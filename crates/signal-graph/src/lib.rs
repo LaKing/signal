@@ -5,7 +5,8 @@
 //!   project root is itself a composite.
 //! - [`build_plan`]: flattens composites into primitive instances with
 //!   hierarchical addresses, validates connections and parameter values, and
-//!   schedules every instance.
+//!   schedules every instance. A parameter accepts signal connections
+//!   (modulation) and event connections (base changes, ADR 0016 §4).
 //! - [`GraphError`] and [`GraphWarning`]: what can be wrong, with addresses.
 //!
 //! Domain-free: knows instances, ports, connections and addresses only.
@@ -20,7 +21,7 @@ mod validate;
 
 use std::collections::BTreeMap;
 
-use signal_core::{Direction, PortAddress, Registry};
+use signal_core::{Direction, PortAddress, PortShape, Registry};
 
 pub use def::{
     CompositeDef, ConnectionDef, Exports, InputExport, InstanceDef, OutputExport, ParameterExport,
@@ -75,9 +76,19 @@ pub fn build_plan(
         }
     }
     for connection in graph.connections {
+        // Validation passed, so the source is a declared output port.
+        let shape = graph
+            .instances
+            .get(&connection.from.instance())
+            .and_then(|i| {
+                let name = connection.from.port();
+                i.descriptor.ports.iter().find(|p| p.name == name)
+            })
+            .map_or(PortShape::Signal, |p| p.shape);
         sources.entry(connection.to).or_default().push(Source {
             from: connection.from,
             scale: connection.scale,
+            shape,
         });
     }
 

@@ -5,6 +5,7 @@
 mod common;
 
 use common::{addr, build, nested, port_addr};
+use signal_core::PortShape;
 use signal_graph::{GraphWarning, Source};
 
 #[test]
@@ -22,6 +23,7 @@ fn connections_resolve_through_exports() {
     let clock = vec![Source {
         from: port_addr("/clock.out"),
         scale: 1.0,
+        shape: PortShape::Events,
     }];
     // Exported fan-out: `/drums.trigger` -> `kick.trigger` -> both envelopes.
     assert_eq!(plan.sources[&port_addr("/drums/kick/amp_env.trig")], clock);
@@ -34,7 +36,8 @@ fn connections_resolve_through_exports() {
         plan.sources[&port_addr("/speaker.in")],
         [Source {
             from: port_addr("/drums/mix.out"),
-            scale: 1.0
+            scale: 1.0,
+            shape: PortShape::Signal,
         }]
     );
     // Exported parameter, set on `/drums`, overrides the value set inside `voice`.

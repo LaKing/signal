@@ -3,13 +3,21 @@
 mod common;
 
 use common::{addr, build, composite, conn, errors, inst, port_addr};
-use signal_core::PortKind;
+use signal_core::{PortKind, PortShape, RateDivisor};
 use signal_graph::{ConnectionDef, GraphError, GraphWarning, Source};
 
 fn source(from: &str, scale: f64) -> Source {
     Source {
         from: port_addr(from),
         scale,
+        shape: PortShape::Signal,
+    }
+}
+
+fn event_source(from: &str) -> Source {
+    Source {
+        shape: PortShape::Events,
+        ..source(from, 1.0)
     }
 }
 
@@ -133,7 +141,7 @@ fn fan_in_and_fan_out_are_allowed() {
     );
     assert_eq!(
         plan.sources[&port_addr("/env.trig")],
-        [source("/t1.out", 1.0), source("/t2.out", 1.0)]
+        [event_source("/t1.out"), event_source("/t2.out")]
     );
     assert_eq!(
         plan.sources[&port_addr("/spk.in")],
@@ -167,6 +175,47 @@ fn sources_are_in_canonical_order_with_scales() {
     assert!(plan.sources[&port_addr("/vca.cv")].is_empty());
     assert!(plan.sources[&port_addr("/zed.freq")].is_empty());
     assert_eq!(plan.sources.len(), 4);
+}
+
+/// Operator note (M1-4): a parameter takes events (they change its base) and
+/// signals (they modulate it), both at once (ADR 0016 §4). The sources keep the
+/// two kinds apart in canonical order.
+#[test]
+fn event_and_signal_sources_into_one_parameter() {
+    let project = composite(
+        "project",
+        vec![
+            inst("osc", "test.osc"),
+            inst("lfo", "test.osc"),
+            inst("clock", "test.trig"),
+        ],
+        vec![conn("lfo.out", "osc.freq"), conn("clock.out", "osc.freq")],
+    );
+    let plan = build(&project, &[]).unwrap();
+    assert_eq!(
+        plan.sources[&port_addr("/osc.freq")],
+        [event_source("/clock.out"), source("/lfo.out", 1.0)]
+    );
+    // Both connections are dependency edges: the sources run first.
+    assert_eq!(plan.schedule, [addr("/clock"), addr("/lfo"), addr("/osc")]);
+}
+
+#[test]
+fn event_connection_into_parameter_needs_matching_rate() {
+    let project = composite(
+        "project",
+        vec![inst("osc", "test.osc"), inst("slow", "test.slow_trig")],
+        vec![conn("slow.out", "osc.freq")],
+    );
+    assert_eq!(
+        errors(&project, &[]),
+        [GraphError::RateMismatch {
+            from: port_addr("/slow.out"),
+            to: port_addr("/osc.freq"),
+            from_rate: RateDivisor::new(2).unwrap(),
+            to_rate: RateDivisor::ONE,
+        }]
+    );
 }
 
 #[test]

@@ -45,5 +45,5 @@ pub use module::{
     DirectPrimitive, EventSink, Inputs, Outputs, PrepareContext, Primitive, StateOutputPrimitive,
 };
 pub use registry::{ModuleType, Registry, RegistryError};
-pub use rng::{RngStream, SplitMix64, Xoshiro256PlusPlus, fnv1a64};
+pub use rng::{Fnv1a64, RngStream, SplitMix64, Xoshiro256PlusPlus, fnv1a64};
 pub use time::{Frame, RateDivisor};

@@ -1,25 +1,27 @@
 //! Checks on the flattened graph: connections need equal shape and rate (a kind
-//! mismatch is only a warning), and parameter values must lie in their declared
-//! range. Fan-in and fan-out are unrestricted: signals into one input are summed
-//! and events merged (ADR 0016 §3, §4).
+//! mismatch is only a warning), except that a parameter accepts both shapes, and
+//! parameter values must lie in their declared range. Fan-in and fan-out are
+//! unrestricted: signals into one input are summed and events merged (ADR 0016
+//! §3, §4).
 
 use signal_core::{PortAddress, PortKind, PortShape, RateDivisor};
 
 use crate::error::{GraphError, GraphWarning};
 use crate::flatten::FlatGraph;
 
-/// Shape, rate and kind of a port.
-type Signature = (PortShape, RateDivisor, PortKind);
+/// Shape, rate and kind of a port, and whether it is a parameter.
+type Signature = (PortShape, RateDivisor, PortKind, bool);
 
 fn signature(graph: &FlatGraph, port: &PortAddress) -> Option<Signature> {
     let descriptor = graph.instances.get(&port.instance())?.descriptor;
     let name = port.port();
     if let Some(p) = descriptor.ports.iter().find(|p| p.name == name) {
-        return Some((p.shape, p.rate, p.kind));
+        return Some((p.shape, p.rate, p.kind, false));
     }
-    // A parameter is a signal input (ADR 0004).
+    // A parameter is an input port (ADR 0004) whose signals modulate it and
+    // whose events change its base (ADR 0016 §4); its own shape is a signal.
     let p = descriptor.parameters.iter().find(|p| p.name == name)?;
-    Some((PortShape::Signal, p.rate, p.kind))
+    Some((PortShape::Signal, p.rate, p.kind, true))
 }
 
 /// Validates `graph`, whose connections are in canonical order, appending
@@ -34,8 +36,11 @@ pub(crate) fn validate(
         let (Some(source), Some(target)) = (signature(graph, from), signature(graph, to)) else {
             continue;
         };
-        let ((from_shape, from_rate, from_kind), (to_shape, to_rate, to_kind)) = (source, target);
-        if from_shape != to_shape {
+        let (from_shape, from_rate, from_kind, _) = source;
+        let (to_shape, to_rate, to_kind, to_parameter) = target;
+        // A parameter (a signal input) also takes events, which set its base.
+        let events_into_parameter = to_parameter && from_shape == PortShape::Events;
+        if from_shape != to_shape && !events_into_parameter {
             errors.push(GraphError::ShapeMismatch {
                 from: from.clone(),
                 to: to.clone(),

@@ -681,6 +681,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "signal-contract",
  "signal-core",
  "signal-graph",
 ]

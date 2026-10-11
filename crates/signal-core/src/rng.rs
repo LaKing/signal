@@ -8,16 +8,50 @@ use crate::address::InstanceAddress;
 
 /// FNV-1a 64-bit hash of `bytes` (offset basis `0xcbf29ce484222325`, prime
 /// `0x100000001b3`). A non-cryptographic content hash: used to derive RNG
-/// streams from addresses, and reusable by manifests.
+/// streams from addresses, and by render manifests. Equal to feeding `bytes`
+/// to [`Fnv1a64`] in one or several pieces.
 pub const fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut rest = bytes;
-    while let [byte, tail @ ..] = rest {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        rest = tail;
+    let mut hasher = Fnv1a64::new();
+    hasher.update(bytes);
+    hasher.finish()
+}
+
+/// The FNV-1a 64-bit hash of [`fnv1a64`], fed incrementally, for content too
+/// large to hold in one buffer (render audio). Non-cryptographic: it detects
+/// accidental change, not tampering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fnv1a64 {
+    hash: u64,
+}
+
+impl Fnv1a64 {
+    /// A hasher that has seen no bytes (the offset basis).
+    pub const fn new() -> Fnv1a64 {
+        Fnv1a64 {
+            hash: 0xcbf2_9ce4_8422_2325,
+        }
     }
-    hash
+
+    /// Feeds `bytes`, continuing from everything fed before.
+    pub const fn update(&mut self, bytes: &[u8]) {
+        let mut rest = bytes;
+        while let [byte, tail @ ..] = rest {
+            self.hash ^= *byte as u64;
+            self.hash = self.hash.wrapping_mul(0x0000_0100_0000_01b3);
+            rest = tail;
+        }
+    }
+
+    /// The hash of every byte fed so far.
+    pub const fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+impl Default for Fnv1a64 {
+    fn default() -> Fnv1a64 {
+        Fnv1a64::new()
+    }
 }
 
 /// SplitMix64 (Steele, Lea & Flood; reference `splitmix64.c`). Used to expand
@@ -218,6 +252,20 @@ mod tests {
         for (text, hash) in FNV1A64 {
             assert_eq!(fnv1a64(text.as_bytes()), hash, "fnv1a64({text:?})");
         }
+    }
+
+    #[test]
+    fn fnv1a64_fed_in_pieces_equals_one_shot() {
+        for (text, hash) in FNV1A64 {
+            for split in 0..=text.len() {
+                let (head, tail) = text.as_bytes().split_at(split);
+                let mut hasher = Fnv1a64::new();
+                hasher.update(head);
+                hasher.update(tail);
+                assert_eq!(hasher.finish(), hash, "{text:?} split at {split}");
+            }
+        }
+        assert_eq!(Fnv1a64::default().finish(), fnv1a64(b""));
     }
 
     #[test]

@@ -142,6 +142,18 @@ const SLOW: ModuleDescriptor = descriptor(
     None,
 );
 
+/// Event output at rate divisor 2.
+const SLOW_TRIG: ModuleDescriptor = descriptor(
+    "test.slow_trig",
+    &[PortDescriptor {
+        rate: TWO,
+        ..port("out", Out, Events, Trigger)
+    }],
+    &[],
+    Feedthrough::Direct,
+    None,
+);
+
 /// Does nothing; signal-graph never runs modules.
 struct Null;
 
@@ -178,7 +190,7 @@ fn state_output() -> Primitive {
 /// A registry of the fake types.
 pub fn registry() -> Registry {
     let mut registry = Registry::new();
-    for descriptor in [OSC, ENV, VCA, TRIG, OUT, SLOW] {
+    for descriptor in [OSC, ENV, VCA, TRIG, OUT, SLOW, SLOW_TRIG] {
         let module_type = ModuleType {
             descriptor,
             create: direct,

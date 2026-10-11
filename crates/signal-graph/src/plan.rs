@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use serde::Serialize;
-use signal_core::{InstanceAddress, ModuleDescriptor, PortAddress};
+use signal_core::{InstanceAddress, ModuleDescriptor, PortAddress, PortShape};
 
 use crate::error::GraphWarning;
 
@@ -23,7 +23,8 @@ pub struct ExecutionPlan {
     /// absorb after the direct instances run (ADR 0016 §2).
     pub state_outputs: Vec<InstanceAddress>,
     /// For every input port and parameter, its incoming connections in canonical
-    /// order: byte-wise by source port address (ADR 0016 §3, §4).
+    /// order: byte-wise by source port address (ADR 0016 §3, §4). A parameter may
+    /// have both kinds of source; [`Source::shape`] tells them apart.
     pub sources: BTreeMap<PortAddress, Vec<Source>>,
     /// Diagnostics; none of them changes what runs.
     pub warnings: Vec<GraphWarning>,
@@ -49,6 +50,10 @@ pub struct PlanInstance {
 pub struct Source {
     /// The source output port.
     pub from: PortAddress,
-    /// The factor applied to the source (1 when the connection gives none).
+    /// The factor applied to a signal source (1 when the connection gives none).
+    /// Events are delivered unscaled.
     pub scale: f64,
+    /// The source port's shape. Into a parameter, a signal source is modulation
+    /// and an event source changes the base (ADR 0016 §4).
+    pub shape: PortShape,
 }

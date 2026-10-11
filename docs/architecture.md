@@ -58,11 +58,11 @@ See `adr/0015-workspace-and-lab-tier.md`. Crates are created when their mileston
 
 | Crate | Responsibility | Created in |
 |---|---|---|
-| `signal-core` | Frame, ports/values, events, addresses, RNG, module trait, manifest types | M0 (placeholder), M1 |
+| `signal-core` | Frame, ports/values, events, addresses, RNG, module trait | M0 (placeholder), M1 |
 | `signal-graph` | Composites, flattening, validation, conversion insertion, plans, edits | M1 |
 | `signal-project` | Project folder loading, TOML model, schema export | M1 |
 | `signal-std` | Standard primitives | M1 |
-| `signal-engine` | Executor, plan swap, fault guards, drivers | M1/M2 |
+| `signal-engine` | Executor, plan swap, fault guards, drivers, render manifest (semantics: `semantics.md`) | M1/M2 |
 | `signal-eval` | Analysis, metrics, compare, listening packages | M1/M3 |
 | `signal-cli` | `signal` command | M1 |
 | `signal-app` | Signal.app shell and GUI | M2.5 |

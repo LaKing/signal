@@ -1,5 +1,7 @@
 //! Events: small generic messages on event ports (ADR 0004, ADR 0016 §3, §4a).
 
+use serde::Serialize;
+
 /// An event inside one `process`/`absorb` or `emit` call: a payload stamped
 /// with its frame offset in the call's block (0 ≤ `offset` < frames of the call).
 ///
@@ -17,7 +19,11 @@ pub struct Event {
 ///
 /// `Set` and `Ramp` sent to a parameter change its base value, applied by the
 /// executor exactly as ADR 0016 §4a defines; modules never apply them.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// Serializes as `"trigger"`, `{"set": v}` or
+/// `{"ramp": {"to": v, "frames": n, "curve": "linear"}}` (render logs).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EventPayload {
     /// A momentary impulse.
     Trigger,
@@ -37,7 +43,8 @@ pub enum EventPayload {
 
 /// The shape of a ramp: a function `c` on `[0, 1]` with `c(0) = 0` and
 /// `c(1) = 1` exactly (ADR 0016 §4a). Every future curve keeps this constraint.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Curve {
     /// `c(x) = x`.

@@ -16,6 +16,8 @@ hound = { workspace = true }
 [dev-dependencies]
 approx = { workspace = true }
 proptest = { workspace = true }
+# The counting allocator (ADR 0017) for the executor's no-allocation test.
+signal-contract = { workspace = true }
 
 [lints]
 workspace = true

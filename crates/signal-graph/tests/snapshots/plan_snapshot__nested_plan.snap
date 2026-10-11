@@ -77,14 +77,16 @@ expression: plan
     "/drums/echo.in": [
       {
         "from": "/drums/mix.out",
-        "scale": 1.0
+        "scale": 1.0,
+        "shape": "signal"
       }
     ],
     "/drums/kick/amp_env.attack": [],
     "/drums/kick/amp_env.trig": [
       {
         "from": "/clock.out",
-        "scale": 1.0
+        "scale": 1.0,
+        "shape": "events"
       }
     ],
     "/drums/kick/osc.freq": [],
@@ -92,37 +94,43 @@ expression: plan
     "/drums/kick/pitch_env.trig": [
       {
         "from": "/clock.out",
-        "scale": 1.0
+        "scale": 1.0,
+        "shape": "events"
       }
     ],
     "/drums/kick/vca.cv": [
       {
         "from": "/drums/kick/amp_env.out",
-        "scale": 1.0
+        "scale": 1.0,
+        "shape": "signal"
       }
     ],
     "/drums/kick/vca.in": [
       {
         "from": "/drums/kick/osc.out",
-        "scale": 1.0
+        "scale": 1.0,
+        "shape": "signal"
       }
     ],
     "/drums/mix.cv": [],
     "/drums/mix.in": [
       {
         "from": "/drums/echo.out",
-        "scale": 0.5
+        "scale": 0.5,
+        "shape": "signal"
       },
       {
         "from": "/drums/kick/vca.out",
-        "scale": 1.0
+        "scale": 1.0,
+        "shape": "signal"
       }
     ],
     "/lonely.freq": [],
     "/speaker.in": [
       {
         "from": "/drums/mix.out",
-        "scale": 1.0
+        "scale": 1.0,
+        "shape": "signal"
       }
     ]
   },
