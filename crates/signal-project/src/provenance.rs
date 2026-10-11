@@ -1,6 +1,8 @@
 //! The caller-supplied fields of `manifest.json` (ADR 0008): where the Signal
 //! source, the compiler and the project files came from. A source that cannot
-//! be read gives `"unknown"`; it never fails the render.
+//! be read gives `"unknown"`; it never fails the render. Used by `signal
+//! render` and `signal replay`, and by anything that records a session
+//! (`SessionRecorder::new` takes the build's provenance).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,17 +10,18 @@ use std::process::{Command, Stdio};
 
 use signal_core::fnv1a64;
 use signal_engine::Provenance;
-use signal_project::SourceFile;
+
+use crate::SourceFile;
 
 const UNKNOWN: &str = "unknown";
 
 /// The Signal workspace this binary was built from.
-pub(crate) fn source_dir() -> PathBuf {
+pub fn source_dir() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
 }
 
 /// The provenance of a render of `files`, with the Signal source at `source`.
-pub(crate) fn collect(source: &Path, files: &[SourceFile]) -> Provenance {
+pub fn collect(source: &Path, files: &[SourceFile]) -> Provenance {
     let git = |args: &[&str]| {
         let mut command = Command::new("git");
         command.arg("-C").arg(source).args(args);

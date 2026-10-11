@@ -11,12 +11,18 @@
 //! - [`diff`]: the edit commands that turn a running project into a changed
 //!   one (ADR 0006): parameter `set`s, or a structural swap.
 //! - [`schema`]: the JSON Schema of both file kinds.
+//! - [`session`]: session directories (`docs/session-format.md`): recording
+//!   ([`session::SessionRecorder`], and [`session::LiveRecorder`] for a
+//!   real-time run), reading and replaying.
+//! - [`provenance`]: the build's provenance for render manifests and sessions.
 
 mod diagnostic;
 mod diff;
 mod locate;
 mod model;
+pub mod provenance;
 mod schema;
+pub mod session;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

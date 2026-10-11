@@ -366,3 +366,12 @@ An added instance is created and prepared like any instance (its random stream i
 ### Draining the log
 
 `Engine::drain_log` hands the last frame's records to the caller in the order of `log.jsonl` (§9) and empties the log, without allocating, so a real-time caller keeps the log bounded by draining it after every frame.
+
+### Real-time runner
+
+`signal_engine::Runner` runs the engine inside an audio callback of any size, fed by `signal_engine::Controller` from the control thread (M2-3; the mechanics are in `realtime-rules.md`, "The runner"). It changes nothing above: it is the same executor, driven by the same live-edit calls.
+
+- **Order of operations.** Per callback: the queued commands are taken; then the frames run one at a time, a swap committed before the frame it is effective from, events and edits applied by the engine at their effective frame (§2, phase 1); after each frame the audio sink's channels are written and its log records sent; at the end, meters and the status.
+- **Requested and effective frame.** Every command carries a **requested** frame: its stamp. Its **effective** frame follows the rules of "Pushed input and effective frames" above: the latest of the stamp, the next frame to run, and the effective frame of the previous command of its kind (event; suspend or resume); for a swap, one past the previous swap's frame. A command whose requested frame has already run is **late** and applies on the next frame. The runner reports both frames for every command, and counts late ones; `log.jsonl` records only the effective frame, so the log of a live run equals the log of its replay.
+- **Latency.** A command stamped by default is requested for the current frame (as the runner last reported it) plus the latency, two device buffers unless configured otherwise. A command arriving within the latency applies exactly at its requested frame, whatever the callback size, unless an earlier command of its kind raised it (its effective frame is never before the previous one's); only a command whose requested frame has already run is late.
+- **Output.** Each frame, every audio-sink channel is the value the offline driver records (§8: the sink's input sum times its `gain`), clamped to [−1, 1] and converted to f32 (round to nearest, ties to even). Where no sample is clamped, the output equals the offline render of the same frames and commands bit for bit as f32 (V9), for any sequence of callback sizes (*k*-partition invariance, ADR 0002). Clamped samples are counted. `audio.wav` is not clamped (§8).

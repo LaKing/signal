@@ -50,7 +50,7 @@ render artifacts: audio + manifest + logs + metrics ─► signal-eval (analyse,
 | Control | Parses files, builds plans, calls `prepare`, reads device input/MIDI/network and stamps it, frees old plans, writes logs | Block the audio thread |
 | GUI (later) | Setup dialog, meters, panels; a client of the edit and observation interface | Hold state that is not in text or Setup |
 
-Communication between threads uses only lock-free SPSC queues.
+Communication between threads uses only lock-free SPSC queues (`rtrb`). The audio thread runs `signal_engine::Runner`; the control thread holds its `Controller`, which prepares swaps, drops what the runner returns, and hands logs, meters and command reports to a sink; recording a session from them happens outside the engine (`signal_project::session::LiveRecorder`).
 
 ## Crates
 
@@ -60,10 +60,10 @@ See `adr/0015-workspace-and-lab-tier.md`. Crates are created when their mileston
 |---|---|---|
 | `signal-core` | Frame, ports/values, events, addresses, RNG, module trait | M0 (placeholder), M1 |
 | `signal-graph` | Composites, flattening, validation, conversion insertion, plans, edits | M1 |
-| `signal-project` | Project folder loading, TOML model, schema export | M1 |
+| `signal-project` | Project folder loading, TOML model, schema export, project diff; session record, read and replay (`session-format.md`) and build provenance, shared by `signal` and Signal.app. Depends on `signal-engine` for sessions; the engine depends on no project or session code | M1/M2 |
 | `signal-std` | Standard primitives | M1 |
-| `signal-engine` | Executor, plan swap, fault guards, driver trait, offline and null drivers, render manifest (semantics: `semantics.md`) | M1/M2 |
+| `signal-engine` | Executor, plan swap, fault guards, render manifest (semantics: `semantics.md`); the real-time runner and controller, the driver trait, offline and null drivers (`realtime-rules.md`, "The runner") | M1/M2 |
 | `signal-audio` | CoreAudio driver through cpal (ADR 0011) | M2 |
 | `signal-eval` | Analysis, metrics, compare, listening packages | M1/M3 |
-| `signal-cli` | `signal` command; session record, read and replay (`session-format.md`) | M1/M2 |
+| `signal-cli` | `signal` command layer only: `render`, `replay`, `modules`, `schema` | M1/M2 |
 | `signal-app` | Signal.app shell and GUI (egui, ADR 0018) | M2.5 (skeleton in M2) |

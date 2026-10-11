@@ -6,11 +6,11 @@ use std::path::PathBuf;
 
 use clap::Args;
 use serde_json::json;
-use signal_cli::session::{Session, replay};
 use signal_core::Registry;
 use signal_project::LoadError;
+use signal_project::provenance;
+use signal_project::session::{Session, replay};
 
-use crate::provenance;
 use crate::render::{FILES, located, metrics_of, write_artifacts};
 use crate::{Failure, print_stdout};
 

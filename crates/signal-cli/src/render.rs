@@ -8,9 +8,9 @@ use serde_json::json;
 use signal_core::{Registry, SinkKind};
 use signal_engine::{Engine, EngineConfig, Manifest, Provenance, Render, RenderError, render};
 use signal_eval::Metrics;
+use signal_project::provenance;
 use signal_project::{Diagnostic, LoadError, Project};
 
-use crate::provenance;
 use crate::{Failure, print_stdout};
 
 /// The files a render writes, in the order listed in output.

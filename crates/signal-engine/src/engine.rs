@@ -274,8 +274,12 @@ struct PushedEdit {
 
 /// Everything that belongs to one instantiated plan: instances, ports, buffers
 /// and the frame log, whose records name this plan's ports and instances.
+///
+/// The real-time [`Controller`](crate::Controller) keeps one without
+/// primitives as a structural mirror of the running plan: what a swap is
+/// prepared against and what log records are read with.
 #[derive(Debug)]
-struct PlanState {
+pub(crate) struct PlanState {
     instances: Vec<InstanceAddress>,
     instance_ids: BTreeMap<InstanceAddress, usize>,
     /// Each instance's type and descriptor: what decides whether it survives a swap.
@@ -679,6 +683,96 @@ impl PlanState {
         Ok((state, survivors))
     }
 
+    /// The structural mirror of `plan`: built like the engine's own state,
+    /// with its primitives dropped (control-thread code; it allocates).
+    pub(crate) fn mirror(
+        plan: &ExecutionPlan,
+        registry: &Registry,
+        config: EngineConfig,
+    ) -> Result<PlanState, EngineError> {
+        let (mut state, _) = PlanState::build(plan, registry, config, &[], None)?;
+        state.primitives.clear();
+        Ok(state)
+    }
+
+    /// The audio sink: its address and number of signal inputs, if the plan
+    /// has exactly one.
+    pub(crate) fn audio_sink(&self) -> Option<(&InstanceAddress, usize)> {
+        let mut sinks = self.slots.iter().enumerate().filter(|(_, s)| s.audio_sink);
+        let (i, slot) = sinks.next()?;
+        if sinks.next().is_some() {
+            return None;
+        }
+        Some((self.instances.get(i)?, slot.signal_in.len()))
+    }
+
+    /// `record`, written by this plan, with addresses.
+    pub(crate) fn line(&self, record: &LogRecord) -> Option<LogLine<'_>> {
+        let source = |source| match source {
+            LogSource::External { sequence } => Some(LineSource::External { sequence }),
+            LogSource::Port(id) => Some(LineSource::Port(self.ports.get(id.0)?)),
+        };
+        Some(match *record {
+            LogRecord::Swap {
+                frame,
+                version,
+                plan_version,
+            } => LogLine::Swap {
+                frame,
+                version,
+                plan_version,
+            },
+            LogRecord::Event {
+                frame,
+                target,
+                payload,
+                source: from,
+            } => LogLine::Event {
+                frame,
+                target: self.ports.get(target.0)?,
+                payload,
+                source: source(from)?,
+            },
+            LogRecord::Discard {
+                frame,
+                target,
+                payload,
+                source: from,
+                reason,
+            } => LogLine::Discard {
+                frame,
+                target: self.ports.get(target.0)?,
+                payload,
+                source: source(from)?,
+                reason,
+            },
+            LogRecord::Suspend { frame, instance } => LogLine::Suspend {
+                frame,
+                address: self.instances.get(instance.0)?,
+            },
+            LogRecord::Resume {
+                frame,
+                instance,
+                discarded,
+            } => LogLine::Resume {
+                frame,
+                address: self.instances.get(instance.0)?,
+                discarded,
+            },
+            LogRecord::Fault {
+                frame,
+                instance,
+                port,
+                reason,
+            } => LogLine::Fault {
+                frame,
+                address: self.instances.get(instance.0)?,
+                port: self.ports.get(port.0)?,
+                reason,
+            },
+        })
+    }
+
     /// The id and role of `port`.
     fn role_of(&self, port: &PortAddress) -> Option<(usize, Role)> {
         let id = self.ports.binary_search(port).ok()?;
@@ -844,6 +938,92 @@ impl PreparedSwap {
     pub fn is_committed(&self) -> bool {
         self.committed
     }
+}
+
+/// Who a prepared swap is for: the engine's identity, the version it must be
+/// committed at, and the configuration its plan is built with.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SwapTarget {
+    pub(crate) engine: u64,
+    pub(crate) version: u64,
+    pub(crate) config: EngineConfig,
+}
+
+/// [`Engine::prepare_swap`] against `old`, the running plan or its
+/// structural mirror: survivors and held modulation depend only on the
+/// structure of both plans.
+pub(crate) fn prepare_swap(
+    old: &PlanState,
+    target: SwapTarget,
+    upfront: &[ExternalEvent],
+    plan: &ExecutionPlan,
+    registry: &Registry,
+) -> Result<PreparedSwap, EngineError> {
+    let (state, survivors) = PlanState::build(plan, registry, target.config, upfront, Some(old))?;
+
+    // Which old instances survive, and the old instance of every output.
+    let mut survives = vec![false; old.slots.len()];
+    for &(_, o) in &survivors {
+        if let Some(s) = survives.get_mut(o) {
+            *s = true;
+        }
+    }
+    let mut owner = vec![usize::MAX; old.outputs.len()];
+    for (i, slot) in old.slots.iter().enumerate() {
+        for o in slot.signal_out.clone() {
+            if let Some(w) = owner.get_mut(o) {
+                *w = i;
+            }
+        }
+    }
+    // A surviving parameter without signal sources in the new plan holds
+    // the modulation of its removed sources (absent from the new plan), or
+    // carries an existing hold. Lost sources that survive are a plain
+    // disconnect: no hold (§5, §12).
+    let mut holds = Vec::new();
+    let mut removed_sources = Vec::new();
+    for &(n, o) in &survivors {
+        let (Some(ns), Some(os)) = (state.slots.get(n), old.slots.get(o)) else {
+            continue;
+        };
+        for (nj, oj) in ns.params.clone().zip(os.params.clone()) {
+            let (Some(np), Some(op)) = (state.params.get(nj), old.params.get(oj)) else {
+                continue;
+            };
+            if !np.modulation.is_empty() {
+                continue;
+            }
+            let start = removed_sources.len();
+            for &(out, scale) in &op.modulation {
+                let removed = owner
+                    .get(out)
+                    .and_then(|&w| survives.get(w))
+                    .is_some_and(|&s| !s);
+                if removed {
+                    removed_sources.push((out, scale));
+                }
+            }
+            let removed = start..removed_sources.len();
+            if !removed.is_empty() || op.modulation.is_empty() {
+                holds.push(Hold {
+                    param: nj,
+                    old_param: oj,
+                    removed,
+                });
+            }
+        }
+    }
+
+    Ok(PreparedSwap {
+        plan: state,
+        survivors,
+        holds,
+        removed_sources,
+        engine: target.engine,
+        from_version: target.version,
+        plan_version: plan.version,
+        committed: false,
+    })
 }
 
 /// An instantiated [`ExecutionPlan`], run one frame at a time (ADR 0016).
@@ -1111,73 +1291,27 @@ impl Engine {
         plan: &ExecutionPlan,
         registry: &Registry,
     ) -> Result<PreparedSwap, EngineError> {
-        let (state, survivors) =
-            PlanState::build(plan, registry, self.config, &self.upfront, Some(&self.plan))?;
-        let old = &self.plan;
+        prepare_swap(
+            &self.plan,
+            SwapTarget {
+                engine: self.id,
+                version: self.version,
+                config: self.config,
+            },
+            &self.upfront,
+            plan,
+            registry,
+        )
+    }
 
-        // Which old instances survive, and the old instance of every output.
-        let mut survives = vec![false; old.slots.len()];
-        for &(_, o) in &survivors {
-            if let Some(s) = survives.get_mut(o) {
-                *s = true;
-            }
-        }
-        let mut owner = vec![usize::MAX; old.outputs.len()];
-        for (i, slot) in old.slots.iter().enumerate() {
-            for o in slot.signal_out.clone() {
-                if let Some(w) = owner.get_mut(o) {
-                    *w = i;
-                }
-            }
-        }
-        // A surviving parameter without signal sources in the new plan holds
-        // the modulation of its removed sources (absent from the new plan), or
-        // carries an existing hold. Lost sources that survive are a plain
-        // disconnect: no hold (§5, §12).
-        let mut holds = Vec::new();
-        let mut removed_sources = Vec::new();
-        for &(n, o) in &survivors {
-            let (Some(ns), Some(os)) = (state.slots.get(n), old.slots.get(o)) else {
-                continue;
-            };
-            for (nj, oj) in ns.params.clone().zip(os.params.clone()) {
-                let (Some(np), Some(op)) = (state.params.get(nj), old.params.get(oj)) else {
-                    continue;
-                };
-                if !np.modulation.is_empty() {
-                    continue;
-                }
-                let start = removed_sources.len();
-                for &(out, scale) in &op.modulation {
-                    let removed = owner
-                        .get(out)
-                        .and_then(|&w| survives.get(w))
-                        .is_some_and(|&s| !s);
-                    if removed {
-                        removed_sources.push((out, scale));
-                    }
-                }
-                let removed = start..removed_sources.len();
-                if !removed.is_empty() || op.modulation.is_empty() {
-                    holds.push(Hold {
-                        param: nj,
-                        old_param: oj,
-                        removed,
-                    });
-                }
-            }
-        }
-
-        Ok(PreparedSwap {
-            plan: state,
-            survivors,
-            holds,
-            removed_sources,
+    /// The identity a swap must name to commit here, and the configuration
+    /// it must be built with.
+    pub(crate) fn swap_target(&self) -> SwapTarget {
+        SwapTarget {
             engine: self.id,
-            from_version: self.version,
-            plan_version: plan.version,
-            committed: false,
-        })
+            version: self.version,
+            config: self.config,
+        }
     }
 
     /// Swaps in a prepared plan between frames, effective from `frame`, which
@@ -1778,73 +1912,7 @@ impl Engine {
     /// ports and instances of the plan that wrote them: convert them before
     /// the next swap.
     pub fn log_line(&self, record: &LogRecord) -> Option<LogLine<'_>> {
-        let plan = &self.plan;
-        Some(match *record {
-            LogRecord::Swap {
-                frame,
-                version,
-                plan_version,
-            } => LogLine::Swap {
-                frame,
-                version,
-                plan_version,
-            },
-            LogRecord::Event {
-                frame,
-                target,
-                payload,
-                source,
-            } => LogLine::Event {
-                frame,
-                target: plan.ports.get(target.0)?,
-                payload,
-                source: self.line_source(source)?,
-            },
-            LogRecord::Discard {
-                frame,
-                target,
-                payload,
-                source,
-                reason,
-            } => LogLine::Discard {
-                frame,
-                target: plan.ports.get(target.0)?,
-                payload,
-                source: self.line_source(source)?,
-                reason,
-            },
-            LogRecord::Suspend { frame, instance } => LogLine::Suspend {
-                frame,
-                address: plan.instances.get(instance.0)?,
-            },
-            LogRecord::Resume {
-                frame,
-                instance,
-                discarded,
-            } => LogLine::Resume {
-                frame,
-                address: plan.instances.get(instance.0)?,
-                discarded,
-            },
-            LogRecord::Fault {
-                frame,
-                instance,
-                port,
-                reason,
-            } => LogLine::Fault {
-                frame,
-                address: plan.instances.get(instance.0)?,
-                port: plan.ports.get(port.0)?,
-                reason,
-            },
-        })
-    }
-
-    fn line_source(&self, source: LogSource) -> Option<LineSource<'_>> {
-        Some(match source {
-            LogSource::External { sequence } => LineSource::External { sequence },
-            LogSource::Port(id) => LineSource::Port(self.plan.ports.get(id.0)?),
-        })
+        self.plan.line(record)
     }
 
     fn role(&self, port: &PortAddress) -> Option<Role> {
@@ -1904,6 +1972,16 @@ impl Engine {
             .filter(|&i| self.plan.slots.get(i).is_some_and(|s| s.audio_sink))
             .map(InstanceId)
             .collect()
+    }
+
+    /// The first instance whose descriptor declares an audio sink; allocates
+    /// nothing, unlike [`audio_sinks`](Engine::audio_sinks).
+    pub(crate) fn first_audio_sink(&self) -> Option<InstanceId> {
+        self.plan
+            .slots
+            .iter()
+            .position(|s| s.audio_sink)
+            .map(InstanceId)
     }
 
     /// The address of `instance`.

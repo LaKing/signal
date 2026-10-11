@@ -17,9 +17,11 @@ How Signal is tested, what the acceptance IDs (V1…) map to, and how golden ren
 | 7. Golden renders | A fixed render's manifest, audio and log hashes | `tests/golden/<project>/`, checked by the acceptance suite |
 | 8. Metrics and analysis | Peak, RMS, mean, non-finite and subnormal counts (`metrics.json`); 4× peak, aliasing ratio, zero-crossing pitch | `crates/signal-eval` |
 
-Later: benchmarks (M2, V13), real time against offline (M2, V9–V11), comparison and listening packages (M3), soak runs (V12).
+Real time against offline (M2-3): `crates/signal-cli/tests/realtime.rs` checks V9 (60 s of `projects/kick` through the null driver, three callback-size seeds, equal to the offline render as f32) and replays a session issued through the `Controller` with `signal replay`; `crates/signal-engine/tests/realtime_no_allocation.rs` checks V11 (no heap call inside `Runner::process` over 12 000 callbacks); `crates/signal-engine/tests/realtime.rs` covers queue overflow, the clamp, channel mapping, stamping and late commands.
 
-Run everything with `cargo test --workspace --locked --offline`. The acceptance suite renders about 18 million frames in the debug profile; its longest test, V5, renders 64 bars at 96 kHz.
+Later: benchmarks (M2, V13), comparison and listening packages (M3), soak runs (V12).
+
+Run everything with `cargo test --workspace --locked --offline`. The acceptance suite renders about 18 million frames in the debug profile; its longest test, V5, renders 64 bars at 96 kHz. V9 adds about 23 million (one offline render and three null-driver runs of 60 s at 96 kHz, the runs in parallel).
 
 ## Acceptance IDs (M1)
 

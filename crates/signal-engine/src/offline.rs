@@ -13,8 +13,9 @@ use crate::error::{EngineError, RenderError};
 use crate::log::InstanceId;
 use crate::manifest::{Manifest, Provenance};
 
-/// The name of the sink parameter the driver applies to every recorded channel.
-const GAIN: &str = "gain";
+/// The name of the sink parameter the driver applies to every recorded channel
+/// (the real-time runner applies it the same way).
+pub(crate) const GAIN: &str = "gain";
 
 /// The result of [`render`]: the audio and the log, in memory.
 #[derive(Clone, Debug, PartialEq)]

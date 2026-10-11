@@ -1,8 +1,8 @@
 //! The `signal` command (headless entry point; ADR 0013): `render`, `replay`,
 //! `modules` and `schema`. `--json` makes every command print machine-readable output on
 //! stdout. Exit codes: 0 ok, 1 validation or user error, 2 internal error.
+//! The command layer only: sessions and provenance live in `signal-project`.
 
-mod provenance;
 mod render;
 mod replay;
 

@@ -1,6 +1,6 @@
 # Session format
 
-**Status: normative** (ADR 0006, 0008, 0009). A **session** is the text record of a live run: the project it started from, every plan version swapped in, and every command applied, each with its **effective frame**. `signal replay` renders it offline, bit-identically on the same build (V10). `signal-cli`'s `session` module implements it: `SessionRecorder` writes a session, `Session::load` reads and validates one, `replay` renders one.
+**Status: normative** (ADR 0006, 0008, 0009). A **session** is the text record of a live run: the project it started from, every plan version swapped in, and every command applied, each with its **effective frame**. `signal replay` renders it offline, bit-identically on the same build (V10). `signal-project`'s `session` module implements it, so that `signal` and `Signal.app` share it: `SessionRecorder` writes a session, `LiveRecorder` records a real-time run into one, `Session::load` reads and validates one, `replay` renders one. `signal-cli` holds only the `signal replay` command.
 
 Edit commands come from project changes through `signal_project::diff` (§5).
 
@@ -85,7 +85,7 @@ One JSON object per line, with a newline after every line:
 | `resume` | `address` | `Engine::push_resume` |
 | `swap` | `version` | `Engine::prepare_swap` and `commit_swap` with `projects/v<version>/` |
 
-Writers put the fields in the order shown; readers accept any order. Numbers use the shortest form that reads back to the same value, and a reader must parse them correctly rounded, so that every value is the recorded f64 bit for bit (`signal-cli` enables serde_json's `float_roundtrip`; its default parser can be off by one ulp). Unknown fields are errors.
+Writers put the fields in the order shown; readers accept any order. Numbers use the shortest form that reads back to the same value, and a reader must parse them correctly rounded, so that every value is the recorded f64 bit for bit (`signal-project` enables serde_json's `float_roundtrip`; its default parser can be off by one ulp). Unknown fields are errors.
 
 ### Rules
 
@@ -105,9 +105,20 @@ A driver records the frame the engine applies a command at, not the frame it ask
 
 - an external event applies at `max(stamp, n, the last event's frame)`;
 - a suspend or resume applies at `max(stamp, n, the last suspend or resume's frame)`;
-- a swap applies at *n* (it is committed for the next frame).
+- a swap committed directly with `Engine::commit_swap` (the offline driver, `signal replay`) applies at *n*, the next frame; a swap sent through the real-time `Controller` applies at `max(stamp, n, the last swap's frame + 1)`, and is reported at the frame it committed.
 
-`SessionRecorder::event` and `SessionRecorder::edit` compute these, reserve a `seq`, and check the command against the version running now; the driver pushes what they return and records it with `applied_event`/`applied_edit` only once the engine has accepted it. `applied_swap` records a swap; record it before input meant for the instances it adds. `SessionRecorder::write` validates the whole session as `signal replay` would and writes nothing if it is invalid.
+`SessionRecorder::event` and `SessionRecorder::edit` compute these, reserve a `seq`, and check the command against the version running now; the driver pushes what they return and records it with `applied_event`/`applied_edit` only once the engine has accepted it. Both `applied_event` and `applied_edit` check the command again against the version running at its effective frame, and refuse one the engine would discard. `applied_swap` records a swap (`applied_swap_as` with a `seq` the caller chose); record it before input meant for the instances it adds. `SessionRecorder::write` validates the whole session as `signal replay` would and writes nothing if it is invalid.
+
+### Recording from the real-time runner
+
+The real-time `Controller` (`signal-engine`) knows nothing of sessions. `LiveRecorder` is the `ControlSink` its `poll` feeds, and records into a `SessionRecorder`:
+
+- **`seq` is the Controller's command id** (an event's id is also its sequence number), so `log.jsonl` and `edits.jsonl` name events alike.
+- **Frames come from the runner's reports**: an event, suspend or resume is reported with its effective frame when the runner takes it; a swap only when it commits, so a swap the engine refused is never recorded.
+- **Records follow the frontier.** Reports arrive in the order the runner made them, not the order commands apply: a swap sent first but stamped later is reported after an edit stamped before it. A report waits until the runner has run past its frame (the `next_frame` of the status `poll` reads first), then is recorded in the order the engine applied it: by frame, then swap, suspends and resumes, events, then id. So each command is checked against the version running at its own frame. After the driver stops, call `frontier` once more with the Runner's own next frame: the last status may have been dropped.
+- **Plan versions.** `LiveRecorder::swap_plan` gives the plan to swap to, its `version` set to the session version it will be recorded as.
+
+A command the recorder refuses is one the engine discarded; it is listed in `LiveRecorder::refused` and not recorded.
 
 ## 5. From project changes to commands
 

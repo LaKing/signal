@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use serde_json::Value;
-use signal_cli::session::{self, EditKind, Session, SessionRecorder, replay};
 use signal_core::{Curve, EventPayload, Frame, InstanceAddress, PortAddress, Registry};
 use signal_engine::{Engine, EngineConfig, EngineError, Provenance, Render, render_with};
+use signal_project::session::{self, EditKind, Session, SessionRecorder, replay};
 use signal_project::{Project, ProjectEdit, diff};
 
 /// The frames of the scripted session.

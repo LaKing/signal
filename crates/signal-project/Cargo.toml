@@ -1,6 +1,6 @@
 [package]
 name = "signal-project"
-description = "Signal project folders: TOML model, loading, validation, JSON Schema export."
+description = "Signal project folders: TOML model, loading, validation, JSON Schema export; session directories."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,8 +9,13 @@ publish.workspace = true
 [dependencies]
 signal-core = { workspace = true }
 signal-graph = { workspace = true }
+# Sessions (`session`): replay renders through the engine, and the recorder
+# takes its reports and provenance.
+signal-engine = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# float_roundtrip: edits.jsonl values must read back bit for bit (replay is
+# bit-exact); the default parser can be off by one ulp.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 toml = { workspace = true }
 toml_edit = { workspace = true }
 schemars = { workspace = true }

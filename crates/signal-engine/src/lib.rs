@@ -17,8 +17,13 @@
 //!   `manifest.json` ([`Manifest`]). [`render_with`] also lets the caller swap
 //!   plans and push input before each frame (how `signal replay` applies a
 //!   recorded session).
-//!
-//! Planned for M2: the real-time driver.
+//! - [`realtime`]: the real-time [`Runner`], called from a driver's audio
+//!   callback, and the [`Controller`] that feeds it from the control thread
+//!   through `rtrb` queues ([`Controller::poll`] drains logs, meters and
+//!   command reports into a [`ControlSink`]). [`Runner::process`] allocates
+//!   nothing.
+//! - [`Driver`]: the driver trait (ADR 0011); [`NullDriver`] runs a Runner
+//!   without hardware, with seeded [`CallbackSizes`].
 
 #![cfg_attr(
     not(test),
@@ -30,6 +35,7 @@
     )
 )]
 
+mod driver;
 mod engine;
 mod error;
 mod fade;
@@ -37,7 +43,9 @@ mod log;
 mod manifest;
 mod offline;
 mod parameter;
+mod realtime;
 
+pub use driver::{CallbackSizes, Driver, DriverError, MAX_CALLBACK_FRAMES, NullDriver};
 pub use engine::{
     EditFull, Engine, EngineConfig, ExternalEvent, ExternalFull, InputDiscards, ParameterValue,
     PreparedSwap,
@@ -48,3 +56,7 @@ pub use log::{
 };
 pub use manifest::{Manifest, Provenance};
 pub use offline::{Render, render, render_with};
+pub use realtime::{
+    Command, CommandId, ControlError, ControlSink, Controller, Meter, Outcome, RealtimeConfig,
+    Report, Runner, RunnerStatus, SentCommand, Stamp, realtime,
+};

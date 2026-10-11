@@ -1,8 +1,10 @@
 //! Session directories (`docs/session-format.md`): the initial project, every
 //! plan version swapped in, and every command with its effective frame, as
-//! text. [`SessionRecorder`] writes one; [`Session::load`] reads and validates
-//! one; [`replay`] renders it offline through the same engine API a live
-//! driver uses (ADR 0006, V10). Control-thread code: it allocates and does I/O.
+//! text. [`SessionRecorder`] writes one; [`LiveRecorder`] feeds it from a
+//! real-time [`Controller`](signal_engine::Controller); [`Session::load`] reads
+//! and validates one; [`replay`] renders it offline through the same engine API
+//! a live driver uses (ADR 0006, V10). Control-thread code: it allocates and
+//! does I/O.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -16,11 +18,12 @@ use signal_core::{
     PortShape, Registry, SinkKind, fnv1a64,
 };
 use signal_engine::{
-    Engine, EngineConfig, EngineError, ExternalEvent, InputDiscards, Provenance, Render,
-    RenderError, render_with,
+    ControlSink, Engine, EngineConfig, EngineError, ExternalEvent, InputDiscards, Outcome,
+    Provenance, Render, RenderError, Report, SentCommand, render_with,
 };
 use signal_graph::ExecutionPlan;
-use signal_project::{Diagnostic, LoadError, Project, Severity, SourceFile};
+
+use crate::{Diagnostic, LoadError, Project, Severity, SourceFile};
 
 /// The session format version this build reads and writes.
 pub const FORMAT_VERSION: i64 = 1;
@@ -727,7 +730,10 @@ impl SessionRecorder {
         })
     }
 
-    /// Records an event the engine accepted (`push_external` returned `Ok`).
+    /// Records an event the engine accepted (`push_external` returned `Ok`),
+    /// at its effective frame `event.frame`. Refused, like
+    /// [`event`](SessionRecorder::event), if the version running at that
+    /// frame would discard it.
     pub fn applied_event(&mut self, event: &ExternalEvent) -> Result<(), SessionError> {
         if event.frame < self.last_event {
             return Err(SessionError::Refused(format!(
@@ -735,14 +741,19 @@ impl SessionRecorder {
                 event.sequence, event.frame.0, self.last_event.0
             )));
         }
+        let command = Command::Event {
+            target: event.target.clone(),
+            payload: event.payload,
+        };
+        self.state
+            .check(event.frame, &command)
+            .map_err(SessionError::Refused)?;
         self.last_event = event.frame;
+        self.next_seq = self.next_seq.max(event.sequence.saturating_add(1));
         self.edits.push(Edit {
             frame: event.frame,
             seq: event.sequence,
-            command: Command::Event {
-                target: event.target.clone(),
-                payload: event.payload,
-            },
+            command,
         });
         Ok(())
     }
@@ -792,6 +803,7 @@ impl SessionRecorder {
             .map_err(SessionError::Refused)?;
         self.state.apply(edit.frame, &command);
         self.last_edit = edit.frame;
+        self.next_seq = self.next_seq.max(edit.seq.saturating_add(1));
         self.edits.push(Edit {
             frame: edit.frame,
             seq: edit.seq,
@@ -815,6 +827,19 @@ impl SessionRecorder {
         project: &Project,
         registry: &Registry,
     ) -> Result<u64, SessionError> {
+        self.applied_swap_as(frame, self.next_seq, project, registry)
+    }
+
+    /// [`applied_swap`](SessionRecorder::applied_swap) with the seq `seq`,
+    /// which the caller chose (a [`Controller`](signal_engine::Controller)'s
+    /// command id).
+    pub fn applied_swap_as(
+        &mut self,
+        frame: Frame,
+        seq: u64,
+        project: &Project,
+        registry: &Registry,
+    ) -> Result<u64, SessionError> {
         if self.last_swap.is_some_and(|last| frame <= last) {
             return Err(SessionError::Refused(format!(
                 "a swap at frame {} after one at frame {}; at most one swap per frame, in order",
@@ -828,7 +853,7 @@ impl SessionRecorder {
         self.state.swap(&plan, version);
         self.versions.push((project.files.clone(), plan));
         self.last_swap = Some(frame);
-        let seq = self.reserve();
+        self.next_seq = self.next_seq.max(seq.saturating_add(1));
         self.edits.push(Edit {
             frame,
             seq,
@@ -921,6 +946,167 @@ impl SessionRecorder {
         }
         let path = dir.join(EDITS_FILE);
         fs::write(&path, log).map_err(io(&path))
+    }
+}
+
+/// A reported command waiting for the frontier.
+#[derive(Debug)]
+enum Applied {
+    Swap { plan_version: u64 },
+    Edit(PendingEdit),
+    Event(ExternalEvent),
+}
+
+/// Records a real-time run: the [`ControlSink`] that
+/// [`Controller::poll`](signal_engine::Controller::poll) feeds (operator
+/// decision for M2-3: the engine knows nothing of sessions).
+///
+/// Reports arrive in the order the runner produced them, which is not the
+/// order commands apply: an edit is reported when the runner takes it, a
+/// swap when it commits. So reports wait until the runner has run past their
+/// frame ([`frontier`](ControlSink::frontier)), and are then recorded in the
+/// order the engine applied them: by frame, then swap, edits, events (ADR
+/// 0016 §2), then id. Each command is checked against the version running at
+/// its own frame; one the recorder refuses is the engine's discard, and is
+/// listed in [`refused`](LiveRecorder::refused), not recorded.
+pub struct LiveRecorder {
+    recorder: SessionRecorder,
+    registry: Registry,
+    /// The project of every swap sent and not yet recorded, by plan version.
+    swaps: BTreeMap<u64, Project>,
+    pending: BTreeMap<(Frame, u8, u64), Applied>,
+    refused: Vec<String>,
+}
+
+impl LiveRecorder {
+    /// Records into `recorder`, whose version 0 is the plan the run started
+    /// from; `registry` builds the plans of swaps.
+    pub fn new(recorder: SessionRecorder, registry: Registry) -> LiveRecorder {
+        LiveRecorder {
+            recorder,
+            registry,
+            swaps: BTreeMap::new(),
+            pending: BTreeMap::new(),
+            refused: Vec::new(),
+        }
+    }
+
+    /// The plan to swap to `project`, its `version` set to the session version
+    /// it will be recorded as. Pass it to
+    /// [`Controller::swap`](signal_engine::Controller::swap); if the Controller
+    /// refuses it, call [`swap_not_sent`](LiveRecorder::swap_not_sent).
+    pub fn swap_plan(&mut self, project: Project) -> Result<ExecutionPlan, SessionError> {
+        let mut plan = project
+            .plan(&self.registry)
+            .map_err(SessionError::Invalid)?
+            .plan;
+        plan.version = self.recorder.next_version() + self.swaps.len() as u64;
+        self.swaps.insert(plan.version, project);
+        Ok(plan)
+    }
+
+    /// Forgets the last [`swap_plan`](LiveRecorder::swap_plan), which was not
+    /// sent.
+    pub fn swap_not_sent(&mut self) {
+        self.swaps.pop_last();
+    }
+
+    /// Commands the recorder refused, with the reason: the engine discarded
+    /// them, or a swap was refused at its commit.
+    pub fn refused(&self) -> &[String] {
+        &self.refused
+    }
+
+    /// Reports not yet recorded: their frame has not been passed.
+    pub fn pending(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// The recorder.
+    pub fn recorder(&self) -> &SessionRecorder {
+        &self.recorder
+    }
+
+    /// The recorder, to [`write`](SessionRecorder::write) the session.
+    pub fn into_recorder(self) -> SessionRecorder {
+        self.recorder
+    }
+
+    fn record(&mut self, applied: Applied, frame: Frame, id: u64) {
+        let result = match applied {
+            Applied::Swap { plan_version } => match self.swaps.remove(&plan_version) {
+                Some(project) if plan_version == self.recorder.next_version() => self
+                    .recorder
+                    .applied_swap_as(frame, id, &project, &self.registry)
+                    .map(|_| ()),
+                _ => Err(SessionError::Refused(format!(
+                    "a swap to plan version {plan_version} that this recorder did not plan next"
+                ))),
+            },
+            Applied::Edit(edit) => self.recorder.applied_edit(edit),
+            Applied::Event(event) => self.recorder.applied_event(&event),
+        };
+        if let Err(error) = result {
+            self.refused
+                .push(format!("command {id} at frame {}: {error}", frame.0));
+        }
+    }
+}
+
+impl ControlSink for LiveRecorder {
+    fn report(&mut self, report: &Report, command: &SentCommand) {
+        let frame = report.frame;
+        if report.outcome == Outcome::Refused {
+            if let SentCommand::Swap { plan_version } = command {
+                self.swaps.remove(plan_version);
+            }
+            self.refused.push(format!(
+                "command {} was refused by the engine at frame {}",
+                report.id, frame.0
+            ));
+            return;
+        }
+        let (class, applied) = match command {
+            SentCommand::Swap { plan_version } => (
+                0,
+                Applied::Swap {
+                    plan_version: *plan_version,
+                },
+            ),
+            SentCommand::Suspend(address) | SentCommand::Resume(address) => {
+                let kind = match command {
+                    SentCommand::Suspend(_) => EditKind::Suspend,
+                    _ => EditKind::Resume,
+                };
+                let edit = PendingEdit {
+                    kind,
+                    address: address.clone(),
+                    frame,
+                    seq: report.id,
+                };
+                (1, Applied::Edit(edit))
+            }
+            SentCommand::Event(event) => {
+                let event = ExternalEvent {
+                    frame,
+                    ..event.clone()
+                };
+                (2, Applied::Event(event))
+            }
+        };
+        self.pending.insert((frame, class, report.id), applied);
+    }
+
+    fn frontier(&mut self, next_frame: Frame) {
+        while self
+            .pending
+            .first_key_value()
+            .is_some_and(|((frame, _, _), _)| *frame < next_frame)
+        {
+            if let Some(((frame, _, id), applied)) = self.pending.pop_first() {
+                self.record(applied, frame, id);
+            }
+        }
     }
 }
 

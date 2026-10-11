@@ -3325,7 +3325,6 @@ dependencies = [
  "clap",
  "hound",
  "insta",
- "serde",
  "serde_json",
  "signal-core",
  "signal-engine",
@@ -3333,7 +3332,6 @@ dependencies = [
  "signal-graph",
  "signal-project",
  "signal-std",
- "toml",
 ]
 
 [[package]]
@@ -3410,6 +3408,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-core",
+ "signal-engine",
  "signal-graph",
  "signal-std",
  "toml",
