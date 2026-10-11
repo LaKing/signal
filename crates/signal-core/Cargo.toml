@@ -11,6 +11,8 @@ serde = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# `json` only enables insta's optional `serde` dependency, already in Cargo.lock.
+insta = { workspace = true, features = ["json"] }
 
 [lints]
 workspace = true

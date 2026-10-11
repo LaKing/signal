@@ -1,0 +1,71 @@
+---
+source: crates/signal-core/tests/descriptor_snapshot.rs
+expression: SAMPLE
+---
+{
+  "type_name": "test.sample_out",
+  "doc": "Sample descriptor covering every field: plays `in` scaled by `level`.",
+  "ports": [
+    {
+      "name": "in",
+      "direction": "in",
+      "shape": "signal",
+      "rate": 1,
+      "kind": "audio",
+      "unit": null,
+      "range": {
+        "min": -1.0,
+        "max": 1.0
+      }
+    },
+    {
+      "name": "mute",
+      "direction": "in",
+      "shape": "events",
+      "rate": 1,
+      "kind": "trigger",
+      "unit": null,
+      "range": null
+    },
+    {
+      "name": "phase",
+      "direction": "out",
+      "shape": "signal",
+      "rate": 1,
+      "kind": "phase",
+      "unit": "cycles",
+      "range": {
+        "min": 0.0,
+        "max": 1.0
+      }
+    }
+  ],
+  "parameters": [
+    {
+      "name": "level",
+      "kind": "gain",
+      "rate": 1,
+      "unit": null,
+      "range": {
+        "min": 0.0,
+        "max": 2.0
+      },
+      "default": 1.0,
+      "combine": "multiply"
+    },
+    {
+      "name": "freq",
+      "kind": "frequency",
+      "rate": 1,
+      "unit": "Hz",
+      "range": {
+        "min": 0.0,
+        "max": 20000.0
+      },
+      "default": 440.0,
+      "combine": "add"
+    }
+  ],
+  "feedthrough": "direct",
+  "sink": "audio"
+}
