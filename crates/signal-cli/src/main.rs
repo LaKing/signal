@@ -1,9 +1,10 @@
-//! The `signal` command (headless entry point; ADR 0013): `render`, `modules`
-//! and `schema`. `--json` makes every command print machine-readable output on
+//! The `signal` command (headless entry point; ADR 0013): `render`, `replay`,
+//! `modules` and `schema`. `--json` makes every command print machine-readable output on
 //! stdout. Exit codes: 0 ok, 1 validation or user error, 2 internal error.
 
 mod provenance;
 mod render;
+mod replay;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -14,7 +15,7 @@ use serde_json::json;
 use signal_core::{Direction, Feedthrough, ModuleDescriptor, Registry};
 use signal_project::Diagnostic;
 
-/// Signal: render and inspect projects.
+/// Signal: render, replay and inspect projects.
 #[derive(Parser)]
 #[command(name = "signal", version)]
 struct Cli {
@@ -29,6 +30,8 @@ struct Cli {
 enum Command {
     /// Render a project offline: audio.wav, manifest.json, log.jsonl, metrics.json.
     Render(render::RenderArgs),
+    /// Replay a recorded session directory offline: the same artifacts as render.
+    Replay(replay::ReplayArgs),
     /// Print the catalogue of module descriptors.
     Modules,
     /// Print the JSON Schema of project and composite files.
@@ -41,6 +44,8 @@ pub(crate) enum Failure {
     Usage(String),
     /// The project is invalid.
     Invalid(Vec<Diagnostic>),
+    /// The session directory is malformed (`signal replay`).
+    InvalidSession(Vec<Diagnostic>),
     /// A file could not be read or written.
     Io(String),
     /// A bug: something that validation should have ruled out.
@@ -61,6 +66,11 @@ impl Failure {
             Failure::Invalid(diagnostics) => (
                 "validation",
                 format!("the project is invalid ({} errors)", diagnostics.len()),
+                diagnostics.as_slice(),
+            ),
+            Failure::InvalidSession(diagnostics) => (
+                "validation",
+                format!("the session is invalid ({} errors)", diagnostics.len()),
                 diagnostics.as_slice(),
             ),
             Failure::Io(message) => ("io", message.clone(), &[][..]),
@@ -131,6 +141,7 @@ fn execute(cli: &Cli) -> Result<(), Failure> {
     signal_std::register(&mut registry).map_err(|e| Failure::Internal(e.to_string()))?;
     match &cli.command {
         Command::Render(args) => render::run(args, &registry, cli.json),
+        Command::Replay(args) => replay::run(args, &registry, cli.json),
         Command::Modules => {
             if cli.json {
                 let descriptors: Vec<ModuleDescriptor> =

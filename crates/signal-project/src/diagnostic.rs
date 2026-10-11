@@ -41,8 +41,9 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    /// An error at byte `offset` of `text`, the content of `file`.
-    pub(crate) fn at(
+    /// A diagnostic at byte `offset` of `text`, the content of `file`, with
+    /// its 1-based line and character column.
+    pub fn at(
         severity: Severity,
         file: &str,
         text: &str,

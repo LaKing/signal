@@ -12,7 +12,7 @@ Terms are those of `00-vision.md` §3a: Project, Module, Primitive, Composite, I
   composites/<name>.toml  one composite per file (optional folder)
 ```
 
-These are the **project files**. Signal loads every one of them, validates every one of them, and hashes every one of them into a render's manifest (§7). Nothing else in the folder is read. Machine settings (Setup: devices, channel mapping) never live here.
+These are the **project files**. Signal loads every one of them, validates every one of them, and hashes every one of them into a render's manifest (§7). A recorded session keeps an exact copy of them for every plan version (`session-format.md`). Nothing else in the folder is read. Machine settings (Setup: devices, channel mapping) never live here.
 
 All files are UTF-8 [TOML 1.1](https://toml.io). **Unknown keys are errors** in every table, never silently ignored.
 

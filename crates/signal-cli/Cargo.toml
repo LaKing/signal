@@ -17,7 +17,12 @@ signal-project = { workspace = true }
 signal-std = { workspace = true }
 signal-engine = { workspace = true }
 signal-eval = { workspace = true }
-serde_json = { workspace = true }
+serde = { workspace = true }
+# float_roundtrip: edits.jsonl values must read back bit for bit (replay is
+# bit-exact); the default parser can be off by one ulp.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+# session.toml (`signal replay`, docs/session-format.md).
+toml = { workspace = true }
 clap = { workspace = true }
 # To tell an I/O failure writing audio.wav (exit 1) from another (exit 2);
 # the integration tests also read the WAV header with it.

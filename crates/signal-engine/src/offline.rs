@@ -6,10 +6,11 @@
 use std::fs;
 use std::path::Path;
 
-use signal_core::{Fnv1a64, Frame, PortAddress, fnv1a64};
+use signal_core::{Fnv1a64, Frame, InstanceAddress, PortAddress, fnv1a64};
 
 use crate::engine::Engine;
-use crate::error::RenderError;
+use crate::error::{EngineError, RenderError};
+use crate::log::InstanceId;
 use crate::manifest::{Manifest, Provenance};
 
 /// The name of the sink parameter the driver applies to every recorded channel.
@@ -42,11 +43,27 @@ pub struct Render {
 /// frame's log records go to `log.jsonl` in canonical order: a swap, then edits,
 /// then events and discards by target port address, then faults.
 pub fn render(engine: &mut Engine, frames: u64) -> Result<Render, RenderError> {
+    render_with(engine, frames, |_| Ok(()))
+}
+
+/// [`render`], calling `before` before each frame runs, so that it can commit
+/// a swap or push input effective from [`Engine::next_frame`] (ADR 0006). Each
+/// frame's log is drained after it is recorded, as a swap requires.
+///
+/// The audio sink is looked up again after every swap. A swapped-in plan must
+/// keep exactly one audio sink at the same address with as many signal inputs;
+/// otherwise the render stops with [`RenderError::SinkChanged`]. An error from
+/// `before` stops it with [`RenderError::Edit`].
+pub fn render_with(
+    engine: &mut Engine,
+    frames: u64,
+    mut before: impl FnMut(&mut Engine) -> Result<(), EngineError>,
+) -> Result<Render, RenderError> {
     if engine.next_frame() != Frame::ZERO {
         return Err(RenderError::AlreadyStarted);
     }
     let sinks = engine.audio_sinks();
-    let (sink, address) = match sinks.as_slice() {
+    let (mut sink, address) = match sinks.as_slice() {
         [sink] => match engine.instance_address(*sink) {
             Some(address) => (*sink, address.clone()),
             None => return Err(RenderError::NoAudioSink),
@@ -79,7 +96,13 @@ pub fn render(engine: &mut Engine, frames: u64) -> Result<Render, RenderError> {
     let mut samples = Vec::new();
     let mut log = Vec::new();
     let mut records = Vec::new();
+    let mut version = engine.version();
     for _ in 0..frames {
+        before(engine).map_err(RenderError::Edit)?;
+        if engine.version() != version {
+            version = engine.version();
+            sink = same_sink(engine, &address, width)?;
+        }
         engine.run_frame();
         let inputs = engine.instance_inputs(sink);
         match gain.as_ref().and_then(|port| engine.parameter(port)) {
@@ -95,6 +118,7 @@ pub fn render(engine: &mut Engine, frames: u64) -> Result<Render, RenderError> {
                 log.push(b'\n');
             }
         }
+        engine.drain_log(&mut |_| {});
     }
 
     let config = engine.config();
@@ -106,6 +130,33 @@ pub fn render(engine: &mut Engine, frames: u64) -> Result<Render, RenderError> {
         samples,
         log,
     })
+}
+
+/// The audio sink after a swap: it must be the only one, at `address`, with
+/// `width` signal inputs.
+fn same_sink(
+    engine: &Engine,
+    address: &InstanceAddress,
+    width: usize,
+) -> Result<InstanceId, RenderError> {
+    let sinks = engine.audio_sinks();
+    let after: Vec<InstanceAddress> = sinks
+        .iter()
+        .filter_map(|&s| engine.instance_address(s).cloned())
+        .collect();
+    match sinks.as_slice() {
+        [sink]
+            if engine.instance_address(*sink) == Some(address)
+                && engine.instance_inputs(*sink).len() == width =>
+        {
+            Ok(*sink)
+        }
+        _ => Err(RenderError::SinkChanged {
+            before: address.clone(),
+            after,
+            channels: width,
+        }),
+    }
 }
 
 impl Render {

@@ -1,0 +1,18 @@
+# The session test project (M2-2), version 0: a tone and an envelope.
+schema_version = 1
+
+[project]
+name = "session"
+sample_rate = 8000
+seed = 3
+
+[instances]
+osc = { module = "std.sine_osc", freq = 440 }
+env = { module = "std.exp_env" }
+out = { module = "std.audio_out", gain = 0.5 }
+
+[wiring]
+connections = [
+  { from = "osc.out", to = "out.l" },
+  { from = "env.out", to = "out.r" },
+]

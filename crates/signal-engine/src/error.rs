@@ -208,6 +208,19 @@ pub enum RenderError {
         /// Its number of signal inputs.
         channels: usize,
     },
+    /// A swap during [`render_with`](crate::render_with) did not keep the
+    /// audio sink: exactly one, at the same address, as wide.
+    SinkChanged {
+        /// The sink the render started with.
+        before: InstanceAddress,
+        /// The audio sinks of the swapped-in plan.
+        after: Vec<InstanceAddress>,
+        /// The number of signal inputs the render records.
+        channels: usize,
+    },
+    /// The caller's step before a frame of [`render_with`](crate::render_with)
+    /// failed: a swap or an edit was refused.
+    Edit(EngineError),
     /// Writing an artifact failed.
     Io(std::io::Error),
     /// Writing `audio.wav` failed.
@@ -232,6 +245,21 @@ impl fmt::Display for RenderError {
                 f,
                 "{instance}: an audio sink needs 1 to 65535 signal inputs, it has {channels}"
             ),
+            RenderError::SinkChanged {
+                before,
+                after,
+                channels,
+            } => {
+                write!(
+                    f,
+                    "a swap must keep the audio sink {before} with {channels} inputs; the new plan's audio sinks:"
+                )?;
+                for instance in after {
+                    write!(f, " {instance}")?;
+                }
+                Ok(())
+            }
+            RenderError::Edit(error) => write!(f, "applying an edit: {error}"),
             RenderError::Io(error) => write!(f, "writing render artifacts: {error}"),
             RenderError::Wav(error) => write!(f, "writing audio.wav: {error}"),
             RenderError::Json(error) => write!(f, "serializing render artifacts: {error}"),

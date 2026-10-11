@@ -1,0 +1,21 @@
+# The session test project (M2-2), version 1: a second tone added, and the
+# first one's frequency changed in the file.
+schema_version = 1
+
+[project]
+name = "session"
+sample_rate = 8000
+seed = 3
+
+[instances]
+osc = { module = "std.sine_osc", freq = 470 }
+osc2 = { module = "std.sine_osc", freq = 660 }
+env = { module = "std.exp_env" }
+out = { module = "std.audio_out", gain = 0.5 }
+
+[wiring]
+connections = [
+  { from = "osc.out", to = "out.l" },
+  { from = "osc2.out", to = "out.l", scale = 0.5 },
+  { from = "env.out", to = "out.r" },
+]

@@ -10,7 +10,7 @@ use common::{
 use signal_core::{EventPayload, Frame, Registry};
 use signal_engine::{
     EditFull, Engine, EngineConfig, EngineError, ExternalEvent, ExternalFull, InputDiscards,
-    LogRecord, render,
+    LogRecord, RenderError, render, render_with,
 };
 use signal_graph::ExecutionPlan;
 
@@ -642,6 +642,80 @@ fn drain_log_is_the_rendered_order() {
         assert!(draining.frame_log().is_empty());
     }
     assert_eq!(log.as_bytes(), rendered.log);
+}
+
+/// M2-2: `render_with` records exactly what a hand-driven run of the same
+/// swaps and pushed input records, sink inputs and log alike.
+#[test]
+fn render_with_records_swaps_and_pushed_input() {
+    let (with, without) = removal_plans();
+    let script = |engine: &mut Engine, frame: u64| {
+        if frame == 3 {
+            engine
+                .push_external(ext(3, 1, "/pm.value", EventPayload::Set(0.25)))
+                .unwrap();
+            engine.push_suspend(addr("/o"), Frame(3)).unwrap();
+        }
+        if frame == 3 + F {
+            swap_at(engine, &without, frame);
+        }
+    };
+
+    let mut driven = engine(&with, RATE, vec![]);
+    let reference = run(&mut driven, 20, script);
+
+    let mut rendering = engine(&with, RATE, vec![]);
+    let rendered = render_with(&mut rendering, 20, |engine| {
+        script(engine, engine.next_frame().0);
+        Ok(())
+    })
+    .unwrap();
+    let audio: Vec<(u64, u64)> = rendered
+        .samples
+        .chunks(2)
+        .map(|c| (c[0].to_bits(), c[1].to_bits()))
+        .collect();
+    assert_eq!(audio, reference.audio);
+    let lines: String = reference
+        .lines
+        .concat()
+        .iter()
+        .map(|l| format!("{l}\n"))
+        .collect();
+    assert_eq!(String::from_utf8(rendered.log).unwrap(), lines);
+    assert!(lines.contains(r#""type":"swap""#));
+    assert_eq!(rendering.input_discards(), InputDiscards::default());
+}
+
+/// M2-2: a swap that drops the audio sink stops `render_with`; an error from
+/// the caller's step stops it too.
+#[test]
+fn render_with_refuses_a_lost_sink_and_reports_edit_errors() {
+    let (with, _) = removal_plans();
+    let no_sink = plan(vec![inst("o", "test.osc")], vec![]);
+    let mut engine_a = engine(&with, RATE, vec![]);
+    let error = render_with(&mut engine_a, 10, |engine| {
+        if engine.next_frame() == Frame(2) {
+            swap_at(engine, &no_sink, 2);
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(
+        matches!(&error, RenderError::SinkChanged { before, after, channels: 2 }
+            if *before == addr("/rec") && after.is_empty()),
+        "{error}"
+    );
+
+    let mut engine_b = engine(&with, RATE, vec![]);
+    let error = render_with(&mut engine_b, 10, |engine| {
+        engine.commit_swap(&mut engine.prepare_swap(&with, &registry())?, Frame(99))
+    })
+    .unwrap_err();
+    assert!(
+        matches!(error, RenderError::Edit(EngineError::SwapFrame { .. })),
+        "{error}"
+    );
 }
 
 /// AC7: the same plans, swap frames and pushed events give the same bytes;

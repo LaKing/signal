@@ -205,10 +205,11 @@ The offline driver renders *N* frames from frame 0:
 - **What is recorded.** Each frame, the driver records the sink's **signal inputs** as §3 sums them, one channel per signal input, in the order the module type declares them. This does not depend on whether the sink instance itself is suspended or muted (§10).
 - **Sink gain.** If the sink's module type declares a parameter named `gain`, each recorded input is multiplied by that parameter's effective value (§4) in the same frame. While the sink is suspended or muted the executor does not recompute it, so the last effective value applies (§10, choice 11). `std.audio_out` records `gain·l` and `gain·r` this way.
 - **`audio.wav`**: IEEE float, 32 bits, at the project sample rate, channels interleaved per frame. Each value is converted from f64 to f32 with round-to-nearest, ties to even.
+- **Edits during a render.** `render_with` lets the caller commit a swap or push input before each frame (§12); `signal replay` renders a recorded session this way (`session-format.md`). Each frame's log is drained after it is recorded. A swapped-in plan must keep the audio sink: exactly one, at the same address, with as many signal inputs.
 
 ## 9. Artifacts
 
-A render directory holds `audio.wav` (§8), `log.jsonl` and `manifest.json`. The `Manifest` type is defined in `signal-engine` (not `signal-core`, as `docs/architecture.md` once listed; its crate table now says so).
+A render directory holds `audio.wav` (§8), `log.jsonl` and `manifest.json`. `signal replay` writes the same artifacts for a recorded session; the session itself is specified in `session-format.md`. The `Manifest` type is defined in `signal-engine` (not `signal-core`, as `docs/architecture.md` once listed; its crate table now says so).
 
 ### `log.jsonl`
 

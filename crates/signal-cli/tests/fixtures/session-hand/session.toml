@@ -1,0 +1,25 @@
+# A session written by hand (M2-2 AC3): no recorder produced it.
+format_version = 1
+sample_rate = 8000
+seed = 3
+
+[provenance]
+signal_revision = "hand-written"
+signal_dirty = "unknown"
+rustc_version = "unknown"
+cargo_lock_hash = "unknown"
+
+[provenance.project_file_hashes]
+"project.toml" = "cda28b8f6591f20c"
+
+[[versions]]
+version = 0
+
+[versions.files]
+"project.toml" = "cda28b8f6591f20c"
+
+[[versions]]
+version = 1
+
+[versions.files]
+"project.toml" = "4674961305edf113"

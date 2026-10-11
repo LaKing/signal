@@ -6,14 +6,15 @@ use std::path::{Path, PathBuf};
 use clap::{ArgGroup, Args};
 use serde_json::json;
 use signal_core::{Registry, SinkKind};
-use signal_engine::{Engine, EngineConfig, RenderError, render};
+use signal_engine::{Engine, EngineConfig, Manifest, Provenance, Render, RenderError, render};
+use signal_eval::Metrics;
 use signal_project::{Diagnostic, LoadError, Project};
 
 use crate::provenance;
 use crate::{Failure, print_stdout};
 
 /// The files a render writes, in the order listed in output.
-const FILES: [&str; 4] = ["audio.wav", "manifest.json", "log.jsonl", "metrics.json"];
+pub(crate) const FILES: [&str; 4] = ["audio.wav", "manifest.json", "log.jsonl", "metrics.json"];
 
 /// Arguments of `signal render`.
 #[derive(Args)]
@@ -39,7 +40,7 @@ pub(crate) struct RenderArgs {
 }
 
 /// Diagnostics with their file paths joined to the project folder.
-fn located(dir: &Path, diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
+pub(crate) fn located(dir: &Path, diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
     diagnostics
         .into_iter()
         .map(|d| Diagnostic {
@@ -101,15 +102,8 @@ pub(crate) fn run(args: &RenderArgs, registry: &Registry, json: bool) -> Result<
         .map_err(|e| Failure::Internal(e.to_string()))?;
     let rendered = render(&mut engine, frames).map_err(|e| render_failure(&project, dir, e))?;
     let provenance = provenance::collect(&provenance::source_dir(), &project.files);
-    let manifest = rendered
-        .write(&args.out, provenance)
-        .map_err(|e| render_failure(&project, dir, e))?;
-    let samples: Vec<f32> = rendered.samples.iter().map(|&x| x as f32).collect();
-    let metrics = signal_eval::metrics(&samples, rendered.channels);
-    let metrics_path = args.out.join("metrics.json");
-    metrics
-        .write(&metrics_path)
-        .map_err(|e| Failure::Io(format!("writing {}: {e}", metrics_path.display())))?;
+    let (manifest, metrics) = write_artifacts(&rendered, &args.out, provenance)
+        .map_err(|e| e.into_failure(|e| render_failure(&project, dir, e)))?;
 
     let warnings = located(dir, planned.warnings.clone());
     if json {
@@ -138,6 +132,48 @@ pub(crate) fn run(args: &RenderArgs, registry: &Registry, json: bool) -> Result<
         ));
     }
     Ok(())
+}
+
+/// Why [`write_artifacts`] failed.
+pub(crate) enum WriteError {
+    /// Writing `audio.wav`, `log.jsonl` or `manifest.json`.
+    Render(RenderError),
+    /// Writing `metrics.json`.
+    Metrics(String),
+}
+
+impl WriteError {
+    pub(crate) fn into_failure(self, render: impl FnOnce(RenderError) -> Failure) -> Failure {
+        match self {
+            WriteError::Render(error) => render(error),
+            WriteError::Metrics(message) => Failure::Io(message),
+        }
+    }
+}
+
+/// Writes the render artifacts of `rendered` into `out`: `audio.wav`,
+/// `log.jsonl`, `manifest.json` and `metrics.json` (shared by `signal render`
+/// and `signal replay`).
+pub(crate) fn write_artifacts(
+    rendered: &Render,
+    out: &Path,
+    provenance: Provenance,
+) -> Result<(Manifest, Metrics), WriteError> {
+    let manifest = rendered
+        .write(out, provenance)
+        .map_err(WriteError::Render)?;
+    let metrics = metrics_of(rendered);
+    let metrics_path = out.join("metrics.json");
+    metrics
+        .write(&metrics_path)
+        .map_err(|e| WriteError::Metrics(format!("writing {}: {e}", metrics_path.display())))?;
+    Ok((manifest, metrics))
+}
+
+/// The metrics of a render's audio, as `metrics.json` holds them.
+pub(crate) fn metrics_of(rendered: &Render) -> Metrics {
+    let samples: Vec<f32> = rendered.samples.iter().map(|&x| x as f32).collect();
+    signal_eval::metrics(&samples, rendered.channels)
 }
 
 /// The frame count of `seconds` at `sample_rate`, rounded half up.

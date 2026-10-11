@@ -14,7 +14,9 @@
 //!   `prepare_swap` allocates.
 //! - [`render`]: the offline driver. It records the single audio sink's inputs
 //!   and the event log; [`Render::write`] writes `audio.wav`, `log.jsonl` and
-//!   `manifest.json` ([`Manifest`]).
+//!   `manifest.json` ([`Manifest`]). [`render_with`] also lets the caller swap
+//!   plans and push input before each frame (how `signal replay` applies a
+//!   recorded session).
 //!
 //! Planned for M2: the real-time driver.
 
@@ -45,4 +47,4 @@ pub use log::{
     DiscardReason, FaultReason, InstanceId, LineSource, LogLine, LogRecord, LogSource, PortId,
 };
 pub use manifest::{Manifest, Provenance};
-pub use offline::{Render, render};
+pub use offline::{Render, render, render_with};

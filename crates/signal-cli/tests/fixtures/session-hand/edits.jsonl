@@ -1,0 +1,6 @@
+{"frame":10,"seq":1,"kind":"set","target":"/osc.freq","value":300}
+{"frame":20,"seq":2,"kind":"trigger","target":"/env.trigger"}
+{"frame":100,"seq":3,"kind":"set","target":"/osc2.freq","value":880}
+{"frame":100,"seq":4,"kind":"swap","version":1}
+{"frame":150,"seq":5,"kind":"ramp","target":"/out.gain","to":0.125,"frames":200,"curve":"linear"}
+{"frame":400,"seq":6,"kind":"suspend","address":"/osc2"}

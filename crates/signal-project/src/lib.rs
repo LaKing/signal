@@ -8,9 +8,12 @@
 //! - [`Project::plan`] builds the execution plan and maps every graph error and
 //!   warning back to the instance or connection it concerns. Composites the
 //!   project does not use are validated too.
+//! - [`diff`]: the edit commands that turn a running project into a changed
+//!   one (ADR 0006): parameter `set`s, or a structural swap.
 //! - [`schema`]: the JSON Schema of both file kinds.
 
 mod diagnostic;
+mod diff;
 mod locate;
 mod model;
 mod schema;
@@ -29,6 +32,7 @@ use signal_graph::{
 use toml::Spanned;
 
 pub use diagnostic::{Diagnostic, Severity};
+pub use diff::{DiffOptions, ParameterChange, ProjectEdit, diff, diff_with};
 pub use schema::schema;
 
 use locate::{
@@ -106,6 +110,9 @@ pub struct Project {
     /// Every composite in `composites/`, in name order.
     pub composites: Vec<CompositeDef>,
     spans: SourceMap,
+    /// The byte offsets in `project.toml` of the `sample_rate` and `seed`
+    /// values (0 for a key left out).
+    settings_at: (usize, usize),
 }
 
 /// A validated plan and its warnings.
@@ -215,6 +222,7 @@ impl Project {
             root,
             composites,
             spans,
+            settings_at: (settings.sample_rate_at, settings.seed_at),
         })
     }
 
@@ -371,7 +379,11 @@ fn valid_name(name: &str) -> bool {
 struct Settings {
     name: String,
     sample_rate: u32,
+    /// The byte offset of the `sample_rate` value in `project.toml` (0 if absent).
+    sample_rate_at: usize,
     seed: u64,
+    /// The byte offset of the `seed` value in `project.toml` (0 if absent).
+    seed_at: usize,
 }
 
 /// Parses files into definitions and span tables, collecting diagnostics.
@@ -429,10 +441,13 @@ impl Builder<'_> {
                 "sample_rate must be at least 1".to_owned(),
             );
         }
+        let seed = parsed.project.seed;
         let settings = Settings {
             name: parsed.project.name,
+            sample_rate_at: sample_rate.span().start,
             sample_rate: sample_rate.into_inner(),
-            seed: parsed.project.seed,
+            seed_at: seed.span().start,
+            seed: seed.into_inner(),
         };
         let (def, spans) = definition(
             0,

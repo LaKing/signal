@@ -69,12 +69,17 @@ pub(crate) struct ProjectSection {
     #[schemars(with = "u32", range(min = 1))]
     pub(crate) sample_rate: Spanned<u32>,
     /// The master seed of every random stream.
-    #[serde(default)]
-    pub(crate) seed: u64,
+    #[serde(default = "default_seed")]
+    #[schemars(with = "u64")]
+    pub(crate) seed: Spanned<u64>,
 }
 
 fn default_sample_rate() -> Spanned<u32> {
     Spanned::new(0..0, 96_000)
+}
+
+fn default_seed() -> Spanned<u64> {
+    Spanned::new(0..0, 0)
 }
 
 /// `[composite]`.
