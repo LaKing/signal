@@ -1,0 +1,5 @@
+# ADR 0007/0008: the toolchain is pinned; golden renders are tied to it.
+# Upgrading is an explicit, reviewed change.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]

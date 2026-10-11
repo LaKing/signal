@@ -1,0 +1,5 @@
+/target
+/renders/
+*.wav
+!tests/golden/**/*.wav
+.DS_Store
