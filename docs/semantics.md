@@ -203,6 +203,7 @@ The offline driver renders *N* frames from frame 0:
 
 - **The audio sink.** The plan must contain exactly one instance whose module type declares `sink = audio`. Zero or several is an error.
 - **What is recorded.** Each frame, the driver records the sink's **signal inputs** as §3 sums them, one channel per signal input, in the order the module type declares them. This does not depend on whether the sink instance itself is suspended or muted (§10).
+- **Sink gain.** If the sink's module type declares a parameter named `gain`, each recorded input is multiplied by that parameter's effective value (§4) in the same frame. While the sink is suspended or muted the executor does not recompute it, so the last effective value applies (§10, choice 11). `std.audio_out` records `gain·l` and `gain·r` this way.
 - **`audio.wav`**: IEEE float, 32 bits, at the project sample rate, channels interleaved per frame. Each value is converted from f64 to f32 with round-to-nearest, ties to even.
 
 ## 9. Artifacts
@@ -291,6 +292,7 @@ These choices are part of the semantics above. Each was made for M1 and can chan
 8. **A trigger delivered to a parameter is discarded and counted** (reason `not_a_parameter_event`). Only `set` and `ramp` change a base.
 9. **Every resume fades in from 0, even after a suspension shorter than *F*** (ADR 0016 §1a), so a short suspension steps down to `live/F`.
 10. **The "random *k*-partitions" clause of ADR 0016's ramp verification is covered at *k* = 1 only.** The test checks that every frame's base equals the closed form of (*i*, *N*), evaluated over random block partitions. Block execution itself, and so the block-partition clause, is not exercised until D-EXEC-3.
+11. **The offline driver applies the sink's `gain` parameter** (§8, M1-6). A sink has no outputs, so it cannot expose gained values itself; the driver multiplies the recorded inputs by the sink's effective `gain`. A sink type without a `gain` parameter is recorded unchanged.
 
 ## 11. Determinism
 

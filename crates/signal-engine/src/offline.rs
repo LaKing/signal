@@ -6,11 +6,14 @@
 use std::fs;
 use std::path::Path;
 
-use signal_core::{Fnv1a64, Frame, fnv1a64};
+use signal_core::{Fnv1a64, Frame, PortAddress, fnv1a64};
 
 use crate::engine::Engine;
 use crate::error::RenderError;
 use crate::manifest::{Manifest, Provenance};
+
+/// The name of the sink parameter the driver applies to every recorded channel.
+const GAIN: &str = "gain";
 
 /// The result of [`render`]: the audio and the log, in memory.
 #[derive(Clone, Debug, PartialEq)]
@@ -33,7 +36,9 @@ pub struct Render {
 ///
 /// The plan must contain exactly one instance whose descriptor declares
 /// `sink = Audio`; each frame records that instance's signal inputs (as summed
-/// by the executor, whether or not the sink itself is suspended or muted). Each
+/// by the executor, whether or not the sink itself is suspended or muted). If
+/// the sink's type declares a parameter named `gain`, each recorded input is
+/// multiplied by that parameter's effective value (`docs/semantics.md` §8). Each
 /// frame's log records go to `log.jsonl` in canonical order: edits, then events
 /// and discards by target port address, then faults.
 pub fn render(engine: &mut Engine, frames: u64) -> Result<Render, RenderError> {
@@ -66,12 +71,21 @@ pub fn render(engine: &mut Engine, frames: u64) -> Result<Render, RenderError> {
         }
     };
 
+    // The sink's `gain` parameter, if its type declares one.
+    let gain = PortAddress::new(&address, GAIN)
+        .ok()
+        .filter(|port| engine.parameter(port).is_some());
+
     let mut samples = Vec::new();
     let mut log = Vec::new();
     let mut records = Vec::new();
     for _ in 0..frames {
         engine.run_frame();
-        samples.extend_from_slice(engine.instance_inputs(sink));
+        let inputs = engine.instance_inputs(sink);
+        match gain.as_ref().and_then(|port| engine.parameter(port)) {
+            Some(gain) => samples.extend(inputs.iter().map(|x| gain.effective * x)),
+            None => samples.extend_from_slice(inputs),
+        }
         records.clear();
         records.extend_from_slice(engine.frame_log());
         records.sort_by_key(|record| record.order());

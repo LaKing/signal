@@ -730,6 +730,7 @@ dependencies = [
  "approx",
  "libm",
  "proptest",
+ "signal-contract",
  "signal-core",
 ]
 

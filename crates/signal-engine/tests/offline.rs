@@ -75,6 +75,27 @@ fn render_records_single_audio_sink_in_input_port_order() {
     assert_eq!(rendered.samples, [0.25, 0.75].repeat(4));
 }
 
+/// A sink with a `gain` parameter is recorded as gain · input, with the gain's
+/// effective value in each frame (`std.audio_out`, docs/semantics.md §8).
+#[test]
+fn render_applies_the_sinks_gain_parameter() {
+    let plan = plan(
+        vec![
+            inst_with("k", "test.const", &[("value", 0.25)]),
+            inst("d", "test.dc"),
+            inst_with("out", "test.gained_recorder", &[("gain", 0.5)]),
+        ],
+        vec![conn("k.out", "out.l"), conn("d.out", "out.r")],
+    );
+    let external = vec![ext(2, 1, "/out.gain", EventPayload::Set(2.0))];
+    let rendered = render(&mut engine(&plan, 48_000, external), 4).unwrap();
+    assert_eq!(rendered.channels, 2);
+    assert_eq!(
+        rendered.samples,
+        [0.125, 0.375, 0.125, 0.375, 0.5, 1.5, 0.5, 1.5]
+    );
+}
+
 #[test]
 fn zero_or_several_audio_sinks_is_an_error() {
     let none = plan(vec![inst("d", "test.dc")], vec![]);

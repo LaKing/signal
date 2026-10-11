@@ -428,6 +428,22 @@ direct!(
     |_p, _inputs, _outputs| {}
 );
 
+/// An audio sink with a `gain` parameter, which the driver applies.
+pub const GAINED_RECORDER: ModuleDescriptor = descriptor(
+    "test.gained_recorder",
+    &[port("l", In, Signal, Audio), port("r", In, Signal, Audio)],
+    &[param("gain", 0.0, 4.0, 1.0, Combine::Multiply)],
+    Feedthrough::Direct,
+    Some(SinkKind::Audio),
+);
+direct!(
+    GainedRecorder,
+    GAINED_RECORDER,
+    {},
+    |_s, _ctx| {},
+    |_p, _inputs, _outputs| {}
+);
+
 /// `out[n] = in[n − 1]`, `out[0] = 0` (state-output).
 pub const UNIT_DELAY: ModuleDescriptor = descriptor(
     "test.unit_delay",
@@ -536,6 +552,7 @@ pub fn registry() -> Registry {
         direct_type::<Loud>(),
         direct_type::<Flood>(),
         direct_type::<Recorder>(),
+        direct_type::<GainedRecorder>(),
         state_output_type::<UnitDelay>(),
         state_output_type::<EventDelay>(),
     ] {
