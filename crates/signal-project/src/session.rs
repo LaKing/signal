@@ -274,6 +274,8 @@ struct SessionOut<'a> {
     format_version: i64,
     sample_rate: u32,
     seed: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frames: Option<u64>,
     provenance: &'a Provenance,
     versions: Vec<VersionOut>,
 }
@@ -291,6 +293,8 @@ struct SessionIn {
     format_version: toml::Spanned<i64>,
     sample_rate: toml::Spanned<u32>,
     seed: u64,
+    #[serde(default)]
+    frames: Option<u64>,
     provenance: Provenance,
     versions: Vec<toml::Spanned<VersionIn>>,
 }
@@ -452,6 +456,29 @@ impl State {
     }
 }
 
+/// The edits at or after the session's recorded end `frames`: every command
+/// of a session that records its end lies before it.
+fn end_errors(edits: &[(usize, Edit)], frames: Option<u64>) -> Vec<Diagnostic> {
+    let Some(frames) = frames else {
+        return Vec::new();
+    };
+    edits
+        .iter()
+        .filter(|(_, edit)| edit.frame.0 >= frames)
+        .map(|(line, edit)| {
+            error(
+                EDITS_FILE,
+                *line,
+                1,
+                format!(
+                    "seq {} at frame {} is at or after the session's end (frames = {frames} in session.toml)",
+                    edit.seq, edit.frame.0
+                ),
+            )
+        })
+        .collect()
+}
+
 /// Every rule of `edits.jsonl` (`docs/session-format.md`) that `edits`, with
 /// their line numbers, break against the plans of `plans` (index = version).
 fn validate(edits: &[(usize, Edit)], plans: &[ExecutionPlan]) -> Vec<Diagnostic> {
@@ -551,9 +578,9 @@ fn validate(edits: &[(usize, Edit)], plans: &[ExecutionPlan]) -> Vec<Diagnostic>
     diagnostics
 }
 
-/// The audio sink of `plan`: its address and number of signal inputs, or the
+/// The audio sink of `project`'s `plan`: its address and number of signal inputs, or the
 /// diagnostics that say why there is not exactly one.
-fn sink_of(
+pub fn sink_of(
     project: &Project,
     plan: &ExecutionPlan,
 ) -> Result<(InstanceAddress, usize), Vec<Diagnostic>> {
@@ -667,6 +694,8 @@ pub struct SessionRecorder {
     last_edit: Frame,
     last_swap: Option<Frame>,
     state: State,
+    /// The recorded end ([`set_end`](SessionRecorder::set_end)).
+    end: Option<u64>,
 }
 
 impl SessionRecorder {
@@ -699,6 +728,7 @@ impl SessionRecorder {
             last_event: Frame::ZERO,
             last_edit: Frame::ZERO,
             last_swap: None,
+            end: None,
         })
     }
 
@@ -862,6 +892,25 @@ impl SessionRecorder {
         Ok(version)
     }
 
+    /// Records the session's end: the run played `frames` frames, and replay
+    /// renders that many by default (`session.toml`'s `frames`). Refused if a
+    /// recorded command lies at or after it.
+    pub fn set_end(&mut self, frames: u64) -> Result<(), SessionError> {
+        if let Some(edit) = self.edits.iter().find(|e| e.frame.0 >= frames) {
+            return Err(SessionError::Refused(format!(
+                "the session cannot end at frame {frames}: seq {} applies at frame {}",
+                edit.seq, edit.frame.0
+            )));
+        }
+        self.end = Some(frames);
+        Ok(())
+    }
+
+    /// The recorded end, if any.
+    pub fn end(&self) -> Option<u64> {
+        self.end
+    }
+
     /// A new seq.
     fn reserve(&mut self) -> u64 {
         let seq = self.next_seq;
@@ -887,7 +936,8 @@ impl SessionRecorder {
             .map(|(i, e)| (i + 1, e.clone()))
             .collect();
         let plans: Vec<ExecutionPlan> = self.versions.iter().map(|(_, p)| p.clone()).collect();
-        let diagnostics = validate(&numbered, &plans);
+        let mut diagnostics = validate(&numbered, &plans);
+        diagnostics.extend(end_errors(&numbered, self.end));
         if !diagnostics.is_empty() {
             return Err(SessionError::Invalid(diagnostics));
         }
@@ -913,6 +963,7 @@ impl SessionRecorder {
             format_version: FORMAT_VERSION,
             sample_rate: self.sample_rate,
             seed: self.seed,
+            frames: self.end,
             provenance: &self.provenance,
             versions: self
                 .versions
@@ -1027,6 +1078,15 @@ impl LiveRecorder {
         &self.recorder
     }
 
+    /// Ends the recording when the driver has stopped: the last
+    /// [`frontier`](ControlSink::frontier), with the Runner's own next frame,
+    /// then [`set_end`](SessionRecorder::set_end) at that frame, so replay
+    /// renders exactly the frames the run played.
+    pub fn finish(&mut self, next_frame: Frame) -> Result<(), SessionError> {
+        self.frontier(next_frame);
+        self.recorder.set_end(next_frame.0)
+    }
+
     /// The recorder, to [`write`](SessionRecorder::write) the session.
     pub fn into_recorder(self) -> SessionRecorder {
         self.recorder
@@ -1116,6 +1176,9 @@ pub struct Session {
     pub sample_rate: u32,
     /// The master seed.
     pub seed: u64,
+    /// The frames the recorded run played (`session.toml`'s `frames`), if it
+    /// recorded its end.
+    pub frames: Option<u64>,
     /// The build that recorded it.
     pub provenance: Provenance,
     /// Every plan version's project, by version.
@@ -1289,7 +1352,8 @@ impl Session {
         if !diagnostics.is_empty() {
             return Err(LoadError::Invalid(diagnostics));
         }
-        let diagnostics = validate(&edits, &plans);
+        let mut diagnostics = validate(&edits, &plans);
+        diagnostics.extend(end_errors(&edits, file.frames));
         if !diagnostics.is_empty() {
             return Err(LoadError::Invalid(diagnostics));
         }
@@ -1297,6 +1361,7 @@ impl Session {
         Ok(Session {
             sample_rate: *file.sample_rate.get_ref(),
             seed: file.seed,
+            frames: file.frames,
             provenance: file.provenance,
             versions,
             plans,
@@ -1304,8 +1369,12 @@ impl Session {
         })
     }
 
-    /// The default replay length: the last command's frame, then one second.
+    /// The default replay length: the recorded end, else the last command's
+    /// frame, then one second.
     pub fn default_frames(&self) -> u64 {
+        if let Some(frames) = self.frames {
+            return frames;
+        }
         let end = self.edits.last().map_or(0, |e| e.frame.0.saturating_add(1));
         end.saturating_add(u64::from(self.sample_rate))
     }

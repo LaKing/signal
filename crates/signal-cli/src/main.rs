@@ -1,8 +1,11 @@
 //! The `signal` command (headless entry point; ADR 0013): `render`, `replay`,
-//! `modules` and `schema`. `--json` makes every command print machine-readable output on
+//! `play`, `devices`, `modules` and `schema`. `--json` makes every command print machine-readable output on
 //! stdout. Exit codes: 0 ok, 1 validation or user error, 2 internal error.
-//! The command layer only: sessions and provenance live in `signal-project`.
+//! The command layer only: sessions, live edits and provenance live in
+//! `signal-project`, the audio device in `signal-audio`.
 
+mod devices;
+mod play;
 mod render;
 mod replay;
 
@@ -32,6 +35,11 @@ enum Command {
     Render(render::RenderArgs),
     /// Replay a recorded session directory offline: the same artifacts as render.
     Replay(replay::ReplayArgs),
+    /// Play a project in real time (until Enter, or --seconds), with live
+    /// edits (--watch) and session recording; statistics at the end.
+    Play(play::PlayArgs),
+    /// List the audio devices with their sample rates, channels and buffer sizes.
+    Devices,
     /// Print the catalogue of module descriptors.
     Modules,
     /// Print the JSON Schema of project and composite files.
@@ -48,6 +56,8 @@ pub(crate) enum Failure {
     InvalidSession(Vec<Diagnostic>),
     /// A file could not be read or written.
     Io(String),
+    /// The audio device cannot play the project (exit 1).
+    Device(String),
     /// A bug: something that validation should have ruled out.
     Internal(String),
 }
@@ -74,6 +84,7 @@ impl Failure {
                 diagnostics.as_slice(),
             ),
             Failure::Io(message) => ("io", message.clone(), &[][..]),
+            Failure::Device(message) => ("device", message.clone(), &[][..]),
             Failure::Internal(message) => ("internal", message.clone(), &[][..]),
         };
         if json {
@@ -142,6 +153,8 @@ fn execute(cli: &Cli) -> Result<(), Failure> {
     match &cli.command {
         Command::Render(args) => render::run(args, &registry, cli.json),
         Command::Replay(args) => replay::run(args, &registry, cli.json),
+        Command::Play(args) => play::run(args, &registry, cli.json),
+        Command::Devices => devices::run(cli.json),
         Command::Modules => {
             if cli.json {
                 let descriptors: Vec<ModuleDescriptor> =
@@ -193,4 +206,21 @@ fn describe(d: &ModuleDescriptor) -> String {
         ));
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Failure;
+    use std::process::ExitCode;
+
+    #[test]
+    fn a_device_that_cannot_play_the_project_exits_1() {
+        let error = signal_audio::AudioError::SampleRate {
+            device: "Speakers".to_owned(),
+            requested: 96_000,
+            supported: vec![(44_100, 44_100), (48_000, 48_000)],
+        };
+        let failure = Failure::Device(error.to_string());
+        assert_eq!(failure.exit_code(), ExitCode::from(1));
+    }
 }

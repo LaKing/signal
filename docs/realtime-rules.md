@@ -67,7 +67,9 @@ None of them blocks, and none changes the audio: a dropped log record or meter i
 
 `NullDriver` in threaded mode checks a one-slot `rtrb` stop queue between callbacks and may sleep for a callback's duration after it (`pace`), outside `process`; `stop` joins its thread and hands the Runner back.
 
-Verified by `crates/signal-engine/tests/realtime_no_allocation.rs` (V11) and `realtime.rs`, and by `crates/signal-cli/tests/realtime.rs` (V9, replay of a live session).
+`CoreAudioDriver` (`signal-audio`, M2-4) runs the Runner in cpal's output callback through `OutputCallback::fill`: the Runner writes the sink's channels into a scratch buffer allocated at `start` (a device buffer larger than it is run in pieces), and `ChannelMap` copies sink channel *i* to device channel *i*, other device channels 0. `stop` pushes a token on a one-slot `rtrb` queue; the callback then moves the Runner into a one-slot return queue (if that push fails it keeps the Runner and retries, never dropping it on the audio thread) and plays silence, and `stop` drops the stream on the control thread. Each callback is timed with `Instant` into `CallbackStats`, atomics only, for statistics only: xruns are the stream's errors (CoreAudio overloads among them) plus callbacks whose duration exceeded their period. `signal play` polls the Controller at least once per buffer period, and right before sending a file edit, so `Stamp::Default` (two buffers ahead) is normally still ahead of the runner.
+
+Verified by `crates/signal-engine/tests/realtime_no_allocation.rs` (V11) and `realtime.rs`, by `crates/signal-cli/tests/realtime.rs` (V9, replay of a live session), and for the CoreAudio callback body by `crates/signal-audio/tests/no_allocation.rs` and `callback.rs`.
 
 ## Review checklist (paste into PRs touching real-time code)
 

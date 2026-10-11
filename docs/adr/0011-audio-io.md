@@ -16,3 +16,6 @@ Direct objc2 CoreAudio: more control, more code.
 
 ## Consequences
 cpal upgrades are isolated to one module.
+
+## Notes
+- 2026-10-11 (M2-4): cpal 0.18.2 provides the gaps this ADR anticipated for buffer size: the IO buffer-size range (`SupportedBufferSize::Range`, from `kAudioDevicePropertyBufferFrameSizeRange`) and a fixed buffer (`BufferSize::Fixed`, set through `kAudioDevicePropertyBufferFrameSize`), plus the supported sample rates and overload reporting as `ErrorKind::Xrun` (`src/host/coreaudio/macos/device.rs`, `mod.rs`). `CoreAudioDriver` needs no `objc2-audio-toolbox`. AudioWorkgroup remains unverified.

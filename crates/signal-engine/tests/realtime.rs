@@ -433,6 +433,31 @@ fn a_swap_returns_the_old_plan_to_the_control_thread() {
     driver.stop().unwrap();
 }
 
+/// A swap prepared by one Controller is refused by another before anything
+/// is queued, so it cannot desynchronise it; its own Controller sends it, and
+/// refuses it again once another swap has been sent since it was prepared.
+#[test]
+fn a_prepared_swap_is_sent_only_by_its_own_controller() {
+    let (_runner_a, mut a) = realtime(&v0(), &registry(), config()).unwrap();
+    let (_runner_b, mut b) = realtime(&v0(), &registry(), config()).unwrap();
+    let ready = a.prepare_swap(&v1()).unwrap();
+    assert!(matches!(
+        b.send_swap(ready, Stamp::Default),
+        Err(ControlError::Engine(signal_engine::EngineError::StaleSwap))
+    ));
+    assert_eq!(b.in_flight(), 0, "nothing was queued");
+    assert!(!b.is_desynchronised());
+
+    let first = a.prepare_swap(&v1()).unwrap();
+    let second = a.prepare_swap(&v1()).unwrap();
+    a.send_swap(first, Stamp::Default).unwrap();
+    assert!(matches!(
+        a.send_swap(second, Stamp::Default),
+        Err(ControlError::Engine(signal_engine::EngineError::StaleSwap))
+    ));
+    assert_eq!(a.in_flight(), 1);
+}
+
 /// AC6: callback sizes are 1 to 4096, start with 1, a prime and a power of
 /// two, and depend on the seed.
 #[test]

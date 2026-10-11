@@ -974,3 +974,68 @@ fn malformed_sessions_fail_with_located_errors() {
         "the audio sink must stay /out with 2 inputs",
     );
 }
+
+/// M2-4: a session that records its end (`frames` in session.toml) replays
+/// exactly that many frames by default; one without keeps the last command
+/// plus one second. The end lies after every command: `set_end` refuses an
+/// earlier one, `write` refuses a session with a command at or after it, and
+/// loading a session whose `frames` was edited below a command fails with
+/// the command's line.
+#[test]
+fn a_recorded_end_is_the_default_replay_length() {
+    let (live, mut recorder) = live_session();
+    let last = recorder.edits().last().unwrap().frame.0;
+    let rate = u64::from(version(0).sample_rate);
+
+    let plain = out_dir("end/plain");
+    recorder.write(&plain).unwrap();
+    let text = fs::read_to_string(plain.join("session.toml")).unwrap();
+    assert!(!text.contains("frames ="), "{text}");
+    assert_eq!(replayed(&plain, &[])["frames"], last + 1 + rate);
+
+    assert!(recorder.set_end(last).is_err(), "a command at the end");
+    recorder.set_end(FRAMES).unwrap();
+    let ended = out_dir("end/recorded");
+    recorder.write(&ended).unwrap();
+    let text = fs::read_to_string(ended.join("session.toml")).unwrap();
+    assert!(text.contains(&format!("frames = {FRAMES}")), "{text}");
+    let json = replayed(&ended, &[]);
+    assert_eq!(json["frames"], FRAMES);
+    assert_eq!(json["skipped"], 0);
+    assert_eq!(
+        hashes(&json),
+        hashes_of(&live),
+        "the recorded run, bit for bit"
+    );
+    let session = Session::load(&ended, &registry()).unwrap();
+    assert_eq!(session.frames, Some(FRAMES));
+    assert_eq!(session.default_frames(), FRAMES);
+
+    // A command recorded after the end was set: not written.
+    let v0 = version(0);
+    let mut late =
+        SessionRecorder::new(&v0, &registry(), v0.sample_rate, v0.seed, provenance()).unwrap();
+    late.set_end(10).unwrap();
+    let event = late
+        .event(
+            Frame(20),
+            Frame(0),
+            port("/osc.freq"),
+            EventPayload::Set(500.0),
+        )
+        .unwrap();
+    late.applied_event(&event).unwrap();
+    let refused = out_dir("end/late");
+    assert!(matches!(
+        late.write(&refused),
+        Err(signal_project::session::SessionError::Invalid(_))
+    ));
+    assert!(!refused.exists());
+
+    let result = broken(&ended, "end-before-a-command", |dir| {
+        rewrite(dir, "session.toml", |text| {
+            text.replace(&format!("frames = {FRAMES}"), &format!("frames = {last}"))
+        });
+    });
+    assert_fails(result, "edits.jsonl:", "at or after the session's end");
+}

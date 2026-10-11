@@ -23,6 +23,7 @@ All files are UTF-8. Nothing else in the directory is read. A session holds no w
 format_version = 1
 sample_rate = 8000
 seed = 3
+frames = 40000
 
 [provenance]
 signal_revision = "cf613bd1fc85a9a8dc6de643e68080ea99ea1265"
@@ -51,6 +52,7 @@ version = 1
 | `format_version` | This format: 1. Another value is an error. |
 | `sample_rate` | The engine's master rate (≥ 1). The session's value is used, not a project file's. |
 | `seed` | The engine's master seed, 0 to 2⁶³−1. |
+| `frames` | Optional. The frames the recorded run played (M2-4): `signal play` records it when the run ends, after the last `frontier`. Every command's frame is below it. Without it, replay renders the last command's frame plus one second (§6). Sessions written before it existed have no `frames` and replay as before; the format version stays 1. |
 | `[provenance]` | The recording build, field for field as in a render manifest (`semantics.md` §9, `project-format.md` §7). `project_file_hashes` are version 0's. |
 | `[[versions]]` | Every plan version in order: `version` is 0, 1, 2, …; `files` maps each project file of `projects/v<N>/` (path relative to that folder) to its FNV-1a 64, 16 lowercase hex digits. |
 
@@ -115,7 +117,7 @@ The real-time `Controller` (`signal-engine`) knows nothing of sessions. `LiveRec
 
 - **`seq` is the Controller's command id** (an event's id is also its sequence number), so `log.jsonl` and `edits.jsonl` name events alike.
 - **Frames come from the runner's reports**: an event, suspend or resume is reported with its effective frame when the runner takes it; a swap only when it commits, so a swap the engine refused is never recorded.
-- **Records follow the frontier.** Reports arrive in the order the runner made them, not the order commands apply: a swap sent first but stamped later is reported after an edit stamped before it. A report waits until the runner has run past its frame (the `next_frame` of the status `poll` reads first), then is recorded in the order the engine applied it: by frame, then swap, suspends and resumes, events, then id. So each command is checked against the version running at its own frame. After the driver stops, call `frontier` once more with the Runner's own next frame: the last status may have been dropped.
+- **Records follow the frontier.** Reports arrive in the order the runner made them, not the order commands apply: a swap sent first but stamped later is reported after an edit stamped before it. A report waits until the runner has run past its frame (the `next_frame` of the status `poll` reads first), then is recorded in the order the engine applied it: by frame, then swap, suspends and resumes, events, then id. So each command is checked against the version running at its own frame. After the driver stops, call `frontier` once more with the Runner's own next frame: the last status may have been dropped. `LiveRecorder::finish(next_frame)` does that and records the session's end (`frames`, `SessionRecorder::set_end`), so replay renders exactly what was played.
 - **Plan versions.** `LiveRecorder::swap_plan` gives the plan to swap to, its `version` set to the session version it will be recorded as.
 
 A command the recorder refuses is one the engine discarded; it is listed in `LiveRecorder::refused` and not recorded.
@@ -129,7 +131,7 @@ A command the recorder refuses is one the engine discarded; it is listed in `Liv
 - **identical, or only whitespace and comments**: the empty edit;
 - **a changed `sample_rate` or `seed`**: an error at that key: the project must be restarted.
 
-A driver removes instances by suspending them at *s* and swapping at `Engine::removal_swap_frame(s)`, so that they fade out.
+A driver removes instances by suspending them at *s* and swapping at `Engine::removal_swap_frame(s)`, so that they fade out. `signal_project::live::send_edit` sends an edit's commands only once its swap is prepared (`Controller::prepare_swap`, then `send_swap`) and the `Controller` can take all of them, suspends, swap and sets, plus the resumes that would undo the suspends (`Controller::available`); otherwise it sends none, so a removal never stops half-way with instances left suspended. Because each removal also reserves its resume, one edit can remove at most about half the command queue (511 instances at the default 1 024). After preparing the swap, which can take long, `send_edit` polls again, so the suspend and the swap are stamped from a fresh status and keep the removal's fade.
 
 ## 6. `signal replay`
 
@@ -138,7 +140,7 @@ signal replay <session> [--out <dir>] [--frames N] [--json]
 ```
 
 - Loads and validates the session, builds the engine from version 0 with the session's sample rate and seed, and before each frame commits that frame's swap and pushes its other commands at their effective frames. The input queues are sized for the session's busiest frame (`EngineConfig::queue_capacity` is not part of the semantics, `semantics.md` §11).
-- Renders `--frames` frames, by default the last command's frame plus one second (`last + 1 + sample_rate`; one second with no commands). Commands after the end are not applied, and the output says how many.
+- Renders `--frames` frames, by default the session's recorded `frames`, else the last command's frame plus one second (`last + 1 + sample_rate`; one second with no commands). Commands after the end are not applied, and the output says how many.
 - With `--out`, writes the artifacts of `signal render`: `audio.wav`, `log.jsonl`, `manifest.json` (the replaying build's provenance, version 0's file hashes) and `metrics.json`. Prints the audio and log hashes.
 - Warns when the session was recorded by another build (revision, compiler or `Cargo.lock`): bit-exactness holds on the same build (ADR 0008).
 - **Exit codes**: 1 for a malformed session (each error as `file:line:column: error: message`, with the file relative to the session directory, line 1 column 1 where no line applies) or an unreadable file; 2 if the engine discards or refuses input of a validated session (a bug).

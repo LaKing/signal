@@ -3315,7 +3315,13 @@ name = "signal-audio"
 version = "0.0.0"
 dependencies = [
  "cpal",
+ "rtrb",
+ "serde",
+ "signal-contract",
+ "signal-core",
  "signal-engine",
+ "signal-project",
+ "signal-std",
 ]
 
 [[package]]
@@ -3326,6 +3332,7 @@ dependencies = [
  "hound",
  "insta",
  "serde_json",
+ "signal-audio",
  "signal-core",
  "signal-engine",
  "signal-eval",

@@ -57,6 +57,6 @@ pub use log::{
 pub use manifest::{Manifest, Provenance};
 pub use offline::{Render, render, render_with};
 pub use realtime::{
-    Command, CommandId, ControlError, ControlSink, Controller, Meter, Outcome, RealtimeConfig,
-    Report, Runner, RunnerStatus, SentCommand, Stamp, realtime,
+    Command, CommandId, ControlError, ControlSink, Controller, Meter, Outcome, ReadySwap,
+    RealtimeConfig, Report, Runner, RunnerStatus, SentCommand, Stamp, realtime,
 };

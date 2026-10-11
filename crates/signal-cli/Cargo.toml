@@ -1,6 +1,6 @@
 [package]
 name = "signal-cli"
-description = "The `signal` command: render, replay, modules, schema, compare."
+description = "The `signal` command: render, replay, play, devices, modules, schema, compare."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,8 @@ signal-project = { workspace = true }
 signal-std = { workspace = true }
 signal-engine = { workspace = true }
 signal-eval = { workspace = true }
+# `signal play` and `signal devices`: the CoreAudio driver (cpal stays inside it).
+signal-audio = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }
 # To tell an I/O failure writing audio.wav (exit 1) from another (exit 2);

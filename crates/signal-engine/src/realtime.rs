@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::mem;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use signal_core::{EventPayload, Frame, InstanceAddress, PortAddress, Registry};
@@ -265,6 +266,18 @@ enum Back {
     Swap(Box<PreparedSwap>),
 }
 
+/// A swap prepared on the control thread by [`Controller::prepare_swap`],
+/// not yet sent.
+pub struct ReadySwap {
+    /// The [`Controller`] that prepared it ([`Controller::send_swap`] sends
+    /// it through that one only).
+    controller: u64,
+    swap: Box<PreparedSwap>,
+    mirror: PlanState,
+    plan_version: u64,
+    target_version: u64,
+}
+
 /// A swap waiting for its frame.
 #[derive(Debug)]
 struct PendingSwap {
@@ -360,6 +373,7 @@ pub fn realtime(
         latest: RunnerStatus::default(),
         command_overflows: 0,
         desynchronised: false,
+        id: NEXT_CONTROLLER.fetch_add(1, Ordering::Relaxed),
     };
     Ok((runner, controller))
 }
@@ -707,7 +721,12 @@ pub struct Controller {
     latest: RunnerStatus,
     command_overflows: u64,
     desynchronised: bool,
+    /// Tells this Controller's [`ReadySwap`]s from another's.
+    id: u64,
 }
+
+/// The id of the next [`Controller`] built (bookkeeping, not semantics).
+static NEXT_CONTROLLER: AtomicU64 = AtomicU64::new(1);
 
 impl Controller {
     /// Sends an event to `target`, stamped `stamp`; its sequence number is
@@ -751,7 +770,18 @@ impl Controller {
     /// Prepares a swap to `plan` here (it allocates) and sends it, stamped
     /// `stamp`. It commits at its effective frame; its report says so. The
     /// plan must keep the audio sink: one, at the same address, as wide.
+    /// [`prepare_swap`](Controller::prepare_swap), then
+    /// [`send_swap`](Controller::send_swap).
     pub fn swap(&mut self, plan: &ExecutionPlan, stamp: Stamp) -> Result<CommandId, ControlError> {
+        let ready = self.prepare_swap(plan)?;
+        self.send_swap(ready, stamp)
+    }
+
+    /// Prepares a swap to `plan` (it allocates) without sending anything:
+    /// every refusal of [`swap`](Controller::swap) but a full queue happens
+    /// here, so a caller can prepare before sending commands the swap
+    /// completes (a removal's suspends).
+    pub fn prepare_swap(&self, plan: &ExecutionPlan) -> Result<ReadySwap, ControlError> {
         if self.desynchronised {
             return Err(ControlError::Desynchronised);
         }
@@ -776,12 +806,32 @@ impl Controller {
             .ok_or(ControlError::Desynchronised)?;
         let swap = prepare_swap(old, self.target, &[], plan, &self.registry)
             .map_err(ControlError::Engine)?;
-        let sent = SentCommand::Swap {
+        Ok(ReadySwap {
+            swap: Box::new(swap),
+            mirror,
             plan_version: plan.version,
+            target_version: self.target.version,
+            controller: self.id,
+        })
+    }
+
+    /// Sends a swap from [`prepare_swap`](Controller::prepare_swap), stamped
+    /// `stamp`. Refused, before anything is queued, if another Controller
+    /// prepared it or another swap was sent since it was prepared
+    /// ([`EngineError::StaleSwap`]), or as any command is.
+    pub fn send_swap(&mut self, ready: ReadySwap, stamp: Stamp) -> Result<CommandId, ControlError> {
+        if self.desynchronised {
+            return Err(ControlError::Desynchronised);
+        }
+        if ready.controller != self.id || ready.target_version != self.target.version {
+            return Err(ControlError::Engine(EngineError::StaleSwap));
+        }
+        let sent = SentCommand::Swap {
+            plan_version: ready.plan_version,
         };
-        let id = self.send(self.frame_of(stamp), Command::Swap(Box::new(swap)), sent)?;
+        let id = self.send(self.frame_of(stamp), Command::Swap(ready.swap), sent)?;
         self.target.version = self.target.version.saturating_add(1);
-        self.mirrors.push_back((self.target.version, mirror));
+        self.mirrors.push_back((self.target.version, ready.mirror));
         Ok(id)
     }
 
@@ -886,6 +936,13 @@ impl Controller {
     /// Commands sent whose returned item has not been dropped yet.
     pub fn in_flight(&self) -> usize {
         self.outstanding
+    }
+
+    /// How many more commands can be sent now without being refused as
+    /// [`Full`](ControlError::Full): the in-flight limit less those in
+    /// flight. A batch that must go out whole checks this first.
+    pub fn available(&self) -> usize {
+        self.limit.saturating_sub(self.outstanding)
     }
 
     /// Whether a swap was refused at its commit (no further swap is sent).

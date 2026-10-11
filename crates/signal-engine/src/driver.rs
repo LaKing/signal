@@ -47,6 +47,9 @@ pub enum DriverError {
     Spawn(std::io::Error),
     /// Its thread panicked; the Runner is lost.
     Panicked,
+    /// The audio device failed: its stream could not be built or started, or
+    /// it stopped calling back before handing the Runner back.
+    Device(String),
 }
 
 impl fmt::Display for DriverError {
@@ -56,6 +59,7 @@ impl fmt::Display for DriverError {
             DriverError::NotStarted => f.write_str("the driver holds no runner to call here"),
             DriverError::Spawn(error) => write!(f, "the driver thread did not start: {error}"),
             DriverError::Panicked => f.write_str("the driver thread panicked"),
+            DriverError::Device(message) => write!(f, "the audio device failed: {message}"),
         }
     }
 }

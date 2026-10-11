@@ -14,10 +14,14 @@
 //! - [`session`]: session directories (`docs/session-format.md`): recording
 //!   ([`session::SessionRecorder`], and [`session::LiveRecorder`] for a
 //!   real-time run), reading and replaying.
+//! - [`live`]: live edits from project files: [`live::ProjectWatcher`] polls a
+//!   project folder, [`live::send_edit`] sends the diff to a real-time
+//!   `Controller` and records it.
 //! - [`provenance`]: the build's provenance for render manifests and sessions.
 
 mod diagnostic;
 mod diff;
+pub mod live;
 mod locate;
 mod model;
 pub mod provenance;

@@ -85,6 +85,29 @@ A milestone's listening verdict (V14 for M1) is a file `experiments/<id>/verdict
 
 `crates/signal-cli/tests/pulse.rs` checks `projects/pulse` (M2-7): the project is at 96 kHz with seed 7 and uses the documented patch, every primitive in it has the contract suite; 16 bars render at 44.1, 48, 96 and 192 kHz with every sample finite (`is_finite()` per sample, since a peak taken with `f64::max` ignores NaN), a 4× oversampled peak ≤ −0.3 dBFS and |mean| < 1e-4 per channel; and `golden_pulse_16_bars` matches `tests/golden/pulse/manifest.json`. The same file checks that a `std.delay` closes a feedback loop without a `std.unit_delay` (accepted, finite, bounded), and that the same loop through a direct primitive is rejected. Printed values: `cargo test -p signal-cli --test pulse -- --nocapture`. The 60 s seed-7 render for the owner's listening verdict is `signal render projects/pulse --seconds 60 --out renders/pulse-seed7/`.
 
+## Manual device check (M2-4)
+
+Seats have no audio device, so `signal play` is tested with the null driver (`crates/signal-cli/tests/play.rs`) and the CoreAudio callback body without cpal (`crates/signal-audio/tests/`). The operator runs the device check at the checkpoint:
+
+```sh
+cd ~/projects/signal-project
+PATH=/opt/homebrew/opt/rustup/bin:$PATH cargo build --release -p signal-cli
+S=/tmp/signal-project-target/release/signal
+$S devices; $S devices --json
+$S play projects/kick --seconds 30                    # 30 s of the kick; statistics at the end
+$S play projects/kick --seconds 30 --json
+$S play projects/kick --watch --record-session /tmp/kick-live-session
+#   while it plays, edit projects/kick/project.toml and save:
+#   out gain 0.75 -> 0.4 (quieter); remove { from = "drums.out", to = "out.r" } (right channel silent);
+#   then type a syntax error (diagnostic printed, still playing); fix it; press Enter.
+git checkout projects/kick/project.toml
+$S replay /tmp/kick-live-session --out /tmp/kick-live-replay   # renders the recorded length
+cp -R projects/kick /tmp/kick-12345 && sed -i '' 's/sample_rate = 96000/sample_rate = 12345/' /tmp/kick-12345/project.toml
+$S play /tmp/kick-12345 --seconds 1; echo "exit $?"   # lists the supported rates, exit 1
+```
+
+Record what was heard and the statistics printed (xruns, worst callback ratio) with the verdict.
+
 ## Golden renders
 
 `tests/golden/kick/manifest.json` is the `manifest.json` (`semantics.md` §9) of `signal render projects/kick --frames 2792727` (16 bars at 132 bpm and 96 kHz, seed 42), with the fields that depend on the build rather than the sound removed:

@@ -63,7 +63,7 @@ See `adr/0015-workspace-and-lab-tier.md`. Crates are created when their mileston
 | `signal-project` | Project folder loading, TOML model, schema export, project diff; session record, read and replay (`session-format.md`) and build provenance, shared by `signal` and Signal.app. Depends on `signal-engine` for sessions; the engine depends on no project or session code | M1/M2 |
 | `signal-std` | Standard primitives | M1 |
 | `signal-engine` | Executor, plan swap, fault guards, render manifest (semantics: `semantics.md`); the real-time runner and controller, the driver trait, offline and null drivers (`realtime-rules.md`, "The runner") | M1/M2 |
-| `signal-audio` | CoreAudio driver through cpal (ADR 0011) | M2 |
+| `signal-audio` | `CoreAudioDriver` through cpal (ADR 0011), device listing, callback statistics | M2 |
 | `signal-eval` | Analysis, metrics, compare, listening packages | M1/M3 |
-| `signal-cli` | `signal` command layer only: `render`, `replay`, `modules`, `schema` | M1/M2 |
+| `signal-cli` | `signal` command layer only: `render`, `replay`, `play`, `devices`, `modules`, `schema` | M1/M2 |
 | `signal-app` | Signal.app shell and GUI (egui, ADR 0018) | M2.5 (skeleton in M2) |
