@@ -39,8 +39,8 @@ pub struct Render {
 /// by the executor, whether or not the sink itself is suspended or muted). If
 /// the sink's type declares a parameter named `gain`, each recorded input is
 /// multiplied by that parameter's effective value (`docs/semantics.md` §8). Each
-/// frame's log records go to `log.jsonl` in canonical order: edits, then events
-/// and discards by target port address, then faults.
+/// frame's log records go to `log.jsonl` in canonical order: a swap, then edits,
+/// then events and discards by target port address, then faults.
 pub fn render(engine: &mut Engine, frames: u64) -> Result<Render, RenderError> {
     if engine.next_frame() != Frame::ZERO {
         return Err(RenderError::AlreadyStarted);

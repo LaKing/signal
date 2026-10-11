@@ -46,7 +46,7 @@ fn registry() -> Registry {
 fn render_project(project: &Project, seed: u64, sample_rate: u32, frames: u64) -> Render {
     let registry = registry();
     let planned = project.plan(&registry).expect("the project is valid");
-    let config = EngineConfig { sample_rate, seed };
+    let config = EngineConfig::new(sample_rate, seed);
     let mut engine = Engine::new(&planned.plan, &registry, config, Vec::new()).unwrap();
     render(&mut engine, frames).unwrap()
 }

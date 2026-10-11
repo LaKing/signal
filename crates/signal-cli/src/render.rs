@@ -96,7 +96,7 @@ pub(crate) fn run(args: &RenderArgs, registry: &Registry, json: bool) -> Result<
         (None, None) => return Err(Failure::Usage("give --seconds or --frames".to_owned())),
     };
 
-    let config = EngineConfig { sample_rate, seed };
+    let config = EngineConfig::new(sample_rate, seed);
     let mut engine = Engine::new(plan, registry, config, Vec::new())
         .map_err(|e| Failure::Internal(e.to_string()))?;
     let rendered = render(&mut engine, frames).map_err(|e| render_failure(&project, dir, e))?;

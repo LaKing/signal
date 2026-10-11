@@ -53,6 +53,16 @@ pub enum FaultReason {
 /// One thing the executor did in a frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LogRecord {
+    /// A plan swap, effective from this frame (`docs/semantics.md` §12).
+    Swap {
+        /// The frame.
+        frame: Frame,
+        /// The engine's plan version after the swap: 0 for the first plan,
+        /// plus one per swap.
+        version: u64,
+        /// The swapped-in plan's own [`ExecutionPlan::version`](signal_graph::ExecutionPlan::version).
+        plan_version: u64,
+    },
     /// An event delivered to an input port or applied to a parameter.
     Event {
         /// The frame.
@@ -107,17 +117,18 @@ pub enum LogRecord {
 }
 
 impl LogRecord {
-    /// The order of records within a frame in `log.jsonl`: edits by instance,
-    /// then events and discards by target port (a stable sort keeps their
-    /// delivery order), then faults by instance. It does not depend on the
-    /// schedule.
+    /// The order of records within a frame in `log.jsonl`: a swap, then edits
+    /// by instance, then events and discards by target port (a stable sort
+    /// keeps their delivery order), then faults by instance. It does not depend
+    /// on the schedule.
     pub(crate) fn order(&self) -> (u8, usize) {
         match *self {
+            LogRecord::Swap { .. } => (0, 0),
             LogRecord::Suspend { instance, .. } | LogRecord::Resume { instance, .. } => {
-                (0, instance.0)
+                (1, instance.0)
             }
-            LogRecord::Event { target, .. } | LogRecord::Discard { target, .. } => (1, target.0),
-            LogRecord::Fault { instance, .. } => (2, instance.0),
+            LogRecord::Event { target, .. } | LogRecord::Discard { target, .. } => (2, target.0),
+            LogRecord::Fault { instance, .. } => (3, instance.0),
         }
     }
 }
@@ -126,6 +137,15 @@ impl LogRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LogLine<'a> {
+    /// See [`LogRecord::Swap`].
+    Swap {
+        /// The frame.
+        frame: Frame,
+        /// The engine's plan version after the swap.
+        version: u64,
+        /// The swapped-in plan's own version.
+        plan_version: u64,
+    },
     /// See [`LogRecord::Event`].
     Event {
         /// The frame.

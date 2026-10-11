@@ -6,11 +6,17 @@
 //! - [`Engine`]: instantiates an [`ExecutionPlan`](signal_graph::ExecutionPlan)
 //!   through a [`Registry`](signal_core::Registry) and runs it one frame at a time
 //!   (*k* = 1). [`Engine::run_frame`] allocates nothing.
+//! - Live edits (ADR 0006): [`Engine::prepare_swap`] and [`Engine::commit_swap`]
+//!   replace the plan at an exact frame, moving each surviving instance's state;
+//!   [`Engine::push_external`], [`Engine::push_suspend`] and
+//!   [`Engine::push_resume`] queue input while the engine runs, and
+//!   [`Engine::drain_log`] takes each frame's log out. None of them but
+//!   `prepare_swap` allocates.
 //! - [`render`]: the offline driver. It records the single audio sink's inputs
 //!   and the event log; [`Render::write`] writes `audio.wav`, `log.jsonl` and
 //!   `manifest.json` ([`Manifest`]).
 //!
-//! Planned for M2: the real-time driver, plan swap and live edits.
+//! Planned for M2: the real-time driver.
 
 #![cfg_attr(
     not(test),
@@ -30,7 +36,10 @@ mod manifest;
 mod offline;
 mod parameter;
 
-pub use engine::{Engine, EngineConfig, ExternalEvent, ParameterValue};
+pub use engine::{
+    EditFull, Engine, EngineConfig, ExternalEvent, ExternalFull, InputDiscards, ParameterValue,
+    PreparedSwap,
+};
 pub use error::{EngineError, RenderError};
 pub use log::{
     DiscardReason, FaultReason, InstanceId, LineSource, LogLine, LogRecord, LogSource, PortId,

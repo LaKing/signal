@@ -1,5 +1,5 @@
-//! What can go wrong when instantiating a plan, scheduling an edit, or
-//! rendering. Nothing goes wrong inside a frame: every check happens before.
+//! What can go wrong when instantiating a plan, scheduling an edit, swapping
+//! plans, or rendering. Nothing goes wrong inside a frame: every check happens before.
 
 use std::fmt;
 
@@ -97,6 +97,21 @@ pub enum EngineError {
         /// The edit's frame.
         frame: Frame,
     },
+    /// A swap committed for a frame other than the next one.
+    SwapFrame {
+        /// The swap's frame.
+        frame: Frame,
+        /// The next frame to run.
+        next: Frame,
+    },
+    /// A prepared swap committed already, or prepared at another plan version.
+    StaleSwap,
+    /// A second swap committed before the frame of the first one ran.
+    SwapPending,
+    /// A swap committed before the last frame's log was drained.
+    LogNotDrained,
+    /// A swap prepared by another engine.
+    ForeignSwap,
 }
 
 impl fmt::Display for EngineError {
@@ -154,6 +169,19 @@ impl fmt::Display for EngineError {
                 "{instance}: suspend and resume must alternate at increasing frames (frame {})",
                 frame.0
             ),
+            EngineError::SwapFrame { frame, next } => {
+                write!(f, "swap at frame {}: the next frame is {}", frame.0, next.0)
+            }
+            EngineError::StaleSwap => {
+                f.write_str("the swap was prepared at another plan version or already committed")
+            }
+            EngineError::SwapPending => {
+                f.write_str("a swap is already committed for the next frame")
+            }
+            EngineError::ForeignSwap => f.write_str("the swap was prepared by another engine"),
+            EngineError::LogNotDrained => {
+                f.write_str("drain the last frame's log before committing a swap")
+            }
         }
     }
 }

@@ -82,10 +82,7 @@ fn instantiation_errors() {
         ],
         vec![conn("t.out", "c.in")],
     );
-    let config = EngineConfig {
-        sample_rate: 48_000,
-        seed: 1,
-    };
+    let config = EngineConfig::new(48_000, 1);
     let refused = |config, external| Engine::new(&plan, &registry(), config, external).err();
 
     let silent = EngineConfig {

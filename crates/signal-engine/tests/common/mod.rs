@@ -624,7 +624,7 @@ pub fn engine_seeded(
     seed: u64,
     external: Vec<ExternalEvent>,
 ) -> Engine {
-    let config = EngineConfig { sample_rate, seed };
+    let config = EngineConfig::new(sample_rate, seed);
     Engine::new(plan, &registry(), config, external).unwrap()
 }
 

@@ -4,7 +4,7 @@
 
 The reference implementation is the per-frame executor and the offline driver in `crates/signal-engine` (ADR 0012). Every later engine, including the real-time one, must produce the same results bit for bit.
 
-Scope (M1): one frame per step (*k* = 1), rate divisor 1 for every port, one master rate per project. Block execution (*k* > 1, D-EXEC-3), plan swaps and live edits other than suspend and resume come later.
+Scope (M1): one frame per step (*k* = 1), rate divisor 1 for every port, one master rate per project. Plan swaps, incremental input and add/remove fades (M2-1) are in §12. Block execution (*k* > 1, D-EXEC-3) comes later.
 
 ## 1. Frames
 
@@ -17,7 +17,7 @@ Scope (M1): one frame per step (*k* = 1), rate divisor 1 for every port, one mas
 
 Each frame *n* runs in four phases (ADR 0016 §2):
 
-1. **External input.** The edits stamped for *n* take effect (suspend, resume; §6). Then the external events stamped for *n* become inputs of their targets.
+1. **External input.** A plan swap committed for *n* takes effect (§12). Then the edits effective at *n* take effect (suspend, resume; §6). Then the external events effective at *n* become inputs of their targets. An input's effective frame is the frame it is stamped for, or a later one for input pushed late (§12).
 2. **Emit.** Every state-output instance writes its frame-*n* outputs from its state alone. It gets no inputs and no parameter values.
 3. **Process.** Direct instances run in schedule order. Before an instance runs, its frame-*n* inputs are computed: signal inputs (§3), events (§4) and parameters (§5).
 4. **Absorb.** Every state-output instance gets its frame-*n* inputs, computed the same way, and updates its state. Its frame-*n* output was already fixed in phase 2, so these inputs show first at frame *n* + 1.
@@ -108,7 +108,7 @@ The module never sees the base, the events or the modulation separately. It rece
 
 1. The modulation sum *m* is computed like a signal input (§3), over the parameter's signal connections.
 2. The value is combined as the parameter declares:
-   - with no signal connections: the base, whatever `combine` says;
+   - with no signal connections: the base, whatever `combine` says, unless the parameter holds modulation from instances removed by a plan swap (§12). Then the held sum is *m*, until a `set` (or `ramp` with *N* = 0) reaches the parameter or a later swap gives it a signal connection. A parameter that only lost connections to instances still in the plan returns to the base on the swap frame;
    - `add`: `base + m` (the default);
    - `multiply`: `base · m`;
    - `replace`: `m`.
@@ -215,6 +215,7 @@ A render directory holds `audio.wav` (§8), `log.jsonl` and `manifest.json`. The
 One JSON object per line, with a newline after every line, field order as shown. Records:
 
 ```json
+{"type":"swap","frame":2,"version":1,"plan_version":1}
 {"type":"event","frame":2,"target":"/p.value","payload":{"set":0.125},"source":{"external":{"sequence":1}}}
 {"type":"event","frame":0,"target":"/c.in","payload":"trigger","source":{"port":"/t.out"}}
 {"type":"event","frame":4,"target":"/p.value","payload":{"ramp":{"to":0.5,"frames":3,"curve":"linear"}},"source":{"external":{"sequence":2}}}
@@ -230,14 +231,16 @@ One JSON object per line, with a newline after every line, field order as shown.
   - `muted`;
   - `not_a_parameter_event` (a trigger sent to a parameter).
 - **`suspend`** / **`resume`**: an edit and the frame it took effect. `discarded` counts the events discarded during that suspension.
+- **`swap`**: a plan swap and the frame it took effect (§12). `version` is the engine's plan version after it; `plan_version` is the swapped-in plan's own version.
 - **`fault`**: see §7. Reasons:
   - `non_finite`;
   - `magnitude`;
   - `event_overflow`.
 - **Order within a frame:**
-  1. edits, by instance address;
-  2. events and discards, by target port address (in delivery order within a target);
-  3. faults, by instance address.
+  1. a swap;
+  2. edits, by instance address;
+  3. events and discards, by target port address (in delivery order within a target);
+  4. faults, by instance address.
 
   Frames are in increasing order. The log therefore does not depend on the schedule.
 - Numbers use the shortest representation that reads back to the same f64.
@@ -299,10 +302,10 @@ These choices are part of the semantics above. Each was made for M1 and can chan
 ## 11. Determinism
 
 The output follows from these inputs alone:
-- the plan;
+- the plan, and each plan swapped in with its swap frame (§12);
 - the seed: each instance's random stream is `RngStream::derive(seed, address)` (ADR 0008);
 - the sample rate;
-- the external events and edits;
+- the external events and edits, with their effective frames;
 - the build.
 
 Two renders with the same inputs produce byte-identical `audio.wav`, `log.jsonl` and hashes. Any valid schedule produces the same output and the same log.
@@ -313,3 +316,52 @@ The rounding rules:
 - ramp and fade gains divide first, then multiply once (§5, §6, §7);
 - ends of ramps and fades are assigned;
 - f64 is converted to f32 only for `audio.wav`, rounding to nearest, ties to even.
+
+## 12. Plan swap and live edits
+
+ADR 0006: a running engine replaces its plan at an exact frame, and takes external events and edits while it runs. This section is normative for `Engine::prepare_swap`, `commit_swap`, `push_external`, `push_suspend`, `push_resume` and `drain_log`.
+
+### Swaps and versions
+
+- A swap is prepared off the real-time thread (it builds the new plan's instances and buffers) and committed between frames, effective from the next frame *n*. Committing allocates nothing and moves state; the replaced plan is dropped elsewhere.
+- The engine's **plan version** is 0 for the plan it was built with and goes up by one per swap. The swap record `{"type":"swap","frame":n,"version":v,"plan_version":p}` is the first record of frame *n*; `plan_version` is the swapped-in plan's own `version`, which the caller assigns.
+- At most one swap per frame. A swap prepared by another engine or at another version, or already committed, is refused.
+- The log holds one frame, and its records name the ports and instances of the plan that wrote it, so a frame's log must be drained before a swap is committed; a commit refuses an undrained log.
+
+### What survives
+
+An instance **survives** when the new plan has an instance at the same address with the same module type (and descriptor). A changed type at the same address is a removal plus an addition. A survivor keeps, moved and not copied:
+
+- its primitive object: DSP state and random stream;
+- its parameter bases, with running and pending ramps (§5, §6);
+- its suspension, fade and fault state, and its discard counts;
+- its outputs as readers last saw them, and the values its fades start from.
+
+The new plan's parameter values do not apply to a survivor: its bases move. A caller that wants a new value sends a `set`.
+
+### Connections
+
+Connection changes between survivors take effect on the swap frame with no fade (crossfading changed connections is not done). This includes a disconnect that leaves a parameter with no signal sources: from the swap frame it uses its base (§5).
+
+### Added instances
+
+An added instance is created and prepared like any instance (its random stream is `RngStream::derive(seed, address)`) and runs from the swap frame. Its `audio` outputs fade in exactly as after a resume (§6): on its *j*-th frame the output is `live · ((j + 1) / F)` for *j* < *F* − 1, and exactly `live` from *j* = *F* − 1 on. Its other signal outputs and its event outputs start at once.
+
+### Removal
+
+- **Removal is two steps.** Suspend the instance at frame *s* (§6), then swap to a plan without it at *s* + *F* (`Engine::removal_swap_frame(s)`). From *s* + *F* − 1 on its `audio` outputs are exactly +0.0, so dropping their terms from the canonical sums that read them (§3) changes nothing bit for bit: the audio fades out exactly like an ordinary suspend.
+- A removal without the prior suspend drops the instance's contribution on the swap frame with no fade.
+- Outputs of other kinds hold their value while suspended (§6), so their terms step to absent at the swap.
+- **Held modulation.** A surviving parameter left with no signal sources, whose lost sources include removed instances, holds the canonical sum of `scale · output` over those removed sources, read at the commit from their outputs as readers last saw them. After the suspend-then-remove protocol that sum is exactly +0.0, so a Multiply or Replace parameter keeps the value it had under the suspension instead of returning to its base; skipping the protocol holds whatever the removed source's last output was. A surviving source that was disconnected in the same swap does not contribute. The hold lasts until a `set` (or `ramp` with *N* = 0) reaches the parameter or a later swap gives it a signal source. While it lasts, a live session differs from a fresh load of the same files.
+
+### Pushed input and effective frames
+
+- External events and suspends and resumes may be pushed while the engine runs, into fixed-capacity queues (`EngineConfig::queue_capacity`, default 4096). A full queue refuses the input and hands it back; nothing is dropped. Pushed input stays in its queue after it is used until the caller reclaims it (`reclaim_externals`, `reclaim_edits`), so that nothing is freed on the real-time thread; until then it counts against the capacity.
+- Input arrives in frame order. Its **effective frame** is the frame it is stamped for, raised to the effective frame of the previous push of the same kind, and for an edit to the next frame to run. An input stamped for a frame that has already run is therefore applied on the next frame, and its log records carry that effective frame: the log is the truth for replay.
+- Same-frame external events are ordered by target, then sequence number, whether they came from the constructor's list or were pushed, so pushing a list's events in frame order gives exactly what the list gives. Sequence numbers must be unique across the list and pushed events; this is the caller's duty (duplicates are ordered list first, then in push order).
+- Targets and instances are resolved at the effective frame, against the plan running then: an event for an instance that a later swap adds applies once it exists. External events whose target is not an event input or parameter of that plan, or whose `set` or `ramp` value is not finite, and edits that name no instance of it or do not fit the instance's state (a suspend of a suspended instance, a resume of a running one, a second edit of one instance in a frame) have no effect: they are counted (`Engine::input_discards`), not logged.
+- Pushed edits and the edits scheduled with `suspend` and `resume` before they run may be mixed. Edits effective at the same frame apply scheduled first, then pushed. A pushed edit, once applied, is what `suspend` and `resume` check against, unless a later scheduled edit of the instance is recorded: then, until that frame, only `push_resume` can resume the instance.
+
+### Draining the log
+
+`Engine::drain_log` hands the last frame's records to the caller in the order of `log.jsonl` (§9) and empties the log, without allocating, so a real-time caller keeps the log bounded by draining it after every frame.

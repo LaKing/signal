@@ -122,10 +122,7 @@ fn schedule_independence() {
 #[test]
 fn invalid_schedule_is_refused() {
     let plan = rich_plan();
-    let config = signal_engine::EngineConfig {
-        sample_rate: 48_000,
-        seed: 1,
-    };
+    let config = signal_engine::EngineConfig::new(48_000, 1);
     let refused = |schedule: Vec<_>| {
         let mut broken = plan.clone();
         broken.schedule = schedule;
