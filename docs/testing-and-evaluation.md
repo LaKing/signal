@@ -30,8 +30,7 @@ Run everything with `cargo test --workspace --locked --offline`. The acceptance 
 | V3 | `v3_triggers_on_the_integer_grid_and_first_onset` | Every beat and ghost trigger in `log.jsonl` is on the transport's integer formula (ghosts recomputed from the seed's stream), accents fall on every third beat, nothing is discarded, and the first kick's first non-zero sample is frame 1 (the derivation is in the test). |
 | V4 | `v4_seed_changes_only_ghosts` | Seeds 42 and 43 give the same beats and accents and different ghosts; the audio is bit-identical up to the first frame where the ghosts differ. |
 | V5 | `v5_floors_over_64_bars` | 64 bars: no NaN or infinity, **4× oversampled** peak ≤ −0.3 dBFS, \|mean\| < 1e-4 per channel. |
-| V6 | `v6_shaper_aliasing_at_least_60_db` | `std.tanh_shaper` at drive 20 on 1, 2, 4 and 8 kHz sines at 96 kHz: inharmonic energy ≥ 60 dB below the fundamental. See the limitation below. |
-| V6 (supplement) | `v6_off_divisor_aliasing_report` | The same measurement at 1009, 2003, 4001 and 8009 Hz, printed, with no threshold. |
+| V6 | `v6_shaper_aliasing_at_least_60_db` | `std.tanh_shaper` at drive 20 on 1009, 2003, 4001 and 8009 Hz sines at 96 kHz: inharmonic energy ≥ 60 dB below the fundamental. **Ignored** until the shaper fix; see below. |
 | V7 | `v7_delay_free_feedback_is_rejected` | The kick with its feedback loop closed without the unit delay: `signal render` exits 1 and names the cycle. |
 | V8 | `v8_pitch_at_every_rate` | Renders at 44.1, 48, 96 and 192 kHz; the first kick's tail (from 250 ms after the trigger to the next trigger) is 48 Hz within 1 % by zero crossings. |
 | Golden | `golden_kick_16_bars` | The seed-42, 16-bar render matches `tests/golden/kick/manifest.json`. |
@@ -39,13 +38,24 @@ Run everything with `cargo test --workspace --locked --offline`. The acceptance 
 
 Thresholds are fixed by the PO and are never lowered to make a test pass. If a measurement misses one, the test is marked `#[ignore = "…"]` with the measured values, and the values go to the PO.
 
-Printed values (V4–V6, V8) are shown with `cargo test -p signal-cli --test kick_acceptance -- --nocapture`.
+Printed values (V4, V5, V8) are shown with `cargo test -p signal-cli --test kick_acceptance -- --nocapture`; V6's with `cargo test -p signal-cli --test kick_acceptance -- --ignored v6 --nocapture`.
 
-### The V6 measurement and its limitation
+### The V6 measurement
 
 `signal_eval::aliasing` windows the signal with a periodic Hann window, takes a real FFT, and compares the energy within ±2 bins of the fundamental with the energy further than ±2 bins from every harmonic below Nyquist. The test analyses 96 000 samples (1 s, 1 Hz bins) after 1000 frames of start-up: a whole number of periods of every tone, so the window adds no leakage.
 
-**Limitation.** 1, 2, 4 and 8 kHz divide 96 kHz, so the shaped tone repeats exactly every 96, 48, 24 or 12 frames. A periodic signal has energy only at multiples of its fundamental, so every aliased component lands exactly on a harmonic and is not counted. The gating test therefore passes for naive `tanh` as well, and it cannot tell antialiasing from none. The supplement uses tones that do not divide the rate, whose aliases fall between the harmonics; there the inharmonic ratio measures aliasing. Whether V6 should be defined on such tones is the PO's decision.
+**Tones.** The tones are fixed at 1009, 2003, 4001 and 8009 Hz (owner decision sq-4aece389, option A). They do not divide 96 kHz, so the shaped tone is not periodic in whole frames and its aliases fall between the harmonics, where they are counted. The original tones, 1, 2, 4 and 8 kHz, divide 96 kHz: the shaped tone repeated every 96, 48, 24 or 12 frames, every alias landed exactly on a harmonic, and the test passed for naive `tanh` as well (ADAA 253–306 dB, naive 244–294 dB), so it could not tell antialiasing from none. That check is removed, not kept as a sanity check, because it measures nothing.
+
+**Status: ignored pending the shaper fix.** The threshold stays at 60 dB. The current first-order ADAA `std.tanh_shaper` misses it, so the test is marked `#[ignore]` with the measured values, and it prints the shaper's ratio and that of naive `tanh(20·x)` on the same sine:
+
+| Tone | ADAA (`std.tanh_shaper`) | Naive `tanh` |
+|---|---|---|
+| 1009 Hz | 49.0 dB | 43.8 dB |
+| 2003 Hz | 33.5 dB | 27.3 dB |
+| 4001 Hz | 26.1 dB | 18.5 dB |
+| 8009 Hz | 22.0 dB | 13.1 dB |
+
+Bringing the shaper to ≥ 60 dB is follow-up issue `2026-10-11-follow-up-bring-std-tanh-shaper-aliasing-to-60-db-on-off-div`, tracked for the M3 ADAA-versus-oversampling experiment. The `#[ignore]` is removed when that lands.
 
 ## Golden renders
 

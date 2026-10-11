@@ -317,8 +317,8 @@ fn v5_floors_over_64_bars() {
 
 /// Frames skipped before the analysis (the shaper starts from u[−1] = 0).
 const V6_SKIP: u64 = 1000;
-/// One second at 96 kHz: a whole number of periods of every V6 tone, so the
-/// Hann window adds no leakage and 1 Hz bins.
+/// One second at 96 kHz: 1 Hz bins and a whole number of periods of every
+/// whole-hertz V6 tone, so the Hann window adds no leakage.
 const V6_FRAMES: usize = 96_000;
 
 /// `std.tanh_shaper` at drive 20 on a pure `std.sine_osc` tone of `freq` Hz at
@@ -355,14 +355,18 @@ fn shaper_aliasing(freq: u32) -> (f64, f64) {
     (ratio(&shaped), ratio(&naive))
 }
 
-/// V6 (gating, AC11's tones): the shaper's inharmonic energy is at least
-/// 60 dB below the fundamental at 1, 2, 4 and 8 kHz. These tones divide
-/// 96 kHz, so every alias falls on a harmonic and cannot be seen: naive tanh
-/// passes as well (printed). See `v6_off_divisor_aliasing_report`.
+/// V6 (gating, owner decision sq-4aece389 option A): the shaper's inharmonic
+/// energy is at least 60 dB below the fundamental at 1009, 2003, 4001 and
+/// 8009 Hz. These tones do not divide 96 kHz, so the aliases land between the
+/// harmonics and are counted. Naive tanh is printed for comparison.
 #[test]
+#[ignore = "std.tanh_shaper misses 60 dB on off-divisor tones; follow-up issue \
+            2026-10-11-follow-up-bring-std-tanh-shaper-aliasing-to-60-db-on-off-div. \
+            Measured ADAA / naive tanh: 1009 Hz 49.0 / 43.8 dB, 2003 Hz 33.5 / 27.3 dB, \
+            4001 Hz 26.1 / 18.5 dB, 8009 Hz 22.0 / 13.1 dB"]
 fn v6_shaper_aliasing_at_least_60_db() {
     let mut misses = Vec::new();
-    for freq in [1000, 2000, 4000, 8000] {
+    for freq in [1009, 2003, 4001, 8009] {
         let (adaa, naive) = shaper_aliasing(freq);
         println!("V6 {freq} Hz: ADAA {adaa:.1} dB, naive tanh {naive:.1} dB");
         // A NaN measurement is a miss, not a pass.
@@ -371,18 +375,6 @@ fn v6_shaper_aliasing_at_least_60_db() {
         }
     }
     assert!(misses.is_empty(), "below 60 dB: {}", misses.join(", "));
-}
-
-/// V6 supplement (non-gating): the same measurement on tones that do not
-/// divide 96 kHz, whose aliases land between the harmonics. Printed for the
-/// PO; no threshold is applied.
-#[test]
-fn v6_off_divisor_aliasing_report() {
-    for freq in [1009, 2003, 4001, 8009] {
-        let (adaa, naive) = shaper_aliasing(freq);
-        println!("V6 off-divisor {freq} Hz: ADAA {adaa:.1} dB, naive tanh {naive:.1} dB");
-        assert!(adaa.is_finite() && naive.is_finite(), "{freq} Hz");
-    }
 }
 
 /// V7: the kick with its feedback taken from the shaper straight into the
