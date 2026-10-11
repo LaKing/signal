@@ -264,6 +264,24 @@ fn a_missing_project_exits_1() {
     assert_eq!(stdout_json(&output)["error"]["kind"], "io");
 }
 
+/// The M2-7 primitives, which `modules` and `schema` must list.
+const M2_7_TYPES: [&str; 14] = [
+    "std.delay",
+    "std.mix",
+    "std.pan",
+    "std.gain",
+    "std.sub",
+    "std.min",
+    "std.max",
+    "std.abs",
+    "std.scale",
+    "std.clamp",
+    "std.sample_hold",
+    "std.edge",
+    "std.clock_div",
+    "std.step_seq",
+];
+
 #[test]
 fn modules_lists_the_catalogue() {
     let output = signal(&["modules", "--json"]);
@@ -283,7 +301,10 @@ fn modules_lists_the_catalogue() {
         "std.onepole",
         "std.adsr",
         "std.lag",
-    ] {
+    ]
+    .into_iter()
+    .chain(M2_7_TYPES)
+    {
         assert!(names.contains(&name), "{name}");
     }
 
@@ -300,6 +321,10 @@ fn modules_lists_the_catalogue() {
     ] {
         assert!(text.contains(&format!("{name} (direct)")), "{name}");
     }
+    for name in M2_7_TYPES {
+        assert!(text.contains(name), "{name}");
+    }
+    assert!(text.contains("std.delay (state-output)"));
 }
 
 #[test]
@@ -312,8 +337,11 @@ fn schema_output() {
     let output = signal(&["schema", "--json"]);
     assert_eq!(output.status.code(), Some(0));
     let schema = stdout_json(&output);
-    assert_eq!(
-        schema["$defs"]["ModuleRef"]["anyOf"][0]["enum"][0],
-        "std.add"
-    );
+    let types = schema["$defs"]["ModuleRef"]["anyOf"][0]["enum"]
+        .as_array()
+        .unwrap();
+    assert_eq!(types[0], "std.abs");
+    for name in M2_7_TYPES {
+        assert!(types.iter().any(|t| t == name), "{name}");
+    }
 }

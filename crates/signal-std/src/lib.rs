@@ -1,6 +1,7 @@
 //! Signal standard library: the M1 primitives (oscillators, envelope, math,
 //! shaper, filter, delay, LFO, noise, transport, audio out) and the M2 core
-//! primitives (band-limited oscillator, TPT filters, ADSR, lag). Every primitive
+//! primitives (band-limited oscillator, TPT filters, ADSR, lag, fractional
+//! delay, mixing, math and event utilities). Every primitive
 //! passes the contract suite (`docs/module-contract.md`, `docs/realtime-rules.md`,
 //! ADR 0002, 0016) and follows `docs/dsp-conventions.md`: f64 throughout, `libm`
 //! for every transcendental function (ADR 0007), everything rate-dependent
@@ -26,6 +27,20 @@
 //! | `std.onepole` | [`OnePole`] | direct |
 //! | `std.adsr` | [`Adsr`] | direct |
 //! | `std.lag` | [`Lag`] | direct |
+//! | `std.delay` | [`Delay`] | state-output |
+//! | `std.mix` | [`Mix`] | direct |
+//! | `std.pan` | [`Pan`] | direct |
+//! | `std.gain` | [`Gain`] | direct |
+//! | `std.sub` | [`Sub`] | direct |
+//! | `std.min` | [`Min`] | direct |
+//! | `std.max` | [`Max`] | direct |
+//! | `std.abs` | [`Abs`] | direct |
+//! | `std.scale` | [`Scale`] | direct |
+//! | `std.clamp` | [`Clamp`] | direct |
+//! | `std.sample_hold` | [`SampleHold`] | direct |
+//! | `std.edge` | [`Edge`] | direct |
+//! | `std.clock_div` | [`ClockDiv`] | direct |
+//! | `std.step_seq` | [`StepSeq`] | direct |
 //!
 //! Musical time (tempo, beats) lives here, in [`Transport`], never in the core
 //! (ADR 0003).
@@ -43,15 +58,24 @@
 mod add;
 mod adsr;
 mod audio_out;
+mod clock_div;
 mod dc_block;
+mod delay;
+mod edge;
 mod exp_env;
+mod gain;
 mod lag;
 mod lfo;
+mod math;
+mod mix;
 mod mul;
 mod noise;
 mod onepole;
 mod osc;
+mod pan;
+mod sample_hold;
 mod sine_osc;
+mod step_seq;
 mod svf;
 mod tanh_shaper;
 mod transport;
@@ -63,23 +87,33 @@ mod testing;
 pub use add::Add;
 pub use adsr::Adsr;
 pub use audio_out::AudioOut;
+pub use clock_div::ClockDiv;
 pub use dc_block::DcBlock;
+pub use delay::Delay;
+pub use edge::Edge;
 pub use exp_env::ExpEnv;
+pub use gain::Gain;
 pub use lag::Lag;
 pub use lfo::Lfo;
+pub use math::{Abs, Clamp, Max, Min, Scale, Sub};
+pub use mix::Mix;
 pub use mul::Mul;
 pub use noise::Noise;
 pub use onepole::OnePole;
 pub use osc::Osc;
+pub use pan::Pan;
+pub use sample_hold::SampleHold;
 pub use sine_osc::SineOsc;
+pub use step_seq::StepSeq;
 pub use svf::Svf;
 pub use tanh_shaper::TanhShaper;
 pub use transport::Transport;
 pub use unit_delay::UnitDelay;
 
 use signal_core::{
-    Combine, DirectPrimitive, Direction, ModuleType, ParameterDescriptor, PortDescriptor, PortKind,
-    PortShape, Primitive, Range, RateDivisor, Registry, RegistryError, StateOutputPrimitive,
+    Combine, DirectPrimitive, Direction, Event, EventPayload, ModuleType, Outputs,
+    ParameterDescriptor, PortDescriptor, PortKind, PortShape, Primitive, Range, RateDivisor,
+    Registry, RegistryError, StateOutputPrimitive,
 };
 
 /// Registers every `std.*` primitive type in `registry`.
@@ -105,6 +139,20 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<OnePole>(),
         direct::<Adsr>(),
         direct::<Lag>(),
+        state_output::<Delay>(),
+        direct::<Mix>(),
+        direct::<Pan>(),
+        direct::<Gain>(),
+        direct::<Sub>(),
+        direct::<Min>(),
+        direct::<Max>(),
+        direct::<Abs>(),
+        direct::<Scale>(),
+        direct::<Clamp>(),
+        direct::<SampleHold>(),
+        direct::<Edge>(),
+        direct::<ClockDiv>(),
+        direct::<StepSeq>(),
     ] {
         registry.register(module_type)?;
     }
@@ -148,6 +196,32 @@ pub(crate) fn sine_of_cycles(cycles: f64) -> f64 {
 /// The value of `values` at `index`, or `fallback` if there is none.
 pub(crate) fn at(values: &[f64], index: usize, fallback: f64) -> f64 {
     values.get(index).copied().unwrap_or(fallback)
+}
+
+/// Whether `events` (sorted by offset) hold a `Trigger` on frame `n`. `next`
+/// is the index of the first event not yet consumed; call this for
+/// increasing `n`, starting with `next = 0`. `Set` and `Ramp` events are
+/// skipped, and several triggers on one frame count once.
+pub(crate) fn triggered(events: &[Event], next: &mut usize, n: usize) -> bool {
+    let mut triggered = false;
+    while let Some(event) = events.get(*next) {
+        if event.offset as usize > n {
+            break;
+        }
+        triggered |= event.offset as usize == n && event.payload == EventPayload::Trigger;
+        *next += 1;
+    }
+    triggered
+}
+
+/// Pushes one `Trigger` on frame `n` of event output `port`.
+pub(crate) fn push_trigger(outputs: &mut Outputs<'_>, port: usize, n: usize) {
+    if let Some(sink) = outputs.events(port) {
+        sink.push(Event {
+            offset: u32::try_from(n).unwrap_or(u32::MAX),
+            payload: EventPayload::Trigger,
+        });
+    }
 }
 
 /// A master-rate signal port.
@@ -213,7 +287,7 @@ pub(crate) const BIPOLAR: Option<Range> = Some(Range {
 mod tests {
     use super::*;
 
-    const NAMES: [&str; 16] = [
+    const NAMES: [&str; 30] = [
         "std.sine_osc",
         "std.exp_env",
         "std.mul",
@@ -230,10 +304,24 @@ mod tests {
         "std.onepole",
         "std.adsr",
         "std.lag",
+        "std.delay",
+        "std.mix",
+        "std.pan",
+        "std.gain",
+        "std.sub",
+        "std.min",
+        "std.max",
+        "std.abs",
+        "std.scale",
+        "std.clamp",
+        "std.sample_hold",
+        "std.edge",
+        "std.clock_div",
+        "std.step_seq",
     ];
 
     #[test]
-    fn register_adds_all_sixteen_types_under_their_names() {
+    fn register_adds_every_type_under_its_name() {
         let mut registry = Registry::new();
         register(&mut registry).unwrap();
         assert_eq!(registry.len(), NAMES.len());

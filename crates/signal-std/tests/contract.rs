@@ -79,3 +79,59 @@ mod adsr {
 mod lag {
     signal_contract::contract_tests!(super::std_type("std.lag"));
 }
+
+mod delay {
+    signal_contract::contract_tests!(super::std_type("std.delay"));
+}
+
+mod mix {
+    signal_contract::contract_tests!(super::std_type("std.mix"));
+}
+
+mod pan {
+    signal_contract::contract_tests!(super::std_type("std.pan"));
+}
+
+mod gain {
+    signal_contract::contract_tests!(super::std_type("std.gain"));
+}
+
+mod sub {
+    signal_contract::contract_tests!(super::std_type("std.sub"));
+}
+
+mod min {
+    signal_contract::contract_tests!(super::std_type("std.min"));
+}
+
+mod max {
+    signal_contract::contract_tests!(super::std_type("std.max"));
+}
+
+mod abs {
+    signal_contract::contract_tests!(super::std_type("std.abs"));
+}
+
+mod scale {
+    signal_contract::contract_tests!(super::std_type("std.scale"));
+}
+
+mod clamp {
+    signal_contract::contract_tests!(super::std_type("std.clamp"));
+}
+
+mod sample_hold {
+    signal_contract::contract_tests!(super::std_type("std.sample_hold"));
+}
+
+mod edge {
+    signal_contract::contract_tests!(super::std_type("std.edge"));
+}
+
+mod clock_div {
+    signal_contract::contract_tests!(super::std_type("std.clock_div"));
+}
+
+mod step_seq {
+    signal_contract::contract_tests!(super::std_type("std.step_seq"));
+}

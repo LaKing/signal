@@ -1,0 +1,94 @@
+# The M2 test project: a gliding saw sequence through an enveloped low-pass
+# filter, a dotted-eighth feedback delay and a slowly moving pan, at 120 bpm.
+# A fixture for listening and live editing, not a product.
+#
+# Signal flow:
+#
+#   transport.beat ─► seq (8 pitches, Hz) ─► glide ─► osc (saw) ─► filter.in
+#   transport.beat ─► pulse (short decay) ─► gate (Schmitt) ─► env.gate
+#   env ×2400 Hz + sweep ×200 Hz + 500 Hz ─► filter.cutoff_hz
+#   filter.lp ─► mix.a                                   (dry)
+#   filter.lp ─► delay ─► mix.b                          (wet)
+#                delay ─► feedback (−6 dB) ─► damping ─► delay.in
+#   mix ─► dc (DC blocker) ─► pan (moved by drift) ─► out.l, out.r
+#
+# The delay closes its feedback loop without a std.unit_delay: std.delay is
+# state-output with a delay of at least one frame (ADR 0016 §2).
+schema_version = 1
+
+[project]
+name = "pulse"
+sample_rate = 96000
+seed = 7
+
+[instances]
+# 120 bpm: a beat every 500 ms. No ghost notes; the accents are not used.
+transport = { module = "std.transport", bpm = 120 }
+
+# The pitch sequence, one step per beat (4 s per loop), in Hz: A2 C3 E3 G3
+# D3 A2 A3 E3. The first beat (frame 0) moves it to step 2 at once.
+seq = { module = "std.step_seq", length = 8, s1 = 110, s2 = 130.8128, s3 = 164.8138, s4 = 195.9977, s5 = 146.8324, s6 = 110, s7 = 220, s8 = 164.8138 }
+# Glide between the pitches.
+glide = { module = "std.lag", rise_ms = 40, fall_ms = 40 }
+# Saw (shape 1); its frequency is 0 Hz plus the glide.
+osc = { module = "std.osc", shape = 1, freq = 0 }
+
+# A pulse derived from the beat: an exponential envelope retriggered on each
+# beat, turned into a gate by a Schmitt trigger. The gate is on while the pulse
+# is above 0.5, about decay·ln 2 ≈ 83 ms of every beat.
+pulse = { module = "std.exp_env", attack_ms = 0, decay_ms = 120 }
+gate = { module = "std.edge", threshold = 0.5, hysteresis = 0.01 }
+# The filter envelope, gated by the pulse.
+env = { module = "std.adsr", attack_ms = 4, decay_ms = 160, sustain = 0.25, release_ms = 220 }
+# A slow sweep of the cutoff: one cycle every 20 s.
+sweep = { module = "std.lfo", freq_hz = 0.05 }
+# Low-pass; cutoff 500 Hz + 2400 Hz·env + 200 Hz·sweep.
+filter = { module = "std.svf", cutoff_hz = 500, q = 1.5 }
+
+# Dotted eighth at 120 bpm: 3/4 of a 500 ms beat = 375 ms.
+delay = { module = "std.delay", time_ms = 375 }
+# Feedback at −6 dB through a one-pole low-pass that darkens each repeat.
+feedback = { module = "std.gain", db = -6 }
+damping = { module = "std.onepole", cutoff_hz = 2500 }
+# Dry on a, the delay on b.
+mix = { module = "std.mix", gain_a = 1, gain_b = 0.6 }
+
+# Removes the small DC of the sampled saw, which the feedback would double.
+dc = { module = "std.dc_block" }
+
+# The pan drifts ±0.6 around the centre, one cycle every 12.5 s.
+drift = { module = "std.lfo", freq_hz = 0.08 }
+pan = { module = "std.pan", pan = 0 }
+# Gain chosen so the 4× oversampled peak stays ≤ −0.3 dBFS at every rate.
+out = { module = "std.audio_out", gain = 0.33 }
+
+[wiring]
+connections = [
+  # Pitch: beat → sequence → glide → oscillator frequency.
+  { from = "transport.beat", to = "seq.step" },
+  { from = "seq.out", to = "glide.in" },
+  { from = "glide.out", to = "osc.freq" },
+  # Filter envelope: beat → pulse → Schmitt gate → ADSR.
+  { from = "transport.beat", to = "pulse.trigger" },
+  { from = "pulse.out", to = "gate.in" },
+  { from = "gate.gate", to = "env.gate" },
+  # Cutoff: envelope and sweep add to the 500 Hz base.
+  { from = "env.out", to = "filter.cutoff_hz", scale = 2400 },
+  { from = "sweep.out", to = "filter.cutoff_hz", scale = 200 },
+  { from = "osc.out", to = "filter.in" },
+  # Dry signal, and into the delay.
+  { from = "filter.lp", to = "mix.a" },
+  { from = "filter.lp", to = "delay.in" },
+  # Feedback loop: delay → −6 dB → damping → back into the delay.
+  { from = "delay.out", to = "feedback.in" },
+  { from = "feedback.out", to = "damping.in" },
+  { from = "damping.lp", to = "delay.in" },
+  # Wet signal.
+  { from = "delay.out", to = "mix.b" },
+  # Stereo: the mix, without DC, panned by the drift.
+  { from = "mix.out", to = "dc.in" },
+  { from = "dc.out", to = "pan.in" },
+  { from = "drift.out", to = "pan.pan", scale = 0.6 },
+  { from = "pan.l", to = "out.l" },
+  { from = "pan.r", to = "out.r" },
+]

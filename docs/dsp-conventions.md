@@ -36,6 +36,7 @@
 - Time is frames (ADR 0003). A duration in milliseconds becomes `ms·sr/1000` frames.
 - When a duration must be a whole number of frames, use the one rounding rule: `round_half_up(x) = ⌊x + ½⌋`, with ties going toward +∞. For example, `std.exp_env`'s attack takes `round_half_up(attack_ms·sr/1000)` frames.
 - A continuous time constant may stay fractional, such as a decay's τ in frames.
+- A fractional delay is read with 4-point, 3rd-order Hermite interpolation (`std.delay`). A state-output delay of `d` frames cannot read the current input, so exact Hermite holds from `d ≥ 2`; for `1 < d < 2` the unknown newest point is replaced by the previous sample, which is exact at `d = 1` and continuous at `d = 1` and `d = 2` (operator decision, M2-7).
 - **Positions on a grid** (beats, 16ths) are computed from their index in exact integer arithmetic (`u128`), as `round_half_up(p/q) = ⌊(2p + q)/2q⌋`. They are never accumulated in floating point, so long polymeters do not drift (ADR 0003).
 
 ## Denormals

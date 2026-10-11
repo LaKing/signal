@@ -13,7 +13,7 @@ How Signal is tested, what the acceptance IDs (V1…) map to, and how golden ren
 | 3. Graph | Flattening, addresses, validation, cycles, schedule | `crates/signal-graph/tests/` |
 | 4. Engine | Frame phases, events, parameters, suspension, faults, no allocation (`semantics.md`) | `crates/signal-engine/tests/` |
 | 5. Project and CLI | Loading, diagnostics, schema, `signal render` artifacts and exit codes | `crates/signal-project/tests/`, `crates/signal-cli/tests/cli.rs` |
-| 6. Acceptance | V1–V8 on the test project `projects/kick` | `crates/signal-cli/tests/kick_acceptance.rs` |
+| 6. Acceptance | V1–V8 on the test project `projects/kick`; the M2 test project `projects/pulse` (M2-7) | `crates/signal-cli/tests/kick_acceptance.rs`, `crates/signal-cli/tests/pulse.rs` |
 | 7. Golden renders | A fixed render's manifest, audio and log hashes | `tests/golden/<project>/`, checked by the acceptance suite |
 | 8. Metrics and analysis | Peak, RMS, mean, non-finite and subnormal counts (`metrics.json`); 4× peak, aliasing ratio, zero-crossing pitch | `crates/signal-eval` |
 
@@ -81,6 +81,10 @@ A milestone's listening verdict (V14 for M1) is a file `experiments/<id>/verdict
 |---|---|
 | M1, V14 | `experiments/m1-kick-v14/verdict.md` |
 
+## The M2 test project: `projects/pulse`
+
+`crates/signal-cli/tests/pulse.rs` checks `projects/pulse` (M2-7): the project is at 96 kHz with seed 7 and uses the documented patch, every primitive in it has the contract suite; 16 bars render at 44.1, 48, 96 and 192 kHz with every sample finite (`is_finite()` per sample, since a peak taken with `f64::max` ignores NaN), a 4× oversampled peak ≤ −0.3 dBFS and |mean| < 1e-4 per channel; and `golden_pulse_16_bars` matches `tests/golden/pulse/manifest.json`. The same file checks that a `std.delay` closes a feedback loop without a `std.unit_delay` (accepted, finite, bounded), and that the same loop through a direct primitive is rejected. Printed values: `cargo test -p signal-cli --test pulse -- --nocapture`. The 60 s seed-7 render for the owner's listening verdict is `signal render projects/pulse --seconds 60 --out renders/pulse-seed7/`.
+
 ## Golden renders
 
 `tests/golden/kick/manifest.json` is the `manifest.json` (`semantics.md` §9) of `signal render projects/kick --frames 2792727` (16 bars at 132 bpm and 96 kHz, seed 42), with the fields that depend on the build rather than the sound removed:
@@ -95,12 +99,14 @@ A milestone's listening verdict (V14 for M1) is a file `experiments/<id>/verdict
 
 What remains is `seed`, `sample_rate`, `frames`, `provenance.project_file_hashes`, `log_fnv1a64` and `audio_fnv1a64`. Any change to the sound changes the audio hash; any change to an event changes the log hash; any edit of a project file changes its hash. The test also asserts that exactly these fields remain, so a field added to the manifest later must be added to the golden or listed above.
 
+`tests/golden/pulse/manifest.json` is made the same way from `signal render projects/pulse --frames 3072000` (16 bars at 120 bpm and 96 kHz, seed 7), and is updated by the same rules.
+
 ### Updating a golden
 
 A golden changes only for an **intentional** change of sound or of the project files:
 
 1. Write a note saying what changed and why the sound is meant to change, and get it reviewed with the change.
 2. Get a listening verdict on the new render from the PO, recorded in the repository like the milestone verdicts (V14).
-3. Replace the golden with the fresh manifest that `golden_kick_16_bars` prints when it fails.
+3. Replace the golden with the fresh manifest that `golden_kick_16_bars` (or `golden_pulse_16_bars`) prints when it fails.
 
 A golden that changes without both the note and the verdict is a regression, whatever the metrics say.
