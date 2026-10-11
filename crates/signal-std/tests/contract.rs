@@ -59,3 +59,23 @@ mod transport {
 mod audio_out {
     signal_contract::contract_tests!(super::std_type("std.audio_out"));
 }
+
+mod osc {
+    signal_contract::contract_tests!(super::std_type("std.osc"));
+}
+
+mod svf {
+    signal_contract::contract_tests!(super::std_type("std.svf"));
+}
+
+mod onepole {
+    signal_contract::contract_tests!(super::std_type("std.onepole"));
+}
+
+mod adsr {
+    signal_contract::contract_tests!(super::std_type("std.adsr"));
+}
+
+mod lag {
+    signal_contract::contract_tests!(super::std_type("std.lag"));
+}

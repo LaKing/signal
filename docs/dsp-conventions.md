@@ -18,6 +18,7 @@
 - A descriptor is static, so a range cannot depend on the sample rate. A rate-dependent limit, such as `sr/2` for an oscillator frequency, is declared as the widest static bound and applied in `process`. The rustdoc states both.
 - Declare the range of an output when it is known (`[−1, 1]` for a sine). Declare no range for a signal input that accepts any value.
 - A choice with one value in M1 (such as `std.lfo`'s `shape`) is a parameter with a one-point range, so that later values do not change the port layout.
+- A choice with *N* values is an integer-valued parameter with the static range `[0, N−1]`. `process` rounds it with `round_half_up` on every frame, and the rustdoc lists what each integer selects. Example: `std.osc`'s `shape` (0 sine, 1 saw, 2 square, 3 triangle).
 
 ## Numbers: f64
 
@@ -43,6 +44,9 @@
 - **Threshold: 1e-9.** A decaying value is set to exactly 0 when its magnitude falls below 1e-9. This applies to envelopes and to the state of a recursive filter's feedback path. 1e-9 is −180 dBFS, about 40 dB below the smallest step of 24-bit audio (2⁻²³ ≈ 1.2e-7), so the flush is inaudible.
   - `std.exp_env` flushes its output and goes idle.
   - `std.dc_block` flushes `y[n]`, which is its output and its feedback state.
+  - `std.svf` and `std.onepole` flush each integrator state (`s₁`, `s₂`; `s`).
+  - `std.adsr` flushes its release to exactly 0 and goes idle. Its decay ends at exactly the sustain level when the distance to it falls below 1e-9.
+  - `std.lag` flushes the difference `x[n] − y[n]`: below 1e-9 the output is exactly the input.
 - A primitive whose output can only be subnormal when its input is subnormal (a gain, a delay) need not flush.
 - The contract check `no_subnormals` drives every primitive with an impulse and 65 536 frames of silence. It fails on any subnormal output.
 
@@ -58,7 +62,35 @@
   - Sum the difference `F(u[n]) − F(u[n−1])` in a form with as little cancellation as possible.
   - ADAA delays the signal by half a frame. Every ADAA primitive documents that delay.
 - **Oversampling is not used in M1.** The M3 lab experiment compares it with ADAA (ADR 0015 governs promotion).
-- Oscillators produce only band-limited waveforms. M1 has only the sine. Other waveforms need their own antialiasing and are out of scope in M1.
+- Oscillators produce only band-limited waveforms. A waveform with discontinuities needs its own antialiasing: see the next section.
+
+## Band-limited oscillators: polyBLEP and polyBLAMP
+
+A naive saw, square or triangle computed from the phase has infinitely many harmonics, and every one above `sr/2` aliases. `std.osc` corrects the naive waveform near each discontinuity with a short polynomial residual, the difference between a band-limited and an ideal discontinuity. The residual covers the frame before and the frame after the discontinuity (2 points).
+
+- **polyBLEP** (band-limited step) corrects a jump in the value: the saw's wrap and the square's two edges. With the phase step `Δ = f/sr` and `t` the phase since the jump, the residual of an upward jump of 2 is
+
+  ```text
+  blep(t) = 2x − x² − 1,  x = t/Δ          if t < Δ        (the frame after)
+          = x² + 2x + 1,  x = (t − 1)/Δ    if t > 1 − Δ    (the frame before)
+          = 0                              otherwise
+  ```
+
+  It is added for an upward jump and subtracted for a downward one: `saw = 2p − 1 − blep(p)`.
+- **polyBLAMP** (band-limited ramp) corrects a jump in the slope: the triangle's corners. It is the integral of the polyBLEP residual. For a slope change of 1 per frame it is `(1 − t/Δ)³/6` after the corner and `((t − 1)/Δ + 1)³/6` before it. A slope change of *c* per cycle is *c*·Δ per frame, so the residual is scaled by *c*·Δ.
+- The polynomials assume `Δ ≤ ½`, which the clamp of the frequency to `sr/2` guarantees. With `Δ = 0` there is nothing to correct.
+- A 2-point residual is an approximation. It lowers aliasing but does not remove it, and less is removed as the fundamental rises. Each oscillator documents its measured residual aliasing: `signal_eval::aliasing` on an off-divisor tone, as in `testing-and-evaluation.md`, "The V6 measurement". Wavetables, hard sync and oversampling are out of scope.
+
+## TPT filters
+
+Filters are written in the topology-preserving transform (TPT, Zavalishin) form: the analog structure is kept, and each integrator is discretised with the trapezoidal rule. The result is the bilinear transform of the analog prototype, prewarped so the cutoff is exact. Unlike a direct-form biquad, the state stays meaningful when the coefficients change, so the filter is stable under audio-rate modulation of its cutoff.
+
+- The integrator gain is `g = tan(π·fc/sr)` (`libm::tan`). The cutoff is clamped in `process` to `[1, 0.49·sr]`, which keeps `g` finite. The declared range is the static bound `[1, 0.49·(2³² − 1)]`.
+- A trapezoidal integrator keeps one state `s`. Each frame computes `v = g·u`, outputs `y = v + s`, and stores `s ← y + v`.
+- **One-pole** (`std.onepole`): `G = g/(1 + g)`, `v = (x − s)·G`, `lp = v + s`, `s ← lp + v`, `hp = x − lp`.
+- **State-variable** (`std.svf`): `k = 1/q`, then `hp = (x − (k + g)·s₁ − s₂)/(1 + k·g + g²)`, `bp` and `lp` from two integrators in series. `lp + k·bp + hp = x`, and `bp` has gain `q` at the cutoff.
+- Coefficients that need a transcendental function are recomputed only when their inputs change, which is never more than once per frame. The result does not depend on how the frames are split into calls.
+- The integrator states are flushed below 1e-9 (see "Denormals").
 
 ## The rate-agnostic rule
 
@@ -71,6 +103,7 @@
 - Normally a primitive reads every parameter's effective value on every frame.
 - When a primitive reads a parameter only at certain frames, the rustdoc says when. Examples:
   - `std.exp_env` reads `attack_ms` on the trigger frame.
+  - `std.adsr` reads `attack_ms` on the frame its attack starts.
   - `std.transport` reads `bpm` and `ghost_offset_ms` once, on the first frame.
 
 ## Randomness

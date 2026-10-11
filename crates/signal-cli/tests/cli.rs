@@ -275,15 +275,31 @@ fn modules_lists_the_catalogue() {
         .iter()
         .map(|m| m["type_name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"std.sine_osc") && names.contains(&"std.audio_out"));
+    for name in [
+        "std.sine_osc",
+        "std.audio_out",
+        "std.osc",
+        "std.svf",
+        "std.onepole",
+        "std.adsr",
+        "std.lag",
+    ] {
+        assert!(names.contains(&name), "{name}");
+    }
 
     let output = signal(&["modules"]);
     assert_eq!(output.status.code(), Some(0));
-    assert!(
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .contains("std.sine_osc (direct)")
-    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    for name in [
+        "std.sine_osc",
+        "std.osc",
+        "std.svf",
+        "std.onepole",
+        "std.adsr",
+        "std.lag",
+    ] {
+        assert!(text.contains(&format!("{name} (direct)")), "{name}");
+    }
 }
 
 #[test]

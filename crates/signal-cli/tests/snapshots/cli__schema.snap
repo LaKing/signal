@@ -126,13 +126,18 @@ expression: text
         {
           "enum": [
             "std.add",
+            "std.adsr",
             "std.audio_out",
             "std.dc_block",
             "std.exp_env",
+            "std.lag",
             "std.lfo",
             "std.mul",
             "std.noise",
+            "std.onepole",
+            "std.osc",
             "std.sine_osc",
+            "std.svf",
             "std.tanh_shaper",
             "std.transport",
             "std.unit_delay"

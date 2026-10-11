@@ -1,5 +1,6 @@
 //! Signal standard library: the M1 primitives (oscillators, envelope, math,
-//! shaper, filter, delay, LFO, noise, transport, audio out). Every primitive
+//! shaper, filter, delay, LFO, noise, transport, audio out) and the M2 core
+//! primitives (band-limited oscillator, TPT filters, ADSR, lag). Every primitive
 //! passes the contract suite (`docs/module-contract.md`, `docs/realtime-rules.md`,
 //! ADR 0002, 0016) and follows `docs/dsp-conventions.md`: f64 throughout, `libm`
 //! for every transcendental function (ADR 0007), everything rate-dependent
@@ -20,6 +21,11 @@
 //! | `std.noise` | [`Noise`] | direct |
 //! | `std.transport` | [`Transport`] | direct |
 //! | `std.audio_out` | [`AudioOut`] | direct, audio sink |
+//! | `std.osc` | [`Osc`] | direct |
+//! | `std.svf` | [`Svf`] | direct |
+//! | `std.onepole` | [`OnePole`] | direct |
+//! | `std.adsr` | [`Adsr`] | direct |
+//! | `std.lag` | [`Lag`] | direct |
 //!
 //! Musical time (tempo, beats) lives here, in [`Transport`], never in the core
 //! (ADR 0003).
@@ -35,13 +41,18 @@
 )]
 
 mod add;
+mod adsr;
 mod audio_out;
 mod dc_block;
 mod exp_env;
+mod lag;
 mod lfo;
 mod mul;
 mod noise;
+mod onepole;
+mod osc;
 mod sine_osc;
+mod svf;
 mod tanh_shaper;
 mod transport;
 mod unit_delay;
@@ -50,13 +61,18 @@ mod unit_delay;
 mod testing;
 
 pub use add::Add;
+pub use adsr::Adsr;
 pub use audio_out::AudioOut;
 pub use dc_block::DcBlock;
 pub use exp_env::ExpEnv;
+pub use lag::Lag;
 pub use lfo::Lfo;
 pub use mul::Mul;
 pub use noise::Noise;
+pub use onepole::OnePole;
+pub use osc::Osc;
 pub use sine_osc::SineOsc;
+pub use svf::Svf;
 pub use tanh_shaper::TanhShaper;
 pub use transport::Transport;
 pub use unit_delay::UnitDelay;
@@ -84,6 +100,11 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<Noise>(),
         direct::<Transport>(),
         direct::<AudioOut>(),
+        direct::<Osc>(),
+        direct::<Svf>(),
+        direct::<OnePole>(),
+        direct::<Adsr>(),
+        direct::<Lag>(),
     ] {
         registry.register(module_type)?;
     }
@@ -192,7 +213,7 @@ pub(crate) const BIPOLAR: Option<Range> = Some(Range {
 mod tests {
     use super::*;
 
-    const NAMES: [&str; 11] = [
+    const NAMES: [&str; 16] = [
         "std.sine_osc",
         "std.exp_env",
         "std.mul",
@@ -204,10 +225,15 @@ mod tests {
         "std.noise",
         "std.transport",
         "std.audio_out",
+        "std.osc",
+        "std.svf",
+        "std.onepole",
+        "std.adsr",
+        "std.lag",
     ];
 
     #[test]
-    fn register_adds_all_eleven_types_under_their_names() {
+    fn register_adds_all_sixteen_types_under_their_names() {
         let mut registry = Registry::new();
         register(&mut registry).unwrap();
         assert_eq!(registry.len(), NAMES.len());

@@ -10,8 +10,8 @@ use crate::{BIPOLAR, at, fract, parameter, signal_port, sine_of_cycles};
 /// The upper end of `freq`'s declared range: half the highest sample rate the
 /// engine accepts (any non-zero `u32`), so the executor's clamp to the range
 /// never cuts a frequency below `sr/2`. A descriptor's range is static; the
-/// effective limit `sr/2` is applied in `process`.
-const FREQ_MAX: f64 = u32::MAX as f64 / 2.0;
+/// effective limit `sr/2` is applied in `process`. `std.osc` uses it too.
+pub(crate) const FREQ_MAX: f64 = u32::MAX as f64 / 2.0;
 
 const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     type_name: "std.sine_osc",

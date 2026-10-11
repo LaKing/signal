@@ -13,6 +13,8 @@ libm = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 approx = { workspace = true }
+# signal_eval::aliasing and zero_crossing_frequency, for std.osc's analytic tests.
+signal-eval = { workspace = true }
 # The contract suite and its counting allocator (ADR 0017), for tests/contract.rs.
 signal-contract = { workspace = true }
 
