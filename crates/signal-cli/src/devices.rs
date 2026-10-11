@@ -59,6 +59,7 @@ mod tests {
         let list = [
             DeviceInfo {
                 name: "Speakers".to_owned(),
+                id: Some("coreaudio:speakers".to_owned()),
                 direction: Direction::Output,
                 default: true,
                 configs: vec![ConfigRange {
@@ -71,6 +72,7 @@ mod tests {
             },
             DeviceInfo {
                 name: "Mic".to_owned(),
+                id: None,
                 direction: Direction::Input,
                 default: false,
                 configs: vec![ConfigRange {

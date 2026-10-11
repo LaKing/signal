@@ -11,9 +11,20 @@ name = "signal-app"
 path = "src/main.rs"
 
 [dependencies]
+signal-core = { workspace = true }
+signal-graph = { workspace = true }
+signal-project = { workspace = true }
+signal-std = { workspace = true }
 signal-audio = { workspace = true }
 signal-engine = { workspace = true }
 eframe = { workspace = true }
+# The Setup file.
+serde = { workspace = true }
+toml = { workspace = true }
+# `--setup` and `--project`.
+clap = { workspace = true }
+# Commands and view snapshots between the window and the control thread.
+rtrb = { workspace = true }
 
 [lints]
 workspace = true

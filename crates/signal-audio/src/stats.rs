@@ -1,5 +1,5 @@
 //! Callback statistics (statistics only, never semantics): how long each
-//! callback took against its period, and the xruns.
+//! callback took against its period, on average and at worst, and the xruns.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -15,6 +15,10 @@ pub struct CallbackStats {
     frames: AtomicU64,
     overruns: AtomicU64,
     stream_errors: AtomicU64,
+    /// The time spent in callbacks with a period, in nanoseconds.
+    busy_nanos: AtomicU64,
+    /// Their periods, in nanoseconds.
+    period_nanos: AtomicU64,
     /// The worst duration / period, as f64 bits (finite and ≥ 0, so the bits
     /// order like the values).
     worst: AtomicU64,
@@ -35,6 +39,9 @@ pub struct StatsSnapshot {
     pub overruns: u64,
     /// The worst callback duration as a fraction of its period.
     pub worst_callback_ratio: f64,
+    /// The time spent in callbacks as a fraction of their periods, over all
+    /// callbacks with a period (0 before any).
+    pub average_callback_ratio: f64,
 }
 
 impl CallbackStats {
@@ -48,6 +55,10 @@ impl CallbackStats {
         let ratio = elapsed.as_secs_f64() / period;
         if period > 0.0 && ratio.is_finite() {
             self.worst.fetch_max(ratio.to_bits(), Ordering::Relaxed);
+            let busy = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+            self.busy_nanos.fetch_add(busy, Ordering::Relaxed);
+            self.period_nanos
+                .fetch_add((period * 1e9).round() as u64, Ordering::Relaxed);
             if ratio > 1.0 {
                 self.overruns.fetch_add(1, Ordering::Relaxed);
             }
@@ -63,6 +74,8 @@ impl CallbackStats {
     pub fn snapshot(&self) -> StatsSnapshot {
         let stream_errors = self.stream_errors.load(Ordering::Relaxed);
         let overruns = self.overruns.load(Ordering::Relaxed);
+        let busy = self.busy_nanos.load(Ordering::Relaxed);
+        let period = self.period_nanos.load(Ordering::Relaxed);
         StatsSnapshot {
             callbacks: self.callbacks.load(Ordering::Relaxed),
             frames: self.frames.load(Ordering::Relaxed),
@@ -70,6 +83,11 @@ impl CallbackStats {
             stream_errors,
             overruns,
             worst_callback_ratio: f64::from_bits(self.worst.load(Ordering::Relaxed)),
+            average_callback_ratio: if period > 0 {
+                busy as f64 / period as f64
+            } else {
+                0.0
+            },
         }
     }
 }
@@ -89,6 +107,8 @@ mod tests {
         let s = stats.snapshot();
         assert_eq!((s.callbacks, s.frames, s.overruns, s.xruns), (3, 300, 0, 0));
         assert_eq!(s.worst_callback_ratio, 0.5);
+        // 85 ms in 300 ms of periods.
+        assert!((s.average_callback_ratio - 85.0 / 300.0).abs() < 1e-12);
         stats.record(10, Duration::from_millis(20), 1_000);
         let s = stats.snapshot();
         assert_eq!((s.overruns, s.xruns), (1, 1));
@@ -111,5 +131,6 @@ mod tests {
         let s = stats.snapshot();
         assert_eq!((s.callbacks, s.overruns), (1, 0));
         assert_eq!(s.worst_callback_ratio, 0.0);
+        assert_eq!(s.average_callback_ratio, 0.0);
     }
 }

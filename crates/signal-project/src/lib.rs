@@ -41,7 +41,7 @@ use signal_graph::{
 };
 use toml::Spanned;
 
-pub use diagnostic::{Diagnostic, Severity};
+pub use diagnostic::{Diagnostic, Severity, located};
 pub use diff::{DiffOptions, ParameterChange, ProjectEdit, diff, diff_with};
 pub use schema::schema;
 

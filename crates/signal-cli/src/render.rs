@@ -8,8 +8,9 @@ use serde_json::json;
 use signal_core::{Registry, SinkKind};
 use signal_engine::{Engine, EngineConfig, Manifest, Provenance, Render, RenderError, render};
 use signal_eval::Metrics;
+pub(crate) use signal_project::located;
 use signal_project::provenance;
-use signal_project::{Diagnostic, LoadError, Project};
+use signal_project::{LoadError, Project};
 
 use crate::{Failure, print_stdout};
 
@@ -37,17 +38,6 @@ pub(crate) struct RenderArgs {
     /// The sample rate in Hz, instead of the project's.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     sample_rate: Option<u32>,
-}
-
-/// Diagnostics with their file paths joined to the project folder.
-pub(crate) fn located(dir: &Path, diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
-    diagnostics
-        .into_iter()
-        .map(|d| Diagnostic {
-            file: dir.join(&d.file).display().to_string(),
-            ..d
-        })
-        .collect()
 }
 
 pub(crate) fn run(args: &RenderArgs, registry: &Registry, json: bool) -> Result<(), Failure> {

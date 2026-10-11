@@ -19,9 +19,9 @@ use signal_core::Registry;
 use signal_engine::{
     Controller, Driver, NullDriver, RealtimeConfig, Runner, RunnerStatus, realtime,
 };
-use signal_project::live::{EditError, ProjectWatcher, WATCH_INTERVAL_MS, send_edit};
+use signal_project::live::{ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload};
 use signal_project::session::{LiveRecorder, SessionError, SessionRecorder, sink_of};
-use signal_project::{Diagnostic, LoadError, Project, provenance};
+use signal_project::{LoadError, Project, provenance};
 
 use crate::render::located;
 use crate::{Failure, print_stdout};
@@ -121,48 +121,28 @@ impl Control<'_> {
     /// Loads the changed project and sends the edit; on any error prints it
     /// and keeps the last good version playing.
     fn reload(&mut self) {
-        let failed = |edits: &mut Edits, diagnostics: Vec<Diagnostic>, dir: &Path| {
-            edits.errors += 1;
-            for diagnostic in located(dir, diagnostics) {
-                eprintln!("{diagnostic}");
-            }
-            eprintln!("signal: watch: keeping the last good version");
-        };
-        let new = match Project::load(self.dir) {
-            Ok(new) => new,
-            Err(LoadError::Invalid(diagnostics)) => {
-                return failed(&mut self.edits, diagnostics, self.dir);
-            }
-            Err(error) => {
-                self.edits.errors += 1;
-                eprintln!("signal: watch: {error}; keeping the last good version");
-                return;
-            }
-        };
-        match send_edit(
+        match reload(
             &mut self.controller,
             &mut self.live,
-            &self.current,
-            new,
+            &mut self.current,
+            self.dir,
             self.registry,
         ) {
-            Ok((project, applied)) => {
-                self.current = project;
+            Ok(applied) => {
                 self.edits.sets += applied.sets;
-                match applied.swap {
-                    Some(version) => {
-                        self.edits.swaps += 1;
-                        eprintln!(
-                            "signal: watch: applied a swap to version {version} ({} sets, {} removed)",
-                            applied.sets, applied.removed
-                        );
-                    }
-                    None if applied.sets == 0 => eprintln!("signal: watch: no change to apply"),
-                    None => eprintln!("signal: watch: applied {} sets", applied.sets),
+                if applied.swap.is_some() {
+                    self.edits.swaps += 1;
                 }
+                eprintln!("signal: watch: {applied}");
             }
-            Err(EditError::Invalid(diagnostics)) => failed(&mut self.edits, diagnostics, self.dir),
-            Err(EditError::Refused(message)) => {
+            Err(ReloadError::Invalid(diagnostics)) => {
+                self.edits.errors += 1;
+                for diagnostic in diagnostics {
+                    eprintln!("{diagnostic}");
+                }
+                eprintln!("signal: watch: keeping the last good version");
+            }
+            Err(ReloadError::Failed(message)) => {
                 self.edits.errors += 1;
                 eprintln!("signal: watch: {message}; keeping the last good version");
             }

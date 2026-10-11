@@ -81,6 +81,22 @@ pub struct Applied {
     pub removed: usize,
 }
 
+/// What `--watch` reports: `applied a swap to version 3 (1 sets, 0 removed)`,
+/// `applied 2 sets`, or `no change to apply`.
+impl fmt::Display for Applied {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.swap {
+            Some(version) => write!(
+                f,
+                "applied a swap to version {version} ({} sets, {} removed)",
+                self.sets, self.removed
+            ),
+            None if self.sets == 0 => f.write_str("no change to apply"),
+            None => write!(f, "applied {} sets", self.sets),
+        }
+    }
+}
+
 /// Why [`send_edit`] sent nothing (or not everything).
 #[derive(Debug)]
 pub enum EditError {
@@ -223,6 +239,46 @@ pub fn send_edit(
             let current = Project::from_sources(files).map_err(EditError::Invalid)?;
             Ok((current, applied))
         }
+    }
+}
+
+/// Why [`reload`] kept the running project.
+#[derive(Debug)]
+pub enum ReloadError {
+    /// The folder's project does not load, or cannot replace the running one;
+    /// the diagnostics' files are joined to the folder ([`located`](crate::located)).
+    Invalid(Vec<Diagnostic>),
+    /// The folder could not be read, or the Controller refused the edit.
+    Failed(String),
+}
+
+/// What `--watch` (and Signal.app) does when a project folder changed: loads
+/// `dir` and sends the edit from `current` to it ([`send_edit`]). On success
+/// `current` is the new project; on an error nothing changed and the last
+/// good version keeps playing.
+pub fn reload(
+    controller: &mut Controller,
+    live: &mut LiveRecorder,
+    current: &mut Project,
+    dir: &Path,
+    registry: &Registry,
+) -> Result<Applied, ReloadError> {
+    let new = match Project::load(dir) {
+        Ok(new) => new,
+        Err(crate::LoadError::Invalid(diagnostics)) => {
+            return Err(ReloadError::Invalid(crate::located(dir, diagnostics)));
+        }
+        Err(error) => return Err(ReloadError::Failed(error.to_string())),
+    };
+    match send_edit(controller, live, current, new, registry) {
+        Ok((project, applied)) => {
+            *current = project;
+            Ok(applied)
+        }
+        Err(EditError::Invalid(diagnostics)) => {
+            Err(ReloadError::Invalid(crate::located(dir, diagnostics)))
+        }
+        Err(EditError::Refused(message)) => Err(ReloadError::Failed(message)),
     }
 }
 

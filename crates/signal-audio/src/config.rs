@@ -36,6 +36,9 @@ pub struct ConfigRange {
 pub struct DeviceInfo {
     /// Its name.
     pub name: String,
+    /// The audio system's stable identifier (`coreaudio:<device UID>`),
+    /// if it reports one. Same-named devices differ here.
+    pub id: Option<String>,
     /// Output or input.
     pub direction: Direction,
     /// Whether it is the system's default device of its direction.
@@ -81,13 +84,17 @@ pub enum AudioError {
         /// The highest supported.
         max: u32,
     },
-    /// No output device of that name (or no default output device).
+    /// No device of that name or id (or no default device).
     NoDevice {
-        /// The name asked for, if any.
+        /// Output or input.
+        direction: Direction,
+        /// The name or id asked for, if any.
         name: Option<String>,
-        /// The output devices there are.
+        /// The devices of that direction there are.
         available: Vec<String>,
     },
+    /// A channel map that does not fit the sink or the device.
+    ChannelMap(String),
     /// The device offers no 32-bit float output.
     Format {
         /// The device.
@@ -130,17 +137,26 @@ impl fmt::Display for AudioError {
                 f,
                 "the device '{device}' cannot use a buffer of {requested} frames; it supports {min} to {max}"
             ),
-            AudioError::NoDevice { name, available } => {
+            AudioError::NoDevice {
+                direction,
+                name,
+                available,
+            } => {
+                let kind = match direction {
+                    Direction::Output => "output",
+                    Direction::Input => "input",
+                };
                 match name {
-                    Some(name) => write!(f, "no output device is named '{name}'")?,
-                    None => f.write_str("there is no default output device")?,
+                    Some(name) => write!(f, "no {kind} device is named '{name}'")?,
+                    None => write!(f, "there is no default {kind} device")?,
                 }
                 if available.is_empty() {
-                    f.write_str("; there are no output devices")
+                    write!(f, "; there are no {kind} devices")
                 } else {
-                    write!(f, "; output devices: {}", available.join(", "))
+                    write!(f, "; {kind} devices: {}", available.join(", "))
                 }
             }
+            AudioError::ChannelMap(message) => write!(f, "the channel map: {message}"),
             AudioError::Format { device } => {
                 write!(f, "the device '{device}' offers no 32-bit float output")
             }
@@ -221,6 +237,17 @@ pub fn choose_output(
     })
 }
 
+/// The input configuration of `device` at `sample_rate` with a buffer of
+/// `buffer` frames: an `f32` configuration at the rate exactly, with the most
+/// channels (input is metered, every channel of it).
+pub fn choose_input(
+    device: &DeviceInfo,
+    sample_rate: u32,
+    buffer: u32,
+) -> Result<Choice, AudioError> {
+    choose_output(device, sample_rate, buffer, usize::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +265,7 @@ mod tests {
     fn device(configs: Vec<ConfigRange>) -> DeviceInfo {
         DeviceInfo {
             name: "Speakers".to_owned(),
+            id: None,
             direction: Direction::Output,
             default: true,
             configs,

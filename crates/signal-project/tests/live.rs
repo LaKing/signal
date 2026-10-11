@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use signal_core::{ModuleType, PortDescriptor, Primitive, RateDivisor, Registry};
 use signal_engine::{Controller, Driver, NullDriver, RealtimeConfig, Runner, realtime};
-use signal_project::live::{Applied, EditError, send_edit};
+use signal_project::live::{Applied, EditError, ReloadError, reload, send_edit};
 use signal_project::session::{self, LiveRecorder, Session, SessionRecorder, replay};
 use signal_project::{Project, SourceFile, provenance};
 
@@ -371,4 +371,39 @@ fn a_slow_preparation_keeps_the_removal_fade_while_playing() {
     let samples: Vec<f32> = replayed.render.samples.iter().map(|&x| x as f32).collect();
     assert_eq!(samples.len(), played.len());
     assert_eq!(samples, played, "replay equals what was played");
+}
+
+/// `reload` (the `--watch` and Signal.app path): a folder that does not load
+/// keeps the running project, with diagnostics located in the folder; a
+/// parameter change is sent and becomes the running project.
+#[test]
+fn reload_keeps_the_last_good_version_and_applies_a_good_one() {
+    let registry = registry();
+    let dir = std::env::temp_dir().join(format!("signal-reload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let text = project(0, &[]).files[0].text.clone();
+    std::fs::write(dir.join("project.toml"), &text).unwrap();
+    let mut current = Project::load(&dir).unwrap();
+    let (mut driver, mut controller, mut live) = start(&current, &registry);
+    run(&mut driver, &mut controller, &mut live, 1_024);
+
+    std::fs::write(dir.join("project.toml"), "schema_version = [").unwrap();
+    let error = reload(&mut controller, &mut live, &mut current, &dir, &registry).unwrap_err();
+    let ReloadError::Invalid(diagnostics) = error else {
+        panic!("expected diagnostics, got {error:?}");
+    };
+    assert!(diagnostics[0].file.starts_with(dir.to_str().unwrap()));
+    assert!(current.files[0].text.contains("freq = 330"), "kept");
+
+    std::fs::write(
+        dir.join("project.toml"),
+        text.replace("freq = 330", "freq = 440"),
+    )
+    .unwrap();
+    let applied = reload(&mut controller, &mut live, &mut current, &dir, &registry).unwrap();
+    assert_eq!((applied.sets, applied.swap), (1, None));
+    assert_eq!(applied.to_string(), "applied 1 sets");
+    assert!(current.files[0].text.contains("freq = 440"), "replaced");
+    std::fs::remove_dir_all(&dir).unwrap();
 }

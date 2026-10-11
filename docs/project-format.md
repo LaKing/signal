@@ -149,3 +149,47 @@ Hashes are 16 lowercase hex digits. Provenance is read when the render runs, not
 ## 8. JSON Schema
 
 `signal schema` prints a JSON Schema (draft 2020-12) that accepts exactly one of the two file kinds. Module references are restricted to the registry's type names or a bare composite name. The schema is generated from the same model the loader uses. It cannot check what needs the registry's descriptors or other files: parameter names and ranges, ports, and whether a composite exists.
+
+## 9. Setup (machine settings)
+
+The **Setup** holds how this machine plays projects. It is never part of a project (ADR 0009). Signal.app (`signal-app`) reads and writes it at:
+
+1. `--setup <file>`, when given;
+2. else `$SIGNAL_SETUP` (used by tests);
+3. else `~/Library/Application Support/Signal/setup.toml`.
+
+```toml
+version = 1
+buffer = 128                      # frames requested from the device
+output_channels = [1, 2]          # device channel (from 1) of each sink channel
+last_project = "/Users/me/projects/kick"
+
+[output]                          # absent: the system's default output
+name = "SSL 2+ MKII"
+id = "coreaudio:AppleUSBAudioEngine:…"   # the device's stable id, when it has one
+signature = "4 ch, 44100-192000 Hz"      # channels and rates when it was chosen
+
+[input]                           # absent: no input; input is metered only
+name = "SSL 2+ MKII"
+id = "coreaudio:AppleUSBAudioEngine:…"
+signature = "2 ch, 44100-192000 Hz"
+
+[window]
+width = 900.0
+height = 640.0
+```
+
+| Key | Meaning | Default |
+|---|---|---|
+| `version` | the format version; another version makes the whole file default | `1` |
+| `buffer` | the buffer to request, in frames, at least 1 | `128` |
+| `output_channels` | sink channel *i* plays on device channel `output_channels[i]` (from 1). The device is opened in a configuration with at least as many channels as the highest of them. A map whose length is not the project's sink width, or that names a channel the device does not have or one channel twice, is reported and the identity map is used | the identity map |
+| `last_project` | the last project folder opened; opened at start when `--project` is not given | none |
+| `[output]`, `[input]` | the device: `name`, optional `id`, `signature` | the system default output; no input |
+| `[window]` | the window's size in points when last closed | the toolkit's default |
+
+**Finding a saved device.** Several devices can share a name (one display can list three audio endpoints of the same name), so the device picker shows such devices as `name (#k · signature)`. A saved device with an `id` is that device only. If no present device has that id, the Setup reports that the saved device is not present and asks for another to be chosen. It never takes another device of the same name for it, nor the default. Without an `id`, a unique name finds the device. If several devices share the name, only the one whose `signature` matches does. When none or more than one is left, that is reported and nothing is chosen. Playing is refused while the output cannot be found. Playing goes on without input meters while the input cannot be found. The interface dialog shows such a device as not found. Applying without choosing another keeps it saved as it is. Only an explicit choice replaces it, and that choice may be the system default. A device chosen in the dialog is kept by its identity, so refreshing the list (which may reorder it) never turns the choice into another device.
+
+**Reading and writing.** A file that is missing is the default Setup. Unknown keys and invalid values are reported with the reason and replaced by their defaults; the rest of the file is kept. A file that is not valid TOML is reported and replaced by the default Setup. Nothing in the file can stop the app from starting. The app writes the whole file again when the interface settings are applied, a project is opened, and at exit. It writes to `setup.toml.tmp` beside it, syncs that file, then renames it over `setup.toml`, so a reader sees either the old file or the new one.
+
+**Interface changes and meters.** Applying interface settings while playing stops the run and starts it again from frame 0. Device lists are refreshed only while stopped, because listing devices pauses the control thread. Meters show, per output and input channel, the peak in dBFS held for 1.5 s, the RMS over 300 ms, and a clip indicator that latches until clicked (a block peak of 1.0 or more: an output sample clamped to full scale reads exactly 1.0). While a live edit is planned and its swap prepared, the meter blocks of that time are not shown (the reload drains them into the session recorder). A peak or clip inside that gap can be missed by the meters and the clip indicator. The status line's clipped-sample count comes from the runner and counts every clamped sample.

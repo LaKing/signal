@@ -1,6 +1,7 @@
 //! Diagnostics: an error or warning at a file, line and column.
 
 use std::fmt;
+use std::path::Path;
 
 use serde::Serialize;
 
@@ -69,6 +70,17 @@ impl fmt::Display for Diagnostic {
             self.file, self.line, self.column, self.severity, self.message
         )
     }
+}
+
+/// Diagnostics with their file paths joined to the project folder `dir`.
+pub fn located(dir: &Path, diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
+    diagnostics
+        .into_iter()
+        .map(|d| Diagnostic {
+            file: dir.join(&d.file).display().to_string(),
+            ..d
+        })
+        .collect()
 }
 
 /// The 1-based line and character column of byte `offset` in `text` (clamped

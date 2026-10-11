@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 signal-engine = { workspace = true }
+# `Frame` in the input meters.
+signal-core = { workspace = true }
 cpal = { workspace = true }
 # The callback's stop request and Runner return (one-slot SPSC queues).
 rtrb = { workspace = true }
@@ -18,7 +20,6 @@ serde = { workspace = true }
 # The counting allocator (ADR 0017) for the callback's no-allocation test,
 # and a real Runner of the kick project for the callback tests.
 signal-contract = { workspace = true }
-signal-core = { workspace = true }
 signal-project = { workspace = true }
 signal-std = { workspace = true }
 
