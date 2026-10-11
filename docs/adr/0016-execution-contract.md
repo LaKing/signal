@@ -1,6 +1,6 @@
 # ADR 0016: Execution contract — scheduling, feedback, and same-frame ordering
 
-- **Status:** Proposed. Awaiting PO approval; blocks the M1 module interface. Revision 2: event delivery to state-output primitives, suspension, and exact ramps.
+- **Status:** Accepted (PO, 2026-10-11; technical sign-off on revision 2333f75). Revision 2: event delivery to state-output primitives, suspension, and exact ramps.
 - **Date:** 2026-10-11
 - **Refines:** ADR 0002 (frame semantics, module contract) and ADR 0004 (events, parameters). It does not change their intent; it removes ambiguities found in review.
 

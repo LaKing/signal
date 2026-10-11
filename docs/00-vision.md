@@ -144,7 +144,7 @@ Reaktor-inspired: a hierarchy, the split between built-in low-level units and us
 6. **One master clock, many rates.** Video (~60 Hz), DMX (~44 Hz), analysis hops, and control signals should not run at 96 kHz. Each port has a rate that is an exact subdivision of the master clock, and rate changes are explicit at connections.
 7. **Physical clocks drift.** The master clock is *logical*. In real time it follows the primary audio device. Other devices (a second interface, the display, the network) are attached through clock-domain adapters (resampling, frame repeat or drop). Offline there are no physical clocks, so everything is exact.
 
-**PO response (2026-10-11): D-EXEC-1 and D-EXEC-2 approved. D-EXEC-3 deferred to benchmarks.** The precise scheduling, feedback, and same-frame ordering rules are specified in ADR 0016 (proposed).
+**PO response (2026-10-11): D-EXEC-1 and D-EXEC-2 approved. D-EXEC-3 deferred to benchmarks.** The precise scheduling, feedback, and same-frame ordering rules are specified in ADR 0016 (accepted).
 
 | ID | Decision | Status | Reversibility |
 |---|---|---|---|

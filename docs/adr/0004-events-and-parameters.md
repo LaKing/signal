@@ -1,6 +1,6 @@
 # ADR 0004: Generic events; parameters are input ports
 
-- **Status:** Accepted. Refined by ADR 0016 (proposed): same-frame ordering, base vs modulation.
+- **Status:** Accepted. Refined by ADR 0016: same-frame ordering, base vs modulation.
 - **Date:** 2026-10-11
 
 ## Context

@@ -21,4 +21,4 @@ To change a decision, add a new ADR that supersedes the old one. Do not rewrite 
 | [0013](0013-application-and-gui.md) | Signal.app and GUI architecture |
 | [0014](0014-licence.md) | Licence: provisional, all rights reserved |
 | [0015](0015-workspace-and-lab-tier.md) | Workspace layout and the lab tier |
-| [0016](0016-execution-contract.md) | Execution contract: scheduling, feedback, same-frame ordering (**Proposed**) |
+| [0016](0016-execution-contract.md) | Execution contract: scheduling, feedback, same-frame ordering  |

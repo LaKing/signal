@@ -1,6 +1,6 @@
 # ADR 0002: Frame-functional semantics and the k-frame module contract
 
-- **Status:** Accepted. Refined by ADR 0016 (proposed): scheduling, feedback execution.
+- **Status:** Accepted. Refined by ADR 0016: scheduling, feedback execution.
 - **Date:** 2026-10-11
 
 ## Context

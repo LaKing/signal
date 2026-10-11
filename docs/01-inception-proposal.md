@@ -6,7 +6,7 @@
 | Date | 2026-10-11 |
 | Depends on | `00-vision.md` (draft v4) |
 | Already approved | D-EXEC-1 (frame-functional semantics), D-EXEC-2 (k-frame module contract), Q15b (primitives compiled into the binary), Q19 (polyphony belongs to modules), Q18 (always seeded) |
-| Later refinements | ADR 0016 (proposed) specifies scheduling (every non-suspended instance runs; reachability is diagnostic only), feedback execution, and same-frame event ordering. Where this snapshot says "pull from outputs", ADR 0016 governs. |
+| Later refinements | ADR 0016 (accepted) specifies scheduling (every non-suspended instance runs; reachability is diagnostic only), feedback execution, and same-frame event ordering. Where this snapshot says "pull from outputs", ADR 0016 governs. |
 | Terminology | Uses the **provisional** terms of vision §3a (Project, Module, Primitive, Composite, Instance, Port, Parameter, Library). Renaming is cheap until M0 ends. |
 
 **Evidence labels:**
