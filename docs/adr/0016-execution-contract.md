@@ -91,7 +91,7 @@ For each parameter and each frame *n* the instance runs, the executor computes `
 - **0 ≤ *i* < *N*:** value = `b + (to − b) · c(i / N)`, evaluated in f64 from the integers *i* and *N*. It is never accumulated step by step, so there is no drift and the result is independent of *k*.
 - ***i* ≥ *N*:** value = `to`, assigned exactly (not computed), and the ramp ends.
 
-**Endpoints.** The value at the start frame *n₀* is exactly *b*. The value reaches *to* exactly at frame *n₀* + *N*. A ramp with *N* = 1 therefore moves from *b* at *n₀* to *to* at *n₀* + 1.
+**Endpoints (*N* ≥ 1).** The value at the start frame *n₀* is exactly *b*. The value reaches *to* exactly after *N* frames in which the instance runs. Without suspension that is frame *n₀* + *N*; each suspended frame in between postpones completion by one frame (§1a). A ramp with *N* = 1 and no suspension therefore moves from *b* at *n₀* to *to* at *n₀* + 1. For *N* = 0 the value is *to* immediately at *n₀*.
 
 **Curves.** Every curve satisfies `c(0) = 0` and `c(1) = 1` exactly. `linear` is `c(x) = x`. Further curves are defined in `semantics.md` (M1) with the same constraint.
 
@@ -118,4 +118,4 @@ For each parameter and each frame *n* the instance runs, the executor computes `
 - Base and modulation: a `set` during active modulation changes only the base; the effective value follows the declared `combine`.
 - State-output delivery: an event emitted by a direct module to a `unit_delay`-like instance in frame *n* changes that instance's output first at frame *n* + 1, never at *n*.
 - Suspension: a suspended trigger source emits no events; signal outputs hold (audio fades to exactly 0 within *F* frames); `set` while suspended is visible after resume; a running ramp resumes with its remaining frames; discarded triggers are counted.
-- Ramps: for *N* ∈ {0, 1, 7, 96000} and random *k*-partitions, value at *n₀* = *b*, value at *n₀* + *N* = `to` bit-exactly, and an interrupting `set`/`ramp` starts from the interrupted ramp's value at that frame.
+- Ramps: for *N* ∈ {0, 1, 7, 96000} and random *k*-partitions: for *N* = 0 the value at *n₀* is `to`; for *N* ≥ 1 the value at *n₀* is *b* and the value after *N* running frames is `to` bit-exactly (at *n₀* + *N* without suspension, later by the number of suspended frames with suspension); an interrupting `set`/`ramp` starts from the interrupted ramp's value at that frame.
