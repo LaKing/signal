@@ -8,10 +8,13 @@ publish.workspace = true
 
 [dependencies]
 signal-core = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
-insta = { workspace = true }
+# `json` only enables insta's optional `serde` dependency, already in Cargo.lock.
+insta = { workspace = true, features = ["json"] }
 proptest = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

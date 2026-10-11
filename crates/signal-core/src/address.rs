@@ -20,6 +20,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Serialize, Serializer};
+
 /// The address of an instance in the flattened graph, e.g. `/drums/kick/amp_env`.
 ///
 /// One or more segments, each `[a-z][a-z0-9_]*`, each preceded by `/`. See the
@@ -59,6 +61,13 @@ impl FromStr for InstanceAddress {
 impl fmt::Display for InstanceAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// Serializes as the canonical text, so an address can also be a map key.
+impl Serialize for InstanceAddress {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
     }
 }
 
@@ -131,6 +140,13 @@ impl FromStr for PortAddress {
 impl fmt::Display for PortAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.text)
+    }
+}
+
+/// Serializes as the canonical text, so an address can also be a map key.
+impl Serialize for PortAddress {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.text)
     }
 }
 

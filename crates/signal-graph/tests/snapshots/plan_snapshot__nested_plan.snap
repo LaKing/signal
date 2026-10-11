@@ -1,0 +1,139 @@
+---
+source: crates/signal-graph/tests/plan_snapshot.rs
+expression: plan
+---
+{
+  "version": 1,
+  "instances": [
+    {
+      "address": "/clock",
+      "type_name": "test.trig",
+      "parameters": {}
+    },
+    {
+      "address": "/drums/echo",
+      "type_name": "test.delay",
+      "parameters": {}
+    },
+    {
+      "address": "/drums/kick/amp_env",
+      "type_name": "test.env",
+      "parameters": {
+        "attack": 0.01
+      }
+    },
+    {
+      "address": "/drums/kick/osc",
+      "type_name": "test.osc",
+      "parameters": {
+        "freq": 55.0
+      }
+    },
+    {
+      "address": "/drums/kick/pitch_env",
+      "type_name": "test.env",
+      "parameters": {
+        "attack": 0.01
+      }
+    },
+    {
+      "address": "/drums/kick/vca",
+      "type_name": "test.vca",
+      "parameters": {}
+    },
+    {
+      "address": "/drums/mix",
+      "type_name": "test.vca",
+      "parameters": {}
+    },
+    {
+      "address": "/lonely",
+      "type_name": "test.osc",
+      "parameters": {
+        "freq": 440.0
+      }
+    },
+    {
+      "address": "/speaker",
+      "type_name": "test.out",
+      "parameters": {}
+    }
+  ],
+  "schedule": [
+    "/clock",
+    "/drums/kick/amp_env",
+    "/drums/kick/osc",
+    "/drums/kick/pitch_env",
+    "/drums/kick/vca",
+    "/drums/mix",
+    "/drums/echo",
+    "/lonely",
+    "/speaker"
+  ],
+  "state_outputs": [
+    "/drums/echo"
+  ],
+  "sources": {
+    "/drums/echo.in": [
+      {
+        "from": "/drums/mix.out",
+        "scale": 1.0
+      }
+    ],
+    "/drums/kick/amp_env.attack": [],
+    "/drums/kick/amp_env.trig": [
+      {
+        "from": "/clock.out",
+        "scale": 1.0
+      }
+    ],
+    "/drums/kick/osc.freq": [],
+    "/drums/kick/pitch_env.attack": [],
+    "/drums/kick/pitch_env.trig": [
+      {
+        "from": "/clock.out",
+        "scale": 1.0
+      }
+    ],
+    "/drums/kick/vca.cv": [
+      {
+        "from": "/drums/kick/amp_env.out",
+        "scale": 1.0
+      }
+    ],
+    "/drums/kick/vca.in": [
+      {
+        "from": "/drums/kick/osc.out",
+        "scale": 1.0
+      }
+    ],
+    "/drums/mix.cv": [],
+    "/drums/mix.in": [
+      {
+        "from": "/drums/echo.out",
+        "scale": 0.5
+      },
+      {
+        "from": "/drums/kick/vca.out",
+        "scale": 1.0
+      }
+    ],
+    "/lonely.freq": [],
+    "/speaker.in": [
+      {
+        "from": "/drums/mix.out",
+        "scale": 1.0
+      }
+    ]
+  },
+  "warnings": [
+    {
+      "warning": "no_sink_reachable",
+      "instance": "/drums/kick/pitch_env"
+    },
+    {
+      "warning": "no_sink_reachable",
+      "instance": "/lonely"
+    }
+  ]
+}
