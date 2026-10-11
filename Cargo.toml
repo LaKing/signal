@@ -19,6 +19,7 @@ signal-std = { path = "crates/signal-std" }
 signal-engine = { path = "crates/signal-engine" }
 signal-eval = { path = "crates/signal-eval" }
 signal-contract = { path = "crates/signal-contract" }
+signal-audio = { path = "crates/signal-audio" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.152"
 toml = "1.1.8"
@@ -28,6 +29,11 @@ hound = "3.5.1"
 realfft = "3.5.0"
 libm = "0.2.16"
 clap = { version = "4.6.7", features = ["derive"] }
+# M2: real time (ADR 0011: cpal pinned behind the driver trait; lock-free SPSC queues between threads)
+cpal = "=0.18.2"
+rtrb = "0.4.0"
+# M2.5: Signal.app GUI (ADR 0018)
+eframe = "0.36.2"
 # test-only
 proptest = "1.12.0"
 insta = "1.49.0"

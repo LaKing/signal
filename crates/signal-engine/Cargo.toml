@@ -12,6 +12,8 @@ signal-graph = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hound = { workspace = true }
+# M2: the lock-free SPSC queues between the control and audio threads.
+rtrb = { workspace = true }
 
 [dev-dependencies]
 approx = { workspace = true }

@@ -1,0 +1,14 @@
+[package]
+name = "signal-audio"
+description = "Signal's audio device driver: CoreAudio through cpal behind the engine's driver trait (ADR 0011)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+signal-engine = { workspace = true }
+cpal = { workspace = true }
+
+[lints]
+workspace = true

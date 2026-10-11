@@ -23,3 +23,4 @@ To change a decision, add a new ADR that supersedes the old one. Do not rewrite 
 | [0015](0015-workspace-and-lab-tier.md) | Workspace layout and the lab tier |
 | [0016](0016-execution-contract.md) | Execution contract: scheduling, feedback, same-frame ordering  |
 | [0017](0017-unsafe-exception-counting-allocator.md) | Unsafe exception: the counting allocator |
+| [0018](0018-gui-toolkit.md) | GUI toolkit: egui through eframe |

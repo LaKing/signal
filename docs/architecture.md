@@ -62,7 +62,8 @@ See `adr/0015-workspace-and-lab-tier.md`. Crates are created when their mileston
 | `signal-graph` | Composites, flattening, validation, conversion insertion, plans, edits | M1 |
 | `signal-project` | Project folder loading, TOML model, schema export | M1 |
 | `signal-std` | Standard primitives | M1 |
-| `signal-engine` | Executor, plan swap, fault guards, drivers, render manifest (semantics: `semantics.md`) | M1/M2 |
+| `signal-engine` | Executor, plan swap, fault guards, driver trait, offline and null drivers, render manifest (semantics: `semantics.md`) | M1/M2 |
+| `signal-audio` | CoreAudio driver through cpal (ADR 0011) | M2 |
 | `signal-eval` | Analysis, metrics, compare, listening packages | M1/M3 |
 | `signal-cli` | `signal` command | M1 |
-| `signal-app` | Signal.app shell and GUI | M2.5 |
+| `signal-app` | Signal.app shell and GUI (egui, ADR 0018) | M2.5 (skeleton in M2) |

@@ -13,7 +13,7 @@ Signal is a macOS application with a GUI by default (Q22) and needs its own perm
   1. interface setup dialog (devices, I/O, sound card), then metering;
   2. control panels;
   3. visual patching, a nice-to-have. Manual wiring scales badly for big projects, so text plus automatic conversion stays primary.
-- The GUI toolkit is decided by its own ADR when the GUI milestone starts. egui is the leading candidate (researched 2026-10-11).
+- The GUI toolkit is decided by its own ADR when the GUI milestone starts. egui is the leading candidate (researched 2026-10-11). *Decided in ADR 0018: egui through eframe.*
 
 ## Alternatives considered
 A separate GUI process talking to an engine process: better isolation, more IPC complexity.

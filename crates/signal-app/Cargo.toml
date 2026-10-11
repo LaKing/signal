@@ -1,0 +1,19 @@
+[package]
+name = "signal-app"
+description = "Signal.app: the GUI shell (interface setup, metering, panels) over the engine (ADR 0013, 0018)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "signal-app"
+path = "src/main.rs"
+
+[dependencies]
+signal-audio = { workspace = true }
+signal-engine = { workspace = true }
+eframe = { workspace = true }
+
+[lints]
+workspace = true
