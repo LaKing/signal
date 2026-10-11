@@ -62,7 +62,7 @@ impl ControlSink for Tally {
 
 /// Over 12 000 callbacks the control thread swaps plans, sends bursts of
 /// events and suspends and resumes, and drains only every fourth step, so
-/// that the 4-record log queue and 2-meter queue overflow. The audio thread
+/// that the 4-record log, 2-meter and 2-parameter queues overflow. The audio thread
 /// counts every heap call inside `Runner::process`: none.
 #[test]
 fn runner_process_allocates_and_frees_nothing() {
@@ -70,6 +70,7 @@ fn runner_process_allocates_and_frees_nothing() {
     let config = RealtimeConfig {
         log: 4,
         meters: 2,
+        parameters: 2,
         ..RealtimeConfig::with_buffer(RATE, 42, 64)
     };
     let (mut runner, mut controller) = realtime(&version(0), &registry(), config).unwrap();

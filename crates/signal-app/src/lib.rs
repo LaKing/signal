@@ -7,6 +7,8 @@
 //! - [`state`]: the app's state, its [`Command`](state::Command)s and its
 //!   [`View`](state::View) snapshots, playing through `signal-audio` (or the
 //!   null driver) with `signal-project`'s live reload.
+//! - [`panel`]: the parameter panel's instances and parameters, with the
+//!   runner's effective values; its edits go through [`state`].
 //! - [`dialog`]: the interface dialog's draft, which keeps chosen devices
 //!   by identity.
 //! - [`control`]: the control thread that owns the state; `rtrb` queues to
@@ -26,6 +28,7 @@
 pub mod control;
 pub mod dialog;
 pub mod meter;
+pub mod panel;
 pub mod setup;
 pub mod state;
 pub mod ui;

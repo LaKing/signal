@@ -50,7 +50,7 @@ render artifacts: audio + manifest + logs + metrics ─► signal-eval (analyse,
 | Control | Parses files, builds plans, calls `prepare`, reads device input/MIDI/network and stamps it, frees old plans, writes logs | Block the audio thread |
 | GUI (`signal-app`) | Setup dialog, meters, panels; a client of the edit and observation interface | Hold state that is not in text or Setup |
 
-Communication between threads uses only lock-free SPSC queues (`rtrb`). The audio thread runs `signal_engine::Runner`; the control thread holds its `Controller`, which prepares swaps, drops what the runner returns, and hands logs, meters and command reports to a sink; recording a session from them happens outside the engine (`signal_project::session::LiveRecorder`). Signal.app runs a control thread (the `Controller`, the file watch, the input meters and the Setup) and the GUI thread. They exchange commands and view snapshots over `rtrb` queues too, and only the control thread touches the `Controller`.
+Communication between threads uses only lock-free SPSC queues (`rtrb`). The audio thread runs `signal_engine::Runner`; the control thread holds its `Controller`, which prepares swaps, drops what the runner returns, and hands logs, meters, parameter values and command reports to a sink; recording a session from them happens outside the engine (`signal_project::session::LiveRecorder`). Signal.app runs a control thread (the `Controller`, the file watch, the input meters and the Setup) and the GUI thread. They exchange commands and view snapshots over `rtrb` queues too, and only the control thread touches the `Controller`.
 
 ## Crates
 

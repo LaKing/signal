@@ -12,8 +12,8 @@ use common::{addr, conn, inst, inst_with, plan, port_addr, registry, scaled};
 use signal_core::{EventPayload, Frame};
 use signal_engine::{
     CallbackSizes, Command, ControlError, ControlSink, Controller, Driver, Engine, EngineConfig,
-    ExternalEvent, LogLine, MAX_CALLBACK_FRAMES, Meter, NullDriver, Outcome, RealtimeConfig,
-    Report, Runner, SentCommand, Stamp, realtime, render_with,
+    ExternalEvent, LogLine, MAX_CALLBACK_FRAMES, Meter, NullDriver, Outcome, ParameterValue,
+    RealtimeConfig, Report, Runner, SentCommand, Stamp, realtime, render_with,
 };
 use signal_graph::ExecutionPlan;
 
@@ -65,6 +65,7 @@ struct Seen {
     reports: Vec<(Report, SentCommand)>,
     lines: Vec<String>,
     meters: Vec<Meter>,
+    parameters: Vec<(String, ParameterValue)>,
     frontier: Frame,
 }
 
@@ -77,6 +78,9 @@ impl ControlSink for Seen {
     }
     fn meter(&mut self, meter: &Meter) {
         self.meters.push(*meter);
+    }
+    fn parameter(&mut self, port: &signal_core::PortAddress, value: ParameterValue) {
+        self.parameters.push((port.to_string(), value));
     }
     fn frontier(&mut self, next_frame: Frame) {
         self.frontier = next_frame;
@@ -317,6 +321,7 @@ fn lossy_queue_overflow_is_counted_and_does_not_change_the_audio() {
     let tiny = RealtimeConfig {
         log: 1,
         meters: 1,
+        parameters: 1,
         status: 1,
         ..config()
     };
@@ -325,9 +330,56 @@ fn lossy_queue_overflow_is_counted_and_does_not_change_the_audio() {
     let status = runner.status();
     assert!(status.log_overflows > 0, "{status:?}");
     assert!(status.meter_overflows > 0, "{status:?}");
+    assert!(status.parameter_overflows > 0, "{status:?}");
     assert!(status.status_overflows > 0, "{status:?}");
     // Reports travel on the lossless return queue.
     assert_eq!(seen.reports.len(), 8);
+}
+
+/// M2.5-2: each callback reports parameters' base and effective values, read
+/// on the control thread with the plan that wrote them: a set and a ramp
+/// show in the base, and a plan's parameters come and go with its swaps.
+#[test]
+fn parameter_values_are_reported_with_their_plan() {
+    let mut sent = false;
+    let (_, seen, ..) = run(config(), 2, 11, FRAMES, |controller, seen| {
+        if !sent {
+            script(controller);
+            sent = true;
+        }
+        controller.poll(seen);
+    });
+    let values = |port: &str| -> Vec<ParameterValue> {
+        seen.parameters
+            .iter()
+            .filter(|(p, _)| p == port)
+            .map(|(_, v)| *v)
+            .collect()
+    };
+    let freq = values("/osc.freq");
+    assert_eq!(freq.first().unwrap().base, 110.0);
+    assert_eq!(
+        freq.last(),
+        Some(&ParameterValue {
+            base: 220.0,
+            effective: 220.0
+        })
+    );
+    let gain = values("/out.gain");
+    assert_eq!(gain.first().unwrap().base, 0.5);
+    assert_eq!(gain.last().unwrap().base, 0.25, "the ramp's end");
+    assert_eq!(
+        values("/osc2.freq").last().unwrap().base,
+        330.0,
+        "while v1 ran"
+    );
+    // v2 (without /osc2) runs last: the last callback reports v0's ports.
+    let (last, _) = seen.parameters.last().unwrap();
+    let tail: Vec<&str> = seen.parameters[seen.parameters.len() - 3..]
+        .iter()
+        .map(|(p, _)| p.as_str())
+        .collect();
+    assert!(!tail.contains(&"/osc2.freq"), "{tail:?} ({last})");
 }
 
 /// AC4: a full command queue refuses the send without blocking, hands the

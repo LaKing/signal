@@ -47,7 +47,7 @@ Why: an audio callback has a hard deadline (128 frames at 96 kHz is 1.33 ms). Mi
 
    These are the engine's own rules (`semantics.md` §12). Events, suspends and resumes go into the engine's queues; swaps wait for their frame.
 2. **Frames, one at a time.** Commit the swap whose effective frame has come, run the frame, and write the audio sink's channels (each times the sink's `gain`, as the offline driver records them) to the same device channels, interleaved, as f32. Device channels beyond the sink's are 0; sink channels beyond the device's are not played. Each value is **clamped to [−1, 1]** before the conversion, and every clamped (or non-finite, written as 0) sample is counted in `clipped`. Then push the frame's log records (the engine's log holds one frame).
-3. **Meters and status.** Push one meter per sink channel (peak and sum of squares over the callback), send the input the engine has used back to the control thread, and push the status last: the next frame, the plan version and every counter.
+3. **Meters, parameters and status.** Push one meter per sink channel (peak and sum of squares over the callback), the base and effective value of up to `PARAMETERS_PER_CALLBACK` (64) parameters, going round the plan's parameters from callback to callback, send the input the engine has used back to the control thread, and push the status last: the next frame, the plan version and every counter.
 
 **Latency.** A command stamped `Stamp::Default` is requested for the current frame, as last reported, plus the latency: two device buffers by default (`RealtimeConfig::latency_frames`, `2 × buffer_frames`). A command whose requested frame has already run is **late**: it applies on the next frame that runs. Its report carries both frames, and the runner counts it in `late`. The engine's log (`log.jsonl`) carries only effective frames, so a live log equals its replay.
 
@@ -59,11 +59,12 @@ Why: an audio callback has a hard deadline (128 frames at 96 kHz is 1.33 ms). Mi
 | returns: reports, used events and addresses, replaced plans | audio → control | Never full: the Controller keeps at most as many commands in flight as the engine's queues and half this queue hold, and refuses further sends as above. Should it fill anyway, the runner holds the item, counts `return_stalls`, and withholds the status until the item is sent; nothing is dropped. |
 | log | audio → control | The record is dropped and counted (`log_overflows`). |
 | meters | audio → control | The meter is dropped and counted (`meter_overflows`). |
+| parameter values (observation only) | audio → control | The value is dropped and counted (`parameter_overflows`); the next round reports it again. |
 | status | audio → control | Dropped and counted (`status_overflows`); counters are cumulative, so the next status says everything. |
 
 None of them blocks, and none changes the audio: a dropped log record or meter is a report, not an input.
 
-**Dropping.** Nothing that owns heap memory is dropped on the audio thread. Used events and addresses, and a committed swap's box (which then holds the replaced plan), go back on the return queue, and `Controller::poll` drops them on the control thread. `poll` also hands reports, log lines and meters to a `ControlSink` without allocating; the Controller performs no file I/O.
+**Dropping.** Nothing that owns heap memory is dropped on the audio thread. Used events and addresses, and a committed swap's box (which then holds the replaced plan), go back on the return queue, and `Controller::poll` drops them on the control thread. `poll` also hands reports, log lines, meters and parameter values (read with the plan that wrote them) to a `ControlSink` without allocating; the Controller performs no file I/O.
 
 `NullDriver` in threaded mode checks a one-slot `rtrb` stop queue between callbacks and may sleep for a callback's duration after it (`pace`), outside `process`; `stop` joins its thread and hands the Runner back.
 

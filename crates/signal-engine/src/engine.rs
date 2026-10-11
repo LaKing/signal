@@ -774,6 +774,11 @@ impl PlanState {
     }
 
     /// The id and role of `port`.
+    /// The address of parameter `j` (in [`Engine::parameter_at`] order).
+    pub(crate) fn parameter_port(&self, j: usize) -> Option<&PortAddress> {
+        self.ports.get(self.params.get(j)?.port.0)
+    }
+
     fn role_of(&self, port: &PortAddress) -> Option<(usize, Role)> {
         let id = self.ports.binary_search(port).ok()?;
         Some((id, self.roles.get(id).copied().flatten()?.1))
@@ -1948,6 +1953,20 @@ impl Engine {
             }),
             _ => None,
         }
+    }
+
+    /// The number of parameters of the running plan.
+    pub(crate) fn parameter_count(&self) -> usize {
+        self.plan.params.len()
+    }
+
+    /// The base and effective value of the running plan's parameter `j`, as
+    /// [`parameter`](Engine::parameter) gives them. Allocates nothing.
+    pub(crate) fn parameter_at(&self, j: usize) -> Option<ParameterValue> {
+        Some(ParameterValue {
+            base: self.plan.params.get(j)?.base.value(),
+            effective: self.plan.param_values.get(j).copied()?,
+        })
     }
 
     /// How many events reached `instance` and had no effect: while it was

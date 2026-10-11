@@ -9,6 +9,7 @@ use signal_audio::{Direction, Resolution};
 
 use crate::control::Control;
 use crate::dialog::{Choice, Draft, capabilities, rate_check};
+use crate::panel::ParameterView;
 use crate::setup::Window;
 use crate::state::{Command, MeterView, View};
 
@@ -24,6 +25,9 @@ pub struct SignalApp {
     dialog_error: Option<String>,
     size: Option<Window>,
     notice: Option<String>,
+    /// The slider being dragged (instance, parameter) and its value, shown
+    /// until the view catches up.
+    editing: Option<((String, String), f64)>,
 }
 
 impl SignalApp {
@@ -37,6 +41,7 @@ impl SignalApp {
             dialog_error: None,
             size: None,
             notice: None,
+            editing: None,
         }
     }
 
@@ -135,6 +140,89 @@ impl SignalApp {
             }
         }
         if let Some(command) = clear {
+            self.send(command);
+        }
+        self.parameter_panel(ui);
+    }
+
+    /// The parameters of each top-level instance: a slider for the base
+    /// (dragging sends it, releasing writes it to `project.toml`), the
+    /// effective value, and Reset. A composite's inner parameters are shown
+    /// read-only.
+    fn parameter_panel(&mut self, ui: &mut egui::Ui) {
+        if self.view.panel.is_empty() {
+            return;
+        }
+        ui.separator();
+        ui.heading("Parameters");
+        ui.label(format!(
+            "Releasing a slider writes its value to {}; Reset removes it from the file.",
+            signal_project::PROJECT_FILE
+        ));
+        let mut commands = Vec::new();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for instance in &self.view.panel {
+                let title = format!("{} ({})", instance.name, instance.module);
+                egui::CollapsingHeader::new(title)
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        for p in &instance.parameters {
+                            let key = (instance.name.clone(), p.name.clone());
+                            let mut value = match &self.editing {
+                                Some((k, v)) if *k == key => *v,
+                                _ => p.base,
+                            };
+                            ui.horizontal(|ui| {
+                                ui.label(&p.name);
+                                let response = ui.add(slider(&mut value, p));
+                                if response.changed() {
+                                    self.editing = Some((key.clone(), value));
+                                    commands.push(Command::Drag {
+                                        instance: key.0.clone(),
+                                        parameter: key.1.clone(),
+                                        value,
+                                    });
+                                }
+                                // A typed value or a click is a drag of one step.
+                                if response.drag_stopped()
+                                    || (response.changed() && !response.dragged())
+                                {
+                                    self.editing = None;
+                                    commands.push(Command::Release {
+                                        instance: key.0.clone(),
+                                        parameter: key.1.clone(),
+                                    });
+                                }
+                                details(ui, p);
+                                if ui.button("Reset").clicked() {
+                                    commands.push(Command::Reset {
+                                        instance: key.0.clone(),
+                                        parameter: key.1.clone(),
+                                    });
+                                }
+                            });
+                        }
+                        if !instance.inner.is_empty() {
+                            egui::CollapsingHeader::new(
+                                "Inside the composite (read-only: set in the composite's file, \
+                                 shared by every instance of it)",
+                            )
+                            .id_salt(("inner", &instance.name))
+                            .show(ui, |ui| {
+                                for p in &instance.inner {
+                                    let mut value = p.base;
+                                    ui.horizontal(|ui| {
+                                        ui.label(&p.name);
+                                        ui.add_enabled(false, slider(&mut value, p));
+                                        details(ui, p);
+                                    });
+                                }
+                            });
+                        }
+                    });
+            }
+        });
+        for command in commands {
             self.send(command);
         }
     }
@@ -286,6 +374,37 @@ fn db(x: f64) -> String {
     } else {
         format!("{x:.1}")
     }
+}
+
+/// A parameter's base slider over its range, with its unit; logarithmic for
+/// a positive range spanning more than two decades.
+fn slider<'a>(value: &'a mut f64, p: &ParameterView) -> egui::Slider<'a> {
+    let slider = egui::Slider::new(value, p.min..=p.max)
+        .logarithmic(p.min > 0.0 && p.max / p.min > 100.0)
+        .max_decimals(6);
+    match p.unit {
+        Some(unit) => slider.suffix(format!(" {unit}")),
+        None => slider,
+    }
+}
+
+/// The range, the default, whether the file sets the value, and the
+/// effective value (which differs from the base when modulated).
+fn details(ui: &mut egui::Ui, p: &ParameterView) {
+    let effective = p
+        .effective
+        .map_or_else(|| "—".to_owned(), |v| format!("{v:.6}"));
+    let mut text = format!(
+        "[{} … {}] default {}{}   effective {effective}",
+        p.min,
+        p.max,
+        p.default,
+        if p.in_file { "" } else { " (not in file)" }
+    );
+    if p.modulated {
+        text.push_str("   modulated");
+    }
+    ui.monospace(text);
 }
 
 /// One meter: the RMS as a bar, peak, hold and RMS in dBFS, and the clip

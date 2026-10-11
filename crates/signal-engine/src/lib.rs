@@ -19,8 +19,8 @@
 //!   recorded session).
 //! - [`realtime`]: the real-time [`Runner`], called from a driver's audio
 //!   callback, and the [`Controller`] that feeds it from the control thread
-//!   through `rtrb` queues ([`Controller::poll`] drains logs, meters and
-//!   command reports into a [`ControlSink`]). [`Runner::process`] allocates
+//!   through `rtrb` queues ([`Controller::poll`] drains logs, meters,
+//!   parameter values and command reports into a [`ControlSink`]). [`Runner::process`] allocates
 //!   nothing.
 //! - [`Driver`]: the driver trait (ADR 0011); [`NullDriver`] runs a Runner
 //!   without hardware, with seeded [`CallbackSizes`].
@@ -57,6 +57,7 @@ pub use log::{
 pub use manifest::{Manifest, Provenance};
 pub use offline::{Render, render, render_with};
 pub use realtime::{
-    Command, CommandId, ControlError, ControlSink, Controller, Meter, Outcome, ReadySwap,
-    RealtimeConfig, Report, Runner, RunnerStatus, SentCommand, Stamp, realtime,
+    Command, CommandId, ControlError, ControlSink, Controller, Meter, Outcome,
+    PARAMETERS_PER_CALLBACK, ReadySwap, RealtimeConfig, Report, Runner, RunnerStatus, SentCommand,
+    Stamp, realtime,
 };

@@ -18,6 +18,8 @@
 //!   project folder, [`live::send_edit`] sends the diff to a real-time
 //!   `Controller` and records it.
 //! - [`provenance`]: the build's provenance for render manifests and sessions.
+//! - [`write_parameter`]: a top-level instance's parameter written into
+//!   `project.toml` text with `toml_edit`, keeping everything else.
 
 mod diagnostic;
 mod diff;
@@ -27,6 +29,7 @@ mod model;
 pub mod provenance;
 mod schema;
 pub mod session;
+mod write;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -44,6 +47,7 @@ use toml::Spanned;
 pub use diagnostic::{Diagnostic, Severity, located};
 pub use diff::{DiffOptions, ParameterChange, ProjectEdit, diff, diff_with};
 pub use schema::schema;
+pub use write::{WriteError, write_parameter};
 
 use locate::{
     ConnectionSpans, DefSpans, ExportKind, ExportSpans, InstanceSpans, Location, Locator, Root,

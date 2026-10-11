@@ -19,8 +19,8 @@ use signal_core::{EventPayload, Frame, InstanceAddress, PortAddress, Registry};
 use signal_graph::ExecutionPlan;
 
 use crate::engine::{
-    EditFull, Engine, EngineConfig, ExternalEvent, ExternalFull, InputDiscards, PlanState,
-    PreparedSwap, SwapTarget, prepare_swap,
+    EditFull, Engine, EngineConfig, ExternalEvent, ExternalFull, InputDiscards, ParameterValue,
+    PlanState, PreparedSwap, SwapTarget, prepare_swap,
 };
 use crate::error::{EngineError, RenderError};
 use crate::fade::fade_frames;
@@ -43,6 +43,8 @@ pub struct RealtimeConfig {
     pub log: usize,
     /// The meter queue's capacity, in [`Meter`]s.
     pub meters: usize,
+    /// The parameter queue's capacity, in parameter values.
+    pub parameters: usize,
     /// The status queue's capacity.
     pub status: usize,
 }
@@ -67,10 +69,16 @@ impl RealtimeConfig {
             commands: 1024,
             log: 1 << 16,
             meters: 1024,
+            parameters: 1024,
             status: 256,
         }
     }
 }
+
+/// How many parameter values the runner reports per callback at most. It
+/// goes round the plan's parameters, so each is reported at least every
+/// `parameters / PARAMETERS_PER_CALLBACK` callbacks (rounded up).
+pub const PARAMETERS_PER_CALLBACK: usize = 64;
 
 /// The id of a command sent through the [`Controller`]: 1, 2, 3, … in send
 /// order. An event's id is also its sequence number.
@@ -187,6 +195,8 @@ pub struct RunnerStatus {
     pub log_overflows: u64,
     /// Meters dropped because the meter queue was full.
     pub meter_overflows: u64,
+    /// Parameter values dropped because the parameter queue was full.
+    pub parameter_overflows: u64,
     /// Statuses not sent because the status queue was full (or returns were
     /// held back).
     pub status_overflows: u64,
@@ -209,6 +219,9 @@ pub trait ControlSink {
     fn log(&mut self, _line: LogLine<'_>) {}
     /// A meter of one callback and channel.
     fn meter(&mut self, _meter: &Meter) {}
+    /// A parameter's base and effective value at the end of a callback
+    /// (observation only: it never feeds back into the run).
+    fn parameter(&mut self, _port: &PortAddress, _value: ParameterValue) {}
     /// Called last: every command whose effective frame is before `next_frame`
     /// has been reported (if a status reached the control thread).
     fn frontier(&mut self, _next_frame: Frame) {}
@@ -334,6 +347,7 @@ pub fn realtime(
     let (back_tx, back_rx) = RingBuffer::new(2 * limit);
     let (log_tx, log_rx) = RingBuffer::new(config.log.max(1));
     let (meter_tx, meter_rx) = RingBuffer::new(config.meters.max(1));
+    let (parameter_tx, parameter_rx) = RingBuffer::new(config.parameters.max(1));
     let (status_tx, status_rx) = RingBuffer::new(config.status.max(1));
     let target = engine.swap_target();
 
@@ -345,6 +359,8 @@ pub fn realtime(
         back: back_tx,
         log: log_tx,
         meters: meter_tx,
+        parameters: parameter_tx,
+        next_parameter: 0,
         status: status_tx,
         pending: VecDeque::with_capacity(limit),
         held: VecDeque::with_capacity(2 * limit),
@@ -359,6 +375,7 @@ pub fn realtime(
         back: back_rx,
         log: log_rx,
         meters: meter_rx,
+        parameters: parameter_rx,
         status: status_rx,
         registry: registry.clone(),
         target,
@@ -389,6 +406,10 @@ pub struct Runner {
     back: Producer<Back>,
     log: Producer<(u64, LogRecord)>,
     meters: Producer<Meter>,
+    /// (plan version, parameter index, value).
+    parameters: Producer<(u64, usize, ParameterValue)>,
+    /// The parameter the next callback reports first.
+    next_parameter: usize,
     status: Producer<RunnerStatus>,
     /// Swaps waiting for their frame, in frame order.
     pending: VecDeque<PendingSwap>,
@@ -411,8 +432,9 @@ impl Runner {
     ///    writes each frame's audio-sink channels (times the sink's `gain`)
     ///    clamped to [−1, 1] as f32 to the same device channels, extra device
     ///    channels 0; and pushes the frame's log records;
-    /// 3. pushes a meter per sink channel, returns used input for dropping,
-    ///    and pushes the status.
+    /// 3. pushes a meter per sink channel, the base and effective value of
+    ///    up to [`PARAMETERS_PER_CALLBACK`] parameters (going round the plan's
+    ///    parameters), returns used input for dropping, and pushes the status.
     ///
     /// Allocates, frees, locks and blocks nowhere; a full log, meter or
     /// status queue is counted. A trailing partial frame in `out` is zeroed.
@@ -600,6 +622,7 @@ impl Runner {
                 }
             }
         }
+        self.push_parameters();
         let Runner {
             engine,
             back,
@@ -625,6 +648,25 @@ impl Runner {
         // A held report would be missing behind this status's frontier.
         if !self.held.is_empty() || self.status.push(self.status()).is_err() {
             self.counts.status_overflows = self.counts.status_overflows.saturating_add(1);
+        }
+    }
+
+    /// Pushes the next parameters' values, for observation.
+    fn push_parameters(&mut self) {
+        let count = self.engine.parameter_count();
+        let version = self.engine.version();
+        for _ in 0..count.min(PARAMETERS_PER_CALLBACK) {
+            if self.next_parameter >= count {
+                self.next_parameter = 0;
+            }
+            let index = self.next_parameter;
+            self.next_parameter += 1;
+            if let Some(value) = self.engine.parameter_at(index)
+                && self.parameters.push((version, index, value)).is_err()
+            {
+                self.counts.parameter_overflows = self.counts.parameter_overflows.saturating_add(1);
+                return;
+            }
         }
     }
 
@@ -703,6 +745,7 @@ pub struct Controller {
     back: Consumer<Back>,
     log: Consumer<(u64, LogRecord)>,
     meters: Consumer<Meter>,
+    parameters: Consumer<(u64, usize, ParameterValue)>,
     status: Consumer<RunnerStatus>,
     registry: Registry,
     /// The engine and the version the next swap is prepared at.
@@ -863,8 +906,8 @@ impl Controller {
 
     /// Drains everything the runner sent, without allocating: reads the
     /// newest status, hands each report to `sink` with its command, drops
-    /// returned items and replaced plans, hands each log record (read with
-    /// the plan that wrote it) and meter to `sink`, and calls
+    /// returned items and replaced plans, hands each log record and parameter
+    /// value (read with the plan that wrote it) and meter to `sink`, and calls
     /// [`frontier`](ControlSink::frontier) with the status's next frame.
     pub fn poll(&mut self, sink: &mut impl ControlSink) {
         while let Ok(status) = self.status.pop() {
@@ -901,6 +944,14 @@ impl Controller {
         }
         while let Ok(meter) = self.meters.pop() {
             sink.meter(&meter);
+        }
+        // Values of a plan whose mirror is retired are dropped: a newer
+        // plan's values follow.
+        while let Ok((version, index, value)) = self.parameters.pop() {
+            let mirror = self.mirrors.iter().find(|m| m.0 == version);
+            if let Some(port) = mirror.and_then(|(_, state)| state.parameter_port(index)) {
+                sink.parameter(port, value);
+            }
         }
         sink.frontier(frontier);
     }
