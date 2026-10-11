@@ -1,0 +1,5 @@
+# Build output lives outside the repository, for every cargo invocation (people,
+# CI, devpanel seats). devpanel delivers every untracked file in a run's
+# worktree, git-ignored ones included, so a target/ there breaks delivery.
+[build]
+target-dir = "/tmp/signal-project-target"
