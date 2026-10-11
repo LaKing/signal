@@ -1,0 +1,21 @@
+[package]
+name = "signal-engine"
+description = "Signal engine: per-frame executor, plan swap, fault guards, offline and realtime drivers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+signal-core = { workspace = true }
+signal-graph = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hound = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+proptest = { workspace = true }
+
+[lints]
+workspace = true

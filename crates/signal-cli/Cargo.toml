@@ -1,0 +1,27 @@
+[package]
+name = "signal-cli"
+description = "The `signal` command: render, replay, modules, schema, compare."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "signal"
+path = "src/main.rs"
+
+[dependencies]
+signal-core = { workspace = true }
+signal-graph = { workspace = true }
+signal-project = { workspace = true }
+signal-std = { workspace = true }
+signal-engine = { workspace = true }
+signal-eval = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+
+[lints]
+workspace = true

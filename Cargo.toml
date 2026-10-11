@@ -8,6 +8,30 @@ edition = "2024"
 rust-version = "1.99"
 publish = false      # ADR 0014: all rights reserved, unpublished
 
+# Every dependency is declared here once, pinned by Cargo.lock, and fetched by
+# ./install.sh. devpanel seats build offline, so they cannot add new crates:
+# adding one is an operator change (edit here, run ./install.sh). ADR 0014: permissive licences only.
+[workspace.dependencies]
+signal-core = { path = "crates/signal-core" }
+signal-graph = { path = "crates/signal-graph" }
+signal-project = { path = "crates/signal-project" }
+signal-std = { path = "crates/signal-std" }
+signal-engine = { path = "crates/signal-engine" }
+signal-eval = { path = "crates/signal-eval" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.152"
+toml = "1.1.8"
+toml_edit = "0.25.17"
+schemars = "1.2.2"
+hound = "3.5.1"
+realfft = "3.5.0"
+libm = "0.2.16"
+clap = { version = "4.6.7", features = ["derive"] }
+# test-only
+proptest = "1.12.0"
+insta = "1.49.0"
+approx = "0.5.1"
+
 [workspace.lints.rust]
 unsafe_code = "deny"            # exceptions need an ADR and an audited module
 missing_docs = "warn"

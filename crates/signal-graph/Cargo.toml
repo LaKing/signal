@@ -1,0 +1,17 @@
+[package]
+name = "signal-graph"
+description = "Signal graph: composites, flattening, validation, conversion insertion, scheduling, plans, edits."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+signal-core = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+proptest = { workspace = true }
+
+[lints]
+workspace = true

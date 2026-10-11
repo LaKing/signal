@@ -1,0 +1,18 @@
+[package]
+name = "signal-std"
+description = "Signal standard library of primitives."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+signal-core = { workspace = true }
+libm = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+approx = { workspace = true }
+
+[lints]
+workspace = true
