@@ -656,6 +656,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "signal-contract"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "signal-core",
+]
+
+[[package]]
 name = "signal-core"
 version = "0.0.0"
 dependencies = [

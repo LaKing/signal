@@ -18,6 +18,7 @@ signal-project = { path = "crates/signal-project" }
 signal-std = { path = "crates/signal-std" }
 signal-engine = { path = "crates/signal-engine" }
 signal-eval = { path = "crates/signal-eval" }
+signal-contract = { path = "crates/signal-contract" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.152"
 toml = "1.1.8"
