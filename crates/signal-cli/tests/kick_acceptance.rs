@@ -418,10 +418,150 @@ fn v7_delay_free_feedback_is_rejected() {
     assert_eq!(json["error"]["kind"], "validation");
 }
 
-/// V8: the project renders at 44.1, 48, 96 and 192 kHz, and the late tail of
-/// the first kick is 48 Hz within 1 %, measured by zero crossings from 250 ms
-/// after its trigger (the pitch envelope is then within 0.22 % of 48 Hz) to
-/// the kick's next trigger.
+/// The kick's pitch (`projects/kick/composites/kick.toml`): `osc.freq` is
+/// 48 Hz + 132·`pitch_env`, and `pitch_env` (attack 0) is e^(−t/τ) from the
+/// trigger frame, τ = 35 ms: f(t) = 48 + 132·e^(−t/τ), 180 Hz at the trigger.
+const PITCH_BASE_HZ: f64 = 48.0;
+const PITCH_SCALE_HZ: f64 = 132.0;
+const PITCH_DECAY_S: f64 = 0.035;
+/// The kick's other stages that move zero crossings: `dc` (`std.dc_block` at
+/// its default cutoff), the feedback phase modulation into `osc.pm` (cycles,
+/// through a unit delay), and the largest shaper drive (2.5, plus 1.5 on an
+/// accent; beat 0 is accented). `amp_env` and `vca` scale by a positive factor
+/// and move no crossing.
+const DC_CUTOFF_HZ: f64 = 10.0;
+const FEEDBACK_CYCLES: f64 = 0.05;
+const MAX_DRIVE: f64 = 4.0;
+/// The early sweep is checked up to 3τ after the trigger (f within 5 % of the
+/// way to 48 Hz), before the first possible ghost retrigger (≈ 120 ms).
+const SWEEP_SECONDS: f64 = 3.0 * PITCH_DECAY_S;
+
+/// The mean of f(t) over `a..b` seconds after the trigger, for decay `tau`.
+fn sweep_mean(a: f64, b: f64, tau: f64) -> f64 {
+    PITCH_BASE_HZ + PITCH_SCALE_HZ * tau * ((-a / tau).exp() - (-b / tau).exp()) / (b - a)
+}
+
+/// The early-sweep tolerance in Hz for one period `a..b` (seconds after the
+/// trigger) at `rate`. A period between two like zero crossings reads the mean
+/// of the output's instantaneous frequency over it, which is the mean of f(t)
+/// ([`sweep_mean`]) plus the drift, over the period, of every phase offset the
+/// kick adds between `pitch_env` and the crossing. Each term is that drift,
+/// derived from the kick's constants; a constant offset cancels.
+///
+/// - `dc`: the DC blocker leads by atan(fc/f) rad, which grows as f falls:
+///   (atan(fc/f(b)) − atan(fc/f(a))) / (2π·(b − a)). Rate-independent; the
+///   largest term (≈ 0.23 Hz on the first periods). The steady-state lead
+///   overstates it while the filter (time constant 16 ms) settles.
+/// - `drift`: two phase offsets proportional to f/sr. The oscillator sums
+///   f[n]/sr frame by frame, which exceeds the integral of a falling f by
+///   (f(0) − f(t))/(2·sr) cycles; and the feedback (0.05 cycles through a unit
+///   delay) offsets the crossing by at most c·f/sr cycles, c = 2π·0.05 /
+///   (1 − 2π·0.05) ≈ 0.46. Together (½ + c)·(f(a) − f(b)) / (sr·(b − a)):
+///   0.058 Hz on the first period at 44.1 kHz, 0.013 Hz at 192 kHz.
+/// - `resolution`: the measurement's own. A crossing is placed by linear
+///   interpolation between two frames; for tanh(g·sin(θ·n)), θ = 2π·f/sr per
+///   frame, the cubic term misplaces it by at most k/(6√3) frames, k =
+///   θ²·(g²/3 + 1/6), so the period's frequency by 2·k/(6√3) / (sr·(b − a)²).
+///   Below 0.001 Hz at every rate. The f32 WAV adds about 1e-7 frames.
+///
+/// The test also requires the tolerance to reject a rate-dependent sweep: the
+/// envelope counting τ in frames of another of the four rates (τ·r/sr, at
+/// least 8.8 % off) reads about 4 Hz or more off near t = τ. A 1 % error in τ
+/// (decay 35.35 ms) reads about 0.5 Hz off there, above the ≈ 0.26 Hz
+/// allowed, and fails.
+fn sweep_tolerance(a: f64, b: f64, rate: f64) -> f64 {
+    use std::f64::consts::TAU;
+    let f = |t: f64| PITCH_BASE_HZ + PITCH_SCALE_HZ * (-t / PITCH_DECAY_S).exp();
+    let (fa, fb, span) = (f(a), f(b), b - a);
+    let dc = ((DC_CUTOFF_HZ / fb).atan() - (DC_CUTOFF_HZ / fa).atan()) / (TAU * span);
+    let feedback = TAU * FEEDBACK_CYCLES;
+    let drift = (0.5 + feedback / (1.0 - feedback)) * (fa - fb) / (rate * span);
+    let theta = TAU * fa / rate;
+    let misplaced = theta * theta * (MAX_DRIVE * MAX_DRIVE / 3.0 + 1.0 / 6.0) / (6.0 * 3f64.sqrt());
+    let resolution = 2.0 * misplaced / (rate * span * span);
+    dc + drift + resolution
+}
+
+/// The zero crossings of `samples` in one direction, in fractional frames,
+/// placed by linear interpolation as `signal_eval::zero_crossing_frequency`
+/// places the upward ones.
+fn crossings(samples: &[f64], upward: bool) -> Vec<f64> {
+    samples
+        .windows(2)
+        .enumerate()
+        .filter(|(_, w)| match upward {
+            true => w[0] < 0.0 && w[1] >= 0.0,
+            false => w[0] > 0.0 && w[1] <= 0.0,
+        })
+        .map(|(n, w)| n as f64 + w[0] / (w[0] - w[1]))
+        .collect()
+}
+
+/// V8's early sweep on `samples`, the left channel from the first kick's
+/// trigger to 3τ after it: every period between two upward or two downward
+/// crossings reads the mean of f(t) over it within [`sweep_tolerance`]. Times
+/// are taken half a frame earlier than the crossing, the shaper's delay
+/// (`std.tanh_shaper`, "Half-frame delay").
+fn check_sweep(samples: &[f64], rate: u32) {
+    let sr = f64::from(rate);
+    let mut periods: Vec<(f64, f64)> = [true, false]
+        .into_iter()
+        .flat_map(|upward| {
+            let times: Vec<f64> = crossings(samples, upward)
+                .into_iter()
+                .map(|n| (n - 0.5) / sr)
+                .collect();
+            times.windows(2).map(|w| (w[0], w[1])).collect::<Vec<_>>()
+        })
+        .collect();
+    periods.sort_by(|x, y| x.0.total_cmp(&y.0));
+    assert!(periods.len() >= 10, "{rate} Hz: {} periods", periods.len());
+
+    let mut misses = Vec::new();
+    for (i, &(a, b)) in periods.iter().enumerate() {
+        let (measured, analytic) = (1.0 / (b - a), sweep_mean(a, b, PITCH_DECAY_S));
+        let tolerance = sweep_tolerance(a, b, sr);
+        println!(
+            "V8 {rate} Hz sweep {:6.2}..{:6.2} ms: {measured:8.4} Hz, f(t) {analytic:8.4} Hz, \
+             {:+.4} Hz (tolerance {tolerance:.4})",
+            a * 1e3,
+            b * 1e3,
+            measured - analytic
+        );
+        if i == 0 {
+            // The first period scaled back to t = 0: the onset the curve implies.
+            let onset = PITCH_BASE_HZ
+                + PITCH_SCALE_HZ * (measured - PITCH_BASE_HZ) / (analytic - PITCH_BASE_HZ);
+            println!("V8 {rate} Hz onset: {onset:.3} Hz (f(0) = 180 Hz)");
+        }
+        // A NaN measurement is a miss, not a pass.
+        let error = measured - analytic;
+        if error.is_nan() || error.abs() > tolerance {
+            misses.push(format!(
+                "{a:.4}..{b:.4} s: {measured} Hz, f(t) {analytic} Hz"
+            ));
+        }
+    }
+    assert!(misses.is_empty(), "{rate} Hz sweep: {}", misses.join("; "));
+
+    // The tolerance still rejects τ counted in frames of another rate.
+    for other in [44_100u32, 48_000, 96_000, 192_000] {
+        let wrong = PITCH_DECAY_S * f64::from(other) / sr;
+        let caught = periods.iter().any(|&(a, b)| {
+            (sweep_mean(a, b, wrong) - sweep_mean(a, b, PITCH_DECAY_S)).abs()
+                > sweep_tolerance(a, b, sr)
+        });
+        assert!(caught || other == rate, "{rate} Hz: τ at {other} Hz passes");
+    }
+}
+
+/// V8: the project renders at 44.1, 48, 96 and 192 kHz, and at each rate the
+/// first kick's pitch follows its definition. The early sweep (from the
+/// trigger to 3τ) reads f(t) = 48 + 132·e^(−t/τ) period by period within a
+/// tolerance derived from the kick ([`sweep_tolerance`]); the late tail is
+/// 48 Hz within 1 %, measured by zero crossings from 250 ms after its trigger
+/// (the pitch envelope is then within 0.22 % of 48 Hz) to the kick's next
+/// trigger.
 #[test]
 fn v8_pitch_at_every_rate() {
     for rate in [44_100u32, 48_000, 96_000, 192_000] {
@@ -448,6 +588,10 @@ fn v8_pitch_at_every_rate() {
             .step_by(2)
             .map(|s| f64::from(s.unwrap()))
             .collect();
+        let sweep_end = trigger + (SWEEP_SECONDS * f64::from(rate)) as usize;
+        assert!(sweep_end <= next, "{rate} Hz: a retrigger inside the sweep");
+        check_sweep(&left[trigger..sweep_end], rate);
+
         let freq =
             signal_eval::zero_crossing_frequency(&left[start..next], f64::from(rate)).unwrap();
         let error = freq / 48.0 - 1.0;

@@ -394,7 +394,7 @@ connections = [
 | V3 | Every event takes effect on its exact frame. Each kick onset in the audio is on the trigger frame. | M1 |
 | V4 | A different seed changes only the ghost triggers | M1 |
 | V5 | Floors: no NaN/Inf, peak ≤ −0.3 dBFS, \|DC\| < 1e-4 | M1 |
-| V6 | Shaper aliasing below the threshold set in M1 (initial target: inharmonic content ≥ 60 dB below the fundamental for 1–8 kHz test tones) | M1 |
+| V6 | Shaper aliasing below the threshold set in M1 (initial target: inharmonic content ≥ 60 dB below the fundamental for 1–8 kHz test tones) *Note (2026-10-11): redefined on the off-divisor tones 1009, 2003, 4001 and 8009 Hz, threshold unchanged (owner decision sq-4aece389, option A); see `testing-and-evaluation.md`, "The V6 measurement".* | M1 |
 | V7 | A feedback loop without a delay is rejected with a clear error; with `unit_delay` it renders | M1 |
 | V8 | The project renders at 44.1, 48, 96, and 192 kHz. The kick's pitch envelope is correct in Hz at each rate. | M1 |
 | V9 | Real-time driver against a null sink with randomised callback sizes → bit-identical to offline | M2 |

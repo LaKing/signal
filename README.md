@@ -2,7 +2,7 @@
 
 A technical and creative platform for developing and interconnecting real-time signal-processing modules (audio, control, analysis, visuals, lighting), built in Rust for macOS on Apple Silicon.
 
-Status: **M1 Core + offline**, developed through devpanel. No application functionality yet.
+Status: **M1 Core + offline** done (V6 waived), developed through devpanel: an offline renderer (`signal render / modules / schema`), the M1 standard modules and the project schema, and the test project `projects/kick`; no real-time audio or GUI yet.
 
 - Vision: [`docs/00-vision.md`](docs/00-vision.md)
 - Architecture: [`docs/architecture.md`](docs/architecture.md) · Decisions: [`docs/adr/`](docs/adr/README.md)

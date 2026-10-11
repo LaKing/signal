@@ -27,14 +27,14 @@ Run everything with `cargo test --workspace --locked --offline`. The acceptance 
 |---|---|---|
 | V1 | `v1_same_seed_same_audio_hash` | Two renders of the same project and seed have the same audio and log hashes and identical `audio.wav` bytes. |
 | V2 | `v2_every_primitive_used_has_contract_tests` | Every primitive the project uses is a `std.*` type with the contract suite run on it in `signal-std/tests/contract.rs`. The contract tests themselves run there, not again here. |
-| V3 | `v3_triggers_on_the_integer_grid_and_first_onset` | Every beat and ghost trigger in `log.jsonl` is on the transport's integer formula (ghosts recomputed from the seed's stream), accents fall on every third beat, nothing is discarded, and the first kick's first non-zero sample is frame 1 (the derivation is in the test). |
+| V3 | `v3_triggers_on_the_integer_grid_and_first_onset` | Every beat and ghost trigger in `log.jsonl` is on the transport's integer formula (ghosts recomputed from the seed's stream), accents fall on every third beat, nothing is discarded, and the first kick's first non-zero sample is frame 1 (the derivation is in the test). The owner accepted this as satisfying V3 for M1 (sq-22037848): every beat or ghost trigger frame matches the transport formula, and the first kick's audio onset is checked; later onsets in the audio are not. |
 | V4 | `v4_seed_changes_only_ghosts` | Seeds 42 and 43 give the same beats and accents and different ghosts; the audio is bit-identical up to the first frame where the ghosts differ. |
 | V5 | `v5_floors_over_64_bars` | 64 bars: no NaN or infinity, **4× oversampled** peak ≤ −0.3 dBFS, \|mean\| < 1e-4 per channel. |
 | V6 | `v6_shaper_aliasing_at_least_60_db` | `std.tanh_shaper` at drive 20 on 1009, 2003, 4001 and 8009 Hz sines at 96 kHz: inharmonic energy ≥ 60 dB below the fundamental. **Ignored** until the shaper fix; see below. |
 | V7 | `v7_delay_free_feedback_is_rejected` | The kick with its feedback loop closed without the unit delay: `signal render` exits 1 and names the cycle. |
-| V8 | `v8_pitch_at_every_rate` | Renders at 44.1, 48, 96 and 192 kHz; the first kick's tail (from 250 ms after the trigger to the next trigger) is 48 Hz within 1 % by zero crossings. |
+| V8 | `v8_pitch_at_every_rate` | Renders at 44.1, 48, 96 and 192 kHz. The first kick's early sweep (trigger to 105 ms) follows f(t) = 48 + 132·e^(−t/35 ms), 180 Hz at the trigger, period by period within a tolerance derived from the kick; its tail (from 250 ms after the trigger to the next trigger) is 48 Hz within 1 % by zero crossings. See below. |
 | Golden | `golden_kick_16_bars` | The seed-42, 16-bar render matches `tests/golden/kick/manifest.json`. |
-| V14 | (human) | The PO listens to a render of `projects/kick` and records a verdict. |
+| V14 | (human) | The PO listens to a render of `projects/kick` and records a verdict. Recorded for M1 in `experiments/m1-kick-v14/verdict.md` (the 60 s seed-42 render). |
 
 Thresholds are fixed by the PO and are never lowered to make a test pass. If a measurement misses one, the test is marked `#[ignore = "…"]` with the measured values, and the values go to the PO.
 
@@ -55,7 +55,29 @@ Printed values (V4, V5, V8) are shown with `cargo test -p signal-cli --test kick
 | 4001 Hz | 26.1 dB | 18.5 dB |
 | 8009 Hz | 22.0 dB | 13.1 dB |
 
-Bringing the shaper to ≥ 60 dB is follow-up issue `2026-10-11-follow-up-bring-std-tanh-shaper-aliasing-to-60-db-on-off-div`, tracked for the M3 ADAA-versus-oversampling experiment. The `#[ignore]` is removed when that lands.
+Bringing the shaper to ≥ 60 dB is follow-up issue `2026-10-11-follow-up-bring-std-tanh-shaper-aliasing-to-60-db-on-off-div`, tracked for the M3 ADAA-versus-oversampling experiment. The `#[ignore]` is removed when that lands. The owner waived V6 for M1 on these values (sq-22037848; `roadmap.md`).
+
+### The V8 measurement
+
+**Early sweep.** The kick's pitch is f(t) = 48 + 132·e^(−t/τ) Hz, τ = 35 ms, t from the trigger frame (`projects/kick/composites/kick.toml`). From the first kick's trigger to 3τ (105 ms, before any ghost retrigger), the test locates every upward and every downward zero crossing of the left channel by linear interpolation, takes each crossing half a frame earlier (the shaper's delay), and reads each period between two like crossings as 1/(period). That reading is the mean of the instantaneous frequency over the period, so it is compared with the mean of f(t) over the same period, not with one point of the curve. The first period starts at the first downward crossing (≈ 2.8 ms); the output starts from 0 on the trigger frame, which is not a crossing. The onset is checked through the curve: f(0) = 180 Hz, and the test prints the onset the first period implies.
+
+**Tolerance.** Per period, the sum of what the kick's own stages add to the reading, derived from its constants, and the measurement's resolution at the rate (`sweep_tolerance` in the test, with the derivation):
+
+- the DC blocker's phase lead atan(10 Hz / f), which grows as f falls (≈ 0.23 Hz on the first periods, rate-independent);
+- the oscillator's frame-by-frame phase sum and the feedback phase modulation, both offsets proportional to f/sr (≈ 0.06 Hz on the first period at 44.1 kHz, 0.01 Hz at 192 kHz);
+- linear interpolation of a crossing of the shaped sine (below 0.001 Hz).
+
+The resulting tolerance is 0.14–0.27 Hz. The test also requires it to reject τ counted in frames of another of the four rates (about 4 Hz off or more); a 1 % error in τ reads about 0.5 Hz off near t = τ and fails.
+
+**Tail.** From 250 ms after the trigger to the next trigger, the frequency by zero crossings (`signal_eval::zero_crossing_frequency`) is 48 Hz within 1 %.
+
+## Human verdicts
+
+A milestone's listening verdict (V14 for M1) is a file `experiments/<id>/verdict.md`, the location `01-inception-proposal.md` §9 plans for verdicts, chosen so that the M3 `experiments/` workflow need not move it. Its format is provisional until Q11 is decided. It holds the verdict verbatim, who gave it and when, the owner decision that relayed it, and the identifiers of the render it judges: project, seed, length, sample rate, frames, `audio_fnv1a64` and `log_fnv1a64`.
+
+| Verdict | File |
+|---|---|
+| M1, V14 | `experiments/m1-kick-v14/verdict.md` |
 
 ## Golden renders
 
