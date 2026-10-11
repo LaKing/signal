@@ -1,0 +1,34 @@
+# The kick: a sine whose pitch falls from 180 Hz to 48 Hz, with a small
+# feedback phase modulation through a unit delay, shaped by an amplitude
+# envelope, tanh saturation and a DC blocker. A test fixture, not a product.
+schema_version = 1
+
+[composite]
+name = "kick"
+
+[instances]
+osc = { module = "std.sine_osc", freq = 48 }
+pitch_env = { module = "std.exp_env", attack_ms = 0, decay_ms = 35 }
+amp_env = { module = "std.exp_env", attack_ms = 0.3, decay_ms = 420 }
+vca = { module = "std.mul" }
+shaper = { module = "std.tanh_shaper", drive = 2.5 }
+dc = { module = "std.dc_block" }
+feedback = { module = "std.unit_delay" }
+
+[wiring]
+connections = [
+  # 48 Hz + 132·pitch_env: about 180 Hz at the trigger.
+  { from = "pitch_env.out", to = "osc.freq", scale = 132 },
+  { from = "osc.out", to = "vca.a" },
+  { from = "amp_env.out", to = "vca.b" },
+  { from = "vca.out", to = "shaper.in" },
+  { from = "shaper.out", to = "dc.in" },
+  # Feedback phase modulation; the unit delay makes the loop legal.
+  { from = "osc.out", to = "feedback.in" },
+  { from = "feedback.out", to = "osc.pm", scale = 0.05 },
+]
+
+[exports]
+inputs = { trigger = ["pitch_env.trigger", "amp_env.trigger"] }
+outputs = { out = "dc.out" }
+parameters = { decay = "amp_env.decay_ms", drive = "shaper.drive" }

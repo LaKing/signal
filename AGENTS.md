@@ -8,6 +8,7 @@ Signal is a macOS (Apple Silicon) application that is internally a platform for 
 | Doing anything | `docs/00-vision.md` §2–4 and §3a (terminology), `docs/architecture.md` |
 | Touching code that can run on the audio thread | `docs/realtime-rules.md` (normative) |
 | Writing or changing a primitive | `docs/module-contract.md` (normative) |
+| Writing tests, changing a test project or a golden render | `docs/testing-and-evaluation.md` |
 | Changing a design decision | `docs/adr/` — never contradict an accepted ADR silently; propose a superseding ADR |
 | Picking up work | `docs/roadmap.md` — current milestone and exit conditions |
 

@@ -1,0 +1,31 @@
+# The M1 test project (docs/01-inception-proposal.md §8.1): a techno kick on a
+# 132 bpm grid with seeded ghost notes, a slow LFO on the decay and a 3-beat
+# accent against the 4-beat bar. A test fixture, not a product.
+schema_version = 1
+
+[project]
+name = "kick"
+sample_rate = 96000
+seed = 42
+
+[instances]
+transport = { module = "std.transport", bpm = 132, ghost_probability = 0.15, ghost_offset_ms = 6, accent_every = 3 }
+drums = { module = "drums" }
+# 1/29.1 Hz: one cycle every 29.1 s.
+lfo = { module = "std.lfo", freq_hz = 0.034364261168384876 }
+accent = { module = "std.exp_env", decay_ms = 200 }
+# Gain chosen so the 4× oversampled peak of a 64-bar render stays ≤ −0.3 dBFS.
+out = { module = "std.audio_out", gain = 0.75 }
+
+[wiring]
+connections = [
+  { from = "transport.beat", to = "drums.trigger" },
+  { from = "transport.ghost", to = "drums.trigger" },
+  { from = "transport.accent", to = "accent.trigger" },
+  # decay 420 ms ± 120 ms.
+  { from = "lfo.out", to = "drums.kick_decay", scale = 120 },
+  # drive 2.5, up to 4.0 on an accent.
+  { from = "accent.out", to = "drums.kick_drive", scale = 1.5 },
+  { from = "drums.out", to = "out.l" },
+  { from = "drums.out", to = "out.r" },
+]

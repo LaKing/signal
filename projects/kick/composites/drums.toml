@@ -1,0 +1,14 @@
+# The drum section: for now only the kick, nested one level deeper so that
+# addresses look like /drums/kick/amp_env.
+schema_version = 1
+
+[composite]
+name = "drums"
+
+[instances]
+kick = { module = "kick" }
+
+[exports]
+inputs = { trigger = "kick.trigger" }
+outputs = { out = "kick.out" }
+parameters = { kick_decay = "kick.decay", kick_drive = "kick.drive" }

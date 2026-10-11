@@ -1,0 +1,14 @@
+{
+  "audio_fnv1a64": "864008e273eaca01",
+  "frames": 2792727,
+  "log_fnv1a64": "43a7a5999ec53585",
+  "provenance": {
+    "project_file_hashes": {
+      "composites/drums.toml": "2fce17af5f01d821",
+      "composites/kick.toml": "94a3f3fcb22d33b8",
+      "project.toml": "f2f484505c704250"
+    }
+  },
+  "sample_rate": 96000,
+  "seed": 42
+}

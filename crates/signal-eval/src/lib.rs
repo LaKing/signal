@@ -3,7 +3,15 @@
 //! Metrics detect defects; humans judge quality.
 //!
 //! M1: [`metrics`], the per-channel level and defect counts written to
-//! `metrics.json`. Spectral analysis comes with M1-7, compare with M3.
+//! `metrics.json`; [`aliasing`] (inharmonic energy of a tone),
+//! [`zero_crossing_frequency`] and [`true_peak_4x`], used by the acceptance
+//! tests (`docs/testing-and-evaluation.md`). Compare comes with M3.
+
+mod aliasing;
+mod peak;
+
+pub use aliasing::{Aliasing, aliasing, zero_crossing_frequency};
+pub use peak::true_peak_4x;
 
 use std::fs;
 use std::io;
