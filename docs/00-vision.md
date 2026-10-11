@@ -6,6 +6,7 @@
 | v5 changes | Signal as one macOS application that is internally a platform; ease of use added as goal G12; Q22 (application form) opened. |
 | v6 changes | Signal is a GUI `.app` (Q22 answered); G13 interconnectivity added; conversion model (§9a). |
 | v7 changes | Q23 answered: the first GUI is the interface setup dialog plus metering. Q2: provisional licence. D18/D19 accepted with the M0 go-ahead. *Setup* term added (§3a). |
+| v8 changes | Review fixes: scheduling clarified (every instance runs; reachability is diagnostic only), ADR 0016 referenced, stale approval labels corrected, Q18 removed from the open list. |
 | v3 changes | Projects as application instances; no "first application" (platform-first); runtime load/unload of built modules; always-seeded randomness confirmed; 96 kHz default discussed; terminology proposal (§3a). |
 | Date | 2026-10-11 |
 | Name | **Signal** (decided by PO) |
@@ -48,7 +49,7 @@ Each application instance is a **Project** within the platform. `signal open <pr
 
 Early milestones still need concrete content to prove the platform. They use **test projects**: fixtures that exercise platform capabilities (a kick drum, a test-tone analyser), not products. [Rec]
 
-## 3a. Terminology (proposal — PO to settle)
+## 3a. Terminology (accepted, Q20)
 
 Reaktor-inspired: a hierarchy, the split between built-in low-level units and user-built containers, and snapshots. Not inherited from Reaktor: binary file formats, GUI-only editing, implicit event-ordering rules.
 
@@ -136,22 +137,22 @@ Reaktor-inspired: a hierarchy, the split between built-in low-level units and us
 **Response [Rec]: agree with the semantics, change the execution.**
 
 1. **Adopt functional per-frame semantics as the normative model.** Every module is a function `(inputs[n], state[n−1]) → (outputs[n], state[n])`. That makes results independent of buffer size by definition, gives feedback a precise meaning (every cycle must pass through a one-frame delay), and makes determinism natural.
-2. **"Pull from outputs" is the right way to *define* what gets computed.** For an acyclic graph, though, pulling and a forward pass in topological order compute exactly the same values. The pull is therefore done **once, when the graph changes**: reachability from outputs determines the active set and its order. It is not repeated at runtime every frame.
+2. **"Pull from outputs" is the mental model of what a value depends on, not a rule for what runs.** For an acyclic graph, pulling and a forward pass in topological order compute exactly the same values, so the order is computed once whenever the graph changes. **Every non-suspended instance runs every frame, whether or not it reaches an output** (point 5; ADR 0016 §1).
 3. **Per-frame semantics, block execution.** Literal per-sample dispatch at 96 kHz forfeits vectorisation and cache efficiency, and it doesn't fit inherently block-based work (FFT, convolution, video frames, 3D). Modules outside feedback loops process many frames per call. That is provably equivalent under rule 1. Feedback loops run frame by frame, or at the granularity of the loop's delay.
-4. **A literal per-frame pull interpreter is kept as the reference oracle.** It is slow, obviously correct, and used in tests: the optimised engine must match it bit-for-bit.
+4. **A literal per-frame interpreter is kept as the reference oracle.** It is slow, obviously correct, and used in tests: the optimised engine must match it bit-for-bit.
 5. **Lazy pulling has a semantic trap.** If an unobserved module is not computed, its time stops: phases freeze, envelopes pause. Recommended semantics: every module in the running graph advances every frame. Suspending a module is an explicit, visible action.
 6. **One master clock, many rates.** Video (~60 Hz), DMX (~44 Hz), analysis hops, and control signals should not run at 96 kHz. Each port has a rate that is an exact subdivision of the master clock, and rate changes are explicit at connections.
 7. **Physical clocks drift.** The master clock is *logical*. In real time it follows the primary audio device. Other devices (a second interface, the display, the network) are attached through clock-domain adapters (resampling, frame repeat or drop). Offline there are no physical clocks, so everything is exact.
 
-**PO response (2026-10-11): D-EXEC-1 and D-EXEC-2 approved. D-EXEC-3 deferred to benchmarks.**
+**PO response (2026-10-11): D-EXEC-1 and D-EXEC-2 approved. D-EXEC-3 deferred to benchmarks.** The precise scheduling, feedback, and same-frame ordering rules are specified in ADR 0016 (proposed).
 
 | ID | Decision | Status | Reversibility |
 |---|---|---|---|
 | D-EXEC-1 | **Semantics:** frame-functional. Each frame, each module computes `(inputs[n], state[n−1]) → (outputs[n], state[n])`. Every feedback loop contains at least a one-frame delay. Every module advances every frame. | **Approved** | Hard: defines what every result means |
 | D-EXEC-2 | **Module contract:** a module processes *k ≥ 1* consecutive frames per call, with results required to be identical for any *k*. A per-frame engine simply calls it with *k* = 1. | **Approved** | Hard: every primitive is written against it |
-| D-EXEC-3 | **Engine scheduling:** start with the PO's model literally. Evaluation order is derived by pulling from outputs whenever the graph changes, then one frame is computed at a time. Block execution (*k* > 1) is added later **only if measurements show a need**, verified bit-exact against the per-frame engine. | Deferred: decided by benchmarks | Easy: internal to the engine |
+| D-EXEC-3 | **Engine scheduling:** start with the PO's model literally: one frame at a time, all non-suspended instances, in an order computed whenever the graph changes (ADR 0016). Block execution (*k* > 1) is added later **only if measurements show a need**, verified bit-exact against the per-frame engine. | Deferred: decided by benchmarks | Easy: internal to the engine |
 
-## 9a. Interconnectivity and conversion model (proposal [Rec], needs PO confirmation)
+## 9a. Interconnectivity and conversion model (accepted: ADR 0005)
 
 **Principle.** Any output can be connected to any input. Signal either connects them directly, inserts a converter it can choose unambiguously, or explains which converter is missing and suggests candidates. Nothing is converted invisibly. Inserted converters are real module instances, so they appear in the plan, the logs, and the GUI.
 
@@ -196,7 +197,7 @@ Five instances, four connections, two converters inserted automatically and visi
 
 **Not proposed:** an expression language inside connections (e.g. `when bass > 0.6 then blue`). It would be convenient, but it is the start of a DSL (§10.1). Revisit with evidence.
 
-## 10. Complexity challenges [Rec, each needs PO agreement]
+## 10. Complexity challenges (accepted with the vision approval)
 
 1. **No new programming language yet.** Declarative text for structure and parameters; algorithms are Rust modules behind a stable contract. Revisit a DSL or scripting layer when usage proves the need.
 2. **Offline first.** The offline renderer is the reference. Real time is a driver over the same code.
@@ -261,7 +262,6 @@ Answered:
 | Q13 | Time or budget expectations? | Roadmap sizing. |
 | Q16 | Visual output: what targets (window on screen, projector, Syphon, video file), and what latency or sync to audio? | Rendering stack and clock adapters. Can wait until that domain is targeted. |
 | Q17 | Measurement accuracy needs (latency calibration, sample-exact input/output alignment, calibrated levels)? | I/O timing design. Can wait until that domain is targeted. |
-| Q18 | Do you confirm A6 (always seeded, even for "random" generation)? | Determinism design. |
 
 ## 14. Approval checklist
 

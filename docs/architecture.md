@@ -19,8 +19,10 @@ One macOS application (`Signal.app`, plus a headless `signal` CLI in the bundle)
 |---|---|---|
 | Frame | `Frame(u64)` at the project's master rate (default 96 kHz) is the only time the core knows | 0003 |
 | Module | Primitive (Rust, compiled in) or composite (text, nestable) | 0001 |
-| Semantics | `(inputs[n], state[n-1]) -> (outputs[n], state[n])`; feedback needs a one-frame delay; every instance advances every frame | 0002 |
-| Module contract | `describe`, `prepare` (only place allocation is allowed), `process(k frames)` (*k*-partition-invariant), `reset` | 0002 |
+| Semantics | `(inputs[n], state[n-1]) -> (outputs[n], state[n])`; feedback needs a one-frame delay; every non-suspended instance advances every frame | 0002, 0016 |
+| Frame phases | external input → emit (state-output primitives) → process (direct primitives, topological order) → absorb | 0016 |
+| Same-frame order | external events by log sequence, then module events by source address; events set the base, signals modulate | 0016 |
+| Module contract | `describe` (incl. feedthrough class), `prepare` (only place allocation is allowed), `process(k frames)` for direct primitives or `emit`/`absorb` for state-output primitives (*k*-partition-invariant), `reset` | 0002, 0016 |
 | Port | shape + rate (integer divisor) + kind + unit/range; parameters are input ports with defaults | 0004, 0005 |
 | Conversion | implicit / default / explicit; converters are modules, auto-inserted only when unambiguous and always visible | 0005 |
 | Event | generic messages on event ports; MIDI/OSC only via adapter modules | 0004 |
@@ -36,7 +38,7 @@ project folder (TOML) ─► signal-project ─► signal-graph ─► Plan vN �
                                                ▲   resolve composites,            ├─ offline (reference)
            edits: file-watch diff, CLI, GUI ───┘   flatten, insert converters,    └─ realtime (CoreAudio)
                                                    check feedback delays,
-                                                   order by pulling from outputs
+                                                   schedule all instances (ADR 0016)
 render artifacts: audio + manifest + logs + metrics ─► signal-eval (analyse, compare)
 ```
 
