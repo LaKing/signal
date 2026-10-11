@@ -1,0 +1,16 @@
+# Invalid: `std.sine` is not a registered module type.
+schema_version = 1
+
+[project]
+name = "unknown_module"
+sample_rate = 48000
+
+[instances]
+osc = { module = "std.sine", freq = 440 }
+out = { module = "std.audio_out" }
+
+[wiring]
+connections = [
+  { from = "osc.out", to = "out.l" },
+  { from = "osc.out", to = "out.r" },
+]

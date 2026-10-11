@@ -1,0 +1,5 @@
+---
+source: crates/signal-project/tests/errors.rs
+expression: "errors(&[(\"project.toml\", &project), (\"composites/voice.toml\", &voice)])"
+---
+project.toml:7:36: error: /v/shaper.drive: value 50 is outside [0.1, 20]

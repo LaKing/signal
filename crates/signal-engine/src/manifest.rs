@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 pub struct Provenance {
     /// The Signal source revision (e.g. a git commit).
     pub signal_revision: String,
-    /// Whether the source had uncommitted changes.
-    pub signal_dirty: bool,
+    /// Whether the source had uncommitted changes; `None` when that could not
+    /// be found out. Written as `true`, `false` or `"unknown"`.
+    #[serde(with = "dirty")]
+    pub signal_dirty: Option<bool>,
     /// The compiler, as `rustc --version` prints it.
     pub rustc_version: String,
     /// A hash of every project file, by path relative to the project folder.
@@ -38,4 +40,41 @@ pub struct Manifest {
     /// FNV-1a 64 of the audio samples as `audio.wav` stores them (32-bit float,
     /// little-endian, interleaved), as 16 lowercase hex digits.
     pub audio_fnv1a64: String,
+}
+
+/// `signal_dirty` as `true`, `false` or `"unknown"`.
+mod dirty {
+    use serde::de::Error;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    const UNKNOWN: &str = "unknown";
+
+    pub(super) fn serialize<S: Serializer>(
+        value: &Option<bool>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(dirty) => serializer.serialize_bool(*dirty),
+            None => serializer.serialize_str(UNKNOWN),
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Known(bool),
+        Text(String),
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<bool>, D::Error> {
+        match Repr::deserialize(deserializer)? {
+            Repr::Known(dirty) => Ok(Some(dirty)),
+            Repr::Text(text) if text == UNKNOWN => Ok(None),
+            Repr::Text(text) => Err(D::Error::custom(format!(
+                "signal_dirty is `{text}`; expected true, false or \"unknown\""
+            ))),
+        }
+    }
 }

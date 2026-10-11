@@ -1,0 +1,298 @@
+//! Error messages with file:line:column for each kind of mistake, including
+//! graph errors mapped back to instances and connections, and errors in
+//! composites the project does not use.
+
+use signal_core::Registry;
+use signal_project::{Project, SourceFile};
+
+const VALID: &str = r#"schema_version = 1
+
+[project]
+name = "t"
+sample_rate = 48000
+
+[instances]
+osc = { module = "std.sine_osc", freq = 440 }
+out = { module = "std.audio_out" }
+
+[wiring]
+connections = [
+  { from = "osc.out", to = "out.l" },
+  { from = "osc.out", to = "out.r" },
+]
+"#;
+
+fn registry() -> Registry {
+    let mut registry = Registry::new();
+    signal_std::register(&mut registry).unwrap();
+    registry
+}
+
+fn sources(files: &[(&str, &str)]) -> Vec<SourceFile> {
+    files
+        .iter()
+        .map(|(path, text)| SourceFile {
+            path: (*path).to_owned(),
+            text: (*text).to_owned(),
+        })
+        .collect()
+}
+
+/// The diagnostics of loading and planning `files`, one per line.
+fn errors(files: &[(&str, &str)]) -> String {
+    let diagnostics = match Project::from_sources(sources(files)) {
+        Err(diagnostics) => diagnostics,
+        Ok(project) => match project.plan(&registry()) {
+            Err(diagnostics) => diagnostics,
+            Ok(_) => panic!("expected errors"),
+        },
+    };
+    diagnostics
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn project_errors(text: &str) -> String {
+    errors(&[("project.toml", text)])
+}
+
+#[test]
+fn valid_project_plans() {
+    let project = Project::from_sources(sources(&[("project.toml", VALID)])).unwrap();
+    let planned = project.plan(&registry()).unwrap();
+    assert_eq!(planned.plan.instances.len(), 2);
+    assert!(planned.warnings.is_empty());
+}
+
+#[test]
+fn syntax_error() {
+    let text = VALID.replace(r#"name = "t""#, r#"name = "t"#);
+    insta::assert_snapshot!("syntax_error", project_errors(&text));
+}
+
+#[test]
+fn unknown_key() {
+    let text = VALID.replace("sample_rate", "sample_rat");
+    insta::assert_snapshot!("unknown_key", project_errors(&text));
+}
+
+#[test]
+fn unknown_module() {
+    let text = VALID.replace("std.sine_osc", "std.sine");
+    insta::assert_snapshot!("unknown_module", project_errors(&text));
+}
+
+#[test]
+fn unknown_port() {
+    let text = VALID.replacen(r#"from = "osc.out""#, r#"from = "osc.output""#, 1);
+    insta::assert_snapshot!("unknown_port", project_errors(&text));
+}
+
+#[test]
+fn out_of_range_parameter() {
+    let text = VALID.replace(
+        r#"{ module = "std.audio_out" }"#,
+        r#"{ module = "std.audio_out", gain = 5 }"#,
+    );
+    insta::assert_snapshot!("out_of_range_parameter", project_errors(&text));
+}
+
+#[test]
+fn delay_free_feedback_cycle() {
+    let text = r#"schema_version = 1
+
+[project]
+name = "loop"
+
+[instances]
+a = { module = "std.add" }
+b = { module = "std.add" }
+out = { module = "std.audio_out" }
+
+[wiring]
+connections = [
+  { from = "a.out", to = "b.a" },
+  { from = "b.out", to = "a.a" },
+  { from = "b.out", to = "out.l" },
+]
+"#;
+    insta::assert_snapshot!("delay_free_feedback_cycle", project_errors(text));
+}
+
+const VOICE_PROJECT: &str = r#"schema_version = 1
+
+[project]
+name = "t"
+
+[instances]
+v = { module = "voice", drive = 50 }
+out = { module = "std.audio_out" }
+
+[wiring]
+connections = [{ from = "v.out", to = "out.l" }]
+"#;
+
+const VOICE: &str = r#"schema_version = 1
+
+[composite]
+name = "voice"
+
+[instances]
+osc = { module = "std.sine_osc" }
+shaper = { module = "std.tanh_shaper" }
+
+[wiring]
+connections = [{ from = "osc.out", to = "shaper.in" }]
+
+[exports]
+outputs = { out = "shaper.out" }
+parameters = { drive = "shaper.drive" }
+"#;
+
+/// An error inside a used composite names the composite's file.
+#[test]
+fn error_in_used_composite() {
+    let voice = VOICE.replace(
+        r#"{ module = "std.sine_osc" }"#,
+        r#"{ module = "std.nope" }"#,
+    );
+    let project = VOICE_PROJECT.replace("drive = 50", "drive = 2");
+    insta::assert_snapshot!(
+        "error_in_used_composite",
+        errors(&[
+            ("project.toml", &project),
+            ("composites/voice.toml", &voice)
+        ])
+    );
+}
+
+/// A value set through a parameter export points at the outer key's value.
+#[test]
+fn out_of_range_through_export() {
+    insta::assert_snapshot!(
+        "out_of_range_through_export",
+        errors(&[
+            ("project.toml", VOICE_PROJECT),
+            ("composites/voice.toml", VOICE)
+        ])
+    );
+}
+
+const SPARE: &str = r#"schema_version = 1
+
+[composite]
+name = "spare"
+
+[instances]
+osc = { module = "std.sine_osc" }
+
+[exports]
+outputs = { out = "osc.out" }
+"#;
+
+/// A composite no instance uses is still validated: an unknown parameter key
+/// in it is an error at the key.
+#[test]
+fn unused_composite_unknown_parameter() {
+    let spare = SPARE.replace(
+        r#"{ module = "std.sine_osc" }"#,
+        r#"{ module = "std.sine_osc", typo = 1 }"#,
+    );
+    insta::assert_snapshot!(
+        "unused_composite_unknown_parameter",
+        errors(&[("project.toml", VALID), ("composites/spare.toml", &spare)])
+    );
+}
+
+/// Unknown modules, ports and export targets in an unused composite are
+/// errors too (each on its own instance, so none hides another).
+#[test]
+fn unused_composite_other_errors() {
+    let spare = r#"schema_version = 1
+
+[composite]
+name = "spare"
+
+[instances]
+osc = { module = "std.sine_osc" }
+lost = { module = "std.nope" }
+shaper = { module = "std.tanh_shaper" }
+
+[wiring]
+connections = [{ from = "osc.output", to = "shaper.in" }]
+
+[exports]
+outputs = { out = "ghost.out" }
+"#;
+    insta::assert_snapshot!(
+        "unused_composite_other_errors",
+        errors(&[("project.toml", VALID), ("composites/spare.toml", spare)])
+    );
+}
+
+/// The control for the two cases above: the valid composite file is accepted,
+/// so the errors come from the defects alone.
+#[test]
+fn unused_valid_composite_is_accepted() {
+    assert!(plans(&[
+        ("project.toml", VALID),
+        ("composites/spare.toml", SPARE)
+    ]));
+}
+
+/// Whether `files` load and plan without errors.
+fn plans(files: &[(&str, &str)]) -> bool {
+    let project = Project::from_sources(sources(files)).unwrap();
+    project.plan(&registry()).is_ok()
+}
+
+/// Two connections between the same ports: the non-finite scale is reported at
+/// the connection that has it (line 13), not at the first one.
+#[test]
+fn non_finite_scale_on_a_repeated_connection() {
+    let text = r#"schema_version = 1
+
+[project]
+name = "t"
+
+[instances]
+osc = { module = "std.sine_osc" }
+out = { module = "std.audio_out" }
+
+[wiring]
+connections = [
+  { from = "osc.out", to = "out.l", scale = 1.0 },
+  { from = "osc.out", to = "out.l", scale = nan },
+]
+"#;
+    insta::assert_snapshot!(
+        "non_finite_scale_on_a_repeated_connection",
+        project_errors(text)
+    );
+    assert!(plans(&[("project.toml", &text.replace("nan", "1.0"))]));
+}
+
+/// Two exported parameters alias one inner parameter. Values are assigned in
+/// key order, so `z` wins over `a`, and the range error points at `z`'s value.
+#[test]
+fn out_of_range_through_aliased_exports() {
+    let voice = VOICE.replace(
+        r#"parameters = { drive = "shaper.drive" }"#,
+        r#"parameters = { a = "shaper.drive", z = "shaper.drive" }"#,
+    );
+    let project = VOICE_PROJECT.replace("drive = 50", "a = 1, z = 50");
+    insta::assert_snapshot!(
+        "out_of_range_through_aliased_exports",
+        errors(&[
+            ("project.toml", &project),
+            ("composites/voice.toml", &voice)
+        ])
+    );
+    let fixed = project.replace("z = 50", "z = 5");
+    assert!(plans(&[
+        ("project.toml", &fixed),
+        ("composites/voice.toml", &voice)
+    ]));
+}

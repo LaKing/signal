@@ -20,7 +20,7 @@ fn artifacts(name: &str) -> PathBuf {
 fn provenance() -> Provenance {
     Provenance {
         signal_revision: "cf613bd1fc85a9a8dc6de643e68080ea99ea1265".to_owned(),
-        signal_dirty: true,
+        signal_dirty: Some(true),
         rustc_version: "rustc 1.99.0".to_owned(),
         project_file_hashes: [("project.toml".to_owned(), "0123456789abcdef".to_owned())]
             .into_iter()
@@ -310,4 +310,27 @@ fn manifest_serializes_every_field() {
     assert_eq!(read, manifest);
     assert_eq!(read.provenance, provenance());
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `signal_dirty` is written `true`, `false` or `"unknown"` and reads back the
+/// same; any other text is refused.
+#[test]
+fn signal_dirty_is_true_false_or_unknown() {
+    for (dirty, json) in [
+        (Some(true), serde_json::json!(true)),
+        (Some(false), serde_json::json!(false)),
+        (None, serde_json::json!("unknown")),
+    ] {
+        let provenance = Provenance {
+            signal_dirty: dirty,
+            ..provenance()
+        };
+        let value = serde_json::to_value(&provenance).unwrap();
+        assert_eq!(value["signal_dirty"], json);
+        let read: Provenance = serde_json::from_value(value).unwrap();
+        assert_eq!(read, provenance);
+    }
+    let mut value = serde_json::to_value(provenance()).unwrap();
+    value["signal_dirty"] = serde_json::json!("maybe");
+    assert!(serde_json::from_value::<Provenance>(value).is_err());
 }

@@ -1,0 +1,17 @@
+# Valid with a warning: `spare` reaches no sink.
+schema_version = 1
+
+[project]
+name = "unused_instance"
+sample_rate = 48000
+
+[instances]
+osc = { module = "std.sine_osc" }
+spare = { module = "std.sine_osc" }
+out = { module = "std.audio_out" }
+
+[wiring]
+connections = [
+  { from = "osc.out", to = "out.l" },
+  { from = "osc.out", to = "out.r" },
+]

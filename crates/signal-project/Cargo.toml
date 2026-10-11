@@ -17,6 +17,8 @@ schemars = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
+# The standard primitives, for loading and validating real projects in tests.
+signal-std = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,0 +1,7 @@
+---
+source: crates/signal-project/tests/errors.rs
+expression: "errors(&[(\"project.toml\", VALID), (\"composites/spare.toml\", spare)])"
+---
+composites/spare.toml:8:19: error: /spare/lost: unknown module `std.nope` (neither a registered primitive type nor a composite)
+composites/spare.toml:12:25: error: /spare/osc.output: unknown port
+composites/spare.toml:15:19: error: /spare: no instance named `ghost`

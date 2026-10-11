@@ -1,0 +1,5 @@
+---
+source: crates/signal-project/tests/errors.rs
+expression: "errors(&[(\"project.toml\", VALID), (\"composites/spare.toml\", &spare)])"
+---
+composites/spare.toml:7:34: error: /spare/osc.typo: unknown parameter

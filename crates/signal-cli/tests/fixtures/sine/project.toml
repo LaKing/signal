@@ -1,0 +1,17 @@
+# The smallest renderable project: a sine oscillator into both channels.
+schema_version = 1
+
+[project]
+name = "sine"
+sample_rate = 48000
+seed = 1
+
+[instances]
+osc = { module = "std.sine_osc", freq = 440 }
+out = { module = "std.audio_out", gain = 0.5 }
+
+[wiring]
+connections = [
+  { from = "osc.out", to = "out.l" },
+  { from = "osc.out", to = "out.r" },
+]

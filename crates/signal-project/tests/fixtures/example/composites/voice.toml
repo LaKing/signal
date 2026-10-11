@@ -1,0 +1,21 @@
+# Two sine oscillators into a tanh shaper.
+schema_version = 1
+
+[composite]
+name = "voice"
+
+[instances]
+low = { module = "std.sine_osc" }
+high = { module = "std.sine_osc", freq = 441 }
+shaper = { module = "std.tanh_shaper" }
+
+[wiring]
+connections = [
+  { from = "low.out", to = "shaper.in" },
+  { from = "high.out", to = "shaper.in", scale = 0.5 },
+]
+
+[exports]
+inputs = { pm = ["low.pm", "high.pm"] }
+outputs = { out = "shaper.out" }
+parameters = { freq = ["low.freq", "high.freq"], drive = "shaper.drive" }

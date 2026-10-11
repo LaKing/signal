@@ -1,0 +1,247 @@
+---
+source: crates/signal-cli/tests/cli.rs
+expression: text
+---
+{
+  "$defs": {
+    "CompositeFile": {
+      "additionalProperties": false,
+      "description": "A Signal composite file, `composites/<name>.toml`.",
+      "properties": {
+        "composite": {
+          "$ref": "#/$defs/CompositeSection",
+          "description": "The composite's name."
+        },
+        "exports": {
+          "$ref": "#/$defs/ExportsSection",
+          "description": "What the composite exposes to the instance that uses it."
+        },
+        "instances": {
+          "additionalProperties": {
+            "$ref": "#/$defs/InstanceEntry"
+          },
+          "description": "The module instances, by name.",
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 1,
+          "description": "The format version of this file; this version of Signal reads 1.",
+          "type": "integer"
+        },
+        "wiring": {
+          "$ref": "#/$defs/Wiring",
+          "description": "The connections between instances."
+        }
+      },
+      "required": [
+        "schema_version",
+        "composite"
+      ],
+      "type": "object"
+    },
+    "CompositeSection": {
+      "additionalProperties": false,
+      "description": "`[composite]`.",
+      "properties": {
+        "name": {
+          "description": "The composite's name: its file name without `.toml`, used as the module\nreference of its instances.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "ConnectionEntry": {
+      "additionalProperties": false,
+      "description": "One connection.",
+      "properties": {
+        "from": {
+          "description": "The source output port, `instance.port`.",
+          "type": "string"
+        },
+        "scale": {
+          "description": "The factor applied to a signal source; 1 when absent.",
+          "format": "double",
+          "type": "number"
+        },
+        "to": {
+          "description": "The target input port or parameter, `instance.port`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    "ExportsSection": {
+      "additionalProperties": false,
+      "description": "`[exports]`.",
+      "properties": {
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Targets"
+          },
+          "description": "Exported inputs: each maps to one inner input port or a list of them.",
+          "type": "object"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Exported outputs: each maps to exactly one inner output port.",
+          "type": "object"
+        },
+        "parameters": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Targets"
+          },
+          "description": "Exported parameters: each maps to one inner parameter or a list of them.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "InstanceEntry": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "description": "An instance: its module and the parameter values set on it.",
+      "properties": {
+        "module": {
+          "$ref": "#/$defs/ModuleRef"
+        }
+      },
+      "required": [
+        "module"
+      ],
+      "type": "object"
+    },
+    "ModuleRef": {
+      "anyOf": [
+        {
+          "enum": [
+            "std.add",
+            "std.audio_out",
+            "std.dc_block",
+            "std.exp_env",
+            "std.lfo",
+            "std.mul",
+            "std.noise",
+            "std.sine_osc",
+            "std.tanh_shaper",
+            "std.transport",
+            "std.unit_delay"
+          ]
+        },
+        {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "type": "string"
+        }
+      ],
+      "description": "A module reference: a registered primitive type, or the name of a composite in composites/<name>.toml."
+    },
+    "ProjectFile": {
+      "additionalProperties": false,
+      "description": "A Signal project file, `project.toml`.",
+      "properties": {
+        "instances": {
+          "additionalProperties": {
+            "$ref": "#/$defs/InstanceEntry"
+          },
+          "description": "The module instances, by name.",
+          "type": "object"
+        },
+        "project": {
+          "$ref": "#/$defs/ProjectSection",
+          "description": "The project's name and run settings."
+        },
+        "schema_version": {
+          "const": 1,
+          "description": "The format version of this file; this version of Signal reads 1.",
+          "type": "integer"
+        },
+        "wiring": {
+          "$ref": "#/$defs/Wiring",
+          "description": "The connections between instances."
+        }
+      },
+      "required": [
+        "schema_version",
+        "project"
+      ],
+      "type": "object"
+    },
+    "ProjectSection": {
+      "additionalProperties": false,
+      "description": "`[project]`.",
+      "properties": {
+        "name": {
+          "description": "The project's name.",
+          "type": "string"
+        },
+        "sample_rate": {
+          "default": 96000,
+          "description": "The sample rate in frames per second.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "seed": {
+          "default": 0,
+          "description": "The master seed of every random stream.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "Targets": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      ],
+      "description": "One inner port `instance.port`, or a non-empty list of them (fan-out)."
+    },
+    "Wiring": {
+      "additionalProperties": false,
+      "description": "`[wiring]`.",
+      "properties": {
+        "connections": {
+          "description": "Connections from an output port to an input port or parameter.",
+          "items": {
+            "$ref": "#/$defs/ConnectionEntry"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ProjectFile"
+    },
+    {
+      "$ref": "#/$defs/CompositeFile"
+    }
+  ],
+  "title": "Signal project and composite files"
+}

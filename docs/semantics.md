@@ -265,6 +265,8 @@ Pretty-printed JSON with a final newline:
 ```
 
 - **`provenance`** is supplied by the caller (the CLI): the Signal revision and whether the source was dirty, the `rustc --version` line, a hash per project file (by path relative to the project folder) and a hash of `Cargo.lock`, in a format the caller chooses.
+  - `signal_dirty` is `false` for a clean source, `true` for uncommitted changes, and `"unknown"` when the source state could not be read.
+  - `signal render` writes `"unknown"` for any string field whose source is unavailable (`docs/project-format.md`, "Render provenance").
 - **The engine fills in the rest:**
   - `seed`: the master seed;
   - `sample_rate`;

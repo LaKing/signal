@@ -1,0 +1,5 @@
+---
+source: crates/signal-project/tests/errors.rs
+expression: project_errors(&text)
+---
+project.toml:8:18: error: /osc: unknown module `std.sine` (neither a registered primitive type nor a composite)

@@ -645,6 +645,7 @@ name = "signal-cli"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "hound",
  "insta",
  "serde_json",
  "signal-core",
@@ -719,6 +720,7 @@ dependencies = [
  "serde_json",
  "signal-core",
  "signal-graph",
+ "signal-std",
  "toml",
  "toml_edit",
 ]

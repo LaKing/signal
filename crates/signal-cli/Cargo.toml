@@ -19,6 +19,9 @@ signal-engine = { workspace = true }
 signal-eval = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }
+# To tell an I/O failure writing audio.wav (exit 1) from another (exit 2);
+# the integration tests also read the WAV header with it.
+hound = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

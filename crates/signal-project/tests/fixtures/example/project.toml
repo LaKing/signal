@@ -1,0 +1,17 @@
+# The example project of docs/project-format.md: a two-oscillator voice into
+# the stereo sink.
+schema_version = 1
+
+[project]
+name = "example"
+seed = 7
+
+[instances]
+voice = { module = "voice", freq = 220, drive = 2.0 }
+out = { module = "std.audio_out", gain = 0.5 }
+
+[wiring]
+connections = [
+  { from = "voice.out", to = "out.l" },
+  { from = "voice.out", to = "out.r", scale = 0.5 },
+]
