@@ -60,10 +60,17 @@ impl RealtimeConfig {
     }
 
     /// A configuration for a device buffer of `buffer_frames`: the latency
-    /// is two buffers.
+    /// is two buffers, and the engine runs blocks of up to the buffer, at
+    /// most [`EngineConfig::DEFAULT_BLOCK_CAPACITY`] frames (ADR 0019 §1).
     pub fn with_buffer(sample_rate: u32, seed: u64, buffer_frames: u64) -> RealtimeConfig {
+        let block = usize::try_from(buffer_frames)
+            .unwrap_or(usize::MAX)
+            .clamp(1, EngineConfig::DEFAULT_BLOCK_CAPACITY);
         RealtimeConfig {
-            engine: EngineConfig::new(sample_rate, seed),
+            engine: EngineConfig {
+                block_capacity: block,
+                ..EngineConfig::new(sample_rate, seed)
+            },
             buffer_frames,
             latency_frames: buffer_frames.saturating_mul(2),
             commands: 1024,
@@ -428,10 +435,12 @@ impl Runner {
     /// `channels` interleaved device channels. In order:
     /// 1. takes the queued commands, each at its effective frame: events,
     ///    suspends and resumes go to the engine, swaps wait for their frame;
-    /// 2. runs the frames one at a time, committing a swap at its frame;
-    ///    writes each frame's audio-sink channels (times the sink's `gain`)
-    ///    clamped to [−1, 1] as f32 to the same device channels, extra device
-    ///    channels 0; and pushes the frame's log records;
+    /// 2. runs the frames in blocks of up to the engine's block capacity,
+    ///    split at the frame of every command (a swap is committed at a
+    ///    block's first frame, ADR 0019 §1); writes each frame's audio-sink
+    ///    channels (times the sink's `gain`) clamped to [−1, 1] as f32 to the
+    ///    same device channels, extra device channels 0; and pushes each
+    ///    block's log records, frame by frame;
     /// 3. pushes a meter per sink channel, the base and effective value of
     ///    up to [`PARAMETERS_PER_CALLBACK`] parameters (going round the plan's
     ///    parameters), returns used input for dropping, and pushes the status.
@@ -447,10 +456,16 @@ impl Runner {
             out.fill(0.0);
         } else {
             let mut rows = out.chunks_exact_mut(channels);
-            for row in &mut rows {
-                self.frame(row);
-                frames += 1;
+            let total = rows.len();
+            let mut done = 0;
+            while done < total {
+                let ran = self.block(&mut rows, total - done);
+                if ran == 0 {
+                    break;
+                }
+                done += ran;
             }
+            frames = done as u64;
             rows.into_remainder().fill(0.0);
         }
         self.finish(first_frame, frames);
@@ -557,8 +572,10 @@ impl Runner {
         }
     }
 
-    /// One frame: the swap due now, the frame, its audio, its log.
-    fn frame(&mut self, row: &mut [f32]) {
+    /// One block of at most `most` frames: the swap due now, then frames up
+    /// to the next swap or command frame, their audio and their log. Returns
+    /// the frames it ran.
+    fn block<'a>(&mut self, rows: &mut impl Iterator<Item = &'a mut [f32]>, most: usize) -> usize {
         let next = self.engine.next_frame();
         if self.pending.front().is_some_and(|p| p.frame <= next)
             && let Some(mut pending) = self.pending.pop_front()
@@ -577,22 +594,42 @@ impl Runner {
             self.send_back(Back::Swap(pending.swap));
         }
 
-        self.engine.run_frame();
-        row.fill(0.0);
+        // Split at the next swap and at the next command's frame (C6).
+        let swap = self.pending.front().map(|p| p.frame);
+        let command = self.engine.next_command_frame();
+        let until = [swap, command]
+            .into_iter()
+            .flatten()
+            .filter(|&at| at > next)
+            .map(|at| usize::try_from(at.0 - next.0).unwrap_or(usize::MAX))
+            .min()
+            .unwrap_or(usize::MAX);
+        let ran = self.engine.run_block(most.min(until));
+
         let gain = self
             .gain
             .as_ref()
-            .and_then(|port| self.engine.parameter(port))
-            .map(|g| g.effective);
-        let inputs = self.engine.instance_inputs(self.sink);
-        for (channel, &x) in inputs.iter().enumerate() {
-            let sample = to_device(gain.map_or(x, |g| g * x), &mut self.counts.clipped);
-            if let Some(level) = self.levels.get_mut(channel) {
-                level.0 = level.0.max(sample.abs());
-                level.1 += f64::from(sample) * f64::from(sample);
-            }
-            if let Some(out) = row.get_mut(channel) {
-                *out = sample;
+            .and_then(|port| self.engine.parameter_index(port));
+        let width = self.engine.instance_inputs(self.sink).len();
+        for f in 0..ran {
+            let Some(row) = rows.next() else {
+                break;
+            };
+            row.fill(0.0);
+            let gain = gain.and_then(|j| self.engine.parameter_at_frame(j, f));
+            for channel in 0..width {
+                let x = self
+                    .engine
+                    .instance_input_at(self.sink, channel, f)
+                    .unwrap_or(0.0);
+                let sample = to_device(gain.map_or(x, |g| g * x), &mut self.counts.clipped);
+                if let Some(level) = self.levels.get_mut(channel) {
+                    level.0 = level.0.max(sample.abs());
+                    level.1 += f64::from(sample) * f64::from(sample);
+                }
+                if let Some(out) = row.get_mut(channel) {
+                    *out = sample;
+                }
             }
         }
 
@@ -603,6 +640,7 @@ impl Runner {
                 *overflows = overflows.saturating_add(1);
             }
         });
+        ran
     }
 
     /// After the frames: meters, used input back, then the status, last, so

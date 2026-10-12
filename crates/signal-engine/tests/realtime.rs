@@ -187,6 +187,37 @@ fn offline(reports: &[(Report, SentCommand)], frames: u64) -> Vec<f32> {
     rendered.samples.iter().map(|&x| x as f32).collect()
 }
 
+/// M2.6-1 C6: at every block capacity the Runner splits each callback into
+/// blocks at swap and command frames, and its output equals the per-frame
+/// offline render of what it applied, bit for bit as f32.
+#[test]
+fn runner_blocks_at_every_capacity_equal_the_offline_render() {
+    for capacity in [1, 7, 64, 256] {
+        let config = RealtimeConfig {
+            engine: EngineConfig {
+                block_capacity: capacity,
+                ..EngineConfig::new(RATE, SEED)
+            },
+            ..config()
+        };
+        let mut sent = false;
+        let (output, seen, _, runner) = run(config, 2, 11, FRAMES, |controller, seen| {
+            controller.poll(seen);
+            if !sent {
+                script(controller);
+                sent = true;
+            }
+        });
+        assert_eq!(seen.reports.len(), 8, "capacity {capacity}");
+        assert_eq!(
+            output,
+            offline(&seen.reports, FRAMES),
+            "capacity {capacity}"
+        );
+        assert_eq!(runner.status().next_frame, Frame(FRAMES));
+    }
+}
+
 /// AC6: commands, swaps and the removal apply at their frames, and the output
 /// equals the offline render of what was applied, bit for bit as f32.
 #[test]

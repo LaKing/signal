@@ -12,6 +12,8 @@ use signal_core::{Frame, InstanceAddress, PortAddress};
 pub enum EngineError {
     /// The sample rate is 0.
     InvalidSampleRate,
+    /// The block capacity is 0.
+    InvalidBlockCapacity,
     /// The registry has no type of this name.
     UnknownModuleType {
         /// The instance.
@@ -118,6 +120,9 @@ impl fmt::Display for EngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EngineError::InvalidSampleRate => f.write_str("the sample rate must be at least 1"),
+            EngineError::InvalidBlockCapacity => {
+                f.write_str("the block capacity must be at least 1")
+            }
             EngineError::UnknownModuleType {
                 instance,
                 type_name,

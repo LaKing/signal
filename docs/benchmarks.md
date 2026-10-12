@@ -1,10 +1,10 @@
 # Benchmarks (V13) and the soak (V12)
 
-What the per-frame engine (*k* = 1, ADR 0016) costs at 96 kHz, as input to D-EXEC-3 (block processing, deferred to benchmarks; `docs/00-vision.md`). The numbers are **measurements**, never thresholds: no test compares a timing to a limit, and the decision is the owner's (AGENTS.md rule 6).
+What the engine costs at 96 kHz, one frame at a time (*k* = 1, ADR 0016; the input to D-EXEC-3) and, since M2.6-1, in blocks of *k* frames (ADR 0019 §1; "Block sizes" below). The numbers are **measurements**, never thresholds: no test compares a timing to a limit, and the decision is the owner's (AGENTS.md rule 6).
 
 ## Method
 
-`signal bench [--json] [--seconds <s>]` (`crates/signal-cli/src/bench.rs`) builds each case as an execution plan and runs it in the offline `Engine` one frame at a time, as `signal render` does. Every case runs at 96 kHz with seed 42. After 1024 untimed frames, it times repeats of 1024 frames for `--seconds` (default 1 s, at least 5 repeats) and reports nanoseconds per frame: the median and the 99th percentile (nearest rank) over the repeats. The real-time budget is 10⁹ / 96 000 = **10 417 ns per frame**. The only clock reads are around each repeat, in the bench command. The engine is unchanged.
+`signal bench [--json] [--seconds <s>]` (`crates/signal-cli/src/bench.rs`) builds each case as an execution plan and runs it in the offline `Engine` one frame at a time (`run_frame`; the block rows run blocks, see "Block sizes"). Every case runs at 96 kHz with seed 42. After 1024 untimed frames, it times repeats of 1024 frames for `--seconds` (default 1 s, at least 5 repeats) and reports nanoseconds per frame: the median and the 99th percentile (nearest rank) over the repeats. The real-time budget is 10⁹ / 96 000 = **10 417 ns per frame**. The only clock reads are around each repeat, in the bench command. The engine is unchanged.
 
 | Case | Graph | Reported |
 |---|---|---|
@@ -13,6 +13,7 @@ What the per-frame engine (*k* = 1, ADR 0016) costs at 96 kHz, as input to D-EXE
 | Each registered `std.*` primitive | The stimulus and 16 instances at default parameters. Signal inputs come from the saw (phase inputs scaled to 0.05 cycles), gate inputs from the LFO, the first event input from the beats and ghost notes, and any other event input from the accents. Outputs are left open; every instance still runs. | (graph − stimulus median) / 16, per instance; the p99 column uses the graph's p99 |
 | Kick project | `projects/kick` as committed (compiled into the binary) | Per frame, and as a fraction of the budget |
 | Kick voices | The kick project with its `drums` instance duplicated *N* times (every connection to and from it repeated) and the copies summed by a tree of 4-input `std.mix` into `out` | The largest *N* whose **median** stays within 25 % and within 50 % of the budget (doubling, then bisection; every *N* measured is listed in `kick_voices.measured`) |
+| Block sizes | The kick project, and the kick voices at the *N* within 25 % | Per frame, in blocks of *k* = 1, 64 and 256 (`blocks.measured`) |
 
 ## Reproducing a row
 
@@ -91,6 +92,22 @@ Measured *N* → median ns per frame: 1 → 296, 2 → 462, 4 → 790, 8 → 1 4
 | `std.tanh_shaper` | 29.8 | 34.0 |
 | `std.transport` | 29.0 | 31.8 |
 | `std.unit_delay` | 11.5 | 19.6 |
+
+### Block sizes (M2.6-1)
+
+`signal bench` times the kick and the kick voices (the count within 25 % of the budget at *k* = 1) in blocks of *k* = 1, 64 and 256 frames (`blocks` in the JSON; ADR 0019 §1, `semantics.md` §13). Each repeat is still 1024 frames, run as 1024 / *k* calls of `Engine::run_block(k)`, with the engine's block capacity set to *k*. The output is the same at every *k* (the determinism matrix in `docs/testing-and-evaluation.md`); only the time changes.
+
+**Seat measurement**, 2026-10-12 03:41 UTC, from a devpanel seat (M2.6-1 candidate, uncommitted, on 72886ec): `signal --json bench` from a release build, default `--seconds 1`. Machine from `system_profiler SPHardwareDataType` and `sw_vers` (the JSON's `machine` is null: `sysctl` is sandboxed, as for the M2-5 seat row): Mac Studio (Mac17,14), Apple M5 Max, 18 cores (6 Super and 12 Performance), 64 GB, macOS 27.0.1. Conditions: shared with other work, load average 2.9–3.3, not pinned to a core. These are the seat's numbers, not the checks'.
+
+| *k* | Kick median (ns/frame) | Kick p99 | 9 kick voices, median | 9 kick voices, p99 |
+|---:|---:|---:|---:|---:|
+| 1 | 386.6 | 443.1 | 2 535.9 | 2 793.3 |
+| 64 | 149.0 | 172.6 | 1 074.1 | 1 192.1 |
+| 256 | 141.2 | 166.7 | 1 028.0 | 1 117.5 |
+
+- **Measurement:** at *k* = 256 the kick costs 141 ns per frame (1.4 % of the budget) and 9 kick voices 1 028 ns (9.9 %), 2.7× and 2.5× less than at *k* = 1 in the same run. Most of the gain is reached by *k* = 64.
+- **Measurement:** in the same run, *k* = 1 (`run_frame`) costs more than the per-frame engine did in the M2-5 rows above: kick 386.6 ns against 261.8 ns, and 9 voices within 25 % of the budget against 14. The block engine does per-call work (staging inputs into call buffers, the fault scan, the event store, refreshing the last-frame values) that the per-frame engine did not.
+- **Assumption:** part of that difference is load (2.9–3.3 here, 2.2–2.6 then). Only an idle re-run of both builds would separate the two. The real-time runner splits a callback at every command's frame, so a dense command stream brings its blocks toward *k* = 1.
 
 ## What this means for D-EXEC-3
 

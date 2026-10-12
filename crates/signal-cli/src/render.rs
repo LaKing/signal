@@ -38,6 +38,10 @@ pub(crate) struct RenderArgs {
     /// The sample rate in Hz, instead of the project's.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     sample_rate: Option<u32>,
+    /// Frames the engine runs at once (1 to 4096). A performance setting:
+    /// the output is identical for every block size.
+    #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..=4096))]
+    block: u32,
 }
 
 pub(crate) fn run(args: &RenderArgs, registry: &Registry, json: bool) -> Result<(), Failure> {
@@ -87,7 +91,10 @@ pub(crate) fn run(args: &RenderArgs, registry: &Registry, json: bool) -> Result<
         (None, None) => return Err(Failure::Usage("give --seconds or --frames".to_owned())),
     };
 
-    let config = EngineConfig::new(sample_rate, seed);
+    let config = EngineConfig {
+        block_capacity: args.block as usize,
+        ..EngineConfig::new(sample_rate, seed)
+    };
     let mut engine = Engine::new(plan, registry, config, Vec::new())
         .map_err(|e| Failure::Internal(e.to_string()))?;
     let rendered = render(&mut engine, frames).map_err(|e| render_failure(&project, dir, e))?;

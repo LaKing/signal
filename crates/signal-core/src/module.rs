@@ -153,11 +153,24 @@ fn block(data: &[f64], index: usize, frames: usize) -> &[f64] {
 /// allocates or panics: when the sink is full the event is dropped and the
 /// overflow counter, a fault the engine reports, is raised. A clone reserves
 /// the full capacity too, so this holds for clones as well.
+///
+/// A sink made with [`per_frame`](EventSink::per_frame) limits each frame of
+/// a call instead of the call: an event counts against the frame of its
+/// offset (an offset past the call's last frame counts against the last
+/// frame), and the earliest frame that dropped an event is kept, so a block
+/// call overflows at exactly the frames a run of one-frame calls would.
 #[derive(Debug, Default)]
 pub struct EventSink {
     events: Vec<Event>,
     capacity: usize,
     overflows: u64,
+    /// Per-frame mode: the most events kept per frame (0: one limit per call).
+    per_frame: usize,
+    /// Per-frame mode: the events kept per frame of the current call.
+    counts: Vec<usize>,
+    /// Per-frame mode: the frames of the current call.
+    frames: usize,
+    first_overflow: Option<usize>,
 }
 
 impl Clone for EventSink {
@@ -170,6 +183,10 @@ impl Clone for EventSink {
             events,
             capacity: self.capacity,
             overflows: self.overflows,
+            per_frame: self.per_frame,
+            counts: self.counts.clone(),
+            frames: self.frames,
+            first_overflow: self.first_overflow,
         }
     }
 }
@@ -180,13 +197,63 @@ impl EventSink {
         EventSink {
             events: Vec::with_capacity(capacity),
             capacity,
-            overflows: 0,
+            ..EventSink::default()
         }
+    }
+
+    /// A sink keeping up to `per_frame` events in each frame of calls of up to
+    /// `max_frames` frames. Allocates: not for the real-time path. Call
+    /// [`start_call`](EventSink::start_call) before each call.
+    pub fn per_frame(per_frame: usize, max_frames: usize) -> EventSink {
+        let max_frames = max_frames.max(1);
+        let capacity = per_frame.saturating_mul(max_frames);
+        EventSink {
+            events: Vec::with_capacity(capacity),
+            capacity,
+            overflows: 0,
+            per_frame,
+            counts: vec![0; max_frames],
+            frames: 1,
+            first_overflow: None,
+        }
+    }
+
+    /// Per-frame mode: removes the kept events and readies the sink for a call
+    /// of `frames` frames (at most the `max_frames` it was made for), with no
+    /// frame counted and no overflow seen. Keeps the storage and the overflow
+    /// count; allocates nothing.
+    pub fn start_call(&mut self, frames: usize) {
+        self.events.clear();
+        self.frames = frames.clamp(1, self.counts.len().max(1));
+        for count in self.counts.iter_mut().take(self.frames) {
+            *count = 0;
+        }
+        self.first_overflow = None;
+    }
+
+    /// Per-frame mode: the earliest frame of the current call that dropped an
+    /// event, if any.
+    pub fn first_overflow(&self) -> Option<usize> {
+        self.first_overflow
     }
 
     /// Appends `event`, or drops it and raises the overflow counter when full.
     /// Returns whether the event was kept.
     pub fn push(&mut self, event: Event) -> bool {
+        if self.per_frame > 0 {
+            let frame = (event.offset as usize).min(self.frames.saturating_sub(1));
+            if let Some(count) = self.counts.get_mut(frame)
+                && *count < self.per_frame
+                && self.events.len() < self.capacity
+            {
+                *count += 1;
+                self.events.push(event);
+                return true;
+            }
+            self.overflows = self.overflows.saturating_add(1);
+            self.first_overflow = Some(self.first_overflow.map_or(frame, |f| f.min(frame)));
+            return false;
+        }
         // `len < capacity <= Vec::capacity`, so this push never reallocates.
         if self.events.len() < self.capacity {
             self.events.push(event);
@@ -214,7 +281,8 @@ impl EventSink {
 
     /// Removes the kept events, keeping the storage and the overflow count.
     pub fn clear(&mut self) {
-        self.events.clear();
+        let frames = self.frames;
+        self.start_call(frames);
     }
 }
 
@@ -316,9 +384,10 @@ pub trait DirectPrimitive: Send {
 /// same-frame inputs; outputs at frame *n* are a function of state\[n−1\] only
 /// (ADR 0016 §2). Each frame the engine calls `emit`, then later `absorb`.
 ///
-/// The per-frame reference engine calls `emit` and `absorb` with one frame
-/// (`frames() == 1`). Block execution for state-output instances (D-EXEC-3) is
-/// deferred.
+/// The engine calls `emit` and `absorb` with one frame (`frames() == 1`), also
+/// in block execution (D-EXEC-3, ADR 0019 §1): `emit` gets no inputs, so it
+/// cannot write a frame whose output depends on inputs of an earlier frame of
+/// the same call.
 ///
 /// Object safe: the engine holds `Box<dyn StateOutputPrimitive>`.
 ///
@@ -512,6 +581,53 @@ mod tests {
         let mut none = EventSink::default();
         assert!(!none.push(trigger(0)));
         assert_eq!(none.overflows(), 1);
+    }
+
+    /// A per-frame sink keeps 16 events per frame whatever the emission order,
+    /// and reports the earliest frame that dropped one: 33 events at offset 1,
+    /// then 17 at offset 0, overflow at frame 0, as one-frame calls would.
+    #[test]
+    fn per_frame_sink_overflows_at_the_earliest_frame_in_any_order() {
+        let mut sink = EventSink::per_frame(16, 2);
+        let storage = (sink.events.as_ptr(), sink.events.capacity());
+        sink.start_call(2);
+        for _ in 0..33 {
+            sink.push(trigger(1));
+        }
+        assert_eq!(sink.first_overflow(), Some(1));
+        for _ in 0..17 {
+            sink.push(trigger(0));
+        }
+        assert_eq!(sink.first_overflow(), Some(0));
+        let kept = |offset| sink.events().iter().filter(|e| e.offset == offset).count();
+        assert_eq!((kept(0), kept(1)), (16, 16));
+        assert_eq!(sink.overflows(), 18);
+        assert_eq!((sink.events.as_ptr(), sink.events.capacity()), storage);
+
+        // A new call starts with no frame counted and no overflow seen.
+        sink.start_call(2);
+        assert!(sink.events().is_empty());
+        assert_eq!(sink.first_overflow(), None);
+        for _ in 0..16 {
+            assert!(sink.push(trigger(1)));
+        }
+        assert_eq!(sink.first_overflow(), None);
+        assert_eq!(sink.overflows(), 18);
+        assert_eq!((sink.events.as_ptr(), sink.events.capacity()), storage);
+    }
+
+    /// In a one-frame call every event counts against that frame, whatever its
+    /// offset: the limit of the per-frame engine's 16-event sink.
+    #[test]
+    fn per_frame_sink_in_a_one_frame_call_limits_the_call() {
+        let mut sink = EventSink::per_frame(16, 4);
+        sink.start_call(1);
+        for k in 0..16 {
+            assert!(sink.push(trigger(k % 3)));
+        }
+        assert!(!sink.push(trigger(0)));
+        assert_eq!(sink.first_overflow(), Some(0));
+        assert_eq!(sink.events().len(), 16);
     }
 
     /// Regression (auditor-1-001): a derived clone reserved no storage, so the

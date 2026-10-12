@@ -116,6 +116,31 @@ fn bench_json_has_every_field() {
     }
 }
 
+/// M2.6-1 AC5: the kick and the kick voices (the count within 25 % of the
+/// budget) are timed in blocks of k = 1, 64 and 256 frames, in ns per frame.
+#[test]
+fn bench_json_reports_block_sizes() {
+    let output = Command::new(env!("CARGO_BIN_EXE_signal"))
+        .args(["--json", "bench", "--seconds", "0.1"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("the signal binary runs");
+    assert!(output.status.success());
+    let bench: Value = serde_json::from_slice(&output.stdout).expect("JSON on stdout");
+    let blocks = &bench["blocks"];
+    let within = bench["kick_voices"]["within_25_percent"]["voices"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(blocks["voices"].as_u64(), Some(within.max(1)));
+    let measured = blocks["measured"].as_array().unwrap();
+    let sizes: Vec<u64> = measured.iter().map(|m| m["k"].as_u64().unwrap()).collect();
+    assert_eq!(sizes, [1, 64, 256]);
+    for entry in measured {
+        timing(&entry["kick"], "blocks.kick");
+        timing(&entry["kick_voices"], "blocks.kick_voices");
+    }
+}
+
 #[test]
 fn bench_refuses_a_non_positive_duration() {
     let output = Command::new(env!("CARGO_BIN_EXE_signal"))

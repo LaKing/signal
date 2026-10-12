@@ -1,7 +1,7 @@
-//! The offline driver, the reference implementation (ADR 0012): renders N frames,
-//! records the audio sink's inputs and the event log, and writes `audio.wav`,
-//! `log.jsonl` and `manifest.json`. Not real-time code: it allocates and writes
-//! files; [`Engine::run_frame`] does neither.
+//! The offline driver, the reference implementation (ADR 0012): renders N frames
+//! in blocks, records the audio sink's inputs and the event log, and writes
+//! `audio.wav`, `log.jsonl` and `manifest.json`. Not real-time code: it
+//! allocates and writes files; [`Engine::run_block`] does neither.
 
 use std::fs;
 use std::path::Path;
@@ -43,8 +43,12 @@ pub struct Render {
 /// multiplied by that parameter's effective value (`docs/semantics.md` §8). Each
 /// frame's log records go to `log.jsonl` in canonical order: a swap, then edits,
 /// then events and discards by target port address, then faults.
+///
+/// It runs blocks of the engine's block capacity; the result does not depend
+/// on the block size (`docs/semantics.md` §13).
 pub fn render(engine: &mut Engine, frames: u64) -> Result<Render, RenderError> {
-    render_with(engine, frames, |_| Ok(()))
+    let block = engine.config().block_capacity;
+    render_blocks(engine, frames, block, |_| Ok(None))
 }
 
 /// [`render`], calling `before` before each frame runs, so that it can commit
@@ -59,6 +63,27 @@ pub fn render_with(
     engine: &mut Engine,
     frames: u64,
     mut before: impl FnMut(&mut Engine) -> Result<(), EngineError>,
+) -> Result<Render, RenderError> {
+    render_blocks(engine, frames, 1, |engine| {
+        before(engine)?;
+        Ok(Some(Frame(engine.next_frame().0.saturating_add(1))))
+    })
+}
+
+/// [`render`] in blocks of at most `block` frames (and the engine's block
+/// capacity), calling `before` before the first block and again before the
+/// block starting at the frame it returns, so that it can commit a swap or
+/// push input there. `before` returns the next frame it must run before, or
+/// `None` for none: a block never spans it, so a swap always falls on a
+/// block's first frame. Input it pushes for later frames lands at those
+/// frames inside a block. Each block's log is drained after it is recorded.
+///
+/// Errors as [`render_with`].
+pub fn render_blocks(
+    engine: &mut Engine,
+    frames: u64,
+    block: usize,
+    mut before: impl FnMut(&mut Engine) -> Result<Option<Frame>, EngineError>,
 ) -> Result<Render, RenderError> {
     if engine.next_frame() != Frame::ZERO {
         return Err(RenderError::AlreadyStarted);
@@ -98,21 +123,40 @@ pub fn render_with(
     let mut log = Vec::new();
     let mut records = Vec::new();
     let mut version = engine.version();
-    for _ in 0..frames {
-        before(engine).map_err(RenderError::Edit)?;
+    let mut call = Some(engine.next_frame());
+    let mut done = 0u64;
+    while done < frames {
+        let next = engine.next_frame();
+        if call.is_some_and(|at| at <= next) {
+            call = before(engine).map_err(RenderError::Edit)?;
+        }
         if engine.version() != version {
             version = engine.version();
             sink = same_sink(engine, &address, width)?;
         }
-        engine.run_frame();
-        let inputs = engine.instance_inputs(sink);
-        match gain.as_ref().and_then(|port| engine.parameter(port)) {
-            Some(gain) => samples.extend(inputs.iter().map(|x| gain.effective * x)),
-            None => samples.extend_from_slice(inputs),
+        let until_call = call.map_or(u64::MAX, |at| at.0.saturating_sub(next.0).max(1));
+        let len = (frames - done).min(until_call);
+        let len = usize::try_from(len)
+            .map_or(block, |len| len.min(block))
+            .max(1);
+        let ran = engine.run_block(len);
+        if ran == 0 {
+            break;
+        }
+        done += ran as u64;
+        let gain = gain.as_ref().and_then(|port| engine.parameter_index(port));
+        for f in 0..ran {
+            for channel in 0..width {
+                let x = engine.instance_input_at(sink, channel, f).unwrap_or(0.0);
+                samples.push(match gain.and_then(|j| engine.parameter_at_frame(j, f)) {
+                    Some(gain) => gain * x,
+                    None => x,
+                });
+            }
         }
         records.clear();
         records.extend_from_slice(engine.frame_log());
-        records.sort_by_key(|record| record.order());
+        records.sort_by_key(|record| (record.frame(), record.order()));
         for record in &records {
             if let Some(line) = engine.log_line(record) {
                 serde_json::to_writer(&mut log, &line)?;

@@ -19,7 +19,7 @@ use signal_core::{
 };
 use signal_engine::{
     ControlSink, Engine, EngineConfig, EngineError, ExternalEvent, InputDiscards, Outcome,
-    Provenance, Render, RenderError, Report, SentCommand, render_with,
+    Provenance, Render, RenderError, Report, SentCommand, render_blocks,
 };
 use signal_graph::ExecutionPlan;
 
@@ -1440,13 +1440,14 @@ impl fmt::Display for ReplayError {
 impl std::error::Error for ReplayError {}
 
 /// Replays `session` for `frames` frames (by default
-/// [`Session::default_frames`]): builds the engine from version 0 and, before
-/// each frame, commits that frame's swap and pushes its other commands with
-/// `push_external`, `push_suspend` and `push_resume`, as a live driver does.
+/// [`Session::default_frames`]): builds the engine from version 0 and, at
+/// each frame with commands, commits its swap and pushes its other commands
+/// with `push_external`, `push_suspend` and `push_resume`, as a live driver
+/// does. It renders in blocks split at those frames (`docs/semantics.md` §13).
 ///
 /// The input queues are sized for the session's busiest frame (queue capacity
-/// is not part of the semantics, `docs/semantics.md` §11), and reclaimed after
-/// every frame. Any discarded input or overflow afterwards is an error.
+/// is not part of the semantics, `docs/semantics.md` §11), and reclaimed
+/// before every block. Any discarded input or overflow afterwards is an error.
 pub fn replay(
     session: &Session,
     registry: &Registry,
@@ -1478,7 +1479,8 @@ pub fn replay(
 
     let mut next = 0usize;
     let mut refused = None;
-    let rendered = render_with(&mut engine, frames, |engine| {
+    let block = config.block_capacity;
+    let rendered = render_blocks(&mut engine, frames, block, |engine| {
         engine.reclaim_externals().for_each(drop);
         engine.reclaim_edits().for_each(drop);
         let frame = engine.next_frame();
@@ -1516,7 +1518,7 @@ pub fn replay(
                 refused.get_or_insert(message);
             }
         }
-        Ok(())
+        Ok(session.edits.get(next).map(|e| e.frame))
     })
     .map_err(ReplayError::Render)?;
     if let Some(message) = refused {

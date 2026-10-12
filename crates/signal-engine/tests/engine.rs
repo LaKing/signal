@@ -10,7 +10,7 @@ use common::{
 use signal_core::{EventPayload, Frame, Registry, RngStream};
 use signal_engine::{Engine, EngineConfig, EngineError, render};
 
-/// Each primitive is prepared with the sample rate, k = 1 and
+/// Each primitive is prepared with the sample rate, the block capacity and
 /// `RngStream::derive(seed, address)`.
 #[test]
 fn prepare_gets_rate_k1_and_derived_rng_stream() {
@@ -28,7 +28,10 @@ fn prepare_gets_rate_k1_and_derived_rng_stream() {
     for _ in 0..16 {
         engine.run_frame();
         assert_eq!(engine.signal_output(&rate), Some(44_100.0));
-        assert_eq!(engine.signal_output(&frames), Some(1.0));
+        assert_eq!(
+            engine.signal_output(&frames),
+            Some(EngineConfig::DEFAULT_BLOCK_CAPACITY as f64)
+        );
         let expected = stream.next_f64();
         assert_eq!(
             engine.signal_output(&noise).map(f64::to_bits),

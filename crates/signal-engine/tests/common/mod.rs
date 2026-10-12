@@ -5,10 +5,10 @@
 #![allow(dead_code)]
 
 use signal_core::{
-    Combine, Curve, DirectPrimitive, Direction, Event, EventPayload, Feedthrough, Frame, Inputs,
-    InstanceAddress, ModuleDescriptor, ModuleType, Outputs, ParameterDescriptor, PortAddress,
-    PortDescriptor, PortKind, PortShape, PrepareContext, Primitive, Range, RateDivisor, Registry,
-    RngStream, SinkKind, SplitMix64, StateOutputPrimitive,
+    Combine, Curve, DirectPrimitive, Direction, Event, EventPayload, EventSink, Feedthrough, Frame,
+    Inputs, InstanceAddress, ModuleDescriptor, ModuleType, Outputs, ParameterDescriptor,
+    PortAddress, PortDescriptor, PortKind, PortShape, PrepareContext, Primitive, Range,
+    RateDivisor, Registry, RngStream, SinkKind, SplitMix64, StateOutputPrimitive,
 };
 use signal_engine::{Engine, EngineConfig, ExternalEvent};
 use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, Exports, InstanceDef, build_plan};
@@ -73,19 +73,82 @@ fn first(values: &[f64]) -> f64 {
     values.first().copied().unwrap_or(0.0)
 }
 
-fn write(outputs: &mut Outputs<'_>, port: usize, value: f64) {
-    if let Some(out) = outputs.signal(port).first_mut() {
+/// One frame of a call's inputs, as a fixture body reads them: each signal
+/// and parameter as a one-sample slice, and the events of that frame.
+pub struct FrameIn<'a, 'b> {
+    inputs: &'a Inputs<'b>,
+    f: usize,
+}
+
+impl FrameIn<'_, '_> {
+    fn signal(&self, port: usize) -> &[f64] {
+        self.inputs.signal(port).get(self.f..=self.f).unwrap_or(&[])
+    }
+
+    fn parameter(&self, index: usize) -> &[f64] {
+        self.inputs
+            .parameter(index)
+            .get(self.f..=self.f)
+            .unwrap_or(&[])
+    }
+
+    fn events(&self, port: usize) -> &[Event] {
+        let events = self.inputs.events(port);
+        let start = events.partition_point(|e| (e.offset as usize) < self.f);
+        let end = events.partition_point(|e| (e.offset as usize) <= self.f);
+        events.get(start..end).unwrap_or(&[])
+    }
+}
+
+/// One frame of a call's outputs, as a fixture body writes them.
+pub struct FrameOut<'a, 'b> {
+    outputs: &'a mut Outputs<'b>,
+    f: usize,
+}
+
+/// Where `write` and `push` put a frame's sample and events: one frame of a
+/// direct fixture's call, or a state-output fixture's one-frame call.
+trait FrameOutputs {
+    fn sample(&mut self, port: usize) -> Option<&mut f64>;
+    fn sink(&mut self, port: usize) -> Option<(&mut EventSink, u32)>;
+}
+
+impl FrameOutputs for FrameOut<'_, '_> {
+    fn sample(&mut self, port: usize) -> Option<&mut f64> {
+        self.outputs.signal(port).get_mut(self.f)
+    }
+
+    fn sink(&mut self, port: usize) -> Option<(&mut EventSink, u32)> {
+        let offset = self.f as u32;
+        self.outputs.events(port).map(|sink| (sink, offset))
+    }
+}
+
+impl FrameOutputs for Outputs<'_> {
+    fn sample(&mut self, port: usize) -> Option<&mut f64> {
+        self.signal(port).first_mut()
+    }
+
+    fn sink(&mut self, port: usize) -> Option<(&mut EventSink, u32)> {
+        self.events(port).map(|sink| (sink, 0))
+    }
+}
+
+fn write(outputs: &mut impl FrameOutputs, port: usize, value: f64) {
+    if let Some(out) = outputs.sample(port) {
         *out = value;
     }
 }
 
-fn push(outputs: &mut Outputs<'_>, port: usize, payload: EventPayload) {
-    if let Some(sink) = outputs.events(port) {
-        sink.push(Event { offset: 0, payload });
+fn push(outputs: &mut impl FrameOutputs, port: usize, payload: EventPayload) {
+    if let Some((sink, offset)) = outputs.sink(port) {
+        sink.push(Event { offset, payload });
     }
 }
 
-/// Declares a direct fixture: its descriptor, its state and its `process`.
+/// Declares a direct fixture: its descriptor, its state and its `process`
+/// for one frame. A call of *k* frames runs the body once per frame, on that
+/// frame's inputs and outputs, so every fixture is partition-invariant.
 macro_rules! direct {
     ($name:ident, $descriptor:expr, { $($field:ident: $ty:ty),* }, |$s:ident, $ctx:ident| $prepare:block, |$p:ident, $i:ident, $o:ident| $process:block) => {
         #[derive(Default)]
@@ -106,9 +169,16 @@ macro_rules! direct {
 
             fn reset(&mut self) {}
 
-            fn process(&mut self, $i: &Inputs<'_>, $o: &mut Outputs<'_>) {
-                let $p = self;
-                $process
+            fn process(&mut self, inputs: &Inputs<'_>, outputs: &mut Outputs<'_>) {
+                for f in 0..inputs.frames() {
+                    let $i = &FrameIn { inputs, f };
+                    let $o = &mut FrameOut {
+                        outputs: &mut *outputs,
+                        f,
+                    };
+                    let $p = &mut *self;
+                    $process
+                }
             }
         }
     };

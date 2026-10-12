@@ -1,7 +1,8 @@
 //! `signal bench` (V13): what the per-frame engine costs at 96 kHz, as input to
 //! D-EXEC-3 (`docs/benchmarks.md`). It drives the offline [`Engine`] one frame
-//! at a time, exactly as it runs; the only instrumentation is a clock read
-//! around each repeat of [`REPEAT_FRAMES`] frames, here and nowhere else.
+//! at a time (and, for the block rows, *k* frames at a time), exactly as it
+//! runs; the only instrumentation is a clock read around each repeat of
+//! [`REPEAT_FRAMES`] frames, here and nowhere else.
 //!
 //! - Every registered `std.*` primitive: [`INSTANCES`] instances fed by a
 //!   shared stimulus (a saw, a 2 Hz gate, a 132 bpm transport), minus the
@@ -11,6 +12,8 @@
 //! - Kick voices: the kick project with its `drums` instance duplicated *N*
 //!   times into a tree of `std.mix`; the largest *N* whose median stays within
 //!   25 % and 50 % of the 96 kHz budget.
+//! - Block sizes (ADR 0019 §1): the kick and the kick voices within 25 % of
+//!   the budget, run in blocks of *k* = 1, 64 and 256 frames.
 //!
 //! The numbers are measurements of the machine that ran them, never pass or
 //! fail; the command checks nothing.
@@ -40,6 +43,9 @@ const MIN_REPEATS: usize = 5;
 const INSTANCES: usize = 16;
 /// The largest voice count tried.
 const MAX_VOICES: usize = 4096;
+/// The block sizes the kick and kick voices are timed at (ADR 0019 §1); each
+/// divides [`REPEAT_FRAMES`].
+const BLOCK_SIZES: [usize; 3] = [1, 64, 256];
 
 /// The kick project, as committed.
 const KICK: [(&str, &str); 3] = [
@@ -195,6 +201,28 @@ pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(
         ));
     }
 
+    // Block sizes (ADR 0019 §1): the kick and the kick voices within 25 % of
+    // the budget (at k = 1), run k frames at a time.
+    let block_voices = most[0].0.max(1);
+    let kick_plan = plan_of(&kick.root, &kick.composites, registry)?;
+    let voices_plan = plan_of(
+        &voices_graph(&kick.root, block_voices)?,
+        &kick.composites,
+        registry,
+    )?;
+    let mut blocks = Vec::new();
+    for k in BLOCK_SIZES {
+        let kick = measure_blocks(&kick_plan, registry, seconds, k)?;
+        let voices = measure_blocks(&voices_plan, registry, seconds, k)?;
+        if !json {
+            eprintln!(
+                "signal: bench: k = {k}: kick {:.1} ns, {block_voices} voices {:.0} ns",
+                kick.median, voices.median
+            );
+        }
+        blocks.push((k, kick, voices));
+    }
+
     let voices_json = |(n, timing): &(usize, Option<Timing>), limit: f64| {
         json!({
             "limit_ns": limit,
@@ -236,6 +264,12 @@ pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(
                     "voices": n, "median_ns": t.median, "p99_ns": t.p99, "repeats": t.repeats,
                 })).collect::<Vec<_>>(),
             },
+            "blocks": {
+                "voices": block_voices,
+                "measured": blocks.iter().map(|(k, kick, voices)| json!({
+                    "k": k, "kick": kick.json(), "kick_voices": voices.json(),
+                })).collect::<Vec<_>>(),
+            },
         });
         print_stdout(&serde_json::to_string_pretty(&output).unwrap_or_default());
     } else {
@@ -262,26 +296,50 @@ pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(
             most[0].0,
             most[1].0
         ));
+        text.push_str(&format!(
+            "\nblocks of k frames (median, p99 ns/frame; kick, then {block_voices} kick voices):"
+        ));
+        for (k, kick, voices) in &blocks {
+            text.push_str(&format!(
+                "\n  k = {k:<4}  {:>9.1}  {:>9.1}  {:>9.1}  {:>9.1}",
+                kick.median, kick.p99, voices.median, voices.p99
+            ));
+        }
         print_stdout(&text);
     }
     Ok(())
 }
 
-/// Times `plan` for about `seconds`: repeats of [`REPEAT_FRAMES`] frames after
-/// one untimed repeat.
+/// Times `plan` for about `seconds` one frame at a time: see [`measure_blocks`].
 fn measure(plan: &ExecutionPlan, registry: &Registry, seconds: f64) -> Result<Timing, Failure> {
-    let config = EngineConfig::new(SAMPLE_RATE, SEED);
+    measure_blocks(plan, registry, seconds, 1)
+}
+
+/// Times `plan` for about `seconds` in blocks of `k` frames (a divisor of
+/// [`REPEAT_FRAMES`]): repeats of [`REPEAT_FRAMES`] frames after one untimed
+/// repeat.
+fn measure_blocks(
+    plan: &ExecutionPlan,
+    registry: &Registry,
+    seconds: f64,
+    k: usize,
+) -> Result<Timing, Failure> {
+    let config = EngineConfig {
+        block_capacity: k,
+        ..EngineConfig::new(SAMPLE_RATE, SEED)
+    };
     let mut engine = Engine::new(plan, registry, config, Vec::new())
         .map_err(|e| Failure::Internal(e.to_string()))?;
-    for _ in 0..REPEAT_FRAMES {
-        engine.run_frame();
+    let blocks = REPEAT_FRAMES / k as u64;
+    for _ in 0..blocks {
+        engine.run_block(k);
     }
     let mut repeats = Vec::new();
     let start = Instant::now();
     while repeats.len() < MIN_REPEATS || start.elapsed().as_secs_f64() < seconds {
         let began = Instant::now();
-        for _ in 0..REPEAT_FRAMES {
-            engine.run_frame();
+        for _ in 0..blocks {
+            engine.run_block(k);
         }
         repeats.push(began.elapsed().as_nanos() as f64 / REPEAT_FRAMES as f64);
     }

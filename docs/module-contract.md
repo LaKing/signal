@@ -29,7 +29,8 @@ The module never sees addresses, other instances, the graph, suspension, or the 
 - **`process(inputs, outputs)`** computes `frames()` = *k* ≥ 1 consecutive frames. It reads signal inputs, effective parameter values and input events, writes every output sample, and may push output events. The result must be identical for every partition of the timeline into calls (ADR 0002).
 - **`emit(outputs)`** writes the outputs for the frame from state alone. It receives **no inputs and no parameter values** and takes `&self`, so it cannot change state. Events it pushes belong to the emit phase (ADR 0016 §3).
 - **`absorb(inputs)`** receives the frame's now-final signal inputs, input events (from every source, ADR 0016 §3) and effective parameter values, and computes state[n]. It has no outputs. An input therefore first affects output at frame *n* + 1.
-- The per-frame reference engine calls `emit` and `absorb` with one frame. Block execution of state-output instances (D-EXEC-3) is deferred. When it is decided, this section will state its limits.
+- The engine calls `emit` and `absorb` with **one frame**, also in block execution (ADR 0019 §1, `semantics.md` §13): a state-output instance covers a block's frames one call per frame. `emit` gets no inputs, so it could not write a later frame of the same call whose output depends on an earlier frame's input. `process` gets blocks of up to `max_frames` frames.
+- An event output keeps at most 16 events per frame of a call (a frame is the event's `offset`); more in one frame is an `event_overflow` fault at that frame. Push events with offsets inside the call (0 ≤ offset < *k*); an offset past the call counts against its last frame.
 - A primitive that needs both kinds of output is built as a composite of the two classes (ADR 0016 §2).
 
 ## Lifecycle: what may run where

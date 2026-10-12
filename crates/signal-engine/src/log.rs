@@ -117,6 +117,18 @@ pub enum LogRecord {
 }
 
 impl LogRecord {
+    /// The frame it belongs to.
+    pub fn frame(&self) -> Frame {
+        match *self {
+            LogRecord::Swap { frame, .. }
+            | LogRecord::Event { frame, .. }
+            | LogRecord::Discard { frame, .. }
+            | LogRecord::Suspend { frame, .. }
+            | LogRecord::Resume { frame, .. }
+            | LogRecord::Fault { frame, .. } => frame,
+        }
+    }
+
     /// The order of records within a frame in `log.jsonl`: a swap, then edits
     /// by instance, then events and discards by target port (a stable sort
     /// keeps their delivery order), then faults by instance. It does not depend

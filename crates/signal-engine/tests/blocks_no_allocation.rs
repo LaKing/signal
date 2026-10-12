@@ -1,0 +1,243 @@
+//! M2.6-1 AC4: block execution allocates and frees nothing, measured with the
+//! counting allocator of `signal-contract` (ADR 0017): `run_block` with
+//! in-block events, edits and faults, `commit_swap` between blocks, and the
+//! `Runner` processing callbacks larger than its block capacity while the
+//! control thread swaps plans and sends commands.
+
+signal_contract::install_counting_allocator!();
+
+mod common;
+
+use std::thread;
+use std::time::Duration;
+
+use common::{addr, conn, engine, ext, inst, inst_with, plan, port_addr, ramp, registry, scaled};
+use signal_contract::alloc_counter::{self, Counts, Guard};
+use signal_core::{EventPayload, Frame};
+use signal_engine::{
+    CallbackSizes, ControlSink, Outcome, RealtimeConfig, Report, SentCommand, Stamp, realtime,
+};
+use signal_graph::ExecutionPlan;
+
+/// Blocks of several sizes, each with events pushed ahead to land inside it,
+/// a suspend and a resume inside it, faults inside the first blocks (with the
+/// undo of the frames after them), and a swap committed between blocks.
+#[test]
+fn blocks_and_swaps_allocate_nothing() {
+    assert!(alloc_counter::is_installed());
+    let base = || {
+        vec![
+            inst_with("o", "test.osc", &[("freq", 130.0)]),
+            inst("d", "test.dc"),
+            inst("pm", "test.probe_mul"),
+            inst_with("t", "test.trigger", &[("period", 3.0)]),
+            inst("c", "test.counter"),
+            inst_with("flood", "test.flood", &[("count", 0.0)]),
+            inst("c2", "test.counter"),
+            inst("x", "test.faulty"),
+            inst("u", "test.unit_delay"),
+            inst("g", "test.gain"),
+            inst("rec", "test.recorder"),
+        ]
+    };
+    let wiring = || {
+        vec![
+            conn("o.out", "rec.zeta"),
+            conn("d.out", "rec.alpha"),
+            conn("d.out", "pm.value"),
+            conn("t.out", "c.in"),
+            conn("flood.out", "c2.in"),
+            conn("x.out", "rec.zeta"),
+            conn("g.out", "u.in"),
+            conn("u.out", "g.in"),
+            scaled("o.out", "g.in", 0.5),
+        ]
+    };
+    let a = plan(base(), wiring());
+    let mut with_noise = base();
+    with_noise.push(inst("n", "test.noise"));
+    let mut noise_wiring = wiring();
+    noise_wiring.push(conn("n.out", "rec.alpha"));
+    let b = plan(with_noise, noise_wiring);
+
+    let mut engine = engine(
+        &a,
+        1_000,
+        vec![
+            ext(3, 1, "/pm.value", ramp(0.25, 30)),
+            ext(2, 2, "/flood.count", ramp(30.0, 40)),
+            ext(60, 3, "/flood.count", EventPayload::Set(1.0)),
+        ],
+    );
+    let mut swaps = [Some(b.clone()), None, Some(a), None, Some(b)].into_iter();
+    let mut sequence = 100;
+    let mut old = Vec::new();
+    for (round, k) in [7usize, 64, 256, 3, 128].into_iter().enumerate() {
+        let start = engine.next_frame().0;
+        let mut swap = swaps
+            .next()
+            .flatten()
+            .map(|plan| engine.prepare_swap(&plan, &registry()).unwrap());
+        let mut events: Vec<_> = (0..4u64)
+            .map(|n| {
+                sequence += 1;
+                // Late, at the block's start, and ahead inside it.
+                let frame = (start + n * k as u64 / 4).saturating_sub(2);
+                ext(frame, sequence, "/c.in", EventPayload::Trigger)
+            })
+            .collect();
+        let edits = [
+            (addr("/o"), start + k as u64 / 3, true),
+            (addr("/o"), start + k as u64 / 2 + 1, false),
+        ];
+
+        let guard = Guard::start();
+        for event in events.drain(..) {
+            engine.push_external(event).unwrap();
+        }
+        for (instance, at, suspend) in edits {
+            if suspend {
+                engine.push_suspend(instance, Frame(at)).unwrap();
+            } else {
+                engine.push_resume(instance, Frame(at)).unwrap();
+            }
+        }
+        assert_eq!(engine.run_block(k), k);
+        engine.drain_log(&mut |_| {});
+        if let Some(swap) = swap.as_mut() {
+            engine.commit_swap(swap, engine.next_frame()).unwrap();
+        }
+        let counts = guard.counts();
+        drop(guard);
+        assert!(
+            counts.is_zero(),
+            "block {round} (k = {k}) allocated: {counts:?}"
+        );
+
+        old.extend(swap);
+        drop(engine.reclaim_externals().collect::<Vec<_>>());
+        drop(engine.reclaim_edits().collect::<Vec<_>>());
+    }
+    assert_eq!(engine.version(), 3);
+    assert_eq!(engine.log_overflows(), 0);
+    assert_eq!(engine.input_overflows(), 0);
+    assert_eq!(engine.is_muted(&addr("/x")), Some(true));
+    assert_eq!(engine.is_muted(&addr("/flood")), Some(true));
+    assert!(engine.signal_output(&port_addr("/c.out")).unwrap() > 0.0);
+    assert!(old.iter().all(|swap| swap.is_committed()));
+}
+
+const RATE: u32 = 1_000;
+const CALLBACKS: u64 = 3_000;
+/// Callbacks up to four times the Runner's block capacity of 256.
+const MOST_FRAMES: usize = 1_024;
+const CHANNELS: usize = 2;
+
+fn version(n: u64) -> ExecutionPlan {
+    let mut instances = vec![
+        inst_with("osc", "test.osc", &[("freq", 110.0)]),
+        inst("dc", "test.dc"),
+        inst_with("out", "test.gained_recorder", &[("gain", 0.5)]),
+    ];
+    let mut connections = vec![conn("osc.out", "out.l"), conn("dc.out", "out.r")];
+    if n % 2 == 1 {
+        instances.push(inst_with("osc2", "test.osc", &[("freq", 230.0)]));
+        connections.push(scaled("osc2.out", "out.l", 0.5));
+    }
+    let mut plan = plan(instances, connections);
+    plan.version = n;
+    plan
+}
+
+#[derive(Default)]
+struct Tally {
+    events: u64,
+    edits: u64,
+    swaps: u64,
+}
+
+impl ControlSink for Tally {
+    fn report(&mut self, report: &Report, command: &SentCommand) {
+        match (report.outcome, command) {
+            (Outcome::Committed { .. }, _) => self.swaps += 1,
+            (Outcome::Scheduled, SentCommand::Event(_)) => self.events += 1,
+            (Outcome::Scheduled, _) => self.edits += 1,
+            _ => {}
+        }
+    }
+}
+
+/// The Runner splits each callback (up to 1024 frames) into blocks of up to
+/// its capacity (256) at swap and command frames, while the control thread
+/// swaps plans and sends events, suspends and resumes stamped ahead. The
+/// audio thread counts every heap call inside `Runner::process`: none.
+#[test]
+fn runner_with_blocks_allocates_and_frees_nothing() {
+    assert!(alloc_counter::is_installed());
+    let config = RealtimeConfig::with_buffer(RATE, 42, MOST_FRAMES as u64);
+    assert_eq!(config.engine.block_capacity, 256);
+    let (mut runner, mut controller) = realtime(&version(0), &registry(), config).unwrap();
+
+    let audio = thread::spawn(move || {
+        let mut sizes = CallbackSizes::new(5);
+        let mut out = vec![0.0f32; MOST_FRAMES * CHANNELS];
+        let mut total = Counts::default();
+        for n in 0..CALLBACKS {
+            let frames = if n % 2 == 0 {
+                MOST_FRAMES
+            } else {
+                sizes.next_size().min(MOST_FRAMES)
+            };
+            let buffer = &mut out[..frames * CHANNELS];
+            let guard = Guard::start();
+            runner.process(buffer, CHANNELS);
+            let counts = guard.counts();
+            drop(guard);
+            total.allocations += counts.allocations;
+            total.deallocations += counts.deallocations;
+        }
+        (runner, total)
+    });
+
+    let plans: Vec<ExecutionPlan> = (1..=100).map(version).collect();
+    let mut next_plan = 0;
+    let mut tally = Tally::default();
+    let mut step = 0u64;
+    while !audio.is_finished() {
+        step += 1;
+        controller.poll(&mut tally);
+        match step % 4 {
+            0 => {
+                if let Some(plan) = plans.get(next_plan)
+                    && controller.swap(plan, Stamp::Default).is_ok()
+                {
+                    next_plan += 1;
+                }
+            }
+            1 => {
+                for k in 0..10 {
+                    let value = EventPayload::Set(100.0 + k as f64);
+                    let _ = controller.send_event(port_addr("/osc.freq"), value, Stamp::Default);
+                }
+            }
+            2 => {
+                let _ = controller.send_suspend(addr("/dc"), Stamp::Default);
+            }
+            _ => {
+                let _ = controller.send_resume(addr("/dc"), Stamp::Default);
+            }
+        }
+        thread::sleep(Duration::from_micros(200));
+    }
+    let (runner, total) = audio.join().unwrap();
+    controller.poll(&mut tally);
+
+    assert_eq!(
+        total,
+        Counts::default(),
+        "heap calls inside Runner::process"
+    );
+    assert_eq!(runner.status().callbacks, CALLBACKS);
+    assert!(tally.swaps >= 2, "swaps committed: {}", tally.swaps);
+    assert!(tally.events > 0 && tally.edits > 0);
+}

@@ -4,7 +4,7 @@
 
 The reference implementation is the per-frame executor and the offline driver in `crates/signal-engine` (ADR 0012). Every later engine, including the real-time one, must produce the same results bit for bit.
 
-Scope (M1): one frame per step (*k* = 1), rate divisor 1 for every port, one master rate per project. Plan swaps, incremental input and add/remove fades (M2-1) are in §12. Block execution (*k* > 1, D-EXEC-3) comes later.
+Scope: the semantics are stated frame by frame; the engine runs them in blocks of *k* frames with the same result bit for bit (§13, M2.6-1). Rate divisor 1 for every port, one master rate per project. Plan swaps, incremental input and add/remove fades (M2-1) are in §12.
 
 ## 1. Frames
 
@@ -205,7 +205,8 @@ The offline driver renders *N* frames from frame 0:
 - **What is recorded.** Each frame, the driver records the sink's **signal inputs** as §3 sums them, one channel per signal input, in the order the module type declares them. This does not depend on whether the sink instance itself is suspended or muted (§10).
 - **Sink gain.** If the sink's module type declares a parameter named `gain`, each recorded input is multiplied by that parameter's effective value (§4) in the same frame. While the sink is suspended or muted the executor does not recompute it, so the last effective value applies (§10, choice 11). `std.audio_out` records `gain·l` and `gain·r` this way.
 - **`audio.wav`**: IEEE float, 32 bits, at the project sample rate, channels interleaved per frame. Each value is converted from f64 to f32 with round-to-nearest, ties to even.
-- **Edits during a render.** `render_with` lets the caller commit a swap or push input before each frame (§12); `signal replay` renders a recorded session this way (`session-format.md`). Each frame's log is drained after it is recorded. A swapped-in plan must keep the audio sink: exactly one, at the same address, with as many signal inputs.
+- **Blocks.** The driver runs blocks of the engine's block capacity (§13; `signal render --block <k>`, default 256). The block size changes nothing above.
+- **Edits during a render.** `render_with` lets the caller commit a swap or push input before each frame (§12); `render_blocks` before the frames it names, splitting blocks there. `signal replay` renders a recorded session this way (`session-format.md`), split at its commands' frames. Each block's log is drained after it is recorded. A swapped-in plan must keep the audio sink: exactly one, at the same address, with as many signal inputs.
 
 ## 9. Artifacts
 
@@ -297,7 +298,7 @@ These choices are part of the semantics above. Each was made for M1 and can chan
 7. **Each frame's log records are written in canonical order** (§9), so the log, like the audio, does not depend on the schedule.
 8. **A trigger delivered to a parameter is discarded and counted** (reason `not_a_parameter_event`). Only `set` and `ramp` change a base.
 9. **Every resume fades in from 0, even after a suspension shorter than *F*** (ADR 0016 §1a), so a short suspension steps down to `live/F`.
-10. **The "random *k*-partitions" clause of ADR 0016's ramp verification is covered at *k* = 1 only.** The test checks that every frame's base equals the closed form of (*i*, *N*), evaluated over random block partitions. Block execution itself, and so the block-partition clause, is not exercised until D-EXEC-3.
+10. **The "random *k*-partitions" clause of ADR 0016's ramp verification.** A test checks that every frame's base equals the closed form of (*i*, *N*), evaluated over random block partitions; since block execution (§13), the determinism matrix also runs ramps in blocks of every size and in random partitions.
 11. **The offline driver applies the sink's `gain` parameter** (§8, M1-6). A sink has no outputs, so it cannot expose gained values itself; the driver multiplies the recorded inputs by the sink's effective `gain`. A sink type without a `gain` parameter is recorded unchanged.
 
 ## 11. Determinism
@@ -324,10 +325,10 @@ ADR 0006: a running engine replaces its plan at an exact frame, and takes extern
 
 ### Swaps and versions
 
-- A swap is prepared off the real-time thread (it builds the new plan's instances and buffers) and committed between frames, effective from the next frame *n*. Committing allocates nothing and moves state; the replaced plan is dropped elsewhere.
+- A swap is prepared off the real-time thread (it builds the new plan's instances and buffers) and committed between blocks, effective from the next frame *n*, the first of the next block (§13). Committing allocates nothing and moves state; the replaced plan is dropped elsewhere.
 - The engine's **plan version** is 0 for the plan it was built with and goes up by one per swap. The swap record `{"type":"swap","frame":n,"version":v,"plan_version":p}` is the first record of frame *n*; `plan_version` is the swapped-in plan's own `version`, which the caller assigns.
 - At most one swap per frame. A swap prepared by another engine or at another version, or already committed, is refused.
-- The log holds one frame, and its records name the ports and instances of the plan that wrote it, so a frame's log must be drained before a swap is committed; a commit refuses an undrained log.
+- The log holds one block, and its records name the ports and instances of the plan that wrote it, so a block's log must be drained before a swap is committed; a commit refuses an undrained log.
 
 ### What survives
 
@@ -365,13 +366,42 @@ An added instance is created and prepared like any instance (its random stream i
 
 ### Draining the log
 
-`Engine::drain_log` hands the last frame's records to the caller in the order of `log.jsonl` (§9) and empties the log, without allocating, so a real-time caller keeps the log bounded by draining it after every frame.
+`Engine::drain_log` hands the last block's records to the caller frame by frame, each frame's in the order of `log.jsonl` (§9), and empties the log, without allocating, so a real-time caller keeps the log bounded by draining it after every block. What it hands out is exactly the per-frame log of those frames (§13).
 
 ### Real-time runner
 
 `signal_engine::Runner` runs the engine inside an audio callback of any size, fed by `signal_engine::Controller` from the control thread (M2-3; the mechanics are in `realtime-rules.md`, "The runner"). It changes nothing above: it is the same executor, driven by the same live-edit calls.
 
-- **Order of operations.** Per callback: the queued commands are taken; then the frames run one at a time, a swap committed before the frame it is effective from, events and edits applied by the engine at their effective frame (§2, phase 1); after each frame the audio sink's channels are written and its log records sent; at the end, meters, parameter values (observation only) and the status.
+- **Order of operations.** Per callback: the queued commands are taken; then the frames run in blocks of up to the engine's block capacity (the device buffer, at most 256), split at every swap's frame and every command's effective frame (§13), a swap committed before the block it is effective from, events and edits applied by the engine at their effective frame (§2, phase 1); after each block the audio sink's channels are written frame by frame and its log records sent; at the end, meters, parameter values (observation only) and the status.
 - **Requested and effective frame.** Every command carries a **requested** frame: its stamp. Its **effective** frame follows the rules of "Pushed input and effective frames" above: the latest of the stamp, the next frame to run, and the effective frame of the previous command of its kind (event; suspend or resume); for a swap, one past the previous swap's frame. A command whose requested frame has already run is **late** and applies on the next frame. The runner reports both frames for every command, and counts late ones; `log.jsonl` records only the effective frame, so the log of a live run equals the log of its replay.
 - **Latency.** A command stamped by default is requested for the current frame (as the runner last reported it) plus the latency, two device buffers unless configured otherwise. A command arriving within the latency applies exactly at its requested frame, whatever the callback size, unless an earlier command of its kind raised it (its effective frame is never before the previous one's); only a command whose requested frame has already run is late.
 - **Output.** Each frame, every audio-sink channel is the value the offline driver records (§8: the sink's input sum times its `gain`), clamped to [−1, 1] and converted to f32 (round to nearest, ties to even). Where no sample is clamped, the output equals the offline render of the same frames and commands bit for bit as f32 (V9), for any sequence of callback sizes (*k*-partition invariance, ADR 0002). Clamped samples are counted. `audio.wav` is not clamped (§8).
+
+## 13. Block execution
+
+ADR 0019 §1 (D-EXEC-3, M2.6-1). `Engine::run_block(k)` runs the next *k* frames, 1 ≤ *k* ≤ `EngineConfig::block_capacity` (default 256, also the `max_frames` every primitive is prepared with); `run_frame` is `run_block(1)`. *k* is a performance setting: it never appears in project files and never changes the output. **For every block size and every partition of a run into blocks, the audio, the log, the parameter values and every counter are bit-identical to running the frames one at a time as §§1–12 describe.** The goldens, the V-tests and the determinism matrix (`crates/signal-engine/tests/blocks.rs`, `crates/signal-cli/tests/blocks.rs`, anchored to hashes of the per-frame engine) check this.
+
+### Units
+
+- When a plan is instantiated (when the engine is built and at `prepare_swap`), it is condensed into strongly connected components over every connection, from state-output sources too. The **units** run in a topological order of the condensation, ties broken by the earliest schedule position among a unit's members, so the order depends only on the plan.
+- An instance outside any cycle is a unit of its own. A **direct** one is called once with `process` for the frames of the block (or of a segment, below), its inputs computed frame by frame before the call. A **state-output** one covers the block's frames too, but calls `emit` and `absorb` one frame at a time: `emit` gets no inputs, so it cannot write the output of frame *n* + 1 when that depends on the input of frame *n* (`std.unit_delay` writes one value to every frame it is given). `module-contract.md` states this limit.
+- A **cycle** (closed through state-output instances, §2) is one unit whose members are interleaved in sub-blocks of one frame, its shortest possible loop delay (1 frame for `std.unit_delay`; `std.delay` is at least 1 frame): each frame its state-output members emit, its direct members process in schedule order, and its state-output members absorb.
+- Every consumer combines its sources in canonical order (§3, §4), so the unit order decides only when values are computed, never what they are.
+
+### Inside a block
+
+- **External input.** The external events effective in the block are staged at their effective frames (a late one at the block's first frame) and delivered with in-block offsets, in the order of §4. Edits **split** the block internally: an edit applies at the first frame of a segment, exactly as in phase 1 (§2).
+- **Signals and parameters**, per frame and with the same arithmetic: canonical-order sums (§3), modulation, ramps and effective values (§5); a suspended or muted instance's effective value stays as it was.
+- **Suspension** (§6): fades and held outputs per frame.
+- **Events between modules.** An event output keeps at most 16 events **per frame** of a call; the 17th event of a frame is an `event_overflow` at that frame, whatever the order in which a block call emits its frames' events. An event whose offset is past the call's last frame counts against that last frame (a breach of the contract).
+- **The fault guard** checks a call's frames in order (signal outputs, then event outputs, in descriptor order). A fault at frame *n* acts exactly from *n* (§7): the frames before *n* are committed, the outputs fade from their values at *n* − 1, none of the call's events from *n* on is delivered, and what the instance's inputs did after *n* (log records, parameter bases and ramps, discard counts) is undone and done again as for a muted instance.
+
+### Splitting
+
+- A block never spans a plan swap: swaps are committed only between blocks, so callers split at swap frames. The offline driver splits where its caller asks (`render_blocks`); `signal render --block <k>` sets the block size; `signal replay` splits at the session's command frames.
+- The real-time runner splits each callback into blocks of up to its capacity at every swap frame and at every command's effective frame (§12, "Real-time runner").
+- Pushed events and edits that a caller queues ahead land at their effective frames inside a block.
+
+### The log
+
+The log holds one block. Draining it yields the block's frames in order, each frame's records in the canonical order of §9: exactly the per-frame log. Its capacity covers a block: per frame, one edit per instance and 16 events per event connection; one fault per instance; every external event of the block (pushed: the queue capacity; up front: the most stamped in any *K* consecutive frames, all targets in total).
