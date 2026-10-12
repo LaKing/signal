@@ -31,6 +31,8 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     )],
     feedthrough: Feedthrough::StateOutput,
     sink: None,
+    latency: None,
+    reproducibility: signal_core::Reproducibility::BitExact,
 };
 
 /// `std.delay`: a fractional delay line.

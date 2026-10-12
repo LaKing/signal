@@ -297,6 +297,7 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
             "worst_callback_ratio": stats.worst_callback_ratio,
             "clipped": status.clipped,
             "late": status.late,
+            "late_results": status.late_results,
             "queue_overflows": {
                 "total": total,
                 "commands": commands,
@@ -324,7 +325,8 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
              worst callback {:.3} of its period\n\
              clipped samples {}\n\
              queue overflows {total}\n\
-             late commands {}",
+             late commands {}\n\
+             late GPU results {}",
             status.next_frame.0,
             ended.device_channels,
             scheduling.threads,
@@ -335,7 +337,8 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
             stats.overruns,
             stats.worst_callback_ratio,
             status.clipped,
-            status.late
+            status.late,
+            status.late_results
         ));
     }
     Ok(())

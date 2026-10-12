@@ -111,6 +111,16 @@ If building or playing the stream fails, the workers leave again. `stop`, once t
 
 **Reporting.** `signal play` prints `signal: T threads (W workers): <path>` and adds `threads`, `workers` and `scheduling` (`path`, `summary`, each worker's path, why there was no workgroup) to its JSON; the app's status line shows `threads T (W workers, <path>)`. Statistics only: none of it reaches the Runner, the engine log, `log.jsonl`, a recorded session or the audio, so the determinism matrix is untouched (`crates/signal-audio/tests/rt_workers.rs` plays the kick with time-constraint workers bit for bit like the offline render).
 
+## GPU (M2.6-4)
+
+ADR 0019 §3. The per-block graph never runs on the GPU; GPU-backed modules declare a latency of *L* ≥ 1 blocks of their own (`module-contract.md`, "Declared latency").
+
+**The device service** (`crates/signal-gpu`). `GpuService` creates the wgpu adapter and device (Metal backend) on the control side: `GpuService::shared()`, first called from a module's `prepare`, starts it once per process, or reports why there is no usable GPU. It owns one thread, `signal-gpu`, the **only** thread that submits GPU work or waits for it (`Device::poll`). A module talks to it through a `Channel`: a fixed pool of job buffers, allocated in `prepare`, moved (never copied, allocated or freed) through two `rtrb` SPSC queues, submit and done; the queues' atomic indices are the completion signal. `submit`, `peek_done`, `take_done` and `recycle` neither block, lock, allocate nor make a system call. The GPU thread never parks: it polls every channel and sleeps 50 µs when idle (`IDLE_SLEEP`; 1 ms while no channel exists, `UNUSED_SLEEP`), so a submitting thread never has to wake it. A dropped channel's jobs are dropped on the GPU thread; a stopped service makes every channel report its jobs lost.
+
+**Never waited on in real time.** The engine asks a latent module whether its due result is in (`due`) before each `emit`: in real time once, and a result not in is a `late_result` fault (silence for that block, logged and counted), never a wait. So the GPU is never waited on by the audio callback or the real-time workers. Offline (renders, replays, the bench) the engine waits for it, yielding the thread. Verified by `lab/tests/realtime.rs` (the null driver while the service's test hook, `set_completion_delay`, holds every result back for 60 s: one second of audio runs in a fraction of a second with a fault per due block) and `crates/signal-engine/tests/latency.rs` (a fake latent module, no GPU). The audio side of `lab.gpu_partials` per block is its phases and the job's input: bounded, about 2.3 µs per 256-frame block on the seat (`docs/benchmarks.md`).
+
+**Optional.** Only `lab.*` types use the GPU, and they compile in only with the `lab` feature (ADR 0015); every other module, and so every existing project and golden, runs on the CPU, bit-exact as before. Without the `lab` feature nothing but `signal-gpu` (and `signal-app`, through eframe) links wgpu.
+
 ## Review checklist (paste into PRs touching real-time code)
 
 - [ ] No allocation, free, lock, syscall, I/O, or logging reachable from `process` / the executor
@@ -120,5 +130,6 @@ If building or playing the stream fails, the workers leave again. `stop`, once t
 - [ ] Feedback/decay paths are denormal-safe
 - [ ] Randomness comes only from the seeded `ctx` stream
 - [ ] Contract suite and benchmarks pass; new costs recorded
+- [ ] GPU-backed modules (ADR 0019 §3): GPU work and every wait for it only on the `signal-gpu` thread; `due` never blocks; the engine waits offline only
 - [ ] `crates/signal-engine/src/shared.rs` (ADR 0020): every `unsafe` block has a `SAFETY:` comment naming its ordering (Release on completion, Acquire before reading; the gate's SeqCst open, AcqRel join, Release leave); shared reads require `T: Sync`; no view escapes its `Access`; the checked-mode tests report no violation
 - [ ] `crates/signal-audio/src/rt_thread.rs` (ADR 0019 §4): every `unsafe` block has a `SAFETY:` comment (`unsafe_scope.rs` checks); every workgroup call holds a live reference; a joined thread leaves with its own token and reference before it ends

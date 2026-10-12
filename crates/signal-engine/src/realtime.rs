@@ -215,6 +215,9 @@ pub struct RunnerStatus {
     pub return_stalls: u64,
     /// The engine's [`log_overflows`](Engine::log_overflows).
     pub engine_log_overflows: u64,
+    /// The engine's [`late_results`](Engine::late_results): due results of
+    /// latent (GPU-backed) modules that were not in when due (ADR 0019 §3).
+    pub late_results: u64,
     /// The engine's [`input_overflows`](Engine::input_overflows).
     pub input_overflows: u64,
     /// The engine's [`input_discards`](Engine::input_discards).
@@ -323,6 +326,8 @@ pub fn realtime(
     if config.engine.threads == 0 {
         config.engine.threads = realtime_threads();
     }
+    // A latent module's due result is never waited for (ADR 0019 §3).
+    config.engine.realtime = true;
     let engine =
         Engine::new(plan, registry, config.engine, Vec::new()).map_err(ControlError::Engine)?;
     let mirror = PlanState::mirror(plan, registry, config.engine).map_err(ControlError::Engine)?;
@@ -706,6 +711,7 @@ impl Runner {
         }
         self.counts.callbacks = self.counts.callbacks.saturating_add(1);
         self.counts.engine_log_overflows = self.engine.log_overflows();
+        self.counts.late_results = self.engine.late_results();
         self.counts.input_overflows = self.engine.input_overflows();
         self.counts.input_discards = self.engine.input_discards();
         // A held report would be missing behind this status's frontier.
@@ -1119,6 +1125,8 @@ mod tests {
                 parameters: &[],
                 feedthrough: Feedthrough::Direct,
                 sink: None,
+                latency: None,
+                reproducibility: signal_core::Reproducibility::BitExact,
             }
         }
         fn prepare(&mut self, _ctx: &PrepareContext) {}
@@ -1141,6 +1149,8 @@ mod tests {
                 parameters: &[],
                 feedthrough: Feedthrough::Direct,
                 sink: Some(SinkKind::Audio),
+                latency: None,
+                reproducibility: signal_core::Reproducibility::BitExact,
             }
         }
         fn prepare(&mut self, _ctx: &PrepareContext) {}

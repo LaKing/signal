@@ -10,6 +10,11 @@ publish.workspace = true
 name = "signal"
 path = "src/main.rs"
 
+[features]
+# ADR 0015: the lab tier (`lab.*` primitives; M2.6-4: `lab.gpu_partials`), and
+# `signal bench`'s GPU partial bank. Without it nothing here links wgpu.
+lab = ["dep:signal-lab", "signal-lab/lab", "dep:signal-gpu"]
+
 [dependencies]
 signal-core = { workspace = true }
 signal-graph = { workspace = true }
@@ -24,6 +29,9 @@ clap = { workspace = true }
 # To tell an I/O failure writing audio.wav (exit 1) from another (exit 2);
 # the integration tests also read the WAV header with it.
 hound = { workspace = true }
+# `--features lab`: the lab primitives, and the GPU device for `signal bench`.
+signal-lab = { workspace = true, optional = true }
+signal-gpu = { workspace = true, optional = true }
 
 [dev-dependencies]
 insta = { workspace = true }

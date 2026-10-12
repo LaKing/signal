@@ -67,6 +67,8 @@ const fn descriptor(
         parameters,
         feedthrough,
         sink,
+        latency: None,
+        reproducibility: signal_core::Reproducibility::BitExact,
     }
 }
 

@@ -29,6 +29,8 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     ],
     feedthrough: Feedthrough::Direct,
     sink: None,
+    latency: None,
+    reproducibility: signal_core::Reproducibility::BitExact,
 };
 
 /// `std.mix`: the weighted sum of four signals.

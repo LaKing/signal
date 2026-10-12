@@ -17,6 +17,8 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     parameters: &[],
     feedthrough: Feedthrough::StateOutput,
     sink: None,
+    latency: None,
+    reproducibility: signal_core::Reproducibility::BitExact,
 };
 
 /// `std.unit_delay`: a one-frame delay, z⁻¹.

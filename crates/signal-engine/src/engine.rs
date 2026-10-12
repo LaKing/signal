@@ -16,9 +16,9 @@ use std::ops::Range as Span;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use signal_core::{
-    Combine, DirectPrimitive, Direction, Event, EventPayload, EventSink, Feedthrough, Frame,
+    Combine, DirectPrimitive, Direction, Due, Event, EventPayload, EventSink, Feedthrough, Frame,
     Inputs, InstanceAddress, ModuleDescriptor, Outputs, PortAddress, PortKind, PortShape,
-    PrepareContext, Primitive, Range, RateDivisor, Registry, RngStream, SinkKind,
+    PrepareContext, Primitive, Range, RateDivisor, Registry, Reproducibility, RngStream, SinkKind,
     StateOutputPrimitive,
 };
 use signal_graph::ExecutionPlan;
@@ -29,6 +29,7 @@ use crate::fade::{FAULT_FADE_FRAMES, Fade, fade_frames, fade_in, fade_out};
 use crate::log::{
     DiscardReason, FaultReason, InstanceId, LineSource, LogLine, LogRecord, LogSource, PortId,
 };
+use crate::manifest::SameMachine;
 use crate::parameter::{Applied, Base, effective};
 use crate::pool::{Pool, Workers};
 use crate::shared::{Access, CallView, HookPoint, Job, Layout, Parts, PlanCells, Reader, Window};
@@ -107,6 +108,11 @@ pub struct EngineConfig {
     /// machine setting: it never changes the output, and never appears in a
     /// project. [`Engine::config`] reports the resolved number.
     pub threads: usize,
+    /// Whether the engine runs in real time ([`realtime`](crate::realtime) sets
+    /// it). A module with a declared latency (ADR 0019 §3) is then never
+    /// waited for: a result not ready when due is a `late_result` fault.
+    /// Offline (`false`) the engine waits for it, so renders stay exact.
+    pub realtime: bool,
     /// When segments run on the workers (tests and the bench).
     #[doc(hidden)]
     pub schedule: Schedule,
@@ -128,6 +134,7 @@ impl EngineConfig {
             block_capacity: EngineConfig::DEFAULT_BLOCK_CAPACITY,
             threads: 1,
             schedule: Schedule::DEFAULT,
+            realtime: false,
         }
     }
 }
@@ -220,6 +227,9 @@ enum Mode {
 pub(crate) struct Slot {
     feedthrough: Feedthrough,
     audio_sink: bool,
+    /// Declares a latency (ADR 0019 §3): asked [`StateOutputPrimitive::due`]
+    /// before each `emit`.
+    latent: bool,
     signal_in: Span<usize>,
     event_in: Span<usize>,
     signal_out: Span<usize>,
@@ -366,6 +376,8 @@ pub(crate) struct Out {
     log: Vec<LogRecord>,
     log_overflows: u64,
     input_overflows: u64,
+    /// Due results of latent modules given up on (`late_result` faults).
+    late_results: u64,
 }
 
 impl Out {
@@ -374,6 +386,7 @@ impl Out {
         self.log.clear();
         self.log_overflows = 0;
         self.input_overflows = 0;
+        self.late_results = 0;
     }
 }
 
@@ -581,6 +594,7 @@ impl PlanState {
             slots.push(Slot {
                 feedthrough: descriptor.feedthrough,
                 audio_sink: descriptor.sink == Some(SinkKind::Audio),
+                latent: descriptor.latency.is_some(),
                 signal_in: starts.0..signal_inputs,
                 event_in: starts.1..event_inputs.len(),
                 signal_out: starts.2..output_audio.len(),
@@ -725,8 +739,8 @@ impl PlanState {
         }
         // The log of a block: one swap record, at most one edit per instance
         // and frame, one fault per instance, every staged external (up-front:
-        // X_tot, all targets in total; pushed: Q), and 16 events per frame per
-        // event connection.
+        // X_tot, all targets in total; pushed: Q), 16 events per frame per
+        // event connection, and a `late_result` per frame per latent instance.
         let event_connections: usize = event_inputs
             .iter()
             .map(|i| connections(&i.sources))
@@ -735,6 +749,7 @@ impl PlanState {
         let log_capacity = 1
             + slots.len() * capacity
             + slots.len()
+            + slots.iter().filter(|s| s.latent).count() * capacity
             + most_in_total
             + config.queue_capacity
             + EVENTS_PER_FRAME * capacity * event_connections;
@@ -762,8 +777,9 @@ impl PlanState {
                 saved: Saved::default(),
             })
             .collect();
-        // One log per task when there are workers: each instance's fault and
-        // 16 events per frame per event connection into it, plus
+        // One log per task when there are workers: each instance's fault,
+        // 16 events per frame per event connection into it and a latent
+        // instance's `late_result` per frame, plus
         // `task_spare(K)` staged externals (a segment with more for one task
         // runs on the calling thread, `Engine::parallel`).
         let mut outs = Vec::new();
@@ -783,6 +799,9 @@ impl PlanState {
                 let t = tasks.instance_task.get(i).copied().unwrap_or(0) as usize;
                 if let Some(b) = bound.get_mut(t) {
                     *b += 1 + EVENTS_PER_FRAME * capacity * into;
+                    if slot.latent {
+                        *b += capacity;
+                    }
                 }
             }
             outs = bound
@@ -1268,6 +1287,8 @@ pub struct Engine {
     discards: InputDiscards,
     log_overflows: u64,
     input_overflows: u64,
+    /// Due results of latent modules given up on (ADR 0019 §3).
+    late_results: u64,
 
     /// The first frame of the current (or last) block, and its length.
     block_start: Frame,
@@ -1400,6 +1421,7 @@ impl Engine {
             discards: InputDiscards::default(),
             log_overflows: 0,
             input_overflows: 0,
+            late_results: 0,
             block_start: Frame::ZERO,
             block_frames: 0,
             pool: (threads > 1).then(|| Pool::new(threads - 1)),
@@ -1879,6 +1901,7 @@ impl Engine {
             staged: &self.staged,
             start: self.block_start,
             fade_len: self.fade_len,
+            wait: !self.config.realtime,
             a,
             b,
         };
@@ -1909,6 +1932,7 @@ impl Engine {
                     }
                     main.log_overflows = main.log_overflows.saturating_add(out.log_overflows);
                     main.input_overflows = main.input_overflows.saturating_add(out.input_overflows);
+                    main.late_results = main.late_results.saturating_add(out.late_results);
                 }
             }
             _ => {
@@ -1941,6 +1965,9 @@ impl Engine {
         self.input_overflows = self
             .input_overflows
             .saturating_add(mem::take(&mut out.input_overflows));
+        self.late_results = self
+            .late_results
+            .saturating_add(mem::take(&mut out.late_results));
     }
 
     /// The last frame's values: block frame `f`'s outputs, signal inputs and
@@ -2042,6 +2069,33 @@ impl Engine {
     /// sized so that this stays 0.
     pub fn log_overflows(&self) -> u64 {
         self.log_overflows
+    }
+
+    /// Due results of latent modules given up on, since the start: each is a
+    /// `late_result` fault in the log (ADR 0019 §3). Always 0 offline, unless
+    /// a result was lost.
+    pub fn late_results(&self) -> u64 {
+        self.late_results
+    }
+
+    /// The current plan's instances whose type is reproducible on the same
+    /// machine only (ADR 0019 §3), in address order: what a manifest records.
+    pub fn same_machine(&self) -> Vec<SameMachine> {
+        let plan = &self.plan;
+        let mut found: Vec<SameMachine> = plan
+            .instances
+            .iter()
+            .zip(&plan.types)
+            .filter(|(_, (_, d))| d.reproducibility == Reproducibility::SameMachine)
+            .map(|(address, (type_name, d))| SameMachine {
+                instance: address.to_string(),
+                type_name: (*type_name).to_owned(),
+                latency_blocks: d.latency.map(|l| l.latency_blocks),
+                block_frames: d.latency.map(|l| l.block_frames),
+            })
+            .collect();
+        found.sort_by(|a, b| a.instance.cmp(&b.instance));
+        found
     }
 
     /// Events dropped, not delivered and not logged, because an instance's
@@ -2232,6 +2286,8 @@ struct Fixed<'x> {
     staged: &'x [Staged],
     start: Frame,
     fade_len: u64,
+    /// Offline: wait for a latent module's due result (ADR 0019 §3).
+    wait: bool,
     a: usize,
     b: usize,
 }
@@ -2341,6 +2397,9 @@ fn emit(fx: &Fixed<'_>, v: &mut CallView<'_>, i: usize, f: usize) {
                 sink.start_call(1);
             }
             if let Some(Primitive::StateOutput(module)) = v.primitive.as_mut() {
+                if v.slot.latent {
+                    await_due(fx, module.as_mut(), &*v.slot, &mut *v.out, (i, f));
+                }
                 emit_call(module.as_mut(), (&*v.slot, &mut *v.lane, &mut *v.sinks));
             }
             let fault = commit(fx, &mut running(v), f, f + 1);
@@ -2365,6 +2424,44 @@ fn absorb(fx: &Fixed<'_>, v: &mut CallView<'_>, f: usize) {
     if let Some(Primitive::StateOutput(module)) = v.primitive.as_mut() {
         absorb_call(module.as_mut(), (&*v.slot, &*v.lane));
     }
+}
+
+/// Before the `emit` of a latent instance `i` at frame `f` (ADR 0019 §3):
+/// offline, wait until its due result is in, so the render stays exact; in
+/// real time never wait, and give up on a result that is not in. A result
+/// given up on (or lost) is a `late_result` fault: the module outputs
+/// silence for that block, and the fault is logged and counted. The
+/// instance is not muted. Offline waiting yields the thread; real time
+/// calls `due` once.
+fn await_due(
+    fx: &Fixed<'_>,
+    module: &mut dyn StateOutputPrimitive,
+    slot: &Slot,
+    out: &mut Out,
+    (i, f): (usize, usize),
+) {
+    loop {
+        match module.due() {
+            Due::Ready => return,
+            Due::Pending if fx.wait => std::thread::yield_now(),
+            Due::Pending | Due::Lost => break,
+        }
+    }
+    module.miss();
+    out.late_results = out.late_results.saturating_add(1);
+    let port = fx
+        .output_ports
+        .get(slot.signal_out.start)
+        .or_else(|| fx.sink_ports.get(slot.event_out.start))
+        .copied()
+        .unwrap_or(PortId(usize::MAX));
+    let record = LogRecord::Fault {
+        frame: fx.frame(f),
+        instance: InstanceId(i),
+        port,
+        reason: FaultReason::LateResult,
+    };
+    push_record(&mut out.log, &mut out.log_overflows, record);
 }
 
 /// A view's parts for [`gather`].
@@ -2711,6 +2808,9 @@ fn whole_emit(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, f: usize) {
                 sink.start_call(1);
             }
             if let Some(Some(Primitive::StateOutput(module))) = w.primitives.get_mut(i) {
+                if slot.latent {
+                    await_due(fx, module.as_mut(), slot, &mut *w.out, (i, f));
+                }
                 emit_call(module.as_mut(), (slot, &mut *w.lane, sinks));
             }
             let fault = {

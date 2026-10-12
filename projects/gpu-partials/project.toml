@@ -1,0 +1,27 @@
+# The M2.6-4 lab fixture (ADR 0019 §3): a bank of 1024 sine partials computed
+# per 256-frame block on the GPU, two blocks late, its inharmonicity moved by
+# a slow LFO. Needs a `--features lab` build of `signal`; for the operator's
+# device checks (docs/benchmarks.md, "GPU partial bank (M2.6-4)"), not a
+# product. Its renders are reproducible on the same machine only: the
+# manifest says so (`same_machine`).
+#
+#   wobble (0.2 Hz) ×0.0005 ─► bank.stretch (0.0005 base): the partials spread and close
+#   bank.out ─► out.l, out.r
+schema_version = 1
+
+[project]
+name = "gpu-partials"
+sample_rate = 96000
+seed = 11
+
+[instances]
+bank = { module = "lab.gpu_partials", freq = 110, stretch = 0.0005, tilt = 1.2, gain = 0.3 }
+wobble = { module = "std.lfo", freq_hz = 0.2 }
+out = { module = "std.audio_out", gain = 0.5 }
+
+[wiring]
+connections = [
+  { from = "wobble.out", to = "bank.stretch", scale = 0.0005 },
+  { from = "bank.out", to = "out.l" },
+  { from = "bank.out", to = "out.r" },
+]

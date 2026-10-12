@@ -33,6 +33,24 @@ The module never sees addresses, other instances, the graph, suspension, or the 
 - An event output keeps at most 16 events per frame of a call (a frame is the event's `offset`); more in one frame is an `event_overflow` fault at that frame. Push events with offsets inside the call (0 ≤ offset < *k*); an offset past the call counts against its last frame.
 - A primitive that needs both kinds of output is built as a composite of the two classes (ADR 0016 §2).
 
+## Declared latency (GPU-backed modules)
+
+ADR 0019 §3 (M2.6-4). A **state-output** type may declare in its descriptor:
+- `latency: Some(BlockLatency { latency_blocks, block_frames })`: its output in its block *b* is the result for its block *b* − *L*, *L* = `latency_blocks` ≥ 1. The block is the **module's own**: `block_frames` ≥ 1 consecutive frames, counted from the instance's first frame (after `prepare` or `reset`). It is fixed for the type, so for every run, and it is part of the result; the manifest records it. The engine's block size *k* and the thread count still never change the output: the engine calls the instance one frame at a time, as every state-output instance.
+- `reproducibility: Reproducibility::SameMachine`: its output is the same bit for bit on the same machine and build only (GPU arithmetic differs between GPUs and drivers). The default, `BitExact`, is every other type's. A render that uses a `same_machine` instance lists it in `manifest.json` (`semantics.md` §9); renders without one keep their manifests unchanged.
+
+`Registry::register` refuses a latency on a direct type, or with 0 blocks or 0 frames (`RegistryError::InvalidLatency`). The output depends only on earlier blocks' input, so the engine treats the type as the state-output class it is: it may close a cycle.
+
+Two more methods of `StateOutputPrimitive`, with defaults the other types keep:
+- **`due(&mut self) -> Due`**, asked by the engine before every `emit` of a latent instance: `Ready` (the next `emit` has its result, or none is due yet), `Pending` (not arrived), or `Lost` (it never will: no device, or the job could not be submitted). It never blocks.
+- **`miss(&mut self)`**: the engine gave up on the due result; the module outputs silence for that block and discards the result when it arrives.
+
+What the engine does with them (`semantics.md` §7, §13):
+- **Offline** (`EngineConfig::realtime == false`: renders, replays, the bench, the contract suite) it asks again, yielding the thread, until `due` is not `Pending`, so renders are exact and repeatable. A result that is `Lost` (no usable GPU) is still a `late_result` fault, and `signal render` warns about it (stderr, and `late_results` in its JSON).
+- **In real time** (`realtime()`, so the null driver, `signal play` and the app) it asks once and never waits. `Pending` or `Lost` is a **`late_result` fault**: `miss`, a `fault` record at the block's first frame, and `Engine::late_results` / `RunnerStatus::late_results` count it. The instance is not muted; the next block asks again.
+
+The GPU work itself runs on the `signal-gpu` thread (`crates/signal-gpu`, `realtime-rules.md` "GPU"); `due`, `miss`, `emit` and `absorb` only move preallocated job buffers through lock-free queues. `lab.gpu_partials` (`lab/src/gpu_partials.rs`) is the example: *L* = 2, blocks of 256 frames, with a CPU reference and a documented tolerance.
+
 ## Lifecycle: what may run where
 
 ```
@@ -45,7 +63,7 @@ create ─► prepare(ctx) ─► { process | emit, absorb }*  ─► (reset ─
 | `describe` | any | no | An associated function: available from the type, without an instance. |
 | `create` | control | yes | Returns an unprepared instance. |
 | `prepare(ctx)` | control | **yes, only here** | Size buffers for `ctx.max_frames`, keep `ctx.rng`, precompute tables, validate. Leaves the instance in its initial state. |
-| `process`, `emit`, `absorb` | audio | **no** | `realtime-rules.md`: no allocation or free, locks, I/O, syscalls, panics (`unwrap`, `expect`, failing indexing), unbounded loops, wall-clock time, or unseeded randomness. Bounded work per frame. Finite outputs. |
+| `process`, `emit`, `absorb`, `due`, `miss` | audio | **no** | `realtime-rules.md`: no allocation or free, locks, I/O, syscalls, panics (`unwrap`, `expect`, failing indexing), unbounded loops, wall-clock time, or unseeded randomness. Bounded work per frame. Finite outputs. |
 | `reset` | either | **no** | Returns to exactly the state `prepare` left, including random streams. |
 | drop | control | frees | The engine returns old instances to the control thread for dropping. |
 
@@ -104,7 +122,7 @@ The default stimulus (`signal_contract::stimulus::random`) is derived from a see
 - **Parameters**: effective values in the declared range, shaped as the executor makes them (ADR 0016 §4a). Each segment starts with a set (a jump) or a linear ramp that reaches its target exactly. The first segments set the minimum, the maximum and 0 (or the default when 0 is out of range).
 - **Event inputs**: triggers, sets and ramps on random frames, sometimes several on one frame.
 
-Each case renders 4096 frames. Direct instances get calls of the drawn sizes, repeated. State-output instances run per frame (`emit`, then `absorb`), as the reference engine does. Every check except `no_subnormals` runs 32 proptest cases (override with `PROPTEST_CASES`). Every check prepares its instances at 44 100, 48 000, 96 000 and 192 000 Hz.
+Each case renders 4096 frames. Direct instances get calls of the drawn sizes, repeated. State-output instances run per frame (`emit`, then `absorb`), as the reference engine does; before each `emit` the suite asks `due` until it is not `Pending`, as the offline engine does. Every check except `no_subnormals` runs 32 proptest cases (override with `PROPTEST_CASES`). Every check prepares its instances at 44 100, 48 000, 96 000 and 192 000 Hz.
 
 ### What each check proves
 

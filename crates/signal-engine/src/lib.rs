@@ -64,7 +64,7 @@ pub use error::{EngineError, RenderError};
 pub use log::{
     DiscardReason, FaultReason, InstanceId, LineSource, LogLine, LogRecord, LogSource, PortId,
 };
-pub use manifest::{Manifest, Provenance};
+pub use manifest::{Manifest, Provenance, SameMachine};
 pub use offline::{Render, render, render_blocks, render_with};
 #[doc(hidden)]
 pub use pool::spawned_workers;

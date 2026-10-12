@@ -27,6 +27,8 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     )],
     feedthrough: Feedthrough::Direct,
     sink: None,
+    latency: None,
+    reproducibility: signal_core::Reproducibility::BitExact,
 };
 
 /// `std.onepole`: a 1-pole filter in topology-preserving transform (TPT) form

@@ -23,6 +23,8 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     parameters: &[],
     feedthrough: Feedthrough::Direct,
     sink: None,
+    latency: None,
+    reproducibility: signal_core::Reproducibility::BitExact,
 };
 
 /// `std.noise`: uniform white noise from the instance's `RngStream` (ADR 0008).

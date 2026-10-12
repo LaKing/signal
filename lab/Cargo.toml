@@ -1,0 +1,30 @@
+[package]
+name = "signal-lab"
+description = "Signal's lab tier (ADR 0015): experimental primitives, compiled in only with the `lab` feature."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# Without it the crate is empty and links nothing beyond signal-core: the
+# default build never links wgpu through here (M2.6-4, AC2b).
+lab = ["dep:signal-gpu"]
+
+[dependencies]
+signal-core = { workspace = true }
+libm = { workspace = true }
+signal-gpu = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The noop device, for the job path and kernel validation where no GPU is usable.
+signal-gpu = { workspace = true, features = ["noop"] }
+# The contract suite and its counting allocator (ADR 0017).
+signal-contract = { workspace = true }
+# Offline renders and the real-time runner with the null driver.
+signal-engine = { workspace = true }
+signal-graph = { workspace = true }
+signal-std = { workspace = true }
+
+[lints]
+workspace = true

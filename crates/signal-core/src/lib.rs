@@ -37,12 +37,13 @@ mod time;
 
 pub use address::{AddressError, InstanceAddress, PortAddress};
 pub use descriptor::{
-    Combine, Direction, Feedthrough, ModuleDescriptor, ParameterDescriptor, PortDescriptor,
-    PortKind, PortShape, Range, SinkKind,
+    BlockLatency, Combine, Direction, Feedthrough, ModuleDescriptor, ParameterDescriptor,
+    PortDescriptor, PortKind, PortShape, Range, Reproducibility, SinkKind,
 };
 pub use event::{Curve, Event, EventPayload};
 pub use module::{
-    DirectPrimitive, EventSink, Inputs, Outputs, PrepareContext, Primitive, StateOutputPrimitive,
+    DirectPrimitive, Due, EventSink, Inputs, Outputs, PrepareContext, Primitive,
+    StateOutputPrimitive,
 };
 pub use registry::{ModuleType, Registry, RegistryError};
 pub use rng::{Fnv1a64, RngStream, SplitMix64, Xoshiro256PlusPlus, fnv1a64};

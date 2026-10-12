@@ -77,6 +77,9 @@ const THRESHOLD_BLOCKS: [usize; 4] = [16, 64, 128, 256];
 const RT_BLOCK: usize = 128;
 /// Timed blocks per row of the `--realtime` table, at least.
 const RT_MIN_BLOCKS: usize = 100;
+/// How long the GPU partial bank waits for one result before it moves on.
+#[cfg(feature = "lab")]
+const GPU_GIVE_UP: Duration = Duration::from_secs(5);
 /// How long the `--realtime` table waits for the workers to change policy.
 const RT_WAIT: Duration = Duration::from_secs(1);
 /// The `--realtime` variants: ordinary threads; the workers in the
@@ -121,6 +124,11 @@ pub(crate) struct BenchArgs {
     /// The kick voices of the --realtime table.
     #[arg(long, default_value_t = 24, requires = "realtime")]
     rt_voices: usize,
+    /// Measure only the GPU partial bank (`lab.gpu_partials`): its cost per
+    /// block on the GPU, next to its CPU reference.
+    #[cfg(feature = "lab")]
+    #[arg(long, conflicts_with_all = ["write_voices", "realtime"])]
+    gpu: bool,
 }
 
 /// One case's nanoseconds per frame over its repeats.
@@ -164,6 +172,27 @@ pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(
     }
     if args.realtime {
         return realtime_table(args.rt_voices, seconds, profile, registry, json);
+    }
+    #[cfg(feature = "lab")]
+    if args.gpu {
+        let gpu = gpu_partials(seconds, json);
+        if json {
+            let output = json!({
+                "label": "measurement",
+                "profile": profile,
+                "machine": machine(),
+                "sample_rate": SAMPLE_RATE,
+                "seconds_per_case": seconds,
+                "gpu_partials": gpu.json(),
+            });
+            print_stdout(&serde_json::to_string_pretty(&output).unwrap_or_default());
+        } else {
+            print_stdout(&format!(
+                "measurement, {profile} build, {SAMPLE_RATE} Hz\n{}",
+                gpu.text()
+            ));
+        }
+        return Ok(());
     }
 
     let empty = measure(
@@ -297,6 +326,10 @@ pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(
         .map(|(_, k, estimate, _, _)| estimate.0 * *k as u64)
         .min();
 
+    // The GPU partial bank (ADR 0019 §3), in a `--features lab` build.
+    #[cfg(feature = "lab")]
+    let gpu = gpu_partials(seconds, json);
+
     let voices_json = |(n, timing): &(usize, Option<Timing>), limit: f64| {
         json!({
             "limit_ns": limit,
@@ -379,6 +412,12 @@ pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(
                 })).collect::<Vec<_>>(),
             },
         });
+        #[cfg(feature = "lab")]
+        let output = {
+            let mut output = output;
+            output["gpu_partials"] = gpu.json();
+            output
+        };
         print_stdout(&serde_json::to_string_pretty(&output).unwrap_or_default());
     } else {
         let mut text = format!(
@@ -433,6 +472,8 @@ pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(
                 "{ns} ns per segment"
             ))
         ));
+        #[cfg(feature = "lab")]
+        text.push_str(&format!("\n{}", gpu.text()));
         print_stdout(&text);
     }
     Ok(())
@@ -886,17 +927,154 @@ fn measure_blocks(
         }
         repeats.push(began.elapsed().as_nanos() as f64 / REPEAT_FRAMES as f64);
     }
+    Ok(timing_of(repeats))
+}
+
+/// The median and p99 (nearest rank) of `repeats`.
+fn timing_of(mut repeats: Vec<f64>) -> Timing {
     repeats.sort_by(f64::total_cmp);
-    // Nearest rank.
     let rank = |p: f64| {
         let k = ((p * repeats.len() as f64).ceil() as usize).clamp(1, repeats.len());
         repeats.get(k - 1).copied().unwrap_or_default()
     };
-    Ok(Timing {
+    Timing {
         median: rank(0.5),
         p99: rank(0.99),
         repeats: repeats.len(),
-    })
+    }
+}
+
+/// The GPU partial bank's figures, in ns per block of the bank.
+#[cfg(feature = "lab")]
+struct GpuBench {
+    /// The adapter, if there is one.
+    adapter: Option<String>,
+    /// [`reference`](signal_lab::gpu_partials::reference): the block on the CPU.
+    cpu: Timing,
+    /// What the module does on the audio thread per block: the phases and
+    /// the job's input, and the submission.
+    audio_side: Timing,
+    /// From submission to the result in hand, on the calling thread; or why
+    /// it was not measured (no usable GPU, or the channel failed).
+    round_trip: Result<Timing, String>,
+}
+
+#[cfg(feature = "lab")]
+impl GpuBench {
+    fn json(&self) -> Value {
+        use signal_lab::gpu_partials::{BLOCK_FRAMES, LATENCY_BLOCKS, PARTIALS};
+        let block_ns = BLOCK_FRAMES as f64 * budget_ns();
+        json!({
+            "partials": PARTIALS,
+            "block_frames": BLOCK_FRAMES,
+            "latency_blocks": LATENCY_BLOCKS,
+            "block_ns": block_ns,
+            "adapter": self.adapter,
+            "no_gpu": self.round_trip.as_ref().err(),
+            "per_block": {
+                "cpu_reference": self.cpu.json(),
+                "gpu_round_trip": self.round_trip.as_ref().ok().map(Timing::json),
+                "audio_side": self.audio_side.json(),
+            },
+        })
+    }
+
+    fn text(&self) -> String {
+        use signal_lab::gpu_partials::{BLOCK_FRAMES, LATENCY_BLOCKS, PARTIALS};
+        let block_ns = BLOCK_FRAMES as f64 * budget_ns();
+        let row = |name: &str, t: &Timing| {
+            format!(
+                "\n  {name:<24} {:>12.0} {:>12.0}  {:>6.1} % of a block",
+                t.median,
+                t.p99,
+                100.0 * t.median / block_ns
+            )
+        };
+        let mut text = format!(
+            "GPU partial bank (lab.gpu_partials: {PARTIALS} partials, {BLOCK_FRAMES}-frame blocks \
+             of {block_ns:.0} ns, {LATENCY_BLOCKS} blocks late; median, p99 ns per block):"
+        );
+        if let Some(adapter) = &self.adapter {
+            text.push_str(&format!("\n  adapter {adapter}"));
+        }
+        match &self.round_trip {
+            Ok(round_trip) => text.push_str(&row("GPU round trip", round_trip)),
+            Err(why) => text.push_str(&format!("\n  GPU round trip not measured: {why}")),
+        }
+        text.push_str(&row("CPU reference", &self.cpu));
+        text.push_str(&row("audio side (submit)", &self.audio_side));
+        text
+    }
+}
+
+/// Times the GPU partial bank for about `seconds` per row: the CPU
+/// reference of a block, the module's audio-side work per block, and the
+/// GPU's round trip (submit, compute on the `signal-gpu` thread, result
+/// back), one block at a time, with the parameters changing every block.
+#[cfg(feature = "lab")]
+fn gpu_partials(seconds: f64, json: bool) -> GpuBench {
+    use signal_gpu::GpuService;
+    use signal_lab::gpu_partials::{BLOCK_FRAMES, Bank, KERNEL, Params, pack, reference};
+
+    let params = |n: usize| Params {
+        freq: 55.0 * (1.0 + 0.01 * (n % 7) as f64),
+        ..Params::default()
+    };
+    let time = |mut block: Box<dyn FnMut(usize) + '_>| {
+        let mut repeats = Vec::new();
+        let start = Instant::now();
+        while repeats.len() < MIN_REPEATS || start.elapsed().as_secs_f64() < seconds {
+            let began = Instant::now();
+            block(repeats.len());
+            repeats.push(began.elapsed().as_nanos() as f64);
+        }
+        timing_of(repeats)
+    };
+    let rate = f64::from(SAMPLE_RATE);
+    let mut bank = Bank::new(rate);
+    let mut out = vec![0.0; BLOCK_FRAMES];
+    let cpu = time(Box::new(|n| {
+        reference(bank.next_block(params(n)), &mut out)
+    }));
+    let mut input = vec![0.0f32; KERNEL.input_words];
+    let audio_side = time(Box::new(|n| pack(bank.next_block(params(n)), &mut input)));
+    let service = GpuService::shared();
+    let adapter = service.map(|service| service.adapter().to_owned());
+    let channel = match service {
+        Some(service) => service.channel(KERNEL, 1).map_err(|e| e.to_string()),
+        None => {
+            Err(GpuService::shared_error().map_or("no usable GPU".to_owned(), ToString::to_string))
+        }
+    };
+    let round_trip = channel.map(|mut channel| {
+        time(Box::new(move |n| {
+            let block = bank.next_block(params(n));
+            if channel.submit(n as u64, |input| pack(block, input)) {
+                let began = Instant::now();
+                while channel.peek_done().is_none() && began.elapsed() < GPU_GIVE_UP {
+                    std::hint::spin_loop();
+                }
+                if let Some(job) = channel.take_done() {
+                    channel.recycle(job);
+                }
+            }
+        }))
+    });
+    if !json {
+        eprintln!(
+            "signal: bench: GPU partial bank: CPU {:.0} ns, GPU {} per block",
+            cpu.median,
+            round_trip
+                .as_ref()
+                .map_or("not measured".to_owned(), |t| format!("{:.0} ns", t.median))
+        );
+    }
+    GpuBench {
+        adapter,
+        cpu,
+        audio_side,
+        round_trip,
+    }
 }
 
 fn plan_of(

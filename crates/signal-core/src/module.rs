@@ -330,6 +330,8 @@ impl EventSink {
 ///     }],
 ///     feedthrough: Feedthrough::Direct,
 ///     sink: None,
+///     latency: None,
+///     reproducibility: signal_core::Reproducibility::BitExact,
 /// };
 ///
 /// impl DirectPrimitive for Gain {
@@ -424,6 +426,8 @@ pub trait DirectPrimitive: Send {
 ///     parameters: &[],
 ///     feedthrough: Feedthrough::StateOutput,
 ///     sink: None,
+///     latency: None,
+///     reproducibility: signal_core::Reproducibility::BitExact,
 /// };
 ///
 /// impl StateOutputPrimitive for UnitDelay {
@@ -483,6 +487,34 @@ pub trait StateOutputPrimitive: Send {
     /// current frames and computes the new state, which the next `emit` reads.
     /// Real-time rules apply.
     fn absorb(&mut self, inputs: &Inputs<'_>);
+
+    /// For a type that declares a [`BlockLatency`](crate::BlockLatency) (ADR
+    /// 0019 §3): whether the result the next `emit` shows has arrived. The
+    /// engine asks before every `emit` of such an instance. Offline it asks
+    /// again until the answer is not [`Due::Pending`], so renders stay exact;
+    /// in real time it never waits, and calls [`miss`](Self::miss) instead.
+    /// Never blocks; real-time rules apply. Others keep the default, `Ready`.
+    fn due(&mut self) -> Due {
+        Due::Ready
+    }
+
+    /// The engine gives up on the result [`due`](Self::due) did not report
+    /// ready (a fault, logged as `late_result`): the module outputs silence
+    /// for that block, and discards the result when it arrives. Real-time
+    /// rules apply.
+    fn miss(&mut self) {}
+}
+
+/// What [`StateOutputPrimitive::due`] reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Due {
+    /// The next `emit` has what it needs: the due result, or none is due.
+    Ready,
+    /// The due result has not arrived yet.
+    Pending,
+    /// The due result will never arrive (no device, or it was never
+    /// submitted): the engine calls `miss` without waiting.
+    Lost,
 }
 
 /// A primitive instance as the engine holds it: a boxed implementation of the

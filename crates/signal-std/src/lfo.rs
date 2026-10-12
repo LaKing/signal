@@ -39,6 +39,8 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     ],
     feedthrough: Feedthrough::Direct,
     sink: None,
+    latency: None,
+    reproducibility: signal_core::Reproducibility::BitExact,
 };
 
 /// `std.lfo`: a low-frequency sine oscillator, computed as [`SineOsc`](crate::SineOsc)

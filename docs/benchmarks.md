@@ -228,6 +228,41 @@ T="$(cargo metadata --locked --offline --no-deps --format-version 1 | sed -n 's/
 - **Measurement:** paced, 24 voices cost 1 146–1 153 µs per block on one ordinary thread, about 3.5 times what "Scaling" above measures for back-to-back blocks (26 voices within 333 µs on the operator's Mac). A block after a sleep starts with colder caches and, perhaps, a slower core; part of it is the shared machine. So the "within 25 %" voice counts of the back-to-back tables overstate what one device period carries; not separated here.
 - **Context, not the same metric:** the operator's 5cb390c measurement outside the sandbox (operator note 002) gave 26 / 34 / 65 / 107 / 175 kick voices within 25 % at 1 / 2 / 4 / 8 / 18 threads (k = 128), a tail jitter at 18 threads of 2.6 µs median and 6.1 µs p99, and 0 xruns on the device at `--threads` 1 and 8. The `ordinary` rows here are the 5cb390c scheduling in this table's terms.
 
+### GPU partial bank (M2.6-4)
+
+ADR 0019 §3. `signal bench --gpu [--seconds s]`, in a `--features lab` build (the full `signal bench` of such a build adds the same section as `gpu_partials`), times `lab.gpu_partials` (1 024 partials, blocks of 256 frames = 2 666 667 ns at 96 kHz, *L* = 2) one block at a time, the parameters changing every block, for `--seconds` per row (at least 5 blocks), and reports ns **per block** (median, p99, and the median as a fraction of a block's period):
+
+- **GPU round trip** (`per_block.gpu_round_trip`): from the submission of a block to its result in hand, on the calling thread (the job runs on the `signal-gpu` thread, including the upload, the dispatch and the read-back). It must stay well under *L* − 1 = 1 block for the real-time path to have its results in time; `null` with `no_gpu` (the reason) when there is no usable GPU.
+- **CPU reference** (`per_block.cpu_reference`): `signal_lab::gpu_partials::reference`, the same block in f64 on one core.
+- **Audio side** (`per_block.audio_side`): what the module does on the audio thread per block besides one `emit`/`absorb` per frame: the phases and the job's input.
+
+**Seat measurement**, 2026-10-12, devpanel seat (sandboxed, M5 Max as above, shared load), release build, `signal bench --gpu --seconds 1`:
+
+| Row | Median ns/block | p99 ns/block | Median, % of a block |
+|---|---|---|---|
+| GPU round trip | not measured: the seat has no usable GPU (`metal found no adapters` inside the sandbox) | | |
+| CPU reference | 1 077 958 | 2 473 209 | 40.4 % |
+| Audio side | 2 334 | 2 625 | 0.1 % |
+
+The tolerance is checked by `lab/tests/gpu_partials.rs` on a GPU: |GPU − CPU| ≤ 1e-4 of the bank's full scale Σ|a_i| per sample (first estimated at 1e-5 without a GPU; **operator measurement**, 2026-10-12, Apple M5 Max with Metal: worst 4.5e-5 at 48 kHz and 1.9e-5 at 96 kHz, identical on every run; the excess over the simulated kernel comes from the GPU's `sin`, which is not correctly rounded). Operator GPU bench, same machine: 1 024 partials per 256-frame block, GPU round trip 0.91 ms median (0.96 ms p99), CPU f64 reference 1.07 ms, audio-thread side 2.3 µs. Without a GPU, the seat measured the design instead: the kernel's arithmetic in f32 on the CPU (libm's `sinf` for the GPU's `sin`) stays within **8.1e-7** of full scale of the f64 reference over 192 blocks at 44.1, 96 and 192 kHz (`f32_kernel_arithmetic_is_within_the_tolerance`, a measurement of the packing, not of the GPU).
+
+### Pending operator steps for the M2.6-4 checkpoint
+
+The seat has no usable GPU: every GPU test here ran on wgpu's noop device or skipped with its reason (`lab/tests`, `crates/signal-gpu`), and no GPU number is measured. On the Mac outside the sandbox, from the repository root, with `PATH=/opt/homebrew/opt/rustup/bin:$PATH` and `T=/tmp/signal-project-target`:
+
+1. **The checks at the pinned target**, default build: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `cargo test --workspace --locked --offline`.
+2. **The lab build and its GPU tests:** `cargo clippy -p signal-lab -p signal-cli --features lab --all-targets --locked --offline -- -D warnings`, then `cargo test -p signal-gpu -p signal-lab --features signal-lab/lab --locked --offline -- --nocapture` and `cargo test -p signal-cli --features lab --locked --offline` (in a lab build `schema_output` is ignored: its snapshot is the default build's catalogue). Expect `GPU: <name> (Metal)` (not `skipped`) and `device: <name> (Metal)` lines, the two `worst |GPU − CPU| / Σ|a|` lines (at 48 and 96 kHz) at or below `1e-4`, and every test passing: AC1a (tolerance), AC1b (*L* blocks late), AC1c (bit-identical offline renders over *k* 1, 64, 256 and 1, 3, 4 threads), AC3 (the 60 s hold: about 373 late results in well under 10 s).
+3. **Repeated renders on the device:** `cargo build --release -p signal-cli --features lab --locked --offline`, then `"$T/release/signal" render projects/gpu-partials --seconds 10 --out /tmp/gpu-a` and `"$T/release/signal" render projects/gpu-partials --seconds 10 --out /tmp/gpu-b`: the two `manifest.json` have the same `audio_fnv1a64` and `log_fnv1a64`, `log.jsonl` holds no `late_result`, and `same_machine` lists `/bank`.
+4. **The bench row:** `"$T/release/signal" --json bench --gpu --seconds 2`, twice; add an operator row to the table above (GPU round trip, CPU reference, audio side).
+5. **Real time on the device:** `"$T/release/signal" play projects/gpu-partials --seconds 60 --json`, with the interface as the default output: report `xruns`, `worst_callback_ratio` and `late_results` (expected 0 with an idle GPU; every late result is a block of silence, logged), and listen for clicks.
+6. **The real-time tail is no worse (AC12):** with the `--features lab` release build, `scripts/soak.sh --voices 80 --threads 12 --signal "$T/release/signal" 30 128`, the M2.6-3 checkpoint's load (0 xruns, worst 0.405 there). The tail must not be worse; then the same soak with `projects/gpu-partials` playing beside it in a second `signal play` is optional information, not a criterion.
+7. **Signal.app (GUI).** The app is built without the `lab` feature, so it must behave exactly as at the M2.6-3 checkpoint. Run `./start.sh projects/kick` (a release build of `dist/Signal.app`, opened on the kick). Then:
+   - press play: the meters move, and the status line ends `threads T (W workers, workgroup)` with T the Setup's "CPU workers" (auto: two thirds of the performance cores);
+   - move a parameter in the parameter panel (e.g. the kick's decay): the sound follows, and the setup dialog still lists the devices and keeps the chosen output after a restart;
+   - let it play for 5 minutes: no dropout heard, and the status line shows `xruns 0`;
+   - type the absolute path of `projects/gpu-partials` into "Project folder" and press Open (or drop the folder onto the window): the app must refuse it, showing in red the diagnostic ``/bank: unknown module `lab.gpu_partials` (neither a registered primitive type nor a composite)``, without crashing, because GPU modules exist only in a `--features lab` build of `signal`.
+   Report anything else verbatim, with the app's status line.
+
 ## What this means for D-EXEC-3
 
 These are interpretations of a single seat measurement. They are not a decision; D-EXEC-3 stays deferred (roadmap M4).

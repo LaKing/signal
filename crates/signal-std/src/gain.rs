@@ -28,6 +28,8 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     )],
     feedthrough: Feedthrough::Direct,
     sink: None,
+    latency: None,
+    reproducibility: signal_core::Reproducibility::BitExact,
 };
 
 /// `std.gain`: a gain set in decibels.

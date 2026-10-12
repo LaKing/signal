@@ -68,6 +68,8 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     ],
     feedthrough: Feedthrough::Direct,
     sink: None,
+    latency: None,
+    reproducibility: signal_core::Reproducibility::BitExact,
 };
 
 /// `std.transport`: a tempo clock that emits beats, accents and seeded ghost

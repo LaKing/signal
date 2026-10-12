@@ -6,7 +6,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use signal_core::{
-    Direction, Event, EventPayload, EventSink, Inputs, InstanceAddress, ModuleType, Outputs,
+    Direction, Due, Event, EventPayload, EventSink, Inputs, InstanceAddress, ModuleType, Outputs,
     PortShape, PrepareContext, Primitive, RngStream,
 };
 
@@ -141,7 +141,8 @@ impl Instance {
     /// Renders the first `frames` frames of `stimulus`. A direct instance gets
     /// calls of the sizes in `blocks`, repeated cyclically (the last one cut to
     /// fit). A state-output instance is run per frame (`emit`, then `absorb`),
-    /// as the reference engine does (block execution, D-EXEC-3, is deferred).
+    /// as the engine runs it; a latent one (ADR 0019 §3) is waited for before
+    /// each `emit`, as offline.
     pub fn render(&mut self, stimulus: &Stimulus, frames: usize, blocks: &[usize]) -> Rendered {
         let mut rendered = Rendered {
             signals: vec![Vec::with_capacity(frames); self.signal_outputs],
@@ -178,7 +179,24 @@ impl Instance {
             let guard = Guard::start();
             let (call, result) = match &mut self.primitive {
                 Primitive::Direct(p) => ("process", catch(|| p.process(&inputs, &mut outputs))),
-                Primitive::StateOutput(p) => ("emit", catch(|| p.emit(&mut outputs))),
+                Primitive::StateOutput(p) => (
+                    "emit",
+                    catch(|| {
+                        // As the offline engine: wait for a due result
+                        // (ADR 0019 §3); give up only on a lost one.
+                        loop {
+                            match p.due() {
+                                Due::Ready => break,
+                                Due::Pending => std::thread::yield_now(),
+                                Due::Lost => {
+                                    p.miss();
+                                    break;
+                                }
+                            }
+                        }
+                        p.emit(&mut outputs)
+                    }),
+                ),
             };
             let counts = guard.counts();
             drop(guard);

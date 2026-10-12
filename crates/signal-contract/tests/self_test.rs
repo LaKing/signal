@@ -40,6 +40,8 @@ const fn descriptor(
         parameters,
         feedthrough,
         sink: None,
+        latency: None,
+        reproducibility: signal_core::Reproducibility::BitExact,
     }
 }
 

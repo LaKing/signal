@@ -40,6 +40,27 @@ pub struct Manifest {
     /// FNV-1a 64 of the audio samples as `audio.wav` stores them (32-bit float,
     /// little-endian, interleaved), as 16 lowercase hex digits.
     pub audio_fnv1a64: String,
+    /// The instances, in any plan of the render, whose type is reproducible
+    /// on the same machine and build only (ADR 0019 §3), by address. Absent
+    /// when there are none: the render is then bit-exact on any machine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub same_machine: Vec<SameMachine>,
+}
+
+/// An instance whose output is reproducible on the same machine only.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SameMachine {
+    /// Its address.
+    pub instance: String,
+    /// Its module type.
+    #[serde(rename = "type")]
+    pub type_name: String,
+    /// Its declared latency *L*, in blocks of its own, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_blocks: Option<u32>,
+    /// The size of those blocks in frames: part of the result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_frames: Option<u32>,
 }
 
 /// `signal_dirty` as `true`, `false` or `"unknown"`.

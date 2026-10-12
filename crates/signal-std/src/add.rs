@@ -18,6 +18,8 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     parameters: &[],
     feedthrough: Feedthrough::Direct,
     sink: None,
+    latency: None,
+    reproducibility: signal_core::Reproducibility::BitExact,
 };
 
 /// `std.add`: the sum of two signals.

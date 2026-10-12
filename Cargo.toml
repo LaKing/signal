@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "lab"]
 
 [workspace.package]
 version = "0.0.0"
@@ -21,6 +21,8 @@ signal-eval = { path = "crates/signal-eval" }
 signal-contract = { path = "crates/signal-contract" }
 signal-audio = { path = "crates/signal-audio" }
 signal-gpu = { path = "crates/signal-gpu" }
+# ADR 0015: experimental primitives (`lab/`); they compile in only with its `lab` feature.
+signal-lab = { path = "lab" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.152"
 toml = "1.1.8"

@@ -11,7 +11,7 @@ use signal_core::{Fnv1a64, Frame, InstanceAddress, PortAddress, fnv1a64};
 use crate::engine::Engine;
 use crate::error::{EngineError, RenderError};
 use crate::log::InstanceId;
-use crate::manifest::{Manifest, Provenance};
+use crate::manifest::{Manifest, Provenance, SameMachine};
 
 /// The name of the sink parameter the driver applies to every recorded channel
 /// (the real-time runner applies it the same way).
@@ -32,6 +32,9 @@ pub struct Render {
     pub samples: Vec<f64>,
     /// The bytes of `log.jsonl`.
     pub log: Vec<u8>,
+    /// The instances of any of its plans that are reproducible on the same
+    /// machine only (ADR 0019 §3), by address; empty for a bit-exact render.
+    pub same_machine: Vec<SameMachine>,
 }
 
 /// Renders `frames` frames of a fresh `engine`.
@@ -122,6 +125,7 @@ pub fn render_blocks(
     let mut samples = Vec::new();
     let mut log = Vec::new();
     let mut records = Vec::new();
+    let mut same_machine = engine.same_machine();
     let mut version = engine.version();
     let mut call = Some(engine.next_frame());
     let mut done = 0u64;
@@ -133,6 +137,7 @@ pub fn render_blocks(
         if engine.version() != version {
             version = engine.version();
             sink = same_sink(engine, &address, width)?;
+            same_machine.extend(engine.same_machine());
         }
         let until_call = call.map_or(u64::MAX, |at| at.0.saturating_sub(next.0).max(1));
         let len = (frames - done).min(until_call);
@@ -166,6 +171,8 @@ pub fn render_blocks(
         engine.drain_log(&mut |_| {});
     }
 
+    same_machine.sort();
+    same_machine.dedup();
     let config = engine.config();
     Ok(Render {
         sample_rate: config.sample_rate,
@@ -174,6 +181,7 @@ pub fn render_blocks(
         channels,
         samples,
         log,
+        same_machine,
     })
 }
 
@@ -230,6 +238,7 @@ impl Render {
             debug_assertions: cfg!(debug_assertions),
             log_fnv1a64: format!("{:016x}", self.log_fnv1a64()),
             audio_fnv1a64: format!("{:016x}", self.audio_fnv1a64()),
+            same_machine: self.same_machine.clone(),
         }
     }
 

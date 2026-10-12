@@ -328,6 +328,10 @@ fn modules_lists_the_catalogue() {
 }
 
 #[test]
+#[cfg_attr(
+    feature = "lab",
+    ignore = "the snapshot is the default build's catalogue; a lab build adds lab.*"
+)]
 fn schema_output() {
     let output = signal(&["schema"]);
     assert_eq!(output.status.code(), Some(0));

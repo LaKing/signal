@@ -48,6 +48,10 @@ pub enum FaultReason {
     Magnitude,
     /// An event output overflowed its sink (more than 16 events in a frame).
     EventOverflow,
+    /// A module with a declared latency (ADR 0019 §3) did not have its result
+    /// when due, in real time (offline the engine waits), or the result was
+    /// lost. Its output is silence for that block of its own; it is not muted.
+    LateResult,
 }
 
 /// One thing the executor did in a frame.
@@ -103,7 +107,8 @@ pub enum LogRecord {
         /// Events discarded while it was suspended.
         discarded: u64,
     },
-    /// The fault guard muted an instance.
+    /// The fault guard muted an instance, or (`LateResult`) a latent module
+    /// missed a due result and outputs silence for that block.
     Fault {
         /// The frame of the faulty call.
         frame: Frame,

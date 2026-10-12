@@ -131,6 +131,44 @@ pub enum Feedthrough {
     StateOutput,
 }
 
+/// A declared output latency (ADR 0019 §3): the output in the module's block
+/// *b* is the result for its block *b* − `latency_blocks`. Only a
+/// state-output type declares one; its output then depends on past input
+/// only, at block granularity.
+///
+/// The block is the module's own: `block_frames` consecutive frames counted
+/// from the instance's first frame, fixed for its type and therefore for
+/// every run. It is part of the result (and recorded in the manifest); the
+/// engine's block size *k* still never changes the output, because the engine
+/// calls a state-output instance one frame at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+pub struct BlockLatency {
+    /// *L* ≥ 1.
+    pub latency_blocks: u32,
+    /// The module's block size in frames, ≥ 1.
+    pub block_frames: u32,
+}
+
+/// How far a module's output reproduces (ADR 0008, ADR 0019 §3).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reproducibility {
+    /// Bit-exact for the same build on any machine.
+    #[default]
+    BitExact,
+    /// Bit-exact only on the same machine and build (e.g. GPU arithmetic).
+    /// A render that uses such a module records it in its manifest.
+    SameMachine,
+}
+
+impl Reproducibility {
+    /// Whether this is [`Reproducibility::BitExact`] (the descriptor's JSON
+    /// leaves the default out).
+    pub fn is_bit_exact(&self) -> bool {
+        *self == Reproducibility::BitExact
+    }
+}
+
 /// The external effect of a sink module: used for reachability warnings and by
 /// drivers to collect output (ADR 0016 §1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -157,4 +195,11 @@ pub struct ModuleDescriptor {
     pub feedthrough: Feedthrough,
     /// `Some` if the module has an external effect.
     pub sink: Option<SinkKind>,
+    /// `Some` for a state-output type whose output is late by whole blocks
+    /// of its own (ADR 0019 §3), e.g. a GPU-backed module.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency: Option<BlockLatency>,
+    /// How far its output reproduces.
+    #[serde(skip_serializing_if = "Reproducibility::is_bit_exact")]
+    pub reproducibility: Reproducibility,
 }

@@ -34,6 +34,8 @@ const fn descriptor(type_name: &'static str, feedthrough: Feedthrough) -> Module
         parameters: &[],
         feedthrough,
         sink: None,
+        latency: None,
+        reproducibility: signal_core::Reproducibility::BitExact,
     }
 }
 

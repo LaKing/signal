@@ -4,3 +4,5 @@
 *.wav
 !tests/golden/**/*.wav
 .DS_Store
+# insta writes a pending snapshot beside a failing one; never commit it.
+*.snap.new

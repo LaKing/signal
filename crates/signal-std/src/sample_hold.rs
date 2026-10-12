@@ -18,6 +18,8 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     parameters: &[],
     feedthrough: Feedthrough::Direct,
     sink: None,
+    latency: None,
+    reproducibility: signal_core::Reproducibility::BitExact,
 };
 
 /// `std.sample_hold`: samples its input on each trigger and holds it.

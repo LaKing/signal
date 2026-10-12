@@ -109,8 +109,12 @@ pub(crate) fn run(args: &RenderArgs, registry: &Registry, json: bool) -> Result<
         .map_err(|e| e.into_failure(|e| render_failure(&project, dir, e)))?;
 
     let warnings = located(dir, planned.warnings.clone());
+    // ADR 0019 §3: offline the engine waits for a due result, so any late
+    // result was lost (no usable GPU): the render is not what the project
+    // means. Said only when it happened, so other renders print as before.
+    let late = engine.late_results();
     if json {
-        let output = json!({
+        let mut output = json!({
             "out": args.out.display().to_string(),
             "frames": rendered.frames,
             "sample_rate": rendered.sample_rate,
@@ -120,10 +124,18 @@ pub(crate) fn run(args: &RenderArgs, registry: &Registry, json: bool) -> Result<
             "manifest": manifest,
             "metrics": metrics,
         });
+        if late > 0 {
+            output["late_results"] = json!(late);
+        }
         print_stdout(&serde_json::to_string_pretty(&output).unwrap_or_default());
     } else {
         for warning in &warnings {
             eprintln!("{warning}");
+        }
+        if late > 0 {
+            eprintln!(
+                "warning: {late} due results of GPU-backed modules were lost (late_result faults in log.jsonl): those blocks are silent"
+            );
         }
         print_stdout(&format!(
             "rendered {} frames at {} Hz ({} channels) to {}\naudio_fnv1a64 {}",

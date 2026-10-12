@@ -197,6 +197,8 @@ On a fault at frame *n*:
 - A `fault` record names the frame, the instance, the first offending output port (signal outputs before event outputs, in descriptor order) and the reason.
 - Everything else keeps running.
 
+**Late results** (ADR 0019 §3, M2.6-4). An instance whose type declares a latency (`module-contract.md`, "Declared latency") is asked before each `emit` whether its due result is in. Offline the engine waits until it is. In real time it never waits: a result not in when due (or lost) is a fault with reason `late_result`, logged at the frame it was due (the first frame of the module's block) with the instance's first output port, and counted (`Engine::late_results`, `RunnerStatus::late_results`). The instance outputs silence for that block of its own and is **not muted**; the guard above still applies to what it outputs.
+
 ## 8. The offline render
 
 The offline driver renders *N* frames from frame 0:
@@ -279,6 +281,7 @@ Pretty-printed JSON with a final newline:
   - `debug_assertions`: the build profile, true for a debug build;
   - `log_fnv1a64`: the hash of the bytes of `log.jsonl` exactly as written;
   - `audio_fnv1a64`: the hash of the f32 samples as `audio.wav` stores them (4 bytes each, little-endian, interleaved). That is the WAV data chunk, so both hashes can be checked from the files.
+  - `same_machine` (ADR 0019 §3, M2.6-4), only when a plan of the render has an instance whose type is reproducible on the same machine and build only (a GPU-backed module): one entry per instance, by address, `{"instance", "type", "latency_blocks", "block_frames"}`. The render is then the same bit for bit on that machine and build, not across machines. Without one the key is absent and the manifest is exactly as before.
 - **FNV-1a 64** (`signal_core::fnv1a64` and the incremental `signal_core::Fnv1a64`):
   - start from `0xcbf29ce484222325`;
   - for each byte, XOR it in, then multiply by `0x100000001b3` modulo 2⁶⁴.
@@ -387,6 +390,7 @@ ADR 0019 §1 (D-EXEC-3, M2.6-1). `Engine::run_block(k)` runs the next *k* frames
 - An instance outside any cycle is a unit of its own. A **direct** one is called once with `process` for the frames of the block (or of a segment, below), its inputs computed frame by frame before the call. A **state-output** one covers the block's frames too, but calls `emit` and `absorb` one frame at a time: `emit` gets no inputs, so it cannot write the output of frame *n* + 1 when that depends on the input of frame *n* (`std.unit_delay` writes one value to every frame it is given). `module-contract.md` states this limit.
 - A **cycle** (closed through state-output instances, §2) is one unit whose members are interleaved in sub-blocks of one frame, its shortest possible loop delay (1 frame for `std.unit_delay`; `std.delay` is at least 1 frame): each frame its state-output members emit, its direct members process in schedule order, and its state-output members absorb.
 - Every consumer combines its sources in canonical order (§3, §4), so the unit order decides only when values are computed, never what they are.
+- A **latent** state-output instance (a declared latency, ADR 0019 §3) runs the same way, one frame at a time. Its latency counts blocks **of its own** (`block_frames`, fixed for its type and recorded in the manifest), not the engine's *k*: so its output, too, is the same for every *k* and thread count. Before each of its `emit`s the engine asks for the due result, waiting offline and never in real time (§7, "Late results").
 
 ### Inside a block
 

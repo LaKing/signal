@@ -154,6 +154,9 @@ fn run(json: bool) -> ExitCode {
 fn execute(cli: &Cli) -> Result<(), Failure> {
     let mut registry = Registry::new();
     signal_std::register(&mut registry).map_err(|e| Failure::Internal(e.to_string()))?;
+    // ADR 0015: `lab.*` only in a `--features lab` build.
+    #[cfg(feature = "lab")]
+    signal_lab::register(&mut registry).map_err(|e| Failure::Internal(e.to_string()))?;
     match &cli.command {
         Command::Render(args) => render::run(args, &registry, cli.json),
         Command::Replay(args) => replay::run(args, &registry, cli.json),
@@ -191,7 +194,22 @@ fn describe(d: &ModuleDescriptor) -> String {
         Feedthrough::StateOutput => "state-output",
     };
     let sink = if d.sink.is_some() { ", sink" } else { "" };
-    let mut text = format!("{} ({class}{sink})\n  {}\n", d.type_name, d.doc);
+    // ADR 0019 §3: a declared latency and the reproducibility class.
+    let latency = d.latency.map_or(String::new(), |l| {
+        format!(
+            ", {} blocks of {} frames late",
+            l.latency_blocks, l.block_frames
+        )
+    });
+    let machine = if d.reproducibility.is_bit_exact() {
+        ""
+    } else {
+        ", same_machine"
+    };
+    let mut text = format!(
+        "{} ({class}{sink}{latency}{machine})\n  {}\n",
+        d.type_name, d.doc
+    );
     for port in d.ports {
         let direction = match port.direction {
             Direction::In => "in ",

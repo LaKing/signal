@@ -26,6 +26,8 @@ const fn binary(type_name: &'static str, doc: &'static str) -> ModuleDescriptor 
         parameters: &[],
         feedthrough: Feedthrough::Direct,
         sink: None,
+        latency: None,
+        reproducibility: signal_core::Reproducibility::BitExact,
     }
 }
 
@@ -144,6 +146,8 @@ const ABS: ModuleDescriptor = ModuleDescriptor {
     parameters: &[],
     feedthrough: Feedthrough::Direct,
     sink: None,
+    latency: None,
+    reproducibility: signal_core::Reproducibility::BitExact,
 };
 
 /// `std.abs`: the absolute value of a signal.
@@ -207,6 +211,8 @@ const SCALE: ModuleDescriptor = ModuleDescriptor {
     ],
     feedthrough: Feedthrough::Direct,
     sink: None,
+    latency: None,
+    reproducibility: signal_core::Reproducibility::BitExact,
 };
 
 /// `std.scale`: a linear map of a signal.
@@ -271,6 +277,8 @@ const CLAMP: ModuleDescriptor = ModuleDescriptor {
     ],
     feedthrough: Feedthrough::Direct,
     sink: None,
+    latency: None,
+    reproducibility: signal_core::Reproducibility::BitExact,
 };
 
 /// `std.clamp`: a signal limited to a range.
