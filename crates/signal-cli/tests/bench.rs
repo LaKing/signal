@@ -210,3 +210,117 @@ fn bench_refuses_a_non_positive_duration() {
     let error: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(error["error"]["kind"], "usage");
 }
+
+fn signal(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_signal"))
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .expect("the signal binary runs")
+}
+
+/// M2.6-3: `signal bench --write-voices <N> <DIR>` writes a project that
+/// loads and plans, the kick's `drums` duplicated N times into a tree of
+/// `std.mix`, with the `accent` line `scripts/soak.sh` edits; a directory
+/// that is not empty, and N = 0, are refused.
+#[test]
+fn write_voices_writes_a_valid_many_voice_project() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("write-voices");
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.display().to_string();
+    let output = signal(&["--json", "bench", "--write-voices", "5", &path]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["voices"], 5);
+
+    let mut registry = Registry::new();
+    signal_std::register(&mut registry).unwrap();
+    let project = signal_project::Project::load(&dir).unwrap();
+    let plan = project.plan(&registry).unwrap().plan;
+    assert_eq!(
+        json["instances"].as_u64(),
+        Some(plan.instances.len() as u64)
+    );
+    let count = |module: &str| {
+        project
+            .root
+            .instances
+            .iter()
+            .filter(|i| i.module == module)
+            .count()
+    };
+    assert_eq!(
+        (count("drums"), count("std.mix")),
+        (5, 3),
+        "5 voices, mixed by 2 then 1"
+    );
+    assert_eq!((project.sample_rate, project.seed), (96_000, 42));
+    let text = std::fs::read_to_string(dir.join("project.toml")).unwrap();
+    let accent = r#"accent = { module = "std.exp_env", decay_ms = "#;
+    assert!(text.lines().any(|l| l.starts_with(accent)), "{text}");
+
+    let again = signal(&["--json", "bench", "--write-voices", "5", &path]);
+    assert_eq!(again.status.code(), Some(1), "not empty");
+    let zero = signal(&["--json", "bench", "--write-voices", "0", &path]);
+    assert_eq!(zero.status.code(), Some(1), "no voices");
+}
+
+/// M2.6-3: `signal bench --realtime` prints a row per thread count (1, 8,
+/// the real-time auto count and all of them) and variant, with its
+/// per-block timing and each worker's path. Shape only.
+#[test]
+fn realtime_json_has_every_field() {
+    let output = signal(&[
+        "--json",
+        "bench",
+        "--realtime",
+        "--rt-voices",
+        "2",
+        "--seconds",
+        "0.01",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bench: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(bench["table"], "realtime_workers");
+    assert_eq!(bench["block_frames"], 128);
+    assert!(bench["blocks_per_row"].as_u64().unwrap() >= 100);
+    number(&bench["policy"]["period_ticks"], "policy.period_ticks");
+    let cores = bench["performance_cores"].as_u64().unwrap();
+    let mut expected = vec![1, 8, (cores * 2 / 3).max(1), cores];
+    expected.sort_unstable();
+    expected.dedup();
+    let rows = bench["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 3 * expected.len());
+    for (row, threads) in rows.iter().zip(expected.iter().flat_map(|&t| [t, t, t])) {
+        assert_eq!(row["threads"].as_u64(), Some(threads));
+        assert_eq!(row["workers"].as_u64(), Some(threads - 1));
+        for key in ["median_ns", "p99_ns", "max_ns", "median_fraction"] {
+            number(&row[key], key);
+        }
+        let paths = row["paths"].as_array().unwrap();
+        let caller = row["caller"].as_str().unwrap();
+        match row["variant"].as_str() {
+            Some("ordinary") => assert!(paths.is_empty() && caller == "ordinary"),
+            Some(variant @ ("rt-workers" | "rt-all")) => {
+                assert_eq!(caller == "ordinary", variant == "rt-workers", "{caller}");
+                assert_eq!(paths.len() as u64, threads - 1);
+                for path in paths {
+                    let path = path.as_str().unwrap();
+                    assert!(
+                        path.starts_with("time-constraint") || path.starts_with("none"),
+                        "{path}"
+                    );
+                }
+            }
+            other => panic!("variant {other:?}"),
+        }
+    }
+}

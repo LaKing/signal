@@ -30,7 +30,7 @@ use crate::log::{
     DiscardReason, FaultReason, InstanceId, LineSource, LogLine, LogRecord, LogSource, PortId,
 };
 use crate::parameter::{Applied, Base, effective};
-use crate::pool::Pool;
+use crate::pool::{Pool, Workers};
 use crate::shared::{Access, CallView, HookPoint, Job, Layout, Parts, PlanCells, Reader, Window};
 use crate::tasks::{DEFAULT_COST_NS, TASK_MIN_NS, Tasks, tasks};
 use crate::units::{Unit, Units, units};
@@ -102,7 +102,8 @@ pub struct EngineConfig {
     pub block_capacity: usize,
     /// The threads a block runs on, the calling thread included: 1 runs no
     /// workers, 0 means the machine's performance cores
-    /// ([`performance_cores`](crate::performance_cores), read once). A
+    /// ([`performance_cores`](crate::performance_cores), read once; one
+    /// fewer in real time, [`realtime_threads`](crate::realtime_threads)). A
     /// machine setting: it never changes the output, and never appears in a
     /// project. [`Engine::config`] reports the resolved number.
     pub threads: usize,
@@ -1964,6 +1965,14 @@ impl Engine {
     /// The configuration the engine was built with, `threads` resolved.
     pub fn config(&self) -> EngineConfig {
         self.config
+    }
+
+    /// Its worker threads, for a driver to run code on them (ADR 0019 §4).
+    pub fn workers(&self) -> Workers {
+        match &self.pool {
+            Some(pool) => pool.handle(self.config.threads),
+            None => Workers::none(self.config.threads),
+        }
     }
 
     /// Calls `hook` when a thread enters and leaves a parallel segment and

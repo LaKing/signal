@@ -14,6 +14,11 @@
 //!   [`CallbackStats`] measures them (statistics only, never
 //!   semantics). The callback allocates, frees, locks and blocks nowhere
 //!   (`docs/realtime-rules.md`).
+//! - Real-time workers (ADR 0019 §2, §4): when the stream starts, the driver
+//!   puts each of the engine's worker threads into the Mach time-constraint
+//!   policy and the output device's I/O workgroup ([`rt_thread`], the
+//!   audited `unsafe` module), and takes them out when it stops;
+//!   [`Scheduling`] says which path each worker took.
 
 #![cfg_attr(
     not(test),
@@ -30,6 +35,8 @@ mod config;
 mod coreaudio;
 mod input;
 mod map;
+pub mod rt_thread;
+mod scheduling;
 mod select;
 mod stats;
 
@@ -40,5 +47,6 @@ pub use config::{
 pub use coreaudio::{CoreAudioDriver, DeviceSelector, InputCapture, devices};
 pub use input::{InputCallback, InputMeters};
 pub use map::ChannelMap;
+pub use scheduling::{DeviceMatch, Scheduling, TimeConstraint, WorkerPath, match_device};
 pub use select::{DeviceRef, Resolution, labels, resolve, signature};
 pub use stats::{CallbackStats, StatsSnapshot};

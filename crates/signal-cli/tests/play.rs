@@ -127,6 +127,15 @@ fn a_recorded_session_replays_to_the_recorded_audio() {
             + json["xruns"]["overruns"].as_u64().unwrap()
     );
     assert!(json["worst_callback_ratio"].as_f64().unwrap() > 0.0);
+    // M2.6-3: the worker count and the scheduling path (the null driver
+    // leaves its workers ordinary).
+    let threads = json["threads"].as_u64().unwrap();
+    assert!(threads >= 1);
+    assert_eq!(json["workers"].as_u64(), Some(threads - 1));
+    assert_eq!(json["scheduling"]["path"], "none");
+    let workers = json["scheduling"]["workers"].as_array().unwrap();
+    assert_eq!(workers.len() as u64, threads - 1);
+    assert!(workers.iter().all(|w| w == "none (null driver)"));
     assert_eq!(json["clipped"], 0, "the kick never clips");
     assert_eq!(json["queue_overflows"]["total"], 0);
     let toml = fs::read_to_string(session.join("session.toml")).unwrap();

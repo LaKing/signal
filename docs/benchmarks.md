@@ -161,6 +161,73 @@ The small-plan threshold (2 threads, every segment on the workers, against 1 thr
 
 - **Measurement (AC14):** the smallest estimate at which two threads were faster was 21.0 µs per segment (2 voices, *k* = 64; the same in both runs). Every *k* = 16 row lost (up to 35.4 µs), and a single voice lost at every size, up to 50.7 µs (its tasks form one chain, and this table runs one task per unit); every row of 2 voices or more from 21.0 µs on, *k* = 16 aside, was faster. **`parallel_min_ns` stays 50 µs.** One row lies above it and loses, the single voice at *k* = 256 (50.7 µs): with the default schedule, which chains it into fewer tasks, the kick on 18 threads costs what it costs on one (117.3 and 116.5 against 117.3 and 118.4 above). The estimate overstates block costs (one voice: 198 ns per frame estimated, 132 measured at *k* = 256); it only orders plans.
 
+### Real-time workers on the device
+
+**Operator measurement**, 2026-10-12, M5 Max (18 performance cores: 6 Super, 12 Performance), SSL 2+ Mk II at 96 kHz with a 128-frame buffer, release build of the M2.6-3 delivery. Projects from `signal bench --write-voices N`, with the `out` gain set to 0.001 so the runs were silent. Every worker joined the device's I/O workgroup (`scheduling workgroup`).
+
+15-second runs, 120 voices (885 primitive instances):
+
+| `--threads` | xruns | Worst callback (of the period) |
+|---:|---:|---:|
+| 1 | 22 305 | 1.619 |
+| 4 | 0 | 0.917 |
+| 6 | 0 | 0.683 |
+| 12 | 0 | 0.528 |
+| 17 (the first auto rule, P − 1) | 0 | 0.769 |
+| 18 | 2 | 1.860 |
+
+15-second runs at 8 and 12 threads: 40 voices 0.234 and 0.288; 60 voices 0.424 and 0.314; 80 voices 0.437 and 0.332, all with 0 xruns.
+
+**30-minute soak**, 80 voices (585 instances), `--threads 12`, `--watch` with 178 live edits of `accent.decay_ms`: 172 800 000 frames, **0 xruns** (0 stream errors, 0 overruns), 0 late commands, 0 clipped samples, 0 edit errors, worst callback **0.405** of the period.
+
+What it means:
+- **Fact:** with real-time workers in the audio workgroup, Signal plays at least 120 kick voices live without an xrun. One thread cannot play that load at all.
+- **Fact:** using every core (18) is worse than 12. Auto is now two thirds of the performance cores (`docs/realtime-rules.md` "Worker threads").
+- **Measurement, open:** under multi-core load the worst callback is about 0.3–0.4 of the period whatever the voice count (40 to 120 voices at 12 threads), so a fixed cost (most likely waking parked workers) sets the tail, not the DSP. V12's "0 xruns" holds for this load. Its "worst callback < 0.25" holds for the single-core kick soak (0.104) but not yet under multi-core load. The follow-up issue M2.6-5 targets the wake-up tail.
+
+### Real-time workers (M2.6-3)
+
+`signal bench --realtime [--rt-voices N] [--seconds s]` measures how the workers' scheduling changes the time of a block as a device would ask for it (ADR 0019 §2, §4; `docs/realtime-rules.md` "Real-time workers"). It runs only this table:
+
+- **Load:** *N* kick voices (default 24, the "Kick voices" graph) in blocks of 128 frames at 96 kHz, **paced**: one block per 1.333 ms period, the thread sleeping until the next one, so idle workers spin out and park as they do between device callbacks. After 8 untimed blocks, every block is timed on its own (at least 100 blocks; `--seconds` / 1.333 ms of them, 751 by default).
+- **Threads:** 1, 8, the real-time auto count (`realtime_threads`: P − 1 when this table was measured, two thirds of the performance cores since the operator's revision) and all of them, with the default schedule.
+- **Variants:** `ordinary` (every thread ordinary: the 5cb390c scheduling); `rt-workers` (the workers in the time-constraint policy the CoreAudio driver sets, `TimeConstraint::from_period(128, 96000, timebase)`: period and constraint 1.333 ms, computation 333 µs; **the calling thread ordinary, as in `ordinary`**, so only the workers differ); and `rt-all` (the calling thread in the same policy too, as a device's I/O thread is). Offline there is no device, so no workgroup: the workers' path is `time-constraint (offline: no device workgroup)`; the workgroup itself is measured only by the operator's device run.
+- **Reported** per row: the median, p99 (nearest rank) and maximum time per block, as fractions of the period too, the blocks over 25 % and over 100 % of the period, and each worker's path (`--json`: `rows[]`, with `caller`; `policy`; `cores_source`).
+
+To reproduce, from the repository root, on the Mac, outside the sandbox:
+
+```sh
+cargo build --release --locked --offline -p signal-cli
+T="$(cargo metadata --locked --offline --no-deps --format-version 1 | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+"$T/release/signal" --json bench --realtime > rt-1.json; "$T/release/signal" bench --realtime
+"$T/release/signal" --json bench --realtime > rt-2.json; "$T/release/signal" bench --realtime
+```
+
+**Seat measurement, sandboxed**, 2026-10-12 09:48–09:50 UTC, from a devpanel seat (M2.6-3 candidate, uncommitted, on 5cb390c): `signal bench --realtime` from a release build, defaults (24 voices, 751 blocks per row), run twice in a row in one session. Machine as for the M2.6-2 row: Mac Studio (Mac17,14), Apple M5 Max, 18 cores (6 Super and 12 Performance), macOS 27.0.1; `sysctl` is sandboxed, so the performance cores are `available_parallelism`, **18** (`cores_source` `fallback`), and P − 1 is 17. `thread_policy_set` was accepted in the sandbox (every worker reported `time-constraint`). Conditions: shared with other work, not pinned; load average 3.4 at the start and 18.5 at the end (other sessions). These are the seat's numbers, not the checks'; the operator re-measures with the commands above.
+
+µs per block (run 1 / run 2; the period is 1 333 µs, 25 % of it 333 µs):
+
+| Threads | Variant | Median | p99 | Max | Blocks over the period |
+|---:|---|---:|---:|---:|---:|
+| 1 | ordinary | 1 146 / 1 153 | 1 431 / 1 429 | 1 626 / 1 743 | 169 / 196 |
+| 1 | rt-workers | 1 151 / 1 148 | 1 428 / 1 422 | 1 813 / 1 685 | 198 / 161 |
+| 1 | rt-all | 956 / 959 | 1 161 / 1 168 | 1 190 / 1 175 | 0 / 0 |
+| 8 | ordinary | 397 / 396 | 1 296 / 783 | 4 730 / 2 359 | 7 / 2 |
+| 8 | rt-workers | 291 / 255 | 12 843 / 13 264 | 1 173 205 / 22 014 | 144 / 184 |
+| 8 | rt-all | 403 / 409 | 417 / 415 | 425 / 432 | 0 / 0 |
+| 17 (P − 1) | ordinary | 401 / 395 | 726 / 1 176 | 4 233 / 4 239 | 6 / 7 |
+| 17 (P − 1) | rt-workers | 386 / 347 | 13 635 / 16 302 | 2 674 076 / 2 677 197 | 138 / 169 |
+| 17 (P − 1) | rt-all | 411 / 402 | 418 / 410 | 1 566 / 436 | 3 / 0 |
+| 18 (P) | ordinary | 399 / 390 | 1 096 / 1 777 | 4 680 / 6 007 | 3 / 9 |
+| 18 (P) | rt-workers | 390 / 417 | 14 714 / 14 162 | 27 575 / 17 213 | 207 / 219 |
+| 18 (P) | rt-all | 350 / 280 | 417 / 395 | 465 / 401 | 0 / 0 |
+
+- **Measurement:** with the calling thread and the workers in the time-constraint policy (`rt-all`, the device's arrangement), the p99 per block on 8, 17 and 18 threads is 395–418 µs, against 726–1 777 µs with ordinary threads in the same session, and the worst block 401–1 566 µs against 2 359–6 007 µs; 3 blocks in 4 506 went over the period, against 34 with ordinary threads. The medians barely move (280–411 µs against 390–401 µs).
+- **Measurement:** time-constraint workers beside an **ordinary** calling thread (`rt-workers`) are much worse than either: p99 12.8–16.3 ms, the worst block 2.7 s. Real-time workers waiting for a task the ordinary caller holds can keep it from running. The CoreAudio driver puts the workers into real time only around a device stream, whose callback thread is real-time (`docs/realtime-rules.md`).
+- **Measurement (AC-auto-threads):** P − 1 = 17 threads was not worse than P = 18: p99 418 / 410 µs against 417 / 395 µs with real-time threads, 726 / 1 176 µs against 1 096 / 1 777 µs with ordinary ones. The real-time auto is P − 1 (`docs/realtime-rules.md` "Worker threads").
+- **Measurement:** paced, 24 voices cost 1 146–1 153 µs per block on one ordinary thread, about 3.5 times what "Scaling" above measures for back-to-back blocks (26 voices within 333 µs on the operator's Mac). A block after a sleep starts with colder caches and, perhaps, a slower core; part of it is the shared machine. So the "within 25 %" voice counts of the back-to-back tables overstate what one device period carries; not separated here.
+- **Context, not the same metric:** the operator's 5cb390c measurement outside the sandbox (operator note 002) gave 26 / 34 / 65 / 107 / 175 kick voices within 25 % at 1 / 2 / 4 / 8 / 18 threads (k = 128), a tail jitter at 18 threads of 2.6 µs median and 6.1 µs p99, and 0 xruns on the device at `--threads` 1 and 8. The `ordinary` rows here are the 5cb390c scheduling in this table's terms.
+
 ## What this means for D-EXEC-3
 
 These are interpretations of a single seat measurement. They are not a decision; D-EXEC-3 stays deferred (roadmap M4).
@@ -172,7 +239,7 @@ These are interpretations of a single seat measurement. They are not a decision;
 
 ## The soak (V12)
 
-`scripts/soak.sh [--driver coreaudio|null] [--signal PATH] [--target-dir DIR] [minutes] [buffer]` copies `projects/kick` into a new temporary folder (`$TMPDIR/signal-soak.*`); the committed project is never edited. It runs `signal --json play <copy> --watch --driver <driver> --buffer <buffer> --seconds <minutes × 60>` at the project's 96 kHz. Every 10 s it rewrites `accent` `decay_ms` in the copy, alternating 300 and 200, with `sed` into a hidden file and `mv` (no Python). At the end it prints the frames, the edits written and applied, the xruns, the worst callback as a fraction of the period, and the verdict:
+`scripts/soak.sh [--driver coreaudio|null] [--signal PATH] [--target-dir DIR] [--voices N] [--threads n] [minutes] [buffer]` copies `projects/kick` into a new temporary folder (`$TMPDIR/signal-soak.*`); the committed project is never edited. With `--voices N` (M2.6-3) the folder holds instead the kick with its `drums` composite duplicated *N* times into a tree of 4-input `std.mix`, written by `signal bench --write-voices N <folder>` (the "Kick voices" graph, its `out` gain divided by *N* so that it does not clip; the `accent` line is the same). It runs `signal --json play <copy> --watch --driver <driver> --buffer <buffer> --seconds <minutes × 60>` at the project's 96 kHz, with `--threads n` when given (otherwise `signal play`'s auto, the performance cores minus one). Every 10 s it rewrites `accent` `decay_ms` in the copy, alternating 300 and 200, with `sed` into a hidden file and `mv` (no Python). At the end it prints the frames, the voices, the threads and workers with their scheduling path (`workgroup`, `time-constraint`, `none` or `mixed`, from the play JSON), the edits written and applied, the xruns, the worst callback as a fraction of the period, and the verdict:
 
 - **PASS**: 0 xruns and a worst callback under 0.25 of the period (V12). Exit 0.
 - **FAIL**: anything else. Exit 1. Exit 2 means the soak could not run.
@@ -214,3 +281,18 @@ V12 FAIL (needs 0 xruns and a worst callback < 0.25 of the period)
 ```
 
 The script works end to end: the copy, the build, the play, the edits applied live, and the parsed verdict. The null driver's FAIL is not a V12 result. The null driver runs `Runner::process` on an ordinary thread and times it with the wall clock. On the loaded, sandboxed seat, that thread is preempted. Plain `signal play projects/kick --driver null --seconds 10` without edits showed 4–5 overruns and a worst callback of 1.4–2.5 periods per run, while the kick needs about 2.5 % of the period on the median. Only the operator's run on the device decides V12.
+
+M2.6-3 seat check, 2026-10-12, same conditions: `scripts/soak.sh --driver null --voices 8 --threads 2 --signal <release signal> 0.2` wrote the 8-voice project (63 primitive instances), applied the edit live (1 written, 1 applied, 0 errors) and printed `voices 8, threads 2 (1 workers), scheduling none (null driver)`; its null-driver verdict (FAIL, 432 xruns) is, as above, not a V12 result.
+
+### Pending operator steps for the M2.6-3 checkpoint
+
+On the Mac outside the sandbox, from the repository root, with `PATH=/opt/homebrew/opt/rustup/bin:$PATH`:
+
+1. **Rerun the checks at the pinned target path** (`/tmp/signal-project-target`, `.cargo/config.toml`): `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, `cargo test --workspace --locked --offline`.
+2. **The workgroup join on the device.** With the interface as the default output: `"$T/release/signal" play projects/kick --threads 8 --seconds 10` (`$T` as in "Real-time workers (M2.6-3)"). The line after `playing …` should read `signal: 8 threads (7 workers): workgroup`. Then the same with `--device "<another output's name>"` (see `signal devices`): `workgroup` there too. Anything else (`time-constraint (…)`, `none (…)`, `mixed (…)`) is reported with its reason, verbatim.
+3. **The app display.** Open a project in Signal.app and play it: the status line ends `threads T (W workers, workgroup)`, with T the Setup's "CPU workers" (auto: the performance cores minus one).
+4. **Re-measure the real-time table** with the four commands under "Real-time workers (M2.6-3)" (two runs), add them as an operator row, and confirm or revise the real-time auto rule (`docs/realtime-rules.md` "Worker threads") from the P − 1 and P rows.
+5. **V12 at 30 minutes with many voices**, reporting the voice count, the threads and the scheduling path the soak prints:
+   - *N* as the issue states it, about 60 % of one core's budget times the performance cores *P*: one core's whole budget at *k* = 128 is 4 × the one-thread "within 25 %" count of `signal --json bench` (`scaling.rows[]` where `threads` is 1, `within_25_percent.voices`), so *N* = round(2.4 × N25(1 thread) × *P*); on the operator's 5cb390c numbers 2.4 × 26 × 18 ≈ **1 123**. Then `scripts/soak.sh --voices <N> --threads <P> 30 128`.
+   - For information, predicted by arithmetic: that load is 0.6 × *P* core-periods of work per period, so even perfectly spread over *P* threads every callback takes at least 0.6 of the period, above V12's 0.25: a FAIL is expected by construction. Beside it, the heaviest load consistent with V12 is about 0.6 × N25(*P* threads) = 0.6 × 175 ≈ **105** voices (`scaling.rows[]` where `threads` is *P*), which still needs about four cores. The choice of *N* is the operator's.
+   - V12 passes with `xruns 0` and a `worst callback` below `0.250`; the soak result (AC-soak-result) is the operator's measurement.

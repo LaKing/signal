@@ -1,15 +1,16 @@
 //! The cpal glue (ADR 0011): device listing, the output stream and the input
-//! stream (metering only). The only code that calls cpal; everything it
-//! decides is in [`choose_output`], [`OutputCallback`], [`InputCallback`] and
-//! [`CallbackStats`].
+//! stream (metering only), and the real-time workers' lifecycle around the
+//! output stream (ADR 0019 §4). The only code that calls cpal; everything it
+//! decides is in [`choose_output`], [`OutputCallback`], [`InputCallback`],
+//! [`CallbackStats`] and [`Scheduling`].
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, Device, Stream, StreamConfig, SupportedBufferSize};
-use signal_engine::{Driver, DriverError, Runner};
+use signal_engine::{Driver, DriverError, Runner, Workers};
 
 use crate::callback::{CallbackControl, OutputCallback};
 use crate::config::{
@@ -17,11 +18,20 @@ use crate::config::{
 };
 use crate::input::{InputCallback, InputMeters};
 use crate::map::ChannelMap;
+use crate::rt_thread::{self, Workgroup};
+use crate::scheduling::{DeviceMatch, Scheduling, TimeConstraint, WorkerPath, match_device};
 use crate::stats::CallbackStats;
 
 /// How long [`CoreAudioDriver::stop`] waits for the callback to hand the
 /// Runner back.
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long the driver waits for the workers to enter or leave real-time
+/// scheduling. A worker that takes longer still runs the request later.
+const WORKER_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How often the device list is read again when it changed while matching.
+const MATCH_ATTEMPTS: usize = 3;
 
 fn host_error(error: impl std::fmt::Display) -> AudioError {
     AudioError::Host(error.to_string())
@@ -127,17 +137,58 @@ fn find(direction: Direction, selector: &DeviceSelector) -> Result<Device, Audio
     Ok(device)
 }
 
+/// The I/O workgroup of `device`: its CoreAudio object is found by its
+/// position in the system's device list, which cpal lists in the same order
+/// (`match_device`), or why there is none.
+fn workgroup_of(device: &Device) -> Result<Workgroup, String> {
+    let id = id_of(device).ok_or_else(|| "the device has no id".to_owned())?;
+    let host = cpal::default_host();
+    for _ in 0..MATCH_ATTEMPTS {
+        let before = rt_thread::device_ids()?;
+        let ids: Vec<Option<String>> = host
+            .devices()
+            .map_err(|e| e.to_string())?
+            .map(|d| id_of(&d))
+            .collect();
+        let after = rt_thread::device_ids()?;
+        match match_device(&before, &ids, &after, &id) {
+            Ok(object) => return rt_thread::device_workgroup(object),
+            Err(DeviceMatch::Changed) => continue,
+            Err(absent) => return Err(absent.to_string()),
+        }
+    }
+    Err(DeviceMatch::Changed.to_string())
+}
+
+/// Takes the workers out of real-time scheduling ([`rt_thread::exit`]),
+/// waiting up to [`WORKER_TIMEOUT`]; a late worker still does it later, or
+/// when its thread ends.
+fn release_workers(workers: &Workers) {
+    let generation = workers.post(|_| rt_thread::exit());
+    let _ = workers.wait(generation, WORKER_TIMEOUT);
+}
+
+/// What a started stream holds.
+struct Running {
+    stream: Stream,
+    control: CallbackControl,
+    workers: Workers,
+}
+
 /// A [`Driver`] on a CoreAudio output device, through cpal.
-/// [`start`](Driver::start) builds and plays the output stream, whose callback
-/// is an [`OutputCallback`]; [`stop`](Driver::stop) asks it for the Runner
-/// back, then stops and drops the stream on the calling thread.
+/// [`start`](Driver::start) puts the Runner's worker threads into real-time
+/// scheduling, then builds and plays the output stream, whose callback is an
+/// [`OutputCallback`]; [`stop`](Driver::stop) asks it for the Runner back,
+/// takes the workers out of real-time scheduling, then stops and drops the
+/// stream on the calling thread.
 pub struct CoreAudioDriver {
     device: Device,
     name: String,
     choice: Choice,
     map: ChannelMap,
     stats: Arc<CallbackStats>,
-    running: Option<(Stream, CallbackControl)>,
+    running: Option<Running>,
+    scheduling: Option<Scheduling>,
 }
 
 impl CoreAudioDriver {
@@ -187,6 +238,7 @@ impl CoreAudioDriver {
             choice,
             stats: Arc::new(CallbackStats::default()),
             running: None,
+            scheduling: None,
         })
     }
 
@@ -203,6 +255,55 @@ impl CoreAudioDriver {
     /// The callback statistics.
     pub fn stats(&self) -> Arc<CallbackStats> {
         Arc::clone(&self.stats)
+    }
+
+    /// How the last start scheduled the worker threads (`None` before one).
+    pub fn scheduling(&self) -> Option<&Scheduling> {
+        self.scheduling.as_ref()
+    }
+
+    /// Puts each worker into the time-constraint policy of the device's
+    /// period and then into the device's I/O workgroup, or the policy alone
+    /// where there is no workgroup ([`rt_thread::enter`]), and says which
+    /// path each took. A worker that does not answer within
+    /// [`WORKER_TIMEOUT`] is reported pending (it enters later).
+    fn schedule(&self, workers: &Workers) -> Scheduling {
+        let count = workers.count();
+        if count == 0 {
+            return Scheduling::ordinary(workers.threads(), 0, "no worker threads");
+        }
+        let workgroup = workgroup_of(&self.device);
+        let no_workgroup = workgroup.as_ref().err().cloned();
+        let policy = TimeConstraint::from_period(
+            self.choice.buffer,
+            self.choice.sample_rate,
+            rt_thread::timebase(),
+        );
+        let paths: Arc<Mutex<Vec<Option<WorkerPath>>>> = Arc::new(Mutex::new(vec![None; count]));
+        let slots = Arc::clone(&paths);
+        // The request owns its workgroup reference until every worker has
+        // run it; each joined worker retains its own.
+        let generation = workers.post(move |w| {
+            let path = rt_thread::enter(&policy, workgroup.as_ref().map_err(String::as_str));
+            let mut slots = slots.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(slot) = slots.get_mut(w) {
+                *slot = Some(path);
+            }
+        });
+        let _ = workers.wait(generation, WORKER_TIMEOUT);
+        let paths = paths.lock().unwrap_or_else(PoisonError::into_inner);
+        Scheduling {
+            threads: workers.threads(),
+            workers: paths
+                .iter()
+                .map(|p| {
+                    p.clone().unwrap_or_else(|| {
+                        WorkerPath::None("pending: no answer within 1 s".to_owned())
+                    })
+                })
+                .collect(),
+            no_workgroup,
+        }
     }
 }
 
@@ -223,6 +324,9 @@ impl Driver for CoreAudioDriver {
         if self.running.is_some() {
             return Err(DriverError::Running);
         }
+        // Before the first block: the workers enter real-time scheduling.
+        let workers = runner.workers();
+        self.scheduling = Some(self.schedule(&workers));
         let (mut callback, control) = OutputCallback::new(
             runner,
             self.map.clone(),
@@ -236,24 +340,39 @@ impl Driver for CoreAudioDriver {
             buffer_size: BufferSize::Fixed(self.choice.buffer),
         };
         let stats = Arc::clone(&self.stats);
-        let stream = self
-            .device
-            .build_output_stream(
-                config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| callback.fill(data),
-                move |_: cpal::Error| stats.stream_error(),
-                None,
-            )
-            .map_err(|e| DriverError::Device(e.to_string()))?;
-        stream
-            .play()
-            .map_err(|e| DriverError::Device(e.to_string()))?;
-        self.running = Some((stream, control));
+        let built = self.device.build_output_stream(
+            config,
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| callback.fill(data),
+            move |_: cpal::Error| stats.stream_error(),
+            None,
+        );
+        let stream = match built {
+            Ok(stream) => stream,
+            Err(error) => {
+                release_workers(&workers);
+                return Err(DriverError::Device(error.to_string()));
+            }
+        };
+        if let Err(error) = stream.play() {
+            drop(stream);
+            release_workers(&workers);
+            return Err(DriverError::Device(error.to_string()));
+        }
+        self.running = Some(Running {
+            stream,
+            control,
+            workers,
+        });
         Ok(())
     }
 
     fn stop(&mut self) -> Result<Option<Runner>, DriverError> {
-        let Some((stream, mut control)) = self.running.take() else {
+        let Some(Running {
+            stream,
+            mut control,
+            workers,
+        }) = self.running.take()
+        else {
             return Ok(None);
         };
         control.request_stop();
@@ -268,6 +387,8 @@ impl Driver for CoreAudioDriver {
             thread::sleep(Duration::from_millis(1));
         };
         let _ = stream.pause();
+        // No block runs any more: the workers leave real-time scheduling.
+        release_workers(&workers);
         // The callback, and the Runner if it was never handed back, are
         // dropped here, on this thread.
         drop(stream);

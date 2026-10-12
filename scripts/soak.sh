@@ -12,6 +12,10 @@
 #                                            dist/Signal.app/Contents/Helpers/signal
 #   scripts/soak.sh --target-dir DIR ...     build in DIR (else CARGO_TARGET_DIR,
 #                                            else .cargo/config.toml, as cargo does)
+#   scripts/soak.sh --voices N ...           play the kick with N voices instead
+#                                            (`signal bench --write-voices N`)
+#   scripts/soak.sh --threads n ...          threads per block, the audio thread
+#                                            included (default: signal play's auto)
 #
 # The rate is the project's (96 kHz). Without --signal it builds signal-cli
 # with --release --locked --offline and takes the binary from the target
@@ -25,13 +29,17 @@ die () { printf 'soak: %s\n' "$*" >&2; exit 2; }
 DRIVER=coreaudio
 SIGNAL=
 TARGET_DIR=
+VOICES=
+THREADS=
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --driver) [[ $# -ge 2 ]] || die "--driver needs coreaudio or null"; DRIVER=$2; shift ;;
     --signal) [[ $# -ge 2 ]] || die "--signal needs a path"; SIGNAL=$2; shift ;;
     --target-dir) [[ $# -ge 2 ]] || die "--target-dir needs a directory"; TARGET_DIR=$2; shift ;;
-    -h|--help) sed -n '3,20p' "$0"; exit 0 ;;
+    --voices) [[ $# -ge 2 ]] || die "--voices needs a number of voices"; VOICES=$2; shift ;;
+    --threads) [[ $# -ge 2 ]] || die "--threads needs a number of threads"; THREADS=$2; shift ;;
+    -h|--help) sed -n '3,24p' "$0"; exit 0 ;;
     -*) die "unknown argument: $1" ;;
     *) POSITIONAL+=("$1") ;;
   esac
@@ -44,6 +52,8 @@ case "$DRIVER" in coreaudio|null) ;; *) die "--driver must be coreaudio or null,
 [[ $MINUTES =~ ^[0-9]+([.][0-9]+)?$ ]] && awk "BEGIN { exit !($MINUTES > 0) }" \
   || die "minutes must be a positive number, not $MINUTES"
 [[ $BUFFER =~ ^[1-9][0-9]*$ ]] || die "buffer must be a positive whole number of frames, not $BUFFER"
+[[ -z $VOICES || $VOICES =~ ^[1-9][0-9]*$ ]] || die "--voices must be a positive whole number, not $VOICES"
+[[ -z $THREADS || $THREADS =~ ^[0-9]+$ ]] || die "--threads must be a whole number, not $THREADS"
 SECONDS_TOTAL=$(awk "BEGIN { print $MINUTES * 60 }")
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -71,7 +81,11 @@ fi
 
 # --- the copy -----------------------------------------------------------------
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/signal-soak.XXXXXX") || die "no temporary folder"
-cp -R "$ROOT/projects/kick" "$WORK/kick"
+if [[ -n $VOICES ]]; then
+  "$SIGNAL" bench --write-voices "$VOICES" "$WORK/kick" >&2 || die "writing $VOICES voices failed"
+else
+  cp -R "$ROOT/projects/kick" "$WORK/kick"
+fi
 PROJECT=$WORK/kick/project.toml
 # The line rewritten: `accent = { module = "std.exp_env", decay_ms = 200 }`.
 PATTERN='^\(accent = {.*decay_ms = \)[0-9.]*'
@@ -85,9 +99,11 @@ edit () {
 }
 
 # --- the run ------------------------------------------------------------------
-printf 'soak: %s min, %s driver, buffer %s, in %s\n' "$MINUTES" "$DRIVER" "$BUFFER" "$WORK" >&2
-"$SIGNAL" --json play "$WORK/kick" --watch --driver "$DRIVER" --buffer "$BUFFER" \
-  --seconds "$SECONDS_TOTAL" < /dev/null > "$WORK/play.json" 2> "$WORK/play.log" &
+PLAY=(--json play "$WORK/kick" --watch --driver "$DRIVER" --buffer "$BUFFER" --seconds "$SECONDS_TOTAL")
+[[ -n $THREADS ]] && PLAY+=(--threads "$THREADS")
+printf 'soak: %s min, %s driver, buffer %s, voices %s, threads %s, in %s\n' "$MINUTES" "$DRIVER" \
+  "$BUFFER" "${VOICES:-1}" "${THREADS:-auto}" "$WORK" >&2
+"$SIGNAL" "${PLAY[@]}" < /dev/null > "$WORK/play.json" 2> "$WORK/play.log" &
 PID=$!
 trap 'kill "$PID" 2>/dev/null || true' EXIT INT TERM
 
@@ -123,9 +139,13 @@ WORST=$(field worst_callback_ratio)
 XRUNS=$(block xruns total)
 SETS=$(block edits sets)
 ERRORS=$(block edits errors)
+PLAYED_THREADS=$(field threads)
+WORKERS=$(field workers)
+SCHEDULING=$(block scheduling summary | sed 's/^"//; s/"$//')
 [[ -n $XRUNS && -n $WORST && -n $SETS ]] || { cat "$WORK/play.json" >&2; die "unreadable play output"; }
 
 printf 'soak: %s frames at %s Hz, buffer %s, %s driver\n' "$FRAMES" "$RATE" "$BUFFER" "$DRIVER"
+printf 'voices %s, threads %s (%s workers), scheduling %s\n' "${VOICES:-1}" "$PLAYED_THREADS" "$WORKERS" "$SCHEDULING"
 printf 'edits %s written, %s applied as parameter sets, %s errors\n' "$EDITS" "$SETS" "$ERRORS"
 printf 'xruns %s\n' "$XRUNS"
 printf 'worst callback %.3f of the period\n' "$WORST"

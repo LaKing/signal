@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 
 use signal_audio::{
     AudioError, ChannelMap, CoreAudioDriver, DeviceInfo, DeviceRef, DeviceSelector, Direction,
-    InputCallback, InputCapture, InputMeters, Resolution, StatsSnapshot, choose_output, labels,
-    resolve,
+    InputCallback, InputCapture, InputMeters, Resolution, Scheduling, StatsSnapshot, choose_output,
+    labels, resolve,
 };
 use signal_core::{Curve, EventPayload, Frame, PortAddress, Registry};
 use signal_engine::{
@@ -176,6 +176,13 @@ pub struct Status {
     pub clipped: u64,
     /// The buffer requested, in frames.
     pub buffer: u32,
+    /// The threads a block runs on, the audio thread included.
+    pub threads: usize,
+    /// The worker threads.
+    pub workers: usize,
+    /// How the workers are scheduled: `workgroup`, `time-constraint`,
+    /// `none` or `mixed` ([`Scheduling::path`]).
+    pub scheduling: &'static str,
 }
 
 /// A device list for the dialog.
@@ -272,6 +279,8 @@ struct Playing {
     inputs: Vec<(String, ChannelMeter)>,
     /// The last base and effective value the runner reported per parameter.
     values: BTreeMap<PortAddress, ParameterValue>,
+    /// How the worker threads were scheduled at the start.
+    scheduling: Scheduling,
 }
 
 /// Feeds the recorder, the output meters and the parameter values from one
@@ -933,6 +942,7 @@ impl AppState {
                 Ok(recorder) => recorder,
                 Err(error) => return self.refuse(error.to_string()),
             };
+        let workers = runner.workers();
         let started = match &mut output {
             Output::Device(driver) => driver.start(runner),
             Output::Null(driver, _) => driver.start(runner),
@@ -940,6 +950,11 @@ impl AppState {
         if let Err(error) = started {
             return self.refuse(error.to_string());
         }
+        let scheduling = match &output {
+            Output::Device(driver) => driver.scheduling().cloned(),
+            Output::Null(..) => None,
+        }
+        .unwrap_or_else(|| Scheduling::ordinary(workers.threads(), workers.count(), "null driver"));
 
         let input = self.open_input(rate, buffer);
         let inputs = input.as_ref().map_or(0, |(_, channels)| *channels);
@@ -970,6 +985,7 @@ impl AppState {
                 .map(|channel| (format!("in {}", channel + 1), ChannelMeter::new(rate)))
                 .collect(),
             values: BTreeMap::new(),
+            scheduling,
         };
         self.status = Some(status_of(&playing));
         self.playing = Some(playing);
@@ -1092,5 +1108,8 @@ fn status_of(playing: &Playing) -> Status {
         load_worst: stats.worst_callback_ratio,
         clipped: status.clipped,
         buffer: playing.buffer,
+        threads: playing.scheduling.threads,
+        workers: playing.scheduling.workers.len(),
+        scheduling: playing.scheduling.path(),
     }
 }

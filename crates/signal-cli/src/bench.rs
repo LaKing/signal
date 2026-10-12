@@ -21,18 +21,33 @@
 //!   two threads (every segment on the workers) against one thread, and the
 //!   smallest per-segment estimate at which two threads were faster.
 //!
+//! - `--realtime` (ADR 0019 §4, M2.6-3), instead of all the above: kick
+//!   voices in blocks of 128 frames paced at the 96 kHz period, timed block
+//!   by block on 1, 8 and all performance cores (and one fewer): ordinary;
+//!   with the workers in the time-constraint policy the CoreAudio driver gives
+//!   them (the calling thread ordinary, so only the workers differ); and with
+//!   the calling thread in it too, as a device's I/O thread is.
+//!
 //! The numbers are measurements of the machine that ran them, never pass or
 //! fail; the command checks nothing.
+//!
+//! `--write-voices <N> <DIR>` measures nothing: it writes the kick voices as
+//! a project (the soak's many-voice load, `scripts/soak.sh --voices`).
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 use std::process::Command;
-use std::time::Instant;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use clap::Args;
 use serde_json::{Value, json};
+use signal_audio::{TimeConstraint, WorkerPath, rt_thread};
 use signal_core::{Direction, PortKind, PortShape, Registry};
-use signal_engine::{Engine, EngineConfig, Schedule, performance_cores};
-use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, InstanceDef, build_plan};
+use signal_engine::{Engine, EngineConfig, Schedule, Workers, performance_cores};
+use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, Exports, InstanceDef, build_plan};
 use signal_project::{Project, SourceFile};
 
 use crate::{Failure, print_stdout};
@@ -58,6 +73,17 @@ const SCALING_BLOCK: usize = 128;
 /// at; each segment length divides [`REPEAT_FRAMES`].
 const THRESHOLD_VOICES: [usize; 5] = [1, 2, 4, 8, 16];
 const THRESHOLD_BLOCKS: [usize; 4] = [16, 64, 128, 256];
+/// The block (and device period) of the `--realtime` table, in frames.
+const RT_BLOCK: usize = 128;
+/// Timed blocks per row of the `--realtime` table, at least.
+const RT_MIN_BLOCKS: usize = 100;
+/// How long the `--realtime` table waits for the workers to change policy.
+const RT_WAIT: Duration = Duration::from_secs(1);
+/// The `--realtime` variants: ordinary threads; the workers in the
+/// time-constraint policy (the calling thread ordinary, as in `ordinary`:
+/// only the workers differ); and the calling thread too, as a device's I/O
+/// thread is.
+const RT_VARIANTS: [&str; 3] = ["ordinary", "rt-workers", "rt-all"];
 
 /// The kick project, as committed.
 const KICK: [(&str, &str); 3] = [
@@ -82,6 +108,19 @@ pub(crate) struct BenchArgs {
     /// 1024 frames each).
     #[arg(long, default_value_t = 1.0)]
     seconds: f64,
+    /// Write the kick with its `drums` composite duplicated N times into a
+    /// tree of `std.mix` as a project in DIR (new or empty), and measure
+    /// nothing: the soak's many-voice load.
+    #[arg(long, num_args = 2, value_names = ["N", "DIR"])]
+    write_voices: Option<Vec<String>>,
+    /// Measure only real-time worker scheduling: kick voices in paced
+    /// 128-frame blocks on 1, 8 and all performance cores (and one fewer),
+    /// with ordinary and with time-constraint workers.
+    #[arg(long, conflicts_with = "write_voices")]
+    realtime: bool,
+    /// The kick voices of the --realtime table.
+    #[arg(long, default_value_t = 24, requires = "realtime")]
+    rt_voices: usize,
 }
 
 /// One case's nanoseconds per frame over its repeats.
@@ -104,6 +143,9 @@ fn budget_ns() -> f64 {
 }
 
 pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(), Failure> {
+    if let Some(voices) = &args.write_voices {
+        return write_voices(voices, registry, json);
+    }
     if !(args.seconds.is_finite() && args.seconds > 0.0) {
         return Err(Failure::Usage(format!(
             "--seconds must be a positive number, not {}",
@@ -119,6 +161,9 @@ pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(
     };
     if !json {
         eprintln!("signal: bench: {seconds} s per case, {profile} build");
+    }
+    if args.realtime {
+        return realtime_table(args.rt_voices, seconds, profile, registry, json);
     }
 
     let empty = measure(
@@ -151,15 +196,7 @@ pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(
         primitives.push((name, per_instance, timing));
     }
 
-    let kick = Project::from_sources(
-        KICK.iter()
-            .map(|(path, text)| SourceFile {
-                path: (*path).to_owned(),
-                text: (*text).to_owned(),
-            })
-            .collect(),
-    )
-    .map_err(|d| Failure::Internal(format!("the kick project does not load: {d:?}")))?;
+    let kick = kick_project()?;
     let kick_timing = measure(
         &plan_of(&kick.root, &kick.composites, registry)?,
         registry,
@@ -396,6 +433,341 @@ pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(
                 "{ns} ns per segment"
             ))
         ));
+        print_stdout(&text);
+    }
+    Ok(())
+}
+
+/// The kick project, as committed.
+fn kick_project() -> Result<Project, Failure> {
+    Project::from_sources(
+        KICK.iter()
+            .map(|(path, text)| SourceFile {
+                path: (*path).to_owned(),
+                text: (*text).to_owned(),
+            })
+            .collect(),
+    )
+    .map_err(|d| Failure::Internal(format!("the kick project does not load: {d:?}")))
+}
+
+/// `--write-voices <N> <DIR>`: the kick voices ([`voices_graph`]) as a
+/// project in `DIR`, its composites as committed, checked by loading and
+/// planning it back.
+fn write_voices(args: &[String], registry: &Registry, json: bool) -> Result<(), Failure> {
+    let [n, dir] = args else {
+        return Err(Failure::Usage("--write-voices needs N and DIR".to_owned()));
+    };
+    let n: usize = match n.parse() {
+        Ok(n) if (1..=MAX_VOICES).contains(&n) => n,
+        _ => {
+            return Err(Failure::Usage(format!(
+                "--write-voices: N must be a whole number from 1 to {MAX_VOICES}, not {n}"
+            )));
+        }
+    };
+    let dir = Path::new(dir);
+    if fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some()) {
+        return Err(Failure::Usage(format!(
+            "{} is not empty; the project is written into a new directory",
+            dir.display()
+        )));
+    }
+    let kick = kick_project()?;
+    let mut root = voices_graph(&kick.root, n)?;
+    // N voices sum to N times the kick: the sink's gain is divided by N so
+    // the soak does not clip. Every instance still runs; the cost is the same.
+    if let Some(out) = root.instances.iter_mut().find(|i| i.name == "out")
+        && let Some(gain) = out.parameters.get_mut("gain")
+    {
+        *gain /= n as f64;
+    }
+    let name = format!("kick-voices-{n}");
+    let text = project_text(&name, kick.sample_rate, kick.seed, n, &root)?;
+    let io = |path: &Path, e: std::io::Error| Failure::Io(format!("{}: {e}", path.display()));
+    fs::create_dir_all(dir.join("composites")).map_err(|e| io(dir, e))?;
+    let project = dir.join("project.toml");
+    fs::write(&project, text).map_err(|e| io(&project, e))?;
+    for (path, text) in KICK.iter().filter(|(path, _)| *path != "project.toml") {
+        let path = dir.join(path);
+        fs::write(&path, text).map_err(|e| io(&path, e))?;
+    }
+    let written = Project::load(dir)
+        .map_err(|e| Failure::Internal(format!("the written project does not load: {e}")))?;
+    let planned = written
+        .plan(registry)
+        .map_err(|d| Failure::Internal(format!("the written project does not plan: {d:?}")))?;
+    let instances = planned.plan.instances.len();
+    if json {
+        let output = json!({
+            "project": dir.display().to_string(),
+            "voices": n,
+            "instances": instances,
+        });
+        print_stdout(&serde_json::to_string_pretty(&output).unwrap_or_default());
+    } else {
+        print_stdout(&format!(
+            "wrote {} ({n} kick voices, {instances} primitive instances)",
+            dir.display()
+        ));
+    }
+    Ok(())
+}
+
+/// `root` as a `project.toml`: an inline table per instance, its module
+/// first, and a line per connection.
+fn project_text(
+    name: &str,
+    sample_rate: u32,
+    seed: u64,
+    voices: usize,
+    root: &CompositeDef,
+) -> Result<String, Failure> {
+    if root.exports != Exports::default() {
+        return Err(Failure::Internal("the kick's root has exports".to_owned()));
+    }
+    let mut text = format!(
+        "# The kick project with its `drums` composite duplicated {voices} times, the\n\
+         # copies summed by a tree of 4-input `std.mix` (`signal bench --write-voices`).\n\
+         # A generated soak load, not a product.\n\
+         schema_version = 1\n\n\
+         [project]\nname = {name:?}\nsample_rate = {sample_rate}\nseed = {seed}\n\n\
+         [instances]\n"
+    );
+    for i in &root.instances {
+        let parameters: String = i
+            .parameters
+            .iter()
+            .map(|(key, value)| format!(", {key} = {value}"))
+            .collect();
+        text.push_str(&format!(
+            "{} = {{ module = {:?}{parameters} }}\n",
+            i.name, i.module
+        ));
+    }
+    text.push_str("\n[wiring]\nconnections = [\n");
+    for c in &root.connections {
+        let scale = c
+            .scale
+            .map(|s| format!(", scale = {s}"))
+            .unwrap_or_default();
+        text.push_str(&format!(
+            "  {{ from = {:?}, to = {:?}{scale} }},\n",
+            c.from, c.to
+        ));
+    }
+    text.push_str("]\n");
+    Ok(text)
+}
+
+/// One row of the `--realtime` table, in ns per block.
+struct RtRow {
+    threads: usize,
+    workers: usize,
+    variant: &'static str,
+    paths: Vec<WorkerPath>,
+    caller: Option<WorkerPath>,
+    median: f64,
+    p99: f64,
+    max: f64,
+    over_quarter: usize,
+    over_period: usize,
+}
+
+/// Puts every worker into `policy` (offline, without a workgroup) and says
+/// which path each took.
+fn enter_workers(workers: &Workers, policy: TimeConstraint) -> Vec<WorkerPath> {
+    let paths = Arc::new(Mutex::new(vec![None; workers.count()]));
+    let slots = Arc::clone(&paths);
+    let generation = workers.post(move |w| {
+        let path = rt_thread::enter(&policy, Err("offline: no device workgroup"));
+        let mut slots = slots.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(slot) = slots.get_mut(w) {
+            *slot = Some(path);
+        }
+    });
+    let _ = workers.wait(generation, RT_WAIT);
+    let paths = paths.lock().unwrap_or_else(PoisonError::into_inner);
+    paths
+        .iter()
+        .map(|p| {
+            p.clone()
+                .unwrap_or_else(|| WorkerPath::None("pending".to_owned()))
+        })
+        .collect()
+}
+
+/// `--realtime`: `voices` kick voices in blocks of [`RT_BLOCK`] frames, one
+/// block per period of 128 frames at 96 kHz (the thread sleeps between
+/// blocks, so idle workers park as they do with a device), each block timed,
+/// on 1, 8, the real-time auto count (two thirds of the performance cores)
+/// and all of them, in each of
+/// [`RT_VARIANTS`]: ordinary; the workers in the time-constraint policy the
+/// CoreAudio driver sets (`TimeConstraint::from_period`), the calling thread
+/// ordinary; and the calling thread in it too.
+fn realtime_table(
+    voices: usize,
+    seconds: f64,
+    profile: &str,
+    registry: &Registry,
+    json: bool,
+) -> Result<(), Failure> {
+    if !(1..=MAX_VOICES).contains(&voices) {
+        return Err(Failure::Usage(format!(
+            "--rt-voices must be from 1 to {MAX_VOICES}, not {voices}"
+        )));
+    }
+    let kick = kick_project()?;
+    let plan = plan_of(
+        &voices_graph(&kick.root, voices)?,
+        &kick.composites,
+        registry,
+    )?;
+    let (cores, cores_source) = performance_cores();
+    let mut thread_counts = vec![1, 8, signal_engine::realtime_threads(), cores];
+    thread_counts.sort_unstable();
+    thread_counts.dedup();
+    let period = Duration::from_secs_f64(RT_BLOCK as f64 / f64::from(SAMPLE_RATE));
+    let period_ns = period.as_nanos() as f64;
+    let blocks = ((seconds / period.as_secs_f64()).ceil() as usize).max(RT_MIN_BLOCKS);
+    let timebase = rt_thread::timebase();
+    let policy = TimeConstraint::from_period(RT_BLOCK as u32, SAMPLE_RATE, timebase);
+
+    let mut rows = Vec::new();
+    for &threads in &thread_counts {
+        for variant in RT_VARIANTS {
+            let config = EngineConfig {
+                block_capacity: RT_BLOCK,
+                threads,
+                schedule: Schedule::DEFAULT,
+                ..EngineConfig::new(SAMPLE_RATE, SEED)
+            };
+            let mut engine = Engine::new(&plan, registry, config, Vec::new())
+                .map_err(|e| Failure::Internal(e.to_string()))?;
+            let workers = engine.workers();
+            let paths = if variant == "ordinary" {
+                Vec::new()
+            } else {
+                enter_workers(&workers, policy)
+            };
+            let caller = (variant == "rt-all")
+                .then(|| rt_thread::enter(&policy, Err("offline: no device workgroup")));
+            // Untimed: one repeat's worth of blocks.
+            for _ in 0..REPEAT_FRAMES as usize / RT_BLOCK {
+                engine.run_block(RT_BLOCK);
+            }
+            let mut times = Vec::with_capacity(blocks);
+            let mut next = Instant::now() + period;
+            for _ in 0..blocks {
+                if let Some(wait) = next.checked_duration_since(Instant::now()) {
+                    thread::sleep(wait);
+                }
+                let began = Instant::now();
+                engine.run_block(RT_BLOCK);
+                times.push(began.elapsed().as_nanos() as f64);
+                next = (next + period).max(Instant::now());
+            }
+            if variant != "ordinary" {
+                let generation = workers.post(|_| rt_thread::exit());
+                let _ = workers.wait(generation, RT_WAIT);
+            }
+            if caller.is_some() {
+                rt_thread::exit();
+            }
+            drop(engine);
+            times.sort_by(f64::total_cmp);
+            let rank = |p: f64| {
+                let k = ((p * times.len() as f64).ceil() as usize).clamp(1, times.len());
+                times.get(k - 1).copied().unwrap_or_default()
+            };
+            let row = RtRow {
+                threads,
+                workers: workers.count(),
+                variant,
+                paths,
+                caller,
+                median: rank(0.5),
+                p99: rank(0.99),
+                max: times.last().copied().unwrap_or_default(),
+                over_quarter: times.iter().filter(|&&t| t > 0.25 * period_ns).count(),
+                over_period: times.iter().filter(|&&t| t > period_ns).count(),
+            };
+            if !json {
+                eprintln!(
+                    "signal: bench: realtime: {threads} threads, {variant}: median {:.1} µs, p99 {:.1} µs",
+                    row.median / 1e3,
+                    row.p99 / 1e3
+                );
+            }
+            rows.push(row);
+        }
+    }
+
+    let paths = |paths: &[WorkerPath]| -> String {
+        let mut names: Vec<String> = paths.iter().map(ToString::to_string).collect();
+        names.dedup();
+        if names.is_empty() {
+            "ordinary".to_owned()
+        } else {
+            names.join(", ")
+        }
+    };
+    if json {
+        let output = json!({
+            "label": "measurement",
+            "table": "realtime_workers",
+            "profile": profile,
+            "machine": machine(),
+            "sample_rate": SAMPLE_RATE,
+            "block_frames": RT_BLOCK,
+            "period_ns": period_ns,
+            "voices": voices,
+            "blocks_per_row": blocks,
+            "performance_cores": cores,
+            "cores_source": cores_source.name(),
+            "policy": {
+                "timebase": [timebase.0, timebase.1],
+                "period_ticks": policy.period,
+                "computation_ticks": policy.computation,
+                "constraint_ticks": policy.constraint,
+            },
+            "rows": rows.iter().map(|r| json!({
+                "threads": r.threads,
+                "workers": r.workers,
+                "variant": r.variant,
+                "caller": r.caller.as_ref().map_or("ordinary".to_owned(), ToString::to_string),
+                "paths": r.paths.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "median_ns": r.median,
+                "p99_ns": r.p99,
+                "max_ns": r.max,
+                "median_fraction": r.median / period_ns,
+                "p99_fraction": r.p99 / period_ns,
+                "over_25_percent": r.over_quarter,
+                "over_period": r.over_period,
+            })).collect::<Vec<_>>(),
+        });
+        print_stdout(&serde_json::to_string_pretty(&output).unwrap_or_default());
+    } else {
+        let mut text = format!(
+            "real-time workers: {voices} kick voices, blocks of {RT_BLOCK} frames paced at {:.1} µs, \
+             {blocks} blocks per row, {cores} performance cores ({})\n\
+             threads  variant       median µs   p99 µs   max µs  >25 %  >100 %  workers",
+            period_ns / 1e3,
+            cores_source.name()
+        );
+        for r in &rows {
+            text.push_str(&format!(
+                "\n  {:>5}  {:<11} {:>10.1} {:>8.1} {:>8.1} {:>6} {:>7}  {}",
+                r.threads,
+                r.variant,
+                r.median / 1e3,
+                r.p99 / 1e3,
+                r.max / 1e3,
+                r.over_quarter,
+                r.over_period,
+                paths(&r.paths)
+            ));
+        }
         print_stdout(&text);
     }
     Ok(())
@@ -711,4 +1083,51 @@ fn machine() -> Value {
         "memory_bytes": sysctl("hw.memsize"),
         "os": sysctl("kern.osproductversion"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ok<T>(result: Result<T, Failure>) -> T {
+        result.unwrap_or_else(|_| panic!("a bench helper failed"))
+    }
+
+    /// The written project is the bench's voices graph, instance for
+    /// instance and connection for connection.
+    #[test]
+    fn the_written_project_is_the_voices_graph() {
+        let mut registry = Registry::new();
+        signal_std::register(&mut registry).unwrap();
+        let kick = ok(kick_project());
+        for n in [1, 3, 17] {
+            let root = ok(voices_graph(&kick.root, n));
+            let text = ok(project_text("kick-voices", 96_000, 42, n, &root));
+            let mut files: Vec<SourceFile> = KICK
+                .iter()
+                .filter(|(path, _)| *path != "project.toml")
+                .map(|(path, text)| SourceFile {
+                    path: (*path).to_owned(),
+                    text: (*text).to_owned(),
+                })
+                .collect();
+            files.push(SourceFile {
+                path: "project.toml".to_owned(),
+                text,
+            });
+            let written = Project::from_sources(files).unwrap();
+            let sorted = |c: &CompositeDef| {
+                let mut instances = c.instances.clone();
+                instances.sort_by(|a, b| a.name.cmp(&b.name));
+                let mut connections = c.connections.clone();
+                connections.sort_by(|a, b| (&a.from, &a.to).cmp(&(&b.from, &b.to)));
+                (instances, connections)
+            };
+            assert_eq!(sorted(&written.root), sorted(&root), "{n} voices");
+            assert_eq!((written.sample_rate, written.seed), (96_000, 42));
+            let planned = written.plan(&registry).unwrap().plan;
+            let reference = ok(plan_of(&root, &kick.composites, &registry));
+            assert_eq!(planned.instances.len(), reference.instances.len());
+        }
+    }
 }

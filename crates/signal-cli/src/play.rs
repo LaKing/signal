@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, ValueEnum};
 use serde_json::json;
-use signal_audio::{CallbackStats, CoreAudioDriver, StatsSnapshot};
+use signal_audio::{CallbackStats, CoreAudioDriver, Scheduling, StatsSnapshot};
 use signal_core::Registry;
 use signal_engine::{
     Controller, Driver, NullDriver, RealtimeConfig, Runner, RunnerStatus, realtime,
@@ -69,9 +69,9 @@ pub(crate) struct PlayArgs {
     /// in memory while playing).
     #[arg(long)]
     record_audio: Option<PathBuf>,
-    /// Threads a block runs on, the audio thread included (0: one per
-    /// performance core; 1: no worker threads). The output is identical for
-    /// every count.
+    /// Threads a block runs on, the audio thread included (0: two thirds
+    /// of the performance cores; 1: no worker threads). The output is
+    /// identical for every count.
     #[arg(long, default_value_t = 0)]
     threads: u32,
 }
@@ -82,6 +82,8 @@ struct Ended {
     stats: StatsSnapshot,
     /// The device channels played (the sink's width with the null driver).
     device_channels: usize,
+    /// How the worker threads were scheduled.
+    scheduling: Scheduling,
     audio: Option<Vec<f32>>,
 }
 
@@ -268,6 +270,7 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
     let total: u64 = overflows.iter().sum();
     let stats = ended.stats;
     let driver = if null { "null" } else { "coreaudio" };
+    let scheduling = &ended.scheduling;
     if json {
         let output = json!({
             "project": dir.display().to_string(),
@@ -277,6 +280,14 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
             "sink_channels": width,
             "device_channels": ended.device_channels,
             "buffer": args.buffer,
+            "threads": scheduling.threads,
+            "workers": scheduling.workers.len(),
+            "scheduling": {
+                "path": scheduling.path(),
+                "summary": scheduling.summary(),
+                "workers": scheduling.workers.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "no_workgroup": scheduling.no_workgroup,
+            },
             "callbacks": stats.callbacks,
             "xruns": {
                 "total": stats.xruns,
@@ -308,6 +319,7 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
     } else {
         print_stdout(&format!(
             "played {} frames at {rate} Hz ({width} sink channels on {} device channels) with the {driver} driver\n\
+             threads {} ({} workers), scheduling {}\n\
              xruns {} ({} stream errors, {} overruns)\n\
              worst callback {:.3} of its period\n\
              clipped samples {}\n\
@@ -315,6 +327,9 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
              late commands {}",
             status.next_frame.0,
             ended.device_channels,
+            scheduling.threads,
+            scheduling.workers.len(),
+            scheduling.summary(),
             stats.xruns,
             stats.stream_errors,
             stats.overruns,
@@ -337,6 +352,8 @@ fn play_null(
     stop: &AtomicBool,
 ) -> Result<Ended, Failure> {
     let rate = control.current.sample_rate;
+    let workers = runner.workers();
+    let scheduling = Scheduling::ordinary(workers.threads(), workers.count(), "null driver");
     let mut driver = NullDriver::new(rate, width, control.current.seed);
     driver
         .start(runner)
@@ -345,6 +362,7 @@ fn play_null(
         "signal: playing {} at {rate} Hz with the null driver; press Enter to stop",
         args.project.display()
     );
+    report_scheduling(&scheduling);
     let stats = CallbackStats::default();
     let mut audio = args.record_audio.is_some().then(Vec::new);
     let began = Cell::new(Instant::now());
@@ -397,6 +415,7 @@ fn play_null(
         status: runner.status(),
         stats: stats.snapshot(),
         device_channels: width,
+        scheduling,
         audio,
     })
 }
@@ -432,6 +451,11 @@ fn play_device(
         driver.name(),
         args.buffer
     );
+    let scheduling = driver
+        .scheduling()
+        .cloned()
+        .ok_or_else(|| Failure::Internal("the driver reported no scheduling".to_owned()))?;
+    report_scheduling(&scheduling);
     let interval = Duration::from_secs_f64(f64::from(args.buffer) / f64::from(rate))
         .min(Duration::from_millis(1));
     let mut stopping: Option<Instant> = None;
@@ -465,8 +489,19 @@ fn play_device(
         status,
         stats: stats.snapshot(),
         device_channels: driver.channels(),
+        scheduling,
         audio: None,
     })
+}
+
+/// `signal: 8 threads (7 workers): workgroup` on stderr.
+fn report_scheduling(scheduling: &Scheduling) {
+    eprintln!(
+        "signal: {} threads ({} workers): {}",
+        scheduling.threads,
+        scheduling.workers.len(),
+        scheduling.summary()
+    );
 }
 
 /// Writes interleaved samples as `signal render` writes `audio.wav`: 32-bit

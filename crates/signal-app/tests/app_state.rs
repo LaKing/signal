@@ -111,6 +111,12 @@ fn open_play_meter_and_stop_through_the_null_driver() {
     let view = state.view();
     assert_eq!(view.status.unwrap().frame, 48_000);
     assert!((view.status.unwrap().elapsed - 0.5).abs() < 1e-12);
+    // M2.6-3: the worker count and the scheduling path (auto threads; the
+    // null backend leaves the workers ordinary).
+    let status = view.status.unwrap();
+    assert_eq!(status.threads, signal_engine::realtime_threads());
+    assert_eq!(status.workers, status.threads - 1);
+    assert_eq!(status.scheduling, "none");
     for meter in &view.outputs {
         assert!(
             meter.reading.held.is_finite(),

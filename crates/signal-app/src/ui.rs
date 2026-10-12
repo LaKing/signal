@@ -230,14 +230,17 @@ impl SignalApp {
     fn status_line(&self, ui: &mut egui::Ui) {
         let text = match &self.view.status {
             Some(s) => format!(
-                "frame {}   elapsed {:.3} s   xruns {}   load {:.1} % avg, {:.1} % worst   clipped {}   buffer {}",
+                "frame {}   elapsed {:.3} s   xruns {}   load {:.1} % avg, {:.1} % worst   clipped {}   buffer {}   threads {} ({} workers, {})",
                 s.frame,
                 s.elapsed,
                 s.xruns,
                 s.load_average * 100.0,
                 s.load_worst * 100.0,
                 s.clipped,
-                s.buffer
+                s.buffer,
+                s.threads,
+                s.workers,
+                s.scheduling
             ),
             None => "stopped".to_owned(),
         };

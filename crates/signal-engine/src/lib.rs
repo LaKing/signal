@@ -52,7 +52,7 @@ pub mod shared;
 mod tasks;
 mod units;
 
-pub use cores::{CoreSource, performance_cores};
+pub use cores::{CoreSource, performance_cores, realtime_threads};
 pub use driver::{CallbackSizes, Driver, DriverError, MAX_CALLBACK_FRAMES, NullDriver};
 pub use engine::{
     EditFull, Engine, EngineConfig, ExternalEvent, ExternalFull, InputDiscards, ParameterValue,
@@ -68,6 +68,7 @@ pub use manifest::{Manifest, Provenance};
 pub use offline::{Render, render, render_blocks, render_with};
 #[doc(hidden)]
 pub use pool::spawned_workers;
+pub use pool::{Progress, Workers};
 pub use realtime::{
     Command, CommandId, ControlError, ControlSink, Controller, Meter, Outcome,
     PARAMETERS_PER_CALLBACK, ReadySwap, RealtimeConfig, Report, Runner, RunnerStatus, SentCommand,

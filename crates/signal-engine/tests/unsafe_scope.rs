@@ -79,8 +79,49 @@ fn unsafe_appears_only_in_the_audited_modules() {
         offenders.is_empty(),
         "the keyword outside the audited modules:\n{offenders:#?}"
     );
-    // The two modules that exist today do use it (rt_thread.rs is M2.6-3).
-    for module in [AUDITED[0], AUDITED[2]] {
+    // The three audited modules do use it.
+    for module in AUDITED {
         assert!(audited_found.iter().any(|f| f == module), "{module}");
+    }
+}
+
+/// ADR 0019 §4 (M2.6-3): every line of `rt_thread.rs` that uses the keyword
+/// follows a comment holding `SAFETY:` (attributes may stand between), and
+/// `os_workgroup_join` and `os_workgroup_leave` are declared there in an
+/// `extern "C"` block.
+#[test]
+fn every_unsafe_use_in_rt_thread_has_a_safety_comment() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let text = fs::read_to_string(root.join(AUDITED[1])).unwrap();
+    let keyword = concat!("un", "safe");
+    let lines: Vec<&str> = text.lines().map(str::trim_start).collect();
+    let mut uses = 0;
+    let mut missing = Vec::new();
+    for (n, line) in lines.iter().enumerate() {
+        if line.starts_with("//") || !has_keyword(line, keyword) {
+            continue;
+        }
+        uses += 1;
+        let mut above = lines[..n]
+            .iter()
+            .rev()
+            .skip_while(|l| l.starts_with("#["))
+            .take_while(|l| l.starts_with("//"));
+        if !above.any(|l| l.contains("SAFETY:")) {
+            missing.push(format!("{}: {line}", n + 1));
+        }
+    }
+    assert!(uses >= 5, "rt_thread.rs uses the keyword {uses} times");
+    assert!(
+        missing.is_empty(),
+        "without a SAFETY comment:\n{missing:#?}"
+    );
+
+    let block = format!("{keyword} extern \"C\" {{");
+    let start = text.find(&block).expect("an extern \"C\" block");
+    let end = start + text[start..].find("\n}").expect("its end");
+    let declarations = &text[start..end];
+    for function in ["fn os_workgroup_join(", "fn os_workgroup_leave("] {
+        assert!(declarations.contains(function), "{function} is declared");
     }
 }

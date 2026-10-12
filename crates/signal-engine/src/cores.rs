@@ -62,3 +62,13 @@ fn from_sysctl() -> Option<usize> {
     }
     Some(cores)
 }
+
+/// The threads a real-time run uses when its `threads` is 0 (auto): two
+/// thirds of the performance cores, rounded down, at least 1. The rest are
+/// left to the control thread, the GUI and the system, whose preemption of a
+/// joined worker delays the whole block (`docs/realtime-rules.md` "Worker
+/// threads", operator measurement 2026-10-12). Offline, auto is every
+/// performance core.
+pub fn realtime_threads() -> usize {
+    (performance_cores().0 * 2 / 3).max(1)
+}

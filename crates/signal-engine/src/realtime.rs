@@ -18,6 +18,7 @@ use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use signal_core::{EventPayload, Frame, InstanceAddress, PortAddress, Registry};
 use signal_graph::ExecutionPlan;
 
+use crate::cores::realtime_threads;
 use crate::engine::{
     EditFull, Engine, EngineConfig, ExternalEvent, ExternalFull, InputDiscards, ParameterValue,
     PlanState, PreparedSwap, ScheduleStats, SwapTarget, prepare_swap,
@@ -26,6 +27,7 @@ use crate::error::{EngineError, RenderError};
 use crate::fade::fade_frames;
 use crate::log::{InstanceId, LogLine, LogRecord};
 use crate::offline::GAIN;
+use crate::pool::Workers;
 use crate::shared::HookPoint;
 
 /// The capacities and timing of a real-time run.
@@ -316,6 +318,11 @@ pub fn realtime(
     registry: &Registry,
     config: RealtimeConfig,
 ) -> Result<(Runner, Controller), ControlError> {
+    // Auto in real time: one performance core fewer (`realtime_threads`).
+    let mut config = config;
+    if config.engine.threads == 0 {
+        config.engine.threads = realtime_threads();
+    }
     let engine =
         Engine::new(plan, registry, config.engine, Vec::new()).map_err(ControlError::Engine)?;
     let mirror = PlanState::mirror(plan, registry, config.engine).map_err(ControlError::Engine)?;
@@ -475,6 +482,11 @@ impl Runner {
     /// The next frame it will run.
     pub fn next_frame(&self) -> Frame {
         self.engine.next_frame()
+    }
+
+    /// The engine's worker threads ([`Engine::workers`]), for the driver.
+    pub fn workers(&self) -> Workers {
+        self.engine.workers()
     }
 
     /// The engine's [`set_task_hook`](Engine::set_task_hook) (tests).
