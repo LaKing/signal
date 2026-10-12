@@ -19,7 +19,7 @@ How Signal is tested, what the acceptance IDs (V1…) map to, and how golden ren
 
 Real time against offline (M2-3): `crates/signal-cli/tests/realtime.rs` checks V9 (60 s of `projects/kick` through the null driver, three callback-size seeds, equal to the offline render as f32) and replays a session issued through the `Controller` with `signal replay`; `crates/signal-engine/tests/realtime_no_allocation.rs` checks V11 (no heap call inside `Runner::process` over 12 000 callbacks); `crates/signal-engine/tests/realtime.rs` covers queue overflow, the clamp, channel mapping, stamping and late commands.
 
-Later: benchmarks (M2, V13), comparison and listening packages (M3), soak runs (V12).
+Benchmarks (V13) and the soak (V12): `signal bench` and `scripts/soak.sh`, with the method, the recorded measurements and the operator's soak command in `docs/benchmarks.md`. `crates/signal-cli/tests/bench.rs` checks the fields and shape of `signal --json bench --seconds 0.1`, never its timings. Later: comparison and listening packages (M3).
 
 Run everything with `cargo test --workspace --locked --offline`. The acceptance suite renders about 18 million frames in the debug profile; its longest test, V5, renders 64 bars at 96 kHz. V9 adds about 23 million (one offline render and three null-driver runs of 60 s at 96 kHz, the runs in parallel).
 

@@ -1,9 +1,10 @@
 //! The `signal` command (headless entry point; ADR 0013): `render`, `replay`,
-//! `play`, `devices`, `modules` and `schema`. `--json` makes every command print machine-readable output on
+//! `play`, `bench`, `devices`, `modules` and `schema`. `--json` makes every command print machine-readable output on
 //! stdout. Exit codes: 0 ok, 1 validation or user error, 2 internal error.
 //! The command layer only: sessions, live edits and provenance live in
 //! `signal-project`, the audio device in `signal-audio`.
 
+mod bench;
 mod devices;
 mod play;
 mod render;
@@ -38,6 +39,9 @@ enum Command {
     /// Play a project in real time (until Enter, or --seconds), with live
     /// edits (--watch) and session recording; statistics at the end.
     Play(play::PlayArgs),
+    /// Measure the per-frame engine at 96 kHz (V13): every `std.*`
+    /// primitive, the empty engine, the kick project and kick voices.
+    Bench(bench::BenchArgs),
     /// List the audio devices with their sample rates, channels and buffer sizes.
     Devices,
     /// Print the catalogue of module descriptors.
@@ -154,6 +158,7 @@ fn execute(cli: &Cli) -> Result<(), Failure> {
         Command::Render(args) => render::run(args, &registry, cli.json),
         Command::Replay(args) => replay::run(args, &registry, cli.json),
         Command::Play(args) => play::run(args, &registry, cli.json),
+        Command::Bench(args) => bench::run(args, &registry, cli.json),
         Command::Devices => devices::run(cli.json),
         Command::Modules => {
             if cli.json {

@@ -1,6 +1,6 @@
 [package]
 name = "signal-cli"
-description = "The `signal` command: render, replay, play, devices, modules, schema, compare."
+description = "The `signal` command: render, replay, play, bench, devices, modules, schema, compare."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
