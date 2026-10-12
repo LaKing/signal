@@ -268,6 +268,22 @@ fn exit_saves_the_window_size() {
     assert_eq!(Setup::load(&path).0.window, Some(window));
 }
 
+/// M2.5-3: started without `--project` (as Signal.app is from the Finder),
+/// the app opens the Setup's last project.
+#[test]
+fn a_start_without_a_project_opens_the_last_one() {
+    let setup = Setup {
+        last_project: Some(tone()),
+        ..Setup::default()
+    };
+    let path = setup_file("last", &setup);
+    let state = AppState::new(path, None, Backend::Null(devices()));
+    let view = state.view();
+    assert_eq!(view.project, tone().display().to_string());
+    assert_eq!(view.sample_rate, Some(48_000));
+    assert!(view.diagnostics.is_empty());
+}
+
 #[test]
 fn a_project_that_does_not_load_shows_its_diagnostic() {
     let dir = std::env::temp_dir().join(format!("signal-app-bad-{}", std::process::id()));

@@ -59,7 +59,11 @@ fn main() -> ExitCode {
         options,
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
-            let project = args.project;
+            // Absolute, because it becomes the Setup's last project, and
+            // Signal.app opened from the Finder starts in `/`.
+            let project = args
+                .project
+                .map(|dir| std::path::absolute(&dir).unwrap_or(dir));
             let control = Control::spawn(
                 move || AppState::new(path, project, Backend::CoreAudio),
                 move || ctx.request_repaint(),

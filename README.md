@@ -10,4 +10,13 @@ Status: **M1 Core + offline** done (V6 waived), developed through devpanel: an o
 - Set up this Mac: `./install.sh` (toolchain, tools, dependencies, offline verification)
 - For AI agents and contributors: [`AGENTS.md`](AGENTS.md)
 
+## Build the app
+
+```sh
+scripts/bundle-app.sh            # debug; --release for an optimised build
+open dist/Signal.app
+```
+
+This builds `signal-app` and `signal` offline (`--locked --offline`) in cargo's target directory (or `--target-dir DIR`). It writes `dist/Signal.app` (git-ignored), with the GUI as `Contents/MacOS/Signal` and the CLI as `Contents/Helpers/signal`. The bundle is signed ad hoc with the hardened runtime and the audio-input entitlement, and needs no signing identity. On first start macOS asks for microphone access, which the app uses for input metering. The app opens the Setup's last project, or `--project DIR`.
+
 © 2026. All rights reserved (provisional; see ADR 0014).

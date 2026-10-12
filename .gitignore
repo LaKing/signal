@@ -1,4 +1,5 @@
 /target
+/dist/
 /renders/
 *.wav
 !tests/golden/**/*.wav
