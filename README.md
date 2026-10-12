@@ -13,6 +13,14 @@ Status: **M1 Core + offline** done (V6 waived), developed through devpanel: an o
 ## Build the app
 
 ```sh
+./start.sh                       # release build of Signal.app, then open it
+./start.sh projects/kick         # ... with this project
+./start.sh --cli projects/kick   # play it in the terminal instead (live reload)
+```
+
+Or step by step:
+
+```sh
 scripts/bundle-app.sh            # debug; --release for an optimised build
 open dist/Signal.app
 ```
