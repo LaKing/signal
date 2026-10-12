@@ -11,13 +11,17 @@ use std::process::Command;
 
 use signal_core::{Curve, EventPayload, Frame, Registry, SplitMix64};
 use signal_engine::{
-    Engine, EngineConfig, EngineError, ExternalEvent, Render, render_blocks, render_with,
+    Engine, EngineConfig, EngineError, ExternalEvent, Render, Schedule, render_blocks, render_with,
 };
-use signal_graph::ExecutionPlan;
+use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, InstanceDef, build_plan};
 use signal_project::{Project, SourceFile};
 
 /// The block sizes of the matrix (AC1).
 const SIZES: [usize; 7] = [1, 2, 3, 7, 64, 128, 256];
+
+/// M2.6-2's thread counts and block sizes (ADR 0019 §2).
+const THREADS: [usize; 5] = [1, 2, 3, 4, 8];
+const THREAD_SIZES: [usize; 3] = [1, 64, 256];
 
 /// Frames of the kick and pulse rows (about 2 s at 96 kHz).
 const PROJECT_FRAMES: u64 = 200_000;
@@ -64,18 +68,32 @@ fn partitions() -> impl Iterator<Item = Partition> {
         .chain([Partition::Random(7)])
 }
 
-/// Renders `frames` of `plan` split by `partition`, calling `before` (which
-/// returns the next frame it must run before) as `render_blocks` does.
+/// The configuration on `threads` threads: with more than one, every segment
+/// of a plan with two tasks or more runs on the workers, one task per unit.
+fn config(sample_rate: u32, seed: u64, threads: usize) -> EngineConfig {
+    EngineConfig {
+        threads,
+        schedule: if threads > 1 {
+            Schedule::FORCED
+        } else {
+            Schedule::DEFAULT
+        },
+        ..EngineConfig::new(sample_rate, seed)
+    }
+}
+
+/// Renders `frames` of `plan` split by `partition` on `threads` threads,
+/// calling `before` (which returns the next frame it must run before) as
+/// `render_blocks` does. With workers, asserts that they ran tasks.
 fn render(
     plan: &ExecutionPlan,
-    sample_rate: u32,
-    seed: u64,
-    frames: u64,
+    (sample_rate, seed, frames): (u32, u64, u64),
     partition: Partition,
+    threads: usize,
     mut before: impl FnMut(&mut Engine) -> Result<Option<Frame>, EngineError>,
 ) -> Render {
     let registry = registry();
-    let config = EngineConfig::new(sample_rate, seed);
+    let config = config(sample_rate, seed, threads);
     let mut engine = Engine::new(plan, &registry, config, Vec::new()).unwrap();
     let render = match partition {
         Partition::PerFrame => render_with(&mut engine, frames, |e| before(e).map(|_| ())),
@@ -92,36 +110,73 @@ fn render(
     .unwrap();
     assert_eq!(engine.log_overflows(), 0);
     assert_eq!(engine.input_overflows(), 0);
+    if threads > 1 {
+        let stats = engine.schedule_stats();
+        assert!(stats.worker_tasks > 0, "{stats:?}");
+    }
     render
 }
 
-fn project_matrix(name: &str, per_frame: (&str, &str)) {
+/// The thread grid of M2.6-2's matrix (ADR 0019 §2): every thread count at
+/// block sizes 1, 64 and 256.
+fn thread_grid() -> impl Iterator<Item = (Partition, usize)> {
+    THREADS
+        .into_iter()
+        .flat_map(|threads| THREAD_SIZES.map(|k| (Partition::Blocks(k), threads)))
+}
+
+/// The checked mode's exclusivity tracker ran and found nothing.
+fn assert_checked() {
+    let exclusivity = signal_engine::exclusivity();
+    assert!(exclusivity.checked, "the matrix runs with the tracker on");
+    assert!(exclusivity.claims > 0);
+    assert_eq!(exclusivity.violations, 0);
+}
+
+fn project_matrix(
+    name: &str,
+    per_frame: (&str, &str),
+    runs: impl Iterator<Item = (Partition, usize)>,
+) {
     let project = Project::load(&repository().join("projects").join(name)).unwrap();
     let plan = project.plan(&registry()).unwrap().plan;
     let expected = (per_frame.0.to_owned(), per_frame.1.to_owned());
-    for partition in partitions() {
-        let rendered = render(
-            &plan,
-            project.sample_rate,
-            project.seed,
-            PROJECT_FRAMES,
-            partition,
-            |_| Ok(None),
+    for (partition, threads) in runs {
+        let run = (project.sample_rate, project.seed, PROJECT_FRAMES);
+        let rendered = render(&plan, run, partition, threads, |_| Ok(None));
+        assert_eq!(
+            hashes(&rendered),
+            expected,
+            "{name}, {partition:?}, {threads} threads"
         );
-        assert_eq!(hashes(&rendered), expected, "{name}, {partition:?}");
     }
 }
 
 /// AC1: the kick project at every block size equals the per-frame engine.
 #[test]
 fn kick_is_bit_identical_in_blocks() {
-    project_matrix("kick", KICK_PER_FRAME);
+    project_matrix("kick", KICK_PER_FRAME, partitions().map(|p| (p, 1)));
+}
+
+/// M2.6-2 AC1: on 1, 2, 3, 4 and 8 threads at k = 1, 64 and 256, every
+/// segment on the workers, the kick equals the per-frame engine.
+#[test]
+fn kick_is_bit_identical_on_threads() {
+    project_matrix("kick", KICK_PER_FRAME, thread_grid());
+    assert_checked();
+}
+
+/// M2.6-2 AC1: the pulse project (a loop through `std.delay`) likewise.
+#[test]
+fn pulse_is_bit_identical_on_threads() {
+    project_matrix("pulse", PULSE_PER_FRAME, thread_grid());
+    assert_checked();
 }
 
 /// AC1: the pulse project (a loop through `std.delay`) likewise.
 #[test]
 fn pulse_is_bit_identical_in_blocks() {
-    project_matrix("pulse", PULSE_PER_FRAME);
+    project_matrix("pulse", PULSE_PER_FRAME, partitions().map(|p| (p, 1)));
 }
 
 /// Input pushed during the scripted session.
@@ -210,6 +265,23 @@ fn session_step(
 /// and late events) at every block size equals the per-frame engine.
 #[test]
 fn a_scripted_session_is_bit_identical_in_blocks() {
+    session_matrix(
+        [Partition::PerFrame]
+            .into_iter()
+            .chain(partitions())
+            .map(|p| (p, 1)),
+    );
+}
+
+/// M2.6-2 AC1: the scripted session on 1, 2, 3, 4 and 8 threads at k = 1, 64
+/// and 256 (every segment on the workers, swaps included) likewise.
+#[test]
+fn a_scripted_session_is_bit_identical_on_threads() {
+    session_matrix(thread_grid());
+    assert_checked();
+}
+
+fn session_matrix(runs: impl Iterator<Item = (Partition, usize)>) {
     let registry = registry();
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/session");
     let projects: Vec<Project> = (0..3)
@@ -231,14 +303,132 @@ fn a_scripted_session_is_bit_identical_in_blocks() {
         SESSION_PER_FRAME.0.to_owned(),
         SESSION_PER_FRAME.1.to_owned(),
     );
-    for partition in [Partition::PerFrame].into_iter().chain(partitions()) {
+    for (partition, threads) in runs {
         let mut next = 0;
-        let rendered = render(&plans[0], rate, seed, 3_000, partition, |engine| {
-            session_step(engine, &plans, &registry, &script, &mut next)
-        });
+        let rendered = render(
+            &plans[0],
+            (rate, seed, 3_000),
+            partition,
+            threads,
+            |engine| session_step(engine, &plans, &registry, &script, &mut next),
+        );
         assert_eq!(next, script.len());
-        assert_eq!(hashes(&rendered), expected, "session, {partition:?}");
+        assert_eq!(
+            hashes(&rendered),
+            expected,
+            "session, {partition:?}, {threads} threads"
+        );
     }
+}
+
+/// The kick project with its `drums` instance repeated `n` times (every
+/// connection to and from it repeated) and the copies summed by a tree of
+/// 4-input `std.mix` into the sink: `signal bench`'s kick voices.
+fn voices(n: usize) -> (ExecutionPlan, u32, u64) {
+    let project = Project::load(&repository().join("projects/kick")).unwrap();
+    let kick = &project.root;
+    let drums = kick.instances.iter().find(|i| i.name == "drums").unwrap();
+    let mut root = CompositeDef {
+        instances: kick
+            .instances
+            .iter()
+            .filter(|i| i.name != "drums")
+            .cloned()
+            .collect(),
+        connections: Vec::new(),
+        ..kick.clone()
+    };
+    let mut outputs: Vec<String> = Vec::new();
+    for i in 0..n {
+        let name = format!("drums_{i}");
+        root.instances.push(InstanceDef {
+            name: name.clone(),
+            ..drums.clone()
+        });
+        outputs.push(format!("{name}.out"));
+    }
+    let connect = |from: &str, to: &str, scale| ConnectionDef {
+        from: from.to_owned(),
+        to: to.to_owned(),
+        scale,
+    };
+    let mut sink_inputs = Vec::new();
+    for c in &kick.connections {
+        match (c.from.split_once('.'), c.to.split_once('.')) {
+            (Some(("drums", _)), _) => sink_inputs.push(c.to.clone()),
+            (_, Some(("drums", port))) => {
+                for i in 0..n {
+                    let to = format!("drums_{i}.{port}");
+                    root.connections.push(connect(&c.from, &to, c.scale));
+                }
+            }
+            _ => root.connections.push(c.clone()),
+        }
+    }
+    let mut level = 0;
+    while outputs.len() > 1 || level == 0 {
+        let mut next = Vec::new();
+        for (j, group) in outputs.chunks(4).enumerate() {
+            let name = format!("mix_{level}_{j}");
+            root.instances.push(InstanceDef {
+                name: name.clone(),
+                module: "std.mix".to_owned(),
+                parameters: Default::default(),
+            });
+            for (input, from) in ["a", "b", "c", "d"].iter().zip(group) {
+                root.connections
+                    .push(connect(from, &format!("{name}.{input}"), None));
+            }
+            next.push(format!("{name}.out"));
+        }
+        outputs = next;
+        level += 1;
+    }
+    for to in sink_inputs {
+        for from in &outputs {
+            root.connections.push(connect(from, &to, None));
+        }
+    }
+    let plan = build_plan(&root, &project.composites, &registry(), 0).unwrap();
+    (plan, project.sample_rate, project.seed)
+}
+
+/// Frames of the 32-voice rows.
+const VOICES_FRAMES: u64 = 20_000;
+
+/// M2.6-2 AC1: a 32-voice kick (about 300 instances) on 1, 2, 3, 4 and 8
+/// threads at k = 1, 64 and 256 equals its own per-frame render.
+#[test]
+fn thirty_two_kick_voices_are_bit_identical_on_threads() {
+    let (plan, rate, seed) = voices(32);
+    let run = (rate, seed, VOICES_FRAMES);
+    let reference = hashes(&render(&plan, run, Partition::PerFrame, 1, |_| Ok(None)));
+    for (partition, threads) in thread_grid() {
+        let rendered = render(&plan, run, partition, threads, |_| Ok(None));
+        assert_eq!(
+            hashes(&rendered),
+            reference,
+            "32 voices, {partition:?}, {threads} threads"
+        );
+    }
+    // The default schedule (tasks chained by cost) gives the same.
+    let registry = registry();
+    let mut engine = Engine::new(
+        &plan,
+        &registry,
+        EngineConfig {
+            threads: 8,
+            ..EngineConfig::new(rate, seed)
+        },
+        Vec::new(),
+    )
+    .unwrap();
+    let rendered =
+        signal_engine::render_blocks(&mut engine, VOICES_FRAMES, 256, |_| Ok(None)).unwrap();
+    assert_eq!(hashes(&rendered), reference, "32 voices, default schedule");
+    let stats = engine.schedule_stats();
+    assert!(stats.tasks <= stats.units, "{stats:?}");
+    assert_checked();
 }
 
 /// A one-file project at 8 kHz.
@@ -260,7 +450,7 @@ fn loop_matrix(project: &Project, events: &[(u64, &'static str, f64)]) {
     let plan = project.plan(&registry()).unwrap().plan;
     let run = |partition| {
         let mut pushed = false;
-        render(&plan, 8_000, 5, 4_000, partition, |engine| {
+        render(&plan, (8_000, 5, 4_000), partition, 1, |engine| {
             if !pushed {
                 pushed = true;
                 for (n, &(frame, target, value)) in events.iter().enumerate() {
@@ -358,8 +548,18 @@ fn render_block_option_changes_nothing_in_the_output() {
         out
     };
     let default = render_to("default", &[]);
-    for k in ["1", "7", "4096"] {
-        let other = render_to(k, &["--block", k]);
+    // M2.6-2 AC9: `--threads` (default 0, auto) changes nothing either.
+    let options: [&[&str]; 6] = [
+        &["--block", "1"],
+        &["--block", "7"],
+        &["--block", "4096"],
+        &["--threads", "1"],
+        &["--threads", "4"],
+        &["--threads", "3", "--block", "64"],
+    ];
+    for option in options {
+        let k = option.join(" ");
+        let other = render_to(&k.replace(' ', "_"), option);
         for file in ["audio.wav", "log.jsonl"] {
             let bytes = |dir: &Path| fs::read(dir.join(file)).unwrap();
             assert!(bytes(&other) == bytes(&default), "--block {k}: {file}");

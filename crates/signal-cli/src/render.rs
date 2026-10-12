@@ -42,6 +42,11 @@ pub(crate) struct RenderArgs {
     /// the output is identical for every block size.
     #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..=4096))]
     block: u32,
+    /// Threads a block runs on, the calling thread included (0: one per
+    /// performance core; 1: no worker threads). A performance setting: the
+    /// output is identical for every count.
+    #[arg(long, default_value_t = 0)]
+    threads: u32,
 }
 
 pub(crate) fn run(args: &RenderArgs, registry: &Registry, json: bool) -> Result<(), Failure> {
@@ -93,6 +98,7 @@ pub(crate) fn run(args: &RenderArgs, registry: &Registry, json: bool) -> Result<
 
     let config = EngineConfig {
         block_capacity: args.block as usize,
+        threads: args.threads as usize,
         ..EngineConfig::new(sample_rate, seed)
     };
     let mut engine = Engine::new(plan, registry, config, Vec::new())

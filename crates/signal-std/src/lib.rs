@@ -116,7 +116,45 @@ use signal_core::{
     Registry, RegistryError, StateOutputPrimitive,
 };
 
-/// Registers every `std.*` primitive type in `registry`.
+/// Each `std.*` type's static cost in ns per frame per instance: the seat's
+/// per-primitive medians of `docs/benchmarks.md` (M2-5, one frame at a time),
+/// rounded up. The engine groups cheap units into tasks by them (ADR 0019
+/// §2); they never change the output.
+pub const COST_NS: [(&str, u32); 30] = [
+    ("std.abs", 11),
+    ("std.add", 11),
+    ("std.adsr", 44),
+    ("std.audio_out", 12),
+    ("std.clamp", 18),
+    ("std.clock_div", 21),
+    ("std.dc_block", 18),
+    ("std.delay", 23),
+    ("std.edge", 19),
+    ("std.exp_env", 34),
+    ("std.gain", 15),
+    ("std.lag", 25),
+    ("std.lfo", 20),
+    ("std.max", 12),
+    ("std.min", 12),
+    ("std.mix", 32),
+    ("std.mul", 12),
+    ("std.noise", 9),
+    ("std.onepole", 17),
+    ("std.osc", 25),
+    ("std.pan", 19),
+    ("std.sample_hold", 15),
+    ("std.scale", 19),
+    ("std.sine_osc", 19),
+    ("std.step_seq", 57),
+    ("std.sub", 12),
+    ("std.svf", 22),
+    ("std.tanh_shaper", 30),
+    ("std.transport", 29),
+    ("std.unit_delay", 12),
+];
+
+/// Registers every `std.*` primitive type in `registry`, with its static
+/// cost ([`COST_NS`]).
 ///
 /// Fails with [`RegistryError::DuplicateTypeName`] if one of the names is
 /// already registered (for example when called twice on the same registry);
@@ -155,6 +193,9 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<StepSeq>(),
     ] {
         registry.register(module_type)?;
+    }
+    for (name, ns) in COST_NS {
+        registry.set_cost(name, ns);
     }
     Ok(())
 }

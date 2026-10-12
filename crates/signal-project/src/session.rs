@@ -1448,10 +1448,13 @@ impl std::error::Error for ReplayError {}
 /// The input queues are sized for the session's busiest frame (queue capacity
 /// is not part of the semantics, `docs/semantics.md` §11), and reclaimed
 /// before every block. Any discarded input or overflow afterwards is an error.
+/// `threads` is the engine's thread count (`EngineConfig::threads`); it
+/// never changes the output.
 pub fn replay(
     session: &Session,
     registry: &Registry,
     frames: Option<u64>,
+    threads: usize,
 ) -> Result<Replay, ReplayError> {
     let frames = frames.unwrap_or_else(|| session.default_frames());
     let mut externals = BTreeMap::<u64, usize>::new();
@@ -1468,6 +1471,7 @@ pub fn replay(
         queue_capacity: busiest
             .unwrap_or(0)
             .max(EngineConfig::DEFAULT_QUEUE_CAPACITY),
+        threads,
         ..EngineConfig::new(session.sample_rate, session.seed)
     };
     let first = session

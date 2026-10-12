@@ -654,3 +654,31 @@ fn golden_kick_16_bars() {
         golden.display()
     );
 }
+
+/// M2.6-2 (ADR 0019 §2): the golden render on 4 threads, every segment on
+/// the workers, has the golden's audio and log hashes.
+#[test]
+fn golden_kick_on_workers() {
+    let golden = read_json(&repository().join("tests/golden/kick/manifest.json"));
+    let registry = registry();
+    let project = Project::load(&kick()).unwrap();
+    let planned = project.plan(&registry).expect("the project is valid");
+    let rate = u32::try_from(golden["sample_rate"].as_u64().unwrap()).unwrap();
+    let config = EngineConfig {
+        threads: 4,
+        schedule: signal_engine::Schedule::FORCED,
+        ..EngineConfig::new(rate, golden["seed"].as_u64().unwrap())
+    };
+    let mut engine = Engine::new(&planned.plan, &registry, config, Vec::new()).unwrap();
+    let rendered = render(&mut engine, golden["frames"].as_u64().unwrap()).unwrap();
+    assert!(engine.schedule_stats().worker_tasks > 0);
+    assert_eq!(
+        format!("{:016x}", rendered.audio_fnv1a64()),
+        golden["audio_fnv1a64"].as_str().unwrap()
+    );
+    assert_eq!(
+        format!("{:016x}", rendered.log_fnv1a64()),
+        golden["log_fnv1a64"].as_str().unwrap()
+    );
+    assert_eq!(rendered.frames, golden["frames"].as_u64().unwrap());
+}

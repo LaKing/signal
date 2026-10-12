@@ -237,6 +237,7 @@ fn apply_saves_and_restarts_from_frame_0() {
         output: Selection::Device(DeviceRef::of(&devices()[1])),
         input: Selection::Unset,
         buffer: 256,
+        cpu_workers: Some(2),
         output_channels: None,
     })));
     let view = state.view();
@@ -251,6 +252,7 @@ fn apply_saves_and_restarts_from_frame_0() {
     assert!(problems.is_empty());
     assert_eq!(saved.output.unwrap().id.as_deref(), Some("null:dell-b"));
     assert_eq!(saved.buffer, 256);
+    assert_eq!(saved.cpu_workers, Some(2));
     assert_eq!(saved.last_project, Some(tone()));
 }
 

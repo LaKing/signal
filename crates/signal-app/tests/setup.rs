@@ -28,6 +28,7 @@ fn full() -> Setup {
             signature: "2 ch, 44100-192000 Hz".to_owned(),
         }),
         buffer: 256,
+        cpu_workers: Some(4),
         output_channels: Some(vec![3, 4]),
         last_project: Some(PathBuf::from("/Users/me/projects/kick")),
         window: Some(Window {
@@ -108,6 +109,20 @@ fn what_does_not_read_falls_back_with_a_reason() {
         "{problems:#?}"
     );
     assert!(problems.iter().all(|p| p.starts_with("setup.toml: ")));
+
+    // CPU workers: "auto" or a number of threads, at least 1.
+    assert_eq!(parse("cpu_workers = \"auto\"\n").0.cpu_workers, None);
+    assert_eq!(parse("cpu_workers = 3\n").0.cpu_workers, Some(3));
+    for bad in ["cpu_workers = 0\n", "cpu_workers = \"many\"\n"] {
+        let (setup, problems) = parse(bad);
+        assert_eq!(setup.cpu_workers, None);
+        assert_eq!(
+            problems,
+            [
+                "setup.toml: cpu_workers: must be \"auto\" or a number of at least 1; using the default"
+            ]
+        );
+    }
 }
 
 #[test]

@@ -23,11 +23,13 @@ pub(crate) enum Unit {
     },
 }
 
-/// The units of a plan, in execution order, and the members of its cycles.
+/// The units of a plan, in execution order, the members of its cycles, and
+/// each unit's successors (units reading it), by position in `order`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Units {
     pub(crate) order: Vec<Unit>,
     pub(crate) members: Vec<usize>,
+    pub(crate) successors: Vec<Vec<usize>>,
 }
 
 /// Condenses `count` instances, connected by `edges` (source instance,
@@ -92,7 +94,11 @@ pub(crate) fn units(
         .map(|c| (first(c), c))
         .collect();
     let mut units = Units::default();
+    let mut placed = vec![usize::MAX; groups];
     while let Some((_, c)) = ready.pop_first() {
+        if let Some(at) = placed.get_mut(c) {
+            *at = units.order.len();
+        }
         let list = members_of.get(c).map_or(&[][..], Vec::as_slice);
         match list {
             [i] if direct.get(*i) == Some(&true) => units.order.push(Unit::Direct(*i)),
@@ -123,6 +129,17 @@ pub(crate) fn units(
                     ready.insert((first(b), b));
                 }
             }
+        }
+    }
+    // The condensation's edges, by unit position, in order.
+    units.successors = vec![Vec::new(); units.order.len()];
+    for (c, set) in after.iter().enumerate() {
+        let Some(&from) = placed.get(c) else {
+            continue;
+        };
+        if let Some(list) = units.successors.get_mut(from) {
+            list.extend(set.iter().filter_map(|&b| placed.get(b).copied()));
+            list.sort_unstable();
         }
     }
     units
@@ -220,6 +237,8 @@ mod tests {
             ]
         );
         assert_eq!(units.members, vec![3, 1, 2]);
+        // 4 → 0 → the cycle.
+        assert_eq!(units.successors, vec![vec![1], vec![2], vec![]]);
     }
 
     /// The order depends only on the plan: any listing of the edges gives the

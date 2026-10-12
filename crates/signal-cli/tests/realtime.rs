@@ -13,9 +13,10 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use signal_core::{Curve, EventPayload, Fnv1a64, Frame, InstanceAddress, PortAddress, Registry};
 use signal_engine::{
-    CallbackSizes, ControlSink, Controller, Driver, Engine, EngineConfig, NullDriver, Outcome,
-    Provenance, RealtimeConfig, Report, SentCommand, Stamp, realtime, render,
+    CallbackSizes, ControlSink, Controller, Driver, Engine, EngineConfig, LogLine, NullDriver,
+    Outcome, Provenance, RealtimeConfig, Report, Schedule, SentCommand, Stamp, realtime, render,
 };
+use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, InstanceDef, build_plan};
 use signal_project::session::{self, LiveRecorder, Session, SessionRecorder, replay};
 use signal_project::{Project, ProjectEdit, diff};
 
@@ -173,7 +174,7 @@ fn assert_replays(live: &Live) {
     );
 
     let session = Session::load(&live.session, &registry()).unwrap();
-    let replayed = replay(&session, &registry(), Some(live.frames)).unwrap();
+    let replayed = replay(&session, &registry(), Some(live.frames), 1).unwrap();
     let samples: Vec<f32> = replayed.render.samples.iter().map(|&x| x as f32).collect();
     assert_eq!(samples, live.output);
 }
@@ -223,18 +224,70 @@ fn sets(old: &Project, new: &Project) -> Vec<(PortAddress, EventPayload)> {
 /// that callbacks follow the late event.
 #[test]
 fn a_session_issued_through_the_controller_replays_to_the_null_driver_output() {
-    const FRAMES: u64 = 40_000;
+    let session = controller_session(RealtimeConfig::new(8_000, 3));
+    let dir = out_dir("sync");
+    session.recorder.write(&dir).unwrap();
+    assert_replays(&Live {
+        output: session.output,
+        frames: SESSION_FRAMES,
+        session: dir,
+    });
+}
+
+/// Frames of the Controller-driven session.
+const SESSION_FRAMES: u64 = 40_000;
+
+/// What the Controller-driven session left.
+struct SessionRun {
+    output: Vec<f32>,
+    log: Vec<u8>,
+    recorder: SessionRecorder,
+    stats: signal_engine::ScheduleStats,
+}
+
+/// Forwards to the live recorder and keeps the log as `log.jsonl` lines.
+struct Tee<'a> {
+    live: &'a mut LiveRecorder,
+    log: Vec<u8>,
+}
+
+impl ControlSink for Tee<'_> {
+    fn report(&mut self, report: &Report, command: &SentCommand) {
+        self.live.report(report, command);
+    }
+    fn log(&mut self, line: LogLine<'_>) {
+        serde_json::to_writer(&mut self.log, &line).unwrap();
+        self.log.push(b'\n');
+    }
+    fn frontier(&mut self, next_frame: Frame) {
+        self.live.frontier(next_frame);
+    }
+}
+
+/// The session of the AC2 tests through the Controller and the null driver
+/// (seeded random callback sizes) with `config`, checked as it records.
+fn controller_session(config: RealtimeConfig) -> SessionRun {
+    const FRAMES: u64 = SESSION_FRAMES;
     let mut live = live_recorder();
-    let (runner, mut controller) = start(RealtimeConfig::new(8_000, 3));
+    let mut log = Vec::new();
+    let (runner, mut controller) = start(config);
     let mut driver = NullDriver::new(8_000, 2, 5);
     driver.start(runner).unwrap();
+    let mut poll = |controller: &mut Controller, live: &mut LiveRecorder| {
+        let mut tee = Tee {
+            live,
+            log: std::mem::take(&mut log),
+        };
+        controller.poll(&mut tee);
+        log = tee.log;
+    };
 
     let at = |frame| Stamp::At(Frame(frame));
     let mut first = true;
     let mut late_sent = false;
     driver
         .run(FRAMES, || {
-            controller.poll(&mut live);
+            poll(&mut controller, &mut live);
             if first {
                 first = false;
                 let c = &mut controller;
@@ -272,10 +325,11 @@ fn a_session_issued_through_the_controller_replays_to_the_null_driver_output() {
         })
         .unwrap();
     let runner = driver.stop().unwrap().unwrap();
-    controller.poll(&mut live);
+    poll(&mut controller, &mut live);
     // The final frontier from the runner itself, in case the last status was
     // lost (the status queue is lossy).
     live.frontier(runner.next_frame());
+    assert_eq!(runner.status().log_overflows, 0);
     assert!(late_sent);
     assert_eq!(live.refused(), &[] as &[String]);
     assert_eq!(live.pending(), 0);
@@ -299,14 +353,231 @@ fn a_session_issued_through_the_controller_replays_to_the_null_driver_output() {
         order,
         [(1_000, "swap"), (1_500, "suspend"), (1_540, "swap")]
     );
-
-    let dir = out_dir("sync");
-    recorder.write(&dir).unwrap();
-    assert_replays(&Live {
+    SessionRun {
         output: driver.take_output(),
-        frames: FRAMES,
+        log,
+        recorder,
+        stats: runner.schedule_stats(),
+    }
+}
+
+/// M2.6-2's thread counts and block sizes (ADR 0019 §2).
+const THREADS: [usize; 5] = [1, 2, 3, 4, 8];
+const BLOCKS: [usize; 3] = [1, 64, 256];
+
+/// `config` on `threads` threads with block capacity `k`: with more than one
+/// thread, every segment of a plan with two tasks or more on the workers.
+fn on_threads(mut config: RealtimeConfig, threads: usize, k: usize) -> RealtimeConfig {
+    config.engine = EngineConfig {
+        threads,
+        block_capacity: k,
+        schedule: if threads > 1 {
+            Schedule::FORCED
+        } else {
+            Schedule::DEFAULT
+        },
+        ..config.engine
+    };
+    config
+}
+
+/// The checked mode's exclusivity tracker ran and found nothing.
+fn assert_checked() {
+    let exclusivity = signal_engine::exclusivity();
+    assert!(exclusivity.checked, "the matrix runs with the tracker on");
+    assert!(exclusivity.claims > 0);
+    assert_eq!(exclusivity.violations, 0);
+}
+
+/// M2.6-2 AC1: the Controller-driven session (sets, a ramp, a trigger, a
+/// late event, a structural swap, a removal, a suspend and resume) through
+/// the null driver with seeded random callback sizes, on 1, 2, 3, 4 and 8
+/// threads at block capacities 1, 64 and 256: the same audio and log every
+/// time, and the reference replays to the same audio.
+#[test]
+fn the_controller_session_is_bit_identical_on_threads() {
+    let reference = controller_session(on_threads(RealtimeConfig::new(8_000, 3), 1, 256));
+    for threads in THREADS {
+        for k in BLOCKS {
+            let run = controller_session(on_threads(RealtimeConfig::new(8_000, 3), threads, k));
+            let at = format!("{threads} threads, k = {k}");
+            assert!(run.output == reference.output, "audio, {at}");
+            assert!(run.log == reference.log, "log, {at}");
+            if threads > 1 {
+                assert!(run.stats.worker_tasks > 0, "{at}: {:?}", run.stats);
+            }
+        }
+    }
+    assert!(!reference.log.is_empty());
+    let dir = out_dir("threads");
+    reference.recorder.write(&dir).unwrap();
+    assert_replays(&Live {
+        output: reference.output,
+        frames: SESSION_FRAMES,
         session: dir,
     });
+    assert_checked();
+}
+
+/// Keeps the log as `log.jsonl` lines.
+#[derive(Default)]
+struct LogLines(Vec<u8>);
+
+impl ControlSink for LogLines {
+    fn log(&mut self, line: LogLine<'_>) {
+        serde_json::to_writer(&mut self.0, &line).unwrap();
+        self.0.push(b'\n');
+    }
+}
+
+/// M2.6-2 AC1 through the Runner: `plan` for `frames` frames through the null
+/// driver (seeded random callback sizes), polling the Controller between
+/// callbacks, on 1, 2, 3, 4 and 8 threads at block capacities 1, 64 and 256,
+/// equals the offline one-thread render: its samples as the device gets them
+/// (clamped, f32) and its `log.jsonl`.
+fn runner_matrix(name: &str, plan: &ExecutionPlan, (rate, seed): (u32, u64), frames: u64) {
+    let registry = registry();
+    let mut engine =
+        Engine::new(plan, &registry, EngineConfig::new(rate, seed), Vec::new()).unwrap();
+    let rendered = render(&mut engine, frames).unwrap();
+    let channels = usize::from(rendered.channels);
+    let reference: Vec<f32> = rendered
+        .samples
+        .iter()
+        .map(|&x| {
+            if x.is_finite() {
+                x.clamp(-1.0, 1.0) as f32
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    assert!(!rendered.log.is_empty(), "{name} logs events");
+    for threads in THREADS {
+        for k in BLOCKS {
+            let at = format!("{name}, {threads} threads, k = {k}");
+            let config = on_threads(RealtimeConfig::new(rate, seed), threads, k);
+            let (runner, mut controller) = realtime(plan, &registry, config).unwrap();
+            let mut driver = NullDriver::new(rate, channels, 11);
+            driver.start(runner).unwrap();
+            let mut log = LogLines::default();
+            driver.run(frames, || controller.poll(&mut log)).unwrap();
+            let runner = driver.stop().unwrap().unwrap();
+            controller.poll(&mut log);
+            assert_eq!(runner.status().log_overflows, 0, "{at}");
+            let output = driver.take_output();
+            assert_eq!(output.len(), reference.len(), "{at}");
+            if let Some(n) =
+                (0..output.len()).find(|&n| output[n].to_bits() != reference[n].to_bits())
+            {
+                panic!(
+                    "{at}: sample {n} is {}, offline {}",
+                    output[n], reference[n]
+                );
+            }
+            assert!(log.0 == rendered.log, "{at}: the log differs");
+            if threads > 1 {
+                let stats = runner.schedule_stats();
+                assert!(stats.worker_tasks > 0, "{at}: {stats:?}");
+            }
+        }
+    }
+    assert_checked();
+}
+
+fn project_plan(name: &str) -> (ExecutionPlan, (u32, u64)) {
+    let project = Project::load(&repository().join("projects").join(name)).unwrap();
+    let plan = project.plan(&registry()).unwrap().plan;
+    (plan, (project.sample_rate, project.seed))
+}
+
+#[test]
+fn the_kick_through_the_runner_is_bit_identical_on_threads() {
+    let (plan, run) = project_plan("kick");
+    runner_matrix("kick", &plan, run, 48_000);
+}
+
+#[test]
+fn pulse_through_the_runner_is_bit_identical_on_threads() {
+    let (plan, run) = project_plan("pulse");
+    runner_matrix("pulse", &plan, run, 48_000);
+}
+
+#[test]
+fn thirty_two_kick_voices_through_the_runner_are_bit_identical_on_threads() {
+    let (plan, run) = voices(32);
+    runner_matrix("32 voices", &plan, run, 8_192);
+}
+
+/// The kick project with its `drums` instance repeated `n` times and the
+/// copies summed by a tree of 4-input `std.mix` (`signal bench`'s voices).
+fn voices(n: usize) -> (ExecutionPlan, (u32, u64)) {
+    let project = Project::load(&repository().join("projects/kick")).unwrap();
+    let kick = &project.root;
+    let drums = kick.instances.iter().find(|i| i.name == "drums").unwrap();
+    let mut root = CompositeDef {
+        instances: kick
+            .instances
+            .iter()
+            .filter(|i| i.name != "drums")
+            .cloned()
+            .collect(),
+        connections: Vec::new(),
+        ..kick.clone()
+    };
+    let mut outputs: Vec<String> = Vec::new();
+    for i in 0..n {
+        let name = format!("drums_{i}");
+        root.instances.push(InstanceDef {
+            name: name.clone(),
+            ..drums.clone()
+        });
+        outputs.push(format!("{name}.out"));
+    }
+    let connect = |from: &str, to: &str, scale| ConnectionDef {
+        from: from.to_owned(),
+        to: to.to_owned(),
+        scale,
+    };
+    let mut sink_inputs = Vec::new();
+    for c in &kick.connections {
+        match (c.from.split_once('.'), c.to.split_once('.')) {
+            (Some(("drums", _)), _) => sink_inputs.push(c.to.clone()),
+            (_, Some(("drums", port))) => {
+                for i in 0..n {
+                    let to = format!("drums_{i}.{port}");
+                    root.connections.push(connect(&c.from, &to, c.scale));
+                }
+            }
+            _ => root.connections.push(c.clone()),
+        }
+    }
+    let mut level = 0;
+    while outputs.len() > 1 || level == 0 {
+        let mut next = Vec::new();
+        for (j, group) in outputs.chunks(4).enumerate() {
+            let name = format!("mix_{level}_{j}");
+            root.instances.push(InstanceDef {
+                name: name.clone(),
+                module: "std.mix".to_owned(),
+                parameters: Default::default(),
+            });
+            for (input, from) in ["a", "b", "c", "d"].iter().zip(group) {
+                root.connections
+                    .push(connect(from, &format!("{name}.{input}"), None));
+            }
+            next.push(format!("{name}.out"));
+        }
+        outputs = next;
+        level += 1;
+    }
+    for to in sink_inputs {
+        for from in &outputs {
+            root.connections.push(connect(from, &to, None));
+        }
+    }
+    let plan = build_plan(&root, &project.composites, &registry(), 0).unwrap();
+    (plan, (project.sample_rate, project.seed))
 }
 
 /// Waits, polling, until `done` holds; the driver keeps running meanwhile.

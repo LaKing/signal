@@ -72,6 +72,25 @@ None of them blocks, and none changes the audio: a dropped log record or meter i
 
 Verified by `crates/signal-engine/tests/realtime_no_allocation.rs` (V11), `blocks_no_allocation.rs` (callbacks larger than the block capacity) and `realtime.rs`, by `crates/signal-cli/tests/realtime.rs` (V9, replay of a live session), and for the CoreAudio callback body by `crates/signal-audio/tests/no_allocation.rs` and `callback.rs`.
 
+## Worker threads
+
+The engine runs a block's units on several threads (ADR 0019 §2, M2.6-2): `EngineConfig::threads` threads, the calling thread (the audio callback, or the offline driver) included. 1 runs no worker threads; 0 is one thread per performance core, read once per process (`signal_engine::performance_cores`). The `threads − 1` workers are ordinary threads, created with the engine on the control thread and kept across plan swaps; they are joined when the engine is dropped, which happens on the control thread (the Runner comes back there). Real-time priority and the audio workgroup are M2.6-3.
+
+**Which segments run on the workers.** A segment (the frames between two edit frames of a block) runs on the calling thread alone unless the plan has two tasks or more, the segment has at least `min_frames` frames (16) and the plan's estimated cost times the segment's frames reaches `parallel_min_ns`, and every task's log has room for the segment's staged external events. So a *k* = 1 block never goes to the workers. A segment on the calling thread alone indexes the plan's buffers directly, as M2.6-1 did, without the views a parallel segment's tasks use (ADR 0020). On the seat, in one session alternating with the base build, the kick at *k* = 1 on one thread measured 375.5 and 369.1 ns per frame against the base's 379.5 and 377.8 (`docs/benchmarks.md` "Threads (M2.6-2)"); the operator re-measures outside the sandbox. The thresholds and the cost table are in `docs/benchmarks.md`; they change the timing, never the output.
+
+**A parallel segment.** The calling thread publishes the segment's job (`crates/signal-engine/src/shared.rs`, ADR 0020), wakes at most one parked worker, and takes ready tasks itself, as the workers do: a task is ready when its dependency counter reaches 0. It returns when every task is complete and every worker that joined the job has left it. Nothing in a segment allocates, frees, locks or blocks: claiming a task, completing it and joining or leaving the job are atomic operations on memory sized when the plan was built.
+
+**Waiting policy and its cost.**
+- An idle worker spins on the job gate for about 50 µs after its last job, then parks (`std::thread::park`). Offline renders run blocks back to back, so their workers rarely park; in real time with a 128-frame buffer (1.33 ms at 96 kHz) they park between callbacks.
+- The calling thread wakes at most one parked worker per parallel segment, and each worker that joins wakes up to two more (a tree: depth about log₂ of the workers). Waking is `Thread::unpark`: an atomic swap, and `dispatch_semaphore_signal` only when the worker is parked. It neither allocates nor blocks. It is the one system call a parallel segment can make on the calling thread, at most once per segment.
+- The calling thread never waits for a wake: it runs ready tasks itself. Measured on the seat (planner probe, M2.6-2 plan): `unpark` costs the caller a median 1.7 µs (p99 5.0 µs); a parked worker starts running a median 10 µs (p99 44 µs, worst seen 1.6 ms) after its wake, so the *n*-th worker of the tree arrives after about log₂ *n* such hops. In real time the caller may therefore run much of a short block alone, until M2.6-3.
+- The handshake loses no wake. A parking worker stores its `parked` flag and then re-reads the gate; the caller opens the gate and then reads the flags. All four operations are SeqCst, so in their single order either the worker sees the open gate and does not park, or the caller sees the flag and wakes it. An `unpark` that comes before the `park` is kept by the thread, so it is not lost either.
+- The calling thread waits for a task a worker has claimed, and for every joined worker to leave the job before it returns. A worker preempted at that moment delays the block. With ordinary-priority workers this is bounded only by the OS scheduler: it is the real-time risk of this milestone, and the reason small plans and *k* = 1 stay on the calling thread.
+
+**A worker that panics** (only a contract-breaking primitive or a test hook can make one) completes its task and leaves the job through drop guards, so the calling thread never hangs; the task's completion guard exists from its claim on, before the test hook runs. The worker is not replaced: the pool runs one worker short until the engine is rebuilt, and `schedule_stats().worker_panics` counts it. If the calling thread panics inside a parallel segment, a drop guard closes the job and waits for every joined worker to leave before the unwinding goes on, so no worker ever holds a reference to the segment's job after it.
+
+**Determinism.** A task writes only its own instances' rows; every sum and event merge is computed by the consumer in canonical source order; the tasks' logs are joined in task order after the segment. The output and the log are the same bit for bit for every thread count (`docs/semantics.md` §13).
+
 ## Review checklist (paste into PRs touching real-time code)
 
 - [ ] No allocation, free, lock, syscall, I/O, or logging reachable from `process` / the executor
@@ -81,3 +100,4 @@ Verified by `crates/signal-engine/tests/realtime_no_allocation.rs` (V11), `block
 - [ ] Feedback/decay paths are denormal-safe
 - [ ] Randomness comes only from the seeded `ctx` stream
 - [ ] Contract suite and benchmarks pass; new costs recorded
+- [ ] `crates/signal-engine/src/shared.rs` (ADR 0020): every `unsafe` block has a `SAFETY:` comment naming its ordering (Release on completion, Acquire before reading; the gate's SeqCst open, AcqRel join, Release leave); shared reads require `T: Sync`; no view escapes its `Access`; the checked-mode tests report no violation

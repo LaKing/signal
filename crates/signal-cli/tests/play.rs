@@ -135,6 +135,68 @@ fn a_recorded_session_replays_to_the_recorded_audio() {
     assert_replays_to(&session, &dir.join("r"), &audio, 5 * 96_000);
 }
 
+/// M2.6-2 AC9: `--threads` on `play` and `replay` changes nothing: one
+/// second of the kick through the null driver on 1 and 3 threads gives the
+/// same audio, and `signal replay --threads 2` of the session gives it too.
+#[test]
+fn threads_on_play_and_replay_change_nothing() {
+    let dir = workspace("threads");
+    let play = |threads: &str| {
+        let (session, audio) = (
+            dir.join(format!("s{threads}")),
+            dir.join(format!("a{threads}.wav")),
+        );
+        let output = signal(&[
+            "play",
+            &text(&dir.join("kick")),
+            "--driver",
+            "null",
+            "--fast",
+            "--threads",
+            threads,
+            "--record-session",
+            &text(&session),
+            "--record-audio",
+            &text(&audio),
+            "--seconds",
+            "1",
+            "--json",
+        ]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (session, audio)
+    };
+    let (session, one) = play("1");
+    let (_, three) = play("3");
+    assert!(
+        samples(&one) == samples(&three),
+        "--threads 3 plays the same"
+    );
+
+    let out = dir.join("r2");
+    let output = signal(&[
+        "replay",
+        &text(&session),
+        "--threads",
+        "2",
+        "--out",
+        &text(&out),
+        "--json",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        samples(&out.join("audio.wav")) == samples(&one),
+        "replay --threads 2 gives the played audio"
+    );
+}
+
 /// Kills the child if the test fails before it ends.
 struct Playing(Child);
 

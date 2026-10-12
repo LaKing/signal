@@ -133,6 +133,9 @@ pub struct Interface {
     pub input: Selection,
     /// The buffer in frames.
     pub buffer: u32,
+    /// "CPU workers": threads per block, the audio thread included; `None`
+    /// is auto.
+    pub cpu_workers: Option<u32>,
     /// The device channel (from 1) of each sink channel; identity without.
     pub output_channels: Option<Vec<u16>>,
 }
@@ -395,6 +398,7 @@ impl AppState {
                 interface.output.apply(&mut self.setup.output);
                 interface.input.apply(&mut self.setup.input);
                 self.setup.buffer = interface.buffer.max(1);
+                self.setup.cpu_workers = interface.cpu_workers.map(|n| n.max(1));
                 self.setup.output_channels = interface.output_channels;
                 self.save();
                 if self.playing.is_some() {
@@ -917,7 +921,8 @@ impl AppState {
             .collect();
 
         plan.version = 0;
-        let config = RealtimeConfig::with_buffer(rate, seed, u64::from(buffer));
+        let mut config = RealtimeConfig::with_buffer(rate, seed, u64::from(buffer));
+        config.engine.threads = self.setup.cpu_workers.map_or(0, |n| n as usize);
         let (runner, controller) = match realtime(&plan, &self.registry, config) {
             Ok(run) => run,
             Err(error) => return self.refuse(error.to_string()),

@@ -27,6 +27,11 @@ pub(crate) struct ReplayArgs {
     /// second.
     #[arg(long)]
     frames: Option<u64>,
+    /// Threads a block runs on, the calling thread included (0: one per
+    /// performance core; 1: no worker threads). The output is identical for
+    /// every count.
+    #[arg(long, default_value_t = 0)]
+    threads: u32,
 }
 
 pub(crate) fn run(args: &ReplayArgs, registry: &Registry, json: bool) -> Result<(), Failure> {
@@ -35,8 +40,8 @@ pub(crate) fn run(args: &ReplayArgs, registry: &Registry, json: bool) -> Result<
         LoadError::Invalid(diagnostics) => Failure::InvalidSession(located(dir, diagnostics)),
         error @ LoadError::Io { .. } => Failure::Io(error.to_string()),
     })?;
-    let replayed =
-        replay(&session, registry, args.frames).map_err(|e| Failure::Internal(e.to_string()))?;
+    let replayed = replay(&session, registry, args.frames, args.threads as usize)
+        .map_err(|e| Failure::Internal(e.to_string()))?;
     let rendered = &replayed.render;
 
     let provenance = provenance::collect(

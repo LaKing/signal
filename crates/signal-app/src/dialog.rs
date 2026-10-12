@@ -29,6 +29,9 @@ pub struct Draft {
     pub input: Choice,
     /// The buffer in frames.
     pub buffer: u32,
+    /// "CPU workers": threads per block, the audio thread included; `None`
+    /// is auto (one per performance core).
+    pub cpu_workers: Option<u32>,
     /// The output channel map as typed: `1, 2`, or empty for the identity.
     pub channels: String,
 }
@@ -62,6 +65,7 @@ impl Draft {
             output: choice(&setup.output, devices, Direction::Output),
             input: choice(&setup.input, devices, Direction::Input),
             buffer: setup.buffer,
+            cpu_workers: setup.cpu_workers,
             channels: setup
                 .output_channels
                 .map(|c| c.iter().map(u16::to_string).collect::<Vec<_>>().join(", "))
@@ -138,6 +142,7 @@ impl Draft {
             output: selection(&self.output),
             input: selection(&self.input),
             buffer: self.buffer.max(1),
+            cpu_workers: self.cpu_workers.map(|n| n.max(1)),
             output_channels: channels(&self.channels)?,
         })
     }

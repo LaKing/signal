@@ -109,6 +109,58 @@ Measured *N* → median ns per frame: 1 → 296, 2 → 462, 4 → 790, 8 → 1 4
 - **Measurement:** in the same run, *k* = 1 (`run_frame`) costs more than the per-frame engine did in the M2-5 rows above: kick 386.6 ns against 261.8 ns, and 9 voices within 25 % of the budget against 14. The block engine does per-call work (staging inputs into call buffers, the fault scan, the event store, refreshing the last-frame values) that the per-frame engine did not.
 - **Assumption:** part of that difference is load (2.9–3.3 here, 2.2–2.6 then). Only an idle re-run of both builds would separate the two. The real-time runner splits a callback at every command's frame, so a dense command stream brings its blocks toward *k* = 1.
 
+### Threads (M2.6-2)
+
+ADR 0019 §2 runs a segment's units on several threads (`docs/realtime-rules.md` "Worker threads", `semantics.md` §13 "Threads"). How the engine decides, from static figures in the code:
+
+- **Costs.** Each `std.*` type's cost is its per-instance median in the primitives table above, rounded up (`signal_std::COST_NS`, registered with the types; a type without one costs 20 ns). A unit's estimate per frame is its members' costs times **0.54** (141.2 / 261.8: the kick at *k* = 256 against the per-frame engine, the M2.6-1 and M2-5 rows above), plus **22 ns** per member for state-output units and cycles, which run one frame per call ((386.6 − 141.2) / 11: the kick at *k* = 1 against *k* = 256, per instance).
+- **Tasks.** A unit joins the task of the unit before it while that task is estimated below **2 000 ns per 256-frame block** and that unit feeds it; otherwise it starts a task (`Schedule::task_min_ns`).
+- **When the workers run.** A segment runs on the calling thread alone unless the plan has two tasks or more, the segment has at least **16** frames (`min_frames`: a block of *k* = 1 never goes to the workers) and the plan's estimate times the segment's frames reaches **`parallel_min_ns`** (below).
+
+`signal bench` gains three tables (`--json`: `blocks.measured[].on_performance_cores`, `scaling`, `parallel_threshold`). "Performance cores" is every performance level whose `hw.perflevelN.name` is not `Efficiency`, read with `sysctl`; where `sysctl` does not answer (the seat's sandbox) it is `available_parallelism`, and `scaling.cores_source` says which.
+
+- **Block sizes on all performance cores:** the M2.6-1 rows above again, on the performance cores with the default schedule, beside one thread.
+- **Scaling:** the most kick voices within 25 % and 50 % of the budget at *k* = 128 on 1, 2, 4, 8 and all performance cores, default schedule (doubling, then bisection, every *N* listed).
+- **Small-plan threshold:** kick voices *N* = 1, 2, 4, 8, 16 in segments of *k* = 16, 64, 128 and 256 frames, on 2 threads with every segment on the workers (`Schedule::FORCED`, one task per unit) against one thread. `crossover_ns` is the smallest estimate per segment (the plan's estimate per frame times *k*) at which two threads were faster.
+
+**Seat measurement**, 2026-10-12, from a devpanel seat (M2.6-2 candidate, uncommitted, on 31b48df): `signal bench` from a release build, default `--seconds 1`, with the base 31b48df built the same way, in one session, alternating: base, candidate, base, candidate. Machine as for the M2.6-1 row: Mac Studio (Mac17,14), Apple M5 Max, 18 cores (6 Super and 12 Performance), macOS 27.0.1. `sysctl` is sandboxed on the seat, so the performance cores are `available_parallelism`: **18** (`cores_source` `fallback`). Conditions: shared with other work, not pinned. These are the seat's numbers, not the checks'; the operator re-measures outside the sandbox.
+
+Block sizes, kick and 9 kick voices (ns per frame, median; two runs each: the base, then the candidate on 1 thread and on 18):
+
+| *k* | Kick, base | Kick, 1 thread | Kick, 18 threads | 9 voices, base | 9 voices, 1 thread | 9 voices, 18 threads |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 379.5 / 377.8 | 375.5 / 369.1 | 375.9 / 369.5 | 2 471.4 / 2 464.9 | 2 407.5 / 2 410.6 | 2 405.7 / 2 400.4 |
+| 64 | 145.4 / 143.8 | 122.7 / 121.2 | 123.1 / 121.8 | 1 047.2 / 1 043.5 | 933.8 / 927.7 | 518.6 / 513.5 |
+| 256 | 139.3 / 137.4 | 117.3 / 118.4 | 117.3 / 116.5 | 1 010.9 / 1 009.9 | 890.8 / 903.0 | 326.0 / 325.8 |
+
+- **Measurement (AC13): *k* = 1 is not slower than the base.** The kick measured 375.5 and 369.1 against the base's 379.5 and 377.8; the plan's pass rule (at most the larger base run plus the base spread, 379.5 + 1.7 = 381.2) holds for both runs, which are below both base runs. 9 voices: 2 407.5 and 2 410.6 against 2 471.4 and 2 464.9 (2.5 % faster). A *k* = 1 block never goes to the workers (`min_frames`), and a segment on the calling thread alone builds no views (`docs/realtime-rules.md` "Worker threads", ADR 0020): it indexes the plan's buffers as M2.6-1 did, and a one-frame call copies its inputs into the call buffers with a store per port, not a `memcpy` call per port (the profile's one excess over the base). Earlier attempts in the same session order: views on that path, one per call, 463.3 and 460.9 against 377.2 and 376.1; without views but with the `memcpy` per port, 383.6 and 380.9 against 374.9 and 377.1 (the rule missed by 1.6–4.3 ns).
+- **Measurement:** at *k* = 64 and 256 the candidate is 13–16 % faster than the base on one thread. On 18 threads, at *k* = 256, 9 kick voices cost 326 ns per frame against 891–903 on one thread (2.7×); at *k* = 64, 514–519 against 928–934. The kick alone does not gain: it is one voice (one chain of tasks).
+
+Scaling at *k* = 128 (the most kick voices whose median stays within the limit; default schedule; two runs):
+
+| Threads | Within 25 % | Within 50 % |
+|---:|---:|---:|
+| 1 | 26 / 26 | 54 / 53 |
+| 2 | 33 / 35 | 67 / 67 |
+| 4 | 63 / 63 | 126 / 125 |
+| 8 | 92 / 92 | 189 / 189 |
+| 18 (all performance cores) | 129 / 130 | 268 / 269 |
+
+- **Fact to report (AC4):** within 25 % of the budget, all 18 performance cores run **129** and **130** kick voices against **26** on one thread, **5.0×** (5.0× and 5.1× within 50 %). Not a threshold.
+- **Measurement:** the previous revision's run gave 196 against 24 (8.2×). The tasks' views now hand out windows whose every element is bounds-checked and readers that check each read's frames, at a cost on every parallel segment (with views, *k* = 64 on one thread measured 155–159 ns against 132 before); part of the difference may be the shared machine. Not separated here.
+
+The small-plan threshold (2 threads, every segment on the workers, against 1 thread; estimate per segment in µs; ns per frame; the first run):
+
+| Voices | *k* = 16 | *k* = 64 | *k* = 128 | *k* = 256 |
+|---:|---|---|---|---|
+| 1 | 3.2: 159 → 288 | 12.7: 136 → 189 | 25.3: 132 → 172 | 50.7: 132 → 150 |
+| 2 | 5.2: 262 → 336 | 21.0: 235 → 216 | 42.0: 228 → 198 | 84.0: 223 → 188 |
+| 4 | 9.4: 464 → 562 | 37.6: 418 → 376 | 75.3: 402 → 346 | 150.5: 396 → 330 |
+| 8 | 18.3: 900 → 1 025 | 73.0: 823 → 715 | 146.0: 792 → 661 | 292.1: 775 → 635 |
+| 16 | 35.4: 1 741 → 1 937 | 141.7: 1 586 → 1 375 | 283.4: 1 531 → 1 281 | 566.8: 1 496 → 1 221 |
+
+- **Measurement (AC14):** the smallest estimate at which two threads were faster was 21.0 µs per segment (2 voices, *k* = 64; the same in both runs). Every *k* = 16 row lost (up to 35.4 µs), and a single voice lost at every size, up to 50.7 µs (its tasks form one chain, and this table runs one task per unit); every row of 2 voices or more from 21.0 µs on, *k* = 16 aside, was faster. **`parallel_min_ns` stays 50 µs.** One row lies above it and loses, the single voice at *k* = 256 (50.7 µs): with the default schedule, which chains it into fewer tasks, the kick on 18 threads costs what it costs on one (117.3 and 116.5 against 117.3 and 118.4 above). The estimate overstates block costs (one voice: 198 ns per frame estimated, 132 measured at *k* = 256); it only orders plans.
+
 ## What this means for D-EXEC-3
 
 These are interpretations of a single seat measurement. They are not a decision; D-EXEC-3 stays deferred (roadmap M4).

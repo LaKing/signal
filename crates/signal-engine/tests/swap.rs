@@ -12,7 +12,7 @@ use signal_engine::{
     EditFull, Engine, EngineConfig, EngineError, ExternalEvent, ExternalFull, InputDiscards,
     LogRecord, RenderError, render, render_with,
 };
-use signal_graph::ExecutionPlan;
+use signal_graph::{ConnectionDef, ExecutionPlan, InstanceDef};
 
 /// 1 kHz: the fade length F is 5 frames.
 const RATE: u32 = 1_000;
@@ -40,41 +40,46 @@ fn faded_in(live: f64, j: u64) -> f64 {
 /// The plan of `no_allocation.rs`: module and external events, triggers to a
 /// parameter, ramps, modulation, a feedback loop, randomness, a fault.
 fn rich_plan() -> ExecutionPlan {
-    plan(
-        vec![
-            inst_with("f1", "test.flood", &[("count", 16.0)]),
-            inst_with("f2", "test.flood", &[("count", 16.0)]),
-            inst("c", "test.counter"),
-            inst_with("s", "test.setter", &[("value", 0.25)]),
-            inst_with("k", "test.const", &[("value", 0.125)]),
-            inst("p", "test.probe_add"),
-            inst_with("t", "test.trigger", &[("period", 2.0)]),
-            inst("e", "test.event_delay"),
-            inst("impulse", "test.impulse"),
-            inst("loop", "test.gain"),
-            inst("delay", "test.unit_delay"),
-            inst("d", "test.dc"),
-            inst("x", "test.faulty"),
-            inst("n", "test.noise"),
-            inst("rec", "test.recorder"),
-        ],
-        vec![
-            conn("f1.out", "c.in"),
-            conn("f2.out", "c.in"),
-            conn("s.out", "p.value"),
-            conn("k.out", "p.value"),
-            conn("t.out", "p.value"),
-            conn("t.out", "e.in"),
-            conn("impulse.out", "loop.in"),
-            scaled("delay.out", "loop.in", 0.5),
-            conn("loop.out", "delay.in"),
-            conn("d.out", "rec.zeta"),
-            conn("x.out", "rec.zeta"),
-            conn("n.out", "rec.alpha"),
-            conn("loop.out", "rec.alpha"),
-            conn("p.out", "rec.alpha"),
-        ],
-    )
+    plan(rich_instances(), rich_connections())
+}
+
+fn rich_instances() -> Vec<InstanceDef> {
+    vec![
+        inst_with("f1", "test.flood", &[("count", 16.0)]),
+        inst_with("f2", "test.flood", &[("count", 16.0)]),
+        inst("c", "test.counter"),
+        inst_with("s", "test.setter", &[("value", 0.25)]),
+        inst_with("k", "test.const", &[("value", 0.125)]),
+        inst("p", "test.probe_add"),
+        inst_with("t", "test.trigger", &[("period", 2.0)]),
+        inst("e", "test.event_delay"),
+        inst("impulse", "test.impulse"),
+        inst("loop", "test.gain"),
+        inst("delay", "test.unit_delay"),
+        inst("d", "test.dc"),
+        inst("x", "test.faulty"),
+        inst("n", "test.noise"),
+        inst("rec", "test.recorder"),
+    ]
+}
+
+fn rich_connections() -> Vec<ConnectionDef> {
+    vec![
+        conn("f1.out", "c.in"),
+        conn("f2.out", "c.in"),
+        conn("s.out", "p.value"),
+        conn("k.out", "p.value"),
+        conn("t.out", "p.value"),
+        conn("t.out", "e.in"),
+        conn("impulse.out", "loop.in"),
+        scaled("delay.out", "loop.in", 0.5),
+        conn("loop.out", "delay.in"),
+        conn("d.out", "rec.zeta"),
+        conn("x.out", "rec.zeta"),
+        conn("n.out", "rec.alpha"),
+        conn("loop.out", "rec.alpha"),
+        conn("p.out", "rec.alpha"),
+    ]
 }
 
 /// The events of `no_allocation.rs`: unique sequence numbers that do not
@@ -983,6 +988,60 @@ fn pushed_and_scheduled_edits_mix() {
     ));
     engine.resume(&addr("/e"), Frame(70)).unwrap();
     assert_eq!(engine.input_discards(), InputDiscards::default());
+}
+
+/// M2.6-2 AC5 (ADR 0019 §2): on 4 threads, every segment on the workers,
+/// swaps between the rich plan and a larger one (each swap's task graph is
+/// built by `prepare_swap`, on the calling thread here as on the control
+/// thread live) give the one-thread render bit for bit, and the engine's
+/// worker pool is the one it started with: no thread is spawned by a swap.
+#[test]
+fn swaps_on_workers_rebuild_tasks_and_keep_the_pool() {
+    let a = rich_plan();
+    // The same instances and connections as `rich_plan`, plus `o2`.
+    let b = {
+        let mut connections = vec![scaled("o2.out", "rec.zeta", 0.25)];
+        connections.extend(rich_connections());
+        let mut instances = rich_instances();
+        instances.push(inst_with("o2", "test.osc", &[("freq", 330.0)]));
+        plan(instances, connections)
+    };
+    let render = |threads: usize| {
+        let config = common::config_threads(RATE, 42, threads);
+        let mut engine = Engine::new(&a, &registry(), config, rich_events()).unwrap();
+        let started = signal_engine::spawned_workers();
+        let workers = engine.schedule_stats().workers;
+        let mut swaps = 0;
+        let rendered = signal_engine::render_blocks(&mut engine, 2_000, 64, |engine| {
+            let now = engine.next_frame().0;
+            if now > 0 && now % 100 == 0 {
+                let next = if swaps % 2 == 0 { &b } else { &a };
+                let mut swap = engine.prepare_swap(next, &registry())?;
+                engine.commit_swap(&mut swap, Frame(now))?;
+                swaps += 1;
+            }
+            Ok(Some(Frame(now - now % 100 + 100)))
+        })
+        .unwrap();
+        assert_eq!(engine.version(), 19);
+        let stats = engine.schedule_stats();
+        assert_eq!(stats.workers, workers);
+        assert_eq!(signal_engine::spawned_workers(), started, "no swap spawns");
+        (rendered.samples, rendered.log, stats)
+    };
+    let (samples, log, one) = render(1);
+    let (parallel_samples, parallel_log, four) = render(4);
+    assert_eq!(one.workers, 0);
+    assert_eq!(four.workers, 3);
+    assert!(
+        four.parallel_segments > 0 && four.worker_tasks > 0,
+        "{four:?}"
+    );
+    assert!(
+        parallel_samples == samples,
+        "the audio differs on 4 threads"
+    );
+    assert!(parallel_log == log, "the log differs on 4 threads");
 }
 
 /// `LogRecord::Swap` is public for real-time callers that keep records.

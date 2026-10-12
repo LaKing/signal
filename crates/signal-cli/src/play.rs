@@ -69,6 +69,11 @@ pub(crate) struct PlayArgs {
     /// in memory while playing).
     #[arg(long)]
     record_audio: Option<PathBuf>,
+    /// Threads a block runs on, the audio thread included (0: one per
+    /// performance core; 1: no worker threads). The output is identical for
+    /// every count.
+    #[arg(long, default_value_t = 0)]
+    threads: u32,
 }
 
 /// What the run left behind, for the statistics.
@@ -187,7 +192,8 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
     let (rate, seed) = (project.sample_rate, project.seed);
     let limit = args.seconds.map(|s| (s * f64::from(rate)).round() as u64);
 
-    let config = RealtimeConfig::with_buffer(rate, seed, u64::from(args.buffer));
+    let mut config = RealtimeConfig::with_buffer(rate, seed, u64::from(args.buffer));
+    config.engine.threads = args.threads as usize;
     let (runner, controller) =
         realtime(&plan, registry, config).map_err(|e| Failure::Internal(e.to_string()))?;
     let provenance = provenance::collect(&provenance::source_dir(), &project.files);

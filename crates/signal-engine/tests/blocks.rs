@@ -24,6 +24,8 @@ use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, Exports, Instance
 const SIZES: [usize; 7] = [1, 2, 3, 7, 64, 128, 256];
 /// Seeds of the random partitions.
 const PARTITIONS: [u64; 3] = [1, 2, 3];
+/// Thread counts of the matrix (ADR 0019 §2).
+const THREADS: [usize; 3] = [1, 4, 8];
 
 /// Pushes `count[f]` triggers for each frame `f` of a call, the last frame
 /// first: a block call emits out of frame order, a one-frame call as `test.flood`.
@@ -176,9 +178,9 @@ fn step(
     Ok(scenario.script.get(*next).map(|(at, _)| Frame(*at)))
 }
 
-fn run(scenario: &Scenario, partition: &Partition) -> Trace {
+fn run(scenario: &Scenario, partition: &Partition, threads: usize) -> Trace {
     let registry = types();
-    let config = EngineConfig::new(scenario.rate, 42);
+    let config = common::config_threads(scenario.rate, 42, threads);
     let mut engine = Engine::new(
         &scenario.plans[0],
         &registry,
@@ -234,21 +236,32 @@ fn run(scenario: &Scenario, partition: &Partition) -> Trace {
     }
 }
 
-/// Every block size and partition gives the per-frame trace.
+/// Every block size and partition, on 1, 4 and 8 threads (ADR 0019 §2,
+/// every segment on the workers), gives the per-frame trace, with the
+/// checked mode's exclusivity tracker on.
 fn matrix(scenario: &Scenario) -> Trace {
-    let reference = run(scenario, &Partition::PerFrame);
+    let reference = run(scenario, &Partition::PerFrame, 1);
     assert_eq!(reference.log_overflows, 0);
     assert_eq!(reference.input_overflows, 0);
-    for k in SIZES {
-        assert_eq!(run(scenario, &Partition::Blocks(k)), reference, "k = {k}");
+    for threads in THREADS {
+        for k in SIZES {
+            assert_eq!(
+                run(scenario, &Partition::Blocks(k), threads),
+                reference,
+                "k = {k}, {threads} threads"
+            );
+        }
+        for seed in PARTITIONS {
+            assert_eq!(
+                run(scenario, &Partition::Random(seed), threads),
+                reference,
+                "random partition {seed}, {threads} threads"
+            );
+        }
     }
-    for seed in PARTITIONS {
-        assert_eq!(
-            run(scenario, &Partition::Random(seed)),
-            reference,
-            "random partition {seed}"
-        );
-    }
+    let exclusivity = signal_engine::exclusivity();
+    assert!(exclusivity.checked && exclusivity.claims > 0);
+    assert_eq!(exclusivity.violations, 0);
     reference
 }
 

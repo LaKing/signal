@@ -156,7 +156,7 @@ fn a_removal_suspends_then_swaps_and_replays() {
     let _ = std::fs::remove_dir_all(&dir);
     recorder.write(&dir).unwrap();
     let session = Session::load(&dir, &registry).unwrap();
-    let replayed = replay(&session, &registry, None).unwrap();
+    let replayed = replay(&session, &registry, None, 1).unwrap();
     let samples: Vec<f32> = replayed.render.samples.iter().map(|&x| x as f32).collect();
     assert_eq!(samples, driver.output(), "replay equals what was played");
 }
@@ -367,7 +367,7 @@ fn a_slow_preparation_keeps_the_removal_fade_while_playing() {
     let _ = std::fs::remove_dir_all(&dir);
     recorder.write(&dir).unwrap();
     let session = Session::load(&dir, &registry).unwrap();
-    let replayed = replay(&session, &registry, None).unwrap();
+    let replayed = replay(&session, &registry, None, 1).unwrap();
     let samples: Vec<f32> = replayed.render.samples.iter().map(|&x| x as f32).collect();
     assert_eq!(samples.len(), played.len());
     assert_eq!(samples, played, "replay equals what was played");

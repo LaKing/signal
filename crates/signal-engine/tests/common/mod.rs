@@ -10,7 +10,7 @@ use signal_core::{
     PortAddress, PortDescriptor, PortKind, PortShape, PrepareContext, Primitive, Range,
     RateDivisor, Registry, RngStream, SinkKind, SplitMix64, StateOutputPrimitive,
 };
-use signal_engine::{Engine, EngineConfig, ExternalEvent};
+use signal_engine::{Engine, EngineConfig, ExternalEvent, Schedule};
 use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, Exports, InstanceDef, build_plan};
 
 use Direction::{In, Out};
@@ -695,6 +695,32 @@ pub fn engine_seeded(
     external: Vec<ExternalEvent>,
 ) -> Engine {
     let config = EngineConfig::new(sample_rate, seed);
+    Engine::new(plan, &registry(), config, external).unwrap()
+}
+
+/// The configuration of an engine on `threads` threads (ADR 0019 §2); with
+/// more than one, every segment of a plan with two tasks or more runs on the
+/// workers, one task per unit (`Schedule::FORCED`).
+pub fn config_threads(sample_rate: u32, seed: u64, threads: usize) -> EngineConfig {
+    EngineConfig {
+        threads,
+        schedule: if threads > 1 {
+            Schedule::FORCED
+        } else {
+            Schedule::DEFAULT
+        },
+        ..EngineConfig::new(sample_rate, seed)
+    }
+}
+
+/// [`engine`] on `threads` threads ([`config_threads`]).
+pub fn engine_threads(
+    plan: &ExecutionPlan,
+    sample_rate: u32,
+    threads: usize,
+    external: Vec<ExternalEvent>,
+) -> Engine {
+    let config = config_threads(sample_rate, 42, threads);
     Engine::new(plan, &registry(), config, external).unwrap()
 }
 

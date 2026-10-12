@@ -41,7 +41,7 @@ A GPU is a separate device with its own queue. Submitting work and reading resul
 - The GPU device lives in a new crate `signal-gpu` using **wgpu** (MIT OR Apache-2.0, Metal backend on macOS, already in the lock through eframe). Visual output (a later milestone) will use the same device.
 
 ### 4. Unsafe code
-Joining the workgroup and setting the thread policy need FFI. They live in one audited module, `crates/signal-audio/src/rt_thread.rs`, under the same rules as ADR 0017. It may call only `os_workgroup_join` and `os_workgroup_leave` (declared there with `extern "C"`), `thread_policy_set` (`libc`) and the CoreAudio property read (`objc2-core-audio`), and every `unsafe` block carries a `SAFETY:` comment. `unsafe_code` stays denied everywhere else.
+Joining the workgroup and setting the thread policy need FFI. They live in one audited module, `crates/signal-audio/src/rt_thread.rs`, under the same rules as ADR 0017. It may call only `os_workgroup_join` and `os_workgroup_leave` (declared there with `extern "C"`), `thread_policy_set` (`libc`) and the CoreAudio property read (`objc2-core-audio`), and every `unsafe` block carries a `SAFETY:` comment. `unsafe_code` stays denied everywhere else. ADR 0020 adds a third audited module for the scheduler of §2, `crates/signal-engine/src/shared.rs` (disjoint access to a plan's state, and handing a block's tasks to the workers).
 
 ## Alternatives considered
 - **Parallelism per frame:** impossible within a 10.4 µs frame at 96 kHz (see Context).

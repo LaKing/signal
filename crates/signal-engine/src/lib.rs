@@ -36,6 +36,7 @@
     )
 )]
 
+mod cores;
 mod driver;
 mod engine;
 mod error;
@@ -44,22 +45,33 @@ mod log;
 mod manifest;
 mod offline;
 mod parameter;
+mod pool;
 mod realtime;
+#[doc(hidden)]
+pub mod shared;
+mod tasks;
 mod units;
 
+pub use cores::{CoreSource, performance_cores};
 pub use driver::{CallbackSizes, Driver, DriverError, MAX_CALLBACK_FRAMES, NullDriver};
 pub use engine::{
     EditFull, Engine, EngineConfig, ExternalEvent, ExternalFull, InputDiscards, ParameterValue,
     PreparedSwap,
 };
+#[doc(hidden)]
+pub use engine::{Schedule, ScheduleStats};
 pub use error::{EngineError, RenderError};
 pub use log::{
     DiscardReason, FaultReason, InstanceId, LineSource, LogLine, LogRecord, LogSource, PortId,
 };
 pub use manifest::{Manifest, Provenance};
 pub use offline::{Render, render, render_blocks, render_with};
+#[doc(hidden)]
+pub use pool::spawned_workers;
 pub use realtime::{
     Command, CommandId, ControlError, ControlSink, Controller, Meter, Outcome,
     PARAMETERS_PER_CALLBACK, ReadySwap, RealtimeConfig, Report, Runner, RunnerStatus, SentCommand,
     Stamp, realtime,
 };
+#[doc(hidden)]
+pub use shared::{Exclusivity, HookPoint, exclusivity};

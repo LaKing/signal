@@ -8,22 +8,71 @@ signal_contract::install_counting_allocator!();
 
 mod common;
 
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use common::{addr, conn, engine, ext, inst, inst_with, plan, port_addr, ramp, registry, scaled};
+use common::{
+    addr, config_threads, conn, engine_threads, ext, inst, inst_with, plan, port_addr, ramp,
+    registry, scaled,
+};
 use signal_contract::alloc_counter::{self, Counts, Guard};
 use signal_core::{EventPayload, Frame};
 use signal_engine::{
-    CallbackSizes, ControlSink, Outcome, RealtimeConfig, Report, SentCommand, Stamp, realtime,
+    CallbackSizes, ControlSink, HookPoint, Outcome, RealtimeConfig, Report, SentCommand, Stamp,
+    realtime,
 };
 use signal_graph::ExecutionPlan;
+
+/// Heap calls counted on the worker threads while they take part in a block.
+static WORKER_HEAP_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Times a worker entered a block under a guard.
+static WORKER_ENTRIES: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    static WORKER_GUARD: RefCell<Option<Guard>> = const { RefCell::new(None) };
+}
+
+/// The engine's test hook: a guard on each worker (lanes 1 and up) from the
+/// moment it enters a block until it leaves it. The calling thread (lane 0)
+/// is guarded by the test itself.
+fn guard_workers(point: HookPoint) {
+    match point {
+        HookPoint::Enter { lane } if lane > 0 => {
+            WORKER_GUARD.with(|g| *g.borrow_mut() = Some(Guard::start()));
+            WORKER_ENTRIES.fetch_add(1, Ordering::Relaxed);
+        }
+        HookPoint::Leave { lane } if lane > 0 => {
+            let counts = WORKER_GUARD.with(|g| g.borrow_mut().take().map(|g| g.counts()));
+            if let Some(counts) = counts {
+                WORKER_HEAP_CALLS
+                    .fetch_add(counts.allocations + counts.deallocations, Ordering::Relaxed);
+            }
+        }
+        _ => {}
+    }
+}
 
 /// Blocks of several sizes, each with events pushed ahead to land inside it,
 /// a suspend and a resume inside it, faults inside the first blocks (with the
 /// undo of the frames after them), and a swap committed between blocks.
 #[test]
 fn blocks_and_swaps_allocate_nothing() {
+    blocks_and_swaps(1);
+}
+
+/// M2.6-2 AC3: the same on 8 threads, every segment on the workers: neither
+/// the calling thread nor any worker allocates or frees during a block or a
+/// swap.
+#[test]
+fn blocks_and_swaps_on_workers_allocate_nothing() {
+    blocks_and_swaps(8);
+    assert!(WORKER_ENTRIES.load(Ordering::Relaxed) > 0);
+    assert_eq!(WORKER_HEAP_CALLS.load(Ordering::Relaxed), 0);
+}
+
+fn blocks_and_swaps(threads: usize) {
     assert!(alloc_counter::is_installed());
     let base = || {
         vec![
@@ -60,15 +109,17 @@ fn blocks_and_swaps_allocate_nothing() {
     noise_wiring.push(conn("n.out", "rec.alpha"));
     let b = plan(with_noise, noise_wiring);
 
-    let mut engine = engine(
+    let mut engine = engine_threads(
         &a,
         1_000,
+        threads,
         vec![
             ext(3, 1, "/pm.value", ramp(0.25, 30)),
             ext(2, 2, "/flood.count", ramp(30.0, 40)),
             ext(60, 3, "/flood.count", EventPayload::Set(1.0)),
         ],
     );
+    engine.set_task_hook(Some(guard_workers));
     let mut swaps = [Some(b.clone()), None, Some(a), None, Some(b)].into_iter();
     let mut sequence = 100;
     let mut old = Vec::new();
@@ -125,6 +176,13 @@ fn blocks_and_swaps_allocate_nothing() {
     assert_eq!(engine.is_muted(&addr("/flood")), Some(true));
     assert!(engine.signal_output(&port_addr("/c.out")).unwrap() > 0.0);
     assert!(old.iter().all(|swap| swap.is_committed()));
+    if threads > 1 {
+        let stats = engine.schedule_stats();
+        assert!(
+            stats.parallel_segments > 0 && stats.worker_tasks > 0,
+            "{stats:?}"
+        );
+    }
 }
 
 const RATE: u32 = 1_000;
@@ -173,10 +231,26 @@ impl ControlSink for Tally {
 /// audio thread counts every heap call inside `Runner::process`: none.
 #[test]
 fn runner_with_blocks_allocates_and_frees_nothing() {
+    runner_with_blocks(1);
+}
+
+/// M2.6-2 AC3: the same on 4 threads, every segment on the workers, swaps
+/// included: no heap call on the audio thread or on any worker.
+#[test]
+fn runner_on_workers_allocates_and_frees_nothing() {
+    let entries = WORKER_ENTRIES.load(Ordering::Relaxed);
+    runner_with_blocks(4);
+    assert!(WORKER_ENTRIES.load(Ordering::Relaxed) > entries);
+    assert_eq!(WORKER_HEAP_CALLS.load(Ordering::Relaxed), 0);
+}
+
+fn runner_with_blocks(threads: usize) {
     assert!(alloc_counter::is_installed());
-    let config = RealtimeConfig::with_buffer(RATE, 42, MOST_FRAMES as u64);
+    let mut config = RealtimeConfig::with_buffer(RATE, 42, MOST_FRAMES as u64);
+    config.engine = config_threads(RATE, 42, threads);
     assert_eq!(config.engine.block_capacity, 256);
     let (mut runner, mut controller) = realtime(&version(0), &registry(), config).unwrap();
+    runner.set_task_hook(Some(guard_workers));
 
     let audio = thread::spawn(move || {
         let mut sizes = CallbackSizes::new(5);
@@ -240,4 +314,7 @@ fn runner_with_blocks_allocates_and_frees_nothing() {
     assert_eq!(runner.status().callbacks, CALLBACKS);
     assert!(tally.swaps >= 2, "swaps committed: {}", tally.swaps);
     assert!(tally.events > 0 && tally.edits > 0);
+    if threads > 1 {
+        assert!(runner.schedule_stats().worker_tasks > 0);
+    }
 }

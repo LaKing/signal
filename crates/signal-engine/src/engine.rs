@@ -16,29 +16,75 @@ use std::ops::Range as Span;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use signal_core::{
-    Combine, Direction, Event, EventPayload, EventSink, Feedthrough, Frame, Inputs,
-    InstanceAddress, ModuleDescriptor, Outputs, PortAddress, PortKind, PortShape, PrepareContext,
-    Primitive, Range, RateDivisor, Registry, RngStream, SinkKind,
+    Combine, DirectPrimitive, Direction, Event, EventPayload, EventSink, Feedthrough, Frame,
+    Inputs, InstanceAddress, ModuleDescriptor, Outputs, PortAddress, PortKind, PortShape,
+    PrepareContext, Primitive, Range, RateDivisor, Registry, RngStream, SinkKind,
+    StateOutputPrimitive,
 };
 use signal_graph::ExecutionPlan;
 
+use crate::cores::performance_cores;
 use crate::error::EngineError;
 use crate::fade::{FAULT_FADE_FRAMES, Fade, fade_frames, fade_in, fade_out};
 use crate::log::{
     DiscardReason, FaultReason, InstanceId, LineSource, LogLine, LogRecord, LogSource, PortId,
 };
 use crate::parameter::{Applied, Base, effective};
+use crate::pool::Pool;
+use crate::shared::{Access, CallView, HookPoint, Job, Layout, Parts, PlanCells, Reader, Window};
+use crate::tasks::{DEFAULT_COST_NS, TASK_MIN_NS, Tasks, tasks};
 use crate::units::{Unit, Units, units};
 
 /// Events an event output keeps per frame: the contract suite's 16 events per
 /// frame. More in one frame is an `event_overflow` fault at that frame.
 const EVENTS_PER_FRAME: usize = 16;
 
+/// The staged external events one task's log has room for in a parallel
+/// segment: the block capacity *K*.
+fn task_spare(capacity: usize) -> usize {
+    capacity
+}
+
 /// The fault guard trips on an output value whose magnitude exceeds this.
 const FAULT_MAGNITUDE: f64 = 1e6;
 
 /// The next engine's identity: a prepared swap commits only to its own engine.
 static NEXT_ENGINE_ID: AtomicU64 = AtomicU64::new(0);
+
+/// The most threads an engine runs a block on.
+const MAX_THREADS: usize = 1024;
+
+/// When a segment runs on several threads (ADR 0019 §2): thresholds that
+/// change the timing, never the output. Documented in `docs/benchmarks.md`.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Schedule {
+    /// A task takes further units while its estimate is below this, in ns
+    /// per 256-frame block (0: one task per unit).
+    pub task_min_ns: u64,
+    /// A segment runs on the workers only if the plan's estimate times its
+    /// frames reaches this, in ns.
+    pub parallel_min_ns: u64,
+    /// A segment runs on the workers only if it has at least this many frames.
+    pub min_frames: usize,
+}
+
+impl Schedule {
+    /// The documented thresholds.
+    pub const DEFAULT: Schedule = Schedule {
+        task_min_ns: TASK_MIN_NS,
+        parallel_min_ns: 50_000,
+        min_frames: 16,
+    };
+
+    /// Every segment of every plan with two tasks or more on the workers,
+    /// one task per unit: for tests and the bench.
+    pub const FORCED: Schedule = Schedule {
+        task_min_ns: 0,
+        parallel_min_ns: 0,
+        min_frames: 1,
+    };
+}
 
 /// What a run is prepared for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +100,15 @@ pub struct EngineConfig {
     /// every primitive is prepared with. A performance setting: it never
     /// changes the output.
     pub block_capacity: usize,
+    /// The threads a block runs on, the calling thread included: 1 runs no
+    /// workers, 0 means the machine's performance cores
+    /// ([`performance_cores`](crate::performance_cores), read once). A
+    /// machine setting: it never changes the output, and never appears in a
+    /// project. [`Engine::config`] reports the resolved number.
+    pub threads: usize,
+    /// When segments run on the workers (tests and the bench).
+    #[doc(hidden)]
+    pub schedule: Schedule,
 }
 
 impl EngineConfig {
@@ -70,6 +125,8 @@ impl EngineConfig {
             seed,
             queue_capacity: EngineConfig::DEFAULT_QUEUE_CAPACITY,
             block_capacity: EngineConfig::DEFAULT_BLOCK_CAPACITY,
+            threads: 1,
+            schedule: Schedule::DEFAULT,
         }
     }
 }
@@ -159,7 +216,7 @@ enum Mode {
 
 /// An instance: its feedthrough class, its buffer ranges and its state.
 #[derive(Debug)]
-struct Slot {
+pub(crate) struct Slot {
     feedthrough: Feedthrough,
     audio_sink: bool,
     signal_in: Span<usize>,
@@ -175,6 +232,10 @@ struct Slot {
     suspension_discards: u64,
     /// The frame of the last edit applied: at most one edit per frame.
     edited_at: Option<Frame>,
+    /// The events delivered to its event inputs in the current call, at
+    /// in-call offsets, and where each input's end in them.
+    events: Vec<Event>,
+    ends: Vec<usize>,
 }
 
 impl Slot {
@@ -226,7 +287,7 @@ struct EventInput {
 
 /// A parameter: its base, how it combines, and its sources in canonical order.
 #[derive(Debug)]
-struct Param {
+pub(crate) struct Param {
     port: PortId,
     base: Base,
     combine: Combine,
@@ -284,6 +345,37 @@ struct PushedEdit {
     instance: InstanceAddress,
 }
 
+/// One thread's scratch for instance calls: one call's inputs and outputs,
+/// port-major for its frames, a parameter's modulation per block frame, and
+/// what the fault guard's rollback restores.
+#[derive(Debug, Default)]
+pub(crate) struct Lane {
+    call_signals: Vec<f64>,
+    call_params: Vec<f64>,
+    call_outputs: Vec<f64>,
+    modulation: Vec<f64>,
+    saved_params: Vec<(Base, Option<f64>)>,
+    saved: Saved,
+}
+
+/// Where a block's records go: the plan's log, or one task's in a parallel
+/// segment, and the counters of what did not fit.
+#[derive(Debug, Default)]
+pub(crate) struct Out {
+    log: Vec<LogRecord>,
+    log_overflows: u64,
+    input_overflows: u64,
+}
+
+impl Out {
+    /// Empties the log and the counters; allocates nothing.
+    pub(crate) fn clear(&mut self) {
+        self.log.clear();
+        self.log_overflows = 0;
+        self.input_overflows = 0;
+    }
+}
+
 /// Everything that belongs to one instantiated plan: instances, ports, buffers
 /// and the frame log, whose records name this plan's ports and instances.
 ///
@@ -299,53 +391,31 @@ pub(crate) struct PlanState {
     /// Every port, in address order: a [`PortId`] indexes it.
     ports: Vec<PortAddress>,
     roles: Vec<Option<(usize, Role)>>,
-    slots: Vec<Slot>,
-    /// `None` only for a survivor of a prepared swap, until it is committed.
-    primitives: Vec<Option<Primitive>>,
     /// The strongly connected components, in execution order (ADR 0019 §1).
     units: Units,
+    /// The units grouped into tasks for the workers (ADR 0019 §2).
+    tasks: Tasks,
     last_edit: Vec<Option<(EditKind, Frame)>>,
 
-    /// The block capacity *K*: the stride of every per-frame buffer below.
+    /// The block capacity *K*: the stride of every per-frame buffer.
     capacity: usize,
     /// Summed signal inputs of the last frame.
     signal_in: Vec<f64>,
     signal_sources: Vec<Vec<(usize, f64)>>,
     /// What readers saw of every signal output in the last frame.
     outputs: Vec<f64>,
-    /// Values fades start from.
-    held: Vec<f64>,
     output_audio: Vec<bool>,
     output_ports: Vec<PortId>,
-    /// Per block frame: what readers see of output `o` at index `o·K + f`,
-    /// signal input `s`'s sum at `s·K + f`, parameter `j`'s effective value
-    /// at `j·K + f`.
-    outputs_block: Vec<f64>,
-    signal_in_block: Vec<f64>,
-    param_block: Vec<f64>,
-    /// One call's inputs and outputs, port-major for its frames.
-    call_signals: Vec<f64>,
-    call_params: Vec<f64>,
-    call_outputs: Vec<f64>,
-
-    sinks: Vec<EventSink>,
     sink_ports: Vec<PortId>,
-    /// Per event output: the events delivered this block, `offset` being the
-    /// frame's index in the block, in emission order.
-    emitted: Vec<Vec<Event>>,
     event_inputs: Vec<EventInput>,
-    instance_events: Vec<Vec<Event>>,
-    instance_event_ends: Vec<Vec<usize>>,
-
-    params: Vec<Param>,
     /// Effective values of the last frame.
     param_values: Vec<f64>,
-    /// An instance's parameter bases before a block call, for the fault
-    /// guard's rollback.
-    saved_params: Vec<(Base, Option<f64>)>,
-
-    log: Vec<LogRecord>,
-    /// Scratch for [`Engine::drain_log`]'s canonical order, as large as `log`.
+    /// Every per-instance buffer the units write: slots, primitives,
+    /// parameters, the block's outputs, inputs and events (ADR 0020).
+    cells: PlanCells,
+    /// The block's log and the counters of what did not fit.
+    out: Out,
+    /// Scratch for [`Engine::drain_log`]'s canonical order, as large as the log.
     log_order: Vec<usize>,
 }
 
@@ -526,6 +596,9 @@ impl PlanState {
                 discards: 0,
                 suspension_discards: 0,
                 edited_at: None,
+                // Sized below, once every connection is known.
+                events: Vec::new(),
+                ends: Vec::new(),
             });
             primitives.push(primitive);
             types.push(kind);
@@ -631,9 +704,7 @@ impl PlanState {
         // when it has event inputs: all its pushed events of a block come
         // from that queue. A sink keeps at most 16 events per frame, and each
         // connection delivers each once, so a block never exceeds it.
-        let mut instance_events = Vec::with_capacity(slots.len());
-        let mut instance_event_ends = Vec::with_capacity(slots.len());
-        for slot in &slots {
+        for slot in &mut slots {
             let inputs = event_inputs.get(slot.event_in.clone()).unwrap_or(&[]);
             let pushed = if inputs.is_empty() {
                 0
@@ -648,8 +719,8 @@ impl PlanState {
                 })
                 .sum::<usize>()
                 + pushed;
-            instance_events.push(Vec::with_capacity(capacity));
-            instance_event_ends.push(vec![0; slot.event_in.len()]);
+            slot.events = Vec::with_capacity(capacity);
+            slot.ends = vec![0; slot.event_in.len()];
         }
         // The log of a block: one swap record, at most one edit per instance
         // and frame, one fault per instance, every staged external (up-front:
@@ -669,14 +740,104 @@ impl PlanState {
         let log = Vec::with_capacity(log_capacity);
         let log_order = Vec::with_capacity(log.capacity());
 
-        // One call's buffers: the most ports (and parameters) of any instance.
-        let most = |len: fn(&Slot) -> usize| slots.iter().map(len).max().unwrap_or(0);
-        let call_signals = vec![0.0; most(|s| s.signal_in.len()) * capacity];
-        let call_params = vec![0.0; most(|s| s.params.len()) * capacity];
-        let call_outputs = vec![0.0; most(|s| s.signal_out.len()) * capacity];
-        let saved_params = Vec::with_capacity(most(|s| s.params.len()));
+        // The tasks (ADR 0019 §2), from each instance's type's static cost.
+        let cost_ns: Vec<f64> = types
+            .iter()
+            .map(|(name, _)| f64::from(registry.cost(name).unwrap_or(DEFAULT_COST_NS)))
+            .collect();
+        let tasks = tasks(&units, &cost_ns, slots.len(), config.schedule.task_min_ns);
 
+        // One lane per thread: one call's buffers (the most ports and
+        // parameters of any instance) and a parameter's modulation per frame.
+        let threads = config.threads.clamp(1, MAX_THREADS);
+        let most = |len: fn(&Slot) -> usize| slots.iter().map(len).max().unwrap_or(0);
+        let lanes = (0..threads)
+            .map(|_| Lane {
+                call_signals: vec![0.0; most(|s| s.signal_in.len()) * capacity],
+                call_params: vec![0.0; most(|s| s.params.len()) * capacity],
+                call_outputs: vec![0.0; most(|s| s.signal_out.len()) * capacity],
+                modulation: vec![0.0; capacity],
+                saved_params: Vec::with_capacity(most(|s| s.params.len())),
+                saved: Saved::default(),
+            })
+            .collect();
+        // One log per task when there are workers: each instance's fault and
+        // 16 events per frame per event connection into it, plus
+        // `task_spare(K)` staged externals (a segment with more for one task
+        // runs on the calling thread, `Engine::parallel`).
+        let mut outs = Vec::new();
+        if threads > 1 {
+            let mut bound = vec![task_spare(capacity); tasks.len()];
+            for (i, slot) in slots.iter().enumerate() {
+                let inputs = event_inputs.get(slot.event_in.clone()).unwrap_or(&[]);
+                let targets = params.get(slot.params.clone()).unwrap_or(&[]);
+                let into = inputs
+                    .iter()
+                    .map(|i| connections(&i.sources))
+                    .sum::<usize>()
+                    + targets
+                        .iter()
+                        .map(|p| connections(&p.events))
+                        .sum::<usize>();
+                let t = tasks.instance_task.get(i).copied().unwrap_or(0) as usize;
+                if let Some(b) = bound.get_mut(t) {
+                    *b += 1 + EVENTS_PER_FRAME * capacity * into;
+                }
+            }
+            outs = bound
+                .into_iter()
+                .map(|b| Out {
+                    log: Vec::with_capacity(b),
+                    ..Out::default()
+                })
+                .collect();
+        }
+
+        let owners = |range: fn(&Slot) -> Span<usize>, len: usize| {
+            let mut owner = vec![0u32; len];
+            for (i, slot) in slots.iter().enumerate() {
+                for o in range(slot) {
+                    if let Some(w) = owner.get_mut(o) {
+                        *w = i as u32;
+                    }
+                }
+            }
+            owner
+        };
         let outputs = output_audio.len();
+        let output_owner = owners(|s| s.signal_out.clone(), outputs);
+        let sink_owner = owners(|s| s.event_out.clone(), sinks.len());
+        let cells = PlanCells::new(Parts {
+            capacity,
+            layout: slots
+                .iter()
+                .map(|s| Layout {
+                    signal_in: s.signal_in.clone(),
+                    signal_out: s.signal_out.clone(),
+                    event_out: s.event_out.clone(),
+                    params: s.params.clone(),
+                })
+                .collect(),
+            instance_task: tasks.instance_task.clone(),
+            primitives,
+            outputs: vec![0.0; outputs * capacity],
+            output_owner,
+            held: vec![0.0; outputs],
+            signal_in: vec![0.0; signal_inputs * capacity],
+            param_rows: vec![0.0; param_values.len() * capacity],
+            emitted: (0..sinks.len())
+                .map(|_| Vec::with_capacity(EVENTS_PER_FRAME * capacity))
+                .collect(),
+            sinks,
+            sink_owner,
+            params,
+            slots,
+            lanes,
+            outs,
+            preds: tasks.preds.clone(),
+            successors: tasks.successors.clone(),
+        });
+
         let state = PlanState {
             last_edit: vec![None; instances.len()],
             instances,
@@ -684,34 +845,22 @@ impl PlanState {
             types,
             ports,
             roles,
-            slots,
-            primitives,
             units,
+            tasks,
             capacity,
             signal_in: vec![0.0; signal_inputs],
             signal_sources,
             outputs: vec![0.0; outputs],
-            held: vec![0.0; outputs],
             output_audio,
             output_ports,
-            outputs_block: vec![0.0; outputs * capacity],
-            signal_in_block: vec![0.0; signal_inputs * capacity],
-            param_block: vec![0.0; param_values.len() * capacity],
-            call_signals,
-            call_params,
-            call_outputs,
-            emitted: (0..sinks.len())
-                .map(|_| Vec::with_capacity(EVENTS_PER_FRAME * capacity))
-                .collect(),
-            sinks,
             sink_ports,
             event_inputs,
-            instance_events,
-            instance_event_ends,
-            params,
             param_values,
-            saved_params,
-            log,
+            cells,
+            out: Out {
+                log,
+                ..Out::default()
+            },
             log_order,
         };
         Ok((state, survivors))
@@ -725,14 +874,22 @@ impl PlanState {
         config: EngineConfig,
     ) -> Result<PlanState, EngineError> {
         let (mut state, _) = PlanState::build(plan, registry, config, &[], None)?;
-        state.primitives.clear();
+        for primitive in state.cells.primitives.get_mut() {
+            *primitive = None;
+        }
         Ok(state)
     }
 
     /// The audio sink: its address and number of signal inputs, if the plan
     /// has exactly one.
     pub(crate) fn audio_sink(&self) -> Option<(&InstanceAddress, usize)> {
-        let mut sinks = self.slots.iter().enumerate().filter(|(_, s)| s.audio_sink);
+        let mut sinks = self
+            .cells
+            .slots
+            .get()
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.audio_sink);
         let (i, slot) = sinks.next()?;
         if sinks.next().is_some() {
             return None;
@@ -810,36 +967,7 @@ impl PlanState {
     /// The id and role of `port`.
     /// The address of parameter `j` (in [`Engine::parameter_at`] order).
     pub(crate) fn parameter_port(&self, j: usize) -> Option<&PortAddress> {
-        self.ports.get(self.params.get(j)?.port.0)
-    }
-
-    /// Copies instance `i`'s summed signal inputs and effective parameter
-    /// values for block frames `a..a + len` into the call buffers, port-major.
-    fn load_call(&mut self, i: usize, a: usize, len: usize) {
-        let k = self.capacity;
-        let Some(slot) = self.slots.get(i) else {
-            return;
-        };
-        let pairs = [
-            (
-                slot.signal_in.clone(),
-                &mut self.call_signals,
-                &self.signal_in_block,
-            ),
-            (
-                slot.params.clone(),
-                &mut self.call_params,
-                &self.param_block,
-            ),
-        ];
-        for (ports, call, block) in pairs {
-            for (p, port) in ports.enumerate() {
-                let from = block.get(port * k + a..port * k + a + len);
-                if let (Some(to), Some(from)) = (call.get_mut(p * len..(p + 1) * len), from) {
-                    to.copy_from_slice(from);
-                }
-            }
-        }
+        self.ports.get(self.cells.params.get().get(j)?.port.0)
     }
 
     fn role_of(&self, port: &PortAddress) -> Option<(usize, Role)> {
@@ -864,9 +992,10 @@ impl PlanState {
             discards.unrouted = discards.unrouted.saturating_add(1);
             return;
         };
-        let Some(slot) = self.slots.get_mut(i) else {
+        let Some(slot) = self.cells.slots.get_mut().get_mut(i) else {
             return;
         };
+        let held = self.cells.held.get_mut();
         let fits = match kind {
             EditKind::Suspend => !slot.suspended,
             EditKind::Resume => slot.suspended,
@@ -883,9 +1012,7 @@ impl PlanState {
                 slot.suspension_discards = 0;
                 if slot.fault.is_none() {
                     for o in slot.signal_out.clone() {
-                        if let (Some(held), Some(&out)) =
-                            (self.held.get_mut(o), self.outputs.get(o))
-                        {
+                        if let (Some(held), Some(&out)) = (held.get_mut(o), self.outputs.get(o)) {
                             *held = out;
                         }
                     }
@@ -912,7 +1039,7 @@ impl PlanState {
         {
             *last = Some((kind, frame));
         }
-        push_record(&mut self.log, log_overflows, record);
+        push_record(&mut self.out.log, log_overflows, record);
     }
 }
 
@@ -921,13 +1048,17 @@ impl PlanState {
 /// readers see them, held values, event sinks and parameter bases with their
 /// ramps. Both have the same descriptor, so their ranges have equal lengths.
 fn move_instance(new: &mut PlanState, old: &mut PlanState, n: usize, o: usize) {
-    if let (Some(a), Some(b)) = (new.primitives.get_mut(n), old.primitives.get_mut(o)) {
+    let (nc, oc) = (&mut new.cells, &mut old.cells);
+    if let (Some(a), Some(b)) = (
+        nc.primitives.get_mut().get_mut(n),
+        oc.primitives.get_mut().get_mut(o),
+    ) {
         mem::swap(a, b);
     }
     if let (Some(a), Some(&b)) = (new.last_edit.get_mut(n), old.last_edit.get(o)) {
         *a = b;
     }
-    let (Some(ns), Some(os)) = (new.slots.get_mut(n), old.slots.get(o)) else {
+    let (Some(ns), Some(os)) = (nc.slots.get_mut().get_mut(n), oc.slots.get().get(o)) else {
         return;
     };
     ns.suspended = os.suspended;
@@ -941,15 +1072,15 @@ fn move_instance(new: &mut PlanState, old: &mut PlanState, n: usize, o: usize) {
     let params = ns.params.clone().zip(os.params.clone());
     for (a, b) in outputs {
         copy(&mut new.outputs, &old.outputs, a, b);
-        copy(&mut new.held, &old.held, a, b);
+        copy(nc.held.get_mut(), oc.held.get(), a, b);
     }
     for (a, b) in events {
-        if let (Some(x), Some(y)) = (new.sinks.get_mut(a), old.sinks.get_mut(b)) {
+        if let (Some(x), Some(y)) = (nc.sinks.get_mut().get_mut(a), oc.sinks.get_mut().get_mut(b)) {
             mem::swap(x, y);
         }
     }
     for (a, b) in params {
-        if let (Some(x), Some(y)) = (new.params.get_mut(a), old.params.get(b)) {
+        if let (Some(x), Some(y)) = (nc.params.get_mut().get_mut(a), oc.params.get().get(b)) {
             x.base = y.base;
         }
         copy(&mut new.param_values, &old.param_values, a, b);
@@ -1028,14 +1159,16 @@ pub(crate) fn prepare_swap(
     let (state, survivors) = PlanState::build(plan, registry, target.config, upfront, Some(old))?;
 
     // Which old instances survive, and the old instance of every output.
-    let mut survives = vec![false; old.slots.len()];
+    let (old_slots, old_params) = (old.cells.slots.get(), old.cells.params.get());
+    let (new_slots, new_params) = (state.cells.slots.get(), state.cells.params.get());
+    let mut survives = vec![false; old_slots.len()];
     for &(_, o) in &survivors {
         if let Some(s) = survives.get_mut(o) {
             *s = true;
         }
     }
     let mut owner = vec![usize::MAX; old.outputs.len()];
-    for (i, slot) in old.slots.iter().enumerate() {
+    for (i, slot) in old_slots.iter().enumerate() {
         for o in slot.signal_out.clone() {
             if let Some(w) = owner.get_mut(o) {
                 *w = i;
@@ -1049,11 +1182,11 @@ pub(crate) fn prepare_swap(
     let mut holds = Vec::new();
     let mut removed_sources = Vec::new();
     for &(n, o) in &survivors {
-        let (Some(ns), Some(os)) = (state.slots.get(n), old.slots.get(o)) else {
+        let (Some(ns), Some(os)) = (new_slots.get(n), old_slots.get(o)) else {
             continue;
         };
         for (nj, oj) in ns.params.clone().zip(os.params.clone()) {
-            let (Some(np), Some(op)) = (state.params.get(nj), old.params.get(oj)) else {
+            let (Some(np), Some(op)) = (new_params.get(nj), old_params.get(oj)) else {
                 continue;
             };
             if !np.modulation.is_empty() {
@@ -1138,14 +1271,42 @@ pub struct Engine {
     /// The first frame of the current (or last) block, and its length.
     block_start: Frame,
     block_frames: usize,
-    /// Counters before a block call, for the fault guard's rollback.
-    saved: Saved,
+
+    /// The worker threads (none for one thread), kept across swaps.
+    pool: Option<Pool>,
+    /// The parallel segments run, which is also each one's job epoch.
+    parallel_segments: u64,
+    /// The test hook (`set_task_hook`).
+    hook: Option<fn(HookPoint)>,
+}
+
+/// How an engine schedules its blocks (`Engine::schedule_stats`).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScheduleStats {
+    /// The threads a block may run on, the calling thread included.
+    pub threads: usize,
+    /// The worker threads running.
+    pub workers: usize,
+    /// The running plan's units.
+    pub units: usize,
+    /// The running plan's tasks.
+    pub tasks: usize,
+    /// The running plan's estimated cost per frame, in ns (rounded): what a
+    /// segment's frames multiply against `Schedule::parallel_min_ns`.
+    pub estimate_ns: u64,
+    /// Segments run on the workers.
+    pub parallel_segments: u64,
+    /// Tasks the workers ran (not the calling thread).
+    pub worker_tasks: u64,
+    /// Tasks whose body unwound on a worker; that worker is gone.
+    pub worker_panics: u64,
 }
 
 /// What a block call's gather changes besides parameter bases, saved so that
 /// a fault mid-call can undo the frames after it.
 #[derive(Clone, Copy, Debug, Default)]
-struct Saved {
+pub(crate) struct Saved {
     log_len: usize,
     log_overflows: u64,
     input_overflows: u64,
@@ -1175,6 +1336,13 @@ impl Engine {
         if config.block_capacity == 0 {
             return Err(EngineError::InvalidBlockCapacity);
         }
+        // Auto: the performance cores, read once per process.
+        let threads = match config.threads {
+            0 => performance_cores().0,
+            n => n,
+        }
+        .clamp(1, MAX_THREADS);
+        let config = EngineConfig { threads, ..config };
         let (state, _) = PlanState::build(plan, registry, config, &external, None)?;
 
         // External events: checked against the plan, unique sequence numbers.
@@ -1233,7 +1401,9 @@ impl Engine {
             input_overflows: 0,
             block_start: Frame::ZERO,
             block_frames: 0,
-            saved: Saved::default(),
+            pool: (threads > 1).then(|| Pool::new(threads - 1)),
+            parallel_segments: 0,
+            hook: None,
         })
     }
 
@@ -1435,16 +1605,18 @@ impl Engine {
         if self.swap_record.is_some() {
             return Err(EngineError::SwapPending);
         }
-        if !self.plan.log.is_empty() {
+        if !self.plan.out.log.is_empty() {
             return Err(EngineError::LogNotDrained);
         }
         let (new, old) = (&mut swap.plan, &mut self.plan);
         for &(n, o) in &swap.survivors {
             move_instance(new, old, n, o);
         }
+        let new_params = new.cells.params.get_mut();
+        let old_params = old.cells.params.get();
         for hold in &swap.holds {
             let held = if hold.removed.is_empty() {
-                old.params
+                old_params
                     .get(hold.old_param)
                     .and_then(|p| p.held_modulation)
             } else {
@@ -1454,7 +1626,7 @@ impl Engine {
                     .unwrap_or(&[]);
                 Some(sum(removed, &old.outputs))
             };
-            if let Some(param) = new.params.get_mut(hold.param) {
+            if let Some(param) = new_params.get_mut(hold.param) {
                 param.held_modulation = held;
             }
         }
@@ -1512,18 +1684,18 @@ impl Engine {
         let start = self.next_frame;
         self.block_start = start;
         self.block_frames = k;
-        self.plan.log.clear();
+        self.plan.out.log.clear();
         if let Some((version, plan_version)) = self.swap_record.take() {
             let record = LogRecord::Swap {
                 frame: start,
                 version,
                 plan_version,
             };
-            push_record(&mut self.plan.log, &mut self.log_overflows, record);
+            push_record(&mut self.plan.out.log, &mut self.log_overflows, record);
         }
 
         self.stage_externals(start, k);
-        for events in &mut self.plan.emitted {
+        for events in self.plan.cells.emitted.get_mut() {
             events.clear();
         }
         // Segments: an edit takes effect only at a segment's first frame.
@@ -1653,533 +1825,121 @@ impl Engine {
             .sort_unstable_by_key(|s| (s.target, s.frame, s.sequence, s.pushed, s.ordinal));
     }
 
-    /// Frames `a..b` of the block, unit by unit.
-    fn run_segment(&mut self, a: usize, b: usize) {
-        for u in 0..self.plan.units.order.len() {
-            let Some(unit) = self.plan.units.order.get(u).cloned() else {
-                continue;
-            };
-            match unit {
-                Unit::Direct(i) => self.run_direct(i, a, b),
-                Unit::State(i) => {
-                    for f in a..b {
-                        self.emit(i, f);
-                        self.absorb(i, f);
-                    }
-                }
-                Unit::Cycle {
-                    state_outputs,
-                    direct,
-                } => {
-                    for f in a..b {
-                        for m in state_outputs.clone() {
-                            if let Some(&i) = self.plan.units.members.get(m) {
-                                self.emit(i, f);
-                            }
-                        }
-                        for m in direct.clone() {
-                            if let Some(&i) = self.plan.units.members.get(m) {
-                                self.run_direct(i, f, f + 1);
-                            }
-                        }
-                        for m in state_outputs.clone() {
-                            if let Some(&i) = self.plan.units.members.get(m) {
-                                self.absorb(i, f);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Phase 3 for one direct instance over frames `a..b` of the block: its
-    /// inputs frame by frame, one `process` call, then its outputs.
-    fn run_direct(&mut self, i: usize, a: usize, b: usize) {
-        let len = b - a;
-        let rollback = len > 1
-            && self
-                .plan
-                .slots
-                .get(i)
-                .is_some_and(|s| s.mode() == Mode::Running);
-        if rollback {
-            self.save(i);
-        }
-        match self.gather(i, a, b) {
-            Mode::Running => {
-                let plan = &mut self.plan;
-                plan.load_call(i, a, len);
-                let Some(slot) = plan.slots.get(i) else {
-                    return;
-                };
-                let (signal_in, out, events, params) = (
-                    slot.signal_in.len(),
-                    slot.signal_out.len(),
-                    slot.event_out.clone(),
-                    slot.params.len(),
-                );
-                for sink in plan.sinks.get_mut(events.clone()).unwrap_or(&mut []) {
-                    sink.start_call(len);
-                }
-                if let Some(Some(Primitive::Direct(module))) = plan.primitives.get_mut(i) {
-                    let inputs = Inputs::new(
-                        len,
-                        plan.call_signals.get(..signal_in * len).unwrap_or(&[]),
-                        plan.call_params.get(..params * len).unwrap_or(&[]),
-                        plan.instance_events.get(i).map_or(&[][..], Vec::as_slice),
-                        plan.instance_event_ends
-                            .get(i)
-                            .map_or(&[][..], Vec::as_slice),
-                    );
-                    let mut outputs = Outputs::new(
-                        len,
-                        plan.call_outputs.get_mut(..out * len).unwrap_or(&mut []),
-                        plan.sinks.get_mut(events).unwrap_or(&mut []),
-                    );
-                    module.process(&inputs, &mut outputs);
-                }
-                self.commit(i, a, b, rollback);
-            }
-            Mode::Suspended => {
-                for f in a..b {
-                    self.fade_suspended(i, f);
-                }
-            }
-            Mode::Muted => {
-                for f in a..b {
-                    self.fade_muted(i, f);
-                }
-            }
-        }
-    }
-
-    /// Phase 2 for one state-output instance at frame `f` of the block.
-    fn emit(&mut self, i: usize, f: usize) {
-        let Some(slot) = self.plan.slots.get(i) else {
-            return;
-        };
-        match slot.mode() {
-            Mode::Running => {
-                let (out, events) = (slot.signal_out.len(), slot.event_out.clone());
-                let plan = &mut self.plan;
-                for sink in plan.sinks.get_mut(events.clone()).unwrap_or(&mut []) {
-                    sink.start_call(1);
-                }
-                if let Some(Some(Primitive::StateOutput(module))) = plan.primitives.get_mut(i) {
-                    let mut outputs = Outputs::new(
-                        1,
-                        plan.call_outputs.get_mut(..out).unwrap_or(&mut []),
-                        plan.sinks.get_mut(events).unwrap_or(&mut []),
-                    );
-                    module.emit(&mut outputs);
-                }
-                self.commit(i, f, f + 1, false);
-            }
-            Mode::Suspended => self.fade_suspended(i, f),
-            Mode::Muted => self.fade_muted(i, f),
-        }
-    }
-
-    /// Phase 4 for one state-output instance at frame `f` of the block.
-    fn absorb(&mut self, i: usize, f: usize) {
-        if self.gather(i, f, f + 1) != Mode::Running {
-            return;
-        }
+    /// Whether a segment of `frames` frames runs on the workers: there are
+    /// workers and two tasks or more, the segment is long and costly enough
+    /// (`Schedule`), and every task's log has room for its staged external
+    /// events. Otherwise the calling thread runs it alone, with the same
+    /// result.
+    fn parallel(&mut self, frames: usize) -> bool {
+        let schedule = self.config.schedule;
         let plan = &mut self.plan;
-        plan.load_call(i, f, 1);
-        let Some(slot) = plan.slots.get(i) else {
-            return;
-        };
-        let (signal_in, params) = (slot.signal_in.len(), slot.params.len());
-        if let Some(Some(Primitive::StateOutput(module))) = plan.primitives.get_mut(i) {
-            let inputs = Inputs::new(
-                1,
-                plan.call_signals.get(..signal_in).unwrap_or(&[]),
-                plan.call_params.get(..params).unwrap_or(&[]),
-                plan.instance_events.get(i).map_or(&[][..], Vec::as_slice),
-                plan.instance_event_ends
-                    .get(i)
-                    .map_or(&[][..], Vec::as_slice),
-            );
-            module.absorb(&inputs);
-        }
-    }
-
-    /// Computes an instance's inputs for frames `a..b` of the block, frame by
-    /// frame, once they are final: signal input sums, events on event inputs
-    /// (at in-call offsets), and parameter bases and effective values (ADR
-    /// 0016 §3, §4, §4a; §1a when suspended). Returns how the instance takes
-    /// part in these frames.
-    fn gather(&mut self, i: usize, a: usize, b: usize) -> Mode {
-        let start = self.block_start;
-        let plan = &mut self.plan;
-        let k = plan.capacity;
-        let Some(slot) = plan.slots.get(i) else {
-            return Mode::Muted;
-        };
-        let mode = slot.mode();
-        let (signal_in, event_in, params) = (
-            slot.signal_in.clone(),
-            slot.event_in.clone(),
-            slot.params.clone(),
-        );
-        let frame = |f: usize| Frame(start.0.saturating_add(f as u64));
-
-        // Signal inputs: the canonical-order sum of scale · source, from +0
-        // (computed even when the instance is not called: the audio sink's
-        // inputs are what the drivers record).
-        for s in signal_in {
-            let sources = plan.signal_sources.get(s).map_or(&[][..], Vec::as_slice);
-            for f in a..b {
-                let value = sum_at(sources, &plan.outputs_block, k, f);
-                if let Some(input) = plan.signal_in_block.get_mut(s * k + f) {
-                    *input = value;
-                }
-            }
-        }
-
-        let mut discards = 0u64;
-        let emitted = &plan.emitted;
-        let staged = self.staged.as_slice();
-
-        // Event inputs: external events by sequence, then module events by
-        // source port address, each source in emission order (ADR 0016 §3).
-        if let (Some(buffer), Some(ends)) = (
-            plan.instance_events.get_mut(i),
-            plan.instance_event_ends.get_mut(i),
-        ) {
-            buffer.clear();
-            let inputs = plan.event_inputs.get(event_in).unwrap_or(&[]);
-            for (input, end) in inputs.iter().zip(ends.iter_mut()) {
-                let target = input.port;
-                for f in a..b {
-                    for (payload, source) in arrivals(staged, target, f, &input.sources, emitted) {
-                        let record = match mode {
-                            Mode::Running => {
-                                if buffer.len() >= buffer.capacity() {
-                                    // Unreachable within the construction-time
-                                    // bound; never reallocate, never call it delivered.
-                                    self.input_overflows = self.input_overflows.saturating_add(1);
-                                    continue;
-                                }
-                                let offset = u32::try_from(f - a).unwrap_or(u32::MAX);
-                                buffer.push(Event { offset, payload });
-                                LogRecord::Event {
-                                    frame: frame(f),
-                                    target,
-                                    payload,
-                                    source,
-                                }
-                            }
-                            Mode::Suspended | Mode::Muted => {
-                                discards = discards.saturating_add(1);
-                                let reason = if mode == Mode::Muted {
-                                    DiscardReason::Muted
-                                } else {
-                                    DiscardReason::Suspended
-                                };
-                                LogRecord::Discard {
-                                    frame: frame(f),
-                                    target,
-                                    payload,
-                                    source,
-                                    reason,
-                                }
-                            }
-                        };
-                        push_record(&mut plan.log, &mut self.log_overflows, record);
-                    }
-                }
-                *end = buffer.len();
-            }
-        }
-
-        // Parameters, frame by frame: advance, then events in canonical order,
-        // then the effective value (§4a, §4). While suspended, events act on
-        // the base only, and the effective value stays.
-        for j in params {
-            let Some(param) = plan.params.get_mut(j) else {
-                continue;
-            };
-            let target = param.port;
-            for f in a..b {
-                if mode == Mode::Running {
-                    param.base.advance();
-                }
-                for (payload, source) in arrivals(staged, target, f, &param.events, emitted) {
-                    let applied = match mode {
-                        Mode::Running => Some(param.base.apply(payload)),
-                        Mode::Suspended => Some(param.base.apply_suspended(payload)),
-                        Mode::Muted => None,
-                    };
-                    // A set releases modulation held from removed sources (§12).
-                    if applied == Some(Applied::Yes) && is_set(payload) {
-                        param.held_modulation = None;
-                    }
-                    let reason = match (applied, mode) {
-                        (Some(Applied::Yes), _) => None,
-                        (None, _) => Some(DiscardReason::Muted),
-                        (Some(Applied::NotAParameterEvent), Mode::Suspended) => {
-                            Some(DiscardReason::Suspended)
-                        }
-                        (Some(Applied::NotAParameterEvent), _) => {
-                            Some(DiscardReason::NotAParameterEvent)
-                        }
-                    };
-                    let record = match reason {
-                        None => LogRecord::Event {
-                            frame: frame(f),
-                            target,
-                            payload,
-                            source,
-                        },
-                        Some(reason) => {
-                            discards = discards.saturating_add(1);
-                            LogRecord::Discard {
-                                frame: frame(f),
-                                target,
-                                payload,
-                                source,
-                                reason,
-                            }
-                        }
-                    };
-                    push_record(&mut plan.log, &mut self.log_overflows, record);
-                }
-                let value = if mode == Mode::Running {
-                    let modulation = if param.modulation.is_empty() {
-                        param.held_modulation
-                    } else {
-                        Some(sum_at(&param.modulation, &plan.outputs_block, k, f))
-                    };
-                    effective(param.base.value(), modulation, param.combine, param.range)
-                } else {
-                    previous(&plan.param_values, &plan.param_block, k, j, f)
-                };
-                if let Some(slot) = plan.param_block.get_mut(j * k + f) {
-                    *slot = value;
-                }
-            }
-        }
-
-        if discards > 0
-            && let Some(slot) = plan.slots.get_mut(i)
+        if self.pool.is_none()
+            || plan.tasks.len() < 2
+            || frames < schedule.min_frames
+            || plan.tasks.estimate_ns * (frames as f64) < (schedule.parallel_min_ns as f64)
         {
-            slot.discards = slot.discards.saturating_add(discards);
-            if mode == Mode::Suspended {
-                slot.suspension_discards = slot.suspension_discards.saturating_add(discards);
-            }
+            return false;
         }
-        mode
-    }
-
-    /// Saves what a block call's gather of instance `i` changes, for
-    /// [`restore`](Engine::restore).
-    fn save(&mut self, i: usize) {
-        let plan = &mut self.plan;
-        let Some(slot) = plan.slots.get(i) else {
-            return;
-        };
-        plan.saved_params.clear();
-        for param in plan.params.get(slot.params.clone()).unwrap_or(&[]) {
-            if plan.saved_params.len() < plan.saved_params.capacity() {
-                plan.saved_params.push((param.base, param.held_modulation));
-            }
-        }
-        self.saved = Saved {
-            log_len: plan.log.len(),
-            log_overflows: self.log_overflows,
-            input_overflows: self.input_overflows,
-            discards: slot.discards,
-            suspension_discards: slot.suspension_discards,
-        };
-    }
-
-    /// Undoes the gather of instance `i` since [`save`](Engine::save).
-    fn restore(&mut self, i: usize) {
-        let plan = &mut self.plan;
-        let Some(slot) = plan.slots.get_mut(i) else {
-            return;
-        };
-        let params = plan.params.get_mut(slot.params.clone()).unwrap_or(&mut []);
-        for (param, &(base, held)) in params.iter_mut().zip(&plan.saved_params) {
-            param.base = base;
-            param.held_modulation = held;
-        }
-        slot.discards = self.saved.discards;
-        slot.suspension_discards = self.saved.suspension_discards;
-        plan.log.truncate(self.saved.log_len);
-        self.log_overflows = self.saved.log_overflows;
-        self.input_overflows = self.saved.input_overflows;
-    }
-
-    /// After a call of a running instance over frames `a..b` of the block:
-    /// the fault guard, frame by frame, then that frame's outputs become
-    /// visible, with the resume (or swap) fade-in on `audio` outputs; then its
-    /// events are kept for their receivers. A fault found at frame n acts
-    /// exactly from n: the outputs fade from what readers saw at n − 1, none
-    /// of the call's events from n are delivered, and the instance is never
-    /// called again. With `rollback`, what the gather did for the frames
-    /// after n is undone and done again as for a muted instance.
-    fn commit(&mut self, i: usize, a: usize, b: usize, rollback: bool) {
-        let len = b - a;
-        let fade_len = self.fade_len;
-        let plan = &mut self.plan;
-        let k = plan.capacity;
-        let Some(slot) = plan.slots.get_mut(i) else {
-            return;
-        };
-        let (out, events) = (slot.signal_out.clone(), slot.event_out.clone());
-        let mut fault = None;
-        for c in 0..len {
-            let found = check(
-                plan.call_outputs.get(..out.len() * len).unwrap_or(&[]),
-                len,
-                c,
-                plan.output_ports.get(out.clone()).unwrap_or(&[]),
-                plan.sinks.get(events.clone()).unwrap_or(&[]),
-                plan.sink_ports.get(events.clone()).unwrap_or(&[]),
-            );
-            if let Some(found) = found {
-                fault = Some((a + c, found));
-                break;
-            }
-            let f = a + c;
-            let fade = slot.fade;
-            for (p, o) in out.clone().enumerate() {
-                let audio = plan.output_audio.get(o).copied().unwrap_or(false);
-                let live = plan.call_outputs.get(p * len + c).copied().unwrap_or(0.0);
-                if let Some(visible) = plan.outputs_block.get_mut(o * k + f) {
-                    *visible = match fade {
-                        Fade::In(j) if audio => fade_in(live, j, fade_len),
-                        _ => live,
-                    };
-                }
-            }
-            if let Fade::In(j) = fade {
-                let next = j.saturating_add(1);
-                slot.fade = if next >= fade_len {
-                    Fade::None
-                } else {
-                    Fade::In(next)
-                };
-            }
-        }
-
-        if let Some((n, (port, reason))) = fault {
-            // Fade from what readers saw at frame n − 1.
-            for o in out {
-                let visible = previous(&plan.outputs, &plan.outputs_block, k, o, n);
-                if let Some(held) = plan.held.get_mut(o) {
-                    *held = visible;
-                }
-            }
-            if rollback && n + 1 < b {
-                self.restore(i);
-                self.gather(i, a, n + 1);
-                self.mute(i);
-                self.gather(i, n + 1, b);
-            } else {
-                self.mute(i);
-            }
-            let record = LogRecord::Fault {
-                frame: Frame(self.block_start.0.saturating_add(n as u64)),
-                instance: InstanceId(i),
-                port,
-                reason,
-            };
-            push_record(&mut self.plan.log, &mut self.log_overflows, record);
-            for f in n..b {
-                self.fade_muted(i, f);
-            }
-        }
-
-        // The call's events for their receivers, up to the fault.
-        let until = fault.map_or(len, |(n, _)| n - a);
-        let plan = &mut self.plan;
-        for s in events {
-            let (Some(sink), Some(store)) = (plan.sinks.get(s), plan.emitted.get_mut(s)) else {
+        let spare = task_spare(plan.capacity);
+        let tasks = &mut plan.tasks;
+        tasks.staged.fill(0);
+        for staged in &self.staged {
+            let Some(&Some((i, _))) = plan.roles.get(staged.target) else {
                 continue;
             };
-            for event in sink.events() {
-                let c = (event.offset as usize).min(len - 1);
-                if c >= until {
-                    continue;
-                }
-                if store.len() < store.capacity() {
-                    let offset = u32::try_from(a + c).unwrap_or(u32::MAX);
-                    store.push(Event {
-                        offset,
-                        payload: event.payload,
-                    });
-                } else {
-                    // Unreachable: a sink keeps 16 events per frame.
-                    self.input_overflows = self.input_overflows.saturating_add(1);
+            let t = tasks.instance_task.get(i).copied().unwrap_or(0) as usize;
+            if let Some(count) = tasks.staged.get_mut(t) {
+                *count += 1;
+                if *count > spare {
+                    return false;
                 }
             }
         }
+        true
     }
 
-    /// The fault guard mutes instance `i`.
-    fn mute(&mut self, i: usize) {
-        if let Some(slot) = self.plan.slots.get_mut(i) {
-            slot.fault = Some(0);
-        }
-    }
-
-    /// A suspended instance's frame `f`: `audio` outputs take the next
-    /// fade-out frame (exactly 0 from the F-th suspended frame on), the other
-    /// outputs hold what readers saw in the frame before.
-    fn fade_suspended(&mut self, i: usize, f: usize) {
-        let fade_len = self.fade_len;
+    /// Frames `a..b` of the block, unit by unit: on the calling thread, or
+    /// as tasks on the workers too (ADR 0019 §2). Either way each unit writes
+    /// only its own instances' rows and reads its sources' in canonical
+    /// order, and the tasks' logs are joined in task order, which is unit
+    /// order: the result is the same bit for bit.
+    fn run_segment(&mut self, a: usize, b: usize) {
+        let parallel = self.parallel(b - a);
         let plan = &mut self.plan;
-        let k = plan.capacity;
-        let Some(slot) = plan.slots.get_mut(i) else {
-            return;
+        let fx = Fixed {
+            units: &plan.units,
+            signal_sources: &plan.signal_sources,
+            event_inputs: &plan.event_inputs,
+            outputs: &plan.outputs,
+            param_values: &plan.param_values,
+            output_audio: &plan.output_audio,
+            output_ports: &plan.output_ports,
+            sink_ports: &plan.sink_ports,
+            staged: &self.staged,
+            start: self.block_start,
+            fade_len: self.fade_len,
+            a,
+            b,
         };
-        let fade = slot.fade;
-        for o in slot.signal_out.clone() {
-            let audio = plan.output_audio.get(o) == Some(&true);
-            let value = match fade {
-                Fade::Out(j) if audio => {
-                    fade_out(plan.held.get(o).copied().unwrap_or(0.0), j, fade_len)
+        match self.pool.as_mut() {
+            Some(pool) if parallel => {
+                self.parallel_segments += 1;
+                let tasks = &plan.tasks;
+                let body = |access: &mut Access<'_>, t: usize| {
+                    for u in tasks.units(t) {
+                        run_unit(&fx, access, u);
+                    }
+                };
+                let (mut dispatch, stats) = pool.split();
+                let job = Job::new(
+                    &mut plan.cells,
+                    self.parallel_segments,
+                    &body,
+                    self.hook,
+                    stats,
+                );
+                // The job holds the cells until it is run: no worker is in it
+                // once `run` returns.
+                dispatch.run(&job);
+                let main = &mut plan.out;
+                for out in plan.cells.outs.get_mut() {
+                    for record in out.log.drain(..) {
+                        push_record(&mut main.log, &mut main.log_overflows, record);
+                    }
+                    main.log_overflows = main.log_overflows.saturating_add(out.log_overflows);
+                    main.input_overflows = main.input_overflows.saturating_add(out.input_overflows);
                 }
-                _ => previous(&plan.outputs, &plan.outputs_block, k, o, f),
-            };
-            if let Some(visible) = plan.outputs_block.get_mut(o * k + f) {
-                *visible = value;
+            }
+            _ => {
+                let c = &mut plan.cells;
+                if let Some(lane) = c.lanes.get_mut().first_mut() {
+                    let mut whole = Whole {
+                        k: plan.capacity,
+                        slots: c.slots.get_mut(),
+                        primitives: c.primitives.get_mut(),
+                        params: c.params.get_mut(),
+                        outputs: c.outputs.get_mut(),
+                        held: c.held.get_mut(),
+                        signal_in: c.signal_in.get_mut(),
+                        param_rows: c.param_rows.get_mut(),
+                        sinks: c.sinks.get_mut(),
+                        emitted: c.emitted.get_mut(),
+                        lane,
+                        out: &mut plan.out,
+                    };
+                    for u in 0..fx.units.order.len() {
+                        whole_unit(&fx, &mut whole, u);
+                    }
+                }
             }
         }
-        if let Fade::Out(j) = fade {
-            slot.fade = Fade::Out(j.saturating_add(1));
-        }
-    }
-
-    /// A muted instance's frame `f`: every signal output takes the next frame
-    /// of the 64-frame fault fade (exactly 0 from its 64th frame on).
-    fn fade_muted(&mut self, i: usize, f: usize) {
-        let plan = &mut self.plan;
-        let k = plan.capacity;
-        let Some(slot) = plan.slots.get_mut(i) else {
-            return;
-        };
-        for o in slot.signal_out.clone() {
-            let value = match slot.fault {
-                Some(j) => fade_out(
-                    plan.held.get(o).copied().unwrap_or(0.0),
-                    j,
-                    FAULT_FADE_FRAMES,
-                ),
-                None => previous(&plan.outputs, &plan.outputs_block, k, o, f),
-            };
-            if let Some(visible) = plan.outputs_block.get_mut(o * k + f) {
-                *visible = value;
-            }
-        }
-        if let Some(j) = slot.fault {
-            slot.fault = Some(j.saturating_add(1));
-        }
+        let out = &mut self.plan.out;
+        self.log_overflows = self
+            .log_overflows
+            .saturating_add(mem::take(&mut out.log_overflows));
+        self.input_overflows = self
+            .input_overflows
+            .saturating_add(mem::take(&mut out.input_overflows));
     }
 
     /// The last frame's values: block frame `f`'s outputs, signal inputs and
@@ -2187,26 +1947,49 @@ impl Engine {
     fn refresh_last(&mut self, f: usize) {
         let plan = &mut self.plan;
         let k = plan.capacity;
-        for (o, last) in plan.outputs.iter_mut().enumerate() {
-            if let Some(&value) = plan.outputs_block.get(o * k + f) {
-                *last = value;
-            }
-        }
-        for (s, last) in plan.signal_in.iter_mut().enumerate() {
-            if let Some(&value) = plan.signal_in_block.get(s * k + f) {
-                *last = value;
-            }
-        }
-        for (j, last) in plan.param_values.iter_mut().enumerate() {
-            if let Some(&value) = plan.param_block.get(j * k + f) {
-                *last = value;
+        let rows = [
+            (&mut plan.outputs, plan.cells.outputs.get()),
+            (&mut plan.signal_in, plan.cells.signal_in.get()),
+            (&mut plan.param_values, plan.cells.param_rows.get()),
+        ];
+        for (last, block) in rows {
+            for (o, last) in last.iter_mut().enumerate() {
+                if let Some(&value) = block.get(o * k + f) {
+                    *last = value;
+                }
             }
         }
     }
 
-    /// The configuration the engine was built with.
+    /// The configuration the engine was built with, `threads` resolved.
     pub fn config(&self) -> EngineConfig {
         self.config
+    }
+
+    /// Calls `hook` when a thread enters and leaves a parallel segment and
+    /// before each task it runs (tests: delays, allocation guards).
+    #[doc(hidden)]
+    pub fn set_task_hook(&mut self, hook: Option<fn(HookPoint)>) {
+        self.hook = hook;
+    }
+
+    /// How the engine schedules its blocks.
+    #[doc(hidden)]
+    pub fn schedule_stats(&self) -> ScheduleStats {
+        let pool = self.pool.as_ref();
+        let stats = pool.map(|p| p.stats());
+        let count =
+            |c: Option<&std::sync::atomic::AtomicU64>| c.map_or(0, |c| c.load(Ordering::Relaxed));
+        ScheduleStats {
+            threads: self.config.threads,
+            workers: pool.map_or(0, Pool::workers),
+            units: self.plan.units.order.len(),
+            tasks: self.plan.tasks.len(),
+            estimate_ns: self.plan.tasks.estimate_ns.round() as u64,
+            parallel_segments: self.parallel_segments,
+            worker_tasks: count(stats.map(|s| &s.worker_tasks)),
+            worker_panics: count(stats.map(|s| &s.worker_panics)),
+        }
     }
 
     /// The next frame [`run_frame`](Engine::run_frame) will run.
@@ -2223,7 +2006,7 @@ impl Engine {
     /// What the last block did, in execution order (frame by frame after
     /// [`run_frame`](Engine::run_frame)).
     pub fn frame_log(&self) -> &[LogRecord] {
-        &self.plan.log
+        &self.plan.out.log
     }
 
     /// Hands the last block's records to `out` frame by frame, each frame's
@@ -2233,7 +2016,7 @@ impl Engine {
     /// [`commit_swap`](Engine::commit_swap), which refuses an undrained log.
     pub fn drain_log(&mut self, out: &mut impl FnMut(&LogRecord)) {
         let plan = &mut self.plan;
-        let log = &plan.log;
+        let log = &plan.out.log;
         plan.log_order.clear();
         plan.log_order.extend(0..log.len());
         plan.log_order
@@ -2243,7 +2026,7 @@ impl Engine {
                 out(record);
             }
         }
-        plan.log.clear();
+        plan.out.log.clear();
     }
 
     /// Log records dropped because the block's log was full. The buffer is
@@ -2281,7 +2064,11 @@ impl Engine {
     }
 
     fn slot(&self, instance: &InstanceAddress) -> Option<&Slot> {
-        self.plan.slots.get(*self.plan.instance_ids.get(instance)?)
+        self.plan
+            .cells
+            .slots
+            .get()
+            .get(*self.plan.instance_ids.get(instance)?)
     }
 
     /// The value readers saw of signal output `port` in the last frame.
@@ -2303,24 +2090,21 @@ impl Engine {
     /// The base and effective value of parameter `port`.
     pub fn parameter(&self, port: &PortAddress) -> Option<ParameterValue> {
         match self.role(port)? {
-            Role::Param(j) => Some(ParameterValue {
-                base: self.plan.params.get(j)?.base.value(),
-                effective: self.plan.param_values.get(j).copied()?,
-            }),
+            Role::Param(j) => self.parameter_at(j),
             _ => None,
         }
     }
 
     /// The number of parameters of the running plan.
     pub(crate) fn parameter_count(&self) -> usize {
-        self.plan.params.len()
+        self.plan.cells.params.len()
     }
 
     /// The base and effective value of the running plan's parameter `j`, as
     /// [`parameter`](Engine::parameter) gives them. Allocates nothing.
     pub(crate) fn parameter_at(&self, j: usize) -> Option<ParameterValue> {
         Some(ParameterValue {
-            base: self.plan.params.get(j)?.base.value(),
+            base: self.plan.cells.params.get().get(j)?.base.value(),
             effective: self.plan.param_values.get(j).copied()?,
         })
     }
@@ -2343,8 +2127,9 @@ impl Engine {
 
     /// The instances whose descriptor declares an audio sink.
     pub(crate) fn audio_sinks(&self) -> Vec<InstanceId> {
-        (0..self.plan.slots.len())
-            .filter(|&i| self.plan.slots.get(i).is_some_and(|s| s.audio_sink))
+        let slots = self.plan.cells.slots.get();
+        (0..slots.len())
+            .filter(|&i| slots.get(i).is_some_and(|s| s.audio_sink))
             .map(InstanceId)
             .collect()
     }
@@ -2353,7 +2138,9 @@ impl Engine {
     /// nothing, unlike [`audio_sinks`](Engine::audio_sinks).
     pub(crate) fn first_audio_sink(&self) -> Option<InstanceId> {
         self.plan
+            .cells
             .slots
+            .get()
             .iter()
             .position(|s| s.audio_sink)
             .map(InstanceId)
@@ -2377,13 +2164,15 @@ impl Engine {
         channel: usize,
         f: usize,
     ) -> Option<f64> {
-        let slot = self.plan.slots.get(instance.0)?;
+        let slot = self.plan.cells.slots.get().get(instance.0)?;
         if channel >= slot.signal_in.len() {
             return None;
         }
         let s = slot.signal_in.start + channel;
         self.plan
-            .signal_in_block
+            .cells
+            .signal_in
+            .get()
             .get(s * self.plan.capacity + f)
             .copied()
     }
@@ -2400,7 +2189,9 @@ impl Engine {
     /// [`parameter`](Engine::parameter) gave it after that frame.
     pub(crate) fn parameter_at_frame(&self, j: usize, f: usize) -> Option<f64> {
         self.plan
-            .param_block
+            .cells
+            .param_rows
+            .get()
             .get(j * self.plan.capacity + f)
             .copied()
     }
@@ -2408,11 +2199,1233 @@ impl Engine {
     /// The signal inputs of `instance` in the last frame, in port order.
     pub(crate) fn instance_inputs(&self, instance: InstanceId) -> &[f64] {
         self.plan
+            .cells
             .slots
+            .get()
             .get(instance.0)
             .and_then(|s| self.plan.signal_in.get(s.signal_in.clone()))
             .unwrap_or(&[])
     }
+}
+
+/// What a segment's units read and never write: the plan's structure, the
+/// last frame's values, the staged external events and the segment's frames.
+#[derive(Clone, Copy)]
+struct Fixed<'x> {
+    units: &'x Units,
+    signal_sources: &'x [Vec<(usize, f64)>],
+    event_inputs: &'x [EventInput],
+    outputs: &'x [f64],
+    param_values: &'x [f64],
+    output_audio: &'x [bool],
+    output_ports: &'x [PortId],
+    sink_ports: &'x [PortId],
+    staged: &'x [Staged],
+    start: Frame,
+    fade_len: u64,
+    a: usize,
+    b: usize,
+}
+
+impl Fixed<'_> {
+    fn frame(&self, f: usize) -> Frame {
+        Frame(self.start.0.saturating_add(f as u64))
+    }
+}
+
+/// Unit `u` of the plan over the segment's frames: an acyclic direct
+/// instance in one call, a state-output instance and a cycle frame by frame.
+fn run_unit(fx: &Fixed<'_>, access: &mut Access<'_>, u: usize) {
+    let (a, b) = (fx.a, fx.b);
+    let Some(unit) = fx.units.order.get(u) else {
+        return;
+    };
+    match unit {
+        &Unit::Direct(i) => run_direct(fx, access, i, a, b),
+        &Unit::State(i) => {
+            for f in a..b {
+                if let Some(mut v) = access.call(i, f, f + 1) {
+                    emit(fx, &mut v, i, f);
+                    absorb(fx, &mut v, f);
+                }
+            }
+        }
+        Unit::Cycle {
+            state_outputs,
+            direct,
+        } => {
+            let member = |m: usize| fx.units.members.get(m).copied();
+            for f in a..b {
+                for i in state_outputs.clone().filter_map(member) {
+                    if let Some(mut v) = access.call(i, f, f + 1) {
+                        emit(fx, &mut v, i, f);
+                    }
+                }
+                for i in direct.clone().filter_map(member) {
+                    run_direct(fx, access, i, f, f + 1);
+                }
+                for i in state_outputs.clone().filter_map(member) {
+                    if let Some(mut v) = access.call(i, f, f + 1) {
+                        absorb(fx, &mut v, f);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Phase 3 for one direct instance over frames `a..b` of the block: its
+/// inputs frame by frame, one `process` call, then its outputs; one view.
+fn run_direct(fx: &Fixed<'_>, access: &mut Access<'_>, i: usize, a: usize, b: usize) {
+    let Some(mut v) = access.call(i, a, b) else {
+        return;
+    };
+    let len = b - a;
+    let rollback = len > 1 && v.slot.mode() == Mode::Running;
+    if rollback {
+        save(&mut gathering(&mut v));
+    }
+    match gather(fx, &mut gathering(&mut v), a, b) {
+        Mode::Running => {
+            let ports = (v.slot.signal_in.len(), v.slot.params.len());
+            load_call(v.lane, (&v.signal_in, &v.param_rows), ports, a, len);
+            for sink in v.sinks.iter_mut() {
+                sink.start_call(len);
+            }
+            if let Some(Primitive::Direct(module)) = v.primitive.as_mut() {
+                process(
+                    module.as_mut(),
+                    (&*v.slot, &mut *v.lane, &mut *v.sinks),
+                    len,
+                );
+            }
+            let fault = commit(fx, &mut running(&mut v), a, b);
+            keep_events(&mut running(&mut v), a, b, fault.map(|(n, _, _)| n));
+            if let Some(fault) = fault {
+                mute(fx, &mut gathering(&mut v), i, (a, b), rollback, fault);
+                let mut r = running(&mut v);
+                for f in fault.0..b {
+                    fade_muted(fx, &mut r, f);
+                }
+            }
+        }
+        Mode::Suspended => {
+            let mut r = running(&mut v);
+            for f in a..b {
+                fade_suspended(fx, &mut r, f);
+            }
+        }
+        Mode::Muted => {
+            let mut r = running(&mut v);
+            for f in a..b {
+                fade_muted(fx, &mut r, f);
+            }
+        }
+    }
+}
+
+/// Phase 2 for one state-output instance at frame `f` of the block.
+fn emit(fx: &Fixed<'_>, v: &mut CallView<'_>, i: usize, f: usize) {
+    match v.slot.mode() {
+        Mode::Running => {
+            for sink in v.sinks.iter_mut() {
+                sink.start_call(1);
+            }
+            if let Some(Primitive::StateOutput(module)) = v.primitive.as_mut() {
+                emit_call(module.as_mut(), (&*v.slot, &mut *v.lane, &mut *v.sinks));
+            }
+            let fault = commit(fx, &mut running(v), f, f + 1);
+            keep_events(&mut running(v), f, f + 1, fault.map(|(n, _, _)| n));
+            if let Some(fault) = fault {
+                mute(fx, &mut gathering(v), i, (f, f + 1), false, fault);
+                fade_muted(fx, &mut running(v), f);
+            }
+        }
+        Mode::Suspended => fade_suspended(fx, &mut running(v), f),
+        Mode::Muted => fade_muted(fx, &mut running(v), f),
+    }
+}
+
+/// Phase 4 for one state-output instance at frame `f` of the block.
+fn absorb(fx: &Fixed<'_>, v: &mut CallView<'_>, f: usize) {
+    if gather(fx, &mut gathering(v), f, f + 1) != Mode::Running {
+        return;
+    }
+    let ports = (v.slot.signal_in.len(), v.slot.params.len());
+    load_call(v.lane, (&v.signal_in, &v.param_rows), ports, f, 1);
+    if let Some(Primitive::StateOutput(module)) = v.primitive.as_mut() {
+        absorb_call(module.as_mut(), (&*v.slot, &*v.lane));
+    }
+}
+
+/// A view's parts for [`gather`].
+#[inline(always)]
+fn gathering<'x, 't>(
+    v: &'x mut CallView<'t>,
+) -> Gather<'x, &'x mut Window<'t>, ViewSources<'x, 't>, ViewEvents<'x, 't>> {
+    let (own, own_sinks) = (v.slot.signal_out.clone(), v.slot.event_out.clone());
+    Gather {
+        slot: &mut *v.slot,
+        params: &mut *v.params,
+        signal_in: &mut v.signal_in,
+        param_rows: &mut v.param_rows,
+        lane: &mut *v.lane,
+        out: &mut *v.out,
+        sources: ViewSources {
+            reader: &v.sources,
+            window: &v.outputs,
+            own,
+        },
+        events: ViewEvents {
+            reader: &v.events,
+            sinks: &*v.emitted,
+            own: own_sinks,
+        },
+    }
+}
+
+/// A view's parts for the rest of a call.
+#[inline(always)]
+fn running<'x, 't>(v: &'x mut CallView<'t>) -> Run<'x, &'x mut Window<'t>> {
+    Run {
+        slot: &mut *v.slot,
+        lane: &mut *v.lane,
+        sinks: &mut *v.sinks,
+        emitted: &mut *v.emitted,
+        outputs: &mut v.outputs,
+        held: &mut *v.held,
+        out: &mut *v.out,
+    }
+}
+
+/// One `process` call of a direct instance over `len` frames, from its
+/// lane's call buffers: its gathered inputs (`load_call`) and events, into
+/// its sinks (their call started).
+#[inline(always)]
+fn process(
+    module: &mut dyn DirectPrimitive,
+    (slot, lane, sinks): (&Slot, &mut Lane, &mut [EventSink]),
+    len: usize,
+) {
+    let (signal_in, out, params) = (
+        slot.signal_in.len(),
+        slot.signal_out.len(),
+        slot.params.len(),
+    );
+    let inputs = Inputs::new(
+        len,
+        lane.call_signals.get(..signal_in * len).unwrap_or(&[]),
+        lane.call_params.get(..params * len).unwrap_or(&[]),
+        &slot.events,
+        &slot.ends,
+    );
+    let mut outputs = Outputs::new(
+        len,
+        lane.call_outputs.get_mut(..out * len).unwrap_or(&mut []),
+        sinks,
+    );
+    module.process(&inputs, &mut outputs);
+}
+
+/// One `emit` call of a state-output instance (one frame), into its sinks
+/// (their call started).
+#[inline(always)]
+fn emit_call(
+    module: &mut dyn StateOutputPrimitive,
+    (slot, lane, sinks): (&Slot, &mut Lane, &mut [EventSink]),
+) {
+    let out = slot.signal_out.len();
+    let mut outputs = Outputs::new(
+        1,
+        lane.call_outputs.get_mut(..out).unwrap_or(&mut []),
+        sinks,
+    );
+    module.emit(&mut outputs);
+}
+
+/// One `absorb` call of a state-output instance (one frame), from its
+/// lane's call buffers and events.
+#[inline(always)]
+fn absorb_call(module: &mut dyn StateOutputPrimitive, (slot, lane): (&Slot, &Lane)) {
+    let (signal_in, params) = (slot.signal_in.len(), slot.params.len());
+    let inputs = Inputs::new(
+        1,
+        lane.call_signals.get(..signal_in).unwrap_or(&[]),
+        lane.call_params.get(..params).unwrap_or(&[]),
+        &slot.events,
+        &slot.ends,
+    );
+    module.absorb(&inputs);
+}
+
+/// Copies the instance's summed signal inputs and effective parameter values
+/// for block frames `a..a + len` into its lane's call buffers, port-major;
+/// `ports` is its (signal inputs, parameters).
+#[inline(always)]
+fn load_call<R: Own>(
+    lane: &mut Lane,
+    (signal_in, param_rows): (&R, &R),
+    ports: (usize, usize),
+    a: usize,
+    len: usize,
+) {
+    let pairs = [
+        (ports.0, signal_in, &mut lane.call_signals),
+        (ports.1, param_rows, &mut lane.call_params),
+    ];
+    for (count, rows, call) in pairs {
+        for p in 0..count {
+            let from = rows.frames(p, (a, a + len));
+            match (call.get_mut(p * len..(p + 1) * len), from) {
+                // One frame (k = 1, state units, cycles): a store, not a call
+                // to `memcpy` per port.
+                (Some([to]), Some([from])) => *to = *from,
+                (Some(to), Some(from)) => to.copy_from_slice(from),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The plan's buffers for a segment on the calling thread alone (ADR 0019
+/// §2, M2.6-2): taken whole once per segment and indexed by instance as
+/// M2.6-1 did, without views, readers or claims. The bodies ([`gather`],
+/// [`commit`], the fades) are the views' own; only how an instance's parts
+/// are reached differs.
+struct Whole<'p> {
+    k: usize,
+    slots: &'p mut [Slot],
+    primitives: &'p mut [Option<Primitive>],
+    params: &'p mut [Param],
+    outputs: &'p mut [f64],
+    held: &'p mut [f64],
+    signal_in: &'p mut [f64],
+    param_rows: &'p mut [f64],
+    sinks: &'p mut [EventSink],
+    emitted: &'p mut [Vec<Event>],
+    lane: &'p mut Lane,
+    out: &'p mut Out,
+}
+
+impl Whole<'_> {
+    /// Instance `i`'s parts for [`gather`].
+    #[inline(always)]
+    fn gathering(
+        &mut self,
+        i: usize,
+    ) -> Option<Gather<'_, PlanRows<'_>, PlanSources<'_>, &[Vec<Event>]>> {
+        let k = self.k;
+        let slot = self.slots.get_mut(i)?;
+        let (signal_in, params) = (slot.signal_in.start, slot.params.clone());
+        Some(Gather {
+            params: self.params.get_mut(params.clone())?,
+            slot,
+            signal_in: PlanRows {
+                rows: &mut *self.signal_in,
+                first: signal_in,
+                k,
+            },
+            param_rows: PlanRows {
+                rows: &mut *self.param_rows,
+                first: params.start,
+                k,
+            },
+            lane: &mut *self.lane,
+            out: &mut *self.out,
+            sources: PlanSources {
+                rows: &*self.outputs,
+                k,
+            },
+            events: &*self.emitted,
+        })
+    }
+
+    /// Instance `i`'s parts for the rest of a call.
+    #[inline(always)]
+    fn running(&mut self, i: usize) -> Option<Run<'_, PlanRows<'_>>> {
+        let slot = self.slots.get_mut(i)?;
+        let (out, events) = (slot.signal_out.clone(), slot.event_out.clone());
+        Some(Run {
+            sinks: self.sinks.get_mut(events.clone())?,
+            emitted: self.emitted.get_mut(events)?,
+            held: self.held.get_mut(out.clone())?,
+            slot,
+            lane: &mut *self.lane,
+            outputs: PlanRows {
+                rows: &mut *self.outputs,
+                first: out.start,
+                k: self.k,
+            },
+            out: &mut *self.out,
+        })
+    }
+
+    /// Copies instance `i`'s inputs for frames `a..a + len` into the lane.
+    #[inline(always)]
+    fn load_call(&mut self, i: usize, a: usize, len: usize) {
+        let Some(slot) = self.slots.get(i) else {
+            return;
+        };
+        let k = self.k;
+        let signal_in = PlanRows {
+            rows: &mut *self.signal_in,
+            first: slot.signal_in.start,
+            k,
+        };
+        let param_rows = PlanRows {
+            rows: &mut *self.param_rows,
+            first: slot.params.start,
+            k,
+        };
+        let ports = (slot.signal_in.len(), slot.params.len());
+        load_call(self.lane, (&signal_in, &param_rows), ports, a, len);
+    }
+
+    /// The fault guard after instance `i`'s call over `a..b` faulted.
+    fn mute(
+        &mut self,
+        fx: &Fixed<'_>,
+        i: usize,
+        (a, b): (usize, usize),
+        rollback: bool,
+        fault: (usize, PortId, FaultReason),
+    ) {
+        if let Some(mut g) = self.gathering(i) {
+            mute(fx, &mut g, i, (a, b), rollback, fault);
+        }
+        if let Some(mut r) = self.running(i) {
+            for f in fault.0..b {
+                fade_muted(fx, &mut r, f);
+            }
+        }
+    }
+}
+
+/// [`run_unit`] for a sequential segment.
+fn whole_unit(fx: &Fixed<'_>, w: &mut Whole<'_>, u: usize) {
+    let (a, b) = (fx.a, fx.b);
+    let Some(unit) = fx.units.order.get(u) else {
+        return;
+    };
+    match unit {
+        &Unit::Direct(i) => whole_direct(fx, w, i, a, b),
+        &Unit::State(i) => {
+            for f in a..b {
+                whole_emit(fx, w, i, f);
+                whole_absorb(fx, w, i, f);
+            }
+        }
+        Unit::Cycle {
+            state_outputs,
+            direct,
+        } => {
+            let member = |m: usize| fx.units.members.get(m).copied();
+            for f in a..b {
+                for i in state_outputs.clone().filter_map(member) {
+                    whole_emit(fx, w, i, f);
+                }
+                for i in direct.clone().filter_map(member) {
+                    whole_direct(fx, w, i, f, f + 1);
+                }
+                for i in state_outputs.clone().filter_map(member) {
+                    whole_absorb(fx, w, i, f);
+                }
+            }
+        }
+    }
+}
+
+/// [`run_direct`] for a sequential segment.
+fn whole_direct(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, a: usize, b: usize) {
+    let len = b - a;
+    let rollback = len > 1 && w.slots.get(i).is_some_and(|s| s.mode() == Mode::Running);
+    let mode = {
+        let Some(mut g) = w.gathering(i) else {
+            return;
+        };
+        if rollback {
+            save(&mut g);
+        }
+        gather(fx, &mut g, a, b)
+    };
+    match mode {
+        Mode::Running => {
+            w.load_call(i, a, len);
+            let Some(slot) = w.slots.get(i) else {
+                return;
+            };
+            let sinks = w.sinks.get_mut(slot.event_out.clone()).unwrap_or(&mut []);
+            for sink in sinks.iter_mut() {
+                sink.start_call(len);
+            }
+            if let Some(Some(Primitive::Direct(module))) = w.primitives.get_mut(i) {
+                process(module.as_mut(), (slot, &mut *w.lane, sinks), len);
+            }
+            let fault = {
+                let Some(mut r) = w.running(i) else {
+                    return;
+                };
+                let fault = commit(fx, &mut r, a, b);
+                keep_events(&mut r, a, b, fault.map(|(n, _, _)| n));
+                fault
+            };
+            if let Some(fault) = fault {
+                w.mute(fx, i, (a, b), rollback, fault);
+            }
+        }
+        Mode::Suspended => {
+            if let Some(mut r) = w.running(i) {
+                for f in a..b {
+                    fade_suspended(fx, &mut r, f);
+                }
+            }
+        }
+        Mode::Muted => {
+            if let Some(mut r) = w.running(i) {
+                for f in a..b {
+                    fade_muted(fx, &mut r, f);
+                }
+            }
+        }
+    }
+}
+
+/// [`emit`] for a sequential segment.
+fn whole_emit(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, f: usize) {
+    let Some(slot) = w.slots.get(i) else {
+        return;
+    };
+    match slot.mode() {
+        Mode::Running => {
+            let sinks = w.sinks.get_mut(slot.event_out.clone()).unwrap_or(&mut []);
+            for sink in sinks.iter_mut() {
+                sink.start_call(1);
+            }
+            if let Some(Some(Primitive::StateOutput(module))) = w.primitives.get_mut(i) {
+                emit_call(module.as_mut(), (slot, &mut *w.lane, sinks));
+            }
+            let fault = {
+                let Some(mut r) = w.running(i) else {
+                    return;
+                };
+                let fault = commit(fx, &mut r, f, f + 1);
+                keep_events(&mut r, f, f + 1, fault.map(|(n, _, _)| n));
+                fault
+            };
+            if let Some(fault) = fault {
+                w.mute(fx, i, (f, f + 1), false, fault);
+            }
+        }
+        Mode::Suspended => {
+            if let Some(mut r) = w.running(i) {
+                fade_suspended(fx, &mut r, f);
+            }
+        }
+        Mode::Muted => {
+            if let Some(mut r) = w.running(i) {
+                fade_muted(fx, &mut r, f);
+            }
+        }
+    }
+}
+
+/// [`absorb`] for a sequential segment.
+fn whole_absorb(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, f: usize) {
+    let mode = {
+        let Some(mut g) = w.gathering(i) else {
+            return;
+        };
+        gather(fx, &mut g, f, f + 1)
+    };
+    if mode != Mode::Running {
+        return;
+    }
+    w.load_call(i, f, 1);
+    if let (Some(slot), Some(Some(Primitive::StateOutput(module)))) =
+        (w.slots.get(i), w.primitives.get_mut(i))
+    {
+        absorb_call(module.as_mut(), (slot, &*w.lane));
+    }
+}
+
+/// An instance's own rows of one per-frame block buffer: its `p`-th port at
+/// block frame `f`. A view's [`Window`] on a task, or the plan's buffer
+/// itself ([`PlanRows`]) in a segment on the calling thread alone.
+trait Own {
+    fn get(&self, p: usize, f: usize) -> Option<f64>;
+    fn set(&mut self, p: usize, f: usize, value: f64);
+    fn frames(&self, p: usize, frames: (usize, usize)) -> Option<&[f64]>;
+    fn frames_mut(&mut self, p: usize, frames: (usize, usize)) -> Option<&mut [f64]>;
+}
+
+impl Own for Window<'_> {
+    #[inline(always)]
+    fn get(&self, p: usize, f: usize) -> Option<f64> {
+        Window::get(self, p, f)
+    }
+    #[inline(always)]
+    fn set(&mut self, p: usize, f: usize, value: f64) {
+        Window::set(self, p, f, value);
+    }
+    #[inline(always)]
+    fn frames(&self, p: usize, frames: (usize, usize)) -> Option<&[f64]> {
+        Window::frames(self, p, frames)
+    }
+    #[inline(always)]
+    fn frames_mut(&mut self, p: usize, frames: (usize, usize)) -> Option<&mut [f64]> {
+        Window::frames_mut(self, p, frames)
+    }
+}
+
+impl<W: Own> Own for &mut W {
+    #[inline(always)]
+    fn get(&self, p: usize, f: usize) -> Option<f64> {
+        (**self).get(p, f)
+    }
+    #[inline(always)]
+    fn set(&mut self, p: usize, f: usize, value: f64) {
+        (**self).set(p, f, value);
+    }
+    #[inline(always)]
+    fn frames(&self, p: usize, frames: (usize, usize)) -> Option<&[f64]> {
+        (**self).frames(p, frames)
+    }
+    #[inline(always)]
+    fn frames_mut(&mut self, p: usize, frames: (usize, usize)) -> Option<&mut [f64]> {
+        (**self).frames_mut(p, frames)
+    }
+}
+
+/// An instance's rows of a buffer of the whole plan (stride `k`), from row
+/// `first`: what a sequential segment indexes, as M2.6-1 did.
+struct PlanRows<'b> {
+    rows: &'b mut [f64],
+    first: usize,
+    k: usize,
+}
+
+impl Own for PlanRows<'_> {
+    #[inline(always)]
+    fn get(&self, p: usize, f: usize) -> Option<f64> {
+        self.rows.get((self.first + p) * self.k + f).copied()
+    }
+    #[inline(always)]
+    fn set(&mut self, p: usize, f: usize, value: f64) {
+        if let Some(x) = self.rows.get_mut((self.first + p) * self.k + f) {
+            *x = value;
+        }
+    }
+    #[inline(always)]
+    fn frames(&self, p: usize, (a, b): (usize, usize)) -> Option<&[f64]> {
+        let row = (self.first + p) * self.k;
+        self.rows.get(row + a..row + b)
+    }
+    #[inline(always)]
+    fn frames_mut(&mut self, p: usize, (a, b): (usize, usize)) -> Option<&mut [f64]> {
+        let row = (self.first + p) * self.k;
+        self.rows.get_mut(row + a..row + b)
+    }
+}
+
+/// Where a call reads the outputs of its signal sources: output `o` at block
+/// frames `a..b`, handed to `read` (`None` if it cannot be read).
+trait Sources {
+    fn read<T>(
+        &self,
+        o: usize,
+        frames: (usize, usize),
+        read: impl FnOnce(Option<&[f64]>) -> T,
+    ) -> T;
+}
+
+/// A view's sources: other instances' outputs through its reader, its own
+/// (a state-output instance reading itself) in its window; `own` are its
+/// output indices.
+struct ViewSources<'v, 't> {
+    reader: &'v Reader<'t, f64>,
+    window: &'v Window<'t>,
+    own: Span<usize>,
+}
+
+impl Sources for ViewSources<'_, '_> {
+    #[inline(always)]
+    fn read<T>(
+        &self,
+        o: usize,
+        frames: (usize, usize),
+        read: impl FnOnce(Option<&[f64]>) -> T,
+    ) -> T {
+        if self.own.contains(&o) {
+            read(self.window.frames(o - self.own.start, frames))
+        } else {
+            let row = self.reader.frames(o, frames);
+            read(row.as_deref())
+        }
+    }
+}
+
+/// A sequential segment's sources: every output row of the plan, stride `k`.
+struct PlanSources<'v> {
+    rows: &'v [f64],
+    k: usize,
+}
+
+impl Sources for PlanSources<'_> {
+    #[inline(always)]
+    fn read<T>(
+        &self,
+        o: usize,
+        (a, b): (usize, usize),
+        read: impl FnOnce(Option<&[f64]>) -> T,
+    ) -> T {
+        read(self.rows.get(o * self.k + a..o * self.k + b))
+    }
+}
+
+/// Where a call reads the events its sources emitted: sink `sink`'s, handed
+/// to `read`; `None` if they cannot be read.
+trait Emitted {
+    fn read<T>(&self, sink: usize, read: impl FnOnce(&[Event]) -> T) -> Option<T>;
+}
+
+/// A view's: other instances' sinks through its reader, its own in the view;
+/// `own` are its sink indices.
+struct ViewEvents<'v, 't> {
+    reader: &'v Reader<'t, Vec<Event>>,
+    sinks: &'v [Vec<Event>],
+    own: Span<usize>,
+}
+
+impl Emitted for ViewEvents<'_, '_> {
+    #[inline(always)]
+    fn read<T>(&self, sink: usize, read: impl FnOnce(&[Event]) -> T) -> Option<T> {
+        if self.own.contains(&sink) {
+            self.sinks.get(sink - self.own.start).map(|e| read(e))
+        } else {
+            let row = self.reader.row(sink)?;
+            row.first().map(|e| read(e))
+        }
+    }
+}
+
+/// A sequential segment's: every sink of the plan.
+impl Emitted for &[Vec<Event>] {
+    #[inline(always)]
+    fn read<T>(&self, sink: usize, read: impl FnOnce(&[Event]) -> T) -> Option<T> {
+        self.get(sink).map(|e| read(e))
+    }
+}
+
+/// The canonical-order sum of `scale ·` each source in `sources` (output
+/// index, scale) over block frames `a..b`, from +0 (§3), into `to`. One frame
+/// is folded in a register; more are summed one source at a time, which does
+/// each frame's additions in the same order, so the results are the same.
+/// Both kinds of segment sum here, so they sum alike.
+#[inline(always)]
+fn sum_sources(
+    to: &mut [f64],
+    sources: &[(usize, f64)],
+    from: &impl Sources,
+    (a, b): (usize, usize),
+) {
+    if let [total] = to {
+        let mut sum = 0.0;
+        for &(o, scale) in sources {
+            let x = from.read(o, (a, a + 1), |row| row.and_then(|r| r.first().copied()));
+            sum += scale * x.unwrap_or(0.0);
+        }
+        *total = sum;
+        return;
+    }
+    to.fill(0.0);
+    for &(o, scale) in sources {
+        from.read(o, (a, b), |row| add_source(to, row, scale));
+    }
+}
+
+/// Adds `scale ·` source row `from` to `to`, frame by frame: the canonical
+/// sum, one source at a time (each frame's additions keep their order).
+fn add_source(to: &mut [f64], from: Option<&[f64]>, scale: f64) {
+    match from {
+        Some(from) => {
+            for (total, &x) in to.iter_mut().zip(from) {
+                *total += scale * x;
+            }
+        }
+        None => {
+            for total in to.iter_mut() {
+                *total += scale * 0.0;
+            }
+        }
+    }
+}
+
+/// Computes an instance's inputs for frames `a..b` of the block, frame by
+/// frame, once they are final: signal input sums, events on event inputs
+/// (at in-call offsets), and parameter bases and effective values (ADR
+/// 0016 §3, §4, §4a; §1a when suspended). Returns how the instance takes
+/// part in these frames.
+fn gather<R: Own, S: Sources, E: Emitted>(
+    fx: &Fixed<'_>,
+    g: &mut Gather<'_, R, S, E>,
+    a: usize,
+    b: usize,
+) -> Mode {
+    let mode = g.slot.mode();
+    let (signal_in, event_in, params) = (
+        g.slot.signal_in.clone(),
+        g.slot.event_in.clone(),
+        g.slot.params.clone(),
+    );
+
+    // Signal inputs: the canonical-order sum of scale · source, from +0
+    // (computed even when the instance is not called: the audio sink's
+    // inputs are what the drivers record). Adding one source at a time over
+    // the frames does each frame's additions in the same order.
+    for (p, s) in signal_in.enumerate() {
+        let from = fx.signal_sources.get(s).map_or(&[][..], Vec::as_slice);
+        let Some(row) = g.signal_in.frames_mut(p, (a, b)) else {
+            continue;
+        };
+        sum_sources(row, from, &g.sources, (a, b));
+    }
+
+    let mut discards = 0u64;
+
+    // Event inputs: external events by sequence, then module events by
+    // source port address, each source in emission order (ADR 0016 §3).
+    let slot = &mut *g.slot;
+    slot.events.clear();
+    let inputs = fx.event_inputs.get(event_in).unwrap_or(&[]);
+    for (input, end) in inputs.iter().zip(slot.ends.iter_mut()) {
+        let target = input.port;
+        for f in a..b {
+            for staged in staged_at(fx.staged, target, f) {
+                let source = LogSource::External {
+                    sequence: staged.sequence,
+                };
+                let to = (target, a, f, staged.payload, source);
+                deliver(fx, &mut slot.events, g.out, &mut discards, mode, to);
+            }
+            for source in &input.sources {
+                let from = LogSource::Port(source.port);
+                g.events.read(source.sink, |events| {
+                    for event in events.iter().filter(|e| e.offset as usize == f) {
+                        for _ in 0..source.copies {
+                            let to = (target, a, f, event.payload, from);
+                            deliver(fx, &mut slot.events, g.out, &mut discards, mode, to);
+                        }
+                    }
+                });
+            }
+        }
+        *end = slot.events.len();
+    }
+
+    // Parameters, frame by frame: advance, then events in canonical order,
+    // then the effective value (§4a, §4). While suspended, events act on
+    // the base only, and the effective value stays.
+    for (q, j) in params.enumerate() {
+        let Some(param) = g.params.get_mut(q) else {
+            continue;
+        };
+        let target = param.port;
+        if mode == Mode::Running
+            && !param.modulation.is_empty()
+            && let Some(modulation) = g.lane.modulation.get_mut(a..b)
+        {
+            sum_sources(modulation, &param.modulation, &g.sources, (a, b));
+        }
+        for f in a..b {
+            if mode == Mode::Running {
+                param.base.advance();
+            }
+            for staged in staged_at(fx.staged, target, f) {
+                let source = LogSource::External {
+                    sequence: staged.sequence,
+                };
+                let to = (target, f, staged.payload, source);
+                apply(
+                    fx,
+                    (&mut param.base, &mut param.held_modulation),
+                    g.out,
+                    &mut discards,
+                    mode,
+                    to,
+                );
+            }
+            for source in &param.events {
+                let from = LogSource::Port(source.port);
+                g.events.read(source.sink, |events| {
+                    for event in events.iter().filter(|e| e.offset as usize == f) {
+                        for _ in 0..source.copies {
+                            let to = (target, f, event.payload, from);
+                            apply(
+                                fx,
+                                (&mut param.base, &mut param.held_modulation),
+                                g.out,
+                                &mut discards,
+                                mode,
+                                to,
+                            );
+                        }
+                    }
+                });
+            }
+            let value = if mode == Mode::Running {
+                let modulation = if param.modulation.is_empty() {
+                    param.held_modulation
+                } else {
+                    g.lane.modulation.get(f).copied()
+                };
+                effective(param.base.value(), modulation, param.combine, param.range)
+            } else {
+                previous(fx.param_values, &g.param_rows, (j, q), f)
+            };
+            g.param_rows.set(q, f, value);
+        }
+    }
+
+    if discards > 0 {
+        g.slot.discards = g.slot.discards.saturating_add(discards);
+        if mode == Mode::Suspended {
+            g.slot.suspension_discards = g.slot.suspension_discards.saturating_add(discards);
+        }
+    }
+    mode
+}
+
+/// What [`gather`] works on for one instance: its slot, parameters, rows of
+/// the signal input and parameter value buffers, lane and log, and where it
+/// reads its sources' outputs and events.
+struct Gather<'x, R, S, E> {
+    slot: &'x mut Slot,
+    params: &'x mut [Param],
+    signal_in: R,
+    param_rows: R,
+    lane: &'x mut Lane,
+    out: &'x mut Out,
+    sources: S,
+    events: E,
+}
+
+/// What the rest of a call (its fault guard and commit, events, fades and
+/// holds) works on for one instance: its slot, lane, sinks and the events
+/// they keep, its rows of the output buffer, held outputs and the log.
+struct Run<'x, R> {
+    slot: &'x mut Slot,
+    lane: &'x mut Lane,
+    sinks: &'x mut [EventSink],
+    emitted: &'x mut [Vec<Event>],
+    outputs: R,
+    held: &'x mut [f64],
+    out: &'x mut Out,
+}
+
+/// The staged external events for `target` at block frame `f`, by sequence.
+fn staged_at(staged: &[Staged], target: PortId, f: usize) -> &[Staged] {
+    let key = (target.0, f);
+    let start = staged.partition_point(|e| (e.target, e.frame) < key);
+    let end = staged.partition_point(|e| (e.target, e.frame) <= key);
+    staged.get(start..end).unwrap_or(&[])
+}
+
+/// One event arriving at an event input: (target, the call's first frame,
+/// its frame, payload, source).
+type Arrival = (PortId, usize, usize, EventPayload, LogSource);
+
+/// One event arriving at event input `target` at block frame `f`: delivered
+/// and logged, or discarded while the instance is suspended or muted.
+fn deliver(
+    fx: &Fixed<'_>,
+    buffer: &mut Vec<Event>,
+    out: &mut Out,
+    discards: &mut u64,
+    mode: Mode,
+    (target, a, f, payload, source): Arrival,
+) {
+    let frame = fx.frame(f);
+    let record = match mode {
+        Mode::Running => {
+            if buffer.len() >= buffer.capacity() {
+                // Unreachable within the construction-time bound; never
+                // reallocate, never call it delivered.
+                out.input_overflows = out.input_overflows.saturating_add(1);
+                return;
+            }
+            let offset = u32::try_from(f - a).unwrap_or(u32::MAX);
+            buffer.push(Event { offset, payload });
+            LogRecord::Event {
+                frame,
+                target,
+                payload,
+                source,
+            }
+        }
+        Mode::Suspended | Mode::Muted => {
+            *discards = discards.saturating_add(1);
+            let reason = if mode == Mode::Muted {
+                DiscardReason::Muted
+            } else {
+                DiscardReason::Suspended
+            };
+            LogRecord::Discard {
+                frame,
+                target,
+                payload,
+                source,
+                reason,
+            }
+        }
+    };
+    push_record(&mut out.log, &mut out.log_overflows, record);
+}
+
+/// One event arriving at a parameter: (target, its frame, payload, source).
+type ParamArrival = (PortId, usize, EventPayload, LogSource);
+
+/// One event arriving at parameter `target` at block frame `f`: applied to
+/// its base (or held while suspended) and logged, or discarded.
+fn apply(
+    fx: &Fixed<'_>,
+    (base, held_modulation): (&mut Base, &mut Option<f64>),
+    out: &mut Out,
+    discards: &mut u64,
+    mode: Mode,
+    (target, f, payload, source): ParamArrival,
+) {
+    let applied = match mode {
+        Mode::Running => Some(base.apply(payload)),
+        Mode::Suspended => Some(base.apply_suspended(payload)),
+        Mode::Muted => None,
+    };
+    // A set releases modulation held from removed sources (§12).
+    if applied == Some(Applied::Yes) && is_set(payload) {
+        *held_modulation = None;
+    }
+    let reason = match (applied, mode) {
+        (Some(Applied::Yes), _) => None,
+        (None, _) => Some(DiscardReason::Muted),
+        (Some(Applied::NotAParameterEvent), Mode::Suspended) => Some(DiscardReason::Suspended),
+        (Some(Applied::NotAParameterEvent), _) => Some(DiscardReason::NotAParameterEvent),
+    };
+    let frame = fx.frame(f);
+    let record = match reason {
+        None => LogRecord::Event {
+            frame,
+            target,
+            payload,
+            source,
+        },
+        Some(reason) => {
+            *discards = discards.saturating_add(1);
+            LogRecord::Discard {
+                frame,
+                target,
+                payload,
+                source,
+                reason,
+            }
+        }
+    };
+    push_record(&mut out.log, &mut out.log_overflows, record);
+}
+
+/// Saves what a block call's gather changes, for [`restore`].
+fn save<R, S, E>(g: &mut Gather<'_, R, S, E>) {
+    let lane = &mut *g.lane;
+    lane.saved_params.clear();
+    for param in g.params.iter() {
+        if lane.saved_params.len() < lane.saved_params.capacity() {
+            lane.saved_params.push((param.base, param.held_modulation));
+        }
+    }
+    lane.saved = Saved {
+        log_len: g.out.log.len(),
+        log_overflows: g.out.log_overflows,
+        input_overflows: g.out.input_overflows,
+        discards: g.slot.discards,
+        suspension_discards: g.slot.suspension_discards,
+    };
+}
+
+/// Undoes the gather since [`save`].
+fn restore<R, S, E>(g: &mut Gather<'_, R, S, E>) {
+    let lane = &*g.lane;
+    for (param, &(base, held)) in g.params.iter_mut().zip(&lane.saved_params) {
+        param.base = base;
+        param.held_modulation = held;
+    }
+    g.slot.discards = lane.saved.discards;
+    g.slot.suspension_discards = lane.saved.suspension_discards;
+    g.out.log.truncate(lane.saved.log_len);
+    g.out.log_overflows = lane.saved.log_overflows;
+    g.out.input_overflows = lane.saved.input_overflows;
+}
+
+/// After a call of a running instance over frames `a..b` of the block: the
+/// fault guard, frame by frame, then that frame's outputs become visible,
+/// with the resume (or swap) fade-in on `audio` outputs. A fault found at
+/// frame n acts exactly from n: the outputs fade from what readers saw at
+/// n − 1. Returns the fault for [`finish`].
+fn commit<R: Own>(
+    fx: &Fixed<'_>,
+    r: &mut Run<'_, R>,
+    a: usize,
+    b: usize,
+) -> Option<(usize, PortId, FaultReason)> {
+    let len = b - a;
+    let (out, events) = (r.slot.signal_out.clone(), r.slot.event_out.clone());
+    let mut fault = None;
+    for c in 0..len {
+        let found = check(
+            r.lane.call_outputs.get(..out.len() * len).unwrap_or(&[]),
+            len,
+            c,
+            fx.output_ports.get(out.clone()).unwrap_or(&[]),
+            r.sinks,
+            fx.sink_ports.get(events.clone()).unwrap_or(&[]),
+        );
+        if let Some((port, reason)) = found {
+            fault = Some((a + c, port, reason));
+            break;
+        }
+        let f = a + c;
+        let fade = r.slot.fade;
+        for (p, o) in out.clone().enumerate() {
+            let audio = fx.output_audio.get(o).copied().unwrap_or(false);
+            let live = r.lane.call_outputs.get(p * len + c).copied().unwrap_or(0.0);
+            let visible = match fade {
+                Fade::In(j) if audio => fade_in(live, j, fx.fade_len),
+                _ => live,
+            };
+            r.outputs.set(p, f, visible);
+        }
+        if let Fade::In(j) = fade {
+            let next = j.saturating_add(1);
+            r.slot.fade = if next >= fx.fade_len {
+                Fade::None
+            } else {
+                Fade::In(next)
+            };
+        }
+    }
+
+    if let Some((n, _, _)) = fault {
+        // Fade from what readers saw at frame n − 1.
+        for (p, o) in out.enumerate() {
+            let visible = previous(fx.outputs, &r.outputs, (o, p), n);
+            if let Some(held) = r.held.get_mut(p) {
+                *held = visible;
+            }
+        }
+    }
+    fault
+}
+
+/// The fault guard mutes the instance after a call that faulted at frame `n`
+/// (`fault`; with `rollback`, the gather of the frames after it is undone
+/// and done again as for a muted instance, by `regather`), and logs the
+/// fault; the caller then fades its outputs from `n`.
+fn mute<R, S, E>(
+    fx: &Fixed<'_>,
+    g: &mut Gather<'_, R, S, E>,
+    i: usize,
+    (a, b): (usize, usize),
+    rollback: bool,
+    (n, port, reason): (usize, PortId, FaultReason),
+) where
+    R: Own,
+    S: Sources,
+    E: Emitted,
+{
+    if rollback && n + 1 < b {
+        restore(g);
+        gather(fx, g, a, n + 1);
+        g.slot.fault = Some(0);
+        gather(fx, g, n + 1, b);
+    } else {
+        g.slot.fault = Some(0);
+    }
+    let record = LogRecord::Fault {
+        frame: fx.frame(n),
+        instance: InstanceId(i),
+        port,
+        reason,
+    };
+    push_record(&mut g.out.log, &mut g.out.log_overflows, record);
+}
+
+/// The call's events over frames `a..b` for their receivers, up to the
+/// fault's frame `fault` if there is one.
+fn keep_events<R>(r: &mut Run<'_, R>, a: usize, b: usize, fault: Option<usize>) {
+    let len = b - a;
+    let until = fault.map_or(len, |n| n - a);
+    for (sink, store) in r.sinks.iter().zip(r.emitted.iter_mut()) {
+        for event in sink.events() {
+            let c = (event.offset as usize).min(len - 1);
+            if c >= until {
+                continue;
+            }
+            if store.len() < store.capacity() {
+                let offset = u32::try_from(a + c).unwrap_or(u32::MAX);
+                store.push(Event {
+                    offset,
+                    payload: event.payload,
+                });
+            } else {
+                // Unreachable: a sink keeps 16 events per frame.
+                r.out.input_overflows = r.out.input_overflows.saturating_add(1);
+            }
+        }
+    }
+}
+
+/// A suspended instance's frame `f`: `audio` outputs take the next fade-out
+/// frame (exactly 0 from the F-th suspended frame on), the other outputs hold
+/// what readers saw in the frame before.
+fn fade_suspended<R: Own>(fx: &Fixed<'_>, r: &mut Run<'_, R>, f: usize) {
+    let fade = r.slot.fade;
+    for (p, o) in r.slot.signal_out.clone().enumerate() {
+        let audio = fx.output_audio.get(o) == Some(&true);
+        let value = match fade {
+            Fade::Out(j) if audio => {
+                fade_out(r.held.get(p).copied().unwrap_or(0.0), j, fx.fade_len)
+            }
+            _ => previous(fx.outputs, &r.outputs, (o, p), f),
+        };
+        r.outputs.set(p, f, value);
+    }
+    if let Fade::Out(j) = fade {
+        r.slot.fade = Fade::Out(j.saturating_add(1));
+    }
+}
+
+/// A muted instance's frame `f`: every signal output takes the next frame of
+/// the 64-frame fault fade (exactly 0 from its 64th frame on).
+fn fade_muted<R: Own>(fx: &Fixed<'_>, r: &mut Run<'_, R>, f: usize) {
+    for (p, o) in r.slot.signal_out.clone().enumerate() {
+        let value = match r.slot.fault {
+            Some(j) => fade_out(r.held.get(p).copied().unwrap_or(0.0), j, FAULT_FADE_FRAMES),
+            None => previous(fx.outputs, &r.outputs, (o, p), f),
+        };
+        r.outputs.set(p, f, value);
+    }
+    if let Some(j) = r.slot.fault {
+        r.slot.fault = Some(j.saturating_add(1));
+    }
+}
+
+/// Port `global` (the instance's port `local`) in the frame before block
+/// frame `f`: from its rows (a view's window holds the frame before its
+/// call), or from `last` (the previous block's last frame) at the block's
+/// first frame.
+fn previous(last: &[f64], rows: &impl Own, (global, local): (usize, usize), f: usize) -> f64 {
+    let value = match f.checked_sub(1) {
+        Some(before) => rows.get(local, before),
+        None => last.get(global).copied(),
+    };
+    value.unwrap_or(0.0)
 }
 
 /// The address of port `name` of `instance`.
@@ -2487,64 +3500,11 @@ fn push_staged(staged: &mut Vec<Staged>, overflows: &mut u64, item: Option<Stage
     staged.push(item);
 }
 
-/// The events arriving at `target` at block frame `f` in canonical order: the
-/// staged external events for it (sorted by sequence), then each event
-/// source's events of that frame in source order and emission order. A
-/// source connected several times delivers each event once per connection
-/// before its next event. A source's events of frame `f` are found by
-/// scanning its block store: a cost per frame, not a semantics.
-fn arrivals<'a>(
-    staged: &'a [Staged],
-    target: PortId,
-    f: usize,
-    sources: &'a [EventSource],
-    emitted: &'a [Vec<Event>],
-) -> impl Iterator<Item = (EventPayload, LogSource)> + 'a {
-    let key = (target.0, f);
-    let start = staged.partition_point(|e| (e.target, e.frame) < key);
-    let end = staged.partition_point(|e| (e.target, e.frame) <= key);
-    let outside = staged.get(start..end).unwrap_or(&[]).iter().map(|e| {
-        (
-            e.payload,
-            LogSource::External {
-                sequence: e.sequence,
-            },
-        )
-    });
-    let modules = sources.iter().flat_map(move |source| {
-        let events = emitted.get(source.sink).map_or(&[][..], Vec::as_slice);
-        let from = LogSource::Port(source.port);
-        events
-            .iter()
-            .filter(move |e| e.offset as usize == f)
-            .flat_map(move |e| std::iter::repeat_n((e.payload, from), source.copies))
-    });
-    outside.chain(modules)
-}
-
 /// The canonical-order sum of `scale · output`, starting from +0.
 fn sum(sources: &[(usize, f64)], outputs: &[f64]) -> f64 {
     sources.iter().fold(0.0, |total, &(o, scale)| {
         total + scale * outputs.get(o).copied().unwrap_or(0.0)
     })
-}
-
-/// [`sum`] at block frame `f` of per-frame buffers of stride `k`.
-fn sum_at(sources: &[(usize, f64)], outputs: &[f64], k: usize, f: usize) -> f64 {
-    sources.iter().fold(0.0, |total, &(o, scale)| {
-        total + scale * outputs.get(o * k + f).copied().unwrap_or(0.0)
-    })
-}
-
-/// Value `o` of the frame before block frame `f`: from the per-frame buffer
-/// `block` (stride `k`), or from `last` (the previous block's last frame) at
-/// the block's first frame.
-fn previous(last: &[f64], block: &[f64], k: usize, o: usize, f: usize) -> f64 {
-    let value = match f.checked_sub(1) {
-        Some(before) => block.get(o * k + before),
-        None => last.get(o),
-    };
-    value.copied().unwrap_or(0.0)
 }
 
 /// The fault guard for frame `c` of a call of `len` frames: the first output,

@@ -73,6 +73,10 @@ pub struct Setup {
     pub input: Option<DeviceEntry>,
     /// The buffer to request, in frames.
     pub buffer: u32,
+    /// "CPU workers": the threads a block runs on, the audio thread
+    /// included (`EngineConfig::threads`; 1: no worker threads); `None` is
+    /// auto, one per performance core. A machine setting, never a project's.
+    pub cpu_workers: Option<u32>,
     /// The device channel (from 1) of each sink channel; sink channel *i* on
     /// device channel *i* without it.
     pub output_channels: Option<Vec<u16>>,
@@ -88,6 +92,7 @@ impl Default for Setup {
             output: None,
             input: None,
             buffer: DEFAULT_BUFFER,
+            cpu_workers: None,
             output_channels: None,
             last_project: None,
             window: None,
@@ -100,6 +105,8 @@ impl Default for Setup {
 struct File<'a> {
     version: i64,
     buffer: u32,
+    /// `"auto"` or a number of threads.
+    cpu_workers: toml::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_channels: Option<&'a [u16]>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -184,6 +191,14 @@ impl Setup {
                     Ok(_) => bad("must be at least 1 frame".to_owned()),
                     Err(error) => bad(error.to_string()),
                 },
+                "cpu_workers" => match value {
+                    toml::Value::String(text) if text == "auto" => setup.cpu_workers = None,
+                    toml::Value::Integer(n) if n >= 1 => match u32::try_from(n) {
+                        Ok(n) => setup.cpu_workers = Some(n),
+                        Err(error) => bad(error.to_string()),
+                    },
+                    _ => bad("must be \"auto\" or a number of at least 1".to_owned()),
+                },
                 "output_channels" => match value.try_into::<Vec<u16>>() {
                     Ok(channels) if channels.contains(&0) => {
                         bad("device channels count from 1".to_owned())
@@ -224,6 +239,10 @@ impl Setup {
         let file = File {
             version: VERSION,
             buffer: self.buffer,
+            cpu_workers: match self.cpu_workers {
+                Some(n) => toml::Value::Integer(i64::from(n)),
+                None => toml::Value::String("auto".to_owned()),
+            },
             output_channels: self.output_channels.as_deref(),
             last_project: self.last_project.as_ref().map(|p| p.display().to_string()),
             output: self.output.as_ref(),

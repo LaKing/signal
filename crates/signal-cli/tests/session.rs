@@ -411,7 +411,7 @@ fn replay_does_not_depend_on_when_or_how_the_session_was_made() {
 
     let registry = registry();
     let session = Session::load(&dir, &registry).unwrap();
-    let in_process = replay(&session, &registry, Some(FRAMES)).unwrap();
+    let in_process = replay(&session, &registry, Some(FRAMES), 1).unwrap();
     assert_eq!(hashes_of(&in_process.render), hashes_of(&live));
 
     let default = replayed(&dir, &[]);
@@ -479,7 +479,7 @@ fn a_frame_with_more_commands_than_the_default_queue_replays() {
     );
     // In process: no discards and no overflow, or replay fails.
     let session = Session::load(&dir, &registry).unwrap();
-    replay(&session, &registry, Some(2)).unwrap();
+    replay(&session, &registry, Some(2), 1).unwrap();
 }
 
 /// The value of every `set` and `ramp`, as bits, in order.

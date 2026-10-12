@@ -13,7 +13,13 @@
 //!   times into a tree of `std.mix`; the largest *N* whose median stays within
 //!   25 % and 50 % of the 96 kHz budget.
 //! - Block sizes (ADR 0019 §1): the kick and the kick voices within 25 % of
-//!   the budget, run in blocks of *k* = 1, 64 and 256 frames.
+//!   the budget, run in blocks of *k* = 1, 64 and 256 frames, on one thread
+//!   and on the performance cores.
+//! - Scaling (ADR 0019 §2): the most kick voices within 25 % and 50 % of the
+//!   budget at *k* = 128 on 1, 2, 4, 8 and all performance cores.
+//! - The small-plan threshold: kick voices in segments of 16 to 256 frames on
+//!   two threads (every segment on the workers) against one thread, and the
+//!   smallest per-segment estimate at which two threads were faster.
 //!
 //! The numbers are measurements of the machine that ran them, never pass or
 //! fail; the command checks nothing.
@@ -25,7 +31,7 @@ use std::time::Instant;
 use clap::Args;
 use serde_json::{Value, json};
 use signal_core::{Direction, PortKind, PortShape, Registry};
-use signal_engine::{Engine, EngineConfig};
+use signal_engine::{Engine, EngineConfig, Schedule, performance_cores};
 use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, InstanceDef, build_plan};
 use signal_project::{Project, SourceFile};
 
@@ -46,6 +52,12 @@ const MAX_VOICES: usize = 4096;
 /// The block sizes the kick and kick voices are timed at (ADR 0019 §1); each
 /// divides [`REPEAT_FRAMES`].
 const BLOCK_SIZES: [usize; 3] = [1, 64, 256];
+/// The block size of the scaling table (ADR 0019 §2).
+const SCALING_BLOCK: usize = 128;
+/// The kick voices and segment lengths the small-plan threshold is measured
+/// at; each segment length divides [`REPEAT_FRAMES`].
+const THRESHOLD_VOICES: [usize; 5] = [1, 2, 4, 8, 16];
+const THRESHOLD_BLOCKS: [usize; 4] = [16, 64, 128, 256];
 
 /// The kick project, as committed.
 const KICK: [(&str, &str); 3] = [
@@ -154,74 +166,99 @@ pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(
         seconds,
     )?;
 
-    let mut voices = BTreeMap::new();
-    let mut voice_timing = |n: usize| -> Result<Timing, Failure> {
-        if let Some(timing) = voices.get(&n) {
-            return Ok(*timing);
-        }
-        let root = voices_graph(&kick.root, n)?;
-        let timing = measure(
-            &plan_of(&root, &kick.composites, registry)?,
-            registry,
-            seconds,
-        )?;
+    let within = [0.25, 0.5].map(|fraction| fraction * budget);
+    let voices_plan = |n: usize| plan_of(&voices_graph(&kick.root, n)?, &kick.composites, registry);
+    let (most, voices) = most_voices(within, |n| {
+        let timing = measure(&voices_plan(n)?, registry, seconds)?;
         if !json {
             eprintln!("signal: bench: {n} voices {:.0} ns", timing.median);
         }
-        voices.insert(n, timing);
         Ok(timing)
-    };
-    let within = [0.25, 0.5].map(|fraction| fraction * budget);
-    // Double until over the larger limit, then bisect below each limit.
-    let mut over = 1;
-    while over < MAX_VOICES && voice_timing(over)?.median <= within[1] {
-        over *= 2;
-    }
-    let mut most = Vec::new();
-    for limit in within {
-        let (mut fits, mut fails) = (0, over);
-        while fails - fits > 1 {
-            let mid = (fits + fails) / 2;
-            if voice_timing(mid)?.median <= limit {
-                fits = mid;
-            } else {
-                fails = mid;
-            }
-        }
-        if fits == MAX_VOICES - 1 && voice_timing(MAX_VOICES)?.median <= limit {
-            fits = MAX_VOICES;
-        }
-        most.push((
-            fits,
-            if fits > 0 {
-                Some(voice_timing(fits)?)
-            } else {
-                None
-            },
-        ));
-    }
+    })?;
 
     // Block sizes (ADR 0019 §1): the kick and the kick voices within 25 % of
-    // the budget (at k = 1), run k frames at a time.
+    // the budget (at k = 1), run k frames at a time, on one thread and on
+    // the performance cores (ADR 0019 §2, the default schedule).
+    let (cores, cores_source) = performance_cores();
+    let all = Threads {
+        threads: cores,
+        schedule: Schedule::DEFAULT,
+    };
     let block_voices = most[0].0.max(1);
     let kick_plan = plan_of(&kick.root, &kick.composites, registry)?;
-    let voices_plan = plan_of(
-        &voices_graph(&kick.root, block_voices)?,
-        &kick.composites,
-        registry,
-    )?;
+    let block_voices_plan = voices_plan(block_voices)?;
     let mut blocks = Vec::new();
     for k in BLOCK_SIZES {
-        let kick = measure_blocks(&kick_plan, registry, seconds, k)?;
-        let voices = measure_blocks(&voices_plan, registry, seconds, k)?;
-        if !json {
-            eprintln!(
-                "signal: bench: k = {k}: kick {:.1} ns, {block_voices} voices {:.0} ns",
-                kick.median, voices.median
-            );
+        let mut row = Vec::new();
+        for on in [ONE_THREAD, all] {
+            let kick = measure_blocks(&kick_plan, registry, seconds, k, on)?;
+            let voices = measure_blocks(&block_voices_plan, registry, seconds, k, on)?;
+            if !json {
+                eprintln!(
+                    "signal: bench: k = {k}, {} threads: kick {:.1} ns, {block_voices} voices {:.0} ns",
+                    on.threads, kick.median, voices.median
+                );
+            }
+            row.push((kick, voices));
         }
-        blocks.push((k, kick, voices));
+        blocks.push((k, row));
     }
+
+    // Scaling (ADR 0019 §2): the most kick voices within 25 % and 50 % of
+    // the budget at k = SCALING_BLOCK on 1, 2, 4, 8 and all performance
+    // cores, with the default schedule.
+    let mut thread_counts = vec![1, 2, 4, 8, cores];
+    thread_counts.sort_unstable();
+    thread_counts.dedup();
+    let mut scaling = Vec::new();
+    for threads in thread_counts {
+        let on = Threads {
+            threads,
+            schedule: Schedule::DEFAULT,
+        };
+        let (most, measured) = most_voices(within, |n| {
+            let timing = measure_blocks(&voices_plan(n)?, registry, seconds, SCALING_BLOCK, on)?;
+            if !json {
+                eprintln!(
+                    "signal: bench: k = {SCALING_BLOCK}, {threads} threads: {n} voices {:.0} ns",
+                    timing.median
+                );
+            }
+            Ok(timing)
+        })?;
+        scaling.push((threads, most, measured));
+    }
+
+    // The small-plan threshold (ADR 0019 §2): kick voices in segments of k
+    // frames, on 2 threads with every segment on the workers against one
+    // thread; the plan's estimate per segment where the workers start to win.
+    let forced = Threads {
+        threads: 2,
+        schedule: Schedule::FORCED,
+    };
+    let mut threshold = Vec::new();
+    for n in THRESHOLD_VOICES {
+        let plan = voices_plan(n)?;
+        let estimate = estimate_of(&plan, registry)?;
+        for k in THRESHOLD_BLOCKS {
+            let one = measure_blocks(&plan, registry, seconds, k, ONE_THREAD)?;
+            let two = measure_blocks(&plan, registry, seconds, k, forced)?;
+            if !json {
+                eprintln!(
+                    "signal: bench: threshold: {n} voices, k = {k}: estimate {} ns, 1 thread {:.0} ns, 2 threads {:.0} ns",
+                    estimate.0 * k as u64,
+                    one.median,
+                    two.median
+                );
+            }
+            threshold.push((n, k, estimate, one, two));
+        }
+    }
+    let crossover = threshold
+        .iter()
+        .filter(|(_, _, _, one, two)| two.median < one.median)
+        .map(|(_, k, estimate, _, _)| estimate.0 * *k as u64)
+        .min();
 
     let voices_json = |(n, timing): &(usize, Option<Timing>), limit: f64| {
         json!({
@@ -266,8 +303,42 @@ pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(
             },
             "blocks": {
                 "voices": block_voices,
-                "measured": blocks.iter().map(|(k, kick, voices)| json!({
-                    "k": k, "kick": kick.json(), "kick_voices": voices.json(),
+                "threads": cores,
+                "measured": blocks.iter().map(|(k, row)| json!({
+                    "k": k,
+                    "kick": row[0].0.json(),
+                    "kick_voices": row[0].1.json(),
+                    "on_performance_cores": {
+                        "threads": cores,
+                        "kick": row[1].0.json(),
+                        "kick_voices": row[1].1.json(),
+                    },
+                })).collect::<Vec<_>>(),
+            },
+            "scaling": {
+                "block": SCALING_BLOCK,
+                "performance_cores": cores,
+                "cores_source": cores_source.name(),
+                "rows": scaling.iter().map(|(threads, most, measured)| json!({
+                    "threads": threads,
+                    "within_25_percent": voices_json(&most[0], within[0]),
+                    "within_50_percent": voices_json(&most[1], within[1]),
+                    "measured": measured.iter().map(|(n, t)| json!({
+                        "voices": n, "median_ns": t.median, "p99_ns": t.p99, "repeats": t.repeats,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            },
+            "parallel_threshold": {
+                "threads": forced.threads,
+                "crossover_ns": crossover,
+                "rows": threshold.iter().map(|(n, k, (estimate, units, tasks), one, two)| json!({
+                    "voices": n,
+                    "k": k,
+                    "units": units,
+                    "tasks": tasks,
+                    "estimate_ns": estimate * *k as u64,
+                    "one_thread": one.json(),
+                    "two_threads": two.json(),
                 })).collect::<Vec<_>>(),
             },
         });
@@ -297,35 +368,135 @@ pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(
             most[1].0
         ));
         text.push_str(&format!(
-            "\nblocks of k frames (median, p99 ns/frame; kick, then {block_voices} kick voices):"
+            "\nblocks of k frames (median, p99 ns/frame; kick, then {block_voices} kick voices; \
+             1 thread, then {cores}):"
         ));
-        for (k, kick, voices) in &blocks {
+        for (k, row) in &blocks {
+            for (on, (kick, voices)) in [1, cores].iter().zip(row) {
+                text.push_str(&format!(
+                    "\n  k = {k:<4} {on:>2} threads  {:>9.1}  {:>9.1}  {:>9.1}  {:>9.1}",
+                    kick.median, kick.p99, voices.median, voices.p99
+                ));
+            }
+        }
+        text.push_str(&format!(
+            "\nscaling at k = {SCALING_BLOCK} (kick voices within 25 %, 50 %; {cores} performance \
+             cores, {}):",
+            cores_source.name()
+        ));
+        for (threads, most, _) in &scaling {
             text.push_str(&format!(
-                "\n  k = {k:<4}  {:>9.1}  {:>9.1}  {:>9.1}  {:>9.1}",
-                kick.median, kick.p99, voices.median, voices.p99
+                "\n  {threads:>2} threads  {:>6}  {:>6}",
+                most[0].0, most[1].0
             ));
         }
+        text.push_str(&format!(
+            "\nparallel threshold (2 threads, every segment on the workers): crossover {}",
+            crossover.map_or("none measured".to_owned(), |ns| format!(
+                "{ns} ns per segment"
+            ))
+        ));
         print_stdout(&text);
     }
     Ok(())
 }
 
-/// Times `plan` for about `seconds` one frame at a time: see [`measure_blocks`].
-fn measure(plan: &ExecutionPlan, registry: &Registry, seconds: f64) -> Result<Timing, Failure> {
-    measure_blocks(plan, registry, seconds, 1)
+/// Voice counts with their timings, in order.
+type Measured = BTreeMap<usize, Timing>;
+
+/// The most voices whose median stays within each limit of `within`, by
+/// doubling until over the larger limit and then bisecting below each limit,
+/// with every count measured (by `timing`, once each).
+#[allow(clippy::type_complexity)]
+fn most_voices(
+    within: [f64; 2],
+    mut timing: impl FnMut(usize) -> Result<Timing, Failure>,
+) -> Result<(Vec<(usize, Option<Timing>)>, Measured), Failure> {
+    let mut measured = Measured::new();
+    let mut voice_timing = |n: usize| -> Result<Timing, Failure> {
+        if let Some(timing) = measured.get(&n) {
+            return Ok(*timing);
+        }
+        let result = timing(n)?;
+        measured.insert(n, result);
+        Ok(result)
+    };
+    let mut over = 1;
+    while over < MAX_VOICES && voice_timing(over)?.median <= within[1] {
+        over *= 2;
+    }
+    let mut most = Vec::new();
+    for limit in within {
+        let (mut fits, mut fails) = (0, over);
+        while fails - fits > 1 {
+            let mid = (fits + fails) / 2;
+            if voice_timing(mid)?.median <= limit {
+                fits = mid;
+            } else {
+                fails = mid;
+            }
+        }
+        if fits == MAX_VOICES - 1 && voice_timing(MAX_VOICES)?.median <= limit {
+            fits = MAX_VOICES;
+        }
+        most.push((
+            fits,
+            if fits > 0 {
+                Some(voice_timing(fits)?)
+            } else {
+                None
+            },
+        ));
+    }
+    Ok((most, measured))
 }
 
+/// A plan's estimated cost per frame in ns (the engine's, from the static
+/// costs), its units and its tasks with one task per unit.
+fn estimate_of(plan: &ExecutionPlan, registry: &Registry) -> Result<(u64, usize, usize), Failure> {
+    let config = EngineConfig {
+        threads: 1,
+        schedule: Schedule::FORCED,
+        ..EngineConfig::new(SAMPLE_RATE, SEED)
+    };
+    let engine = Engine::new(plan, registry, config, Vec::new())
+        .map_err(|e| Failure::Internal(e.to_string()))?;
+    let stats = engine.schedule_stats();
+    Ok((stats.estimate_ns, stats.units, stats.tasks))
+}
+
+/// Times `plan` for about `seconds` one frame at a time: see [`measure_blocks`].
+fn measure(plan: &ExecutionPlan, registry: &Registry, seconds: f64) -> Result<Timing, Failure> {
+    measure_blocks(plan, registry, seconds, 1, ONE_THREAD)
+}
+
+/// How a case runs: its threads, the calling thread included, and when a
+/// segment runs on the workers.
+#[derive(Clone, Copy)]
+struct Threads {
+    threads: usize,
+    schedule: Schedule,
+}
+
+const ONE_THREAD: Threads = Threads {
+    threads: 1,
+    schedule: Schedule::DEFAULT,
+};
+
 /// Times `plan` for about `seconds` in blocks of `k` frames (a divisor of
-/// [`REPEAT_FRAMES`]): repeats of [`REPEAT_FRAMES`] frames after one untimed
-/// repeat.
+/// [`REPEAT_FRAMES`]) on `on.threads` threads: repeats of [`REPEAT_FRAMES`]
+/// frames after one untimed repeat.
 fn measure_blocks(
     plan: &ExecutionPlan,
     registry: &Registry,
     seconds: f64,
     k: usize,
+    on: Threads,
 ) -> Result<Timing, Failure> {
     let config = EngineConfig {
         block_capacity: k,
+        threads: on.threads,
+        schedule: on.schedule,
         ..EngineConfig::new(SAMPLE_RATE, SEED)
     };
     let mut engine = Engine::new(plan, registry, config, Vec::new())

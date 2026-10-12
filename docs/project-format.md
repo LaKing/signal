@@ -161,6 +161,7 @@ The **Setup** holds how this machine plays projects. It is never part of a proje
 ```toml
 version = 1
 buffer = 128                      # frames requested from the device
+cpu_workers = "auto"              # threads per block: "auto" or a number
 output_channels = [1, 2]          # device channel (from 1) of each sink channel
 last_project = "/Users/me/projects/kick"
 
@@ -183,6 +184,7 @@ height = 640.0
 |---|---|---|
 | `version` | the format version; another version makes the whole file default | `1` |
 | `buffer` | the buffer to request, in frames, at least 1 | `128` |
+| `cpu_workers` | "CPU workers" in the interface dialog: the threads a block runs on, the audio thread included (`EngineConfig::threads`; 1 runs no worker threads), or `"auto"`, one per performance core (ADR 0019 §2). It changes the timing, never the output | `"auto"` |
 | `output_channels` | sink channel *i* plays on device channel `output_channels[i]` (from 1). The device is opened in a configuration with at least as many channels as the highest of them. A map whose length is not the project's sink width, or that names a channel the device does not have or one channel twice, is reported and the identity map is used | the identity map |
 | `last_project` | the last project folder opened; opened at start when `--project` is not given | none |
 | `[output]`, `[input]` | the device: `name`, optional `id`, `signature` | the system default output; no input |

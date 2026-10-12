@@ -19,10 +19,12 @@ pub struct ModuleType {
     pub create: fn() -> Primitive,
 }
 
-/// Module types keyed by type name, iterated in name order.
+/// Module types keyed by type name, iterated in name order, with each type's
+/// static cost estimate where the library that registers it gives one.
 #[derive(Clone, Debug, Default)]
 pub struct Registry {
     types: BTreeMap<&'static str, ModuleType>,
+    costs: BTreeMap<&'static str, u32>,
 }
 
 impl Registry {
@@ -44,6 +46,18 @@ impl Registry {
     /// The type registered under `type_name`.
     pub fn get(&self, type_name: &str) -> Option<&ModuleType> {
         self.types.get(type_name)
+    }
+
+    /// Records `type_name`'s static cost: nanoseconds per frame per instance,
+    /// as measured for `docs/benchmarks.md`. The engine groups cheap units
+    /// into tasks by it (ADR 0019 §2); it never changes the output.
+    pub fn set_cost(&mut self, type_name: &'static str, ns_per_frame: u32) {
+        self.costs.insert(type_name, ns_per_frame);
+    }
+
+    /// The static cost recorded for `type_name`, if any.
+    pub fn cost(&self, type_name: &str) -> Option<u32> {
+        self.costs.get(type_name).copied()
     }
 
     /// Every registered type, in byte-wise order of type name.

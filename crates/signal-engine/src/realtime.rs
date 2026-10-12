@@ -20,12 +20,13 @@ use signal_graph::ExecutionPlan;
 
 use crate::engine::{
     EditFull, Engine, EngineConfig, ExternalEvent, ExternalFull, InputDiscards, ParameterValue,
-    PlanState, PreparedSwap, SwapTarget, prepare_swap,
+    PlanState, PreparedSwap, ScheduleStats, SwapTarget, prepare_swap,
 };
 use crate::error::{EngineError, RenderError};
 use crate::fade::fade_frames;
 use crate::log::{InstanceId, LogLine, LogRecord};
 use crate::offline::GAIN;
+use crate::shared::HookPoint;
 
 /// The capacities and timing of a real-time run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -474,6 +475,18 @@ impl Runner {
     /// The next frame it will run.
     pub fn next_frame(&self) -> Frame {
         self.engine.next_frame()
+    }
+
+    /// The engine's [`set_task_hook`](Engine::set_task_hook) (tests).
+    #[doc(hidden)]
+    pub fn set_task_hook(&mut self, hook: Option<fn(HookPoint)>) {
+        self.engine.set_task_hook(hook);
+    }
+
+    /// The engine's [`schedule_stats`](Engine::schedule_stats).
+    #[doc(hidden)]
+    pub fn schedule_stats(&self) -> ScheduleStats {
+        self.engine.schedule_stats()
     }
 
     /// Its counters now (what the next status will say).

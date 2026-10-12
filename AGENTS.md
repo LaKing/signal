@@ -33,7 +33,7 @@ Development runs through **devpanel** (`~/devpanel`, project `signal-project`); 
 6. **Metrics never decide quality.** Present renders and metrics; a human records the verdict.
 7. **Dependencies** come only from the root `[workspace.dependencies]`, which `./install.sh` has already fetched. Moving a locked crate into another crate is fine; adding a new crate is an operator step (edit the root Cargo.toml, run `./install.sh`). Licences must be permissive (MIT, Apache-2.0, BSD, ISC, Zlib); MPL-2.0 only with a note; never GPL (ADR 0014).
 8. **Don't build ahead of the roadmap.** Create crates, port types, and features when a milestone or test project needs them.
-9. **`unsafe` is denied workspace-wide.** Exceptions need an ADR and a single audited module: `signal-contract/src/alloc_counter.rs` (ADR 0017) and `signal-audio/src/rt_thread.rs` (ADR 0019 §4).
+9. **`unsafe` is denied workspace-wide.** Exceptions need an ADR and a single audited module: `signal-contract/src/alloc_counter.rs` (ADR 0017), `signal-audio/src/rt_thread.rs` (ADR 0019 §4) and `signal-engine/src/shared.rs` (ADR 0020).
 
 ## Terminology
 Use the terms in `docs/00-vision.md` §3a consistently: Project, Module, Primitive, Composite, Instance, Port, Connection, Parameter, Preset, Library, Setup.

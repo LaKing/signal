@@ -135,9 +135,67 @@ fn bench_json_reports_block_sizes() {
     let measured = blocks["measured"].as_array().unwrap();
     let sizes: Vec<u64> = measured.iter().map(|m| m["k"].as_u64().unwrap()).collect();
     assert_eq!(sizes, [1, 64, 256]);
+    let cores = blocks["threads"].as_u64().unwrap();
+    assert!(cores >= 1);
     for entry in measured {
         timing(&entry["kick"], "blocks.kick");
         timing(&entry["kick_voices"], "blocks.kick_voices");
+        let all = &entry["on_performance_cores"];
+        assert_eq!(all["threads"].as_u64(), Some(cores));
+        timing(&all["kick"], "blocks.on_performance_cores.kick");
+        timing(
+            &all["kick_voices"],
+            "blocks.on_performance_cores.kick_voices",
+        );
+    }
+}
+
+/// M2.6-2 AC4 and AC14: the scaling table (kick voices within 25 % and 50 %
+/// of the budget at k = 128 on 1, 2, 4, 8 and all performance cores) and the
+/// small-plan threshold rows are there, with their shape.
+#[test]
+fn bench_json_reports_scaling_and_the_threshold() {
+    let output = Command::new(env!("CARGO_BIN_EXE_signal"))
+        .args(["--json", "bench", "--seconds", "0.1"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("the signal binary runs");
+    assert!(output.status.success());
+    let bench: Value = serde_json::from_slice(&output.stdout).expect("JSON on stdout");
+    let scaling = &bench["scaling"];
+    assert_eq!(scaling["block"], 128);
+    let cores = scaling["performance_cores"].as_u64().unwrap();
+    assert!(["sysctl", "fallback"].contains(&scaling["cores_source"].as_str().unwrap()));
+    let rows = scaling["rows"].as_array().unwrap();
+    let threads: Vec<u64> = rows
+        .iter()
+        .map(|r| r["threads"].as_u64().unwrap())
+        .collect();
+    let mut expected = vec![1, 2, 4, 8, cores];
+    expected.sort_unstable();
+    expected.dedup();
+    assert_eq!(threads, expected);
+    for row in rows {
+        for key in ["within_25_percent", "within_50_percent"] {
+            let within = &row[key];
+            if within["voices"].as_u64().unwrap() > 0 {
+                timing(&within["timing"], key);
+            }
+        }
+        assert!(!row["measured"].as_array().unwrap().is_empty());
+    }
+
+    let threshold = &bench["parallel_threshold"];
+    assert_eq!(threshold["threads"], 2);
+    assert!(threshold["crossover_ns"].is_u64() || threshold["crossover_ns"].is_null());
+    let rows = threshold["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 5 * 4);
+    for row in rows {
+        assert!(row["tasks"].as_u64().unwrap() >= 1);
+        assert!(row["units"].as_u64() >= row["tasks"].as_u64());
+        assert!(row["estimate_ns"].as_u64().unwrap() > 0);
+        timing(&row["one_thread"], "one_thread");
+        timing(&row["two_threads"], "two_threads");
     }
 }
 

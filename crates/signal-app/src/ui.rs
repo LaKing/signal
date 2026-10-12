@@ -341,6 +341,19 @@ impl SignalApp {
                     ui.add(egui::DragValue::new(&mut draft.buffer).range(1..=8192));
                 });
                 ui.horizontal(|ui| {
+                    ui.label("CPU workers");
+                    let mut auto = draft.cpu_workers.is_none();
+                    if ui.checkbox(&mut auto, "Auto").changed() {
+                        draft.cpu_workers = if auto { None } else { Some(1) };
+                    }
+                    if let Some(threads) = &mut draft.cpu_workers {
+                        ui.add(egui::DragValue::new(threads).range(1..=64));
+                        ui.label("threads, the audio thread included (1: none extra)");
+                    } else {
+                        ui.label("one per performance core");
+                    }
+                });
+                ui.horizontal(|ui| {
                     ui.label("Output channels (device channel per sink channel)");
                     ui.add(egui::TextEdit::singleline(&mut draft.channels).hint_text("1, 2"));
                 });

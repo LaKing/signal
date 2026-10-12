@@ -25,3 +25,4 @@ To change a decision, add a new ADR that supersedes the old one. Do not rewrite 
 | [0017](0017-unsafe-exception-counting-allocator.md) | Unsafe exception: the counting allocator |
 | [0018](0018-gui-toolkit.md) | GUI toolkit: egui through eframe |
 | [0019](0019-multi-core-and-gpu-execution.md) | Multi-core and GPU execution (decides D-EXEC-3) |
+| [0020](0020-unsafe-exception-disjoint-plan-state.md) | Unsafe exception: disjoint access to a plan's state |
