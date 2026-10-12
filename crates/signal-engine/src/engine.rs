@@ -14,6 +14,7 @@ use std::fmt;
 use std::mem;
 use std::ops::Range as Span;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use signal_core::{
     Combine, DirectPrimitive, Direction, Due, Event, EventPayload, EventSink, Feedthrough, Frame,
@@ -68,6 +69,9 @@ pub struct Schedule {
     pub parallel_min_ns: u64,
     /// A segment runs on the workers only if it has at least this many frames.
     pub min_frames: usize,
+    /// How long an idle worker spins before it parks, in ns (at most 3 ms,
+    /// whatever is asked: `docs/realtime-rules.md` "Waiting policy").
+    pub spin_ns: u64,
 }
 
 impl Schedule {
@@ -76,6 +80,7 @@ impl Schedule {
         task_min_ns: TASK_MIN_NS,
         parallel_min_ns: 50_000,
         min_frames: 16,
+        spin_ns: 50_000,
     };
 
     /// Every segment of every plan with two tasks or more on the workers,
@@ -84,7 +89,33 @@ impl Schedule {
         task_min_ns: 0,
         parallel_min_ns: 0,
         min_frames: 1,
+        ..Schedule::DEFAULT
     };
+
+    /// The schedule a real-time engine of `threads` threads with device
+    /// period `period_ns` uses ([`realtime`](crate::realtime)): the default,
+    /// workers parking after 50 µs. M2.6-5 measured spinning through the
+    /// period in the sandbox (no real-time scheduling) and found the tail far
+    /// shorter, but on the device, with the workers in the audio workgroup,
+    /// it caused thousands of xruns (80 voices: 4 060 in 15 s against 0), most
+    /// likely because the system throttles real-time threads that exceed
+    /// their computation budget. Operator decision at the M2.6-5 checkpoint:
+    /// keep the default until a device-measured policy beats it
+    /// (`docs/benchmarks.md` "Real-time wake-up tail"). [`Schedule::spinning`]
+    /// keeps the measured variant for `signal bench`.
+    pub fn realtime(period_ns: u64, threads: usize) -> Schedule {
+        let _ = (period_ns, threads);
+        Schedule::DEFAULT
+    }
+
+    /// Idle workers spin through the device period `period_ns` (at most 3 ms)
+    /// before they park: the M2.6-5 candidate, measured but not the default.
+    pub fn spinning(period_ns: u64) -> Schedule {
+        Schedule {
+            spin_ns: period_ns,
+            ..Schedule::DEFAULT
+        }
+    }
 }
 
 /// What a run is prepared for.
@@ -1424,7 +1455,8 @@ impl Engine {
             late_results: 0,
             block_start: Frame::ZERO,
             block_frames: 0,
-            pool: (threads > 1).then(|| Pool::new(threads - 1)),
+            pool: (threads > 1)
+                .then(|| Pool::new(threads - 1, Duration::from_nanos(config.schedule.spin_ns))),
             parallel_segments: 0,
             hook: None,
         })
@@ -2002,8 +2034,9 @@ impl Engine {
         }
     }
 
-    /// Calls `hook` when a thread enters and leaves a parallel segment and
-    /// before each task it runs (tests: delays, allocation guards).
+    /// Calls `hook` when a thread enters and leaves a parallel segment, and
+    /// before and after the body of each task it runs (tests: delays,
+    /// allocation guards; the bench: the wake-up tail).
     #[doc(hidden)]
     pub fn set_task_hook(&mut self, hook: Option<fn(HookPoint)>) {
         self.hook = hook;

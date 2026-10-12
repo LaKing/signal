@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use common::{config_threads, conn, ext, inst, inst_with, plan, registry, scaled};
 use signal_core::{EventPayload, Frame, SplitMix64};
-use signal_engine::{Engine, HookPoint, Render, render_blocks};
+use signal_engine::{Engine, EngineConfig, HookPoint, Render, Schedule, render_blocks};
 use signal_graph::ExecutionPlan;
 
 const RATE: u32 = 1_000;
@@ -91,13 +91,11 @@ fn random_delay(point: HookPoint) {
 }
 
 fn render(threads: usize, delays: bool) -> (Render, Engine) {
-    let mut engine = Engine::new(
-        &stress_plan(),
-        &registry(),
-        config_threads(RATE, 42, threads),
-        Vec::new(),
-    )
-    .unwrap();
+    render_with(config_threads(RATE, 42, threads), delays)
+}
+
+fn render_with(config: EngineConfig, delays: bool) -> (Render, Engine) {
+    let mut engine = Engine::new(&stress_plan(), &registry(), config, Vec::new()).unwrap();
     if delays {
         engine.set_task_hook(Some(random_delay));
     }
@@ -161,6 +159,37 @@ fn a_thousand_blocks_on_eight_threads_with_random_delays_match_one_thread() {
     let exclusivity = signal_engine::exclusivity();
     assert!(exclusivity.checked && exclusivity.claims > 0);
     assert_eq!(exclusivity.violations, 0);
+}
+
+/// M2.6-5: the real-time spin changes only when a worker runs a task. With
+/// idle workers spinning for the longest the pool allows (so they rarely
+/// park between blocks), 8 threads give the same audio, log and counters as
+/// one thread, with the random delays and the exclusivity tracker on.
+#[test]
+fn spinning_workers_match_one_thread() {
+    let (reference, one) = render(1, false);
+    let mut config = config_threads(RATE, 42, 8);
+    config.schedule = Schedule {
+        spin_ns: u64::MAX,
+        ..config.schedule
+    };
+    let (stressed, eight) = render_with(config, true);
+    assert!(
+        stressed.samples == reference.samples,
+        "the audio differs with spinning workers"
+    );
+    assert!(
+        stressed.log == reference.log,
+        "the log differs with spinning workers"
+    );
+    assert_eq!(eight.log_overflows(), one.log_overflows());
+    assert_eq!(eight.input_overflows(), one.input_overflows());
+    assert_eq!(eight.input_discards(), one.input_discards());
+    let stats = eight.schedule_stats();
+    assert_eq!(stats.parallel_segments, BLOCKS);
+    assert!(stats.worker_tasks > 0, "{stats:?}");
+    assert_eq!(stats.worker_panics, 0);
+    assert_eq!(signal_engine::exclusivity().violations, 0);
 }
 
 static CALLER_PANICKED: AtomicBool = AtomicBool::new(false);

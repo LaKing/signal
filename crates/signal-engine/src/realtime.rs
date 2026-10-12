@@ -21,7 +21,7 @@ use signal_graph::ExecutionPlan;
 use crate::cores::realtime_threads;
 use crate::engine::{
     EditFull, Engine, EngineConfig, ExternalEvent, ExternalFull, InputDiscards, ParameterValue,
-    PlanState, PreparedSwap, ScheduleStats, SwapTarget, prepare_swap,
+    PlanState, PreparedSwap, Schedule, ScheduleStats, SwapTarget, prepare_swap,
 };
 use crate::error::{EngineError, RenderError};
 use crate::fade::fade_frames;
@@ -328,6 +328,14 @@ pub fn realtime(
     }
     // A latent module's due result is never waited for (ADR 0019 §3).
     config.engine.realtime = true;
+    // The real-time schedule (`Schedule::realtime`: the default since the
+    // M2.6-5 device check), unless the caller chose a schedule.
+    if config.engine.schedule == Schedule::DEFAULT {
+        let rate = u128::from(config.engine.sample_rate.max(1));
+        let period_ns = u128::from(config.buffer_frames) * 1_000_000_000 / rate;
+        let period_ns = u64::try_from(period_ns).unwrap_or(u64::MAX);
+        config.engine.schedule = Schedule::realtime(period_ns, config.engine.threads);
+    }
     let engine =
         Engine::new(plan, registry, config.engine, Vec::new()).map_err(ControlError::Engine)?;
     let mirror = PlanState::mirror(plan, registry, config.engine).map_err(ControlError::Engine)?;

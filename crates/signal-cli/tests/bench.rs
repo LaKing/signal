@@ -270,8 +270,9 @@ fn write_voices_writes_a_valid_many_voice_project() {
 }
 
 /// M2.6-3: `signal bench --realtime` prints a row per thread count (1, 8,
-/// the real-time auto count and all of them) and variant, with its
-/// per-block timing and each worker's path. Shape only.
+/// the real-time auto count and all of them), schedule (M2.6-5) and
+/// variant, with its per-block timing, its wake-up tail and each worker's
+/// path. Shape only.
 #[test]
 fn realtime_json_has_every_field() {
     let output = signal(&[
@@ -282,6 +283,10 @@ fn realtime_json_has_every_field() {
         "2",
         "--seconds",
         "0.01",
+        "--rt-schedule",
+        "base",
+        "--rt-schedule",
+        "spin=period,task=0",
     ]);
     assert!(
         output.status.success(),
@@ -298,13 +303,27 @@ fn realtime_json_has_every_field() {
     expected.sort_unstable();
     expected.dedup();
     let rows = bench["rows"].as_array().unwrap();
-    assert_eq!(rows.len(), 3 * expected.len());
-    for (row, threads) in rows.iter().zip(expected.iter().flat_map(|&t| [t, t, t])) {
+    assert_eq!(rows.len(), 6 * expected.len());
+    let schedules = ["base", "spin=period,task=0"];
+    let shape = expected
+        .iter()
+        .flat_map(|&t| schedules.iter().flat_map(move |&s| [(t, s); 3]));
+    for (row, (threads, schedule)) in rows.iter().zip(shape) {
         assert_eq!(row["threads"].as_u64(), Some(threads));
         assert_eq!(row["workers"].as_u64(), Some(threads - 1));
+        assert_eq!(row["schedule"], schedule);
         for key in ["median_ns", "p99_ns", "max_ns", "median_fraction"] {
             number(&row[key], key);
         }
+        let tail = &row["tail"];
+        for part in ["worker_start", "slowest_task", "open_after"] {
+            for key in ["median_ns", "p99_ns", "max_ns"] {
+                number(&tail[part][key], key);
+            }
+        }
+        number(&tail["joined"]["max"], "joined.max");
+        assert!(tail["parallel_blocks"].as_u64().is_some());
+        assert_eq!(tail["multi_job_blocks"].as_u64(), Some(0), "no edits");
         let paths = row["paths"].as_array().unwrap();
         let caller = row["caller"].as_str().unwrap();
         match row["variant"].as_str() {
@@ -323,4 +342,7 @@ fn realtime_json_has_every_field() {
             other => panic!("variant {other:?}"),
         }
     }
+
+    let unknown = signal(&["bench", "--realtime", "--rt-schedule", "spin=forever"]);
+    assert!(!unknown.status.success(), "an unknown schedule is refused");
 }

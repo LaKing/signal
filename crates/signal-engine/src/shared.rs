@@ -1078,6 +1078,14 @@ pub enum HookPoint {
         /// The task.
         task: usize,
     },
+    /// A thread's task body has returned, before the task is marked
+    /// complete (not called when the body unwinds).
+    Done {
+        /// The thread's lane.
+        lane: usize,
+        /// The task.
+        task: usize,
+    },
     /// A thread stops taking part in a job.
     Leave {
         /// The thread's lane.
@@ -1162,6 +1170,7 @@ impl<'a> Job<'a> {
                         _thread: PhantomData,
                     };
                     (self.body)(&mut access, t);
+                    hook(HookPoint::Done { lane, task: t });
                     drop(completion);
                     if lane != 0 {
                         self.stats.worker_tasks.fetch_add(1, Ordering::Relaxed);

@@ -183,7 +183,7 @@ The small-plan threshold (2 threads, every segment on the workers, against 1 thr
 What it means:
 - **Fact:** with real-time workers in the audio workgroup, Signal plays at least 120 kick voices live without an xrun. One thread cannot play that load at all.
 - **Fact:** using every core (18) is worse than 12. Auto is now two thirds of the performance cores (`docs/realtime-rules.md` "Worker threads").
-- **Measurement, open:** under multi-core load the worst callback is about 0.3–0.4 of the period whatever the voice count (40 to 120 voices at 12 threads), so a fixed cost (most likely waking parked workers) sets the tail, not the DSP. V12's "0 xruns" holds for this load. Its "worst callback < 0.25" holds for the single-core kick soak (0.104) but not yet under multi-core load. The follow-up issue M2.6-5 targets the wake-up tail.
+- **Measurement, open:** under multi-core load the worst callback is about 0.3–0.4 of the period whatever the voice count (40 to 120 voices at 12 threads), so a fixed cost (most likely waking parked workers) sets the tail, not the DSP. V12's "0 xruns" holds for this load. Its "worst callback < 0.25" holds for the single-core kick soak (0.104) but not yet under multi-core load. The follow-up issue M2.6-5 targets the wake-up tail ("Real-time wake-up tail (M2.6-5)" below: the spin that shortened the tail in the sandbox broke the stream on the device and was rejected; the worst callback under multi-core load stays about 0.4 of the period, and V12's headroom criterion stays open).
 
 ### Real-time workers (M2.6-3)
 
@@ -227,6 +227,147 @@ T="$(cargo metadata --locked --offline --no-deps --format-version 1 | sed -n 's/
 - **Measurement (AC-auto-threads):** P − 1 = 17 threads was not worse than P = 18: p99 418 / 410 µs against 417 / 395 µs with real-time threads, 726 / 1 176 µs against 1 096 / 1 777 µs with ordinary ones. The real-time auto is P − 1 (`docs/realtime-rules.md` "Worker threads").
 - **Measurement:** paced, 24 voices cost 1 146–1 153 µs per block on one ordinary thread, about 3.5 times what "Scaling" above measures for back-to-back blocks (26 voices within 333 µs on the operator's Mac). A block after a sleep starts with colder caches and, perhaps, a slower core; part of it is the shared machine. So the "within 25 %" voice counts of the back-to-back tables overstate what one device period carries; not separated here.
 - **Context, not the same metric:** the operator's 5cb390c measurement outside the sandbox (operator note 002) gave 26 / 34 / 65 / 107 / 175 kick voices within 25 % at 1 / 2 / 4 / 8 / 18 threads (k = 128), a tail jitter at 18 threads of 2.6 µs median and 6.1 µs p99, and 0 xruns on the device at `--threads` 1 and 8. The `ordinary` rows here are the 5cb390c scheduling in this table's terms.
+
+### Real-time wake-up tail (M2.6-5)
+
+The operator's device figures this starts from ("Real-time workers on the device" above): 80 kick voices, `--threads` 12 (the real-time auto count), SSL 2+ at 96 kHz with 128-frame buffers, 30 minutes with live edits, 0 xruns and a **worst callback of 0.405** of the period at db0363c, **0.408** at dafa32b (M2.6-4 checkpoint). V12 asks for < 0.25.
+
+**What the table measures now.** Besides the time per block, `signal bench --realtime` reads each block's wake-up tail off the engine's task hook (`Engine::set_task_hook`, `HookPoint::Enter`/`Task`/`Done`, atomics only):
+- **workers started** (`tail.worker_start`): from the first thread into the block's job until the last worker that joined it entered it (0 when no worker joined);
+- **slowest task** (`tail.slowest_task`): the longest task body of the block, from `Task` to `Done` (the hook after the body), so the waits for predecessors and for the other threads are not in it;
+- **first participation** (`tail.open_after`): from the block's start until the first thread entered its job. That includes the staging, the open and whatever delayed the first participant, not the staging alone;
+- the **workers joined** (`tail.joined`), the **blocks run on the workers** (`tail.parallel_blocks`) and the blocks with more than one job (`tail.multi_job_blocks`; this load has no edits, so 0 and every figure is per job).
+
+Each has the median, p99 (nearest rank) and maximum over the row's blocks that ran on the workers, in the JSON (`rows[].tail`) and in the text table. The hook costs three clock reads per task.
+
+`--rt-schedule <s>` (repeatable) runs the table once per worker schedule, named in `rows[].schedule`: `base` is the scheduling of dafa32b (pinned in the bench: 50 µs spin, 2 µs chains); `default` is what `signal play` and the app use (`Schedule::realtime`); otherwise `base` with `spin=<ns|period|quarter>` (the idle spin) and `task=<ns>` (`Schedule::task_min_ns`, the chain size). **Since M2.6-5 the rows without `--rt-schedule` are `default`, not the dafa32b scheduling**: compare against `base` rows or a dafa32b build, as below.
+
+**Seat measurement, sandboxed**, 2026-10-12 13:56–14:28 UTC, devpanel seat, Mac Studio (Mac17,14) M5 Max as in "Real-time workers (M2.6-3)" (`cores_source` `fallback`, 18; real-time auto 12). Two release builds, each with its own scratch target directory: **dafa32b** (`git archive dafa32b`, unchanged) and the **candidate**. Shared machine, not pinned: load average 2.6 to 24.5 (other sessions). Runs alternated, dafa32b binary then candidate, with the same commands:
+
+```sh
+signal --json bench --realtime --rt-voices 24      # dafa32b binary
+signal --json bench --realtime --rt-voices 24 --rt-schedule base --rt-schedule spin=quarter ...   # candidate
+signal --json bench --realtime --rt-voices 80      # and the same at 80 voices
+```
+
+751 blocks per row. Every row below is `rt-all` (the calling thread and the workers in the time-constraint policy, as a device runs them; no workgroup offline). µs per block, round 1 / round 2. The workgroup path is only on the device.
+
+**The options** (rounds 1–2, 13:56–14:13 UTC). `prewake` and `workers` were measured on an intermediate candidate and removed after (below); `spin` and `task` remain in the bench.
+- `prewake=<n>`: waking *n* parked workers at the start of each block, before its input is staged.
+- `workers=<ns>`: at most one lane per that many ns of the segment's estimated cost.
+
+| Voices | Threads | Schedule | Median | p99 | Max | Over the period | Workers started p99 | Workers started max | Slowest task p99 | Workers joined (median) |
+|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 24 | 8 | dafa32b binary | 385 / 390 | 394 / 395 | 399 / 397 | 0 / 0 | – | – | – | – |
+| 24 | 8 | `base` | 413 / 261 | 420 / 393 | 432 / 396 | 0 / 0 | 53 / 69 | 65 / 83 | 87 / 50 | 5 / 5 |
+| 24 | 8 | `prewake=1` | 405 / 227 | 413 / 385 | 441 / 389 | 0 / 0 | 60 / 63 | 68 / 67 | 56 / 50 | 5 / 5 |
+| 24 | 8 | `prewake=all` | 242 / 381 | 416 / 390 | 419 / 402 | 0 / 0 | 27 / 32 | 71 / 60 | 58 / 48 | 5 / 5 |
+| 24 | 8 | `workers=100000` | 473 / 450 | 482 / 456 | 487 / 458 | 0 / 0 | 37 / 45 | 74 / 55 | 53 / 48 | 4 / 4 |
+| 24 | 8 | `spin=quarter` | 246 / 196 | 418 / 386 | 1 087 / 1 380 | 0 / 1 | 75 / 75 | 542 / 84 | 88 / 54 | 5 / 7 |
+| 24 | 8 | `spin=period` | 110 / 98 | 119 / 157 | 145 / 189 | 0 / 0 | 3 / 4 | 21 / 29 | 35 / 27 | 7 / 7 |
+| 24 | 8 | `task=1000` | 263 / 388 | 427 / 396 | 428 / 438 | 0 / 0 | 74 / 58 | 234 / 92 | 58 / 60 | 5 / 5 |
+| 24 | 8 | `task=4000` | 414 / 245 | 420 / 392 | 774 / 398 | 0 / 0 | 39 / 66 | 43 / 98 | 56 / 51 | 5 / 5 |
+| 24 | 8 | `task=8000` | 406 / 388 | 414 / 397 | 420 / 403 | 0 / 0 | 61 / 71 | 70 / 78 | 84 / 60 | 5 / 5 |
+| 24 | 12 | dafa32b binary | 395 / 389 | 401 / 396 | 415 / 412 | 0 / 0 | – | – | – | – |
+| 24 | 12 | `base` | 324 / 388 | 422 / 393 | 429 / 395 | 0 / 0 | 62 / 43 | 74 / 44 | 99 / 48 | 5 / 5 |
+| 24 | 12 | `prewake=1` | 406 / 383 | 416 / 389 | 424 / 394 | 0 / 0 | 50 / 45 | 71 / 53 | 100 / 62 | 5 / 5 |
+| 24 | 12 | `prewake=all` | 414 / 315 | 420 / 395 | 426 / 400 | 0 / 0 | 11 / 13 | 62 / 38 | 92 / 70 | 5 / 5 |
+| 24 | 12 | `workers=100000` | 474 / 449 | 481 / 455 | 489 / 477 | 0 / 0 | 35 / 44 | 70 / 53 | 53 / 46 | 4 / 4 |
+| 24 | 12 | `spin=quarter` | 215 / 197 | 342 / 311 | 345 / 335 | 0 / 0 | 71 / 71 | 101 / 90 | 96 / 62 | 11 / 11 |
+| 24 | 12 | `spin=period` | 100 / 91 | 108 / 133 | 125 / 177 | 0 / 0 | 6 / 5 | 29 / 39 | 34 / 33 | 11 / 11 |
+| 24 | 12 | `task=1000` | 419 / 393 | 427 / 400 | 823 / 402 | 0 / 0 | 43 / 42 | 57 / 66 | 61 / 51 | 5 / 5 |
+| 24 | 12 | `task=4000` | 414 / 389 | 421 / 395 | 426 / 404 | 0 / 0 | 56 / 41 | 61 / 47 | 88 / 48 | 5 / 5 |
+| 24 | 12 | `task=8000` | 306 / 389 | 414 / 398 | 427 / 1 441 | 0 / 1 | 65 / 60 | 76 / 678 | 97 / 64 | 5 / 5 |
+| 80 | 8 | dafa32b binary | 763 / 760 | 2 121 / 2 091 | 2 758 / 2 739 | 118 / 154 | – | – | – | – |
+| 80 | 8 | `base` | 637 / 689 | 2 104 / 2 112 | 2 754 / 2 752 | 74 / 91 | 677 / 677 | 688 / 686 | 676 / 676 | 7 / 7 |
+| 80 | 8 | `prewake=1` | 485 / 455 | 2 097 / 2 074 | 2 751 / 2 747 | 51 / 46 | 675 / 674 | 678 / 677 | 676 / 675 | 7 / 7 |
+| 80 | 8 | `prewake=all` | 565 / 513 | 1 494 / 1 487 | 2 129 / 2 135 | 82 / 85 | 672 / 673 | 676 / 678 | 683 / 682 | 7 / 7 |
+| 80 | 8 | `workers=100000` | 691 / 592 | 2 108 / 2 085 | 2 757 / 2 711 | 120 / 58 | 679 / 677 | 693 / 679 | 677 / 675 | 7 / 7 |
+| 80 | 8 | `spin=quarter` | 593 / 574 | 1 725 / 1 699 | 2 080 / 1 728 | 21 / 15 | 675 / 675 | 679 / 697 | 673 / 670 | 5 / 7 |
+| 80 | 8 | `spin=period` | 285 / 281 | 328 / 414 | 354 / 476 | 0 / 0 | 3 / 3 | 22 / 26 | 28 / 27 | 7 / 7 |
+| 80 | 8 | `task=1000` | 756 / 640 | 2 114 / 2 275 | 2 747 / 2 739 | 142 / 161 | 679 / 676 | 683 / 685 | 676 / 675 | 7 / 7 |
+| 80 | 8 | `task=4000` | 747 / 760 | 2 110 / 2 111 | 2 732 / 2 753 | 145 / 137 | 679 / 679 | 681 / 703 | 677 / 678 | 7 / 7 |
+| 80 | 8 | `task=8000` | 690 / 688 | 2 693 / 2 107 | 2 751 / 2 749 | 153 / 67 | 679 / 678 | 715 / 706 | 682 / 680 | 7 / 7 |
+| 80 | 12 | dafa32b binary | 611 / 618 | 2 757 / 2 156 | 2 815 / 2 852 | 164 / 133 | – | – | – | – |
+| 80 | 12 | `base` | 594 / 440 | 2 124 / 2 051 | 2 747 / 2 747 | 95 / 38 | 705 / 705 | 1 349 / 1 344 | 694 / 688 | 11 / 11 |
+| 80 | 12 | `prewake=1` | 575 / 594 | 2 150 / 2 127 | 3 467 / 2 751 | 52 / 120 | 686 / 696 | 1 347 / 1 344 | 692 / 693 | 11 / 11 |
+| 80 | 12 | `prewake=all` | 600 / 599 | 1 494 / 1 504 | 2 198 / 2 206 | 160 / 168 | 679 / 678 | 740 / 685 | 692 / 693 | 11 / 11 |
+| 80 | 12 | `workers=100000` | 457 / 469 | 2 071 / 2 059 | 2 130 / 3 415 | 49 / 28 | 705 / 705 | 1 324 / 1 347 | 688 / 684 | 11 / 11 |
+| 80 | 12 | `spin=quarter` | 365 / 578 | 1 693 / 2 072 | 2 355 / 2 367 | 12 / 31 | 690 / 691 | 1 062 / 1 347 | 678 / 694 | 11 / 11 |
+| 80 | 12 | `spin=period` | 236 / 238 | 294 / 289 | 322 / 328 | 0 / 0 | 5 / 5 | 26 / 32 | 31 / 30 | 11 / 11 |
+| 80 | 12 | `task=1000` | 431 / 465 | 2 061 / 2 126 | 2 745 / 2 753 | 32 / 56 | 696 / 694 | 1 323 / 707 | 685 / 690 | 11 / 11 |
+| 80 | 12 | `task=4000` | 598 / 596 | 2 129 / 2 119 | 2 823 / 2 761 | 132 / 106 | 997 / 814 | 1 349 / 1 347 | 704 / 693 | 11 / 11 |
+| 80 | 12 | `task=8000` | 594 / 588 | 2 114 / 2 136 | 2 170 / 2 773 | 140 / 97 | 809 / 1 292 | 1 275 / 1 348 | 698 / 699 | 11 / 11 |
+
+**The rule, fixed before measuring:** an option is kept if, in both rounds, against the candidate's `base` row of the same run, on 8 and on 12 threads (the auto count): the p99 and the maximum fall, the median is at most 5 % higher, no more blocks go over the period, and the component it targets falls (workers started p99 for the spin, the early wake and the lane limit; slowest task p99 for the chain size).
+
+- **Measured best in the sandbox, rejected on the device: `spin=period`**, workers that spin through the device period instead of parking after 50 µs. In the sandbox it was the only option that passed everywhere (24 and 80 voices, 8 and 12 threads, both rounds): every worker joined (11 of 11 on 12 threads, against 5 with `base` at 24 voices), the workers started within a p99 of 3–6 µs (43–705 µs with `base`), and the p99 per block fell 2.5–4× at 24 voices and 5–7× at 80 voices. **Operator measurement on the device** (2026-10-12, SSL 2+ at 96 kHz / 128 frames, workers in the audio workgroup, silent copies, 15 s): with the spin, 80 voices on 12 threads gave **4 060 xruns** (worst callback 12.4 periods) and 120 voices 5 397 (14.7), 80 voices on 4 threads 31 (7.6); without it (13 threads, which keep parking, or the default restored) 80 voices gave **0 xruns** (worst 0.37–0.38) and 120 voices 0 (0.51). Spinning real-time threads exceed their computation budget and are throttled; the sandbox has neither real-time scheduling nor a workgroup, so it could not show this. The default stays parking after 50 µs (`Schedule::realtime`); the variant remains measurable as `--rt-schedule spin=period` (`Schedule::spinning`). The 3 ms bound (`MAX_SPIN`) still caps any configured spin.
+- **Measured and rejected:**
+  - `prewake=1` passed only at 80 voices on 8 threads (with a p99 within 1 % of `base`), and failed on 12 threads and at 24 voices.
+  - `prewake=all` lowered the p99 at 80 voices to 1.49–1.50 ms but put more blocks over the period (82–168 against 38–91), and did nothing at 24 voices.
+  - `workers=100000` (fewer lanes for smaller blocks) made 24 voices slower (median 449–474 µs against 261–413 µs), joining 4 workers.
+  - `spin=quarter` (333 µs, the time-constraint computation) passed only at 80 voices on 8 threads, and at 24 voices raised the maximum to 1.1–1.4 ms.
+  - `task=1000`, `4000` and `8000` (the chain size, against 2 000 ns) changed nothing consistently.
+
+  The code of `prewake` and `workers` was removed after this session; `spin` and `task` stay as bench schedules.
+- **Measurement:** at 80 voices with `base`, the workers-started and slowest-task p99 are both about 676–705 µs (about half a period) on 8 and 12 threads, and their maxima about 1 345 µs (a whole period). The spin removes both. The slowest task, which is the task body alone, also falls from 50–99 µs to 27–35 µs at 24 voices.
+- **Assumption, not measured:** a worker that parks lets its core go idle and slow down, and a task on it runs slower until it is fully running again. Spinning keeps the core running. The seat cannot read core frequencies or idle states.
+- **Measurement (instrumentation cost):** the candidate's `base` rows against the dafa32b binary, both without the spin, differ within this session's noise. At 24 voices the p99 was 385–422 µs and 394–404 µs.
+
+**All cores: the reason for the limit.** On 18 threads (every performance core) `spin=period` was far worse. At 24 and 80 voices, in each of four rounds (rounds 1–2 and two confirmation rounds of the first candidate), the p99 per block was 3.36–3.37 ms with 363–373 of 751 blocks over the period. With `base` it was 0.39–0.42 ms and 0 blocks at 24 voices, and 3.31–3.54 ms and 61–88 blocks at 80 voices. Workers started reached a whole period (about 1.34 ms). A spinning worker then holds a core that something else needs and is preempted for whole periods. So `Schedule::realtime` spins only up to the real-time auto count of threads (two thirds of the performance cores), the measured 8 and 12. With more threads, including counts between 13 and 17 that were not measured, the workers park after 50 µs as before.
+
+**The shipped schedule** (rounds 5–6, 14:23–14:28 UTC, the final candidate: `--rt-schedule base --rt-schedule default`, alternating with the dafa32b binary as above). On 18 threads `default` is `base`:
+
+| Voices | Threads | Schedule | Median | p99 | Max | Over the period | Workers started p99 | Workers started max | Slowest task p99 | Workers joined (median) |
+|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 24 | 8 | dafa32b binary | 397 / 391 | 404 / 397 | 409 / 401 | 0 / 0 | – | – | – | – |
+| 24 | 8 | `base` | 403 / 405 | 414 / 417 | 439 / 436 | 0 / 0 | 71 / 69 | 76 / 122 | 55 / 56 | 5 / 5 |
+| 24 | 8 | `default` | 106 / 106 | 115 / 179 | 118 / 217 | 0 / 0 | 3 / 3 | 17 / 31 | 33 / 45 | 7 / 7 |
+| 24 | 12 | dafa32b binary | 392 / 279 | 400 / 398 | 414 / 414 | 0 / 0 | – | – | – | – |
+| 24 | 12 | `base` | 310 / 347 | 416 / 417 | 422 / 424 | 0 / 0 | 76 / 70 | 94 / 117 | 95 / 85 | 5 / 5 |
+| 24 | 12 | `default` | 97 / 99 | 114 / 135 | 684 / 201 | 0 / 0 | 5 / 5 | 32 / 47 | 34 / 42 | 11 / 11 |
+| 24 | 18 | dafa32b binary | 387 / 390 | 394 / 398 | 401 / 403 | 0 / 0 | – | – | – | – |
+| 24 | 18 | `base` | 297 / 409 | 416 / 417 | 421 / 426 | 0 / 0 | 75 / 52 | 100 / 147 | 91 / 65 | 5 / 5 |
+| 24 | 18 | `default` | 410 / 243 | 416 / 414 | 420 / 418 | 0 / 0 | 41 / 72 | 45 / 147 | 56 / 88 | 5 / 11 |
+| 80 | 8 | dafa32b binary | 765 / 692 | 2 106 / 2 105 | 2 762 / 2 766 | 172 / 96 | – | – | – | – |
+| 80 | 8 | `base` | 647 / 566 | 2 660 / 2 089 | 3 355 / 2 752 | 177 / 68 | 679 / 676 | 686 / 685 | 676 / 674 | 7 / 7 |
+| 80 | 8 | `default` | 312 / 313 | 354 / 466 | 382 / 547 | 0 / 0 | 3 / 3 | 22 / 27 | 38 / 44 | 7 / 7 |
+| 80 | 12 | dafa32b binary | 614 / 645 | 2 754 / 2 750 | 2 818 / 2 758 | 124 / 201 | – | – | – | – |
+| 80 | 12 | `base` | 641 / 637 | 2 758 / 2 154 | 2 829 / 2 826 | 136 / 90 | 1 292 / 709 | 1 345 / 1 347 | 702 / 698 | 11 / 11 |
+| 80 | 12 | `default` | 260 / 260 | 358 / 316 | 462 / 363 | 0 / 0 | 5 / 5 | 36 / 31 | 44 / 36 | 11 / 11 |
+| 80 | 18 | dafa32b binary | 589 / 603 | 3 332 / 3 541 | 4 879 / 4 870 | 74 / 81 | – | – | – | – |
+| 80 | 18 | `base` | 500 / 549 | 3 535 / 3 545 | 4 891 / 6 154 | 101 / 104 | 1 374 / 1 364 | 1 385 / 1 381 | 1 359 / 1 367 | 11 / 11 |
+| 80 | 18 | `default` | 601 / 501 | 3 545 / 3 543 | 4 714 / 4 326 | 99 / 79 | 1 375 / 1 380 | 2 676 / 2 650 | 1 362 / 1 359 | 11 / 11 |
+
+**Next to the device figures.**
+- **Measurement (sandboxed, offline, no workgroup):** 80 voices on 12 threads, the device's load, went from a p99 per block of 2.15–2.76 ms (both builds without the spin) to 0.32–0.36 ms with the spin, which is 0.24–0.27 of the 1.333 ms period. The worst block went from 2.76–2.83 ms to 0.36–0.46 ms (0.27–0.35 of the period).
+- **Not the same metric:** the device's worst callback is a 30-minute maximum on the real I/O thread inside the workgroup. The seat's numbers are 1-second rows on a shared machine.
+- **Whether V12's worst < 0.25 now holds on the device is the operator's soak** (below). The seat cannot decide it either way.
+
+Also not measured on the seat: the CPU the spin costs while playing, about `threads − 1` busy cores, which the operator reads during the soak.
+
+**Measurement (not a device arrangement):** time-constraint workers beside an **ordinary** calling thread (`rt-workers`) stay bad, as in M2.6-3, and the spin does not fix it. At 80 voices (rounds 3–6), on 8 threads the p99 was 7.3–7.7 ms with `default` against 9.1–10.2 ms with `base`. On 12 threads it was 10.3–62 ms against 10.8–24.8 ms, with a worst block of 0.69 s: spinning real-time workers starve the ordinary caller even more. The CoreAudio driver never runs that arrangement, because the workers enter the time-constraint policy only around a real-time callback thread.
+
+### Pending operator steps for the M2.6-5 checkpoint
+
+On the Mac outside the sandbox, from the repository root, with `PATH=/opt/homebrew/opt/rustup/bin:$PATH` and `T=/tmp/signal-project-target`:
+
+1. **The checks at the pinned target:**
+   - `cargo fmt --all --check`
+   - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
+   - `cargo clippy -p signal-lab -p signal-cli --features lab --all-targets --locked --offline -- -D warnings`
+   - `cargo test --workspace --locked --offline`
+2. **The V12 soak (AC3):**
+   - `cargo build --release --locked --offline -p signal-cli --target-dir "$T"`
+   - `scripts/soak.sh --voices 80 --silent --signal "$T/release/signal" 30 128`, with the interface as the default output and no `--threads` (auto: 12 of 18; the workers park after 50 µs, M2.6-5 operator decision).
+   - `--silent` sets the copy's `out` gain to 0.001 (−60 dB), as the operator's silent copies before.
+   - Report the last lines verbatim: `xruns` (expected 0), `worst callback` against **0.405 / 0.408** (V12's target is < 0.25; record it as measured if not reached), `edits … written, … applied`, and the `scheduling` path (`workgroup`).
+   - While it plays, read the CPU in a second terminal: `ps -o %cpu= -p "$(pgrep -n signal)"`. About 1 100 % is expected, 11 spinning workers.
+3. **The device's tail (AC2):**
+   - `"$T/release/signal" --json bench --realtime --rt-voices 80 --rt-schedule base --rt-schedule default > rt-m265-1.json`, then the same into `rt-m265-2.json`.
+   - The `rt-all` rows on 8 and 12 threads compare the old and the new schedule outside the sandbox (still without the workgroup).
+   - Add them as an operator row here.
+4. **If the soak is worse than 0.408:** run the same soak with `--signal` pointing at a build of dafa32b in the same session, to separate the change from the day's conditions, and report both. The seat could not test whether the kernel demotes a time-constraint worker that spins past its computation (`docs/realtime-rules.md` "The policy"); a worse device tail would be the sign.
 
 ### GPU partial bank (M2.6-4)
 
@@ -274,7 +415,7 @@ These are interpretations of a single seat measurement. They are not a decision;
 
 ## The soak (V12)
 
-`scripts/soak.sh [--driver coreaudio|null] [--signal PATH] [--target-dir DIR] [--voices N] [--threads n] [minutes] [buffer]` copies `projects/kick` into a new temporary folder (`$TMPDIR/signal-soak.*`); the committed project is never edited. With `--voices N` (M2.6-3) the folder holds instead the kick with its `drums` composite duplicated *N* times into a tree of 4-input `std.mix`, written by `signal bench --write-voices N <folder>` (the "Kick voices" graph, its `out` gain divided by *N* so that it does not clip; the `accent` line is the same). It runs `signal --json play <copy> --watch --driver <driver> --buffer <buffer> --seconds <minutes × 60>` at the project's 96 kHz, with `--threads n` when given (otherwise `signal play`'s auto, the performance cores minus one). Every 10 s it rewrites `accent` `decay_ms` in the copy, alternating 300 and 200, with `sed` into a hidden file and `mv` (no Python). At the end it prints the frames, the voices, the threads and workers with their scheduling path (`workgroup`, `time-constraint`, `none` or `mixed`, from the play JSON), the edits written and applied, the xruns, the worst callback as a fraction of the period, and the verdict:
+`scripts/soak.sh [--driver coreaudio|null] [--signal PATH] [--target-dir DIR] [--voices N] [--threads n] [--silent] [minutes] [buffer]` copies `projects/kick` into a new temporary folder (`$TMPDIR/signal-soak.*`); the committed project is never edited. With `--voices N` (M2.6-3) the folder holds instead the kick with its `drums` composite duplicated *N* times into a tree of 4-input `std.mix`, written by `signal bench --write-voices N <folder>` (the "Kick voices" graph, its `out` gain divided by *N* so that it does not clip; the `accent` line is the same). With `--silent` (M2.6-5) the copy's `out` gain becomes 0.001 (−60 dB, `sed` and `mv` as for the edits); every module still runs, so the timing is the same. It runs `signal --json play <copy> --watch --driver <driver> --buffer <buffer> --seconds <minutes × 60>` at the project's 96 kHz, with `--threads n` when given (otherwise `signal play`'s auto, the performance cores minus one). Every 10 s it rewrites `accent` `decay_ms` in the copy, alternating 300 and 200, with `sed` into a hidden file and `mv` (no Python). At the end it prints the frames, the voices, the threads and workers with their scheduling path (`workgroup`, `time-constraint`, `none` or `mixed`, from the play JSON), the edits written and applied, the xruns, the worst callback as a fraction of the period, and the verdict:
 
 - **PASS**: 0 xruns and a worst callback under 0.25 of the period (V12). Exit 0.
 - **FAIL**: anything else. Exit 1. Exit 2 means the soak could not run.

@@ -2,7 +2,10 @@
 //! "Worker threads"). Created with the engine on the control thread and kept
 //! across plan swaps; dropped (shut down and joined) with it.
 //!
-//! A worker spins on the gate for [`SPIN`] after its last job, then parks. A
+//! A worker spins on the gate for the pool's spin (`Schedule::spin_ns`: 50 µs
+//! offline, the device period in real time; at most [`MAX_SPIN`]) after its
+//! last job or wake, then parks: an engine with no parallel jobs parks every
+//! worker within [`MAX_SPIN`], so an idle engine never keeps a core busy. A
 //! parallel segment wakes at most one parked worker from the calling thread;
 //! each worker that joins wakes up to two more. The handshake is complete:
 //! a parking worker stores its `parked` flag (SeqCst) and then reads the gate
@@ -25,8 +28,11 @@ use std::time::{Duration, Instant};
 
 use crate::shared::{Gate, Job, Opener, PoolStats};
 
-/// How long an idle worker spins before it parks.
-pub(crate) const SPIN: Duration = Duration::from_micros(50);
+/// The longest an idle worker spins before it parks, whatever the schedule
+/// asks: a little over two device periods of 128 frames at 96 kHz. It bounds
+/// what a worker burns after the last job of a run or after a wake that
+/// brought no job.
+pub(crate) const MAX_SPIN: Duration = Duration::from_millis(3);
 
 /// Worker threads spawned by every pool of this process.
 static SPAWNED: AtomicUsize = AtomicUsize::new(0);
@@ -48,6 +54,8 @@ struct Request {
 /// What the workers share with the pool.
 struct Shared {
     gate: Arc<Gate>,
+    /// How long an idle worker spins before it parks (at most [`MAX_SPIN`]).
+    spin: Duration,
     parked: Box<[AtomicBool]>,
     threads: OnceLock<Box<[Thread]>>,
     shutdown: AtomicBool,
@@ -161,12 +169,14 @@ impl fmt::Debug for Pool {
 }
 
 impl Pool {
-    /// Starts `workers` threads (control-thread code; it allocates). A thread
-    /// the system refuses is left out.
-    pub(crate) fn new(workers: usize) -> Pool {
+    /// Starts `workers` threads that spin for `spin` (at most [`MAX_SPIN`])
+    /// before they park (control-thread code; it allocates). A thread the
+    /// system refuses is left out.
+    pub(crate) fn new(workers: usize, spin: Duration) -> Pool {
         let (gate, opener) = Gate::new();
         let shared = Arc::new(Shared {
             gate,
+            spin: spin.min(MAX_SPIN),
             parked: (0..workers).map(|_| AtomicBool::new(false)).collect(),
             threads: OnceLock::new(),
             shutdown: AtomicBool::new(false),
@@ -379,7 +389,7 @@ impl Drop for Alive<'_> {
 }
 
 /// Worker `w`: runs posted requests, joins every new job as lane `w + 1`,
-/// spinning briefly between jobs and parking after [`SPIN`].
+/// spinning between jobs and parking after the pool's spin.
 fn run(shared: &Shared, w: usize) {
     let _alive = Alive(shared, w);
     let mut seen = 0;
@@ -397,7 +407,7 @@ fn run(shared: &Shared, w: usize) {
             idle = Instant::now();
             continue;
         }
-        if idle.elapsed() < SPIN {
+        if idle.elapsed() < shared.spin {
             for _ in 0..64 {
                 std::hint::spin_loop();
             }
@@ -415,5 +425,41 @@ fn run(shared: &Shared, w: usize) {
             parked.store(false, Ordering::SeqCst);
         }
         idle = Instant::now();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::{Access, PlanCells};
+
+    /// AC-idle (M2.6-5): a spin longer than [`MAX_SPIN`] is clamped to it,
+    /// and after a job every worker parks once the spin has passed. Polled
+    /// with a ceiling far above the bound, so a loaded machine cannot fail
+    /// it by being slow, only a worker that never parks.
+    #[test]
+    fn idle_workers_park_after_the_spin_bound() {
+        let mut pool = Pool::new(3, Duration::from_secs(1));
+        assert_eq!(pool.shared.spin, MAX_SPIN);
+        let mut cells = PlanCells::default();
+        let body = |_: &mut Access<'_>, _: usize| {};
+        {
+            let (mut dispatch, stats) = pool.split();
+            let job = Job::new(&mut cells, 1, &body, None, stats);
+            dispatch.run(&job);
+        }
+        let shared = &pool.shared;
+        let all_parked = || {
+            shared
+                .parked
+                .iter()
+                .zip(shared.alive.iter())
+                .all(|(p, a)| p.load(Ordering::SeqCst) || !a.load(Ordering::SeqCst))
+        };
+        let ceiling = Instant::now() + Duration::from_secs(2);
+        while !all_parked() && Instant::now() < ceiling {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(all_parked(), "a worker still spins 2 s after its last job");
     }
 }

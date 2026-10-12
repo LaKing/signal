@@ -16,6 +16,8 @@
 #                                            (`signal bench --write-voices N`)
 #   scripts/soak.sh --threads n ...          threads per block, the audio thread
 #                                            included (default: signal play's auto)
+#   scripts/soak.sh --silent ...             set the copy's `out` gain to 0.001
+#                                            (−60 dB): every module still runs
 #
 # The rate is the project's (96 kHz). Without --signal it builds signal-cli
 # with --release --locked --offline and takes the binary from the target
@@ -31,6 +33,7 @@ SIGNAL=
 TARGET_DIR=
 VOICES=
 THREADS=
+SILENT=
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -39,7 +42,8 @@ while [[ $# -gt 0 ]]; do
     --target-dir) [[ $# -ge 2 ]] || die "--target-dir needs a directory"; TARGET_DIR=$2; shift ;;
     --voices) [[ $# -ge 2 ]] || die "--voices needs a number of voices"; VOICES=$2; shift ;;
     --threads) [[ $# -ge 2 ]] || die "--threads needs a number of threads"; THREADS=$2; shift ;;
-    -h|--help) sed -n '3,24p' "$0"; exit 0 ;;
+    --silent) SILENT=1 ;;
+    -h|--help) sed -n '3,26p' "$0"; exit 0 ;;
     -*) die "unknown argument: $1" ;;
     *) POSITIONAL+=("$1") ;;
   esac
@@ -87,6 +91,15 @@ else
   cp -R "$ROOT/projects/kick" "$WORK/kick"
 fi
 PROJECT=$WORK/kick/project.toml
+# --silent: the sink's gain (0.75 in projects/kick, divided by N with
+# --voices) becomes 0.001, as the operator's silent copies at the M2.6-3 and
+# M2.6-4 checkpoints.
+if [[ -n $SILENT ]]; then
+  OUT_PATTERN='^\(out = { module = "std.audio_out", gain = \)[0-9.]*'
+  grep -q "$OUT_PATTERN" "$PROJECT" || die "the copy has no out gain to silence"
+  sed "s/$OUT_PATTERN/\10.001/" "$PROJECT" > "$WORK/kick/.project.toml.new"
+  mv "$WORK/kick/.project.toml.new" "$PROJECT"
+fi
 # The line rewritten: `accent = { module = "std.exp_env", decay_ms = 200 }`.
 PATTERN='^\(accent = {.*decay_ms = \)[0-9.]*'
 grep -q "$PATTERN" "$PROJECT" || die "projects/kick/project.toml has no accent decay_ms to edit"
@@ -146,6 +159,7 @@ SCHEDULING=$(block scheduling summary | sed 's/^"//; s/"$//')
 
 printf 'soak: %s frames at %s Hz, buffer %s, %s driver\n' "$FRAMES" "$RATE" "$BUFFER" "$DRIVER"
 printf 'voices %s, threads %s (%s workers), scheduling %s\n' "${VOICES:-1}" "$PLAYED_THREADS" "$WORKERS" "$SCHEDULING"
+[[ -n $SILENT ]] && printf 'silent (out gain 0.001)\n'
 printf 'edits %s written, %s applied as parameter sets, %s errors\n' "$EDITS" "$SETS" "$ERRORS"
 printf 'xruns %s\n' "$XRUNS"
 printf 'worst callback %.3f of the period\n' "$WORST"
