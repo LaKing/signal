@@ -27,13 +27,13 @@ Development runs through **devpanel** (`~/devpanel`, project `signal-project`); 
 ## Hard rules
 1. **No domain concepts in the core.** `signal-core`, `signal-graph`, and `signal-engine` know frames, ports, events, and addresses only. Tempo, MIDI, DMX, and video belong to library modules (ADR 0001, 0003).
 2. **Real-time rules are mandatory** for `process` and the executor: no allocation, locks, I/O, or panics (`docs/realtime-rules.md`).
-3. **Determinism.** No wall-clock time or unseeded randomness in semantics. Output must be identical for any *k*-partition of frames (ADR 0002, 0008).
+3. **Determinism.** No wall-clock time or unseeded randomness in semantics. Output must be identical for any *k*-partition of frames and any number of worker threads (ADR 0002, 0008, 0019). Where sources meet, combine them in canonical source order, never in arrival order.
 4. **Text is the source of truth.** Anything a project means must be expressible in its files. The GUI and tools edit files; they hold no hidden state (ADR 0009, 0013).
 5. **Experimental work goes in `lab/`** behind the `lab` feature. Promotion requires the contract suite, benchmarks, and a recorded human verdict (ADR 0015).
 6. **Metrics never decide quality.** Present renders and metrics; a human records the verdict.
 7. **Dependencies** come only from the root `[workspace.dependencies]`, which `./install.sh` has already fetched. Moving a locked crate into another crate is fine; adding a new crate is an operator step (edit the root Cargo.toml, run `./install.sh`). Licences must be permissive (MIT, Apache-2.0, BSD, ISC, Zlib); MPL-2.0 only with a note; never GPL (ADR 0014).
 8. **Don't build ahead of the roadmap.** Create crates, port types, and features when a milestone or test project needs them.
-9. **`unsafe` is denied workspace-wide.** Exceptions need an ADR and a single audited module.
+9. **`unsafe` is denied workspace-wide.** Exceptions need an ADR and a single audited module: `signal-contract/src/alloc_counter.rs` (ADR 0017) and `signal-audio/src/rt_thread.rs` (ADR 0019 §4).
 
 ## Terminology
 Use the terms in `docs/00-vision.md` §3a consistently: Project, Module, Primitive, Composite, Instance, Port, Connection, Parameter, Preset, Library, Setup.

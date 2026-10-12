@@ -11,6 +11,9 @@ signal-engine = { workspace = true }
 # `Frame` in the input meters.
 signal-core = { workspace = true }
 cpal = { workspace = true }
+# ADR 0019 §4: real-time worker threads (rt_thread.rs only).
+objc2-core-audio = { workspace = true }
+libc = { workspace = true }
 # The callback's stop request and Runner return (one-slot SPSC queues).
 rtrb = { workspace = true }
 # `signal devices --json`.

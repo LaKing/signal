@@ -50,7 +50,7 @@ render artifacts: audio + manifest + logs + metrics ─► signal-eval (analyse,
 | Control | Parses files, builds plans, calls `prepare`, reads device input/MIDI/network and stamps it, frees old plans, writes logs | Block the audio thread |
 | GUI (`signal-app`) | Setup dialog, meters, panels; a client of the edit and observation interface | Hold state that is not in text or Setup |
 
-Communication between threads uses only lock-free SPSC queues (`rtrb`). The audio thread runs `signal_engine::Runner`; the control thread holds its `Controller`, which prepares swaps, drops what the runner returns, and hands logs, meters, parameter values and command reports to a sink; recording a session from them happens outside the engine (`signal_project::session::LiveRecorder`). Signal.app runs a control thread (the `Controller`, the file watch, the input meters and the Setup) and the GUI thread. They exchange commands and view snapshots over `rtrb` queues too, and only the control thread touches the `Controller`.
+Communication between threads uses only lock-free SPSC queues (`rtrb`). The audio thread runs `signal_engine::Runner`; the control thread holds its `Controller`, which prepares swaps, drops what the runner returns, and hands logs, meters, parameter values and command reports to a sink; recording a session from them happens outside the engine (`signal_project::session::LiveRecorder`). Signal.app runs a control thread (the `Controller`, the file watch, the input meters and the Setup) and the GUI thread. They exchange commands and view snapshots over `rtrb` queues too, and only the control thread touches the `Controller`. Since ADR 0019 the audio thread also drives a pool of real-time **worker** threads that execute a block's independent units; they synchronise through atomics only, and the result does not depend on how the work is split.
 
 ## Crates
 
@@ -67,3 +67,4 @@ See `adr/0015-workspace-and-lab-tier.md`. Crates are created when their mileston
 | `signal-eval` | Analysis, metrics, compare, listening packages | M1/M3 |
 | `signal-cli` | `signal` command layer only: `render`, `replay`, `play`, `bench`, `devices`, `modules`, `schema` | M1/M2 |
 | `signal-app` | Signal.app shell and GUI (egui, ADR 0018) | M2.5 (skeleton in M2) |
+| `signal-gpu` | GPU device service (wgpu) and GPU-backed module support (ADR 0019 §3) | M2.6 |
