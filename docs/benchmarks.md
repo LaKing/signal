@@ -257,7 +257,7 @@ What it shows:
   |---|---:|---:|---:|---:|---|
   | V12: `projects/kick` (17:41–18:11 local) | 0 | 0.050 | 0.137 | 0.087 | **V12 PASS** (< 0.25) |
   | Capacity: 80 voices, 592 instances (18:11–18:41) | 0 | 0.280 | 0.513 | 0.233 | **capacity PASS** (< 0.75) |
-  | Capacity re-run after M2.7-9 (hang probe on the hot path), 23:33–00:03 | 0 | 0.290 | 0.454 | 0.164 | **capacity PASS** (< 0.75) |
+  | Capacity re-run after M2.7-9 (hang probe on the hot path), 23:24–23:54 | 0 | 0.290 | 0.454 | 0.164 | **capacity PASS** (< 0.75) |
 
 
 ### Real-time wake-up tail (M2.6-5)
