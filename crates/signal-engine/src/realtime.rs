@@ -25,7 +25,7 @@ use crate::engine::{
 };
 use crate::error::{EngineError, RenderError};
 use crate::fade::fade_frames;
-use crate::log::{EngineFailure, InstanceId, LogLine, LogRecord};
+use crate::log::{EngineFailure, FaultReason, InstanceId, LogLine, LogRecord};
 use crate::offline::GAIN;
 use crate::pool::Workers;
 #[cfg(feature = "test-hooks")]
@@ -52,6 +52,11 @@ pub struct RealtimeConfig {
     pub parameters: usize,
     /// The status queue's capacity.
     pub status: usize,
+    /// The boundary-data queue's capacity, in `f32` words (M2.7-4): the
+    /// delivered results carried with `Delivered` records when the engine
+    /// records them ([`EngineConfig::record_boundary_data`]). 0, the
+    /// default, makes no queue.
+    pub boundary_data: usize,
     /// The wake policy, the computation budget and the wake-up trace
     /// (M2.7-1); the default is the behaviour before it.
     pub rt: RtOptions,
@@ -86,6 +91,7 @@ impl RealtimeConfig {
             meters: 1024,
             parameters: 1024,
             status: 256,
+            boundary_data: 0,
             rt: RtOptions::default(),
         }
     }
@@ -224,6 +230,14 @@ pub struct RunnerStatus {
     /// The engine's [`late_results`](Engine::late_results): due results of
     /// latent (GPU-backed) modules that were not in when due (ADR 0019 §3).
     pub late_results: u64,
+    /// The engine's [`delivered_results`](Engine::delivered_results): due
+    /// results of latent modules delivered (M2.7-4).
+    pub delivered_results: u64,
+    /// Delivered results whose data was dropped because the boundary-data
+    /// queue was full (or there is none): their records say `lost`, as do
+    /// those whose data did not fit the engine's block buffer
+    /// ([`Engine::boundary_data_overflows`]).
+    pub boundary_data_overflows: u64,
     /// The engine's [`input_overflows`](Engine::input_overflows).
     pub input_overflows: u64,
     /// The engine's [`input_discards`](Engine::input_discards).
@@ -245,9 +259,55 @@ pub trait ControlSink {
     /// A parameter's base and effective value at the end of a callback
     /// (observation only: it never feeds back into the run).
     fn parameter(&mut self, _port: &PortAddress, _value: ParameterValue) {}
+    /// The newest runner status `poll` read (M2.7-4): its cumulative counts
+    /// let a recorder tell whether it received every boundary record. Call
+    /// it once more with the stopped [`Runner`]'s own status, whose last
+    /// status may not have reached the control thread.
+    fn status(&mut self, _status: &RunnerStatus) {}
+    /// A latent instance's due block (M2.7-4): its result was delivered (with
+    /// its data when the run carries it) or missed (also a `late_result`
+    /// fault in [`log`](ControlSink::log)).
+    fn boundary(&mut self, _line: BoundaryLine<'_>) {}
     /// Called last: every command whose effective frame is before `next_frame`
     /// has been reported (if a status reached the control thread).
     fn frontier(&mut self, _next_frame: Frame) {}
+}
+
+/// The outcome of a latent instance's due block, as
+/// [`ControlSink::boundary`] receives it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoundaryLine<'a> {
+    /// The due frame.
+    pub frame: Frame,
+    /// The instance.
+    pub address: &'a InstanceAddress,
+    /// Delivered or missed.
+    pub outcome: BoundaryOutcome<'a>,
+}
+
+/// What happened to a due result.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BoundaryOutcome<'a> {
+    /// It arrived in time.
+    Delivered {
+        /// Its words, when the run carries delivered results.
+        data: Option<&'a [f32]>,
+        /// Its words were carried but did not reach the control thread.
+        data_lost: bool,
+    },
+    /// It did not (a `late_result` fault).
+    Missed,
+}
+
+/// A due result's device sample: as a device receives it, finite samples
+/// clamped to [−1, 1] and anything else 0, then rounded to `f32`. The
+/// runner's conversion, and an exact replay's (M2.7-4).
+pub fn device_sample(x: f64) -> f32 {
+    if x.is_finite() {
+        x.clamp(-1.0, 1.0) as f32
+    } else {
+        0.0
+    }
 }
 
 /// Discards everything.
@@ -403,6 +463,13 @@ pub fn realtime_with(
     let (meter_tx, meter_rx) = RingBuffer::new(config.meters.max(1));
     let (parameter_tx, parameter_rx) = RingBuffer::new(config.parameters.max(1));
     let (status_tx, status_rx) = RingBuffer::new(config.status.max(1));
+    let (data_tx, data_rx) = match config.boundary_data {
+        0 => (None, None),
+        words => {
+            let (tx, rx) = RingBuffer::new(words);
+            (Some(tx), Some(rx))
+        }
+    };
     let target = engine.swap_target();
 
     let runner = Runner {
@@ -416,6 +483,7 @@ pub fn realtime_with(
         parameters: parameter_tx,
         next_parameter: 0,
         status: status_tx,
+        data: data_tx,
         pending: VecDeque::with_capacity(limit),
         held: VecDeque::with_capacity(2 * limit),
         levels: vec![(0.0, 0.0); width],
@@ -432,6 +500,8 @@ pub fn realtime_with(
         meters: meter_rx,
         parameters: parameter_rx,
         status: status_rx,
+        data: data_rx,
+        words: Vec::with_capacity(config.boundary_data),
         registry: registry.clone(),
         target,
         mirrors: VecDeque::from([(0, mirror)]),
@@ -466,6 +536,8 @@ pub struct Runner {
     /// The parameter the next callback reports first.
     next_parameter: usize,
     status: Producer<RunnerStatus>,
+    /// Delivered results carried with `Delivered` records, if recorded.
+    data: Option<Producer<f32>>,
     /// Swaps waiting for their frame, in frame order.
     pending: VecDeque<PendingSwap>,
     /// Returned items the return queue had no room for (never dropped here).
@@ -729,10 +801,35 @@ impl Runner {
         }
 
         let version = self.engine.version();
-        let (log, overflows) = (&mut self.log, &mut self.counts.log_overflows);
-        self.engine.drain_log(&mut |record| {
-            if log.push((version, *record)).is_err() {
-                *overflows = overflows.saturating_add(1);
+        let (log, data) = (&mut self.log, &mut self.data);
+        let counts = &mut self.counts;
+        self.engine.drain_log_with(&mut |record, words| {
+            if log.slots() == 0 {
+                counts.log_overflows = counts.log_overflows.saturating_add(1);
+                return;
+            }
+            let mut record = *record;
+            // The words go first, so a record the controller reads has its
+            // words in the data queue already (M2.7-4).
+            if let LogRecord::Delivered {
+                words: count, lost, ..
+            } = &mut record
+                && *count > 0
+            {
+                let sent = data.as_mut().is_some_and(|data| {
+                    data.write_chunk_uninit(words.len())
+                        .map(|chunk| chunk.fill_from_iter(words.iter().copied()))
+                        .is_ok()
+                });
+                if !sent {
+                    *count = 0;
+                    *lost = true;
+                    counts.boundary_data_overflows =
+                        counts.boundary_data_overflows.saturating_add(1);
+                }
+            }
+            if log.push((version, record)).is_err() {
+                counts.log_overflows = counts.log_overflows.saturating_add(1);
             }
         });
         ran
@@ -777,6 +874,7 @@ impl Runner {
         self.counts.callbacks = self.counts.callbacks.saturating_add(1);
         self.counts.engine_log_overflows = self.engine.log_overflows();
         self.counts.late_results = self.engine.late_results();
+        self.counts.delivered_results = self.engine.delivered_results();
         self.counts.input_overflows = self.engine.input_overflows();
         self.counts.input_discards = self.engine.input_discards();
         self.counts.failure = self.engine.failure();
@@ -854,15 +952,11 @@ fn send_back(back: &mut Producer<Back>, held: &mut VecDeque<Back>, stalls: &mut 
 /// A sample for the device: clamped to [−1, 1], non-finite as 0; either
 /// counts as clipped.
 fn to_device(x: f64, clipped: &mut u64) -> f32 {
-    let clamped = if x.is_finite() {
-        x.clamp(-1.0, 1.0)
-    } else {
-        0.0
-    };
-    if clamped != x {
+    let sample = device_sample(x);
+    if !x.is_finite() || x.clamp(-1.0, 1.0) != x {
         *clipped = clipped.saturating_add(1);
     }
-    clamped as f32
+    sample
 }
 
 /// The control-thread half of a real-time run: sends commands to the
@@ -882,6 +976,10 @@ pub struct Controller {
     meters: Consumer<Meter>,
     parameters: Consumer<(u64, usize, ParameterValue)>,
     status: Consumer<RunnerStatus>,
+    /// Delivered results carried with `Delivered` records, if recorded, and
+    /// the words of the one being handed out.
+    data: Option<Consumer<f32>>,
+    words: Vec<f32>,
     registry: Registry,
     /// The engine and the version the next swap is prepared at.
     target: SwapTarget,
@@ -1067,13 +1165,64 @@ impl Controller {
                 Back::Swap(swap) => self.dropped(swap),
             }
         }
+        sink.status(&self.latest);
         while let Ok((version, record)) = self.log.pop() {
             // The log is FIFO: no later record names an older plan.
             while self.mirrors.len() > 1 && self.mirrors.front().is_some_and(|m| m.0 < version) {
                 self.mirrors.pop_front();
             }
             let mirror = self.mirrors.iter().find(|m| m.0 == version);
+            if let LogRecord::Delivered {
+                frame,
+                instance,
+                words,
+                lost,
+                ..
+            } = record
+            {
+                // Its words were sent before it: read them even when the
+                // record cannot be named, so the next record finds its own.
+                self.words.clear();
+                let mut data_lost = lost;
+                if words > 0 {
+                    let read = self.data.as_mut().and_then(|data| {
+                        let chunk = data.read_chunk(words as usize).ok()?;
+                        let (a, b) = chunk.as_slices();
+                        let fits = a.len() + b.len() <= self.words.capacity();
+                        if fits {
+                            self.words.extend_from_slice(a);
+                            self.words.extend_from_slice(b);
+                        }
+                        chunk.commit_all();
+                        fits.then_some(())
+                    });
+                    data_lost |= read.is_none();
+                }
+                let address = mirror.and_then(|(_, state)| state.instance_address(instance));
+                if let Some(address) = address {
+                    let data = (words > 0 && !data_lost).then_some(&self.words[..]);
+                    sink.boundary(BoundaryLine {
+                        frame,
+                        address,
+                        outcome: BoundaryOutcome::Delivered { data, data_lost },
+                    });
+                }
+                continue;
+            }
             if let Some(line) = mirror.and_then(|(_, state)| state.line(&record)) {
+                if let LogLine::Fault {
+                    frame,
+                    address,
+                    reason: FaultReason::LateResult,
+                    ..
+                } = line
+                {
+                    sink.boundary(BoundaryLine {
+                        frame,
+                        address,
+                        outcome: BoundaryOutcome::Missed,
+                    });
+                }
                 sink.log(line);
             }
         }

@@ -35,6 +35,36 @@ pub struct Render {
     /// The instances of any of its plans that are reproducible on the same
     /// machine only (ADR 0019 §3), by address; empty for a bit-exact render.
     pub same_machine: Vec<SameMachine>,
+    /// How `audio.wav` and its hash store the samples (M2.7-4): as `f32`
+    /// casts, or as the device received them in an exact replay.
+    pub conversion: Conversion,
+    /// An ideal render of a session (`signal replay --ideal`, M2.7-4): every
+    /// latent result was awaited. The manifest says so.
+    pub ideal: bool,
+}
+
+/// How a render's samples become the `f32` of `audio.wav` (M2.7-4).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Conversion {
+    /// Each sample rounded to `f32` (round to nearest, ties to even): every
+    /// offline render.
+    #[default]
+    Plain,
+    /// As the real-time runner hands samples to the device
+    /// ([`device_sample`](crate::device_sample)): the exact replay of a
+    /// session that recorded its boundary outcomes, so that it equals the
+    /// live recording bit for bit.
+    Device,
+}
+
+impl Conversion {
+    /// `sample` as `audio.wav` stores it.
+    pub fn sample(self, sample: f64) -> f32 {
+        match self {
+            Conversion::Plain => sample as f32,
+            Conversion::Device => crate::device_sample(sample),
+        }
+    }
 }
 
 /// Renders `frames` frames of a fresh `engine`.
@@ -185,6 +215,8 @@ pub fn render_blocks(
         samples,
         log,
         same_machine,
+        conversion: Conversion::Plain,
+        ideal: false,
     })
 }
 
@@ -222,11 +254,12 @@ impl Render {
     }
 
     /// FNV-1a 64 of the samples as `audio.wav` stores them: each converted to
-    /// f32 (round to nearest, ties to even), little-endian, interleaved.
+    /// f32 by the render's [`conversion`](Render::conversion), little-endian,
+    /// interleaved.
     pub fn audio_fnv1a64(&self) -> u64 {
         let mut hasher = Fnv1a64::new();
         for &sample in &self.samples {
-            hasher.update(&(sample as f32).to_le_bytes());
+            hasher.update(&self.conversion.sample(sample).to_le_bytes());
         }
         hasher.finish()
     }
@@ -242,6 +275,8 @@ impl Render {
             log_fnv1a64: format!("{:016x}", self.log_fnv1a64()),
             audio_fnv1a64: format!("{:016x}", self.audio_fnv1a64()),
             same_machine: self.same_machine.clone(),
+            ideal: self.ideal,
+            device_conversion: self.conversion == Conversion::Device,
         }
     }
 
@@ -258,7 +293,7 @@ impl Render {
         };
         let mut wav = hound::WavWriter::create(dir.join("audio.wav"), spec)?;
         for &sample in &self.samples {
-            wav.write_sample(sample as f32)?;
+            wav.write_sample(self.conversion.sample(sample))?;
         }
         wav.finalize()?;
         fs::write(dir.join("log.jsonl"), &self.log)?;

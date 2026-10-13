@@ -139,6 +139,12 @@ impl Channel {
         }
     }
 
+    /// Jobs in the pool, ready for [`submit`](Channel::submit). Neither
+    /// blocks, locks nor allocates.
+    pub fn free_jobs(&self) -> usize {
+        self.free.len()
+    }
+
     /// The sequence number of the oldest finished job not yet taken.
     pub fn peek_done(&self) -> Option<u64> {
         self.done.peek().ok().map(|job| job.seq)

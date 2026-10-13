@@ -19,8 +19,8 @@ use signal_audio::{
 };
 use signal_core::Registry;
 use signal_engine::{
-    Computation, Controller, Driver, NullDriver, RealtimeConfig, RtOptions, RtPolicy, Runner,
-    RunnerStatus, Spread, WakeStats, realtime_with,
+    Computation, ControlSink, Controller, Driver, NullDriver, RealtimeConfig, RtOptions, RtPolicy,
+    Runner, RunnerStatus, Spread, WakeStats, realtime_with,
 };
 use signal_project::live::{ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload};
 use signal_project::session::{LiveRecorder, SessionError, SessionRecorder, sink_of};
@@ -72,6 +72,10 @@ pub(crate) struct PlayArgs {
     /// in memory while playing).
     #[arg(long)]
     record_audio: Option<PathBuf>,
+    /// With --record-session: also record each delivered result of a latent
+    /// (GPU-backed) module, so that replay does not need the same GPU.
+    #[arg(long)]
+    record_boundary_data: bool,
     /// Threads a block runs on, the audio thread included (0: two thirds
     /// of the performance cores; 1: no worker threads). The output is
     /// identical for every count.
@@ -236,6 +240,11 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
             "--fast and --record-audio need --driver null".to_owned(),
         ));
     }
+    if args.record_boundary_data && args.record_session.is_none() {
+        return Err(Failure::Usage(
+            "--record-boundary-data needs --record-session".to_owned(),
+        ));
+    }
     if let Some(seconds) = args.seconds
         && !(seconds.is_finite() && seconds > 0.0)
     {
@@ -268,6 +277,16 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
 
     let mut config = RealtimeConfig::with_buffer(rate, seed, u64::from(args.buffer));
     config.engine.threads = args.threads as usize;
+    if args.record_boundary_data {
+        // About a second of delivered results per latent instance.
+        let latent = plan
+            .instances
+            .iter()
+            .filter(|i| i.descriptor.latency.is_some())
+            .count();
+        config.engine.record_boundary_data = true;
+        config.boundary_data = (rate as usize).saturating_mul(latent.max(1));
+    }
     config.rt = RtOptions {
         policy: args.rt_policy,
         computation: args.rt_computation,
@@ -290,7 +309,10 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
     };
     let mut control = Control {
         controller,
-        live: LiveRecorder::new(recorder, registry.clone()),
+        live: match args.record_boundary_data {
+            true => LiveRecorder::new(recorder, registry.clone()).with_boundary_data(),
+            false => LiveRecorder::new(recorder, registry.clone()),
+        },
         registry,
         dir,
         watch,
@@ -319,8 +341,17 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
     };
 
     let mut live = control.live;
+    // The stopped runner's own status: its last one may not have reached
+    // the control thread, and the boundary records are checked against it.
+    live.status(&ended.status);
     if let Err(error) = live.finish(ended.status.next_frame) {
         eprintln!("signal: the session's end was not recorded: {error}");
+    }
+    let boundaries = live.recorder().boundaries().cloned();
+    if let Some(reason) = boundaries.as_ref().and_then(|b| b.reason.as_ref()) {
+        eprintln!(
+            "signal: warning: the session's boundary records are incomplete ({reason}); it replays only with --ideal"
+        );
     }
     let refused = live.refused().to_vec();
     for message in &refused {
@@ -410,6 +441,13 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
             },
             "refused": refused,
             "session": args.record_session.as_ref().map(|d| d.display().to_string()),
+            "boundaries": boundaries.as_ref().map(|b| json!({
+                "complete": b.complete,
+                "data": b.data,
+                "delivered": b.delivered,
+                "missed": b.missed,
+                "reason": b.reason,
+            })),
             "audio": args.record_audio.as_ref().map(|p| p.display().to_string()),
         });
         print_stdout(&serde_json::to_string_pretty(&output).unwrap_or_default());

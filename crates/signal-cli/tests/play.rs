@@ -367,6 +367,7 @@ fn play_and_devices_take_their_flags() {
         "--rt-computation",
         "[default: 0.25]",
         "--rt-trace",
+        "--record-boundary-data",
     ] {
         assert!(help.contains(flag), "{flag} in:\n{help}");
     }
@@ -376,7 +377,12 @@ fn play_and_devices_take_their_flags() {
 
     // Refused before any device is opened.
     let project = text(&kick());
-    for flags in [&["--fast"][..], &["--record-audio", "x.wav"][..]] {
+    // `--record-boundary-data` needs `--record-session` (M2.7-4).
+    for flags in [
+        &["--fast"][..],
+        &["--record-audio", "x.wav"][..],
+        &["--record-boundary-data"][..],
+    ] {
         let mut args = vec!["play", project.as_str(), "--seconds", "1", "--json"];
         args.extend_from_slice(flags);
         let output = signal(&args);

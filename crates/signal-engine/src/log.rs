@@ -155,6 +155,22 @@ pub enum LogRecord {
         /// What was wrong.
         reason: FaultReason,
     },
+    /// Real time (M2.7-4): a latent instance's due result was delivered.
+    /// Not a line of `log.jsonl`: the [`Controller`](crate::Controller)
+    /// hands it to [`ControlSink::boundary`](crate::ControlSink::boundary), as
+    /// it does a `late_result` fault, the missed outcome.
+    Delivered {
+        /// The due frame: the first of the instance's block.
+        frame: Frame,
+        /// The instance.
+        instance: InstanceId,
+        /// Where its data is in the block's delivered results (engine-internal).
+        at: u32,
+        /// The words of delivered result carried with it: 0 without data.
+        words: u32,
+        /// Its data was recorded but did not fit a buffer or queue.
+        lost: bool,
+    },
 }
 
 impl LogRecord {
@@ -166,7 +182,8 @@ impl LogRecord {
             | LogRecord::Discard { frame, .. }
             | LogRecord::Suspend { frame, .. }
             | LogRecord::Resume { frame, .. }
-            | LogRecord::Fault { frame, .. } => frame,
+            | LogRecord::Fault { frame, .. }
+            | LogRecord::Delivered { frame, .. } => frame,
         }
     }
 
@@ -182,6 +199,7 @@ impl LogRecord {
             }
             LogRecord::Event { target, .. } | LogRecord::Discard { target, .. } => (2, target.0),
             LogRecord::Fault { instance, .. } => (3, instance.0),
+            LogRecord::Delivered { instance, .. } => (4, instance.0),
         }
     }
 }

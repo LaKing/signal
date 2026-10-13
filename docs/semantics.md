@@ -285,6 +285,8 @@ Pretty-printed JSON with a final newline:
   - `log_fnv1a64`: the hash of the bytes of `log.jsonl` exactly as written;
   - `audio_fnv1a64`: the hash of the f32 samples as `audio.wav` stores them (4 bytes each, little-endian, interleaved). That is the WAV data chunk, so both hashes can be checked from the files.
   - `same_machine` (ADR 0019 §3, M2.6-4), only when a plan of the render has an instance whose type is reproducible on the same machine and build only (a GPU-backed module): one entry per instance, by address, `{"instance", "type", "latency_blocks", "block_frames"}`. The render is then the same bit for bit on that machine and build, not across machines. Without one the key is absent and the manifest is exactly as before.
+  - `ideal` (M2.7-4, §15), only `true`, only for an ideal render of a session (`signal replay --ideal`, or a session without boundary records): every latent result was awaited, so it is not what was played. Absent otherwise.
+  - `device_conversion` (M2.7-4, §15), only `true`, only for the exact replay of a session with boundary records: `audio.wav` and `audio_fnv1a64` store each sample as the device received it (finite samples clamped to [−1, 1], anything else 0, then rounded to f32) instead of rounding it to f32 alone. Absent otherwise.
 - **FNV-1a 64** (`signal_core::fnv1a64` and the incremental `signal_core::Fnv1a64`):
   - start from `0xcbf29ce484222325`;
   - for each byte, XOR it in, then multiply by `0x100000001b3` modulo 2⁶⁴.
@@ -442,3 +444,16 @@ The engine itself fails when something unwinds in a task outside a primitive's c
   - `render` and its variants end with `RenderError::EngineFailed`; `signal render` and `signal replay` fail with that message, and write nothing.
   - The real-time runner keeps the frames of the blocks it ran before the failed one in the same callback (they completed and were valid), outputs silence from the failed block's first frame on, in that callback and every later one, and reports the failure in its status (`RunnerStatus::failure`); `signal play` stops and fails with the message, and Signal.app writes it to stderr and shows it.
 - A failure on a worker and on the calling thread take the same path and give the same error. No worker is lost: the pool keeps every thread (`ScheduleStats::task_failures` counts the failed tasks).
+
+## 15. Exact replay and ideal render
+
+M2.7-4 (audit finding 2; ADR 0019 §3). Offline the engine waits for every due result of a latent module (§7, §13); in real time it never waits, and a result not in when due is a `late_result` fault, silence for that block. A live run's output therefore depends on when results arrived, which is not in its commands. Two operations on a session (`session-format.md` §6) take that into account:
+
+- **Exact replay** reproduces the performance. It applies each recorded outcome (`session-format.md` §4a) at its due frame: a **recorded miss is enforced** without waiting (the engine asks the module's `due` once, as real time does, and calls `miss`, logging the same `late_result`), a **recorded delivery** shows the recorded data when the session has it (`inject_result`), else waits for the same device's result; before each `absorb` it lets the module **settle** (`settle`), so that work live submitted is never refused because the replay runs faster than the run did. The audio is stored as the device received it (§9, `device_conversion`). Its output and log are those of the live run, bit for bit, on the same machine and build (with recorded data, on any machine with the same build), for every *k* and thread count. A due block without a recorded outcome, or an outcome at no due block, is an error; so are incomplete records.
+- **Ideal render** awaits every result: a fresh offline render of the same edits, as `signal render` would make of them. It is what the performance would have been on an infinitely fast device. Its manifest says `ideal`.
+
+For a project without latent modules the two render the same audio and log, and nothing in its session or its plain replay changes; only an explicit `--ideal` adds the `ideal` label to the manifest. An exact replay renders at most the recorded frames; the frames after them were never played.
+
+A session's boundary records depend on when results arrived in its run, which is not in its commands: two runs of the same commands may record different outcomes, and each replays exactly to its own run.
+
+A frame is **due** for a latent instance when the frames it has run since it was prepared are a multiple of `block_frames` and at least *L* blocks (`module-contract.md`): the engine counts them, carried across swaps like every survivor's state, and the module counts its blocks the same way.

@@ -67,7 +67,7 @@ pub use driver::{CallbackSizes, Driver, DriverError, MAX_CALLBACK_FRAMES, NullDr
 pub use engine::Injection;
 pub use engine::{
     EditFull, Engine, EngineConfig, ExternalEvent, ExternalFull, InputDiscards, ParameterValue,
-    PreparedSwap,
+    PreparedSwap, Scripted,
 };
 #[doc(hidden)]
 pub use engine::{Schedule, ScheduleStats};
@@ -77,15 +77,15 @@ pub use log::{
     LogRecord, LogSource, PortId,
 };
 pub use manifest::{Manifest, Provenance, SameMachine};
-pub use offline::{Render, render, render_blocks, render_with};
+pub use offline::{Conversion, Render, render, render_blocks, render_with};
 #[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 pub use pool::spawned_workers;
 pub use pool::{Progress, Workers};
 pub use realtime::{
-    Command, CommandId, ControlError, ControlSink, Controller, Meter, Outcome,
-    PARAMETERS_PER_CALLBACK, ReadySwap, RealtimeConfig, Report, Runner, RunnerStatus, SentCommand,
-    Stamp, realtime, realtime_with,
+    BoundaryLine, BoundaryOutcome, Command, CommandId, ControlError, ControlSink, Controller,
+    Meter, Outcome, PARAMETERS_PER_CALLBACK, ReadySwap, RealtimeConfig, Report, Runner,
+    RunnerStatus, SentCommand, Stamp, device_sample, realtime, realtime_with,
 };
 #[cfg(feature = "test-hooks")]
 #[doc(hidden)]

@@ -144,3 +144,62 @@ fn runner_process_allocates_and_frees_nothing() {
     assert!(status.log_overflows > 0, "{status:?}");
     assert!(status.meter_overflows > 0, "{status:?}");
 }
+
+/// AC3 of M2.7-4: with boundary recording on (every due block's outcome, and
+/// the delivered results' data through a boundary-data queue small enough
+/// to overflow), `Runner::process` still allocates and frees nothing.
+/// `test.mixed_latent` delivers its even blocks and misses its odd ones.
+#[test]
+fn recording_boundary_outcomes_and_data_allocates_nothing() {
+    assert!(alloc_counter::is_installed());
+    let registry = common::latent_registry();
+    let plan = plan(
+        vec![
+            inst("count", "test.frames"),
+            inst("lat", "test.mixed_latent"),
+            inst("rec", "test.recorder"),
+        ],
+        vec![conn("count.out", "lat.in"), conn("lat.out", "rec.alpha")],
+    );
+    let mut config = RealtimeConfig::with_buffer(RATE, 42, 64);
+    config.engine.threads = 2;
+    config.engine.record_boundary_data = true;
+    config.boundary_data = 8;
+    config.log = 64;
+    let (mut runner, mut controller) = realtime(&plan, &registry, config).unwrap();
+
+    let audio = thread::spawn(move || {
+        let mut sizes = CallbackSizes::new(5);
+        let mut out = vec![0.0f32; MOST_FRAMES * CHANNELS];
+        let mut total = Counts::default();
+        for _ in 0..2_000 {
+            let frames = sizes.next_size().min(MOST_FRAMES);
+            let buffer = &mut out[..frames * CHANNELS];
+            let guard = Guard::start();
+            runner.process(buffer, CHANNELS);
+            let counts = guard.counts();
+            drop(guard);
+            total.allocations += counts.allocations;
+            total.deallocations += counts.deallocations;
+        }
+        (runner, total)
+    });
+    while !audio.is_finished() {
+        controller.poll(&mut ());
+        thread::sleep(Duration::from_micros(500));
+    }
+    let (runner, total) = audio.join().unwrap();
+    controller.poll(&mut ());
+
+    assert_eq!(
+        total,
+        Counts::default(),
+        "heap calls inside Runner::process"
+    );
+    let status = runner.status();
+    assert!(
+        status.delivered_results > 0 && status.late_results > 0,
+        "{status:?}"
+    );
+    assert!(status.boundary_data_overflows > 0, "{status:?}");
+}

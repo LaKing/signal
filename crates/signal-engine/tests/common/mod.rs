@@ -811,7 +811,7 @@ pub fn plan(instances: Vec<InstanceDef>, connections: Vec<ConnectionDef>) -> Exe
         connections,
         exports: Exports::default(),
     };
-    build_plan(&root, &[], &registry(), 1).unwrap()
+    build_plan(&root, &[], &latent_registry(), 1).unwrap()
 }
 
 /// An engine for `plan` at `sample_rate` and seed 42.
@@ -927,4 +927,124 @@ pub fn random_order(plan: &ExecutionPlan, seed: u64) -> Vec<InstanceAddress> {
         order.push(remaining.remove(pick));
     }
     order
+}
+
+/// M2.7-4: `test.mixed_latent`, a latent module without a GPU: 1 block of
+/// 4 frames, `same_machine`; `out` in block m is Σ `in` over block m − 1.
+/// The due result of an even block is in at the first `due`, an odd
+/// block's only at the third, so real time delivers the even blocks and
+/// misses the odd ones. `polls` is the `due` calls of the current block,
+/// `settles` the `settle` calls since `prepare`. Its delivered result is one
+/// word, which an exact replay may inject.
+pub const MIXED_LATENT: ModuleDescriptor = ModuleDescriptor {
+    latency: Some(signal_core::BlockLatency {
+        latency_blocks: 1,
+        block_frames: MIXED_BLOCK as u32,
+    }),
+    reproducibility: signal_core::Reproducibility::SameMachine,
+    ..descriptor(
+        "test.mixed_latent",
+        &[
+            port("in", In, Signal, Audio),
+            port("out", Out, Signal, Audio),
+            port("polls", Out, Signal, Control),
+            port("settles", Out, Signal, Control),
+        ],
+        &[],
+        Feedthrough::StateOutput,
+        None,
+    )
+};
+
+/// `test.mixed_latent`'s block, in frames.
+pub const MIXED_BLOCK: usize = 4;
+
+#[derive(Default)]
+pub struct MixedLatent {
+    frame: usize,
+    block: u64,
+    sum: f64,
+    pending: f64,
+    shown: [f32; 1],
+    polls: u32,
+    settles: u32,
+    resolved: bool,
+}
+
+impl StateOutputPrimitive for MixedLatent {
+    fn describe() -> ModuleDescriptor {
+        MIXED_LATENT
+    }
+    fn prepare(&mut self, _ctx: &PrepareContext) {
+        *self = MixedLatent::default();
+    }
+    fn reset(&mut self) {
+        *self = MixedLatent::default();
+    }
+    fn due(&mut self) -> signal_core::Due {
+        use signal_core::Due;
+        if self.frame != 0 || self.resolved {
+            return Due::Ready;
+        }
+        if self.block == 0 {
+            self.resolved = true;
+            return Due::Ready;
+        }
+        self.polls += 1;
+        let needed = if self.block.is_multiple_of(2) { 1 } else { 3 };
+        if self.polls < needed {
+            return Due::Pending;
+        }
+        self.shown = [self.pending as f32];
+        self.resolved = true;
+        Due::Ready
+    }
+    fn miss(&mut self) {
+        self.shown = [0.0];
+        self.resolved = true;
+    }
+    fn result_words(&self) -> usize {
+        1
+    }
+    fn delivered_result(&self) -> &[f32] {
+        &self.shown
+    }
+    fn inject_result(&mut self, words: &[f32]) -> bool {
+        let [word] = words else {
+            return false;
+        };
+        self.shown = [*word];
+        self.resolved = true;
+        true
+    }
+    fn settle(&mut self) -> signal_core::Due {
+        self.settles += 1;
+        signal_core::Due::Ready
+    }
+    fn emit(&self, outputs: &mut Outputs<'_>) {
+        outputs.signal(0).fill(f64::from(self.shown[0]));
+        outputs.signal(1).fill(f64::from(self.polls));
+        outputs.signal(2).fill(f64::from(self.settles));
+    }
+    fn absorb(&mut self, inputs: &Inputs<'_>) {
+        self.sum += inputs.signal(0).first().copied().unwrap_or(0.0);
+        self.frame += 1;
+        if self.frame == MIXED_BLOCK {
+            self.pending = self.sum;
+            self.sum = 0.0;
+            self.frame = 0;
+            self.block += 1;
+            self.resolved = false;
+            self.polls = 0;
+        }
+    }
+}
+
+/// [`registry`] plus `test.mixed_latent`.
+pub fn latent_registry() -> Registry {
+    let mut registry = registry();
+    registry
+        .register(state_output_type::<MixedLatent>())
+        .unwrap();
+    registry
 }

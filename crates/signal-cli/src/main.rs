@@ -62,6 +62,9 @@ pub(crate) enum Failure {
     Io(String),
     /// The audio device cannot play the project (exit 1).
     Device(String),
+    /// A valid session cannot be replayed as asked (exit 1): its boundary
+    /// records are incomplete, or a recorded result cannot be reproduced.
+    Replay(String),
     /// A bug: something that validation should have ruled out.
     Internal(String),
 }
@@ -89,6 +92,7 @@ impl Failure {
             ),
             Failure::Io(message) => ("io", message.clone(), &[][..]),
             Failure::Device(message) => ("device", message.clone(), &[][..]),
+            Failure::Replay(message) => ("replay", message.clone(), &[][..]),
             Failure::Internal(message) => ("internal", message.clone(), &[][..]),
         };
         if json {

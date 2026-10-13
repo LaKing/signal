@@ -45,6 +45,20 @@ pub struct Manifest {
     /// when there are none: the render is then bit-exact on any machine.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub same_machine: Vec<SameMachine>,
+    /// An ideal render of a session (`signal replay --ideal`, M2.7-4): every
+    /// result of a latent module was awaited, so it is not what was played.
+    /// Absent unless true.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ideal: bool,
+    /// The exact replay of a session with boundary records (M2.7-4): the
+    /// audio is stored as the device received it, clamped to [−1, 1] and
+    /// non-finite samples 0. Absent unless true.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub device_conversion: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// An instance whose output is reproducible on the same machine only.

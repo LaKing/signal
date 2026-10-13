@@ -17,10 +17,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use signal_core::{
-    Combine, DirectPrimitive, Direction, Due, Event, EventPayload, EventSink, Feedthrough, Frame,
-    Inputs, InstanceAddress, ModuleDescriptor, Outputs, PortAddress, PortKind, PortShape,
-    PrepareContext, Primitive, Range, RateDivisor, Registry, Reproducibility, RngStream, SinkKind,
-    StateOutputPrimitive,
+    BlockLatency, Combine, DirectPrimitive, Direction, Due, Event, EventPayload, EventSink,
+    Feedthrough, Frame, Inputs, InstanceAddress, ModuleDescriptor, Outputs, PortAddress, PortKind,
+    PortShape, PrepareContext, Primitive, Range, RateDivisor, Registry, Reproducibility, RngStream,
+    SinkKind, StateOutputPrimitive,
 };
 use signal_graph::ExecutionPlan;
 
@@ -162,6 +162,15 @@ pub struct EngineConfig {
     /// waited for: a result not ready when due is a `late_result` fault.
     /// Offline (`false`) the engine waits for it, so renders stay exact.
     pub realtime: bool,
+    /// Real time (M2.7-4): with each `delivered` boundary record, also carry
+    /// the latent module's delivered result
+    /// ([`delivered_result`](signal_core::StateOutputPrimitive::delivered_result)),
+    /// for a session recorded with `--record-boundary-data`.
+    pub record_boundary_data: bool,
+    /// Offline exact replay (M2.7-4, `docs/semantics.md` §15): every due
+    /// result of a latent module follows the outcome pushed with
+    /// [`Engine::push_boundary`] instead of being waited for.
+    pub scripted_boundaries: bool,
     /// When segments run on the workers (tests and the bench).
     #[doc(hidden)]
     pub schedule: Schedule,
@@ -184,8 +193,39 @@ impl EngineConfig {
             threads: 1,
             schedule: Schedule::DEFAULT,
             realtime: false,
+            record_boundary_data: false,
+            scripted_boundaries: false,
         }
     }
+}
+
+/// A recorded outcome of a latent module's due block, pushed for an exact
+/// replay ([`Engine::push_boundary`], M2.7-4).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Scripted {
+    /// The result was missed: the engine asks `due` once, without waiting,
+    /// and then calls `miss`, as in real time.
+    Missed,
+    /// The result was delivered: with the recorded words, which the module
+    /// shows in place of its device's; without, the engine waits for it.
+    Delivered(Option<Box<[f32]>>),
+}
+
+/// A pushed boundary outcome with its frame.
+#[derive(Debug)]
+struct PushedBoundary {
+    at: Frame,
+    instance: InstanceAddress,
+    outcome: Scripted,
+}
+
+/// A pushed boundary outcome of the current block, resolved to its instance.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StagedBoundary {
+    slot: usize,
+    frame: Frame,
+    /// Its index in the engine's queue of pushed outcomes.
+    entry: usize,
 }
 
 /// An event from outside the graph (ADR 0016 §3): from the session log, the CLI
@@ -279,6 +319,14 @@ pub(crate) struct Slot {
     /// Declares a latency (ADR 0019 §3): asked [`StateOutputPrimitive::due`]
     /// before each `emit`.
     latent: bool,
+    /// Its declared latency, which says which of its frames are due.
+    latency: Option<BlockLatency>,
+    /// A latent instance's frames run (absorbed) since it was prepared: the
+    /// module counts its blocks the same way (`module-contract.md`).
+    latent_frames: u64,
+    /// The words its delivered result has at most
+    /// ([`StateOutputPrimitive::result_words`]); 0 without one.
+    result_words: usize,
     signal_in: Span<usize>,
     event_in: Span<usize>,
     signal_out: Span<usize>,
@@ -427,6 +475,36 @@ pub(crate) struct Out {
     input_overflows: u64,
     /// Due results of latent modules given up on (`late_result` faults).
     late_results: u64,
+    /// Boundary bookkeeping (M2.7-4).
+    boundary: BoundaryCounts,
+    /// The delivered results that `Delivered` records carry, by their `at`.
+    boundary_data: Vec<f32>,
+}
+
+/// What a block did at latent modules' boundaries (M2.7-4), beside
+/// `late_results`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BoundaryCounts {
+    /// Due results delivered (real time).
+    pub(crate) delivered: u64,
+    /// Delivered results whose data did not fit the block's buffer.
+    pub(crate) data_overflows: u64,
+    /// Exact replay: staged outcomes applied.
+    pub(crate) used: u64,
+    /// Exact replay: due frames without a staged outcome.
+    pub(crate) unscripted: u64,
+    /// Exact replay: recorded deliveries this run could not reproduce.
+    pub(crate) unreproduced: u64,
+}
+
+impl BoundaryCounts {
+    fn add(&mut self, other: BoundaryCounts) {
+        self.delivered = self.delivered.saturating_add(other.delivered);
+        self.data_overflows = self.data_overflows.saturating_add(other.data_overflows);
+        self.used = self.used.saturating_add(other.used);
+        self.unscripted = self.unscripted.saturating_add(other.unscripted);
+        self.unreproduced = self.unreproduced.saturating_add(other.unreproduced);
+    }
 }
 
 impl Out {
@@ -436,6 +514,8 @@ impl Out {
         self.log_overflows = 0;
         self.input_overflows = 0;
         self.late_results = 0;
+        self.boundary = BoundaryCounts::default();
+        self.boundary_data.clear();
     }
 }
 
@@ -644,6 +724,17 @@ impl PlanState {
                 feedthrough: descriptor.feedthrough,
                 audio_sink: descriptor.sink == Some(SinkKind::Audio),
                 latent: descriptor.latency.is_some(),
+                latency: descriptor.latency,
+                latent_frames: 0,
+                result_words: match (&primitive, survivor) {
+                    (Some(Primitive::StateOutput(module)), _) if descriptor.latency.is_some() => {
+                        module.result_words()
+                    }
+                    (_, Some(o)) => old
+                        .and_then(|old| old.cells.slots.get().get(o))
+                        .map_or(0, |s| s.result_words),
+                    _ => 0,
+                },
                 signal_in: starts.0..signal_inputs,
                 event_in: starts.1..event_inputs.len(),
                 signal_out: starts.2..output_audio.len(),
@@ -804,6 +895,15 @@ impl PlanState {
             + EVENTS_PER_FRAME * capacity * event_connections;
         let log = Vec::with_capacity(log_capacity);
         let log_order = Vec::with_capacity(log.capacity());
+        // Delivered results carried in a block (M2.7-4): each latent
+        // instance's words, once per of its blocks a block can begin.
+        let data_words = |slot: &Slot| match slot.latency {
+            Some(l) if config.record_boundary_data && config.realtime => {
+                slot.result_words * (capacity / (l.block_frames.max(1) as usize) + 1)
+            }
+            _ => 0,
+        };
+        let boundary_data = Vec::with_capacity(slots.iter().map(data_words).sum());
 
         // The tasks (ADR 0019 §2), from each instance's type's static cost.
         let cost_ns: Vec<f64> = types
@@ -834,6 +934,7 @@ impl PlanState {
         let mut outs = Vec::new();
         if threads > 1 {
             let mut bound = vec![task_spare(capacity); tasks.len()];
+            let mut words = vec![0usize; tasks.len()];
             for (i, slot) in slots.iter().enumerate() {
                 let inputs = event_inputs.get(slot.event_in.clone()).unwrap_or(&[]);
                 let targets = params.get(slot.params.clone()).unwrap_or(&[]);
@@ -852,11 +953,16 @@ impl PlanState {
                         *b += capacity;
                     }
                 }
+                if let Some(w) = words.get_mut(t) {
+                    *w += data_words(slot);
+                }
             }
             outs = bound
                 .into_iter()
-                .map(|b| Out {
+                .zip(words)
+                .map(|(b, w)| Out {
                     log: Vec::with_capacity(b),
+                    boundary_data: Vec::with_capacity(w),
                     ..Out::default()
                 })
                 .collect();
@@ -928,6 +1034,7 @@ impl PlanState {
             cells,
             out: Out {
                 log,
+                boundary_data,
                 ..Out::default()
             },
             log_order,
@@ -1033,7 +1140,14 @@ impl PlanState {
                 port: self.ports.get(port.0),
                 reason,
             },
+            // Not a line of `log.jsonl`: it goes to `ControlSink::boundary`.
+            LogRecord::Delivered { .. } => return None,
         })
+    }
+
+    /// The address of instance `instance` of this plan.
+    pub(crate) fn instance_address(&self, instance: InstanceId) -> Option<&InstanceAddress> {
+        self.instances.get(instance.0)
     }
 
     /// The id and role of `port`.
@@ -1134,6 +1248,8 @@ fn move_instance(new: &mut PlanState, old: &mut PlanState, n: usize, o: usize) {
         return;
     };
     ns.suspended = os.suspended;
+    ns.latent_frames = os.latent_frames;
+    ns.result_words = os.result_words;
     ns.fault = os.fault;
     ns.fade = os.fade;
     ns.discards = os.discards;
@@ -1333,6 +1449,16 @@ pub struct Engine {
     pushed_edits: VecDeque<PushedEdit>,
     edits_consumed: usize,
     last_pushed_edit_at: Frame,
+    /// Exact replay (M2.7-4): pushed boundary outcomes in frame order; the
+    /// first `boundaries_consumed` were staged.
+    boundaries: VecDeque<PushedBoundary>,
+    boundaries_consumed: usize,
+    /// The current block's pushed outcomes, sorted by (instance, frame).
+    staged_boundaries: Vec<StagedBoundary>,
+    /// Boundary bookkeeping since the start.
+    boundary: BoundaryCounts,
+    /// Exact replay: pushed outcomes that applied to no due frame.
+    boundary_unused: u64,
 
     /// (version, plan version) of a swap committed for the next frame.
     swap_record: Option<(u64, u64)>,
@@ -1521,6 +1647,11 @@ impl Engine {
             scheduled_next: 0,
             pushed_edits: VecDeque::with_capacity(config.queue_capacity),
             edits_consumed: 0,
+            boundaries: VecDeque::with_capacity(config.queue_capacity),
+            boundaries_consumed: 0,
+            staged_boundaries: Vec::with_capacity(config.queue_capacity),
+            boundary: BoundaryCounts::default(),
+            boundary_unused: 0,
             last_pushed_edit_at: Frame::ZERO,
             swap_record: None,
             discards: InputDiscards::default(),
@@ -1673,6 +1804,62 @@ impl Engine {
     pub fn reclaim_edits(&mut self) -> impl Iterator<Item = InstanceAddress> + '_ {
         let used = mem::take(&mut self.edits_consumed);
         self.pushed_edits.drain(..used).map(|edit| edit.instance)
+    }
+
+    /// Exact replay (M2.7-4, offline, with
+    /// [`scripted_boundaries`](EngineConfig::scripted_boundaries)): queues the
+    /// recorded outcome of `instance`'s due block at `frame`. Push them in
+    /// frame order, before the block that holds their frame runs. The
+    /// instance is resolved against the plan running then; an outcome that
+    /// meets no due frame is counted in
+    /// [`boundary_mismatches`](Engine::boundary_mismatches). A full queue
+    /// hands the outcome back.
+    pub fn push_boundary(
+        &mut self,
+        instance: InstanceAddress,
+        frame: Frame,
+        outcome: Scripted,
+    ) -> Result<(), Scripted> {
+        if self.boundaries.len() >= self.config.queue_capacity {
+            return Err(outcome);
+        }
+        self.boundaries.push_back(PushedBoundary {
+            at: frame,
+            instance,
+            outcome,
+        });
+        Ok(())
+    }
+
+    /// Drops the pushed boundary outcomes that have been staged, freeing
+    /// their queue space (offline only).
+    pub fn reclaim_boundaries(&mut self) {
+        let used = mem::take(&mut self.boundaries_consumed);
+        self.boundaries.drain(..used);
+    }
+
+    /// The pushed boundary outcomes of the block of `frames` frames from
+    /// `start`, resolved to instances and sorted by (instance, frame).
+    fn stage_boundaries(&mut self, start: Frame, frames: usize) {
+        self.staged_boundaries.clear();
+        let end = start.0.saturating_add(frames as u64);
+        while let Some(pushed) = self.boundaries.get(self.boundaries_consumed) {
+            if pushed.at.0 >= end {
+                break;
+            }
+            let entry = self.boundaries_consumed;
+            self.boundaries_consumed += 1;
+            match self.plan.instance_ids.get(&pushed.instance) {
+                Some(&slot) if pushed.at >= start => self.staged_boundaries.push(StagedBoundary {
+                    slot,
+                    frame: pushed.at,
+                    entry,
+                }),
+                _ => self.boundary_unused = self.boundary_unused.saturating_add(1),
+            }
+        }
+        self.staged_boundaries
+            .sort_unstable_by_key(|s| (s.slot, s.frame));
     }
 
     /// Instantiates `plan` for a swap (ADR 0006); call it off the real-time
@@ -1834,6 +2021,10 @@ impl Engine {
         }
 
         self.stage_externals(start, k);
+        if self.config.scripted_boundaries {
+            self.stage_boundaries(start, k);
+        }
+        let used_before = self.boundary.used;
         for events in self.plan.cells.emitted.get_mut() {
             events.clear();
         }
@@ -1855,6 +2046,9 @@ impl Engine {
             a = b;
         }
 
+        let used = self.boundary.used.saturating_sub(used_before);
+        let unused = (self.staged_boundaries.len() as u64).saturating_sub(used);
+        self.boundary_unused = self.boundary_unused.saturating_add(unused);
         self.next_frame = Frame(start.0.saturating_add(k as u64));
         k
     }
@@ -2025,6 +2219,9 @@ impl Engine {
             start: self.block_start,
             fade_len: self.fade_len,
             wait: !self.config.realtime,
+            record_data: self.config.realtime && self.config.record_boundary_data,
+            script: (self.config.scripted_boundaries && !self.config.realtime)
+                .then_some((&self.staged_boundaries[..], &self.boundaries)),
             a,
             b,
         };
@@ -2052,12 +2249,43 @@ impl Engine {
                 }
                 let main = &mut plan.out;
                 for out in plan.cells.outs.get_mut() {
-                    for record in out.log.drain(..) {
-                        push_record(&mut main.log, &mut main.log_overflows, record);
-                    }
                     main.log_overflows = main.log_overflows.saturating_add(out.log_overflows);
                     main.input_overflows = main.input_overflows.saturating_add(out.input_overflows);
                     main.late_results = main.late_results.saturating_add(out.late_results);
+                    main.boundary.add(out.boundary);
+                    out.boundary = BoundaryCounts::default();
+                    let (base, words) = (main.boundary_data.len(), out.boundary_data.len());
+                    let fits = base + words <= main.boundary_data.capacity();
+                    if fits {
+                        main.boundary_data.extend_from_slice(&out.boundary_data);
+                    }
+                    out.boundary_data.clear();
+                    for record in out.log.drain(..) {
+                        let record = match record {
+                            LogRecord::Delivered {
+                                frame,
+                                instance,
+                                at,
+                                words,
+                                lost,
+                            } if words > 0 => {
+                                let lost = lost || !fits;
+                                if !fits {
+                                    main.boundary.data_overflows =
+                                        main.boundary.data_overflows.saturating_add(1);
+                                }
+                                LogRecord::Delivered {
+                                    frame,
+                                    instance,
+                                    at: if lost { 0 } else { at + base as u32 },
+                                    words: if lost { 0 } else { words },
+                                    lost,
+                                }
+                            }
+                            record => record,
+                        };
+                        push_record(&mut main.log, &mut main.log_overflows, record);
+                    }
                 }
             }
             pool => {
@@ -2134,6 +2362,7 @@ impl Engine {
         self.late_results = self
             .late_results
             .saturating_add(mem::take(&mut out.late_results));
+        self.boundary.add(mem::take(&mut out.boundary));
         None
     }
 
@@ -2295,18 +2524,36 @@ impl Engine {
     /// after each [`run_block`](Engine::run_block), and before a
     /// [`commit_swap`](Engine::commit_swap), which refuses an undrained log.
     pub fn drain_log(&mut self, out: &mut impl FnMut(&LogRecord)) {
+        self.drain_log_with(&mut |record, _| out(record));
+    }
+
+    /// [`drain_log`](Engine::drain_log), handing each record with the
+    /// delivered result it carries (a `Delivered` record with `words`, in
+    /// real time with
+    /// [`record_boundary_data`](EngineConfig::record_boundary_data)); empty
+    /// for every other record. Allocates nothing.
+    pub fn drain_log_with(&mut self, out: &mut impl FnMut(&LogRecord, &[f32])) {
         let plan = &mut self.plan;
         let log = &plan.out.log;
         plan.log_order.clear();
         plan.log_order.extend(0..log.len());
         plan.log_order
             .sort_unstable_by_key(|&k| (log.get(k).map(|r| (r.frame(), r.order())), k));
+        let data = &plan.out.boundary_data;
         for &k in &plan.log_order {
             if let Some(record) = log.get(k) {
-                out(record);
+                let words = match *record {
+                    LogRecord::Delivered { at, words, .. } => {
+                        let (at, words) = (at as usize, words as usize);
+                        data.get(at..at + words).unwrap_or(&[])
+                    }
+                    _ => &[],
+                };
+                out(record, words);
             }
         }
         plan.out.log.clear();
+        plan.out.boundary_data.clear();
     }
 
     /// Log records dropped because the block's log was full. The buffer is
@@ -2320,6 +2567,34 @@ impl Engine {
     /// a result was lost.
     pub fn late_results(&self) -> u64 {
         self.late_results
+    }
+
+    /// Real time (M2.7-4): due results of latent modules delivered, since
+    /// the start; each is a `Delivered` record.
+    pub fn delivered_results(&self) -> u64 {
+        self.boundary.delivered
+    }
+
+    /// Delivered results whose data did not fit the block's buffer (their
+    /// records say `lost`). The buffer is sized so that this stays 0.
+    pub fn boundary_data_overflows(&self) -> u64 {
+        self.boundary.data_overflows
+    }
+
+    /// Exact replay (M2.7-4): due frames without a pushed outcome, plus
+    /// pushed outcomes that met no due frame. 0 when the recorded outcomes
+    /// and this run's due frames agree.
+    pub fn boundary_mismatches(&self) -> u64 {
+        self.boundary
+            .unscripted
+            .saturating_add(self.boundary_unused)
+    }
+
+    /// Exact replay (M2.7-4): recorded deliveries this run could not
+    /// reproduce (the device lost the result, or the module refused the
+    /// recorded data).
+    pub fn boundary_unreproduced(&self) -> u64 {
+        self.boundary.unreproduced
     }
 
     /// The current plan's instances whose type is reproducible on the same
@@ -2532,6 +2807,11 @@ struct Fixed<'x> {
     fade_len: u64,
     /// Offline: wait for a latent module's due result (ADR 0019 §3).
     wait: bool,
+    /// Real time: carry delivered results with their records (M2.7-4).
+    record_data: bool,
+    /// Exact replay: the block's pushed outcomes, sorted by (instance,
+    /// frame), and the queue they index (M2.7-4).
+    script: Option<(&'x [StagedBoundary], &'x VecDeque<PushedBoundary>)>,
     a: usize,
     b: usize,
 }
@@ -2686,10 +2966,15 @@ fn absorb(fx: &Fixed<'_>, v: &mut CallView<'_>, i: usize, f: usize) {
     }
     let ports = (v.slot.signal_in.len(), v.slot.params.len());
     load_call(v.lane, (&v.signal_in, &v.param_rows), ports, f, 1);
-    if let Some(Primitive::StateOutput(module)) = v.primitive.as_mut()
-        && !guarded(|| absorb_call(module.as_mut(), (&*v.slot, &*v.lane)))
-    {
-        absorb_panicked(fx, &mut running(v), i, f);
+    if let Some(Primitive::StateOutput(module)) = v.primitive.as_mut() {
+        let completed = guarded(|| {
+            settle(fx, module.as_mut(), v.slot);
+            absorb_call(module.as_mut(), (&*v.slot, &*v.lane));
+        });
+        count_frame(v.slot);
+        if !completed {
+            absorb_panicked(fx, &mut running(v), i, f);
+        }
     }
 }
 
@@ -2699,7 +2984,9 @@ fn absorb(fx: &Fixed<'_>, v: &mut CallView<'_>, i: usize, f: usize) {
 /// given up on (or lost) is a `late_result` fault: the module outputs
 /// silence for that block, and the fault is logged and counted. The
 /// instance is not muted. Offline waiting yields the thread; real time
-/// calls `due` once.
+/// calls `due` once, and a due result it delivers is a `Delivered` record
+/// (M2.7-4). An exact replay applies the outcome pushed for the frame
+/// instead (`docs/semantics.md` §15).
 fn await_due(
     fx: &Fixed<'_>,
     module: &mut dyn StateOutputPrimitive,
@@ -2707,13 +2994,93 @@ fn await_due(
     out: &mut Out,
     (i, f): (usize, usize),
 ) {
+    if let Some((staged, queue)) = fx.script {
+        let frame = fx.frame(f);
+        // An outcome applies only at a due frame; one pushed for any other
+        // frame stays unused, a mismatch.
+        let pushed = staged
+            .binary_search_by_key(&(i, frame), |s| (s.slot, s.frame))
+            .ok()
+            .filter(|_| due_frame(slot))
+            .and_then(|k| staged.get(k))
+            .and_then(|s| queue.get(s.entry));
+        match pushed.map(|p| &p.outcome) {
+            Some(Scripted::Missed) => {
+                out.boundary.used = out.boundary.used.saturating_add(1);
+                // Once, without waiting, as in real time: the module's own
+                // bookkeeping (recycling) runs as it did live.
+                let _ = module.due();
+                missed(fx, module, slot, out, (i, f));
+            }
+            Some(Scripted::Delivered(Some(words))) => {
+                out.boundary.used = out.boundary.used.saturating_add(1);
+                if !module.inject_result(words) {
+                    out.boundary.unreproduced = out.boundary.unreproduced.saturating_add(1);
+                }
+            }
+            Some(Scripted::Delivered(None)) => {
+                out.boundary.used = out.boundary.used.saturating_add(1);
+                if !wait_due(module) {
+                    out.boundary.unreproduced = out.boundary.unreproduced.saturating_add(1);
+                    missed(fx, module, slot, out, (i, f));
+                }
+            }
+            None => {
+                if due_frame(slot) {
+                    out.boundary.unscripted = out.boundary.unscripted.saturating_add(1);
+                }
+                if !wait_due(module) {
+                    missed(fx, module, slot, out, (i, f));
+                }
+            }
+        }
+        return;
+    }
+    if fx.wait {
+        if !wait_due(module) {
+            missed(fx, module, slot, out, (i, f));
+        }
+        return;
+    }
+    if module.due() != Due::Ready {
+        missed(fx, module, slot, out, (i, f));
+    } else if due_frame(slot) {
+        delivered(fx, module, slot, out, (i, f));
+    }
+}
+
+/// Offline: asks `due` until it is not `Pending`, yielding the thread;
+/// whether the result is in.
+fn wait_due(module: &mut dyn StateOutputPrimitive) -> bool {
     loop {
         match module.due() {
-            Due::Ready => return,
-            Due::Pending if fx.wait => std::thread::yield_now(),
-            Due::Pending | Due::Lost => break,
+            Due::Ready => return true,
+            Due::Pending => std::thread::yield_now(),
+            Due::Lost => return false,
         }
     }
+}
+
+/// Whether the latent instance's next frame is the first of a block whose
+/// result is due: its `latent_frames` (frames run since it was prepared) at
+/// a block boundary, from block *L* on (`module-contract.md`).
+fn due_frame(slot: &Slot) -> bool {
+    slot.latency.is_some_and(|l| {
+        let block = u64::from(l.block_frames.max(1));
+        slot.latent_frames.is_multiple_of(block)
+            && slot.latent_frames / block >= u64::from(l.latency_blocks)
+    })
+}
+
+/// The module misses its due result: `miss`, counted and logged as a
+/// `late_result` fault.
+fn missed(
+    fx: &Fixed<'_>,
+    module: &mut dyn StateOutputPrimitive,
+    slot: &Slot,
+    out: &mut Out,
+    (i, f): (usize, usize),
+) {
     module.miss();
     out.late_results = out.late_results.saturating_add(1);
     let port = fx
@@ -2729,6 +3096,59 @@ fn await_due(
         reason: FaultReason::LateResult,
     };
     push_record(&mut out.log, &mut out.log_overflows, record);
+}
+
+/// Real time: the due result was delivered. Counted, and recorded as a
+/// `Delivered` record, with the result's words when they are carried and
+/// fit the block's buffer (allocates nothing).
+fn delivered(
+    fx: &Fixed<'_>,
+    module: &mut dyn StateOutputPrimitive,
+    slot: &Slot,
+    out: &mut Out,
+    (i, f): (usize, usize),
+) {
+    out.boundary.delivered = out.boundary.delivered.saturating_add(1);
+    let (mut at, mut words, mut lost) = (0, 0, false);
+    if fx.record_data && slot.result_words > 0 {
+        let result = module.delivered_result();
+        let data = &mut out.boundary_data;
+        if data.len() + result.len() <= data.capacity() {
+            at = data.len() as u32;
+            words = result.len() as u32;
+            data.extend_from_slice(result);
+        } else {
+            lost = true;
+            out.boundary.data_overflows = out.boundary.data_overflows.saturating_add(1);
+        }
+    }
+    let record = LogRecord::Delivered {
+        frame: fx.frame(f),
+        instance: InstanceId(i),
+        at,
+        words,
+        lost,
+    };
+    push_record(&mut out.log, &mut out.log_overflows, record);
+}
+
+/// After an `absorb` of a latent instance: one more of its frames run.
+fn count_frame(slot: &mut Slot) {
+    if slot.latency.is_some() {
+        slot.latent_frames = slot.latent_frames.saturating_add(1);
+    }
+}
+
+/// Exact replay, before an `absorb` of a latent instance: yields while the
+/// module cannot yet accept the work `absorb` may submit
+/// ([`StateOutputPrimitive::settle`]).
+fn settle(fx: &Fixed<'_>, module: &mut dyn StateOutputPrimitive, slot: &Slot) {
+    if fx.script.is_none() || slot.latency.is_none() {
+        return;
+    }
+    while module.settle() == Due::Pending {
+        std::thread::yield_now();
+    }
 }
 
 /// A view's parts for [`gather`].
@@ -3182,10 +3602,16 @@ fn whole_absorb(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, f: usize) {
     let completed = match (w.slots.get(i), w.primitives.get_mut(i)) {
         (Some(slot), Some(Some(Primitive::StateOutput(module)))) => {
             let lane = &*w.lane;
-            guarded(|| absorb_call(module.as_mut(), (slot, lane)))
+            guarded(|| {
+                settle(fx, module.as_mut(), slot);
+                absorb_call(module.as_mut(), (slot, lane));
+            })
         }
         _ => true,
     };
+    if let Some(slot) = w.slots.get_mut(i) {
+        count_frame(slot);
+    }
     if !completed && let Some(mut r) = w.running(i) {
         absorb_panicked(fx, &mut r, i, f);
     }

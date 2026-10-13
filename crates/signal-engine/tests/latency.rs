@@ -8,15 +8,15 @@
 
 mod common;
 
-use common::{conn, inst, plan, port_addr};
+use common::{MIXED_BLOCK, conn, inst, plan, port_addr};
 use signal_core::{
-    BlockLatency, Direction, Due, Feedthrough, Inputs, ModuleDescriptor, ModuleType, Outputs,
-    PortDescriptor, PortKind, PortShape, PrepareContext, Primitive, RateDivisor, Registry,
-    RegistryError, Reproducibility, StateOutputPrimitive,
+    BlockLatency, Direction, Due, Feedthrough, Frame, Inputs, InstanceAddress, ModuleDescriptor,
+    ModuleType, Outputs, PortDescriptor, PortKind, PortShape, PrepareContext, Primitive,
+    RateDivisor, Registry, RegistryError, Reproducibility, StateOutputPrimitive,
 };
 use signal_engine::{
-    ControlSink, Driver, Engine, EngineConfig, FaultReason, LogLine, NullDriver, RealtimeConfig,
-    SameMachine, Schedule, realtime, render,
+    BoundaryLine, BoundaryOutcome, ControlSink, Driver, Engine, EngineConfig, FaultReason, LogLine,
+    NullDriver, RealtimeConfig, SameMachine, Schedule, Scripted, realtime, render,
 };
 use signal_graph::{CompositeDef, Exports, build_plan};
 
@@ -305,4 +305,225 @@ fn the_manifest_records_same_machine_instances() {
     assert!(r.same_machine.is_empty());
     let json = serde_json::to_value(r.manifest(Default::default())).unwrap();
     assert!(json.get("same_machine").is_none(), "{json}");
+}
+
+// M2.7-4: boundary outcomes. `test.mixed_latent` (tests/common) delivers its
+// even blocks and misses its odd ones in real time.
+
+/// The frame counter into `lat`; `lat.out` into the recorder's `alpha`, and
+/// `lat.<second>` (`polls` or `settles`) into its `zeta`.
+fn mixed_plan(registry: &Registry, second: &str) -> signal_graph::ExecutionPlan {
+    let root = CompositeDef {
+        name: "project".to_owned(),
+        instances: vec![
+            inst("count", "test.frames"),
+            inst("lat", "test.mixed_latent"),
+            inst("rec", "test.recorder"),
+        ],
+        connections: vec![
+            conn("count.out", "lat.in"),
+            conn("lat.out", "rec.alpha"),
+            conn(&format!("lat.{second}"), "rec.zeta"),
+        ],
+        exports: Exports::default(),
+    };
+    build_plan(&root, &[], registry, 1).unwrap()
+}
+
+/// The recorder's `zeta` input (its first channel) of a render.
+fn zeta(samples: &[f64]) -> Vec<f64> {
+    samples.iter().step_by(2).copied().collect()
+}
+
+/// The recorded outcome of `lat`'s due block m (frames 4m …): missed for
+/// m ≡ 0 (mod 3), delivered and awaited for m ≡ 1, delivered with the
+/// recorded word 42 + m for m ≡ 2.
+fn script(m: u64) -> Scripted {
+    match m % 3 {
+        0 => Scripted::Missed,
+        1 => Scripted::Delivered(None),
+        _ => Scripted::Delivered(Some(vec![42.0 + m as f32].into_boxed_slice())),
+    }
+}
+
+fn scripted_config(threads: usize, k: usize) -> EngineConfig {
+    EngineConfig {
+        threads,
+        block_capacity: k,
+        schedule: Schedule::FORCED,
+        scripted_boundaries: true,
+        ..EngineConfig::new(48_000, 42)
+    }
+}
+
+/// An exact replay applies each pushed outcome at its due frame: a miss
+/// without waiting (`due` asked once, then `miss`, a `late_result` fault),
+/// a delivery with data by showing the data, one without by waiting; the
+/// same for every *k* and thread count.
+#[test]
+fn exact_replay_applies_the_pushed_outcomes_for_any_k_and_threads() {
+    let registry = common::latent_registry();
+    let plan = mixed_plan(&registry, "polls");
+    let frames = 41u64;
+    let mut renders = Vec::new();
+    for (threads, k) in [(1, 256), (1, 1), (1, 3), (2, 5), (4, 256)] {
+        let mut engine =
+            Engine::new(&plan, &registry, scripted_config(threads, k), Vec::new()).unwrap();
+        for m in 1..=frames / 4 {
+            engine
+                .push_boundary("/lat".parse().unwrap(), Frame(4 * m), script(m))
+                .unwrap();
+        }
+        let r = render(&mut engine, frames).unwrap();
+        assert_eq!(
+            engine.boundary_mismatches(),
+            0,
+            "{threads} threads, k = {k}"
+        );
+        assert_eq!(engine.boundary_unreproduced(), 0);
+        assert_eq!(
+            engine.late_results(),
+            (1..=frames / 4).filter(|m| m.is_multiple_of(3)).count() as u64
+        );
+        let (out, polls) = (alpha(&r.samples), zeta(&r.samples));
+        for (n, (&y, &p)) in out.iter().zip(&polls).enumerate() {
+            let m = (n / 4) as u64;
+            let want = match m {
+                0 => 0.0,
+                m if m.is_multiple_of(3) => 0.0,
+                m if m % 3 == 1 => expected(n),
+                m => f64::from(42.0 + m as f32),
+            };
+            assert_eq!(y, want, "frame {n}, {threads} threads, k = {k}");
+            if m > 0 && m.is_multiple_of(3) && n.is_multiple_of(4) {
+                assert_eq!(p, 1.0, "a recorded miss asks `due` once (frame {n})");
+            }
+        }
+        renders.push(r);
+    }
+    for r in &renders[1..] {
+        assert_eq!(r.samples, renders[0].samples);
+        assert_eq!(r.log, renders[0].log);
+    }
+}
+
+/// An outcome pushed for a frame that is not due, and a due frame without
+/// one, are mismatches; the replay still runs.
+#[test]
+fn exact_replay_counts_mismatched_outcomes() {
+    let registry = common::latent_registry();
+    let plan = mixed_plan(&registry, "polls");
+    let mut engine = Engine::new(&plan, &registry, scripted_config(1, 256), Vec::new()).unwrap();
+    let lat: InstanceAddress = "/lat".parse().unwrap();
+    for m in [1u64, 3, 4] {
+        engine
+            .push_boundary(lat.clone(), Frame(4 * m), script(m))
+            .unwrap();
+    }
+    // Not due: the second frame of block 2, whose own outcome is not pushed.
+    engine
+        .push_boundary(lat, Frame(9), Scripted::Missed)
+        .unwrap();
+    render(&mut engine, 20).unwrap();
+    assert_eq!(engine.boundary_mismatches(), 2);
+}
+
+/// `settle` is asked before each `absorb` in an exact replay only.
+#[test]
+fn settle_is_asked_in_exact_replay_only() {
+    let registry = common::latent_registry();
+    let plan = mixed_plan(&registry, "settles");
+    let mut ideal =
+        Engine::new(&plan, &registry, EngineConfig::new(48_000, 42), Vec::new()).unwrap();
+    let r = render(&mut ideal, 16).unwrap();
+    assert!(zeta(&r.samples).iter().all(|&s| s == 0.0));
+    let mut exact = Engine::new(&plan, &registry, scripted_config(1, 256), Vec::new()).unwrap();
+    for m in 1..4u64 {
+        exact
+            .push_boundary(
+                "/lat".parse().unwrap(),
+                Frame(4 * m),
+                Scripted::Delivered(None),
+            )
+            .unwrap();
+    }
+    let r = render(&mut exact, 16).unwrap();
+    assert_eq!(
+        zeta(&r.samples).last(),
+        Some(&15.0),
+        "one per absorb before the last frame's emit"
+    );
+}
+
+/// What the Controller hands to `boundary`, and the last status.
+#[derive(Default)]
+struct Outcomes {
+    delivered: Vec<(u64, Option<Vec<f32>>)>,
+    missed: Vec<u64>,
+    status: Option<signal_engine::RunnerStatus>,
+}
+
+impl ControlSink for Outcomes {
+    fn boundary(&mut self, line: BoundaryLine<'_>) {
+        assert_eq!(line.address.to_string(), "/lat");
+        match line.outcome {
+            BoundaryOutcome::Delivered { data, data_lost } => {
+                assert!(!data_lost);
+                self.delivered
+                    .push((line.frame.0, data.map(<[f32]>::to_vec)));
+            }
+            BoundaryOutcome::Missed => self.missed.push(line.frame.0),
+        }
+    }
+    fn status(&mut self, status: &signal_engine::RunnerStatus) {
+        self.status = Some(*status);
+    }
+}
+
+/// C1/C2/C3 in the engine: in real time every due block is a delivered or a
+/// missed outcome at its first frame (even blocks delivered, odd missed),
+/// counted by the runner; with `record_boundary_data` each delivery carries
+/// its result, through the boundary-data queue.
+#[test]
+fn real_time_reports_every_due_block_with_its_data() {
+    let registry = common::latent_registry();
+    let plan = mixed_plan(&registry, "polls");
+    let mut config = RealtimeConfig::with_buffer(48_000, 42, 64);
+    config.engine.threads = 2;
+    config.engine.record_boundary_data = true;
+    config.boundary_data = 1024;
+    let (runner, mut controller) = realtime(&plan, &registry, config).unwrap();
+    let mut driver = NullDriver::new(48_000, 2, 3);
+    driver.start(runner).unwrap();
+    let mut outcomes = Outcomes::default();
+    let frames = 1_000;
+    driver
+        .run(frames, || controller.poll(&mut outcomes))
+        .unwrap();
+    let runner = driver.stop().unwrap().unwrap();
+    controller.poll(&mut outcomes);
+
+    let blocks = 1..frames.div_ceil(MIXED_BLOCK as u64);
+    let even: Vec<(u64, Option<Vec<f32>>)> = blocks
+        .clone()
+        .filter(|m| m.is_multiple_of(2))
+        .map(|m| {
+            let n = (m * MIXED_BLOCK as u64) as usize;
+            (n as u64, Some(vec![expected(n) as f32]))
+        })
+        .collect();
+    let odd: Vec<u64> = blocks
+        .filter(|m| m % 2 == 1)
+        .map(|m| m * MIXED_BLOCK as u64)
+        .collect();
+    assert_eq!(outcomes.delivered, even);
+    assert_eq!(outcomes.missed, odd);
+    let status = runner.status();
+    assert_eq!(status.delivered_results, even.len() as u64);
+    assert_eq!(status.late_results, odd.len() as u64);
+    assert_eq!(status.boundary_data_overflows, 0);
+    assert_eq!(
+        outcomes.status.map(|s| s.next_frame),
+        Some(status.next_frame)
+    );
 }

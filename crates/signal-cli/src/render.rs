@@ -187,7 +187,11 @@ pub(crate) fn write_artifacts(
 
 /// The metrics of a render's audio, as `metrics.json` holds them.
 pub(crate) fn metrics_of(rendered: &Render) -> Metrics {
-    let samples: Vec<f32> = rendered.samples.iter().map(|&x| x as f32).collect();
+    let samples: Vec<f32> = rendered
+        .samples
+        .iter()
+        .map(|&x| rendered.conversion.sample(x))
+        .collect();
     signal_eval::metrics(&samples, rendered.channels)
 }
 

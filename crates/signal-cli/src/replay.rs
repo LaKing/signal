@@ -1,6 +1,7 @@
 //! `signal replay`: load and validate a session directory
 //! (`docs/session-format.md`), replay it offline through the engine's live
-//! edit API, and write the same artifacts as `signal render`.
+//! edit API, exactly as it was played or (`--ideal`) with every latent
+//! result awaited, and write the same artifacts as `signal render`.
 
 use std::path::PathBuf;
 
@@ -9,7 +10,7 @@ use serde_json::json;
 use signal_core::Registry;
 use signal_project::LoadError;
 use signal_project::provenance;
-use signal_project::session::{Session, replay};
+use signal_project::session::{BoundaryReplay, ReplayError, ReplayOptions, Session, replay_with};
 
 use crate::render::{FILES, located, metrics_of, write_artifacts};
 use crate::{Failure, print_stdout};
@@ -32,6 +33,11 @@ pub(crate) struct ReplayArgs {
     /// every count.
     #[arg(long, default_value_t = 0)]
     threads: u32,
+    /// Render ideally: wait for every result of a latent (GPU-backed)
+    /// module, whatever the session recorded. Not what was played: the
+    /// manifest says `ideal`.
+    #[arg(long)]
+    ideal: bool,
 }
 
 pub(crate) fn run(args: &ReplayArgs, registry: &Registry, json: bool) -> Result<(), Failure> {
@@ -40,8 +46,17 @@ pub(crate) fn run(args: &ReplayArgs, registry: &Registry, json: bool) -> Result<
         LoadError::Invalid(diagnostics) => Failure::InvalidSession(located(dir, diagnostics)),
         error @ LoadError::Io { .. } => Failure::Io(error.to_string()),
     })?;
-    let replayed = replay(&session, registry, args.frames, args.threads as usize)
-        .map_err(|e| Failure::Internal(e.to_string()))?;
+    let options = ReplayOptions {
+        frames: args.frames,
+        threads: args.threads as usize,
+        ideal: args.ideal,
+    };
+    let replayed = replay_with(&session, registry, options).map_err(|e| match e {
+        ReplayError::IncompleteBoundaries { .. }
+        | ReplayError::Unreproduced { .. }
+        | ReplayError::BeyondRecordedEnd { .. } => Failure::Replay(e.to_string()),
+        e => Failure::Internal(e.to_string()),
+    })?;
     let rendered = &replayed.render;
 
     let provenance = provenance::collect(
@@ -58,6 +73,15 @@ pub(crate) fn run(args: &ReplayArgs, registry: &Registry, json: bool) -> Result<
             "the session was recorded by another build (revision {}, {}, Cargo.lock {}); replay is bit-exact only on the same build (ADR 0008)",
             recorded.signal_revision, recorded.rustc_version, recorded.cargo_lock_hash
         ));
+    }
+    match replayed.boundaries {
+        BoundaryReplay::NotRecorded => warnings.push(
+            "the session records no boundary outcomes (it predates them): misses of latent modules were not recorded, so this replay waits for every result, an ideal render".to_owned(),
+        ),
+        BoundaryReplay::Ideal if session.latent() => warnings.push(
+            "an ideal render: every result of a latent module was awaited; this is not what was played".to_owned(),
+        ),
+        _ => {}
     }
     if replayed.skipped > 0 {
         warnings.push(format!(
@@ -81,6 +105,13 @@ pub(crate) fn run(args: &ReplayArgs, registry: &Registry, json: bool) -> Result<
             "channels": rendered.channels,
             "commands": session.edits.len(),
             "skipped": replayed.skipped,
+            "ideal": replayed.boundaries.ideal(),
+            "boundaries": match replayed.boundaries {
+                BoundaryReplay::NotLatent => "not-latent",
+                BoundaryReplay::Exact => "exact",
+                BoundaryReplay::NotRecorded => "not-recorded",
+                BoundaryReplay::Ideal => "ideal",
+            },
             "files": if args.out.is_some() { &FILES[..] } else { &[][..] },
             "warnings": warnings,
             "manifest": manifest,

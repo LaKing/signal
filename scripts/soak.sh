@@ -3,8 +3,8 @@
 # The V12 soak: play a temporary copy of projects/kick in real time with
 # `signal play --watch --json`, rewrite one parameter every 10 s (accent
 # decay_ms, alternating 200 and 300), then print the xruns, the worst callback
-# fraction, and PASS or FAIL against V12 and the multi-core gate (below): 0 xruns and a worst callback under
-# 25 % of the period. The committed project is never edited.
+# fraction, and two verdicts: V12 (0 xruns and a worst callback under 25 % of the
+# period) and the multi-core gate (0 xruns and worst − median under 25 %). The committed project is never edited.
 #
 #   scripts/soak.sh [minutes] [buffer]       default device (CoreAudio), 30 min, 128 frames
 #   scripts/soak.sh --driver null 1          the null driver, 1 minute (no device)

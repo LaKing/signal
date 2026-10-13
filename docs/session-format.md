@@ -1,6 +1,6 @@
 # Session format
 
-**Status: normative** (ADR 0006, 0008, 0009). A **session** is the text record of a live run: the project it started from, every plan version swapped in, and every command applied, each with its **effective frame**. `signal replay` renders it offline, bit-identically on the same build (V10). `signal-project`'s `session` module implements it, so that `signal` and `Signal.app` share it: `SessionRecorder` writes a session, `LiveRecorder` records a real-time run into one, `Session::load` reads and validates one, `replay` renders one. `signal-cli` holds only the `signal replay` command.
+**Status: normative** (ADR 0006, 0008, 0009). A **session** is the text record of a live run: the project it started from, every plan version swapped in, every command applied, each with its **effective frame**, and (M2.7-4) the outcome of every latent module's due block. `signal replay` renders it offline exactly as it was played, bit-identically on the same build (V10); `signal replay --ideal` renders it with every latent result awaited (`semantics.md` §15). `signal-project`'s `session` module implements it, so that `signal` and `Signal.app` share it: `SessionRecorder` writes a session, `LiveRecorder` records a real-time run into one, `Session::load` reads and validates one, `replay` renders one. `signal-cli` holds only the `signal replay` command.
 
 Edit commands come from project changes through `signal_project::diff` (§5).
 
@@ -13,9 +13,11 @@ Edit commands come from project changes through `signal_project::diff` (§5).
   projects/v0/composites/<name>.toml
   projects/v1/…                      one folder per plan version swapped in
   edits.jsonl                        every command, with its effective frame
+  boundaries.jsonl                   latent modules only: each due block's outcome (§4a)
+  boundary-data.f32                  with --record-boundary-data: the delivered results (§4a)
 ```
 
-All files are UTF-8. Nothing else in the directory is read. A session holds no wall-clock time: recording the same commands twice gives the same bytes.
+All files are UTF-8, except `boundary-data.f32`. Nothing else in the directory is read. A session holds no wall-clock time: recording the same commands twice gives the same bytes, except for the boundary records of a project with latent modules (§4a), which say when results arrived in that run and so may differ between two runs of the same commands.
 
 ## 2. `session.toml`
 
@@ -54,6 +56,7 @@ version = 1
 | `seed` | The engine's master seed, 0 to 2⁶³−1. |
 | `frames` | Optional. The frames the recorded run played (M2-4): `signal play` records it when the run ends, after the last `frontier`. Every command's frame is below it. Without it, replay renders the last command's frame plus one second (§6). Sessions written before it existed have no `frames` and replay as before; the format version stays 1. |
 | `[provenance]` | The recording build, field for field as in a render manifest (`semantics.md` §9, `project-format.md` §7). `project_file_hashes` are version 0's. |
+| `[boundaries]` | Optional (M2.7-4), present when a version has a latent module (§4a): `complete` (bool), `data` (bool: delivered results recorded), `delivered` and `missed` (the counts of the lines of `boundaries.jsonl`), and when incomplete `lost` (outcomes the run had that the recorder did not get) and `reason`; with data, `data_fnv1a64`, the FNV-1a 64 of `boundary-data.f32`. Sessions written before it existed, or of projects without latent modules, have none; the format version stays 1. |
 | `[[versions]]` | Every plan version in order: `version` is 0, 1, 2, …; `files` maps each project file of `projects/v<N>/` (path relative to that folder) to its FNV-1a 64, 16 lowercase hex digits. |
 
 Unknown keys are errors.
@@ -119,8 +122,26 @@ The real-time `Controller` (`signal-engine`) knows nothing of sessions. `LiveRec
 - **Frames come from the runner's reports**: an event, suspend or resume is reported with its effective frame when the runner takes it; a swap only when it commits, so a swap the engine refused is never recorded.
 - **Records follow the frontier.** Reports arrive in the order the runner made them, not the order commands apply: a swap sent first but stamped later is reported after an edit stamped before it. A report waits until the runner has run past its frame (the `next_frame` of the status `poll` reads first), then is recorded in the order the engine applied it: by frame, then swap, suspends and resumes, events, then id. So each command is checked against the version running at its own frame. After the driver stops, call `frontier` once more with the Runner's own next frame: the last status may have been dropped. `LiveRecorder::finish(next_frame)` does that and records the session's end (`frames`, `SessionRecorder::set_end`), so replay renders exactly what was played.
 - **Plan versions.** `LiveRecorder::swap_plan` gives the plan to swap to, its `version` set to the session version it will be recorded as.
+- **Boundary outcomes** (§4a) arrive through `ControlSink::boundary` and are recorded at `finish`, with their completeness judged from the runner statuses `poll` passes to `ControlSink::status`. `LiveRecorder::with_boundary_data()` records delivered results too (run the engine with `EngineConfig::record_boundary_data` and a `RealtimeConfig::boundary_data` queue). **An embedder must pass the stopped runner's own status (`ControlSink::status(&mut recorder, &runner.status())`) before `finish`**, as `signal play` does: the runner's last status may not reach the control thread, and without one of the final frame the records are incomplete.
 
 A command the recorder refuses is one the engine discarded; it is listed in `LiveRecorder::refused` and not recorded.
+
+## 4a. Boundary records
+
+M2.7-4 (audit finding 2). A latent module (`module-contract.md` "Declared latency") may miss a due result in real time and play silence for that block, where an offline render would wait for it. So that `signal replay` reproduces what was played, a session of a project with a latent module records each due block's outcome. `boundaries.jsonl` has one line per due block that ran, ordered by (`frame`, `instance`):
+
+```json
+{"frame":512,"instance":"/bank","outcome":"delivered"}
+{"frame":768,"instance":"/bank","outcome":"missed"}
+{"frame":1024,"instance":"/bank","outcome":"delivered","words":256}
+```
+
+- `frame` is the due frame (the first of the instance's block), below `frames`; `instance` a latent instance of the version running at that frame.
+- `outcome` is `delivered` (the result arrived in time) or `missed` (it did not: a `late_result` fault in the log, and silence for the block).
+- With `--record-boundary-data` (`[boundaries] data = true`), a delivered line also has `words`, the number of `f32` words of the delivered result (`StateOutputPrimitive::delivered_result`); the words are in `boundary-data.f32`, little-endian, in line order. With them, replay shows the recorded result instead of asking the device, so it does not need the same GPU.
+- Unknown fields are errors; the counts must match `[boundaries]`, and the data its length and hash.
+
+**Completeness.** The outcomes travel from the audio thread through the runner's log queue (data through a boundary-data queue), which are lossy. `LiveRecorder::finish(next_frame)` marks the records complete only if the last runner status it received is of `next_frame` and its counts (`RunnerStatus::delivered_results`, `late_results`) equal the outcomes received, with no log record or data dropped (`log_overflows`, `engine_log_overflows`, `boundary_data_overflows` 0). A loss is therefore detected, never silent: `complete = false`, with `lost` and `reason`. A session with incomplete records does not replay exactly (§6).
 
 ## 5. From project changes to commands
 
@@ -136,11 +157,17 @@ A driver removes instances by suspending them at *s* and swapping at `Engine::re
 ## 6. `signal replay`
 
 ```sh
-signal replay <session> [--out <dir>] [--frames N] [--json]
+signal replay <session> [--out <dir>] [--frames N] [--threads N] [--ideal] [--json]
 ```
+
+- **Exact replay** (the default, `semantics.md` §15). With boundary records, each recorded outcome is applied at its due frame: a miss without waiting, a delivery with its recorded data when there is some, else by waiting for the same device's result. `audio.wav` and `audio_fnv1a64` store the samples as the device received them (clamped to [−1, 1], non-finite as 0), so the replay equals the live recording (`signal play --record-audio`) bit for bit, and the manifest says `"device_conversion": true`. Incomplete records fail (exit 1) with a message that names `--ideal`; a recorded delivery this machine cannot reproduce (no device, another one, data the module refuses) fails (exit 1); records that do not match the replay's due blocks fail (exit 2).
+- **`--ideal`**: an ideal render. Every latent result is awaited, whatever the session recorded: a fresh offline render of the same edits, which the manifest labels `"ideal": true`.
+- A session of a project with latent modules but **no boundary records** (written before them) replays as an ideal render, labelled `ideal`, with a warning that misses were not recorded. A session without latent modules replays exactly as before: its plain replay's manifest has neither key, and `--ideal` renders the same audio and log, its manifest saying `"ideal": true` because that was asked for.
+- An exact replay renders at most the recorded `frames`: `--frames` beyond them fails (exit 1), since those frames were never played; `--ideal` renders past the end.
+- The JSON output adds `ideal` and `boundaries` (`exact`, `ideal`, `not-recorded`, `not-latent`).
 
 - Loads and validates the session, builds the engine from version 0 with the session's sample rate and seed, and before each frame commits that frame's swap and pushes its other commands at their effective frames. The input queues are sized for the session's busiest frame (`EngineConfig::queue_capacity` is not part of the semantics, `semantics.md` §11).
 - Renders `--frames` frames, by default the session's recorded `frames`, else the last command's frame plus one second (`last + 1 + sample_rate`; one second with no commands). Commands after the end are not applied, and the output says how many.
 - With `--out`, writes the artifacts of `signal render`: `audio.wav`, `log.jsonl`, `manifest.json` (the replaying build's provenance, version 0's file hashes) and `metrics.json`. Prints the audio and log hashes.
 - Warns when the session was recorded by another build (revision, compiler or `Cargo.lock`): bit-exactness holds on the same build (ADR 0008).
-- **Exit codes**: 1 for a malformed session (each error as `file:line:column: error: message`, with the file relative to the session directory, line 1 column 1 where no line applies) or an unreadable file; 2 if the engine discards or refuses input of a validated session (a bug).
+- **Exit codes**: 1 for a malformed session (each error as `file:line:column: error: message`, with the file relative to the session directory, line 1 column 1 where no line applies) or an unreadable file, including a `words` count beyond the data in `boundary-data.f32`; 1 also for an exact replay that cannot be made (incomplete records, an unreproducible result, frames past the end); 2 if the engine discards or refuses input of a validated session (a bug).

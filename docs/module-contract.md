@@ -45,8 +45,18 @@ Two more methods of `StateOutputPrimitive`, with defaults the other types keep:
 - **`due(&mut self) -> Due`**, asked by the engine before every `emit` of a latent instance: `Ready` (the next `emit` has its result, or none is due yet), `Pending` (not arrived), or `Lost` (it never will: no device, or the job could not be submitted). It never blocks.
 - **`miss(&mut self)`**: the engine gave up on the due result; the module outputs silence for that block and discards the result when it arrives.
 
+**Block-counting invariant** (M2.7-4). A latent module counts its blocks exactly as the engine does: one frame per frame in which the instance runs (`emit` then `absorb`), from `prepare`; the engine never calls `reset` on a running instance. A result is due at the first frame of its block *m* ≥ *L*, and at every other frame `due` answers `Ready` without consuming anything. The engine relies on this to record each due block's outcome and to replay it.
+
+Four more methods (M2.7-4), with defaults a module without a device keeps:
+- **`result_words(&self) -> usize`**: the most words its delivered result has, asked once after `prepare`, off the real-time thread; 0 (the default) records no data.
+- **`delivered_result(&self) -> &[f32]`**: the result `due` just delivered, which a session recorded with `--record-boundary-data` keeps. Real-time rules apply.
+- **`inject_result(&mut self, words) -> bool`**: exact replay with recorded data shows `words` as this block's due result instead of the device's (and calls it instead of `due`); `false` (the default) when the type cannot.
+- **`settle(&mut self) -> Due`**: exact replay only, before each `absorb`: `Pending` while the work that `absorb` may submit cannot be accepted yet because work given up on is still in flight (the engine yields and asks again), `Lost` when it never will be. Never blocks. Without it a replay, which runs faster than the live run, could be refused a submission live made.
+
+At a recorded miss an exact replay calls `due` once, without waiting, and then `miss`, whatever `due` answered, as real time does: a module's bookkeeping in `due` (returning stale jobs to its pool) runs as it did live.
+
 What the engine does with them (`semantics.md` §7, §13):
-- **Offline** (`EngineConfig::realtime == false`: renders, replays, the bench, the contract suite) it asks again, yielding the thread, until `due` is not `Pending`, so renders are exact and repeatable. A result that is `Lost` (no usable GPU) is still a `late_result` fault, and `signal render` warns about it (stderr, and `late_results` in its JSON).
+- **Offline** (`EngineConfig::realtime == false`: renders, ideal replays, the bench, the contract suite) it asks again, yielding the thread, until `due` is not `Pending`, so renders are exact and repeatable. A result that is `Lost` (no usable GPU) is still a `late_result` fault, and `signal render` warns about it (stderr, and `late_results` in its JSON).
 - **In real time** (`realtime()`, so the null driver, `signal play` and the app) it asks once and never waits. `Pending` or `Lost` is a **`late_result` fault**: `miss`, a `fault` record at the block's first frame, and `Engine::late_results` / `RunnerStatus::late_results` count it. The instance is not muted; the next block asks again.
 
 The GPU work itself runs on the `signal-gpu` thread (`crates/signal-gpu`, `realtime-rules.md` "GPU"); `due`, `miss`, `emit` and `absorb` only move preallocated job buffers through lock-free queues. `lab.gpu_partials` (`lab/src/gpu_partials.rs`) is the example: *L* = 2, blocks of 256 frames, with a CPU reference and a documented tolerance.

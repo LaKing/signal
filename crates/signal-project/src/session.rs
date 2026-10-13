@@ -1,10 +1,12 @@
 //! Session directories (`docs/session-format.md`): the initial project, every
 //! plan version swapped in, and every command with its effective frame, as
 //! text. [`SessionRecorder`] writes one; [`LiveRecorder`] feeds it from a
-//! real-time [`Controller`](signal_engine::Controller); [`Session::load`] reads
-//! and validates one; [`replay`] renders it offline through the same engine API
-//! a live driver uses (ADR 0006, V10). Control-thread code: it allocates and
-//! does I/O.
+//! real-time [`Controller`](signal_engine::Controller), with the outcome of
+//! every latent module's due block (M2.7-4); [`Session::load`] reads and
+//! validates one; [`replay`] renders it offline through the same engine API a
+//! live driver uses (ADR 0006, V10), exactly as it was played, and
+//! [`replay_with`] can render it ideally instead. Control-thread code: it
+//! allocates and does I/O.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -18,8 +20,9 @@ use signal_core::{
     PortShape, Registry, SinkKind, fnv1a64,
 };
 use signal_engine::{
-    ControlSink, Engine, EngineConfig, EngineError, ExternalEvent, InputDiscards, Outcome,
-    Provenance, Render, RenderError, Report, SentCommand, render_blocks,
+    BoundaryLine, BoundaryOutcome, ControlSink, Conversion, Engine, EngineConfig, EngineError,
+    ExternalEvent, InputDiscards, Outcome, Provenance, Render, RenderError, Report, RunnerStatus,
+    Scripted, SentCommand, render_blocks,
 };
 use signal_graph::ExecutionPlan;
 
@@ -36,6 +39,104 @@ pub const EDITS_FILE: &str = "edits.jsonl";
 
 /// The folder of plan versions (`projects/v<N>/`) in a session directory.
 pub const PROJECTS_DIR: &str = "projects";
+
+/// The boundary records in a session directory (M2.7-4).
+pub const BOUNDARIES_FILE: &str = "boundaries.jsonl";
+
+/// The delivered results of the boundary records, when recorded (M2.7-4).
+pub const BOUNDARY_DATA_FILE: &str = "boundary-data.f32";
+
+/// What a recorded run did at the due blocks of its latent modules
+/// (`docs/session-format.md` §4a, M2.7-4).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Boundaries {
+    /// Every due block's outcome reached the recorder: an exact replay is
+    /// possible.
+    pub complete: bool,
+    /// Delivered results were recorded with their data
+    /// (`--record-boundary-data`).
+    pub data: bool,
+    /// Delivered outcomes recorded.
+    pub delivered: u64,
+    /// Missed outcomes recorded.
+    pub missed: u64,
+    /// When incomplete: outcomes the run had that the recorder did not get.
+    pub lost: Option<u64>,
+    /// When incomplete: why.
+    pub reason: Option<String>,
+    /// The outcomes, by (frame, instance).
+    pub records: Vec<BoundaryRecord>,
+}
+
+/// One due block's outcome.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoundaryRecord {
+    /// The due frame.
+    pub frame: Frame,
+    /// The latent instance.
+    pub instance: InstanceAddress,
+    /// Delivered (with its words, if recorded) or missed.
+    pub outcome: BoundaryKind,
+}
+
+/// A due result's recorded outcome.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BoundaryKind {
+    /// Delivered; with the result's words when the session records data.
+    Delivered(Option<Vec<f32>>),
+    /// Missed: the module played silence for that block.
+    Missed,
+}
+
+/// Whether any plan has a module with a declared latency.
+fn latent(plans: &[&ExecutionPlan]) -> bool {
+    plans
+        .iter()
+        .any(|p| p.instances.iter().any(|i| i.descriptor.latency.is_some()))
+}
+
+/// The line of `boundaries.jsonl` of `record` (without the newline).
+fn boundary_line(record: &BoundaryRecord) -> String {
+    let head = format!(
+        r#"{{"frame":{},"instance":{},"outcome":"#,
+        record.frame.0,
+        json_string(&record.instance.to_string())
+    );
+    match &record.outcome {
+        BoundaryKind::Missed => format!(r#"{head}"missed"}}"#),
+        BoundaryKind::Delivered(None) => format!(r#"{head}"delivered"}}"#),
+        BoundaryKind::Delivered(Some(words)) => {
+            format!(r#"{head}"delivered","words":{}}}"#, words.len())
+        }
+    }
+}
+
+/// A line of `boundaries.jsonl` as read.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoundaryLineIn {
+    frame: u64,
+    instance: String,
+    outcome: String,
+    #[serde(default)]
+    words: Option<u64>,
+}
+
+/// `[boundaries]` of `session.toml`.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoundariesToml {
+    complete: bool,
+    data: bool,
+    delivered: u64,
+    missed: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lost: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    data_fnv1a64: Option<String>,
+}
 
 /// A suspend or a resume (ADR 0016 §1a).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -277,6 +378,8 @@ struct SessionOut<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     frames: Option<u64>,
     provenance: &'a Provenance,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    boundaries: Option<BoundariesToml>,
     versions: Vec<VersionOut>,
 }
 
@@ -296,6 +399,8 @@ struct SessionIn {
     #[serde(default)]
     frames: Option<u64>,
     provenance: Provenance,
+    #[serde(default)]
+    boundaries: Option<toml::Spanned<BoundariesToml>>,
     versions: Vec<toml::Spanned<VersionIn>>,
 }
 
@@ -696,6 +801,8 @@ pub struct SessionRecorder {
     state: State,
     /// The recorded end ([`set_end`](SessionRecorder::set_end)).
     end: Option<u64>,
+    /// The boundary records ([`set_boundaries`](SessionRecorder::set_boundaries)).
+    boundaries: Option<Boundaries>,
 }
 
 impl SessionRecorder {
@@ -729,6 +836,7 @@ impl SessionRecorder {
             last_edit: Frame::ZERO,
             last_swap: None,
             end: None,
+            boundaries: None,
         })
     }
 
@@ -911,6 +1019,26 @@ impl SessionRecorder {
         self.end
     }
 
+    /// Whether any version has a module with a declared latency: only then
+    /// does a session hold boundary records.
+    pub fn latent(&self) -> bool {
+        latent(&self.versions.iter().map(|(_, p)| p).collect::<Vec<_>>())
+    }
+
+    /// Records the outcomes at latent modules' due blocks (M2.7-4). Written
+    /// only if some version has a latent module.
+    pub fn set_boundaries(&mut self, mut boundaries: Boundaries) {
+        boundaries.records.sort_by(|a, b| {
+            (a.frame, a.instance.to_string()).cmp(&(b.frame, b.instance.to_string()))
+        });
+        self.boundaries = Some(boundaries);
+    }
+
+    /// The boundary records, if set.
+    pub fn boundaries(&self) -> Option<&Boundaries> {
+        self.boundaries.as_ref()
+    }
+
     /// A new seq.
     fn reserve(&mut self) -> u64 {
         let seq = self.next_seq;
@@ -959,12 +1087,33 @@ impl SessionRecorder {
             Err(error) => return Err(io(dir)(error)),
         }
 
+        let boundaries = self.boundaries.as_ref().filter(|_| self.latent());
+        let data: Option<Vec<u8>> = boundaries.filter(|b| b.data).map(|b| {
+            b.records
+                .iter()
+                .filter_map(|r| match &r.outcome {
+                    BoundaryKind::Delivered(Some(words)) => Some(words),
+                    _ => None,
+                })
+                .flatten()
+                .flat_map(|w| w.to_le_bytes())
+                .collect()
+        });
         let session = SessionOut {
             format_version: FORMAT_VERSION,
             sample_rate: self.sample_rate,
             seed: self.seed,
             frames: self.end,
             provenance: &self.provenance,
+            boundaries: boundaries.map(|b| BoundariesToml {
+                complete: b.complete,
+                data: b.data,
+                delivered: b.delivered,
+                missed: b.missed,
+                lost: b.lost,
+                reason: b.reason.clone(),
+                data_fnv1a64: data.as_ref().map(|d| hex(fnv1a64(d))),
+            }),
             versions: self
                 .versions
                 .iter()
@@ -996,7 +1145,21 @@ impl SessionRecorder {
             log.push('\n');
         }
         let path = dir.join(EDITS_FILE);
-        fs::write(&path, log).map_err(io(&path))
+        fs::write(&path, log).map_err(io(&path))?;
+        if let Some(boundaries) = boundaries {
+            let mut lines = String::new();
+            for record in &boundaries.records {
+                lines.push_str(&boundary_line(record));
+                lines.push('\n');
+            }
+            let path = dir.join(BOUNDARIES_FILE);
+            fs::write(&path, lines).map_err(io(&path))?;
+        }
+        if let Some(data) = data {
+            let path = dir.join(BOUNDARY_DATA_FILE);
+            fs::write(&path, data).map_err(io(&path))?;
+        }
+        Ok(())
     }
 }
 
@@ -1020,6 +1183,12 @@ enum Applied {
 /// 0016 §2), then id. Each command is checked against the version running at
 /// its own frame; one the recorder refuses is the engine's discard, and is
 /// listed in [`refused`](LiveRecorder::refused), not recorded.
+///
+/// It also records the outcome of every latent module's due block
+/// ([`boundary`](ControlSink::boundary), M2.7-4) and, at
+/// [`finish`](LiveRecorder::finish), whether it received every one: the
+/// runner's counts in the last [`status`](ControlSink::status) must cover the
+/// final frame and equal what arrived, with nothing dropped on the way.
 pub struct LiveRecorder {
     recorder: SessionRecorder,
     registry: Registry,
@@ -1027,6 +1196,14 @@ pub struct LiveRecorder {
     swaps: BTreeMap<u64, Project>,
     pending: BTreeMap<(Frame, u8, u64), Applied>,
     refused: Vec<String>,
+    /// The due blocks' outcomes received.
+    records: Vec<BoundaryRecord>,
+    /// Delivered results whose data was recorded but did not arrive.
+    data_lost: u64,
+    /// Whether delivered results are recorded with their data.
+    record_data: bool,
+    /// The newest runner status received.
+    status: Option<RunnerStatus>,
 }
 
 impl LiveRecorder {
@@ -1039,7 +1216,18 @@ impl LiveRecorder {
             swaps: BTreeMap::new(),
             pending: BTreeMap::new(),
             refused: Vec::new(),
+            records: Vec::new(),
+            data_lost: 0,
+            record_data: false,
+            status: None,
         }
+    }
+
+    /// Records delivered results with their data (`--record-boundary-data`):
+    /// run the engine with `record_boundary_data` and a boundary-data queue.
+    pub fn with_boundary_data(mut self) -> LiveRecorder {
+        self.record_data = true;
+        self
     }
 
     /// The plan to swap to `project`, its `version` set to the session version
@@ -1081,10 +1269,75 @@ impl LiveRecorder {
     /// Ends the recording when the driver has stopped: the last
     /// [`frontier`](ControlSink::frontier), with the Runner's own next frame,
     /// then [`set_end`](SessionRecorder::set_end) at that frame, so replay
-    /// renders exactly the frames the run played.
+    /// renders exactly the frames the run played. For a run with latent
+    /// modules it also records the boundary outcomes, complete only if a
+    /// runner status of `next_frame` arrived (poll once more after the driver
+    /// stops, or pass the stopped Runner's own status to
+    /// [`status`](ControlSink::status)) and its counts equal what was
+    /// received, with no record or data dropped.
     pub fn finish(&mut self, next_frame: Frame) -> Result<(), SessionError> {
         self.frontier(next_frame);
+        if self.recorder.latent() {
+            let boundaries = self.boundaries(next_frame);
+            self.recorder.set_boundaries(boundaries);
+        }
         self.recorder.set_end(next_frame.0)
+    }
+
+    /// The boundary outcomes received, and whether they are all of the run's
+    /// until `next_frame`.
+    fn boundaries(&self, next_frame: Frame) -> Boundaries {
+        let count = |missed: bool| {
+            self.records
+                .iter()
+                .filter(|r| (r.outcome == BoundaryKind::Missed) == missed)
+                .count() as u64
+        };
+        let (delivered, missed) = (count(false), count(true));
+        let mut lost = None;
+        let reason = match self.status {
+            None => Some("no runner status reached the recorder".to_owned()),
+            Some(status) if status.next_frame != next_frame => Some(format!(
+                "the last runner status that reached the recorder is of frame {}, not of the end, frame {}",
+                status.next_frame.0, next_frame.0
+            )),
+            Some(status) => {
+                let expected = status.delivered_results.saturating_add(status.late_results);
+                lost = Some(expected.saturating_sub(delivered.saturating_add(missed)));
+                let dropped = status
+                    .log_overflows
+                    .saturating_add(status.engine_log_overflows);
+                if status.delivered_results != delivered || status.late_results != missed {
+                    Some(format!(
+                        "the run had {} delivered and {} missed results; {delivered} and {missed} were recorded",
+                        status.delivered_results, status.late_results
+                    ))
+                } else if dropped > 0 {
+                    Some(format!("{dropped} log records were dropped (a full queue)"))
+                } else if self.record_data
+                    && status
+                        .boundary_data_overflows
+                        .saturating_add(self.data_lost)
+                        > 0
+                {
+                    Some(format!(
+                        "the data of {} delivered results was dropped (a full queue)",
+                        status.boundary_data_overflows.max(self.data_lost)
+                    ))
+                } else {
+                    None
+                }
+            }
+        };
+        Boundaries {
+            complete: reason.is_none(),
+            data: self.record_data,
+            delivered,
+            missed,
+            lost: lost.filter(|_| reason.is_some()),
+            reason,
+            records: self.records.clone(),
+        }
     }
 
     /// The recorder, to [`write`](SessionRecorder::write) the session.
@@ -1157,6 +1410,32 @@ impl ControlSink for LiveRecorder {
         self.pending.insert((frame, class, report.id), applied);
     }
 
+    fn status(&mut self, status: &RunnerStatus) {
+        if self
+            .status
+            .is_none_or(|known| status.next_frame >= known.next_frame)
+        {
+            self.status = Some(*status);
+        }
+    }
+
+    fn boundary(&mut self, line: BoundaryLine<'_>) {
+        let outcome = match line.outcome {
+            BoundaryOutcome::Missed => BoundaryKind::Missed,
+            BoundaryOutcome::Delivered { data, data_lost } => {
+                if data_lost {
+                    self.data_lost = self.data_lost.saturating_add(1);
+                }
+                BoundaryKind::Delivered(data.filter(|_| self.record_data).map(<[f32]>::to_vec))
+            }
+        };
+        self.records.push(BoundaryRecord {
+            frame: line.frame,
+            instance: line.address.clone(),
+            outcome,
+        });
+    }
+
     fn frontier(&mut self, next_frame: Frame) {
         while self
             .pending
@@ -1187,6 +1466,9 @@ pub struct Session {
     pub plans: Vec<ExecutionPlan>,
     /// The commands, in `edits.jsonl` order.
     pub edits: Vec<Edit>,
+    /// The latent modules' due-block outcomes (M2.7-4); `None` for a session
+    /// without (written before them, or of a project without latent modules).
+    pub boundaries: Option<Boundaries>,
 }
 
 impl Session {
@@ -1357,6 +1639,36 @@ impl Session {
         if !diagnostics.is_empty() {
             return Err(LoadError::Invalid(diagnostics));
         }
+        let boundaries = match &file.boundaries {
+            None => None,
+            Some(table) => {
+                let span = table.span().start;
+                let table = table.get_ref();
+                let lines = text_of(BOUNDARIES_FILE, read(BOUNDARIES_FILE)?)?;
+                let data = if table.data {
+                    Some(read(BOUNDARY_DATA_FILE)?)
+                } else {
+                    None
+                };
+                let found = load_boundaries(
+                    table,
+                    &lines,
+                    data.as_deref(),
+                    (&edits, &plans, file.frames),
+                );
+                match found {
+                    Ok(boundaries) => Some(boundaries),
+                    Err(mut found) => {
+                        for d in &mut found {
+                            if d.file == SESSION_FILE {
+                                *d = at(span, d.message.clone());
+                            }
+                        }
+                        return Err(LoadError::Invalid(found));
+                    }
+                }
+            }
+        };
 
         Ok(Session {
             sample_rate: *file.sample_rate.get_ref(),
@@ -1366,7 +1678,13 @@ impl Session {
             versions,
             plans,
             edits: edits.into_iter().map(|(_, e)| e).collect(),
+            boundaries,
         })
+    }
+
+    /// Whether any version has a module with a declared latency.
+    pub fn latent(&self) -> bool {
+        latent(&self.plans.iter().collect::<Vec<_>>())
     }
 
     /// The default replay length: the recorded end, else the last command's
@@ -1378,6 +1696,203 @@ impl Session {
         let end = self.edits.last().map_or(0, |e| e.frame.0.saturating_add(1));
         end.saturating_add(u64::from(self.sample_rate))
     }
+}
+
+/// `boundaries.jsonl` (and `boundary-data.f32`) checked against `[boundaries]`,
+/// the commands and the plans: each line a due-block outcome of a latent
+/// instance of the version running at its frame, before the session's end,
+/// ordered by (frame, instance), as many of each kind as `session.toml` says,
+/// and the data exactly the words the lines name.
+fn load_boundaries(
+    table: &BoundariesToml,
+    text: &str,
+    data: Option<&[u8]>,
+    (edits, plans, frames): (&[(usize, Edit)], &[ExecutionPlan], Option<u64>),
+) -> Result<Boundaries, Vec<Diagnostic>> {
+    let at = |line: usize, message: String| error(BOUNDARIES_FILE, line, 1, message);
+    let mut diagnostics = Vec::new();
+    let swaps: Vec<(Frame, usize)> = edits
+        .iter()
+        .filter_map(|(_, e)| match e.command {
+            Command::Swap { version } => Some((e.frame, version as usize)),
+            _ => None,
+        })
+        .collect();
+    // The words the lines name, checked against the data present before
+    // anything is allocated for them: the parsed count is authoritative.
+    let available = data.map_or(0, |d| d.len() / 4) as u64;
+    let mut words_total = 0u64;
+    let mut counts = Vec::new();
+    let mut parsed = Vec::new();
+    let mut previous: Option<(u64, String)> = None;
+    let body = text.strip_suffix('\n').unwrap_or(text);
+    for (i, line_text) in body.split('\n').enumerate().filter(|_| !body.is_empty()) {
+        let line = i + 1;
+        let read: BoundaryLineIn = match serde_json::from_str(line_text) {
+            Ok(read) => read,
+            Err(e) => {
+                diagnostics.push(error(
+                    BOUNDARIES_FILE,
+                    line,
+                    e.column().max(1),
+                    json_message(&e),
+                ));
+                continue;
+            }
+        };
+        let instance = match read.instance.parse::<InstanceAddress>() {
+            Ok(instance) => instance,
+            Err(e) => {
+                diagnostics.push(at(line, format!("instance `{}`: {e}", read.instance)));
+                continue;
+            }
+        };
+        let key = (read.frame, read.instance.clone());
+        if previous.as_ref().is_some_and(|p| key <= *p) {
+            diagnostics.push(at(
+                line,
+                format!(
+                    "(frame {}, {}) does not come after the previous line's; lines are ordered by frame, then instance",
+                    read.frame, read.instance
+                ),
+            ));
+        }
+        previous = Some(key);
+        if frames.is_some_and(|end| read.frame >= end) {
+            diagnostics.push(at(
+                line,
+                format!("frame {} is at or after the session's end", read.frame),
+            ));
+        }
+        let version = swaps
+            .iter()
+            .take_while(|(f, _)| f.0 <= read.frame)
+            .last()
+            .map_or(0, |&(_, v)| v);
+        let is_latent = plans.get(version).is_some_and(|p| {
+            p.instances
+                .iter()
+                .any(|i| i.address == instance && i.descriptor.latency.is_some())
+        });
+        if !is_latent {
+            diagnostics.push(at(
+                line,
+                format!(
+                    "{instance} is not a latent instance of version {version}, which runs at frame {}",
+                    read.frame
+                ),
+            ));
+        }
+        let outcome = match (read.outcome.as_str(), read.words) {
+            ("missed", None) => BoundaryKind::Missed,
+            ("delivered", None) => BoundaryKind::Delivered(None),
+            ("delivered", Some(words)) if table.data => {
+                match words_total.checked_add(words).filter(|&t| t <= available) {
+                    Some(total) => words_total = total,
+                    None => {
+                        diagnostics.push(at(
+                            line,
+                            format!(
+                                "words {words}: boundary-data.f32 holds {available} words, {} of them named by earlier lines",
+                                words_total
+                            ),
+                        ));
+                        continue;
+                    }
+                }
+                counts.push(words as usize);
+                BoundaryKind::Delivered(Some(Vec::new()))
+            }
+            ("delivered", Some(_)) => {
+                diagnostics.push(at(
+                    line,
+                    "words, but session.toml says the session records no data".to_owned(),
+                ));
+                continue;
+            }
+            (other, _) => {
+                diagnostics.push(at(
+                    line,
+                    format!(
+                        "outcome `{other}`, with words {:?}; expected \"delivered\" (words only with data) or \"missed\"",
+                        read.words
+                    ),
+                ));
+                continue;
+            }
+        };
+        parsed.push(BoundaryRecord {
+            frame: Frame(read.frame),
+            instance,
+            outcome,
+        });
+    }
+    let delivered = parsed
+        .iter()
+        .filter(|r| r.outcome != BoundaryKind::Missed)
+        .count() as u64;
+    let missed = parsed.len() as u64 - delivered;
+    if diagnostics.is_empty() && (delivered != table.delivered || missed != table.missed) {
+        diagnostics.push(error(
+            SESSION_FILE,
+            1,
+            1,
+            format!(
+                "[boundaries] says {} delivered and {} missed; boundaries.jsonl has {delivered} and {missed}",
+                table.delivered, table.missed
+            ),
+        ));
+    }
+    if let Some(data) = data {
+        let hash = hex(fnv1a64(data));
+        if table.data_fnv1a64.as_deref() != Some(hash.as_str()) {
+            diagnostics.push(error(
+                BOUNDARY_DATA_FILE,
+                1,
+                1,
+                format!(
+                    "the file's FNV-1a 64 is {hash}; session.toml records {}",
+                    table.data_fnv1a64.as_deref().unwrap_or("none")
+                ),
+            ));
+        } else if data.len() as u64 != words_total * 4 {
+            diagnostics.push(error(
+                BOUNDARY_DATA_FILE,
+                1,
+                1,
+                format!(
+                    "{} bytes; boundaries.jsonl names {words_total} words ({} bytes)",
+                    data.len(),
+                    words_total * 4
+                ),
+            ));
+        } else if diagnostics.is_empty() {
+            // Every count is within the data, and they add up to it.
+            let words = data.as_chunks::<4>().0;
+            let mut counts = counts.into_iter();
+            let mut at = 0;
+            for record in &mut parsed {
+                if let BoundaryKind::Delivered(Some(v)) = &mut record.outcome {
+                    let n = counts.next().unwrap_or(0);
+                    let chunk = words.get(at..at + n).unwrap_or(&[]);
+                    v.extend(chunk.iter().map(|&b| f32::from_le_bytes(b)));
+                    at += n;
+                }
+            }
+        }
+    }
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
+    }
+    Ok(Boundaries {
+        complete: table.complete,
+        data: table.data,
+        delivered,
+        missed,
+        lost: table.lost,
+        reason: table.reason.clone(),
+        records: parsed,
+    })
 }
 
 /// serde_json's message without its own " at line L column C" suffix.
@@ -1395,6 +1910,43 @@ pub struct Replay {
     pub render: Render,
     /// Commands at or after the last rendered frame, not applied.
     pub skipped: usize,
+    /// How the latent modules' due results were treated (M2.7-4).
+    pub boundaries: BoundaryReplay,
+}
+
+/// How a replay treated the latent modules' due results
+/// (`docs/semantics.md` §15).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoundaryReplay {
+    /// The session's plans have no latent module: exact and ideal agree.
+    NotLatent,
+    /// Exact replay: every recorded outcome was applied.
+    Exact,
+    /// The session has latent modules but no boundary records (written
+    /// before them): every result was awaited, an ideal render.
+    NotRecorded,
+    /// `--ideal`: every result was awaited, whatever was recorded.
+    Ideal,
+}
+
+impl BoundaryReplay {
+    /// Whether the replay is an ideal render: what its manifest says.
+    pub fn ideal(self) -> bool {
+        matches!(self, BoundaryReplay::NotRecorded | BoundaryReplay::Ideal)
+    }
+}
+
+/// How to replay a session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReplayOptions {
+    /// Frames to render; by default [`Session::default_frames`].
+    pub frames: Option<u64>,
+    /// The engine's thread count (`EngineConfig::threads`); it never changes
+    /// the output.
+    pub threads: usize,
+    /// Render ideally: await every latent module's result, whatever the
+    /// session recorded (`signal replay --ideal`).
+    pub ideal: bool,
 }
 
 /// Why a validated session could not be replayed. Validation rules these out,
@@ -1407,6 +1959,32 @@ pub enum ReplayError {
     Render(RenderError),
     /// The engine refused a push (its queue was full).
     Refused(String),
+    /// The session's boundary records are incomplete (M2.7-4): it cannot be
+    /// replayed exactly; an ideal render can.
+    IncompleteBoundaries {
+        /// Why, as recorded.
+        reason: String,
+    },
+    /// An exact replay asked for more frames than the session recorded: the
+    /// frames past its end were never played (M2.7-4).
+    BeyondRecordedEnd {
+        /// The frames asked for.
+        frames: u64,
+        /// The session's recorded end.
+        end: u64,
+    },
+    /// Recorded deliveries that this run could not reproduce: the device
+    /// lost them, or the module refused the recorded data (M2.7-4).
+    Unreproduced {
+        /// How many.
+        results: u64,
+    },
+    /// The recorded outcomes and the replay's due blocks disagree (a bug, or
+    /// a changed session).
+    BoundaryMismatch {
+        /// Due blocks without an outcome plus outcomes without a due block.
+        mismatches: u64,
+    },
     /// Input had no effect, or a queue or the log overflowed.
     Discarded {
         /// Input the engine discarded.
@@ -1424,6 +2002,22 @@ impl fmt::Display for ReplayError {
             ReplayError::Engine(error) => write!(f, "replay: {error}"),
             ReplayError::Render(error) => write!(f, "replay: {error}"),
             ReplayError::Refused(message) => write!(f, "replay: {message}"),
+            ReplayError::IncompleteBoundaries { reason } => write!(
+                f,
+                "replay: the session's boundary records are incomplete ({reason}): it cannot be replayed exactly; `signal replay --ideal` renders it with every result awaited"
+            ),
+            ReplayError::BeyondRecordedEnd { frames, end } => write!(
+                f,
+                "replay: {frames} frames asked for, but the session recorded {end}: an exact replay reproduces only what was played; `signal replay --ideal` renders past the end"
+            ),
+            ReplayError::Unreproduced { results } => write!(
+                f,
+                "replay: {results} recorded results of latent modules could not be reproduced on this machine (no device, or another one); record with --record-boundary-data, or render with --ideal"
+            ),
+            ReplayError::BoundaryMismatch { mismatches } => write!(
+                f,
+                "replay: the recorded boundary outcomes do not match the replay's due blocks ({mismatches} mismatches)"
+            ),
             ReplayError::Discarded {
                 discards,
                 input_overflows,
@@ -1440,14 +2034,7 @@ impl fmt::Display for ReplayError {
 impl std::error::Error for ReplayError {}
 
 /// Replays `session` for `frames` frames (by default
-/// [`Session::default_frames`]): builds the engine from version 0 and, at
-/// each frame with commands, commits its swap and pushes its other commands
-/// with `push_external`, `push_suspend` and `push_resume`, as a live driver
-/// does. It renders in blocks split at those frames (`docs/semantics.md` §13).
-///
-/// The input queues are sized for the session's busiest frame (queue capacity
-/// is not part of the semantics, `docs/semantics.md` §11), and reclaimed
-/// before every block. Any discarded input or overflow afterwards is an error.
+/// [`Session::default_frames`]) exactly as it was played: see [`replay_with`].
 /// `threads` is the engine's thread count (`EngineConfig::threads`); it
 /// never changes the output.
 pub fn replay(
@@ -1456,7 +2043,60 @@ pub fn replay(
     frames: Option<u64>,
     threads: usize,
 ) -> Result<Replay, ReplayError> {
-    let frames = frames.unwrap_or_else(|| session.default_frames());
+    let options = ReplayOptions {
+        frames,
+        threads,
+        ideal: false,
+    };
+    replay_with(session, registry, options)
+}
+
+/// Replays `session`: builds the engine from version 0 and, at each frame
+/// with commands, commits its swap and pushes its other commands with
+/// `push_external`, `push_suspend` and `push_resume`, as a live driver does.
+/// It renders in blocks split at those frames (`docs/semantics.md` §13).
+///
+/// The input queues are sized for the session's busiest frame (queue capacity
+/// is not part of the semantics, `docs/semantics.md` §11), and reclaimed
+/// before every block. Any discarded input or overflow afterwards is an error.
+///
+/// With boundary records it is an **exact replay** (`docs/semantics.md`
+/// §15): each recorded outcome is pushed with `push_boundary`, a recorded
+/// miss is applied without waiting, recorded data is shown, and the audio is
+/// stored as the device received it. Incomplete records are an error. With
+/// `ideal`, or without records, it is an **ideal render**: every result is
+/// awaited, and the manifest says `ideal`.
+pub fn replay_with(
+    session: &Session,
+    registry: &Registry,
+    options: ReplayOptions,
+) -> Result<Replay, ReplayError> {
+    let frames = options.frames.unwrap_or_else(|| session.default_frames());
+    let mode = match (&session.boundaries, options.ideal) {
+        (_, true) => BoundaryReplay::Ideal,
+        (Some(boundaries), false) if !boundaries.complete => {
+            return Err(ReplayError::IncompleteBoundaries {
+                reason: boundaries
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "records are missing".to_owned()),
+            });
+        }
+        (Some(_), false) => {
+            // Frames past the end were never played: nothing to reproduce.
+            if let Some(end) = session.frames.filter(|&end| frames > end) {
+                return Err(ReplayError::BeyondRecordedEnd { frames, end });
+            }
+            BoundaryReplay::Exact
+        }
+        (None, false) if session.latent() => BoundaryReplay::NotRecorded,
+        (None, false) => BoundaryReplay::NotLatent,
+    };
+    let script: &[BoundaryRecord] = match (&session.boundaries, mode) {
+        (Some(b), BoundaryReplay::Exact) => &b.records,
+        _ => &[],
+    };
+    let script = &script[..script.partition_point(|r| r.frame.0 < frames)];
     let mut externals = BTreeMap::<u64, usize>::new();
     let mut edits = BTreeMap::<u64, usize>::new();
     for edit in &session.edits {
@@ -1467,11 +2107,24 @@ pub fn replay(
         }
     }
     let busiest = externals.values().chain(edits.values()).copied().max();
+    // Outcomes are pushed up to a block ahead, and wait at most a block more.
+    let block = EngineConfig::DEFAULT_BLOCK_CAPACITY;
+    let window = 2 * block as u64;
+    let mut most_outcomes = 0;
+    let mut first = 0;
+    for (last, record) in script.iter().enumerate() {
+        while script[first].frame.0 + window <= record.frame.0 {
+            first += 1;
+        }
+        most_outcomes = most_outcomes.max(last + 1 - first);
+    }
     let config = EngineConfig {
         queue_capacity: busiest
             .unwrap_or(0)
+            .max(most_outcomes)
             .max(EngineConfig::DEFAULT_QUEUE_CAPACITY),
-        threads,
+        threads: options.threads,
+        scripted_boundaries: mode == BoundaryReplay::Exact,
         ..EngineConfig::new(session.sample_rate, session.seed)
     };
     let first = session
@@ -1482,11 +2135,33 @@ pub fn replay(
         Engine::new(first, registry, config, Vec::new()).map_err(ReplayError::Engine)?;
 
     let mut next = 0usize;
+    let mut next_outcome = 0usize;
     let mut refused = None;
     let block = config.block_capacity;
-    let rendered = render_blocks(&mut engine, frames, block, |engine| {
+    let mut rendered = render_blocks(&mut engine, frames, block, |engine| {
         engine.reclaim_externals().for_each(drop);
         engine.reclaim_edits().for_each(drop);
+        engine.reclaim_boundaries();
+        // The recorded outcomes of the next block, at most.
+        let horizon = engine.next_frame().0.saturating_add(block as u64);
+        while let Some(record) = script.get(next_outcome) {
+            if record.frame.0 >= horizon {
+                break;
+            }
+            let outcome = match &record.outcome {
+                BoundaryKind::Missed => Scripted::Missed,
+                BoundaryKind::Delivered(words) => {
+                    Scripted::Delivered(words.as_ref().map(|w| w.clone().into_boxed_slice()))
+                }
+            };
+            if engine
+                .push_boundary(record.instance.clone(), record.frame, outcome)
+                .is_err()
+            {
+                refused.get_or_insert_with(|| "the boundary queue is full".to_owned());
+            }
+            next_outcome += 1;
+        }
         let frame = engine.next_frame();
         let end = next + session.edits[next..].partition_point(|e| e.frame <= frame);
         let batch = &session.edits[next..end];
@@ -1522,7 +2197,9 @@ pub fn replay(
                 refused.get_or_insert(message);
             }
         }
-        Ok(session.edits.get(next).map(|e| e.frame))
+        let next_edit = session.edits.get(next).map(|e| e.frame);
+        let next_record = script.get(next_outcome).map(|r| r.frame);
+        Ok([next_edit, next_record].into_iter().flatten().min())
     })
     .map_err(ReplayError::Render)?;
     if let Some(message) = refused {
@@ -1539,8 +2216,23 @@ pub fn replay(
             log_overflows: engine.log_overflows(),
         });
     }
+    if engine.boundary_mismatches() != 0 {
+        return Err(ReplayError::BoundaryMismatch {
+            mismatches: engine.boundary_mismatches(),
+        });
+    }
+    if engine.boundary_unreproduced() != 0 {
+        return Err(ReplayError::Unreproduced {
+            results: engine.boundary_unreproduced(),
+        });
+    }
+    if mode == BoundaryReplay::Exact {
+        rendered.conversion = Conversion::Device;
+    }
+    rendered.ideal = mode.ideal();
     Ok(Replay {
         render: rendered,
         skipped: session.edits.len() - next,
+        boundaries: mode,
     })
 }

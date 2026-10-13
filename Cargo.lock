@@ -3522,6 +3522,7 @@ dependencies = [
  "signal-engine",
  "signal-gpu",
  "signal-graph",
+ "signal-project",
  "signal-std",
 ]
 

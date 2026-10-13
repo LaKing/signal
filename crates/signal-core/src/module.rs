@@ -503,6 +503,37 @@ pub trait StateOutputPrimitive: Send {
     /// for that block, and discards the result when it arrives. Real-time
     /// rules apply.
     fn miss(&mut self) {}
+
+    /// The most words [`delivered_result`](Self::delivered_result) returns:
+    /// asked once after `prepare`, off the real-time thread, to size the
+    /// buffers that carry delivered results to a session (M2.7-4). 0, the
+    /// default, records none.
+    fn result_words(&self) -> usize {
+        0
+    }
+
+    /// The due result just delivered (`due` answered `Ready` at a due frame),
+    /// as words, for a session that records delivered data
+    /// (`--record-boundary-data`). Real-time rules apply.
+    fn delivered_result(&self) -> &[f32] {
+        &[]
+    }
+
+    /// Exact replay of a session with recorded data: show `words`, a result
+    /// [`delivered_result`](Self::delivered_result) gave in the recorded run,
+    /// as this block's due result, in place of the device's. `false` (the
+    /// default) when the type cannot.
+    fn inject_result(&mut self, _words: &[f32]) -> bool {
+        false
+    }
+
+    /// Exact replay only, before each `absorb`: [`Due::Pending`] while the
+    /// work that `absorb` may submit cannot be accepted yet because work given
+    /// up on is still in flight; the engine yields and asks again.
+    /// [`Due::Lost`] means it never will be (no device). Never blocks.
+    fn settle(&mut self) -> Due {
+        Due::Ready
+    }
 }
 
 /// What [`StateOutputPrimitive::due`] reports.

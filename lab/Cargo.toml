@@ -25,6 +25,8 @@ signal-contract = { workspace = true }
 signal-engine = { workspace = true }
 signal-graph = { workspace = true }
 signal-std = { workspace = true }
+# Sessions (M2.7-4): a live run recorded and replayed exactly or ideally.
+signal-project = { workspace = true }
 
 [lints]
 workspace = true

@@ -1039,3 +1039,25 @@ fn a_recorded_end_is_the_default_replay_length() {
     });
     assert_fails(result, "edits.jsonl:", "at or after the session's end");
 }
+
+/// M2.7-4 (C5, AC2): `signal replay --ideal` labels its manifest `ideal`;
+/// a plain replay of a session without latent modules is unchanged (no
+/// `ideal`, no `device_conversion`), and for such a session the two render
+/// the same audio and log.
+#[test]
+fn ideal_replay_is_labelled_and_changes_nothing_without_latent_modules() {
+    let (_, dir) = recorded("ideal/session");
+    let exact = replayed(&dir, &[]);
+    assert_eq!(exact["ideal"], false);
+    assert_eq!(exact["boundaries"], "not-latent");
+    assert!(exact["manifest"].get("ideal").is_none(), "{exact}");
+    assert!(
+        exact["manifest"].get("device_conversion").is_none(),
+        "{exact}"
+    );
+    let ideal = replayed(&dir, &["--ideal"]);
+    assert_eq!(ideal["ideal"], true);
+    assert_eq!(ideal["boundaries"], "ideal");
+    assert_eq!(ideal["manifest"]["ideal"], true);
+    assert_eq!(hashes(&ideal), hashes(&exact));
+}

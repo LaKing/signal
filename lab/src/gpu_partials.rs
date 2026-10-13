@@ -308,6 +308,12 @@ pub struct GpuPartials {
     current: Option<Job>,
     /// Whether the current block's due result was dealt with (`due`, `miss`).
     resolved: bool,
+    /// A recorded result an exact replay showed in the current block in place
+    /// of the GPU's (`inject_result`, M2.7-4): [`BLOCK_FRAMES`] words,
+    /// allocated in `prepare`.
+    injected: Vec<f32>,
+    /// Whether the current block shows `injected`.
+    showing_injected: bool,
 }
 
 impl GpuPartials {
@@ -319,6 +325,7 @@ impl GpuPartials {
 
     /// Shows nothing in the current block; the shown job returns to the pool.
     fn silence(&mut self) {
+        self.showing_injected = false;
         if let (Some(job), Some(channel)) = (self.current.take(), self.channel.as_mut()) {
             channel.recycle(job);
         }
@@ -336,6 +343,7 @@ impl StateOutputPrimitive for GpuPartials {
         // control thread); the service is created on first use.
         self.channel = GpuService::shared().and_then(|gpu| gpu.channel(KERNEL, JOBS).ok());
         self.current = None;
+        self.injected = vec![0.0; BLOCK_FRAMES];
         self.first_seq = 0;
         self.reset();
     }
@@ -386,9 +394,14 @@ impl StateOutputPrimitive for GpuPartials {
                 if let Some(shown) = self.current.replace(job) {
                     channel.recycle(shown);
                 }
+                self.showing_injected = false;
                 self.resolved = true;
                 Due::Ready
             }
+            // A stale result published since the loop above: the next `due`
+            // returns it to the pool (an offline wait asks again; in real
+            // time a pending result is a miss, as a lost one).
+            Some(seq) if seq < due => Due::Pending,
             Some(_) => Due::Lost,
             None if channel.is_lost() => Due::Lost,
             None => Due::Pending,
@@ -400,8 +413,65 @@ impl StateOutputPrimitive for GpuPartials {
         self.resolved = true;
     }
 
+    fn result_words(&self) -> usize {
+        BLOCK_FRAMES
+    }
+
+    fn delivered_result(&self) -> &[f32] {
+        match &self.current {
+            Some(job) if self.resolved && !self.showing_injected => job.output(),
+            _ => &[],
+        }
+    }
+
+    fn inject_result(&mut self, words: &[f32]) -> bool {
+        if words.len() != self.injected.len() {
+            return false;
+        }
+        // The GPU's own job for this block, if it comes, is stale from now
+        // on and returns to the pool with the next block's `due`.
+        self.silence();
+        self.injected.copy_from_slice(words);
+        self.showing_injected = true;
+        self.resolved = true;
+        true
+    }
+
+    fn settle(&mut self) -> Due {
+        // Only the absorb that ends a block submits.
+        if self.frame + 1 < BLOCK_FRAMES {
+            return Due::Ready;
+        }
+        let Some(channel) = self.channel.as_mut() else {
+            return Due::Lost;
+        };
+        // Every result before the next block's due one was dealt with:
+        // finished stale jobs go back to the pool, as the next `due` would
+        // return them.
+        let back = u64::from(LATENCY_BLOCKS);
+        let next_due = (self.block + 1 >= back).then(|| self.first_seq + self.block + 1 - back);
+        while channel
+            .peek_done()
+            .is_some_and(|seq| next_due.is_some_and(|due| seq < due))
+        {
+            if let Some(job) = channel.take_done() {
+                channel.recycle(job);
+            }
+        }
+        if channel.free_jobs() > 0 {
+            Due::Ready
+        } else if channel.is_lost() {
+            Due::Lost
+        } else {
+            Due::Pending
+        }
+    }
+
     fn emit(&self, outputs: &mut Outputs<'_>) {
         let value = match &self.current {
+            _ if self.showing_injected && self.resolved => {
+                self.injected.get(self.frame).copied().unwrap_or(0.0)
+            }
             Some(job) if self.resolved => job.output().get(self.frame).copied().unwrap_or(0.0),
             _ => 0.0,
         };
