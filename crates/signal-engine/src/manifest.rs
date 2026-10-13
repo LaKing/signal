@@ -55,6 +55,11 @@ pub struct Manifest {
     /// non-finite samples 0. Absent unless true.
     #[serde(default, skip_serializing_if = "is_false")]
     pub device_conversion: bool,
+    /// An exact replay run with `--trust-provenance` although the session
+    /// was recorded by another build or machine (M2.7-8): its recomputed
+    /// results were still checked against their hashes. Absent unless true.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub trust_provenance: bool,
 }
 
 fn is_false(value: &bool) -> bool {

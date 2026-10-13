@@ -461,8 +461,11 @@ impl StateOutputPrimitive for GpuPartials {
     }
 
     fn delivered_result(&self) -> &[f32] {
+        // The result shown: the GPU's, or in an exact replay the injected
+        // one, which the engine checks against its recorded hash (M2.7-8).
         match &self.current {
-            Some(job) if self.resolved && !self.showing_injected => job.output(),
+            _ if self.resolved && self.showing_injected => &self.injected,
+            Some(job) if self.resolved => job.output(),
             _ => &[],
         }
     }

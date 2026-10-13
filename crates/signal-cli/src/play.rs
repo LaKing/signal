@@ -358,12 +358,13 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
         eprintln!("signal: not recorded: {message}");
     }
     if let Some(dir) = &args.record_session {
-        live.into_recorder()
-            .write(dir)
-            .map_err(|error| match error {
-                SessionError::Io { .. } => Failure::Io(error.to_string()),
-                error => Failure::Internal(error.to_string()),
-            })?;
+        let mut recorder = live.into_recorder();
+        // The GPU the run's latent modules used, if any (M2.7-8).
+        recorder.set_devices(crate::replay::gpu_devices(false));
+        recorder.write(dir).map_err(|error| match error {
+            SessionError::Io { .. } => Failure::Io(error.to_string()),
+            error => Failure::Internal(error.to_string()),
+        })?;
     }
     if let (Some(path), Some(samples)) = (&args.record_audio, &ended.audio) {
         write_wav(path, samples, ended.device_channels, rate)?;

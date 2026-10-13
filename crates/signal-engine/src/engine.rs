@@ -20,7 +20,7 @@ use signal_core::{
     BlockLatency, Combine, DirectPrimitive, Direction, Due, Event, EventPayload, EventSink,
     Feedthrough, Frame, Inputs, InstanceAddress, LossCause, ModuleDescriptor, Outputs, PortAddress,
     PortKind, PortShape, PrepareContext, Primitive, Range, RateDivisor, Registry, Reproducibility,
-    RngStream, SinkKind, StateOutputPrimitive,
+    RngStream, SinkKind, StateOutputPrimitive, fnv1a64_words,
 };
 use signal_graph::ExecutionPlan;
 
@@ -209,7 +209,16 @@ pub enum Scripted {
     Missed(Option<LossCause>),
     /// The result was delivered: with the recorded words, which the module
     /// shows in place of its device's; without, the engine waits for it.
-    Delivered(Option<Box<[f32]>>),
+    /// With the recorded hash (M2.7-8), the result shown is checked against
+    /// it ([`take_boundary_hash_mismatch`](Engine::take_boundary_hash_mismatch)).
+    Delivered {
+        /// The recorded words, if the session has them.
+        words: Option<Box<[f32]>>,
+        /// The recorded FNV-1a 64 of the result
+        /// ([`fnv1a64_words`](signal_core::fnv1a64_words)); none in a session
+        /// written before hashes.
+        fnv1a64: Option<u64>,
+    },
 }
 
 /// A pushed boundary outcome with its frame.
@@ -496,6 +505,10 @@ pub(crate) struct BoundaryCounts {
     pub(crate) unscripted: u64,
     /// Exact replay: recorded deliveries this run could not reproduce.
     pub(crate) unreproduced: u64,
+    /// Exact replay (M2.7-8): the earliest (due frame, instance) whose shown
+    /// result differs from its recorded hash. Only ever set offline, in a
+    /// scripted replay; never in real time.
+    pub(crate) hash_mismatch: Option<(Frame, usize)>,
 }
 
 impl BoundaryCounts {
@@ -505,6 +518,16 @@ impl BoundaryCounts {
         self.used = self.used.saturating_add(other.used);
         self.unscripted = self.unscripted.saturating_add(other.unscripted);
         self.unreproduced = self.unreproduced.saturating_add(other.unreproduced);
+        self.hash_mismatch = first_of(self.hash_mismatch, other.hash_mismatch);
+    }
+}
+
+/// The earlier of two (frame, instance) mismatches, either possibly absent.
+/// Not `Option::min`, for which `None` is the least.
+fn first_of(a: Option<(Frame, usize)>, b: Option<(Frame, usize)>) -> Option<(Frame, usize)> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
     }
 }
 
@@ -646,6 +669,16 @@ impl PlanState {
                     match &mut primitive {
                         Primitive::Direct(module) => module.prepare(&context),
                         Primitive::StateOutput(module) => module.prepare(&context),
+                    }
+                    // M2.7-8: every delivered result of a latent module is
+                    // hashed, so a latent module must expose its result.
+                    if let Primitive::StateOutput(module) = &primitive
+                        && descriptor.latency.is_some()
+                        && module.result_words() == 0
+                    {
+                        return Err(EngineError::LatentWithoutResult {
+                            instance: address.clone(),
+                        });
                     }
                     Some(primitive)
                 }
@@ -1908,8 +1941,11 @@ impl Engine {
     /// Refused, before any state moves, when `swap` was prepared by another
     /// engine, when `frame` is not the next frame, when `swap` was prepared at
     /// another version or is already committed, when a swap is already
-    /// committed for this frame, and when the last frame's log has not been
-    /// drained (its records name the old plan's ports).
+    /// committed for this frame, when the last frame's log has not been
+    /// drained (its records name the old plan's ports), and, in an exact
+    /// replay, when a hash mismatch has not been taken
+    /// ([`take_boundary_hash_mismatch`](Engine::take_boundary_hash_mismatch):
+    /// it names an instance of the old plan).
     pub fn commit_swap(
         &mut self,
         swap: &mut PreparedSwap,
@@ -1932,6 +1968,11 @@ impl Engine {
         }
         if !self.plan.out.log.is_empty() {
             return Err(EngineError::LogNotDrained);
+        }
+        // A plain field test: set only by an offline exact replay, never in
+        // real time.
+        if self.boundary.hash_mismatch.is_some() {
+            return Err(EngineError::MismatchNotTaken);
         }
         let (new, old) = (&mut swap.plan, &mut self.plan);
         for &(n, o) in &swap.survivors {
@@ -2205,7 +2246,28 @@ impl Engine {
     /// order: the result is the same bit for bit. Returns why the engine
     /// failed in it, if it did (`docs/semantics.md` §14): a task unwound
     /// outside a primitive's call, or an access was refused.
+    ///
+    /// An exact replay's hash mismatch found before such a failure is kept
+    /// (M2.7-8): it is the replay's first cause, whatever failed after it.
+    /// The failure exits return before the segment's counters are merged,
+    /// so it is taken from the outs here. Allocates nothing; only an offline
+    /// exact replay ever sets one.
     fn run_segment(&mut self, a: usize, b: usize) -> Option<FailureReason> {
+        let failure = self.run_segment_units(a, b);
+        if failure.is_some() {
+            let plan = &mut self.plan;
+            let mut found = plan.out.boundary.hash_mismatch.take();
+            for out in plan.cells.outs.get_mut() {
+                found = first_of(found, out.boundary.hash_mismatch.take());
+            }
+            self.boundary.hash_mismatch = first_of(self.boundary.hash_mismatch, found);
+        }
+        failure
+    }
+
+    /// [`run_segment`](Engine::run_segment) without keeping a mismatch on a
+    /// failure.
+    fn run_segment_units(&mut self, a: usize, b: usize) -> Option<FailureReason> {
         let parallel = self.parallel(b - a);
         let trace = self.config.schedule.trace;
         let plan = &mut self.plan;
@@ -2271,6 +2333,7 @@ impl Engine {
                                 at,
                                 words,
                                 lost,
+                                fnv1a64,
                             } if words > 0 => {
                                 let lost = lost || !fits;
                                 if !fits {
@@ -2283,6 +2346,7 @@ impl Engine {
                                     at: if lost { 0 } else { at + base as u32 },
                                     words: if lost { 0 } else { words },
                                     lost,
+                                    fnv1a64,
                                 }
                             }
                             record => record,
@@ -2598,6 +2662,20 @@ impl Engine {
     /// recorded data).
     pub fn boundary_unreproduced(&self) -> u64 {
         self.boundary.unreproduced
+    }
+
+    /// Exact replay (M2.7-8): the earliest due block, since the last call,
+    /// whose shown result differs from the hash pushed with its outcome, as
+    /// (due frame, instance address); and forgets it. Take it before every
+    /// [`commit_swap`](Engine::commit_swap), which refuses while one is
+    /// untaken (its instance is one of the plan that ran). Only an offline
+    /// exact replay sets it; call it off the real-time thread (it clones the
+    /// address). The mismatch is forgotten only once its address is known.
+    pub fn take_boundary_hash_mismatch(&mut self) -> Option<(Frame, InstanceAddress)> {
+        let (frame, slot) = self.boundary.hash_mismatch?;
+        let address = self.instance_address(InstanceId(slot))?.clone();
+        self.boundary.hash_mismatch = None;
+        Some((frame, address))
     }
 
     /// The current plan's instances whose type is reproducible on the same
@@ -3016,15 +3094,25 @@ fn await_due(
                 let _ = module.due();
                 missed(fx, module, slot, out, (i, f), Some(*cause));
             }
-            Some(Scripted::Delivered(Some(words))) => {
+            Some(Scripted::Delivered {
+                words: Some(words),
+                fnv1a64,
+            }) => {
                 out.boundary.used = out.boundary.used.saturating_add(1);
-                if !module.inject_result(words) {
+                if module.inject_result(words) {
+                    check_hash(fx, module, out, (i, f), *fnv1a64);
+                } else {
                     out.boundary.unreproduced = out.boundary.unreproduced.saturating_add(1);
                 }
             }
-            Some(Scripted::Delivered(None)) => {
+            Some(Scripted::Delivered {
+                words: None,
+                fnv1a64,
+            }) => {
                 out.boundary.used = out.boundary.used.saturating_add(1);
-                if !wait_due(module) {
+                if wait_due(module) {
+                    check_hash(fx, module, out, (i, f), *fnv1a64);
+                } else {
                     out.boundary.unreproduced = out.boundary.unreproduced.saturating_add(1);
                     missed(fx, module, slot, out, (i, f), None);
                 }
@@ -3050,6 +3138,24 @@ fn await_due(
         missed(fx, module, slot, out, (i, f), None);
     } else if due_frame(slot) {
         delivered(fx, module, slot, out, (i, f));
+    }
+}
+
+/// Exact replay (M2.7-8): the result instance `i` shows at its due frame
+/// (block frame `f`), recomputed or injected, against its recorded hash; a
+/// difference is kept as the block's earliest mismatch. Allocates nothing.
+fn check_hash(
+    fx: &Fixed<'_>,
+    module: &dyn StateOutputPrimitive,
+    out: &mut Out,
+    (i, f): (usize, usize),
+    recorded: Option<u64>,
+) {
+    if let Some(recorded) = recorded
+        && fnv1a64_words(module.delivered_result()) != recorded
+    {
+        let at = Some((fx.frame(f), i));
+        out.boundary.hash_mismatch = first_of(out.boundary.hash_mismatch, at);
     }
 }
 
@@ -3108,8 +3214,9 @@ fn missed(
 }
 
 /// Real time: the due result was delivered. Counted, and recorded as a
-/// `Delivered` record, with the result's words when they are carried and
-/// fit the block's buffer (allocates nothing).
+/// `Delivered` record with the result's hash (M2.7-8, always), and with the
+/// result's words when they are carried and fit the block's buffer
+/// (allocates nothing).
 fn delivered(
     fx: &Fixed<'_>,
     module: &mut dyn StateOutputPrimitive,
@@ -3118,9 +3225,10 @@ fn delivered(
     (i, f): (usize, usize),
 ) {
     out.boundary.delivered = out.boundary.delivered.saturating_add(1);
+    let result = module.delivered_result();
+    let fnv1a64 = fnv1a64_words(result);
     let (mut at, mut words, mut lost) = (0, 0, false);
     if fx.record_data && slot.result_words > 0 {
-        let result = module.delivered_result();
         let data = &mut out.boundary_data;
         if data.len() + result.len() <= data.capacity() {
             at = data.len() as u32;
@@ -3137,6 +3245,7 @@ fn delivered(
         at,
         words,
         lost,
+        fnv1a64,
     };
     push_record(&mut out.log, &mut out.log_overflows, record);
 }

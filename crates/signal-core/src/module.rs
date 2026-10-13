@@ -507,15 +507,21 @@ pub trait StateOutputPrimitive: Send {
 
     /// The most words [`delivered_result`](Self::delivered_result) returns:
     /// asked once after `prepare`, off the real-time thread, to size the
-    /// buffers that carry delivered results to a session (M2.7-4). 0, the
-    /// default, records none.
+    /// buffers that carry delivered results to a session (M2.7-4). A type
+    /// that declares a [`BlockLatency`](crate::BlockLatency) must return at
+    /// least 1: the engine refuses a latent instance that exposes no result,
+    /// since its delivered results could not be hashed (M2.7-8). 0, the
+    /// default, is for every other type.
     fn result_words(&self) -> usize {
         0
     }
 
-    /// The due result just delivered (`due` answered `Ready` at a due frame),
-    /// as words, for a session that records delivered data
-    /// (`--record-boundary-data`). Real-time rules apply.
+    /// The due result shown in the current block, as words: asked at every
+    /// due frame whose result was delivered (`due` answered `Ready`), to hash
+    /// it (M2.7-8) and, for a session that records delivered data
+    /// (`--record-boundary-data`), to keep it; in an exact replay also after
+    /// [`inject_result`](Self::inject_result), when it is the injected
+    /// result. Real-time rules apply.
     fn delivered_result(&self) -> &[f32] {
         &[]
     }

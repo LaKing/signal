@@ -67,6 +67,18 @@ fn a_cached_kernel_does_not_decide_another_channels_dispatch() {
     }
 }
 
+/// M2.7-8: a service names its adapter as its backend describes it, what a
+/// session records of a device it used. On the noop device the backend is
+/// `Noop`; a real adapter's fields are the operator's to check (C15).
+#[test]
+fn a_service_names_its_adapter() {
+    let service = noop();
+    let identity = service.identity();
+    assert_eq!(identity.backend, "Noop", "{identity:?}");
+    assert!(!identity.name.is_empty(), "{identity:?}");
+    assert!(service.adapter().contains(&identity.name));
+}
+
 /// Finding 4: an invalid dispatch raised validation errors, yet the job came
 /// back as zeros with `failed = false`. It is refused, or its job fails.
 #[test]

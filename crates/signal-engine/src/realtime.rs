@@ -294,6 +294,8 @@ pub enum BoundaryOutcome<'a> {
         data: Option<&'a [f32]>,
         /// Its words were carried but did not reach the control thread.
         data_lost: bool,
+        /// The FNV-1a 64 of its words (M2.7-8), always.
+        fnv1a64: u64,
     },
     /// It did not (a `late_result` fault).
     Missed {
@@ -1180,6 +1182,7 @@ impl Controller {
                 instance,
                 words,
                 lost,
+                fnv1a64,
                 ..
             } = record
             {
@@ -1207,7 +1210,11 @@ impl Controller {
                     sink.boundary(BoundaryLine {
                         frame,
                         address,
-                        outcome: BoundaryOutcome::Delivered { data, data_lost },
+                        outcome: BoundaryOutcome::Delivered {
+                            data,
+                            data_lost,
+                            fnv1a64,
+                        },
                     });
                 }
                 continue;

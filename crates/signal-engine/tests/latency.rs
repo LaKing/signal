@@ -13,10 +13,12 @@ use signal_core::{
     BlockLatency, Direction, Due, Feedthrough, Frame, Inputs, InstanceAddress, LossCause,
     ModuleDescriptor, ModuleType, Outputs, PortDescriptor, PortKind, PortShape, PrepareContext,
     Primitive, RateDivisor, Registry, RegistryError, Reproducibility, StateOutputPrimitive,
+    fnv1a64_words,
 };
 use signal_engine::{
-    BoundaryLine, BoundaryOutcome, ControlSink, Driver, Engine, EngineConfig, FaultReason, LogLine,
-    NullDriver, RealtimeConfig, SameMachine, Schedule, Scripted, realtime, render,
+    BoundaryLine, BoundaryOutcome, ControlSink, Driver, Engine, EngineConfig, EngineError,
+    FaultReason, Injection, LogLine, NullDriver, RealtimeConfig, RenderError, SameMachine,
+    Schedule, Scripted, realtime, render, render_blocks,
 };
 use signal_graph::{CompositeDef, Exports, build_plan};
 
@@ -58,6 +60,8 @@ struct Latent {
     sum: f64,
     pending: f64,
     shown: f64,
+    /// `shown` as the result word it exposes (M2.7-8).
+    word: [f32; 1],
     polls: u32,
     resolved: bool,
 }
@@ -85,12 +89,20 @@ impl StateOutputPrimitive for Latent {
             return Due::Pending;
         }
         self.shown = self.pending;
+        self.word = [self.shown as f32];
         self.resolved = true;
         Due::Ready
     }
     fn miss(&mut self) {
         self.shown = 0.0;
+        self.word = [0.0];
         self.resolved = true;
+    }
+    fn result_words(&self) -> usize {
+        1
+    }
+    fn delivered_result(&self) -> &[f32] {
+        &self.word
     }
     fn emit(&self, outputs: &mut Outputs<'_>) {
         outputs.signal(0).fill(self.shown);
@@ -343,8 +355,14 @@ fn zeta(samples: &[f64]) -> Vec<f64> {
 fn script(m: u64) -> Scripted {
     match m % 3 {
         0 => Scripted::Missed(None),
-        1 => Scripted::Delivered(None),
-        _ => Scripted::Delivered(Some(vec![42.0 + m as f32].into_boxed_slice())),
+        1 => Scripted::Delivered {
+            words: None,
+            fnv1a64: None,
+        },
+        _ => Scripted::Delivered {
+            words: Some(vec![42.0 + m as f32].into_boxed_slice()),
+            fnv1a64: None,
+        },
     }
 }
 
@@ -445,7 +463,10 @@ fn settle_is_asked_in_exact_replay_only() {
             .push_boundary(
                 "/lat".parse().unwrap(),
                 Frame(4 * m),
-                Scripted::Delivered(None),
+                Scripted::Delivered {
+                    words: None,
+                    fnv1a64: None,
+                },
             )
             .unwrap();
     }
@@ -461,6 +482,8 @@ fn settle_is_asked_in_exact_replay_only() {
 #[derive(Default)]
 struct Outcomes {
     delivered: Vec<(u64, Option<Vec<f32>>)>,
+    /// Each delivered outcome's hash.
+    hashes: Vec<u64>,
     missed: Vec<u64>,
     status: Option<signal_engine::RunnerStatus>,
 }
@@ -469,10 +492,15 @@ impl ControlSink for Outcomes {
     fn boundary(&mut self, line: BoundaryLine<'_>) {
         assert_eq!(line.address.to_string(), "/lat");
         match line.outcome {
-            BoundaryOutcome::Delivered { data, data_lost } => {
+            BoundaryOutcome::Delivered {
+                data,
+                data_lost,
+                fnv1a64,
+            } => {
                 assert!(!data_lost);
                 self.delivered
                     .push((line.frame.0, data.map(<[f32]>::to_vec)));
+                self.hashes.push(fnv1a64);
             }
             BoundaryOutcome::Missed { cause } => {
                 assert_eq!(cause, None);
@@ -488,7 +516,8 @@ impl ControlSink for Outcomes {
 /// C1/C2/C3 in the engine: in real time every due block is a delivered or a
 /// missed outcome at its first frame (even blocks delivered, odd missed),
 /// counted by the runner; with `record_boundary_data` each delivery carries
-/// its result, through the boundary-data queue.
+/// its result, through the boundary-data queue. M2.7-8: every delivery
+/// carries the hash of the result it showed.
 #[test]
 fn real_time_reports_every_due_block_with_its_data() {
     let registry = common::latent_registry();
@@ -522,6 +551,11 @@ fn real_time_reports_every_due_block_with_its_data() {
         .map(|m| m * MIXED_BLOCK as u64)
         .collect();
     assert_eq!(outcomes.delivered, even);
+    let hashes: Vec<u64> = even
+        .iter()
+        .map(|(_, words)| fnv1a64_words(words.as_deref().unwrap_or(&[])))
+        .collect();
+    assert_eq!(outcomes.hashes, hashes);
     assert_eq!(outcomes.missed, odd);
     let status = runner.status();
     assert_eq!(status.delivered_results, even.len() as u64);
@@ -576,6 +610,12 @@ impl StateOutputPrimitive for Lossy {
     }
     fn lost_cause(&self) -> Option<LossCause> {
         self.cause
+    }
+    fn result_words(&self) -> usize {
+        1
+    }
+    fn delivered_result(&self) -> &[f32] {
+        &[1.0]
     }
     fn emit(&self, outputs: &mut Outputs<'_>) {
         outputs.signal(0).fill(1.0);
@@ -731,7 +771,10 @@ fn exact_replay_logs_the_recorded_cause() {
         let outcome = match m {
             1 => Scripted::Missed(Some(LossCause::DeviceLost)),
             2 => Scripted::Missed(None),
-            _ => Scripted::Delivered(None),
+            _ => Scripted::Delivered {
+                words: None,
+                fnv1a64: None,
+            },
         };
         engine
             .push_boundary(lat.clone(), Frame(4 * m), outcome)
@@ -744,4 +787,214 @@ fn exact_replay_logs_the_recorded_cause() {
     assert_eq!(cause_at(&lines, 8).as_deref(), Some("none"));
     assert_eq!(cause_at(&lines, 12).as_deref(), Some("\"mapping\"}"));
     assert_eq!(cause_at(&lines, 16), None, "an even block is delivered");
+}
+
+// M2.7-8: every delivered result is hashed, and an exact replay checks it.
+
+/// `test.opaque`: like `test.latent`, but exposes no result (the trait's
+/// defaults), so its delivered results could not be hashed.
+const OPAQUE: ModuleDescriptor = ModuleDescriptor {
+    type_name: "test.opaque",
+    ..LATENT
+};
+
+#[derive(Default)]
+struct Opaque;
+
+impl StateOutputPrimitive for Opaque {
+    fn describe() -> ModuleDescriptor {
+        OPAQUE
+    }
+    fn prepare(&mut self, _ctx: &PrepareContext) {}
+    fn reset(&mut self) {}
+    fn emit(&self, outputs: &mut Outputs<'_>) {
+        outputs.signal(0).fill(0.0);
+    }
+    fn absorb(&mut self, _inputs: &Inputs<'_>) {}
+}
+
+/// C1: a latent instance that exposes no result is refused when the engine
+/// builds it, so no delivered result of a latent module goes unhashed.
+#[test]
+fn a_latent_module_without_a_result_is_refused() {
+    let mut registry = common::registry();
+    registry
+        .register(ModuleType {
+            descriptor: OPAQUE,
+            create: || Primitive::StateOutput(Box::new(Opaque)),
+        })
+        .unwrap();
+    let root = CompositeDef {
+        name: "project".to_owned(),
+        instances: vec![
+            inst("count", "test.frames"),
+            inst("lat", "test.opaque"),
+            inst("rec", "test.recorder"),
+        ],
+        connections: vec![conn("count.out", "lat.in"), conn("lat.out", "rec.alpha")],
+        exports: Exports::default(),
+    };
+    let plan = build_plan(&root, &[], &registry, 1).unwrap();
+    match Engine::new(&plan, &registry, EngineConfig::new(48_000, 42), Vec::new()) {
+        Err(EngineError::LatentWithoutResult { instance }) => {
+            assert_eq!(instance.to_string(), "/lat");
+        }
+        Err(other) => panic!("{other}"),
+        Ok(_) => panic!("a latent module without a result was built"),
+    }
+}
+
+/// Two `test.mixed_latent` instances, `a` and `b`, on the frame counter.
+fn two_latent_plan(registry: &Registry) -> signal_graph::ExecutionPlan {
+    let root = CompositeDef {
+        name: "project".to_owned(),
+        instances: vec![
+            inst("count", "test.frames"),
+            inst("a", "test.mixed_latent"),
+            inst("b", "test.mixed_latent"),
+            inst("rec", "test.recorder"),
+        ],
+        connections: vec![
+            conn("count.out", "a.in"),
+            conn("count.out", "b.in"),
+            conn("a.out", "rec.alpha"),
+            conn("b.out", "rec.zeta"),
+        ],
+        exports: Exports::default(),
+    };
+    build_plan(&root, &[], registry, 1).unwrap()
+}
+
+/// The recorded delivery of a `test.mixed_latent` block m, awaited, with
+/// the hash of the word it shows (`right`) or of another word.
+fn awaited(m: u64, right: bool) -> Scripted {
+    let word = expected((m * 4) as usize) as f32;
+    let shown = if right { word } else { word + 0.5 };
+    Scripted::Delivered {
+        words: None,
+        fnv1a64: Some(fnv1a64_words(&[shown])),
+    }
+}
+
+/// C4: an exact replay keeps the earliest due block whose result differs
+/// from its recorded hash, (frame, instance), the same at any thread count
+/// and block size, across every block since it was last taken (here the
+/// whole render, with no step between blocks); matching hashes are no
+/// mismatch. A swap is refused while a mismatch is untaken.
+#[test]
+fn the_earliest_hash_mismatch_is_kept_for_any_k_and_threads() {
+    let registry = common::latent_registry();
+    let plan = two_latent_plan(&registry);
+    let (a, b): (InstanceAddress, InstanceAddress) = ("/a".parse().unwrap(), "/b".parse().unwrap());
+    for (threads, k) in [(1, 256), (1, 3), (4, 5), (4, 256)] {
+        let mut engine =
+            Engine::new(&plan, &registry, scripted_config(threads, k), Vec::new()).unwrap();
+        for m in 1..10u64 {
+            // `a` differs from block 5 on, `b` from block 3 on.
+            engine
+                .push_boundary(a.clone(), Frame(4 * m), awaited(m, m < 5))
+                .unwrap();
+            engine
+                .push_boundary(b.clone(), Frame(4 * m), awaited(m, m < 3))
+                .unwrap();
+        }
+        render(&mut engine, 40).unwrap();
+        assert_eq!(engine.boundary_mismatches(), 0);
+        let mut swap = engine.prepare_swap(&plan, &registry).unwrap();
+        let next = engine.next_frame();
+        assert_eq!(
+            engine.commit_swap(&mut swap, next),
+            Err(EngineError::MismatchNotTaken)
+        );
+        assert_eq!(
+            engine.take_boundary_hash_mismatch(),
+            Some((Frame(12), b.clone())),
+            "{threads} threads, k = {k}"
+        );
+        assert_eq!(engine.take_boundary_hash_mismatch(), None);
+        engine.commit_swap(&mut swap, next).unwrap();
+    }
+
+    // Every hash right: no mismatch.
+    let mut engine = Engine::new(&plan, &registry, scripted_config(2, 7), Vec::new()).unwrap();
+    for m in 1..10u64 {
+        for instance in [&a, &b] {
+            engine
+                .push_boundary(instance.clone(), Frame(4 * m), awaited(m, true))
+                .unwrap();
+        }
+    }
+    render(&mut engine, 40).unwrap();
+    assert_eq!(engine.take_boundary_hash_mismatch(), None);
+}
+
+/// C3: a recorded result shown in place of the device's is checked too:
+/// against a wrong hash it is a mismatch, against its own none.
+#[test]
+fn injected_data_is_checked_against_its_hash() {
+    let registry = common::latent_registry();
+    let plan = mixed_plan(&registry, "polls");
+    for (hash_of, mismatch) in [(7.0f32, None), (8.0, Some(Frame(4)))] {
+        let mut engine =
+            Engine::new(&plan, &registry, scripted_config(1, 256), Vec::new()).unwrap();
+        engine
+            .push_boundary(
+                "/lat".parse().unwrap(),
+                Frame(4),
+                Scripted::Delivered {
+                    words: Some(vec![7.0].into_boxed_slice()),
+                    fnv1a64: Some(fnv1a64_words(&[hash_of])),
+                },
+            )
+            .unwrap();
+        render(&mut engine, 8).unwrap();
+        assert_eq!(engine.boundary_unreproduced(), 0);
+        assert_eq!(
+            engine.take_boundary_hash_mismatch().map(|(f, _)| f),
+            mismatch
+        );
+    }
+}
+
+/// auditor-1-003 (C4): a hash mismatch found before an engine failure in
+/// the same segment is kept, on the calling thread and on the workers, so
+/// that an exact replay reports it rather than the render error. The steps
+/// are `replay_with`'s: take the mismatch before each block, and once more
+/// after `render_blocks` returns, whether it failed or not. Before the fix
+/// the failure exits returned before the segment's counters were merged,
+/// and the mismatch was lost.
+#[test]
+fn a_mismatch_before_an_engine_failure_is_kept() {
+    let registry = common::latent_registry();
+    let plan = mixed_plan(&registry, "polls");
+    for threads in [1, 4] {
+        let mut engine =
+            Engine::new(&plan, &registry, scripted_config(threads, 256), Vec::new()).unwrap();
+        engine
+            .push_boundary(
+                "/lat".parse().unwrap(),
+                Frame(4),
+                Scripted::Delivered {
+                    words: None,
+                    fnv1a64: Some(0),
+                },
+            )
+            .unwrap();
+        // The recorder downstream of `/lat` fails the engine in the same
+        // segment, after `/lat` showed its result.
+        engine.inject(Injection::RefuseView("/rec".parse().unwrap()));
+        let mut first = None;
+        let rendered = render_blocks(&mut engine, 8, 256, |engine| {
+            first = first.take().or(engine.take_boundary_hash_mismatch());
+            Ok(None)
+        });
+        assert!(
+            matches!(rendered, Err(RenderError::EngineFailed(_))),
+            "{threads} threads: {:?}",
+            rendered.err()
+        );
+        let first = first.or(engine.take_boundary_hash_mismatch());
+        let (frame, module) = first.unwrap_or_else(|| panic!("{threads} threads: lost"));
+        assert_eq!((frame, module.to_string()), (Frame(4), "/lat".to_owned()));
+    }
 }

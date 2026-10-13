@@ -1,6 +1,6 @@
 # Session format
 
-**Status: normative** (ADR 0006, 0008, 0009). A **session** is the text record of a live run: the project it started from, every plan version swapped in, every command applied, each with its **effective frame**, and (M2.7-4) the outcome of every latent module's due block. `signal replay` renders it offline exactly as it was played, bit-identically on the same build (V10); `signal replay --ideal` renders it with every latent result awaited (`semantics.md` §15). `signal-project`'s `session` module implements it, so that `signal` and `Signal.app` share it: `SessionRecorder` writes a session, `LiveRecorder` records a real-time run into one, `Session::load` reads and validates one, `replay` renders one. `signal-cli` holds only the `signal replay` command.
+**Status: normative** (ADR 0006, 0008, 0009). A **session** is the text record of a live run: the project it started from, every plan version swapped in, every command applied, each with its **effective frame**, (M2.7-4) the outcome of every latent module's due block, and (M2.7-8) the hash of every delivered result and the machine it ran on. `signal replay` renders it offline exactly as it was played, bit-identically on the same build (V10), and checks that it did (§6); `signal replay --ideal` renders it with every latent result awaited (`semantics.md` §15). `signal-project`'s `session` module implements it, so that `signal` and `Signal.app` share it: `SessionRecorder` writes a session, `LiveRecorder` records a real-time run into one, `Session::load` reads and validates one, `replay` renders one. `signal-cli` holds only the `signal replay` command.
 
 Edit commands come from project changes through `signal_project::diff` (§5).
 
@@ -8,7 +8,7 @@ Edit commands come from project changes through `signal_project::diff` (§5).
 
 ```text
 <session>/
-  session.toml                       format version, run settings, provenance, plan versions
+  session.toml                       format version, run settings, provenance, machine, plan versions
   projects/v0/project.toml           version 0: the project the engine was built from
   projects/v0/composites/<name>.toml
   projects/v1/…                      one folder per plan version swapped in
@@ -36,6 +36,17 @@ cargo_lock_hash = "…"
 [provenance.project_file_hashes]
 "project.toml" = "cda28b8f6591f20c"
 
+[machine]
+cpu_arch = "aarch64"
+
+[[machine.devices]]
+backend = "Metal"
+name = "Apple M5 Max"
+vendor = 0
+device_id = 0
+driver = ""
+driver_info = ""
+
 [[versions]]
 version = 0
 
@@ -56,6 +67,7 @@ version = 1
 | `seed` | The engine's master seed, 0 to 2⁶³−1. |
 | `frames` | Optional. The frames the recorded run played (M2-4): `signal play` records it when the run ends, after the last `frontier`. Every command's frame is below it. Without it, replay renders the last command's frame plus one second (§6). Sessions written before it existed have no `frames` and replay as before; the format version stays 1. |
 | `[provenance]` | The recording build, field for field as in a render manifest (`semantics.md` §9, `project-format.md` §7). `project_file_hashes` are version 0's. |
+| `[machine]` | M2.7-8: the machine that recorded the run. `cpu_arch` is the CPU architecture (`aarch64`); `[[machine.devices]]` lists every compute device the run's latent modules used, each a GPU adapter as its backend describes it: `backend`, `name`, `vendor` and `device_id` (PCI ids, 0 where the backend has none), `driver` and `driver_info`. No device: no `devices` key. `signal play` records the GPU service its modules started (`--features lab`); without the lab tier nothing links a GPU. With `[provenance]`'s build it is what an exact replay that must recompute results compares first (§6). Sessions written before it existed have none, and replay as before (§6); the format version stays 1 (a build without it refuses a session with one, as for any unknown key). |
 | `[boundaries]` | Optional (M2.7-4), present when a version has a latent module (§4a): `complete` (bool), `data` (bool: delivered results recorded), `delivered` and `missed` (the counts of the lines of `boundaries.jsonl`), and when incomplete `lost` (outcomes the run had that the recorder did not get) and `reason`; with data, `data_fnv1a64`, the FNV-1a 64 of `boundary-data.f32`. Sessions written before it existed, or of projects without latent modules, have none; the format version stays 1. |
 | `[[versions]]` | Every plan version in order: `version` is 0, 1, 2, …; `files` maps each project file of `projects/v<N>/` (path relative to that folder) to its FNV-1a 64, 16 lowercase hex digits. |
 
@@ -140,6 +152,7 @@ M2.7-4 (audit finding 2). A latent module (`module-contract.md` "Declared latenc
 - `outcome` is `delivered` (the result arrived in time) or `missed` (it did not: a `late_result` fault in the log, and silence for the block).
 - A `missed` line may have `cause` (M2.7-5): the `cause` of its `late_result` fault (`semantics.md` §9), when the result was lost and the module said why, e.g. `{"frame":768,"instance":"/bank","outcome":"missed","cause":"mapping"}`. An exact replay logs it again. An unknown cause, or a cause on a `delivered` line, is an error. Sessions written before it existed have none; the format version stays 1 (a build without it refuses a session with a cause, as for any unknown field).
 - With `--record-boundary-data` (`[boundaries] data = true`), a delivered line also has `words`, the number of `f32` words of the delivered result (`StateOutputPrimitive::delivered_result`); the words are in `boundary-data.f32`, little-endian, in line order. With them, replay shows the recorded result instead of asking the device, so it does not need the same GPU.
+- M2.7-8: a delivered line has `fnv1a64`, the FNV-1a 64 of its result's words as `boundary-data.f32` would store them (`f32`, little-endian; `signal_core::fnv1a64_words`), 16 lowercase hex digits, after `words`: `{"frame":1024,"instance":"/bank","outcome":"delivered","words":256,"fnv1a64":"8c2b0d4e1f3a5b67"}`. The audio thread computes it for every delivered result, with or without data, allocating nothing; a missed line has none (it shows no result). With data, the line's words must have that hash, or the session is malformed. Every latent module exposes its result (`module-contract.md` "Declared latency"), so every delivered line of a session recorded since has one. Sessions written before it have none and replay as before, unverified (§6); the format version stays 1.
 - Unknown fields are errors; the counts must match `[boundaries]`, and the data its length and hash.
 
 **Completeness.** The outcomes travel from the audio thread through the runner's log queue (data through a boundary-data queue), which are lossy. `LiveRecorder::finish(next_frame)` marks the records complete only if the last runner status it received is of `next_frame` and its counts (`RunnerStatus::delivered_results`, `late_results`) equal the outcomes received, with no log record or data dropped (`log_overflows`, `engine_log_overflows`, `boundary_data_overflows` 0). A loss is therefore detected, never silent: `complete = false`, with `lost` and `reason`. A session with incomplete records does not replay exactly (§6).
@@ -158,17 +171,21 @@ A driver removes instances by suspending them at *s* and swapping at `Engine::re
 ## 6. `signal replay`
 
 ```sh
-signal replay <session> [--out <dir>] [--frames N] [--threads N] [--ideal] [--json]
+signal replay <session> [--out <dir>] [--frames N] [--threads N] [--ideal] [--trust-provenance] [--json]
 ```
 
 - **Exact replay** (the default, `semantics.md` §15). With boundary records, each recorded outcome is applied at its due frame: a miss without waiting, a delivery with its recorded data when there is some, else by waiting for the same device's result. `audio.wav` and `audio_fnv1a64` store the samples as the device received them (clamped to [−1, 1], non-finite as 0), so the replay equals the live recording (`signal play --record-audio`) bit for bit, and the manifest says `"device_conversion": true`. Incomplete records fail (exit 1) with a message that names `--ideal`; a recorded delivery this machine cannot reproduce (no device, another one, data the module refuses) fails (exit 1); records that do not match the replay's due blocks fail (exit 2).
+- **Exact is checked** (M2.7-8). Every delivered result the replay shows, recorded data or recomputed, is hashed and compared with its line's `fnv1a64`. The first block whose result differs, by frame and then instance order, fails the replay with `ReplayMismatch { module, block }` (exit 2, kind `replay-mismatch`), whose message names `--ideal` and `--record-boundary-data`. It takes precedence over every other failure of the same replay, which it may have caused.
+- **Provenance, before it starts** (M2.7-8). Recomputed results (delivered lines without data) are the performance's only on the build and machine that recorded them (`same_machine`, ADR 0019 §3). So when a session with `[machine]` has such a line in the frames to render, the replay first compares the recording's build (`signal_revision`, `signal_dirty`, `rustc_version`, `cargo_lock_hash`) and machine (`cpu_arch`, every device) with its own, and refuses (exit 1) on any difference, listing each and naming `--ideal`, `--record-boundary-data` and `--trust-provenance`. It is a pre-check, not the proof: two dirty builds at the same revision compare equal, and the hashes still catch a result that differs. With data for every delivery nothing is recomputed and nothing is compared (another build only warns, as before).
+- **`--trust-provenance`** replays exactly despite such a difference: every recomputed result is still checked against its hash, and the manifest says `"trust_provenance": true` — only when the flag overrode a difference, so a manifest with the label is one whose machine or build was not the recording's. It cannot be combined with `--ideal`.
+- **Sessions before hashes.** A session with boundary records but no `fnv1a64` on its lines (and no `[machine]`) replays exactly as before, with a warning that its exactness is unverified: how many results could not be checked, and that `--ideal` or a session recorded with `--record-boundary-data` are the alternatives.
 - **`--ideal`**: an ideal render. Every latent result is awaited, whatever the session recorded: a fresh offline render of the same edits, which the manifest labels `"ideal": true`.
 - A session of a project with latent modules but **no boundary records** (written before them) replays as an ideal render, labelled `ideal`, with a warning that misses were not recorded. A session without latent modules replays exactly as before: its plain replay's manifest has neither key, and `--ideal` renders the same audio and log, its manifest saying `"ideal": true` because that was asked for.
 - An exact replay renders at most the recorded `frames`: `--frames` beyond them fails (exit 1), since those frames were never played; `--ideal` renders past the end.
-- The JSON output adds `ideal` and `boundaries` (`exact`, `ideal`, `not-recorded`, `not-latent`).
+- The JSON output adds `ideal`, `boundaries` (`exact`, `ideal`, `not-recorded`, `not-latent`), `unverified` (results replayed without a hash to check) and `trust_provenance`.
 
 - Loads and validates the session, builds the engine from version 0 with the session's sample rate and seed, and before each frame commits that frame's swap and pushes its other commands at their effective frames. The input queues are sized for the session's busiest frame (`EngineConfig::queue_capacity` is not part of the semantics, `semantics.md` §11).
 - Renders `--frames` frames, by default the session's recorded `frames`, else the last command's frame plus one second (`last + 1 + sample_rate`; one second with no commands). Commands after the end are not applied, and the output says how many.
 - With `--out`, writes the artifacts of `signal render`: `audio.wav`, `log.jsonl`, `manifest.json` (the replaying build's provenance, version 0's file hashes) and `metrics.json`. Prints the audio and log hashes.
 - Warns when the session was recorded by another build (revision, compiler or `Cargo.lock`): bit-exactness holds on the same build (ADR 0008).
-- **Exit codes**: 1 for a malformed session (each error as `file:line:column: error: message`, with the file relative to the session directory, line 1 column 1 where no line applies) or an unreadable file, including a `words` count beyond the data in `boundary-data.f32`; 1 also for an exact replay that cannot be made (incomplete records, an unreproducible result, frames past the end); 2 if the engine discards or refuses input of a validated session (a bug).
+- **Exit codes**: 1 for a malformed session (each error as `file:line:column: error: message`, with the file relative to the session directory, line 1 column 1 where no line applies) or an unreadable file, including a `words` count beyond the data in `boundary-data.f32` and recorded data that does not match its line's hash; 1 also for an exact replay that cannot be made (incomplete records, an unreproducible result, frames past the end, another build or machine without `--trust-provenance`); 2 for an exact replay that is not the performance (`ReplayMismatch`), and if the engine discards or refuses input of a validated session (a bug).

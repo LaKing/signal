@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use signal_core::{
     Curve, Direction, EventPayload, Frame, InstanceAddress, LossCause, ModuleDescriptor,
-    PortAddress, PortShape, Registry, SinkKind, fnv1a64,
+    PortAddress, PortShape, Registry, SinkKind, fnv1a64, fnv1a64_words,
 };
 use signal_engine::{
     BoundaryLine, BoundaryOutcome, ControlSink, Conversion, Engine, EngineConfig, EngineError,
@@ -82,11 +82,70 @@ pub struct BoundaryRecord {
 /// A due result's recorded outcome.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BoundaryKind {
-    /// Delivered; with the result's words when the session records data.
-    Delivered(Option<Vec<f32>>),
+    /// Delivered.
+    Delivered {
+        /// The result's words, when the session records data.
+        words: Option<Vec<f32>>,
+        /// The FNV-1a 64 of the result's words
+        /// ([`fnv1a64_words`](signal_core::fnv1a64_words), M2.7-8): always
+        /// recorded now; `None` in a session written before hashes.
+        fnv1a64: Option<u64>,
+    },
     /// Missed: the module played silence for that block; with the cause of
     /// a lost result, when the run recorded one (M2.7-5).
     Missed(Option<LossCause>),
+}
+
+/// The machine a session was recorded on (`[machine]` of `session.toml`,
+/// M2.7-8): with `[provenance]`'s build, what an exact replay that must
+/// recompute results compares before it starts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Machine {
+    /// The CPU architecture (`std::env::consts::ARCH`, e.g. `aarch64`).
+    pub cpu_arch: String,
+    /// Every compute device the run used (a GPU adapter), in the order the
+    /// driver lists them; none without one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<Device>,
+}
+
+impl Machine {
+    /// This machine, with `devices`.
+    pub fn here(devices: Vec<Device>) -> Machine {
+        Machine {
+            cpu_arch: std::env::consts::ARCH.to_owned(),
+            devices,
+        }
+    }
+}
+
+/// A compute device a run used: a GPU adapter as its backend describes it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Device {
+    /// The backend (e.g. `Metal`).
+    pub backend: String,
+    /// The adapter's name.
+    pub name: String,
+    /// The adapter's PCI vendor id (0 where the backend has none).
+    pub vendor: u32,
+    /// The adapter's PCI device id (0 where the backend has none).
+    pub device_id: u32,
+    /// The driver's name.
+    pub driver: String,
+    /// The driver's version or other information.
+    pub driver_info: String,
+}
+
+/// The build and machine a replay runs on (M2.7-8), compared with the
+/// recording's before an exact replay that must recompute results.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Here {
+    /// The replaying build, as a render manifest records it.
+    pub build: Provenance,
+    /// The replaying machine, with the devices the replay will use.
+    pub machine: Machine,
 }
 
 /// Whether any plan has a module with a declared latency.
@@ -108,9 +167,16 @@ fn boundary_line(record: &BoundaryRecord) -> String {
         BoundaryKind::Missed(Some(cause)) => {
             format!(r#"{head}"missed","cause":"{}"}}"#, cause.name())
         }
-        BoundaryKind::Delivered(None) => format!(r#"{head}"delivered"}}"#),
-        BoundaryKind::Delivered(Some(words)) => {
-            format!(r#"{head}"delivered","words":{}}}"#, words.len())
+        BoundaryKind::Delivered { words, fnv1a64 } => {
+            let mut line = format!(r#"{head}"delivered""#);
+            if let Some(words) = words {
+                line.push_str(&format!(r#","words":{}"#, words.len()));
+            }
+            if let Some(hash) = fnv1a64 {
+                line.push_str(&format!(r#","fnv1a64":"{}""#, hex(*hash)));
+            }
+            line.push('}');
+            line
         }
     }
 }
@@ -126,6 +192,8 @@ struct BoundaryLineIn {
     words: Option<u64>,
     #[serde(default)]
     cause: Option<String>,
+    #[serde(default)]
+    fnv1a64: Option<String>,
 }
 
 /// `[boundaries]` of `session.toml`.
@@ -384,6 +452,7 @@ struct SessionOut<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     frames: Option<u64>,
     provenance: &'a Provenance,
+    machine: &'a Machine,
     #[serde(skip_serializing_if = "Option::is_none")]
     boundaries: Option<BoundariesToml>,
     versions: Vec<VersionOut>,
@@ -405,6 +474,8 @@ struct SessionIn {
     #[serde(default)]
     frames: Option<u64>,
     provenance: Provenance,
+    #[serde(default)]
+    machine: Option<Machine>,
     #[serde(default)]
     boundaries: Option<toml::Spanned<BoundariesToml>>,
     versions: Vec<toml::Spanned<VersionIn>>,
@@ -797,6 +868,9 @@ pub struct SessionRecorder {
     sample_rate: u32,
     seed: u64,
     provenance: Provenance,
+    /// The machine (M2.7-8): this one, with the devices the driver sets
+    /// ([`set_devices`](SessionRecorder::set_devices)).
+    machine: Machine,
     /// The files and plan of every version.
     versions: Vec<(Vec<SourceFile>, ExecutionPlan)>,
     edits: Vec<Edit>,
@@ -834,6 +908,7 @@ impl SessionRecorder {
             sample_rate,
             seed,
             provenance,
+            machine: Machine::here(Vec::new()),
             state: State::new(&plan, 0),
             versions: vec![(initial.files.clone(), plan)],
             edits: Vec::new(),
@@ -1045,6 +1120,18 @@ impl SessionRecorder {
         self.boundaries.as_ref()
     }
 
+    /// Records the compute devices the run used (M2.7-8): the GPU adapters
+    /// of its latent modules, which the driver knows and the engine does
+    /// not. The CPU architecture is recorded without asking.
+    pub fn set_devices(&mut self, devices: Vec<Device>) {
+        self.machine.devices = devices;
+    }
+
+    /// The machine recorded (`[machine]`, M2.7-8).
+    pub fn machine(&self) -> &Machine {
+        &self.machine
+    }
+
     /// A new seq.
     fn reserve(&mut self) -> u64 {
         let seq = self.next_seq;
@@ -1098,7 +1185,9 @@ impl SessionRecorder {
             b.records
                 .iter()
                 .filter_map(|r| match &r.outcome {
-                    BoundaryKind::Delivered(Some(words)) => Some(words),
+                    BoundaryKind::Delivered {
+                        words: Some(words), ..
+                    } => Some(words),
                     _ => None,
                 })
                 .flatten()
@@ -1111,6 +1200,7 @@ impl SessionRecorder {
             seed: self.seed,
             frames: self.end,
             provenance: &self.provenance,
+            machine: &self.machine,
             boundaries: boundaries.map(|b| BoundariesToml {
                 complete: b.complete,
                 data: b.data,
@@ -1428,11 +1518,18 @@ impl ControlSink for LiveRecorder {
     fn boundary(&mut self, line: BoundaryLine<'_>) {
         let outcome = match line.outcome {
             BoundaryOutcome::Missed { cause } => BoundaryKind::Missed(cause),
-            BoundaryOutcome::Delivered { data, data_lost } => {
+            BoundaryOutcome::Delivered {
+                data,
+                data_lost,
+                fnv1a64,
+            } => {
                 if data_lost {
                     self.data_lost = self.data_lost.saturating_add(1);
                 }
-                BoundaryKind::Delivered(data.filter(|_| self.record_data).map(<[f32]>::to_vec))
+                BoundaryKind::Delivered {
+                    words: data.filter(|_| self.record_data).map(<[f32]>::to_vec),
+                    fnv1a64: Some(fnv1a64),
+                }
             }
         };
         self.records.push(BoundaryRecord {
@@ -1466,6 +1563,9 @@ pub struct Session {
     pub frames: Option<u64>,
     /// The build that recorded it.
     pub provenance: Provenance,
+    /// The machine that recorded it (M2.7-8); `None` for a session written
+    /// before it was recorded.
+    pub machine: Option<Machine>,
     /// Every plan version's project, by version.
     pub versions: Vec<Project>,
     /// Every plan version's plan, by version, its `version` set to it.
@@ -1681,6 +1781,7 @@ impl Session {
             seed: file.seed,
             frames: file.frames,
             provenance: file.provenance,
+            machine: file.machine,
             versions,
             plans,
             edits: edits.into_iter().map(|(_, e)| e).collect(),
@@ -1803,9 +1904,31 @@ fn load_boundaries(
                 continue;
             }
         };
+        // The result's hash (M2.7-8): 16 lowercase hex digits, on a
+        // delivered line only.
+        let fnv1a64 = match read.fnv1a64.as_deref() {
+            None => None,
+            Some(text) if read.outcome == "delivered" => match parse_hex(text) {
+                Some(hash) => Some(hash),
+                None => {
+                    diagnostics.push(at(
+                        line,
+                        format!("fnv1a64 `{text}`: expected 16 lowercase hex digits"),
+                    ));
+                    continue;
+                }
+            },
+            Some(_) => {
+                diagnostics.push(at(line, format!("fnv1a64 on a `{}` line", read.outcome)));
+                continue;
+            }
+        };
         let outcome = match (read.outcome.as_str(), read.words) {
             ("missed", None) => BoundaryKind::Missed(cause),
-            ("delivered", None) => BoundaryKind::Delivered(None),
+            ("delivered", None) => BoundaryKind::Delivered {
+                words: None,
+                fnv1a64,
+            },
             ("delivered", Some(words)) if table.data => {
                 match words_total.checked_add(words).filter(|&t| t <= available) {
                     Some(total) => words_total = total,
@@ -1820,8 +1943,11 @@ fn load_boundaries(
                         continue;
                     }
                 }
-                counts.push(words as usize);
-                BoundaryKind::Delivered(Some(Vec::new()))
+                counts.push((words as usize, line));
+                BoundaryKind::Delivered {
+                    words: Some(Vec::new()),
+                    fnv1a64,
+                }
             }
             ("delivered", Some(_)) => {
                 diagnostics.push(at(
@@ -1890,13 +2016,29 @@ fn load_boundaries(
             // Every count is within the data, and they add up to it.
             let words = data.as_chunks::<4>().0;
             let mut counts = counts.into_iter();
-            let mut at = 0;
+            let mut start = 0;
             for record in &mut parsed {
-                if let BoundaryKind::Delivered(Some(v)) = &mut record.outcome {
-                    let n = counts.next().unwrap_or(0);
-                    let chunk = words.get(at..at + n).unwrap_or(&[]);
+                if let BoundaryKind::Delivered {
+                    words: Some(v),
+                    fnv1a64,
+                } = &mut record.outcome
+                {
+                    let (n, line) = counts.next().unwrap_or((0, 0));
+                    let chunk = words.get(start..start + n).unwrap_or(&[]);
                     v.extend(chunk.iter().map(|&b| f32::from_le_bytes(b)));
-                    at += n;
+                    start += n;
+                    // M2.7-8: the recorded data is the result the run hashed.
+                    let hash = fnv1a64_words(v);
+                    if fnv1a64.is_some_and(|recorded| recorded != hash) {
+                        diagnostics.push(at(
+                            line,
+                            format!(
+                                "the {n} words of this line in boundary-data.f32 have FNV-1a 64 {}; the line records {}",
+                                hex(hash),
+                                fnv1a64.map(hex).unwrap_or_default()
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -1913,6 +2055,12 @@ fn load_boundaries(
         reason: table.reason.clone(),
         records: parsed,
     })
+}
+
+/// A hash as written by [`hex`]: exactly 16 lowercase hex digits.
+fn parse_hex(text: &str) -> Option<u64> {
+    let valid = text.len() == 16 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    valid.then(|| u64::from_str_radix(text, 16).ok()).flatten()
 }
 
 /// serde_json's message without its own " at line L column C" suffix.
@@ -1932,6 +2080,13 @@ pub struct Replay {
     pub skipped: usize,
     /// How the latent modules' due results were treated (M2.7-4).
     pub boundaries: BoundaryReplay,
+    /// Exact replay (M2.7-8): recorded deliveries replayed without a hash to
+    /// check them against (a session written before hashes). Their
+    /// exactness is unverified; 0 for every session recorded since.
+    pub unverified: u64,
+    /// Exact replay (M2.7-8): `--trust-provenance` let it run although the
+    /// recording's build or machine differ. Its manifest says so.
+    pub trusted_provenance: bool,
 }
 
 /// How a replay treated the latent modules' due results
@@ -1957,7 +2112,7 @@ impl BoundaryReplay {
 }
 
 /// How to replay a session.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReplayOptions {
     /// Frames to render; by default [`Session::default_frames`].
     pub frames: Option<u64>,
@@ -1967,6 +2122,16 @@ pub struct ReplayOptions {
     /// Render ideally: await every latent module's result, whatever the
     /// session recorded (`signal replay --ideal`).
     pub ideal: bool,
+    /// Replay exactly although the recording's build or machine differ from
+    /// [`here`](ReplayOptions::here) (`signal replay --trust-provenance`,
+    /// M2.7-8): every recomputed result is still checked against its hash.
+    pub trust_provenance: bool,
+    /// The replaying build and machine (M2.7-8), compared with the
+    /// recording's before an exact replay that must recompute results.
+    /// `None`: this build ([`provenance::collect`](crate::provenance::collect),
+    /// asked only when the comparison applies) on this machine with no
+    /// compute device; a caller whose modules use a GPU names it here.
+    pub here: Option<Here>,
 }
 
 /// Why a validated session could not be replayed. Validation rules these out,
@@ -1998,6 +2163,23 @@ pub enum ReplayError {
     Unreproduced {
         /// How many.
         results: u64,
+    },
+    /// The result of `module`'s due block at frame `block`, recomputed or
+    /// injected, differs from the one the performance used (its recorded
+    /// hash, M2.7-8): the replay is not the performance. The first such block;
+    /// it takes precedence over every other failure of the replay.
+    ReplayMismatch {
+        /// The latent instance.
+        module: InstanceAddress,
+        /// The due frame: the first of its block.
+        block: Frame,
+    },
+    /// The session's results must be recomputed (it has no data for them),
+    /// but this build or machine is not the recording's (M2.7-8): the exact
+    /// replay is refused before it starts.
+    ProvenanceMismatch {
+        /// What differs, recorded and here.
+        differences: Vec<String>,
     },
     /// The recorded outcomes and the replay's due blocks disagree (a bug, or
     /// a changed session).
@@ -2034,6 +2216,16 @@ impl fmt::Display for ReplayError {
                 f,
                 "replay: {results} recorded results of latent modules could not be reproduced on this machine (no device, or another one); record with --record-boundary-data, or render with --ideal"
             ),
+            ReplayError::ReplayMismatch { module, block } => write!(
+                f,
+                "replay: the result of {module}'s block at frame {} differs from the one the performance used (its recorded FNV-1a 64): this machine does not reproduce the performance exactly; `signal replay --ideal` renders it with every result awaited, and a session recorded with `signal play --record-boundary-data` replays exactly anywhere",
+                block.0
+            ),
+            ReplayError::ProvenanceMismatch { differences } => write!(
+                f,
+                "replay: the session's results of latent modules must be recomputed, but this is not the build and machine that recorded it ({}): an exact replay is refused; `signal replay --ideal` renders it with every result awaited, `--trust-provenance` replays exactly anyway (each result still checked against its recorded hash, and the manifest says so), and a session recorded with `signal play --record-boundary-data` replays exactly anywhere",
+                differences.join("; ")
+            ),
             ReplayError::BoundaryMismatch { mismatches } => write!(
                 f,
                 "replay: the recorded boundary outcomes do not match the replay's due blocks ({mismatches} mismatches)"
@@ -2066,7 +2258,7 @@ pub fn replay(
     let options = ReplayOptions {
         frames,
         threads,
-        ideal: false,
+        ..ReplayOptions::default()
     };
     replay_with(session, registry, options)
 }
@@ -2083,9 +2275,16 @@ pub fn replay(
 /// With boundary records it is an **exact replay** (`docs/semantics.md`
 /// §15): each recorded outcome is pushed with `push_boundary`, a recorded
 /// miss is applied without waiting, recorded data is shown, and the audio is
-/// stored as the device received it. Incomplete records are an error. With
-/// `ideal`, or without records, it is an **ideal render**: every result is
-/// awaited, and the manifest says `ideal`.
+/// stored as the device received it. Incomplete records are an error. Every
+/// delivered result, recomputed or injected, is checked against its recorded
+/// hash (M2.7-8): the first that differs fails with
+/// [`ReplayMismatch`](ReplayError::ReplayMismatch), before any other error.
+/// Results to recompute are the recording's only on its build and machine:
+/// another one is refused up front
+/// ([`ProvenanceMismatch`](ReplayError::ProvenanceMismatch)) unless
+/// [`trust_provenance`](ReplayOptions::trust_provenance). With `ideal`, or
+/// without records, it is an **ideal render**: every result is awaited, and
+/// the manifest says `ideal`.
 pub fn replay_with(
     session: &Session,
     registry: &Registry,
@@ -2117,6 +2316,32 @@ pub fn replay_with(
         _ => &[],
     };
     let script = &script[..script.partition_point(|r| r.frame.0 < frames)];
+    // M2.7-8: results the replay must recompute (no recorded data) are the
+    // recording's only on its build and machine, checked before it starts.
+    let recomputed = script
+        .iter()
+        .any(|r| matches!(r.outcome, BoundaryKind::Delivered { words: None, .. }));
+    let mut trusted = false;
+    if let (Some(recorded), true) = (&session.machine, recomputed) {
+        let here = options.here.clone().unwrap_or_else(|| Here {
+            build: crate::provenance::collect(
+                &crate::provenance::source_dir(),
+                session.versions.first().map_or(&[][..], |p| &p.files),
+            ),
+            machine: Machine::here(Vec::new()),
+        });
+        let differences = provenance_differences(&session.provenance, recorded, &here);
+        if !differences.is_empty() {
+            if !options.trust_provenance {
+                return Err(ReplayError::ProvenanceMismatch { differences });
+            }
+            trusted = true;
+        }
+    }
+    let unverified = script
+        .iter()
+        .filter(|r| matches!(r.outcome, BoundaryKind::Delivered { fnv1a64: None, .. }))
+        .count() as u64;
     let mut externals = BTreeMap::<u64, usize>::new();
     let mut edits = BTreeMap::<u64, usize>::new();
     for edit in &session.edits {
@@ -2157,8 +2382,11 @@ pub fn replay_with(
     let mut next = 0usize;
     let mut next_outcome = 0usize;
     let mut refused = None;
+    let mut mismatch = None;
     let block = config.block_capacity;
-    let mut rendered = render_blocks(&mut engine, frames, block, |engine| {
+    let rendered = render_blocks(&mut engine, frames, block, |engine| {
+        // Before this frame's swap: the mismatch names the plan that ran.
+        take_mismatch(engine, &mut mismatch);
         engine.reclaim_externals().for_each(drop);
         engine.reclaim_edits().for_each(drop);
         engine.reclaim_boundaries();
@@ -2170,9 +2398,10 @@ pub fn replay_with(
             }
             let outcome = match &record.outcome {
                 BoundaryKind::Missed(cause) => Scripted::Missed(*cause),
-                BoundaryKind::Delivered(words) => {
-                    Scripted::Delivered(words.as_ref().map(|w| w.clone().into_boxed_slice()))
-                }
+                BoundaryKind::Delivered { words, fnv1a64 } => Scripted::Delivered {
+                    words: words.as_ref().map(|w| w.clone().into_boxed_slice()),
+                    fnv1a64: *fnv1a64,
+                },
             };
             if engine
                 .push_boundary(record.instance.clone(), record.frame, outcome)
@@ -2220,8 +2449,14 @@ pub fn replay_with(
         let next_edit = session.edits.get(next).map(|e| e.frame);
         let next_record = script.get(next_outcome).map(|r| r.frame);
         Ok([next_edit, next_record].into_iter().flatten().min())
-    })
-    .map_err(ReplayError::Render)?;
+    });
+    // The first result that differs from the performance's is the cause of
+    // whatever else went wrong after it (M2.7-8): it is reported first.
+    take_mismatch(&mut engine, &mut mismatch);
+    if let Some((module, block)) = mismatch {
+        return Err(ReplayError::ReplayMismatch { module, block });
+    }
+    let mut rendered = rendered.map_err(ReplayError::Render)?;
     if let Some(message) = refused {
         return Err(ReplayError::Refused(message));
     }
@@ -2250,9 +2485,84 @@ pub fn replay_with(
         rendered.conversion = Conversion::Device;
     }
     rendered.ideal = mode.ideal();
+    rendered.trust_provenance = trusted;
     Ok(Replay {
         render: rendered,
         skipped: session.edits.len() - next,
         boundaries: mode,
+        unverified,
+        trusted_provenance: trusted,
     })
+}
+
+/// Keeps in `first` the engine's hash mismatch (M2.7-8), unless an earlier
+/// one is kept already.
+fn take_mismatch(engine: &mut Engine, first: &mut Option<(InstanceAddress, Frame)>) {
+    if let Some((frame, address)) = engine.take_boundary_hash_mismatch()
+        && first.is_none()
+    {
+        *first = Some((address, frame));
+    }
+}
+
+/// What differs between the recording's build and machine and `here`
+/// (M2.7-8), each as "what: recorded … here …"; empty when they agree. The
+/// build is compared as the "another build" warning does, with the dirty
+/// flag.
+fn provenance_differences(build: &Provenance, machine: &Machine, here: &Here) -> Vec<String> {
+    let dirty = |d: Option<bool>| d.map_or("unknown".to_owned(), |d| d.to_string());
+    let mut differences = Vec::new();
+    let mut compare = |what: &str, recorded: String, now: String| {
+        if recorded != now {
+            differences.push(format!("{what}: recorded {recorded}, here {now}"));
+        }
+    };
+    compare(
+        "revision",
+        build.signal_revision.clone(),
+        here.build.signal_revision.clone(),
+    );
+    compare(
+        "dirty",
+        dirty(build.signal_dirty),
+        dirty(here.build.signal_dirty),
+    );
+    compare(
+        "compiler",
+        build.rustc_version.clone(),
+        here.build.rustc_version.clone(),
+    );
+    compare(
+        "Cargo.lock",
+        build.cargo_lock_hash.clone(),
+        here.build.cargo_lock_hash.clone(),
+    );
+    compare(
+        "CPU architecture",
+        machine.cpu_arch.clone(),
+        here.machine.cpu_arch.clone(),
+    );
+    let devices = |devices: &[Device]| {
+        if devices.is_empty() {
+            return "none".to_owned();
+        }
+        devices
+            .iter()
+            .map(|d| {
+                format!(
+                    "{} {} (vendor {:#x}, device {:#x}, driver {} {})",
+                    d.backend, d.name, d.vendor, d.device_id, d.driver, d.driver_info
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if machine.devices != here.machine.devices {
+        compare(
+            "devices",
+            devices(&machine.devices),
+            devices(&here.machine.devices),
+        );
+    }
+    differences
 }

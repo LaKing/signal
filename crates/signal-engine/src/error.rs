@@ -117,6 +117,16 @@ pub enum EngineError {
     LogNotDrained,
     /// A swap prepared by another engine.
     ForeignSwap,
+    /// An instance of a type with a declared latency exposes no result
+    /// (`result_words` 0): its delivered results could not be hashed, so a
+    /// replay could never show them exact (M2.7-8).
+    LatentWithoutResult {
+        /// The instance.
+        instance: InstanceAddress,
+    },
+    /// Exact replay: a swap committed before the hash mismatch of an earlier
+    /// block was taken (its instance names the old plan's).
+    MismatchNotTaken,
 }
 
 impl fmt::Display for EngineError {
@@ -190,6 +200,13 @@ impl fmt::Display for EngineError {
             EngineError::LogNotDrained => {
                 f.write_str("drain the last frame's log before committing a swap")
             }
+            EngineError::LatentWithoutResult { instance } => write!(
+                f,
+                "{instance}: a module type with a declared latency must expose its result (result_words of at least 1), so that its results can be hashed"
+            ),
+            EngineError::MismatchNotTaken => f.write_str(
+                "take the boundary hash mismatch of the last block before committing a swap",
+            ),
         }
     }
 }

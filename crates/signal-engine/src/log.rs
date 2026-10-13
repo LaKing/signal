@@ -173,6 +173,8 @@ pub enum LogRecord {
         words: u32,
         /// Its data was recorded but did not fit a buffer or queue.
         lost: bool,
+        /// The FNV-1a 64 of the delivered result's words (M2.7-8), always.
+        fnv1a64: u64,
     },
 }
 

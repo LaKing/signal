@@ -14,7 +14,8 @@ use common::{addr, conn, inst, inst_with, plan, port_addr, registry, scaled};
 use signal_contract::alloc_counter::{self, Counts, Guard};
 use signal_core::EventPayload;
 use signal_engine::{
-    CallbackSizes, ControlSink, Outcome, RealtimeConfig, Report, SentCommand, Stamp, realtime,
+    BoundaryLine, BoundaryOutcome, CallbackSizes, ControlSink, Outcome, RealtimeConfig, Report,
+    SentCommand, Stamp, realtime,
 };
 use signal_graph::ExecutionPlan;
 
@@ -145,12 +146,39 @@ fn runner_process_allocates_and_frees_nothing() {
     assert!(status.meter_overflows > 0, "{status:?}");
 }
 
+/// Counts the delivered outcomes that reach the control thread, and those
+/// with a hash other than the empty result's (M2.7-8).
+#[derive(Default)]
+struct Hashed {
+    delivered: u64,
+    hashed: u64,
+}
+
+impl ControlSink for Hashed {
+    fn boundary(&mut self, line: BoundaryLine<'_>) {
+        if let BoundaryOutcome::Delivered { fnv1a64, .. } = line.outcome {
+            self.delivered += 1;
+            if fnv1a64 != signal_core::fnv1a64_words(&[]) {
+                self.hashed += 1;
+            }
+        }
+    }
+}
+
 /// AC3 of M2.7-4: with boundary recording on (every due block's outcome, and
 /// the delivered results' data through a boundary-data queue small enough
 /// to overflow), `Runner::process` still allocates and frees nothing.
 /// `test.mixed_latent` delivers its even blocks and misses its odd ones.
+/// AC3 of M2.7-8: every delivered result is hashed on the audio thread, with
+/// and without its data recorded, and still nothing is allocated.
 #[test]
 fn recording_boundary_outcomes_and_data_allocates_nothing() {
+    for record_data in [true, false] {
+        record_boundaries(record_data);
+    }
+}
+
+fn record_boundaries(record_data: bool) {
     assert!(alloc_counter::is_installed());
     let registry = common::latent_registry();
     let plan = plan(
@@ -163,8 +191,10 @@ fn recording_boundary_outcomes_and_data_allocates_nothing() {
     );
     let mut config = RealtimeConfig::with_buffer(RATE, 42, 64);
     config.engine.threads = 2;
-    config.engine.record_boundary_data = true;
-    config.boundary_data = 8;
+    if record_data {
+        config.engine.record_boundary_data = true;
+        config.boundary_data = 8;
+    }
     config.log = 64;
     let (mut runner, mut controller) = realtime(&plan, &registry, config).unwrap();
 
@@ -184,22 +214,34 @@ fn recording_boundary_outcomes_and_data_allocates_nothing() {
         }
         (runner, total)
     });
+    let mut hashed = Hashed::default();
     while !audio.is_finished() {
-        controller.poll(&mut ());
+        controller.poll(&mut hashed);
         thread::sleep(Duration::from_micros(500));
     }
     let (runner, total) = audio.join().unwrap();
-    controller.poll(&mut ());
+    controller.poll(&mut hashed);
 
     assert_eq!(
         total,
         Counts::default(),
-        "heap calls inside Runner::process"
+        "heap calls inside Runner::process (data recorded: {record_data})"
     );
     let status = runner.status();
     assert!(
         status.delivered_results > 0 && status.late_results > 0,
         "{status:?}"
     );
-    assert!(status.boundary_data_overflows > 0, "{status:?}");
+    assert_eq!(
+        status.boundary_data_overflows > 0,
+        record_data,
+        "{status:?}"
+    );
+    // Every delivery that reached the control thread carries its hash (its
+    // one word hashes otherwise than no word at all).
+    assert!(
+        hashed.delivered > 0,
+        "no delivery reached the control thread"
+    );
+    assert_eq!(hashed.hashed, hashed.delivered);
 }

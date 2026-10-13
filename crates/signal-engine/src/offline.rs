@@ -41,6 +41,9 @@ pub struct Render {
     /// An ideal render of a session (`signal replay --ideal`, M2.7-4): every
     /// latent result was awaited. The manifest says so.
     pub ideal: bool,
+    /// An exact replay that `--trust-provenance` let run although the
+    /// recording's build or machine differ (M2.7-8). The manifest says so.
+    pub trust_provenance: bool,
 }
 
 /// How a render's samples become the `f32` of `audio.wav` (M2.7-4).
@@ -217,6 +220,7 @@ pub fn render_blocks(
         same_machine,
         conversion: Conversion::Plain,
         ideal: false,
+        trust_provenance: false,
     })
 }
 
@@ -277,6 +281,7 @@ impl Render {
             same_machine: self.same_machine.clone(),
             ideal: self.ideal,
             device_conversion: self.conversion == Conversion::Device,
+            trust_provenance: self.trust_provenance,
         }
     }
 

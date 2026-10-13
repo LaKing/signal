@@ -16,6 +16,19 @@ pub const fn fnv1a64(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
+/// FNV-1a 64 of `words` as little-endian `f32` bytes, the layout of a
+/// session's `boundary-data.f32` (M2.7-8): the hash of a latent module's
+/// delivered result. Allocates nothing; real-time safe.
+pub const fn fnv1a64_words(words: &[f32]) -> u64 {
+    let mut hasher = Fnv1a64::new();
+    let mut rest = words;
+    while let [word, tail @ ..] = rest {
+        hasher.update(&word.to_le_bytes());
+        rest = tail;
+    }
+    hasher.finish()
+}
+
 /// The FNV-1a 64-bit hash of [`fnv1a64`], fed incrementally, for content too
 /// large to hold in one buffer (render audio). Non-cryptographic: it detects
 /// accidental change, not tampering.
@@ -266,6 +279,17 @@ mod tests {
             }
         }
         assert_eq!(Fnv1a64::default().finish(), fnv1a64(b""));
+    }
+
+    /// The words' hash is the hash of their little-endian bytes, and tells
+    /// apart values equal as numbers (−0 and +0).
+    #[test]
+    fn fnv1a64_words_hashes_the_stored_bytes() {
+        let words = [1.5f32, -0.0, f32::NAN, 3.0e-41];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        assert_eq!(fnv1a64_words(&words), fnv1a64(&bytes));
+        assert_eq!(fnv1a64_words(&[]), fnv1a64(b""));
+        assert_ne!(fnv1a64_words(&[0.0]), fnv1a64_words(&[-0.0]));
     }
 
     #[test]

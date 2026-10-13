@@ -65,6 +65,9 @@ pub(crate) enum Failure {
     /// A valid session cannot be replayed as asked (exit 1): its boundary
     /// records are incomplete, or a recorded result cannot be reproduced.
     Replay(String),
+    /// An exact replay is not the performance (exit 2, M2.7-8): a recomputed
+    /// or injected result differs from its recorded hash.
+    Mismatch(String),
     /// A bug: something that validation should have ruled out.
     Internal(String),
 }
@@ -72,7 +75,7 @@ pub(crate) enum Failure {
 impl Failure {
     fn exit_code(&self) -> ExitCode {
         match self {
-            Failure::Internal(_) => ExitCode::from(2),
+            Failure::Internal(_) | Failure::Mismatch(_) => ExitCode::from(2),
             _ => ExitCode::from(1),
         }
     }
@@ -93,6 +96,7 @@ impl Failure {
             Failure::Io(message) => ("io", message.clone(), &[][..]),
             Failure::Device(message) => ("device", message.clone(), &[][..]),
             Failure::Replay(message) => ("replay", message.clone(), &[][..]),
+            Failure::Mismatch(message) => ("replay-mismatch", message.clone(), &[][..]),
             Failure::Internal(message) => ("internal", message.clone(), &[][..]),
         };
         if json {
@@ -249,5 +253,19 @@ mod tests {
         };
         let failure = Failure::Device(error.to_string());
         assert_eq!(failure.exit_code(), ExitCode::from(1));
+    }
+
+    /// C4: an exact replay that is not the performance exits 2; a
+    /// provenance refusal, an exact replay that cannot be made, exits 1.
+    #[test]
+    fn a_replay_mismatch_exits_2() {
+        assert_eq!(
+            Failure::Mismatch(String::new()).exit_code(),
+            ExitCode::from(2)
+        );
+        assert_eq!(
+            Failure::Replay(String::new()).exit_code(),
+            ExitCode::from(1)
+        );
     }
 }

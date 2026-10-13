@@ -128,6 +128,7 @@ fn a_delayed_gpu_run_replays_exactly_and_ideal_differs() {
             frames: None,
             threads: 1,
             ideal: true,
+            ..ReplayOptions::default()
         },
     )
     .unwrap();

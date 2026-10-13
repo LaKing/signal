@@ -465,9 +465,29 @@ struct Kernel {
 /// The cache key: the shader's text (compared by content) and entry point.
 type KernelKey = (&'static str, &'static str);
 
+/// The adapter a service runs on, as its backend describes it: what a
+/// session records of a device it used (M2.7-8,
+/// `docs/session-format.md` §2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdapterIdentity {
+    /// The backend (`Metal`; `Noop` for the test device).
+    pub backend: String,
+    /// The adapter's name.
+    pub name: String,
+    /// Its PCI vendor id (0 where the backend has none).
+    pub vendor: u32,
+    /// Its PCI device id (0 where the backend has none).
+    pub device_id: u32,
+    /// The driver's name.
+    pub driver: String,
+    /// The driver's version or other information.
+    pub driver_info: String,
+}
+
 /// The device service: adapter, device and the GPU thread.
 pub struct GpuService {
     adapter: String,
+    identity: AdapterIdentity,
     noop: bool,
     device: wgpu::Device,
     shared: Arc<Shared>,
@@ -588,6 +608,14 @@ impl GpuService {
         };
         Ok(GpuService {
             adapter: format!("{} ({:?})", info.name, info.backend),
+            identity: AdapterIdentity {
+                backend: format!("{:?}", info.backend),
+                name: info.name.clone(),
+                vendor: info.vendor,
+                device_id: info.device,
+                driver: info.driver.clone(),
+                driver_info: info.driver_info.clone(),
+            },
             noop: info.backend == wgpu::Backend::Noop,
             device,
             shared,
@@ -615,6 +643,18 @@ impl GpuService {
     /// The adapter's name and backend.
     pub fn adapter(&self) -> &str {
         &self.adapter
+    }
+
+    /// The adapter as its backend describes it (M2.7-8).
+    pub fn identity(&self) -> &AdapterIdentity {
+        &self.identity
+    }
+
+    /// The process's service if it was started (by a module's `prepare`, or
+    /// [`shared`](GpuService::shared)); never starts it. What a recorded run
+    /// used (M2.7-8).
+    pub fn started() -> Option<&'static GpuService> {
+        SHARED.get().and_then(|service| service.as_ref().ok())
     }
 
     /// Jobs the GPU thread has started on the device since the start.
