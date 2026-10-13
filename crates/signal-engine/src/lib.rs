@@ -51,6 +51,7 @@ mod realtime;
 pub mod shared;
 mod tasks;
 mod units;
+mod wake;
 
 pub use cores::{CoreSource, performance_cores, realtime_threads};
 pub use driver::{CallbackSizes, Driver, DriverError, MAX_CALLBACK_FRAMES, NullDriver};
@@ -72,7 +73,8 @@ pub use pool::{Progress, Workers};
 pub use realtime::{
     Command, CommandId, ControlError, ControlSink, Controller, Meter, Outcome,
     PARAMETERS_PER_CALLBACK, ReadySwap, RealtimeConfig, Report, Runner, RunnerStatus, SentCommand,
-    Stamp, realtime,
+    Stamp, realtime, realtime_with,
 };
 #[doc(hidden)]
 pub use shared::{Exclusivity, HookPoint, exclusivity};
+pub use wake::{Computation, MakeWaiter, RtOptions, RtPolicy, Spread, Waiter, WakeStats};

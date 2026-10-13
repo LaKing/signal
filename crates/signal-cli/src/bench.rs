@@ -30,7 +30,9 @@
 //!   also reads the wake-up tail (M2.6-5) off the engine's task hook: the
 //!   time from the first thread into the block's job until every joined
 //!   worker has started, and the longest task body. `--rt-schedule` repeats
-//!   the table for other worker schedules.
+//!   the table for other worker schedules, and `--rt-policy` for other wake
+//!   policies (M2.7-1), each row with the engine's wake-up trace (`wake`);
+//!   `--rt-computation` sets the workers' time-constraint computation.
 //!
 //! The numbers are measurements of the machine that ran them, never pass or
 //! fail; the command checks nothing.
@@ -51,10 +53,14 @@ use clap::Args;
 use serde_json::{Value, json};
 use signal_audio::{TimeConstraint, WorkerPath, rt_thread};
 use signal_core::{Direction, PortKind, PortShape, Registry};
-use signal_engine::{Engine, EngineConfig, HookPoint, Schedule, Workers, performance_cores};
+use signal_engine::{
+    Computation, Engine, EngineConfig, HookPoint, RtPolicy, Schedule, WakeStats, Workers,
+    performance_cores,
+};
 use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, Exports, InstanceDef, build_plan};
 use signal_project::{Project, SourceFile};
 
+use crate::play::{parse_computation, parse_policy};
 use crate::{Failure, print_stdout};
 
 /// The rate every case runs at.
@@ -133,8 +139,18 @@ pub(crate) struct BenchArgs {
     /// `default`): `base` (the M2.6-4 scheduling), `default` (the real-time
     /// one `signal play` uses), or `base` changed by a comma list of
     /// `spin=<ns|period|quarter>` (idle spin) and `task=<ns>` (chain size).
+    /// Under --rt-policy budget-spin the computation budget supersedes
+    /// `spin=`.
     #[arg(long, requires = "realtime")]
     rt_schedule: Vec<String>,
+    /// A wake policy of the --realtime table (repeatable; default: park50):
+    /// park50, budget-spin, semaphore or fanout. Each runs every schedule.
+    #[arg(long, requires = "realtime", value_parser = parse_policy)]
+    rt_policy: Vec<RtPolicy>,
+    /// The workers' time-constraint computation in the --realtime table, as
+    /// a fraction of the period (more than 0, at most 1).
+    #[arg(long, requires = "realtime", value_parser = parse_computation, default_value = "0.25")]
+    rt_computation: Computation,
     /// Measure only the GPU partial bank (`lab.gpu_partials`): its cost per
     /// block on the GPU, next to its CPU reference.
     #[cfg(feature = "lab")]
@@ -182,9 +198,15 @@ pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(
         eprintln!("signal: bench: {seconds} s per case, {profile} build");
     }
     if args.realtime {
+        let policies = if args.rt_policy.is_empty() {
+            vec![RtPolicy::default()]
+        } else {
+            args.rt_policy.clone()
+        };
         return realtime_table(
             args.rt_voices,
             &args.rt_schedule,
+            (&policies, args.rt_computation),
             seconds,
             profile,
             registry,
@@ -624,6 +646,11 @@ struct RtRow {
     threads: usize,
     workers: usize,
     schedule: String,
+    policy: RtPolicy,
+    /// What idle workers blocked on (`ScheduleStats::waiter`).
+    waiter: &'static str,
+    /// The engine's wake-up trace (M2.7-1).
+    wake: Option<WakeStats>,
     variant: &'static str,
     paths: Vec<WorkerPath>,
     caller: Option<WorkerPath>,
@@ -754,6 +781,7 @@ const BASE_SCHEDULE: Schedule = Schedule {
     parallel_min_ns: 50_000,
     min_frames: 16,
     spin_ns: 50_000,
+    ..Schedule::DEFAULT
 };
 
 /// The schedule named by an `--rt-schedule` value (see [`BenchArgs`]) for
@@ -820,6 +848,7 @@ fn enter_workers(workers: &Workers, policy: TimeConstraint) -> Vec<WorkerPath> {
 fn realtime_table(
     voices: usize,
     schedules: &[String],
+    (policies, computation): (&[RtPolicy], Computation),
     seconds: f64,
     profile: &str,
     registry: &Registry,
@@ -844,7 +873,7 @@ fn realtime_table(
     let period_ns = period.as_nanos() as f64;
     let blocks = ((seconds / period.as_secs_f64()).ceil() as usize).max(RT_MIN_BLOCKS);
     let timebase = rt_thread::timebase();
-    let policy = TimeConstraint::from_period(RT_BLOCK as u32, SAMPLE_RATE, timebase);
+    let policy = TimeConstraint::for_period(RT_BLOCK as u32, SAMPLE_RATE, timebase, computation);
     let default = ["default".to_owned()];
     let schedules = if schedules.is_empty() {
         &default[..]
@@ -860,101 +889,124 @@ fn realtime_table(
     let mut rows = Vec::new();
     for &threads in &thread_counts {
         for name in schedules {
-            let schedule = rt_schedule(name, period_ns_whole, threads)?;
-            for variant in RT_VARIANTS {
-                let config = EngineConfig {
-                    block_capacity: RT_BLOCK,
-                    threads,
-                    schedule,
-                    ..EngineConfig::new(SAMPLE_RATE, SEED)
+            for &rt_policy in policies {
+                let schedule = Schedule {
+                    policy: rt_policy,
+                    budget_ns: computation.of_ns(period_ns_whole),
+                    trace: true,
+                    ..rt_schedule(name, period_ns_whole, threads)?
                 };
-                let mut engine = Engine::new(&plan, registry, config, Vec::new())
+                for variant in RT_VARIANTS {
+                    let config = EngineConfig {
+                        block_capacity: RT_BLOCK,
+                        threads,
+                        schedule,
+                        ..EngineConfig::new(SAMPLE_RATE, SEED)
+                    };
+                    let mut engine = Engine::with_waiter(
+                        &plan,
+                        registry,
+                        config,
+                        Vec::new(),
+                        Some(rt_thread::mach_semaphores),
+                    )
                     .map_err(|e| Failure::Internal(e.to_string()))?;
-                engine.set_task_hook(Some(tail_hook));
-                let workers = engine.workers();
-                let paths = if variant == "ordinary" {
-                    Vec::new()
-                } else {
-                    enter_workers(&workers, policy)
-                };
-                let caller = (variant == "rt-all")
-                    .then(|| rt_thread::enter(&policy, Err("offline: no device workgroup")));
-                // Untimed: one repeat's worth of blocks.
-                for _ in 0..REPEAT_FRAMES as usize / RT_BLOCK {
-                    engine.run_block(RT_BLOCK);
-                }
-                let mut times = Vec::with_capacity(blocks);
-                let mut tail = Tail::default();
-                let [mut worker_start, mut slowest, mut open_after, mut joined] =
-                    std::array::from_fn(|_| Vec::with_capacity(blocks));
-                let mut next = Instant::now() + period;
-                for _ in 0..blocks {
-                    if let Some(wait) = next.checked_duration_since(Instant::now()) {
-                        thread::sleep(wait);
+                    engine.set_task_hook(Some(tail_hook));
+                    let workers = engine.workers();
+                    let paths = if variant == "ordinary" {
+                        Vec::new()
+                    } else {
+                        enter_workers(&workers, policy)
+                    };
+                    let caller = (variant == "rt-all")
+                        .then(|| rt_thread::enter(&policy, Err("offline: no device workgroup")));
+                    // Untimed: one repeat's worth of blocks.
+                    for _ in 0..REPEAT_FRAMES as usize / RT_BLOCK {
+                        engine.begin_callback(RT_BLOCK);
+                        engine.run_block(RT_BLOCK);
+                        engine.end_callback();
                     }
-                    reset_tail();
-                    let began_ns = tail_now();
-                    let began = Instant::now();
-                    engine.run_block(RT_BLOCK);
-                    times.push(began.elapsed().as_nanos() as f64);
-                    next = (next + period).max(Instant::now());
-                    match JOBS.load(Ordering::Relaxed) {
-                        0 => {}
-                        1 => {
-                            tail.parallel_blocks += 1;
-                            let first = FIRST_ENTER.load(Ordering::Relaxed);
-                            let workers_in = JOINED.load(Ordering::Relaxed);
-                            let last = LAST_WORKER_ENTER.load(Ordering::Relaxed);
-                            worker_start.push(if workers_in > 0 {
-                                last.saturating_sub(first) as f64
-                            } else {
-                                0.0
-                            });
-                            slowest.push(SLOWEST_TASK.load(Ordering::Relaxed) as f64);
-                            open_after.push(first.saturating_sub(began_ns) as f64);
-                            joined.push(workers_in as f64);
+                    let mut times = Vec::with_capacity(blocks);
+                    let mut tail = Tail::default();
+                    let [mut worker_start, mut slowest, mut open_after, mut joined] =
+                        std::array::from_fn(|_| Vec::with_capacity(blocks));
+                    let mut next = Instant::now() + period;
+                    for _ in 0..blocks {
+                        if let Some(wait) = next.checked_duration_since(Instant::now()) {
+                            thread::sleep(wait);
                         }
-                        _ => {
-                            tail.parallel_blocks += 1;
-                            tail.multi_job_blocks += 1;
+                        reset_tail();
+                        let began_ns = tail_now();
+                        let began = Instant::now();
+                        // As a callback: the wake policy's start and end too.
+                        engine.begin_callback(RT_BLOCK);
+                        engine.run_block(RT_BLOCK);
+                        engine.end_callback();
+                        times.push(began.elapsed().as_nanos() as f64);
+                        next = (next + period).max(Instant::now());
+                        match JOBS.load(Ordering::Relaxed) {
+                            0 => {}
+                            1 => {
+                                tail.parallel_blocks += 1;
+                                let first = FIRST_ENTER.load(Ordering::Relaxed);
+                                let workers_in = JOINED.load(Ordering::Relaxed);
+                                let last = LAST_WORKER_ENTER.load(Ordering::Relaxed);
+                                worker_start.push(if workers_in > 0 {
+                                    last.saturating_sub(first) as f64
+                                } else {
+                                    0.0
+                                });
+                                slowest.push(SLOWEST_TASK.load(Ordering::Relaxed) as f64);
+                                open_after.push(first.saturating_sub(began_ns) as f64);
+                                joined.push(workers_in as f64);
+                            }
+                            _ => {
+                                tail.parallel_blocks += 1;
+                                tail.multi_job_blocks += 1;
+                            }
                         }
                     }
-                }
-                tail.worker_start = Spread::of(worker_start);
-                tail.slowest_task = Spread::of(slowest);
-                tail.open_after = Spread::of(open_after);
-                tail.joined = Spread::of(joined);
-                if variant != "ordinary" {
-                    let generation = workers.post(|_| rt_thread::exit());
-                    let _ = workers.wait(generation, RT_WAIT);
-                }
-                if caller.is_some() {
-                    rt_thread::exit();
-                }
-                drop(engine);
-                let row = RtRow {
-                    threads,
-                    workers: workers.count(),
-                    schedule: name.clone(),
-                    variant,
-                    paths,
-                    caller,
-                    over_quarter: times.iter().filter(|&&t| t > 0.25 * period_ns).count(),
-                    over_period: times.iter().filter(|&&t| t > period_ns).count(),
-                    block: Spread::of(times),
-                    tail,
-                };
-                if !json {
-                    eprintln!(
-                        "signal: bench: realtime: {threads} threads, {name}, {variant}: median {:.1} µs, \
+                    tail.worker_start = Spread::of(worker_start);
+                    tail.slowest_task = Spread::of(slowest);
+                    tail.open_after = Spread::of(open_after);
+                    tail.joined = Spread::of(joined);
+                    if variant != "ordinary" {
+                        let generation = workers.post(|_| rt_thread::exit());
+                        let _ = workers.wait(generation, RT_WAIT);
+                    }
+                    if caller.is_some() {
+                        rt_thread::exit();
+                    }
+                    let waiter = engine.schedule_stats().waiter;
+                    let wake = engine.wake_stats();
+                    drop(engine);
+                    let row = RtRow {
+                        threads,
+                        workers: workers.count(),
+                        schedule: name.clone(),
+                        policy: rt_policy,
+                        waiter,
+                        wake,
+                        variant,
+                        paths,
+                        caller,
+                        over_quarter: times.iter().filter(|&&t| t > 0.25 * period_ns).count(),
+                        over_period: times.iter().filter(|&&t| t > period_ns).count(),
+                        block: Spread::of(times),
+                        tail,
+                    };
+                    if !json {
+                        eprintln!(
+                            "signal: bench: realtime: {threads} threads, {name}, {rt_policy}, {variant}: median {:.1} µs, \
                      p99 {:.1} µs; workers started p99 {:.1} µs, slowest task p99 {:.1} µs",
-                        row.block.median / 1e3,
-                        row.block.p99 / 1e3,
-                        row.tail.worker_start.p99 / 1e3,
-                        row.tail.slowest_task.p99 / 1e3
-                    );
+                            row.block.median / 1e3,
+                            row.block.p99 / 1e3,
+                            row.tail.worker_start.p99 / 1e3,
+                            row.tail.slowest_task.p99 / 1e3
+                        );
+                    }
+                    rows.push(row);
                 }
-                rows.push(row);
             }
         }
     }
@@ -986,11 +1038,15 @@ fn realtime_table(
                 "period_ticks": policy.period,
                 "computation_ticks": policy.computation,
                 "constraint_ticks": policy.constraint,
+                "computation_fraction": computation.fraction(),
             },
             "rows": rows.iter().map(|r| json!({
                 "threads": r.threads,
                 "workers": r.workers,
                 "schedule": r.schedule,
+                "rt_policy": r.policy.name(),
+                "waiter": r.waiter,
+                "wake": r.wake.as_ref().map(crate::play::wake_json),
                 "variant": r.variant,
                 "caller": r.caller.as_ref().map_or("ordinary".to_owned(), ToString::to_string),
                 "paths": r.paths.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -1011,7 +1067,7 @@ fn realtime_table(
              {blocks} blocks per row, {cores} performance cores ({})\n\
              µs per block; workers started (from the first thread in the job) and slowest task: \
              median / p99 / max\n\
-             threads  schedule  variant       median     p99     max  >25 %  >100 %  \
+             threads  schedule  policy       variant       median     p99     max  >25 %  >100 %  \
              workers started        slowest task           workers",
             period_ns / 1e3,
             cores_source.name()
@@ -1026,9 +1082,10 @@ fn realtime_table(
         };
         for r in &rows {
             text.push_str(&format!(
-                "\n  {:>5}  {:<8}  {:<11} {:>7.1} {:>7.1} {:>7.1} {:>6} {:>7}  {:<22} {:<22} {}",
+                "\n  {:>5}  {:<8}  {:<11}  {:<11} {:>7.1} {:>7.1} {:>7.1} {:>6} {:>7}  {:<22} {:<22} {}",
                 r.threads,
                 r.schedule,
+                r.policy.name(),
                 r.variant,
                 r.block.median / 1e3,
                 r.block.p99 / 1e3,

@@ -42,6 +42,8 @@ wgpu = "30.0.1"
 pollster = "1.0.1"
 objc2-core-audio = "0.3.2"
 libc = "0.2.190"
+# M2.7-6: model tests of the scheduler's synchronisation (dev-dependency of signal-engine only)
+loom = "0.7.2"
 # test-only
 proptest = "1.12.0"
 insta = "1.49.0"

@@ -12,11 +12,65 @@ signal_contract::install_counting_allocator!();
 use std::path::Path;
 use std::sync::Arc;
 
-use signal_audio::{CallbackStats, ChannelMap, InputCallback, OutputCallback};
+use signal_audio::{CallbackStats, ChannelMap, InputCallback, OutputCallback, rt_thread};
 use signal_contract::alloc_counter::{self, Counts, Guard};
 use signal_core::Registry;
-use signal_engine::{CallbackSizes, RealtimeConfig, realtime};
+use signal_engine::{
+    CallbackSizes, RealtimeConfig, RtOptions, RtPolicy, Schedule, realtime, realtime_with,
+};
 use signal_project::Project;
+
+/// M2.7-1 C10: under every wake policy, with the Mach semaphores of
+/// `semaphore` and the wake-up trace, the callback body on 4 threads (every
+/// segment on the workers) allocates and frees nothing on the audio thread:
+/// the callback-start wakes (`semaphore_signal`, `Thread::unpark`) included.
+#[test]
+fn the_callback_allocates_nothing_under_every_wake_policy() {
+    assert!(alloc_counter::is_installed());
+    let mut registry = Registry::new();
+    signal_std::register(&mut registry).unwrap();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/kick");
+    let project = Project::load(&dir).unwrap();
+    let plan = project.plan(&registry).unwrap().plan;
+    let rate = project.sample_rate;
+    for policy in RtPolicy::ALL {
+        let mut config = RealtimeConfig::with_buffer(rate, project.seed, 128);
+        config.engine.threads = 4;
+        config.engine.schedule = Schedule::FORCED;
+        config.rt = RtOptions {
+            policy,
+            trace: true,
+            ..RtOptions::default()
+        };
+        let (runner, _controller) =
+            realtime_with(&plan, &registry, config, Some(rt_thread::mach_semaphores)).unwrap();
+        let expected = if policy == RtPolicy::Semaphore {
+            "semaphore"
+        } else {
+            "park"
+        };
+        assert_eq!(runner.schedule_stats().waiter, expected);
+        let stats = Arc::new(CallbackStats::default());
+        let map = ChannelMap::new(2, 2);
+        let (mut callback, _control) =
+            OutputCallback::new(runner, map, 128, rate, Arc::clone(&stats));
+        let mut out = vec![0.0f32; 128 * 2];
+        let mut total = Counts::default();
+        for n in 0..2_000 {
+            // Now and then a gap, so that workers wait when the next starts.
+            if n % 50 == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let guard = Guard::start();
+            callback.fill(&mut out);
+            let counts = guard.counts();
+            drop(guard);
+            total.allocations += counts.allocations;
+            total.deallocations += counts.deallocations;
+        }
+        assert!(total.is_zero(), "{policy}: {total:?}");
+    }
+}
 
 #[test]
 fn the_callback_allocates_and_frees_nothing() {

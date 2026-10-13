@@ -47,6 +47,8 @@ pub use config::{
 pub use coreaudio::{CoreAudioDriver, DeviceSelector, InputCapture, devices};
 pub use input::{InputCallback, InputMeters};
 pub use map::ChannelMap;
-pub use scheduling::{DeviceMatch, Scheduling, TimeConstraint, WorkerPath, match_device};
+pub use scheduling::{
+    Demotions, DeviceMatch, Scheduling, TimeConstraint, WorkerPath, match_device,
+};
 pub use select::{DeviceRef, Resolution, labels, resolve, signature};
 pub use stats::{CallbackStats, StatsSnapshot};

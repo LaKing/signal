@@ -2,16 +2,27 @@
 //! "Worker threads"). Created with the engine on the control thread and kept
 //! across plan swaps; dropped (shut down and joined) with it.
 //!
-//! A worker spins on the gate for the pool's spin (`Schedule::spin_ns`: 50 µs
-//! offline, the device period in real time; at most [`MAX_SPIN`]) after its
-//! last job or wake, then parks: an engine with no parallel jobs parks every
-//! worker within [`MAX_SPIN`], so an idle engine never keeps a core busy. A
-//! parallel segment wakes at most one parked worker from the calling thread;
-//! each worker that joins wakes up to two more. The handshake is complete:
-//! a parking worker stores its `parked` flag (SeqCst) and then reads the gate
-//! (SeqCst); the caller opens the gate (SeqCst) and then reads the flags
-//! (SeqCst). In the single order of those operations, either the worker sees
-//! the open gate and does not park, or the caller sees the flag and wakes it.
+//! A worker spins on the gate for the pool's spin (`Schedule::spin_ns`, 50 µs;
+//! under `budget-spin` until 0.9 × its computation budget has passed since it
+//! last resumed; at most [`MAX_SPIN`]) after its last job or wake, then
+//! blocks: an engine with no parallel jobs blocks every worker within
+//! [`MAX_SPIN`], so an idle engine never keeps a core busy. A parallel
+//! segment wakes at most one blocked worker from the calling thread; each
+//! worker that joins wakes up to two more. Under `semaphore` and `fanout` the
+//! calling thread also wakes workers at the start of a callback
+//! ([`Pool::begin_callback`], `docs/realtime-rules.md` "Wake policies"). The
+//! handshake is complete: a blocking worker stores its `parked` flag (SeqCst)
+//! and then reads the gate (SeqCst); the caller opens the gate (SeqCst) and
+//! then reads the flags (SeqCst). In the single order of those operations,
+//! either the worker sees the open gate and does not block, or the caller
+//! sees the flag and wakes it.
+//!
+//! Every wake goes through `Shared::signal` and every block through
+//! `Shared::block`: `Thread::unpark` and `thread::park`, or the policy's
+//! [`Waiter`] (a semaphore per worker). Requests ([`Workers::post`]) and the
+//! shutdown signal every worker unconditionally; a signal the worker did not
+//! need (a park token or a semaphore count) only makes its next block return
+//! at once, and the loop re-checks everything after any return.
 //!
 //! A driver runs code on every worker thread through [`Workers`] (ADR 0019
 //! §4: real-time policy, the audio workgroup): a posted request runs once on
@@ -26,7 +37,9 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
+use crate::engine::Schedule;
 use crate::shared::{Gate, Job, Opener, PoolStats};
+use crate::wake::{Histogram, RtPolicy, Spread, Waiter, WakeStats};
 
 /// The longest an idle worker spins before it parks, whatever the schedule
 /// asks: a little over two device periods of 128 frames at 96 kHz. It bounds
@@ -51,11 +64,76 @@ struct Request {
     f: WorkerFn,
 }
 
+/// How workers block and are woken.
+enum Blocker {
+    /// `thread::park` and `Thread::unpark`.
+    Park,
+    /// A semaphore per worker (`semaphore`).
+    Waiter(Arc<dyn Waiter>),
+}
+
+/// The wake-up trace's state (`Schedule::trace`): stamps in ns since
+/// `epoch`, plus one (0 is none), and histograms. Atomics only.
+struct Trace {
+    epoch: Instant,
+    /// Per worker: when its pending wake was sent.
+    signalled_at: Box<[AtomicU64]>,
+    /// Per worker: from a wake to the worker running again.
+    wake: Box<[Histogram]>,
+    callback_start: AtomicU64,
+    /// This callback's first and last join (`u64::MAX` and 0 when none).
+    first_join: AtomicU64,
+    last_join: AtomicU64,
+    first: Histogram,
+    last: Histogram,
+    slowest: Histogram,
+    callbacks: AtomicU64,
+    without_join: AtomicU64,
+    signalled: AtomicU64,
+    observed: AtomicU64,
+}
+
+impl Trace {
+    fn new(workers: usize) -> Trace {
+        Trace {
+            epoch: Instant::now(),
+            signalled_at: (0..workers).map(|_| AtomicU64::new(0)).collect(),
+            wake: (0..workers).map(|_| Histogram::new()).collect(),
+            callback_start: AtomicU64::new(0),
+            first_join: AtomicU64::new(u64::MAX),
+            last_join: AtomicU64::new(0),
+            first: Histogram::new(),
+            last: Histogram::new(),
+            slowest: Histogram::new(),
+            callbacks: AtomicU64::new(0),
+            without_join: AtomicU64::new(0),
+            signalled: AtomicU64::new(0),
+            observed: AtomicU64::new(0),
+        }
+    }
+
+    /// Now, in ns since the epoch, plus one.
+    fn now(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_nanos())
+            .unwrap_or(u64::MAX - 1)
+            .saturating_add(1)
+    }
+}
+
 /// What the workers share with the pool.
 struct Shared {
     gate: Arc<Gate>,
-    /// How long an idle worker spins before it parks (at most [`MAX_SPIN`]).
+    /// How long an idle worker spins before it blocks (at most [`MAX_SPIN`]).
     spin: Duration,
+    /// `budget-spin`: how long after it last resumed a worker may spin.
+    budget_spin: Option<Duration>,
+    policy: RtPolicy,
+    blocker: Blocker,
+    /// The callback generation ([`Pool::begin_callback`]).
+    generation: AtomicU64,
+    /// Per worker: the last generation it passed a wake on for (`fanout`).
+    propagated: Box<[AtomicU64]>,
+    trace: Option<Trace>,
     parked: Box<[AtomicBool]>,
     threads: OnceLock<Box<[Thread]>>,
     shutdown: AtomicBool,
@@ -137,18 +215,88 @@ impl Shared {
     /// Wakes up to `n` parked workers. SeqCst: the caller's half of the park
     /// handshake, after the SeqCst open.
     fn wake(&self, n: usize) {
-        let Some(threads) = self.threads.get() else {
-            return;
-        };
         let mut woken = 0;
-        for (parked, thread) in self.parked.iter().zip(threads.iter()) {
+        for (w, parked) in self.parked.iter().enumerate() {
             if woken >= n {
                 break;
             }
             if parked.swap(false, Ordering::SeqCst) {
-                thread.unpark();
+                if let Some(trace) = &self.trace {
+                    if let Some(at) = trace.signalled_at.get(w) {
+                        at.store(trace.now(), Ordering::SeqCst);
+                    }
+                    trace.signalled.fetch_add(1, Ordering::Relaxed);
+                }
+                self.signal(w);
                 woken += 1;
             }
+        }
+    }
+
+    /// Wakes worker `w`, or lets its next block return at once: the only
+    /// way any path (segment open, callback start, requests, shutdown)
+    /// wakes a worker.
+    fn signal(&self, w: usize) {
+        match &self.blocker {
+            Blocker::Park => {
+                if let Some(thread) = self.threads.get().and_then(|t| t.get(w)) {
+                    thread.unpark();
+                }
+            }
+            Blocker::Waiter(waiter) => waiter.signal(w),
+        }
+    }
+
+    /// Blocks worker `w` (its own thread) until it is signalled.
+    fn block(&self, w: usize) {
+        match &self.blocker {
+            Blocker::Park => thread::park(),
+            Blocker::Waiter(waiter) => waiter.wait(w),
+        }
+    }
+
+    /// Worker `w` runs again after a block (or decided not to block):
+    /// records its wake's latency against the wake that sent it, and under
+    /// `fanout` passes the wake on, once per callback generation.
+    fn resumed(&self, w: usize) {
+        if let Some(trace) = &self.trace {
+            let at = trace
+                .signalled_at
+                .get(w)
+                .map_or(0, |at| at.swap(0, Ordering::SeqCst));
+            if at != 0 {
+                if let Some(histogram) = trace.wake.get(w) {
+                    histogram.record(trace.now().saturating_sub(at));
+                }
+                trace.observed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if self.policy == RtPolicy::Fanout
+            && let Some(propagated) = self.propagated.get(w)
+        {
+            let generation = self.generation.load(Ordering::SeqCst);
+            if propagated.load(Ordering::Relaxed) < generation {
+                propagated.store(generation, Ordering::Relaxed);
+                self.wake(2);
+            }
+        }
+    }
+
+    /// A worker joined a job: this callback's first and last join.
+    fn joined(&self) {
+        if let Some(trace) = &self.trace {
+            let now = trace.now();
+            trace.first_join.fetch_min(now, Ordering::Relaxed);
+            trace.last_join.fetch_max(now, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether an idle worker still spins: `idle` is its last job or wake,
+    /// `resumed` when it last ran again after a block.
+    fn spins(&self, idle: Instant, resumed: Instant) -> bool {
+        match self.budget_spin {
+            Some(budget) => resumed.elapsed() < budget,
+            None => idle.elapsed() < self.spin,
         }
     }
 }
@@ -169,18 +317,40 @@ impl fmt::Debug for Pool {
 }
 
 impl Pool {
-    /// Starts `workers` threads that spin for `spin` (at most [`MAX_SPIN`])
-    /// before they park (control-thread code; it allocates). A thread the
+    /// Starts `workers` threads that wait as `schedule`'s policy says
+    /// (control-thread code; it allocates): they spin for its `spin_ns` (at
+    /// most [`MAX_SPIN`]) or, under `budget-spin`, until 0.9 × its
+    /// `budget_ns` has passed since they last resumed, then block on
+    /// `waiter` under `semaphore` when one is given, else park. A thread the
     /// system refuses is left out.
-    pub(crate) fn new(workers: usize, spin: Duration) -> Pool {
+    pub(crate) fn new(
+        workers: usize,
+        schedule: &Schedule,
+        waiter: Option<Arc<dyn Waiter>>,
+    ) -> Pool {
         let (gate, opener) = Gate::new();
+        let budget_spin = (schedule.policy == RtPolicy::BudgetSpin && schedule.budget_ns > 0)
+            .then(|| Duration::from_nanos(schedule.budget_ns / 10 * 9).min(MAX_SPIN));
+        let blocker = match waiter {
+            Some(waiter) if schedule.policy == RtPolicy::Semaphore => Blocker::Waiter(waiter),
+            _ => Blocker::Park,
+        };
         let shared = Arc::new(Shared {
             gate,
-            spin: spin.min(MAX_SPIN),
+            spin: Duration::from_nanos(schedule.spin_ns).min(MAX_SPIN),
+            budget_spin,
+            policy: schedule.policy,
+            blocker,
+            generation: AtomicU64::new(0),
+            propagated: (0..workers).map(|_| AtomicU64::new(0)).collect(),
+            trace: schedule.trace.then(|| Trace::new(workers)),
             parked: (0..workers).map(|_| AtomicBool::new(false)).collect(),
             threads: OnceLock::new(),
             shutdown: AtomicBool::new(false),
-            stats: PoolStats::default(),
+            stats: PoolStats {
+                trace: schedule.trace,
+                ..PoolStats::default()
+            },
             requests: Mutex::new(VecDeque::new()),
             posted: AtomicU64::new(0),
             done: (0..workers).map(|_| AtomicU64::new(0)).collect(),
@@ -219,6 +389,81 @@ impl Pool {
         &self.shared.stats
     }
 
+    /// Whether workers block on the policy's [`Waiter`].
+    pub(crate) fn waits_on_waiter(&self) -> bool {
+        matches!(self.shared.blocker, Blocker::Waiter(_))
+    }
+
+    /// A callback starts (the audio thread; allocates, locks and blocks
+    /// nowhere): a new generation, the trace's start and, under `semaphore`
+    /// and `fanout` when `parallel` (the plan can run on the workers in this
+    /// callback), the callback-start wake: every parked worker, or two that
+    /// pass it on.
+    pub(crate) fn begin_callback(&self, parallel: bool) {
+        let shared = &*self.shared;
+        shared.generation.fetch_add(1, Ordering::SeqCst);
+        if let Some(trace) = &shared.trace {
+            trace.callback_start.store(trace.now(), Ordering::Relaxed);
+            trace.first_join.store(u64::MAX, Ordering::Relaxed);
+            trace.last_join.store(0, Ordering::Relaxed);
+            shared.stats.slowest_task_ns.store(0, Ordering::Relaxed);
+        }
+        if parallel {
+            match shared.policy {
+                RtPolicy::Semaphore => shared.wake(usize::MAX),
+                RtPolicy::Fanout => shared.wake(2),
+                RtPolicy::Park50 | RtPolicy::BudgetSpin => {}
+            }
+        }
+    }
+
+    /// The callback ends (the audio thread): folds its joins and its
+    /// slowest task into the trace. A callback without a join adds none.
+    pub(crate) fn end_callback(&self) {
+        let shared = &*self.shared;
+        let Some(trace) = &shared.trace else {
+            return;
+        };
+        trace.callbacks.fetch_add(1, Ordering::Relaxed);
+        let start = trace.callback_start.load(Ordering::Relaxed);
+        let first = trace.first_join.load(Ordering::Relaxed);
+        if first == u64::MAX {
+            trace.without_join.fetch_add(1, Ordering::Relaxed);
+        } else {
+            trace.first.record(first.saturating_sub(start));
+            let last = trace.last_join.load(Ordering::Relaxed);
+            trace.last.record(last.saturating_sub(start));
+        }
+        let slowest = shared.stats.slowest_task_ns.swap(0, Ordering::Relaxed);
+        if slowest > 0 {
+            trace.slowest.record(slowest);
+        }
+    }
+
+    /// The wake-up trace so far (control-thread code), if kept.
+    pub(crate) fn wake_stats(&self) -> Option<WakeStats> {
+        let trace = self.shared.trace.as_ref()?;
+        let all = Histogram::new();
+        for histogram in trace.wake.iter() {
+            histogram.add_to(&all);
+        }
+        Some(WakeStats {
+            callbacks: trace.callbacks.load(Ordering::Relaxed),
+            callbacks_without_join: trace.without_join.load(Ordering::Relaxed),
+            wakes_signalled: trace.signalled.load(Ordering::Relaxed),
+            wakes_observed: trace.observed.load(Ordering::Relaxed),
+            wake: all.spread(),
+            per_worker: trace
+                .wake
+                .iter()
+                .map(Histogram::spread)
+                .collect::<Vec<Spread>>(),
+            first_join: trace.first.spread(),
+            last_join: trace.last.spread(),
+            slowest_task: trace.slowest.spread(),
+        })
+    }
+
     /// The handle that runs code on these workers.
     pub(crate) fn handle(&self, threads: usize) -> Workers {
         Workers {
@@ -255,9 +500,11 @@ impl Dispatch<'_> {
 
 impl Drop for Pool {
     fn drop(&mut self) {
+        // SeqCst: a blocking worker stores its flag and then reads
+        // `shutdown`; it either sees it or is signalled here after blocking.
         self.shared.shutdown.store(true, Ordering::SeqCst);
-        for handle in &self.handles {
-            handle.thread().unpark();
+        for w in 0..self.handles.len() {
+            self.shared.signal(w);
         }
         for handle in self.handles.drain(..) {
             let _ = handle.join();
@@ -351,10 +598,8 @@ impl Workers {
             shared.posted.store(generation, Ordering::SeqCst);
             generation
         };
-        if let Some(threads) = shared.threads.get() {
-            for thread in threads.iter() {
-                thread.unpark();
-            }
+        for w in 0..shared.parked.len() {
+            shared.signal(w);
         }
         generation
     }
@@ -389,17 +634,19 @@ impl Drop for Alive<'_> {
 }
 
 /// Worker `w`: runs posted requests, joins every new job as lane `w + 1`,
-/// spinning between jobs and parking after the pool's spin.
+/// spinning between jobs and blocking after the pool's spin.
 fn run(shared: &Shared, w: usize) {
     let _alive = Alive(shared, w);
     let mut seen = 0;
     let mut idle = Instant::now();
+    let mut resumed = idle;
     loop {
         if shared.shutdown.load(Ordering::Acquire) {
             return;
         }
         shared.serve(w);
         let joined = shared.gate.join(&mut seen, |job| {
+            shared.joined();
             shared.wake(2);
             job.participate(w + 1);
         });
@@ -407,7 +654,7 @@ fn run(shared: &Shared, w: usize) {
             idle = Instant::now();
             continue;
         }
-        if idle.elapsed() < shared.spin {
+        if shared.spins(idle, resumed) {
             for _ in 0..64 {
                 std::hint::spin_loop();
             }
@@ -421,9 +668,12 @@ fn run(shared: &Shared, w: usize) {
         {
             parked.store(false, Ordering::SeqCst);
         } else {
-            thread::park();
+            shared.block(w);
             parked.store(false, Ordering::SeqCst);
+            resumed = Instant::now();
         }
+        // A wake sent while it decided not to block is answered too.
+        shared.resumed(w);
         idle = Instant::now();
     }
 }
@@ -433,33 +683,222 @@ mod tests {
     use super::*;
     use crate::shared::{Access, PlanCells};
 
-    /// AC-idle (M2.6-5): a spin longer than [`MAX_SPIN`] is clamped to it,
-    /// and after a job every worker parks once the spin has passed. Polled
-    /// with a ceiling far above the bound, so a loaded machine cannot fail
-    /// it by being slow, only a worker that never parks.
-    #[test]
-    fn idle_workers_park_after_the_spin_bound() {
-        let mut pool = Pool::new(3, Duration::from_secs(1));
-        assert_eq!(pool.shared.spin, MAX_SPIN);
-        let mut cells = PlanCells::default();
-        let body = |_: &mut Access<'_>, _: usize| {};
-        {
-            let (mut dispatch, stats) = pool.split();
-            let job = Job::new(&mut cells, 1, &body, None, stats);
-            dispatch.run(&job);
-        }
-        let shared = &pool.shared;
-        let all_parked = || {
-            shared
-                .parked
-                .iter()
-                .zip(shared.alive.iter())
-                .all(|(p, a)| p.load(Ordering::SeqCst) || !a.load(Ordering::SeqCst))
-        };
-        let ceiling = Instant::now() + Duration::from_secs(2);
-        while !all_parked() && Instant::now() < ceiling {
+    use std::sync::Condvar;
+    use std::sync::mpsc;
+
+    /// Waits (polling, up to a ceiling far above any bound, so a loaded
+    /// machine cannot fail a test by being slow) until `done`.
+    fn eventually(done: impl Fn() -> bool) -> bool {
+        let ceiling = Instant::now() + Duration::from_secs(5);
+        while !done() && Instant::now() < ceiling {
             thread::sleep(Duration::from_millis(1));
         }
-        assert!(all_parked(), "a worker still spins 2 s after its last job");
+        done()
+    }
+
+    fn all_parked(shared: &Shared) -> bool {
+        shared
+            .parked
+            .iter()
+            .zip(shared.alive.iter())
+            .all(|(p, a)| p.load(Ordering::SeqCst) || !a.load(Ordering::SeqCst))
+    }
+
+    /// Runs one (empty) job on the pool.
+    fn run_job(pool: &mut Pool, epoch: u64) {
+        let mut cells = PlanCells::default();
+        let body = |_: &mut Access<'_>, _: usize| {};
+        let (mut dispatch, stats) = pool.split();
+        let job = Job::new(&mut cells, epoch, &body, None, stats);
+        dispatch.run(&job);
+    }
+
+    /// A counting semaphore per worker (a `Mutex` and `Condvar`: tests only),
+    /// as the `semaphore` policy's [`Waiter`], counting every signal and
+    /// every return from a wait.
+    struct Counting {
+        state: Mutex<(Vec<u64>, usize)>,
+        changed: Condvar,
+        signals: AtomicU64,
+        returns: AtomicU64,
+    }
+
+    impl Counting {
+        fn new(workers: usize) -> Arc<Counting> {
+            Arc::new(Counting {
+                state: Mutex::new((vec![0; workers], 0)),
+                changed: Condvar::new(),
+                signals: AtomicU64::new(0),
+                returns: AtomicU64::new(0),
+            })
+        }
+
+        /// Every worker waits and no signal is pending.
+        fn quiet(&self, workers: usize) -> bool {
+            let state = self.state.lock().unwrap();
+            state.1 == workers && state.0.iter().all(|&n| n == 0)
+        }
+    }
+
+    impl Waiter for Counting {
+        fn wait(&self, w: usize) {
+            let mut state = self.state.lock().unwrap();
+            state.1 += 1;
+            while state.0[w] == 0 {
+                state = self.changed.wait(state).unwrap();
+            }
+            state.0[w] -= 1;
+            state.1 -= 1;
+            self.returns.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn signal(&self, w: usize) {
+            let mut state = self.state.lock().unwrap();
+            state.0[w] += 1;
+            self.signals.fetch_add(1, Ordering::SeqCst);
+            self.changed.notify_all();
+        }
+    }
+
+    /// AC-idle (M2.6-5, M2.7-1 C12): a spin longer than [`MAX_SPIN`] is
+    /// clamped to it, and under every policy, after a job and a callback
+    /// start, every worker parks once its bound has passed.
+    #[test]
+    fn idle_workers_park_after_the_spin_bound() {
+        for policy in RtPolicy::ALL {
+            let schedule = Schedule {
+                spin_ns: 1_000_000_000,
+                budget_ns: 1_000_000_000,
+                policy,
+                ..Schedule::DEFAULT
+            };
+            let mut pool = Pool::new(3, &schedule, None);
+            assert_eq!(pool.shared.spin, MAX_SPIN);
+            let budget = (policy == RtPolicy::BudgetSpin).then_some(MAX_SPIN);
+            assert_eq!(pool.shared.budget_spin, budget);
+            run_job(&mut pool, 1);
+            pool.begin_callback(true);
+            pool.end_callback();
+            assert!(
+                eventually(|| all_parked(&pool.shared)),
+                "{policy}: a worker still spins 5 s after its last job"
+            );
+        }
+        // budget-spin: 0.9 × the budget, when that is below the bound.
+        let schedule = Schedule {
+            policy: RtPolicy::BudgetSpin,
+            budget_ns: 333_333,
+            ..Schedule::DEFAULT
+        };
+        let pool = Pool::new(1, &schedule, None);
+        assert_eq!(pool.shared.budget_spin, Some(Duration::from_nanos(299_997)));
+    }
+
+    /// C12 (auditor-2): every wake path reaches workers blocked on the
+    /// `semaphore` policy's waiter: the callback-start wake, a segment's,
+    /// posted requests and the shutdown. No wake is lost: once every worker
+    /// waits again, the waits that returned equal the signals sent (requests
+    /// and the shutdown included, whose surplus counts are spurious wakes);
+    /// the trace saw every wake it stamped; a callback that cannot go
+    /// parallel wakes nobody; and the pool drops while every worker waits.
+    #[test]
+    fn every_wake_path_reaches_workers_blocked_on_the_waiter() {
+        const WORKERS: usize = 3;
+        let waiter = Counting::new(WORKERS);
+        let schedule = Schedule {
+            policy: RtPolicy::Semaphore,
+            trace: true,
+            ..Schedule::DEFAULT
+        };
+        let mut pool = Pool::new(WORKERS, &schedule, Some(waiter.clone()));
+        assert!(pool.waits_on_waiter());
+        assert!(eventually(|| waiter.quiet(WORKERS)), "the workers wait");
+
+        // Posted requests, while every worker waits.
+        let workers = pool.handle(WORKERS + 1);
+        let ran = Arc::new(AtomicU64::new(0));
+        for _ in 0..3 {
+            let ran = Arc::clone(&ran);
+            let generation = workers.post(move |_| {
+                ran.fetch_add(1, Ordering::SeqCst);
+            });
+            assert!(workers.wait(generation, Duration::from_secs(5)).complete());
+            assert!(eventually(|| waiter.quiet(WORKERS)));
+        }
+        assert_eq!(ran.load(Ordering::SeqCst), 3 * WORKERS as u64);
+
+        // A callback that cannot go parallel wakes nobody.
+        let before = waiter.signals.load(Ordering::SeqCst);
+        pool.begin_callback(false);
+        pool.end_callback();
+        assert_eq!(waiter.signals.load(Ordering::SeqCst), before);
+
+        // Callback starts, with jobs in some, at varying gaps.
+        let mut rng = 1u64;
+        for n in 0..2_000u64 {
+            pool.begin_callback(true);
+            if n % 3 == 0 {
+                run_job(&mut pool, n + 1);
+            }
+            pool.end_callback();
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            if rng >> 62 == 0 {
+                thread::sleep(Duration::from_micros(rng >> 54 & 127));
+            }
+        }
+        assert!(
+            eventually(|| waiter.quiet(WORKERS)),
+            "the workers wait again"
+        );
+        assert_eq!(
+            waiter.returns.load(Ordering::SeqCst),
+            waiter.signals.load(Ordering::SeqCst),
+            "every signal was consumed"
+        );
+        let wake = pool.wake_stats().unwrap();
+        assert!(wake.wakes_signalled > 0);
+        assert_eq!(wake.wakes_observed, wake.wakes_signalled, "{wake:?}");
+        assert_eq!(wake.callbacks, 2_001);
+        assert_eq!(wake.wake.count, wake.wakes_observed);
+        assert_eq!(wake.per_worker.len(), WORKERS);
+
+        // The shutdown, while every worker waits.
+        let (done, dropped) = mpsc::channel();
+        thread::spawn(move || {
+            drop(pool);
+            let _ = done.send(());
+        });
+        assert!(
+            dropped.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the pool did not stop"
+        );
+    }
+
+    /// C12 (auditor-1-02): under `fanout` a callback start reaches the
+    /// parked workers through a tree that ends: each worker passes the wake
+    /// on at most once per callback, so a callback sends at most 2 + 2W
+    /// wakes, and the workers all park again.
+    #[test]
+    fn fanout_propagation_ends() {
+        const WORKERS: usize = 6;
+        let schedule = Schedule {
+            policy: RtPolicy::Fanout,
+            trace: true,
+            ..Schedule::DEFAULT
+        };
+        let pool = Pool::new(WORKERS, &schedule, None);
+        for _ in 0..200 {
+            assert!(eventually(|| all_parked(&pool.shared)));
+            let before = pool.wake_stats().unwrap().wakes_signalled;
+            pool.begin_callback(true);
+            pool.end_callback();
+            assert!(eventually(|| all_parked(&pool.shared)), "the tree ended");
+            let sent = pool.wake_stats().unwrap().wakes_signalled - before;
+            assert!((2..=2 + 2 * WORKERS as u64).contains(&sent), "{sent}");
+        }
+        let wake = pool.wake_stats().unwrap();
+        assert!(eventually(
+            || pool.wake_stats().unwrap().wakes_observed == wake.wakes_signalled
+        ));
     }
 }

@@ -1,6 +1,7 @@
 //! The machine Setup (ADR 0009): which devices, buffer and output channels
 //! this machine plays a project with, the last project folder and the
-//! window's size. One TOML file (`docs/project-format.md`, "Setup"), never
+//! window's size, and two advanced keys not in the dialog: the real-time
+//! wake policy and computation (M2.7-1). One TOML file (`docs/project-format.md`, "Setup"), never
 //! part of a project. Reading it never fails: what is unknown or invalid is
 //! reported and replaced by its default. Writing it is atomic.
 
@@ -11,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use signal_audio::DeviceRef;
+use signal_engine::{Computation, RtPolicy};
 
 /// The file's format version.
 pub const VERSION: i64 = 1;
@@ -84,6 +86,13 @@ pub struct Setup {
     pub last_project: Option<PathBuf>,
     /// The window's size when last closed.
     pub window: Option<Window>,
+    /// Advanced, not in the dialog (M2.7-1): how idle worker threads wait
+    /// and are woken (`rt_policy`, `docs/realtime-rules.md` "Wake
+    /// policies"). A machine setting; it never changes the output.
+    pub rt_policy: RtPolicy,
+    /// Advanced, not in the dialog: the workers' time-constraint
+    /// computation, a fraction of the device period (`rt_computation`).
+    pub rt_computation: Computation,
 }
 
 impl Default for Setup {
@@ -96,6 +105,8 @@ impl Default for Setup {
             output_channels: None,
             last_project: None,
             window: None,
+            rt_policy: RtPolicy::default(),
+            rt_computation: Computation::DEFAULT,
         }
     }
 }
@@ -117,6 +128,12 @@ struct File<'a> {
     input: Option<&'a DeviceEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     window: Option<Window>,
+    /// Written only when not the default, so a Setup that never set them
+    /// stays as it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rt_policy: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rt_computation: Option<f64>,
 }
 
 /// Where the Setup lives: `--setup`, else `SIGNAL_SETUP`, else
@@ -228,6 +245,23 @@ impl Setup {
                     Ok(_) => bad("width and height must be positive".to_owned()),
                     Err(error) => bad(error.to_string()),
                 },
+                "rt_policy" => match value.as_str().and_then(RtPolicy::from_name) {
+                    Some(policy) => setup.rt_policy = policy,
+                    None => {
+                        let names: Vec<&str> = RtPolicy::ALL.iter().map(|p| p.name()).collect();
+                        bad(format!("must be one of {}", names.join(", ")));
+                    }
+                },
+                "rt_computation" => match value
+                    .as_float()
+                    .or_else(|| value.as_integer().map(|n| n as f64))
+                    .and_then(Computation::from_fraction)
+                {
+                    Some(computation) => setup.rt_computation = computation,
+                    None => {
+                        bad("must be a fraction of the period above 0 and at most 1".to_owned())
+                    }
+                },
                 _ => problems.push(format!("{file}: unknown key '{key}'; ignored")),
             }
         }
@@ -248,6 +282,9 @@ impl Setup {
             output: self.output.as_ref(),
             input: self.input.as_ref(),
             window: self.window,
+            rt_policy: (self.rt_policy != RtPolicy::default()).then(|| self.rt_policy.name()),
+            rt_computation: (self.rt_computation != Computation::DEFAULT)
+                .then(|| self.rt_computation.fraction()),
         };
         toml::to_string(&file).unwrap_or_default()
     }

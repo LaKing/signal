@@ -36,7 +36,7 @@ use signal_audio::{
 use signal_core::{Curve, EventPayload, Frame, PortAddress, Registry};
 use signal_engine::{
     ControlSink, Controller, Driver, LogLine, Meter, NullDriver, ParameterValue, Provenance,
-    RealtimeConfig, Report, RunnerStatus, SentCommand, Stamp, realtime,
+    RealtimeConfig, Report, RunnerStatus, SentCommand, Stamp, realtime_with,
 };
 use signal_graph::ExecutionPlan;
 use signal_project::live::{ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload};
@@ -240,9 +240,11 @@ pub struct View {
 }
 
 enum Output {
-    Device(CoreAudioDriver),
-    // Boxed: the null driver is much larger than the CoreAudio one. The map
-    // is what a device would play (the null driver plays the identity).
+    // Boxed, as the null driver: both are large (the CoreAudio driver keeps
+    // its workers' scheduling, M2.7-1 its ports too).
+    Device(Box<CoreAudioDriver>),
+    // The map is what a device would play (the null driver plays the
+    // identity).
     Null(Box<NullDriver>, ChannelMap),
 }
 
@@ -882,7 +884,7 @@ impl AppState {
                     }
                     other => other,
                 }
-                .map(Output::Device)
+                .map(|driver| Output::Device(Box::new(driver)))
             }
             Backend::Null(_) => {
                 // As `CoreAudioDriver::open_selected` chooses, on the listed
@@ -932,7 +934,16 @@ impl AppState {
         plan.version = 0;
         let mut config = RealtimeConfig::with_buffer(rate, seed, u64::from(buffer));
         config.engine.threads = self.setup.cpu_workers.map_or(0, |n| n as usize);
-        let (runner, controller) = match realtime(&plan, &self.registry, config) {
+        // Advanced Setup keys, not in the dialog (M2.7-1).
+        config.rt.policy = self.setup.rt_policy;
+        config.rt.computation = self.setup.rt_computation;
+        let made = realtime_with(
+            &plan,
+            &self.registry,
+            config,
+            Some(signal_audio::rt_thread::mach_semaphores),
+        );
+        let (runner, controller) = match made {
             Ok(run) => run,
             Err(error) => return self.refuse(error.to_string()),
         };

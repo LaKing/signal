@@ -29,6 +29,7 @@ use crate::log::{InstanceId, LogLine, LogRecord};
 use crate::offline::GAIN;
 use crate::pool::Workers;
 use crate::shared::HookPoint;
+use crate::wake::{MakeWaiter, RtOptions, WakeStats};
 
 /// The capacities and timing of a real-time run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +51,9 @@ pub struct RealtimeConfig {
     pub parameters: usize,
     /// The status queue's capacity.
     pub status: usize,
+    /// The wake policy, the computation budget and the wake-up trace
+    /// (M2.7-1); the default is the behaviour before it.
+    pub rt: RtOptions,
 }
 
 impl RealtimeConfig {
@@ -81,6 +85,7 @@ impl RealtimeConfig {
             meters: 1024,
             parameters: 1024,
             status: 256,
+            rt: RtOptions::default(),
         }
     }
 }
@@ -321,6 +326,18 @@ pub fn realtime(
     registry: &Registry,
     config: RealtimeConfig,
 ) -> Result<(Runner, Controller), ControlError> {
+    realtime_with(plan, registry, config, None)
+}
+
+/// [`realtime`], with `make` making the workers' [`Waiter`](crate::Waiter)
+/// for the `semaphore` policy (the driver's: Mach semaphores in
+/// `signal-audio`). Without one the `semaphore` workers park.
+pub fn realtime_with(
+    plan: &ExecutionPlan,
+    registry: &Registry,
+    config: RealtimeConfig,
+    make: Option<MakeWaiter>,
+) -> Result<(Runner, Controller), ControlError> {
     // Auto in real time: one performance core fewer (`realtime_threads`).
     let mut config = config;
     if config.engine.threads == 0 {
@@ -328,16 +345,20 @@ pub fn realtime(
     }
     // A latent module's due result is never waited for (ADR 0019 §3).
     config.engine.realtime = true;
+    let rate = u128::from(config.engine.sample_rate.max(1));
+    let period_ns = u128::from(config.buffer_frames) * 1_000_000_000 / rate;
+    let period_ns = u64::try_from(period_ns).unwrap_or(u64::MAX);
     // The real-time schedule (`Schedule::realtime`: the default since the
     // M2.6-5 device check), unless the caller chose a schedule.
     if config.engine.schedule == Schedule::DEFAULT {
-        let rate = u128::from(config.engine.sample_rate.max(1));
-        let period_ns = u128::from(config.buffer_frames) * 1_000_000_000 / rate;
-        let period_ns = u64::try_from(period_ns).unwrap_or(u64::MAX);
         config.engine.schedule = Schedule::realtime(period_ns, config.engine.threads);
     }
-    let engine =
-        Engine::new(plan, registry, config.engine, Vec::new()).map_err(ControlError::Engine)?;
+    // The wake policy and its budget (M2.7-1): timing only.
+    config.engine.schedule.policy = config.rt.policy;
+    config.engine.schedule.budget_ns = config.rt.computation.of_ns(period_ns);
+    config.engine.schedule.trace = config.rt.trace;
+    let engine = Engine::with_waiter(plan, registry, config.engine, Vec::new(), make)
+        .map_err(ControlError::Engine)?;
     let mirror = PlanState::mirror(plan, registry, config.engine).map_err(ControlError::Engine)?;
     let sinks = engine.audio_sinks();
     let sink = match sinks.as_slice() {
@@ -397,6 +418,7 @@ pub fn realtime(
         last_edit: Frame::ZERO,
         last_swap: None,
         counts: RunnerStatus::default(),
+        rt: config.rt,
     };
     let controller = Controller {
         commands: command_tx,
@@ -449,6 +471,7 @@ pub struct Runner {
     last_edit: Frame,
     last_swap: Option<Frame>,
     counts: RunnerStatus,
+    rt: RtOptions,
 }
 
 impl Runner {
@@ -469,6 +492,9 @@ impl Runner {
     /// Allocates, frees, locks and blocks nowhere; a full log, meter or
     /// status queue is counted. A trailing partial frame in `out` is zeroed.
     pub fn process(&mut self, out: &mut [f32], channels: usize) {
+        // The wake policy's callback start (timing only, M2.7-1).
+        self.engine
+            .begin_callback(out.len().checked_div(channels).unwrap_or(0));
         self.collect();
         let first_frame = self.engine.next_frame();
         self.levels.fill((0.0, 0.0));
@@ -490,6 +516,25 @@ impl Runner {
             rows.into_remainder().fill(0.0);
         }
         self.finish(first_frame, frames);
+        self.engine.end_callback();
+    }
+
+    /// The wake policy, computation budget and trace it was built with: the
+    /// driver sets the workers' time-constraint computation from it.
+    pub fn rt_options(&self) -> RtOptions {
+        self.rt
+    }
+
+    /// The engine's wake-up trace ([`RtOptions::trace`]), if kept and there
+    /// are workers.
+    pub fn wake_stats(&self) -> Option<WakeStats> {
+        self.engine.wake_stats()
+    }
+
+    /// Why the `semaphore` policy's waiter could not be made (its workers
+    /// park instead).
+    pub fn waiter_error(&self) -> Option<&str> {
+        self.engine.waiter_error()
     }
 
     /// The next frame it will run.

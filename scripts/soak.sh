@@ -18,6 +18,9 @@
 #                                            included (default: signal play's auto)
 #   scripts/soak.sh --silent ...             set the copy's `out` gain to 0.001
 #                                            (−60 dB): every module still runs
+#   scripts/soak.sh --rt-policy P ...        the wake policy (signal play --rt-policy)
+#   scripts/soak.sh --rt-computation C ...   the workers' computation, a fraction
+#                                            of the period (signal play --rt-computation)
 #
 # The rate is the project's (96 kHz). Without --signal it builds signal-cli
 # with --release --locked --offline and takes the binary from the target
@@ -34,6 +37,8 @@ TARGET_DIR=
 VOICES=
 THREADS=
 SILENT=
+RT_POLICY=
+RT_COMPUTATION=
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,7 +48,9 @@ while [[ $# -gt 0 ]]; do
     --voices) [[ $# -ge 2 ]] || die "--voices needs a number of voices"; VOICES=$2; shift ;;
     --threads) [[ $# -ge 2 ]] || die "--threads needs a number of threads"; THREADS=$2; shift ;;
     --silent) SILENT=1 ;;
-    -h|--help) sed -n '3,26p' "$0"; exit 0 ;;
+    --rt-policy) [[ $# -ge 2 ]] || die "--rt-policy needs a policy"; RT_POLICY=$2; shift ;;
+    --rt-computation) [[ $# -ge 2 ]] || die "--rt-computation needs a fraction"; RT_COMPUTATION=$2; shift ;;
+    -h|--help) sed -n '3,29p' "$0"; exit 0 ;;
     -*) die "unknown argument: $1" ;;
     *) POSITIONAL+=("$1") ;;
   esac
@@ -114,8 +121,11 @@ edit () {
 # --- the run ------------------------------------------------------------------
 PLAY=(--json play "$WORK/kick" --watch --driver "$DRIVER" --buffer "$BUFFER" --seconds "$SECONDS_TOTAL")
 [[ -n $THREADS ]] && PLAY+=(--threads "$THREADS")
-printf 'soak: %s min, %s driver, buffer %s, voices %s, threads %s, in %s\n' "$MINUTES" "$DRIVER" \
-  "$BUFFER" "${VOICES:-1}" "${THREADS:-auto}" "$WORK" >&2
+[[ -n $RT_POLICY ]] && PLAY+=(--rt-policy "$RT_POLICY")
+[[ -n $RT_COMPUTATION ]] && PLAY+=(--rt-computation "$RT_COMPUTATION")
+printf 'soak: %s min, %s driver, buffer %s, voices %s, threads %s, wake policy %s, computation %s, in %s\n' \
+  "$MINUTES" "$DRIVER" "$BUFFER" "${VOICES:-1}" "${THREADS:-auto}" "${RT_POLICY:-park50}" \
+  "${RT_COMPUTATION:-0.25}" "$WORK" >&2
 "$SIGNAL" "${PLAY[@]}" < /dev/null > "$WORK/play.json" 2> "$WORK/play.log" &
 PID=$!
 trap 'kill "$PID" 2>/dev/null || true' EXIT INT TERM
@@ -159,6 +169,7 @@ SCHEDULING=$(block scheduling summary | sed 's/^"//; s/"$//')
 
 printf 'soak: %s frames at %s Hz, buffer %s, %s driver\n' "$FRAMES" "$RATE" "$BUFFER" "$DRIVER"
 printf 'voices %s, threads %s (%s workers), scheduling %s\n' "${VOICES:-1}" "$PLAYED_THREADS" "$WORKERS" "$SCHEDULING"
+printf 'wake policy %s, computation %s of the period\n' "$(field rt_policy | sed 's/"//g')" "$(field rt_computation)"
 [[ -n $SILENT ]] && printf 'silent (out gain 0.001)\n'
 printf 'edits %s written, %s applied as parameter sets, %s errors\n' "$EDITS" "$SETS" "$ERRORS"
 printf 'xruns %s\n' "$XRUNS"

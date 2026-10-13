@@ -1098,6 +1098,10 @@ pub enum HookPoint {
 pub(crate) struct PoolStats {
     pub(crate) worker_tasks: AtomicU64,
     pub(crate) worker_panics: AtomicU64,
+    /// Whether task bodies are timed (the wake-up trace, M2.7-1).
+    pub(crate) trace: bool,
+    /// The longest task body since the callback began, in ns (0: none).
+    pub(crate) slowest_task_ns: AtomicU64,
 }
 
 /// The work of one task: the engine runs the task's units with the access.
@@ -1159,6 +1163,7 @@ impl<'a> Job<'a> {
                         stats: self.stats,
                     };
                     hook(HookPoint::Task { lane, task: t });
+                    let began = self.stats.trace.then(std::time::Instant::now);
                     let mut access = Access {
                         cells: self.cells,
                         token: Token::Task {
@@ -1170,6 +1175,12 @@ impl<'a> Job<'a> {
                         _thread: PhantomData,
                     };
                     (self.body)(&mut access, t);
+                    if let Some(began) = began {
+                        let body = u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                        self.stats
+                            .slowest_task_ns
+                            .fetch_max(body.max(1), Ordering::Relaxed);
+                    }
                     hook(HookPoint::Done { lane, task: t });
                     drop(completion);
                     if lane != 0 {

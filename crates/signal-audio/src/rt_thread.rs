@@ -12,7 +12,13 @@
 //!   declared here with `extern "C"` (libSystem; no locked crate binds them);
 //! - `thread_policy_set`, `pthread_self`, `pthread_mach_thread_np` and
 //!   `mach_timebase_info` (`libc`; the last is deprecated there in favour of
-//!   the `mach2` crate, which is not a workspace dependency).
+//!   the `mach2` crate, which is not a workspace dependency);
+//! - M2.7-1 (ADR 0019 §4, amended 2026-10-13): `semaphore_create`,
+//!   `semaphore_destroy`, `semaphore_signal` and `semaphore_wait`, declared
+//!   here with `extern "C"` (`mach/task.h`, `mach/semaphore.h`; `libc` binds
+//!   none of them), with `mach_task_self` (`libc`), for the `semaphore` wake
+//!   policy's [`MachSemaphores`]; and `thread_info` (`libc`), for
+//!   [`policy_in_effect`], the sampled demotion check.
 //!
 //! The audit:
 //! - **The workgroup's lifetime.** A [`Workgroup`] owns one reference: the
@@ -44,11 +50,23 @@
 //!   passed with their `libc` counts.
 //! - **Property reads** pass buffers of exactly the size they declare and
 //!   use the data only on status 0.
+//! - **Semaphores.** A [`MachSemaphores`] creates one semaphore per worker
+//!   in this task and destroys each once, in `Drop`. `wait` and `signal`
+//!   borrow it, so no thread can be in either when it is destroyed; the
+//!   engine's pool holds it until every worker has been joined. A worker
+//!   index without a semaphore does nothing. `thread_info` reads into a
+//!   `thread_basic_info` passed with its `libc` count; any port name is safe
+//!   to pass (the kernel validates it), and a failure is reported as `None`.
 //!
-//! The real-time path is never on the audio thread's way: a driver runs
-//! [`enter`] and [`exit`] on the workers between blocks
+//! [`enter`] and [`exit`] are never on the audio thread's way: a driver runs
+//! them on the workers between blocks
 //! ([`Workers::post`](signal_engine::Workers::post)), on the control
-//! thread's request. They may allocate and lock.
+//! thread's request. They may allocate and lock. Under the `semaphore` wake
+//! policy (M2.7-1, `docs/realtime-rules.md` "Wake policies") the audio thread
+//! does call [`MachSemaphores`]' `signal`, at the start of a callback:
+//! `semaphore_signal` neither allocates, locks nor blocks; it is the same
+//! kind of call as the `Thread::unpark` a parallel segment already makes.
+//! `wait` blocks, and only a worker between jobs calls it.
 
 #![allow(unsafe_code)]
 
@@ -56,7 +74,7 @@ use std::cell::RefCell;
 use std::ffi::{c_int, c_void};
 use std::mem::size_of;
 use std::ptr::{NonNull, null, null_mut};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use objc2_core_audio::{
     AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID,
@@ -64,6 +82,8 @@ use objc2_core_audio::{
     kAudioHardwarePropertyDevices, kAudioObjectPropertyElementMain,
     kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
 };
+
+use signal_engine::Waiter;
 
 use crate::scheduling::{TimeConstraint, WorkerPath};
 
@@ -87,6 +107,160 @@ unsafe extern "C" {
     fn os_workgroup_leave(wg: *mut c_void, token: *mut JoinToken);
     fn os_retain(object: *mut c_void) -> *mut c_void;
     fn os_release(object: *mut c_void);
+}
+
+/// A Mach semaphore (`semaphore_t`, a port name).
+type Semaphore = libc::mach_port_t;
+
+/// `SYNC_POLICY_FIFO` (SDK `mach/sync_policy.h`).
+const SYNC_POLICY_FIFO: c_int = 0;
+
+/// `POLICY_TIMESHARE` (SDK `mach/policy.h`): the standard policy.
+pub const POLICY_TIMESHARE: i32 = 1;
+
+// SAFETY: these are the libSystem declarations of the SDK headers
+// `mach/task.h` (`kern_return_t semaphore_create(task_t, semaphore_t *, int
+// policy, int value)`, `kern_return_t semaphore_destroy(task_t,
+// semaphore_t)`) and `mach/semaphore.h` (`kern_return_t
+// semaphore_signal(semaphore_t)`, `kern_return_t semaphore_wait(semaphore_t)`),
+// with `task_t` and `semaphore_t` as `mach_port_t`; none of them unwinds.
+unsafe extern "C" {
+    fn semaphore_create(
+        task: libc::task_t,
+        semaphore: *mut Semaphore,
+        policy: c_int,
+        value: c_int,
+    ) -> libc::kern_return_t;
+    fn semaphore_destroy(task: libc::task_t, semaphore: Semaphore) -> libc::kern_return_t;
+    fn semaphore_signal(semaphore: Semaphore) -> libc::kern_return_t;
+    fn semaphore_wait(semaphore: Semaphore) -> libc::kern_return_t;
+}
+
+/// This task's port.
+#[allow(deprecated)]
+fn this_task() -> libc::task_t {
+    // SAFETY: `mach_task_self` reads the task's own port, set by libSystem
+    // before `main`; it needs no release.
+    unsafe { libc::mach_task_self() }
+}
+
+/// One Mach semaphore per worker: the `semaphore` wake policy's
+/// [`Waiter`] (M2.7-1). Mach semaphores count, so a `signal` before the
+/// `wait` is kept and no wake is lost; a surplus count makes one `wait`
+/// return at once (the pool re-checks after every return).
+pub struct MachSemaphores {
+    semaphores: Box<[Semaphore]>,
+}
+
+impl MachSemaphores {
+    /// `workers` semaphores, each at 0 (control-thread code).
+    pub fn new(workers: usize) -> Result<MachSemaphores, String> {
+        let mut made = MachSemaphores {
+            semaphores: Box::new([]),
+        };
+        let mut semaphores = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let mut semaphore: Semaphore = 0;
+            let task = this_task();
+            let out = &raw mut semaphore;
+            // SAFETY: `out` points to a live local the call fills; the task
+            // is this one's own.
+            let kr = unsafe { semaphore_create(task, out, SYNC_POLICY_FIFO, 0) };
+            if kr != 0 {
+                // The ones made so far are destroyed by `made`'s `Drop`.
+                made.semaphores = semaphores.into_boxed_slice();
+                return Err(format!("semaphore_create failed (kern_return {kr})"));
+            }
+            semaphores.push(semaphore);
+        }
+        made.semaphores = semaphores.into_boxed_slice();
+        Ok(made)
+    }
+
+    /// The semaphores made.
+    pub fn len(&self) -> usize {
+        self.semaphores.len()
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.semaphores.is_empty()
+    }
+}
+
+impl Waiter for MachSemaphores {
+    fn wait(&self, worker: usize) {
+        if let Some(&semaphore) = self.semaphores.get(worker) {
+            // SAFETY: `semaphore` was created by `new` and is destroyed only
+            // in `Drop`, which cannot run while `self` is borrowed here. An
+            // interrupted wait (KERN_ABORTED) returns like a spurious wake.
+            unsafe { semaphore_wait(semaphore) };
+        }
+    }
+
+    fn signal(&self, worker: usize) {
+        if let Some(&semaphore) = self.semaphores.get(worker) {
+            // SAFETY: as in `wait`: a live semaphore of this task.
+            unsafe { semaphore_signal(semaphore) };
+        }
+    }
+}
+
+impl Drop for MachSemaphores {
+    fn drop(&mut self) {
+        for &semaphore in self.semaphores.iter() {
+            // SAFETY: each semaphore was created by `new` and is destroyed
+            // once, here; no `wait` or `signal` borrows `self` any more.
+            unsafe { semaphore_destroy(this_task(), semaphore) };
+        }
+    }
+}
+
+/// The `semaphore` policy's waiter for `workers` workers, for
+/// [`realtime_with`](signal_engine::realtime_with) and
+/// [`Engine::with_waiter`](signal_engine::Engine::with_waiter).
+pub fn mach_semaphores(workers: usize) -> Result<Arc<dyn Waiter>, String> {
+    MachSemaphores::new(workers).map(|s| Arc::new(s) as Arc<dyn Waiter>)
+}
+
+/// The calling thread's Mach port, for [`policy_in_effect`].
+pub fn current_port() -> u32 {
+    this_thread()
+}
+
+/// The scheduling policy in effect for the thread of Mach port `port`
+/// (`thread_info`, `THREAD_BASIC_INFO`: [`POLICY_TIMESHARE`] or a fixed
+/// policy), or `None` when it cannot be read (the thread has ended).
+/// Control-thread code: a system call.
+pub fn policy_in_effect(port: u32) -> Option<i32> {
+    let mut info = libc::thread_basic_info {
+        user_time: libc::time_value_t {
+            seconds: 0,
+            microseconds: 0,
+        },
+        system_time: libc::time_value_t {
+            seconds: 0,
+            microseconds: 0,
+        },
+        cpu_usage: 0,
+        policy: 0,
+        run_state: 0,
+        flags: 0,
+        suspend_count: 0,
+        sleep_time: 0,
+    };
+    let mut count = libc::THREAD_BASIC_INFO_COUNT;
+    // SAFETY: `info` is a live `thread_basic_info` and `count` its size in
+    // `natural_t`s, as the call requires; the kernel validates `port`.
+    let kr = unsafe {
+        libc::thread_info(
+            port,
+            libc::THREAD_BASIC_INFO as libc::thread_flavor_t,
+            (&raw mut info).cast(),
+            &raw mut count,
+        )
+    };
+    (kr == 0).then_some(info.policy)
 }
 
 /// An output device's I/O workgroup (`os_workgroup_t`), owning one

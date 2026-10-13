@@ -7,6 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use signal_app::setup::{DeviceEntry, Setup, Window, setup_path};
+use signal_engine::{Computation, RtPolicy};
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("signal-setup-{name}-{}", std::process::id()));
@@ -35,7 +36,42 @@ fn full() -> Setup {
             width: 900.5,
             height: 640.0,
         }),
+        rt_policy: RtPolicy::Semaphore,
+        rt_computation: Computation::from_fraction(0.75).unwrap(),
     }
+}
+
+/// M2.7-1 (C1): the advanced keys `rt_policy` and `rt_computation` read,
+/// fall back with a reason, and are written only when not the default.
+#[test]
+fn the_wake_policy_and_computation_are_advanced_keys() {
+    let (setup, problems) = parse("rt_policy = \"fanout\"\nrt_computation = 0.5\n");
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(setup.rt_policy, RtPolicy::Fanout);
+    assert_eq!(setup.rt_computation.fraction(), 0.5);
+    assert_eq!(
+        parse("rt_computation = 1\n").0.rt_computation.fraction(),
+        1.0
+    );
+    for name in ["park50", "budget-spin", "semaphore", "fanout"] {
+        let (setup, problems) = parse(&format!("rt_policy = \"{name}\"\n"));
+        assert!(problems.is_empty());
+        assert_eq!(setup.rt_policy.name(), name);
+    }
+    let (setup, mut problems) = parse("rt_policy = \"spin\"\nrt_computation = 1.5\n");
+    assert_eq!(setup, Setup::default());
+    problems.sort_unstable();
+    assert_eq!(
+        problems,
+        [
+            "setup.toml: rt_computation: must be a fraction of the period above 0 and at most 1; using the default",
+            "setup.toml: rt_policy: must be one of park50, budget-spin, semaphore, fanout; using the default"
+        ]
+    );
+    // The default Setup writes neither key.
+    let text = Setup::default().to_toml();
+    assert!(!text.contains("rt_"), "{text}");
+    assert!(full().to_toml().contains("rt_policy = \"semaphore\""));
 }
 
 fn parse(text: &str) -> (Setup, Vec<String>) {

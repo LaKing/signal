@@ -14,10 +14,13 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, ValueEnum};
 use serde_json::json;
-use signal_audio::{CallbackStats, CoreAudioDriver, Scheduling, StatsSnapshot};
+use signal_audio::{
+    CallbackStats, CoreAudioDriver, Demotions, Scheduling, StatsSnapshot, rt_thread,
+};
 use signal_core::Registry;
 use signal_engine::{
-    Controller, Driver, NullDriver, RealtimeConfig, Runner, RunnerStatus, realtime,
+    Computation, Controller, Driver, NullDriver, RealtimeConfig, RtOptions, RtPolicy, Runner,
+    RunnerStatus, Spread, WakeStats, realtime_with,
 };
 use signal_project::live::{ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload};
 use signal_project::session::{LiveRecorder, SessionError, SessionRecorder, sink_of};
@@ -74,6 +77,35 @@ pub(crate) struct PlayArgs {
     /// identical for every count.
     #[arg(long, default_value_t = 0)]
     threads: u32,
+    /// How idle worker threads wait and are woken: park50 (the default),
+    /// budget-spin, semaphore or fanout (docs/realtime-rules.md "Wake
+    /// policies"). Timing only: the output is identical for every policy.
+    #[arg(long, value_parser = parse_policy, default_value = "park50")]
+    rt_policy: RtPolicy,
+    /// The workers' time-constraint computation, as a fraction of the
+    /// device period (more than 0, at most 1); budget-spin spins within it.
+    #[arg(long, value_parser = parse_computation, default_value = "0.25")]
+    rt_computation: Computation,
+    /// Record the wake-up trace (each worker's wake latency, the first and
+    /// last worker joining, the slowest task, per callback) and report it.
+    #[arg(long)]
+    rt_trace: bool,
+}
+
+/// `--rt-policy`'s value.
+pub(crate) fn parse_policy(name: &str) -> Result<RtPolicy, String> {
+    RtPolicy::from_name(name).ok_or_else(|| {
+        let names: Vec<&str> = RtPolicy::ALL.iter().map(|p| p.name()).collect();
+        format!("`{name}` is not one of {}", names.join(", "))
+    })
+}
+
+/// `--rt-computation`'s value.
+pub(crate) fn parse_computation(text: &str) -> Result<Computation, String> {
+    text.parse::<f64>()
+        .ok()
+        .and_then(Computation::from_fraction)
+        .ok_or_else(|| format!("`{text}` is not a fraction of the period above 0 and at most 1"))
 }
 
 /// What the run left behind, for the statistics.
@@ -85,6 +117,46 @@ struct Ended {
     /// How the worker threads were scheduled.
     scheduling: Scheduling,
     audio: Option<Vec<f32>>,
+    /// What idle workers blocked on (`ScheduleStats::waiter`).
+    waiter: &'static str,
+    /// The wake-up trace, with `--rt-trace` and workers.
+    wake: Option<WakeStats>,
+    /// Sampled demotions of the real-time workers (CoreAudio only).
+    demotions: Demotions,
+}
+
+/// A distribution in µs, for the JSON.
+fn spread_json(spread: &Spread) -> serde_json::Value {
+    let us = |ns: u64| (ns as f64 / 100.0).round() / 10.0;
+    json!({
+        "count": spread.count,
+        "median_us": us(spread.median_ns),
+        "p99_us": us(spread.p99_ns),
+        "max_us": us(spread.max_ns),
+    })
+}
+
+/// The wake-up trace for the JSON: flat keys first (what
+/// `scripts/rt-matrix.sh` reads), then the per-worker latencies.
+pub(crate) fn wake_json(wake: &WakeStats) -> serde_json::Value {
+    let us = |ns: u64| (ns as f64 / 100.0).round() / 10.0;
+    json!({
+        "callbacks": wake.callbacks,
+        "callbacks_without_join": wake.callbacks_without_join,
+        "wakes_signalled": wake.wakes_signalled,
+        "wakes_observed": wake.wakes_observed,
+        "wake_median_us": us(wake.wake.median_ns),
+        "wake_p99_us": us(wake.wake.p99_ns),
+        "wake_max_us": us(wake.wake.max_ns),
+        "first_join_median_us": us(wake.first_join.median_ns),
+        "first_join_p99_us": us(wake.first_join.p99_ns),
+        "last_join_median_us": us(wake.last_join.median_ns),
+        "last_join_p99_us": us(wake.last_join.p99_ns),
+        "last_join_max_us": us(wake.last_join.max_ns),
+        "slowest_task_median_us": us(wake.slowest_task.median_ns),
+        "slowest_task_p99_us": us(wake.slowest_task.p99_ns),
+        "per_worker": wake.per_worker.iter().map(spread_json).collect::<Vec<_>>(),
+    })
 }
 
 /// The watch's counts.
@@ -196,8 +268,17 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
 
     let mut config = RealtimeConfig::with_buffer(rate, seed, u64::from(args.buffer));
     config.engine.threads = args.threads as usize;
+    config.rt = RtOptions {
+        policy: args.rt_policy,
+        computation: args.rt_computation,
+        trace: args.rt_trace,
+    };
     let (runner, controller) =
-        realtime(&plan, registry, config).map_err(|e| Failure::Internal(e.to_string()))?;
+        realtime_with(&plan, registry, config, Some(rt_thread::mach_semaphores))
+            .map_err(|e| Failure::Internal(e.to_string()))?;
+    if let Some(error) = runner.waiter_error() {
+        eprintln!("signal: warning: no semaphores ({error}); the semaphore workers park");
+    }
     let provenance = provenance::collect(&provenance::source_dir(), &project.files);
     let recorder = SessionRecorder::new(&project, registry, rate, seed, provenance)
         .map_err(|e| Failure::Internal(e.to_string()))?;
@@ -295,6 +376,18 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
                 "overruns": stats.overruns,
             },
             "worst_callback_ratio": stats.worst_callback_ratio,
+            "p99_callback_ratio": stats.p99_callback_ratio,
+            "median_callback_ratio": stats.median_callback_ratio,
+            "rt_policy": args.rt_policy.name(),
+            "rt_computation": args.rt_computation.fraction(),
+            "waiter": ended.waiter,
+            "wake": ended.wake.as_ref().map(wake_json),
+            "rt_demotions": {
+                "exposed": false,
+                "samples": ended.demotions.samples,
+                "sampled_timeshare": ended.demotions.sampled_timeshare,
+                "unsampled": ended.demotions.unsampled,
+            },
             "clipped": status.clipped,
             "late": status.late,
             "late_results": status.late_results,
@@ -318,11 +411,27 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
         });
         print_stdout(&serde_json::to_string_pretty(&output).unwrap_or_default());
     } else {
+        let wake = ended.wake.as_ref().map_or(String::new(), |w| {
+            let us = |ns: u64| ns as f64 / 1e3;
+            format!(
+                "\nwake latency {:.1} / {:.1} / {:.1} µs (median / p99 / max; {} of {} wakes seen)\n\
+                 last worker joined {:.1} / {:.1} µs after the callback's start; slowest task p99 {:.1} µs",
+                us(w.wake.median_ns),
+                us(w.wake.p99_ns),
+                us(w.wake.max_ns),
+                w.wakes_observed,
+                w.wakes_signalled,
+                us(w.last_join.median_ns),
+                us(w.last_join.p99_ns),
+                us(w.slowest_task.p99_ns)
+            )
+        });
         print_stdout(&format!(
             "played {} frames at {rate} Hz ({width} sink channels on {} device channels) with the {driver} driver\n\
              threads {} ({} workers), scheduling {}\n\
+             wake policy {} (computation {} of the period, workers block on {}){wake}\n\
              xruns {} ({} stream errors, {} overruns)\n\
-             worst callback {:.3} of its period\n\
+             worst callback {:.3} of its period (p99 {:.2}, median {:.2})\n\
              clipped samples {}\n\
              queue overflows {total}\n\
              late commands {}\n\
@@ -332,10 +441,15 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
             scheduling.threads,
             scheduling.workers.len(),
             scheduling.summary(),
+            args.rt_policy,
+            args.rt_computation.fraction(),
+            ended.waiter,
             stats.xruns,
             stats.stream_errors,
             stats.overruns,
             stats.worst_callback_ratio,
+            stats.p99_callback_ratio,
+            stats.median_callback_ratio,
             status.clipped,
             status.late,
             status.late_results
@@ -420,6 +534,9 @@ fn play_null(
         device_channels: width,
         scheduling,
         audio,
+        waiter: runner.schedule_stats().waiter,
+        wake: runner.wake_stats(),
+        demotions: Demotions::default(),
     })
 }
 
@@ -462,9 +579,12 @@ fn play_device(
     let interval = Duration::from_secs_f64(f64::from(args.buffer) / f64::from(rate))
         .min(Duration::from_millis(1));
     let mut stopping: Option<Instant> = None;
+    let mut demotions = Demotions::default();
     loop {
         thread::sleep(interval);
         control.step();
+        // C6: macOS counts no demotions for a process; sample the policy.
+        demotions.sample(&scheduling.ports);
         let next = control.controller.status().next_frame.0;
         if limit.is_some_and(|limit| next >= limit) {
             break;
@@ -479,12 +599,16 @@ fn play_device(
         }
     }
     let stats = driver.stats();
-    let status = match driver.stop() {
-        Ok(Some(runner)) => runner.status(),
-        Ok(None) => control.controller.status(),
+    let (status, waiter, wake) = match driver.stop() {
+        Ok(Some(runner)) => (
+            runner.status(),
+            runner.schedule_stats().waiter,
+            runner.wake_stats(),
+        ),
+        Ok(None) => (control.controller.status(), "unknown", None),
         Err(error) => {
             eprintln!("signal: warning: {error}");
-            control.controller.status()
+            (control.controller.status(), "unknown", None)
         }
     };
     control.controller.poll(&mut control.live);
@@ -494,6 +618,9 @@ fn play_device(
         device_channels: driver.channels(),
         scheduling,
         audio: None,
+        waiter,
+        wake,
+        demotions,
     })
 }
 

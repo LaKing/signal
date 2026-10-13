@@ -16,7 +16,8 @@ use signal_core::{
     PortShape, PrepareContext, Primitive, Range, RateDivisor, Registry, SplitMix64,
 };
 use signal_engine::{
-    Engine, EngineConfig, EngineError, ExternalEvent, InputDiscards, render_blocks, render_with,
+    Engine, EngineConfig, EngineError, ExternalEvent, InputDiscards, RtPolicy, render_blocks,
+    render_with,
 };
 use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, Exports, InstanceDef, build_plan};
 
@@ -181,8 +182,24 @@ fn step(
 }
 
 fn run(scenario: &Scenario, partition: &Partition, threads: usize) -> Trace {
+    run_policy(scenario, partition, threads, None)
+}
+
+/// [`run`], with `policy` (M2.7-1) each block a callback of that wake
+/// policy (`begin_callback` before it, `end_callback` after).
+fn run_policy(
+    scenario: &Scenario,
+    partition: &Partition,
+    threads: usize,
+    policy: Option<RtPolicy>,
+) -> Trace {
     let registry = types();
-    let config = common::config_threads(scenario.rate, 42, threads);
+    let mut config = common::config_threads(scenario.rate, 42, threads);
+    if let Some(policy) = policy {
+        config.schedule.policy = policy;
+        config.schedule.budget_ns = 400_000;
+        config.schedule.trace = true;
+    }
     let mut engine = Engine::new(
         &scenario.plans[0],
         &registry,
@@ -197,6 +214,10 @@ fn run(scenario: &Scenario, partition: &Partition, threads: usize) -> Trace {
             step(engine, scenario, &registry, &mut next).map(|_| ())
         }),
         Partition::Blocks(k) => render_blocks(&mut engine, frames, k, |engine| {
+            if policy.is_some() {
+                engine.end_callback();
+                engine.begin_callback(k);
+            }
             step(engine, scenario, &registry, &mut next)
         }),
         Partition::Random(seed) => {
@@ -258,6 +279,16 @@ fn matrix(scenario: &Scenario) -> Trace {
                 run(scenario, &Partition::Random(seed), threads),
                 reference,
                 "random partition {seed}, {threads} threads"
+            );
+        }
+    }
+    // M2.7-1: every wake policy on 4 threads, each block a callback.
+    for policy in RtPolicy::ALL {
+        for k in SIZES {
+            assert_eq!(
+                run_policy(scenario, &Partition::Blocks(k), 4, Some(policy)),
+                reference,
+                "k = {k}, 4 threads, {policy}"
             );
         }
     }

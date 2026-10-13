@@ -346,3 +346,80 @@ fn realtime_json_has_every_field() {
     let unknown = signal(&["bench", "--realtime", "--rt-schedule", "spin=forever"]);
     assert!(!unknown.status.success(), "an unknown schedule is refused");
 }
+
+/// M2.7-1 (C1, C4, C6): `--rt-policy` repeats the table per wake policy,
+/// each row with its policy, what its workers block on and the engine's
+/// wake-up trace; `--rt-computation` sets the workers' computation. Shape
+/// only.
+#[test]
+fn realtime_rows_per_wake_policy() {
+    let output = signal(&[
+        "--json",
+        "bench",
+        "--realtime",
+        "--rt-voices",
+        "2",
+        "--seconds",
+        "0.01",
+        "--rt-policy",
+        "park50",
+        "--rt-policy",
+        "semaphore",
+        "--rt-computation",
+        "0.5",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bench: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(bench["policy"]["computation_fraction"], 0.5);
+    let period = bench["policy"]["period_ticks"].as_u64().unwrap();
+    let computation = bench["policy"]["computation_ticks"].as_u64().unwrap();
+    assert_eq!(computation, period / 2);
+    let rows = bench["rows"].as_array().unwrap();
+    let cores = bench["performance_cores"].as_u64().unwrap();
+    let mut counts = vec![1, 8, (cores * 2 / 3).max(1), cores];
+    counts.sort_unstable();
+    counts.dedup();
+    assert_eq!(rows.len(), 2 * 3 * counts.len());
+    for (n, row) in rows.iter().enumerate() {
+        let policy = if n % 6 < 3 { "park50" } else { "semaphore" };
+        assert_eq!(row["rt_policy"], policy, "row {n}");
+        let workers = row["workers"].as_u64().unwrap();
+        let waiter = match (workers, policy) {
+            (0, _) => "none",
+            (_, "semaphore") => "semaphore",
+            _ => "park",
+        };
+        assert_eq!(row["waiter"], waiter, "row {n}");
+        // Traced on every thread count (one thread too: its slowest task,
+        // with no wake or join observed).
+        let wake = &row["wake"];
+        for key in [
+            "wake_p99_us",
+            "first_join_median_us",
+            "last_join_p99_us",
+            "slowest_task_p99_us",
+        ] {
+            number(&wake[key], key);
+        }
+        let callbacks = wake["callbacks"].as_u64().unwrap();
+        assert!(callbacks > 0);
+        assert_eq!(wake["per_worker"].as_array().unwrap().len() as u64, workers);
+        if workers == 0 {
+            assert_eq!(wake["wakes_signalled"], 0, "row {n}");
+            assert_eq!(wake["callbacks_without_join"].as_u64(), Some(callbacks));
+        }
+    }
+
+    let unknown = signal(&["bench", "--realtime", "--rt-policy", "spin"]);
+    assert_eq!(
+        unknown.status.code(),
+        Some(1),
+        "an unknown policy is refused"
+    );
+    let bad = signal(&["bench", "--realtime", "--rt-computation", "0"]);
+    assert_eq!(bad.status.code(), Some(1), "a computation of 0 is refused");
+}

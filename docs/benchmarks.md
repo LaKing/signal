@@ -228,6 +228,29 @@ T="$(cargo metadata --locked --offline --no-deps --format-version 1 | sed -n 's/
 - **Measurement:** paced, 24 voices cost 1 146–1 153 µs per block on one ordinary thread, about 3.5 times what "Scaling" above measures for back-to-back blocks (26 voices within 333 µs on the operator's Mac). A block after a sleep starts with colder caches and, perhaps, a slower core; part of it is the shared machine. So the "within 25 %" voice counts of the back-to-back tables overstate what one device period carries; not separated here.
 - **Context, not the same metric:** the operator's 5cb390c measurement outside the sandbox (operator note 002) gave 26 / 34 / 65 / 107 / 175 kick voices within 25 % at 1 / 2 / 4 / 8 / 18 threads (k = 128), a tail jitter at 18 threads of 2.6 µs median and 6.1 µs p99, and 0 xruns on the device at `--threads` 1 and 8. The `ordinary` rows here are the 5cb390c scheduling in this table's terms.
 
+### Wake-policy matrix on the device (M2.7-1)
+
+**Operator measurement**, 2026-10-13 02:25–02:37, M5 Max, SSL 2+ Mk II at 96 kHz with a 128-frame buffer, release build of the M2.7-1 delivery. `scripts/rt-matrix.sh`, default matrix: 4 policies × threads 8/12/14 × 80/120 silent voices × computation 0.25/0.75, 10 s per cell. All 48 cells are in `docs/measurements/rt-matrix-2026-10-13.csv`. Columns are fractions of the period unless marked µs.
+
+At computation 0.25:
+
+| Voices | Threads | Median (all policies) | p99 (all policies) | Worst (range over policies) | Worker wake p99 |
+|---:|---:|---:|---:|---:|---:|
+| 80 | 8 | 0.32–0.33 | 0.34–0.35 | 0.38–0.50 | 18–21 µs |
+| 80 | 12 | 0.23–0.26 | 0.29–0.31 | 0.35–0.39 | 18–21 µs |
+| 80 | 14 | 0.24–0.27 | 0.29–0.32 | 0.34–0.36 | 360–426 µs |
+| 120 | 8 | 0.39–0.40 | 0.41 | 0.58–0.63 | 18–37 µs |
+| 120 | 12 | 0.34–0.35 | 0.41–0.43 | 0.48–0.59 | 18–37 µs |
+| 120 | 14 | 0.35–0.36 | 0.41–0.43 | 0.50–1.04 | 491–590 µs |
+
+xruns: 0 in every cell, except `budget-spin` at computation 0.75 on 14 threads (16 and 15) and `fanout` at 14 threads, 120 voices, computation 0.25 (2).
+
+What it shows:
+- **Fact:** the p99 is only 0.02–0.08 of the period above the median for every policy. The median is the load itself. The earlier reading of M2.6-3 and M2.6-5, that a fixed wake-up cost set the tail, was wrong: at 80–120 voices the work itself is 0.25–0.40 of the period.
+- **Fact:** no policy beats `park50` beyond noise; `semaphore` and `fanout` differ by at most a few hundredths. 14 threads gain nothing over 12, and their workers wake late (p99 360–590 µs).
+- **Decisions (operator, 2026-10-13):** the real-time default stays `park50`, the computation budget stays 0.25 of the period, and auto stays two thirds of the performance cores (12 of 18). The other policies stay selectable with `--rt-policy` for other machines.
+- **The multi-core timing gate, restated:** V12's "worst callback < 0.25" is a headroom rule; it holds only when the median load is well under 0.25 (the kick: worst 0.104). For many-voice projects whose load is itself 0.25–0.40, the gate is **0 xruns over 30 minutes at the auto thread count, and worst callback − median < 0.25 of the period** (scheduling jitter, not load).
+
 ### Real-time wake-up tail (M2.6-5)
 
 The operator's device figures this starts from ("Real-time workers on the device" above): 80 kick voices, `--threads` 12 (the real-time auto count), SSL 2+ at 96 kHz with 128-frame buffers, 30 minutes with live edits, 0 xruns and a **worst callback of 0.405** of the period at db0363c, **0.408** at dafa32b (M2.6-4 checkpoint). V12 asks for < 0.25.
@@ -368,6 +391,32 @@ On the Mac outside the sandbox, from the repository root, with `PATH=/opt/homebr
    - The `rt-all` rows on 8 and 12 threads compare the old and the new schedule outside the sandbox (still without the workgroup).
    - Add them as an operator row here.
 4. **If the soak is worse than 0.408:** run the same soak with `--signal` pointing at a build of dafa32b in the same session, to separate the change from the day's conditions, and report both. The seat could not test whether the kernel demotes a time-constraint worker that spins past its computation (`docs/realtime-rules.md` "The policy"); a worse device tail would be the sign.
+
+### Real-time wake policies (M2.7-1)
+
+The policies (`park50`, the default, `budget-spin`, `semaphore` and `fanout`), the computation knob and the wake-up trace are in `docs/realtime-rules.md` "Wake policies". The device decides between them: the sandbox has no audio device, no workgroup and no real-time scheduling, and in M2.6-5 a policy that won 2.5–7× in the sandbox broke the stream up on the device.
+
+**The harness.** `scripts/rt-matrix.sh` plays `signal play --json --rt-trace` on the default output with silent copies (`out` gain 0.001) of `signal bench --write-voices N` projects, for a fixed number of seconds per cell, over policies × threads × voices × computation budgets, unattended (stdin closed, a failed cell recorded as `error` and the run goes on). It writes `cells.csv` (one row per cell: xruns, worst, p99 and median callback as fractions of the period, wake latency median / p99 / max with the wakes seen of those sent, first and last join from the callback's start, slowest task p99, sampled demotions, what the workers blocked on, the scheduling path), `table.md` and each cell's JSON and log. Rows are labelled `device` (CoreAudio) or `sandboxed` (the null driver); budget-spin rows at a computation of 0.75 or more are flagged ⚠. **The default matrix:** 4 policies × threads 8, 12, 14 × voices 80, 120 × computation 0.25, 0.75 = 48 cells × (10 s + 4 s overhead per cell: start and load, device open and workers entering at most 1 s, stop at most 1 s, 1 s settle) = **672 s, 11.2 minutes** (`scripts/rt-matrix.sh --estimate` prints it from the defaults; the build and the voice projects come first).
+
+**Seat run, SANDBOXED (shape only)**, 2026-10-12 22:53 UTC, devpanel seat, null driver, a release build of the candidate: `scripts/rt-matrix.sh --driver null --threads 2,4 --voices 8 --computation 0.25,0.75 --seconds 2`, 16 cells, every cell `ok`, 60 s wall time with an already-built release (the estimate said 96 s: the null driver opens no device). Its numbers mean nothing for a device (the null driver plays random callback sizes of 1 to 4 096 frames on ordinary threads) and are not recorded here; they decide nothing. `crates/signal-cli/tests/rt_matrix.rs` runs a two-cell null matrix on every `cargo test`.
+
+**Test time (sandboxed, measured).** The determinism matrix of `crates/signal-cli/tests/realtime.rs`, now under every policy (C9), took 116.4 s on the seat against 53.1 s before (debug build, one run each).
+
+### Pending operator steps for the M2.7-1 checkpoint
+
+On the Mac outside the sandbox, from the repository root, with `PATH=/opt/homebrew/opt/rustup/bin:$PATH` and `T=/tmp/signal-project-target`, the SSL 2+ as the default output at 96 kHz:
+
+1. **The checks at the pinned target:**
+   - `cargo fmt --all --check`
+   - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`
+   - `cargo clippy --workspace --all-targets --locked --offline --features signal-cli/lab -- -D warnings`
+   - `cargo test --workspace --locked --offline`
+2. **The build:** `cargo build --release --locked --offline -p signal-cli --target-dir "$T"`
+3. **The default matrix** (about 11 minutes, unattended): `scripts/rt-matrix.sh --signal "$T/release/signal" --out ~/signal-rt-matrix-1`. Keep the folder; paste `table.md` below as an operator measurement.
+4. **The confirmation** of the best candidate (the decision rule below), against `park50`, longer: `scripts/rt-matrix.sh --signal "$T/release/signal" --policies <best>,park50 --threads <best threads> --voices 80,120 --computation <best computation> --seconds 60 --out ~/signal-rt-matrix-2`. To check the SDK's statement that a computation up to 0.5 is raised to half the period (`docs/realtime-rules.md` "The policy"), add `--computation 0.25,0.5` once.
+5. **The soak** with the choice: `scripts/soak.sh --voices 80 --silent --rt-policy <best> --rt-computation <best computation> --threads <best threads> --signal "$T/release/signal" 30 128`. Report its last lines verbatim (`xruns`, `worst callback`, `wake policy …`, `scheduling`).
+6. **The decision rule, fixed before measuring:** at 80 and at 120 voices, the policy, thread count and computation with **0 xruns and a worst callback under 0.25** (V12, C15); if several, the lowest worst at 120 voices; if none, the lowest worst with 0 xruns; a tie goes to `park50`. The auto thread count is that row's thread count. Also read the wake components (which part of the tail a policy removed) and `sampled_timeshare` (a demotion seen).
+7. **Record** the matrix, the confirmation, the soak and the decision here, labelled as operator measurements. Changing a default is then an operator change: the policy in `RtPolicy`'s `#[default]` and the computation in `Computation::DEFAULT` (`crates/signal-engine/src/wake.rs`), the auto count in `realtime_threads` (`crates/signal-engine/src/cores.rs`), each with `docs/realtime-rules.md`. Until then the default stays `park50` at 0.25 on two thirds of the performance cores.
 
 ### GPU partial bank (M2.6-4)
 

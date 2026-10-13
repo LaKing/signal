@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, Device, Stream, StreamConfig, SupportedBufferSize};
-use signal_engine::{Driver, DriverError, Runner, Workers};
+use signal_engine::{Computation, Driver, DriverError, Runner, Workers};
 
 use crate::callback::{CallbackControl, OutputCallback};
 use crate::config::{
@@ -267,27 +267,30 @@ impl CoreAudioDriver {
     /// where there is no workgroup ([`rt_thread::enter`]), and says which
     /// path each took. A worker that does not answer within
     /// [`WORKER_TIMEOUT`] is reported pending (it enters later).
-    fn schedule(&self, workers: &Workers) -> Scheduling {
+    fn schedule(&self, workers: &Workers, computation: Computation) -> Scheduling {
         let count = workers.count();
         if count == 0 {
             return Scheduling::ordinary(workers.threads(), 0, "no worker threads");
         }
         let workgroup = workgroup_of(&self.device);
         let no_workgroup = workgroup.as_ref().err().cloned();
-        let policy = TimeConstraint::from_period(
+        let policy = TimeConstraint::for_period(
             self.choice.buffer,
             self.choice.sample_rate,
             rt_thread::timebase(),
+            computation,
         );
-        let paths: Arc<Mutex<Vec<Option<WorkerPath>>>> = Arc::new(Mutex::new(vec![None; count]));
+        type Slots = Vec<Option<(WorkerPath, u32)>>;
+        let paths: Arc<Mutex<Slots>> = Arc::new(Mutex::new(vec![None; count]));
         let slots = Arc::clone(&paths);
         // The request owns its workgroup reference until every worker has
         // run it; each joined worker retains its own.
         let generation = workers.post(move |w| {
             let path = rt_thread::enter(&policy, workgroup.as_ref().map_err(String::as_str));
+            let port = rt_thread::current_port();
             let mut slots = slots.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(slot) = slots.get_mut(w) {
-                *slot = Some(path);
+                *slot = Some((path, port));
             }
         });
         let _ = workers.wait(generation, WORKER_TIMEOUT);
@@ -297,12 +300,19 @@ impl CoreAudioDriver {
             workers: paths
                 .iter()
                 .map(|p| {
-                    p.clone().unwrap_or_else(|| {
-                        WorkerPath::None("pending: no answer within 1 s".to_owned())
-                    })
+                    p.as_ref().map_or_else(
+                        || WorkerPath::None("pending: no answer within 1 s".to_owned()),
+                        |(path, _)| path.clone(),
+                    )
                 })
                 .collect(),
             no_workgroup,
+            ports: paths
+                .iter()
+                .flatten()
+                .filter(|(path, _)| !matches!(path, WorkerPath::None(_)))
+                .map(|&(_, port)| port)
+                .collect(),
         }
     }
 }
@@ -326,7 +336,7 @@ impl Driver for CoreAudioDriver {
         }
         // Before the first block: the workers enter real-time scheduling.
         let workers = runner.workers();
-        self.scheduling = Some(self.schedule(&workers));
+        self.scheduling = Some(self.schedule(&workers, runner.rt_options().computation));
         let (mut callback, control) = OutputCallback::new(
             runner,
             self.map.clone(),

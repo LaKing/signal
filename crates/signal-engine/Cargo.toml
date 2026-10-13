@@ -16,6 +16,8 @@ hound = { workspace = true }
 rtrb = { workspace = true }
 
 [dev-dependencies]
+# M2.7-6: model tests of the gate, task board and parking (`cfg(loom)`).
+loom = { workspace = true }
 approx = { workspace = true }
 proptest = { workspace = true }
 # The counting allocator (ADR 0017) for the executor's no-allocation test.

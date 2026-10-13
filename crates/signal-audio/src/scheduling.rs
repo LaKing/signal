@@ -6,6 +6,10 @@
 
 use std::fmt;
 
+use signal_engine::Computation;
+
+use crate::rt_thread;
+
 /// How one worker thread is scheduled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkerPath {
@@ -71,7 +75,22 @@ impl TimeConstraint {
     /// The policy for a device period of `frames` at `rate` frames per
     /// second, with the Mach timebase `(numer, denom)` (one tick is
     /// numer / denom ns).
-    pub fn from_period(frames: u32, rate: u32, (numer, denom): (u32, u32)) -> TimeConstraint {
+    pub fn from_period(frames: u32, rate: u32, timebase: (u32, u32)) -> TimeConstraint {
+        TimeConstraint::for_period(frames, rate, timebase, Computation::DEFAULT)
+    }
+
+    /// [`from_period`](TimeConstraint::from_period) with the computation
+    /// `computation` of the period (`--rt-computation`, M2.7-1), within the
+    /// kernel's limits. The SDK (`mach/thread_policy.h`) says the kernel
+    /// raises a computation below half the constraint to half of it, so any
+    /// fraction up to 0.5 asks for the same policy (`docs/realtime-rules.md`
+    /// "The policy").
+    pub fn for_period(
+        frames: u32,
+        rate: u32,
+        (numer, denom): (u32, u32),
+        computation: Computation,
+    ) -> TimeConstraint {
         let (numer, denom) = (u128::from(numer.max(1)), u128::from(denom.max(1)));
         let ticks = |ns_num: u128, ns_den: u128| -> u128 {
             // ns_num / ns_den ns, rounded to the nearest tick.
@@ -82,7 +101,8 @@ impl TimeConstraint {
         let period = ticks(u128::from(frames) * 1_000_000_000, u128::from(rate.max(1)));
         let min = ticks(u128::from(Self::MIN_COMPUTATION_NS), 1);
         let max = ticks(u128::from(Self::MAX_COMPUTATION_NS), 1);
-        let computation = (period / 4).clamp(min, max);
+        let computation =
+            (period * u128::from(computation.ppm()) / 1_000_000).clamp(min, max.max(min));
         let constraint = period.max(computation);
         let narrow = |t: u128| u32::try_from(t).unwrap_or(u32::MAX);
         TimeConstraint {
@@ -105,6 +125,9 @@ pub struct Scheduling {
     /// Why the output device's workgroup was not available (`None` when it
     /// was read).
     pub no_workgroup: Option<String>,
+    /// The Mach ports of the workers that entered the time-constraint
+    /// policy, for [`Demotions`].
+    pub ports: Vec<u32>,
 }
 
 impl Scheduling {
@@ -114,6 +137,7 @@ impl Scheduling {
             threads,
             workers: vec![WorkerPath::None(reason.to_owned()); workers],
             no_workgroup: Some(reason.to_owned()),
+            ports: Vec::new(),
         }
     }
 
@@ -149,6 +173,46 @@ impl Scheduling {
             })
             .collect();
         format!("mixed ({})", counts.join(", "))
+    }
+}
+
+/// Sampled demotions of real-time workers (M2.7-1). macOS exposes no count
+/// of throttling or demotion events to a process: the kernel's real-time
+/// fail-safe is only a kdebug trace code (`MACH_FAILSAFE`, SDK
+/// `sys/kdebug.h`), readable through `ktrace` as root. So the control thread
+/// samples instead: each read of a worker that entered the time-constraint
+/// policy that finds [`POLICY_TIMESHARE`](rt_thread::POLICY_TIMESHARE) in
+/// effect counts. A demotion between two samples is not seen; a read that
+/// fails (the thread has ended) is `unsampled`, never a sample.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Demotions {
+    /// Successful reads.
+    pub samples: u64,
+    /// Successful reads that found the standard (timeshare) policy.
+    pub sampled_timeshare: u64,
+    /// Reads that failed.
+    pub unsampled: u64,
+}
+
+impl Demotions {
+    /// Reads the policy in effect for each of `ports` once.
+    pub fn sample(&mut self, ports: &[u32]) {
+        for &port in ports {
+            self.count(rt_thread::policy_in_effect(port));
+        }
+    }
+
+    /// Counts one read.
+    pub fn count(&mut self, read: Option<i32>) {
+        match read {
+            Some(policy) => {
+                self.samples += 1;
+                if policy == rt_thread::POLICY_TIMESHARE {
+                    self.sampled_timeshare += 1;
+                }
+            }
+            None => self.unsampled += 1,
+        }
     }
 }
 
@@ -245,11 +309,51 @@ mod tests {
         assert!(policy.period > 0 && policy.constraint >= policy.computation);
     }
 
+    /// C4 (M2.7-1): `--rt-computation` sets the computation alone; period
+    /// and constraint stay the device period.
+    #[test]
+    fn the_computation_is_the_fraction_asked_for() {
+        for (fraction, ticks) in [(0.25, 8_000), (0.5, 16_000), (0.75, 24_000), (1.0, 32_000)] {
+            let computation = Computation::from_fraction(fraction).unwrap();
+            let policy = TimeConstraint::for_period(128, 96_000, APPLE_SILICON, computation);
+            assert_eq!(policy.computation, ticks, "{fraction}");
+            assert_eq!((policy.period, policy.constraint), (32_000, 32_000));
+        }
+        assert_eq!(
+            TimeConstraint::for_period(128, 96_000, APPLE_SILICON, Computation::DEFAULT),
+            TimeConstraint::from_period(128, 96_000, APPLE_SILICON)
+        );
+    }
+
+    /// C6 (M2.7-1): a failed read is unsampled, never a sample.
+    #[test]
+    fn demotions_count_only_successful_reads() {
+        let mut demotions = Demotions::default();
+        demotions.count(Some(2));
+        demotions.count(Some(rt_thread::POLICY_TIMESHARE));
+        demotions.count(None);
+        assert_eq!(
+            demotions,
+            Demotions {
+                samples: 2,
+                sampled_timeshare: 1,
+                unsampled: 1
+            }
+        );
+        // A port name no thread holds cannot be read.
+        demotions.sample(&[u32::MAX]);
+        assert_eq!((demotions.samples, demotions.unsampled), (2, 2));
+        // The calling thread can be read.
+        demotions.sample(&[rt_thread::current_port()]);
+        assert_eq!(demotions.samples, 3);
+    }
+
     fn scheduling(workers: Vec<WorkerPath>) -> Scheduling {
         Scheduling {
             threads: workers.len() + 1,
             workers,
             no_workgroup: None,
+            ports: Vec::new(),
         }
     }
 

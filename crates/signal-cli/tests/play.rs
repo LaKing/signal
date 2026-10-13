@@ -362,6 +362,11 @@ fn play_and_devices_take_their_flags() {
         "--fast",
         "--record-audio",
         "--json",
+        "--rt-policy",
+        "[default: park50]",
+        "--rt-computation",
+        "[default: 0.25]",
+        "--rt-trace",
     ] {
         assert!(help.contains(flag), "{flag} in:\n{help}");
     }
@@ -378,6 +383,109 @@ fn play_and_devices_take_their_flags() {
         assert_eq!(output.status.code(), Some(1), "{flags:?}");
         let json: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(json["error"]["kind"], "usage");
+    }
+}
+
+/// M2.7-1 (C1, C2, C4, C6): every wake policy plays with the null driver,
+/// with `--rt-computation` and the wake-up trace, reports what it ran and
+/// the trace, and plays the same samples as every other; the default is
+/// `park50` at 0.25; unknown policies and computations out of (0, 1] are
+/// usage errors.
+#[test]
+fn every_wake_policy_plays_and_reports_its_trace() {
+    let dir = workspace("policies");
+    let project = text(&dir.join("kick"));
+    let mut first: Option<Vec<f32>> = None;
+    for policy in ["park50", "budget-spin", "semaphore", "fanout"] {
+        let wav = dir.join(format!("{policy}.wav"));
+        let output = signal(&[
+            "--json",
+            "play",
+            &project,
+            "--driver",
+            "null",
+            "--fast",
+            "--seconds",
+            "0.5",
+            "--threads",
+            "4",
+            "--rt-policy",
+            policy,
+            "--rt-computation",
+            "0.5",
+            "--rt-trace",
+            "--record-audio",
+            &text(&wav),
+        ]);
+        assert!(
+            output.status.success(),
+            "{policy}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["rt_policy"], policy);
+        assert_eq!(json["rt_computation"], 0.5);
+        let waiter = if policy == "semaphore" {
+            "semaphore"
+        } else {
+            "park"
+        };
+        assert_eq!(json["waiter"], waiter);
+        for key in ["p99_callback_ratio", "median_callback_ratio"] {
+            assert!(json[key].as_f64().is_some(), "{policy}: {key}");
+        }
+        let wake = &json["wake"];
+        assert!(wake["callbacks"].as_u64().unwrap() > 0, "{policy}: {wake}");
+        for key in ["wake_median_us", "first_join_p99_us", "last_join_max_us"] {
+            assert!(wake[key].as_f64().is_some(), "{policy}: {key}");
+        }
+        assert_eq!(wake["per_worker"].as_array().unwrap().len(), 3);
+        assert_eq!(json["rt_demotions"]["exposed"], false);
+        assert_eq!(
+            json["rt_demotions"]["samples"], 0,
+            "the null driver samples none"
+        );
+        let audio = samples(&wav);
+        match &first {
+            None => first = Some(audio),
+            Some(first) => assert!(
+                audio
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .eq(first.iter().map(|x| x.to_bits())),
+                "{policy} plays other samples"
+            ),
+        }
+    }
+
+    // The defaults, and no trace without --rt-trace.
+    let output = signal(&[
+        "--json",
+        "play",
+        &project,
+        "--driver",
+        "null",
+        "--fast",
+        "--seconds",
+        "0.1",
+    ]);
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["rt_policy"], "park50");
+    assert_eq!(json["rt_computation"], 0.25);
+    assert!(json["wake"].is_null());
+
+    for flags in [
+        ["--rt-policy", "spin"],
+        ["--rt-computation", "0"],
+        ["--rt-computation", "1.5"],
+    ] {
+        let mut args = vec!["--json", "play", project.as_str(), "--driver", "null"];
+        args.extend_from_slice(&flags);
+        let output = signal(&args);
+        assert_eq!(output.status.code(), Some(1), "{flags:?}");
+        let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["error"]["kind"], "usage", "{flags:?}");
     }
 }
 

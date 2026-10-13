@@ -11,10 +11,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use signal_audio::rt_thread;
 use signal_core::{Curve, EventPayload, Fnv1a64, Frame, InstanceAddress, PortAddress, Registry};
 use signal_engine::{
     CallbackSizes, ControlSink, Controller, Driver, Engine, EngineConfig, LogLine, NullDriver,
-    Outcome, Provenance, RealtimeConfig, Report, Schedule, SentCommand, Stamp, realtime, render,
+    Outcome, Provenance, RealtimeConfig, Report, RtOptions, RtPolicy, Schedule, SentCommand, Stamp,
+    realtime, realtime_with, render,
 };
 use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, InstanceDef, build_plan};
 use signal_project::session::{self, LiveRecorder, Session, SessionRecorder, replay};
@@ -201,7 +203,7 @@ fn live_recorder() -> LiveRecorder {
 fn start(config: RealtimeConfig) -> (signal_engine::Runner, Controller) {
     let mut plan = version(0).plan(&registry()).unwrap().plan;
     plan.version = 0;
-    realtime(&plan, &registry(), config).unwrap()
+    realtime_with(&plan, &registry(), config, Some(rt_thread::mach_semaphores)).unwrap()
 }
 
 /// The sets a file-watching driver sends with a structural swap: survivors
@@ -365,9 +367,15 @@ fn controller_session(config: RealtimeConfig) -> SessionRun {
 const THREADS: [usize; 5] = [1, 2, 3, 4, 8];
 const BLOCKS: [usize; 3] = [1, 64, 256];
 
-/// `config` on `threads` threads with block capacity `k`: with more than one
-/// thread, every segment of a plan with two tasks or more on the workers.
-fn on_threads(mut config: RealtimeConfig, threads: usize, k: usize) -> RealtimeConfig {
+/// `config` on `threads` threads with block capacity `k` and wake policy
+/// `policy` (with the wake-up trace on, M2.7-1): with more than one thread,
+/// every segment of a plan with two tasks or more on the workers.
+fn on_threads(
+    mut config: RealtimeConfig,
+    threads: usize,
+    k: usize,
+    policy: RtPolicy,
+) -> RealtimeConfig {
     config.engine = EngineConfig {
         threads,
         block_capacity: k,
@@ -378,7 +386,21 @@ fn on_threads(mut config: RealtimeConfig, threads: usize, k: usize) -> RealtimeC
         },
         ..config.engine
     };
+    config.rt = RtOptions {
+        policy,
+        trace: true,
+        ..RtOptions::default()
+    };
     config
+}
+
+/// What idle workers of `policy` block on, on `threads` threads.
+fn waiter(policy: RtPolicy, threads: usize) -> &'static str {
+    match (threads, policy) {
+        (1, _) => "none",
+        (_, RtPolicy::Semaphore) => "semaphore",
+        _ => "park",
+    }
 }
 
 /// The checked mode's exclusivity tracker ran and found nothing.
@@ -392,19 +414,25 @@ fn assert_checked() {
 /// M2.6-2 AC1: the Controller-driven session (sets, a ramp, a trigger, a
 /// late event, a structural swap, a removal, a suspend and resume) through
 /// the null driver with seeded random callback sizes, on 1, 2, 3, 4 and 8
-/// threads at block capacities 1, 64 and 256: the same audio and log every
+/// threads at block capacities 1, 64 and 256, under every wake policy
+/// (M2.7-1 C9; `semaphore` on Mach semaphores): the same audio and log every
 /// time, and the reference replays to the same audio.
 #[test]
 fn the_controller_session_is_bit_identical_on_threads() {
-    let reference = controller_session(on_threads(RealtimeConfig::new(8_000, 3), 1, 256));
-    for threads in THREADS {
-        for k in BLOCKS {
-            let run = controller_session(on_threads(RealtimeConfig::new(8_000, 3), threads, k));
-            let at = format!("{threads} threads, k = {k}");
-            assert!(run.output == reference.output, "audio, {at}");
-            assert!(run.log == reference.log, "log, {at}");
-            if threads > 1 {
-                assert!(run.stats.worker_tasks > 0, "{at}: {:?}", run.stats);
+    let config = |threads, k, policy| on_threads(RealtimeConfig::new(8_000, 3), threads, k, policy);
+    let reference = controller_session(config(1, 256, RtPolicy::Park50));
+    for policy in RtPolicy::ALL {
+        for threads in THREADS {
+            for k in BLOCKS {
+                let run = controller_session(config(threads, k, policy));
+                let at = format!("{policy}, {threads} threads, k = {k}");
+                assert!(run.output == reference.output, "audio, {at}");
+                assert!(run.log == reference.log, "log, {at}");
+                assert_eq!(run.stats.policy, policy, "{at}");
+                assert_eq!(run.stats.waiter, waiter(policy, threads), "{at}");
+                if threads > 1 {
+                    assert!(run.stats.worker_tasks > 0, "{at}: {:?}", run.stats);
+                }
             }
         }
     }
@@ -433,6 +461,7 @@ impl ControlSink for LogLines {
 /// M2.6-2 AC1 through the Runner: `plan` for `frames` frames through the null
 /// driver (seeded random callback sizes), polling the Controller between
 /// callbacks, on 1, 2, 3, 4 and 8 threads at block capacities 1, 64 and 256,
+/// under every wake policy (M2.7-1 C9; `semaphore` on Mach semaphores),
 /// equals the offline one-thread render: its samples as the device gets them
 /// (clamped, f32) and its `log.jsonl`.
 fn runner_matrix(name: &str, plan: &ExecutionPlan, (rate, seed): (u32, u64), frames: u64) {
@@ -453,32 +482,41 @@ fn runner_matrix(name: &str, plan: &ExecutionPlan, (rate, seed): (u32, u64), fra
         })
         .collect();
     assert!(!rendered.log.is_empty(), "{name} logs events");
-    for threads in THREADS {
-        for k in BLOCKS {
-            let at = format!("{name}, {threads} threads, k = {k}");
-            let config = on_threads(RealtimeConfig::new(rate, seed), threads, k);
-            let (runner, mut controller) = realtime(plan, &registry, config).unwrap();
-            let mut driver = NullDriver::new(rate, channels, 11);
-            driver.start(runner).unwrap();
-            let mut log = LogLines::default();
-            driver.run(frames, || controller.poll(&mut log)).unwrap();
-            let runner = driver.stop().unwrap().unwrap();
-            controller.poll(&mut log);
-            assert_eq!(runner.status().log_overflows, 0, "{at}");
-            let output = driver.take_output();
-            assert_eq!(output.len(), reference.len(), "{at}");
-            if let Some(n) =
-                (0..output.len()).find(|&n| output[n].to_bits() != reference[n].to_bits())
-            {
-                panic!(
-                    "{at}: sample {n} is {}, offline {}",
-                    output[n], reference[n]
+    for policy in RtPolicy::ALL {
+        for threads in THREADS {
+            for k in BLOCKS {
+                let at = format!("{name}, {policy}, {threads} threads, k = {k}");
+                let config = on_threads(RealtimeConfig::new(rate, seed), threads, k, policy);
+                let (runner, mut controller) =
+                    realtime_with(plan, &registry, config, Some(rt_thread::mach_semaphores))
+                        .unwrap();
+                assert_eq!(
+                    runner.schedule_stats().waiter,
+                    waiter(policy, threads),
+                    "{at}"
                 );
-            }
-            assert!(log.0 == rendered.log, "{at}: the log differs");
-            if threads > 1 {
-                let stats = runner.schedule_stats();
-                assert!(stats.worker_tasks > 0, "{at}: {stats:?}");
+                let mut driver = NullDriver::new(rate, channels, 11);
+                driver.start(runner).unwrap();
+                let mut log = LogLines::default();
+                driver.run(frames, || controller.poll(&mut log)).unwrap();
+                let runner = driver.stop().unwrap().unwrap();
+                controller.poll(&mut log);
+                assert_eq!(runner.status().log_overflows, 0, "{at}");
+                let output = driver.take_output();
+                assert_eq!(output.len(), reference.len(), "{at}");
+                if let Some(n) =
+                    (0..output.len()).find(|&n| output[n].to_bits() != reference[n].to_bits())
+                {
+                    panic!(
+                        "{at}: sample {n} is {}, offline {}",
+                        output[n], reference[n]
+                    );
+                }
+                assert!(log.0 == rendered.log, "{at}: the log differs");
+                if threads > 1 {
+                    let stats = runner.schedule_stats();
+                    assert!(stats.worker_tasks > 0, "{at}: {stats:?}");
+                }
             }
         }
     }

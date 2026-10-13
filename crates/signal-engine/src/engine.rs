@@ -14,7 +14,7 @@ use std::fmt;
 use std::mem;
 use std::ops::Range as Span;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::Instant;
 
 use signal_core::{
     Combine, DirectPrimitive, Direction, Due, Event, EventPayload, EventSink, Feedthrough, Frame,
@@ -36,6 +36,7 @@ use crate::pool::{Pool, Workers};
 use crate::shared::{Access, CallView, HookPoint, Job, Layout, Parts, PlanCells, Reader, Window};
 use crate::tasks::{DEFAULT_COST_NS, TASK_MIN_NS, Tasks, tasks};
 use crate::units::{Unit, Units, units};
+use crate::wake::{MakeWaiter, RtPolicy, WakeStats};
 
 /// Events an event output keeps per frame: the contract suite's 16 events per
 /// frame. More in one frame is an `event_overflow` fault at that frame.
@@ -70,8 +71,19 @@ pub struct Schedule {
     /// A segment runs on the workers only if it has at least this many frames.
     pub min_frames: usize,
     /// How long an idle worker spins before it parks, in ns (at most 3 ms,
-    /// whatever is asked: `docs/realtime-rules.md` "Waiting policy").
+    /// whatever is asked: `docs/realtime-rules.md` "Wake policies").
     pub spin_ns: u64,
+    /// How idle workers wait and are woken (M2.7-1; `park50` is the
+    /// behaviour before it). [`realtime`](crate::realtime) sets it from
+    /// [`RealtimeConfig::rt`](crate::RealtimeConfig::rt).
+    pub policy: RtPolicy,
+    /// The workers' computation budget per period, in ns: what `budget-spin`
+    /// spins within. Non-zero under `budget-spin`, it supersedes `spin_ns`
+    /// (so `signal bench --rt-schedule spin=…` has no effect there); 0 is
+    /// none, and `budget-spin` then spins `spin_ns`.
+    pub budget_ns: u64,
+    /// Keep the wake-up trace ([`Engine::wake_stats`]).
+    pub trace: bool,
 }
 
 impl Schedule {
@@ -81,6 +93,9 @@ impl Schedule {
         parallel_min_ns: 50_000,
         min_frames: 16,
         spin_ns: 50_000,
+        policy: RtPolicy::Park50,
+        budget_ns: 0,
+        trace: false,
     };
 
     /// Every segment of every plan with two tasks or more on the workers,
@@ -1331,6 +1346,8 @@ pub struct Engine {
     parallel_segments: u64,
     /// The test hook (`set_task_hook`).
     hook: Option<fn(HookPoint)>,
+    /// Why the `semaphore` policy's waiter could not be made (it parks).
+    waiter_error: Option<String>,
 }
 
 /// How an engine schedules its blocks (`Engine::schedule_stats`).
@@ -1354,6 +1371,11 @@ pub struct ScheduleStats {
     pub worker_tasks: u64,
     /// Tasks whose body unwound on a worker; that worker is gone.
     pub worker_panics: u64,
+    /// The wake policy.
+    pub policy: RtPolicy,
+    /// What idle workers block on: `"park"`, or `"semaphore"` (the policy's
+    /// waiter); `"none"` without workers.
+    pub waiter: &'static str,
 }
 
 /// What a block call's gather changes besides parameter bases, saved so that
@@ -1382,6 +1404,20 @@ impl Engine {
         registry: &Registry,
         config: EngineConfig,
         external: Vec<ExternalEvent>,
+    ) -> Result<Engine, EngineError> {
+        Engine::with_waiter(plan, registry, config, external, None)
+    }
+
+    /// [`new`](Engine::new), with `make` making the workers' [`Waiter`]
+    /// (`crate::Waiter`) when the schedule's policy is `semaphore`. Without
+    /// it, or if it fails ([`waiter_error`](Engine::waiter_error)), the
+    /// workers park.
+    pub fn with_waiter(
+        plan: &ExecutionPlan,
+        registry: &Registry,
+        config: EngineConfig,
+        external: Vec<ExternalEvent>,
+        make: Option<MakeWaiter>,
     ) -> Result<Engine, EngineError> {
         if config.sample_rate == 0 {
             return Err(EngineError::InvalidSampleRate);
@@ -1429,6 +1465,16 @@ impl Engine {
         let frames: Vec<u64> = upfront.iter().map(|e| e.frame.0).collect();
         let most_per_block = most_within(&frames, config.block_capacity as u64);
 
+        let workers = threads - 1;
+        let (waiter, waiter_error) = match make {
+            Some(make) if workers > 0 && config.schedule.policy == RtPolicy::Semaphore => {
+                match make(workers) {
+                    Ok(waiter) => (Some(waiter), None),
+                    Err(error) => (None, Some(error)),
+                }
+            }
+            _ => (None, None),
+        };
         Ok(Engine {
             config,
             fade_len: fade_frames(config.sample_rate),
@@ -1455,10 +1501,14 @@ impl Engine {
             late_results: 0,
             block_start: Frame::ZERO,
             block_frames: 0,
-            pool: (threads > 1)
-                .then(|| Pool::new(threads - 1, Duration::from_nanos(config.schedule.spin_ns))),
+            // With the wake-up trace on and no workers, a pool of none keeps
+            // the trace (the slowest task of each callback); it never runs a
+            // parallel segment (`parallel`) and spawns no thread.
+            pool: (workers > 0 || config.schedule.trace)
+                .then(|| Pool::new(workers, &config.schedule, waiter)),
             parallel_segments: 0,
             hook: None,
+            waiter_error,
         })
     }
 
@@ -1888,7 +1938,7 @@ impl Engine {
     fn parallel(&mut self, frames: usize) -> bool {
         let schedule = self.config.schedule;
         let plan = &mut self.plan;
-        if self.pool.is_none()
+        if self.pool.as_ref().is_none_or(|pool| pool.workers() == 0)
             || plan.tasks.len() < 2
             || frames < schedule.min_frames
             || plan.tasks.estimate_ns * (frames as f64) < (schedule.parallel_min_ns as f64)
@@ -1920,6 +1970,7 @@ impl Engine {
     /// order: the result is the same bit for bit.
     fn run_segment(&mut self, a: usize, b: usize) {
         let parallel = self.parallel(b - a);
+        let trace = self.config.schedule.trace;
         let plan = &mut self.plan;
         let fx = Fixed {
             units: &plan.units,
@@ -1967,7 +2018,7 @@ impl Engine {
                     main.late_results = main.late_results.saturating_add(out.late_results);
                 }
             }
-            _ => {
+            pool => {
                 let c = &mut plan.cells;
                 if let Some(lane) = c.lanes.get_mut().first_mut() {
                     let mut whole = Whole {
@@ -1984,8 +2035,33 @@ impl Engine {
                         lane,
                         out: &mut plan.out,
                     };
-                    for u in 0..fx.units.order.len() {
-                        whole_unit(&fx, &mut whole, u);
+                    match pool.filter(|_| trace) {
+                        // The wake-up trace (M2.7-1): the same units in the
+                        // same order, task by task (tasks are contiguous runs
+                        // of the unit order), each task's body timed, so a
+                        // segment on the calling thread has its slowest task
+                        // too.
+                        Some(pool) => {
+                            let tasks = &plan.tasks;
+                            let mut slowest = 0u64;
+                            for t in 0..tasks.len() {
+                                let began = Instant::now();
+                                for u in tasks.units(t) {
+                                    whole_unit(&fx, &mut whole, u);
+                                }
+                                let body =
+                                    u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                                slowest = slowest.max(body.max(1));
+                            }
+                            pool.stats()
+                                .slowest_task_ns
+                                .fetch_max(slowest, Ordering::Relaxed);
+                        }
+                        None => {
+                            for u in 0..fx.units.order.len() {
+                                whole_unit(&fx, &mut whole, u);
+                            }
+                        }
                     }
                 }
             }
@@ -2029,8 +2105,8 @@ impl Engine {
     /// Its worker threads, for a driver to run code on them (ADR 0019 §4).
     pub fn workers(&self) -> Workers {
         match &self.pool {
-            Some(pool) => pool.handle(self.config.threads),
-            None => Workers::none(self.config.threads),
+            Some(pool) if pool.workers() > 0 => pool.handle(self.config.threads),
+            _ => Workers::none(self.config.threads),
         }
     }
 
@@ -2058,7 +2134,54 @@ impl Engine {
             parallel_segments: self.parallel_segments,
             worker_tasks: count(stats.map(|s| &s.worker_tasks)),
             worker_panics: count(stats.map(|s| &s.worker_panics)),
+            policy: self.config.schedule.policy,
+            waiter: match pool {
+                None => "none",
+                Some(pool) if pool.workers() == 0 => "none",
+                Some(pool) if pool.waits_on_waiter() => "semaphore",
+                Some(_) => "park",
+            },
         }
+    }
+
+    /// Why the `semaphore` policy's waiter could not be made, so that the
+    /// workers park instead.
+    #[doc(hidden)]
+    pub fn waiter_error(&self) -> Option<&str> {
+        self.waiter_error.as_deref()
+    }
+
+    /// A driver's callback of `frames` frames starts (the audio thread;
+    /// allocates, locks and blocks nowhere): under `semaphore` and `fanout`
+    /// the workers are woken if the running plan can run in parallel in it
+    /// (two tasks or more, and a block of `frames` reaching the schedule's
+    /// thresholds), and the wake-up trace starts the callback. Timing only.
+    #[doc(hidden)]
+    pub fn begin_callback(&mut self, frames: usize) {
+        let Some(pool) = self.pool.as_ref() else {
+            return;
+        };
+        let schedule = self.config.schedule;
+        let k = frames.min(self.config.block_capacity);
+        let tasks = &self.plan.tasks;
+        let parallel = tasks.len() >= 2
+            && k >= schedule.min_frames
+            && tasks.estimate_ns * (k as f64) >= schedule.parallel_min_ns as f64;
+        pool.begin_callback(parallel);
+    }
+
+    /// The callback ends: the wake-up trace folds it in.
+    #[doc(hidden)]
+    pub fn end_callback(&mut self) {
+        if let Some(pool) = self.pool.as_ref() {
+            pool.end_callback();
+        }
+    }
+
+    /// The wake-up trace (`Schedule::trace`), if kept and there are workers.
+    #[doc(hidden)]
+    pub fn wake_stats(&self) -> Option<WakeStats> {
+        self.pool.as_ref().and_then(Pool::wake_stats)
     }
 
     /// The next frame [`run_frame`](Engine::run_frame) will run.

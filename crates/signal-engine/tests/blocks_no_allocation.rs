@@ -20,8 +20,8 @@ use common::{
 use signal_contract::alloc_counter::{self, Counts, Guard};
 use signal_core::{EventPayload, Frame};
 use signal_engine::{
-    CallbackSizes, ControlSink, HookPoint, Outcome, RealtimeConfig, Report, SentCommand, Stamp,
-    realtime,
+    CallbackSizes, ControlSink, HookPoint, Outcome, RealtimeConfig, Report, RtOptions, RtPolicy,
+    SentCommand, Stamp, realtime,
 };
 use signal_graph::ExecutionPlan;
 
@@ -231,7 +231,7 @@ impl ControlSink for Tally {
 /// audio thread counts every heap call inside `Runner::process`: none.
 #[test]
 fn runner_with_blocks_allocates_and_frees_nothing() {
-    runner_with_blocks(1);
+    runner_with_blocks(1, RtOptions::default());
 }
 
 /// M2.6-2 AC3: the same on 4 threads, every segment on the workers, swaps
@@ -239,15 +239,36 @@ fn runner_with_blocks_allocates_and_frees_nothing() {
 #[test]
 fn runner_on_workers_allocates_and_frees_nothing() {
     let entries = WORKER_ENTRIES.load(Ordering::Relaxed);
-    runner_with_blocks(4);
+    runner_with_blocks(4, RtOptions::default());
     assert!(WORKER_ENTRIES.load(Ordering::Relaxed) > entries);
     assert_eq!(WORKER_HEAP_CALLS.load(Ordering::Relaxed), 0);
 }
 
-fn runner_with_blocks(threads: usize) {
+/// M2.7-1 C10: the same under every wake policy, with the wake-up trace on:
+/// the callback start and end (the policy's wakes, the trace's stamps and
+/// folds) are inside the guarded `Runner::process` too. The `semaphore`
+/// policy parks here (no waiter in this crate); its Mach semaphores are
+/// counted in `signal-audio/tests/no_allocation.rs`.
+#[test]
+fn runner_on_workers_allocates_and_frees_nothing_under_every_wake_policy() {
+    for policy in RtPolicy::ALL {
+        let entries = WORKER_ENTRIES.load(Ordering::Relaxed);
+        let rt = RtOptions {
+            policy,
+            trace: true,
+            ..RtOptions::default()
+        };
+        runner_with_blocks(4, rt);
+        assert!(WORKER_ENTRIES.load(Ordering::Relaxed) > entries, "{policy}");
+        assert_eq!(WORKER_HEAP_CALLS.load(Ordering::Relaxed), 0, "{policy}");
+    }
+}
+
+fn runner_with_blocks(threads: usize, rt: RtOptions) {
     assert!(alloc_counter::is_installed());
     let mut config = RealtimeConfig::with_buffer(RATE, 42, MOST_FRAMES as u64);
     config.engine = config_threads(RATE, 42, threads);
+    config.rt = rt;
     assert_eq!(config.engine.block_capacity, 256);
     let (mut runner, mut controller) = realtime(&version(0), &registry(), config).unwrap();
     runner.set_task_hook(Some(guard_workers));
