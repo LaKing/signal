@@ -26,12 +26,12 @@
 //!   by block on 1, 8 and all performance cores (and one fewer): ordinary;
 //!   with the workers in the time-constraint policy the CoreAudio driver gives
 //!   them (the calling thread ordinary, so only the workers differ); and with
-//!   the calling thread in it too (as a device's I/O thread is). Per block it
-//!   also reads the wake-up tail (M2.6-5) off the engine's task hook: the
-//!   time from the first thread into the block's job until every joined
-//!   worker has started, and the longest task body. `--rt-schedule` repeats
-//!   the table for other worker schedules, and `--rt-policy` for other wake
-//!   policies (M2.7-1), each row with the engine's wake-up trace (`wake`);
+//!   the calling thread in it too (as a device's I/O thread is). Each row has
+//!   the engine's wake-up trace (`wake`, M2.7-1): among others the time from
+//!   the callback's start until the last worker joined, and the longest task
+//!   body (M2.7-3: the engine's task hook is a test-only API now, so the
+//!   M2.6-5 `tail` read off it is gone). `--rt-schedule` repeats the table
+//!   for other worker schedules, and `--rt-policy` for other wake policies;
 //!   `--rt-computation` sets the workers' time-constraint computation.
 //!
 //! The numbers are measurements of the machine that ran them, never pass or
@@ -44,8 +44,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -54,8 +53,7 @@ use serde_json::{Value, json};
 use signal_audio::{TimeConstraint, WorkerPath, rt_thread};
 use signal_core::{Direction, PortKind, PortShape, Registry};
 use signal_engine::{
-    Computation, Engine, EngineConfig, HookPoint, RtPolicy, Schedule, WakeStats, Workers,
-    performance_cores,
+    Computation, Engine, EngineConfig, RtPolicy, Schedule, WakeStats, Workers, performance_cores,
 };
 use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, Exports, InstanceDef, build_plan};
 use signal_project::{Project, SourceFile};
@@ -657,7 +655,6 @@ struct RtRow {
     block: Spread,
     over_quarter: usize,
     over_period: usize,
-    tail: Tail,
 }
 
 /// The median, p99 (nearest rank) and maximum of some figures.
@@ -681,97 +678,15 @@ impl Spread {
             max: values.last().copied().unwrap_or_default(),
         }
     }
+}
 
-    fn json(&self) -> Value {
-        json!({ "median_ns": self.median, "p99_ns": self.p99, "max_ns": self.max })
+/// A trace figure in µs for the progress line, or "—" where there is none
+/// (`needs`: the workers a figure needs; a last join needs one).
+fn wake_us(ns: Option<u64>, needs: usize) -> String {
+    match ns {
+        Some(ns) if needs > 0 => format!("{:.1} µs", ns as f64 / 1e3),
+        _ => "—".to_owned(),
     }
-}
-
-/// A row's wake-up tail, over its blocks that ran one job on the workers.
-#[derive(Default)]
-struct Tail {
-    /// From the first thread into the job until the last joined worker
-    /// entered it (0 when no worker joined).
-    worker_start: Spread,
-    /// The longest task body of the job.
-    slowest_task: Spread,
-    /// From the block's start until the first thread entered the job: the
-    /// staging, the open and whatever delayed the first participant.
-    open_after: Spread,
-    /// The workers that joined the job.
-    joined: Spread,
-    /// Blocks that ran on the workers.
-    parallel_blocks: usize,
-    /// Blocks with more than one job (none without edits); left out above.
-    multi_job_blocks: usize,
-}
-
-impl Tail {
-    fn json(&self) -> Value {
-        json!({
-            "worker_start": self.worker_start.json(),
-            "slowest_task": self.slowest_task.json(),
-            "open_after": self.open_after.json(),
-            "joined": { "median": self.joined.median, "max": self.joined.max },
-            "parallel_blocks": self.parallel_blocks,
-            "multi_job_blocks": self.multi_job_blocks,
-        })
-    }
-}
-
-/// What the tail hook writes, in ns since [`TAIL_EPOCH`]; atomics only, so
-/// the hook neither allocates nor locks on the workers. Reset before each
-/// block and read after it: `run_block` returns only once every worker has
-/// left the job (Release on leave, Acquire in the caller), so the workers'
-/// writes are visible then.
-static TAIL_EPOCH: OnceLock<Instant> = OnceLock::new();
-static TASK_START: [AtomicU64; 1024] = [const { AtomicU64::new(0) }; 1024];
-static FIRST_ENTER: AtomicU64 = AtomicU64::new(u64::MAX);
-static LAST_WORKER_ENTER: AtomicU64 = AtomicU64::new(0);
-static SLOWEST_TASK: AtomicU64 = AtomicU64::new(0);
-static JOINED: AtomicU64 = AtomicU64::new(0);
-static JOBS: AtomicU64 = AtomicU64::new(0);
-
-fn tail_now() -> u64 {
-    TAIL_EPOCH
-        .get()
-        .map_or(0, |epoch| epoch.elapsed().as_nanos() as u64)
-}
-
-/// The engine's task hook for the `--realtime` table.
-fn tail_hook(point: HookPoint) {
-    match point {
-        HookPoint::Enter { lane } => {
-            let now = tail_now();
-            FIRST_ENTER.fetch_min(now, Ordering::Relaxed);
-            if lane == 0 {
-                JOBS.fetch_add(1, Ordering::Relaxed);
-            } else {
-                LAST_WORKER_ENTER.fetch_max(now, Ordering::Relaxed);
-                JOINED.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        HookPoint::Task { lane, .. } => {
-            if let Some(start) = TASK_START.get(lane) {
-                start.store(tail_now(), Ordering::Relaxed);
-            }
-        }
-        HookPoint::Done { lane, .. } => {
-            if let Some(start) = TASK_START.get(lane) {
-                let body = tail_now().saturating_sub(start.load(Ordering::Relaxed));
-                SLOWEST_TASK.fetch_max(body, Ordering::Relaxed);
-            }
-        }
-        HookPoint::Leave { .. } => {}
-    }
-}
-
-fn reset_tail() {
-    FIRST_ENTER.store(u64::MAX, Ordering::Relaxed);
-    LAST_WORKER_ENTER.store(0, Ordering::Relaxed);
-    SLOWEST_TASK.store(0, Ordering::Relaxed);
-    JOINED.store(0, Ordering::Relaxed);
-    JOBS.store(0, Ordering::Relaxed);
 }
 
 /// The worker scheduling of the M2.6-4 checkpoint (dafa32b), pinned so that
@@ -884,7 +799,6 @@ fn realtime_table(
     for spec in schedules {
         rt_schedule(spec, period_ns_whole, 1)?;
     }
-    TAIL_EPOCH.get_or_init(Instant::now);
 
     let mut rows = Vec::new();
     for &threads in &thread_counts {
@@ -911,7 +825,6 @@ fn realtime_table(
                         Some(rt_thread::mach_semaphores),
                     )
                     .map_err(|e| Failure::Internal(e.to_string()))?;
-                    engine.set_task_hook(Some(tail_hook));
                     let workers = engine.workers();
                     let paths = if variant == "ordinary" {
                         Vec::new()
@@ -927,16 +840,11 @@ fn realtime_table(
                         engine.end_callback();
                     }
                     let mut times = Vec::with_capacity(blocks);
-                    let mut tail = Tail::default();
-                    let [mut worker_start, mut slowest, mut open_after, mut joined] =
-                        std::array::from_fn(|_| Vec::with_capacity(blocks));
                     let mut next = Instant::now() + period;
                     for _ in 0..blocks {
                         if let Some(wait) = next.checked_duration_since(Instant::now()) {
                             thread::sleep(wait);
                         }
-                        reset_tail();
-                        let began_ns = tail_now();
                         let began = Instant::now();
                         // As a callback: the wake policy's start and end too.
                         engine.begin_callback(RT_BLOCK);
@@ -944,32 +852,7 @@ fn realtime_table(
                         engine.end_callback();
                         times.push(began.elapsed().as_nanos() as f64);
                         next = (next + period).max(Instant::now());
-                        match JOBS.load(Ordering::Relaxed) {
-                            0 => {}
-                            1 => {
-                                tail.parallel_blocks += 1;
-                                let first = FIRST_ENTER.load(Ordering::Relaxed);
-                                let workers_in = JOINED.load(Ordering::Relaxed);
-                                let last = LAST_WORKER_ENTER.load(Ordering::Relaxed);
-                                worker_start.push(if workers_in > 0 {
-                                    last.saturating_sub(first) as f64
-                                } else {
-                                    0.0
-                                });
-                                slowest.push(SLOWEST_TASK.load(Ordering::Relaxed) as f64);
-                                open_after.push(first.saturating_sub(began_ns) as f64);
-                                joined.push(workers_in as f64);
-                            }
-                            _ => {
-                                tail.parallel_blocks += 1;
-                                tail.multi_job_blocks += 1;
-                            }
-                        }
                     }
-                    tail.worker_start = Spread::of(worker_start);
-                    tail.slowest_task = Spread::of(slowest);
-                    tail.open_after = Spread::of(open_after);
-                    tail.joined = Spread::of(joined);
                     if variant != "ordinary" {
                         let generation = workers.post(|_| rt_thread::exit());
                         let _ = workers.wait(generation, RT_WAIT);
@@ -993,16 +876,15 @@ fn realtime_table(
                         over_quarter: times.iter().filter(|&&t| t > 0.25 * period_ns).count(),
                         over_period: times.iter().filter(|&&t| t > period_ns).count(),
                         block: Spread::of(times),
-                        tail,
                     };
                     if !json {
                         eprintln!(
                             "signal: bench: realtime: {threads} threads, {name}, {rt_policy}, {variant}: median {:.1} µs, \
-                     p99 {:.1} µs; workers started p99 {:.1} µs, slowest task p99 {:.1} µs",
+                     p99 {:.1} µs; last join p99 {}, slowest task p99 {}",
                             row.block.median / 1e3,
                             row.block.p99 / 1e3,
-                            row.tail.worker_start.p99 / 1e3,
-                            row.tail.slowest_task.p99 / 1e3
+                            wake_us(row.wake.as_ref().map(|w| w.last_join.p99_ns), row.workers),
+                            wake_us(row.wake.as_ref().map(|w| w.slowest_task.p99_ns), 1)
                         );
                     }
                     rows.push(row);
@@ -1057,7 +939,6 @@ fn realtime_table(
                 "p99_fraction": r.block.p99 / period_ns,
                 "over_25_percent": r.over_quarter,
                 "over_period": r.over_period,
-                "tail": r.tail.json(),
             })).collect::<Vec<_>>(),
         });
         print_stdout(&serde_json::to_string_pretty(&output).unwrap_or_default());
@@ -1065,20 +946,23 @@ fn realtime_table(
         let mut text = format!(
             "real-time workers: {voices} kick voices, blocks of {RT_BLOCK} frames paced at {:.1} µs, \
              {blocks} blocks per row, {cores} performance cores ({})\n\
-             µs per block; workers started (from the first thread in the job) and slowest task: \
-             median / p99 / max\n\
+             µs per block; last worker join (from the callback's start) and slowest task, from the \
+             engine's wake-up trace: median / p99 / max\n\
              threads  schedule  policy       variant       median     p99     max  >25 %  >100 %  \
-             workers started        slowest task           workers",
+             last join              slowest task           workers",
             period_ns / 1e3,
             cores_source.name()
         );
-        let spread = |s: &Spread| {
-            format!(
+        // The trace's spreads; "—" where there is none (no worker joins on
+        // one thread, so no last join there).
+        let spread = |s: Option<signal_engine::Spread>| match s {
+            Some(s) if s.count > 0 => format!(
                 "{:.1} / {:.1} / {:.1}",
-                s.median / 1e3,
-                s.p99 / 1e3,
-                s.max / 1e3
-            )
+                s.median_ns as f64 / 1e3,
+                s.p99_ns as f64 / 1e3,
+                s.max_ns as f64 / 1e3
+            ),
+            _ => "—".to_owned(),
         };
         for r in &rows {
             text.push_str(&format!(
@@ -1092,8 +976,8 @@ fn realtime_table(
                 r.block.max / 1e3,
                 r.over_quarter,
                 r.over_period,
-                spread(&r.tail.worker_start),
-                spread(&r.tail.slowest_task),
+                spread(r.wake.as_ref().map(|w| w.last_join)),
+                spread(r.wake.as_ref().map(|w| w.slowest_task)),
                 paths(&r.paths)
             ));
         }

@@ -194,7 +194,7 @@ impl ControlSink for Faults {
                 port,
             } => {
                 assert_eq!(address.to_string(), "/lat");
-                assert_eq!(*port, port_addr("/lat.out"));
+                assert_eq!(port, Some(&port_addr("/lat.out")));
                 self.late.push(frame.0);
             }
             LogLine::Fault { .. } => self.other += 1,

@@ -1,6 +1,6 @@
 # ADR 0002: Frame-functional semantics and the k-frame module contract
 
-- **Status:** Accepted. Refined by ADR 0016: scheduling, feedback execution.
+- **Status:** Accepted. Refined by ADR 0016: scheduling, feedback execution. Amended by ADR 0020 (M2.7-3): after a module's panic in a call of several frames, the output depends on the partition (`docs/semantics.md` §14).
 - **Date:** 2026-10-11
 
 ## Context

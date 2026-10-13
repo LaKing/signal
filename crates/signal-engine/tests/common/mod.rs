@@ -586,6 +586,132 @@ impl StateOutputPrimitive for EventDelay {
     }
 }
 
+/// The thread that last ran a `test.fail*` fixture's failing frame (M2.7-3),
+/// so a test can tell a worker's failure from the calling thread's. Tests
+/// that read it run one at a time.
+pub static FAILED_ON: std::sync::Mutex<Option<std::thread::ThreadId>> = std::sync::Mutex::new(None);
+
+/// Records the thread of a failing frame.
+fn failing_here() {
+    if let Ok(mut on) = FAILED_ON.lock() {
+        *on = Some(std::thread::current().id());
+    }
+}
+
+/// `out = in + value`; at its frame `at` it panics, or with `nan` set
+/// outputs NaN there instead (the fault guard's oracle for the panic).
+/// A direct fixture that breaks the module contract on purpose (M2.7-3).
+pub const FAIL: ModuleDescriptor = descriptor(
+    "test.fail",
+    &[
+        port("in", In, Signal, Audio),
+        port("out", Out, Signal, Audio),
+    ],
+    &[
+        param("value", -10.0, 10.0, 0.0, Combine::Add),
+        param("at", 0.0, 1e9, 0.0, Combine::Add),
+        param("nan", 0.0, 1.0, 0.0, Combine::Add),
+    ],
+    Feedthrough::Direct,
+    None,
+);
+direct!(Fail, FAIL, { frame: f64 }, |_s, _ctx| {}, |p, inputs, outputs| {
+    let failing = p.frame == first(inputs.parameter(1));
+    p.frame += 1.0;
+    if failing {
+        failing_here();
+        if first(inputs.parameter(2)) > 0.5 {
+            write(outputs, 0, f64::NAN);
+            return;
+        }
+        panic!("test.fail: a module panics in process");
+    }
+    write(outputs, 0, first(inputs.signal(0)) + first(inputs.parameter(0)));
+});
+
+/// The audio sink `test.recorder`, panicking at its frame `at`: a module
+/// without outputs that fails.
+pub const FAIL_SINK: ModuleDescriptor = descriptor(
+    "test.fail_sink",
+    &[port("in", In, Signal, Audio)],
+    &[param("at", 0.0, 1e9, 0.0, Combine::Add)],
+    Feedthrough::Direct,
+    Some(SinkKind::Audio),
+);
+direct!(FailSink, FAIL_SINK, { frame: f64 }, |_s, _ctx| {}, |p, inputs, _outputs| {
+    let failing = p.frame == first(inputs.parameter(0));
+    p.frame += 1.0;
+    if failing {
+        failing_here();
+        panic!("test.fail_sink: a sink panics in process");
+    }
+});
+
+/// `out[n] = in[n − 1]` (state-output). At its frame `at` the call `phase`
+/// names (0: `emit`, 1: `absorb`) panics, or with `nan` set `emit` outputs
+/// NaN there instead. Its parameters reach it in `absorb`, so `at` > 0.
+pub const FAIL_STATE: ModuleDescriptor = descriptor(
+    "test.fail_state",
+    &[
+        port("in", In, Signal, Audio),
+        port("out", Out, Signal, Audio),
+    ],
+    &[
+        param("at", 0.0, 1e9, 0.0, Combine::Add),
+        param("nan", 0.0, 1.0, 0.0, Combine::Add),
+        param("phase", 0.0, 1.0, 0.0, Combine::Add),
+    ],
+    Feedthrough::StateOutput,
+    None,
+);
+
+#[derive(Default)]
+pub struct FailState {
+    last: f64,
+    /// Frames absorbed: the frame `emit` is called for.
+    frame: f64,
+    at: f64,
+    nan: bool,
+    absorb: bool,
+}
+
+impl StateOutputPrimitive for FailState {
+    fn describe() -> ModuleDescriptor {
+        FAIL_STATE
+    }
+    fn prepare(&mut self, _ctx: &PrepareContext) {
+        *self = FailState {
+            at: -1.0,
+            ..FailState::default()
+        };
+    }
+    fn reset(&mut self) {
+        self.last = 0.0;
+    }
+    fn emit(&self, outputs: &mut Outputs<'_>) {
+        if !self.absorb && self.frame == self.at {
+            failing_here();
+            if self.nan {
+                write(outputs, 0, f64::NAN);
+                return;
+            }
+            panic!("test.fail_state: a module panics in emit");
+        }
+        write(outputs, 0, self.last);
+    }
+    fn absorb(&mut self, inputs: &Inputs<'_>) {
+        self.at = first(inputs.parameter(0));
+        self.nan = first(inputs.parameter(1)) > 0.5;
+        self.absorb = first(inputs.parameter(2)) > 0.5;
+        if self.absorb && self.frame == self.at {
+            failing_here();
+            panic!("test.fail_state: a module panics in absorb");
+        }
+        self.last = first(inputs.signal(0));
+        self.frame += 1.0;
+    }
+}
+
 fn direct_type<T: DirectPrimitive + Default + 'static>() -> ModuleType {
     ModuleType {
         descriptor: T::describe(),
@@ -625,8 +751,11 @@ pub fn registry() -> Registry {
         direct_type::<Flood>(),
         direct_type::<Recorder>(),
         direct_type::<GainedRecorder>(),
+        direct_type::<Fail>(),
+        direct_type::<FailSink>(),
         state_output_type::<UnitDelay>(),
         state_output_type::<EventDelay>(),
+        state_output_type::<FailState>(),
     ] {
         registry.register(module_type).unwrap();
     }

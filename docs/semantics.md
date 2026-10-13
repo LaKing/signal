@@ -182,7 +182,7 @@ After a suspension shorter than *F*, the output therefore steps from the partly 
 
 ## 7. Faults
 
-After every call of an instance (`process` or `emit`), the engine checks what it produced, before anyone reads it:
+After every call of an instance (`process` or `emit`), the engine checks what it produced, before anyone reads it (a call that panics is a fault too: §14):
 - every signal output value, and every value carried by an emitted `set` or `ramp`, must be finite (otherwise reason `non_finite`) and at most 10⁶ in magnitude (otherwise reason `magnitude`);
 - no event output may have overflowed (otherwise reason `event_overflow`).
 
@@ -239,7 +239,10 @@ One JSON object per line, with a newline after every line, field order as shown.
 - **`fault`**: see §7. Reasons:
   - `non_finite`;
   - `magnitude`;
-  - `event_overflow`.
+  - `event_overflow`;
+  - `panic` (§14).
+
+  A fault of an instance without outputs (a `panic`, or a `late_result`) has no `port` in its line; the line is still written.
 - **Order within a frame:**
   1. a swap;
   2. edits, by instance address;
@@ -382,7 +385,7 @@ An added instance is created and prepared like any instance (its random stream i
 
 ## 13. Block execution
 
-ADR 0019 §1 (D-EXEC-3, M2.6-1). `Engine::run_block(k)` runs the next *k* frames, 1 ≤ *k* ≤ `EngineConfig::block_capacity` (default 256, also the `max_frames` every primitive is prepared with); `run_frame` is `run_block(1)`. *k* is a performance setting: it never appears in project files and never changes the output. **For every block size and every partition of a run into blocks, the audio, the log, the parameter values and every counter are bit-identical to running the frames one at a time as §§1–12 describe.** The goldens, the V-tests and the determinism matrix (`crates/signal-engine/tests/blocks.rs`, `crates/signal-cli/tests/blocks.rs`, anchored to hashes of the per-frame engine) check this.
+ADR 0019 §1 (D-EXEC-3, M2.6-1). `Engine::run_block(k)` runs the next *k* frames, 1 ≤ *k* ≤ `EngineConfig::block_capacity` (default 256, also the `max_frames` every primitive is prepared with); `run_frame` is `run_block(1)`. *k* is a performance setting: it never appears in project files and never changes the output. **For every block size and every partition of a run into blocks, the audio, the log, the parameter values and every counter are bit-identical to running the frames one at a time as §§1–12 describe.** The one exception (§14, ADR 0020 as amended for M2.7-3): after a `panic` fault in a `process` call of several frames, which can only be placed at the call's first frame. The thread count never changes anything, a panic included. The goldens, the V-tests and the determinism matrix (`crates/signal-engine/tests/blocks.rs`, `crates/signal-cli/tests/blocks.rs`, anchored to hashes of the per-frame engine) check this.
 
 ### Units
 
@@ -413,3 +416,29 @@ The log holds one block. Draining it yields the block's frames in order, each fr
 ### Threads
 
 ADR 0019 §2 (M2.6-2). A segment may run on several threads (`EngineConfig::threads`, `--threads`, the Setup's "CPU workers"; `docs/realtime-rules.md` "Worker threads"). The units are grouped into **tasks**: runs of consecutive units in the order above, a unit joining the previous one's task only if that one feeds it and the task is still estimated cheap (`docs/benchmarks.md`). A task becomes ready when the tasks it reads have completed. A task writes only its own instances' outputs, inputs, parameters and event stores; every sum, modulation and event merge is still computed by the receiving instance in canonical source order (§3, §4), never in the order tasks complete; each task logs into its own log, and the logs are joined in task order, which is unit order, after the segment. **The thread count, like *k*, is a performance setting: for every thread count and every timing, the audio, the log, the parameter values and every counter are bit-identical to one thread**, and so to the per-frame engine. The determinism matrix runs threads 1, 2, 3, 4 and 8 at *k* = 1, 64 and 256 through the offline driver and the real-time runner.
+
+## 14. Failures
+
+M2.7-3 (ADR 0020, amended). A failure is never silent wrong output: either one instance is faulted, and the rest of the plan runs on without its output, or the engine stops with an error. Nothing that failed is published as if it had succeeded.
+
+### An instance that panics
+
+A call of a primitive (`process`, `emit`, `absorb`, or a latent module's `due` or `miss`) that panics breaks the module contract (`module-contract.md`). The engine catches the panic at that call, on whichever thread ran it, and:
+
+- **The faulted instance** is the one whose call panicked. Its state is no longer trusted: it is **muted** (§7) and never called again.
+- **From when:** the first frame *n* of the call that panicked. Nothing the call wrote is published: none of its outputs and none of its events. Its outputs fade over 64 frames from what readers saw at *n* − 1, exactly as for a fault found at *n* (§7), and are exactly +0.0 from *n* + 63 on; if *n* is the instance's first frame, they are 0 throughout. An `absorb` at frame *f* comes after that frame's `emit` was read: frame *f*'s outputs stand, the fade starts at *f* + 1, and the fault is logged at *f*.
+- **Dependent outputs** are computed as always, in canonical order (§3, §4), from the muted instance's outputs: a faulted source counts as its fading value, then as 0. Events sent to it are discarded with reason `muted`.
+- **The fault record** is a `fault` line (§9) with the frame *n*, the instance, its first output port (signal outputs before event outputs; none for an instance without outputs) and the reason `panic`. The policy is applied, and logged, the same way for every instance.
+- **How long:** for the rest of the run. A swap that keeps the instance keeps its fault (§12, "What survives"); a swap that replaces it (a removal, or another type at the address) brings a new, unfaulted instance. There is no reset edit.
+- **Threads and block size.** The result is identical for every thread count: a panic on a worker and the same panic on the calling thread give the same output and log. A call of one frame (every `emit` and `absorb`, every call in a cycle, every call at *k* = 1) is exact to its frame, as every other fault is. A `process` call of several frames gives no frame for its panic, so the fault acts from the call's first frame, which depends on how the run is split into blocks: the one exception to §13's partition rule.
+- **Real time.** Catching a panic allocates, locks and blocks nothing. The panic itself does (its payload, and the default hook's message on stderr): that is the cost of the broken contract, not of the recovery. A payload whose destructor panics again is caught as well (after eight such panics in a row the last payload is leaked rather than dropped), so nothing unwinds out of the engine.
+
+### An engine-level failure
+
+The engine itself fails when something unwinds in a task outside a primitive's call (engine code; in tests, the test hook), or when it finds one of its own invariants broken. The invariants are those of ADR 0020's disjoint access and of the task board: a view of an instance its task does not own, an instance's parts missing from the plan's buffers, a read of a row whose producer has not completed (or failed), or of the reader's own row, or outside the call's frames, a window outside its frames or the block, a conflicting claim (detected only in checked, debug, builds: release builds do not track claims), a ready task without a slot, a successor without a counter, a claim that finds its slot empty. A correct run never meets one; the goldens and the determinism matrix run with every check on.
+
+- The task's completion is recorded as **failed** on the task board, and the job fails. A failed task is never marked done, so no other task reads its rows; a task claimed after the failure completes without running. After a failure the calling thread waits only for the claims already made: each claim is settled by exactly one completion (its task's, or a failed one the claim makes itself when it finds no task), and a task never pushed is never claimed, so the wait always ends.
+- **The engine stops with an error.** The block publishes nothing, `Engine::run_block` returns 0 for it and for every later call, and `Engine::failure` says where and why (`frame`: the first frame of the segment; `reason`: `task_panic` or `invariant_violation`). It never continues silently:
+  - `render` and its variants end with `RenderError::EngineFailed`; `signal render` and `signal replay` fail with that message, and write nothing.
+  - The real-time runner keeps the frames of the blocks it ran before the failed one in the same callback (they completed and were valid), outputs silence from the failed block's first frame on, in that callback and every later one, and reports the failure in its status (`RunnerStatus::failure`); `signal play` stops and fails with the message, and Signal.app writes it to stderr and shows it.
+- A failure on a worker and on the calling thread take the same path and give the same error. No worker is lost: the pool keeps every thread (`ScheduleStats::task_failures` counts the failed tasks).

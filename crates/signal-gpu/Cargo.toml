@@ -11,6 +11,9 @@ publish.workspace = true
 # lock). Kernels are validated and jobs travel the whole path, but nothing is
 # computed: outputs stay 0. Never selected unless a test asks for it.
 noop = ["wgpu/noop"]
+# Tests only (M2.7-3): the completion delay that plays a slow GPU. Only
+# dev-dependencies turn it on.
+test-hooks = []
 
 [dependencies]
 wgpu = { workspace = true }

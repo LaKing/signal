@@ -11,7 +11,7 @@ mod common;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{
     addr, config_threads, conn, engine_threads, ext, inst, inst_with, plan, port_addr, ramp,
@@ -52,6 +52,33 @@ fn guard_workers(point: HookPoint) {
         }
         _ => {}
     }
+}
+
+/// Tasks a worker started under [`guard_workers_with_workers`] (its test's
+/// own count: the other tests of this file run beside it).
+static WORKER_TASKS_HERE: AtomicU64 = AtomicU64::new(0);
+
+/// [`guard_workers`], and the calling thread waits (up to 100 ms) at the start
+/// of each job until a worker has started a task in it, so that workers run
+/// tasks of these few blocks even where the calling thread alone would be
+/// quicker (release builds): the path under test is the workers'.
+fn guard_workers_with_workers(point: HookPoint) {
+    match point {
+        HookPoint::Enter { lane: 0 } => {
+            let before = WORKER_TASKS_HERE.load(Ordering::SeqCst);
+            let start = Instant::now();
+            while WORKER_TASKS_HERE.load(Ordering::SeqCst) == before
+                && start.elapsed() < Duration::from_millis(100)
+            {
+                std::hint::spin_loop();
+            }
+        }
+        HookPoint::Task { lane, .. } if lane > 0 => {
+            WORKER_TASKS_HERE.fetch_add(1, Ordering::SeqCst);
+        }
+        _ => {}
+    }
+    guard_workers(point);
 }
 
 /// Blocks of several sizes, each with events pushed ahead to land inside it,
@@ -119,7 +146,7 @@ fn blocks_and_swaps(threads: usize) {
             ext(60, 3, "/flood.count", EventPayload::Set(1.0)),
         ],
     );
-    engine.set_task_hook(Some(guard_workers));
+    engine.set_task_hook(Some(guard_workers_with_workers));
     let mut swaps = [Some(b.clone()), None, Some(a), None, Some(b)].into_iter();
     let mut sequence = 100;
     let mut old = Vec::new();

@@ -3,7 +3,7 @@
 # The V12 soak: play a temporary copy of projects/kick in real time with
 # `signal play --watch --json`, rewrite one parameter every 10 s (accent
 # decay_ms, alternating 200 and 300), then print the xruns, the worst callback
-# fraction, and PASS or FAIL against V12: 0 xruns and a worst callback under
+# fraction, and PASS or FAIL against V12 and the multi-core gate (below): 0 xruns and a worst callback under
 # 25 % of the period. The committed project is never edited.
 #
 #   scripts/soak.sh [minutes] [buffer]       default device (CoreAudio), 30 min, 128 frames
@@ -175,9 +175,16 @@ printf 'edits %s written, %s applied as parameter sets, %s errors\n' "$EDITS" "$
 printf 'xruns %s\n' "$XRUNS"
 printf 'worst callback %.3f of the period\n' "$WORST"
 printf 'output %s/play.json, log %s/play.log\n' "$WORK" "$WORK"
-if [[ $XRUNS -eq 0 ]] && awk "BEGIN { exit !($WORST < 0.25) }"; then
-  echo "V12 PASS (0 xruns; worst callback < 0.25 of the period)"
-else
-  echo "V12 FAIL (needs 0 xruns and a worst callback < 0.25 of the period)"
-  exit 1
-fi
+MEDIAN=$(field median_callback_ratio)
+[[ -n $MEDIAN ]] && printf 'median callback %.3f of the period; worst - median %.3f\n' "$MEDIAN" "$(awk "BEGIN { print $WORST - $MEDIAN }")"
+# Two verdicts (docs/benchmarks.md "Wake-policy matrix on the device"):
+# V12 is a headroom rule (0 xruns, worst < 0.25), meaningful when the median
+# load is well under 0.25 (the kick); the multi-core gate (0 xruns, worst -
+# median < 0.25) is the scheduling-jitter rule for loads of their own.
+# The exit status follows V12 unless --voices was given, then the gate.
+V12=FAIL; GATE=FAIL
+if [[ $XRUNS -eq 0 ]] && awk "BEGIN { exit !($WORST < 0.25) }"; then V12=PASS; fi
+if [[ $XRUNS -eq 0 && -n $MEDIAN ]] && awk "BEGIN { exit !($WORST - $MEDIAN < 0.25) }"; then GATE=PASS; fi
+echo "V12 $V12 (0 xruns and worst callback < 0.25 of the period)"
+echo "multi-core gate $GATE (0 xruns and worst - median < 0.25 of the period)"
+if [[ -n ${VOICES:-} ]]; then [[ $GATE == PASS ]] || exit 1; else [[ $V12 == PASS ]] || exit 1; fi

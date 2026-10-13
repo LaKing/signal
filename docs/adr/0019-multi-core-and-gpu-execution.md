@@ -23,6 +23,7 @@ A GPU is a separate device with its own queue. Submitting work and reading resul
 - **Semantics do not change.** ADR 0016's per-frame model stays normative: the block engine must produce output **bit-identical** to the per-frame engine for every *k* and every partition of frames into blocks. The goldens and the V-tests are the proof.
 - **Feedback.** The plan is condensed into strongly connected components. An acyclic instance runs as one task of *k* frames. A cycle (closed through state-output modules, ADR 0016 §2) runs as one **unit** whose members are interleaved in sub-blocks no longer than the cycle's shortest delay (one frame for `std.unit_delay`). The unit is one task for the scheduler.
 - **Exact frames.** Plan swaps, edits and external events keep their exact frames: a block is split at a swap frame, and events are delivered with in-block offsets, as the contract already defines.
+- *Amended by ADR 0020 (M2.7-3):* the one exception to bit-identity for every partition is a module's panic in a `process` call of several frames, whose fault acts from the call's first frame (`docs/semantics.md` §14); the thread count still changes nothing.
 
 ### 2. Parallel scheduling on CPU cores
 - Each block, the plan's units form a dependency graph. A fixed pool of worker threads, created when the engine starts, runs the units whose inputs are ready. The audio thread itself takes part. There is no allocation, no lock and no blocking system call on these threads during a block (`docs/realtime-rules.md`).

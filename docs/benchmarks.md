@@ -250,18 +250,20 @@ What it shows:
 - **Fact:** no policy beats `park50` beyond noise; `semaphore` and `fanout` differ by at most a few hundredths. 14 threads gain nothing over 12, and their workers wake late (p99 360–590 µs).
 - **Decisions (operator, 2026-10-13):** the real-time default stays `park50`, the computation budget stays 0.25 of the period, and auto stays two thirds of the performance cores (12 of 18). The other policies stay selectable with `--rt-policy` for other machines.
 - **The multi-core timing gate, restated:** V12's "worst callback < 0.25" is a headroom rule; it holds only when the median load is well under 0.25 (the kick: worst 0.104). For many-voice projects whose load is itself 0.25–0.40, the gate is **0 xruns over 30 minutes at the auto thread count, and worst callback − median < 0.25 of the period** (scheduling jitter, not load).
+- **The gate, measured** (operator, 2026-10-13 02:51–03:21, M2.7-1 release build): `scripts/soak.sh --silent --voices 80 30 128`, auto (12 threads, `park50`, workgroup), 178 live edits all applied: **0 xruns**, median 0.27, p99 0.32, worst 0.444 of the period. Worst − median = **0.174 < 0.25: the multi-core gate passes.** V12's headroom rule (worst < 0.25) does not apply at this load. `scripts/soak.sh` now prints both verdicts.
 
 ### Real-time wake-up tail (M2.6-5)
 
 The operator's device figures this starts from ("Real-time workers on the device" above): 80 kick voices, `--threads` 12 (the real-time auto count), SSL 2+ at 96 kHz with 128-frame buffers, 30 minutes with live edits, 0 xruns and a **worst callback of 0.405** of the period at db0363c, **0.408** at dafa32b (M2.6-4 checkpoint). V12 asks for < 0.25.
 
-**What the table measures now.** Besides the time per block, `signal bench --realtime` reads each block's wake-up tail off the engine's task hook (`Engine::set_task_hook`, `HookPoint::Enter`/`Task`/`Done`, atomics only):
-- **workers started** (`tail.worker_start`): from the first thread into the block's job until the last worker that joined it entered it (0 when no worker joined);
-- **slowest task** (`tail.slowest_task`): the longest task body of the block, from `Task` to `Done` (the hook after the body), so the waits for predecessors and for the other threads are not in it;
-- **first participation** (`tail.open_after`): from the block's start until the first thread entered its job. That includes the staging, the open and whatever delayed the first participant, not the staging alone;
-- the **workers joined** (`tail.joined`), the **blocks run on the workers** (`tail.parallel_blocks`) and the blocks with more than one job (`tail.multi_job_blocks`; this load has no edits, so 0 and every figure is per job).
+**What the table measures now.** Besides the time per block, each `signal bench --realtime` row has the engine's wake-up trace (`rows[].wake`, M2.7-1). Until M2.7-3 the table also read a `tail` off the engine's task hook; that hook is a test-only API now (feature `test-hooks`, which no build of `signal` turns on), so `rows[].tail` is gone. Its columns map onto the trace as follows; **tail figures from before M2.7-3 are not comparable with the trace's**:
+- **slowest task** (`tail.slowest_task`) → `wake.slowest_task_*_us`: the longest task body of each callback. The trace counts callbacks run on the calling thread alone too, the tail only blocks that ran on the workers; the text table shows it for every row, one thread included.
+- **workers started** (`tail.worker_start`, from the first thread into the job until the last joined worker entered it): retired. The nearest figure is `wake.last_join_*_us`, from the callback's start; the text table shows it as "last join" ("—" on one thread, where no worker joins).
+- **first participation** (`tail.open_after`): retired. The nearest is `wake.first_join_*_us`, the first *worker* to join (not the calling thread).
+- the **workers joined** (`tail.joined`): retired; `wake.callbacks_without_join` counts the callbacks no worker joined.
+- the **blocks run on the workers** (`tail.parallel_blocks`): retired; `wake.callbacks − wake.callbacks_without_join`. The blocks with more than one job (`tail.multi_job_blocks`, always 0 for this load): retired.
 
-Each has the median, p99 (nearest rank) and maximum over the row's blocks that ran on the workers, in the JSON (`rows[].tail`) and in the text table. The hook costs three clock reads per task.
+The trace's spreads are the median, p99 (nearest rank) and maximum over the row's callbacks, in the JSON and in the text table.
 
 `--rt-schedule <s>` (repeatable) runs the table once per worker schedule, named in `rows[].schedule`: `base` is the scheduling of dafa32b (pinned in the bench: 50 µs spin, 2 µs chains); `default` is what `signal play` and the app use (`Schedule::realtime`); otherwise `base` with `spin=<ns|period|quarter>` (the idle spin) and `task=<ns>` (`Schedule::task_min_ns`, the chain size). **Since M2.6-5 the rows without `--rt-schedule` are `default`, not the dafa32b scheduling**: compare against `base` rows or a dafa32b build, as below.
 

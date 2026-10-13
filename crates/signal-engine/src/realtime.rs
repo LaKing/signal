@@ -25,9 +25,10 @@ use crate::engine::{
 };
 use crate::error::{EngineError, RenderError};
 use crate::fade::fade_frames;
-use crate::log::{InstanceId, LogLine, LogRecord};
+use crate::log::{EngineFailure, InstanceId, LogLine, LogRecord};
 use crate::offline::GAIN;
 use crate::pool::Workers;
+#[cfg(feature = "test-hooks")]
 use crate::shared::HookPoint;
 use crate::wake::{MakeWaiter, RtOptions, WakeStats};
 
@@ -227,6 +228,10 @@ pub struct RunnerStatus {
     pub input_overflows: u64,
     /// The engine's [`input_discards`](Engine::input_discards).
     pub input_discards: InputDiscards,
+    /// The engine's [`failure`](Engine::failure): it stopped, and the runner
+    /// outputs silence from the failed block's first frame on (the frames of
+    /// earlier blocks of that callback stand, `docs/semantics.md` §14).
+    pub failure: Option<EngineFailure>,
 }
 
 /// What [`Controller::poll`] hands out. Every method has an empty default.
@@ -513,6 +518,11 @@ impl Runner {
                 done += ran;
             }
             frames = done as u64;
+            // Frames the engine did not run (it stopped, `docs/semantics.md`
+            // §14) are silence.
+            for row in rows.by_ref() {
+                row.fill(0.0);
+            }
             rows.into_remainder().fill(0.0);
         }
         self.finish(first_frame, frames);
@@ -547,7 +557,9 @@ impl Runner {
         self.engine.workers()
     }
 
-    /// The engine's [`set_task_hook`](Engine::set_task_hook) (tests).
+    /// The engine's [`set_task_hook`](Engine::set_task_hook). Tests only
+    /// (feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn set_task_hook(&mut self, hook: Option<fn(HookPoint)>) {
         self.engine.set_task_hook(hook);
@@ -767,6 +779,7 @@ impl Runner {
         self.counts.late_results = self.engine.late_results();
         self.counts.input_overflows = self.engine.input_overflows();
         self.counts.input_discards = self.engine.input_discards();
+        self.counts.failure = self.engine.failure();
         // A held report would be missing behind this status's frontier.
         if !self.held.is_empty() || self.status.push(self.status()).is_err() {
             self.counts.status_overflows = self.counts.status_overflows.saturating_add(1);

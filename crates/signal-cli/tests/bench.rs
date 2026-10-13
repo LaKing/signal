@@ -315,15 +315,9 @@ fn realtime_json_has_every_field() {
         for key in ["median_ns", "p99_ns", "max_ns", "median_fraction"] {
             number(&row[key], key);
         }
-        let tail = &row["tail"];
-        for part in ["worker_start", "slowest_task", "open_after"] {
-            for key in ["median_ns", "p99_ns", "max_ns"] {
-                number(&tail[part][key], key);
-            }
-        }
-        number(&tail["joined"]["max"], "joined.max");
-        assert!(tail["parallel_blocks"].as_u64().is_some());
-        assert_eq!(tail["multi_job_blocks"].as_u64(), Some(0), "no edits");
+        // M2.7-3: the hook-based `tail` is gone; the wake-up trace (below)
+        // carries the last join and the slowest task.
+        assert!(row.get("tail").is_none(), "{row}");
         let paths = row["paths"].as_array().unwrap();
         let caller = row["caller"].as_str().unwrap();
         match row["variant"].as_str() {

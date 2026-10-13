@@ -25,6 +25,9 @@
 //!   nothing.
 //! - [`Driver`]: the driver trait (ADR 0011); [`NullDriver`] runs a Runner
 //!   without hardware, with seeded [`CallbackSizes`].
+//! - Failures (`docs/semantics.md` §14): a primitive's panic mutes its
+//!   instance (a `panic` fault); anything else that fails stops the engine
+//!   ([`Engine::failure`]). Test-only hooks need the feature `test-hooks`.
 
 #![cfg_attr(
     not(test),
@@ -35,6 +38,10 @@
         clippy::indexing_slicing
     )
 )]
+
+// The failure policy catches unwinds (`docs/semantics.md` §14).
+#[cfg(panic = "abort")]
+compile_error!("signal-engine needs panic = \"unwind\": a module's panic must be caught");
 
 mod cores;
 mod driver;
@@ -55,6 +62,9 @@ mod wake;
 
 pub use cores::{CoreSource, performance_cores, realtime_threads};
 pub use driver::{CallbackSizes, Driver, DriverError, MAX_CALLBACK_FRAMES, NullDriver};
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub use engine::Injection;
 pub use engine::{
     EditFull, Engine, EngineConfig, ExternalEvent, ExternalFull, InputDiscards, ParameterValue,
     PreparedSwap,
@@ -63,10 +73,12 @@ pub use engine::{
 pub use engine::{Schedule, ScheduleStats};
 pub use error::{EngineError, RenderError};
 pub use log::{
-    DiscardReason, FaultReason, InstanceId, LineSource, LogLine, LogRecord, LogSource, PortId,
+    DiscardReason, EngineFailure, FailureReason, FaultReason, InstanceId, LineSource, LogLine,
+    LogRecord, LogSource, PortId,
 };
 pub use manifest::{Manifest, Provenance, SameMachine};
 pub use offline::{Render, render, render_blocks, render_with};
+#[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 pub use pool::spawned_workers;
 pub use pool::{Progress, Workers};
@@ -75,6 +87,7 @@ pub use realtime::{
     PARAMETERS_PER_CALLBACK, ReadySwap, RealtimeConfig, Report, Runner, RunnerStatus, SentCommand,
     Stamp, realtime, realtime_with,
 };
+#[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 pub use shared::{Exclusivity, HookPoint, exclusivity};
 pub use wake::{Computation, MakeWaiter, RtOptions, RtPolicy, Spread, Waiter, WakeStats};

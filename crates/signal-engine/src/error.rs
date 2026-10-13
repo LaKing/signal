@@ -1,9 +1,12 @@
 //! What can go wrong when instantiating a plan, scheduling an edit, swapping
-//! plans, or rendering. Nothing goes wrong inside a frame: every check happens before.
+//! plans, or rendering. Nothing goes wrong inside a frame: every check happens
+//! before, except an engine failure (`docs/semantics.md` §14), which stops it.
 
 use std::fmt;
 
 use signal_core::{Frame, InstanceAddress, PortAddress};
+
+use crate::log::EngineFailure;
 
 /// Why a plan cannot be instantiated, an external list is refused, or an edit
 /// cannot be scheduled.
@@ -226,6 +229,9 @@ pub enum RenderError {
     /// The caller's step before a frame of [`render_with`](crate::render_with)
     /// failed: a swap or an edit was refused.
     Edit(EngineError),
+    /// The engine failed and stopped (`docs/semantics.md` §14): nothing of
+    /// the render is kept.
+    EngineFailed(EngineFailure),
     /// Writing an artifact failed.
     Io(std::io::Error),
     /// Writing `audio.wav` failed.
@@ -265,6 +271,7 @@ impl fmt::Display for RenderError {
                 Ok(())
             }
             RenderError::Edit(error) => write!(f, "applying an edit: {error}"),
+            RenderError::EngineFailed(failure) => write!(f, "{failure}"),
             RenderError::Io(error) => write!(f, "writing render artifacts: {error}"),
             RenderError::Wav(error) => write!(f, "writing audio.wav: {error}"),
             RenderError::Json(error) => write!(f, "serializing render artifacts: {error}"),

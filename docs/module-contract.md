@@ -67,6 +67,8 @@ create ─► prepare(ctx) ─► { process | emit, absorb }*  ─► (reset ─
 | `reset` | either | **no** | Returns to exactly the state `prepare` left, including random streams. |
 | drop | control | frees | The engine returns old instances to the control thread for dropping. |
 
+A call that panics anyway is caught by the engine: the instance is muted from that call's first frame and a `panic` fault is logged (`docs/semantics.md` §14). Nothing it wrote in that call is used.
+
 `PrepareContext` gives:
 - `sample_rate`: the master rate in frames per second;
 - `max_frames`: the largest *k* any later call receives;

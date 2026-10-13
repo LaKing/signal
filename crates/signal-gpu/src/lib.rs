@@ -310,6 +310,8 @@ impl GpuService {
 
     /// Test hook (AC3 of M2.6-4): publish every finished job `delay` late,
     /// as a slow GPU would; zero restores normal completion. Process-wide.
+    /// Tests only (feature `test-hooks`).
+    #[cfg(any(test, feature = "test-hooks"))]
     #[doc(hidden)]
     pub fn set_completion_delay(&self, delay: Duration) {
         let us = u64::try_from(delay.as_micros()).unwrap_or(u64::MAX);

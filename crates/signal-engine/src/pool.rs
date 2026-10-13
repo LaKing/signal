@@ -51,6 +51,8 @@ pub(crate) const MAX_SPIN: Duration = Duration::from_millis(3);
 static SPAWNED: AtomicUsize = AtomicUsize::new(0);
 
 /// The number of worker threads every engine of this process has spawned.
+/// Tests only (feature `test-hooks`).
+#[cfg(feature = "test-hooks")]
 pub fn spawned_workers() -> usize {
     SPAWNED.load(Ordering::Relaxed)
 }
@@ -575,9 +577,10 @@ impl Workers {
     /// worker is woken.
     ///
     /// The request is kept until every live worker has run it, whatever
-    /// [`wait`](Workers::wait) returns. A worker whose `f` panics ends, as a
-    /// worker whose task panics does: it no longer counts, and the pool runs
-    /// one worker short until the engine is rebuilt.
+    /// [`wait`](Workers::wait) returns. A worker whose `f` panics ends: it no
+    /// longer counts, and the pool runs one worker short until the engine is
+    /// rebuilt. (A task's failure never ends a worker; it stops the engine,
+    /// `docs/semantics.md` §14.)
     pub fn post(&self, f: impl Fn(usize) + Send + Sync + 'static) -> u64 {
         let Some(shared) = &self.shared else {
             return 0;
@@ -709,7 +712,7 @@ mod tests {
         let mut cells = PlanCells::default();
         let body = |_: &mut Access<'_>, _: usize| {};
         let (mut dispatch, stats) = pool.split();
-        let job = Job::new(&mut cells, epoch, &body, None, stats);
+        let job = Job::new(&mut cells, epoch, &body, stats);
         dispatch.run(&job);
     }
 

@@ -34,6 +34,8 @@ signal-lab = { workspace = true, optional = true }
 signal-gpu = { workspace = true, optional = true }
 
 [dev-dependencies]
+# The engine's exclusivity counters for the determinism matrices.
+signal-engine = { workspace = true, features = ["test-hooks"] }
 insta = { workspace = true }
 
 [lints]

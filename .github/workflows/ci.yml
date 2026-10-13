@@ -27,3 +27,17 @@ jobs:
         run: cargo nextest run --workspace --no-tests=pass
       - name: Doc tests
         run: cargo test --workspace --doc
+
+  release-tests:
+    # M2.7-3 (finding 6): the tests also pass in release builds, where the
+    # checked mode's exclusivity tracker is not compiled in.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Tests (release)
+        run: cargo nextest run --workspace --release --no-tests=pass

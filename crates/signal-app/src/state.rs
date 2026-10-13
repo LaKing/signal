@@ -283,6 +283,8 @@ struct Playing {
     values: BTreeMap<PortAddress, ParameterValue>,
     /// How the worker threads were scheduled at the start.
     scheduling: Scheduling,
+    /// The engine's failure has been reported (it is reported once).
+    failure_reported: bool,
 }
 
 /// Feeds the recorder, the output meters and the parameter values from one
@@ -547,6 +549,15 @@ impl AppState {
                     },
                 );
             }
+        }
+        // The engine stopped (docs/semantics.md §14): it plays silence from
+        // then on, so say why, once.
+        if let Some(failure) = playing.controller.status().failure
+            && !playing.failure_reported
+        {
+            playing.failure_reported = true;
+            eprintln!("signal: {failure}");
+            self.message = Some(failure.to_string());
         }
         self.status = Some(status_of(playing));
     }
@@ -997,6 +1008,7 @@ impl AppState {
                 .collect(),
             values: BTreeMap::new(),
             scheduling,
+            failure_reported: false,
         };
         self.status = Some(status_of(&playing));
         self.playing = Some(playing);

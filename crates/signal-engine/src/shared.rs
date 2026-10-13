@@ -114,19 +114,24 @@ use std::cell::UnsafeCell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Deref, Range as Span};
+use std::panic::AssertUnwindSafe;
 #[cfg(debug_assertions)]
 use std::sync::atomic::AtomicU32;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use signal_core::{Event, EventSink, Primitive};
 
 use crate::engine::{Lane, Out, Param, Slot};
+use crate::log::FailureReason;
 
 /// Claims made and conflicts refused by the checked mode, process-wide.
+#[cfg(any(debug_assertions, test, feature = "test-hooks"))]
 static CLAIMS: AtomicU64 = AtomicU64::new(0);
 static VIOLATIONS: AtomicU64 = AtomicU64::new(0);
 
-/// What the checked mode has seen in this process.
+/// What the checked mode has seen in this process (tests only: feature
+/// `test-hooks`).
+#[cfg(any(test, feature = "test-hooks"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Exclusivity {
     /// Whether the per-element claim tracker is compiled in (debug builds).
@@ -139,7 +144,9 @@ pub struct Exclusivity {
 
 /// The checked mode's counters so far. Claims are counted per thread and
 /// added to the process's count in batches: `claims` covers this thread's
-/// claims and every full batch of the others'.
+/// claims and every full batch of the others'. Tests only (feature
+/// `test-hooks`).
+#[cfg(any(test, feature = "test-hooks"))]
 pub fn exclusivity() -> Exclusivity {
     #[cfg(debug_assertions)]
     let local = LOCAL_CLAIMS.with(std::cell::Cell::get);
@@ -177,11 +184,44 @@ fn count_claims(elements: usize) {
     });
 }
 
-/// Counts a refused access (never on a correct run's path).
+/// Counts a refused access (never on a correct run's path), process-wide and
+/// in the plan's `refusals`, which stops the engine (`docs/semantics.md` §14).
 #[cold]
 #[inline(never)]
-fn violation() {
+fn violation(refusals: &AtomicU64) {
     VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+    refusals.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Runs `f`; false if it panicked (`docs/semantics.md` §14). The panic goes
+/// no further, and neither does one from its payload's destructor: each
+/// payload is dropped under `catch_unwind` too, and after eight in a row the
+/// last is leaked rather than dropped.
+pub(crate) fn caught(f: impl FnOnce()) -> bool {
+    match std::panic::catch_unwind(AssertUnwindSafe(f)) {
+        Ok(()) => true,
+        Err(mut payload) => {
+            for _ in 0..8 {
+                match std::panic::catch_unwind(AssertUnwindSafe(move || drop(payload))) {
+                    Ok(()) => return false,
+                    Err(next) => payload = next,
+                }
+            }
+            std::mem::forget(payload);
+            false
+        }
+    }
+}
+
+/// `found`, counting a refusal ([`violation`]) where it is `None`: an
+/// index outside the plan's layout. Every refusal is counted once, where it
+/// arises.
+#[inline(always)]
+fn counted<T>(found: Option<T>, refusals: &AtomicU64) -> Option<T> {
+    if found.is_none() {
+        violation(refusals);
+    }
+    found
 }
 
 /// The writer bit of an element's claim; the low bits count readers.
@@ -334,8 +374,14 @@ impl<T> Cells<T> {
     /// Claims every element of element range `range` for writing (`write`)
     /// or reading. Checked mode only: a conflict is refused and counted.
     #[inline(always)]
-    fn claim(&self, range: &Span<usize>, write: bool) -> Option<Claim<'_>> {
-        self.track(range.start, (self.data.len(), 1), range.len(), write)
+    fn claim(&self, refusals: &AtomicU64, range: &Span<usize>, write: bool) -> Option<Claim<'_>> {
+        self.track(
+            refusals,
+            range.start,
+            (self.data.len(), 1),
+            range.len(),
+            write,
+        )
     }
 
     /// The checked mode's half of [`claim`](Cells::claim) and of
@@ -344,6 +390,7 @@ impl<T> Cells<T> {
     #[cfg(debug_assertions)]
     fn track(
         &self,
+        refusals: &AtomicU64,
         first: usize,
         (stride, rows): (usize, usize),
         len: usize,
@@ -356,7 +403,7 @@ impl<T> Cells<T> {
             .checked_add((rows - 1).saturating_mul(stride))
             .and_then(|last| last.checked_add(len));
         if end.is_none_or(|end| end > self.data.len()) {
-            violation();
+            violation(refusals);
             return None;
         }
         let held = Held {
@@ -382,7 +429,7 @@ impl<T> Cells<T> {
                 for undo in held.each().take(n) {
                     Held::release(undo, write);
                 }
-                violation();
+                violation(refusals);
                 return None;
             }
         }
@@ -399,6 +446,7 @@ impl<T> Cells<T> {
     #[inline(always)]
     fn track(
         &self,
+        _refusals: &AtomicU64,
         _first: usize,
         _rows: (usize, usize),
         _len: usize,
@@ -417,12 +465,16 @@ impl<T> Cells<T> {
     // exclusivity is its safety contract.
     #[allow(clippy::mut_from_ref)]
     #[inline(always)]
-    unsafe fn slice_mut(&self, range: Span<usize>) -> Option<(&mut [T], Claim<'_>)> {
+    unsafe fn slice_mut(
+        &self,
+        refusals: &AtomicU64,
+        range: Span<usize>,
+    ) -> Option<(&mut [T], Claim<'_>)> {
         if range.is_empty() {
             return Some((&mut [], Claim::none()));
         }
-        let claim = self.claim(&range, true)?;
-        let start = self.data.get(range.clone())?.as_ptr();
+        let claim = self.claim(refusals, &range, true)?;
+        let start = counted(self.data.get(range.clone()), refusals)?.as_ptr();
         // SAFETY: `range` is in bounds (checked above); the caller guarantees
         // exclusivity and ordering; `UnsafeCell::raw_get` is the sanctioned way
         // to write through a shared `UnsafeCell`.
@@ -438,15 +490,15 @@ impl<T> Cells<T> {
     /// and every earlier write to it by another thread must happen before
     /// this call.
     #[inline(always)]
-    unsafe fn slice(&self, range: Span<usize>) -> Option<(&[T], Claim<'_>)>
+    unsafe fn slice(&self, refusals: &AtomicU64, range: Span<usize>) -> Option<(&[T], Claim<'_>)>
     where
         T: Sync,
     {
         if range.is_empty() {
             return Some((&[], Claim::none()));
         }
-        let claim = self.claim(&range, false)?;
-        let start = self.data.get(range.clone())?.as_ptr();
+        let claim = self.claim(refusals, &range, false)?;
+        let start = counted(self.data.get(range.clone()), refusals)?.as_ptr();
         // SAFETY: in bounds (checked above); the caller guarantees no writer
         // and the ordering; `T: Sync` lets other threads hold `&T` too.
         let slice = unsafe { std::slice::from_raw_parts(UnsafeCell::raw_get(start), range.len()) };
@@ -463,23 +515,31 @@ impl Cells<f64> {
     /// frames may exist on any thread, and every earlier write to them by
     /// another thread must happen before this call.
     #[inline(always)]
-    unsafe fn window(&self, rows: &Span<usize>, frames: Span<usize>) -> Option<Window<'_>> {
+    unsafe fn window<'s>(
+        &'s self,
+        refusals: &'s AtomicU64,
+        rows: &Span<usize>,
+        frames: Span<usize>,
+    ) -> Option<Window<'s>> {
         let stride = self.stride;
         if frames.start > frames.end || frames.end > stride {
-            violation();
+            violation(refusals);
             return None;
         }
-        let region = self
-            .data
-            .get(rows.start.checked_mul(stride)?..rows.end.checked_mul(stride)?)?;
+        let span = rows
+            .start
+            .checked_mul(stride)
+            .zip(rows.end.checked_mul(stride));
+        let region = counted(span.and_then(|(a, b)| self.data.get(a..b)), refusals)?;
         let ports = rows.len();
         let first = rows.start * stride + frames.start;
-        let claim = self.track(first, (stride, ports), frames.len(), true)?;
+        let claim = self.track(refusals, first, (stride, ports), frames.len(), true)?;
         Some(Window {
             data: UnsafeCell::raw_get(region.as_ptr()),
             stride,
             ports,
             frames,
+            refusals,
             _claim: claim,
             _rows: PhantomData,
         })
@@ -498,6 +558,8 @@ pub struct Window<'t> {
     stride: usize,
     ports: usize,
     frames: Span<usize>,
+    /// The plan's refusal count, for a refused frame.
+    refusals: &'t AtomicU64,
     _claim: Claim<'t>,
     _rows: PhantomData<&'t mut [f64]>,
 }
@@ -510,7 +572,7 @@ impl Window<'_> {
         if p < self.ports && self.frames.start <= a && a <= b && b <= self.frames.end {
             Some(p * self.stride + a)
         } else {
-            violation();
+            violation(self.refusals);
             None
         }
     }
@@ -610,6 +672,36 @@ pub struct PlanCells {
     /// Per task: its log and counters, in a parallel segment.
     pub(crate) outs: Cells<Out>,
     board: TaskBoard,
+    /// Refused accesses since the engine last read it (`take_refusals`): any
+    /// stops the engine (`docs/semantics.md` §14).
+    refusals: AtomicU64,
+    /// Test hooks only: the instance whose views, or whose rows' reads, are
+    /// refused as a broken invariant would refuse them.
+    #[cfg(feature = "test-hooks")]
+    refuse: Option<Refuse>,
+}
+
+/// Test hooks only: what [`PlanCells::inject`] refuses.
+#[cfg(feature = "test-hooks")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refuse {
+    /// Every view of this instance.
+    View(usize),
+    /// Every read of this instance's rows.
+    Read(usize),
+}
+
+/// Test hooks only: a broken invariant for the next jobs to find
+/// ([`PlanCells::inject`]).
+#[cfg(feature = "test-hooks")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Armed {
+    /// See [`Refuse`].
+    Refuse(Refuse),
+    /// The next push of a ready task finds no slot.
+    DropReady,
+    /// The next claim finds its slot empty.
+    MissingSlot,
 }
 
 impl PlanCells {
@@ -630,6 +722,35 @@ impl PlanCells {
             lanes: Cells::new(parts.lanes),
             outs: Cells::new(parts.outs),
             board: TaskBoard::new(parts.preds, parts.successors),
+            refusals: AtomicU64::new(0),
+            #[cfg(feature = "test-hooks")]
+            refuse: None,
+        }
+    }
+
+    /// The accesses refused since the last call (0 in a correct run); starts
+    /// counting again.
+    pub(crate) fn take_refusals(&mut self) -> u64 {
+        std::mem::take(self.refusals.get_mut())
+    }
+
+    /// Test hooks only: the instance whose views are refused, for a segment
+    /// on the calling thread alone (which takes no views).
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn refused_view(&self) -> Option<usize> {
+        match self.refuse {
+            Some(Refuse::View(i)) => Some(i),
+            _ => None,
+        }
+    }
+
+    /// Test hooks only: arms a broken invariant.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn inject(&mut self, armed: Armed) {
+        match armed {
+            Armed::Refuse(refuse) => self.refuse = Some(refuse),
+            Armed::DropReady => *self.board.inject.get_mut() = INJECT_DROP_READY,
+            Armed::MissingSlot => *self.board.inject.get_mut() = INJECT_MISSING_SLOT,
         }
     }
 
@@ -709,8 +830,10 @@ impl<'a> Access<'a> {
             Token::Whole => i < self.cells.layout.len(),
             Token::Task { task, .. } => self.cells.instance_task.get(i) == Some(&task),
         };
+        #[cfg(feature = "test-hooks")]
+        let owns = owns && self.cells.refuse != Some(Refuse::View(i));
         if !owns {
-            violation();
+            violation(&self.cells.refusals);
         }
         owns
     }
@@ -727,7 +850,8 @@ impl<'a> Access<'a> {
                 // claimant's views touch `outs[t]`; the caller reset the log
                 // before publishing the job (Release on opening the gate,
                 // Acquire on joining it).
-                unsafe { self.cells.outs.slice_mut(t..t + 1) }.and_then(|(s, c)| Some((one(s)?, c)))
+                unsafe { self.cells.outs.slice_mut(&self.cells.refusals, t..t + 1) }
+                    .and_then(|(s, c)| Some((counted(one(s), &self.cells.refusals)?, c)))
             }
         }
     }
@@ -754,17 +878,36 @@ impl<'a> Access<'a> {
             },
             own,
             frames,
+            refusals: &self.cells.refusals,
+            #[cfg(feature = "test-hooks")]
+            refuse: match self.cells.refuse {
+                Some(Refuse::Read(i)) => Some(i),
+                _ => None,
+            },
         }
     }
 
-    /// Instance `i`'s view for one call over block frames `a..b`.
+    /// Instance `i`'s view for one call over block frames `a..b`. A task's
+    /// access that cannot hand it out counts one refusal, where it arises,
+    /// which stops the engine; the whole-plan access of
+    /// [`PlanCells::exclusive`] has no log, so its views are `None` by
+    /// design, not refused.
     #[inline(always)]
     pub fn call(&mut self, i: usize, a: usize, b: usize) -> Option<CallView<'_>> {
+        if let Token::Whole = self.token {
+            return None;
+        }
+        self.view(i, a, b)
+    }
+
+    #[inline(always)]
+    fn view(&mut self, i: usize, a: usize, b: usize) -> Option<CallView<'_>> {
         if !self.owns(i) {
             return None;
         }
         let c = self.cells;
-        let l = c.layout.get(i)?;
+        let r = &c.refusals;
+        let l = counted(c.layout.get(i), r)?;
         let lane = self.lane;
         let before = a.saturating_sub(1);
         let sources = self.reader(&c.outputs, l.signal_out.clone(), a..b);
@@ -781,21 +924,21 @@ impl<'a> Access<'a> {
         // events only after this task's completion (Release on `done`,
         // Acquire before their read), so never while this view lives; the
         // frame before the call (`before`), read by the holds, is `i`'s too.
-        let (slot, c0) = unsafe { c.slots.slice_mut(i..i + 1) }?;
-        let (primitive, c1) = unsafe { c.primitives.slice_mut(i..i + 1) }?;
-        let (params, c2) = unsafe { c.params.slice_mut(l.params.clone()) }?;
-        let signal_in = unsafe { c.signal_in.window(&l.signal_in, a..b) }?;
-        let param_rows = unsafe { c.param_rows.window(&l.params, before..b) }?;
-        let outputs = unsafe { c.outputs.window(&l.signal_out, before..b) }?;
-        let (held, c3) = unsafe { c.held.slice_mut(l.signal_out.clone()) }?;
-        let (sinks, c4) = unsafe { c.sinks.slice_mut(l.event_out.clone()) }?;
-        let (emitted, c5) = unsafe { c.emitted.slice_mut(l.event_out.clone()) }?;
+        let (slot, c0) = unsafe { c.slots.slice_mut(r, i..i + 1) }?;
+        let (primitive, c1) = unsafe { c.primitives.slice_mut(r, i..i + 1) }?;
+        let (params, c2) = unsafe { c.params.slice_mut(r, l.params.clone()) }?;
+        let signal_in = unsafe { c.signal_in.window(r, &l.signal_in, a..b) }?;
+        let param_rows = unsafe { c.param_rows.window(r, &l.params, before..b) }?;
+        let outputs = unsafe { c.outputs.window(r, &l.signal_out, before..b) }?;
+        let (held, c3) = unsafe { c.held.slice_mut(r, l.signal_out.clone()) }?;
+        let (sinks, c4) = unsafe { c.sinks.slice_mut(r, l.event_out.clone()) }?;
+        let (emitted, c5) = unsafe { c.emitted.slice_mut(r, l.event_out.clone()) }?;
         // SAFETY: lane `lane` is used by this thread alone: lane 0 by the
         // caller, lane `w + 1` by worker `w`, each joined once per job.
-        let (lanes, c6) = unsafe { c.lanes.slice_mut(lane..lane + 1) }?;
+        let (lanes, c6) = unsafe { c.lanes.slice_mut(r, lane..lane + 1) }?;
         Some(CallView {
-            slot: one(slot)?,
-            primitive: one(primitive)?,
+            slot: counted(one(slot), r)?,
+            primitive: counted(one(primitive), r)?,
             params,
             signal_in,
             param_rows,
@@ -805,7 +948,7 @@ impl<'a> Access<'a> {
             emitted,
             sources,
             events,
-            lane: one(lanes)?,
+            lane: counted(one(lanes), r)?,
             out,
             _claims: [c0, c1, c2, c3, c4, c5, c6, out_claim],
         })
@@ -844,6 +987,11 @@ pub struct Reader<'t, T: Sync> {
     check: Check<'t>,
     own: Span<usize>,
     frames: Span<usize>,
+    /// The plan's refusal count.
+    refusals: &'t AtomicU64,
+    /// Test hooks only: the instance whose rows are refused.
+    #[cfg(feature = "test-hooks")]
+    refuse: Option<usize>,
 }
 
 /// A row read through a [`Reader`], with its claim.
@@ -871,18 +1019,20 @@ impl<'t, T: Sync> Reader<'t, T> {
     #[inline]
     pub(crate) fn frames(&self, r: usize, (a, b): (usize, usize)) -> Option<Shared<'t, T>> {
         if a > b || a < self.frames.start || b > self.frames.end {
-            violation();
+            violation(self.refusals);
             return None;
         }
         self.read(r, (a, b))
     }
 
     /// Elements `a..b` of row `r`, if its owner's task is this reader's or
-    /// has completed in this epoch, and it is not the viewed instance's own.
+    /// has completed in this epoch, and it is not the viewed instance's own;
+    /// a refused read counts one refusal, where it arises, which stops the
+    /// engine.
     #[inline(always)]
     fn read(&self, r: usize, (a, b): (usize, usize)) -> Option<Shared<'t, T>> {
         if self.own.contains(&r) {
-            violation();
+            violation(self.refusals);
             return None;
         }
         if let Check::Task {
@@ -892,8 +1042,8 @@ impl<'t, T: Sync> Reader<'t, T> {
             board,
         } = self.check
         {
-            let owner = *self.cells.owner.get(r)?;
-            let owner_task = *instance_task.get(owner as usize)?;
+            let owner = *counted(self.cells.owner.get(r), self.refusals)?;
+            let owner_task = *counted(instance_task.get(owner as usize), self.refusals)?;
             // Acquire: pairs with the Release store of the producer's
             // completion, so its writes to this row happen before the read.
             let complete = owner_task == task
@@ -901,17 +1051,20 @@ impl<'t, T: Sync> Reader<'t, T> {
                     .done
                     .get(owner_task as usize)
                     .is_some_and(|d| d.load(Ordering::Acquire) == epoch);
+            // A failed task never stores its `done`: its rows are refused.
+            #[cfg(feature = "test-hooks")]
+            let complete = complete && self.refuse != Some(owner as usize);
             if !complete {
-                violation();
+                violation(self.refusals);
                 return None;
             }
         }
         let stride = self.cells.stride;
         if b > stride {
-            violation();
+            violation(self.refusals);
             return None;
         }
-        let row = r.checked_mul(stride)?;
+        let row = counted(r.checked_mul(stride), self.refusals)?;
         let range = row + a..row + b;
         // SAFETY: the row's owner is this reader's own task (its writes were
         // on this thread, by views now dropped) or a task whose completion was
@@ -919,7 +1072,7 @@ impl<'t, T: Sync> Reader<'t, T> {
         // a completed task writes no more in this epoch. The only live view
         // of the reader's task is the one holding this reader, and the row
         // is not that view's instance's (refused above).
-        let (slice, claim) = unsafe { self.cells.slice(range) }?;
+        let (slice, claim) = unsafe { self.cells.slice(self.refusals, range) }?;
         Some(Shared {
             slice,
             _claim: claim,
@@ -937,14 +1090,16 @@ pub(crate) enum Next {
     AllClaimed,
 }
 
-/// The tasks of a plan and their dependency counters (atomics only).
+/// The tasks of a plan and their dependency counters (atomics only), and
+/// whether the job failed (`docs/semantics.md` §14).
 #[derive(Default)]
 struct TaskBoard {
     preds: Box<[u32]>,
     succ_start: Box<[usize]>,
     succ: Box<[u32]>,
     pending: Box<[AtomicU64]>,
-    /// The epoch in which each task last completed.
+    /// The epoch in which each task last completed successfully; a failed
+    /// task's stays older, so its rows are never read.
     done: Box<[AtomicU64]>,
     /// Ready tasks in the order they became ready, with the epoch each was
     /// pushed in.
@@ -952,8 +1107,27 @@ struct TaskBoard {
     ready_epoch: Box<[AtomicU64]>,
     head: AtomicUsize,
     tail: AtomicUsize,
+    /// Claims settled: one per claim that advanced `head`, by the task's
+    /// completion or, for a claim that found no task, by the claim itself.
     completed: AtomicUsize,
+    /// Why this job failed, the first reason only: 0 (it has not),
+    /// [`FAILED_PANIC`] or [`FAILED_INVARIANT`].
+    failed: AtomicU8,
+    /// Test hooks only: a one-shot broken invariant ([`PlanCells::inject`]).
+    #[cfg(feature = "test-hooks")]
+    inject: AtomicU8,
 }
+
+/// Something unwound in a task outside a primitive's call.
+const FAILED_PANIC: u8 = 1;
+/// The board found itself inconsistent.
+const FAILED_INVARIANT: u8 = 2;
+
+/// Test hooks only: [`TaskBoard::inject`]'s values.
+#[cfg(feature = "test-hooks")]
+const INJECT_DROP_READY: u8 = 1;
+#[cfg(feature = "test-hooks")]
+const INJECT_MISSING_SLOT: u8 = 2;
 
 impl fmt::Debug for TaskBoard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -985,6 +1159,9 @@ impl TaskBoard {
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
             completed: AtomicUsize::new(0),
+            failed: AtomicU8::new(0),
+            #[cfg(feature = "test-hooks")]
+            inject: AtomicU8::new(0),
         }
     }
 
@@ -998,6 +1175,7 @@ impl TaskBoard {
         *self.head.get_mut() = 0;
         *self.tail.get_mut() = 0;
         *self.completed.get_mut() = 0;
+        *self.failed.get_mut() = 0;
         for t in 0..self.preds.len() {
             if self.preds.get(t) == Some(&0) {
                 self.push(t, epoch);
@@ -1005,12 +1183,29 @@ impl TaskBoard {
         }
     }
 
+    /// Test hooks only: whether the armed one-shot invariant `which` fires.
+    #[cfg(feature = "test-hooks")]
+    fn injected(&self, which: u8) -> bool {
+        self.inject
+            .compare_exchange(which, 0, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    }
+
     fn push(&self, t: usize, epoch: u64) {
+        #[cfg(feature = "test-hooks")]
+        if self.injected(INJECT_DROP_READY) {
+            self.fail(FAILED_INVARIANT);
+            return;
+        }
         let at = self.tail.fetch_add(1, Ordering::AcqRel);
         if let (Some(slot), Some(slot_epoch)) = (self.ready.get(at), self.ready_epoch.get(at)) {
             slot.store(t as u64, Ordering::Relaxed);
             // Release: a claimant that sees this epoch sees the task index.
             slot_epoch.store(epoch, Ordering::Release);
+        } else {
+            // No slot: the task would never run. Nothing waits for it after
+            // the failure (it is never claimed).
+            self.fail(FAILED_INVARIANT);
         }
     }
 
@@ -1033,14 +1228,29 @@ impl TaskBoard {
                 .compare_exchange(head, head + 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                return task.map_or(Next::NotYet, |t| Next::Task(t as usize));
+                #[cfg(feature = "test-hooks")]
+                let task = task.filter(|_| !self.injected(INJECT_MISSING_SLOT));
+                return match task {
+                    Some(t) => Next::Task(t as usize),
+                    None => {
+                        // A claim with no task: it settles itself, as a
+                        // failed completion, so a drain never waits for it.
+                        self.fail(FAILED_INVARIANT);
+                        self.completed.fetch_add(1, Ordering::AcqRel);
+                        Next::NotYet
+                    }
+                };
             }
         }
     }
 
-    /// Task `t` is complete: Release its writes, then release its successors.
-    fn complete(&self, t: usize, epoch: u64) {
-        if let Some(done) = self.done.get(t) {
+    /// Task `t` is complete: Release its writes (if it succeeded), then
+    /// release its successors. A failed task (`ok` false) fails the job and
+    /// never marks itself done, so no successor reads its rows.
+    fn complete(&self, t: usize, epoch: u64, ok: bool) {
+        if !ok {
+            self.fail(FAILED_PANIC);
+        } else if let Some(done) = self.done.get(t) {
             done.store(epoch, Ordering::Release);
         }
         let start = self.succ_start.get(t).copied().unwrap_or(0);
@@ -1049,10 +1259,13 @@ impl TaskBoard {
             let s = s as usize;
             // AcqRel: the last predecessor's decrement sees every other
             // predecessor's completion before it pushes the successor.
-            if let Some(p) = self.pending.get(s)
-                && p.fetch_sub(1, Ordering::AcqRel) == 1
-            {
-                self.push(s, epoch);
+            match self.pending.get(s) {
+                Some(p) => {
+                    if p.fetch_sub(1, Ordering::AcqRel) == 1 {
+                        self.push(s, epoch);
+                    }
+                }
+                None => self.fail(FAILED_INVARIANT),
             }
         }
         self.completed.fetch_add(1, Ordering::AcqRel);
@@ -1061,9 +1274,30 @@ impl TaskBoard {
     fn all_complete(&self) -> bool {
         self.completed.load(Ordering::Acquire) >= self.preds.len()
     }
+
+    /// The job failed for `why` (Release: before any claimant that sees it
+    /// skips its task); the first reason stays.
+    fn fail(&self, why: u8) {
+        let _ = self
+            .failed
+            .compare_exchange(0, why, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    fn failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire) != 0
+    }
+
+    /// Every claim made so far is settled: read `head`, then `completed`.
+    /// After a failure the caller waits only for this, never for tasks that
+    /// were never claimed.
+    fn drained(&self) -> bool {
+        let head = self.head.load(Ordering::Acquire);
+        self.completed.load(Ordering::Acquire) >= head
+    }
 }
 
 /// Where the test hook is called (`Engine::set_task_hook`).
+#[cfg(feature = "test-hooks")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HookPoint {
     /// A thread starts taking part in a job (lane 0 is the caller).
@@ -1097,7 +1331,9 @@ pub enum HookPoint {
 #[derive(Debug, Default)]
 pub(crate) struct PoolStats {
     pub(crate) worker_tasks: AtomicU64,
-    pub(crate) worker_panics: AtomicU64,
+    /// Tasks that failed (something unwound outside a primitive's call), on
+    /// any lane.
+    pub(crate) task_failures: AtomicU64,
     /// Whether task bodies are timed (the wake-up trace, M2.7-1).
     pub(crate) trace: bool,
     /// The longest task body since the callback began, in ns (0: none).
@@ -1112,6 +1348,7 @@ pub(crate) struct Job<'a> {
     cells: &'a PlanCells,
     epoch: u64,
     body: Body<'a>,
+    #[cfg(feature = "test-hooks")]
     hook: Option<fn(HookPoint)>,
     stats: &'a PoolStats,
 }
@@ -1122,7 +1359,6 @@ impl<'a> Job<'a> {
         cells: &'a mut PlanCells,
         epoch: u64,
         body: Body<'a>,
-        hook: Option<fn(HookPoint)>,
         stats: &'a PoolStats,
     ) -> Job<'a> {
         cells.board.reset(epoch);
@@ -1133,60 +1369,73 @@ impl<'a> Job<'a> {
             cells,
             epoch,
             body,
-            hook,
+            #[cfg(feature = "test-hooks")]
+            hook: None,
             stats,
         }
     }
 
+    /// Test hooks only: the hook its threads call (`Engine::set_task_hook`).
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn with_hook(mut self, hook: Option<fn(HookPoint)>) -> Job<'a> {
+        self.hook = hook;
+        self
+    }
+
+    /// Why the job failed, if it did (a task's unwind, or the board found
+    /// itself inconsistent): nothing of it may be published
+    /// (`docs/semantics.md` §14).
+    pub(crate) fn failure(&self) -> Option<FailureReason> {
+        match self.cells.board.failed.load(Ordering::Acquire) {
+            0 => None,
+            FAILED_PANIC => Some(FailureReason::TaskPanic),
+            _ => Some(FailureReason::InvariantViolation),
+        }
+    }
+
+    /// Test hooks only: calls the hook; an unwind from it fails the job.
+    #[cfg(feature = "test-hooks")]
+    fn hook(&self, point: HookPoint) {
+        if let Some(hook) = self.hook
+            && !caught(|| hook(point))
+        {
+            self.stats.task_failures.fetch_add(1, Ordering::Relaxed);
+            self.cells.board.fail(FAILED_PANIC);
+        }
+    }
+
     /// Takes part as lane `lane` until every task is claimed (a worker) or
-    /// complete (the caller, lane 0).
+    /// complete (the caller, lane 0), or, after a failure, until it has
+    /// nothing in hand (a worker) or every claim is settled (the caller).
     pub(crate) fn participate(&self, lane: usize) {
         if lane >= self.cells.lanes.len() {
             return;
         }
-        let hook = |point| {
-            if let Some(hook) = self.hook {
-                hook(point);
-            }
-        };
-        hook(HookPoint::Enter { lane });
+        #[cfg(feature = "test-hooks")]
+        self.hook(HookPoint::Enter { lane });
         let board = &self.cells.board;
         loop {
-            match board.claim(self.epoch) {
-                Next::Task(t) => {
-                    // Completes the task even if the hook or the body unwinds,
-                    // so that no thread waits for it forever.
-                    let completion = Completion {
-                        board,
-                        task: t,
-                        epoch: self.epoch,
-                        stats: self.stats,
-                    };
-                    hook(HookPoint::Task { lane, task: t });
-                    let began = self.stats.trace.then(std::time::Instant::now);
-                    let mut access = Access {
-                        cells: self.cells,
-                        token: Token::Task {
-                            task: t as u32,
-                            epoch: self.epoch,
-                        },
-                        lane,
-                        main: None,
-                        _thread: PhantomData,
-                    };
-                    (self.body)(&mut access, t);
-                    if let Some(began) = began {
-                        let body = u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX);
-                        self.stats
-                            .slowest_task_ns
-                            .fetch_max(body.max(1), Ordering::Relaxed);
-                    }
-                    hook(HookPoint::Done { lane, task: t });
-                    drop(completion);
-                    if lane != 0 {
-                        self.stats.worker_tasks.fetch_add(1, Ordering::Relaxed);
+            let next = board.claim(self.epoch);
+            if let Next::Task(t) = next {
+                // Settled before anything else below: a failed completion if
+                // the job has failed or the body unwinds, so no thread waits
+                // for this claim (and lane 0 never waits on its own).
+                let ran = !board.failed() && self.run(lane, t);
+                board.complete(t, self.epoch, ran);
+                if ran && lane != 0 {
+                    self.stats.worker_tasks.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            if board.failed() {
+                if lane == 0 {
+                    while !board.drained() {
+                        std::hint::spin_loop();
                     }
                 }
+                break;
+            }
+            match next {
+                Next::Task(_) => {}
                 Next::NotYet => {
                     if lane == 0 && board.all_complete() {
                         break;
@@ -1195,7 +1444,7 @@ impl<'a> Job<'a> {
                 }
                 Next::AllClaimed => {
                     if lane == 0 {
-                        while !board.all_complete() {
+                        while !board.all_complete() && !(board.failed() && board.drained()) {
                             std::hint::spin_loop();
                         }
                     }
@@ -1203,24 +1452,47 @@ impl<'a> Job<'a> {
                 }
             }
         }
-        hook(HookPoint::Leave { lane });
+        #[cfg(feature = "test-hooks")]
+        self.hook(HookPoint::Leave { lane });
     }
-}
 
-/// Marks a task complete when dropped, also while unwinding (counted).
-struct Completion<'a> {
-    board: &'a TaskBoard,
-    task: usize,
-    epoch: u64,
-    stats: &'a PoolStats,
-}
-
-impl Drop for Completion<'_> {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            self.stats.worker_panics.fetch_add(1, Ordering::Relaxed);
+    /// Runs task `t`'s body on lane `lane`; false if anything unwound in it
+    /// outside a primitive's call (a primitive's own panic is caught at its
+    /// call and mutes the instance, `docs/semantics.md` §14).
+    fn run(&self, lane: usize, t: usize) -> bool {
+        let body = || {
+            #[cfg(feature = "test-hooks")]
+            if let Some(hook) = self.hook {
+                hook(HookPoint::Task { lane, task: t });
+            }
+            let began = self.stats.trace.then(std::time::Instant::now);
+            let mut access = Access {
+                cells: self.cells,
+                token: Token::Task {
+                    task: t as u32,
+                    epoch: self.epoch,
+                },
+                lane,
+                main: None,
+                _thread: PhantomData,
+            };
+            (self.body)(&mut access, t);
+            if let Some(began) = began {
+                let body = u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                self.stats
+                    .slowest_task_ns
+                    .fetch_max(body.max(1), Ordering::Relaxed);
+            }
+            #[cfg(feature = "test-hooks")]
+            if let Some(hook) = self.hook {
+                hook(HookPoint::Done { lane, task: t });
+            }
+        };
+        let ran = caught(body);
+        if !ran {
+            self.stats.task_failures.fetch_add(1, Ordering::Relaxed);
         }
-        self.board.complete(self.task, self.epoch);
+        ran
     }
 }
 
@@ -1394,27 +1666,48 @@ mod tests {
     }
 
     /// The checked mode refuses a second write claim and a read of a claimed
-    /// element, and counts both.
+    /// element, and counts both, in the plan's refusals too (path 8 of
+    /// `docs/semantics.md` §14: detectable in checked builds only).
     #[cfg(debug_assertions)]
     #[test]
     fn checked_mode_refuses_and_counts_conflicts() {
         let cells = Cells::new(vec![0.0_f64; 4]);
+        let refusals = AtomicU64::new(0);
         let before = exclusivity().violations;
         // SAFETY: test of the tracker only; the first claim is the only
         // reference made, and the refused ones make none.
-        let first = unsafe { cells.slice_mut(0..2) };
+        let first = unsafe { cells.slice_mut(&refusals, 0..2) };
         assert!(first.is_some());
-        assert!(unsafe { cells.slice_mut(1..3) }.is_none());
-        assert!(unsafe { cells.slice(0..1) }.is_none());
+        assert!(unsafe { cells.slice_mut(&refusals, 1..3) }.is_none());
+        assert!(unsafe { cells.slice(&refusals, 0..1) }.is_none());
         assert!(exclusivity().violations >= before + 2);
+        assert_eq!(refusals.load(Ordering::Relaxed), 2);
         drop(first);
-        assert!(unsafe { cells.slice(0..2) }.is_some());
+        assert!(unsafe { cells.slice(&refusals, 0..2) }.is_some());
     }
 
     /// This thread's claimed elements so far.
     #[cfg(debug_assertions)]
     fn thread_claims() -> u64 {
         THREAD_CLAIMS.with(std::cell::Cell::get)
+    }
+
+    /// A reader of `cells`' rows outside `own`, at `frames`, whole-plan.
+    fn whole_reader<'t, T: Sync>(
+        cells: &'t Cells<T>,
+        own: Span<usize>,
+        frames: Span<usize>,
+        refusals: &'t AtomicU64,
+    ) -> Reader<'t, T> {
+        Reader {
+            cells,
+            check: Check::Whole,
+            own,
+            frames,
+            refusals,
+            #[cfg(feature = "test-hooks")]
+            refuse: None,
+        }
     }
 
     /// The checked mode claims each element: a view's window once, when it
@@ -1429,11 +1722,12 @@ mod tests {
         const K: usize = 8;
         // Rows 0 and 1: the viewed instance's two outputs; row 2: a source's.
         let cells = Cells::with_rows(vec![0.0_f64; 3 * K], K, vec![0, 0, 1]);
+        let refusals = AtomicU64::new(0);
         assert_eq!(cells.claims.len(), cells.data.len());
         let before = thread_claims();
         // A call over frames 2..4, with the frame before it.
         // SAFETY: test of the tracker only; nothing else references `cells`.
-        let mut window = unsafe { cells.window(&(0..2), 1..4) }.unwrap();
+        let mut window = unsafe { cells.window(&refusals, &(0..2), 1..4) }.unwrap();
         assert_eq!(thread_claims() - before, 2 * 3);
         for f in 2..4 {
             for p in 0..2 {
@@ -1441,12 +1735,7 @@ mod tests {
             }
         }
         assert_eq!(thread_claims() - before, 2 * 3, "the loop claims nothing");
-        let reader = Reader {
-            cells: &cells,
-            check: Check::Whole,
-            own: 0..2,
-            frames: 2..4,
-        };
+        let reader = whole_reader(&cells, 0..2, 2..4, &refusals);
         let signal = reader.frames(2, (2, 4));
         let modulation = reader.frames(2, (2, 4));
         assert!(signal.is_some() && modulation.is_some());
@@ -1460,43 +1749,72 @@ mod tests {
         let violations = exclusivity().violations;
         // SAFETY: as above; refused claims make no reference.
         assert!(
-            unsafe { cells.window(&(0..1), 1..2) }.is_none(),
+            unsafe { cells.window(&refusals, &(0..1), 1..2) }.is_none(),
             "frame 1 is held"
         );
         assert!(exclusivity().violations > violations);
-        let later = unsafe { cells.window(&(0..1), 4..K) };
+        let later = unsafe { cells.window(&refusals, &(0..1), 4..K) };
         assert!(later.is_some(), "other frames of the row are free");
         drop((later, window));
-        assert!(unsafe { cells.window(&(0..1), 1..2) }.is_some());
+        assert!(unsafe { cells.window(&refusals, &(0..1), 1..2) }.is_some());
     }
 
     /// A window for a call over frames 2..4 reaches the frame before the
     /// call and no other; at the block's first frame there is none before.
+    /// Each refused frame counts in the plan's refusals (path 7).
     #[test]
     fn a_window_reaches_its_predecessor_frame() {
         const K: usize = 8;
         let cells = Cells::with_rows((0..2 * K).map(|x| x as f64).collect(), K, Vec::new());
+        let refusals = AtomicU64::new(0);
         // SAFETY: test of the window only; nothing else references `cells`.
-        let mut window = unsafe { cells.window(&(0..2), 1..4) }.unwrap();
-        let violations = exclusivity().violations;
+        let mut window = unsafe { cells.window(&refusals, &(0..2), 1..4) }.unwrap();
         assert_eq!(window.get(1, 1), Some((K + 1) as f64), "the frame before");
         assert_eq!(window.frames(0, (2, 4)), Some(&[2.0, 3.0][..]));
         window.set(0, 3, -1.0);
         assert_eq!(window.get(0, 3), Some(-1.0));
+        assert_eq!(refusals.load(Ordering::Relaxed), 0);
         assert_eq!(window.get(0, 0), None, "two frames before");
         assert_eq!(window.get(0, 4), None, "after the call");
         assert_eq!(window.get(2, 2), None, "another instance's port");
-        assert!(exclusivity().violations >= violations + 3);
+        assert_eq!(refusals.load(Ordering::Relaxed), 3);
         drop(window);
-        let first = unsafe { cells.window(&(0..2), 0..2) }.unwrap();
+        let first = unsafe { cells.window(&refusals, &(0..2), 0..2) }.unwrap();
         assert_eq!(first.get(0, 0), Some(0.0));
         assert_eq!(
             first.frames(1, (0, 2)),
             Some(&[K as f64, (K + 1) as f64][..])
         );
+        assert!(
+            unsafe { cells.window(&refusals, &(0..1), 3..K + 1) }.is_none(),
+            "past the block"
+        );
+        assert_eq!(refusals.load(Ordering::Relaxed), 4);
     }
 
-    /// A task access may not view an instance of another task.
+    /// A reader refuses the viewed instance's own row, a row past the
+    /// stride and frames outside the call, each counted (paths 4 and 5).
+    #[test]
+    fn a_reader_counts_its_refusals() {
+        let cells = Cells::with_rows(vec![1.0, 2.0, 3.0, 4.0], 2, vec![0, 1]);
+        let refusals = AtomicU64::new(0);
+        let reader = whole_reader(&cells, 0..1, 0..2, &refusals);
+        assert!(reader.frames(1, (0, 2)).is_some());
+        assert_eq!(refusals.load(Ordering::Relaxed), 0);
+        let refused = |read: &dyn Fn() -> bool, what: &str| {
+            let before = refusals.load(Ordering::Relaxed);
+            assert!(read(), "{what}");
+            assert!(refusals.load(Ordering::Relaxed) > before, "{what} counted");
+        };
+        refused(&|| reader.frames(0, (0, 1)).is_none(), "its own row");
+        refused(&|| reader.frames(1, (1, 3)).is_none(), "outside the call");
+        refused(&|| reader.read(1, (0, 3)).is_none(), "past the stride");
+        refused(&|| reader.row(7).is_none(), "no such row");
+    }
+
+    /// A task access may not view an instance of another task, and counts
+    /// it (path 1); the doctests' whole-plan access is `None` by design and
+    /// counts nothing.
     #[test]
     fn a_task_access_refuses_a_foreign_instance() {
         let mut cells = PlanCells {
@@ -1505,14 +1823,23 @@ mod tests {
             ..PlanCells::default()
         };
         cells.board = TaskBoard::new(vec![0, 0], vec![Vec::new(), Vec::new()]);
-        let mut access = Access {
-            cells: &cells,
-            token: Token::Task { task: 0, epoch: 1 },
-            lane: 0,
-            main: None,
-            _thread: PhantomData,
-        };
-        assert!(access.call(1, 0, 1).is_none());
+        {
+            let mut access = Access {
+                cells: &cells,
+                token: Token::Task { task: 0, epoch: 1 },
+                lane: 0,
+                main: None,
+                _thread: PhantomData,
+            };
+            assert!(access.call(1, 0, 1).is_none());
+        }
+        assert!(cells.take_refusals() > 0);
+        assert!(cells.exclusive().call(0, 0, 1).is_none());
+        assert_eq!(
+            cells.take_refusals(),
+            0,
+            "whole-plan views are not refusals"
+        );
     }
 
     /// A caller that panics while a worker is in the job still closes the
@@ -1525,7 +1852,7 @@ mod tests {
         let mut cells = PlanCells::default();
         let stats = PoolStats::default();
         let body = |_: &mut Access<'_>, _: usize| {};
-        let job = Job::new(&mut cells, 1, &body, None, &stats);
+        let job = Job::new(&mut cells, 1, &body, &stats);
         let (joined, left) = (AtomicBool::new(false), AtomicBool::new(false));
         std::thread::scope(|s| {
             s.spawn(|| {
@@ -1562,31 +1889,123 @@ mod tests {
         });
     }
 
-    /// A reader refuses a row whose producer has not completed in this epoch,
-    /// and reads it once it has.
+    /// A reader of task 1's of epoch 3 over `cells`.
+    fn task_reader<'t>(
+        cells: &'t Cells<f64>,
+        board: &'t TaskBoard,
+        instance_task: &'t [u32],
+        refusals: &'t AtomicU64,
+    ) -> Reader<'t, f64> {
+        Reader {
+            cells,
+            check: Check::Task {
+                task: 1,
+                epoch: 3,
+                instance_task,
+                board,
+            },
+            own: 0..0,
+            frames: 0..1,
+            refusals,
+            #[cfg(feature = "test-hooks")]
+            refuse: None,
+        }
+    }
+
+    /// A reader refuses a row whose producer has not completed in this epoch
+    /// (path 3, counted), and reads it once it has.
     #[test]
     fn a_reader_waits_for_the_producer() {
         let mut board = TaskBoard::new(vec![0, 1], vec![vec![1], Vec::new()]);
         board.reset(3);
         let cells = Cells::with_rows(vec![1.0, 2.0], 1, vec![0, 1]);
         let instance_task = [0_u32, 1];
-        let reader = Reader {
-            cells: &cells,
-            check: Check::Task {
-                task: 1,
-                epoch: 3,
-                instance_task: &instance_task,
-                board: &board,
-            },
-            own: 0..0,
-            frames: 0..1,
-        };
+        let refusals = AtomicU64::new(0);
+        let reader = task_reader(&cells, &board, &instance_task, &refusals);
         assert!(reader.row(0).is_none());
+        assert!(refusals.load(Ordering::Relaxed) > 0);
         assert_eq!(reader.row(1).as_deref(), Some(&[2.0][..]));
         assert_eq!(board.claim(3), Next::Task(0));
-        board.complete(0, 3);
+        board.complete(0, 3, true);
         assert_eq!(reader.row(0).as_deref(), Some(&[1.0][..]));
         assert_eq!(board.claim(3), Next::Task(1));
         assert_eq!(board.claim(3), Next::AllClaimed);
+        assert!(!board.failed());
+    }
+
+    /// AC-TASK: a failed task fails the job and is never marked done, so its
+    /// successor's reads of its rows are refused even after its completion.
+    #[test]
+    fn a_failed_task_is_never_read() {
+        let mut board = TaskBoard::new(vec![0, 1], vec![vec![1], Vec::new()]);
+        board.reset(3);
+        let cells = Cells::with_rows(vec![1.0, 2.0], 1, vec![0, 1]);
+        let instance_task = [0_u32, 1];
+        let refusals = AtomicU64::new(0);
+        let reader = task_reader(&cells, &board, &instance_task, &refusals);
+        assert_eq!(board.claim(3), Next::Task(0));
+        board.complete(0, 3, false);
+        assert!(board.failed());
+        assert!(reader.row(0).is_none(), "a failed producer's row");
+        assert!(refusals.load(Ordering::Relaxed) > 0);
+        assert!(board.drained());
+    }
+
+    /// Path 11: a claim that advances `head` and finds its slot empty settles
+    /// itself as a failed completion, so a drain never waits for it. The
+    /// board is reset whole (the slot's epoch published), then only `ready`
+    /// is cut short.
+    #[test]
+    fn a_claim_with_an_empty_slot_settles_itself() {
+        let mut board = TaskBoard::new(vec![0], vec![Vec::new()]);
+        board.reset(1);
+        board.ready = Box::new([]);
+        assert_eq!(board.claim(1), Next::NotYet);
+        assert!(board.failed());
+        assert_eq!(board.head.load(Ordering::Relaxed), 1);
+        assert_eq!(board.completed.load(Ordering::Relaxed), 1);
+        assert!(board.drained());
+        assert_eq!(board.claim(1), Next::AllClaimed);
+    }
+
+    /// A job whose first claim finds an empty slot ends, on the caller and
+    /// a worker, with the job failed (an invariant) and nothing left joined:
+    /// the drain waits only for the claims made. Under a watchdog.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn a_job_with_a_missing_slot_ends() {
+        let (done, outcome) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let tasks = 4;
+            let mut cells = PlanCells {
+                lanes: Cells::new((0..2).map(|_| Lane::default()).collect()),
+                outs: Cells::new((0..tasks).map(|_| Out::default()).collect()),
+                ..PlanCells::default()
+            };
+            cells.board = TaskBoard::new(vec![0; tasks], vec![Vec::new(); tasks]);
+            cells.inject(Armed::MissingSlot);
+            let stats = PoolStats::default();
+            let body = |_: &mut Access<'_>, _: usize| {};
+            let (gate, mut opener) = Gate::new();
+            let job = Job::new(&mut cells, 1, &body, &stats);
+            let over = std::sync::atomic::AtomicBool::new(false);
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    let mut seen = 0;
+                    while !over.load(Ordering::SeqCst)
+                        && !gate.join(&mut seen, |job| job.participate(1))
+                    {
+                        std::hint::spin_loop();
+                    }
+                });
+                opener.serve(&job, || {}, |job| job.participate(0));
+                over.store(true, Ordering::SeqCst);
+            });
+            let _ = done.send(job.failure());
+        });
+        let failure = outcome
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the job hung");
+        assert_eq!(failure, Some(FailureReason::InvariantViolation));
     }
 }

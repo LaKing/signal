@@ -27,7 +27,7 @@ Development runs through **devpanel** (`~/devpanel`, project `signal-project`); 
 ## Hard rules
 1. **No domain concepts in the core.** `signal-core`, `signal-graph`, and `signal-engine` know frames, ports, events, and addresses only. Tempo, MIDI, DMX, and video belong to library modules (ADR 0001, 0003).
 2. **Real-time rules are mandatory** for `process` and the executor: no allocation, locks, I/O, or panics (`docs/realtime-rules.md`).
-3. **Determinism.** No wall-clock time or unseeded randomness in semantics. Output must be identical for any *k*-partition of frames and any number of worker threads (ADR 0002, 0008, 0019). Where sources meet, combine them in canonical source order, never in arrival order.
+3. **Determinism.** No wall-clock time or unseeded randomness in semantics. Output must be identical for any *k*-partition of frames and any number of worker threads (ADR 0002, 0008, 0019); the one exception is after a module panics in a call of several frames (`docs/semantics.md` §14). Where sources meet, combine them in canonical source order, never in arrival order.
 4. **Text is the source of truth.** Anything a project means must be expressible in its files. The GUI and tools edit files; they hold no hidden state (ADR 0009, 0013).
 5. **Experimental work goes in `lab/`** behind the `lab` feature. Promotion requires the contract suite, benchmarks, and a recorded human verdict (ADR 0015).
 6. **Metrics never decide quality.** Present renders and metrics; a human records the verdict.

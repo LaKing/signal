@@ -7,6 +7,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,9 +16,9 @@ use serde_json::Value;
 use signal_audio::rt_thread;
 use signal_core::{Curve, EventPayload, Fnv1a64, Frame, InstanceAddress, PortAddress, Registry};
 use signal_engine::{
-    CallbackSizes, ControlSink, Controller, Driver, Engine, EngineConfig, LogLine, NullDriver,
-    Outcome, Provenance, RealtimeConfig, Report, RtOptions, RtPolicy, Schedule, SentCommand, Stamp,
-    realtime, realtime_with, render,
+    CallbackSizes, ControlSink, Controller, Driver, Engine, EngineConfig, HookPoint, LogLine,
+    NullDriver, Outcome, Provenance, RealtimeConfig, Report, RtOptions, RtPolicy, Runner, Schedule,
+    SentCommand, Stamp, realtime, realtime_with, render,
 };
 use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, InstanceDef, build_plan};
 use signal_project::session::{self, LiveRecorder, Session, SessionRecorder, replay};
@@ -268,11 +270,51 @@ impl ControlSink for Tee<'_> {
 
 /// The session of the AC2 tests through the Controller and the null driver
 /// (seeded random callback sizes) with `config`, checked as it records.
+/// Runners on workers in this file run one at a time, so that
+/// [`WORKER_TASKS`] counts only theirs.
+static THREADED: Mutex<()> = Mutex::new(());
+
+/// Tasks a worker started in the threaded run now going.
+static WORKER_TASKS: AtomicU64 = AtomicU64::new(0);
+
+/// The task hook of a threaded run: the calling thread waits (up to 100 ms)
+/// at the start of each job until a worker has started a task, so that
+/// workers do run tasks even where the calling thread alone would be quicker
+/// (release builds). Timing only: it changes no output.
+fn workers_take_part(point: HookPoint) {
+    match point {
+        HookPoint::Enter { lane: 0 } => {
+            let before = WORKER_TASKS.load(Ordering::SeqCst);
+            let start = Instant::now();
+            while WORKER_TASKS.load(Ordering::SeqCst) == before
+                && start.elapsed() < Duration::from_millis(100)
+            {
+                std::hint::spin_loop();
+            }
+        }
+        HookPoint::Task { lane, .. } if lane > 0 => {
+            WORKER_TASKS.fetch_add(1, Ordering::SeqCst);
+        }
+        _ => {}
+    }
+}
+
+/// With workers, steers `runner` into using them ([`workers_take_part`]) and
+/// holds the file's lock on threaded runs until the guard is dropped.
+fn steer(runner: &mut Runner, threads: usize) -> Option<MutexGuard<'static, ()>> {
+    (threads > 1).then(|| {
+        runner.set_task_hook(Some(workers_take_part));
+        THREADED.lock().unwrap_or_else(|e| e.into_inner())
+    })
+}
+
 fn controller_session(config: RealtimeConfig) -> SessionRun {
     const FRAMES: u64 = SESSION_FRAMES;
     let mut live = live_recorder();
     let mut log = Vec::new();
-    let (runner, mut controller) = start(config);
+    let threads = config.engine.threads;
+    let (mut runner, mut controller) = start(config);
+    let _threaded = steer(&mut runner, threads);
     let mut driver = NullDriver::new(8_000, 2, 5);
     driver.start(runner).unwrap();
     let mut poll = |controller: &mut Controller, live: &mut LiveRecorder| {
@@ -403,12 +445,14 @@ fn waiter(policy: RtPolicy, threads: usize) -> &'static str {
     }
 }
 
-/// The checked mode's exclusivity tracker ran and found nothing.
-fn assert_checked() {
+/// Nothing was refused; and where the checked mode's exclusivity tracker is
+/// compiled in (debug builds), it ran.
+fn assert_no_violation() {
     let exclusivity = signal_engine::exclusivity();
-    assert!(exclusivity.checked, "the matrix runs with the tracker on");
-    assert!(exclusivity.claims > 0);
     assert_eq!(exclusivity.violations, 0);
+    if exclusivity.checked {
+        assert!(exclusivity.claims > 0);
+    }
 }
 
 /// M2.6-2 AC1: the Controller-driven session (sets, a ramp, a trigger, a
@@ -444,7 +488,7 @@ fn the_controller_session_is_bit_identical_on_threads() {
         frames: SESSION_FRAMES,
         session: dir,
     });
-    assert_checked();
+    assert_no_violation();
 }
 
 /// Keeps the log as `log.jsonl` lines.
@@ -487,9 +531,10 @@ fn runner_matrix(name: &str, plan: &ExecutionPlan, (rate, seed): (u32, u64), fra
             for k in BLOCKS {
                 let at = format!("{name}, {policy}, {threads} threads, k = {k}");
                 let config = on_threads(RealtimeConfig::new(rate, seed), threads, k, policy);
-                let (runner, mut controller) =
+                let (mut runner, mut controller) =
                     realtime_with(plan, &registry, config, Some(rt_thread::mach_semaphores))
                         .unwrap();
+                let _threaded = steer(&mut runner, threads);
                 assert_eq!(
                     runner.schedule_stats().waiter,
                     waiter(policy, threads),
@@ -520,7 +565,7 @@ fn runner_matrix(name: &str, plan: &ExecutionPlan, (rate, seed): (u32, u64), fra
             }
         }
     }
-    assert_checked();
+    assert_no_violation();
 }
 
 fn project_plan(name: &str) -> (ExecutionPlan, (u32, u64)) {

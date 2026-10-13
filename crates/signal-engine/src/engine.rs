@@ -28,12 +28,15 @@ use crate::cores::performance_cores;
 use crate::error::EngineError;
 use crate::fade::{FAULT_FADE_FRAMES, Fade, fade_frames, fade_in, fade_out};
 use crate::log::{
-    DiscardReason, FaultReason, InstanceId, LineSource, LogLine, LogRecord, LogSource, PortId,
+    DiscardReason, EngineFailure, FailureReason, FaultReason, InstanceId, LineSource, LogLine,
+    LogRecord, LogSource, PortId,
 };
 use crate::manifest::SameMachine;
 use crate::parameter::{Applied, Base, effective};
 use crate::pool::{Pool, Workers};
-use crate::shared::{Access, CallView, HookPoint, Job, Layout, Parts, PlanCells, Reader, Window};
+use crate::shared::{Access, CallView, Job, Layout, Parts, PlanCells, Reader, Window, caught};
+#[cfg(feature = "test-hooks")]
+use crate::shared::{Armed, HookPoint, Refuse};
 use crate::tasks::{DEFAULT_COST_NS, TASK_MIN_NS, Tasks, tasks};
 use crate::units::{Unit, Units, units};
 use crate::wake::{MakeWaiter, RtPolicy, WakeStats};
@@ -1024,7 +1027,10 @@ impl PlanState {
             } => LogLine::Fault {
                 frame,
                 address: self.instances.get(instance.0)?,
-                port: self.ports.get(port.0)?,
+                // A fault of an instance without outputs (a `panic`, or a
+                // `late_result`) names no port; its line is still written
+                // (`docs/semantics.md` §9, §14).
+                port: self.ports.get(port.0),
                 reason,
             },
         })
@@ -1345,7 +1351,11 @@ pub struct Engine {
     /// The parallel segments run, which is also each one's job epoch.
     parallel_segments: u64,
     /// The test hook (`set_task_hook`).
+    #[cfg(feature = "test-hooks")]
     hook: Option<fn(HookPoint)>,
+    /// Why the engine stopped (`docs/semantics.md` §14): it runs no frame
+    /// after.
+    failure: Option<EngineFailure>,
     /// Why the `semaphore` policy's waiter could not be made (it parks).
     waiter_error: Option<String>,
 }
@@ -1369,13 +1379,31 @@ pub struct ScheduleStats {
     pub parallel_segments: u64,
     /// Tasks the workers ran (not the calling thread).
     pub worker_tasks: u64,
-    /// Tasks whose body unwound on a worker; that worker is gone.
-    pub worker_panics: u64,
+    /// Tasks that failed (something unwound outside a primitive's call), on
+    /// any lane; each stopped the engine (`docs/semantics.md` §14).
+    pub task_failures: u64,
     /// The wake policy.
     pub policy: RtPolicy,
     /// What idle workers block on: `"park"`, or `"semaphore"` (the policy's
     /// waiter); `"none"` without workers.
     pub waiter: &'static str,
+}
+
+/// Test hooks only: a broken invariant for [`Engine::inject`] to arm, found
+/// by the next blocks as a defect would be (`docs/semantics.md` §14).
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Injection {
+    /// Every view of this instance is refused (on the calling thread alone,
+    /// its parts are not found).
+    RefuseView(InstanceAddress),
+    /// Every read of this instance's rows by another task is refused.
+    RefuseRead(InstanceAddress),
+    /// The next push of a ready task finds no slot.
+    DropReady,
+    /// The next claim of a task finds its slot empty.
+    MissingSlot,
 }
 
 /// What a block call's gather changes besides parameter bases, saved so that
@@ -1507,7 +1535,9 @@ impl Engine {
             pool: (workers > 0 || config.schedule.trace)
                 .then(|| Pool::new(workers, &config.schedule, waiter)),
             parallel_segments: 0,
+            #[cfg(feature = "test-hooks")]
             hook: None,
+            failure: None,
             waiter_error,
         })
     }
@@ -1781,9 +1811,13 @@ impl Engine {
     /// Allocates nothing. The block's records are in
     /// [`frame_log`](Engine::frame_log) until the next call, or until
     /// [`drain_log`](Engine::drain_log).
+    ///
+    /// A failure of the engine itself (`docs/semantics.md` §14) stops it: the
+    /// call returns 0, the block's frames and log are not to be used, and
+    /// [`failure`](Engine::failure) says why; every later call returns 0.
     pub fn run_block(&mut self, frames: usize) -> usize {
         let k = frames.min(self.plan.capacity);
-        if k == 0 {
+        if k == 0 || self.failure.is_some() {
             return 0;
         }
         let start = self.next_frame;
@@ -1812,7 +1846,11 @@ impl Engine {
                 .next_edit_after(frame)
                 .and_then(|next| usize::try_from(next.0.saturating_sub(start.0)).ok())
                 .map_or(k, |b| b.clamp(a + 1, k));
-            self.run_segment(a, b);
+            if let Some(reason) = self.run_segment(a, b) {
+                self.failure = Some(EngineFailure { frame, reason });
+                self.plan.out.log.clear();
+                return 0;
+            }
             self.refresh_last(b - 1);
             a = b;
         }
@@ -1967,8 +2005,10 @@ impl Engine {
     /// as tasks on the workers too (ADR 0019 §2). Either way each unit writes
     /// only its own instances' rows and reads its sources' in canonical
     /// order, and the tasks' logs are joined in task order, which is unit
-    /// order: the result is the same bit for bit.
-    fn run_segment(&mut self, a: usize, b: usize) {
+    /// order: the result is the same bit for bit. Returns why the engine
+    /// failed in it, if it did (`docs/semantics.md` §14): a task unwound
+    /// outside a primitive's call, or an access was refused.
+    fn run_segment(&mut self, a: usize, b: usize) -> Option<FailureReason> {
         let parallel = self.parallel(b - a);
         let trace = self.config.schedule.trace;
         let plan = &mut self.plan;
@@ -1998,16 +2038,18 @@ impl Engine {
                     }
                 };
                 let (mut dispatch, stats) = pool.split();
-                let job = Job::new(
-                    &mut plan.cells,
-                    self.parallel_segments,
-                    &body,
-                    self.hook,
-                    stats,
-                );
+                let job = Job::new(&mut plan.cells, self.parallel_segments, &body, stats);
+                #[cfg(feature = "test-hooks")]
+                let job = job.with_hook(self.hook);
                 // The job holds the cells until it is run: no worker is in it
                 // once `run` returns.
                 dispatch.run(&job);
+                if let Some(reason) = job.failure() {
+                    return Some(reason);
+                }
+                if plan.cells.take_refusals() > 0 {
+                    return Some(FailureReason::InvariantViolation);
+                }
                 let main = &mut plan.out;
                 for out in plan.cells.outs.get_mut() {
                     for record in out.log.drain(..) {
@@ -2019,6 +2061,8 @@ impl Engine {
                 }
             }
             pool => {
+                #[cfg(feature = "test-hooks")]
+                let refuse_view = plan.cells.refused_view();
                 let c = &mut plan.cells;
                 if let Some(lane) = c.lanes.get_mut().first_mut() {
                     let mut whole = Whole {
@@ -2034,34 +2078,48 @@ impl Engine {
                         emitted: c.emitted.get_mut(),
                         lane,
                         out: &mut plan.out,
+                        refused: false,
+                        #[cfg(feature = "test-hooks")]
+                        refuse_view,
                     };
-                    match pool.filter(|_| trace) {
-                        // The wake-up trace (M2.7-1): the same units in the
-                        // same order, task by task (tasks are contiguous runs
-                        // of the unit order), each task's body timed, so a
-                        // segment on the calling thread has its slowest task
-                        // too.
-                        Some(pool) => {
-                            let tasks = &plan.tasks;
-                            let mut slowest = 0u64;
-                            for t in 0..tasks.len() {
-                                let began = Instant::now();
-                                for u in tasks.units(t) {
+                    let pool = pool.as_deref();
+                    // Anything that unwinds here is outside a primitive's
+                    // call (those are caught at the call): the engine fails.
+                    let ran = caught(|| {
+                        match pool.filter(|_| trace) {
+                            // The wake-up trace (M2.7-1): the same units in the
+                            // same order, task by task (tasks are contiguous runs
+                            // of the unit order), each task's body timed, so a
+                            // segment on the calling thread has its slowest task
+                            // too.
+                            Some(pool) => {
+                                let tasks = &plan.tasks;
+                                let mut slowest = 0u64;
+                                for t in 0..tasks.len() {
+                                    let began = Instant::now();
+                                    for u in tasks.units(t) {
+                                        whole_unit(&fx, &mut whole, u);
+                                    }
+                                    let body = u64::try_from(began.elapsed().as_nanos())
+                                        .unwrap_or(u64::MAX);
+                                    slowest = slowest.max(body.max(1));
+                                }
+                                pool.stats()
+                                    .slowest_task_ns
+                                    .fetch_max(slowest, Ordering::Relaxed);
+                            }
+                            None => {
+                                for u in 0..fx.units.order.len() {
                                     whole_unit(&fx, &mut whole, u);
                                 }
-                                let body =
-                                    u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX);
-                                slowest = slowest.max(body.max(1));
-                            }
-                            pool.stats()
-                                .slowest_task_ns
-                                .fetch_max(slowest, Ordering::Relaxed);
-                        }
-                        None => {
-                            for u in 0..fx.units.order.len() {
-                                whole_unit(&fx, &mut whole, u);
                             }
                         }
+                    });
+                    if !ran {
+                        return Some(FailureReason::TaskPanic);
+                    }
+                    if whole.refused {
+                        return Some(FailureReason::InvariantViolation);
                     }
                 }
             }
@@ -2076,6 +2134,7 @@ impl Engine {
         self.late_results = self
             .late_results
             .saturating_add(mem::take(&mut out.late_results));
+        None
     }
 
     /// The last frame's values: block frame `f`'s outputs, signal inputs and
@@ -2112,10 +2171,39 @@ impl Engine {
 
     /// Calls `hook` when a thread enters and leaves a parallel segment, and
     /// before and after the body of each task it runs (tests: delays,
-    /// allocation guards; the bench: the wake-up tail).
+    /// allocation guards, failures). Tests only (feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn set_task_hook(&mut self, hook: Option<fn(HookPoint)>) {
         self.hook = hook;
+    }
+
+    /// Arms a broken invariant for the next blocks to find, as a defect
+    /// would (`docs/semantics.md` §14). Tests only (feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn inject(&mut self, injection: Injection) {
+        let index = |address: &InstanceAddress| {
+            self.plan
+                .instances
+                .iter()
+                .position(|a| a == address)
+                .unwrap_or(usize::MAX)
+        };
+        let armed = match injection {
+            Injection::RefuseView(address) => Armed::Refuse(Refuse::View(index(&address))),
+            Injection::RefuseRead(address) => Armed::Refuse(Refuse::Read(index(&address))),
+            Injection::DropReady => Armed::DropReady,
+            Injection::MissingSlot => Armed::MissingSlot,
+        };
+        self.plan.cells.inject(armed);
+    }
+
+    /// Why the engine stopped, if it did (`docs/semantics.md` §14): it ran
+    /// nothing of that block's frames that anyone may use, and runs no
+    /// further frame.
+    pub fn failure(&self) -> Option<EngineFailure> {
+        self.failure
     }
 
     /// How the engine schedules its blocks.
@@ -2133,7 +2221,7 @@ impl Engine {
             estimate_ns: self.plan.tasks.estimate_ns.round() as u64,
             parallel_segments: self.parallel_segments,
             worker_tasks: count(stats.map(|s| &s.worker_tasks)),
-            worker_panics: count(stats.map(|s| &s.worker_panics)),
+            task_failures: count(stats.map(|s| &s.task_failures)),
             policy: self.config.schedule.policy,
             waiter: match pool {
                 None => "none",
@@ -2467,7 +2555,7 @@ fn run_unit(fx: &Fixed<'_>, access: &mut Access<'_>, u: usize) {
             for f in a..b {
                 if let Some(mut v) = access.call(i, f, f + 1) {
                     emit(fx, &mut v, i, f);
-                    absorb(fx, &mut v, f);
+                    absorb(fx, &mut v, i, f);
                 }
             }
         }
@@ -2487,7 +2575,7 @@ fn run_unit(fx: &Fixed<'_>, access: &mut Access<'_>, u: usize) {
                 }
                 for i in state_outputs.clone().filter_map(member) {
                     if let Some(mut v) = access.call(i, f, f + 1) {
-                        absorb(fx, &mut v, f);
+                        absorb(fx, &mut v, i, f);
                     }
                 }
             }
@@ -2513,12 +2601,24 @@ fn run_direct(fx: &Fixed<'_>, access: &mut Access<'_>, i: usize, a: usize, b: us
             for sink in v.sinks.iter_mut() {
                 sink.start_call(len);
             }
-            if let Some(Primitive::Direct(module)) = v.primitive.as_mut() {
-                process(
-                    module.as_mut(),
-                    (&*v.slot, &mut *v.lane, &mut *v.sinks),
-                    len,
-                );
+            let completed = match v.primitive.as_mut() {
+                Some(Primitive::Direct(module)) => guarded(|| {
+                    process(
+                        module.as_mut(),
+                        (&*v.slot, &mut *v.lane, &mut *v.sinks),
+                        len,
+                    );
+                }),
+                _ => true,
+            };
+            if !completed {
+                let fault = panicked(fx, &mut running(&mut v), a);
+                mute(fx, &mut gathering(&mut v), i, (a, b), rollback, fault);
+                let mut r = running(&mut v);
+                for f in a..b {
+                    fade_muted(fx, &mut r, f);
+                }
+                return;
             }
             let fault = commit(fx, &mut running(&mut v), a, b);
             keep_events(&mut running(&mut v), a, b, fault.map(|(n, _, _)| n));
@@ -2552,11 +2652,20 @@ fn emit(fx: &Fixed<'_>, v: &mut CallView<'_>, i: usize, f: usize) {
             for sink in v.sinks.iter_mut() {
                 sink.start_call(1);
             }
-            if let Some(Primitive::StateOutput(module)) = v.primitive.as_mut() {
-                if v.slot.latent {
-                    await_due(fx, module.as_mut(), &*v.slot, &mut *v.out, (i, f));
-                }
-                emit_call(module.as_mut(), (&*v.slot, &mut *v.lane, &mut *v.sinks));
+            let completed = match v.primitive.as_mut() {
+                Some(Primitive::StateOutput(module)) => guarded(|| {
+                    if v.slot.latent {
+                        await_due(fx, module.as_mut(), &*v.slot, &mut *v.out, (i, f));
+                    }
+                    emit_call(module.as_mut(), (&*v.slot, &mut *v.lane, &mut *v.sinks));
+                }),
+                _ => true,
+            };
+            if !completed {
+                let fault = panicked(fx, &mut running(v), f);
+                mute(fx, &mut gathering(v), i, (f, f + 1), false, fault);
+                fade_muted(fx, &mut running(v), f);
+                return;
             }
             let fault = commit(fx, &mut running(v), f, f + 1);
             keep_events(&mut running(v), f, f + 1, fault.map(|(n, _, _)| n));
@@ -2571,14 +2680,16 @@ fn emit(fx: &Fixed<'_>, v: &mut CallView<'_>, i: usize, f: usize) {
 }
 
 /// Phase 4 for one state-output instance at frame `f` of the block.
-fn absorb(fx: &Fixed<'_>, v: &mut CallView<'_>, f: usize) {
+fn absorb(fx: &Fixed<'_>, v: &mut CallView<'_>, i: usize, f: usize) {
     if gather(fx, &mut gathering(v), f, f + 1) != Mode::Running {
         return;
     }
     let ports = (v.slot.signal_in.len(), v.slot.params.len());
     load_call(v.lane, (&v.signal_in, &v.param_rows), ports, f, 1);
-    if let Some(Primitive::StateOutput(module)) = v.primitive.as_mut() {
-        absorb_call(module.as_mut(), (&*v.slot, &*v.lane));
+    if let Some(Primitive::StateOutput(module)) = v.primitive.as_mut()
+        && !guarded(|| absorb_call(module.as_mut(), (&*v.slot, &*v.lane)))
+    {
+        absorb_panicked(fx, &mut running(v), i, f);
     }
 }
 
@@ -2767,9 +2878,36 @@ struct Whole<'p> {
     emitted: &'p mut [Vec<Event>],
     lane: &'p mut Lane,
     out: &'p mut Out,
+    /// An instance's parts were not in the buffers ([`has`](Whole::has)): a
+    /// broken invariant, which stops the engine (`docs/semantics.md` §14).
+    refused: bool,
+    /// Test hooks only: the instance whose parts are refused.
+    #[cfg(feature = "test-hooks")]
+    refuse_view: Option<usize>,
 }
 
 impl Whole<'_> {
+    /// Whether instance `i`'s parts are all in the plan's buffers, as they
+    /// are in a correct run; otherwise a refusal, as a view's would be.
+    #[inline(always)]
+    fn has(&mut self, i: usize) -> bool {
+        let k = self.k;
+        let has = self.slots.get(i).is_some_and(|s| {
+            s.params.end <= self.params.len()
+                && s.signal_out.end <= self.held.len()
+                && s.event_out.end <= self.sinks.len().min(self.emitted.len())
+                && s.signal_out.end.saturating_mul(k) <= self.outputs.len()
+                && s.signal_in.end.saturating_mul(k) <= self.signal_in.len()
+                && s.params.end.saturating_mul(k) <= self.param_rows.len()
+        });
+        #[cfg(feature = "test-hooks")]
+        let has = has && self.refuse_view != Some(i);
+        if !has {
+            self.refused = true;
+        }
+        has
+    }
+
     /// Instance `i`'s parts for [`gather`].
     #[inline(always)]
     fn gathering(
@@ -2899,6 +3037,9 @@ fn whole_unit(fx: &Fixed<'_>, w: &mut Whole<'_>, u: usize) {
 
 /// [`run_direct`] for a sequential segment.
 fn whole_direct(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, a: usize, b: usize) {
+    if !w.has(i) {
+        return;
+    }
     let len = b - a;
     let rollback = len > 1 && w.slots.get(i).is_some_and(|s| s.mode() == Mode::Running);
     let mode = {
@@ -2920,8 +3061,20 @@ fn whole_direct(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, a: usize, b: usize)
             for sink in sinks.iter_mut() {
                 sink.start_call(len);
             }
-            if let Some(Some(Primitive::Direct(module))) = w.primitives.get_mut(i) {
-                process(module.as_mut(), (slot, &mut *w.lane, sinks), len);
+            let completed = match w.primitives.get_mut(i) {
+                Some(Some(Primitive::Direct(module))) => {
+                    let lane = &mut *w.lane;
+                    guarded(|| process(module.as_mut(), (slot, lane, sinks), len))
+                }
+                _ => true,
+            };
+            if !completed {
+                let Some(mut r) = w.running(i) else {
+                    return;
+                };
+                let fault = panicked(fx, &mut r, a);
+                w.mute(fx, i, (a, b), rollback, fault);
+                return;
             }
             let fault = {
                 let Some(mut r) = w.running(i) else {
@@ -2954,6 +3107,9 @@ fn whole_direct(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, a: usize, b: usize)
 
 /// [`emit`] for a sequential segment.
 fn whole_emit(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, f: usize) {
+    if !w.has(i) {
+        return;
+    }
     let Some(slot) = w.slots.get(i) else {
         return;
     };
@@ -2963,11 +3119,25 @@ fn whole_emit(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, f: usize) {
             for sink in sinks.iter_mut() {
                 sink.start_call(1);
             }
-            if let Some(Some(Primitive::StateOutput(module))) = w.primitives.get_mut(i) {
-                if slot.latent {
-                    await_due(fx, module.as_mut(), slot, &mut *w.out, (i, f));
+            let completed = match w.primitives.get_mut(i) {
+                Some(Some(Primitive::StateOutput(module))) => {
+                    let (lane, out) = (&mut *w.lane, &mut *w.out);
+                    guarded(|| {
+                        if slot.latent {
+                            await_due(fx, module.as_mut(), slot, out, (i, f));
+                        }
+                        emit_call(module.as_mut(), (slot, lane, sinks));
+                    })
                 }
-                emit_call(module.as_mut(), (slot, &mut *w.lane, sinks));
+                _ => true,
+            };
+            if !completed {
+                let Some(mut r) = w.running(i) else {
+                    return;
+                };
+                let fault = panicked(fx, &mut r, f);
+                w.mute(fx, i, (f, f + 1), false, fault);
+                return;
             }
             let fault = {
                 let Some(mut r) = w.running(i) else {
@@ -2996,6 +3166,9 @@ fn whole_emit(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, f: usize) {
 
 /// [`absorb`] for a sequential segment.
 fn whole_absorb(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, f: usize) {
+    if !w.has(i) {
+        return;
+    }
     let mode = {
         let Some(mut g) = w.gathering(i) else {
             return;
@@ -3006,10 +3179,15 @@ fn whole_absorb(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, f: usize) {
         return;
     }
     w.load_call(i, f, 1);
-    if let (Some(slot), Some(Some(Primitive::StateOutput(module)))) =
-        (w.slots.get(i), w.primitives.get_mut(i))
-    {
-        absorb_call(module.as_mut(), (slot, &*w.lane));
+    let completed = match (w.slots.get(i), w.primitives.get_mut(i)) {
+        (Some(slot), Some(Some(Primitive::StateOutput(module)))) => {
+            let lane = &*w.lane;
+            guarded(|| absorb_call(module.as_mut(), (slot, lane)))
+        }
+        _ => true,
+    };
+    if !completed && let Some(mut r) = w.running(i) {
+        absorb_panicked(fx, &mut r, i, f);
     }
 }
 
@@ -3494,6 +3672,66 @@ fn apply(
         }
     };
     push_record(&mut out.log, &mut out.log_overflows, record);
+}
+
+/// Runs one call of a primitive; false if it panicked. The panic goes no
+/// further, nor does one from its payload's destructor ([`caught`]): the
+/// caller mutes the instance (`docs/semantics.md` §14). Nothing of the call
+/// is trusted, so nothing it wrote is read again.
+#[inline(always)]
+fn guarded(call: impl FnOnce()) -> bool {
+    caught(call)
+}
+
+/// After a `process` or `emit` call over frames `a..` panicked: none of its
+/// outputs or events is published, and the outputs fade from what readers
+/// saw at `a − 1`, as for a fault found at `a` ([`commit`]). Returns the
+/// fault for [`mute`]: frame `a`, the first output port (signal, then event;
+/// none for an instance without outputs), reason `panic`.
+fn panicked<R: Own>(fx: &Fixed<'_>, r: &mut Run<'_, R>, a: usize) -> (usize, PortId, FaultReason) {
+    for (p, o) in r.slot.signal_out.clone().enumerate() {
+        let visible = previous(fx.outputs, &r.outputs, (o, p), a);
+        if let Some(held) = r.held.get_mut(p) {
+            *held = visible;
+        }
+    }
+    (a, first_port(fx, r.slot), FaultReason::Panic)
+}
+
+/// After an `absorb` at frame `f` panicked: frame `f`'s outputs were already
+/// published by its `emit` and stand; the instance is muted from `f + 1`,
+/// its outputs fading from those of `f`, and the fault is logged at `f`.
+fn absorb_panicked<R: Own>(fx: &Fixed<'_>, r: &mut Run<'_, R>, i: usize, f: usize) {
+    for p in 0..r.slot.signal_out.len() {
+        let visible = r.outputs.get(p, f).unwrap_or(0.0);
+        if let Some(held) = r.held.get_mut(p) {
+            *held = visible;
+        }
+    }
+    r.slot.fault = Some(0);
+    let record = LogRecord::Fault {
+        frame: fx.frame(f),
+        instance: InstanceId(i),
+        port: first_port(fx, r.slot),
+        reason: FaultReason::Panic,
+    };
+    push_record(&mut r.out.log, &mut r.out.log_overflows, record);
+}
+
+/// An instance's first output port, signal before event, for a fault that no
+/// output caused; `PortId(usize::MAX)` (no port in the log line) if it has
+/// none.
+fn first_port(fx: &Fixed<'_>, slot: &Slot) -> PortId {
+    fx.output_ports
+        .get(slot.signal_out.start)
+        .filter(|_| !slot.signal_out.is_empty())
+        .or_else(|| {
+            fx.sink_ports
+                .get(slot.event_out.start)
+                .filter(|_| !slot.event_out.is_empty())
+        })
+        .copied()
+        .unwrap_or(PortId(usize::MAX))
 }
 
 /// Saves what a block call's gather changes, for [`restore`].

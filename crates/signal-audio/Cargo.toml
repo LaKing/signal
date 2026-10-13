@@ -20,6 +20,8 @@ rtrb = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
+# The engine's test hooks (task hook, exclusivity counters) for the tests.
+signal-engine = { workspace = true, features = ["test-hooks"] }
 # The counting allocator (ADR 0017) for the callback's no-allocation test,
 # and a real Runner of the kick project for the callback tests.
 signal-contract = { workspace = true }

@@ -18,7 +18,7 @@ signal-gpu = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The noop device, for the job path and kernel validation where no GPU is usable.
-signal-gpu = { workspace = true, features = ["noop"] }
+signal-gpu = { workspace = true, features = ["noop", "test-hooks"] }
 # The contract suite and its counting allocator (ADR 0017).
 signal-contract = { workspace = true }
 # Offline renders and the real-time runner with the null driver.

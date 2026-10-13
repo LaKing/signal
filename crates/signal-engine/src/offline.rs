@@ -145,6 +145,9 @@ pub fn render_blocks(
             .map_or(block, |len| len.min(block))
             .max(1);
         let ran = engine.run_block(len);
+        if let Some(failure) = engine.failure() {
+            return Err(RenderError::EngineFailed(failure));
+        }
         if ran == 0 {
             break;
         }

@@ -4,12 +4,14 @@
 //! mode's exclusivity tracker on. The plan sums several signal sources into
 //! one input, modulates parameters, merges events from three sources into
 //! one input, runs a feedback loop and a fault (with the undo of the frames
-//! after it), and takes pushed external events in every block.
+//! after it), and takes pushed external events in every block. The tracker's
+//! own figures are checked only where it is compiled in (debug builds); the
+//! results and the refusals are checked in every build (M2.7-3, finding 6).
+//! A failing task: `failure_stop.rs`.
 
 mod common;
 
-use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use common::{config_threads, conn, ext, inst, inst_with, plan, registry, scaled};
@@ -169,11 +171,14 @@ fn a_thousand_blocks_on_eight_threads_with_random_delays_match_one_thread() {
     assert_eq!(stats.threads, 8);
     assert_eq!(stats.parallel_segments, BLOCKS);
     assert!(stats.worker_tasks > 0, "{stats:?}");
-    assert_eq!(stats.worker_panics, 0);
+    assert_eq!(stats.task_failures, 0);
     assert!(DELAYS.load(Ordering::Relaxed) >= BLOCKS * stats.tasks as u64);
     let exclusivity = signal_engine::exclusivity();
-    assert!(exclusivity.checked && exclusivity.claims > 0);
     assert_eq!(exclusivity.violations, 0);
+    // Instrumentation: the tracker exists in debug builds only.
+    if exclusivity.checked {
+        assert!(exclusivity.claims > 0);
+    }
 }
 
 /// M2.6-5: the real-time spin changes only when a worker runs a task. With
@@ -203,7 +208,7 @@ fn spinning_workers_match_one_thread() {
     let stats = eight.schedule_stats();
     assert_eq!(stats.parallel_segments, BLOCKS);
     assert!(stats.worker_tasks > 0, "{stats:?}");
-    assert_eq!(stats.worker_panics, 0);
+    assert_eq!(stats.task_failures, 0);
     assert_eq!(signal_engine::exclusivity().violations, 0);
 }
 
@@ -238,7 +243,7 @@ fn every_wake_policy_matches_one_thread_under_random_delays_and_gaps() {
         assert_eq!((stats.policy, stats.waiter), (policy, "park"));
         assert_eq!(stats.parallel_segments, BLOCKS);
         assert!(stats.worker_tasks > 0, "{policy}: {stats:?}");
-        assert_eq!(stats.worker_panics, 0);
+        assert_eq!(stats.task_failures, 0);
         let wake = eight.wake_stats().unwrap();
         assert!(wake.callbacks >= BLOCKS - 1, "{policy}: {wake:?}");
         assert!(wake.wakes_observed <= wake.wakes_signalled, "{wake:?}");
@@ -321,74 +326,4 @@ fn a_traced_callback_without_parallel_segments_records_its_slowest_task() {
     let config = config_threads(RATE, 42, 1);
     let engine = Engine::new(&stress_plan(), &registry(), config, Vec::new()).unwrap();
     assert!(engine.wake_stats().is_none());
-}
-
-static CALLER_PANICKED: AtomicBool = AtomicBool::new(false);
-
-/// Panics once, on the calling thread, at the start of a task.
-fn caller_panics(point: HookPoint) {
-    if let HookPoint::Task { lane: 0, .. } = point
-        && !CALLER_PANICKED.swap(true, Ordering::SeqCst)
-    {
-        panic!("test: the calling thread panics inside a block");
-    }
-}
-
-/// AC11: when the calling thread unwinds out of a block, the job it published
-/// is closed and every worker has left it before the unwinding goes on; the
-/// engine then drops (and joins its workers) without hanging.
-#[test]
-fn a_panicking_caller_leaves_no_worker_in_the_job() {
-    let mut engine = Engine::new(
-        &stress_plan(),
-        &registry(),
-        config_threads(RATE, 42, 4),
-        Vec::new(),
-    )
-    .unwrap();
-    engine.set_task_hook(Some(caller_panics));
-    let mut unwound = false;
-    for _ in 0..100 {
-        let block = panic::catch_unwind(AssertUnwindSafe(|| engine.run_block(BLOCK)));
-        if block.is_err() {
-            unwound = true;
-            break;
-        }
-    }
-    assert!(unwound, "the caller took a task and panicked");
-    drop(engine);
-}
-
-static WORKER_PANICKED: AtomicBool = AtomicBool::new(false);
-
-/// Panics once, on a worker, at the start of a task (after its claim).
-fn worker_panics(point: HookPoint) {
-    if let HookPoint::Task { lane, .. } = point
-        && lane > 0
-        && !WORKER_PANICKED.swap(true, Ordering::SeqCst)
-    {
-        panic!("test: a worker panics inside a block");
-    }
-}
-
-/// A task hook that panics on a worker after the claim still completes the
-/// task: the block returns, the panic is counted, and later blocks run on
-/// the remaining workers.
-#[test]
-fn a_task_hook_panic_on_a_worker_completes_the_task() {
-    let mut engine = Engine::new(
-        &stress_plan(),
-        &registry(),
-        config_threads(RATE, 42, 4),
-        Vec::new(),
-    )
-    .unwrap();
-    engine.set_task_hook(Some(worker_panics));
-    for _ in 0..200 {
-        assert_eq!(engine.run_block(BLOCK), BLOCK);
-    }
-    let stats = engine.schedule_stats();
-    assert!(WORKER_PANICKED.load(Ordering::SeqCst), "{stats:?}");
-    assert_eq!(stats.worker_panics, 1);
-    assert_eq!(stats.parallel_segments, 200);
 }

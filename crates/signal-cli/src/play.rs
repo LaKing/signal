@@ -339,6 +339,9 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
     }
 
     let status = ended.status;
+    if let Some(failure) = status.failure {
+        return Err(Failure::Internal(failure.to_string()));
+    }
     let commands = control.controller.command_overflows();
     let overflows = [
         commands,
@@ -488,7 +491,8 @@ fn play_null(
     let mut stopping: Option<Instant> = None;
     loop {
         let left = limit.map_or(u64::MAX, |limit| limit - played);
-        if left == 0 {
+        // A failed engine plays only silence: stop (docs/semantics.md §14).
+        if left == 0 || control.controller.status().failure.is_some() {
             break;
         }
         // Stopped: once every command sent has applied (or a second has
@@ -585,8 +589,9 @@ fn play_device(
         control.step();
         // C6: macOS counts no demotions for a process; sample the policy.
         demotions.sample(&scheduling.ports);
-        let next = control.controller.status().next_frame.0;
-        if limit.is_some_and(|limit| next >= limit) {
+        let status = control.controller.status();
+        // A failed engine plays only silence: stop (docs/semantics.md §14).
+        if limit.is_some_and(|limit| status.next_frame.0 >= limit) || status.failure.is_some() {
             break;
         }
         // Stopped: once every command sent has applied (or a second has

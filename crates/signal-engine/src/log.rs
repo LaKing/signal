@@ -52,6 +52,42 @@ pub enum FaultReason {
     /// when due, in real time (offline the engine waits), or the result was
     /// lost. Its output is silence for that block of its own; it is not muted.
     LateResult,
+    /// A call of the instance (`process`, `emit`, `absorb`, `due` or `miss`)
+    /// panicked (`docs/semantics.md` §14): it is muted from the call's first
+    /// frame, as for the reasons above.
+    Panic,
+}
+
+/// Why the engine stopped (`docs/semantics.md` §14): never an instance's
+/// fault, always the engine's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureReason {
+    /// Something unwound in a task outside a primitive's call.
+    TaskPanic,
+    /// A view, a read or the task board refused an access that a correct run
+    /// never makes.
+    InvariantViolation,
+}
+
+/// An engine-level failure: the engine stopped in the block from `frame`,
+/// published nothing of it, and runs no further frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct EngineFailure {
+    /// The first frame of the segment that failed.
+    pub frame: Frame,
+    /// Why.
+    pub reason: FailureReason,
+}
+
+impl std::fmt::Display for EngineFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let why = match self.reason {
+            FailureReason::TaskPanic => "a task panicked outside a module's call",
+            FailureReason::InvariantViolation => "an access invariant was violated",
+        };
+        write!(f, "the engine stopped at frame {}: {why}", self.frame.0)
+    }
 }
 
 /// One thing the executor did in a frame.
@@ -209,8 +245,10 @@ pub enum LogLine<'a> {
         frame: Frame,
         /// The instance.
         address: &'a InstanceAddress,
-        /// The first output found at fault.
-        port: &'a PortAddress,
+        /// The first output found at fault; for an instance without outputs,
+        /// none (the line leaves the field out).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        port: Option<&'a PortAddress>,
         /// What was wrong.
         reason: FaultReason,
     },
