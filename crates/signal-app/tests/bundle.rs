@@ -45,14 +45,15 @@ fn bundle_app_builds_a_signed_bundle() {
     }
     let out = std::env::temp_dir().join(format!("signal-bundle-{}", std::process::id()));
     let _ = fs::remove_dir_all(&out);
-    // The target directory this test was built in (<target>/debug/deps/…),
-    // whichever way cargo chose it.
-    let exe = std::env::current_exe().unwrap();
-    let target = exe.ancestors().nth(3).unwrap();
+    // A target directory of its own, inside the one this test was built in
+    // (M2.7-7): the script builds `signal` without features, and in the shared
+    // directory that replaced the `CARGO_BIN_EXE_signal` other tests run (a
+    // `--features signal-cli/lab` workspace run, or one running concurrently).
+    let target = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bundle-app-target");
     run(Command::new("bash")
         .arg(root().join("scripts/bundle-app.sh"))
         .arg("--target-dir")
-        .arg(target)
+        .arg(&target)
         .arg("--out")
         .arg(&out));
     let app = out.join("Signal.app");
