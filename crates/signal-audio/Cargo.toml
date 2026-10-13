@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 signal-engine = { workspace = true }
+# ADR 0022: the audio adapter the CoreAudio driver runs.
+signal-output = { workspace = true }
 # `Frame` in the input meters.
 signal-core = { workspace = true }
 cpal = { workspace = true }

@@ -10,9 +10,10 @@ use common::{
 use signal_core::{EventPayload, Frame, Registry};
 use signal_engine::{
     EditFull, Engine, EngineConfig, EngineError, ExternalEvent, ExternalFull, InputDiscards,
-    LogRecord, RenderError, render, render_with,
+    LogRecord,
 };
 use signal_graph::{ConnectionDef, ExecutionPlan, InstanceDef};
+use signal_output::{RenderError, render, render_with};
 
 /// 1 kHz: the fade length F is 5 frames.
 const RATE: u32 = 1_000;
@@ -1012,7 +1013,7 @@ fn swaps_on_workers_rebuild_tasks_and_keep_the_pool() {
         let started = signal_engine::spawned_workers();
         let workers = engine.schedule_stats().workers;
         let mut swaps = 0;
-        let rendered = signal_engine::render_blocks(&mut engine, 2_000, 64, |engine| {
+        let rendered = signal_output::render_blocks(&mut engine, 2_000, 64, |engine| {
             let now = engine.next_frame().0;
             if now > 0 && now % 100 == 0 {
                 let next = if swaps % 2 == 0 { &b } else { &a };

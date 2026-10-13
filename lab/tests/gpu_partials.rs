@@ -8,11 +8,12 @@
 mod common;
 
 use signal_core::{Due, Inputs, Outputs, PrepareContext, RngStream, StateOutputPrimitive};
-use signal_engine::{Engine, EngineConfig, Render, SameMachine, Schedule, render};
+use signal_engine::{Engine, EngineConfig, SameMachine, Schedule};
 use signal_gpu::GpuService;
 use signal_lab::gpu_partials::{
     BLOCK_FRAMES, Bank, GpuPartials, KERNEL, LATENCY_BLOCKS, Params, TOLERANCE, pack, reference,
 };
+use signal_output::{Render, render};
 
 const L: usize = LATENCY_BLOCKS as usize;
 

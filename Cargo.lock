@@ -3396,6 +3396,7 @@ dependencies = [
  "signal-core",
  "signal-engine",
  "signal-graph",
+ "signal-output",
  "signal-project",
  "signal-std",
  "toml",
@@ -3413,6 +3414,7 @@ dependencies = [
  "signal-contract",
  "signal-core",
  "signal-engine",
+ "signal-output",
  "signal-project",
  "signal-std",
 ]
@@ -3432,6 +3434,7 @@ dependencies = [
  "signal-gpu",
  "signal-graph",
  "signal-lab",
+ "signal-output",
  "signal-project",
  "signal-std",
 ]
@@ -3468,6 +3471,7 @@ dependencies = [
  "signal-core",
  "signal-engine",
  "signal-graph",
+ "signal-output",
 ]
 
 [[package]]
@@ -3524,6 +3528,7 @@ dependencies = [
  "signal-engine",
  "signal-gpu",
  "signal-graph",
+ "signal-output",
  "signal-project",
  "signal-std",
 ]
@@ -3537,7 +3542,21 @@ dependencies = [
  "signal-core",
  "signal-engine",
  "signal-graph",
+ "signal-output",
  "signal-project",
+ "signal-std",
+]
+
+[[package]]
+name = "signal-output"
+version = "0.0.0"
+dependencies = [
+ "hound",
+ "rtrb",
+ "serde_json",
+ "signal-core",
+ "signal-engine",
+ "signal-graph",
  "signal-std",
 ]
 
@@ -3552,6 +3571,7 @@ dependencies = [
  "signal-core",
  "signal-engine",
  "signal-graph",
+ "signal-output",
  "signal-std",
  "toml",
  "toml_edit",

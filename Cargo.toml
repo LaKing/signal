@@ -17,6 +17,7 @@ signal-graph = { path = "crates/signal-graph" }
 signal-project = { path = "crates/signal-project" }
 signal-std = { path = "crates/signal-std" }
 signal-engine = { path = "crates/signal-engine" }
+signal-output = { path = "crates/signal-output" }
 signal-eval = { path = "crates/signal-eval" }
 signal-contract = { path = "crates/signal-contract" }
 signal-audio = { path = "crates/signal-audio" }

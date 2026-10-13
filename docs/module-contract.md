@@ -81,6 +81,12 @@ create ─► prepare(ctx) ─► { process | emit, absorb }*  ─► (reset ─
 
 A call that panics anyway is caught by the engine: the instance is muted from that call's first frame and a `panic` fault is logged (`docs/semantics.md` §14). Nothing it wrote in that call is used.
 
+### Trust boundary
+
+M2.7-9. The synchronous calls, `process`, `emit` and `absorb` (and a latent module's `due` and `miss`), run inside the audio callback, and the callback cannot return until every one of them has. Each **must be bounded in time and never block**: no waiting on I/O, a device, a lock, another thread or a timer, however briefly or rarely. The engine contains a broken call that **panics** (above). It does **not** contain one that **hangs**: the whole output stalls, and no recovery is possible without risking the buffers the call still holds (`realtime-rules.md` "The trust boundary"). The engine only **detects** a hang: the callback is counted and reported with the instance still running (`realtime-rules.md` "Hangs are detected, not contained").
+
+So computation that is **experimental or may block** (a device, a model, anything whose time is not bounded) must run **behind a latent (asynchronous) boundary**: the type declares a `latency` ("Declared latency" above), does the work on its own thread or device, and answers `due` at once, `Pending` or `Lost` when the result is not in; the engine never waits for it in real time. The GPU modules are built this way (ADR 0019 §3). A lab primitive (ADR 0015) meets the same boundary as any other.
+
 `PrepareContext` gives:
 - `sample_rate`: the master rate in frames per second;
 - `max_frames`: the largest *k* any later call receives;

@@ -2,7 +2,7 @@
 
 use signal_app::meter::{ChannelMeter, dbfs};
 use signal_core::Frame;
-use signal_engine::Meter;
+use signal_output::Meter;
 
 const RATE: u32 = 48_000;
 

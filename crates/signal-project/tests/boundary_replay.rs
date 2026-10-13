@@ -15,7 +15,8 @@ use signal_core::{
     ModuleType, Outputs, PortDescriptor, PortKind, PortShape, PrepareContext, Primitive,
     RateDivisor, Registry, Reproducibility, StateOutputPrimitive, fnv1a64, fnv1a64_words,
 };
-use signal_engine::{Driver, NullDriver, RealtimeConfig, RunnerStatus, device_sample, realtime};
+use signal_engine::{RealtimeConfig, RunnerStatus};
+use signal_output::{Driver, NullDriver, device_sample, realtime};
 use signal_project::session::{
     BoundaryKind, BoundaryReplay, Device, Here, LiveRecorder, Machine, ReplayError, ReplayOptions,
     Session, SessionRecorder, replay, replay_with,
@@ -229,13 +230,13 @@ const PLAIN: Run = Run {
 };
 
 /// A null-driver run of `project`, recorded: what the device received (what
-/// `signal play --record-audio` writes), the stopped runner's status and the
-/// recorder after `finish`.
+/// `signal play --record-audio` writes), the stopped runner's status, the
+/// recorder after `finish` and the samples the audio adapter clipped.
 fn live(
     project: &Project,
     registry: &Registry,
     run: Run,
-) -> (Vec<f32>, RunnerStatus, SessionRecorder) {
+) -> (Vec<f32>, RunnerStatus, SessionRecorder, u64) {
     let mut plan = project.plan(registry).unwrap().plan;
     plan.version = 0;
     let mut config = RealtimeConfig::new(RATE, project.seed);
@@ -270,6 +271,7 @@ fn live(
         driver.output().to_vec(),
         runner.status(),
         live.into_recorder(),
+        runner.clipped(),
     )
 }
 
@@ -309,7 +311,7 @@ fn ideal(frames: Option<u64>) -> ReplayOptions {
 fn live_misses_replay_exactly() {
     let registry = registry();
     let project = project(Some("test.latent"));
-    let (played, status, recorder) = live(&project, &registry, PLAIN);
+    let (played, status, recorder, _) = live(&project, &registry, PLAIN);
     assert!(status.late_results > 0, "{status:?}");
     let dir = written(&recorder, "exact");
     let session = Session::load(&dir, &registry).unwrap();
@@ -341,7 +343,7 @@ fn live_misses_replay_exactly() {
 fn every_due_block_is_recorded_and_replays_on_any_thread_count() {
     let registry = registry();
     let project = project(Some("test.latent"));
-    let (played, status, recorder) = live(&project, &registry, PLAIN);
+    let (played, status, recorder, _) = live(&project, &registry, PLAIN);
     let boundaries = recorder.boundaries().unwrap();
     assert!(boundaries.complete, "{:?}", boundaries.reason);
     let blocks = (CALLBACKS * 256 / BLOCK) as u64 - 1;
@@ -379,8 +381,8 @@ fn every_due_block_is_recorded_and_replays_on_any_thread_count() {
 fn clipped_live_output_replays_exactly() {
     let registry = registry();
     let project = project(Some("test.latent_loud"));
-    let (played, status, recorder) = live(&project, &registry, PLAIN);
-    assert!(status.clipped > 0, "{status:?}");
+    let (played, status, recorder, clipped) = live(&project, &registry, PLAIN);
+    assert!(clipped > 0, "{status:?}");
     let dir = written(&recorder, "clipped");
     let session = Session::load(&dir, &registry).unwrap();
     let replayed = replay(&session, &registry, None, 1).unwrap();
@@ -420,7 +422,7 @@ fn wav_samples(wav: &[u8]) -> Vec<f32> {
 fn ideal_differs_and_is_labelled() {
     let registry = registry();
     let project = project(Some("test.latent"));
-    let (played, _, recorder) = live(&project, &registry, PLAIN);
+    let (played, _, recorder, _) = live(&project, &registry, PLAIN);
     let dir = written(&recorder, "ideal");
     let session = Session::load(&dir, &registry).unwrap();
     let exact = replay(&session, &registry, None, 1).unwrap();
@@ -451,7 +453,7 @@ fn recorded_data_replaces_the_device() {
         data_queue: 4096,
         ..PLAIN
     };
-    let (played, _, recorder) = live(&project, &registry, data);
+    let (played, _, recorder, _) = live(&project, &registry, data);
     let boundaries = recorder.boundaries().unwrap();
     assert!(
         boundaries.complete && boundaries.data,
@@ -464,7 +466,7 @@ fn recorded_data_replaces_the_device() {
     let replayed = replay(&session, &other, None, 1).unwrap();
     assert_eq!(stored(&replayed), played);
 
-    let (_, _, recorder) = live(&project, &registry, PLAIN);
+    let (_, _, recorder, _) = live(&project, &registry, PLAIN);
     let dir = written(&recorder, "no-data");
     let session = Session::load(&dir, &other).unwrap();
     // Block 1 (frame 4) was missed; block 2 (frame 8) is the first delivery.
@@ -498,7 +500,7 @@ fn exact_replay_on_another_device_without_data_is_refused() {
     let registry = registry();
     let other = registry_with(true);
     let project = project(Some("test.latent"));
-    let (_, _, recorder) = live(&project, &registry, PLAIN);
+    let (_, _, recorder, _) = live(&project, &registry, PLAIN);
     let dir = written(&recorder, "audit-device-mismatch");
     let session = Session::load(&dir, &other).unwrap();
     let message = match replay(&session, &other, None, 1) {
@@ -517,7 +519,7 @@ fn exact_replay_on_another_device_without_data_is_refused() {
 #[test]
 fn exact_replay_on_another_build_without_data_is_refused() {
     let registry = registry();
-    let (_, _, recorder) = live(&project(Some("test.latent")), &registry, PLAIN);
+    let (_, _, recorder, _) = live(&project(Some("test.latent")), &registry, PLAIN);
     let dir = written(&recorder, "another-build");
     let path = dir.join("session.toml");
     let text = fs::read_to_string(&path).unwrap();
@@ -559,7 +561,7 @@ fn with_line(text: &str, key: &str, value: &str) -> String {
 fn another_machine_is_refused_unless_trusted() {
     let registry = registry();
     let project = project(Some("test.latent"));
-    let (played, _, recorder) = live(&project, &registry, PLAIN);
+    let (played, _, recorder, _) = live(&project, &registry, PLAIN);
     let dir = written(&recorder, "another-machine");
     let path = dir.join("session.toml");
     let text = fs::read_to_string(&path).unwrap();
@@ -615,7 +617,7 @@ fn another_machine_is_refused_unless_trusted() {
         data_queue: 4096,
         ..PLAIN
     };
-    let (played, _, recorder) = live(&project, &registry, data);
+    let (played, _, recorder, _) = live(&project, &registry, data);
     let dir = written(&recorder, "another-machine-data");
     let path = dir.join("session.toml");
     let text = fs::read_to_string(&path).unwrap();
@@ -635,7 +637,7 @@ fn another_machine_is_refused_unless_trusted() {
 fn the_first_mismatch_wins_over_a_later_lost_result() {
     let registry = registry();
     let failing = failing_registry();
-    let (_, _, recorder) = live(&project(Some("test.latent")), &registry, PLAIN);
+    let (_, _, recorder, _) = live(&project(Some("test.latent")), &registry, PLAIN);
     let session = Session::load(&written(&recorder, "mismatch-then-lost"), &failing).unwrap();
     match replay(&session, &failing, None, 1) {
         Err(ReplayError::ReplayMismatch { module, block }) => {
@@ -658,7 +660,7 @@ fn deliveries_are_hashed_and_the_machine_is_recorded() {
         data_queue: 4096,
         ..PLAIN
     };
-    let (_, _, mut recorder) = live(&project(Some("test.latent")), &registry, data);
+    let (_, _, mut recorder, _) = live(&project(Some("test.latent")), &registry, data);
     let boundaries = recorder.boundaries().unwrap().clone();
     let mut delivered = 0;
     for record in &boundaries.records {
@@ -710,7 +712,7 @@ fn recorded_data_must_match_its_hash() {
         data_queue: 4096,
         ..PLAIN
     };
-    let (_, _, recorder) = live(&project(Some("test.latent")), &registry, data);
+    let (_, _, recorder, _) = live(&project(Some("test.latent")), &registry, data);
     let dir = written(&recorder, "data-hash");
     let path = dir.join("boundaries.jsonl");
     let text = fs::read_to_string(&path).unwrap();
@@ -762,7 +764,7 @@ fn a_lost_record_fails_exact_replay() {
         ),
     ];
     for (name, run) in cases {
-        let (_, _, recorder) = live(&project, &registry, run);
+        let (_, _, recorder, _) = live(&project, &registry, run);
         let boundaries = recorder.boundaries().unwrap();
         assert!(!boundaries.complete, "{name}");
         let dir = written(&recorder, &format!("lost-{name}"));
@@ -789,7 +791,7 @@ fn a_lost_record_fails_exact_replay() {
 #[test]
 fn sessions_before_hashes_replay_unverified() {
     let registry = registry();
-    let (played, _, recorder) = live(&project(Some("test.latent")), &registry, PLAIN);
+    let (played, _, recorder, _) = live(&project(Some("test.latent")), &registry, PLAIN);
     let dir = written(&recorder, "before-hashes");
     let path = dir.join("boundaries.jsonl");
     let text = fs::read_to_string(&path).unwrap();
@@ -823,7 +825,7 @@ fn sessions_before_hashes_replay_unverified() {
 #[test]
 fn old_sessions_still_replay() {
     let registry = registry();
-    let (_, _, recorder) = live(&project(Some("test.latent")), &registry, PLAIN);
+    let (_, _, recorder, _) = live(&project(Some("test.latent")), &registry, PLAIN);
     let dir = written(&recorder, "old");
     fs::remove_file(dir.join("boundaries.jsonl")).unwrap();
     let text = fs::read_to_string(dir.join("session.toml")).unwrap();
@@ -838,7 +840,7 @@ fn old_sessions_still_replay() {
     assert_eq!(replayed.boundaries, BoundaryReplay::NotRecorded);
     assert!(replayed.render.ideal);
 
-    let (played, _, recorder) = live(&project(None), &registry, PLAIN);
+    let (played, _, recorder, _) = live(&project(None), &registry, PLAIN);
     let dir = written(&recorder, "not-latent");
     assert!(!dir.join("boundaries.jsonl").exists());
     let text = fs::read_to_string(dir.join("session.toml")).unwrap();
@@ -863,7 +865,7 @@ fn absurd_words_are_rejected_without_panicking() {
         data_queue: 4096,
         ..PLAIN
     };
-    let (_, _, recorder) = live(&project(Some("test.latent")), &registry, data);
+    let (_, _, recorder, _) = live(&project(Some("test.latent")), &registry, data);
     for (name, words) in [
         ("huge", "9223372036854775808"),
         ("max", "18446744073709551615"),
@@ -890,7 +892,7 @@ fn absurd_words_are_rejected_without_panicking() {
 #[test]
 fn a_recorded_cause_round_trips_and_replays_and_a_bad_one_is_refused() {
     let registry = registry();
-    let (_, _, mut recorder) = live(&project(Some("test.latent")), &registry, PLAIN);
+    let (_, _, mut recorder, _) = live(&project(Some("test.latent")), &registry, PLAIN);
     let mut boundaries = recorder.boundaries().unwrap().clone();
     let first = boundaries
         .records
@@ -956,7 +958,7 @@ fn a_recorded_cause_round_trips_and_replays_and_a_bad_one_is_refused() {
 #[test]
 fn exact_replay_refuses_frames_past_the_recorded_end() {
     let registry = registry();
-    let (_, _, recorder) = live(&project(Some("test.latent")), &registry, PLAIN);
+    let (_, _, recorder, _) = live(&project(Some("test.latent")), &registry, PLAIN);
     let dir = written(&recorder, "past-end");
     let session = Session::load(&dir, &registry).unwrap();
     let end = session.frames.unwrap();

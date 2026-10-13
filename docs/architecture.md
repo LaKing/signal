@@ -63,7 +63,8 @@ See `adr/0015-workspace-and-lab-tier.md`. Crates are created when their mileston
 | `signal-graph` | Composites, flattening, validation, conversion insertion, plans, edits | M1 |
 | `signal-project` | Project folder loading, TOML model, schema export, project diff; session record, read and replay (`session-format.md`) and build provenance, shared by `signal` and Signal.app. Depends on `signal-engine` for sessions; the engine depends on no project or session code | M1/M2 |
 | `signal-std` | Standard primitives | M1 |
-| `signal-engine` | Executor, plan swap, fault guards, render manifest (semantics: `semantics.md`); the real-time runner and controller, the driver trait, offline and null drivers (`realtime-rules.md`, "The runner") | M1/M2 |
+| `signal-engine` | Executor, plan swap, fault guards, render manifest (semantics: `semantics.md`); the offline driver and the real-time runner and controller, which hand every sink's inputs to an output generically (ADR 0022; `realtime-rules.md`, "The runner") | M1/M2 |
+| `signal-output` | Output adapters (ADR 0022): the audio adapter (audio sink, `gain`, channel mapping, device conversion, meters) for the offline WAV render and the real-time runner; the driver trait and the null driver | M2.7 |
 | `signal-audio` | `CoreAudioDriver` through cpal (ADR 0011), device listing, callback statistics | M2 |
 | `signal-eval` | Analysis, metrics, compare, listening packages | M1/M3 |
 | `signal-oracle` | Test support: the semantic oracle, a deliberately simple per-frame interpreter of `semantics.md` the block engine is compared with (`testing-and-evaluation.md`). Depends on `signal-core` alone | M2.7 |

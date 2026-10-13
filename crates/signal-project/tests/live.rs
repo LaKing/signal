@@ -12,7 +12,8 @@ use std::thread;
 use std::time::Duration;
 
 use signal_core::{ModuleType, PortDescriptor, Primitive, RateDivisor, Registry};
-use signal_engine::{Controller, Driver, NullDriver, RealtimeConfig, Runner, realtime};
+use signal_engine::RealtimeConfig;
+use signal_output::{Controller, Driver, NullDriver, Runner, realtime};
 use signal_project::live::{Applied, EditError, ReloadError, reload, send_edit};
 use signal_project::session::{self, LiveRecorder, Session, SessionRecorder, replay};
 use signal_project::{Project, SourceFile, provenance};

@@ -18,6 +18,8 @@ signal-graph = { workspace = true }
 # The engine it is compared with; its task hook holds a parallel segment's
 # caller until a worker has run a task (`tests/common/mod.rs`).
 signal-engine = { workspace = true, features = ["test-hooks"] }
+# The engine's renders, through the audio adapter (ADR 0022).
+signal-output = { workspace = true }
 # The goldens' projects.
 signal-project = { workspace = true }
 proptest = { workspace = true }

@@ -21,8 +21,9 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-use signal_engine::{Driver, NullDriver, RealtimeConfig, realtime};
+use signal_engine::RealtimeConfig;
 use signal_lab::gpu_partials::{BLOCK_FRAMES, LATENCY_BLOCKS};
+use signal_output::{Driver, NullDriver, realtime};
 use signal_project::session::{
     BoundaryKind, BoundaryReplay, LiveRecorder, ReplayOptions, Session, SessionRecorder, replay,
     replay_with,

@@ -17,9 +17,10 @@ use common::{addr, config_threads, conn, inst, inst_with, plan, registry};
 use signal_core::Frame;
 use signal_engine::{
     Engine, EngineConfig, EngineFailure, FailureReason, HookPoint, Injection, RealtimeConfig,
-    RenderError, Schedule, realtime, render,
+    Schedule,
 };
 use signal_graph::ExecutionPlan;
+use signal_output::{RenderError, realtime, render};
 
 const RATE: u32 = 1_000;
 

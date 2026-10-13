@@ -15,9 +15,9 @@ use signal_audio::rt_thread::MachSemaphores;
 use signal_audio::{TimeConstraint, WorkerPath, rt_thread};
 use signal_core::{Registry, SplitMix64};
 use signal_engine::{
-    Driver, Engine, EngineConfig, HookPoint, NullDriver, RealtimeConfig, RtOptions, RtPolicy,
-    Schedule, Waiter, realtime, realtime_with, render, render_blocks,
+    Engine, EngineConfig, HookPoint, RealtimeConfig, RtOptions, RtPolicy, Schedule, Waiter,
 };
+use signal_output::{Driver, NullDriver, realtime, realtime_with, render, render_blocks};
 use signal_project::Project;
 
 const WAIT: Duration = Duration::from_secs(10);

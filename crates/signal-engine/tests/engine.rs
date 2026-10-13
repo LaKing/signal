@@ -8,7 +8,8 @@ use common::{
     registry,
 };
 use signal_core::{EventPayload, Frame, Registry, RngStream};
-use signal_engine::{Engine, EngineConfig, EngineError, render};
+use signal_engine::{Engine, EngineConfig, EngineError};
+use signal_output::render;
 
 /// Each primitive is prepared with the sample rate, the block capacity and
 /// `RngStream::derive(seed, address)`.

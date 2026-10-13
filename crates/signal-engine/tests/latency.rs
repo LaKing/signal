@@ -16,11 +16,11 @@ use signal_core::{
     fnv1a64_words,
 };
 use signal_engine::{
-    BoundaryLine, BoundaryOutcome, ControlSink, Driver, Engine, EngineConfig, EngineError,
-    FaultReason, Injection, LogLine, NullDriver, RealtimeConfig, RenderError, SameMachine,
-    Schedule, Scripted, realtime, render, render_blocks,
+    BoundaryLine, BoundaryOutcome, ControlSink, Engine, EngineConfig, EngineError, FaultReason,
+    Injection, LogLine, RealtimeConfig, SameMachine, Schedule, Scripted,
 };
 use signal_graph::{CompositeDef, Exports, build_plan};
+use signal_output::{Driver, NullDriver, RenderError, realtime, render, render_blocks};
 
 const fn port(name: &'static str, direction: Direction) -> PortDescriptor {
     PortDescriptor {

@@ -14,10 +14,10 @@ use common::{addr, conn, inst, inst_with, plan, port_addr, registry, scaled};
 use signal_contract::alloc_counter::{self, Counts, Guard};
 use signal_core::EventPayload;
 use signal_engine::{
-    BoundaryLine, BoundaryOutcome, CallbackSizes, ControlSink, Outcome, RealtimeConfig, Report,
-    SentCommand, Stamp, realtime,
+    BoundaryLine, BoundaryOutcome, ControlSink, Outcome, RealtimeConfig, Report, SentCommand, Stamp,
 };
 use signal_graph::ExecutionPlan;
+use signal_output::{CallbackSizes, realtime};
 
 const RATE: u32 = 1_000;
 const CALLBACKS: u64 = 12_000;
@@ -143,7 +143,7 @@ fn runner_process_allocates_and_frees_nothing() {
     assert!(tally.swaps >= 2, "swaps committed: {}", tally.swaps);
     assert!(tally.events > 0 && tally.edits > 0);
     assert!(status.log_overflows > 0, "{status:?}");
-    assert!(status.meter_overflows > 0, "{status:?}");
+    assert!(runner.meter_overflows() > 0, "{status:?}");
 }
 
 /// Counts the delivered outcomes that reach the control thread, and those

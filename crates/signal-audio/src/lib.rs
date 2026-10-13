@@ -1,7 +1,7 @@
 //! Signal's audio device driver (ADR 0011): CoreAudio through `cpal`, pinned and
 //! isolated in this crate behind the engine's driver trait.
 //!
-//! - [`CoreAudioDriver`]: the [`Driver`](signal_engine::Driver) of an output
+//! - [`CoreAudioDriver`]: the [`Driver`](signal_output::Driver) of an output
 //!   device, opened at the project's sample rate (no resampling) with a fixed
 //!   buffer; [`devices`] lists output and input devices, with their stable
 //!   ids; [`InputCapture`] runs an input stream for metering only.

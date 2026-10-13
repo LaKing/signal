@@ -8,7 +8,8 @@ use std::path::PathBuf;
 
 use common::{addr, conn, engine, engine_seeded, ext, inst, inst_with, plan, ramp};
 use signal_core::{EventPayload, Fnv1a64, Frame, fnv1a64};
-use signal_engine::{Manifest, Provenance, Render, RenderError, render};
+use signal_engine::{Manifest, Provenance};
+use signal_output::{Render, RenderError, render};
 
 /// A fresh directory for one test's artifacts, inside the target directory.
 fn artifacts(name: &str) -> PathBuf {

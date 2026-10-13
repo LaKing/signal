@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
-use signal_engine::Runner;
+use signal_output::Runner;
 
 use crate::map::ChannelMap;
 use crate::stats::CallbackStats;

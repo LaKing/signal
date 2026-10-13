@@ -12,11 +12,9 @@ use std::thread;
 use std::time::Duration;
 
 use common::{config_threads, conn, inst, plan, registry, scaled};
-use signal_engine::{
-    Engine, NullDriver, RealtimeConfig, Workers, performance_cores, realtime, realtime_threads,
-    render,
-};
+use signal_engine::{Engine, RealtimeConfig, Workers, performance_cores, realtime_threads};
 use signal_graph::ExecutionPlan;
+use signal_output::{NullDriver, realtime, render};
 
 const RATE: u32 = 1_000;
 const LONG: Duration = Duration::from_secs(10);
@@ -164,7 +162,7 @@ fn the_runner_hands_out_its_workers_and_auto_is_two_thirds_of_the_cores_in_real_
     assert_eq!((workers.threads(), workers.count()), (3, 2));
     // The handle keeps working while the Runner is in a driver.
     let mut driver = NullDriver::new(RATE, 1, 5);
-    signal_engine::Driver::start(&mut driver, runner).unwrap();
+    signal_output::Driver::start(&mut driver, runner).unwrap();
     let generation = workers.post(|_| {});
     assert!(workers.wait(generation, LONG).complete());
     drop(driver);

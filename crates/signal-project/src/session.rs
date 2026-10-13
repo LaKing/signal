@@ -1,7 +1,7 @@
 //! Session directories (`docs/session-format.md`): the initial project, every
 //! plan version swapped in, and every command with its effective frame, as
 //! text. [`SessionRecorder`] writes one; [`LiveRecorder`] feeds it from a
-//! real-time [`Controller`](signal_engine::Controller), with the outcome of
+//! real-time [`Controller`](signal_output::Controller), with the outcome of
 //! every latent module's due block (M2.7-4); [`Session::load`] reads and
 //! validates one; [`replay`] renders it offline through the same engine API a
 //! live driver uses (ADR 0006, V10), exactly as it was played, and
@@ -20,11 +20,11 @@ use signal_core::{
     PortAddress, PortShape, Registry, SinkKind, fnv1a64, fnv1a64_words,
 };
 use signal_engine::{
-    BoundaryLine, BoundaryOutcome, ControlSink, Conversion, Engine, EngineConfig, EngineError,
-    ExternalEvent, InputDiscards, Outcome, Provenance, Render, RenderError, Report, RunnerStatus,
-    Scripted, SentCommand, render_blocks,
+    BoundaryLine, BoundaryOutcome, ControlSink, Engine, EngineConfig, EngineError, ExternalEvent,
+    InputDiscards, Outcome, Provenance, Report, RunnerStatus, Scripted, SentCommand,
 };
 use signal_graph::ExecutionPlan;
+use signal_output::{Conversion, Render, RenderError, render_blocks};
 
 use crate::{Diagnostic, LoadError, Project, Severity, SourceFile};
 
@@ -1050,7 +1050,7 @@ impl SessionRecorder {
     }
 
     /// [`applied_swap`](SessionRecorder::applied_swap) with the seq `seq`,
-    /// which the caller chose (a [`Controller`](signal_engine::Controller)'s
+    /// which the caller chose (a [`Controller`](signal_output::Controller)'s
     /// command id).
     pub fn applied_swap_as(
         &mut self,
@@ -1268,7 +1268,7 @@ enum Applied {
 }
 
 /// Records a real-time run: the [`ControlSink`] that
-/// [`Controller::poll`](signal_engine::Controller::poll) feeds (operator
+/// [`Controller::poll`](signal_output::Controller::poll) feeds (operator
 /// decision for M2-3: the engine knows nothing of sessions).
 ///
 /// Reports arrive in the order the runner produced them, which is not the

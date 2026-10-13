@@ -12,12 +12,13 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use signal_core::{EventPayload, Frame, InstanceAddress, PortAddress, Registry, SplitMix64};
-use signal_engine::{Engine, EngineConfig, HookPoint, Schedule, ScheduleStats, render_blocks};
+use signal_engine::{Engine, EngineConfig, HookPoint, Schedule, ScheduleStats};
 use signal_graph::ExecutionPlan;
 use signal_oracle::{
     Connection, DiscardReason, FaultReason, Graph, Instance, InstanceEnd, Output, ParameterEnd,
     Record, Script, Source,
 };
+use signal_output::render_blocks;
 
 /// The standard primitives and `oracle.probe`.
 pub fn registry() -> Registry {

@@ -12,7 +12,8 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 use signal_core::{InstanceAddress, Registry, RngStream};
-use signal_engine::{Engine, EngineConfig, Render, render};
+use signal_engine::{Engine, EngineConfig};
+use signal_output::{Render, render};
 use signal_project::{Project, SourceFile};
 
 /// The project's rate and the transport's settings in `projects/kick/project.toml`.

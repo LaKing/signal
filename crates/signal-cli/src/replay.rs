@@ -220,7 +220,7 @@ mod tests {
     #[test]
     fn an_unverified_exact_replay_warns() {
         let mut replayed = Replay {
-            render: signal_engine::Render {
+            render: signal_output::Render {
                 sample_rate: 1,
                 seed: 0,
                 frames: 0,
@@ -228,7 +228,7 @@ mod tests {
                 samples: Vec::new(),
                 log: Vec::new(),
                 same_machine: Vec::new(),
-                conversion: signal_engine::Conversion::Device,
+                conversion: signal_output::Conversion::Device,
                 ideal: false,
                 trust_provenance: false,
             },

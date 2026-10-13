@@ -11,11 +11,14 @@ mod common;
 use common::{addr, conn, inst, inst_with, plan, port_addr, registry, scaled};
 use signal_core::{EventPayload, Frame};
 use signal_engine::{
-    CallbackSizes, Command, ControlError, ControlSink, Controller, Driver, Engine, EngineConfig,
-    ExternalEvent, LogLine, MAX_CALLBACK_FRAMES, Meter, NullDriver, Outcome, ParameterValue,
-    RealtimeConfig, Report, Runner, SentCommand, Stamp, realtime, render_with,
+    Command, ControlError, ControlSink, Engine, EngineConfig, ExternalEvent, LogLine, Outcome,
+    ParameterValue, RealtimeConfig, Report, SentCommand, Stamp,
 };
 use signal_graph::ExecutionPlan;
+use signal_output::{
+    CallbackSizes, Controller, Driver, MAX_CALLBACK_FRAMES, Meter, NullDriver, Runner, realtime,
+    render_with,
+};
 
 /// 1 kHz: the fade length F is 5 frames.
 const RATE: u32 = 1_000;
@@ -76,15 +79,19 @@ impl ControlSink for Seen {
     fn log(&mut self, line: LogLine<'_>) {
         self.lines.push(serde_json::to_string(&line).unwrap());
     }
-    fn meter(&mut self, meter: &Meter) {
-        self.meters.push(*meter);
-    }
     fn parameter(&mut self, port: &signal_core::PortAddress, value: ParameterValue) {
         self.parameters.push((port.to_string(), value));
     }
     fn frontier(&mut self, next_frame: Frame) {
         self.frontier = next_frame;
     }
+}
+
+/// `poll`, with the audio adapter's meters into `seen` too.
+fn poll(controller: &mut Controller, seen: &mut Seen) {
+    let mut meters = Vec::new();
+    controller.poll_with(seen, |meter| meters.push(*meter));
+    seen.meters.extend(meters);
 }
 
 /// The scripted commands, all sent before the first frame: sets, a ramp, a
@@ -135,7 +142,7 @@ fn run(
         .run(frames, || between(&mut controller, &mut seen))
         .unwrap();
     let runner = driver.stop().unwrap().unwrap();
-    controller.poll(&mut seen);
+    poll(&mut controller, &mut seen);
     (driver.take_output(), seen, controller, runner)
 }
 
@@ -202,7 +209,7 @@ fn runner_blocks_at_every_capacity_equal_the_offline_render() {
         };
         let mut sent = false;
         let (output, seen, _, runner) = run(config, 2, 11, FRAMES, |controller, seen| {
-            controller.poll(seen);
+            poll(controller, seen);
             if !sent {
                 script(controller);
                 sent = true;
@@ -224,7 +231,7 @@ fn runner_blocks_at_every_capacity_equal_the_offline_render() {
 fn runner_output_equals_the_offline_render_of_what_it_applied() {
     let mut sent = false;
     let (output, seen, controller, runner) = run(config(), 2, 7, FRAMES, |controller, seen| {
-        controller.poll(seen);
+        poll(controller, seen);
         if !sent {
             script(controller);
             sent = true;
@@ -245,7 +252,7 @@ fn runner_output_equals_the_offline_render_of_what_it_applied() {
     let status = runner.status();
     assert_eq!(status.next_frame, Frame(FRAMES));
     assert_eq!(status.version, 2);
-    assert_eq!(status.clipped, 0);
+    assert_eq!(runner.clipped(), 0);
     assert_eq!(status.input_discards, Default::default());
     assert_eq!(controller.in_flight(), 0, "every returned item was dropped");
     // The log reaches the control thread with addresses, read with the plan
@@ -279,7 +286,7 @@ fn runner_output_equals_the_offline_render_of_what_it_applied() {
 fn a_late_command_applies_on_the_next_frame_and_is_reported() {
     let mut sent = None;
     let (_, seen, controller, _) = run(config(), 2, 3, 40_000, |controller, seen| {
-        controller.poll(seen);
+        poll(controller, seen);
         let now = controller.status().next_frame;
         if sent.is_none() && now >= Frame(200) {
             let id = controller
@@ -314,7 +321,7 @@ fn the_default_stamp_is_the_current_frame_plus_the_latency() {
     );
     let mut sent = None;
     let (_, seen, _, _) = run(config(), 2, 5, 40_000, |controller, seen| {
-        controller.poll(seen);
+        poll(controller, seen);
         let now = controller.status().next_frame;
         if sent.is_none() && now >= Frame(300) {
             assert_eq!(controller.default_frame(), Frame(now.0 + 1_024));
@@ -360,7 +367,7 @@ fn lossy_queue_overflow_is_counted_and_does_not_change_the_audio() {
     assert_eq!(output, reference);
     let status = runner.status();
     assert!(status.log_overflows > 0, "{status:?}");
-    assert!(status.meter_overflows > 0, "{status:?}");
+    assert!(runner.meter_overflows() > 0, "{status:?}");
     assert!(status.parameter_overflows > 0, "{status:?}");
     assert!(status.status_overflows > 0, "{status:?}");
     // Reports travel on the lossless return queue.
@@ -378,7 +385,7 @@ fn parameter_values_are_reported_with_their_plan() {
             script(controller);
             sent = true;
         }
-        controller.poll(seen);
+        poll(controller, seen);
     });
     let values = |port: &str| -> Vec<ParameterValue> {
         seen.parameters
@@ -431,7 +438,7 @@ fn a_full_command_queue_hands_the_command_back_and_counts_it() {
     let mut refused = None;
     let mut first = true;
     let (output, seen, controller, _) = run(small, 2, 13, 1_000, |controller, seen| {
-        controller.poll(seen);
+        poll(controller, seen);
         if first {
             first = false;
             set(controller, 220.0, 100).unwrap();
@@ -478,7 +485,7 @@ fn samples_are_clamped_counted_and_mapped_to_device_channels() {
             assert_eq!(frame, expected.as_slice(), "{channels} channels");
         }
         // Only the left channel (0.75 · 2) clips, whether or not it is played.
-        assert_eq!(runner.status().clipped, 100);
+        assert_eq!(runner.clipped(), 100);
     }
 }
 
@@ -493,11 +500,11 @@ fn a_swap_returns_the_old_plan_to_the_control_thread() {
     assert_eq!(controller.in_flight(), 1);
     driver.run(5, || {}).unwrap();
     let mut seen = Seen::default();
-    controller.poll(&mut seen);
+    poll(&mut controller, &mut seen);
     assert!(seen.reports.is_empty(), "not committed yet");
     assert_eq!(controller.in_flight(), 1);
     driver.run(20, || {}).unwrap();
-    controller.poll(&mut seen);
+    poll(&mut controller, &mut seen);
     let (report, command) = &seen.reports[0];
     assert_eq!(report.outcome, Outcome::Committed { version: 1 });
     assert_eq!(report.frame, Frame(10));

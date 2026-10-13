@@ -217,7 +217,7 @@ impl Drop for MachSemaphores {
 }
 
 /// The `semaphore` policy's waiter for `workers` workers, for
-/// [`realtime_with`](signal_engine::realtime_with) and
+/// [`realtime_with`](signal_output::realtime_with) and
 /// [`Engine::with_waiter`](signal_engine::Engine::with_waiter).
 pub fn mach_semaphores(workers: usize) -> Result<Arc<dyn Waiter>, String> {
     MachSemaphores::new(workers).map(|s| Arc::new(s) as Arc<dyn Waiter>)

@@ -15,9 +15,8 @@ use std::sync::Arc;
 use signal_audio::{CallbackStats, ChannelMap, InputCallback, OutputCallback, rt_thread};
 use signal_contract::alloc_counter::{self, Counts, Guard};
 use signal_core::Registry;
-use signal_engine::{
-    CallbackSizes, RealtimeConfig, RtOptions, RtPolicy, Schedule, realtime, realtime_with,
-};
+use signal_engine::{RealtimeConfig, RtOptions, RtPolicy, Schedule};
+use signal_output::{CallbackSizes, realtime, realtime_with};
 use signal_project::Project;
 
 /// M2.7-1 C10: under every wake policy, with the Mach semaphores of

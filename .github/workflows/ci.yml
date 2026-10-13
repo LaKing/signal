@@ -42,6 +42,26 @@ jobs:
       - name: Tests (release)
         run: cargo nextest run --workspace --release --no-tests=pass
 
+  lab:
+    # M2.7-9: the lab tier (ADR 0015) under clippy and the tests, with
+    # `--features signal-cli/lab`, on its own target directory so that it
+    # never rebuilds over the default jobs' artifacts. The seat runs these
+    # two command lines as they are (crates/signal-cli/tests/ci_lab_job.rs).
+    runs-on: macos-15
+    env:
+      CARGO_TARGET_DIR: /tmp/signal-project-target-lab
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Clippy (lab)
+        run: cargo clippy --workspace --all-targets --locked --features signal-cli/lab -- -D warnings
+      - name: Tests (lab)
+        run: cargo nextest run --workspace --locked --features signal-cli/lab --no-tests=pass
+
   model-tests:
     # M2.7-6: the scheduler's gate, task board and parking under loom
     # (`docs/testing-and-evaluation.md`, "Synchronisation model tests"):

@@ -16,8 +16,9 @@ use std::time::{Duration, Instant};
 
 use common::{config_threads, conn, ext, inst, inst_with, plan, registry, scaled};
 use signal_core::{EventPayload, Frame, SplitMix64};
-use signal_engine::{Engine, EngineConfig, HookPoint, Render, RtPolicy, Schedule, render_blocks};
+use signal_engine::{Engine, EngineConfig, HookPoint, RtPolicy, Schedule};
 use signal_graph::ExecutionPlan;
+use signal_output::{Render, render_blocks};
 
 const RATE: u32 = 1_000;
 const BLOCK: usize = 256;

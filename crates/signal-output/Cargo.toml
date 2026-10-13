@@ -1,0 +1,27 @@
+[package]
+name = "signal-output"
+description = "Signal's output adapters (ADR 0022): the audio adapter (sink selection, gain, channel mapping, device conversion, meters), the offline WAV render and the driver trait."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+signal-core = { workspace = true }
+signal-graph = { workspace = true }
+signal-engine = { workspace = true }
+# The render manifest and the log come through as JSON.
+serde_json = { workspace = true }
+# `audio.wav` (moved here from signal-engine, M2.7-9).
+hound = { workspace = true }
+# The meter queue and the null driver's stop token.
+rtrb = { workspace = true }
+
+[dev-dependencies]
+# The engine's schedule for the hang test's forced parallel case.
+signal-engine = { workspace = true, features = ["test-hooks"] }
+# `std.sine_osc` and `std.audio_out` for the hang test's plan.
+signal-std = { workspace = true }
+
+[lints]
+workspace = true

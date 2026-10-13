@@ -1,12 +1,10 @@
 //! What can go wrong when instantiating a plan, scheduling an edit, swapping
-//! plans, or rendering. Nothing goes wrong inside a frame: every check happens
+//! plans, or running offline. Nothing goes wrong inside a frame: every check happens
 //! before, except an engine failure (`docs/semantics.md` §14), which stops it.
 
 use std::fmt;
 
 use signal_core::{Frame, InstanceAddress, PortAddress};
-
-use crate::log::EngineFailure;
 
 /// Why a plan cannot be instantiated, an external list is refused, or an edit
 /// cannot be scheduled.
@@ -212,115 +210,3 @@ impl fmt::Display for EngineError {
 }
 
 impl std::error::Error for EngineError {}
-
-/// Why an offline render failed.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum RenderError {
-    /// The engine has already run frames; a render starts at frame 0.
-    AlreadyStarted,
-    /// The plan has no audio sink instance.
-    NoAudioSink,
-    /// The plan has more than one audio sink instance (M1 supports one).
-    SeveralAudioSinks {
-        /// The sinks, in address order.
-        instances: Vec<InstanceAddress>,
-    },
-    /// The audio sink has no signal inputs, or more than a WAV file can hold.
-    AudioChannels {
-        /// The sink.
-        instance: InstanceAddress,
-        /// Its number of signal inputs.
-        channels: usize,
-    },
-    /// A swap during [`render_with`](crate::render_with) did not keep the
-    /// audio sink: exactly one, at the same address, as wide.
-    SinkChanged {
-        /// The sink the render started with.
-        before: InstanceAddress,
-        /// The audio sinks of the swapped-in plan.
-        after: Vec<InstanceAddress>,
-        /// The number of signal inputs the render records.
-        channels: usize,
-    },
-    /// The caller's step before a frame of [`render_with`](crate::render_with)
-    /// failed: a swap or an edit was refused.
-    Edit(EngineError),
-    /// The engine failed and stopped (`docs/semantics.md` §14): nothing of
-    /// the render is kept.
-    EngineFailed(EngineFailure),
-    /// Writing an artifact failed.
-    Io(std::io::Error),
-    /// Writing `audio.wav` failed.
-    Wav(hound::Error),
-    /// Serializing a log line or the manifest failed.
-    Json(serde_json::Error),
-}
-
-impl fmt::Display for RenderError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RenderError::AlreadyStarted => f.write_str("a render must start at frame 0"),
-            RenderError::NoAudioSink => f.write_str("the plan has no audio sink"),
-            RenderError::SeveralAudioSinks { instances } => {
-                f.write_str("the plan has several audio sinks:")?;
-                for instance in instances {
-                    write!(f, " {instance}")?;
-                }
-                Ok(())
-            }
-            RenderError::AudioChannels { instance, channels } => write!(
-                f,
-                "{instance}: an audio sink needs 1 to 65535 signal inputs, it has {channels}"
-            ),
-            RenderError::SinkChanged {
-                before,
-                after,
-                channels,
-            } => {
-                write!(
-                    f,
-                    "a swap must keep the audio sink {before} with {channels} inputs; the new plan's audio sinks:"
-                )?;
-                for instance in after {
-                    write!(f, " {instance}")?;
-                }
-                Ok(())
-            }
-            RenderError::Edit(error) => write!(f, "applying an edit: {error}"),
-            RenderError::EngineFailed(failure) => write!(f, "{failure}"),
-            RenderError::Io(error) => write!(f, "writing render artifacts: {error}"),
-            RenderError::Wav(error) => write!(f, "writing audio.wav: {error}"),
-            RenderError::Json(error) => write!(f, "serializing render artifacts: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for RenderError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            RenderError::Io(error) => Some(error),
-            RenderError::Wav(error) => Some(error),
-            RenderError::Json(error) => Some(error),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for RenderError {
-    fn from(error: std::io::Error) -> RenderError {
-        RenderError::Io(error)
-    }
-}
-
-impl From<hound::Error> for RenderError {
-    fn from(error: hound::Error) -> RenderError {
-        RenderError::Wav(error)
-    }
-}
-
-impl From<serde_json::Error> for RenderError {
-    fn from(error: serde_json::Error) -> RenderError {
-        RenderError::Json(error)
-    }
-}

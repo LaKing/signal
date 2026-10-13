@@ -4,6 +4,11 @@
 //! "Threads"). Normative description: `docs/realtime-rules.md`, "The runner",
 //! and `docs/semantics.md` §12, "Real-time runner".
 //!
+//! The runner hands each block's sink inputs to the driver's
+//! [`SinkOutput`] (ADR 0022); what they become on a device is the output
+//! adapter's (`signal-output`). A callback that does not return is not
+//! contained, only detected ([`RealtimeConfig::hang_periods`], M2.7-9).
+//!
 //! [`Runner::process`] allocates, frees, locks and blocks nowhere: every
 //! queue and buffer is sized in [`realtime`], and everything that owns heap
 //! memory (pushed events and addresses, replaced plans) goes back to the
@@ -12,10 +17,14 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::mem;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
-use signal_core::{EventPayload, Frame, InstanceAddress, LossCause, PortAddress, Registry};
+use signal_core::{
+    EventPayload, Frame, InstanceAddress, LossCause, PortAddress, Registry, SinkKind,
+};
 use signal_graph::ExecutionPlan;
 
 use crate::cores::realtime_threads;
@@ -23,13 +32,13 @@ use crate::engine::{
     EditFull, Engine, EngineConfig, ExternalEvent, ExternalFull, InputDiscards, ParameterValue,
     PlanState, PreparedSwap, Schedule, ScheduleStats, SwapTarget, prepare_swap,
 };
-use crate::error::{EngineError, RenderError};
+use crate::error::EngineError;
 use crate::fade::fade_frames;
 use crate::log::{EngineFailure, FaultReason, InstanceId, LogLine, LogRecord};
-use crate::offline::GAIN;
 use crate::pool::Workers;
 #[cfg(feature = "test-hooks")]
 use crate::shared::HookPoint;
+use crate::sink::SinkOutput;
 use crate::wake::{MakeWaiter, RtOptions, WakeStats};
 
 /// The capacities and timing of a real-time run.
@@ -46,7 +55,8 @@ pub struct RealtimeConfig {
     pub commands: usize,
     /// The log queue's capacity, in records.
     pub log: usize,
-    /// The meter queue's capacity, in [`Meter`]s.
+    /// The capacity of the driver output's meter queue, in meters
+    /// (`signal-output`'s audio meters); the engine keeps none.
     pub meters: usize,
     /// The parameter queue's capacity, in parameter values.
     pub parameters: usize,
@@ -60,6 +70,12 @@ pub struct RealtimeConfig {
     /// The wake policy, the computation budget and the wake-up trace
     /// (M2.7-1); the default is the behaviour before it.
     pub rt: RtOptions,
+    /// Hang detection (M2.7-9): a callback still running this many periods
+    /// (`buffer_frames`) after [`Controller::poll`] first saw it is counted
+    /// and reported with the instances still running
+    /// ([`ControlSink::hang`]). 0 turns it off. Detection, not recovery: a
+    /// call that never returns is not contained.
+    pub hang_periods: u32,
 }
 
 impl RealtimeConfig {
@@ -93,6 +109,7 @@ impl RealtimeConfig {
             status: 256,
             boundary_data: 0,
             rt: RtOptions::default(),
+            hang_periods: 4,
         }
     }
 }
@@ -183,21 +200,6 @@ impl Report {
     }
 }
 
-/// One audio-sink channel over one callback, after the f32 conversion.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Meter {
-    /// The callback's first frame.
-    pub first_frame: Frame,
-    /// The callback's number of frames.
-    pub frames: u64,
-    /// The sink channel (its signal input, in port order).
-    pub channel: usize,
-    /// The largest magnitude.
-    pub peak: f32,
-    /// The sum of the squared samples.
-    pub sum_squares: f64,
-}
-
 /// The runner's counters, cumulative since the start, and where it is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RunnerStatus {
@@ -207,16 +209,12 @@ pub struct RunnerStatus {
     pub version: u64,
     /// Callbacks run.
     pub callbacks: u64,
-    /// Samples clamped to [−1, 1] (or non-finite, written as 0).
-    pub clipped: u64,
     /// Commands that applied after the frame they were stamped for.
     pub late: u64,
     /// Commands the engine refused (a full engine queue, a refused commit).
     pub refused: u64,
     /// Log records dropped because the log queue was full.
     pub log_overflows: u64,
-    /// Meters dropped because the meter queue was full.
-    pub meter_overflows: u64,
     /// Parameter values dropped because the parameter queue was full.
     pub parameter_overflows: u64,
     /// Statuses not sent because the status queue was full (or returns were
@@ -243,7 +241,7 @@ pub struct RunnerStatus {
     /// The engine's [`input_discards`](Engine::input_discards).
     pub input_discards: InputDiscards,
     /// The engine's [`failure`](Engine::failure): it stopped, and the runner
-    /// outputs silence from the failed block's first frame on (the frames of
+    /// runs no frame from the failed block's first frame on (the frames of
     /// earlier blocks of that callback stand, `docs/semantics.md` §14).
     pub failure: Option<EngineFailure>,
 }
@@ -254,8 +252,6 @@ pub trait ControlSink {
     fn report(&mut self, _report: &Report, _command: &SentCommand) {}
     /// A log record of a frame, with addresses.
     fn log(&mut self, _line: LogLine<'_>) {}
-    /// A meter of one callback and channel.
-    fn meter(&mut self, _meter: &Meter) {}
     /// A parameter's base and effective value at the end of a callback
     /// (observation only: it never feeds back into the run).
     fn parameter(&mut self, _port: &PortAddress, _value: ParameterValue) {}
@@ -268,6 +264,11 @@ pub trait ControlSink {
     /// its data when the run carries it) or missed (also a `late_result`
     /// fault in [`log`](ControlSink::log)).
     fn boundary(&mut self, _line: BoundaryLine<'_>) {}
+    /// A callback that has not returned after
+    /// [`hang_periods`](RealtimeConfig::hang_periods) periods (M2.7-9), once
+    /// per callback: a diagnosis, not part of the run (no session or engine
+    /// log records it).
+    fn hang(&mut self, _line: HangLine<'_>) {}
     /// Called last: every command whose effective frame is before `next_frame`
     /// has been reported (if a status reached the control thread).
     fn frontier(&mut self, _next_frame: Frame) {}
@@ -304,14 +305,61 @@ pub enum BoundaryOutcome<'a> {
     },
 }
 
-/// A due result's device sample: as a device receives it, finite samples
-/// clamped to [−1, 1] and anything else 0, then rounded to `f32`. The
-/// runner's conversion, and an exact replay's (M2.7-4).
-pub fn device_sample(x: f64) -> f32 {
-    if x.is_finite() {
-        x.clamp(-1.0, 1.0) as f32
-    } else {
-        0.0
+/// A callback that has not returned ([`ControlSink::hang`], M2.7-9).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HangLine<'a> {
+    /// The callback, counted from 0.
+    pub callback: u64,
+    /// How long it has been running since the control thread first saw it
+    /// (at least [`hang_periods`](RealtimeConfig::hang_periods) periods).
+    pub waited: Duration,
+    /// The instances whose primitive call had not returned, one per thread
+    /// lane, in lane order (the calling thread first).
+    pub running: &'a [InstanceAddress],
+}
+
+/// Where a real-time run's threads say what they are calling, for hang
+/// detection (M2.7-9): the callback count (odd while a callback runs), the
+/// plan version, and per thread lane the instance whose primitive call is
+/// running. Relaxed atomic stores only: the audio thread and the workers
+/// never wait on it; the control thread reads a snapshot.
+#[derive(Debug)]
+pub(crate) struct HangProbe {
+    /// Callback starts and ends, each counted.
+    edges: AtomicU64,
+    /// The engine's plan version, as of the last block.
+    version: AtomicU64,
+    /// Per lane: the instance's index + 1 while its call runs, else 0.
+    running: Box<[AtomicUsize]>,
+}
+
+impl HangProbe {
+    fn new(lanes: usize) -> HangProbe {
+        HangProbe {
+            edges: AtomicU64::new(0),
+            version: AtomicU64::new(0),
+            running: (0..lanes.max(1)).map(|_| AtomicUsize::new(0)).collect(),
+        }
+    }
+
+    /// Lane `lane` calls instance `i`.
+    #[inline(always)]
+    pub(crate) fn enter(&self, lane: usize, i: usize) {
+        if let Some(slot) = self.running.get(lane) {
+            slot.store(i.saturating_add(1), Ordering::Relaxed);
+        }
+    }
+
+    /// Lane `lane`'s call returned (or unwound and was caught).
+    #[inline(always)]
+    pub(crate) fn leave(&self, lane: usize) {
+        if let Some(slot) = self.running.get(lane) {
+            slot.store(0, Ordering::Relaxed);
+        }
+    }
+
+    fn edge(&self) {
+        self.edges.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -323,9 +371,9 @@ impl ControlSink for () {}
 pub enum ControlError {
     /// The engine refused the plan.
     Engine(EngineError),
-    /// The plan does not have exactly one audio sink, or a swap changes it:
-    /// a [`RenderError`] that says how.
-    Sink(RenderError),
+    /// The plan's sinks do not suit the driver's output (its own error), or
+    /// a swap changes them ([`SinksChanged`]).
+    Sink(Box<dyn std::error::Error + Send + Sync>),
     /// The command queue is full, or as many commands as the queues can
     /// return are in flight; the command is handed back.
     Full(Command),
@@ -348,6 +396,32 @@ impl fmt::Display for ControlError {
 }
 
 impl std::error::Error for ControlError {}
+
+/// A swap's plan does not declare the same sinks (kind, address, signal
+/// inputs) as the plan the run started with ([`ControlError::Sink`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SinksChanged {
+    /// The sinks the run started with, in instance order ([`InstanceId`]).
+    pub before: Vec<(InstanceAddress, SinkKind, usize)>,
+    /// The swapped-in plan's sinks.
+    pub after: Vec<(InstanceAddress, SinkKind, usize)>,
+}
+
+impl fmt::Display for SinksChanged {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a swap must keep the run's sinks")?;
+        for (address, _, inputs) in &self.before {
+            write!(f, " {address} ({inputs} inputs)")?;
+        }
+        f.write_str("; the new plan's:")?;
+        for (address, _, inputs) in &self.after {
+            write!(f, " {address} ({inputs} inputs)")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for SinksChanged {}
 
 /// A command in the queue.
 #[derive(Debug)]
@@ -389,8 +463,9 @@ struct PendingSwap {
 }
 
 /// Builds a real-time run of `plan`: the [`Runner`] for the audio thread and
-/// the [`Controller`] for the control thread. The plan must have exactly one
-/// audio sink with at least one signal input, as for [`render`](crate::render).
+/// the [`Controller`] for the control thread. Which of the plan's sinks the
+/// run serves, and how, is the driver's [`SinkOutput`]'s (ADR 0022); a swap
+/// must keep the plan's sinks ([`SinksChanged`]).
 pub fn realtime(
     plan: &ExecutionPlan,
     registry: &Registry,
@@ -427,37 +502,12 @@ pub fn realtime_with(
     config.engine.schedule.policy = config.rt.policy;
     config.engine.schedule.budget_ns = config.rt.computation.of_ns(period_ns);
     config.engine.schedule.trace = config.rt.trace;
-    let engine = Engine::with_waiter(plan, registry, config.engine, Vec::new(), make)
+    let mut engine = Engine::with_waiter(plan, registry, config.engine, Vec::new(), make)
         .map_err(ControlError::Engine)?;
     let mirror = PlanState::mirror(plan, registry, config.engine).map_err(ControlError::Engine)?;
-    let sinks = engine.audio_sinks();
-    let sink = match sinks.as_slice() {
-        [sink] => *sink,
-        [] => return Err(ControlError::Sink(RenderError::NoAudioSink)),
-        several => {
-            let instances = several
-                .iter()
-                .filter_map(|&s| engine.instance_address(s).cloned())
-                .collect();
-            return Err(ControlError::Sink(RenderError::SeveralAudioSinks {
-                instances,
-            }));
-        }
-    };
-    let address = engine
-        .instance_address(sink)
-        .cloned()
-        .ok_or(ControlError::Sink(RenderError::NoAudioSink))?;
-    let width = engine.instance_inputs(sink).len();
-    if width == 0 {
-        return Err(ControlError::Sink(RenderError::AudioChannels {
-            instance: address,
-            channels: width,
-        }));
-    }
-    let gain = PortAddress::new(&address, GAIN)
-        .ok()
-        .filter(|port| engine.parameter(port).is_some());
+    let sinks = mirror.sinks();
+    let hang = Arc::new(HangProbe::new(engine.config().threads));
+    engine.set_hang_probe(Arc::clone(&hang));
 
     // Every command returns one report and one item to drop: the return
     // queue holds twice the commands in flight.
@@ -465,7 +515,6 @@ pub fn realtime_with(
     let (command_tx, command_rx) = RingBuffer::new(limit);
     let (back_tx, back_rx) = RingBuffer::new(2 * limit);
     let (log_tx, log_rx) = RingBuffer::new(config.log.max(1));
-    let (meter_tx, meter_rx) = RingBuffer::new(config.meters.max(1));
     let (parameter_tx, parameter_rx) = RingBuffer::new(config.parameters.max(1));
     let (status_tx, status_rx) = RingBuffer::new(config.status.max(1));
     let (data_tx, data_rx) = match config.boundary_data {
@@ -477,21 +526,21 @@ pub fn realtime_with(
     };
     let target = engine.swap_target();
 
+    let hang_after = (config.hang_periods > 0)
+        .then(|| Duration::from_nanos(period_ns).saturating_mul(config.hang_periods));
     let runner = Runner {
         engine,
-        sink,
-        gain,
+        bound: false,
+        hang: Arc::clone(&hang),
         commands: command_rx,
         back: back_tx,
         log: log_tx,
-        meters: meter_tx,
         parameters: parameter_tx,
         next_parameter: 0,
         status: status_tx,
         data: data_tx,
         pending: VecDeque::with_capacity(limit),
         held: VecDeque::with_capacity(2 * limit),
-        levels: vec![(0.0, 0.0); width],
         last_event: Frame::ZERO,
         last_edit: Frame::ZERO,
         last_swap: None,
@@ -502,7 +551,6 @@ pub fn realtime_with(
         commands: command_tx,
         back: back_rx,
         log: log_rx,
-        meters: meter_rx,
         parameters: parameter_rx,
         status: status_rx,
         data: data_rx,
@@ -510,7 +558,11 @@ pub fn realtime_with(
         registry: registry.clone(),
         target,
         mirrors: VecDeque::from([(0, mirror)]),
-        sink: (address, width),
+        sinks,
+        hang,
+        hang_after,
+        watch: None,
+        hangs: 0,
         latency: config.latency_frames,
         fade: fade_frames(config.engine.sample_rate),
         next_id: 1,
@@ -525,17 +577,17 @@ pub fn realtime_with(
     Ok((runner, controller))
 }
 
-/// The audio-thread half of a real-time run: owns the [`Engine`] and is
-/// moved into a [`Driver`](crate::Driver), whose callback calls
-/// [`process`](Runner::process).
+/// The audio-thread half of a real-time run: owns the [`Engine`]; a driver's
+/// audio callback calls [`process`](Runner::process) with its output
+/// (`signal-output` wraps it for audio devices).
 pub struct Runner {
     engine: Engine,
-    sink: InstanceId,
-    gain: Option<PortAddress>,
+    /// Whether an output has been bound (before the first block).
+    bound: bool,
+    hang: Arc<HangProbe>,
     commands: Consumer<Queued>,
     back: Producer<Back>,
     log: Producer<(u64, LogRecord)>,
-    meters: Producer<Meter>,
     /// (plan version, parameter index, value).
     parameters: Producer<(u64, usize, ParameterValue)>,
     /// The parameter the next callback reports first.
@@ -547,8 +599,6 @@ pub struct Runner {
     pending: VecDeque<PendingSwap>,
     /// Returned items the return queue had no room for (never dropped here).
     held: VecDeque<Back>,
-    /// Per sink channel: (peak, sum of squares) of the current callback.
-    levels: Vec<(f32, f64)>,
     last_event: Frame,
     last_edit: Frame,
     last_swap: Option<Frame>,
@@ -557,53 +607,53 @@ pub struct Runner {
 }
 
 impl Runner {
-    /// Runs one callback: `out` holds `out.len() / channels` frames of
-    /// `channels` interleaved device channels. In order:
+    /// Runs one callback of `frames` frames, handing each block's sink
+    /// inputs to `output` (ADR 0022). In order:
     /// 1. takes the queued commands, each at its effective frame: events,
     ///    suspends and resumes go to the engine, swaps wait for their frame;
+    ///    on the first callback, binds `output` ([`SinkOutput::bind`]);
     /// 2. runs the frames in blocks of up to the engine's block capacity,
     ///    split at the frame of every command (a swap is committed at a
-    ///    block's first frame, ADR 0019 §1); writes each frame's audio-sink
-    ///    channels (times the sink's `gain`) clamped to [−1, 1] as f32 to the
-    ///    same device channels, extra device channels 0; and pushes each
-    ///    block's log records, frame by frame;
-    /// 3. pushes a meter per sink channel, the base and effective value of
-    ///    up to [`PARAMETERS_PER_CALLBACK`] parameters (going round the plan's
+    ///    block's first frame, ADR 0019 §1, and `output` binds again there);
+    ///    after each block calls [`SinkOutput::block`] and pushes the block's
+    ///    log records, frame by frame;
+    /// 3. pushes the base and effective value of up to
+    ///    [`PARAMETERS_PER_CALLBACK`] parameters (going round the plan's
     ///    parameters), returns used input for dropping, and pushes the status.
     ///
-    /// Allocates, frees, locks and blocks nowhere; a full log, meter or
-    /// status queue is counted. A trailing partial frame in `out` is zeroed.
-    pub fn process(&mut self, out: &mut [f32], channels: usize) {
+    /// Returns the frames it ran: fewer than `frames` once the engine has
+    /// stopped (`docs/semantics.md` §14). Allocates, frees, locks and blocks
+    /// nowhere (with an output that does not); a full log or status queue is
+    /// counted.
+    pub fn process(&mut self, frames: usize, output: &mut impl SinkOutput) -> usize {
+        // Hang detection (M2.7-9): odd while the callback runs.
+        self.hang.edge();
         // The wake policy's callback start (timing only, M2.7-1).
-        self.engine
-            .begin_callback(out.len().checked_div(channels).unwrap_or(0));
+        self.engine.begin_callback(frames);
         self.collect();
-        let first_frame = self.engine.next_frame();
-        self.levels.fill((0.0, 0.0));
-        let mut frames = 0u64;
-        if channels == 0 {
-            out.fill(0.0);
-        } else {
-            let mut rows = out.chunks_exact_mut(channels);
-            let total = rows.len();
-            let mut done = 0;
-            while done < total {
-                let ran = self.block(&mut rows, total - done);
-                if ran == 0 {
-                    break;
-                }
-                done += ran;
-            }
-            frames = done as u64;
-            // Frames the engine did not run (it stopped, `docs/semantics.md`
-            // §14) are silence.
-            for row in rows.by_ref() {
-                row.fill(0.0);
-            }
-            rows.into_remainder().fill(0.0);
+        if !self.bound {
+            // The handoff's contract: `bind` before the first block.
+            output.bind(&self.engine);
+            self.bound = true;
         }
-        self.finish(first_frame, frames);
+        let mut done = 0;
+        while done < frames {
+            let ran = self.block(output, frames - done);
+            if ran == 0 {
+                break;
+            }
+            done += ran;
+        }
+        self.finish();
         self.engine.end_callback();
+        self.hang.edge();
+        done
+    }
+
+    /// The engine, for a driver's output to inspect before the first
+    /// callback (the first callback binds it, [`SinkOutput::bind`]).
+    pub fn engine(&self) -> &Engine {
+        &self.engine
     }
 
     /// The wake policy, computation budget and trace it was built with: the
@@ -747,16 +797,15 @@ impl Runner {
     /// One block of at most `most` frames: the swap due now, then frames up
     /// to the next swap or command frame, their audio and their log. Returns
     /// the frames it ran.
-    fn block<'a>(&mut self, rows: &mut impl Iterator<Item = &'a mut [f32]>, most: usize) -> usize {
+    fn block(&mut self, output: &mut impl SinkOutput, most: usize) -> usize {
         let next = self.engine.next_frame();
         if self.pending.front().is_some_and(|p| p.frame <= next)
             && let Some(mut pending) = self.pending.pop_front()
         {
             match self.engine.commit_swap(&mut pending.swap, next) {
                 Ok(()) => {
-                    if let Some(sink) = self.engine.first_audio_sink() {
-                        self.sink = sink;
-                    }
+                    // The Controller sent no plan without the run's sinks.
+                    output.bind(&self.engine);
                     let version = self.engine.version();
                     let outcome = Outcome::Committed { version };
                     self.report(pending.id, pending.requested, next, outcome);
@@ -776,33 +825,12 @@ impl Runner {
             .map(|at| usize::try_from(at.0 - next.0).unwrap_or(usize::MAX))
             .min()
             .unwrap_or(usize::MAX);
+        self.hang
+            .version
+            .store(self.engine.version(), Ordering::Relaxed);
         let ran = self.engine.run_block(most.min(until));
-
-        let gain = self
-            .gain
-            .as_ref()
-            .and_then(|port| self.engine.parameter_index(port));
-        let width = self.engine.instance_inputs(self.sink).len();
-        for f in 0..ran {
-            let Some(row) = rows.next() else {
-                break;
-            };
-            row.fill(0.0);
-            let gain = gain.and_then(|j| self.engine.parameter_at_frame(j, f));
-            for channel in 0..width {
-                let x = self
-                    .engine
-                    .instance_input_at(self.sink, channel, f)
-                    .unwrap_or(0.0);
-                let sample = to_device(gain.map_or(x, |g| g * x), &mut self.counts.clipped);
-                if let Some(level) = self.levels.get_mut(channel) {
-                    level.0 = level.0.max(sample.abs());
-                    level.1 += f64::from(sample) * f64::from(sample);
-                }
-                if let Some(out) = row.get_mut(channel) {
-                    *out = sample;
-                }
-            }
+        if ran > 0 {
+            output.block(&self.engine, ran);
         }
 
         let version = self.engine.version();
@@ -840,23 +868,9 @@ impl Runner {
         ran
     }
 
-    /// After the frames: meters, used input back, then the status, last, so
-    /// that every report it covers precedes it.
-    fn finish(&mut self, first_frame: Frame, frames: u64) {
-        if frames > 0 {
-            for (channel, &(peak, sum_squares)) in self.levels.iter().enumerate() {
-                let meter = Meter {
-                    first_frame,
-                    frames,
-                    channel,
-                    peak,
-                    sum_squares,
-                };
-                if self.meters.push(meter).is_err() {
-                    self.counts.meter_overflows = self.counts.meter_overflows.saturating_add(1);
-                }
-            }
-        }
+    /// After the frames: parameter values, used input back, then the status,
+    /// last, so that every report it covers precedes it.
+    fn finish(&mut self) {
         self.push_parameters();
         let Runner {
             engine,
@@ -954,16 +968,6 @@ fn send_back(back: &mut Producer<Back>, held: &mut VecDeque<Back>, stalls: &mut 
     }
 }
 
-/// A sample for the device: clamped to [−1, 1], non-finite as 0; either
-/// counts as clipped.
-fn to_device(x: f64, clipped: &mut u64) -> f32 {
-    let sample = device_sample(x);
-    if !x.is_finite() || x.clamp(-1.0, 1.0) != x {
-        *clipped = clipped.saturating_add(1);
-    }
-    sample
-}
-
 /// The control-thread half of a real-time run: sends commands to the
 /// [`Runner`], prepares swaps, and drains what it sends back
 /// ([`poll`](Controller::poll)). Allocates (it builds plans) but performs no
@@ -978,7 +982,6 @@ pub struct Controller {
     commands: Producer<Queued>,
     back: Consumer<Back>,
     log: Consumer<(u64, LogRecord)>,
-    meters: Consumer<Meter>,
     parameters: Consumer<(u64, usize, ParameterValue)>,
     status: Consumer<RunnerStatus>,
     /// Delivered results carried with `Delivered` records, if recorded, and
@@ -991,7 +994,15 @@ pub struct Controller {
     /// Structural mirrors by engine plan version: the newest is the plan the
     /// next swap replaces; older ones read log records not yet drained.
     mirrors: VecDeque<(u64, PlanState)>,
-    sink: (InstanceAddress, usize),
+    /// The sinks the run started with: a swap must keep them.
+    sinks: Vec<(InstanceAddress, SinkKind, usize)>,
+    /// Hang detection (M2.7-9): the probe, how long a callback may run, the
+    /// running callback's count as first seen, when, and whether it was
+    /// reported, and the hangs reported.
+    hang: Arc<HangProbe>,
+    hang_after: Option<Duration>,
+    watch: Option<(u64, Instant, bool)>,
+    hangs: u64,
     latency: u64,
     fade: u64,
     next_id: CommandId,
@@ -1050,7 +1061,7 @@ impl Controller {
 
     /// Prepares a swap to `plan` here (it allocates) and sends it, stamped
     /// `stamp`. It commits at its effective frame; its report says so. The
-    /// plan must keep the audio sink: one, at the same address, as wide.
+    /// plan must keep the run's sinks ([`SinksChanged`]).
     /// [`prepare_swap`](Controller::prepare_swap), then
     /// [`send_swap`](Controller::send_swap).
     pub fn swap(&mut self, plan: &ExecutionPlan, stamp: Stamp) -> Result<CommandId, ControlError> {
@@ -1068,17 +1079,12 @@ impl Controller {
         }
         let mirror = PlanState::mirror(plan, &self.registry, self.target.config)
             .map_err(ControlError::Engine)?;
-        if mirror.audio_sink() != Some((&self.sink.0, self.sink.1)) {
-            let after = mirror
-                .audio_sink()
-                .map(|(a, _)| a.clone())
-                .into_iter()
-                .collect();
-            return Err(ControlError::Sink(RenderError::SinkChanged {
-                before: self.sink.0.clone(),
+        let after = mirror.sinks();
+        if after != self.sinks {
+            return Err(ControlError::Sink(Box::new(SinksChanged {
+                before: self.sinks.clone(),
                 after,
-                channels: self.sink.1,
-            }));
+            })));
         }
         let old = self
             .mirrors
@@ -1145,9 +1151,13 @@ impl Controller {
     /// Drains everything the runner sent, without allocating: reads the
     /// newest status, hands each report to `sink` with its command, drops
     /// returned items and replaced plans, hands each log record and parameter
-    /// value (read with the plan that wrote it) and meter to `sink`, and calls
+    /// value (read with the plan that wrote it) to `sink`, and calls
     /// [`frontier`](ControlSink::frontier) with the status's next frame.
+    /// First it looks for a hung callback
+    /// ([`hang_periods`](RealtimeConfig::hang_periods)); reporting one
+    /// allocates.
     pub fn poll(&mut self, sink: &mut impl ControlSink) {
+        self.watch(sink);
         while let Ok(status) = self.status.pop() {
             self.latest = status;
         }
@@ -1237,9 +1247,6 @@ impl Controller {
                 sink.log(line);
             }
         }
-        while let Ok(meter) = self.meters.pop() {
-            sink.meter(&meter);
-        }
         // Values of a plan whose mirror is retired are dropped: a newer
         // plan's values follow.
         while let Ok((version, index, value)) = self.parameters.pop() {
@@ -1254,6 +1261,60 @@ impl Controller {
     /// The runner's last status that reached this thread.
     pub fn status(&self) -> RunnerStatus {
         self.latest
+    }
+
+    /// Callbacks reported hung ([`ControlSink::hang`]).
+    pub fn hangs(&self) -> u64 {
+        self.hangs
+    }
+
+    /// Hang detection (M2.7-9): a callback seen running for
+    /// [`hang_periods`](RealtimeConfig::hang_periods) periods is counted
+    /// once and reported with the instances whose calls have not returned.
+    /// It only reads the probe; nothing reaches the runner.
+    fn watch(&mut self, sink: &mut impl ControlSink) {
+        let Some(after) = self.hang_after else {
+            return;
+        };
+        let edges = self.hang.edges.load(Ordering::Acquire);
+        if edges.is_multiple_of(2) {
+            self.watch = None;
+            return;
+        }
+        let now = Instant::now();
+        let since = match self.watch {
+            Some((seen, _, true)) if seen == edges => return,
+            Some((seen, since, false)) if seen == edges => since,
+            _ => {
+                self.watch = Some((edges, now, false));
+                now
+            }
+        };
+        let waited = now.duration_since(since);
+        if waited < after {
+            return;
+        }
+        self.watch = Some((edges, since, true));
+        self.hangs = self.hangs.saturating_add(1);
+        let version = self.hang.version.load(Ordering::Relaxed);
+        let state = self
+            .mirrors
+            .iter()
+            .find(|m| m.0 == version)
+            .map(|(_, state)| state);
+        let running: Vec<InstanceAddress> = self
+            .hang
+            .running
+            .iter()
+            .filter_map(|slot| slot.load(Ordering::Relaxed).checked_sub(1))
+            .filter_map(|i| state.and_then(|state| state.instance_address(InstanceId(i))))
+            .cloned()
+            .collect();
+        sink.hang(HangLine {
+            callback: edges / 2,
+            waited,
+            running: &running,
+        });
     }
 
     /// The frame [`Stamp::Default`] stands for now: the last reported next
@@ -1362,7 +1423,7 @@ mod tests {
         }
     }
 
-    /// An audio sink with one input.
+    /// A sink with one input.
     #[derive(Default)]
     struct Sink;
 
@@ -1420,6 +1481,77 @@ mod tests {
         build_plan(&root, &[], &registry(), version).unwrap()
     }
 
+    /// Writes the first sink's first input, frame by frame, to `out`.
+    struct Capture<'a> {
+        out: &'a mut [f32],
+        at: usize,
+        sink: Option<InstanceId>,
+    }
+
+    impl SinkOutput for Capture<'_> {
+        fn bind(&mut self, engine: &Engine) -> bool {
+            self.sink = engine.sinks().next().map(|sink| sink.id);
+            self.sink.is_some()
+        }
+
+        fn block(&mut self, engine: &Engine, frames: usize) {
+            for f in 0..frames {
+                let x = self.sink.and_then(|s| engine.sink_input_at(s, 0, f));
+                if let Some(out) = self.out.get_mut(self.at) {
+                    *out = x.unwrap_or(0.0) as f32;
+                }
+                self.at += 1;
+            }
+        }
+    }
+
+    /// One callback of `out.len()` frames into `out`.
+    fn process(runner: &mut Runner, out: &mut [f32]) {
+        let frames = out.len();
+        let mut capture = Capture {
+            out,
+            at: 0,
+            sink: None,
+        };
+        // A fresh output: bound here, since the runner binds only its first.
+        capture.bind(runner.engine());
+        runner.process(frames, &mut capture);
+    }
+
+    /// Records the order of the calls it receives.
+    #[derive(Default)]
+    struct Calls(Vec<&'static str>);
+
+    impl SinkOutput for Calls {
+        fn bind(&mut self, _engine: &Engine) -> bool {
+            self.0.push("bind");
+            true
+        }
+
+        fn block(&mut self, _engine: &Engine, _frames: usize) {
+            self.0.push("block");
+        }
+    }
+
+    /// The sink handoff's contract (ADR 0022): `bind` comes before the
+    /// first block, once, and not again without a swap.
+    #[test]
+    fn the_runner_binds_its_output_before_the_first_block() {
+        let (mut runner, _controller) =
+            realtime(&plan(0), &registry(), RealtimeConfig::new(1_000, 1)).unwrap();
+        let mut calls = Calls::default();
+        assert_eq!(runner.process(8, &mut calls), 8);
+        assert_eq!(calls.0.first(), Some(&"bind"), "{:?}", calls.0);
+        assert!(
+            calls.0.iter().skip(1).all(|&c| c == "block"),
+            "{:?}",
+            calls.0
+        );
+        let mut later = Calls::default();
+        runner.process(8, &mut later);
+        assert!(later.0.iter().all(|&c| c == "block"), "{:?}", later.0);
+    }
+
     #[derive(Default)]
     struct Reports(Vec<Report>);
 
@@ -1439,7 +1571,7 @@ mod tests {
         controller.target.version += 1;
         controller.swap(&plan(1), Stamp::At(Frame(2))).unwrap();
         let mut out = [0.0f32; 8];
-        runner.process(&mut out, 1);
+        process(&mut runner, &mut out);
         assert_eq!(out, [0.5; 8], "the old plan keeps running");
         let mut reports = Reports::default();
         controller.poll(&mut reports);
@@ -1452,20 +1584,6 @@ mod tests {
             controller.swap(&plan(2), Stamp::Default),
             Err(ControlError::Desynchronised)
         ));
-    }
-
-    /// Out-of-range samples are clamped, non-finite ones written as 0; all
-    /// are counted.
-    #[test]
-    fn non_finite_samples_are_written_as_zero_and_counted() {
-        let mut clipped = 0;
-        assert_eq!(to_device(0.5, &mut clipped), 0.5);
-        assert_eq!(to_device(1.5, &mut clipped), 1.0);
-        assert_eq!(to_device(-1.5, &mut clipped), -1.0);
-        assert_eq!(to_device(f64::INFINITY, &mut clipped), 0.0);
-        assert_eq!(to_device(f64::NEG_INFINITY, &mut clipped), 0.0);
-        assert_eq!(to_device(f64::NAN, &mut clipped), 0.0);
-        assert_eq!(clipped, 5);
     }
 
     /// With the in-flight limit lifted, a full return queue holds items on
@@ -1489,15 +1607,15 @@ mod tests {
                 .send_event(target.clone(), EventPayload::Trigger, Stamp::At(Frame(0)))
                 .unwrap();
             sent.push(id);
-            runner.process(&mut out, 1);
+            process(&mut runner, &mut out);
         }
         assert!(runner.status().return_stalls > 0);
         assert!(!runner.held.is_empty());
         let mut reports = Reports::default();
         controller.poll(&mut reports);
-        runner.process(&mut out, 1);
+        process(&mut runner, &mut out);
         controller.poll(&mut reports);
-        runner.process(&mut out, 1);
+        process(&mut runner, &mut out);
         controller.poll(&mut reports);
         assert!(runner.held.is_empty());
         let ids: Vec<CommandId> = reports.0.iter().map(|r| r.id).collect();

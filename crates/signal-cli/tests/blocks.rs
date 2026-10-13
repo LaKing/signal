@@ -13,11 +13,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use signal_core::{Curve, EventPayload, Frame, Registry, SplitMix64};
-use signal_engine::{
-    Engine, EngineConfig, EngineError, ExternalEvent, HookPoint, Render, Schedule, render_blocks,
-    render_with,
-};
+use signal_engine::{Engine, EngineConfig, EngineError, ExternalEvent, HookPoint, Schedule};
 use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, InstanceDef, build_plan};
+use signal_output::{Render, render_blocks, render_with};
 use signal_project::{Project, SourceFile};
 
 /// The block sizes of the matrix (AC1).
@@ -463,7 +461,7 @@ fn thirty_two_kick_voices_are_bit_identical_on_threads() {
     )
     .unwrap();
     let rendered =
-        signal_engine::render_blocks(&mut engine, VOICES_FRAMES, 256, |_| Ok(None)).unwrap();
+        signal_output::render_blocks(&mut engine, VOICES_FRAMES, 256, |_| Ok(None)).unwrap();
     assert_eq!(hashes(&rendered), reference, "32 voices, default schedule");
     let stats = engine.schedule_stats();
     assert!(stats.tasks <= stats.units, "{stats:?}");

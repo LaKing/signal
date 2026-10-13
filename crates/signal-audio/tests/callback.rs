@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use signal_audio::{CallbackStats, ChannelMap, OutputCallback};
 use signal_core::Registry;
-use signal_engine::{Engine, EngineConfig, RealtimeConfig, Runner, realtime, render};
+use signal_engine::{Engine, EngineConfig, RealtimeConfig};
+use signal_output::{Runner, realtime, render};
 use signal_project::Project;
 
 fn registry() -> Registry {

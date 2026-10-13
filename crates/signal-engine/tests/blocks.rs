@@ -15,11 +15,9 @@ use signal_core::{
     ModuleDescriptor, ModuleType, Outputs, ParameterDescriptor, PortDescriptor, PortKind,
     PortShape, PrepareContext, Primitive, Range, RateDivisor, Registry, SplitMix64,
 };
-use signal_engine::{
-    Engine, EngineConfig, EngineError, ExternalEvent, InputDiscards, RtPolicy, render_blocks,
-    render_with,
-};
+use signal_engine::{Engine, EngineConfig, EngineError, ExternalEvent, InputDiscards, RtPolicy};
 use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, Exports, InstanceDef, build_plan};
+use signal_output::{render_blocks, render_with};
 
 /// The block sizes of the matrix (AC1).
 const SIZES: [usize; 7] = [1, 2, 3, 7, 64, 128, 256];

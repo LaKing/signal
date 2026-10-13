@@ -35,10 +35,11 @@ use signal_audio::{
 };
 use signal_core::{Curve, EventPayload, Frame, PortAddress, Registry};
 use signal_engine::{
-    ControlSink, Controller, Driver, LogLine, Meter, NullDriver, ParameterValue, Provenance,
-    RealtimeConfig, Report, RunnerStatus, SentCommand, Stamp, realtime_with,
+    ControlSink, HangLine, LogLine, ParameterValue, Provenance, RealtimeConfig, Report,
+    RunnerStatus, SentCommand, Stamp,
 };
 use signal_graph::ExecutionPlan;
+use signal_output::{Controller, Driver, Meter, NullDriver, realtime_with};
 use signal_project::live::{ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload};
 use signal_project::session::{Edit, LiveRecorder, SessionRecorder, sink_of};
 use signal_project::{LoadError, PROJECT_FILE, Project, located, write_parameter};
@@ -287,12 +288,27 @@ struct Playing {
     failure_reported: bool,
 }
 
-/// Feeds the recorder, the output meters and the parameter values from one
-/// Controller poll.
+/// Feeds the recorder and the parameter values from one Controller poll.
 struct Sink<'a> {
     live: &'a mut LiveRecorder,
-    meters: &'a mut [(String, ChannelMeter)],
     values: &'a mut BTreeMap<PortAddress, ParameterValue>,
+}
+
+/// One Controller poll: the recorder, the parameter values, and the audio
+/// adapter's output meters (ADR 0022).
+fn poll(playing: &mut Playing) {
+    let meters = &mut playing.outputs;
+    playing.controller.poll_with(
+        &mut Sink {
+            live: &mut playing.live,
+            values: &mut playing.values,
+        },
+        |meter: &Meter| {
+            if let Some((_, channel)) = meters.get_mut(meter.channel) {
+                channel.push(meter);
+            }
+        },
+    );
 }
 
 impl ControlSink for Sink<'_> {
@@ -301,11 +317,6 @@ impl ControlSink for Sink<'_> {
     }
     fn log(&mut self, line: LogLine<'_>) {
         self.live.log(line);
-    }
-    fn meter(&mut self, meter: &Meter) {
-        if let Some((_, channel)) = self.meters.get_mut(meter.channel) {
-            channel.push(meter);
-        }
     }
     fn parameter(&mut self, port: &PortAddress, value: ParameterValue) {
         match self.values.get_mut(port) {
@@ -317,6 +328,16 @@ impl ControlSink for Sink<'_> {
     }
     fn frontier(&mut self, next_frame: Frame) {
         self.live.frontier(next_frame);
+    }
+    /// A hung callback (M2.7-9): a diagnosis on stderr, not recorded.
+    fn hang(&mut self, line: HangLine<'_>) {
+        let running: Vec<String> = line.running.iter().map(ToString::to_string).collect();
+        eprintln!(
+            "signal-app: hang: callback {} has not returned after {:.1} ms; still running: {}",
+            line.callback,
+            line.waited.as_secs_f64() * 1e3,
+            running.join(", ")
+        );
     }
 }
 
@@ -491,11 +512,7 @@ impl AppState {
         let Some(playing) = self.playing.as_mut() else {
             return;
         };
-        playing.controller.poll(&mut Sink {
-            live: &mut playing.live,
-            meters: &mut playing.outputs,
-            values: &mut playing.values,
-        });
+        poll(playing);
         if let Some(input) = playing.input.as_mut() {
             let meters = &mut playing.inputs;
             input.meters().drain(|meter| {
@@ -1058,15 +1075,11 @@ impl AppState {
         if let Err(error) = &stopped {
             self.message = Some(format!("stopping: {error}"));
         }
-        playing.controller.poll(&mut Sink {
-            live: &mut playing.live,
-            meters: &mut playing.outputs,
-            values: &mut playing.values,
-        });
+        poll(&mut playing);
         let mut status = status_of(&playing);
         if let Ok(Some(runner)) = stopped {
             status.frame = runner.status().next_frame.0;
-            status.clipped = runner.status().clipped;
+            status.clipped = runner.clipped();
             status.elapsed = status.frame as f64 / f64::from(playing.rate);
         }
         self.status = Some(status);
@@ -1129,7 +1142,7 @@ fn status_of(playing: &Playing) -> Status {
         xruns: stats.xruns + input_errors,
         load_average: stats.average_callback_ratio,
         load_worst: stats.worst_callback_ratio,
-        clipped: status.clipped,
+        clipped: playing.controller.clipped(),
         buffer: playing.buffer,
         threads: playing.scheduling.threads,
         workers: playing.scheduling.workers.len(),

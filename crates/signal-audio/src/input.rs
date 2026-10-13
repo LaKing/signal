@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rtrb::{Consumer, Producer, RingBuffer};
 use signal_core::Frame;
-use signal_engine::Meter;
+use signal_output::Meter;
 
 /// What the input callback holds. [`capture`](InputCallback::capture)
 /// allocates, frees, locks and blocks nowhere: the levels are sized here, and

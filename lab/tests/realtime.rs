@@ -13,10 +13,9 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use signal_engine::{
-    ControlSink, Driver, FaultReason, LogLine, NullDriver, RealtimeConfig, realtime,
-};
+use signal_engine::{ControlSink, FaultReason, LogLine, RealtimeConfig};
 use signal_lab::gpu_partials::{BLOCK_FRAMES, LATENCY_BLOCKS};
+use signal_output::{Driver, NullDriver, realtime};
 
 /// The `late_result` faults the controller hands out, by frame.
 #[derive(Default)]

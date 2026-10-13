@@ -150,7 +150,7 @@ Reaktor-inspired: a hierarchy, the split between built-in low-level units and us
 |---|---|---|---|
 | D-EXEC-1 | **Semantics:** frame-functional. Each frame, each module computes `(inputs[n], state[n−1]) → (outputs[n], state[n])`. Every feedback loop contains at least a one-frame delay. Every module advances every frame. | **Approved** | Hard: defines what every result means |
 | D-EXEC-2 | **Module contract:** a module processes *k ≥ 1* consecutive frames per call, with results required to be identical for any *k*. A per-frame engine simply calls it with *k* = 1. | **Approved** | Hard: every primitive is written against it |
-| D-EXEC-3 | **Engine scheduling:** start with the PO's model literally: one frame at a time, all non-suspended instances, in an order computed whenever the graph changes (ADR 0016). Block execution (*k* > 1) is added later **only if measurements show a need**, verified bit-exact against the per-frame engine. | **Decided 2026-10-12 by ADR 0019:** block execution with a deterministic multi-core scheduler, bit-identical to the per-frame engine | Easy: internal to the engine |
+| D-EXEC-3 | **Engine scheduling:** start with the PO's model literally: one frame at a time, all non-suspended instances, in an order computed whenever the graph changes (ADR 0016). Block execution (*k* > 1) is added later **only if measurements show a need**, verified bit-exact against the per-frame engine. | **Decided 2026-10-12 by ADR 0019:** block execution with a deterministic multi-core scheduler, bit-identical to the per-frame engine (except after a panic in a `process` call of several frames, `semantics.md` §14) | Easy: internal to the engine |
 
 ## 9a. Interconnectivity and conversion model (accepted: ADR 0005)
 

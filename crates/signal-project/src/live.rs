@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use signal_core::{Frame, Registry};
-use signal_engine::{Controller, Stamp};
+use signal_engine::Stamp;
+use signal_output::Controller;
 
 use crate::session::{LiveRecorder, sink_of};
 use crate::{Diagnostic, Project, ProjectEdit, diff};

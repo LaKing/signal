@@ -11,9 +11,10 @@
 
 mod common;
 
-use signal_engine::{Engine, EngineConfig, render_with};
+use signal_engine::{Engine, EngineConfig};
 use signal_gpu::Injected;
 use signal_lab::gpu_partials::{BLOCK_FRAMES, JOBS};
+use signal_output::render_with;
 
 #[test]
 fn a_failed_job_and_a_lost_device_are_faults_with_their_cause() {

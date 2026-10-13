@@ -11,7 +11,8 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 use signal_core::Registry;
-use signal_engine::{Engine, EngineConfig, Render, render};
+use signal_engine::{Engine, EngineConfig};
+use signal_output::{Render, render};
 use signal_project::{Project, SourceFile};
 
 /// The project's rate and seed in `projects/pulse/project.toml`.

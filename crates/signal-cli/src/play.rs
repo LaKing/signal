@@ -17,11 +17,12 @@ use serde_json::json;
 use signal_audio::{
     CallbackStats, CoreAudioDriver, Demotions, Scheduling, StatsSnapshot, rt_thread,
 };
-use signal_core::Registry;
+use signal_core::{Frame, Registry};
 use signal_engine::{
-    Computation, ControlSink, Controller, Driver, NullDriver, RealtimeConfig, RtOptions, RtPolicy,
-    Runner, RunnerStatus, Spread, WakeStats, realtime_with,
+    BoundaryLine, Computation, ControlSink, HangLine, RealtimeConfig, Report, RtOptions, RtPolicy,
+    RunnerStatus, SentCommand, Spread, WakeStats,
 };
+use signal_output::{Controller, Driver, NullDriver, Runner, realtime_with};
 use signal_project::live::{ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload};
 use signal_project::session::{LiveRecorder, SessionError, SessionRecorder, sink_of};
 use signal_project::{LoadError, Project, provenance};
@@ -115,6 +116,10 @@ pub(crate) fn parse_computation(text: &str) -> Result<Computation, String> {
 /// What the run left behind, for the statistics.
 struct Ended {
     status: RunnerStatus,
+    /// The audio adapter's counts (ADR 0022): samples clipped, meters
+    /// dropped.
+    clipped: u64,
+    meter_overflows: u64,
     stats: StatsSnapshot,
     /// The device channels played (the sink's width with the null driver).
     device_channels: usize,
@@ -173,6 +178,38 @@ struct Edits {
 
 /// The control thread's state between callbacks: the Controller, the
 /// recorder, and the file watch.
+/// The live recorder's poll, and a hung callback (M2.7-9) on stderr: it is
+/// a diagnosis, not part of the recording.
+struct Recording<'a>(&'a mut LiveRecorder);
+
+impl ControlSink for Recording<'_> {
+    fn report(&mut self, report: &Report, command: &SentCommand) {
+        self.0.report(report, command);
+    }
+    fn status(&mut self, status: &RunnerStatus) {
+        self.0.status(status);
+    }
+    fn boundary(&mut self, line: BoundaryLine<'_>) {
+        self.0.boundary(line);
+    }
+    fn hang(&mut self, line: HangLine<'_>) {
+        let running: Vec<String> = line.running.iter().map(ToString::to_string).collect();
+        eprintln!(
+            "signal: hang: callback {} has not returned after {:.1} ms; still running: {}",
+            line.callback,
+            line.waited.as_secs_f64() * 1e3,
+            if running.is_empty() {
+                "no primitive call".to_owned()
+            } else {
+                running.join(", ")
+            }
+        );
+    }
+    fn frontier(&mut self, next_frame: Frame) {
+        self.0.frontier(next_frame);
+    }
+}
+
 struct Control<'a> {
     controller: Controller,
     live: LiveRecorder,
@@ -186,7 +223,7 @@ struct Control<'a> {
 impl Control<'_> {
     /// Drains the runner's reports, and applies file changes every 100 ms.
     fn step(&mut self) {
-        self.controller.poll(&mut self.live);
+        self.controller.poll(&mut Recording(&mut self.live));
         let Some((watcher, last)) = self.watch.as_mut() else {
             return;
         };
@@ -378,7 +415,7 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
     let overflows = [
         commands,
         status.log_overflows,
-        status.meter_overflows,
+        ended.meter_overflows,
         status.status_overflows,
         status.engine_log_overflows,
         status.input_overflows,
@@ -423,14 +460,15 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
                 "sampled_timeshare": ended.demotions.sampled_timeshare,
                 "unsampled": ended.demotions.unsampled,
             },
-            "clipped": status.clipped,
+            "clipped": ended.clipped,
+            "hangs": control.controller.hangs(),
             "late": status.late,
             "late_results": status.late_results,
             "queue_overflows": {
                 "total": total,
                 "commands": commands,
                 "log": status.log_overflows,
-                "meters": status.meter_overflows,
+                "meters": ended.meter_overflows,
                 "status": status.status_overflows,
                 "engine_log": status.engine_log_overflows,
                 "input": status.input_overflows,
@@ -492,7 +530,7 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
             stats.worst_callback_ratio,
             stats.p99_callback_ratio,
             stats.median_callback_ratio,
-            status.clipped,
+            ended.clipped,
             status.late,
             status.late_results
         ));
@@ -570,9 +608,11 @@ fn play_null(
         .stop()
         .map_err(|e| Failure::Internal(e.to_string()))?
         .ok_or_else(|| Failure::Internal("the null driver lost the runner".to_owned()))?;
-    control.controller.poll(&mut control.live);
+    control.controller.poll(&mut Recording(&mut control.live));
     Ok(Ended {
         status: runner.status(),
+        clipped: runner.clipped(),
+        meter_overflows: runner.meter_overflows(),
         stats: stats.snapshot(),
         device_channels: width,
         scheduling,
@@ -643,21 +683,30 @@ fn play_device(
         }
     }
     let stats = driver.stats();
-    let (status, waiter, wake) = match driver.stop() {
+    // The adapter's counts as of the last callback, should the device not
+    // hand the runner back.
+    let adapter_counts = (
+        control.controller.clipped(),
+        control.controller.meter_overflows(),
+    );
+    let (status, waiter, wake, counts) = match driver.stop() {
         Ok(Some(runner)) => (
             runner.status(),
             runner.schedule_stats().waiter,
             runner.wake_stats(),
+            (runner.clipped(), runner.meter_overflows()),
         ),
-        Ok(None) => (control.controller.status(), "unknown", None),
+        Ok(None) => (control.controller.status(), "unknown", None, adapter_counts),
         Err(error) => {
             eprintln!("signal: warning: {error}");
-            (control.controller.status(), "unknown", None)
+            (control.controller.status(), "unknown", None, adapter_counts)
         }
     };
-    control.controller.poll(&mut control.live);
+    control.controller.poll(&mut Recording(&mut control.live));
     Ok(Ended {
         status,
+        clipped: counts.0,
+        meter_overflows: counts.1,
         stats: stats.snapshot(),
         device_channels: driver.channels(),
         scheduling,

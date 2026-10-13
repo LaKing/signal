@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 
-use signal_engine::Meter;
+use signal_output::Meter;
 
 /// How long the held peak stays, in seconds.
 pub const PEAK_HOLD_SECONDS: f64 = 1.5;

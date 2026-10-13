@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, Device, Stream, StreamConfig, SupportedBufferSize};
-use signal_engine::{Computation, Driver, DriverError, Runner, Workers};
+use signal_engine::{Computation, Workers};
+use signal_output::{Driver, DriverError, Runner};
 
 use crate::callback::{CallbackControl, OutputCallback};
 use crate::config::{

@@ -9,7 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use signal_core::{EventPayload, PortAddress, Registry};
-use signal_engine::{Driver, NullDriver, RealtimeConfig, Stamp, realtime};
+use signal_engine::{RealtimeConfig, Stamp};
+use signal_output::{Driver, NullDriver, realtime};
 use signal_project::live::{Applied, reload};
 use signal_project::session::{LiveRecorder, SessionRecorder};
 use signal_project::{ParameterChange, Project, ProjectEdit, diff, provenance, write_parameter};

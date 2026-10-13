@@ -15,8 +15,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use common::{FAILED_ON, addr, config_threads, conn, inst, inst_with, plan, registry, scaled};
-use signal_engine::{Engine, EngineConfig, HookPoint, Render, render};
+use signal_engine::{Engine, EngineConfig, HookPoint};
 use signal_graph::ExecutionPlan;
+use signal_output::{Render, render};
 
 const RATE: u32 = 1_000;
 

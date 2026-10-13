@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use signal_core::LossCause;
 use signal_engine::{
-    BoundaryLine, BoundaryOutcome, ControlSink, Driver, FaultReason, LogLine, NullDriver,
-    RealtimeConfig, realtime,
+    BoundaryLine, BoundaryOutcome, ControlSink, FaultReason, LogLine, RealtimeConfig,
 };
+use signal_output::{Driver, NullDriver, realtime};
 
 /// The due outcomes, in order: `Some(cause)` missed, `None` delivered.
 #[derive(Default)]

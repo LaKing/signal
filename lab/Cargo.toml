@@ -23,6 +23,7 @@ signal-gpu = { workspace = true, features = ["noop", "test-hooks"] }
 signal-contract = { workspace = true }
 # Offline renders and the real-time runner with the null driver.
 signal-engine = { workspace = true }
+signal-output = { workspace = true }
 signal-graph = { workspace = true }
 signal-std = { workspace = true }
 # Sessions (M2.7-4): a live run recorded and replayed exactly or ideally.

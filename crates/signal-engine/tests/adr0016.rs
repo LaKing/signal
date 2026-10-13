@@ -8,8 +8,9 @@ use common::{
     random_order, registry, scaled,
 };
 use signal_core::{EventPayload, Frame, SplitMix64};
-use signal_engine::{Engine, EngineError, LineSource, LogLine, Render, render};
+use signal_engine::{Engine, EngineError, LineSource, LogLine};
 use signal_graph::{CompositeDef, ExecutionPlan, Exports, GraphError, GraphWarning, build_plan};
+use signal_output::{Render, render};
 
 fn bits(values: &[f64]) -> Vec<u64> {
     values.iter().map(|v| v.to_bits()).collect()

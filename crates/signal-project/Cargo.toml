@@ -12,6 +12,8 @@ signal-graph = { workspace = true }
 # Sessions (`session`): replay renders through the engine, and the recorder
 # takes its reports and provenance.
 signal-engine = { workspace = true }
+# Replay renders through the audio adapter (ADR 0022) and writes its WAV.
+signal-output = { workspace = true }
 serde = { workspace = true }
 # float_roundtrip: edits.jsonl values must read back bit for bit (replay is
 # bit-exact); the default parser can be off by one ulp.

@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::mem;
 use std::ops::Range as Span;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -34,9 +35,11 @@ use crate::log::{
 use crate::manifest::SameMachine;
 use crate::parameter::{Applied, Base, effective};
 use crate::pool::{Pool, Workers};
+use crate::realtime::HangProbe;
 use crate::shared::{Access, CallView, Job, Layout, Parts, PlanCells, Reader, Window, caught};
 #[cfg(feature = "test-hooks")]
 use crate::shared::{Armed, HookPoint, Refuse};
+use crate::sink::Sink;
 use crate::tasks::{DEFAULT_COST_NS, TASK_MIN_NS, Tasks, tasks};
 use crate::units::{Unit, Units, units};
 use crate::wake::{MakeWaiter, RtPolicy, WakeStats};
@@ -325,7 +328,10 @@ enum Mode {
 #[derive(Debug)]
 pub(crate) struct Slot {
     feedthrough: Feedthrough,
-    audio_sink: bool,
+    /// The external effect its descriptor declares, if any (ADR 0022: the
+    /// engine hands a sink's inputs to the driver's output, whatever the
+    /// kind).
+    sink: Option<SinkKind>,
     /// Declares a latency (ADR 0019 §3): asked [`StateOutputPrimitive::due`]
     /// before each `emit`.
     latent: bool,
@@ -756,7 +762,7 @@ impl PlanState {
 
             slots.push(Slot {
                 feedthrough: descriptor.feedthrough,
-                audio_sink: descriptor.sink == Some(SinkKind::Audio),
+                sink: descriptor.sink,
                 latent: descriptor.latency.is_some(),
                 latency: descriptor.latency,
                 latent_frames: 0,
@@ -1090,21 +1096,15 @@ impl PlanState {
         Ok(state)
     }
 
-    /// The audio sink: its address and number of signal inputs, if the plan
-    /// has exactly one.
-    pub(crate) fn audio_sink(&self) -> Option<(&InstanceAddress, usize)> {
-        let mut sinks = self
-            .cells
-            .slots
-            .get()
+    /// The plan's sinks, in instance order ([`InstanceId`]): each instance whose descriptor
+    /// declares a sink kind, with its kind and number of signal inputs.
+    pub(crate) fn sinks(&self) -> Vec<(InstanceAddress, SinkKind, usize)> {
+        let slots = self.cells.slots.get();
+        slots
             .iter()
-            .enumerate()
-            .filter(|(_, s)| s.audio_sink);
-        let (i, slot) = sinks.next()?;
-        if sinks.next().is_some() {
-            return None;
-        }
-        Some((self.instances.get(i)?, slot.signal_in.len()))
+            .zip(&self.instances)
+            .filter_map(|(slot, address)| Some((address.clone(), slot.sink?, slot.signal_in.len())))
+            .collect()
     }
 
     /// `record`, written by this plan, with addresses.
@@ -1520,6 +1520,8 @@ pub struct Engine {
     failure: Option<EngineFailure>,
     /// Why the `semaphore` policy's waiter could not be made (it parks).
     waiter_error: Option<String>,
+    /// Real time: the hang probe its calls record themselves in (M2.7-9).
+    hang: Option<Arc<HangProbe>>,
 }
 
 /// How an engine schedules its blocks (`Engine::schedule_stats`).
@@ -1706,6 +1708,7 @@ impl Engine {
             hook: None,
             failure: None,
             waiter_error,
+            hang: None,
         })
     }
 
@@ -2284,6 +2287,7 @@ impl Engine {
             start: self.block_start,
             fade_len: self.fade_len,
             wait: !self.config.realtime,
+            hang: self.hang.as_deref(),
             record_data: self.config.realtime && self.config.record_boundary_data,
             script: (self.config.scripted_boundaries && !self.config.realtime)
                 .then_some((&self.staged_boundaries[..], &self.boundaries)),
@@ -2533,6 +2537,12 @@ impl Engine {
     #[doc(hidden)]
     pub fn waiter_error(&self) -> Option<&str> {
         self.waiter_error.as_deref()
+    }
+
+    /// Real time: the hang probe its primitive calls record themselves in
+    /// (M2.7-9); one slot per thread lane.
+    pub(crate) fn set_hang_probe(&mut self, probe: Arc<HangProbe>) {
+        self.hang = Some(probe);
     }
 
     /// A driver's callback of `frames` frames starts (the audio thread;
@@ -2788,29 +2798,33 @@ impl Engine {
         self.slot(instance).map(|s| s.fault.is_some())
     }
 
-    /// The instances whose descriptor declares an audio sink.
-    pub(crate) fn audio_sinks(&self) -> Vec<InstanceId> {
-        let slots = self.plan.cells.slots.get();
-        (0..slots.len())
-            .filter(|&i| slots.get(i).is_some_and(|s| s.audio_sink))
-            .map(InstanceId)
-            .collect()
-    }
-
-    /// The first instance whose descriptor declares an audio sink; allocates
-    /// nothing, unlike [`audio_sinks`](Engine::audio_sinks).
-    pub(crate) fn first_audio_sink(&self) -> Option<InstanceId> {
+    /// The running plan's sinks (ADR 0022, "the sink handoff"): every
+    /// instance whose descriptor declares a sink kind, in instance order
+    /// ([`InstanceId`]), with its kind and number of signal inputs. The
+    /// engine attaches no meaning to a kind; a driver's [`SinkOutput`](crate::SinkOutput) picks the
+    /// sinks it serves and reads their inputs with
+    /// [`sink_input_at`](Engine::sink_input_at). Allocates nothing, so a
+    /// real-time output may call it when it rebinds after a swap.
+    pub fn sinks(&self) -> impl Iterator<Item = Sink<'_>> {
         self.plan
             .cells
             .slots
             .get()
             .iter()
-            .position(|s| s.audio_sink)
-            .map(InstanceId)
+            .zip(&self.plan.instances)
+            .enumerate()
+            .filter_map(|(i, (slot, address))| {
+                Some(Sink {
+                    id: InstanceId(i),
+                    kind: slot.sink?,
+                    address,
+                    inputs: slot.signal_in.len(),
+                })
+            })
     }
 
     /// The address of `instance`.
-    pub(crate) fn instance_address(&self, instance: InstanceId) -> Option<&InstanceAddress> {
+    pub fn instance_address(&self, instance: InstanceId) -> Option<&InstanceAddress> {
         self.plan.instances.get(instance.0)
     }
 
@@ -2819,19 +2833,16 @@ impl Engine {
         self.block_frames
     }
 
-    /// Signal input `channel` of `instance` (in port order) at frame `f` of
-    /// the last block.
-    pub(crate) fn instance_input_at(
-        &self,
-        instance: InstanceId,
-        channel: usize,
-        f: usize,
-    ) -> Option<f64> {
+    /// Signal input `input` of `instance` (in port order) at frame `f` of the
+    /// last block ([`block_frames`](Engine::block_frames)): the sum the
+    /// executor computed, whether or not the instance itself is suspended or
+    /// muted. How a sink's inputs are handed to a driver (ADR 0022).
+    pub fn sink_input_at(&self, instance: InstanceId, input: usize, f: usize) -> Option<f64> {
         let slot = self.plan.cells.slots.get().get(instance.0)?;
-        if channel >= slot.signal_in.len() {
+        if input >= slot.signal_in.len() {
             return None;
         }
-        let s = slot.signal_in.start + channel;
+        let s = slot.signal_in.start + input;
         self.plan
             .cells
             .signal_in
@@ -2840,8 +2851,9 @@ impl Engine {
             .copied()
     }
 
-    /// The index of parameter `port` in the running plan.
-    pub(crate) fn parameter_index(&self, port: &PortAddress) -> Option<usize> {
+    /// The index of parameter `port` in the running plan, for
+    /// [`parameter_at_frame`](Engine::parameter_at_frame).
+    pub fn parameter_index(&self, port: &PortAddress) -> Option<usize> {
         match self.role(port)? {
             Role::Param(j) => Some(j),
             _ => None,
@@ -2850,24 +2862,13 @@ impl Engine {
 
     /// The effective value of parameter `j` at frame `f` of the last block, as
     /// [`parameter`](Engine::parameter) gave it after that frame.
-    pub(crate) fn parameter_at_frame(&self, j: usize, f: usize) -> Option<f64> {
+    pub fn parameter_at_frame(&self, j: usize, f: usize) -> Option<f64> {
         self.plan
             .cells
             .param_rows
             .get()
             .get(j * self.plan.capacity + f)
             .copied()
-    }
-
-    /// The signal inputs of `instance` in the last frame, in port order.
-    pub(crate) fn instance_inputs(&self, instance: InstanceId) -> &[f64] {
-        self.plan
-            .cells
-            .slots
-            .get()
-            .get(instance.0)
-            .and_then(|s| self.plan.signal_in.get(s.signal_in.clone()))
-            .unwrap_or(&[])
     }
 }
 
@@ -2888,6 +2889,9 @@ struct Fixed<'x> {
     fade_len: u64,
     /// Offline: wait for a latent module's due result (ADR 0019 §3).
     wait: bool,
+    /// Real time: where each lane records the instance it is calling
+    /// (M2.7-9, hang detection).
+    hang: Option<&'x HangProbe>,
     /// Real time: carry delivered results with their records (M2.7-4).
     record_data: bool,
     /// Exact replay: the block's pushed outcomes, sorted by (instance,
@@ -2907,6 +2911,7 @@ impl Fixed<'_> {
 /// instance in one call, a state-output instance and a cycle frame by frame.
 fn run_unit(fx: &Fixed<'_>, access: &mut Access<'_>, u: usize) {
     let (a, b) = (fx.a, fx.b);
+    let lane = access.lane();
     let Some(unit) = fx.units.order.get(u) else {
         return;
     };
@@ -2915,8 +2920,8 @@ fn run_unit(fx: &Fixed<'_>, access: &mut Access<'_>, u: usize) {
         &Unit::State(i) => {
             for f in a..b {
                 if let Some(mut v) = access.call(i, f, f + 1) {
-                    emit(fx, &mut v, i, f);
-                    absorb(fx, &mut v, i, f);
+                    emit(fx, &mut v, (lane, i), f);
+                    absorb(fx, &mut v, (lane, i), f);
                 }
             }
         }
@@ -2928,7 +2933,7 @@ fn run_unit(fx: &Fixed<'_>, access: &mut Access<'_>, u: usize) {
             for f in a..b {
                 for i in state_outputs.clone().filter_map(member) {
                     if let Some(mut v) = access.call(i, f, f + 1) {
-                        emit(fx, &mut v, i, f);
+                        emit(fx, &mut v, (lane, i), f);
                     }
                 }
                 for i in direct.clone().filter_map(member) {
@@ -2936,7 +2941,7 @@ fn run_unit(fx: &Fixed<'_>, access: &mut Access<'_>, u: usize) {
                 }
                 for i in state_outputs.clone().filter_map(member) {
                     if let Some(mut v) = access.call(i, f, f + 1) {
-                        absorb(fx, &mut v, i, f);
+                        absorb(fx, &mut v, (lane, i), f);
                     }
                 }
             }
@@ -2947,6 +2952,7 @@ fn run_unit(fx: &Fixed<'_>, access: &mut Access<'_>, u: usize) {
 /// Phase 3 for one direct instance over frames `a..b` of the block: its
 /// inputs frame by frame, one `process` call, then its outputs; one view.
 fn run_direct(fx: &Fixed<'_>, access: &mut Access<'_>, i: usize, a: usize, b: usize) {
+    let lane = access.lane();
     let Some(mut v) = access.call(i, a, b) else {
         return;
     };
@@ -2963,7 +2969,7 @@ fn run_direct(fx: &Fixed<'_>, access: &mut Access<'_>, i: usize, a: usize, b: us
                 sink.start_call(len);
             }
             let completed = match v.primitive.as_mut() {
-                Some(Primitive::Direct(module)) => guarded(|| {
+                Some(Primitive::Direct(module)) => guarded(fx.hang, (lane, i), || {
                     process(
                         module.as_mut(),
                         (&*v.slot, &mut *v.lane, &mut *v.sinks),
@@ -3007,14 +3013,14 @@ fn run_direct(fx: &Fixed<'_>, access: &mut Access<'_>, i: usize, a: usize, b: us
 }
 
 /// Phase 2 for one state-output instance at frame `f` of the block.
-fn emit(fx: &Fixed<'_>, v: &mut CallView<'_>, i: usize, f: usize) {
+fn emit(fx: &Fixed<'_>, v: &mut CallView<'_>, (lane, i): (usize, usize), f: usize) {
     match v.slot.mode() {
         Mode::Running => {
             for sink in v.sinks.iter_mut() {
                 sink.start_call(1);
             }
             let completed = match v.primitive.as_mut() {
-                Some(Primitive::StateOutput(module)) => guarded(|| {
+                Some(Primitive::StateOutput(module)) => guarded(fx.hang, (lane, i), || {
                     if v.slot.latent {
                         await_due(fx, module.as_mut(), &*v.slot, &mut *v.out, (i, f));
                     }
@@ -3041,14 +3047,14 @@ fn emit(fx: &Fixed<'_>, v: &mut CallView<'_>, i: usize, f: usize) {
 }
 
 /// Phase 4 for one state-output instance at frame `f` of the block.
-fn absorb(fx: &Fixed<'_>, v: &mut CallView<'_>, i: usize, f: usize) {
+fn absorb(fx: &Fixed<'_>, v: &mut CallView<'_>, (lane, i): (usize, usize), f: usize) {
     if gather(fx, &mut gathering(v), f, f + 1) != Mode::Running {
         return;
     }
     let ports = (v.slot.signal_in.len(), v.slot.params.len());
     load_call(v.lane, (&v.signal_in, &v.param_rows), ports, f, 1);
     if let Some(Primitive::StateOutput(module)) = v.primitive.as_mut() {
-        let completed = guarded(|| {
+        let completed = guarded(fx.hang, (lane, i), || {
             settle(fx, module.as_mut(), v.slot);
             absorb_call(module.as_mut(), (&*v.slot, &*v.lane));
         });
@@ -3602,7 +3608,9 @@ fn whole_direct(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, a: usize, b: usize)
             let completed = match w.primitives.get_mut(i) {
                 Some(Some(Primitive::Direct(module))) => {
                     let lane = &mut *w.lane;
-                    guarded(|| process(module.as_mut(), (slot, lane, sinks), len))
+                    guarded(fx.hang, (0, i), || {
+                        process(module.as_mut(), (slot, lane, sinks), len);
+                    })
                 }
                 _ => true,
             };
@@ -3660,7 +3668,7 @@ fn whole_emit(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, f: usize) {
             let completed = match w.primitives.get_mut(i) {
                 Some(Some(Primitive::StateOutput(module))) => {
                     let (lane, out) = (&mut *w.lane, &mut *w.out);
-                    guarded(|| {
+                    guarded(fx.hang, (0, i), || {
                         if slot.latent {
                             await_due(fx, module.as_mut(), slot, out, (i, f));
                         }
@@ -3720,7 +3728,7 @@ fn whole_absorb(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, f: usize) {
     let completed = match (w.slots.get(i), w.primitives.get_mut(i)) {
         (Some(slot), Some(Some(Primitive::StateOutput(module)))) => {
             let lane = &*w.lane;
-            guarded(|| {
+            guarded(fx.hang, (0, i), || {
                 settle(fx, module.as_mut(), slot);
                 absorb_call(module.as_mut(), (slot, lane));
             })
@@ -3966,8 +3974,8 @@ fn gather<R: Own, S: Sources, E: Emitted>(
     );
 
     // Signal inputs: the canonical-order sum of scale · source, from +0
-    // (computed even when the instance is not called: the audio sink's
-    // inputs are what the drivers record). Adding one source at a time over
+    // (computed even when the instance is not called: a sink's inputs are
+    // what the drivers hand to their output). Adding one source at a time over
     // the frames does each frame's additions in the same order.
     for (p, s) in signal_in.enumerate() {
         let from = fx.signal_sources.get(s).map_or(&[][..], Vec::as_slice);
@@ -4218,13 +4226,23 @@ fn apply(
     push_record(&mut out.log, &mut out.log_overflows, record);
 }
 
-/// Runs one call of a primitive; false if it panicked. The panic goes no
-/// further, nor does one from its payload's destructor ([`caught`]): the
-/// caller mutes the instance (`docs/semantics.md` §14). Nothing of the call
-/// is trusted, so nothing it wrote is read again.
+/// Runs one call of instance `i` of a primitive on lane `lane`; false if it
+/// panicked. The panic goes no further, nor does one from its payload's
+/// destructor ([`caught`]): the caller mutes the instance
+/// (`docs/semantics.md` §14). Nothing of the call is trusted, so nothing it
+/// wrote is read again. In real time the lane's slot of the hang probe names
+/// the instance while the call runs (M2.7-9): a call that never returns is
+/// not contained, only reported.
 #[inline(always)]
-fn guarded(call: impl FnOnce()) -> bool {
-    caught(call)
+fn guarded(hang: Option<&HangProbe>, (lane, i): (usize, usize), call: impl FnOnce()) -> bool {
+    if let Some(hang) = hang {
+        hang.enter(lane, i);
+    }
+    let completed = caught(call);
+    if let Some(hang) = hang {
+        hang.leave(lane);
+    }
+    completed
 }
 
 /// After a `process` or `emit` call over frames `a..` panicked: none of its

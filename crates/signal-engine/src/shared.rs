@@ -846,6 +846,12 @@ fn one<T>(slice: &mut [T]) -> Option<&mut T> {
 }
 
 impl<'a> Access<'a> {
+    /// The lane of the thread this access belongs to (0: the calling
+    /// thread): where hang detection records the instance it runs (M2.7-9).
+    pub(crate) fn lane(&self) -> usize {
+        self.lane
+    }
+
     /// Whether this access may view instance `i`; refused and counted when not.
     #[inline(always)]
     fn owns(&self, i: usize) -> bool {

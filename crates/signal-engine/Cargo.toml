@@ -1,6 +1,6 @@
 [package]
 name = "signal-engine"
-description = "Signal engine: per-frame executor, plan swap, fault guards, offline and realtime drivers."
+description = "Signal engine: per-frame executor, plan swap, fault guards, offline and realtime drivers, generic sink handoff (ADR 0022)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,7 +18,6 @@ signal-core = { workspace = true }
 signal-graph = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-hound = { workspace = true }
 # M2: the lock-free SPSC queues between the control and audio threads.
 rtrb = { workspace = true }
 
@@ -31,6 +30,11 @@ approx = { workspace = true }
 proptest = { workspace = true }
 # The counting allocator (ADR 0017) for the executor's no-allocation test.
 signal-contract = { workspace = true }
+# ADR 0022: the audio adapter, for the tests that render and play (the
+# engine itself never depends on it).
+signal-output = { workspace = true }
+# `tests/offline.rs` reads the WAV files the adapter writes.
+hound = { workspace = true }
 
 [lints]
 workspace = true

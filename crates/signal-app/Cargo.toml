@@ -17,6 +17,8 @@ signal-project = { workspace = true }
 signal-std = { workspace = true }
 signal-audio = { workspace = true }
 signal-engine = { workspace = true }
+# ADR 0022: the audio adapter (the audio runner, the null driver, meters).
+signal-output = { workspace = true }
 eframe = { workspace = true }
 # The Setup file.
 serde = { workspace = true }

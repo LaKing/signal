@@ -16,11 +16,13 @@ use serde_json::Value;
 use signal_audio::rt_thread;
 use signal_core::{Curve, EventPayload, Fnv1a64, Frame, InstanceAddress, PortAddress, Registry};
 use signal_engine::{
-    CallbackSizes, ControlSink, Controller, Driver, Engine, EngineConfig, HookPoint, LogLine,
-    NullDriver, Outcome, Provenance, RealtimeConfig, Report, RtOptions, RtPolicy, Runner, Schedule,
-    SentCommand, Stamp, realtime, realtime_with, render,
+    ControlSink, Engine, EngineConfig, HookPoint, LogLine, Outcome, Provenance, RealtimeConfig,
+    Report, RtOptions, RtPolicy, Schedule, SentCommand, Stamp,
 };
 use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, InstanceDef, build_plan};
+use signal_output::{
+    CallbackSizes, Controller, Driver, NullDriver, Runner, realtime, realtime_with, render,
+};
 use signal_project::session::{self, LiveRecorder, Session, SessionRecorder, replay};
 use signal_project::{Project, ProjectEdit, diff};
 
@@ -135,7 +137,7 @@ fn v9_null_driver_equals_the_offline_render_of_the_kick() {
                     .unwrap();
                 assert_eq!(at, reference.len());
                 let runner = driver.stop().unwrap().unwrap();
-                assert_eq!(runner.status().clipped, 0, "the kick never clips");
+                assert_eq!(runner.clipped(), 0, "the kick never clips");
                 assert_eq!(runner.next_frame(), Frame(frames));
             });
         }
@@ -202,7 +204,7 @@ fn live_recorder() -> LiveRecorder {
 }
 
 /// The frame to start the session from: version 0's plan.
-fn start(config: RealtimeConfig) -> (signal_engine::Runner, Controller) {
+fn start(config: RealtimeConfig) -> (signal_output::Runner, Controller) {
     let mut plan = version(0).plan(&registry()).unwrap().plan;
     plan.version = 0;
     realtime_with(&plan, &registry(), config, Some(rt_thread::mach_semaphores)).unwrap()
@@ -708,8 +710,8 @@ fn a_session_issued_while_the_driver_thread_runs_replays_to_its_output() {
     let suspend = c.default_frame();
     c.send_suspend(addr("/osc2"), Stamp::At(suspend)).unwrap();
     let removed = live.swap_plan(version(2)).unwrap();
-    c.swap(&removed, Stamp::At(c.removal_swap_frame(suspend)))
-        .unwrap();
+    let at = c.removal_swap_frame(suspend);
+    c.swap(&removed, Stamp::At(at)).unwrap();
     wait(c, live, |c| c.status().version >= 2);
     c.send_suspend(addr("/env"), Stamp::Default).unwrap();
     let resume_after = c.status().next_frame.0 + 100;

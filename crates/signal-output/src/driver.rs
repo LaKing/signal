@@ -9,7 +9,7 @@ use std::time::Duration;
 use rtrb::{Producer, RingBuffer};
 use signal_core::SplitMix64;
 
-use crate::realtime::Runner;
+use crate::runner::Runner;
 
 /// The most frames the null driver asks for in one callback.
 pub const MAX_CALLBACK_FRAMES: usize = 4096;

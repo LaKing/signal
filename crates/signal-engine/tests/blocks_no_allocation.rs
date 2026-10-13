@@ -20,10 +20,11 @@ use common::{
 use signal_contract::alloc_counter::{self, Counts, Guard};
 use signal_core::{EventPayload, Frame};
 use signal_engine::{
-    CallbackSizes, ControlSink, HookPoint, Outcome, RealtimeConfig, Report, RtOptions, RtPolicy,
-    SentCommand, Stamp, realtime,
+    ControlSink, HookPoint, Outcome, RealtimeConfig, Report, RtOptions, RtPolicy, SentCommand,
+    Stamp,
 };
 use signal_graph::ExecutionPlan;
+use signal_output::{CallbackSizes, realtime};
 
 /// Heap calls counted on the worker threads while they take part in a block.
 static WORKER_HEAP_CALLS: AtomicU64 = AtomicU64::new(0);
