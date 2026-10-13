@@ -243,6 +243,8 @@ One JSON object per line, with a newline after every line, field order as shown.
   - `panic` (§14).
 
   A fault of an instance without outputs (a `panic`, or a `late_result`) has no `port` in its line; the line is still written.
+
+  A `late_result` whose result was lost, and whose module said why (`StateOutputPrimitive::lost_cause`, M2.7-5), has a `cause`: `validation`, `out_of_memory`, `mapping`, `internal`, `uncaptured`, `stopped` or `device_lost`. Other lines have none, so logs without such a loss are unchanged. An exact replay logs the cause its session recorded (§15). For example: `{"type":"fault","frame":512,"address":"/bank","port":"/bank.out","reason":"late_result","cause":"device_lost"}`.
 - **Order within a frame:**
   1. a swap;
   2. edits, by instance address;

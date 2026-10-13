@@ -455,6 +455,14 @@ The seat has no usable GPU: every GPU test here ran on wgpu's noop device or ski
    - type the absolute path of `projects/gpu-partials` into "Project folder" and press Open (or drop the folder onto the window): the app must refuse it, showing in red the diagnostic ``/bank: unknown module `lab.gpu_partials` (neither a registered primitive type nor a composite)``, without crashing, because GPU modules exist only in a `--features lab` build of `signal`.
    Report anything else verbatim, with the app's status line.
 
+### Pending operator steps for the M2.7-5 checkpoint
+
+The seat ran every `signal-gpu` and lab GPU test on wgpu's noop device; the tests that need a GPU skipped with their reason. On the Mac outside the sandbox, as above:
+
+1. `cargo test -p signal-gpu --locked --offline -- --nocapture`: `adapter_two_channels_of_one_shader_each_get_their_own_result` (the audit's finding 3: `[3, 7]`, `Ok`) and `adapter_an_invalid_dispatch_is_never_a_success` (finding 4: refused, or the job fails) must print `GPU: <name> (Metal)`, not `skipped`, and pass.
+2. `cargo test --workspace --locked --offline --features signal-cli/lab -- --nocapture`: every test passes on the GPU, including `lab/tests/fault_causes.rs` and `lab/tests/device_loss.rs`, and the M2.6-4 tolerance lines are unchanged (at or below `1e-4`).
+3. Steps 3–5 of the M2.6-4 list above with the M2.7-5 build: identical repeated renders, the bench row, and `signal play projects/gpu-partials` with `late_results` 0 on an idle GPU.
+
 ## What this means for D-EXEC-3
 
 These are interpretations of a single seat measurement. They are not a decision; D-EXEC-3 stays deferred (roadmap M4).

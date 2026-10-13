@@ -18,9 +18,9 @@ use std::time::Instant;
 
 use signal_core::{
     BlockLatency, Combine, DirectPrimitive, Direction, Due, Event, EventPayload, EventSink,
-    Feedthrough, Frame, Inputs, InstanceAddress, ModuleDescriptor, Outputs, PortAddress, PortKind,
-    PortShape, PrepareContext, Primitive, Range, RateDivisor, Registry, Reproducibility, RngStream,
-    SinkKind, StateOutputPrimitive,
+    Feedthrough, Frame, Inputs, InstanceAddress, LossCause, ModuleDescriptor, Outputs, PortAddress,
+    PortKind, PortShape, PrepareContext, Primitive, Range, RateDivisor, Registry, Reproducibility,
+    RngStream, SinkKind, StateOutputPrimitive,
 };
 use signal_graph::ExecutionPlan;
 
@@ -204,8 +204,9 @@ impl EngineConfig {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Scripted {
     /// The result was missed: the engine asks `due` once, without waiting,
-    /// and then calls `miss`, as in real time.
-    Missed,
+    /// and then calls `miss`, as in real time. With the recorded cause, if
+    /// the run recorded one (M2.7-5), which the replay logs as it was.
+    Missed(Option<LossCause>),
     /// The result was delivered: with the recorded words, which the module
     /// shows in place of its device's; without, the engine waits for it.
     Delivered(Option<Box<[f32]>>),
@@ -1131,6 +1132,7 @@ impl PlanState {
                 instance,
                 port,
                 reason,
+                cause,
             } => LogLine::Fault {
                 frame,
                 address: self.instances.get(instance.0)?,
@@ -1139,6 +1141,7 @@ impl PlanState {
                 // (`docs/semantics.md` §9, §14).
                 port: self.ports.get(port.0),
                 reason,
+                cause,
             },
             // Not a line of `log.jsonl`: it goes to `ControlSink::boundary`.
             LogRecord::Delivered { .. } => return None,
@@ -3005,12 +3008,13 @@ fn await_due(
             .and_then(|k| staged.get(k))
             .and_then(|s| queue.get(s.entry));
         match pushed.map(|p| &p.outcome) {
-            Some(Scripted::Missed) => {
+            Some(Scripted::Missed(cause)) => {
                 out.boundary.used = out.boundary.used.saturating_add(1);
                 // Once, without waiting, as in real time: the module's own
-                // bookkeeping (recycling) runs as it did live.
+                // bookkeeping (recycling) runs as it did live. The fault is
+                // logged with the recorded cause.
                 let _ = module.due();
-                missed(fx, module, slot, out, (i, f));
+                missed(fx, module, slot, out, (i, f), Some(*cause));
             }
             Some(Scripted::Delivered(Some(words))) => {
                 out.boundary.used = out.boundary.used.saturating_add(1);
@@ -3022,7 +3026,7 @@ fn await_due(
                 out.boundary.used = out.boundary.used.saturating_add(1);
                 if !wait_due(module) {
                     out.boundary.unreproduced = out.boundary.unreproduced.saturating_add(1);
-                    missed(fx, module, slot, out, (i, f));
+                    missed(fx, module, slot, out, (i, f), None);
                 }
             }
             None => {
@@ -3030,7 +3034,7 @@ fn await_due(
                     out.boundary.unscripted = out.boundary.unscripted.saturating_add(1);
                 }
                 if !wait_due(module) {
-                    missed(fx, module, slot, out, (i, f));
+                    missed(fx, module, slot, out, (i, f), None);
                 }
             }
         }
@@ -3038,12 +3042,12 @@ fn await_due(
     }
     if fx.wait {
         if !wait_due(module) {
-            missed(fx, module, slot, out, (i, f));
+            missed(fx, module, slot, out, (i, f), None);
         }
         return;
     }
     if module.due() != Due::Ready {
-        missed(fx, module, slot, out, (i, f));
+        missed(fx, module, slot, out, (i, f), None);
     } else if due_frame(slot) {
         delivered(fx, module, slot, out, (i, f));
     }
@@ -3073,14 +3077,18 @@ fn due_frame(slot: &Slot) -> bool {
 }
 
 /// The module misses its due result: `miss`, counted and logged as a
-/// `late_result` fault.
+/// `late_result` fault, with the cause an exact replay recorded
+/// (`scripted`), else the one the module gives for its last `due` (asked
+/// before `miss`, which may forget it).
 fn missed(
     fx: &Fixed<'_>,
     module: &mut dyn StateOutputPrimitive,
     slot: &Slot,
     out: &mut Out,
     (i, f): (usize, usize),
+    scripted: Option<Option<LossCause>>,
 ) {
+    let cause = scripted.unwrap_or_else(|| module.lost_cause());
     module.miss();
     out.late_results = out.late_results.saturating_add(1);
     let port = fx
@@ -3094,6 +3102,7 @@ fn missed(
         instance: InstanceId(i),
         port,
         reason: FaultReason::LateResult,
+        cause,
     };
     push_record(&mut out.log, &mut out.log_overflows, record);
 }
@@ -4140,6 +4149,7 @@ fn absorb_panicked<R: Own>(fx: &Fixed<'_>, r: &mut Run<'_, R>, i: usize, f: usiz
         instance: InstanceId(i),
         port: first_port(fx, r.slot),
         reason: FaultReason::Panic,
+        cause: None,
     };
     push_record(&mut r.out.log, &mut r.out.log_overflows, record);
 }
@@ -4281,6 +4291,7 @@ fn mute<R, S, E>(
         instance: InstanceId(i),
         port,
         reason,
+        cause: None,
     };
     push_record(&mut g.out.log, &mut g.out.log_overflows, record);
 }

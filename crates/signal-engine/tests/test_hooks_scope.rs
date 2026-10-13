@@ -41,16 +41,30 @@ const GATED: &[(&str, &str)] = &[
         "crates/signal-gpu/src/lib.rs",
         "pub fn set_completion_delay",
     ),
+    // M2.7-5: the device service's hooks and test-only accessors.
+    ("crates/signal-gpu/src/lib.rs", "pub fn set_execution_delay"),
+    ("crates/signal-gpu/src/lib.rs", "pub fn last_dispatch"),
+    ("crates/signal-gpu/src/lib.rs", "pub enum Injected"),
+    ("crates/signal-gpu/src/lib.rs", "pub fn fail_next_job"),
+    ("crates/signal-gpu/src/lib.rs", "pub fn lose_device"),
+    ("crates/signal-gpu/src/lib.rs", "pub fn peak_in_flight"),
+    ("crates/signal-gpu/src/lib.rs", "pub fn kernels_cached"),
 ];
 
 /// Names no production source outside the two crates that define them may use.
-const NAMES: [&str; 6] = [
+const NAMES: [&str; 12] = [
     "HookPoint",
     "set_task_hook",
     "exclusivity(",
     "spawned_workers",
     ".inject(",
     "set_completion_delay",
+    "set_execution_delay",
+    "last_dispatch",
+    "fail_next_job",
+    "lose_device",
+    "peak_in_flight",
+    "kernels_cached",
 ];
 
 const FEATURE: &str = "feature = \"test-hooks\"";

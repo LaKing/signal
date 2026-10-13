@@ -138,6 +138,7 @@ M2.7-4 (audit finding 2). A latent module (`module-contract.md` "Declared latenc
 
 - `frame` is the due frame (the first of the instance's block), below `frames`; `instance` a latent instance of the version running at that frame.
 - `outcome` is `delivered` (the result arrived in time) or `missed` (it did not: a `late_result` fault in the log, and silence for the block).
+- A `missed` line may have `cause` (M2.7-5): the `cause` of its `late_result` fault (`semantics.md` §9), when the result was lost and the module said why, e.g. `{"frame":768,"instance":"/bank","outcome":"missed","cause":"mapping"}`. An exact replay logs it again. An unknown cause, or a cause on a `delivered` line, is an error. Sessions written before it existed have none; the format version stays 1 (a build without it refuses a session with a cause, as for any unknown field).
 - With `--record-boundary-data` (`[boundaries] data = true`), a delivered line also has `words`, the number of `f32` words of the delivered result (`StateOutputPrimitive::delivered_result`); the words are in `boundary-data.f32`, little-endian, in line order. With them, replay shows the recorded result instead of asking the device, so it does not need the same GPU.
 - Unknown fields are errors; the counts must match `[boundaries]`, and the data its length and hash.
 

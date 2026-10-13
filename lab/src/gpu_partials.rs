@@ -46,11 +46,11 @@
 
 use libm::{exp, floor, log, sin};
 use signal_core::{
-    BlockLatency, Combine, Direction, Due, Feedthrough, Inputs, ModuleDescriptor, Outputs,
-    ParameterDescriptor, PortDescriptor, PortKind, PortShape, PrepareContext, Range, RateDivisor,
-    Reproducibility, StateOutputPrimitive,
+    BlockLatency, Combine, Direction, Due, Feedthrough, Inputs, LossCause, ModuleDescriptor,
+    Outputs, ParameterDescriptor, PortDescriptor, PortKind, PortShape, PrepareContext, Range,
+    RateDivisor, Reproducibility, StateOutputPrimitive,
 };
-use signal_gpu::{Channel, GpuService, Job, KernelSpec};
+use signal_gpu::{Channel, Failure, GpuService, Job, KernelSpec, Outcome};
 
 /// The partials in the bank.
 pub const PARTIALS: usize = 1024;
@@ -287,6 +287,34 @@ fn fract(x: f64) -> f64 {
     x - floor(x)
 }
 
+/// Returns `job` to `channel`'s pool. One the channel refuses (never one of
+/// this module's own) is kept in `refused` and dropped with it, on the
+/// control thread; with no room left it is leaked rather than freed here.
+/// Real-time safe.
+fn give_back(channel: &mut Channel, refused: &mut Vec<Job>, job: Job) {
+    if let Err(job) = channel.recycle(job) {
+        if refused.len() < refused.capacity() {
+            refused.push(job);
+        } else {
+            std::mem::forget(job);
+        }
+    }
+}
+
+/// The cause the engine logs for a job that ended other than `Ok`.
+fn cause_of(outcome: Outcome) -> Option<LossCause> {
+    Some(match outcome {
+        Outcome::Ok => return None,
+        Outcome::Failed(Failure::Validation) => LossCause::Validation,
+        Outcome::Failed(Failure::OutOfMemory) => LossCause::OutOfMemory,
+        Outcome::Failed(Failure::Internal) => LossCause::Internal,
+        Outcome::Failed(Failure::Mapping) => LossCause::Mapping,
+        Outcome::Failed(Failure::Uncaptured) => LossCause::Uncaptured,
+        Outcome::Failed(Failure::Stopped) => LossCause::Stopped,
+        Outcome::DeviceLost => LossCause::DeviceLost,
+    })
+}
+
 /// `lab.gpu_partials` (see the module documentation).
 #[derive(Debug, Default)]
 pub struct GpuPartials {
@@ -314,6 +342,12 @@ pub struct GpuPartials {
     injected: Vec<f32>,
     /// Whether the current block shows `injected`.
     showing_injected: bool,
+    /// Why the due result `due` last reported lost will never come: the
+    /// job's failure (M2.7-5).
+    cause: Option<LossCause>,
+    /// Jobs the channel refused to take back (never one of this module's):
+    /// kept, not dropped in real time; capacity [`JOBS`], from `prepare`.
+    refused: Vec<Job>,
 }
 
 impl GpuPartials {
@@ -327,7 +361,7 @@ impl GpuPartials {
     fn silence(&mut self) {
         self.showing_injected = false;
         if let (Some(job), Some(channel)) = (self.current.take(), self.channel.as_mut()) {
-            channel.recycle(job);
+            give_back(channel, &mut self.refused, job);
         }
     }
 }
@@ -343,6 +377,7 @@ impl StateOutputPrimitive for GpuPartials {
         // control thread); the service is created on first use.
         self.channel = GpuService::shared().and_then(|gpu| gpu.channel(KERNEL, JOBS).ok());
         self.current = None;
+        self.refused = Vec::with_capacity(JOBS);
         self.injected = vec![0.0; BLOCK_FRAMES];
         self.first_seq = 0;
         self.reset();
@@ -357,9 +392,11 @@ impl StateOutputPrimitive for GpuPartials {
         self.frame = 0;
         self.unsent = 0;
         self.resolved = false;
+        self.cause = None;
     }
 
     fn due(&mut self) -> Due {
+        self.cause = None;
         if self.frame != 0 || self.resolved {
             return Due::Ready;
         }
@@ -376,7 +413,7 @@ impl StateOutputPrimitive for GpuPartials {
         // as soon as they arrive, so submissions resume.
         while channel.peek_done().is_some_and(|seq| seq < due) {
             if let Some(job) = channel.take_done() {
-                channel.recycle(job);
+                give_back(channel, &mut self.refused, job);
             }
         }
         if self.unsent & (1 << (due % 64)) != 0 {
@@ -388,11 +425,12 @@ impl StateOutputPrimitive for GpuPartials {
                     return Due::Pending;
                 };
                 if job.failed() {
-                    channel.recycle(job);
+                    self.cause = cause_of(job.outcome());
+                    give_back(channel, &mut self.refused, job);
                     return Due::Lost;
                 }
                 if let Some(shown) = self.current.replace(job) {
-                    channel.recycle(shown);
+                    give_back(channel, &mut self.refused, shown);
                 }
                 self.showing_injected = false;
                 self.resolved = true;
@@ -411,6 +449,11 @@ impl StateOutputPrimitive for GpuPartials {
     fn miss(&mut self) {
         self.silence();
         self.resolved = true;
+        self.cause = None;
+    }
+
+    fn lost_cause(&self) -> Option<LossCause> {
+        self.cause
     }
 
     fn result_words(&self) -> usize {
@@ -455,7 +498,7 @@ impl StateOutputPrimitive for GpuPartials {
             .is_some_and(|seq| next_due.is_some_and(|due| seq < due))
         {
             if let Some(job) = channel.take_done() {
-                channel.recycle(job);
+                give_back(channel, &mut self.refused, job);
             }
         }
         if channel.free_jobs() > 0 {

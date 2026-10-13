@@ -10,9 +10,9 @@ mod common;
 
 use common::{MIXED_BLOCK, conn, inst, plan, port_addr};
 use signal_core::{
-    BlockLatency, Direction, Due, Feedthrough, Frame, Inputs, InstanceAddress, ModuleDescriptor,
-    ModuleType, Outputs, PortDescriptor, PortKind, PortShape, PrepareContext, Primitive,
-    RateDivisor, Registry, RegistryError, Reproducibility, StateOutputPrimitive,
+    BlockLatency, Direction, Due, Feedthrough, Frame, Inputs, InstanceAddress, LossCause,
+    ModuleDescriptor, ModuleType, Outputs, PortDescriptor, PortKind, PortShape, PrepareContext,
+    Primitive, RateDivisor, Registry, RegistryError, Reproducibility, StateOutputPrimitive,
 };
 use signal_engine::{
     BoundaryLine, BoundaryOutcome, ControlSink, Driver, Engine, EngineConfig, FaultReason, LogLine,
@@ -192,6 +192,8 @@ impl ControlSink for Faults {
                 reason: FaultReason::LateResult,
                 address,
                 port,
+                // Merely late: no cause.
+                cause: None,
             } => {
                 assert_eq!(address.to_string(), "/lat");
                 assert_eq!(port, Some(&port_addr("/lat.out")));
@@ -340,7 +342,7 @@ fn zeta(samples: &[f64]) -> Vec<f64> {
 /// recorded word 42 + m for m ≡ 2.
 fn script(m: u64) -> Scripted {
     match m % 3 {
-        0 => Scripted::Missed,
+        0 => Scripted::Missed(None),
         1 => Scripted::Delivered(None),
         _ => Scripted::Delivered(Some(vec![42.0 + m as f32].into_boxed_slice())),
     }
@@ -422,7 +424,7 @@ fn exact_replay_counts_mismatched_outcomes() {
     }
     // Not due: the second frame of block 2, whose own outcome is not pushed.
     engine
-        .push_boundary(lat, Frame(9), Scripted::Missed)
+        .push_boundary(lat, Frame(9), Scripted::Missed(None))
         .unwrap();
     render(&mut engine, 20).unwrap();
     assert_eq!(engine.boundary_mismatches(), 2);
@@ -472,7 +474,10 @@ impl ControlSink for Outcomes {
                 self.delivered
                     .push((line.frame.0, data.map(<[f32]>::to_vec)));
             }
-            BoundaryOutcome::Missed => self.missed.push(line.frame.0),
+            BoundaryOutcome::Missed { cause } => {
+                assert_eq!(cause, None);
+                self.missed.push(line.frame.0);
+            }
         }
     }
     fn status(&mut self, status: &signal_engine::RunnerStatus) {
@@ -526,4 +531,217 @@ fn real_time_reports_every_due_block_with_its_data() {
         outcomes.status.map(|s| s.next_frame),
         Some(status.next_frame)
     );
+}
+
+// M2.7-5: the cause of a lost result. `test.lossy` (like `test.latent`, one
+// block of 4) loses its odd blocks' results with the cause `mapping`, and
+// forgets the cause in `miss`, as `lab.gpu_partials` does: a cause read
+// after `miss` would be none.
+
+const LOSSY: ModuleDescriptor = ModuleDescriptor {
+    type_name: "test.lossy",
+    ..LATENT
+};
+
+#[derive(Default)]
+struct Lossy {
+    frame: usize,
+    block: u64,
+    resolved: bool,
+    cause: Option<LossCause>,
+}
+
+impl StateOutputPrimitive for Lossy {
+    fn describe() -> ModuleDescriptor {
+        LOSSY
+    }
+    fn prepare(&mut self, _ctx: &PrepareContext) {
+        *self = Lossy::default();
+    }
+    fn reset(&mut self) {
+        *self = Lossy::default();
+    }
+    fn due(&mut self) -> Due {
+        self.cause = None;
+        if self.frame != 0 || self.resolved || self.block.is_multiple_of(2) {
+            self.resolved = true;
+            return Due::Ready;
+        }
+        self.cause = Some(LossCause::Mapping);
+        Due::Lost
+    }
+    fn miss(&mut self) {
+        self.resolved = true;
+        self.cause = None;
+    }
+    fn lost_cause(&self) -> Option<LossCause> {
+        self.cause
+    }
+    fn emit(&self, outputs: &mut Outputs<'_>) {
+        outputs.signal(0).fill(1.0);
+    }
+    fn absorb(&mut self, _inputs: &Inputs<'_>) {
+        self.frame += 1;
+        if self.frame == BLOCK {
+            self.frame = 0;
+            self.block += 1;
+            self.resolved = false;
+        }
+    }
+}
+
+fn lossy_registry() -> Registry {
+    let mut registry = common::registry();
+    registry
+        .register(ModuleType {
+            descriptor: LOSSY,
+            create: || Primitive::StateOutput(Box::new(Lossy::default())),
+        })
+        .unwrap();
+    registry
+}
+
+fn lossy_plan(registry: &Registry) -> signal_graph::ExecutionPlan {
+    let root = CompositeDef {
+        name: "project".to_owned(),
+        instances: vec![
+            inst("count", "test.frames"),
+            inst("lat", "test.lossy"),
+            inst("rec", "test.recorder"),
+        ],
+        connections: vec![conn("count.out", "lat.in"), conn("lat.out", "rec.alpha")],
+        exports: Exports::default(),
+    };
+    build_plan(&root, &[], registry, 1).unwrap()
+}
+
+/// The `late_result` lines of a render's log.
+fn late_lines(log: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(log)
+        .lines()
+        .filter(|l| l.contains("late_result"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The odd due frames below `frames`: the blocks `test.lossy` loses.
+fn odd_due(frames: u64) -> Vec<u64> {
+    (1..frames.div_ceil(BLOCK as u64))
+        .filter(|m| m % 2 == 1)
+        .map(|m| m * BLOCK as u64)
+        .collect()
+}
+
+/// The cause of the `late_result` line at `frame`, as written: `none` when
+/// the line has no cause; `None` when there is no such line.
+fn cause_at(lines: &[String], frame: u64) -> Option<String> {
+    let at = format!("\"frame\":{frame},");
+    lines
+        .iter()
+        .find(|l| l.contains(&at))
+        .map(|l| l.split("\"cause\":").nth(1).unwrap_or("none").to_owned())
+}
+
+/// Offline (`wait_due`): each lost result's fault line carries the cause
+/// the module gave, read before `miss`.
+#[test]
+fn offline_a_lost_result_is_logged_with_its_cause() {
+    let registry = lossy_registry();
+    let mut engine = Engine::new(
+        &lossy_plan(&registry),
+        &registry,
+        EngineConfig::new(48_000, 42),
+        Vec::new(),
+    )
+    .unwrap();
+    let r = render(&mut engine, 40).unwrap();
+    let lines = late_lines(&r.log);
+    assert_eq!(lines.len(), odd_due(40).len(), "{lines:#?}");
+    for frame in odd_due(40) {
+        assert_eq!(
+            cause_at(&lines, frame).as_deref(),
+            Some("\"mapping\"}"),
+            "{lines:#?}"
+        );
+    }
+}
+
+#[derive(Default)]
+struct Causes {
+    faults: Vec<(u64, Option<LossCause>)>,
+    missed: Vec<(u64, Option<LossCause>)>,
+}
+
+impl ControlSink for Causes {
+    fn log(&mut self, line: LogLine<'_>) {
+        if let LogLine::Fault {
+            frame,
+            reason: FaultReason::LateResult,
+            cause,
+            ..
+        } = line
+        {
+            self.faults.push((frame.0, cause));
+        }
+    }
+    fn boundary(&mut self, line: BoundaryLine<'_>) {
+        if let BoundaryOutcome::Missed { cause } = line.outcome {
+            self.missed.push((line.frame.0, cause));
+        }
+    }
+}
+
+/// Real time (`due` once): the same cause on the fault line and on the
+/// missed boundary outcome a session records.
+#[test]
+fn real_time_a_lost_result_is_logged_with_its_cause() {
+    let registry = lossy_registry();
+    let plan = lossy_plan(&registry);
+    let mut config = RealtimeConfig::with_buffer(48_000, 42, 64);
+    config.engine.threads = 2;
+    let (runner, mut controller) = realtime(&plan, &registry, config).unwrap();
+    let mut driver = NullDriver::new(48_000, 2, 3);
+    driver.start(runner).unwrap();
+    let mut causes = Causes::default();
+    let frames = 1_000;
+    driver.run(frames, || controller.poll(&mut causes)).unwrap();
+    driver.stop().unwrap().unwrap();
+    controller.poll(&mut causes);
+    let want: Vec<(u64, Option<LossCause>)> = odd_due(frames)
+        .into_iter()
+        .map(|f| (f, Some(LossCause::Mapping)))
+        .collect();
+    assert_eq!(causes.faults, want);
+    assert_eq!(causes.missed, want);
+}
+
+/// Exact replay: a recorded miss is logged with the recorded cause (not the
+/// module's), and a recorded delivery the module now loses is logged with
+/// the module's cause.
+#[test]
+fn exact_replay_logs_the_recorded_cause() {
+    let registry = lossy_registry();
+    let config = EngineConfig {
+        scripted_boundaries: true,
+        ..EngineConfig::new(48_000, 42)
+    };
+    let mut engine = Engine::new(&lossy_plan(&registry), &registry, config, Vec::new()).unwrap();
+    let lat: InstanceAddress = "/lat".parse().unwrap();
+    for m in 1..10u64 {
+        let outcome = match m {
+            1 => Scripted::Missed(Some(LossCause::DeviceLost)),
+            2 => Scripted::Missed(None),
+            _ => Scripted::Delivered(None),
+        };
+        engine
+            .push_boundary(lat.clone(), Frame(4 * m), outcome)
+            .unwrap();
+    }
+    let r = render(&mut engine, 40).unwrap();
+    assert_eq!(engine.boundary_mismatches(), 0);
+    let lines = late_lines(&r.log);
+    assert_eq!(cause_at(&lines, 4).as_deref(), Some("\"device_lost\"}"));
+    assert_eq!(cause_at(&lines, 8).as_deref(), Some("none"));
+    assert_eq!(cause_at(&lines, 12).as_deref(), Some("\"mapping\"}"));
+    assert_eq!(cause_at(&lines, 16), None, "an even block is delivered");
 }

@@ -1227,7 +1227,8 @@ fn gpu_partials(seconds: f64, json: bool) -> GpuBench {
                     std::hint::spin_loop();
                 }
                 if let Some(job) = channel.take_done() {
-                    channel.recycle(job);
+                    // Its own job; not real time, so a refused one may drop.
+                    let _ = channel.recycle(job);
                 }
             }
         }))

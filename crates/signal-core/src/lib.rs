@@ -42,7 +42,7 @@ pub use descriptor::{
 };
 pub use event::{Curve, Event, EventPayload};
 pub use module::{
-    DirectPrimitive, Due, EventSink, Inputs, Outputs, PrepareContext, Primitive,
+    DirectPrimitive, Due, EventSink, Inputs, LossCause, Outputs, PrepareContext, Primitive,
     StateOutputPrimitive,
 };
 pub use registry::{ModuleType, Registry, RegistryError};

@@ -11,14 +11,14 @@ use std::fs;
 use std::path::PathBuf;
 
 use signal_core::{
-    BlockLatency, Direction, Due, Feedthrough, Inputs, ModuleDescriptor, ModuleType, Outputs,
-    PortDescriptor, PortKind, PortShape, PrepareContext, Primitive, RateDivisor, Registry,
+    BlockLatency, Direction, Due, Feedthrough, Inputs, LossCause, ModuleDescriptor, ModuleType,
+    Outputs, PortDescriptor, PortKind, PortShape, PrepareContext, Primitive, RateDivisor, Registry,
     Reproducibility, StateOutputPrimitive, fnv1a64,
 };
 use signal_engine::{Driver, NullDriver, RealtimeConfig, RunnerStatus, device_sample, realtime};
 use signal_project::session::{
-    BoundaryReplay, LiveRecorder, ReplayError, ReplayOptions, Session, SessionRecorder, replay,
-    replay_with,
+    BoundaryKind, BoundaryReplay, LiveRecorder, ReplayError, ReplayOptions, Session,
+    SessionRecorder, replay, replay_with,
 };
 use signal_project::{Project, SourceFile, provenance};
 
@@ -327,7 +327,7 @@ fn every_due_block_is_recorded_and_replays_on_any_thread_count() {
     for record in &boundaries.records {
         let m = record.frame.0 / BLOCK as u64;
         assert_eq!(record.frame.0 % BLOCK as u64, 0);
-        let missed = record.outcome == signal_project::session::BoundaryKind::Missed;
+        let missed = matches!(record.outcome, BoundaryKind::Missed(_));
         assert_eq!(missed, m % 2 == 1, "block {m}");
     }
     let dir = written(&recorder, "threads");
@@ -560,6 +560,74 @@ fn absurd_words_are_rejected_without_panicking() {
             Ok(_) => panic!("{name}: a session with words {words} loaded"),
         };
         assert!(error.contains("boundaries.jsonl:"), "{name}: {error}");
+    }
+}
+
+/// M2.7-5: a missed line may carry the cause of a lost result. It is
+/// written, read back, and logged by the exact replay on that block's
+/// `late_result` line; the other lines keep no cause. An unknown cause, or
+/// a cause on a delivered line, is an error at its line.
+#[test]
+fn a_recorded_cause_round_trips_and_replays_and_a_bad_one_is_refused() {
+    let registry = registry();
+    let (_, _, mut recorder) = live(&project(Some("test.latent")), &registry, PLAIN);
+    let mut boundaries = recorder.boundaries().unwrap().clone();
+    let first = boundaries
+        .records
+        .iter_mut()
+        .find(|r| matches!(r.outcome, BoundaryKind::Missed(None)))
+        .unwrap();
+    first.outcome = BoundaryKind::Missed(Some(LossCause::DeviceLost));
+    let frame = first.frame.0;
+    recorder.set_boundaries(boundaries.clone());
+    let dir = written(&recorder, "cause");
+    let text = fs::read_to_string(dir.join("boundaries.jsonl")).unwrap();
+    assert_eq!(
+        text.matches(",\"cause\":\"device_lost\"}").count(),
+        1,
+        "{text}"
+    );
+    let session = Session::load(&dir, &registry).unwrap();
+    assert_eq!(
+        session.boundaries.as_ref().map(|b| &b.records),
+        Some(&boundaries.records)
+    );
+    let replayed = replay(&session, &registry, None, 1).unwrap();
+    assert_eq!(replayed.boundaries, BoundaryReplay::Exact);
+    let log = String::from_utf8(replayed.render.log.clone()).unwrap();
+    let late: Vec<&str> = log.lines().filter(|l| l.contains("late_result")).collect();
+    assert_eq!(late.len() as u64, boundaries.missed);
+    for line in late {
+        let has = line.contains(",\"cause\":\"device_lost\"}");
+        assert_eq!(has, line.contains(&format!("\"frame\":{frame},")), "{line}");
+    }
+
+    for (name, from, to) in [
+        (
+            "unknown",
+            "\"outcome\":\"missed\"}",
+            "\"outcome\":\"missed\",\"cause\":\"gremlins\"}",
+        ),
+        (
+            "on-delivered",
+            "\"outcome\":\"delivered\"}",
+            "\"outcome\":\"delivered\",\"cause\":\"mapping\"}",
+        ),
+    ] {
+        let dir = written(&recorder, &format!("cause-{name}"));
+        let path = dir.join("boundaries.jsonl");
+        let text = fs::read_to_string(&path).unwrap();
+        let changed = text.replacen(from, to, 1);
+        assert_ne!(changed, text, "{name}");
+        fs::write(&path, changed).unwrap();
+        let error = match Session::load(&dir, &registry) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("{name}: loaded"),
+        };
+        assert!(
+            error.contains("boundaries.jsonl:") && error.contains("cause"),
+            "{name}: {error}"
+        );
     }
 }
 

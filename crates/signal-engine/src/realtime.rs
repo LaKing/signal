@@ -15,7 +15,7 @@ use std::mem;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
-use signal_core::{EventPayload, Frame, InstanceAddress, PortAddress, Registry};
+use signal_core::{EventPayload, Frame, InstanceAddress, LossCause, PortAddress, Registry};
 use signal_graph::ExecutionPlan;
 
 use crate::cores::realtime_threads;
@@ -296,7 +296,10 @@ pub enum BoundaryOutcome<'a> {
         data_lost: bool,
     },
     /// It did not (a `late_result` fault).
-    Missed,
+    Missed {
+        /// Why it was lost, when the module said (M2.7-5).
+        cause: Option<LossCause>,
+    },
 }
 
 /// A due result's device sample: as a device receives it, finite samples
@@ -1214,13 +1217,14 @@ impl Controller {
                     frame,
                     address,
                     reason: FaultReason::LateResult,
+                    cause,
                     ..
                 } = line
                 {
                     sink.boundary(BoundaryLine {
                         frame,
                         address,
-                        outcome: BoundaryOutcome::Missed,
+                        outcome: BoundaryOutcome::Missed { cause },
                     });
                 }
                 sink.log(line);

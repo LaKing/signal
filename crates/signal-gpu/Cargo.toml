@@ -21,5 +21,11 @@ pollster = { workspace = true }
 # The lock-free SPSC queues between a module and the GPU thread.
 rtrb = { workspace = true }
 
+[dev-dependencies]
+# This crate's own tests on the noop device, with its test hooks.
+signal-gpu = { path = ".", features = ["noop", "test-hooks"] }
+# The counting allocator (ADR 0017), for the job path's no-allocation tests.
+signal-contract = { workspace = true }
+
 [lints]
 workspace = true

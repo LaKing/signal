@@ -12,6 +12,7 @@
 use crate::descriptor::{Feedthrough, ModuleDescriptor};
 use crate::event::Event;
 use crate::rng::RngStream;
+use serde::Serialize;
 
 /// What [`prepare`](DirectPrimitive::prepare) learns about the run it is prepared for.
 #[derive(Clone, Debug)]
@@ -534,6 +535,15 @@ pub trait StateOutputPrimitive: Send {
     fn settle(&mut self) -> Due {
         Due::Ready
     }
+
+    /// Why the due result the last [`due`](Self::due) reported
+    /// [`Due::Lost`] will never arrive, when the module knows (M2.7-5): the
+    /// engine records it with the `late_result` fault. Asked right after
+    /// `due`, before [`miss`](Self::miss). `None`, the default, records no
+    /// cause. Real-time rules apply.
+    fn lost_cause(&self) -> Option<LossCause> {
+        None
+    }
 }
 
 /// What [`StateOutputPrimitive::due`] reports.
@@ -546,6 +556,59 @@ pub enum Due {
     /// The due result will never arrive (no device, or it was never
     /// submitted): the engine calls `miss` without waiting.
     Lost,
+}
+
+/// Why a due result was lost ([`StateOutputPrimitive::lost_cause`]): the
+/// `cause` of a `late_result` fault in the log and of a missed boundary in
+/// a session (M2.7-5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LossCause {
+    /// The work was refused as invalid.
+    Validation,
+    /// The device ran out of memory.
+    OutOfMemory,
+    /// The result could not be read back.
+    Mapping,
+    /// An internal error of the device.
+    Internal,
+    /// An error no one captured was raised while the work was in flight.
+    Uncaptured,
+    /// The device was shutting down.
+    Stopped,
+    /// The device was lost.
+    DeviceLost,
+}
+
+impl LossCause {
+    /// Every cause.
+    pub const ALL: [LossCause; 7] = [
+        LossCause::Validation,
+        LossCause::OutOfMemory,
+        LossCause::Mapping,
+        LossCause::Internal,
+        LossCause::Uncaptured,
+        LossCause::Stopped,
+        LossCause::DeviceLost,
+    ];
+
+    /// Its name in the log and in sessions.
+    pub fn name(self) -> &'static str {
+        match self {
+            LossCause::Validation => "validation",
+            LossCause::OutOfMemory => "out_of_memory",
+            LossCause::Mapping => "mapping",
+            LossCause::Internal => "internal",
+            LossCause::Uncaptured => "uncaptured",
+            LossCause::Stopped => "stopped",
+            LossCause::DeviceLost => "device_lost",
+        }
+    }
+
+    /// The cause named `name`.
+    pub fn from_name(name: &str) -> Option<LossCause> {
+        LossCause::ALL.into_iter().find(|c| c.name() == name)
+    }
 }
 
 /// A primitive instance as the engine holds it: a boxed implementation of the

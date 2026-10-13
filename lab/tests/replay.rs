@@ -85,7 +85,7 @@ fn a_delayed_gpu_run_replays_exactly_and_ideal_differs() {
     let outcomes: Vec<bool> = boundaries
         .records
         .iter()
-        .map(|r| r.outcome != BoundaryKind::Missed)
+        .map(|r| !matches!(r.outcome, BoundaryKind::Missed(_)))
         .collect();
     eprintln!(
         "live: {} due blocks from block {LATENCY_BLOCKS}, {} delivered, {} missed: {}",

@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use signal_core::{
-    Curve, Direction, EventPayload, Frame, InstanceAddress, ModuleDescriptor, PortAddress,
-    PortShape, Registry, SinkKind, fnv1a64,
+    Curve, Direction, EventPayload, Frame, InstanceAddress, LossCause, ModuleDescriptor,
+    PortAddress, PortShape, Registry, SinkKind, fnv1a64,
 };
 use signal_engine::{
     BoundaryLine, BoundaryOutcome, ControlSink, Conversion, Engine, EngineConfig, EngineError,
@@ -84,8 +84,9 @@ pub struct BoundaryRecord {
 pub enum BoundaryKind {
     /// Delivered; with the result's words when the session records data.
     Delivered(Option<Vec<f32>>),
-    /// Missed: the module played silence for that block.
-    Missed,
+    /// Missed: the module played silence for that block; with the cause of
+    /// a lost result, when the run recorded one (M2.7-5).
+    Missed(Option<LossCause>),
 }
 
 /// Whether any plan has a module with a declared latency.
@@ -103,7 +104,10 @@ fn boundary_line(record: &BoundaryRecord) -> String {
         json_string(&record.instance.to_string())
     );
     match &record.outcome {
-        BoundaryKind::Missed => format!(r#"{head}"missed"}}"#),
+        BoundaryKind::Missed(None) => format!(r#"{head}"missed"}}"#),
+        BoundaryKind::Missed(Some(cause)) => {
+            format!(r#"{head}"missed","cause":"{}"}}"#, cause.name())
+        }
         BoundaryKind::Delivered(None) => format!(r#"{head}"delivered"}}"#),
         BoundaryKind::Delivered(Some(words)) => {
             format!(r#"{head}"delivered","words":{}}}"#, words.len())
@@ -120,6 +124,8 @@ struct BoundaryLineIn {
     outcome: String,
     #[serde(default)]
     words: Option<u64>,
+    #[serde(default)]
+    cause: Option<String>,
 }
 
 /// `[boundaries]` of `session.toml`.
@@ -1290,7 +1296,7 @@ impl LiveRecorder {
         let count = |missed: bool| {
             self.records
                 .iter()
-                .filter(|r| (r.outcome == BoundaryKind::Missed) == missed)
+                .filter(|r| matches!(r.outcome, BoundaryKind::Missed(_)) == missed)
                 .count() as u64
         };
         let (delivered, missed) = (count(false), count(true));
@@ -1421,7 +1427,7 @@ impl ControlSink for LiveRecorder {
 
     fn boundary(&mut self, line: BoundaryLine<'_>) {
         let outcome = match line.outcome {
-            BoundaryOutcome::Missed => BoundaryKind::Missed,
+            BoundaryOutcome::Missed { cause } => BoundaryKind::Missed(cause),
             BoundaryOutcome::Delivered { data, data_lost } => {
                 if data_lost {
                     self.data_lost = self.data_lost.saturating_add(1);
@@ -1783,8 +1789,22 @@ fn load_boundaries(
                 ),
             ));
         }
+        let cause = match read.cause.as_deref().map(|c| (c, LossCause::from_name(c))) {
+            None => None,
+            Some((_, Some(cause))) if read.outcome == "missed" => Some(cause),
+            Some((name, known)) => {
+                diagnostics.push(at(
+                    line,
+                    match known {
+                        None => format!("cause `{name}` is not a known cause"),
+                        Some(_) => format!("cause `{name}` on a `{}` line", read.outcome),
+                    },
+                ));
+                continue;
+            }
+        };
         let outcome = match (read.outcome.as_str(), read.words) {
-            ("missed", None) => BoundaryKind::Missed,
+            ("missed", None) => BoundaryKind::Missed(cause),
             ("delivered", None) => BoundaryKind::Delivered(None),
             ("delivered", Some(words)) if table.data => {
                 match words_total.checked_add(words).filter(|&t| t <= available) {
@@ -1829,7 +1849,7 @@ fn load_boundaries(
     }
     let delivered = parsed
         .iter()
-        .filter(|r| r.outcome != BoundaryKind::Missed)
+        .filter(|r| !matches!(r.outcome, BoundaryKind::Missed(_)))
         .count() as u64;
     let missed = parsed.len() as u64 - delivered;
     if diagnostics.is_empty() && (delivered != table.delivered || missed != table.missed) {
@@ -2149,7 +2169,7 @@ pub fn replay_with(
                 break;
             }
             let outcome = match &record.outcome {
-                BoundaryKind::Missed => Scripted::Missed,
+                BoundaryKind::Missed(cause) => Scripted::Missed(*cause),
                 BoundaryKind::Delivered(words) => {
                     Scripted::Delivered(words.as_ref().map(|w| w.clone().into_boxed_slice()))
                 }

@@ -3,7 +3,7 @@
 //! [`LogLine`] is their `log.jsonl` form (`docs/semantics.md`, "Artifacts").
 
 use serde::Serialize;
-use signal_core::{EventPayload, Frame, InstanceAddress, PortAddress};
+use signal_core::{EventPayload, Frame, InstanceAddress, LossCause, PortAddress};
 
 /// A port of the engine's plan. Ids follow the byte-wise order of port addresses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -154,6 +154,9 @@ pub enum LogRecord {
         port: PortId,
         /// What was wrong.
         reason: FaultReason,
+        /// For a `LateResult` whose result was lost, why, when the module
+        /// knew (M2.7-5).
+        cause: Option<LossCause>,
     },
     /// Real time (M2.7-4): a latent instance's due result was delivered.
     /// Not a line of `log.jsonl`: the [`Controller`](crate::Controller)
@@ -269,6 +272,10 @@ pub enum LogLine<'a> {
         port: Option<&'a PortAddress>,
         /// What was wrong.
         reason: FaultReason,
+        /// For a `late_result` whose result was lost, why (M2.7-5); the
+        /// line leaves the field out when there is none.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cause: Option<LossCause>,
     },
 }
 

@@ -59,6 +59,8 @@ What the engine does with them (`semantics.md` §7, §13):
 - **Offline** (`EngineConfig::realtime == false`: renders, ideal replays, the bench, the contract suite) it asks again, yielding the thread, until `due` is not `Pending`, so renders are exact and repeatable. A result that is `Lost` (no usable GPU) is still a `late_result` fault, and `signal render` warns about it (stderr, and `late_results` in its JSON).
 - **In real time** (`realtime()`, so the null driver, `signal play` and the app) it asks once and never waits. `Pending` or `Lost` is a **`late_result` fault**: `miss`, a `fault` record at the block's first frame, and `Engine::late_results` / `RunnerStatus::late_results` count it. The instance is not muted; the next block asks again.
 
+**The cause of a lost result** (M2.7-5). When `due` answers `Lost` because the work failed (a GPU job ended `Failed` or `DeviceLost`), `lost_cause` says why (`LossCause`: `validation`, `out_of_memory`, `mapping`, `internal`, `uncaptured`, `stopped`, `device_lost`); the engine asks it right after that `due` and before `miss`, so `miss` may forget it, and logs it as the fault's `cause` (`semantics.md` §9). The default, `None`, logs no cause; real-time rules apply.
+
 The GPU work itself runs on the `signal-gpu` thread (`crates/signal-gpu`, `realtime-rules.md` "GPU"); `due`, `miss`, `emit` and `absorb` only move preallocated job buffers through lock-free queues. `lab.gpu_partials` (`lab/src/gpu_partials.rs`) is the example: *L* = 2, blocks of 256 frames, with a CPU reference and a documented tolerance.
 
 ## Lifecycle: what may run where
