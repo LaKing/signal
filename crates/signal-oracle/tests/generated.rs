@@ -14,14 +14,17 @@
 //!
 //! 256 cases (fixed, whatever `PROPTEST_CASES` says); failures are recorded
 //! in `generated.proptest-regressions` beside this file and replayed first.
+//! The file is named directly ([`REGRESSIONS`]): `SourceParallel` looks for
+//! a `lib.rs` or `main.rs` above `tests/`, finds none, and only guesses.
 
 mod common;
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 use common::{Setup, compare, registry, run_engine, shuffled};
 use proptest::prelude::*;
-use proptest::test_runner::FileFailurePersistence;
+use proptest::test_runner::{FailurePersistence, FileFailurePersistence, TestError, TestRunner};
 use signal_core::{
     Curve, Direction, EventPayload, Feedthrough, InstanceAddress, PortAddress, PortShape, Range,
     Registry, SplitMix64,
@@ -31,6 +34,12 @@ use signal_oracle::{Connection, Edit, ExternalEvent, Graph, Instance, PROBE_INPU
 
 /// The cases run.
 const CASES: u32 = 256;
+
+/// The regression file, whose seeds are replayed before new cases.
+const REGRESSIONS: FileFailurePersistence = FileFailurePersistence::Direct(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/generated.proptest-regressions"
+));
 
 /// A random stream for one case.
 struct Rng(SplitMix64);
@@ -337,7 +346,7 @@ fn graph(spec: &Spec, version: u64, seed: u64) -> Graph {
 }
 
 /// The raw parameters a case is drawn from; proptest shrinks them.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct Draw {
     seed: u64,
     instances: usize,
@@ -615,9 +624,7 @@ fn setups(seed: u64, frames: u64) -> Vec<Setup> {
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: CASES,
-        failure_persistence: Some(Box::new(FileFailurePersistence::SourceParallel(
-            "proptest-regressions"
-        ))),
+        failure_persistence: Some(Box::new(REGRESSIONS)),
         ..ProptestConfig::default()
     })]
 
@@ -733,4 +740,72 @@ fn the_generator_covers_its_dimensions() {
     ] {
         assert!(count > 0, "the generator made no {what}");
     }
+}
+
+/// The property test's persistence reads every seed saved in the
+/// regression file beside this source, in order.
+#[test]
+fn the_regression_file_is_found() {
+    let saved: Vec<&str> = include_str!("generated.proptest-regressions")
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or("").trim())
+        .filter(|seed| !seed.is_empty())
+        .collect();
+    assert!(!saved.is_empty(), "the regression file holds no seed");
+    let loaded: Vec<String> = REGRESSIONS
+        .load_persisted_failures2(None)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(loaded, saved);
+}
+
+/// A known failing seed, injected into a regression file of its own (never
+/// the real one), is replayed before any new case and fails the run with
+/// the value it draws.
+#[test]
+fn a_saved_seed_is_replayed_first() {
+    let path = std::env::temp_dir().join(format!(
+        "signal-oracle-replay-{}.proptest-regressions",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        "cc 5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed # injected\n",
+    )
+    .unwrap();
+    let path: &'static str = Box::leak(path.to_str().unwrap().to_owned().into_boxed_str());
+    let config = |cases| ProptestConfig {
+        cases,
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(path))),
+        ..ProptestConfig::default()
+    };
+    let seen = RefCell::new(Vec::new());
+
+    // With no new cases, only a replay runs the test: the seed's value.
+    TestRunner::new(config(0))
+        .run(&draw(), |d| {
+            seen.borrow_mut().push(d);
+            Ok(())
+        })
+        .unwrap();
+    let known = seen.take();
+    assert_eq!(known.len(), 1, "the seed was not replayed: {known:?}");
+    let known = known[0].clone();
+
+    // The property fails on that value: the run stops at the replay.
+    let result = TestRunner::new(config(CASES)).run(&draw(), |d| {
+        seen.borrow_mut().push(d.clone());
+        if d == known {
+            Err(TestCaseError::fail("the known failing seed"))
+        } else {
+            Ok(())
+        }
+    });
+    std::fs::remove_file(path).unwrap();
+    match result {
+        Err(TestError::Fail(_, value)) => assert_eq!(value, known),
+        other => panic!("the known failing seed passed: {other:?}"),
+    }
+    assert_eq!(seen.borrow().first(), Some(&known), "a new case ran first");
 }
