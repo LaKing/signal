@@ -43,19 +43,25 @@
 #[cfg(panic = "abort")]
 compile_error!("signal-engine needs panic = \"unwind\": a module's panic must be caught");
 
+mod board;
 mod cores;
 mod driver;
 mod engine;
 mod error;
 mod fade;
+mod gate;
 mod log;
 mod manifest;
+#[cfg(all(test, loom))]
+mod model;
 mod offline;
 mod parameter;
+mod park;
 mod pool;
 mod realtime;
 #[doc(hidden)]
 pub mod shared;
+mod sync;
 mod tasks;
 mod units;
 mod wake;

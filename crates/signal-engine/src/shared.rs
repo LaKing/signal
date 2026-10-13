@@ -24,6 +24,8 @@
 //!   [`Gate`]: a worker reads the job only after joining it, and the caller
 //!   closes the gate and waits until every worker has left before it
 //!   returns or unwinds, so no worker ever holds a reference past the job.
+//!   The gate's word is `gate.rs`'s and the job's task board `board.rs`'s
+//!   (M2.7-6): safe state machines, which the model tests run under loom.
 //!
 //! In debug builds (and so in every `cargo test`) every [`Cells`] carries an
 //! atomic claim per element: a view claims each element it holds mutably
@@ -117,11 +119,13 @@ use std::ops::{Deref, Range as Span};
 use std::panic::AssertUnwindSafe;
 #[cfg(debug_assertions)]
 use std::sync::atomic::AtomicU32;
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use signal_core::{Event, EventSink, Primitive};
 
+use crate::board::{self, TaskBoard};
 use crate::engine::{Lane, Out, Param, Slot};
+use crate::gate::GateWord;
 use crate::log::FailureReason;
 
 /// Claims made and conflicts refused by the checked mode, process-wide.
@@ -749,9 +753,28 @@ impl PlanCells {
     pub(crate) fn inject(&mut self, armed: Armed) {
         match armed {
             Armed::Refuse(refuse) => self.refuse = Some(refuse),
-            Armed::DropReady => *self.board.inject.get_mut() = INJECT_DROP_READY,
-            Armed::MissingSlot => *self.board.inject.get_mut() = INJECT_MISSING_SLOT,
+            Armed::DropReady => self.board.arm(board::INJECT_DROP_READY),
+            Armed::MissingSlot => self.board.arm(board::INJECT_MISSING_SLOT),
         }
+    }
+
+    /// Model tests only: a plan of `preds.len()` tasks with `successors`,
+    /// `lanes` lanes and no instances, for jobs whose bodies take no views.
+    #[cfg(all(test, loom))]
+    pub(crate) fn for_tasks(preds: Vec<u32>, successors: Vec<Vec<u32>>, lanes: usize) -> PlanCells {
+        let tasks = preds.len();
+        PlanCells {
+            lanes: Cells::new((0..lanes).map(|_| Lane::default()).collect()),
+            outs: Cells::new((0..tasks).map(|_| Out::default()).collect()),
+            board: TaskBoard::new(preds, successors),
+            ..PlanCells::default()
+        }
+    }
+
+    /// Model tests only: the task board.
+    #[cfg(all(test, loom))]
+    pub(crate) fn board(&self) -> &TaskBoard {
+        &self.board
     }
 
     /// The whole plan, for one thread, without a log (the doctests'; a
@@ -1046,11 +1069,7 @@ impl<'t, T: Sync> Reader<'t, T> {
             let owner_task = *counted(instance_task.get(owner as usize), self.refusals)?;
             // Acquire: pairs with the Release store of the producer's
             // completion, so its writes to this row happen before the read.
-            let complete = owner_task == task
-                || board
-                    .done
-                    .get(owner_task as usize)
-                    .is_some_and(|d| d.load(Ordering::Acquire) == epoch);
+            let complete = owner_task == task || board.done_in(owner_task as usize, epoch);
             // A failed task never stores its `done`: its rows are refused.
             #[cfg(feature = "test-hooks")]
             let complete = complete && self.refuse != Some(owner as usize);
@@ -1077,222 +1096,6 @@ impl<'t, T: Sync> Reader<'t, T> {
             slice,
             _claim: claim,
         })
-    }
-}
-
-/// What the task board says when asked for work.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Next {
-    Task(usize),
-    /// Some task is not claimed yet but none is ready.
-    NotYet,
-    /// Every task is claimed.
-    AllClaimed,
-}
-
-/// The tasks of a plan and their dependency counters (atomics only), and
-/// whether the job failed (`docs/semantics.md` §14).
-#[derive(Default)]
-struct TaskBoard {
-    preds: Box<[u32]>,
-    succ_start: Box<[usize]>,
-    succ: Box<[u32]>,
-    pending: Box<[AtomicU64]>,
-    /// The epoch in which each task last completed successfully; a failed
-    /// task's stays older, so its rows are never read.
-    done: Box<[AtomicU64]>,
-    /// Ready tasks in the order they became ready, with the epoch each was
-    /// pushed in.
-    ready: Box<[AtomicU64]>,
-    ready_epoch: Box<[AtomicU64]>,
-    head: AtomicUsize,
-    tail: AtomicUsize,
-    /// Claims settled: one per claim that advanced `head`, by the task's
-    /// completion or, for a claim that found no task, by the claim itself.
-    completed: AtomicUsize,
-    /// Why this job failed, the first reason only: 0 (it has not),
-    /// [`FAILED_PANIC`] or [`FAILED_INVARIANT`].
-    failed: AtomicU8,
-    /// Test hooks only: a one-shot broken invariant ([`PlanCells::inject`]).
-    #[cfg(feature = "test-hooks")]
-    inject: AtomicU8,
-}
-
-/// Something unwound in a task outside a primitive's call.
-const FAILED_PANIC: u8 = 1;
-/// The board found itself inconsistent.
-const FAILED_INVARIANT: u8 = 2;
-
-/// Test hooks only: [`TaskBoard::inject`]'s values.
-#[cfg(feature = "test-hooks")]
-const INJECT_DROP_READY: u8 = 1;
-#[cfg(feature = "test-hooks")]
-const INJECT_MISSING_SLOT: u8 = 2;
-
-impl fmt::Debug for TaskBoard {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TaskBoard")
-            .field("tasks", &self.preds.len())
-            .finish()
-    }
-}
-
-impl TaskBoard {
-    fn new(preds: Vec<u32>, successors: Vec<Vec<u32>>) -> TaskBoard {
-        let n = preds.len();
-        let mut succ_start = Vec::with_capacity(n + 1);
-        let mut succ = Vec::new();
-        for list in &successors {
-            succ_start.push(succ.len());
-            succ.extend_from_slice(list);
-        }
-        succ_start.resize(n + 1, succ.len());
-        let atomics = |_| AtomicU64::new(0);
-        TaskBoard {
-            preds: preds.into_boxed_slice(),
-            succ_start: succ_start.into_boxed_slice(),
-            succ: succ.into_boxed_slice(),
-            pending: (0..n).map(atomics).collect(),
-            done: (0..n).map(atomics).collect(),
-            ready: (0..n).map(atomics).collect(),
-            ready_epoch: (0..n).map(atomics).collect(),
-            head: AtomicUsize::new(0),
-            tail: AtomicUsize::new(0),
-            completed: AtomicUsize::new(0),
-            failed: AtomicU8::new(0),
-            #[cfg(feature = "test-hooks")]
-            inject: AtomicU8::new(0),
-        }
-    }
-
-    /// Resets the counters for a segment of epoch `epoch` and pushes the
-    /// tasks without predecessors, in task order. Exclusive: before the job
-    /// is published.
-    fn reset(&mut self, epoch: u64) {
-        for (pending, &preds) in self.pending.iter_mut().zip(self.preds.iter()) {
-            *pending.get_mut() = u64::from(preds);
-        }
-        *self.head.get_mut() = 0;
-        *self.tail.get_mut() = 0;
-        *self.completed.get_mut() = 0;
-        *self.failed.get_mut() = 0;
-        for t in 0..self.preds.len() {
-            if self.preds.get(t) == Some(&0) {
-                self.push(t, epoch);
-            }
-        }
-    }
-
-    /// Test hooks only: whether the armed one-shot invariant `which` fires.
-    #[cfg(feature = "test-hooks")]
-    fn injected(&self, which: u8) -> bool {
-        self.inject
-            .compare_exchange(which, 0, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-    }
-
-    fn push(&self, t: usize, epoch: u64) {
-        #[cfg(feature = "test-hooks")]
-        if self.injected(INJECT_DROP_READY) {
-            self.fail(FAILED_INVARIANT);
-            return;
-        }
-        let at = self.tail.fetch_add(1, Ordering::AcqRel);
-        if let (Some(slot), Some(slot_epoch)) = (self.ready.get(at), self.ready_epoch.get(at)) {
-            slot.store(t as u64, Ordering::Relaxed);
-            // Release: a claimant that sees this epoch sees the task index.
-            slot_epoch.store(epoch, Ordering::Release);
-        } else {
-            // No slot: the task would never run. Nothing waits for it after
-            // the failure (it is never claimed).
-            self.fail(FAILED_INVARIANT);
-        }
-    }
-
-    fn claim(&self, epoch: u64) -> Next {
-        loop {
-            let head = self.head.load(Ordering::Acquire);
-            if head >= self.preds.len() {
-                return Next::AllClaimed;
-            }
-            let ready = self
-                .ready_epoch
-                .get(head)
-                .is_some_and(|e| e.load(Ordering::Acquire) == epoch);
-            if !ready {
-                return Next::NotYet;
-            }
-            let task = self.ready.get(head).map(|s| s.load(Ordering::Relaxed));
-            if self
-                .head
-                .compare_exchange(head, head + 1, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                #[cfg(feature = "test-hooks")]
-                let task = task.filter(|_| !self.injected(INJECT_MISSING_SLOT));
-                return match task {
-                    Some(t) => Next::Task(t as usize),
-                    None => {
-                        // A claim with no task: it settles itself, as a
-                        // failed completion, so a drain never waits for it.
-                        self.fail(FAILED_INVARIANT);
-                        self.completed.fetch_add(1, Ordering::AcqRel);
-                        Next::NotYet
-                    }
-                };
-            }
-        }
-    }
-
-    /// Task `t` is complete: Release its writes (if it succeeded), then
-    /// release its successors. A failed task (`ok` false) fails the job and
-    /// never marks itself done, so no successor reads its rows.
-    fn complete(&self, t: usize, epoch: u64, ok: bool) {
-        if !ok {
-            self.fail(FAILED_PANIC);
-        } else if let Some(done) = self.done.get(t) {
-            done.store(epoch, Ordering::Release);
-        }
-        let start = self.succ_start.get(t).copied().unwrap_or(0);
-        let end = self.succ_start.get(t + 1).copied().unwrap_or(start);
-        for &s in self.succ.get(start..end).unwrap_or(&[]) {
-            let s = s as usize;
-            // AcqRel: the last predecessor's decrement sees every other
-            // predecessor's completion before it pushes the successor.
-            match self.pending.get(s) {
-                Some(p) => {
-                    if p.fetch_sub(1, Ordering::AcqRel) == 1 {
-                        self.push(s, epoch);
-                    }
-                }
-                None => self.fail(FAILED_INVARIANT),
-            }
-        }
-        self.completed.fetch_add(1, Ordering::AcqRel);
-    }
-
-    fn all_complete(&self) -> bool {
-        self.completed.load(Ordering::Acquire) >= self.preds.len()
-    }
-
-    /// The job failed for `why` (Release: before any claimant that sees it
-    /// skips its task); the first reason stays.
-    fn fail(&self, why: u8) {
-        let _ = self
-            .failed
-            .compare_exchange(0, why, Ordering::AcqRel, Ordering::Acquire);
-    }
-
-    fn failed(&self) -> bool {
-        self.failed.load(Ordering::Acquire) != 0
-    }
-
-    /// Every claim made so far is settled: read `head`, then `completed`.
-    /// After a failure the caller waits only for this, never for tasks that
-    /// were never claimed.
-    fn drained(&self) -> bool {
-        let head = self.head.load(Ordering::Acquire);
-        self.completed.load(Ordering::Acquire) >= head
     }
 }
 
@@ -1375,6 +1178,12 @@ impl<'a> Job<'a> {
         }
     }
 
+    /// Model tests only: the job's epoch.
+    #[cfg(all(test, loom))]
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
     /// Test hooks only: the hook its threads call (`Engine::set_task_hook`).
     #[cfg(feature = "test-hooks")]
     pub(crate) fn with_hook(mut self, hook: Option<fn(HookPoint)>) -> Job<'a> {
@@ -1386,9 +1195,9 @@ impl<'a> Job<'a> {
     /// itself inconsistent): nothing of it may be published
     /// (`docs/semantics.md` §14).
     pub(crate) fn failure(&self) -> Option<FailureReason> {
-        match self.cells.board.failed.load(Ordering::Acquire) {
+        match self.cells.board.failure() {
             0 => None,
-            FAILED_PANIC => Some(FailureReason::TaskPanic),
+            board::FAILED_PANIC => Some(FailureReason::TaskPanic),
             _ => Some(FailureReason::InvariantViolation),
         }
     }
@@ -1400,7 +1209,7 @@ impl<'a> Job<'a> {
             && !caught(|| hook(point))
         {
             self.stats.task_failures.fetch_add(1, Ordering::Relaxed);
-            self.cells.board.fail(FAILED_PANIC);
+            self.cells.board.fail(board::FAILED_PANIC);
         }
     }
 
@@ -1413,45 +1222,16 @@ impl<'a> Job<'a> {
         }
         #[cfg(feature = "test-hooks")]
         self.hook(HookPoint::Enter { lane });
-        let board = &self.cells.board;
-        loop {
-            let next = board.claim(self.epoch);
-            if let Next::Task(t) = next {
-                // Settled before anything else below: a failed completion if
-                // the job has failed or the body unwinds, so no thread waits
-                // for this claim (and lane 0 never waits on its own).
-                let ran = !board.failed() && self.run(lane, t);
-                board.complete(t, self.epoch, ran);
-                if ran && lane != 0 {
-                    self.stats.worker_tasks.fetch_add(1, Ordering::Relaxed);
-                }
+        // Every claimed task is completed exactly once, with this outcome: a
+        // failed completion if the job has failed or the body unwinds, so no
+        // thread waits for a claim (and lane 0 never waits on its own).
+        self.cells.board.participate(self.epoch, lane, |t| {
+            let ran = self.run(lane, t);
+            if ran && lane != 0 {
+                self.stats.worker_tasks.fetch_add(1, Ordering::Relaxed);
             }
-            if board.failed() {
-                if lane == 0 {
-                    while !board.drained() {
-                        std::hint::spin_loop();
-                    }
-                }
-                break;
-            }
-            match next {
-                Next::Task(_) => {}
-                Next::NotYet => {
-                    if lane == 0 && board.all_complete() {
-                        break;
-                    }
-                    std::hint::spin_loop();
-                }
-                Next::AllClaimed => {
-                    if lane == 0 {
-                        while !board.all_complete() && !(board.failed() && board.drained()) {
-                            std::hint::spin_loop();
-                        }
-                    }
-                    break;
-                }
-            }
-        }
+            ran
+        });
         #[cfg(feature = "test-hooks")]
         self.hook(HookPoint::Leave { lane });
     }
@@ -1496,18 +1276,13 @@ impl<'a> Job<'a> {
     }
 }
 
-/// The gate word: the epoch above bit 16, then the `open` bit, then the
-/// number of joined workers.
-const OPEN: u64 = 1 << 15;
-const JOINED: u64 = OPEN - 1;
-const EPOCH_SHIFT: u32 = 16;
-
-/// How the caller publishes a [`Job`] to the workers and takes it back.
+/// How the caller publishes a [`Job`] to the workers and takes it back: the
+/// gate's word (`gate.rs`) and, beside it, the job.
 pub(crate) struct Gate {
-    word: AtomicU64,
+    word: GateWord,
     /// The published job; written only while the gate is closed and no
     /// worker is joined, read only by joined workers.
-    job: UnsafeCell<*const Job<'static>>,
+    job: crate::sync::UnsafeCell<*const Job<'static>>,
 }
 
 // SAFETY: `job` is written only by the gate's single opener while the gate is
@@ -1521,9 +1296,7 @@ unsafe impl Send for Gate {}
 
 impl fmt::Debug for Gate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Gate")
-            .field("word", &self.word.load(Ordering::Relaxed))
-            .finish()
+        f.debug_struct("Gate").field("word", &self.word).finish()
     }
 }
 
@@ -1536,65 +1309,59 @@ pub(crate) struct Opener {
 impl Gate {
     /// A closed gate and its opener.
     pub(crate) fn new() -> (std::sync::Arc<Gate>, Opener) {
+        Gate::with_word(GateWord::new())
+    }
+
+    /// A closed gate over `word`, and its opener.
+    pub(crate) fn with_word(word: GateWord) -> (std::sync::Arc<Gate>, Opener) {
         let gate = std::sync::Arc::new(Gate {
-            word: AtomicU64::new(0),
-            job: UnsafeCell::new(std::ptr::null()),
+            word,
+            job: crate::sync::UnsafeCell::new(std::ptr::null()),
         });
         (gate.clone(), Opener { gate })
     }
 
-    fn epoch(word: u64) -> u64 {
-        word >> EPOCH_SHIFT
+    /// Tests only: the gate's word.
+    #[cfg(test)]
+    pub(crate) fn word(&self) -> &GateWord {
+        &self.word
     }
 
     /// Whether a job newer than `seen` is open (SeqCst: the worker's half of
     /// the park handshake).
     pub(crate) fn joinable(&self, seen: u64) -> bool {
-        let word = self.word.load(Ordering::SeqCst);
-        word & OPEN != 0 && Gate::epoch(word) != seen
+        self.word.joinable(seen)
     }
 
     /// Joins the open job if it is newer than `seen`, runs `work` on it and
     /// leaves. Returns whether it joined.
     pub(crate) fn join(&self, seen: &mut u64, work: impl FnOnce(&Job<'_>)) -> bool {
-        let word = self.word.load(Ordering::Acquire);
-        if word & OPEN == 0 || Gate::epoch(word) == *seen || word & JOINED == JOINED {
+        self.join_loaded(self.word.load(), seen, work)
+    }
+
+    /// [`join`](Gate::join) with the gate's word read earlier
+    /// (`GateWord::join_loaded`; the model tests put a pause there).
+    pub(crate) fn join_loaded(
+        &self,
+        word: u64,
+        seen: &mut u64,
+        work: impl FnOnce(&Job<'_>),
+    ) -> bool {
+        // A worker that paused before joining fails once the gate has closed
+        // (`GateWord::join_loaded`), and never reads the pointer.
+        let Some(_joined) = self.word.join_loaded(word, seen) else {
             return false;
-        }
-        // AcqRel: Acquire pairs with the opener's SeqCst (so Release) open,
-        // so the job pointer and everything the caller wrote before opening
-        // are visible below. It succeeds only if the gate is still open for
-        // this epoch: a worker that paused after loading `word` fails here
-        // once the gate has closed, and never reads the pointer.
-        if self
-            .word
-            .compare_exchange(word, word + 1, Ordering::AcqRel, Ordering::Relaxed)
-            .is_err()
-        {
-            return false;
-        }
-        *seen = Gate::epoch(word);
-        let _leave = Leave(&self.word);
-        // SAFETY: the pointer was written before the open this join synchronised
-        // with (Acquire above), and the opener does not return, unwind,
-        // close for good or rewrite it until `joined` is back to 0 (its
-        // `Close` guard), which needs this worker's Release decrement in
-        // `Leave`: the job outlives every use here. `Job` is `Sync`
-        // (`assert_sync`, checked by the compiler), so sharing it is sound.
-        let job = unsafe { &**self.job.get() };
+        };
+        // SAFETY: the pointer was written before the open this join
+        // synchronised with (the join's Acquire pairs with the SeqCst open),
+        // and the opener does not return, unwind, close for good or rewrite
+        // it until `joined` is back to 0 (its `Close` guard), which needs
+        // this worker's Release leave when `_joined` drops: the job outlives
+        // every use here. `Job` is `Sync` (`assert_sync`, checked by the
+        // compiler), so sharing it is sound.
+        let job = unsafe { &*self.job.with(|job| *job) };
         work(job);
         true
-    }
-}
-
-/// Leaves the gate when dropped (also while unwinding).
-struct Leave<'a>(&'a AtomicU64);
-
-impl Drop for Leave<'_> {
-    fn drop(&mut self) {
-        // Release: every access this worker made to the job happens before
-        // the opener's Acquire load that sees `joined == 0`.
-        self.0.fetch_sub(1, Ordering::Release);
     }
 }
 
@@ -1610,41 +1377,23 @@ impl Opener {
         caller: impl FnOnce(&Job<'_>),
     ) {
         let gate = &*self.gate;
-        let word = gate.word.load(Ordering::Acquire);
         // SAFETY: the gate is closed and `joined == 0` here (every `serve`
         // waits for that before it returns or unwinds, and this `&mut self`
         // is the only opener), so no worker reads the pointer while it is
         // written. The lifetime is erased only for the gate's storage: `job`
-        // outlives every read, because `Close` below keeps this function from
-        // returning or unwinding until the last joined worker has left. The
-        // job is `Sync` (`assert_sync`, checked by the compiler), so workers
-        // may share it.
-        unsafe {
-            *gate.job.get() = (job as *const Job<'_>).cast::<Job<'static>>();
-        }
-        let epoch = Gate::epoch(word).wrapping_add(1) & (u64::MAX >> EPOCH_SHIFT);
+        // outlives every read, because the `Close` guard below keeps this
+        // function from returning or unwinding until the last joined worker
+        // has left. The job is `Sync` (`assert_sync`, checked by the
+        // compiler), so workers may share it.
+        gate.job.with_mut(|slot| unsafe {
+            *slot = (job as *const Job<'_>).cast::<Job<'static>>();
+        });
         // SeqCst: publishes the pointer and the job (Release), and orders the
         // open before `after_open`'s SeqCst reads of the parked flags.
-        gate.word
-            .swap((epoch << EPOCH_SHIFT) | OPEN, Ordering::SeqCst);
-        let close = Close(&gate.word);
+        let close = gate.word.open();
         after_open();
         caller(job);
         drop(close);
-    }
-}
-
-/// Closes a gate and waits until every joined worker has left, when dropped:
-/// on `serve`'s return and while it unwinds.
-struct Close<'a>(&'a AtomicU64);
-
-impl Drop for Close<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_and(!OPEN, Ordering::AcqRel);
-        // Acquire: pairs with every worker's Release leave.
-        while self.0.load(Ordering::Acquire) & JOINED != 0 {
-            std::hint::spin_loop();
-        }
     }
 }
 
@@ -1654,9 +1403,10 @@ impl Drop for Close<'_> {
 const fn assert_sync<T: Sync + ?Sized>() {}
 const _: () = assert_sync::<Job<'static>>();
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
+    use crate::board::Next;
 
     #[test]
     fn get_and_get_mut_see_every_element() {
@@ -1883,9 +1633,9 @@ mod tests {
                 left.load(Ordering::SeqCst),
                 "serve unwound before the worker left"
             );
-            let word = gate.word.load(Ordering::SeqCst);
-            assert_eq!(word & OPEN, 0, "the gate is closed");
-            assert_eq!(word & JOINED, 0, "no worker is joined");
+            let (joined, open) = gate.word().state();
+            assert!(!open, "the gate is closed");
+            assert_eq!(joined, 0, "no worker is joined");
         });
     }
 
@@ -1949,23 +1699,6 @@ mod tests {
         assert!(reader.row(0).is_none(), "a failed producer's row");
         assert!(refusals.load(Ordering::Relaxed) > 0);
         assert!(board.drained());
-    }
-
-    /// Path 11: a claim that advances `head` and finds its slot empty settles
-    /// itself as a failed completion, so a drain never waits for it. The
-    /// board is reset whole (the slot's epoch published), then only `ready`
-    /// is cut short.
-    #[test]
-    fn a_claim_with_an_empty_slot_settles_itself() {
-        let mut board = TaskBoard::new(vec![0], vec![Vec::new()]);
-        board.reset(1);
-        board.ready = Box::new([]);
-        assert_eq!(board.claim(1), Next::NotYet);
-        assert!(board.failed());
-        assert_eq!(board.head.load(Ordering::Relaxed), 1);
-        assert_eq!(board.completed.load(Ordering::Relaxed), 1);
-        assert!(board.drained());
-        assert_eq!(board.claim(1), Next::AllClaimed);
     }
 
     /// A job whose first claim finds an empty slot ends, on the caller and

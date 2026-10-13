@@ -52,6 +52,8 @@ approx = "0.5.1"
 [workspace.lints.rust]
 unsafe_code = "deny"            # exceptions need an ADR and an audited module
 missing_docs = "warn"
+# M2.7-6: `--cfg loom` builds signal-engine's model tests of the scheduler.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

@@ -11,11 +11,8 @@
 //! worker that joins wakes up to two more. Under `semaphore` and `fanout` the
 //! calling thread also wakes workers at the start of a callback
 //! ([`Pool::begin_callback`], `docs/realtime-rules.md` "Wake policies"). The
-//! handshake is complete: a blocking worker stores its `parked` flag (SeqCst)
-//! and then reads the gate (SeqCst); the caller opens the gate (SeqCst) and
-//! then reads the flags (SeqCst). In the single order of those operations,
-//! either the worker sees the open gate and does not block, or the caller
-//! sees the flag and wakes it.
+//! worker loop, the flags and the handshake are `park.rs`'s, which this
+//! pool drives ([`park::Worker`]); the handshake loses no wake (see there).
 //!
 //! Every wake goes through `Shared::signal` and every block through
 //! `Shared::block`: `Thread::unpark` and `thread::park`, or the policy's
@@ -38,6 +35,7 @@ use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
 use crate::engine::Schedule;
+use crate::park::{self, Parking};
 use crate::shared::{Gate, Job, Opener, PoolStats};
 use crate::wake::{Histogram, RtPolicy, Spread, Waiter, WakeStats};
 
@@ -136,7 +134,7 @@ struct Shared {
     /// Per worker: the last generation it passed a wake on for (`fanout`).
     propagated: Box<[AtomicU64]>,
     trace: Option<Trace>,
-    parked: Box<[AtomicBool]>,
+    parking: Parking,
     threads: OnceLock<Box<[Thread]>>,
     shutdown: AtomicBool,
     stats: PoolStats,
@@ -217,22 +215,15 @@ impl Shared {
     /// Wakes up to `n` parked workers. SeqCst: the caller's half of the park
     /// handshake, after the SeqCst open.
     fn wake(&self, n: usize) {
-        let mut woken = 0;
-        for (w, parked) in self.parked.iter().enumerate() {
-            if woken >= n {
-                break;
-            }
-            if parked.swap(false, Ordering::SeqCst) {
-                if let Some(trace) = &self.trace {
-                    if let Some(at) = trace.signalled_at.get(w) {
-                        at.store(trace.now(), Ordering::SeqCst);
-                    }
-                    trace.signalled.fetch_add(1, Ordering::Relaxed);
+        self.parking.wake(n, |w| {
+            if let Some(trace) = &self.trace {
+                if let Some(at) = trace.signalled_at.get(w) {
+                    at.store(trace.now(), Ordering::SeqCst);
                 }
-                self.signal(w);
-                woken += 1;
+                trace.signalled.fetch_add(1, Ordering::Relaxed);
             }
-        }
+            self.signal(w);
+        });
     }
 
     /// Wakes worker `w`, or lets its next block return at once: the only
@@ -346,7 +337,7 @@ impl Pool {
             generation: AtomicU64::new(0),
             propagated: (0..workers).map(|_| AtomicU64::new(0)).collect(),
             trace: schedule.trace.then(|| Trace::new(workers)),
-            parked: (0..workers).map(|_| AtomicBool::new(false)).collect(),
+            parking: Parking::new(workers),
             threads: OnceLock::new(),
             shutdown: AtomicBool::new(false),
             stats: PoolStats {
@@ -601,7 +592,7 @@ impl Workers {
             shared.posted.store(generation, Ordering::SeqCst);
             generation
         };
-        for w in 0..shared.parked.len() {
+        for w in 0..shared.done.len() {
             shared.signal(w);
         }
         generation
@@ -637,51 +628,75 @@ impl Drop for Alive<'_> {
 }
 
 /// Worker `w`: runs posted requests, joins every new job as lane `w + 1`,
-/// spinning between jobs and blocking after the pool's spin.
+/// spinning between jobs and blocking after the pool's spin
+/// ([`park::run_worker`]).
 fn run(shared: &Shared, w: usize) {
     let _alive = Alive(shared, w);
-    let mut seen = 0;
-    let mut idle = Instant::now();
-    let mut resumed = idle;
-    loop {
-        if shared.shutdown.load(Ordering::Acquire) {
-            return;
-        }
-        shared.serve(w);
-        let joined = shared.gate.join(&mut seen, |job| {
-            shared.joined();
-            shared.wake(2);
+    park::run_worker(shared, w);
+}
+
+/// The pool's side of the worker loop: its requests, gate, timing and
+/// blocker.
+impl park::Worker for Shared {
+    /// When the worker last ran a job or was woken, and when it last ran
+    /// again after blocking.
+    type Clock = (Instant, Instant);
+
+    fn start(&self) -> (Instant, Instant) {
+        let now = Instant::now();
+        (now, now)
+    }
+
+    fn shutdown(&self, order: Ordering) -> bool {
+        self.shutdown.load(order)
+    }
+
+    fn serve(&self, w: usize) {
+        Shared::serve(self, w);
+    }
+
+    fn pending(&self, w: usize) -> bool {
+        Shared::pending(self, w)
+    }
+
+    fn join(&self, w: usize, seen: &mut u64) -> bool {
+        self.gate.join(seen, |job| {
+            self.joined();
+            self.wake(2);
             job.participate(w + 1);
-        });
-        if joined {
-            idle = Instant::now();
-            continue;
-        }
-        if shared.spins(idle, resumed) {
-            for _ in 0..64 {
-                std::hint::spin_loop();
-            }
-            continue;
-        }
-        let Some(parked) = shared.parked.get(w) else {
-            return;
-        };
-        parked.store(true, Ordering::SeqCst);
-        if shared.gate.joinable(seen) || shared.shutdown.load(Ordering::SeqCst) || shared.pending(w)
-        {
-            parked.store(false, Ordering::SeqCst);
+        })
+    }
+
+    fn joinable(&self, seen: u64) -> bool {
+        self.gate.joinable(seen)
+    }
+
+    fn spins(&self, &(idle, resumed): &(Instant, Instant)) -> bool {
+        Shared::spins(self, idle, resumed)
+    }
+
+    fn tick(&self, clock: &mut (Instant, Instant), resumed: bool) {
+        if resumed {
+            clock.1 = Instant::now();
         } else {
-            shared.block(w);
-            parked.store(false, Ordering::SeqCst);
-            resumed = Instant::now();
+            clock.0 = Instant::now();
         }
-        // A wake sent while it decided not to block is answered too.
-        shared.resumed(w);
-        idle = Instant::now();
+    }
+
+    fn parking(&self) -> &Parking {
+        &self.parking
+    }
+
+    fn block(&self, w: usize) {
+        Shared::block(self, w);
+    }
+
+    fn resumed(&self, w: usize) {
+        Shared::resumed(self, w);
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
     use crate::shared::{Access, PlanCells};
@@ -701,10 +716,10 @@ mod tests {
 
     fn all_parked(shared: &Shared) -> bool {
         shared
-            .parked
+            .alive
             .iter()
-            .zip(shared.alive.iter())
-            .all(|(p, a)| p.load(Ordering::SeqCst) || !a.load(Ordering::SeqCst))
+            .enumerate()
+            .all(|(w, a)| shared.parking.is_parked(w) || !a.load(Ordering::SeqCst))
     }
 
     /// Runs one (empty) job on the pool.

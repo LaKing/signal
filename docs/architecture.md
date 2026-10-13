@@ -66,6 +66,7 @@ See `adr/0015-workspace-and-lab-tier.md`. Crates are created when their mileston
 | `signal-engine` | Executor, plan swap, fault guards, render manifest (semantics: `semantics.md`); the real-time runner and controller, the driver trait, offline and null drivers (`realtime-rules.md`, "The runner") | M1/M2 |
 | `signal-audio` | `CoreAudioDriver` through cpal (ADR 0011), device listing, callback statistics | M2 |
 | `signal-eval` | Analysis, metrics, compare, listening packages | M1/M3 |
+| `signal-oracle` | Test support: the semantic oracle, a deliberately simple per-frame interpreter of `semantics.md` the block engine is compared with (`testing-and-evaluation.md`). Depends on `signal-core` alone | M2.7 |
 | `signal-cli` | `signal` command layer only: `render`, `replay`, `play`, `bench`, `devices`, `modules`, `schema` | M1/M2 |
 | `signal-app` | Signal.app shell and GUI (egui, ADR 0018) | M2.5 (skeleton in M2) |
 | `signal-gpu` | GPU device service (wgpu, Metal): one GPU thread, jobs through lock-free queues (ADR 0019 §3) | M2.6 |

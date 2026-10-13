@@ -41,3 +41,20 @@ jobs:
           tool: cargo-nextest
       - name: Tests (release)
         run: cargo nextest run --workspace --release --no-tests=pass
+
+  model-tests:
+    # M2.7-6: the scheduler's gate, task board and parking under loom
+    # (`docs/testing-and-evaluation.md`, "Synchronisation model tests"):
+    # about 70 s on the seat, so 20 minutes is a generous budget.
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      RUSTFLAGS: --cfg loom -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Clippy (cfg(loom))
+        run: cargo clippy -p signal-engine --lib --tests
+      - name: Model tests
+        run: cargo test -p signal-engine --lib --release model::

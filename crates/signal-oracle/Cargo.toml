@@ -1,0 +1,28 @@
+[package]
+name = "signal-oracle"
+description = "Test support (M2.7-6): the semantic oracle, a deliberately simple per-frame interpreter of ADR 0016 that the engine is compared with."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# signal-core only: the oracle shares no code with signal-engine (or the
+# graph crate) beyond signal-core's types and the primitives a registry
+# gives it (`tests/independence.rs`).
+[dependencies]
+signal-core = { workspace = true }
+
+[dev-dependencies]
+signal-std = { workspace = true }
+signal-graph = { workspace = true }
+# The engine it is compared with; its task hook holds a parallel segment's
+# caller until a worker has run a task (`tests/common/mod.rs`).
+signal-engine = { workspace = true, features = ["test-hooks"] }
+# The goldens' projects.
+signal-project = { workspace = true }
+proptest = { workspace = true }
+# float_roundtrip: log.jsonl values must read back bit for bit.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+
+[lints]
+workspace = true

@@ -3529,6 +3529,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "signal-oracle"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "serde_json",
+ "signal-core",
+ "signal-engine",
+ "signal-graph",
+ "signal-project",
+ "signal-std",
+]
+
+[[package]]
 name = "signal-project"
 version = "0.0.0"
 dependencies = [
