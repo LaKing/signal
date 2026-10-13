@@ -4,7 +4,7 @@
 # `signal play --watch --json`, rewrite one parameter every 10 s (accent
 # decay_ms, alternating 200 and 300), then print the xruns, the worst callback
 # fraction, and two verdicts: V12 (0 xruns and a worst callback under 25 % of the
-# period) and the multi-core gate (0 xruns and worst − median under 25 %). The committed project is never edited.
+# period) and the capacity gate (0 xruns and a worst callback under 75 %). The committed project is never edited.
 #
 #   scripts/soak.sh [minutes] [buffer]       default device (CoreAudio), 30 min, 128 frames
 #   scripts/soak.sh --driver null 1          the null driver, 1 minute (no device)
@@ -178,13 +178,13 @@ printf 'output %s/play.json, log %s/play.log\n' "$WORK" "$WORK"
 MEDIAN=$(field median_callback_ratio)
 [[ -n $MEDIAN ]] && printf 'median callback %.3f of the period; worst - median %.3f\n' "$MEDIAN" "$(awk "BEGIN { print $WORST - $MEDIAN }")"
 # Two verdicts (docs/benchmarks.md "Wake-policy matrix on the device"):
-# V12 is a headroom rule (0 xruns, worst < 0.25), meaningful when the median
-# load is well under 0.25 (the kick); the multi-core gate (0 xruns, worst -
-# median < 0.25) is the scheduling-jitter rule for loads of their own.
-# The exit status follows V12 unless --voices was given, then the gate.
-V12=FAIL; GATE=FAIL
+# V12, the headroom rule at nominal load (0 xruns, worst < 0.25), and the
+# capacity gate at heavy load (0 xruns, worst < 0.75, i.e. 25 % headroom).
+# Jitter (worst - median) is printed, not gated. The exit status follows V12,
+# or the capacity gate when --voices was given.
+V12=FAIL; CAP=FAIL
 if [[ $XRUNS -eq 0 ]] && awk "BEGIN { exit !($WORST < 0.25) }"; then V12=PASS; fi
-if [[ $XRUNS -eq 0 && -n $MEDIAN ]] && awk "BEGIN { exit !($WORST - $MEDIAN < 0.25) }"; then GATE=PASS; fi
+if [[ $XRUNS -eq 0 ]] && awk "BEGIN { exit !($WORST < 0.75) }"; then CAP=PASS; fi
 echo "V12 $V12 (0 xruns and worst callback < 0.25 of the period)"
-echo "multi-core gate $GATE (0 xruns and worst - median < 0.25 of the period)"
-if [[ -n ${VOICES:-} ]]; then [[ $GATE == PASS ]] || exit 1; else [[ $V12 == PASS ]] || exit 1; fi
+echo "capacity gate $CAP (0 xruns and worst callback < 0.75 of the period)"
+if [[ -n ${VOICES:-} ]]; then [[ $CAP == PASS ]] || exit 1; else [[ $V12 == PASS ]] || exit 1; fi

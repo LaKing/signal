@@ -249,8 +249,15 @@ What it shows:
 - **Fact:** the p99 is only 0.02–0.08 of the period above the median for every policy. The median is the load itself. The earlier reading of M2.6-3 and M2.6-5, that a fixed wake-up cost set the tail, was wrong: at 80–120 voices the work itself is 0.25–0.40 of the period.
 - **Fact:** no policy beats `park50` beyond noise; `semaphore` and `fanout` differ by at most a few hundredths. 14 threads gain nothing over 12, and their workers wake late (p99 360–590 µs).
 - **Decisions (operator, 2026-10-13):** the real-time default stays `park50`, the computation budget stays 0.25 of the period, and auto stays two thirds of the performance cores (12 of 18). The other policies stay selectable with `--rt-policy` for other machines.
-- **The multi-core timing gate, restated:** V12's "worst callback < 0.25" is a headroom rule; it holds only when the median load is well under 0.25 (the kick: worst 0.104). For many-voice projects whose load is itself 0.25–0.40, the gate is **0 xruns over 30 minutes at the auto thread count, and worst callback − median < 0.25 of the period** (scheduling jitter, not load).
-- **The gate, measured** (operator, 2026-10-13 02:51–03:21, M2.7-1 release build): `scripts/soak.sh --silent --voices 80 30 128`, auto (12 threads, `park50`, workgroup), 178 live edits all applied: **0 xruns**, median 0.27, p99 0.32, worst 0.444 of the period. Worst − median = **0.174 < 0.25: the multi-core gate passes.** V12's headroom rule (worst < 0.25) does not apply at this load. `scripts/soak.sh` now prints both verdicts.
+- **The timing gates, reconciled** (2026-10-13, after the external re-review, which objected that worst − median measures jitter and not headroom): **V12** keeps its absolute rule at nominal load (`projects/kick`: worst < 0.25 of the period); a **capacity gate** at heavy load (80 voices) requires 0 xruns and an absolute worst < 0.75 of the period (25 % headroom). Worst − median is reported as jitter, not gated.
+- **First capacity measurement** (operator, 2026-10-13 02:51–03:21, M2.7-1 release build): `scripts/soak.sh --silent --voices 80 30 128`, auto (12 threads, `park50`, workgroup), 178 live edits all applied: 0 xruns, median 0.27, p99 0.32, worst 0.444 of the period.
+- **Gate soaks at 68b4077** (operator, 2026-10-13, SSL 2+, 96 kHz, 128 frames, auto = 12 threads, `park50`, workgroup, silent, 30 minutes each with live edits, every edit applied):
+
+  | Soak | xruns | Median | Worst | Worst − median | Verdict |
+  |---|---:|---:|---:|---:|---|
+  | V12: `projects/kick` (17:41–18:11 local) | 0 | 0.050 | 0.137 | 0.087 | **V12 PASS** (< 0.25) |
+  | Capacity: 80 voices, 592 instances (18:11–18:41) | 0 | 0.280 | 0.513 | 0.233 | **capacity PASS** (< 0.75) |
+
 
 ### Real-time wake-up tail (M2.6-5)
 
