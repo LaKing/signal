@@ -232,12 +232,17 @@ fn p1_no_lost_wake() {
 /// fence orders its store with the caller's. loom lets a read-modify-write
 /// read any store that is maximal in its partial modification order
 /// (`rt/atomic.rs`, `match_rmw_to_stores`), without the reader's causality.
-/// `docs/testing-and-evaluation.md` lists it under what is not covered; the
-/// wake before the open is tested on real threads
-/// (`pool::tests::every_wake_path_reaches_workers_blocked_on_the_waiter`).
+/// The handshake is checked apart from loom instead (M2.7-10,
+/// `docs/testing-and-evaluation.md`, "The park/wake handshake"): every
+/// interleaving of this scenario, with 1–3 workers under sequential consistency (1–2 under the store-buffer mode) and two callbacks, by
+/// `tests/handshake.rs` (`a_wake_before_the_open_loses_no_wake`), and the
+/// wake before the open forced at each point of the worker's next park on
+/// real threads by `park::tests::the_wake_before_the_open_is_never_lost_on_real_threads`
+/// (also `pool::tests::every_wake_path_reaches_workers_blocked_on_the_waiter`).
 /// Run it with `-- --ignored` to see the report.
 #[test]
-#[ignore = "loom 0.7.2 false alarm, see the doc comment"]
+#[ignore = "loom 0.7.2 false alarm, see the doc comment; checked by tests/handshake.rs \
+            and park::tests::the_wake_before_the_open_is_never_lost_on_real_threads"]
 fn p2_a_wake_before_the_open_is_not_lost() {
     explore("P2", 2, || {
         let (gate, mut opener) = Gate::new();

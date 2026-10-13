@@ -16,7 +16,7 @@ How Signal is tested, what the acceptance IDs (V1…) map to, and how golden ren
 | 6. Acceptance | V1–V8 on the test project `projects/kick`; the M2 test project `projects/pulse` (M2-7) | `crates/signal-cli/tests/kick_acceptance.rs`, `crates/signal-cli/tests/pulse.rs` |
 | 7. Golden renders | A fixed render's manifest, audio and log hashes | `tests/golden/<project>/`, checked by the acceptance suite |
 | 8. Metrics and analysis | Peak, RMS, mean, non-finite and subnormal counts (`metrics.json`); 4× peak, aliasing ratio, zero-crossing pitch | `crates/signal-eval` |
-| 9. Synchronisation model | The scheduler's gate, task board and parking in every interleaving loom explores (below) | `crates/signal-engine/src/model/`, only with `--cfg loom` |
+| 9. Synchronisation model | The scheduler's gate, task board and parking in every interleaving loom explores; the park/wake handshake in every interleaving of an explorer of its own, and forced on real threads (below) | `crates/signal-engine/src/model/`, only with `--cfg loom`; `crates/signal-engine/tests/handshake.rs` and `park::tests`, in the normal suite |
 | 10. Semantic oracle | The block engine against an independent per-frame interpreter, on generated graphs and the goldens' projects (below) | `crates/signal-oracle` |
 
 Real time against offline (M2-3): `crates/signal-cli/tests/realtime.rs` checks V9 (60 s of `projects/kick` through the null driver, three callback-size seeds, equal to the offline render as f32) and replays a session issued through the `Controller` with `signal replay`; `crates/signal-engine/tests/realtime_no_allocation.rs` checks V11 (no heap call inside `Runner::process` over 12 000 callbacks); `crates/signal-engine/tests/realtime.rs` covers queue overflow, the clamp, channel mapping, stamping and late commands.
@@ -64,13 +64,65 @@ RUSTFLAGS="--cfg loom" cargo test -p signal-engine --lib --release --locked --of
 **AC2 (finding 1).** With `TaskBoard::participate` reverted to completing every claimed task as a success (`self.complete(t, epoch, true)`, the bug of revision 986cc16), B2a fails (`the job did not fail`, failure 0 rather than `FAILED_PANIC`) and B2b fails (`Job::failure()` is `None` though task 0 panicked); so do two tests of `failure_stop.rs`.
 
 **Not covered.**
-- **P2, the callback-start wake** (`semaphore`: every parked worker woken before the segment's open). It is in the suite but ignored: loom 0.7.2 reports a deadlock in an execution the C11 model forbids. Both later swaps of a worker's flag read the caller's own earlier `false` although the worker stored `true` and fenced, because loom lets a read-modify-write read any store maximal in its partial modification order (`rt/atomic.rs`, `match_rmw_to_stores`). It runs with `-- --ignored`; the wake is tested on real threads (`pool::tests::every_wake_path_reaches_workers_blocked_on_the_waiter`).
+- **P2, the callback-start wake** (`semaphore`: every parked worker woken before the segment's open). It is in the suite but ignored: loom 0.7.2 reports a deadlock in an execution the C11 model forbids. Both later swaps of a worker's flag read the caller's own earlier `false` although the worker stored `true` and fenced, because loom lets a read-modify-write read any store maximal in its partial modification order (`rt/atomic.rs`, `match_rmw_to_stores`). It runs with `-- --ignored`. The handshake it exercises is checked apart from loom, exhaustively and on real threads (M2.7-10, "The park/wake handshake" below).
 - **Beyond the bound.** Each scenario is exhaustive only within its preemption bound. The board's scenarios use 1: at 2, loom's conservative backtracking for bounded preemption explores schedules in which two workers waiting for a successor (`spin_loop`, a yield) hand the processor to each other while the thread holding its predecessor never runs, and one execution exceeds 100 000 branches. S3 uses 1 to stay within the budget (about 100 s at 2).
 - **Load buffering**, which loom does not explore (its README); SeqCst accesses only as far as loom models them (as AcqRel, hence the fences).
 - **Timing**: spinning before parking, `budget-spin` and `fanout`'s propagation (the model's workers block at once), and the `semaphore` policy's Mach waiter (they park).
 - **The request queue's `Mutex`** (`Workers::post`): the model counts requests in an atomic.
 - **What the jobs compute**: the cells, views, readers and claims of `shared.rs`, which the checked mode covers in every debug test (ADR 0020), and the engine's units and tasks, which the determinism matrix and the oracle cover.
 - **GPU** completion (`crates/signal-gpu`).
+
+### The park/wake handshake (M2.7-10)
+
+The claim that the handshake loses no wake (`park.rs`, `realtime-rules.md` "Worker threads") rests on two checks of its own besides loom, both in the normal suite.
+
+**An explorer of every interleaving** (`crates/signal-engine/tests/handshake.rs`, std only). One caller and 1–3 workers run two consecutive callbacks and a shutdown. The caller: under `semaphore` the callback-start wake of every parked worker, the job store, the open, the segment's wake of one, then it waits for every worker's join (a lost wake leaves it waiting with nothing to run: a deadlock), closes, and at the end stores shutdown and unparks every worker. A worker: the shutdown check and a join attempt (a join reads the job and wakes two, as `pool.rs` does), otherwise the flag store, the fence, the re-reads of the gate and of shutdown, the park unless they said not to, the flag cleared. A wake is the fence, then per flag a swap and an unpark if it was set. An unpark leaves a token the next park consumes: one (`park`) or a count (`semaphore`'s waiter). The explorer expands each distinct state once and fails on a state with no step that is not the end (lost wake), on a join that sees another epoch's job or an epoch twice (wrong epoch), and on a state reached again on its own path (no termination). The number of interleavings is computed through that memo (the executions from each state, summed), not walked one by one; `the_counts_are_interleavings` compares it with a plain walk where one is feasible (1 worker, 1 callback: 72 903 executions). States and transitions are counted exactly.
+
+Two memory modes. **Sc**: each step is atomic in one total order, which is what C11 gives these SeqCst accesses and fences; it is the claim being checked, and a fence then changes nothing. **Buffered**: each thread's stores wait in a FIFO buffer that drains at any point; a fence, and an unpark (it releases), wait until the thread's buffer is empty; a read-modify-write acts on memory once its own store to that place has drained. That is store buffering, accesses no stronger than Release/Acquire, as loom treats SeqCst. It deliberately weakens the open, a SeqCst `swap`, to a plain store: that is not an equivalence, and a fence that matters only in this mode is not evidence that the hardware needs it. `Sc` and the SeqCst argument of `park.rs` remain the claim; `Buffered` shows what the fences add.
+
+Abstractions, each a choice of the model rather than of the code: a join is one step (load, CAS and the job read; the gate's load-then-CAS and its leaves and close are G1–G3's subject), and the caller closes once every worker has joined; requests (`pending`, P3), spinning and timing are left out, and a park never returns without a token (a spurious return only adds a re-check; it would also make the state graph cyclic).
+
+Every model step is on a line of the code (`each_model_step_is_in_the_code` reads each line and checks the order of `park.rs`'s steps, so swapping the flag and the gate in `run_worker` fails the suite too):
+
+| Step | Code |
+|---|---|
+| callback-start wake | `pool.rs:406` |
+| wake: fence, swap flag, unpark | `park.rs:44`, `:50`, `:51` (`pool.rs:236` `park`, `:239` waiter) |
+| store job | `shared.rs:1395` |
+| open | `gate.rs:101` |
+| wake one | `pool.rs:490` |
+| close | `gate.rs:130` |
+| shutdown: store, unpark | `pool.rs:498`, `:500` |
+| shutdown check | `park.rs:100` |
+| join (CAS, job read), wake two | `park.rs:104` (`gate.rs:85`, `shared.rs:1368`), `pool.rs:665` |
+| store flag, fence | `park.rs:117`, `:120` |
+| re-read gate, shutdown | `park.rs:121` (`gate.rs:60`) |
+| park | `park.rs:123` (`pool.rs:246` `park`, `:247` waiter) |
+| clear flag | `park.rs:125` |
+
+Result (the full `cargo test --workspace` run, debug profile, the test binary's three explorations in parallel: 15.7 s): no lost wake, no wrong epoch, every execution ends, for `park` without the callback-start wake (`park50`, `budget-spin`), `park` with it (P2's scenario) and `semaphore`, at 1–3 workers in `Sc` and 1–2 in `Buffered` (3 workers there take about 45 s, beyond the minute with the rest). The largest, `semaphore` with 3 workers in `Sc`: 9.4 × 10¹⁰⁶ interleavings through 4 467 060 states and 16 719 634 transitions in about 16 s; P2's with 3 workers: 6.4 × 10¹⁰⁴ through 1 914 638 states in about 7 s. Run them with `cargo test -p signal-engine --test handshake -- --nocapture` to see every count.
+
+A broken handshake fails (`a_broken_handshake_is_caught`, 2 workers, one callback with the callback-start wake):
+
+| Variant | `Sc` | `Buffered` |
+|---|---|---|
+| Worker re-reads the gate before storing its flag | lost wake | lost wake |
+| Caller wakes before it opens | lost wake | lost wake |
+| Worker's fence removed (`run_worker`) | holds | lost wake |
+| Waker's fence removed (`Parking::wake`) | holds | lost wake |
+| A blocker that forgets an unpark sent before the park | lost wake | |
+
+The two fence rows hold in `Sc` as `park.rs` says (the SeqCst accesses alone order the handshake) and fail once accesses are weaker; the test prints each counterexample's steps.
+
+**The wake before the open on real threads** (`park::tests::the_wake_before_the_open_is_never_lost_on_real_threads`). One worker runs the real `run_worker` over the real `Parking` and `GateWord`; its test pool implements `park::Worker` and pauses it in the calls the loop already makes (`parking`, `joinable`, `pending`, `block`), so no hook exists outside the test build. Each callback: the callback-start wake of every parked worker takes the worker's flag; on its next pass to a park the worker is held before its flag store, after the store and fence, after re-reading the gate closed, or until it has entered `block`; then the caller opens and wakes one, and the worker must join within 5 s. A callback counts as forced only if that wake took the flag and the worker was then held on a pass that began after it; the test asserts what the held worker read (the open gate, or the caller's wake taking its flag) and at least 2 000 forced callbacks per position. 3 000 callbacks per position with `park`'s token and again with a counting semaphore (a `Mutex` and `Condvar` standing in for the Mach waiter): 24 000 callbacks, no lost wake, in about 0.1 s. The forced count per position varies from run to run (2 326 to 3 000 observed); the test requires at least 2 000.
+
+**The `semaphore` waiter** blocks and wakes through the same code as `park`: the flags, fences, swaps and re-reads are `Parking::wake` and `run_worker` under every policy, and the policy only chooses what `Shared::signal` and `Shared::block` call (`pool.rs:232-249`). The one difference is the token: `park` keeps one, a Mach semaphore counts. The handshake needs only that a signal sent before the wait is kept, which both do; a surplus count only makes a later wait return at once, and the loop re-checks after every return. The explorer runs both tokens, and the reproducer both blockers.
+
+**Outside every model**, and what covers it instead:
+- the shared data views (cells, views, readers and claims of `shared.rs`): the checked mode in every debug test (ADR 0020), `parallel.rs`, the determinism matrix and the semantic oracle;
+- GPU completion (`crates/signal-gpu`): `lab/tests/gpu_partials.rs`, `lab/tests/realtime.rs` and `lab/tests/recovery.rs`, which need an adapter for computed values (skipped on the seat; the operator runs them at checkpoint);
+- the Mach semaphore itself: `crates/signal-audio/tests/rt_workers.rs` and `pool::tests::every_wake_path_reaches_workers_blocked_on_the_waiter`;
+- spinning, timing and `fanout`'s propagation: `pool::tests` (`idle_workers_park_after_the_spin_bound`, `fanout_propagation_ends`) and `parallel.rs`.
 
 ## The semantic oracle (M2.7-6)
 
