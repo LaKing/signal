@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use signal_app::setup::{DeviceEntry, Setup, Window, setup_path};
 use signal_engine::{Computation, RtPolicy};
+use signal_gpu::Selection;
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("signal-setup-{name}-{}", std::process::id()));
@@ -38,7 +39,42 @@ fn full() -> Setup {
         }),
         rt_policy: RtPolicy::Semaphore,
         rt_computation: Computation::from_fraction(0.75).unwrap(),
+        gpu_devices: Selection::Only(vec!["metal-apple-m5-max".to_owned(), "1".to_owned()]),
     }
+}
+
+/// M2.7-2 (AC7): `gpu_devices` is `"all"` or a list of adapter ids or
+/// indices; anything else falls back to all with a reason; it is written
+/// only when it limits the devices, and kept by a save.
+#[test]
+fn gpu_devices_limit_the_adapters() {
+    let (setup, problems) = parse("gpu_devices = [\"metal-apple-m5-max\", 2]\n");
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(
+        setup.gpu_devices,
+        Selection::Only(vec!["metal-apple-m5-max".to_owned(), "2".to_owned()])
+    );
+    assert_eq!(
+        parse("gpu_devices = []\n").0.gpu_devices,
+        Selection::Only(Vec::new())
+    );
+    assert_eq!(
+        parse("gpu_devices = \"all\"\n").0.gpu_devices,
+        Selection::All
+    );
+    let (setup, problems) = parse("gpu_devices = \"first\"\n");
+    assert_eq!(setup.gpu_devices, Selection::All);
+    assert_eq!(problems.len(), 1);
+    assert!(
+        problems[0].starts_with("setup.toml: gpu_devices: must be \"all\""),
+        "{problems:?}"
+    );
+    assert!(!Setup::default().to_toml().contains("gpu_devices"));
+    let text = full().to_toml();
+    assert!(
+        text.contains("gpu_devices = [\"metal-apple-m5-max\", \"1\"]"),
+        "{text}"
+    );
 }
 
 /// M2.7-1 (C1): the advanced keys `rt_policy` and `rt_computation` read,

@@ -1,8 +1,8 @@
 //! Signal's GPU device service (ADR 0019 §3).
 //!
 //! A [`GpuService`] owns one wgpu adapter and device (Metal backend), created
-//! on the control side, and one dedicated thread, `signal-gpu`, which is the
-//! only thread that submits GPU work or polls for it. A GPU-backed module
+//! on the control side, and one dedicated thread, `signal-gpu-<id>`, which is
+//! the only thread that submits work to that device or polls it. A GPU-backed module
 //! talks to it through a [`Channel`]: a fixed set of [`Job`] buffers moved
 //! between the module and the GPU thread through two lock-free `rtrb` SPSC
 //! queues (submit, done), whose atomic indices are the completion signal.
@@ -19,10 +19,17 @@
 //! or `lost` from any state ([`ServiceState`]), with a bounded
 //! [`shutdown`](GpuService::shutdown).
 //!
-//! A machine without a usable adapter has no service ([`GpuService::shared`]
-//! is `None`): GPU-backed modules then have no channel and the engine reports
-//! their due results as lost. The GPU path is always optional; the CPU stays
-//! the deterministic default.
+//! M2.7-2: every adapter of the machine is a device ([`inventory`]). A
+//! [`DevicePool`] owns one service per device (there is no process-wide
+//! service), replaces a lost one with a new generation, and lends GPU-backed
+//! instances their device by a deterministic placement ([`GpuHost`]); a
+//! module's [`PlacedChannel`] takes the replacement without blocking. Large
+//! work may be split across devices only through a fixed split and combine
+//! order ([`SplitChannel`]).
+//!
+//! A machine without a usable adapter has an empty pool: GPU-backed modules
+//! then have no channel and the engine reports their due results as lost.
+//! The GPU path is always optional; the CPU stays the deterministic default.
 
 #![cfg_attr(
     not(test),
@@ -38,7 +45,17 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
+
+mod inventory;
+mod placement;
+mod pool;
+mod split;
+
+pub use inventory::{AdapterInfo, AdapterLimits, Inventory, inventory};
+pub use placement::{GpuHost, Placed};
+pub use pool::{DevicePool, Lease, PlacedChannel, Selection, SlotStatus};
+pub use split::SplitChannel;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -206,6 +223,8 @@ pub struct Channel {
     /// Read only by the test hooks.
     #[cfg_attr(not(any(test, feature = "test-hooks")), allow(dead_code))]
     probe: Arc<Probe>,
+    /// Its service's state, for [`service_lost`](Channel::service_lost).
+    service: Arc<Shared>,
 }
 
 impl Channel {
@@ -264,6 +283,41 @@ impl Channel {
     /// Whether the GPU thread is gone: nothing in flight will come back.
     pub fn is_lost(&self) -> bool {
         self.done.is_abandoned() && self.done.is_empty()
+    }
+
+    /// Whether its service's device was lost (M2.7-2: why its jobs no longer
+    /// come back). An atomic load: real-time safe.
+    pub fn service_lost(&self) -> bool {
+        self.service.is_lost()
+    }
+
+    /// A channel of `jobs` jobs of `spec` on no device (M2.7-2): made for an
+    /// instance prepared while its device is lost, so that the pool can
+    /// offer it a replacement. It is lost at once; what it is given never
+    /// comes back. Control side: it allocates.
+    pub(crate) fn detached(spec: KernelSpec, jobs: usize) -> Channel {
+        let id = ChannelId(NEXT_CHANNEL.fetch_add(1, Ordering::Relaxed));
+        let (submit, _gone) = rtrb::RingBuffer::new(jobs.max(1));
+        let (_never, done) = rtrb::RingBuffer::new(jobs.max(1));
+        let free = (0..jobs)
+            .map(|_| Job {
+                owner: id,
+                seq: 0,
+                outcome: Outcome::Ok,
+                input: vec![0.0; spec.input_words].into_boxed_slice(),
+                output: vec![0.0; spec.output_words].into_boxed_slice(),
+            })
+            .collect();
+        let service = Shared::default();
+        service.state.store(LOST, Ordering::Release);
+        Channel {
+            id,
+            submit,
+            done,
+            free,
+            probe: Arc::new(Probe::default()),
+            service: Arc::new(service),
+        }
     }
 
     /// Test hook (M2.7-5): every job of this channel stays in flight at
@@ -403,6 +457,10 @@ struct Shared {
     /// Counts of [`FaultCounts`], in its field order.
     faults: [AtomicU64; 7],
     last_error: Mutex<Option<String>>,
+    /// The pool's watcher, woken when the device is lost (M2.7-2). Never
+    /// used on a real-time thread: a loss is recorded by wgpu's device-lost
+    /// callback or the test hook.
+    wake: Option<Mutex<Sender<()>>>,
 }
 
 impl Shared {
@@ -429,6 +487,9 @@ impl Shared {
     fn lose(&self, why: String) {
         self.state.store(LOST, Ordering::Release);
         self.note(why);
+        if let Some(wake) = &self.wake {
+            let _ = wake.lock().unwrap_or_else(PoisonError::into_inner).send(());
+        }
     }
 
     /// Off the real-time threads only (it locks).
@@ -484,8 +545,10 @@ pub struct AdapterIdentity {
     pub driver_info: String,
 }
 
-/// The device service: adapter, device and the GPU thread.
+/// The device service: adapter, device and the GPU thread. Made by a
+/// [`DevicePool`], which owns it.
 pub struct GpuService {
+    id: String,
     adapter: String,
     identity: AdapterIdentity,
     noop: bool,
@@ -504,41 +567,20 @@ pub struct GpuService {
 impl fmt::Debug for GpuService {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GpuService")
+            .field("id", &self.id)
             .field("adapter", &self.adapter)
             .finish_non_exhaustive()
     }
 }
 
 impl GpuService {
-    /// Creates the adapter and device (Metal backend) on the calling thread,
-    /// which should be the control thread, and starts the GPU thread.
-    pub fn start() -> Result<GpuService, GpuError> {
-        GpuService::start_on(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        })
-    }
-
     /// Tests only (feature `noop`): a service on wgpu's noop device, which
-    /// validates kernels and moves jobs like a GPU but computes nothing.
+    /// validates kernels and moves jobs like a GPU but computes nothing; on
+    /// its own, outside any pool (the service's own tests).
     #[cfg(feature = "noop")]
     #[doc(hidden)]
     pub fn start_noop() -> Result<GpuService, GpuError> {
-        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
-        descriptor.backends = wgpu::Backends::NOOP;
-        descriptor.backend_options.noop.enable = true;
-        GpuService::start_on(descriptor)
-    }
-
-    /// Tests only (feature `noop`): [`shared`](GpuService::shared), or the
-    /// noop service as the process's service where no GPU is usable.
-    #[cfg(feature = "noop")]
-    #[doc(hidden)]
-    pub fn shared_or_noop() -> Option<&'static GpuService> {
-        SHARED
-            .get_or_init(|| GpuService::start().or_else(|_| GpuService::start_noop()))
-            .as_ref()
-            .ok()
+        GpuService::on_adapter(inventory::noop_adapter()?, "noop-0".to_owned(), None)
     }
 
     /// Whether this is the noop device (tests only), which computes nothing.
@@ -546,20 +588,24 @@ impl GpuService {
         self.noop
     }
 
-    fn start_on(descriptor: wgpu::InstanceDescriptor) -> Result<GpuService, GpuError> {
-        let instance = wgpu::Instance::new(descriptor);
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..wgpu::RequestAdapterOptions::default()
-        }))
-        .map_err(|e| GpuError::NoDevice(e.to_string()))?;
+    /// Creates the device of `adapter` on the calling thread, which should be
+    /// the control thread (or the pool's watcher), and starts its GPU thread,
+    /// `signal-gpu-<id>`. A loss wakes `wake`.
+    pub(crate) fn on_adapter(
+        adapter: wgpu::Adapter,
+        id: String,
+        wake: Option<Sender<()>>,
+    ) -> Result<GpuService, GpuError> {
         let info = adapter.get_info();
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("signal-gpu"),
             ..wgpu::DeviceDescriptor::default()
         }))
         .map_err(|e| GpuError::NoDevice(e.to_string()))?;
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared {
+            wake: wake.map(Mutex::new),
+            ..Shared::default()
+        });
         // An error no scope captured must not panic the GPU thread: it
         // fails the jobs in flight (their outcome is `Uncaptured`).
         let on_error = Arc::clone(&shared);
@@ -597,7 +643,7 @@ impl GpuService {
         let thread = {
             let (device, shared) = (device.clone(), Arc::clone(&shared));
             thread::Builder::new()
-                .name("signal-gpu".to_owned())
+                .name(format!("signal-gpu-{id}"))
                 .spawn(move || {
                     gpu_thread(&device, &queue, &shared, &receiver);
                     shared.advance(DRAINING, STOPPED);
@@ -607,6 +653,7 @@ impl GpuService {
                 .map_err(|e| GpuError::NoDevice(e.to_string()))?
         };
         Ok(GpuService {
+            id,
             adapter: format!("{} ({:?})", info.name, info.backend),
             identity: AdapterIdentity {
                 backend: format!("{:?}", info.backend),
@@ -628,18 +675,6 @@ impl GpuService {
         })
     }
 
-    /// The process's service, started on first use (from a module's
-    /// `prepare`, on the control thread); `None` when this machine has no
-    /// usable GPU. Why not: [`shared_error`](GpuService::shared_error).
-    pub fn shared() -> Option<&'static GpuService> {
-        SHARED.get_or_init(GpuService::start).as_ref().ok()
-    }
-
-    /// Why [`shared`](GpuService::shared) is `None`, if it is.
-    pub fn shared_error() -> Option<&'static GpuError> {
-        SHARED.get_or_init(GpuService::start).as_ref().err()
-    }
-
     /// The adapter's name and backend.
     pub fn adapter(&self) -> &str {
         &self.adapter
@@ -650,11 +685,9 @@ impl GpuService {
         &self.identity
     }
 
-    /// The process's service if it was started (by a module's `prepare`, or
-    /// [`shared`](GpuService::shared)); never starts it. What a recorded run
-    /// used (M2.7-8).
-    pub fn started() -> Option<&'static GpuService> {
-        SHARED.get().and_then(|service| service.as_ref().ok())
+    /// Its device's stable id (M2.7-2, [`inventory`]).
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     /// Jobs the GPU thread has started on the device since the start.
@@ -867,6 +900,7 @@ impl GpuService {
             done,
             free,
             probe,
+            service: Arc::clone(&self.shared),
         })
     }
 
@@ -941,8 +975,6 @@ impl Drop for GpuService {
         }
     }
 }
-
-static SHARED: OnceLock<Result<GpuService, GpuError>> = OnceLock::new();
 
 /// A lane's staging map: none asked, asked, and its callback's answer.
 const MAP_NONE: u8 = 0;
@@ -1287,21 +1319,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         workgroups: (1, 1, 1),
     };
 
-    /// The GPU, or (with the `noop` feature) the noop device where there is
-    /// none; `None` after saying why.
-    fn service() -> Option<&'static GpuService> {
-        #[cfg(feature = "noop")]
-        let service = GpuService::shared_or_noop();
-        #[cfg(not(feature = "noop"))]
-        let service = GpuService::shared();
-        match service {
-            Some(service) => eprintln!("device: {}", service.adapter()),
-            None => eprintln!(
-                "skipped: no usable GPU adapter ({:?})",
-                GpuService::shared_error()
-            ),
-        }
-        service
+    /// A private noop service (the GPU's own values are checked by the
+    /// adapter tests in `tests/service.rs`, on a GPU).
+    fn service() -> GpuService {
+        GpuService::start_noop().unwrap()
     }
 
     fn wait_done(channel: &Channel) -> u64 {
@@ -1320,9 +1341,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     /// pool refuses without allocating; a taken job goes back to the pool.
     #[test]
     fn jobs_run_in_order_on_the_gpu_thread() {
-        let Some(service) = service() else {
-            return;
-        };
+        let service = service();
         let mut channel = service.channel(DOUBLE, 2).unwrap();
         assert!(channel.submit(7, |input| {
             for (i, x) in input.iter_mut().enumerate() {
@@ -1353,9 +1372,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     /// A kernel that does not compile is refused on the control side.
     #[test]
     fn a_bad_kernel_is_refused() {
-        let Some(service) = service() else {
-            return;
-        };
+        let service = service();
         let bad = KernelSpec {
             wgsl: "this is not wgsl",
             ..DOUBLE
@@ -1373,11 +1390,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     /// The test hook holds finished jobs back; a stopped service loses the
     /// jobs in flight, and its channels say so instead of waiting forever.
-    #[cfg(feature = "noop")]
     #[test]
     fn the_completion_delay_holds_results_and_a_stopped_service_is_lost() {
-        let service = GpuService::start().or_else(|_| GpuService::start_noop());
-        let service = service.unwrap();
+        let service = service();
         let mut channel = service.channel(DOUBLE, 2).unwrap();
         service.set_completion_delay(Duration::from_millis(300));
         let start = Instant::now();
@@ -1397,7 +1412,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     /// An error no scope captured, raised while a job is in flight, is that
     /// job's: it ends `Failed(Uncaptured)`, not `Ok`.
-    #[cfg(feature = "noop")]
     #[test]
     fn an_uncaptured_error_fails_the_job_in_flight() {
         let service = GpuService::start_noop().unwrap();

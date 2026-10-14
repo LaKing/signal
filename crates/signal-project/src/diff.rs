@@ -107,6 +107,34 @@ pub fn diff_with(
 
     let before = old.plan(registry)?.plan;
     let after = new.plan(registry)?.plan;
+    // M2.7-2: placement is decided when the project starts.
+    let (old_pins, new_pins) = (old.gpu_pins(&before), new.gpu_pins(&after));
+    let before_addresses: BTreeMap<String, ()> = before
+        .instances
+        .iter()
+        .map(|i| (i.address.to_string(), ()))
+        .collect();
+    let repinned: Vec<Diagnostic> = after
+        .instances
+        .iter()
+        .filter(|i| {
+            let key = i.address.to_string();
+            let changed = old_pins.get(&key) != new_pins.get(&key);
+            changed && (before_addresses.contains_key(&key) || new_pins.contains_key(&key))
+        })
+        .map(|i| {
+            new.instance_error(
+                &i.address,
+                format!(
+                    "{}: its `gpu` pin changed; a running project keeps its GPU placement: restart the project",
+                    i.address
+                ),
+            )
+        })
+        .collect();
+    if !repinned.is_empty() {
+        return Err(repinned);
+    }
     let change = |value: f64| match options.ramp_frames {
         Some(frames) if frames > 0 => EventPayload::Ramp {
             to: value,

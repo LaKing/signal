@@ -61,7 +61,7 @@ What the engine does with them (`semantics.md` §7, §13):
 
 **The cause of a lost result** (M2.7-5). When `due` answers `Lost` because the work failed (a GPU job ended `Failed` or `DeviceLost`), `lost_cause` says why (`LossCause`: `validation`, `out_of_memory`, `mapping`, `internal`, `uncaptured`, `stopped`, `device_lost`); the engine asks it right after that `due` and before `miss`, so `miss` may forget it, and logs it as the fault's `cause` (`semantics.md` §9). The default, `None`, logs no cause; real-time rules apply.
 
-The GPU work itself runs on the `signal-gpu` thread (`crates/signal-gpu`, `realtime-rules.md` "GPU"); `due`, `miss`, `emit` and `absorb` only move preallocated job buffers through lock-free queues. `lab.gpu_partials` (`lab/src/gpu_partials.rs`) is the example: *L* = 2, blocks of 256 frames, with a CPU reference and a documented tolerance.
+The GPU work itself runs on its device's `signal-gpu-<id>` thread (`crates/signal-gpu`, `realtime-rules.md` "GPU"); `due`, `miss`, `emit` and `absorb` only move preallocated job buffers through lock-free queues. `lab.gpu_partials` (`lab/src/gpu_partials.rs`) is the example: *L* = 2, blocks of 256 frames, with a CPU reference and a documented tolerance.
 
 ## Lifecycle: what may run where
 
@@ -90,9 +90,12 @@ So computation that is **experimental or may block** (a device, a model, anythin
 `PrepareContext` gives:
 - `sample_rate`: the master rate in frames per second;
 - `max_frames`: the largest *k* any later call receives;
-- `rng`: the instance's `RngStream`, `derive(master_seed, instance address)` (ADR 0008).
+- `rng`: the instance's `RngStream`, `derive(master_seed, instance address)` (ADR 0008);
+- `lent` (M2.7-2): what the program running the engine lends the instance, or `None`. The registry's `Host` decides it per plan (`lend`, called on the control side for every plan state the engine builds, the real-time mirror's included, with every instance in address order); the engine passes it on and never reads it. It is opaque (`Arc<dyn Any + Send + Sync>`): a module that uses it downcasts it to the type it expects, and **must work without it**. A GPU-backed module is lent its device, a `signal_gpu::Lease` placed by `signal_gpu::GpuHost` (`realtime-rules.md` "GPU"); without one it has no channel and its due results are lost, logged.
 
 All randomness must come from that stream. Keep a clone of it, so that `reset` can restart it.
+
+A GPU-backed module's channel is a `signal_gpu::PlacedChannel`. When its device is lost and the pool replaces it (M2.7-2), the module takes the new channel with `PlacedChannel::refresh(before)`, which is real-time safe (no allocation, lock or system call) and may be called from `due`: `before` receives the old channel first, and the module gives back every job it holds from it there (a job belongs to its channel); results in flight on the old channel are lost, with the cause `device_lost`.
 
 ## I/O views
 

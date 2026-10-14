@@ -3,7 +3,8 @@
 //! edit API, exactly as it was played or (`--ideal`) with every latent
 //! result awaited, and write the same artifacts as `signal render`.
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use clap::Args;
 use serde_json::json;
@@ -11,8 +12,10 @@ use signal_core::Registry;
 use signal_project::LoadError;
 use signal_project::provenance;
 use signal_project::session::{
-    BoundaryReplay, Device, Here, Machine, Replay, ReplayError, ReplayOptions, Session, replay_with,
+    BoundaryReplay, Here, Machine, Replay, ReplayError, ReplayOptions, Session, replay_with,
 };
+
+use crate::gpu::Gpu;
 
 use crate::render::{FILES, located, metrics_of, write_artifacts};
 use crate::{Failure, print_stdout};
@@ -48,7 +51,12 @@ pub(crate) struct ReplayArgs {
     trust_provenance: bool,
 }
 
-pub(crate) fn run(args: &ReplayArgs, registry: &Registry, json: bool) -> Result<(), Failure> {
+pub(crate) fn run(
+    args: &ReplayArgs,
+    registry: &Registry,
+    setup: Option<&Path>,
+    json: bool,
+) -> Result<(), Failure> {
     let dir = &args.session;
     let session = Session::load(dir, registry).map_err(|error| match error {
         LoadError::Invalid(diagnostics) => Failure::InvalidSession(located(dir, diagnostics)),
@@ -58,11 +66,18 @@ pub(crate) fn run(args: &ReplayArgs, registry: &Registry, json: bool) -> Result<
         &provenance::source_dir(),
         session.versions.first().map_or(&[][..], |p| &p.files),
     );
+    // M2.7-2: latent instances placed on this machine's devices, by the
+    // first version's pins (a running project cannot change them).
+    let pins = match (session.versions.first(), session.plans.first()) {
+        (Some(project), Some(plan)) => project.gpu_pins(plan),
+        _ => BTreeMap::new(),
+    };
+    let mut gpu = Gpu::new(registry, session.latent(), pins, setup);
     // The build and machine an exact replay compares with the recording's
-    // (M2.7-8), with the GPU its latent modules will use.
+    // (M2.7-8), with the GPU devices its latent modules will use.
     let here = session.latent().then(|| Here {
         build: provenance.clone(),
-        machine: Machine::here(gpu_devices(true)),
+        machine: Machine::here(gpu.devices()),
     });
     let options = ReplayOptions {
         frames: args.frames,
@@ -71,7 +86,7 @@ pub(crate) fn run(args: &ReplayArgs, registry: &Registry, json: bool) -> Result<
         trust_provenance: args.trust_provenance,
         here,
     };
-    let replayed = replay_with(&session, registry, options).map_err(|e| match e {
+    let mut replayed = replay_with(&session, gpu.registry(), options).map_err(|e| match e {
         ReplayError::IncompleteBoundaries { .. }
         | ReplayError::Unreproduced { .. }
         | ReplayError::BeyondRecordedEnd { .. }
@@ -79,9 +94,10 @@ pub(crate) fn run(args: &ReplayArgs, registry: &Registry, json: bool) -> Result<
         ReplayError::ReplayMismatch { .. } => Failure::Mismatch(e.to_string()),
         e => Failure::Internal(e.to_string()),
     })?;
+    (replayed.render.compute_devices, replayed.render.placement) = gpu.record();
     let rendered = &replayed.render;
 
-    let mut warnings = Vec::new();
+    let mut warnings = gpu.warnings();
     let recorded = &session.provenance;
     if recorded.signal_revision != provenance.signal_revision
         || recorded.rustc_version != provenance.rustc_version
@@ -181,35 +197,6 @@ fn boundary_warnings(replayed: &Replay, latent: bool) -> Vec<String> {
     warnings
 }
 
-/// The GPU adapters this process's latent modules use (M2.7-8): with
-/// `start`, starting the service as a module's `prepare` would.
-#[cfg(feature = "lab")]
-pub(crate) fn gpu_devices(start: bool) -> Vec<Device> {
-    let service = match start {
-        true => signal_gpu::GpuService::shared(),
-        false => signal_gpu::GpuService::started(),
-    };
-    service
-        .map(|service| {
-            let id = service.identity();
-            vec![Device {
-                backend: id.backend.clone(),
-                name: id.name.clone(),
-                vendor: id.vendor,
-                device_id: id.device_id,
-                driver: id.driver.clone(),
-                driver_info: id.driver_info.clone(),
-            }]
-        })
-        .unwrap_or_default()
-}
-
-/// Without the lab tier nothing here links a GPU: no device.
-#[cfg(not(feature = "lab"))]
-pub(crate) fn gpu_devices(_start: bool) -> Vec<Device> {
-    Vec::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +218,8 @@ mod tests {
                 conversion: signal_output::Conversion::Device,
                 ideal: false,
                 trust_provenance: false,
+                compute_devices: Vec::new(),
+                placement: Vec::new(),
             },
             skipped: 0,
             boundaries: BoundaryReplay::Exact,

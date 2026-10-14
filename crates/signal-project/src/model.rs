@@ -3,7 +3,8 @@
 //! can point at. The JSON Schema is generated from the same structs.
 //!
 //! Every table refuses unknown keys. Instance tables are open (their keys are
-//! parameter names), so the graph checks those keys against the module.
+//! parameter names), so the graph checks those keys against the module;
+//! `module` and `gpu` (M2.7-2) are reserved there.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -140,9 +141,12 @@ fn schema_version(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "type": "integer", "const": 1 })
 }
 
-/// An instance: `{ module = "<ref>", <parameter> = <number>, … }`.
+/// An instance: `{ module = "<ref>", gpu = "<device>", <parameter> = <number>, … }`.
 pub(crate) struct InstanceEntry {
     pub(crate) module: Spanned<String>,
+    /// M2.7-2: the GPU device a GPU-backed instance is pinned to, by id or
+    /// index.
+    pub(crate) gpu: Option<Spanned<String>>,
     pub(crate) parameters: BTreeMap<Spanned<String>, Spanned<f64>>,
 }
 
@@ -154,21 +158,30 @@ impl<'de> Deserialize<'de> for InstanceEntry {
             type Value = InstanceEntry;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("an instance table `{ module = \"<ref>\", <parameter> = <number>, … }`")
+                f.write_str(
+                    "an instance table `{ module = \"<ref>\", gpu = \"<device>\", <parameter> = <number>, … }`",
+                )
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<InstanceEntry, A::Error> {
                 let mut module = None;
+                let mut gpu = None;
                 let mut parameters = BTreeMap::new();
                 while let Some(key) = map.next_key::<Spanned<String>>()? {
-                    if key.get_ref() == "module" {
-                        module = Some(map.next_value::<Spanned<String>>()?);
-                    } else {
-                        parameters.insert(key, map.next_value::<Spanned<f64>>()?);
+                    match key.get_ref().as_str() {
+                        "module" => module = Some(map.next_value::<Spanned<String>>()?),
+                        "gpu" => gpu = Some(map.next_value::<Spanned<String>>()?),
+                        _ => {
+                            parameters.insert(key, map.next_value::<Spanned<f64>>()?);
+                        }
                     }
                 }
                 let module = module.ok_or_else(|| de::Error::missing_field("module"))?;
-                Ok(InstanceEntry { module, parameters })
+                Ok(InstanceEntry {
+                    module,
+                    gpu,
+                    parameters,
+                })
             }
         }
 
@@ -184,9 +197,12 @@ impl JsonSchema for InstanceEntry {
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         let module = generator.subschema_for::<ModuleRef>();
         json_schema!({
-            "description": "An instance: its module and the parameter values set on it.",
+            "description": "An instance: its module, the GPU device it is pinned to (`gpu`, a device id or index; GPU-backed instances only), and the parameter values set on it.",
             "type": "object",
-            "properties": { "module": module },
+            "properties": {
+                "module": module,
+                "gpu": { "type": "string", "minLength": 1 }
+            },
             "required": ["module"],
             "additionalProperties": { "type": "number" }
         })

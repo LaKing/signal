@@ -150,7 +150,8 @@ pub(crate) struct BenchArgs {
     #[arg(long, requires = "realtime", value_parser = parse_computation, default_value = "0.25")]
     rt_computation: Computation,
     /// Measure only the GPU partial bank (`lab.gpu_partials`): its cost per
-    /// block on the GPU, next to its CPU reference.
+    /// block on each GPU device the Setup allows (M2.7-2), next to its CPU
+    /// reference.
     #[cfg(feature = "lab")]
     #[arg(long, conflicts_with_all = ["write_voices", "realtime"])]
     gpu: bool,
@@ -175,7 +176,13 @@ fn budget_ns() -> f64 {
     1e9 / f64::from(SAMPLE_RATE)
 }
 
-pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(), Failure> {
+#[cfg_attr(not(feature = "lab"), allow(unused_variables))]
+pub(crate) fn run(
+    args: &BenchArgs,
+    registry: &Registry,
+    setup: Option<&std::path::Path>,
+    json: bool,
+) -> Result<(), Failure> {
     if let Some(voices) = &args.write_voices {
         return write_voices(voices, registry, json);
     }
@@ -213,7 +220,7 @@ pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(
     }
     #[cfg(feature = "lab")]
     if args.gpu {
-        let gpu = gpu_partials(seconds, json);
+        let gpu = gpu_partials(seconds, json, setup);
         if json {
             let output = json!({
                 "label": "measurement",
@@ -366,7 +373,7 @@ pub(crate) fn run(args: &BenchArgs, registry: &Registry, json: bool) -> Result<(
 
     // The GPU partial bank (ADR 0019 §3), in a `--features lab` build.
     #[cfg(feature = "lab")]
-    let gpu = gpu_partials(seconds, json);
+    let gpu = gpu_partials(seconds, json, setup);
 
     let voices_json = |(n, timing): &(usize, Option<Timing>), limit: f64| {
         json!({
@@ -1119,15 +1126,26 @@ fn timing_of(mut repeats: Vec<f64>) -> Timing {
 /// The GPU partial bank's figures, in ns per block of the bank.
 #[cfg(feature = "lab")]
 struct GpuBench {
-    /// The adapter, if there is one.
-    adapter: Option<String>,
     /// [`reference`](signal_lab::gpu_partials::reference): the block on the CPU.
     cpu: Timing,
     /// What the module does on the audio thread per block: the phases and
     /// the job's input, and the submission.
     audio_side: Timing,
+    /// Each GPU device's round trip (M2.7-2), in the pool's order (by id).
+    devices: Vec<DeviceBench>,
+    /// Why there is no device, when there is none.
+    no_gpu: Option<String>,
+}
+
+/// One GPU device's figures.
+#[cfg(feature = "lab")]
+struct DeviceBench {
+    /// Its stable id.
+    id: String,
+    /// Its name and backend.
+    adapter: String,
     /// From submission to the result in hand, on the calling thread; or why
-    /// it was not measured (no usable GPU, or the channel failed).
+    /// it was not measured (its channel failed).
     round_trip: Result<Timing, String>,
 }
 
@@ -1136,16 +1154,29 @@ impl GpuBench {
     fn json(&self) -> Value {
         use signal_lab::gpu_partials::{BLOCK_FRAMES, LATENCY_BLOCKS, PARTIALS};
         let block_ns = BLOCK_FRAMES as f64 * budget_ns();
+        let devices: Vec<Value> = self
+            .devices
+            .iter()
+            .map(|d| {
+                json!({
+                    "id": d.id,
+                    "adapter": d.adapter,
+                    "no_gpu": d.round_trip.as_ref().err(),
+                    "per_block": {
+                        "gpu_round_trip": d.round_trip.as_ref().ok().map(Timing::json),
+                    },
+                })
+            })
+            .collect();
         json!({
             "partials": PARTIALS,
             "block_frames": BLOCK_FRAMES,
             "latency_blocks": LATENCY_BLOCKS,
             "block_ns": block_ns,
-            "adapter": self.adapter,
-            "no_gpu": self.round_trip.as_ref().err(),
+            "no_gpu": self.no_gpu,
+            "devices": devices,
             "per_block": {
                 "cpu_reference": self.cpu.json(),
-                "gpu_round_trip": self.round_trip.as_ref().ok().map(Timing::json),
                 "audio_side": self.audio_side.json(),
             },
         })
@@ -1166,12 +1197,15 @@ impl GpuBench {
             "GPU partial bank (lab.gpu_partials: {PARTIALS} partials, {BLOCK_FRAMES}-frame blocks \
              of {block_ns:.0} ns, {LATENCY_BLOCKS} blocks late; median, p99 ns per block):"
         );
-        if let Some(adapter) = &self.adapter {
-            text.push_str(&format!("\n  adapter {adapter}"));
+        if let Some(why) = &self.no_gpu {
+            text.push_str(&format!("\n  GPU round trip not measured: {why}"));
         }
-        match &self.round_trip {
-            Ok(round_trip) => text.push_str(&row("GPU round trip", round_trip)),
-            Err(why) => text.push_str(&format!("\n  GPU round trip not measured: {why}")),
+        for device in &self.devices {
+            text.push_str(&format!("\n  device {} ({})", device.id, device.adapter));
+            match &device.round_trip {
+                Ok(round_trip) => text.push_str(&row("  GPU round trip", round_trip)),
+                Err(why) => text.push_str(&format!("\n    GPU round trip not measured: {why}")),
+            }
         }
         text.push_str(&row("CPU reference", &self.cpu));
         text.push_str(&row("audio side (submit)", &self.audio_side));
@@ -1180,12 +1214,15 @@ impl GpuBench {
 }
 
 /// Times the GPU partial bank for about `seconds` per row: the CPU
-/// reference of a block, the module's audio-side work per block, and the
-/// GPU's round trip (submit, compute on the `signal-gpu` thread, result
-/// back), one block at a time, with the parameters changing every block.
+/// reference of a block, the module's audio-side work per block, and on each
+/// GPU device the Setup allows (M2.7-2) the round trip (submit, compute on
+/// its `signal-gpu-<id>` thread, result back), one block at a time, with the
+/// parameters changing every block.
 #[cfg(feature = "lab")]
-fn gpu_partials(seconds: f64, json: bool) -> GpuBench {
-    use signal_gpu::GpuService;
+fn gpu_partials(seconds: f64, json: bool, setup: Option<&std::path::Path>) -> GpuBench {
+    use std::sync::Arc;
+
+    use signal_gpu::DevicePool;
     use signal_lab::gpu_partials::{BLOCK_FRAMES, Bank, KERNEL, Params, pack, reference};
 
     let params = |n: usize| Params {
@@ -1210,43 +1247,73 @@ fn gpu_partials(seconds: f64, json: bool) -> GpuBench {
     }));
     let mut input = vec![0.0f32; KERNEL.input_words];
     let audio_side = time(Box::new(|n| pack(bank.next_block(params(n)), &mut input)));
-    let service = GpuService::shared();
-    let adapter = service.map(|service| service.adapter().to_owned());
-    let channel = match service {
-        Some(service) => service.channel(KERNEL, 1).map_err(|e| e.to_string()),
-        None => {
-            Err(GpuService::shared_error().map_or("no usable GPU".to_owned(), ToString::to_string))
+    let (selection, narrowed, problems) = crate::gpu::setup::selection(setup);
+    for problem in &problems {
+        eprintln!("signal: bench: {problem}");
+    }
+    if let Some((path, devices)) = &narrowed {
+        eprintln!(
+            "signal: bench: GPU devices limited by the Setup {path}: gpu_devices = {devices}"
+        );
+    }
+    let pool = Arc::new(DevicePool::open(&selection));
+    let no_gpu = pool.devices().is_empty().then(|| {
+        let mut why = signal_gpu::inventory()
+            .error
+            .unwrap_or_else(|| "the Setup's gpu_devices allows no GPU adapter".to_owned());
+        for report in pool.reports() {
+            why.push_str(&format!("; {report}"));
         }
-    };
-    let round_trip = channel.map(|mut channel| {
-        time(Box::new(move |n| {
-            let block = bank.next_block(params(n));
-            if channel.submit(n as u64, |input| pack(block, input)) {
-                let began = Instant::now();
-                while channel.peek_done().is_none() && began.elapsed() < GPU_GIVE_UP {
-                    std::hint::spin_loop();
-                }
-                if let Some(job) = channel.take_done() {
-                    // Its own job; not real time, so a refused one may drop.
-                    let _ = channel.recycle(job);
-                }
-            }
-        }))
+        why
     });
+    let mut devices = Vec::new();
+    for info in pool.devices() {
+        let channel = DevicePool::lease(&pool, info.index)
+            .channel(KERNEL, 1)
+            .map_err(|e| e.to_string());
+        let mut bank = Bank::new(rate);
+        let round_trip = channel.map(|mut channel| {
+            time(Box::new(move |n| {
+                let block = bank.next_block(params(n));
+                if channel.submit(n as u64, |input| pack(block, input)) {
+                    let began = Instant::now();
+                    while channel.peek_done().is_none() && began.elapsed() < GPU_GIVE_UP {
+                        std::hint::spin_loop();
+                    }
+                    if let Some(job) = channel.take_done() {
+                        // Its own job; not real time, so a refused one may drop.
+                        let _ = channel.recycle(job);
+                    }
+                }
+            }))
+        });
+        if !json {
+            eprintln!(
+                "signal: bench: GPU partial bank on {}: {} per block",
+                info.id,
+                round_trip
+                    .as_ref()
+                    .map_or("not measured".to_owned(), |t| format!("{:.0} ns", t.median))
+            );
+        }
+        devices.push(DeviceBench {
+            id: info.id.clone(),
+            adapter: format!("{} ({})", info.name, info.backend),
+            round_trip,
+        });
+    }
     if !json {
         eprintln!(
-            "signal: bench: GPU partial bank: CPU {:.0} ns, GPU {} per block",
+            "signal: bench: GPU partial bank: CPU {:.0} ns per block, {} GPU device(s)",
             cpu.median,
-            round_trip
-                .as_ref()
-                .map_or("not measured".to_owned(), |t| format!("{:.0} ns", t.median))
+            devices.len()
         );
     }
     GpuBench {
-        adapter,
         cpu,
         audio_side,
-        round_trip,
+        devices,
+        no_gpu,
     }
 }
 

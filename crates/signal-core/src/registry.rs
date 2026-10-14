@@ -1,11 +1,31 @@
 //! Primitive module types by name. Building the registry allocates; it is not
 //! real time.
 
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
+use crate::address::InstanceAddress;
 use crate::descriptor::{Feedthrough, ModuleDescriptor};
 use crate::module::Primitive;
+
+/// Something a [`Host`] lends one instance (M2.7-2): opaque to the engine,
+/// which passes it to `prepare` in [`PrepareContext::lent`](crate::PrepareContext::lent)
+/// and never reads it.
+pub type Lent = Arc<dyn Any + Send + Sync>;
+
+/// What the program running the engine lends its instances on the control
+/// side (M2.7-2: GPU devices, placed by address). The engine calls
+/// [`lend`](Host::lend) once for every plan state it builds (in real time
+/// twice per plan: the engine's and its mirror's), before it prepares any
+/// new instance of it, with every instance of the plan in address order and
+/// its type name. Answers must depend only on those, so both calls agree.
+pub trait Host: Send + Sync + fmt::Debug {
+    /// What each of `instances` is lent, by index; a shorter answer lends
+    /// nothing to the rest.
+    fn lend(&self, instances: &[(&InstanceAddress, &'static str)]) -> Vec<Option<Lent>>;
+}
 
 /// A primitive module type: its descriptor and a constructor for instances.
 ///
@@ -25,6 +45,7 @@ pub struct ModuleType {
 pub struct Registry {
     types: BTreeMap<&'static str, ModuleType>,
     costs: BTreeMap<&'static str, u32>,
+    host: Option<Arc<dyn Host>>,
 }
 
 impl Registry {
@@ -68,6 +89,16 @@ impl Registry {
     /// The static cost recorded for `type_name`, if any.
     pub fn cost(&self, type_name: &str) -> Option<u32> {
         self.costs.get(type_name).copied()
+    }
+
+    /// Sets what lends this registry's instances their resources (M2.7-2).
+    pub fn set_host(&mut self, host: Arc<dyn Host>) {
+        self.host = Some(host);
+    }
+
+    /// The host, if one is set.
+    pub fn host(&self) -> Option<&Arc<dyn Host>> {
+        self.host.as_ref()
     }
 
     /// Every registered type, in byte-wise order of type name.

@@ -110,8 +110,12 @@ expression: text
       "additionalProperties": {
         "type": "number"
       },
-      "description": "An instance: its module and the parameter values set on it.",
+      "description": "An instance: its module, the GPU device it is pinned to (`gpu`, a device id or index; GPU-backed instances only), and the parameter values set on it.",
       "properties": {
+        "gpu": {
+          "minLength": 1,
+          "type": "string"
+        },
         "module": {
           "$ref": "#/$defs/ModuleRef"
         }

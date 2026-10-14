@@ -3,8 +3,7 @@
 //! completion, real-time calls (one `due` per block, `miss` when not ready)
 //! exhaust the job pool and later blocks cannot even be submitted. Once the
 //! delay ends, the late results are discarded and their jobs reused, so the
-//! next blocks are submitted, run and delivered again. Its own test binary,
-//! because the hook belongs to the process's service. On the GPU, or where
+//! next blocks are submitted, run and delivered again. On the GPU, or where
 //! none is usable on the noop device, which moves jobs the same way.
 
 #![cfg(feature = "lab")]
@@ -47,6 +46,7 @@ fn after_late_results_the_bank_recovers() {
         sample_rate: 96_000.0,
         max_frames: 256,
         rng: signal_core::RngStream::derive(1, &"/bank".parse().unwrap()),
+        lent: Some(gpu.lent()),
     });
 
     // Every result 200 ms late; 80 blocks run in far less: the pool of

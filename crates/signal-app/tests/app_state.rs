@@ -231,6 +231,22 @@ fn devices_are_listed_again_only_while_stopped() {
     assert_eq!(state.view().message, None);
 }
 
+/// M2.7-2 (AC3b): the interface setup shows the compute inventory read-only,
+/// with the fields `signal devices --compute` lists: the CPU's performance
+/// levels, every GPU adapter (or why there is none) and the Setup's
+/// `gpu_devices`.
+#[test]
+fn the_compute_devices_are_listed() {
+    let state = state("compute", &Setup::default(), &tone());
+    let lines = state.view().devices.compute;
+    let (levels, source) = signal_engine::cpu_levels();
+    let mut expected = signal_engine::cpu_lines(&levels, source);
+    expected.extend(signal_gpu::inventory().lines());
+    expected.push("GPU devices for GPU-backed modules (Setup gpu_devices): \"all\"".to_owned());
+    assert_eq!(lines, expected);
+    eprintln!("{}", lines.join("\n"));
+}
+
 #[test]
 fn apply_saves_and_restarts_from_frame_0() {
     let path = setup_file("apply", &Setup::default());

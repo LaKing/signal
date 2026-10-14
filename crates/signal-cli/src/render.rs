@@ -3,6 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::gpu::{Gpu, uses_gpu};
+
 use clap::{ArgGroup, Args};
 use serde_json::json;
 use signal_core::{Registry, SinkKind};
@@ -50,7 +52,12 @@ pub(crate) struct RenderArgs {
     threads: u32,
 }
 
-pub(crate) fn run(args: &RenderArgs, registry: &Registry, json: bool) -> Result<(), Failure> {
+pub(crate) fn run(
+    args: &RenderArgs,
+    registry: &Registry,
+    setup: Option<&Path>,
+    json: bool,
+) -> Result<(), Failure> {
     let dir = &args.project;
     let project = Project::load(dir).map_err(|error| match error {
         LoadError::Invalid(diagnostics) => Failure::Invalid(located(dir, diagnostics)),
@@ -102,9 +109,14 @@ pub(crate) fn run(args: &RenderArgs, registry: &Registry, json: bool) -> Result<
         threads: args.threads as usize,
         ..EngineConfig::new(sample_rate, seed)
     };
-    let mut engine = Engine::new(plan, registry, config, Vec::new())
+    // M2.7-2: GPU-backed instances on this machine's devices; dropped after
+    // the engine.
+    let mut gpu = Gpu::new(registry, uses_gpu(plan), project.gpu_pins(plan), setup);
+    let mut engine = Engine::new(plan, gpu.registry(), config, Vec::new())
         .map_err(|e| Failure::Internal(e.to_string()))?;
-    let rendered = render(&mut engine, frames).map_err(|e| render_failure(&project, dir, e))?;
+    let mut rendered = render(&mut engine, frames).map_err(|e| render_failure(&project, dir, e))?;
+    (rendered.compute_devices, rendered.placement) = gpu.record();
+    let gpu_warnings = gpu.warnings();
     let provenance = provenance::collect(&provenance::source_dir(), &project.files);
     let (manifest, metrics) = write_artifacts(&rendered, &args.out, provenance)
         .map_err(|e| e.into_failure(|e| render_failure(&project, dir, e)))?;
@@ -128,10 +140,19 @@ pub(crate) fn run(args: &RenderArgs, registry: &Registry, json: bool) -> Result<
         if late > 0 {
             output["late_results"] = json!(late);
         }
+        if !gpu_warnings.is_empty() {
+            output["gpu_warnings"] = json!(gpu_warnings);
+        }
+        if let Some(setup) = gpu.setup_json() {
+            output["gpu_setup"] = setup;
+        }
         print_stdout(&serde_json::to_string_pretty(&output).unwrap_or_default());
     } else {
         for warning in &warnings {
             eprintln!("{warning}");
+        }
+        for warning in &gpu_warnings {
+            eprintln!("signal: {warning}");
         }
         if late > 0 {
             eprintln!(

@@ -7,9 +7,11 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use signal_core::{Due, Inputs, Outputs, PrepareContext, RngStream, StateOutputPrimitive};
 use signal_engine::{Engine, EngineConfig, SameMachine, Schedule};
-use signal_gpu::GpuService;
+use signal_gpu::DevicePool;
 use signal_lab::gpu_partials::{
     BLOCK_FRAMES, Bank, GpuPartials, KERNEL, LATENCY_BLOCKS, Params, TOLERANCE, pack, reference,
 };
@@ -38,12 +40,13 @@ fn run_block(module: &mut GpuPartials, params: Params) -> Vec<f64> {
     block
 }
 
-fn prepared(sample_rate: f64) -> GpuPartials {
+fn prepared(gpu: &common::Gpu, sample_rate: f64) -> GpuPartials {
     let mut module = GpuPartials::default();
     module.prepare(&PrepareContext {
         sample_rate,
         max_frames: 256,
         rng: RngStream::derive(1, &"/bank".parse().unwrap()),
+        lent: Some(gpu.lent()),
     });
     module
 }
@@ -64,11 +67,11 @@ fn params_of(m: usize) -> Params {
 /// within the tolerance (relative to Σ|a_i|), and exactly 0 before.
 #[test]
 fn gpu_matches_the_cpu_reference_l_blocks_late() {
-    if common::gpu().is_none() {
+    let Some(gpu) = common::gpu() else {
         return;
-    }
+    };
     for sample_rate in [48_000.0, 96_000.0] {
-        let mut module = prepared(sample_rate);
+        let mut module = prepared(&gpu, sample_rate);
         let mut bank = Bank::new(sample_rate);
         let mut expected = Vec::new();
         let mut worst: f64 = 0.0;
@@ -101,9 +104,9 @@ fn gpu_matches_the_cpu_reference_l_blocks_late() {
 /// block whose first frame saw it, whatever frame of a block it comes on.
 #[test]
 fn a_change_reaches_the_output_exactly_l_blocks_later() {
-    if common::gpu().is_none() {
+    let Some(gpu) = common::gpu() else {
         return;
-    }
+    };
     let silent = Params {
         gain: 0.0,
         ..Params::default()
@@ -112,7 +115,7 @@ fn a_change_reaches_the_output_exactly_l_blocks_later() {
         gain: 0.5,
         ..Params::default()
     };
-    let mut module = prepared(96_000.0);
+    let mut module = prepared(&gpu, 96_000.0);
     let mut blocks = Vec::new();
     // Gain 0 for blocks 0–3; on from the middle of block 4 (read at the
     // first frame of block 5); so block 5 + L is the first one audible.
@@ -144,8 +147,8 @@ fn a_change_reaches_the_output_exactly_l_blocks_later() {
     assert!(blocks[6 + L].iter().filter(|&&y| y != 0.0).count() > BLOCK_FRAMES / 2);
 }
 
-fn render_with(threads: usize, block_capacity: usize, frames: u64) -> Render {
-    let registry = common::registry();
+fn render_with(gpu: &common::Gpu, threads: usize, block_capacity: usize, frames: u64) -> Render {
+    let registry = gpu.registry();
     let config = EngineConfig {
         threads,
         block_capacity,
@@ -161,14 +164,14 @@ fn render_with(threads: usize, block_capacity: usize, frames: u64) -> Render {
 /// late, and the manifest records the `same_machine` instance.
 #[test]
 fn offline_renders_are_bit_identical_and_record_same_machine() {
-    if common::gpu().is_none() {
+    let Some(gpu) = common::gpu() else {
         return;
-    }
+    };
     let frames = 48_000;
-    let first = render_with(1, 256, frames);
+    let first = render_with(&gpu, 1, 256, frames);
     let bits = |r: &Render| r.samples.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
     for (threads, k) in [(1, 256), (1, 1), (1, 64), (4, 256), (3, 64)] {
-        let again = render_with(threads, k, frames);
+        let again = render_with(&gpu, threads, k, frames);
         assert!(bits(&again) == bits(&first), "{threads} threads, k = {k}");
         assert_eq!(again.log, first.log, "{threads} threads, k = {k}");
     }
@@ -200,15 +203,8 @@ fn offline_renders_are_bit_identical_and_record_same_machine() {
 /// before any backend sees it; the noop device then computes nothing).
 #[test]
 fn the_kernel_validates_and_a_job_comes_back() {
-    let own;
-    let service = match common::gpu() {
-        Some(service) => service,
-        None => {
-            own = GpuService::start_noop().unwrap();
-            &own
-        }
-    };
-    let mut channel = service.channel(KERNEL, 1).unwrap();
+    let gpu = common::device();
+    let mut channel = DevicePool::lease(&gpu.pool, 0).channel(KERNEL, 1).unwrap();
     let mut bank = Bank::new(96_000.0);
     let block = bank.next_block(Params::default());
     assert!(channel.submit(0, |input| pack(block, input)));
@@ -222,17 +218,17 @@ fn the_kernel_validates_and_a_job_comes_back() {
     assert_eq!(job.output().len(), BLOCK_FRAMES);
 }
 
-/// AC10: without a usable GPU the module has no channel; offline, every due
-/// result is lost (the engine does not wait for it): a logged `late_result`
-/// fault per block from block L on, and silence. Skipped where a GPU is.
+/// AC10 (and AC2a of M2.7-2): without a device the module has no channel;
+/// offline, every due result is lost (the engine does not wait for it): a
+/// logged `late_result` fault per block from block L on, and silence. On an
+/// empty pool, so it runs everywhere.
 #[test]
 fn without_a_gpu_every_due_result_is_lost_and_logged() {
-    if GpuService::shared().is_some() {
-        eprintln!("skipped: a GPU is usable here");
-        return;
-    }
+    let gpu = common::Gpu {
+        pool: Arc::new(DevicePool::empty()),
+    };
     let frames = 4 * BLOCK_FRAMES as u64 + 10;
-    let r = render_with(1, 256, frames);
+    let r = render_with(&gpu, 1, 256, frames);
     assert!(r.samples.iter().all(|&x| x == 0.0));
     let log = String::from_utf8(r.log).unwrap();
     let late: Vec<&str> = log.lines().filter(|l| l.contains("late_result")).collect();

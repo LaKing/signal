@@ -22,6 +22,11 @@ pub mod gpu_partials;
 #[cfg(feature = "lab")]
 use signal_core::{ModuleType, Primitive, Registry, RegistryError, StateOutputPrimitive};
 
+/// The `lab.*` types that run on a GPU device: what a
+/// `signal_gpu::GpuHost` places (M2.7-2).
+#[cfg(feature = "lab")]
+pub const GPU_TYPES: [&str; 1] = ["lab.gpu_partials"];
+
 /// Registers every `lab.*` primitive type in `registry`.
 #[cfg(feature = "lab")]
 pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {

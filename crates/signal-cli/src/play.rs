@@ -27,6 +27,7 @@ use signal_project::live::{ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reloa
 use signal_project::session::{LiveRecorder, SessionError, SessionRecorder, sink_of};
 use signal_project::{LoadError, Project, provenance};
 
+use crate::gpu::{Gpu, uses_gpu};
 use crate::render::located;
 use crate::{Failure, print_stdout};
 
@@ -214,6 +215,8 @@ struct Control<'a> {
     controller: Controller,
     live: LiveRecorder,
     registry: &'a Registry,
+    /// The GPU devices, for the placement's warnings after a watched edit.
+    gpu: &'a Gpu,
     dir: &'a Path,
     watch: Option<(ProjectWatcher, Instant)>,
     current: Project,
@@ -254,6 +257,9 @@ impl Control<'_> {
                     self.edits.swaps += 1;
                 }
                 eprintln!("signal: watch: {applied}");
+                for warning in self.gpu.placement_warnings() {
+                    eprintln!("signal: {warning}");
+                }
             }
             Err(ReloadError::Invalid(diagnostics)) => {
                 self.edits.errors += 1;
@@ -270,7 +276,12 @@ impl Control<'_> {
     }
 }
 
-pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<(), Failure> {
+pub(crate) fn run(
+    args: &PlayArgs,
+    registry: &Registry,
+    setup: Option<&Path>,
+    json: bool,
+) -> Result<(), Failure> {
     let null = args.driver == DriverKind::Null;
     if !null && (args.fast || args.record_audio.is_some()) {
         return Err(Failure::Usage(
@@ -308,6 +319,19 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
         .map_err(|diagnostics| Failure::Invalid(located(dir, diagnostics)))?
         .plan;
     plan.version = 0;
+    // M2.7-2: GPU-backed instances on this machine's devices (also for
+    // ones a watched edit adds); kept until the runner and the controller
+    // are gone, so the pool is never dropped on the audio thread.
+    let mut gpu = Gpu::new(
+        registry,
+        uses_gpu(&plan) || args.watch,
+        project.gpu_pins(&plan),
+        setup,
+    );
+    for warning in gpu.warnings() {
+        eprintln!("signal: {warning}");
+    }
+    let registry = gpu.registry();
     let (_, width) = sink_of(&project, &plan).map_err(|d| Failure::Invalid(located(dir, d)))?;
     let (rate, seed) = (project.sample_rate, project.seed);
     let limit = args.seconds.map(|s| (s * f64::from(rate)).round() as u64);
@@ -335,6 +359,10 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
     if let Some(error) = runner.waiter_error() {
         eprintln!("signal: warning: no semaphores ({error}); the semaphore workers park");
     }
+    // The placement is made while the plan is prepared (auditor-1-006).
+    for warning in gpu.placement_warnings() {
+        eprintln!("signal: {warning}");
+    }
     let provenance = provenance::collect(&provenance::source_dir(), &project.files);
     let recorder = SessionRecorder::new(&project, registry, rate, seed, provenance)
         .map_err(|e| Failure::Internal(e.to_string()))?;
@@ -351,6 +379,7 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
             false => LiveRecorder::new(recorder, registry.clone()),
         },
         registry,
+        gpu: &gpu,
         dir,
         watch,
         current: project,
@@ -396,8 +425,8 @@ pub(crate) fn run(args: &PlayArgs, registry: &Registry, json: bool) -> Result<()
     }
     if let Some(dir) = &args.record_session {
         let mut recorder = live.into_recorder();
-        // The GPU the run's latent modules used, if any (M2.7-8).
-        recorder.set_devices(crate::replay::gpu_devices(false));
+        // The GPU devices the run's latent modules could use (M2.7-8, M2.7-2).
+        recorder.set_devices(gpu.devices());
         recorder.write(dir).map_err(|error| match error {
             SessionError::Io { .. } => Failure::Io(error.to_string()),
             error => Failure::Internal(error.to_string()),

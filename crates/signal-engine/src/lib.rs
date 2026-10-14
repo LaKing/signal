@@ -71,7 +71,9 @@ mod tasks;
 mod units;
 mod wake;
 
-pub use cores::{CoreSource, performance_cores, realtime_threads};
+pub use cores::{
+    CoreSource, PerfLevel, cpu_levels, cpu_lines, performance_cores, realtime_threads,
+};
 #[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 pub use engine::Injection;
@@ -86,7 +88,7 @@ pub use log::{
     DiscardReason, EngineFailure, FailureReason, FaultReason, InstanceId, LineSource, LogLine,
     LogRecord, LogSource, PortId,
 };
-pub use manifest::{Manifest, Provenance, SameMachine};
+pub use manifest::{ComputeDevice, Manifest, Placement, Provenance, SameMachine};
 pub use offline::{Offline, OfflineError, run_offline};
 #[cfg(feature = "test-hooks")]
 #[doc(hidden)]

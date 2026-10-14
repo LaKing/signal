@@ -2,8 +2,7 @@
 //! The null driver runs `lab.gpu_partials` while the service's test hook
 //! holds every result back for 60 s: each due result is a `late_result`
 //! fault (silence), logged and counted, and the run finishes in a fraction
-//! of the hold, so neither the callback nor a worker waited. Its own test
-//! binary, because the hook belongs to the process's service. On the GPU,
+//! of the hold, so neither the callback nor a worker waited. On the GPU,
 //! or where none is usable (AC10) on the noop device, which moves jobs the
 //! same way.
 
@@ -42,7 +41,7 @@ fn a_late_gpu_result_is_a_counted_logged_fault_and_nothing_waits() {
     let hold = Duration::from_secs(60);
     gpu.set_completion_delay(hold);
 
-    let registry = common::registry();
+    let registry = gpu.registry();
     let mut config = RealtimeConfig::with_buffer(96_000, 42, 128);
     config.engine.threads = 4;
     let (runner, mut controller) = realtime(&common::plan(&registry), &registry, config).unwrap();

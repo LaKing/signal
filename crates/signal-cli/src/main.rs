@@ -6,11 +6,14 @@
 
 mod bench;
 mod devices;
+mod gpu;
 mod play;
 mod render;
 mod replay;
 
 use std::io::Write;
+#[cfg(feature = "gpu")]
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::error::ErrorKind;
@@ -26,6 +29,11 @@ struct Cli {
     /// Print machine-readable JSON on stdout.
     #[arg(long, global = true)]
     json: bool,
+    /// The machine Setup whose `gpu_devices` limits the GPU devices
+    /// (default: $SIGNAL_SETUP, else Signal.app's Setup).
+    #[cfg(feature = "gpu")]
+    #[arg(long, global = true)]
+    setup: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -42,8 +50,9 @@ enum Command {
     /// Measure the per-frame engine at 96 kHz (V13): every `std.*`
     /// primitive, the empty engine, the kick project and kick voices.
     Bench(bench::BenchArgs),
-    /// List the audio devices with their sample rates, channels and buffer sizes.
-    Devices,
+    /// List the audio devices with their sample rates, channels and buffer
+    /// sizes; with --compute, the compute devices instead.
+    Devices(devices::DevicesArgs),
     /// Print the catalogue of module descriptors.
     Modules,
     /// Print the JSON Schema of project and composite files.
@@ -165,12 +174,16 @@ fn execute(cli: &Cli) -> Result<(), Failure> {
     // ADR 0015: `lab.*` only in a `--features lab` build.
     #[cfg(feature = "lab")]
     signal_lab::register(&mut registry).map_err(|e| Failure::Internal(e.to_string()))?;
+    #[cfg(feature = "gpu")]
+    let setup = cli.setup.as_deref();
+    #[cfg(not(feature = "gpu"))]
+    let setup = None;
     match &cli.command {
-        Command::Render(args) => render::run(args, &registry, cli.json),
-        Command::Replay(args) => replay::run(args, &registry, cli.json),
-        Command::Play(args) => play::run(args, &registry, cli.json),
-        Command::Bench(args) => bench::run(args, &registry, cli.json),
-        Command::Devices => devices::run(cli.json),
+        Command::Render(args) => render::run(args, &registry, setup, cli.json),
+        Command::Replay(args) => replay::run(args, &registry, setup, cli.json),
+        Command::Play(args) => play::run(args, &registry, setup, cli.json),
+        Command::Bench(args) => bench::run(args, &registry, setup, cli.json),
+        Command::Devices(args) => devices::run(args, cli.json),
         Command::Modules => {
             if cli.json {
                 let descriptors: Vec<ModuleDescriptor> =

@@ -11,9 +11,14 @@ name = "signal"
 path = "src/main.rs"
 
 [features]
+# M2.7-2: the GPU devices: `signal devices --compute` lists the GPU adapters,
+# and runs place GPU-backed instances on the devices the Setup's
+# `gpu_devices` allows. Without it (the default build) nothing here links
+# wgpu (AC2b, decision of 2026-10-14).
+gpu = ["dep:signal-gpu", "dep:toml"]
 # ADR 0015: the lab tier (`lab.*` primitives; M2.6-4: `lab.gpu_partials`), and
-# `signal bench`'s GPU partial bank. Without it nothing here links wgpu.
-lab = ["dep:signal-lab", "signal-lab/lab", "dep:signal-gpu"]
+# `signal bench`'s GPU partial bank, with the GPU devices.
+lab = ["dep:signal-lab", "signal-lab/lab", "gpu"]
 
 [dependencies]
 signal-core = { workspace = true }
@@ -31,9 +36,11 @@ clap = { workspace = true }
 # To tell an I/O failure writing audio.wav (exit 1) from another (exit 2);
 # the integration tests also read the WAV header with it.
 hound = { workspace = true }
-# `--features lab`: the lab primitives, and the GPU device for `signal bench`.
+# `--features lab`: the lab primitives. `--features gpu` (in `lab`): the GPU
+# devices, and the Setup's `gpu_devices` (read with `toml`).
 signal-lab = { workspace = true, optional = true }
 signal-gpu = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The engine's exclusivity counters for the determinism matrices.

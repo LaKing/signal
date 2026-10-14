@@ -3,9 +3,10 @@
 //! mute) with its cause on the log line: `validation`, `mapping` and
 //! `device_lost` are told apart, and a channel whose job failed delivers
 //! again. Offline, so the engine waits for every due result and each
-//! injected failure lands on exactly one block. Its own test binary,
-//! because the hooks act on the process's service. On the GPU, or where
-//! none is usable on the noop device (wgpu's validation is the same).
+//! injected failure lands on exactly one block. The lost device is not
+//! replaced here (replacement held): `lab/tests/placement.rs` covers the
+//! replacement. On the GPU, or where none is usable on the noop device
+//! (wgpu's validation is the same).
 
 #![cfg(feature = "lab")]
 
@@ -19,7 +20,8 @@ use signal_output::render_with;
 #[test]
 fn a_failed_job_and_a_lost_device_are_faults_with_their_cause() {
     let gpu = common::device();
-    let registry = common::registry();
+    gpu.pool.hold_replacement(true);
+    let registry = gpu.registry();
     let mut engine = Engine::new(
         &common::plan(&registry),
         &registry,

@@ -16,6 +16,9 @@ noop = ["wgpu/noop"]
 test-hooks = []
 
 [dependencies]
+# M2.7-2: the engine's host hook (`Host`, `Lent`) through which the pool
+# lends instances their device.
+signal-core = { workspace = true }
 wgpu = { workspace = true }
 pollster = { workspace = true }
 # The lock-free SPSC queues between a module and the GPU thread.

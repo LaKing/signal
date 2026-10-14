@@ -6,8 +6,8 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use signal_core::{
-    Direction, Due, Event, EventPayload, EventSink, Inputs, InstanceAddress, ModuleType, Outputs,
-    PortShape, PrepareContext, Primitive, RngStream,
+    Direction, Due, Event, EventPayload, EventSink, Inputs, InstanceAddress, Lent, ModuleType,
+    Outputs, PortShape, PrepareContext, Primitive, RngStream,
 };
 
 use crate::alloc_counter::{Counts, Guard};
@@ -61,13 +61,16 @@ pub(crate) struct Instance {
     event_outputs: usize,
     /// A panic in `prepare` or `reset`; every later render reports it.
     fault: Option<Panic>,
+    /// What `prepare` lends it (M2.7-2).
+    lent: Option<Lent>,
 }
 
 impl Instance {
     /// A fresh instance, prepared at `sample_rate` for calls of at most
-    /// `max_frames` frames, with the random stream of `seed`.
+    /// `max_frames` frames, with the random stream of `seed`, lent `lent`.
     pub fn new(
         module_type: &ModuleType,
+        lent: Option<&Lent>,
         sample_rate: f64,
         max_frames: usize,
         seed: u64,
@@ -88,6 +91,7 @@ impl Instance {
             signal_outputs: count(Direction::Out, PortShape::Signal),
             event_outputs: count(Direction::Out, PortShape::Events),
             fault: None,
+            lent: lent.cloned(),
         };
         instance.prepare(sample_rate, max_frames, seed);
         instance
@@ -100,6 +104,7 @@ impl Instance {
             sample_rate,
             max_frames: max_frames.max(1),
             rng: RngStream::derive(seed, &address),
+            lent: self.lent.clone(),
         };
         self.max_frames = ctx.max_frames;
         let primitive = &mut self.primitive;

@@ -63,6 +63,65 @@ fn from_sysctl() -> Option<usize> {
     Some(cores)
 }
 
+/// One performance level of the CPU (M2.7-2, `signal devices --compute`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PerfLevel {
+    /// `N` of `hw.perflevelN` (0 is the fastest).
+    pub index: usize,
+    /// Its name (`Performance`, `Efficiency`).
+    pub name: String,
+    /// Its physical cores.
+    pub physical: usize,
+    /// Its logical cores.
+    pub logical: usize,
+}
+
+/// The machine's performance levels, read now, and where they came from:
+/// `sysctl`, or where it does not answer one level, `all`, of
+/// [`std::thread::available_parallelism`] cores. Control-thread code.
+pub fn cpu_levels() -> (Vec<PerfLevel>, CoreSource) {
+    let read = || -> Option<Vec<PerfLevel>> {
+        let levels: usize = sysctl("hw.nperflevels")?.parse().ok()?;
+        (0..levels)
+            .map(|index| {
+                let key = |k: &str| sysctl(&format!("hw.perflevel{index}.{k}"));
+                Some(PerfLevel {
+                    index,
+                    name: key("name")?,
+                    physical: key("physicalcpu")?.parse().ok()?,
+                    logical: key("logicalcpu")?.parse().ok()?,
+                })
+            })
+            .collect()
+    };
+    match read() {
+        Some(levels) if !levels.is_empty() => (levels, CoreSource::Sysctl),
+        _ => {
+            let n = std::thread::available_parallelism().map_or(1, |n| n.get());
+            let all = PerfLevel {
+                index: 0,
+                name: "all".to_owned(),
+                physical: n,
+                logical: n,
+            };
+            (vec![all], CoreSource::Fallback)
+        }
+    }
+}
+
+/// The CPU part of the compute inventory for people, one line per level
+/// (`signal devices --compute` and the app's interface setup).
+pub fn cpu_lines(levels: &[PerfLevel], source: CoreSource) -> Vec<String> {
+    let mut lines = vec![format!("CPU ({}):", source.name())];
+    for level in levels {
+        lines.push(format!(
+            "  level {} {}: {} cores ({} logical)",
+            level.index, level.name, level.physical, level.logical
+        ));
+    }
+    lines
+}
+
 /// The threads a real-time run uses when its `threads` is 0 (auto): two
 /// thirds of the performance cores, rounded down, at least 1. The rest are
 /// left to the control thread, the GUI and the system, whose preemption of a

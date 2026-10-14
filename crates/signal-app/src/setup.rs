@@ -1,7 +1,7 @@
 //! The machine Setup (ADR 0009): which devices, buffer and output channels
 //! this machine plays a project with, the last project folder and the
-//! window's size, and two advanced keys not in the dialog: the real-time
-//! wake policy and computation (M2.7-1). One TOML file (`docs/project-format.md`, "Setup"), never
+//! window's size, and advanced keys not in the dialog: the real-time
+//! wake policy and computation (M2.7-1) and the GPU devices (M2.7-2). One TOML file (`docs/project-format.md`, "Setup"), never
 //! part of a project. Reading it never fails: what is unknown or invalid is
 //! reported and replaced by its default. Writing it is atomic.
 
@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use signal_audio::DeviceRef;
 use signal_engine::{Computation, RtPolicy};
+use signal_gpu::Selection;
 
 /// The file's format version.
 pub const VERSION: i64 = 1;
@@ -93,6 +94,9 @@ pub struct Setup {
     /// Advanced, not in the dialog: the workers' time-constraint
     /// computation, a fraction of the device period (`rt_computation`).
     pub rt_computation: Computation,
+    /// Advanced, not edited in the dialog (M2.7-2): the GPU adapters GPU-backed
+    /// modules may use (`gpu_devices`: `"all"`, or a list of ids or indices).
+    pub gpu_devices: Selection,
 }
 
 impl Default for Setup {
@@ -107,6 +111,7 @@ impl Default for Setup {
             window: None,
             rt_policy: RtPolicy::default(),
             rt_computation: Computation::DEFAULT,
+            gpu_devices: Selection::All,
         }
     }
 }
@@ -134,6 +139,25 @@ struct File<'a> {
     rt_policy: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rt_computation: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gpu_devices: Option<&'a [String]>,
+}
+
+/// `gpu_devices`: `"all"`, or a list of adapter ids (strings) or indices.
+fn gpu_devices(value: &toml::Value) -> Option<Selection> {
+    match value {
+        toml::Value::String(all) if all == "all" => Some(Selection::All),
+        toml::Value::Array(entries) => entries
+            .iter()
+            .map(|entry| match entry {
+                toml::Value::String(id) if !id.is_empty() => Some(id.clone()),
+                toml::Value::Integer(index) if *index >= 0 => Some(index.to_string()),
+                _ => None,
+            })
+            .collect::<Option<Vec<String>>>()
+            .map(Selection::Only),
+        _ => None,
+    }
 }
 
 /// Where the Setup lives: `--setup`, else `SIGNAL_SETUP`, else
@@ -262,6 +286,13 @@ impl Setup {
                         bad("must be a fraction of the period above 0 and at most 1".to_owned())
                     }
                 },
+                "gpu_devices" => match gpu_devices(&value) {
+                    Some(selection) => setup.gpu_devices = selection,
+                    None => bad(
+                        "must be \"all\" or a list of GPU adapter ids or indices (`signal devices --compute`)"
+                            .to_owned(),
+                    ),
+                },
                 _ => problems.push(format!("{file}: unknown key '{key}'; ignored")),
             }
         }
@@ -285,6 +316,10 @@ impl Setup {
             rt_policy: (self.rt_policy != RtPolicy::default()).then(|| self.rt_policy.name()),
             rt_computation: (self.rt_computation != Computation::DEFAULT)
                 .then(|| self.rt_computation.fraction()),
+            gpu_devices: match &self.gpu_devices {
+                Selection::All => None,
+                Selection::Only(entries) => Some(entries),
+            },
         };
         toml::to_string(&file).unwrap_or_default()
     }

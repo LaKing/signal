@@ -347,3 +347,109 @@ fn edit_errors(new: &Project) -> Vec<String> {
         Err(diagnostics) => diagnostics.iter().map(ToString::to_string).collect(),
     }
 }
+
+/// M2.7-2 (AC7): a `gpu` pin is read by address, through composites; it is
+/// a string on a primitive instance, never a composite's, and no composite
+/// may export a parameter named `gpu`.
+#[test]
+fn gpu_pins_are_read_by_address_and_checked() {
+    let pinned = project_with(
+        &PROJECT.replacen(
+            "tone = { module = \"std.sine_osc\", freq = 330 }",
+            "tone = { module = \"std.sine_osc\", freq = 330, gpu = \"1\" }",
+            1,
+        ),
+        &VOICE.replacen(
+            "high = { module = \"std.sine_osc\", freq = 441 }",
+            "high = { module = \"std.sine_osc\", freq = 441, gpu = \"metal-apple-m5-max\" }",
+            1,
+        ),
+    );
+    let plan = pinned.plan(&registry()).unwrap().plan;
+    let pins: Vec<(String, String)> = pinned.gpu_pins(&plan).into_iter().collect();
+    assert_eq!(
+        pins,
+        [
+            ("/tone".to_owned(), "1".to_owned()),
+            ("/voice/high".to_owned(), "metal-apple-m5-max".to_owned()),
+        ]
+    );
+
+    let errors = |text: &str, voice: &str| -> Vec<String> {
+        let files = vec![
+            SourceFile {
+                path: "project.toml".to_owned(),
+                text: text.to_owned(),
+            },
+            SourceFile {
+                path: "composites/voice.toml".to_owned(),
+                text: voice.to_owned(),
+            },
+        ];
+        match Project::from_sources(files) {
+            Ok(_) => Vec::new(),
+            Err(diagnostics) => diagnostics.iter().map(ToString::to_string).collect(),
+        }
+    };
+    let on_composite = errors(
+        &PROJECT.replacen("drive = 2.0 }", "drive = 2.0, gpu = \"0\" }", 1),
+        VOICE,
+    );
+    assert_eq!(on_composite.len(), 1, "{on_composite:?}");
+    assert!(
+        on_composite[0].starts_with("project.toml:10:")
+            && on_composite[0].contains("`voice` is a composite"),
+        "{on_composite:?}"
+    );
+    let empty = errors(
+        &PROJECT.replacen("freq = 330 }", "freq = 330, gpu = \"\" }", 1),
+        VOICE,
+    );
+    assert!(empty[0].contains("`gpu` is empty"), "{empty:?}");
+    let number = errors(
+        &PROJECT.replacen("freq = 330 }", "freq = 330, gpu = 1 }", 1),
+        VOICE,
+    );
+    assert!(number[0].contains("project.toml:11:"), "{number:?}");
+    let exported = errors(
+        PROJECT,
+        &VOICE.replacen("drive = \"shaper.drive\"", "gpu = \"shaper.drive\"", 1),
+    );
+    assert!(
+        exported
+            .iter()
+            .any(|e| e.starts_with("composites/voice.toml:") && e.contains("named `gpu`")),
+        "{exported:?}"
+    );
+}
+
+/// M2.7-2: a running project keeps its GPU placement; a changed pin, or a
+/// pin on an added instance, needs a restart. Removing a pinned instance
+/// does not.
+#[test]
+fn a_changed_gpu_pin_needs_a_restart() {
+    let tone = "tone = { module = \"std.sine_osc\", freq = 330 }";
+    let pinned = |pin: &str| tone.replacen(" }", &format!(", gpu = \"{pin}\" }}"), 1);
+    let errors = edit_errors(&edited(tone, &pinned("0")));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].starts_with("project.toml:11:") && errors[0].contains("restart the project"),
+        "{errors:?}"
+    );
+    let added = format!("{tone}\nextra = {{ module = \"std.sine_osc\", gpu = \"0\" }}");
+    assert!(edit_errors(&edited(tone, &added))[0].contains("/extra: its `gpu` pin changed"));
+    // Same pin on both sides: no restart.
+    let old = project(&PROJECT.replacen(tone, &pinned("0"), 1));
+    let same = project(
+        &PROJECT
+            .replacen(tone, &pinned("0"), 1)
+            .replacen("330", "331", 1),
+    );
+    assert!(diff(&old, &same, &registry()).is_ok());
+    let removed = project(&PROJECT.replacen(&format!("{tone}\n"), "", 1).replacen(
+        "  { from = \"tone.out\", to = \"out.r\", scale = 0.5 },\n",
+        "",
+        1,
+    ));
+    assert!(diff(&old, &removed, &registry()).is_ok());
+}

@@ -60,6 +60,38 @@ pub struct Manifest {
     /// results were still checked against their hashes. Absent unless true.
     #[serde(default, skip_serializing_if = "is_false")]
     pub trust_provenance: bool,
+    /// The compute devices the render could place instances on (M2.7-2),
+    /// sorted by id, as the program running the engine supplied them.
+    /// Absent when no instance was placed on a device.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compute_devices: Vec<ComputeDevice>,
+    /// Where each placed instance ran (M2.7-2), by address. Absent when
+    /// there is none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub placement: Vec<Placement>,
+}
+
+/// A compute device (a GPU adapter) a render could use (M2.7-2).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputeDevice {
+    /// Its stable id.
+    pub id: String,
+    /// Its name.
+    pub name: String,
+    /// Its backend (e.g. `Metal`).
+    pub backend: String,
+}
+
+/// The device an instance ran on (M2.7-2).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Placement {
+    /// Its address.
+    pub instance: String,
+    /// The device's id; `null` without a device (its results were lost).
+    pub device: Option<String>,
+    /// The project's pin (`gpu = "…"`), as written, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {

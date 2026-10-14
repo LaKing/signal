@@ -471,6 +471,70 @@ The seat ran every `signal-gpu` and lab GPU test on wgpu's noop device; the test
 2. `cargo test --workspace --locked --offline --features signal-cli/lab -- --nocapture`: every test passes on the GPU, including `lab/tests/fault_causes.rs` and `lab/tests/device_loss.rs`, and the M2.6-4 tolerance lines are unchanged (at or below `1e-4`).
 3. Steps 3–5 of the M2.6-4 list above with the M2.7-5 build: identical repeated renders, the bench row, and `signal play projects/gpu-partials` with `late_results` 0 on an idle GPU.
 
+### Multi-GPU device pool (M2.7-2)
+
+`realtime-rules.md` "GPU" (devices, placement, generations). Every GPU adapter is a device of a pool, with its own service thread; GPU-backed instances are placed on them deterministically, and `signal bench --gpu` measures the bank's round trip **per device** (`gpu_partials.devices[]`: `id`, `adapter`, `per_block.gpu_round_trip`, or `no_gpu` with the reason; the CPU reference and the audio side once, in `gpu_partials.per_block`; `gpu_partials.no_gpu` when there is no device at all). Only a `--features gpu` (or `lab`) build lists or uses GPUs: the default `signal`, and so the helper `scripts/bundle-app.sh` bundles, links no wgpu (AC2b; decision of 2026-10-14, made for the run by the top-level supervisor, to be confirmed or reversed by the operator). Signal.app's interface setup shows the same inventory read-only, under "Compute devices".
+
+**`signal devices --compute`** lists the compute devices: text, or with `--json` this object:
+
+```json
+{
+  "cpu": {
+    "source": "sysctl",
+    "performance_cores": 12,
+    "levels": [
+      { "index": 0, "name": "Performance", "physical": 12, "logical": 12 },
+      { "index": 1, "name": "Efficiency", "physical": 6, "logical": 6 }
+    ]
+  },
+  "gpu": {
+    "built": true,
+    "available": true,
+    "reason": null,
+    "adapters": [
+      {
+        "id": "metal-apple-m5-max", "index": 0, "name": "Apple M5 Max",
+        "backend": "Metal", "type": "integrated", "vendor": 0, "device_id": 0,
+        "driver": "", "driver_info": "",
+        "limits": {
+          "max_compute_workgroups_per_dimension": 65535,
+          "max_compute_invocations_per_workgroup": 1024,
+          "max_compute_workgroup_size": [1024, 1024, 64],
+          "max_compute_workgroup_storage_size": 32768,
+          "max_storage_buffer_binding_size": 4294967296,
+          "max_buffer_size": 4294967296
+        }
+      }
+    ]
+  }
+}
+```
+
+(The values are an illustration, not a measurement.)
+
+| Key | Meaning |
+|---|---|
+| `cpu.source` | `"sysctl"` (`hw.perflevelN.*`), or `"fallback"` where `sysctl` does not answer (a sandbox): then one level `all` of `available_parallelism` cores |
+| `cpu.performance_cores` | the cores of every level but `Efficiency`: what `threads = 0` derives from (ADR 0019 §2) |
+| `cpu.levels[]` | `index` (`N` of `hw.perflevelN`, 0 the fastest), `name`, `physical` and `logical` cores |
+| `gpu.built` | whether this build lists GPUs (`--features gpu` or `lab`); `false` in the default build |
+| `gpu.available` | whether any adapter is listed |
+| `gpu.reason` | why none is, when none is (`null` otherwise) |
+| `gpu.adapters[]` | every Metal adapter, sorted by `id`: `id` (stable: `<backend>-<name>`, then `-<PCI bus id>` where the backend reports one, then `-2`, `-3`… for adapters still alike; an assumption, as wgpu exposes no Metal registry id), `index` (its place in this list; a project's `gpu = "<index>"` counts the devices the Setup allows instead), `name`, `backend`, `type` (`integrated`, `discrete`, `virtual`, `cpu`, `other`), `vendor` and `device_id` (PCI ids, 0 where the backend has none), `driver`, `driver_info`, and the compute `limits` above, in bytes where sizes |
+
+**Seat result** (the devpanel seat, 2026-10-14; sandboxed, no GPU, no `sysctl`): a seat result, which decides nothing. The default build's `signal --json devices --compute` reports `cpu.source` `"fallback"` and `gpu.built` `false`; the `--features lab` build reports `gpu.built` `true`, `available` `false` with the reason "no Metal adapter (no usable GPU on this machine)", and `signal --json bench --gpu` reports no device (`devices: []`, `no_gpu` with that reason). Every multi-device test ran on wgpu's noop device (3 noop devices; noop computes nothing, so its audio is silence: those tests prove the job path, the placement, the loss and the replacement, not GPU arithmetic).
+
+### Pending operator steps for the M2.7-2 checkpoint
+
+On the M5 Max outside the sandbox, from the repository root, with `PATH=/opt/homebrew/opt/rustup/bin:$PATH` and `T=/tmp/signal-project-target`. With one adapter every placement is that adapter; the multi-device logic is the noop tests', run here on Metal too (AC10).
+
+1. **Inventory:** `cargo build --release -p signal-cli --features lab --locked --offline`, then `"$T/release/signal" devices --compute` and `"$T/release/signal" --json devices --compute`. Expect `cpu.source` `sysctl` with the Performance and Efficiency levels, and one adapter, Metal, with its id (expected `metal-apple-m5-max`), type and limits. Report the JSON verbatim. Then open Signal.app (`./start.sh projects/kick`), the interface setup, "Compute devices": the same lines as the text output.
+2. **The lab GPU tests:** `cargo test -p signal-gpu -p signal-lab --features signal-lab/lab --locked --offline -- --nocapture` and `cargo test -p signal-cli --features lab --locked --offline`. Expect `GPU: Apple M5 Max (Metal)` (not `skipped`), every test passing (the pool, placement, split and loss tests run on noop devices there as here; the adapter tests on Metal), and the M2.6-4 tolerance lines at or below `1e-4`.
+3. **The bench per device:** `"$T/release/signal" --json bench --gpu --seconds 2`, twice: `gpu_partials.devices` has one entry, `metal-apple-m5-max`, with `per_block.gpu_round_trip` (expected near the M2.6-4 row: about 0.9 ms median per block). Add an operator row.
+4. **Placement recorded and repeatable:** `"$T/release/signal" render projects/gpu-partials --seconds 10 --out /tmp/gpu-a`, the same to `/tmp/gpu-b`: the two `manifest.json` have the same `audio_fnv1a64`, `log_fnv1a64`, `compute_devices` (the one adapter) and `placement` (`/bank` on it). Then a copy of the project with `gpu = "0"` on `bank`: the same hashes, and `placement[0].pinned` is `"0"`.
+5. **The Setup's limit:** a Setup with `gpu_devices = []` (`"$T/release/signal" --setup /tmp/no-gpu.toml render projects/gpu-partials --seconds 2 --out /tmp/gpu-none`): the summary says the Setup limited the devices to none, `placement[0].device` is `null`, the audio is silence and `log.jsonl` holds one `late_result` per due block.
+6. **Real time unchanged:** `"$T/release/signal" play projects/gpu-partials --seconds 60 --json` with the interface as the default output: `xruns` 0 and `late_results` 0 on an idle GPU, as at the M2.7-5 checkpoint. A device loss cannot be provoked on the device; it is the noop tests' (`lab/tests/placement.rs`).
+
 ## What this means for D-EXEC-3
 
 These are interpretations of a single seat measurement. They are not a decision; D-EXEC-3 stays deferred (roadmap M4).

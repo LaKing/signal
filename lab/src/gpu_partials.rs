@@ -41,8 +41,16 @@
 //!
 //! **Time.** The phases (1 024 multiply-adds per block), the upload of the
 //! block's partials and every per-frame call are bounded and allocation
-//! free. The GPU work runs on the `signal-gpu` thread; the module never
-//! waits for it. The engine waits for a due result offline only (`due`).
+//! free. The GPU work runs on its device's `signal-gpu-<id>` thread; the
+//! module never waits for it. The engine waits for a due result offline only
+//! (`due`).
+//!
+//! **Device (M2.7-2).** The instance runs on the device its host lends it
+//! (`PrepareContext::lent`, a [`Lease`] placed by `signal_gpu::GpuHost`);
+//! without one it has no channel and every due result is lost. When its
+//! device is lost and the pool replaces it, the next block's `due` takes the
+//! new channel ([`PlacedChannel::refresh`]): the results still in flight on
+//! the old device are lost (cause `device_lost`), the next ones come back.
 
 use libm::{exp, floor, log, sin};
 use signal_core::{
@@ -50,7 +58,7 @@ use signal_core::{
     Outputs, ParameterDescriptor, PortDescriptor, PortKind, PortShape, PrepareContext, Range,
     RateDivisor, Reproducibility, StateOutputPrimitive,
 };
-use signal_gpu::{Channel, Failure, GpuService, Job, KernelSpec, Outcome};
+use signal_gpu::{Channel, Failure, Job, KernelSpec, Lease, Outcome, PlacedChannel};
 
 /// The partials in the bank.
 pub const PARTIALS: usize = 1024;
@@ -319,8 +327,8 @@ fn cause_of(outcome: Outcome) -> Option<LossCause> {
 #[derive(Debug, Default)]
 pub struct GpuPartials {
     bank: Bank,
-    /// `None` without a usable GPU: every due result is then lost.
-    channel: Option<Channel>,
+    /// `None` without a device: every due result is then lost.
+    channel: Option<PlacedChannel>,
     /// The parameters at the first frame of the block being absorbed.
     params: Params,
     /// The frame within the current block, for `emit` and `absorb` alike.
@@ -332,6 +340,10 @@ pub struct GpuPartials {
     first_seq: u64,
     /// Bit `seq % 64` set: that block's job could not be submitted.
     unsent: u64,
+    /// Bit `seq % 64` set: that block's job was in flight on a device that
+    /// was lost and replaced (M2.7-2); cleared, as `unsent`, by the next
+    /// submission with the same bit.
+    lost_at_rebind: u64,
     /// The job shown in the current block (`None`: silence).
     current: Option<Job>,
     /// Whether the current block's due result was dealt with (`due`, `miss`).
@@ -357,6 +369,21 @@ impl GpuPartials {
         (self.block >= back).then(|| self.first_seq + self.block - back)
     }
 
+    /// The bits (`seq % 64`) of every block submitted and not yet due.
+    fn outstanding(&self) -> u64 {
+        let from = self.due_seq().unwrap_or(self.first_seq);
+        let to = self.first_seq + self.block;
+        (from..to).fold(0u64, |bits, seq| bits | 1 << (seq % 64))
+    }
+
+    /// Why a block that was never sent, or is no longer coming back, is
+    /// lost: its device was lost (now, or while it was in flight).
+    fn unsent_cause(&self, bit: u64) -> Option<LossCause> {
+        let device_lost = self.lost_at_rebind & bit != 0
+            || self.channel.as_ref().is_some_and(|c| c.service_lost());
+        device_lost.then_some(LossCause::DeviceLost)
+    }
+
     /// Shows nothing in the current block; the shown job returns to the pool.
     fn silence(&mut self) {
         self.showing_injected = false;
@@ -373,9 +400,13 @@ impl StateOutputPrimitive for GpuPartials {
 
     fn prepare(&mut self, ctx: &PrepareContext) {
         self.bank = Bank::new(ctx.sample_rate);
-        // A new channel (the old one, if any, is dropped here, on the
-        // control thread); the service is created on first use.
-        self.channel = GpuService::shared().and_then(|gpu| gpu.channel(KERNEL, JOBS).ok());
+        // A new channel on the lent device (the old one, if any, is dropped
+        // here, on the control thread).
+        self.channel = ctx
+            .lent
+            .as_ref()
+            .and_then(|lent| lent.downcast_ref::<Lease>())
+            .and_then(|lease| lease.channel(KERNEL, JOBS).ok());
         self.current = None;
         self.refused = Vec::with_capacity(JOBS);
         self.injected = vec![0.0; BLOCK_FRAMES];
@@ -391,6 +422,7 @@ impl StateOutputPrimitive for GpuPartials {
         self.block = 0;
         self.frame = 0;
         self.unsent = 0;
+        self.lost_at_rebind = 0;
         self.resolved = false;
         self.cause = None;
     }
@@ -400,11 +432,30 @@ impl StateOutputPrimitive for GpuPartials {
         if self.frame != 0 || self.resolved {
             return Due::Ready;
         }
+        // M2.7-2: a replacement for a lost device is taken at a block's
+        // start; the shown job goes back to its own (old) channel first, and
+        // every block still in flight there is lost.
+        if let Some(channel) = self.channel.as_mut() {
+            let (current, refused) = (&mut self.current, &mut self.refused);
+            let swapped = channel.refresh(|old| {
+                if let Some(job) = current.take() {
+                    give_back(old, refused, job);
+                }
+            });
+            if swapped {
+                self.showing_injected = false;
+                let outstanding = self.outstanding();
+                self.lost_at_rebind |= outstanding;
+                self.unsent |= outstanding;
+            }
+        }
         let Some(due) = self.due_seq() else {
             self.silence();
             self.resolved = true;
             return Due::Ready;
         };
+        let bit = 1 << (due % 64);
+        let cause = self.unsent_cause(bit);
         let Some(channel) = self.channel.as_mut() else {
             return Due::Lost;
         };
@@ -416,7 +467,8 @@ impl StateOutputPrimitive for GpuPartials {
                 give_back(channel, &mut self.refused, job);
             }
         }
-        if self.unsent & (1 << (due % 64)) != 0 {
+        if self.unsent & bit != 0 {
+            self.cause = cause;
             return Due::Lost;
         }
         match channel.peek_done() {
@@ -438,11 +490,30 @@ impl StateOutputPrimitive for GpuPartials {
             }
             // A stale result published since the loop above: the next `due`
             // returns it to the pool (an offline wait asks again; in real
-            // time a pending result is a miss, as a lost one).
-            Some(seq) if seq < due => Due::Pending,
-            Some(_) => Due::Lost,
-            None if channel.is_lost() => Due::Lost,
-            None => Due::Pending,
+            // time a pending result is a miss, as a lost one; its cause is
+            // the device's loss when the device is lost, auditor-2-015).
+            // While the lost service still holds the channel's jobs (it
+            // drains them), a miss is the device's loss too (auditor-1-008).
+            Some(seq) if seq < due => {
+                self.cause = cause;
+                Due::Pending
+            }
+            Some(_) => {
+                self.cause = cause;
+                Due::Lost
+            }
+            None if channel.is_lost() => {
+                self.cause = Some(if channel.service_lost() {
+                    LossCause::DeviceLost
+                } else {
+                    LossCause::Stopped
+                });
+                Due::Lost
+            }
+            None => {
+                self.cause = cause;
+                Due::Pending
+            }
         }
     }
 
@@ -552,6 +623,7 @@ impl StateOutputPrimitive for GpuPartials {
         } else {
             self.unsent | bit
         };
+        self.lost_at_rebind &= !bit;
         self.frame = 0;
         self.block += 1;
         self.resolved = false;
@@ -615,6 +687,93 @@ mod tests {
         }
         eprintln!("f32 kernel arithmetic: worst |f32 − f64| / Σ|a| = {worst:.3e}");
         assert!(worst <= TOLERANCE / 4.0, "{worst}");
+    }
+
+    /// One block as the offline engine runs it: wait for a pending result,
+    /// `miss` a lost one. Whether its due result was delivered, and the
+    /// cause the engine would log for one that was lost.
+    fn offline_block(module: &mut GpuPartials) -> (bool, Option<LossCause>) {
+        let values = {
+            let p = Params::default();
+            [p.freq, p.stretch, p.tilt, p.gain]
+        };
+        let mut delivered = true;
+        let mut cause = None;
+        for t in 0..BLOCK_FRAMES {
+            let started = std::time::Instant::now();
+            loop {
+                match module.due() {
+                    Due::Ready => break,
+                    Due::Pending => {
+                        assert!(started.elapsed().as_secs() < 10, "a due result never came");
+                        std::thread::yield_now();
+                    }
+                    Due::Lost => {
+                        delivered &= t != 0;
+                        cause = module.lost_cause();
+                        module.miss();
+                        break;
+                    }
+                }
+            }
+            let mut out = [0.0];
+            module.emit(&mut Outputs::new(1, &mut out, &mut []));
+            module.absorb(&Inputs::new(1, &[], &values, &[], &[]));
+        }
+        (delivered && module.block > u64::from(LATENCY_BLOCKS), cause)
+    }
+
+    /// M2.7-2 (auditor-1-003, auditor-2-011): when its device is replaced,
+    /// the shown job goes back to its own (old) channel, so nothing is
+    /// refused or leaked; the blocks in flight are lost with the cause
+    /// `device_lost`, their marks are cleared as `unsent` is, by the next
+    /// block sent with the same mark (`seq % 64`), and
+    /// the bank delivers again on the new channel.
+    #[test]
+    fn a_replaced_device_takes_back_every_job() {
+        use signal_gpu::DevicePool;
+        use std::sync::Arc;
+
+        let pool = Arc::new(DevicePool::noop(1).unwrap());
+        let mut module = GpuPartials::default();
+        module.prepare(&PrepareContext {
+            sample_rate: 96_000.0,
+            max_frames: 256,
+            rng: signal_core::RngStream::derive(1, &"/bank".parse().unwrap()),
+            lent: Some(Arc::new(DevicePool::lease(&pool, 0))),
+        });
+        for _ in 0..4 {
+            offline_block(&mut module);
+        }
+        assert!(offline_block(&mut module).0, "delivering before the loss");
+        assert!(module.current.is_some(), "a job is shown");
+        pool.lose_device(0);
+        let started = std::time::Instant::now();
+        while pool.status()[0].generation < 2 {
+            assert!(started.elapsed().as_secs() < 10, "not replaced");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let mut causes = Vec::new();
+        let mut delivered = 0;
+        // Past 64 blocks: every mark (`seq % 64`) is sent again.
+        for _ in 0..70 {
+            match offline_block(&mut module) {
+                (true, _) => delivered += 1,
+                (false, cause) => causes.push(cause),
+            }
+            assert!(
+                module.refused.is_empty(),
+                "every job went to its own channel"
+            );
+        }
+        assert!(!causes.is_empty(), "the blocks in flight were lost");
+        assert!(
+            causes.iter().all(|c| *c == Some(LossCause::DeviceLost)),
+            "{causes:?}"
+        );
+        assert!(delivered > 2 * JOBS, "delivering again: {delivered}");
+        assert_eq!(module.lost_at_rebind, 0, "cleared by later submissions");
+        assert_eq!(module.unsent, 0);
     }
 
     /// Partials at or above Nyquist are silent; Σ|a_i| is the gain.

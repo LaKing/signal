@@ -11,6 +11,7 @@
 
 use crate::descriptor::{Feedthrough, ModuleDescriptor};
 use crate::event::Event;
+use crate::registry::Lent;
 use crate::rng::RngStream;
 use serde::Serialize;
 
@@ -23,6 +24,10 @@ pub struct PrepareContext {
     pub max_frames: usize,
     /// The instance's random stream (ADR 0008). Keep a copy to restart it in `reset`.
     pub rng: RngStream,
+    /// What the registry's [`Host`](crate::Host) lends this instance (M2.7-2:
+    /// e.g. its GPU device), opaque to the engine; `None` when nothing is
+    /// lent. A module that uses it downcasts it and must work without it.
+    pub lent: Option<Lent>,
 }
 
 /// The inputs of one real-time call, covering `frames` consecutive frames.

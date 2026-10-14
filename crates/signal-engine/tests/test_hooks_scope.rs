@@ -49,10 +49,17 @@ const GATED: &[(&str, &str)] = &[
     ("crates/signal-gpu/src/lib.rs", "pub fn lose_device"),
     ("crates/signal-gpu/src/lib.rs", "pub fn peak_in_flight"),
     ("crates/signal-gpu/src/lib.rs", "pub fn kernels_cached"),
+    // M2.7-2: the device pool's hooks.
+    ("crates/signal-gpu/src/pool.rs", "pub fn lose_device"),
+    ("crates/signal-gpu/src/pool.rs", "pub fn with_service"),
+    ("crates/signal-gpu/src/pool.rs", "pub fn hold_replacement"),
+    ("crates/signal-gpu/src/pool.rs", "pub fn refuse_replacement"),
+    ("crates/signal-gpu/src/pool.rs", "pub fn watcher_wakes"),
+    ("crates/signal-gpu/src/pool.rs", "pub fn refuse_offers"),
 ];
 
 /// Names no production source outside the two crates that define them may use.
-const NAMES: [&str; 12] = [
+const NAMES: [&str; 17] = [
     "HookPoint",
     "set_task_hook",
     "exclusivity(",
@@ -65,6 +72,11 @@ const NAMES: [&str; 12] = [
     "lose_device",
     "peak_in_flight",
     "kernels_cached",
+    "with_service",
+    "hold_replacement",
+    "refuse_replacement",
+    "watcher_wakes",
+    "refuse_offers",
 ];
 
 const FEATURE: &str = "feature = \"test-hooks\"";
@@ -121,8 +133,56 @@ fn every_test_only_item_needs_the_feature() {
     assert!(missing.is_empty(), "{missing:#?}");
 }
 
+/// The line numbers inside a file's `#[cfg(test)] mod tests { … }` blocks:
+/// from the `mod tests {` line to the line whose `}` closes it, by brace
+/// count. Everything else in the file is production source.
+fn unit_test_lines(lines: &[&str]) -> Vec<bool> {
+    let mut inside = vec![false; lines.len()];
+    let mut n = 0;
+    while n + 1 < lines.len() {
+        if lines[n].trim() == "#[cfg(test)]" && lines[n + 1].trim_start().starts_with("mod tests {")
+        {
+            let mut depth = 0i64;
+            let mut m = n + 1;
+            while m < lines.len() {
+                inside[m] = true;
+                depth += lines[m].matches('{').count() as i64;
+                depth -= lines[m].matches('}').count() as i64;
+                if depth <= 0 {
+                    break;
+                }
+                m += 1;
+            }
+            n = m;
+        }
+        n += 1;
+    }
+    inside
+}
+
+/// Only the unit-test block is skipped: code before and after it is read.
+#[test]
+fn only_the_unit_test_block_is_skipped() {
+    let lines = [
+        "fn a() { hook(); }",
+        "#[cfg(test)]",
+        "mod tests {",
+        "    fn t() {",
+        "        hook();",
+        "    }",
+        "}",
+        "fn b() { hook(); }",
+    ];
+    assert_eq!(
+        unit_test_lines(&lines),
+        [false, false, true, true, true, true, true, false]
+    );
+}
+
 /// No production source of another crate names a test-only item (the
-/// tests, benches and examples may).
+/// tests, benches and examples may, and so may a source file's own unit
+/// tests: the lines inside its `#[cfg(test)] mod tests` block are not read;
+/// code after the block is).
 #[test]
 fn no_production_source_uses_them() {
     let root = root();
@@ -140,7 +200,12 @@ fn no_production_source_uses_them() {
     let mut offenders = Vec::new();
     for file in &sources {
         let text = fs::read_to_string(file).unwrap();
-        for (n, line) in text.lines().enumerate() {
+        let lines: Vec<&str> = text.lines().collect();
+        let unit_tests = unit_test_lines(&lines);
+        for (n, line) in lines.iter().enumerate() {
+            if unit_tests[n] {
+                continue;
+            }
             if !is_comment(line) && NAMES.iter().any(|name| line.contains(name)) {
                 offenders.push(format!("{}:{}: {}", file.display(), n + 1, line.trim()));
             }

@@ -1,8 +1,9 @@
 //! The contract suite (`docs/module-contract.md`) on every `lab.*` primitive,
 //! as on `std.*`. The suite's renderer waits for due results as the offline
-//! engine does. `lab.gpu_partials` runs on the GPU, or, where none is usable
-//! (AC10 of M2.6-4), on the noop device: then every job travels the real
-//! path (submit, due, recycle, reset) but its output is 0.
+//! engine does. `lab.gpu_partials` is lent a device (M2.7-2) and runs on the
+//! GPU, or, where none is usable (AC10 of M2.6-4), on the noop device: then
+//! every job travels the real path (submit, due, recycle, reset) but its
+//! output is 0.
 
 #![cfg(feature = "lab")]
 
@@ -17,11 +18,11 @@ macro_rules! checks {
         $(
             #[test]
             fn $name() {
-                common::device();
+                let gpu = common::device();
                 $check.assert(
                     &common::module_type(),
                     stimulus::random,
-                    &Settings::persisting(file!()),
+                    &Settings::persisting(file!()).lending(gpu.lent()),
                 );
             }
         )*

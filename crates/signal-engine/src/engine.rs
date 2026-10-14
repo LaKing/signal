@@ -614,6 +614,20 @@ impl PlanState {
         }
         let ports: Vec<PortAddress> = all_ports.into_iter().collect();
         let mut roles: Vec<Option<(usize, Role)>> = vec![None; ports.len()];
+        // M2.7-2: what the host lends each instance, asked once per plan
+        // state with every instance in address order; never read here.
+        let mut lent = match registry.host() {
+            Some(host) => {
+                let all: Vec<_> = plan
+                    .instances
+                    .iter()
+                    .map(|i| (&i.address, i.type_name))
+                    .collect();
+                host.lend(&all)
+            }
+            None => Vec::new(),
+        };
+        lent.resize(plan.instances.len(), None);
 
         let mut instances = Vec::with_capacity(plan.instances.len());
         let mut instance_ids = BTreeMap::new();
@@ -671,6 +685,7 @@ impl PlanState {
                         sample_rate: f64::from(config.sample_rate),
                         max_frames: config.block_capacity,
                         rng: RngStream::derive(config.seed, address),
+                        lent: lent.get_mut(index).and_then(Option::take),
                     };
                     match &mut primitive {
                         Primitive::Direct(module) => module.prepare(&context),

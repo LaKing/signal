@@ -360,6 +360,12 @@ impl SignalApp {
                     ui.label("Output channels (device channel per sink channel)");
                     ui.add(egui::TextEdit::singleline(&mut draft.channels).hint_text("1, 2"));
                 });
+                // M2.7-2: read-only, as `signal devices --compute` lists it.
+                egui::CollapsingHeader::new("Compute devices (read-only)").show(ui, |ui| {
+                    for line in &view.devices.compute {
+                        ui.monospace(line);
+                    }
+                });
                 if let Some(error) = &error {
                     ui.colored_label(egui::Color32::LIGHT_RED, error);
                 }

@@ -88,13 +88,14 @@ Ports are written `instance.port`, with the inner instance's local name. Export 
 
 ```toml
 [instances]
-<name> = { module = "<ref>", <parameter> = <number>, … }
+<name> = { module = "<ref>", gpu = "<device>", <parameter> = <number>, … }
 ```
 
 - **`<name>`** is the instance's local name, `[a-z][a-z0-9_]*`. Instance addresses follow from names: `/voice/low` is instance `low` inside the instance `voice` of the project (ADR 0016 §1).
 - **`module`** is the module reference:
   - a reference containing a dot, such as **`std.sine_osc`**, resolves to a **primitive type in the registry** (`signal modules` lists them);
   - a **bare name**, such as `voice`, resolves to the **composite in `composites/voice.toml`**.
+- **`gpu`** (M2.7-2, optional) pins a **GPU-backed primitive instance** to a GPU device: a device's stable id or its index in the machine's pool, as a string (`gpu = "metal-apple-m5-max"`, `gpu = "1"`; `signal devices --compute` lists both; an index counts the devices the Setup's `gpu_devices` allows, sorted by id). Without it the instance is placed by the rule: round-robin over the devices sorted by id, by instance address (`docs/realtime-rules.md` "GPU"). A pin naming no device of the machine is reported and the instance is placed by the rule; a pin on an instance that uses no GPU is reported and ignored. It is an error on a composite instance (pin the instances inside it) and when empty. `gpu` is **reserved**: no composite may export a parameter named `gpu`. A running project keeps its placement: a live edit that changes a pin, or adds a pinned instance, is refused (restart the project). The render manifest records the placement.
 - **Parameters** are every other key. The value is a number (integer or float). For a primitive, the key must be one of its declared parameters, and the value must lie in the parameter's range. For a composite, the key must be one of its exported parameters. When parameters are set at several levels, the outermost instance's value wins.
 
 ## 5. Connections
@@ -191,6 +192,7 @@ height = 640.0
 | `[window]` | the window's size in points when last closed | the toolkit's default |
 | `rt_policy` | **advanced, not in the dialog** (M2.7-1): how idle worker threads wait and are woken in real time: `"park50"`, `"budget-spin"`, `"semaphore"` or `"fanout"` (`docs/realtime-rules.md` "Wake policies"). It changes the timing, never the output. Written only when not the default | `"park50"` |
 | `rt_computation` | **advanced, not in the dialog**: the worker threads' time-constraint computation, a fraction of the device period above 0 and at most 1 (`docs/realtime-rules.md` "The policy"). Written only when not the default | `0.25` |
+| `gpu_devices` | **advanced, shown read-only in the dialog** (M2.7-2): the GPU adapters GPU-backed modules may use: `"all"`, or a list of adapter ids or inventory indices (`signal devices --compute`), e.g. `["metal-apple-m5-max"]`; `[]` uses none. An entry naming no adapter is reported. `signal render`, `play`, `replay` and `bench --gpu` of a `--features gpu` build read it from the same file (`--setup`, else `$SIGNAL_SETUP`, else the default path) and say when it limited the devices. Written only when not `"all"` | `"all"` |
 
 **Finding a saved device.** Several devices can share a name (one display can list three audio endpoints of the same name), so the device picker shows such devices as `name (#k · signature)`. A saved device with an `id` is that device only. If no present device has that id, the Setup reports that the saved device is not present and asks for another to be chosen. It never takes another device of the same name for it, nor the default. Without an `id`, a unique name finds the device. If several devices share the name, only the one whose `signature` matches does. When none or more than one is left, that is reported and nothing is chosen. Playing is refused while the output cannot be found. Playing goes on without input meters while the input cannot be found. The interface dialog shows such a device as not found. Applying without choosing another keeps it saved as it is. Only an explicit choice replaces it, and that choice may be the system default. A device chosen in the dialog is kept by its identity, so refreshing the list (which may reorder it) never turns the choice into another device.
 

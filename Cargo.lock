@@ -3395,6 +3395,7 @@ dependencies = [
  "signal-audio",
  "signal-core",
  "signal-engine",
+ "signal-gpu",
  "signal-graph",
  "signal-output",
  "signal-project",
@@ -3437,6 +3438,7 @@ dependencies = [
  "signal-output",
  "signal-project",
  "signal-std",
+ "toml",
 ]
 
 [[package]]
@@ -3493,6 +3495,7 @@ dependencies = [
  "pollster",
  "rtrb",
  "signal-contract",
+ "signal-core",
  "signal-gpu",
  "wgpu",
 ]

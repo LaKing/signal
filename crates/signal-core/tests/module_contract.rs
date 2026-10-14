@@ -109,6 +109,7 @@ fn ctx() -> PrepareContext {
         sample_rate: 96_000.0,
         max_frames: 4,
         rng: RngStream::derive(1, &address),
+        lent: None,
     }
 }
 

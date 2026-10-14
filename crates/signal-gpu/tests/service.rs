@@ -5,12 +5,13 @@
 
 signal_contract::install_counting_allocator!();
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use signal_contract::alloc_counter::Guard;
 use signal_gpu::{
-    Channel, Failure, GpuError, GpuService, Injected, JOIN_MARGIN, Job, KernelSpec, MAX_IN_FLIGHT,
-    Outcome, SHUTDOWN_TIMEOUT, ServiceState,
+    Channel, DevicePool, Failure, GpuError, GpuService, Injected, JOIN_MARGIN, Job, KernelSpec,
+    Lease, MAX_IN_FLIGHT, Outcome, SHUTDOWN_TIMEOUT, Selection, ServiceState,
 };
 
 /// The audit's copy kernel: `output[i] = input[i]` for the first two words.
@@ -493,18 +494,19 @@ fn shutdown_is_bounded_and_reported() {
     assert!(stuck.is_lost());
 }
 
-/// A real GPU, or `None` after saying why (the noop device computes
-/// nothing): the audit's adapter reproductions, run by the operator.
-fn gpu() -> Option<&'static GpuService> {
-    match GpuService::shared() {
-        Some(service) if !service.is_noop() => {
-            eprintln!("GPU: {}", service.adapter());
-            Some(service)
+/// The machine's first GPU, or `None` after saying why (the noop device
+/// computes nothing): the audit's adapter reproductions, run by the operator.
+fn gpu() -> Option<Lease> {
+    let pool = Arc::new(DevicePool::open(&Selection::All));
+    match pool.devices().first() {
+        Some(device) => {
+            eprintln!("GPU: {} ({})", device.name, device.backend);
+            Some(DevicePool::lease(&pool, 0))
         }
-        _ => {
+        None => {
             eprintln!(
                 "skipped: no usable GPU adapter ({:?}); the operator runs this on the M5 Max",
-                GpuService::shared_error()
+                signal_gpu::inventory().error
             );
             None
         }

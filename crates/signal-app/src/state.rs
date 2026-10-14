@@ -186,6 +186,19 @@ pub struct Status {
     pub scheduling: &'static str,
 }
 
+/// The compute inventory for the dialog (M2.7-2): read on the control
+/// thread; listing GPU adapters creates no device.
+fn compute_lines(gpu_devices: &signal_gpu::Selection) -> Vec<String> {
+    let (levels, source) = signal_engine::cpu_levels();
+    let mut lines = signal_engine::cpu_lines(&levels, source);
+    lines.extend(signal_gpu::inventory().lines());
+    lines.push(format!(
+        "GPU devices for GPU-backed modules (Setup gpu_devices): {}",
+        gpu_devices.describe()
+    ));
+    lines
+}
+
 /// A device list for the dialog.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DeviceList {
@@ -197,6 +210,10 @@ pub struct DeviceList {
     pub inputs: Vec<(usize, String)>,
     /// Why there is no list.
     pub error: Option<String>,
+    /// The compute devices, read-only (M2.7-2): the CPU's performance levels
+    /// and every GPU adapter, as `signal devices --compute` lists them, and
+    /// the Setup's `gpu_devices`.
+    pub compute: Vec<String>,
 }
 
 /// A snapshot of the state, for the window.
@@ -673,12 +690,14 @@ impl AppState {
                 inputs: labels(&devices, Direction::Input),
                 devices,
                 error: None,
+                compute: Vec::new(),
             },
             Err(error) => DeviceList {
                 error: Some(error.to_string()),
                 ..DeviceList::default()
             },
         };
+        self.devices.compute = compute_lines(&self.setup.gpu_devices);
     }
 
     /// Loads the project at `dir` for its rate and diagnostics.

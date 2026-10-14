@@ -8,7 +8,7 @@ use proptest::prelude::{Strategy, any};
 use proptest::test_runner::{
     Config, FailurePersistence, FileFailurePersistence, TestCaseError, TestError, TestRunner,
 };
-use signal_core::{Feedthrough, ModuleDescriptor, ModuleType, Primitive};
+use signal_core::{Feedthrough, Lent, ModuleDescriptor, ModuleType, Primitive};
 
 use crate::alloc_counter;
 use crate::render::{Instance, Panic, Rendered, first_difference};
@@ -91,7 +91,9 @@ impl Check {
                 seed: 0,
                 blocks: vec![TAIL_BLOCK],
             };
-            return self.run_case(module_type, stimulus, &case);
+            return self
+                .case(module_type, stimulus, &case, settings.lent.as_ref())
+                .map_err(|detail| self.failure(module_type, detail));
         }
         let mut config = Config::default();
         if std::env::var_os("PROPTEST_CASES").is_none() {
@@ -105,7 +107,7 @@ impl Check {
         let cases = (any::<u64>().no_shrink(), vec(1..=MAX_BLOCK, 1..=16))
             .prop_map(|(seed, blocks)| Case { seed, blocks });
         let result = TestRunner::new(config).run(&cases, |case| {
-            self.case(module_type, stimulus, &case)
+            self.case(module_type, stimulus, &case, settings.lent.as_ref())
                 .map_err(TestCaseError::fail)
         });
         let detail = match result {
@@ -127,7 +129,7 @@ impl Check {
         stimulus: StimulusFn,
         case: &Case,
     ) -> Result<(), Failure> {
-        self.case(module_type, stimulus, case)
+        self.case(module_type, stimulus, case, None)
             .map_err(|detail| self.failure(module_type, detail))
     }
 
@@ -151,6 +153,7 @@ impl Check {
         module_type: &ModuleType,
         stimulus: StimulusFn,
         case: &Case,
+        lent: Option<&Lent>,
     ) -> Result<(), String> {
         let descriptor = &module_type.descriptor;
         let names = output_names(descriptor);
@@ -162,9 +165,12 @@ impl Check {
                 let input = generate(descriptor, stimulus, seed, FRAMES)?;
                 for rate in RATES {
                     let at = format!("at {rate} Hz, seed {seed}");
-                    let one =
-                        Instance::new(module_type, rate, 1, seed).render(&input, FRAMES, &[1]);
-                    let split = Instance::new(module_type, rate, max_block, seed)
+                    let one = Instance::new(module_type, lent, rate, 1, seed).render(
+                        &input,
+                        FRAMES,
+                        &[1],
+                    );
+                    let split = Instance::new(module_type, lent, rate, max_block, seed)
                         .render(&input, FRAMES, blocks);
                     faults(&one, &names, &at)?;
                     faults(&split, &names, &at)?;
@@ -180,7 +186,7 @@ impl Check {
                 let input = generate(descriptor, stimulus, seed, FRAMES)?;
                 for rate in RATES {
                     let at = format!("at {rate} Hz, seed {seed}");
-                    let mut instance = Instance::new(module_type, rate, max_block, seed);
+                    let mut instance = Instance::new(module_type, lent, rate, max_block, seed);
                     let first = instance.render(&input, FRAMES, blocks);
                     faults(&first, &names, &at)?;
                     instance.reset();
@@ -199,7 +205,7 @@ impl Check {
                 let input = generate(descriptor, stimulus, seed, FRAMES)?;
                 for rate in RATES {
                     let at = format!("at {rate} Hz, seed {seed}");
-                    let rendered = Instance::new(module_type, rate, max_block, seed)
+                    let rendered = Instance::new(module_type, lent, rate, max_block, seed)
                         .render(&input, FRAMES, blocks);
                     faults(&rendered, &names, &at)?;
                     if let Some(d) = rendered.first_value(&names, |x| !x.is_finite()) {
@@ -219,7 +225,7 @@ impl Check {
                 let input = generate(descriptor, stimulus, seed, FRAMES)?;
                 for rate in RATES {
                     let at = format!("at {rate} Hz, seed {seed}");
-                    let mut instance = Instance::new(module_type, rate, max_block, seed);
+                    let mut instance = Instance::new(module_type, lent, rate, max_block, seed);
                     let rendered = instance.render(&input, FRAMES, blocks);
                     faults(&rendered, &names, &at)?;
                     if let Some((frame, call, counts)) = rendered.allocation {
@@ -248,7 +254,7 @@ impl Check {
                 let input = generate(descriptor, stimulus, seed, HONESTY_FRAMES)?;
                 for rate in RATES {
                     let at = format!("at {rate} Hz, seed {seed}");
-                    let baseline = Instance::new(module_type, rate, 1, seed).render(
+                    let baseline = Instance::new(module_type, lent, rate, 1, seed).render(
                         &input,
                         HONESTY_FRAMES,
                         &[1],
@@ -260,7 +266,7 @@ impl Check {
                         .map(|b| b.saturating_sub(1) % HONESTY_FRAMES)
                     {
                         let changed = stimulus::perturb(descriptor, &input, n);
-                        let mut instance = Instance::new(module_type, rate, 1, seed);
+                        let mut instance = Instance::new(module_type, lent, rate, 1, seed);
                         let rendered = instance.render(&changed, n + 1, &[1]);
                         faults(&rendered, &names, &at)?;
                         if let Some(d) =
@@ -286,13 +292,13 @@ impl Check {
                 for (i, rate) in RATES.into_iter().enumerate() {
                     let earlier = RATES[(i + RATES.len() - 1) % RATES.len()];
                     let at = format!("at {rate} Hz, seed {seed}");
-                    let mut used = Instance::new(module_type, earlier, max_block, seed);
+                    let mut used = Instance::new(module_type, lent, earlier, max_block, seed);
                     let first = used.render(&input, FRAMES, blocks);
                     faults(&first, &names, &format!("at {earlier} Hz, seed {seed}"))?;
                     used.prepare(rate, max_block, seed);
                     let again = used.render(&input, FRAMES, blocks);
                     faults(&again, &names, &at)?;
-                    let fresh = Instance::new(module_type, rate, max_block, seed)
+                    let fresh = Instance::new(module_type, lent, rate, max_block, seed)
                         .render(&input, FRAMES, blocks);
                     faults(&fresh, &names, &at)?;
                     if let Some(d) = first_difference(&fresh, &again, &names) {
@@ -308,7 +314,7 @@ impl Check {
                 let input = stimulus::impulse(descriptor, TAIL_FRAMES);
                 for rate in RATES {
                     let at = format!("at {rate} Hz, seed {seed}");
-                    let rendered = Instance::new(module_type, rate, max_block, seed).render(
+                    let rendered = Instance::new(module_type, lent, rate, max_block, seed).render(
                         &input,
                         TAIL_FRAMES,
                         blocks,
@@ -345,7 +351,7 @@ pub struct Case {
 }
 
 /// How a check runs under proptest.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Settings {
     /// Cases per check, unless the `PROPTEST_CASES` environment variable is set.
     pub cases: u32,
@@ -353,6 +359,9 @@ pub struct Settings {
     /// `<file stem>.proptest-regressions` beside it and replays them first on
     /// the next run. `None` records nothing.
     pub regressions: Option<&'static str>,
+    /// What every instance is lent in `prepare` (M2.7-2: a GPU device for a
+    /// GPU-backed type), as the engine's host would; `None` lends nothing.
+    pub lent: Option<Lent>,
 }
 
 impl Settings {
@@ -361,6 +370,7 @@ impl Settings {
         Settings {
             cases: DEFAULT_CASES,
             regressions: Some(source_file),
+            lent: None,
         }
     }
 
@@ -369,6 +379,15 @@ impl Settings {
         Settings {
             cases: DEFAULT_CASES,
             regressions: None,
+            lent: None,
+        }
+    }
+
+    /// These settings, lending every instance `lent`.
+    pub fn lending(self, lent: Lent) -> Settings {
+        Settings {
+            lent: Some(lent),
+            ..self
         }
     }
 }

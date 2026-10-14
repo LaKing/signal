@@ -40,6 +40,8 @@ pub(crate) struct InstanceSpans {
     pub(crate) module_span: Span,
     /// Key and value span of each parameter set on the instance.
     pub(crate) parameters: BTreeMap<String, (Span, Span)>,
+    /// Its `gpu` pin (M2.7-2) and the value's span.
+    pub(crate) gpu: Option<(String, Span)>,
 }
 
 /// The spans of one connection.
@@ -250,6 +252,12 @@ impl<'a> Locator<'a> {
         let (last, scope) = segments.split_last()?;
         let def = self.def_at(scope)?;
         Some((def, def.instances.get(last)?))
+    }
+
+    /// The `gpu` pin of the instance at `address`, if it has one.
+    pub(crate) fn pin(&self, address: &InstanceAddress) -> Option<&'a str> {
+        let (_, instance) = self.instance(address)?;
+        instance.gpu.as_ref().map(|(pin, _)| pin.as_str())
     }
 
     fn instance_key(&self, address: &InstanceAddress) -> Option<Location> {

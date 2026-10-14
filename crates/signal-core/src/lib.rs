@@ -9,7 +9,8 @@
 //! - [`RngStream`]: the vendored, seeded per-instance random stream (ADR 0008).
 //! - [`DirectPrimitive`], [`StateOutputPrimitive`] and their I/O views: the module
 //!   contract (ADR 0002, 0016 §5), normative in `docs/module-contract.md`.
-//! - [`ModuleType`] and [`Registry`]: primitive types by name.
+//! - [`ModuleType`] and [`Registry`]: primitive types by name, and the
+//!   [`Host`] that lends instances what the program provides ([`Lent`]).
 //!
 //! This crate knows frames, ports, events and addresses only. Musical, MIDI,
 //! lighting or video concepts do not belong here (ADR 0001, risk R15).
@@ -45,6 +46,6 @@ pub use module::{
     DirectPrimitive, Due, EventSink, Inputs, LossCause, Outputs, PrepareContext, Primitive,
     StateOutputPrimitive,
 };
-pub use registry::{ModuleType, Registry, RegistryError};
+pub use registry::{Host, Lent, ModuleType, Registry, RegistryError};
 pub use rng::{Fnv1a64, RngStream, SplitMix64, Xoshiro256PlusPlus, fnv1a64, fnv1a64_words};
 pub use time::{Frame, RateDivisor};

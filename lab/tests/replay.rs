@@ -9,8 +9,7 @@
 //! render awaits every result: no fault, another log hash, labelled `ideal`.
 //! On the noop device (no usable GPU) every result is silence, so the audio
 //! difference of the ideal render shows on a GPU only (AC4-gpu, the
-//! operator). Its own test binary, because the hook belongs to the
-//! process's service.
+//! operator). The test's own device pool (M2.7-2) lends the bank its device.
 
 #![cfg(feature = "lab")]
 
@@ -46,7 +45,7 @@ const PAUSES: [bool; 16] = [
 fn a_delayed_gpu_run_replays_exactly_and_ideal_differs() {
     let gpu = common::device();
     gpu.set_completion_delay(D);
-    let registry = common::registry();
+    let registry = gpu.registry();
     let project = Project::from_sources(vec![SourceFile {
         path: "project.toml".to_owned(),
         text: format!(

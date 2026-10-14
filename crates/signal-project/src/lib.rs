@@ -216,6 +216,11 @@ impl Project {
         let Some((settings, root, root_spans)) = root else {
             return Err(builder.diagnostics);
         };
+        let names: BTreeSet<&str> = composites.iter().map(|(c, _)| c.name.as_str()).collect();
+        builder.check_pins(&root_spans, &names);
+        for (_, spans) in &composites {
+            builder.check_pins(spans, &names);
+        }
         if !builder.diagnostics.is_empty() {
             return Err(builder.diagnostics);
         }
@@ -311,6 +316,19 @@ impl Project {
             Some(planned) if errors.is_empty() => Ok(planned),
             _ => Err(errors),
         }
+    }
+
+    /// The `gpu` pins (M2.7-2) of `plan`'s instances (a plan of this
+    /// project), by address: what a GPU host places them by.
+    pub fn gpu_pins(&self, plan: &ExecutionPlan) -> BTreeMap<String, String> {
+        let locator = Locator {
+            map: &self.spans,
+            root: Root::Project,
+        };
+        plan.instances
+            .iter()
+            .filter_map(|i| Some((i.address.to_string(), locator.pin(&i.address)?.to_owned())))
+            .collect()
     }
 
     /// An error located at the declaration of the instance at `address`, or at
@@ -431,6 +449,42 @@ impl Builder<'_> {
         }
     }
 
+    /// M2.7-2: a `gpu` pin is a device id or index on a primitive instance;
+    /// a composite cannot export a parameter named `gpu` (the key is
+    /// reserved in instance tables).
+    fn check_pins(&mut self, def: &DefSpans, composites: &BTreeSet<&str>) {
+        for (name, instance) in &def.instances {
+            let Some((pin, span)) = &instance.gpu else {
+                continue;
+            };
+            if pin.is_empty() {
+                self.error(
+                    def.file,
+                    span.start,
+                    format!("{name}: `gpu` is empty; give a device id or index (`signal devices --compute`)"),
+                );
+            } else if composites.contains(instance.module.as_str()) {
+                self.error(
+                    def.file,
+                    span.start,
+                    format!(
+                        "{name}: `gpu` pins a primitive instance; `{}` is a composite: pin the instances inside it",
+                        instance.module
+                    ),
+                );
+            }
+        }
+        for export in &def.exports {
+            if export.kind == ExportKind::Parameter && export.name == "gpu" {
+                self.error(
+                    def.file,
+                    export.key.start,
+                    "a composite cannot export a parameter named `gpu`: the key is reserved in instance tables".to_owned(),
+                );
+            }
+        }
+    }
+
     fn schema_version(&mut self, file: usize, version: &Spanned<i64>) {
         if *version.get_ref() != 1 {
             self.error(
@@ -540,6 +594,7 @@ fn definition(
         let entry = entry.into_inner();
         let module_span = entry.module.span();
         let module = entry.module.into_inner();
+        let gpu = entry.gpu.map(|g| (g.get_ref().clone(), g.span()));
         let mut parameters = BTreeMap::new();
         let mut parameter_spans = BTreeMap::new();
         for (key, value) in entry.parameters {
@@ -555,6 +610,7 @@ fn definition(
                 module: module.clone(),
                 module_span,
                 parameters: parameter_spans,
+                gpu,
             },
         );
         def.instances.push(InstanceDef {

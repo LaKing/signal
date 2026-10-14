@@ -1,11 +1,40 @@
 //! `signal devices`: the output and input devices with their supported sample
-//! rates, channel counts and buffer-size ranges.
+//! rates, channel counts and buffer-size ranges; with `--compute` (M2.7-2)
+//! the compute devices: the CPU's performance levels and, in a `--features
+//! gpu` build, every GPU adapter. The JSON is documented in
+//! `docs/benchmarks.md`, "`signal devices --compute`".
 
+use clap::Args;
+use serde_json::{Value, json};
 use signal_audio::{DeviceInfo, Direction, devices};
+use signal_engine::{cpu_levels, cpu_lines, performance_cores};
 
 use crate::{Failure, print_stdout};
 
-pub(crate) fn run(json: bool) -> Result<(), Failure> {
+/// Arguments of `signal devices`.
+#[derive(Args)]
+pub(crate) struct DevicesArgs {
+    /// List the compute devices instead: CPU performance levels and GPU
+    /// adapters (the adapters in a `--features gpu` build only).
+    #[arg(long)]
+    compute: bool,
+}
+
+/// Why the default build lists no GPU adapter.
+#[cfg(not(feature = "gpu"))]
+const NOT_BUILT: &str = "this build has no GPU support (AC2b): build signal with --features gpu";
+
+pub(crate) fn run(args: &DevicesArgs, json: bool) -> Result<(), Failure> {
+    if args.compute {
+        if json {
+            let text = serde_json::to_string_pretty(&compute_json())
+                .map_err(|e| Failure::Internal(e.to_string()))?;
+            print_stdout(&text);
+        } else {
+            print_stdout(&compute_lines().join("\n"));
+        }
+        return Ok(());
+    }
     let list = devices().map_err(|e| Failure::Device(e.to_string()))?;
     if json {
         let text =
@@ -15,6 +44,83 @@ pub(crate) fn run(json: bool) -> Result<(), Failure> {
         print_stdout(&describe(&list));
     }
     Ok(())
+}
+
+/// The compute devices for people (the lines Signal.app's interface setup
+/// shows too).
+fn compute_lines() -> Vec<String> {
+    let (levels, source) = cpu_levels();
+    let mut lines = cpu_lines(&levels, source);
+    #[cfg(feature = "gpu")]
+    lines.extend(signal_gpu::inventory().lines());
+    #[cfg(not(feature = "gpu"))]
+    lines.extend(["GPU:".to_owned(), format!("  not listed: {NOT_BUILT}")]);
+    lines
+}
+
+/// `signal devices --compute --json`.
+fn compute_json() -> Value {
+    let (levels, source) = cpu_levels();
+    let levels: Vec<Value> = levels
+        .iter()
+        .map(|l| {
+            json!({
+                "index": l.index,
+                "name": l.name,
+                "physical": l.physical,
+                "logical": l.logical,
+            })
+        })
+        .collect();
+    let cpu = json!({
+        "source": source.name(),
+        "performance_cores": performance_cores().0,
+        "levels": levels,
+    });
+    json!({ "cpu": cpu, "gpu": gpu_json() })
+}
+
+#[cfg(feature = "gpu")]
+fn gpu_json() -> Value {
+    let inventory = signal_gpu::inventory();
+    let adapters: Vec<Value> = inventory
+        .adapters
+        .iter()
+        .map(|a| {
+            let l = &a.limits;
+            let (x, y, z) = l.max_compute_workgroup_size;
+            json!({
+                "id": a.id,
+                "index": a.index,
+                "name": a.name,
+                "backend": a.backend,
+                "type": a.device_type,
+                "vendor": a.vendor,
+                "device_id": a.device_id,
+                "driver": a.driver,
+                "driver_info": a.driver_info,
+                "limits": {
+                    "max_compute_workgroups_per_dimension": l.max_compute_workgroups_per_dimension,
+                    "max_compute_invocations_per_workgroup": l.max_compute_invocations_per_workgroup,
+                    "max_compute_workgroup_size": [x, y, z],
+                    "max_compute_workgroup_storage_size": l.max_compute_workgroup_storage_size,
+                    "max_storage_buffer_binding_size": l.max_storage_buffer_binding_size,
+                    "max_buffer_size": l.max_buffer_size,
+                },
+            })
+        })
+        .collect();
+    json!({
+        "built": true,
+        "available": !adapters.is_empty(),
+        "reason": inventory.error,
+        "adapters": adapters,
+    })
+}
+
+#[cfg(not(feature = "gpu"))]
+fn gpu_json() -> Value {
+    json!({ "built": false, "available": false, "reason": NOT_BUILT, "adapters": [] })
 }
 
 /// The list for people: one block per device, one line per configuration.

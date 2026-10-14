@@ -8,7 +8,8 @@ use std::path::Path;
 
 use signal_core::{Fnv1a64, Frame, fnv1a64};
 use signal_engine::{
-    Engine, EngineError, Manifest, OfflineError, Provenance, SameMachine, SinkOutput, run_offline,
+    ComputeDevice, Engine, EngineError, Manifest, OfflineError, Placement, Provenance, SameMachine,
+    SinkOutput, run_offline,
 };
 
 use crate::audio::{AudioSink, Conversion, RenderError};
@@ -40,6 +41,11 @@ pub struct Render {
     /// An exact replay that `--trust-provenance` let run although the
     /// recording's build or machine differ (M2.7-8). The manifest says so.
     pub trust_provenance: bool,
+    /// The compute devices and the placement (M2.7-2), for the manifest;
+    /// the program that placed its instances sets them, empty otherwise.
+    pub compute_devices: Vec<ComputeDevice>,
+    /// See [`compute_devices`](Render::compute_devices).
+    pub placement: Vec<Placement>,
 }
 
 /// Renders `frames` frames of a fresh `engine`.
@@ -124,6 +130,8 @@ pub fn render_blocks(
         conversion: Conversion::Plain,
         ideal: false,
         trust_provenance: false,
+        compute_devices: Vec::new(),
+        placement: Vec::new(),
     })
 }
 
@@ -201,6 +209,8 @@ impl Render {
             ideal: self.ideal,
             device_conversion: self.conversion == Conversion::Device,
             trust_provenance: self.trust_provenance,
+            compute_devices: self.compute_devices.clone(),
+            placement: self.placement.clone(),
         }
     }
 

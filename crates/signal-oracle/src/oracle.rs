@@ -385,6 +385,7 @@ impl Plan {
                         sample_rate: f64::from(script.sample_rate),
                         max_frames: 1,
                         rng: RngStream::derive(script.seed, &spec.address),
+                        lent: None,
                     };
                     match &mut primitive {
                         Primitive::Direct(module) => module.prepare(&context),
