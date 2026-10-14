@@ -1,0 +1,35 @@
+/* The controls' theme (docs/ui-controls.md "Theming"): every custom
+   property below, with the dark default each control falls back to when
+   the property is not set. Link this file to restyle in one place, or set
+   any of them on a container or a single control. */
+:root {
+  --signal-bg: #16181d;        /* page and outlines between parts */
+  --signal-panel: #1f232b;     /* pads and scope backgrounds */
+  --signal-fg: #d6dbe4;        /* text and readouts */
+  --signal-muted: #8a93a3;     /* labels and scales */
+  --signal-track: #2a2f38;     /* tracks, rings, unlit lamps */
+  --signal-accent: #4fc3f7;    /* the value: fills, arcs, traces */
+  --signal-effective: #ffb74d; /* the effective value when modulated; the trigger level */
+  --signal-thumb: #e8ecf2;     /* thumbs, pointers, the held peak */
+  --signal-knob: #262b34;      /* knob bodies and button caps */
+  --signal-knob-edge: #3a414d;
+  --signal-knob-on: #2f3a48;
+  --signal-focus: #5aa9ff;     /* the keyboard focus ring */
+  --signal-clip: #ff5252;      /* the meter's clip lamp */
+  --signal-meter-rms: #3ecf8e;
+  --signal-meter-peak: #3ecf8e;
+  --signal-meter-hot: #e6c84f; /* RMS above −6 dBFS */
+  --signal-radius: 6px;
+  --signal-font: 11px/1.3 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  /* Sizes */
+  --signal-fader-length: 200px;
+  --signal-fader-thickness: 40px;
+  --signal-knob-size: 64px;
+  --signal-xy-size: 160px;
+  --signal-meter-length: 200px;
+  --signal-meter-width: 44px;
+  --signal-scope-height: 160px;
+  --signal-button-width: 56px;
+  --signal-button-height: 32px;
+  --signal-value-size: 13px;
+}

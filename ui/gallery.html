@@ -1,0 +1,199 @@
+<!doctype html>
+<!-- The control gallery (M2.8-2, docs/ui-controls.md): every control in
+     every mode. Without `#ws=…&token=…` in the URL it runs against the
+     built-in fake connection (ui/fake-connection.js), so it needs no engine;
+     with the fragment `signal ui` prints, it connects to the running project
+     and adds a fader and a value per control, its meters and a scope.
+     Everything is local: no network resources. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signal — controls</title>
+<link rel="stylesheet" href="controls/theme.css">
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 1.5rem 2rem 3rem; background: var(--signal-bg); color: var(--signal-fg); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 .25rem; }
+  h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--signal-muted); margin: 2rem 0 .75rem; }
+  header p, .note { color: var(--signal-muted); margin: .25rem 0; }
+  #status { color: var(--signal-accent); }
+  #status.failed { color: var(--signal-clip); }
+  .row { display: flex; flex-wrap: wrap; gap: 1rem 1.5rem; align-items: flex-start; }
+  figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: .3rem; }
+  figcaption { color: var(--signal-muted); font-size: 11px; text-align: center; max-width: 14em; }
+  .wide { flex: 1 1 22rem; min-width: 18rem; }
+  .wide signal-scope { width: 100%; }
+  #log { font: 11px/1.4 ui-monospace, Menlo, monospace; color: var(--signal-muted); min-height: 1.4em; }
+  details { margin-top: .5rem; color: var(--signal-muted); }
+  table { border-collapse: collapse; margin-top: .5rem; }
+  td, th { text-align: left; padding: .15rem .8rem .15rem 0; vertical-align: top; }
+  kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--signal-track); border-radius: 3px; padding: 0 .3em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Signal controls</h1>
+  <p><span id="status">starting…</span> · <span id="mode"></span></p>
+  <details>
+    <summary>Keyboard and pointer</summary>
+    <table>
+      <tr><th>Fader, knob</th><td><kbd>↑</kbd><kbd>→</kbd> / <kbd>↓</kbd><kbd>←</kbd> ±1 %, <kbd>Page Up</kbd>/<kbd>Page Down</kbd> ±10 %, <kbd>Home</kbd> min, <kbd>End</kbd> max, <kbd>Delete</kbd> default; <kbd>Shift</kbd> fine (×0.1) for keys, drags and the wheel; double-click resets</td></tr>
+      <tr><th>2D pad</th><td><kbd>←</kbd><kbd>→</kbd> X, <kbd>↑</kbd><kbd>↓</kbd> Y, <kbd>Page Up</kbd>/<kbd>Page Down</kbd> Y ±10 % (with <kbd>Alt</kbd>: X), <kbd>Home</kbd>/<kbd>End</kbd> both to min/max, <kbd>Delete</kbd> defaults, <kbd>Esc</kbd> centre (spring)</td></tr>
+      <tr><th>Button</th><td><kbd>Space</kbd> or <kbd>Enter</kbd> sends a trigger while held</td></tr>
+      <tr><th>Toggle</th><td><kbd>Space</kbd>/<kbd>Enter</kbd> flips; <kbd>→</kbd><kbd>↑</kbd><kbd>Page Up</kbd><kbd>End</kbd> on, <kbd>←</kbd><kbd>↓</kbd><kbd>Page Down</kbd><kbd>Home</kbd> off</td></tr>
+      <tr><th>Meter</th><td><kbd>Enter</kbd>, <kbd>Space</kbd> or <kbd>Delete</kbd> (or a click) clears the clip; <kbd>↑</kbd><kbd>↓</kbd> move the scale's floor 6 dB, <kbd>Page Up</kbd>/<kbd>Page Down</kbd> 24 dB, <kbd>Home</kbd> −96 dB, <kbd>End</kbd> −60 dB</td></tr>
+      <tr><th>Scope</th><td><kbd>↑</kbd><kbd>↓</kbd> trigger level ±0.01 (<kbd>Shift</kbd> ±0.001), <kbd>Page Up</kbd>/<kbd>Page Down</kbd> ±0.1, <kbd>Home</kbd> 0, <kbd>End</kbd> auto, <kbd>E</kbd> edge, <kbd>Space</kbd> freeze</td></tr>
+      <tr><th>Value</th><td><kbd>↑</kbd><kbd>↓</kbd> one decimal more or less, <kbd>Home</kbd>/<kbd>End</kbd> fewest/most</td></tr>
+    </table>
+  </details>
+</header>
+
+<h2>Faders</h2>
+<div class="row">
+  <figure><signal-fader bind="/synth.drive" label="drive"></signal-fader><figcaption>vertical, linear; modulated: the amber mark is the effective value</figcaption></figure>
+  <figure><signal-fader bind="/synth.cutoff" taper="log" label="cutoff"></signal-fader><figcaption>log taper</figcaption></figure>
+  <figure><signal-fader bind="/synth.level" taper="db" label="level"></signal-fader><figcaption>dB taper (gain 0…4)</figcaption></figure>
+  <figure><signal-fader bind="/synth.level" taper="db" skin="svg:assets/fader.svg" label="level"></signal-fader><figcaption>SVG skin (part “thumb”)</figcaption></figure>
+  <figure>
+    <signal-fader bind="/synth.pan" orientation="horizontal" label="pan"></signal-fader>
+    <signal-fader bind="/synth.decay" orientation="horizontal" taper="log" label="decay"></signal-fader>
+    <signal-fader bind="/synth.level" orientation="horizontal" taper="db" floor="-40" label="level"></signal-fader>
+    <figcaption>horizontal: linear, log, dB (floor −40 dB)</figcaption>
+  </figure>
+</div>
+
+<h2>Knobs</h2>
+<div class="row">
+  <figure><signal-knob bind="/synth.cutoff" taper="log" label="cutoff"></signal-knob><figcaption>270°, vertical drag</figcaption></figure>
+  <figure><signal-knob bind="/synth.pan" bipolar label="pan"></signal-knob><figcaption>bipolar</figcaption></figure>
+  <figure><signal-knob bind="/synth.decay" taper="log" sweep="300" label="decay"></signal-knob><figcaption>300° sweep</figcaption></figure>
+  <figure><signal-knob bind="/synth.level" taper="db" label="level"></signal-knob><figcaption>dB taper (gain 0…4)</figcaption></figure>
+  <figure><signal-knob bind="/synth.drive" drag="circular" label="drive"></signal-knob><figcaption>circular drag, modulated</figcaption></figure>
+  <figure><signal-knob bind="/synth.drive" skin="svg:assets/knob.svg" label="drive"></signal-knob><figcaption>SVG skin (part “pointer”)</figcaption></figure>
+  <figure><signal-knob bind="/synth.cutoff" taper="log" skin="strip:assets/knob-strip.png;frames=64;2x=assets/knob-strip@2x.png" label="cutoff"></signal-knob><figcaption>PNG filmstrip, vertical, 1x + @2x</figcaption></figure>
+  <figure><signal-knob bind="/synth.decay" taper="log" skin="strip:assets/knob-sheet@2x.png;frames=64;columns=8" label="decay"></signal-knob><figcaption>PNG sprite sheet 8 × 8, @2x</figcaption></figure>
+  <figure><signal-knob min="-24" max="24" default="0" unit="dB" bipolar label="unbound"></signal-knob><figcaption>no bind: a local value</figcaption></figure>
+</div>
+
+<h2>2D input</h2>
+<div class="row">
+  <figure><signal-xy bind="/pad.x /pad.y" label="pad"></signal-xy><figcaption>two parameters</figcaption></figure>
+  <figure><signal-xy bind="/pad.x /pad.y" spring label="pad (spring)"></signal-xy><figcaption>spring-back to the centre</figcaption></figure>
+</div>
+
+<h2>Buttons</h2>
+<div class="row">
+  <figure><signal-button bind="/synth.trigger" label="trigger"></signal-button><figcaption>momentary: sends <code>trigger</code></figcaption></figure>
+  <figure><signal-toggle bind="/synth.on" label="on"></signal-toggle><figcaption>toggle</figcaption></figure>
+  <figure><signal-toggle bind="/synth.on" skin="strip:assets/toggle-strip.png;frames=2;2x=assets/toggle-strip@2x.png" label="on"></signal-toggle><figcaption>PNG strip, horizontal, 1x + @2x</figcaption></figure>
+  <figure class="wide"><div id="log"></div><figcaption>triggers</figcaption></figure>
+</div>
+
+<h2>Meters</h2>
+<div class="row">
+  <figure><signal-meter bind="/out.l" label="L"></signal-meter><figcaption><code>bind="/out.l"</code>: peak, RMS, hold; click clears the clip</figcaption></figure>
+  <figure><signal-meter bind="/out.r" label="R"></signal-meter><figcaption><code>/out.r</code></figcaption></figure>
+  <figure><signal-meter bind="/out.l" floor="-24" label="L"></signal-meter><figcaption>floor −24 dB</figcaption></figure>
+  <figure><signal-meter source="input" channel="0" label="in 1"></signal-meter><figcaption>the Setup’s input (<code>source="input"</code>)</figcaption></figure>
+</div>
+
+<h2>Scope</h2>
+<div class="row">
+  <figure class="wide"><signal-scope bind="/osc.out" label="osc"></signal-scope><figcaption>time, rising edge at 0</figcaption></figure>
+  <figure class="wide"><signal-scope bind="/osc.out" trigger-level="0.5" trigger-edge="falling" label="osc"></signal-scope><figcaption>time, falling edge at 0.5</figcaption></figure>
+  <figure><signal-scope bind="/osc.out /lfo.out" mode="xy" label="osc against lfo"></signal-scope><figcaption>X–Y</figcaption></figure>
+</div>
+
+<h2>Values</h2>
+<div class="row">
+  <figure><signal-value bind="/synth.cutoff"></signal-value><figcaption>cutoff (Hz)</figcaption></figure>
+  <figure><signal-value bind="/synth.decay"></signal-value><figcaption>decay (ms)</figcaption></figure>
+  <figure><signal-value bind="/synth.level" digits="2"></signal-value><figcaption>level, 2 decimals</figcaption></figure>
+  <figure><signal-value bind="/synth.drive"></signal-value><figcaption>drive, effective</figcaption></figure>
+</div>
+
+<h2>The project’s controls</h2>
+<p class="note" id="project-note">From <code>describe</code>: a fader and a value per control, a meter per audio sink input and a scope of the first signal output.</p>
+<div class="row" id="project"></div>
+
+<script type="module">
+import './controls/index.js';
+import { connectFromPage, setDefaultConnection } from './signal-ui.js';
+import { FakeConnection } from './fake-connection.js';
+
+const live = connectFromPage();
+const connection = live ?? new FakeConnection();
+// For the console (docs/ui-controls.md "Gallery"): signalConnection.socket.close() tests a reconnect.
+window.signalConnection = connection;
+document.getElementById('mode').textContent = live ? `live: ${live.url}` : 'fake connection (no engine): add the #ws=…&token=… that signal ui prints to connect';
+
+const status = document.getElementById('status');
+const showStatus = (s) => {
+  status.textContent = s;
+  status.classList.toggle('failed', s === 'failed');
+};
+connection.on('status', showStatus);
+showStatus(connection.status);
+
+const log = document.getElementById('log');
+document.addEventListener('signal-trigger', (event) => {
+  log.textContent = `trigger ${event.detail.address} at ${new Date().toLocaleTimeString()}`;
+});
+
+/** Builds the project section from a describe reply. */
+function project(description) {
+  const row = document.getElementById('project');
+  const items = [];
+  for (const control of description.controls ?? []) {
+    const figure = document.createElement('figure');
+    const fader = document.createElement('signal-fader');
+    fader.setAttribute('bind', control.address);
+    fader.setAttribute('label', control.parameter ?? control.address);
+    const value = document.createElement('signal-value');
+    value.setAttribute('bind', control.address);
+    const caption = document.createElement('figcaption');
+    caption.textContent = control.address;
+    figure.append(fader, value, caption);
+    items.push(figure);
+  }
+  // A meter per audio sink input: the input's port address is the meter's bind.
+  const sink = (description.sinks ?? []).find((s) => s.kind === 'audio');
+  const inputs = (description.instances ?? []).find((i) => i.address === sink?.address)?.ports?.filter((p) => p.direction === 'in' && p.shape === 'signal') ?? [];
+  for (const port of inputs) {
+    const figure = document.createElement('figure');
+    const meter = document.createElement('signal-meter');
+    meter.setAttribute('bind', port.address);
+    meter.setAttribute('label', port.address);
+    figure.append(meter);
+    items.push(figure);
+  }
+  const output = (description.instances ?? []).flatMap((i) => i.ports ?? []).find((p) => p.direction === 'out' && p.shape === 'signal');
+  if (output) {
+    const figure = document.createElement('figure');
+    figure.className = 'wide';
+    const scope = document.createElement('signal-scope');
+    scope.setAttribute('bind', output.address);
+    const caption = document.createElement('figcaption');
+    caption.textContent = output.address;
+    figure.append(scope, caption);
+    items.push(figure);
+  }
+  row.replaceChildren(...items);
+}
+
+let described = null;
+connection.on('describe', (description) => {
+  // Rebuild only when the plan changed, not on every pushed describe.
+  const key = JSON.stringify([description.planVersion, (description.controls ?? []).map((c) => c.address)]);
+  if (key !== described) {
+    described = key;
+    project(description);
+  }
+});
+
+setDefaultConnection(connection);
+if (!live) connection.start();
+</script>
+</body>
+</html>

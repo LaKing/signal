@@ -190,4 +190,6 @@ signal ui projects/kick --port 8800        # a fixed HTTP port
 
 `signal ui` takes every option of `signal play` (`--device`, `--buffer`, `--seconds`, `--threads`, `--rt-policy`, `--rt-computation`, `--rt-trace`, `--driver`, `--fast`, `--record-session`, `--record-audio`, `--record-boundary-data`) and always watches the folder, as `play --watch` does. It stops on Enter (or at `--seconds`), and with `--json` prints `{"url", "http", "ws"}` when it starts. The UI library's folder is the repository's `ui/` of the build (`--ui-dir` for another; the app bundle will carry its own, M2.8-4).
 
+Pages and controls use the client in `ui/signal-ui.js` (reconnect included) and the web components in `ui/controls/`; `/ui/gallery.html` shows them all (`docs/ui-controls.md`).
+
 The page at `/` is the raw protocol test page: the connection and protocol, the output meters, a scope of a chosen signal output, a slider per control (a ramp while moving, a commit on release) with its effective value, and the `describe` reply.
