@@ -392,6 +392,220 @@ impl StateOutputPrimitive for FloodsEvents {
     fn absorb(&mut self, _inputs: &Inputs<'_>) {}
 }
 
+// ---- M2.8-6: divided rates and vectors -------------------------------------
+
+/// `port` at rate divisor `d`.
+const fn at(d: u32, port: PortDescriptor) -> PortDescriptor {
+    PortDescriptor {
+        rate: match RateDivisor::new(d) {
+            Some(rate) => rate,
+            None => RateDivisor::ONE,
+        },
+        ..port
+    }
+}
+
+/// A gain in [0, 4] at divisor 1.
+const GAIN_PARAMETER: ParameterDescriptor = ParameterDescriptor {
+    name: "gain",
+    kind: PortKind::Gain,
+    rate: RateDivisor::ONE,
+    unit: None,
+    range: Range { min: 0.0, max: 4.0 },
+    default: 1.0,
+    combine: Combine::Multiply,
+};
+
+const V4_IN: PortDescriptor = port("in", Direction::In, PortShape::Vector(4));
+const V4_OUT: PortDescriptor = port("out", Direction::Out, PortShape::Vector(4));
+const VECTOR_PORTS: &[PortDescriptor] = &[at(64, V4_IN), at(64, V4_OUT)];
+const VECTOR_GAIN: ParameterDescriptor = ParameterDescriptor {
+    rate: match RateDivisor::new(64) {
+        Some(rate) => rate,
+        None => RateDivisor::ONE,
+    },
+    ..GAIN_PARAMETER
+};
+
+/// A vector of 4 at divisor 64: element `e` is `in[e] · gain · (e + 1)`. It
+/// sees ticks only; the suite calls it with ticks, as the engine does.
+struct VectorGain;
+
+impl DirectPrimitive for VectorGain {
+    fn describe() -> ModuleDescriptor {
+        descriptor(
+            "test.vector_gain",
+            VECTOR_PORTS,
+            &[VECTOR_GAIN],
+            Feedthrough::Direct,
+        )
+    }
+    fn prepare(&mut self, _ctx: &PrepareContext) {}
+    fn reset(&mut self) {}
+    fn process(&mut self, inputs: &Inputs<'_>, outputs: &mut Outputs<'_>) {
+        let gain = inputs.parameter(0);
+        for (e, row) in outputs.signals().enumerate() {
+            for (out, (x, g)) in row.iter_mut().zip(inputs.signal(e).iter().zip(gain)) {
+                *out = x * g * (e + 1) as f64;
+            }
+        }
+    }
+}
+
+/// A unit delay per element of a vector of 4, at divisor 3 (state-output).
+#[derive(Default)]
+struct VectorDelay {
+    last: [f64; 4],
+}
+
+impl StateOutputPrimitive for VectorDelay {
+    fn describe() -> ModuleDescriptor {
+        const PORTS: &[PortDescriptor] = &[at(3, V4_IN), at(3, V4_OUT)];
+        descriptor("test.vector_delay", PORTS, &[], Feedthrough::StateOutput)
+    }
+    fn prepare(&mut self, _ctx: &PrepareContext) {
+        self.last = [0.0; 4];
+    }
+    fn reset(&mut self) {
+        self.last = [0.0; 4];
+    }
+    fn emit(&self, outputs: &mut Outputs<'_>) {
+        for (row, &x) in outputs.signals().zip(&self.last) {
+            row.fill(x);
+        }
+    }
+    fn absorb(&mut self, inputs: &Inputs<'_>) {
+        for (e, last) in self.last.iter_mut().enumerate() {
+            if let Some(&x) = inputs.signal(e).last() {
+                *last = x;
+            }
+        }
+    }
+}
+
+fn vector_gain_type() -> ModuleType {
+    ModuleType {
+        descriptor: VectorGain::describe(),
+        create: || Primitive::Direct(Box::new(VectorGain)),
+    }
+}
+
+fn vector_delay_type() -> ModuleType {
+    ModuleType {
+        descriptor: VectorDelay::describe(),
+        create: || Primitive::StateOutput(Box::<VectorDelay>::default()),
+    }
+}
+
+mod vector_gain {
+    signal_contract::contract_tests!(super::vector_gain_type());
+}
+
+mod vector_delay {
+    signal_contract::contract_tests!(super::vector_delay_type());
+}
+
+/// A vector of 4 at divisor 64 whose element 1 is the number of ticks in
+/// the call: it depends on how ticks are split into calls.
+struct VectorPerCall;
+
+impl DirectPrimitive for VectorPerCall {
+    fn describe() -> ModuleDescriptor {
+        descriptor(
+            "test.vector_per_call",
+            VECTOR_PORTS,
+            &[],
+            Feedthrough::Direct,
+        )
+    }
+    fn prepare(&mut self, _ctx: &PrepareContext) {}
+    fn reset(&mut self) {}
+    fn process(&mut self, inputs: &Inputs<'_>, outputs: &mut Outputs<'_>) {
+        let ticks = inputs.frames() as f64;
+        outputs.rows(0, 4).copy_from_slice(inputs.rows(0, 4));
+        outputs.signal(1).fill(ticks);
+    }
+}
+
+/// A vector of 4 that never writes its last element.
+struct VectorUnwritten;
+
+impl DirectPrimitive for VectorUnwritten {
+    fn describe() -> ModuleDescriptor {
+        descriptor(
+            "test.vector_unwritten",
+            VECTOR_PORTS,
+            &[],
+            Feedthrough::Direct,
+        )
+    }
+    fn prepare(&mut self, _ctx: &PrepareContext) {}
+    fn reset(&mut self) {}
+    fn process(&mut self, inputs: &Inputs<'_>, outputs: &mut Outputs<'_>) {
+        outputs.rows(0, 3).copy_from_slice(inputs.rows(0, 3));
+    }
+}
+
+#[test]
+fn a_vector_that_depends_on_its_call_size_fails_partition_invariance() {
+    let failure = fails_only(
+        ModuleType {
+            descriptor: VectorPerCall::describe(),
+            create: || Primitive::Direct(Box::new(VectorPerCall)),
+        },
+        Check::PartitionInvariance,
+    );
+    assert!(
+        failure.detail.contains("signal output `out[1]`"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn an_unwritten_vector_element_fails_finite_output() {
+    let failure = fails_only(
+        ModuleType {
+            descriptor: VectorUnwritten::describe(),
+            create: || Primitive::Direct(Box::new(VectorUnwritten)),
+        },
+        Check::FiniteOutput,
+    );
+    assert!(
+        failure.detail.contains("signal output `out[3]`"),
+        "{failure}"
+    );
+}
+
+/// A type without one rate divisor (its output at 64, its parameter at 1)
+/// makes every render invalid: every check fails, naming why.
+#[test]
+fn a_type_without_one_rate_fails_every_check() {
+    const MIXED: &[PortDescriptor] = &[at(64, OUT)];
+    let module_type = ModuleType {
+        descriptor: descriptor(
+            "test.mixed_rates",
+            MIXED,
+            &[GAIN_PARAMETER],
+            Feedthrough::Direct,
+        ),
+        create: || Primitive::Direct(Box::new(VectorUnwritten)),
+    };
+    for check in Check::ALL {
+        let report = check
+            .run(
+                &module_type,
+                stimulus::random,
+                &Settings::without_persistence(),
+            )
+            .expect_err("no one rate fails every check")
+            .to_string();
+        assert!(
+            report.contains("no one rate divisor") && report.contains("test.mixed_rates"),
+            "`{check}`: {report}"
+        );
+    }
+}
+
 /// Runs every check on `module_type` and asserts that exactly `expected` fails,
 /// with a report naming the module type, the seed and a frame.
 fn fails_only(module_type: ModuleType, expected: Check) -> Failure {

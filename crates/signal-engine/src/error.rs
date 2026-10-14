@@ -39,10 +39,21 @@ pub enum EngineError {
         /// The name.
         name: &'static str,
     },
-    /// A port or parameter has a rate divisor other than 1 (M1 runs only 1).
+    /// The type's ports and parameters have no one rate divisor
+    /// (`docs/semantics.md` §16): its outputs, parameters and event ports
+    /// differ, or a signal input's divisor neither divides nor is a multiple
+    /// of theirs.
+    MixedRates {
+        /// The instance.
+        instance: InstanceAddress,
+    },
+    /// A type at a rate divisor above 1 has what runs only at divisor 1:
+    /// event ports, a declared latency or a sink (M2.8-6).
     UnsupportedRate {
-        /// The port.
-        port: PortAddress,
+        /// The instance.
+        instance: InstanceAddress,
+        /// What it has.
+        what: &'static str,
     },
     /// A port has a shape this engine does not know.
     UnsupportedShape {
@@ -149,9 +160,14 @@ impl fmt::Display for EngineError {
             EngineError::InvalidPortName { instance, name } => {
                 write!(f, "{instance}: invalid port name `{name}`")
             }
-            EngineError::UnsupportedRate { port } => {
-                write!(f, "{port}: only rate divisor 1 runs in M1")
-            }
+            EngineError::MixedRates { instance } => write!(
+                f,
+                "{instance}: its ports and parameters have no one rate divisor (outputs, parameters and event ports share one; a signal input's divides or is a multiple of it)"
+            ),
+            EngineError::UnsupportedRate { instance, what } => write!(
+                f,
+                "{instance}: a type at a rate divisor above 1 cannot have {what} (they run at rate divisor 1 only)"
+            ),
             EngineError::UnsupportedShape { port } => write!(f, "{port}: unsupported port shape"),
             EngineError::InvalidConnection { from, to } => {
                 write!(f, "{from} -> {to}: not a connection this engine can run")

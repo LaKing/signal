@@ -759,7 +759,280 @@ pub fn registry() -> Registry {
     ] {
         registry.register(module_type).unwrap();
     }
+    register_rates(&mut registry);
     registry
+}
+
+/// The divisors of M2.8-6's AC1.
+pub const DIVISORS: [u32; 5] = [1, 2, 3, 64, 1600];
+/// The vector sizes of M2.8-6's AC1.
+pub const SIZES: [u32; 3] = [1, 4, 256];
+
+/// A vector fixture: its kind, ports, whether it has `gain`, its class and
+/// its constructor.
+type VectorKind = (
+    &'static str,
+    Vec<PortDescriptor>,
+    bool,
+    Feedthrough,
+    fn() -> Primitive,
+);
+
+fn leak<T>(items: Vec<T>) -> &'static [T] {
+    Box::leak(items.into_boxed_slice())
+}
+
+/// M2.8-6 fixtures: `test.osc`, `test.gain`, `test.unit_delay` and
+/// `test.faulty` again at each divisor above 1 as `d<d>.<type>` (every port
+/// and parameter at *d*), and the vector types `test.v<kind>.n<N>.d<d>` for
+/// every size and divisor: `spread` (a signal to N elements, element *e*
+/// weighted (e + 1) / N, times `gain`), `gain` (each element times `gain`),
+/// `mix` (the elements summed in order, times `gain`) and `delay` (a
+/// state-output unit delay per element).
+fn register_rates(registry: &mut Registry) {
+    let rated = |d: u32| RateDivisor::new(d).unwrap();
+    for t in [
+        direct_type::<Osc>(),
+        direct_type::<Gain>(),
+        direct_type::<Faulty>(),
+        state_output_type::<UnitDelay>(),
+    ] {
+        for &d in &DIVISORS[1..] {
+            let mut descriptor = t.descriptor;
+            descriptor.type_name =
+                Box::leak(format!("d{d}.{}", descriptor.type_name).into_boxed_str());
+            descriptor.ports = leak(
+                descriptor
+                    .ports
+                    .iter()
+                    .map(|p| PortDescriptor {
+                        rate: rated(d),
+                        ..*p
+                    })
+                    .collect(),
+            );
+            descriptor.parameters = leak(
+                descriptor
+                    .parameters
+                    .iter()
+                    .map(|p| ParameterDescriptor {
+                        rate: rated(d),
+                        ..*p
+                    })
+                    .collect(),
+            );
+            registry
+                .register(ModuleType {
+                    descriptor,
+                    create: t.create,
+                })
+                .unwrap();
+        }
+    }
+    for d in DIVISORS {
+        for n in SIZES {
+            let at = |p: PortDescriptor| PortDescriptor {
+                rate: rated(d),
+                ..p
+            };
+            let v = PortShape::Vector(n);
+            let gain = ParameterDescriptor {
+                rate: rated(d),
+                ..param("gain", -2.0, 2.0, 1.0, Combine::Add)
+            };
+            let kinds: [VectorKind; 4] = [
+                (
+                    "spread",
+                    vec![
+                        at(port("in", In, Signal, Control)),
+                        at(port("out", Out, v, Control)),
+                    ],
+                    true,
+                    Feedthrough::Direct,
+                    || Primitive::Direct(Box::new(VSpread)),
+                ),
+                (
+                    "gain",
+                    vec![
+                        at(port("in", In, v, Control)),
+                        at(port("out", Out, v, Control)),
+                    ],
+                    true,
+                    Feedthrough::Direct,
+                    || Primitive::Direct(Box::new(VGain)),
+                ),
+                (
+                    "mix",
+                    vec![
+                        at(port("in", In, v, Control)),
+                        at(port("out", Out, Signal, Control)),
+                    ],
+                    true,
+                    Feedthrough::Direct,
+                    || Primitive::Direct(Box::new(VMix)),
+                ),
+                (
+                    "delay",
+                    vec![
+                        at(port("in", In, v, Control)),
+                        at(port("out", Out, v, Control)),
+                    ],
+                    false,
+                    Feedthrough::StateOutput,
+                    || {
+                        Primitive::StateOutput(Box::new(VDelay {
+                            state: vec![0.0; 256],
+                        }))
+                    },
+                ),
+            ];
+            for (kind, ports, has_gain, feedthrough, create) in kinds {
+                let type_name = Box::leak(format!("test.v{kind}.n{n}.d{d}").into_boxed_str());
+                let parameters = if has_gain { vec![gain] } else { Vec::new() };
+                let descriptor = ModuleDescriptor {
+                    ports: leak(ports),
+                    parameters: leak(parameters),
+                    ..descriptor(type_name, &[], &[], feedthrough, None)
+                };
+                registry
+                    .register(ModuleType { descriptor, create })
+                    .unwrap();
+            }
+        }
+    }
+}
+
+/// M2.8-6: a plan with instances at divisors 1, 3, 64 and 1600, vectors of
+/// 4 and 256 elements (a gain and a delay in a feedback loop at 64), holds
+/// and decimates, into `test.gained_recorder` `/out`. `second` replaces the
+/// connection `o64.out -> out.r` with `o3.out -> out.r`: a converter removed
+/// (`/o64/out_d1` stays for `osc.freq`) and one added (`/o3/out_d1`).
+pub fn rates_plan(second: bool) -> ExecutionPlan {
+    let instances = vec![
+        inst_with("osc", "test.osc", &[("freq", 110.0)]),
+        inst_with("o3", "d3.test.osc", &[("freq", 50.0)]),
+        inst_with("o64", "d64.test.osc", &[("freq", 2.0)]),
+        inst("vs", "test.vspread.n256.d64"),
+        inst_with("vg", "test.vgain.n256.d64", &[("gain", 0.5)]),
+        inst("vd", "test.vdelay.n256.d64"),
+        inst("vm", "test.vmix.n256.d64"),
+        inst("v4", "test.vspread.n4.d1600"),
+        inst("m4", "test.vmix.n4.d1600"),
+        inst("ud", "d3.test.unit_delay"),
+        inst_with("out", "test.gained_recorder", &[("gain", 0.5)]),
+    ];
+    let mut connections = vec![
+        conn("osc.out", "vs.in"),
+        conn("vs.out", "vg.in"),
+        scaled("vd.out", "vg.in", 0.25),
+        conn("vg.out", "vd.in"),
+        conn("vd.out", "vm.in"),
+        conn("o64.out", "v4.in"),
+        conn("v4.out", "m4.in"),
+        conn("o3.out", "ud.in"),
+        scaled("o64.out", "osc.freq", 10.0),
+        conn("osc.out", "out.l"),
+        scaled("vm.out", "out.l", 0.01),
+        conn("ud.out", "out.l"),
+        conn("m4.out", "out.r"),
+    ];
+    connections.push(if second {
+        conn("o3.out", "out.r")
+    } else {
+        conn("o64.out", "out.r")
+    });
+    plan(instances, connections)
+}
+
+/// A signal to a vector of N: element `e` is `in · gain · (e + 1) / N`.
+struct VSpread;
+
+impl DirectPrimitive for VSpread {
+    fn describe() -> ModuleDescriptor {
+        descriptor("test.vspread", &[], &[], Feedthrough::Direct, None)
+    }
+    fn prepare(&mut self, _ctx: &PrepareContext) {}
+    fn reset(&mut self) {}
+    fn process(&mut self, inputs: &Inputs<'_>, outputs: &mut Outputs<'_>) {
+        let n = outputs.signals().count() as f64;
+        let (x, g) = (inputs.signal(0), inputs.parameter(0));
+        for (e, row) in outputs.signals().enumerate() {
+            let w = (e + 1) as f64 / n;
+            for (out, (x, g)) in row.iter_mut().zip(x.iter().zip(g)) {
+                *out = x * g * w;
+            }
+        }
+    }
+}
+
+/// Each element times `gain`.
+struct VGain;
+
+impl DirectPrimitive for VGain {
+    fn describe() -> ModuleDescriptor {
+        descriptor("test.vgain", &[], &[], Feedthrough::Direct, None)
+    }
+    fn prepare(&mut self, _ctx: &PrepareContext) {}
+    fn reset(&mut self) {}
+    fn process(&mut self, inputs: &Inputs<'_>, outputs: &mut Outputs<'_>) {
+        let g = inputs.parameter(0);
+        for (e, row) in outputs.signals().enumerate() {
+            for (out, (x, g)) in row.iter_mut().zip(inputs.signal(e).iter().zip(g)) {
+                *out = x * g;
+            }
+        }
+    }
+}
+
+/// The elements summed in order, times `gain`.
+struct VMix;
+
+impl DirectPrimitive for VMix {
+    fn describe() -> ModuleDescriptor {
+        descriptor("test.vmix", &[], &[], Feedthrough::Direct, None)
+    }
+    fn prepare(&mut self, _ctx: &PrepareContext) {}
+    fn reset(&mut self) {}
+    fn process(&mut self, inputs: &Inputs<'_>, outputs: &mut Outputs<'_>) {
+        let g = inputs.parameter(0);
+        let rows = inputs.signal_rows();
+        for (t, out) in outputs.signal(0).iter_mut().enumerate() {
+            let mut sum = 0.0;
+            for e in 0..rows {
+                sum += inputs.signal(e)[t];
+            }
+            *out = sum * g[t];
+        }
+    }
+}
+
+/// A unit delay per element (up to 256).
+struct VDelay {
+    state: Vec<f64>,
+}
+
+impl StateOutputPrimitive for VDelay {
+    fn describe() -> ModuleDescriptor {
+        descriptor("test.vdelay", &[], &[], Feedthrough::StateOutput, None)
+    }
+    fn prepare(&mut self, _ctx: &PrepareContext) {
+        self.state.fill(0.0);
+    }
+    fn reset(&mut self) {
+        self.state.fill(0.0);
+    }
+    fn emit(&self, outputs: &mut Outputs<'_>) {
+        for (row, &value) in outputs.signals().zip(&self.state) {
+            row.fill(value);
+        }
+    }
+    fn absorb(&mut self, inputs: &Inputs<'_>) {
+        for (e, state) in self.state.iter_mut().enumerate().take(inputs.signal_rows()) {
+            if let Some(&x) = inputs.signal(e).last() {
+                *state = x;
+            }
+        }
+    }
 }
 
 pub fn addr(text: &str) -> InstanceAddress {

@@ -7,6 +7,8 @@
 
 #![allow(dead_code)]
 
+pub mod rates;
+
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 

@@ -7,6 +7,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::address::InstanceAddress;
+use crate::convert::{self, CONVERTER_PREFIX};
 use crate::descriptor::{Feedthrough, ModuleDescriptor};
 use crate::module::Primitive;
 
@@ -54,7 +55,8 @@ impl Registry {
         Registry::default()
     }
 
-    /// Adds `module_type`, refusing a type name that is already registered.
+    /// Adds `module_type`, refusing a type name that is already registered,
+    /// or one in the converters' reserved `core.` namespace (M2.8-6).
     /// Refuses a declared latency that is not a state-output type's, or whose
     /// `latency_blocks` or `block_frames` is 0 (ADR 0019 §3).
     pub fn register(&mut self, module_type: ModuleType) -> Result<(), RegistryError> {
@@ -62,6 +64,9 @@ impl Registry {
         let name = descriptor.type_name;
         if self.types.contains_key(name) {
             return Err(RegistryError::DuplicateTypeName(name));
+        }
+        if name.starts_with(CONVERTER_PREFIX) {
+            return Err(RegistryError::ReservedTypeName(name));
         }
         if let Some(latency) = descriptor.latency
             && (descriptor.feedthrough != Feedthrough::StateOutput
@@ -74,9 +79,19 @@ impl Registry {
         Ok(())
     }
 
-    /// The type registered under `type_name`.
+    /// The type registered under `type_name`, or the rate converter of that
+    /// canonical name in the reserved `core.` namespace
+    /// ([`converter_name`](crate::converter_name)): converters are known to
+    /// every registry without being registered or listed by
+    /// [`iter`](Registry::iter). A malformed `core.` name is `None`, like any
+    /// unknown name. Not for the audio thread: a converter is made on first
+    /// use, under a lock.
     pub fn get(&self, type_name: &str) -> Option<&ModuleType> {
-        self.types.get(type_name)
+        match self.types.get(type_name) {
+            Some(found) => Some(found),
+            None if type_name.starts_with(CONVERTER_PREFIX) => convert::named(type_name),
+            None => None,
+        }
     }
 
     /// Records `type_name`'s static cost: nanoseconds per frame per instance,
@@ -126,11 +141,17 @@ pub enum RegistryError {
     /// A declared latency on a type that is not state-output, or with 0
     /// blocks or 0 frames per block.
     InvalidLatency(&'static str),
+    /// A name in the converters' reserved `core.` namespace (M2.8-6).
+    ReservedTypeName(&'static str),
 }
 
 impl fmt::Display for RegistryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            RegistryError::ReservedTypeName(name) => write!(
+                f,
+                "module type `{name}`: names starting with `{CONVERTER_PREFIX}` are reserved for rate converters"
+            ),
             RegistryError::DuplicateTypeName(name) => {
                 write!(f, "module type `{name}` is already registered")
             }
@@ -143,3 +164,25 @@ impl fmt::Display for RegistryError {
 }
 
 impl std::error::Error for RegistryError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// M2.8-6: converters are known to every registry by canonical name,
+    /// without being listed; the `core.` namespace cannot be registered.
+    #[test]
+    fn converters_are_served_and_their_namespace_reserved() {
+        let mut registry = Registry::new();
+        let hold = *registry.get("core.hold.d64.d1.signal.control").unwrap();
+        assert_eq!(hold.descriptor.type_name, "core.hold.d64.d1.signal.control");
+        assert!(registry.get("core.hold.d0.d1.signal.audio").is_none());
+        assert!(registry.is_empty());
+        let mut taken = hold;
+        taken.descriptor.type_name = "core.x";
+        assert_eq!(
+            registry.register(taken),
+            Err(RegistryError::ReservedTypeName("core.x"))
+        );
+    }
+}

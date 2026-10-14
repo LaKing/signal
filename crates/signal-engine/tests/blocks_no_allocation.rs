@@ -213,6 +213,70 @@ fn blocks_and_swaps(threads: usize) {
     }
 }
 
+/// M2.8-6 AC3a: divided-rate scheduling, vector buffers and converters
+/// allocate and free nothing, on the calling thread and on the workers:
+/// blocks of several sizes with ticks inside and across them, a parameter
+/// set and a suspend and resume of a divided instance at frames that are
+/// no tick, and swaps that remove and add a converter (and move the held
+/// values of every survivor).
+#[test]
+fn divided_rates_and_vectors_allocate_nothing() {
+    for threads in [1, 8] {
+        let (a, b) = (common::rates_plan(false), common::rates_plan(true));
+        let mut engine = engine_threads(&a, 48_000, threads, vec![]);
+        engine.set_task_hook(Some(guard_workers_with_workers));
+        let registry = registry();
+        let mut swaps = [Some(b.clone()), None, Some(a), None, Some(b), None].into_iter();
+        let mut sequence = 0;
+        let mut old = Vec::new();
+        for (round, k) in [7usize, 64, 256, 3, 128, 1].into_iter().enumerate() {
+            let start = engine.next_frame().0;
+            let mut swap = swaps
+                .next()
+                .flatten()
+                .map(|plan| engine.prepare_swap(&plan, &registry).unwrap());
+            sequence += 1;
+            let event = ext(
+                start + k as u64 / 2,
+                sequence,
+                "/vg.gain",
+                EventPayload::Set(0.25 * round as f64 - 0.5),
+            );
+            // Addresses are made before the guard: a pushed edit owns one.
+            let (suspended, resumed) = (addr("/o64"), addr("/o64"));
+            let guard = Guard::start();
+            engine.push_external(event).unwrap();
+            engine
+                .push_suspend(suspended, Frame(start + k as u64 / 3))
+                .unwrap();
+            engine
+                .push_resume(resumed, Frame(start + k as u64 / 3 + 1))
+                .unwrap();
+            assert_eq!(engine.run_block(k), k);
+            engine.drain_log(&mut |_| {});
+            if let Some(swap) = swap.as_mut() {
+                engine.commit_swap(swap, engine.next_frame()).unwrap();
+            }
+            let counts = guard.counts();
+            drop(guard);
+            assert!(
+                counts.is_zero(),
+                "{threads} threads, block {round} (k = {k}) allocated: {counts:?}"
+            );
+            old.extend(swap);
+            drop(engine.reclaim_externals().collect::<Vec<_>>());
+            drop(engine.reclaim_edits().collect::<Vec<_>>());
+        }
+        assert_eq!(engine.version(), 3);
+        assert_eq!(engine.input_overflows(), 0);
+        if threads > 1 {
+            let stats = engine.schedule_stats();
+            assert!(stats.worker_tasks > 0, "{stats:?}");
+        }
+    }
+    assert_eq!(WORKER_HEAP_CALLS.load(Ordering::Relaxed), 0);
+}
+
 const RATE: u32 = 1_000;
 const CALLBACKS: u64 = 3_000;
 /// Callbacks up to four times the Runner's block capacity of 256.

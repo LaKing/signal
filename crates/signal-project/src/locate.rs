@@ -127,7 +127,10 @@ impl<'a> Locator<'a> {
     /// The location of `warning`.
     pub(crate) fn warning(&self, warning: &GraphWarning) -> Location {
         let location = match warning {
-            GraphWarning::KindMismatch { from, to, .. } => self.connection_or_instance(from, to),
+            GraphWarning::KindMismatch { from, to, .. }
+            | GraphWarning::ConverterInserted { from, to, .. } => {
+                self.connection_or_instance(from, to)
+            }
             GraphWarning::NoSinkReachable { instance } => self.instance_key(instance),
             _ => None,
         };

@@ -11,6 +11,8 @@
 //!   contract (ADR 0002, 0016 §5), normative in `docs/module-contract.md`.
 //! - [`ModuleType`] and [`Registry`]: primitive types by name, and the
 //!   [`Host`] that lends instances what the program provides ([`Lent`]).
+//! - [`converter`] and [`Conversion`]: the hold and decimate rate converters
+//!   (ADR 0005, M2.8-6) the graph compiler inserts between rate divisors.
 //!
 //! This crate knows frames, ports, events and addresses only. Musical, MIDI,
 //! lighting or video concepts do not belong here (ADR 0001, risk R15).
@@ -29,6 +31,7 @@
 )]
 
 mod address;
+mod convert;
 mod descriptor;
 mod event;
 mod module;
@@ -37,6 +40,7 @@ mod rng;
 mod time;
 
 pub use address::{AddressError, InstanceAddress, PortAddress};
+pub use convert::{CONVERTER_PREFIX, Conversion, converter, converter_name};
 pub use descriptor::{
     BlockLatency, Combine, Direction, Feedthrough, ModuleDescriptor, ParameterDescriptor,
     PortDescriptor, PortKind, PortShape, Range, Reproducibility, SinkKind,

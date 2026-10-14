@@ -30,12 +30,16 @@ pub struct PrepareContext {
     pub lent: Option<Lent>,
 }
 
-/// The inputs of one real-time call, covering `frames` consecutive frames.
+/// The inputs of one real-time call, covering `frames` consecutive frames;
+/// for a type of rate divisor *d* > 1, its `frames` consecutive ticks (the
+/// frames that are multiples of *d*), one value per tick (M2.8-6,
+/// `docs/module-contract.md` "Rates and vectors").
 ///
 /// Layout (indices count within each group, in the order of the module
 /// descriptor's `ports` and `parameters`):
-/// - `signals`: every signal input port, port-major: port *p* is
-///   `signals[p * frames .. (p + 1) * frames]`.
+/// - `signals`: every signal input row, row-major: row *r* is
+///   `signals[r * frames .. (r + 1) * frames]`. A signal port is one row, a
+///   vector port of N is N rows, its elements in order.
 /// - `parameters`: the executor-computed effective value of every parameter for
 ///   every frame (ADR 0016 §4), in the same layout. Modules never see bases,
 ///   events on parameters, or modulation separately.
@@ -75,9 +79,24 @@ impl<'a> Inputs<'a> {
         self.frames
     }
 
-    /// The samples of signal input `port`, one per frame.
+    /// The samples of signal input row `port`, one per frame: the port
+    /// itself for a type without vector inputs.
     pub fn signal(&self, port: usize) -> &'a [f64] {
         block(self.signals, port, self.frames)
+    }
+
+    /// Signal input rows `first .. first + count`, row after row: a vector
+    /// port of N from its first row is `rows(first, N)`. Empty if they are
+    /// not all there.
+    pub fn rows(&self, first: usize, count: usize) -> &'a [f64] {
+        let start = first.saturating_mul(self.frames);
+        let end = start.saturating_add(count.saturating_mul(self.frames));
+        self.signals.get(start..end).unwrap_or(&[])
+    }
+
+    /// The number of signal input rows.
+    pub fn signal_rows(&self) -> usize {
+        self.signals.len() / self.frames.max(1)
     }
 
     /// The effective values of parameter `index`, one per frame.
@@ -101,9 +120,10 @@ impl<'a> Inputs<'a> {
     }
 }
 
-/// The outputs of one real-time call, covering `frames` consecutive frames.
+/// The outputs of one real-time call, covering `frames` consecutive frames
+/// (ticks, for a divided rate, as for [`Inputs`]).
 ///
-/// `signals` holds every signal output port, port-major like [`Inputs`]; the
+/// `signals` holds every signal output row, row-major like [`Inputs`]; the
 /// module overwrites every sample. `events` has one bounded [`EventSink`] per
 /// event output port, in descriptor order.
 #[derive(Debug)]
@@ -128,10 +148,16 @@ impl<'a> Outputs<'a> {
         self.frames
     }
 
-    /// The samples of signal output `port`, one per frame.
+    /// The samples of signal output row `port`, one per frame.
     pub fn signal(&mut self, port: usize) -> &mut [f64] {
-        let start = port.saturating_mul(self.frames);
-        let end = start.saturating_add(self.frames);
+        self.rows(port, 1)
+    }
+
+    /// Signal output rows `first .. first + count`, row after row (a vector
+    /// port's elements). Empty if they are not all there.
+    pub fn rows(&mut self, first: usize, count: usize) -> &mut [f64] {
+        let start = first.saturating_mul(self.frames);
+        let end = start.saturating_add(count.saturating_mul(self.frames));
         self.signals.get_mut(start..end).unwrap_or(&mut [])
     }
 
@@ -678,6 +704,21 @@ mod tests {
         assert_eq!(inputs.events(1), []);
         assert_eq!(inputs.events(2), [trigger(1), trigger(1)]);
         assert_eq!(inputs.events(3), []);
+    }
+
+    /// A vector port is rows: `rows` hands several at once, element-major.
+    #[test]
+    fn views_hand_out_rows() {
+        let signals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let inputs = Inputs::new(2, &signals, &[], &[], &[]);
+        assert_eq!(inputs.signal_rows(), 3);
+        assert_eq!(inputs.rows(1, 2), [3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(inputs.rows(2, 2), [] as [f64; 0]);
+        let mut out = [0.0; 4];
+        let mut outputs = Outputs::new(2, &mut out, &mut []);
+        outputs.rows(0, 2).copy_from_slice(&[7.0, 8.0, 9.0, 10.0]);
+        assert!(outputs.rows(1, 2).is_empty());
+        assert_eq!(out, [7.0, 8.0, 9.0, 10.0]);
     }
 
     #[test]

@@ -156,6 +156,87 @@ const SLOW_TRIG: ModuleDescriptor = descriptor(
     None,
 );
 
+/// A port at rate divisor `d`.
+const fn at(d: u32, port: PortDescriptor) -> PortDescriptor {
+    PortDescriptor {
+        rate: match RateDivisor::new(d) {
+            Some(rate) => rate,
+            None => RateDivisor::ONE,
+        },
+        ..port
+    }
+}
+
+/// M2.8-6: types with one signal or vector port at a divisor, for the
+/// conversion tests (`tests/rates.rs`). `test.slow64` and `test.slow3`:
+/// control outputs at 64 and 3.
+const SLOW64: ModuleDescriptor = descriptor(
+    "test.slow64",
+    &[at(64, port("out", Out, Signal, Control))],
+    &[],
+    Feedthrough::Direct,
+    None,
+);
+const SLOW3: ModuleDescriptor = descriptor(
+    "test.slow3",
+    &[at(3, port("out", Out, Signal, Control))],
+    &[],
+    Feedthrough::Direct,
+    None,
+);
+/// Control inputs at 3, 64 and 1600.
+const IN3: ModuleDescriptor = descriptor(
+    "test.in3",
+    &[at(3, port("in", In, Signal, Control))],
+    &[],
+    Feedthrough::Direct,
+    None,
+);
+const IN64: ModuleDescriptor = descriptor(
+    "test.in64",
+    &[at(64, port("in", In, Signal, Control))],
+    &[],
+    Feedthrough::Direct,
+    None,
+);
+const IN1600: ModuleDescriptor = descriptor(
+    "test.in1600",
+    &[at(1600, port("in", In, Signal, Control))],
+    &[],
+    Feedthrough::Direct,
+    None,
+);
+/// Vector outputs of 4: at 1 and at 64.
+const VSRC: ModuleDescriptor = descriptor(
+    "test.vsrc",
+    &[port("out", Out, PortShape::Vector(4), Control)],
+    &[],
+    Feedthrough::Direct,
+    None,
+);
+const VSLOW: ModuleDescriptor = descriptor(
+    "test.vslow",
+    &[at(64, port("out", Out, PortShape::Vector(4), Control))],
+    &[],
+    Feedthrough::Direct,
+    None,
+);
+/// Vector inputs: 4 at 64, 2 at 1.
+const VIN64: ModuleDescriptor = descriptor(
+    "test.vin64",
+    &[at(64, port("in", In, PortShape::Vector(4), Control))],
+    &[],
+    Feedthrough::Direct,
+    None,
+);
+const VIN2: ModuleDescriptor = descriptor(
+    "test.vin2",
+    &[port("in", In, PortShape::Vector(2), Control)],
+    &[],
+    Feedthrough::Direct,
+    None,
+);
+
 /// Does nothing; signal-graph never runs modules.
 struct Null;
 
@@ -192,7 +273,10 @@ fn state_output() -> Primitive {
 /// A registry of the fake types.
 pub fn registry() -> Registry {
     let mut registry = Registry::new();
-    for descriptor in [OSC, ENV, VCA, TRIG, OUT, SLOW, SLOW_TRIG] {
+    for descriptor in [
+        OSC, ENV, VCA, TRIG, OUT, SLOW, SLOW_TRIG, SLOW64, SLOW3, IN3, IN64, IN1600, VSRC, VSLOW,
+        VIN64, VIN2,
+    ] {
         let module_type = ModuleType {
             descriptor,
             create: direct,

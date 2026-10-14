@@ -1,10 +1,14 @@
-//! Checks on the flattened graph: connections need equal shape and rate (a kind
-//! mismatch is only a warning), except that a parameter accepts both shapes, and
+//! Checks on the flattened graph, after converter insertion: connections need
+//! equal shape and rate (a kind mismatch is only a warning; a rate mismatch
+//! left here is one no converter joins), except that a parameter accepts
+//! both a signal and events, and
 //! parameter values must lie in their declared range. Fan-in and fan-out are
 //! unrestricted: signals into one input are summed and events merged (ADR 0016
 //! §3, §4).
 
-use signal_core::{PortAddress, PortKind, PortShape, RateDivisor};
+use std::collections::BTreeMap;
+
+use signal_core::{InstanceAddress, PortAddress, PortKind, PortShape, RateDivisor};
 
 use crate::error::{GraphError, GraphWarning};
 use crate::flatten::FlatGraph;
@@ -25,14 +29,18 @@ fn signature(graph: &FlatGraph, port: &PortAddress) -> Option<Signature> {
 }
 
 /// Validates `graph`, whose connections are in canonical order, appending
-/// warnings to `warnings`.
+/// warnings to `warnings`. `converted` names each inserted converter's
+/// source port: a kind mismatch through one is reported from that source,
+/// as the connection was written (the converter carries its kind).
 pub(crate) fn validate(
     graph: &FlatGraph,
+    converted: &BTreeMap<InstanceAddress, PortAddress>,
     warnings: &mut Vec<GraphWarning>,
 ) -> Result<(), Vec<GraphError>> {
     let mut errors = Vec::new();
     for connection in &graph.connections {
         let (from, to) = (&connection.from, &connection.to);
+        let written = converted.get(&from.instance()).unwrap_or(from);
         let (Some(source), Some(target)) = (signature(graph, from), signature(graph, to)) else {
             continue;
         };
@@ -58,7 +66,7 @@ pub(crate) fn validate(
         }
         if from_kind != to_kind {
             warnings.push(GraphWarning::KindMismatch {
-                from: from.clone(),
+                from: written.clone(),
                 to: to.clone(),
                 from_kind,
                 to_kind,

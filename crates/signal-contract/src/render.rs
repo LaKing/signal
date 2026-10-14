@@ -75,21 +75,27 @@ impl Instance {
         max_frames: usize,
         seed: u64,
     ) -> Instance {
-        let count = |direction, shape| {
+        let ports = |direction: Direction| {
             module_type
                 .descriptor
                 .ports
                 .iter()
-                .filter(|p| p.direction == direction && p.shape == shape)
+                .filter(move |p| p.direction == direction)
+        };
+        // A signal port is one row of the views, a vector of N is N (M2.8-6).
+        let rows = |direction| ports(direction).map(|p| p.shape.rows()).sum();
+        let events = |direction| {
+            ports(direction)
+                .filter(|p| p.shape == PortShape::Events)
                 .count()
         };
         let mut instance = Instance {
             primitive: (module_type.create)(),
             max_frames,
-            signal_inputs: count(Direction::In, PortShape::Signal),
-            event_inputs: count(Direction::In, PortShape::Events),
-            signal_outputs: count(Direction::Out, PortShape::Signal),
-            event_outputs: count(Direction::Out, PortShape::Events),
+            signal_inputs: rows(Direction::In),
+            event_inputs: events(Direction::In),
+            signal_outputs: rows(Direction::Out),
+            event_outputs: events(Direction::Out),
             fault: None,
             lent: lent.cloned(),
         };
@@ -336,7 +342,7 @@ impl Rendered {
     /// with its frame and a description naming the output.
     pub fn first_value(
         &self,
-        names: &(Vec<&'static str>, Vec<&'static str>),
+        names: &(Vec<String>, Vec<String>),
         bad: impl Fn(f64) -> bool,
     ) -> Option<Difference> {
         let mut first: Option<Difference> = None;
@@ -376,7 +382,7 @@ impl Rendered {
 pub(crate) fn first_difference(
     a: &Rendered,
     b: &Rendered,
-    names: &(Vec<&'static str>, Vec<&'static str>),
+    names: &(Vec<String>, Vec<String>),
 ) -> Option<Difference> {
     let mut first: Option<Difference> = None;
     let mut offer = |frame: u64, what: String| {
@@ -426,9 +432,9 @@ pub(crate) fn first_difference(
     first
 }
 
-fn name(names: &[&'static str], index: usize) -> String {
+fn name(names: &[String], index: usize) -> String {
     match names.get(index) {
-        Some(name) => (*name).to_owned(),
+        Some(name) => name.clone(),
         None => format!("#{index}"),
     }
 }

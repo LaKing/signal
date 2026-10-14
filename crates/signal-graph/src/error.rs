@@ -5,7 +5,7 @@ use std::fmt;
 
 use serde::Serialize;
 use signal_core::{
-    Direction, InstanceAddress, PortAddress, PortKind, PortShape, Range, RateDivisor,
+    Conversion, Direction, InstanceAddress, PortAddress, PortKind, PortShape, Range, RateDivisor,
 };
 
 /// Why a graph description cannot become an execution plan.
@@ -246,7 +246,7 @@ impl fmt::Display for GraphError {
                 to_rate,
             } => write!(
                 f,
-                "{from} (rate divisor {}) -> {to} (rate divisor {}): rate mismatch; {CONVERTER}",
+                "{from} (rate divisor {}) -> {to} (rate divisor {}): rate mismatch; only signals and vectors of the same shape convert implicitly, by hold (the source's divisor a multiple of the target's) or decimate (the target's a multiple of the source's)",
                 from_rate.get(),
                 to_rate.get()
             ),
@@ -300,6 +300,22 @@ pub enum GraphWarning {
         /// The instance.
         instance: InstanceAddress,
     },
+    /// A connection across rate divisors runs through an inserted converter
+    /// (ADR 0005, M2.8-6): reported so that the conversion is visible.
+    ConverterInserted {
+        /// The source output port, as connected.
+        from: PortAddress,
+        /// The target input port or parameter, as connected.
+        to: PortAddress,
+        /// The converter instance.
+        converter: InstanceAddress,
+        /// Hold or decimate.
+        conversion: Conversion,
+        /// The source's rate divisor.
+        from_rate: RateDivisor,
+        /// The target's rate divisor.
+        to_rate: RateDivisor,
+    },
 }
 
 impl fmt::Display for GraphWarning {
@@ -317,6 +333,19 @@ impl fmt::Display for GraphWarning {
             GraphWarning::NoSinkReachable { instance } => {
                 write!(f, "{instance}: no sink is reachable; its output is unused")
             }
+            GraphWarning::ConverterInserted {
+                from,
+                to,
+                converter,
+                conversion,
+                from_rate,
+                to_rate,
+            } => write!(
+                f,
+                "{from} -> {to}: inserted converter {converter} ({conversion}, rate divisor {} -> {})",
+                from_rate.get(),
+                to_rate.get()
+            ),
         }
     }
 }

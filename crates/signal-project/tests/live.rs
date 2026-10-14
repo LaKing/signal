@@ -27,8 +27,9 @@ fn registry() -> Registry {
 }
 
 /// The standard registry plus `test.slow_lfo`: `std.lfo` with every port at
-/// rate divisor 2, which plans but which the engine refuses to run (M1 runs
-/// divisor 1 only), so a swap adding it fails to prepare.
+/// rate divisor 2 and its parameters at 1, which plans but which the engine
+/// refuses to run (a type has one rate divisor, `docs/semantics.md` §16), so
+/// a swap adding it fails to prepare.
 fn registry_with_slow_lfo() -> Registry {
     let mut registry = registry();
     let lfo = *registry.get("std.lfo").unwrap();

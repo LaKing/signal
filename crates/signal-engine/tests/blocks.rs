@@ -604,6 +604,113 @@ fn a_cycle_runs_frame_by_frame_inside_blocks() {
     matrix(&scenario);
 }
 
+/// M2.8-6 (AC1, AC6, `docs/semantics.md` §16): divided rates and vector
+/// ports in blocks. Instances at divisors 1, 2, 3, 64 and 1600, vectors of
+/// 1, 4 and 256 elements (a gain and a delay in a feedback loop at 64),
+/// inserted holds and decimates (shared, into parameters), a fault at a
+/// tick (`d3.test.faulty`, NaN from its 9th tick: frame 24), ramps and sets
+/// at frames that are no tick, a divided instance suspended and resumed
+/// mid-block, and a swap that replaces a cross-rate connection (one
+/// converter removed, another added and fading in): every block size,
+/// partition, thread count and wake policy gives the per-frame trace.
+#[test]
+fn divided_rates_and_vectors_run_in_blocks() {
+    let instances = || {
+        vec![
+            inst_with("osc", "test.osc", &[("freq", 440.0)]),
+            inst_with("o2", "d2.test.osc", &[("freq", 300.0)]),
+            inst_with("o3", "d3.test.osc", &[("freq", 200.0)]),
+            inst_with("o64", "d64.test.osc", &[("freq", 3.0)]),
+            inst_with("o1600", "d1600.test.osc", &[("freq", 1.0)]),
+            inst("vs1", "test.vspread.n1.d2"),
+            inst("vs4", "test.vspread.n4.d64"),
+            inst("vs256", "test.vspread.n256.d1600"),
+            inst_with("vg4", "test.vgain.n4.d64", &[("gain", 0.5)]),
+            inst("vd4", "test.vdelay.n4.d64"),
+            inst("vm1", "test.vmix.n1.d2"),
+            inst("vm4", "test.vmix.n4.d64"),
+            inst("vm256", "test.vmix.n256.d1600"),
+            inst("ud3", "d3.test.unit_delay"),
+            inst("f3", "d3.test.faulty"),
+            inst("g64", "d64.test.gain"),
+            inst("rec", "test.recorder"),
+        ]
+    };
+    let common = || {
+        vec![
+            conn("osc.out", "vs1.in"),
+            conn("o2.out", "vs4.in"),
+            conn("o64.out", "vs256.in"),
+            conn("vs4.out", "vg4.in"),
+            scaled("vd4.out", "vg4.in", 0.25),
+            scaled("o1600.out", "vg4.gain", 0.5),
+            conn("vg4.out", "vd4.in"),
+            conn("vs1.out", "vm1.in"),
+            conn("vd4.out", "vm4.in"),
+            conn("vs256.out", "vm256.in"),
+            conn("o3.out", "ud3.in"),
+            conn("o64.out", "g64.in"),
+            conn("osc.out", "g64.gain"),
+            scaled("o64.out", "osc.freq", 10.0),
+            conn("osc.out", "rec.zeta"),
+            conn("vm1.out", "rec.zeta"),
+            scaled("vm4.out", "rec.zeta", 0.5),
+            conn("ud3.out", "rec.zeta"),
+            conn("f3.out", "rec.zeta"),
+            conn("vm256.out", "rec.alpha"),
+            conn("g64.out", "rec.alpha"),
+            scaled("o64.out", "rec.alpha", 0.25),
+        ]
+    };
+    let mut first = common();
+    first.push(conn("o2.out", "rec.alpha"));
+    let mut second = common();
+    second.push(conn("o3.out", "rec.alpha"));
+    let plans = vec![plan(instances(), first), plan(instances(), second)];
+    let converters = |p: &ExecutionPlan| {
+        p.instances
+            .iter()
+            .filter(|i| i.type_name.starts_with("core."))
+            .map(|i| i.address.to_string())
+            .collect::<Vec<_>>()
+    };
+    let before = converters(&plans[0]);
+    for c in [
+        "/o2/out_d1",
+        "/o2/out_d64",
+        "/o64/out_d1",
+        "/o64/out_d1600",
+        "/osc/out_d2",
+    ] {
+        assert!(before.iter().any(|b| b == c), "{c}: {before:?}");
+    }
+    assert!(converters(&plans[1]).iter().any(|c| c == "/o3/out_d1"));
+    let scenario = Scenario {
+        rate: 48_000,
+        frames: 4_800,
+        plans,
+        upfront: vec![
+            set(101, 1, "/o3.freq", 500.0),
+            ext(1_601, 2, "/vg4.gain", ramp(-1.0, 700)),
+            set(3_203, 3, "/vs256.gain", 0.25),
+        ],
+        script: vec![
+            (1_000, Cmd::Suspend(1_000, "/o64")),
+            (1_000, Cmd::Resume(1_130, "/o64")),
+            (2_000, Cmd::Swap(1)),
+        ],
+        parameters: vec!["/vg4.gain", "/osc.freq", "/g64.gain"],
+        instances: vec!["/f3", "/o64", "/o64/out_d1", "/o3/out_d1"],
+    };
+    let trace = matrix(&scenario);
+    assert!(
+        trace
+            .log
+            .contains(r#""address":"/f3","port":"/f3.out","reason":"non_finite""#)
+    );
+    assert!(trace.log.contains(r#"{"type":"fault","frame":24,"#));
+}
+
 /// The log of a block holds every external of the block, all targets in
 /// total: many same-frame events to two targets (auditor-1-log-external-bound).
 #[test]

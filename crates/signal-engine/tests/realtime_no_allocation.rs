@@ -146,6 +146,78 @@ fn runner_process_allocates_and_frees_nothing() {
     assert!(runner.meter_overflows() > 0, "{status:?}");
 }
 
+/// M2.8-6 AC3a: the same with divided rates, vectors and converters
+/// (`common::rates_plan`): the control thread swaps between the two
+/// variants (a converter removed, another added), sends sets of a divided
+/// instance's parameter and suspends and resumes one; `Runner::process`
+/// allocates and frees nothing.
+#[test]
+fn divided_rates_and_vectors_in_the_runner_allocate_nothing() {
+    assert!(alloc_counter::is_installed());
+    let config = RealtimeConfig::with_buffer(48_000, 42, 64);
+    let (mut runner, mut controller) =
+        realtime(&common::rates_plan(false), &registry(), config).unwrap();
+    let audio = thread::spawn(move || {
+        let mut sizes = CallbackSizes::new(5);
+        let mut out = vec![0.0f32; MOST_FRAMES * CHANNELS];
+        let mut total = Counts::default();
+        for _ in 0..3_000 {
+            let frames = sizes.next_size().min(MOST_FRAMES);
+            let buffer = &mut out[..frames * CHANNELS];
+            let guard = Guard::start();
+            runner.process(buffer, CHANNELS);
+            let counts = guard.counts();
+            drop(guard);
+            total.allocations += counts.allocations;
+            total.deallocations += counts.deallocations;
+        }
+        (runner, total)
+    });
+    let plans: Vec<ExecutionPlan> = (1..=100u64)
+        .map(|n| {
+            let mut plan = common::rates_plan(n % 2 == 1);
+            plan.version = n;
+            plan
+        })
+        .collect();
+    let (mut next_plan, mut step) = (0, 0u64);
+    let mut tally = Tally::default();
+    while !audio.is_finished() {
+        step += 1;
+        controller.poll(&mut tally);
+        match step % 4 {
+            0 => {
+                if let Some(plan) = plans.get(next_plan)
+                    && controller.swap(plan, Stamp::Default).is_ok()
+                {
+                    next_plan += 1;
+                }
+            }
+            1 => {
+                let value = EventPayload::Set((step % 5) as f64 * 0.25);
+                let _ = controller.send_event(port_addr("/vg.gain"), value, Stamp::Default);
+            }
+            2 => {
+                let _ = controller.send_suspend(addr("/o64"), Stamp::Default);
+            }
+            _ => {
+                let _ = controller.send_resume(addr("/o64"), Stamp::Default);
+            }
+        }
+        thread::sleep(Duration::from_micros(200));
+    }
+    let (runner, total) = audio.join().unwrap();
+    controller.poll(&mut tally);
+    assert_eq!(
+        total,
+        Counts::default(),
+        "heap calls inside Runner::process"
+    );
+    assert_eq!(runner.status().callbacks, 3_000);
+    assert!(tally.swaps >= 2, "swaps committed: {}", tally.swaps);
+    assert!(tally.events > 0 && tally.edits > 0);
+}
+
 /// Counts the delivered outcomes that reach the control thread, and those
 /// with a hash other than the empty result's (M2.7-8).
 #[derive(Default)]

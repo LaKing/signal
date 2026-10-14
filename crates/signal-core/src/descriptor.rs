@@ -19,7 +19,7 @@ pub enum Direction {
     Out,
 }
 
-/// What a port carries per tick (ADR 0005). Vector shapes come later.
+/// What a port carries per tick (ADR 0005).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -28,6 +28,27 @@ pub enum PortShape {
     Signal,
     /// A stream of [`Event`](crate::Event)s.
     Events,
+    /// N ≥ 1 `f64` per tick (M2.8-6): N rows of the I/O views, its elements
+    /// in order, each one value per tick (`docs/module-contract.md`). A
+    /// vector connects only to a vector of the same N.
+    Vector(u32),
+}
+
+impl PortShape {
+    /// The rows of the I/O views a port of this shape takes: 1 for a signal,
+    /// N for a vector of N, 0 for events.
+    pub const fn rows(self) -> usize {
+        match self {
+            PortShape::Signal => 1,
+            PortShape::Vector(n) => n as usize,
+            PortShape::Events => 0,
+        }
+    }
+
+    /// Whether it carries values (a signal or a vector), not events.
+    pub const fn is_signal(self) -> bool {
+        matches!(self, PortShape::Signal | PortShape::Vector(_))
+    }
 }
 
 /// What a port's values mean, used for conversion and display (ADR 0005).
@@ -202,4 +223,95 @@ pub struct ModuleDescriptor {
     /// How far its output reproduces.
     #[serde(skip_serializing_if = "Reproducibility::is_bit_exact")]
     pub reproducibility: Reproducibility,
+}
+
+impl ModuleDescriptor {
+    /// The type's rate (M2.8-6, `docs/semantics.md` §16): the divisor every
+    /// port and parameter declares except its signal and vector inputs, 1 if
+    /// it has none of those. `None` if those differ, or if a signal or vector
+    /// input's divisor neither divides the rate nor is a multiple of it.
+    pub fn rate(&self) -> Option<RateDivisor> {
+        let signal_input = |p: &PortDescriptor| p.direction == Direction::In && p.shape.is_signal();
+        let mut rate: Option<RateDivisor> = None;
+        let own = self
+            .ports
+            .iter()
+            .filter(|p| !signal_input(p))
+            .map(|p| p.rate)
+            .chain(self.parameters.iter().map(|p| p.rate));
+        for divisor in own {
+            match rate {
+                Some(r) if r != divisor => return None,
+                _ => rate = Some(divisor),
+            }
+        }
+        let rate = rate.unwrap_or(RateDivisor::ONE);
+        let r = rate.get();
+        let commensurate = |d: u32| d.is_multiple_of(r) || r.is_multiple_of(d);
+        self.ports
+            .iter()
+            .filter(|p| signal_input(p))
+            .all(|p| commensurate(p.rate.get()))
+            .then_some(rate)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn port(name: &'static str, direction: Direction, shape: PortShape, d: u32) -> PortDescriptor {
+        PortDescriptor {
+            name,
+            direction,
+            shape,
+            rate: RateDivisor::new(d).unwrap(),
+            kind: PortKind::Generic,
+            unit: None,
+            range: None,
+        }
+    }
+
+    fn rate_of(ports: Vec<PortDescriptor>) -> Option<u32> {
+        let descriptor = ModuleDescriptor {
+            type_name: "test.rate",
+            doc: "",
+            ports: Box::leak(ports.into_boxed_slice()),
+            parameters: &[],
+            feedthrough: Feedthrough::Direct,
+            sink: None,
+            latency: None,
+            reproducibility: Reproducibility::BitExact,
+        };
+        descriptor.rate().map(RateDivisor::get)
+    }
+
+    #[test]
+    fn shapes_take_rows() {
+        assert_eq!(PortShape::Signal.rows(), 1);
+        assert_eq!(PortShape::Vector(256).rows(), 256);
+        assert_eq!(PortShape::Events.rows(), 0);
+        assert!(PortShape::Vector(4).is_signal() && !PortShape::Events.is_signal());
+    }
+
+    /// The rate is what the outputs (and parameters, event ports) share; a
+    /// signal input may differ from it by a multiple either way.
+    #[test]
+    fn a_type_has_one_rate() {
+        use Direction::{In, Out};
+        use PortShape::{Events, Signal, Vector};
+        assert_eq!(rate_of(vec![]), Some(1));
+        assert_eq!(rate_of(vec![port("out", Out, Signal, 64)]), Some(64));
+        let held = vec![
+            port("in", In, Vector(4), 64),
+            port("out", Out, Vector(4), 1),
+        ];
+        assert_eq!(rate_of(held), Some(1));
+        let mixed = vec![port("a", Out, Signal, 2), port("b", Out, Signal, 1)];
+        assert_eq!(rate_of(mixed), None);
+        let odd = vec![port("in", In, Signal, 3), port("out", Out, Signal, 2)];
+        assert_eq!(rate_of(odd), None);
+        let events = vec![port("e", In, Events, 2), port("out", Out, Signal, 1)];
+        assert_eq!(rate_of(events), None);
+    }
 }

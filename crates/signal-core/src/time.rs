@@ -69,7 +69,8 @@ impl Sub<Frame> for Frame {
 }
 
 /// A port's rate as a non-zero integer divisor of the master rate (ADR 0005):
-/// a port with divisor *d* ticks on every *d*-th master frame. M1 uses only 1.
+/// a port with divisor *d* ticks on every *d*-th master frame, the frames
+/// that are multiples of *d* (`docs/semantics.md` §16).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct RateDivisor(NonZeroU32);

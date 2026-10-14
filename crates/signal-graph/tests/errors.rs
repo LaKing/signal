@@ -228,24 +228,34 @@ fn shape_mismatch() {
     assert!(errors[0].to_string().contains(CONVERTER));
 }
 
+/// M2.8-6: divisors 2 and 3 are not multiples of each other, so no
+/// converter joins them (2 -> 1 is a hold now: `tests/rates.rs`).
 #[test]
 fn rate_mismatch() {
     let project = composite(
         "project",
-        vec![inst("slow", "test.slow"), inst("spk", "test.out")],
-        vec![conn("slow.out", "spk.in")],
+        vec![inst("slow", "test.slow"), inst("x", "test.in3")],
+        vec![conn("slow.out", "x.in")],
     );
     let errors = errors(&project, &[]);
     assert_eq!(
         errors,
         [GraphError::RateMismatch {
             from: port_addr("/slow.out"),
-            to: port_addr("/spk.in"),
+            to: port_addr("/x.in"),
             from_rate: RateDivisor::new(2).unwrap(),
-            to_rate: RateDivisor::ONE,
+            to_rate: RateDivisor::new(3).unwrap(),
         }]
     );
-    assert!(errors[0].to_string().contains(CONVERTER));
+    let message = errors[0].to_string();
+    assert!(
+        message.contains("/slow.out (rate divisor 2) -> /x.in (rate divisor 3)"),
+        "{message}"
+    );
+    assert!(
+        message.contains("hold") && message.contains("decimate"),
+        "{message}"
+    );
 }
 
 #[test]

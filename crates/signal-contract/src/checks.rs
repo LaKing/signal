@@ -156,6 +156,7 @@ impl Check {
         lent: Option<&Lent>,
     ) -> Result<(), String> {
         let descriptor = &module_type.descriptor;
+        check_rate(descriptor)?;
         let names = output_names(descriptor);
         let seed = case.seed;
         let blocks: &[usize] = &case.blocks;
@@ -428,32 +429,71 @@ fn generate(
     Ok(input)
 }
 
-fn output_names(descriptor: &ModuleDescriptor) -> (Vec<&'static str>, Vec<&'static str>) {
+/// The names of the signal output rows (a vector's elements as `port[e]`)
+/// and of the event outputs.
+fn output_names(descriptor: &ModuleDescriptor) -> (Vec<String>, Vec<String>) {
     use signal_core::{Direction, PortShape};
-    let names = |shape| {
+    let outputs = || {
         descriptor
             .ports
             .iter()
-            .filter(|p| p.direction == Direction::Out && p.shape == shape)
-            .map(|p| p.name)
-            .collect()
+            .filter(|p| p.direction == Direction::Out)
     };
-    (names(PortShape::Signal), names(PortShape::Events))
+    let signals = outputs()
+        .flat_map(|p| match p.shape {
+            PortShape::Vector(n) => (0..n).map(|e| format!("{}[{e}]", p.name)).collect(),
+            PortShape::Signal => vec![p.name.to_owned()],
+            _ => Vec::new(),
+        })
+        .collect();
+    let events = outputs()
+        .filter(|p| p.shape == PortShape::Events)
+        .map(|p| p.name.to_owned())
+        .collect();
+    (signals, events)
+}
+
+/// Whether the descriptor has one rate, and keeps a divided rate's limits
+/// (M2.8-6, `docs/semantics.md` §16): what makes every render invalid.
+fn check_rate(descriptor: &ModuleDescriptor) -> Result<(), String> {
+    let Some(rate) = descriptor.rate() else {
+        return Err(
+            "the descriptor has no one rate divisor: its outputs, parameters and \
+                    event ports must share one, and each signal input's must divide it or \
+                    be a multiple of it"
+                .to_owned(),
+        );
+    };
+    let events = descriptor
+        .ports
+        .iter()
+        .any(|p| p.shape == signal_core::PortShape::Events);
+    if rate.get() > 1 && (events || descriptor.latency.is_some() || descriptor.sink.is_some()) {
+        return Err(format!(
+            "the descriptor is at rate divisor {} but has event ports, a declared latency \
+             or a sink, which run at rate divisor 1 only",
+            rate.get()
+        ));
+    }
+    if descriptor
+        .ports
+        .iter()
+        .any(|p| p.shape == signal_core::PortShape::Vector(0))
+    {
+        return Err("the descriptor has a vector port of 0 elements".to_owned());
+    }
+    Ok(())
 }
 
 /// Fails for what makes any render invalid, whatever the check: a panic in a
 /// call of the primitive, or an event sink overflow.
-fn faults(
-    rendered: &Rendered,
-    names: &(Vec<&'static str>, Vec<&'static str>),
-    at: &str,
-) -> Result<(), String> {
+fn faults(rendered: &Rendered, names: &(Vec<String>, Vec<String>), at: &str) -> Result<(), String> {
     if let Some(panic) = &rendered.panic {
         return Err(describe_panic(panic, at));
     }
     match rendered.overflow {
         Some((frame, port)) => {
-            let name = names.1.get(port).copied().unwrap_or("?");
+            let name = names.1.get(port).map_or("?", String::as_str);
             Err(format!(
                 "{at}: event output `{name}` overflowed its sink in the call starting at frame {frame}"
             ))

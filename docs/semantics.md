@@ -4,14 +4,14 @@
 
 The reference implementation is the per-frame executor and the offline driver in `crates/signal-engine` (ADR 0012). Every later engine, including the real-time one, must produce the same results bit for bit, with one exception (§14): after a panic in a `process` call of several frames the fault acts from that call's first frame, which depends on how the frames are split into calls.
 
-Scope: the semantics are stated frame by frame; the engine runs them in blocks of *k* frames with the same result bit for bit (§13, M2.6-1), except after a panic in a call of several frames (§14). Rate divisor 1 for every port, one master rate per project. Plan swaps, incremental input and add/remove fades (M2-1) are in §12.
+Scope: the semantics are stated frame by frame; the engine runs them in blocks of *k* frames with the same result bit for bit (§13, M2.6-1), except after a panic in a call of several frames (§14). One master rate per project; ports at other rate divisors and vector ports (M2.8-6) are in §16. Plan swaps, incremental input and add/remove fades (M2-1) are in §12.
 
 ## 1. Frames
 
 - Time is the **frame**: an integer count since project start, at the project's master rate (its sample rate, in whole frames per second). Nothing in the engine reads a clock.
 - **Every instance runs every frame**, connected or not, unless it is suspended (§6) or muted by the fault guard (§7). An instance from which no sink can be reached only causes a validation warning (ADR 0016 §1).
 - Values are f64 (ADR 0007). f32 appears only in `audio.wav` (§8).
-- M1 runs ports at rate divisor 1 only. A plan with any other divisor is refused when the engine is built.
+- An instance of a type at rate divisor *d* > 1 runs every frame too, but is **called** on its ticks only, the frames that are multiples of *d*; its outputs hold between them (§16). Everything below holds for it as stated, frame by frame.
 
 ## 2. Frame phases
 
@@ -357,6 +357,8 @@ The new plan's parameter values do not apply to a survivor: its bases move. A ca
 
 Connection changes between survivors take effect on the swap frame with no fade (crossfading changed connections is not done). This includes a disconnect that leaves a parameter with no signal sources: from the swap frame it uses its base (§5).
 
+A connection across rate divisors runs through a converter instance (§16), so changing one changes the instances, not only the connections: adding the first such connection from a source port to a divisor adds its converter, whose `audio` outputs fade in as any added instance's (below); removing the last one removes its converter, as any removal (a live edit suspends it first, so its `audio` output fades out to exactly +0.0 before the swap).
+
 ### Added instances
 
 An added instance is created and prepared like any instance (its random stream is `RngStream::derive(seed, address)`) and runs from the swap frame. Its `audio` outputs fade in exactly as after a resume (§6): on its *j*-th frame the output is `live · ((j + 1) / F)` for *j* < *F* − 1, and exactly `live` from *j* = *F* − 1 on. Its other signal outputs and its event outputs start at once.
@@ -397,6 +399,7 @@ ADR 0019 §1 (D-EXEC-3, M2.6-1). `Engine::run_block(k)` runs the next *k* frames
 
 - When a plan is instantiated (when the engine is built and at `prepare_swap`), it is condensed into strongly connected components over every connection, from state-output sources too. The **units** run in a topological order of the condensation, ties broken by the earliest schedule position among a unit's members, so the order depends only on the plan.
 - An instance outside any cycle is a unit of its own. A **direct** one is called once with `process` for the frames of the block (or of a segment, below), its inputs computed frame by frame before the call. A **state-output** one covers the block's frames too, but calls `emit` and `absorb` one frame at a time: `emit` gets no inputs, so it cannot write the output of frame *n* + 1 when that depends on the input of frame *n* (`std.unit_delay` writes one value to every frame it is given). `module-contract.md` states this limit.
+- An instance at rate divisor *d* > 1 (§16) is gathered frame by frame like any other, but a direct one's `process` covers only the segment's ticks, from its first tick to the segment's end; the frames before that tick show its held outputs. A state-output one emits and absorbs at its ticks only.
 - A **cycle** (closed through state-output instances, §2) is one unit whose members are interleaved in sub-blocks of one frame, its shortest possible loop delay (1 frame for `std.unit_delay`; `std.delay` is at least 1 frame): each frame its state-output members emit, its direct members process in schedule order, and its state-output members absorb.
 - Every consumer combines its sources in canonical order (§3, §4), so the unit order decides only when values are computed, never what they are.
 - A **latent** state-output instance (a declared latency, ADR 0019 §3) runs the same way, one frame at a time. Its latency counts blocks **of its own** (`block_frames`, fixed for its type and recorded in the manifest), not the engine's *k*: so its output, too, is the same for every *k* and thread count. Before each of its `emit`s the engine asks for the due result, waiting offline and never in real time (§7, "Late results").
@@ -436,7 +439,7 @@ A call of a primitive (`process`, `emit`, `absorb`, or a latent module's `due` o
 - **Dependent outputs** are computed as always, in canonical order (§3, §4), from the muted instance's outputs: a faulted source counts as its fading value, then as 0. Events sent to it are discarded with reason `muted`.
 - **The fault record** is a `fault` line (§9) with the frame *n*, the instance, its first output port (signal outputs before event outputs; none for an instance without outputs) and the reason `panic`. The policy is applied, and logged, the same way for every instance.
 - **How long:** for the rest of the run. A swap that keeps the instance keeps its fault (§12, "What survives"); a swap that replaces it (a removal, or another type at the address) brings a new, unfaulted instance. There is no reset edit.
-- **Threads and block size.** The result is identical for every thread count: a panic on a worker and the same panic on the calling thread give the same output and log. A call of one frame (every `emit` and `absorb`, every call in a cycle, every call at *k* = 1) is exact to its frame, as every other fault is. A `process` call of several frames gives no frame for its panic, so the fault acts from the call's first frame, which depends on how the run is split into blocks: the one exception to §13's partition rule.
+- **Threads and block size.** The result is identical for every thread count: a panic on a worker and the same panic on the calling thread give the same output and log. A call of one frame (every `emit` and `absorb`, every call in a cycle, every call at *k* = 1) is exact to its frame, as every other fault is. A `process` call of several frames gives no frame for its panic, so the fault acts from the call's first frame, which depends on how the run is split into blocks: the one exception to §13's partition rule. For an instance at rate divisor *d* > 1 (§16) a call counts in ticks: a call of one tick is exact to that tick however many frames its segment spans, and a call of several ticks acts from its first tick.
 - **Real time.** Catching a panic allocates, locks and blocks nothing. The panic itself does (its payload, and the default hook's message on stderr): that is the cost of the broken contract, not of the recovery. A payload whose destructor panics again is caught as well (after eight such panics in a row the last payload is leaked rather than dropped), so nothing unwinds out of the engine.
 
 ### An engine-level failure
@@ -465,3 +468,31 @@ For a project without latent modules the two render the same audio and log, and 
 A session's boundary records depend on when results arrived in its run, which is not in its commands: two runs of the same commands may record different outcomes, and each replays exactly to its own run.
 
 A frame is **due** for a latent instance when the frames it has run since it was prepared are a multiple of `block_frames` and at least *L* blocks (`module-contract.md`): the engine counts them, carried across swaps like every survivor's state, and the module counts its blocks the same way.
+
+## 16. Rate divisors and vector ports
+
+M2.8-6 (ADR 0005; ADR 0023 §5). A port runs at an integer **rate divisor** *d* of the master rate, and a port may carry a **vector** of *N* values. The oracle (`crates/signal-oracle`) implements this section independently of the engine, and the two match bit for bit (`testing-and-evaluation.md`).
+
+### Rates and ticks
+
+- A type's **rate** is the divisor its outputs, event ports and parameters share; each of its signal or vector inputs may declare a divisor that divides it or is a multiple of it. A type without one rate is refused when the engine is built, and so is a type at a rate above 1 with event ports, a declared latency or a sink: those run at divisor 1 only (`module-contract.md`, "Rates and vectors").
+- An instance at rate *d* is **called** only on its **ticks**: the frames *n* with *n* mod *d* = 0, counted from frame 0 of the run. Which frames are ticks therefore depends neither on the block size nor on the partition nor on the thread count.
+- It still **runs** every frame (§1): its inputs are summed (§3), its parameters' bases advance, take their events and give effective values frame by frame (§5, ramps counted in master frames), and suspension, faults and fades act frame by frame (§6, §7).
+- **Outputs hold between ticks.** On a frame that is not a tick, each output is what the instance wrote at its last tick (0 before its first): what the fades, the fault guard and every reader see, as if it had written that value again. A state-output instance emits and absorbs at its ticks only. An instance that resumes, or is added by a swap, on a frame that is not a tick fades in from that held value; a survivor of a swap keeps it.
+- **Per-tick calls.** In a call, `frames()` is the number of ticks the call covers, and its inputs, effective parameter values and outputs have one value per tick (`module-contract.md`). `PrepareContext` gives the master rate and the block capacity, as for divisor 1.
+- **Panics.** A divided-rate `process` call covers the ticks of its segment, from the first; a panic acts from that first tick (§14). Before the call the engine keeps what the segment's gather will change, so a fault at a tick undoes what the frames after it gathered, exactly as one frame at a time.
+
+### Vectors
+
+- A port of shape `Vector(N)`, *N* ≥ 1, carries *N* `f64` per tick, as *N* rows (its elements, in order).
+- A vector connection joins equal shapes only, element by element: element *e* of the target sums element *e* of each source, in canonical source order (§3), each times the connection's scale. A vector never connects to a signal or a parameter; parameters are scalar.
+- Faults are found and faded per element, and name the vector port (§7); `audio` vector outputs fade per element (§6).
+
+### Converters
+
+- A signal or vector connection whose source divisor *s* and target divisor *t* differ, one a multiple of the other, between ports of the same shape (or a signal into a parameter), runs through a **converter**, inserted when the plan is built: a **hold** when *s* > *t*, a **decimate** when *s* < *t*. Every other connection across rates, or across shapes, is an error naming the connection as written; so is an event connection across rates.
+- A converter is an **ordinary instance**: a direct primitive of type `core.<hold|decimate>.d<s>.d<t>.<signal|vectorN>.<kind>` (the source port's shape and kind), with input `in` at *s* and output `out` at *t*, which copies its input to its output at its own ticks. Its value at a tick of *t* is therefore the source's output at that frame: the source's held value for a hold, a sample of it for a decimate.
+- It lives at `<source instance>/<port>_d<t>`, beneath the source primitive, where no other instance can be. One converter serves every connection from that source port to targets at *t*: the source feeds its `in` with scale 1, its `out` feeds each target with the connection's own scale, so its input is the source's output itself and it never faults.
+- Its port takes part in its targets' canonical sums (§3) at its own address, which sorts where the source's ports sort among every other instance's.
+- It is visible: in the plan, as an instance with its connections, and as the warning `<from> -> <to>: inserted converter <address> (<hold|decimate>, rate divisor <s> -> <t>)`, which `signal render` and the project loader report at the connection. A kind mismatch through it is reported from the source port.
+- Swaps and live edits treat it as any instance (§12): it survives when it is in both plans with the same type; it is added, fading in if `audio`, when a cross-rate connection appears; it is removed when its last connection goes, suspended first by a live edit. Removing a converter's **source** at *t* > 1 can step at the swap: the converter shows its last tick, which may have read the source in the middle of its fade.

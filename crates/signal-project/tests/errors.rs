@@ -66,6 +66,65 @@ fn valid_project_plans() {
     assert!(planned.warnings.is_empty());
 }
 
+/// M2.8-6 (ADR 0005): a connection across rate divisors plans through an
+/// inserted converter, reported as a warning at the connection as written.
+#[test]
+fn an_inserted_converter_is_a_warning_at_its_connection() {
+    let mut registry = registry();
+    let lfo = *registry.get("std.lfo").unwrap();
+    let mut descriptor = lfo.descriptor;
+    let d64 = signal_core::RateDivisor::new(64).unwrap();
+    descriptor.type_name = "test.slow_lfo";
+    descriptor.ports = Box::leak(
+        descriptor
+            .ports
+            .iter()
+            .map(|p| signal_core::PortDescriptor { rate: d64, ..*p })
+            .collect(),
+    );
+    descriptor.parameters = Box::leak(
+        descriptor
+            .parameters
+            .iter()
+            .map(|p| signal_core::ParameterDescriptor { rate: d64, ..*p })
+            .collect(),
+    );
+    registry
+        .register(signal_core::ModuleType {
+            descriptor,
+            create: lfo.create,
+        })
+        .unwrap();
+    let text = VALID
+        .replace(
+            "out = { module",
+            "lfo = { module = \"test.slow_lfo\" }\nout = { module",
+        )
+        .replace(
+            "  { from = \"osc.out\", to = \"out.r\" },",
+            "  { from = \"osc.out\", to = \"out.r\" },\n  { from = \"lfo.out\", to = \"osc.freq\", scale = 10 },",
+        );
+    let project = Project::from_sources(sources(&[("project.toml", &text)])).unwrap();
+    let planned = project.plan(&registry).unwrap();
+    let warnings: Vec<String> = planned.warnings.iter().map(ToString::to_string).collect();
+    // The kind mismatch (control into a frequency) names the connection as
+    // written too, not the converter's port.
+    assert_eq!(
+        warnings,
+        [
+            "project.toml:16:3: warning: /lfo.out -> /osc.freq: inserted converter /lfo/out_d1 (hold, rate divisor 64 -> 1)",
+            "project.toml:16:3: warning: /lfo.out (Control) -> /osc.freq (Frequency): kind mismatch",
+        ]
+    );
+    assert!(
+        planned
+            .plan
+            .instances
+            .iter()
+            .any(|i| i.type_name == "core.hold.d64.d1.signal.control")
+    );
+}
+
 #[test]
 fn syntax_error() {
     let text = VALID.replace(r#"name = "t""#, r#"name = "t"#);

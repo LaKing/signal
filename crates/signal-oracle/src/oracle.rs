@@ -41,7 +41,7 @@ fn error<T>(message: String) -> Result<T, OracleError> {
 /// Runs `graph` for `script.frames` frames, one at a time.
 pub fn run(registry: &Registry, graph: &Graph, script: &Script) -> Result<Output, OracleError> {
     let fade = fade_frames(script.sample_rate);
-    let mut plan = Plan::build(registry, graph, script, None)?;
+    let mut plan = Plan::build(registry, &with_converters(registry, graph)?, script, None)?;
     let mut output = Output {
         channels: plan.sink_inputs(),
         ..Output::default()
@@ -51,7 +51,8 @@ pub fn run(registry: &Registry, graph: &Graph, script: &Script) -> Result<Output
         let mut records = Vec::new();
         // Phase 1 (§2): a swap, then edits, then external events.
         if let Some(swap) = script.swaps.iter().find(|s| s.frame == n) {
-            plan = Plan::build(registry, &swap.graph, script, Some(plan))?;
+            let graph = with_converters(registry, &swap.graph)?;
+            plan = Plan::build(registry, &graph, script, Some(plan))?;
             version += 1;
             records.push(Record::Swap {
                 frame: n,
@@ -282,9 +283,22 @@ struct Inst {
     /// This frame's events on its event inputs, and where each input's end.
     events: Vec<Event>,
     ends: Vec<usize>,
+    /// Its rate divisor (§16): it is called on frames that are multiples of
+    /// it only.
+    divisor: u64,
+    /// Per signal output row: what it wrote at its last call (0 before),
+    /// which its outputs show on the frames between calls (§16).
+    live: Vec<f64>,
+    /// Per signal output row: the output port it belongs to.
+    row_ports: Vec<PortAddress>,
 }
 
 impl Inst {
+    /// Whether it is called at frame `n` (§16).
+    fn ticks_at(&self, n: u64) -> bool {
+        n.is_multiple_of(self.divisor)
+    }
+
     fn mode(&self) -> Mode {
         if self.fault.is_some() {
             Mode::Muted
@@ -295,11 +309,11 @@ impl Inst {
         }
     }
 
-    /// The first output port: signal, then event; none without outputs.
+    /// The first output port: signal (or vector), then event; none without
+    /// outputs.
     fn first_port(&self) -> Option<PortAddress> {
-        let signal = self.ports(Direction::Out, PortShape::Signal);
         let event = self.ports(Direction::Out, PortShape::Events);
-        signal.into_iter().chain(event).next()
+        self.row_ports.iter().cloned().chain(event).next()
     }
 
     fn ports(&self, direction: Direction, shape: PortShape) -> Vec<PortAddress> {
@@ -421,25 +435,40 @@ impl Plan {
                 edited_at: None,
                 events: Vec::new(),
                 ends: Vec::new(),
+                divisor: rate_of(&descriptor)?,
+                live: Vec::new(),
+                row_ports: Vec::new(),
             };
             for port in descriptor.ports {
                 let address = port_address(&spec.address, port.name)?;
+                // A signal is one row, a vector of N is N (§16).
+                let rows = match port.shape {
+                    PortShape::Signal => 1,
+                    PortShape::Vector(n) if n >= 1 => n as usize,
+                    _ => 0,
+                };
                 match (port.direction, port.shape) {
-                    (Direction::In, PortShape::Signal) => {
-                        inst.signal_sources.push(Vec::new());
-                        inst.signal_in.push(0.0);
+                    (Direction::In, PortShape::Signal | PortShape::Vector(_)) if rows > 0 => {
+                        for _ in 0..rows {
+                            inst.signal_sources.push(Vec::new());
+                            inst.signal_in.push(0.0);
+                        }
                     }
                     (Direction::In, PortShape::Events) => inst.event_inputs.push(EventInput {
                         port: address,
                         sources: Vec::new(),
                     }),
-                    (Direction::Out, PortShape::Signal) => {
-                        inst.outputs.push(plan.outputs.len());
-                        inst.audio.push(port.kind == PortKind::Audio);
-                        inst.held.push(0.0);
-                        plan.outputs.push(0.0);
-                        plan.output_ports.push(address);
-                        plan.output_owner.push(i);
+                    (Direction::Out, PortShape::Signal | PortShape::Vector(_)) if rows > 0 => {
+                        for _ in 0..rows {
+                            inst.outputs.push(plan.outputs.len());
+                            inst.audio.push(port.kind == PortKind::Audio);
+                            inst.held.push(0.0);
+                            inst.live.push(0.0);
+                            inst.row_ports.push(address.clone());
+                            plan.outputs.push(0.0);
+                            plan.output_ports.push(address.clone());
+                            plan.output_owner.push(i);
+                        }
                     }
                     (Direction::Out, PortShape::Events) => {
                         inst.event_outputs.push(plan.emitted.len());
@@ -477,6 +506,7 @@ impl Plan {
                 inst.suspension_discards = before.suspension_discards;
                 inst.edited_at = before.edited_at;
                 inst.held = before.held.clone();
+                inst.live = before.live.clone();
                 for (&new, &was) in inst.outputs.iter().zip(&before.outputs) {
                     plan.outputs[new] = old.outputs[was];
                 }
@@ -527,6 +557,13 @@ impl Plan {
                 return error(format!("no instance for {}", c.to));
             };
             let name = c.to.port();
+            // The source's rows: all of its port's (a vector's elements).
+            let source_rows = signal.map_or(0, |o| {
+                self.output_ports[o..]
+                    .iter()
+                    .take_while(|p| **p == c.from)
+                    .count()
+            });
             let mut signal_inputs = 0;
             let mut event_inputs = 0;
             let mut found = false;
@@ -535,9 +572,19 @@ impl Plan {
                     continue;
                 }
                 let here = port.name == name;
+                let rows = match port.shape {
+                    PortShape::Signal => 1,
+                    PortShape::Vector(n) => n as usize,
+                    _ => 0,
+                };
                 match (port.shape, here, signal, event) {
-                    (PortShape::Signal, true, Some(o), _) => {
-                        inst.signal_sources[signal_inputs].push((o, c.scale));
+                    (PortShape::Signal | PortShape::Vector(_), true, Some(o), _)
+                        if rows == source_rows =>
+                    {
+                        // Element by element (§16).
+                        for e in 0..rows {
+                            inst.signal_sources[signal_inputs + e].push((o + e, c.scale));
+                        }
                         found = true;
                     }
                     (PortShape::Events, true, _, Some(e)) => {
@@ -547,12 +594,15 @@ impl Plan {
                     _ => {}
                 }
                 match port.shape {
-                    PortShape::Signal => signal_inputs += 1,
-                    _ => event_inputs += 1,
+                    PortShape::Events => event_inputs += 1,
+                    _ => signal_inputs += rows,
                 }
             }
             if let Some(param) = inst.params.iter_mut().find(|p| p.port == c.to) {
                 match (signal, event) {
+                    (Some(_), _) if source_rows != 1 => {
+                        return error(format!("a vector into a parameter: {} -> {}", c.from, c.to));
+                    }
                     (Some(o), _) => param.modulation.push((o, c.scale)),
                     (_, Some(e)) => add_event_source(&mut param.events, e),
                     _ => {}
@@ -864,6 +914,11 @@ impl Plan {
         records: &mut Vec<Record>,
     ) {
         match self.gather(i, n, externals, records) {
+            // Between its ticks it shows what it wrote last (§16).
+            Mode::Running if !self.instances[i].ticks_at(n) => {
+                let live = self.instances[i].live.clone();
+                self.commit(i, n, true, &live, records);
+            }
             Mode::Running => {
                 let inst = &mut self.instances[i];
                 let mut outputs = vec![0.0; inst.outputs.len()];
@@ -889,6 +944,10 @@ impl Plan {
     /// A state-output instance's emit at frame `n` (phase 2).
     fn emit(&mut self, i: usize, n: u64, records: &mut Vec<Record>) {
         match self.instances[i].mode() {
+            Mode::Running if !self.instances[i].ticks_at(n) => {
+                let live = self.instances[i].live.clone();
+                self.commit(i, n, true, &live, records);
+            }
             Mode::Running => {
                 let inst = &mut self.instances[i];
                 let mut outputs = vec![0.0; inst.outputs.len()];
@@ -918,7 +977,8 @@ impl Plan {
         externals: &[&ExternalEvent],
         records: &mut Vec<Record>,
     ) {
-        if self.gather(i, n, externals, records) != Mode::Running {
+        if self.gather(i, n, externals, records) != Mode::Running || !self.instances[i].ticks_at(n)
+        {
             return;
         }
         let inst = &mut self.instances[i];
@@ -982,6 +1042,7 @@ impl Plan {
                 Fade::In(j + 1)
             };
         }
+        inst.live.copy_from_slice(live);
         for (sink, &e) in inst.sinks.iter().zip(&inst.event_outputs) {
             self.emitted[e] = sink.events().iter().map(|event| event.payload).collect();
         }
@@ -991,10 +1052,9 @@ impl Plan {
     /// event outputs, in descriptor order (§7).
     fn check(&self, i: usize, live: &[f64]) -> Option<(Option<PortAddress>, FaultReason)> {
         let inst = &self.instances[i];
-        let signal = inst.ports(Direction::Out, PortShape::Signal);
         for (p, &value) in live.iter().enumerate() {
             if let Some(reason) = fault_of(value) {
-                return Some((signal.get(p).cloned(), reason));
+                return Some((inst.row_ports.get(p).cloned(), reason));
             }
         }
         let events = inst.ports(Direction::Out, PortShape::Events);
@@ -1080,4 +1140,129 @@ fn add_event_source(sources: &mut Vec<(usize, usize)>, e: usize) {
 
 fn port_address(instance: &InstanceAddress, name: &str) -> Result<PortAddress, OracleError> {
     PortAddress::new(instance, name).map_err(|e| OracleError(format!("{instance}.{name}: {e}")))
+}
+
+/// An instance's rate divisor (§16): the one its outputs, event ports and
+/// parameters share (its signal inputs may differ), 1 without them.
+fn rate_of(descriptor: &ModuleDescriptor) -> Result<u64, OracleError> {
+    let own = descriptor
+        .ports
+        .iter()
+        .filter(|p| p.direction == Direction::Out || p.shape == PortShape::Events)
+        .map(|p| p.rate.get())
+        .chain(descriptor.parameters.iter().map(|p| p.rate.get()));
+    let mut rate = None;
+    for d in own {
+        if rate.is_some_and(|r| r != d) {
+            return error(format!("{}: mixed rate divisors", descriptor.type_name));
+        }
+        rate = Some(d);
+    }
+    Ok(u64::from(rate.unwrap_or(1)))
+}
+
+/// A port kind's name in a converter's type name (§16).
+fn kind_name(kind: PortKind) -> Result<&'static str, OracleError> {
+    Ok(match kind {
+        PortKind::Audio => "audio",
+        PortKind::Control => "control",
+        PortKind::Gate => "gate",
+        PortKind::Trigger => "trigger",
+        PortKind::Frequency => "frequency",
+        PortKind::Gain => "gain",
+        PortKind::Phase => "phase",
+        PortKind::Generic => "generic",
+        _ => return error(format!("no converter name for kind {kind:?}")),
+    })
+}
+
+/// `graph` with its implicit converters (§16), inserted here from the rule
+/// as `docs/semantics.md` states it: a connection from a signal or vector
+/// output at divisor *s* into an input of the same shape (or a signal into a
+/// parameter) at *t* ≠ *s*, one a multiple of the other, runs through the
+/// instance `<source instance>/<port>_d<t>` of type
+/// `core.<hold|decimate>.d<s>.d<t>.<signal|vectorN>.<kind>` (hold when *s* is
+/// the multiple), shared by every target of that source port at *t*: the
+/// source feeds its `in` with scale 1, its `out` feeds the target with the
+/// connection's scale. The type itself is the registry's.
+pub(crate) fn with_converters(registry: &Registry, graph: &Graph) -> Result<Graph, OracleError> {
+    let descriptor = |address: &InstanceAddress| {
+        let instance = graph.instances.iter().find(|i| i.address == *address)?;
+        Some(registry.get(&instance.type_name)?.descriptor)
+    };
+    let mut out = Graph {
+        version: graph.version,
+        instances: graph.instances.clone(),
+        connections: Vec::new(),
+    };
+    let mut made: Vec<(PortAddress, u32)> = Vec::new();
+    for c in &graph.connections {
+        let (from, to) = (descriptor(&c.from.instance()), descriptor(&c.to.instance()));
+        let source = from.and_then(|d| {
+            d.ports
+                .iter()
+                .find(|p| p.name == c.from.port() && p.direction == Direction::Out)
+                .copied()
+        });
+        let target = to.and_then(|d| {
+            d.ports
+                .iter()
+                .find(|p| p.name == c.to.port() && p.direction == Direction::In)
+                .map(|p| (p.shape, p.rate.get()))
+                .or_else(|| {
+                    d.parameters
+                        .iter()
+                        .find(|p| p.name == c.to.port())
+                        .map(|p| (PortShape::Signal, p.rate.get()))
+                })
+        });
+        let (Some(source), Some((shape, t))) = (source, target) else {
+            out.connections.push(c.clone());
+            continue;
+        };
+        let s = source.rate.get();
+        let word = if s != t && s % t == 0 {
+            "hold"
+        } else if s != t && t % s == 0 {
+            "decimate"
+        } else {
+            out.connections.push(c.clone());
+            continue;
+        };
+        let shape = match (source.shape, shape) {
+            (PortShape::Signal, PortShape::Signal) => "signal".to_owned(),
+            (PortShape::Vector(n), PortShape::Vector(m)) if n == m && n >= 1 => {
+                format!("vector{n}")
+            }
+            _ => {
+                out.connections.push(c.clone());
+                continue;
+            }
+        };
+        let name = format!("{}_d{t}", c.from.port());
+        let address = c
+            .from
+            .instance()
+            .child(&name)
+            .map_err(|e| OracleError(format!("converter {name}: {e}")))?;
+        if !made.contains(&(c.from.clone(), t)) {
+            made.push((c.from.clone(), t));
+            out.instances.push(crate::Instance {
+                address: address.clone(),
+                type_name: format!("core.{word}.d{s}.d{t}.{shape}.{}", kind_name(source.kind)?),
+                parameters: Vec::new(),
+            });
+            out.connections.push(crate::Connection {
+                from: c.from.clone(),
+                to: port_address(&address, "in")?,
+                scale: 1.0,
+            });
+        }
+        out.connections.push(crate::Connection {
+            from: port_address(&address, "out")?,
+            to: c.to.clone(),
+            scale: c.scale,
+        });
+    }
+    Ok(out)
 }

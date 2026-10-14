@@ -16,7 +16,10 @@ const DEFAULT_RANGE: Range = Range {
 /// descriptor order of the module's [`Inputs`](signal_core::Inputs).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stimulus {
-    /// One sample per frame for every signal input port.
+    /// One sample per frame for every signal input row: a signal port's,
+    /// and each element of a vector port's (M2.8-6). For a type at a rate
+    /// divisor above 1, a "frame" here is one of its ticks: the suite calls
+    /// it with its ticks only, as the engine does.
     pub signals: Vec<Vec<f64>>,
     /// The effective value per frame of every parameter, within its range.
     pub parameters: Vec<Vec<f64>>,
@@ -44,7 +47,7 @@ pub type StimulusFn = fn(descriptor: &ModuleDescriptor, seed: u64, frames: usize
 pub fn random(descriptor: &ModuleDescriptor, seed: u64, frames: usize) -> Stimulus {
     let mut draw = Draw::new(seed);
     let mut stimulus = Stimulus::default();
-    for port in inputs(descriptor, PortShape::Signal) {
+    for port in signal_rows(descriptor) {
         let range = port.range.unwrap_or(DEFAULT_RANGE);
         let corners = corners(range, None);
         let samples = (0..frames)
@@ -89,7 +92,7 @@ pub fn random(descriptor: &ModuleDescriptor, seed: u64, frames: usize) -> Stimul
 /// silence, so it differs from silence whenever the range is not a single point.
 pub fn impulse(descriptor: &ModuleDescriptor, frames: usize) -> Stimulus {
     let mut stimulus = Stimulus::default();
-    for port in inputs(descriptor, PortShape::Signal) {
+    for port in signal_rows(descriptor) {
         let range = port.range.unwrap_or(DEFAULT_RANGE);
         let silence = clamp(0.0, range);
         let mut peak = clamp(1.0, range);
@@ -126,8 +129,7 @@ pub(crate) fn perturb(
     frame: usize,
 ) -> Stimulus {
     let mut perturbed = stimulus.clone();
-    let signal_ranges =
-        inputs(descriptor, PortShape::Signal).map(|p| p.range.unwrap_or(DEFAULT_RANGE));
+    let signal_ranges = signal_rows(descriptor).map(|p| p.range.unwrap_or(DEFAULT_RANGE));
     for (samples, range) in perturbed.signals.iter_mut().zip(signal_ranges) {
         if let Some(x) = samples.get_mut(frame) {
             *x = other_value(*x, range);
@@ -155,7 +157,7 @@ pub(crate) fn check_shape(
     let groups = [
         (
             "signal inputs",
-            inputs(descriptor, PortShape::Signal).count(),
+            signal_rows(descriptor).count(),
             stimulus.signals.len(),
         ),
         (
@@ -190,6 +192,18 @@ pub(crate) fn check_shape(
         return Err("the stimulus has events that are not sorted by frame".to_owned());
     }
     Ok(())
+}
+
+/// Every signal input row: a signal port once, a vector port of N once per
+/// element (M2.8-6), in descriptor order.
+fn signal_rows(
+    descriptor: &ModuleDescriptor,
+) -> impl Iterator<Item = &'static signal_core::PortDescriptor> {
+    descriptor
+        .ports
+        .iter()
+        .filter(|p| p.direction == Direction::In && p.shape.is_signal())
+        .flat_map(|p| std::iter::repeat_n(p, p.shape.rows()))
 }
 
 fn inputs(

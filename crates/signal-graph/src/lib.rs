@@ -4,14 +4,16 @@
 //! - [`CompositeDef`] and friends: the description, as in-memory structs. The
 //!   project root is itself a composite.
 //! - [`build_plan`]: flattens composites into primitive instances with
-//!   hierarchical addresses, validates connections and parameter values, and
-//!   schedules every instance. A parameter accepts signal connections
-//!   (modulation) and event connections (base changes, ADR 0016 §4).
+//!   hierarchical addresses, inserts hold and decimate converters between
+//!   rate divisors (ADR 0005, M2.8-6), validates connections and parameter
+//!   values, and schedules every instance. A parameter accepts signal
+//!   connections (modulation) and event connections (base changes, ADR 0016
+//!   §4).
 //! - [`GraphError`] and [`GraphWarning`]: what can be wrong, with addresses.
 //!
 //! Domain-free: knows instances, ports, connections and addresses only.
-//! Converter insertion (ADR 0005) and live edits come in later milestones.
 
+mod convert;
 mod def;
 mod error;
 mod flatten;
@@ -36,7 +38,9 @@ pub use plan::{ExecutionPlan, PlanInstance, Source};
 ///
 /// Errors are reported in stages: composite library, flattening, connection and
 /// parameter validation, then dependency cycles. Every error of the first
-/// failing stage is returned.
+/// failing stage is returned. Before validation, a connection across rate
+/// divisors that hold or decimate joins runs through an inserted converter,
+/// reported as a [`GraphWarning::ConverterInserted`] (`docs/semantics.md` §16).
 pub fn build_plan(
     root: &CompositeDef,
     composites: &[CompositeDef],
@@ -45,14 +49,19 @@ pub fn build_plan(
 ) -> Result<ExecutionPlan, Vec<GraphError>> {
     let mut graph = flatten::flatten(root, composites, registry)?;
     // Canonical order (ADR 0016 §3): by target, then byte-wise by source.
-    graph.connections.sort_by(|a, b| {
-        (&a.to, &a.from)
-            .cmp(&(&b.to, &b.from))
-            .then_with(|| a.scale.total_cmp(&b.scale))
-    });
+    let canonical = |graph: &mut flatten::FlatGraph| {
+        graph.connections.sort_by(|a, b| {
+            (&a.to, &a.from)
+                .cmp(&(&b.to, &b.from))
+                .then_with(|| a.scale.total_cmp(&b.scale))
+        });
+    };
+    canonical(&mut graph);
 
     let mut warnings = Vec::new();
-    validate::validate(&graph, &mut warnings)?;
+    let converted = convert::insert(&mut graph, &mut warnings);
+    canonical(&mut graph);
+    validate::validate(&graph, &converted, &mut warnings)?;
     let schedule = schedule::schedule(&graph).map_err(|error| vec![error])?;
     warnings.extend(
         schedule::unreachable(&graph)

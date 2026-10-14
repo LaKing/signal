@@ -20,8 +20,8 @@ use std::time::Instant;
 use signal_core::{
     BlockLatency, Combine, DirectPrimitive, Direction, Due, Event, EventPayload, EventSink,
     Feedthrough, Frame, Inputs, InstanceAddress, LossCause, ModuleDescriptor, Outputs, PortAddress,
-    PortKind, PortShape, PrepareContext, Primitive, Range, RateDivisor, Registry, Reproducibility,
-    RngStream, SinkKind, StateOutputPrimitive, fnv1a64_words,
+    PortKind, PortShape, PrepareContext, Primitive, Range, Registry, Reproducibility, RngStream,
+    SinkKind, StateOutputPrimitive, fnv1a64_words,
 };
 use signal_graph::ExecutionPlan;
 
@@ -360,6 +360,13 @@ pub(crate) struct Slot {
     /// in-call offsets, and where each input's end in them.
     events: Vec<Event>,
     ends: Vec<usize>,
+    /// Its rate divisor *d* (M2.8-6, `docs/semantics.md` §16): it is called
+    /// on the frames that are multiples of *d* only.
+    divisor: u64,
+    /// For *d* > 1: what it wrote at its last tick, per signal output row
+    /// (0 before its first), which its outputs hold between ticks. Empty for
+    /// *d* = 1.
+    hold: Vec<f64>,
 }
 
 impl Slot {
@@ -614,6 +621,8 @@ impl PlanState {
         }
         let ports: Vec<PortAddress> = all_ports.into_iter().collect();
         let mut roles: Vec<Option<(usize, Role)>> = vec![None; ports.len()];
+        // Each port's rows: 1 for a signal or parameter, N for a vector.
+        let mut port_rows = vec![0usize; ports.len()];
         // M2.7-2: what the host lends each instance, asked once per plan
         // state with every instance in address order; never read here.
         let mut lent = match registry.host() {
@@ -661,6 +670,37 @@ impl PlanState {
                 return Err(EngineError::DescriptorMismatch {
                     instance: address.clone(),
                 });
+            }
+            // M2.8-6: one rate per type (`docs/semantics.md` §16); a divided
+            // rate has no event ports, no declared latency and no sink.
+            let divisor = u64::from(
+                descriptor
+                    .rate()
+                    .ok_or_else(|| EngineError::MixedRates {
+                        instance: address.clone(),
+                    })?
+                    .get(),
+            );
+            if divisor > 1 {
+                let limit = if descriptor
+                    .ports
+                    .iter()
+                    .any(|p| p.shape == PortShape::Events)
+                {
+                    Some("event ports")
+                } else if descriptor.latency.is_some() {
+                    Some("a declared latency")
+                } else if descriptor.sink.is_some() {
+                    Some("a sink")
+                } else {
+                    None
+                };
+                if let Some(what) = limit {
+                    return Err(EngineError::UnsupportedRate {
+                        instance: address.clone(),
+                        what,
+                    });
+                }
             }
             let kind = (instance.type_name, descriptor);
             let survivor = old.and_then(|old| {
@@ -714,14 +754,19 @@ impl PlanState {
             );
             for p in descriptor.ports {
                 let port = port_address(address, p.name)?;
-                if p.rate != RateDivisor::ONE {
-                    return Err(EngineError::UnsupportedRate { port });
-                }
                 let id = ports.binary_search(&port).unwrap_or(usize::MAX);
+                // A vector of N is N rows, from its first (M2.8-6).
+                let rows = p.shape.rows();
+                if let Some(r) = port_rows.get_mut(id) {
+                    *r = rows;
+                }
                 let role = match (p.direction, p.shape) {
-                    (Direction::In, PortShape::Signal) => {
-                        signal_inputs += 1;
-                        Role::SignalIn(signal_inputs - 1)
+                    (_, PortShape::Vector(0)) => {
+                        return Err(EngineError::UnsupportedShape { port });
+                    }
+                    (Direction::In, PortShape::Signal | PortShape::Vector(_)) => {
+                        signal_inputs += rows;
+                        Role::SignalIn(signal_inputs - rows)
                     }
                     (Direction::In, PortShape::Events) => {
                         event_inputs.push(EventInput {
@@ -730,10 +775,12 @@ impl PlanState {
                         });
                         Role::EventIn(event_inputs.len() - 1)
                     }
-                    (Direction::Out, PortShape::Signal) => {
-                        output_audio.push(p.kind == PortKind::Audio);
-                        output_ports.push(PortId(id));
-                        Role::SignalOut(output_audio.len() - 1)
+                    (Direction::Out, PortShape::Signal | PortShape::Vector(_)) => {
+                        for _ in 0..rows {
+                            output_audio.push(p.kind == PortKind::Audio);
+                            output_ports.push(PortId(id));
+                        }
+                        Role::SignalOut(output_audio.len() - rows)
                     }
                     (Direction::Out, PortShape::Events) => {
                         sinks.push(EventSink::per_frame(
@@ -751,10 +798,10 @@ impl PlanState {
             }
             for p in descriptor.parameters {
                 let port = port_address(address, p.name)?;
-                if p.rate != RateDivisor::ONE {
-                    return Err(EngineError::UnsupportedRate { port });
-                }
                 let id = ports.binary_search(&port).unwrap_or(usize::MAX);
+                if let Some(r) = port_rows.get_mut(id) {
+                    *r = 1;
+                }
                 let initial = instance
                     .parameters
                     .get(p.name)
@@ -809,6 +856,12 @@ impl PlanState {
                 // Sized below, once every connection is known.
                 events: Vec::new(),
                 ends: Vec::new(),
+                divisor,
+                hold: if divisor > 1 {
+                    vec![0.0; output_audio.len() - starts.2]
+                } else {
+                    Vec::new()
+                },
             });
             primitives.push(primitive);
             types.push(kind);
@@ -828,16 +881,25 @@ impl PlanState {
                     from: source.from.clone(),
                     to: target.clone(),
                 };
-                let (Some((_, (to, target_role))), Some((from_id, (from, source_role)))) =
+                let (Some((to_id, (to, target_role))), Some((from_id, (from, source_role)))) =
                     (role_of(target), role_of(&source.from))
                 else {
                     return Err(invalid());
                 };
+                // A signal or a vector: element-wise, equal shapes only.
+                let rows = source.shape.rows();
+                let same = |id: usize| port_rows.get(id) == Some(&rows);
                 match (target_role, source_role, source.shape) {
-                    (Role::SignalIn(k), Role::SignalOut(o), PortShape::Signal) => signal_sources
-                        .get_mut(k)
-                        .ok_or_else(invalid)?
-                        .push((o, source.scale)),
+                    (Role::SignalIn(k), Role::SignalOut(o), shape)
+                        if shape.is_signal() && same(to_id) && same(from_id) =>
+                    {
+                        for e in 0..rows {
+                            signal_sources
+                                .get_mut(k + e)
+                                .ok_or_else(invalid)?
+                                .push((o + e, source.scale));
+                        }
+                    }
                     (Role::EventIn(k), Role::EventOut(s), PortShape::Events) => add_event_source(
                         &mut event_inputs.get_mut(k).ok_or_else(invalid)?.sources,
                         s,
@@ -1306,6 +1368,9 @@ fn move_instance(new: &mut PlanState, old: &mut PlanState, n: usize, o: usize) {
     ns.discards = os.discards;
     ns.suspension_discards = os.suspension_discards;
     ns.edited_at = os.edited_at;
+    for (a, &b) in ns.hold.iter_mut().zip(&os.hold) {
+        *a = b;
+    }
     let outputs = ns.signal_out.clone().zip(os.signal_out.clone());
     let events = ns.event_out.clone().zip(os.event_out.clone());
     let params = ns.params.clone().zip(os.params.clone());
@@ -3014,6 +3079,10 @@ fn run_direct(fx: &Fixed<'_>, access: &mut Access<'_>, i: usize, a: usize, b: us
     let Some(mut v) = access.call(i, a, b) else {
         return;
     };
+    if v.slot.divisor > 1 {
+        divided_direct(fx, &mut v, (lane, i), a, b);
+        return;
+    }
     let len = b - a;
     let rollback = len > 1 && v.slot.mode() == Mode::Running;
     if rollback {
@@ -3070,9 +3139,189 @@ fn run_direct(fx: &Fixed<'_>, access: &mut Access<'_>, i: usize, a: usize, b: us
     }
 }
 
+/// [`run_direct`] for an instance of rate divisor *d* > 1 (M2.8-6,
+/// `docs/semantics.md` §16): its inputs are gathered every frame, as for
+/// *d* = 1, but `process` is called once for the segment's ticks only (from
+/// its first tick `t₁`), and its outputs hold its last tick's values between
+/// ticks. The rollback snapshot is taken before the gather, so a fault at a
+/// tick undoes what the frames after it gathered, exactly as per frame; a
+/// panic acts from `t₁`.
+fn divided_direct(
+    fx: &Fixed<'_>,
+    v: &mut CallView<'_>,
+    (lane, i): (usize, usize),
+    a: usize,
+    b: usize,
+) {
+    let rollback = b - a > 1 && v.slot.mode() == Mode::Running;
+    if rollback {
+        save(&mut gathering(v));
+    }
+    match gather(fx, &mut gathering(v), a, b) {
+        Mode::Running => {}
+        Mode::Suspended => {
+            let mut r = running(v);
+            for f in a..b {
+                fade_suspended(fx, &mut r, f);
+            }
+            return;
+        }
+        Mode::Muted => {
+            let mut r = running(v);
+            for f in a..b {
+                fade_muted(fx, &mut r, f);
+            }
+            return;
+        }
+    }
+    let d = v.slot.divisor;
+    let first = first_tick(fx, d, a, b);
+    let held = first.unwrap_or(b);
+    if held > a
+        && let Some(fault) = commit_hold(fx, &mut running(v), a, held)
+    {
+        mute(fx, &mut gathering(v), i, (a, b), rollback, fault);
+        let mut r = running(v);
+        for f in fault.0..b {
+            fade_muted(fx, &mut r, f);
+        }
+        return;
+    }
+    let Some(t1) = first else {
+        return;
+    };
+    let ticks = ticks_from(d, t1, b);
+    let ports = (v.slot.signal_in.len(), v.slot.params.len());
+    load_ticks(v.lane, (&v.signal_in, &v.param_rows), ports, (t1, d, ticks));
+    let completed = match v.primitive.as_mut() {
+        Some(Primitive::Direct(module)) => guarded(fx.hang, (lane, i), || {
+            process(
+                module.as_mut(),
+                (&*v.slot, &mut *v.lane, &mut *v.sinks),
+                ticks,
+            );
+        }),
+        _ => true,
+    };
+    if !completed {
+        let fault = panicked(fx, &mut running(v), t1);
+        mute(fx, &mut gathering(v), i, (a, b), rollback, fault);
+        let mut r = running(v);
+        for f in t1..b {
+            fade_muted(fx, &mut r, f);
+        }
+        return;
+    }
+    let mut r = running(v);
+    expand(&mut r, (d, ticks), b - t1);
+    if let Some(fault) = commit(fx, &mut r, t1, b) {
+        mute(fx, &mut gathering(v), i, (a, b), rollback, fault);
+        let mut r = running(v);
+        for f in fault.0..b {
+            fade_muted(fx, &mut r, f);
+        }
+    }
+}
+
+/// Whether block frame `f` is a tick of `slot`: its frame is a multiple of
+/// the rate divisor (always, for divisor 1).
+#[inline(always)]
+fn is_tick(fx: &Fixed<'_>, slot: &Slot, f: usize) -> bool {
+    slot.divisor <= 1 || fx.frame(f).0.is_multiple_of(slot.divisor)
+}
+
+/// The first block frame in `a..b` whose frame is a multiple of `d`.
+fn first_tick(fx: &Fixed<'_>, d: u64, a: usize, b: usize) -> Option<usize> {
+    let past = fx.frame(a).0 % d;
+    let ahead = if past == 0 { 0 } else { d - past };
+    let t = a.saturating_add(usize::try_from(ahead).unwrap_or(usize::MAX));
+    (t < b).then_some(t)
+}
+
+/// The ticks of divisor `d` in `t1..b`, `t1` a tick.
+fn ticks_from(d: u64, t1: usize, b: usize) -> usize {
+    let d = usize::try_from(d).unwrap_or(usize::MAX).max(1);
+    (b - t1 - 1) / d + 1
+}
+
+/// Copies the instance's summed signal inputs and effective parameter values
+/// at its `ticks` ticks from block frame `t1` (one every `d` frames) into
+/// its lane's call buffers, port-major: [`load_call`] for a divided rate.
+fn load_ticks<R: Own>(
+    lane: &mut Lane,
+    (signal_in, param_rows): (&R, &R),
+    ports: (usize, usize),
+    (t1, d, ticks): (usize, u64, usize),
+) {
+    let d = usize::try_from(d).unwrap_or(usize::MAX).max(1);
+    let pairs = [
+        (ports.0, signal_in, &mut lane.call_signals),
+        (ports.1, param_rows, &mut lane.call_params),
+    ];
+    for (count, rows, call) in pairs {
+        for p in 0..count {
+            let Some(to) = call.get_mut(p * ticks..(p + 1) * ticks) else {
+                continue;
+            };
+            for (j, to) in to.iter_mut().enumerate() {
+                *to = rows.get(p, t1 + j * d).unwrap_or(0.0);
+            }
+        }
+    }
+}
+
+/// After a divided-rate call of `ticks` ticks (one every `d` frames) from a
+/// tick: spreads the lane's call outputs, port-major per tick, to one value
+/// per frame of the `len` frames from that tick, each frame showing its
+/// latest tick, in place (from the last row and frame back, so nothing is
+/// overwritten before it is read); then keeps the last tick's values in
+/// the slot's `hold`.
+fn expand<R>(r: &mut Run<'_, R>, (d, ticks): (u64, usize), len: usize) {
+    let d = usize::try_from(d).unwrap_or(usize::MAX).max(1);
+    let call = &mut r.lane.call_outputs;
+    for p in (0..r.slot.hold.len()).rev() {
+        for c in (0..len).rev() {
+            let value = call.get(p * ticks + c / d).copied().unwrap_or(0.0);
+            if let Some(to) = call.get_mut(p * len + c) {
+                *to = value;
+            }
+        }
+    }
+    for (p, hold) in r.slot.hold.iter_mut().enumerate() {
+        if let Some(&value) = call.get(p * len + len - 1) {
+            *hold = value;
+        }
+    }
+}
+
+/// A divided-rate instance's frames `a..b` with no tick among them, running:
+/// its outputs show its held values ([`commit`], with fade-ins as for any
+/// value it writes). Returns a fault for [`mute`], as `commit` does (a held
+/// value already passed the guard at its tick, so none is expected).
+fn commit_hold<R: Own>(
+    fx: &Fixed<'_>,
+    r: &mut Run<'_, R>,
+    a: usize,
+    b: usize,
+) -> Option<(usize, PortId, FaultReason)> {
+    let len = b - a;
+    for (p, &value) in r.slot.hold.iter().enumerate() {
+        if let Some(row) = r.lane.call_outputs.get_mut(p * len..(p + 1) * len) {
+            row.fill(value);
+        }
+    }
+    commit(fx, r, a, b)
+}
+
 /// Phase 2 for one state-output instance at frame `f` of the block.
 fn emit(fx: &Fixed<'_>, v: &mut CallView<'_>, (lane, i): (usize, usize), f: usize) {
     match v.slot.mode() {
+        Mode::Running if !is_tick(fx, v.slot, f) => {
+            if let Some(fault) = commit_hold(fx, &mut running(v), f, f + 1) {
+                mute(fx, &mut gathering(v), i, (f, f + 1), false, fault);
+                fade_muted(fx, &mut running(v), f);
+            }
+        }
         Mode::Running => {
             for sink in v.sinks.iter_mut() {
                 sink.start_call(1);
@@ -3097,6 +3346,8 @@ fn emit(fx: &Fixed<'_>, v: &mut CallView<'_>, (lane, i): (usize, usize), f: usiz
             if let Some(fault) = fault {
                 mute(fx, &mut gathering(v), i, (f, f + 1), false, fault);
                 fade_muted(fx, &mut running(v), f);
+            } else {
+                hold_emitted(&mut running(v));
             }
         }
         Mode::Suspended => fade_suspended(fx, &mut running(v), f),
@@ -3104,9 +3355,18 @@ fn emit(fx: &Fixed<'_>, v: &mut CallView<'_>, (lane, i): (usize, usize), f: usiz
     }
 }
 
+/// After a divided-rate instance's `emit` at a tick: its outputs hold what
+/// it wrote until its next tick. Nothing for divisor 1 (no `hold`).
+#[inline(always)]
+fn hold_emitted<R>(r: &mut Run<'_, R>) {
+    for (hold, &value) in r.slot.hold.iter_mut().zip(&r.lane.call_outputs) {
+        *hold = value;
+    }
+}
+
 /// Phase 4 for one state-output instance at frame `f` of the block.
 fn absorb(fx: &Fixed<'_>, v: &mut CallView<'_>, (lane, i): (usize, usize), f: usize) {
-    if gather(fx, &mut gathering(v), f, f + 1) != Mode::Running {
+    if gather(fx, &mut gathering(v), f, f + 1) != Mode::Running || !is_tick(fx, v.slot, f) {
         return;
     }
     let ports = (v.slot.signal_in.len(), v.slot.params.len());
@@ -3583,6 +3843,27 @@ impl Whole<'_> {
         load_call(self.lane, (&signal_in, &param_rows), ports, a, len);
     }
 
+    /// Copies instance `i`'s inputs at its `ticks` ticks from `t1` (one
+    /// every `d` frames) into the lane ([`load_ticks`]).
+    fn load_ticks(&mut self, i: usize, ticks: (usize, u64, usize)) {
+        let Some(slot) = self.slots.get(i) else {
+            return;
+        };
+        let k = self.k;
+        let signal_in = PlanRows {
+            rows: &mut *self.signal_in,
+            first: slot.signal_in.start,
+            k,
+        };
+        let param_rows = PlanRows {
+            rows: &mut *self.param_rows,
+            first: slot.params.start,
+            k,
+        };
+        let ports = (slot.signal_in.len(), slot.params.len());
+        load_ticks(self.lane, (&signal_in, &param_rows), ports, ticks);
+    }
+
     /// The fault guard after instance `i`'s call over `a..b` faulted.
     fn mute(
         &mut self,
@@ -3640,6 +3921,10 @@ fn whole_unit(fx: &Fixed<'_>, w: &mut Whole<'_>, u: usize) {
 /// [`run_direct`] for a sequential segment.
 fn whole_direct(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, a: usize, b: usize) {
     if !w.has(i) {
+        return;
+    }
+    if w.slots.get(i).is_some_and(|s| s.divisor > 1) {
+        whole_divided(fx, w, i, a, b);
         return;
     }
     let len = b - a;
@@ -3709,6 +3994,80 @@ fn whole_direct(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, a: usize, b: usize)
     }
 }
 
+/// [`divided_direct`] for a sequential segment.
+fn whole_divided(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, a: usize, b: usize) {
+    let Some(slot) = w.slots.get(i) else {
+        return;
+    };
+    let (d, rollback) = (slot.divisor, b - a > 1 && slot.mode() == Mode::Running);
+    let mode = {
+        let Some(mut g) = w.gathering(i) else {
+            return;
+        };
+        if rollback {
+            save(&mut g);
+        }
+        gather(fx, &mut g, a, b)
+    };
+    match mode {
+        Mode::Running => {}
+        Mode::Suspended => {
+            if let Some(mut r) = w.running(i) {
+                for f in a..b {
+                    fade_suspended(fx, &mut r, f);
+                }
+            }
+            return;
+        }
+        Mode::Muted => {
+            if let Some(mut r) = w.running(i) {
+                for f in a..b {
+                    fade_muted(fx, &mut r, f);
+                }
+            }
+            return;
+        }
+    }
+    let first = first_tick(fx, d, a, b);
+    let held = first.unwrap_or(b);
+    if held > a {
+        let Some(mut r) = w.running(i) else {
+            return;
+        };
+        if let Some(fault) = commit_hold(fx, &mut r, a, held) {
+            w.mute(fx, i, (a, b), rollback, fault);
+            return;
+        }
+    }
+    let Some(t1) = first else {
+        return;
+    };
+    let ticks = ticks_from(d, t1, b);
+    w.load_ticks(i, (t1, d, ticks));
+    let completed = match (w.slots.get(i), w.primitives.get_mut(i)) {
+        (Some(slot), Some(Some(Primitive::Direct(module)))) => {
+            let sinks = w.sinks.get_mut(slot.event_out.clone()).unwrap_or(&mut []);
+            let lane = &mut *w.lane;
+            guarded(fx.hang, (0, i), || {
+                process(module.as_mut(), (slot, lane, sinks), ticks);
+            })
+        }
+        _ => true,
+    };
+    let Some(mut r) = w.running(i) else {
+        return;
+    };
+    if !completed {
+        let fault = panicked(fx, &mut r, t1);
+        w.mute(fx, i, (a, b), rollback, fault);
+        return;
+    }
+    expand(&mut r, (d, ticks), b - t1);
+    if let Some(fault) = commit(fx, &mut r, t1, b) {
+        w.mute(fx, i, (a, b), rollback, fault);
+    }
+}
+
 /// [`emit`] for a sequential segment.
 fn whole_emit(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, f: usize) {
     if !w.has(i) {
@@ -3718,6 +4077,14 @@ fn whole_emit(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, f: usize) {
         return;
     };
     match slot.mode() {
+        Mode::Running if !is_tick(fx, slot, f) => {
+            let Some(mut r) = w.running(i) else {
+                return;
+            };
+            if let Some(fault) = commit_hold(fx, &mut r, f, f + 1) {
+                w.mute(fx, i, (f, f + 1), false, fault);
+            }
+        }
         Mode::Running => {
             let sinks = w.sinks.get_mut(slot.event_out.clone()).unwrap_or(&mut []);
             for sink in sinks.iter_mut() {
@@ -3749,6 +4116,9 @@ fn whole_emit(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, f: usize) {
                 };
                 let fault = commit(fx, &mut r, f, f + 1);
                 keep_events(&mut r, f, f + 1, fault.map(|(n, _, _)| n));
+                if fault.is_none() {
+                    hold_emitted(&mut r);
+                }
                 fault
             };
             if let Some(fault) = fault {
@@ -3779,7 +4149,7 @@ fn whole_absorb(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, f: usize) {
         };
         gather(fx, &mut g, f, f + 1)
     };
-    if mode != Mode::Running {
+    if mode != Mode::Running || w.slots.get(i).is_some_and(|s| !is_tick(fx, s, f)) {
         return;
     }
     w.load_call(i, f, 1);

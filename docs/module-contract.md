@@ -13,9 +13,9 @@
    - `feedthrough`: must name the class whose trait you implement.
    - `sink`: `Some(SinkKind::Audio)` if the module has an external effect, else `None`.
 
-   Port and parameter names follow `[a-z][a-z0-9_]*` and are unique within the module, because parameters are input ports and share the address form `<instance>.<name>` (ADR 0004). M1 uses rate divisor 1 only.
+   Port and parameter names follow `[a-z][a-z0-9_]*` and are unique within the module, because parameters are input ports and share the address form `<instance>.<name>` (ADR 0004). Rates and vector shapes: "Rates and vectors" below.
 3. **Implement the trait**: `describe` returns the descriptor; `prepare`, `reset`, and either `process` or `emit` + `absorb`.
-4. **Register it** as a `ModuleType { descriptor, create }`, where `create` returns a fresh, unprepared instance boxed as `Primitive::Direct` or `Primitive::StateOutput`. `Registry::register` refuses a type name that is already registered.
+4. **Register it** as a `ModuleType { descriptor, create }`, where `create` returns a fresh, unprepared instance boxed as `Primitive::Direct` or `Primitive::StateOutput`. `Registry::register` refuses a type name that is already registered, and names in the `core.` namespace, which is the rate converters' (below).
 
 The module never sees addresses, other instances, the graph, suspension, or the wall clock. Domain concepts (tempo, musical time, protocols) belong in library modules, never in the core (ADR 0001, 0003).
 
@@ -88,8 +88,8 @@ M2.7-9. The synchronous calls, `process`, `emit` and `absorb` (and a latent modu
 So computation that is **experimental or may block** (a device, a model, anything whose time is not bounded) must run **behind a latent (asynchronous) boundary**: the type declares a `latency` ("Declared latency" above), does the work on its own thread or device, and answers `due` at once, `Pending` or `Lost` when the result is not in; the engine never waits for it in real time. The GPU modules are built this way (ADR 0019 §3). A lab primitive (ADR 0015) meets the same boundary as any other.
 
 `PrepareContext` gives:
-- `sample_rate`: the master rate in frames per second;
-- `max_frames`: the largest *k* any later call receives;
+- `sample_rate`: the master rate in frames per second, whatever the type's rate divisor *d*: a type that needs its own tick rate divides it by *d*, which it knows from its descriptor;
+- `max_frames`: the largest *k* any later call receives (for a divided rate, also a bound on the ticks of a call, which never has more ticks than frames);
 - `rng`: the instance's `RngStream`, `derive(master_seed, instance address)` (ADR 0008);
 - `lent` (M2.7-2): what the program running the engine lends the instance, or `None`. The registry's `Host` decides it per plan (`lend`, called on the control side for every plan state the engine builds, the real-time mirror's included, with every instance in address order); the engine passes it on and never reads it. It is opaque (`Arc<dyn Any + Send + Sync>`): a module that uses it downcasts it to the type it expects, and **must work without it**. A GPU-backed module is lent its device, a `signal_gpu::Lease` placed by `signal_gpu::GpuHost` (`realtime-rules.md` "GPU"); without one it has no channel and its due results are lost, logged.
 
@@ -100,20 +100,21 @@ A GPU-backed module's channel is a `signal_gpu::PlacedChannel`. When its device 
 ## I/O views
 
 The engine owns every buffer. It lends them to the module per call as flat views, so building a view never allocates. Indices count **within each group, in descriptor order**:
-- signal inputs: `ports` with direction `In` and shape `Signal`;
+- signal inputs: `ports` with direction `In` and shape `Signal` or `Vector`, one **row** per signal and *N* rows per vector of *N*;
 - event inputs: `In` + `Events`;
-- signal outputs: `Out` + `Signal`;
+- signal outputs: `Out` + `Signal` or `Vector`, in rows likewise;
 - event outputs: `Out` + `Events`;
 - parameters: the `parameters` list.
 
 | View | Accessor | Carries |
 |---|---|---|
 | `Inputs` | `frames()` | *k* ≥ 1, the frames in this call |
-| | `signal(i)` | *k* samples of signal input *i*. The executor has already summed its connections (fan-in = sum, ADR 0016 §4), so an input with no connection reads 0. |
+| | `signal(i)` | *k* samples of signal input row *i*. The executor has already summed its connections (fan-in = sum, ADR 0016 §4), so an input with no connection reads 0. |
+| | `rows(first, n)`, `signal_rows()` | Rows `first .. first + n`, row after row (a vector's elements); the number of rows |
 | | `parameter(i)` | *k* **effective** values of parameter *i*. The executor applies `set`/`ramp` events to the base, adds modulation per `combine`, and clamps to the range (ADR 0016 §4, §4a). Modules never apply parameter events themselves. |
 | | `events(i)` | The events on event input *i*, each with its frame `offset` inside the block (0 ≤ offset < *k*). They are sorted by offset; events with the same offset are already in the canonical order of ADR 0016 §3. |
 | `Outputs` | `frames()` | *k*, as above |
-| | `signal(i)`, `signals()` | *k* samples of signal output *i* (or all outputs at once). The module writes every sample. |
+| | `signal(i)`, `signals()`, `rows(first, n)` | *k* samples of signal output row *i* (or all rows at once, or rows `first .. first + n`). The module writes every sample. |
 | | `events(i)` | The bounded `EventSink` of event output *i* |
 
 Accessors never panic. An index outside the declared ports yields an empty slice (or `None` for an event sink), so a shape mismatch is a visible defect, not a crash.
@@ -121,6 +122,15 @@ Accessors never panic. An index outside the declared ports yields an empty slice
 **Event output is bounded.** `EventSink::push` keeps the event if there is room. When the sink is full it **drops the event, increments the sink's overflow counter, and returns `false`**, without allocating or panicking. The engine sizes each sink before the real-time calls, collects and clears it after each call, and reports overflows as faults. Events pushed by one module on one port keep their emission order. Their order relative to other sources is set by the receiver's canonical order (ADR 0016 §3).
 
 **Events** (`Event { offset, payload }`) are `Copy`, heap-free, and at most 32 bytes. Payloads are `Trigger`, `Set(v)` and `Ramp { to, frames, curve }`. `Curve::Linear` is `c(x) = x`, and every curve satisfies `c(0) = 0` and `c(1) = 1` exactly (ADR 0016 §4a).
+
+## Rates and vectors
+
+M2.8-6 (ADR 0005, `semantics.md` §16).
+
+- **One rate per type.** Every port and parameter declares a rate divisor *d*. A type's **rate** is the divisor its outputs, event ports and parameters share (1 if it has none of them); each signal or vector input may declare another, which divides it or is a multiple of it (`ModuleDescriptor::rate`). The engine refuses a type without one rate (`EngineError::MixedRates`), and a type at a rate above 1 with event ports, a declared latency or a sink (`EngineError::UnsupportedRate`); those run at divisor 1 only.
+- **Per-tick calls.** A type at rate *d* is called on its **ticks** only, the frames that are multiples of *d*. In every call `frames()` is the number of ticks the call covers, and every slice holds one value per tick: its inputs and effective parameter values at those ticks, and its outputs for them. The type never sees the frames between ticks; its outputs hold their last tick's values there. So the module contract is the same as at divisor 1, counted in ticks: the result must not depend on how ticks are split into calls, and the contract suite checks a divided-rate type over ticks.
+- **Vectors.** A port of shape `Vector(N)`, *N* ≥ 1, carries *N* `f64` per tick as *N* consecutive rows of the views, its elements in order (element *e* is row `first + e`). A vector connects only to a vector of the same *N*, element by element; never to a signal or a parameter. Parameters are scalar.
+- **Converters.** Where a connection joins two rates one of which divides the other, the graph compiler inserts a converter instance, an ordinary direct primitive of type `core.<hold|decimate>.d<from>.d<to>.<signal|vectorN>.<kind>` that copies each input row to its output row at its own rate (`signal_core::converter`). A project may also name one explicitly by that type name; every registry knows them (`Registry::get`) without listing them. A `core.` name that is not exactly such a name is an unknown module.
 
 ## Testing a primitive: the contract suite
 
@@ -141,11 +151,11 @@ mod sine_osc {
 The argument is an expression of type `ModuleType`. `contract_tests!(module_type, stimulus)` takes a custom stimulus generator instead of the default: a `fn(&ModuleDescriptor, seed: u64, frames: usize) -> Stimulus`. The macro expands to one `#[test]` per check, named after the check. To test several module types in one file, give each its own `mod`. Without `install_counting_allocator!()`, `no_allocation` fails rather than passing vacuously.
 
 The default stimulus (`signal_contract::stimulus::random`) is derived from a seed:
-- **Signal inputs**: values in the port's range, or in [−1, 1] when it has none. The range endpoints and 0 come first, then uniform values with endpoints and 0 mixed in.
+- **Signal inputs**: values in the port's range, or in [−1, 1] when it has none, for every row (each element of a vector). The range endpoints and 0 come first, then uniform values with endpoints and 0 mixed in.
 - **Parameters**: effective values in the declared range, shaped as the executor makes them (ADR 0016 §4a). Each segment starts with a set (a jump) or a linear ramp that reaches its target exactly. The first segments set the minimum, the maximum and 0 (or the default when 0 is out of range).
 - **Event inputs**: triggers, sets and ramps on random frames, sometimes several on one frame.
 
-Each case renders 4096 frames. Direct instances get calls of the drawn sizes, repeated. State-output instances run per frame (`emit`, then `absorb`), as the reference engine does; before each `emit` the suite asks `due` until it is not `Pending`, as the offline engine does. Every check except `no_subnormals` runs 32 proptest cases (override with `PROPTEST_CASES`). Every check prepares its instances at 44 100, 48 000, 96 000 and 192 000 Hz.
+Each case renders 4096 frames; for a type at a rate divisor above 1 these are 4096 of its ticks, which is all it ever sees (M2.8-6, "Rates and vectors"), so every check applies to it as written. Vector outputs are reported per element, as `port[e]`. A descriptor without one rate, or at a divided rate with event ports, a latency or a sink, or with a vector of 0 elements, fails every check. Direct instances get calls of the drawn sizes, repeated. State-output instances run per frame (`emit`, then `absorb`), as the reference engine does; before each `emit` the suite asks `due` until it is not `Pending`, as the offline engine does. Every check except `no_subnormals` runs 32 proptest cases (override with `PROPTEST_CASES`). Every check prepares its instances at 44 100, 48 000, 96 000 and 192 000 Hz.
 
 ### What each check proves
 

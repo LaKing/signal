@@ -11,11 +11,17 @@
 //! takes everything else from the module descriptors and the primitives a
 //! [`Registry`](signal_core::Registry) creates.
 //!
-//! Not covered: latent (GPU) modules, rate divisors other than 1 (the engine
-//! refuses them), input pushed late or through the real-time runner, input
-//! naming no port of the plan (dropped here, counted by the engine), and the
-//! frame of a panic in a block call (`docs/semantics.md` §14: it depends on
-//! the block size).
+//! Rate divisors and vector ports (M2.8-6, `docs/semantics.md` §16): an
+//! instance is called at its ticks only and shows its last tick's values
+//! between them; a vector port is one value per element. The oracle inserts
+//! the converters a graph's cross-rate connections need itself, from the
+//! rule §16 states (their addresses, type names and wiring), and takes their
+//! types from the registry like any other.
+//!
+//! Not covered: latent (GPU) modules, input pushed late or through the
+//! real-time runner, input naming no port of the plan (dropped here, counted
+//! by the engine), and the frame of a panic in a block call
+//! (`docs/semantics.md` §14: it depends on the block size).
 
 mod oracle;
 mod probe;
