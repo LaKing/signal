@@ -1,6 +1,6 @@
 # ADR 0018: GUI toolkit: egui through eframe
 
-- **Status:** Accepted (operator decision, delegated by the owner, 2026-10-11)
+- **Status:** Accepted; to be superseded by ADR 0023 (web UI) when the web UI reaches parity (M2.8-4) (operator decision, delegated by the owner, 2026-10-11)
 - **Date:** 2026-10-11
 
 ## Context

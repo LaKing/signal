@@ -48,7 +48,10 @@ for tool in codesign plutil; do
 done
 
 # --- build ------------------------------------------------------------------
-BUILD=(build --locked --offline -p signal-app -p signal-cli)
+# The bundled helper CLI is built with the `gpu` feature (operator decision,
+# M2.7-2 answer A): Signal.app links wgpu anyway, so its helper can list the
+# GPUs (`signal devices --compute`). The default CLI build stays wgpu-free.
+BUILD=(build --locked --offline -p signal-app -p signal-cli --features signal-cli/gpu)
 [[ $PROFILE == release ]] && BUILD+=(--release)
 [[ -n $TARGET_DIR ]] && BUILD+=(--target-dir "$TARGET_DIR")
 "$CARGO" "${BUILD[@]}"

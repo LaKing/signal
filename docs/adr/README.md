@@ -27,3 +27,4 @@ To change a decision, add a new ADR that supersedes the old one. Do not rewrite 
 | [0019](0019-multi-core-and-gpu-execution.md) | Multi-core and GPU execution (decides D-EXEC-3) |
 | [0020](0020-unsafe-exception-disjoint-plan-state.md) | Unsafe exception: disjoint access to a plan's state |
 | [0022](0022-output-adapters.md) | Output adapters: sinks generic in the engine, audio policy in `signal-output` |
+| [0023](0023-web-ui.md) | A web-based user interface (supersedes 0018 at parity) |

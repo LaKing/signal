@@ -22,6 +22,7 @@ signal-eval = { path = "crates/signal-eval" }
 signal-contract = { path = "crates/signal-contract" }
 signal-audio = { path = "crates/signal-audio" }
 signal-gpu = { path = "crates/signal-gpu" }
+signal-ui = { path = "crates/signal-ui" }
 # ADR 0015: experimental primitives (`lab/`); they compile in only with its `lab` feature.
 signal-lab = { path = "lab" }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -45,6 +46,11 @@ objc2-core-audio = "0.3.2"
 libc = "0.2.190"
 # M2.7-6: model tests of the scheduler's synchronisation (dev-dependency of signal-engine only)
 loom = "0.7.2"
+# M2.8 (ADR 0023): the web UI: local server (signal-ui) and the app's WebView (signal-app)
+tiny_http = "0.12.0"
+tungstenite = "0.30.0"
+wry = "0.57.0"
+tao = "0.37.1"
 # test-only
 proptest = "1.12.0"
 insta = "1.49.0"
