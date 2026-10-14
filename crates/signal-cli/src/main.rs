@@ -49,8 +49,9 @@ enum Command {
     Play(play::PlayArgs),
     /// Play a project as `play --watch` does (--watch is implied: the folder
     /// is always watched) and serve it to web pages through the UI protocol
-    /// (docs/ui-protocol.md), on 127.0.0.1; --open opens the page in the
-    /// default browser.
+    /// (docs/ui-protocol.md), on 127.0.0.1; --open opens the project's main
+    /// panel in the default browser. `signal ui check <project>` checks the
+    /// panels' bindings instead.
     Ui(ui::UiArgs),
     /// Measure the per-frame engine at 96 kHz (V13): every `std.*`
     /// primitive, the empty engine, the kick project and kick voices.
@@ -72,6 +73,8 @@ pub(crate) enum Failure {
     Invalid(Vec<Diagnostic>),
     /// The session directory is malformed (`signal replay`).
     InvalidSession(Vec<Diagnostic>),
+    /// A panel binds what the plan does not have (`signal ui check`).
+    InvalidPanels(Vec<Diagnostic>),
     /// A file could not be read or written.
     Io(String),
     /// The audio device cannot play the project (exit 1).
@@ -105,6 +108,17 @@ impl Failure {
             Failure::InvalidSession(diagnostics) => (
                 "validation",
                 format!("the session is invalid ({} errors)", diagnostics.len()),
+                diagnostics.as_slice(),
+            ),
+            Failure::InvalidPanels(diagnostics) => (
+                "validation",
+                format!(
+                    "the panels have {} errors",
+                    diagnostics
+                        .iter()
+                        .filter(|d| d.severity == signal_project::Severity::Error)
+                        .count()
+                ),
                 diagnostics.as_slice(),
             ),
             Failure::Io(message) => ("io", message.clone(), &[][..]),

@@ -11,5 +11,6 @@ import './lib/trigger.test.js';
 import './lib/skin.test.js';
 import './lib/format.test.js';
 import './lib/offline.test.js';
+import './lib/panel.test.js';
 import './signal-ui.test.js';
 import './fake-connection.test.js';

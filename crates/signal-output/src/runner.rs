@@ -258,7 +258,7 @@ impl Controller {
     }
 
     /// Starts scope `slot` (below [`SCOPE_SLOTS`](crate::SCOPE_SLOTS)) on
-    /// signal output `port`, one point every `decimation` frames, from the
+    /// signal output or signal input `port`, one point every `decimation` frames, from the
     /// next callback; it replaces what the slot ran. Its blocks carry the
     /// generation returned.
     pub fn scope_start(

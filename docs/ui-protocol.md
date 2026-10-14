@@ -19,7 +19,7 @@ They are separate because `tiny_http`'s upgraded connection is one boxed stream 
 http://127.0.0.1:<http port>/#ws=<websocket port>&token=<session token>
 ```
 
-The fragment is never sent over HTTP, so the token is in no request, Referer or server log. A page reads both values from `location.hash` (`parseFragment` in `ui/lib/protocol.js`).
+The fragment is never sent over HTTP, so the token is in no request, Referer or server log. A page reads both values from `location.hash` (`parseFragment` in `ui/lib/protocol.js`). `signal ui` also prints the project's main panel with the same fragment, `http://127.0.0.1:<http port>/project/main.html#ws=…&token=…`, and `--open` opens that one.
 
 ### Static files
 
@@ -27,7 +27,7 @@ The fragment is never sent over HTTP, so the token is in no request, Referer or 
 |---|---|
 | `/` | the repository's `ui/index.html` (the raw protocol test page) |
 | `/ui/<path>` | the repository's `ui/<path>` (the UI library; `signal ui --ui-dir` names another folder) |
-| `/project/<path>` | the project's `ui/<path>`: its panels, and `ui/assets/` for their SVG and PNG files |
+| `/project/<path>` | the project's `ui/<path>`: its panels, and `ui/assets/` for their SVG and PNG files. `/project/main.html` of a project without `ui/main.html` is the generated panel, the repository's `ui/default-panel.html` (`ui-controls.md` "Panels") |
 
 Only `GET` and `HEAD` (else 405). A path with `..`, `%`, `\`, NUL, an empty segment or a segment starting with `.` is not served, nor one that resolves (links followed) outside its folder; there are no directory listings (404). Content types: `.html` `text/html; charset=utf-8`, `.js` and `.mjs` `text/javascript; charset=utf-8` (ES modules), `.css` `text/css`, `.json` `application/json`, `.svg` `image/svg+xml`, `.png` `image/png`, `.jpg` `image/jpeg`, `.gif`, `.webp`, `.woff2`, `.txt`; anything else `application/octet-stream`. Every response carries `X-Content-Type-Options: nosniff`, `Cache-Control: no-cache` and `Referrer-Policy: no-referrer`.
 
@@ -77,9 +77,9 @@ The server pushes `describe` (without `id`) when a plan swap commits, after a re
 |---|---|---|
 | `parameters` | `addresses`: controls or plan parameter ports; `rate`: frames per second, at least 1 (default 30; more than 60 is taken as 60; below 1, not a number or not finite: `bad-rate`) | kind 3, every `1/rate` s: each address's base and effective value, as the runner last reported them (the parameter observation queue: up to 64 parameters per callback, round robin) |
 | `meters` | `source`: `"output"` (default, the audio sink's channels) or `"input"` (the Setup's input, metered only); `rate` as above | kind 1, every `1/rate` s once levels arrived: per channel, the peak and the RMS over the callbacks since the last frame |
-| `scope` | `port`: a signal output of the running plan (`/a.out`); `rate`: points per second, at least 1 (default and at most the sample rate; below 1, not a number or not finite: `bad-rate`) | kind 2: blocks of 256 consecutive points, one every `decimation` frames, `decimation = max(1, round(sampleRate / rate))`; the reply also gives `decimation` and the `slot` |
+| `scope` | `port`: a signal output of the running plan (`/a.out`), or a signal input (`/out.l`: the sum of its sources, each scaled, as the instance receives it); `rate`: points per second, at least 1 (default and at most the sample rate; below 1, not a number or not finite: `bad-rate`) | kind 2: blocks of 256 consecutive points, one every `decimation` frames, `decimation = max(1, round(sampleRate / rate))`; the reply also gives `decimation` and the `slot` |
 
-**Scope streams** come from the scope adapter in `signal-output` (beside the audio adapter of ADR 0022): a decimated capture. A point is the output's value at an absolute frame that is a multiple of the decimation, so a stream does not depend on how the frames were split into callbacks or threads. **A scope stream is the output as its readers see it, fades included**: it fades in when its instance is added, out when it is suspended or removed, and through the 64-frame fault fade after a fault (`semantics.md` §12, §14). It costs the audio thread a copy per point and allocates nothing there (measured: `crates/signal-output/tests/scope_no_allocation.rs`). **An open block is dropped, not sent, at a discontinuity**: when a swap rebinds the slot, when the slot is started again (a new `subscribe`, or `setup.apply` playing again), and when the points stop being consecutive (frames not run). So up to 255 points are lost there, and every block that arrives is 256 consecutive points. There are 8 slots per run (`no-scope-slot` when they are all in use). After a swap that removes the port the server pushes `{"type": "scope.unbound", "sub": 5}`, and `scope.bound` when a later swap brings it back. Errors: `not-a-signal-output`, `bad-rate`, `busy` (too many scope commands outstanding; try again).
+**Scope streams** come from the scope adapter in `signal-output` (beside the audio adapter of ADR 0022): a decimated capture. A point is the port's value at an absolute frame that is a multiple of the decimation, so a stream does not depend on how the frames were split into callbacks or threads. **A scope stream is the output as its readers see it, fades included** (a signal input, the sum of its sources as they are read): it fades in when its instance is added, out when it is suspended or removed, and through the 64-frame fault fade after a fault (`semantics.md` §12, §14). It costs the audio thread a copy per point and allocates nothing there (measured: `crates/signal-output/tests/scope_no_allocation.rs`). **An open block is dropped, not sent, at a discontinuity**: when a swap rebinds the slot, when the slot is started again (a new `subscribe`, or `setup.apply` playing again), and when the points stop being consecutive (frames not run). So up to 255 points are lost there, and every block that arrives is 256 consecutive points. There are 8 slots per run (`no-scope-slot` when they are all in use). After a swap that removes the port the server pushes `{"type": "scope.unbound", "sub": 5}`, and `scope.bound` when a later swap brings it back. Errors: `not-a-signal-output` (neither a signal output nor a signal input), `bad-rate`, `busy` (too many scope commands outstanding; try again).
 
 ### `set`, `ramp`, `trigger`
 
@@ -113,6 +113,22 @@ Writes a control's value into the project's `project.toml` (`value: null` remove
 
 Only controls are committed (`not-editable` otherwise): a parameter inside a composite is set in the composite's file, and writing it there would change every instance of the composite.
 
+### `panel.check`
+
+```json
+{"type": "panel.check", "id": 7, "file": "main.html"}
+```
+
+The binding check of a panel in the project's `ui/` folder (`file`: an `.html` file there, by the static files' rules) against the running plan: the check `signal ui check` makes (`crates/signal-ui/src/bindings.rs`), so a panel shows at load what the command prints. `<signal-panel>` asks it once described, and again when the plan version changes. Reply:
+
+```json
+{"type": "panel.check", "id": 7, "file": "ui/main.html", "controls": 6, "bindings": 6, "ok": false,
+ "diagnostics": [{"severity": "error", "file": "ui/main.html", "line": 36, "column": 28, "control": 0,
+   "message": "unknown port /drums.kick_decya: /drums has kick_decay, kick_drive"}]}
+```
+
+`control` is the control's index among the file's `signal-*` elements other than `<signal-panel>`, in source order (null for the file as a whole); `ok` is false when any diagnostic is an error. Errors: `unknown-panel` (no such file, not `.html`, outside `ui/`), `not-playing` (the project does not plan).
+
 ### Pushed: `reload`, `reload.error`
 
 Every 100 ms the server checks the project folder (hidden files ignored, as `signal play --watch`) and applies a change live. It pushes `{"type": "reload", "sets": 2, "swap": 1, "removed": 0, "message": "applied a swap to version 1 (2 sets, 0 removed)"}`, or `{"type": "reload.error", "message": …}` when the folder does not load or cannot replace the running project (the last good version keeps playing).
@@ -139,7 +155,7 @@ The interface setup dialog's functions (M2.5), without a window. The Setup file 
 
 ### Errors
 
-`{"type": "error", "id": …, "code": "…", "message": "…"}`. Codes: `unauthorized`, `protocol`, `already-authenticated`, `bad-message`, `unknown-type`, `unknown-address`, `unknown-sub`, `unknown-device`, `bad-address`, `bad-value`, `bad-rate`, `bad-device`, `not-a-signal-output`, `no-scope-slot`, `busy`, `refused`, `not-playing`, `not-editable`, `write-failed`, `playing`, `recording`.
+`{"type": "error", "id": …, "code": "…", "message": "…"}`. Codes: `unauthorized`, `protocol`, `already-authenticated`, `bad-message`, `unknown-type`, `unknown-address`, `unknown-sub`, `unknown-device`, `unknown-panel`, `bad-address`, `bad-value`, `bad-rate`, `bad-device`, `not-a-signal-output`, `no-scope-slot`, `busy`, `refused`, `not-playing`, `not-editable`, `write-failed`, `playing`, `recording`.
 
 ## Binary frames
 
@@ -183,12 +199,13 @@ The control thread never waits for a client. Each client has a thread that write
 ## Running it
 
 ```sh
-signal ui projects/kick --open             # CoreAudio, the default output; opens the page
+signal ui projects/kick --open             # CoreAudio, the default output; opens the main panel
+signal ui check projects/kick              # checks the panels' bindings (exit 1 with diagnostics)
 signal ui projects/kick --driver null      # no device, real-time pace
 signal ui projects/kick --port 8800        # a fixed HTTP port
 ```
 
-`signal ui` takes every option of `signal play` (`--device`, `--buffer`, `--seconds`, `--threads`, `--rt-policy`, `--rt-computation`, `--rt-trace`, `--driver`, `--fast`, `--record-session`, `--record-audio`, `--record-boundary-data`) and always watches the folder, as `play --watch` does. It stops on Enter (or at `--seconds`), and with `--json` prints `{"url", "http", "ws"}` when it starts. The UI library's folder is the repository's `ui/` of the build (`--ui-dir` for another; the app bundle will carry its own, M2.8-4).
+`signal ui` takes every option of `signal play` (`--device`, `--buffer`, `--seconds`, `--threads`, `--rt-policy`, `--rt-computation`, `--rt-trace`, `--driver`, `--fast`, `--record-session`, `--record-audio`, `--record-boundary-data`) and always watches the folder, as `play --watch` does. It stops on Enter (or at `--seconds`), and with `--json` prints `{"url", "panel", "http", "ws"}` when it starts. The UI library's folder is the repository's `ui/` of the build (`--ui-dir` for another; the app bundle will carry its own, M2.8-4).
 
 Pages and controls use the client in `ui/signal-ui.js` (reconnect included) and the web components in `ui/controls/`; `/ui/gallery.html` shows them all (`docs/ui-controls.md`).
 

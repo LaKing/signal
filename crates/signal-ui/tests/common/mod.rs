@@ -140,6 +140,8 @@ pub struct Options {
     pub client_queue: usize,
     pub recording: bool,
     pub transport: Transport,
+    /// A project folder to copy instead of the tone project.
+    pub project: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -148,6 +150,7 @@ impl Default for Options {
             client_queue: 256,
             recording: false,
             transport: Transport::Tcp,
+            project: None,
         }
     }
 }
@@ -156,7 +159,22 @@ pub fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// A rig for test `name`, its folder holding the tone project.
+/// Copies the folder `from` to `to` (files and folders only).
+pub fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let path = entry.unwrap().path();
+        let target = to.join(path.file_name().unwrap());
+        if path.is_dir() {
+            copy_dir(&path, &target);
+        } else {
+            fs::copy(&path, &target).unwrap();
+        }
+    }
+}
+
+/// A rig for test `name`, its folder holding the tone project (or a copy
+/// of `options.project`).
 pub fn rig(name: &str, options: Options) -> Rig {
     let base = std::env::temp_dir().join(format!(
         "signal-ui-{name}-{:?}-{}",
@@ -165,8 +183,13 @@ pub fn rig(name: &str, options: Options) -> Rig {
     ));
     let _ = fs::remove_dir_all(&base);
     let dir = base.join("project");
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("project.toml"), TONE).unwrap();
+    match &options.project {
+        Some(project) => copy_dir(project, &dir),
+        None => {
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("project.toml"), TONE).unwrap();
+        }
+    }
     let setup = base.join("setup.toml");
     let mut registry = Registry::new();
     signal_std::register(&mut registry).unwrap();

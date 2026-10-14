@@ -5,12 +5,14 @@ The web-component controls of ADR 0023 §3 (M2.8-2). They are in the repository'
 | File | Holds |
 |---|---|
 | `ui/signal-ui.js` | The protocol client: `connect`, `connectFromPage`, `Connection` (describe, subscribe, set, ramp, trigger, commit, reconnect), the default connection the controls use |
-| `ui/controls/index.js` | Defines every element below (import it once) |
+| `ui/controls/index.js` | Defines every element below and `<signal-panel>` (import it once) |
+| `ui/controls/panel.js` | `<signal-panel>`, the loader of a project panel ("Panels") |
+| `ui/default-panel.html` | The generated panel of a project without `ui/main.html` |
 | `ui/controls/theme.css` | The theme's custom properties and their dark defaults |
-| `ui/lib/` | Pure logic with `node --test` tests: `taper.js`, `gesture.js`, `ballistics.js`, `trigger.js`, `skin.js`, `format.js`; `protocol.js` (M2.8-1) |
+| `ui/lib/` | Pure logic with `node --test` tests: `taper.js`, `gesture.js`, `ballistics.js`, `trigger.js`, `skin.js`, `format.js`, `panel.js` (the default panel, diagnostics); `protocol.js` (M2.8-1) |
 | `ui/fake-connection.js` | A connection without an engine, for the gallery |
 | `ui/gallery.html` | Every control in every mode |
-| `ui/assets/` | The gallery's skins; `scripts/ui-strip.mjs` draws its PNGs |
+| `ui/assets/` | The gallery's skins; `scripts/ui-strip.mjs` draws its PNGs (`pulse`: the pulse panel's strip) |
 
 ## Using them
 
@@ -33,7 +35,7 @@ A control uses the default connection (`setDefaultConnection`), or the one given
 ## Elements
 
 Common to all:
-- `bind`: the port address (a control or plan parameter port; an event input for `<signal-button>`; signal outputs for `<signal-scope>`).
+- `bind`: the port address (a control or plan parameter port; an event input for `<signal-button>`; signal outputs or inputs for `<signal-scope>`). In a project panel, the controls that edit (fader, knob, toggle, 2D pad) bind controls, which a release commits ("Panels").
 - `skin` (below) and `label`.
 - Focusable (`tabindex="0"`), a focus ring (`--signal-focus`) on keyboard focus, an ARIA role, pointer events with pointer capture (mouse, pen and touch; `touch-action: none`).
 
@@ -125,6 +127,53 @@ What `node --test` cannot see, checked by a person (the M2.8-2 checkpoint):
 4. Live: `signal ui projects/kick --open`, then the printed `#ws=…&token=…` on `/ui/gallery.html`: a fader drag changes one key in `project.toml` on release; a burst of wheel steps writes it once, about 400 ms after the last; `signalConnection.socket.close()` reconnects and the meters resume, while a `describe()` outstanding at the close rejects with `closed`; after a server restart (a new token) the status is `failed`, with no retries.
 5. `cargo test --workspace` on the Mac, for the socket tests a sandbox cannot run.
 
+## Panels
+
+A project carries its panels as text (ADR 0023 §4): HTML files in its `ui/` folder, `ui/main.html` the main one, with their SVG and PNG files in `ui/assets/`. `signal ui` serves them under `/project/` and prints the main panel's URL (`docs/ui-protocol.md`). A panel is a page with the controls inside a `<signal-panel>`:
+
+```html
+<link rel="stylesheet" href="/ui/controls/theme.css">
+<signal-panel>
+  <signal-knob bind="/drums.kick_decay" taper="log" min="100" max="1500" label="decay" skin="svg:assets/knob.svg"></signal-knob>
+  <signal-meter bind="/out.l" label="L"></signal-meter>
+</signal-panel>
+<script type="module">import '/ui/controls/index.js';</script>
+```
+
+Panels import the library by its served path (`/ui/…`); their own files are relative to the page (`assets/knob.svg` is the project's `ui/assets/knob.svg`).
+
+**`<signal-panel>`** connects with the page's `#ws=…&token=…`, makes that the controls' connection (`setDefaultConnection`), shows the connection's status and the project's name, and once described asks the server's binding check for its file (`panel.check`; `file` overrides the file the page's path names), once per plan version (`BindingCheck` in `ui/lib/panel.js`); a check the connection dropped is asked again with the `describe` of the reconnect. Every diagnostic is listed at the top of the panel as `ui/main.html:36:28: error: …`, and the control it is about gets an outline (red for an error, amber for a warning), the diagnostic as its tooltip and, for an error, `aria-invalid`. It checks again when the plan version changes. With `generated` it builds the default panel instead.
+
+**The binding check** (`crates/signal-ui/src/bindings.rs`) is the same for `signal ui check <project>` (every `ui/*.html`, against the project's plan; exit 1 on an error) and for `panel.check` (one file, against the running plan). It reads every `signal-*` start tag (comments and the content of `script`, `style`, `textarea`, `title` skipped) and checks each `bind` as the browser gives it to the control, with character references decoded as the HTML tokenizer decodes an attribute value (numeric ones, `&#46;` or `&#x2E;`; every name of the WHATWG table, `crates/signal-ui/src/entities.rs`, the longest that matches; a legacy name without `;`, such as `&amp`, is left as written before `=` or an ASCII letter or digit):
+
+| Control | Binds | Addresses |
+|---|---|---|
+| `<signal-fader>`, `<signal-knob>`, `<signal-toggle>` | a control: a top-level parameter (`/<instance>.<parameter>`, a composite's exports included), which `commit` writes to `project.toml` | 1 |
+| `<signal-xy>` | controls, x then y | 2 |
+| `<signal-value>` | a parameter: a control or a plan parameter port (it only shows the value) | 1 |
+| `<signal-button>` | an event input of the plan | 1 |
+| `<signal-meter>` | a signal input of the audio sink (none with `source="input"`) | 1 |
+| `<signal-scope>` | signal outputs or inputs of the plan (a primitive's: `/drums/kick/dc.out`, not the composite's `/drums.out`; an input shows the sum of its sources) | 1 or 2 |
+
+Errors: an address that is not one, an unknown port (the message lists what the instance has, or says that it is a composite), a port of the wrong kind or shape (`wrong kind: /out.gain is a parameter; <signal-scope> binds a signal output or input of the plan`), an editing control on a parameter inside a composite, which `commit` refuses (`not editable: /drums/kick/amp_env.decay_ms is a parameter inside the composite /drums, …`: export it, or show it with `<signal-value>`), the wrong number of addresses, a `bind` missing where one is needed, and an unknown `signal-*` element. Warnings: an editing control without `bind` (it edits only its own value), `taper="log"` where the range does not start above 0 (the control is linear), and a file without `<signal-panel>`. Positions are `file:line:column` (1-based, columns in characters) at the address in the source (where a character reference starts, if it does), or at the tag's `<`, as the project loader's.
+
+**Edits** are the controls' own: a drag sends ramps and commits on release, which writes the value into `project.toml` (`commit`); the panel file is never written. The file watch then reloads `project.toml` and finds nothing to apply (`reload` with `"no change to apply"`).
+
+**The default panel.** For a project without `ui/main.html`, `/project/main.html` is `ui/default-panel.html`, whose `<signal-panel generated>` builds from `describe` (`defaultPanel` in `ui/lib/panel.js`): the top-level parameters (`controls`) grouped by instance, a fader for a level (unit `dB`, or a gain without unit; a dB taper for a gain) and a knob for anything else (a log taper for Hz and times whose range starts above 0); a meter per signal input of the audio sink; and a scope on the sink's first input (`/out.l`: the sum of every source feeding it, each scaled, as the sink receives it). It is rebuilt when the plan version changes.
+
+**The example panels.** `projects/kick/ui/main.html`: decay and drive knobs (an SVG skin, `projects/kick/ui/assets/knob.svg`), the gain fader, the output meters, a scope of the kick. `projects/pulse/ui/main.html`: cutoff and resonance on a 2D pad, the delay's time, feedback and level on knobs (a PNG filmstrip, `projects/pulse/ui/assets/knob-strip.png` and `@2x`, drawn by `node scripts/ui-strip.mjs pulse`), the eight sequence steps as faders (55–440 Hz), the gain, meters and a scope of the filter.
+
+### Checks of the panels by the operator
+
+What the sandbox cannot run (a browser, a device, loopback), checked by a person (the M2.8-3 checkpoint):
+1. `signal ui check projects/kick` and `signal ui check projects/pulse`: each prints `…/ui/main.html: N controls, M bindings: ok` and exits 0.
+2. The AC2 twin over TCP: `cargo test -p signal-ui --test panels` (the `::tcp` tests and `a_project_without_a_main_panel_is_served_the_generated_one` bind 127.0.0.1); all pass.
+3. Kick: `signal ui projects/kick --open` (CoreAudio, the default output) opens the printed panel URL. The status reads `open`, no diagnostics are listed, and the summary reads `ui/main.html: 6 controls, 6 bindings`. The kick plays. Drag the decay knob (SVG skin): the tail changes while dragging; on release `project.toml` gets `kick_decay = …` on the `drums` line and nothing else changes (`git diff projects/kick`); the terminal prints `signal: watch: no change to apply`; `ui/main.html` is unchanged. Drag drive and the gain fader the same way. The meters move with the kick and hold their peaks; the scope shows a steady kick waveform. Undo with `git checkout projects/kick/project.toml`.
+4. Pulse: `signal ui projects/pulse --open`. Move the pad: cutoff (x) and resonance (y) change the sound and their values; its release commits both axes, so `filter`'s `cutoff_hz` and `q` are written (an axis that did not move is written as it was). Move the delay knobs (PNG strip, sharp on a retina display): each release writes one key, `delay`'s `time_ms`, `feedback`'s `db` or `mix`'s `gain_b`. Move a few step faders: the sequence's pitches change, and each release writes that step's key, `seq`'s `s1` … `s8`; the gain fader writes `out`'s `gain`. Nothing else in `project.toml` changes (`git diff projects/pulse`), and `ui/main.html` never does. Meters and scope as above.
+5. In-page errors: copy `projects/kick` to a scratch folder, change the decay knob's bind to `/drums.kick_decya`, the drive knob's to `/drums/kick/amp_env.decay_ms` and the scope's to `/out.gain`, run `signal ui <copy> --driver null --open`: the panel lists the three diagnostics (unknown port, not editable, wrong kind) with `ui/main.html:line:column`, outlines the three controls in red with the message as tooltip, and the other controls still work. `signal ui check <copy>` prints the same three lines and exits 1. Reload the page with the server stopped and started again (a new token, so open the new URL): the diagnostics are shown again.
+6. Default panel: `signal ui crates/signal-cli/tests/fixtures/sine --driver null --open`: the generated panel shows the instances' parameters (knobs, the gain as a fader), two meters and a scope on the sink's left input (`/out.l`).
+7. Safari and Chrome, inspectors open: no console errors, only 127.0.0.1 requests.
+
 ## Tests
 
-`node --test ui/` (run by `cargo test` through `crates/signal-ui/tests/js.rs`, skipped with a message when `node` is not on PATH) covers the tapers' round trips, fine adjust, keys and reset, the ballistics against the M2.5-1 reference numbers, the scope trigger on a known sine and X–Y pairing, skin parsing, frame selection and sanitizing rules, the client against an in-process fake WebSocket (requests, frames, reconnect, rejection on close), the fake connection, and that `ui/` loads nothing remote and imports only relative paths. Look and interaction are checked by a person in a browser.
+`node --test ui/` (run by `cargo test` through `crates/signal-ui/tests/js.rs`, skipped with a message when `node` is not on PATH) covers the tapers' round trips, fine adjust, keys and reset, the ballistics against the M2.5-1 reference numbers, the scope trigger on a known sine and X–Y pairing, skin parsing, frame selection and sanitizing rules, the client against an in-process fake WebSocket (requests, frames, reconnect, rejection on close), the fake connection, that `ui/` loads nothing remote and imports only relative paths, that the project panels load nothing remote, and the default panel and diagnostics (`ui/lib/panel.test.js`). In Rust: `crates/signal-cli/tests/ui_check.rs` (`signal ui check` on the example panels and on a broken copy) and `crates/signal-ui/tests/panels.rs` (the kick's panel through the protocol, `panel.check`, the generated panel). Look and interaction are checked by a person in a browser.

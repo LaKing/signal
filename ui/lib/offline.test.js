@@ -1,6 +1,6 @@
-// Everything the UI library loads is local (no network, no CDN) and plain ES
-// modules (no npm, no bare or absolute import specifiers, so the gallery
-// also loads from a file).
+// Everything the UI library and the project panels load is local (no
+// network, no CDN) and plain ES modules (no npm, no bare import specifiers;
+// the library uses relative ones, so the gallery also loads from a file).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -49,6 +49,27 @@ test('browser modules import only relative paths', () => {
     for (const specifier of specifiers) {
       assert.match(specifier, /^\.\.?\//, `${name} imports "${specifier}"`);
     }
+  }
+});
+
+// Project panels (projects/*/ui/) are served beside the library: the same
+// rules, except that they import the library by its served path (/ui/…).
+const PROJECTS = fileURLToPath(new URL('../../projects/', import.meta.url));
+const panels = readdirSync(PROJECTS)
+  .map((project) => join(PROJECTS, project, 'ui'))
+  .filter((dir) => existsSync(dir))
+  .flatMap((dir) => files(dir))
+  .map((path) => ({ name: relative(PROJECTS, path), text: readFileSync(path, 'utf8') }));
+
+test('project panels load nothing remote and import only the library or their own files', () => {
+  assert.ok(panels.some((p) => p.name === 'kick/ui/main.html'));
+  assert.ok(panels.some((p) => p.name === 'pulse/ui/main.html'));
+  for (const { name, text } of panels) {
+    const remote = text.match(/https?:\/\/(?!www\.w3\.org\/)[^\s'"`)<>]*/gi);
+    assert.equal(remote, null, `${name} names ${remote}`);
+    assert.doesNotMatch(text, /(?:src|href)\s*=\s*["']?\s*\/\//i, `${name}: a protocol-relative src or href`);
+    const specifiers = [...text.matchAll(/\bimport\s+(?:[\w*{}\s,$]+\s+from\s+)?['"]([^'"]+)['"]/g)].map((m) => m[1]);
+    for (const specifier of specifiers) assert.match(specifier, /^(?:\/ui\/|\.\.?\/)/, `${name} imports "${specifier}"`);
   }
 });
 

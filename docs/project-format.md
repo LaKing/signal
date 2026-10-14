@@ -10,9 +10,11 @@ Terms are those of `00-vision.md` §3a: Project, Module, Primitive, Composite, I
 <project>/
   project.toml            the project: settings, instances, wiring
   composites/<name>.toml  one composite per file (optional folder)
+  ui/*.html               panels (optional; ui/main.html is the main one)
+  ui/assets/              their SVG and PNG files
 ```
 
-These are the **project files**. Signal loads every one of them, validates every one of them, and hashes every one of them into a render's manifest (§7). A recorded session keeps an exact copy of them for every plan version (`session-format.md`). Nothing else in the folder is read, except by `signal ui`, which serves the folder's `ui/` (panels and their `assets/`) to web pages as files and never plans them (`ui-protocol.md`). Machine settings (Setup: devices, channel mapping) never live here.
+These are the **project files**. Signal loads every one of them, validates every one of them, and hashes every one of them into a render's manifest (§7). A recorded session keeps an exact copy of them for every plan version (`session-format.md`). Nothing else in the folder is read, except by `signal ui`, which serves the folder's `ui/` (panels and their `assets/`) to web pages as files and never plans them (`ui-protocol.md`). A panel is an HTML page whose controls bind to ports by address; `signal ui check <project>` checks every binding against the plan, and moving a control writes `project.toml`, never the panel (`ui-controls.md` "Panels"). Machine settings (Setup: devices, channel mapping) never live here.
 
 All files are UTF-8 [TOML 1.1](https://toml.io). **Unknown keys are errors** in every table, never silently ignored.
 

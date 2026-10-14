@@ -38,6 +38,7 @@ use signal_project::session::{LiveRecorder, SessionRecorder, sink_of};
 use signal_project::{Diagnostic, LoadError, Project, located};
 
 use crate::PROTOCOL;
+use crate::bindings::{Targets, check};
 use crate::frames::{self, frame};
 use crate::panel::{Panel, ramp_frames, write_project};
 use crate::player::{Backend, Input, Interface, Output, Selection, open_input, open_output};
@@ -390,6 +391,11 @@ impl Host {
     /// token in its fragment.
     pub fn url(&self) -> String {
         self.server.url()
+    }
+
+    /// The URL of the project's main panel, with the same fragment.
+    pub fn panel_url(&self) -> String {
+        self.server.panel_url()
     }
 
     /// The HTTP server's address.
@@ -960,6 +966,7 @@ impl Host {
             "unsubscribe" => self.unsubscribe(client, &message).map(Some),
             "set" | "ramp" | "trigger" => self.edit(client, &id, kind, &message).map(|()| None),
             "commit" => self.commit(&message).map(Some),
+            "panel.check" => self.panel_check(&message).map(Some),
             "setup.get" => Ok(Some(self.setup_get())),
             "setup.devices" => self.setup_devices(&message).map(Some),
             "setup.check" => self.setup_check(&message).map(Some),
@@ -1171,22 +1178,22 @@ impl Host {
                 let port: PortAddress = address
                     .parse()
                     .map_err(|e| fail("bad-address", format!("{address}: {e}")))?;
-                let is_output = self.plan.as_ref().is_some_and(|plan| {
+                // A signal output, or a signal input (the sum of its sources).
+                let is_signal = self.plan.as_ref().is_some_and(|plan| {
                     plan.instances
                         .iter()
                         .find(|i| i.address == port.instance())
                         .is_some_and(|i| {
-                            i.descriptor.ports.iter().any(|p| {
-                                p.name == port.port()
-                                    && p.direction == PortDirection::Out
-                                    && p.shape == PortShape::Signal
-                            })
+                            i.descriptor
+                                .ports
+                                .iter()
+                                .any(|p| p.name == port.port() && p.shape == PortShape::Signal)
                         })
                 });
-                if !is_output {
+                if !is_signal {
                     return Err(fail(
                         "not-a-signal-output",
-                        format!("{address} is not a signal output of the running plan"),
+                        format!("{address} is not a signal output or input of the running plan"),
                     ));
                 }
                 let decimation = scope_decimation(message, self.rate)?;
@@ -1563,6 +1570,48 @@ impl Host {
             "writes": self.writes,
             "sent": sent,
             "note": note,
+        }))
+    }
+
+    /// `panel.check`: the binding check of a panel file in the project's
+    /// `ui/` against the running plan, as `signal ui check` makes it.
+    fn panel_check(&self, message: &Value) -> Result<Value, Failure> {
+        let name = message.get("file").and_then(Value::as_str).unwrap_or("");
+        let unknown = || {
+            fail(
+                "unknown-panel",
+                format!("no panel '{name}' in the project's ui/ folder"),
+            )
+        };
+        if !name.ends_with(".html") {
+            return Err(unknown());
+        }
+        let path = crate::server::file(&project_ui(&self.dir), name).ok_or_else(unknown)?;
+        let text = std::fs::read_to_string(path).map_err(|_| unknown())?;
+        let plan = self
+            .plan
+            .as_ref()
+            .ok_or_else(|| fail("not-playing", "the project has no plan"))?;
+        let targets = Targets {
+            plan,
+            panel: &self.panel,
+        };
+        let checked = check(&format!("ui/{name}"), &text, &targets);
+        let diagnostics: Vec<Value> = checked
+            .findings
+            .iter()
+            .map(|f| {
+                let value = serde_json::to_value(&f.diagnostic).unwrap_or(Value::Null);
+                with(value, "control", json!(f.control))
+            })
+            .collect();
+        Ok(json!({
+            "type": "panel.check",
+            "file": checked.file,
+            "controls": checked.controls,
+            "bindings": checked.bindings,
+            "ok": !checked.failed(),
+            "diagnostics": diagnostics,
         }))
     }
 

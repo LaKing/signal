@@ -185,6 +185,34 @@ fn a_scope_stream_is_its_outputs_values_whatever_the_callback_sizes() {
     assert_eq!(counts, [78 * SCOPE_POINTS, 11 * SCOPE_POINTS]);
 }
 
+/// M2.8-3: a scope on a signal input shows what the instance receives: the
+/// sum of its sources (here `/out.l` = a + b), whatever the partition.
+#[test]
+fn a_scope_on_a_signal_input_is_the_sum_of_its_sources() {
+    let frames = 6_000;
+    let scopes = [("/out.l", 1), ("/out.r", 5)];
+    let (points, _) = capture(1, 1, &scopes, frames);
+    assert_eq!(
+        capture(2, 4, &scopes, frames).0,
+        points,
+        "another partition"
+    );
+    let a = reference(&port("/a.out"), frames);
+    let b = reference(&port("/b.out"), frames);
+    let mut counts = [0usize; 2];
+    for &(slot, frame, value) in &points {
+        let f = frame as usize;
+        let wanted = if slot == 0 { a[f] + b[f] } else { a[f] };
+        assert_eq!(
+            value.to_bits(),
+            (wanted as f32).to_bits(),
+            "slot {slot} frame {frame}"
+        );
+        counts[slot] += 1;
+    }
+    assert_eq!(counts, [23 * SCOPE_POINTS, 4 * SCOPE_POINTS]);
+}
+
 #[test]
 fn scopes_leave_the_audio_unchanged() {
     let frames = 12_000;

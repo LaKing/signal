@@ -2,14 +2,17 @@
 // Draws the gallery's pixel skins into ui/assets/ (docs/ui-controls.md
 // "Skins"): a knob filmstrip (vertical, 64 frames, 1x and @2x), a toggle
 // strip (horizontal, 2 frames, 1x and @2x) and a knob sprite sheet (8 × 8
-// frames, @2x only). The PNGs are committed; this script only makes them
-// again (`node scripts/ui-strip.mjs`). Node built-ins only.
+// frames, @2x only); with `pulse`, the pulse panel's knob filmstrip into
+// projects/pulse/ui/assets/ instead (vertical, 64 frames, 1x and @2x). The
+// PNGs are committed; this script only makes them again
+// (`node scripts/ui-strip.mjs [pulse]`). Node built-ins only.
 
 import { writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
-const OUT = fileURLToPath(new URL('../ui/assets/', import.meta.url));
+const PULSE = process.argv[2] === 'pulse';
+const OUT = fileURLToPath(new URL(PULSE ? '../projects/pulse/ui/assets/' : '../ui/assets/', import.meta.url));
 
 const CRC = Array.from({ length: 256 }, (_, n) => {
   let c = n;
@@ -88,6 +91,29 @@ function knob(position) {
   };
 }
 
+/** The pulse knob at `position`: a flat disc with a dot, inside a thin teal value arc. */
+function dotKnob(position) {
+  const angle = (-SWEEP / 2 + position * SWEEP) * (Math.PI / 180);
+  const half = (SWEEP / 2) * (Math.PI / 180);
+  return (x, y) => {
+    const dx = x - 0.5, dy = y - 0.5;
+    const r = Math.hypot(dx, dy);
+    const a = Math.atan2(dx, -dy);
+    // The dot, two thirds out along the pointer's angle.
+    const px = 0.5 + 0.21 * Math.sin(angle), py = 0.5 - 0.21 * Math.cos(angle);
+    if (Math.hypot(x - px, y - py) < 0.045) return [236, 240, 244, 255];
+    if (r < 0.32) {
+      const shade = 40 + Math.round(14 * (0.5 - y));
+      return [shade, shade + 3, shade + 7, 255];
+    }
+    if (r < 0.335) return [14, 16, 19, 255];
+    if (r > 0.38 && r < 0.43 && Math.abs(a) <= half) {
+      return a <= angle ? [77, 208, 196, 255] : [44, 50, 58, 255];
+    }
+    return null;
+  };
+}
+
 /** A toggle: a rounded cap with a lamp, green when on. */
 function toggle(on) {
   return (x, y) => {
@@ -114,9 +140,13 @@ function strip(name, frames, columns, cellW, cellH, draw) {
   console.log(`${name}: ${width} × ${height}`);
 }
 
-for (const scale of [1, 2]) {
-  const suffix = scale === 2 ? '@2x' : '';
-  strip(`knob-strip${suffix}.png`, 64, 1, 48 * scale, 48 * scale, knob);
-  strip(`toggle-strip${suffix}.png`, 2, 2, 56 * scale, 32 * scale, (p) => toggle(p >= 0.5));
+if (PULSE) {
+  for (const scale of [1, 2]) strip(`knob-strip${scale === 2 ? '@2x' : ''}.png`, 64, 1, 56 * scale, 56 * scale, dotKnob);
+} else {
+  for (const scale of [1, 2]) {
+    const suffix = scale === 2 ? '@2x' : '';
+    strip(`knob-strip${suffix}.png`, 64, 1, 48 * scale, 48 * scale, knob);
+    strip(`toggle-strip${suffix}.png`, 2, 2, 56 * scale, 32 * scale, (p) => toggle(p >= 0.5));
+  }
+  strip('knob-sheet@2x.png', 64, 8, 96, 96, knob);
 }
-strip('knob-sheet@2x.png', 64, 8, 96, 96, knob);

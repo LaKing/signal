@@ -2907,6 +2907,27 @@ impl Engine {
             .get(o * self.plan.capacity + f)
             .copied()
     }
+
+    /// The index of signal input `port` in the running plan, for
+    /// [`signal_input_at`](Engine::signal_input_at).
+    pub fn signal_input_index(&self, port: &PortAddress) -> Option<usize> {
+        match self.role(port)? {
+            Role::SignalIn(k) => Some(k),
+            _ => None,
+        }
+    }
+
+    /// Signal input `k` at frame `f` of the last block: the sum of its
+    /// sources, each scaled, as the executor computed it (the row
+    /// [`signal_input`](Engine::signal_input) reads its last frame from).
+    pub fn signal_input_at(&self, k: usize, f: usize) -> Option<f64> {
+        self.plan
+            .cells
+            .signal_in
+            .get()
+            .get(k * self.plan.capacity + f)
+            .copied()
+    }
 }
 
 /// What a segment's units read and never write: the plan's structure, the

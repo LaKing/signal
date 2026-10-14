@@ -31,6 +31,7 @@ use tungstenite::protocol::frame::coding::CloseCode;
 use tungstenite::{Error as WsError, Message, WebSocket};
 
 use crate::PROTOCOL;
+use crate::bindings::MAIN_PANEL;
 
 /// How long a client has to send `hello`.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -48,6 +49,9 @@ const MAX_WRITE_BUFFER: usize = 4 << 20;
 const MAX_MESSAGE: usize = 64 << 10;
 /// Messages from all clients waiting for the control thread.
 const INBOUND: usize = 1024;
+/// The generated panel in the UI library, served for a project's missing
+/// `ui/main.html`.
+const DEFAULT_PANEL: &str = "default-panel.html";
 
 /// What the servers need.
 #[derive(Clone, Debug)]
@@ -215,8 +219,18 @@ impl Server {
     /// The URL to open: the page, with the WebSocket's port and the token
     /// in the fragment (never sent over HTTP, so in no request or log).
     pub(crate) fn url(&self) -> String {
+        self.url_of("/")
+    }
+
+    /// The project's main panel (`ui/main.html`, else the generated one),
+    /// with the same fragment.
+    pub(crate) fn panel_url(&self) -> String {
+        self.url_of(&format!("/project/{MAIN_PANEL}"))
+    }
+
+    fn url_of(&self, path: &str) -> String {
         format!(
-            "http://127.0.0.1:{}/#ws={}&token={}",
+            "http://127.0.0.1:{}{path}#ws={}&token={}",
             self.http.port(),
             self.ws.port(),
             self.token
@@ -303,7 +317,12 @@ impl Files {
             "/" => file(&self.ui, "index.html"),
             _ => match (path.strip_prefix("/ui/"), path.strip_prefix("/project/")) {
                 (Some(rest), _) => file(&self.ui, rest),
-                (_, Some(rest)) => file(&self.project, rest),
+                // A project without `ui/main.html` gets the generated panel.
+                (_, Some(rest)) => file(&self.project, rest).or_else(|| {
+                    (rest == MAIN_PANEL)
+                        .then(|| file(&self.ui, DEFAULT_PANEL))
+                        .flatten()
+                }),
                 _ => None,
             },
         };
@@ -333,7 +352,7 @@ impl Files {
 
 /// `relative` inside `root`, an existing file: no `..`, no hidden or empty
 /// segment, no escape through a link.
-fn file(root: &Path, relative: &str) -> Option<PathBuf> {
+pub(crate) fn file(root: &Path, relative: &str) -> Option<PathBuf> {
     let clean = !relative.is_empty()
         && !relative.contains(['%', '\\', '\0'])
         && relative

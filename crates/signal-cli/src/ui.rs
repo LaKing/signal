@@ -3,6 +3,10 @@
 //! (`signal-ui`, `docs/ui-protocol.md`): the UI files over HTTP and a
 //! WebSocket, on 127.0.0.1 unless `--remote`. `--open` opens the page in the
 //! default browser. This thread is the control thread: it steps the host.
+//!
+//! `signal ui check <project>` checks the project's panels (`ui/*.html`)
+//! against its plan instead: every `bind` names a port whose kind and shape
+//! fit its control (`signal_ui::bindings`).
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -11,12 +15,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use clap::Args;
+use clap::{Args, Subcommand};
 use serde_json::json;
 use signal_core::Registry;
 use signal_engine::{ControlSink, RtOptions};
 use signal_project::session::{SessionError, sink_of};
 use signal_project::{LoadError, Project, provenance};
+use signal_ui::bindings::{MAIN_PANEL, check_project};
 use signal_ui::player::Backend;
 use signal_ui::setup::setup_path;
 use signal_ui::{FirstRun, Host, HostConfig, ServerOptions, project_ui};
@@ -32,10 +37,13 @@ const CLIENT_QUEUE: usize = 256;
 
 /// Arguments of `signal ui`.
 #[derive(Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 pub(crate) struct UiArgs {
+    #[command(subcommand)]
+    command: Option<UiCommand>,
     #[command(flatten)]
-    play: PlayArgs,
-    /// Open the page in the default browser.
+    play: Option<PlayArgs>,
+    /// Open the project's main panel in the default browser.
     #[arg(long)]
     open: bool,
     /// The HTTP port (0: a free one). The WebSocket takes a free port.
@@ -51,13 +59,33 @@ pub(crate) struct UiArgs {
     ui_dir: Option<PathBuf>,
 }
 
+/// `signal ui`'s subcommands.
+#[derive(Subcommand)]
+enum UiCommand {
+    /// Check the project's panels (ui/*.html): every bind must name a port
+    /// of the plan whose kind and shape fit its control. Exits 1 with
+    /// file:line:column diagnostics when one does not.
+    Check {
+        /// The project folder (containing project.toml).
+        project: PathBuf,
+    },
+}
+
 pub(crate) fn run(
     args: &UiArgs,
     registry: &Registry,
     setup: Option<&Path>,
     json: bool,
 ) -> Result<(), Failure> {
-    let play = &args.play;
+    let play = match (&args.command, &args.play) {
+        (Some(UiCommand::Check { project }), _) => return check_panels(project, registry, json),
+        (None, Some(play)) => play,
+        (None, None) => {
+            return Err(Failure::Usage(
+                "signal ui needs a project folder (or `signal ui check <project>`)".to_owned(),
+            ));
+        }
+    };
     check(play)?;
     let null = play.driver == DriverKind::Null;
     let dir = &play.project;
@@ -123,11 +151,14 @@ pub(crate) fn run(
     let mut host = Host::new(config).map_err(Failure::Device)?;
     let rate = host.sample_rate();
     let url = host.url();
+    let panel = host.panel_url();
     eprintln!("signal: ui at {url}");
+    eprintln!("signal: panel at {panel}");
     if json {
         print_stdout(
             &json!({
                 "url": url,
+                "panel": panel,
                 "http": host.http_addr().to_string(),
                 "ws": host.ws_addr().to_string(),
             })
@@ -146,12 +177,12 @@ pub(crate) fn run(
     );
     if args.open {
         match std::process::Command::new("/usr/bin/open")
-            .arg(&url)
+            .arg(&panel)
             .status()
         {
             Ok(status) if status.success() => {}
-            Ok(status) => eprintln!("signal: warning: open {url} failed ({status})"),
-            Err(error) => eprintln!("signal: warning: open {url} failed: {error}"),
+            Ok(status) => eprintln!("signal: warning: open {panel} failed ({status})"),
+            Err(error) => eprintln!("signal: warning: open {panel} failed: {error}"),
         }
     }
 
@@ -264,6 +295,59 @@ pub(crate) fn run(
         eprintln!(
             "signal: played {} frames at {rate} Hz; clipped samples {}",
             finished.status.next_frame.0, finished.clipped
+        );
+    }
+    Ok(())
+}
+
+/// `signal ui check`: the binding check of every panel of the project.
+fn check_panels(dir: &Path, registry: &Registry, json: bool) -> Result<(), Failure> {
+    let project = Project::load(dir).map_err(|error| match error {
+        LoadError::Invalid(diagnostics) => Failure::Invalid(located(dir, diagnostics)),
+        error @ LoadError::Io { .. } => Failure::Io(error.to_string()),
+    })?;
+    project
+        .plan(registry)
+        .map_err(|diagnostics| Failure::Invalid(located(dir, diagnostics)))?;
+    let checked = check_project(dir, &project, registry).map_err(Failure::Io)?;
+    let diagnostics: Vec<_> = checked
+        .iter()
+        .flat_map(|c| c.findings.iter().map(|f| f.diagnostic.clone()))
+        .collect();
+    let diagnostics = located(dir, diagnostics);
+    if checked.iter().any(|c| c.failed()) {
+        return Err(Failure::InvalidPanels(diagnostics));
+    }
+    if json {
+        let panels: Vec<_> = checked
+            .iter()
+            .map(|c| json!({"file": c.file, "controls": c.controls, "bindings": c.bindings}))
+            .collect();
+        print_stdout(
+            &serde_json::to_string_pretty(&json!({
+                "panels": panels,
+                "generated": !project_ui(dir).join(MAIN_PANEL).is_file(),
+                "diagnostics": diagnostics,
+            }))
+            .unwrap_or_default(),
+        );
+        return Ok(());
+    }
+    for diagnostic in &diagnostics {
+        eprintln!("{diagnostic}");
+    }
+    for c in &checked {
+        eprintln!(
+            "signal: {}: {} controls, {} bindings: ok",
+            dir.join(&c.file).display(),
+            c.controls,
+            c.bindings
+        );
+    }
+    if !project_ui(dir).join(MAIN_PANEL).is_file() {
+        eprintln!(
+            "signal: {}: no ui/{MAIN_PANEL}; the main panel is generated from the plan",
+            dir.display()
         );
     }
     Ok(())

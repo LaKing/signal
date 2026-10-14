@@ -10,6 +10,8 @@
 //!   explicitly; every client needs the session token.
 //! - [`panel`], [`setup`] and [`player`]: the parameter panel, the Setup
 //!   file and how a run opens its devices, shared with Signal.app (M2.5).
+//! - [`bindings`]: the binding check of a project's panels (`signal ui
+//!   check`, and the protocol's `panel.check` when a panel loads).
 //! - [`frames`]: the binary data frames.
 
 #![cfg_attr(
@@ -22,6 +24,8 @@
     )
 )]
 
+pub mod bindings;
+mod entities;
 pub mod frames;
 mod host;
 #[cfg(feature = "test-hooks")]

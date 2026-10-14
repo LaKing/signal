@@ -1,0 +1,25 @@
+<!doctype html>
+<!-- The generated panel (docs/ui-controls.md "Panels"): `signal ui` serves
+     it as /project/main.html when the project has no ui/main.html.
+     <signal-panel generated> builds it from `describe`: the top-level
+     parameters grouped by instance, meters for the audio sink and a scope
+     on what feeds it. The base makes its relative paths the UI library's. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<base href="/ui/">
+<title>Signal — panel</title>
+<link rel="stylesheet" href="controls/theme.css">
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 1.5rem 2rem 3rem; background: var(--signal-bg); color: var(--signal-fg); }
+</style>
+</head>
+<body>
+<signal-panel generated></signal-panel>
+<script type="module">
+import './controls/index.js';
+</script>
+</body>
+</html>

@@ -1,7 +1,9 @@
 //! The scope adapter (M2.8-1, beside the audio adapter of ADR 0022): a
-//! decimated capture of any signal output of the running plan, for display.
-//! The control thread starts a slot on an output port with a decimation `d`;
-//! the audio thread then keeps every output value at an absolute frame that
+//! decimated capture of any signal output of the running plan, or any signal
+//! input (the sum of its sources, each scaled, as the executor computed it;
+//! M2.8-3: the generated panel's scope on the audio sink's input), for
+//! display. The control thread starts a slot on a port with a decimation
+//! `d`; the audio thread then keeps every value at an absolute frame that
 //! is a multiple of `d` (so the stream does not depend on how the frames
 //! were split into callbacks), as its readers saw it (fades included), in
 //! blocks of [`SCOPE_POINTS`] points pushed to a preallocated queue. A full
@@ -98,6 +100,30 @@ enum Command {
     },
 }
 
+/// A captured port: a signal output, or a signal input (its sources
+/// summed, each scaled), by its index in the running plan.
+#[derive(Clone, Copy, Debug)]
+enum Tap {
+    Output(usize),
+    Input(usize),
+}
+
+impl Tap {
+    fn of(engine: &Engine, port: &PortAddress) -> Option<Tap> {
+        engine
+            .signal_output_index(port)
+            .map(Tap::Output)
+            .or_else(|| engine.signal_input_index(port).map(Tap::Input))
+    }
+
+    fn at(self, engine: &Engine, f: usize) -> Option<f64> {
+        match self {
+            Tap::Output(o) => engine.signal_output_at(o, f),
+            Tap::Input(k) => engine.signal_input_at(k, f),
+        }
+    }
+}
+
 /// What the audio thread publishes for the control thread.
 #[derive(Debug, Default)]
 pub(crate) struct ScopeCounts {
@@ -110,8 +136,8 @@ struct Slot {
     port: Option<PortAddress>,
     generation: u32,
     decimation: u64,
-    /// The output's index in the running plan, while it has the port.
-    output: Option<usize>,
+    /// Where the port's values are in the running plan, while it has it.
+    tap: Option<Tap>,
     /// The block being filled.
     block: ScopeBlock,
     /// The frame the next point is expected at, while a block is open.
@@ -148,7 +174,7 @@ pub(crate) fn scopes() -> (Scopes, ScopeControl) {
             port: None,
             generation: 0,
             decimation: 1,
-            output: None,
+            tap: None,
             block: ScopeBlock {
                 slot,
                 ..ScopeBlock::EMPTY
@@ -195,7 +221,7 @@ impl Scopes {
                 let _ = self.returns.push(port);
                 continue;
             };
-            s.output = port.as_ref().and_then(|p| engine.signal_output_index(p));
+            s.tap = port.as_ref().and_then(|p| Tap::of(engine, p));
             let old = std::mem::replace(&mut s.port, port);
             s.generation = generation;
             s.decimation = decimation.max(1);
@@ -210,7 +236,7 @@ impl Scopes {
     /// in the running plan, or waits unbound while the plan lacks it.
     pub(crate) fn bind(&mut self, engine: &Engine) {
         for s in &mut self.slots {
-            s.output = s.port.as_ref().and_then(|p| engine.signal_output_index(p));
+            s.tap = s.port.as_ref().and_then(|p| Tap::of(engine, p));
             s.block.len = 0;
             s.next = None;
         }
@@ -219,7 +245,7 @@ impl Scopes {
     /// Captures block frames `0..frames`, the first at absolute frame `first`.
     pub(crate) fn block(&mut self, engine: &Engine, first: u64, frames: usize) {
         for s in &mut self.slots {
-            let Some(o) = s.output else {
+            let Some(tap) = s.tap else {
                 continue;
             };
             let d = s.decimation;
@@ -236,7 +262,7 @@ impl Scopes {
                     s.block.decimation = d;
                     s.block.generation = s.generation;
                 }
-                let value = engine.signal_output_at(o, f).unwrap_or(0.0) as f32;
+                let value = tap.at(engine, f).unwrap_or(0.0) as f32;
                 if let Some(point) = s.block.points.get_mut(s.block.len) {
                     *point = value;
                 }
@@ -257,7 +283,7 @@ impl Scopes {
     pub(crate) fn publish(&self, counts: &ScopeCounts) {
         counts.overflows.store(self.overflows, Ordering::Relaxed);
         for (s, bound) in self.slots.iter().zip(&counts.bound) {
-            bound.store(s.output.is_some(), Ordering::Relaxed);
+            bound.store(s.tap.is_some(), Ordering::Relaxed);
         }
     }
 }

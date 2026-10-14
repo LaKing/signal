@@ -16,9 +16,9 @@
 //! [`Runner`] (any [`Driver`]: the [`NullDriver`] here, CoreAudio in
 //! `signal-audio`) use the same adapter.
 //!
-//! The scope adapter (`scope`, M2.8-1) captures any signal output of the
-//! running plan, decimated, for display; it reads and never changes the
-//! output.
+//! The scope adapter (`scope`, M2.8-1) captures any signal output or signal
+//! input of the running plan, decimated, for display; it reads and never
+//! changes them.
 
 #![cfg_attr(
     not(test),
