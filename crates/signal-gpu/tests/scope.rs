@@ -97,10 +97,8 @@ fn only_signal_gpu_and_signal_app_link_wgpu_by_default() {
     required.sort();
     assert_eq!(
         required,
-        [
-            "signal-app → eframe",
-            "signal-app → signal-gpu",
-            "signal-gpu → wgpu"
-        ]
+        // M2.8-4: eframe is gone (ADR 0023); it is still searched for, so it
+        // does not come back unnoticed.
+        ["signal-app → signal-gpu", "signal-gpu → wgpu"]
     );
 }

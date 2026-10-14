@@ -1,0 +1,27 @@
+/* Signal.app's pages (ui/app/). The controls' theme is controls/theme.css. */
+:root { color-scheme: dark; }
+body { margin: 0; padding: 0 1.5rem 2rem; background: var(--signal-bg); color: var(--signal-fg); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+.menu { display: flex; gap: 0.25rem; align-items: center; padding: 0.4rem 0; border-bottom: 1px solid var(--signal-track); margin-bottom: 0.8rem; }
+.menu a { color: var(--signal-accent); margin-left: 0.75rem; text-decoration: none; }
+button { font: inherit; color: var(--signal-fg); background: var(--signal-knob); border: 1px solid var(--signal-knob-edge); border-radius: var(--signal-radius); padding: 0.2rem 0.7rem; }
+button:disabled { opacity: 0.45; }
+input, select { font: inherit; color: var(--signal-fg); background: var(--signal-panel); border: 1px solid var(--signal-track); border-radius: 4px; padding: 0.15rem 0.3rem; }
+:focus-visible { outline: 2px solid var(--signal-focus); outline-offset: 1px; }
+.project, .transport { display: flex; gap: 0.5rem; align-items: center; margin: 0.4rem 0; }
+.status-line { font-family: ui-monospace, Menlo, monospace; color: var(--signal-muted); margin: 0.3rem 0 0.8rem; }
+.meters { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.reload { color: var(--signal-muted); }
+.messages { list-style: none; padding: 0; margin: 0.3rem 0; }
+.warn { color: var(--signal-meter-hot); }
+.error { color: var(--signal-clip); }
+.muted { color: var(--signal-muted); }
+.parameters td { padding: 0.15rem 0.5rem 0.15rem 0; }
+.parameters input[type="range"] { width: 16rem; }
+.read-only { color: var(--signal-muted); }
+section h3 { font-size: 13px; margin: 0.9rem 0 0.2rem; }
+.field { margin: 0.6rem 0; }
+.field > label { display: inline-block; min-width: 9rem; color: var(--signal-muted); }
+.capabilities, .compute { color: var(--signal-muted); margin: 0.2rem 0 0 9rem; padding-left: 1rem; }
+.check { margin-left: 9rem; }
+.actions { display: flex; gap: 0.5rem; margin: 1rem 0 0.5rem; }
+.project-panel { display: block; width: 100%; height: calc(100vh - 5rem); border: 0; background: var(--signal-bg); }

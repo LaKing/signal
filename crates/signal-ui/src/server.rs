@@ -17,9 +17,9 @@ use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -98,6 +98,9 @@ pub(crate) struct Server {
     pub(crate) inbound: Receiver<Inbound>,
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
+    /// The project's `ui/` folder served under `/project/` (Signal.app opens
+    /// another project while running: [`Server::set_project_ui`]).
+    project: Arc<RwLock<PathBuf>>,
     /// How a client's connection is made (shared with the accept thread).
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     accept: Arc<Accept>,
@@ -123,9 +126,10 @@ impl Server {
         let ws_addr = listener.local_addr()?;
         let (inbound_tx, inbound) = sync_channel(INBOUND);
 
+        let project = Arc::new(RwLock::new(options.project_ui.clone()));
         let files = Files {
             ui: options.ui_dir.clone(),
-            project: options.project_ui.clone(),
+            project: Arc::clone(&project),
             port: http_addr.port(),
             remote: options.remote,
         };
@@ -162,6 +166,7 @@ impl Server {
             inbound,
             stop,
             threads: vec![http_thread, accept_thread],
+            project,
             accept,
         })
     }
@@ -191,6 +196,7 @@ impl Server {
             inbound,
             stop,
             threads: Vec::new(),
+            project: Arc::new(RwLock::new(options.project_ui.clone())),
             accept,
         })
     }
@@ -199,9 +205,21 @@ impl Server {
     /// client thread exactly as an accepted TCP connection is.
     #[cfg(feature = "test-hooks")]
     pub(crate) fn connect_local(&self) -> crate::local::LocalStream {
-        let (client, server) = crate::local::pair();
-        self.accept.spawn(server);
-        client
+        self.local_connector().connect()
+    }
+
+    /// Test hooks: what makes in-process connections, for another thread
+    /// than the one that owns the servers.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn local_connector(&self) -> LocalConnector {
+        LocalConnector {
+            accept: Arc::clone(&self.accept),
+        }
+    }
+
+    /// Serves `dir` (a project's `ui/` folder) under `/project/` from now on.
+    pub(crate) fn set_project_ui(&self, dir: PathBuf) {
+        *self.project.write().unwrap_or_else(PoisonError::into_inner) = dir;
     }
 
     pub(crate) fn http_addr(&self) -> SocketAddr {
@@ -228,7 +246,8 @@ impl Server {
         self.url_of(&format!("/project/{MAIN_PANEL}"))
     }
 
-    fn url_of(&self, path: &str) -> String {
+    /// The page at `path` (from `/`), with the same fragment.
+    pub(crate) fn url_of(&self, path: &str) -> String {
         format!(
             "http://127.0.0.1:{}{path}#ws={}&token={}",
             self.http.port(),
@@ -273,10 +292,28 @@ fn loopback(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "[::1]")
 }
 
+/// Test hooks: makes in-process connections to a server (from any thread),
+/// served by a client thread exactly as an accepted TCP connection is.
+#[cfg(feature = "test-hooks")]
+#[derive(Clone)]
+pub struct LocalConnector {
+    accept: Arc<Accept>,
+}
+
+#[cfg(feature = "test-hooks")]
+impl LocalConnector {
+    /// A new client's end of an in-process connection.
+    pub fn connect(&self) -> crate::local::LocalStream {
+        let (client, server) = crate::local::pair();
+        self.accept.spawn(server);
+        client
+    }
+}
+
 /// The static files.
 struct Files {
     ui: PathBuf,
-    project: PathBuf,
+    project: Arc<RwLock<PathBuf>>,
     port: u16,
     remote: bool,
 }
@@ -318,11 +355,18 @@ impl Files {
             _ => match (path.strip_prefix("/ui/"), path.strip_prefix("/project/")) {
                 (Some(rest), _) => file(&self.ui, rest),
                 // A project without `ui/main.html` gets the generated panel.
-                (_, Some(rest)) => file(&self.project, rest).or_else(|| {
-                    (rest == MAIN_PANEL)
-                        .then(|| file(&self.ui, DEFAULT_PANEL))
-                        .flatten()
-                }),
+                (_, Some(rest)) => {
+                    let project = self
+                        .project
+                        .read()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone();
+                    file(&project, rest).or_else(|| {
+                        (rest == MAIN_PANEL)
+                            .then(|| file(&self.ui, DEFAULT_PANEL))
+                            .flatten()
+                    })
+                }
                 _ => None,
             },
         };

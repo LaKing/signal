@@ -81,6 +81,28 @@ fn bundle_app_builds_a_signed_bundle() {
         "the microphone usage is described"
     );
     assert_eq!(plist_value(&plist, "NSHighResolutionCapable"), "true");
+    // M2.8-4: the window loads its pages from 127.0.0.1.
+    assert_eq!(
+        plist_value(&plist, "NSAppTransportSecurity.NSAllowsLocalNetworking"),
+        "true"
+    );
+
+    // M2.8-4: the UI library inside the bundle (sealed by the signature
+    // below), without its node tests.
+    let ui = app.join("Contents/Resources/ui");
+    for page in [
+        "signal-ui.js",
+        "app/index.html",
+        "app/setup.html",
+        "app/panel.html",
+        "app/app.js",
+        "controls/index.js",
+        "default-panel.html",
+    ] {
+        assert!(ui.join(page).is_file(), "Resources/ui/{page}");
+    }
+    assert!(!ui.join("index.js").exists(), "the node test entry");
+    assert!(!ui.join("app/lib/menu.test.js").exists(), "a node test");
 
     run(Command::new("codesign")
         .args(["--verify", "--deep", "--strict"])
@@ -104,5 +126,22 @@ fn bundle_app_builds_a_signed_bundle() {
 
     let output = run(Command::new(&cli).arg("modules"));
     assert!(String::from_utf8_lossy(&output.stdout).contains("std.audio_out"));
+
+    // The helper is built with `--features gpu` (M2.7-2 answer A): it lists
+    // the GPUs. The exit status is not asserted: a machine (or sandbox)
+    // without a GPU may refuse the listing, which is not what is checked.
+    let output = Command::new(&cli)
+        .args(["devices", "--compute"])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !text.contains("this build has no GPU support"),
+        "the helper is built with --features gpu: {text}"
+    );
     fs::remove_dir_all(&out).unwrap();
 }

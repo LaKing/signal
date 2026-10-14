@@ -1,6 +1,6 @@
 # ADR 0018: GUI toolkit: egui through eframe
 
-- **Status:** Accepted; to be superseded by ADR 0023 (web UI) when the web UI reaches parity (M2.8-4) (operator decision, delegated by the owner, 2026-10-11)
+- **Status:** Superseded by [ADR 0023](0023-web-ui.md) (web UI) in M2.8-4, 2026-10-14: Signal.app is a tao window with a wry WebView, and egui and eframe are gone from the workspace. Accepted 2026-10-11 (operator decision, delegated by the owner). The OFL font exception below lapsed with egui.
 - **Date:** 2026-10-11
 
 ## Context

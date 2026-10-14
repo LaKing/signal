@@ -65,7 +65,7 @@ Otherwise it sends `{"type": "error", "code": "unauthorized", …}` (a wrong or 
  "scopes": {"slots": 8, "points": 256, "maxRate": 48000}}
 ```
 
-(Values here are illustrative.) `instances` is the flattened plan: every primitive instance with its ports and parameters (kind, unit, range, default, combine, and the parameter's initial base in the plan). `controls` are what the parameter panel edits: the parameters of the project's top-level instances, a composite's exported ones included, at the address `/<instance>.<parameter>`, with the plan ports a value goes to (an export can fan out to several), the range they share, the value without a key in the file (`default`), the base (`base`, the file's value or the default) and whether the file sets it. `planVersion` is the running engine's plan version; `meters.output` lists the sink's channels and the device channel each plays on.
+(Values here are illustrative.) `instances` is the flattened plan: every primitive instance with its ports and parameters (kind, unit, range, default, combine, and the parameter's initial base in the plan). `controls` are what the parameter panel edits: the parameters of the project's top-level instances, a composite's exported ones included, at the address `/<instance>.<parameter>`, with the plan ports a value goes to (an export can fan out to several), the range they share, the value without a key in the file (`default`), the base (`base`, the file's value or the default) and whether the file sets it. `planVersion` is the running engine's plan version; `meters.output` lists the sink's channels, the device channel each plays on, and its `label` (`out 1 → 3`, or `out 2 (not played)`).
 
 The server pushes `describe` (without `id`) when a plan swap commits, after a reload that changed values, after a `commit`, and after `setup.apply` played again (then with `"restarted": true`).
 
@@ -139,15 +139,28 @@ The interface setup dialog's functions (M2.5), without a window. The Setup file 
 
 | Message | Does | Reply |
 |---|---|---|
-| `setup.get` | — | `{"type": "setup", "path", "setup": {"output", "input", "buffer", "cpuWorkers", "outputChannels"}, "problems", "playing", "run": {"device", "rate", "buffer", "threads", "map", "inputChannels"}}` |
-| `setup.devices` | `refresh: true` lists the devices again; refused while playing (`playing`: "stop playback to refresh: listing devices pauses metering and status"), as in the dialog | `{"type": "setup.devices", "devices": [{…, "index", "label", "capabilities"}], "error", "output", "input", "compute"}`: every device (name, id, direction, default, configurations), its label (same-named devices told apart), its capabilities as the dialog shows them; where the Setup's output and input are (`{"found": index}` or `{"unresolved": reason}`); the compute devices |
+| `setup.get` | — | `{"type": "setup", "path", "setup": {"output", "input", "buffer", "cpuWorkers", "outputChannels", "rtPolicy"}, "problems", "playing", "run": {"device", "rate", "buffer", "threads", "map", "inputChannels"}, "rtPolicies"}`: `rtPolicy` is the workers' wake policy, one of `rtPolicies` |
+| `setup.devices` | `refresh: true` lists the devices again; refused while playing (`playing`: "stop playback to refresh: listing devices pauses metering and status"), as in the dialog. `choices`: `{"output", "input"}`, each `{"name", "id", "signature"}`, devices a page chose, found again by identity | `{"type": "setup.devices", "devices": [{…, "index", "label", "signature", "capabilities"}], "error", "output", "input", "choices", "compute"}`: every device (name, id, direction, default, configurations), its label (same-named devices told apart), its signature (channels and rates, which tell same-named devices apart without an id), its capabilities as the dialog shows them; where the Setup's output and input are, and where the `choices` are now (`{"found": index}` or `{"unresolved": reason}`, as the dialog finds a chosen device after a refresh); the compute devices |
 | `setup.check` | `output`: a device index (or null: the default output), `buffer` | `{"type": "setup.check", "ok", "message"}`: whether that output plays the project's rate with that buffer |
-| `setup.apply` | `output`, `input`: absent or `"keep"` (keep the Setup's), `null` (none: the default output, no input), `{"index": n}` or `{"name", "id", "signature"}`; `buffer` (1 to 8192), `cpuWorkers` (`"auto"`, null or 1 to 64), `outputChannels` (`"1, 2"`, `[1, 2]` or null) | `{"type": "applied", "saved", "restarted", "frame", "setup", "run", "notes", "error"}` |
+| `setup.apply` | `output`, `input`: absent or `"keep"` (keep the Setup's), `null` (none: the default output, no input), `{"index": n}` or `{"name", "id", "signature"}`; `buffer` (1 to 8192), `cpuWorkers` (`"auto"`, null or 1 to 64), `outputChannels` (`"1, 2"`, `[1, 2]` or null), `rtPolicy` (a wake policy's name: `park50`, `budget-spin`, `semaphore`, `fanout`; `bad-value` otherwise) | `{"type": "applied", "saved", "restarted", "frame", "setup", "run", "notes", "error"}` |
 
 `setup.apply` is the dialog's Apply: the settings go into the Setup, which is saved; **while playing, the run stops and plays again from frame 0** with the Setup's output device, channel map (a map the device cannot take falls back to the identity, with a note), buffer, CPU workers, and its input, metered. Subscriptions carry over (scopes are started again on the new run), edits waiting for their reports are answered `abandoned`, and `describe` is pushed with `"restarted": true` after the reply. The options of `signal ui` that the dialog does not have stay as they were (`--rt-policy`, `--rt-computation`, `--rt-trace`, `--driver`, `--fast`). Two cases differ from the app:
 
 - A run that records a session or its audio (`--record-session`, `--record-audio`) is not restarted: the Setup is saved and the reply is `{"type": "error", "code": "recording", …}`, because a recording covers one run from frame 0.
 - Under `--driver null` the device list is still the machine's CoreAudio list, so the Setup's devices resolve as the app resolves them; the run plays on the null driver as if on that device. Tests give the host a fixed list.
+
+### Signal.app (app mode)
+
+Signal.app's control thread runs the host in **app mode** (`Host::new_app`, M2.8-4): its window's WebView loads `http://127.0.0.1:<http port>/ui/app/index.html#ws=…&token=…` from it. App mode starts **stopped**, on the project the app was given or else the Setup's last project, and plays every run with the Setup (its output, channel map, buffer, CPU workers, wake policy and input), with the rules of the app's state (`crates/signal-ui/src/app.rs`, shared with `signal-app`'s `AppState`). `describe` answers while stopped (with `"playing": false`), and `commit` writes while stopped. Its own messages, which `signal ui` refuses with `not-allowed`:
+
+| Message | Does | Reply |
+|---|---|---|
+| `app.get` | — | `{"type": "app", "project": {"dir", "sampleRate", "diagnostics"} or null, "playing", "reload": {"message", "error"} or null, "notes", "message", "writes", "setupPath", "setupProblems"}`: what the window shows beside the panel and meters (`sampleRate` is null and `diagnostics` lists why when the folder does not load; `message` is the last refusal or notice). Pushed (without `id`) whenever it changes |
+| `transport.play` | Plays the open project from frame 0 with the Setup | `{"type": "transport", "playing": true}`; errors `no-project` ("open a project folder first"), `does-not-load` ("the project does not load"), `device` (the output or engine could not start) |
+| `transport.stop` | Stops; edits waiting for reports are answered `abandoned`; subscriptions are kept (scopes start again with the next run); the devices are listed again | `{"type": "transport", "playing": false}` |
+| `project.open` | `path`: a project folder (made absolute). Stops, opens it (stopped), records it as the Setup's last project and saves the Setup, and serves its `ui/` under `/project/` | `{"type": "project", "dir", "loads", "diagnostics"}` |
+
+`describe` is pushed after each of them. The **status line** is pushed as `{"type": "status", "playing", "line", "status": {"frame", "elapsed", "xruns", "loadAverage", "loadWorst", "clipped", "buffer", "threads", "workers", "scheduling"}}` four times a second while playing and once after a stop (the last run's): `line` is the text the window shows, `xruns` counts the output's and the input's. When the window closes, the host stops, records the window's size in the Setup and saves it.
 
 ### `stats`, `ping`
 
@@ -155,7 +168,7 @@ The interface setup dialog's functions (M2.5), without a window. The Setup file 
 
 ### Errors
 
-`{"type": "error", "id": …, "code": "…", "message": "…"}`. Codes: `unauthorized`, `protocol`, `already-authenticated`, `bad-message`, `unknown-type`, `unknown-address`, `unknown-sub`, `unknown-device`, `unknown-panel`, `bad-address`, `bad-value`, `bad-rate`, `bad-device`, `not-a-signal-output`, `no-scope-slot`, `busy`, `refused`, `not-playing`, `not-editable`, `write-failed`, `playing`, `recording`.
+`{"type": "error", "id": …, "code": "…", "message": "…"}`. Codes: `unauthorized`, `protocol`, `already-authenticated`, `bad-message`, `unknown-type`, `unknown-address`, `unknown-sub`, `unknown-device`, `unknown-panel`, `bad-address`, `bad-value`, `bad-rate`, `bad-device`, `not-a-signal-output`, `no-scope-slot`, `busy`, `refused`, `not-playing`, `not-editable`, `write-failed`, `playing`, `recording`, and in Signal.app's messages `not-allowed`, `no-project`, `does-not-load`, `device`.
 
 ## Binary frames
 
@@ -189,11 +202,12 @@ The control thread never waits for a client. Each client has a thread that write
 
 ## Security notes
 
-- **Local only by default.** Both servers bind 127.0.0.1. `signal ui --remote` binds every interface, for a tablet or another Mac; it is off by default and prints a warning. Remote access then relies on the token alone, and the token travels in clear text (no TLS). Signal.app will make it a Setup switch.
+- **Local only by default.** Both servers bind 127.0.0.1. `signal ui --remote` binds every interface, for a tablet or another Mac; it is off by default and prints a warning. Remote access then relies on the token alone, and the token travels in clear text (no TLS). Signal.app binds 127.0.0.1 only (a Setup switch for remote clients is later work).
 - **A token per session.** 32 bytes from the system's random source (`/dev/urandom`), hex, new for every run of the server, compared in constant time. It is required in the first message of every WebSocket connection. It is in the URL's fragment, never in an HTTP request. Anyone with the URL can control the run and write the project's `project.toml`, so the URL is a credential: `signal ui` prints it on the terminal only.
 - **Origin.** A browser connecting to the WebSocket must come from the HTTP server's own origin: `http://127.0.0.1:<http port>` (or `localhost`, `[::1]`); with `--remote`, the host the request was sent to and the HTTP port. Another site's page is refused at the handshake (403), before the token. A client without `Origin` is not a browser page and goes on to the token check.
 - **Host.** Without `--remote`, the HTTP server answers only the loopback names with its port, so another site cannot read the files through a name that resolves to 127.0.0.1 (DNS rebinding).
 - **Files.** Only the two `ui/` folders are served (above). A client writes only through `commit` (a top-level parameter in `project.toml`) and `setup.apply` (the Setup file the server was started with).
+- **`project.open` exists only in Signal.app's app mode**; `signal ui` refuses it (`not-allowed`), so a client of `signal ui` cannot point it at another folder. In the app, a client with the token may open any folder it names: the host then writes the Setup file the app was started with (`last_project`), serves that folder's `ui/` (its panels and `ui/assets/`, by the rules above) under `/project/`, and later `commit`s write that folder's `project.toml`. The token rules are unchanged, and the app binds 127.0.0.1 only.
 - **Limits.** A client message is at most 64 KiB; numbers a client sends are checked before use (an unsupported rate is `bad-rate`, a value outside its range is clamped); messages from all clients wait in a bounded queue; at most 256 are handled per control step.
 
 ## Running it
@@ -205,7 +219,7 @@ signal ui projects/kick --driver null      # no device, real-time pace
 signal ui projects/kick --port 8800        # a fixed HTTP port
 ```
 
-`signal ui` takes every option of `signal play` (`--device`, `--buffer`, `--seconds`, `--threads`, `--rt-policy`, `--rt-computation`, `--rt-trace`, `--driver`, `--fast`, `--record-session`, `--record-audio`, `--record-boundary-data`) and always watches the folder, as `play --watch` does. It stops on Enter (or at `--seconds`), and with `--json` prints `{"url", "panel", "http", "ws"}` when it starts. The UI library's folder is the repository's `ui/` of the build (`--ui-dir` for another; the app bundle will carry its own, M2.8-4).
+`signal ui` takes every option of `signal play` (`--device`, `--buffer`, `--seconds`, `--threads`, `--rt-policy`, `--rt-computation`, `--rt-trace`, `--driver`, `--fast`, `--record-session`, `--record-audio`, `--record-boundary-data`) and always watches the folder, as `play --watch` does. It stops on Enter (or at `--seconds`), and with `--json` prints `{"url", "panel", "http", "ws"}` when it starts. The UI library's folder is the app bundle's `Contents/Resources/ui` when the program runs from a bundle, else the repository's `ui/` of the build (`--ui-dir` for another).
 
 Pages and controls use the client in `ui/signal-ui.js` (reconnect included) and the web components in `ui/controls/`; `/ui/gallery.html` shows them all (`docs/ui-controls.md`).
 

@@ -1,13 +1,14 @@
 //! The machine Setup (ADR 0009): which devices, buffer and output channels
 //! this machine plays a project with, the last project folder and the
-//! window's size, and advanced keys not in the dialog: the real-time
-//! wake policy and computation (M2.7-1) and the GPU devices (M2.7-2). One TOML file (`docs/project-format.md`, "Setup"), never
+//! window's size, the real-time wake policy (M2.7-1; edited in the
+//! interface setup page since M2.8-4), and advanced keys not in the dialog:
+//! the workers' computation (M2.7-1) and the GPU devices (M2.7-2). One TOML file (`docs/project-format.md`, "Setup"), never
 //! part of a project. Reading it never fails: what is unknown or invalid is
 //! reported and replaced by its default. Writing it is atomic.
 //!
 //! Also the interface dialog's checks that need no window (M2.5; shared with
-//! the UI protocol's `setup.*`, M2.8-1): [`channels`], [`capabilities`] and
-//! [`rate_check`].
+//! the UI protocol's `setup.*`, M2.8-1): [`channels`], [`capabilities`],
+//! [`rate_check`] and [`found`], which finds a chosen device by identity.
 
 use std::ffi::OsString;
 use std::fs;
@@ -15,7 +16,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use signal_audio::{DeviceInfo, DeviceRef, choose_output};
+use signal_audio::{DeviceInfo, DeviceRef, Direction, Resolution, choose_output, resolve};
 use signal_engine::{Computation, RtPolicy};
 
 /// The file's format version.
@@ -116,9 +117,10 @@ pub struct Setup {
     pub last_project: Option<PathBuf>,
     /// The window's size when last closed.
     pub window: Option<Window>,
-    /// Advanced, not in the dialog (M2.7-1): how idle worker threads wait
-    /// and are woken (`rt_policy`, `docs/realtime-rules.md` "Wake
-    /// policies"). A machine setting; it never changes the output.
+    /// How idle worker threads wait and are woken (`rt_policy`, M2.7-1,
+    /// `docs/realtime-rules.md` "Wake policies"); the interface setup page
+    /// edits it (`setup.apply`'s `rtPolicy`, M2.8-4). A machine setting; it
+    /// never changes the output.
     pub rt_policy: RtPolicy,
     /// Advanced, not in the dialog: the workers' time-constraint
     /// computation, a fraction of the device period (`rt_computation`).
@@ -372,6 +374,31 @@ impl Setup {
             let _ = fs::remove_file(&temporary);
         }
         written
+    }
+}
+
+/// The dialog's choice of an output or input device.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Choice {
+    /// The saved device is not found (missing or ambiguous), for this reason.
+    Unresolved(String),
+    /// No device: the system's default output, or no input.
+    Unset,
+    /// This device.
+    Device(DeviceRef),
+}
+
+/// `wanted` in `devices`: the device as listed now, or why it is not there.
+/// A device is found by its identity, never by its place in the list.
+pub fn found(devices: &[DeviceInfo], direction: Direction, wanted: &DeviceRef) -> Choice {
+    match resolve(devices, direction, wanted) {
+        Resolution::Found(index) => match devices.get(index) {
+            Some(device) => Choice::Device(DeviceRef::of(device)),
+            None => Choice::Unresolved("the device list changed".to_owned()),
+        },
+        Resolution::Missing { reason, .. } | Resolution::Ambiguous { reason, .. } => {
+            Choice::Unresolved(reason)
+        }
     }
 }
 

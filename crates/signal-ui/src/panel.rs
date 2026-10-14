@@ -381,6 +381,70 @@ fn inner(plan: &ExecutionPlan, address: &InstanceAddress) -> Vec<Row> {
     rows
 }
 
+/// What the project took after a parameter was written into `project.toml`
+/// ([`after_write`]).
+pub enum Written {
+    /// The running project took the written value: the written project's
+    /// panel.
+    Taken(Panel),
+    /// The written project's panel; the running project could not take the
+    /// value no port has (sent after a refused edit), for this reason.
+    Refused(Panel, String),
+    /// The running project could not take the written value, for this
+    /// reason; the next reload applies the file.
+    NotTaken(String),
+    /// Nothing plays: the folder's panel and plan (whose instances hold the
+    /// written values), or its diagnostics when it does not load.
+    Stopped(Result<(Panel, ExecutionPlan), Vec<String>>),
+}
+
+/// After `value` was written for `parameter` of `instance` into the
+/// `project.toml` of `dir` (the panel's release or reset, the protocol's
+/// `commit`): the running project `current` takes the same edit, so when the
+/// file watch reloads the written file the diff is empty and nothing is
+/// applied twice. When the Controller refused it for some port (`sent`
+/// false), the ports may hold anything sent before, so the running project
+/// takes a value no port has in the file ([`Target::unlike`]): that reload's
+/// diff then sends every port the file's value. Stopped, the folder is read
+/// again ([`crate::app::load`]).
+#[allow(clippy::too_many_arguments)]
+pub fn after_write(
+    current: Option<&mut Project>,
+    dir: &Path,
+    target: &Target,
+    instance: &str,
+    parameter: &str,
+    value: Option<f64>,
+    sent: bool,
+    registry: &Registry,
+) -> Written {
+    let Some(current) = current else {
+        return Written::Stopped(
+            crate::app::load(dir, registry)
+                .map(|(project, plan, _)| (Panel::new(&project, registry), plan)),
+        );
+    };
+    let order: Vec<&str> = target.order.iter().map(String::as_str).collect();
+    match current.with_parameter(instance, parameter, value, &order) {
+        Ok(project) => {
+            let panel = Panel::new(&project, registry);
+            let running = match target.unlike(value).filter(|_| !sent) {
+                Some(unlike) => current.with_parameter(instance, parameter, Some(unlike), &order),
+                // Sent, or a single-valued range (every send was that value).
+                None => Ok(project),
+            };
+            match running {
+                Ok(running) => {
+                    *current = running;
+                    Written::Taken(panel)
+                }
+                Err(error) => Written::Refused(panel, error.to_string()),
+            }
+        }
+        Err(error) => Written::NotTaken(error.to_string()),
+    }
+}
+
 /// Writes `value` for `parameter` of `instance` (`None`: removes the key)
 /// into the `project.toml` of `dir` with `toml_edit`
 /// ([`write_parameter`](signal_project::write_parameter)), keeping the rest of

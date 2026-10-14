@@ -9,6 +9,11 @@
 //! for a client: messages go out through each client's bounded queue with
 //! `try_send`, a full queue drops a data frame (counted) and evicts a client
 //! whose control reply does not fit.
+//!
+//! In app mode ([`Host::new_app`], Signal.app's server, M2.8-4) it starts
+//! stopped and takes the app's own messages too (`app.get`,
+//! `transport.play`/`stop`, `project.open`), with Signal.app's rules
+//! ([`crate::app`]): every run plays from the Setup, as the app's state does.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -19,15 +24,15 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use signal_audio::{
-    ChannelMap, CoreAudioDriver, DeviceInfo, DeviceRef, Direction, Resolution, labels, resolve,
-    rt_thread,
+    ChannelMap, CoreAudioDriver, DeviceInfo, DeviceRef, Direction, Resolution, Scheduling, labels,
+    resolve, rt_thread,
 };
 use signal_core::{
     Curve, Direction as PortDirection, EventPayload, Frame, PortAddress, PortShape, Registry,
 };
 use signal_engine::{
     CommandId, ControlSink, HangLine, Outcome, ParameterValue, Provenance, RealtimeConfig, Report,
-    RtOptions, RunnerStatus, SentCommand, Stamp,
+    RtOptions, RtPolicy, RunnerStatus, SentCommand, Stamp,
 };
 use signal_graph::ExecutionPlan;
 use signal_output::{
@@ -38,15 +43,20 @@ use signal_project::session::{LiveRecorder, SessionRecorder, sink_of};
 use signal_project::{Diagnostic, LoadError, Project, located};
 
 use crate::PROTOCOL;
+use crate::app::{self, Status};
 use crate::bindings::{Targets, check};
 use crate::frames::{self, frame};
-use crate::panel::{Panel, ramp_frames, write_project};
+use crate::panel::{Panel, Written, after_write, ramp_frames, write_project};
 use crate::player::{Backend, Input, Interface, Output, Selection, open_input, open_output};
 use crate::server::{Inbound, Outbound, Server, ServerOptions};
-use crate::setup::{Setup, capabilities, channels, rate_check};
+use crate::setup::{
+    Choice, DEFAULT_BUFFER, Setup, Window, capabilities, channels, found, rate_check,
+};
 
 /// Client messages handled per step at most.
 const MESSAGES_PER_STEP: usize = 256;
+/// How often the status line is pushed while playing (app mode).
+const STATUS_EVERY: Duration = Duration::from_millis(250);
 /// The fastest parameter and meter streams.
 const MAX_RATE_HZ: f64 = 60.0;
 
@@ -88,6 +98,46 @@ pub struct HostConfig {
     pub server: ServerOptions,
 }
 
+/// What Signal.app's server runs ([`Host::new_app`]): the Setup file, the
+/// project folder to open (else the Setup's last project), the modules,
+/// the devices, the compute inventory and the servers.
+pub struct AppHostConfig {
+    /// The Setup file the app reads and writes.
+    pub setup_path: PathBuf,
+    /// The project folder to open at start (else the Setup's last one).
+    pub project: Option<PathBuf>,
+    /// The modules.
+    pub registry: Registry,
+    /// CoreAudio, or the null driver with a device list.
+    pub backend: Backend,
+    /// The compute inventory for `setup.devices`.
+    pub compute: Vec<String>,
+    /// The servers (`project_ui` is the open project's, set by the host).
+    pub server: ServerOptions,
+}
+
+/// Signal.app's state beside the protocol's (app mode): what the app's
+/// window showed beside the panel and the meters.
+#[derive(Default)]
+struct AppMode {
+    /// A project folder is open (the host's `dir`).
+    opened: bool,
+    /// The open folder's diagnostics, when it does not load.
+    diagnostics: Vec<String>,
+    /// Notes on the run: the channel map, the input.
+    notes: Vec<String>,
+    /// The last refusal or notice.
+    message: Option<String>,
+    /// The last file-watch outcome, and whether it was an error.
+    reload: Option<(String, bool)>,
+    /// The status line (of the last run once stopped).
+    status: Option<Status>,
+    /// When the status was last pushed.
+    pushed: Option<Instant>,
+    /// The `app` message last pushed.
+    last: Option<Value>,
+}
+
 /// What a stopped host leaves: the recorder and the runner's last status.
 pub struct Finished {
     /// The session recorder.
@@ -119,6 +169,8 @@ struct Run {
     /// The engine's plan version last described.
     version: u64,
     failure_reported: bool,
+    /// How the workers are scheduled (app mode: the status line).
+    scheduling: Option<Scheduling>,
 }
 
 struct Client {
@@ -257,6 +309,8 @@ pub struct Host {
     next_ack: u64,
     writes: u64,
     messages: Vec<String>,
+    /// Signal.app's state, in app mode.
+    app: Option<AppMode>,
 }
 
 fn joined(diagnostics: Vec<Diagnostic>) -> String {
@@ -342,7 +396,69 @@ impl Host {
         self.server.connect_local()
     }
 
+    /// Signal.app's server (app mode): starts the servers, opens the project
+    /// (else the Setup's last one) without playing it.
+    pub fn new_app(config: AppHostConfig) -> Result<Host, String> {
+        let server = Server::start(&config.server)
+            .map_err(|error| format!("the UI server did not start: {error}"))?;
+        Ok(Host::with_app(config, server))
+    }
+
+    /// Test hooks: [`new_app`](Host::new_app) with servers that bind
+    /// nothing (clients connect in process).
+    #[cfg(feature = "test-hooks")]
+    pub fn new_app_local(config: AppHostConfig) -> Result<Host, String> {
+        let server = Server::start_local(&config.server)
+            .map_err(|error| format!("the UI server did not start: {error}"))?;
+        Ok(Host::with_app(config, server))
+    }
+
+    fn with_app(config: AppHostConfig, server: Server) -> Host {
+        let AppHostConfig {
+            setup_path,
+            project,
+            registry,
+            backend,
+            compute,
+            server: options,
+        } = config;
+        // App mode plays every run from the Setup (`app::start`): the
+        // first run's options and `rt` are not used.
+        let config = HostConfig {
+            dir: PathBuf::new(),
+            registry,
+            setup_path,
+            backend,
+            first: FirstRun {
+                device: None,
+                buffer: DEFAULT_BUFFER,
+                threads: 0,
+            },
+            rt: RtOptions::default(),
+            boundary_data: false,
+            recording: false,
+            provenance: Provenance::default(),
+            compute,
+            server: options,
+        };
+        let mut host = Host::blank(config, server, Some(AppMode::default()));
+        if let Some(dir) = app::initial_project(project, &host.setup) {
+            host.open(&dir);
+            // Saved with the next change to the Setup.
+            app::opened(&mut host.setup, dir);
+        }
+        host
+    }
+
     fn with_server(config: HostConfig, server: Server) -> Result<Host, String> {
+        let mut host = Host::blank(config, server, None);
+        let (run, notes) = host.build(true)?;
+        host.messages.extend(notes);
+        host.install(run);
+        Ok(host)
+    }
+
+    fn blank(config: HostConfig, server: Server, app: Option<AppMode>) -> Host {
         let (setup, setup_problems) = Setup::load(&config.setup_path);
         let mut host = Host {
             registry: config.registry,
@@ -379,12 +495,10 @@ impl Host {
             next_ack: 1,
             writes: 0,
             messages: Vec::new(),
+            app,
         };
         host.list_devices();
-        let (run, notes) = host.build(true)?;
-        host.messages.extend(notes);
-        host.install(run);
-        Ok(host)
+        host
     }
 
     /// The URL to open: the page, with the WebSocket port and the session
@@ -396,6 +510,29 @@ impl Host {
     /// The URL of the project's main panel, with the same fragment.
     pub fn panel_url(&self) -> String {
         self.server.panel_url()
+    }
+
+    /// The URL of the page at `path` (from `/`, e.g. [`crate::APP_PAGE`]),
+    /// with the same fragment.
+    pub fn page_url(&self, path: &str) -> String {
+        self.server.url_of(path)
+    }
+
+    /// Test hooks: what connects in-process clients from another thread.
+    #[cfg(feature = "test-hooks")]
+    pub fn local_connector(&self) -> crate::LocalConnector {
+        self.server.local_connector()
+    }
+
+    /// Signal.app exits: stops playing, records the window's size (when
+    /// known) in the Setup and saves it. Returns what to tell the operator.
+    pub fn close(&mut self, window: Option<Window>) -> Vec<String> {
+        self.stop_app();
+        app::exit(&mut self.setup, window);
+        if let Err(message) = app::save(&self.setup, &self.setup_path) {
+            self.messages.push(message);
+        }
+        std::mem::take(&mut self.messages)
     }
 
     /// The HTTP server's address.
@@ -489,7 +626,299 @@ impl Host {
             }
         }
         self.emit();
+        self.push_app();
         std::mem::take(&mut self.messages)
+    }
+
+    /// App mode: the status line every [`STATUS_EVERY`] while playing, and
+    /// the `app` message whenever it changed.
+    fn push_app(&mut self) {
+        let Some(mode) = self.app.as_mut() else {
+            return;
+        };
+        let due = match &self.run {
+            Some(run) => {
+                let due = mode.pushed.is_none_or(|at| at.elapsed() >= STATUS_EVERY);
+                if due && let Some(scheduling) = &run.scheduling {
+                    mode.status = Some(app::status(
+                        &run.controller,
+                        &run.output,
+                        run.input.as_ref(),
+                        run.rate,
+                        run.buffer,
+                        scheduling,
+                    ));
+                }
+                due
+            }
+            // Once after a stop: the last run's final status.
+            None => mode.pushed.is_none() && mode.status.is_some(),
+        };
+        if due {
+            mode.pushed = Some(Instant::now());
+            let status = self.status_json();
+            self.broadcast(&status);
+        }
+        let current = self.app_json();
+        if self.app.as_ref().and_then(|m| m.last.as_ref()) != Some(&current) {
+            self.broadcast(&current);
+            if let Some(mode) = self.app.as_mut() {
+                mode.last = Some(current);
+            }
+        }
+    }
+
+    /// `status`: the status line of the run (of the last one once stopped).
+    fn status_json(&self) -> Value {
+        let status = self.app.as_ref().and_then(|m| m.status.as_ref());
+        json!({
+            "type": "status",
+            "playing": self.run.is_some(),
+            "line": app::status_line(status),
+            "status": status.map(|s| json!({
+                "frame": s.frame,
+                "elapsed": s.elapsed,
+                "xruns": s.xruns,
+                "loadAverage": s.load_average,
+                "loadWorst": s.load_worst,
+                "clipped": s.clipped,
+                "buffer": s.buffer,
+                "threads": s.threads,
+                "workers": s.workers,
+                "scheduling": s.scheduling,
+            })),
+        })
+    }
+
+    /// `app`: what Signal.app's window shows beside the panel and meters.
+    fn app_json(&self) -> Value {
+        let Some(mode) = &self.app else {
+            return Value::Null;
+        };
+        json!({
+            "type": "app",
+            "project": mode.opened.then(|| json!({
+                "dir": self.dir.display().to_string(),
+                "sampleRate": (mode.diagnostics.is_empty() && self.rate > 0).then_some(self.rate),
+                "diagnostics": mode.diagnostics,
+            })),
+            "playing": self.run.is_some(),
+            "reload": mode.reload.as_ref().map(|(message, error)| json!({"message": message, "error": error})),
+            "notes": mode.notes,
+            "message": mode.message,
+            "writes": self.writes,
+            "setupPath": self.setup_path.display().to_string(),
+            "setupProblems": self.setup_problems,
+        })
+    }
+
+    /// App mode: opens the project folder `dir` (stopped) for its rate,
+    /// panel and diagnostics, and serves its `ui/`.
+    fn open(&mut self, dir: &Path) {
+        self.dir = dir.to_owned();
+        self.server.set_project_ui(project_ui(dir));
+        let loaded = app::load(dir, &self.registry);
+        let Some(mode) = self.app.as_mut() else {
+            return;
+        };
+        mode.opened = true;
+        mode.reload = None;
+        match loaded {
+            Ok((project, plan, _)) => {
+                self.rate = project.sample_rate;
+                mode.diagnostics.clear();
+                self.panel = Panel::new(&project, &self.registry);
+                self.plan = Some(plan);
+            }
+            Err(diagnostics) => {
+                self.rate = 0;
+                mode.diagnostics = diagnostics;
+                self.panel = Panel::default();
+                self.plan = None;
+            }
+        }
+    }
+
+    /// App mode: plays the open project from frame 0 with the Setup
+    /// ([`app::start`]), as the app's Play does.
+    fn play_app(&mut self) -> Result<(), Failure> {
+        let opened = match self.app.as_mut() {
+            Some(mode) => {
+                mode.notes.clear();
+                mode.opened
+            }
+            None => return Err(app_only()),
+        };
+        if self.run.is_some() {
+            return Ok(());
+        }
+        if !opened {
+            return Err(fail("no-project", "open a project folder first"));
+        }
+        let (project, plan, width) = match app::load(&self.dir, &self.registry) {
+            Ok(loaded) => loaded,
+            Err(diagnostics) => {
+                if let Some(mode) = self.app.as_mut() {
+                    mode.diagnostics = diagnostics;
+                }
+                return Err(fail("does-not-load", "the project does not load"));
+            }
+        };
+        self.rate = project.sample_rate;
+        self.panel = Panel::new(&project, &self.registry);
+        let mut notes = Vec::new();
+        let started = app::start(
+            &self.backend,
+            &self.devices,
+            &self.setup,
+            &self.registry,
+            &project,
+            plan,
+            width,
+            &mut notes,
+        );
+        if let Some(mode) = self.app.as_mut() {
+            mode.diagnostics.clear();
+            mode.notes.extend(notes);
+        }
+        let started = started.map_err(|error| fail("device", error))?;
+        let (watcher, reload) = match ProjectWatcher::new(&self.dir) {
+            Ok(watcher) => (Some(watcher), ("watching for edits".to_owned(), false)),
+            Err(error) => (None, (format!("not watching: {error}"), true)),
+        };
+        if let Some(mode) = self.app.as_mut() {
+            mode.reload = Some(reload);
+            mode.pushed = None;
+        }
+        let (input, input_channels) = match started.input {
+            Some((input, channels)) => (Some(input), channels),
+            None => (None, 0),
+        };
+        let device = device_name(&started.output);
+        let run = Run {
+            output: started.output,
+            input,
+            controller: started.controller,
+            live: LiveRecorder::new(started.recorder, self.registry.clone()),
+            current: project,
+            watcher,
+            watched: Instant::now(),
+            retry: false,
+            rate: started.rate,
+            buffer: started.buffer,
+            threads: u32::try_from(started.scheduling.threads).unwrap_or(u32::MAX),
+            width,
+            input_channels,
+            device,
+            version: 0,
+            failure_reported: false,
+            scheduling: Some(started.scheduling),
+        };
+        self.install(run);
+        self.rearm();
+        Ok(())
+    }
+
+    /// Stops the run, as the app's Stop does: its last status stays, edits
+    /// waiting for reports are abandoned, subscriptions are kept (scopes
+    /// start again with the next run).
+    fn stop_app(&mut self) {
+        let Some(mut run) = self.run.take() else {
+            return;
+        };
+        let stopped = run.output.stop();
+        run.controller.poll(&mut run.live);
+        if let Some(mode) = self.app.as_mut() {
+            if let Err(error) = &stopped {
+                mode.message = Some(format!("stopping: {error}"));
+            }
+            if let Some(scheduling) = &run.scheduling {
+                let mut status = app::status(
+                    &run.controller,
+                    &run.output,
+                    run.input.as_ref(),
+                    run.rate,
+                    run.buffer,
+                    scheduling,
+                );
+                if let Ok(Some(runner)) = &stopped {
+                    status.frame = runner.status().next_frame.0;
+                    status.clipped = runner.clipped();
+                    status.elapsed = status.frame as f64 / f64::from(run.rate.max(1));
+                }
+                mode.status = Some(status);
+            }
+            // The final status is pushed by the next step.
+            mode.pushed = None;
+        }
+        // The streams, the Runner and the input are dropped here, on the
+        // control thread.
+        drop(run);
+        self.values.clear();
+        self.abandon();
+    }
+
+    /// `transport.play`, `transport.stop` (app mode).
+    fn transport(&mut self, play: bool) -> Result<Value, Failure> {
+        if self.app.is_none() {
+            return Err(app_only());
+        }
+        let result = if play {
+            self.play_app()
+        } else {
+            if self.run.is_some() {
+                self.stop_app();
+                self.list_devices();
+            }
+            Ok(())
+        };
+        self.noted(result)?;
+        Ok(json!({"type": "transport", "playing": self.run.is_some()}))
+    }
+
+    /// `project.open` (app mode): stops, opens the folder at `path` (made
+    /// absolute: it becomes the Setup's last project) and saves the Setup.
+    fn project_open(&mut self, message: &Value) -> Result<Value, Failure> {
+        if self.app.is_none() {
+            return Err(app_only());
+        }
+        let path = message
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| fail("bad-message", "project.open needs `path`"))?;
+        let dir = std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path));
+        if let Some(mode) = self.app.as_mut() {
+            mode.message = None;
+        }
+        self.stop_app();
+        self.open(&dir);
+        app::opened(&mut self.setup, dir.clone());
+        let saved = app::save(&self.setup, &self.setup_path);
+        let mode = self.app.as_mut();
+        if let (Some(mode), Err(message)) = (mode, &saved) {
+            mode.message = Some(message.clone());
+        }
+        let diagnostics = self
+            .app
+            .as_ref()
+            .map_or_else(Vec::new, |m| m.diagnostics.clone());
+        Ok(json!({
+            "type": "project",
+            "dir": dir.display().to_string(),
+            "loads": diagnostics.is_empty(),
+            "diagnostics": diagnostics,
+        }))
+    }
+
+    /// App mode: the message to show for an app message's outcome (cleared
+    /// by each one, as the app's commands do).
+    fn noted<T>(&mut self, result: Result<T, Failure>) -> Result<T, Failure> {
+        if let Some(mode) = self.app.as_mut() {
+            mode.message = result.as_ref().err().map(|f| f.message.clone());
+        }
+        result
     }
 
     fn list_devices(&mut self) {
@@ -592,10 +1021,7 @@ impl Host {
         } else {
             live
         };
-        let device = match &output {
-            Output::Device(driver) => driver.name().to_owned(),
-            Output::Null(..) => "null".to_owned(),
-        };
+        let device = device_name(&output);
         output.start(runner).map_err(|e| e.to_string())?;
         let input = if first {
             None
@@ -630,6 +1056,7 @@ impl Host {
             device,
             version: 0,
             failure_reported: false,
+            scheduling: None,
         };
         Ok((run, notes))
     }
@@ -672,6 +1099,9 @@ impl Host {
         {
             run.failure_reported = true;
             self.messages.push(failure.to_string());
+            if let Some(mode) = self.app.as_mut() {
+                mode.message = Some(failure.to_string());
+            }
         }
         let mut bound = Vec::new();
         for (&sub, s) in &mut self.subs {
@@ -761,6 +1191,11 @@ impl Host {
                 (json!({"type": "reload.error", "message": message}), false)
             }
         };
+        if let Some(mode) = self.app.as_mut() {
+            let error = notice.0.get("type") == Some(&json!("reload.error"));
+            let message = notice.0.get("message").and_then(Value::as_str);
+            mode.reload = message.map(|m| (m.to_owned(), error));
+        }
         self.take_reports();
         self.broadcast(&notice.0);
         // A swap is described once it commits (`poll`); new bases now.
@@ -971,6 +1406,13 @@ impl Host {
             "setup.devices" => self.setup_devices(&message).map(Some),
             "setup.check" => self.setup_check(&message).map(Some),
             "setup.apply" => self.setup_apply(&message).map(Some),
+            "app.get" => match self.app {
+                Some(_) => Ok(Some(self.app_json())),
+                None => Err(app_only()),
+            },
+            "transport.play" => self.transport(true).map(Some),
+            "transport.stop" => self.transport(false).map(Some),
+            "project.open" => self.project_open(&message).map(Some),
             "stats" => Ok(Some(self.stats())),
             "ping" => Ok(Some(json!({
                 "type": "pong",
@@ -989,10 +1431,12 @@ impl Host {
             Ok(Some(reply)) => {
                 let restarted =
                     kind == "setup.apply" && reply.get("restarted") == Some(&json!(true));
+                // The plan or what plays changed: every client is told.
+                let changed = matches!(kind, "transport.play" | "transport.stop" | "project.open");
                 let reply = with(reply, "id", id);
                 self.send_text(client, &reply);
-                if restarted {
-                    let describe = self.describe(true);
+                if restarted || changed {
+                    let describe = self.describe(restarted);
                     self.broadcast(&describe);
                 }
             }
@@ -1106,7 +1550,10 @@ impl Host {
         let (output_meters, input_meters): (Vec<Value>, Vec<Value>) = match &self.run {
             Some(run) => (
                 (0..run.width)
-                    .map(|c| json!({"channel": c, "device": run.output.target(c)}))
+                    .map(|c| {
+                        let device = run.output.target(c);
+                        json!({"channel": c, "device": device, "label": app::meter_label(c, device)})
+                    })
                     .collect(),
                 (0..run.input_channels)
                     .map(|c| json!({"channel": c}))
@@ -1522,41 +1969,48 @@ impl Host {
             .map_err(|error| fail("write-failed", error))?;
         self.writes += 1;
         let mut note = None;
-        match self.run.as_mut() {
-            Some(run) => match run
-                .current
-                .with_parameter(&instance, &parameter, value, &order)
-            {
-                Ok(project) => {
-                    self.panel = Panel::new(&project, &self.registry);
-                    let unlike = target.unlike(value).filter(|_| !sent);
-                    let running = match unlike {
-                        Some(unlike) => {
-                            run.current
-                                .with_parameter(&instance, &parameter, Some(unlike), &order)
-                        }
-                        None => Ok(project),
-                    };
-                    match running {
-                        Ok(running) => run.current = running,
-                        Err(error) => {
-                            note = Some(format!(
-                                "the running project could not take the refused value ({error}); \
-                             the next reload applies what differs from the file"
-                            ))
-                        }
-                    }
-                }
-                Err(error) => {
-                    note = Some(format!(
-                        "written, but the running project could not take it ({error}); the next \
-                         reload applies the file"
-                    ));
-                }
-            },
-            None => {
-                if let Ok(project) = Project::load(&self.dir) {
-                    self.panel = Panel::new(&project, &self.registry);
+        let current = self.run.as_mut().map(|r| &mut r.current);
+        match after_write(
+            current,
+            &self.dir,
+            &target,
+            &instance,
+            &parameter,
+            value,
+            sent,
+            &self.registry,
+        ) {
+            // The plan too, which `describe` reads the instances' (and so a
+            // composite's inner parameters') bases from.
+            Written::Taken(panel) => {
+                self.panel = panel;
+                self.plan = self
+                    .run
+                    .as_ref()
+                    .and_then(|r| r.current.plan(&self.registry).ok())
+                    .map(|p| p.plan);
+            }
+            Written::Stopped(Ok((panel, plan))) => {
+                self.panel = panel;
+                self.plan = Some(plan);
+            }
+            Written::Refused(panel, error) => {
+                self.panel = panel;
+                note = Some(format!(
+                    "the running project could not take the refused value ({error}); the next \
+                     reload applies what differs from the file"
+                ));
+            }
+            Written::NotTaken(error) => {
+                note = Some(format!(
+                    "written, but the running project could not take it ({error}); the next \
+                     reload applies the file"
+                ));
+            }
+            // The folder's diagnostics, shown by the app (app mode).
+            Written::Stopped(Err(diagnostics)) => {
+                if let Some(mode) = self.app.as_mut() {
+                    mode.diagnostics = diagnostics;
                 }
             }
         }
@@ -1622,6 +2076,7 @@ impl Host {
             "buffer": self.setup.buffer,
             "cpuWorkers": self.setup.cpu_workers,
             "outputChannels": self.setup.output_channels,
+            "rtPolicy": self.setup.rt_policy.name(),
         })
     }
 
@@ -1648,6 +2103,7 @@ impl Host {
             "problems": self.setup_problems,
             "playing": self.run.is_some(),
             "run": self.run_json(),
+            "rtPolicies": RtPolicy::ALL.iter().map(|p| p.name()).collect::<Vec<_>>(),
         })
     }
 
@@ -1657,10 +2113,7 @@ impl Host {
     fn setup_devices(&mut self, message: &Value) -> Result<Value, Failure> {
         if message.get("refresh").and_then(Value::as_bool) == Some(true) {
             if self.run.is_some() {
-                return Err(fail(
-                    "playing",
-                    "stop playback to refresh: listing devices pauses metering and status",
-                ));
+                return Err(fail("playing", app::REFRESH_WHILE_PLAYING));
             }
             self.list_devices();
         }
@@ -1678,6 +2131,9 @@ impl Host {
                 let value = serde_json::to_value(d).unwrap_or(Value::Null);
                 let value = with(value, "index", json!(index));
                 let value = with(value, "label", json!(label(d.direction, index)));
+                // What tells same-named devices apart without an id: a page
+                // keeps a chosen device by its name, id and signature.
+                let value = with(value, "signature", json!(DeviceRef::of(d).signature));
                 with(value, "capabilities", json!(capabilities(d)))
             })
             .collect();
@@ -1690,12 +2146,40 @@ impl Host {
                 }
             },
         };
+        // A page's chosen devices, found again by identity after a refresh
+        // (`Choice` and `found`, the dialog's draft).
+        let chosen = |key: &str, direction| {
+            let wanted = message.get("choices")?.get(key)?;
+            let name = wanted.get("name")?.as_str()?;
+            let wanted = DeviceRef {
+                name: name.to_owned(),
+                id: wanted.get("id").and_then(Value::as_str).map(str::to_owned),
+                signature: wanted
+                    .get("signature")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+            };
+            Some(match found(&self.devices, direction, &wanted) {
+                Choice::Device(device) => match resolve(&self.devices, direction, &device) {
+                    Resolution::Found(index) => json!({"found": index}),
+                    _ => json!({"unresolved": "the device list changed"}),
+                },
+                Choice::Unresolved(reason) => json!({"unresolved": reason}),
+                Choice::Unset => Value::Null,
+            })
+        };
+        let choices = json!({
+            "output": chosen("output", Direction::Output),
+            "input": chosen("input", Direction::Input),
+        });
         Ok(json!({
             "type": "setup.devices",
             "devices": devices,
             "error": self.devices_error,
             "output": resolution(&self.setup.output, Direction::Output),
             "input": resolution(&self.setup.input, Direction::Input),
+            "choices": choices,
             "compute": self.compute,
         }))
     }
@@ -1764,6 +2248,16 @@ impl Host {
         let output = self.selection(message.get("output"), Direction::Output)?;
         let input = self.selection(message.get("input"), Direction::Input)?;
         let buffer = buffer_of(message, self.setup.buffer)?;
+        let rt_policy = match message.get("rtPolicy") {
+            None => self.setup.rt_policy,
+            Some(name) => name.as_str().and_then(RtPolicy::from_name).ok_or_else(|| {
+                let names: Vec<&str> = RtPolicy::ALL.iter().map(|p| p.name()).collect();
+                fail(
+                    "bad-value",
+                    format!("rtPolicy is one of {}", names.join(", ")),
+                )
+            })?,
+        };
         let cpu_workers = match message.get("cpuWorkers") {
             None => self.setup.cpu_workers,
             Some(Value::Null) => None,
@@ -1806,13 +2300,20 @@ impl Host {
             output_channels,
         }
         .apply(&mut self.setup);
-        if let Err(error) = self.setup.save(&self.setup_path) {
+        self.setup.rt_policy = rt_policy;
+        if let Err(error) = app::save(&self.setup, &self.setup_path) {
+            if let Some(mode) = self.app.as_mut() {
+                mode.message = Some(error.clone());
+            }
             return Ok(json!({
                 "type": "applied",
                 "saved": false,
                 "restarted": false,
-                "error": format!("the Setup was not saved to {}: {error}", self.setup_path.display()),
+                "error": error,
             }));
+        }
+        if self.app.is_some() {
+            return Ok(self.apply_app());
         }
         let Some(old) = self.run.take() else {
             return Ok(
@@ -1857,6 +2358,47 @@ impl Host {
                     "setup": self.setup_json(),
                     "error": error,
                 }))
+            }
+        }
+    }
+
+    /// App mode, after the Setup was saved: while playing, the run stops and
+    /// plays again from frame 0 with it, as the app's Apply does.
+    fn apply_app(&mut self) -> Value {
+        if let Some(mode) = self.app.as_mut() {
+            mode.message = None;
+        }
+        if self.run.is_none() {
+            return json!({"type": "applied", "saved": true, "restarted": false, "setup": self.setup_json()});
+        }
+        self.stop_app();
+        match self.play_app() {
+            Ok(()) => {
+                let notes = self.app.as_ref().map_or_else(Vec::new, |m| m.notes.clone());
+                if let Some(mode) = self.app.as_mut() {
+                    mode.message = Some("applied; playing again from frame 0".to_owned());
+                }
+                json!({
+                    "type": "applied",
+                    "saved": true,
+                    "restarted": true,
+                    "frame": 0,
+                    "setup": self.setup_json(),
+                    "run": self.run_json(),
+                    "notes": notes,
+                })
+            }
+            Err(failure) => {
+                if let Some(mode) = self.app.as_mut() {
+                    mode.message = Some(failure.message.clone());
+                }
+                json!({
+                    "type": "applied",
+                    "saved": true,
+                    "restarted": false,
+                    "setup": self.setup_json(),
+                    "error": failure.message,
+                })
             }
         }
     }
@@ -1976,6 +2518,22 @@ fn buffer_of(message: &Value, default: u32) -> Result<u32, Failure> {
             .filter(|b| (1..=8192).contains(b))
             .map(|b| b as u32)
             .ok_or_else(|| fail("bad-value", "buffer is 1 to 8192 frames")),
+    }
+}
+
+/// The refusal of an app message outside app mode.
+fn app_only() -> Failure {
+    fail(
+        "not-allowed",
+        "only Signal.app's server opens projects and plays or stops them",
+    )
+}
+
+/// The output device's name, for `setup.get`'s run.
+fn device_name(output: &Output) -> String {
+    match output {
+        Output::Device(driver) => driver.name().to_owned(),
+        Output::Null(..) => "null".to_owned(),
     }
 }
 

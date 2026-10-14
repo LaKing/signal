@@ -192,7 +192,7 @@ height = 640.0
 | `last_project` | the last project folder opened; opened at start when `--project` is not given | none |
 | `[output]`, `[input]` | the device: `name`, optional `id`, `signature` | the system default output; no input |
 | `[window]` | the window's size in points when last closed | the toolkit's default |
-| `rt_policy` | **advanced, not in the dialog** (M2.7-1): how idle worker threads wait and are woken in real time: `"park50"`, `"budget-spin"`, `"semaphore"` or `"fanout"` (`docs/realtime-rules.md` "Wake policies"). It changes the timing, never the output. Written only when not the default | `"park50"` |
+| `rt_policy` | the interface setup's **wake policy** (M2.7-1; in the setup page since M2.8-4): how idle worker threads wait and are woken in real time: `"park50"`, `"budget-spin"`, `"semaphore"` or `"fanout"` (`docs/realtime-rules.md` "Wake policies"). It changes the timing, never the output. Written only when not the default | `"park50"` |
 | `rt_computation` | **advanced, not in the dialog**: the worker threads' time-constraint computation, a fraction of the device period above 0 and at most 1 (`docs/realtime-rules.md` "The policy"). Written only when not the default | `0.25` |
 | `gpu_devices` | **advanced, shown read-only in the dialog** (M2.7-2): the GPU adapters GPU-backed modules may use: `"all"`, or a list of adapter ids or inventory indices (`signal devices --compute`), e.g. `["metal-apple-m5-max"]`; `[]` uses none. An entry naming no adapter is reported. `signal render`, `play`, `replay` and `bench --gpu` of a `--features gpu` build read it from the same file (`--setup`, else `$SIGNAL_SETUP`, else the default path) and say when it limited the devices. Written only when not `"all"` | `"all"` |
 

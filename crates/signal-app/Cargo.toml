@@ -1,6 +1,6 @@
 [package]
 name = "signal-app"
-description = "Signal.app: the GUI shell (interface setup, metering, panels) over the engine (ADR 0013, 0018)."
+description = "Signal.app: a tao window with a wry WebView on the app's own UI server (interface setup, transport, meters, panels) over the engine (ADR 0013, 0023)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,12 @@ publish.workspace = true
 [[bin]]
 name = "signal-app"
 path = "src/main.rs"
+
+[features]
+# Test hooks: the server in the app without a socket (in-process clients).
+# Only the dev-dependencies below turn it on, with signal-ui's own
+# (crates/signal-engine/tests/test_hooks_scope.rs).
+test-hooks = []
 
 [dependencies]
 signal-core = { workspace = true }
@@ -19,10 +25,10 @@ signal-audio = { workspace = true }
 signal-engine = { workspace = true }
 # ADR 0022: the audio adapter (the audio runner, the null driver, meters).
 signal-output = { workspace = true }
-# The Setup, the parameter panel and the player, shared with the UI protocol (M2.8-1).
+# The Setup, the parameter panel, the player and the app's rules, shared with
+# the UI protocol; its host in app mode is the server in the app (M2.8-4).
 signal-ui = { workspace = true }
-eframe = { workspace = true }
-# ADR 0023: the WebView window that replaces eframe at parity (M2.8-4).
+# ADR 0023: the window and its WebView.
 wry = { workspace = true }
 tao = { workspace = true }
 # M2.7-2: the compute inventory in the interface setup (the GPU adapters,
@@ -31,10 +37,15 @@ signal-gpu = { workspace = true }
 # The Setup file.
 serde = { workspace = true }
 toml = { workspace = true }
+# A dropped folder's path, quoted for the page.
+serde_json = { workspace = true }
 # `--setup` and `--project`.
 clap = { workspace = true }
-# Commands and view snapshots between the window and the control thread.
-rtrb = { workspace = true }
+
+[dev-dependencies]
+signal-app = { path = ".", features = ["test-hooks"] }
+signal-ui = { workspace = true, features = ["test-hooks"] }
+tungstenite = { workspace = true }
 
 [lints]
 workspace = true

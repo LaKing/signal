@@ -54,7 +54,8 @@ pub(crate) struct UiArgs {
     /// text over the network.
     #[arg(long)]
     remote: bool,
-    /// The UI library folder (default: the repository's `ui/`).
+    /// The UI library folder (default: the app bundle's, else the
+    /// repository's `ui/`).
     #[arg(long)]
     ui_dir: Option<PathBuf>,
 }
@@ -117,10 +118,13 @@ pub(crate) fn run(
     } else {
         Backend::CoreAudio
     };
-    let ui_dir = args
-        .ui_dir
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui")));
+    // The bundle's ui/ (Contents/Resources/ui, beside Contents/Helpers),
+    // else the repository's the CLI was built from.
+    let ui_dir = args.ui_dir.clone().unwrap_or_else(|| {
+        let exe = std::env::current_exe().ok();
+        let built = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui"));
+        signal_ui::library_dir(exe.as_deref(), built)
+    });
     let config = HostConfig {
         dir: dir.clone(),
         registry: gpu.registry().clone(),

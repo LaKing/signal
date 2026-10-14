@@ -1,7 +1,10 @@
 //! The app's state, without a window (ADR 0013): the Setup, the project
 //! folder, the devices, and while playing the driver, its `Controller`, the
-//! file watch and the meters. The window sends [`Command`]s and draws the
-//! [`View`] snapshots it gets back; it holds no signal state.
+//! file watch and the meters. It takes [`Command`]s and gives [`View`]
+//! snapshots; it holds no signal state. Its rules (the project's load, how a
+//! run plays from the Setup, the status line, the meter labels, what opening
+//! and exiting record) are `signal_ui::app`'s, which Signal.app's server
+//! runs too (M2.8-4).
 //!
 //! Playing reuses what `signal play --watch` uses: the CoreAudio driver and
 //! input capture of `signal-audio`, and `signal_project::live::reload` for
@@ -28,21 +31,19 @@ use std::time::{Duration, Instant};
 
 use signal_audio::{DeviceInfo, Direction, Resolution, Scheduling, labels, resolve};
 use signal_core::{Curve, EventPayload, Frame, PortAddress, Registry};
-use signal_engine::{
-    ControlSink, HangLine, LogLine, ParameterValue, Provenance, RealtimeConfig, Report,
-    RunnerStatus, SentCommand, Stamp,
-};
-use signal_graph::ExecutionPlan;
-use signal_output::{Controller, Meter, realtime_with};
+use signal_engine::{ControlSink, HangLine, LogLine, ParameterValue, Report, SentCommand, Stamp};
+use signal_output::{Controller, Meter};
+use signal_project::Project;
 use signal_project::live::{ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload};
-use signal_project::session::{Edit, LiveRecorder, SessionRecorder, sink_of};
-use signal_project::{LoadError, Project, located};
+use signal_project::session::{Edit, LiveRecorder};
+use signal_ui::app::{self, load};
 
 use crate::meter::{ChannelMeter, Reading};
-use crate::panel::{InstanceView, Panel, ramp_frames, write_project};
+use crate::panel::{InstanceView, Panel, Written, after_write, ramp_frames, write_project};
 use crate::setup::{DeviceEntry, GpuDevices, Setup, Window};
+pub use signal_ui::app::Status;
 pub use signal_ui::player::{Backend, Interface, Selection};
-use signal_ui::player::{Input, Output, open_input, open_output};
+use signal_ui::player::{Input, Output};
 
 /// What the window asks for.
 #[derive(Clone, Debug, PartialEq)]
@@ -104,35 +105,10 @@ pub struct MeterView {
     pub reading: Reading,
 }
 
-/// The status line.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Status {
-    /// The next frame to play.
-    pub frame: u64,
-    /// `frame` in seconds.
-    pub elapsed: f64,
-    /// Output and input xruns.
-    pub xruns: u64,
-    /// The callback load, average and worst, as fractions of the period.
-    pub load_average: f64,
-    /// The worst callback load.
-    pub load_worst: f64,
-    /// Samples clamped to full scale (or non-finite).
-    pub clipped: u64,
-    /// The buffer requested, in frames.
-    pub buffer: u32,
-    /// The threads a block runs on, the audio thread included.
-    pub threads: usize,
-    /// The worker threads.
-    pub workers: usize,
-    /// How the workers are scheduled: `workgroup`, `time-constraint`,
-    /// `none` or `mixed` ([`Scheduling::path`]).
-    pub scheduling: &'static str,
-}
-
 /// The compute inventory for the dialog (M2.7-2): read on the control
-/// thread; listing GPU adapters creates no device.
-fn compute_lines(gpu_devices: &GpuDevices) -> Vec<String> {
+/// thread; listing GPU adapters creates no device. Signal.app's server
+/// gives the same lines to the interface setup page.
+pub fn compute_lines(gpu_devices: &GpuDevices) -> Vec<String> {
     let (levels, source) = signal_engine::cpu_levels();
     let mut lines = signal_engine::cpu_lines(&levels, source);
     lines.extend(signal_gpu::inventory().lines());
@@ -327,10 +303,10 @@ impl AppState {
             writes: 0,
         };
         state.list_devices();
-        if let Some(dir) = project.or_else(|| state.setup.last_project.clone()) {
+        if let Some(dir) = app::initial_project(project, &state.setup) {
             state.open(&dir);
             // Saved with the next change to the Setup.
-            state.setup.last_project = Some(dir);
+            app::opened(&mut state.setup, dir);
         }
         state
     }
@@ -352,15 +328,12 @@ impl AppState {
             Command::OpenProject(dir) => {
                 self.stop();
                 self.open(&dir);
-                self.setup.last_project = Some(dir);
+                app::opened(&mut self.setup, dir);
                 self.save();
             }
             Command::RefreshDevices => {
                 if self.playing.is_some() {
-                    self.message = Some(
-                        "stop playback to refresh: listing devices pauses metering and status"
-                            .to_owned(),
-                    );
+                    self.message = Some(app::REFRESH_WHILE_PLAYING.to_owned());
                 } else {
                     self.list_devices();
                 }
@@ -401,9 +374,7 @@ impl AppState {
             }
             Command::Exit(window) => {
                 self.stop();
-                if window.is_some() {
-                    self.setup.window = window;
-                }
+                app::exit(&mut self.setup, window);
                 self.save();
             }
             Command::Drag {
@@ -584,11 +555,8 @@ impl AppState {
     }
 
     fn save(&mut self) {
-        if let Err(error) = self.setup.save(&self.setup_path) {
-            self.message = Some(format!(
-                "the Setup was not saved to {}: {error}",
-                self.setup_path.display()
-            ));
+        if let Err(message) = app::save(&self.setup, &self.setup_path) {
+            self.message = Some(message);
         }
     }
 
@@ -697,49 +665,32 @@ impl AppState {
             return self.refuse(error);
         }
         self.writes += 1;
-        match self.playing.as_mut() {
-            Some(playing) => {
-                match playing
-                    .current
-                    .with_parameter(instance, parameter, value, &order)
-                {
-                    Ok(project) => {
-                        self.panel.replace(Panel::new(&project, &self.registry));
-                        let unlike = target.unlike(value).filter(|_| !sent);
-                        let running = match unlike {
-                            Some(unlike) => playing.current.with_parameter(
-                                instance,
-                                parameter,
-                                Some(unlike),
-                                &order,
-                            ),
-                            // Sent, or a single-valued range (every send was
-                            // that value).
-                            None => Ok(project),
-                        };
-                        match running {
-                            Ok(running) => playing.current = running,
-                            Err(error) => {
-                                self.message = Some(format!(
-                                    "{instance}.{parameter}: the running project could not \
-                                     take the refused value ({error}); the next reload applies \
-                                     what differs from the file"
-                                ));
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        self.message = Some(format!(
-                            "{instance}.{parameter} was written, but the running project could \
-                             not take it ({error}); the next reload applies the file"
-                        ));
-                    }
-                }
+        let current = self.playing.as_mut().map(|p| &mut p.current);
+        match after_write(
+            current,
+            &dir,
+            &target,
+            instance,
+            parameter,
+            value,
+            sent,
+            &self.registry,
+        ) {
+            Written::Taken(panel) | Written::Stopped(Ok((panel, _))) => self.panel.replace(panel),
+            Written::Refused(panel, error) => {
+                self.panel.replace(panel);
+                self.message = Some(format!(
+                    "{instance}.{parameter}: the running project could not take the refused \
+                     value ({error}); the next reload applies what differs from the file"
+                ));
             }
-            None => match load(&dir, &self.registry) {
-                Ok((project, _, _)) => self.panel.replace(Panel::new(&project, &self.registry)),
-                Err(diagnostics) => self.diagnostics = diagnostics,
-            },
+            Written::NotTaken(error) => {
+                self.message = Some(format!(
+                    "{instance}.{parameter} was written, but the running project could not \
+                     take it ({error}); the next reload applies the file"
+                ));
+            }
+            Written::Stopped(Err(diagnostics)) => self.diagnostics = diagnostics,
         }
     }
 
@@ -753,7 +704,7 @@ impl AppState {
         if self.project_dir.is_empty() {
             return self.refuse("open a project folder first".to_owned());
         }
-        let (project, mut plan, width) = match load(&dir, &self.registry) {
+        let (project, plan, width) = match load(&dir, &self.registry) {
             Ok(loaded) => loaded,
             Err(diagnostics) => {
                 self.diagnostics = diagnostics;
@@ -763,72 +714,36 @@ impl AppState {
         self.diagnostics.clear();
         self.sample_rate = Some(project.sample_rate);
         self.panel.replace(Panel::new(&project, &self.registry));
-        let (rate, seed, buffer) = (project.sample_rate, project.seed, self.setup.buffer);
         let mut notes = Vec::new();
-        let opened = open_output(
+        let started = app::start(
             &self.backend,
             &self.devices.devices,
             &self.setup,
-            rate,
+            &self.registry,
+            &project,
+            plan,
             width,
-            seed,
             &mut notes,
         );
         self.notes.extend(notes);
-        let mut output = match opened {
-            Ok(output) => output,
+        let app::Started {
+            output,
+            controller,
+            recorder,
+            input,
+            rate,
+            buffer,
+            scheduling,
+        } = match started {
+            Ok(started) => started,
             Err(error) => return self.refuse(error),
         };
-        let target = |sink: usize| output.target(sink);
         let outputs: Vec<(String, ChannelMeter)> = (0..width)
             .map(|sink| {
-                let label = match target(sink) {
-                    Some(device) => format!("out {} → {}", sink + 1, device + 1),
-                    None => format!("out {} (not played)", sink + 1),
-                };
+                let label = app::meter_label(sink, output.target(sink));
                 (label, ChannelMeter::new(rate))
             })
             .collect();
-
-        plan.version = 0;
-        let mut config = RealtimeConfig::with_buffer(rate, seed, u64::from(buffer));
-        config.engine.threads = self.setup.cpu_workers.map_or(0, |n| n as usize);
-        // Advanced Setup keys, not in the dialog (M2.7-1).
-        config.rt.policy = self.setup.rt_policy;
-        config.rt.computation = self.setup.rt_computation;
-        let made = realtime_with(
-            &plan,
-            &self.registry,
-            config,
-            Some(signal_audio::rt_thread::mach_semaphores),
-        );
-        let (runner, controller) = match made {
-            Ok(run) => run,
-            Err(error) => return self.refuse(error.to_string()),
-        };
-        let recorder =
-            match SessionRecorder::new(&project, &self.registry, rate, seed, Provenance::default())
-            {
-                Ok(recorder) => recorder,
-                Err(error) => return self.refuse(error.to_string()),
-            };
-        let workers = runner.workers();
-        if let Err(error) = output.start(runner) {
-            return self.refuse(error.to_string());
-        }
-        let scheduling = output.scheduling().cloned().unwrap_or_else(|| {
-            Scheduling::ordinary(workers.threads(), workers.count(), "null driver")
-        });
-
-        let mut notes = Vec::new();
-        let input = open_input(
-            &self.backend,
-            &self.devices.devices,
-            &self.setup,
-            rate,
-            &mut notes,
-        );
-        self.notes.extend(notes);
         let inputs = input.as_ref().map_or(0, |(_, channels)| *channels);
         let watcher = match ProjectWatcher::new(&dir) {
             Ok(watcher) => Some(watcher),
@@ -885,38 +800,13 @@ impl AppState {
     }
 }
 
-/// The project at `dir`, its plan and its sink's width; or its diagnostics,
-/// located in the folder.
-fn load(dir: &Path, registry: &Registry) -> Result<(Project, ExecutionPlan, usize), Vec<String>> {
-    let project = Project::load(dir).map_err(|error| match error {
-        LoadError::Invalid(diagnostics) => strings(located(dir, diagnostics)),
-        error => vec![error.to_string()],
-    })?;
-    let planned = project
-        .plan(registry)
-        .map_err(|diagnostics| strings(located(dir, diagnostics)))?;
-    let (_, width) = sink_of(&project, &planned.plan).map_err(|d| strings(located(dir, d)))?;
-    Ok((project, planned.plan, width))
-}
-
-fn strings(diagnostics: Vec<signal_project::Diagnostic>) -> Vec<String> {
-    diagnostics.iter().map(ToString::to_string).collect()
-}
-
 fn status_of(playing: &Playing) -> Status {
-    let status: RunnerStatus = playing.controller.status();
-    let stats = playing.output.stats();
-    let input_errors = playing.input.as_ref().map_or(0, Input::stream_errors);
-    Status {
-        frame: status.next_frame.0,
-        elapsed: status.next_frame.0 as f64 / f64::from(playing.rate.max(1)),
-        xruns: stats.xruns + input_errors,
-        load_average: stats.average_callback_ratio,
-        load_worst: stats.worst_callback_ratio,
-        clipped: playing.controller.clipped(),
-        buffer: playing.buffer,
-        threads: playing.scheduling.threads,
-        workers: playing.scheduling.workers.len(),
-        scheduling: playing.scheduling.path(),
-    }
+    app::status(
+        &playing.controller,
+        &playing.output,
+        playing.input.as_ref(),
+        playing.rate,
+        playing.buffer,
+        &playing.scheduling,
+    )
 }

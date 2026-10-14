@@ -37,9 +37,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 # M2: real time (ADR 0011: cpal pinned behind the driver trait; lock-free SPSC queues between threads)
 cpal = "=0.18.2"
 rtrb = "0.4.0"
-# M2.5: Signal.app GUI (ADR 0018)
-eframe = "0.36.2"
-# M2.6 (ADR 0019): GPU device (wgpu, already locked through eframe) and real-time worker threads (rt_thread.rs only)
+# M2.6 (ADR 0019): GPU device (wgpu) and real-time worker threads (rt_thread.rs only)
 wgpu = "30.0.1"
 pollster = "1.0.1"
 objc2-core-audio = "0.3.2"

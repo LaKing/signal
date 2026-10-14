@@ -1,6 +1,6 @@
 # ADR 0023: A web-based user interface
 
-- **Status:** Accepted (owner's direction 2026-10-14: "the UI should be HTML-based, able to bring in SVG and pixel graphics, with the basic elements ready: fader, knob, 2D input, scope, meter, button…"; design by the operator, delegated). **Supersedes ADR 0018** (egui) once the web UI reaches parity (M2.8-4).
+- **Status:** Accepted (owner's direction 2026-10-14: "the UI should be HTML-based, able to bring in SVG and pixel graphics, with the basic elements ready: fader, knob, 2D input, scope, meter, button…"; design by the operator, delegated). **Supersedes ADR 0018** (egui): done in M2.8-4, where Signal.app became a tao window with a wry WebView and egui and eframe left the workspace.
 - **Date:** 2026-10-14
 
 ## Context
@@ -33,4 +33,6 @@ The first GUI (M2.5) uses egui. It works, but it is a programmer's toolkit: cust
 ## Consequences
 - New locked crates: `wry`, `tao`, `tungstenite`, `tiny_http` (all MIT or Apache-2.0). **MPL-2.0 note (ADR 0014):** on macOS one MPL-2.0 crate is linked, `option-ext` (through `dirs`, which wry uses); `cssparser`, `selectors` and `dtoa-short` (MPL-2.0) are locked only for the Linux WebKitGTK backend and are not compiled for macOS. MPL-2.0 is file-level copyleft; Signal does not modify these files.
 - The UI has two clients, WebView and browser, and one protocol. UI tests are split: protocol tests in Rust, control logic in `node:test`, and visual checks by the operator.
-- The app needs `NSLocalNetworkUsageDescription` only if remote UI clients are enabled.
+- The app needs `NSLocalNetworkUsageDescription` only if remote UI clients are enabled. Its WebView loads `http://127.0.0.1`, which the bundle's `Info.plist` allows (`NSAppTransportSecurity` → `NSAllowsLocalNetworking`).
+- **M2.8-4, Signal.app on the web UI.** The app's control thread runs the protocol's host in *app mode* (`ui-protocol.md`, "Signal.app"): it starts stopped, plays and stops on request, opens projects, and pushes the status line. Its rules are shared with the app's state (`signal_ui::app`: the project's load, how a run plays from the Setup, the status line, the meter labels, what opening a project and exiting record in the Setup), so the app and its tests run the same code. The bundle carries the UI library in `Contents/Resources/ui`.
+- **The app's menu is in the page** (Open project…, Interface setup, Quit; Cmd-O, Cmd-comma, Cmd-Q), with Quit sent to the window through wry's IPC: tao has no menu bar, `muda` is not locked, and a hand-built `NSMenu` needs `unsafe` outside the audited modules (AGENTS.md rule 9). Without a native Edit menu, the system's Cut/Copy/Paste shortcuts may not reach the page's text fields; a native menu through `muda` is a later step once the operator locks it.

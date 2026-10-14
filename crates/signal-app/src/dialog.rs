@@ -5,21 +5,10 @@
 //! Apply keeps it as saved, and only an explicit choice replaces it.
 
 use signal_audio::{DeviceInfo, DeviceRef, Direction, Resolution, resolve};
-pub use signal_ui::setup::{capabilities, channels, rate_check};
+pub use signal_ui::setup::{Choice, capabilities, channels, found, rate_check};
 
 use crate::setup::DeviceEntry;
 use crate::state::{Interface, Selection, View};
-
-/// The dialog's choice of an output or input device.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Choice {
-    /// The saved device is not found (missing or ambiguous), for this reason.
-    Unresolved(String),
-    /// No device: the system's default output, or no input.
-    Unset,
-    /// This device.
-    Device(DeviceRef),
-}
 
 /// What the dialog edits until Apply.
 #[derive(Clone, Debug, PartialEq)]
@@ -41,19 +30,6 @@ fn choice(saved: &Option<DeviceEntry>, devices: &[DeviceInfo], direction: Direct
     match saved {
         None => Choice::Unset,
         Some(entry) => found(devices, direction, &entry.to_ref()),
-    }
-}
-
-/// `wanted` in `devices`: the device as listed now, or why it is not there.
-fn found(devices: &[DeviceInfo], direction: Direction, wanted: &DeviceRef) -> Choice {
-    match resolve(devices, direction, wanted) {
-        Resolution::Found(index) => match devices.get(index) {
-            Some(device) => Choice::Device(DeviceRef::of(device)),
-            None => Choice::Unresolved("the device list changed".to_owned()),
-        },
-        Resolution::Missing { reason, .. } | Resolution::Ambiguous { reason, .. } => {
-            Choice::Unresolved(reason)
-        }
     }
 }
 

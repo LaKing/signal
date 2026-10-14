@@ -14,3 +14,6 @@ import './lib/offline.test.js';
 import './lib/panel.test.js';
 import './signal-ui.test.js';
 import './fake-connection.test.js';
+import './app/lib/menu.test.js';
+import './app/lib/draft.test.js';
+import './app/lib/parameters.test.js';

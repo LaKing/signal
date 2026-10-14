@@ -1,0 +1,32 @@
+<!doctype html>
+<!-- Signal.app's window (ADR 0023 §2, M2.8-4): the menu, the project bar and
+     transport with the status line, the meters, the live-reload status and
+     diagnostics, and the parameter list (the M2.5-2 panel). The project's
+     own panel is /project/main.html (M2.8-3), the menu's Panel; the
+     interface setup is setup.html. The page URL's fragment carries the
+     WebSocket's port and the session token (docs/ui-protocol.md). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signal</title>
+<link rel="stylesheet" href="../controls/theme.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<signal-app-menu></signal-app-menu>
+<signal-app-transport></signal-app-transport>
+<signal-app-meters></signal-app-meters>
+<signal-app-messages></signal-app-messages>
+<h2>Parameters</h2>
+<signal-app-parameters></signal-app-parameters>
+<script type="module">
+import { connectFromPage, setDefaultConnection } from '../signal-ui.js';
+import './app.js';
+
+const connection = connectFromPage();
+if (connection) setDefaultConnection(connection);
+else document.body.prepend(Object.assign(document.createElement('p'), { className: 'error', textContent: 'This page needs the URL Signal.app or `signal ui` opens (#ws=…&token=…).' }));
+</script>
+</body>
+</html>
