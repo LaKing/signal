@@ -48,7 +48,7 @@ pub(crate) fn run(args: &DevicesArgs, json: bool) -> Result<(), Failure> {
 
 /// The compute devices for people (the lines Signal.app's interface setup
 /// shows too).
-fn compute_lines() -> Vec<String> {
+pub(crate) fn compute_lines() -> Vec<String> {
     let (levels, source) = cpu_levels();
     let mut lines = cpu_lines(&levels, source);
     #[cfg(feature = "gpu")]

@@ -23,33 +23,26 @@
 //! written file finds nothing to apply.
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use signal_audio::{
-    AudioError, ChannelMap, CoreAudioDriver, DeviceInfo, DeviceRef, DeviceSelector, Direction,
-    InputCallback, InputCapture, InputMeters, Resolution, Scheduling, StatsSnapshot, choose_output,
-    labels, resolve,
-};
+use signal_audio::{DeviceInfo, Direction, Resolution, Scheduling, labels, resolve};
 use signal_core::{Curve, EventPayload, Frame, PortAddress, Registry};
 use signal_engine::{
     ControlSink, HangLine, LogLine, ParameterValue, Provenance, RealtimeConfig, Report,
     RunnerStatus, SentCommand, Stamp,
 };
 use signal_graph::ExecutionPlan;
-use signal_output::{Controller, Driver, Meter, NullDriver, realtime_with};
+use signal_output::{Controller, Meter, realtime_with};
 use signal_project::live::{ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload};
 use signal_project::session::{Edit, LiveRecorder, SessionRecorder, sink_of};
-use signal_project::{LoadError, PROJECT_FILE, Project, located, write_parameter};
+use signal_project::{LoadError, Project, located};
 
 use crate::meter::{ChannelMeter, Reading};
-use crate::panel::{InstanceView, Panel, ramp_frames};
-use crate::setup::{DeviceEntry, Setup, Window};
-
-/// Room for input meters between two control steps.
-const INPUT_METERS: usize = 4096;
+use crate::panel::{InstanceView, Panel, ramp_frames, write_project};
+use crate::setup::{DeviceEntry, GpuDevices, Setup, Window};
+pub use signal_ui::player::{Backend, Interface, Selection};
+use signal_ui::player::{Input, Output, open_input, open_output};
 
 /// What the window asks for.
 #[derive(Clone, Debug, PartialEq)]
@@ -102,55 +95,6 @@ pub enum Command {
     },
 }
 
-/// What Apply does with the Setup's output or input device.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub enum Selection {
-    /// Keeps the Setup's device: the dialog could not find it, and no other
-    /// was chosen (a missing saved device is never replaced unasked).
-    #[default]
-    Keep,
-    /// No device: the system's default output, or no input.
-    Unset,
-    /// This device.
-    Device(DeviceRef),
-}
-
-impl Selection {
-    fn apply(self, saved: &mut Option<DeviceEntry>) {
-        match self {
-            Selection::Keep => {}
-            Selection::Unset => *saved = None,
-            Selection::Device(device) => *saved = Some(DeviceEntry::from_ref(device)),
-        }
-    }
-}
-
-/// The interface settings the dialog applies.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Interface {
-    /// The output device.
-    pub output: Selection,
-    /// The input device, metered only.
-    pub input: Selection,
-    /// The buffer in frames.
-    pub buffer: u32,
-    /// "CPU workers": threads per block, the audio thread included; `None`
-    /// is auto.
-    pub cpu_workers: Option<u32>,
-    /// The device channel (from 1) of each sink channel; identity without.
-    pub output_channels: Option<Vec<u16>>,
-}
-
-/// Where audio goes.
-#[derive(Clone, Debug)]
-pub enum Backend {
-    /// CoreAudio, through `signal-audio`.
-    CoreAudio,
-    /// No device: the null driver, run with [`AppState::run_null`], and this
-    /// device list. For tests and scripting.
-    Null(Vec<DeviceInfo>),
-}
-
 /// One meter as the window shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeterView {
@@ -188,7 +132,7 @@ pub struct Status {
 
 /// The compute inventory for the dialog (M2.7-2): read on the control
 /// thread; listing GPU adapters creates no device.
-fn compute_lines(gpu_devices: &signal_gpu::Selection) -> Vec<String> {
+fn compute_lines(gpu_devices: &GpuDevices) -> Vec<String> {
     let (levels, source) = signal_engine::cpu_levels();
     let mut lines = signal_engine::cpu_lines(&levels, source);
     lines.extend(signal_gpu::inventory().lines());
@@ -255,29 +199,6 @@ pub struct View {
     pub panel: Vec<InstanceView>,
     /// Files the panel has written since the app started.
     pub writes: u64,
-}
-
-enum Output {
-    // Boxed, as the null driver: both are large (the CoreAudio driver keeps
-    // its workers' scheduling, M2.7-1 its ports too).
-    Device(Box<CoreAudioDriver>),
-    // The map is what a device would play (the null driver plays the
-    // identity).
-    Null(Box<NullDriver>, ChannelMap),
-}
-
-enum Input {
-    Device(InputCapture),
-    Null(Box<InputCallback>, InputMeters),
-}
-
-impl Input {
-    fn meters(&mut self) -> &mut InputMeters {
-        match self {
-            Input::Device(capture) => capture.meters(),
-            Input::Null(_, meters) => meters,
-        }
-    }
 }
 
 struct Playing {
@@ -445,12 +366,7 @@ impl AppState {
                 }
             }
             Command::Apply(interface) => {
-                let interface = *interface;
-                interface.output.apply(&mut self.setup.output);
-                interface.input.apply(&mut self.setup.input);
-                self.setup.buffer = interface.buffer.max(1);
-                self.setup.cpu_workers = interface.cpu_workers.map(|n| n.max(1));
-                self.setup.output_channels = interface.output_channels;
+                interface.apply(&mut self.setup);
                 self.save();
                 if self.playing.is_some() {
                     self.stop();
@@ -662,11 +578,8 @@ impl AppState {
     /// of the input's channels), through the input callback body.
     pub fn push_input(&mut self, data: &[f32]) -> Result<(), String> {
         match self.playing.as_mut().and_then(|p| p.input.as_mut()) {
-            Some(Input::Null(callback, _)) => {
-                callback.capture(data);
-                Ok(())
-            }
-            _ => Err("no null input is playing".to_owned()),
+            Some(input) => input.push(data),
+            None => Err("no null input is playing".to_owned()),
         }
     }
 
@@ -780,19 +693,8 @@ impl AppState {
         };
         let order: Vec<&str> = target.order.iter().map(String::as_str).collect();
         let dir = PathBuf::from(&self.project_dir);
-        let path = dir.join(PROJECT_FILE);
-        let written = fs::read_to_string(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|text| {
-                write_parameter(&text, instance, parameter, value, &order)
-                    .map_err(|e| e.to_string())
-            })
-            .and_then(|text| write_file(&path, &text).map_err(|e| e.to_string()));
-        if let Err(error) = written {
-            return self.refuse(format!(
-                "{instance}.{parameter} was not written to {}: {error}",
-                path.display()
-            ));
+        if let Err(error) = write_project(&dir, instance, parameter, value, &order) {
+            return self.refuse(error);
         }
         self.writes += 1;
         match self.playing.as_mut() {
@@ -845,46 +747,6 @@ impl AppState {
         self.message = Some(message);
     }
 
-    /// Where `entry` (if any) is among the devices of `direction`: the
-    /// device to open, or why none is.
-    fn selector(
-        &self,
-        entry: &DeviceEntry,
-        direction: Direction,
-    ) -> Result<(DeviceSelector, &DeviceInfo), String> {
-        match resolve(&self.devices.devices, direction, &entry.to_ref()) {
-            Resolution::Found(index) => {
-                let Some(device) = self.devices.devices.get(index) else {
-                    return Err("the device list changed".to_owned());
-                };
-                match &device.id {
-                    Some(id) => Ok((DeviceSelector::Id(id.clone()), device)),
-                    // Opening by name takes the first of that name: only
-                    // when the name is unique.
-                    None if self.devices.devices.iter().any(|d| {
-                        d.direction == direction
-                            && d.name == device.name
-                            && !std::ptr::eq(d, device)
-                    }) =>
-                    {
-                        Err(format!(
-                            "the {} '{}' has no id and shares its name; it cannot be opened",
-                            match direction {
-                                Direction::Output => "output",
-                                Direction::Input => "input",
-                            },
-                            device.name
-                        ))
-                    }
-                    None => Ok((DeviceSelector::Name(device.name.clone()), device)),
-                }
-            }
-            Resolution::Ambiguous { reason, .. } | Resolution::Missing { reason, .. } => {
-                Err(reason)
-            }
-        }
-    }
-
     fn play(&mut self) {
         self.notes.clear();
         let dir = PathBuf::from(&self.project_dir);
@@ -902,72 +764,22 @@ impl AppState {
         self.sample_rate = Some(project.sample_rate);
         self.panel.replace(Panel::new(&project, &self.registry));
         let (rate, seed, buffer) = (project.sample_rate, project.seed, self.setup.buffer);
-        let output = match &self.setup.output {
-            Some(entry) => match self.selector(entry, Direction::Output) {
-                Ok((selector, device)) => Some((selector, device.clone())),
-                Err(reason) => return self.refuse(reason),
-            },
-            None => None,
-        };
-        let targets: Option<Vec<usize>> = self.setup.output_channels.as_ref().map(|c| {
-            c.iter()
-                .map(|&c| usize::from(c).saturating_sub(1))
-                .collect()
-        });
-        let map_note = |error: AudioError, channels: &[u16]| {
-            format!("output channel map {channels:?}: {error}; playing on the identity map",)
-        };
-        let opened = match &self.backend {
-            Backend::CoreAudio => {
-                let selector = output.map_or(DeviceSelector::Default, |(s, _)| s);
-                let open = |targets| {
-                    CoreAudioDriver::open_selected(&selector, rate, buffer, width, targets)
-                };
-                match open(targets.clone()) {
-                    Err(error @ AudioError::ChannelMap(_)) => {
-                        let channels = self.setup.output_channels.clone().unwrap_or_default();
-                        self.notes.push(map_note(error, &channels));
-                        open(None)
-                    }
-                    other => other,
-                }
-                .map(|driver| Output::Device(Box::new(driver)))
-            }
-            Backend::Null(_) => {
-                // As `CoreAudioDriver::open_selected` chooses, on the listed
-                // device (the default output is taken to be that wide).
-                let wanted = targets
-                    .as_deref()
-                    .map_or(width, |t| ChannelMap::width_for(width, t));
-                let channels = match &output {
-                    Some((_, device)) => {
-                        choose_output(device, rate, buffer, wanted).map(|c| usize::from(c.channels))
-                    }
-                    None => Ok(wanted),
-                };
-                channels.map(|channels| {
-                    let map = match (targets, &self.setup.output_channels) {
-                        (Some(targets), Some(saved)) => ChannelMap::with_targets(
-                            width, channels, targets,
-                        )
-                        .unwrap_or_else(|error| {
-                            self.notes.push(map_note(error, saved));
-                            ChannelMap::new(width, channels)
-                        }),
-                        _ => ChannelMap::new(width, channels),
-                    };
-                    Output::Null(Box::new(NullDriver::new(rate, channels, seed)), map)
-                })
-            }
-        };
+        let mut notes = Vec::new();
+        let opened = open_output(
+            &self.backend,
+            &self.devices.devices,
+            &self.setup,
+            rate,
+            width,
+            seed,
+            &mut notes,
+        );
+        self.notes.extend(notes);
         let mut output = match opened {
             Ok(output) => output,
-            Err(error) => return self.refuse(error.to_string()),
+            Err(error) => return self.refuse(error),
         };
-        let target = |sink: usize| match &output {
-            Output::Device(driver) => driver.map().target(sink),
-            Output::Null(_, map) => map.target(sink),
-        };
+        let target = |sink: usize| output.target(sink);
         let outputs: Vec<(String, ChannelMeter)> = (0..width)
             .map(|sink| {
                 let label = match target(sink) {
@@ -1001,20 +813,22 @@ impl AppState {
                 Err(error) => return self.refuse(error.to_string()),
             };
         let workers = runner.workers();
-        let started = match &mut output {
-            Output::Device(driver) => driver.start(runner),
-            Output::Null(driver, _) => driver.start(runner),
-        };
-        if let Err(error) = started {
+        if let Err(error) = output.start(runner) {
             return self.refuse(error.to_string());
         }
-        let scheduling = match &output {
-            Output::Device(driver) => driver.scheduling().cloned(),
-            Output::Null(..) => None,
-        }
-        .unwrap_or_else(|| Scheduling::ordinary(workers.threads(), workers.count(), "null driver"));
+        let scheduling = output.scheduling().cloned().unwrap_or_else(|| {
+            Scheduling::ordinary(workers.threads(), workers.count(), "null driver")
+        });
 
-        let input = self.open_input(rate, buffer);
+        let mut notes = Vec::new();
+        let input = open_input(
+            &self.backend,
+            &self.devices.devices,
+            &self.setup,
+            rate,
+            &mut notes,
+        );
+        self.notes.extend(notes);
         let inputs = input.as_ref().map_or(0, |(_, channels)| *channels);
         let watcher = match ProjectWatcher::new(&dir) {
             Ok(watcher) => Some(watcher),
@@ -1050,47 +864,11 @@ impl AppState {
         self.playing = Some(playing);
     }
 
-    /// The input, metered only, and its channels; a note when the Setup's
-    /// input cannot be used (playing goes on without it).
-    fn open_input(&mut self, rate: u32, buffer: u32) -> Option<(Input, usize)> {
-        let entry = self.setup.input.clone()?;
-        let (selector, device) = match self.selector(&entry, Direction::Input) {
-            Ok((selector, device)) => (selector, device.clone()),
-            Err(reason) => {
-                self.notes.push(format!("no input meters: {reason}"));
-                return None;
-            }
-        };
-        let opened = match &self.backend {
-            Backend::CoreAudio => {
-                InputCapture::open(&selector, rate, buffer, INPUT_METERS).map(|mut capture| {
-                    let channels = capture.meters().channels();
-                    (Input::Device(capture), channels)
-                })
-            }
-            Backend::Null(_) => signal_audio::choose_input(&device, rate, buffer).map(|choice| {
-                let channels = usize::from(choice.channels);
-                let (callback, meters) = InputCallback::new(channels, INPUT_METERS);
-                (Input::Null(Box::new(callback), meters), channels)
-            }),
-        };
-        match opened {
-            Ok(input) => Some(input),
-            Err(error) => {
-                self.notes.push(format!("no input meters: {error}"));
-                None
-            }
-        }
-    }
-
     fn stop(&mut self) {
         let Some(mut playing) = self.playing.take() else {
             return;
         };
-        let stopped = match &mut playing.output {
-            Output::Device(driver) => driver.stop(),
-            Output::Null(driver, _) => driver.stop(),
-        };
+        let stopped = playing.output.stop();
         if let Err(error) = &stopped {
             self.message = Some(format!("stopping: {error}"));
         }
@@ -1121,40 +899,14 @@ fn load(dir: &Path, registry: &Registry) -> Result<(Project, ExecutionPlan, usiz
     Ok((project, planned.plan, width))
 }
 
-/// Writes `text` to `path` through a hidden temporary file beside it (the
-/// watch ignores hidden files), synced, then renamed over `path`, so a reader
-/// sees the old file or the new one.
-fn write_file(path: &Path, text: &str) -> io::Result<()> {
-    let mut name = std::ffi::OsString::from(".");
-    name.push(path.file_name().unwrap_or_default());
-    name.push(".tmp");
-    let temporary = path.with_file_name(name);
-    let written = (|| {
-        let mut file = fs::File::create(&temporary)?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)
-    })();
-    if written.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    written
-}
-
 fn strings(diagnostics: Vec<signal_project::Diagnostic>) -> Vec<String> {
     diagnostics.iter().map(ToString::to_string).collect()
 }
 
 fn status_of(playing: &Playing) -> Status {
     let status: RunnerStatus = playing.controller.status();
-    let stats = match &playing.output {
-        Output::Device(driver) => driver.stats().snapshot(),
-        Output::Null(..) => StatsSnapshot::default(),
-    };
-    let input_errors = match &playing.input {
-        Some(Input::Device(capture)) => capture.stream_errors(),
-        _ => 0,
-    };
+    let stats = playing.output.stats();
+    let input_errors = playing.input.as_ref().map_or(0, Input::stream_errors);
     Status {
         frame: status.next_frame.0,
         elapsed: status.next_frame.0 as f64 / f64::from(playing.rate.max(1)),

@@ -1,5 +1,5 @@
 //! The `signal` command (headless entry point; ADR 0013): `render`, `replay`,
-//! `play`, `bench`, `devices`, `modules` and `schema`. `--json` makes every command print machine-readable output on
+//! `play`, `ui`, `bench`, `devices`, `modules` and `schema`. `--json` makes every command print machine-readable output on
 //! stdout. Exit codes: 0 ok, 1 validation or user error, 2 internal error.
 //! The command layer only: sessions, live edits and provenance live in
 //! `signal-project`, the audio device in `signal-audio`.
@@ -10,9 +10,9 @@ mod gpu;
 mod play;
 mod render;
 mod replay;
+mod ui;
 
 use std::io::Write;
-#[cfg(feature = "gpu")]
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -29,9 +29,9 @@ struct Cli {
     /// Print machine-readable JSON on stdout.
     #[arg(long, global = true)]
     json: bool,
-    /// The machine Setup whose `gpu_devices` limits the GPU devices
-    /// (default: $SIGNAL_SETUP, else Signal.app's Setup).
-    #[cfg(feature = "gpu")]
+    /// The machine Setup (default: $SIGNAL_SETUP, else Signal.app's
+    /// Setup): `signal ui` reads and writes it (`setup.*`); in a GPU build
+    /// its `gpu_devices` limits the GPU devices.
     #[arg(long, global = true)]
     setup: Option<PathBuf>,
     #[command(subcommand)]
@@ -47,6 +47,11 @@ enum Command {
     /// Play a project in real time (until Enter, or --seconds), with live
     /// edits (--watch) and session recording; statistics at the end.
     Play(play::PlayArgs),
+    /// Play a project as `play --watch` does (--watch is implied: the folder
+    /// is always watched) and serve it to web pages through the UI protocol
+    /// (docs/ui-protocol.md), on 127.0.0.1; --open opens the page in the
+    /// default browser.
+    Ui(ui::UiArgs),
     /// Measure the per-frame engine at 96 kHz (V13): every `std.*`
     /// primitive, the empty engine, the kick project and kick voices.
     Bench(bench::BenchArgs),
@@ -182,6 +187,7 @@ fn execute(cli: &Cli) -> Result<(), Failure> {
         Command::Render(args) => render::run(args, &registry, setup, cli.json),
         Command::Replay(args) => replay::run(args, &registry, setup, cli.json),
         Command::Play(args) => play::run(args, &registry, setup, cli.json),
+        Command::Ui(args) => ui::run(args, &registry, cli.setup.as_deref(), cli.json),
         Command::Bench(args) => bench::run(args, &registry, setup, cli.json),
         Command::Devices(args) => devices::run(args, cli.json),
         Command::Modules => {

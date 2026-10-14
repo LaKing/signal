@@ -22,6 +22,8 @@ rtrb = { workspace = true }
 signal-engine = { workspace = true, features = ["test-hooks"] }
 # `std.sine_osc` and `std.audio_out` for the hang test's plan.
 signal-std = { workspace = true }
+# The counting allocator, for the scope adapter's allocation test.
+signal-contract = { workspace = true }
 
 [lints]
 workspace = true

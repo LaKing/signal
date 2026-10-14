@@ -6,9 +6,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use signal_app::setup::{DeviceEntry, Setup, Window, setup_path};
 use signal_engine::{Computation, RtPolicy};
-use signal_gpu::Selection;
+use signal_ui::setup::{DeviceEntry, GpuDevices, Setup, Window, setup_path};
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("signal-setup-{name}-{}", std::process::id()));
@@ -39,7 +38,7 @@ fn full() -> Setup {
         }),
         rt_policy: RtPolicy::Semaphore,
         rt_computation: Computation::from_fraction(0.75).unwrap(),
-        gpu_devices: Selection::Only(vec!["metal-apple-m5-max".to_owned(), "1".to_owned()]),
+        gpu_devices: GpuDevices::Only(vec!["metal-apple-m5-max".to_owned(), "1".to_owned()]),
     }
 }
 
@@ -52,18 +51,18 @@ fn gpu_devices_limit_the_adapters() {
     assert!(problems.is_empty(), "{problems:?}");
     assert_eq!(
         setup.gpu_devices,
-        Selection::Only(vec!["metal-apple-m5-max".to_owned(), "2".to_owned()])
+        GpuDevices::Only(vec!["metal-apple-m5-max".to_owned(), "2".to_owned()])
     );
     assert_eq!(
         parse("gpu_devices = []\n").0.gpu_devices,
-        Selection::Only(Vec::new())
+        GpuDevices::Only(Vec::new())
     );
     assert_eq!(
         parse("gpu_devices = \"all\"\n").0.gpu_devices,
-        Selection::All
+        GpuDevices::All
     );
     let (setup, problems) = parse("gpu_devices = \"first\"\n");
-    assert_eq!(setup.gpu_devices, Selection::All);
+    assert_eq!(setup.gpu_devices, GpuDevices::All);
     assert_eq!(problems.len(), 1);
     assert!(
         problems[0].starts_with("setup.toml: gpu_devices: must be \"all\""),

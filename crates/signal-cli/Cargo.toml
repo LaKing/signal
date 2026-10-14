@@ -29,6 +29,8 @@ signal-engine = { workspace = true }
 # ADR 0022: the audio adapter (render, the null driver, the audio runner).
 signal-output = { workspace = true }
 signal-eval = { workspace = true }
+# `signal ui` (M2.8-1): the UI protocol and local server.
+signal-ui = { workspace = true }
 # `signal play` and `signal devices`: the CoreAudio driver (cpal stays inside it).
 signal-audio = { workspace = true }
 serde_json = { workspace = true }
@@ -46,6 +48,8 @@ toml = { workspace = true, optional = true }
 # The engine's exclusivity counters for the determinism matrices.
 signal-engine = { workspace = true, features = ["test-hooks"] }
 insta = { workspace = true }
+# A client for `signal ui`'s protocol.
+tungstenite = { workspace = true }
 
 [lints]
 workspace = true

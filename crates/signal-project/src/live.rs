@@ -10,8 +10,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use signal_core::{Frame, Registry};
-use signal_engine::Stamp;
+use signal_core::{Frame, PortAddress, Registry};
+use signal_engine::{
+    BoundaryLine, ControlSink, HangLine, LogLine, ParameterValue, Report, RunnerStatus,
+    SentCommand, Stamp,
+};
 use signal_output::Controller;
 
 use crate::session::{LiveRecorder, sink_of};
@@ -148,12 +151,59 @@ pub fn send_edit(
     new: Project,
     registry: &Registry,
 ) -> Result<(Project, Applied), EditError> {
+    send_edit_observed(controller, live, &mut (), old, new, registry)
+}
+
+/// Both sinks of one poll: everything goes to the first, then the second.
+pub struct Both<'a, A, B>(pub &'a mut A, pub &'a mut B);
+
+impl<A: ControlSink, B: ControlSink> ControlSink for Both<'_, A, B> {
+    fn report(&mut self, report: &Report, command: &SentCommand) {
+        self.0.report(report, command);
+        self.1.report(report, command);
+    }
+    fn log(&mut self, line: LogLine<'_>) {
+        self.0.log(line);
+        self.1.log(line);
+    }
+    fn parameter(&mut self, port: &PortAddress, value: ParameterValue) {
+        self.0.parameter(port, value);
+        self.1.parameter(port, value);
+    }
+    fn status(&mut self, status: &RunnerStatus) {
+        self.0.status(status);
+        self.1.status(status);
+    }
+    fn boundary(&mut self, line: BoundaryLine<'_>) {
+        self.0.boundary(line);
+        self.1.boundary(line);
+    }
+    fn hang(&mut self, line: HangLine<'_>) {
+        self.0.hang(line);
+        self.1.hang(line);
+    }
+    fn frontier(&mut self, next_frame: Frame) {
+        self.0.frontier(next_frame);
+        self.1.frontier(next_frame);
+    }
+}
+
+/// [`send_edit`], with the Controller's polls during the edit also handed to
+/// `observer` (a UI's acknowledgements and values, M2.8-1).
+pub fn send_edit_observed(
+    controller: &mut Controller,
+    live: &mut LiveRecorder,
+    observer: &mut impl ControlSink,
+    old: &Project,
+    new: Project,
+    registry: &Registry,
+) -> Result<(Project, Applied), EditError> {
     let edit = diff(old, &new, registry).map_err(EditError::Invalid)?;
     let refused = |error: signal_engine::ControlError| EditError::Refused(error.to_string());
     let mut applied = Applied::default();
     match edit {
         ProjectEdit::Parameters(changes) => {
-            controller.poll(live);
+            controller.poll(&mut Both(live, observer));
             room(controller, changes.len())?;
             for change in changes {
                 controller
@@ -188,7 +238,7 @@ pub fn send_edit(
             // (suspends, swap, sets) and the resumes that would undo the
             // suspends must all fit in the queue.
             let commands = 2 * removed.len() + 1 + sets.len();
-            controller.poll(live);
+            controller.poll(&mut Both(live, observer));
             room(controller, commands)?;
             let files = new.files.clone();
             let plan = live
@@ -205,7 +255,7 @@ pub fn send_edit(
             // so the frames below come from a fresh status, not one stale by
             // the preparation (else the suspend and the swap could both be
             // late and land on one frame, skipping the removal's fade).
-            controller.poll(live);
+            controller.poll(&mut Both(live, observer));
             if let Err(error) = room(controller, commands) {
                 live.swap_not_sent();
                 return Err(error);
@@ -264,6 +314,19 @@ pub fn reload(
     dir: &Path,
     registry: &Registry,
 ) -> Result<Applied, ReloadError> {
+    reload_observed(controller, live, &mut (), current, dir, registry)
+}
+
+/// [`reload`], with the Controller's polls during the edit also handed to
+/// `observer` ([`send_edit_observed`]).
+pub fn reload_observed(
+    controller: &mut Controller,
+    live: &mut LiveRecorder,
+    observer: &mut impl ControlSink,
+    current: &mut Project,
+    dir: &Path,
+    registry: &Registry,
+) -> Result<Applied, ReloadError> {
     let new = match Project::load(dir) {
         Ok(new) => new,
         Err(crate::LoadError::Invalid(diagnostics)) => {
@@ -271,7 +334,7 @@ pub fn reload(
         }
         Err(error) => return Err(ReloadError::Failed(error.to_string())),
     };
-    match send_edit(controller, live, current, new, registry) {
+    match send_edit_observed(controller, live, observer, current, new, registry) {
         Ok((project, applied)) => {
             *current = project;
             Ok(applied)

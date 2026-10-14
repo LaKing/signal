@@ -4,6 +4,10 @@
 //! wake policy and computation (M2.7-1) and the GPU devices (M2.7-2). One TOML file (`docs/project-format.md`, "Setup"), never
 //! part of a project. Reading it never fails: what is unknown or invalid is
 //! reported and replaced by its default. Writing it is atomic.
+//!
+//! Also the interface dialog's checks that need no window (M2.5; shared with
+//! the UI protocol's `setup.*`, M2.8-1): [`channels`], [`capabilities`] and
+//! [`rate_check`].
 
 use std::ffi::OsString;
 use std::fs;
@@ -11,9 +15,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use signal_audio::DeviceRef;
+use signal_audio::{DeviceInfo, DeviceRef, choose_output};
 use signal_engine::{Computation, RtPolicy};
-use signal_gpu::Selection;
 
 /// The file's format version.
 pub const VERSION: i64 = 1;
@@ -57,6 +60,32 @@ impl DeviceEntry {
     }
 }
 
+/// The GPU adapters GPU-backed modules may use (`gpu_devices`), as the Setup
+/// writes them. `signal_gpu::Selection` is built from it where a GPU device
+/// is opened, so that reading the Setup links no GPU library.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum GpuDevices {
+    /// Every adapter (`gpu_devices = "all"`, the default).
+    #[default]
+    All,
+    /// These, each an adapter's id or its index in the inventory
+    /// (`gpu_devices = ["…", …]`); an empty list opens none.
+    Only(Vec<String>),
+}
+
+impl GpuDevices {
+    /// As the Setup writes it: `"all"` or `["…", …]`.
+    pub fn describe(&self) -> String {
+        match self {
+            GpuDevices::All => "\"all\"".to_owned(),
+            GpuDevices::Only(entries) => {
+                let quoted: Vec<String> = entries.iter().map(|e| format!("\"{e}\"")).collect();
+                format!("[{}]", quoted.join(", "))
+            }
+        }
+    }
+}
+
 /// The window's size, in points.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -96,7 +125,7 @@ pub struct Setup {
     pub rt_computation: Computation,
     /// Advanced, not edited in the dialog (M2.7-2): the GPU adapters GPU-backed
     /// modules may use (`gpu_devices`: `"all"`, or a list of ids or indices).
-    pub gpu_devices: Selection,
+    pub gpu_devices: GpuDevices,
 }
 
 impl Default for Setup {
@@ -111,7 +140,7 @@ impl Default for Setup {
             window: None,
             rt_policy: RtPolicy::default(),
             rt_computation: Computation::DEFAULT,
-            gpu_devices: Selection::All,
+            gpu_devices: GpuDevices::All,
         }
     }
 }
@@ -144,9 +173,9 @@ struct File<'a> {
 }
 
 /// `gpu_devices`: `"all"`, or a list of adapter ids (strings) or indices.
-fn gpu_devices(value: &toml::Value) -> Option<Selection> {
+fn gpu_devices(value: &toml::Value) -> Option<GpuDevices> {
     match value {
-        toml::Value::String(all) if all == "all" => Some(Selection::All),
+        toml::Value::String(all) if all == "all" => Some(GpuDevices::All),
         toml::Value::Array(entries) => entries
             .iter()
             .map(|entry| match entry {
@@ -155,7 +184,7 @@ fn gpu_devices(value: &toml::Value) -> Option<Selection> {
                 _ => None,
             })
             .collect::<Option<Vec<String>>>()
-            .map(Selection::Only),
+            .map(GpuDevices::Only),
         _ => None,
     }
 }
@@ -317,8 +346,8 @@ impl Setup {
             rt_computation: (self.rt_computation != Computation::DEFAULT)
                 .then(|| self.rt_computation.fraction()),
             gpu_devices: match &self.gpu_devices {
-                Selection::All => None,
-                Selection::Only(entries) => Some(entries),
+                GpuDevices::All => None,
+                GpuDevices::Only(entries) => Some(entries),
             },
         };
         toml::to_string(&file).unwrap_or_default()
@@ -344,4 +373,49 @@ impl Setup {
         }
         written
     }
+}
+
+/// `1, 2` as device channels; empty for none.
+pub fn channels(text: &str) -> Result<Option<Vec<u16>>, String> {
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    text.split(',')
+        .map(|c| match c.trim().parse::<u16>() {
+            Ok(n) if n > 0 => Ok(n),
+            _ => Err(format!("'{}' is not a device channel (1, 2, …)", c.trim())),
+        })
+        .collect::<Result<Vec<u16>, String>>()
+        .map(Some)
+}
+
+/// What the dialog shows for an output: one line per configuration
+/// (channels, rates, format, buffer sizes).
+pub fn capabilities(device: &DeviceInfo) -> Vec<String> {
+    device
+        .configs
+        .iter()
+        .map(|c| {
+            let rates = if c.min_rate == c.max_rate {
+                format!("{} Hz", c.min_rate)
+            } else {
+                format!("{}-{} Hz", c.min_rate, c.max_rate)
+            };
+            let buffer = c.buffer.map_or("buffer unknown".to_owned(), |(a, b)| {
+                format!("buffer {a}-{b} frames")
+            });
+            format!(
+                "{} channels, {rates}, {}, {buffer}",
+                c.channels, c.sample_format
+            )
+        })
+        .collect()
+}
+
+/// Whether the output runs the project's `rate` with `buffer`: the line the
+/// dialog shows, or the refusal (which says which rates it supports).
+pub fn rate_check(device: &DeviceInfo, rate: u32, buffer: u32) -> Result<String, String> {
+    choose_output(device, rate, buffer, 1)
+        .map(|_| format!("The project's {rate} Hz is supported."))
+        .map_err(|error| error.to_string())
 }

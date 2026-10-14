@@ -1,0 +1,152 @@
+<!doctype html>
+<!-- The raw protocol test page (M2.8-1): connects with the token from the
+     URL fragment, shows the meters, a scope of one signal output and a
+     slider per control, and sends ramp (while moving) and commit (on
+     release). Not a panel: panels arrive in M2.8-2. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Signal — protocol test</title>
+<style>
+  :root { color-scheme: light dark; font: 14px system-ui, sans-serif; }
+  body { margin: 1.5rem; max-width: 60rem; }
+  #status.refused { color: #c33; font-weight: bold; }
+  .meter { display: grid; grid-template-columns: 6rem 1fr 5rem; gap: .5rem; align-items: center; margin: .2rem 0; }
+  .bar { height: .8rem; background: #8884; position: relative; }
+  .bar > div { position: absolute; inset: 0 auto 0 0; background: #2a2; }
+  .control { display: grid; grid-template-columns: 14rem 1fr 9rem; gap: .5rem; align-items: center; }
+  canvas { width: 100%; height: 10rem; background: #0001; }
+  pre { max-height: 20rem; overflow: auto; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Signal protocol test</h1>
+<p id="status">connecting…</p>
+<h2>Meters</h2>
+<div id="meters"></div>
+<h2>Scope</h2>
+<label>Signal output <select id="scope-port"></select></label>
+<canvas id="scope" width="1024" height="200"></canvas>
+<h2>Controls</h2>
+<div id="controls"></div>
+<details><summary>describe</summary><pre id="describe"></pre></details>
+<script type="module">
+import { Client, KIND, meterFraction, parseFragment, socketUrl, toDb } from '/ui/lib/protocol.js';
+
+const $ = (id) => document.getElementById(id);
+const { ws, token } = parseFragment(location.hash);
+const status = (text, refused = false) => { $('status').textContent = text; $('status').classList.toggle('refused', refused); };
+const subs = { meters: null, scope: null, parameters: null };
+let controls = [];
+let scopeSub = null;
+
+if (!ws || !token) {
+  status('refused: no token in the URL (open the URL `signal ui` prints)', true);
+} else {
+  const client = new Client(socketUrl(location.hostname, ws), token, {
+    onMessage, onFrame,
+    onClose: (event) => { if (!$('status').classList.contains('refused')) status(`disconnected (${event.code})`, event.code === 1008); },
+  });
+  window.signal = client;
+
+  function onMessage(m) {
+    if (m.type === 'welcome') {
+      status(`connected · protocol ${m.protocol} · ${m.project} at ${m.sampleRate} Hz`);
+      client.request({ type: 'describe' });
+    } else if (m.type === 'error' && (m.code === 'unauthorized' || m.code === 'protocol')) {
+      status(`refused: ${m.code} (${m.message})`, true);
+    } else if (m.type === 'describe') {
+      described(m);
+    } else if (m.type === 'subscribed') {
+      subs[m.stream] = m.sub;
+      if (m.stream === 'scope') scopeSub = m.sub;
+    } else if (m.type === 'error') {
+      console.warn('signal:', m);
+    }
+  }
+
+  function described(d) {
+    $('describe').textContent = JSON.stringify(d, null, 2);
+    // Meters, once.
+    if (subs.meters === null) {
+      $('meters').replaceChildren(...d.meters.output.map((m) => {
+        const row = document.createElement('div');
+        row.className = 'meter';
+        row.innerHTML = `<span>out ${m.channel + 1}</span><div class="bar"><div></div></div><span>−∞ dBFS</span>`;
+        return row;
+      }));
+      subs.meters = 0;
+      client.request({ type: 'subscribe', stream: 'meters', rate: 30 });
+    }
+    // The scope's choice of signal outputs.
+    const outputs = d.instances.flatMap((i) => i.ports.filter((p) => p.direction === 'out' && p.shape === 'signal').map((p) => p.address));
+    const select = $('scope-port');
+    const chosen = select.value;
+    select.replaceChildren(...outputs.map((a) => new Option(a, a)));
+    if (outputs.includes(chosen)) select.value = chosen;
+    if (scopeSub === null && outputs.length) scope(select.value);
+    // Controls.
+    controls = d.controls;
+    $('controls').replaceChildren(...controls.map((c, i) => {
+      const row = document.createElement('div');
+      row.className = 'control';
+      const label = document.createElement('label');
+      label.textContent = `${c.address}${c.unit ? ` (${c.unit})` : ''}`;
+      const slider = Object.assign(document.createElement('input'), { type: 'range', min: c.min, max: c.max, step: (c.max - c.min) / 1000, value: c.base });
+      const value = document.createElement('span');
+      value.id = `effective-${i}`;
+      slider.addEventListener('input', () => client.request({ type: 'ramp', address: c.address, to: Number(slider.value), ms: 5 }));
+      slider.addEventListener('change', () => client.request({ type: 'commit', address: c.address, value: Number(slider.value) }));
+      row.append(label, slider, value);
+      return row;
+    }));
+    if (subs.parameters !== null && subs.parameters !== 0) client.request({ type: 'unsubscribe', sub: subs.parameters });
+    subs.parameters = 0;
+    client.request({ type: 'subscribe', stream: 'parameters', addresses: controls.map((c) => c.address), rate: 20 });
+  }
+
+  function scope(port) {
+    if (scopeSub !== null) client.request({ type: 'unsubscribe', sub: scopeSub });
+    scopeSub = 0;
+    client.request({ type: 'subscribe', stream: 'scope', port, rate: 12000 });
+  }
+  $('scope-port').addEventListener('change', (e) => scope(e.target.value));
+
+  const points = [];
+  function onFrame(f) {
+    if (f.kind === KIND.METERS && f.sub === subs.meters) {
+      [...$('meters').children].forEach((row, c) => {
+        const level = f.values[c];
+        if (!level) return;
+        row.children[1].firstChild.style.width = `${100 * meterFraction(level.peak)}%`;
+        const db = toDb(level.peak);
+        row.children[2].textContent = Number.isFinite(db) ? `${db.toFixed(1)} dBFS` : '−∞ dBFS';
+      });
+    } else if (f.kind === KIND.SCOPE && f.sub === scopeSub) {
+      points.push(...f.values);
+      if (points.length > 1024) points.splice(0, points.length - 1024);
+      draw();
+    } else if (f.kind === KIND.PARAMETERS && f.sub === subs.parameters) {
+      f.values.forEach((v, i) => {
+        const cell = $(`effective-${i}`);
+        if (cell) cell.textContent = Number.isNaN(v.effective) ? '…' : `${v.effective.toPrecision(4)} (base ${v.base.toPrecision(4)})`;
+      });
+    }
+  }
+
+  function draw() {
+    const canvas = $('scope');
+    const g = canvas.getContext('2d');
+    g.clearRect(0, 0, canvas.width, canvas.height);
+    g.beginPath();
+    points.forEach((p, x) => {
+      const y = canvas.height / 2 * (1 - Math.max(-1, Math.min(1, p)));
+      if (x === 0) g.moveTo(x, y); else g.lineTo(x, y);
+    });
+    g.strokeStyle = '#2a2';
+    g.stroke();
+  }
+}
+</script>
+</body>
+</html>

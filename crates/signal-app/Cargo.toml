@@ -19,6 +19,8 @@ signal-audio = { workspace = true }
 signal-engine = { workspace = true }
 # ADR 0022: the audio adapter (the audio runner, the null driver, meters).
 signal-output = { workspace = true }
+# The Setup, the parameter panel and the player, shared with the UI protocol (M2.8-1).
+signal-ui = { workspace = true }
 eframe = { workspace = true }
 # ADR 0023: the WebView window that replaces eframe at parity (M2.8-4).
 wry = { workspace = true }

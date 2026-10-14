@@ -4,7 +4,8 @@
 //! saved device the list does not have is *unresolved*: it is shown as such,
 //! Apply keeps it as saved, and only an explicit choice replaces it.
 
-use signal_audio::{DeviceInfo, DeviceRef, Direction, Resolution, choose_output, resolve};
+use signal_audio::{DeviceInfo, DeviceRef, Direction, Resolution, resolve};
+pub use signal_ui::setup::{capabilities, channels, rate_check};
 
 use crate::setup::DeviceEntry;
 use crate::state::{Interface, Selection, View};
@@ -146,49 +147,4 @@ impl Draft {
             output_channels: channels(&self.channels)?,
         })
     }
-}
-
-/// `1, 2` as device channels; empty for none.
-pub fn channels(text: &str) -> Result<Option<Vec<u16>>, String> {
-    if text.trim().is_empty() {
-        return Ok(None);
-    }
-    text.split(',')
-        .map(|c| match c.trim().parse::<u16>() {
-            Ok(n) if n > 0 => Ok(n),
-            _ => Err(format!("'{}' is not a device channel (1, 2, …)", c.trim())),
-        })
-        .collect::<Result<Vec<u16>, String>>()
-        .map(Some)
-}
-
-/// What the dialog shows for an output: one line per configuration
-/// (channels, rates, format, buffer sizes).
-pub fn capabilities(device: &DeviceInfo) -> Vec<String> {
-    device
-        .configs
-        .iter()
-        .map(|c| {
-            let rates = if c.min_rate == c.max_rate {
-                format!("{} Hz", c.min_rate)
-            } else {
-                format!("{}-{} Hz", c.min_rate, c.max_rate)
-            };
-            let buffer = c.buffer.map_or("buffer unknown".to_owned(), |(a, b)| {
-                format!("buffer {a}-{b} frames")
-            });
-            format!(
-                "{} channels, {rates}, {}, {buffer}",
-                c.channels, c.sample_format
-            )
-        })
-        .collect()
-}
-
-/// Whether the output runs the project's `rate` with `buffer`: the line the
-/// dialog shows, or the refusal (which says which rates it supports).
-pub fn rate_check(device: &DeviceInfo, rate: u32, buffer: u32) -> Result<String, String> {
-    choose_output(device, rate, buffer, 1)
-        .map(|_| format!("The project's {rate} Hz is supported."))
-        .map_err(|error| error.to_string())
 }

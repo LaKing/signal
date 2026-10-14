@@ -44,58 +44,58 @@ pub(crate) enum DriverKind {
 #[derive(Args)]
 pub(crate) struct PlayArgs {
     /// The project folder (containing project.toml).
-    project: PathBuf,
+    pub(crate) project: PathBuf,
     /// The output device's name (see `signal devices`); the default output
     /// device without it.
     #[arg(long)]
-    device: Option<String>,
+    pub(crate) device: Option<String>,
     /// The device buffer to request, in frames.
     #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u32).range(1..))]
-    buffer: u32,
+    pub(crate) buffer: u32,
     /// Play this many seconds (rounded to the nearest frame). Without it,
     /// play until Enter is pressed or stdin closes.
     #[arg(long)]
-    seconds: Option<f64>,
+    pub(crate) seconds: Option<f64>,
     /// Poll the project folder every 100 ms and apply changes live; a
     /// project that does not load keeps the last good version playing.
     #[arg(long)]
-    watch: bool,
+    pub(crate) watch: bool,
     /// Write the session (docs/session-format.md) to this new directory at
     /// the end, for `signal replay`.
     #[arg(long)]
-    record_session: Option<PathBuf>,
+    pub(crate) record_session: Option<PathBuf>,
     /// The driver.
     #[arg(long, value_enum, default_value_t = DriverKind::Coreaudio)]
-    driver: DriverKind,
+    pub(crate) driver: DriverKind,
     /// Null driver only: run as fast as possible instead of in real time.
     #[arg(long)]
-    fast: bool,
+    pub(crate) fast: bool,
     /// Null driver only: write the output to this WAV file at the end (kept
     /// in memory while playing).
     #[arg(long)]
-    record_audio: Option<PathBuf>,
+    pub(crate) record_audio: Option<PathBuf>,
     /// With --record-session: also record each delivered result of a latent
     /// (GPU-backed) module, so that replay does not need the same GPU.
     #[arg(long)]
-    record_boundary_data: bool,
+    pub(crate) record_boundary_data: bool,
     /// Threads a block runs on, the audio thread included (0: two thirds
     /// of the performance cores; 1: no worker threads). The output is
     /// identical for every count.
     #[arg(long, default_value_t = 0)]
-    threads: u32,
+    pub(crate) threads: u32,
     /// How idle worker threads wait and are woken: park50 (the default),
     /// budget-spin, semaphore or fanout (docs/realtime-rules.md "Wake
     /// policies"). Timing only: the output is identical for every policy.
     #[arg(long, value_parser = parse_policy, default_value = "park50")]
-    rt_policy: RtPolicy,
+    pub(crate) rt_policy: RtPolicy,
     /// The workers' time-constraint computation, as a fraction of the
     /// device period (more than 0, at most 1); budget-spin spins within it.
     #[arg(long, value_parser = parse_computation, default_value = "0.25")]
-    rt_computation: Computation,
+    pub(crate) rt_computation: Computation,
     /// Record the wake-up trace (each worker's wake latency, the first and
     /// last worker joining, the slowest task, per callback) and report it.
     #[arg(long)]
-    rt_trace: bool,
+    pub(crate) rt_trace: bool,
 }
 
 /// `--rt-policy`'s value.
@@ -276,12 +276,9 @@ impl Control<'_> {
     }
 }
 
-pub(crate) fn run(
-    args: &PlayArgs,
-    registry: &Registry,
-    setup: Option<&Path>,
-    json: bool,
-) -> Result<(), Failure> {
+/// The options that do not go together, or are out of range (`play` and
+/// `ui`).
+pub(crate) fn check(args: &PlayArgs) -> Result<(), Failure> {
     let null = args.driver == DriverKind::Null;
     if !null && (args.fast || args.record_audio.is_some()) {
         return Err(Failure::Usage(
@@ -308,7 +305,17 @@ pub(crate) fn run(
             dir.display()
         )));
     }
+    Ok(())
+}
 
+pub(crate) fn run(
+    args: &PlayArgs,
+    registry: &Registry,
+    setup: Option<&Path>,
+    json: bool,
+) -> Result<(), Failure> {
+    check(args)?;
+    let null = args.driver == DriverKind::Null;
     let dir = &args.project;
     let project = Project::load(dir).map_err(|error| match error {
         LoadError::Invalid(diagnostics) => Failure::Invalid(located(dir, diagnostics)),
@@ -758,7 +765,12 @@ fn report_scheduling(scheduling: &Scheduling) {
 
 /// Writes interleaved samples as `signal render` writes `audio.wav`: 32-bit
 /// float.
-fn write_wav(path: &Path, samples: &[f32], channels: usize, rate: u32) -> Result<(), Failure> {
+pub(crate) fn write_wav(
+    path: &Path,
+    samples: &[f32],
+    channels: usize,
+    rate: u32,
+) -> Result<(), Failure> {
     let io = |e: hound::Error| Failure::Io(format!("{}: {e}", path.display()));
     let spec = hound::WavSpec {
         channels: u16::try_from(channels).map_err(|e| Failure::Internal(e.to_string()))?,

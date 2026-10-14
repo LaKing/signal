@@ -15,6 +15,10 @@
 //! [`render`] (the offline WAV writer, [`Render::write`]) and the real-time
 //! [`Runner`] (any [`Driver`]: the [`NullDriver`] here, CoreAudio in
 //! `signal-audio`) use the same adapter.
+//!
+//! The scope adapter (`scope`, M2.8-1) captures any signal output of the
+//! running plan, decimated, for display; it reads and never changes the
+//! output.
 
 #![cfg_attr(
     not(test),
@@ -30,8 +34,10 @@ mod audio;
 mod driver;
 mod render;
 mod runner;
+mod scope;
 
 pub use audio::{Conversion, Meter, RenderError, device_sample};
 pub use driver::{CallbackSizes, Driver, DriverError, MAX_CALLBACK_FRAMES, NullDriver};
 pub use render::{Render, render, render_blocks, render_with};
 pub use runner::{Controller, Runner, realtime, realtime_with};
+pub use scope::{SCOPE_POINTS, SCOPE_SLOTS, ScopeBlock, ScopeError};

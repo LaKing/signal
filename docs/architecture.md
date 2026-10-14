@@ -49,6 +49,7 @@ render artifacts: audio + manifest + logs + metrics ─► signal-eval (analyse,
 | Audio (CoreAudio callback) | Executes frames; swaps plans at frame boundaries; applies queued events; runs fault guards | See `realtime-rules.md` |
 | Control | Parses files, builds plans, calls `prepare`, reads device input/MIDI/network and stamps it, frees old plans, writes logs | Block the audio thread |
 | GUI (`signal-app`) | Setup dialog, meters, panels; a client of the edit and observation interface | Hold state that is not in text or Setup |
+| UI servers (`signal-ui`: `signal-ui-http`, `signal-ui-accept`, one `signal-ui-client-<n>` per WebSocket client) | Serve the UI files; authenticate a client, write what the control thread queued for it, read its messages (`ui-protocol.md`) | Touch the `Controller`; be waited on by the control thread |
 | GPU (`signal-gpu-<id>`, one per device of the pool a run opens when it has GPU-backed instances) | Owns its device; runs the jobs of the instances placed on it and waits for them (ADR 0019 §3, `realtime-rules.md` "GPU") | Be waited on by the audio thread or the workers |
 | GPU pool (`signal-gpu-pool`, one per pool) | Sleeps until a device is lost; then replaces its service with a new generation and offers the modules' channels replacements (M2.7-2) | Run on, or be waited on by, the audio thread or the workers |
 
@@ -65,11 +66,12 @@ See `adr/0015-workspace-and-lab-tier.md`. Crates are created when their mileston
 | `signal-project` | Project folder loading, TOML model, schema export, project diff; session record, read and replay (`session-format.md`) and build provenance, shared by `signal` and Signal.app. Depends on `signal-engine` for sessions; the engine depends on no project or session code | M1/M2 |
 | `signal-std` | Standard primitives | M1 |
 | `signal-engine` | Executor, plan swap, fault guards, render manifest (semantics: `semantics.md`); the offline driver and the real-time runner and controller, which hand every sink's inputs to an output generically (ADR 0022; `realtime-rules.md`, "The runner") | M1/M2 |
-| `signal-output` | Output adapters (ADR 0022): the audio adapter (audio sink, `gain`, channel mapping, device conversion, meters) for the offline WAV render and the real-time runner; the driver trait and the null driver | M2.7 |
+| `signal-output` | Output adapters (ADR 0022): the audio adapter (audio sink, `gain`, channel mapping, device conversion, meters) for the offline WAV render and the real-time runner; the scope adapter (a decimated capture of any signal output, M2.8-1); the driver trait and the null driver | M2.7 |
 | `signal-audio` | `CoreAudioDriver` through cpal (ADR 0011), device listing, callback statistics | M2 |
 | `signal-eval` | Analysis, metrics, compare, listening packages | M1/M3 |
 | `signal-oracle` | Test support: the semantic oracle, a deliberately simple per-frame interpreter of `semantics.md` the block engine is compared with (`testing-and-evaluation.md`). Depends on `signal-core` alone | M2.7 |
-| `signal-cli` | `signal` command layer only: `render`, `replay`, `play`, `bench`, `devices`, `modules`, `schema` | M1/M2 |
+| `signal-cli` | `signal` command layer only: `render`, `replay`, `play`, `ui`, `bench`, `devices`, `modules`, `schema` | M1/M2 |
 | `signal-app` | Signal.app shell and GUI (egui, ADR 0018) | M2.5 (skeleton in M2) |
+| `signal-ui` | The UI protocol and its local servers (ADR 0023, `ui-protocol.md`): static files over HTTP (`tiny_http`), the protocol over a WebSocket (`tungstenite`), its host on the control thread; the Setup file, the parameter panel and how a run opens its devices, shared with Signal.app | M2.8 |
 | `signal-gpu` | GPU device services (wgpu, Metal): the adapter inventory, a device pool with one thread per device, deterministic placement, generations after a loss, the split hook; jobs through lock-free queues (ADR 0019 §3, M2.7-2) | M2.6 |
 | `signal-lab` (`lab/`) | Lab primitives (ADR 0015), compiled in only with its `lab` feature (`signal` and `cargo test -p signal-lab --features lab`): `lab.gpu_partials` | M2.6 |

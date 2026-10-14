@@ -10,6 +10,9 @@
 //! of that composite, not just this one.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::io::{self, Write};
+use std::path::Path;
 
 use signal_core::{InstanceAddress, ParameterDescriptor, PortAddress, PortShape, Registry};
 use signal_engine::ParameterValue;
@@ -376,4 +379,52 @@ fn inner(plan: &ExecutionPlan, address: &InstanceAddress) -> Vec<Row> {
         }
     }
     rows
+}
+
+/// Writes `value` for `parameter` of `instance` (`None`: removes the key)
+/// into the `project.toml` of `dir` with `toml_edit`
+/// ([`write_parameter`](signal_project::write_parameter)), keeping the rest of
+/// the file as it was; `order` is the module's parameter order, for where a
+/// new key goes. Atomic ([`write_file`]).
+pub fn write_project(
+    dir: &Path,
+    instance: &str,
+    parameter: &str,
+    value: Option<f64>,
+    order: &[&str],
+) -> Result<(), String> {
+    let path = dir.join(signal_project::PROJECT_FILE);
+    fs::read_to_string(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|text| {
+            signal_project::write_parameter(&text, instance, parameter, value, order)
+                .map_err(|e| e.to_string())
+        })
+        .and_then(|text| write_file(&path, &text).map_err(|e| e.to_string()))
+        .map_err(|error| {
+            format!(
+                "{instance}.{parameter} was not written to {}: {error}",
+                path.display()
+            )
+        })
+}
+
+/// Writes `text` to `path` through a hidden temporary file beside it (the
+/// watch ignores hidden files), synced, then renamed over `path`, so a reader
+/// sees the old file or the new one.
+pub fn write_file(path: &Path, text: &str) -> io::Result<()> {
+    let mut name = std::ffi::OsString::from(".");
+    name.push(path.file_name().unwrap_or_default());
+    name.push(".tmp");
+    let temporary = path.with_file_name(name);
+    let written = (|| {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
 }

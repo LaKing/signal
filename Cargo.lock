@@ -4434,6 +4434,7 @@ dependencies = [
  "signal-output",
  "signal-project",
  "signal-std",
+ "signal-ui",
  "tao",
  "toml 1.1.8+spec-1.1.0",
  "wry",
@@ -4474,7 +4475,9 @@ dependencies = [
  "signal-output",
  "signal-project",
  "signal-std",
+ "signal-ui",
  "toml 1.1.8+spec-1.1.0",
+ "tungstenite",
 ]
 
 [[package]]
@@ -4593,6 +4596,7 @@ dependencies = [
  "hound",
  "rtrb",
  "serde_json",
+ "signal-contract",
  "signal-core",
  "signal-engine",
  "signal-graph",
@@ -4632,8 +4636,18 @@ dependencies = [
 name = "signal-ui"
 version = "0.0.0"
 dependencies = [
+ "serde",
+ "serde_json",
+ "signal-audio",
  "signal-core",
+ "signal-engine",
+ "signal-graph",
+ "signal-output",
+ "signal-project",
+ "signal-std",
+ "signal-ui",
  "tiny_http",
+ "toml 1.1.8+spec-1.1.0",
  "tungstenite",
 ]
 

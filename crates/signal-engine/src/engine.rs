@@ -2885,6 +2885,28 @@ impl Engine {
             .get(j * self.plan.capacity + f)
             .copied()
     }
+
+    /// The index of signal output `port` in the running plan, for
+    /// [`signal_output_at`](Engine::signal_output_at).
+    pub fn signal_output_index(&self, port: &PortAddress) -> Option<usize> {
+        match self.role(port)? {
+            Role::SignalOut(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    /// Signal output `o` at frame `f` of the last block
+    /// ([`block_frames`](Engine::block_frames)), as its readers saw it (fades
+    /// included): the row [`signal_output`](Engine::signal_output) reads its
+    /// last frame from.
+    pub fn signal_output_at(&self, o: usize, f: usize) -> Option<f64> {
+        self.plan
+            .cells
+            .outputs
+            .get()
+            .get(o * self.plan.capacity + f)
+            .copied()
+    }
 }
 
 /// What a segment's units read and never write: the plan's structure, the
