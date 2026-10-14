@@ -1,0 +1,87 @@
+# The M2.8-5 test project: a short piece of physically modelled sound at
+# 120 bpm. A plucked string plays an eight-note line, a bell is struck on
+# every bar, a mass-spring drum on beats 1 and 3, and a low string is bowed
+# every two bars. A fixture for listening, not a product.
+#
+# Signal flow:
+#
+#   transport.beat ─► line (8 pitches, Hz) ─► string.freq
+#   transport.beat ─► string.pluck                         (plucked line)
+#   transport.accent (every 4 beats) ─► mallet (strike) ─► bell (modal, bell)
+#   transport.beat ─► half (÷2) ─► thump (strike) ─► drum (mass-spring chain)
+#   transport.beat ─► slow (÷8) ─► bow (bow stroke) ─► cello.in
+#   cello ─► dc (DC blocker) ─► friction (unit delay) ─► bow.velocity
+#   string, bell, drum, dc ─► out.l, out.r (panned by the connection scales)
+#
+# The bow and the low string close a loop through a std.unit_delay: the
+# bow's friction depends on the string's motion one frame earlier.
+schema_version = 1
+
+[project]
+name = "physical"
+sample_rate = 48000
+seed = 5
+
+[instances]
+# 120 bpm: a beat every 500 ms, an accent on the first beat of every bar.
+transport = { module = "std.transport", bpm = 120, accent_every = 4 }
+
+# The plucked line, one note per beat (4 s per loop), in Hz: D3 F3 G3 A3 C4
+# D4 A3 F3. The first beat (frame 0) moves it to step 2 at once.
+line = { module = "std.step_seq", length = 8, s1 = 146.8324, s2 = 174.6141, s3 = 195.9977, s4 = 220, s5 = 261.6256, s6 = 293.6648, s7 = 220, s8 = 174.6141 }
+string = { module = "std.string", freq = 0, decay_s = 2.5, brightness = 0.45, stiffness = 0.15, position = 0.18 }
+
+# A bell on D5 (its hum is D4), struck by a hard 2.5 ms mallet on each bar.
+mallet = { module = "std.exciter", kind = 1, level = 1, duration_ms = 2.5, hardness = 0.6 }
+bell = { module = "std.modal", freq = 587.3295, material = 4, modes = 12, decay_s = 4, law = 0.8, position = 0.27 }
+
+# A drum: five masses between two walls, struck softly at the first mass and
+# heard at the second, on beats 1 and 3.
+half = { module = "std.clock_div", divide = 2 }
+thump = { module = "std.exciter", kind = 1, level = 1, duration_ms = 6, hardness = 0.3 }
+drum = { module = "std.mass_spring", masses = 5, spring_hz = 120, decay_s = 0.6, boundary = 0, drive_node = 1, pickup_node = 2 }
+
+# A low string on D2, bowed for 3 s every two bars. The bow's friction reads
+# the string's motion (without DC) a frame late, scaled by 4: light enough
+# that it sticks and slips once per period instead of squealing.
+slow = { module = "std.clock_div", divide = 8 }
+bow = { module = "std.exciter", kind = 3, level = 0.03, duration_ms = 3000 }
+cello = { module = "std.string", freq = 73.41619, decay_s = 5, brightness = 0.3, stiffness = 0.1, position = 0.12 }
+friction = { module = "std.unit_delay" }
+# The bow pushes the string with a mean force; this removes its DC.
+dc = { module = "std.dc_block" }
+
+# Gain chosen so the 4× oversampled peak stays ≤ −1 dBFS at every rate.
+out = { module = "std.audio_out", gain = 0.45 }
+
+[wiring]
+connections = [
+  # The plucked line.
+  { from = "transport.beat", to = "line.step" },
+  { from = "line.out", to = "string.freq" },
+  { from = "transport.beat", to = "string.pluck" },
+  # The bell, on each bar.
+  { from = "transport.accent", to = "mallet.trigger" },
+  { from = "mallet.out", to = "bell.in" },
+  # The drum, on beats 1 and 3.
+  { from = "transport.beat", to = "half.in" },
+  { from = "half.out", to = "thump.trigger" },
+  { from = "thump.out", to = "drum.drive" },
+  # The bowed string and its friction loop.
+  { from = "transport.beat", to = "slow.in" },
+  { from = "slow.out", to = "bow.trigger" },
+  { from = "bow.out", to = "cello.in" },
+  { from = "cello.out", to = "dc.in" },
+  { from = "dc.out", to = "friction.in" },
+  { from = "friction.out", to = "bow.velocity", scale = 4 },
+  # The mix: the line left of centre, the bell right, the drum and the
+  # cello in the middle.
+  { from = "string.out", to = "out.l", scale = 0.6 },
+  { from = "string.out", to = "out.r", scale = 0.4 },
+  { from = "bell.out", to = "out.l", scale = 0.13 },
+  { from = "bell.out", to = "out.r", scale = 0.2 },
+  { from = "drum.out", to = "out.l", scale = 1 },
+  { from = "drum.out", to = "out.r", scale = 1 },
+  { from = "dc.out", to = "out.l", scale = 1 },
+  { from = "dc.out", to = "out.r", scale = 1 },
+]

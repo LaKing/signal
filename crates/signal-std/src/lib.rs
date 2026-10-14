@@ -41,6 +41,15 @@
 //! | `std.edge` | [`Edge`] | direct |
 //! | `std.clock_div` | [`ClockDiv`] | direct |
 //! | `std.step_seq` | [`StepSeq`] | direct |
+//! | `std.string` | [`StringModel`] | direct |
+//! | `std.modal` | [`Modal`] | direct |
+//! | `std.mass_spring` | [`MassSpring`] | direct |
+//! | `std.exciter` | [`Exciter`] | direct |
+//!
+//! The M2.8 physical models (`std.string`, `std.modal`, `std.mass_spring`,
+//! `std.exciter`) document their equations and are checked against analytic
+//! results in their unit tests. Their decay times are T60s in seconds
+//! (`decay_s`).
 //!
 //! Musical time (tempo, beats) lives here, in [`Transport`], never in the core
 //! (ADR 0003).
@@ -62,12 +71,15 @@ mod clock_div;
 mod dc_block;
 mod delay;
 mod edge;
+mod exciter;
 mod exp_env;
 mod gain;
 mod lag;
 mod lfo;
+mod mass_spring;
 mod math;
 mod mix;
+mod modal;
 mod mul;
 mod noise;
 mod onepole;
@@ -76,6 +88,7 @@ mod pan;
 mod sample_hold;
 mod sine_osc;
 mod step_seq;
+mod string;
 mod svf;
 mod tanh_shaper;
 mod transport;
@@ -91,12 +104,15 @@ pub use clock_div::ClockDiv;
 pub use dc_block::DcBlock;
 pub use delay::Delay;
 pub use edge::Edge;
+pub use exciter::Exciter;
 pub use exp_env::ExpEnv;
 pub use gain::Gain;
 pub use lag::Lag;
 pub use lfo::Lfo;
+pub use mass_spring::MassSpring;
 pub use math::{Abs, Clamp, Max, Min, Scale, Sub};
 pub use mix::Mix;
+pub use modal::Modal;
 pub use mul::Mul;
 pub use noise::Noise;
 pub use onepole::OnePole;
@@ -105,6 +121,7 @@ pub use pan::Pan;
 pub use sample_hold::SampleHold;
 pub use sine_osc::SineOsc;
 pub use step_seq::StepSeq;
+pub use string::StringModel;
 pub use svf::Svf;
 pub use tanh_shaper::TanhShaper;
 pub use transport::Transport;
@@ -119,7 +136,8 @@ use signal_core::{
 /// Each `std.*` type's static cost in ns per frame per instance: the seat's
 /// per-primitive medians of `docs/benchmarks.md` (M2-5, one frame at a time),
 /// rounded up. The engine groups cheap units into tasks by them (ADR 0019
-/// §2); they never change the output.
+/// §2); they never change the output. The M2.8 physical models are not
+/// benchmarked yet and take the engine's default cost.
 pub const COST_NS: [(&str, u32); 30] = [
     ("std.abs", 11),
     ("std.add", 11),
@@ -191,6 +209,10 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<Edge>(),
         direct::<ClockDiv>(),
         direct::<StepSeq>(),
+        direct::<StringModel>(),
+        direct::<Modal>(),
+        direct::<MassSpring>(),
+        direct::<Exciter>(),
     ] {
         registry.register(module_type)?;
     }
@@ -328,7 +350,7 @@ pub(crate) const BIPOLAR: Option<Range> = Some(Range {
 mod tests {
     use super::*;
 
-    const NAMES: [&str; 30] = [
+    const NAMES: [&str; 34] = [
         "std.sine_osc",
         "std.exp_env",
         "std.mul",
@@ -359,6 +381,10 @@ mod tests {
         "std.edge",
         "std.clock_div",
         "std.step_seq",
+        "std.string",
+        "std.modal",
+        "std.mass_spring",
+        "std.exciter",
     ];
 
     #[test]

@@ -6,7 +6,7 @@
 
 - **Signals** carry plain numbers. Audio is full scale at ±1.
 - **Frequencies** are in Hz (`unit: "Hz"`).
-- **Durations** are in milliseconds (`unit: "ms"`).
+- **Durations** are in milliseconds (`unit: "ms"`). One exception: the decay of a physical model (`std.string`, `std.modal`, `std.mass_spring`) is its T60, the time to fall by 60 dB, in seconds (`decay_s`, `unit: "s"`), as resonances are usually given.
 - **Phases** are in cycles (`unit: "cycles"`): 1 is a whole period. They are not in radians or degrees.
 - **Gains** are linear factors, not dB.
 - **Tempo** is in beats per minute (`unit: "bpm"`). Musical time exists only in library primitives such as `std.transport`, never in the core (ADR 0003).

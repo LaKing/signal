@@ -1,0 +1,12 @@
+{
+  "audio_fnv1a64": "cb2a24c268d907b6",
+  "frames": 1536000,
+  "log_fnv1a64": "1ee13ea88aa2a820",
+  "provenance": {
+    "project_file_hashes": {
+      "project.toml": "514dbe91ea59a50a"
+    }
+  },
+  "sample_rate": 48000,
+  "seed": 5
+}

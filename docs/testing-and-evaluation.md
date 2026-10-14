@@ -196,6 +196,12 @@ A milestone's listening verdict (V14 for M1) is a file `experiments/<id>/verdict
 
 `crates/signal-cli/tests/pulse.rs` checks `projects/pulse` (M2-7): the project is at 96 kHz with seed 7 and uses the documented patch, every primitive in it has the contract suite; 16 bars render at 44.1, 48, 96 and 192 kHz with every sample finite (`is_finite()` per sample, since a peak taken with `f64::max` ignores NaN), a 4× oversampled peak ≤ −0.3 dBFS and |mean| < 1e-4 per channel; and `golden_pulse_16_bars` matches `tests/golden/pulse/manifest.json`. The same file checks that a `std.delay` closes a feedback loop without a `std.unit_delay` (accepted, finite, bounded), and that the same loop through a direct primitive is rejected. Printed values: `cargo test -p signal-cli --test pulse -- --nocapture`. The 60 s seed-7 render for the owner's listening verdict is `signal render projects/pulse --seconds 60 --out renders/pulse-seed7/`.
 
+## The M2.8-5 test project: `projects/physical`
+
+The physical models (`std.string`, `std.modal`, `std.mass_spring`, `std.exciter`) are checked against analytic results in their unit tests in `crates/signal-std/src/` (printed values: `cargo test -p signal-std --lib -- string:: modal:: mass_spring:: exciter:: --nocapture`): the string's fundamental within 0.1 cent at 55, 220, 880 and 3520 Hz at 44.1 and 96 kHz and its T60 within 5 % of `decay_s`, with the loss and dispersion filters active; each modal mode's frequency within 0.1 % of `freq·r_k` and its T60 within 1 % of `decay_s·r_k^(−law)` for every material; the mass-spring chain's normal modes against the closed form for small M, and its stability at and above the clamped bound; each exciter's energy and duration against its definition.
+
+`crates/signal-cli/tests/physical.rs` checks `projects/physical`: the project is at 48 kHz with seed 5 and uses all four, and every primitive in it has the contract suite; 4 bars render at 44.1, 48 and 96 kHz with every sample finite, a 4× oversampled peak ≤ −1 dBFS and |mean| < 1e-3 per channel; `golden_physical_16_bars` matches `tests/golden/physical/manifest.json`, and `golden_physical_on_workers` renders it on 4 threads with the same hashes. The 60 s seed-5 render for the owner's listening verdict is `signal render projects/physical --seconds 60 --out renders/physical-seed5/`.
+
 ## Manual device check (M2-4)
 
 Seats have no audio device, so `signal play` is tested with the null driver (`crates/signal-cli/tests/play.rs`) and the CoreAudio callback body without cpal (`crates/signal-audio/tests/`). The operator runs the device check at the checkpoint:
@@ -233,7 +239,7 @@ Record what was heard and the statistics printed (xruns, worst callback ratio) w
 
 What remains is `seed`, `sample_rate`, `frames`, `provenance.project_file_hashes`, `log_fnv1a64` and `audio_fnv1a64`. Any change to the sound changes the audio hash; any change to an event changes the log hash; any edit of a project file changes its hash. The test also asserts that exactly these fields remain, so a field added to the manifest later must be added to the golden or listed above.
 
-`tests/golden/pulse/manifest.json` is made the same way from `signal render projects/pulse --frames 3072000` (16 bars at 120 bpm and 96 kHz, seed 7), and is updated by the same rules.
+`tests/golden/pulse/manifest.json` is made the same way from `signal render projects/pulse --frames 3072000` (16 bars at 120 bpm and 96 kHz, seed 7), and `tests/golden/physical/manifest.json` from `signal render projects/physical --frames 1536000` (16 bars at 120 bpm and 48 kHz, seed 5); both are updated by the same rules.
 
 ### Updating a golden
 
@@ -241,6 +247,6 @@ A golden changes only for an **intentional** change of sound or of the project f
 
 1. Write a note saying what changed and why the sound is meant to change, and get it reviewed with the change.
 2. Get a listening verdict on the new render from the PO, recorded in the repository like the milestone verdicts (V14).
-3. Replace the golden with the fresh manifest that `golden_kick_16_bars` (or `golden_pulse_16_bars`) prints when it fails.
+3. Replace the golden with the fresh manifest that `golden_kick_16_bars` (or `golden_pulse_16_bars`, `golden_physical_16_bars`) prints when it fails.
 
 A golden that changes without both the note and the verdict is a regression, whatever the metrics say.
