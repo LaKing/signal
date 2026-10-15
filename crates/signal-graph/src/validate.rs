@@ -4,14 +4,71 @@
 //! both a signal and events, and
 //! parameter values must lie in their declared range. Fan-in and fan-out are
 //! unrestricted: signals into one input are summed and events merged (ADR 0016
-//! §3, §4).
+//! §3, §4), except into an input the registry restricts ([`restricted`], ADR
+//! 0024).
 
 use std::collections::BTreeMap;
 
-use signal_core::{InstanceAddress, PortAddress, PortKind, PortShape, RateDivisor};
+use signal_core::{InstanceAddress, PortAddress, PortKind, PortShape, RateDivisor, Registry};
 
-use crate::error::{GraphError, GraphWarning};
-use crate::flatten::FlatGraph;
+use crate::error::{GraphError, GraphWarning, Restriction};
+use crate::flatten::{FlatConnection, FlatGraph};
+
+/// Before converters are inserted: an input the registry restricts
+/// (`Registry::restrict_input`, ADR 0024) takes at most one connection, at
+/// scale exactly 1, from the output it is restricted to. Each offending
+/// connection is reported as written.
+pub(crate) fn restricted(graph: &FlatGraph, registry: &Registry) -> Result<(), Vec<GraphError>> {
+    let mut into: BTreeMap<&PortAddress, Vec<&FlatConnection>> = BTreeMap::new();
+    for connection in &graph.connections {
+        into.entry(&connection.to).or_default().push(connection);
+    }
+    let mut errors = Vec::new();
+    for (to, mut connections) in into {
+        let Some(target) = graph.instances.get(&to.instance()) else {
+            continue;
+        };
+        let Some(source) = registry.input_rule(target.descriptor.type_name, to.port()) else {
+            continue;
+        };
+        connections.sort_by(|a, b| a.from.cmp(&b.from));
+        let count = connections.len();
+        for connection in connections {
+            let from_type = graph
+                .instances
+                .get(&connection.from.instance())
+                .map_or("", |i| i.descriptor.type_name);
+            let reason = if count > 1 {
+                Restriction::FanIn { connections: count }
+            } else if (from_type, connection.from.port()) != source {
+                Restriction::Source {
+                    type_name: from_type,
+                    port: connection.from.port().to_owned(),
+                }
+            } else if connection.scale != 1.0 {
+                Restriction::Scaled
+            } else {
+                continue;
+            };
+            let (from, to) = connection
+                .declared
+                .clone()
+                .unwrap_or_else(|| (connection.from.clone(), connection.to.clone()));
+            errors.push(GraphError::RestrictedInput {
+                from,
+                to,
+                scale: connection.scale,
+                source,
+                reason: Box::new(reason),
+            });
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
 
 /// Shape, rate and kind of a port, and whether it is a parameter.
 type Signature = (PortShape, RateDivisor, PortKind, bool);

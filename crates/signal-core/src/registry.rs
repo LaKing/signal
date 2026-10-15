@@ -41,11 +41,14 @@ pub struct ModuleType {
 }
 
 /// Module types keyed by type name, iterated in name order, with each type's
-/// static cost estimate where the library that registers it gives one.
+/// static cost estimate where the library that registers it gives one, and
+/// its restricted inputs (ADR 0024).
 #[derive(Clone, Debug, Default)]
 pub struct Registry {
     types: BTreeMap<&'static str, ModuleType>,
     costs: BTreeMap<&'static str, u32>,
+    /// (type, input) → (source type, source output).
+    inputs: BTreeMap<(&'static str, &'static str), (&'static str, &'static str)>,
     host: Option<Arc<dyn Host>>,
 }
 
@@ -104,6 +107,30 @@ impl Registry {
     /// The static cost recorded for `type_name`, if any.
     pub fn cost(&self, type_name: &str) -> Option<u32> {
         self.costs.get(type_name).copied()
+    }
+
+    /// Restricts input `port` of `type_name` (ADR 0024): a plan is built only
+    /// if it takes at most one connection there, at scale exactly 1, from
+    /// output `from_port` of a `from_type` instance. A structural rule: the
+    /// graph compares the names and nothing else.
+    pub fn restrict_input(
+        &mut self,
+        type_name: &'static str,
+        port: &'static str,
+        from_type: &'static str,
+        from_port: &'static str,
+    ) {
+        self.inputs
+            .insert((type_name, port), (from_type, from_port));
+    }
+
+    /// The source (type, output) input `port` of `type_name` is restricted
+    /// to, if it is ([`restrict_input`](Registry::restrict_input)).
+    pub fn input_rule(&self, type_name: &str, port: &str) -> Option<(&'static str, &'static str)> {
+        self.inputs
+            .iter()
+            .find(|((t, p), _)| *t == type_name && *p == port)
+            .map(|(_, rule)| *rule)
     }
 
     /// Sets what lends this registry's instances their resources (M2.7-2).

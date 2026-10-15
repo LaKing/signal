@@ -208,6 +208,19 @@ impl<'a> Locator<'a> {
                     .map_or(&connection.entry, |(_, span)| span);
                 Some(at(def, span.start))
             }
+            GraphError::RestrictedInput {
+                from, to, scale, ..
+            } => {
+                // The connection as written, with its scale (one of several
+                // between the same ports otherwise).
+                let (def, connection) = self
+                    .connection_where(from, to, |c| {
+                        c.scale.as_ref().map_or(1.0, |(value, _)| *value).to_bits()
+                            == scale.to_bits()
+                    })
+                    .or_else(|| self.connection(from, to))?;
+                Some(at(def, connection.entry.start))
+            }
             GraphError::Cycle { instances } => self.instance_key(instances.first()?),
             _ => None,
         }

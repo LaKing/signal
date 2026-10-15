@@ -32,6 +32,8 @@ A signal input's value is the sum of its connections' values, in **canonical sou
 
 `in = ((0 + s₁·x₁) + s₂·x₂) + …`
 
+An input its library restricts (ADR 0024) has at most one connection, at scale 1, from the output it names; a plan that connects it otherwise is not built.
+
 An unconnected input reads 0. The value read is the source's output as other instances see it, after any fade (§6, §7). Floating-point addition is not associative, so the fixed order is what makes sums bit-stable.
 
 ## 4. Events

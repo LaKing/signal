@@ -5,7 +5,7 @@ use signal_core::{
     PortShape, PrepareContext,
 };
 
-use crate::bridge::{BRIDGE_ROWS, Since, Window, effect, mean};
+use crate::bridge::{BRIDGE_ROWS, Since, Window, effect, lost, mean};
 use crate::svf::flush;
 use crate::{VISUAL_DIVISOR, at, fract, parameter_at, port_at};
 
@@ -73,6 +73,15 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
             "life",
             Direction::Out,
             PortShape::Vector(PARTICLES as u32),
+            D,
+            PortKind::Control,
+            None,
+            None,
+        ),
+        port_at(
+            "lost",
+            Direction::Out,
+            PortShape::Signal,
             D,
             PortKind::Control,
             None,
@@ -213,8 +222,9 @@ struct Particle {
 ///
 /// **Events** (operator decision operator-request:007): a type above
 /// divisor 1 cannot have event ports (`docs/semantics.md` §16), so `emit`
-/// and `impulse` are vectors of 19 at divisor 1, each the reading of one
-/// `std.count` connected at scale 1 ([`crate::bridge`]). At each tick each
+/// and `impulse` are vectors of 24 at divisor 1, each the reading of one
+/// `std.count` connected at scale 1, the only connection the plan accepts
+/// there ([`crate::bridge`]). At each tick each
 /// applies what its counter counted since the reading it applied last: an
 /// event at frame *f* acts at the first tick at or after *f*, at most one
 /// tick late, once (the losses on swaps are [`Count`](crate::Count)'s).
@@ -233,6 +243,9 @@ struct Particle {
 ///   velocity.
 /// - `life` (vector of 64 out): the fraction of its lifetime left, in
 ///   [0, 1]; 0 is dead (every slot is dead at the start).
+/// - `lost` (out): readings of `emit` and `impulse` not applied because
+///   their sum may have wrapped (2¹⁷ events or more since the one applied
+///   last), counted since the start or the last reset, at most 2¹⁹ − 1.
 ///
 /// **Parameters** (at divisor 800): `rate` (emissions per second, `[0,
 /// 1000]`, default 0: fractions carry over ticks), `x`, `y` (the emitter,
@@ -432,6 +445,9 @@ impl DirectPrimitive for Particles {
                     *out = life;
                 }
             }
+            if let Some(out) = outputs.signal(5 * PARTICLES).get_mut(t) {
+                *out = lost(&[&self.emits, &self.impulses]);
+            }
         }
     }
 }
@@ -439,7 +455,25 @@ impl DirectPrimitive for Particles {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::Window;
+    use crate::bridge::{LOST_MAX, Window};
+
+    /// Finding auditor-1-007 (M2.8-9 AC7): with both inputs at their own
+    /// limit, `lost` stays at 2¹⁹ − 1, inside the fault guard; it never sums
+    /// past it.
+    #[test]
+    fn lost_saturates_whatever_its_inputs_sum_to() {
+        let mut particles = Particles::default();
+        particles.prepare(&crate::testing::context(48_000.0, 256, 0));
+        particles.emits = Since::with_lost(LOST_MAX);
+        particles.impulses = Since::with_lost(LOST_MAX);
+        let mut out = [0.0; 5 * PARTICLES + 1];
+        particles.process(
+            &Inputs::new(1, &[0.0; 2 * BRIDGE_ROWS], &[], &[], &[]),
+            &mut Outputs::new(1, &mut out, &mut []),
+        );
+        assert_eq!(out[5 * PARTICLES], f64::from(LOST_MAX));
+        assert!(out[5 * PARTICLES] < 1e6);
+    }
 
     fn trigger(n: u64) -> Window {
         match n {

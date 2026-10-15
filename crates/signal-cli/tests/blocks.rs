@@ -653,9 +653,11 @@ fn render_tapped(
         engine.set_task_hook(Some(workers_take_part));
         THREADED.lock().unwrap_or_else(|e| e.into_inner())
     });
+    // `before` swaps nothing here: the one plan is every version's.
+    let plans = std::slice::from_ref(plan);
     let rendered = match partition {
-        Partition::PerFrame => render_blocks_tapped(&mut engine, frames, 1, before, taps),
-        Partition::Blocks(k) => render_blocks_tapped(&mut engine, frames, k, before, taps),
+        Partition::PerFrame => render_blocks_tapped(&mut engine, frames, 1, before, taps, plans),
+        Partition::Blocks(k) => render_blocks_tapped(&mut engine, frames, k, before, taps, plans),
         Partition::Random(seed) => {
             let mut rng = SplitMix64::new(seed);
             let cut = |engine: &mut Engine| {
@@ -663,7 +665,7 @@ fn render_tapped(
                 let cut = Frame(engine.next_frame().0 + 1 + rng.next_u64() % 256);
                 Ok(Some(next.map_or(cut, |at: Frame| at.min(cut))))
             };
-            render_blocks_tapped(&mut engine, frames, 256, cut, taps)
+            render_blocks_tapped(&mut engine, frames, 256, cut, taps, plans)
         }
     }
     .unwrap();
@@ -718,7 +720,8 @@ fn events_act_at_the_first_tick_at_or_after_their_frame() {
             }
             Ok(frames.get(next).map(|&at| Frame(at)))
         };
-        let taps = [tap("/p.life", 64, 1)];
+        // At the port's ticks: a tap between them is refused (M2.8-9).
+        let taps = [tap("/p.life", 64, 800)];
         let (_, tracks) =
             render_tapped(&plan, (48_000, 5, 4_000), partition, threads, before, &taps);
         tracks[0]
@@ -728,7 +731,7 @@ fn events_act_at_the_first_tick_at_or_after_their_frame() {
             .collect::<Vec<_>>()
     };
     let live = run(Partition::Blocks(1), 1);
-    // Held between ticks: the count changes only on the ticks.
+    // Tick by tick: the count changes at the ticks the events reach.
     let changes: Vec<(u64, usize)> = live
         .windows(2)
         .filter(|w| w[0].1 != w[1].1)

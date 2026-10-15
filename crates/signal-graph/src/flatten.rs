@@ -26,6 +26,9 @@ pub(crate) struct FlatConnection {
     pub(crate) from: PortAddress,
     pub(crate) to: PortAddress,
     pub(crate) scale: f64,
+    /// The connection as written (its declared endpoints), for errors;
+    /// `None` for one the graph inserted (a converter's).
+    pub(crate) declared: Option<(PortAddress, PortAddress)>,
 }
 
 /// The flattened graph: primitive instances and connections between them.
@@ -436,6 +439,7 @@ impl<'a> Flattener<'a> {
                 .push(GraphError::NonFiniteScale { from, to, scale });
             return;
         }
+        let declared = (from.clone(), to.clone());
         let from = self.ok(source.source(from));
         let to = self.ok(target.targets(to, false));
         let (Some(from), Some(to)) = (from, to) else {
@@ -446,6 +450,7 @@ impl<'a> Flattener<'a> {
                 from: from.clone(),
                 to,
                 scale,
+                declared: Some(declared.clone()),
             });
         }
     }

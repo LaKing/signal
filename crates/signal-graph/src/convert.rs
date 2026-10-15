@@ -102,6 +102,7 @@ pub(crate) fn insert(
                         from: connection.from.clone(),
                         to,
                         scale: 1.0,
+                        declared: None,
                     });
                 }
                 converters.insert(key, address.clone());
@@ -124,6 +125,7 @@ pub(crate) fn insert(
             from,
             to: connection.to,
             scale: connection.scale,
+            declared: connection.declared,
         });
     }
     graph.connections.extend(added);

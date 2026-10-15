@@ -100,7 +100,7 @@ pub struct Panel {
 
 /// A parameter's live value that the file may not hold: the latest value
 /// sent (dragged, or set by a client), whether the Controller took it for
-/// every port, and the last value known to have reached every port.
+/// every port, and the last value the Controller took for every port.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Drag {
     /// The latest value sent.
@@ -108,8 +108,10 @@ pub struct Drag {
     /// Whether the Controller took it for every port (and no runner refused
     /// it since).
     pub sent: bool,
-    /// The last value known to have reached every port: `value` when sent,
-    /// else the one before (the file's when there was none).
+    /// The last value the Controller took for every port: `value` when the
+    /// Controller took it, else the one before (the file's when there was
+    /// none). A runner refusing it afterwards ([`Panel::unsend`]) leaves it.
+    /// It is `describe`'s `base`.
     pub applied: f64,
 }
 
@@ -555,4 +557,32 @@ pub fn write_file(path: &Path, text: &str) -> io::Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     written
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// M2.8-9 AC2 (`docs/ui-protocol.md` "Unsaved"): `describe`'s `base` is
+    /// a drag's `applied`, the last value the Controller took for every
+    /// port. A runner refusing that value afterwards leaves it (the value is
+    /// listed `applied: false`), and a later value the Controller refuses
+    /// keeps it. (Through the protocol a runner cannot refuse a `set`: the
+    /// Controller keeps at most as many commands in flight as the engine's
+    /// event queue holds, so the queue never overflows.)
+    #[test]
+    fn the_base_is_the_last_value_the_controller_took() {
+        let mut panel = Panel::default();
+        panel.drag("out", "gain", 0.3, true);
+        assert_eq!(panel.dragged("out", "gain").unwrap().applied, 0.3);
+        // The Controller takes 0.2; a runner refuses it.
+        panel.drag("out", "gain", 0.2, true);
+        panel.unsend("out", "gain", 0.2);
+        let drag = panel.dragged("out", "gain").unwrap();
+        assert!(!drag.sent);
+        assert_eq!(drag.applied, 0.2);
+        // The Controller refuses 0.1: the base stays the runner-refused 0.2.
+        panel.drag("out", "gain", 0.1, false);
+        assert_eq!(panel.dragged("out", "gain").unwrap().applied, 0.2);
+    }
 }

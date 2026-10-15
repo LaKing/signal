@@ -12,13 +12,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rtrb::{Consumer, Producer, RingBuffer};
-use signal_core::{PortAddress, Registry};
-use signal_engine::{ControlError, ControlSink, Engine, MakeWaiter, RealtimeConfig, SinkOutput};
+use signal_core::{EventPayload, InstanceAddress, PortAddress, Registry};
+use signal_engine::{
+    CommandId, ControlError, ControlSink, Engine, MakeWaiter, RealtimeConfig, SinkOutput, Stamp,
+};
 use signal_graph::ExecutionPlan;
 
 use crate::audio::{AudioSink, Meter, to_device};
 use crate::scope::{ScopeBlock, ScopeControl, ScopeCounts, ScopeError, Scopes, scopes};
-use crate::vectors::{VectorControl, VectorCounts, VectorError, VectorSnapshot, Vectors, vectors};
+use crate::vectors::{
+    VectorControl, VectorCounts, VectorError, VectorSnapshot, VectorUnbound, Vectors, vectors,
+};
 
 /// Builds a real-time run of `plan` with the audio adapter: the [`Runner`]
 /// for the audio thread and the [`Controller`] for the control thread. The
@@ -46,7 +50,7 @@ pub fn realtime_with(
     let (meter_tx, meter_rx) = RingBuffer::new(config.meters.max(1));
     let counts = Arc::new(Counts::default());
     let (scopes, scope_control) = scopes();
-    let (vectors, vector_control) = vectors();
+    let (vectors, vector_control) = vectors(plan);
     let runner = Runner {
         runner,
         levels: vec![(0.0, 0.0); sink.width],
@@ -237,8 +241,18 @@ impl SinkOutput for Device<'_> {
 }
 
 /// The control-thread half of a real-time run: the engine's
-/// [`Controller`](signal_engine::Controller) (which it dereferences to) and
-/// the audio adapter's meters and counts.
+/// [`Controller`](signal_engine::Controller) and the audio adapter's meters
+/// and counts. It dereferences to the engine's Controller for reading only:
+/// every command goes through it, and every swap through
+/// [`swap`](Controller::swap) or [`send_swap`](Controller::send_swap), so the
+/// vector streams know each plan the run swaps to (M2.8-9). A swap around it
+/// cannot be written:
+///
+/// ```compile_fail,E0596
+/// fn bypass(controller: &mut signal_output::Controller) -> &mut signal_engine::Controller {
+///     &mut **controller
+/// }
+/// ```
 pub struct Controller {
     controller: signal_engine::Controller,
     meters: Consumer<Meter>,
@@ -261,6 +275,69 @@ impl Controller {
         while let Ok(m) = self.meters.pop() {
             meter(&m);
         }
+    }
+
+    /// [`signal_engine::Controller::send_event`].
+    pub fn send_event(
+        &mut self,
+        target: PortAddress,
+        payload: EventPayload,
+        stamp: Stamp,
+    ) -> Result<CommandId, ControlError> {
+        self.controller.send_event(target, payload, stamp)
+    }
+
+    /// [`signal_engine::Controller::send_suspend`].
+    pub fn send_suspend(
+        &mut self,
+        instance: InstanceAddress,
+        stamp: Stamp,
+    ) -> Result<CommandId, ControlError> {
+        self.controller.send_suspend(instance, stamp)
+    }
+
+    /// [`signal_engine::Controller::send_resume`].
+    pub fn send_resume(
+        &mut self,
+        instance: InstanceAddress,
+        stamp: Stamp,
+    ) -> Result<CommandId, ControlError> {
+        self.controller.send_resume(instance, stamp)
+    }
+
+    /// [`signal_engine::Controller::prepare_swap`], keeping `plan` for the
+    /// vector streams' verdicts.
+    pub fn prepare_swap(&self, plan: &ExecutionPlan) -> Result<ReadySwap, ControlError> {
+        Ok(ReadySwap {
+            ready: self.controller.prepare_swap(plan)?,
+            plan: plan.clone(),
+        })
+    }
+
+    /// [`signal_engine::Controller::send_swap`]: first, room permitting,
+    /// every started vector slot's verdict for the plan version the swap
+    /// makes, so it is there when the swap commits; withdrawn if the engine
+    /// refuses the swap, sent after it if there was no room.
+    pub fn send_swap(&mut self, ready: ReadySwap, stamp: Stamp) -> Result<CommandId, ControlError> {
+        let running = self.controller.status().version;
+        let early = self.vectors.before_swap(running, &ready.plan);
+        match self.controller.send_swap(ready.ready, stamp) {
+            Ok(id) => {
+                self.vectors.swapped(&ready.plan, early);
+                Ok(id)
+            }
+            Err(error) => {
+                self.vectors.refused(early);
+                Err(error)
+            }
+        }
+    }
+
+    /// [`prepare_swap`](Controller::prepare_swap), then
+    /// [`send_swap`](Controller::send_swap).
+    pub fn swap(&mut self, plan: &ExecutionPlan, stamp: Stamp) -> Result<CommandId, ControlError> {
+        let ready = self.prepare_swap(plan)?;
+        self.send_swap(ready, stamp)
     }
 
     /// The runner's clipped samples, as of its last callback.
@@ -312,7 +389,9 @@ impl Controller {
     /// frame that is a multiple of `decimation`, from the next callback; it
     /// replaces what the slot ran. Its snapshots carry the generation
     /// returned. `decimation` must be a multiple of the port's rate divisor
-    /// in `plan` (the plan the caller starts it for), when `plan` has it.
+    /// in `plan` (the plan the caller starts it for), when `plan` has it; in
+    /// the running plan and every one swapped to later it binds only where
+    /// it is ([`vector_unbound`](Controller::vector_unbound) says why not).
     pub fn vector_start(
         &mut self,
         plan: &ExecutionPlan,
@@ -321,7 +400,9 @@ impl Controller {
         rows: usize,
         decimation: u64,
     ) -> Result<u32, VectorError> {
-        self.vectors.start(plan, slot, port, rows, decimation)
+        let running = self.controller.status().version;
+        self.vectors
+            .start(running, plan, slot, port, rows, decimation)
     }
 
     /// Stops vector slot `slot`; its snapshots still queued are dropped.
@@ -341,6 +422,12 @@ impl Controller {
         VectorControl::bound(&self.counts.vectors, slot)
     }
 
+    /// Why started vector slot `slot` is not bound, as of the runner's last
+    /// callback; `None` when it is bound or not started.
+    pub fn vector_unbound(&self, slot: usize) -> Option<VectorUnbound> {
+        VectorControl::unbound(&self.counts.vectors, slot)
+    }
+
     /// Vector snapshots dropped because the vector queue was full.
     pub fn vector_overflows(&self) -> u64 {
         VectorControl::overflows(&self.counts.vectors)
@@ -355,8 +442,8 @@ impl Deref for Controller {
     }
 }
 
-impl DerefMut for Controller {
-    fn deref_mut(&mut self) -> &mut signal_engine::Controller {
-        &mut self.controller
-    }
+/// A swap prepared by [`Controller::prepare_swap`], with its plan.
+pub struct ReadySwap {
+    ready: signal_engine::ReadySwap,
+    plan: ExecutionPlan,
 }

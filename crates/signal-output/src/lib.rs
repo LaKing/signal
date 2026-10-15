@@ -42,9 +42,9 @@ mod vectors;
 pub use audio::{Conversion, Meter, RenderError, device_sample};
 pub use driver::{CallbackSizes, Driver, DriverError, MAX_CALLBACK_FRAMES, NullDriver};
 pub use render::{Render, render, render_blocks, render_blocks_tapped, render_with};
-pub use runner::{Controller, Runner, realtime, realtime_with};
+pub use runner::{Controller, ReadySwap, Runner, realtime, realtime_with};
 pub use scope::{SCOPE_POINTS, SCOPE_SLOTS, ScopeBlock, ScopeError};
 pub use vectors::{
     VECTOR_MAX_ROWS, VECTOR_SLOTS, VectorError, VectorSnapshot, VectorTap, VectorTrack,
-    vector_shape,
+    VectorUnbound, vector_shape,
 };

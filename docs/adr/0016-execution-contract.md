@@ -76,6 +76,7 @@ A parameter is an input port with a **base value** and optional **modulation** (
 - **Connected signals are modulation.** Several signals connected to one input are **summed** (fan-in on signal ports = sum; each connection may scale). Modulation never overwrites the base.
 - **Effective value** = `combine(base[n], modulation_sum[n])`. The parameter declares `combine`: the default is additive in the parameter's unit, and alternatives are multiplicative or replace. The result is clamped to the declared range. A parameter with no connections uses its base.
 - Event fan-in follows §3. Signal fan-in is a commutative sum, but the summation order is fixed to the canonical source order of §3, so floating-point results are bit-stable.
+- An input a library restricts takes at most one connection, at scale 1, from the output named (ADR 0024, M2.8-9).
 
 ### 4a. Base value per frame and ramps (normative)
 For each parameter and each frame *n* the instance runs, the executor computes `base[n]` in this order:

@@ -2436,6 +2436,16 @@ pub fn replay_with(
                         .ok_or(EngineError::StaleSwap)?;
                     let mut swap = engine.prepare_swap(plan, registry)?;
                     engine.commit_swap(&mut swap, frame)?;
+                    // The vector taps take `session.plans[v]` as the plan of
+                    // engine version v.
+                    if engine.version() != version {
+                        refused.get_or_insert_with(|| {
+                            format!(
+                                "swap to version {version} is the engine's version {}",
+                                engine.version()
+                            )
+                        });
+                    }
                 }
             }
             for edit in batch {
@@ -2464,6 +2474,8 @@ pub fn replay_with(
             Ok([next_edit, next_record].into_iter().flatten().min())
         },
         &options.vectors,
+        // The engine runs plan version v as its version v (checked below).
+        &session.plans,
     );
     // The first result that differs from the performance's is the cause of
     // whatever else went wrong after it (M2.7-8): it is reported first.

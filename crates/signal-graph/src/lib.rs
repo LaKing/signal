@@ -28,7 +28,7 @@ use signal_core::{Direction, PortAddress, PortShape, Registry};
 pub use def::{
     CompositeDef, ConnectionDef, Exports, InputExport, InstanceDef, OutputExport, ParameterExport,
 };
-pub use error::{GraphError, GraphWarning};
+pub use error::{GraphError, GraphWarning, Restriction};
 pub use plan::{ExecutionPlan, PlanInstance, Source};
 
 /// Builds the execution plan of the project `root`.
@@ -48,6 +48,8 @@ pub fn build_plan(
     version: u64,
 ) -> Result<ExecutionPlan, Vec<GraphError>> {
     let mut graph = flatten::flatten(root, composites, registry)?;
+    // Before converters: the sources and connections as written (ADR 0024).
+    validate::restricted(&graph, registry)?;
     // Canonical order (ADR 0016 §3): by target, then byte-wise by source.
     let canonical = |graph: &mut flatten::FlatGraph| {
         graph.connections.sort_by(|a, b| {

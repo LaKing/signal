@@ -355,3 +355,110 @@ fn out_of_range_through_aliased_exports() {
         ("composites/voice.toml", &voice)
     ]));
 }
+
+/// M2.8-9 AC6 (ADR 0024): a bridge input takes one `std.count.window`, at
+/// scale 1. A scale other than 1, any fan-in (auditor-1's R1 + R2 − R3
+/// included) and another source are refused when the plan is built, each
+/// at the connection as written.
+fn bridge(wiring: &str) -> String {
+    format!(
+        r#"schema_version = 1
+
+[project]
+name = "t"
+
+[instances]
+c = {{ module = "std.count" }}
+c2 = {{ module = "std.count" }}
+c3 = {{ module = "std.count" }}
+abs = {{ module = "std.abs" }}
+p = {{ module = "std.particles" }}
+
+[wiring]
+connections = [
+{wiring}
+]
+"#
+    )
+}
+
+#[test]
+fn a_misconnected_bridge_input_is_refused_as_written() {
+    let takes =
+        |to: &str| format!("{to} takes one connection, at scale 1, from the window of a std.count");
+    let emit = takes("/p.emit");
+    for (wiring, expected) in [
+        (
+            r#"  { from = "c.window", to = "p.emit", scale = 2 },"#,
+            format!("project.toml:15:3: error: /c.window -> /p.emit: {emit}; this one has scale 2"),
+        ),
+        (
+            r#"  { from = "c.window", to = "p.impulse", scale = 0.5 },"#,
+            format!(
+                "project.toml:15:3: error: /c.window -> /p.impulse: {}; this one has scale 0.5",
+                takes("/p.impulse")
+            ),
+        ),
+        (
+            "  { from = \"c.window\", to = \"p.emit\" },\n  { from = \"c2.window\", to = \"p.emit\" },",
+            format!(
+                "project.toml:15:3: error: /c.window -> /p.emit: {emit}; it has 2 connections\n\
+                 project.toml:16:3: error: /c2.window -> /p.emit: {emit}; it has 2 connections"
+            ),
+        ),
+        // Auditor-1's R1 + R2 − R3, which the check rows alone let through.
+        (
+            "  { from = \"c.window\", to = \"p.emit\" },\n  { from = \"c2.window\", to = \"p.emit\" },\n  { from = \"c3.window\", to = \"p.emit\", scale = -1 },",
+            format!(
+                "project.toml:15:3: error: /c.window -> /p.emit: {emit}; it has 3 connections\n\
+                 project.toml:16:3: error: /c2.window -> /p.emit: {emit}; it has 3 connections\n\
+                 project.toml:17:3: error: /c3.window -> /p.emit: {emit}; it has 3 connections"
+            ),
+        ),
+        (
+            r#"  { from = "abs.out", to = "p.emit" },"#,
+            format!(
+                "project.toml:15:3: error: /abs.out -> /p.emit: {emit}; this one comes from the out of a std.abs"
+            ),
+        ),
+    ] {
+        assert_eq!(project_errors(&bridge(wiring)), expected, "{wiring}");
+    }
+    // Through a composite's input export: the connection as written.
+    let sparks = r#"schema_version = 1
+
+[composite]
+name = "sparks"
+
+[instances]
+p = { module = "std.particles" }
+
+[exports]
+inputs = { emit = "p.emit" }
+"#;
+    let project = bridge("").replace(
+        "p = { module = \"std.particles\" }",
+        "s = { module = \"sparks\" }",
+    );
+    let project = project.replace(
+        "[\n\n]",
+        "[\n  { from = \"c.window\", to = \"s.emit\", scale = 2 },\n]",
+    );
+    assert_eq!(
+        errors(&[
+            ("project.toml", &project),
+            ("composites/sparks.toml", sparks)
+        ]),
+        format!(
+            "project.toml:15:3: error: /c.window -> /s.emit: {}; this one has scale 2",
+            takes("/s.emit")
+        )
+    );
+    assert!(plans(&[(
+        "project.toml",
+        &bridge(
+            "  { from = \"c.window\", to = \"p.emit\" },\n  { from = \"c.window\", to = \"p.impulse\", scale = 1.0 },"
+        )
+    )]));
+    assert!(plans(&[("project.toml", &bridge(""))]));
+}

@@ -149,6 +149,21 @@ pub enum GraphError {
         /// The scale.
         scale: f64,
     },
+    /// A connection into a restricted input (ADR 0024,
+    /// `Registry::restrict_input`) that is not its one connection, at scale
+    /// 1, from the source it is restricted to.
+    RestrictedInput {
+        /// The declared source endpoint.
+        from: PortAddress,
+        /// The declared target endpoint.
+        to: PortAddress,
+        /// The connection's scale.
+        scale: f64,
+        /// The (type, output) the input is restricted to.
+        source: (&'static str, &'static str),
+        /// What is wrong with it.
+        reason: Box<Restriction>,
+    },
     /// The dependency graph has a cycle that passes through no state-output
     /// instance (ADR 0016 §2).
     Cycle {
@@ -262,6 +277,28 @@ impl fmt::Display for GraphError {
             GraphError::NonFiniteScale { from, to, scale } => {
                 write!(f, "{from} -> {to}: scale {scale} is not finite")
             }
+            GraphError::RestrictedInput {
+                from,
+                to,
+                scale,
+                source: (from_type, from_port),
+                reason,
+            } => {
+                write!(
+                    f,
+                    "{from} -> {to}: {to} takes one connection, at scale 1, from the \
+                     {from_port} of a {from_type}; "
+                )?;
+                match &**reason {
+                    Restriction::Scaled => write!(f, "this one has scale {scale}"),
+                    Restriction::FanIn { connections } => {
+                        write!(f, "it has {connections} connections")
+                    }
+                    Restriction::Source { type_name, port } => {
+                        write!(f, "this one comes from the {port} of a {type_name}")
+                    }
+                }
+            }
             GraphError::Cycle { instances } => {
                 f.write_str("dependency cycle without a state-output instance: ")?;
                 for instance in instances {
@@ -277,6 +314,26 @@ impl fmt::Display for GraphError {
 }
 
 impl std::error::Error for GraphError {}
+
+/// Why a connection into a restricted input is refused
+/// ([`GraphError::RestrictedInput`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Restriction {
+    /// Its scale is not exactly 1.
+    Scaled,
+    /// The input has more than one connection.
+    FanIn {
+        /// How many.
+        connections: usize,
+    },
+    /// It comes from another output than the one the input is restricted to.
+    Source {
+        /// The source instance's type.
+        type_name: &'static str,
+        /// The source output.
+        port: String,
+    },
+}
 
 /// A diagnostic that does not prevent a plan.
 #[derive(Clone, Debug, PartialEq, Serialize)]

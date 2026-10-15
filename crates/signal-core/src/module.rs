@@ -30,9 +30,11 @@ pub struct PrepareContext {
     pub lent: Option<Lent>,
     /// The engine's plan version this instance was created for: 0 for the
     /// plan the engine was built with, *v* + 1 for an instance added by the
-    /// swap prepared at version *v* (`docs/semantics.md` §12). An identity
-    /// token only: a primitive may use it to tell a re-created instance from
-    /// one it has seen, never to change a signal value.
+    /// swap prepared at version *v* (`docs/semantics.md` §12). Identity data
+    /// only: a primitive may use it to tell a re-created instance from one it
+    /// has seen, and may carry it in a signal as identity (`std.count.window`
+    /// does, in rows 4–6), but no consumer's effect may depend on its value,
+    /// only on whether it matches.
     pub generation: u64,
 }
 

@@ -74,7 +74,9 @@ fn runner_process_with_vector_streams_allocates_and_frees_nothing() {
         (port("/hits.window"), signal_std::BRIDGE_ROWS),
     ];
     for (slot, (p, rows)) in streams.iter().enumerate() {
-        let decimation = if *rows == signal_std::BRIDGE_ROWS {
+        // The window runs at divisor 1, the visual types at 800 (and
+        // `bodies` is as wide as a reading).
+        let decimation = if p.instance().as_str() == "/hits" {
             1
         } else {
             800

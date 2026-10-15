@@ -12,6 +12,8 @@ use signal_engine::{
     SinkOutput, run_offline,
 };
 
+use signal_graph::ExecutionPlan;
+
 use crate::audio::{AudioSink, Conversion, RenderError};
 use crate::vectors::{VectorTap, VectorTaps, VectorTrack};
 
@@ -97,20 +99,25 @@ pub fn render_blocks(
     block: usize,
     before: impl FnMut(&mut Engine) -> Result<Option<Frame>, EngineError>,
 ) -> Result<Render, RenderError> {
-    render_blocks_tapped(engine, frames, block, before, &[]).map(|(render, _)| render)
+    render_blocks_tapped(engine, frames, block, before, &[], &[]).map(|(render, _)| render)
 }
 
 /// [`render_blocks`], also taking snapshots of the vector outputs `taps`
 /// (M2.8-7): one [`VectorTrack`] per tap, its snapshots at the frames that
 /// are multiples of its decimation, as the real-time vector adapter takes
 /// them (`crate::vectors`). The audio and the log are those of
-/// [`render_blocks`]: the taps only read.
+/// [`render_blocks`]: the taps only read. `plans[v]` is the plan the engine
+/// runs at version `v` (`Engine::version`: the first, then one per swap
+/// `before` commits): a tap is refused, from the swap on, in a plan where its
+/// decimation is not a multiple of its port's rate divisor, or for which no
+/// plan is given ([`VectorTrack::refused`]).
 pub fn render_blocks_tapped(
     engine: &mut Engine,
     frames: u64,
     block: usize,
     before: impl FnMut(&mut Engine) -> Result<Option<Frame>, EngineError>,
     taps: &[VectorTap],
+    plans: &[ExecutionPlan],
 ) -> Result<(Render, Vec<VectorTrack>), RenderError> {
     if engine.next_frame() != Frame::ZERO {
         return Err(RenderError::AlreadyStarted);
@@ -122,7 +129,7 @@ pub fn render_blocks_tapped(
         started: false,
         samples: Vec::new(),
         changed: None,
-        taps: VectorTaps::new(taps),
+        taps: VectorTaps::new(taps, plans),
         at: 0,
     };
     let run = match run_offline(engine, frames, block, before, &mut file) {

@@ -5,7 +5,7 @@ use signal_core::{
     PortDescriptor, PortKind, PortShape, PrepareContext,
 };
 
-use crate::bridge::{BRIDGE_ROWS, Since, effect};
+use crate::bridge::{BRIDGE_ROWS, Since, effect, lost};
 use crate::count::value;
 use crate::svf::flush;
 use crate::{VISUAL_DIVISOR, at, parameter_at, port_at};
@@ -103,7 +103,7 @@ const fn parameters(d: u32, spring: f64, decay: f64) -> [signal_core::ParameterD
     ]
 }
 
-const VISUAL_PORTS: [PortDescriptor; 4] = [
+const VISUAL_PORTS: [PortDescriptor; 5] = [
     port_at(
         "strike",
         Direction::In,
@@ -133,6 +133,15 @@ const VISUAL_PORTS: [PortDescriptor; 4] = [
     ),
     port_at(
         "out",
+        Direction::Out,
+        PortShape::Signal,
+        VISUAL_DIVISOR,
+        PortKind::Control,
+        None,
+        None,
+    ),
+    port_at(
+        "lost",
         Direction::Out,
         PortShape::Signal,
         VISUAL_DIVISOR,
@@ -216,8 +225,9 @@ const AUDIO_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///
 /// **Ports**
 /// - `strike`: an impulse at the strike node, in velocity per unit
-///   `strength`. `std.mesh2d`: a vector of 19 at divisor 1, the reading of
-///   one `std.count` connected at scale 1 ([`crate::bridge`]): at each tick
+///   `strength`. `std.mesh2d`: a vector of 24 at divisor 1, the reading of
+///   one `std.count` connected at scale 1, the only connection the plan
+///   accepts there ([`crate::bridge`]): at each tick
 ///   it adds `S × strength`, the summed values of the events its counter
 ///   counted since the reading it applied last (impulses within one tick
 ///   superpose; nothing is capped); an event at frame *f* acts at the first
@@ -232,6 +242,10 @@ const AUDIO_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///   `j·16 + i`.
 /// - `out` (signal out): the displacement at the pickup node (`audio` in
 ///   `std.mesh2d_audio`).
+/// - `lost` (signal out, `std.mesh2d` only): readings of `strike` not
+///   applied because their sum may have wrapped (2¹⁷ events or more since
+///   the one applied last), counted since the start or the last reset, at
+///   most 2¹⁹ − 1.
 ///
 /// **Parameters** (at the type's rate)
 /// - `spring_hz` (Hz, `[0, (2³² − 1)/2π]`, default 2 visual, 150 audio,
@@ -461,6 +475,9 @@ impl<const AUDIO: bool> DirectPrimitive for Mesh2d<AUDIO> {
             if let Some(out) = outputs.signal(NODES).get_mut(t) {
                 *out = self.z.get(pickup).copied().unwrap_or(0.0);
             }
+            if !AUDIO && let Some(out) = outputs.signal(NODES + 1).get_mut(t) {
+                *out = lost(&[&self.strikes]);
+            }
         }
     }
 }
@@ -474,6 +491,21 @@ mod tests {
         let mut mesh = Mesh2d::<A>::default();
         mesh.prepare(&crate::testing::context(sample_rate, 256, 0));
         mesh
+    }
+
+    /// M2.8-9 AC7 (finding auditor-1-007): `std.mesh2d`'s `lost` stays at
+    /// most 2¹⁹ − 1, inside the fault guard.
+    #[test]
+    fn lost_saturates_inside_the_guard() {
+        use crate::bridge::LOST_MAX;
+        let mut mesh = ready::<false>(48_000.0);
+        mesh.strikes = Since::with_lost(LOST_MAX);
+        let mut out = [0.0; NODES + 2];
+        mesh.process(
+            &Inputs::new(1, &[0.0; BRIDGE_ROWS + 1], &[], &[], &[]),
+            &mut Outputs::new(1, &mut out, &mut []),
+        );
+        assert_eq!(out[NODES + 1], f64::from(LOST_MAX));
     }
 
     /// Finding auditor-2-energy-test-cost: driven directly, 200 000 ticks of

@@ -37,7 +37,7 @@ use signal_engine::{
 use signal_graph::ExecutionPlan;
 use signal_output::{
     Controller, Meter, NullDriver, SCOPE_POINTS, SCOPE_SLOTS, ScopeBlock, VECTOR_MAX_ROWS,
-    VECTOR_SLOTS, VectorSnapshot, realtime_with,
+    VECTOR_SLOTS, VectorSnapshot, VectorUnbound, realtime_with,
 };
 use signal_project::live::{Both, ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload_observed};
 use signal_project::session::{LiveRecorder, SessionRecorder, sink_of};
@@ -1370,7 +1370,30 @@ impl Host {
                 (false, true) => "scope.bound",
                 (false, false) => "scope.unbound",
             };
-            self.send_text(client, &json!({"type": kind, "sub": sub}));
+            let mut message = json!({"type": kind, "sub": sub});
+            // Why a vector stream is unbound (M2.8-9): its port's width, or
+            // its decimation off the port's ticks in the running plan.
+            if vector && !now {
+                let slot = self.subs.get(&sub).and_then(|s| match &s.stream {
+                    Stream::Vector { slot, .. } => Some(*slot),
+                    _ => None,
+                });
+                let reason = slot
+                    .zip(self.run.as_ref())
+                    .and_then(|(slot, run)| run.controller.vector_unbound(slot));
+                if let Some(reason) = reason {
+                    message = with(
+                        message,
+                        "reason",
+                        json!(match reason {
+                            VectorUnbound::Absent => "absent",
+                            VectorUnbound::Decimation => "decimation",
+                            VectorUnbound::Unverified => "unverified",
+                        }),
+                    );
+                }
+            }
+            self.send_text(client, &message);
         }
         self.take_reports();
         self.take_meters();
@@ -1843,8 +1866,9 @@ impl Host {
                     continue;
                 };
                 let address = format!("/{}.{}", instance.name, p.name);
-                // The live base: the last value known to have reached every
-                // port (not a refused one), each port's default after a reset.
+                // The live base: the last value the Controller took for every
+                // port (not one it refused; one a runner refused afterwards
+                // still counts), each port's default after a reset.
                 let reset = self
                     .failed
                     .get(&(instance.name.clone(), p.name.clone()))

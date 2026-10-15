@@ -9,14 +9,26 @@
 //! it and reads its messages. The control thread only ever `try_send`s to a
 //! client's bounded queue, and evicts a client by setting its flag and
 //! dropping its sender: it never waits for a client thread.
+//!
+//! At most [`MAX_CLIENTS`] connections have a thread, a connection that has
+//! not said `hello` yet included (M2.8-9). One past that waits in a bounded
+//! queue for one of [`REFUSERS`] refusal threads, which completes its
+//! handshake, says `too-many-clients` and closes it with code 1013 (try
+//! again later) and that reason, all within [`REFUSAL_DEADLINE`]; a client
+//! that has not sent its handshake by then is closed without one (a close
+//! reason needs a WebSocket). While the queue is full, accepting waits: no
+//! connection is dropped for want of a refusal thread. Every one of these
+//! threads ends on its own; none is joined.
 
 use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{
+    Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError, sync_channel,
+};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -47,6 +59,14 @@ const MAX_WRITE_BUFFER: usize = 4 << 20;
 const MAX_MESSAGE: usize = 64 << 10;
 /// Messages from all clients waiting for the control thread.
 const INBOUND: usize = 1024;
+/// WebSocket connections with a thread, those before `hello` included.
+pub const MAX_CLIENTS: usize = 32;
+/// Threads that refuse the connections past [`MAX_CLIENTS`].
+pub(crate) const REFUSERS: usize = 2;
+/// Connections waiting for a refusal thread.
+pub(crate) const REFUSAL_QUEUE: usize = 16;
+/// How long a refusal may take: the handshake, the reason, the close.
+pub(crate) const REFUSAL_DEADLINE: Duration = Duration::from_secs(1);
 
 /// What the servers need.
 #[derive(Clone, Debug)]
@@ -139,6 +159,8 @@ impl Server {
             remote: options.remote,
             stop: Arc::clone(&stop),
             next: Arc::new(AtomicU64::new(1)),
+            clients: Arc::new(AtomicUsize::new(0)),
+            refusals: refusers(http_addr.port(), options.remote, &stop)?,
         });
         let accepting = Arc::clone(&accept);
         threads.push(
@@ -186,6 +208,8 @@ impl Server {
             remote: false,
             stop: Arc::clone(&stop),
             next: Arc::new(AtomicU64::new(1)),
+            clients: Arc::new(AtomicUsize::new(0)),
+            refusals: refusers(0, false, &stop)?,
         });
         Ok(Server {
             http: none,
@@ -329,6 +353,117 @@ struct Accept {
     remote: bool,
     stop: Arc<AtomicBool>,
     next: Arc<AtomicU64>,
+    /// Connections with a thread ([`MAX_CLIENTS`]).
+    clients: Arc<AtomicUsize>,
+    /// Connections past the limit, for the refusal threads.
+    refusals: SyncSender<Box<dyn Transport>>,
+}
+
+/// A connection's place among the [`MAX_CLIENTS`], given back when its
+/// thread ends (or is never started).
+struct Place(Arc<AtomicUsize>);
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Starts the [`REFUSERS`] refusal threads (detached; each ends on stop or
+/// when the servers are gone) and returns their queue.
+fn refusers(
+    http_port: u16,
+    remote: bool,
+    stop: &Arc<AtomicBool>,
+) -> io::Result<SyncSender<Box<dyn Transport>>> {
+    let (refusals, waiting) = sync_channel::<Box<dyn Transport>>(REFUSAL_QUEUE);
+    let waiting = Arc::new(Mutex::new(waiting));
+    for k in 0..REFUSERS {
+        let waiting = Arc::clone(&waiting);
+        let stop = Arc::clone(stop);
+        thread::Builder::new()
+            .name(format!("signal-ui-refuse-{k}"))
+            .spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let next = waiting
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .recv_timeout(Duration::from_millis(10));
+                    match next {
+                        Ok(stream) => refuse(stream, http_port, remote),
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+            })?;
+    }
+    Ok(refusals)
+}
+
+/// A refused connection's stream: every read and write fails once
+/// [`REFUSAL_DEADLINE`] has passed since its refusal began, so a client
+/// sending its handshake a byte at a time holds a refusal thread no longer.
+struct Deadline {
+    stream: Box<dyn Transport>,
+    until: Instant,
+}
+
+impl Deadline {
+    fn within<T>(
+        &mut self,
+        mut io: impl FnMut(&mut dyn Transport) -> io::Result<T>,
+    ) -> io::Result<T> {
+        loop {
+            if Instant::now() >= self.until {
+                return Err(io::Error::from(ErrorKind::TimedOut));
+            }
+            match io(&mut *self.stream) {
+                Err(e) if would_block(&e) || e.kind() == ErrorKind::Interrupted => {}
+                other => return other,
+            }
+        }
+    }
+}
+
+impl Read for Deadline {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.within(|s| s.read(buf))
+    }
+}
+
+impl Write for Deadline {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.within(|s| s.write(buf))
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.within(|s| s.flush())
+    }
+}
+
+/// Refuses a connection past [`MAX_CLIENTS`]: its handshake (the Origin
+/// rule as for any client), the `too-many-clients` error, and a close with
+/// code 1013 and that reason, within [`REFUSAL_DEADLINE`].
+fn refuse(stream: Box<dyn Transport>, http_port: u16, remote: bool) {
+    let poll = Some(Duration::from_millis(50));
+    if stream.read_timeout(poll).is_err() || stream.write_timeout(poll).is_err() {
+        return;
+    }
+    let stream = Deadline {
+        stream,
+        until: Instant::now() + REFUSAL_DEADLINE,
+    };
+    let Some(mut ws) = handshake(stream, http_port, remote) else {
+        return;
+    };
+    let message = format!("at most {MAX_CLIENTS} clients are connected; try again later");
+    let _ = ws.send(Message::text(error_text("too-many-clients", &message)));
+    let _ = ws.close(Some(CloseFrame {
+        code: CloseCode::Again,
+        reason: "too-many-clients".into(),
+    }));
+    // Let the close go out: the stream waits for it up to the deadline.
+    let _ = ws.flush();
+    ws.get_mut().stream.finish();
 }
 
 impl Accept {
@@ -348,8 +483,32 @@ impl Accept {
         }
     }
 
-    /// A client thread for an accepted connection.
+    /// A client thread for an accepted connection, while fewer than
+    /// [`MAX_CLIENTS`] have one; else it goes to the refusal threads,
+    /// waiting (until stop) while their queue is full.
     fn spawn<S: Transport>(&self, stream: S) {
+        let admitted = self
+            .clients
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < MAX_CLIENTS).then_some(n + 1)
+            })
+            .is_ok();
+        if !admitted {
+            let mut stream: Box<dyn Transport> = Box::new(stream);
+            loop {
+                match self.refusals.try_send(stream) {
+                    Ok(()) | Err(TrySendError::Disconnected(_)) => return,
+                    Err(TrySendError::Full(back)) => {
+                        if self.stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        stream = back;
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+        }
+        let place = Place(Arc::clone(&self.clients));
         let client = self.next.fetch_add(1, Ordering::Relaxed);
         let connection = Connection {
             client,
@@ -361,10 +520,13 @@ impl Accept {
             stop: Arc::clone(&self.stop),
         };
         // Detached: it ends on its own (stop, eviction, a closed or stalled
-        // socket).
+        // socket), and gives its place back (as does a thread not started).
         let _ = thread::Builder::new()
             .name(format!("signal-ui-client-{client}"))
-            .spawn(move || connection.run(stream));
+            .spawn(move || {
+                let _place = place;
+                connection.run(stream);
+            });
     }
 }
 
@@ -413,31 +575,7 @@ impl Connection {
         {
             return;
         }
-        let (http_port, remote) = (self.http_port, self.remote);
-        // The refusal's type is tungstenite's handshake callback's.
-        #[allow(clippy::result_large_err)]
-        let check = move |request: &Request, response: Response| {
-            let header = |name: &str| {
-                request
-                    .headers()
-                    .get(name)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned)
-            };
-            if origin_allowed(
-                header("origin").as_deref(),
-                header("host").as_deref(),
-                http_port,
-                remote,
-            ) {
-                Ok(response)
-            } else {
-                let mut refusal = ErrorResponse::new(Some("origin not allowed".to_owned()));
-                *refusal.status_mut() = tungstenite::http::StatusCode::FORBIDDEN;
-                Err(refusal)
-            }
-        };
-        let Ok(mut ws) = tungstenite::accept_hdr_with_config(stream, check, Some(config())) else {
+        let Some(mut ws) = handshake(stream, self.http_port, self.remote) else {
             return;
         };
         if let Err((code, close, message)) = self.hello(&mut ws) {
@@ -535,6 +673,34 @@ impl Connection {
             }
         }
     }
+}
+
+/// The WebSocket handshake, refused (403) for a page of another origin.
+fn handshake<S: Read + Write>(stream: S, http_port: u16, remote: bool) -> Option<WebSocket<S>> {
+    // The refusal's type is tungstenite's handshake callback's.
+    #[allow(clippy::result_large_err)]
+    let check = move |request: &Request, response: Response| {
+        let header = |name: &str| {
+            request
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        if origin_allowed(
+            header("origin").as_deref(),
+            header("host").as_deref(),
+            http_port,
+            remote,
+        ) {
+            Ok(response)
+        } else {
+            let mut refusal = ErrorResponse::new(Some("origin not allowed".to_owned()));
+            *refusal.status_mut() = tungstenite::http::StatusCode::FORBIDDEN;
+            Err(refusal)
+        }
+    };
+    tungstenite::accept_hdr_with_config(stream, check, Some(config())).ok()
 }
 
 /// The WebSocket configuration: messages from a client up to

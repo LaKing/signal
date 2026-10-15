@@ -131,9 +131,9 @@ fn serve(files: &Files, mut stream: HttpConnection, stop: &AtomicBool, deadlines
     let response = match read_head(&mut stream, stop, deadlines.head) {
         Head::Complete(head) => match parse(&head) {
             Some(request) => files.respond(&request),
-            None => Response::text(400, "bad request"),
+            None => Response::bad_request(head.starts_with(b"HEAD ")),
         },
-        Head::TooLarge => Response::text(400, "bad request"),
+        Head::TooLarge { head } => Response::bad_request(head),
         Head::Gone => return,
     };
     if write_response(&mut stream, response, stop, deadlines.write).is_ok() {
@@ -146,8 +146,9 @@ fn serve(files: &Files, mut stream: HttpConnection, stop: &AtomicBool, deadlines
 enum Head {
     /// The head, up to its blank line.
     Complete(Vec<u8>),
-    /// More than [`MAX_HEAD`] without a blank line.
-    TooLarge,
+    /// More than [`MAX_HEAD`] without a blank line; `head` if it is a HEAD
+    /// request, whose refusal has no body either.
+    TooLarge { head: bool },
     /// Closed, too slow (`deadline`), failed or stopped: nothing to answer.
     Gone,
 }
@@ -162,7 +163,9 @@ fn read_head<R: Read + ?Sized>(stream: &mut R, stop: &AtomicBool, deadline: Dura
             return Head::Complete(head);
         }
         if head.len() > MAX_HEAD {
-            return Head::TooLarge;
+            return Head::TooLarge {
+                head: head.starts_with(b"HEAD "),
+            };
         }
         if stop.load(Ordering::Relaxed) || Instant::now() >= until {
             return Head::Gone;
@@ -229,6 +232,15 @@ impl Response {
             head_only: false,
         }
     }
+
+    /// 400 to a request that could not be read; for a HEAD request, the
+    /// head alone.
+    fn bad_request(head_only: bool) -> Response {
+        Response {
+            head_only,
+            ..Response::text(400, "bad request")
+        }
+    }
 }
 
 fn reason(status: u16) -> &'static str {
@@ -258,8 +270,13 @@ impl Files {
             }
             None => false,
         };
+        // A refusal of a HEAD request has a head only, like any HEAD response.
+        let refused = |status, text| Response {
+            head_only,
+            ..Response::text(status, text)
+        };
         if !allowed {
-            return Response::text(403, "forbidden host");
+            return refused(403, "forbidden host");
         }
         let path = request.path.as_str();
         let found = match path {
@@ -294,7 +311,7 @@ impl Files {
                 body: Body::File(file, length),
                 head_only,
             },
-            None => Response::text(404, "not found"),
+            None => refused(404, "not found"),
         }
     }
 }
@@ -453,7 +470,12 @@ mod tests {
         let mut long = Cursor::new(vec![b'a'; MAX_HEAD + 2048]);
         assert_eq!(
             read_head(&mut long, &stop, Duration::from_secs(1)),
-            Head::TooLarge
+            Head::TooLarge { head: false }
+        );
+        let mut long_head = Cursor::new([&b"HEAD /"[..], &vec![b'a'; MAX_HEAD + 2048]].concat());
+        assert_eq!(
+            read_head(&mut long_head, &stop, Duration::from_secs(1)),
+            Head::TooLarge { head: true }
         );
         let mut short = Cursor::new(b"GET / HTTP/1.1\r\n".to_vec());
         assert_eq!(
@@ -550,5 +572,74 @@ mod tests {
         let other = parse(b"GET / HTTP/1.1\r\nHost: example.com:8").unwrap();
         assert_eq!(files.respond(&other).status, 403);
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// M2.8-9 AC1: a HEAD response never carries a body, a refusal (403,
+    /// 404) included; the same refusals to GET keep theirs.
+    #[test]
+    fn a_head_refusal_has_no_body() {
+        let base = std::env::temp_dir().join(format!("signal-ui-http-head-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("ui")).unwrap();
+        let files = Files {
+            ui: base.join("ui"),
+            project: Arc::new(RwLock::new(base.join("project-ui"))),
+            port: 8,
+            remote: false,
+        };
+        let stop = AtomicBool::new(false);
+        let answer = |request: &[u8]| {
+            let response = files.respond(&parse(request).unwrap());
+            let status = response.status;
+            let mut out = Vec::new();
+            write_response(&mut out, response, &stop, DEADLINES.write).unwrap();
+            (status, String::from_utf8(out).unwrap())
+        };
+        for (request, status, body) in [
+            (
+                &b"HEAD / HTTP/1.1\r\nHost: example.com:8"[..],
+                403,
+                "forbidden host",
+            ),
+            (
+                b"HEAD /ui/missing.js HTTP/1.1\r\nHost: localhost:8",
+                404,
+                "not found",
+            ),
+        ] {
+            let (got, out) = answer(request);
+            assert_eq!(got, status);
+            assert!(
+                out.ends_with("\r\n\r\n"),
+                "a body after a HEAD head: {out:?}"
+            );
+            assert!(out.contains(&format!("Content-Length: {}", body.len())));
+            let get = [b"GET", &request[4..]].concat();
+            let (got, out) = answer(&get);
+            assert_eq!(got, status);
+            assert!(out.ends_with(&format!("\r\n\r\n{body}")), "{out:?}");
+        }
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A HEAD request that cannot be read (a malformed header, a head too
+    /// large) is refused with 400 and no body; a GET's refusal keeps its own.
+    #[test]
+    fn a_bad_head_request_has_no_body() {
+        let stop = AtomicBool::new(false);
+        assert!(parse(b"HEAD / HTTP/1.1\r\nHost: localhost:8\r\nX-bad").is_none());
+        for (head_only, body) in [(true, ""), (false, "bad request")] {
+            let mut out = Vec::new();
+            write_response(
+                &mut out,
+                Response::bad_request(head_only),
+                &stop,
+                DEADLINES.write,
+            )
+            .unwrap();
+            let out = String::from_utf8_lossy(&out).to_string();
+            assert!(out.starts_with("HTTP/1.1 400 "), "{out:?}");
+            assert!(out.ends_with(&format!("\r\n\r\n{body}")), "{out:?}");
+        }
     }
 }

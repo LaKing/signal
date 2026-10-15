@@ -249,8 +249,20 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     for (name, ns) in COST_NS {
         registry.set_cost(name, ns);
     }
+    for (name, input) in BRIDGE_INPUTS {
+        registry.restrict_input(name, input, "std.count", "window");
+    }
     Ok(())
 }
+
+/// The bridge inputs (`crate::bridge`): each takes one `std.count.window`
+/// at scale 1, and the plan refuses anything else there (ADR 0024).
+const BRIDGE_INPUTS: [(&str, &str); 4] = [
+    ("std.particles", "emit"),
+    ("std.particles", "impulse"),
+    ("std.mesh2d", "strike"),
+    ("std.body2d", "kick"),
+];
 
 fn direct<T: DirectPrimitive + Default + 'static>() -> ModuleType {
     ModuleType {

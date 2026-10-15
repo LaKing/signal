@@ -47,7 +47,7 @@ pub use host::{AppHostConfig, Finished, FirstRun, Host, HostConfig, project_ui};
 pub use local::LocalStream;
 #[cfg(feature = "test-hooks")]
 pub use server::LocalConnector;
-pub use server::ServerOptions;
+pub use server::{MAX_CLIENTS, ServerOptions};
 
 /// The protocol version (`hello`, `welcome`, byte 1 of every binary frame).
 pub const PROTOCOL: u32 = 1;

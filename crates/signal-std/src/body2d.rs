@@ -5,7 +5,7 @@ use signal_core::{
     PortShape, PrepareContext,
 };
 
-use crate::bridge::{BRIDGE_ROWS, Since, effect};
+use crate::bridge::{BRIDGE_ROWS, Since, effect, lost};
 use crate::svf::flush;
 use crate::{VISUAL_DIVISOR, at, parameter_at, port_at};
 
@@ -59,6 +59,15 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
             "vel",
             Direction::Out,
             PortShape::Vector(2 * BODIES as u32),
+            D,
+            PortKind::Control,
+            None,
+            None,
+        ),
+        port_at(
+            "lost",
+            Direction::Out,
+            PortShape::Signal,
             D,
             PortKind::Control,
             None,
@@ -139,7 +148,8 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///
 /// **Ports**
 /// - `kick` (reading in, operator decision operator-request:007): the
-///   reading of one `std.count` at scale 1 ([`crate::bridge`]). At each tick
+///   reading of one `std.count` at scale 1, the only connection the plan
+///   accepts there ([`crate::bridge`]). At each tick
 ///   every body gets `S × kick_speed` of speed along its own direction
 ///   `θ_i = π/2 + 0.4·(i − 2.5)` (mostly up), `S` the summed values of the
 ///   events its counter counted since the reading it applied last; nothing
@@ -147,6 +157,9 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 /// - `bodies` (vector of 24 out): per body `[x, y, size, kind]`, kind 0 a
 ///   circle (size its radius), 1 a box (size its half-width).
 /// - `vel` (vector of 12 out): per body `[vx, vy]`.
+/// - `lost` (out): readings of `kick` not applied because their sum may
+///   have wrapped (2¹⁷ events or more since the one applied last), counted
+///   since the start or the last reset, at most 2¹⁹ − 1.
 ///
 /// **Parameters** (at divisor 800): `gravity` (along y, default −2),
 /// `restitution` *e* (`[0, 1]`, default 0.6), `max_speed` (default 8),
@@ -558,6 +571,9 @@ impl DirectPrimitive for Body2d {
                     }
                 }
             }
+            if let Some(out) = outputs.signal(6 * BODIES).get_mut(t) {
+                *out = lost(&[&self.kicks]);
+            }
         }
     }
 }
@@ -580,6 +596,43 @@ mod tests {
         let mut bodies = Body2d::default();
         bodies.prepare(&crate::testing::context(48_000.0, 256, 0));
         bodies
+    }
+
+    /// M2.8-9 AC7: a kick window that may have wrapped (2¹⁷ events since the
+    /// reading applied last) applies nothing and is counted on `lost`, which
+    /// a reset clears.
+    #[test]
+    fn a_window_that_may_have_wrapped_is_counted_lost() {
+        use crate::bridge::Reading;
+        use signal_core::Inputs;
+        let mut bodies = ready();
+        let tick = |bodies: &mut Body2d, n: u64, age: u64| {
+            let reading = Reading {
+                stamp: 9,
+                age,
+                n,
+                sum: u128::from(n) << 96,
+                ..Reading::default()
+            };
+            let mut out = [0.0; 6 * BODIES + 1];
+            bodies.process(
+                &Inputs::new(1, &reading.encode(), &[], &[], &[]),
+                &mut Outputs::new(1, &mut out, &mut []),
+            );
+            out[6 * BODIES]
+        };
+        assert_eq!(tick(&mut bodies, 0, 5), 0.0);
+        assert_eq!(tick(&mut bodies, 1 << 17, 6), 1.0);
+        assert_eq!(tick(&mut bodies, (1 << 17) + 1, 7), 1.0);
+        bodies.reset();
+        assert_eq!(tick(&mut bodies, (1 << 17) + 2, 8), 0.0);
+        // At its limit `lost` stays 2¹⁹ − 1, inside the fault guard
+        // (finding auditor-1-007).
+        bodies.kicks = Since::with_lost(crate::bridge::LOST_MAX);
+        assert_eq!(
+            tick(&mut bodies, (1 << 17) + 3, 9),
+            f64::from(crate::bridge::LOST_MAX)
+        );
     }
 
     /// Parks every body but `keep` far apart in the corners, at rest.

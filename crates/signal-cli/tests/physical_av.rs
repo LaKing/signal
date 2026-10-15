@@ -346,7 +346,15 @@ fn scripted(
         }
         Ok(script.get(next).map(|(at, _)| Frame(*at)))
     };
-    let (rendered, tracks) = render_blocks_tapped(&mut engine, frames, 256, before, taps).unwrap();
+    // The plan of each engine version: the first, then one per swap in order.
+    let by_version: Vec<_> = std::iter::once(built[0].clone())
+        .chain(script.iter().filter_map(|(_, step)| match step {
+            Step::Swap(v) => Some(built[*v].clone()),
+            _ => None,
+        }))
+        .collect();
+    let (rendered, tracks) =
+        render_blocks_tapped(&mut engine, frames, 256, before, taps, &by_version).unwrap();
     (String::from_utf8(rendered.log).unwrap(), tracks)
 }
 
@@ -1099,6 +1107,14 @@ fn a_replayed_session_reproduces_creation_generations() {
     let mut engine =
         Engine::new(&fresh, &registry, EngineConfig::new(48_000, 5), Vec::new()).unwrap();
     let taps = [tap("/c.window", signal_std::BRIDGE_ROWS, 800)];
-    let (_, tracks) = render_blocks_tapped(&mut engine, 1, 1, |_| Ok(None), &taps).unwrap();
+    let (_, tracks) = render_blocks_tapped(
+        &mut engine,
+        1,
+        1,
+        |_| Ok(None),
+        &taps,
+        std::slice::from_ref(&fresh),
+    )
+    .unwrap();
     assert_eq!(generation(&tracks[0].snapshots[0].1), 0.0);
 }

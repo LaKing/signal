@@ -10,7 +10,7 @@ use crate::{event_port, port_at};
 
 const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     type_name: "std.count",
-    doc: "The event bridge into the visual-rate types: counts its events and sums their values since it was created, output as a reading of 19 integer rows (stamp, generation, age, count, sum at 2^-32) from which std.particles, std.mesh2d and std.body2d apply exactly what was counted since their previous tick. One connection at scale 1 per bridge input.",
+    doc: "The event bridge into the visual-rate types: counts its events and sums their values since it was created, output as a reading of 24 integer rows (stamp, generation, age, count, sum at 2^-32, two check values) from which std.particles, std.mesh2d and std.body2d apply exactly what was counted since their previous tick. One connection at scale 1 per bridge input; the plan refuses any other.",
     ports: &[
         event_port("in", Direction::In),
         port_at(
@@ -38,14 +38,15 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 /// §16), so the visual-rate types [`Particles`](crate::Particles),
 /// [`Mesh2d`](crate::Mesh2d) (`std.mesh2d`) and [`Body2d`](crate::Body2d)
 /// take their events through this type: their `emit`, `impulse`, `strike`
-/// and `kick` inputs are vectors of 19 at divisor 1, each connected to one
-/// `std.count.window` at scale 1.
+/// and `kick` inputs are vectors of 24 at divisor 1, each connected to one
+/// `std.count.window` at scale 1: building the plan refuses a scale other
+/// than 1, more than one connection and any other source there (ADR 0024).
 ///
 /// **Ports**
 /// - `in` (event in): every event counts once, several on one frame
 ///   included. Its value: `Trigger` 1, `Set(v)` v, `Ramp { to, .. }` to; a
 ///   non-finite value counts as an event of value 0.
-/// - `window` (vector of 19 out, generic; the name is M2.8-7's): at every
+/// - `window` (vector of 24 out, generic; the name is M2.8-7's): at every
 ///   frame, the reading of [`crate::bridge`]: a stamp drawn from the
 ///   instance's random stream, the plan version it was created for
 ///   (`PrepareContext::generation`, used only to recognise a re-created
@@ -87,8 +88,16 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///   the consumer's last tick and what the new counter counted before the
 ///   consumer's first tick after resuming, however long the suspension.
 ///   Nothing is applied twice.
-/// - *Disconnection*: a consumer whose bridge input is disconnected and
-///   reconnected applies nothing of what the counter counted meanwhile.
+/// - *Disconnection*: a consumer that reads its bridge input disconnected
+///   (at a tick) applies nothing of what the counter counted before it
+///   reads it connected again. A disconnection and a reconnection that both
+///   fall between two of its ticks, or while it is suspended, are not seen:
+///   the events counted meanwhile are applied once, at its next tick.
+/// - *Wrap*: a window of 2¹⁷ events or more since the reading a consumer
+///   applied last (about 2.7 s with an event on every frame while the
+///   consumer is suspended), or of a saturated count, may have wrapped
+///   modulo 2¹¹⁴: it applies nothing, and the consumer counts it in its
+///   `lost` output.
 /// - *Identity*: counters are told apart by (stamp, generation). The
 ///   generation is exact for a counter re-created at one address (it
 ///   saturates at 2⁵⁷ − 1 plan versions). Counters at different addresses
@@ -96,9 +105,12 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///   could in principle share (about 2⁻⁶⁴ per pair).
 ///
 /// **Values.** Each value is rounded to a multiple of 2⁻³² (ties to even)
-/// and limited to ±2⁶⁴, and summed exactly as an integer modulo 2¹¹⁴: the
-/// sum a consumer applies is exact at 2⁻³² while it is below 2⁸¹ in
-/// magnitude. A value below 2⁻³³ in magnitude adds 0 (it still counts).
+/// and limited to ±2⁶⁴, and summed exactly as an integer modulo 2¹¹⁴. The
+/// sum a consumer applies is **deterministic**: exact as an integer, then
+/// converted to binary64 once, which is exact up to 2⁵³ units (about 2²¹ in
+/// value) and rounds to nearest beyond. A value of at most 2⁻³³ in
+/// magnitude adds 0 (exactly 2⁻³³ is a tie, rounded to even; it still
+/// counts).
 /// Age and count are exact below 2⁵⁷ (counts saturate there).
 ///
 /// **Feedthrough:** direct. Work per frame: its events plus one reading.
