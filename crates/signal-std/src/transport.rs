@@ -83,14 +83,17 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///
 /// **Parameters**
 /// - `bpm` (control, beats per minute, range `[20, 400]`, default 120,
-///   combine `add`): **read once**, on the first frame after `prepare` or
-///   `reset`, and quantised to `bpm_milli = round_half_up(bpm·1000)`. Later
-///   values are ignored: changing tempo during a run is out of scope in M1.
+///   combine `add`): read on the first frame after `prepare` or `reset` and
+///   again on each beat's frame, quantised to `bpm_milli =
+///   round_half_up(bpm·1000)`. A changed tempo takes effect from that beat:
+///   the grid is anchored again at the beat (its frame and index), so the
+///   tempo changes without a jump or drift, at most one beat after the
+///   parameter. At a constant tempo the anchor stays at frame 0.
 /// - `ghost_probability` (control, no unit, range `[0, 1]`, default 0, combine
 ///   `add`): read on each candidate's frame.
 /// - `ghost_offset_ms` (control, ms, range `[−50, 50]`, default 0, combine
-///   `add`): read once, on the first frame, with `bpm`, so that the candidate
-///   frames are one fixed, ordered grid for the run.
+///   `add`): read once, on the first frame, so that the offset is fixed for
+///   the run.
 /// - `accent_every` (control, beats, range `[1, 64]`, default 3, combine
 ///   `add`): read on each beat's frame, rounded half up to a whole number of beats.
 ///
@@ -101,11 +104,14 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 /// never accumulated floats; `round_half_up(p/q) = ⌊(2p + q) / 2q⌋`):
 ///
 /// ```text
-/// beat k (k = 0, 1, 2, …)      at round_half_up(k·60000·sr / bpm_milli)
+/// anchor (a, b)                 frame a and index b of the beat where the
+///                               current tempo began ((0, 0) at first)
+/// beat k (k = b, b+1, …)        at a + round_half_up((k−b)·60000·sr / bpm_milli)
 /// accent                        on beat k when k mod round_half_up(accent_every) = 0
 /// ghost candidate j             for j = 1, 2, 3, 5, 6, 7, 9, … (16ths, j mod 4 ≠ 0)
-///                               at max(0, round_half_up(j·15000·sr / bpm_milli)
-///                                         + round_half_up(ghost_offset_ms·sr/1000))
+///                               at max(0, a + round_half_up((j−4b)·15000·sr / bpm_milli)
+///                                         + round_half_up(ghost_offset_ms·sr/1000)),
+///                               and never before the event before it
 /// ghost                         at candidate j when its draw < ghost_probability
 /// ```
 ///
@@ -126,6 +132,8 @@ pub struct Transport {
     streams: Option<(RngStream, RngStream)>,
     /// The first frame of the next call.
     frame: u64,
+    /// The frame of the last event, which the next one never precedes.
+    last: u64,
     /// Fixed on the first frame.
     grid: Option<Grid>,
     /// The index of the next beat.
@@ -134,12 +142,27 @@ pub struct Transport {
     candidate: u64,
 }
 
-/// What the first frame fixes: the quantised tempo and the ghost offset.
+/// The grid: the quantised tempo and where it began (a beat), and the
+/// ghost offset the first frame fixed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Grid {
     bpm_milli: u128,
     /// The ghost offset in frames.
     offset: i128,
+    /// The frame of the beat where this tempo began.
+    origin: u64,
+    /// That beat's index.
+    base: u64,
+}
+
+/// `round_half_up(numerator / denominator)` for a signed numerator and
+/// `denominator` ≥ 1: `⌊(2p + q) / 2q⌋`.
+fn signed_ratio(numerator: i128, denominator: u128) -> i128 {
+    let q = i128::try_from(denominator).unwrap_or(i128::MAX).max(1);
+    numerator
+        .saturating_mul(2)
+        .saturating_add(q)
+        .div_euclid(q.saturating_mul(2))
 }
 
 /// `round_half_up(numerator / denominator)` for `denominator` ≥ 1.
@@ -156,17 +179,27 @@ fn frame(value: u128) -> u64 {
 }
 
 impl Grid {
-    /// The frame of beat `k`.
+    /// The frame of beat `k` (k ≥ the anchor's beat).
     fn beat(&self, k: u64, rate: u128) -> u64 {
-        let numerator = u128::from(k).saturating_mul(60_000).saturating_mul(rate);
-        frame(ratio(numerator, self.bpm_milli))
+        let numerator = u128::from(k.saturating_sub(self.base))
+            .saturating_mul(60_000)
+            .saturating_mul(rate);
+        self.origin
+            .saturating_add(frame(ratio(numerator, self.bpm_milli)))
     }
 
-    /// The frame of the 16th `j`, offset and clamped at frame 0.
+    /// The frame of the 16th `j`, offset and clamped at frame 0. A 16th
+    /// before the anchor's beat (a late candidate of the tempo before) is
+    /// placed back from the anchor.
     fn candidate(&self, j: u64, rate: u128) -> u64 {
-        let numerator = u128::from(j).saturating_mul(15_000).saturating_mul(rate);
-        let base = i128::try_from(ratio(numerator, self.bpm_milli)).unwrap_or(i128::MAX);
-        frame(u128::try_from(base.saturating_add(self.offset)).unwrap_or(0))
+        let sixteenths = i128::from(j) - 4 * i128::from(self.base);
+        let numerator = sixteenths
+            .saturating_mul(15_000)
+            .saturating_mul(i128::try_from(rate).unwrap_or(i128::MAX));
+        let at = i128::from(self.origin)
+            .saturating_add(signed_ratio(numerator, self.bpm_milli))
+            .saturating_add(self.offset);
+        frame(u128::try_from(at).unwrap_or(0))
     }
 }
 
@@ -206,6 +239,7 @@ impl DirectPrimitive for Transport {
             stream.clone_from(initial);
         }
         self.frame = 0;
+        self.last = 0;
         self.grid = None;
         self.beat = 0;
         self.candidate = 1;
@@ -216,23 +250,42 @@ impl DirectPrimitive for Transport {
         let end = start.saturating_add(inputs.frames() as u64);
         let rate = self.rate;
         let sample_rate = self.sample_rate;
-        let grid = *self.grid.get_or_insert_with(|| Grid {
-            bpm_milli: round_half_up(at(inputs.parameter(BPM), 0, DEFAULT_BPM) * 1000.0).max(1.0)
-                as u128,
+        let tempo = |index: usize| {
+            round_half_up(at(inputs.parameter(BPM), index, DEFAULT_BPM) * 1000.0).max(1.0) as u128
+        };
+        let mut grid = *self.grid.get_or_insert_with(|| Grid {
+            bpm_milli: tempo(0),
             offset: round_half_up(
                 at(inputs.parameter(GHOST_OFFSET_MS), 0, 0.0) * sample_rate / 1000.0,
             ) as i128,
+            origin: 0,
+            base: 0,
         });
         loop {
             let beat = grid.beat(self.beat, rate);
-            let candidate = grid.candidate(self.candidate, rate);
+            // Never before the event before it (a tempo change can move a
+            // pending candidate back).
+            let candidate = grid.candidate(self.candidate, rate).max(self.last);
             let next = beat.min(candidate);
             if next >= end {
                 break;
             }
+            self.last = next;
             let offset = next.saturating_sub(start);
             let index = usize::try_from(offset).unwrap_or(usize::MAX);
             if beat == next {
+                // The tempo on the beat's frame: a change takes effect from
+                // this beat, anchored here.
+                let bpm_milli = tempo(index);
+                if bpm_milli != grid.bpm_milli {
+                    grid = Grid {
+                        bpm_milli,
+                        origin: beat,
+                        base: self.beat,
+                        ..grid
+                    };
+                    self.grid = Some(grid);
+                }
                 trigger(outputs, BEAT, offset);
                 let every = at(inputs.parameter(ACCENT_EVERY), index, DEFAULT_ACCENT_EVERY);
                 // NaN converts to 0, which `max(1)` lifts back into range.
@@ -417,10 +470,10 @@ mod tests {
         assert!(half > 0 && half < between(&all, 2_000_000, frames));
     }
 
-    /// bpm and the ghost offset are read on the first frame only, and bpm is
-    /// quantised to thousandths, rounding half up.
+    /// bpm is quantised to thousandths, rounding half up; the ghost offset
+    /// is read on the first frame only.
     #[test]
-    fn tempo_is_read_once_and_quantised() {
+    fn tempo_is_quantised_and_the_ghost_offset_read_once() {
         let fixed = run(
             48_000.0,
             1,
@@ -428,17 +481,17 @@ mod tests {
             512,
             &[(0, [120.0625, 1.0, -50.0, 4.0])],
         );
-        let changed = run(
+        let offset_changed = run(
             48_000.0,
             1,
             500_000,
             512,
             &[
                 (0, [120.0625, 1.0, -50.0, 4.0]),
-                (1, [300.0, 1.0, 50.0, 4.0]),
+                (1, [120.0625, 1.0, 50.0, 4.0]),
             ],
         );
-        assert_eq!(fixed, changed);
+        assert_eq!(fixed, offset_changed);
         // 120.0625·1000 = 120062.5 → bpm_milli 120063.
         let beats: Vec<u64> = (0..)
             .map(|k: u64| exact(u128::from(k) * 60_000 * 48_000, 120_063))
@@ -447,6 +500,52 @@ mod tests {
         assert_eq!(fixed.beat, beats);
         let offset = round_half_up(-50.0 * 48.0) as i128;
         assert_eq!(fixed.ghost, candidates(120_063, 48_000, offset, 500_000));
+    }
+
+    /// A tempo change takes effect from the next beat, anchored there: the
+    /// beats before it are the old tempo's, the ones after it the new
+    /// tempo's counted from that beat, with no jump.
+    #[test]
+    fn a_tempo_change_takes_effect_from_the_next_beat() {
+        // 120 bpm at 48 kHz: a beat every 24 000 frames. 200 bpm from frame
+        // 30 000: beat 1 (24 000) is before it, so beat 2 (48 000) is the
+        // anchor; then a beat every 14 400 frames.
+        let events = run(
+            48_000.0,
+            1,
+            100_000,
+            512,
+            &[
+                (0, [120.0, 0.0, 0.0, 1.0]),
+                (30_000, [200.0, 0.0, 0.0, 1.0]),
+            ],
+        );
+        assert_eq!(events.beat, [0, 24_000, 48_000, 62_400, 76_800, 91_200]);
+        assert_eq!(events.accent, events.beat);
+    }
+
+    /// With tempo changes, the events are the same for any partition into
+    /// calls, and in order: ghosts never precede the event before them.
+    #[test]
+    fn tempo_changes_do_not_depend_on_the_partition() {
+        let segments = [
+            (0, [132.0, 0.6, -50.0, 3.0]),
+            (70_000, [400.0, 0.6, -50.0, 3.0]),
+            (150_000, [20.0, 0.6, -50.0, 3.0]),
+            (400_000, [97.3, 0.6, -50.0, 3.0]),
+        ];
+        let reference = run(96_000.0, 9, 800_000, 4096, &segments);
+        for block in [1, 7, 512, 1000] {
+            assert_eq!(
+                run(96_000.0, 9, 800_000, block, &segments),
+                reference,
+                "block {block}"
+            );
+        }
+        for list in [&reference.beat, &reference.ghost] {
+            assert!(list.windows(2).all(|w| w[0] <= w[1]), "{list:?}");
+        }
+        assert!(reference.beat.len() > 10 && !reference.ghost.is_empty());
     }
 
     /// A negative offset clamps a candidate at frame 0 rather than dropping it.

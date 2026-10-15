@@ -105,7 +105,7 @@ Filters are written in the topology-preserving transform (TPT, Zavalishin) form:
 - When a primitive reads a parameter only at certain frames, the rustdoc says when. Examples:
   - `std.exp_env` reads `attack_ms` on the trigger frame.
   - `std.adsr` reads `attack_ms` on the frame its attack starts.
-  - `std.transport` reads `bpm` and `ghost_offset_ms` once, on the first frame.
+  - `std.transport` reads `bpm` on the first frame and on each beat's frame (a new tempo starts on a beat), and `ghost_offset_ms` once, on the first frame.
 
 ## Randomness
 
