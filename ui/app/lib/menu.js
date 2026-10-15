@@ -21,6 +21,19 @@ export function pageHandlesShortcuts(target = globalThis) {
   return !target?.signalApp?.menu;
 }
 
+/**
+ * Whether the Panel tab's frame loads again for the project `next` (the
+ * `app` message's `project.dir`) after `shown`, the folder whose panel it
+ * shows (null: none; undefined: the first message, while the frame loads):
+ * only for another project. A moment without a project (null, while
+ * the app loads the plan again on Play, Stop or a written parameter) keeps
+ * the frame, so the panel is never rebuilt in sight (docs/ui-controls.md
+ * "Stable layout").
+ */
+export function panelReloads(shown, next) {
+  return shown !== undefined && Boolean(next) && next !== shown;
+}
+
 /** The project's main panel (M2.8-3) in the Panel tab, with the page's fragment. */
 export function panelSource(hash) {
   const fragment = String(hash ?? '');

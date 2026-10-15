@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { pageHandlesShortcuts, panelSource, shortcut } from './menu.js';
+import { pageHandlesShortcuts, panelReloads, panelSource, shortcut } from './menu.js';
 
 const page = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
@@ -22,6 +22,15 @@ test('the page takes the shortcuts only without a native menu', () => {
   assert.equal(pageHandlesShortcuts({}), true, 'a browser');
   assert.equal(pageHandlesShortcuts({ signalApp: { menu: true } }), false, 'Signal.app');
   assert.equal(pageHandlesShortcuts(null), true);
+});
+
+test('the panel frame loads again only for another project', () => {
+  assert.equal(panelReloads(undefined, '/p/kick'), false, 'the first project: the frame is loading it');
+  assert.equal(panelReloads('/p/kick', '/p/kick'), false, 'Play, Stop, a written parameter');
+  assert.equal(panelReloads('/p/kick', null), false, 'a moment without a project');
+  assert.equal(panelReloads('/p/kick', '/p/pulse'), true, 'another project');
+  assert.equal(panelReloads(null, '/p/kick'), true, 'a project after none');
+  assert.equal(panelReloads(null, null), false);
 });
 
 test('the Panel tab shows the project’s panel with the page’s fragment', () => {

@@ -13,7 +13,7 @@ import { getDefaultConnection, onDefaultConnection } from '../signal-ui.js';
 import '../controls/meter.js';
 import { formatFixed } from '../lib/format.js';
 import { applyProps } from './lib/dom.js';
-import { pageHandlesShortcuts, panelSource, shortcut } from './lib/menu.js';
+import { pageHandlesShortcuts, panelReloads, panelSource, shortcut } from './lib/menu.js';
 import { dragMessage, fileNote, planUpdate, releaseMessage, resetMessage, rows, shown, structureKey, valuesOf } from './lib/parameters.js';
 import { INITIAL, controls, powerRequest, reduce } from './lib/power.js';
 import { saveReport, saveRequests } from './lib/save.js';
@@ -312,6 +312,9 @@ export class SignalAppMeters extends AppElement {
     const meters = description.meters ?? { output: [], input: [] };
     const key = JSON.stringify(meters);
     if (key === this.shown) return;
+    // Stopped, `describe` lists no meters: the last ones stay, at rest, so
+    // Play and Stop do not rebuild the card ("Stable layout").
+    if (this.shown && (meters.output ?? []).length + (meters.input ?? []).length === 0) return;
     const row = (source, list, label) =>
       list.map((m, i) => el('signal-meter', { source, channel: String(m.channel ?? i), label: label(m, i), floor: '-60' }));
     const output = row('output', meters.output ?? [], (m, i) => m.label ?? `out ${i + 1}`);
@@ -592,8 +595,12 @@ export class SignalAppPanel extends AppElement {
 
   app(app) {
     const dir = app.project?.dir ?? null;
-    if (this.dir !== undefined && dir !== this.dir) this.frame.contentWindow?.location.reload();
-    this.dir = dir;
+    // Not `this.dir`: that is HTMLElement's text direction, which reads
+    // back "" for a folder, so every `app` message (Play, Stop, a written
+    // parameter) reloaded the panel in sight.
+    if (panelReloads(this.shownDir, dir)) this.frame.contentWindow?.location.reload();
+    // A moment without a project keeps the folder shown.
+    if (dir || this.shownDir === undefined) this.shownDir = dir;
   }
 }
 
