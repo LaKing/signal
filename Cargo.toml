@@ -48,6 +48,8 @@ loom = "0.7.2"
 tungstenite = "0.30.0"
 wry = "0.57.0"
 tao = "0.37.1"
+# The app's native menu bar (File, …) for the tao window (MIT/Apache-2.0, tauri-apps).
+muda = { version = "0.21.2", default-features = false }
 # test-only
 proptest = "1.12.0"
 insta = "1.49.0"

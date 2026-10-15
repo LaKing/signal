@@ -31,6 +31,8 @@ signal-ui = { workspace = true }
 # ADR 0023: the window and its WebView.
 wry = { workspace = true }
 tao = { workspace = true }
+# The native menu bar: File (Open, Save, Interface setup, Quit).
+muda = { workspace = true }
 # M2.7-2: the compute inventory in the interface setup (the GPU adapters,
 # listed without creating a device) and the Setup's `gpu_devices`.
 signal-gpu = { workspace = true }
