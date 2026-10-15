@@ -311,6 +311,7 @@ mod modulation {
             max_frames: 1,
             rng: RngStream::derive(0, &"/probe".parse().unwrap()),
             lent: None,
+            generation: 0,
         });
         let mut moving = 0;
         let mut last = 0.0;

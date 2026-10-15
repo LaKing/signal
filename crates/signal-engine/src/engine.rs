@@ -602,13 +602,15 @@ pub(crate) struct PlanState {
 impl PlanState {
     /// Instantiates `plan`. With `old` (a swap), an instance of `old` with the
     /// same address, type and descriptor survives: it is not created, and is
-    /// returned as a (new, old) pair; every other instance fades in.
+    /// returned as a (new, old) pair; every other instance fades in. A
+    /// created instance is prepared with `generation` (`PrepareContext`).
     fn build(
         plan: &ExecutionPlan,
         registry: &Registry,
         config: EngineConfig,
         upfront: &[ExternalEvent],
         old: Option<&PlanState>,
+        generation: u64,
     ) -> Result<(PlanState, Vec<(usize, usize)>), EngineError> {
         // Every port of every instance, in address order.
         let mut all_ports = BTreeSet::new();
@@ -726,6 +728,7 @@ impl PlanState {
                         max_frames: config.block_capacity,
                         rng: RngStream::derive(config.seed, address),
                         lent: lent.get_mut(index).and_then(Option::take),
+                        generation,
                     };
                     match &mut primitive {
                         Primitive::Direct(module) => module.prepare(&context),
@@ -1166,7 +1169,7 @@ impl PlanState {
         registry: &Registry,
         config: EngineConfig,
     ) -> Result<PlanState, EngineError> {
-        let (mut state, _) = PlanState::build(plan, registry, config, &[], None)?;
+        let (mut state, _) = PlanState::build(plan, registry, config, &[], None, 0)?;
         for primitive in state.cells.primitives.get_mut() {
             *primitive = None;
         }
@@ -1460,7 +1463,14 @@ pub(crate) fn prepare_swap(
     plan: &ExecutionPlan,
     registry: &Registry,
 ) -> Result<PreparedSwap, EngineError> {
-    let (state, survivors) = PlanState::build(plan, registry, target.config, upfront, Some(old))?;
+    let (state, survivors) = PlanState::build(
+        plan,
+        registry,
+        target.config,
+        upfront,
+        Some(old),
+        target.version.saturating_add(1),
+    )?;
 
     // Which old instances survive, and the old instance of every output.
     let (old_slots, old_params) = (old.cells.slots.get(), old.cells.params.get());
@@ -1704,7 +1714,7 @@ impl Engine {
         }
         .clamp(1, MAX_THREADS);
         let config = EngineConfig { threads, ..config };
-        let (state, _) = PlanState::build(plan, registry, config, &external, None)?;
+        let (state, _) = PlanState::build(plan, registry, config, &external, None, 0)?;
 
         // External events: checked against the plan, unique sequence numbers.
         let mut sequences = BTreeSet::new();

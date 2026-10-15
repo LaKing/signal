@@ -46,4 +46,5 @@ pub use runner::{Controller, Runner, realtime, realtime_with};
 pub use scope::{SCOPE_POINTS, SCOPE_SLOTS, ScopeBlock, ScopeError};
 pub use vectors::{
     VECTOR_MAX_ROWS, VECTOR_SLOTS, VectorError, VectorSnapshot, VectorTap, VectorTrack,
+    vector_shape,
 };

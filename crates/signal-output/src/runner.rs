@@ -311,15 +311,17 @@ impl Controller {
     /// on the `rows` rows of vector output `port`, one snapshot at every
     /// frame that is a multiple of `decimation`, from the next callback; it
     /// replaces what the slot ran. Its snapshots carry the generation
-    /// returned.
+    /// returned. `decimation` must be a multiple of the port's rate divisor
+    /// in `plan` (the plan the caller starts it for), when `plan` has it.
     pub fn vector_start(
         &mut self,
+        plan: &ExecutionPlan,
         slot: usize,
         port: PortAddress,
         rows: usize,
         decimation: u64,
     ) -> Result<u32, VectorError> {
-        self.vectors.start(slot, port, rows, decimation)
+        self.vectors.start(plan, slot, port, rows, decimation)
     }
 
     /// Stops vector slot `slot`; its snapshots still queued are dropped.

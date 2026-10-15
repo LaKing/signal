@@ -741,6 +741,7 @@ mod tests {
             max_frames: 256,
             rng: signal_core::RngStream::derive(1, &"/bank".parse().unwrap()),
             lent: Some(Arc::new(DevicePool::lease(&pool, 0))),
+            generation: 0,
         });
         for _ in 0..4 {
             offline_block(&mut module);

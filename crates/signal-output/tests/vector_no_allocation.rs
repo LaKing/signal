@@ -71,12 +71,16 @@ fn runner_process_with_vector_streams_allocates_and_frees_nothing() {
         (port("/sparks.pos"), 128),
         (port("/sparks.life"), 64),
         (port("/bodies.bodies"), 24),
-        (port("/hits.window"), 4),
+        (port("/hits.window"), signal_std::BRIDGE_ROWS),
     ];
     for (slot, (p, rows)) in streams.iter().enumerate() {
-        let decimation = if *rows == 4 { 1 } else { 800 };
+        let decimation = if *rows == signal_std::BRIDGE_ROWS {
+            1
+        } else {
+            800
+        };
         controller
-            .vector_start(slot, p.clone(), *rows, decimation)
+            .vector_start(&plan, slot, p.clone(), *rows, decimation)
             .unwrap();
     }
     assert!(streams.len() < VECTOR_SLOTS);
@@ -110,9 +114,9 @@ fn runner_process_with_vector_streams_allocates_and_frees_nothing() {
         controller.poll_vectors(|_| snapshots += 1);
         step += 1;
         match step % 40 {
-            10 => drop(controller.vector_start(6, streams[0].0.clone(), 256, 1600)),
+            10 => drop(controller.vector_start(&plan, 6, streams[0].0.clone(), 256, 1600)),
             20 => drop(controller.vector_stop(6)),
-            30 => drop(controller.vector_start(1, streams[1].0.clone(), 128, 2400)),
+            30 => drop(controller.vector_start(&plan, 1, streams[1].0.clone(), 128, 2400)),
             _ => {}
         }
         thread::sleep(Duration::from_micros(200));

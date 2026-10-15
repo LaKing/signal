@@ -755,7 +755,7 @@ fn events_act_at_the_first_tick_at_or_after_their_frame() {
 /// M2.8-7 AC1: the physical-av demo, its visual-rate types and the count
 /// bridge included, is bit-identical in every partition and on workers:
 /// the audio, the log and every row of every vector output at every tick
-/// (the bridge windows every frame, the audio membrane's 256 rows every 97
+/// (the bridge readings every frame, the audio membrane's 256 rows every 97
 /// frames). The visual streams move, so the comparison is not of zeros.
 #[test]
 fn physical_av_is_bit_identical_in_blocks_and_on_threads() {
@@ -768,8 +768,8 @@ fn physical_av_is_bit_identical_in_blocks_and_on_threads() {
         tap("/sparks.life", 64, 800),
         tap("/bodies.bodies", 24, 800),
         tap("/bodies.vel", 12, 800),
-        tap("/hits.window", 4, 1),
-        tap("/kicks.window", 4, 1),
+        tap("/hits.window", signal_std::BRIDGE_ROWS, 1),
+        tap("/kicks.window", signal_std::BRIDGE_ROWS, 1),
         tap("/membrane_a.z", 256, 97),
     ];
     let run = (project.sample_rate, project.seed, 96_000);

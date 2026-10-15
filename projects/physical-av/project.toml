@@ -16,7 +16,7 @@
 #   transport.beat ─► bars (÷4) ─► kicks (std.count) ─► bodies.kick
 #
 # A type above rate divisor 1 cannot take events, so the visual types take
-# std.count windows (one connection at scale 1 each; docs/module-contract.md
+# std.count readings (one connection at scale 1 each; docs/module-contract.md
 # "Events into divided-rate types"): an event acts at the first visual tick
 # at or after its frame.
 schema_version = 1

@@ -62,8 +62,8 @@
 //! (`docs/semantics.md` §16), so their events come through [`Count`]
 //! (operator decision operator-request:007, a deviation from the M2.8-7
 //! wording "emit and impulse events": the visual types take `std.count`
-//! windows instead of event ports; `docs/module-contract.md` "Events into
-//! divided-rate types"). `std.mesh2d_audio` is the same membrane at divisor 1,
+//! readings ([`BRIDGE_ROWS`] rows) instead of event ports;
+//! `docs/module-contract.md` "Events into divided-rate types"). `std.mesh2d_audio` is the same membrane at divisor 1,
 //! with an event input and an audio pickup.
 //!
 //! Musical time (tempo, beats) lives here, in [`Transport`], never in the core
@@ -121,6 +121,7 @@ pub use add::Add;
 pub use adsr::Adsr;
 pub use audio_out::AudioOut;
 pub use body2d::Body2d;
+pub use bridge::BRIDGE_ROWS;
 pub use clock_div::ClockDiv;
 pub use count::Count;
 pub use dc_block::DcBlock;

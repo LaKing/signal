@@ -5,7 +5,7 @@ use signal_core::{
     PortShape, PrepareContext,
 };
 
-use crate::bridge::{WINDOW_ROWS, Window, at_tick, effect, mean};
+use crate::bridge::{BRIDGE_ROWS, Since, Window, effect, mean};
 use crate::svf::flush;
 use crate::{VISUAL_DIVISOR, at, fract, parameter_at, port_at};
 
@@ -31,12 +31,12 @@ const IMPULSE_SPEED: usize = 10;
 
 const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     type_name: "std.particles",
-    doc: "64 particles at the visual rate (rate divisor 800) with gravity, drag and springs to their anchors; emitted and pushed through std.count windows (emit, impulse) or at a rate; outputs positions, velocities and remaining life as vectors.",
+    doc: "64 particles at the visual rate (rate divisor 800) with gravity, drag and springs to their anchors; emitted and pushed through std.count readings (emit, impulse) or at a rate; outputs positions, velocities and remaining life as vectors.",
     ports: &[
         port_at(
             "emit",
             Direction::In,
-            PortShape::Vector(WINDOW_ROWS as u32),
+            PortShape::Vector(BRIDGE_ROWS as u32),
             1,
             PortKind::Generic,
             None,
@@ -45,7 +45,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
         port_at(
             "impulse",
             Direction::In,
-            PortShape::Vector(WINDOW_ROWS as u32),
+            PortShape::Vector(BRIDGE_ROWS as u32),
             1,
             PortKind::Generic,
             None,
@@ -213,19 +213,20 @@ struct Particle {
 ///
 /// **Events** (operator decision operator-request:007): a type above
 /// divisor 1 cannot have event ports (`docs/semantics.md` §16), so `emit`
-/// and `impulse` are vectors of 4 at divisor 1, each the window of one
-/// `std.count` connected at scale 1 ([`crate::bridge`]). At each tick the
-/// window holds the events since the previous tick: an event at frame *f*
-/// acts at the first tick at or after *f*, at most one tick late, once.
+/// and `impulse` are vectors of 19 at divisor 1, each the reading of one
+/// `std.count` connected at scale 1 ([`crate::bridge`]). At each tick each
+/// applies what its counter counted since the reading it applied last: an
+/// event at frame *f* acts at the first tick at or after *f*, at most one
+/// tick late, once (the losses on swaps are [`Count`](crate::Count)'s).
 ///
 /// **Ports**
-/// - `emit` (window in): `n` emissions at the tick, at speed `speed` times
+/// - `emit` (reading in): `n` emissions at the tick, at speed `speed` times
 ///   the tick's mean event value `S/n` (a trigger is worth 1), formed
 ///   without overflow ([`crate::bridge`]'s `mean`). Every one is emitted in
 ///   order: the emission index advances by `n`, and slot `k mod 64` takes
 ///   emission `k`, the oldest replaced, so only the last 64 of a tick can be
 ///   seen; nothing is capped or dropped.
-/// - `impulse` (window in): every live particle gets `S × impulse_speed` of
+/// - `impulse` (reading in): every live particle gets `S × impulse_speed` of
 ///   speed away from the emitter (straight along `angle` when on it).
 /// - `pos`, `vel` (vectors of 128 out): particle *k*'s x and y at elements
 ///   2*k* and 2*k* + 1. A dead particle keeps its last position and
@@ -266,6 +267,9 @@ pub struct Particles {
     carry: f64,
     drag: f64,
     decay: f64,
+    /// What `emit` and `impulse` applied last.
+    emits: Since,
+    impulses: Since,
 }
 
 impl Default for Particles {
@@ -277,6 +281,8 @@ impl Default for Particles {
             carry: 0.0,
             drag: f64::NAN,
             decay: 1.0,
+            emits: Since::default(),
+            impulses: Since::default(),
         }
     }
 }
@@ -348,7 +354,7 @@ impl Particles {
         }
     }
 
-    /// One tick with its two windows.
+    /// One tick with what its two inputs apply.
     fn tick(&mut self, emit: Window, impulse: Window, rate: f64, tick: &Tick) {
         self.carry += rate.max(0.0) * self.h;
         let regular = libm::floor(self.carry);
@@ -382,8 +388,8 @@ impl DirectPrimitive for Particles {
             let fallback = DESCRIPTOR.parameters.get(index).map_or(0.0, |d| d.default);
             at(inputs.parameter(index), t, fallback)
         };
-        let emit = inputs.rows(0, WINDOW_ROWS);
-        let impulse = inputs.rows(WINDOW_ROWS, WINDOW_ROWS);
+        let emit = inputs.rows(0, BRIDGE_ROWS);
+        let impulse = inputs.rows(BRIDGE_ROWS, BRIDGE_ROWS);
         for t in 0..ticks {
             let drag = p(DRAG, t);
             if drag != self.drag {
@@ -405,12 +411,9 @@ impl DirectPrimitive for Particles {
                 w2: w * w,
                 impulse_speed: p(IMPULSE_SPEED, t),
             };
-            self.tick(
-                at_tick(emit, ticks, t),
-                at_tick(impulse, ticks, t),
-                p(RATE, t),
-                &tick,
-            );
+            let emitted = self.emits.take(emit, ticks, t);
+            let pushed = self.impulses.take(impulse, ticks, t);
+            self.tick(emitted, pushed, p(RATE, t), &tick);
             for (k, q) in self.particles.iter().enumerate() {
                 for (axis, (&p, &v)) in q.p.iter().zip(&q.v).enumerate() {
                     if let Some(out) = outputs.signal(2 * k + axis).get_mut(t) {

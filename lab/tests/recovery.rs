@@ -47,6 +47,7 @@ fn after_late_results_the_bank_recovers() {
         max_frames: 256,
         rng: signal_core::RngStream::derive(1, &"/bank".parse().unwrap()),
         lent: Some(gpu.lent()),
+        generation: 0,
     });
 
     // Every result 200 ms late; 80 blocks run in far less: the pool of

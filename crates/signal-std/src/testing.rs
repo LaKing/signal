@@ -17,6 +17,7 @@ pub(crate) fn context(sample_rate: f64, max_frames: usize, seed: u64) -> Prepare
         max_frames,
         rng: stream(seed),
         lent: None,
+        generation: 0,
     }
 }
 

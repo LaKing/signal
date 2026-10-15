@@ -5,7 +5,7 @@ use signal_core::{
     PortDescriptor, PortKind, PortShape, PrepareContext,
 };
 
-use crate::bridge::{WINDOW_ROWS, at_tick, effect};
+use crate::bridge::{BRIDGE_ROWS, Since, effect};
 use crate::count::value;
 use crate::svf::flush;
 use crate::{VISUAL_DIVISOR, at, parameter_at, port_at};
@@ -107,7 +107,7 @@ const VISUAL_PORTS: [PortDescriptor; 4] = [
     port_at(
         "strike",
         Direction::In,
-        PortShape::Vector(WINDOW_ROWS as u32),
+        PortShape::Vector(BRIDGE_ROWS as u32),
         1,
         PortKind::Generic,
         None,
@@ -187,7 +187,7 @@ const AUDIO_PARAMETERS: [signal_core::ParameterDescriptor; 7] = parameters(1, 15
 
 const VISUAL_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     type_name: "std.mesh2d",
-    doc: "A 16 × 16 mass-spring membrane between fixed walls at the visual rate (rate divisor 800, 60 Hz at 48 kHz), symplectic Euler; struck through a std.count window (strike) or pushed (drive); outputs every node's displacement (z, vector of 256) and one node's (out).",
+    doc: "A 16 × 16 mass-spring membrane between fixed walls at the visual rate (rate divisor 800, 60 Hz at 48 kHz), symplectic Euler; struck through a std.count reading (strike) or pushed (drive); outputs every node's displacement (z, vector of 256) and one node's (out).",
     ports: &VISUAL_PORTS,
     parameters: &VISUAL_PARAMETERS,
     feedthrough: Feedthrough::Direct,
@@ -216,11 +216,12 @@ const AUDIO_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///
 /// **Ports**
 /// - `strike`: an impulse at the strike node, in velocity per unit
-///   `strength`. `std.mesh2d`: a vector of 4 at divisor 1, the window of one
-///   `std.count` connected at scale 1 ([`crate::bridge`]): at each tick it
-///   adds `S × strength`, the summed values of the events since the previous
-///   tick (impulses within one tick superpose; nothing is capped); an event
-///   at frame *f* acts at the first tick at or after *f*. `std.mesh2d_audio`:
+///   `strength`. `std.mesh2d`: a vector of 19 at divisor 1, the reading of
+///   one `std.count` connected at scale 1 ([`crate::bridge`]): at each tick
+///   it adds `S × strength`, the summed values of the events its counter
+///   counted since the reading it applied last (impulses within one tick
+///   superpose; nothing is capped); an event at frame *f* acts at the first
+///   tick at or after *f*. `std.mesh2d_audio`:
 ///   an event input, each event acting once on its own frame with its value
 ///   (`Trigger` 1, `Set(v)` v, `Ramp` its target) times `strength`; several
 ///   on one frame add.
@@ -278,6 +279,8 @@ pub struct Mesh2d<const AUDIO: bool> {
     g: f64,
     /// `ω_s²` of the last tick (`None`: none yet).
     w2: Option<f64>,
+    /// What `strike` applied last (`std.mesh2d` only).
+    strikes: Since,
 }
 
 impl<const AUDIO: bool> Default for Mesh2d<AUDIO> {
@@ -289,6 +292,7 @@ impl<const AUDIO: bool> Default for Mesh2d<AUDIO> {
             decay_s: f64::NAN,
             g: 1.0,
             w2: None,
+            strikes: Since::default(),
         }
     }
 }
@@ -411,7 +415,7 @@ impl<const AUDIO: bool> DirectPrimitive for Mesh2d<AUDIO> {
         let (window, drive) = if AUDIO {
             (&[][..], inputs.signal(0))
         } else {
-            (inputs.rows(0, WINDOW_ROWS), inputs.signal(WINDOW_ROWS))
+            (inputs.rows(0, BRIDGE_ROWS), inputs.signal(BRIDGE_ROWS))
         };
         let events = inputs.events(0);
         let mut next = 0;
@@ -443,7 +447,7 @@ impl<const AUDIO: bool> DirectPrimitive for Mesh2d<AUDIO> {
                 }
                 sum
             } else {
-                effect(at_tick(window, ticks, t), strength)
+                effect(self.strikes.take(window, ticks, t), strength)
             };
             let w = std::f64::consts::TAU * spring;
             self.step(w * w, h, s, impulse, at(drive, t, 0.0));

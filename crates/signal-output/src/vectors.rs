@@ -6,7 +6,10 @@
 //! one [`VectorSnapshot`] per frame, pushed to a preallocated queue (a full
 //! queue drops the snapshot and counts it). The decimation is a multiple of
 //! the port's rate divisor, so snapshots fall on its ticks and do not
-//! depend on how frames were split into callbacks.
+//! depend on how frames were split into callbacks: a start whose decimation
+//! is not a multiple of the port's divisor in the plan it names is refused
+//! ([`vector_shape`]); a port that plan lacks is not, and binds when a later
+//! plan has it.
 //!
 //! As for scopes, nothing is allocated or freed on the audio thread: slots,
 //! snapshots and queues are made with the run, and a port replaced by a
@@ -18,8 +21,9 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rtrb::{Consumer, Producer, RingBuffer};
-use signal_core::{Frame, PortAddress};
+use signal_core::{Direction, Frame, PortAddress, PortShape};
 use signal_engine::Engine;
+use signal_graph::ExecutionPlan;
 
 /// Vector slots per run.
 pub const VECTOR_SLOTS: usize = 8;
@@ -68,7 +72,7 @@ impl VectorSnapshot {
 pub enum VectorError {
     /// No such slot.
     Slot,
-    /// The decimation must be at least 1.
+    /// The decimation must be a positive multiple of the port's rate divisor.
     Decimation,
     /// Rows must be 1 to [`VECTOR_MAX_ROWS`].
     Rows,
@@ -80,7 +84,9 @@ impl std::fmt::Display for VectorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             VectorError::Slot => "no such vector slot",
-            VectorError::Decimation => "the decimation must be at least 1",
+            VectorError::Decimation => {
+                "the decimation must be a positive multiple of the port's rate divisor"
+            }
             VectorError::Rows => "a vector stream has 1 to 512 rows",
             VectorError::Full => "too many vector commands outstanding",
         })
@@ -88,6 +94,27 @@ impl std::fmt::Display for VectorError {
 }
 
 impl std::error::Error for VectorError {}
+
+/// Vector output `port` of `plan`: its elements and rate divisor; `None`
+/// when the plan has no such vector output of at most [`VECTOR_MAX_ROWS`]
+/// elements.
+pub fn vector_shape(plan: &ExecutionPlan, port: &PortAddress) -> Option<(usize, u64)> {
+    let instance = plan
+        .instances
+        .iter()
+        .find(|i| i.address == port.instance())?;
+    instance
+        .descriptor
+        .ports
+        .iter()
+        .find_map(|p| match p.shape {
+            PortShape::Vector(n) if p.name == port.port() && p.direction == Direction::Out => {
+                Some((n as usize, u64::from(p.rate.get())))
+            }
+            _ => None,
+        })
+        .filter(|&(n, _)| n <= VECTOR_MAX_ROWS)
+}
 
 /// Writes the `out.len()` rows of the output whose first row is `first` at
 /// block frame `f`, as `f32`. Allocates nothing.
@@ -288,6 +315,7 @@ impl VectorControl {
 
     pub(crate) fn start(
         &mut self,
+        plan: &ExecutionPlan,
         slot: usize,
         port: PortAddress,
         rows: usize,
@@ -296,7 +324,8 @@ impl VectorControl {
         if slot >= VECTOR_SLOTS {
             return Err(VectorError::Slot);
         }
-        if decimation == 0 {
+        let divisor = vector_shape(plan, &port).map_or(1, |(_, d)| d.max(1));
+        if decimation == 0 || !decimation.is_multiple_of(divisor) {
             return Err(VectorError::Decimation);
         }
         if rows == 0 || rows > VECTOR_MAX_ROWS {
@@ -405,5 +434,44 @@ impl VectorTaps {
                 track.snapshots.push((Frame(first + f as u64), values));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use signal_core::Registry;
+    use signal_graph::{CompositeDef, Exports, InstanceDef, build_plan};
+
+    use super::*;
+
+    /// M2.8-10 AC8: a start whose decimation is not a multiple of the port's
+    /// divisor in the plan is refused; a multiple is accepted; a port the
+    /// plan lacks stays armed (it binds when a later plan has it).
+    #[test]
+    fn a_start_checks_the_decimation_against_the_ports_divisor() {
+        let mut registry = Registry::new();
+        signal_std::register(&mut registry).unwrap();
+        let root = CompositeDef {
+            name: "project".to_owned(),
+            instances: vec![InstanceDef {
+                name: "sparks".to_owned(),
+                module: "std.particles".to_owned(),
+                parameters: BTreeMap::new(),
+            }],
+            connections: Vec::new(),
+            exports: Exports::default(),
+        };
+        let plan = build_plan(&root, &[], &registry, 0).unwrap();
+        let port = |text: &str| -> PortAddress { text.parse().unwrap() };
+        assert_eq!(vector_shape(&plan, &port("/sparks.vel")), Some((128, 800)));
+        let (_vectors, mut control) = vectors();
+        let mut start =
+            |p: &str, decimation: u64| control.start(&plan, 0, port(p), 128, decimation);
+        assert_eq!(start("/sparks.vel", 1200), Err(VectorError::Decimation));
+        assert_eq!(start("/sparks.vel", 0), Err(VectorError::Decimation));
+        assert!(start("/sparks.vel", 1600).is_ok());
+        assert!(start("/later.vel", 3).is_ok());
     }
 }

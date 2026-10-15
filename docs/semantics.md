@@ -361,7 +361,7 @@ A connection across rate divisors runs through a converter instance (§16), so c
 
 ### Added instances
 
-An added instance is created and prepared like any instance (its random stream is `RngStream::derive(seed, address)`) and runs from the swap frame. Its `audio` outputs fade in exactly as after a resume (§6): on its *j*-th frame the output is `live · ((j + 1) / F)` for *j* < *F* − 1, and exactly `live` from *j* = *F* − 1 on. Its other signal outputs and its event outputs start at once.
+An added instance is created and prepared like any instance (its random stream is `RngStream::derive(seed, address)`, its `generation` *v* + 1 for a swap prepared at plan version *v*; an instance of the plan the engine was built with has 0) and runs from the swap frame. Its `audio` outputs fade in exactly as after a resume (§6): on its *j*-th frame the output is `live · ((j + 1) / F)` for *j* < *F* − 1, and exactly `live` from *j* = *F* − 1 on. Its other signal outputs and its event outputs start at once.
 
 ### Removal
 

@@ -47,6 +47,7 @@ fn prepared(gpu: &common::Gpu, sample_rate: f64) -> GpuPartials {
         max_frames: 256,
         rng: RngStream::derive(1, &"/bank".parse().unwrap()),
         lent: Some(gpu.lent()),
+        generation: 0,
     });
     module
 }

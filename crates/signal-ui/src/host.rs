@@ -472,25 +472,10 @@ fn vector_decimation(rate: f64, sample_rate: u32, divisor: u64) -> u64 {
     divisor * (ticks / rate).round().max(1.0) as u64
 }
 
-/// Vector output `port` of `plan`: its elements and rate divisor; `None`
-/// when the plan has no such vector output of at most
-/// [`VECTOR_MAX_ROWS`] elements.
+/// Vector output `port` of `plan`: its elements and rate divisor
+/// ([`signal_output::vector_shape`]); `None` without a plan.
 fn vector_shape(plan: Option<&ExecutionPlan>, port: &PortAddress) -> Option<(usize, u64)> {
-    let instance = plan?
-        .instances
-        .iter()
-        .find(|i| i.address == port.instance())?;
-    instance
-        .descriptor
-        .ports
-        .iter()
-        .find_map(|p| match p.shape {
-            PortShape::Vector(n) if p.name == port.port() && p.direction == PortDirection::Out => {
-                Some((n as usize, u64::from(p.rate.get())))
-            }
-            _ => None,
-        })
-        .filter(|&(n, _)| n <= VECTOR_MAX_ROWS)
+    signal_output::vector_shape(plan?, port)
 }
 
 impl Host {
@@ -2032,12 +2017,11 @@ impl Host {
                     .iter()
                     .position(Option::is_none)
                     .ok_or_else(|| fail("no-vector-slot", "every vector slot is in use"))?;
-                let run = self
-                    .run
-                    .as_mut()
-                    .ok_or_else(|| fail("not-playing", "nothing plays"))?;
+                let (Some(plan), Some(run)) = (self.plan.as_ref(), self.run.as_mut()) else {
+                    return Err(fail("not-playing", "nothing plays"));
+                };
                 run.controller
-                    .vector_start(slot, port.clone(), rows, decimation)
+                    .vector_start(plan, slot, port.clone(), rows, decimation)
                     .map_err(|e| fail("busy", e.to_string()))?;
                 if let Some(s) = self.vector_slots.get_mut(slot) {
                     *s = Some(id);
@@ -3089,8 +3073,8 @@ impl Host {
                 continue;
             }
             (*rows, *decimation) = (n, d);
-            if restart && let Some(run) = self.run.as_mut() {
-                let _ = run.controller.vector_start(*slot, port.clone(), n, d);
+            if restart && let (Some(plan), Some(run)) = (plan, self.run.as_mut()) {
+                let _ = run.controller.vector_start(plan, *slot, port.clone(), n, d);
             }
             told.push((
                 s.client,
@@ -3105,7 +3089,7 @@ impl Host {
     /// The scope and vector subscriptions, on a new run's Controller.
     fn rearm(&mut self) {
         self.reshape_vectors(false);
-        let Some(run) = self.run.as_mut() else {
+        let (Some(plan), Some(run)) = (self.plan.as_ref(), self.run.as_mut()) else {
             return;
         };
         for sub in self.subs.values_mut() {
@@ -3131,7 +3115,7 @@ impl Host {
                 *bound = false;
                 let _ = run
                     .controller
-                    .vector_start(*slot, port.clone(), *rows, *decimation);
+                    .vector_start(plan, *slot, port.clone(), *rows, *decimation);
             }
         }
     }

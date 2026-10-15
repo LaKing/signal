@@ -5,7 +5,7 @@ use signal_core::{
     PortShape, PrepareContext,
 };
 
-use crate::bridge::{WINDOW_ROWS, at_tick, effect};
+use crate::bridge::{BRIDGE_ROWS, Since, effect};
 use crate::svf::flush;
 use crate::{VISUAL_DIVISOR, at, parameter_at, port_at};
 
@@ -35,12 +35,12 @@ const START: [[f64; 2]; BODIES] = [
 
 const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     type_name: "std.body2d",
-    doc: "Four rigid circles and two rigid, axis-aligned boxes colliding in the box [-1, 1]² at the visual rate (rate divisor 800), with gravity and restitution, kicked through a std.count window; deterministic symplectic integration in substeps, so nothing tunnels at speeds up to max_speed.",
+    doc: "Four rigid circles and two rigid, axis-aligned boxes colliding in the box [-1, 1]² at the visual rate (rate divisor 800), with gravity and restitution, kicked through a std.count reading; deterministic symplectic integration in substeps, so nothing tunnels at speeds up to max_speed.",
     ports: &[
         port_at(
             "kick",
             Direction::In,
-            PortShape::Vector(WINDOW_ROWS as u32),
+            PortShape::Vector(BRIDGE_ROWS as u32),
             1,
             PortKind::Generic,
             None,
@@ -138,11 +138,12 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 /// walls of the box [−1, 1]², at the visual rate (divisor 800). No friction.
 ///
 /// **Ports**
-/// - `kick` (window in, operator decision operator-request:007): the window
-///   of one `std.count` at scale 1 ([`crate::bridge`]). At each tick every
-///   body gets `S × kick_speed` of speed along its own direction
+/// - `kick` (reading in, operator decision operator-request:007): the
+///   reading of one `std.count` at scale 1 ([`crate::bridge`]). At each tick
+///   every body gets `S × kick_speed` of speed along its own direction
 ///   `θ_i = π/2 + 0.4·(i − 2.5)` (mostly up), `S` the summed values of the
-///   events since the previous tick; nothing is capped.
+///   events its counter counted since the reading it applied last; nothing
+///   is capped.
 /// - `bodies` (vector of 24 out): per body `[x, y, size, kind]`, kind 0 a
 ///   circle (size its radius), 1 a box (size its half-width).
 /// - `vel` (vector of 12 out): per body `[vx, vy]`.
@@ -184,8 +185,10 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 /// `size_min`, less than the sum of their sizes, so the swept segment never
 /// crosses a body whole between two looks; walls clamp every substep. So
 /// at any speed up to `max_speed` (the documented bound, itself limited to
-/// `64·size_min/(2h)`) a body never crosses a wall or another body. A
-/// resting stack may jitter (one pass per substep). Velocities are flushed
+/// `64·size_min/(2h)`) a body never crosses a wall or another body. Known
+/// limit, not fixed (M2.8-10): a large change of `radius` or `half` within
+/// one tick can put bodies into overlap, which is then resolved by
+/// positional correction without a sweep. A resting stack may jitter (one pass per substep). Velocities are flushed
 /// to 0 below 1e-9. The order of every operation is fixed, so the result is
 /// bit-exact.
 #[derive(Clone, Debug)]
@@ -193,6 +196,8 @@ pub struct Body2d {
     h: f64,
     p: [[f64; 2]; BODIES],
     v: [[f64; 2]; BODIES],
+    /// What `kick` applied last.
+    kicks: Since,
 }
 
 impl Default for Body2d {
@@ -201,6 +206,7 @@ impl Default for Body2d {
             h: f64::from(D) / 48_000.0,
             p: START,
             v: [[0.0; 2]; BODIES],
+            kicks: Since::default(),
         }
     }
 }
@@ -527,7 +533,7 @@ impl DirectPrimitive for Body2d {
             let fallback = DESCRIPTOR.parameters.get(index).map_or(0.0, |d| d.default);
             at(inputs.parameter(index), t, fallback)
         };
-        let kick = inputs.rows(0, WINDOW_ROWS);
+        let kick = inputs.rows(0, BRIDGE_ROWS);
         for t in 0..ticks {
             let tick = Tick {
                 gravity: p(GRAVITY, t),
@@ -536,7 +542,8 @@ impl DirectPrimitive for Body2d {
                 radius: p(RADIUS, t).max(1e-3),
                 half: p(HALF, t).max(1e-3),
             };
-            self.tick(effect(at_tick(kick, ticks, t), p(KICK_SPEED, t)), &tick);
+            let kicked = self.kicks.take(kick, ticks, t);
+            self.tick(effect(kicked, p(KICK_SPEED, t)), &tick);
             for (i, (pos, vel)) in self.p.iter().zip(&self.v).enumerate() {
                 let kind = if i < CIRCLES { 0.0 } else { 1.0 };
                 let record = [pos[0], pos[1], tick.size(i), kind];

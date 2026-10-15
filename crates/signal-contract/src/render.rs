@@ -111,6 +111,7 @@ impl Instance {
             max_frames: max_frames.max(1),
             rng: RngStream::derive(seed, &address),
             lent: self.lent.clone(),
+            generation: 0,
         };
         self.max_frames = ctx.max_frames;
         let primitive = &mut self.primitive;

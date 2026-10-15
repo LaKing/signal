@@ -41,7 +41,13 @@ fn error<T>(message: String) -> Result<T, OracleError> {
 /// Runs `graph` for `script.frames` frames, one at a time.
 pub fn run(registry: &Registry, graph: &Graph, script: &Script) -> Result<Output, OracleError> {
     let fade = fade_frames(script.sample_rate);
-    let mut plan = Plan::build(registry, &with_converters(registry, graph)?, script, None)?;
+    let mut plan = Plan::build(
+        registry,
+        &with_converters(registry, graph)?,
+        script,
+        None,
+        0,
+    )?;
     let mut output = Output {
         channels: plan.sink_inputs(),
         ..Output::default()
@@ -52,8 +58,8 @@ pub fn run(registry: &Registry, graph: &Graph, script: &Script) -> Result<Output
         // Phase 1 (§2): a swap, then edits, then external events.
         if let Some(swap) = script.swaps.iter().find(|s| s.frame == n) {
             let graph = with_converters(registry, &swap.graph)?;
-            plan = Plan::build(registry, &graph, script, Some(plan))?;
             version += 1;
+            plan = Plan::build(registry, &graph, script, Some(plan), version)?;
             records.push(Record::Swap {
                 frame: n,
                 version,
@@ -350,12 +356,15 @@ struct Plan {
 
 impl Plan {
     /// Instantiates `graph`; after a swap from `old`, an instance with the
-    /// same address and type survives with its state (§12).
+    /// same address and type survives with its state (§12). A created
+    /// instance is prepared with `generation`: 0 for the first plan, the
+    /// version a swap makes for an added one (§12, "Added instances").
     fn build(
         registry: &Registry,
         graph: &Graph,
         script: &Script,
         old: Option<Plan>,
+        generation: u64,
     ) -> Result<Plan, OracleError> {
         let mut old = old;
         let mut sorted = graph.instances.clone();
@@ -400,6 +409,7 @@ impl Plan {
                         max_frames: 1,
                         rng: RngStream::derive(script.seed, &spec.address),
                         lent: None,
+                        generation,
                     };
                     match &mut primitive {
                         Primitive::Direct(module) => module.prepare(&context),

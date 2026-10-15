@@ -115,6 +115,7 @@ fn a_miss_while_the_lost_service_drains_is_device_lost() {
         max_frames: 256,
         rng: RngStream::derive(1, &"/bank".parse().unwrap()),
         lent: Some(gpu.lent()),
+        generation: 0,
     });
     // The first L blocks have no due result; each submits one job.
     for _ in 0..LATENCY_BLOCKS as usize * BLOCK_FRAMES {

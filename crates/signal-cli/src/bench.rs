@@ -1367,7 +1367,7 @@ fn stimulus_graph() -> CompositeDef {
 /// The stimulus and [`INSTANCES`] instances of `type_name`, each input fed by
 /// it: signals by the saw (phase inputs scaled to 0.05 cycles), gates by the
 /// LFO, the first event input by the beats and ghost notes, any other by the
-/// accents, and a `std.count` window (the event bridge of the visual-rate
+/// accents, and a `std.count` reading (the event bridge of the visual-rate
 /// types, M2.8-7) by one counter of the beats, shared by the instances.
 /// Outputs are left open; every instance runs regardless.
 fn primitive_graph(registry: &Registry, type_name: &str) -> Result<CompositeDef, Failure> {
@@ -1377,7 +1377,7 @@ fn primitive_graph(registry: &Registry, type_name: &str) -> Result<CompositeDef,
         .map(|t| t.descriptor)
         .ok_or_else(|| Failure::Internal(format!("{type_name} is not registered")))?;
     let mut graph = stimulus_graph();
-    let window = PortShape::Vector(4);
+    let window = PortShape::Vector(signal_std::BRIDGE_ROWS as u32);
     if descriptor
         .ports
         .iter()
