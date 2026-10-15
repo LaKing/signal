@@ -45,7 +45,6 @@ libc = "0.2.190"
 # M2.7-6: model tests of the scheduler's synchronisation (dev-dependency of signal-engine only)
 loom = "0.7.2"
 # M2.8 (ADR 0023): the web UI: local server (signal-ui) and the app's WebView (signal-app)
-tiny_http = "0.12.0"
 tungstenite = "0.30.0"
 wry = "0.57.0"
 tao = "0.37.1"

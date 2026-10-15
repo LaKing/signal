@@ -9,6 +9,7 @@
 
 import { connectFromPage, getDefaultConnection, setDefaultConnection } from '../signal-ui.js';
 import { BindingCheck, defaultPanel, formatDiagnostic, panelFile } from '../lib/panel.js';
+import { unsavedLine } from '../lib/unsaved.js';
 
 const CSS = `
 :host { display: block; color: var(--signal-fg, #d6dbe4); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
@@ -23,6 +24,8 @@ const CSS = `
 .generated h2 small { font-weight: 400; letter-spacing: 0; text-transform: none; margin-left: .5em; }
 .generated .row { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; align-items: flex-end; }
 .generated signal-scope { flex: 1 1 20rem; min-width: 16rem; }
+.unsaved { color: var(--signal-unsaved, #ffb74d); }
+.unsaved button { margin-left: .4em; font: inherit; color: var(--signal-fg, #d6dbe4); background: var(--signal-track, #2a2f38); border: 1px solid var(--signal-unsaved, #ffb74d); border-radius: 3px; cursor: pointer; }
 [hidden] { display: none !important; }
 `;
 
@@ -36,7 +39,7 @@ export class SignalPanel extends HTMLElement {
     super();
     this.attachShadow({ mode: 'open' });
     this.shadowRoot.innerHTML = `<style>${CSS}</style>
-<div class="bar" part="bar"><span class="status">starting…</span><span class="title"></span><span class="summary"></span></div>
+<div class="bar" part="bar"><span class="status">starting…</span><span class="title"></span><span class="summary"></span><span class="unsaved" part="unsaved" role="status" hidden><span class="unsaved-text"></span><button type="button" class="retry-all">Retry all</button><button type="button" class="revert-all">Revert all</button></span></div>
 <ol class="problems" part="problems" role="alert" hidden></ol>
 <div class="generated" part="generated"></div>
 <slot></slot>`;
@@ -71,8 +74,31 @@ export class SignalPanel extends HTMLElement {
     if (getDefaultConnection() !== connection) setDefaultConnection(connection);
     this.stops.push(connection.on('status', (s) => this.showStatus(s)));
     this.stops.push(connection.on('describe', (d) => this.described(d)));
+    this.stops.push(connection.on('unsaved', (u) => this.showUnsaved(u)));
+    this.$('.retry-all').onclick = () => this.everyUnsaved((address) => connection.retry(address), (p) => p.control);
+    this.$('.revert-all').onclick = () => this.everyUnsaved((address) => connection.revert(address), () => true);
     this.showStatus(connection.status);
     if (connection.description) this.described(connection.description);
+  }
+
+  /**
+   * The project's unsaved parameters (docs/ui-controls.md "Unsaved"):
+   * "N unsaved parameters — last error", with Retry all and Revert all.
+   */
+  showUnsaved(state, note = null) {
+    this.unsaved = state;
+    const line = unsavedLine(state);
+    this.$('.unsaved-text').textContent = note ? `${line} (${note})` : line;
+    this.$('.unsaved').hidden = !line;
+  }
+
+  /** `request(address)` for every listed parameter `which` takes; a refusal is shown. */
+  everyUnsaved(request, which) {
+    for (const p of (this.unsaved?.parameters ?? []).filter(which)) {
+      request(p.address).catch((error) => {
+        if (error.code !== 'not-unsaved') this.showUnsaved(this.unsaved, `${p.address}: ${error.message}`);
+      });
+    }
   }
 
   disconnectedCallback() {
@@ -88,6 +114,7 @@ export class SignalPanel extends HTMLElement {
   /** A pushed or requested describe: check again (or rebuild) when the plan changed. */
   described(description) {
     this.$('.title').textContent = description.project ?? '';
+    if (description.unsaved) this.showUnsaved(description.unsaved);
     if (this.hasAttribute('generated')) {
       if (description.planVersion === this.planVersion) return;
       this.planVersion = description.planVersion;

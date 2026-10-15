@@ -326,7 +326,47 @@ fn signal_ui_refuses_the_app_s_messages(transport: Transport) {
     rig.finish();
 }
 
+/// M2.8-8: a commit that fails while stopped is unsaved, and stays so (its
+/// value live) once the project plays: a new run plays the file, and the
+/// host plays the unsaved value again in it.
+fn a_failed_stopped_commit_is_still_unsaved_when_playing(transport: Transport) {
+    let mut rig = app_rig("unsaved", transport, None);
+    let (mut ws, _) = rig.client();
+    let Some(read_only) = common::ReadOnly::new(&rig.dir) else {
+        return rig.finish();
+    };
+    let refused = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "commit", "address": "/out.gain", "value": 0.125}),
+        "error",
+    );
+    assert_eq!(refused["code"], "write-failed");
+    let unsaved = rig.unsaved(&mut ws, "listed while stopped", |u| u["count"] == 1);
+    assert_eq!(unsaved["parameters"][0]["address"], "/out.gain");
+    rig.request(&mut ws, 2, json!({"type": "transport.play"}), "transport");
+    let described = rig.request(&mut ws, 3, json!({"type": "describe"}), "describe");
+    assert_eq!(described["playing"], true);
+    assert_eq!(described["unsaved"]["count"], 1, "still unsaved");
+    assert_eq!(
+        described["unsaved"]["parameters"][0]["error"],
+        refused["message"]
+    );
+    let sub = rig.watch_parameter(&mut ws, 4, "/out.gain");
+    rig.wait_base(&mut ws, sub, 0.125);
+    drop(read_only);
+    rig.request(
+        &mut ws,
+        5,
+        json!({"type": "retry", "address": "/out.gain"}),
+        "committed",
+    );
+    rig.unsaved(&mut ws, "saved", |u| u["count"] == 0);
+    rig.finish();
+}
+
 both!(
+    a_failed_stopped_commit_is_still_unsaved_when_playing,
     it_starts_stopped_plays_and_stops,
     a_project_that_does_not_load_shows_its_diagnostics,
     opening_a_project_stops_records_it_and_serves_its_panels,

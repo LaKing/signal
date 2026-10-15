@@ -4,8 +4,9 @@
 //!
 //! - [`Host`]: the protocol's state, stepped by its owner's control loop:
 //!   the run, the clients, their subscriptions and edits.
-//! - The servers: static files over HTTP (`tiny_http`: the repository's
-//!   `ui/` and the project's `ui/`) and the protocol over a WebSocket
+//! - The servers: static files over HTTP (a small `std::net` server with a
+//!   fixed pool of workers and deadlines: the repository's `ui/` and the
+//!   project's `ui/`) and the protocol over a WebSocket
 //!   (`tungstenite`), on 127.0.0.1 unless remote clients are allowed
 //!   explicitly; every client needs the session token.
 //! - [`panel`], [`setup`] and [`player`]: the parameter panel, the Setup
@@ -31,6 +32,7 @@ pub mod bindings;
 mod entities;
 pub mod frames;
 mod host;
+mod http;
 #[cfg(feature = "test-hooks")]
 mod local;
 pub mod panel;

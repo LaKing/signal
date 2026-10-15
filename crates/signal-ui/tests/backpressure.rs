@@ -78,8 +78,13 @@ fn a_stalled_client_is_dropped_from_and_evicted_without_blocking_the_others(tran
         assert_eq!(ack["outcome"], "scheduled");
     }
 
-    // A reply that does not fit evicts the stalled client.
-    send(&mut slow, json!({"type": "ping", "id": 2}));
+    // A reply that does not fit evicts the stalled client. The other
+    // client's uncommitted edits made `/out.gain` unsaved, and that push (a
+    // control message too) may already have evicted it: then this send
+    // finds the connection closed.
+    let _ = slow.send(tungstenite::Message::text(
+        json!({"type": "ping", "id": 2}).to_string(),
+    ));
     let until = Instant::now() + Duration::from_secs(20);
     loop {
         assert!(Instant::now() < until, "the stalled client was not evicted");

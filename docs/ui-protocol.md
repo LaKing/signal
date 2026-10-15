@@ -8,10 +8,12 @@ Two servers, both bound to **127.0.0.1** by default:
 
 | Server | Port | Serves |
 |---|---|---|
-| HTTP (`tiny_http`) | `--port N` (a free one without it, or with 0) | Static files only (below) |
+| HTTP (a small `std::net` server, `crates/signal-ui/src/http.rs`) | `--port N` (a free one without it, or with 0) | Static files only (below) |
 | WebSocket (`tungstenite`) | a free port | The protocol |
 
-They are separate because `tiny_http`'s upgraded connection is one boxed stream with no timeouts that cannot be split, so one thread could not both wait for a client's messages and write the frames queued for it.
+They are separate: each WebSocket client has a thread that both waits for its messages and writes the frames queued for it, while the HTTP server serves one request per connection from a fixed pool (below). (Until M2.8-8 the HTTP server was `tiny_http`, whose upgraded connection could not be split either.)
+
+**No client can block the HTTP server (M2.8-8).** An accept thread hands each connection to a queue of 32 (more are closed at once), and a fixed pool of **4 workers** serves them, one request per connection (`Connection: close`, with `Content-Length`). A connection holds one worker at most: it has **2 s** to send its request head (at most 8 KiB; otherwise 400), and a response is streamed in 64 KiB chunks, never read whole into memory; a client that takes nothing for **3 s** is dropped and its worker freed. Every wait is a poll of 100 ms that looks at the stop flag, so dropping the server (`signal ui` ending, Signal.app's window closing or quitting) returns within a few polls whatever its clients do. A client that keeps reading, however slowly, keeps its worker. Tests: `crates/signal-ui/src/http.rs` (deadlines, stop, streaming, without a socket) and `crates/signal-ui/tests/http.rs` (a client that stops reading a 32 MiB asset; another request answered within 1 s; dropping the server within 2 s; the deadline; over TCP and in process).
 
 **The URL to open** (printed by `signal ui`, opened by `--open`):
 
@@ -65,9 +67,9 @@ Otherwise it sends `{"type": "error", "code": "unauthorized", …}` (a wrong or 
  "scopes": {"slots": 8, "points": 256, "maxRate": 48000}}
 ```
 
-(Values here are illustrative.) `instances` is the flattened plan: every primitive instance with its ports and parameters (kind, unit, range, default, combine, and the parameter's initial base in the plan). `controls` are what the parameter panel edits: the parameters of the project's top-level instances, a composite's exported ones included, at the address `/<instance>.<parameter>`, with the plan ports a value goes to (an export can fan out to several), the range they share, the value without a key in the file (`default`), the base (`base`, the file's value or the default) and whether the file sets it. `planVersion` is the running engine's plan version; `meters.output` lists the sink's channels, the device channel each plays on, and its `label` (`out 1 → 3`, or `out 2 (not played)`).
+(Values here are illustrative.) `instances` is the flattened plan: every primitive instance with its ports and parameters (kind, unit, range, default, combine, and the parameter's initial base in the plan). `controls` are what the parameter panel edits: the parameters of the project's top-level instances, a composite's exported ones included, at the address `/<instance>.<parameter>`, with the plan ports a value goes to (an export can fan out to several), the range they share, the value without a key in the file (`default`), the base (`base`: the live value, the last one known to have reached every port; the file's value or the default when nothing else was sent) and whether the file sets it. `unsaved` lists the parameters whose live value the file does not hold ("Unsaved", below). `planVersion` is the running engine's plan version; `meters.output` lists the sink's channels, the device channel each plays on, and its `label` (`out 1 → 3`, or `out 2 (not played)`).
 
-The server pushes `describe` (without `id`) when a plan swap commits, after a reload that changed values, after a `commit`, and after `setup.apply` played again (then with `"restarted": true`).
+The server pushes `describe` (without `id`) when a plan swap commits, after a reload that changed values, after a `commit` (or `retry`) is written and after a `revert`, and after `setup.apply` played again (then with `"restarted": true`).
 
 ### `subscribe`, `unsubscribe`
 
@@ -112,6 +114,34 @@ Writes a control's value into the project's `project.toml` (`value: null` remove
 ```
 
 Only controls are committed (`not-editable` otherwise): a parameter inside a composite is set in the composite's file, and writing it there would change every instance of the composite.
+
+A write that fails (a read-only folder, a full disk) answers `{"type": "error", "code": "write-failed", "message": …}`, and the value the commit sent live **stays live and unsaved** (below): it is never quietly taken as saved.
+
+### Unsaved: `unsaved`, `retry`, `revert`
+
+The live state and the project's text may differ (ADR 0009, 0013), but never silently: **the host knows every parameter whose live value the file does not hold, or may not hold, and tells every client** — in `describe` (`unsaved`) and as a push whenever it changes, so a second client or a reloaded page sees the same. Clients hold no state of their own about it.
+
+```json
+{"type": "unsaved", "count": 1, "lastError": "out.gain was not written to …/project.toml: Permission denied (os error 13)",
+ "parameters": [{"address": "/out.gain", "file": 0.5, "inFile": true, "control": true, "applied": true,
+   "error": "out.gain was not written to …/project.toml: Permission denied (os error 13)"}]}
+```
+
+A parameter is listed while:
+
+- **a control's latest live value is not the file's** (`file`: the file's value, or the default without a key): an edit not committed yet (a drag in progress, a `set` or `ramp`), or one whose write failed (`error`: the write's error). Each new `set`, `ramp` or `commit` replaces the live value: `retry` writes the newest one, never an older failed one.
+- **its latest live value did not reach every port** (`applied: false`): the Controller refused it (`refused`), a runner refused it after (the edit's ack is `refused`), or a commit was written while its live send was refused (until the reload of the written file sends every port the file's value). It stays listed whatever its value until a send of it is taken: a refused `set` back to the file's value does not make it saved, since the ports still hold what they held. `describe`'s `base` is then the last value known to have reached every port.
+- **a failed reset** (`commit` of `null`) leaves each port at its default while the file has the key.
+- **a plan parameter port that is no control** was edited live (`control: false`): its value is in a composite's file, which the protocol never writes; it can be reverted, not retried.
+
+`count` is the number listed; `lastError` the most recent error still listed. A parameter whose live and file values agree again (moved back to the file's value, with that send taken) is no longer listed, and its error goes with it. A reload whose file changes a listed parameter's value sends the file's value and so clears it; a reload of other keys keeps it. A new run of the same project (`transport.play`, `setup.apply` playing again) plays the file and the host plays every listed control's live value again in it, so it stays live and unsaved; `transport.stop` keeps them, and opening another project (`project.open`) lets them go and says how many in `app`'s `message`.
+
+| Message | Does | Reply |
+|---|---|---|
+| `{"type": "retry", "address": "/out.gain"}` | Commits the control's live value again (the latest one; after a failed reset, `null`), sending it live first unless every port already took it. A send the Controller refuses writes nothing (`refused`) | `committed`, as for `commit`; errors `write-failed` (still unsaved, with the new error), `refused`, `not-editable` (a plan port that is no control), `not-unsaved` |
+| `{"type": "revert", "address": "/out.gain"}` | Sends each port the file's value (each port its own default without a key; a plan port the plan's base), and the parameter is saved. Stopped, it only clears | `{"type": "reverted", "address", "value": <the file's value or null>, "sent": <whether it played>}`; errors `refused` (still unsaved, its ports in doubt), `not-unsaved` |
+
+Tests: `crates/signal-ui/tests/unsaved.rs` (a read-only project folder: `write-failed`, listed in `describe` and pushed to every client, retry once writable, revert, a newer edit replacing the failed value, a refused edit back to the file's value staying unsaved, a reload), `crates/signal-ui/tests/app_mode.rs` (a failed write while stopped is still unsaved when playing).
 
 ### `panel.check`
 
@@ -168,7 +198,7 @@ Signal.app's control thread runs the host in **app mode** (`Host::new_app`, M2.8
 
 ### Errors
 
-`{"type": "error", "id": …, "code": "…", "message": "…"}`. Codes: `unauthorized`, `protocol`, `already-authenticated`, `bad-message`, `unknown-type`, `unknown-address`, `unknown-sub`, `unknown-device`, `unknown-panel`, `bad-address`, `bad-value`, `bad-rate`, `bad-device`, `not-a-signal-output`, `no-scope-slot`, `busy`, `refused`, `not-playing`, `not-editable`, `write-failed`, `playing`, `recording`, and in Signal.app's messages `not-allowed`, `no-project`, `does-not-load`, `device`.
+`{"type": "error", "id": …, "code": "…", "message": "…"}`. Codes: `unauthorized`, `protocol`, `already-authenticated`, `bad-message`, `unknown-type`, `unknown-address`, `unknown-sub`, `unknown-device`, `unknown-panel`, `bad-address`, `bad-value`, `bad-rate`, `bad-device`, `not-a-signal-output`, `no-scope-slot`, `busy`, `refused`, `not-playing`, `not-editable`, `write-failed`, `not-unsaved`, `playing`, `recording`, and in Signal.app's messages `not-allowed`, `no-project`, `does-not-load`, `device`.
 
 ## Binary frames
 

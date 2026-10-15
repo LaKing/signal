@@ -1,20 +1,16 @@
 // What every control shares (docs/ui-controls.md): the connection, the
 // `bind` attribute, the `skin` attribute, focus, keys, pointer capture and
 // the theme; and, for the controls that edit a value, the binding to one
-// parameter (live edits, debounced commits, ARIA values).
+// parameter (live edits, debounced commits, ARIA values, lib/binding.js) and
+// its unsaved mark.
 
-import { findParameter, onDefaultConnection } from '../signal-ui.js';
-import { formatValue } from '../lib/format.js';
-import { dragDelta, keyAction, resetValue, wheelDelta } from '../lib/gesture.js';
+import { onDefaultConnection } from '../signal-ui.js';
+import { Binding } from '../lib/binding.js';
+import { dragDelta, keyAction, wheelDelta } from '../lib/gesture.js';
 import { parseSkin } from '../lib/skin.js';
-import { toPosition, toValue } from '../lib/taper.js';
 import { loadSkin, mountSkin, showSkin } from './skin-dom.js';
 
-/** Keyboard and wheel edits are committed once this long after the last one. */
-export const COMMIT_DELAY_MS = 400;
-
-/** The ramp a drag sends with each move. */
-export const RAMP_MS = 5;
+export { Binding, COMMIT_DELAY_MS, RAMP_MS, numberAttribute, quietly } from '../lib/binding.js';
 
 /** The dark default theme; every value can be overridden by a custom property. */
 export const BASE_CSS = `
@@ -50,24 +46,75 @@ svg { display: block; overflow: visible; }
 .fill { fill: var(--signal-accent, #4fc3f7); }
 .effective { fill: var(--signal-effective, #ffb74d); stroke: var(--signal-effective, #ffb74d); }
 .thumb { fill: var(--signal-thumb, #e8ecf2); stroke: var(--signal-bg, #16181d); stroke-width: 1; }
+:host([unsaved]) { outline: 1px dashed var(--signal-unsaved, #ffb74d); outline-offset: 2px; }
+.unsaved-mark {
+  margin: 3px auto 0;
+  max-width: 14em;
+  text-align: center;
+  white-space: normal;
+  font-size: 0.9em;
+  color: var(--signal-unsaved, #ffb74d);
+}
+.unsaved-mark button {
+  margin: 3px 2px 0;
+  padding: 0 6px;
+  font: inherit;
+  color: var(--signal-fg, #d6dbe4);
+  background: var(--signal-track, #2a2f38);
+  border: 1px solid var(--signal-unsaved, #ffb74d);
+  border-radius: 3px;
+  cursor: pointer;
+}
 `;
-
-/** A request whose refusal shows in the next frame, not as a console error. */
-export function quietly(promise) {
-  promise?.catch?.(() => {});
-}
-
-/** A numeric attribute, or undefined when absent or not a number. */
-export function numberAttribute(element, name) {
-  const text = element.getAttribute(name);
-  if (text === null || text.trim() === '') return undefined;
-  const value = Number(text);
-  return Number.isFinite(value) ? value : undefined;
-}
 
 /** The addresses in a `bind` attribute (space or comma separated). */
 export function bindAddresses(element) {
   return (element.getAttribute('bind') ?? '').split(/[\s,]+/).filter(Boolean);
+}
+
+/**
+ * The unsaved mark of a control that edits `bindings()` (docs/ui-controls.md
+ * "Unsaved"): the `unsaved` attribute, the error text and Retry and Revert,
+ * shown while one of them has a refused write. Returns the function that
+ * redraws it.
+ */
+export function unsavedMark(element, bindings) {
+  const mark = document.createElement('div');
+  mark.className = 'unsaved-mark';
+  mark.setAttribute('role', 'alert');
+  mark.hidden = true;
+  const text = document.createElement('span');
+  const button = (label, act) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    // Not a drag of the control, nor its keys.
+    b.addEventListener('pointerdown', (event) => event.stopPropagation());
+    b.addEventListener('keydown', (event) => event.stopPropagation());
+    b.addEventListener('click', (event) => {
+      event.stopPropagation();
+      for (const binding of bindings()) if (binding.unsaved) act(binding);
+    });
+    return b;
+  };
+  mark.append(text, document.createElement('br'), button('Retry', (b) => b.retry()), button('Revert', (b) => b.revert()));
+  element.shadowRoot.append(mark);
+  return () => {
+    const error = bindings().find((b) => b.unsaved)?.unsaved?.error ?? null;
+    element.toggleAttribute('unsaved', Boolean(error));
+    mark.hidden = !error;
+    text.textContent = error ? `Unsaved: ${error}` : '';
+  };
+}
+
+/** Each binding's unsaved state from the host's `unsaved` pushes; returns the stop. */
+export function unsavedStream(connection, bindings, redraw) {
+  const show = (state) => {
+    for (const binding of bindings()) binding.fromHost(state);
+    redraw();
+  };
+  if (connection.unsaved) show(connection.unsaved);
+  return connection.on('unsaved', show);
 }
 
 /**
@@ -238,121 +285,6 @@ export class SignalElement extends HTMLElement {
 }
 
 /**
- * One parameter a control edits: its range (from `describe`, with the
- * element's `min`, `max`, `default`, `unit`, `taper` and `floor` attributes
- * over it), its base and effective values (from a `parameters`
- * subscription), and the edits: a ramp per drag move and a commit on
- * release, or a live `set` per key or wheel step and one commit
- * `COMMIT_DELAY_MS` after the last.
- */
-export class Binding {
-  constructor(element, address) {
-    this.element = element;
-    this.address = address;
-    this.described = null;
-    this.base = NaN;
-    this.effective = NaN;
-    this.timer = null;
-    this.pending = false;
-  }
-
-  get range() {
-    const e = this.element;
-    const d = this.described ?? {};
-    return {
-      min: numberAttribute(e, 'min') ?? d.min ?? 0,
-      max: numberAttribute(e, 'max') ?? d.max ?? 1,
-      default: numberAttribute(e, 'default') ?? d.default,
-      unit: e.getAttribute('unit') ?? d.unit ?? null,
-      taper: e.getAttribute('taper') ?? 'linear',
-      floorDb: numberAttribute(e, 'floor'),
-    };
-  }
-
-  /** The value shown: the base, else the default. */
-  get value() {
-    return Number.isFinite(this.base) ? this.base : resetValue(this.range);
-  }
-
-  get position() {
-    return toPosition(this.value, this.range);
-  }
-
-  get effectivePosition() {
-    return toPosition(this.effective, this.range);
-  }
-
-  /** Whether the effective value differs visibly from the base (modulated). */
-  get modulated() {
-    return Number.isFinite(this.effective) && Math.abs(this.effectivePosition - this.position) > 0.002;
-  }
-
-  describe(description) {
-    this.described = findParameter(description, this.address);
-    if (this.described && !this.pending && !this.element.dragging) {
-      const base = this.described.base ?? this.described.default;
-      if (Number.isFinite(base)) this.base = base;
-    }
-  }
-
-  /** A parameter frame's `{base, effective}` (NaN until the runner reported it). */
-  frame({ base, effective }) {
-    if (!this.pending && !this.element.dragging && Number.isFinite(base)) this.base = base;
-    this.effective = effective;
-  }
-
-  /**
-   * Moves to `position`: `how` is `ramp` (drag), `nudge` (key, wheel),
-   * `commit`, or `local` (shown only; the caller sends).
-   */
-  moveTo(position, how) {
-    const value = toValue(position, this.range);
-    this.setValue(value, how);
-  }
-
-  setValue(value, how) {
-    this.base = value;
-    const connection = this.element.connection;
-    if (how === 'local') this.cancel();
-    if (!connection || !this.address || how === 'local') return;
-    if (how === 'ramp') {
-      quietly(connection.ramp(this.address, value, { ms: RAMP_MS }));
-    } else if (how === 'nudge') {
-      quietly(connection.set(this.address, value));
-      this.pending = true;
-      clearTimeout(this.timer);
-      this.timer = setTimeout(() => this.flush(), COMMIT_DELAY_MS);
-    } else {
-      this.cancel();
-      quietly(connection.commit(this.address, value));
-    }
-  }
-
-  /** Commits now what a debounced edit left pending. */
-  flush() {
-    if (!this.pending) return;
-    this.cancel();
-    if (this.element.connection && this.address) quietly(this.element.connection.commit(this.address, this.base));
-  }
-
-  cancel() {
-    clearTimeout(this.timer);
-    this.timer = null;
-    this.pending = false;
-  }
-
-  reset() {
-    this.setValue(resetValue(this.range), 'commit');
-  }
-
-  ariaText() {
-    const unit = this.range.unit;
-    const text = formatValue(this.value, unit);
-    return this.modulated ? `${text}, modulated to ${formatValue(this.effective, unit)}` : text;
-  }
-}
-
-/**
  * A control that edits one parameter (`bind`): ARIA slider values, the
  * keys (arrows, Page, Home, End; Shift fine; Delete resets), the wheel,
  * double-click to reset and drags. Subclasses give `dragStart(event)` and
@@ -361,22 +293,32 @@ export class Binding {
 export class SignalValueElement extends SignalElement {
   static role = 'slider';
   static observedAttributes = ['bind', 'skin', 'min', 'max', 'default', 'unit', 'taper', 'floor', 'label'];
+  /** Whether it commits, and so shows the unsaved mark. */
+  static commits = true;
 
   constructor() {
     super();
-    this.binding = new Binding(this, null);
+    this.binding = this.newBinding(null);
     this.dragging = false;
+  }
+
+  newBinding(address) {
+    const binding = new Binding(this, address);
+    binding.onChange = () => this.redrawUnsaved?.();
+    return binding;
   }
 
   rebind() {
     this.binding.flush();
-    this.binding = new Binding(this, bindAddresses(this)[0] ?? null);
+    this.binding = this.newBinding(bindAddresses(this)[0] ?? null);
     if (this.connection) this.attach(this.connection);
   }
 
   connectedCallback() {
     if (!this.binding.address) this.binding.address = bindAddresses(this)[0] ?? null;
     super.connectedCallback();
+    if (this.constructor.commits && !this.redrawUnsaved) this.redrawUnsaved = unsavedMark(this, () => [this.binding]);
+    this.redrawUnsaved?.();
   }
 
   setup() {
@@ -426,10 +368,13 @@ export class SignalValueElement extends SignalElement {
 
   streams(connection) {
     if (!this.binding.address) return [];
-    return [connection.subscribe({ stream: 'parameters', addresses: [this.binding.address], rate: 30 }, (frame) => {
-      this.binding.frame(frame.values[0]);
-      this.update();
-    })];
+    return [
+      connection.subscribe({ stream: 'parameters', addresses: [this.binding.address], rate: 30 }, (frame) => {
+        this.binding.frame(frame.values[0]);
+        this.update();
+      }),
+      unsavedStream(connection, () => [this.binding], () => this.redrawUnsaved?.()),
+    ];
   }
 
   described(description) {

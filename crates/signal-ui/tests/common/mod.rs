@@ -228,6 +228,38 @@ pub fn rig(name: &str, options: Options) -> Rig {
     }
 }
 
+/// A project folder made read-only until dropped, so a commit's write
+/// fails (`write_file` cannot create its temporary file beside
+/// `project.toml`); permissions come back even when a test fails.
+pub struct ReadOnly(PathBuf);
+
+impl ReadOnly {
+    /// `None`, with a message, when the folder stays writable (as root): no
+    /// write can be made to fail this way.
+    pub fn new(dir: &Path) -> Option<ReadOnly> {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let guard = ReadOnly(dir.to_owned());
+        let probe = dir.join(".write-probe");
+        if fs::write(&probe, b"").is_ok() {
+            let _ = fs::remove_file(&probe);
+            eprintln!(
+                "skipping: {} stays writable when read-only (running as root?)",
+                dir.display()
+            );
+            return None;
+        }
+        Some(guard)
+    }
+}
+
+impl Drop for ReadOnly {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+    }
+}
+
 /// What a client received.
 #[derive(Debug)]
 pub enum Got {
@@ -322,6 +354,27 @@ pub fn connect(host: &Host) -> Ws {
     }
 }
 
+/// Opens an HTTP connection to the host: over TCP, or for a host that binds
+/// nothing (port 0) in process, served by the same HTTP workers. Its reads
+/// wait at most `read_timeout`.
+pub fn connect_http(host: &Host, read_timeout: Duration) -> Stream {
+    if host.http_addr().port() == 0 {
+        let stream = host.connect_local_http();
+        stream.set_read_timeout(Some(read_timeout));
+        Stream::Local(stream)
+    } else {
+        let stream = TcpStream::connect(host.http_addr()).unwrap();
+        stream.set_read_timeout(Some(read_timeout)).unwrap();
+        Stream::Tcp(stream)
+    }
+}
+
+/// The `Host` header that the host's HTTP server answers (`127.0.0.1:0` in
+/// process).
+pub fn http_host(host: &Host) -> String {
+    format!("127.0.0.1:{}", host.http_addr().port())
+}
+
 pub fn send(ws: &mut Ws, value: Value) {
     ws.send(Message::text(value.to_string())).unwrap();
 }
@@ -410,6 +463,33 @@ impl Rig {
         let welcome = self.wait(&mut ws, "welcome", |got| got.of("welcome").cloned());
         assert_eq!(welcome["protocol"], 1);
         (ws, welcome["client"].as_u64().unwrap())
+    }
+
+    /// The next `unsaved` push `wanted` accepts.
+    pub fn unsaved(&mut self, ws: &mut Ws, what: &str, wanted: impl Fn(&Value) -> bool) -> Value {
+        self.wait(ws, what, |got| {
+            got.of("unsaved").filter(|u| wanted(u)).cloned()
+        })
+    }
+
+    /// Subscribes `ws` to `address`'s parameter frames; the subscription.
+    pub fn watch_parameter(&mut self, ws: &mut Ws, id: u64, address: &str) -> u64 {
+        let reply = self.request(
+            ws,
+            id,
+            json!({"type": "subscribe", "stream": "parameters", "addresses": [address], "rate": 60}),
+            "subscribed",
+        );
+        reply["sub"].as_u64().unwrap()
+    }
+
+    /// Waits until a parameter frame of `sub` gives `base` as its base.
+    pub fn wait_base(&mut self, ws: &mut Ws, sub: u64, base: f64) {
+        self.wait(ws, &format!("base {base}"), |got| {
+            got.frame(3, sub)
+                .map(|f| f.f64s()[0])
+                .filter(|b| *b == base)
+        });
     }
 
     /// Drops the host (its servers stop) and lets the detached client

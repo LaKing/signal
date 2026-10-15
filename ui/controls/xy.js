@@ -4,7 +4,7 @@
 import { formatValue } from '../lib/format.js';
 import { FINE, PAGE_STEP, keyAction } from '../lib/gesture.js';
 import { clamp } from '../lib/taper.js';
-import { Binding, SignalElement, bindAddresses, quietly } from './base.js';
+import { Binding, SignalElement, bindAddresses, quietly, unsavedMark, unsavedStream } from './base.js';
 
 const SIZE = 160;
 const INSET = 8;
@@ -28,9 +28,15 @@ export class SignalXY extends SignalElement {
 
   constructor() {
     super();
+    this.newBindings();
+    this.dragging = false;
+  }
+
+  /** Two bindings sharing one unsaved mark. */
+  newBindings() {
     this.x = new Binding(this, null);
     this.y = new Binding(this, null);
-    this.dragging = false;
+    for (const b of [this.x, this.y]) b.onChange = () => this.redrawUnsaved?.();
   }
 
   bindings() {
@@ -42,12 +48,13 @@ export class SignalXY extends SignalElement {
   connectedCallback() {
     this.bindings();
     super.connectedCallback();
+    if (!this.redrawUnsaved) this.redrawUnsaved = unsavedMark(this, () => [this.x, this.y]);
+    this.redrawUnsaved();
   }
 
   rebind() {
     this.flush();
-    this.x = new Binding(this, null);
-    this.y = new Binding(this, null);
+    this.newBindings();
     this.bindings();
     if (this.connection) this.attach(this.connection);
   }
@@ -128,7 +135,7 @@ export class SignalXY extends SignalElement {
       const connection = this.connection;
       if (connection && b.address) {
         quietly(connection.ramp(b.address, b.base, { ms: SPRING_MS }));
-        quietly(connection.commit(b.address, b.base));
+        b.commit(b.base);
       }
     }
     this.update();
@@ -137,12 +144,15 @@ export class SignalXY extends SignalElement {
   streams(connection) {
     const addresses = [this.x.address, this.y.address].filter(Boolean);
     if (addresses.length === 0) return [];
-    return [connection.subscribe({ stream: 'parameters', addresses, rate: 30 }, (frame) => {
-      const [first, second] = frame.values;
-      if (this.x.address) this.x.frame(first);
-      if (this.y.address) this.y.frame(this.x.address ? second : first);
-      this.update();
-    })];
+    return [
+      connection.subscribe({ stream: 'parameters', addresses, rate: 30 }, (frame) => {
+        const [first, second] = frame.values;
+        if (this.x.address) this.x.frame(first);
+        if (this.y.address) this.y.frame(this.x.address ? second : first);
+        this.update();
+      }),
+      unsavedStream(connection, () => [this.x, this.y], () => this.redrawUnsaved?.()),
+    ];
   }
 
   described(description) {

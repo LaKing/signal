@@ -10,6 +10,8 @@ const MAX_DIGITS = 6;
 
 export class SignalValue extends SignalValueElement {
   static role = 'status';
+  /** It shows a value and writes none: no unsaved mark. */
+  static commits = false;
   static observedAttributes = [...SignalValueElement.observedAttributes, 'digits'];
   static css = `
 .value { padding: 2px 6px; font-size: var(--signal-value-size, 13px); font-variant-numeric: tabular-nums; color: var(--signal-fg, #d6dbe4); }

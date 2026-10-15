@@ -74,6 +74,7 @@ export class FakeConnection {
     this.nextSub = 1;
     this.listeners = new Map();
     this.triggers = [];
+    this.unsaved = null;
   }
 
   on(event, fn) {
@@ -143,6 +144,15 @@ export class FakeConnection {
     const c = this.control(address);
     if (!c) return failure('not-editable', `no control ${address}`);
     return this.edit(address, value ?? c.default).then(() => ({ type: 'committed', address, value, file: 'project.toml', writes: 1, sent: true, note: null }));
+  }
+
+  /** Every commit is written here: nothing is ever unsaved. */
+  retry(address) {
+    return failure('not-unsaved', `${address} is not unsaved`);
+  }
+
+  revert(address) {
+    return failure('not-unsaved', `${address} is not unsaved`);
   }
 
   trigger(address) {

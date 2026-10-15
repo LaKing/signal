@@ -15,7 +15,7 @@
 //! `transport.play`/`stop`, `project.open`), with Signal.app's rules
 //! ([`crate::app`]): every run plays from the Setup, as the app's state does.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,7 +46,7 @@ use crate::PROTOCOL;
 use crate::app::{self, Status};
 use crate::bindings::{Targets, check};
 use crate::frames::{self, frame};
-use crate::panel::{Panel, Written, after_write, ramp_frames, write_project};
+use crate::panel::{Panel, Target, Written, after_write, ramp_frames, write_project};
 use crate::player::{Backend, Input, Interface, Output, Selection, open_input, open_output};
 use crate::server::{Inbound, Outbound, Server, ServerOptions};
 use crate::setup::{
@@ -220,6 +220,38 @@ struct Pending {
     frame: u64,
     requested: u64,
     refused: bool,
+    /// The value it sends, which a runner's refusal marks as not applied.
+    edited: Option<Edited>,
+}
+
+/// A live value an edit sent.
+enum Edited {
+    /// To a control (`instance`, `parameter`).
+    Control((String, String), f64),
+    /// To a plan parameter port that is no control.
+    Port(PortAddress, f64),
+}
+
+/// A control's failed write (`docs/ui-protocol.md` "Unsaved"): its error,
+/// in order of failures; the live value is the panel's drag, never kept
+/// here. `reset`: the write was of `null` (each port to its default), with
+/// whether the Controller took the defaults.
+struct Failed {
+    error: String,
+    seq: u64,
+    reset: Option<bool>,
+}
+
+/// A parameter whose live value the file does not hold, as `unsaved` lists
+/// it.
+struct Unsaved {
+    address: String,
+    file: f64,
+    in_file: bool,
+    control: bool,
+    /// The live value is known to be the one last sent.
+    applied: bool,
+    error: Option<(u64, String)>,
 }
 
 /// A refused message: its code and why.
@@ -241,6 +273,16 @@ struct Aim {
     min: f64,
     max: f64,
     control: Option<(String, String)>,
+}
+
+impl Aim {
+    /// What sending `value` here edits.
+    fn edited(&self, value: f64) -> Option<Edited> {
+        match &self.control {
+            Some(control) => Some(Edited::Control(control.clone(), value)),
+            None => self.ports.first().map(|p| Edited::Port(p.clone(), value)),
+        }
+    }
 }
 
 /// The values and reports of one poll, beside the session recorder.
@@ -311,6 +353,17 @@ pub struct Host {
     messages: Vec<String>,
     /// Signal.app's state, in app mode.
     app: Option<AppMode>,
+    /// Controls whose last write failed.
+    failed: BTreeMap<(String, String), Failed>,
+    /// Controls written while their live send was refused: the reload of
+    /// the written file sends them the file's value.
+    resend: BTreeSet<(String, String)>,
+    /// Live edits of plan parameter ports that are no control: the value,
+    /// and whether the Controller took it.
+    port_edits: BTreeMap<PortAddress, (f64, bool)>,
+    next_failure: u64,
+    /// The `unsaved` message last pushed.
+    unsaved_pushed: Option<Value>,
 }
 
 fn joined(diagnostics: Vec<Diagnostic>) -> String {
@@ -338,6 +391,32 @@ fn control_of(port: &PortAddress) -> Option<(String, String)> {
 
 /// `value` in `[min, max]`; never panics, whatever the range (`f64::clamp`
 /// does when `min > max`).
+/// The base of plan parameter `port` as the plan was built (its files'
+/// value, or its default).
+fn plan_base(plan: Option<&ExecutionPlan>, port: &PortAddress) -> Option<f64> {
+    let instance = plan?
+        .instances
+        .iter()
+        .find(|i| i.address == port.instance())?;
+    let descriptor = instance
+        .descriptor
+        .parameters
+        .iter()
+        .find(|p| p.name == port.port())?;
+    Some(
+        instance
+            .parameters
+            .get(descriptor.name)
+            .copied()
+            .unwrap_or(descriptor.default),
+    )
+}
+
+/// A file value as compared: its bits, and whether the file sets it.
+fn bits(base: Option<(f64, bool)>) -> Option<(u64, bool)> {
+    base.map(|(value, in_file)| (value.to_bits(), in_file))
+}
+
 fn within(value: f64, min: f64, max: f64) -> f64 {
     value.max(min).min(max)
 }
@@ -394,6 +473,13 @@ impl Host {
     #[cfg(feature = "test-hooks")]
     pub fn connect_local(&self) -> crate::LocalStream {
         self.server.connect_local()
+    }
+
+    /// Test hooks: a new HTTP client's end of an in-process connection,
+    /// served by the HTTP workers (its requests carry `Host: 127.0.0.1:0`).
+    #[cfg(feature = "test-hooks")]
+    pub fn connect_local_http(&self) -> crate::LocalStream {
+        self.server.local_connector().connect_http()
     }
 
     /// Signal.app's server (app mode): starts the servers, opens the project
@@ -496,6 +582,11 @@ impl Host {
             writes: 0,
             messages: Vec::new(),
             app,
+            failed: BTreeMap::new(),
+            resend: BTreeSet::new(),
+            port_edits: BTreeMap::new(),
+            next_failure: 1,
+            unsaved_pushed: None,
         };
         host.list_devices();
         host
@@ -627,7 +718,96 @@ impl Host {
         }
         self.emit();
         self.push_app();
+        self.push_unsaved();
         std::mem::take(&mut self.messages)
+    }
+
+    /// `unsaved` to every client whenever it changed; a failure whose
+    /// control is no longer unsaved (live and file agree again) is dropped.
+    fn push_unsaved(&mut self) {
+        let listed: BTreeSet<String> = self.unsaved().into_iter().map(|u| u.address).collect();
+        self.failed
+            .retain(|(i, p), _| listed.contains(&format!("/{i}.{p}")));
+        self.port_edits
+            .retain(|port, _| listed.contains(port.as_str()));
+        let current = self.unsaved_json();
+        if self.unsaved_pushed.as_ref() != Some(&current) {
+            self.broadcast(&with(current.clone(), "type", json!("unsaved")));
+            self.unsaved_pushed = Some(current);
+        }
+    }
+
+    /// Every parameter whose live value the file does not hold, or may not
+    /// (`docs/ui-protocol.md` "Unsaved"): the controls in the panel's order,
+    /// then the plan parameter ports edited live.
+    fn unsaved(&self) -> Vec<Unsaved> {
+        let mut list = Vec::new();
+        for instance in self.panel.view(&self.values) {
+            for p in &instance.parameters {
+                let key = (instance.name.clone(), p.name.clone());
+                let Some((file, in_file)) = self.panel.file_base(&key.0, &key.1) else {
+                    continue;
+                };
+                let drag = self.panel.dragged(&key.0, &key.1);
+                let failed = self.failed.get(&key);
+                let resend = self.resend.contains(&key);
+                let unsent = drag.is_some_and(|d| !d.sent)
+                    || failed.is_some_and(|f| f.reset == Some(false))
+                    || resend;
+                let differs = drag.is_some_and(|d| d.value.to_bits() != file.to_bits())
+                    || (drag.is_none() && failed.is_some_and(|f| f.reset.is_some()) && in_file);
+                if unsent || differs {
+                    list.push(Unsaved {
+                        address: format!("/{}.{}", key.0, key.1),
+                        file,
+                        in_file,
+                        control: true,
+                        applied: !unsent,
+                        error: failed.map(|f| (f.seq, f.error.clone())),
+                    });
+                }
+            }
+        }
+        for (port, &(value, sent)) in &self.port_edits {
+            let Some(file) = plan_base(self.plan.as_ref(), port) else {
+                continue;
+            };
+            if !sent || value.to_bits() != file.to_bits() {
+                list.push(Unsaved {
+                    address: port.as_str().to_owned(),
+                    file,
+                    in_file: false,
+                    control: false,
+                    applied: sent,
+                    error: None,
+                });
+            }
+        }
+        list
+    }
+
+    /// `unsaved`'s body (also `describe`'s `unsaved`).
+    fn unsaved_json(&self) -> Value {
+        let list = self.unsaved();
+        let last = list
+            .iter()
+            .filter_map(|u| u.error.as_ref())
+            .max_by_key(|(seq, _)| *seq)
+            .map(|(_, error)| error.clone());
+        let parameters: Vec<Value> = list
+            .iter()
+            .map(|u| {
+                json!({
+                    "address": u.address,
+                    "file": u.file,
+                    "inFile": u.in_file,
+                    "control": u.control,
+                    "applied": u.applied,
+                    "error": u.error.as_ref().map(|(_, e)| e),
+                })
+            })
+            .collect();
+        json!({"count": list.len(), "parameters": parameters, "lastError": last})
     }
 
     /// App mode: the status line every [`STATUS_EVERY`] while playing, and
@@ -765,7 +945,11 @@ impl Host {
             }
         };
         self.rate = project.sample_rate;
+        // The unsaved controls stay unsaved: their values, kept while the
+        // run starts, are played again in it.
+        let carried = self.carried();
         self.panel = Panel::new(&project, &self.registry);
+        self.play_carried(carried.clone());
         let mut notes = Vec::new();
         let started = app::start(
             &self.backend,
@@ -816,12 +1000,14 @@ impl Host {
         };
         self.install(run);
         self.rearm();
+        self.play_carried(carried);
         Ok(())
     }
 
     /// Stops the run, as the app's Stop does: its last status stays, edits
     /// waiting for reports are abandoned, subscriptions are kept (scopes
-    /// start again with the next run).
+    /// start again with the next run). The unsaved controls keep their values
+    /// (played again by the next run); live edits of plan ports end.
     fn stop_app(&mut self) {
         let Some(mut run) = self.run.take() else {
             return;
@@ -855,6 +1041,8 @@ impl Host {
         // control thread.
         drop(run);
         self.values.clear();
+        self.resend.clear();
+        self.port_edits.clear();
         self.abandon();
     }
 
@@ -892,13 +1080,26 @@ impl Host {
         if let Some(mode) = self.app.as_mut() {
             mode.message = None;
         }
+        // Another project: the unsaved values of this one are let go, and
+        // the window says so.
+        let unsaved = self.unsaved().len();
         self.stop_app();
         self.open(&dir);
+        self.failed.clear();
         app::opened(&mut self.setup, dir.clone());
         let saved = app::save(&self.setup, &self.setup_path);
         let mode = self.app.as_mut();
-        if let (Some(mode), Err(message)) = (mode, &saved) {
-            mode.message = Some(message.clone());
+        if let Some(mode) = mode {
+            mode.message = match (&saved, unsaved) {
+                (Err(message), _) => Some(message.clone()),
+                (Ok(()), 0) => None,
+                (Ok(()), 1) => {
+                    Some("1 unsaved edit of the previous project was not written".to_owned())
+                }
+                (Ok(()), n) => Some(format!(
+                    "{n} unsaved edits of the previous project were not written"
+                )),
+            };
         }
         let diagnostics = self
             .app
@@ -1061,12 +1262,16 @@ impl Host {
         Ok((run, notes))
     }
 
+    /// A new run plays the file: no live edit is left in it (the unsaved
+    /// controls' values are played again by [`Host::play_carried`]).
     fn install(&mut self, mut run: Run) {
         self.panel = Panel::new(&run.current, &self.registry);
         self.plan = run.current.plan(&self.registry).ok().map(|p| p.plan);
         self.rate = run.rate;
         run.version = run.controller.status().version;
         self.values.clear();
+        self.resend.clear();
+        self.port_edits.clear();
         self.run = Some(run);
     }
 
@@ -1162,10 +1367,13 @@ impl Host {
             &self.dir,
             &self.registry,
         );
+        let mut reloaded = None;
         let notice = match result {
             Ok(applied) => {
-                self.panel = Panel::new(&run.current, &self.registry);
-                self.plan = run.current.plan(&self.registry).ok().map(|p| p.plan);
+                reloaded = Some((
+                    Panel::new(&run.current, &self.registry),
+                    run.current.plan(&self.registry).ok().map(|p| p.plan),
+                ));
                 self.messages.push(format!("watch: {applied}"));
                 let edited = applied.sets > 0 || applied.swap.is_some();
                 (
@@ -1191,6 +1399,21 @@ impl Host {
                 (json!({"type": "reload.error", "message": message}), false)
             }
         };
+        if let Some((panel, plan)) = reloaded {
+            // The reload sent every port what differs from the file: a
+            // control written while its live send was refused now holds it.
+            for (instance, parameter) in std::mem::take(&mut self.resend) {
+                self.panel.release(&instance, &parameter);
+            }
+            self.reconcile(panel);
+            let old = std::mem::replace(&mut self.plan, plan);
+            let new = self.plan.as_ref();
+            self.port_edits.retain(|port, _| {
+                let after = plan_base(new, port);
+                after.is_some()
+                    && after.map(f64::to_bits) == plan_base(old.as_ref(), port).map(f64::to_bits)
+            });
+        }
         if let Some(mode) = self.app.as_mut() {
             let error = notice.0.get("type") == Some(&json!("reload.error"));
             let message = notice.0.get("message").and_then(Value::as_str);
@@ -1220,6 +1443,20 @@ impl Host {
             if pending.remaining == 0
                 && let Some(done) = self.acks.remove(&key)
             {
+                // A runner refused it: the value did not reach the ports.
+                match (&done.edited, done.refused) {
+                    (Some(Edited::Control((instance, parameter), value)), true) => {
+                        self.panel.unsend(instance, parameter, *value);
+                    }
+                    (Some(Edited::Port(port, value)), true) => {
+                        if let Some(edit) = self.port_edits.get_mut(port)
+                            && edit.0.to_bits() == value.to_bits()
+                        {
+                            edit.1 = false;
+                        }
+                    }
+                    _ => {}
+                }
                 let ack = json!({
                     "type": "ack",
                     "id": done.id,
@@ -1401,6 +1638,8 @@ impl Host {
             "unsubscribe" => self.unsubscribe(client, &message).map(Some),
             "set" | "ramp" | "trigger" => self.edit(client, &id, kind, &message).map(|()| None),
             "commit" => self.commit(&message).map(Some),
+            "retry" => self.retry(&message).map(Some),
+            "revert" => self.revert(&message).map(Some),
             "panel.check" => self.panel_check(&message).map(Some),
             "setup.get" => Ok(Some(self.setup_get())),
             "setup.devices" => self.setup_devices(&message).map(Some),
@@ -1530,6 +1769,17 @@ impl Host {
                     continue;
                 };
                 let address = format!("/{}.{}", instance.name, p.name);
+                // The live base: the last value known to have reached every
+                // port (not a refused one), each port's default after a reset.
+                let reset = self
+                    .failed
+                    .get(&(instance.name.clone(), p.name.clone()))
+                    .is_some_and(|f| f.reset.is_some());
+                let base = match self.panel.dragged(&instance.name, &p.name) {
+                    Some(drag) => drag.applied,
+                    None if reset => p.default,
+                    None => p.base,
+                };
                 controls.push(json!({
                     "address": address,
                     "instance": instance.name,
@@ -1540,7 +1790,7 @@ impl Host {
                     "min": p.min,
                     "max": p.max,
                     "default": p.default,
-                    "base": p.base,
+                    "base": base,
                     "inFile": p.in_file,
                     "modulated": p.modulated,
                     "combine": target.ports.first().and_then(combine_of),
@@ -1572,6 +1822,7 @@ impl Host {
             "sinks": sinks,
             "meters": {"output": output_meters, "input": input_meters},
             "scopes": {"slots": SCOPE_SLOTS, "points": SCOPE_POINTS, "maxRate": self.rate},
+            "unsaved": self.unsaved_json(),
         });
         if restarted {
             describe = with(describe, "restarted", json!(true));
@@ -1817,11 +2068,8 @@ impl Host {
             "set" => {
                 let aim = self.aim(address)?;
                 let value = within(number("value")?, aim.min, aim.max);
-                (
-                    aim.ports,
-                    EventPayload::Set(value),
-                    aim.control.map(|c| (c, value)),
-                )
+                let edited = aim.edited(value);
+                (aim.ports, EventPayload::Set(value), edited)
             }
             _ => {
                 let aim = self.aim(address)?;
@@ -1841,7 +2089,8 @@ impl Host {
                     frames,
                     curve: Curve::Linear,
                 };
-                (aim.ports, payload, aim.control.map(|c| (c, to)))
+                let edited = aim.edited(to);
+                (aim.ports, payload, edited)
             }
         };
         let run = self
@@ -1859,9 +2108,21 @@ impl Host {
                 }
             }
         }
-        if let Some(((instance, parameter), value)) = drag {
-            self.panel
-                .drag(&instance, &parameter, value, refused.is_none());
+        // The live value the file may not hold (`docs/ui-protocol.md`
+        // "Unsaved"): the latest one, and whether it reached every port.
+        match &drag {
+            Some(Edited::Control((instance, parameter), value)) => {
+                self.panel
+                    .drag(instance, parameter, *value, refused.is_none());
+                if let Some(failed) = self.failed.get_mut(&(instance.clone(), parameter.clone())) {
+                    failed.reset = None;
+                }
+            }
+            Some(Edited::Port(port, value)) => {
+                self.port_edits
+                    .insert(port.clone(), (*value, refused.is_none()));
+            }
+            None => {}
         }
         if let Some(error) = refused {
             return Err(fail("refused", error));
@@ -1880,6 +2141,7 @@ impl Host {
                 frame: 0,
                 requested: 0,
                 refused: false,
+                edited: drag,
             },
         );
         Ok(())
@@ -1948,10 +2210,30 @@ impl Host {
                 target.max,
             )),
         };
-        let last = self.panel.release(&instance, &parameter);
+        self.commit_control(address, &instance, &parameter, &target, value, false)
+    }
+
+    /// Writes `value` for a control (sent live first unless every port
+    /// already took exactly that value): `commit`, and `retry`
+    /// (`retrying`: a live send that is refused writes nothing). A failed
+    /// write keeps the value as the control's live drag, with the error
+    /// (`docs/ui-protocol.md` "Unsaved"); a write keeps the control unsaved
+    /// until the reload of the written file sends it, when its live send was
+    /// refused.
+    fn commit_control(
+        &mut self,
+        address: &str,
+        instance: &str,
+        parameter: &str,
+        target: &Target,
+        value: Option<f64>,
+        retrying: bool,
+    ) -> Result<Value, Failure> {
+        let key = (instance.to_owned(), parameter.to_owned());
+        let last = self.panel.dragged(instance, parameter);
         let sent = match value {
             Some(v) => match last {
-                Some((sent, true)) if sent.to_bits() == v.to_bits() => true,
+                Some(d) if d.sent && d.value.to_bits() == v.to_bits() => true,
                 _ => self.send_ramps(target.ports.iter().cloned().map(|p| (p, v)).collect()),
             },
             // Each port back to its own default, as the panel's Reset.
@@ -1964,18 +2246,44 @@ impl Host {
                     .collect(),
             ),
         };
+        let unwritten = |host: &mut Host, error: String| {
+            match value {
+                Some(v) => host.panel.drag(instance, parameter, v, sent),
+                None => {
+                    host.panel.release(instance, parameter);
+                }
+            }
+            let seq = host.next_failure;
+            host.next_failure += 1;
+            host.failed.insert(
+                key.clone(),
+                Failed {
+                    error,
+                    seq,
+                    reset: value.is_none().then_some(sent),
+                },
+            );
+        };
+        if retrying && !sent {
+            let error = format!("{address}: the running project did not take the value");
+            unwritten(self, error.clone());
+            return Err(fail("refused", format!("{error}; nothing was written")));
+        }
         let order: Vec<&str> = target.order.iter().map(String::as_str).collect();
-        write_project(&self.dir, &instance, &parameter, value, &order)
-            .map_err(|error| fail("write-failed", error))?;
+        if let Err(error) = write_project(&self.dir, instance, parameter, value, &order) {
+            unwritten(self, error.clone());
+            return Err(fail("write-failed", error));
+        }
+        self.panel.release(instance, parameter);
         self.writes += 1;
         let mut note = None;
         let current = self.run.as_mut().map(|r| &mut r.current);
         match after_write(
             current,
             &self.dir,
-            &target,
-            &instance,
-            &parameter,
+            target,
+            instance,
+            parameter,
             value,
             sent,
             &self.registry,
@@ -1983,7 +2291,7 @@ impl Host {
             // The plan too, which `describe` reads the instances' (and so a
             // composite's inner parameters') bases from.
             Written::Taken(panel) => {
-                self.panel = panel;
+                self.reconcile(panel);
                 self.plan = self
                     .run
                     .as_ref()
@@ -1991,11 +2299,11 @@ impl Host {
                     .map(|p| p.plan);
             }
             Written::Stopped(Ok((panel, plan))) => {
-                self.panel = panel;
+                self.reconcile(panel);
                 self.plan = Some(plan);
             }
             Written::Refused(panel, error) => {
-                self.panel = panel;
+                self.reconcile(panel);
                 note = Some(format!(
                     "the running project could not take the refused value ({error}); the next \
                      reload applies what differs from the file"
@@ -2014,6 +2322,12 @@ impl Host {
                 }
             }
         }
+        self.failed.remove(&key);
+        if sent {
+            self.resend.remove(&key);
+        } else {
+            self.resend.insert(key);
+        }
         let describe = self.describe(false);
         self.broadcast(&describe);
         Ok(json!({
@@ -2025,6 +2339,190 @@ impl Host {
             "sent": sent,
             "note": note,
         }))
+    }
+
+    /// `retry`: commits an unsaved control's live value again (the latest
+    /// one sent; the file's when only its live send is in doubt, the default
+    /// after a failed reset).
+    fn retry(&mut self, message: &Value) -> Result<Value, Failure> {
+        let address = message.get("address").and_then(Value::as_str).unwrap_or("");
+        let port: PortAddress = address
+            .parse()
+            .map_err(|e| fail("bad-address", format!("{address}: {e}")))?;
+        let listed = self.unsaved().into_iter().find(|u| u.address == address);
+        let Some(unsaved) = listed else {
+            return Err(fail("not-unsaved", format!("{address} is not unsaved")));
+        };
+        let control = control_of(&port)
+            .and_then(|(i, p)| self.panel.target(&i, &p).map(|t| (i, p, t)))
+            .filter(|_| unsaved.control);
+        let Some((instance, parameter, target)) = control else {
+            return Err(fail(
+                "not-editable",
+                format!("{address} is no control: it can be reverted, not written"),
+            ));
+        };
+        let reset = self
+            .failed
+            .get(&(instance.clone(), parameter.clone()))
+            .is_some_and(|f| f.reset.is_some());
+        let value = match self.panel.dragged(&instance, &parameter) {
+            Some(drag) => Some(drag.value),
+            None if reset => None,
+            None => unsaved.in_file.then_some(unsaved.file),
+        };
+        self.commit_control(address, &instance, &parameter, &target, value, true)
+    }
+
+    /// `revert`: an unsaved parameter's live value back to the file's (each
+    /// port to its own default without a key; a plan port to the plan's
+    /// base). Refused, the parameter stays unsaved.
+    fn revert(&mut self, message: &Value) -> Result<Value, Failure> {
+        let address = message.get("address").and_then(Value::as_str).unwrap_or("");
+        let port: PortAddress = address
+            .parse()
+            .map_err(|e| fail("bad-address", format!("{address}: {e}")))?;
+        let listed = self.unsaved().into_iter().find(|u| u.address == address);
+        let Some(unsaved) = listed else {
+            return Err(fail("not-unsaved", format!("{address} is not unsaved")));
+        };
+        let playing = self.run.is_some();
+        let control = control_of(&port)
+            .and_then(|(i, p)| self.panel.target(&i, &p).map(|t| (i, p, t)))
+            .filter(|_| unsaved.control);
+        let sent = match &control {
+            Some((_, _, target)) if unsaved.in_file => self.send_ramps(
+                target
+                    .ports
+                    .iter()
+                    .cloned()
+                    .map(|p| (p, unsaved.file))
+                    .collect(),
+            ),
+            Some((_, _, target)) => self.send_ramps(
+                target
+                    .ports
+                    .iter()
+                    .cloned()
+                    .zip(target.defaults.iter().copied())
+                    .collect(),
+            ),
+            None => self.send_ramps(vec![(port.clone(), unsaved.file)]),
+        };
+        if !sent {
+            // Some ports may have taken it: what they hold is not known.
+            match &control {
+                Some((instance, parameter, _)) => {
+                    if let Some(drag) = self.panel.dragged(instance, parameter) {
+                        self.panel.drag(instance, parameter, drag.value, false);
+                    }
+                }
+                None => {
+                    if let Some(edit) = self.port_edits.get_mut(&port) {
+                        edit.1 = false;
+                    }
+                }
+            }
+            return Err(fail(
+                "refused",
+                format!("{address}: the running project did not take the file's value"),
+            ));
+        }
+        match control {
+            Some((instance, parameter, _)) => {
+                self.panel.release(&instance, &parameter);
+                let key = (instance, parameter);
+                self.failed.remove(&key);
+                self.resend.remove(&key);
+            }
+            None => {
+                self.port_edits.remove(&port);
+            }
+        }
+        let describe = self.describe(false);
+        self.broadcast(&describe);
+        Ok(json!({
+            "type": "reverted",
+            "address": address,
+            "value": unsaved.in_file.then_some(unsaved.file),
+            "sent": playing,
+        }))
+    }
+
+    /// Takes `new` (the panel of a reloaded or written project), keeping the
+    /// drags, failures and pending resends of the controls whose file value
+    /// did not change; a changed value was sent live by the reload (or
+    /// written), a control that is gone has nothing left to save.
+    fn reconcile(&mut self, new: Panel) {
+        let old = std::mem::replace(&mut self.panel, new);
+        let kept = |panel: &Panel, (instance, parameter): &(String, String)| {
+            let after = panel.file_base(instance, parameter);
+            after.is_some() && bits(after) == bits(old.file_base(instance, parameter))
+        };
+        for (key, drag) in old.drags() {
+            if kept(&self.panel, key) {
+                self.panel.restore(key.clone(), *drag);
+            }
+        }
+        let panel = &self.panel;
+        self.failed.retain(|key, _| kept(panel, key));
+        self.resend.retain(|key| kept(panel, key));
+    }
+
+    /// The unsaved controls' live values that a new run of the same project
+    /// does not have (it plays the file): their latest values, and failed
+    /// resets (`None`).
+    fn carried(&self) -> Vec<((String, String), Option<f64>)> {
+        let mut carried = Vec::new();
+        for unsaved in self.unsaved() {
+            let key = unsaved
+                .address
+                .parse::<PortAddress>()
+                .ok()
+                .and_then(|port| control_of(&port));
+            let Some(key) = key.filter(|_| unsaved.control) else {
+                continue;
+            };
+            match self.panel.dragged(&key.0, &key.1) {
+                Some(drag) => carried.push((key, Some(drag.value))),
+                None if self.failed.get(&key).is_some_and(|f| f.reset.is_some()) => {
+                    carried.push((key, None));
+                }
+                None => {}
+            }
+        }
+        carried
+    }
+
+    /// Plays the `carried` values again in the new run (or, stopped, keeps
+    /// them as the controls' values), so they stay live and unsaved.
+    fn play_carried(&mut self, carried: Vec<((String, String), Option<f64>)>) {
+        for ((instance, parameter), value) in carried {
+            let Some(target) = self.panel.target(&instance, &parameter) else {
+                self.failed.remove(&(instance, parameter));
+                continue;
+            };
+            match value {
+                Some(v) => {
+                    let sent =
+                        self.send_ramps(target.ports.iter().cloned().map(|p| (p, v)).collect());
+                    self.panel.drag(&instance, &parameter, v, sent);
+                }
+                None => {
+                    let sent = self.send_ramps(
+                        target
+                            .ports
+                            .iter()
+                            .cloned()
+                            .zip(target.defaults.iter().copied())
+                            .collect(),
+                    );
+                    if let Some(failed) = self.failed.get_mut(&(instance, parameter)) {
+                        failed.reset = Some(sent);
+                    }
+                }
+            }
+        }
     }
 
     /// `panel.check`: the binding check of a panel file in the project's
@@ -2040,7 +2538,7 @@ impl Host {
         if !name.ends_with(".html") {
             return Err(unknown());
         }
-        let path = crate::server::file(&project_ui(&self.dir), name).ok_or_else(unknown)?;
+        let path = crate::http::file(&project_ui(&self.dir), name).ok_or_else(unknown)?;
         let text = std::fs::read_to_string(path).map_err(|_| unknown())?;
         let plan = self
             .plan
@@ -2328,12 +2826,14 @@ impl Host {
                  restarted (a recording covers one run from frame 0)",
             ));
         }
+        let carried = self.carried();
         stop(old);
         self.abandon();
         match self.build(false) {
             Ok((run, notes)) => {
                 self.install(run);
                 self.rearm();
+                self.play_carried(carried);
                 self.messages
                     .push("setup: applied; playing again from frame 0".to_owned());
                 self.messages.extend(notes.iter().cloned());

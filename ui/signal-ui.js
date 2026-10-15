@@ -70,7 +70,8 @@ export function findMeter(description, address) {
  *
  * Events (`on(name, fn)`): `status` (`connecting`, `open`, `reconnecting`,
  * `failed`, `closed`), `welcome`, `describe` (replies and pushes),
- * `reload`, `reload.error`, `scope.bound`, `scope.unbound`, `error`
+ * `reload`, `reload.error`, `unsaved` (also kept as `connection.unsaved`,
+ * with `describe`'s), `scope.bound`, `scope.unbound`, `error`
  * (errors that answer no request) and `message` (every message).
  */
 export class Connection {
@@ -83,10 +84,12 @@ export class Connection {
     this.status = 'connecting';
     this.welcome = null;
     this.description = null;
+    /** The host's unsaved parameters, as last described or pushed. */
+    this.unsaved = null;
     this.socket = null;
     this.nextId = 1;
     this.attempt = 0;
-    this.retry = null;
+    this.reconnectTimer = null;
     this.pending = new Map();
     this.subscriptions = new Set();
     this.bySub = new Map();
@@ -112,7 +115,7 @@ export class Connection {
   }
 
   open() {
-    this.retry = null;
+    this.reconnectTimer = null;
     const socket = new this.WebSocketImpl(this.url);
     this.socket = socket;
     socket.binaryType = 'arraybuffer';
@@ -154,8 +157,10 @@ export class Connection {
     }
     if (message.type === 'describe') {
       this.description = message;
+      if (message.unsaved) this.unsaved = message.unsaved;
       this.emit('describe', message);
     } else if (message.type !== 'error' && message.id === undefined) {
+      if (message.type === 'unsaved') this.unsaved = message;
       this.emit(message.type, message);
     }
   }
@@ -178,7 +183,7 @@ export class Connection {
     this.setStatus('reconnecting');
     const wait = this.backoff[Math.min(this.attempt, this.backoff.length - 1)];
     this.attempt += 1;
-    this.retry = this.timers.setTimeout(() => this.open(), wait);
+    this.reconnectTimer = this.timers.setTimeout(() => this.open(), wait);
   }
 
   /** Sends `message` with a new id; the promise settles with its reply. */
@@ -220,6 +225,16 @@ export class Connection {
   /** Writes a control's value into project.toml (null removes the key). */
   commit(address, value) {
     return this.request({ type: 'commit', address, value });
+  }
+
+  /** Writes an unsaved control's live value into project.toml again. */
+  retry(address) {
+    return this.request({ type: 'retry', address });
+  }
+
+  /** Sets an unsaved parameter's live value back to the file's. */
+  revert(address) {
+    return this.request({ type: 'revert', address });
   }
 
   /**
@@ -266,8 +281,8 @@ export class Connection {
   /** Closes the connection for good. */
   close() {
     this.setStatus('closed');
-    if (this.retry !== null) this.timers.clearTimeout(this.retry);
-    this.retry = null;
+    if (this.reconnectTimer !== null) this.timers.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
     const socket = this.socket;
     if (socket) {
       this.closed(1000);

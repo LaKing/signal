@@ -107,6 +107,27 @@ test('requests carry ids, and replies and errors settle them', async () => {
   await assert.rejects(trigger, { code: 'not-playing' });
 });
 
+test('retry and revert, and the host unsaved state kept from describe and pushes', async () => {
+  const { connection, socket } = connected();
+  const retry = connection.retry('/out.gain');
+  const revert = connection.revert('/out.gain');
+  const [r, v] = socket.sent.slice(-2);
+  assert.deepEqual([r.type, r.address, v.type, v.address], ['retry', '/out.gain', 'revert', '/out.gain']);
+  socket.receive({ type: 'error', id: r.id, code: 'write-failed', message: 'read-only' });
+  socket.receive({ type: 'reverted', id: v.id, address: '/out.gain', value: 1, sent: true });
+  await assert.rejects(retry, { code: 'write-failed', message: 'read-only' });
+  assert.equal((await revert).type, 'reverted');
+
+  const unsaved = { count: 1, parameters: [{ address: '/out.gain', error: 'read-only' }], lastError: 'read-only' };
+  socket.receive({ type: 'describe', planVersion: 0, controls: [], instances: [], unsaved });
+  assert.deepEqual(connection.unsaved, unsaved);
+  const pushed = [];
+  connection.on('unsaved', (u) => pushed.push(u));
+  socket.receive({ type: 'unsaved', count: 0, parameters: [], lastError: null });
+  assert.equal(pushed.length, 1);
+  assert.equal(connection.unsaved.count, 0);
+});
+
 test('frames go to their subscription by sub', () => {
   const { connection, socket } = connected();
   const meters = [];

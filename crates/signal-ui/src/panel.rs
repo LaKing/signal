@@ -93,10 +93,24 @@ struct Instance {
 #[derive(Clone, Debug, Default)]
 pub struct Panel {
     instances: Vec<Instance>,
-    /// The value being dragged, and whether its send reached every port
-    /// (each send carries the latest value to all of them, so only the
-    /// latest send says what the ports hold).
-    drags: BTreeMap<(String, String), (f64, bool)>,
+    /// The values being dragged (each send carries the latest value to all
+    /// of a parameter's ports, so only the latest send says what they hold).
+    drags: BTreeMap<(String, String), Drag>,
+}
+
+/// A parameter's live value that the file may not hold: the latest value
+/// sent (dragged, or set by a client), whether the Controller took it for
+/// every port, and the last value known to have reached every port.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Drag {
+    /// The latest value sent.
+    pub value: f64,
+    /// Whether the Controller took it for every port (and no runner refused
+    /// it since).
+    pub sent: bool,
+    /// The last value known to have reached every port: `value` when sent,
+    /// else the one before (the file's when there was none).
+    pub applied: f64,
 }
 
 impl Panel {
@@ -197,14 +211,66 @@ impl Panel {
 
     /// Records the value being dragged, and whether the Controller took it.
     pub fn drag(&mut self, instance: &str, parameter: &str, value: f64, sent: bool) {
-        self.drags
-            .insert((instance.to_owned(), parameter.to_owned()), (value, sent));
+        let key = (instance.to_owned(), parameter.to_owned());
+        let applied = match (sent, self.drags.get(&key)) {
+            (true, _) => value,
+            (false, Some(before)) => before.applied,
+            (false, None) => self
+                .file_base(instance, parameter)
+                .map_or(value, |(base, _)| base),
+        };
+        self.drags.insert(
+            key,
+            Drag {
+                value,
+                sent,
+                applied,
+            },
+        );
     }
 
     /// Ends a drag: its value, and whether its last send reached every port.
     pub fn release(&mut self, instance: &str, parameter: &str) -> Option<(f64, bool)> {
         self.drags
             .remove(&(instance.to_owned(), parameter.to_owned()))
+            .map(|d| (d.value, d.sent))
+    }
+
+    /// The drag of `parameter` of `instance`, if any.
+    pub fn dragged(&self, instance: &str, parameter: &str) -> Option<Drag> {
+        self.drags
+            .get(&(instance.to_owned(), parameter.to_owned()))
+            .copied()
+    }
+
+    /// Every drag, by instance and parameter.
+    pub fn drags(&self) -> impl Iterator<Item = (&(String, String), &Drag)> {
+        self.drags.iter()
+    }
+
+    /// Puts a drag back as it was (a rebuilt panel keeps it).
+    pub fn restore(&mut self, key: (String, String), drag: Drag) {
+        self.drags.insert(key, drag);
+    }
+
+    /// A runner refused the send of `value` after the Controller took it:
+    /// if that is still the latest value, it did not reach the ports.
+    pub fn unsend(&mut self, instance: &str, parameter: &str, value: f64) {
+        if let Some(drag) = self
+            .drags
+            .get_mut(&(instance.to_owned(), parameter.to_owned()))
+            && drag.value.to_bits() == value.to_bits()
+        {
+            drag.sent = false;
+        }
+    }
+
+    /// The file's value of an editable parameter (its default without a
+    /// key), and whether the file sets it.
+    pub fn file_base(&self, instance: &str, parameter: &str) -> Option<(f64, bool)> {
+        let i = self.instances.iter().find(|i| i.name == instance)?;
+        let row = i.parameters.iter().find(|r| r.view.name == parameter)?;
+        Some((row.view.base, row.view.in_file))
     }
 
     /// Takes the instances of `other` (a reloaded or written project),
@@ -233,10 +299,8 @@ impl Panel {
                     .iter()
                     .map(|r| {
                         let mut view = row(r);
-                        if let Some(&(v, _)) =
-                            self.drags.get(&(i.name.clone(), r.view.name.clone()))
-                        {
-                            view.base = v;
+                        if let Some(drag) = self.drags.get(&(i.name.clone(), r.view.name.clone())) {
+                            view.base = drag.value;
                         }
                         view
                     })

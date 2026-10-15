@@ -1,10 +1,7 @@
 //! The local servers (`docs/ui-protocol.md`): static files over HTTP
-//! (`tiny_http`) and the protocol over a WebSocket (`tungstenite`) on a second
-//! port, both on 127.0.0.1 unless remote clients are allowed explicitly.
-//!
-//! Two ports, because `tiny_http`'s upgraded connection is one boxed stream
-//! with no timeouts and no way to split it: a client could not be read and
-//! written by one thread without one side blocking the other.
+//! ([`crate::http`]: a fixed pool of workers with deadlines) and the protocol
+//! over a WebSocket (`tungstenite`) on a second port, both on 127.0.0.1
+//! unless remote clients are allowed explicitly.
 //!
 //! Each WebSocket client has its own thread, which authenticates it (the
 //! first message must be `hello` with the session token) before the control
@@ -15,8 +12,8 @@
 
 use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::sync::{Arc, PoisonError, RwLock};
@@ -32,6 +29,7 @@ use tungstenite::{Error as WsError, Message, WebSocket};
 
 use crate::PROTOCOL;
 use crate::bindings::MAIN_PANEL;
+use crate::http::{self, Files, HttpConnection};
 
 /// How long a client has to send `hello`.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -49,9 +47,6 @@ const MAX_WRITE_BUFFER: usize = 4 << 20;
 const MAX_MESSAGE: usize = 64 << 10;
 /// Messages from all clients waiting for the control thread.
 const INBOUND: usize = 1024;
-/// The generated panel in the UI library, served for a project's missing
-/// `ui/main.html`.
-const DEFAULT_PANEL: &str = "default-panel.html";
 
 /// What the servers need.
 #[derive(Clone, Debug)]
@@ -90,7 +85,8 @@ pub(crate) enum Outbound {
     Binary(Vec<u8>),
 }
 
-/// The running servers; dropping them stops the HTTP and accept threads.
+/// The running servers; dropping them stops the HTTP workers and the accept
+/// threads, each within a few polls whatever the clients do.
 pub(crate) struct Server {
     http: SocketAddr,
     ws: SocketAddr,
@@ -104,6 +100,9 @@ pub(crate) struct Server {
     /// How a client's connection is made (shared with the accept thread).
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     accept: Arc<Accept>,
+    /// The HTTP workers' queue (test hooks: in-process HTTP clients).
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+    http_queue: SyncSender<HttpConnection>,
 }
 
 impl Server {
@@ -115,12 +114,8 @@ impl Server {
         };
         let token = token()?;
         let stop = Arc::new(AtomicBool::new(false));
-        let http = tiny_http::Server::http(SocketAddr::new(ip, options.port))
-            .map_err(|e| io::Error::other(e.to_string()))?;
-        let http_addr = http
-            .server_addr()
-            .to_ip()
-            .ok_or_else(|| io::Error::other("the HTTP server has no IP address"))?;
+        let http = TcpListener::bind(SocketAddr::new(ip, options.port))?;
+        let http_addr = http.local_addr()?;
         let listener = TcpListener::bind(SocketAddr::new(ip, 0))?;
         listener.set_nonblocking(true)?;
         let ws_addr = listener.local_addr()?;
@@ -133,18 +128,8 @@ impl Server {
             port: http_addr.port(),
             remote: options.remote,
         };
-        let http_stop = Arc::clone(&stop);
-        let http_thread = thread::Builder::new()
-            .name("signal-ui-http".to_owned())
-            .spawn(move || {
-                while !http_stop.load(Ordering::Relaxed) {
-                    match http.recv_timeout(Duration::from_millis(100)) {
-                        Ok(Some(request)) => files.serve(request),
-                        Ok(None) => {}
-                        Err(_) => break,
-                    }
-                }
-            })?;
+        let (http_queue, mut threads) = http::workers(files, &stop)?;
+        threads.push(http::accept(http, http_queue.clone(), Arc::clone(&stop))?);
 
         let accept = Arc::new(Accept {
             token: token.clone(),
@@ -156,30 +141,43 @@ impl Server {
             next: Arc::new(AtomicU64::new(1)),
         });
         let accepting = Arc::clone(&accept);
-        let accept_thread = thread::Builder::new()
-            .name("signal-ui-accept".to_owned())
-            .spawn(move || accepting.run(&listener))?;
+        threads.push(
+            thread::Builder::new()
+                .name("signal-ui-accept".to_owned())
+                .spawn(move || accepting.run(&listener))?,
+        );
         Ok(Server {
             http: http_addr,
             ws: ws_addr,
             token,
             inbound,
             stop,
-            threads: vec![http_thread, accept_thread],
+            threads,
             project,
             accept,
+            http_queue,
         })
     }
 
     /// Test hooks: the servers without a socket. Nothing is bound; clients
-    /// connect through [`connect_local`](Server::connect_local) and are
-    /// served by the same connection code as over TCP.
+    /// connect through [`connect_local`](Server::connect_local), HTTP clients
+    /// through [`LocalConnector::connect_http`], and are served by the same
+    /// connection code and HTTP workers as over TCP.
     #[cfg(feature = "test-hooks")]
     pub(crate) fn start_local(options: &ServerOptions) -> io::Result<Server> {
         let token = token()?;
         let stop = Arc::new(AtomicBool::new(false));
         let (inbound_tx, inbound) = sync_channel(INBOUND);
         let none = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+        let project = Arc::new(RwLock::new(options.project_ui.clone()));
+        // Port 0: in-process HTTP clients send `Host: 127.0.0.1:0`.
+        let files = Files {
+            ui: options.ui_dir.clone(),
+            project: Arc::clone(&project),
+            port: 0,
+            remote: false,
+        };
+        let (http_queue, threads) = http::workers(files, &stop)?;
         let accept = Arc::new(Accept {
             token: token.clone(),
             inbound: inbound_tx,
@@ -195,9 +193,10 @@ impl Server {
             token,
             inbound,
             stop,
-            threads: Vec::new(),
-            project: Arc::new(RwLock::new(options.project_ui.clone())),
+            threads,
+            project,
             accept,
+            http_queue,
         })
     }
 
@@ -214,6 +213,7 @@ impl Server {
     pub(crate) fn local_connector(&self) -> LocalConnector {
         LocalConnector {
             accept: Arc::clone(&self.accept),
+            http: self.http_queue.clone(),
         }
     }
 
@@ -283,12 +283,12 @@ fn same(a: &str, b: &str) -> bool {
 }
 
 /// `host:port` (with `[…]` for IPv6) as host and port.
-fn host_port(text: &str) -> Option<(&str, u16)> {
+pub(crate) fn host_port(text: &str) -> Option<(&str, u16)> {
     let (host, port) = text.rsplit_once(':')?;
     Some((host, port.parse().ok()?))
 }
 
-fn loopback(host: &str) -> bool {
+pub(crate) fn loopback(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "[::1]")
 }
 
@@ -298,6 +298,7 @@ fn loopback(host: &str) -> bool {
 #[derive(Clone)]
 pub struct LocalConnector {
     accept: Arc<Accept>,
+    http: SyncSender<HttpConnection>,
 }
 
 #[cfg(feature = "test-hooks")]
@@ -308,123 +309,14 @@ impl LocalConnector {
         self.accept.spawn(server);
         client
     }
-}
 
-/// The static files.
-struct Files {
-    ui: PathBuf,
-    project: Arc<RwLock<PathBuf>>,
-    port: u16,
-    remote: bool,
-}
-
-impl Files {
-    fn serve(&self, request: tiny_http::Request) {
-        let response = self.respond(&request);
-        let _ = request.respond(response);
-    }
-
-    fn respond(&self, request: &tiny_http::Request) -> tiny_http::Response<io::Cursor<Vec<u8>>> {
-        let status =
-            |code: u16, text: &str| tiny_http::Response::from_string(text).with_status_code(code);
-        if !matches!(
-            request.method(),
-            tiny_http::Method::Get | tiny_http::Method::Head
-        ) {
-            return status(405, "method not allowed");
-        }
-        // Without remote clients only the loopback names are served, so a
-        // page of another site cannot read these files through a name that
-        // resolves to 127.0.0.1 (DNS rebinding).
-        let host = request
-            .headers()
-            .iter()
-            .find(|h| h.field.equiv("Host"))
-            .map(|h| h.value.as_str().to_owned());
-        let allowed = match host.as_deref().and_then(host_port) {
-            Some((host, port)) => self.remote || (loopback(host) && port == self.port),
-            None => false,
-        };
-        if !allowed {
-            return status(403, "forbidden host");
-        }
-        let url = request.url();
-        let path = url.split(['?', '#']).next().unwrap_or("");
-        let found = match path {
-            "/" => file(&self.ui, "index.html"),
-            _ => match (path.strip_prefix("/ui/"), path.strip_prefix("/project/")) {
-                (Some(rest), _) => file(&self.ui, rest),
-                // A project without `ui/main.html` gets the generated panel.
-                (_, Some(rest)) => {
-                    let project = self
-                        .project
-                        .read()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .clone();
-                    file(&project, rest).or_else(|| {
-                        (rest == MAIN_PANEL)
-                            .then(|| file(&self.ui, DEFAULT_PANEL))
-                            .flatten()
-                    })
-                }
-                _ => None,
-            },
-        };
-        match found.and_then(|path| fs::read(&path).ok().map(|bytes| (path, bytes))) {
-            Some((path, bytes)) => {
-                let header = |name: &str, value: &str| {
-                    tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()).ok()
-                };
-                let mut response = tiny_http::Response::from_data(bytes);
-                for h in [
-                    header("Content-Type", mime(&path)),
-                    header("X-Content-Type-Options", "nosniff"),
-                    header("Cache-Control", "no-cache"),
-                    header("Referrer-Policy", "no-referrer"),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    response.add_header(h);
-                }
-                response
-            }
-            None => status(404, "not found"),
-        }
-    }
-}
-
-/// `relative` inside `root`, an existing file: no `..`, no hidden or empty
-/// segment, no escape through a link.
-pub(crate) fn file(root: &Path, relative: &str) -> Option<PathBuf> {
-    let clean = !relative.is_empty()
-        && !relative.contains(['%', '\\', '\0'])
-        && relative
-            .split('/')
-            .all(|segment| !segment.is_empty() && !segment.starts_with('.'));
-    if !clean {
-        return None;
-    }
-    let root = fs::canonicalize(root).ok()?;
-    let path = fs::canonicalize(root.join(relative)).ok()?;
-    (path.starts_with(&root) && path.is_file()).then_some(path)
-}
-
-/// The MIME type of a served file.
-pub(crate) fn mime(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
-        "html" | "htm" => "text/html; charset=utf-8",
-        "js" | "mjs" => "text/javascript; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "json" => "application/json",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "woff2" => "font/woff2",
-        "txt" | "md" => "text/plain; charset=utf-8",
-        _ => "application/octet-stream",
+    /// A new HTTP client's end of an in-process connection, served by the
+    /// HTTP workers exactly as an accepted TCP connection is (closed at once
+    /// when their queue is full). It must send `Host: 127.0.0.1:0`.
+    pub fn connect_http(&self) -> crate::local::LocalStream {
+        let (client, server) = crate::local::pair();
+        let _ = self.http.try_send(Box::new(server));
+        client
     }
 }
 
@@ -482,6 +374,8 @@ pub(crate) trait Transport: Read + Write + Send + 'static {
     fn read_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
     /// How long a write waits.
     fn write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+    /// An HTTP response is complete: the client reads to its end.
+    fn finish(&self) {}
 }
 
 impl Transport for TcpStream {
@@ -490,6 +384,9 @@ impl Transport for TcpStream {
     }
     fn write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.set_write_timeout(timeout)
+    }
+    fn finish(&self) {
+        let _ = self.shutdown(Shutdown::Write);
     }
 }
 

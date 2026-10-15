@@ -8,6 +8,7 @@ import { getDefaultConnection, onDefaultConnection } from '../signal-ui.js';
 import '../controls/meter.js';
 import { MENU, PANEL_PAGE, panelSource, quit, shortcut, withFragment } from './lib/menu.js';
 import { dragMessage, fileNote, releaseMessage, resetMessage, rows, shown, valuesOf } from './lib/parameters.js';
+import { retryMessage, revertMessage, unsavedLine, unsavedOf } from '../lib/unsaved.js';
 
 /** A new element `tag` with `props` (className, textContent, …) and children. */
 export function el(tag, props = {}, ...children) {
@@ -195,8 +196,20 @@ export class SignalAppMessages extends AppElement {
   connectedCallback() {
     if (!this.firstChild) {
       this.reload = el('div', { className: 'reload' });
+      // The project's unsaved parameters (docs/ui-controls.md "Unsaved").
+      this.unsavedText = el('span');
+      const every = (message, which) => () => {
+        for (const p of (this.unsavedState?.parameters ?? []).filter(which)) {
+          this.request(message(p.address)).catch((error) => error.code !== 'not-unsaved' && failed(error));
+        }
+      };
+      const retry = el('button', { type: 'button', textContent: 'Retry all' });
+      retry.addEventListener('click', every(retryMessage, (p) => p.control));
+      const revert = el('button', { type: 'button', textContent: 'Revert all' });
+      revert.addEventListener('click', every(revertMessage, () => true));
+      this.unsaved = el('div', { className: 'unsaved', role: 'status', hidden: true }, this.unsavedText, retry, revert);
       this.list = el('ul', { className: 'messages' });
-      this.append(this.reload, this.list);
+      this.append(this.reload, this.unsaved, this.list);
       this.errored = (event) => this.error(event.detail);
       window.addEventListener('signal-app-error', this.errored);
     }
@@ -213,6 +226,17 @@ export class SignalAppMessages extends AppElement {
     this.stops.push(connection.on('app', (app) => this.app(app)));
     this.stops.push(connection.on('reload', (r) => this.line(r.message, false)));
     this.stops.push(connection.on('reload.error', (r) => this.line(r.message, true)));
+    this.stops.push(connection.on('unsaved', (u) => this.showUnsaved(u)));
+    this.stops.push(connection.on('describe', (d) => d.unsaved && this.showUnsaved(d.unsaved)));
+    if (connection.unsaved) this.showUnsaved(connection.unsaved);
+  }
+
+  /** "N unsaved parameters — last error", hidden when nothing is unsaved. */
+  showUnsaved(state) {
+    this.unsavedState = state;
+    const line = unsavedLine(state);
+    this.unsavedText.textContent = line;
+    this.unsaved.hidden = !line;
   }
 
   opened() {
@@ -249,7 +273,17 @@ export class SignalAppParameters extends AppElement {
   attach(connection) {
     super.attach(connection);
     this.stops.push(connection.on('describe', (description) => this.described(description)));
+    this.stops.push(connection.on('unsaved', (state) => this.showUnsaved(state)));
     if (connection.description) this.described(connection.description);
+  }
+
+  /** Each row's failed write: its error, with Retry and Revert. */
+  showUnsaved(state) {
+    for (const [address, cell] of this.marks ?? []) {
+      const error = unsavedOf(state, address)?.error ?? null;
+      cell.hidden = !error;
+      cell.firstChild.textContent = error ? `Unsaved: ${error}` : '';
+    }
   }
 
   described(description) {
@@ -257,6 +291,7 @@ export class SignalAppParameters extends AppElement {
     if (this.dragging) return; // redrawn after the release
     if (this.unsubscribe) this.unsubscribe();
     this.cells = new Map();
+    this.marks = new Map();
     const blocks = list.map((instance) => {
       const table = el('table', { className: 'parameters' });
       for (const p of instance.parameters) table.append(this.row(p));
@@ -277,6 +312,7 @@ export class SignalAppParameters extends AppElement {
     } else {
       this.unsubscribe = null;
     }
+    this.showUnsaved(description.unsaved ?? this.connection?.unsaved);
   }
 
   row(p) {
@@ -298,7 +334,13 @@ export class SignalAppParameters extends AppElement {
       });
       const reset = el('button', { type: 'button', textContent: 'Reset', title: `Reset to default (${shown(p.default, p.unit)})` });
       reset.addEventListener('click', () => this.request(resetMessage(p.address)).catch(failed));
-      cells.push(el('td', {}, reset));
+      const retry = el('button', { type: 'button', textContent: 'Retry' });
+      retry.addEventListener('click', () => this.request(retryMessage(p.address)).catch(failed));
+      const revert = el('button', { type: 'button', textContent: 'Revert' });
+      revert.addEventListener('click', () => this.request(revertMessage(p.address)).catch(failed));
+      const mark = el('td', { className: 'unsaved', role: 'alert', hidden: true }, el('span'), retry, revert);
+      this.marks.set(p.address, mark);
+      cells.push(el('td', {}, reset), mark);
     } else {
       cells.push(el('td', { className: 'muted', textContent: 'read-only' }));
     }
