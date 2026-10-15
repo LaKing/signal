@@ -16,6 +16,7 @@ import { applyProps } from './lib/dom.js';
 import { pageHandlesShortcuts, panelReloads, panelSource, shortcut } from './lib/menu.js';
 import { dragMessage, fileNote, planUpdate, releaseMessage, resetMessage, rows, shown, structureKey, valuesOf } from './lib/parameters.js';
 import { INITIAL, controls, powerRequest, reduce } from './lib/power.js';
+import { contextItems, keepsSystemMenu, placeMenu } from './lib/context.js';
 import { saveReport, saveRequests } from './lib/save.js';
 import { compactStatus, statusFields } from './lib/status.js';
 import { INITIAL_TAB, TABS, select, tabForAction } from './lib/tabs.js';
@@ -555,7 +556,11 @@ export class SignalAppParameters extends AppElement {
     const mark = el('td', { className: 'unsaved', role: 'alert' }, el('span', { textContent: '⚠ ' }), retry, revert);
     mark.style.visibility = 'hidden';
     this.cells.set(p.address, { slider, base, note, effective, mark, unit: p.unit });
-    return el('tr', {}, name, el('td', {}, slider), base, note, effective, el('td', {}, reset), mark);
+    const tr = el('tr', {}, name, el('td', {}, slider), base, note, effective, el('td', {}, reset), mark);
+    // The context menu's Reset and Copy address.
+    tr.dataset.address = p.address;
+    tr.dataset.label = p.name;
+    return tr;
   }
 }
 
@@ -572,7 +577,12 @@ export class SignalAppPanel extends AppElement {
       this.frame.addEventListener('load', () => {
         this.unlisten?.();
         const doc = this.frame.contentDocument;
-        this.unlisten = doc ? SignalAppToolbar.listen(doc) : null;
+        const keys = doc ? SignalAppToolbar.listen(doc) : null;
+        const menu = doc ? SignalAppContextMenu.listen(doc, this.frame) : null;
+        this.unlisten = () => {
+          keys?.();
+          menu?.();
+        };
       });
       this.append(this.frame);
     }
@@ -604,11 +614,113 @@ export class SignalAppPanel extends AppElement {
   }
 }
 
+/**
+ * The context menu (owner's request, 2026-10-16), in place of the WebView's
+ * own: on a control bound to a parameter, Reset to default and Copy
+ * address; then Play or Stop and the other tabs. A text field keeps the
+ * system's menu (Cut, Copy, Paste). One per page; the panel frame's right
+ * clicks come here too.
+ */
+export class SignalAppContextMenu extends AppElement {
+  connectedCallback() {
+    if (!this.firstChild) {
+      this.list = el('div', { className: 'context-menu', role: 'menu', hidden: true });
+      this.append(this.list);
+      this.unlisten = SignalAppContextMenu.listen(document, null);
+      this.closer = (event) => {
+        if (!this.list.hidden && !this.list.contains(event.target)) this.close();
+      };
+      this.escape = (event) => event.key === 'Escape' && this.close();
+      window.addEventListener('pointerdown', this.closer, true);
+      window.addEventListener('keydown', this.escape);
+      window.addEventListener('blur', () => this.close());
+    }
+    super.connectedCallback();
+  }
+
+  disconnectedCallback() {
+    this.unlisten?.();
+    window.removeEventListener('pointerdown', this.closer, true);
+    window.removeEventListener('keydown', this.escape);
+    super.disconnectedCallback();
+  }
+
+  /** Right clicks in `doc` (this page's, or the panel frame's: `frame`); returns the remover. */
+  static listen(doc, frame) {
+    const open = (event) => {
+      const target = event.composedPath?.()[0] ?? event.target;
+      if (keepsSystemMenu(target)) return;
+      event.preventDefault();
+      const offset = frame?.getBoundingClientRect() ?? { left: 0, top: 0 };
+      document.querySelector('signal-app-context-menu')?.show(event, offset);
+    };
+    const close = () => document.querySelector('signal-app-context-menu')?.close();
+    doc.addEventListener('contextmenu', open);
+    if (frame) doc.addEventListener('pointerdown', close, true);
+    return () => {
+      doc.removeEventListener('contextmenu', open);
+      if (frame) doc.removeEventListener('pointerdown', close, true);
+    };
+  }
+
+  /** The parameter control under the click, if any: `{ address, label, editable }`. */
+  static control(event) {
+    for (const node of event.composedPath?.() ?? []) {
+      if (node?.binding?.address) {
+        return { address: node.binding.address, label: node.getAttribute?.('label') ?? '', editable: true };
+      }
+      if (node?.dataset?.address) return { address: node.dataset.address, label: node.dataset.label ?? '', editable: true };
+    }
+    return null;
+  }
+
+  show(event, offset) {
+    const toolbar = document.querySelector('signal-app-toolbar');
+    const control = SignalAppContextMenu.control(event);
+    const items = contextItems({
+      control,
+      playing: Boolean(toolbar?.playing),
+      power: (toolbar?.power?.power ?? 'on') === 'on',
+      tab: toolbar?.tab ?? null,
+    });
+    this.list.replaceChildren(
+      ...items.map((item) => {
+        if (item.id === 'separator') return el('hr', { role: 'separator' });
+        const button = el('button', { type: 'button', role: 'menuitem', textContent: item.label, disabled: Boolean(item.disabled) });
+        button.addEventListener('click', () => {
+          this.close();
+          this.run(item.id, control, toolbar);
+        });
+        return button;
+      }),
+    );
+    this.list.hidden = false;
+    const box = this.list.getBoundingClientRect();
+    const { left, top } = placeMenu(event.clientX + offset.left, event.clientY + offset.top, box.width, box.height, innerWidth, innerHeight);
+    this.list.style.left = `${left}px`;
+    this.list.style.top = `${top}px`;
+    this.list.querySelector('button:not([disabled])')?.focus();
+  }
+
+  close() {
+    if (this.list) this.list.hidden = true;
+  }
+
+  run(id, control, toolbar) {
+    if (id === 'reset' && control) this.request(resetMessage(control.address)).catch(failed);
+    else if (id === 'copy-address' && control) navigator.clipboard?.writeText(control.address).catch(failed);
+    else if (id === 'play') this.request({ type: 'transport.play' }).catch(failed);
+    else if (id === 'stop') this.request({ type: 'transport.stop' }).catch(failed);
+    else if (id.startsWith('tab:')) toolbar?.select(id.slice(4));
+  }
+}
+
 for (const [name, element] of [
   ['signal-app-toolbar', SignalAppToolbar],
   ['signal-app-project', SignalAppProject],
   ['signal-app-status', SignalAppStatus],
   ['signal-app-panel', SignalAppPanel],
+  ['signal-app-context-menu', SignalAppContextMenu],
   ['signal-app-meters', SignalAppMeters],
   ['signal-app-messages', SignalAppMessages],
   ['signal-app-parameters', SignalAppParameters],

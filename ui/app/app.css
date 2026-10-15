@@ -74,3 +74,9 @@ signal-app-messages { display: block; }
 .capabilities, .compute { color: var(--signal-muted); margin: 0.2rem 0 0 9rem; padding-left: 1rem; }
 .check { margin-left: 9rem; }
 .actions { display: flex; gap: 0.5rem; margin: 1rem 0 0.5rem; }
+
+/* The context menu: over everything, never in the flow. */
+.context-menu { position: fixed; z-index: 100; min-width: 13rem; padding: 0.3rem; display: flex; flex-direction: column; background: var(--signal-panel); border: 1px solid var(--signal-track); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); }
+.context-menu button { text-align: left; border: 0; background: transparent; padding: 0.3rem 0.6rem; border-radius: 4px; white-space: nowrap; }
+.context-menu button:hover:not([disabled]), .context-menu button:focus-visible { background: var(--signal-knob); outline: none; }
+.context-menu hr { border: 0; border-top: 1px solid var(--signal-track); margin: 0.25rem 0.2rem; }
