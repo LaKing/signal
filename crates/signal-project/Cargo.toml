@@ -19,6 +19,8 @@ serde = { workspace = true }
 # bit-exact); the default parser can be off by one ulp.
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 toml = { workspace = true }
+# Project files (`.signal`): the project folder as one zip (M2.8-12).
+zip = { workspace = true }
 toml_edit = { workspace = true }
 schemars = { workspace = true }
 

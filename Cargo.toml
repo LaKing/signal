@@ -54,6 +54,9 @@ muda = { version = "0.21.2", default-features = false }
 objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSURL"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSOpenPanel", "NSPanel", "NSResponder", "NSSavePanel", "NSWindow"] }
+# Project files (`.signal`, a zip of the project folder; owner's request 2026-10-16). MIT; only
+# deflate through flate2 and zlib-rs, which muda already locked.
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # test-only
 proptest = "1.12.0"
 insta = "1.49.0"
