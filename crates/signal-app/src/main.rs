@@ -16,6 +16,9 @@ use std::process::ExitCode;
 use clap::Parser;
 use muda::accelerator::{CMD_OR_CTRL, Key, KeyAccelerator};
 use muda::{AboutMetadata, IsMenuItem, Menu, MenuEvent, PredefinedMenuItem, Submenu};
+use objc2::MainThreadMarker;
+use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
+use objc2_foundation::NSString;
 use signal_app::server::{AppConfig, AppServer};
 use signal_app::setup::{Setup, setup_path};
 use signal_app::state::Backend;
@@ -207,6 +210,16 @@ fn main() -> ExitCode {
                 ..
             }
             | Event::UserEvent(UserEvent::Menu(MenuAction::Quit)) => true,
+            // Open Project…: the system's folder chooser; a chosen folder is
+            // opened as a dropped one is, a cancel does nothing.
+            Event::UserEvent(UserEvent::Menu(MenuAction::Open))
+                if MainThreadMarker::new().is_some() =>
+            {
+                if let Some(path) = choose_folder() {
+                    hand_dropped(&webview, &path);
+                }
+                false
+            }
             Event::UserEvent(UserEvent::Menu(action)) => {
                 if let Some(script) = action.page_script()
                     && let Err(error) = webview.evaluate_script(&script)
@@ -216,18 +229,7 @@ fn main() -> ExitCode {
                 false
             }
             Event::UserEvent(UserEvent::Dropped(path)) => {
-                // A folder is opened; anything else is refused, as before.
-                let (event, text) = match dropped(&path) {
-                    Ok(dir) => ("signal-drop", dir.display().to_string()),
-                    Err(refusal) => ("signal-app-error", refusal.to_owned()),
-                };
-                let quoted = serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".to_owned());
-                let script = format!(
-                    "window.dispatchEvent(new CustomEvent('{event}', {{ detail: {quoted} }}))"
-                );
-                if let Err(error) = webview.evaluate_script(&script) {
-                    eprintln!("signal-app: {error}");
-                }
+                hand_dropped(&webview, &path);
                 false
             }
             _ => false,
@@ -241,6 +243,37 @@ fn main() -> ExitCode {
             *control_flow = ControlFlow::Exit;
         }
     })
+}
+
+/// Hands `path` to the page as a drop: a folder is opened; anything else is
+/// refused, and opens nothing.
+fn hand_dropped(webview: &wry::WebView, path: &std::path::Path) {
+    let (event, text) = match dropped(path) {
+        Ok(dir) => ("signal-drop", dir.display().to_string()),
+        Err(refusal) => ("signal-app-error", refusal.to_owned()),
+    };
+    let quoted = serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".to_owned());
+    let script =
+        format!("window.dispatchEvent(new CustomEvent('{event}', {{ detail: {quoted} }}))");
+    if let Err(error) = webview.evaluate_script(&script) {
+        eprintln!("signal-app: {error}");
+    }
+}
+
+/// The system's folder chooser (NSOpenPanel, modal, folders only), on the
+/// main thread; the chosen folder, or None when cancelled.
+fn choose_folder() -> Option<PathBuf> {
+    let mtm = MainThreadMarker::new()?;
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseDirectories(true);
+    panel.setCanChooseFiles(false);
+    panel.setAllowsMultipleSelection(false);
+    panel.setPrompt(Some(&NSString::from_str("Open")));
+    if panel.runModal() != NSModalResponseOK {
+        return None;
+    }
+    let path = panel.URL()?.path()?;
+    Some(PathBuf::from(path.to_string()))
 }
 
 #[cfg(test)]

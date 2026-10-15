@@ -157,7 +157,8 @@ export class SignalAppToolbar extends AppElement {
     if (!target) return;
     this.select(target.tab);
     if (target.focus === 'project') {
-      // No native folder chooser (ADR 0023): the Setup tab's folder field.
+      // Without the app's folder chooser (in a browser, ⌘O): the Setup
+      // tab's folder field (ADR 0023).
       const field = document.querySelector('signal-app-project input[name="project"]');
       field?.focus();
       field?.select();

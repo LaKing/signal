@@ -3012,6 +3012,9 @@ version = "0.0.0"
 dependencies = [
  "clap",
  "muda",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "serde",
  "serde_json",
  "signal-app",

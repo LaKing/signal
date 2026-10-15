@@ -9,9 +9,10 @@ use crate::setup::Window;
 /// What one of Signal's own menu items does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuAction {
-    /// Open Project…: the page shows the Setup tab with its folder field
-    /// focused (no native folder chooser: it would need direct `objc2`
-    /// dependencies, which change Cargo.lock; ADR 0023).
+    /// Open Project…: the system's folder chooser (NSOpenPanel, in
+    /// `main.rs`); a chosen folder opens as a dropped one does. Without the
+    /// main thread, the page shows the Setup tab with its folder field
+    /// focused (ADR 0023).
     Open,
     /// Save Project: the page writes every unsaved parameter again.
     Save,

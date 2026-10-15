@@ -18,8 +18,9 @@ export function select(current, requested) {
 
 /**
  * What a menu action shows: Interface Setup… the Setup tab; Open Project…
- * the Setup tab with its project folder field focused (Signal.app has no
- * native folder chooser, ADR 0023). Null for an action without a tab.
+ * the Setup tab with its project folder field focused (in a browser;
+ * Signal.app shows the system's folder chooser instead, ADR 0023). Null for
+ * an action without a tab.
  */
 export function tabForAction(action) {
   if (action === 'setup') return { tab: 'setup', focus: null };
