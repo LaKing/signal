@@ -64,3 +64,18 @@ test('meters clip, scopes share frames, triggers are recorded', async () => {
   fake.subscribe({ stream: 'scope', port: '/synth.cutoff' }, () => {}, { onError: (e) => (refused = e.code) });
   assert.equal(refused, 'not-a-signal-output');
 });
+
+test('vector streams arrive at 60 snapshots per second on whole frames', () => {
+  const fake = new FakeConnection({ timers: timers() });
+  const frames = [];
+  let reply = null;
+  fake.subscribe({ stream: 'vector', port: '/membrane.z' }, (f) => frames.push(f), { onSubscribed: (r) => (reply = r) });
+  for (let i = 0; i < 30; i++) fake.tick();
+  assert.equal(reply.rows, 256);
+  assert.equal(reply.decimation, 800);
+  assert.equal(frames.length, 60);
+  assert.ok(frames.every((f) => f.kind === 4 && f.values.length === 256 && f.firstFrame % 800 === 0));
+  let refused = null;
+  fake.subscribe({ stream: 'vector', port: '/osc.out' }, () => {}, { onError: (e) => (refused = e.code) });
+  assert.equal(refused, 'not-a-vector-output');
+});

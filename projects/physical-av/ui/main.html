@@ -1,0 +1,82 @@
+<!doctype html>
+<!-- The physical-av panel (docs/ui-controls.md "Panels" and "Canvas"): the
+     membrane seen (std.mesh2d at the visual rate, WebGL when the browser
+     gives one), the sparks (a PNG sprite sheet, ui/assets/spark.png, made by
+     `node scripts/ui-strip.mjs sparks`) and the bodies (an SVG skin,
+     ui/assets/body.svg), each a <signal-canvas> of the engine's vector
+     streams; a strike button, the membranes' knobs, meters and a scope of
+     the membrane heard. Moving a control commits its value to project.toml
+     on release; this file never changes. `signal ui check
+     projects/physical-av` checks its bindings. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>physical-av</title>
+<link rel="stylesheet" href="/ui/controls/theme.css">
+<style>
+  :root { color-scheme: dark; --signal-accent: #4dd0c4; }
+  body { margin: 0; padding: 2rem; background: var(--signal-bg); color: var(--signal-fg); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+  h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: .02em; }
+  header p { margin: .15rem 0 1.5rem; color: var(--signal-muted); }
+  .rack { display: flex; flex-wrap: wrap; gap: 1.25rem; align-items: stretch; }
+  section { background: var(--signal-panel); border-radius: 10px; padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: .75rem; }
+  section h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--signal-muted); }
+  .row { display: flex; gap: 1rem; align-items: flex-end; }
+  .view { flex: 1 1 22rem; min-width: 18rem; }
+  .view signal-canvas { width: 100%; --signal-canvas-height: 260px; }
+  .scope { flex: 1 1 24rem; min-width: 18rem; }
+  .scope signal-scope { width: 100%; }
+</style>
+</head>
+<body>
+<signal-panel>
+  <header>
+    <h1>physical-av</h1>
+    <p>A struck membrane heard and seen, sparks that follow its sound, and bodies kicked every bar, at 90 bpm.</p>
+  </header>
+  <div class="rack">
+    <section class="view">
+      <h2>membrane, seen</h2>
+      <signal-canvas renderer="mesh" bind="/membrane_v.z" label="membrane (visual rate)"></signal-canvas>
+    </section>
+    <section class="view">
+      <h2>sparks</h2>
+      <signal-canvas renderer="points" bind="/sparks.pos /sparks.life" skin="strip:assets/spark.png;frames=8;orientation=horizontal" label="sparks"></signal-canvas>
+    </section>
+    <section class="view">
+      <h2>bodies</h2>
+      <signal-canvas renderer="bodies" bind="/bodies.bodies" skin="svg:assets/body.svg" label="bodies"></signal-canvas>
+    </section>
+    <section>
+      <h2>strike</h2>
+      <signal-button bind="/hub.in" label="strike"></signal-button>
+      <div class="row">
+        <signal-knob bind="/membrane_a.spring_hz" taper="log" min="40" max="600" label="pitch"></signal-knob>
+        <signal-knob bind="/membrane_a.decay_s" min="0.1" max="6" label="decay"></signal-knob>
+        <signal-knob bind="/membrane_v.spring_hz" min="0.2" max="6" label="wobble"></signal-knob>
+      </div>
+      <div class="row">
+        <signal-knob bind="/sparks.gravity" min="-4" max="2" label="gravity"></signal-knob>
+        <signal-knob bind="/bodies.kick_speed" min="0" max="8" label="kick"></signal-knob>
+        <signal-knob bind="/out.gain" min="0" max="2" label="gain"></signal-knob>
+      </div>
+    </section>
+    <section>
+      <h2>out</h2>
+      <div class="row">
+        <signal-meter bind="/out.l" label="L"></signal-meter>
+        <signal-meter bind="/out.r" label="R"></signal-meter>
+      </div>
+    </section>
+    <section class="scope">
+      <h2>membrane, heard</h2>
+      <signal-scope bind="/membrane_a.out" label="pickup"></signal-scope>
+    </section>
+  </div>
+</signal-panel>
+<script type="module">
+import '/ui/controls/index.js';
+</script>
+</body>
+</html>

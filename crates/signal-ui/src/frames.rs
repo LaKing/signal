@@ -3,13 +3,13 @@
 //!
 //! | offset | size | field |
 //! |---|---|---|
-//! | 0 | u8 | kind: 1 meters, 2 scope, 3 parameters |
+//! | 0 | u8 | kind: 1 meters, 2 scope, 3 parameters, 4 vector |
 //! | 1 | u8 | protocol version |
 //! | 2 | u16 | reserved, 0 |
 //! | 4 | u32 | subscription |
 //! | 8 | u64 | first frame |
 //! | 16 | u32 | count |
-//! | 20 | u32 | meters: frames covered; scope: decimation; parameters: 0 |
+//! | 20 | u32 | meters: frames covered; scope and vector: decimation; parameters: 0 |
 
 use crate::PROTOCOL;
 
@@ -21,6 +21,8 @@ pub const METERS: u8 = 1;
 pub const SCOPE: u8 = 2;
 /// Per address: `f64` base, `f64` effective (NaN when not known yet).
 pub const PARAMETERS: u8 = 3;
+/// `f32` rows of a vector output at one frame (M2.8-7).
+pub const VECTOR: u8 = 4;
 
 /// A frame with its header, ready for `payload` bytes.
 pub(crate) fn frame(

@@ -3,15 +3,20 @@
 // "Skins"): a knob filmstrip (vertical, 64 frames, 1x and @2x), a toggle
 // strip (horizontal, 2 frames, 1x and @2x) and a knob sprite sheet (8 × 8
 // frames, @2x only); with `pulse`, the pulse panel's knob filmstrip into
-// projects/pulse/ui/assets/ instead (vertical, 64 frames, 1x and @2x). The
-// PNGs are committed; this script only makes them again
-// (`node scripts/ui-strip.mjs [pulse]`). Node built-ins only.
+// projects/pulse/ui/assets/ instead (vertical, 64 frames, 1x and @2x); with
+// `sparks`, the <signal-canvas> spark sprite sheet (horizontal, 8 frames of
+// 32 × 32, a bright point fading and cooling with age, docs/ui-controls.md
+// "Canvas") as ui/assets/spark-strip.png and
+// projects/physical-av/ui/assets/spark.png. The PNGs are committed; this
+// script only makes them again (`node scripts/ui-strip.mjs [pulse|sparks]`).
+// Node built-ins only.
 
 import { writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 const PULSE = process.argv[2] === 'pulse';
+const SPARKS = process.argv[2] === 'sparks';
 const OUT = fileURLToPath(new URL(PULSE ? '../projects/pulse/ui/assets/' : '../ui/assets/', import.meta.url));
 
 const CRC = Array.from({ length: 256 }, (_, n) => {
@@ -128,7 +133,19 @@ function toggle(on) {
   };
 }
 
-function strip(name, frames, columns, cellW, cellH, draw) {
+/** A spark at age `t` (0 new, 1 old): a round glow, white-gold to dim red, shrinking. */
+function spark(t) {
+  const radius = 0.45 - 0.25 * t;
+  const hot = [255, 244 - Math.round(150 * t), 200 - Math.round(190 * t)];
+  return (x, y) => {
+    const r = Math.hypot(x - 0.5, y - 0.5) / radius;
+    if (r >= 1) return null;
+    const alpha = Math.round(255 * (1 - r * r) * (1 - 0.6 * t));
+    return [...hot, alpha];
+  };
+}
+
+function strip(name, frames, columns, cellW, cellH, draw, out = OUT) {
   const rows = Math.ceil(frames / columns);
   const width = cellW * columns;
   const height = cellH * rows;
@@ -136,11 +153,14 @@ function strip(name, frames, columns, cellW, cellH, draw) {
   for (let f = 0; f < frames; f++) {
     paint(pixels, width, (f % columns) * cellW, Math.floor(f / columns) * cellH, cellW, cellH, draw(f / (frames - 1)));
   }
-  writeFileSync(`${OUT}${name}`, png(width, height, pixels));
+  writeFileSync(`${out}${name}`, png(width, height, pixels));
   console.log(`${name}: ${width} × ${height}`);
 }
 
-if (PULSE) {
+if (SPARKS) {
+  strip('spark-strip.png', 8, 8, 32, 32, spark);
+  strip('spark.png', 8, 8, 32, 32, spark, fileURLToPath(new URL('../projects/physical-av/ui/assets/', import.meta.url)));
+} else if (PULSE) {
   for (const scale of [1, 2]) strip(`knob-strip${scale === 2 ? '@2x' : ''}.png`, 64, 1, 56 * scale, 56 * scale, dotKnob);
 } else {
   for (const scale of [1, 2]) {

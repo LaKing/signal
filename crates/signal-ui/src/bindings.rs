@@ -106,6 +106,8 @@ enum Wants {
     SinkInput,
     /// Signal outputs or inputs of the plan.
     SignalPorts,
+    /// Vector outputs of the plan (M2.8-7, `<signal-canvas>`).
+    VectorOutputs,
 }
 
 impl Wants {
@@ -119,6 +121,7 @@ impl Wants {
             Wants::EventInput => "an event input of the plan",
             Wants::SinkInput => "a signal input of the audio sink",
             Wants::SignalPorts => "a signal output or input of the plan",
+            Wants::VectorOutputs => "a vector output of the plan",
         }
     }
 }
@@ -133,12 +136,13 @@ fn control(name: &str) -> Option<(Wants, usize, usize)> {
         "signal-button" => (Wants::EventInput, 1, 1),
         "signal-meter" => (Wants::SinkInput, 1, 1),
         "signal-scope" => (Wants::SignalPorts, 1, 2),
+        "signal-canvas" => (Wants::VectorOutputs, 1, 3),
         _ => return None,
     })
 }
 
 const CONTROLS: &str = "signal-fader, signal-knob, signal-xy, signal-button, signal-toggle, \
-                        signal-meter, signal-scope, signal-value";
+                        signal-meter, signal-scope, signal-value, signal-canvas";
 
 /// A diagnostic of the check, with the control it is about: its index among
 /// the file's controls (the `signal-*` elements other than `<signal-panel>`,
@@ -527,6 +531,7 @@ fn describe_port(direction: Direction, shape: PortShape, sink: bool) -> String {
     let shape = match shape {
         PortShape::Signal => "signal",
         PortShape::Events => "event",
+        PortShape::Vector(_) => "vector",
         _ => "other",
     };
     let direction = match direction {
@@ -676,6 +681,9 @@ pub fn check(file: &str, text: &str, targets: &Targets<'_>) -> Checked {
                             direction == Direction::In && shape == PortShape::Signal && sink
                         }
                         Wants::SignalPorts => shape == PortShape::Signal,
+                        Wants::VectorOutputs => {
+                            direction == Direction::Out && matches!(shape, PortShape::Vector(_))
+                        }
                     };
                     if !fits {
                         finding(

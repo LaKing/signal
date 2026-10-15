@@ -18,6 +18,7 @@ use signal_graph::ExecutionPlan;
 
 use crate::audio::{AudioSink, Meter, to_device};
 use crate::scope::{ScopeBlock, ScopeControl, ScopeCounts, ScopeError, Scopes, scopes};
+use crate::vectors::{VectorControl, VectorCounts, VectorError, VectorSnapshot, Vectors, vectors};
 
 /// Builds a real-time run of `plan` with the audio adapter: the [`Runner`]
 /// for the audio thread and the [`Controller`] for the control thread. The
@@ -45,6 +46,7 @@ pub fn realtime_with(
     let (meter_tx, meter_rx) = RingBuffer::new(config.meters.max(1));
     let counts = Arc::new(Counts::default());
     let (scopes, scope_control) = scopes();
+    let (vectors, vector_control) = vectors();
     let runner = Runner {
         runner,
         levels: vec![(0.0, 0.0); sink.width],
@@ -54,12 +56,14 @@ pub fn realtime_with(
         meter_overflows: 0,
         counts: Arc::clone(&counts),
         scopes,
+        vectors,
     };
     let controller = Controller {
         controller,
         meters: meter_rx,
         counts,
         scopes: scope_control,
+        vectors: vector_control,
     };
     Ok((runner, controller))
 }
@@ -70,6 +74,7 @@ struct Counts {
     clipped: AtomicU64,
     meter_overflows: AtomicU64,
     scopes: ScopeCounts,
+    vectors: VectorCounts,
 }
 
 /// The audio-thread half of a real-time run: the engine's
@@ -87,6 +92,8 @@ pub struct Runner {
     counts: Arc<Counts>,
     /// The scope adapter's slots (`crate::scope`).
     scopes: Scopes,
+    /// The vector adapter's slots (`crate::vectors`).
+    vectors: Vectors,
 }
 
 impl Runner {
@@ -98,8 +105,9 @@ impl Runner {
     /// channel is pushed. Frames the engine did not run (it stopped,
     /// `docs/semantics.md` §14) and a trailing partial frame are silence.
     ///
-    /// The scopes started since the last callback take effect first, and
-    /// capture the frames run (`crate::scope`).
+    /// The scopes and vector streams started since the last callback take
+    /// effect first, and capture the frames run (`crate::scope`,
+    /// `crate::vectors`).
     ///
     /// Allocates, frees, locks and blocks nowhere; a full meter or scope
     /// queue is counted.
@@ -108,6 +116,7 @@ impl Runner {
         let first_frame = self.runner.next_frame();
         self.levels.fill((0.0, 0.0));
         self.scopes.commands(self.runner.engine());
+        self.vectors.commands(self.runner.engine());
         let done = {
             let mut device = Device {
                 sink: &mut self.sink,
@@ -118,6 +127,7 @@ impl Runner {
                 levels: &mut self.levels,
                 clipped: &mut self.clipped,
                 scopes: &mut self.scopes,
+                vectors: &mut self.vectors,
             };
             self.runner.process(frames, &mut device)
         };
@@ -143,6 +153,7 @@ impl Runner {
             .meter_overflows
             .store(self.meter_overflows, Ordering::Relaxed);
         self.scopes.publish(&self.counts.scopes);
+        self.vectors.publish(&self.counts.vectors);
     }
 
     /// Samples clamped to [−1, 1] (or non-finite, written as 0), since the
@@ -183,17 +194,21 @@ struct Device<'a> {
     levels: &'a mut [(f32, f64)],
     clipped: &'a mut u64,
     scopes: &'a mut Scopes,
+    vectors: &'a mut Vectors,
 }
 
 impl SinkOutput for Device<'_> {
     fn bind(&mut self, engine: &Engine) -> bool {
         self.sink.follow(engine);
         self.scopes.bind(engine);
+        self.vectors.bind(engine);
         true
     }
 
     fn block(&mut self, engine: &Engine, frames: usize) {
         self.scopes
+            .block(engine, self.first + self.at as u64, frames);
+        self.vectors
             .block(engine, self.first + self.at as u64, frames);
         let gain = self.sink.gain_index(engine);
         for f in 0..frames {
@@ -229,6 +244,7 @@ pub struct Controller {
     meters: Consumer<Meter>,
     counts: Arc<Counts>,
     scopes: ScopeControl,
+    vectors: VectorControl,
 }
 
 impl Controller {
@@ -289,6 +305,43 @@ impl Controller {
     /// Scope blocks dropped because the scope queue was full.
     pub fn scope_overflows(&self) -> u64 {
         ScopeControl::overflows(&self.counts.scopes)
+    }
+
+    /// Starts vector slot `slot` (below [`VECTOR_SLOTS`](crate::VECTOR_SLOTS))
+    /// on the `rows` rows of vector output `port`, one snapshot at every
+    /// frame that is a multiple of `decimation`, from the next callback; it
+    /// replaces what the slot ran. Its snapshots carry the generation
+    /// returned.
+    pub fn vector_start(
+        &mut self,
+        slot: usize,
+        port: PortAddress,
+        rows: usize,
+        decimation: u64,
+    ) -> Result<u32, VectorError> {
+        self.vectors.start(slot, port, rows, decimation)
+    }
+
+    /// Stops vector slot `slot`; its snapshots still queued are dropped.
+    pub fn vector_stop(&mut self, slot: usize) -> Result<(), VectorError> {
+        self.vectors.stop(slot)
+    }
+
+    /// Hands each vector snapshot that arrived to `snapshot`. Allocates
+    /// nothing.
+    pub fn poll_vectors(&mut self, snapshot: impl FnMut(&VectorSnapshot)) {
+        self.vectors.poll(snapshot);
+    }
+
+    /// Whether vector slot `slot` found its port in the running plan, as of
+    /// the runner's last callback.
+    pub fn vector_bound(&self, slot: usize) -> bool {
+        VectorControl::bound(&self.counts.vectors, slot)
+    }
+
+    /// Vector snapshots dropped because the vector queue was full.
+    pub fn vector_overflows(&self) -> u64 {
+        VectorControl::overflows(&self.counts.vectors)
     }
 }
 

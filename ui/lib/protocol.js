@@ -9,7 +9,7 @@ export const PROTOCOL = 1;
 export const HEADER = 24;
 
 /** Binary frame kinds. */
-export const KIND = Object.freeze({ METERS: 1, SCOPE: 2, PARAMETERS: 3 });
+export const KIND = Object.freeze({ METERS: 1, SCOPE: 2, PARAMETERS: 3, VECTOR: 4 });
 
 /**
  * The WebSocket port and the session token from the page URL's fragment
@@ -38,7 +38,8 @@ export function helloMessage(token) {
 /**
  * A binary frame as an object: its header fields and its values.
  * Meters: `[{peak, rms}]` per channel; scope: a Float32Array of points;
- * parameters: `[{base, effective}]` per address (NaN when not known yet).
+ * vector: a Float32Array of the rows at one frame (`firstFrame`; `extra` is
+ * the decimation); parameters: `[{base, effective}]` per address (NaN when not known yet).
  */
 export function decodeFrame(buffer) {
   const bytes = buffer instanceof ArrayBuffer ? buffer : buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
@@ -55,7 +56,7 @@ export function decodeFrame(buffer) {
     extra: view.getUint32(20, true),
     values: null,
   };
-  const size = { [KIND.METERS]: 8, [KIND.SCOPE]: 4, [KIND.PARAMETERS]: 16 }[frame.kind];
+  const size = { [KIND.METERS]: 8, [KIND.SCOPE]: 4, [KIND.PARAMETERS]: 16, [KIND.VECTOR]: 4 }[frame.kind];
   if (size === undefined) {
     throw new Error(`unknown frame kind ${frame.kind}`);
   }
@@ -73,7 +74,7 @@ export function decodeFrame(buffer) {
       values.push(view.getFloat32(at, true));
     }
   }
-  frame.values = frame.kind === KIND.SCOPE ? Float32Array.from(values) : values;
+  frame.values = frame.kind === KIND.SCOPE || frame.kind === KIND.VECTOR ? Float32Array.from(values) : values;
   return frame;
 }
 

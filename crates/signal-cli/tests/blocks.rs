@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 use signal_core::{Curve, EventPayload, Frame, Registry, SplitMix64};
 use signal_engine::{Engine, EngineConfig, EngineError, ExternalEvent, HookPoint, Schedule};
 use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, InstanceDef, build_plan};
-use signal_output::{Render, render_blocks, render_with};
+use signal_output::{
+    Render, VectorTap, VectorTrack, render_blocks, render_blocks_tapped, render_with,
+};
 use signal_project::{Project, SourceFile};
 
 /// The block sizes of the matrix (AC1).
@@ -631,4 +633,195 @@ fn render_block_option_changes_nothing_in_the_output() {
         assert!(!output.status.success(), "--block {k} is refused");
         assert!(!out.exists());
     }
+}
+
+/// [`render`] with the vector outputs `taps` snapshotted
+/// ([`render_blocks_tapped`]); the per-frame partition runs blocks of one
+/// frame.
+fn render_tapped(
+    plan: &ExecutionPlan,
+    (sample_rate, seed, frames): (u32, u64, u64),
+    partition: Partition,
+    threads: usize,
+    mut before: impl FnMut(&mut Engine) -> Result<Option<Frame>, EngineError>,
+    taps: &[VectorTap],
+) -> (Render, Vec<VectorTrack>) {
+    let registry = registry();
+    let config = config(sample_rate, seed, threads);
+    let mut engine = Engine::new(plan, &registry, config, Vec::new()).unwrap();
+    let _threaded = (threads > 1).then(|| {
+        engine.set_task_hook(Some(workers_take_part));
+        THREADED.lock().unwrap_or_else(|e| e.into_inner())
+    });
+    let rendered = match partition {
+        Partition::PerFrame => render_blocks_tapped(&mut engine, frames, 1, before, taps),
+        Partition::Blocks(k) => render_blocks_tapped(&mut engine, frames, k, before, taps),
+        Partition::Random(seed) => {
+            let mut rng = SplitMix64::new(seed);
+            let cut = |engine: &mut Engine| {
+                let next = before(engine)?;
+                let cut = Frame(engine.next_frame().0 + 1 + rng.next_u64() % 256);
+                Ok(Some(next.map_or(cut, |at: Frame| at.min(cut))))
+            };
+            render_blocks_tapped(&mut engine, frames, 256, cut, taps)
+        }
+    }
+    .unwrap();
+    assert_eq!(engine.log_overflows(), 0);
+    assert_eq!(engine.input_overflows(), 0);
+    if threads > 1 {
+        let stats = engine.schedule_stats();
+        assert!(stats.worker_tasks > 0, "{stats:?}");
+    }
+    rendered
+}
+
+fn tap(port: &str, rows: usize, decimation: u64) -> VectorTap {
+    VectorTap {
+        port: port.parse().unwrap(),
+        rows,
+        decimation,
+    }
+}
+
+/// M2.8-7, operator-request:007 condition 3: an event into `std.count` acts
+/// on a divisor-800 type at the first tick at or after its frame, once,
+/// whatever the partition or thread count. Particles that live for a minute
+/// count the emissions: +1 at 0; +3 at 800 (frames 1, 799, 800); +3 at
+/// 1600 (801, 1599, 1600); none at 2400; +6 at 3200 (2405 and five at 3000).
+#[test]
+fn events_act_at_the_first_tick_at_or_after_their_frame() {
+    let project = project_at(
+        48_000,
+        "c = { module = \"std.count\" }\n\
+         p = { module = \"std.particles\", lifetime_s = 60, gravity = 0 }\n\
+         out = { module = \"std.audio_out\" }\n",
+        "  { from = \"c.window\", to = \"p.emit\" },\n",
+    );
+    let plan = project.plan(&registry()).unwrap().plan;
+    let mut frames: Vec<u64> = vec![0, 1, 799, 800, 801, 1599, 1600, 2405];
+    frames.extend([3000; 5]);
+    let run = |partition, threads| {
+        let mut next = 0;
+        let before = |engine: &mut Engine| {
+            engine.reclaim_externals().for_each(drop);
+            let now = engine.next_frame().0;
+            while let Some(&at) = frames.get(next).filter(|&&at| at == now) {
+                next += 1;
+                let event = ExternalEvent {
+                    frame: Frame(at),
+                    sequence: next as u64,
+                    target: "/c.in".parse().unwrap(),
+                    payload: EventPayload::Trigger,
+                };
+                engine.push_external(event).unwrap();
+            }
+            Ok(frames.get(next).map(|&at| Frame(at)))
+        };
+        let taps = [tap("/p.life", 64, 1)];
+        let (_, tracks) =
+            render_tapped(&plan, (48_000, 5, 4_000), partition, threads, before, &taps);
+        tracks[0]
+            .snapshots
+            .iter()
+            .map(|(frame, life)| (frame.0, life.iter().filter(|&&l| l > 0.0).count()))
+            .collect::<Vec<_>>()
+    };
+    let live = run(Partition::Blocks(1), 1);
+    // Held between ticks: the count changes only on the ticks.
+    let changes: Vec<(u64, usize)> = live
+        .windows(2)
+        .filter(|w| w[0].1 != w[1].1)
+        .map(|w| (w[1].0, w[1].1))
+        .collect();
+    assert_eq!(live[0], (0, 1));
+    assert_eq!(changes, vec![(800, 4), (1600, 7), (3200, 13)]);
+    for (partition, threads) in [
+        (Partition::Blocks(3), 1),
+        (Partition::Blocks(64), 1),
+        (Partition::Blocks(256), 1),
+        (Partition::Random(11), 1),
+        (Partition::Blocks(1), 4),
+        (Partition::Blocks(64), 4),
+    ] {
+        assert_eq!(
+            run(partition, threads),
+            live,
+            "{partition:?}, {threads} threads"
+        );
+    }
+}
+
+/// M2.8-7 AC1: the physical-av demo, its visual-rate types and the count
+/// bridge included, is bit-identical in every partition and on workers:
+/// the audio, the log and every row of every vector output at every tick
+/// (the bridge windows every frame, the audio membrane's 256 rows every 97
+/// frames). The visual streams move, so the comparison is not of zeros.
+#[test]
+fn physical_av_is_bit_identical_in_blocks_and_on_threads() {
+    let project = Project::load(&repository().join("projects/physical-av")).unwrap();
+    let plan = project.plan(&registry()).unwrap().plan;
+    let taps = [
+        tap("/membrane_v.z", 256, 800),
+        tap("/sparks.pos", 128, 800),
+        tap("/sparks.vel", 128, 800),
+        tap("/sparks.life", 64, 800),
+        tap("/bodies.bodies", 24, 800),
+        tap("/bodies.vel", 12, 800),
+        tap("/hits.window", 4, 1),
+        tap("/kicks.window", 4, 1),
+        tap("/membrane_a.z", 256, 97),
+    ];
+    let run = (project.sample_rate, project.seed, 96_000);
+    let (reference, tracks) =
+        render_tapped(&plan, run, Partition::Blocks(1), 1, |_| Ok(None), &taps);
+    for (track, tap) in tracks.iter().zip(&taps) {
+        let first = &track.snapshots[0].1;
+        let moving = track.snapshots.iter().any(|(_, rows)| rows != first);
+        assert!(moving, "{} never changes", tap.port);
+        assert_eq!(
+            track.snapshots.len() as u64,
+            96_000_u64.div_ceil(tap.decimation)
+        );
+    }
+    let bits = |t: &VectorTrack| -> Vec<(u64, Vec<u64>)> {
+        t.snapshots
+            .iter()
+            .map(|(f, rows)| (f.0, rows.iter().map(|x| x.to_bits()).collect()))
+            .collect()
+    };
+    let runs = partitions().map(|p| (p, 1)).chain(
+        [2, 4, 8]
+            .into_iter()
+            .flat_map(|t| [64, 256].map(|k| (Partition::Blocks(k), t))),
+    );
+    for (partition, threads) in runs {
+        let (rendered, other) = render_tapped(&plan, run, partition, threads, |_| Ok(None), &taps);
+        assert_eq!(
+            hashes(&rendered),
+            hashes(&reference),
+            "{partition:?}, {threads} threads"
+        );
+        for ((a, b), tap) in tracks.iter().zip(&other).zip(&taps) {
+            assert!(
+                bits(a) == bits(b),
+                "{}: {partition:?}, {threads} threads",
+                tap.port
+            );
+        }
+    }
+    assert_no_violation();
+}
+
+/// A one-file project at `rate`.
+fn project_at(rate: u32, instances: &str, connections: &str) -> Project {
+    let text = format!(
+        "schema_version = 1\n\n[project]\nname = \"bridge\"\nsample_rate = {rate}\nseed = 5\n\n\
+         [instances]\n{instances}\n[wiring]\nconnections = [\n{connections}]\n"
+    );
+    Project::from_sources(vec![SourceFile {
+        path: "project.toml".to_owned(),
+        text,
+    }])
+    .unwrap()
 }

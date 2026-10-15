@@ -36,7 +36,8 @@ use signal_engine::{
 };
 use signal_graph::ExecutionPlan;
 use signal_output::{
-    Controller, Meter, NullDriver, SCOPE_POINTS, SCOPE_SLOTS, ScopeBlock, realtime_with,
+    Controller, Meter, NullDriver, SCOPE_POINTS, SCOPE_SLOTS, ScopeBlock, VECTOR_MAX_ROWS,
+    VECTOR_SLOTS, VectorSnapshot, realtime_with,
 };
 use signal_project::live::{Both, ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload_observed};
 use signal_project::session::{LiveRecorder, SessionRecorder, sink_of};
@@ -203,6 +204,15 @@ enum Stream {
         decimation: u64,
         bound: bool,
     },
+    Vector {
+        slot: usize,
+        port: PortAddress,
+        rows: usize,
+        /// The snapshots per second asked for.
+        rate: f64,
+        decimation: u64,
+        bound: bool,
+    },
 }
 
 struct Sub {
@@ -341,11 +351,13 @@ pub struct Host {
     subs: BTreeMap<u32, Sub>,
     next_sub: u32,
     scope_slots: [Option<u32>; SCOPE_SLOTS],
+    vector_slots: [Option<u32>; VECTOR_SLOTS],
     values: BTreeMap<PortAddress, ParameterValue>,
     reports: Vec<Report>,
     meters: Vec<Meter>,
     inputs: Vec<Meter>,
     blocks: Vec<ScopeBlock>,
+    snapshots: Vec<VectorSnapshot>,
     commands: BTreeMap<CommandId, u64>,
     acks: BTreeMap<u64, Pending>,
     next_ack: u64,
@@ -448,6 +460,37 @@ fn scope_decimation(message: &Value, sample_rate: u32) -> Result<u64, Failure> {
     let rate = rate_of(message, sample_rate)?.min(sample_rate);
     // From 1 to the sample rate, so this is a finite number of frames.
     Ok((sample_rate / rate).round().max(1.0) as u64)
+}
+
+/// A vector stream's decimation: its `rate` in snapshots per second
+/// (default 60; at least 1, at most the port's tick rate), as a whole number
+/// of the port's ticks, so every snapshot is a tick.
+fn vector_decimation(rate: f64, sample_rate: u32, divisor: u64) -> u64 {
+    let divisor = divisor.max(1);
+    let ticks = f64::from(sample_rate.max(1)) / divisor as f64;
+    let rate = rate.min(ticks.max(1.0));
+    divisor * (ticks / rate).round().max(1.0) as u64
+}
+
+/// Vector output `port` of `plan`: its elements and rate divisor; `None`
+/// when the plan has no such vector output of at most
+/// [`VECTOR_MAX_ROWS`] elements.
+fn vector_shape(plan: Option<&ExecutionPlan>, port: &PortAddress) -> Option<(usize, u64)> {
+    let instance = plan?
+        .instances
+        .iter()
+        .find(|i| i.address == port.instance())?;
+    instance
+        .descriptor
+        .ports
+        .iter()
+        .find_map(|p| match p.shape {
+            PortShape::Vector(n) if p.name == port.port() && p.direction == PortDirection::Out => {
+                Some((n as usize, u64::from(p.rate.get())))
+            }
+            _ => None,
+        })
+        .filter(|&(n, _)| n <= VECTOR_MAX_ROWS)
 }
 
 impl Host {
@@ -571,11 +614,13 @@ impl Host {
             subs: BTreeMap::new(),
             next_sub: 1,
             scope_slots: [None; SCOPE_SLOTS],
+            vector_slots: [None; VECTOR_SLOTS],
             values: BTreeMap::new(),
             reports: Vec::new(),
             meters: Vec::new(),
             inputs: Vec::new(),
             blocks: Vec::new(),
+            snapshots: Vec::new(),
             commands: BTreeMap::new(),
             acks: BTreeMap::new(),
             next_ack: 1,
@@ -1292,6 +1337,8 @@ impl Host {
             });
         let blocks = &mut self.blocks;
         run.controller.poll_scopes(|b| blocks.push(*b));
+        let snapshots = &mut self.snapshots;
+        run.controller.poll_vectors(|s| snapshots.push(*s));
         if let Some(input) = run.input.as_mut() {
             let inputs = &mut self.inputs;
             input.meters().drain(|m| inputs.push(*m));
@@ -1317,17 +1364,33 @@ impl Host {
                 let now = run.controller.scope_bound(*slot);
                 if now != *was {
                     *was = now;
-                    bound.push((s.client, sub, now));
+                    bound.push((s.client, sub, now, false));
+                }
+            }
+            if let Stream::Vector {
+                slot, bound: was, ..
+            } = &mut s.stream
+            {
+                let now = run.controller.vector_bound(*slot);
+                if now != *was {
+                    *was = now;
+                    bound.push((s.client, sub, now, true));
                 }
             }
         }
-        for (client, sub, now) in bound {
-            let kind = if now { "scope.bound" } else { "scope.unbound" };
+        for (client, sub, now, vector) in bound {
+            let kind = match (vector, now) {
+                (true, true) => "vector.bound",
+                (true, false) => "vector.unbound",
+                (false, true) => "scope.bound",
+                (false, false) => "scope.unbound",
+            };
             self.send_text(client, &json!({"type": kind, "sub": sub}));
         }
         self.take_reports();
         self.take_meters();
         self.take_blocks();
+        self.take_snapshots();
         if swapped {
             let describe = self.describe(false);
             self.broadcast(&describe);
@@ -1413,6 +1476,7 @@ impl Host {
                 after.is_some()
                     && after.map(f64::to_bits) == plan_base(old.as_ref(), port).map(f64::to_bits)
             });
+            self.reshape_vectors(true);
         }
         if let Some(mode) = self.app.as_mut() {
             let error = notice.0.get("type") == Some(&json!("reload.error"));
@@ -1523,6 +1587,31 @@ impl Host {
         }
     }
 
+    /// Vector frames (kind 4, M2.8-7): one per snapshot, its rows as `f32`.
+    fn take_snapshots(&mut self) {
+        for snapshot in std::mem::take(&mut self.snapshots) {
+            let Some(sub) = self.vector_slots.get(snapshot.slot).copied().flatten() else {
+                continue;
+            };
+            let Some(client) = self.subs.get(&sub).map(|s| s.client) else {
+                continue;
+            };
+            let values = snapshot.values();
+            let mut bytes = frame(
+                frames::VECTOR,
+                sub,
+                snapshot.frame.0,
+                values.len() as u32,
+                u32::try_from(snapshot.decimation).unwrap_or(u32::MAX),
+                values.len() * 4,
+            );
+            for v in values {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            self.send_binary(client, bytes);
+        }
+    }
+
     /// The parameter and meter frames due.
     fn emit(&mut self) {
         let now = Instant::now();
@@ -1581,7 +1670,7 @@ impl Host {
                     }
                     out.push((sub.client, bytes));
                 }
-                Stream::Scope { .. } => {}
+                Stream::Scope { .. } | Stream::Vector { .. } => {}
             }
         }
         for (client, bytes) in out {
@@ -1822,6 +1911,7 @@ impl Host {
             "sinks": sinks,
             "meters": {"output": output_meters, "input": input_meters},
             "scopes": {"slots": SCOPE_SLOTS, "points": SCOPE_POINTS, "maxRate": self.rate},
+            "vectors": {"slots": VECTOR_SLOTS, "maxRows": VECTOR_MAX_ROWS},
             "unsaved": self.unsaved_json(),
         });
         if restarted {
@@ -1921,6 +2011,50 @@ impl Host {
                     json!({"port": address, "decimation": decimation, "slot": slot}),
                 )
             }
+            "vector" => {
+                let address = message.get("port").and_then(Value::as_str).unwrap_or("");
+                let port: PortAddress = address
+                    .parse()
+                    .map_err(|e| fail("bad-address", format!("{address}: {e}")))?;
+                // A vector output: its rows and rate divisor.
+                let Some((rows, divisor)) = vector_shape(self.plan.as_ref(), &port) else {
+                    return Err(fail(
+                        "not-a-vector-output",
+                        format!(
+                            "{address} is not a vector output (of at most {VECTOR_MAX_ROWS} elements) of the running plan"
+                        ),
+                    ));
+                };
+                let rate = rate_of(message, 60.0)?;
+                let decimation = vector_decimation(rate, self.rate, divisor);
+                let slot = self
+                    .vector_slots
+                    .iter()
+                    .position(Option::is_none)
+                    .ok_or_else(|| fail("no-vector-slot", "every vector slot is in use"))?;
+                let run = self
+                    .run
+                    .as_mut()
+                    .ok_or_else(|| fail("not-playing", "nothing plays"))?;
+                run.controller
+                    .vector_start(slot, port.clone(), rows, decimation)
+                    .map_err(|e| fail("busy", e.to_string()))?;
+                if let Some(s) = self.vector_slots.get_mut(slot) {
+                    *s = Some(id);
+                }
+                (
+                    Stream::Vector {
+                        slot,
+                        port,
+                        rows,
+                        rate,
+                        decimation,
+                        bound: false,
+                    },
+                    Duration::ZERO,
+                    json!({"port": address, "rows": rows, "decimation": decimation, "slot": slot}),
+                )
+            }
             other => return Err(fail("bad-message", format!("no stream '{other}'"))),
         };
         self.next_sub = self.next_sub.wrapping_add(1).max(1);
@@ -1928,6 +2062,7 @@ impl Host {
             Stream::Parameters { .. } => "parameters",
             Stream::Meters { .. } => "meters",
             Stream::Scope { .. } => "scope",
+            Stream::Vector { .. } => "vector",
         };
         self.subs.insert(
             id,
@@ -1964,17 +2099,30 @@ impl Host {
     }
 
     fn drop_sub(&mut self, sub: u32) {
-        if let Some(Sub {
-            stream: Stream::Scope { slot, .. },
-            ..
-        }) = self.subs.remove(&sub)
-        {
-            if let Some(s) = self.scope_slots.get_mut(slot) {
-                *s = None;
+        match self.subs.remove(&sub) {
+            Some(Sub {
+                stream: Stream::Scope { slot, .. },
+                ..
+            }) => {
+                if let Some(s) = self.scope_slots.get_mut(slot) {
+                    *s = None;
+                }
+                if let Some(run) = self.run.as_mut() {
+                    let _ = run.controller.scope_stop(slot);
+                }
             }
-            if let Some(run) = self.run.as_mut() {
-                let _ = run.controller.scope_stop(slot);
+            Some(Sub {
+                stream: Stream::Vector { slot, .. },
+                ..
+            }) => {
+                if let Some(s) = self.vector_slots.get_mut(slot) {
+                    *s = None;
+                }
+                if let Some(run) = self.run.as_mut() {
+                    let _ = run.controller.vector_stop(slot);
+                }
             }
+            _ => {}
         }
     }
 
@@ -2912,8 +3060,51 @@ impl Host {
         }
     }
 
-    /// The scope subscriptions, on a new run's Controller.
+    /// Vector subscriptions whose port the plan now has with another number
+    /// of elements or another rate divisor (a swap replaced its type) take
+    /// the new shape, and their client is told (`vector.reshaped`), so a
+    /// stream never carries another port's rows (the adapter refuses to
+    /// bind a slot whose width differs from the port's). With `restart`,
+    /// a reshaped slot is started again on the running Controller.
+    fn reshape_vectors(&mut self, restart: bool) {
+        let plan = self.plan.as_ref();
+        let mut told = Vec::new();
+        for (&sub, s) in &mut self.subs {
+            let Stream::Vector {
+                slot,
+                port,
+                rows,
+                rate,
+                decimation,
+                ..
+            } = &mut s.stream
+            else {
+                continue;
+            };
+            let Some((n, divisor)) = vector_shape(plan, port) else {
+                continue;
+            };
+            let d = vector_decimation(*rate, self.rate, divisor);
+            if (n, d) == (*rows, *decimation) {
+                continue;
+            }
+            (*rows, *decimation) = (n, d);
+            if restart && let Some(run) = self.run.as_mut() {
+                let _ = run.controller.vector_start(*slot, port.clone(), n, d);
+            }
+            told.push((
+                s.client,
+                json!({"type": "vector.reshaped", "sub": sub, "rows": n, "decimation": d}),
+            ));
+        }
+        for (client, message) in told {
+            self.send_text(client, &message);
+        }
+    }
+
+    /// The scope and vector subscriptions, on a new run's Controller.
     fn rearm(&mut self) {
+        self.reshape_vectors(false);
         let Some(run) = self.run.as_mut() else {
             return;
         };
@@ -2927,6 +3118,20 @@ impl Host {
             {
                 *bound = false;
                 let _ = run.controller.scope_start(*slot, port.clone(), *decimation);
+            }
+            if let Stream::Vector {
+                slot,
+                port,
+                rows,
+                decimation,
+                bound,
+                ..
+            } = &mut sub.stream
+            {
+                *bound = false;
+                let _ = run
+                    .controller
+                    .vector_start(*slot, port.clone(), *rows, *decimation);
             }
         }
     }
@@ -2945,6 +3150,7 @@ impl Host {
             "evicted": self.evicted,
             "meterOverflows": controller.map(Controller::meter_overflows),
             "scopeOverflows": controller.map(Controller::scope_overflows),
+            "vectorOverflows": controller.map(Controller::vector_overflows),
             "commandOverflows": controller.map(|c| c.command_overflows()),
             "clipped": controller.map(Controller::clipped),
             "writes": self.writes,

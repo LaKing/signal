@@ -152,6 +152,26 @@ mod exciter {
     signal_contract::contract_tests!(super::std_type("std.exciter"));
 }
 
+mod count {
+    signal_contract::contract_tests!(super::std_type("std.count"));
+}
+
+mod particles {
+    signal_contract::contract_tests!(super::std_type("std.particles"));
+}
+
+mod mesh2d {
+    signal_contract::contract_tests!(super::std_type("std.mesh2d"));
+}
+
+mod mesh2d_audio {
+    signal_contract::contract_tests!(super::std_type("std.mesh2d_audio"));
+}
+
+mod body2d {
+    signal_contract::contract_tests!(super::std_type("std.body2d"));
+}
+
 /// The physical models stay finite when their parameters jump between range
 /// limits on every frame (finding auditor-1-modal-modulation-overflow): a
 /// unit impulse on every signal input and a trigger on every event input on

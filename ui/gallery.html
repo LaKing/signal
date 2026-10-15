@@ -105,6 +105,15 @@
   <figure><signal-scope bind="/osc.out /lfo.out" mode="xy" label="osc against lfo"></signal-scope><figcaption>X–Y</figcaption></figure>
 </div>
 
+<h2>Canvas</h2>
+<div class="row">
+  <figure class="wide"><signal-canvas renderer="mesh" bind="/membrane.z" label="membrane"></signal-canvas><figcaption><code>renderer="mesh"</code>: a vector of 16 × 16 displacements, WebGL when there is one</figcaption></figure>
+  <figure class="wide"><signal-canvas renderer="points" bind="/sparks.pos /sparks.life" label="sparks"></signal-canvas><figcaption><code>renderer="points"</code>: positions and remaining life</figcaption></figure>
+  <figure class="wide"><signal-canvas renderer="points" bind="/sparks.pos /sparks.life" skin="strip:assets/spark-strip.png;frames=8;orientation=horizontal" label="sprites"></signal-canvas><figcaption>a PNG sprite sheet, its frame chosen by age (Canvas 2D)</figcaption></figure>
+  <figure class="wide"><signal-canvas renderer="bodies" bind="/bodies.bodies" label="bodies"></signal-canvas><figcaption><code>renderer="bodies"</code>: circles and boxes in the box</figcaption></figure>
+  <figure class="wide"><signal-canvas renderer="bodies" bind="/bodies.bodies" skin="svg:assets/body.svg" label="SVG bodies"></signal-canvas><figcaption>an SVG skin</figcaption></figure>
+</div>
+
 <h2>Values</h2>
 <div class="row">
   <figure><signal-value bind="/synth.cutoff"></signal-value><figcaption>cutoff (Hz)</figcaption></figure>

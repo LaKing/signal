@@ -13,6 +13,7 @@ use signal_engine::{
 };
 
 use crate::audio::{AudioSink, Conversion, RenderError};
+use crate::vectors::{VectorTap, VectorTaps, VectorTrack};
 
 /// The result of [`render`]: the audio and the log, in memory.
 #[derive(Clone, Debug, PartialEq)]
@@ -96,6 +97,21 @@ pub fn render_blocks(
     block: usize,
     before: impl FnMut(&mut Engine) -> Result<Option<Frame>, EngineError>,
 ) -> Result<Render, RenderError> {
+    render_blocks_tapped(engine, frames, block, before, &[]).map(|(render, _)| render)
+}
+
+/// [`render_blocks`], also taking snapshots of the vector outputs `taps`
+/// (M2.8-7): one [`VectorTrack`] per tap, its snapshots at the frames that
+/// are multiples of its decimation, as the real-time vector adapter takes
+/// them (`crate::vectors`). The audio and the log are those of
+/// [`render_blocks`]: the taps only read.
+pub fn render_blocks_tapped(
+    engine: &mut Engine,
+    frames: u64,
+    block: usize,
+    before: impl FnMut(&mut Engine) -> Result<Option<Frame>, EngineError>,
+    taps: &[VectorTap],
+) -> Result<(Render, Vec<VectorTrack>), RenderError> {
     if engine.next_frame() != Frame::ZERO {
         return Err(RenderError::AlreadyStarted);
     }
@@ -106,6 +122,8 @@ pub fn render_blocks(
         started: false,
         samples: Vec::new(),
         changed: None,
+        taps: VectorTaps::new(taps),
+        at: 0,
     };
     let run = match run_offline(engine, frames, block, before, &mut file) {
         Ok(run) => run,
@@ -119,7 +137,7 @@ pub fn render_blocks(
         }
         Err(OfflineError::Json(error)) => return Err(RenderError::Json(error)),
     };
-    Ok(Render {
+    let render = Render {
         sample_rate: run.sample_rate,
         seed: run.seed,
         frames: run.frames,
@@ -132,7 +150,8 @@ pub fn render_blocks(
         trust_provenance: false,
         compute_devices: Vec::new(),
         placement: Vec::new(),
-    })
+    };
+    Ok((render, file.taps.tracks))
 }
 
 /// The render's output: the audio sink's inputs times its `gain`, frame by
@@ -143,10 +162,15 @@ struct File {
     samples: Vec<f64>,
     /// Why a swap lost the sink.
     changed: Option<RenderError>,
+    /// Vector outputs to snapshot (M2.8-7).
+    taps: VectorTaps,
+    /// Frames rendered so far.
+    at: u64,
 }
 
 impl SinkOutput for File {
     fn bind(&mut self, engine: &Engine) -> bool {
+        self.taps.bind(engine);
         if !self.started {
             // Chosen by `render_blocks` from this plan.
             self.started = true;
@@ -162,6 +186,8 @@ impl SinkOutput for File {
     }
 
     fn block(&mut self, engine: &Engine, frames: usize) {
+        self.taps.block(engine, self.at, frames);
+        self.at += frames as u64;
         let gain = self.sink.gain_index(engine);
         for f in 0..frames {
             for channel in 0..self.sink.width {

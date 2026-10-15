@@ -1,7 +1,8 @@
 //! M2.8-1 AC1: the protocol with a `tungstenite` client against the null
 //! driver: describe; meters and a scope stream; set and ramp, then the
 //! effective value; trigger; commit, then the file; a plan swap updates
-//! describe; a bad token, a missing hello and another version are refused.
+//! describe; a bad token, a missing hello and another version are refused;
+//! (M2.8-7) vector streams of the physical-av demo.
 
 mod common;
 
@@ -9,7 +10,7 @@ use std::fs;
 
 use common::{Got, Options, Rig, Transport, connect, receive, rig, send};
 use serde_json::{Value, json};
-use signal_ui::frames::{METERS, PARAMETERS, SCOPE};
+use signal_ui::frames::{METERS, PARAMETERS, SCOPE, VECTOR};
 use tungstenite::Message;
 
 fn find<'a>(list: &'a Value, address: &str) -> &'a Value {
@@ -118,6 +119,151 @@ fn meters_and_a_scope_stream_arrive(transport: Transport) {
         "unsubscribed",
     );
     assert_eq!(gone["sub"], sub);
+    rig.finish();
+}
+
+/// M2.8-7: a vector stream of the visual membrane arrives as frames of kind
+/// 4, one per snapshot, its 256 rows at multiples of the decimation (a whole
+/// number of the port's 800-frame ticks); describe gives the slots and the
+/// shape; a signal output, a too-fast rate and a ninth slot are refused.
+fn vector_streams_arrive(transport: Transport) {
+    let mut rig = rig(
+        "vectors",
+        Options {
+            transport,
+            project: Some(common::root().join("projects/physical-av")),
+            ..Options::default()
+        },
+    );
+    let (mut ws, _) = rig.client();
+    let d = rig.request(&mut ws, 1, json!({"type": "describe"}), "describe");
+    assert_eq!(d["vectors"], json!({"slots": 8, "maxRows": 512}));
+    let z = find(
+        &find(&d["instances"], "/membrane_v")["ports"],
+        "/membrane_v.z",
+    );
+    assert_eq!(
+        (z["shape"].clone(), z["rate"].clone()),
+        (json!({"vector": 256}), json!(800))
+    );
+    let reply = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "subscribe", "stream": "vector", "port": "/membrane_v.z", "rate": 30}),
+        "subscribed",
+    );
+    assert_eq!(
+        (reply["rows"].clone(), reply["decimation"].clone()),
+        (json!(256), json!(1600))
+    );
+    let sub = reply["sub"].as_u64().unwrap();
+    let first = rig.wait(&mut ws, "a vector frame", |got| got.frame(VECTOR, sub));
+    let second = rig.wait(&mut ws, "a second vector frame", |got| {
+        got.frame(VECTOR, sub)
+    });
+    assert_eq!((first.count, first.extra), (256, 1600));
+    assert_eq!(
+        first.first % 1600,
+        0,
+        "snapshots on multiples of the decimation"
+    );
+    assert_eq!(second.first, first.first + 1600);
+    assert!(first.f32s().iter().all(|x| x.is_finite()));
+    // At most the tick rate: 60 per second, every tick.
+    let fast = rig.request(
+        &mut ws,
+        3,
+        json!({"type": "subscribe", "stream": "vector", "port": "/sparks.life", "rate": 1000}),
+        "subscribed",
+    );
+    assert_eq!(fast["decimation"], 800);
+    let refused = rig.request(
+        &mut ws,
+        4,
+        json!({"type": "subscribe", "stream": "vector", "port": "/membrane_a.out", "rate": 60}),
+        "error",
+    );
+    assert_eq!(refused["code"], "not-a-vector-output");
+    for id in 5..11 {
+        rig.request(
+            &mut ws,
+            id,
+            json!({"type": "subscribe", "stream": "vector", "port": "/bodies.bodies"}),
+            "subscribed",
+        );
+    }
+    let full = rig.request(
+        &mut ws,
+        11,
+        json!({"type": "subscribe", "stream": "vector", "port": "/bodies.bodies"}),
+        "error",
+    );
+    assert_eq!(full["code"], "no-vector-slot");
+    let gone = rig.request(
+        &mut ws,
+        12,
+        json!({"type": "unsubscribe", "sub": sub}),
+        "unsubscribed",
+    );
+    assert_eq!(gone["sub"], sub);
+    rig.request(
+        &mut ws,
+        13,
+        json!({"type": "subscribe", "stream": "vector", "port": "/bodies.bodies"}),
+        "subscribed",
+    );
+    rig.finish();
+}
+
+/// Finding auditor-1-007 and auditor-2-vector-rearm-keeps-subscription-rows:
+/// a swap that retypes the subscribed port's instance to a vector of
+/// another width is told to the client (`vector.reshaped` with the new
+/// `rows`), and the stream carries the new width from then on.
+fn a_vector_stream_follows_a_swap_that_changes_its_width(transport: Transport) {
+    let mut rig = rig(
+        "vector-reshape",
+        Options {
+            transport,
+            ..Options::default()
+        },
+    );
+    let (mut ws, _) = rig.client();
+    let path = rig.dir.join("project.toml");
+    let tone = fs::read_to_string(&path).unwrap();
+    let with = |module: &str| {
+        tone.replace(
+            "out = { module",
+            &format!("v = {{ module = \"{module}\" }}\nout = {{ module"),
+        )
+    };
+    fs::write(&path, with("std.particles")).unwrap();
+    rig.wait(&mut ws, "the particles", |got| {
+        got.of("describe")
+            .filter(|d| d["instances"].to_string().contains("/v.vel"))
+            .cloned()
+    });
+    let reply = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "subscribe", "stream": "vector", "port": "/v.vel"}),
+        "subscribed",
+    );
+    assert_eq!(reply["rows"], 128);
+    let sub = reply["sub"].as_u64().unwrap();
+    let first = rig.wait(&mut ws, "a vector frame", |got| got.frame(VECTOR, sub));
+    assert_eq!(first.count, 128);
+    fs::write(&path, with("std.body2d")).unwrap();
+    let reshaped = rig.wait(&mut ws, "vector.reshaped", |got| {
+        got.of("vector.reshaped").cloned()
+    });
+    assert_eq!(
+        (reshaped["sub"].as_u64(), reshaped["rows"].clone()),
+        (Some(sub), json!(12))
+    );
+    let after = rig.wait(&mut ws, "a frame of 12 rows", |got| {
+        got.frame(VECTOR, sub).filter(|f| f.count == 12)
+    });
+    assert_eq!(after.f32s().len(), 12);
     rig.finish();
 }
 
@@ -360,5 +506,7 @@ both!(
     commit_writes_the_file_once_and_the_reload_applies_nothing,
     a_plan_swap_updates_describe,
     a_bad_token_a_missing_hello_and_another_version_are_refused,
-    unknown_messages_are_answered_with_an_error
+    unknown_messages_are_answered_with_an_error,
+    vector_streams_arrive,
+    a_vector_stream_follows_a_swap_that_changes_its_width
 );

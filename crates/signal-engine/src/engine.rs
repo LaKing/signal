@@ -2960,6 +2960,25 @@ impl Engine {
         }
     }
 
+    /// The first row and the number of rows of signal or vector output
+    /// `port` in the running plan (1 for a signal, N for a vector of N), for
+    /// [`signal_output_at`](Engine::signal_output_at). Allocates nothing.
+    pub fn signal_output_rows(&self, port: &PortAddress) -> Option<(usize, usize)> {
+        let (id, role) = self.plan.role_of(port)?;
+        let Role::SignalOut(o) = role else {
+            return None;
+        };
+        let rows = self
+            .plan
+            .output_ports
+            .get(o..)
+            .unwrap_or(&[])
+            .iter()
+            .take_while(|p| p.0 == id)
+            .count();
+        Some((o, rows))
+    }
+
     /// Signal output `o` at frame `f` of the last block
     /// ([`block_frames`](Engine::block_frames)), as its readers saw it (fades
     /// included): the row [`signal_output`](Engine::signal_output) reads its

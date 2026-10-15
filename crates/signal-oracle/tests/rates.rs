@@ -32,7 +32,7 @@ use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 use signal_core::{
     Curve, Direction, EventPayload, Feedthrough, InstanceAddress, ModuleDescriptor, PortAddress,
-    PortShape, Registry, SplitMix64,
+    PortShape, RateDivisor, Registry, SplitMix64,
 };
 use signal_graph::{CompositeDef, ConnectionDef, ExecutionPlan, Exports, InstanceDef, build_plan};
 use signal_oracle::{Connection, Edit, ExternalEvent, Graph, Instance, Record, Script, Swap};
@@ -411,6 +411,12 @@ fn build(registry: &Registry, draw: &Draw) -> Case {
             d.sink.is_none()
                 && d.latency.is_none()
                 && (d.type_name.starts_with("std.") || d.type_name.starts_with('d'))
+                // M2.8-7: the standard types at divisor 1 without vector
+                // ports, as before; the visual-rate and bridge types are
+                // covered by their own tests.
+                && (!d.type_name.starts_with("std.")
+                    || (d.rate() == Some(RateDivisor::ONE)
+                        && d.ports.iter().all(|p| !matches!(p.shape, PortShape::Vector(_)))))
         })
         .map(|d| d.type_name.to_owned())
         .collect();

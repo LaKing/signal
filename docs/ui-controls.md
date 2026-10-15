@@ -51,10 +51,13 @@ Common to all:
 | `<signal-meter>` | `bind`: a signal input of the audio sink (`/out.l`), which is the output meter of the same channel; `source` (`output`, `input`) and `channel` override it (the Setup's input has no port: `source="input" channel="0"`); `floor` (scale bottom, −96 to −24 dB, default −60) | click clears the clip | `meter`; `aria-valuenow` is the held peak in dB, the floor for silence; `aria-valuetext` says peak, RMS and clip |
 | `<signal-scope>` | `bind` (one port; two for X–Y), `mode` (`time`, `xy`; two ports default to `xy`), `rate` (points per second, default 12000), `trigger-level` (default 0), `trigger-edge` (`rising`, `falling`) | — | `group` with `aria-label`, `aria-description`, `aria-keyshortcuts` |
 | `<signal-value>` | `bind`, `unit`, `digits` | — | `status`; shows the effective value, else the base |
+| `<signal-canvas>` | `bind` (1 to 3 vector outputs, in the renderer's order), `renderer` (`points`, `mesh`, `bodies`), `rate` (snapshots per second, default 60), `grid` (`mesh`: nodes per side, default the square root), `tilt`, `height` (`mesh` view, default 0.5), `skin`, `backend` (`auto`, `2d`, `webgl`) | — | `img` with `aria-label`, `aria-description`; `data-backend` and `.backend` say what draws |
 
 The fader and knob show the effective value when it differs from the base (a modulated parameter): an amber mark on the fader, a dot on the knob's arc, and `→ value` in the readout and `aria-valuetext`.
 
 The meter uses the M2.5-1 ballistics (`crates/signal-app/src/meter.rs`) ported line for line to `ui/lib/ballistics.js`: a 1.5 s peak hold, a 300 ms RMS, and a clip indicator latched at a peak of 1.0 until cleared. A protocol meter frame carries each channel's peak and RMS over `extra` frames, so its block's sum of squares is `rms² · frames`.
+
+The canvas is described under "Canvas" below.
 
 The scope shows the subscribed points from the first crossing of the trigger level on the trigger edge that leaves a full display after it (half of the last two consecutive blocks, at most 256 points), else from the start (free running). X–Y pairs the points of the latest block of each port that fall on the same frames.
 
@@ -108,6 +111,20 @@ So a skin cannot run code or load anything from another host.
 
 URLs are relative to the page. A skin that does not load falls back to the built-in drawing with a `console.info` line.
 
+## Canvas
+
+`<signal-canvas>` (M2.8-7, ADR 0023 §5) draws the state of a visual-rate model, streamed as vector frames (`ui-protocol.md`, the `vector` stream, frame kind 4): one subscription per bound port, the latest snapshot drawn at the next animation frame. It simulates nothing: the engine's modules (`std.particles`, `std.mesh2d`, `std.body2d`) are the model, so a replay of a recorded session draws the same.
+
+| `renderer` | Binds | Draws |
+|---|---|---|
+| `points` | a positions vector (x, y pairs), optionally a life vector (0 dead) | each live particle: a dot sized and faded by its life, or a skin's frame |
+| `mesh` | a displacement vector of `grid` × `grid` nodes | a slanted wire grid (depth foreshortened by `tilt`, displacement times `height`) |
+| `bodies` | a bodies vector (x, y, size, kind per body) | the box [−1, 1]² and each body: a circle (size its radius) or a box (size its half-width), or a skin stretched over it |
+
+The world is the box [−1, 1]², y up, fitted to the canvas with its aspect kept (`fitBox`). **Backends.** With `backend="auto"` (the default) an unskinned `points` or `mesh` canvas draws with WebGL when the browser gives a context (`ui/canvas/gl.js`: round point sprites, line pairs), and everything else with Canvas 2D; `2d` forces Canvas 2D. **Skins** are the controls' (`strip:…` and `svg:…`, "Skins"), loaded as images and drawn with `drawImage`, never inserted: for `points`, the frame of a sprite sheet is chosen by the particle's age (`spriteFrame`: the frames spread evenly over its life); for `bodies`, frame 0 for circles and the last for boxes, or the SVG over every body. The spark sheet (`ui/assets/spark-strip.png`, `projects/physical-av/ui/assets/spark.png`: 8 frames of 32 × 32 in a row, a glow cooling and shrinking with age) is drawn by `node scripts/ui-strip.mjs sparks`; `ui/assets/body.svg` is a shaded disc.
+
+The pure parts (`ui/lib/canvas.js`: projection, scaling, sprite frame choice, the draw lists, the backend choice, colours) are tested by `node --test ui/`; the renderers are `ui/canvas/points.js`, `mesh.js` and `bodies.js`.
+
 ## Theming
 
 Every color and size is a CSS custom property with a dark default (`ui/controls/theme.css` lists them): `--signal-bg`, `--signal-panel`, `--signal-fg`, `--signal-muted`, `--signal-track`, `--signal-accent`, `--signal-effective`, `--signal-thumb`, `--signal-knob`, `--signal-focus`, `--signal-clip`, the meter colours, `--signal-font`, `--signal-radius`, and the sizes (`--signal-fader-length`, `--signal-knob-size`, …). Set them on the page, a container or one control.
@@ -156,6 +173,7 @@ Panels import the library by its served path (`/ui/…`); their own files are re
 | `<signal-button>` | an event input of the plan | 1 |
 | `<signal-meter>` | a signal input of the audio sink (none with `source="input"`) | 1 |
 | `<signal-scope>` | signal outputs or inputs of the plan (a primitive's: `/drums/kick/dc.out`, not the composite's `/drums.out`; an input shows the sum of its sources) | 1 or 2 |
+| `<signal-canvas>` | vector outputs of the plan (`/membrane_v.z`) | 1 to 3 |
 
 Errors: an address that is not one, an unknown port (the message lists what the instance has, or says that it is a composite), a port of the wrong kind or shape (`wrong kind: /out.gain is a parameter; <signal-scope> binds a signal output or input of the plan`), an editing control on a parameter inside a composite, which `commit` refuses (`not editable: /drums/kick/amp_env.decay_ms is a parameter inside the composite /drums, …`: export it, or show it with `<signal-value>`), the wrong number of addresses, a `bind` missing where one is needed, and an unknown `signal-*` element. Warnings: an editing control without `bind` (it edits only its own value), `taper="log"` where the range does not start above 0 (the control is linear), and a file without `<signal-panel>`. Positions are `file:line:column` (1-based, columns in characters) at the address in the source (where a character reference starts, if it does), or at the tag's `<`, as the project loader's.
 
@@ -163,7 +181,7 @@ Errors: an address that is not one, an unknown port (the message lists what the 
 
 **The default panel.** For a project without `ui/main.html`, `/project/main.html` is `ui/default-panel.html`, whose `<signal-panel generated>` builds from `describe` (`defaultPanel` in `ui/lib/panel.js`): the top-level parameters (`controls`) grouped by instance, a fader for a level (unit `dB`, or a gain without unit; a dB taper for a gain) and a knob for anything else (a log taper for Hz and times whose range starts above 0); a meter per signal input of the audio sink; and a scope on the sink's first input (`/out.l`: the sum of every source feeding it, each scaled, as the sink receives it). It is rebuilt when the plan version changes.
 
-**The example panels.** `projects/kick/ui/main.html`: decay and drive knobs (an SVG skin, `projects/kick/ui/assets/knob.svg`), the gain fader, the output meters, a scope of the kick. `projects/pulse/ui/main.html`: cutoff and resonance on a 2D pad, the delay's time, feedback and level on knobs (a PNG filmstrip, `projects/pulse/ui/assets/knob-strip.png` and `@2x`, drawn by `node scripts/ui-strip.mjs pulse`), the eight sequence steps as faders (55–440 Hz), the gain, meters and a scope of the filter.
+**The example panels.** `projects/kick/ui/main.html`: decay and drive knobs (an SVG skin, `projects/kick/ui/assets/knob.svg`), the gain fader, the output meters, a scope of the kick. `projects/pulse/ui/main.html`: cutoff and resonance on a 2D pad, the delay's time, feedback and level on knobs (a PNG filmstrip, `projects/pulse/ui/assets/knob-strip.png` and `@2x`, drawn by `node scripts/ui-strip.mjs pulse`), the eight sequence steps as faders (55–440 Hz), the gain, meters and a scope of the filter. `projects/physical-av/ui/main.html` (M2.8-7): three canvases (the membrane seen, as a mesh; the sparks with the PNG sprite sheet; the bodies with the SVG skin), a strike button, knobs, meters and a scope of the membrane heard.
 
 ### Checks of the panels by the operator
 
@@ -176,6 +194,7 @@ What the sandbox cannot run (a browser, a device, loopback), checked by a person
 6. Default panel: `signal ui crates/signal-cli/tests/fixtures/sine --driver null --open`: the generated panel shows the instances' parameters (knobs, the gain as a fader), two meters and a scope on the sink's left input (`/out.l`).
 7. Safari and Chrome, inspectors open: no console errors, only 127.0.0.1 requests.
 8. Unsaved (M2.8-8): with a copy of a project open (`signal ui <copy> --open`, and in Signal.app), `chmod a-w <copy>` and move the gain fader. On release the fader gets the dashed amber outline and the error text with Retry and Revert; the bar reads "1 unsaved parameter — … Permission denied …"; Signal.app's window shows the same line above its messages and the row's error in its parameter list. A second browser on the same URL, and a reload of the page, show the same. Move the fader again, `chmod u+w <copy>`, click Retry: the newest value is in `project.toml`, and the mark and the indicator go. Make it read-only again, move the fader, click Revert: the sound and the fader return to the file's value, and the mark goes. While a fader is being dragged it shows no mark (the bar may count it).
+9. The physical-av demo (M2.8-7): `signal ui check projects/physical-av` prints `…/ui/main.html: 13 controls, 14 bindings: ok`. `signal ui projects/physical-av --open`: the membrane is heard on every beat (90 bpm) and on the strike button; the membrane canvas wobbles a slanted grid from the strike point, the sparks burst with each strike (a sprite per spark, cooling as it ages) and stream with the sound, the bodies jump on every bar and fall back. In the inspector's console `[...document.querySelectorAll('signal-canvas')].map((c) => c.backend)` reads `webgl` for the membrane (or `2d` without WebGL) and `2d` for the skinned two; set `backend="2d"` on the membrane and it still draws. In the Network panel the WebSocket carries binary frames whose first byte is 4, about 60 a second per canvas; `stats` (from the raw page `/`) shows `vectorOverflows: 0` and no dropped frames. In Signal.app: Open project… → `projects/physical-av` → Play, the same.
 
 ## Tests
 

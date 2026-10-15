@@ -14,6 +14,7 @@ import './lib/offline.test.js';
 import './lib/panel.test.js';
 import './lib/binding.test.js';
 import './lib/unsaved.test.js';
+import './lib/canvas.test.js';
 import './signal-ui.test.js';
 import './fake-connection.test.js';
 import './app/lib/menu.test.js';

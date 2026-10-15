@@ -18,7 +18,9 @@
 //!
 //! The scope adapter (`scope`, M2.8-1) captures any signal output or signal
 //! input of the running plan, decimated, for display; it reads and never
-//! changes them.
+//! changes them. The vector adapter (`vectors`, M2.8-7) snapshots vector
+//! outputs (the visual-rate models' state) for `<signal-canvas>`, in real
+//! time and, for a replay, offline ([`render_blocks_tapped`]).
 
 #![cfg_attr(
     not(test),
@@ -35,9 +37,13 @@ mod driver;
 mod render;
 mod runner;
 mod scope;
+mod vectors;
 
 pub use audio::{Conversion, Meter, RenderError, device_sample};
 pub use driver::{CallbackSizes, Driver, DriverError, MAX_CALLBACK_FRAMES, NullDriver};
-pub use render::{Render, render, render_blocks, render_with};
+pub use render::{Render, render, render_blocks, render_blocks_tapped, render_with};
 pub use runner::{Controller, Runner, realtime, realtime_with};
 pub use scope::{SCOPE_POINTS, SCOPE_SLOTS, ScopeBlock, ScopeError};
+pub use vectors::{
+    VECTOR_MAX_ROWS, VECTOR_SLOTS, VectorError, VectorSnapshot, VectorTap, VectorTrack,
+};

@@ -5,7 +5,7 @@ import { Client, HEADER, KIND, PROTOCOL, decodeFrame, helloMessage, meterFractio
 
 /** A frame as the server writes it (crates/signal-ui/src/frames.rs). */
 function frame(kind, sub, first, count, extra, write) {
-  const size = { [KIND.METERS]: 8, [KIND.SCOPE]: 4, [KIND.PARAMETERS]: 16 }[kind];
+  const size = { [KIND.METERS]: 8, [KIND.SCOPE]: 4, [KIND.PARAMETERS]: 16, [KIND.VECTOR]: 4 }[kind];
   const buffer = new ArrayBuffer(HEADER + size * count);
   const view = new DataView(buffer);
   view.setUint8(0, kind);
@@ -53,6 +53,18 @@ test('scope frames decode to points', () => {
   assert.equal(decoded.firstFrame, 2 ** 40);
   assert.equal(decoded.extra, 10);
   assert.deepEqual(Array.from(decoded.values), [-1, 0, 1]);
+});
+
+test('vector frames decode to the rows of one frame', () => {
+  const buffer = frame(KIND.VECTOR, 4, 1600, 4, 800, (v, at, i) => v.setFloat32(at, i * 0.5, true));
+  const decoded = decodeFrame(buffer);
+  assert.equal(decoded.kind, KIND.VECTOR);
+  assert.equal(decoded.firstFrame, 1600);
+  assert.equal(decoded.extra, 800);
+  assert.ok(decoded.values instanceof Float32Array);
+  assert.deepEqual(Array.from(decoded.values), [0, 0.5, 1, 1.5]);
+  const short = frame(KIND.VECTOR, 4, 0, 3, 800, () => {}).slice(0, HEADER + 8);
+  assert.throws(() => decodeFrame(short), /has 36 bytes, not 32/);
 });
 
 test('parameter frames carry base and effective, NaN when unknown', () => {

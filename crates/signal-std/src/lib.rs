@@ -45,11 +45,26 @@
 //! | `std.modal` | [`Modal`] | direct |
 //! | `std.mass_spring` | [`MassSpring`] | direct |
 //! | `std.exciter` | [`Exciter`] | direct |
+//! | `std.count` | [`Count`] | direct (the event bridge) |
+//! | `std.particles` | [`Particles`] | direct, divisor 800 |
+//! | `std.mesh2d` | [`Mesh2d`]`<false>` | direct, divisor 800 |
+//! | `std.mesh2d_audio` | [`Mesh2d`]`<true>` | direct |
+//! | `std.body2d` | [`Body2d`] | direct, divisor 800 |
 //!
 //! The M2.8 physical models (`std.string`, `std.modal`, `std.mass_spring`,
 //! `std.exciter`) document their equations and are checked against analytic
 //! results in their unit tests. Their decay times are T60s in seconds
 //! (`decay_s`).
+//!
+//! The M2.8-7 visual-rate physics (`std.particles`, `std.mesh2d`,
+//! `std.body2d`) run at [`VISUAL_DIVISOR`] and output vectors for
+//! `<signal-canvas>`. A type above divisor 1 cannot have event ports
+//! (`docs/semantics.md` §16), so their events come through [`Count`]
+//! (operator decision operator-request:007, a deviation from the M2.8-7
+//! wording "emit and impulse events": the visual types take `std.count`
+//! windows instead of event ports; `docs/module-contract.md` "Events into
+//! divided-rate types"). `std.mesh2d_audio` is the same membrane at divisor 1,
+//! with an event input and an audio pickup.
 //!
 //! Musical time (tempo, beats) lives here, in [`Transport`], never in the core
 //! (ADR 0003).
@@ -67,7 +82,10 @@
 mod add;
 mod adsr;
 mod audio_out;
+mod body2d;
+mod bridge;
 mod clock_div;
+mod count;
 mod dc_block;
 mod delay;
 mod edge;
@@ -78,6 +96,7 @@ mod lag;
 mod lfo;
 mod mass_spring;
 mod math;
+mod mesh2d;
 mod mix;
 mod modal;
 mod mul;
@@ -85,6 +104,7 @@ mod noise;
 mod onepole;
 mod osc;
 mod pan;
+mod particles;
 mod sample_hold;
 mod sine_osc;
 mod step_seq;
@@ -100,7 +120,9 @@ mod testing;
 pub use add::Add;
 pub use adsr::Adsr;
 pub use audio_out::AudioOut;
+pub use body2d::Body2d;
 pub use clock_div::ClockDiv;
+pub use count::Count;
 pub use dc_block::DcBlock;
 pub use delay::Delay;
 pub use edge::Edge;
@@ -111,6 +133,7 @@ pub use lag::Lag;
 pub use lfo::Lfo;
 pub use mass_spring::MassSpring;
 pub use math::{Abs, Clamp, Max, Min, Scale, Sub};
+pub use mesh2d::Mesh2d;
 pub use mix::Mix;
 pub use modal::Modal;
 pub use mul::Mul;
@@ -118,6 +141,7 @@ pub use noise::Noise;
 pub use onepole::OnePole;
 pub use osc::Osc;
 pub use pan::Pan;
+pub use particles::Particles;
 pub use sample_hold::SampleHold;
 pub use sine_osc::SineOsc;
 pub use step_seq::StepSeq;
@@ -213,6 +237,11 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<Modal>(),
         direct::<MassSpring>(),
         direct::<Exciter>(),
+        direct::<Count>(),
+        direct::<Particles>(),
+        direct::<Mesh2d<false>>(),
+        direct::<Mesh2d<true>>(),
+        direct::<Body2d>(),
     ] {
         registry.register(module_type)?;
     }
@@ -287,6 +316,63 @@ pub(crate) fn push_trigger(outputs: &mut Outputs<'_>, port: usize, n: usize) {
     }
 }
 
+/// The rate divisor of the visual-rate types (M2.8-7): 60 Hz at 48 kHz,
+/// 120 Hz at 96 kHz. A type's rate is fixed by its descriptor, so the visual
+/// types run at this divisor at every master rate.
+pub const VISUAL_DIVISOR: u32 = 800;
+
+/// `d` as a divisor (1 for 0, which no caller passes).
+const fn divisor(d: u32) -> RateDivisor {
+    match RateDivisor::new(d) {
+        Some(d) => d,
+        None => RateDivisor::ONE,
+    }
+}
+
+/// A port of any shape at rate divisor `d`.
+pub(crate) const fn port_at(
+    name: &'static str,
+    direction: Direction,
+    shape: PortShape,
+    d: u32,
+    kind: PortKind,
+    unit: Option<&'static str>,
+    range: Option<Range>,
+) -> PortDescriptor {
+    PortDescriptor {
+        name,
+        direction,
+        shape,
+        rate: divisor(d),
+        kind,
+        unit,
+        range,
+    }
+}
+
+/// A parameter at rate divisor `d`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) const fn parameter_at(
+    name: &'static str,
+    d: u32,
+    kind: PortKind,
+    unit: Option<&'static str>,
+    min: f64,
+    max: f64,
+    default: f64,
+    combine: Combine,
+) -> ParameterDescriptor {
+    ParameterDescriptor {
+        name,
+        kind,
+        rate: divisor(d),
+        unit,
+        range: Range { min, max },
+        default,
+        combine,
+    }
+}
+
 /// A master-rate signal port.
 pub(crate) const fn signal_port(
     name: &'static str,
@@ -350,7 +436,7 @@ pub(crate) const BIPOLAR: Option<Range> = Some(Range {
 mod tests {
     use super::*;
 
-    const NAMES: [&str; 34] = [
+    const NAMES: [&str; 39] = [
         "std.sine_osc",
         "std.exp_env",
         "std.mul",
@@ -385,6 +471,11 @@ mod tests {
         "std.modal",
         "std.mass_spring",
         "std.exciter",
+        "std.count",
+        "std.particles",
+        "std.mesh2d",
+        "std.mesh2d_audio",
+        "std.body2d",
     ];
 
     #[test]

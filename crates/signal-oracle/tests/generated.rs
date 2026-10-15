@@ -375,11 +375,24 @@ fn draw() -> impl Strategy<Value = Draw> {
         })
 }
 
+/// The standard types the generator draws: those at divisor 1 without
+/// vector ports. The M2.8-7 types (`std.count`, the visual-rate physics and
+/// `std.mesh2d_audio`) carry vectors, which the generator's wiring and its
+/// probe (scalar signals) do not reach; the contract suite and the engine
+/// tests cover them, and leaving them out keeps every earlier case as drawn.
+fn scalar(d: &signal_core::ModuleDescriptor) -> bool {
+    d.rate() == Some(signal_core::RateDivisor::ONE)
+        && d.ports
+            .iter()
+            .all(|p| !matches!(p.shape, signal_core::PortShape::Vector(_)))
+}
+
 fn build(registry: &Registry, draw: &Draw) -> Case {
     let types = registry
         .iter()
         .map(|t| t.descriptor)
         .filter(|d| d.sink.is_none() && d.latency.is_none() && d.type_name.starts_with("std."))
+        .filter(scalar)
         .map(|d| d.type_name)
         .collect();
     let mut g = Generator {
@@ -724,6 +737,7 @@ fn the_generator_covers_its_dimensions() {
         .iter()
         .map(|t| t.descriptor)
         .filter(|d| d.sink.is_none() && d.type_name.starts_with("std."))
+        .filter(scalar)
         .map(|d| d.type_name)
         .collect();
     let missing: Vec<_> = all.difference(&types).collect();

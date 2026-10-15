@@ -225,6 +225,10 @@ pub fn register(registry: &mut Registry) {
                 && d.sink.is_none()
                 && d.latency.is_none()
                 && d.ports.iter().all(|p| p.shape != PortShape::Events)
+                // M2.8-7: the visual-rate and vector types have their own
+                // rates and shapes; the fixtures re-rate scalar types only.
+                && d.rate() == Some(RateDivisor::ONE)
+                && d.ports.iter().all(|p| !matches!(p.shape, PortShape::Vector(_)))
         })
         .copied()
         .collect();

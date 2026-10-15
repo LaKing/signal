@@ -79,7 +79,10 @@ The server pushes `describe` (without `id`) when a plan swap commits, after a re
 |---|---|---|
 | `parameters` | `addresses`: controls or plan parameter ports; `rate`: frames per second, at least 1 (default 30; more than 60 is taken as 60; below 1, not a number or not finite: `bad-rate`) | kind 3, every `1/rate` s: each address's base and effective value, as the runner last reported them (the parameter observation queue: up to 64 parameters per callback, round robin) |
 | `meters` | `source`: `"output"` (default, the audio sink's channels) or `"input"` (the Setup's input, metered only); `rate` as above | kind 1, every `1/rate` s once levels arrived: per channel, the peak and the RMS over the callbacks since the last frame |
+| `vector` | `port`: a vector output of the running plan (at most 512 elements); `rate`: snapshots per second (default 60; at least 1, else `bad-rate`; at most the port's tick rate, the sample rate over its rate divisor) | kind 4, one per snapshot: the port's elements at one frame, at every frame that is a multiple of `decimation`, a whole number of the port's ticks (`decimation = d · max(1, round(sampleRate / (d · rate)))`); the reply also gives `rows`, `decimation` and the `slot` |
 | `scope` | `port`: a signal output of the running plan (`/a.out`), or a signal input (`/out.l`: the sum of its sources, each scaled, as the instance receives it); `rate`: points per second, at least 1 (default and at most the sample rate; below 1, not a number or not finite: `bad-rate`) | kind 2: blocks of 256 consecutive points, one every `decimation` frames, `decimation = max(1, round(sampleRate / rate))`; the reply also gives `decimation` and the `slot` |
+
+**Vector streams** (M2.8-7) come from the vector adapter in `signal-output` (`crates/signal-output/src/vectors.rs`): the audio thread copies the port's elements at each snapshot frame, absolute and on the port's ticks, so a stream depends neither on the callbacks nor on when it was started, into a preallocated queue (a full queue drops the snapshot and counts it, `stats`' `vectorOverflows`). It allocates nothing there (`crates/signal-output/tests/vector_no_allocation.rs`). There are 8 slots per run (`no-vector-slot`); `describe` says so (`"vectors": {"slots": 8, "maxRows": 512}`). After a swap that removes the port the server pushes `{"type": "vector.unbound", "sub": 5}`, and `vector.bound` when it is back. A slot reads its port only while the port has exactly the elements the stream was started with, so it never carries another port's rows: when a swap gives the port another number of elements or another rate divisor (its instance retyped), the server pushes `{"type": "vector.reshaped", "sub": 5, "rows": 12, "decimation": 800}` and the stream carries the new width from then on (`crates/signal-ui/tests/protocol.rs`, `a_vector_stream_follows_a_swap_that_changes_its_width`; the adapter and the replay's taps: `crates/signal-cli/tests/physical_av.rs`). Errors: `not-a-vector-output`, `bad-rate`, `busy`. A replay can take the same snapshots offline (`ReplayOptions::vectors`), which is how a recorded session is shown to reproduce them (`crates/signal-cli/tests/physical_av.rs`). In `describe`, a vector port's `shape` is `{"vector": N}` and its `rate` the divisor.
 
 **Scope streams** come from the scope adapter in `signal-output` (beside the audio adapter of ADR 0022): a decimated capture. A point is the port's value at an absolute frame that is a multiple of the decimation, so a stream does not depend on how the frames were split into callbacks or threads. **A scope stream is the output as its readers see it, fades included** (a signal input, the sum of its sources as they are read): it fades in when its instance is added, out when it is suspended or removed, and through the 64-frame fault fade after a fault (`semantics.md` §12, §14). It costs the audio thread a copy per point and allocates nothing there (measured: `crates/signal-output/tests/scope_no_allocation.rs`). **An open block is dropped, not sent, at a discontinuity**: when a swap rebinds the slot, when the slot is started again (a new `subscribe`, or `setup.apply` playing again), and when the points stop being consecutive (frames not run). So up to 255 points are lost there, and every block that arrives is 256 consecutive points. There are 8 slots per run (`no-scope-slot` when they are all in use). After a swap that removes the port the server pushes `{"type": "scope.unbound", "sub": 5}`, and `scope.bound` when a later swap brings it back. Errors: `not-a-signal-output` (neither a signal output nor a signal input), `bad-rate`, `busy` (too many scope commands outstanding; try again).
 
@@ -194,11 +197,11 @@ Signal.app's control thread runs the host in **app mode** (`Host::new_app`, M2.8
 
 ### `stats`, `ping`
 
-`stats` → `{"type": "stats", "frame", "clients": [{"client", "dropped"}], "evicted", "meterOverflows", "scopeOverflows", "commandOverflows", "clipped", "writes"}`. `ping` → `{"type": "pong", "frame"}`.
+`stats` → `{"type": "stats", "frame", "clients": [{"client", "dropped"}], "evicted", "meterOverflows", "scopeOverflows", "vectorOverflows", "commandOverflows", "clipped", "writes"}`. `ping` → `{"type": "pong", "frame"}`.
 
 ### Errors
 
-`{"type": "error", "id": …, "code": "…", "message": "…"}`. Codes: `unauthorized`, `protocol`, `already-authenticated`, `bad-message`, `unknown-type`, `unknown-address`, `unknown-sub`, `unknown-device`, `unknown-panel`, `bad-address`, `bad-value`, `bad-rate`, `bad-device`, `not-a-signal-output`, `no-scope-slot`, `busy`, `refused`, `not-playing`, `not-editable`, `write-failed`, `not-unsaved`, `playing`, `recording`, and in Signal.app's messages `not-allowed`, `no-project`, `does-not-load`, `device`.
+`{"type": "error", "id": …, "code": "…", "message": "…"}`. Codes: `unauthorized`, `protocol`, `already-authenticated`, `bad-message`, `unknown-type`, `unknown-address`, `unknown-sub`, `unknown-device`, `unknown-panel`, `bad-address`, `bad-value`, `bad-rate`, `bad-device`, `not-a-signal-output`, `no-scope-slot`, `not-a-vector-output`, `no-vector-slot`, `busy`, `refused`, `not-playing`, `not-editable`, `write-failed`, `not-unsaved`, `playing`, `recording`, and in Signal.app's messages `not-allowed`, `no-project`, `does-not-load`, `device`.
 
 ## Binary frames
 
@@ -206,19 +209,20 @@ Little-endian, a 24-byte header, then the payload (`crates/signal-ui/src/frames.
 
 | Offset | Size | Field |
 |---|---|---|
-| 0 | u8 | kind: 1 meters, 2 scope, 3 parameters |
+| 0 | u8 | kind: 1 meters, 2 scope, 3 parameters, 4 vector |
 | 1 | u8 | protocol version (1) |
 | 2 | u16 | reserved, 0 |
 | 4 | u32 | subscription (`sub`) |
-| 8 | u64 | first frame: meters, the first callback's; scope, point 0's; parameters, the runner's next frame when sent |
+| 8 | u64 | first frame: meters, the first callback's; scope, point 0's; vector, the snapshot's; parameters, the runner's next frame when sent |
 | 16 | u32 | count |
-| 20 | u32 | meters: frames covered; scope: decimation; parameters: 0 |
+| 20 | u32 | meters: frames covered; scope and vector: decimation; parameters: 0 |
 
 | Kind | Payload, `count` times |
 |---|---|
 | 1 meters | `f32` peak, `f32` RMS (linear; full scale 1) per channel |
 | 2 scope | `f32` point |
 | 3 parameters | `f64` base, `f64` effective per address, in the subscription's order; NaN until the runner reported it |
+| 4 vector | `f32` per element of the port, in order |
 
 ## Delivery: slow and gone clients
 

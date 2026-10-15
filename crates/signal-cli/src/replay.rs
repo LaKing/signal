@@ -85,6 +85,7 @@ pub(crate) fn run(
         ideal: args.ideal,
         trust_provenance: args.trust_provenance,
         here,
+        vectors: Vec::new(),
     };
     let mut replayed = replay_with(&session, gpu.registry(), options).map_err(|e| match e {
         ReplayError::IncompleteBoundaries { .. }
@@ -225,6 +226,7 @@ mod tests {
             boundaries: BoundaryReplay::Exact,
             unverified: 0,
             trusted_provenance: false,
+            vectors: Vec::new(),
         };
         assert!(boundary_warnings(&replayed, true).is_empty());
         replayed.unverified = 3;

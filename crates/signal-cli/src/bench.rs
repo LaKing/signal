@@ -1367,7 +1367,9 @@ fn stimulus_graph() -> CompositeDef {
 /// The stimulus and [`INSTANCES`] instances of `type_name`, each input fed by
 /// it: signals by the saw (phase inputs scaled to 0.05 cycles), gates by the
 /// LFO, the first event input by the beats and ghost notes, any other by the
-/// accents. Outputs are left open; every instance runs regardless.
+/// accents, and a `std.count` window (the event bridge of the visual-rate
+/// types, M2.8-7) by one counter of the beats, shared by the instances.
+/// Outputs are left open; every instance runs regardless.
 fn primitive_graph(registry: &Registry, type_name: &str) -> Result<CompositeDef, Failure> {
     let descriptor = registry
         .iter()
@@ -1375,6 +1377,17 @@ fn primitive_graph(registry: &Registry, type_name: &str) -> Result<CompositeDef,
         .map(|t| t.descriptor)
         .ok_or_else(|| Failure::Internal(format!("{type_name} is not registered")))?;
     let mut graph = stimulus_graph();
+    let window = PortShape::Vector(4);
+    if descriptor
+        .ports
+        .iter()
+        .any(|p| p.direction == Direction::In && p.shape == window)
+    {
+        graph.instances.push(instance("bridge", "std.count", &[]));
+        graph
+            .connections
+            .push(connection("transport.beat", "bridge.in", None));
+    }
     for i in 0..INSTANCES {
         let name = format!("p{i}");
         graph.instances.push(instance(&name, type_name, &[]));
@@ -1389,6 +1402,7 @@ fn primitive_graph(registry: &Registry, type_name: &str) -> Result<CompositeDef,
                 (PortShape::Signal, PortKind::Phase) => &[("saw.out", Some(0.05))],
                 (PortShape::Signal, PortKind::Gate) => &[("gate.out", None)],
                 (PortShape::Signal, _) => &[("saw.out", None)],
+                (shape, _) if shape == window => &[("bridge.window", None)],
                 (PortShape::Events, _) => {
                     events += 1;
                     if events == 1 {

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- A <signal-canvas> body skin (docs/ui-controls.md "Canvas"): drawn
+       over each body's square, so a circle body shows the disc and a box
+       the same disc in its square. -->
+  <defs>
+    <radialGradient id="shade" cx="0.38" cy="0.34" r="0.7">
+      <stop offset="0" stop-color="#e6fff9"/>
+      <stop offset="0.45" stop-color="#4dd0c4"/>
+      <stop offset="1" stop-color="#1b5e58"/>
+    </radialGradient>
+  </defs>
+  <circle cx="32" cy="32" r="30" fill="url(#shade)" stroke="#0e2a27" stroke-width="2"/>
+  <circle cx="24" cy="22" r="6" fill="#ffffff" fill-opacity="0.35"/>
+</svg>

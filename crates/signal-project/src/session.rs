@@ -24,7 +24,9 @@ use signal_engine::{
     InputDiscards, Outcome, Provenance, Report, RunnerStatus, Scripted, SentCommand,
 };
 use signal_graph::ExecutionPlan;
-use signal_output::{Conversion, Render, RenderError, render_blocks};
+use signal_output::{
+    Conversion, Render, RenderError, VectorTap, VectorTrack, render_blocks_tapped,
+};
 
 use crate::{Diagnostic, LoadError, Project, Severity, SourceFile};
 
@@ -2087,6 +2089,10 @@ pub struct Replay {
     /// Exact replay (M2.7-8): `--trust-provenance` let it run although the
     /// recording's build or machine differ. Its manifest says so.
     pub trusted_provenance: bool,
+    /// M2.8-7: the snapshots of [`ReplayOptions::vectors`], one track per
+    /// tap: the visual streams the replay reproduces, as the real-time
+    /// vector adapter takes them.
+    pub vectors: Vec<VectorTrack>,
 }
 
 /// How a replay treated the latent modules' due results
@@ -2132,6 +2138,9 @@ pub struct ReplayOptions {
     /// asked only when the comparison applies) on this machine with no
     /// compute device; a caller whose modules use a GPU names it here.
     pub here: Option<Here>,
+    /// M2.8-7: vector outputs to snapshot during the replay
+    /// ([`Replay::vectors`]); they only read, the render is unchanged.
+    pub vectors: Vec<VectorTap>,
 }
 
 /// Why a validated session could not be replayed. Validation rules these out,
@@ -2384,79 +2393,85 @@ pub fn replay_with(
     let mut refused = None;
     let mut mismatch = None;
     let block = config.block_capacity;
-    let rendered = render_blocks(&mut engine, frames, block, |engine| {
-        // Before this frame's swap: the mismatch names the plan that ran.
-        take_mismatch(engine, &mut mismatch);
-        engine.reclaim_externals().for_each(drop);
-        engine.reclaim_edits().for_each(drop);
-        engine.reclaim_boundaries();
-        // The recorded outcomes of the next block, at most.
-        let horizon = engine.next_frame().0.saturating_add(block as u64);
-        while let Some(record) = script.get(next_outcome) {
-            if record.frame.0 >= horizon {
-                break;
-            }
-            let outcome = match &record.outcome {
-                BoundaryKind::Missed(cause) => Scripted::Missed(*cause),
-                BoundaryKind::Delivered { words, fnv1a64 } => Scripted::Delivered {
-                    words: words.as_ref().map(|w| w.clone().into_boxed_slice()),
-                    fnv1a64: *fnv1a64,
-                },
-            };
-            if engine
-                .push_boundary(record.instance.clone(), record.frame, outcome)
-                .is_err()
-            {
-                refused.get_or_insert_with(|| "the boundary queue is full".to_owned());
-            }
-            next_outcome += 1;
-        }
-        let frame = engine.next_frame();
-        let end = next + session.edits[next..].partition_point(|e| e.frame <= frame);
-        let batch = &session.edits[next..end];
-        next = end;
-        for edit in batch {
-            if let Command::Swap { version } = edit.command {
-                let plan = usize::try_from(version)
-                    .ok()
-                    .and_then(|v| session.plans.get(v))
-                    .ok_or(EngineError::StaleSwap)?;
-                let mut swap = engine.prepare_swap(plan, registry)?;
-                engine.commit_swap(&mut swap, frame)?;
-            }
-        }
-        for edit in batch {
-            let pushed = match &edit.command {
-                Command::Event { target, payload } => engine
-                    .push_external(ExternalEvent {
-                        frame: edit.frame,
-                        sequence: edit.seq,
-                        target: target.clone(),
-                        payload: *payload,
-                    })
-                    .map_err(|e| e.to_string()),
-                Command::Edit { kind, address } => match kind {
-                    EditKind::Suspend => engine.push_suspend(address.clone(), edit.frame),
-                    EditKind::Resume => engine.push_resume(address.clone(), edit.frame),
+    let rendered = render_blocks_tapped(
+        &mut engine,
+        frames,
+        block,
+        |engine| {
+            // Before this frame's swap: the mismatch names the plan that ran.
+            take_mismatch(engine, &mut mismatch);
+            engine.reclaim_externals().for_each(drop);
+            engine.reclaim_edits().for_each(drop);
+            engine.reclaim_boundaries();
+            // The recorded outcomes of the next block, at most.
+            let horizon = engine.next_frame().0.saturating_add(block as u64);
+            while let Some(record) = script.get(next_outcome) {
+                if record.frame.0 >= horizon {
+                    break;
                 }
-                .map_err(|e| e.to_string()),
-                Command::Swap { .. } => Ok(()),
-            };
-            if let Err(message) = pushed {
-                refused.get_or_insert(message);
+                let outcome = match &record.outcome {
+                    BoundaryKind::Missed(cause) => Scripted::Missed(*cause),
+                    BoundaryKind::Delivered { words, fnv1a64 } => Scripted::Delivered {
+                        words: words.as_ref().map(|w| w.clone().into_boxed_slice()),
+                        fnv1a64: *fnv1a64,
+                    },
+                };
+                if engine
+                    .push_boundary(record.instance.clone(), record.frame, outcome)
+                    .is_err()
+                {
+                    refused.get_or_insert_with(|| "the boundary queue is full".to_owned());
+                }
+                next_outcome += 1;
             }
-        }
-        let next_edit = session.edits.get(next).map(|e| e.frame);
-        let next_record = script.get(next_outcome).map(|r| r.frame);
-        Ok([next_edit, next_record].into_iter().flatten().min())
-    });
+            let frame = engine.next_frame();
+            let end = next + session.edits[next..].partition_point(|e| e.frame <= frame);
+            let batch = &session.edits[next..end];
+            next = end;
+            for edit in batch {
+                if let Command::Swap { version } = edit.command {
+                    let plan = usize::try_from(version)
+                        .ok()
+                        .and_then(|v| session.plans.get(v))
+                        .ok_or(EngineError::StaleSwap)?;
+                    let mut swap = engine.prepare_swap(plan, registry)?;
+                    engine.commit_swap(&mut swap, frame)?;
+                }
+            }
+            for edit in batch {
+                let pushed = match &edit.command {
+                    Command::Event { target, payload } => engine
+                        .push_external(ExternalEvent {
+                            frame: edit.frame,
+                            sequence: edit.seq,
+                            target: target.clone(),
+                            payload: *payload,
+                        })
+                        .map_err(|e| e.to_string()),
+                    Command::Edit { kind, address } => match kind {
+                        EditKind::Suspend => engine.push_suspend(address.clone(), edit.frame),
+                        EditKind::Resume => engine.push_resume(address.clone(), edit.frame),
+                    }
+                    .map_err(|e| e.to_string()),
+                    Command::Swap { .. } => Ok(()),
+                };
+                if let Err(message) = pushed {
+                    refused.get_or_insert(message);
+                }
+            }
+            let next_edit = session.edits.get(next).map(|e| e.frame);
+            let next_record = script.get(next_outcome).map(|r| r.frame);
+            Ok([next_edit, next_record].into_iter().flatten().min())
+        },
+        &options.vectors,
+    );
     // The first result that differs from the performance's is the cause of
     // whatever else went wrong after it (M2.7-8): it is reported first.
     take_mismatch(&mut engine, &mut mismatch);
     if let Some((module, block)) = mismatch {
         return Err(ReplayError::ReplayMismatch { module, block });
     }
-    let mut rendered = rendered.map_err(ReplayError::Render)?;
+    let (mut rendered, vectors) = rendered.map_err(ReplayError::Render)?;
     if let Some(message) = refused {
         return Err(ReplayError::Refused(message));
     }
@@ -2492,6 +2507,7 @@ pub fn replay_with(
         boundaries: mode,
         unverified,
         trusted_provenance: trusted,
+        vectors,
     })
 }
 

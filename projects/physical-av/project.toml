@@ -1,0 +1,75 @@
+# The M2.8-7 demo: one struck membrane heard and seen, sparks driven by its
+# sound, and bodies kicked every bar. The sound is std.mesh2d_audio, a
+# 16 × 16 mass-spring membrane at audio rate; what is seen is std.mesh2d,
+# the same membrane at the visual rate (rate divisor 800: 60 Hz at this
+# project's 48 kHz), struck at the same moments. The panel (ui/main.html)
+# draws the visual streams with <signal-canvas>; it simulates nothing, so a
+# recorded session replays them bit for bit.
+#
+# Signal flow:
+#
+#   transport.beat ─► hub (the strike button binds /hub.in too)
+#   hub ─► membrane_a.strike (event, audio rate) ─► dc ─► out.l, out.r   heard
+#   hub ─► hits (std.count) ─► membrane_v.strike (visual rate)      seen
+#   hits ─► sparks.impulse                                          pushed
+#   membrane_a.out ─► abs ─► env (lag) ─► sparks.rate               sparks with the sound
+#   transport.beat ─► bars (÷4) ─► kicks (std.count) ─► bodies.kick
+#
+# A type above rate divisor 1 cannot take events, so the visual types take
+# std.count windows (one connection at scale 1 each; docs/module-contract.md
+# "Events into divided-rate types"): an event acts at the first visual tick
+# at or after its frame.
+schema_version = 1
+
+[project]
+name = "physical-av"
+sample_rate = 48000
+seed = 7
+
+[instances]
+# 90 bpm: a strike every 32 000 frames; an accent every 4 beats.
+transport = { module = "std.transport", bpm = 90, accent_every = 4 }
+# Every strike, from the beat or the panel's button.
+hub = { module = "std.clock_div", divide = 1 }
+
+# Heard: the membrane at audio rate, struck off-centre, picked up nearer
+# the edge.
+membrane_a = { module = "std.mesh2d_audio", spring_hz = 140, decay_s = 1.6, strike_x = 0.35, strike_y = 0.4, strength = 7000, pickup_x = 0.2, pickup_y = 0.7 }
+
+# Seen: the same membrane at the visual rate, slow enough to watch.
+hits = { module = "std.count" }
+membrane_v = { module = "std.mesh2d", spring_hz = 1.2, decay_s = 2.5, strike_x = 0.35, strike_y = 0.4, strength = 1.5 }
+
+# Sparks: emitted at a rate following the sound's envelope, pushed out by
+# every strike.
+abs = { module = "std.abs" }
+env = { module = "std.lag", rise_ms = 2, fall_ms = 250 }
+sparks = { module = "std.particles", y = -0.3, spread = 2.5, speed = 0.8, lifetime_s = 1.5, gravity = -0.6, drag = 0.8, impulse_speed = 0.6 }
+
+# Bodies: kicked up on every bar.
+bars = { module = "std.clock_div", divide = 4 }
+kicks = { module = "std.count" }
+bodies = { module = "std.body2d", kick_speed = 2.5 }
+
+# The membrane's pickup without its slow drift.
+dc = { module = "std.dc_block" }
+# Headroom for strikes from the panel on top of the beat.
+out = { module = "std.audio_out", gain = 0.8 }
+
+[wiring]
+connections = [
+  { from = "transport.beat", to = "hub.in" },
+  { from = "hub.out", to = "membrane_a.strike" },
+  { from = "hub.out", to = "hits.in" },
+  { from = "hits.window", to = "membrane_v.strike" },
+  { from = "hits.window", to = "sparks.impulse" },
+  { from = "membrane_a.out", to = "abs.in" },
+  { from = "abs.out", to = "env.in" },
+  { from = "env.out", to = "sparks.rate", scale = 4000 },
+  { from = "transport.beat", to = "bars.in" },
+  { from = "bars.out", to = "kicks.in" },
+  { from = "kicks.window", to = "bodies.kick" },
+  { from = "membrane_a.out", to = "dc.in" },
+  { from = "dc.out", to = "out.l" },
+  { from = "dc.out", to = "out.r" },
+]

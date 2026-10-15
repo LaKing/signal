@@ -201,9 +201,56 @@ fn a_panel_that_binds_what_the_plan_lacks_is_told_where(transport: Transport) {
     rig.finish();
 }
 
+/// M2.8-7: `<signal-canvas>` binds vector outputs, up to three: the demo's
+/// own panel checks, and a signal output or a fourth address is an error.
+fn a_canvas_binds_vector_outputs(transport: Transport) {
+    let mut rig = rig(
+        "canvas-check",
+        Options {
+            transport,
+            project: Some(common::root().join("projects/physical-av")),
+            ..Options::default()
+        },
+    );
+    let panel = "<!doctype html>\n<signal-panel>\n  <signal-canvas renderer=\"points\" bind=\"/sparks.pos /sparks.life\"></signal-canvas>\n  <signal-canvas bind=\"/membrane_a.out\"></signal-canvas>\n  <signal-canvas bind=\"/membrane_v.z /sparks.pos /sparks.vel /sparks.life\"></signal-canvas>\n</signal-panel>\n";
+    fs::write(rig.dir.join("ui/canvas.html"), panel).unwrap();
+    let (mut ws, _) = rig.client();
+    let main = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "panel.check", "file": "main.html"}),
+        "panel.check",
+    );
+    assert_eq!(main["ok"], true, "{main}");
+    let checked = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "panel.check", "file": "canvas.html"}),
+        "panel.check",
+    );
+    assert_eq!(checked["ok"], false);
+    let diagnostics = checked["diagnostics"].as_array().unwrap();
+    assert_eq!(diagnostics.len(), 2, "{checked}");
+    let message = |i: usize| diagnostics[i]["message"].as_str().unwrap().to_owned();
+    assert_eq!(diagnostics[0]["control"], 1);
+    assert!(
+        message(0).contains("/membrane_a.out is a signal output"),
+        "{}",
+        message(0)
+    );
+    assert!(
+        message(0).contains("a vector output of the plan"),
+        "{}",
+        message(0)
+    );
+    assert_eq!(diagnostics[1]["control"], 2);
+    rig.finish();
+}
+
 both!(
     a_knob_of_the_kick_panel_changes_one_value_of_the_toml,
     a_panel_that_binds_what_the_plan_lacks_is_told_where,
+    a_canvas_binds_vector_outputs,
 );
 
 /// The generated panel's scope is on the audio sink's input: in the tone

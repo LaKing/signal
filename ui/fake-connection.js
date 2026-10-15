@@ -1,6 +1,6 @@
 // A connection without an engine, for ui/gallery.html: the same interface
 // as `Connection` in signal-ui.js, a fixed demo project, and deterministic
-// test signals for its meters and scopes. Nothing runs until `start()`.
+// test signals for its meters, scopes and canvases. Nothing runs until `start()`.
 
 import { KIND } from './lib/protocol.js';
 
@@ -26,6 +26,10 @@ export function fakeDescription() {
       { address: '/osc', module: 'demo.osc', sink: null, parameters: [], ports: [{ name: 'out', address: '/osc.out', direction: 'out', shape: 'signal', rate: 1, kind: 'audio', unit: null, range: null }] },
       { address: '/lfo', module: 'demo.osc', sink: null, parameters: [], ports: [{ name: 'out', address: '/lfo.out', direction: 'out', shape: 'signal', rate: 1, kind: 'audio', unit: null, range: null }] },
       { address: '/synth', module: 'demo.voice', sink: null, parameters: [], ports: [{ name: 'trigger', address: '/synth.trigger', direction: 'in', shape: 'event', rate: 1, kind: 'trigger', unit: null, range: null }] },
+      ...Object.entries(VECTORS).map(([address, { rows }]) => {
+        const [instance, name] = address.slice(1).split('.');
+        return { address: `/${instance}`, module: 'demo.visual', sink: null, parameters: [], ports: [{ name, address, direction: 'out', shape: { vector: rows }, rate: VISUAL, kind: 'control', unit: null, range: null }] };
+      }),
       {
         address: '/out',
         module: 'std.audio_out',
@@ -47,6 +51,7 @@ export function fakeDescription() {
     sinks: [{ index: 0, address: '/out', kind: 'audio', inputs: 2 }],
     meters: { output: [{ channel: 0, device: 0 }, { channel: 1, device: 1 }], input: [{ channel: 0 }] },
     scopes: { slots: 8, points: POINTS, maxRate: RATE },
+    vectors: { slots: 8, maxRows: 512 },
   };
 }
 
@@ -54,6 +59,49 @@ export function fakeDescription() {
 const SIGNALS = {
   '/osc.out': (n) => 0.8 * Math.sin((2 * Math.PI * 220 * n) / RATE) + 0.1 * Math.sin((2 * Math.PI * 660 * n) / RATE),
   '/lfo.out': (n) => 0.8 * Math.sin((2 * Math.PI * 330 * n) / RATE + Math.PI / 4),
+};
+
+/** The demo vector ports' rate divisor: 60 snapshots per second. */
+const VISUAL = RATE / 60;
+
+/**
+ * The demo vector outputs at snapshot `t` (seconds): fixed patterns for the
+ * gallery's canvases, not models (the engine's are in signal-std).
+ */
+const VECTORS = {
+  '/membrane.z': {
+    rows: 256,
+    at: (t) => Float32Array.from({ length: 256 }, (_, k) => {
+      const i = k % 16;
+      const j = Math.floor(k / 16);
+      return 0.4 * Math.sin((Math.PI * (i + 1)) / 17) * Math.sin((Math.PI * (j + 1)) / 17) * Math.cos(2 * Math.PI * 0.7 * t);
+    }),
+  },
+  '/sparks.pos': {
+    rows: 128,
+    at: (t) => Float32Array.from({ length: 128 }, (_, e) => {
+      const k = e >> 1;
+      const a = k * 2.399963 + 0.3 * t;
+      const r = 0.15 + 0.75 * (((k * 0.618034 + 0.2 * t) % 1 + 1) % 1);
+      return e % 2 === 0 ? r * Math.cos(a) : r * Math.sin(a) - 0.1;
+    }),
+  },
+  '/sparks.life': {
+    rows: 64,
+    at: (t) => Float32Array.from({ length: 64 }, (_, k) => 1 - ((((k * 0.618034 + 0.2 * t) % 1) + 1) % 1)),
+  },
+  '/bodies.bodies': {
+    rows: 24,
+    at: (t) => Float32Array.from({ length: 24 }, (_, e) => {
+      const b = e >> 2;
+      const box = b >= 4;
+      const field = e % 4;
+      if (field === 0) return -0.6 + 0.24 * b;
+      if (field === 1) return -0.9 + (box ? 0.1 : 0.08) + Math.abs(Math.sin(2 * Math.PI * 0.4 * t + b)) * 0.8;
+      if (field === 2) return box ? 0.1 : 0.08;
+      return box ? 1 : 0;
+    }),
+  },
 };
 
 function failure(code, message) {
@@ -169,6 +217,12 @@ export class FakeConnection {
       onError(error);
       return () => {};
     }
+    if (stream.stream === 'vector' && !VECTORS[stream.port]) {
+      const error = new Error(`${stream.port} is not a vector output`);
+      error.code = 'not-a-vector-output';
+      onError(error);
+      return () => {};
+    }
     const subscription = { stream, onFrame, sub: this.nextSub++ };
     this.subscriptions.add(subscription);
     const reply = { type: 'subscribed', sub: subscription.sub, stream: stream.stream };
@@ -178,6 +232,13 @@ export class FakeConnection {
       // rate share their frames (X–Y), and each block follows the last.
       const span = POINTS * reply.decimation;
       subscription.next = Math.floor(this.frameNumber / span) * span;
+    }
+    if (stream.stream === 'vector') {
+      const ticks = RATE / VISUAL;
+      reply.rows = VECTORS[stream.port].rows;
+      reply.decimation = VISUAL * Math.max(1, Math.round(ticks / Math.min(ticks, stream.rate ?? 60)));
+      subscription.next = Math.ceil(this.frameNumber / reply.decimation) * reply.decimation;
+      subscription.decimation = reply.decimation;
     }
     onSubscribed(reply);
     return () => this.subscriptions.delete(subscription);
@@ -214,6 +275,14 @@ export class FakeConnection {
           for (let i = 0; i < POINTS; i++) values[i] = SIGNALS[stream.port](start + i * decimation);
           subscription.next += POINTS * decimation;
           onFrame({ kind: KIND.SCOPE, version: 1, sub, firstFrame: start, count: POINTS, extra: decimation, values });
+        }
+      } else if (stream.stream === 'vector') {
+        // Every snapshot frame the clock passed, the latest last.
+        while (subscription.next < this.frameNumber) {
+          const at = subscription.next;
+          const values = VECTORS[stream.port].at(at / RATE);
+          subscription.next += subscription.decimation;
+          onFrame({ kind: KIND.VECTOR, version: 1, sub, firstFrame: at, count: values.length, extra: subscription.decimation, values });
         }
       }
     }
