@@ -16,8 +16,9 @@
 //!   by identity.
 //! - [`server`]: the server in the app: the control thread, which runs the
 //!   UI protocol's host in app mode; the window's page is its client.
-//! - [`window`]: what the window decides without a window (the page's
-//!   requests, where it may navigate, the size the Setup records).
+//! - [`window`]: what the window decides without a window (its native menu
+//!   bar and what each item does, where it may navigate, the size the Setup
+//!   records).
 
 #![cfg_attr(
     not(test),

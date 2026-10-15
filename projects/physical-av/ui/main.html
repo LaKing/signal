@@ -16,39 +16,33 @@
 <link rel="stylesheet" href="/ui/controls/theme.css">
 <style>
   :root { color-scheme: dark; --signal-accent: #4dd0c4; }
-  body { margin: 0; padding: 2rem; background: var(--signal-bg); color: var(--signal-fg); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
-  h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: .02em; }
-  header p { margin: .15rem 0 1.5rem; color: var(--signal-muted); }
-  .rack { display: flex; flex-wrap: wrap; gap: 1.25rem; align-items: stretch; }
-  section { background: var(--signal-panel); border-radius: 10px; padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: .75rem; }
-  section h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--signal-muted); }
-  .row { display: flex; gap: 1rem; align-items: flex-end; }
-  .view { flex: 1 1 22rem; min-width: 18rem; }
+  body { margin: 0; padding: 0.75rem; background: var(--signal-bg); color: var(--signal-fg); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+  .signal-cards { --signal-card-min: 20rem; }
+  .signal-card > h1 { font-size: 18px; letter-spacing: .02em; text-transform: none; color: var(--signal-fg); }
   .view signal-canvas { width: 100%; --signal-canvas-height: 260px; }
-  .scope { flex: 1 1 24rem; min-width: 18rem; }
   .scope signal-scope { width: 100%; }
 </style>
 </head>
 <body>
 <signal-panel>
-  <header>
-    <h1>physical-av</h1>
-    <p>A struck membrane heard and seen, sparks that follow its sound, and bodies kicked every bar, at 90 bpm.</p>
-  </header>
-  <div class="rack">
-    <section class="view">
+  <div class="signal-cards">
+    <section class="signal-card">
+      <h1>physical-av</h1>
+      <p>A struck membrane heard and seen, sparks that follow its sound, and bodies kicked every bar, at 90 bpm.</p>
+    </section>
+    <section class="signal-card view">
       <h2>membrane, seen</h2>
       <signal-canvas renderer="mesh" bind="/membrane_v.z" label="membrane (visual rate)"></signal-canvas>
     </section>
-    <section class="view">
+    <section class="signal-card view">
       <h2>sparks</h2>
       <signal-canvas renderer="points" bind="/sparks.pos /sparks.life" skin="strip:assets/spark.png;frames=8;orientation=horizontal" label="sparks"></signal-canvas>
     </section>
-    <section class="view">
+    <section class="signal-card view">
       <h2>bodies</h2>
       <signal-canvas renderer="bodies" bind="/bodies.bodies" skin="svg:assets/body.svg" label="bodies"></signal-canvas>
     </section>
-    <section>
+    <section class="signal-card">
       <h2>strike</h2>
       <signal-button bind="/hub.in" label="strike"></signal-button>
       <div class="row">
@@ -62,14 +56,14 @@
         <signal-knob bind="/out.gain" min="0" max="2" label="gain"></signal-knob>
       </div>
     </section>
-    <section>
+    <section class="signal-card">
       <h2>out</h2>
       <div class="row">
         <signal-meter bind="/out.l" label="L"></signal-meter>
         <signal-meter bind="/out.r" label="R"></signal-meter>
       </div>
     </section>
-    <section class="scope">
+    <section class="signal-card wide scope">
       <h2>membrane, heard</h2>
       <signal-scope bind="/membrane_a.out" label="pickup"></signal-scope>
     </section>

@@ -24,6 +24,7 @@ export class SignalXY extends SignalElement {
 .puck { fill: var(--signal-accent, #4fc3f7); stroke: var(--signal-thumb, #e8ecf2); stroke-width: 2; }
 .effective { stroke: none; }
 .axes { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.readout { width: var(--signal-xy-size, 160px); }
 `;
 
   constructor() {

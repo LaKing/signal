@@ -14,7 +14,7 @@ export class SignalValue extends SignalValueElement {
   static commits = false;
   static observedAttributes = [...SignalValueElement.observedAttributes, 'digits'];
   static css = `
-.value { padding: 2px 6px; font-size: var(--signal-value-size, 13px); font-variant-numeric: tabular-nums; color: var(--signal-fg, #d6dbe4); }
+.value { display: inline-block; box-sizing: border-box; width: var(--signal-value-width, 12ch); padding: 2px 6px; font-size: var(--signal-value-size, 13px); font-variant-numeric: tabular-nums; color: var(--signal-fg, #d6dbe4); text-align: right; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
 `;
 
   template() {

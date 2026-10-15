@@ -365,7 +365,146 @@ fn a_failed_stopped_commit_is_still_unsaved_when_playing(transport: Transport) {
     rig.finish();
 }
 
+/// M2.8-11: the power switch. Off stops the run (the project stays open),
+/// refuses Play and is never written to the Setup; on plays again if it
+/// played, and stays stopped if it did not.
+fn power_off_stops_and_on_restores(transport: Transport) {
+    let mut rig = app_rig("power", transport, None);
+    let (mut ws, _) = rig.client();
+    let setup_before = fs::read(&rig.setup).ok();
+    let app = rig.request(&mut ws, 1, json!({"type": "app.get"}), "app");
+    assert_eq!(app["power"], "on", "Signal.app starts switched on");
+    rig.request(&mut ws, 2, json!({"type": "transport.play"}), "transport");
+
+    let off = rig.request(
+        &mut ws,
+        3,
+        json!({"type": "app.power", "on": false}),
+        "power",
+    );
+    assert_eq!(
+        (off["on"].clone(), off["playing"].clone()),
+        (json!(false), json!(false))
+    );
+    assert!(rig.host().controller().is_none(), "no run while off");
+    assert!(!rig.host().powered());
+    let app = rig.request(&mut ws, 4, json!({"type": "app.get"}), "app");
+    assert_eq!(app["power"], "off");
+    assert_eq!(app["project"]["dir"], rig.dir.display().to_string());
+    let refused = rig.request(&mut ws, 5, json!({"type": "transport.play"}), "error");
+    assert_eq!(refused["code"], "powered-off");
+    let described = rig.request(&mut ws, 6, json!({"type": "describe"}), "describe");
+    assert!(
+        !described["controls"].as_array().unwrap().is_empty(),
+        "the project stays open"
+    );
+
+    let on = rig.request(
+        &mut ws,
+        7,
+        json!({"type": "app.power", "on": true}),
+        "power",
+    );
+    assert_eq!(
+        (on["on"].clone(), on["playing"].clone()),
+        (json!(true), json!(true)),
+        "it played"
+    );
+    rig.request(&mut ws, 8, json!({"type": "transport.stop"}), "transport");
+    rig.request(
+        &mut ws,
+        9,
+        json!({"type": "app.power", "on": false}),
+        "power",
+    );
+    let on = rig.request(
+        &mut ws,
+        10,
+        json!({"type": "app.power", "on": true}),
+        "power",
+    );
+    assert_eq!(on["playing"], false, "stopped stays stopped");
+    assert_eq!(
+        fs::read(&rig.setup).ok(),
+        setup_before,
+        "the power is never written"
+    );
+    rig.finish();
+}
+
+/// auditor-1-power-initial-state: a client that connects while the app is
+/// off (the panel's frame, reloaded because another project was opened) is
+/// told so in `welcome`; no subscription is taken while off and no stream
+/// frame reaches any client.
+fn a_client_connecting_while_off_is_told_and_gets_no_frames(transport: Transport) {
+    let mut rig = app_rig("power-welcome", transport, None);
+    let kick = rig.dir.parent().unwrap().join("kick");
+    copy_dir(&root().join("projects/kick"), &kick);
+    let (mut a, _) = rig.client();
+    rig.request(&mut a, 1, json!({"type": "transport.play"}), "transport");
+    let sub = rig.watch_parameter(&mut a, 2, "/out.gain");
+    rig.wait(&mut a, "a parameters frame", |got| got.frame(3, sub));
+
+    rig.request(
+        &mut a,
+        3,
+        json!({"type": "app.power", "on": false}),
+        "power",
+    );
+    let opened = rig.request(
+        &mut a,
+        4,
+        json!({"type": "project.open", "path": kick.display().to_string()}),
+        "project",
+    );
+    assert_eq!(opened["loads"], true);
+
+    let token = rig.host().token().to_owned();
+    let mut b = common::connect(rig.host());
+    common::send(
+        &mut b,
+        json!({"type": "hello", "protocol": 1, "token": token}),
+    );
+    let welcome = rig.wait(&mut b, "welcome", |got| got.of("welcome").cloned());
+    assert_eq!(welcome["power"], "off", "told before it can subscribe");
+    let refused = rig.request(
+        &mut b,
+        1,
+        json!({"type": "subscribe", "stream": "parameters", "addresses": ["/out.gain"]}),
+        "error",
+    );
+    assert_eq!(refused["code"], "powered-off");
+
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    while std::time::Instant::now() < until {
+        rig.pump();
+        for ws in [&mut a, &mut b] {
+            while let Some(got) = common::receive(ws) {
+                assert!(
+                    !matches!(got, common::Got::Frame(_)),
+                    "a stream frame while off"
+                );
+            }
+        }
+    }
+    let on = rig.request(&mut b, 2, json!({"type": "app.power", "on": true}), "power");
+    assert_eq!(
+        on["playing"], false,
+        "the project opened while off is stopped"
+    );
+    rig.request(
+        &mut b,
+        3,
+        json!({"type": "subscribe", "stream": "parameters", "addresses": ["/out.gain"]}),
+        "subscribed",
+    );
+    rig.finish();
+    let _ = fs::remove_dir_all(&kick);
+}
+
 both!(
+    power_off_stops_and_on_restores,
+    a_client_connecting_while_off_is_told_and_gets_no_frames,
     a_failed_stopped_commit_is_still_unsaved_when_playing,
     it_starts_stopped_plays_and_stops,
     a_project_that_does_not_load_shows_its_diagnostics,

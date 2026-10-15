@@ -14,27 +14,21 @@
 <link rel="stylesheet" href="/ui/controls/theme.css">
 <style>
   :root { color-scheme: dark; --signal-accent: #4dd0c4; }
-  body { margin: 0; padding: 2rem; background: var(--signal-bg); color: var(--signal-fg); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
-  h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: .02em; }
-  header p { margin: .15rem 0 1.5rem; color: var(--signal-muted); }
-  .rack { display: flex; flex-wrap: wrap; gap: 1.25rem; align-items: stretch; }
-  section { background: var(--signal-panel); border-radius: 10px; padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: .75rem; }
-  section h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--signal-muted); }
-  .row { display: flex; gap: 1rem; align-items: flex-end; }
-  .steps { --signal-fader-length: 140px; --signal-fader-thickness: 32px; }
+  body { margin: 0; padding: 0.75rem; background: var(--signal-bg); color: var(--signal-fg); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+  .signal-card > h1 { font-size: 18px; letter-spacing: .02em; text-transform: none; color: var(--signal-fg); }
+  .steps { --signal-fader-length: 140px; --signal-fader-thickness: 32px; --signal-readout-width: 8ch; }
   .steps .row { gap: .35rem; }
-  .scope { flex: 1 1 24rem; min-width: 18rem; }
   .scope signal-scope { width: 100%; }
 </style>
 </head>
 <body>
 <signal-panel>
-  <header>
-    <h1>pulse</h1>
-    <p>A gliding saw sequence through an enveloped low-pass filter and a dotted-eighth delay, at 120 bpm.</p>
-  </header>
-  <div class="rack">
-    <section>
+  <div class="signal-cards">
+    <section class="signal-card">
+      <h1>pulse</h1>
+      <p>A gliding saw sequence through an enveloped low-pass filter and a dotted-eighth delay, at 120 bpm.</p>
+    </section>
+    <section class="signal-card">
       <h2>filter</h2>
       <signal-xy bind="/filter.cutoff_hz /filter.q" taper="log" label="cutoff · resonance"></signal-xy>
       <div class="row">
@@ -42,7 +36,7 @@
         <signal-value bind="/filter.q" digits="2"></signal-value>
       </div>
     </section>
-    <section>
+    <section class="signal-card">
       <h2>delay</h2>
       <div class="row">
         <signal-knob bind="/delay.time_ms" taper="log" min="50" max="1000" label="time" skin="strip:assets/knob-strip.png;frames=64;2x=assets/knob-strip@2x.png"></signal-knob>
@@ -50,7 +44,7 @@
         <signal-knob bind="/mix.gain_b" min="0" max="1.5" label="level" skin="strip:assets/knob-strip.png;frames=64;2x=assets/knob-strip@2x.png"></signal-knob>
       </div>
     </section>
-    <section class="steps">
+    <section class="signal-card wide steps">
       <h2>sequence</h2>
       <div class="row">
         <signal-fader bind="/seq.s1" taper="log" min="55" max="440" unit="Hz" label="1"></signal-fader>
@@ -63,7 +57,7 @@
         <signal-fader bind="/seq.s8" taper="log" min="55" max="440" unit="Hz" label="8"></signal-fader>
       </div>
     </section>
-    <section>
+    <section class="signal-card">
       <h2>output</h2>
       <div class="row">
         <signal-fader bind="/out.gain" taper="db" label="gain"></signal-fader>
@@ -71,7 +65,7 @@
         <signal-meter bind="/out.r" label="R"></signal-meter>
       </div>
     </section>
-    <section class="scope">
+    <section class="signal-card wide scope">
       <h2>scope</h2>
       <signal-scope bind="/filter.lp" rate="24000" label="filter"></signal-scope>
     </section>

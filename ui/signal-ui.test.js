@@ -233,3 +233,65 @@ test('a meter is bound by the audio sink input it shows', () => {
   assert.equal(findMeter(description, '/out.gain'), null);
   assert.equal(findMeter(null, '/out.l'), null);
 });
+
+// M2.8-11 AC1: Signal.app's meters threw in their `describe` listener while
+// playing, and the parameter list registered after them was never filled.
+test('a throwing listener does not keep the later ones from the event', () => {
+  const { connection, socket } = connected();
+  const seen = [];
+  const reported = [];
+  const report = globalThis.reportError;
+  globalThis.reportError = (error) => reported.push(error.message);
+  try {
+    connection.on('describe', () => {
+      seen.push('meters');
+      throw new TypeError('Cannot set property floor');
+    });
+    connection.on('describe', (d) => seen.push(`parameters ${d.controls.length}`));
+    socket.receive({ type: 'describe', id: socket.last('describe').id, playing: true, controls: [{ address: '/osc.freq' }] });
+  } finally {
+    globalThis.reportError = report;
+  }
+  assert.deepEqual(seen, ['meters', 'parameters 1']);
+  assert.deepEqual(reported, ['Cannot set property floor']);
+});
+
+// auditor-1-power-initial-state: a connection opened while Signal.app is off
+// (the panel's frame after another project is opened) learns it from
+// `welcome`, before it sends any subscription.
+test('a connection welcomed while power is off sends no subscribe', () => {
+  FakeSocket.all = [];
+  const connection = new Connection({ url: 'ws://127.0.0.1:9/', token: 'tok', WebSocketImpl: FakeSocket, timers: fakeTimers() });
+  connection.subscribe({ stream: 'parameters', addresses: ['/out.gain'] }, () => {});
+  const socket = FakeSocket.all[0];
+  socket.open();
+  socket.receive({ type: 'welcome', protocol: 1, power: 'off' });
+  assert.equal(connection.streaming, false);
+  assert.equal(socket.last('subscribe'), undefined, 'nothing subscribed while off');
+  connection.subscribe({ stream: 'meters' }, () => {});
+  assert.equal(socket.last('subscribe'), undefined, 'nor a later subscription');
+  socket.receive({ type: 'app', power: 'on' });
+  assert.deepEqual(socket.sent.filter((m) => m.type === 'subscribe').map((m) => m.stream), ['parameters', 'meters']);
+});
+
+test('power off stops the streams and power on subscribes again', () => {
+  const { connection, socket } = connected();
+  const frames = [];
+  const errors = [];
+  connection.subscribe({ stream: 'meters' }, (f) => frames.push(f.values[0].peak), { onError: (e) => errors.push(e.code) });
+  socket.receive({ type: 'subscribed', id: socket.last('subscribe').id, sub: 5, stream: 'meters' });
+  socket.receive({ type: 'app', power: 'off' });
+  assert.equal(socket.last('unsubscribe').sub, 5);
+  socket.onmessage({ data: meterFrame(5, 0.5) });
+  assert.deepEqual(frames, [], 'no frame reaches a stream let go');
+  socket.receive({ type: 'app', power: 'off', playing: false });
+  assert.equal(socket.sent.filter((m) => m.type === 'subscribe').length, 1, 'an unchanged power sends nothing');
+  socket.receive({ type: 'app', power: 'on' });
+  const again = socket.last('subscribe');
+  assert.equal(socket.sent.filter((m) => m.type === 'subscribe').length, 2);
+  // Refused because the power went off again before it arrived: kept, not an error.
+  socket.receive({ type: 'error', id: again.id, code: 'powered-off', message: 'the power is off' });
+  assert.deepEqual(errors, []);
+  socket.receive({ type: 'app' });
+  assert.equal(connection.streaming, true, 'signal ui has no power: it streams');
+});

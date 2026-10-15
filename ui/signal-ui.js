@@ -11,6 +11,15 @@ export const FINAL_CLOSE_CODES = Object.freeze([1008, 1002]);
 /** Waits before each reconnect attempt, in ms; the last repeats. */
 export const BACKOFF_MS = Object.freeze([250, 500, 1000, 2000, 5000]);
 
+/**
+ * Signal.app's power as a `welcome` or `app` message gives it: `'on'`,
+ * `'off'`, or null without one (`signal ui`, which always streams).
+ */
+export function powerOf(message) {
+  const power = message?.power;
+  return power === 'on' || power === 'off' ? power : null;
+}
+
 /** The error a request gets when its connection is or goes down. */
 function closedError() {
   const error = new Error('connection closed');
@@ -94,6 +103,8 @@ export class Connection {
     this.subscriptions = new Set();
     this.bySub = new Map();
     this.listeners = new Map();
+    /** False while Signal.app's power is off: no subscription is sent. */
+    this.streaming = true;
     this.open();
   }
 
@@ -105,7 +116,36 @@ export class Connection {
   }
 
   emit(event, value) {
-    for (const fn of [...(this.listeners.get(event) ?? [])]) fn(value);
+    // One listener's failure is reported and never keeps the others from
+    // their event (a throwing `describe` listener once left Signal.app's
+    // parameter list empty).
+    for (const fn of [...(this.listeners.get(event) ?? [])]) {
+      try {
+        fn(value);
+      } catch (error) {
+        (globalThis.reportError ?? console.error)(error);
+      }
+    }
+  }
+
+  /**
+   * Whether streams flow (Signal.app's power switch, `docs/ui-protocol.md`
+   * "Signal.app"): off, every subscription is let go on the server and kept
+   * here; on, each is sent again.
+   */
+  setStreaming(on) {
+    if (this.streaming === on) return;
+    this.streaming = on;
+    for (const subscription of this.subscriptions) {
+      if (on) {
+        if (this.status === 'open') this.sendSubscribe(subscription);
+      } else if (subscription.sub !== null) {
+        this.bySub.delete(subscription.sub);
+        // The server let it go itself when its power went off.
+        this.request({ type: 'unsubscribe', sub: subscription.sub }).catch(() => {});
+        subscription.sub = null;
+      }
+    }
   }
 
   setStatus(status) {
@@ -135,12 +175,16 @@ export class Connection {
     if (message.type === 'welcome') {
       this.welcome = message;
       this.attempt = 0;
+      // Before any subscription is sent: a client that connects while
+      // Signal.app is off learns it here.
+      this.streaming = powerOf(message) !== 'off';
       this.setStatus('open');
       this.emit('welcome', message);
       this.describe().catch(() => {});
-      for (const subscription of this.subscriptions) this.sendSubscribe(subscription);
+      if (this.streaming) for (const subscription of this.subscriptions) this.sendSubscribe(subscription);
       return;
     }
+    if (message.type === 'app' && powerOf(message)) this.setStreaming(powerOf(message) !== 'off');
     const waiting = message.id !== undefined ? this.pending.get(message.id) : undefined;
     if (waiting) {
       this.pending.delete(message.id);
@@ -246,7 +290,7 @@ export class Connection {
   subscribe(stream, onFrame, { onSubscribed = () => {}, onError = () => {} } = {}) {
     const subscription = { stream, onFrame, onSubscribed, onError, sub: null, active: true };
     this.subscriptions.add(subscription);
-    if (this.status === 'open') this.sendSubscribe(subscription);
+    if (this.status === 'open' && this.streaming) this.sendSubscribe(subscription);
     return () => {
       subscription.active = false;
       this.subscriptions.delete(subscription);
@@ -273,7 +317,8 @@ export class Connection {
         subscription.onSubscribed(reply);
       },
       (error) => {
-        if (error.code !== 'closed') subscription.onError(error);
+        // `powered-off`: kept, and sent again when the power is back on.
+        if (error.code !== 'closed' && error.code !== 'powered-off') subscription.onError(error);
       },
     );
   }

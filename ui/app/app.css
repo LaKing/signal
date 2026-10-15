@@ -1,30 +1,76 @@
-/* Signal.app's pages (ui/app/). The controls' theme is controls/theme.css. */
+/* Signal.app's window (ui/app/index.html). The controls' theme and the
+   cards are controls/theme.css. One scroll container (M2.8-11): the page
+   never scrolls; the Parameters and Setup tabs scroll (.tab-scroll, the
+   only overflow: auto here), and the Panel tab's frame scrolls its own
+   document. Nothing changes size with a value (docs/ui-controls.md
+   "Stable layout"): widths are fixed in ch, numbers tabular. */
 :root { color-scheme: dark; }
-body { margin: 0; padding: 0 1.5rem 2rem; background: var(--signal-bg); color: var(--signal-fg); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
-.menu { display: flex; gap: 0.25rem; align-items: center; padding: 0.4rem 0; border-bottom: 1px solid var(--signal-track); margin-bottom: 0.8rem; }
-.menu a { color: var(--signal-accent); margin-left: 0.75rem; text-decoration: none; }
+html, body { height: 100%; margin: 0; overflow: hidden; }
+body { display: grid; grid-template-rows: auto minmax(0, 1fr); background: var(--signal-bg); color: var(--signal-fg); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
 button { font: inherit; color: var(--signal-fg); background: var(--signal-knob); border: 1px solid var(--signal-knob-edge); border-radius: var(--signal-radius); padding: 0.2rem 0.7rem; }
 button:disabled { opacity: 0.45; }
 input, select { font: inherit; color: var(--signal-fg); background: var(--signal-panel); border: 1px solid var(--signal-track); border-radius: 4px; padding: 0.15rem 0.3rem; }
 :focus-visible { outline: 2px solid var(--signal-focus); outline-offset: 1px; }
-.project, .transport { display: flex; gap: 0.5rem; align-items: center; margin: 0.4rem 0; }
-.status-line { font-family: ui-monospace, Menlo, monospace; color: var(--signal-muted); margin: 0.3rem 0 0.8rem; }
-.meters { display: flex; flex-wrap: wrap; gap: 0.5rem; }
-.reload { color: var(--signal-muted); }
-.unsaved { color: var(--signal-unsaved, #ffb74d); }
-.unsaved button { margin-left: 0.4rem; padding: 0 0.5rem; }
 [hidden] { display: none !important; }
-.messages { list-style: none; padding: 0; margin: 0.3rem 0; }
+
+/* The toolbar: one row of fixed height. */
+signal-app-toolbar { display: flex; gap: 0.75rem; align-items: center; height: 2.6rem; padding: 0 0.75rem; border-bottom: 1px solid var(--signal-track); white-space: nowrap; overflow: hidden; }
+.power { width: 5.5em; }
+.power[aria-checked="true"] { border-color: var(--signal-meter-rms); }
+.tabs, .transport { display: flex; gap: 0.25rem; }
+.tabs [role="tab"] { width: 7.5em; }
+.tabs [role="tab"][aria-selected="true"] { background: var(--signal-knob-on); border-color: var(--signal-accent); }
+.transport button { width: 5.5em; }
+.compact-status { display: flex; gap: 0.75rem; font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; color: var(--signal-muted); min-width: 0; }
+.compact-status .line { width: 25ch; white-space: pre; overflow: hidden; }
+.compact-status .note { width: 32ch; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+
+/* The tabs: each fills what the toolbar leaves. */
+main { min-height: 0; }
+.tab { box-sizing: border-box; height: 100%; }
+.tab-panel { overflow: hidden; }
+.tab-scroll { overflow: auto; padding: 0.75rem; }
+.project-panel { display: block; width: 100%; height: 100%; border: 0; background: var(--signal-bg); }
+signal-app-panel { display: block; height: 100%; }
+signal-app-parameters { display: contents; }
+
+/* Cards of the Parameters tab: fixed heights where streams and messages change. */
+.status-fields { display: grid; grid-template-columns: max-content max-content; gap: 0.1rem 1rem; margin: 0; font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
+.status-fields dt { color: var(--signal-muted); }
+.status-fields dd { margin: 0; white-space: pre; }
+signal-app-meters { display: block; height: 250px; overflow: hidden; }
+.meters { display: flex; gap: 0.5rem; }
+signal-app-messages { display: block; }
+.reload, .messages li, .unsaved .line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.reload { color: var(--signal-muted); height: 1.4em; }
+.unsaved { color: var(--signal-unsaved, #ffb74d); height: 1.9em; display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
+.unsaved button { padding: 0 0.5rem; }
+/* The line takes the row's width whatever it says, so Retry all and Revert all never move. */
+.unsaved .line { flex: 1 1 0; min-width: 0; }
+.messages { list-style: none; padding: 0; margin: 0; height: 8.4em; overflow: hidden; }
 .warn { color: var(--signal-meter-hot); }
 .error { color: var(--signal-clip); }
 .muted { color: var(--signal-muted); }
-.parameters td { padding: 0.15rem 0.5rem 0.15rem 0; }
-.parameters input[type="range"] { width: 16rem; }
+
+/* The parameter list: fixed column widths, values in tabular figures. */
+.parameters { table-layout: fixed; border-collapse: collapse; width: calc(12rem + 14rem + 13ch + 7rem + 13ch + 4.5rem + 10rem); }
+.parameters td { padding: 0.15rem 0.5rem 0.15rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; height: 1.7rem; }
+.col-name { width: 12rem; }
+.col-slider { width: 14rem; }
+.col-base, .col-effective { width: 13ch; }
+.col-note { width: 7rem; }
+.col-reset { width: 4.5rem; }
+.col-mark { width: 10rem; }
+.parameters input[type="range"] { width: 13rem; margin: 0; }
+.parameters .value { font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; white-space: pre; }
+.parameters .effective { color: var(--signal-effective); }
+.parameters button { padding: 0 0.5rem; }
 .read-only { color: var(--signal-muted); }
-section h3 { font-size: 13px; margin: 0.9rem 0 0.2rem; }
+
+/* The setup. */
+.project { display: flex; gap: 0.5rem; align-items: center; }
 .field { margin: 0.6rem 0; }
 .field > label { display: inline-block; min-width: 9rem; color: var(--signal-muted); }
 .capabilities, .compute { color: var(--signal-muted); margin: 0.2rem 0 0 9rem; padding-left: 1rem; }
 .check { margin-left: 9rem; }
 .actions { display: flex; gap: 0.5rem; margin: 1rem 0 0.5rem; }
-.project-panel { display: block; width: 100%; height: calc(100vh - 5rem); border: 0; background: var(--signal-bg); }

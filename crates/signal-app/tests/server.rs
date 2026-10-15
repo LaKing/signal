@@ -289,7 +289,56 @@ fn dropping_it_saves_the_setup(transport: Transport) {
     fs::remove_dir_all(&base).unwrap();
 }
 
+/// The control addresses a `describe` lists.
+fn controls(described: &Value) -> Vec<String> {
+    described["controls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["address"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// M2.8-11 AC2 ("Parameters go empty after switching tabs"): a page that
+/// connects while the app plays (as the old Transport page did on each
+/// visit) is described every parameter. The server was right; the page's
+/// meters threw in their `describe` listener, which kept the parameter list
+/// from its own (`ui/signal-ui.test.js`).
+fn a_later_client_describes_every_parameter_while_playing(transport: Transport) {
+    let (base, path) = setup("later", transport);
+    let server = start(transport, &path);
+    let mut first = connect(&server, transport);
+    hello(&mut first, server.token());
+    of(&mut first, "welcome");
+    let stopped = request(&mut first, json!({"type": "describe", "id": 1}), "describe");
+    assert_eq!(stopped["playing"], false);
+    let every = controls(&stopped);
+    assert!(every.iter().any(|a| a == "/osc.freq"), "{every:?}");
+    assert!(every.iter().any(|a| a == "/out.gain"), "{every:?}");
+    let played = request(
+        &mut first,
+        json!({"type": "transport.play", "id": 2}),
+        "transport",
+    );
+    assert_eq!(played["playing"], true);
+
+    let mut later = connect(&server, transport);
+    hello(&mut later, server.token());
+    let welcome = of(&mut later, "welcome");
+    assert_eq!(welcome["power"], "on");
+    let described = request(&mut later, json!({"type": "describe", "id": 1}), "describe");
+    assert_eq!(described["playing"], true);
+    assert_eq!(
+        controls(&described),
+        every,
+        "every parameter, while playing"
+    );
+    drop(server);
+    fs::remove_dir_all(&base).unwrap();
+}
+
 both!(
+    a_later_client_describes_every_parameter_while_playing,
     the_url_carries_a_new_token_in_its_fragment,
     a_client_needs_the_token,
     it_starts_stopped_on_the_last_project,

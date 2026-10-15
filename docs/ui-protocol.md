@@ -49,6 +49,8 @@ The first message on a connection must be `hello`, within 5 s, with the session 
 {"type": "welcome", "protocol": 1, "client": 3, "project": "kick", "sampleRate": 96000, "frame": 123456, "planVersion": 0}
 ```
 
+(Signal.app's adds `"power": "on"` or `"off"`, its power switch: "Signal.app" below.)
+
 Otherwise it sends `{"type": "error", "code": "unauthorized", …}` (a wrong or missing token, another first message, not JSON) and closes the connection with code 1008 (policy), or `{"type": "error", "code": "protocol", …}` (another version) and closes it with 1002. Nothing else is answered on that connection, and the control thread never hears of it. A later `hello` is an error (`already-authenticated`).
 
 ### `describe`
@@ -188,12 +190,13 @@ Signal.app's control thread runs the host in **app mode** (`Host::new_app`, M2.8
 
 | Message | Does | Reply |
 |---|---|---|
-| `app.get` | — | `{"type": "app", "project": {"dir", "sampleRate", "diagnostics"} or null, "playing", "reload": {"message", "error"} or null, "notes", "message", "writes", "setupPath", "setupProblems"}`: what the window shows beside the panel and meters (`sampleRate` is null and `diagnostics` lists why when the folder does not load; `message` is the last refusal or notice). Pushed (without `id`) whenever it changes |
-| `transport.play` | Plays the open project from frame 0 with the Setup | `{"type": "transport", "playing": true}`; errors `no-project` ("open a project folder first"), `does-not-load` ("the project does not load"), `device` (the output or engine could not start) |
+| `app.get` | — | `{"type": "app", "project": {"dir", "sampleRate", "diagnostics"} or null, "playing", "power": "on" or "off", "reload": {"message", "error"} or null, "notes", "message", "writes", "setupPath", "setupProblems"}`: what the window shows beside the panel and meters (`sampleRate` is null and `diagnostics` lists why when the folder does not load; `message` is the last refusal or notice). Pushed (without `id`) whenever it changes |
+| `app.power` | `on`: `true` or `false`, the window's power switch (M2.8-11; application state like play and stop, never written to the project or the Setup; the app starts switched on). Off: stops the run as `transport.stop` does (the device is released, the engine's worker threads are joined, GPU work, which only a run does, ends; the open project, its panel and its unsaved values stay) and lets go of **every** subscription; the control thread then waits blocked for the next message instead of stepping every millisecond. On: plays again if it played when switched off | `{"type": "power", "on", "playing"}` |
+| `transport.play` | Plays the open project from frame 0 with the Setup | `{"type": "transport", "playing": true}`; errors `no-project` ("open a project folder first"), `does-not-load` ("the project does not load"), `device` (the output or engine could not start), `powered-off` (switched off) |
 | `transport.stop` | Stops; edits waiting for reports are answered `abandoned`; subscriptions are kept (scopes start again with the next run); the devices are listed again | `{"type": "transport", "playing": false}` |
 | `project.open` | `path`: a project folder (made absolute). Stops, opens it (stopped), records it as the Setup's last project and saves the Setup, and serves its `ui/` under `/project/` | `{"type": "project", "dir", "loads", "diagnostics"}` |
 
-`describe` is pushed after each of them. The **status line** is pushed as `{"type": "status", "playing", "line", "status": {"frame", "elapsed", "xruns", "loadAverage", "loadWorst", "clipped", "buffer", "threads", "workers", "scheduling"}}` four times a second while playing and once after a stop (the last run's): `line` is the text the window shows, `xruns` counts the output's and the input's. When the window closes, the host stops, records the window's size in the Setup and saves it.
+`describe` is pushed after each of them. **While switched off** the app's `welcome` carries `"power": "off"` (`"on"` otherwise; `signal ui`'s has no `power`), so a client that connects then (the Panel tab's frame after another project is opened, say) knows it before it could subscribe, and every `subscribe` is refused with `powered-off`: no stream frame is sent to any client. The client in `ui/signal-ui.js` sends no subscription while off and sends them all again when an `app` message says `"power": "on"`. A project opened while off opens stopped, and switching on then plays nothing. The **status line** is pushed as `{"type": "status", "playing", "line", "status": {"frame", "elapsed", "xruns", "loadAverage", "loadWorst", "clipped", "buffer", "threads", "workers", "scheduling"}}` four times a second while playing and once after a stop (the last run's): `line` is the text the window shows, `xruns` counts the output's and the input's. When the window closes, the host stops, records the window's size in the Setup and saves it.
 
 ### `stats`, `ping`
 
@@ -201,7 +204,7 @@ Signal.app's control thread runs the host in **app mode** (`Host::new_app`, M2.8
 
 ### Errors
 
-`{"type": "error", "id": …, "code": "…", "message": "…"}`. Codes: `unauthorized`, `protocol`, `already-authenticated`, `bad-message`, `unknown-type`, `unknown-address`, `unknown-sub`, `unknown-device`, `unknown-panel`, `bad-address`, `bad-value`, `bad-rate`, `bad-device`, `not-a-signal-output`, `no-scope-slot`, `not-a-vector-output`, `no-vector-slot`, `busy`, `refused`, `not-playing`, `too-many-clients`, `not-editable`, `write-failed`, `not-unsaved`, `playing`, `recording`, and in Signal.app's messages `not-allowed`, `no-project`, `does-not-load`, `device`.
+`{"type": "error", "id": …, "code": "…", "message": "…"}`. Codes: `unauthorized`, `protocol`, `already-authenticated`, `bad-message`, `unknown-type`, `unknown-address`, `unknown-sub`, `unknown-device`, `unknown-panel`, `bad-address`, `bad-value`, `bad-rate`, `bad-device`, `not-a-signal-output`, `no-scope-slot`, `not-a-vector-output`, `no-vector-slot`, `busy`, `refused`, `not-playing`, `too-many-clients`, `not-editable`, `write-failed`, `not-unsaved`, `playing`, `recording`, and in Signal.app's messages `not-allowed`, `no-project`, `does-not-load`, `device`, `powered-off` (`transport.play` and `subscribe` while switched off).
 
 ## Binary frames
 

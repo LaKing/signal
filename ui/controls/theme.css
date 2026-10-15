@@ -32,4 +32,29 @@
   --signal-button-width: 56px;
   --signal-button-height: 32px;
   --signal-value-size: 13px;
+  --signal-card-min: 16rem;    /* the narrowest card of a grid */
 }
+
+/* Cards (M2.8-11, docs/ui-controls.md "Panels"): a panel is a grid of
+   cards filling its width, and every text in it is inside a card. A card
+   is as tall as its row; its controls keep their own fixed sizes. */
+.signal-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(var(--signal-card-min), 100%), 1fr));
+  gap: 0.75rem;
+  align-items: stretch;
+}
+.signal-card {
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+  background: var(--signal-panel);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.signal-card.wide { grid-column: 1 / -1; }
+.signal-card > h1, .signal-card > h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--signal-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.signal-card > p { margin: 0; color: var(--signal-muted); }
+.signal-card .row { display: flex; flex-wrap: wrap; gap: 0.75rem 1rem; align-items: flex-end; }

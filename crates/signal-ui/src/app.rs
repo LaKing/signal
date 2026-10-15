@@ -188,6 +188,53 @@ pub fn start(
     })
 }
 
+/// The app's power switch (M2.8-11): application state like play and stop,
+/// never written to the project or the Setup. Off, nothing runs; on again,
+/// the run that played before plays again. The app starts switched on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Power {
+    on: bool,
+    resume: bool,
+}
+
+impl Default for Power {
+    fn default() -> Power {
+        Power {
+            on: true,
+            resume: false,
+        }
+    }
+}
+
+impl Power {
+    /// Whether it is on.
+    pub fn is_on(&self) -> bool {
+        self.on
+    }
+
+    /// Switched off, `playing` or not: the caller stops the run.
+    pub fn off(&mut self, playing: bool) {
+        if self.on {
+            self.on = false;
+            self.resume = playing;
+        }
+    }
+
+    /// Switched on: whether the run that played when it went off plays again.
+    pub fn on(&mut self) -> bool {
+        let resume = !self.on && self.resume;
+        self.on = true;
+        self.resume = false;
+        resume
+    }
+
+    /// Another project was opened while off: it is opened stopped, so
+    /// nothing plays again.
+    pub fn forget(&mut self) {
+        self.resume = false;
+    }
+}
+
 /// The label of the output meter of sink channel `sink`, played on device
 /// channel `target`.
 pub fn meter_label(sink: usize, target: Option<usize>) -> String {
@@ -266,6 +313,22 @@ mod tests {
             "frame 48000   elapsed 0.500 s   xruns 1   load 12.5 % avg, 50.0 % worst   clipped 2   buffer 128   threads 4 (3 workers, workgroup)"
         );
         assert_eq!(status_line(None), "stopped");
+    }
+
+    #[test]
+    fn the_power_switch_restores_what_played() {
+        let mut power = Power::default();
+        assert!(power.is_on(), "the app starts switched on");
+        power.off(true);
+        assert!(!power.is_on());
+        power.off(false);
+        assert!(power.on(), "a second off keeps what played");
+        assert!(!power.on(), "already on: nothing to restore");
+        power.off(false);
+        assert!(!power.on(), "stopped stays stopped");
+        power.off(true);
+        power.forget();
+        assert!(!power.on(), "another project opens stopped");
     }
 
     #[test]

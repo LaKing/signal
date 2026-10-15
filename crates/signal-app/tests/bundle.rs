@@ -93,9 +93,8 @@ fn bundle_app_builds_a_signed_bundle() {
     for page in [
         "signal-ui.js",
         "app/index.html",
-        "app/setup.html",
-        "app/panel.html",
         "app/app.js",
+        "app/setup.js",
         "controls/index.js",
         "default-panel.html",
     ] {

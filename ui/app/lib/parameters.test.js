@@ -5,7 +5,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { RAMP_MS, dragMessage, fileNote, releaseMessage, resetMessage, rows, shown, valuesOf } from './parameters.js';
+import { RAMP_MS, dragMessage, fileNote, planUpdate, releaseMessage, resetMessage, rows, shown, structureKey, valuesOf } from './parameters.js';
 
 // The kick project's describe, in short.
 const description = {
@@ -48,4 +48,27 @@ test('effective values by address, and how they read', () => {
   assert.equal(shown(391.2345, 'ms'), '391.2 ms');
   assert.equal(shown(420, 'ms'), '420 ms');
   assert.equal(shown(Number.NaN, null), '—');
+});
+
+// M2.8-11 (docs/ui-controls.md "Stable layout"): a describe with the same
+// structure updates the values in place; the list is rebuilt only when its
+// structure changes, and not under a slider being dragged.
+test('only a new structure rebuilds the list', () => {
+  const key = structureKey(rows(description));
+  const moved = structuredClone(description);
+  moved.controls[1].base = 0.5;
+  moved.controls[0].inFile = true;
+  moved.instances[0].parameters[0].base = 300;
+  assert.equal(structureKey(rows(moved)), key, 'values are not structure');
+  const other = structuredClone(description);
+  other.controls.pop();
+  assert.notEqual(structureKey(rows(other)), key);
+  const unit = structuredClone(description);
+  unit.controls[0].unit = 's';
+  assert.notEqual(structureKey(rows(unit)), key);
+  assert.equal(planUpdate(key, key, false), 'update');
+  assert.equal(planUpdate(key, key, true), 'update', 'values update while dragging (not the dragged slider)');
+  assert.equal(planUpdate(key, 'other', false), 'rebuild');
+  assert.equal(planUpdate(key, 'other', true), 'defer');
+  assert.equal(planUpdate(undefined, key, false), 'rebuild', 'the first describe builds it');
 });

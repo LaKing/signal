@@ -15,7 +15,7 @@ export class SignalFader extends SignalValueElement {
 :host([orientation="horizontal"]) .control { flex-direction: row; }
 .art { width: var(--signal-fader-thickness, 40px); height: var(--signal-fader-length, 200px); cursor: ns-resize; }
 :host([orientation="horizontal"]) .art { width: var(--signal-fader-length, 200px); height: var(--signal-fader-thickness, 40px); cursor: ew-resize; }
-.readout { min-width: 5.5em; }
+.readout { height: 2.6em; }
 `;
 
   get horizontal() {
@@ -66,8 +66,10 @@ export class SignalFader extends SignalValueElement {
     this.setAttribute('aria-orientation', this.horizontal ? 'horizontal' : 'vertical');
     this.updateAria();
     this.$('.label').textContent = this.getAttribute('label') ?? '';
-    const effectiveText = b.modulated ? ` → ${formatValue(b.effective, b.range.unit)}` : '';
-    this.$('.readout').textContent = `${formatValue(b.value, b.range.unit)}${effectiveText}`;
+    // The effective value on the readout's second line, kept (empty) when not
+    // modulated: the readout never changes size.
+    const effectiveText = b.modulated ? `→ ${formatValue(b.effective, b.range.unit)}` : '';
+    this.$('.readout').textContent = `${formatValue(b.value, b.range.unit)}\n${effectiveText}`;
     if (this.showSkin({ position, text: formatValue(b.value, b.range.unit) })) return;
     const svg = this.$('.art');
     svg.setAttribute('viewBox', this.horizontal ? `0 0 ${LENGTH} ${THICK}` : `0 0 ${THICK} ${LENGTH}`);

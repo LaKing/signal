@@ -13,18 +13,31 @@ import { unsavedLine } from '../lib/unsaved.js';
 
 const CSS = `
 :host { display: block; color: var(--signal-fg, #d6dbe4); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
-.bar { display: flex; gap: .75rem; align-items: baseline; margin: 0 0 .75rem; color: var(--signal-muted, #8a93a3); font-size: 11px; }
-.status { color: var(--signal-accent, #4fc3f7); }
+/* Cards (docs/ui-controls.md "Panels"): the bar, the problems and the
+   generated panel's groups are cards too, so no text is outside one. The
+   bar is one line of fixed height whatever it says ("Stable layout"). */
+.bar, .problems, .generated section { box-sizing: border-box; border-radius: 10px; background: var(--signal-panel, #1f232b); }
+.bar { display: flex; gap: .75rem; align-items: center; height: 2rem; margin: 0 0 .75rem; padding: 0 1rem; color: var(--signal-muted, #8a93a3); font-size: 11px; white-space: nowrap; overflow: hidden; }
+.bar > span { overflow: hidden; text-overflow: ellipsis; }
+.status { flex: none; width: 11ch; color: var(--signal-accent, #4fc3f7); }
 .status.failed, .status.closed { color: var(--signal-clip, #ff5252); }
-.problems { margin: 0 0 1rem; padding: .5rem .75rem .5rem 2rem; border: 1px solid var(--signal-clip, #ff5252); border-radius: var(--signal-radius, 6px); background: color-mix(in srgb, var(--signal-clip, #ff5252) 10%, transparent); font: 11px/1.5 ui-monospace, Menlo, monospace; }
+.title { flex: none; width: 16ch; min-width: 0; }
+.summary { min-width: 0; }
+.problems { margin: 0 0 .75rem; padding: .5rem .75rem .5rem 2rem; border: 1px solid var(--signal-clip, #ff5252); font: 11px/1.5 ui-monospace, Menlo, monospace; }
 .problems .warning { color: var(--signal-effective, #ffb74d); }
 .problems .error { color: var(--signal-clip, #ff5252); }
-.generated section { margin: 0 0 1.25rem; }
-.generated h2 { margin: 0 0 .5rem; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--signal-muted, #8a93a3); }
+.generated { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(var(--signal-card-min, 16rem), 100%), 1fr)); gap: .75rem; }
+.generated:empty { display: none; }
+.generated section { min-width: 0; padding: .75rem 1rem; display: flex; flex-direction: column; gap: .6rem; }
+.generated section.wide { grid-column: 1 / -1; }
+.generated h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--signal-muted, #8a93a3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .generated h2 small { font-weight: 400; letter-spacing: 0; text-transform: none; margin-left: .5em; }
 .generated .row { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; align-items: flex-end; }
 .generated signal-scope { flex: 1 1 20rem; min-width: 16rem; }
-.unsaved { color: var(--signal-unsaved, #ffb74d); }
+/* The unsaved indicator is a box of fixed width at the bar's end, its text cut
+   to its own fixed width: the count or the error changing moves nothing. */
+.unsaved { flex: none; width: 46ch; margin-left: auto; display: flex; align-items: center; color: var(--signal-unsaved, #ffb74d); }
+.unsaved-text { flex: none; width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .unsaved button { margin-left: .4em; font: inherit; color: var(--signal-fg, #d6dbe4); background: var(--signal-track, #2a2f38); border: 1px solid var(--signal-unsaved, #ffb74d); border-radius: 3px; cursor: pointer; }
 [hidden] { display: none !important; }
 `;
@@ -39,13 +52,14 @@ export class SignalPanel extends HTMLElement {
     super();
     this.attachShadow({ mode: 'open' });
     this.shadowRoot.innerHTML = `<style>${CSS}</style>
-<div class="bar" part="bar"><span class="status">starting…</span><span class="title"></span><span class="summary"></span><span class="unsaved" part="unsaved" role="status" hidden><span class="unsaved-text"></span><button type="button" class="retry-all">Retry all</button><button type="button" class="revert-all">Revert all</button></span></div>
+<div class="bar" part="bar"><span class="status">starting…</span><span class="title"></span><span class="summary"></span><span class="unsaved" part="unsaved" role="status" style="visibility: hidden"><span class="unsaved-text"></span><button type="button" class="retry-all">Retry all</button><button type="button" class="revert-all">Revert all</button></span></div>
 <ol class="problems" part="problems" role="alert" hidden></ol>
 <div class="generated" part="generated"></div>
 <slot></slot>`;
     this.connection = null;
     this.stops = [];
-    this.planVersion = undefined;
+    /** The structure of the generated panel shown (`defaultPanel`), with `generated`. */
+    this.generated = undefined;
     this.marked = [];
   }
 
@@ -89,7 +103,9 @@ export class SignalPanel extends HTMLElement {
     this.unsaved = state;
     const line = unsavedLine(state);
     this.$('.unsaved-text').textContent = note ? `${line} (${note})` : line;
-    this.$('.unsaved').hidden = !line;
+    this.$('.unsaved-text').title = this.$('.unsaved-text').textContent;
+    // Its space is kept: the indicator appearing moves nothing.
+    this.$('.unsaved').style.visibility = line ? 'visible' : 'hidden';
   }
 
   /** `request(address)` for every listed parameter `which` takes; a refusal is shown. */
@@ -113,11 +129,20 @@ export class SignalPanel extends HTMLElement {
 
   /** A pushed or requested describe: check again (or rebuild) when the plan changed. */
   described(description) {
+    // The name comes only while playing; the title's fixed width keeps the
+    // bar still when Play and Stop set and clear it ("Stable layout").
     this.$('.title').textContent = description.project ?? '';
     if (description.unsaved) this.showUnsaved(description.unsaved);
     if (this.hasAttribute('generated')) {
-      if (description.planVersion === this.planVersion) return;
-      this.planVersion = description.planVersion;
+      // Rebuilt only when what it shows changes (docs/ui-controls.md
+      // "Stable layout"): a new plan version with the same controls, meters
+      // and scope keeps its elements, which take the new values themselves.
+      // Only what generate() builds from: not the project's name, which a
+      // describe gives only while playing (Play and Stop change nothing here).
+      const { groups, meters, scope } = defaultPanel(description);
+      const structure = JSON.stringify({ groups, meters, scope });
+      if (structure === this.generated) return;
+      this.generated = structure;
       this.generate(description);
       return;
     }
@@ -200,7 +225,8 @@ export class SignalPanel extends HTMLElement {
       ...spec.meters.map((m) => element('signal-meter', { bind: m.bind, label: m.label })),
       ...(spec.scope ? [element('signal-scope', { bind: spec.scope.bind, label: spec.scope.label })] : []),
     ];
-    if (output.length) sections.push(section('output', null, output));
+    // The output card (meters and the scope) spans the grid's width.
+    if (output.length) sections.push(Object.assign(section('output', null, output), { className: 'wide' }));
     this.$('.generated').replaceChildren(...sections);
     this.$('.summary').textContent = 'generated panel (the project has no ui/main.html)';
   }

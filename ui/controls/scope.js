@@ -18,7 +18,7 @@ export class SignalScope extends SignalElement {
 .control { display: flex; flex-direction: column; gap: 4px; padding: 4px; }
 canvas { width: var(--signal-scope-width, 100%); height: var(--signal-scope-height, 160px); background: var(--signal-panel, #1f232b); border-radius: 4px; display: block; }
 :host([mode="xy"]) canvas { width: var(--signal-scope-height, 160px); }
-.readout { text-align: left; color: var(--signal-muted, #8a93a3); }
+.readout { text-align: left; color: var(--signal-muted, #8a93a3); width: 100%; }
 `;
 
   constructor() {

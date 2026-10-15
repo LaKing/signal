@@ -29,7 +29,7 @@ export class SignalMeter extends SignalElement {
 .clip .lamp { fill: var(--signal-clip, #ff5252); }
 .tick { stroke: var(--signal-muted, #8a93a3); stroke-width: 1; }
 .tick-label { fill: var(--signal-muted, #8a93a3); font-size: 8px; }
-.readout { min-width: 4.5em; }
+.readout { width: 9ch; }
 `;
 
   constructor() {

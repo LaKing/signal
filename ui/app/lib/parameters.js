@@ -52,6 +52,32 @@ export function rows(description) {
   return [...instances.values()];
 }
 
+/**
+ * What the list's DOM is built from (M2.8-11): the instances and their
+ * parameters, without the values. A `describe` with the same structure
+ * updates the values in place; only a new structure rebuilds the list.
+ */
+export function structureKey(list) {
+  return JSON.stringify(
+    list.map((i) => [
+      i.name,
+      i.module,
+      i.parameters.map((p) => [p.address, p.name, p.unit, p.min, p.max, p.editable]),
+      i.inner.map((p) => [p.address, p.name, p.unit, p.min, p.max]),
+    ]),
+  );
+}
+
+/**
+ * What a `describe` does to the list shown with `shownKey`: `update` the
+ * values in place, `rebuild` it, or `defer` the rebuild until the slider
+ * being dragged is released (its row would be replaced under the pointer).
+ */
+export function planUpdate(shownKey, nextKey, dragging) {
+  if (shownKey === nextKey) return 'update';
+  return dragging ? 'defer' : 'rebuild';
+}
+
 /** What follows a parameter's base: `(not in file)` when the file has no value. */
 export function fileNote(parameter) {
   return parameter.inFile === false ? '(not in file)' : '';

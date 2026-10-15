@@ -1,25 +1,135 @@
-//! What the window decides without a window: the page's requests to the
-//! native side (wry's IPC: `window.ipc.postMessage`), where the WebView may
-//! navigate, and the size recorded in the Setup.
+//! What the window decides without a window: its native menu bar (as data;
+//! `muda` builds it on the main thread), what each of Signal's own items
+//! does, where the WebView may navigate, and the size recorded in the Setup.
 
 use std::path::Path;
 
 use crate::setup::Window;
 
-/// A request from the page.
+/// What one of Signal's own menu items does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action {
-    /// The menu's Quit (or Cmd-Q): close the window, as its close button.
+pub enum MenuAction {
+    /// Open Project…: the page shows the Setup tab with its folder field
+    /// focused (no native folder chooser: it would need direct `objc2`
+    /// dependencies, which change Cargo.lock; ADR 0023).
+    Open,
+    /// Save Project: the page writes every unsaved parameter again.
+    Save,
+    /// Interface Setup…: the page shows the Setup tab.
+    Setup,
+    /// Quit: the window closes as with its close button (the Setup records
+    /// its size).
     Quit,
 }
 
-/// The page's IPC message `message` as an action, if it is one.
-pub fn ipc_action(message: &str) -> Option<Action> {
-    match message.trim() {
-        "quit" => Some(Action::Quit),
-        _ => None,
+impl MenuAction {
+    const ALL: [MenuAction; 4] = [
+        MenuAction::Open,
+        MenuAction::Save,
+        MenuAction::Setup,
+        MenuAction::Quit,
+    ];
+
+    /// The menu item's id.
+    pub fn id(self) -> &'static str {
+        match self {
+            MenuAction::Open => "open",
+            MenuAction::Save => "save",
+            MenuAction::Setup => "setup",
+            MenuAction::Quit => "quit",
+        }
+    }
+
+    /// The action of the menu item `id`, if it is one of Signal's own.
+    pub fn of(id: &str) -> Option<MenuAction> {
+        MenuAction::ALL.into_iter().find(|a| a.id() == id)
+    }
+
+    /// The script that hands the action to the page (a `signal-menu`
+    /// event, `ui/app/app.js`); none for Quit, which the window does.
+    pub fn page_script(self) -> Option<String> {
+        (self != MenuAction::Quit).then(|| {
+            let quoted = serde_json::to_string(self.id()).unwrap_or_else(|_| "\"\"".to_owned());
+            format!("window.dispatchEvent(new CustomEvent('signal-menu', {{ detail: {quoted} }}))")
+        })
     }
 }
+
+/// An item of the menu bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuItem {
+    /// One of Signal's own: its action, label and Cmd-key.
+    Own(MenuAction, &'static str, char),
+    // The system's items (`muda`'s predefined ones) act on the app or, for
+    // the Edit menu, on the focused text field.
+    /// About Signal.
+    About,
+    /// Hide Signal.
+    Hide,
+    /// Hide the other apps.
+    HideOthers,
+    /// Show every app.
+    ShowAll,
+    /// Undo (in a text field).
+    Undo,
+    /// Redo.
+    Redo,
+    /// Cut.
+    Cut,
+    /// Copy.
+    Copy,
+    /// Paste.
+    Paste,
+    /// Select All.
+    SelectAll,
+    /// A line between items.
+    Separator,
+}
+
+const QUIT: MenuItem = MenuItem::Own(MenuAction::Quit, "Quit Signal", 'q');
+
+/// The menu bar: the app menu, File and Edit, in order (ADR 0023).
+pub const MENU_BAR: [(&str, &[MenuItem]); 3] = [
+    (
+        "Signal",
+        &[
+            MenuItem::About,
+            MenuItem::Separator,
+            MenuItem::Hide,
+            MenuItem::HideOthers,
+            MenuItem::ShowAll,
+            MenuItem::Separator,
+            QUIT,
+        ],
+    ),
+    (
+        "File",
+        &[
+            MenuItem::Own(MenuAction::Open, "Open Project…", 'o'),
+            MenuItem::Own(MenuAction::Save, "Save Project", 's'),
+            MenuItem::Separator,
+            MenuItem::Own(MenuAction::Setup, "Interface Setup…", ','),
+            MenuItem::Separator,
+            MenuItem::Own(MenuAction::Quit, "Quit", 'q'),
+        ],
+    ),
+    (
+        "Edit",
+        &[
+            MenuItem::Undo,
+            MenuItem::Redo,
+            MenuItem::Separator,
+            MenuItem::Cut,
+            MenuItem::Copy,
+            MenuItem::Paste,
+            MenuItem::SelectAll,
+        ],
+    ),
+];
+
+/// What the WebView runs before the page: it tells the page that the
+/// native menu takes the shortcuts (`ui/app/lib/menu.js`).
+pub const NATIVE_MENU_SCRIPT: &str = "window.signalApp = Object.freeze({ menu: true });";
 
 /// Whether the WebView may navigate to `url`: only the app's own server
 /// (`origin`, `http://127.0.0.1:<port>`), never another site.
@@ -60,10 +170,79 @@ pub fn window_of(width: f64, height: f64) -> Option<Window> {
 mod tests {
     use super::*;
 
+    fn own(menu: &str) -> Vec<(&'static str, char)> {
+        MENU_BAR
+            .iter()
+            .find(|(name, _)| *name == menu)
+            .unwrap()
+            .1
+            .iter()
+            .filter_map(|item| match item {
+                MenuItem::Own(_, label, key) => Some((*label, *key)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// M2.8-11 AC12, AC15: the app menu, File and Edit.
     #[test]
-    fn the_page_asks_to_quit() {
-        assert_eq!(ipc_action("quit"), Some(Action::Quit));
-        assert_eq!(ipc_action("rm -rf"), None);
+    fn the_menu_bar_has_the_app_menu_file_and_edit() {
+        let names: Vec<&str> = MENU_BAR.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, ["Signal", "File", "Edit"]);
+        assert_eq!(
+            own("File"),
+            [
+                ("Open Project…", 'o'),
+                ("Save Project", 's'),
+                ("Interface Setup…", ','),
+                ("Quit", 'q')
+            ]
+        );
+        let (_, app) = MENU_BAR[0];
+        for item in [MenuItem::About, MenuItem::Hide, QUIT] {
+            assert!(app.contains(&item), "{item:?}");
+        }
+        let (_, edit) = MENU_BAR[2];
+        let edit: Vec<MenuItem> = edit
+            .iter()
+            .copied()
+            .filter(|i| *i != MenuItem::Separator)
+            .collect();
+        assert_eq!(
+            edit,
+            [
+                MenuItem::Undo,
+                MenuItem::Redo,
+                MenuItem::Cut,
+                MenuItem::Copy,
+                MenuItem::Paste,
+                MenuItem::SelectAll
+            ]
+        );
+    }
+
+    #[test]
+    fn each_own_item_has_its_action_and_the_page_gets_all_but_quit() {
+        for (_, items) in MENU_BAR {
+            for item in items {
+                if let MenuItem::Own(action, ..) = item {
+                    assert_eq!(MenuAction::of(action.id()), Some(*action));
+                }
+            }
+        }
+        assert_eq!(MenuAction::of("rm -rf"), None);
+        assert_eq!(
+            MenuAction::Open.page_script().unwrap(),
+            "window.dispatchEvent(new CustomEvent('signal-menu', { detail: \"open\" }))"
+        );
+        assert!(MenuAction::Save.page_script().unwrap().contains("\"save\""));
+        assert!(
+            MenuAction::Setup
+                .page_script()
+                .unwrap()
+                .contains("\"setup\"")
+        );
+        assert_eq!(MenuAction::Quit.page_script(), None, "the window quits");
     }
 
     #[test]

@@ -23,7 +23,7 @@ export class SignalCanvas extends SignalElement {
 :host { display: block; }
 .control { display: flex; flex-direction: column; gap: 4px; padding: 4px; }
 canvas { width: var(--signal-canvas-width, 100%); height: var(--signal-canvas-height, 240px); background: var(--signal-panel, #1f232b); border-radius: 4px; display: block; }
-.readout { text-align: left; color: var(--signal-muted, #8a93a3); }
+.readout { text-align: left; color: var(--signal-muted, #8a93a3); width: 100%; }
 `;
 
   constructor() {

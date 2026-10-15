@@ -32,7 +32,7 @@ export class SignalKnob extends SignalValueElement {
 .arc { stroke: var(--signal-accent, #4fc3f7); }
 .pointer { stroke: var(--signal-thumb, #e8ecf2); stroke-width: 2.5; stroke-linecap: round; }
 .dot { stroke: none; }
-.readout { min-width: 5em; }
+.readout { height: 2.6em; }
 `;
 
   /** The sweep in degrees (10..350, default 270). */
@@ -88,8 +88,10 @@ export class SignalKnob extends SignalValueElement {
     const angle = knobAngle(position, sweep);
     this.updateAria();
     this.$('.label').textContent = this.getAttribute('label') ?? '';
-    const effectiveText = b.modulated ? ` → ${formatValue(b.effective, b.range.unit)}` : '';
-    this.$('.readout').textContent = `${formatValue(b.value, b.range.unit)}${effectiveText}`;
+    // The effective value on the readout's second line, kept (empty) when not
+    // modulated: the readout never changes size.
+    const effectiveText = b.modulated ? `→ ${formatValue(b.effective, b.range.unit)}` : '';
+    this.$('.readout').textContent = `${formatValue(b.value, b.range.unit)}\n${effectiveText}`;
     if (this.showSkin({ position, angle, text: formatValue(b.value, b.range.unit) })) return;
     const origin = this.hasAttribute('bipolar') ? knobAngle(bipolarOrigin(b.range), sweep) : -sweep / 2;
     this.$('.ring').setAttribute('d', arc(-sweep / 2, sweep / 2));

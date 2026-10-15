@@ -1,10 +1,13 @@
 <!doctype html>
-<!-- Signal.app's window (ADR 0023 §2, M2.8-4): the menu, the project bar and
-     transport with the status line, the meters, the live-reload status and
-     diagnostics, and the parameter list (the M2.5-2 panel). The project's
-     own panel is /project/main.html (M2.8-3), the menu's Panel; the
-     interface setup is setup.html. The page URL's fragment carries the
-     WebSocket's port and the session token (docs/ui-protocol.md). -->
+<!-- Signal.app's window (ADR 0023 §2, M2.8-4, M2.8-11): one page. The
+     toolbar (power switch, the tabs Panel | Parameters | Setup, Play and
+     Stop, the status), then the tabs, switched without a reload or a new
+     connection: the project's panel (/project/main.html in a same-origin
+     frame filling the tab), the parameters (status, meters, messages and
+     the parameter list, as cards) and the setup (the project folder and the
+     interface setup). Only the shown tab scrolls, as one container. The
+     page URL's fragment carries the WebSocket's port and the session token
+     (docs/ui-protocol.md). -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -14,19 +17,34 @@
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<signal-app-menu></signal-app-menu>
-<signal-app-transport></signal-app-transport>
-<signal-app-meters></signal-app-meters>
-<signal-app-messages></signal-app-messages>
-<h2>Parameters</h2>
-<signal-app-parameters></signal-app-parameters>
+<signal-app-toolbar></signal-app-toolbar>
+<main>
+<section class="tab tab-panel" data-tab="panel" role="tabpanel" aria-label="Panel">
+  <signal-app-panel></signal-app-panel>
+</section>
+<section class="tab tab-scroll" data-tab="parameters" role="tabpanel" aria-label="Parameters" hidden>
+  <div class="signal-cards">
+    <section class="signal-card"><h2>Status</h2><signal-app-status></signal-app-status></section>
+    <section class="signal-card"><h2>Meters</h2><signal-app-meters></signal-app-meters></section>
+    <section class="signal-card"><h2>Messages</h2><signal-app-messages></signal-app-messages></section>
+    <signal-app-parameters></signal-app-parameters>
+  </div>
+</section>
+<section class="tab tab-scroll" data-tab="setup" role="tabpanel" aria-label="Setup" hidden>
+  <div class="signal-cards">
+    <section class="signal-card wide"><h2>Project</h2><signal-app-project></signal-app-project></section>
+    <section class="signal-card wide"><h2>Interface setup</h2><signal-app-setup></signal-app-setup></section>
+  </div>
+</section>
+</main>
 <script type="module">
 import { connectFromPage, setDefaultConnection } from '../signal-ui.js';
 import './app.js';
+import './setup.js';
 
 const connection = connectFromPage();
 if (connection) setDefaultConnection(connection);
-else document.body.prepend(Object.assign(document.createElement('p'), { className: 'error', textContent: 'This page needs the URL Signal.app or `signal ui` opens (#ws=…&token=…).' }));
+else document.querySelector('main').prepend(Object.assign(document.createElement('p'), { className: 'error', textContent: 'This page needs the URL Signal.app or `signal ui` opens (#ws=…&token=…).' }));
 </script>
 </body>
 </html>

@@ -5,7 +5,8 @@
 //! The window's WebView is one of its clients: it loads [`AppServer::url`],
 //! whose fragment carries the session token. The control thread steps the
 //! host about every millisecond, as `signal play` polls, so the runner's
-//! queues are drained whether or not a page is open.
+//! queues are drained whether or not a page is open; switched off
+//! (`app.power`), it waits blocked for the next message instead.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -20,6 +21,10 @@ use crate::state::{Backend, compute_lines};
 
 /// Each client's queue of outgoing messages (as `signal ui`'s).
 const CLIENT_QUEUE: usize = 256;
+
+/// How long the control thread waits for a message while the app is
+/// switched off: also how soon it then sees the window's exit.
+const OFF_WAIT: Duration = Duration::from_millis(100);
 
 /// What the server in the app runs.
 pub struct AppConfig {
@@ -195,6 +200,12 @@ fn run(host: &mut Host, requests: &Receiver<Option<Window>>) {
         for message in host.step() {
             eprintln!("signal-app: {message}");
         }
-        thread::sleep(Duration::from_millis(1));
+        if host.powered() {
+            thread::sleep(Duration::from_millis(1));
+        } else {
+            // Switched off: nothing runs or streams, so the thread sleeps
+            // in the wait for a client's message (or the window's exit).
+            host.wait(OFF_WAIT);
+        }
     }
 }

@@ -3,21 +3,27 @@
 //! and `--project <dir>` choose the Setup file and the project to open, for
 //! tests and scripting.
 //!
-//! The page holds the app's menu (Open project, Interface setup, Quit; tao
-//! has no menu bar and a native one would need `unsafe`, ADR 0023). Quit
-//! reaches this side through wry's IPC; a folder dropped on the window is
-//! handed to the page, which opens it.
+//! The menu bar is native (`muda`, M2.8-11): the app menu, File (Open
+//! Project…, Save Project, Interface Setup…, Quit) and Edit, so the page's
+//! text fields get the system's shortcuts. Quit closes the window here;
+//! Open, Save and Interface Setup are handed to the page, which runs them
+//! (a `signal-menu` event). A folder dropped on the window is handed to the
+//! page, which opens it.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
+use muda::accelerator::{CMD_OR_CTRL, Key, KeyAccelerator};
+use muda::{AboutMetadata, IsMenuItem, Menu, MenuEvent, PredefinedMenuItem, Submenu};
 use signal_app::server::{AppConfig, AppServer};
 use signal_app::setup::{Setup, setup_path};
 use signal_app::state::Backend;
-use signal_app::window::{Action, dropped, ipc_action, may_navigate, origin_of, window_of};
+use signal_app::window::{
+    MENU_BAR, MenuAction, MenuItem, NATIVE_MENU_SCRIPT, dropped, may_navigate, origin_of, window_of,
+};
 use tao::dpi::LogicalSize;
-use tao::event::{Event, WindowEvent};
+use tao::event::{Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::window::WindowBuilder;
 use wry::{DragDropEvent, WebViewBuilder};
@@ -35,13 +41,59 @@ struct Args {
     project: Option<PathBuf>,
 }
 
-/// What the page and the WebView tell the event loop.
+/// What the menu bar and the WebView tell the event loop.
 #[derive(Debug)]
 enum UserEvent {
-    /// The menu's Quit.
-    Quit,
+    /// One of Signal's own menu items.
+    Menu(MenuAction),
     /// What was dropped on the window (a folder is opened).
     Dropped(PathBuf),
+}
+
+/// The native menu bar of [`MENU_BAR`]; built on the main thread, as `muda`
+/// requires.
+fn menu_bar() -> muda::Result<Menu> {
+    let bar = Menu::new();
+    for (name, items) in MENU_BAR {
+        let built: Vec<Box<dyn IsMenuItem>> = items
+            .iter()
+            .map(|item| menu_item(*item))
+            .collect::<muda::Result<_>>()?;
+        let refs: Vec<&dyn IsMenuItem> = built.iter().map(AsRef::as_ref).collect();
+        bar.append(&Submenu::with_items(name, true, &refs)?)?;
+    }
+    Ok(bar)
+}
+
+fn menu_item(item: MenuItem) -> muda::Result<Box<dyn IsMenuItem>> {
+    Ok(match item {
+        MenuItem::Own(action, label, key) => {
+            let own = muda::MenuItem::with_id(action.id(), label, true, None);
+            own.set_key_accelerator(Some(KeyAccelerator::new(
+                CMD_OR_CTRL,
+                Key::Character(key.to_string()),
+            )))?;
+            Box::new(own)
+        }
+        MenuItem::About => Box::new(PredefinedMenuItem::about(
+            None,
+            Some(AboutMetadata {
+                name: Some("Signal".to_owned()),
+                version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+                ..AboutMetadata::default()
+            }),
+        )),
+        MenuItem::Hide => Box::new(PredefinedMenuItem::hide(None)),
+        MenuItem::HideOthers => Box::new(PredefinedMenuItem::hide_others(None)),
+        MenuItem::ShowAll => Box::new(PredefinedMenuItem::show_all(None)),
+        MenuItem::Undo => Box::new(PredefinedMenuItem::undo(None)),
+        MenuItem::Redo => Box::new(PredefinedMenuItem::redo(None)),
+        MenuItem::Cut => Box::new(PredefinedMenuItem::cut(None)),
+        MenuItem::Copy => Box::new(PredefinedMenuItem::copy(None)),
+        MenuItem::Paste => Box::new(PredefinedMenuItem::paste(None)),
+        MenuItem::SelectAll => Box::new(PredefinedMenuItem::select_all(None)),
+        MenuItem::Separator => Box::new(PredefinedMenuItem::separator()),
+    })
 }
 
 fn main() -> ExitCode {
@@ -86,6 +138,21 @@ fn main() -> ExitCode {
     };
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    let menu = match menu_bar() {
+        Ok(menu) => menu,
+        Err(error) => {
+            eprintln!("signal-app: the menu bar was not built: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let menus = std::sync::Mutex::new(event_loop.create_proxy());
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        if let Some(action) = MenuAction::of(event.id().as_ref())
+            && let Ok(proxy) = menus.lock()
+        {
+            let _ = proxy.send_event(UserEvent::Menu(action));
+        }
+    }));
     let mut builder = WindowBuilder::new().with_title("Signal");
     if let Some(window) = setup.window {
         builder = builder.with_inner_size(LogicalSize::new(
@@ -102,16 +169,12 @@ fn main() -> ExitCode {
     };
     let url = server.url().to_owned();
     let origin = origin_of(&url).to_owned();
-    let quit = event_loop.create_proxy();
     let drops = event_loop.create_proxy();
     let webview = WebViewBuilder::new()
         .with_url(url)
+        // The page leaves the menu's shortcuts to the native menu.
+        .with_initialization_script(NATIVE_MENU_SCRIPT)
         .with_navigation_handler(move |to| may_navigate(&to, &origin))
-        .with_ipc_handler(move |request| {
-            if ipc_action(request.body()) == Some(Action::Quit) {
-                let _ = quit.send_event(UserEvent::Quit);
-            }
-        })
         .with_drag_drop_handler(move |event| {
             if let DragDropEvent::Drop { paths, .. } = event
                 && let Some(path) = paths.into_iter().next()
@@ -134,11 +197,24 @@ fn main() -> ExitCode {
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         let close = match event {
+            // The application exists now: its menu bar is set.
+            Event::NewEvents(StartCause::Init) => {
+                menu.init_for_nsapp();
+                false
+            }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
             }
-            | Event::UserEvent(UserEvent::Quit) => true,
+            | Event::UserEvent(UserEvent::Menu(MenuAction::Quit)) => true,
+            Event::UserEvent(UserEvent::Menu(action)) => {
+                if let Some(script) = action.page_script()
+                    && let Err(error) = webview.evaluate_script(&script)
+                {
+                    eprintln!("signal-app: {error}");
+                }
+                false
+            }
             Event::UserEvent(UserEvent::Dropped(path)) => {
                 // A folder is opened; anything else is refused, as before.
                 let (event, text) = match dropped(&path) {

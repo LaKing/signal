@@ -40,16 +40,37 @@ svg { display: block; overflow: visible; }
   color: var(--signal-muted, #8a93a3);
   font-variant-numeric: tabular-nums;
 }
-.readout { color: var(--signal-fg, #d6dbe4); min-height: 1.3em; }
+/* Stable layout (docs/ui-controls.md): a readout is a box of fixed size
+   whatever its text, so a changing value never moves anything else. */
+.label { overflow: hidden; text-overflow: ellipsis; }
+.readout {
+  color: var(--signal-fg, #d6dbe4);
+  box-sizing: border-box;
+  width: var(--signal-readout-width, 11ch);
+  height: 1.3em;
+  margin: 0 auto;
+  overflow: hidden;
+  white-space: pre;
+  text-overflow: ellipsis;
+}
 .skin { display: flex; justify-content: center; }
 .track { fill: var(--signal-track, #2a2f38); }
 .fill { fill: var(--signal-accent, #4fc3f7); }
 .effective { fill: var(--signal-effective, #ffb74d); stroke: var(--signal-effective, #ffb74d); }
 .thumb { fill: var(--signal-thumb, #e8ecf2); stroke: var(--signal-bg, #16181d); stroke-width: 1; }
 :host([unsaved]) { outline: 1px dashed var(--signal-unsaved, #ffb74d); outline-offset: 2px; }
+/* Over what is below the control, never in its flow: showing it moves nothing. */
 .unsaved-mark {
-  margin: 3px auto 0;
-  max-width: 14em;
+  position: absolute;
+  z-index: 1;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  box-sizing: border-box;
+  width: 14em;
+  padding: 3px 4px;
+  border-radius: 4px;
+  background: var(--signal-panel, #1f232b);
   text-align: center;
   white-space: normal;
   font-size: 0.9em;

@@ -137,6 +137,8 @@ struct AppMode {
     pushed: Option<Instant>,
     /// The `app` message last pushed.
     last: Option<Value>,
+    /// The power switch (application state, never written anywhere).
+    power: app::Power,
 }
 
 /// What a stopped host leaves: the recorder and the runner's last status.
@@ -913,6 +915,7 @@ impl Host {
                 "diagnostics": mode.diagnostics,
             })),
             "playing": self.run.is_some(),
+            "power": power_json(mode.power),
             "reload": mode.reload.as_ref().map(|(message, error)| json!({"message": message, "error": error})),
             "notes": mode.notes,
             "message": mode.message,
@@ -1081,7 +1084,9 @@ impl Host {
         if self.app.is_none() {
             return Err(app_only());
         }
-        let result = if play {
+        let result = if play && !self.powered() {
+            Err(powered_off())
+        } else if play {
             self.play_app()
         } else {
             if self.run.is_some() {
@@ -1092,6 +1097,54 @@ impl Host {
         };
         self.noted(result)?;
         Ok(json!({"type": "transport", "playing": self.run.is_some()}))
+    }
+
+    /// `app.power` (app mode): off stops the run (the project, its panel and
+    /// its unsaved values stay, as with Stop) and lets go of every
+    /// subscription, so nothing runs and nothing streams; on plays again if
+    /// it played when switched off.
+    fn power(&mut self, message: &Value) -> Result<Value, Failure> {
+        let on = message
+            .get("on")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| fail("bad-message", "app.power needs `on`: true or false"))?;
+        let playing = self.run.is_some();
+        let Some(mode) = self.app.as_mut() else {
+            return Err(app_only());
+        };
+        let result = if on {
+            if mode.power.on() {
+                self.play_app()
+            } else {
+                Ok(())
+            }
+        } else {
+            mode.power.off(playing);
+            // The device is released, the workers joined (the Runner is
+            // dropped here) and the file watch ends with the run.
+            self.stop_app();
+            let subs: Vec<u32> = self.subs.keys().copied().collect();
+            for sub in subs {
+                self.drop_sub(sub);
+            }
+            Ok(())
+        };
+        self.noted(result)?;
+        Ok(json!({"type": "power", "on": self.powered(), "playing": self.run.is_some()}))
+    }
+
+    /// Whether the app is switched on (always outside app mode).
+    pub fn powered(&self) -> bool {
+        self.app.as_ref().is_none_or(|m| m.power.is_on())
+    }
+
+    /// Waits up to `timeout` for a client's message and handles it: the
+    /// control thread's loop while the app is switched off, which then has
+    /// nothing to poll.
+    pub fn wait(&mut self, timeout: Duration) {
+        if let Ok(message) = self.server.inbound.recv_timeout(timeout) {
+            self.inbound(message);
+        }
     }
 
     /// `project.open` (app mode): stops, opens the folder at `path` (made
@@ -1109,6 +1162,8 @@ impl Host {
         let dir = std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path));
         if let Some(mode) = self.app.as_mut() {
             mode.message = None;
+            // Opened stopped: switching on again plays nothing.
+            mode.power.forget();
         }
         // Another project: the unsaved values of this one are let go, and
         // the window says so.
@@ -1703,7 +1758,7 @@ impl Host {
                         dropped: 0,
                     },
                 );
-                let welcome = json!({
+                let mut welcome = json!({
                     "type": "welcome",
                     "protocol": PROTOCOL,
                     "client": client,
@@ -1712,6 +1767,11 @@ impl Host {
                     "frame": self.run.as_ref().map(|r| r.controller.status().next_frame.0),
                     "planVersion": self.run.as_ref().map(|r| r.version),
                 });
+                // Before the client can subscribe: one that connects while
+                // the app is off streams nothing (M2.8-11).
+                if let Some(mode) = &self.app {
+                    welcome = with(welcome, "power", power_json(mode.power));
+                }
                 self.send_text(client, &welcome);
             }
             Inbound::Text { client, text } => self.handle(client, &text),
@@ -1746,6 +1806,7 @@ impl Host {
                 Some(_) => Ok(Some(self.app_json())),
                 None => Err(app_only()),
             },
+            "app.power" => self.power(&message).map(Some),
             "transport.play" => self.transport(true).map(Some),
             "transport.stop" => self.transport(false).map(Some),
             "project.open" => self.project_open(&message).map(Some),
@@ -1768,7 +1829,10 @@ impl Host {
                 let restarted =
                     kind == "setup.apply" && reply.get("restarted") == Some(&json!(true));
                 // The plan or what plays changed: every client is told.
-                let changed = matches!(kind, "transport.play" | "transport.stop" | "project.open");
+                let changed = matches!(
+                    kind,
+                    "transport.play" | "transport.stop" | "project.open" | "app.power"
+                );
                 let reply = with(reply, "id", id);
                 self.send_text(client, &reply);
                 if restarted || changed {
@@ -1930,6 +1994,9 @@ impl Host {
     }
 
     fn subscribe(&mut self, client: u64, message: &Value) -> Result<Value, Failure> {
+        if !self.powered() {
+            return Err(powered_off());
+        }
         let stream = message.get("stream").and_then(Value::as_str).unwrap_or("");
         let id = self.next_sub;
         let (stream, every, extra) = match stream {
@@ -3241,6 +3308,16 @@ fn app_only() -> Failure {
         "not-allowed",
         "only Signal.app's server opens projects and plays or stops them",
     )
+}
+
+/// The refusal of what needs the app switched on.
+fn powered_off() -> Failure {
+    fail("powered-off", "Signal is switched off")
+}
+
+/// The power switch as `welcome`, `app` and `power` carry it.
+fn power_json(power: app::Power) -> Value {
+    json!(if power.is_on() { "on" } else { "off" })
 }
 
 /// The output device's name, for `setup.get`'s run.
