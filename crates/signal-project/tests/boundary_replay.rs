@@ -375,8 +375,9 @@ fn every_due_block_is_recorded_and_replays_on_any_thread_count() {
 }
 
 /// The device conversion reaches the artifact: a live run that clipped
-/// replays to the same `audio.wav` samples and audio hash, and the manifest
-/// says so; non-finite samples are 0 as the device gets them.
+/// replays to the same `audio.wav` samples, audio hash and clipped count,
+/// and the manifest says so, with or without the recorded `conversion`;
+/// non-finite samples are 0 as the device gets them.
 #[test]
 fn clipped_live_output_replays_exactly() {
     let registry = registry();
@@ -387,6 +388,7 @@ fn clipped_live_output_replays_exactly() {
     let session = Session::load(&dir, &registry).unwrap();
     let replayed = replay(&session, &registry, None, 1).unwrap();
     assert!(replayed.render.samples.iter().any(|x| x.abs() > 1.0));
+    assert_eq!(replayed.render.clipped(), clipped);
 
     let out = dir.join("artifacts");
     let manifest = replayed.render.write(&out, Default::default()).unwrap();
@@ -397,6 +399,16 @@ fn clipped_live_output_replays_exactly() {
     let json = serde_json::to_value(&manifest).unwrap();
     assert_eq!(json["device_conversion"], true);
     assert!(json.get("ideal").is_none(), "{json}");
+
+    // Recorded before `conversion`: the exact replay converts as before.
+    let path = dir.join("session.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(&path, text.replace("conversion = \"device\"\n", "")).unwrap();
+    let session = Session::load(&dir, &registry).unwrap();
+    assert_eq!(session.conversion, None);
+    let before = replay(&session, &registry, None, 1).unwrap();
+    assert_eq!(stored(&before), played);
+    assert_eq!(before.render.clipped(), clipped);
 
     assert_eq!(device_sample(f64::NAN), 0.0);
     assert_eq!(device_sample(f64::INFINITY), 0.0);
@@ -820,8 +832,8 @@ fn sessions_before_hashes_replay_unverified() {
 /// replays: as an ideal render, which it says. A project without latent
 /// modules writes and replays as before: no boundary files and no
 /// `[boundaries]` (its session records `[machine]`, as every session does
-/// since M2.7-8), and its manifest has neither `ideal` nor
-/// `device_conversion`.
+/// since M2.7-8, and `conversion`), and its manifest has no `ideal`; it
+/// says `device_conversion` only because the session records it.
 #[test]
 fn old_sessions_still_replay() {
     let registry = registry();
@@ -850,6 +862,19 @@ fn old_sessions_still_replay() {
     assert_eq!(replayed.boundaries, BoundaryReplay::NotLatent);
     let plain: Vec<f32> = replayed.render.samples.iter().map(|&x| x as f32).collect();
     assert_eq!(plain, played);
+    assert_eq!(stored(&replayed), played);
+    let json = serde_json::to_value(replayed.render.manifest(Default::default())).unwrap();
+    assert!(json.get("ideal").is_none(), "{json}");
+    assert_eq!(json["device_conversion"], true);
+
+    fs::write(
+        dir.join("session.toml"),
+        text.replace("conversion = \"device\"\n", ""),
+    )
+    .unwrap();
+    let session = Session::load(&dir, &registry).unwrap();
+    assert_eq!(session.conversion, None);
+    let replayed = replay(&session, &registry, None, 1).unwrap();
     let json = serde_json::to_value(replayed.render.manifest(Default::default())).unwrap();
     assert!(json.get("ideal").is_none() && json.get("device_conversion").is_none());
 }

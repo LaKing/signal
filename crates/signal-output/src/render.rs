@@ -14,7 +14,7 @@ use signal_engine::{
 
 use signal_graph::ExecutionPlan;
 
-use crate::audio::{AudioSink, Conversion, RenderError};
+use crate::audio::{AudioSink, Conversion, RenderError, to_device};
 use crate::vectors::{VectorTap, VectorTaps, VectorTrack};
 
 /// The result of [`render`]: the audio and the log, in memory.
@@ -226,6 +226,20 @@ impl Render {
             hasher.update(&self.conversion.sample(sample).to_le_bytes());
         }
         hasher.finish()
+    }
+
+    /// The samples its [`conversion`](Render::conversion) clipped, counted as
+    /// the real-time runner counts them ([`Runner::clipped`](crate::Runner::clipped)):
+    /// under [`Conversion::Device`], every clamped or non-finite sample; none
+    /// under [`Conversion::Plain`].
+    pub fn clipped(&self) -> u64 {
+        let mut clipped = 0;
+        if self.conversion == Conversion::Device {
+            for &sample in &self.samples {
+                to_device(sample, &mut clipped);
+            }
+        }
+        clipped
     }
 
     /// The manifest of this render: `provenance` plus what the engine knows.

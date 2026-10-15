@@ -453,6 +453,7 @@ struct SessionOut<'a> {
     seed: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     frames: Option<u64>,
+    conversion: &'static str,
     provenance: &'a Provenance,
     machine: &'a Machine,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -475,6 +476,8 @@ struct SessionIn {
     seed: u64,
     #[serde(default)]
     frames: Option<u64>,
+    #[serde(default)]
+    conversion: Option<toml::Spanned<String>>,
     provenance: Provenance,
     #[serde(default)]
     machine: Option<Machine>,
@@ -1201,6 +1204,8 @@ impl SessionRecorder {
             sample_rate: self.sample_rate,
             seed: self.seed,
             frames: self.end,
+            // The real-time runner's conversion: what the device received.
+            conversion: Conversion::Device.name(),
             provenance: &self.provenance,
             machine: &self.machine,
             boundaries: boundaries.map(|b| BoundariesToml {
@@ -1563,6 +1568,10 @@ pub struct Session {
     /// The frames the recorded run played (`session.toml`'s `frames`), if it
     /// recorded its end.
     pub frames: Option<u64>,
+    /// How the run's audio reached the device (`session.toml`'s
+    /// `conversion`), which replay applies; `None` for a session written
+    /// before it was recorded, which replays as before.
+    pub conversion: Option<Conversion>,
     /// The build that recorded it.
     pub provenance: Provenance,
     /// The machine that recorded it (M2.7-8); `None` for a session written
@@ -1628,6 +1637,21 @@ impl Session {
         if file.versions.is_empty() {
             diagnostics.push(at(0, "the session lists no versions".to_owned()));
         }
+        let conversion = file.conversion.as_ref().map(|name| {
+            let found = Conversion::from_name(name.get_ref());
+            if found.is_none() {
+                diagnostics.push(at(
+                    name.span().start,
+                    format!(
+                        "unknown conversion \"{}\"; it is \"{}\" or \"{}\"",
+                        name.get_ref(),
+                        Conversion::Device.name(),
+                        Conversion::Plain.name()
+                    ),
+                ));
+            }
+            found
+        });
         if !diagnostics.is_empty() {
             return Err(LoadError::Invalid(diagnostics));
         }
@@ -1782,6 +1806,7 @@ impl Session {
             sample_rate: *file.sample_rate.get_ref(),
             seed: file.seed,
             frames: file.frames,
+            conversion: conversion.flatten(),
             provenance: file.provenance,
             machine: file.machine,
             versions,
@@ -2294,6 +2319,11 @@ pub fn replay(
 /// [`trust_provenance`](ReplayOptions::trust_provenance). With `ideal`, or
 /// without records, it is an **ideal render**: every result is awaited, and
 /// the manifest says `ideal`.
+///
+/// Unless ideal, the audio is stored by the session's recorded
+/// [`conversion`](Session::conversion), as the device received it, with its
+/// clipped samples ([`Render::clipped`]); a session that records none is
+/// stored as the device received it only in an exact replay.
 pub fn replay_with(
     session: &Session,
     registry: &Registry,
@@ -2508,8 +2538,13 @@ pub fn replay_with(
             results: engine.boundary_unreproduced(),
         });
     }
-    if mode == BoundaryReplay::Exact {
-        rendered.conversion = Conversion::Device;
+    // The recorded conversion reproduces what the device received; a
+    // session written before it records none and replays as before. An
+    // ideal render is not what was played.
+    match session.conversion {
+        Some(conversion) if !mode.ideal() => rendered.conversion = conversion,
+        None if mode == BoundaryReplay::Exact => rendered.conversion = Conversion::Device,
+        _ => {}
     }
     rendered.ideal = mode.ideal();
     rendered.trust_provenance = trusted;

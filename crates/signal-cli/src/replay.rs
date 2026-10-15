@@ -135,6 +135,7 @@ pub(crate) fn run(
             "ideal": replayed.boundaries.ideal(),
             "unverified": replayed.unverified,
             "trust_provenance": replayed.trusted_provenance,
+            "clipped": rendered.clipped(),
             "boundaries": match replayed.boundaries {
                 BoundaryReplay::NotLatent => "not-latent",
                 BoundaryReplay::Exact => "exact",

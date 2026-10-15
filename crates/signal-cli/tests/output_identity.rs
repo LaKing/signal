@@ -4,7 +4,8 @@
 //! shapes aside, and are pinned here: offline renders (plain f32), a render
 //! whose sink `gain` ramps into clipping, the null driver with 2 and 3 device
 //! channels (samples, clipped count, meters), and the exact replay of a
-//! recorded run that clipped (the device conversion).
+//! recorded run that clipped: as the device played it when its session
+//! records the device conversion, and unchanged for a session without it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -177,8 +178,11 @@ fn the_null_driver_plays_unchanged() {
     );
 }
 
-/// A recorded run that clipped, and its replay (without latent modules, a
-/// plain render: `docs/semantics.md` §15).
+/// A recorded run that clipped, and its replay (without latent modules).
+/// The session records the device conversion, and its replay is what the
+/// device played, clipped count included. With the `conversion` key removed,
+/// as in a session recorded before it, the replay is a plain render whose
+/// hash is the one pinned on the base revision: unchanged.
 #[test]
 fn an_exact_replay_is_unchanged() {
     let registry = registry();
@@ -202,16 +206,43 @@ fn an_exact_replay_is_unchanged() {
     let runner = driver.stop().unwrap().unwrap();
     controller.poll(&mut live);
     live.finish(runner.next_frame()).unwrap();
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join("output_identity")
-        .join("replay");
-    let _ = fs::remove_dir_all(&dir);
-    live.into_recorder().write(&dir).unwrap();
-    let session = Session::load(&dir, &registry).unwrap();
-    let replayed = replay(&session, &registry, None, 1).unwrap();
+    let recorder = live.into_recorder();
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("output_identity");
+    let dir = root.join("replay");
+    let legacy = root.join("replay-before-conversion");
+    for dir in [&dir, &legacy] {
+        let _ = fs::remove_dir_all(dir);
+        recorder.write(dir).unwrap();
+    }
     assert_eq!(f32_hash(driver.output()), "ad66631bac81097d");
+    assert!(runner.clipped() > 0);
+
+    let session = Session::load(&dir, &registry).unwrap();
+    assert_eq!(session.conversion, Some(Conversion::Device));
+    let replayed = replay(&session, &registry, None, 1).unwrap();
+    assert_eq!(replayed.render.conversion, Conversion::Device);
+    assert_eq!(
+        format!("{:016x}", replayed.render.audio_fnv1a64()),
+        "ad66631bac81097d"
+    );
+    assert_eq!(replayed.render.clipped(), runner.clipped());
+    let manifest = replayed.render.manifest(Provenance::default());
+    assert!(manifest.device_conversion);
+
+    let path = legacy.join("session.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let line = "conversion = \"device\"\n";
+    assert!(text.contains(line), "{text}");
+    fs::write(&path, text.replace(line, "")).unwrap();
+    let session = Session::load(&legacy, &registry).unwrap();
+    assert_eq!(session.conversion, None);
+    let replayed = replay(&session, &registry, None, 1).unwrap();
+    assert_eq!(replayed.render.conversion, Conversion::Plain);
     assert_eq!(
         format!("{:016x}", replayed.render.audio_fnv1a64()),
         "318d8f3e3265e295"
     );
+    assert_eq!(replayed.render.clipped(), 0);
+    let manifest = replayed.render.manifest(Provenance::default());
+    assert!(!manifest.device_conversion);
 }

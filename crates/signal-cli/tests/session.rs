@@ -315,6 +315,7 @@ fn live_session_replays_bit_identically() {
         "format_version = 1",
         "sample_rate = 8000",
         "seed = 3",
+        "conversion = \"device\"",
         "[provenance]",
         "signal_revision = \"session-test\"",
         "[[versions]]",
@@ -788,6 +789,12 @@ fn malformed_sessions_fail_with_located_errors() {
         })
     });
     assert_fails(result, "session.toml:1:18:", "unsupported format_version 2");
+    let result = broken(&dir, "conversion", |d| {
+        rewrite(d, "session.toml", |t| {
+            t.replace("conversion = \"device\"", "conversion = \"loud\"")
+        })
+    });
+    assert_fails(result, "session.toml:", "unknown conversion \"loud\"");
     let result = broken(&dir, "json", |d| edits(d, 2, r#"{"frame":200,"seq":2,"#));
     assert_fails(result, "edits.jsonl:2:", "EOF");
     let result = broken(&dir, "kind", |d| {
@@ -1042,9 +1049,9 @@ fn a_recorded_end_is_the_default_replay_length() {
 }
 
 /// M2.7-4 (C5, AC2): `signal replay --ideal` labels its manifest `ideal`;
-/// a plain replay of a session without latent modules is unchanged (no
-/// `ideal`, no `device_conversion`), and for such a session the two render
-/// the same audio and log.
+/// a plain replay of a session without latent modules has no `ideal` and,
+/// as the session records the device conversion, says `device_conversion`;
+/// nothing clipped, so the two render the same audio and log.
 #[test]
 fn ideal_replay_is_labelled_and_changes_nothing_without_latent_modules() {
     let (_, dir) = recorded("ideal/session");
@@ -1052,10 +1059,8 @@ fn ideal_replay_is_labelled_and_changes_nothing_without_latent_modules() {
     assert_eq!(exact["ideal"], false);
     assert_eq!(exact["boundaries"], "not-latent");
     assert!(exact["manifest"].get("ideal").is_none(), "{exact}");
-    assert!(
-        exact["manifest"].get("device_conversion").is_none(),
-        "{exact}"
-    );
+    assert_eq!(exact["manifest"]["device_conversion"], true, "{exact}");
+    assert_eq!(exact["clipped"], 0);
     let ideal = replayed(&dir, &["--ideal"]);
     assert_eq!(ideal["ideal"], true);
     assert_eq!(ideal["boundaries"], "ideal");

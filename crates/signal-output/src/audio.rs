@@ -54,8 +54,9 @@ pub enum Conversion {
     #[default]
     Plain,
     /// As the real-time runner hands samples to the device
-    /// ([`device_sample`]): the exact replay of a session that recorded its
-    /// boundary outcomes, so that it equals the live recording bit for bit.
+    /// ([`device_sample`]): the replay of a session that records this
+    /// conversion, or (recorded before it) its boundary outcomes, so that it
+    /// equals the live recording bit for bit.
     Device,
 }
 
@@ -66,6 +67,21 @@ impl Conversion {
             Conversion::Plain => sample as f32,
             Conversion::Device => device_sample(sample),
         }
+    }
+
+    /// Its name in a session's `conversion` (`docs/session-format.md` §2).
+    pub fn name(self) -> &'static str {
+        match self {
+            Conversion::Plain => "plain",
+            Conversion::Device => "device",
+        }
+    }
+
+    /// The conversion named `name`, if any.
+    pub fn from_name(name: &str) -> Option<Conversion> {
+        [Conversion::Plain, Conversion::Device]
+            .into_iter()
+            .find(|c| c.name() == name)
     }
 }
 
