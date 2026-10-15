@@ -260,15 +260,19 @@ fn hand_dropped(webview: &wry::WebView, path: &std::path::Path) {
     }
 }
 
-/// The system's folder chooser (NSOpenPanel, modal, folders only), on the
-/// main thread; the chosen folder, or None when cancelled.
+/// The system's chooser for a project (NSOpenPanel, modal): a folder, or a
+/// project's `project.toml` (which opens its folder), on the main thread;
+/// the choice, or None when cancelled.
 fn choose_folder() -> Option<PathBuf> {
     let mtm = MainThreadMarker::new()?;
     let panel = NSOpenPanel::openPanel(mtm);
     panel.setCanChooseDirectories(true);
-    panel.setCanChooseFiles(false);
+    panel.setCanChooseFiles(true);
     panel.setAllowsMultipleSelection(false);
     panel.setPrompt(Some(&NSString::from_str("Open")));
+    panel.setMessage(Some(&NSString::from_str(
+        "Choose a project folder, or its project.toml",
+    )));
     if panel.runModal() != NSModalResponseOK {
         return None;
     }

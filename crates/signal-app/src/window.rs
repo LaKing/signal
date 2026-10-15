@@ -148,14 +148,17 @@ pub fn origin_of(url: &str) -> &str {
     }
 }
 
-/// What dropping `path` on the window does: a folder is opened as the
-/// project; anything else is refused with the message the window shows, and
-/// opens nothing (so it never becomes the Setup's last project).
+/// What dropping (or choosing) `path` does: a folder is opened as the
+/// project, and a project's `project.toml` opens its folder; anything else
+/// is refused with the message the window shows, and opens nothing (so it
+/// never becomes the Setup's last project).
 pub fn dropped(path: &Path) -> Result<&Path, &'static str> {
     if path.is_dir() {
         Ok(path)
+    } else if path.file_name().is_some_and(|name| name == "project.toml") && path.is_file() {
+        path.parent().ok_or("open a project folder")
     } else {
-        Err("drop a project folder")
+        Err("open a project folder (or its project.toml)")
     }
 }
 
@@ -267,8 +270,11 @@ mod tests {
         assert_eq!(dropped(dir), Ok(dir));
         assert_eq!(
             dropped(&dir.join("Cargo.toml")),
-            Err("drop a project folder")
+            Err("open a project folder (or its project.toml)")
         );
+        let kick = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../projects/kick"));
+        assert_eq!(dropped(&kick.join("project.toml")), Ok(kick), "its folder");
+        assert!(dropped(&dir.join("project.toml")).is_err(), "no such file");
     }
 
     #[test]
