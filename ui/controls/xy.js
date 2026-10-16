@@ -1,10 +1,11 @@
 // <signal-xy>: a 2D pad bound to two parameters, with optional spring-back
 // to the centre (docs/ui-controls.md). `bind="/x.address /y.address"`.
+// Its readout is two boxes, x and y, each taking a typed value.
 
 import { formatValue } from '../lib/format.js';
 import { FINE, PAGE_STEP, keyAction } from '../lib/gesture.js';
 import { clamp } from '../lib/taper.js';
-import { Binding, SignalElement, bindAddresses, quietly, unsavedMark, unsavedStream } from './base.js';
+import { Binding, SignalElement, bindAddresses, bindingEntry, quietly, unsavedMark, unsavedStream } from './base.js';
 
 const SIZE = 160;
 const INSET = 8;
@@ -24,7 +25,10 @@ export class SignalXY extends SignalElement {
 .puck { fill: var(--signal-accent, #4fc3f7); stroke: var(--signal-thumb, #e8ecf2); stroke-width: 2; }
 .effective { stroke: none; }
 .axes { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-.readout { width: var(--signal-xy-size, 160px); }
+.readout { width: var(--signal-xy-size, 160px); display: flex; }
+.readout-x, .readout-y { position: relative; flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.readout-x { text-align: right; }
+.readout-y { text-align: left; }
 `;
 
   constructor() {
@@ -50,6 +54,11 @@ export class SignalXY extends SignalElement {
     this.bindings();
     super.connectedCallback();
     if (!this.redrawUnsaved) this.redrawUnsaved = unsavedMark(this, () => [this.x, this.y]);
+    if (!this.entries) {
+      const y = bindingEntry(this, this.$('.readout-y'), () => this.y);
+      const x = bindingEntry(this, this.$('.readout-x'), () => this.x, { next: () => y.open() });
+      this.entries = [x, y];
+    }
     this.redrawUnsaved();
   }
 
@@ -71,7 +80,7 @@ export class SignalXY extends SignalElement {
   </svg></div>
   <div class="skin" hidden></div>
   <div class="label"></div>
-  <div class="readout"></div>
+  <div class="readout"><span class="readout-x"></span><span class="sep"> · </span><span class="readout-y"></span></div>
   <div class="axes"><div class="axis-x" role="slider" tabindex="-1" aria-label="X"></div><div class="axis-y" role="slider" tabindex="-1" aria-label="Y" aria-orientation="vertical"></div></div>
 </div>`;
   }
@@ -88,7 +97,8 @@ export class SignalXY extends SignalElement {
 
   setup() {
     this.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0) return;
+      // A press on the readout is for typing, not on the pad.
+      if (event.button !== 0 || event.composedPath?.().includes(this.$('.readout'))) return;
       this.capture(event);
       this.dragging = true;
       this.lastPointer = this.pointerPositions(event);
@@ -116,7 +126,9 @@ export class SignalXY extends SignalElement {
     this.addEventListener('pointerup', end);
     this.addEventListener('pointercancel', end);
     this.addEventListener('lostpointercapture', end);
-    this.addEventListener('dblclick', () => {
+    this.addEventListener('dblclick', (event) => {
+      // On x's or y's readout (a captured pointer's double-click is the pad's): type that value.
+      if (this.entries?.some((entry) => entry.at(event) && entry.open())) return;
       this.x.reset();
       this.y.reset();
       this.update();
@@ -179,6 +191,8 @@ export class SignalXY extends SignalElement {
     } else if (key === 'Delete' || key === 'Backspace') {
       this.x.reset();
       this.y.reset();
+    } else if (key === 'Enter') {
+      return this.entries?.[0].open() ?? false;
     } else if (key === 'Escape' && this.hasAttribute('spring')) {
       this.springBack();
     } else {
@@ -198,7 +212,7 @@ export class SignalXY extends SignalElement {
     const { x, y } = this;
     const label = this.getAttribute('label') ?? '';
     if (!this.hasAttribute('aria-label')) this.setAttribute('aria-label', label || `${x.address ?? 'x'} and ${y.address ?? 'y'}`);
-    this.setAttribute('aria-keyshortcuts', 'ArrowLeft ArrowRight ArrowUp ArrowDown PageUp PageDown Home End Delete');
+    this.setAttribute('aria-keyshortcuts', 'ArrowLeft ArrowRight ArrowUp ArrowDown PageUp PageDown Home End Delete Enter');
     for (const [binding, element] of [[x, this.$('.axis-x')], [y, this.$('.axis-y')]]) {
       const { min, max } = binding.range;
       element.setAttribute('aria-valuemin', String(min));
@@ -207,7 +221,9 @@ export class SignalXY extends SignalElement {
       element.setAttribute('aria-valuetext', binding.ariaText());
     }
     this.$('.label').textContent = label;
-    this.$('.readout').textContent = `${formatValue(x.value, x.range.unit)} · ${formatValue(y.value, y.range.unit)}`;
+    const [xEntry, yEntry] = this.entries ?? [];
+    if (!xEntry?.isOpen) this.$('.readout-x').textContent = formatValue(x.value, x.range.unit);
+    if (!yEntry?.isOpen) this.$('.readout-y').textContent = formatValue(y.value, y.range.unit);
     if (this.showSkin({ position: x.position, x: x.position, y: y.position })) return;
     const px = INSET + x.position * SPAN;
     const py = INSET + (1 - y.position) * SPAN;

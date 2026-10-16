@@ -73,6 +73,11 @@ signal-app-messages { display: block; }
 .col-mark { width: 10rem; }
 .parameters input[type="range"] { width: 13rem; margin: 0; }
 .parameters .value { font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; white-space: pre; }
+/* A typed value's field covers exactly the base's cell, out of the flow (controls/entry-field.js). */
+.parameters td.value { position: relative; }
+.parameters .entry { position: absolute; inset: 0; box-sizing: border-box; width: 100%; height: 100%; margin: 0; padding: 0 2px; border: 1px solid var(--signal-focus); border-radius: 3px; outline: none; background: var(--signal-panel); color: var(--signal-fg); font: inherit; text-align: inherit; }
+.parameters .entry[aria-invalid="true"] { border-color: var(--signal-clip); }
+.parameters .entry[readonly] { border-color: var(--signal-effective); }
 .parameters .effective { color: var(--signal-effective); }
 .parameters button { padding: 0 0.5rem; }
 .read-only { color: var(--signal-muted); }

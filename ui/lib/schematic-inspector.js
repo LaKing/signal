@@ -36,7 +36,8 @@ function planBase(description, address) {
  * from, to}`), from `graph` and `description`: `{kind, title, subtitle,
  * fields: [[label, text]], parameters: [row]}`. A row is `{name, address
  * (what set/ramp/commit take), stream (what the parameters stream takes),
- * unit, min, max, default, editable, fallback}`.
+ * unit, min, max, default, taper and kind (a control's, for a typed value),
+ * editable, fallback}`.
  */
 export function card(selection, { graph, description } = {}) {
   if (!selection || selection.kind === 'background') return null;
@@ -85,6 +86,8 @@ export function card(selection, { graph, description } = {}) {
       min: p.min,
       max: p.max,
       default: p.default,
+      taper: p.taper,
+      kind: p.kind,
       editable: true,
       control: true,
       fallback: p.base,

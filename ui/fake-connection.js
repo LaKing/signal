@@ -25,7 +25,7 @@ export function fakeDescription() {
     instances: [
       { address: '/osc', module: 'demo.osc', sink: null, parameters: [], ports: [{ name: 'out', address: '/osc.out', direction: 'out', shape: 'signal', rate: 1, kind: 'audio', unit: null, range: null }] },
       { address: '/lfo', module: 'demo.osc', sink: null, parameters: [], ports: [{ name: 'out', address: '/lfo.out', direction: 'out', shape: 'signal', rate: 1, kind: 'audio', unit: null, range: null }] },
-      { address: '/synth', module: 'demo.voice', sink: null, parameters: [], ports: [{ name: 'trigger', address: '/synth.trigger', direction: 'in', shape: 'event', rate: 1, kind: 'trigger', unit: null, range: null }] },
+      { address: '/synth', module: 'demo.voice', sink: null, parameters: [{ name: 'level', address: '/synth.level', kind: 'gain', rate: 1, unit: null, range: { min: 0, max: 4 }, default: 1, combine: 'multiply', base: 1 }], ports: [{ name: 'trigger', address: '/synth.trigger', direction: 'in', shape: 'event', rate: 1, kind: 'trigger', unit: null, range: null }] },
       ...Object.entries(VECTORS).map(([address, { rows }]) => {
         const [instance, name] = address.slice(1).split('.');
         return { address: `/${instance}`, module: 'demo.visual', sink: null, parameters: [], ports: [{ name, address, direction: 'out', shape: { vector: rows }, rate: VISUAL, kind: 'control', unit: null, range: null }] };

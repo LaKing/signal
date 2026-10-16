@@ -13,6 +13,7 @@
 import { getDefaultConnection, onDefaultConnection } from '../signal-ui.js';
 import '../controls/meter.js';
 import '../controls/schematic.js';
+import { ValueEntry } from '../controls/entry-field.js';
 import { formatFixed } from '../lib/format.js';
 import { applyProps } from './lib/dom.js';
 import { pageHandlesShortcuts, panelReloads, panelSource, shortcut } from './lib/menu.js';
@@ -466,7 +467,9 @@ export class SignalAppMessages extends AppElement {
 /**
  * The parameter list (the M2.5-2 panel), a card per top-level instance: a
  * slider per parameter (a drag ramps live, the release writes once into
- * project.toml), Reset to default, the base, `not in file`, the effective
+ * project.toml), Reset to default, the base (a double-click on it, or Enter
+ * on the slider, types a value: docs/ui-controls.md "Value entry"; a clamp's
+ * reason shows where `not in file` does), `not in file`, the effective
  * value while playing, the unsaved mark; a composite's own parameters
  * read-only. Columns have fixed widths; a `describe` with the same
  * structure updates the values in place.
@@ -554,12 +557,14 @@ export class SignalAppParameters extends AppElement {
       const cells = this.cells.get(p.address);
       if (!cells) continue;
       if (cells.slider && cells.slider !== this.dragging) {
+        cells.value = p.base;
         cells.slider.value = String(p.base);
-        cells.base.textContent = formatFixed(p.base, p.unit);
+        if (!cells.entry.isOpen) cells.base.textContent = formatFixed(p.base, p.unit);
       } else if (!cells.slider) {
         cells.base.textContent = formatFixed(p.base, p.unit);
       }
-      cells.note.textContent = fileNote(p);
+      cells.file = fileNote(p);
+      if (!cells.notice) cells.note.textContent = cells.file;
     }
   }
 
@@ -573,9 +578,19 @@ export class SignalAppParameters extends AppElement {
       this.cells.set(p.address, { base, note, unit: p.unit });
       return el('tr', { className: 'read-only' }, name, el('td', {}, slider), base, note, effective, el('td', { className: 'muted', textContent: 'read-only' }), el('td'));
     }
+    const reset = el('button', { type: 'button', textContent: 'Reset', title: `Reset to default (${shown(p.default, p.unit)})` });
+    reset.addEventListener('click', () => this.request(resetMessage(p.address)).catch(failed));
+    const retry = el('button', { type: 'button', textContent: 'Retry' });
+    retry.addEventListener('click', () => this.request(retryMessage(p.address)).catch(failed));
+    const revert = el('button', { type: 'button', textContent: 'Revert' });
+    revert.addEventListener('click', () => this.request(revertMessage(p.address)).catch(failed));
+    const mark = el('td', { className: 'unsaved', role: 'alert' }, el('span', { textContent: '⚠ ' }), retry, revert);
+    mark.style.visibility = 'hidden';
+    const cells = { slider, base, note, effective, mark, unit: p.unit, value: p.base, file: fileNote(p), notice: null };
     slider.addEventListener('input', () => {
       this.dragging = slider;
-      base.textContent = formatFixed(Number(slider.value), p.unit);
+      cells.value = Number(slider.value);
+      if (!cells.entry.isOpen) base.textContent = formatFixed(cells.value, p.unit);
       this.request(dragMessage(p.address, Number(slider.value))).catch(() => {});
     });
     const released = () => {
@@ -589,15 +604,29 @@ export class SignalAppParameters extends AppElement {
     });
     slider.addEventListener('pointerup', released);
     slider.addEventListener('pointercancel', released);
-    const reset = el('button', { type: 'button', textContent: 'Reset', title: `Reset to default (${shown(p.default, p.unit)})` });
-    reset.addEventListener('click', () => this.request(resetMessage(p.address)).catch(failed));
-    const retry = el('button', { type: 'button', textContent: 'Retry' });
-    retry.addEventListener('click', () => this.request(retryMessage(p.address)).catch(failed));
-    const revert = el('button', { type: 'button', textContent: 'Revert' });
-    revert.addEventListener('click', () => this.request(revertMessage(p.address)).catch(failed));
-    const mark = el('td', { className: 'unsaved', role: 'alert' }, el('span', { textContent: '⚠ ' }), retry, revert);
-    mark.style.visibility = 'hidden';
-    this.cells.set(p.address, { slider, base, note, effective, mark, unit: p.unit });
+    cells.entry = new ValueEntry(base, {
+      spec: () => ({ unit: p.unit, range: { min: p.min, max: p.max }, taper: p.taper, kind: p.kind }),
+      value: () => cells.value,
+      apply: (value) => {
+        cells.value = value;
+        slider.value = String(value);
+        this.request(dragMessage(p.address, value)).catch(() => {});
+        this.request(releaseMessage(p.address, value)).catch(failed);
+      },
+      note: (text) => {
+        cells.notice = text;
+        note.textContent = text ?? cells.file;
+        note.title = text ?? '';
+      },
+      closed: () => {
+        base.textContent = formatFixed(cells.value, p.unit);
+      },
+      focus: () => slider.focus({ preventScroll: true }),
+    });
+    slider.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && cells.entry.open()) event.preventDefault();
+    });
+    this.cells.set(p.address, cells);
     const tr = el('tr', {}, name, el('td', {}, slider), base, note, effective, el('td', {}, reset), mark);
     // The context menu's Reset and Copy address.
     tr.dataset.address = p.address;

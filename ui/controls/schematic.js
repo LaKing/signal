@@ -12,6 +12,7 @@
 // switched off, and nothing runs between events: no animation loop.
 
 import { onDefaultConnection } from '../signal-ui.js';
+import { ENTRY_CSS, ValueEntry } from './entry-field.js';
 import { formatFixed } from '../lib/format.js';
 import { layout } from '../lib/schematic-layout.js';
 import { breadcrumbs, levelRect, nodeRect, scene } from '../lib/schematic-scene.js';
@@ -67,11 +68,11 @@ button { font: inherit; color: inherit; background: var(--signal-knob, #262b34);
 .card dt { color: var(--signal-muted, #8a93a3); }
 .card dd { margin: 0; overflow-wrap: anywhere; }
 .row { display: grid; grid-template-columns: 1fr auto auto 1ch; gap: 2px 6px; align-items: center; margin-top: 4px; }
-.row .readout { font-variant-numeric: tabular-nums; white-space: pre; color: var(--signal-muted, #8a93a3); }
+.row .readout { position: relative; font-variant-numeric: tabular-nums; white-space: pre; color: var(--signal-muted, #8a93a3); }
 .row input { grid-column: 1 / 4; width: 100%; margin: 0; }
 .row .mark { visibility: hidden; color: var(--signal-effective, #ffb74d); }
 .row .mark.on { visibility: visible; }
-`;
+${ENTRY_CSS}`;
 
 function el(name, attributes = {}, text = null) {
   const node = document.createElementNS(SVG, name);
@@ -575,6 +576,29 @@ export class SignalSchematic extends HTMLElement {
       input.addEventListener('input', () => this.send(dragMessage(row.address, Number(input.value))));
       input.addEventListener('change', () => this.send(releaseMessage(row.address, Number(input.value))));
       input.addEventListener('dblclick', () => this.send(resetMessage(row.address)));
+      // A typed value (docs/ui-controls.md "Value entry"): a double-click on
+      // the base, or Enter on the slider; sent as a release is, the clamp's
+      // reason on the message line.
+      shown.entry = new ValueEntry(base, {
+        spec: () => ({ unit: row.unit, range: { min: row.min, max: row.max }, taper: row.taper, kind: row.kind }),
+        value: () => shown.value,
+        apply: (value) => {
+          shown.value = value;
+          input.value = String(value);
+          this.send(dragMessage(row.address, value));
+          this.send(releaseMessage(row.address, value));
+        },
+        note: (text) => {
+          if (text) this.say(text);
+          else if (this.message.textContent === shown.notice) this.say('');
+          shown.notice = text;
+        },
+        closed: () => this.refreshCard(),
+        focus: () => input.focus({ preventScroll: true }),
+      });
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && shown.entry.open()) event.preventDefault();
+      });
       box.append(input);
       shown.input = input;
     }
@@ -590,7 +614,8 @@ export class SignalSchematic extends HTMLElement {
   refreshCard() {
     for (const shown of this.cardRows) {
       const values = rowValues(shown.row, this.cardValues, this.connection?.unsaved, this.connection?.description);
-      shown.base.textContent = formatFixed(values.base, shown.row.unit);
+      shown.value = values.base;
+      if (!shown.entry?.isOpen) shown.base.textContent = formatFixed(values.base, shown.row.unit);
       shown.effective.textContent = formatFixed(values.effective, shown.row.unit);
       shown.mark.classList.toggle('on', Boolean(values.unsaved));
       if (shown.input && document.activeElement !== shown.input && this.shadowRoot.activeElement !== shown.input && Number.isFinite(values.base)) {

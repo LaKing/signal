@@ -10,7 +10,7 @@ import { toPosition, toValue } from './taper.js';
 import { unsavedOf } from './unsaved.js';
 
 /** Keyboard and wheel edits are committed once this long after the last one. */
-export const COMMIT_DELAY_MS = 400;
+export const COMMIT_DELAY_MS = 500;
 
 /** The ramp a drag sends with each move. */
 export const RAMP_MS = 5;
@@ -146,6 +146,12 @@ export class Binding {
       this.cancel();
       this.commit(value);
     }
+  }
+
+  /** A typed value (docs/ui-controls.md "Value entry"): sent as a drag's release is, a short ramp, then committed. */
+  enter(value) {
+    this.setValue(value, 'ramp');
+    this.setValue(value, 'commit');
   }
 
   /** Commits now what a debounced edit left pending. */

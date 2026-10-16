@@ -67,9 +67,9 @@ export class SignalFader extends SignalValueElement {
     this.updateAria();
     this.$('.label').textContent = this.getAttribute('label') ?? '';
     // The effective value on the readout's second line, kept (empty) when not
-    // modulated: the readout never changes size.
+    // modulated: the readout never changes size. A value field over it keeps it.
     const effectiveText = b.modulated ? `→ ${formatValue(b.effective, b.range.unit)}` : '';
-    this.$('.readout').textContent = `${formatValue(b.value, b.range.unit)}\n${effectiveText}`;
+    if (!this.entry?.isOpen) this.$('.readout').textContent = `${formatValue(b.value, b.range.unit)}\n${effectiveText}`;
     if (this.showSkin({ position, text: formatValue(b.value, b.range.unit) })) return;
     const svg = this.$('.art');
     svg.setAttribute('viewBox', this.horizontal ? `0 0 ${LENGTH} ${THICK}` : `0 0 ${THICK} ${LENGTH}`);

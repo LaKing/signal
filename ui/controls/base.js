@@ -2,13 +2,15 @@
 // `bind` attribute, the `skin` attribute, focus, keys, pointer capture and
 // the theme; and, for the controls that edit a value, the binding to one
 // parameter (live edits, debounced commits, ARIA values, lib/binding.js) and
-// its unsaved mark.
+// its unsaved mark, and the typed value entry of its readout
+// (controls/entry-field.js).
 
 import { onDefaultConnection } from '../signal-ui.js';
 import { Binding } from '../lib/binding.js';
 import { dragDelta, keyAction, wheelDelta } from '../lib/gesture.js';
 import { parseSkin } from '../lib/skin.js';
 import { loadSkin, mountSkin, showSkin } from './skin-dom.js';
+import { ENTRY_CSS, ValueEntry, entryDisabled } from './entry-field.js';
 
 export { Binding, COMMIT_DELAY_MS, RAMP_MS, numberAttribute, quietly } from '../lib/binding.js';
 
@@ -44,6 +46,7 @@ svg { display: block; overflow: visible; }
    whatever its text, so a changing value never moves anything else. */
 .label { overflow: hidden; text-overflow: ellipsis; }
 .readout {
+  position: relative;
   color: var(--signal-fg, #d6dbe4);
   box-sizing: border-box;
   width: var(--signal-readout-width, 11ch);
@@ -86,7 +89,7 @@ svg { display: block; overflow: visible; }
   border-radius: 3px;
   cursor: pointer;
 }
-`;
+${ENTRY_CSS}`;
 
 /** The addresses in a `bind` attribute (space or comma separated). */
 export function bindAddresses(element) {
@@ -96,8 +99,9 @@ export function bindAddresses(element) {
 /**
  * The unsaved mark of a control that edits `bindings()` (docs/ui-controls.md
  * "Unsaved"): the `unsaved` attribute, the error text and Retry and Revert,
- * shown while one of them has a refused write. Returns the function that
- * redraws it.
+ * shown while one of them has a refused write. Otherwise it is the control's
+ * message place for `element.entryNote` (a typed value's clamp, "Value
+ * entry"), without the buttons. Returns the function that redraws it.
  */
 export function unsavedMark(element, bindings) {
   const mark = document.createElement('div');
@@ -118,13 +122,16 @@ export function unsavedMark(element, bindings) {
     });
     return b;
   };
-  mark.append(text, document.createElement('br'), button('Retry', (b) => b.retry()), button('Revert', (b) => b.revert()));
+  const parts = [document.createElement('br'), button('Retry', (b) => b.retry()), button('Revert', (b) => b.revert())];
+  mark.append(text, ...parts);
   element.shadowRoot.append(mark);
   return () => {
     const error = bindings().find((b) => b.unsaved)?.unsaved?.error ?? null;
+    const note = error ? null : (element.entryNote ?? null);
     element.toggleAttribute('unsaved', Boolean(error));
-    mark.hidden = !error;
-    text.textContent = error ? `Unsaved: ${error}` : '';
+    mark.hidden = !error && !note;
+    for (const part of parts) part.hidden = !error;
+    text.textContent = error ? `Unsaved: ${error}` : (note ?? '');
   };
 }
 
@@ -306,16 +313,47 @@ export class SignalElement extends HTMLElement {
 }
 
 /**
+ * The value entry of `readout` for `binding`, on `element`: a typed value is
+ * sent as a drag's release is (a short ramp, then a commit), the clamp
+ * reason shown in the control's message place. Off under `no-entry`, and for
+ * a parameter that is not a control (`commit` would refuse it).
+ */
+export function bindingEntry(element, readout, binding, options = {}) {
+  return new ValueEntry(readout, {
+    spec: () => {
+      const range = binding().range;
+      return { unit: range.unit, range, taper: range.taper, kind: binding().described?.kind ?? null };
+    },
+    value: () => binding().value,
+    apply: (value) => {
+      binding().enter(value);
+      element.update();
+    },
+    note: (text) => {
+      element.entryNote = text;
+      element.redrawUnsaved?.();
+    },
+    closed: () => element.update(),
+    focus: () => element.focus({ preventScroll: true }),
+    enabled: () => !entryDisabled(element) && binding().described?.control !== false,
+    ...options,
+  });
+}
+
+/**
  * A control that edits one parameter (`bind`): ARIA slider values, the
- * keys (arrows, Page, Home, End; Shift fine; Delete resets), the wheel,
- * double-click to reset and drags. Subclasses give `dragStart(event)` and
- * `dragMove(event)` returning a new position.
+ * keys (arrows, Page, Home, End; Shift fine; Delete resets; Enter types a
+ * value), the wheel, double-click to reset (on the readout: type a value)
+ * and drags. Subclasses give `dragStart(event)` and `dragMove(event)`
+ * returning a new position.
  */
 export class SignalValueElement extends SignalElement {
   static role = 'slider';
   static observedAttributes = ['bind', 'skin', 'min', 'max', 'default', 'unit', 'taper', 'floor', 'label'];
   /** Whether it commits, and so shows the unsaved mark. */
   static commits = true;
+  /** The readout a typed value replaces. */
+  static readout = '.readout';
 
   constructor() {
     super();
@@ -339,6 +377,9 @@ export class SignalValueElement extends SignalElement {
     if (!this.binding.address) this.binding.address = bindAddresses(this)[0] ?? null;
     super.connectedCallback();
     if (this.constructor.commits && !this.redrawUnsaved) this.redrawUnsaved = unsavedMark(this, () => [this.binding]);
+    // A control without a readout (the toggle) takes nothing typed.
+    const readout = this.$(this.constructor.readout);
+    if (readout) this.entry ??= bindingEntry(this, readout, () => this.binding);
     this.redrawUnsaved?.();
   }
 
@@ -368,7 +409,9 @@ export class SignalValueElement extends SignalElement {
     this.addEventListener('pointerup', end);
     this.addEventListener('pointercancel', end);
     this.addEventListener('lostpointercapture', end);
-    this.addEventListener('dblclick', () => {
+    this.addEventListener('dblclick', (event) => {
+      // On the readout (a captured pointer's double-click is the control's): type a value.
+      if (this.entry?.at(event) && this.entry.open()) return;
       this.binding.reset();
       this.update();
     });
@@ -404,6 +447,7 @@ export class SignalValueElement extends SignalElement {
   }
 
   onKey(event) {
+    if (event.key === 'Enter') return this.entry?.open() ?? false;
     if (event.key === 'Delete' || event.key === 'Backspace') {
       this.binding.reset();
       this.update();

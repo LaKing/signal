@@ -27,27 +27,38 @@ function closedError() {
   return error;
 }
 
-/** The parameter or control at `address` in a `describe` reply, as a range. */
+/** The plan parameter port at `address` in a `describe` reply, or null. */
+function planParameter(description, address) {
+  for (const instance of description.instances ?? []) {
+    const parameter = (instance.parameters ?? []).find((p) => p.address === address);
+    if (parameter) return parameter;
+  }
+  return null;
+}
+
+/**
+ * The parameter or control at `address` in a `describe` reply, as a range,
+ * with its plan `kind` (a control's: its first plan port's; a `gain` takes
+ * dB typed, docs/ui-controls.md "Value entry"), null when not described.
+ */
 export function findParameter(description, address) {
   if (!description || !address) return null;
   const control = (description.controls ?? []).find((c) => c.address === address);
   if (control) {
-    return { min: control.min, max: control.max, default: control.default, unit: control.unit ?? null, base: control.base, control: true };
+    const kind = planParameter(description, control.ports?.[0])?.kind ?? null;
+    return { min: control.min, max: control.max, default: control.default, unit: control.unit ?? null, base: control.base, control: true, kind };
   }
-  for (const instance of description.instances ?? []) {
-    const parameter = (instance.parameters ?? []).find((p) => p.address === address);
-    if (parameter) {
-      return {
-        min: parameter.range?.min ?? 0,
-        max: parameter.range?.max ?? 1,
-        default: parameter.default,
-        unit: parameter.unit ?? null,
-        base: parameter.base,
-        control: false,
-      };
-    }
-  }
-  return null;
+  const parameter = planParameter(description, address);
+  if (!parameter) return null;
+  return {
+    min: parameter.range?.min ?? 0,
+    max: parameter.range?.max ?? 1,
+    default: parameter.default,
+    unit: parameter.unit ?? null,
+    base: parameter.base,
+    control: false,
+    kind: parameter.kind ?? null,
+  };
 }
 
 /**

@@ -2,14 +2,20 @@
 // instances with their parameters from `describe`, editable; a composite's
 // own parameters inside it, read-only (they are set in the composite's
 // file). A drag is a 5 ms ramp, the release one commit, Reset a commit of
-// null (the default: the key removed from project.toml). No DOM.
+// null (the default: the key removed from project.toml); a typed value is
+// sent as a release is, the ramp then the commit. No DOM.
+
+import { controlSpec } from '../../lib/panel.js';
+import { findParameter } from '../../signal-ui.js';
 
 /** The ramp a drag moves along, against zipper noise. */
 export const RAMP_MS = 5;
 
 /**
  * The list: per top-level instance (in the panel's order), its editable
- * parameters (`describe.controls`) and the read-only ones inside it.
+ * parameters (`describe.controls`) and the read-only ones inside it. A
+ * row's `taper` is the default panel's (`dB` for a gain) and its `kind` the
+ * plan's, for typed values.
  */
 export function rows(description) {
   const instances = new Map();
@@ -27,6 +33,8 @@ export function rows(description) {
       base: c.base,
       inFile: c.inFile,
       modulated: c.modulated,
+      taper: controlSpec(c, description).taper,
+      kind: findParameter(description, c.address)?.kind ?? null,
       editable: true,
     });
   }

@@ -207,8 +207,8 @@ test('parameters are found among controls and plan ports', () => {
     controls: [{ address: '/out.gain', min: 0, max: 4, default: 1, base: 0.5, unit: null }],
     instances: [{ parameters: [{ address: '/a.freq', unit: 'Hz', range: { min: 0, max: 24000 }, default: 440, base: 440 }] }],
   };
-  assert.deepEqual(findParameter(description, '/out.gain'), { min: 0, max: 4, default: 1, unit: null, base: 0.5, control: true });
-  assert.deepEqual(findParameter(description, '/a.freq'), { min: 0, max: 24000, default: 440, unit: 'Hz', base: 440, control: false });
+  assert.deepEqual(findParameter(description, '/out.gain'), { min: 0, max: 4, default: 1, unit: null, base: 0.5, control: true, kind: null });
+  assert.deepEqual(findParameter(description, '/a.freq'), { min: 0, max: 24000, default: 440, unit: 'Hz', base: 440, control: false, kind: null });
   assert.equal(findParameter(description, '/nope'), null);
 });
 
