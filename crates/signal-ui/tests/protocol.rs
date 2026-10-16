@@ -349,7 +349,7 @@ fn set_ramp_and_trigger_are_acknowledged_with_their_frame(transport: Transport) 
     rig.finish();
 }
 
-fn commit_writes_the_file_once_and_the_reload_applies_nothing(transport: Transport) {
+fn commit_writes_the_file_once_and_the_watch_does_not_reload_it(transport: Transport) {
     let mut rig = rig(
         "commit",
         Options {
@@ -381,7 +381,12 @@ fn commit_writes_the_file_once_and_the_reload_applies_nothing(transport: Transpo
         expected,
         "only the value changed"
     );
-    let reload = rig.wait(&mut ws, "the reload of the written file", |got| {
+    // The running project already holds the written file: the watch does
+    // not reload it (several watch intervals pass).
+    rig.no_reload(&mut ws, 500);
+    // Another writer's identical edit is still seen, and applies nothing.
+    fs::write(&path, format!("{expected}\n")).unwrap();
+    let reload = rig.wait(&mut ws, "the reload of another write", |got| {
         got.of("reload").cloned()
     });
     assert_eq!(reload["sets"], 0, "{reload}");
@@ -398,6 +403,62 @@ fn commit_writes_the_file_once_and_the_reload_applies_nothing(transport: Transpo
         "error",
     );
     assert_eq!(refused["code"], "not-editable");
+    rig.finish();
+}
+
+/// Another writer's edit to `project.toml` that the watch cannot see (same
+/// length, its modification time put back), followed by a commit: the
+/// commit's write keeps it, and since the file it read is not what the
+/// running project came from, the watch reloads the written file and applies
+/// the edit (audit 2026-10-16, P2: content, not metadata, decides).
+fn an_edit_the_watch_cannot_see_is_applied_by_the_next_commit(transport: Transport) {
+    let mut rig = rig(
+        "unseen",
+        Options {
+            transport,
+            ..Options::default()
+        },
+    );
+    let path = rig.dir.join("project.toml");
+    let before = fs::read_to_string(&path).unwrap();
+    let (mut ws, _) = rig.client();
+    rig.request(&mut ws, 1, json!({"type": "describe"}), "describe");
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    let edited = before.replace("freq = 440", "freq = 330");
+    assert_eq!(edited.len(), before.len());
+    fs::write(&path, &edited).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    rig.no_reload(&mut ws, 300);
+    let committed = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "commit", "address": "/out.gain", "value": 0.4}),
+        "committed",
+    );
+    assert_eq!(committed["sent"], true);
+    let reload = rig.wait(&mut ws, "the reload of the written file", |got| {
+        got.of("reload").cloned()
+    });
+    assert_eq!(reload["sets"], 1, "{reload}");
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("freq = 330"), "{text}");
+    let d = rig.request(&mut ws, 3, json!({"type": "describe"}), "describe");
+    let osc = find(&d["instances"], "/a");
+    assert_eq!(find(&osc["parameters"], "/a.freq")["base"], 330.0);
+    assert_eq!(find(&d["controls"], "/out.gain")["base"], 0.4);
+    // The running project holds the file again: the next commit is quiet.
+    rig.request(
+        &mut ws,
+        4,
+        json!({"type": "commit", "address": "/out.gain", "value": 0.3}),
+        "committed",
+    );
+    rig.no_reload(&mut ws, 300);
     rig.finish();
 }
 
@@ -503,7 +564,8 @@ both!(
     describe_gives_the_plan_its_controls_sinks_and_meters,
     meters_and_a_scope_stream_arrive,
     set_ramp_and_trigger_are_acknowledged_with_their_frame,
-    commit_writes_the_file_once_and_the_reload_applies_nothing,
+    commit_writes_the_file_once_and_the_watch_does_not_reload_it,
+    an_edit_the_watch_cannot_see_is_applied_by_the_next_commit,
     a_plan_swap_updates_describe,
     a_bad_token_a_missing_hello_and_another_version_are_refused,
     unknown_messages_are_answered_with_an_error,

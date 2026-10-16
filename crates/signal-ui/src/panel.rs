@@ -515,22 +515,28 @@ pub fn after_write(
 /// into the `project.toml` of `dir` with `toml_edit`
 /// ([`write_parameter`](signal_project::write_parameter)), keeping the rest of
 /// the file as it was; `order` is the module's parameter order, for where a
-/// new key goes. Atomic ([`write_file`]).
+/// new key goes. Atomic ([`write_file`]). Gives the file's text before and
+/// after.
 pub fn write_project(
     dir: &Path,
     instance: &str,
     parameter: &str,
     value: Option<f64>,
     order: &[&str],
-) -> Result<(), String> {
+) -> Result<(String, String), String> {
     let path = dir.join(signal_project::PROJECT_FILE);
     fs::read_to_string(&path)
         .map_err(|e| e.to_string())
-        .and_then(|text| {
-            signal_project::write_parameter(&text, instance, parameter, value, order)
+        .and_then(|before| {
+            signal_project::write_parameter(&before, instance, parameter, value, order)
+                .map(|after| (before, after))
                 .map_err(|e| e.to_string())
         })
-        .and_then(|text| write_file(&path, &text).map_err(|e| e.to_string()))
+        .and_then(|(before, after)| {
+            write_file(&path, &after)
+                .map(|()| (before, after))
+                .map_err(|e| e.to_string())
+        })
         .map_err(|error| {
             format!(
                 "{instance}.{parameter} was not written to {}: {error}",

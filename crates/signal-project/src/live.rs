@@ -50,7 +50,32 @@ impl ProjectWatcher {
         self.last = now;
         Ok(changed)
     }
+
+    /// `file` (relative to the folder) as it is now, for [`accept`](Self::accept).
+    pub fn stamp(&self, file: &Path) -> FileStamp {
+        FileStamp(
+            fs::symlink_metadata(self.dir.join(file))
+                .ok()
+                .filter(|metadata| metadata.is_file())
+                .map(|metadata| (metadata.modified().ok(), metadata.len())),
+        )
+    }
+
+    /// Takes `file` as `stamp` found it as already seen: for a write whose
+    /// content the running project already holds, so the next
+    /// [`poll`](Self::poll) does not report it. A change after the stamp, and
+    /// every other file's, is still reported.
+    pub fn accept(&mut self, file: &Path, stamp: FileStamp) {
+        match stamp.0 {
+            Some(state) => self.last.insert(file.to_owned(), state),
+            None => self.last.remove(file),
+        };
+    }
 }
+
+/// A file's modification time and length as [`ProjectWatcher::stamp`] read them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileStamp(Option<(Option<SystemTime>, u64)>);
 
 fn snapshot(dir: &Path) -> io::Result<Snapshot> {
     let mut files = Snapshot::new();
@@ -379,6 +404,7 @@ fn resume(
 mod tests {
     use super::ProjectWatcher;
     use std::fs;
+    use std::path::Path;
 
     #[test]
     fn the_watcher_notices_changed_and_added_files_only() {
@@ -395,6 +421,30 @@ mod tests {
         assert!(watcher.poll().unwrap(), "an added file");
         fs::write(dir.join(".hidden"), "x").unwrap();
         assert!(!watcher.poll().unwrap(), "hidden files are ignored");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_accepted_write_is_not_reported_but_other_changes_are() {
+        let dir = std::env::temp_dir().join(format!("signal-accept-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("composites")).unwrap();
+        fs::write(dir.join("project.toml"), "a").unwrap();
+        let mut watcher = ProjectWatcher::new(&dir).unwrap();
+        fs::write(dir.join("project.toml"), "ab").unwrap();
+        let stamp = watcher.stamp(Path::new("project.toml"));
+        watcher.accept(Path::new("project.toml"), stamp);
+        assert!(!watcher.poll().unwrap(), "the accepted write");
+        fs::write(dir.join("composites/voice.toml"), "x").unwrap();
+        fs::write(dir.join("project.toml"), "abc").unwrap();
+        let stamp = watcher.stamp(Path::new("project.toml"));
+        watcher.accept(Path::new("project.toml"), stamp);
+        assert!(watcher.poll().unwrap(), "another file changed meanwhile");
+        fs::write(dir.join("project.toml"), "abcd").unwrap();
+        let stamp = watcher.stamp(Path::new("project.toml"));
+        fs::write(dir.join("project.toml"), "abcde").unwrap();
+        watcher.accept(Path::new("project.toml"), stamp);
+        assert!(watcher.poll().unwrap(), "a change after the stamp");
         fs::remove_dir_all(&dir).unwrap();
     }
 }

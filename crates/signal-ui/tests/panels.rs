@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::fs;
 
 use common::{Options, Transport, rig, root};
-use serde_json::{Value, json};
+use serde_json::json;
 use signal_ui::bindings::elements;
 use signal_ui::frames::SCOPE;
 
@@ -132,13 +132,8 @@ fn a_knob_of_the_kick_panel_changes_one_value_of_the_toml(transport: Transport) 
     assert_eq!(edited, 1, "{after}");
     assert_eq!(fs::read_to_string(&panel_path).unwrap(), panel);
 
-    // The watcher sees the written file and finds nothing to apply.
-    let reload = rig.wait(&mut ws, "the reload of the written file", |got| {
-        got.of("reload").cloned()
-    });
-    assert_eq!(reload["sets"], 0, "{reload}");
-    assert_eq!(reload["swap"], Value::Null);
-    assert_eq!(reload["message"], "no change to apply");
+    // The running project already holds the written file: no reload.
+    rig.no_reload(&mut ws, 300);
     let d = rig.request(&mut ws, 7, json!({"type": "describe"}), "describe");
     let decay = d["controls"]
         .as_array()

@@ -18,6 +18,7 @@
 //! ([`crate::document`]); `signal ui` reopens only the project it serves.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -202,6 +203,10 @@ struct Run {
     watcher: Option<ProjectWatcher>,
     watched: Instant,
     retry: bool,
+    /// The `project.toml` text `current` is known to hold (read before the
+    /// last reload that applied, or written by a commit it took); `None`
+    /// when not known.
+    file: Option<String>,
     rate: u32,
     buffer: u32,
     threads: u32,
@@ -1053,6 +1058,8 @@ impl Host {
         if !opened {
             return Err(fail("no-project", "open a project folder first"));
         }
+        // Read before the load: a later edit makes it differ from the file.
+        let file = fs::read_to_string(self.dir.join(signal_project::PROJECT_FILE)).ok();
         let (project, plan, width) = match app::load(&self.dir, &self.registry) {
             Ok(loaded) => loaded,
             Err(diagnostics) => {
@@ -1106,6 +1113,7 @@ impl Host {
             watcher,
             watched: Instant::now(),
             retry: false,
+            file,
             rate: started.rate,
             buffer: started.buffer,
             threads: u32::try_from(started.scheduling.threads).unwrap_or(u32::MAX),
@@ -1530,6 +1538,8 @@ impl Host {
     /// the Setup's (as the dialog's Apply plays again).
     fn build(&self, first: bool) -> Result<(Run, Vec<String>), String> {
         let dir = &self.dir;
+        // Read before the load: a later edit makes it differ from the file.
+        let file = fs::read_to_string(dir.join(signal_project::PROJECT_FILE)).ok();
         let project = Project::load(dir).map_err(|error| match error {
             LoadError::Invalid(diagnostics) => joined(located(dir, diagnostics)),
             error => error.to_string(),
@@ -1636,6 +1646,7 @@ impl Host {
             watcher,
             watched: Instant::now(),
             retry: false,
+            file,
             rate,
             buffer,
             threads,
@@ -1783,6 +1794,9 @@ impl Host {
             return;
         }
         run.retry = false;
+        // Read before the reload: a later edit makes it differ from the file.
+        let file = fs::read_to_string(self.dir.join(signal_project::PROJECT_FILE)).ok();
+        run.file = None;
         let mut observed = Observed {
             values: &mut self.values,
             reports: &mut self.reports,
@@ -1798,6 +1812,7 @@ impl Host {
         let mut reloaded = None;
         let notice = match result {
             Ok(applied) => {
+                run.file = file;
                 reloaded = Some((
                     Panel::new(&run.current, &self.registry),
                     run.current.plan(&self.registry).ok().map(|p| p.plan),
@@ -1834,13 +1849,7 @@ impl Host {
                 self.panel.release(&instance, &parameter);
             }
             self.reconcile(panel);
-            let old = std::mem::replace(&mut self.plan, plan);
-            let new = self.plan.as_ref();
-            self.port_edits.retain(|port, _| {
-                let after = plan_base(new, port);
-                after.is_some()
-                    && after.map(f64::to_bits) == plan_base(old.as_ref(), port).map(f64::to_bits)
-            });
+            self.replace_plan(plan);
             self.reshape_vectors(true);
         }
         if let Some(mode) = self.app.as_mut() {
@@ -1855,6 +1864,18 @@ impl Host {
             let describe = self.describe(false);
             self.broadcast(&describe);
         }
+    }
+
+    /// The plan now running: a live port edit whose plan base changed (or
+    /// whose port went) is dropped, the base being what the file now says.
+    fn replace_plan(&mut self, plan: Option<ExecutionPlan>) {
+        let old = std::mem::replace(&mut self.plan, plan);
+        let new = self.plan.as_ref();
+        self.port_edits.retain(|port, _| {
+            let after = plan_base(new, port);
+            after.is_some()
+                && after.map(f64::to_bits) == plan_base(old.as_ref(), port).map(f64::to_bits)
+        });
     }
 
     fn take_reports(&mut self) {
@@ -2796,13 +2817,33 @@ impl Host {
             return Err(fail("refused", format!("{error}; nothing was written")));
         }
         let order: Vec<&str> = target.order.iter().map(String::as_str).collect();
-        if let Err(error) = write_project(&self.dir, instance, parameter, value, &order) {
-            unwritten(self, error.clone());
-            return Err(fail("write-failed", error));
-        }
+        let (before, after) = match write_project(&self.dir, instance, parameter, value, &order) {
+            Ok(texts) => texts,
+            Err(error) => {
+                unwritten(self, error.clone());
+                return Err(fail("write-failed", error));
+            }
+        };
+        let file = Path::new(signal_project::PROJECT_FILE);
+        // The written file, read at once: a later edit differs from it.
+        let stamp = self
+            .run
+            .as_ref()
+            .and_then(|r| r.watcher.as_ref())
+            .map(|w| w.stamp(file));
+        // The running project held exactly the file this write read: any
+        // other writer's edit is in `before`, so it is not held.
+        let known = self
+            .run
+            .as_mut()
+            .and_then(|r| r.file.take())
+            .is_some_and(|text| text == before);
         self.panel.release(instance, parameter);
         self.writes += 1;
         let mut note = None;
+        // Whether the running project now holds exactly the file: then the
+        // watch need not reload the write it would otherwise see.
+        let mut held = false;
         let current = self.run.as_mut().map(|r| &mut r.current);
         match after_write(
             current,
@@ -2817,12 +2858,14 @@ impl Host {
             // The plan too, which `describe` reads the instances' (and so a
             // composite's inner parameters') bases from.
             Written::Taken(panel) => {
+                held = sent && known;
                 self.reconcile(panel);
-                self.plan = self
+                let plan = self
                     .run
                     .as_ref()
                     .and_then(|r| r.current.plan(&self.registry).ok())
                     .map(|p| p.plan);
+                self.replace_plan(plan);
             }
             Written::Stopped(Ok((panel, plan))) => {
                 self.reconcile(panel);
@@ -2846,6 +2889,19 @@ impl Host {
                 if let Some(mode) = self.app.as_mut() {
                     mode.diagnostics = diagnostics;
                 }
+            }
+        }
+        // The running project now holds `after`. The watch takes the file as
+        // seen only when it still is `after` once stamped (no edit came
+        // between the write and the stamp; a later one differs from it).
+        if held
+            && let Some(stamp) = stamp
+            && fs::read_to_string(self.dir.join(file)).is_ok_and(|text| text == after)
+            && let Some(run) = self.run.as_mut()
+        {
+            run.file = Some(after);
+            if let Some(watcher) = run.watcher.as_mut() {
+                watcher.accept(file, stamp);
             }
         }
         self.failed.remove(&key);

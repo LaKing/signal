@@ -447,6 +447,17 @@ impl Rig {
         panic!("timed out waiting for {what}");
     }
 
+    /// Steps for `ms` and asserts no `reload` reaches `ws` meanwhile.
+    pub fn no_reload(&mut self, ws: &mut Ws, ms: u64) {
+        let until = Instant::now() + Duration::from_millis(ms);
+        while Instant::now() < until {
+            self.pump();
+            while let Some(got) = receive(ws) {
+                assert!(got.of("reload").is_none(), "{:?}", got.json());
+            }
+        }
+    }
+
     /// A reply of `kind` with `id`.
     pub fn reply(&mut self, ws: &mut Ws, id: u64, kind: &str) -> Value {
         self.wait(ws, kind, |got| {

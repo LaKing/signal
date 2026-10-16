@@ -46,8 +46,16 @@ fn tree(dir: &Path) -> Vec<(String, Vec<u8>)> {
     out
 }
 
+/// A committed project folder's files as a pack takes them: without the
+/// hidden files a Finder or an editor may leave there (`.DS_Store`).
+fn project_tree(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut files = tree(dir);
+    files.retain(|(name, _)| !name.split('/').any(|part| part.starts_with('.')));
+    files
+}
+
 fn copy_tree(from: &Path, to: &Path) {
-    for (name, bytes) in tree(from) {
+    for (name, bytes) in project_tree(from) {
         let path = to.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, bytes).unwrap();
@@ -123,8 +131,8 @@ fn every_project_round_trips() {
         let bytes = pack(&dir).unwrap();
         let into = base(&format!("round-{project}")).join(project);
         let unpacked = unpack(&bytes, &into).unwrap();
-        assert_eq!(tree(&into), tree(&dir), "{project}");
-        assert_eq!(unpacked.files.len(), tree(&dir).len());
+        assert_eq!(tree(&into), project_tree(&dir), "{project}");
+        assert_eq!(unpacked.files.len(), project_tree(&dir).len());
         assert!(unpacked.files.contains(&"project.toml".to_owned()));
         let a = Project::load(&dir).unwrap();
         let b = Project::load(&into).unwrap();
@@ -375,7 +383,7 @@ fn a_refusal_names_its_reason() {
     // An empty folder is unpacked into.
     let empty = base("empty-folder");
     unpack(&bytes, &empty).unwrap();
-    assert_eq!(tree(&empty), tree(&projects().join("pulse")));
+    assert_eq!(tree(&empty), project_tree(&projects().join("pulse")));
 }
 
 /// AC18's write: atomic, the old file replaced, no temporary left.
