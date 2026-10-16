@@ -30,6 +30,14 @@
     )
 )]
 
+/// The version: `SIGNAL_VERSION` when the build set it
+/// (`scripts/version.sh`, as `scripts/bundle-app.sh` does), else the
+/// workspace version.
+pub const VERSION: &str = match option_env!("SIGNAL_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 pub mod dialog;
 pub mod meter;
 pub use signal_ui::{panel, setup};

@@ -20,7 +20,10 @@ If `cargo` is not on PATH (Homebrew rustup), prefix with `PATH=/opt/homebrew/opt
 cargo fmt --all --check                                          # formatting (CI)
 cargo clippy --workspace --all-targets --offline -- -D warnings  # lints as errors (CI)
 cargo test --workspace --offline                                 # tests (CI uses cargo nextest run --workspace)
+scripts/version.sh                                               # the version this commit builds
 ```
+
+**Versions.** `MAJOR.MINOR.N`: `MAJOR.MINOR` is the workspace version in the root `Cargo.toml`, and `N` counts the commits since the tag `vMAJOR.MINOR.0`, so every commit is a version of its own and the same commit always builds the same one (`scripts/version.sh`; `scripts/bundle-app.sh` builds it into Signal.app and `signal --version`). A new `MAJOR.MINOR` is an owner's decision: set it in `Cargo.toml` and tag that commit `vMAJOR.MINOR.0`.
 
 Development runs through **devpanel** (`~/devpanel`, project `signal-project`); its seats build **offline**.
 

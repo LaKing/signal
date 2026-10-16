@@ -52,6 +52,10 @@ done
 # The bundled helper CLI is built with the `gpu` feature (operator decision,
 # M2.7-2 answer A): Signal.app links wgpu anyway, so its helper can list the
 # GPUs (`signal devices --compute`). The default CLI build stays wgpu-free.
+# The version (scripts/version.sh: MAJOR.MINOR and the commits since its
+# tag), built into the binaries through SIGNAL_VERSION.
+VERSION=$("$ROOT/scripts/version.sh")
+export SIGNAL_VERSION=$VERSION
 BUILD=(build --locked --offline -p signal-app -p signal-cli --features signal-cli/gpu)
 [[ $PROFILE == release ]] && BUILD+=(--release)
 [[ -n $TARGET_DIR ]] && BUILD+=(--target-dir "$TARGET_DIR")
@@ -69,9 +73,6 @@ for exe in signal-app signal; do
   [[ -x $BIN/$exe ]] || die "$BIN/$exe was not built"
 done
 
-# The workspace version (path+file://…#signal-app@X.Y.Z, or …#X.Y.Z).
-PKGID=$("$CARGO" pkgid --locked --offline -p signal-app)
-VERSION=${PKGID##*[#@]}
 # The oldest macOS the toolchain builds for (MACOSX_DEPLOYMENT_TARGET, else
 # the target's default).
 MINIMUM=$("$RUSTC" --print deployment-target 2>/dev/null | sed -n 's/^MACOSX_DEPLOYMENT_TARGET=//p')

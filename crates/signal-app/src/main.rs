@@ -98,7 +98,7 @@ fn menu_item(item: MenuItem) -> muda::Result<Box<dyn IsMenuItem>> {
             None,
             Some(AboutMetadata {
                 name: Some("Signal".to_owned()),
-                version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+                version: Some(signal_app::VERSION.to_owned()),
                 ..AboutMetadata::default()
             }),
         )),

@@ -3008,7 +3008,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "signal-app"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clap",
  "muda",
@@ -3035,7 +3035,7 @@ dependencies = [
 
 [[package]]
 name = "signal-audio"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "cpal",
  "libc",
@@ -3052,7 +3052,7 @@ dependencies = [
 
 [[package]]
 name = "signal-cli"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clap",
  "hound",
@@ -3075,7 +3075,7 @@ dependencies = [
 
 [[package]]
 name = "signal-contract"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "proptest",
  "signal-core",
@@ -3083,7 +3083,7 @@ dependencies = [
 
 [[package]]
 name = "signal-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "insta",
  "proptest",
@@ -3092,7 +3092,7 @@ dependencies = [
 
 [[package]]
 name = "signal-engine"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "approx",
  "hound",
@@ -3110,7 +3110,7 @@ dependencies = [
 
 [[package]]
 name = "signal-eval"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "approx",
  "hound",
@@ -3122,7 +3122,7 @@ dependencies = [
 
 [[package]]
 name = "signal-gpu"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "pollster",
  "rtrb",
@@ -3134,7 +3134,7 @@ dependencies = [
 
 [[package]]
 name = "signal-graph"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "insta",
  "proptest",
@@ -3145,7 +3145,7 @@ dependencies = [
 
 [[package]]
 name = "signal-lab"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "libm",
  "signal-contract",
@@ -3160,7 +3160,7 @@ dependencies = [
 
 [[package]]
 name = "signal-oracle"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "proptest",
  "serde_json",
@@ -3174,7 +3174,7 @@ dependencies = [
 
 [[package]]
 name = "signal-output"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hound",
  "rtrb",
@@ -3188,7 +3188,7 @@ dependencies = [
 
 [[package]]
 name = "signal-project"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "insta",
  "schemars",
@@ -3206,7 +3206,7 @@ dependencies = [
 
 [[package]]
 name = "signal-std"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "approx",
  "libm",
@@ -3218,7 +3218,7 @@ dependencies = [
 
 [[package]]
 name = "signal-ui"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",

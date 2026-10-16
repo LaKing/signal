@@ -23,9 +23,17 @@ use serde_json::json;
 use signal_core::{Direction, Feedthrough, ModuleDescriptor, Registry};
 use signal_project::Diagnostic;
 
+/// The version: `SIGNAL_VERSION` when the build set it
+/// (`scripts/version.sh`, as `scripts/bundle-app.sh` does), else the
+/// workspace version.
+const VERSION: &str = match option_env!("SIGNAL_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 /// Signal: render, replay and inspect projects.
 #[derive(Parser)]
-#[command(name = "signal", version)]
+#[command(name = "signal", version = VERSION)]
 struct Cli {
     /// Print machine-readable JSON on stdout.
     #[arg(long, global = true)]
