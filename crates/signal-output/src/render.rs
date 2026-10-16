@@ -72,9 +72,10 @@ pub fn render(engine: &mut Engine, frames: u64) -> Result<Render, RenderError> {
 /// a swap or push input effective from [`Engine::next_frame`] (ADR 0006). Each
 /// frame's log is drained after it is recorded, as a swap requires.
 ///
-/// The audio sink is looked up again after every swap. A swapped-in plan must
-/// keep exactly one audio sink at the same address with as many signal inputs;
-/// otherwise the render stops with [`RenderError::SinkChanged`]. An error from
+/// The audio sink and its `gain` are looked up again after every swap (the
+/// sink's type may change, and with it whether it declares `gain`). A
+/// swapped-in plan must keep exactly one audio sink at the same address with
+/// as many signal inputs; otherwise the render stops with [`RenderError::SinkChanged`]. An error from
 /// `before` stops it with [`RenderError::Edit`].
 pub fn render_with(
     engine: &mut Engine,
@@ -195,7 +196,7 @@ impl SinkOutput for File {
     fn block(&mut self, engine: &Engine, frames: usize) {
         self.taps.block(engine, self.at, frames);
         self.at += frames as u64;
-        let gain = self.sink.gain_index(engine);
+        let gain = self.sink.gain_index();
         for f in 0..frames {
             for channel in 0..self.sink.width {
                 let x = engine

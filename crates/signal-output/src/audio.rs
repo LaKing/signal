@@ -91,8 +91,13 @@ pub(crate) struct AudioSink {
     pub(crate) id: InstanceId,
     pub(crate) address: InstanceAddress,
     pub(crate) width: usize,
-    /// `<sink>.gain`, if the sink's type declares it (resolved at the start).
-    gain: Option<PortAddress>,
+    /// `<sink>.gain`, built once at selection (it allocates). The address
+    /// outlives a swap; whether it names a parameter does not.
+    gain_port: Option<PortAddress>,
+    /// The gain's parameter index in the running plan, if the sink's type
+    /// there declares it: rebound with the id on every plan, since a swap
+    /// may change the sink's type at the same address and width.
+    gain: Option<usize>,
 }
 
 /// The running plan's audio sinks.
@@ -118,15 +123,23 @@ impl AudioSink {
                 channels: sink.inputs,
             });
         }
-        let gain = PortAddress::new(sink.address, GAIN)
-            .ok()
-            .filter(|port| engine.parameter(port).is_some());
-        Ok(AudioSink {
+        let mut selected = AudioSink {
             id: sink.id,
             address: sink.address.clone(),
             width: sink.inputs,
-            gain,
-        })
+            gain_port: PortAddress::new(sink.address, GAIN).ok(),
+            gain: None,
+        };
+        selected.rebind(engine);
+        Ok(selected)
+    }
+
+    /// Resolves the gain in the running plan. Allocates nothing.
+    fn rebind(&mut self, engine: &Engine) {
+        self.gain = self
+            .gain_port
+            .as_ref()
+            .and_then(|port| engine.parameter_index(port));
     }
 
     /// After a swap offline: the plan must keep the sink, the only one, at
@@ -136,6 +149,7 @@ impl AudioSink {
         match sinks.as_slice() {
             [sink] if *sink.address == self.address && sink.inputs == self.width => {
                 self.id = sink.id;
+                self.rebind(engine);
                 Ok(())
             }
             _ => Err(RenderError::SinkChanged {
@@ -147,18 +161,18 @@ impl AudioSink {
     }
 
     /// After a swap in real time (the Controller refused a plan without the
-    /// run's sinks): the plan's first audio sink. Allocates nothing.
+    /// run's sinks, so its address and width hold): the plan's first audio
+    /// sink and its gain. Allocates nothing.
     pub(crate) fn follow(&mut self, engine: &Engine) {
         if let Some(sink) = audio_sinks(engine).next() {
             self.id = sink.id;
         }
+        self.rebind(engine);
     }
 
     /// The gain's parameter index in the running plan.
-    pub(crate) fn gain_index(&self, engine: &Engine) -> Option<usize> {
+    pub(crate) fn gain_index(&self) -> Option<usize> {
         self.gain
-            .as_ref()
-            .and_then(|port| engine.parameter_index(port))
     }
 }
 

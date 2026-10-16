@@ -6,7 +6,9 @@
 //!   declares [`SinkKind::Audio`](signal_core::SinkKind::Audio), with at
 //!   least one signal input;
 //! - applies the sink's `gain` parameter, if its type declares one, to every
-//!   input, frame by frame (`docs/semantics.md` §8);
+//!   input, frame by frame (`docs/semantics.md` §8); the gain is looked up
+//!   again in every plan a swap brings, since a swap may keep the sink's
+//!   address and width but change its type;
 //! - maps sink input *i* to device channel *i* (extra device channels 0);
 //! - converts to the device's `f32` ([`device_sample`]: clamped to [−1, 1],
 //!   non-finite as 0, counted as clipped) and meters each channel per

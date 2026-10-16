@@ -214,7 +214,7 @@ impl SinkOutput for Device<'_> {
             .block(engine, self.first + self.at as u64, frames);
         self.vectors
             .block(engine, self.first + self.at as u64, frames);
-        let gain = self.sink.gain_index(engine);
+        let gain = self.sink.gain_index();
         for f in 0..frames {
             let start = self.at.saturating_mul(self.channels);
             let Some(row) = self.out.get_mut(start..start + self.channels) else {
