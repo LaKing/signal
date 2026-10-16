@@ -1,0 +1,34 @@
+# ADR 0026: The signal schematic and the panel editor
+
+- **Status:** Accepted (owner's request of 2026-10-16: "Like Native Instruments Reaktor, I want a UI component editor and a signal-path schematic… signal processing needs transparency, and only a graphical representation, a kind of schematic, makes it really clear to a person… maybe an infinite-zoom SVG, but it could also have clickable components"; design by the operator, delegated). Builds on ADR 0009, 0013 and 0023; changes none of them. Pulls "visual patching (GUI c)" forward from *Later* as M2.9, viewing and layout first, patching after.
+- **Date:** 2026-10-16
+
+## Context
+A project's signal path is only visible as text: `project.toml`'s instances and connections, and composites in their own files, possibly nested. Past a handful of modules nobody can follow it without drawing it. Panels are HTML text in `ui/` (ADR 0023 §4) and can only be laid out by editing that text: a stereo meter pair that broke across lines could not be fixed from the app.
+
+## Decision
+1. **A `graph` message in the UI protocol** (`docs/ui-protocol.md`) gives the project's structure as written, not flattened: the top level's instances (address, module, whether it is a composite, ports with direction, shape, kind and rate divisor), its connections (from, to), and for every composite used, the same for its inside, keyed by composite name, with its exported ports and parameters. The converters the compiler inserts are listed per connection (their name), not as instances. It is pushed again after every reload that changed the structure. Nothing new is computed in the engine; `signal-project` and `signal-graph` already hold all of it.
+2. **`<signal-schematic>`, an SVG web component** (no dependency, as ADR 0023 §3):
+   - **Infinite zoom and pan** (wheel, pinch, drag of the background, keyboard), by a view transform on one SVG; text and strokes stay crisp at every scale.
+   - **Semantic zoom:** a composite is a box with its ports; zoomed in past a threshold, or double-clicked, it opens in place and shows its inside, recursively. Breadcrumbs say where the view is.
+   - **Clickable:** selecting an instance shows its parameters (base, effective value) and lets them be set and committed through the existing `set`/`ramp`/`commit`; a port shows its address, shape, kind and rate; a connection shows its converter, if any. Signal ports carry a small live level (the existing parameter and meter streams, at display rate, only for what is on screen).
+   - **Drawing:** instances as boxes with inputs on the left and outputs on the right; connections as orthogonal or smooth wires, coloured by shape (signal, vector, events) and dashed across a rate change; feedback connections drawn back around.
+3. **Layout is automatic and deterministic, positions are text.** A layered layout (left to right by signal flow, longest-path layering, barycentre ordering of each layer, feedback edges reversed) places every node; it is a pure function with `node:test` tests, so the same project always draws the same. Dragging a node writes its position to `ui/schematic.toml` (one table per graph level: the top level and each composite by name; `toml_edit`, atomic, as `commit` writes). A node with a position keeps it; the others are laid out around it. The file is presentation only: deleting it loses nothing but positions, and it travels in a `.signal` file like every other file under `ui/`.
+4. **A panel editor in Signal.app's Panel tab** (and `signal ui` in a browser): an *Edit layout* switch. In edit mode:
+   - **cards** can be dragged to another place in the grid, made `wide` or normal, renamed, added and removed;
+   - **controls** can be dragged within a row, into another card, into or out of a `.signal-group` (never broken across lines), and removed; a control can be added for any parameter or port from a list (knob, fader, button, toggle, meter, scope, value, 2D input), and its label, taper, range and skin set;
+   - the layout stays the responsive card grid of M2.8-11 (no absolute x/y positions): it reflows with the window, and "next to each other" is expressed by a group, not by coordinates.
+5. **The editor writes the panel's HTML, nothing else.** The page serialises the edited `<signal-panel>` element canonically (a fixed whitelist of the elements and attributes of ADR 0023's controls, cards, rows and groups; anything else is refused) and sends it in a `panel.write` message. The server replaces exactly the content of the file's one `<signal-panel>` element, atomically, keeps everything outside it byte for byte, and checks the bindings as `panel.check` does before it writes. An edit the check refuses is not written. Undo and redo in the editor are a history of written versions. Panels stay text (ADR 0009, 0013); a hand-edited panel stays editable as long as it has one `<signal-panel>` element; its content is re-formatted canonically by the first editor write.
+6. **Patching from the schematic comes after** (M2.9-3, its own issue): adding and removing instances and connections, writing `project.toml` and composite files with `toml_edit`, applied live through the existing reload. The schematic and the editor are built so that it fits (selection, hit testing, the write path), but it is not part of the first two issues.
+
+## Alternatives considered
+- **Free x/y positions for panel controls** (Reaktor's panels): exact, but breaks the responsive grid, the one scroll container and the "no jitter" rule of M2.8-11, and makes panels depend on the window size. A free-position card type can be added later if needed.
+- **Canvas or WebGL for the schematic:** faster for very large graphs, but text, hit testing and crisp zoom are simpler in SVG, and a project's structure is hundreds of nodes, not millions; the flattened plan is never drawn at once (semantic zoom).
+- **A JavaScript graph-layout library (ELK, dagre):** a dependency and a build step (ADR 0023 §3 excludes both); a layered layout for this size is a few hundred lines with tests.
+- **Panel layout in a separate structured file instead of HTML:** would change ADR 0023 §4's format; rewriting the `<signal-panel>` element keeps it.
+
+## Consequences
+- The protocol gains `graph` and `panel.write`, and the app a Schematic tab; the engine, the core and the graph are unchanged, and no crate is added.
+- `ui/schematic.toml` is a new optional project file (`docs/project-format.md`); it is packed with the project.
+- Writing the panel re-formats the `<signal-panel>` element; comments inside it are not kept (outside it everything is).
+- Tests: the layout, the zoom transform, the panel serialiser and the editor's operations are pure functions with `node:test` tests; `graph` and `panel.write` have protocol tests over both transports; the visual and interaction checks (zoom, drag, the meter pair) are the operator's, in the window and headless Chrome.
