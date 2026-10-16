@@ -5,11 +5,14 @@
 // showing every diagnostic in the page and marking the controls they are
 // about. With `generated` it builds the default panel from `describe`
 // instead. Attributes: `file` (the panel file; by default the page's
-// `/project/<file>.html`), `generated`.
+// `/project/<file>.html`), `generated`. Its bar's Edit layout switch is the
+// panel editor (./panel-editor.js, M2.9-2); a panel another client wrote
+// (`panel.written`) is shown as written, without reloading the page.
 
 import { connectFromPage, getDefaultConnection, setDefaultConnection } from '../signal-ui.js';
 import { BindingCheck, defaultPanel, formatDiagnostic, panelFile } from '../lib/panel.js';
 import { unsavedLine } from '../lib/unsaved.js';
+import { EDITOR_CSS, PanelEditor, showWritten } from './panel-editor.js';
 
 const CSS = `
 :host { display: block; color: var(--signal-fg, #d6dbe4); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
@@ -39,8 +42,13 @@ const CSS = `
    to its own fixed width: the count or the error changing moves nothing. */
 .unsaved { flex: none; width: 46ch; margin-left: auto; display: flex; align-items: center; color: var(--signal-unsaved, #ffb74d); }
 .unsaved-text { flex: none; width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Edit layout: a switch of fixed width, its state in its colour only. */
+.edit { flex: none; width: 12ch; font: inherit; color: var(--signal-fg, #d6dbe4); background: var(--signal-track, #2a2f38); border: 1px solid var(--signal-muted, #8a93a3); border-radius: 3px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; }
+.edit[aria-checked="true"] { border-color: var(--signal-accent, #4fc3f7); color: var(--signal-accent, #4fc3f7); }
+.edit[aria-disabled="true"] { opacity: .5; cursor: default; }
 .unsaved button { margin-left: .4em; font: inherit; color: var(--signal-fg, #d6dbe4); background: var(--signal-track, #2a2f38); border: 1px solid var(--signal-unsaved, #ffb74d); border-radius: 3px; cursor: pointer; }
 [hidden] { display: none !important; }
+${EDITOR_CSS}
 `;
 
 /** The controls of `root` in document order (the check's indexes). */
@@ -53,7 +61,8 @@ export class SignalPanel extends HTMLElement {
     super();
     this.attachShadow({ mode: 'open' });
     this.shadowRoot.innerHTML = `<style>${CSS}</style>
-<div class="bar" part="bar"><span class="status">starting…</span><span class="title"></span><span class="summary"></span><span class="unsaved" part="unsaved" role="status" style="visibility: hidden"><span class="unsaved-text"></span><button type="button" class="retry-all">Retry all</button><button type="button" class="revert-all">Revert all</button></span></div>
+<div class="bar" part="bar"><button type="button" class="edit" role="switch" aria-checked="false" aria-disabled="true" title="Edit layout: arrange the cards and controls, written to the panel file">Edit layout</button><span class="status">starting…</span><span class="title"></span><span class="summary"></span><span class="unsaved" part="unsaved" role="status" style="visibility: hidden"><span class="unsaved-text"></span><button type="button" class="retry-all">Retry all</button><button type="button" class="revert-all">Revert all</button></span></div>
+<div class="tools" part="tools" hidden></div>
 <ol class="problems" part="problems" role="alert" hidden></ol>
 <div class="generated" part="generated"></div>
 <slot></slot>`;
@@ -62,6 +71,7 @@ export class SignalPanel extends HTMLElement {
     /** The structure of the generated panel shown (`defaultPanel`), with `generated`. */
     this.generated = undefined;
     this.marked = [];
+    this.editor = new PanelEditor(this);
   }
 
   $(selector) {
@@ -90,6 +100,8 @@ export class SignalPanel extends HTMLElement {
     this.stops.push(connection.on('status', (s) => this.showStatus(s)));
     this.stops.push(connection.on('describe', (d) => this.described(d)));
     this.stops.push(connection.on('unsaved', (u) => this.showUnsaved(u)));
+    this.stops.push(connection.on('panel.written', (m) => this.written(m)));
+    this.$('.edit').onclick = () => this.setEditing(!this.editor.editing);
     this.$('.retry-all').onclick = () => this.everyUnsaved((address) => connection.retry(address), (p) => p.control);
     this.$('.revert-all').onclick = () => this.everyUnsaved((address) => connection.revert(address), () => true);
     this.showStatus(connection.status);
@@ -119,7 +131,75 @@ export class SignalPanel extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this.editor.leave();
     for (const stop of this.stops.splice(0)) stop();
+  }
+
+  /**
+   * Edit layout on or off (the bar's switch, Escape). Without a plan the
+   * editor cannot check bindings, so it does not start, and says why.
+   */
+  async setEditing(on) {
+    const edit = this.$('.edit');
+    if (!on) {
+      this.editor.leave();
+      edit.setAttribute('aria-checked', 'false');
+      return;
+    }
+    if (edit.getAttribute('aria-disabled') === 'true' || this.entering) return;
+    // One entry at a time: a double click must not start it twice.
+    this.entering = true;
+    let refused;
+    try {
+      refused = await this.editor.enter();
+    } catch (error) {
+      refused = error.message ?? String(error);
+    } finally {
+      this.entering = false;
+    }
+    if (refused) {
+      edit.title = refused;
+      this.showProblems([{ severity: 'warning', text: `Edit layout: ${refused}` }]);
+      return;
+    }
+    edit.setAttribute('aria-checked', 'true');
+  }
+
+  /** The switch is usable once there is a plan to check writes against. */
+  editable(description) {
+    const planned = Array.isArray(description?.instances) && description.instances.length > 0;
+    const edit = this.$('.edit');
+    edit.setAttribute('aria-disabled', String(!planned));
+    edit.title = planned
+      ? 'Edit layout: arrange the cards and controls, written to the panel file'
+      : 'The project has no plan: Edit layout writes only what the binding check accepts';
+  }
+
+  /** Another client (or this page) wrote a panel file: shown as written. */
+  written(message) {
+    if (message.file !== (this.file ?? 'main.html')) return;
+    if (this.editor.editing) {
+      this.editor.written(message);
+      return;
+    }
+    // The generated panel's file now exists: the page is that file.
+    if (this.hasAttribute('generated')) {
+      globalThis.location?.reload();
+      return;
+    }
+    showWritten(this, message.html ?? '').then((error) => {
+      if (error) this.showProblems([{ severity: 'warning', text: `the written panel is not shown: ${error}` }]);
+      else this.recheck();
+    });
+  }
+
+  /** The binding check again (the controls' indexes changed with a write). */
+  recheck() {
+    const file = this.file;
+    if (!file || !this.connection?.description || !this.binding) return;
+    this.binding.checked = undefined;
+    this.binding.asking = undefined;
+    this.binding.described(this.connection.description, file);
   }
 
   showStatus(status) {
@@ -134,7 +214,10 @@ export class SignalPanel extends HTMLElement {
     // bar still when Play and Stop set and clear it ("Stable layout").
     this.$('.title').textContent = description.project ?? '';
     if (description.unsaved) this.showUnsaved(description.unsaved);
+    this.editable(description);
     if (this.hasAttribute('generated')) {
+      // While it is edited the editor draws it.
+      if (this.editor.editing) return;
       // Rebuilt only when what it shows changes (docs/ui-controls.md
       // "Stable layout"): a new plan version with the same controls, meters
       // and scope keeps its elements, which take the new values themselves.

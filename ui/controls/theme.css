@@ -61,3 +61,24 @@
 /* Controls that belong together (a stereo meter pair): never broken across
    lines; the group wraps as a whole. */
 .signal-group { display: flex; flex: none; flex-wrap: nowrap; gap: 0.5rem; align-items: flex-end; }
+
+/* Edit layout (M2.9-2, docs/ui-controls.md "Editing a panel"): every card,
+   row, group and control framed, with a handle and its address. Outlines
+   and absolutely placed labels only, so nothing moves or resizes; an empty
+   row keeps a height to drop into. */
+signal-panel[editing] [data-edit] { outline: 1px dashed var(--signal-focus); outline-offset: 2px; cursor: grab; }
+signal-panel[editing] .signal-card { position: relative; }
+signal-panel[editing] .signal-card[data-edit]::before,
+signal-panel[editing] [data-edit]:is(signal-fader, signal-knob, signal-xy, signal-button, signal-toggle, signal-meter, signal-scope, signal-value, signal-canvas)::before {
+  content: "⠿"; position: absolute; top: -0.55rem; left: -0.35rem; z-index: 2; padding: 0 2px; border-radius: 3px;
+  font: 10px/1.2 ui-monospace, Menlo, monospace; color: var(--signal-bg); background: var(--signal-focus); pointer-events: none;
+}
+signal-panel[editing] .signal-card[data-edit]::after,
+signal-panel[editing] [data-edit]:is(signal-fader, signal-knob, signal-xy, signal-button, signal-toggle, signal-meter, signal-scope, signal-value, signal-canvas)::after {
+  content: attr(data-edit); position: absolute; top: -0.55rem; right: 0; z-index: 2; max-width: 100%; padding: 0 3px; border-radius: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 9px/1.2 ui-monospace, Menlo, monospace;
+  color: var(--signal-focus); background: var(--signal-bg); pointer-events: none;
+}
+signal-panel[editing] .row[data-edit], signal-panel[editing] .signal-group[data-edit] { outline-color: var(--signal-muted); }
+signal-panel[editing] .signal-card .row:empty { min-height: 2rem; }
+signal-panel[editing] [data-edit-selected] { outline: 2px solid var(--signal-accent); }

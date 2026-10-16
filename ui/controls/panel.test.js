@@ -11,7 +11,17 @@ globalThis.HTMLElement ??= class {
     this.shadowRoot = {
       innerHTML: '',
       querySelector(selector) {
-        if (!parts.has(selector)) parts.set(selector, { textContent: '', title: '', className: '', style: {} });
+        if (!parts.has(selector)) {
+          const attributes = new Map();
+          parts.set(selector, {
+            textContent: '',
+            title: '',
+            className: '',
+            style: {},
+            setAttribute: (name, value) => attributes.set(name, String(value)),
+            getAttribute: (name) => attributes.get(name) ?? null,
+          });
+        }
         return parts.get(selector);
       },
     };
@@ -73,4 +83,18 @@ test('Play and Stop do not rebuild the generated panel', () => {
   assert.equal(panel.shadowRoot.querySelector('.title').textContent, '', 'the title still follows the project');
   panel.described(description(1, 0.75, ['phase'], 'tone'));
   assert.equal(builds, 2, 'a new structure rebuilds');
+});
+
+// M2.9-2 (docs/ui-controls.md "Editing a panel"): the bar's Edit layout
+// switch can be used once there is a plan, and says why not before.
+test('Edit layout is usable once described with a plan', () => {
+  const panel = new SignalPanel();
+  panel.attributes = new Set(['generated']);
+  panel.generate = () => {};
+  const edit = panel.shadowRoot.querySelector('.edit');
+  panel.described({ ...description(null, 0.5), instances: [] });
+  assert.equal(edit.getAttribute('aria-disabled'), 'true');
+  assert.match(edit.title, /no plan/);
+  panel.described(description(0, 0.5));
+  assert.equal(edit.getAttribute('aria-disabled'), 'false');
 });

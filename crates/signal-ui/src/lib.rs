@@ -39,6 +39,7 @@ mod http;
 #[cfg(feature = "test-hooks")]
 mod local;
 pub mod panel;
+pub mod panel_write;
 pub mod player;
 mod server;
 pub mod setup;

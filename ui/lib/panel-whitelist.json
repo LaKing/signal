@@ -1,0 +1,26 @@
+{
+  "about": "What the panel editor writes inside <signal-panel> (docs/ui-controls.md \"Editing a panel\", ADR 0026 §5): read by ui/lib/panel-tree.js and by the server (crates/signal-ui/src/panel_write.rs). A control's attributes are its observedAttributes, plus class.",
+  "classToken": "^[a-z][a-z0-9-]*$",
+  "containers": {
+    "div.signal-cards": { "attributes": ["class"], "children": ["section.signal-card"] },
+    "section.signal-card": { "attributes": ["class"], "children": ["h1", "h2", "p", "div.row", "control"] },
+    "div.row": { "attributes": ["class"], "children": ["control", "div.signal-group"] },
+    "div.signal-group": { "attributes": ["class"], "children": ["control"] },
+    "h1": { "attributes": [], "children": ["text"] },
+    "h2": { "attributes": ["class"], "children": ["text"] },
+    "p": { "attributes": ["class"], "children": ["text"] }
+  },
+  "controls": {
+    "signal-fader": ["bind", "skin", "label", "class", "orientation", "taper", "floor", "min", "max", "default", "unit"],
+    "signal-knob": ["bind", "skin", "label", "class", "sweep", "bipolar", "drag", "taper", "floor", "min", "max", "default", "unit"],
+    "signal-xy": ["bind", "skin", "label", "class", "spring", "taper", "floor", "min", "max", "default"],
+    "signal-toggle": ["bind", "skin", "label", "class", "taper", "floor", "min", "max", "default", "unit"],
+    "signal-value": ["bind", "skin", "label", "class", "digits", "taper", "floor", "min", "max", "default", "unit"],
+    "signal-button": ["bind", "skin", "label", "class"],
+    "signal-meter": ["bind", "skin", "label", "class", "source", "channel", "floor"],
+    "signal-scope": ["bind", "skin", "label", "class", "mode", "rate", "trigger-level", "trigger-edge"],
+    "signal-canvas": ["bind", "skin", "label", "class", "renderer", "rate", "grid", "tilt", "height", "backend"]
+  },
+  "boolean": ["bipolar"],
+  "order": ["renderer", "bind", "source", "channel", "mode", "orientation", "taper", "floor", "min", "max", "default", "unit", "digits", "rate", "grid", "tilt", "height", "sweep", "bipolar", "drag", "spring", "trigger-level", "trigger-edge", "backend", "label", "skin", "class"]
+}

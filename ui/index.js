@@ -37,3 +37,5 @@ import './lib/schematic-layout.test.js';
 import './lib/schematic-scene.test.js';
 import './lib/schematic-inspector.test.js';
 import './lib/schematic-levels.test.js';
+import './lib/panel-tree.test.js';
+import './lib/panel-edit.test.js';

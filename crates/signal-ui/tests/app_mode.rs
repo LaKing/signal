@@ -626,6 +626,59 @@ fn a_signal_file_opens_in_a_working_folder(transport: Transport) {
     rig.finish();
 }
 
+/// M2.9-2 (ADR 0026 §5): a `panel.write` is a file in a `.signal`
+/// project's working folder, so the project becomes edited (here the first
+/// write of its generated panel, `ui/main.html` created), and Save packs it.
+fn a_panel_write_marks_a_signal_project_edited(transport: Transport) {
+    let mut rig = app_rig("signal-panel-write", transport, None);
+    let file = packed(&rig, "tone");
+    let (mut ws, _) = rig.client();
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    let working = PathBuf::from(opened["dir"].as_str().unwrap());
+    assert!(!rig.host().project_status().unwrap().edited);
+    let read = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "panel.read", "file": "main.html"}),
+        "panel.read",
+    );
+    assert_eq!(read["exists"], false);
+    let html = "\n  <div class=\"signal-cards\">\n    <section class=\"signal-card\">\n      <h2>out</h2>\n      <div class=\"row\">\n        <signal-fader bind=\"/out.gain\" taper=\"db\" label=\"gain\"></signal-fader>\n      </div>\n    </section>\n  </div>\n";
+    let written = rig.request(
+        &mut ws,
+        3,
+        json!({"type": "panel.write", "file": "main.html", "html": html, "base": null}),
+        "panel.written",
+    );
+    assert_eq!(written["created"], true);
+    assert!(working.join("ui/main.html").is_file());
+    assert!(
+        rig.host().project_status().unwrap().edited,
+        "the write edits the project"
+    );
+    rig.wait(&mut ws, "edited", |got| {
+        got.of("app")
+            .filter(|a| a["project"]["edited"] == true)
+            .cloned()
+    });
+    rig.request(&mut ws, 4, json!({"type": "project.save"}), "saved");
+    assert!(!rig.host().project_status().unwrap().edited);
+    let unpacked = file.with_extension("check");
+    archive::unpack(&fs::read(&file).unwrap(), &unpacked).unwrap();
+    assert!(
+        fs::read_to_string(unpacked.join("ui/main.html"))
+            .unwrap()
+            .contains(html),
+        "saved with the panel"
+    );
+    rig.finish();
+}
+
 /// Audit P2 (document-check-stall): the control thread never waits for the
 /// display's comparison of a .signal project. While a comparison's result
 /// is held (as a large project's would take long), steps go on: requests
@@ -1064,6 +1117,7 @@ both!(
     a_stopped_commit_updates_the_inner_bases,
     signal_ui_refuses_the_app_s_messages,
     a_signal_file_opens_in_a_working_folder,
+    a_panel_write_marks_a_signal_project_edited,
     steps_never_wait_for_a_document_comparison,
     opening_another_project_can_save_first,
     reopening_the_same_file_with_save_keeps_the_edit,

@@ -179,9 +179,58 @@ impl Checked {
 
 /// The `signal-*` start tags of an HTML text, in source order.
 pub fn elements(text: &str) -> Vec<Element> {
-    let bytes = text.as_bytes();
     let mut found = Vec::new();
+    scan(text, |tag| {
+        if let Tag::Start {
+            name,
+            offset,
+            attributes,
+            ..
+        } = tag
+            && name.starts_with("signal-")
+        {
+            found.push(Element {
+                name,
+                offset,
+                attributes,
+            });
+        }
+    });
+    found
+}
+
+/// A tag the scanner meets outside comments and raw text.
+enum Tag {
+    /// A start tag: its name (lower case), the offset of its `<`, its
+    /// attributes, and the offset after its `>`.
+    Start {
+        name: String,
+        offset: usize,
+        attributes: Vec<Attribute>,
+        end: usize,
+    },
+    /// An end tag: its name (lower case) and the offset of its `<`.
+    End { name: String, offset: usize },
+}
+
+/// Every start and end tag of an HTML text in source order, skipping
+/// comments and the content of `script`, `style`, `textarea` and `title`.
+fn scan(text: &str, mut on: impl FnMut(Tag)) {
+    let bytes = text.as_bytes();
     let mut at = 0;
+    let name_at = |from: usize| {
+        let len = text
+            .get(from..)
+            .unwrap_or("")
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
+            .count();
+        (len > 0 && bytes.get(from).is_some_and(u8::is_ascii_alphabetic)).then(|| {
+            text.get(from..from + len)
+                .unwrap_or("")
+                .to_ascii_lowercase()
+        })
+    };
     while let Some(lt) = text.get(at..).and_then(|rest| rest.find('<')) {
         let start = at + lt;
         let rest = text.get(start..).unwrap_or("");
@@ -192,38 +241,79 @@ pub fn elements(text: &str) -> Vec<Element> {
                 .map_or(text.len(), |end| start + 4 + end + 3);
             continue;
         }
-        let name_len = rest
-            .get(1..)
-            .unwrap_or("")
-            .bytes()
-            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
-            .count();
-        if name_len == 0 || !bytes.get(start + 1).is_some_and(u8::is_ascii_alphabetic) {
-            // A closing tag, a declaration, or a `<` in text.
+        if rest.starts_with("</") {
+            if let Some(name) = name_at(start + 2) {
+                on(Tag::End {
+                    name,
+                    offset: start,
+                });
+            }
             at = start + 1;
             continue;
         }
-        let name = rest.get(1..1 + name_len).unwrap_or("").to_ascii_lowercase();
-        let (attributes, end) = attributes(text, start + 1 + name_len);
+        let Some(name) = name_at(start + 1) else {
+            // A declaration, or a `<` in text.
+            at = start + 1;
+            continue;
+        };
+        let (attributes, end) = attributes(text, start + 1 + name.len());
         at = end;
-        if matches!(name.as_str(), "script" | "style" | "textarea" | "title") {
+        let raw = matches!(name.as_str(), "script" | "style" | "textarea" | "title");
+        on(Tag::Start {
+            name: name.clone(),
+            offset: start,
+            attributes,
+            end,
+        });
+        if raw {
             // Raw text up to the matching end tag.
             let close = format!("</{name}");
             at = text
                 .get(at..)
                 .and_then(|r| r.to_ascii_lowercase().find(&close))
                 .map_or(text.len(), |i| at + i);
-            continue;
-        }
-        if name.starts_with("signal-") {
-            found.push(Element {
-                name,
-                offset: start,
-                attributes,
-            });
         }
     }
-    found
+}
+
+/// The content of a file's one `<signal-panel>` element, as byte offsets:
+/// after its start tag's `>`, and the `<` of its end tag, found as the
+/// start tags are (outside comments, scripts and the other raw text), so a
+/// `</signal-panel>` in a comment or a script is not its end. Else why the
+/// file has no one panel element to edit (ADR 0026 §5).
+pub fn panel_content(text: &str) -> Result<(usize, usize), String> {
+    let mut starts = Vec::new();
+    let mut ends = Vec::new();
+    scan(text, |tag| match tag {
+        Tag::Start {
+            name, offset, end, ..
+        } if name == PANEL_ELEMENT => starts.push((offset, end)),
+        Tag::End { name, offset } if name == PANEL_ELEMENT => ends.push(offset),
+        _ => {}
+    });
+    let line = |offset: usize| text.get(..offset).unwrap_or("").matches('\n').count() + 1;
+    match starts.as_slice() {
+        [] => Err(format!("the file has no <{PANEL_ELEMENT}> element")),
+        [(start, content)] => ends
+            .iter()
+            .copied()
+            .find(|end| end >= content)
+            .map(|end| (*content, end))
+            .ok_or_else(|| {
+                format!(
+                    "<{PANEL_ELEMENT}> (line {}) has no end tag outside comments and scripts",
+                    line(*start)
+                )
+            }),
+        many => Err(format!(
+            "the file has {} <{PANEL_ELEMENT}> elements (lines {}); the editor edits a file with one",
+            many.len(),
+            many.iter()
+                .map(|(offset, _)| line(*offset).to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
 }
 
 /// The attributes of a start tag from byte `at` (after its name), and the

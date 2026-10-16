@@ -50,10 +50,11 @@ use signal_project::{Diagnostic, LoadError, PROJECT_FILE, Project, located};
 
 use crate::PROTOCOL;
 use crate::app::{self, Status};
-use crate::bindings::{Targets, check};
+use crate::bindings::{MAIN_PANEL, Targets, check, panel_content};
 use crate::document::{Document, project_name};
 use crate::frames::{self, frame};
 use crate::panel::{Panel, Target, Written, after_write, ramp_frames, write_file, write_project};
+use crate::panel_write::{check_content, first_file, replace, sha256_hex};
 use crate::player::{Backend, Input, Interface, Output, Selection, open_input, open_output};
 use crate::server::{Inbound, Outbound, Server, ServerOptions};
 use crate::setup::{
@@ -311,16 +312,27 @@ struct Unsaved {
     error: Option<(u64, String)>,
 }
 
-/// A refused message: its code and why.
+/// A refused message: its code and why, and what else the error carries
+/// (`panel.write`'s `conflict`: the current text and base).
 struct Failure {
     code: &'static str,
     message: String,
+    detail: Option<Value>,
 }
 
 fn fail(code: &'static str, message: impl Into<String>) -> Failure {
     Failure {
         code,
         message: message.into(),
+        detail: None,
+    }
+}
+
+/// [`fail`], with `detail`'s fields in the error.
+fn fail_with(code: &'static str, message: impl Into<String>, detail: Value) -> Failure {
+    Failure {
+        detail: Some(detail),
+        ..fail(code, message)
     }
 }
 
@@ -2148,6 +2160,8 @@ impl Host {
             "retry" => self.retry(&message).map(Some),
             "revert" => self.revert(&message).map(Some),
             "panel.check" => self.panel_check(&message).map(Some),
+            "panel.read" => self.panel_read(&message).map(Some),
+            "panel.write" => self.panel_write(&message).map(Some),
             "setup.get" => Ok(Some(self.setup_get())),
             "setup.devices" => self.setup_devices(&message).map(Some),
             "setup.check" => self.setup_check(&message).map(Some),
@@ -2195,15 +2209,32 @@ impl Host {
                 if kind.starts_with("schematic.") {
                     self.push_graph(true);
                 }
+                // Every client gets the written panel (ADR 0026 §5).
+                if kind == "panel.write" {
+                    let pushed = json!({
+                        "type": "panel.written",
+                        "file": reply.get("file").cloned().unwrap_or(Value::Null),
+                        "base": reply.get("base").cloned().unwrap_or(Value::Null),
+                        "html": message.get("html").cloned().unwrap_or(Value::Null),
+                    });
+                    self.broadcast(&pushed);
+                }
             }
             Ok(None) => {}
             Err(failure) => {
-                let error = json!({
+                let mut error = json!({
                     "type": "error",
                     "id": id,
                     "code": failure.code,
                     "message": failure.message,
                 });
+                if let (Some(Value::Object(detail)), Some(error)) =
+                    (failure.detail, error.as_object_mut())
+                {
+                    for (key, value) in detail {
+                        error.entry(key).or_insert(value);
+                    }
+                }
                 self.send_text(client, &error);
             }
         }
@@ -3394,6 +3425,176 @@ impl Host {
             "bindings": checked.bindings,
             "ok": !checked.failed(),
             "diagnostics": diagnostics,
+        }))
+    }
+
+    /// The panel file `name` of `panel.read` and `panel.write`: an `.html`
+    /// file in the project's `ui/` by the static files' rules
+    /// ([`crate::http::file`]: no `..`, no hidden segment, no escape through
+    /// a link), or `ui/main.html` when it does not exist yet (the generated
+    /// default panel's first write). Never outside the project served.
+    fn panel_path(&self, name: &str) -> Result<(PathBuf, bool), Failure> {
+        let unknown = || {
+            fail(
+                "unknown-panel",
+                format!("no panel '{name}' in the project's ui/ folder"),
+            )
+        };
+        if !name.ends_with(".html") {
+            return Err(unknown());
+        }
+        let ui = project_ui(&self.dir);
+        // Written only where it resolves inside the project served, never
+        // through a link (a linked `ui/` or file is served, not edited).
+        let link =
+            |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+        if link(&ui) || link(&ui.join(name)) {
+            return Err(fail(
+                "unknown-panel",
+                format!(
+                    "ui/{name} is reached through a link: the editor writes only the project's own files"
+                ),
+            ));
+        }
+        if let Some(path) = crate::http::file(&ui, name) {
+            let project = fs::canonicalize(&self.dir).map_err(|_| unknown())?;
+            return if path.starts_with(&project) {
+                Ok((path, true))
+            } else {
+                Err(unknown())
+            };
+        }
+        let main = ui.join(MAIN_PANEL);
+        if name == MAIN_PANEL && fs::symlink_metadata(&main).is_err() {
+            return Ok((main, false));
+        }
+        Err(unknown())
+    }
+
+    /// `panel.read` (ADR 0026 §5): a panel file's text and its SHA-256 (the
+    /// `base` a `panel.write` names), the content of its `<signal-panel>`
+    /// (or why it has no one to edit), and whether a write can be checked
+    /// (`planned`: the project has a plan). A missing `ui/main.html` reads
+    /// as `exists: false` with `base: null`: the generated panel.
+    fn panel_read(&self, message: &Value) -> Result<Value, Failure> {
+        let name = message.get("file").and_then(Value::as_str).unwrap_or("");
+        let (path, exists) = self.panel_path(name)?;
+        let planned = self.plan.is_some();
+        if !exists {
+            return Ok(
+                json!({"type": "panel.read", "file": name, "exists": false, "base": null,
+                "text": null, "html": null, "editable": true, "reason": null, "planned": planned}),
+            );
+        }
+        let text = fs::read_to_string(&path)
+            .map_err(|e| fail("unknown-panel", format!("ui/{name}: {e}")))?;
+        let (html, reason) = match panel_content(&text) {
+            Ok((start, end)) => (json!(text[start..end]), Value::Null),
+            Err(reason) => (Value::Null, json!(reason)),
+        };
+        Ok(json!({
+            "type": "panel.read",
+            "file": name,
+            "exists": true,
+            "base": sha256_hex(text.as_bytes()),
+            "text": text,
+            "html": html,
+            "editable": reason.is_null(),
+            "reason": reason,
+            "planned": planned,
+        }))
+    }
+
+    /// `panel.write` (ADR 0026 §5): replaces the content of the file's one
+    /// `<signal-panel>` with `html`, keeping every byte outside it, after
+    /// checking `html` against the whitelist again, that the file is still
+    /// the version `base` names (`conflict` otherwise, with its text), and
+    /// the bindings as `panel.check` does; written atomically as `commit`
+    /// writes, and taken as seen by the watch. A missing `ui/main.html`
+    /// (`base: null`) is created with the standard head.
+    fn panel_write(&mut self, message: &Value) -> Result<Value, Failure> {
+        let name = message.get("file").and_then(Value::as_str).unwrap_or("");
+        let html = message
+            .get("html")
+            .and_then(Value::as_str)
+            .ok_or_else(|| fail("bad-message", "panel.write needs `html`"))?;
+        let base = match message.get("base") {
+            Some(Value::String(base)) => Some(base.as_str()),
+            None | Some(Value::Null) => None,
+            Some(_) => return Err(fail("bad-message", "`base` is a string or null")),
+        };
+        let (path, exists) = self.panel_path(name)?;
+        check_content(html).map_err(|why| fail("bad-html", format!("not written: {why}")))?;
+        let before = if exists {
+            Some(
+                fs::read_to_string(&path)
+                    .map_err(|e| fail("write-failed", format!("ui/{name}: {e}")))?,
+            )
+        } else {
+            None
+        };
+        let current = before.as_deref().map(|t| sha256_hex(t.as_bytes()));
+        if current.as_deref() != base {
+            let html = before
+                .as_deref()
+                .and_then(|t| panel_content(t).ok().map(|(s, e)| t[s..e].to_owned()));
+            return Err(fail_with(
+                "conflict",
+                format!("ui/{name} changed since the version the editor started from"),
+                json!({"file": name, "base": current, "text": before, "html": html}),
+            ));
+        }
+        let after = match &before {
+            Some(text) => {
+                let range = panel_content(text).map_err(|why| fail("not-editable", why))?;
+                replace(text, range, html)
+            }
+            None => first_file(&self.project_name(), html),
+        };
+        let plan = self.plan.as_ref().ok_or_else(|| {
+            fail(
+                "not-playing",
+                "the project has no plan: the bindings cannot be checked",
+            )
+        })?;
+        let targets = Targets {
+            plan,
+            panel: &self.panel,
+        };
+        let checked = check(&format!("ui/{name}"), &after, &targets);
+        if checked.failed() {
+            let diagnostics: Vec<Value> = checked
+                .findings
+                .iter()
+                .map(|f| {
+                    let value = serde_json::to_value(&f.diagnostic).unwrap_or(Value::Null);
+                    with(value, "control", json!(f.control))
+                })
+                .collect();
+            let first = checked
+                .findings
+                .iter()
+                .find(|f| f.diagnostic.severity == signal_project::Severity::Error)
+                .map(|f| f.diagnostic.message.clone())
+                .unwrap_or_default();
+            return Err(fail_with(
+                "bad-binding",
+                format!("not written: {first}"),
+                json!({"file": name, "diagnostics": diagnostics}),
+            ));
+        }
+        let failed =
+            |e: std::io::Error| fail("write-failed", format!("ui/{name} was not written: {e}"));
+        if let Some(folder) = path.parent() {
+            fs::create_dir_all(folder).map_err(failed)?;
+        }
+        write_file(&path, &after).map_err(failed)?;
+        self.seen(&Path::new("ui").join(name));
+        Ok(json!({
+            "type": "panel.written",
+            "file": name,
+            "base": sha256_hex(after.as_bytes()),
+            "created": !exists,
         }))
     }
 
