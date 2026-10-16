@@ -164,13 +164,16 @@ pub(crate) fn run(
     let rate = host.sample_rate();
     let url = host.url();
     let panel = host.panel_url();
+    let schematic = host.page_url(signal_ui::SCHEMATIC_PAGE);
     eprintln!("signal: ui at {url}");
     eprintln!("signal: panel at {panel}");
+    eprintln!("signal: schematic at {schematic}");
     if json {
         print_stdout(
             &json!({
                 "url": url,
                 "panel": panel,
+                "schematic": schematic,
                 "http": host.http_addr().to_string(),
                 "ws": host.ws_addr().to_string(),
             })

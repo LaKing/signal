@@ -12,6 +12,7 @@ Terms are those of `00-vision.md` §3a: Project, Module, Primitive, Composite, I
   composites/<name>.toml  one composite per file (optional folder)
   ui/*.html               panels (optional; ui/main.html is the main one)
   ui/assets/              their SVG and PNG files
+  ui/schematic.toml       the schematic's positions (optional, presentation only; §11)
 ```
 
 These are the **project files**. Signal loads every one of them, validates every one of them, and hashes every one of them into a render's manifest (§7). A recorded session keeps an exact copy of them for every plan version (`session-format.md`). Nothing else in the folder is read, except by `signal ui`, which serves the folder's `ui/` (panels and their `assets/`) to web pages as files and never plans them (`ui-protocol.md`). A panel is an HTML page whose controls bind to ports by address; `signal ui check <project>` checks every binding against the plan, and moving a control writes `project.toml`, never the panel (`ui-controls.md` "Panels"). Machine settings (Setup: devices, channel mapping) never live here.
@@ -234,3 +235,17 @@ A symbolic link where a project file would be is refused, not followed, and a fo
 - the folder to unpack into must not exist, or be empty. A `.signal` file larger than 1 GiB and 64 MiB is refused before it is read.
 
 An archive made by another tool is read by the same rules. Files in it that a project never reads are unpacked, and are left out when it is saved again.
+
+## 11. Schematic positions (`ui/schematic.toml`)
+
+The schematic (`ui-controls.md` "Schematic", ADR 0026 §3) is laid out automatically; a box moved by hand keeps its place through this optional file. It is **presentation only**: it never changes what the project means, renders, plays or hashes (it is not a file `signal render` loads), and deleting it loses nothing but positions. Like every file under `ui/` it is packed in a `.signal` file (§10), so moving a box edits a `.signal` project.
+
+```toml
+[top]                            # the project's top level
+drums = { x = 120, y = -40 }
+
+[composite.kick]                 # the inside of composite `kick` (every instance of it)
+osc = { x = 0, y = 30 }
+```
+
+One table per graph level: `[top]` for the top level, `[composite.<name>]` for a composite's inside; each key is an instance of that level, its value `{ x, y }`, integers in the schematic's units. `schematic.move` (`ui-protocol.md`) writes it with `toml_edit`, atomically, as `commit` writes `project.toml`, keeping comments and everything else; "Reset layout" removes a level's table, or the whole file. Read leniently, since it is never the project: an entry that is not `{ x = integer, y = integer }` and any other table are ignored; an instance or level that does not exist (any more) is kept in the file and in `graph`'s `layout.positions` as read, and ignored by the drawing; a file that does not parse is reported with `graph` (`layout.error`) and taken as empty.

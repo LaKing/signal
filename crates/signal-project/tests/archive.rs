@@ -223,6 +223,25 @@ fn what_a_project_never_reads_stays_out() {
     );
 }
 
+/// M2.9-1 AC19: the schematic's positions (`ui/schematic.toml`, ADR 0026
+/// §3) are a file under `ui/`, so a pack takes them and an unpack gives
+/// them back byte for byte.
+#[test]
+fn the_schematic_positions_are_packed() {
+    let dir = base("schematic").join("p");
+    copy_tree(&projects().join("kick"), &dir);
+    let text = "[top]\ndrums = { x = 10, y = -4 }\n";
+    fs::write(dir.join(signal_project::schematic::SCHEMATIC_FILE), text).unwrap();
+    let bytes = pack(&dir).unwrap();
+    assert!(names(&bytes).contains(&"ui/schematic.toml".to_owned()));
+    let into = base("schematic-out").join("p");
+    unpack(&bytes, &into).unwrap();
+    assert_eq!(
+        fs::read_to_string(into.join("ui/schematic.toml")).unwrap(),
+        text
+    );
+}
+
 /// `packs_to` says what comparing `pack`'s bytes says, without packing: a
 /// folder matches the archive it packed to, whatever is not read and its
 /// files' times; any change of a read file's bytes, a file added, removed

@@ -22,6 +22,9 @@
 //!   `project.toml` text with `toml_edit`, keeping everything else.
 //! - [`archive`]: project files (`.signal`, ADR 0025): a project folder
 //!   packed into one deterministic zip, and unpacked with every entry checked.
+//! - [`Project::structure`]: the structure as written, for the UI protocol's
+//!   `graph` (ADR 0026 §1); [`schematic`]: the schematic's positions in
+//!   `ui/schematic.toml` (ADR 0026 §3).
 
 pub mod archive;
 mod diagnostic;
@@ -31,7 +34,9 @@ mod locate;
 mod model;
 pub mod provenance;
 mod schema;
+pub mod schematic;
 pub mod session;
+mod structure;
 mod write;
 
 use std::collections::{BTreeMap, BTreeSet};

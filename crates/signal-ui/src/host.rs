@@ -44,6 +44,7 @@ use signal_output::{
 };
 use signal_project::archive::{self, TempProject};
 use signal_project::live::{Both, ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload_observed};
+use signal_project::schematic::{self, SCHEMATIC_FILE};
 use signal_project::session::{LiveRecorder, SessionRecorder, sink_of};
 use signal_project::{Diagnostic, LoadError, PROJECT_FILE, Project, located};
 
@@ -52,7 +53,7 @@ use crate::app::{self, Status};
 use crate::bindings::{Targets, check};
 use crate::document::{Document, project_name};
 use crate::frames::{self, frame};
-use crate::panel::{Panel, Target, Written, after_write, ramp_frames, write_project};
+use crate::panel::{Panel, Target, Written, after_write, ramp_frames, write_file, write_project};
 use crate::player::{Backend, Input, Interface, Output, Selection, open_input, open_output};
 use crate::server::{Inbound, Outbound, Server, ServerOptions};
 use crate::setup::{
@@ -430,6 +431,11 @@ pub struct Host {
     next_failure: u64,
     /// The `unsaved` message last pushed.
     unsaved_pushed: Option<Value>,
+    /// The `graph` message last pushed (`docs/ui-protocol.md` "graph").
+    graph_pushed: Option<Value>,
+    /// App mode, stopped and switched on: the project folder's watch, for
+    /// the `graph` push (a run has its own), and when it was last polled.
+    idle_watch: Option<(ProjectWatcher, Instant)>,
 }
 
 fn joined(diagnostics: Vec<Diagnostic>) -> String {
@@ -685,6 +691,8 @@ impl Host {
             port_edits: BTreeMap::new(),
             next_failure: 1,
             unsaved_pushed: None,
+            graph_pushed: None,
+            idle_watch: None,
         };
         host.list_devices();
         host
@@ -832,6 +840,7 @@ impl Host {
     pub fn step(&mut self) -> Vec<String> {
         self.poll();
         self.watch();
+        self.watch_stopped();
         for _ in 0..MESSAGES_PER_STEP {
             match self.server.inbound.try_recv() {
                 Ok(message) => self.inbound(message),
@@ -1025,6 +1034,7 @@ impl Host {
     /// panel and diagnostics, and serves its `ui/`.
     fn open(&mut self, dir: &Path) {
         self.dir = dir.to_owned();
+        self.idle_watch = None;
         self.server.set_project_ui(project_ui(dir));
         let loaded = app::load(dir, &self.registry);
         let Some(mode) = self.app.as_mut() else {
@@ -1285,6 +1295,7 @@ impl Host {
             Ok(_) => {
                 let describe = self.describe(false);
                 self.broadcast(&describe);
+                self.push_graph(false);
                 Ok(())
             }
             Err(failure) => {
@@ -1776,6 +1787,7 @@ impl Host {
         if swapped {
             let describe = self.describe(false);
             self.broadcast(&describe);
+            self.push_graph(true);
         }
     }
 
@@ -1816,6 +1828,8 @@ impl Host {
             &self.registry,
         );
         let mut reloaded = None;
+        // A swap's `graph` is pushed once it commits (`poll`).
+        let swapping = matches!(&result, Ok(applied) if applied.swap.is_some());
         let notice = match result {
             Ok(applied) => {
                 run.file = file;
@@ -1869,6 +1883,10 @@ impl Host {
         if notice.1 {
             let describe = self.describe(false);
             self.broadcast(&describe);
+        }
+        // `ui/schematic.toml` changes come this way too.
+        if !swapping {
+            self.push_graph(false);
         }
     }
 
@@ -2120,6 +2138,9 @@ impl Host {
         let kind = message.get("type").and_then(Value::as_str).unwrap_or("");
         let result = match kind {
             "describe" => Ok(Some(self.describe(false))),
+            "graph" => self.graph().map(Some),
+            "schematic.move" => self.schematic_move(&message).map(Some),
+            "schematic.reset" => self.schematic_reset(&message).map(Some),
             "subscribe" => self.subscribe(client, &message).map(Some),
             "unsubscribe" => self.unsubscribe(client, &message).map(Some),
             "set" | "ramp" | "trigger" => self.edit(client, &id, kind, &message).map(|()| None),
@@ -2168,6 +2189,11 @@ impl Host {
                 if restarted || changed {
                     let describe = self.describe(restarted);
                     self.broadcast(&describe);
+                    self.push_graph(false);
+                }
+                // Every client sees the positions written.
+                if kind.starts_with("schematic.") {
+                    self.push_graph(true);
                 }
             }
             Ok(None) => {}
@@ -2321,6 +2347,222 @@ impl Host {
             describe = with(describe, "restarted", json!(true));
         }
         describe
+    }
+
+    /// `graph` (ADR 0026 §1): the project's structure as written
+    /// ([`Project::structure`]), and its schematic positions from
+    /// `ui/schematic.toml`, read now. Playing, of the running project (the
+    /// last good version, as `describe`); stopped (app mode), of the folder.
+    fn graph(&self) -> Result<Value, Failure> {
+        let (name, structure) = match &self.run {
+            Some(run) => {
+                let plan = self
+                    .plan
+                    .as_ref()
+                    .ok_or_else(|| fail("does-not-load", "the running project has no plan"))?;
+                (
+                    run.current.name.clone(),
+                    run.current.structure(plan, &self.registry),
+                )
+            }
+            None => {
+                if self.app.as_ref().is_some_and(|m| !m.opened) {
+                    return Err(fail("no-project", "open a project folder first"));
+                }
+                let (project, plan, _) = app::load(&self.dir, &self.registry)
+                    .map_err(|diagnostics| fail("does-not-load", diagnostics.join("\n")))?;
+                (
+                    project.name.clone(),
+                    project.structure(&plan, &self.registry),
+                )
+            }
+        };
+        let (positions, error) = match fs::read_to_string(self.dir.join(SCHEMATIC_FILE)) {
+            Ok(text) => match schematic::read_positions(&text) {
+                Ok(positions) => (positions, None),
+                Err(error) => (Default::default(), Some(error)),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                (Default::default(), None)
+            }
+            Err(error) => (
+                Default::default(),
+                Some(format!("{SCHEMATIC_FILE}: {error}")),
+            ),
+        };
+        let positions: serde_json::Map<String, Value> = positions
+            .into_iter()
+            .map(|(level, entries)| {
+                let entries: serde_json::Map<String, Value> = entries
+                    .into_iter()
+                    .map(|(instance, (x, y))| (instance, json!({"x": x, "y": y})))
+                    .collect();
+                (level, Value::Object(entries))
+            })
+            .collect();
+        Ok(json!({
+            "type": "graph",
+            "project": name,
+            "planVersion": self.run.as_ref().map(|r| r.version),
+            "top": structure.get("top"),
+            "composites": structure.get("composites"),
+            "layout": {"file": SCHEMATIC_FILE, "positions": positions, "error": error},
+        }))
+    }
+
+    /// Pushes `graph` to every client when it differs from the last one
+    /// pushed, or (`force`) whatever it is: after a swap and a schematic
+    /// write. A project that does not load pushes nothing.
+    fn push_graph(&mut self, force: bool) {
+        let Ok(graph) = self.graph() else {
+            return;
+        };
+        if force || self.graph_pushed.as_ref() != Some(&graph) {
+            self.broadcast(&graph);
+            self.graph_pushed = Some(graph);
+        }
+    }
+
+    /// App mode, stopped: every 100 ms a changed folder pushes `graph` (its
+    /// structure or its positions). Not while switched off: switching on
+    /// pushes what changed meanwhile (`handle`).
+    fn watch_stopped(&mut self) {
+        let opened = self.app.as_ref().is_some_and(|m| m.opened);
+        if self.run.is_some() || !opened {
+            self.idle_watch = None;
+            return;
+        }
+        if !self.powered() {
+            return;
+        }
+        let Some((watcher, polled)) = self.idle_watch.as_mut() else {
+            self.idle_watch = ProjectWatcher::new(&self.dir)
+                .ok()
+                .map(|w| (w, Instant::now()));
+            return;
+        };
+        if polled.elapsed() < Duration::from_millis(WATCH_INTERVAL_MS) {
+            return;
+        }
+        *polled = Instant::now();
+        if watcher.poll().unwrap_or(false) {
+            self.push_graph(false);
+        }
+    }
+
+    /// `schematic.move` (ADR 0026 §3): instance `instance` of level `level`
+    /// (`""` the top level, else a composite the project uses) at `x`, `y`
+    /// (finite, rounded to integers), written into `ui/schematic.toml`.
+    fn schematic_move(&mut self, message: &Value) -> Result<Value, Failure> {
+        let text = |key: &str| {
+            message
+                .get(key)
+                .and_then(Value::as_str)
+                .ok_or_else(|| fail("bad-message", format!("schematic.move needs `{key}`")))
+        };
+        let (level, instance) = (text("level")?, text("instance")?);
+        let coordinate = |key: &str| {
+            message
+                .get(key)
+                .and_then(Value::as_f64)
+                .filter(|v| v.is_finite() && v.abs() <= 1e9)
+                .map(|v| v.round() as i64)
+                .ok_or_else(|| {
+                    fail(
+                        "bad-value",
+                        format!("`{key}` must be a finite number, at most 1e9"),
+                    )
+                })
+        };
+        let (x, y) = (coordinate("x")?, coordinate("y")?);
+        let graph = self.graph()?;
+        let instances = level_of(&graph, level)?["instances"].as_array();
+        if !instances.is_some_and(|all| all.iter().any(|i| i["name"] == instance)) {
+            let at = if level.is_empty() {
+                "the top level".to_owned()
+            } else {
+                format!("composite {level}")
+            };
+            return Err(fail(
+                "unknown-instance",
+                format!("{at} has no instance `{instance}`"),
+            ));
+        }
+        self.write_schematic(|text| schematic::set_position(text, level, instance, x, y))?;
+        Ok(json!({
+            "type": "schematic.moved",
+            "level": level,
+            "instance": instance,
+            "x": x,
+            "y": y,
+            "file": SCHEMATIC_FILE,
+        }))
+    }
+
+    /// `schematic.reset`: removes the table of `level`, or without one the
+    /// whole `ui/schematic.toml`.
+    fn schematic_reset(&mut self, message: &Value) -> Result<Value, Failure> {
+        let path = self.dir.join(SCHEMATIC_FILE);
+        match message.get("level") {
+            None | Some(Value::Null) => {
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(fail("write-failed", format!("{}: {error}", path.display())));
+                    }
+                }
+                self.seen(Path::new(SCHEMATIC_FILE));
+                Ok(json!({"type": "schematic.reset", "level": null, "file": SCHEMATIC_FILE}))
+            }
+            Some(Value::String(level)) => {
+                let graph = self.graph()?;
+                level_of(&graph, level)?;
+                if path.exists() {
+                    self.write_schematic(|text| schematic::remove_level(text, level))?;
+                }
+                Ok(json!({"type": "schematic.reset", "level": level, "file": SCHEMATIC_FILE}))
+            }
+            Some(_) => Err(fail("bad-message", "`level` is a string or null")),
+        }
+    }
+
+    /// `ui/schematic.toml` edited by `edit`, written atomically as `commit`
+    /// writes `project.toml`, and taken as seen by the watch (the write's
+    /// `graph` is pushed at once instead).
+    fn write_schematic(
+        &mut self,
+        edit: impl FnOnce(&str) -> Result<String, String>,
+    ) -> Result<(), Failure> {
+        let path = self.dir.join(SCHEMATIC_FILE);
+        let failed = |error: String| {
+            fail(
+                "write-failed",
+                format!("{} was not written: {error}", path.display()),
+            )
+        };
+        let before = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(failed(error.to_string())),
+        };
+        let after = edit(&before).map_err(failed)?;
+        if let Some(folder) = path.parent() {
+            fs::create_dir_all(folder).map_err(|e| failed(e.to_string()))?;
+        }
+        write_file(&path, &after).map_err(|e| failed(e.to_string()))?;
+        self.seen(Path::new(SCHEMATIC_FILE));
+        Ok(())
+    }
+
+    /// Takes `file` as it is now as seen by the watches.
+    fn seen(&mut self, file: &Path) {
+        let run = self.run.as_mut().and_then(|r| r.watcher.as_mut());
+        let idle = self.idle_watch.as_mut().map(|(w, _)| w);
+        for watcher in run.into_iter().chain(idle) {
+            let stamp = watcher.stamp(file);
+            watcher.accept(file, stamp);
+        }
     }
 
     fn subscribe(&mut self, client: u64, message: &Value) -> Result<Value, Failure> {
@@ -3683,6 +3925,21 @@ fn app_only() -> Failure {
         "not-allowed",
         "only Signal.app's server opens projects and plays or stops them",
     )
+}
+
+/// Level `level` of a `graph` message: `""` the top level, else a composite.
+fn level_of<'a>(graph: &'a Value, level: &str) -> Result<&'a Value, Failure> {
+    let found = if level.is_empty() {
+        graph.get("top")
+    } else {
+        graph.get("composites").and_then(|c| c.get(level))
+    };
+    found.ok_or_else(|| {
+        fail(
+            "unknown-level",
+            format!("the project uses no composite `{level}`"),
+        )
+    })
 }
 
 /// The refusal of what needs the app switched on.

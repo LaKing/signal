@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { INITIAL_TAB, TABS, select, tabForAction } from './tabs.js';
 
-test('the tabs are Panel, Parameters and Setup, opening on the panel', () => {
-  assert.deepEqual(TABS.map((t) => t.label), ['Panel', 'Parameters', 'Setup']);
+test('the tabs are Panel, Schematic, Parameters and Setup, opening on the panel', () => {
+  assert.deepEqual(TABS.map((t) => t.label), ['Panel', 'Schematic', 'Parameters', 'Setup']);
   assert.equal(INITIAL_TAB, 'panel');
 });
 

@@ -37,6 +37,9 @@ const CHUNK: usize = 64 << 10;
 /// The generated panel in the UI library, served for a project's missing
 /// `ui/main.html`.
 const DEFAULT_PANEL: &str = "default-panel.html";
+/// The schematic's page in the UI library, served at
+/// [`SCHEMATIC_PAGE`](crate::SCHEMATIC_PAGE).
+const SCHEMATIC: &str = "schematic.html";
 
 /// How long a client may take.
 #[derive(Clone, Copy, Debug)]
@@ -281,6 +284,7 @@ impl Files {
         let path = request.path.as_str();
         let found = match path {
             "/" => file(&self.ui, "index.html"),
+            crate::SCHEMATIC_PAGE => file(&self.ui, SCHEMATIC),
             _ => match (path.strip_prefix("/ui/"), path.strip_prefix("/project/")) {
                 (Some(rest), _) => file(&self.ui, rest),
                 // A project without `ui/main.html` gets the generated panel.
@@ -572,6 +576,39 @@ mod tests {
         let other = parse(b"GET / HTTP/1.1\r\nHost: example.com:8").unwrap();
         assert_eq!(files.respond(&other).status, 403);
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// M2.9-1: `signal ui`'s schematic page is `/schematic`, the UI
+    /// library's `schematic.html` (also at `/ui/schematic.html`).
+    #[test]
+    fn the_schematic_page_is_served_at_its_path() {
+        let files = Files {
+            ui: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui"),
+            project: Arc::new(RwLock::new(PathBuf::from("/nonexistent"))),
+            port: 8,
+            remote: false,
+        };
+        let stop = AtomicBool::new(false);
+        for request in [
+            &b"GET /schematic HTTP/1.1\r\nHost: localhost:8"[..],
+            b"GET /ui/schematic.html HTTP/1.1\r\nHost: localhost:8",
+        ] {
+            let response = files.respond(&parse(request).unwrap());
+            assert_eq!(response.status, 200);
+            let mut out = Vec::new();
+            write_response(&mut out, response, &stop, DEADLINES.write).unwrap();
+            let out = String::from_utf8(out).unwrap();
+            assert!(
+                out.contains("Content-Type: text/html; charset=utf-8"),
+                "{out}"
+            );
+            assert!(out.contains("<signal-schematic"), "{out}");
+        }
+        let head = files.respond(&parse(b"HEAD /schematic HTTP/1.1\r\nHost: localhost:8").unwrap());
+        assert_eq!(head.status, 200);
+        let missing =
+            files.respond(&parse(b"GET /schematic/x HTTP/1.1\r\nHost: localhost:8").unwrap());
+        assert_eq!(missing.status, 404);
     }
 
     /// M2.8-9 AC1: a HEAD response never carries a body, a refusal (403,

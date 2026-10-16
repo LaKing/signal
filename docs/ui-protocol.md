@@ -29,6 +29,7 @@ The fragment is never sent over HTTP, so the token is in no request, Referer or 
 |---|---|
 | `/` | the repository's `ui/index.html` (the raw protocol test page) |
 | `/ui/<path>` | the repository's `ui/<path>` (the UI library; `signal ui --ui-dir` names another folder) |
+| `/schematic` | the repository's `ui/schematic.html`: the schematic, `<signal-schematic>` alone filling the page (M2.9-1; also at `/ui/schematic.html`). `signal ui` prints its URL with the same fragment; it is its own page rather than a tab of the generated panel, so it fills the window |
 | `/project/<path>` | the project's `ui/<path>`: its panels, and `ui/assets/` for their SVG and PNG files. `/project/main.html` of a project without `ui/main.html` is the generated panel, the repository's `ui/default-panel.html` (`ui-controls.md` "Panels") |
 
 Only `GET` and `HEAD` (else 405); a response to `HEAD`, a refusal (403, 404) included, is the head alone, with the length the body would have. A path with `..`, `%`, `\`, NUL, an empty segment or a segment starting with `.` is not served, nor one that resolves (links followed) outside its folder; there are no directory listings (404). Content types: `.html` `text/html; charset=utf-8`, `.js` and `.mjs` `text/javascript; charset=utf-8` (ES modules), `.css` `text/css`, `.json` `application/json`, `.svg` `image/svg+xml`, `.png` `image/png`, `.jpg` `image/jpeg`, `.gif`, `.webp`, `.woff2`, `.txt`; anything else `application/octet-stream`. Every response carries `X-Content-Type-Options: nosniff`, `Cache-Control: no-cache` and `Referrer-Policy: no-referrer`.
@@ -72,6 +73,52 @@ Otherwise it sends `{"type": "error", "code": "unauthorized", …}` (a wrong or 
 (Values here are illustrative.) `instances` is the flattened plan: every primitive instance with its ports and parameters (kind, unit, range, default, combine, and the parameter's initial base in the plan). `controls` are what the parameter panel edits: the parameters of the project's top-level instances, a composite's exported ones included, at the address `/<instance>.<parameter>`, with the plan ports a value goes to (an export can fan out to several), the range they share, the value without a key in the file (`default`), the base (`base`: the live value, the last one the Controller took for every port, even if a runner refused it afterwards; the file's value or the default when nothing else was sent) and whether the file sets it. `unsaved` lists the parameters whose live value the file does not hold ("Unsaved", below). `planVersion` is the running engine's plan version; `meters.output` lists the sink's channels, the device channel each plays on, and its `label` (`out 1 → 3`, or `out 2 (not played)`).
 
 The server pushes `describe` (without `id`) when a plan swap commits, after a reload that changed values, after a `commit` (or `retry`) is written and after a `revert`, and after `setup.apply` played again (then with `"restarted": true`).
+
+### `graph`
+
+`{"type": "graph", "id": 1}` → the project's structure **as written, not flattened** (ADR 0026 §1), for the schematic (`ui-controls.md` "Schematic"):
+
+```json
+{"type": "graph", "id": 1, "project": "kick", "planVersion": 0,
+ "top": {
+   "instances": [{"name": "drums", "address": "/drums", "module": "drums", "composite": true,
+     "ports": [{"name": "trigger", "address": "/drums.trigger", "direction": "in", "shape": "events", "rate": 1, "kind": "trigger", "unit": null, "range": null}, …],
+     "parameters": [{"name": "kick_decay", "address": "/drums.kick_decay", "kind": "control", "rate": 1, "unit": "ms", "range": {"min": 0.1, "max": 60000.0}, "default": 400.0, "combine": "add"}]}, …],
+   "connections": [{"from": "/lfo.out", "to": "/drums.kick_decay", "scale": 120.0, "converters": []}, …]},
+ "composites": {
+   "drums": {"inputs": [{"name": "trigger", "to": ["kick.trigger"], "direction": "in", "shape": "events", …}],
+             "outputs": [{"name": "out", "from": "kick.out", "direction": "out", "shape": "signal", …}],
+             "parameters": [{"name": "kick_decay", "to": ["kick.decay"]}],
+             "instances": [{"name": "kick", "address": "kick", "module": "kick", "composite": true, …}],
+             "connections": []},
+   "kick": {…}},
+ "layout": {"file": "ui/schematic.toml", "positions": {"": {"drums": {"x": 120, "y": -40}}, "kick": {"osc": {"x": 0, "y": 30}}}, "error": null}}
+```
+
+- `top`: the project's instances, each with its `module`, whether it is a `composite`, its ports (as in `describe`: direction, shape, kind, rate divisor; a composite's are its exported inputs and outputs, with the shape of what they reach) and its parameters (a composite's: its exported ones); and its connections (`from`, `to` as written, with the leading `/`), each with `converters`.
+- `converters`: the converters the compiler inserted on that connection (ADR 0005, `semantics.md` §16), each `{"name", "module", "conversion", "fromRate", "toRate"}`: `name` the converter instance's name (`out_d800`), `module` its type (`core.decimate.d1.d800.signal.control`). It is empty when there is none. **A connection between two primitives has at most one entry; a connection to an exported input or parameter that fans out to several ports may have several**, one per distinct conversion. Converters are never listed as instances.
+- `composites`: every composite the project uses (reached from the top level, nested ones included), by name, in name order: its exported `inputs` (`to`: the inner ports each reaches), `outputs` (`from`), `parameters` (`to`), and its inside as the top level's, with addresses relative to an instance of it (`kick.out` is `/drums/kick.out` in `/drums`). Its connections' converters are those of its first instance; a composite's rates are the same in every instance.
+- **Order:** instances and connections in source order (the file's), composites by name; the same project always gives the same reply.
+- `layout`: the positions of `ui/schematic.toml` (`project-format.md` §11) by level (`""` the top level, else the composite's name), read with every `graph`; `error` says why the file was ignored (it is never a reason not to answer).
+- `planVersion` is the running plan's (null while Signal.app is stopped).
+
+Playing, `graph` describes the running project (the last version that loaded, as `describe`); stopped (Signal.app), the folder as it is now. A folder that does not load is `{"type": "error", "code": "does-not-load", "message": <its diagnostics, one per line>}`; Signal.app without a project open answers `no-project`.
+
+**Pushed** (without `id`) after every plan swap (once it commits, beside `describe`), and whenever the `graph` it would give differs from the last pushed: after a reload of the folder (an edit of `ui/schematic.toml` included), after `transport.*`, `project.open`, `app.power` and `setup.apply` playing again, and after each `schematic.move` and `schematic.reset`. Stopped, Signal.app watches the folder every 100 ms for the same push; switched off it watches nothing, and switching on pushes what changed meanwhile. Tests: `crates/signal-ui/tests/schematic.rs` (kick, pulse, physical-av's converter, the push after a structural reload, positions) and `crates/signal-ui/tests/app_mode.rs` (stopped, does not load, switched off), both transports; `crates/signal-project/tests/structure.rs`.
+
+### `schematic.move`, `schematic.reset`
+
+```json
+{"type": "schematic.move", "id": 8, "level": "", "instance": "drums", "x": 120.4, "y": -39.6}
+{"type": "schematic.reset", "id": 9, "level": "kick"}
+{"type": "schematic.reset", "id": 10}
+```
+
+`schematic.move` writes instance `instance` of `level` (`""` the top level, else a composite the project uses) at `x`, `y` (finite, at most 1e9 in size, rounded to integers) into `ui/schematic.toml` (`project-format.md` §11), with `toml_edit` and atomically through a hidden temporary file, as `commit` writes; the watch takes the write as seen (no `reload` push), and `graph` is pushed to every client. Reply `{"type": "schematic.moved", "id": 8, "level": "", "instance": "drums", "x": 120, "y": -40, "file": "ui/schematic.toml"}`. Errors: `unknown-level`, `unknown-instance`, `bad-value` (not a finite number, or too large), `bad-message`, `does-not-load`, `write-failed`. `schematic.reset` removes the table of `level` (it must be a level of the project), or without a `level` the whole file; reply `{"type": "schematic.reset", "level", "file"}`, then the `graph` push. Neither changes the project: the file is presentation only.
+
+### Schematic level bars
+
+The schematic's level bars (`ui-controls.md` "Schematic") are `scope` streams of the signal outputs on screen (a closed composite's: the primitive output its export reaches), at 7680 points per second. They share the run's 8 scope slots with every other scope of every client (the Panel tab's included), so the schematic takes them in order, the selected instance's outputs first, then by place on screen, and lets a slot go when its port leaves the screen, when it is hidden, when the power is off and when nothing plays. A port it cannot get a slot for (`no-scope-slot`) shows its bar marked **no slot**, the same size as a live one, and is asked for again at most every 2 s; while stopped every bar is **idle**. A slot samples its port at its decimated frames, so a divided-rate output (its value held between its ticks, `semantics.md` §1) has a level too. This limit was accepted for M2.9-1 (operator decision, 2026-10-16); a stream of levels for every port would be a new stream kind.
 
 ### `subscribe`, `unsubscribe`
 
@@ -207,7 +254,7 @@ Signal.app's control thread runs the host in **app mode** (`Host::new_app`, M2.8
 
 ### Errors
 
-`{"type": "error", "id": …, "code": "…", "message": "…"}`. Codes: `unauthorized`, `protocol`, `already-authenticated`, `bad-message`, `unknown-type`, `unknown-address`, `unknown-sub`, `unknown-device`, `unknown-panel`, `bad-address`, `bad-value`, `bad-rate`, `bad-device`, `not-a-signal-output`, `no-scope-slot`, `not-a-vector-output`, `no-vector-slot`, `busy`, `refused`, `not-playing`, `too-many-clients`, `not-editable`, `write-failed`, `not-unsaved`, `playing`, `recording`, and in Signal.app's messages `not-allowed`, `no-project`, `does-not-load`, `device`, `powered-off` (`transport.play` and `subscribe` while switched off).
+`{"type": "error", "id": …, "code": "…", "message": "…"}`. Codes: `unauthorized`, `protocol`, `already-authenticated`, `bad-message`, `unknown-type`, `unknown-address`, `unknown-sub`, `unknown-device`, `unknown-panel`, `bad-address`, `bad-value`, `bad-rate`, `bad-device`, `not-a-signal-output`, `no-scope-slot`, `not-a-vector-output`, `no-vector-slot`, `busy`, `refused`, `not-playing`, `too-many-clients`, `not-editable`, `write-failed`, `not-unsaved`, `playing`, `recording`, `unknown-level`, `unknown-instance`, `does-not-load` (`graph`, `schematic.*`), and in Signal.app's messages `not-allowed`, `no-project`, `does-not-load`, `device`, `powered-off` (`transport.play` and `subscribe` while switched off).
 
 ## Binary frames
 
@@ -246,7 +293,7 @@ The control thread never waits for a client. Each client has a thread that write
 - **A token per session.** 32 bytes from the system's random source (`/dev/urandom`), hex, new for every run of the server, compared in constant time. It is required in the first message of every WebSocket connection. It is in the URL's fragment, never in an HTTP request. Anyone with the URL can control the run and write the project's `project.toml`, so the URL is a credential: `signal ui` prints it on the terminal only.
 - **Origin.** A browser connecting to the WebSocket must come from the HTTP server's own origin: `http://127.0.0.1:<http port>` (or `localhost`, `[::1]`); with `--remote`, the host the request was sent to and the HTTP port. Another site's page is refused at the handshake (403), before the token. A client without `Origin` is not a browser page and goes on to the token check.
 - **Host.** Without `--remote`, the HTTP server answers only the loopback names with its port, so another site cannot read the files through a name that resolves to 127.0.0.1 (DNS rebinding).
-- **Files.** Only the two `ui/` folders are served (above). A client writes only through `commit` (a top-level parameter in `project.toml`) and `setup.apply` (the Setup file the server was started with).
+- **Files.** Only the two `ui/` folders are served (above). A client writes only through `commit` (a top-level parameter in `project.toml`), `schematic.move` and `schematic.reset` (the project's `ui/schematic.toml`, presentation only) and `setup.apply` (the Setup file the server was started with).
 - **`project.open` opens another project only in Signal.app's app mode**; `signal ui` refuses it (`not-allowed`) for every path but the project it serves, so a client of `signal ui` cannot point it at another folder. For the project it serves (its folder, its `project.toml`, or the `.signal` file it was started with, compared after resolving links) `signal ui` plays it again from frame 0 from its files, a `.signal` file unpacked again into a new temporary folder (M2.8-12); while recording that is refused with `recording`, as `setup.apply` does not restart a recording run. In the app, a client with the token may open any folder it names: the host then writes the Setup file the app was started with (`last_project`), serves that folder's `ui/` (its panels and `ui/assets/`, by the rules above) under `/project/`, and later `commit`s write that folder's `project.toml`. The token rules are unchanged, and the app binds 127.0.0.1 only.
 - **Clients.** At most 32 WebSocket connections are served at once, a connection that has not sent `hello` yet included. Such a connection holds its place for at most 5 s from its acceptance: an absolute deadline over its WebSocket handshake and its `hello` with the token, not a timeout per read, so a client that trickles its handshake a byte at a time loses its place as one that sends nothing does (it is told `unauthorized` if its handshake was complete, else closed without a reason), and a stop ends it at once. Connections before `hello` have no budget of their own apart from the 32: anyone who can connect can open as many as it likes, so a smaller budget would refuse a newcomer just as the full one does; the deadline bounds how long any of them holds a place. One past that is refused: once it has sent its handshake it is told `{"type": "error", "code": "too-many-clients"}` and closed with code 1013 (try again later) and the reason `too-many-clients`, all within 1 s; one that sends no handshake in that time is closed without a reason (a close reason needs a WebSocket). Two threads refuse, with 16 connections waiting for them; while those are taken, accepting waits rather than drop a connection. None of these threads is waited for at shutdown (`crates/signal-ui/tests/backpressure.rs`).
 - **Limits.** A client message is at most 64 KiB; numbers a client sends are checked before use (an unsupported rate is `bad-rate`, a value outside its range is clamped); messages from all clients wait in a bounded queue; at most 256 are handled per control step.
@@ -261,6 +308,8 @@ signal ui projects/kick --port 8800        # a fixed HTTP port
 ```
 
 `signal ui` takes every option of `signal play` (`--device`, `--buffer`, `--seconds`, `--threads`, `--rt-policy`, `--rt-computation`, `--rt-trace`, `--driver`, `--fast`, `--record-session`, `--record-audio`, `--record-boundary-data`) and always watches the folder, as `play --watch` does. It stops on Enter (or at `--seconds`), and with `--json` prints `{"url", "panel", "http", "ws"}` when it starts. The UI library's folder is the app bundle's `Contents/Resources/ui` when the program runs from a bundle, else the repository's `ui/` of the build (`--ui-dir` for another).
+
+`signal ui` also prints the schematic's page, `http://127.0.0.1:<http port>/schematic#ws=…&token=…` (`--json`: `schematic`).
 
 Pages and controls use the client in `ui/signal-ui.js` (reconnect included) and the web components in `ui/controls/`; `/ui/gallery.html` shows them all (`docs/ui-controls.md`).
 

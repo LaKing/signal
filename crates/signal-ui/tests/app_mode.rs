@@ -939,6 +939,118 @@ fn a_folder_named_like_a_signal_file_opens_as_a_folder(transport: Transport) {
     let _ = fs::remove_dir_all(&folder);
 }
 
+fn graph_names(graph: &Value) -> Vec<&str> {
+    graph["top"]["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect()
+}
+
+/// M2.9-1 (ADR 0026 §1, §3): stopped, `graph` describes the folder, and a
+/// change of it (its structure or `ui/schematic.toml`) pushes `graph`; a
+/// folder that does not load is an error naming its diagnostics.
+fn graph_while_stopped(transport: Transport) {
+    let mut rig = app_rig(
+        "graph-stopped",
+        transport,
+        Some(&root().join("projects/kick")),
+    );
+    let (mut ws, _) = rig.client();
+    let graph = rig.request(&mut ws, 1, json!({"type": "graph"}), "graph");
+    assert_eq!(
+        graph_names(&graph),
+        ["transport", "drums", "lfo", "accent", "out"]
+    );
+    assert_eq!(graph["planVersion"], Value::Null, "stopped");
+    let path = rig.dir.join("project.toml");
+    let text = fs::read_to_string(&path).unwrap().replace(
+        "out = { module",
+        "extra = { module = \"std.sine_osc\" }\nout = { module",
+    );
+    fs::write(&path, &text).unwrap();
+    rig.wait(&mut ws, "graph after a stopped edit", |got| {
+        got.of("graph")
+            .filter(|g| g.get("id").is_none() && graph_names(g).contains(&"extra"))
+            .cloned()
+    });
+    let moved = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "schematic.move", "level": "drums", "instance": "kick", "x": 5, "y": 6}),
+        "schematic.moved",
+    );
+    assert_eq!(moved["file"], "ui/schematic.toml");
+    fs::write(
+        rig.dir.join("ui/schematic.toml"),
+        "[top]\nout = { x = 1, y = 2 }\n",
+    )
+    .unwrap();
+    rig.wait(&mut ws, "graph after a positions edit", |got| {
+        got.of("graph")
+            .filter(|g| g["layout"]["positions"][""]["out"] == json!({"x": 1, "y": 2}))
+            .cloned()
+    });
+    fs::write(&path, "schema_version = 1\n[instances\n").unwrap();
+    let refused = rig.request(&mut ws, 3, json!({"type": "graph"}), "error");
+    assert_eq!(refused["code"], "does-not-load");
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("project.toml"),
+        "{refused}"
+    );
+    rig.finish();
+}
+
+/// M2.9-1, M2.8-11: switched off, nothing watches the folder; switching on
+/// pushes the `graph` of what changed meanwhile.
+fn graph_is_pushed_when_switched_on_again(transport: Transport) {
+    let mut rig = app_rig(
+        "graph-power",
+        transport,
+        Some(&root().join("projects/kick")),
+    );
+    let (mut ws, _) = rig.client();
+    rig.request(&mut ws, 1, json!({"type": "graph"}), "graph");
+    rig.request(
+        &mut ws,
+        2,
+        json!({"type": "app.power", "on": false}),
+        "power",
+    );
+    fs::write(
+        rig.dir.join("ui/schematic.toml"),
+        "[top]\nlfo = { x = 9, y = 9 }\n",
+    )
+    .unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(400);
+    while std::time::Instant::now() < until {
+        rig.pump();
+        while let Some(got) = common::receive(&mut ws) {
+            let seen = got.of("graph").map(|g| g["layout"]["positions"].clone());
+            assert!(
+                seen.as_ref().is_none_or(|p| *p == json!({})),
+                "the edit made while off is not watched: {seen:?}"
+            );
+        }
+    }
+    rig.request(
+        &mut ws,
+        3,
+        json!({"type": "app.power", "on": true}),
+        "power",
+    );
+    rig.wait(&mut ws, "graph after switching on", |got| {
+        got.of("graph")
+            .filter(|g| g["layout"]["positions"][""]["lfo"] == json!({"x": 9, "y": 9}))
+            .cloned()
+    });
+    rig.finish();
+}
+
 both!(
     power_off_stops_and_on_restores,
     a_client_connecting_while_off_is_told_and_gets_no_frames,
@@ -960,4 +1072,6 @@ both!(
     closing_keeps_an_edited_working_folder,
     signal_ui_reopens_only_the_project_it_serves,
     a_folder_named_like_a_signal_file_opens_as_a_folder,
+    graph_while_stopped,
+    graph_is_pushed_when_switched_on_again,
 );

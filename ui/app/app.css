@@ -36,6 +36,9 @@ signal-app-toolbar { display: flex; gap: 0.75rem; align-items: center; height: 2
 main { min-height: 0; }
 .tab { box-sizing: border-box; height: 100%; }
 .tab-panel { overflow: hidden; }
+/* The Schematic tab (M2.9-1): the schematic pans and zooms in place; it never scrolls. */
+.tab-fill { overflow: hidden; }
+signal-schematic { display: block; height: 100%; }
 .tab-scroll { overflow: auto; padding: 0.75rem; }
 .project-panel { display: block; width: 100%; height: 100%; border: 0; background: var(--signal-bg); }
 signal-app-panel { display: block; height: 100%; }

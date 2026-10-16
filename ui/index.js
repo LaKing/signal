@@ -30,3 +30,8 @@ import './app/lib/layout.test.js';
 import './app/lib/context.test.js';
 import './lib/cards.test.js';
 import './controls/panel.test.js';
+import './lib/schematic-view.test.js';
+import './lib/schematic-layout.test.js';
+import './lib/schematic-scene.test.js';
+import './lib/schematic-inspector.test.js';
+import './lib/schematic-levels.test.js';

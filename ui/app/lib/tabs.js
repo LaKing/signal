@@ -1,9 +1,10 @@
-// Signal.app's tabs (M2.8-11): one page, three tabs, switched without a
+// Signal.app's tabs (M2.8-11; the Schematic, M2.9-1): one page, four tabs, switched without a
 // reload or a new connection. Plain ES module, no DOM.
 
 /** The tabs, in the toolbar's order. */
 export const TABS = Object.freeze([
   Object.freeze({ id: 'panel', label: 'Panel' }),
+  Object.freeze({ id: 'schematic', label: 'Schematic' }),
   Object.freeze({ id: 'parameters', label: 'Parameters' }),
   Object.freeze({ id: 'setup', label: 'Setup' }),
 ]);

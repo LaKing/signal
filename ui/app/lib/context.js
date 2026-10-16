@@ -20,12 +20,17 @@ export function keepsSystemMenu(target) {
 /**
  * The menu's items, in order: for a control bound to a parameter
  * (`control: { address, label, editable }`), Reset to default and Copy
- * address; then Play or Stop; then the tabs other than the shown one.
+ * address; for a part of the schematic (`control: { address, part: true }`:
+ * an instance, a port or a wire, M2.9-1), Copy address; then Play or Stop;
+ * then the tabs other than the shown one.
  * Each item is `{ id, label, disabled? }`; `separator` items divide groups.
  */
 export function contextItems({ control = null, playing = false, power = true, tab = null } = {}) {
   const items = [];
-  if (control?.address) {
+  if (control?.address && control.part) {
+    items.push({ id: 'copy-address', label: 'Copy address' });
+    items.push({ id: 'separator' });
+  } else if (control?.address) {
     const name = control.label || control.address;
     items.push({ id: 'reset', label: `Reset ${name} to default`, disabled: control.editable === false });
     items.push({ id: 'copy-address', label: 'Copy address' });

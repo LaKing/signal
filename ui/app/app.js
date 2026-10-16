@@ -12,6 +12,7 @@
 
 import { getDefaultConnection, onDefaultConnection } from '../signal-ui.js';
 import '../controls/meter.js';
+import '../controls/schematic.js';
 import { formatFixed } from '../lib/format.js';
 import { applyProps } from './lib/dom.js';
 import { pageHandlesShortcuts, panelReloads, panelSource, shortcut } from './lib/menu.js';
@@ -710,7 +711,8 @@ export class SignalAppContextMenu extends AppElement {
       if (node?.binding?.address) {
         return { address: node.binding.address, label: node.getAttribute?.('label') ?? '', editable: true };
       }
-      if (node?.dataset?.address) return { address: node.dataset.address, label: node.dataset.label ?? '', editable: true };
+      // A schematic part (M2.9-1) has an address to copy, nothing to reset.
+      if (node?.dataset?.address) return { address: node.dataset.address, label: node.dataset.label ?? '', editable: true, part: node.dataset.part === 'schematic' };
     }
     return null;
   }

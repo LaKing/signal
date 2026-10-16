@@ -60,6 +60,10 @@ pub const PROTOCOL: u32 = 1;
 /// The page of Signal.app's window, in the UI library (`ui/app/`).
 pub const APP_PAGE: &str = "/ui/app/index.html";
 
+/// The schematic's page in `signal ui` (M2.9-1, ADR 0026 §2): the UI
+/// library's `schematic.html`.
+pub const SCHEMATIC_PAGE: &str = "/schematic";
+
 /// The UI library to serve: the app bundle's own (`Contents/Resources/ui`,
 /// beside `Contents/MacOS` and `Contents/Helpers`, where `exe` runs from),
 /// else `built`, the repository's `ui/` the program was built from.

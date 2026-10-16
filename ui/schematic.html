@@ -1,0 +1,31 @@
+<!doctype html>
+<!-- The schematic in `signal ui` (M2.9-1, ADR 0026 §2): <signal-schematic>
+     filling the window, served at /schematic (docs/ui-protocol.md "Static
+     files"; Signal.app shows the same component in its Schematic tab). The
+     URL's fragment carries the WebSocket's port and the session token. The
+     base makes its relative paths the UI library's. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<base href="/ui/">
+<title>Signal — schematic</title>
+<link rel="stylesheet" href="controls/theme.css">
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; overflow: hidden; background: var(--signal-bg); color: var(--signal-fg); }
+  signal-schematic { display: block; height: 100%; }
+</style>
+</head>
+<body>
+<signal-schematic></signal-schematic>
+<script type="module">
+import { connectFromPage, setDefaultConnection } from './signal-ui.js';
+import './controls/schematic.js';
+
+const connection = connectFromPage();
+if (connection) setDefaultConnection(connection);
+else document.body.prepend(Object.assign(document.createElement('p'), { textContent: 'This page needs the URL `signal ui` prints (#ws=…&token=…).' }));
+</script>
+</body>
+</html>
