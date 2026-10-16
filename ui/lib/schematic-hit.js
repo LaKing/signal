@@ -1,7 +1,9 @@
 // What a click or a hover on the schematic is over (M2.9-1): a port, an
 // instance box, a wire or the background, in a scene as `scene()` gives it.
 // The innermost level drawn is tried first; within a level a port beats its
-// box and a box beats a wire. Tolerances are screen pixels, so they hold at
+// box and a box beats a wire, and of the ports within reach the nearest
+// (2026-10-17: pins are meant to be easy to hit; the reach shrinks with a
+// box small on screen). Tolerances are screen pixels, so they hold at
 // every zoom, and a wire is hit on its curve, not its flattened points. No
 // DOM.
 
@@ -9,8 +11,12 @@ import { INPUTS, OUTPUTS } from './schematic-layout.js';
 import { toLocal } from './schematic-view.js';
 import { curveDistance, distanceToSegment } from './schematic-wire.js';
 
-/** A port is hit within this radius (px). */
-export const PORT_PX = 6;
+/**
+ * A port is hit within this radius (px): three times its drawn radius at
+ * scale 1; never more than a quarter of its box's height on screen, so a
+ * box zoomed out is not all pins.
+ */
+export const PORT_PX = 9;
 /** A wire is hit within this distance (px). */
 export const WIRE_PX = 4;
 
@@ -26,6 +32,29 @@ export function endpointAddress(path, written) {
   return `${path}/${String(written).replace(/^\//, '')}`;
 }
 
+/** The hit of instance `node` drawn at level `entry` (`{path, level}`). */
+export function instanceHit(entry, node) {
+  return { kind: 'instance', path: entry.path, level: entry.level, node, address: `${entry.path}/${node.name}` };
+}
+
+/** The hit of pin `port` of instance `node` at level `entry`. */
+export function portHit(entry, node, port) {
+  return { kind: 'port', path: entry.path, level: entry.level, node, port, address: `${entry.path}/${node.name}.${port.name}` };
+}
+
+/** The hit of `wire` (a layout's) at level `entry`: its ends' addresses as `from` and `to`. */
+export function wireHit(entry, wire) {
+  return {
+    kind: 'wire',
+    path: entry.path,
+    level: entry.level,
+    wire,
+    // An export's end on the frame is the composite instance's port.
+    from: wire.from.node === INPUTS ? `${entry.path}.${wire.from.port}` : endpointAddress(entry.path, wire.written.from),
+    to: wire.to.node === OUTPUTS ? `${entry.path}.${wire.to.port}` : endpointAddress(entry.path, wire.written.to),
+  };
+}
+
 /**
  * What screen point `point` is over: `{kind: 'port' | 'instance' | 'wire' |
  * 'background', path, level, node?, port?, wire?, address?}`. A port's and
@@ -37,35 +66,23 @@ export function hitTest(drawn, point) {
     const entry = drawn.levels[i];
     const local = toLocal(entry.transform, point);
     const scale = entry.transform.k;
-    const base = { path: entry.path, level: entry.level };
+    let best = null;
     for (const node of entry.nodes) {
       if (node.kind !== 'instance') continue;
+      // A box small on screen (zoomed out) keeps its body: its pins reach less.
+      const reach = Math.min(PORT_PX, (node.h * scale) / 4);
       for (const port of [...node.ins, ...node.outs]) {
-        if (Math.hypot(port.x - local.x, port.y - local.y) * scale <= PORT_PX) {
-          const address = `${entry.path}/${node.name}.${port.name}`;
-          return { kind: 'port', ...base, node, port, address };
-        }
+        const d = Math.hypot(port.x - local.x, port.y - local.y) * scale;
+        if (d <= reach && (!best || d < best.d)) best = { d, node, port };
       }
     }
+    if (best) return portHit(entry, best.node, best.port);
     for (const node of entry.nodes) {
       if (node.kind !== 'instance') continue;
-      if (local.x >= node.x && local.x <= node.x + node.w && local.y >= node.y && local.y <= node.y + node.h) {
-        // An open composite's inside was tried first; its box still counts.
-        return { kind: 'instance', ...base, node, address: `${entry.path}/${node.name}` };
-      }
+      // An open composite's inside was tried first; its box still counts.
+      if (local.x >= node.x && local.x <= node.x + node.w && local.y >= node.y && local.y <= node.y + node.h) return instanceHit(entry, node);
     }
-    for (const wire of entry.wires) {
-      if (nearWire(wire, local, WIRE_PX / scale)) {
-        return {
-          kind: 'wire',
-          ...base,
-          wire,
-          // An export's end on the frame is the composite instance's port.
-          from: wire.from.node === INPUTS ? `${entry.path}.${wire.from.port}` : endpointAddress(entry.path, wire.written.from),
-          to: wire.to.node === OUTPUTS ? `${entry.path}.${wire.to.port}` : endpointAddress(entry.path, wire.written.to),
-        };
-      }
-    }
+    for (const wire of entry.wires) if (nearWire(wire, local, WIRE_PX / scale)) return wireHit(entry, wire);
   }
   return { kind: 'background', path: '', level: '' };
 }

@@ -1,5 +1,6 @@
 // The schematic's inspector card (M2.9-1, ADR 0026 §2): what a selected
-// instance, port or connection shows. An instance's parameters follow the
+// instance, port or connection shows; since 2026-10-17 the base of the
+// sidebar's model (ui/lib/schematic-sidebar.js), which adds the rest. An instance's parameters follow the
 // Parameters tab's rules (`ui/app/lib/parameters.js`): a top-level
 // instance's (a composite's exported ones included) are controls, set with a
 // 5 ms ramp while dragged and committed once on release, with the same

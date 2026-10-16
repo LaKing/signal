@@ -47,4 +47,6 @@ import './lib/schematic-patch.test.js';
 import './lib/schematic-edit.test.js';
 import './lib/context-menu.test.js';
 import './lib/schematic-menu.test.js';
+import './lib/schematic-select.test.js';
+import './lib/schematic-sidebar.test.js';
 import './controls/context-menu.test.js';

@@ -2,8 +2,8 @@
 // "Editing the patch"): the switch, Undo and Redo in <signal-schematic>'s
 // bar; dragging from an output to a compatible input or parameter connects
 // them; a double-click on the background opens the add palette there;
-// Delete or Backspace removes the selected instance or wire; a wire's scale
-// is typed in the card. The context menu's edits (ui/lib/schematic-menu.js)
+// Delete or Backspace removes the selection (several parts: one patch per
+// level); a wire's scale is typed in the sidebar. The context menu's edits (ui/lib/schematic-menu.js)
 // come here too: Delete, Edit scale…, Disconnect all, Add module here…. Every change is a `patch` written at once
 // (docs/ui-protocol.md "patch"); the drawing changes with the `graph` push
 // that follows, never before. The state and the history are
@@ -55,7 +55,7 @@ svg.rubber path { fill: none; stroke: var(--signal-focus, #5aa9ff); stroke-width
 .notice { position: absolute; left: 8px; right: 8px; bottom: 28px; max-height: 30%; overflow: hidden; visibility: hidden; padding: 6px 8px; white-space: pre-wrap;
   background: var(--signal-panel, #1f232b); border: 1px solid var(--signal-effective, #ffb74d); border-radius: var(--signal-radius, 6px); }
 .notice h3 { margin: 0 0 4px; font-size: 12px; color: var(--signal-effective, #ffb74d); }
-.card .reach { color: var(--signal-effective, #ffb74d); margin-top: 4px; }
+.side .reach { color: var(--signal-effective, #ffb74d); margin-top: 4px; }
 `;
 
 function html(name, properties = {}) {
@@ -112,7 +112,7 @@ export class SchematicEditor {
     if (!on) this.hideNotice();
     this.s.toggleAttribute('editing', on);
     this.updateButtons();
-    this.s.showCard();
+    this.s.showSide();
   }
 
   graphSeen(graph) {
@@ -133,34 +133,40 @@ export class SchematicEditor {
     return level === '' ? graph?.top : graph?.composites?.[level];
   }
 
-  /** Writes `ops` at `level` (`step` 0), or the history's undo (-1) or redo (+1). */
+  /**
+   * Writes `ops` at `level` (`step` 0), or the history's undo (-1) or redo
+   * (+1). Resolves to whether it was written (a group's per-level patches
+   * go one after the other).
+   */
   write(step, level = '', ops = []) {
-    if (!this.editing) return;
+    if (!this.editing) return Promise.resolve(false);
     const asked = step === 0 ? this.session.request(level, ops) : step < 0 ? this.session.undo() : this.session.redo();
-    if (!asked) return;
+    if (!asked) return Promise.resolve(false);
     if (asked.refused) {
       this.s.say(asked.refused);
-      return;
+      return Promise.resolve(false);
     }
     this.updateButtons();
     const request = this.s.connection?.request?.(asked.message);
     if (!request) {
       this.session.refused({ message: 'Not connected' });
       this.updateButtons();
-      return;
+      return Promise.resolve(false);
     }
-    request.then(
+    return request.then(
       (reply) => {
         this.session.written(reply, asked.pending);
         this.hideNotice();
         this.s.say('');
         this.updateButtons();
+        return true;
       },
       (error) => {
         const result = this.session.refused(error, asked.pending);
         if (result.cleared) this.showNotice('Undo history emptied', result.cleared);
         else this.showNotice('Not written', [result.reason, ...result.references.map((r) => `${r.file}${r.line ? `:${r.line}` : ''}: ${r.text}`)].join('\n'));
         this.updateButtons();
+        return false;
       },
     );
   }
@@ -191,8 +197,9 @@ export class SchematicEditor {
     return true;
   }
 
+  /** Delete or Backspace: the selection removed (several parts: one patch per level). */
   removeSelection() {
-    this.remove(this.s.selection);
+    this.s.deleteSelection();
   }
 
   /** Removes instance or connection `hit` (the selection, or a context menu's target). */
@@ -201,7 +208,7 @@ export class SchematicEditor {
     else if (hit?.kind === 'wire' && hit.wire.kind === 'connection') this.write(0, hit.level, [removeConnection(hit.wire.written.from, hit.wire.written.to)]);
   }
 
-  /** The card's scale field opened (the context menu's Edit scale…, once the wire is selected). */
+  /** The sidebar's scale field opened (the context menu's Edit scale…, once the wire is selected). */
   openScale() {
     this.scaleEntry?.open();
   }
@@ -347,9 +354,9 @@ export class SchematicEditor {
     if (this.palette) this.palette.style.visibility = 'hidden';
   }
 
-  // The card.
+  // The sidebar.
 
-  /** What the card adds in edit mode: a wire's scale entry; inside a composite, how many instances the edit reaches. */
+  /** What the sidebar adds in edit mode: a wire's scale entry; inside a composite, how many instances the edit reaches. */
   cardParts(selection) {
     this.scaleEntry = null;
     if (!this.editing || !selection) return [];

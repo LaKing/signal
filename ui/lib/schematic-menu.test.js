@@ -93,3 +93,26 @@ test('Disconnect all removes every connection of the pin at its level, as one pa
   assert.deepEqual(disconnectOps({ connections: [{ from: 'osc.out', to: 'vca.a' }] }, 'vca', { name: 'a', direction: 'in' }), [{ op: 'connection.remove', from: 'osc.out', to: 'vca.a' }], 'inside a composite');
   assert.deepEqual(disconnectOps(null, 'lfo', { name: 'out', direction: 'out' }), []);
 });
+
+test('a part of several selected ends with Delete selected (Edit patch); the background never has it', () => {
+  for (const hit of [PRIMITIVE, WIRE, PIN]) {
+    const items = schematicMenu(hit, { editing: true, group: 3 });
+    assert.deepEqual(ids(items).slice(-2), ['separator', 'delete-selected']);
+    assert.equal(item(items, 'delete-selected').label, 'Delete selected (3)');
+    assert.equal(item(items, 'delete-selected').disabled, false);
+    assert.equal(item(schematicMenu(hit, { editing: false, group: 3 }), 'delete-selected').title, EDIT_OFF);
+    assert.equal(item(schematicMenu(hit, { editing: true, group: 1 }), 'delete-selected'), undefined, 'alone: its own Delete');
+  }
+  assert.equal(item(schematicMenu({ kind: 'background' }, { editing: true, group: 3 }), 'delete-selected'), undefined);
+});
+
+test('Delete selected counts what it would delete; off when nothing would be, or when it is too large', () => {
+  const items = schematicMenu(PRIMITIVE, { editing: true, group: 5, deleted: 3 });
+  assert.equal(item(items, 'delete-selected').label, 'Delete selected (3)');
+  const pins = schematicMenu(PIN, { editing: true, group: 2, deleted: 0 });
+  assert.equal(item(pins, 'delete-selected').disabled, true);
+  assert.match(item(pins, 'delete-selected').title, /pins and exports stay/);
+  const large = schematicMenu(PRIMITIVE, { editing: true, group: 4000, deleted: 4000, tooLarge: 'Too much to delete at once' });
+  assert.equal(item(large, 'delete-selected').disabled, true);
+  assert.equal(item(large, 'delete-selected').title, 'Too much to delete at once');
+});

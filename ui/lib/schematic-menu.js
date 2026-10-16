@@ -24,10 +24,24 @@ function unless(item, reason) {
  * and whether something can be added inside it (`addable`); for a pin how
  * many connections reach it at its level (`connected`) and how many of the
  * level's exports (`exported`, which are not edited here); for the background
- * the level shown (`level`, `""` the top level) and `addable`. Items are
+ * the level shown (`level`, `""` the top level) and `addable`. A part that
+ * is one of several selected (`group`: how many) ends with Delete selected,
+ * which removes them all (`deletePlan`, ui/lib/schematic-select.js),
+ * counting what it would delete (`deleted`), off with `tooLarge`'s reason. Items are
  * `{id, label, disabled, title?}` and separators, `{id: 'separator'}`.
  */
 export function schematicMenu(hit, state = {}) {
+  const items = partMenu(hit, state);
+  if (hit?.kind !== 'background' && hit && state.group > 1) {
+    // Counted as Delete would delete (`deleted`, `deletePlan`'s): pins and exports stay.
+    const n = state.deleted ?? state.group;
+    const why = state.editing ? (n > 0 ? (state.tooLarge ?? null) : 'Nothing selected is deleted: pins and exports stay') : EDIT_OFF;
+    items.push(SEPARATOR, unless({ id: 'delete-selected', label: `Delete selected (${n})` }, why));
+  }
+  return items;
+}
+
+function partMenu(hit, state) {
   const editing = Boolean(state.editing);
   const editOff = editing ? null : EDIT_OFF;
   if (hit?.kind === 'instance') {

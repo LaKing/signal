@@ -1,6 +1,7 @@
 // A box being dragged on the schematic, and what follows it (M2.9-1; the
 // owner's "while moving parts around the cables should follow",
-// 2026-10-16): the box itself, the wires that change with it
+// 2026-10-16), or a group of boxes of one level selected together and
+// dragged by one of them (2026-10-17): the boxes themselves, the wires that change with it
 // (`movedWires`), and an open composite's inside, in every drawn instance
 // of the level (a composite's layout is its type's, so each open instance
 // of it shows the drag). Only attributes of elements already drawn change
@@ -14,10 +15,15 @@ import { bakedPath, inBounds } from './schematic-draw.js';
 import { matrix } from './schematic-view.js';
 
 export class DragFollow {
-  /** The instance `name` of level `level` (`""` the top level, else a composite's name). */
+  /**
+   * The instance `name` of level `level` (`""` the top level, else a
+   * composite's name); `name` may be a list of instances of the level, the
+   * first the one dragged, the others moved by as much.
+   */
   constructor(level, name) {
     this.level = level;
-    this.name = name;
+    this.names = Array.isArray(name) ? [...name] : [name];
+    this.name = this.names[0];
     /** Wire elements written → `{was, key}`: their own `d`, and the route written. */
     this.wires = new Map();
     /** Box elements given a transform. */
@@ -25,25 +31,33 @@ export class DragFollow {
     /** Groups of levels inside moved → their drawn group (its `placed`). */
     this.inner = new Map();
     this.cache = null;
+    /** The group's nodes in the layout last applied: `{layout, node, nodes, names}`. */
+    this.group = null;
   }
 
   /**
    * The box at `to` (`{x, y}`, layout units) in `layout` (the level's, as
-   * now laid out), in each of `levels` (the scene's, `{path, level,
-   * transform}`) drawn in `groups` (path → `{g, baked, placed, wireCache,
+   * now laid out), the group's other boxes moved by as much, in each of
+   * `levels` (the scene's, `{path, level, transform}`) drawn in `groups` (path → `{g, baked, placed, wireCache,
    * nodeCache}`, as <signal-schematic> keeps them). Returns how many
    * attributes it wrote.
    */
   apply({ layout, levels, groups, to }) {
-    const node = layout?.nodes.find((n) => n.kind === 'instance' && n.name === this.name);
-    if (!node) return 0;
-    const cache = this.cache;
-    if (!cache || cache.layout !== layout || cache.x !== to.x || cache.y !== to.y) {
-      this.cache = { layout, x: to.x, y: to.y, moved: movedWires(layout, node.id, to), geometry: new Map() };
+    // The group's nodes, found once per layout (a group of thousands: no search per frame).
+    if (this.group?.layout !== layout) {
+      const byName = new Map((layout?.nodes ?? []).filter((n) => n.kind === 'instance').map((n) => [n.name, n]));
+      this.group = { layout, node: byName.get(this.name), nodes: this.names.map((name) => byName.get(name)).filter(Boolean), names: new Set(this.names) };
     }
-    const { moved, geometry } = this.cache;
+    const { node, nodes, names } = this.group;
+    if (!node) return 0;
     const dx = to.x - node.x;
     const dy = to.y - node.y;
+    const cache = this.cache;
+    if (!cache || cache.layout !== layout || cache.x !== to.x || cache.y !== to.y) {
+      const moves = new Map(nodes.map((n) => [n.id, { x: n.x + dx, y: n.y + dy }]));
+      this.cache = { layout, x: to.x, y: to.y, moved: movedWires(layout, moves), geometry: new Map() };
+    }
+    const { moved, geometry } = this.cache;
     let writes = 0;
     const set = (element, name, value) => {
       if (element.getAttribute(name) === value) return;
@@ -58,8 +72,9 @@ export class DragFollow {
       const group = groups.get(entry.path);
       if (!group?.baked) continue;
       const m = group.baked.m;
-      const box = group.nodeCache.get(node.id)?.el;
-      if (box) {
+      for (const each of nodes) {
+        const box = group.nodeCache.get(each.id)?.el;
+        if (!box) continue;
         set(box, 'transform', `translate(${dx * m} ${dy * m})`);
         boxes.add(box);
       }
@@ -75,11 +90,13 @@ export class DragFollow {
         element.setAttribute('d', bakedPath(group.baked, points, curve));
         writes++;
       }
-      // The levels inside it, moved on screen as the box is; one that would
-      // leave SVG's bounds (a zoom since) stays where it is drawn.
-      const address = `${entry.path}/${this.name}`;
+      // The levels inside them, moved on screen as the boxes are; one that
+      // would leave SVG's bounds (a zoom since) stays where it is drawn.
+      const prefix = `${entry.path}/`;
       for (const [path, drawn] of groups) {
-        if ((path !== address && !path.startsWith(`${address}/`)) || !drawn.placed) continue;
+        if (!path.startsWith(prefix) || !drawn.placed) continue;
+        const child = path.slice(prefix.length).split('/')[0];
+        if (!names.has(child)) continue;
         const placed = innerOffset(drawn.placed, { x: dx, y: dy }, entry.transform.k);
         set(drawn.g, 'transform', matrix(inBounds(placed) ? placed : drawn.placed));
         this.inner.set(drawn.g, drawn);
@@ -116,6 +133,7 @@ export class DragFollow {
     this.boxes.clear();
     this.inner.clear();
     this.cache = null;
+    this.group = null;
   }
 }
 

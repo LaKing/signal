@@ -29,7 +29,18 @@ test('the window has one scroll container: the shown tab', () => {
 
 test('nothing inside a tab or a panel scrolls on its own', () => {
   assert.deepEqual([...noComments(read('controls/theme.css')).matchAll(SCROLLS)], []);
-  for (const file of controls) assert.deepEqual([...read(`controls/${file}`).matchAll(SCROLLS)], [], file);
+  // One exception, asked for (the owner's, 2026-10-17: a fixed sidebar
+  // left of the schematic): the sidebar's body scrolls inside the
+  // Schematic tab, which itself never scrolls; nothing else of it does.
+  const scrollers = (text) => [...text.matchAll(/([^{}\n]+)\{[^}]*overflow(-x|-y)?\s*:\s*(auto|scroll)/g)].map((m) => m[1].trim());
+  for (const file of controls) {
+    const text = read(`controls/${file}`);
+    if (file !== 'schematic.js') assert.deepEqual([...text.matchAll(SCROLLS)], [], file);
+    else {
+      assert.equal([...text.matchAll(SCROLLS)].length, 1, file);
+      assert.deepEqual(scrollers(text), ['.side-body'], file);
+    }
+  }
   for (const file of ['app/app.js', 'app/setup.js']) assert.deepEqual([...read(file).matchAll(SCROLLS)], [], file);
   for (const panel of panels) {
     const text = read(panel);

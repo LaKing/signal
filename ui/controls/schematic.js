@@ -6,8 +6,8 @@
 // when zoomed in or double-clicked (ui/lib/schematic-scene.js). One view
 // transform, wheel and pinch zoom about the pointer, the background drags to
 // pan, keys + − 0 and the arrows. Clicking selects an instance, a port or a
-// wire and shows it on a card; dragging a box moves it, its wires following
-// (`schematic.move`).
+// wire and shows it in the sidebar; dragging a box moves it, its wires
+// following (`schematic.move`).
 // M2.9-3: the bar's Edit patch switch edits the patch
 // (ui/controls/schematic-editor.js); off, nothing of it takes an input.
 // Signal outputs on screen carry a level bar from scope streams
@@ -25,20 +25,29 @@
 // drawn thicker, and an instance, a wire, a pin and the background have a
 // context menu (ui/lib/schematic-menu.js): Signal.app's, which shows these
 // items first, or in a browser this element's own.
+// 2026-10-17 (the owner's "a properties window appears in the top right
+// corner which sometimes covers things. Better would be a fixed sidebar on
+// the left", "it should be possible to select … grouped groups too"): the
+// card is a fixed sidebar left of the drawing area (ui/lib/schematic-sidebar.js),
+// collapsible, and several parts can be selected at once
+// (ui/lib/schematic-select.js): Shift- or ⌘-click, a Shift-drag on the
+// background, ⌘A; a group's boxes drag together and Delete removes them all.
 
 import { onDefaultConnection } from '../signal-ui.js';
 import { ENTRY_CSS, ValueEntry } from './entry-field.js';
 import { EDITOR_CSS, SchematicEditor } from './schematic-editor.js';
 import { ContextMenu, MENU_CSS, menusClaimed } from './context-menu.js';
-import { paletteLevel } from '../lib/schematic-patch.js';
+import { paletteLevel, removeConnection } from '../lib/schematic-patch.js';
 import { disconnectOps, schematicMenu } from '../lib/schematic-menu.js';
+import { LEGEND, addressesText, sidebar, tooLargeText } from '../lib/schematic-sidebar.js';
+import { allOf, deletePlan, dragGroup, has, hitKey, inside, moveMessages, reselectAll, toggled, union } from '../lib/schematic-select.js';
 import { formatFixed } from '../lib/format.js';
 import { dragPosition, layout } from '../lib/schematic-layout.js';
 import { DragFollow } from '../lib/schematic-drag.js';
 import { CLOSE_PX, breadcrumbs, levelRect, nodeRect, rebase, reroot, scene } from '../lib/schematic-scene.js';
 import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
 import { hitTest, reselect } from '../lib/schematic-hit.js';
-import { card, cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
+import { cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
 import { LEVEL_RATE, SLOTS, candidates, levelFraction, levelPlan } from '../lib/schematic-levels.js';
 import { IDENTITY, fit, focus, keyView, matrix, pan, toScreen, wheelFactor, zoomAt } from '../lib/schematic-view.js';
 
@@ -51,11 +60,18 @@ const MAC = /Mac/i.test(globalThis.navigator?.userAgentData?.platform ?? globalT
 const MIN_TEXT_PX = 4;
 /** After the view settles (ms), the level streams follow it. */
 const SETTLE_MS = 150;
+/** Above this many parts selected, each is marked by its stroke alone. */
+const MANY_MARKS = 64;
+/** Where the sidebar's collapse is kept, per viewer (localStorage). */
+const SIDE_KEY = 'signal.schematic.sidebar';
 
 const CSS = `
-:host { display: block; position: relative; overflow: hidden; height: 100%; outline: none;
+:host { display: block; position: relative; overflow: hidden; height: 100%; outline: none; --side-width: 300px;
   color: var(--signal-fg, #d6dbe4); background: var(--signal-bg, #16181d);
   font: var(--signal-font, 11px/1.3 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif); }
+:host([side-collapsed]) { --side-width: 28px; }
+/* The drawing area: everything right of the sidebar. Its size changes only with the element's or the sidebar's collapse. */
+.stage { position: absolute; top: 0; right: 0; bottom: 0; left: var(--side-width); overflow: hidden; }
 svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
 .box { fill: var(--signal-panel, #1f232b); stroke: var(--signal-knob-edge, #3a414d); vector-effect: non-scaling-stroke; }
 .composite > .box { stroke: var(--signal-muted, #8a93a3); stroke-width: 2; }
@@ -92,6 +108,9 @@ svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; t
 .halo { fill: none; stroke: var(--signal-focus, #5aa9ff); stroke-width: 11; stroke-opacity: 0.4; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
 .wire.raised { stroke-width: 4; }
 .overlay { pointer-events: none; }
+/* Many selected (more than MANY_MARKS): strokes only, no glow, halo or ring, which would cost a filter or two paths each. */
+svg.many .selected > .box { filter: none; }
+svg.many .wire.selected { stroke-width: 4; }
 .level { fill: var(--signal-track, #2a2f38); }
 .level-fill { fill: var(--signal-meter-rms, #3ecf8e); }
 .level-mark { fill: var(--signal-muted, #8a93a3); visibility: hidden; }
@@ -108,13 +127,50 @@ svg.stale { opacity: 0.4; filter: grayscale(1); }
 .diagnostics h3 { margin: 0 0 4px; font-size: 12px; color: var(--signal-effective, #ffb74d); }
 .tip { position: absolute; left: 0; top: 0; pointer-events: none; visibility: hidden; white-space: nowrap; padding: 2px 6px;
   background: var(--signal-knob, #262b34); border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 4px; }
-.card { position: absolute; right: 8px; top: 40px; width: 20rem; max-height: calc(100% - 56px); overflow: hidden; box-sizing: border-box;
-  padding: 8px; visibility: hidden; background: var(--signal-panel, #1f232b); border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: var(--signal-radius, 6px); }
-.card h3 { margin: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.card .subtitle { color: var(--signal-muted, #8a93a3); margin-bottom: 6px; }
-.card dl { display: grid; grid-template-columns: 5rem 1fr; gap: 2px 8px; margin: 0; }
-.card dt { color: var(--signal-muted, #8a93a3); }
-.card dd { margin: 0; overflow-wrap: anywhere; }
+/* The sidebar (2026-10-17): a fixed column at the left, never over the drawing; its content scrolls inside it. */
+.side { position: absolute; left: 0; top: 0; bottom: 0; width: var(--side-width); box-sizing: border-box; display: flex; flex-direction: column;
+  background: var(--signal-panel, #1f232b); border-right: 1px solid var(--signal-knob-edge, #3a414d); }
+.side-head { flex: none; display: flex; align-items: center; gap: 6px; height: 32px; box-sizing: border-box; padding: 0 4px; border-bottom: 1px solid var(--signal-knob-edge, #3a414d); }
+.side-head h2 { flex: 1; min-width: 0; margin: 0; font-size: 11px; font-weight: 600; color: var(--signal-muted, #8a93a3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.side-head .collapse { flex: none; width: 20px; height: 22px; padding: 0; }
+:host([side-collapsed]) .side-head h2, :host([side-collapsed]) .side-body { display: none; }
+:host([side-collapsed]) .side-head { border-bottom: none; }
+.side-body { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; padding: 8px; box-sizing: border-box; }
+.side h3 { margin: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.side h4 { margin: 10px 0 4px; font-size: 11px; color: var(--signal-muted, #8a93a3); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.side .subtitle { color: var(--signal-muted, #8a93a3); margin-bottom: 6px; }
+.side dl { display: grid; grid-template-columns: 6.5rem 1fr; gap: 2px 8px; margin: 0; }
+.side dt { color: var(--signal-muted, #8a93a3); }
+.side dd { margin: 0; overflow-wrap: anywhere; }
+.side .actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+.side .actions button:disabled { opacity: 0.45; }
+.side .note { color: var(--signal-effective, #ffb74d); margin-top: 4px; }
+.side button.link { border: none; background: none; padding: 0; color: var(--signal-accent, #4fc3f7); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.side button.link:hover { text-decoration: underline; }
+.side button.link:disabled { color: var(--signal-muted, #8a93a3); cursor: default; text-decoration: none; }
+.side ul { list-style: none; margin: 0; padding: 0; }
+.side li { margin: 2px 0; }
+.side .pinrow { display: grid; grid-template-columns: 10px 1fr auto; gap: 4px; align-items: baseline; margin-top: 4px; }
+.side .pinrow .what { color: var(--signal-muted, #8a93a3); white-space: nowrap; }
+.side .dot { width: 8px; height: 8px; border-radius: 50%; box-sizing: border-box; border: 1.5px solid var(--signal-muted, #8a93a3); align-self: center; }
+.side .dot.signal { border-color: var(--signal-accent, #4fc3f7); }
+.side .dot.vector { border-color: var(--signal-effective, #ffb74d); }
+.side .dot.events { border-color: var(--signal-meter-rms, #3ecf8e); }
+.side .dot.signal.connected { background: var(--signal-accent, #4fc3f7); }
+.side .dot.vector.connected { background: var(--signal-effective, #ffb74d); }
+.side .dot.events.connected { background: var(--signal-meter-rms, #3ecf8e); }
+.side .wires { margin: 0 0 0 14px; }
+.side .wires li { display: grid; grid-template-columns: 1fr auto; gap: 4px; align-items: baseline; }
+.side .remove { padding: 0 5px; }
+.side .legend { display: grid; grid-template-columns: 28px 1fr; gap: 4px 8px; align-items: center; }
+.side .legend svg { position: static; width: 28px; height: 10px; }
+.side .meter-row { display: grid; grid-template-columns: 1fr 9ch; gap: 6px; align-items: center; margin-top: 4px; }
+.side .meter-track { height: 4px; background: var(--signal-track, #2a2f38); position: relative; overflow: hidden; }
+.side .meter-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 100%; transform-origin: left; transform: scaleX(0); background: var(--signal-meter-rms, #3ecf8e); }
+.side .meter-state { color: var(--signal-muted, #8a93a3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The marquee: a Shift-drag on the background. */
+.marquee { position: absolute; left: 0; top: 0; width: 0; height: 0; visibility: hidden; pointer-events: none; box-sizing: border-box;
+  border: 1px dashed var(--signal-focus, #5aa9ff); background: rgba(90, 169, 255, 0.12); }
 .row { display: grid; grid-template-columns: 1fr auto auto 1ch; gap: 2px 6px; align-items: center; margin-top: 4px; }
 .row .readout { position: relative; font-variant-numeric: tabular-nums; white-space: pre; color: var(--signal-muted, #8a93a3); }
 .row input { grid-column: 1 / 4; width: 100%; margin: 0; }
@@ -157,21 +213,22 @@ export class SignalSchematic extends HTMLElement {
     /** The paths of the groups in the SVG, in order. */
     this.order = [];
     this.crumbKey = null;
-    /** The elements marked `selected` and `hover`. */
-    this.marked = { selected: null, hover: null };
+    /** The elements marked `selected` (a Set) and `hover`. */
+    this.marked = { selected: new Set(), hover: null };
     /** The wire under the pointer (a hit), and the target of an open context menu. */
     this.hovered = null;
     this.menuState = null;
     /** The keyboard's menu anchor while its right click is dispatched. */
     this.keyMenu = null;
-    /** The selected wire's copy and halo, in its level's overlay; a selected pin's ring. */
-    this.halo = null;
-    this.ring = null;
+    /** Each selected wire's copy and halo, in its level's overlay; each selected pin's ring (by the element marked). */
+    this.halos = new Map();
+    this.rings = new Map();
     /** The host's last word on its scope slots (`scopes`, else `describe`). */
     this.scopes = null;
     this.scopesPushed = false;
     this.fitted = false;
-    this.selection = null;
+    /** The selection: hits, each part once, the last the one added last (ui/lib/schematic-select.js). */
+    this.selected = [];
     this.gesture = null;
     this.pending = false;
     this.barsPending = false;
@@ -187,12 +244,20 @@ export class SignalSchematic extends HTMLElement {
     this.cardValues = new Map();
     this.cardStop = null;
     this.cardRows = [];
+    /** The sidebar's live level of a selected pin: `{address, fill, state}`, or null. */
+    this.sideMeter = null;
+  }
+
+  /** The part selected last (the context menu's and the keyboard's), or null. */
+  get selection() {
+    return this.selected.at(-1) ?? null;
   }
 
   connectedCallback() {
     if (!this.shadowRoot) this.build();
     this.resize = new ResizeObserver(() => this.measure());
     this.resize.observe(this);
+    this.resize.observe(this.stage);
     this.onVisibility = () => this.activity();
     document.addEventListener('visibilitychange', this.onVisibility);
     this.stopDefault = onDefaultConnection((connection) => this.attach(connection));
@@ -218,6 +283,7 @@ export class SignalSchematic extends HTMLElement {
     const root = this.attachShadow({ mode: 'open' });
     this.tabIndex = 0;
     const style = html('style', { textContent: CSS });
+    this.stage = html('div', { className: 'stage' });
     this.svg = el('svg', { role: 'img', 'aria-label': 'Signal schematic' });
     this.bar = html('div', { className: 'bar' });
     this.crumbs = html('nav', { className: 'crumbs' });
@@ -231,10 +297,11 @@ export class SignalSchematic extends HTMLElement {
     this.message = html('div', { className: 'message' });
     this.staleBox = html('section', { className: 'diagnostics' });
     this.tip = html('div', { className: 'tip' });
-    this.cardBox = html('section', { className: 'card' });
-    root.append(style, this.svg, this.bar, this.message, this.staleBox, this.tip, this.cardBox);
+    this.marquee = html('div', { className: 'marquee' });
+    this.stage.append(this.svg, this.bar, this.message, this.staleBox, this.tip, this.marquee);
+    root.append(style, this.buildSide(), this.stage);
     this.editor = new SchematicEditor(this);
-    this.editor.build(this.bar, root);
+    this.editor.build(this.bar, this.stage);
     this.svg.addEventListener('pointerdown', (e) => this.pointerDown(e));
     this.svg.addEventListener('pointermove', (e) => this.pointerMove(e));
     this.svg.addEventListener('pointerup', (e) => this.pointerUp(e));
@@ -302,12 +369,12 @@ export class SignalSchematic extends HTMLElement {
     if (this.graph && 'folder' in error && error.folder !== this.graph.folder) {
       this.graph = null;
       this.layouts.clear();
-      this.selection = null;
+      this.selected = [];
       this.closeMenu();
       this.fitted = false;
       this.svg.replaceChildren();
       this.crumbs.replaceChildren();
-      this.showCard();
+      this.showSide();
     }
     const notice = staleNotice(error, Boolean(this.graph));
     const title = html('h3', { textContent: notice.title });
@@ -322,22 +389,29 @@ export class SignalSchematic extends HTMLElement {
     const old = new Map(this.layouts);
     // Another project: its own view, fitted again, nothing open or selected.
     if (this.graph && graph.project !== this.graph.project) {
+      this.moved.clear();
       this.open = new Set();
       this.pinned = new Set();
       this.fitted = false;
-      this.selection = null;
+      this.selected = [];
       this.view = IDENTITY;
       old.clear();
     }
     this.graph = graph;
     this.editor.graphSeen(graph);
     this.layouts.clear();
-    this.moved.clear();
+    // A move the graph holds, or written, goes; one still being written (a
+    // group's later message) stays, so no box jumps back meanwhile.
+    for (const [level, names] of this.moved) {
+      const stored = graph.layout?.positions?.[level] ?? {};
+      for (const [name, at] of names) if (!at.pending || (stored[name]?.x === at.x && stored[name]?.y === at.y)) names.delete(name);
+      if (!names.size) this.moved.delete(level);
+    }
     // What did not move stays where it is on screen.
     if (old.size) this.view = rebase(this.view, (level) => old.get(level) ?? null, (level) => this.layoutOf(level));
     this.say(graph.layout?.error ? `Positions ignored: ${graph.layout.error}` : '');
-    // The selection is found again in the new graph, or let go.
-    this.selection = reselect(this.selection, (level) => this.layoutOf(level));
+    // The selection is found again in the new graph; what went is let go.
+    this.selected = reselectAll(this.selected, (level) => this.layoutOf(level));
     // So is an open menu's target; a menu whose target went closes.
     const target = this.menuState?.target;
     if (target && target.hit.kind !== 'background') {
@@ -345,7 +419,7 @@ export class SignalSchematic extends HTMLElement {
       if (again) target.hit = again;
       else this.closeMenu();
     }
-    this.showCard();
+    this.showSide();
     this.schedule();
   }
 
@@ -364,11 +438,11 @@ export class SignalSchematic extends HTMLElement {
   described() {
     this.scopesSeen(this.connection?.description?.scopes, false);
     this.activity();
-    // The card is built again only when its rows change (a `describe` that
-    // arrives after the selection, or another structure); values in place.
-    const model = card(this.selection, { graph: this.graph, description: this.connection?.description });
+    // The sidebar is built again only when its rows change (a `describe`
+    // that arrives after the selection, or another structure); values in place.
+    const model = this.sideModel();
     const rows = (m) => (m?.parameters ?? []).map((r) => `${r.address} ${r.editable}`).join('\n');
-    if (rows(model) !== rows(this.cardModel)) this.showCard();
+    if (rows(model) !== rows(this.cardModel)) this.showSide();
     else this.refreshCard();
   }
 
@@ -390,8 +464,9 @@ export class SignalSchematic extends HTMLElement {
     if (this.viewport.w > 0) this.schedule();
   }
 
+  /** The drawing area (right of the sidebar): what the view, Fit and every screen coordinate are of. */
   measure() {
-    const rect = this.getBoundingClientRect();
+    const rect = this.stage.getBoundingClientRect();
     this.viewport = { w: rect.width, h: rect.height };
     // A hidden tab is 0×0: nothing to draw, nothing to stream.
     this.activity();
@@ -464,6 +539,9 @@ export class SignalSchematic extends HTMLElement {
     this.applyMarks();
     this.applyDrag();
     this.drawCrumbs();
+    // A selected composite opened or closed by the zoom (or the sidebar's
+    // own Open in place): its buttons follow.
+    if (this.sideStateKey() !== this.sideShownKey) this.showSide();
     this.applyBars();
     clearTimeout(this.levelTimer);
     this.levelTimer = setTimeout(() => this.updateLevels(), SETTLE_MS);
@@ -619,9 +697,17 @@ export class SignalSchematic extends HTMLElement {
     this.marked[name] = element;
   }
 
+  /** Class `selected` on `elements` (a Set) alone, each written only when it changes. */
+  markSelected(elements) {
+    for (const had of this.marked.selected) if (!elements.has(had)) had.classList.remove('selected');
+    for (const element of elements) if (!this.marked.selected.has(element)) element.classList.add('selected');
+    this.marked.selected = elements;
+  }
+
   /** The selection, and a menu's target or the wire under the pointer, marked on their elements (built again or not). */
   applyMarks() {
-    this.mark('selected', this.partElement(this.selection));
+    this.svg.classList.toggle('many', this.selected.length > MANY_MARKS);
+    this.markSelected(new Set(this.selected.map((s) => this.partElement(s)).filter(Boolean)));
     this.mark('hover', this.partElement(this.menuState?.target.hit ?? this.hovered));
     this.syncHalo();
   }
@@ -633,41 +719,52 @@ export class SignalSchematic extends HTMLElement {
   }
 
   /**
-   * A selected wire drawn again above the other wires of its level, thick,
-   * over a soft halo: two paths in the level's overlay (between its wires
-   * and its boxes) with the wire's own `d`, copied whenever it differs (a
-   * new bake, a drag that rewrites it, a cancelled drag). Nothing else is
-   * written: the wire keeps its place among the others. A selected pin (a
-   * disc; not one drawn as a polygon, past 1e7 px) gets a ring of twice
-   * its radius in its box's group, which a drag moves with the box.
+   * Each selected wire drawn again above the other wires of its level,
+   * thick, over a soft halo: two paths in the level's overlay (between its
+   * wires and its boxes) with the wire's own `d`, copied whenever it
+   * differs (a new bake, a drag that rewrites it, a cancelled drag).
+   * Nothing else is written: the wire keeps its place among the others.
+   * Each selected pin (a disc; not one drawn as a polygon, past 1e7 px)
+   * gets a ring of twice its radius in its box's group, which a drag moves
+   * with the box. What is no longer selected or drawn loses its own.
    */
   syncHalo() {
-    const s = this.selection;
-    const pin = s?.kind === 'port' && this.marked.selected?.localName === 'circle' ? this.marked.selected : null;
-    if (pin) {
-      this.ring ??= el('circle', { class: 'ring' });
-      if (this.ring.parentNode !== pin.parentNode) pin.parentNode.append(this.ring);
-      for (const [name, value] of [['cx', pin.getAttribute('cx')], ['cy', pin.getAttribute('cy')], ['r', String(2 * Number(pin.getAttribute('r')))]]) {
-        if (this.ring.getAttribute(name) !== value) this.ring.setAttribute(name, value);
+    const rings = new Map();
+    const halos = new Map();
+    for (const s of this.selected.length > MANY_MARKS ? [] : this.selected) {
+      const element = this.partElement(s);
+      if (!element) continue;
+      if (s.kind === 'port' && element.localName === 'circle') {
+        const ring = this.rings.get(element) ?? el('circle', { class: 'ring' });
+        if (ring.parentNode !== element.parentNode) element.parentNode.append(ring);
+        for (const [name, value] of [['cx', element.getAttribute('cx')], ['cy', element.getAttribute('cy')], ['r', String(2 * Number(element.getAttribute('r')))]]) {
+          if (ring.getAttribute(name) !== value) ring.setAttribute(name, value);
+        }
+        rings.set(element, ring);
+      } else if (s.kind === 'wire') {
+        const overlay = this.groups.get(s.path)?.overlay;
+        if (!overlay) continue;
+        const halo = this.halos.get(element) ?? { under: el('path', { class: 'halo' }), over: el('path') };
+        const { under, over } = halo;
+        if (under.parentNode !== overlay) overlay.append(under, over);
+        const d = element.getAttribute('d');
+        if (over.getAttribute('d') !== d) {
+          under.setAttribute('d', d);
+          over.setAttribute('d', d);
+        }
+        const classes = ['wire', s.wire.shape, s.wire.dashed ? 'dashed' : '', 'raised'].filter(Boolean).join(' ');
+        if (over.getAttribute('class') !== classes) over.setAttribute('class', classes);
+        halos.set(element, halo);
       }
-    } else this.ring?.remove();
-    const wire = s?.kind === 'wire' ? this.marked.selected : null;
-    const overlay = wire ? this.groups.get(s.path)?.overlay : null;
-    if (!wire || !overlay) {
-      this.halo?.under.remove();
-      this.halo?.over.remove();
-      return;
     }
-    this.halo ??= { under: el('path', { class: 'halo' }), over: el('path') };
-    const { under, over } = this.halo;
-    if (under.parentNode !== overlay) overlay.append(under, over);
-    const d = wire.getAttribute('d');
-    if (over.getAttribute('d') !== d) {
-      under.setAttribute('d', d);
-      over.setAttribute('d', d);
+    for (const [element, ring] of this.rings) if (rings.get(element) !== ring) ring.remove();
+    for (const [element, halo] of this.halos) {
+      if (halos.get(element) === halo) continue;
+      halo.under.remove();
+      halo.over.remove();
     }
-    const classes = ['wire', s.wire.shape, s.wire.dashed ? 'dashed' : '', 'raised'].filter(Boolean).join(' ');
-    if (over.getAttribute('class') !== classes) over.setAttribute('class', classes);
+    this.rings = rings;
+    this.halos = halos;
   }
 
   /**
@@ -699,6 +796,8 @@ export class SignalSchematic extends HTMLElement {
     const key = `${this.graph.project}\n${crumbs.map((c) => c.path).join('\n')}`;
     if (key === this.crumbKey) return;
     this.crumbKey = key;
+    // Nothing selected, the sidebar names the level shown.
+    if (!this.selected.length) this.showSide();
     this.crumbs.replaceChildren(
       ...crumbs.map((crumb, i) => {
         const button = html('button', { type: 'button', textContent: i === 0 ? this.graph.project ?? 'project' : crumb.name });
@@ -740,17 +839,27 @@ export class SignalSchematic extends HTMLElement {
     const at = this.point(event);
     const hit = hitTest(this.drawn, at);
     this.svg.setPointerCapture?.(event.pointerId);
-    // Edit patch: a press on an output starts a connection.
-    if (this.editor.starts(hit)) {
-      this.gesture = { start: at, last: at, hit, moved: false, connect: true, pointer: event.pointerId };
+    // Shift or ⌘ adds to the selection or takes out of it.
+    const additive = event.shiftKey || event.metaKey || (!MAC && event.ctrlKey);
+    const base = { start: at, last: at, hit, moved: false, additive, pointer: event.pointerId };
+    // Shift-drag on the background: the marquee (a plain drag pans).
+    if (hit.kind === 'background' && event.shiftKey) {
+      this.gesture = { ...base, marquee: true };
+      return;
+    }
+    // Edit patch: a press on an output starts a connection (a Shift- or
+    // ⌘-click selects the pin instead).
+    if (!additive && this.editor.starts(hit)) {
+      this.gesture = { ...base, connect: true };
       this.editor.connectStart(hit, at);
       return;
     }
     // The level's scale is kept from the start: a render during the drag
-    // (a push, a zoom) may replace the group or close the level.
+    // (a push, a zoom) may replace the group or close the level. A box of
+    // a group selected moves the group's boxes of its level with it.
     const k = hit.kind === 'instance' ? this.levelOf(hit.path)?.transform.k : undefined;
-    const follow = k && this.nodeGroup(hit.address) ? new DragFollow(hit.level, hit.node.name) : null;
-    this.gesture = { start: at, last: at, hit, moved: false, k, follow, pointer: event.pointerId };
+    const follow = k && this.nodeGroup(hit.address) ? new DragFollow(hit.level, dragGroup(this.selected, hit)) : null;
+    this.gesture = { ...base, k, follow };
   }
 
   nodeGroup(address) {
@@ -774,8 +883,25 @@ export class SignalSchematic extends HTMLElement {
     if (!gesture.moved) return;
     const last = gesture.last;
     gesture.last = at;
-    if (gesture.follow) this.scheduleDrag();
+    if (gesture.marquee) this.showMarquee(gesture);
+    else if (gesture.follow) this.scheduleDrag();
     else this.setView(pan(this.view, at.x - last.x, at.y - last.y));
+  }
+
+  /** The marquee's rectangle on screen, from the press to the pointer (`{x, y, w, h}`, `w` and `h` positive). */
+  marqueeRect(gesture) {
+    const x = Math.min(gesture.start.x, gesture.last.x);
+    const y = Math.min(gesture.start.y, gesture.last.y);
+    return { x, y, w: Math.abs(gesture.last.x - gesture.start.x), h: Math.abs(gesture.last.y - gesture.start.y) };
+  }
+
+  showMarquee(gesture) {
+    const r = this.marqueeRect(gesture);
+    Object.assign(this.marquee.style, { transform: `translate(${Math.round(r.x)}px, ${Math.round(r.y)}px)`, width: `${Math.round(r.w)}px`, height: `${Math.round(r.h)}px`, visibility: 'visible' });
+  }
+
+  hideMarquee() {
+    this.marquee.style.visibility = 'hidden';
   }
 
   levelOf(path) {
@@ -792,35 +918,89 @@ export class SignalSchematic extends HTMLElement {
       return;
     }
     if (gesture.connect) this.editor.cancelConnect();
-    if (!gesture.moved) {
-      this.select(gesture.hit.kind === 'background' ? null : gesture.hit);
+    if (gesture.marquee) {
+      this.hideMarquee();
+      if (!gesture.moved) return;
+      gesture.last = at;
+      // Shift held throughout: what it takes is added to the selection.
+      this.select(union(this.selected, inside(this.drawn, this.marqueeRect(gesture))));
       return;
     }
-    if (gesture.follow) {
-      const { node, level, path } = gesture.hit;
-      gesture.last = at;
-      const { x, y } = dragTo(gesture);
-      // Kept here until the pushed `graph` holds it; drawn at the next frame
-      // from the layout with it, which is what the drag showed.
-      if (!this.moved.has(level)) this.moved.set(level, new Map());
-      this.moved.get(level).set(node.name, { x, y });
-      const old = new Map(this.layouts);
-      const before = (l) => old.get(l) ?? null;
-      this.layouts.delete(level);
-      // Inside a composite the view is in (its breadcrumb), that inside
-      // stays where it is and the levels around it are fitted to it again;
-      // elsewhere what did not move stays (and an inside seen from outside
-      // is fitted to its box again).
-      const viewed = this.view.path ?? '';
-      const within = path !== '' && (viewed === path || viewed.startsWith(`${path}/`));
-      this.view = within ? reroot(this.view, before, path) : rebase(this.view, before, (l) => this.layoutOf(l));
-      this.schedule();
-      this.connection?.request?.({ type: 'schematic.move', level, instance: node.name, x, y }).catch((error) => this.say(`Not moved: ${error.message}`));
+    if (!gesture.moved) {
+      const hit = gesture.hit.kind === 'background' ? null : gesture.hit;
+      if (gesture.additive) {
+        if (hit) this.select(toggled(this.selected, hit));
+      } else this.select(hit ? [hit] : []);
+      return;
+    }
+    if (gesture.follow) this.drop(gesture, at);
+  }
+
+  /**
+   * A drag of `gesture` let go at `at`: every box it moved (its group's,
+   * each by as much as the one dragged) kept until the pushed `graph` holds
+   * it and written, one `schematic.move` (its `moves` form for a group).
+   */
+  drop(gesture, at) {
+    const { node, level, path } = gesture.hit;
+    gesture.last = at;
+    const to = dragTo(gesture);
+    const dx = to.x - node.x;
+    const dy = to.y - node.y;
+    const byName = new Map((this.layoutOf(level)?.nodes ?? []).filter((n) => n.kind === 'instance').map((n) => [n.name, n]));
+    const moves = [];
+    for (const name of gesture.follow.names) {
+      const box = name === node.name ? node : byName.get(name);
+      if (box) moves.push({ instance: name, x: box.x + dx, y: box.y + dy });
+    }
+    // Drawn at the next frame from the layout with them, which is what the
+    // drag showed; kept while written (`pending`) and until a graph holds them.
+    if (!this.moved.has(level)) this.moved.set(level, new Map());
+    const kept = this.moved.get(level);
+    for (const m of moves) kept.set(m.instance, { x: m.x, y: m.y, pending: true });
+    const old = new Map(this.layouts);
+    const before = (l) => old.get(l) ?? null;
+    this.layouts.delete(level);
+    // Inside a composite the view is in (its breadcrumb), that inside
+    // stays where it is and the levels around it are fitted to it again;
+    // elsewhere what did not move stays (and an inside seen from outside
+    // is fitted to its box again).
+    const viewed = this.view.path ?? '';
+    const within = path !== '' && (viewed === path || viewed.startsWith(`${path}/`));
+    this.view = within ? reroot(this.view, before, path) : rebase(this.view, before, (l) => this.layoutOf(l));
+    this.schedule();
+    // A group too large for one message goes as several (`moveMessages`).
+    for (const message of moveMessages(level, moves)) {
+      const mine = (message.moves ?? [message]).map((m) => [m.instance, kept.get(m.instance)]);
+      const settle = (failed) => {
+        let changed = false;
+        for (const [name, at] of mine) {
+          if (kept.get(name) !== at) continue;
+          at.pending = false;
+          // Not written: the box goes back to where the graph has it.
+          if (failed) changed = kept.delete(name) || changed;
+        }
+        if (changed) {
+          this.layouts.delete(level);
+          this.schedule();
+        }
+      };
+      const request = this.connection?.request?.(message);
+      if (!request) settle(true);
+      else
+        request.then(
+          () => settle(false),
+          (error) => {
+            settle(true);
+            this.say(`Not moved: ${error.message}`);
+          },
+        );
     }
   }
 
   cancelGesture() {
     this.gesture?.follow?.restore();
+    if (this.gesture?.marquee) this.hideMarquee();
     if (this.gesture?.connect) this.editor.cancelConnect();
     this.gesture = null;
     this.syncHalo();
@@ -884,12 +1064,26 @@ export class SignalSchematic extends HTMLElement {
   key(event) {
     // The menu's keys are its own (it stops them too): never the selection's Delete or ⌘Z.
     if (event.composedPath().includes(this.menu.list)) return;
+    const own = event.composedPath()[0] === this;
+    // Escape lets the selection go first (the add palette's Escape is the
+    // palette's), then leaves Edit patch, then goes back out of a level.
+    if (own && event.key === 'Escape' && this.selected.length && !this.editor.placing) {
+      event.preventDefault();
+      this.select([]);
+      return;
+    }
+    // ⌘A (Ctrl+A elsewhere): every instance and connection of the level shown.
+    if (own && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'a') {
+      event.preventDefault();
+      this.selectAll();
+      return;
+    }
     // Edit patch takes its keys first: Escape leaves edit mode before it
     // goes back out of a level.
     if (this.editor.key(event)) return;
-    // Keys of the inspector's slider and the bar's buttons are theirs (an
+    // Keys of the sidebar's sliders and buttons and the bar's are theirs (an
     // event from the shadow tree reaches this listener retargeted to the host).
-    if (event.composedPath()[0] !== this) return;
+    if (!own) return;
     // The context menu from the keyboard, for the selection (else the background).
     if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
       event.preventDefault();
@@ -901,8 +1095,6 @@ export class SignalSchematic extends HTMLElement {
       if (crumbs.length > 1) {
         this.pinned.delete(crumbs.at(-1).path);
         this.goTo(crumbs.at(-2).path);
-      } else {
-        this.select(null);
       }
       event.preventDefault();
       return;
@@ -920,7 +1112,7 @@ export class SignalSchematic extends HTMLElement {
   /**
    * The menu of what `event` (a right click, or the keyboard's) is over:
    * `{items, act(id), closed()}` (`schematicMenu`'s items), or null outside
-   * the drawing (the bar, the card, a field), whose right clicks are not
+   * the drawing (the bar, the sidebar, a field), whose right clicks are not
    * the schematic's. Signal.app's menu shows the items first; in a browser
    * this element's own does (`ownMenu`). `close()` closes whichever shows
    * them: called when its target goes with a pushed `graph`, and on a
@@ -997,6 +1189,11 @@ export class SignalSchematic extends HTMLElement {
   /** What `schematicMenu` needs of `hit`, opened at `point`. */
   menuContext(hit, point) {
     const context = { editing: this.editor.editing, level: this.currentLevel() };
+    // One of several selected: the menu's Delete selected removes them all.
+    if (this.selected.length > 1 && has(this.selected, hit)) {
+      const plan = deletePlan(this.selected);
+      Object.assign(context, { group: this.selected.length, deleted: plan.deleted, tooLarge: tooLargeText(plan) });
+    }
     if (hit.kind === 'background') context.addable = Boolean(paletteLevel(hit, this.drawn, point));
     if (hit.kind === 'instance' && hit.node.composite) {
       const level = this.levelOf(hit.path);
@@ -1035,7 +1232,10 @@ export class SignalSchematic extends HTMLElement {
 
   /** Item `id` of the menu opened on `target` (`{hit, point}`). */
   menuAct(id, { hit, point }) {
-    if (id === 'inspect') this.select(hit);
+    if (id === 'inspect') {
+      this.select([hit]);
+      this.revealSide();
+    } else if (id === 'delete-selected') this.deleteSelection();
     else if (id === 'open') {
       this.pinned.add(hit.address);
       this.schedule();
@@ -1046,7 +1246,8 @@ export class SignalSchematic extends HTMLElement {
     else if (id === 'copy-address') this.copy(hit.kind === 'wire' ? `${hit.from} → ${hit.to}` : hit.address);
     else if (id === 'delete') this.editor.remove(hit);
     else if (id === 'scale') {
-      this.select(hit);
+      this.select([hit]);
+      this.revealSide();
       this.editor.openScale();
     } else if (id === 'source' || id === 'target') this.goToEnd(hit, id === 'source' ? 'from' : 'to');
     else if (id === 'disconnect') {
@@ -1078,7 +1279,7 @@ export class SignalSchematic extends HTMLElement {
     const node = level?.layout.nodes.find((n) => n.id === end.node);
     const port = (side === 'from' ? node?.outs : node?.ins)?.find((p) => p.name === end.port);
     if (!port) return;
-    if (node.kind === 'instance') this.select({ kind: 'port', path: hit.path, level: hit.level, node, port, address: `${hit.path}/${node.name}.${port.name}` });
+    if (node.kind === 'instance') this.select([{ kind: 'port', path: hit.path, level: hit.level, node, port, address: `${hit.path}/${node.name}.${port.name}` }]);
     const at = toScreen(level.transform, port);
     this.setView(pan(this.view, this.viewport.w / 2 - at.x, this.viewport.h / 2 - at.y));
   }
@@ -1088,36 +1289,278 @@ export class SignalSchematic extends HTMLElement {
     this.connection?.request?.(message).catch((error) => this.say(`Not reset: ${error.message}`));
   }
 
-  // The selection and its card.
+  // The selection and the sidebar.
 
-  select(hit) {
-    this.selection = hit;
-    this.showCard();
+  /** `selected` (a list of hits; `[]` none) is the selection, shown in the sidebar and marked. */
+  select(selected) {
+    this.selected = selected;
+    this.showSide();
     this.schedule();
   }
 
-  showCard() {
-    this.stopCardStream();
-    const model = card(this.selection, { graph: this.graph, description: this.connection?.description });
-    this.cardModel = model;
-    this.cardRows = [];
-    if (!model) {
-      this.cardBox.style.visibility = 'hidden';
-      this.cardBox.replaceChildren();
+  /** ⌘A: every instance and connection of the level shown (the deepest breadcrumb's). */
+  selectAll() {
+    if (!this.drawn) return;
+    const path = breadcrumbs(this.drawn, this.viewport).at(-1).path;
+    this.select(allOf(this.levelOf(path)));
+  }
+
+  /**
+   * Delete (Edit patch) of the selection, or of a group from the menu: one
+   * `patch` per level (`deletePlan`), written one after the other, each
+   * once the last is answered; a refused one stops the rest.
+   */
+  async deleteSelection() {
+    if (this.selected.length === 1) {
+      this.editor.remove(this.selected[0]);
       return;
     }
-    const parts = [html('h3', { textContent: model.title }), html('div', { className: 'subtitle', textContent: model.subtitle })];
+    const plan = deletePlan(this.selected);
+    // A patch is one message and one undo: one too large is not split, and nothing is written.
+    if (plan.tooLarge.length) {
+      this.editor.showNotice('Not written', tooLargeText(plan));
+      return;
+    }
+    for (const { level, ops } of plan.patches) if (!(await this.editor.write(0, level, ops))) return;
+  }
+
+  // The sidebar.
+
+  buildSide() {
+    this.side = html('aside', { className: 'side' });
+    this.side.setAttribute('aria-label', 'Selection');
+    const head = html('div', { className: 'side-head' });
+    this.collapseButton = html('button', { type: 'button', className: 'collapse' });
+    this.collapseButton.addEventListener('click', () => {
+      this.setCollapsed(!this.hasAttribute('side-collapsed'));
+      this.focus({ preventScroll: true });
+    });
+    this.sideTitle = html('h2', { textContent: 'Selection' });
+    head.append(this.collapseButton, this.sideTitle);
+    this.sideBody = html('div', { className: 'side-body' });
+    this.side.append(head, this.sideBody);
+    let collapsed = false;
+    try {
+      collapsed = globalThis.localStorage?.getItem(SIDE_KEY) === 'collapsed';
+    } catch {
+      // No storage here (a private window, blocked site data): open.
+    }
+    this.setCollapsed(collapsed, false);
+    return this.side;
+  }
+
+  /** The sidebar collapsed to a thin strip, or open; kept for this viewer when `keep`. */
+  setCollapsed(collapsed, keep = true) {
+    this.toggleAttribute('side-collapsed', collapsed);
+    this.collapseButton.textContent = collapsed ? '›' : '‹';
+    this.collapseButton.title = collapsed ? 'Show the sidebar' : 'Hide the sidebar';
+    this.collapseButton.setAttribute('aria-expanded', String(!collapsed));
+    if (!keep) return;
+    try {
+      globalThis.localStorage?.setItem(SIDE_KEY, collapsed ? 'collapsed' : 'open');
+    } catch {
+      // Not kept: it opens next time.
+    }
+  }
+
+  /** The sidebar shown (opened if collapsed) and scrolled to its top: the menu's Inspect. */
+  revealSide() {
+    if (this.hasAttribute('side-collapsed')) this.setCollapsed(false);
+    this.sideBody.scrollTop = 0;
+  }
+
+  /** What the sidebar's buttons depend on besides the selection: a selected composite open, and held open by the zoom. */
+  sideStateKey() {
+    const s = this.selected.length === 1 ? this.selected[0] : null;
+    if (s?.kind !== 'instance' || !s.node.composite || !this.drawn) return '';
+    const level = this.levelOf(s.path);
+    const open = this.drawn.open.has(s.address);
+    return `${open} ${open && Boolean(level) && s.node.w * level.transform.k >= CLOSE_PX}`;
+  }
+
+  /** The sidebar's model of the selection now (ui/lib/schematic-sidebar.js). */
+  sideModel() {
+    const drawn = this.drawn;
+    const crumb = drawn ? breadcrumbs(drawn, this.viewport).at(-1) : { path: '', level: '' };
+    return sidebar(this.selected, {
+      graph: this.graph,
+      description: this.connection?.description,
+      layoutOf: (level) => this.layoutOf(level),
+      editing: this.editor.editing,
+      shown: { path: crumb.path, level: crumb.level },
+      menu: (hit) => (drawn ? this.menuContext(hit, { x: this.viewport.w / 2, y: this.viewport.h / 2 }) : {}),
+    });
+  }
+
+  /**
+   * The sidebar built again for the selection. Its width never changes,
+   * whatever it shows; its scroll is kept while it shows the same parts.
+   */
+  showSide() {
+    if (!this.sideBody) return;
+    this.stopCardStream();
+    const model = this.sideModel();
+    this.cardModel = model;
+    this.cardRows = [];
+    this.sideMeter = null;
+    this.sideShownKey = this.sideStateKey();
+    const key = this.selected.map(hitKey).join('\n');
+    const scroll = key === this.sideKey ? this.sideBody.scrollTop : 0;
+    this.sideKey = key;
+    this.sideTitle.textContent = model.kind === 'project' ? 'Project' : model.kind === 'group' ? 'Selection' : model.kind === 'port' ? 'Pin' : model.kind === 'wire' ? 'Connection' : 'Instance';
+    const parts = [html('h3', { textContent: model.title, title: model.title }), html('div', { className: 'subtitle', textContent: model.subtitle })];
+    if (model.actions?.length) parts.push(this.actionButtons(model.actions));
     if (model.fields.length) {
       const list = html('dl');
       for (const [label, value] of model.fields) list.append(html('dt', { textContent: label }), html('dd', { textContent: value }));
       parts.push(list);
     }
-    for (const row of model.parameters) parts.push(this.parameterRow(row));
-    parts.push(...this.editor.cardParts(this.selection));
-    this.cardBox.replaceChildren(...parts);
-    this.cardBox.style.visibility = 'visible';
+    if (model.kind === 'project') parts.push(...this.legendParts());
+    if (model.kind === 'instance') parts.push(...this.pinParts(model));
+    if (model.kind === 'wire') parts.push(...this.wireParts(model));
+    if (model.kind === 'port') parts.push(...this.portParts(model));
+    if (model.kind === 'group') parts.push(...this.groupParts(model));
+    if (model.parameters?.length) {
+      parts.push(html('h4', { textContent: model.editable ? 'Parameters' : 'Parameters (set in the composite’s file)' }));
+      for (const row of model.parameters) parts.push(this.parameterRow(row));
+    }
+    if (this.selected.length === 1) parts.push(...this.editor.cardParts(this.selected[0]));
+    this.sideBody.replaceChildren(...parts);
+    this.sideBody.scrollTop = scroll;
     this.refreshCard();
     this.updateCardStream();
+    this.applyBars();
+  }
+
+  /** The actions' buttons: menu items (`{id, label, disabled, title}`), done on the selection. */
+  actionButtons(actions) {
+    const row = html('div', { className: 'actions' });
+    for (const action of actions) {
+      const button = html('button', { type: 'button', textContent: action.label, disabled: Boolean(action.disabled) });
+      if (action.title) button.title = action.title;
+      button.addEventListener('click', () => this.sideAct(action.id));
+      row.append(button);
+    }
+    return row;
+  }
+
+  /** Action `id` of the sidebar, on the selection. */
+  sideAct(id) {
+    const selected = this.selected;
+    this.focus({ preventScroll: true });
+    if (id === 'delete-all') this.deleteSelection();
+    else if (id === 'copy-addresses') this.copy(addressesText(selected));
+    else if (selected.length === 1) this.menuAct(id, { hit: selected[0], point: { x: this.viewport.w / 2, y: this.viewport.h / 2 } });
+    // What the action changed (Open in place, Close) shows at the next frame's check; the rest now.
+    this.schedule();
+  }
+
+  /** A link that selects `hit` (Shift or ⌘: adds it or takes it out), or plain text when there is nothing to select. */
+  link(label, hit) {
+    const button = html('button', { type: 'button', className: 'link', textContent: label, disabled: !hit });
+    if (hit) {
+      button.title = `Select ${label}`;
+      button.addEventListener('click', (event) => {
+        this.focus({ preventScroll: true });
+        this.select(event.shiftKey || event.metaKey || (!MAC && event.ctrlKey) ? toggled(this.selected, hit) : [hit]);
+      });
+    }
+    return button;
+  }
+
+  legendParts() {
+    const list = html('div', { className: 'legend' });
+    for (const entry of LEGEND) {
+      const swatch = el('svg', { viewBox: '0 0 28 10', 'aria-hidden': 'true' });
+      if (entry.swatch.startsWith('wire')) swatch.append(el('path', { class: entry.swatch, d: 'M1 5 C 10 5, 18 5, 27 5' }));
+      else swatch.append(el('circle', { class: entry.swatch, cx: 14, cy: 5, r: 3.5 }));
+      list.append(swatch, html('span', { textContent: entry.label }));
+    }
+    return [html('h4', { textContent: 'Legend' }), list, html('div', { className: 'subtitle', textContent: 'Shift- or ⌘-click adds to the selection, Shift-drag on the background selects the boxes inside, ⌘A the level shown, Escape lets go.' })];
+  }
+
+  /** A connection's line: the wire (a link), its other end (a link), and in Edit patch its removal. */
+  connectionItem(c, level) {
+    const item = html('li');
+    const what = html('span');
+    // The wire (its arrow), then the pin at its other end.
+    const wire = this.link(`${c.wire.label.slice(0, 1)} wire`, c.wire.hit);
+    wire.title = `Select the wire ${c.wire.hit.from} → ${c.wire.hit.to}`;
+    what.append(wire, ' ', this.link(c.end.label, c.end.hit));
+    item.append(what);
+    if (this.editor.editing && c.removable) {
+      const remove = html('button', { type: 'button', className: 'remove', textContent: '×', title: 'Remove this connection' });
+      remove.addEventListener('click', () => {
+        this.focus({ preventScroll: true });
+        const { from, to } = c.wire.hit.wire.written;
+        this.editor.write(0, level, [removeConnection(from, to)]);
+      });
+      item.append(remove);
+    } else item.append(html('span'));
+    return item;
+  }
+
+  pinParts(model) {
+    const parts = [html('h4', { textContent: 'Pins' })];
+    for (const pin of model.pins) {
+      const row = html('div', { className: 'pinrow' });
+      const dot = html('span', { className: ['dot', pin.shape, pin.connected ? 'connected' : ''].filter(Boolean).join(' ') });
+      const what = html('span', { className: 'what', textContent: [pin.role === 'parameter' ? 'param' : pin.direction, pin.kind, pin.rate == null ? null : `÷${pin.rate}`].filter(Boolean).join(' · ') });
+      row.append(dot, this.link(pin.name, pin.hit), what);
+      parts.push(row);
+      if (pin.connections.length) {
+        const wires = html('ul', { className: 'wires' });
+        for (const c of pin.connections) wires.append(this.connectionItem(c, pin.hit.level));
+        parts.push(wires);
+      }
+    }
+    return parts;
+  }
+
+  wireParts(model) {
+    const list = html('dl');
+    for (const end of model.links) {
+      const dd = html('dd');
+      dd.append(this.link(end.label, end.hit));
+      list.append(html('dt', { textContent: end.name }), dd);
+    }
+    return [html('h4', { textContent: 'Ends' }), list];
+  }
+
+  portParts(model) {
+    const parts = [];
+    if (model.meter) {
+      // Fixed size whatever its state: only the fill's scale and the word change.
+      const row = html('div', { className: 'meter-row' });
+      const track = html('div', { className: 'meter-track' });
+      const fill = html('div', { className: 'meter-fill' });
+      track.append(fill);
+      const state = html('span', { className: 'meter-state' });
+      row.append(track, state);
+      this.sideMeter = { address: this.selected[0].address, fill, state, shown: null };
+      parts.push(html('h4', { textContent: 'Level' }), row);
+    }
+    parts.push(html('h4', { textContent: `Connections (${model.connections.length})` }));
+    if (model.connections.length) {
+      const list = html('ul', { className: 'wires' });
+      for (const c of model.connections) list.append(this.connectionItem(c, this.selected[0].level));
+      parts.push(list);
+    } else parts.push(html('div', { className: 'subtitle', textContent: 'none' }));
+    return parts;
+  }
+
+  groupParts(model) {
+    const parts = model.notes.map((text) => html('div', { className: 'note', textContent: text }));
+    parts.push(html('h4', { textContent: 'Members' }));
+    const list = html('ul');
+    for (const member of model.members) {
+      const item = html('li');
+      item.append(this.link(member.label, member.hit));
+      list.append(item);
+    }
+    if (model.more) list.append(html('li', { className: 'subtitle', textContent: `and ${model.more} more` }));
+    parts.push(list, html('div', { className: 'subtitle', textContent: 'Drag one of the boxes to move those of its level together.' }));
+    return parts;
   }
 
   parameterRow(row) {
@@ -1287,6 +1730,19 @@ export class SignalSchematic extends HTMLElement {
       if (shown.level !== level) shown.fill.setAttribute('width', String(shown.width * level));
       shown.state = state;
       shown.level = level;
+    }
+    // A selected pin's level in the sidebar: its bar's, while one shows.
+    const meter = this.sideMeter;
+    if (meter) {
+      const entry = this.states?.get(meter.address);
+      const state = entry ? entry.state ?? 'idle' : 'off';
+      const level = state === 'live' ? this.levels.get(entry.port) ?? 0 : 0;
+      const text = { live: level > 0 ? `${(60 * level - 60).toFixed(1)} dB` : '−∞ dB', idle: 'stopped', pending: '…', 'no-slot': 'no slot', off: 'not on screen' }[state] ?? state;
+      if (meter.shown !== `${state} ${level}`) {
+        meter.fill.style.transform = `scaleX(${level})`;
+        meter.state.textContent = text;
+        meter.shown = `${state} ${level}`;
+      }
     }
   }
 }

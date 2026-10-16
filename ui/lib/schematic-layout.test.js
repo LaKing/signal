@@ -248,3 +248,39 @@ test('a pin knows its shape and whether a wire reaches it', () => {
   assert.deepEqual(pins('a'), { out: ['signal', true, false], spare: ['signal', false, false] });
   assert.deepEqual(pins('b'), { in: ['signal', true, false], free: ['signal', false, false], gain: ['signal', true, true], pan: ['signal', false, true] });
 });
+
+// 2026-10-17: a group of selected boxes dragged together.
+test('a group dragged together: its wires follow it as the next layout, with all of them stored there, draws them', () => {
+  const level = {
+    instances: [box('a', []), box('b', ['in', 'back']), box('c'), box('d', ['in'], [])],
+    connections: [wire('/a.out', '/b.in'), wire('/b.out', '/c.in'), wire('/c.out', '/d.in'), wire('/c.out', '/b.back')],
+  };
+  const before = layout(level);
+  const check = (offset, ids) => {
+    const moves = new Map(ids.map((id) => [id, { x: nodeOf(before, id).x + offset.x, y: nodeOf(before, id).y + offset.y }]));
+    const after = layout(level, Object.fromEntries(moves));
+    for (const n of after.nodes) {
+      const want = moves.get(n.id) ?? { x: nodeOf(before, n.id).x, y: nodeOf(before, n.id).y };
+      assert.deepEqual([n.x, n.y], [want.x, want.y], `${n.id} where it was put`);
+    }
+    const moved = new Map(movedWires(before, moves).map((m) => [m.wire.id, m]));
+    const shape = (w) => ({ curve: w.curve, points: w.points, box: w.box, feedback: w.feedback, under: w.under });
+    const route = (m) => ({ ...routed(m), feedback: m.feedback, under: m.under });
+    for (const w of after.wires) assert.deepEqual(moved.has(w.id) ? route(moved.get(w.id)) : shape(before.wires[w.id]), shape(w), `${w.label} follows`);
+    return moved;
+  };
+  // b and c together: the wire between them keeps its shape but moves, and
+  // those in and out of the pair change.
+  const pair = check({ x: 13, y: 7 }, ['b', 'c']);
+  assert.deepEqual([...pair.values()].map((m) => m.wire.label).sort(), ['/a.out → /b.in', '/b.out → /c.in', '/c.out → /b.back', '/c.out → /d.in']);
+  // Far below: the loop's lane goes down with the lowest of them.
+  check({ x: 0, y: 600 }, ['c', 'd']);
+  // Every box: every wire moves.
+  assert.equal(check({ x: -40, y: 25 }, ['a', 'b', 'c', 'd']).size, 4);
+  // One id in a Map is the one-box drag.
+  const c = nodeOf(before, 'c');
+  const to = { x: c.x + 17, y: c.y - 9 };
+  assert.deepEqual(movedWires(before, new Map([['c', to]])), movedWires(before, 'c', to));
+  assert.deepEqual(movedWires(before, new Map([['nope', to]])), []);
+  assert.equal(levelBottom(before.nodes, new Map([['d', { x: 0, y: 1000 }]])), 1000 + nodeOf(before, 'd').h);
+});

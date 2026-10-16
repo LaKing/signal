@@ -61,6 +61,17 @@ pub fn set_position(
     x: i64,
     y: i64,
 ) -> Result<String, String> {
+    set_positions(text, level, &[(instance, x, y)])
+}
+
+/// `text` with each `(instance, x, y)` of `moves` of `level` (`""`: the top
+/// level) at its position, in order: parsed once and written once, however
+/// many (a group of boxes dragged together).
+pub fn set_positions(
+    text: &str,
+    level: &str,
+    moves: &[(&str, i64, i64)],
+) -> Result<String, String> {
     let mut document = parse(text)?;
     let table = if level.is_empty() {
         document
@@ -81,17 +92,19 @@ pub fn set_position(
             })
     }
     .ok_or_else(|| format!("{SCHEMATIC_FILE}: the table of level `{level}` is not a table"))?;
-    let mut position = InlineTable::new();
-    position.insert("x", Value::from(x));
-    position.insert("y", Value::from(y));
-    match table.get_mut(instance) {
-        Some(Item::Value(old)) => {
-            let decor = old.decor().clone();
-            *old = Value::InlineTable(position);
-            *old.decor_mut() = decor;
-        }
-        _ => {
-            table.insert(instance, Item::Value(Value::InlineTable(position)));
+    for &(instance, x, y) in moves {
+        let mut position = InlineTable::new();
+        position.insert("x", Value::from(x));
+        position.insert("y", Value::from(y));
+        match table.get_mut(instance) {
+            Some(Item::Value(old)) => {
+                let decor = old.decor().clone();
+                *old = Value::InlineTable(position);
+                *old.decor_mut() = decor;
+            }
+            _ => {
+                table.insert(instance, Item::Value(Value::InlineTable(position)));
+            }
         }
     }
     Ok(document.to_string())
@@ -117,6 +130,37 @@ pub fn remove_level(text: &str, level: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn several_positions_are_written_at_once_as_one_by_one() {
+        let text = "# by hand\n[top]\ndrums = { x = 1, y = 2 } # kept\n";
+        let at_once = set_positions(
+            text,
+            "",
+            &[("drums", 7, 8), ("out", 200, 0), ("lfo", -3, 4)],
+        )
+        .unwrap();
+        let mut one_by_one = text.to_owned();
+        for (instance, x, y) in [("drums", 7, 8), ("out", 200, 0), ("lfo", -3, 4)] {
+            one_by_one = set_position(&one_by_one, "", instance, x, y).unwrap();
+        }
+        assert_eq!(at_once, one_by_one);
+        assert_eq!(
+            at_once,
+            "# by hand\n[top]\ndrums = { x = 7, y = 8 } # kept\nout = { x = 200, y = 0 }\nlfo = { x = -3, y = 4 }\n"
+        );
+        let inner = set_positions("", "kick", &[("osc", 0, 30), ("env", 5, 6)]).unwrap();
+        assert_eq!(
+            inner,
+            "[composite.kick]\nosc = { x = 0, y = 30 }\nenv = { x = 5, y = 6 }\n"
+        );
+        assert_eq!(
+            set_positions(text, "", &[]).unwrap(),
+            text,
+            "nothing to write changes nothing"
+        );
+        assert!(set_positions("top = 3\n", "", &[("a", 0, 0)]).is_err());
+    }
 
     #[test]
     fn positions_are_written_one_table_per_level_and_read_back() {

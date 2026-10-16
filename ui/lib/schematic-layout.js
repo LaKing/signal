@@ -352,12 +352,14 @@ export function dragPosition(node, travel, k) {
 
 /**
  * The lowest box's bottom edge (never above 0), with node `id`, if given,
- * at `to`: what feedback lanes run below, in `layout` and in a drag alike.
+ * at `to` (or, `id` a Map, each node it holds at its position): what
+ * feedback lanes run below, in `layout` and in a drag alike.
  */
 export function levelBottom(nodes, id = null, to = null) {
+  const moves = id instanceof Map ? id : new Map(id === null ? [] : [[id, to]]);
   let bottom = 0;
   for (const n of nodes) {
-    const y = (n.id === id ? to.y : n.y) + n.h;
+    const y = (moves.get(n.id)?.y ?? n.y) + n.h;
     if (y > bottom) bottom = y;
   }
   return bottom;
@@ -373,21 +375,28 @@ export function levelBottom(nodes, id = null, to = null) {
  * moves (the lowest box moved, or a wire attached became or stopped being
  * feedback). Released there, the next layout draws exactly these, unless
  * the node now overlaps one that is not stored (see docs/ui-controls.md
- * "Schematic").
+ * "Schematic"). `id` may instead be a Map of node id → `{x, y}` (and `to`
+ * left out): a group dragged together, every node of it at its position.
  */
 export function movedWires(drawn, id, to) {
-  const node = drawn.nodes.find((n) => n.id === id);
-  if (!node) return [];
-  const dx = to.x - node.x;
-  const dy = to.y - node.y;
-  const bottom = levelBottom(drawn.nodes, id, to);
-  const shift = (p, moves) => (moves ? { x: p.x + dx, y: p.y + dy } : p);
+  const asked = id instanceof Map ? id : new Map([[id, to]]);
+  const moves = new Map();
+  for (const node of drawn.nodes) {
+    const at = asked.get(node.id);
+    if (at) moves.set(node.id, { dx: at.x - node.x, dy: at.y - node.y, at });
+  }
+  if (!moves.size) return [];
+  const bottom = levelBottom(drawn.nodes, new Map([...moves].map(([key, m]) => [key, m.at])));
+  const shift = (p, node) => {
+    const m = moves.get(node);
+    return m ? { x: p.x + m.dx, y: p.y + m.dy } : p;
+  };
   const changed = [];
   let lane = 0;
   for (const wire of drawn.wires) {
-    const attached = wire.from.node === id || wire.to.node === id;
-    const a = shift(wire.curve.start, wire.from.node === id);
-    const b = shift(wire.curve.segs.at(-1).to, wire.to.node === id);
+    const attached = moves.has(wire.from.node) || moves.has(wire.to.node);
+    const a = shift(wire.curve.start, wire.from.node);
+    const b = shift(wire.curve.segs.at(-1).to, wire.to.node);
     const feedback = wire.reversed || b.x <= a.x;
     if (feedback) lane += 1;
     const under = feedback ? laneY(bottom, lane) : null;

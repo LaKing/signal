@@ -153,3 +153,29 @@ test('released inside a composite the view is in, that inside stays where it is'
   assert.ok(Math.abs(refit.k - was.k) > 1e-6);
   assert.deepEqual(reroot(view, layoutOf, '/nope'), view);
 });
+
+// 2026-10-17: a group of boxes of one level dragged by one of them.
+test('a group’s boxes move together by the dragged one’s offset, and come back on a cancel', () => {
+  const drawn = layout(LEVEL);
+  const transform = { k: 1, x: 0, y: 0 };
+  const group = drawnGroup(drawn, transform);
+  const groups = new Map([['', group]]);
+  const levels = [{ path: '', level: '', transform }];
+  const follow = new DragFollow('', ['b', 'c']);
+  const b = drawn.nodes.find((n) => n.id === 'b');
+  const to = { x: b.x + 10, y: b.y + 20 };
+  follow.apply({ layout: drawn, levels, groups, to });
+  const m = group.baked.m;
+  for (const id of ['b', 'c']) assert.equal(group.nodeCache.get(id).el.getAttribute('transform'), `translate(${10 * m} ${20 * m})`, id);
+  assert.equal(group.nodeCache.get('a').el.getAttribute('transform'), null, 'a box not in the group stays');
+  const c = drawn.nodes.find((n) => n.id === 'c');
+  const expected = movedWires(drawn, new Map([['b', to], ['c', { x: c.x + 10, y: c.y + 20 }]]));
+  for (const route of expected) {
+    const { points, curve } = routed(route);
+    assert.equal(group.wireCache.get(route.wire.id).el.getAttribute('d'), bakedPath(group.baked, points, curve), route.wire.label);
+  }
+  assert.equal(follow.apply({ layout: drawn, levels, groups, to }), 0, 'nothing moved, nothing written');
+  follow.restore();
+  for (const id of ['b', 'c']) assert.equal(group.nodeCache.get(id).el.getAttribute('transform'), null);
+  for (const w of drawn.wires) assert.equal(group.wireCache.get(w.id).el.getAttribute('d'), bakedPath(group.baked, w.points, w.curve));
+});

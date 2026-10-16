@@ -285,6 +285,99 @@ fn schematic_move_writes_positions_and_pushes_graph(transport: Transport) {
     rig.finish();
 }
 
+/// 2026-10-17: a group of boxes dragged together is one `schematic.move`
+/// with `moves`: checked whole, one write, one `graph` push; a list naming
+/// an unknown instance writes nothing.
+fn schematic_move_writes_a_group_at_once(transport: Transport) {
+    let mut rig = project_rig("schematic-move-group", transport, "kick");
+    let (mut ws, _) = rig.client();
+    let file = rig.dir.join("ui/schematic.toml");
+    let moved = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "schematic.move", "level": "", "moves": [
+            {"instance": "drums", "x": 10.4, "y": -3.6},
+            {"instance": "lfo", "x": 200, "y": 40},
+        ]}),
+        "schematic.moved",
+    );
+    assert_eq!(
+        moved["moves"],
+        json!([{"instance": "drums", "x": 10, "y": -4}, {"instance": "lfo", "x": 200, "y": 40}]),
+        "rounded, in order"
+    );
+    assert_eq!(moved["level"], "");
+    assert_eq!(moved["file"], "ui/schematic.toml");
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "[top]\ndrums = { x = 10, y = -4 }\nlfo = { x = 200, y = 40 }\n"
+    );
+    pushed(&mut rig, &mut ws, "graph with both positions", |g| {
+        g["layout"]["positions"][""]["drums"] == json!({"x": 10, "y": -4})
+            && g["layout"]["positions"][""]["lfo"] == json!({"x": 200, "y": 40})
+    });
+    rig.no_reload(&mut ws, 300);
+
+    for (id, message, code) in [
+        (
+            2,
+            json!({"type": "schematic.move", "level": "", "moves": [
+                {"instance": "drums", "x": 1, "y": 1},
+                {"instance": "nope", "x": 2, "y": 2},
+            ]}),
+            "unknown-instance",
+        ),
+        (
+            3,
+            json!({"type": "schematic.move", "level": "", "moves": [
+                {"instance": "drums", "x": 1, "y": 1},
+                {"instance": "lfo", "x": "a", "y": 2},
+            ]}),
+            "bad-value",
+        ),
+        (
+            4,
+            json!({"type": "schematic.move", "level": "", "moves": []}),
+            "bad-message",
+        ),
+        (
+            5,
+            json!({"type": "schematic.move", "level": "", "instance": "drums", "x": 1, "y": 1,
+                "moves": [{"instance": "drums", "x": 1, "y": 1}]}),
+            "bad-message",
+        ),
+        (
+            6,
+            json!({"type": "schematic.move", "level": "", "moves": [{"x": 1, "y": 1}]}),
+            "bad-message",
+        ),
+        (
+            7,
+            json!({"type": "schematic.move", "level": "", "x": 1, "y": 1,
+                "moves": [{"instance": "drums", "x": 1, "y": 1}]}),
+            "bad-message",
+        ),
+        (
+            8,
+            json!({"type": "schematic.move", "level": "", "moves": [
+                {"instance": "drums", "x": 1, "y": 1},
+                {"instance": "lfo", "x": 2, "y": 2},
+                {"instance": "drums", "x": 3, "y": 3},
+            ]}),
+            "bad-value",
+        ),
+    ] {
+        let refused = rig.request(&mut ws, id, message, "error");
+        assert_eq!(refused["code"], code, "{refused}");
+    }
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "[top]\ndrums = { x = 10, y = -4 }\nlfo = { x = 200, y = 40 }\n",
+        "a refused list writes nothing"
+    );
+    rig.finish();
+}
+
 fn an_edit_of_the_positions_file_pushes_graph(transport: Transport) {
     let mut rig = project_rig("schematic-edit", transport, "kick");
     let (mut ws, _) = rig.client();
@@ -311,6 +404,7 @@ both!(
     kick_pulse_and_physical_av_are_described_as_written,
     a_structural_reload_pushes_graph,
     schematic_move_writes_positions_and_pushes_graph,
+    schematic_move_writes_a_group_at_once,
     an_edit_of_the_positions_file_pushes_graph,
     a_playing_graph_is_built_once_per_plan_version,
 );
