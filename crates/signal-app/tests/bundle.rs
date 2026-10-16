@@ -71,10 +71,17 @@ fn bundle_app_builds_a_signed_bundle() {
     assert_eq!(plist_value(&plist, "CFBundleName"), "Signal");
     assert_eq!(plist_value(&plist, "CFBundleIdentifier"), "hu.d250.signal");
     assert_eq!(plist_value(&plist, "CFBundleExecutable"), "Signal");
+    // The commit's version (scripts/version.sh), not only the workspace's.
+    let version = Command::new(root().join("scripts/version.sh"))
+        .output()
+        .unwrap();
+    assert!(version.status.success());
+    let version = String::from_utf8(version.stdout).unwrap();
     assert_eq!(
         plist_value(&plist, "CFBundleShortVersionString"),
-        env!("CARGO_PKG_VERSION")
+        version.trim()
     );
+    assert!(version.starts_with(env!("CARGO_PKG_VERSION").rsplit_once('.').unwrap().0));
     assert!(!plist_value(&plist, "LSMinimumSystemVersion").is_empty());
     assert!(
         plist_value(&plist, "NSMicrophoneUsageDescription").contains("audio input"),
