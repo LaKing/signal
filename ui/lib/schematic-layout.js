@@ -6,7 +6,10 @@
 // ordered by a few barycentre sweeps. A node with a stored position keeps it,
 // and the others move down until they overlap nothing. Deterministic: the
 // result depends on the arrays' order (source order) and never on an
-// object's key order. No DOM.
+// object's key order. Wires are smooth curves (ui/lib/schematic-wire.js);
+// `movedWires` gives them again for a box being dragged. No DOM.
+
+import { wireGeometry } from './schematic-wire.js';
 
 /** Geometry, in the layout's own units. */
 export const HEADER = 34;
@@ -17,6 +20,8 @@ export const MIN_WIDTH = 96;
 export const GAP_X = 72;
 export const GAP_Y = 24;
 const SWEEPS = 4;
+/** Feedback lanes run this far apart, the first GAP_Y / 2 below the lowest box. */
+export const LANE = 6;
 
 /** Where an export pseudo-node's pins go: a composite's frame. */
 export const INPUTS = '@inputs';
@@ -226,12 +231,19 @@ function anchor(node, name, out) {
   return { x: out ? node.x + node.w : node.x, y: node.y + HEADER + ROW * (i + 0.5) };
 }
 
+/** The y of feedback lane `lane` (1, 2, …) below boxes reaching down to `bottom`. */
+export function laneY(bottom, lane) {
+  return bottom + GAP_Y / 2 + lane * LANE;
+}
+
 /**
  * The layout of `level` with the stored `positions` (`{instance: {x, y}}`)
  * of its instances: `{nodes, wires, bounds}`. Nodes carry their box (`x`,
  * `y`, `w`, `h`), `layer`, `pinned` and their pins (`ins` left, `outs`
- * right, each with its `x`, `y`); wires their polyline `points`, `shape`,
- * `converters`, `dashed` (a converter changes the rate) and `feedback`.
+ * right, each with its `x`, `y`); wires their `curve` and its polyline
+ * `points` (ui/lib/schematic-wire.js), `shape`, `converters`, `dashed` (a
+ * converter changes the rate), `feedback` and, for a feedback wire, its
+ * `lane` below `bottom` (the lowest box's bottom edge).
  */
 export function layout(level, positions = {}) {
   const nodes = nodesOf(level ?? {});
@@ -286,23 +298,15 @@ export function layout(level, positions = {}) {
     node.ins = node.ins.map((p) => ({ ...p, ...anchor(node, p.name, false) }));
     node.outs = node.outs.map((p) => ({ ...p, ...anchor(node, p.name, true) }));
   }
-  const bottom = most(nodes.map((n) => n.y + n.h), 0);
-  let below = 0;
+  const bottom = levelBottom(nodes);
+  let lane = 0;
   const wires = edges.map((e, i) => {
-    const source = byId.get(e.from.node);
-    const target = byId.get(e.to.node);
-    const a = anchor(source, e.from.port, true);
-    const b = anchor(target, e.to.port, false);
+    const a = anchor(byId.get(e.from.node), e.from.port, true);
+    const b = anchor(byId.get(e.to.node), e.to.port, false);
     const feedback = back.has(i) || b.x <= a.x;
-    let points;
-    if (feedback) {
-      below += 1;
-      const under = Math.max(bottom, source.y + source.h, target.y + target.h) + GAP_Y / 2 + below * 6;
-      points = [a, { x: a.x + 12, y: a.y }, { x: a.x + 12, y: under }, { x: b.x - 12, y: under }, { x: b.x - 12, y: b.y }, b];
-    } else {
-      const mid = (a.x + b.x) / 2;
-      points = [a, { x: mid, y: a.y }, { x: mid, y: b.y }, b];
-    }
+    if (feedback) lane += 1;
+    const under = feedback ? laneY(bottom, lane) : null;
+    const { curve, points, box } = wireGeometry(a, b, { feedback, under });
     return {
       id: i,
       from: e.from,
@@ -316,14 +320,79 @@ export function layout(level, positions = {}) {
       feedback,
       reversed: back.has(i),
       label: e.label,
+      lane: feedback ? lane : 0,
+      under,
+      curve,
       points,
+      box,
     };
   });
-  const xs = [...nodes.flatMap((n) => [n.x, n.x + n.w]), ...wires.flatMap((w) => w.points.map((p) => p.x))];
-  const ys = [...nodes.flatMap((n) => [n.y, n.y + n.h]), ...wires.flatMap((w) => w.points.map((p) => p.y))];
+  // A wire's extent is its curve's box (a short one swings out past its pins).
+  const xs = [...nodes.flatMap((n) => [n.x, n.x + n.w]), ...wires.flatMap((w) => [w.box.x0, w.box.x1])];
+  const ys = [...nodes.flatMap((n) => [n.y, n.y + n.h]), ...wires.flatMap((w) => [w.box.y0, w.box.y1])];
   // Loops, not Math.min(...xs): a large project's points exceed an
   // engine's argument limit.
   const [x0, x1, y0, y1] = [least(xs, Infinity), most(xs, -Infinity), least(ys, Infinity), most(ys, -Infinity)];
   const bounds = xs.length ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : { x: 0, y: 0, w: MIN_WIDTH, h: HEADER };
-  return { nodes, wires, bounds };
+  return { nodes, wires, bounds, bottom };
+}
+
+/**
+ * Where a box at `node` (`{x, y}`) goes when dragged by `travel` screen
+ * pixels at scale `k`: in whole layout units, as `schematic.move` stores it.
+ */
+export function dragPosition(node, travel, k) {
+  return { x: Math.round(node.x + travel.x / k), y: Math.round(node.y + travel.y / k) };
+}
+
+/**
+ * The lowest box's bottom edge (never above 0), with node `id`, if given,
+ * at `to`: what feedback lanes run below, in `layout` and in a drag alike.
+ */
+export function levelBottom(nodes, id = null, to = null) {
+  let bottom = 0;
+  for (const n of nodes) {
+    const y = (n.id === id ? to.y : n.y) + n.h;
+    if (y > bottom) bottom = y;
+  }
+  return bottom;
+}
+
+/**
+ * The wires of `drawn` (a `layout`) that change while its node `id` is
+ * dragged to `to` (`{x, y}`, its box's corner), every other node staying
+ * where it is: `[{wire, a, b, feedback, under, key}]`, each routed as
+ * `layout` would route it with the node stored there (`routed` gives its
+ * geometry; `key` is the same string for the same route). The wires
+ * attached to the node (in or out), and the feedback wires whose lane's y
+ * moves (the lowest box moved, or a wire attached became or stopped being
+ * feedback). Released there, the next layout draws exactly these, unless
+ * the node now overlaps one that is not stored (see docs/ui-controls.md
+ * "Schematic").
+ */
+export function movedWires(drawn, id, to) {
+  const node = drawn.nodes.find((n) => n.id === id);
+  if (!node) return [];
+  const dx = to.x - node.x;
+  const dy = to.y - node.y;
+  const bottom = levelBottom(drawn.nodes, id, to);
+  const shift = (p, moves) => (moves ? { x: p.x + dx, y: p.y + dy } : p);
+  const changed = [];
+  let lane = 0;
+  for (const wire of drawn.wires) {
+    const attached = wire.from.node === id || wire.to.node === id;
+    const a = shift(wire.curve.start, wire.from.node === id);
+    const b = shift(wire.curve.segs.at(-1).to, wire.to.node === id);
+    const feedback = wire.reversed || b.x <= a.x;
+    if (feedback) lane += 1;
+    const under = feedback ? laneY(bottom, lane) : null;
+    if (!attached && under === wire.under) continue;
+    changed.push({ wire, a, b, feedback, under, key: `${a.x},${a.y},${b.x},${b.y},${under}` });
+  }
+  return changed;
+}
+
+/** The geometry of a route `movedWires` gives: `{curve, points, box}`. */
+export function routed(route) {
+  return wireGeometry(route.a, route.b, { feedback: route.feedback, under: route.under ?? 0 });
 }

@@ -37,9 +37,13 @@ export function inside(node, bounds) {
   };
 }
 
-/** A wire's bounding box in its level's coordinates, computed once per layout. */
+/**
+ * A wire's bounding box in its level's coordinates: its curve's (`box`, a
+ * layout's wires), else its points', computed once per layout.
+ */
 const boxes = new WeakMap();
 function wireBox(wire) {
+  if (wire.box) return wire.box;
   let box = boxes.get(wire);
   if (!box) {
     box = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
@@ -187,6 +191,20 @@ export function rebase(view, before, after) {
   }
   if (kept === old.length - 1) return view;
   return { ...upward(old, view)[kept], path: old[kept].path };
+}
+
+/**
+ * `view` (as `scene` takes it, with the layouts `layoutOf`) in the
+ * coordinates of the level at `path`, one of its chain's (the view's level
+ * or one it is inside); `view` itself when `path` is not on its chain.
+ * Handed to `scene` with layouts in which that level changed, it keeps that
+ * level where it is on screen, and the levels around it move instead.
+ */
+export function reroot(view, layoutOf, path) {
+  const links = chain(layoutOf, view.path ?? '');
+  const i = links ? links.findIndex((l) => l.path === path) : -1;
+  if (i < 0) return view;
+  return { ...upward(links, view)[i], path };
 }
 
 /** Whether instance `path` (an open composite's) is drawn as open in `drawn`. */

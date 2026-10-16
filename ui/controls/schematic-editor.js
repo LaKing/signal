@@ -25,7 +25,8 @@ import {
   removeInstance,
   scaleConnection,
 } from '../lib/schematic-patch.js';
-import { toLocal } from '../lib/schematic-view.js';
+import { toLocal, toScreen } from '../lib/schematic-view.js';
+import { cordCurve, curveData } from '../lib/schematic-wire.js';
 import { formatFixed } from '../lib/format.js';
 
 /** The rows the palette shows at most (the list keeps its height). */
@@ -39,7 +40,7 @@ export const EDITOR_CSS = `
 .history.off { visibility: hidden; }
 .pin.target { stroke: var(--signal-focus, #5aa9ff); stroke-width: 3; }
 svg.rubber { pointer-events: none; }
-svg.rubber line { stroke: var(--signal-focus, #5aa9ff); stroke-width: 1.5; stroke-dasharray: 4 3; }
+svg.rubber path { fill: none; stroke: var(--signal-focus, #5aa9ff); stroke-width: 1.5; stroke-dasharray: 4 3; }
 .palette { position: absolute; left: 0; top: 0; width: 22rem; box-sizing: border-box; padding: 6px; visibility: hidden; z-index: 2;
   background: var(--signal-panel, #1f232b); border: 1px solid var(--signal-focus, #5aa9ff); border-radius: var(--signal-radius, 6px); }
 .palette input { width: 100%; box-sizing: border-box; font: inherit; color: inherit; background: var(--signal-bg, #16181d); border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 3px; margin: 0 0 4px; }
@@ -92,8 +93,9 @@ export class SchematicEditor {
     this.redoButton.addEventListener('click', () => this.write(+1));
     bar.prepend(this.toggle, this.undoButton, this.redoButton);
     this.rubber = svgEl('svg', { class: 'rubber' });
-    this.line = svgEl('line', { visibility: 'hidden' });
-    this.rubber.append(this.line);
+    // The cord being dragged: a wire's curve, in screen pixels.
+    this.cord = svgEl('path', { visibility: 'hidden' });
+    this.rubber.append(this.cord);
     this.notice = html('section', { className: 'notice' });
     this.palette = this.buildPalette();
     root.append(this.rubber, this.notice, this.palette);
@@ -207,15 +209,18 @@ export class SchematicEditor {
     const keys = new Set(targets.map((t) => `${hit.path}/${t.instance}.${t.port}`));
     const pins = [...(this.s.groups.get(hit.path)?.g.querySelectorAll('.pin') ?? [])].filter((pin) => keys.has(pin.dataset.address));
     for (const pin of pins) pin.classList.add('target');
-    this.connecting = { hit, keys, pins, start: at };
+    // From the pin itself, as the wire will be drawn.
+    const level = this.s.levelOf(hit.path);
+    const start = level ? toScreen(level.transform, hit.port) : at;
+    this.connecting = { hit, keys, pins, start };
     this.connectMove(at);
   }
 
   connectMove(at) {
     const c = this.connecting;
     if (!c) return;
-    for (const [key, value] of Object.entries({ x1: c.start.x, y1: c.start.y, x2: at.x, y2: at.y })) this.line.setAttribute(key, value);
-    this.line.setAttribute('visibility', 'visible');
+    this.cord.setAttribute('d', curveData(cordCurve(c.start, at)));
+    this.cord.setAttribute('visibility', 'visible');
   }
 
   /** The drag ended over `hit`: a compatible input or parameter of the same level is connected. */
@@ -233,7 +238,7 @@ export class SchematicEditor {
   cancelConnect() {
     for (const pin of this.connecting?.pins ?? []) pin.classList.remove('target');
     this.connecting = null;
-    this.line?.setAttribute('visibility', 'hidden');
+    this.cord?.setAttribute('visibility', 'hidden');
   }
 
   // The add palette.

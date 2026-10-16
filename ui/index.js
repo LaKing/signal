@@ -35,6 +35,8 @@ import './controls/entry-field.test.js';
 import './controls/scope.test.js';
 import './lib/schematic-view.test.js';
 import './lib/schematic-layout.test.js';
+import './lib/schematic-wire.test.js';
+import './lib/schematic-drag.test.js';
 import './lib/schematic-scene.test.js';
 import './lib/schematic-inspector.test.js';
 import './lib/schematic-levels.test.js';

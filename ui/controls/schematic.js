@@ -6,7 +6,8 @@
 // when zoomed in or double-clicked (ui/lib/schematic-scene.js). One view
 // transform, wheel and pinch zoom about the pointer, the background drags to
 // pan, keys + − 0 and the arrows. Clicking selects an instance, a port or a
-// wire and shows it on a card; dragging a box moves it (`schematic.move`).
+// wire and shows it on a card; dragging a box moves it, its wires following
+// (`schematic.move`).
 // M2.9-3: the bar's Edit patch switch edits the patch
 // (ui/controls/schematic-editor.js); off, nothing of it takes an input.
 // Signal outputs on screen carry a level bar from scope streams
@@ -23,8 +24,9 @@ import { ENTRY_CSS, ValueEntry } from './entry-field.js';
 import { EDITOR_CSS, SchematicEditor } from './schematic-editor.js';
 import { paletteLevel } from '../lib/schematic-patch.js';
 import { formatFixed } from '../lib/format.js';
-import { layout } from '../lib/schematic-layout.js';
-import { breadcrumbs, levelRect, nodeRect, rebase, scene } from '../lib/schematic-scene.js';
+import { dragPosition, layout } from '../lib/schematic-layout.js';
+import { DragFollow } from '../lib/schematic-drag.js';
+import { breadcrumbs, levelRect, nodeRect, rebase, reroot, scene } from '../lib/schematic-scene.js';
 import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
 import { hitTest, reselect } from '../lib/schematic-hit.js';
 import { card, cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
@@ -98,6 +100,11 @@ function el(name, attributes = {}, text = null) {
 
 function html(name, properties = {}) {
   return Object.assign(document.createElement(name), properties);
+}
+
+/** Where the box a gesture drags goes (`dragPosition`). */
+function dragTo(gesture) {
+  return dragPosition(gesture.hit.node, { x: gesture.last.x - gesture.start.x, y: gesture.last.y - gesture.start.y }, gesture.k);
 }
 
 export class SignalSchematic extends HTMLElement {
@@ -181,6 +188,10 @@ export class SignalSchematic extends HTMLElement {
     this.svg.addEventListener('pointermove', (e) => this.pointerMove(e));
     this.svg.addEventListener('pointerup', (e) => this.pointerUp(e));
     this.svg.addEventListener('pointercancel', () => this.cancelGesture());
+    // Capture lost mid-gesture (not the release, which ends it first): let go, as cancelled.
+    this.svg.addEventListener('lostpointercapture', (e) => {
+      if (this.gesture && e.pointerId === this.gesture.pointer) this.cancelGesture();
+    });
     this.svg.addEventListener('pointerleave', () => this.hideTip());
     this.svg.addEventListener('dblclick', (e) => this.doubleClick(e));
     this.svg.addEventListener('wheel', (e) => this.wheel(e), { passive: false });
@@ -438,6 +449,7 @@ export class SignalSchematic extends HTMLElement {
       drawn.nodeCache = nodes.cache;
       drawn.shown = { sizes, open, nodes: level.nodes, wires: level.wires };
     }
+    drawn.placed = placed;
     drawn.g.setAttribute('transform', matrix(placed));
     return !same;
   }
@@ -446,7 +458,7 @@ export class SignalSchematic extends HTMLElement {
     const from = `${level.path}/${String(wire.written.from).replace(/^\//, '')}`;
     return el('path', {
       class: ['wire', wire.shape, wire.dashed ? 'dashed' : ''].join(' ').trim(),
-      d: bakedPath(baked, wire.points),
+      d: bakedPath(baked, wire.points, wire.curve),
       'data-address': from,
       'data-label': wire.label,
       'data-part': 'schematic',
@@ -529,14 +541,27 @@ export class SignalSchematic extends HTMLElement {
     this.selectedElement = element;
   }
 
-  /** A drag in progress keeps its offset on its box, built again or not. */
+  /**
+   * A drag in progress: its box, the wires that change with it and an open
+   * composite's inside follow it, in place (ui/lib/schematic-drag.js),
+   * built again or not. The box moves in whole layout units, as it is
+   * stored, so the release draws it where it was let go. Cheap when nothing
+   * moved: a redraw during the drag (a stream frame) writes nothing.
+   */
   applyDrag() {
     const gesture = this.gesture;
-    if (!gesture?.drag || !gesture.moved) return;
-    const group = this.nodeGroup(gesture.hit.address) ?? gesture.drag;
-    const scale = gesture.k / (this.groups.get(gesture.hit.path)?.baked.m ?? 1);
-    group.setAttribute('transform', `translate(${(gesture.last.x - gesture.start.x) / scale} ${(gesture.last.y - gesture.start.y) / scale})`);
-    gesture.drag = group;
+    if (!gesture?.follow || !gesture.moved || !this.drawn) return;
+    gesture.follow.apply({ layout: this.layoutOf(gesture.hit.level), levels: this.drawn.levels, groups: this.groups, to: dragTo(gesture) });
+  }
+
+  /** The drag's next step at the next frame: one per frame, however many moves. */
+  scheduleDrag() {
+    if (this.dragPending) return;
+    this.dragPending = true;
+    requestAnimationFrame(() => {
+      this.dragPending = false;
+      this.applyDrag();
+    });
   }
 
   drawCrumbs() {
@@ -578,20 +603,23 @@ export class SignalSchematic extends HTMLElement {
 
   pointerDown(event) {
     if (event.button !== 0 || !this.drawn) return;
+    // Another press while one is held: the first is let go, as cancelled.
+    if (this.gesture) this.cancelGesture();
     this.focus({ preventScroll: true });
     const at = this.point(event);
     const hit = hitTest(this.drawn, at);
     this.svg.setPointerCapture?.(event.pointerId);
     // Edit patch: a press on an output starts a connection.
     if (this.editor.starts(hit)) {
-      this.gesture = { start: at, last: at, hit, moved: false, connect: true };
+      this.gesture = { start: at, last: at, hit, moved: false, connect: true, pointer: event.pointerId };
       this.editor.connectStart(hit, at);
       return;
     }
     // The level's scale is kept from the start: a render during the drag
     // (a push, a zoom) may replace the group or close the level.
     const k = hit.kind === 'instance' ? this.levelOf(hit.path)?.transform.k : undefined;
-    this.gesture = { start: at, last: at, hit, moved: false, k, drag: k ? this.nodeGroup(hit.address) : null };
+    const follow = k && this.nodeGroup(hit.address) ? new DragFollow(hit.level, hit.node.name) : null;
+    this.gesture = { start: at, last: at, hit, moved: false, k, follow, pointer: event.pointerId };
   }
 
   nodeGroup(address) {
@@ -606,6 +634,7 @@ export class SignalSchematic extends HTMLElement {
       this.hover(at);
       return;
     }
+    if (event.pointerId !== gesture.pointer) return;
     if (Math.hypot(at.x - gesture.start.x, at.y - gesture.start.y) > DRAG_PX) gesture.moved = true;
     if (gesture.connect) {
       this.editor.connectMove(at);
@@ -614,7 +643,7 @@ export class SignalSchematic extends HTMLElement {
     if (!gesture.moved) return;
     const last = gesture.last;
     gesture.last = at;
-    if (gesture.drag) this.applyDrag();
+    if (gesture.follow) this.scheduleDrag();
     else this.setView(pan(this.view, at.x - last.x, at.y - last.y));
   }
 
@@ -624,8 +653,8 @@ export class SignalSchematic extends HTMLElement {
 
   pointerUp(event) {
     const gesture = this.gesture;
+    if (!gesture || event.pointerId !== gesture.pointer) return;
     this.gesture = null;
-    if (!gesture) return;
     const at = this.point(event);
     if (gesture.connect && gesture.moved) {
       this.editor.connectEnd(hitTest(this.drawn, at));
@@ -636,24 +665,31 @@ export class SignalSchematic extends HTMLElement {
       this.select(gesture.hit.kind === 'background' ? null : gesture.hit);
       return;
     }
-    if (gesture.drag) {
-      const { node, level } = gesture.hit;
-      const k = gesture.k;
-      const x = Math.round(node.x + (at.x - gesture.start.x) / k);
-      const y = Math.round(node.y + (at.y - gesture.start.y) / k);
-      // Kept here until the pushed `graph` holds it.
+    if (gesture.follow) {
+      const { node, level, path } = gesture.hit;
+      gesture.last = at;
+      const { x, y } = dragTo(gesture);
+      // Kept here until the pushed `graph` holds it; drawn at the next frame
+      // from the layout with it, which is what the drag showed.
       if (!this.moved.has(level)) this.moved.set(level, new Map());
       this.moved.get(level).set(node.name, { x, y });
       const old = new Map(this.layouts);
+      const before = (l) => old.get(l) ?? null;
       this.layouts.delete(level);
-      this.view = rebase(this.view, (l) => old.get(l) ?? null, (l) => this.layoutOf(l));
+      // Inside a composite the view is in (its breadcrumb), that inside
+      // stays where it is and the levels around it are fitted to it again;
+      // elsewhere what did not move stays (and an inside seen from outside
+      // is fitted to its box again).
+      const viewed = this.view.path ?? '';
+      const within = path !== '' && (viewed === path || viewed.startsWith(`${path}/`));
+      this.view = within ? reroot(this.view, before, path) : rebase(this.view, before, (l) => this.layoutOf(l));
       this.schedule();
       this.connection?.request?.({ type: 'schematic.move', level, instance: node.name, x, y }).catch((error) => this.say(`Not moved: ${error.message}`));
     }
   }
 
   cancelGesture() {
-    if (this.gesture?.drag) this.gesture.drag.removeAttribute('transform');
+    this.gesture?.follow?.restore();
     if (this.gesture?.connect) this.editor.cancelConnect();
     this.gesture = null;
   }

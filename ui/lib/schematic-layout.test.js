@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { GAP_Y, INPUTS, OUTPUTS, layout, shapeName } from './schematic-layout.js';
+import { GAP_Y, INPUTS, OUTPUTS, dragPosition, laneY, layout, levelBottom, movedWires, routed, shapeName } from './schematic-layout.js';
+import { wireGeometry } from './schematic-wire.js';
 
 const port = (name, direction, shape = 'signal') => ({ name, direction, shape, kind: 'audio', rate: 1 });
 const box = (name, ins = ['in'], outs = ['out'], extra = {}) => ({
@@ -139,4 +140,100 @@ test('a composite level has its exports as pins on the frame', () => {
   assert.equal(result.nodes.at(-1).id, OUTPUTS);
   assert.ok(nodeOf(result, OUTPUTS).layer > nodeOf(result, 'vca').layer);
   assert.equal(result.wires.filter((w) => w.kind === 'export').length, 2, 'decay reaches no drawn port');
+});
+
+test('wires are smooth curves from their output pin to their input pin', () => {
+  const level = {
+    instances: [box('a', []), box('b', ['in', 'side']), box('c'), box('d', ['in'], [])],
+    connections: [wire('/a.out', '/b.side'), wire('/b.out', '/c.in'), wire('/a.out', '/d.in'), wire('/c.out', '/b.in')],
+  };
+  const result = layout(level);
+  for (const w of result.wires) {
+    const a = nodeOf(result, w.from.node).outs.find((p) => p.name === w.from.port);
+    const b = nodeOf(result, w.to.node).ins.find((p) => p.name === w.to.port);
+    assert.deepEqual([w.curve.start, w.curve.segs.at(-1).to], [{ x: a.x, y: a.y }, { x: b.x, y: b.y }], w.label);
+    assert.deepEqual([w.points[0], w.points.at(-1)], [w.curve.start, w.curve.segs.at(-1).to]);
+    const { curve, points } = wireGeometry(a, b, { feedback: w.feedback, under: laneY(result.bottom, w.lane) });
+    assert.deepEqual([w.curve, w.points], [curve, points], `${w.label}: the one curve function's`);
+    if (!w.feedback) assert.equal(w.curve.segs.length, 1, `${w.label}: one cubic`);
+  }
+});
+
+test('feedback loops have lanes of their own, below every box', () => {
+  const level = {
+    instances: [box('a', []), box('b', ['in', 'back']), box('c', ['in', 'back']), box('d')],
+    connections: [wire('/a.out', '/b.in'), wire('/b.out', '/c.in'), wire('/c.out', '/d.in'), wire('/d.out', '/c.back'), wire('/c.out', '/b.back')],
+  };
+  const result = layout(level);
+  const loops = result.wires.filter((w) => w.feedback);
+  assert.deepEqual(loops.map((w) => w.lane), [1, 2]);
+  const lowest = Math.max(...result.nodes.map((n) => n.y + n.h));
+  assert.equal(result.bottom, lowest);
+  const depth = loops.map((w) => Math.max(...w.points.map((p) => p.y)));
+  assert.ok(depth.every((y) => y > lowest), 'below every box');
+  assert.notEqual(depth[0], depth[1], 'not on top of each other');
+});
+
+/**
+ * Dragging `id` of `level` to `to`: the wires `movedWires` gives, put in
+ * place of the layout's, are the wires of the layout with `id` stored at
+ * `to` (when no other box has to move out of its way).
+ */
+function followsDrag(level, id, to) {
+  const before = layout(level);
+  const after = layout(level, { [id]: to });
+  for (const n of after.nodes) if (n.id !== id) assert.deepEqual([n.x, n.y], [nodeOf(before, n.id).x, nodeOf(before, n.id).y], `${n.id} stayed`);
+  const moved = new Map(movedWires(before, id, to).map((m) => [m.wire.id, m]));
+  const shape = (w) => ({ curve: w.curve, points: w.points, box: w.box, feedback: w.feedback, under: w.under });
+  const route = (m) => ({ ...routed(m), feedback: m.feedback, under: m.under });
+  for (const w of after.wires) assert.deepEqual(moved.has(w.id) ? route(moved.get(w.id)) : shape(before.wires[w.id]), shape(w), `${w.label} follows`);
+  return moved;
+}
+
+test('a dragged box’s wires follow it as the next layout will draw them', () => {
+  const level = {
+    instances: [box('a', []), box('b', ['in', 'back']), box('c'), box('d', ['in'], [])],
+    connections: [wire('/a.out', '/b.in'), wire('/b.out', '/c.in'), wire('/c.out', '/d.in'), wire('/c.out', '/b.back')],
+  };
+  const free = layout(level);
+  const c = nodeOf(free, 'c');
+  // A little up and right: the wires in and out of c, and the loop from it.
+  const near = followsDrag(level, 'c', { x: c.x + 17, y: c.y - 9 });
+  assert.deepEqual([...near.values()].map((m) => m.wire.label).sort(), ['/b.out → /c.in', '/c.out → /b.back', '/c.out → /d.in']);
+  // Far below every box: the loop's lane goes down with it.
+  followsDrag(level, 'c', { x: c.x, y: c.y + 500 });
+  // Left of b: b → c turns into a loop and takes a lane; the loop c → b is
+  // forward now, and gives its lane up.
+  const back = followsDrag(level, 'c', { x: nodeOf(free, 'a').x, y: c.y + 300 });
+  assert.equal([...back.values()].find((m) => m.wire.label === '/b.out → /c.in').feedback, true);
+  assert.equal([...back.values()].find((m) => m.wire.label === '/c.out → /b.back').feedback, true, 'a back edge stays one');
+  // A loop not attached to the dragged box moves only when its lane does.
+  const loop = {
+    instances: [box('a', []), box('b', ['in', 'back']), box('c'), box('e', [])],
+    connections: [wire('/a.out', '/b.in'), wire('/b.out', '/c.in'), wire('/c.out', '/b.back')],
+  };
+  const e = nodeOf(layout(loop), 'e');
+  assert.deepEqual([...followsDrag(loop, 'e', { x: e.x + 5, y: e.y }).keys()], [], 'nothing attached, the lanes stay');
+  assert.equal(followsDrag(loop, 'e', { x: e.x, y: e.y + 900 }).size, 1, 'the loop goes below it');
+  assert.deepEqual(movedWires(free, 'nope', { x: 0, y: 0 }), []);
+});
+
+test('a drag goes in whole layout units, as it is stored', () => {
+  assert.deepEqual(dragPosition({ x: 10, y: 20 }, { x: 13, y: -7 }, 2), { x: 17, y: 17 });
+  assert.deepEqual(dragPosition({ x: 10, y: 20 }, { x: 0.4, y: 0.6 }, 1), { x: 10, y: 21 });
+});
+
+test('a level above y = 0 keeps its loops’ lanes while a box moves (the same floor in the drag as in the layout)', () => {
+  const level = {
+    instances: [box('a', []), box('b', ['in', 'back']), box('c'), box('d', ['in'], [])],
+    connections: [wire('/a.out', '/b.in'), wire('/b.out', '/c.in'), wire('/c.out', '/d.in'), wire('/c.out', '/b.back')],
+  };
+  const positions = { a: { x: 0, y: -900 }, b: { x: 200, y: -900 }, c: { x: 400, y: -900 }, d: { x: 600, y: -900 } };
+  const stored = layout(level, positions);
+  assert.equal(stored.bottom, 0, 'lanes below 0');
+  assert.equal(levelBottom(stored.nodes), 0);
+  const moved = movedWires(stored, 'd', { x: 650, y: -880 });
+  assert.deepEqual(moved.map((m) => m.wire.label), ['/c.out → /d.in'], 'only the attached wire');
+  const after = layout(level, { ...positions, d: { x: 650, y: -880 } });
+  assert.deepEqual(routed(moved[0]).curve, after.wires[moved[0].wire.id].curve);
 });

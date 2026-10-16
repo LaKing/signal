@@ -2,22 +2,23 @@
 // instance box, a wire or the background, in a scene as `scene()` gives it.
 // The innermost level drawn is tried first; within a level a port beats its
 // box and a box beats a wire. Tolerances are screen pixels, so they hold at
-// every zoom. No DOM.
+// every zoom, and a wire is hit on its curve, not its flattened points. No
+// DOM.
 
 import { INPUTS, OUTPUTS } from './schematic-layout.js';
 import { toLocal } from './schematic-view.js';
+import { curveDistance, distanceToSegment } from './schematic-wire.js';
 
 /** A port is hit within this radius (px). */
 export const PORT_PX = 6;
 /** A wire is hit within this distance (px). */
 export const WIRE_PX = 4;
 
-function distanceToSegment(p, a, b) {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const length = dx * dx + dy * dy;
-  const t = length === 0 ? 0 : Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / length));
-  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+/** Whether `wire` passes within `limit` (level units) of `p`: its curve when it has one, else its polyline. */
+function nearWire(wire, p, limit) {
+  if (wire.curve) return curveDistance(wire.curve, p, limit) <= limit;
+  for (let s = 1; s < wire.points.length; s++) if (distanceToSegment(p, wire.points[s - 1], wire.points[s]) <= limit) return true;
+  return false;
 }
 
 /** The address of a written endpoint (`kick.out`, `/a.out`) at level `path`. */
@@ -54,17 +55,15 @@ export function hitTest(drawn, point) {
       }
     }
     for (const wire of entry.wires) {
-      for (let s = 1; s < wire.points.length; s++) {
-        if (distanceToSegment(local, wire.points[s - 1], wire.points[s]) * scale <= WIRE_PX) {
-          return {
-            kind: 'wire',
-            ...base,
-            wire,
-            // An export's end on the frame is the composite instance's port.
-            from: wire.from.node === INPUTS ? `${entry.path}.${wire.from.port}` : endpointAddress(entry.path, wire.written.from),
-            to: wire.to.node === OUTPUTS ? `${entry.path}.${wire.to.port}` : endpointAddress(entry.path, wire.written.to),
-          };
-        }
+      if (nearWire(wire, local, WIRE_PX / scale)) {
+        return {
+          kind: 'wire',
+          ...base,
+          wire,
+          // An export's end on the frame is the composite instance's port.
+          from: wire.from.node === INPUTS ? `${entry.path}.${wire.from.port}` : endpointAddress(entry.path, wire.written.from),
+          to: wire.to.node === OUTPUTS ? `${entry.path}.${wire.to.port}` : endpointAddress(entry.path, wire.written.to),
+        };
       }
     }
   }

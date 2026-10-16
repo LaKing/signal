@@ -18,6 +18,7 @@
 // drawn. No DOM.
 
 import { toLocal, toScreen } from './schematic-view.js';
+import { bow, hull, split } from './schematic-wire.js';
 
 /** The bounds of every matrix handed to SVG. */
 export const SVG_MIN_SCALE = 1e-6;
@@ -31,6 +32,8 @@ export const CLIP_PX = 1e7;
 export const HUGE_PIN_PX = 1e7;
 /** Its arc's chords bow in by at most this (px), half the 0.01 px tolerance. */
 const SAGITTA_PX = 0.005;
+/** A clipped curve's chords are within this of it on screen (px). */
+export const CHORD_PX = 0.01;
 /** Strokes reach this far (px) past a clipped edge, which stays off screen. */
 const STROKE_PX = 16;
 
@@ -150,22 +153,69 @@ function clipSegment(a, b, box) {
   return [at(t0), at(t1)];
 }
 
-/** A wire's polyline as baked and clipped: a path's `d` (empty if none is left). */
-export function bakedPath(baked, points) {
+/**
+ * A wire as baked and clipped: a path's `d` (empty if none is left). With
+ * its `curve` (ui/lib/schematic-wire.js), the curve itself: each cubic
+ * whose control points are within the clip box is one `C`, exact at any
+ * zoom; one reaching past it is split (de Casteljau) until its pieces are
+ * inside, outside, or both so flat that their chord is within CHORD_PX of
+ * them on screen and at least half the clip distance from `q`; those that
+ * straddle its edge are drawn as clipped chords. Zoomed out, a chord comes
+ * nearer and is closer still to its curve; zoomed in (as far as the bake
+ * holds), it moves farther off screen. Without, the polyline `points`.
+ */
+export function bakedPath(baked, points, curve = null) {
   let d = '';
   let last = null;
-  const at = points.map((p) => bakedPoint(baked, p));
-  for (let i = 1; i < at.length; i++) {
-    const segment = clipSegment(at[i - 1], at[i], baked.clip);
-    if (segment?.[0] !== at[i - 1] || segment[1] !== at[i]) baked.clipped = true;
+  const line = (from, to) => {
+    const segment = clipSegment(from, to, baked.clip);
+    if (segment?.[0] !== from || segment[1] !== to) baked.clipped = true;
     if (!segment) {
       last = null;
-      continue;
+      return;
     }
     const [a, b] = segment;
     if (last !== a) d += `${d ? ' ' : ''}M${a.x},${a.y}`;
     d += ` L${b.x},${b.y}`;
     last = b;
+  };
+  if (!curve) {
+    const at = points.map((p) => bakedPoint(baked, p));
+    for (let i = 1; i < at.length; i++) line(at[i - 1], at[i]);
+    return d;
+  }
+  const { clip } = baked;
+  // CHORD_PX in baked units (the clip box is CLIP_PX each way on screen).
+  const flat = (CHORD_PX * (clip.x1 - clip.x0)) / (2 * CLIP_PX);
+  const near = { x0: clip.x0 / 2, y0: clip.y0 / 2, x1: clip.x1 / 2, y1: clip.y1 / 2 };
+  const cubic = (c, depth) => {
+    const box = hull(c);
+    if (box.x1 < clip.x0 || box.x0 > clip.x1 || box.y1 < clip.y0 || box.y0 > clip.y1) {
+      baked.clipped = true;
+      last = null;
+      return;
+    }
+    if (box.x0 >= clip.x0 && box.x1 <= clip.x1 && box.y0 >= clip.y0 && box.y1 <= clip.y1) {
+      if (last !== c[0]) d += `${d ? ' ' : ''}M${c[0].x},${c[0].y}`;
+      d += ` C${c[1].x},${c[1].y} ${c[2].x},${c[2].y} ${c[3].x},${c[3].y}`;
+      last = c[3];
+      return;
+    }
+    const far = box.x1 < near.x0 || box.x0 > near.x1 || box.y1 < near.y0 || box.y0 > near.y1;
+    if (depth >= 64 || (far && bow(c) <= flat)) {
+      line(c[0], c[3]);
+      return;
+    }
+    const [l, r] = split(c);
+    cubic(l, depth + 1);
+    cubic(r, depth + 1);
+  };
+  let from = bakedPoint(baked, curve.start);
+  for (const seg of curve.segs) {
+    const to = bakedPoint(baked, seg.to);
+    if (seg.c1) cubic([from, bakedPoint(baked, seg.c1), bakedPoint(baked, seg.c2), to], 0);
+    else line(from, to);
+    from = to;
   }
   return d;
 }
