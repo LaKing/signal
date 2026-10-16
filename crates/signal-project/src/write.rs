@@ -108,7 +108,7 @@ impl Project {
 }
 
 /// `value` as a TOML number that reads back to it bit for bit.
-fn number(value: f64) -> Value {
+pub(crate) fn number(value: f64) -> Value {
     // −0.0 stays a float: the integer 0 would read back as +0.0.
     if value.fract() == 0.0 && value.abs() < 1e15 && value.to_bits() != (-0.0f64).to_bits() {
         Value::from(value as i64)
@@ -117,7 +117,12 @@ fn number(value: f64) -> Value {
     }
 }
 
-fn inline(table: &mut InlineTable, parameter: &str, value: Option<Value>, order: &[&str]) {
+pub(crate) fn inline(
+    table: &mut InlineTable,
+    parameter: &str,
+    value: Option<Value>,
+    order: &[&str],
+) {
     let keys: Vec<String> = table.iter().map(|(k, _)| k.to_owned()).collect();
     let last = keys.last().cloned();
     let Some(value) = value else {
@@ -166,7 +171,7 @@ fn inline(table: &mut InlineTable, parameter: &str, value: Option<Value>, order:
     }
 }
 
-fn standard(table: &mut Table, parameter: &str, value: Option<Value>) {
+pub(crate) fn standard(table: &mut Table, parameter: &str, value: Option<Value>) {
     match value {
         None => {
             table.remove(parameter);

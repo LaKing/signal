@@ -79,6 +79,15 @@ pub fn diff_with(
     registry: &Registry,
     options: &DiffOptions,
 ) -> Result<ProjectEdit, Vec<Diagnostic>> {
+    restart(old, new)?;
+    let before = old.plan(registry)?.plan;
+    let after = new.plan(registry)?.plan;
+    diff_plans(old, &before, new, after, options)
+}
+
+/// A changed sample rate or seed, which no running engine can take: the
+/// errors, located at the keys in `new`'s `project.toml`.
+pub(crate) fn restart(old: &Project, new: &Project) -> Result<(), Vec<Diagnostic>> {
     let mut restart = Vec::new();
     let (sample_rate_at, seed_at) = new.settings_at;
     if old.sample_rate != new.sample_rate {
@@ -101,14 +110,24 @@ pub fn diff_with(
             ),
         ));
     }
-    if !restart.is_empty() {
-        return Err(restart);
+    if restart.is_empty() {
+        Ok(())
+    } else {
+        Err(restart)
     }
+}
 
-    let before = old.plan(registry)?.plan;
-    let after = new.plan(registry)?.plan;
+/// [`diff_with`] of `old` planned as `before` and `new` planned as `after`,
+/// their settings already checked by [`restart`].
+pub(crate) fn diff_plans(
+    old: &Project,
+    before: &ExecutionPlan,
+    new: &Project,
+    after: ExecutionPlan,
+    options: &DiffOptions,
+) -> Result<ProjectEdit, Vec<Diagnostic>> {
     // M2.7-2: placement is decided when the project starts.
-    let (old_pins, new_pins) = (old.gpu_pins(&before), new.gpu_pins(&after));
+    let (old_pins, new_pins) = (old.gpu_pins(before), new.gpu_pins(&after));
     let before_addresses: BTreeMap<String, ()> = before
         .instances
         .iter()

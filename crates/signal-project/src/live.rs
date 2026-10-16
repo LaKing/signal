@@ -228,6 +228,56 @@ impl<A: ControlSink, B: ControlSink> ControlSink for Both<'_, A, B> {
     }
 }
 
+/// A structural edit keeps the running project's audio sink: the same
+/// instance with as many inputs (`old` planned as `before`, `new` as `plan`).
+fn same_sink(
+    old: &Project,
+    before: &signal_graph::ExecutionPlan,
+    new: &Project,
+    plan: &signal_graph::ExecutionPlan,
+) -> Result<(), Vec<crate::Diagnostic>> {
+    let sink = sink_of(old, before)?;
+    let after = sink_of(new, plan)?;
+    if after != sink {
+        return Err(vec![new.instance_error(
+            &after.0,
+            format!(
+                "{}: the audio sink must stay {} with {} inputs while the project plays; restart to change it",
+                after.0, sink.0, sink.1
+            ),
+        )]);
+    }
+    Ok(())
+}
+
+/// Whether `new`, planned as `planned`, could replace the running `old` by a
+/// live edit, with the same checks as [`send_edit`] (the diff, and the audio
+/// sink kept by a structural edit), without sending anything: what a patch
+/// is checked with before it is written (M2.9-3). `running` is `old`'s plan
+/// when the caller holds it (`old` is planned again otherwise).
+pub fn check_edit(
+    old: &Project,
+    running: Option<&signal_graph::ExecutionPlan>,
+    new: &Project,
+    planned: signal_graph::ExecutionPlan,
+    registry: &Registry,
+) -> Result<(), Vec<crate::Diagnostic>> {
+    crate::diff::restart(old, new)?;
+    let planned_old;
+    let before = match running {
+        Some(plan) => plan,
+        None => {
+            planned_old = old.plan(registry)?.plan;
+            &planned_old
+        }
+    };
+    let options = crate::DiffOptions::default();
+    match crate::diff::diff_plans(old, before, new, planned, &options)? {
+        ProjectEdit::Parameters(_) => Ok(()),
+        ProjectEdit::Structural { plan, .. } => same_sink(old, before, new, &plan),
+    }
+}
+
 /// [`send_edit`], with the Controller's polls during the edit also handed to
 /// `observer` (a UI's acknowledgements and values, M2.8-1).
 pub fn send_edit_observed(
@@ -260,17 +310,7 @@ pub fn send_edit_observed(
             ..
         } => {
             let before = old.plan(registry).map_err(EditError::Invalid)?.plan;
-            let sink = sink_of(old, &before).map_err(EditError::Invalid)?;
-            let after = sink_of(&new, &plan).map_err(EditError::Invalid)?;
-            if after != sink {
-                return Err(EditError::Invalid(vec![new.instance_error(
-                    &after.0,
-                    format!(
-                        "{}: the audio sink must stay {} with {} inputs while the project plays; restart to change it",
-                        after.0, sink.0, sink.1
-                    ),
-                )]));
-            }
+            same_sink(old, &before, &new, &plan).map_err(EditError::Invalid)?;
             // Nothing is sent unless the whole edit can complete: a removal
             // stopped half-way would leave instances suspended in the plan
             // that keeps playing. So the swap is prepared first (every

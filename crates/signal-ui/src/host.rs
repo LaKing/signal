@@ -47,6 +47,7 @@ use signal_project::archive::{self, TempProject};
 use signal_project::live::{
     Both, FolderState, ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload_observed,
 };
+use signal_project::patch::{self, Op};
 use signal_project::schematic::{self, SCHEMATIC_FILE};
 use signal_project::session::{LiveRecorder, SessionRecorder, sink_of};
 use signal_project::{Diagnostic, LoadError, PROJECT_FILE, Project, located};
@@ -59,7 +60,7 @@ use crate::frames::{self, frame};
 use crate::panel::{Panel, Target, Written, after_write, ramp_frames, write_file, write_project};
 use crate::panel_write::{check_content, first_file, replace, sha256_hex};
 use crate::player::{Backend, Input, Interface, Output, Selection, open_input, open_output};
-use crate::server::{Inbound, Outbound, Server, ServerOptions};
+use crate::server::{Inbound, MAX_MESSAGE, Outbound, Server, ServerOptions};
 use crate::setup::{
     Choice, DEFAULT_BUFFER, Setup, Window, capabilities, channels, found, rate_check,
 };
@@ -449,10 +450,11 @@ pub struct Host {
     /// The hash of the `graph` (or `graph.error`) message last pushed
     /// (`docs/ui-protocol.md` "graph").
     graph_pushed: Option<u64>,
-    /// Stopped: `graph`'s project name and structure, by the folder (and
-    /// its state, `ui/schematic.toml` aside) it was loaded from. Kept across
-    /// a run, so stopping again loads nothing when the folder is unchanged.
-    graph_stopped: Option<(PathBuf, Option<FolderState>, String, Value)>,
+    /// Stopped: `graph`'s project name and structure, and `modules`, by the
+    /// folder (and its state, `ui/schematic.toml` aside) it was loaded from.
+    /// Kept across a run, so stopping again loads nothing when the folder is
+    /// unchanged.
+    graph_stopped: Option<(PathBuf, Option<FolderState>, String, Value, Value)>,
     /// Playing: `graph`'s project name and structure, by plan version;
     /// forgotten when the run or its project is replaced.
     graph_playing: Option<(u64, String, Value)>,
@@ -2207,6 +2209,8 @@ impl Host {
             "graph" => self.graph().map(Some),
             "schematic.move" => self.schematic_move(&message).map(Some),
             "schematic.reset" => self.schematic_reset(&message).map(Some),
+            "modules" => self.modules().map(Some),
+            "patch" => self.patch(&message).map(Some),
             "subscribe" => self.subscribe(client, &message).map(Some),
             "unsubscribe" => self.unsubscribe(client, &message).map(Some),
             "set" | "ramp" | "trigger" => self.edit(client, &id, kind, &message).map(|()| None),
@@ -2455,7 +2459,14 @@ impl Host {
     ) {
         self.counts.1 += 1;
         let structure = project.structure(plan, &self.registry);
-        self.graph_stopped = Some((self.dir.clone(), state, project.name.clone(), structure));
+        let modules = project.modules(&self.registry);
+        self.graph_stopped = Some((
+            self.dir.clone(),
+            state,
+            project.name.clone(),
+            structure,
+            modules,
+        ));
     }
 
     /// `graph`'s project name and structure ([`Project::structure`]),
@@ -2495,7 +2506,7 @@ impl Host {
             self.remember_stopped(state, &project, &plan);
         }
         match &self.graph_stopped {
-            Some((_, _, name, structure)) => Ok((name, structure)),
+            Some((_, _, name, structure, _)) => Ok((name, structure)),
             None => Err(fail(
                 "does-not-load",
                 "the project's structure is not known",
@@ -2543,11 +2554,60 @@ impl Host {
             "type": "graph",
             "project": name,
             "folder": self.folder_name(),
+            "projectId": self.project_id(),
             "planVersion": self.run.as_ref().map(|r| r.version),
             "top": top,
             "composites": composites,
             "layout": {"file": SCHEMATIC_FILE, "positions": positions, "error": error},
+            "files": self.files_json(),
         }))
+    }
+
+    /// `graph.projectId` (M2.9-3): which project folder this is, opaque (the
+    /// SHA-256 of its canonical path; the path itself is not sent), so a
+    /// page's patch history stays with the project it was written in even
+    /// when two have the same folder name and project name.
+    fn project_id(&self) -> String {
+        let dir = fs::canonicalize(&self.dir).unwrap_or_else(|_| self.dir.clone());
+        sha256_hex(dir.as_os_str().as_encoded_bytes())
+    }
+
+    /// `graph.files` (M2.9-3): the SHA-256 of `project.toml` (`""`) and of
+    /// each `composites/<name>.toml` (by name) as they are now, the bases a
+    /// `patch` names.
+    fn files_json(&self) -> Value {
+        let mut files = serde_json::Map::new();
+        for source in signal_project::read_sources(&self.dir).unwrap_or_default() {
+            let key = match source.path.as_str() {
+                PROJECT_FILE => String::new(),
+                path => path
+                    .strip_prefix("composites/")
+                    .and_then(|p| p.strip_suffix(".toml"))
+                    .unwrap_or(path)
+                    .to_owned(),
+            };
+            files.insert(key, json!(sha256_hex(source.text.as_bytes())));
+        }
+        Value::Object(files)
+    }
+
+    /// `modules` (M2.9-3): the module types an instance can be added from,
+    /// of the project `graph` describes (playing, the running one; stopped,
+    /// the folder's, cached with its structure).
+    fn modules(&mut self) -> Result<Value, Failure> {
+        let modules = match &self.run {
+            Some(run) => run.current.modules(&self.registry),
+            None => {
+                self.structure()?;
+                match &self.graph_stopped {
+                    Some((.., modules)) => modules.clone(),
+                    None => {
+                        return Err(fail("does-not-load", "the project's modules are not known"));
+                    }
+                }
+            }
+        };
+        Ok(with(modules, "type", json!("modules")))
     }
 
     /// Pushes `graph` to every client when it differs from the last one
@@ -2681,6 +2741,7 @@ impl Host {
         let path = self.dir.join(SCHEMATIC_FILE);
         match message.get("level") {
             None | Some(Value::Null) => {
+                self.schematic_unlinked()?;
                 match fs::remove_file(&path) {
                     Ok(()) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -2710,6 +2771,7 @@ impl Host {
         &mut self,
         edit: impl FnOnce(&str) -> Result<String, String>,
     ) -> Result<(), Failure> {
+        self.schematic_unlinked()?;
         let path = self.dir.join(SCHEMATIC_FILE);
         let failed = |error: String| {
             fail(
@@ -2730,6 +2792,320 @@ impl Host {
         self.counts.2 += 1;
         self.seen(Path::new(SCHEMATIC_FILE));
         Ok(())
+    }
+
+    /// `ui/schematic.toml` is the project's own file: neither it nor `ui/`
+    /// is a link (a linked `ui/` is served, not edited, as for
+    /// [`Self::panel_path`]). `write-failed` otherwise, before anything is
+    /// written.
+    fn schematic_unlinked(&self) -> Result<(), Failure> {
+        let link =
+            |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+        if link(&project_ui(&self.dir)) || link(&self.dir.join(SCHEMATIC_FILE)) {
+            return Err(fail(
+                "write-failed",
+                format!(
+                    "{SCHEMATIC_FILE} was not written: it is reached through a link, and the positions are written only into the project's own files"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// `patch` (ADR 0026 §6, M2.9-3, `docs/ui-protocol.md` "patch"): `ops`
+    /// written into one level's file (and positions into
+    /// `ui/schematic.toml`) as text, after the same load and compile as a
+    /// reload, atomically; the watch's reload then applies it live (stopped,
+    /// `graph` is pushed at once). Nothing is written when any step refuses.
+    fn patch(&mut self, message: &Value) -> Result<Value, Failure> {
+        if self.app.as_ref().is_some_and(|m| !m.opened) {
+            return Err(fail("no-project", "open a project folder first"));
+        }
+        let text = |key: &str| {
+            message
+                .get(key)
+                .and_then(Value::as_str)
+                .ok_or_else(|| fail("bad-message", format!("patch needs `{key}`")))
+        };
+        let (level, base) = (text("level")?, text("base")?);
+        let ops: Vec<Op> = match message.get("ops") {
+            Some(ops @ Value::Array(list)) if !list.is_empty() => {
+                serde_json::from_value(ops.clone())
+                    .map_err(|e| fail("bad-message", format!("`ops`: {e}")))?
+            }
+            _ => return Err(fail("bad-message", "patch needs `ops`, a list of ops")),
+        };
+        let sources = signal_project::read_sources(&self.dir)
+            .map_err(|e| fail("does-not-load", e.to_string()))?;
+        // The level's file is one the project read: never a path from the client.
+        let file = if level.is_empty() {
+            PROJECT_FILE.to_owned()
+        } else {
+            format!("composites/{level}.toml")
+        };
+        let unknown = || {
+            fail(
+                "unknown-level",
+                format!("the project has no composite `{level}`"),
+            )
+        };
+        let index = sources
+            .iter()
+            .position(|s| s.path == file)
+            .ok_or_else(unknown)?;
+        let link =
+            |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+        if link(&self.dir.join(&file)) || (!level.is_empty() && link(&self.dir.join("composites")))
+        {
+            return Err(fail(
+                "unknown-level",
+                format!(
+                    "{file} is reached through a link: a patch writes only the project's own files"
+                ),
+            ));
+        }
+        let before = sources
+            .get(index)
+            .map(|s| s.text.clone())
+            .ok_or_else(unknown)?;
+        let current = sha256_hex(before.as_bytes());
+        if current != base {
+            return Err(fail_with(
+                "conflict",
+                format!("{file} changed since the version the patch names"),
+                json!({"level": level, "file": file, "base": current}),
+            ));
+        }
+        let positions_path = self.dir.join(SCHEMATIC_FILE);
+        let positions = match fs::read_to_string(&positions_path) {
+            Ok(text) => Some(text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(fail("write-failed", format!("{SCHEMATIC_FILE}: {error}"))),
+        };
+        // The project as its files now say, the running one when it is that.
+        let parsed;
+        let loaded = match &self.run {
+            Some(run) if run.current.files == sources => Some(&run.current),
+            _ => {
+                parsed = Project::from_sources(sources.clone()).ok();
+                parsed.as_ref()
+            }
+        };
+        let registry = &self.registry;
+        let order = |module: &str| -> Option<Vec<String>> {
+            if let Some(t) = registry.get(module) {
+                return Some(
+                    t.descriptor
+                        .parameters
+                        .iter()
+                        .map(|p| p.name.to_owned())
+                        .collect(),
+                );
+            }
+            sources
+                .iter()
+                .any(|s| s.path == format!("composites/{module}.toml"))
+                .then(|| {
+                    loaded
+                        .and_then(|p| p.composites.iter().find(|c| c.name == module))
+                        .map(|c| {
+                            c.exports
+                                .parameters
+                                .iter()
+                                .map(|e| e.name.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
+        };
+        let ctx = patch::Context {
+            level,
+            module: &order,
+        };
+        let patched = patch::apply(&before, positions.as_deref(), &ops, &ctx)
+            .map_err(|e| fail(e.code, e.message))?;
+        let mut edited = sources.clone();
+        if let Some(source) = edited.get_mut(index) {
+            source.text = patched.text.clone();
+        }
+        let new = Project::from_sources(edited);
+        // The edited project when the current one does not load: a level's
+        // edit leaves its exports and the paths of its instances as they were.
+        let references = self.references(
+            level,
+            &patch::removed_instances(&ops),
+            loaded.or(new.as_ref().ok()),
+        );
+        if !references.is_empty() {
+            let named: Vec<String> = references
+                .iter()
+                .map(|r| r["text"].as_str().unwrap_or_default().to_owned())
+                .collect();
+            return Err(fail_with(
+                "in-use",
+                format!("not removed: in use by {}", named.join("; ")),
+                json!({"references": references}),
+            ));
+        }
+        // The edited project, loaded and compiled as a reload would.
+        let does_not_load = |diagnostics: Vec<Diagnostic>| {
+            let lines: Vec<String> = located(&self.dir, diagnostics)
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            fail_with(
+                "does-not-load",
+                lines.join("\n"),
+                json!({"diagnostics": lines}),
+            )
+        };
+        let new = new.map_err(does_not_load)?;
+        let planned = new.plan(&self.registry).map_err(does_not_load)?.plan;
+        sink_of(&new, &planned).map_err(does_not_load)?;
+        if let Some(run) = &self.run {
+            // `self.plan` is the running project's plan, kept with it.
+            signal_project::live::check_edit(
+                &run.current,
+                self.plan.as_ref(),
+                &new,
+                planned,
+                &self.registry,
+            )
+            .map_err(does_not_load)?;
+        }
+        // Every written patch stays undoable: its undo and redo requests fit
+        // a client message, with room for every parameter its instances
+        // could be committed with meanwhile.
+        let margin: usize = ops
+            .iter()
+            .chain(&patched.inverse)
+            .filter_map(|op| match op {
+                Op::InstanceAdd { module, .. } => order(module),
+                _ => None,
+            })
+            .flatten()
+            .map(|name| name.len() + 32)
+            .sum();
+        let request = |ops: &[Op]| {
+            let message = json!({"type": "patch", "id": u64::MAX, "level": level, "base": "0".repeat(64), "ops": ops});
+            message.to_string().len() + margin
+        };
+        let redo = patch::apply(
+            &patched.text,
+            patched.positions.as_deref(),
+            &patched.inverse,
+            &ctx,
+        )
+        .map_err(|e| {
+            fail(
+                "write-failed",
+                format!("not written: the patch could not be undone ({e})"),
+            )
+        })?;
+        let size = request(&patched.inverse).max(request(&redo.inverse));
+        if size > MAX_MESSAGE {
+            return Err(fail(
+                "bad-value",
+                format!(
+                    "not written: undoing this patch needs a message of {size} bytes, over the {} KiB limit",
+                    MAX_MESSAGE >> 10
+                ),
+            ));
+        }
+        if patched.positions_changed {
+            self.schematic_unlinked()?;
+        }
+        // The file as it is now, not as it was read: an edit from elsewhere
+        // since then is a conflict, never overwritten.
+        let path = self.dir.join(&file);
+        let now = fs::read(&path).ok().map(|bytes| sha256_hex(&bytes));
+        if now.as_deref() != Some(base) {
+            return Err(fail_with(
+                "conflict",
+                format!("{file} changed since the version the patch names"),
+                json!({"level": level, "file": file, "base": now}),
+            ));
+        }
+        write_file(&path, &patched.text)
+            .map_err(|e| fail("write-failed", format!("{file} was not written: {e}")))?;
+        if patched.positions_changed {
+            let written = match &patched.positions {
+                Some(text) => positions_path
+                    .parent()
+                    .map_or(Ok(()), fs::create_dir_all)
+                    .and_then(|()| write_file(&positions_path, text)),
+                None => match fs::remove_file(&positions_path) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+                    _ => Ok(()),
+                },
+            };
+            if let Err(error) = written {
+                let message = match write_file(&path, &before) {
+                    Ok(()) => format!(
+                        "{SCHEMATIC_FILE} was not written ({error}); {file} was put back: nothing changed"
+                    ),
+                    Err(again) => format!(
+                        "{SCHEMATIC_FILE} was not written ({error}) and {file} could not be put back ({again}): {file} holds the patch, the positions do not"
+                    ),
+                };
+                return Err(fail("write-failed", message));
+            }
+            self.seen(Path::new(SCHEMATIC_FILE));
+        }
+        // Playing, the watch reloads the level's file and pushes `graph`.
+        if self.run.is_none() {
+            self.push_graph(false);
+        }
+        Ok(json!({
+            "type": "patched",
+            "level": level,
+            "file": file,
+            "base": sha256_hex(patched.text.as_bytes()),
+            "inverse": patched.inverse,
+        }))
+    }
+
+    /// What a removal of `names` at `level` would leave dangling: the
+    /// composite's `[exports]` naming them and the panel bindings in `ui/*.html`
+    /// naming them (through every instance of the composite).
+    fn references(&self, level: &str, names: &[&str], project: Option<&Project>) -> Vec<Value> {
+        let mut found = Vec::new();
+        if names.is_empty() {
+            return found;
+        }
+        let instance = |target: &str| target.split('.').next().unwrap_or_default().to_owned();
+        if !level.is_empty()
+            && let Some(def) = project.and_then(|p| p.composites.iter().find(|c| c.name == level))
+        {
+            let file = format!("composites/{level}.toml");
+            let mut export = |kind: &str, name: &str, target: &str| {
+                if names.contains(&instance(target).as_str()) {
+                    found.push(json!({"file": file, "text": format!("[exports] {kind}.{name} = {target}")}));
+                }
+            };
+            for e in &def.exports.inputs {
+                e.to.iter().for_each(|t| export("inputs", &e.name, t));
+            }
+            for e in &def.exports.outputs {
+                export("outputs", &e.name, &e.from);
+            }
+            for e in &def.exports.parameters {
+                e.to.iter().for_each(|t| export("parameters", &e.name, t));
+            }
+        }
+        let paths: Vec<String> = if level.is_empty() {
+            vec![String::new()]
+        } else {
+            project.map(|p| p.instances_of(level)).unwrap_or_default()
+        };
+        let prefixes: Vec<String> = paths
+            .iter()
+            .flat_map(|path| names.iter().map(move |name| format!("{path}/{name}")))
+            .collect();
+        for (file, line, address) in crate::bindings::references(&self.dir.join("ui"), &prefixes) {
+            found.push(json!({"file": format!("ui/{file}"), "line": line, "text": address}));
+        }
+        found
     }
 
     /// Takes `file` as it is now as seen by the watches.
@@ -3341,6 +3717,8 @@ impl Host {
         }
         let describe = self.describe(false);
         self.broadcast(&describe);
+        // `graph.files` names the written file's new SHA-256.
+        self.push_graph(false);
         Ok(json!({
             "type": "committed",
             "address": address,

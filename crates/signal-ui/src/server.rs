@@ -68,8 +68,9 @@ const WRITE_POLL: Duration = Duration::from_millis(100);
 /// The most a client's WebSocket holds unwritten: one message beyond what
 /// the socket took (`drain`), and never more than this.
 const MAX_WRITE_BUFFER: usize = 4 << 20;
-/// The largest message a client may send.
-const MAX_MESSAGE: usize = 64 << 10;
+/// The largest message a client may send; a larger one closes the
+/// connection.
+pub(crate) const MAX_MESSAGE: usize = 64 << 10;
 /// Messages from all clients waiting for the control thread.
 const INBOUND: usize = 1024;
 /// WebSocket connections with a thread, those before `hello` included.

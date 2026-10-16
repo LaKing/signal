@@ -41,3 +41,5 @@ import './lib/schematic-levels.test.js';
 import './lib/schematic-draw.test.js';
 import './lib/panel-tree.test.js';
 import './lib/panel-edit.test.js';
+import './lib/schematic-patch.test.js';
+import './lib/schematic-edit.test.js';

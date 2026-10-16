@@ -679,6 +679,78 @@ fn a_panel_write_marks_a_signal_project_edited(transport: Transport) {
     rig.finish();
 }
 
+/// M2.9-3: stopped, a patch writes the file and pushes `graph` at once (no
+/// watch reload to wait for), with the instance in it.
+fn a_stopped_patch_writes_and_pushes_graph(transport: Transport) {
+    let mut rig = app_rig("stopped-patch", transport, None);
+    let (mut ws, _) = rig.client();
+    let graph = rig.request(&mut ws, 1, json!({"type": "graph"}), "graph");
+    assert_eq!(graph["planVersion"], Value::Null);
+    let base = graph["files"][""].as_str().unwrap().to_owned();
+    // The push comes before the reply.
+    common::send(
+        &mut ws,
+        json!({"type": "patch", "id": 2, "level": "", "base": base, "ops": [
+            {"op": "instance.add", "name": "svf", "module": "std.svf", "x": 10, "y": 20},
+            {"op": "connection.add", "from": "b.out", "to": "svf.in"}]}),
+    );
+    let pushed = rig.wait(&mut ws, "graph with svf", |got| {
+        got.of("graph")
+            .filter(|g| {
+                g.get("id").is_none()
+                    && g["top"]["instances"]
+                        .as_array()
+                        .is_some_and(|i| i.iter().any(|i| i["name"] == "svf"))
+            })
+            .cloned()
+    });
+    let patched = rig.reply(&mut ws, 2, "patched");
+    let text = fs::read_to_string(rig.dir.join("project.toml")).unwrap();
+    assert!(text.contains("svf = { module = \"std.svf\" }\n"), "{text}");
+    assert_eq!(
+        patched["base"],
+        signal_ui::panel_write::sha256_hex(text.as_bytes())
+    );
+    assert_eq!(
+        pushed["layout"]["positions"][""]["svf"],
+        json!({"x": 10, "y": 20})
+    );
+    assert_eq!(pushed["files"][""], patched["base"]);
+    assert_eq!(pushed["planVersion"], Value::Null, "still stopped");
+    rig.finish();
+}
+
+/// M2.9-3: a patch edits a `.signal` project's working folder: edited.
+fn a_patch_marks_a_signal_project_edited(transport: Transport) {
+    let mut rig = app_rig("signal-patch", transport, None);
+    let file = packed(&rig, "tone");
+    let (mut ws, _) = rig.client();
+    rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    assert!(!rig.host().project_status().unwrap().edited);
+    let graph = rig.request(&mut ws, 2, json!({"type": "graph"}), "graph");
+    rig.request(
+        &mut ws,
+        3,
+        json!({"type": "patch", "level": "", "base": graph["files"][""], "ops": [{"op": "instance.remove", "name": "env"}]}),
+        "patched",
+    );
+    assert!(
+        rig.host().project_status().unwrap().edited,
+        "the patch edits the project"
+    );
+    rig.wait(&mut ws, "edited", |got| {
+        got.of("app")
+            .filter(|a| a["project"]["edited"] == true)
+            .cloned()
+    });
+    rig.finish();
+}
+
 /// Audit P2 (document-check-stall): the control thread never waits for the
 /// display's comparison of a .signal project. While a comparison's result
 /// is held (as a large project's would take long), steps go on: requests
@@ -1324,6 +1396,8 @@ both!(
     signal_ui_refuses_the_app_s_messages,
     a_signal_file_opens_in_a_working_folder,
     a_panel_write_marks_a_signal_project_edited,
+    a_stopped_patch_writes_and_pushes_graph,
+    a_patch_marks_a_signal_project_edited,
     steps_never_wait_for_a_document_comparison,
     opening_another_project_can_save_first,
     reopening_the_same_file_with_save_keeps_the_edit,

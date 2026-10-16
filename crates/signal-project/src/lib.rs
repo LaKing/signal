@@ -24,7 +24,8 @@
 //!   packed into one deterministic zip, and unpacked with every entry checked.
 //! - [`Project::structure`]: the structure as written, for the UI protocol's
 //!   `graph` (ADR 0026 §1); [`schematic`]: the schematic's positions in
-//!   `ui/schematic.toml` (ADR 0026 §3).
+//!   `ui/schematic.toml` (ADR 0026 §3); [`patch`]: patching from the
+//!   schematic, written as text (ADR 0026 §6).
 
 pub mod archive;
 mod diagnostic;
@@ -32,6 +33,7 @@ mod diff;
 pub mod live;
 mod locate;
 mod model;
+pub mod patch;
 pub mod provenance;
 mod schema;
 pub mod schematic;
@@ -145,57 +147,93 @@ pub struct Planned {
     pub warnings: Vec<Diagnostic>,
 }
 
+/// A project folder's files as read: `project.toml` and every
+/// `composites/*.toml` in name order, without checking what they say (a
+/// project that does not load can still be read and patched).
+pub fn read_sources(dir: &Path) -> Result<Vec<SourceFile>, LoadError> {
+    let mut paths = vec![PROJECT_FILE.to_owned()];
+    let composites = dir.join(COMPOSITES);
+    match fs::read_dir(&composites) {
+        Ok(entries) => {
+            let mut names = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(|error| LoadError::Io {
+                    path: composites.clone(),
+                    error,
+                })?;
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "toml") && path.is_file() {
+                    names.push(entry.file_name().to_string_lossy().into_owned());
+                }
+            }
+            names.sort();
+            paths.extend(names.into_iter().map(|n| format!("{COMPOSITES}/{n}")));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(LoadError::Io {
+                path: composites,
+                error,
+            });
+        }
+    }
+
+    let mut files = Vec::new();
+    let mut diagnostics = Vec::new();
+    for path in paths {
+        let full = dir.join(&path);
+        let bytes = fs::read(&full).map_err(|error| LoadError::Io { path: full, error })?;
+        match String::from_utf8(bytes) {
+            Ok(text) => files.push(SourceFile { path, text }),
+            Err(_) => diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                file: path,
+                line: 1,
+                column: 1,
+                message: "the file is not UTF-8".to_owned(),
+            }),
+        }
+    }
+    if !diagnostics.is_empty() {
+        return Err(LoadError::Invalid(diagnostics));
+    }
+    Ok(files)
+}
+
 impl Project {
     /// Loads the project folder `dir`: `project.toml` and every
     /// `composites/*.toml`.
     pub fn load(dir: &Path) -> Result<Project, LoadError> {
-        let mut paths = vec![PROJECT_FILE.to_owned()];
-        let composites = dir.join(COMPOSITES);
-        match fs::read_dir(&composites) {
-            Ok(entries) => {
-                let mut names = Vec::new();
-                for entry in entries {
-                    let entry = entry.map_err(|error| LoadError::Io {
-                        path: composites.clone(),
-                        error,
-                    })?;
-                    let path = entry.path();
-                    if path.extension().is_some_and(|e| e == "toml") && path.is_file() {
-                        names.push(entry.file_name().to_string_lossy().into_owned());
-                    }
-                }
-                names.sort();
-                paths.extend(names.into_iter().map(|n| format!("{COMPOSITES}/{n}")));
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(LoadError::Io {
-                    path: composites,
-                    error,
-                });
-            }
-        }
+        Project::from_sources(read_sources(dir)?).map_err(LoadError::Invalid)
+    }
 
-        let mut files = Vec::new();
-        let mut diagnostics = Vec::new();
-        for path in paths {
-            let full = dir.join(&path);
-            let bytes = fs::read(&full).map_err(|error| LoadError::Io { path: full, error })?;
-            match String::from_utf8(bytes) {
-                Ok(text) => files.push(SourceFile { path, text }),
-                Err(_) => diagnostics.push(Diagnostic {
-                    severity: Severity::Error,
-                    file: path,
-                    line: 1,
-                    column: 1,
-                    message: "the file is not UTF-8".to_owned(),
-                }),
+    /// The addresses of every instance of composite `name` in the project
+    /// (`/drums/kick`), sorted.
+    pub fn instances_of(&self, name: &str) -> Vec<String> {
+        let by_name: BTreeMap<&str, &CompositeDef> = self
+            .composites
+            .iter()
+            .map(|c| (c.name.as_str(), c))
+            .collect();
+        let mut found = Vec::new();
+        let mut pending = vec![(&self.root, String::new(), 0usize)];
+        while let Some((def, prefix, depth)) = pending.pop() {
+            // A cycle does not plan; the depth only keeps this finite.
+            if depth > by_name.len() {
+                continue;
+            }
+            for instance in def.instances.iter().rev() {
+                let address = format!("{prefix}/{}", instance.name);
+                if let Some(inner) = by_name.get(instance.module.as_str()) {
+                    if instance.module == name {
+                        found.push(address.clone());
+                    }
+                    pending.push((inner, address, depth + 1));
+                }
             }
         }
-        if !diagnostics.is_empty() {
-            return Err(LoadError::Invalid(diagnostics));
-        }
-        Project::from_sources(files).map_err(LoadError::Invalid)
+        found.sort();
+        found
     }
 
     /// Loads a project from in-memory files: `project.toml` and any

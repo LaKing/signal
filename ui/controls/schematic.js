@@ -7,6 +7,8 @@
 // transform, wheel and pinch zoom about the pointer, the background drags to
 // pan, keys + − 0 and the arrows. Clicking selects an instance, a port or a
 // wire and shows it on a card; dragging a box moves it (`schematic.move`).
+// M2.9-3: the bar's Edit patch switch edits the patch
+// (ui/controls/schematic-editor.js); off, nothing of it takes an input.
 // Signal outputs on screen carry a level bar from scope streams
 // (ui/lib/schematic-levels.js). Nothing is drawn or streamed while hidden or
 // switched off, and nothing runs between events: no animation loop.
@@ -18,6 +20,8 @@
 
 import { onDefaultConnection } from '../signal-ui.js';
 import { ENTRY_CSS, ValueEntry } from './entry-field.js';
+import { EDITOR_CSS, SchematicEditor } from './schematic-editor.js';
+import { paletteLevel } from '../lib/schematic-patch.js';
 import { formatFixed } from '../lib/format.js';
 import { layout } from '../lib/schematic-layout.js';
 import { breadcrumbs, levelRect, nodeRect, rebase, scene } from '../lib/schematic-scene.js';
@@ -82,7 +86,8 @@ svg.stale { opacity: 0.4; filter: grayscale(1); }
 .row input { grid-column: 1 / 4; width: 100%; margin: 0; }
 .row .mark { visibility: hidden; color: var(--signal-effective, #ffb74d); }
 .row .mark.on { visibility: visible; }
-${ENTRY_CSS}`;
+${ENTRY_CSS}
+${EDITOR_CSS}`;
 
 function el(name, attributes = {}, text = null) {
   const node = document.createElementNS(SVG, name);
@@ -170,6 +175,8 @@ export class SignalSchematic extends HTMLElement {
     this.tip = html('div', { className: 'tip' });
     this.cardBox = html('section', { className: 'card' });
     root.append(style, this.svg, this.bar, this.message, this.staleBox, this.tip, this.cardBox);
+    this.editor = new SchematicEditor(this);
+    this.editor.build(this.bar, root);
     this.svg.addEventListener('pointerdown', (e) => this.pointerDown(e));
     this.svg.addEventListener('pointermove', (e) => this.pointerMove(e));
     this.svg.addEventListener('pointerup', (e) => this.pointerUp(e));
@@ -253,6 +260,7 @@ export class SignalSchematic extends HTMLElement {
       old.clear();
     }
     this.graph = graph;
+    this.editor.graphSeen(graph);
     this.layouts.clear();
     this.moved.clear();
     // What did not move stays where it is on screen.
@@ -574,6 +582,12 @@ export class SignalSchematic extends HTMLElement {
     const at = this.point(event);
     const hit = hitTest(this.drawn, at);
     this.svg.setPointerCapture?.(event.pointerId);
+    // Edit patch: a press on an output starts a connection.
+    if (this.editor.starts(hit)) {
+      this.gesture = { start: at, last: at, hit, moved: false, connect: true };
+      this.editor.connectStart(hit, at);
+      return;
+    }
     // The level's scale is kept from the start: a render during the drag
     // (a push, a zoom) may replace the group or close the level.
     const k = hit.kind === 'instance' ? this.levelOf(hit.path)?.transform.k : undefined;
@@ -593,6 +607,10 @@ export class SignalSchematic extends HTMLElement {
       return;
     }
     if (Math.hypot(at.x - gesture.start.x, at.y - gesture.start.y) > DRAG_PX) gesture.moved = true;
+    if (gesture.connect) {
+      this.editor.connectMove(at);
+      return;
+    }
     if (!gesture.moved) return;
     const last = gesture.last;
     gesture.last = at;
@@ -609,6 +627,11 @@ export class SignalSchematic extends HTMLElement {
     this.gesture = null;
     if (!gesture) return;
     const at = this.point(event);
+    if (gesture.connect && gesture.moved) {
+      this.editor.connectEnd(hitTest(this.drawn, at));
+      return;
+    }
+    if (gesture.connect) this.editor.cancelConnect();
     if (!gesture.moved) {
       this.select(gesture.hit.kind === 'background' ? null : gesture.hit);
       return;
@@ -631,6 +654,7 @@ export class SignalSchematic extends HTMLElement {
 
   cancelGesture() {
     if (this.gesture?.drag) this.gesture.drag.removeAttribute('transform');
+    if (this.gesture?.connect) this.editor.cancelConnect();
     this.gesture = null;
   }
 
@@ -654,6 +678,13 @@ export class SignalSchematic extends HTMLElement {
   doubleClick(event) {
     if (!this.drawn) return;
     const hit = hitTest(this.drawn, this.point(event));
+    // Edit patch: the add palette, where the background or an open
+    // composite's inside was double-clicked.
+    const level = this.editor.editing ? paletteLevel(hit, this.drawn, this.point(event)) : null;
+    if (level) {
+      this.editor.openPalette(this.point(event), level);
+      return;
+    }
     if (hit.kind !== 'instance' || !hit.node.composite) return;
     this.pinned.add(hit.address);
     const rect = nodeRect(this.drawn, hit.address);
@@ -675,6 +706,9 @@ export class SignalSchematic extends HTMLElement {
   }
 
   key(event) {
+    // Edit patch takes its keys first: Escape leaves edit mode before it
+    // goes back out of a level.
+    if (this.editor.key(event)) return;
     // Keys of the inspector's slider and the bar's buttons are theirs (an
     // event from the shadow tree reaches this listener retargeted to the host).
     if (event.composedPath()[0] !== this) return;
@@ -726,6 +760,7 @@ export class SignalSchematic extends HTMLElement {
       parts.push(list);
     }
     for (const row of model.parameters) parts.push(this.parameterRow(row));
+    parts.push(...this.editor.cardParts(this.selection));
     this.cardBox.replaceChildren(...parts);
     this.cardBox.style.visibility = 'visible';
     this.refreshCard();

@@ -75,6 +75,78 @@ impl Project {
                 );
             }
         }
+        let walk = self.walk(registry, converters);
+        // The first instance (in source order) of every composite reached.
+        let mut first = BTreeMap::new();
+        walk.reach(&self.root, "", &mut first);
+        let top = walk.level(&self.root, "", false);
+        let mut composites = Map::new();
+        for (name, prefix) in &first {
+            let Some(def) = walk.by_name.get(name.as_str()) else {
+                continue;
+            };
+            let mut level = walk.level(def, prefix, true);
+            if let Value::Object(fields) = &mut level {
+                fields.insert("inputs".to_owned(), walk.exported_inputs(def));
+                fields.insert("outputs".to_owned(), walk.exported_outputs(def));
+                fields.insert("parameters".to_owned(), walk.exported_parameters(def));
+            }
+            composites.insert(name.clone(), level);
+        }
+        json!({"top": top, "composites": composites})
+    }
+
+    /// The module types an instance can be added from (`docs/ui-protocol.md`
+    /// "modules"): `registry`'s primitive types and the project's composites,
+    /// each in name order, with their ports and parameters as `graph` gives
+    /// an instance's, without `address` (there is no instance).
+    pub fn modules(&self, registry: &Registry) -> Value {
+        let unaddressed = |mut value: Value| {
+            if let Value::Object(fields) = &mut value {
+                fields.remove("address");
+            }
+            value
+        };
+        let primitives: Vec<Value> = registry
+            .iter()
+            .map(|t| {
+                let d = &t.descriptor;
+                json!({
+                    "module": d.type_name,
+                    "composite": false,
+                    "description": d.doc,
+                    "ports": d.ports.iter()
+                        .map(|p| unaddressed(port_json(p.name, "", p.direction, Some(Endpoint::Port(p)))))
+                        .collect::<Vec<_>>(),
+                    "parameters": d.parameters.iter()
+                        .map(|p| unaddressed(parameter_json(p, p.name, "")))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let walk = self.walk(registry, BTreeMap::new());
+        let composites: Vec<Value> = self
+            .composites
+            .iter()
+            .map(|def| {
+                let (ports, parameters) = walk.interface(def, &|_| String::new());
+                json!({
+                    "module": def.name,
+                    "composite": true,
+                    "description": null,
+                    "ports": ports.into_iter().map(unaddressed).collect::<Vec<_>>(),
+                    "parameters": parameters.into_iter().map(unaddressed).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        json!({"primitives": primitives, "composites": composites})
+    }
+
+    fn walk<'a>(
+        &'a self,
+        registry: &'a Registry,
+        converters: BTreeMap<(String, String), Value>,
+    ) -> Walk<'a> {
         let mut instances = BTreeMap::new();
         let (mut outputs, mut inputs, mut parameters) =
             (ByExport::new(), ByExport::new(), ByExport::new());
@@ -95,7 +167,7 @@ impl Project {
                 all.push(e.to.as_slice());
             }
         }
-        let walk = Walk {
+        Walk {
             project: self,
             registry,
             by_name: self
@@ -108,25 +180,7 @@ impl Project {
             inputs,
             parameters,
             converters,
-        };
-        // The first instance (in source order) of every composite reached.
-        let mut first = BTreeMap::new();
-        walk.reach(&self.root, "", &mut first);
-        let top = walk.level(&self.root, "", false);
-        let mut composites = Map::new();
-        for (name, prefix) in &first {
-            let Some(def) = walk.by_name.get(name.as_str()) else {
-                continue;
-            };
-            let mut level = walk.level(def, prefix, true);
-            if let Value::Object(fields) = &mut level {
-                fields.insert("inputs".to_owned(), walk.exported_inputs(def));
-                fields.insert("outputs".to_owned(), walk.exported_outputs(def));
-                fields.insert("parameters".to_owned(), walk.exported_parameters(def));
-            }
-            composites.insert(name.clone(), level);
         }
-        json!({"top": top, "composites": composites})
     }
 
     /// `def`'s instances in source order.
@@ -174,39 +228,7 @@ impl Walk<'_> {
                 let (composite, ports, parameters) =
                     match self.by_name.get(instance.module.as_str()) {
                         Some(inner) => {
-                            let mut ports = Vec::new();
-                            for export in &inner.exports.inputs {
-                                let found = export.to.first().and_then(|t| self.endpoint(inner, t));
-                                ports.push(port_json(
-                                    &export.name,
-                                    &at(&export.name),
-                                    Direction::In,
-                                    found,
-                                ));
-                            }
-                            for export in &inner.exports.outputs {
-                                let found = self.endpoint(inner, &export.from);
-                                ports.push(port_json(
-                                    &export.name,
-                                    &at(&export.name),
-                                    Direction::Out,
-                                    found,
-                                ));
-                            }
-                            let parameters = inner
-                                .exports
-                                .parameters
-                                .iter()
-                                .filter_map(|export| {
-                                    let target = export.to.first()?;
-                                    match self.endpoint(inner, target)? {
-                                        Endpoint::Parameter(p) => {
-                                            Some(parameter_json(p, &export.name, &at(&export.name)))
-                                        }
-                                        Endpoint::Port(_) => None,
-                                    }
-                                })
-                                .collect();
+                            let (ports, parameters) = self.interface(inner, &at);
                             (true, ports, parameters)
                         }
                         None => match self.registry.get(&instance.module) {
@@ -268,6 +290,49 @@ impl Walk<'_> {
             })
             .collect();
         json!({"instances": instances, "connections": connections})
+    }
+
+    /// A composite's ports and parameters as an instance of it shows them:
+    /// its exports, with the shape of what they reach, at `at(name)`.
+    fn interface(
+        &self,
+        inner: &CompositeDef,
+        at: &dyn Fn(&str) -> String,
+    ) -> (Vec<Value>, Vec<Value>) {
+        let mut ports = Vec::new();
+        for export in &inner.exports.inputs {
+            let found = export.to.first().and_then(|t| self.endpoint(inner, t));
+            ports.push(port_json(
+                &export.name,
+                &at(&export.name),
+                Direction::In,
+                found,
+            ));
+        }
+        for export in &inner.exports.outputs {
+            let found = self.endpoint(inner, &export.from);
+            ports.push(port_json(
+                &export.name,
+                &at(&export.name),
+                Direction::Out,
+                found,
+            ));
+        }
+        let parameters = inner
+            .exports
+            .parameters
+            .iter()
+            .filter_map(|export| {
+                let target = export.to.first()?;
+                match self.endpoint(inner, target)? {
+                    Endpoint::Parameter(p) => {
+                        Some(parameter_json(p, &export.name, &at(&export.name)))
+                    }
+                    Endpoint::Port(_) => None,
+                }
+            })
+            .collect();
+        (ports, parameters)
     }
 
     fn exported_inputs(&self, def: &CompositeDef) -> Value {

@@ -852,6 +852,38 @@ pub fn panel_files(ui: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// The bindings of the panels in `ui` that name an instance at one of
+/// `prefixes` (`/out`, `/drums/kick/dc`), or a port or anything inside it:
+/// `(file name, line, address)`, in file and source order (a patch's
+/// `in-use`, M2.9-3).
+pub fn references(ui: &Path, prefixes: &[String]) -> Vec<(String, usize, String)> {
+    let mut found = Vec::new();
+    for path in panel_files(ui).unwrap_or_default() {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for element in elements(&text) {
+            for (address, offset) in element.addresses() {
+                let hit = prefixes.iter().any(|p| {
+                    address == p
+                        || address
+                            .strip_prefix(p.as_str())
+                            .is_some_and(|rest| rest.starts_with(['.', '/']))
+                });
+                if hit {
+                    let line = text[..offset.min(text.len())].matches('\n').count() + 1;
+                    found.push((name.clone(), line, address.to_owned()));
+                }
+            }
+        }
+    }
+    found
+}
+
 /// Checks every panel of the project in `dir` (loaded as `project`) against
 /// its plan: `signal ui check`.
 pub fn check_project(
