@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { card, cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues } from './schematic-inspector.js';
+import { readFileSync } from 'node:fs';
+import { card, cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from './schematic-inspector.js';
 import { layout } from './schematic-layout.js';
 
 const GRAPH = {
@@ -117,4 +118,28 @@ test('without a stream value, the base is the latest describe\u2019s', () => {
   assert.equal(rowValues(env, new Map(), null, inner).base, 333);
   // A stream value still wins.
   assert.equal(rowValues(gain, new Map([['/out.gain', { base: 0.2, effective: 0.2 }]]), null, later).base, 0.2);
+});
+
+// M2.9-1b: `graph.error` shows its diagnostics over the last drawing, marked stale.
+test('a project that stops loading: its diagnostics, the drawing marked stale', () => {
+  const error = { type: 'graph.error', code: 'does-not-load', message: 'project.toml:3: expected `]`\nproject.toml:9: unknown module' };
+  assert.deepEqual(staleNotice(error, true), {
+    title: 'The project does not load; the drawing is stale',
+    text: 'project.toml:3: expected `]`\nproject.toml:9: unknown module',
+  });
+  assert.equal(staleNotice(error, false).title, 'The project does not load', 'nothing drawn yet: nothing stale');
+  assert.equal(staleNotice({ code: 'no-project', message: 'open a project folder first' }, true).title, 'No project is open; the drawing is stale');
+});
+
+// auditor-1-stale-svg-hidden: the SVG marked stale stays visible, dimmed;
+// only the diagnostics box is hidden until it has something to say.
+test('the stale drawing is dimmed, not hidden, by the schematic’s styles', () => {
+  const source = readFileSync(new URL('../controls/schematic.js', import.meta.url), 'utf8');
+  const css = source.slice(source.indexOf('const CSS = `'), source.indexOf('${ENTRY_CSS}'));
+  const rules = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].map(([, selector, body]) => ({ selector: selector.trim(), body }));
+  const onStale = rules.filter((r) => r.selector.split(',').some((s) => /(^|[\s>])(svg)?\.stale\b/.test(s.trim())));
+  assert.deepEqual(onStale.map((r) => r.selector), ['svg.stale'], 'only one rule matches the stale SVG');
+  assert.doesNotMatch(onStale[0].body, /visibility|display|position/);
+  assert.match(onStale[0].body, /opacity/);
+  assert.match(source, /html\('section', \{ className: 'diagnostics' \}\)/, 'the box over it has a class of its own');
 });

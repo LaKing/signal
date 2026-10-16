@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  IDENTITY, MAX_SCALE, MIN_SCALE, compose, fit, focus, keyView, pan, screenRect, toLocal, toScreen, wheelFactor, zoomAt,
+  IDENTITY, MAX_SCALE, MIN_SCALE, compose, fit, focus, keyView, pan, screenRect, toLocal, toScreen, uncompose, wheelFactor, zoomAt,
 } from './schematic-view.js';
 
 const close = (a, b, message) => assert.ok(Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b)), `${message}: ${a} vs ${b}`);
@@ -60,6 +60,43 @@ test('the zoom is effectively unbounded, and clamped only to stay finite', () =>
   // Deep but ordinary zoom keeps exact numbers: 1e12 is no limit.
   assert.equal(zoomAt({ k: 1e12, x: 0, y: 0 }, 2, { x: 0, y: 0 }).k, 2e12);
   assert.deepEqual(pan(view, Infinity, 0), view, 'a non-finite step changes nothing');
+});
+
+// auditor-1-zoom-clamp: no clamp on the camera. A point at x = 1e5 under
+// the pointer at k = 100 (translation −9 999 500) stays under it, zoom
+// after zoom on a level with nothing nested, and its neighbours follow the
+// exact scaling law.
+test('zooming about the pointer keeps its point there, at any translation, on a terminal level', () => {
+  const at = { x: 500, y: 300 };
+  let view = { k: 100, x: -9999500, y: 300 };
+  const point = { x: 1e5, y: 0 };
+  close(toScreen(view, point).x, 500, 'under the pointer');
+  // Two floats from it: `near.x − 1e5` is exact, so its true offset is that times k.
+  const near = { x: 1e5 + 3e-11, y: 0 };
+  for (let n = 1; n <= 120; n++) {
+    view = zoomAt(view, 1.25, at);
+    assert.ok(Math.abs(toScreen(view, point).x - at.x) < 1e-6, `step ${n}: the point stays`);
+    const offset = toScreen(view, near).x - at.x;
+    assert.ok(Math.abs(offset - (near.x - 1e5) * view.k) < 0.5, `step ${n}: a neighbour at ${offset} px`);
+  }
+  assert.ok(view.k > 1e13, `zoomed to ${view.k}`);
+});
+
+// Levels on either side of a link agree on screen at any scale, so the view
+// can move between them (re-rooting) without anything moving.
+test('compose and uncompose agree to a hundredth of a pixel at any scale', () => {
+  const inner = { k: 6.3e-5, x: 1008.5, y: 466864.25 };
+  const parentEdge = { x: 1000, y: 466875 };
+  const childPoint = { x: 123.5, y: 456.75 };
+  for (const k of [21, 1e6, 1e12]) {
+    const parent = { k, ox: parentEdge.x, oy: parentEdge.y, x: 500, y: 300 };
+    const child = compose(parent, inner);
+    const back = uncompose(child, inner);
+    for (const [a, b] of [[toScreen(parent, parentEdge), toScreen(back, parentEdge)], [toScreen(child, childPoint), toScreen(compose(back, inner), childPoint)]]) {
+      assert.ok(Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01, `k ${k}: ${a.x},${a.y} vs ${b.x},${b.y}`);
+    }
+    close(child.k, k * inner.k, 'scales multiply');
+  }
 });
 
 test('wheel and keys', () => {

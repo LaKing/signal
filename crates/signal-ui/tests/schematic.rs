@@ -135,6 +135,42 @@ fn a_structural_reload_pushes_graph(transport: Transport) {
     rig.finish();
 }
 
+/// M2.9-1b: playing, `graph`'s structure is built once per plan version.
+fn a_playing_graph_is_built_once_per_plan_version(transport: Transport) {
+    let mut rig = project_rig("graph-version", transport, "kick");
+    let (mut ws, _) = rig.client();
+    rig.request(&mut ws, 1, json!({"type": "graph"}), "graph");
+    let built = rig.host().graph_counts().1;
+    rig.request(&mut ws, 2, json!({"type": "graph"}), "graph");
+    rig.request(
+        &mut ws,
+        3,
+        json!({"type": "schematic.move", "level": "", "instance": "lfo", "x": 1, "y": 2}),
+        "schematic.moved",
+    );
+    assert_eq!(
+        rig.host().graph_counts().1,
+        built,
+        "cached for this version"
+    );
+    let path = rig.dir.join("project.toml");
+    let text = fs::read_to_string(&path).unwrap().replace(
+        "out = { module",
+        "extra = { module = \"std.sine_osc\", freq = 330 }\nout = { module",
+    );
+    fs::write(&path, text).unwrap();
+    pushed(&mut rig, &mut ws, "graph after the swap", |g| {
+        names(&g["top"]).contains(&"extra")
+    });
+    rig.request(&mut ws, 4, json!({"type": "graph"}), "graph");
+    assert_eq!(
+        rig.host().graph_counts().1,
+        built + 1,
+        "built again for the new version only"
+    );
+    rig.finish();
+}
+
 fn schematic_move_writes_positions_and_pushes_graph(transport: Transport) {
     let mut rig = project_rig("schematic-move", transport, "kick");
     let (mut ws, _) = rig.client();
@@ -276,4 +312,5 @@ both!(
     a_structural_reload_pushes_graph,
     schematic_move_writes_positions_and_pushes_graph,
     an_edit_of_the_positions_file_pushes_graph,
+    a_playing_graph_is_built_once_per_plan_version,
 );

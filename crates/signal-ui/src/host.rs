@@ -19,6 +19,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,7 +44,9 @@ use signal_output::{
     VECTOR_SLOTS, VectorSnapshot, VectorUnbound, realtime_with,
 };
 use signal_project::archive::{self, TempProject};
-use signal_project::live::{Both, ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload_observed};
+use signal_project::live::{
+    Both, FolderState, ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload_observed,
+};
 use signal_project::schematic::{self, SCHEMATIC_FILE};
 use signal_project::session::{LiveRecorder, SessionRecorder, sink_of};
 use signal_project::{Diagnostic, LoadError, PROJECT_FILE, Project, located};
@@ -443,8 +446,24 @@ pub struct Host {
     next_failure: u64,
     /// The `unsaved` message last pushed.
     unsaved_pushed: Option<Value>,
-    /// The `graph` message last pushed (`docs/ui-protocol.md` "graph").
-    graph_pushed: Option<Value>,
+    /// The hash of the `graph` (or `graph.error`) message last pushed
+    /// (`docs/ui-protocol.md` "graph").
+    graph_pushed: Option<u64>,
+    /// Stopped: `graph`'s project name and structure, by the folder (and
+    /// its state, `ui/schematic.toml` aside) it was loaded from. Kept across
+    /// a run, so stopping again loads nothing when the folder is unchanged.
+    graph_stopped: Option<(PathBuf, Option<FolderState>, String, Value)>,
+    /// Playing: `graph`'s project name and structure, by plan version;
+    /// forgotten when the run or its project is replaced.
+    graph_playing: Option<(u64, String, Value)>,
+    /// Test hooks: projects loaded, structures built and schematic writes.
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+    counts: (u64, u64, u64),
+    /// The free scope slots last pushed (`scopes`), and when they last rose.
+    scopes_pushed: Option<usize>,
+    scopes_freed: Option<Instant>,
+    /// A scope slot was released since the last `scopes` push.
+    scopes_released: bool,
     /// App mode, stopped and switched on: the project folder's watch, for
     /// the `graph` push (a run has its own), and when it was last polled.
     idle_watch: Option<(ProjectWatcher, Instant)>,
@@ -704,6 +723,12 @@ impl Host {
             next_failure: 1,
             unsaved_pushed: None,
             graph_pushed: None,
+            graph_stopped: None,
+            graph_playing: None,
+            counts: (0, 0, 0),
+            scopes_pushed: None,
+            scopes_freed: None,
+            scopes_released: false,
             idle_watch: None,
         };
         host.list_devices();
@@ -862,7 +887,15 @@ impl Host {
         self.emit();
         self.push_app();
         self.push_unsaved();
+        self.push_scopes();
         std::mem::take(&mut self.messages)
+    }
+
+    /// Test hooks: the projects loaded (`app::load`), the `graph`
+    /// structures built and the `ui/schematic.toml` writes so far.
+    #[cfg(feature = "test-hooks")]
+    pub fn graph_counts(&self) -> (u64, u64, u64) {
+        self.counts
     }
 
     /// `unsaved` to every client whenever it changed; a failure whose
@@ -1048,7 +1081,11 @@ impl Host {
         self.dir = dir.to_owned();
         self.idle_watch = None;
         self.server.set_project_ui(project_ui(dir));
-        let loaded = app::load(dir, &self.registry);
+        let state = FolderState::read(dir, Path::new(SCHEMATIC_FILE)).ok();
+        let loaded = self.load(dir);
+        if let Ok((project, plan, _)) = &loaded {
+            self.remember_stopped(state, project, plan);
+        }
         let Some(mode) = self.app.as_mut() else {
             return;
         };
@@ -1088,8 +1125,14 @@ impl Host {
         }
         // Read before the load: a later edit makes it differ from the file.
         let file = fs::read_to_string(self.dir.join(signal_project::PROJECT_FILE)).ok();
-        let (project, plan, width) = match app::load(&self.dir, &self.registry) {
-            Ok(loaded) => loaded,
+        let state = FolderState::read(&self.dir, Path::new(SCHEMATIC_FILE)).ok();
+        let dir = self.dir.clone();
+        let (project, plan, width) = match self.load(&dir) {
+            Ok(loaded) => {
+                // Stopping again with the folder unchanged loads nothing.
+                self.remember_stopped(state, &loaded.0, &loaded.1);
+                loaded
+            }
             Err(diagnostics) => {
                 if let Some(mode) = self.app.as_mut() {
                     mode.diagnostics = diagnostics;
@@ -1404,6 +1447,14 @@ impl Host {
     }
 
     /// The open project's name: its file's stem, or its folder's name.
+    /// The project folder's name, telling a client's drawing of one project
+    /// from a `graph.error` of another (`graph`, `graph.error`).
+    fn folder_name(&self) -> Option<String> {
+        self.dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    }
+
     fn project_name(&self) -> String {
         match &self.document {
             Some(document) => document.name(),
@@ -1692,6 +1743,7 @@ impl Host {
     /// A new run plays the file: no live edit is left in it (the unsaved
     /// controls' values are played again by [`Host::play_carried`]).
     fn install(&mut self, mut run: Run) {
+        self.graph_playing = None;
         self.panel = Panel::new(&run.current, &self.registry);
         self.plan = run.current.plan(&self.registry).ok().map(|p| p.plan);
         self.rate = run.rate;
@@ -1875,6 +1927,8 @@ impl Host {
             }
         };
         if let Some((panel, plan)) = reloaded {
+            // The running project changed (a swap is a new version too).
+            self.graph_playing = None;
             // The reload sent every port what differs from the file: a
             // control written while its live send was refused now holds it.
             for (instance, parameter) in std::mem::take(&mut self.resend) {
@@ -2370,7 +2424,11 @@ impl Host {
             "controls": controls,
             "sinks": sinks,
             "meters": {"output": output_meters, "input": input_meters},
-            "scopes": {"slots": SCOPE_SLOTS, "points": SCOPE_POINTS, "maxRate": self.rate},
+            "scopes": with(
+                with(self.scopes_json(), "points", json!(SCOPE_POINTS)),
+                "maxRate",
+                json!(self.rate),
+            ),
             "vectors": {"slots": VECTOR_SLOTS, "maxRows": VECTOR_MAX_ROWS},
             "unsaved": self.unsaved_json(),
         });
@@ -2380,33 +2438,83 @@ impl Host {
         describe
     }
 
+    /// A project folder loaded and planned ([`app::load`]), counted for the
+    /// test hooks.
+    fn load(&mut self, dir: &Path) -> Result<(Project, ExecutionPlan, usize), Vec<String>> {
+        self.counts.0 += 1;
+        app::load(dir, &self.registry)
+    }
+
+    /// Keeps the structure of `project` (loaded from the folder in `state`)
+    /// for `graph` while stopped.
+    fn remember_stopped(
+        &mut self,
+        state: Option<FolderState>,
+        project: &Project,
+        plan: &ExecutionPlan,
+    ) {
+        self.counts.1 += 1;
+        let structure = project.structure(plan, &self.registry);
+        self.graph_stopped = Some((self.dir.clone(), state, project.name.clone(), structure));
+    }
+
+    /// `graph`'s project name and structure ([`Project::structure`]),
+    /// cached: playing, per plan version; stopped, per folder state, so a
+    /// call loads the folder again only after it changed.
+    fn structure(&mut self) -> Result<(&str, &Value), Failure> {
+        if let Some(run) = &self.run {
+            let version = run.version;
+            let entry = match self.graph_playing.take() {
+                Some(entry) if entry.0 == version => self.graph_playing.insert(entry),
+                _ => {
+                    let plan = self
+                        .plan
+                        .as_ref()
+                        .ok_or_else(|| fail("does-not-load", "the running project has no plan"))?;
+                    self.counts.1 += 1;
+                    let structure = run.current.structure(plan, &self.registry);
+                    self.graph_playing
+                        .insert((version, run.current.name.clone(), structure))
+                }
+            };
+            return Ok((&entry.1, &entry.2));
+        }
+        if self.app.as_ref().is_some_and(|m| !m.opened) {
+            return Err(fail("no-project", "open a project folder first"));
+        }
+        let state = FolderState::read(&self.dir, Path::new(SCHEMATIC_FILE)).ok();
+        let cached = self
+            .graph_stopped
+            .as_ref()
+            .is_some_and(|(dir, seen, ..)| *dir == self.dir && seen.is_some() && *seen == state);
+        if !cached {
+            let dir = self.dir.clone();
+            let (project, plan, _) = self
+                .load(&dir)
+                .map_err(|diagnostics| fail("does-not-load", diagnostics.join("\n")))?;
+            self.remember_stopped(state, &project, &plan);
+        }
+        match &self.graph_stopped {
+            Some((_, _, name, structure)) => Ok((name, structure)),
+            None => Err(fail(
+                "does-not-load",
+                "the project's structure is not known",
+            )),
+        }
+    }
+
     /// `graph` (ADR 0026 §1): the project's structure as written
-    /// ([`Project::structure`]), and its schematic positions from
+    /// ([`Host::structure`]), and its schematic positions from
     /// `ui/schematic.toml`, read now. Playing, of the running project (the
     /// last good version, as `describe`); stopped (app mode), of the folder.
-    fn graph(&self) -> Result<Value, Failure> {
-        let (name, structure) = match &self.run {
-            Some(run) => {
-                let plan = self
-                    .plan
-                    .as_ref()
-                    .ok_or_else(|| fail("does-not-load", "the running project has no plan"))?;
-                (
-                    run.current.name.clone(),
-                    run.current.structure(plan, &self.registry),
-                )
-            }
-            None => {
-                if self.app.as_ref().is_some_and(|m| !m.opened) {
-                    return Err(fail("no-project", "open a project folder first"));
-                }
-                let (project, plan, _) = app::load(&self.dir, &self.registry)
-                    .map_err(|diagnostics| fail("does-not-load", diagnostics.join("\n")))?;
-                (
-                    project.name.clone(),
-                    project.structure(&plan, &self.registry),
-                )
-            }
+    fn graph(&mut self) -> Result<Value, Failure> {
+        let (name, top, composites) = {
+            let (name, structure) = self.structure()?;
+            (
+                name.to_owned(),
+                structure.get("top").cloned(),
+                structure.get("composites").cloned(),
+            )
         };
         let (positions, error) = match fs::read_to_string(self.dir.join(SCHEMATIC_FILE)) {
             Ok(text) => match schematic::read_positions(&text) {
@@ -2434,24 +2542,61 @@ impl Host {
         Ok(json!({
             "type": "graph",
             "project": name,
+            "folder": self.folder_name(),
             "planVersion": self.run.as_ref().map(|r| r.version),
-            "top": structure.get("top"),
-            "composites": structure.get("composites"),
+            "top": top,
+            "composites": composites,
             "layout": {"file": SCHEMATIC_FILE, "positions": positions, "error": error},
         }))
     }
 
     /// Pushes `graph` to every client when it differs from the last one
-    /// pushed, or (`force`) whatever it is: after a swap and a schematic
-    /// write. A project that does not load pushes nothing.
+    /// pushed (compared by the hash of its text), or (`force`) whatever it
+    /// is: after a swap and a schematic write. A project that does not load
+    /// pushes `graph.error` with its diagnostics, and clients keep their
+    /// last drawing, marked stale.
     fn push_graph(&mut self, force: bool) {
-        let Ok(graph) = self.graph() else {
-            return;
+        let message = match self.graph() {
+            Ok(graph) => graph,
+            Err(failure) => json!({
+                "type": "graph.error",
+                "folder": self.folder_name(),
+                "code": failure.code,
+                "message": failure.message,
+            }),
         };
-        if force || self.graph_pushed.as_ref() != Some(&graph) {
-            self.broadcast(&graph);
-            self.graph_pushed = Some(graph);
+        let text = message.to_string();
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        let hash = hasher.finish();
+        if force || self.graph_pushed != Some(hash) {
+            self.broadcast_text(&text);
+            self.graph_pushed = Some(hash);
         }
+    }
+
+    /// The scope slots of a run, as `describe` and `scopes` give them:
+    /// `free` now, and `sinceFreedMs` since the free count last rose.
+    fn scopes_json(&self) -> Value {
+        json!({
+            "slots": SCOPE_SLOTS,
+            "free": self.scope_slots.iter().filter(|s| s.is_none()).count(),
+            "sinceFreedMs": self.scopes_freed.map(|at| at.elapsed().as_millis()),
+        })
+    }
+
+    /// Pushes `scopes` to every client whenever the free scope slot count
+    /// changed since the last push, or a slot was released (`sinceFreedMs`
+    /// restarted) though another was taken in the same step.
+    fn push_scopes(&mut self) {
+        let free = self.scope_slots.iter().filter(|s| s.is_none()).count();
+        let released = std::mem::take(&mut self.scopes_released);
+        if self.scopes_pushed == Some(free) && !released {
+            return;
+        }
+        self.scopes_pushed = Some(free);
+        let message = with(self.scopes_json(), "type", json!("scopes"));
+        self.broadcast(&message);
     }
 
     /// App mode, stopped: every 100 ms a changed folder pushes `graph` (its
@@ -2582,6 +2727,7 @@ impl Host {
             fs::create_dir_all(folder).map_err(|e| failed(e.to_string()))?;
         }
         write_file(&path, &after).map_err(|e| failed(e.to_string()))?;
+        self.counts.2 += 1;
         self.seen(Path::new(SCHEMATIC_FILE));
         Ok(())
     }
@@ -2785,6 +2931,10 @@ impl Host {
                 if let Some(s) = self.scope_slots.get_mut(slot) {
                     *s = None;
                 }
+                // Every release restarts the age, even if another client
+                // takes the slot before the next push.
+                self.scopes_freed = Some(Instant::now());
+                self.scopes_released = true;
                 if let Some(run) = self.run.as_mut() {
                     let _ = run.controller.scope_stop(slot);
                 }
@@ -4041,10 +4191,14 @@ impl Host {
     }
 
     fn send_text(&mut self, client: u64, value: &Value) {
+        self.send_serialised(client, value.to_string());
+    }
+
+    fn send_serialised(&mut self, client: u64, text: String) {
         let Some(c) = self.clients.get(&client) else {
             return;
         };
-        match c.queue.try_send(Outbound::Text(value.to_string())) {
+        match c.queue.try_send(Outbound::Text(text)) {
             Ok(()) => {}
             // A client that cannot take a reply is not keeping up.
             Err(TrySendError::Full(_)) => self.evict(client),
@@ -4067,6 +4221,14 @@ impl Host {
         let clients: Vec<u64> = self.clients.keys().copied().collect();
         for client in clients {
             self.send_text(client, value);
+        }
+    }
+
+    /// A message already serialised, to every client.
+    fn broadcast_text(&mut self, text: &str) {
+        let clients: Vec<u64> = self.clients.keys().copied().collect();
+        for client in clients {
+            self.send_serialised(client, text.to_owned());
         }
     }
 

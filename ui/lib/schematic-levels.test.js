@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { RETRY_MS, candidates, levelFraction, levelPlan, retryDue } from './schematic-levels.js';
+import { CLAIM_MS, RETRY_MS, candidates, levelFraction, levelPlan } from './schematic-levels.js';
 import { layout } from './schematic-layout.js';
 import { scene } from './schematic-scene.js';
 import { fit } from './schematic-view.js';
@@ -60,7 +60,7 @@ test('a refusal (no free slot) shows no slot and is asked again after a while', 
   let plan = levelPlan({ wanted: ports, granted: new Set(['/a.out']), refused, active: true, now: 1500 });
   assert.deepEqual(plan.subscribe, []);
   assert.equal(plan.states.get('/b.out'), 'no-slot');
-  assert.ok(retryDue(plan.states));
+  assert.equal(plan.retry, 1000 + RETRY_MS - 1500, 'asked again when its cooldown ends');
   plan = levelPlan({ wanted: ports, granted: new Set(['/a.out']), refused, active: true, now: 1000 + RETRY_MS });
   assert.deepEqual(plan.subscribe, ['/b.out'], 'a slot freed elsewhere is taken on the retry');
   // The selected instance's outputs come first, and take a slot from the last.
@@ -74,7 +74,89 @@ test('hidden, switched off or stopped: everything is let go, every bar idle', ()
   assert.deepEqual(plan.subscribe, []);
   assert.deepEqual(plan.unsubscribe, ['/a.out', '/b.out']);
   assert.deepEqual([...plan.states.values()], ['idle', 'idle']);
-  assert.equal(retryDue(plan.states), false);
+  assert.equal(plan.retry, null);
+});
+
+// M2.9-1b: the host's free count (`scopes`) and panel scopes first.
+const scopes = (free, sinceFreedMs, at, held = 0) => ({ free, sinceFreedMs, at, held });
+
+test('only the free slots are asked, and no timer runs while none is', () => {
+  const ports = wanted('/a.out', '/b.out', '/c.out');
+  let plan = levelPlan({ wanted: ports, active: true, now: 9000, scopes: scopes(1, null, 9000) });
+  assert.deepEqual(plan.subscribe, ['/a.out'], 'one free, one asked');
+  assert.deepEqual([...plan.states.values()], ['pending', 'no-slot', 'no-slot']);
+  assert.equal(plan.retry, null, 'nothing more could succeed: no timer');
+  plan = levelPlan({ wanted: ports, granted: new Set(['/a.out']), active: true, now: 9100, scopes: scopes(0, null, 9100, 1) });
+  assert.deepEqual(plan.subscribe, []);
+  assert.equal(plan.retry, null, 'every port beyond the free count waits for the host, not a timer');
+  // A subscription asked since the last `scopes` counts against its free count.
+  plan = levelPlan({ wanted: ports, granted: new Set(['/a.out', '/b.out']), active: true, now: 9200, scopes: scopes(2, null, 9000, 0) });
+  assert.deepEqual(plan.subscribe, [], 'two asked against two free: no third');
+});
+
+test('a slot freed is claimed CLAIM_MS after the free count rose, whoever freed it, at attach too', () => {
+  // A panel scope refused at t = 0 retries at t = 2000; a slot is freed at
+  // t = 100; a schematic attaches at t = 200 and hears it was freed 100 ms ago.
+  const ports = wanted('/a.out');
+  let plan = levelPlan({ wanted: ports, active: true, now: 200, scopes: scopes(1, 100, 200) });
+  assert.deepEqual(plan.subscribe, [], 'not at attach');
+  assert.equal(plan.retry, CLAIM_MS - 100 - 0);
+  assert.equal(200 + plan.retry, 2600, 'after the panel scope’s retry at 2000');
+  plan = levelPlan({ wanted: ports, active: true, now: 2000, scopes: scopes(1, 100, 200) });
+  assert.deepEqual(plan.subscribe, [], 'not at the panel scope’s retry either');
+  // The panel scope took it.
+  plan = levelPlan({ wanted: ports, active: true, now: 2010, scopes: scopes(0, 1910, 2010) });
+  assert.equal(plan.retry, null);
+  // A rise older than CLAIM_MS is taken at once.
+  plan = levelPlan({ wanted: ports, active: true, now: 9000, scopes: scopes(1, 5000, 9000) });
+  assert.deepEqual(plan.subscribe, ['/a.out']);
+});
+
+// auditor-1-stale-own-slot-credit: an own release taken by another client,
+// then a foreign release, gives no immediate claim.
+test('a slot freed after an own release taken by another client waits too', () => {
+  const ports = wanted('/a.out', '/b.out');
+  // t = 0: the schematic let /x go (it left the screen); the host says free 1.
+  let plan = levelPlan({ wanted: ports, active: true, now: 0, scopes: scopes(1, 0, 0) });
+  assert.deepEqual(plan.subscribe, []);
+  // t = 50: another client took it; a panel scope is refused (retry at 2050).
+  plan = levelPlan({ wanted: ports, active: true, now: 50, scopes: scopes(0, 50, 50) });
+  assert.equal(plan.retry, null);
+  // t = 300: another client frees a slot.
+  plan = levelPlan({ wanted: ports, active: true, now: 300, scopes: scopes(1, 0, 300) });
+  assert.deepEqual(plan.subscribe, [], 'no immediate claim');
+  assert.equal(300 + plan.retry, 2800, 'after the panel scope’s retry at 2050');
+  plan = levelPlan({ wanted: ports, active: true, now: 2050, scopes: scopes(1, 0, 300) });
+  assert.deepEqual(plan.subscribe, []);
+});
+
+test('after the schematic’s own release a newly visible port waits; a swap in one plan does not', () => {
+  // t = 0: /a.out left the screen and was let go; the host says free 1.
+  let plan = levelPlan({ wanted: wanted('/b.out'), active: true, now: 1000, scopes: scopes(1, 0, 0) });
+  assert.deepEqual(plan.subscribe, [], 'entered at t = 1000');
+  assert.equal(plan.retry, 1500);
+  plan = levelPlan({ wanted: wanted('/b.out'), active: true, now: 2500, scopes: scopes(1, 0, 0) });
+  assert.deepEqual(plan.subscribe, ['/b.out']);
+  // One port leaves and one enters in the same plan, no slot free: swapped at once.
+  plan = levelPlan({ wanted: wanted('/b.out'), granted: new Set(['/a.out']), active: true, now: 10, scopes: scopes(0, null, 0, 1) });
+  assert.deepEqual([plan.unsubscribe, plan.subscribe], [['/a.out'], ['/b.out']]);
+});
+
+// auditor-2-no-slot-refusal-cooldown: a lost race leaves free > 0 until the
+// next `scopes`, and the refused port is not asked again at once.
+test('a refused port is not asked again within RETRY_MS, whatever the free count says', () => {
+  for (const code of ['no-scope-slot', 'busy']) {
+    const ports = wanted('/p.out');
+    let plan = levelPlan({ wanted: ports, active: true, now: 0, scopes: scopes(1, 9000, 0) });
+    assert.deepEqual(plan.subscribe, ['/p.out'], code);
+    // Refused at t = 5 (`code`); no `scopes` since, so free still reads 1.
+    const refused = new Map([['/p.out', 5]]);
+    plan = levelPlan({ wanted: ports, refused, active: true, now: 10, scopes: scopes(1, 9000, 0) });
+    assert.deepEqual(plan.subscribe, [], code);
+    assert.equal(plan.retry, 1995, code);
+    plan = levelPlan({ wanted: ports, refused, active: true, now: 20, scopes: scopes(0, 9000, 20) });
+    assert.equal(plan.retry, null, `${code}: no free slot, no timer`);
+  }
 });
 
 test('a bar is the block’s peak on a −60…0 dBFS scale', () => {

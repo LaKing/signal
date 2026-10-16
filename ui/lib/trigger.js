@@ -1,6 +1,21 @@
-// Scope triggering and X–Y pairing for <signal-scope>. Points are the scope
-// stream's (docs/ui-protocol.md "Scope streams"): one every `decimation`
-// frames, at absolute frames that are multiples of it.
+// Scope triggering, X–Y pairing and slot retries for <signal-scope>. Points
+// are the scope stream's (docs/ui-protocol.md "Scope streams"): one every
+// `decimation` frames, at absolute frames that are multiples of it.
+
+/** A scope refused a slot asks again this often (ms), as the schematic's level bars do. */
+export const SLOT_RETRY_MS = 2000;
+
+/**
+ * What a scope does after its subscription was refused with `code`:
+ * `wait` SLOT_RETRY_MS and ask again (no free slot, or `busy`), `park`
+ * while the page is `hidden` or the app is switched off (`streaming`
+ * false; switching on sends it again, showing the page asks again), or
+ * `none` for a refusal that asking again cannot change.
+ */
+export function slotRetry(code, { hidden = false, streaming = true } = {}) {
+  if (code !== 'no-scope-slot' && code !== 'busy') return 'none';
+  return hidden || !streaming ? 'park' : 'wait';
+}
 
 /**
  * The index of the first point at or after `from` (and after the first

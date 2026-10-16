@@ -560,6 +560,107 @@ fn unknown_messages_are_answered_with_an_error(transport: Transport) {
     rig.finish();
 }
 
+/// M2.9-1b: `describe` gives the free scope slots, and `scopes` is pushed
+/// whenever their count changes, with the time since it last rose.
+fn the_free_scope_count_is_described_and_pushed(transport: Transport) {
+    let mut rig = rig(
+        "scopes-free",
+        Options {
+            transport,
+            ..Options::default()
+        },
+    );
+    let (mut ws, _) = rig.client();
+    let d = rig.request(&mut ws, 1, json!({"type": "describe"}), "describe");
+    assert_eq!(d["scopes"]["free"], 8);
+    assert_eq!(
+        d["scopes"]["sinceFreedMs"],
+        Value::Null,
+        "nothing freed yet"
+    );
+    let scope = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "subscribe", "stream": "scope", "port": "/a.out", "rate": 4800}),
+        "subscribed",
+    );
+    let taken = rig.wait(&mut ws, "scopes after a subscribe", |got| {
+        got.of("scopes").filter(|s| s["free"] == 7).cloned()
+    });
+    assert_eq!(taken["slots"], 8);
+    rig.request(
+        &mut ws,
+        3,
+        json!({"type": "unsubscribe", "sub": scope["sub"]}),
+        "unsubscribed",
+    );
+    let freed = rig.wait(&mut ws, "scopes after an unsubscribe", |got| {
+        got.of("scopes").filter(|s| s["free"] == 8).cloned()
+    });
+    assert!(freed["sinceFreedMs"].as_u64().unwrap() < 1000, "{freed}");
+    rig.finish();
+}
+
+/// M2.9-1b (auditor-1-net-free-count-priority): a slot taken, a scope
+/// refused and a slot released in one host step leave the free count as it
+/// was, and `scopes` is still pushed with the release's age, so a schematic
+/// waits CLAIM_MS from that release before taking it.
+fn a_release_masked_by_a_claim_still_restarts_the_release_age(transport: Transport) {
+    let mut rig = rig(
+        "scopes-masked",
+        Options {
+            transport,
+            ..Options::default()
+        },
+    );
+    let (mut ws, _) = rig.client();
+    let scope = json!({"type": "subscribe", "stream": "scope", "port": "/a.out", "rate": 4800});
+    let mut subs = Vec::new();
+    for id in 1..=7 {
+        let reply = rig.request(&mut ws, id, scope.clone(), "subscribed");
+        subs.push(reply["sub"].clone());
+    }
+    rig.wait(&mut ws, "scopes with one slot free", |got| {
+        got.of("scopes").filter(|s| s["free"] == 1).cloned()
+    });
+    // One batch: the last slot taken, a scope refused, a slot released.
+    send(&mut ws, with_id(&scope, 8));
+    send(&mut ws, with_id(&scope, 9));
+    send(
+        &mut ws,
+        json!({"type": "unsubscribe", "id": 10, "sub": subs[0]}),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let mut refused = false;
+    let pushed = rig.wait(&mut ws, "scopes after the batch", |got| {
+        if got
+            .of("error")
+            .is_some_and(|e| e["code"] == "no-scope-slot")
+        {
+            refused = true;
+        }
+        got.of("scopes").filter(|s| s.get("id").is_none()).cloned()
+    });
+    assert!(refused, "the second subscribe was refused");
+    assert_eq!(pushed["free"], 1, "as it was before the batch");
+    assert!(
+        pushed["sinceFreedMs"].as_u64().is_some_and(|ms| ms < 1000),
+        "the release's age, not an older one: {pushed}"
+    );
+    rig.finish();
+}
+
+fn with_id(message: &Value, id: u64) -> Value {
+    let mut message = message.clone();
+    message["id"] = json!(id);
+    message
+}
+
+both!(
+    the_free_scope_count_is_described_and_pushed,
+    a_release_masked_by_a_claim_still_restarts_the_release_age,
+);
+
 both!(
     describe_gives_the_plan_its_controls_sinks_and_meters,
     meters_and_a_scope_stream_arrive,

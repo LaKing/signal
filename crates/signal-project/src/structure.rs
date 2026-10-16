@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
 use signal_core::{Direction, ParameterDescriptor, PortDescriptor, Registry};
-use signal_graph::{CompositeDef, ExecutionPlan, GraphWarning};
+use signal_graph::{CompositeDef, ExecutionPlan, GraphWarning, InstanceDef};
 
 use crate::Project;
 
@@ -19,10 +19,19 @@ enum Endpoint {
     Parameter(&'static ParameterDescriptor),
 }
 
+/// A composite's exports of one name, by (composite, export name): an
+/// output's source, or the targets of an input or a parameter, in source order.
+type ByExport<'a, T> = BTreeMap<(&'a str, &'a str), Vec<T>>;
+
 struct Walk<'a> {
     project: &'a Project,
     registry: &'a Registry,
     by_name: BTreeMap<&'a str, &'a CompositeDef>,
+    /// Each definition's instances by name (the top level's under its own name).
+    instances: BTreeMap<&'a str, BTreeMap<&'a str, &'a InstanceDef>>,
+    outputs: ByExport<'a, &'a str>,
+    inputs: ByExport<'a, &'a [String]>,
+    parameters: ByExport<'a, &'a [String]>,
     /// (flattened source port, flattened target) → the converter between.
     converters: BTreeMap<(String, String), Value>,
 }
@@ -66,6 +75,26 @@ impl Project {
                 );
             }
         }
+        let mut instances = BTreeMap::new();
+        let (mut outputs, mut inputs, mut parameters) =
+            (ByExport::new(), ByExport::new(), ByExport::new());
+        for def in std::iter::once(&self.root).chain(&self.composites) {
+            let name = def.name.as_str();
+            let by_name = def.instances.iter().map(|i| (i.name.as_str(), i));
+            instances.insert(name, by_name.collect());
+            for e in &def.exports.outputs {
+                let all: &mut Vec<_> = outputs.entry((name, e.name.as_str())).or_default();
+                all.push(e.from.as_str());
+            }
+            for e in &def.exports.inputs {
+                let all: &mut Vec<_> = inputs.entry((name, e.name.as_str())).or_default();
+                all.push(e.to.as_slice());
+            }
+            for e in &def.exports.parameters {
+                let all: &mut Vec<_> = parameters.entry((name, e.name.as_str())).or_default();
+                all.push(e.to.as_slice());
+            }
+        }
         let walk = Walk {
             project: self,
             registry,
@@ -74,6 +103,10 @@ impl Project {
                 .iter()
                 .map(|c| (c.name.as_str(), c))
                 .collect(),
+            instances,
+            outputs,
+            inputs,
+            parameters,
             converters,
         };
         // The first instance (in source order) of every composite reached.
@@ -285,28 +318,15 @@ impl Walk<'_> {
     /// (an export's first target, recursively).
     fn endpoint(&self, def: &CompositeDef, text: &str) -> Option<Endpoint> {
         let (instance, port) = text.split_once('.')?;
-        let instance = def.instances.iter().find(|i| i.name == instance)?;
+        let instance = self.instance(def, instance)?;
         if let Some(inner) = self.by_name.get(instance.module.as_str()) {
-            let exports = &inner.exports;
-            let target = exports
+            let key = (inner.name.as_str(), port);
+            let target = self
                 .outputs
-                .iter()
-                .find(|e| e.name == port)
-                .map(|e| e.from.as_str())
-                .or_else(|| {
-                    exports
-                        .inputs
-                        .iter()
-                        .find(|e| e.name == port)
-                        .and_then(|e| e.to.first().map(String::as_str))
-                })
-                .or_else(|| {
-                    exports
-                        .parameters
-                        .iter()
-                        .find(|e| e.name == port)
-                        .and_then(|e| e.to.first().map(String::as_str))
-                })?;
+                .get(&key)
+                .and_then(|all| all.first().copied())
+                .or_else(|| first_target(&self.inputs, key))
+                .or_else(|| first_target(&self.parameters, key))?;
             return self.endpoint(inner, target);
         }
         let descriptor = &self.registry.get(&instance.module)?.descriptor;
@@ -331,39 +351,42 @@ impl Walk<'_> {
         let Some((name, port)) = text.split_once('.') else {
             return Vec::new();
         };
-        let Some(instance) = def.instances.iter().find(|i| i.name == name) else {
+        let Some(instance) = self.instance(def, name) else {
             return Vec::new();
         };
         let address = format!("{prefix}/{name}");
         let Some(inner) = self.by_name.get(instance.module.as_str()) else {
             return vec![format!("{address}.{port}")];
         };
-        let exports = &inner.exports;
+        let key = (inner.name.as_str(), port);
         if out {
-            exports
-                .outputs
-                .iter()
-                .filter(|e| e.name == port)
-                .flat_map(|e| self.primitives(inner, &address, &e.from, true))
+            self.outputs
+                .get(&key)
+                .into_iter()
+                .flatten()
+                .flat_map(|from| self.primitives(inner, &address, from, true))
                 .collect()
         } else {
-            let inputs = exports
-                .inputs
-                .iter()
-                .filter(|e| e.name == port)
-                .map(|e| &e.to);
-            let parameters = exports
-                .parameters
-                .iter()
-                .filter(|e| e.name == port)
-                .map(|e| &e.to);
-            inputs
-                .chain(parameters)
+            self.inputs
+                .get(&key)
+                .into_iter()
+                .chain(self.parameters.get(&key))
                 .flatten()
+                .flat_map(|targets| targets.iter())
                 .flat_map(|t| self.primitives(inner, &address, t, false))
                 .collect()
         }
     }
+
+    /// Instance `name` of `def`.
+    fn instance(&self, def: &CompositeDef, name: &str) -> Option<&'_ InstanceDef> {
+        self.instances.get(def.name.as_str())?.get(name).copied()
+    }
+}
+
+/// The first target of the first export `key` in `all`.
+fn first_target<'a>(all: &ByExport<'a, &'a [String]>, key: (&str, &str)) -> Option<&'a str> {
+    all.get(&key)?.first()?.first().map(String::as_str)
 }
 
 /// A port as `describe` gives it (`name`, `direction`, `shape`, `rate`,

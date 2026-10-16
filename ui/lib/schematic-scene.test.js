@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { layout } from './schematic-layout.js';
-import { CLOSE_PX, OPEN_PX, breadcrumbs, levelRect, nodeRect, planPort, scene } from './schematic-scene.js';
+import { CLOSE_PX, MIN_PX, OPEN_PX, breadcrumbs, inside, levelRect, nodeRect, planPort, rebase, scene } from './schematic-scene.js';
+import { bake, bakeHolds, bakedMatrix, bakedRect, SVG_MAX_SCALE, SVG_MAX_TRANSLATE, SVG_MIN_SCALE } from './schematic-draw.js';
 import { hitTest, reselect } from './schematic-hit.js';
-import { fit, focus, screenRect, toScreen } from './schematic-view.js';
+import { fit, focus, pan, screenRect, toScreen, zoomAt } from './schematic-view.js';
 
 const p = (name, direction, shape = 'signal') => ({ name, direction, shape, kind: 'audio', rate: 1 });
 const primitive = (name, module, ins, outs, parameters = []) => ({
@@ -209,4 +210,146 @@ test('a selection under a removed or retyped ancestor is cleared', () => {
   // A port under the removed instance goes too.
   const port = { kind: 'port', path: '/first', level: 'voice', node: osc, port: osc.outs[0], address: '/first/osc.out' };
   assert.equal(reselect(port, graphOf([box('second', 'voice')], { voice: shared })), null);
+});
+
+// M2.9-1b: re-rooting, deep zoom, culling.
+
+/** A stub node and a stub layout (bounds around its nodes). */
+const stubNode = (name, x, y, w, h, module = null) => ({ id: name, name, kind: 'instance', composite: Boolean(module), module: module ?? 'std.x', x, y, w, h, ins: [], outs: [] });
+function stub(nodes, wires = []) {
+  const xs = nodes.flatMap((n) => [n.x, n.x + n.w]);
+  const ys = nodes.flatMap((n) => [n.y, n.y + n.h]);
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  return { nodes, wires, bounds: { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y } };
+}
+
+/** Every drawn level as the schematic hands it to SVG, baked again only as it would be: within the bounds (AC16). */
+function bakedInBounds(drawn, bakes, viewport) {
+  for (const level of drawn.levels) {
+    if ((!level.nodes.length && !level.wires.length) || level.behind) continue;
+    let baked = bakes.get(level.path);
+    if (!baked || !bakeHolds(baked, level.transform, viewport)) {
+      baked = bake(level.transform, viewport);
+      for (const node of level.nodes) bakedRect(baked, node);
+      bakes.set(level.path, baked);
+    }
+    const m = bakedMatrix(baked, level.transform);
+    assert.ok(m.k >= SVG_MIN_SCALE && m.k <= SVG_MAX_SCALE, `${level.path}: scale ${m.k}`);
+    assert.ok(Math.abs(m.x) <= SVG_MAX_TRANSLATE && Math.abs(m.y) <= SVG_MAX_TRANSLATE, `${level.path}: translation ${m.x}, ${m.y}`);
+  }
+}
+
+// AC16–AC19: ten nested composites, each drawn at about 6e-5 of its box;
+// zooming in about the innermost one reaches a total scale past 1e40, the
+// view re-rooted at the deepest level, every matrix within the bounds.
+test('zooming through ten levels to a total scale of 1e40 keeps every matrix small', () => {
+  const W = 1.84e6;
+  const H = 0.92e6;
+  const level = (i) => {
+    const corners = [stubNode('a', 0, 0, 200, 100), stubNode('b', W - 200, H - 100, 200, 100)];
+    const centre = i < 10 ? stubNode('c', W / 2 - 100, H / 2 - 50, 200, 100, `L${i + 1}`) : stubNode('p', W / 2 - 100, H / 2 - 50, 200, 100);
+    return stub([...corners, centre]);
+  };
+  const layouts = new Map(Array.from({ length: 11 }, (_, i) => [i === 0 ? '' : `L${i}`, level(i)]));
+  const layoutOf = (name) => layouts.get(name) ?? null;
+  const viewport = { w: 1000, h: 600 };
+  const centreOf = (n) => ({ x: n.x + n.w / 2, y: n.y + n.h / 2 });
+  let view = fit(layoutOf('').bounds, viewport);
+  let open = new Set();
+  let drawn = null;
+  const bakes = new Map();
+  for (let step = 0; step < 3000; step++) {
+    drawn = scene({ layoutOf, view, viewport, open });
+    open = drawn.open;
+    view = drawn.view;
+    bakedInBounds(drawn, bakes, viewport);
+    if (drawn.levels.length === 11 && drawn.levels[0].transform.k >= 1e40) break;
+    // Zoom in about the innermost composite (or the leaf's node).
+    const deepest = drawn.levels.at(-1);
+    const target = deepest.layout.nodes.find((n) => n.name === 'c' || n.name === 'p');
+    view = zoomAt(view, 1.25, toScreen(deepest.transform, centreOf(target)));
+  }
+  assert.equal(drawn.levels.length, 11, 'ten levels open');
+  assert.ok(drawn.levels[0].transform.k >= 1e40, `total scale ${drawn.levels[0].transform.k}`);
+  assert.equal(view.path, '/c/c/c/c/c/c/c/c/c/c', 'the view is in the deepest level’s coordinates');
+  assert.ok(view.k < 1e6, `and its numbers are small: ${view.k}`);
+  // AC17: the parents' other boxes, far off screen, are culled; and a
+  // parent that shows only the inside of its open box is not drawn at all.
+  for (const parent of drawn.levels.slice(0, 10)) assert.deepEqual(parent.nodes.map((n) => n.name), ['c']);
+  assert.ok(drawn.levels.slice(0, 9).every((l) => l.behind), 'the far parents are culled');
+  assert.ok(!drawn.levels[10].behind, 'the leaf is drawn');
+  // The leaf's node is on screen where hit testing finds it.
+  const leaf = drawn.levels[10];
+  const p = leaf.layout.nodes.find((n) => n.name === 'p');
+  const at = toScreen(leaf.transform, centreOf(p));
+  assert.ok(at.x > 0 && at.x < viewport.w && at.y > 0 && at.y < viewport.h);
+  assert.equal(hitTest(drawn, at).address, '/c/c/c/c/c/c/c/c/c/c/p');
+});
+
+// auditor-2-far-parent-cull-and-translation-clamp: a voice at the bottom of
+// the 4096-voice top level (y ≈ 4.7e5) stays drawn with its parent, at any
+// scale, and panning out of it re-roots the view without moving anything.
+test('a parent far from its origin stays drawn, and re-rooting moves nothing', () => {
+  const voice = stubNode('voice_4095', 1000, 466830, 117, 90, 'voice');
+  const above = stubNode('voice_4094', 1000, 466830 - 114, 117, 90, 'voice');
+  const below = stubNode('mix', 1000, 466830 + 114, 117, 90);
+  const top = stub([stubNode('transport', 0, 0, 117, 90), above, voice, below]);
+  const inner = stub([stubNode('osc', 0, 0, 100, 60), stubNode('env', 200, 0, 100, 60)]);
+  const layoutOf = (name) => (name === '' ? top : name === 'voice' ? inner : null);
+  const viewport = { w: 1000, h: 600 };
+  const edge = { x: voice.x, y: voice.y + voice.h / 2 };
+  for (const k of [4, 21, 1e3, 1e6, 1e9]) {
+    const view = { k, ox: edge.x, oy: edge.y, x: 500, y: 300 };
+    const drawn = scene({ layoutOf, view, viewport });
+    const parent = drawn.levels[0];
+    const names = parent.nodes.map((n) => n.name);
+    assert.ok(names.includes('voice_4095'), `k ${k}: the voice's box is drawn`);
+    if (k === 4) assert.ok(names.includes('voice_4094') && names.includes('mix'), 'and its neighbours');
+    bakedInBounds(drawn, new Map(), viewport);
+    // Its left edge, as baked and drawn, is where the view puts it.
+    const baked = bake(parent.transform, viewport);
+    const box = bakedRect(baked, voice);
+    const matrix = bakedMatrix(baked, parent.transform);
+    assert.ok(Math.abs(box.x * matrix.k + matrix.x - 500) < 0.01, `k ${k}: edge at ${box.x * matrix.k + matrix.x}`);
+    if (voice.w * k >= OPEN_PX) assert.equal(drawn.view.path, '/voice_4095', `k ${k}: re-rooted in the voice`);
+    // Panned 100 px right, the centre leaves the voice: re-rooted at the top.
+    const out = scene({ layoutOf, view: pan(drawn.view, 100, 0), viewport, open: drawn.open });
+    assert.equal(out.view.path, '', `k ${k}`);
+    const now = toScreen(out.levels[0].transform, edge);
+    assert.ok(Math.abs(now.x - 600) < 0.01 && Math.abs(now.y - 300) < 0.01, `k ${k}: the edge moved with the pan only (${now.x})`);
+  }
+});
+
+// AC3: a wire shorter than MIN_PX on screen is culled, as a node is.
+test('wires shorter than MIN_PX on screen are culled', () => {
+  const wire = { id: 0, shape: 'signal', points: [{ x: 0, y: 0 }, { x: 10, y: 0 }] };
+  const flat = { nodes: [], wires: [wire], bounds: { x: 0, y: 0, w: 10, h: 1 } };
+  const viewport = { w: 100, h: 100 };
+  const shown = (k) => scene({ layoutOf: () => flat, view: { k, ox: 5, oy: 0, x: 50, y: 50 }, viewport }).levels[0].wires.length;
+  assert.equal(10 * 0.1 < MIN_PX, true);
+  assert.equal(shown(0.1), 0, '1 px: culled');
+  assert.equal(shown(0.3), 1, '3 px: drawn');
+});
+
+// A new layout keeps the view in the deepest level whose chain did not change.
+test('a new layout rebases the view on what did not move', () => {
+  const view = scene({ layoutOf, view: kickFocused(), viewport, open: new Set(['/drums']) }).view;
+  assert.equal(view.path, '/drums/kick');
+  const top = layoutOf('');
+  const moved = (name, dx) => ({ ...top, nodes: top.nodes.map((n) => (n.name === name ? { ...n, x: n.x + dx } : n)) });
+  // lfo moved: drums' box is where it was, so the view stays in kick.
+  const lfoMoved = moved('lfo', 40);
+  assert.deepEqual(rebase(view, layoutOf, (l) => (l === '' ? lfoMoved : layoutOf(l))), view);
+  // drums moved: the view goes to the top level, which did not move.
+  const drumsMoved = moved('drums', 40);
+  const rebased = rebase(view, layoutOf, (l) => (l === '' ? drumsMoved : layoutOf(l)));
+  assert.equal(rebased.path, '');
+  const before = scene({ layoutOf, view, viewport, open: new Set(['/drums', '/drums/kick']) }).levels[0].transform;
+  const lfo = top.nodes.find((n) => n.name === 'lfo');
+  const a = toScreen(before, lfo);
+  const b = toScreen(rebased, lfo);
+  assert.ok(Math.abs(a.x - b.x) < 1e-6 && Math.abs(a.y - b.y) < 1e-6, 'lfo stays where it was');
+  // The kick inside moved with drums' box.
+  assert.ok(inside(drumsMoved.nodes.find((n) => n.name === 'drums'), layoutOf('drums').bounds).x !== inside(drums(), layoutOf('drums').bounds).x);
 });

@@ -1104,6 +1104,212 @@ fn graph_is_pushed_when_switched_on_again(transport: Transport) {
     rig.finish();
 }
 
+/// The kick with its `drums` composite duplicated `voices` times and the
+/// copies summed by a tree of 4-input `std.mix`, as `signal bench
+/// --write-voices` writes it, in a new folder (a copy of `projects/kick`).
+fn voices_project(name: &str, voices: usize) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("signal-ui-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    copy_dir(&root().join("projects/kick"), &dir);
+    let mut instances = String::from(
+        "transport = { module = \"std.transport\", bpm = 132, ghost_probability = 0.15, ghost_offset_ms = 6, accent_every = 3 }\n\
+         lfo = { module = \"std.lfo\", freq_hz = 0.034 }\n\
+         accent = { module = \"std.exp_env\", decay_ms = 200 }\n",
+    );
+    let mut connections =
+        String::from("  { from = \"transport.accent\", to = \"accent.trigger\" },\n");
+    let mut outputs = Vec::new();
+    for i in 0..voices {
+        instances.push_str(&format!("drums_{i} = {{ module = \"drums\" }}\n"));
+        connections.push_str(&format!(
+            "  {{ from = \"transport.beat\", to = \"drums_{i}.trigger\" }},\n\
+             \x20 {{ from = \"transport.ghost\", to = \"drums_{i}.trigger\" }},\n\
+             \x20 {{ from = \"lfo.out\", to = \"drums_{i}.kick_decay\", scale = 120 }},\n\
+             \x20 {{ from = \"accent.out\", to = \"drums_{i}.kick_drive\", scale = 1.5 }},\n"
+        ));
+        outputs.push(format!("drums_{i}.out"));
+    }
+    let mut level = 0;
+    while outputs.len() > 1 || level == 0 {
+        let mut next = Vec::new();
+        for (j, group) in outputs.chunks(4).enumerate() {
+            let mix = format!("mix_{level}_{j}");
+            instances.push_str(&format!("{mix} = {{ module = \"std.mix\" }}\n"));
+            for (input, from) in ["a", "b", "c", "d"].iter().zip(group) {
+                connections.push_str(&format!(
+                    "  {{ from = \"{from}\", to = \"{mix}.{input}\" }},\n"
+                ));
+            }
+            next.push(format!("{mix}.out"));
+        }
+        outputs = next;
+        level += 1;
+    }
+    instances.push_str(&format!(
+        "out = {{ module = \"std.audio_out\", gain = {} }}\n",
+        0.75 / voices as f64
+    ));
+    for side in ["l", "r"] {
+        connections.push_str(&format!(
+            "  {{ from = \"{}\", to = \"out.{side}\" }},\n",
+            outputs[0]
+        ));
+    }
+    let text = format!(
+        "schema_version = 1\n\n[project]\nname = \"kick-voices-{voices}\"\nsample_rate = 96000\nseed = 42\n\n\
+         [instances]\n{instances}\n[wiring]\nconnections = [\n{connections}]\n"
+    );
+    fs::write(dir.join("project.toml"), text).unwrap();
+    dir
+}
+
+/// M2.9-1b: stopped, `graph` is cached per folder state; on the
+/// 4096-voice project a `schematic.move` writes once and loads nothing
+/// (the `schematic.moved` reply and the host's counts; the `graph` itself:
+/// `the_4096_voice_graph_reaches_the_client_and_it_stays_open`).
+fn a_stopped_move_on_4096_voices_writes_once_and_loads_nothing(transport: Transport) {
+    let source = voices_project(&format!("voices-{transport:?}"), 4096);
+    let started = std::time::Instant::now();
+    let mut rig = app_rig("move-4096", transport, Some(&source));
+    let (mut ws, _) = rig.client();
+    eprintln!("4096 voices: opened in {:?}", started.elapsed());
+    let before = rig.host().graph_counts();
+    assert_eq!(before.0, 1, "opening loaded the project once");
+    assert_eq!(before.1, 1, "and kept its structure");
+    let started = std::time::Instant::now();
+    rig.request(
+        &mut ws,
+        2,
+        json!({"type": "schematic.move", "level": "", "instance": "drums_7", "x": 10, "y": 20}),
+        "schematic.moved",
+    );
+    eprintln!("4096 voices: moved in {:?}", started.elapsed());
+    let after = rig.host().graph_counts();
+    assert_eq!(after.0, before.0, "no load, no recompile");
+    assert_eq!(after.1, before.1, "the structure was not built again");
+    assert_eq!(after.2, before.2 + 1, "one write");
+    let positions = fs::read_to_string(rig.dir.join("ui/schematic.toml")).unwrap();
+    assert!(
+        positions.contains("drums_7 = { x = 10, y = 20 }"),
+        "{positions}"
+    );
+    rig.finish();
+    let _ = fs::remove_dir_all(source);
+}
+
+/// M2.9-1b: stopped, `graph` loads the folder again only after it changed,
+/// whatever asks: a request, `app.power`, `project.open`, `transport.*`.
+fn the_stopped_graph_is_cached_until_the_folder_changes(transport: Transport) {
+    let mut rig = app_rig(
+        "graph-cache",
+        transport,
+        Some(&root().join("projects/kick")),
+    );
+    let (mut ws, _) = rig.client();
+    rig.request(&mut ws, 1, json!({"type": "graph"}), "graph");
+    rig.request(&mut ws, 2, json!({"type": "graph"}), "graph");
+    let loads = |rig: &mut Rig| rig.host().graph_counts().0;
+    assert_eq!(loads(&mut rig), 1, "opened once, then cached");
+    rig.request(
+        &mut ws,
+        3,
+        json!({"type": "app.power", "on": false}),
+        "power",
+    );
+    rig.request(
+        &mut ws,
+        4,
+        json!({"type": "app.power", "on": true}),
+        "power",
+    );
+    rig.request(&mut ws, 5, json!({"type": "graph"}), "graph");
+    assert_eq!(loads(&mut rig), 1, "switching off and on loads nothing");
+    let dir = rig.dir.display().to_string();
+    rig.request(
+        &mut ws,
+        6,
+        json!({"type": "project.open", "path": dir}),
+        "project",
+    );
+    rig.request(&mut ws, 7, json!({"type": "graph"}), "graph");
+    assert_eq!(loads(&mut rig), 2, "opening loads once, and graph uses it");
+    rig.request(&mut ws, 8, json!({"type": "transport.play"}), "transport");
+    rig.request(&mut ws, 9, json!({"type": "transport.stop"}), "transport");
+    rig.request(&mut ws, 10, json!({"type": "graph"}), "graph");
+    assert_eq!(loads(&mut rig), 3, "only play's own load");
+    let path = rig.dir.join("project.toml");
+    let text = fs::read_to_string(&path).unwrap().replace(
+        "out = { module",
+        "extra = { module = \"std.sine_osc\" }\nout = { module",
+    );
+    fs::write(&path, &text).unwrap();
+    rig.wait(&mut ws, "graph after a stopped edit", |got| {
+        got.of("graph")
+            .filter(|g| g.get("id").is_none() && graph_names(g).contains(&"extra"))
+            .cloned()
+    });
+    rig.request(&mut ws, 11, json!({"type": "graph"}), "graph");
+    assert_eq!(loads(&mut rig), 4, "the edit loads once");
+    rig.finish();
+}
+
+/// M2.9-1b: a folder that stops loading pushes `graph.error` with its
+/// diagnostics; loading again pushes `graph`.
+fn a_project_that_stops_loading_pushes_graph_error(transport: Transport) {
+    let mut rig = app_rig(
+        "graph-error",
+        transport,
+        Some(&root().join("projects/kick")),
+    );
+    let (mut ws, _) = rig.client();
+    rig.request(&mut ws, 1, json!({"type": "graph"}), "graph");
+    let path = rig.dir.join("project.toml");
+    let good = fs::read_to_string(&path).unwrap();
+    fs::write(&path, "schema_version = 1\n[instances\n").unwrap();
+    let error = rig.wait(&mut ws, "graph.error", |got| got.of("graph.error").cloned());
+    assert_eq!(error["code"], "does-not-load");
+    assert!(
+        error["message"].as_str().unwrap().contains("project.toml"),
+        "{error}"
+    );
+    fs::write(&path, good).unwrap();
+    rig.wait(&mut ws, "graph once it loads again", |got| {
+        got.of("graph").filter(|g| g.get("id").is_none()).cloned()
+    });
+    rig.finish();
+}
+
+/// M2.9-1b (auditor-1-benchmark-graph-disconnect): the 4096-voice `graph`,
+/// about 6 MB, more than a client's 4 MiB write buffer, reaches the client
+/// as one message, and the connection stays open after it.
+fn the_4096_voice_graph_reaches_the_client_and_it_stays_open(transport: Transport) {
+    let source = voices_project(&format!("voices-graph-{transport:?}"), 4096);
+    let mut rig = app_rig("graph-4096", transport, Some(&source));
+    let (mut ws, _) = rig.client();
+    let graph = rig.request(&mut ws, 1, json!({"type": "graph"}), "graph");
+    // transport, lfo, accent, 4096 voices, 1365 mixers, out.
+    assert_eq!(graph["top"]["instances"].as_array().unwrap().len(), 5465);
+    assert!(
+        graph.to_string().len() > 4 << 20,
+        "larger than the write buffer"
+    );
+    // Still connected: asked again, it answers, and the next message too.
+    let again = rig.request(&mut ws, 2, json!({"type": "graph"}), "graph");
+    assert_eq!(again["project"], graph["project"]);
+    // (Not `describe`: this project's is about 22 MB, past the test client's
+    // own 16 MiB frame limit; a browser has none.)
+    rig.request(&mut ws, 3, json!({"type": "ping"}), "pong");
+    rig.finish();
+    let _ = fs::remove_dir_all(source);
+}
+
+both!(
+    the_4096_voice_graph_reaches_the_client_and_it_stays_open,
+    a_stopped_move_on_4096_voices_writes_once_and_loads_nothing,
+    the_stopped_graph_is_cached_until_the_folder_changes,
+    a_project_that_stops_loading_pushes_graph_error,
+);
+
 both!(
     power_off_stops_and_on_restores,
     a_client_connecting_while_off_is_told_and_gets_no_frames,

@@ -73,6 +73,21 @@ impl ProjectWatcher {
     }
 }
 
+/// A project folder's files as [`ProjectWatcher`] sees them (each one's
+/// modification time and length), less one ignored file: equal states mean
+/// nothing a load reads changed in between. For caching what a load gives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderState(Snapshot);
+
+impl FolderState {
+    /// `dir` as it is now, without `ignore` (relative to the folder).
+    pub fn read(dir: &Path, ignore: &Path) -> io::Result<FolderState> {
+        let mut files = snapshot(dir)?;
+        files.remove(ignore);
+        Ok(FolderState(files))
+    }
+}
+
 /// A file's modification time and length as [`ProjectWatcher::stamp`] read them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileStamp(Option<(Option<SystemTime>, u64)>);

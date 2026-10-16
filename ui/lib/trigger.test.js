@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { alignXY, findTrigger, triggerStart } from './trigger.js';
+import { SLOT_RETRY_MS, alignXY, findTrigger, slotRetry, triggerStart } from './trigger.js';
 
 // A sine of period 64 points, half a point late so no point sits on a
 // crossing: sin(2π (i + ½) / 64). It crosses 0 rising between points 63 and
@@ -37,4 +37,13 @@ test('X–Y pairs the points two blocks share', () => {
   assert.equal(alignXY(x, { ...y, decimation: 5 }), null, 'different decimations');
   assert.equal(alignXY(x, { ...y, firstFrame: 1005 }), null, 'points on other frames');
   assert.equal(alignXY(x, { ...y, firstFrame: 2000 }), null, 'no overlap');
+});
+
+test('a refused slot is asked again every 2 s while shown and on, parked otherwise', () => {
+  assert.equal(SLOT_RETRY_MS, 2000);
+  assert.equal(slotRetry('no-scope-slot'), 'wait');
+  assert.equal(slotRetry('busy'), 'wait');
+  assert.equal(slotRetry('no-scope-slot', { hidden: true }), 'park', 'hidden: no timer');
+  assert.equal(slotRetry('no-scope-slot', { streaming: false }), 'park', 'switched off: no timer');
+  assert.equal(slotRetry('not-a-signal-output'), 'none', 'asking again changes nothing');
 });

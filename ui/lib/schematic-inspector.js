@@ -18,6 +18,17 @@ export { dragMessage, releaseMessage, resetMessage } from '../app/lib/parameters
 /** The effective-value stream's rate (frames per second), as the Parameters tab's. */
 export const PARAMETER_RATE = 15;
 
+/**
+ * What the schematic says when the project stops loading (`graph.error`,
+ * or a refused `graph`: `{code, message}`), over its last drawing if it
+ * has one (`hasDrawing`), which it marks stale: `{title, text}`, the text
+ * the diagnostics as given, one per line.
+ */
+export function staleNotice(error, hasDrawing) {
+  const what = error?.code === 'no-project' ? 'No project is open' : 'The project does not load';
+  return { title: hasDrawing ? `${what}; the drawing is stale` : what, text: String(error?.message ?? '') };
+}
+
 function shapeText(shape) {
   if (shape && typeof shape === 'object' && 'vector' in shape) return `vector of ${shape.vector}`;
   return shape ?? '—';

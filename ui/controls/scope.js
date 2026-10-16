@@ -1,9 +1,12 @@
 // <signal-scope>: a subscribed signal output on a canvas, in time with a
 // trigger level and edge, or X–Y from two outputs (docs/ui-controls.md).
+// Refused a slot (`no-scope-slot`, `busy`), it asks again every 2 s while
+// shown (the page and the scope itself, its tab included) and switched on
+// (M2.9-1b).
 
 import { formatValue } from '../lib/format.js';
 import { clamp } from '../lib/taper.js';
-import { alignXY, triggerStart } from '../lib/trigger.js';
+import { SLOT_RETRY_MS, alignXY, slotRetry, triggerStart } from '../lib/trigger.js';
 import { SignalElement, bindAddresses, numberAttribute } from './base.js';
 
 /** Points shown in time mode, at most: half of what arrived, so a trigger has room. */
@@ -54,7 +57,38 @@ canvas { width: var(--signal-scope-width, 100%); height: var(--signal-scope-heig
     this.latest = {};
     const rate = numberAttribute(this, 'rate') ?? 12000;
     const ports = this.xy ? this.ports.slice(0, 2) : this.ports.slice(0, 1);
-    return ports.map((port) =>
+    let timer = null;
+    let parked = false;
+    // Hidden: the page, or the scope itself (a tab not shown, display: none: 0×0).
+    const hidden = () => {
+      if (document.visibilityState === 'hidden') return true;
+      const box = this.getBoundingClientRect();
+      return !(box.width > 0 || box.height > 0);
+    };
+    const state = () => ({ hidden: hidden(), streaming: connection.streaming !== false });
+    // Asked again by subscribing anew (attach), unless hidden or off by then.
+    const again = () => {
+      timer = null;
+      parked = false;
+      if (slotRetry('no-scope-slot', state()) === 'wait') this.attach(connection);
+      else parked = true;
+    };
+    const refused = (code) => {
+      clearTimeout(timer);
+      timer = null;
+      const action = slotRetry(code, state());
+      parked = action === 'park';
+      if (action === 'wait') timer = setTimeout(again, SLOT_RETRY_MS);
+    };
+    // Shown again (the page, or the scope's tab): a parked refusal asks at
+    // once (switching on re-sends it).
+    const shown = () => {
+      if (parked && !hidden() && connection.streaming !== false) again();
+    };
+    document.addEventListener('visibilitychange', shown);
+    const resize = new ResizeObserver(shown);
+    resize.observe(this);
+    const stops = ports.map((port) =>
       connection.subscribe(
         { stream: 'scope', port, rate },
         (frame) => {
@@ -71,10 +105,21 @@ canvas { width: var(--signal-scope-width, 100%); height: var(--signal-scope-heig
         },
         {
           onSubscribed: () => this.problem(null),
-          onError: (error) => this.problem(`${port}: ${error.code ?? error.message}`),
+          onError: (error) => {
+            this.problem(`${port}: ${error.code ?? error.message}`);
+            refused(error.code);
+          },
         },
       ),
     );
+    return [
+      ...stops,
+      () => {
+        clearTimeout(timer);
+        document.removeEventListener('visibilitychange', shown);
+        resize.disconnect();
+      },
+    ];
   }
 
   problem(text) {

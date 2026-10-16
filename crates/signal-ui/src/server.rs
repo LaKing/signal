@@ -765,7 +765,10 @@ fn config() -> WebSocketConfig {
 /// stays in the bounded queue, where the control thread drops data frames
 /// and evicts for a reply. Whether to keep the client: not once its socket
 /// has taken nothing for [`WRITE_STALL`] (as of `now`), nor after an error
-/// or once its queue is dropped (an eviction).
+/// or once its queue is dropped (an eviction). A single message larger than
+/// [`MAX_WRITE_BUFFER`] (a large project's `graph`) is taken when nothing is
+/// unwritten, which the flush before it guarantees; the limit is restored
+/// once the socket took it, so a backlog stays bounded.
 fn drain<S: Read + Write>(
     ws: &mut WebSocket<S>,
     outgoing: &Receiver<Outbound>,
@@ -774,7 +777,12 @@ fn drain<S: Read + Write>(
 ) -> bool {
     loop {
         match ws.flush() {
-            Ok(()) => *stalled = None,
+            Ok(()) => {
+                *stalled = None;
+                if ws.get_config().max_write_buffer_size != MAX_WRITE_BUFFER {
+                    ws.set_config(|c| c.max_write_buffer_size = MAX_WRITE_BUFFER);
+                }
+            }
             Err(WsError::Io(e)) if would_block(&e) => {
                 let since = *stalled.get_or_insert(now);
                 return now.duration_since(since) <= WRITE_STALL;
@@ -787,6 +795,10 @@ fn drain<S: Read + Write>(
             Err(TryRecvError::Empty) => return true,
             Err(TryRecvError::Disconnected) => return false,
         };
+        if message.len() >= MAX_WRITE_BUFFER {
+            let size = message.len() + MAX_WRITE_BUFFER;
+            ws.set_config(|c| c.max_write_buffer_size = size);
+        }
         match ws.write(message) {
             // Buffered; the next flush says whether the socket took it.
             Ok(()) => {}
