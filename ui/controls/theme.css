@@ -58,3 +58,6 @@
 .signal-card > h1, .signal-card > h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--signal-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .signal-card > p { margin: 0; color: var(--signal-muted); }
 .signal-card .row { display: flex; flex-wrap: wrap; gap: 0.75rem 1rem; align-items: flex-end; }
+/* Controls that belong together (a stereo meter pair): never broken across
+   lines; the group wraps as a whole. */
+.signal-group { display: flex; flex: none; flex-wrap: nowrap; gap: 0.5rem; align-items: flex-end; }

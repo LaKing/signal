@@ -161,7 +161,7 @@ What `node --test` cannot see, checked by a person (the M2.8-2 checkpoint):
 
 ## Panels
 
-A project carries its panels as text (ADR 0023 §4): HTML files in its `ui/` folder, `ui/main.html` the main one, with their SVG and PNG files in `ui/assets/`. `signal ui` serves them under `/project/` and prints the main panel's URL (`docs/ui-protocol.md`). A panel is a page with the controls inside a `<signal-panel>`, laid out as a grid of cards (M2.8-11): `.signal-cards` (as many columns of at least `--signal-card-min` as fit the width) holding `.signal-card`s (a `wide` one spans the grid), both from `theme.css`. Every text of a panel is inside a card: its title and description too (`ui/lib/cards.test.js` checks the example panels and the default one).
+A project carries its panels as text (ADR 0023 §4): HTML files in its `ui/` folder, `ui/main.html` the main one, with their SVG and PNG files in `ui/assets/`. `signal ui` serves them under `/project/` and prints the main panel's URL (`docs/ui-protocol.md`). A panel is a page with the controls inside a `<signal-panel>`, laid out as a grid of cards (M2.8-11): `.signal-cards` (as many columns of at least `--signal-card-min` as fit the width) holding `.signal-card`s (a `wide` one spans the grid), both from `theme.css`. Every text of a panel is inside a card: its title and description too (`ui/lib/cards.test.js` checks the example panels and the default one). Inside a card, a `.row` lays controls out in a line that wraps; controls that belong together, such as a stereo meter pair, go in a `.signal-group`, which is never broken across lines and wraps as a whole.
 
 ```html
 <link rel="stylesheet" href="/ui/controls/theme.css">

@@ -35,8 +35,10 @@
       <h2>output</h2>
       <div class="row">
         <signal-fader bind="/out.gain" taper="db" label="gain"></signal-fader>
-        <signal-meter bind="/out.l" label="L"></signal-meter>
-        <signal-meter bind="/out.r" label="R"></signal-meter>
+        <div class="signal-group">
+          <signal-meter bind="/out.l" label="L"></signal-meter>
+          <signal-meter bind="/out.r" label="R"></signal-meter>
+        </div>
       </div>
     </section>
     <section class="signal-card wide scope">

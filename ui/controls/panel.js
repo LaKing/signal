@@ -33,6 +33,7 @@ const CSS = `
 .generated h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--signal-muted, #8a93a3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .generated h2 small { font-weight: 400; letter-spacing: 0; text-transform: none; margin-left: .5em; }
 .generated .row { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; align-items: flex-end; }
+.generated .signal-group { display: flex; flex: none; flex-wrap: nowrap; gap: .5rem; align-items: flex-end; }
 .generated signal-scope { flex: 1 1 20rem; min-width: 16rem; }
 /* The unsaved indicator is a box of fixed width at the bar's end, its text cut
    to its own fixed width: the count or the error changing moves nothing. */
@@ -221,8 +222,12 @@ export class SignalPanel extends HTMLElement {
     const sections = spec.groups.map((g) =>
       section(g.instance, g.module, g.controls.map((c) => element(c.element, { bind: c.bind, label: c.label, taper: c.taper }))),
     );
+    // The sink's meters side by side, never broken across lines.
+    const meters = document.createElement('div');
+    meters.className = 'signal-group';
+    meters.append(...spec.meters.map((m) => element('signal-meter', { bind: m.bind, label: m.label })));
     const output = [
-      ...spec.meters.map((m) => element('signal-meter', { bind: m.bind, label: m.label })),
+      ...(spec.meters.length ? [meters] : []),
       ...(spec.scope ? [element('signal-scope', { bind: spec.scope.bind, label: spec.scope.label })] : []),
     ];
     // The output card (meters and the scope) spans the grid's width.
