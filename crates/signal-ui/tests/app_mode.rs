@@ -626,6 +626,50 @@ fn a_signal_file_opens_in_a_working_folder(transport: Transport) {
     rig.finish();
 }
 
+/// Audit P2 (document-check-stall): the control thread never waits for the
+/// display's comparison of a .signal project. While a comparison's result
+/// is held (as a large project's would take long), steps go on: requests
+/// are answered and the edit shows at once; released, its result counts.
+fn steps_never_wait_for_a_document_comparison(transport: Transport) {
+    let mut rig = app_rig("signal-held", transport, None);
+    let file = packed(&rig, "tone");
+    let (mut ws, _) = rig.client();
+    rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    rig.host().document().unwrap().hold_comparisons(true);
+    commit(&mut rig, &mut ws, 2, 0.25);
+    rig.wait(&mut ws, "edited", |got| {
+        got.of("app")
+            .filter(|a| a["project"]["edited"] == true)
+            .cloned()
+    });
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while rig.host().document().unwrap().comparisons_held() == 0 {
+        assert!(std::time::Instant::now() < until, "no comparison started");
+        rig.pump();
+    }
+    for id in 3..13 {
+        let app = rig.request(&mut ws, id, json!({"type": "app.get"}), "app");
+        assert_eq!(app["project"]["edited"], true);
+    }
+    let document = rig.host().document().unwrap();
+    assert_eq!(document.comparisons_held(), 1, "no step waited for it");
+    assert!(document.comparing());
+    document.hold_comparisons(false);
+    while rig.host().document().unwrap().comparing() {
+        assert!(std::time::Instant::now() < until, "no result");
+        rig.pump();
+    }
+    assert!(rig.host().project_shown().unwrap().edited);
+    rig.request(&mut ws, 13, json!({"type": "project.save"}), "saved");
+    assert!(!rig.host().project_status().unwrap().edited);
+    rig.finish();
+}
+
 /// AC20: Save in the prompt writes the edits before the other project opens.
 fn opening_another_project_can_save_first(transport: Transport) {
     let mut rig = app_rig("signal-save-first", transport, None);
@@ -908,6 +952,7 @@ both!(
     a_stopped_commit_updates_the_inner_bases,
     signal_ui_refuses_the_app_s_messages,
     a_signal_file_opens_in_a_working_folder,
+    steps_never_wait_for_a_document_comparison,
     opening_another_project_can_save_first,
     reopening_the_same_file_with_save_keeps_the_edit,
     a_refused_archive_opens_nothing,

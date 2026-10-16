@@ -226,6 +226,66 @@ pub fn pack(dir: &Path) -> Result<Vec<u8>, ArchiveError> {
     Ok(writer.finish().map_err(zip_error)?.into_inner())
 }
 
+/// Whether the project folder `dir` packs to `packed`, an archive [`pack`]
+/// wrote, without packing it: the same files a project reads, each with the
+/// same bytes as its entry once inflated. Nothing is compressed, so this
+/// costs a read of the folder and an inflate of the archive (M2.8-12, a
+/// `.signal` document's edited state). A folder that would not pack is an
+/// error, as from [`pack`].
+pub fn packs_to(dir: &Path, packed: &[u8]) -> Result<bool, ArchiveError> {
+    let files = project_files(dir)?;
+    let mut archive = ZipArchive::new(Cursor::new(packed)).map_err(zip_error)?;
+    if archive.len() != files.len() {
+        return Ok(false);
+    }
+    // As many entries as files, each file found by its name: the same names.
+    for (name, path) in &files {
+        let mut entry = match archive.by_name(name) {
+            Ok(entry) => entry,
+            Err(zip::result::ZipError::FileNotFound) => return Ok(false),
+            Err(error) => return Err(zip_error(error)),
+        };
+        let file = fs::File::open(path).map_err(io_error(path))?;
+        let length = file.metadata().map_err(io_error(path))?.len();
+        if entry.size() != length {
+            return Ok(false);
+        }
+        if !same_bytes(&mut entry, file).map_err(io_error(path))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether `a` and `b` read to the same bytes, 64 KiB at a time.
+fn same_bytes(mut a: impl Read, mut b: impl Read) -> io::Result<bool> {
+    const CHUNK: usize = 64 << 10;
+    let (mut x, mut y) = (vec![0u8; CHUNK], vec![0u8; CHUNK]);
+    loop {
+        let n = fill(&mut a, &mut x)?;
+        if fill(&mut b, &mut y)? != n || x[..n] != y[..n] {
+            return Ok(false);
+        }
+        if n == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+/// Reads into `buf` until it is full or the reader ends; the bytes read.
+fn fill(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(filled)
+}
+
 /// What [`unpack`] wrote.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unpacked {

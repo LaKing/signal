@@ -5,11 +5,15 @@
 //! *edited* while that folder packs to other bytes than the file held when
 //! it was opened or last saved. Save writes the archive back atomically;
 //! closing removes the working folder, unless it is edited and the edits
-//! were not let go, so edits are never lost silently. Control-thread code.
+//! were not let go, so edits are never lost silently. Control-thread code;
+//! the display's content comparisons run on a thread of their own, one at
+//! a time, and a result counts only if nothing changed since it started.
 
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, mpsc};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use signal_project::archive::{self, ArchiveError};
@@ -20,8 +24,9 @@ const LOOK_EVERY: Duration = Duration::from_millis(250);
 /// How often a refresh compares the working folder's content with the file
 /// even when no file's size or time changed (an edit can keep both): at
 /// least every 2 s, and no more often than twenty times the last comparison
-/// took, so a large project's display poll spends at most about 5 % of the
-/// control thread on it. Decisions compare at once ([`Document::check`]).
+/// took, so a large project's display poll keeps a core busy at most about
+/// 5 % of the time. The comparison runs on its own thread, so the control
+/// thread never waits for it. Decisions compare at once ([`Document::check`]).
 pub const COMPARE_EVERY: Duration = Duration::from_secs(2);
 
 /// Where opened `.signal` files are unpacked: `Signal/Open` beside the
@@ -74,19 +79,71 @@ fn reason(file: &Path) -> impl FnOnce(ArchiveError) -> String + '_ {
     }
 }
 
+/// A comparison running on its own thread: the version of the folder it
+/// was started for, and where its result (edited, and how long it took)
+/// arrives.
+#[derive(Debug)]
+struct Job {
+    version: u64,
+    result: mpsc::Receiver<(bool, Duration)>,
+}
+
+/// Whether the working folder differs from `saved`, the archive it was
+/// packed to when opened or saved; a folder that no longer packs
+/// (project.toml gone) differs. Nothing is compressed
+/// ([`archive::packs_to`]).
+fn differs(working: &Path, saved: &[u8]) -> bool {
+    archive::packs_to(working, saved).map_or(true, |same| !same)
+}
+
+/// Test hooks: holds comparison threads after they compared and before
+/// their result is sent, as if a comparison took long: a test sees one
+/// pending, and its result arrive late (each waits at most 10 s).
+#[cfg(feature = "test-hooks")]
+#[derive(Debug, Default)]
+struct Hold {
+    held: std::sync::Mutex<bool>,
+    changed: std::sync::Condvar,
+    waiting: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(feature = "test-hooks")]
+impl Hold {
+    fn wait(&self) {
+        use std::sync::atomic::Ordering;
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+        let held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self
+            .changed
+            .wait_timeout_while(held, Duration::from_secs(10), |held| *held);
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// An opened `.signal` file and its working folder.
 #[derive(Debug)]
 pub struct Document {
     file: PathBuf,
     working: PathBuf,
-    /// What the working folder packed to when opened or last saved.
-    saved: Vec<u8>,
+    /// What the working folder packed to when opened or last saved; shared
+    /// with a comparison's thread.
+    saved: Arc<Vec<u8>>,
     look: Look,
     looked: Option<Instant>,
     /// When the content was last compared, and how long that took.
     compared: Instant,
     cost: Duration,
     edited: bool,
+    /// Counts what can make a comparison stale: a change of the folder's
+    /// files seen by a look, a comparison made at once, a save. A result
+    /// counts only for the version it was started for.
+    version: u64,
+    /// Whether this version still needs a comparison.
+    wanted: bool,
+    /// The comparison running, at most one.
+    job: Option<Job>,
+    #[cfg(feature = "test-hooks")]
+    hold: Arc<Hold>,
 }
 
 impl Document {
@@ -113,11 +170,16 @@ impl Document {
             file: file.to_owned(),
             look: look(&working),
             working,
-            saved,
+            saved: Arc::new(saved),
             looked: Some(Instant::now()),
             compared: Instant::now(),
             cost: Duration::ZERO,
             edited: false,
+            version: 0,
+            wanted: false,
+            job: None,
+            #[cfg(feature = "test-hooks")]
+            hold: Arc::default(),
         })
     }
 
@@ -141,40 +203,145 @@ impl Document {
         self.edited
     }
 
-    /// Looks at the working folder at most every 250 ms and packs it again
-    /// when its files changed, or when [`COMPARE_EVERY`] (stretched for a
-    /// large project) has passed; returns whether it is edited. (What the
-    /// window shows; a decision uses [`check`](Document::check).)
+    /// What the window shows; never waits for a comparison (a decision uses
+    /// [`check`](Document::check)). Takes a finished comparison's result,
+    /// looks at the working folder at most every 250 ms, and starts a
+    /// comparison on its own thread when its files changed, or when
+    /// [`COMPARE_EVERY`] (stretched for a large project) has passed. A change
+    /// of the files counts as edited at once, until a comparison of the
+    /// folder as changed says otherwise; a comparison started before a
+    /// change is stale and let go. Returns whether it is edited.
     pub fn refresh(&mut self) -> bool {
-        if self.looked.is_some_and(|at| at.elapsed() < LOOK_EVERY) {
-            return self.edited;
+        self.collect();
+        if !self.looked.is_some_and(|at| at.elapsed() < LOOK_EVERY) {
+            self.looked = Some(Instant::now());
+            let current = look(&self.working);
+            if current != self.look {
+                self.look = current;
+                self.changed();
+            }
         }
-        self.looked = Some(Instant::now());
-        let current = look(&self.working);
-        let due = self.compared.elapsed() >= COMPARE_EVERY.max(self.cost * 20);
-        if current != self.look || due {
-            self.look = current;
-            self.compare();
+        if self.compared.elapsed() >= COMPARE_EVERY.max(self.cost * 20) {
+            self.wanted = true;
+        }
+        if self.wanted && self.job.is_none() {
+            self.start();
         }
         self.edited
     }
 
+    /// The folder's files changed: edited, until compared again.
+    fn changed(&mut self) {
+        self.version += 1;
+        self.edited = true;
+        self.wanted = true;
+    }
+
+    /// A finished comparison's result, if it is not stale: one whose files
+    /// changed while it ran (looked at again here) counts as a change.
+    fn collect(&mut self) {
+        let Some(job) = &self.job else {
+            return;
+        };
+        let (edited, cost) = match job.result.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            // Its thread ended without a result: edited, as for a folder
+            // that does not pack, until the next comparison is due.
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.job = None;
+                self.edited = true;
+                self.wanted = false;
+                self.compared = Instant::now();
+                return;
+            }
+        };
+        let version = job.version;
+        self.job = None;
+        self.compared = Instant::now();
+        self.cost = cost;
+        if version != self.version {
+            return;
+        }
+        self.looked = Some(Instant::now());
+        let current = look(&self.working);
+        if current != self.look {
+            self.look = current;
+            self.changed();
+            return;
+        }
+        self.edited = edited;
+        self.wanted = false;
+    }
+
+    /// Starts a comparison of the current version on its own thread (here,
+    /// when no thread can be made).
+    fn start(&mut self) {
+        let (send, result) = mpsc::sync_channel(1);
+        let working = self.working.clone();
+        let saved = Arc::clone(&self.saved);
+        #[cfg(feature = "test-hooks")]
+        let hold = Arc::clone(&self.hold);
+        let spawned = thread::Builder::new()
+            .name("signal-document".to_owned())
+            .spawn(move || {
+                let started = Instant::now();
+                let edited = differs(&working, &saved);
+                let cost = started.elapsed();
+                #[cfg(feature = "test-hooks")]
+                hold.wait();
+                let _ = send.send((edited, cost));
+            });
+        match spawned {
+            Ok(_) => {
+                self.job = Some(Job {
+                    version: self.version,
+                    result,
+                });
+            }
+            Err(_) => self.compare(),
+        }
+    }
+
     /// Compares the working folder's content with the file now, whatever
     /// its files' sizes and times say: before every decision that may
-    /// discard or replace it (a prompt, Open, close).
+    /// discard or replace it (a prompt, Open, close). A comparison still
+    /// running is stale from then on.
     pub fn check(&mut self) -> bool {
         self.looked = Some(Instant::now());
         self.look = look(&self.working);
+        self.version += 1;
         self.compare();
         self.edited
     }
 
     fn compare(&mut self) {
         let started = Instant::now();
-        // A folder that no longer packs (project.toml gone) differs.
-        self.edited = archive::pack(&self.working).map_or(true, |bytes| bytes != self.saved);
+        self.edited = differs(&self.working, &self.saved);
+        self.wanted = false;
         self.compared = Instant::now();
         self.cost = started.elapsed();
+    }
+
+    /// Test hooks: holds (or releases) comparison threads before they send
+    /// their result.
+    #[cfg(feature = "test-hooks")]
+    pub fn hold_comparisons(&self, held: bool) {
+        *self.hold.held.lock().unwrap_or_else(|e| e.into_inner()) = held;
+        self.hold.changed.notify_all();
+    }
+
+    /// Test hooks: how many comparison threads are held now.
+    #[cfg(feature = "test-hooks")]
+    pub fn comparisons_held(&self) -> usize {
+        self.hold.waiting.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Test hooks: whether a comparison is running (or its result not yet
+    /// taken).
+    #[cfg(feature = "test-hooks")]
+    pub fn comparing(&self) -> bool {
+        self.job.is_some()
     }
 
     /// Save: the working folder packed and written over the file atomically.
@@ -195,11 +362,14 @@ impl Document {
             .map_err(|e| format!("{} was not saved: {e}", file.display()))?;
         archive::write_atomic(file, &bytes)
             .map_err(|e| format!("{} was not saved: {e}", file.display()))?;
-        self.saved = bytes;
+        self.saved = Arc::new(bytes);
         self.look = look(&self.working);
         self.looked = Some(Instant::now());
         self.compared = Instant::now();
         self.edited = false;
+        // A comparison still running compared with the old content.
+        self.version += 1;
+        self.wanted = false;
         Ok(())
     }
 

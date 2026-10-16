@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use signal_project::Project;
 use signal_project::archive::{
-    ArchiveError, Limits, TempProject, pack, unpack, unpack_with, write_atomic,
+    ArchiveError, Limits, TempProject, pack, packs_to, unpack, unpack_with, write_atomic,
 };
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
@@ -221,6 +221,56 @@ fn what_a_project_never_reads_stays_out() {
             "ui/main.html"
         ]
     );
+}
+
+/// `packs_to` says what comparing `pack`'s bytes says, without packing: a
+/// folder matches the archive it packed to, whatever is not read and its
+/// files' times; any change of a read file's bytes, a file added, removed
+/// or renamed, does not; a folder that does not pack is an error.
+#[test]
+fn packs_to_agrees_with_packing() {
+    let dir = base("packs-to").join("p");
+    copy_tree(&projects().join("kick"), &dir);
+    let packed = pack(&dir).unwrap();
+    let agrees = |dir: &Path| {
+        let same = packs_to(dir, &packed).unwrap();
+        assert_eq!(same, pack(dir).unwrap() == packed);
+        same
+    };
+    assert!(agrees(&dir));
+    fs::write(dir.join("notes.txt"), "x").unwrap();
+    fs::write(dir.join("ui/.DS_Store"), "x").unwrap();
+    let toml = dir.join("project.toml");
+    fs::write(&toml, fs::read(&toml).unwrap()).unwrap();
+    assert!(agrees(&dir), "unread files and times do not count");
+
+    let text = fs::read(&toml).unwrap();
+    let mut flipped = text.clone();
+    let last = flipped.len() - 2;
+    flipped[last] ^= 1;
+    fs::write(&toml, &flipped).unwrap();
+    assert!(!agrees(&dir), "a byte changed, the size kept");
+    fs::write(&toml, &text).unwrap();
+    assert!(agrees(&dir));
+
+    let knob = dir.join("ui/assets/knob.svg");
+    fs::write(dir.join("ui/assets/added.svg"), "<svg/>").unwrap();
+    assert!(!agrees(&dir), "a file added");
+    fs::remove_file(dir.join("ui/assets/added.svg")).unwrap();
+    fs::rename(&knob, dir.join("ui/assets/knob2.svg")).unwrap();
+    assert!(!agrees(&dir), "a file renamed");
+    fs::rename(dir.join("ui/assets/knob2.svg"), &knob).unwrap();
+    let svg = fs::read(&knob).unwrap();
+    fs::write(&knob, &svg[..svg.len() - 1]).unwrap();
+    assert!(!agrees(&dir), "a file shortened");
+    fs::write(&knob, &svg).unwrap();
+    assert!(agrees(&dir));
+
+    fs::remove_file(&toml).unwrap();
+    assert!(matches!(
+        packs_to(&dir, &packed),
+        Err(ArchiveError::NoProjectFile)
+    ));
 }
 
 /// Packing refuses a folder without project.toml and a symbolic link.

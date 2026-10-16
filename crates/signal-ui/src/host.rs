@@ -799,6 +799,12 @@ impl Host {
         }
     }
 
+    /// Test hooks: the open `.signal` project, for one.
+    #[cfg(feature = "test-hooks")]
+    pub fn document(&self) -> Option<&Document> {
+        self.document.as_ref()
+    }
+
     /// Stops the run; the Runner is dropped here.
     pub fn finish(mut self) -> Option<Finished> {
         let mut run = self.run.take()?;
