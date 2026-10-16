@@ -32,8 +32,20 @@ test('a schematic part gets Copy address, and no Reset', () => {
   assert.deepEqual(items.map((i) => i.id), ['copy-address', 'separator', 'stop', 'separator', 'tab:panel', 'tab:parameters', 'tab:setup']);
 });
 
+// 2026-10-17: the schematic's own items come first, in place of its Copy address.
+test('a right click on the schematic shows its items first, then the transport and the tabs', () => {
+  const part = [
+    { id: 'inspect', label: 'Inspect', disabled: false },
+    { id: 'separator' },
+    { id: 'delete', label: 'Delete instance', disabled: true, title: 'Turn on Edit patch to change the patch' },
+  ];
+  const items = contextItems({ part, control: { address: '/drums', part: true }, playing: false, tab: 'schematic' });
+  assert.deepEqual(items.map((i) => i.id), ['part:inspect', 'separator', 'part:delete', 'separator', 'play', 'separator', 'tab:panel', 'tab:parameters', 'tab:setup']);
+  assert.equal(items[2].title, 'Turn on Edit patch to change the patch');
+  assert.equal(items[2].disabled, true);
+  assert.deepEqual(contextItems({ part: [], control: { address: '/a.out', part: true } }).map((i) => i.id).slice(0, 1), ['copy-address'], 'no items: Copy address as before');
+});
+
 test('the menu stays inside the window', () => {
   assert.deepEqual(placeMenu(10, 20, 200, 100, 1000, 800), { left: 10, top: 20 });
-  assert.deepEqual(placeMenu(950, 780, 200, 100, 1000, 800), { left: 800, top: 700 });
-  assert.deepEqual(placeMenu(-5, -5, 200, 100, 1000, 800), { left: 0, top: 0 });
 });

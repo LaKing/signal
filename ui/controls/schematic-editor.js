@@ -3,7 +3,8 @@
 // bar; dragging from an output to a compatible input or parameter connects
 // them; a double-click on the background opens the add palette there;
 // Delete or Backspace removes the selected instance or wire; a wire's scale
-// is typed in the card. Every change is a `patch` written at once
+// is typed in the card. The context menu's edits (ui/lib/schematic-menu.js)
+// come here too: Delete, Edit scale…, Disconnect all, Add module here…. Every change is a `patch` written at once
 // (docs/ui-protocol.md "patch"); the drawing changes with the `graph` push
 // that follows, never before. The state and the history are
 // ui/lib/schematic-edit.js, the ops and rules ui/lib/schematic-patch.js.
@@ -191,9 +192,18 @@ export class SchematicEditor {
   }
 
   removeSelection() {
-    const s = this.s.selection;
-    if (s?.kind === 'instance' && s.node.kind === 'instance') this.write(0, s.level, [removeInstance(s.node.name)]);
-    else if (s?.kind === 'wire' && s.wire.kind === 'connection') this.write(0, s.level, [removeConnection(s.wire.written.from, s.wire.written.to)]);
+    this.remove(this.s.selection);
+  }
+
+  /** Removes instance or connection `hit` (the selection, or a context menu's target). */
+  remove(hit) {
+    if (hit?.kind === 'instance' && hit.node.kind === 'instance') this.write(0, hit.level, [removeInstance(hit.node.name)]);
+    else if (hit?.kind === 'wire' && hit.wire.kind === 'connection') this.write(0, hit.level, [removeConnection(hit.wire.written.from, hit.wire.written.to)]);
+  }
+
+  /** The card's scale field opened (the context menu's Edit scale…, once the wire is selected). */
+  openScale() {
+    this.scaleEntry?.open();
   }
 
   // Drag to connect.
@@ -341,6 +351,7 @@ export class SchematicEditor {
 
   /** What the card adds in edit mode: a wire's scale entry; inside a composite, how many instances the edit reaches. */
   cardParts(selection) {
+    this.scaleEntry = null;
     if (!this.editing || !selection) return [];
     const parts = [];
     if (selection.level && selection.level !== '' && selection.kind !== 'background') {
@@ -353,7 +364,7 @@ export class SchematicEditor {
       const row = html('div', { className: 'row' });
       const readout = html('span', { className: 'readout', title: 'scale: double-click to type', textContent: formatFixed(scale, null) });
       row.append(html('span', { textContent: 'scale' }), readout);
-      new ValueEntry(readout, {
+      this.scaleEntry = new ValueEntry(readout, {
         spec: () => ({ unit: null, range: {}, taper: 'linear', kind: null }),
         value: () => scale,
         apply: (value) => {

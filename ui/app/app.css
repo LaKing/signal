@@ -93,5 +93,7 @@ signal-app-messages { display: block; }
 /* The context menu: over everything, never in the flow. */
 .context-menu { position: fixed; z-index: 100; min-width: 13rem; padding: 0.3rem; display: flex; flex-direction: column; background: var(--signal-panel); border: 1px solid var(--signal-track); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); }
 .context-menu button { text-align: left; border: 0; background: transparent; padding: 0.3rem 0.6rem; border-radius: 4px; white-space: nowrap; }
-.context-menu button:hover:not([disabled]), .context-menu button:focus-visible { background: var(--signal-knob); outline: none; }
+.context-menu button:hover:not([aria-disabled="true"]), .context-menu button:focus-visible { background: var(--signal-knob); outline: none; }
+/* An item that does not apply: focusable, its title says why (ui/controls/context-menu.js). */
+.context-menu button[aria-disabled="true"] { opacity: 0.45; }
 .context-menu hr { border: 0; border-top: 1px solid var(--signal-track); margin: 0.25rem 0.2rem; }

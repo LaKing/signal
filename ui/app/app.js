@@ -14,12 +14,13 @@ import { getDefaultConnection, onDefaultConnection } from '../signal-ui.js';
 import '../controls/meter.js';
 import '../controls/schematic.js';
 import { ValueEntry } from '../controls/entry-field.js';
+import { ContextMenu, claimMenus, focusable } from '../controls/context-menu.js';
 import { formatFixed } from '../lib/format.js';
 import { applyProps } from './lib/dom.js';
 import { pageHandlesShortcuts, panelReloads, panelSource, shortcut } from './lib/menu.js';
 import { dragMessage, fileNote, planUpdate, releaseMessage, resetMessage, rows, shown, structureKey, valuesOf } from './lib/parameters.js';
 import { INITIAL, controls, powerRequest, reduce } from './lib/power.js';
-import { contextItems, keepsSystemMenu, placeMenu } from './lib/context.js';
+import { contextItems, keepsSystemMenu } from './lib/context.js';
 import { PROMPT, fieldValue, openRetry, projectLabel, windowTitle } from './lib/document.js';
 import { archiveSave, saveReport, saveRequests } from './lib/save.js';
 import { compactStatus, statusFields } from './lib/status.js';
@@ -687,19 +688,22 @@ export class SignalAppPanel extends AppElement {
 
 /**
  * The context menu (owner's request, 2026-10-16), in place of the WebView's
- * own: on a control bound to a parameter, Reset to default and Copy
- * address; then Play or Stop and the other tabs. A text field keeps the
- * system's menu (Cut, Copy, Paste). One per page; the panel frame's right
- * clicks come here too.
+ * own: on the schematic, the schematic's items for what was clicked (its
+ * `contextMenu`, 2026-10-17); on a control bound to a parameter, Reset to
+ * default and Copy address; then Play or Stop and the other tabs. A text
+ * field keeps the system's menu (Cut, Copy, Paste). One per page; the
+ * panel frame's right clicks come here too. The element is
+ * ui/controls/context-menu.js's, as the schematic's own in a browser.
  */
 export class SignalAppContextMenu extends AppElement {
   connectedCallback() {
     if (!this.firstChild) {
-      this.list = el('div', { className: 'context-menu', role: 'menu', hidden: true });
+      this.menu = new ContextMenu({ label: 'Signal' });
+      this.list = this.menu.list;
       this.append(this.list);
       this.unlisten = SignalAppContextMenu.listen(document, null);
       this.closer = (event) => {
-        if (!this.list.hidden && !this.list.contains(event.target)) this.close();
+        if (this.menu.isOpen && !event.composedPath().includes(this.list)) this.close();
       };
       this.escape = (event) => event.key === 'Escape' && this.close();
       window.addEventListener('pointerdown', this.closer, true);
@@ -716,19 +720,33 @@ export class SignalAppContextMenu extends AppElement {
     super.disconnectedCallback();
   }
 
-  /** Right clicks in `doc` (this page's, or the panel frame's: `frame`); returns the remover. */
+  /**
+   * Right clicks in `doc` (this page's, or the panel frame's: `frame`);
+   * returns the remover. Taken as they bubble, so what swallows them first
+   * keeps them (the panel editor's edit mode). The document is claimed
+   * (`claimMenus`): the schematic opens no menu of its own there and gives
+   * its items to this one.
+   */
   static listen(doc, frame) {
     const open = (event) => {
       const target = event.composedPath?.()[0] ?? event.target;
       if (keepsSystemMenu(target)) return;
+      // A right click on the open menu itself rebuilds nothing.
+      const list = document.querySelector('signal-app-context-menu')?.list;
+      if (list && event.composedPath?.().includes(list)) {
+        event.preventDefault();
+        return;
+      }
       event.preventDefault();
       const offset = frame?.getBoundingClientRect() ?? { left: 0, top: 0 };
       document.querySelector('signal-app-context-menu')?.show(event, offset);
     };
     const close = () => document.querySelector('signal-app-context-menu')?.close();
     doc.addEventListener('contextmenu', open);
+    const unclaim = claimMenus(doc);
     if (frame) doc.addEventListener('pointerdown', close, true);
     return () => {
+      unclaim();
       doc.removeEventListener('contextmenu', open);
       if (frame) doc.removeEventListener('pointerdown', close, true);
     };
@@ -746,40 +764,49 @@ export class SignalAppContextMenu extends AppElement {
     return null;
   }
 
+  /**
+   * The menu of an element under the click that has one (`contextMenu(event,
+   * close)`: <signal-schematic>), `{items, act(id), closed()}`, or null.
+   */
+  static part(event, close) {
+    for (const node of event.composedPath?.() ?? []) {
+      if (typeof node?.contextMenu !== 'function') continue;
+      const menu = node.contextMenu(event, close);
+      if (menu) return menu;
+    }
+    return null;
+  }
+
   show(event, offset) {
     const toolbar = document.querySelector('signal-app-toolbar');
-    const control = SignalAppContextMenu.control(event);
+    this.close();
+    const part = SignalAppContextMenu.part(event, () => this.close());
+    const control = part ? null : SignalAppContextMenu.control(event);
     const items = contextItems({
+      part: part?.items,
       control,
       playing: Boolean(toolbar?.playing),
       power: (toolbar?.power?.power ?? 'on') === 'on',
       tab: toolbar?.tab ?? null,
     });
-    this.list.replaceChildren(
-      ...items.map((item) => {
-        if (item.id === 'separator') return el('hr', { role: 'separator' });
-        const button = el('button', { type: 'button', role: 'menuitem', textContent: item.label, disabled: Boolean(item.disabled) });
-        button.addEventListener('click', () => {
-          this.close();
-          this.run(item.id, control, toolbar);
-        });
-        return button;
-      }),
-    );
-    this.list.hidden = false;
-    const box = this.list.getBoundingClientRect();
-    const { left, top } = placeMenu(event.clientX + offset.left, event.clientY + offset.top, box.width, box.height, innerWidth, innerHeight);
-    this.list.style.left = `${left}px`;
-    this.list.style.top = `${top}px`;
-    this.list.querySelector('button:not([disabled])')?.focus();
+    // The focus goes back where the click was (duck-typed: the panel frame's nodes are of another realm).
+    const back = event.composedPath?.().find(focusable) ?? null;
+    this.menu.show(items, {
+      x: event.clientX + offset.left,
+      y: event.clientY + offset.top,
+      pick: (id) => this.run(id, control, toolbar, part),
+      closed: () => part?.closed?.(),
+      back,
+    });
   }
 
   close() {
-    if (this.list) this.list.hidden = true;
+    this.menu?.close();
   }
 
-  run(id, control, toolbar) {
-    if (id === 'reset' && control) this.request(resetMessage(control.address)).catch(failed);
+  run(id, control, toolbar, part) {
+    if (id.startsWith('part:')) part?.act(id.slice(5));
+    else if (id === 'reset' && control) this.request(resetMessage(control.address)).catch(failed);
     else if (id === 'copy-address' && control) navigator.clipboard?.writeText(control.address).catch(failed);
     else if (id === 'play') this.request({ type: 'transport.play' }).catch(failed);
     else if (id === 'stop') this.request({ type: 'transport.stop' }).catch(failed);
