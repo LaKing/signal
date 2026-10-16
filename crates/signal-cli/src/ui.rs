@@ -27,6 +27,7 @@ use signal_ui::setup::setup_path;
 use signal_ui::{FirstRun, Host, HostConfig, ServerOptions, project_ui};
 
 use crate::devices::compute_lines;
+use crate::files::{project_arg, temporary_note};
 use crate::gpu::Gpu;
 use crate::play::{DriverKind, PlayArgs, check, write_wav};
 use crate::render::located;
@@ -67,7 +68,7 @@ enum UiCommand {
     /// of the plan whose kind and shape fit its control. Exits 1 with
     /// file:line:column diagnostics when one does not.
     Check {
-        /// The project folder (containing project.toml).
+        /// The project folder (containing project.toml), or a .signal file.
         project: PathBuf,
     },
 }
@@ -89,16 +90,21 @@ pub(crate) fn run(
     };
     check(play)?;
     let null = play.driver == DriverKind::Null;
-    let dir = &play.project;
+    // A .signal file is served from a temporary folder, which the host keeps
+    // (and its Setup field reopens, M2.8-12).
+    let opened = project_arg(&play.project)?;
+    temporary_note(&opened);
+    let (dir, shown) = (opened.dir().to_owned(), opened.shown().to_owned());
+    let dir = &dir;
     let project = Project::load(dir).map_err(|error| match error {
-        LoadError::Invalid(diagnostics) => Failure::Invalid(located(dir, diagnostics)),
+        LoadError::Invalid(diagnostics) => Failure::Invalid(located(&shown, diagnostics)),
         error @ LoadError::Io { .. } => Failure::Io(error.to_string()),
     })?;
     let plan = project
         .plan(registry)
-        .map_err(|diagnostics| Failure::Invalid(located(dir, diagnostics)))?
+        .map_err(|diagnostics| Failure::Invalid(located(&shown, diagnostics)))?
         .plan;
-    let (_, width) = sink_of(&project, &plan).map_err(|d| Failure::Invalid(located(dir, d)))?;
+    let (_, width) = sink_of(&project, &plan).map_err(|d| Failure::Invalid(located(&shown, d)))?;
     // As `play --watch`: GPU-backed instances on this machine's devices,
     // kept until the run is gone.
     let mut gpu = Gpu::new(registry, true, project.gpu_pins(&plan), setup);
@@ -127,6 +133,8 @@ pub(crate) fn run(
     });
     let config = HostConfig {
         dir: dir.clone(),
+        source: shown.clone(),
+        temporary: opened.into_temporary(),
         registry: gpu.registry().clone(),
         setup_path,
         backend,
@@ -176,7 +184,7 @@ pub(crate) fn run(
     }
     eprintln!(
         "signal: playing {} at {rate} Hz{}; press Enter to stop",
-        dir.display(),
+        shown.display(),
         if null { " with the null driver" } else { "" }
     );
     if args.open {
@@ -305,20 +313,22 @@ pub(crate) fn run(
 }
 
 /// `signal ui check`: the binding check of every panel of the project.
-fn check_panels(dir: &Path, registry: &Registry, json: bool) -> Result<(), Failure> {
+fn check_panels(path: &Path, registry: &Registry, json: bool) -> Result<(), Failure> {
+    let opened = project_arg(path)?;
+    let (dir, shown) = (opened.dir(), opened.shown());
     let project = Project::load(dir).map_err(|error| match error {
-        LoadError::Invalid(diagnostics) => Failure::Invalid(located(dir, diagnostics)),
+        LoadError::Invalid(diagnostics) => Failure::Invalid(located(shown, diagnostics)),
         error @ LoadError::Io { .. } => Failure::Io(error.to_string()),
     })?;
     project
         .plan(registry)
-        .map_err(|diagnostics| Failure::Invalid(located(dir, diagnostics)))?;
+        .map_err(|diagnostics| Failure::Invalid(located(shown, diagnostics)))?;
     let checked = check_project(dir, &project, registry).map_err(Failure::Io)?;
     let diagnostics: Vec<_> = checked
         .iter()
         .flat_map(|c| c.findings.iter().map(|f| f.diagnostic.clone()))
         .collect();
-    let diagnostics = located(dir, diagnostics);
+    let diagnostics = located(shown, diagnostics);
     if checked.iter().any(|c| c.failed()) {
         return Err(Failure::InvalidPanels(diagnostics));
     }
@@ -343,7 +353,7 @@ fn check_panels(dir: &Path, registry: &Registry, json: bool) -> Result<(), Failu
     for c in &checked {
         eprintln!(
             "signal: {}: {} controls, {} bindings: ok",
-            dir.join(&c.file).display(),
+            shown.join(&c.file).display(),
             c.controls,
             c.bindings
         );
@@ -351,7 +361,7 @@ fn check_panels(dir: &Path, registry: &Registry, json: bool) -> Result<(), Failu
     if !project_ui(dir).join(MAIN_PANEL).is_file() {
         eprintln!(
             "signal: {}: no ui/{MAIN_PANEL}; the main panel is generated from the plan",
-            dir.display()
+            shown.display()
         );
     }
     Ok(())

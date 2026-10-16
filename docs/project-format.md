@@ -189,7 +189,7 @@ height = 640.0
 | `buffer` | the buffer to request, in frames, at least 1 | `128` |
 | `cpu_workers` | "CPU workers" in the interface dialog: the threads a block runs on, the audio thread included (`EngineConfig::threads`; 1 runs no worker threads), or `"auto"`, one per performance core (ADR 0019 §2). It changes the timing, never the output | `"auto"` |
 | `output_channels` | sink channel *i* plays on device channel `output_channels[i]` (from 1). The device is opened in a configuration with at least as many channels as the highest of them. A map whose length is not the project's sink width, or that names a channel the device does not have or one channel twice, is reported and the identity map is used | the identity map |
-| `last_project` | the last project folder opened; opened at start when `--project` is not given | none |
+| `last_project` | the last project opened: a folder, or a `.signal` file (§10), never its working folder; opened at start when `--project` is not given | none |
 | `[output]`, `[input]` | the device: `name`, optional `id`, `signature` | the system default output; no input |
 | `[window]` | the window's size in points when last closed | the toolkit's default |
 | `rt_policy` | the interface setup's **wake policy** (M2.7-1; in the setup page since M2.8-4): how idle worker threads wait and are woken in real time: `"park50"`, `"budget-spin"`, `"semaphore"` or `"fanout"` (`docs/realtime-rules.md` "Wake policies"). It changes the timing, never the output. Written only when not the default | `"park50"` |
@@ -203,3 +203,34 @@ height = 640.0
 **The parameter panel.** Signal.app lists the project's top-level instances with their parameters: name, unit, range, default, the base and, while playing, the effective value the runner reports (base and modulation, clamped), so a modulated parameter shows both. A composite instance shows the parameters its composite exports. Dragging a slider sends the value to the running engine as a 5 ms linear `ramp` (against zipper noise). Releasing it writes the value once into that instance's entry in `[instances]` of `project.toml`, with `toml_edit`: an existing value's text is replaced and nothing else changes (comments, ordering, spacing); a key not in the file is inserted after `module` and the parameters declared before it, so its position does not depend on the order of edits. A value is written in the shortest form that reads back to the same number, as an integer when it is one. **Reset to default** removes the key and ramps each parameter it sets back to that parameter's own value (an exported parameter that fans out may have targets with different values in the composite's files). The file is written through a hidden temporary file renamed over it. When the engine took the value, the running project takes the same edit, so when the file watch reloads the written file the diff is empty and nothing is applied twice. When the Controller refused it for any port (a full command queue), the file is still written, and the running project takes, for that parameter, a value in range that no port has in the file, so that reload sends every port the file's value and playback ends at the file's value. The same holds for a refused reset. A reload that is refused itself (the queue still full) or cannot read the folder is tried again every watch interval until it succeeds, without waiting for another change to the files. Parameters of the primitives inside a composite are shown read-only: their values are in the composite's file, and writing one there would change every instance of that composite.
 
 **Interface changes and meters.** Applying interface settings while playing stops the run and starts it again from frame 0. Device lists are refreshed only while stopped, because listing devices pauses the control thread. Meters show, per output and input channel, the peak in dBFS held for 1.5 s, the RMS over 300 ms, and a clip indicator that latches until clicked (a block peak of 1.0 or more: an output sample clamped to full scale reads exactly 1.0). While a live edit is planned and its swap prepared, the meter blocks of that time are not shown (the reload drains them into the session recorder). A peak or clip inside that gap can be missed by the meters and the clip indicator. The status line's clipped-sample count comes from the runner and counts every clamped sample.
+
+## 10. Project files (`.signal`)
+
+A **project file** is a project folder as one file (ADR 0025): a zip archive of the project files of §1, with `project.toml` at the archive's root. It is only a container. The text files in it are the project, read and written exactly as in a folder, and nothing in the archive means anything of its own (ADR 0009, 0013). `signal pack <folder> <file.signal>` writes one, `signal unpack <file.signal> <folder>` unpacks one, and `signal render`, `signal play` and `signal ui` take a `.signal` file wherever they take a project folder: they unpack it into a temporary folder for the run and remove it at the end. A render of a `.signal` file is the render of its folder, hashes and provenance included. In `signal play --watch` and `signal ui` the edits go to that temporary copy and are not written back. Signal.app opens, saves and saves as `.signal` files (§9 and `ui-protocol.md` "Signal.app").
+
+**What goes in.** The files a project reads, and nothing else:
+
+- `project.toml`;
+- `composites/*.toml` (directly in `composites/`);
+- every file under `ui/` (panels and their `assets/`, at any depth).
+
+**What stays out.** Everything else, in particular:
+
+- hidden files and folders, at any depth: any name that starts with `.` (`.DS_Store`, `.git/`, an editor's temporary file);
+- `renders/` and `sessions/`, and any other folder beside `composites/` and `ui/`;
+- any other file at the root (notes, a `.signal` file) or in `composites/` (a file that is not `.toml`, a sub-folder).
+
+A symbolic link where a project file would be is refused, not followed, and a folder without `project.toml` is not packed.
+
+**Deterministic.** The same files always give the same bytes: entries are files only (no folder entries), in sorted order of their `/`-separated paths, each deflated (level 6), dated 1980-01-01 00:00:00 (the zip format's earliest time) and marked as a regular Unix file with mode `0644`. The folder's place, the files' times and modes, and the order the file system lists them in do not count.
+
+**Reading.** Every entry is checked before anything is written, and a refused archive writes nothing (a folder made for it is removed) and is opened nowhere; the refusal names the reason and the entry:
+
+- an entry's path must be relative and inside the project: no leading `/`, no `..`, `.` or empty component, no backslash, no NUL or other control character;
+- an entry must be a regular file or a folder: no symbolic links, no device files, FIFOs or sockets (from its Unix mode), nothing encrypted;
+- no two entries may name the same file, case ignored (APFS does not tell `A.toml` from `a.toml`);
+- at most **10 000 entries** and **1 GiB** unpacked: the declared sizes are added up first, and the bytes actually written are counted too, so a size that lies is caught;
+- `project.toml` must be a file at the archive's root;
+- the folder to unpack into must not exist, or be empty. A `.signal` file larger than 1 GiB and 64 MiB is refused before it is read.
+
+An archive made by another tool is read by the same rules. Files in it that a project never reads are unpacked, and are left out when it is saved again.

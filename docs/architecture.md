@@ -63,7 +63,7 @@ See `adr/0015-workspace-and-lab-tier.md`. Crates are created when their mileston
 |---|---|---|
 | `signal-core` | Frame, ports/values, events, addresses, RNG, module trait | M0 (placeholder), M1 |
 | `signal-graph` | Composites, flattening, validation, conversion insertion, plans, edits | M1 |
-| `signal-project` | Project folder loading, TOML model, schema export, project diff; session record, read and replay (`session-format.md`) and build provenance, shared by `signal` and Signal.app. Depends on `signal-engine` for sessions; the engine depends on no project or session code | M1/M2 |
+| `signal-project` | Project folder loading, TOML model, schema export, project diff; session record, read and replay (`session-format.md`) and build provenance, shared by `signal` and Signal.app; project files (`.signal`, a deterministic zip of the folder, ADR 0025). Depends on `signal-engine` for sessions; the engine depends on no project or session code | M1/M2 |
 | `signal-std` | Standard primitives | M1 |
 | `signal-engine` | Executor, plan swap, fault guards, render manifest (semantics: `semantics.md`); the offline driver and the real-time runner and controller, which hand every sink's inputs to an output generically (ADR 0022; `realtime-rules.md`, "The runner") | M1/M2 |
 | `signal-output` | Output adapters (ADR 0022): the audio adapter (audio sink, `gain`, channel mapping, device conversion, meters) for the offline WAV render and the real-time runner; the scope adapter (a decimated capture of any signal output, M2.8-1); the vector adapter (snapshots of vector outputs on their ticks for `<signal-canvas>`, in real time and for a replay, M2.8-7); the driver trait and the null driver | M2.7 |

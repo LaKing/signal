@@ -50,10 +50,12 @@ wry = "0.57.0"
 tao = "0.37.1"
 # The app's native menu bar (File, …) for the tao window (MIT/Apache-2.0, tauri-apps).
 muda = { version = "0.21.2", default-features = false }
-# The native folder chooser (NSOpenPanel, safe API only): already locked through tao and muda.
+# The native folder chooser (NSOpenPanel), Save As (NSSavePanel) and the "Save changes?"
+# alert (NSAlert with its buttons; M2.8-12), safe API only: already locked through tao and
+# muda, so these features add no package to Cargo.lock.
 objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSURL"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSOpenPanel", "NSPanel", "NSResponder", "NSSavePanel", "NSWindow"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSOpenPanel", "NSPanel", "NSResponder", "NSSavePanel", "NSView", "NSWindow"] }
 # Project files (`.signal`, a zip of the project folder; owner's request 2026-10-16). MIT; only
 # deflate through flate2 and zlib-rs, which muda already locked.
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }

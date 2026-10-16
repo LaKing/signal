@@ -2,7 +2,8 @@
 //! plays and stops on `transport.*` with the Setup, pushes the status line,
 //! opens another project (and serves its panels), keeps a device chosen by
 //! identity, takes the wake policy, and commits while stopped. `signal ui`
-//! (CLI mode) refuses the app's messages.
+//! (CLI mode) refuses the app's messages. M2.8-12: .signal project files
+//! (open, edited, Save, Save As, close) and `signal ui`'s reopen.
 
 mod common;
 
@@ -13,9 +14,10 @@ use common::{Options, Rig, Transport, copy_dir, devices, rig, root};
 use serde_json::{Value, json};
 use signal_core::Registry;
 use signal_engine::RtPolicy;
+use signal_project::archive;
 use signal_ui::player::Backend;
 use signal_ui::setup::Setup;
-use signal_ui::{AppHostConfig, Host, ServerOptions};
+use signal_ui::{AppHostConfig, Edits, Host, ServerOptions};
 
 /// A host in app mode on the null driver, its folder holding the tone
 /// project (or a copy of `project`).
@@ -39,6 +41,7 @@ fn app_rig(name: &str, transport: Transport, project: Option<&Path>) -> Rig {
     let config = AppHostConfig {
         setup_path: setup.clone(),
         project: Some(dir.clone()),
+        open_root: base.join("Open"),
         registry,
         backend: Backend::Null(devices()),
         compute: vec!["CPU: test".to_owned()],
@@ -502,6 +505,396 @@ fn a_client_connecting_while_off_is_told_and_gets_no_frames(transport: Transport
     let _ = fs::remove_dir_all(&kick);
 }
 
+/// M2.8-12: `rig`'s folder packed into `<base>/<name>.signal`.
+fn packed(rig: &Rig, name: &str) -> PathBuf {
+    let file = rig.setup.with_file_name(format!("{name}.signal"));
+    archive::write_atomic(&file, &archive::pack(&rig.dir).unwrap()).unwrap();
+    file
+}
+
+/// The out.gain written in the project.toml of the folder `dir`.
+fn gain_in(dir: &Path) -> String {
+    let text = fs::read_to_string(dir.join("project.toml")).unwrap();
+    text.lines()
+        .find(|l| l.starts_with("out ="))
+        .unwrap()
+        .to_owned()
+}
+
+/// The out.gain the `.signal` file `file` holds.
+fn gain_of(file: &Path) -> String {
+    let dir = file.with_extension("check");
+    let _ = fs::remove_dir_all(&dir);
+    archive::unpack(&fs::read(file).unwrap(), &dir).unwrap();
+    let gain = gain_in(&dir);
+    fs::remove_dir_all(&dir).unwrap();
+    gain
+}
+
+fn commit(rig: &mut Rig, ws: &mut common::Ws, id: u64, value: f64) {
+    rig.request(
+        ws,
+        id,
+        json!({"type": "commit", "address": "/out.gain", "value": value}),
+        "committed",
+    );
+}
+
+/// M2.8-12 AC13, AC15-AC18: a .signal file opens into a working folder
+/// under the Open folder, the Setup records the file, a commit makes it
+/// edited and Save writes it back; opening another project while edited is
+/// refused until the edits are let go, which removes the working folder.
+fn a_signal_file_opens_in_a_working_folder(transport: Transport) {
+    let mut rig = app_rig("signal-open", transport, None);
+    let file = packed(&rig, "tone");
+    let open_root = rig.setup.with_file_name("Open");
+    let (mut ws, _) = rig.client();
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    assert_eq!(opened["loads"], true, "{opened}");
+    assert_eq!(opened["file"], file.display().to_string());
+    let working = PathBuf::from(opened["dir"].as_str().unwrap());
+    assert!(working.starts_with(&open_root), "{}", working.display());
+    assert!(working.join("project.toml").is_file());
+    assert_eq!(Setup::load(&rig.setup).0.last_project, Some(file.clone()));
+    let app = rig.request(&mut ws, 2, json!({"type": "app.get"}), "app");
+    assert_eq!(app["project"]["file"], file.display().to_string());
+    assert_eq!(app["project"]["name"], "tone");
+    assert_eq!(app["project"]["edited"], false);
+    assert_eq!(app["project"]["sampleRate"], 48_000);
+
+    // A live edit is written to the working folder: the project is edited.
+    commit(&mut rig, &mut ws, 3, 0.25);
+    assert!(gain_in(&working).contains("gain = 0.25"));
+    let status = rig.host().project_status().unwrap();
+    assert!(status.edited);
+    assert_eq!(status.file.as_deref(), Some(file.as_path()));
+    let edited = rig.wait(&mut ws, "edited", |got| {
+        got.of("app")
+            .filter(|a| a["project"]["edited"] == true)
+            .cloned()
+    });
+    assert_eq!(edited["project"]["name"], "tone");
+    assert!(gain_of(&file).contains("gain = 0.5"), "not saved yet");
+
+    // Save writes the archive back and clears edited.
+    let saved = rig.request(&mut ws, 4, json!({"type": "project.save"}), "saved");
+    assert_eq!(saved["file"], file.display().to_string());
+    assert!(gain_of(&file).contains("gain = 0.25"));
+    assert!(!rig.host().project_status().unwrap().edited);
+    let leftovers: Vec<_> = fs::read_dir(file.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "the write is atomic, no temporary left"
+    );
+
+    // Edited again: another project is not opened until asked.
+    commit(&mut rig, &mut ws, 5, 0.125);
+    let folder = rig.dir.display().to_string();
+    let refused = rig.request(
+        &mut ws,
+        6,
+        json!({"type": "project.open", "path": folder}),
+        "error",
+    );
+    assert_eq!(refused["code"], "edited");
+    assert_eq!(refused["message"], "Save changes to tone?");
+    assert!(working.is_dir(), "nothing was let go");
+    let opened = rig.request(
+        &mut ws,
+        7,
+        json!({"type": "project.open", "path": folder, "unsaved": "discard"}),
+        "project",
+    );
+    assert_eq!(opened["file"], Value::Null);
+    assert!(
+        !working.exists(),
+        "the working folder goes with its project"
+    );
+    assert!(
+        gain_of(&file).contains("gain = 0.25"),
+        "Don't Save left the file"
+    );
+    rig.finish();
+}
+
+/// AC20: Save in the prompt writes the edits before the other project opens.
+fn opening_another_project_can_save_first(transport: Transport) {
+    let mut rig = app_rig("signal-save-first", transport, None);
+    let file = packed(&rig, "tone");
+    let (mut ws, _) = rig.client();
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    let working = PathBuf::from(opened["dir"].as_str().unwrap());
+    commit(&mut rig, &mut ws, 2, 0.75);
+    let folder = rig.dir.clone();
+    rig.host().open_project(&folder, Edits::Save).unwrap();
+    assert!(gain_of(&file).contains("gain = 0.75"));
+    assert!(!working.exists());
+    assert_eq!(Setup::load(&rig.setup).0.last_project, Some(folder));
+    rig.finish();
+}
+
+/// auditor-1-reopen-save-stale (AC20): reopening the open .signal file with
+/// Save opens what was saved, so the next Save keeps the edit.
+fn reopening_the_same_file_with_save_keeps_the_edit(transport: Transport) {
+    let mut rig = app_rig("signal-reopen-save", transport, None);
+    let file = packed(&rig, "tone");
+    let (mut ws, _) = rig.client();
+    rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    commit(&mut rig, &mut ws, 2, 0.75);
+    rig.host().open_project(&file, Edits::Save).unwrap();
+    let status = rig.host().project_status().unwrap();
+    assert_eq!(status.file.as_deref(), Some(file.as_path()));
+    assert!(!status.edited);
+    assert!(
+        gain_in(&status.dir).contains("gain = 0.75"),
+        "the reopened copy has the edit"
+    );
+    assert!(gain_of(&file).contains("gain = 0.75"));
+    rig.host().save_document().unwrap();
+    assert!(
+        gain_of(&file).contains("gain = 0.75"),
+        "the next Save keeps it"
+    );
+    assert!(gain_in(&status.dir).contains("gain = 0.75"));
+    rig.finish();
+}
+
+/// AC4-AC7 in the app: a refused archive opens nothing (the open project
+/// stays, no working folder is left) and the reason is named.
+fn a_refused_archive_opens_nothing(transport: Transport) {
+    let mut rig = app_rig("signal-refused", transport, None);
+    let open_root = rig.setup.with_file_name("Open");
+    let bad = rig.setup.with_file_name("bad.signal");
+    fs::write(&bad, "not a zip").unwrap();
+    let (mut ws, _) = rig.client();
+    let refused = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": bad.display().to_string()}),
+        "error",
+    );
+    assert_eq!(refused["code"], "archive");
+    let message = refused["message"].as_str().unwrap();
+    assert!(
+        message.contains("bad.signal was not opened: not a .signal archive"),
+        "{message}"
+    );
+    let app = rig.request(&mut ws, 2, json!({"type": "app.get"}), "app");
+    assert_eq!(
+        app["project"]["dir"],
+        rig.dir.display().to_string(),
+        "the project stays"
+    );
+    let made = fs::read_dir(&open_root).map_or(0, |d| d.count());
+    assert_eq!(made, 0, "no working folder is left");
+    assert_eq!(
+        Setup::load(&rig.setup).0.last_project,
+        None,
+        "never the Setup's"
+    );
+    rig.finish();
+}
+
+/// AC19: Save As of a folder project writes the file and opens it from
+/// then on; the folder is left as it is. Save then writes the file, and
+/// Save As of a .signal project moves it to the new file.
+fn save_as_writes_the_file_and_leaves_the_folder(transport: Transport) {
+    let mut rig = app_rig("signal-save-as", transport, None);
+    let folder = rig.dir.clone();
+    let before = fs::read(folder.join("project.toml")).unwrap();
+    let file = rig.setup.with_file_name("tone.signal");
+    let (mut ws, _) = rig.client();
+    rig.host().save_as(&file).unwrap();
+    let status = rig.host().project_status().unwrap();
+    assert_eq!(status.file.as_deref(), Some(file.as_path()));
+    assert!(!status.edited);
+    assert_ne!(status.dir, folder, "a working folder of its own");
+    assert_eq!(Setup::load(&rig.setup).0.last_project, Some(file.clone()));
+
+    commit(&mut rig, &mut ws, 1, 0.25);
+    assert!(rig.host().project_status().unwrap().edited);
+    rig.host().save_document().unwrap();
+    assert!(
+        gain_of(&file).contains("gain = 0.25"),
+        "the next Save writes there"
+    );
+    assert_eq!(
+        fs::read(folder.join("project.toml")).unwrap(),
+        before,
+        "the folder is left as it was"
+    );
+
+    let copy = rig.setup.with_file_name("copy.signal");
+    commit(&mut rig, &mut ws, 2, 0.125);
+    rig.host().save_as(&copy).unwrap();
+    let status = rig.host().project_status().unwrap();
+    assert_eq!(status.file.as_deref(), Some(copy.as_path()));
+    assert!(!status.edited);
+    assert!(gain_of(&copy).contains("gain = 0.125"));
+    assert!(
+        gain_of(&file).contains("gain = 0.25"),
+        "the old file is left"
+    );
+    assert_eq!(Setup::load(&rig.setup).0.last_project, Some(copy));
+    rig.finish();
+}
+
+/// AC15, AC20: closing removes the working folder unless it is edited and
+/// the edits were not let go (an unanswered prompt): then it is kept.
+fn closing_keeps_an_edited_working_folder(transport: Transport) {
+    for discard in [false, true] {
+        let mut rig = app_rig(&format!("signal-close-{discard}"), transport, None);
+        let file = packed(&rig, "tone");
+        let (mut ws, _) = rig.client();
+        let opened = rig.request(
+            &mut ws,
+            1,
+            json!({"type": "project.open", "path": file.display().to_string()}),
+            "project",
+        );
+        let working = PathBuf::from(opened["dir"].as_str().unwrap());
+        commit(&mut rig, &mut ws, 2, 0.25);
+        let messages = rig.host().close(None, discard);
+        assert_eq!(working.exists(), !discard, "discard {discard}");
+        if !discard {
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| m.contains("unsaved edits of tone are kept")),
+                "{messages:?}"
+            );
+            assert!(
+                gain_in(&working).contains("gain = 0.25"),
+                "the edits are there"
+            );
+        }
+        rig.finish();
+    }
+    // Not edited: closing removes it.
+    let mut rig = app_rig("signal-close-clean", transport, None);
+    let file = packed(&rig, "tone");
+    rig.host().open_project(&file, Edits::Ask).unwrap();
+    let working = rig.host().project_status().unwrap().dir;
+    assert!(working.is_dir());
+    rig.host().close(None, false);
+    assert!(!working.exists());
+    rig.finish();
+}
+
+/// M2.8-12 AC22 (auditor-1-browser-open): `signal ui` started from a
+/// .signal file reopens it from the file when its Setup field names it,
+/// and refuses every other path, as the security note requires.
+fn signal_ui_reopens_only_the_project_it_serves(transport: Transport) {
+    let mut rig = rig(
+        "reopen",
+        Options {
+            transport,
+            packed: true,
+            ..Options::default()
+        },
+    );
+    let source = rig.setup.with_file_name("project.signal");
+    let first = rig.dir.clone();
+    let (mut ws, _) = rig.client();
+    commit(&mut rig, &mut ws, 1, 0.25);
+    assert!(
+        gain_in(&first).contains("gain = 0.25"),
+        "edited in the temporary copy"
+    );
+    let reopened = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "project.open", "path": source.display().to_string()}),
+        "project",
+    );
+    assert_eq!(reopened["loads"], true, "{reopened}");
+    assert_eq!(reopened["file"], source.display().to_string());
+    let again = PathBuf::from(reopened["dir"].as_str().unwrap());
+    assert_ne!(again, first, "a fresh unpack");
+    assert!(!first.exists(), "the previous copy is removed");
+    assert!(
+        gain_in(&again).contains("gain = 0.5"),
+        "the file's value again"
+    );
+    let described = rig.request(&mut ws, 3, json!({"type": "describe"}), "describe");
+    assert_eq!(described["playing"], true, "playing again");
+
+    let other = rig.setup.with_file_name("other.signal");
+    fs::copy(&source, &other).unwrap();
+    for (id, path) in [(4, other.display().to_string()), (5, "/tmp".to_owned())] {
+        let refused = rig.request(
+            &mut ws,
+            id,
+            json!({"type": "project.open", "path": path}),
+            "error",
+        );
+        assert_eq!(refused["code"], "not-allowed", "{path}");
+    }
+    rig.finish();
+
+    let mut recording = common::rig(
+        "reopen-recording",
+        Options {
+            transport,
+            packed: true,
+            recording: true,
+            ..Options::default()
+        },
+    );
+    let source = recording.setup.with_file_name("project.signal");
+    let (mut ws, _) = recording.client();
+    let refused = recording.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": source.display().to_string()}),
+        "error",
+    );
+    assert_eq!(refused["code"], "recording");
+    recording.finish();
+}
+
+/// Second-opinion review of M2.8-12: a folder named `*.signal` is opened as
+/// the folder it is, not read as an archive.
+fn a_folder_named_like_a_signal_file_opens_as_a_folder(transport: Transport) {
+    let mut rig = app_rig("dotsignal", transport, None);
+    let folder = rig.dir.parent().unwrap().join("kick.signal");
+    copy_dir(&root().join("projects/kick"), &folder);
+    let (mut ws, _) = rig.client();
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": folder.display().to_string()}),
+        "project",
+    );
+    assert_eq!(opened["loads"], true, "{opened}");
+    assert_eq!(
+        opened["dir"],
+        folder.display().to_string(),
+        "the folder itself, no working copy"
+    );
+    rig.finish();
+    let _ = fs::remove_dir_all(&folder);
+}
+
 both!(
     power_off_stops_and_on_restores,
     a_client_connecting_while_off_is_told_and_gets_no_frames,
@@ -514,4 +907,12 @@ both!(
     a_commit_while_stopped_writes_once,
     a_stopped_commit_updates_the_inner_bases,
     signal_ui_refuses_the_app_s_messages,
+    a_signal_file_opens_in_a_working_folder,
+    opening_another_project_can_save_first,
+    reopening_the_same_file_with_save_keeps_the_edit,
+    a_refused_archive_opens_nothing,
+    save_as_writes_the_file_and_leaves_the_folder,
+    closing_keeps_an_edited_working_folder,
+    signal_ui_reopens_only_the_project_it_serves,
+    a_folder_named_like_a_signal_file_opens_as_a_folder,
 );

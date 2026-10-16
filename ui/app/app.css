@@ -24,6 +24,13 @@ signal-app-toolbar { display: flex; gap: 0.75rem; align-items: center; height: 2
 .compact-status { display: flex; gap: 0.75rem; font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; color: var(--signal-muted); min-width: 0; }
 .compact-status .line { width: 25ch; white-space: pre; overflow: hidden; }
 .compact-status .note { width: 32ch; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+/* The project's name and its "Edited" mark (M2.8-12): fixed boxes, the mark's space kept. */
+.project-name { display: flex; gap: 0.4rem; align-items: baseline; }
+.project-name .name { width: 18ch; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.project-name .edited { width: 6ch; color: var(--signal-muted); font-size: 0.85em; }
+/* The in-page "Save changes?" prompt (a browser, or the Setup tab's field). */
+.prompt { background: var(--signal-panel); color: inherit; border: 1px solid var(--signal-track); border-radius: 8px; padding: 1rem 1.2rem; }
+.prompt .buttons { display: flex; gap: 0.5rem; justify-content: flex-end; }
 
 /* The tabs: each fills what the toolbar leaves. */
 main { min-height: 0; }

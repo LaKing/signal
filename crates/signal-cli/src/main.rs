@@ -1,11 +1,12 @@
 //! The `signal` command (headless entry point; ADR 0013): `render`, `replay`,
-//! `play`, `ui`, `bench`, `devices`, `modules` and `schema`. `--json` makes every command print machine-readable output on
+//! `play`, `ui`, `pack`, `unpack`, `bench`, `devices`, `modules` and `schema`. `--json` makes every command print machine-readable output on
 //! stdout. Exit codes: 0 ok, 1 validation or user error, 2 internal error.
 //! The command layer only: sessions, live edits and provenance live in
 //! `signal-project`, the audio device in `signal-audio`.
 
 mod bench;
 mod devices;
+mod files;
 mod gpu;
 mod play;
 mod render;
@@ -53,6 +54,12 @@ enum Command {
     /// panel in the default browser. `signal ui check <project>` checks the
     /// panels' bindings instead.
     Ui(ui::UiArgs),
+    /// Pack a project folder into one .signal file (a deterministic zip of
+    /// the files a project reads; docs/project-format.md §10).
+    Pack(files::PackArgs),
+    /// Unpack a .signal file into a new folder; every entry is checked
+    /// first, and a refused file writes nothing.
+    Unpack(files::UnpackArgs),
     /// Measure the per-frame engine at 96 kHz (V13): every `std.*`
     /// primitive, the empty engine, the kick project and kick voices.
     Bench(bench::BenchArgs),
@@ -71,6 +78,8 @@ pub(crate) enum Failure {
     Usage(String),
     /// The project is invalid.
     Invalid(Vec<Diagnostic>),
+    /// A `.signal` file was refused (M2.8-12): its reason.
+    Archive(String),
     /// The session directory is malformed (`signal replay`).
     InvalidSession(Vec<Diagnostic>),
     /// A panel binds what the plan does not have (`signal ui check`).
@@ -122,6 +131,7 @@ impl Failure {
                 diagnostics.as_slice(),
             ),
             Failure::Io(message) => ("io", message.clone(), &[][..]),
+            Failure::Archive(message) => ("archive", message.clone(), &[][..]),
             Failure::Device(message) => ("device", message.clone(), &[][..]),
             Failure::Replay(message) => ("replay", message.clone(), &[][..]),
             Failure::Mismatch(message) => ("replay-mismatch", message.clone(), &[][..]),
@@ -202,6 +212,8 @@ fn execute(cli: &Cli) -> Result<(), Failure> {
         Command::Replay(args) => replay::run(args, &registry, setup, cli.json),
         Command::Play(args) => play::run(args, &registry, setup, cli.json),
         Command::Ui(args) => ui::run(args, &registry, cli.setup.as_deref(), cli.json),
+        Command::Pack(args) => files::pack(args, cli.json),
+        Command::Unpack(args) => files::unpack(args, cli.json),
         Command::Bench(args) => bench::run(args, &registry, setup, cli.json),
         Command::Devices(args) => devices::run(args, cli.json),
         Command::Modules => {

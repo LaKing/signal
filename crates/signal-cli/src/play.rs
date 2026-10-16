@@ -43,7 +43,8 @@ pub(crate) enum DriverKind {
 /// Arguments of `signal play`.
 #[derive(Args)]
 pub(crate) struct PlayArgs {
-    /// The project folder (containing project.toml).
+    /// The project folder (containing project.toml), or a .signal file
+    /// (played from a temporary copy).
     pub(crate) project: PathBuf,
     /// The output device's name (see `signal devices`); the default output
     /// device without it.
@@ -316,14 +317,19 @@ pub(crate) fn run(
 ) -> Result<(), Failure> {
     check(args)?;
     let null = args.driver == DriverKind::Null;
-    let dir = &args.project;
+    // A .signal file plays from a temporary folder, kept until the end.
+    let opened = crate::files::project_arg(&args.project)?;
+    let (dir, shown) = (opened.dir(), opened.shown());
+    if args.watch {
+        crate::files::temporary_note(&opened);
+    }
     let project = Project::load(dir).map_err(|error| match error {
-        LoadError::Invalid(diagnostics) => Failure::Invalid(located(dir, diagnostics)),
+        LoadError::Invalid(diagnostics) => Failure::Invalid(located(shown, diagnostics)),
         error @ LoadError::Io { .. } => Failure::Io(error.to_string()),
     })?;
     let mut plan = project
         .plan(registry)
-        .map_err(|diagnostics| Failure::Invalid(located(dir, diagnostics)))?
+        .map_err(|diagnostics| Failure::Invalid(located(shown, diagnostics)))?
         .plan;
     plan.version = 0;
     // M2.7-2: GPU-backed instances on this machine's devices (also for
@@ -339,7 +345,7 @@ pub(crate) fn run(
         eprintln!("signal: {warning}");
     }
     let registry = gpu.registry();
-    let (_, width) = sink_of(&project, &plan).map_err(|d| Failure::Invalid(located(dir, d)))?;
+    let (_, width) = sink_of(&project, &plan).map_err(|d| Failure::Invalid(located(shown, d)))?;
     let (rate, seed) = (project.sample_rate, project.seed);
     let limit = args.seconds.map(|s| (s * f64::from(rate)).round() as u64);
 

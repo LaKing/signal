@@ -3,7 +3,8 @@
 //! new token per start), admits only a client with the token, starts
 //! stopped on the Setup's last project, and on exit (or when dropped) stops,
 //! records the window's size and the last project in the Setup, closes its
-//! clients and ends its control thread.
+//! clients and ends its control thread. M2.8-12: the window's requests
+//! for a .signal project (its edited state, Save, Save As, Open, exit).
 //!
 //! Each scenario runs twice: `::in_process` (servers that bind nothing,
 //! clients connected in process, served by the same connection code) and
@@ -14,13 +15,15 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use signal_app::server::{AppConfig, AppServer};
 use signal_app::setup::{Setup, Window};
 use signal_app::state::Backend;
-use signal_ui::LocalStream;
+use signal_project::archive;
+use signal_ui::{Edits, LocalStream, ProjectStatus};
 use tungstenite::{Message, WebSocket};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,8 +109,10 @@ fn start_with(transport: Transport, setup_path: &Path, project: Option<PathBuf>)
     let config = AppConfig {
         setup_path: setup_path.to_owned(),
         project,
+        open_root: setup_path.with_file_name("Open"),
         backend: Backend::Null(Vec::new()),
         ui_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui"),
+        on_project: None,
     };
     match transport {
         Transport::Tcp => AppServer::start(config),
@@ -264,7 +269,7 @@ fn exit_stops_saves_the_window_and_closes_clients(transport: Transport) {
         height: 700.0,
     };
     // Returns once the control thread has ended.
-    server.exit(Some(window));
+    server.exit(Some(window), false);
     let saved = Setup::load(&path).0;
     assert_eq!(saved.window, Some(window));
     assert_eq!(saved.last_project, Some(tone()));
@@ -337,6 +342,126 @@ fn a_later_client_describes_every_parameter_while_playing(transport: Transport) 
     fs::remove_dir_all(&base).unwrap();
 }
 
+/// M2.8-12: a server started on `project`, telling `seen` the project shown.
+fn start_seen(
+    transport: Transport,
+    setup_path: &Path,
+    project: PathBuf,
+) -> (AppServer, mpsc::Receiver<Option<ProjectStatus>>) {
+    let (seen, shown) = mpsc::channel();
+    let config = AppConfig {
+        setup_path: setup_path.to_owned(),
+        project: Some(project),
+        open_root: setup_path.with_file_name("Open"),
+        backend: Backend::Null(Vec::new()),
+        ui_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui"),
+        on_project: Some(Box::new(move |status| {
+            let _ = seen.send(status);
+        })),
+    };
+    let server = match transport {
+        Transport::Tcp => AppServer::start(config),
+        Transport::Local => AppServer::start_local(config),
+    }
+    .unwrap();
+    (server, shown)
+}
+
+/// An edit made in the working folder, as a parameter write makes one.
+fn edit(dir: &Path, from: &str, to: &str) {
+    let toml = dir.join("project.toml");
+    let text = fs::read_to_string(&toml).unwrap();
+    let edited = text.replace(&format!("gain = {from}"), &format!("gain = {to}"));
+    assert_ne!(text, edited);
+    fs::write(toml, edited).unwrap();
+}
+
+/// M2.8-12 AC15-AC20 through the window's requests (no window): the
+/// project and its edited state, Save, Save As, and exit keeping an edited
+/// working folder unless its edits are let go; the window is told of each
+/// change (its title).
+fn the_window_s_requests_reach_the_project(transport: Transport) {
+    let (base, path) = setup("project-file", transport);
+    let file = base.join("tone.signal");
+    archive::write_atomic(&file, &archive::pack(&tone()).unwrap()).unwrap();
+    let (mut server, shown) = start_seen(transport, &path, file.clone());
+    let project = server.project().unwrap();
+    assert_eq!(project.file.as_deref(), Some(file.as_path()));
+    assert_eq!(project.name, "tone");
+    assert!(!project.edited);
+    assert!(project.dir.starts_with(base.join("Open")));
+    let first = shown
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.file.as_deref(), Some(file.as_path()));
+
+    edit(&project.dir, "0.5", "0.25");
+    assert!(
+        server.project().unwrap().edited,
+        "the working folder differs"
+    );
+    let told = loop {
+        let status = shown
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        if status.edited {
+            break status;
+        }
+    };
+    assert_eq!(told.name, "tone");
+    server.save().unwrap();
+    assert!(!server.project().unwrap().edited);
+    let unpacked = base.join("check");
+    archive::unpack(&fs::read(&file).unwrap(), &unpacked).unwrap();
+    assert!(
+        fs::read_to_string(unpacked.join("project.toml"))
+            .unwrap()
+            .contains("gain = 0.25")
+    );
+
+    let copy = base.join("copy.signal");
+    server.save_as(&copy).unwrap();
+    assert_eq!(
+        server.project().unwrap().file.as_deref(),
+        Some(copy.as_path())
+    );
+    assert_eq!(Setup::load(&path).0.last_project, Some(copy.clone()));
+
+    // Exit with the edits unanswered: the working folder is kept.
+    edit(&project.dir, "0.25", "0.125");
+    server.exit(None, false);
+    assert!(
+        project.dir.join("project.toml").is_file(),
+        "the edits are kept"
+    );
+
+    // Exit with Don't Save: removed.
+    let (mut server, _) = start_seen(transport, &path, copy.clone());
+    let again = server.project().unwrap();
+    assert_ne!(again.dir, project.dir);
+    edit(&again.dir, "0.25", "0.75");
+    server.exit(None, true);
+    assert!(!again.dir.exists(), "the edits were let go");
+
+    // Open: another project, the edits saved first.
+    let (server, _) = start_seen(transport, &path, copy.clone());
+    let third = server.project().unwrap();
+    edit(&third.dir, "0.25", "0.75");
+    server.open(&tone(), Edits::Save).unwrap();
+    let opened = server.project().unwrap();
+    assert_eq!(opened.file, None);
+    assert_eq!(opened.dir, tone());
+    assert!(!third.dir.exists());
+    let refused = server
+        .open(&base.join("missing.signal"), Edits::Ask)
+        .unwrap_err();
+    assert!(refused.contains("missing.signal"), "{refused}");
+    drop(server);
+    fs::remove_dir_all(&base).unwrap();
+}
+
 both!(
     a_later_client_describes_every_parameter_while_playing,
     the_url_carries_a_new_token_in_its_fragment,
@@ -344,4 +469,5 @@ both!(
     it_starts_stopped_on_the_last_project,
     exit_stops_saves_the_window_and_closes_clients,
     dropping_it_saves_the_setup,
+    the_window_s_requests_reach_the_project,
 );

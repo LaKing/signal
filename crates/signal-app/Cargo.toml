@@ -31,9 +31,10 @@ signal-ui = { workspace = true }
 # ADR 0023: the window and its WebView.
 wry = { workspace = true }
 tao = { workspace = true }
-# The native menu bar: File (Open, Save, Interface setup, Quit).
+# The native menu bar: File (Open, Save, Save As, Interface setup, Quit).
 muda = { workspace = true }
-# Open Project…'s folder chooser (NSOpenPanel through its safe API).
+# Open…'s chooser (NSOpenPanel), Save As (NSSavePanel) and the "Save
+# changes?" alert (NSAlert), through their safe API.
 objc2 = { workspace = true }
 objc2-foundation = { workspace = true }
 objc2-app-kit = { workspace = true }

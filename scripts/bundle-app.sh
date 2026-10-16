@@ -125,6 +125,42 @@ printf '%s\n' \
   '		<key>NSAllowsLocalNetworking</key>' \
   '		<true/>' \
   '	</dict>' \
+  '	<key>CFBundleDocumentTypes</key>' \
+  '	<array>' \
+  '		<dict>' \
+  '			<key>CFBundleTypeName</key>' \
+  '			<string>Signal Project</string>' \
+  '			<key>CFBundleTypeRole</key>' \
+  '			<string>Editor</string>' \
+  '			<key>LSHandlerRank</key>' \
+  '			<string>Owner</string>' \
+  '			<key>LSItemContentTypes</key>' \
+  '			<array>' \
+  '				<string>hu.d250.signal.project</string>' \
+  '			</array>' \
+  '		</dict>' \
+  '	</array>' \
+  '	<key>UTExportedTypeDeclarations</key>' \
+  '	<array>' \
+  '		<dict>' \
+  '			<key>UTTypeIdentifier</key>' \
+  '			<string>hu.d250.signal.project</string>' \
+  '			<key>UTTypeDescription</key>' \
+  '			<string>Signal Project</string>' \
+  '			<key>UTTypeConformsTo</key>' \
+  '			<array>' \
+  '				<string>public.data</string>' \
+  '				<string>public.content</string>' \
+  '			</array>' \
+  '			<key>UTTypeTagSpecification</key>' \
+  '			<dict>' \
+  '				<key>public.filename-extension</key>' \
+  '				<array>' \
+  '					<string>signal</string>' \
+  '				</array>' \
+  '			</dict>' \
+  '		</dict>' \
+  '	</array>' \
   '</dict>' \
   '</plist>' \
   > "$APP/Contents/Info.plist"

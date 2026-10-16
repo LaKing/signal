@@ -16,6 +16,8 @@
 //! - [`frames`]: the binary data frames.
 //! - [`app`]: Signal.app's rules, shared by its `AppState` and the Host's
 //!   app mode ([`Host::new_app`], M2.8-4).
+//! - [`document`]: a `.signal` project opened in the app (M2.8-12): its
+//!   working folder and whether it is edited.
 
 #![cfg_attr(
     not(test),
@@ -29,6 +31,7 @@
 
 pub mod app;
 pub mod bindings;
+pub mod document;
 mod entities;
 pub mod frames;
 mod host;
@@ -42,7 +45,9 @@ pub mod setup;
 
 use std::path::{Path, PathBuf};
 
-pub use host::{AppHostConfig, Finished, FirstRun, Host, HostConfig, project_ui};
+pub use host::{
+    AppHostConfig, Edits, Finished, FirstRun, Host, HostConfig, ProjectStatus, project_ui,
+};
 #[cfg(feature = "test-hooks")]
 pub use local::LocalStream;
 #[cfg(feature = "test-hooks")]

@@ -12,7 +12,8 @@ test('Cmd-O, Cmd-S and Cmd-comma are the menu’s shortcuts', () => {
   assert.equal(shortcut({ metaKey: true, key: 's' }), 'save');
   assert.equal(shortcut({ metaKey: true, key: ',' }), 'setup');
   assert.equal(shortcut({ key: 's' }), null, 'without Cmd');
-  assert.equal(shortcut({ metaKey: true, shiftKey: true, key: 's' }), null);
+  assert.equal(shortcut({ metaKey: true, shiftKey: true, key: 's' }), null, 'Save As (⇧⌘S) is native only');
+  assert.equal(shortcut({ metaKey: true, shiftKey: true, key: 'S' }), null);
   assert.equal(shortcut({ metaKey: true, key: 'v' }), null, 'paste is the Edit menu’s');
   assert.equal(shortcut({ metaKey: true, key: 'q' }), null, 'Quit is the native menu’s');
 });

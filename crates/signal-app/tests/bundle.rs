@@ -86,6 +86,28 @@ fn bundle_app_builds_a_signed_bundle() {
         plist_value(&plist, "NSAppTransportSecurity.NSAllowsLocalNetworking"),
         "true"
     );
+    // M2.8-12 AC14: .signal files are Signal's documents, so the Finder
+    // opens them in Signal.app (tao's `Event::Opened`, main.rs).
+    let exported = "UTExportedTypeDeclarations.0";
+    assert_eq!(
+        plist_value(&plist, &format!("{exported}.UTTypeIdentifier")),
+        "hu.d250.signal.project"
+    );
+    assert_eq!(
+        plist_value(
+            &plist,
+            &format!("{exported}.UTTypeTagSpecification.public\\.filename-extension.0")
+        ),
+        "signal"
+    );
+    assert_eq!(
+        plist_value(&plist, "CFBundleDocumentTypes.0.LSItemContentTypes.0"),
+        "hu.d250.signal.project"
+    );
+    assert_eq!(
+        plist_value(&plist, "CFBundleDocumentTypes.0.CFBundleTypeRole"),
+        "Editor"
+    );
 
     // M2.8-4: the UI library inside the bundle (sealed by the signature
     // below), without its node tests.

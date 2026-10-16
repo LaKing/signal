@@ -1,9 +1,11 @@
-// Signal.app's menu actions (ADR 0023, M2.8-11). The menu is native (muda):
-// File (Open Project…, Save Project, Interface Setup…, Quit), the app menu
-// and Edit. It hands Open, Save and Interface Setup to the page as a
-// `signal-menu` event. In a browser (`signal ui`, or the app's URL opened
-// elsewhere) there is no native menu, so the page takes their shortcuts
-// itself. Plain ES module, no DOM.
+// Signal.app's menu actions (ADR 0023, M2.8-11, M2.8-12). The menu is
+// native (muda): File (Open…, Save, Save As…, Interface Setup…, Quit), the
+// app menu and Edit. It hands Save and Interface Setup (and Open… without
+// its chooser) to the page as a `signal-menu` event; Save As… is the
+// window's alone. In a browser (`signal ui`, or the app's URL opened
+// elsewhere) there is no native menu, so the page takes Cmd-O, Cmd-S and
+// Cmd-comma itself, and has no Save As and no chooser. Plain ES module, no
+// DOM.
 
 const KEYS = Object.freeze({ o: 'open', s: 'save', ',': 'setup' });
 

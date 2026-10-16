@@ -29,3 +29,4 @@ To change a decision, add a new ADR that supersedes the old one. Do not rewrite 
 | [0022](0022-output-adapters.md) | Output adapters: sinks generic in the engine, audio policy in `signal-output` |
 | [0023](0023-web-ui.md) | A web-based user interface (supersedes 0018) |
 | [0024](0024-restricted-inputs.md) | Restricted inputs (narrows 0016 §4 for the inputs a library restricts) |
+| [0025](0025-project-files.md) | Project files: a project folder as one `.signal` zip, opened, saved and saved as in Signal.app |

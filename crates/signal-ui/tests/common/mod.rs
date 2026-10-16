@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use signal_audio::{ConfigRange, DeviceInfo, Direction};
 use signal_core::Registry;
 use signal_engine::{Provenance, RtOptions};
+use signal_project::archive;
 use signal_ui::player::Backend;
 use signal_ui::{FirstRun, Host, HostConfig, LocalStream, ServerOptions, project_ui};
 use tungstenite::{Message, WebSocket};
@@ -142,6 +143,9 @@ pub struct Options {
     pub transport: Transport,
     /// A project folder to copy instead of the tone project.
     pub project: Option<PathBuf>,
+    /// Serve the copy as `signal ui` serves a `.signal` file (M2.8-12): it
+    /// is packed into `project.signal` and played from a temporary unpack.
+    pub packed: bool,
 }
 
 impl Default for Options {
@@ -151,6 +155,7 @@ impl Default for Options {
             recording: false,
             transport: Transport::Tcp,
             project: None,
+            packed: false,
         }
     }
 }
@@ -191,10 +196,20 @@ pub fn rig(name: &str, options: Options) -> Rig {
         }
     }
     let setup = base.join("setup.toml");
+    let (dir, source, temporary) = if options.packed {
+        let file = base.join("project.signal");
+        archive::write_atomic(&file, &archive::pack(&dir).unwrap()).unwrap();
+        let temporary = archive::TempProject::unpack(&file).unwrap();
+        (temporary.dir().to_owned(), file, Some(temporary))
+    } else {
+        (dir.clone(), dir, None)
+    };
     let mut registry = Registry::new();
     signal_std::register(&mut registry).unwrap();
     let config = HostConfig {
         dir: dir.clone(),
+        source,
+        temporary,
         registry,
         setup_path: setup.clone(),
         backend: Backend::Null(devices()),
@@ -493,11 +508,11 @@ impl Rig {
     }
 
     /// Drops the host (its servers stop) and lets the detached client
-    /// threads see it before the folder goes.
+    /// threads see it before the test's folder (the Setup's) goes.
     pub fn finish(mut self) {
         drop(self.host.take());
         thread::sleep(Duration::from_millis(100));
-        if let Some(base) = self.dir.parent() {
+        if let Some(base) = self.setup.parent() {
             let _ = fs::remove_dir_all(base);
         }
     }

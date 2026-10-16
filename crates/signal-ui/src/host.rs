@@ -12,8 +12,10 @@
 //!
 //! In app mode ([`Host::new_app`], Signal.app's server, M2.8-4) it starts
 //! stopped and takes the app's own messages too (`app.get`,
-//! `transport.play`/`stop`, `project.open`), with Signal.app's rules
-//! ([`crate::app`]): every run plays from the Setup, as the app's state does.
+//! `transport.play`/`stop`, `project.open`, `project.save`), with Signal.app's
+//! rules ([`crate::app`]): every run plays from the Setup, as the app's state
+//! does. A `.signal` project (M2.8-12) plays from its working folder
+//! ([`crate::document`]); `signal ui` reopens only the project it serves.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -39,13 +41,15 @@ use signal_output::{
     Controller, Meter, NullDriver, SCOPE_POINTS, SCOPE_SLOTS, ScopeBlock, VECTOR_MAX_ROWS,
     VECTOR_SLOTS, VectorSnapshot, VectorUnbound, realtime_with,
 };
+use signal_project::archive::{self, TempProject};
 use signal_project::live::{Both, ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload_observed};
 use signal_project::session::{LiveRecorder, SessionRecorder, sink_of};
-use signal_project::{Diagnostic, LoadError, Project, located};
+use signal_project::{Diagnostic, LoadError, PROJECT_FILE, Project, located};
 
 use crate::PROTOCOL;
 use crate::app::{self, Status};
 use crate::bindings::{Targets, check};
+use crate::document::{Document, project_name};
 use crate::frames::{self, frame};
 use crate::panel::{Panel, Target, Written, after_write, ramp_frames, write_project};
 use crate::player::{Backend, Input, Interface, Output, Selection, open_input, open_output};
@@ -76,6 +80,12 @@ pub struct FirstRun {
 pub struct HostConfig {
     /// The project folder.
     pub dir: PathBuf,
+    /// The project as given: `dir`, or the `.signal` file `dir` was unpacked
+    /// from. A `project.open` of it reopens it (M2.8-12); nothing else opens.
+    pub source: PathBuf,
+    /// The temporary folder a `.signal` file was unpacked into, kept (and
+    /// removed) with the host.
+    pub temporary: Option<TempProject>,
     /// The modules.
     pub registry: Registry,
     /// The Setup file `setup.*` reads and writes.
@@ -105,8 +115,12 @@ pub struct HostConfig {
 pub struct AppHostConfig {
     /// The Setup file the app reads and writes.
     pub setup_path: PathBuf,
-    /// The project folder to open at start (else the Setup's last one).
+    /// The project folder or `.signal` file to open at start (else the
+    /// Setup's last one).
     pub project: Option<PathBuf>,
+    /// Where opened `.signal` files are unpacked
+    /// ([`document::open_root`](crate::document::open_root)).
+    pub open_root: PathBuf,
     /// The modules.
     pub registry: Registry,
     /// CoreAudio, or the null driver with a device list.
@@ -115,6 +129,31 @@ pub struct AppHostConfig {
     pub compute: Vec<String>,
     /// The servers (`project_ui` is the open project's, set by the host).
     pub server: ServerOptions,
+}
+
+/// What opening another project (or quitting) does with an edited `.signal`
+/// project's changes (M2.8-12): nothing is let go unless asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edits {
+    /// Refuse while edited (`edited`), so the caller asks first.
+    Ask,
+    /// Save them to the file first.
+    Save,
+    /// Let them go.
+    Discard,
+}
+
+/// The open project as the window shows it (its title, the close prompt).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectStatus {
+    /// The folder the project plays from (a `.signal` file's working folder).
+    pub dir: PathBuf,
+    /// The `.signal` file, for one.
+    pub file: Option<PathBuf>,
+    /// Its name: the file's stem, or the folder's name.
+    pub name: String,
+    /// The working folder differs from the file.
+    pub edited: bool,
 }
 
 /// Signal.app's state beside the protocol's (app mode): what the app's
@@ -367,6 +406,14 @@ pub struct Host {
     messages: Vec<String>,
     /// Signal.app's state, in app mode.
     app: Option<AppMode>,
+    /// The project as given to `signal ui` (its folder or `.signal` file).
+    source: PathBuf,
+    /// `signal ui`'s temporary folder of a `.signal` file.
+    temporary: Option<TempProject>,
+    /// App mode: where `.signal` files are unpacked.
+    open_root: PathBuf,
+    /// App mode: the open `.signal` file and its working folder.
+    document: Option<Document>,
     /// Controls whose last write failed.
     failed: BTreeMap<(String, String), Failed>,
     /// Controls written while their live send was refused: the reload of
@@ -533,6 +580,7 @@ impl Host {
         let AppHostConfig {
             setup_path,
             project,
+            open_root,
             registry,
             backend,
             compute,
@@ -542,6 +590,8 @@ impl Host {
         // first run's options and `rt` are not used.
         let config = HostConfig {
             dir: PathBuf::new(),
+            source: PathBuf::new(),
+            temporary: None,
             registry,
             setup_path,
             backend,
@@ -558,10 +608,17 @@ impl Host {
             server: options,
         };
         let mut host = Host::blank(config, server, Some(AppMode::default()));
-        if let Some(dir) = app::initial_project(project, &host.setup) {
-            host.open(&dir);
-            // Saved with the next change to the Setup.
-            app::opened(&mut host.setup, dir);
+        host.open_root = open_root;
+        if let Some(path) = app::initial_project(project, &host.setup) {
+            // A refused .signal opens nothing; the window says why.
+            if let Err(message) = host.open_path(&path) {
+                if let Some(mode) = host.app.as_mut() {
+                    mode.message = Some(message);
+                }
+            } else {
+                // Saved with the next change to the Setup.
+                app::opened(&mut host.setup, path);
+            }
         }
         host
     }
@@ -614,6 +671,10 @@ impl Host {
             writes: 0,
             messages: Vec::new(),
             app,
+            source: config.source,
+            temporary: config.temporary,
+            open_root: PathBuf::new(),
+            document: None,
             failed: BTreeMap::new(),
             resend: BTreeSet::new(),
             port_edits: BTreeMap::new(),
@@ -648,9 +709,20 @@ impl Host {
     }
 
     /// Signal.app exits: stops playing, records the window's size (when
-    /// known) in the Setup and saves it. Returns what to tell the operator.
-    pub fn close(&mut self, window: Option<Window>) -> Vec<String> {
+    /// known) in the Setup and saves it. A `.signal` project's working
+    /// folder is removed, unless it is edited and `discard` is false: then it
+    /// is kept, and the message says where. Returns what to tell the operator.
+    pub fn close(&mut self, window: Option<Window>, discard: bool) -> Vec<String> {
         self.stop_app();
+        if let Some(document) = self.document.take() {
+            let name = document.name();
+            if let Some(kept) = document.close(discard) {
+                self.messages.push(format!(
+                    "the unsaved edits of {name} are kept in {}",
+                    kept.display()
+                ));
+            }
+        }
         app::exit(&mut self.setup, window);
         if let Err(message) = app::save(&self.setup, &self.setup_path) {
             self.messages.push(message);
@@ -845,6 +917,9 @@ impl Host {
     /// App mode: the status line every [`STATUS_EVERY`] while playing, and
     /// the `app` message whenever it changed.
     fn push_app(&mut self) {
+        if let Some(document) = self.document.as_mut() {
+            document.refresh();
+        }
         let Some(mode) = self.app.as_mut() else {
             return;
         };
@@ -911,6 +986,9 @@ impl Host {
             "type": "app",
             "project": mode.opened.then(|| json!({
                 "dir": self.dir.display().to_string(),
+                "file": self.document.as_ref().map(|d| d.file().display().to_string()),
+                "name": self.project_name(),
+                "edited": self.document.as_ref().is_some_and(Document::edited),
                 "sampleRate": (mode.diagnostics.is_empty() && self.rate > 0).then_some(self.rate),
                 "diagnostics": mode.diagnostics,
             })),
@@ -1147,19 +1225,79 @@ impl Host {
         }
     }
 
-    /// `project.open` (app mode): stops, opens the folder at `path` (made
-    /// absolute: it becomes the Setup's last project) and saves the Setup.
+    /// `project.open`. App mode: stops, opens the folder or `.signal` file at
+    /// `path` (made absolute: it becomes the Setup's last project) and saves
+    /// the Setup; while a `.signal` project is edited it is refused
+    /// (`edited`) unless `unsaved` is `"save"` or `"discard"`. `signal ui`:
+    /// only the project it serves, which is reopened ([`Host::reopen`]).
     fn project_open(&mut self, message: &Value) -> Result<Value, Failure> {
-        if self.app.is_none() {
-            return Err(app_only());
-        }
         let path = message
             .get("path")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|p| !p.is_empty())
-            .ok_or_else(|| fail("bad-message", "project.open needs `path`"))?;
-        let dir = std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path));
+            .ok_or_else(|| fail("bad-message", "project.open needs `path`"));
+        if self.app.is_none() {
+            return self.reopen(path?);
+        }
+        let path = path?;
+        let edits = match message.get("unsaved").and_then(Value::as_str) {
+            None => Edits::Ask,
+            Some("save") => Edits::Save,
+            Some("discard") => Edits::Discard,
+            Some(other) => {
+                return Err(fail(
+                    "bad-message",
+                    format!("`unsaved` is \"save\" or \"discard\", not \"{other}\""),
+                ));
+            }
+        };
+        let path = std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path));
+        self.open_with(&path, edits)
+    }
+
+    /// App mode: opens the folder (or its `project.toml`) or the `.signal`
+    /// file at `path`, as `project.open` does; the error is what to show.
+    pub fn open_project(&mut self, path: &Path, edits: Edits) -> Result<(), String> {
+        match self.open_with(path, edits) {
+            // As after a `project.open`: every client is told.
+            Ok(_) => {
+                let describe = self.describe(false);
+                self.broadcast(&describe);
+                Ok(())
+            }
+            Err(failure) => {
+                if let Some(mode) = self.app.as_mut() {
+                    mode.message = Some(failure.message.clone());
+                }
+                Err(failure.message)
+            }
+        }
+    }
+
+    fn open_with(&mut self, path: &Path, edits: Edits) -> Result<Value, Failure> {
+        if self.app.is_none() {
+            return Err(app_only());
+        }
+        let edited = self.document.as_mut().is_some_and(Document::check);
+        if edited && edits == Edits::Ask {
+            return Err(fail(
+                "edited",
+                format!("Save changes to {}?", self.project_name()),
+            ));
+        }
+        // Saved first, so that reopening the same file opens what was saved.
+        if edited && edits == Edits::Save {
+            self.save_document().map_err(|m| fail("not-saved", m))?;
+        }
+        // The new project is unpacked before anything stops: a refused one
+        // changes nothing.
+        // A folder named `*.signal` is a folder.
+        let prepared = if archive::is_project_file(path) && !path.is_dir() {
+            Some(Document::open(path, &self.open_root).map_err(|m| fail("archive", m))?)
+        } else {
+            None
+        };
         if let Some(mode) = self.app.as_mut() {
             mode.message = None;
             // Opened stopped: switching on again plays nothing.
@@ -1169,9 +1307,18 @@ impl Host {
         // the window says so.
         let unsaved = self.unsaved().len();
         self.stop_app();
+        if let Some(previous) = self.document.take() {
+            // Not edited, saved, or let go on request.
+            previous.close(true);
+        }
+        let dir = match &prepared {
+            Some(document) => document.working().to_owned(),
+            None => folder_of(path),
+        };
+        self.document = prepared;
         self.open(&dir);
         self.failed.clear();
-        app::opened(&mut self.setup, dir.clone());
+        app::opened(&mut self.setup, path.to_owned());
         let saved = app::save(&self.setup, &self.setup_path);
         let mode = self.app.as_mut();
         if let Some(mode) = mode {
@@ -1193,8 +1340,156 @@ impl Host {
         Ok(json!({
             "type": "project",
             "dir": dir.display().to_string(),
+            "file": self.document.as_ref().map(|d| d.file().display().to_string()),
             "loads": diagnostics.is_empty(),
             "diagnostics": diagnostics,
+        }))
+    }
+
+    /// App mode, at start: opens `path`, a folder or a `.signal` file.
+    fn open_path(&mut self, path: &Path) -> Result<(), String> {
+        if archive::is_project_file(path) && !path.is_dir() {
+            let document = Document::open(path, &self.open_root)?;
+            let dir = document.working().to_owned();
+            self.document = Some(document);
+            self.open(&dir);
+        } else {
+            self.open(&folder_of(path));
+        }
+        Ok(())
+    }
+
+    /// The open project's name: its file's stem, or its folder's name.
+    fn project_name(&self) -> String {
+        match &self.document {
+            Some(document) => document.name(),
+            None => project_name(&self.dir),
+        }
+    }
+
+    /// App mode: the open project as the window shows it, its edited state
+    /// looked at now; `None` without one.
+    pub fn project_status(&mut self) -> Option<ProjectStatus> {
+        if let Some(document) = self.document.as_mut() {
+            document.check();
+        }
+        self.project_shown()
+    }
+
+    /// App mode: the open project as last looked at (each step looks at
+    /// most every 250 ms); `None` without one.
+    pub fn project_shown(&self) -> Option<ProjectStatus> {
+        if !self.app.as_ref().is_some_and(|m| m.opened) {
+            return None;
+        }
+        Some(ProjectStatus {
+            dir: self.dir.clone(),
+            file: self.document.as_ref().map(|d| d.file().to_owned()),
+            name: self.project_name(),
+            edited: self.document.as_ref().is_some_and(Document::edited),
+        })
+    }
+
+    /// Save of a `.signal` project: the working folder written back to the
+    /// file atomically. A folder project has nothing to write here (its
+    /// parameters are written by `retry`).
+    pub fn save_document(&mut self) -> Result<(), String> {
+        match self.document.as_mut() {
+            Some(document) => document.save(),
+            None => Ok(()),
+        }
+    }
+
+    /// Save As (app mode): the project written to the `.signal` file
+    /// `file`, which it is from then on (the Setup's last project). A folder
+    /// project's folder is left as it is: the project is opened again, from
+    /// the new file, stopped.
+    pub fn save_as(&mut self, file: &Path) -> Result<(), String> {
+        if self.app.is_none() {
+            return Err(app_only().message);
+        }
+        let saved = match self.document.as_mut() {
+            Some(document) => document.save_as(file),
+            None => {
+                let bytes = archive::pack(&self.dir)
+                    .map_err(|e| format!("{} was not saved: {e}", file.display()))?;
+                archive::write_atomic(file, &bytes)
+                    .map_err(|e| format!("{} was not saved: {e}", file.display()))?;
+                return self.open_project(file, Edits::Discard);
+            }
+        };
+        saved?;
+        app::opened(&mut self.setup, file.to_owned());
+        app::save(&self.setup, &self.setup_path)
+    }
+
+    /// `project.save` (app mode): [`Host::save_document`].
+    fn project_save(&mut self) -> Result<Value, Failure> {
+        if self.app.is_none() {
+            return Err(app_only());
+        }
+        let saved = self.save_document().map_err(|m| fail("not-saved", m));
+        self.noted(saved)?;
+        Ok(json!({
+            "type": "saved",
+            "file": self.document.as_ref().map(|d| d.file().display().to_string()),
+        }))
+    }
+
+    /// `signal ui`'s `project.open`: only the project it serves (its folder,
+    /// its `project.toml`, or the `.signal` file it was started with), which
+    /// is played again from frame 0 from its files: a `.signal` file is
+    /// unpacked again into a new temporary folder. Anything else is refused
+    /// (`docs/ui-protocol.md` "Security notes").
+    fn reopen(&mut self, path: &str) -> Result<Value, Failure> {
+        let asked = Path::new(path);
+        let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        };
+        let served = same(asked, &self.source)
+            || (asked.file_name().is_some_and(|n| n == PROJECT_FILE)
+                && asked.parent().is_some_and(|p| same(p, &self.source)));
+        if !served {
+            return Err(app_only());
+        }
+        if self.recording {
+            return Err(fail(
+                "recording",
+                "a run that records a session or its audio is not reopened (a recording covers one run from frame 0)",
+            ));
+        }
+        let temporary = match &self.temporary {
+            Some(_) => Some(
+                TempProject::unpack(&self.source)
+                    .map_err(|e| fail("archive", format!("{}: {e}", self.source.display())))?,
+            ),
+            None => None,
+        };
+        if let Some(old) = self.run.take() {
+            stop(old);
+        }
+        self.abandon();
+        self.failed.clear();
+        if let Some(temporary) = temporary {
+            self.dir = temporary.dir().to_owned();
+            // The previous copy is removed once its run is stopped.
+            self.temporary = Some(temporary);
+            self.server.set_project_ui(project_ui(&self.dir));
+        }
+        let built = self.build(true);
+        let error = built.as_ref().err().cloned();
+        if let Ok((run, notes)) = built {
+            self.install(run);
+            self.rearm();
+            self.messages.extend(notes);
+        }
+        Ok(json!({
+            "type": "project",
+            "dir": self.dir.display().to_string(),
+            "file": self.temporary.as_ref().map(|_| self.source.display().to_string()),
+            "loads": error.is_none(),
+            "diagnostics": error.into_iter().collect::<Vec<_>>(),
         }))
     }
 
@@ -1810,6 +2105,7 @@ impl Host {
             "transport.play" => self.transport(true).map(Some),
             "transport.stop" => self.transport(false).map(Some),
             "project.open" => self.project_open(&message).map(Some),
+            "project.save" => self.project_save().map(Some),
             "stats" => Ok(Some(self.stats())),
             "ping" => Ok(Some(json!({
                 "type": "pong",
@@ -3303,6 +3599,16 @@ fn buffer_of(message: &Value, default: u32) -> Result<u32, Failure> {
 }
 
 /// The refusal of an app message outside app mode.
+/// The folder of `path`: its parent for a project's `project.toml`.
+fn folder_of(path: &Path) -> PathBuf {
+    match path.parent() {
+        Some(dir) if path.file_name().is_some_and(|n| n == PROJECT_FILE) && path.is_file() => {
+            dir.to_owned()
+        }
+        _ => path.to_owned(),
+    }
+}
+
 fn app_only() -> Failure {
     fail(
         "not-allowed",

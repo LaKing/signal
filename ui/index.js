@@ -25,6 +25,7 @@ import './app/lib/tabs.test.js';
 import './app/lib/power.test.js';
 import './app/lib/status.test.js';
 import './app/lib/save.test.js';
+import './app/lib/document.test.js';
 import './app/lib/layout.test.js';
 import './app/lib/context.test.js';
 import './lib/cards.test.js';

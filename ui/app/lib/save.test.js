@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { saveReport, saveRequests } from './save.js';
+import { archiveSave, saveReport, saveRequests } from './save.js';
 
 const unsaved = {
   count: 3,
@@ -27,4 +27,11 @@ test('it says "saved", or what was not', () => {
   const report = saveReport(unsaved, [{ address: '/out.gain', error: { code: 'write-failed', message: 'Permission denied' } }, { address: '/drums.kick_decay' }]);
   assert.equal(report.saved, false);
   assert.equal(report.text, 'not saved: /out.gain: Permission denied; /drums/kick/amp_env.decay_ms: a live edit of a port inside the plan, not in project.toml');
+});
+
+// M2.8-12 AC18: Save on a .signal project writes it back to its file; a folder project keeps today's Save.
+test('a .signal project is then written to its file', () => {
+  assert.deepEqual(archiveSave({ dir: '/open/kick-1-1', file: '/p/kick.signal' }), { type: 'project.save' });
+  assert.equal(archiveSave({ dir: '/p/pulse', file: null }), null);
+  assert.equal(archiveSave(null), null);
 });

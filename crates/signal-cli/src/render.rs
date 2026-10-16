@@ -24,7 +24,7 @@ pub(crate) const FILES: [&str; 4] = ["audio.wav", "manifest.json", "log.jsonl", 
 #[derive(Args)]
 #[command(group(ArgGroup::new("length").required(true).args(["seconds", "frames"])))]
 pub(crate) struct RenderArgs {
-    /// The project folder (containing project.toml).
+    /// The project folder (containing project.toml), or a .signal file.
     project: PathBuf,
     /// Render this many seconds (rounded to the nearest frame).
     #[arg(long)]
@@ -58,8 +58,10 @@ pub(crate) fn run(
     setup: Option<&Path>,
     json: bool,
 ) -> Result<(), Failure> {
-    let dir = &args.project;
-    let project = Project::load(dir).map_err(|error| match error {
+    // A .signal file is read from a temporary folder, kept until the end.
+    let opened = crate::files::project_arg(&args.project)?;
+    let (load_dir, dir) = (opened.dir(), opened.shown());
+    let project = Project::load(load_dir).map_err(|error| match error {
         LoadError::Invalid(diagnostics) => Failure::Invalid(located(dir, diagnostics)),
         error @ LoadError::Io { .. } => Failure::Io(error.to_string()),
     })?;

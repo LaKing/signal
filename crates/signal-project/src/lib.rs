@@ -20,7 +20,10 @@
 //! - [`provenance`]: the build's provenance for render manifests and sessions.
 //! - [`write_parameter`]: a top-level instance's parameter written into
 //!   `project.toml` text with `toml_edit`, keeping everything else.
+//! - [`archive`]: project files (`.signal`, ADR 0025): a project folder
+//!   packed into one deterministic zip, and unpacked with every entry checked.
 
+pub mod archive;
 mod diagnostic;
 mod diff;
 pub mod live;

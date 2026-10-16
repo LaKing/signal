@@ -17,7 +17,7 @@ export function select(current, requested) {
 }
 
 /**
- * What a menu action shows: Interface Setup… the Setup tab; Open Project…
+ * What a menu action shows: Interface Setup… the Setup tab; Open…
  * the Setup tab with its project folder field focused (in a browser;
  * Signal.app shows the system's folder chooser instead, ADR 0023). Null for
  * an action without a tab.

@@ -1,11 +1,12 @@
-// Signal.app's window (ADR 0023 §2, M2.8-4, M2.8-11): one page, web
+// Signal.app's window (ADR 0023 §2, M2.8-4, M2.8-11, M2.8-12): one page, web
 // components over the page's connection to the app's server. The toolbar
-// (power switch, tabs, Play and Stop, the status) is always there; the tabs
+// (power switch, tabs, Play and Stop, the project's name with "Edited", the
+// status) is always there; the tabs
 // are the project's panel, the parameters (status, meters, messages and the
 // parameter list) and the setup (the project folder and the interface
 // setup), switched without a reload or a new connection. The app's own
-// messages (`app`, `status`, `app.power`, `transport.*`, `project.open`)
-// are in docs/ui-protocol.md "Signal.app". Plain ES modules, no build step.
+// messages (`app`, `status`, `app.power`, `transport.*`, `project.open`,
+// `project.save`) are in docs/ui-protocol.md "Signal.app". Plain ES modules, no build step.
 // Every text from the server goes in with textContent, never as HTML.
 // Nothing here changes size with a value (docs/ui-controls.md "Stable layout").
 
@@ -17,7 +18,8 @@ import { pageHandlesShortcuts, panelReloads, panelSource, shortcut } from './lib
 import { dragMessage, fileNote, planUpdate, releaseMessage, resetMessage, rows, shown, structureKey, valuesOf } from './lib/parameters.js';
 import { INITIAL, controls, powerRequest, reduce } from './lib/power.js';
 import { contextItems, keepsSystemMenu, placeMenu } from './lib/context.js';
-import { saveReport, saveRequests } from './lib/save.js';
+import { PROMPT, fieldValue, openRetry, projectLabel, windowTitle } from './lib/document.js';
+import { archiveSave, saveReport, saveRequests } from './lib/save.js';
 import { compactStatus, statusFields } from './lib/status.js';
 import { INITIAL_TAB, TABS, select, tabForAction } from './lib/tabs.js';
 import { retryMessage, revertMessage, unsavedLine, unsavedOf } from '../lib/unsaved.js';
@@ -66,7 +68,9 @@ class AppElement extends HTMLElement {
 
 /**
  * The toolbar: the power switch, the tabs (Panel | Parameters | Setup),
- * Play and Stop, and the compact status with the last notice. It switches
+ * Play and Stop, the project's name (with "Edited" while a .signal
+ * project's working folder differs from its file), and the compact status
+ * with the last notice. It switches
  * the tabs, and runs the menu's actions: the native menu's (`signal-menu`)
  * and, without one (a browser), their shortcuts.
  */
@@ -91,10 +95,15 @@ export class SignalAppToolbar extends AppElement {
       this.stop.addEventListener('click', () => this.request({ type: 'transport.stop' }).catch(failed));
       this.line = el('span', { className: 'line' });
       this.note = el('span', { className: 'note' });
+      this.project = null;
+      this.name = el('span', { className: 'name' });
+      // Its space is kept, edited or not ("Stable layout").
+      this.edited = el('span', { className: 'edited', textContent: 'Edited' });
       this.append(
         this.switch,
         el('div', { className: 'tabs', role: 'tablist' }, ...this.tabs.values()),
         el('div', { className: 'transport' }, this.play, this.stop),
+        el('span', { className: 'project-name' }, this.name, this.edited),
         el('output', { className: 'compact-status' }, this.line, this.note),
       );
       this.menu = (event) => this.run(event.detail);
@@ -148,7 +157,7 @@ export class SignalAppToolbar extends AppElement {
     for (const panel of document.querySelectorAll('[role="tabpanel"][data-tab]')) panel.hidden = panel.dataset.tab !== this.tab;
   }
 
-  /** A menu action: Open Project…, Save Project, Interface Setup…. */
+  /** A menu action: Open…, Save, Interface Setup…. */
   run(action) {
     if (action === 'save') {
       this.save();
@@ -166,7 +175,7 @@ export class SignalAppToolbar extends AppElement {
     }
   }
 
-  /** Writes every unsaved parameter again (the existing retry) and says how it went. */
+  /** Writes every unsaved parameter again (the existing retry), then a .signal project to its file, and says how it went. */
   async save() {
     const unsaved = (this.connection ?? getDefaultConnection())?.unsaved ?? null;
     const results = await Promise.all(
@@ -178,6 +187,15 @@ export class SignalAppToolbar extends AppElement {
       ),
     );
     const report = saveReport(unsaved, results);
+    const archive = report.saved ? archiveSave(this.project) : null;
+    if (archive) {
+      try {
+        await this.request(archive);
+      } catch (error) {
+        failed(error);
+        return;
+      }
+    }
     window.dispatchEvent(new CustomEvent(report.saved ? 'signal-app-notice' : 'signal-app-error', { detail: report.text }));
   }
 
@@ -203,6 +221,7 @@ export class SignalAppToolbar extends AppElement {
   app(app) {
     this.power = reduce(this.power, { type: 'app', app });
     this.playing = app.playing;
+    this.project = app.project ?? null;
     this.render();
   }
 
@@ -226,39 +245,61 @@ export class SignalAppToolbar extends AppElement {
     this.play.disabled = c.playDisabled;
     this.stop.disabled = c.stopDisabled;
     this.line.textContent = compactStatus({ power: this.power.power, playing: this.playing, status: this.status });
+    const label = projectLabel(this.project);
+    this.name.textContent = label.name;
+    this.name.title = this.project?.file ?? this.project?.dir ?? '';
+    this.edited.style.visibility = label.edited ? 'visible' : 'hidden';
+    document.title = windowTitle(this.project);
   }
 }
 
 /**
- * The project folder (Setup tab): typed, or dropped on the window, and
- * Open. Open Project… focuses its field.
+ * The project (Setup tab): a folder, its project.toml or a .signal file,
+ * typed, and Open. Open… focuses its field without the app's chooser. While
+ * a .signal project is edited, opening another asks "Save changes?" here
+ * (the server refuses with `edited` until the person chooses).
  */
 export class SignalAppProject extends AppElement {
   connectedCallback() {
     if (!this.firstChild) {
-      this.field = el('input', { name: 'project', type: 'text', placeholder: 'project folder', spellcheck: false, size: 48 });
+      this.field = el('input', { name: 'project', type: 'text', placeholder: 'project folder or .signal file', spellcheck: false, size: 48 });
       const open = el('button', { type: 'button', textContent: 'Open' });
-      const form = el('form', { className: 'project' }, el('label', { textContent: 'Folder ' }, this.field), open);
+      const form = el('form', { className: 'project' }, el('label', { textContent: 'Project ' }, this.field), open);
       form.addEventListener('submit', (event) => {
         event.preventDefault();
         this.open(this.field.value);
       });
       open.addEventListener('click', () => this.open(this.field.value));
-      this.append(form);
-      this.dropped = (event) => this.open(event.detail);
-      window.addEventListener('signal-drop', this.dropped);
+      this.prompt = el('dialog', { className: 'prompt' });
+      this.append(form, this.prompt);
     }
     super.connectedCallback();
   }
 
-  disconnectedCallback() {
-    window.removeEventListener('signal-drop', this.dropped);
-    super.disconnectedCallback();
-  }
-
   open(path) {
     const text = String(path ?? '').trim();
-    if (text) this.request({ type: 'project.open', path: text }).catch(failed);
+    if (!text) return;
+    this.request({ type: 'project.open', path: text }).catch(async (error) => {
+      if (error.code !== 'edited') return failed(error);
+      const retry = openRetry(text, error, await this.ask(error.message));
+      if (retry) this.request(retry).catch(failed);
+    });
+  }
+
+  /** "Save changes to <name>?" in the page: resolves to the button chosen (`save`, `cancel` or `discard`). */
+  ask(text) {
+    return new Promise((resolve) => {
+      const buttons = PROMPT.map((b) => {
+        const button = el('button', { type: 'button', textContent: b.label });
+        button.addEventListener('click', () => this.prompt.close(b.id));
+        return button;
+      });
+      this.prompt.replaceChildren(el('p', { textContent: text }), el('div', { className: 'buttons' }, ...buttons));
+      this.prompt.returnValue = 'cancel';
+      this.prompt.addEventListener('close', () => resolve(this.prompt.returnValue || 'cancel'), { once: true });
+      this.prompt.showModal();
+      buttons[0].focus();
+    });
   }
 
   attach(connection) {
@@ -271,7 +312,7 @@ export class SignalAppProject extends AppElement {
   }
 
   app(app) {
-    if (document.activeElement !== this.field) this.field.value = app.project?.dir ?? '';
+    if (document.activeElement !== this.field) this.field.value = fieldValue(app.project);
   }
 }
 

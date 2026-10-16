@@ -1,6 +1,7 @@
-// Save Project (M2.8-11): edits are written on release, so Save writes again
-// every parameter still unsaved, through the existing retry, and says
-// "saved" or what was not. Plain ES module, no DOM.
+// Save (M2.8-11): edits are written on release, so Save writes again every
+// parameter still unsaved, through the existing retry, and says "saved" or
+// what was not. A .signal project (M2.8-12) is then written back to its
+// file (`project.save`). Plain ES module, no DOM.
 
 /** The `retry` of every unsaved control (`unsaved` as the host pushes it). */
 export function saveRequests(unsaved) {
@@ -21,4 +22,9 @@ export function saveReport(unsaved, results) {
     problems.push(`${p.address}: a live edit of a port inside the plan, not in project.toml`);
   }
   return problems.length ? { saved: false, text: `not saved: ${problems.join('; ')}` } : { saved: true, text: 'saved' };
+}
+
+/** After the retries, a .signal project's write to its file; none for a folder project. */
+export function archiveSave(project) {
+  return project?.file ? { type: 'project.save' } : null;
 }
