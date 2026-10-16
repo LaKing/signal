@@ -774,6 +774,13 @@ impl Host {
         }
     }
 
+    /// Test hooks: how long a connection accepted from now on has for its
+    /// handshake and `hello` with the token (5 s by default).
+    #[cfg(feature = "test-hooks")]
+    pub fn set_admission_deadline(&self, deadline: Duration) {
+        self.server.set_admission_deadline(deadline);
+    }
+
     /// Test hooks: holds (or releases) client `client`'s writer, so its
     /// queue fills as if its socket took nothing.
     #[cfg(feature = "test-hooks")]

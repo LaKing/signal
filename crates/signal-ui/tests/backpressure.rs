@@ -4,12 +4,16 @@
 //! and a control reply that does not fit evicts it; a client that drops its
 //! socket is removed; another client's edits are answered throughout, and no
 //! control step waits. M2.8-9: the number of connections is bounded, those
-//! past it are refused with a reason, and shutdown stays prompt.
+//! past it are refused with a reason, and shutdown stays prompt. A
+//! connection that has not said `hello` by the admission deadline, however
+//! slowly it sends, gives its place back.
 
 mod common;
 
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -215,6 +219,14 @@ fn connections_past_the_limit_are_refused_with_a_reason(transport: Transport) {
     }
     // A client leaves: its place is given back once its thread ends.
     drop(admitted.pop());
+    let _back = admit(&mut rig);
+    drop(admitted);
+    rig.finish();
+}
+
+/// A client that says `hello` with the token and is welcomed, once a place
+/// is free: until then it is refused (`too-many-clients`) and tries again.
+fn admit(rig: &mut common::Rig) -> common::Ws {
     let token = rig.host().token().to_owned();
     let until = Instant::now() + Duration::from_secs(10);
     loop {
@@ -227,12 +239,121 @@ fn connections_past_the_limit_are_refused_with_a_reason(transport: Transport) {
             got.of("welcome").or_else(|| got.of("error")).cloned()
         });
         if got["type"] == "welcome" {
-            break;
+            return ws;
         }
         assert_eq!(got["code"], "too-many-clients");
         thread::sleep(Duration::from_millis(50));
     }
-    drop(admitted);
+}
+
+/// Whether the server closed `stream` within `within`: its end of the
+/// stream (or a reset), not a read that times out.
+fn closed(stream: &mut Stream, within: Duration) -> bool {
+    let poll = Some(Duration::from_millis(20));
+    match stream {
+        Stream::Tcp(s) => s.set_read_timeout(poll).unwrap(),
+        Stream::Local(s) => s.set_read_timeout(poll),
+    }
+    let until = Instant::now() + within;
+    let mut buf = [0u8; 256];
+    while Instant::now() < until {
+        match stream.read(&mut buf) {
+            Ok(0) => return true,
+            Ok(_) => {}
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(_) => return true,
+        }
+    }
+    false
+}
+
+/// P2 audit (slow handshakes): a connection that has not said `hello` with
+/// the token loses its place at the admission deadline, counted from its
+/// acceptance across the handshake and `hello`, not per read. Every place is
+/// taken by connections that are silent or that trickle their handshake a
+/// byte every 20 ms (no read ever waits long); a newcomer is refused. Once
+/// the deadline (1 s here) has passed, every one of them is closed while
+/// the trickling goes on, and a healthy client is admitted, as are as many
+/// as there are places.
+fn connections_that_do_not_say_hello_in_time_give_their_place_back(transport: Transport) {
+    let mut rig = rig(
+        "admission-deadline",
+        Options {
+            transport,
+            ..Options::default()
+        },
+    );
+    rig.host().set_admission_deadline(Duration::from_secs(1));
+    let dial = Dial::of(rig.host());
+    let began = Instant::now();
+    let mut silent: Vec<_> = (0..MAX_CLIENTS / 2).map(|_| dial.silent()).collect();
+    let trickling = Arc::new(AtomicBool::new(true));
+    let trickles: Vec<_> = (MAX_CLIENTS / 2..MAX_CLIENTS)
+        .map(|_| {
+            let mut stream = dial.silent();
+            let trickling = Arc::clone(&trickling);
+            thread::spawn(move || {
+                let mut sent = stream.write_all(b"GET / HTTP/1.1\r\nX-Slow: ");
+                while sent.is_ok() && trickling.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(20));
+                    sent = stream.write_all(b"a");
+                }
+                // Closed by the server, else still trickling at the end.
+                sent.is_err()
+            })
+        })
+        .collect();
+    let (error, code, _) = dial.refused();
+    assert_eq!(error["code"], "too-many-clients", "every place is taken");
+    assert_eq!(code, 1013);
+
+    let mut first = admit(&mut rig);
+    let admitted = began.elapsed();
+    assert!(
+        admitted < Duration::from_secs(4),
+        "admitted after {admitted:?}, not at the 1 s deadline"
+    );
+    for stream in &mut silent {
+        assert!(closed(stream, Duration::from_secs(2)), "a silent one stays");
+    }
+    // Each trickle's writes fail once the server has closed it.
+    thread::sleep(Duration::from_millis(500));
+    trickling.store(false, Ordering::Relaxed);
+    for trickle in trickles {
+        assert!(trickle.join().unwrap(), "a trickling one stays");
+    }
+
+    // Every place is free again: as many clients as there are places.
+    let mut healthy: Vec<_> = (1..MAX_CLIENTS).map(|_| admit(&mut rig)).collect();
+    rig.request(&mut first, 1, json!({"type": "ping"}), "pong");
+    healthy.push(first);
+    drop(healthy);
+    rig.finish();
+}
+
+/// P2 audit (slow handshakes): stopping the servers ends the threads of
+/// connections that have not said `hello` at once, not at their deadline
+/// (5 s by default): each is closed within 1 s of the host's drop.
+fn connections_before_hello_end_at_shutdown(transport: Transport) {
+    let mut rig = rig(
+        "admission-shutdown",
+        Options {
+            transport,
+            ..Options::default()
+        },
+    );
+    let dial = Dial::of(rig.host());
+    let mut silent: Vec<_> = (0..4).map(|_| dial.silent()).collect();
+    for stream in &mut silent {
+        assert!(!closed(stream, Duration::from_millis(100)), "closed early");
+    }
+    drop(rig.host.take());
+    for stream in &mut silent {
+        assert!(
+            closed(stream, Duration::from_secs(1)),
+            "open after the stop"
+        );
+    }
     rig.finish();
 }
 
@@ -282,4 +403,6 @@ fn shutdown_with_stalled_clients_at_the_limit_is_prompt(transport: Transport) {
 both!(
     connections_past_the_limit_are_refused_with_a_reason,
     shutdown_with_stalled_clients_at_the_limit_is_prompt,
+    connections_that_do_not_say_hello_in_time_give_their_place_back,
+    connections_before_hello_end_at_shutdown,
 );

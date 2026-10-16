@@ -11,12 +11,21 @@
 //! dropping its sender: it never waits for a client thread.
 //!
 //! At most [`MAX_CLIENTS`] connections have a thread, a connection that has
-//! not said `hello` yet included (M2.8-9). One past that waits in a bounded
-//! queue for one of [`REFUSERS`] refusal threads, which completes its
-//! handshake, says `too-many-clients` and closes it with code 1013 (try
-//! again later) and that reason, all within [`REFUSAL_DEADLINE`]; a client
-//! that has not sent its handshake by then is closed without one (a close
-//! reason needs a WebSocket). While the queue is full, accepting waits: no
+//! not said `hello` yet included (M2.8-9). Such a connection keeps its place
+//! for at most [`ADMISSION_DEADLINE`] from its acceptance, however it sends
+//! its bytes: the deadline covers the whole handshake and `hello` (with the
+//! token), not each read, and is checked between reads of at most
+//! [`HANDSHAKE_POLL`], as is the stop. There is no separate budget for
+//! connections before `hello`: whoever can open one can open as many as it
+//! likes, so a smaller one would refuse a newcomer just as the full one
+//! does; the deadline is what bounds how long any of them holds a place.
+//!
+//! A connection past [`MAX_CLIENTS`] waits in a bounded queue for one of
+//! [`REFUSERS`] refusal threads, which completes its handshake, says
+//! `too-many-clients` and closes it with code 1013 (try again later) and
+//! that reason, all within [`REFUSAL_DEADLINE`]; a client that has not sent
+//! its handshake by then is closed without one (a close reason needs a
+//! WebSocket). While the queue is full, accepting waits: no
 //! connection is dropped for want of a refusal thread. Every one of these
 //! threads ends on its own; none is joined.
 
@@ -43,8 +52,12 @@ use crate::PROTOCOL;
 use crate::bindings::MAIN_PANEL;
 use crate::http::{self, Files, HttpConnection};
 
-/// How long a client has to send `hello`.
-const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a connection has, from its acceptance, for its handshake and
+/// `hello` with the token, however slowly it sends them.
+const ADMISSION_DEADLINE: Duration = Duration::from_secs(5);
+/// A read's timeout before `hello`: how often the deadline and the stop are
+/// looked at.
+const HANDSHAKE_POLL: Duration = Duration::from_millis(50);
 /// A client thread's read timeout: how often it looks at its queue.
 pub(crate) const CLIENT_POLL: Duration = Duration::from_millis(5);
 /// A client whose socket takes nothing for this long is disconnected.
@@ -160,6 +173,7 @@ impl Server {
             stop: Arc::clone(&stop),
             next: Arc::new(AtomicU64::new(1)),
             clients: Arc::new(AtomicUsize::new(0)),
+            admission: AtomicU64::new(micros(ADMISSION_DEADLINE)),
             refusals: refusers(http_addr.port(), options.remote, &stop)?,
         });
         let accepting = Arc::clone(&accept);
@@ -209,6 +223,7 @@ impl Server {
             stop: Arc::clone(&stop),
             next: Arc::new(AtomicU64::new(1)),
             clients: Arc::new(AtomicUsize::new(0)),
+            admission: AtomicU64::new(micros(ADMISSION_DEADLINE)),
             refusals: refusers(0, false, &stop)?,
         });
         Ok(Server {
@@ -239,6 +254,15 @@ impl Server {
             accept: Arc::clone(&self.accept),
             http: self.http_queue.clone(),
         }
+    }
+
+    /// Test hooks: the admission deadline of connections accepted from now
+    /// on ([`ADMISSION_DEADLINE`] by default).
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn set_admission_deadline(&self, deadline: Duration) {
+        self.accept
+            .admission
+            .store(micros(deadline), Ordering::Relaxed);
     }
 
     /// Serves `dir` (a project's `ui/` folder) under `/project/` from now on.
@@ -295,6 +319,10 @@ fn token() -> io::Result<String> {
     let mut bytes = [0u8; 32];
     fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
 /// Equal in time independent of where they differ.
@@ -355,6 +383,8 @@ struct Accept {
     next: Arc<AtomicU64>,
     /// Connections with a thread ([`MAX_CLIENTS`]).
     clients: Arc<AtomicUsize>,
+    /// The admission deadline in microseconds ([`ADMISSION_DEADLINE`]).
+    admission: AtomicU64,
     /// Connections past the limit, for the refusal threads.
     refusals: SyncSender<Box<dyn Transport>>,
 }
@@ -390,7 +420,7 @@ fn refusers(
                         .unwrap_or_else(PoisonError::into_inner)
                         .recv_timeout(Duration::from_millis(10));
                     match next {
-                        Ok(stream) => refuse(stream, http_port, remote),
+                        Ok(stream) => refuse(stream, http_port, remote, &stop),
                         Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => return,
                     }
@@ -400,24 +430,27 @@ fn refusers(
     Ok(refusals)
 }
 
-/// A refused connection's stream: every read and write fails once
-/// [`REFUSAL_DEADLINE`] has passed since its refusal began, so a client
-/// sending its handshake a byte at a time holds a refusal thread no longer.
-struct Deadline {
-    stream: Box<dyn Transport>,
-    until: Instant,
+/// A stream with an absolute deadline: until it is lifted (`until: None`),
+/// a read or write that times out is tried again, and every one fails once
+/// `until` has passed or the servers stop. So a client sending its handshake
+/// a byte at a time holds its thread (a refusal's or its own, before
+/// `hello`) no longer than the deadline, whatever the stream's own timeouts.
+struct Deadline<S> {
+    stream: S,
+    until: Option<Instant>,
+    stop: Arc<AtomicBool>,
 }
 
-impl Deadline {
-    fn within<T>(
-        &mut self,
-        mut io: impl FnMut(&mut dyn Transport) -> io::Result<T>,
-    ) -> io::Result<T> {
+impl<S: Read + Write> Deadline<S> {
+    fn within<T>(&mut self, mut io: impl FnMut(&mut S) -> io::Result<T>) -> io::Result<T> {
+        let Some(until) = self.until else {
+            return io(&mut self.stream);
+        };
         loop {
-            if Instant::now() >= self.until {
+            if Instant::now() >= until || self.stop.load(Ordering::Relaxed) {
                 return Err(io::Error::from(ErrorKind::TimedOut));
             }
-            match io(&mut *self.stream) {
+            match io(&mut self.stream) {
                 Err(e) if would_block(&e) || e.kind() == ErrorKind::Interrupted => {}
                 other => return other,
             }
@@ -425,13 +458,13 @@ impl Deadline {
     }
 }
 
-impl Read for Deadline {
+impl<S: Read + Write> Read for Deadline<S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.within(|s| s.read(buf))
     }
 }
 
-impl Write for Deadline {
+impl<S: Read + Write> Write for Deadline<S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.within(|s| s.write(buf))
     }
@@ -443,14 +476,15 @@ impl Write for Deadline {
 /// Refuses a connection past [`MAX_CLIENTS`]: its handshake (the Origin
 /// rule as for any client), the `too-many-clients` error, and a close with
 /// code 1013 and that reason, within [`REFUSAL_DEADLINE`].
-fn refuse(stream: Box<dyn Transport>, http_port: u16, remote: bool) {
-    let poll = Some(Duration::from_millis(50));
+fn refuse(stream: Box<dyn Transport>, http_port: u16, remote: bool, stop: &Arc<AtomicBool>) {
+    let poll = Some(HANDSHAKE_POLL);
     if stream.read_timeout(poll).is_err() || stream.write_timeout(poll).is_err() {
         return;
     }
     let stream = Deadline {
         stream,
-        until: Instant::now() + REFUSAL_DEADLINE,
+        until: Some(Instant::now() + REFUSAL_DEADLINE),
+        stop: Arc::clone(stop),
     };
     let Some(mut ws) = handshake(stream, http_port, remote) else {
         return;
@@ -509,6 +543,8 @@ impl Accept {
             }
         }
         let place = Place(Arc::clone(&self.clients));
+        let admission = Duration::from_micros(self.admission.load(Ordering::Relaxed));
+        let until = Instant::now() + admission;
         let client = self.next.fetch_add(1, Ordering::Relaxed);
         let connection = Connection {
             client,
@@ -525,7 +561,7 @@ impl Accept {
             .name(format!("signal-ui-client-{client}"))
             .spawn(move || {
                 let _place = place;
-                connection.run(stream);
+                connection.run(stream, until);
             });
     }
 }
@@ -569,16 +605,27 @@ fn error_text(code: &str, message: &str) -> String {
 }
 
 impl Connection {
-    fn run<S: Transport>(self, stream: S) {
-        if stream.read_timeout(Some(HELLO_TIMEOUT)).is_err()
+    /// Serves a connection admitted with a place, which must have said
+    /// `hello` with the token by `until` ([`ADMISSION_DEADLINE`]).
+    fn run<S: Transport>(self, stream: S, until: Instant) {
+        if stream.read_timeout(Some(HANDSHAKE_POLL)).is_err()
             || stream.write_timeout(Some(WRITE_POLL)).is_err()
         {
             return;
         }
+        let stream = Deadline {
+            stream,
+            until: Some(until),
+            stop: Arc::clone(&self.stop),
+        };
         let Some(mut ws) = handshake(stream, self.http_port, self.remote) else {
             return;
         };
-        if let Err((code, close, message)) = self.hello(&mut ws) {
+        let hello = self.hello(&mut ws);
+        // Said or not, `hello` is over: the refusal below has its own bound,
+        // and the client's reads from now on are the polls of `serve`.
+        ws.get_mut().until = None;
+        if let Err((code, close, message)) = hello {
             let _ = ws.send(Message::text(error_text(code, &message)));
             let _ = ws.close(Some(CloseFrame {
                 code: close,
@@ -589,7 +636,7 @@ impl Connection {
             while Instant::now() < until && ws.flush().is_err() {}
             return;
         }
-        if ws.get_mut().read_timeout(Some(CLIENT_POLL)).is_err() {
+        if ws.get_mut().stream.read_timeout(Some(CLIENT_POLL)).is_err() {
             return;
         }
         let (queue, outgoing) = sync_channel(self.queue);
@@ -612,7 +659,7 @@ impl Connection {
     }
 
     /// The first message: `hello` with the protocol version and the token.
-    fn hello<S: Transport>(
+    fn hello<S: Read + Write>(
         &self,
         ws: &mut WebSocket<S>,
     ) -> Result<(), (&'static str, CloseCode, String)> {
@@ -640,7 +687,7 @@ impl Connection {
         Ok(())
     }
 
-    fn serve<S: Transport>(
+    fn serve<S: Read + Write>(
         &self,
         ws: &mut WebSocket<S>,
         outgoing: &Receiver<Outbound>,
