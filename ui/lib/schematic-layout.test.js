@@ -237,3 +237,14 @@ test('a level above y = 0 keeps its loops’ lanes while a box moves (the same f
   const after = layout(level, { ...positions, d: { x: 650, y: -880 } });
   assert.deepEqual(routed(moved[0]).curve, after.wires[moved[0].wire.id].curve);
 });
+
+test('a pin knows its shape and whether a wire reaches it', () => {
+  const level = {
+    instances: [box('a', [], ['out', 'spare']), { ...box('b', ['in', 'free'], []), parameters: [{ name: 'gain' }, { name: 'pan' }] }],
+    connections: [wire('/a.out', '/b.in'), wire('/a.out', '/b.gain')],
+  };
+  const result = layout(level);
+  const pins = (id) => Object.fromEntries([...nodeOf(result, id).ins, ...nodeOf(result, id).outs].map((p) => [p.name, [p.shape, p.connected, Boolean(p.parameter)]]));
+  assert.deepEqual(pins('a'), { out: ['signal', true, false], spare: ['signal', false, false] });
+  assert.deepEqual(pins('b'), { in: ['signal', true, false], free: ['signal', false, false], gain: ['signal', true, true], pan: ['signal', false, true] });
+});

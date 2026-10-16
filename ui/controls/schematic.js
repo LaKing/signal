@@ -55,6 +55,14 @@ svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; t
 .name { fill: var(--signal-fg, #d6dbe4); font-weight: 600; }
 .module, .pin-label { fill: var(--signal-muted, #8a93a3); }
 .pin { fill: var(--signal-track, #2a2f38); stroke: var(--signal-muted, #8a93a3); vector-effect: non-scaling-stroke; }
+/* A pin is coloured as its wires (its shape); filled when a wire reaches it, hollow when nothing does. A parameter left to its value keeps the muted ring. */
+.pin.signal { stroke: var(--signal-accent, #4fc3f7); }
+.pin.vector { stroke: var(--signal-effective, #ffb74d); }
+.pin.events { stroke: var(--signal-meter-rms, #3ecf8e); }
+.pin.parameter:not(.connected) { stroke: var(--signal-muted, #8a93a3); }
+.pin.signal.connected { fill: var(--signal-accent, #4fc3f7); }
+.pin.vector.connected { fill: var(--signal-effective, #ffb74d); }
+.pin.events.connected { fill: var(--signal-meter-rms, #3ecf8e); }
 .wire { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .wire.signal { stroke: var(--signal-accent, #4fc3f7); }
 .wire.vector { stroke: var(--signal-effective, #ffb74d); }
@@ -494,7 +502,8 @@ export class SignalSchematic extends HTMLElement {
     for (const pin of [...node.ins, ...node.outs]) {
       const out = pin.direction === 'out';
       const portAddress = node.kind === 'instance' ? `${address}.${pin.name}` : `${level.path}.${pin.name}`;
-      const data = { class: 'pin', 'data-address': portAddress, 'data-label': pin.name, 'data-part': 'schematic' };
+      const kind = ['pin', pin.shape, pin.parameter ? 'parameter' : '', pin.connected ? 'connected' : ''].filter(Boolean).join(' ');
+      const data = { class: kind, 'data-address': portAddress, 'data-label': pin.name, 'data-part': 'schematic' };
       const shape = bakedPin(baked, level.transform, this.viewport, pin);
       if (shape.circle) group.append(el('circle', { ...data, ...shape.circle }));
       else if (shape.polygon.length) group.append(el('polygon', { ...data, points: shape.polygon.map((p) => `${p.x},${p.y}`).join(' ') }));

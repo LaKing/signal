@@ -327,6 +327,11 @@ export function layout(level, positions = {}) {
       box,
     };
   });
+  // A pin knows whether a wire of this level reaches it (drawn filled).
+  const ends = new Set(edges.flatMap((e) => [`${e.from.node}\n${e.from.port}`, `${e.to.node}\n${e.to.port}`]));
+  for (const node of nodes) {
+    for (const side of ['ins', 'outs']) node[side] = node[side].map((p) => ({ ...p, connected: ends.has(`${node.id}\n${p.name}`) }));
+  }
   // A wire's extent is its curve's box (a short one swings out past its pins).
   const xs = [...nodes.flatMap((n) => [n.x, n.x + n.w]), ...wires.flatMap((w) => [w.box.x0, w.box.x1])];
   const ys = [...nodes.flatMap((n) => [n.y, n.y + n.h]), ...wires.flatMap((w) => [w.box.y0, w.box.y1])];

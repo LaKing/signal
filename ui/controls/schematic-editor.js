@@ -38,7 +38,7 @@ export const EDITOR_CSS = `
 .edit[aria-checked="true"] { border-color: var(--signal-accent, #4fc3f7); color: var(--signal-accent, #4fc3f7); }
 .history { flex: none; width: 6ch; }
 .history.off { visibility: hidden; }
-.pin.target { stroke: var(--signal-focus, #5aa9ff); stroke-width: 3; }
+.pin.target, .pin.parameter.target:not(.connected) { stroke: var(--signal-focus, #5aa9ff); stroke-width: 3; }
 svg.rubber { pointer-events: none; }
 svg.rubber path { fill: none; stroke: var(--signal-focus, #5aa9ff); stroke-width: 1.5; stroke-dasharray: 4 3; }
 .palette { position: absolute; left: 0; top: 0; width: 22rem; box-sizing: border-box; padding: 6px; visibility: hidden; z-index: 2;
