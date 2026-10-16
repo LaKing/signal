@@ -143,6 +143,21 @@ fn unknown_module() {
     insta::assert_snapshot!("unknown_module", project_errors(&text));
 }
 
+/// Audit P1 (`docs/semantics.md` §16): a converter named with a vector too
+/// wide to allocate is refused at its module, for its width.
+#[test]
+fn a_vector_too_wide_is_an_error_at_its_module() {
+    let text = VALID.replace(
+        "std.sine_osc\", freq = 440",
+        "core.hold.d2.d1.vector4294967295.generic\"",
+    );
+    assert_eq!(
+        project_errors(&text),
+        "project.toml:8:18: error: /osc: `core.hold.d2.d1.vector4294967295.generic` has a \
+         vector of 4294967295 elements; a vector has at most 4096"
+    );
+}
+
 #[test]
 fn unknown_port() {
     let text = VALID.replacen(r#"from = "osc.out""#, r#"from = "osc.output""#, 1);

@@ -19,9 +19,9 @@ use std::time::Instant;
 
 use signal_core::{
     BlockLatency, Combine, DirectPrimitive, Direction, Due, Event, EventPayload, EventSink,
-    Feedthrough, Frame, Inputs, InstanceAddress, LossCause, ModuleDescriptor, Outputs, PortAddress,
-    PortKind, PortShape, PrepareContext, Primitive, Range, Registry, Reproducibility, RngStream,
-    SinkKind, StateOutputPrimitive, fnv1a64_words,
+    Feedthrough, Frame, Inputs, InstanceAddress, LossCause, MAX_VECTOR_WIDTH, ModuleDescriptor,
+    Outputs, PortAddress, PortKind, PortShape, PrepareContext, Primitive, Range, Registry,
+    Reproducibility, RngStream, SinkKind, StateOutputPrimitive, fnv1a64_words,
 };
 use signal_graph::ExecutionPlan;
 
@@ -62,6 +62,91 @@ static NEXT_ENGINE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// The most threads an engine runs a block on.
 const MAX_THREADS: usize = 1024;
+
+/// The most bytes the value buffers of one plan state may take
+/// ([`footprint`], `docs/semantics.md` §16): 2 GiB. They hold a value per
+/// row and frame of the block and are written every block, so they are
+/// memory the plan really uses. Within the graph's row budget
+/// (`signal_graph::MAX_PLAN_ROWS`) they take at most 1 GiB at the default
+/// block capacity; a larger capacity reaches this sooner.
+pub const MAX_PREPARED_BYTES: usize = 1 << 31;
+
+/// The most bytes all the frame-sized buffers of one plan state may
+/// reserve ([`footprint`]): 64 GiB. Beyond the value buffers, these are the
+/// event and log capacities, sized for 16 events per frame on every event
+/// output and connection: address space a block touches only as events
+/// arrive (the largest benchmark project, `signal bench --write-voices 4096`,
+/// reserves about 11 GiB at the default block capacity and keeps about
+/// 0.6 GiB resident). A real-time run keeps a second plan state, the
+/// control side's mirror, under the same budgets.
+pub const MAX_RESERVED_BYTES: usize = 1 << 36;
+
+/// Upper estimates of the bytes that the frame-sized buffers of `plan`'s
+/// state take at block capacity `capacity` with `threads` lanes: (value
+/// buffers, everything), each `None` when it overflows. Per frame, the value
+/// buffers hold a value per row (outputs, signal inputs, parameter rows) and
+/// one call's rows and a modulation per lane; the rest is 16 events per
+/// event output (emitted and its sink) and per event connection (delivered,
+/// then logged by the block and by a task), and a log record per instance
+/// (two with workers). What a primitive allocates itself in `prepare` is
+/// its own, bounded by its type (`module-contract.md`). Checked before
+/// anything is created or allocated for the plan.
+fn footprint(
+    plan: &ExecutionPlan,
+    capacity: usize,
+    threads: usize,
+) -> (Option<usize>, Option<usize>) {
+    let (value, event, record) = (
+        mem::size_of::<f64>(),
+        mem::size_of::<Event>(),
+        mem::size_of::<LogRecord>(),
+    );
+    let mut rows = Some(0usize);
+    let mut event_outputs = 0usize;
+    // The most rows of any one instance: signal inputs, parameters, outputs.
+    let mut most = [0usize; 3];
+    for instance in &plan.instances {
+        let descriptor = instance.descriptor;
+        let mut own = [0usize, descriptor.parameters.len(), 0];
+        for p in descriptor.ports {
+            match (p.direction, p.shape) {
+                (Direction::Out, PortShape::Events) => event_outputs += 1,
+                (Direction::In, shape) => own[0] = own[0].saturating_add(shape.rows()),
+                (Direction::Out, shape) => own[2] = own[2].saturating_add(shape.rows()),
+            }
+        }
+        for (m, o) in most.iter_mut().zip(own) {
+            *m = (*m).max(o);
+            rows = rows.and_then(|r| r.checked_add(o));
+        }
+    }
+    let event_connections = plan
+        .sources
+        .values()
+        .flatten()
+        .filter(|s| s.shape == PortShape::Events)
+        .count();
+    let values = || {
+        let lane = most.iter().try_fold(1usize, |sum, &m| sum.checked_add(m))?;
+        rows?
+            .checked_add(lane.checked_mul(threads)?)?
+            .checked_mul(value)?
+            .checked_mul(capacity)
+    };
+    let values = values();
+    let all = || {
+        let events = event_outputs
+            .checked_mul(2 * event)?
+            .checked_add(event_connections.checked_mul(event + 2 * record)?)?
+            .checked_mul(EVENTS_PER_FRAME)?;
+        let log = plan.instances.len().checked_mul(2 * record)?;
+        events
+            .checked_add(log)?
+            .checked_mul(capacity)?
+            .checked_add(values?)
+    };
+    (values, all())
+}
 
 /// When a segment runs on several threads (ADR 0019 §2): thresholds that
 /// change the timing, never the output. Documented in `docs/benchmarks.md`.
@@ -612,6 +697,36 @@ impl PlanState {
         old: Option<&PlanState>,
         generation: u64,
     ) -> Result<(PlanState, Vec<(usize, usize)>), EngineError> {
+        // Before anything is created or allocated for the plan: its vectors
+        // and its footprint within their limits (`docs/semantics.md` §16).
+        for instance in &plan.instances {
+            for p in instance.descriptor.ports {
+                if let PortShape::Vector(width) = p.shape
+                    && width > MAX_VECTOR_WIDTH
+                {
+                    return Err(EngineError::VectorTooWide {
+                        port: port_address(&instance.address, p.name)?,
+                        width,
+                    });
+                }
+            }
+        }
+        let capacity = config.block_capacity.max(1);
+        let (values, all) = footprint(plan, capacity, config.threads.clamp(1, MAX_THREADS));
+        for (what, bytes, budget) in [
+            ("value buffers", values, MAX_PREPARED_BYTES),
+            ("buffers in all", all, MAX_RESERVED_BYTES),
+        ] {
+            if bytes.is_none_or(|b| b > budget) {
+                return Err(EngineError::PlanTooLarge {
+                    what,
+                    bytes,
+                    capacity,
+                    budget,
+                });
+            }
+        }
+
         // Every port of every instance, in address order.
         let mut all_ports = BTreeSet::new();
         for instance in &plan.instances {
@@ -957,7 +1072,6 @@ impl PlanState {
         // Buffer bounds, over any K consecutive frames (K the block capacity).
         // X(t): the most up-front externals stamped for target t of this plan;
         // X_tot: the most stamped for this plan's targets in total.
-        let capacity = config.block_capacity.max(1);
         let window = capacity as u64;
         let mut stamped: Vec<(usize, u64)> = upfront
             .iter()

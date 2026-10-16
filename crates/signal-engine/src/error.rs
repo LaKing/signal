@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use signal_core::{Frame, InstanceAddress, PortAddress};
+use signal_core::{Frame, InstanceAddress, MAX_VECTOR_WIDTH, PortAddress};
 
 /// Why a plan cannot be instantiated, an external list is refused, or an edit
 /// cannot be scheduled.
@@ -59,6 +59,31 @@ pub enum EngineError {
     UnsupportedShape {
         /// The port.
         port: PortAddress,
+    },
+    /// A vector port is wider than
+    /// [`MAX_VECTOR_WIDTH`](signal_core::MAX_VECTOR_WIDTH) (`docs/semantics.md`
+    /// §16); refused before anything is allocated for it.
+    VectorTooWide {
+        /// The port.
+        port: PortAddress,
+        /// Its elements.
+        width: u32,
+    },
+    /// The plan's frame-sized buffers would take more than their budget at
+    /// this block capacity: its value buffers more than
+    /// [`MAX_PREPARED_BYTES`](crate::MAX_PREPARED_BYTES), or all of them more
+    /// than [`MAX_RESERVED_BYTES`](crate::MAX_RESERVED_BYTES)
+    /// (`docs/semantics.md` §16). Refused before any instance is created or
+    /// buffer allocated.
+    PlanTooLarge {
+        /// Which buffers: `value buffers` or `buffers in all`.
+        what: &'static str,
+        /// The estimate, in bytes; `None` when it overflows.
+        bytes: Option<usize>,
+        /// The block capacity it was estimated at.
+        capacity: usize,
+        /// The budget, in bytes.
+        budget: usize,
     },
     /// A plan source is not an output of a shape its target accepts.
     InvalidConnection {
@@ -169,6 +194,26 @@ impl fmt::Display for EngineError {
                 "{instance}: a type at a rate divisor above 1 cannot have {what} (they run at rate divisor 1 only)"
             ),
             EngineError::UnsupportedShape { port } => write!(f, "{port}: unsupported port shape"),
+            EngineError::VectorTooWide { port, width } => write!(
+                f,
+                "{port}: a vector of {width} elements; a vector has at most {MAX_VECTOR_WIDTH}"
+            ),
+            EngineError::PlanTooLarge {
+                what,
+                bytes,
+                capacity,
+                budget,
+            } => {
+                write!(
+                    f,
+                    "the plan's {what} at a block capacity of {capacity} frames take "
+                )?;
+                match bytes {
+                    Some(bytes) => write!(f, "{bytes} bytes")?,
+                    None => f.write_str("more bytes than can be counted")?,
+                }
+                write!(f, "; their budget is {budget} bytes")
+            }
             EngineError::InvalidConnection { from, to } => {
                 write!(f, "{from} -> {to}: not a connection this engine can run")
             }

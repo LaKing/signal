@@ -40,10 +40,10 @@ mod rng;
 mod time;
 
 pub use address::{AddressError, InstanceAddress, PortAddress};
-pub use convert::{CONVERTER_PREFIX, Conversion, converter, converter_name};
+pub use convert::{CONVERTER_PREFIX, Conversion, converter, converter_name, converter_shape};
 pub use descriptor::{
-    BlockLatency, Combine, Direction, Feedthrough, ModuleDescriptor, ParameterDescriptor,
-    PortDescriptor, PortKind, PortShape, Range, Reproducibility, SinkKind,
+    BlockLatency, Combine, Direction, Feedthrough, MAX_VECTOR_WIDTH, ModuleDescriptor,
+    ParameterDescriptor, PortDescriptor, PortKind, PortShape, Range, Reproducibility, SinkKind,
 };
 pub use event::{Curve, Event, EventPayload};
 pub use module::{

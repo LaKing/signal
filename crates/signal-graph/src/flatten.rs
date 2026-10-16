@@ -4,14 +4,23 @@
 //!
 //! Instances, connections and exports are visited in sorted order, so the result
 //! and the order of errors do not depend on declaration order.
+//!
+//! Composites can expand exponentially (each instantiating several of the
+//! next), so flattening counts instances and connections as it makes them
+//! and stops at the first budget exceeded ([`PlanBudget`]): what a short
+//! text expands to never runs away. A primitive whose vector is wider than
+//! [`MAX_VECTOR_WIDTH`] is refused here, before the engine sees it.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use signal_core::{Direction, InstanceAddress, ModuleDescriptor, PortAddress, Registry};
+use signal_core::{
+    Direction, InstanceAddress, MAX_VECTOR_WIDTH, ModuleDescriptor, PortAddress, PortShape,
+    Registry, converter_shape,
+};
 
 use crate::def::{CompositeDef, ConnectionDef};
-use crate::error::GraphError;
+use crate::error::{GraphError, PlanBudget};
 
 /// A primitive instance of the flattened graph.
 pub(crate) struct FlatInstance {
@@ -162,6 +171,23 @@ struct Flattener<'a> {
     instances: BTreeMap<InstanceAddress, FlatInstance>,
     connections: Vec<FlatConnection>,
     errors: Vec<GraphError>,
+    /// Instances resolved so far, composite or primitive.
+    made: usize,
+    /// The budget flattening stopped at, if any: nothing more is expanded.
+    exceeded: Option<PlanBudget>,
+}
+
+/// The widest vector port of `descriptor`, if any is wider than
+/// [`MAX_VECTOR_WIDTH`].
+fn too_wide(descriptor: &ModuleDescriptor) -> Option<u32> {
+    descriptor
+        .ports
+        .iter()
+        .filter_map(|p| match p.shape {
+            PortShape::Vector(n) if n > MAX_VECTOR_WIDTH => Some(n),
+            _ => None,
+        })
+        .max()
 }
 
 /// Flattens `root`, resolving composite references in `composites` and
@@ -199,6 +225,8 @@ pub(crate) fn flatten(
         instances: BTreeMap::new(),
         connections: Vec::new(),
         errors,
+        made: 0,
+        exceeded: None,
     };
     flattener.expand(root, None, &mut vec![root.name.as_str()]);
     if flattener.errors.is_empty() {
@@ -314,8 +342,24 @@ impl<'a> Flattener<'a> {
         parameters: &BTreeMap<String, f64>,
         stack: &mut Vec<&'a str>,
     ) -> Option<Local> {
+        if self.exceeded.is_some() {
+            return None;
+        }
+        self.made += 1;
+        if self.made > PlanBudget::Instances.limit() {
+            self.exceed(PlanBudget::Instances, self.made);
+            return None;
+        }
         if let Some(module_type) = self.registry.get(module) {
             let descriptor = module_type.descriptor;
+            if let Some(width) = too_wide(&descriptor) {
+                self.errors.push(GraphError::VectorTooWide {
+                    instance: address.clone(),
+                    module: module.to_owned(),
+                    width,
+                });
+                return None;
+            }
             let mut values: BTreeMap<String, f64> = descriptor
                 .parameters
                 .iter()
@@ -335,6 +379,17 @@ impl<'a> Flattener<'a> {
             return Some(Local::Primitive(descriptor));
         }
 
+        // A converter's name whose vector is too wide for one to be made.
+        if let Some(PortShape::Vector(width)) = converter_shape(module)
+            && width > MAX_VECTOR_WIDTH
+        {
+            self.errors.push(GraphError::VectorTooWide {
+                instance: address.clone(),
+                module: module.to_owned(),
+                width,
+            });
+            return None;
+        }
         let Some(&def) = self.composites.get(module) else {
             self.errors.push(GraphError::UnknownModule {
                 instance: address.clone(),
@@ -376,6 +431,15 @@ impl<'a> Flattener<'a> {
             }
         }
         Some(Local::Composite(interface))
+    }
+
+    /// Stops flattening at `budget`, reporting it once with the count it
+    /// stopped at.
+    fn exceed(&mut self, budget: PlanBudget, count: usize) {
+        if self.exceeded.is_none() {
+            self.exceeded = Some(budget);
+            self.errors.push(GraphError::PlanTooLarge { budget, count });
+        }
     }
 
     fn unknown_parameter(&mut self, instance: &InstanceAddress, name: &str) {
@@ -428,6 +492,9 @@ impl<'a> Flattener<'a> {
         locals: &Locals<'_>,
         connection: &ConnectionDef,
     ) {
+        if self.exceeded.is_some() {
+            return;
+        }
         let source = self.endpoint(scope, locals, &connection.from);
         let target = self.endpoint(scope, locals, &connection.to);
         let (Some((source, from)), Some((target, to))) = (source, target) else {
@@ -445,6 +512,11 @@ impl<'a> Flattener<'a> {
         let (Some(from), Some(to)) = (from, to) else {
             return;
         };
+        let count = self.connections.len().saturating_add(to.len());
+        if count > PlanBudget::Connections.limit() {
+            self.exceed(PlanBudget::Connections, count);
+            return;
+        }
         for to in to {
             self.connections.push(FlatConnection {
                 from: from.clone(),

@@ -10,6 +10,10 @@
 //!   connections (modulation) and event connections (base changes, ADR 0016
 //!   §4).
 //! - [`GraphError`] and [`GraphWarning`]: what can be wrong, with addresses.
+//! - Budgets ([`PlanBudget`]): the most instances, connections and value rows
+//!   a plan may have, and the widest vector
+//!   ([`MAX_VECTOR_WIDTH`](signal_core::MAX_VECTOR_WIDTH)), so that no
+//!   project text makes the engine allocate without bound.
 //!
 //! Domain-free: knows instances, ports, connections and addresses only.
 
@@ -28,8 +32,25 @@ use signal_core::{Direction, PortAddress, PortShape, Registry};
 pub use def::{
     CompositeDef, ConnectionDef, Exports, InputExport, InstanceDef, OutputExport, ParameterExport,
 };
-pub use error::{GraphError, GraphWarning, Restriction};
+pub use error::{GraphError, GraphWarning, PlanBudget, Restriction};
 pub use plan::{ExecutionPlan, PlanInstance, Source};
+
+/// The most instances, composite or primitive, a plan flattens to: about 9
+/// times the largest benchmark project's 30 041 (`signal bench
+/// --write-voices 4096`). Counted while flattening, so composites nested to
+/// expand exponentially stop at it.
+pub const MAX_PLAN_INSTANCES: usize = 1 << 18;
+
+/// The most connections between primitive ports a plan flattens to (an
+/// export that fans out counts once per port it reaches).
+pub const MAX_PLAN_CONNECTIONS: usize = 1 << 20;
+
+/// The most value rows a plan has, converters included: a row per signal
+/// input and output, per vector element and per parameter. The engine keeps
+/// a buffer of block-capacity frames per row (at the default 256, 2 KiB), so
+/// this bounds those buffers to 1 GiB; the engine checks its whole footprint
+/// again at the block capacity it runs (`docs/semantics.md` §16).
+pub const MAX_PLAN_ROWS: usize = 1 << 19;
 
 /// Builds the execution plan of the project `root`.
 ///
@@ -63,6 +84,8 @@ pub fn build_plan(
     let mut warnings = Vec::new();
     let converted = convert::insert(&mut graph, &mut warnings);
     canonical(&mut graph);
+    // After converters, which add rows: the whole plan's.
+    validate::budget(&graph)?;
     validate::validate(&graph, &converted, &mut warnings)?;
     let schedule = schedule::schedule(&graph).map_err(|error| vec![error])?;
     warnings.extend(

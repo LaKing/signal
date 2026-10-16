@@ -5,7 +5,8 @@ use std::fmt;
 
 use serde::Serialize;
 use signal_core::{
-    Conversion, Direction, InstanceAddress, PortAddress, PortKind, PortShape, Range, RateDivisor,
+    Conversion, Direction, InstanceAddress, MAX_VECTOR_WIDTH, PortAddress, PortKind, PortShape,
+    Range, RateDivisor,
 };
 
 /// Why a graph description cannot become an execution plan.
@@ -164,6 +165,28 @@ pub enum GraphError {
         /// What is wrong with it.
         reason: Box<Restriction>,
     },
+    /// An instance's module declares a vector port of more than
+    /// [`MAX_VECTOR_WIDTH`] elements (`docs/semantics.md` §16): for a
+    /// converter named in the project, the width in its name.
+    VectorTooWide {
+        /// The instance.
+        instance: InstanceAddress,
+        /// Its module.
+        module: String,
+        /// The widest vector it declares.
+        width: u32,
+    },
+    /// The plan exceeds one of its budgets ([`PlanBudget`],
+    /// `docs/semantics.md` §16), checked before the engine allocates
+    /// anything for it.
+    PlanTooLarge {
+        /// Which budget.
+        budget: PlanBudget,
+        /// What was counted: the whole plan's, or, when flattening stopped
+        /// at the instance or connection budget, the count it stopped at
+        /// (the plan has at least that many).
+        count: usize,
+    },
     /// The dependency graph has a cycle that passes through no state-output
     /// instance (ADR 0016 §2).
     Cycle {
@@ -299,6 +322,20 @@ impl fmt::Display for GraphError {
                     }
                 }
             }
+            GraphError::VectorTooWide {
+                instance,
+                module,
+                width,
+            } => write!(
+                f,
+                "{instance}: `{module}` has a vector of {width} elements; a vector has at most {MAX_VECTOR_WIDTH}"
+            ),
+            GraphError::PlanTooLarge { budget, count } => write!(
+                f,
+                "the plan exceeds its budget of {} {} ({count} counted)",
+                budget.limit(),
+                budget.what()
+            ),
             GraphError::Cycle { instances } => {
                 f.write_str("dependency cycle without a state-output instance: ")?;
                 for instance in instances {
@@ -333,6 +370,43 @@ pub enum Restriction {
         /// The source output.
         port: String,
     },
+}
+
+/// A budget of a plan ([`GraphError::PlanTooLarge`]): limits on what a
+/// project can make the engine allocate, whatever its text expands to
+/// (`docs/semantics.md` §16).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanBudget {
+    /// Instances, composite or primitive, after flattening:
+    /// [`MAX_PLAN_INSTANCES`](crate::MAX_PLAN_INSTANCES).
+    Instances,
+    /// Connections between primitive ports after flattening:
+    /// [`MAX_PLAN_CONNECTIONS`](crate::MAX_PLAN_CONNECTIONS).
+    Connections,
+    /// Value rows (a row per signal port, per vector element and per
+    /// parameter), converters included:
+    /// [`MAX_PLAN_ROWS`](crate::MAX_PLAN_ROWS).
+    Rows,
+}
+
+impl PlanBudget {
+    /// The limit.
+    pub fn limit(self) -> usize {
+        match self {
+            PlanBudget::Instances => crate::MAX_PLAN_INSTANCES,
+            PlanBudget::Connections => crate::MAX_PLAN_CONNECTIONS,
+            PlanBudget::Rows => crate::MAX_PLAN_ROWS,
+        }
+    }
+
+    /// What it counts, in words.
+    pub fn what(self) -> &'static str {
+        match self {
+            PlanBudget::Instances => "instances",
+            PlanBudget::Connections => "primitive connections",
+            PlanBudget::Rows => "value rows (signal ports, vector elements and parameters)",
+        }
+    }
 }
 
 /// A diagnostic that does not prevent a plan.

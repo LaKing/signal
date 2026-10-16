@@ -14,6 +14,16 @@
 //! behind a lock, taken only by [`converter`] and [`named`], which are called
 //! while plans are built (by the graph compiler and through
 //! [`Registry::get`](crate::Registry::get)), never on the audio thread.
+//!
+//! **Bounds.** A converter's vector is at most
+//! [`MAX_VECTOR_WIDTH`](crate::MAX_VECTOR_WIDTH) elements: a wider one is
+//! never made, so a name in project text cannot ask for an unbounded
+//! buffer. The table itself is not capped: each distinct converter type
+//! costs a fixed few hundred bytes (its descriptor does not grow with the
+//! width), and only names that plans actually use are made. A cap would make
+//! whether a project plans depend on what the process planned before it,
+//! which the project text must decide alone (ADR 0009); a process that plans
+//! millions of distinct rate pairs keeps that much (`docs/semantics.md` §16).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -22,7 +32,8 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use serde::Serialize;
 
 use crate::descriptor::{
-    Direction, Feedthrough, ModuleDescriptor, PortDescriptor, PortKind, PortShape, Reproducibility,
+    Direction, Feedthrough, MAX_VECTOR_WIDTH, ModuleDescriptor, PortDescriptor, PortKind,
+    PortShape, Reproducibility,
 };
 use crate::module::{DirectPrimitive, Inputs, Outputs, PrepareContext, Primitive};
 use crate::registry::ModuleType;
@@ -102,6 +113,8 @@ const KINDS: [PortKind; 8] = [
 /// and `kind`, e.g. `core.hold.d64.d1.signal.audio` or
 /// `core.decimate.d1.d64.vector4.control`; `None` if it is not one
 /// ([`Conversion::between`], a signal or a vector of at least one element).
+/// Only a name: a vector wider than
+/// [`MAX_VECTOR_WIDTH`](crate::MAX_VECTOR_WIDTH) has one, but no converter.
 pub fn converter_name(
     from: RateDivisor,
     to: RateDivisor,
@@ -159,14 +172,19 @@ fn table() -> &'static Mutex<BTreeMap<String, &'static ModuleType>> {
 /// The converter type from divisor `from` to `to` for ports of `shape` and
 /// `kind`: input `in` at `from`, output `out` at `to`, both of that shape and
 /// kind, no parameters. `None` when no implicit conversion joins the two
-/// divisors, or for an event or empty shape. Made once per process and kept;
-/// takes a lock and may allocate, so never on the audio thread.
+/// divisors, or for an event or empty shape, or a vector wider than
+/// [`MAX_VECTOR_WIDTH`](crate::MAX_VECTOR_WIDTH) (nothing is made or kept
+/// for it). Made once per process and kept; takes a lock and may allocate,
+/// so never on the audio thread.
 pub fn converter(
     from: RateDivisor,
     to: RateDivisor,
     shape: PortShape,
     kind: PortKind,
 ) -> Option<&'static ModuleType> {
+    if matches!(shape, PortShape::Vector(n) if n > MAX_VECTOR_WIDTH) {
+        return None;
+    }
     let name = converter_name(from, to, shape, kind)?;
     let mut table = table().lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(&found) = table.get(&name) {
@@ -209,6 +227,15 @@ pub fn converter(
 pub fn named(name: &str) -> Option<&'static ModuleType> {
     let (from, to, shape, kind) = parse(name)?;
     converter(from, to, shape, kind)
+}
+
+/// The port shape that `name`, the canonical name of a converter
+/// ([`converter_name`]), declares, even a vector too wide for a converter
+/// to be made ([`converter`]); `None` for any other name. Lets the graph
+/// compiler tell a name refused for its width from an unknown one. Makes
+/// nothing and takes no lock.
+pub fn converter_shape(name: &str) -> Option<PortShape> {
+    parse(name).map(|(_, _, shape, _)| shape)
 }
 
 /// The primitive every converter type creates: each output row is its input
@@ -320,6 +347,27 @@ mod tests {
         ] {
             assert!(named(name).is_none(), "{name}");
         }
+    }
+
+    /// Audit P1 (2026-10-15): a project could name a converter of 2³² − 1
+    /// elements, whose one buffer would be terabytes. Its name still reads
+    /// back (so the graph can say why it is refused), but no converter is
+    /// made; the widest allowed one is.
+    #[test]
+    fn a_converter_wider_than_the_limit_is_never_made() {
+        let name = "core.hold.d2.d1.vector4294967295.generic";
+        assert_eq!(converter_shape(name), Some(PortShape::Vector(u32::MAX)));
+        assert!(named(name).is_none());
+        let over = PortShape::Vector(MAX_VECTOR_WIDTH + 1);
+        assert!(converter(d(2), d(1), over, PortKind::Generic).is_none());
+        let widest = PortShape::Vector(MAX_VECTOR_WIDTH);
+        let made = converter(d(2), d(1), widest, PortKind::Generic).unwrap();
+        assert_eq!(made.descriptor.ports[0].shape, widest);
+        assert_eq!(converter_shape("core.copy"), None);
+        assert_eq!(
+            converter_shape("core.hold.d64.d1.signal.audio"),
+            Some(PortShape::Signal)
+        );
     }
 
     #[test]

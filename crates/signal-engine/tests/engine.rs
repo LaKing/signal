@@ -7,8 +7,10 @@ use common::{
     addr, conn, engine, engine_seeded, ext, inst, inst_with, output_trace, plan, port_addr,
     registry,
 };
-use signal_core::{EventPayload, Frame, Registry, RngStream};
-use signal_engine::{Engine, EngineConfig, EngineError};
+use signal_core::{
+    EventPayload, Frame, MAX_VECTOR_WIDTH, PortDescriptor, PortShape, Registry, RngStream,
+};
+use signal_engine::{Engine, EngineConfig, EngineError, MAX_PREPARED_BYTES, MAX_RESERVED_BYTES};
 use signal_output::render;
 
 /// Each primitive is prepared with the sample rate, the block capacity and
@@ -256,5 +258,86 @@ fn event_sink_overflow_is_a_fault() {
         Some(
             r#"{"type":"fault","frame":0,"address":"/f","port":"/f.out","reason":"event_overflow"}"#
         )
+    );
+}
+
+/// Audit P1 (2026-10-15, `docs/semantics.md` §16): a plan is refused with
+/// a named reason, before any instance is created or buffer allocated, when
+/// a vector is wider than `MAX_VECTOR_WIDTH` (a plan made without the graph
+/// compiler's check) or its buffers would exceed their budgets at the block
+/// capacity asked for; the widest vector runs at the default capacity.
+#[test]
+fn plans_beyond_the_memory_limits_are_refused_before_allocating() {
+    let widest = format!("core.hold.d2.d1.vector{MAX_VECTOR_WIDTH}.generic");
+    let trigger = plan(vec![inst("t", "test.trigger")], vec![]);
+    let plan = plan(vec![inst("h", &widest)], vec![]);
+    let config = EngineConfig::new(48_000, 1);
+    assert!(Engine::new(&plan, &registry(), config, vec![]).is_ok());
+
+    // 2³² − 1 elements: 8 TiB for one 256-frame buffer.
+    let mut huge = plan.clone();
+    let mut descriptor = huge.instances[0].descriptor;
+    descriptor.ports = Box::leak(
+        descriptor
+            .ports
+            .iter()
+            .map(|p| PortDescriptor {
+                shape: PortShape::Vector(u32::MAX),
+                ..*p
+            })
+            .collect::<Box<[_]>>(),
+    );
+    huge.instances[0].descriptor = descriptor;
+    assert_eq!(
+        Engine::new(&huge, &registry(), config, vec![]).err(),
+        Some(EngineError::VectorTooWide {
+            port: port_addr("/h.in"),
+            width: u32::MAX,
+        })
+    );
+
+    let at = |block_capacity| EngineConfig {
+        block_capacity,
+        ..config
+    };
+    // Rows of values: 8192 of them, and as many again for one call, at
+    // 2²⁰ frames are about 128 GiB.
+    let refused = Engine::new(&plan, &registry(), at(1 << 20), vec![]).err();
+    assert!(
+        matches!(
+            refused,
+            Some(EngineError::PlanTooLarge { what: "value buffers", bytes: Some(b), budget, .. })
+                if b > budget && budget == MAX_PREPARED_BYTES
+        ),
+        "{refused:?}"
+    );
+    let overflow = Engine::new(&plan, &registry(), at(usize::MAX), vec![]).err();
+    assert!(
+        matches!(
+            overflow,
+            Some(EngineError::PlanTooLarge {
+                bytes: None,
+                capacity: usize::MAX,
+                ..
+            })
+        ),
+        "{overflow:?}"
+    );
+    // One event output: its few values fit at 2²⁶ frames, its room for 16
+    // events per frame (and the log's) does not.
+    let refused = Engine::new(&trigger, &registry(), at(1 << 26), vec![]).err();
+    assert!(
+        matches!(
+            refused,
+            Some(EngineError::PlanTooLarge { what: "buffers in all", bytes: Some(b), budget, .. })
+                if b > budget && budget == MAX_RESERVED_BYTES
+        ),
+        "{refused:?}"
+    );
+    let message = refused.unwrap().to_string();
+    assert!(
+        message
+            .starts_with("the plan's buffers in all at a block capacity of 67108864 frames take "),
+        "{message}"
     );
 }

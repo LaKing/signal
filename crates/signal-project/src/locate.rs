@@ -148,6 +148,7 @@ impl<'a> Locator<'a> {
             GraphError::DuplicateComposite { name } => self.composite_name(name),
             GraphError::AmbiguousModule { module } => self.composite_name(module),
             GraphError::UnknownModule { instance, .. }
+            | GraphError::VectorTooWide { instance, .. }
             | GraphError::RecursiveComposite { instance, .. } => {
                 let (def, instance) = self.instance(instance)?;
                 Some(at(def, instance.module_span.start))

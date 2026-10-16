@@ -78,8 +78,8 @@ pub use cores::{
 #[doc(hidden)]
 pub use engine::Injection;
 pub use engine::{
-    EditFull, Engine, EngineConfig, ExternalEvent, ExternalFull, InputDiscards, ParameterValue,
-    PreparedSwap, Scripted,
+    EditFull, Engine, EngineConfig, ExternalEvent, ExternalFull, InputDiscards, MAX_PREPARED_BYTES,
+    MAX_RESERVED_BYTES, ParameterValue, PreparedSwap, Scripted,
 };
 #[doc(hidden)]
 pub use engine::{Schedule, ScheduleStats};

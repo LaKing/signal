@@ -30,9 +30,18 @@ pub enum PortShape {
     Events,
     /// N ≥ 1 `f64` per tick (M2.8-6): N rows of the I/O views, its elements
     /// in order, each one value per tick (`docs/module-contract.md`). A
-    /// vector connects only to a vector of the same N.
+    /// vector connects only to a vector of the same N, and N is at most
+    /// [`MAX_VECTOR_WIDTH`].
     Vector(u32),
 }
+
+/// The most elements a vector port may have (`docs/semantics.md` §16): 16
+/// times the widest port of the standard library (`std.mesh2d`'s 256
+/// nodes). A wider vector is refused before anything is allocated for it:
+/// by the converters ([`converter`](crate::converter)), the graph compiler
+/// and the engine. At the default block capacity of 256 frames one row is
+/// 2 KiB per buffer, so the widest port takes 8 MiB per buffer.
+pub const MAX_VECTOR_WIDTH: u32 = 4096;
 
 impl PortShape {
     /// The rows of the I/O views a port of this shape takes: 1 for a signal,

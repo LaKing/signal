@@ -486,7 +486,7 @@ M2.8-6 (ADR 0005; ADR 0023 §5). A port runs at an integer **rate divisor** *d* 
 
 ### Vectors
 
-- A port of shape `Vector(N)`, *N* ≥ 1, carries *N* `f64` per tick, as *N* rows (its elements, in order).
+- A port of shape `Vector(N)`, 1 ≤ *N* ≤ 4096 (`MAX_VECTOR_WIDTH`, "Limits" below), carries *N* `f64` per tick, as *N* rows (its elements, in order).
 - A vector connection joins equal shapes only, element by element: element *e* of the target sums element *e* of each source, in canonical source order (§3), each times the connection's scale. A vector never connects to a signal or a parameter; parameters are scalar.
 - Faults are found and faded per element, and name the vector port (§7); `audio` vector outputs fade per element (§6).
 
@@ -498,3 +498,20 @@ M2.8-6 (ADR 0005; ADR 0023 §5). A port runs at an integer **rate divisor** *d* 
 - Its port takes part in its targets' canonical sums (§3) at its own address, which sorts where the source's ports sort among every other instance's.
 - It is visible: in the plan, as an instance with its connections, and as the warning `<from> -> <to>: inserted converter <address> (<hold|decimate>, rate divisor <s> -> <t>)`, which `signal render` and the project loader report at the connection. A kind mismatch through it is reported from the source port.
 - Swaps and live edits treat it as any instance (§12): it survives when it is in both plans with the same type; it is added, fading in if `audio`, when a cross-rate connection appears; it is removed when its last connection goes, suspended first by a live edit. Removing a converter's **source** at *t* > 1 can step at the swap: the converter shows its last tick, which may have read the source in the middle of its fade.
+
+### Limits
+
+Audit P1 (2026-10-15). What a project's text names, directly or through composites and converter names, never makes the engine allocate without bound. Every limit is checked while the plan is built or the engine prepared it, never on the audio thread, with checked arithmetic, and is refused with a named reason, never a panic. The project text alone decides the graph's limits; the engine's depend on it and on the block capacity it runs.
+
+| Limit | Value | Checked by | Refusal |
+|---|---|---|---|
+| Elements of a vector port (`signal_core::MAX_VECTOR_WIDTH`) | 4096: 16 times the widest standard port (`std.mesh2d`, 256) | the converters (no converter wider is made), the graph compiler (any type, and a converter named in the project), the engine (any plan) | `GraphError::VectorTooWide` at the instance's `module`; `EngineError::VectorTooWide` |
+| Instances, composite or primitive, after flattening (`signal_graph::MAX_PLAN_INSTANCES`) | 2¹⁸ = 262 144: about 9 times the 4096-voice benchmark project's 30 041 | while flattening, which stops there, so composites nested to expand exponentially stop at it | `GraphError::PlanTooLarge` (`instances`) |
+| Connections between primitive ports (`MAX_PLAN_CONNECTIONS`) | 2²⁰ = 1 048 576, an export that fans out counting once per port it reaches | while flattening, and with converters | `PlanTooLarge` (`primitive connections`) |
+| Value rows: a row per signal input and output, per vector element and per parameter, converters included (`MAX_PLAN_ROWS`) | 2¹⁹ = 524 288: 1 GiB of value buffers at the default block capacity of 256 | the whole plan, after converters are inserted | `PlanTooLarge` (`value rows`) |
+| Value buffers of a plan state: a value per row and frame, and one call's rows per thread (`signal_engine::MAX_PREPARED_BYTES`) | 2 GiB at the engine's block capacity | the engine, before any instance is created or buffer allocated, for a new plan and a swap's | `EngineError::PlanTooLarge` (`value buffers`) |
+| All frame-sized buffers of a plan state: also room for 16 events per frame on each event output and connection and the log (`MAX_RESERVED_BYTES`) | 64 GiB: mostly address space a block touches only as events arrive (the 4096-voice benchmark project reserves about 11 GiB at block capacity 256 and keeps about 0.6 GiB resident; it is refused from capacity 2048) | as above | `EngineError::PlanTooLarge` (`buffers in all`) |
+
+A real-time run keeps two plan states, the engine's and the control side's mirror, each under the engine's budgets. What a primitive allocates in its own `prepare` is bounded by its type, not here (`module-contract.md`).
+
+A converter type, once made, is kept for the rest of the process (`signal_core::converter`). The table is not capped: each type costs a fixed few hundred bytes whatever its width, only types that plans use are made, and a cap would make whether a project plans depend on what the process planned before, which only its text may decide (ADR 0009). A process that plans millions of distinct (conversion, divisors, shape, kind) combinations keeps that much.

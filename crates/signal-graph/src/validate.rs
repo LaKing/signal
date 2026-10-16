@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use signal_core::{InstanceAddress, PortAddress, PortKind, PortShape, RateDivisor, Registry};
 
-use crate::error::{GraphError, GraphWarning, Restriction};
+use crate::error::{GraphError, GraphWarning, PlanBudget, Restriction};
 use crate::flatten::{FlatConnection, FlatGraph};
 
 /// Before converters are inserted: an input the registry restricts
@@ -63,6 +63,35 @@ pub(crate) fn restricted(graph: &FlatGraph, registry: &Registry) -> Result<(), V
             });
         }
     }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// After converters are inserted: the plan's instances, connections and
+/// value rows within their budgets ([`PlanBudget`]). Flattening already
+/// stopped at the instance and connection budgets; converters add to both.
+pub(crate) fn budget(graph: &FlatGraph) -> Result<(), Vec<GraphError>> {
+    let rows = graph
+        .instances
+        .values()
+        .map(|i| {
+            let ports = i.descriptor.ports.iter().map(|p| p.shape.rows());
+            ports.fold(i.descriptor.parameters.len(), usize::saturating_add)
+        })
+        .fold(0, usize::saturating_add);
+    let counts = [
+        (PlanBudget::Instances, graph.instances.len()),
+        (PlanBudget::Connections, graph.connections.len()),
+        (PlanBudget::Rows, rows),
+    ];
+    let errors: Vec<GraphError> = counts
+        .into_iter()
+        .filter(|&(budget, count)| count > budget.limit())
+        .map(|(budget, count)| GraphError::PlanTooLarge { budget, count })
+        .collect();
     if errors.is_empty() {
         Ok(())
     } else {
