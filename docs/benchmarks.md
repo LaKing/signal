@@ -117,6 +117,27 @@ The ladder costs about 3.0× the state-variable filter per instance at default p
 
 At `--block 1` the default row agrees with `signal bench` above (99.0). The worst case costs about 1.85× the default, about 5.6× `std.svf`. There the solve takes 3.5 Newton steps on average and at most 5 (counted in a copy of the solve on the same input), against 2 at default parameters; the bound is 8.
 
+### The studio project (M2.11-4)
+
+`projects/studio` at its defaults: 177 primitive instances (the voice 39, the tape echo 21, the seven drum voices 108, the transport, sequencers and master bus 9) at 48 kHz. (The first measurement below was of the first version, 161 instances; the review's revision added the stepped octave, the first-note glide gate and the kick's reordered drive.)
+
+**Method, which differs from `signal bench`'s.** `signal bench` times the kick project and per-primitive figures and cannot run another project, so this is wall time of `signal render`, as for the ladder's worst case above. On a release build of e790596 plus the M2.11-4 change (uncommitted), it is `/usr/bin/time -p signal render projects/studio --seconds 60 --threads 1 --out …` (2 880 000 frames, default `--block` 256), and the same render of a project holding only `std.audio_out` (the base: start-up, writing the WAV and the log). DSP time per second of audio is (studio − base)/60, from the median of 3 runs each. The figure includes the engine's per-block work and the log, not only the primitives.
+
+**Measurement on one host**, 2026-10-17 16:37 UTC, in a devpanel seat on the operator's Mac Studio, shared with other work (load average 2.6–6.0), not pinned. `sysctl` is not readable in the seat, so the machine fields are those of the rows above, not read here; the operator's re-run fills them.
+
+| `--threads` | studio, 60 s (runs) | base | DSP per second of audio | per frame | budget at 48 kHz |
+|---|---|---:|---:|---:|---:|
+| 1 | 4.10, 4.35, 4.41 s | 0.11 s | **0.071 s** | 1.47 µs | 7.1 % of one core |
+| default (one per performance core) | 2.42, 2.44, 2.49 s | 0.11 s | 0.039 s (wall) | — | — |
+
+**Re-measured after the review revision** (177 instances), 2026-10-17 20:05 local, same method and seat, under heavier load (load average 8.6–10.6, a full check running beside it), so an upper figure:
+
+| `--threads` | studio, 60 s (runs) | base | DSP per second of audio | per frame | budget at 48 kHz |
+|---|---|---:|---:|---:|---:|
+| 1 | 4.72, 4.74, 5.01 s | 0.08 s | **0.078 s** | 1.62 µs | 7.8 % of one core |
+
+The operator confirms the figure on the Mac outside the seat with the same commands.
+
 ### Block sizes (M2.6-1)
 
 `signal bench` times the kick and the kick voices (the count within 25 % of the budget at *k* = 1) in blocks of *k* = 1, 64 and 256 frames (`blocks` in the JSON; ADR 0019 §1, `semantics.md` §13). Each repeat is still 1024 frames, run as 1024 / *k* calls of `Engine::run_block(k)`, with the engine's block capacity set to *k*. The output is the same at every *k* (the determinism matrix in `docs/testing-and-evaluation.md`); only the time changes.

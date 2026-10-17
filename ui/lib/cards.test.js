@@ -34,7 +34,7 @@ test('the scan finds text outside a card', () => {
   assert.deepEqual(textOutsideCards('<body><header><h1>kick</h1></header><div class="signal-cards"><section class="signal-card"><h2>a</h2><br>b</section></div></body>'), ['kick']);
 });
 
-for (const panel of ['../default-panel.html', '../../projects/kick/ui/main.html', '../../projects/pulse/ui/main.html', '../../projects/physical-av/ui/main.html']) {
+for (const panel of ['../default-panel.html', '../../projects/kick/ui/main.html', '../../projects/pulse/ui/main.html', '../../projects/physical-av/ui/main.html', '../../projects/studio/ui/main.html']) {
   test(`${panel.split('/').slice(-3).join('/')}: every text is in a card`, () => {
     const html = readFileSync(new URL(panel, import.meta.url), 'utf8');
     assert.deepEqual(textOutsideCards(html), []);

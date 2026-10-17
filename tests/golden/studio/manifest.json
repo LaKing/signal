@@ -1,0 +1,23 @@
+{
+  "audio_fnv1a64": "ae83d794a40b6941",
+  "frames": 5760000,
+  "log_fnv1a64": "c4920d6570c2a66b",
+  "provenance": {
+    "project_file_hashes": {
+      "composites/clap909.toml": "6d0bfe3e579eb9b3",
+      "composites/cymbal909.toml": "bf92dbb54c72fe46",
+      "composites/hat909.toml": "ecb9f2954f3546ae",
+      "composites/kick909.toml": "cce33f9694d23e0c",
+      "composites/moog_voice.toml": "f064466de222ca04",
+      "composites/rim909.toml": "7fd8b67363ea222c",
+      "composites/snare909.toml": "6148d0aac842b2ad",
+      "composites/tape_delay.toml": "eb42f84848c3aae5",
+      "composites/tom909.toml": "0e64295683826b10",
+      "patterns/drums.toml": "bc929ae84981ba3b",
+      "patterns/melody.toml": "59a9561e0b85b3e2",
+      "project.toml": "8dc10070eec67261"
+    }
+  },
+  "sample_rate": 48000,
+  "seed": 11
+}

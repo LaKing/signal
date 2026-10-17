@@ -14,7 +14,7 @@ import { textOutsideCards } from './cards.test.js';
 const ui = new URL('../', import.meta.url);
 const read = (path) => readFileSync(new URL(path, ui), 'utf8');
 const whitelist = JSON.parse(read('lib/panel-whitelist.json'));
-const EXAMPLES = ['../projects/kick/ui/main.html', '../projects/pulse/ui/main.html', '../projects/physical-av/ui/main.html'];
+const EXAMPLES = ['../projects/kick/ui/main.html', '../projects/pulse/ui/main.html', '../projects/physical-av/ui/main.html', '../projects/studio/ui/main.html'];
 
 /** The content of a file's <signal-panel> (the examples have one, without comments in it). */
 function content(text) {
@@ -141,7 +141,7 @@ test('comments in an existing panel are dropped on reading; the editor never sen
   refused(card('<!-- never closed'), /unterminated/, 'read');
 });
 
-test('the three example panels round-trip, h1 and their classes kept', () => {
+test('the example panels round-trip, h1 and their classes kept', () => {
   for (const file of EXAMPLES) {
     const original = content(read(file));
     const tree = parse(original, 'read');

@@ -1,0 +1,151 @@
+<!doctype html>
+<!-- The studio's panel (docs/ui-controls.md "Panels"): three sections styled
+     after the instruments they recall, with generic titles and no marks. The
+     mono synth (black panel, wood cheeks, the controllers, oscillator bank,
+     mixer, modifiers and output groups, rocker levers for the waveforms) with
+     the piano roll of the melody; the rhythm composer (warm grey, a knob
+     column per voice) with the step grid of the beat; the tape echo (cream and
+     green, chicken-head knobs); and the master bus's scope and meters. The
+     look is ui/studio.css and the SVG skins in ui/assets/. Moving a control
+     commits its value to project.toml on release; the piano roll and the step
+     grid write patterns/melody.toml and patterns/drums.toml. `signal ui check
+     projects/studio` checks the bindings. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>studio</title>
+<link rel="stylesheet" href="/ui/controls/theme.css">
+<link rel="stylesheet" href="studio.css">
+</head>
+<body>
+<signal-panel>
+  <div class="signal-cards">
+    <section class="signal-card wide title">
+      <h1>studio</h1>
+      <p>A piano-roll melody on a three-oscillator ladder-filter voice through a tape echo, over a synthesised drum machine, at 120 bpm.</p>
+    </section>
+    <section class="signal-card wide mono-synth">
+      <h2>MONO SYNTH</h2>
+      <div class="row">
+        <div class="signal-group controllers">
+          <signal-knob bind="/synth.glide" taper="log" min="1" max="2000" label="glide" skin="svg:assets/synth-knob.svg"></signal-knob>
+        </div>
+        <div class="signal-group oscillators">
+          <signal-knob bind="/synth.osc1_octave" min="-2" max="2" label="osc 1 range" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.osc1_wave" min="1" max="3" sweep="60" label="wave" skin="svg:assets/lever.svg"></signal-knob>
+          <signal-knob bind="/synth.osc2_octave" min="-2" max="2" label="osc 2 range" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.osc2_detune" min="-100" max="100" bipolar label="detune" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.osc2_wave" min="1" max="3" sweep="60" label="wave" skin="svg:assets/lever.svg"></signal-knob>
+          <signal-knob bind="/synth.osc3_octave" min="-2" max="2" label="osc 3 range" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.osc3_detune" min="-100" max="100" bipolar label="detune" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.osc3_wave" min="1" max="3" sweep="60" label="wave" skin="svg:assets/lever.svg"></signal-knob>
+        </div>
+        <div class="signal-group mixer">
+          <signal-knob bind="/synth.osc1_level" min="0" max="1" label="osc 1" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.osc2_level" min="0" max="1" label="osc 2" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.osc3_level" min="0" max="1" label="osc 3" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.noise_level" min="0" max="1" label="noise" skin="svg:assets/synth-knob.svg"></signal-knob>
+        </div>
+        <div class="signal-group modifiers">
+          <signal-knob bind="/synth.cutoff" taper="log" min="20" max="10000" label="cutoff" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.emphasis" min="0" max="1" label="emphasis" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.env_amount" min="0" max="8000" label="contour amount" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.key_track" min="0" max="2" label="key track" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.drive" min="0" max="10" label="drive" skin="svg:assets/synth-knob.svg"></signal-knob>
+        </div>
+        <div class="signal-group filter-contour">
+          <signal-knob bind="/synth.f_attack" taper="log" min="1" max="5000" label="attack" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.f_decay" taper="log" min="1" max="5000" label="decay" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.f_sustain" min="0" max="1" label="sustain" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.f_release" taper="log" min="1" max="5000" label="release" skin="svg:assets/synth-knob.svg"></signal-knob>
+        </div>
+        <div class="signal-group loudness-contour">
+          <signal-knob bind="/synth.a_attack" taper="log" min="1" max="5000" label="attack" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.a_decay" taper="log" min="1" max="5000" label="decay" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.a_sustain" min="0" max="1" label="sustain" skin="svg:assets/synth-knob.svg"></signal-knob>
+          <signal-knob bind="/synth.a_release" taper="log" min="1" max="5000" label="release" skin="svg:assets/synth-knob.svg"></signal-knob>
+        </div>
+        <div class="signal-group output">
+          <signal-knob bind="/synth.volume" min="-30" max="6" label="volume" skin="svg:assets/synth-knob.svg"></signal-knob>
+        </div>
+      </div>
+      <signal-piano-roll pattern="melody" position-bind="/melody.position" label="melody" snap="1/16"></signal-piano-roll>
+    </section>
+    <section class="signal-card wide rhythm">
+      <h2>RHYTHM COMPOSER</h2>
+      <div class="row">
+        <div class="signal-group voice master">
+          <signal-knob bind="/transport.bpm" min="60" max="180" label="tempo" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/drums.swing" min="0" max="75" label="shuffle" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/drums.accent_level" min="1" max="2" label="accent" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+        </div>
+        <div class="signal-group voice kick">
+          <signal-knob bind="/kick.tune" min="35" max="80" label="tune" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/kick.attack" min="0" max="1.5" label="attack" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/kick.decay" taper="log" min="80" max="1500" label="decay" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/kick.level" min="-30" max="6" label="level" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+        </div>
+        <div class="signal-group voice snare">
+          <signal-knob bind="/snare.tune" min="120" max="280" label="tune" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/snare.tone" taper="log" min="1000" max="9000" label="tone" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/snare.snappy" min="0" max="1.5" label="snappy" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/snare.level" min="-30" max="6" label="level" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+        </div>
+        <div class="signal-group voice clap">
+          <signal-knob bind="/clap.tone" taper="log" min="500" max="3000" label="tone" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/clap.decay" taper="log" min="30" max="600" label="decay" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/clap.level" min="-30" max="12" label="level" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+        </div>
+        <div class="signal-group voice hats">
+          <signal-knob bind="/hats.tone" taper="log" min="3000" max="14000" label="tone" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/hats.closed_decay" taper="log" min="10" max="200" label="ch decay" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/hats.open_decay" taper="log" min="100" max="1500" label="oh decay" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/hats.level" min="-30" max="12" label="level" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+        </div>
+        <div class="signal-group voice tom">
+          <signal-knob bind="/tom.tune" min="60" max="220" label="tune" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/tom.decay" taper="log" min="50" max="1000" label="decay" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/tom.level" min="-30" max="6" label="level" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+        </div>
+        <div class="signal-group voice rim">
+          <signal-knob bind="/rim.tune" min="250" max="900" label="tune" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/rim.level" min="-30" max="12" label="level" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+        </div>
+        <div class="signal-group voice cymbal">
+          <signal-knob bind="/cymbal.tone" taper="log" min="2000" max="12000" label="tone" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/cymbal.decay" taper="log" min="100" max="3000" label="decay" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+          <signal-knob bind="/cymbal.level" min="-30" max="12" label="level" skin="svg:assets/rhythm-knob.svg"></signal-knob>
+        </div>
+      </div>
+      <signal-step-grid pattern="drums" step-bind="/drums.step" label="beat"></signal-step-grid>
+    </section>
+    <section class="signal-card wide tape-echo">
+      <h2>TAPE ECHO</h2>
+      <div class="row">
+        <signal-knob bind="/echo.time_ms" taper="log" min="50" max="1000" label="repeat rate" skin="svg:assets/chicken-head.svg"></signal-knob>
+        <signal-knob bind="/echo.feedback" min="0" max="0.75" label="intensity" skin="svg:assets/chicken-head.svg"></signal-knob>
+        <signal-knob bind="/echo.mix" min="0" max="1" label="echo volume" skin="svg:assets/chicken-head.svg"></signal-knob>
+        <signal-knob bind="/echo.wow" min="0" max="5" label="wow" skin="svg:assets/chicken-head.svg"></signal-knob>
+        <signal-knob bind="/echo.flutter" min="0" max="40" label="flutter" skin="svg:assets/chicken-head.svg"></signal-knob>
+        <signal-knob bind="/echo.tone" taper="log" min="300" max="4999" label="tone" skin="svg:assets/chicken-head.svg"></signal-knob>
+      </div>
+    </section>
+    <section class="signal-card wide master-bus">
+      <h2>master</h2>
+      <div class="row">
+        <signal-fader bind="/out.gain" min="0" max="0.25" label="gain"></signal-fader>
+        <div class="signal-group">
+          <signal-meter bind="/out.l" label="L"></signal-meter>
+          <signal-meter bind="/out.r" label="R"></signal-meter>
+        </div>
+        <signal-scope bind="/limiter.out" rate="24000" label="master"></signal-scope>
+      </div>
+    </section>
+  </div>
+</signal-panel>
+<script type="module">
+import '/ui/controls/index.js';
+</script>
+</body>
+</html>

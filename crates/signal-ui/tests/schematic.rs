@@ -100,6 +100,62 @@ fn kick_pulse_and_physical_av_are_described_as_written(transport: Transport) {
     rig.finish();
 }
 
+/// M2.11-4 AC13: the studio demo is described and laid out: its top level
+/// in source order, its nine composites, every connection resolved without a
+/// converter, and its positions read without an error.
+fn studio_is_described_and_laid_out(transport: Transport) {
+    let mut rig = project_rig("graph-studio", transport, "studio");
+    let (mut ws, _) = rig.client();
+    let g = rig.request(&mut ws, 1, json!({"type": "graph"}), "graph");
+    assert_eq!(g["project"], "studio");
+    assert_eq!(
+        names(&g["top"]),
+        [
+            "transport",
+            "melody",
+            "drums",
+            "synth",
+            "echo",
+            "kick",
+            "snare",
+            "clap",
+            "hats",
+            "tom",
+            "rim",
+            "cymbal",
+            "drum_a",
+            "drum_b",
+            "bus",
+            "dc",
+            "limiter",
+            "out"
+        ]
+    );
+    let keys: Vec<_> = g["composites"].as_object().unwrap().keys().collect();
+    assert_eq!(
+        keys,
+        [
+            "clap909",
+            "cymbal909",
+            "hat909",
+            "kick909",
+            "moog_voice",
+            "rim909",
+            "snare909",
+            "tape_delay",
+            "tom909"
+        ]
+    );
+    let connections = g["top"]["connections"].as_array().unwrap();
+    assert_eq!(connections.len(), 36);
+    assert!(connections.iter().all(|c| c["converters"] == json!([])));
+    assert_eq!(
+        g["layout"],
+        json!({"file": "ui/schematic.toml", "positions": {}, "error": null})
+    );
+    rig.finish();
+}
+
 fn a_structural_reload_pushes_graph(transport: Transport) {
     let mut rig = project_rig("graph-reload", transport, "kick");
     let (mut ws, _) = rig.client();
@@ -402,6 +458,7 @@ fn an_edit_of_the_positions_file_pushes_graph(transport: Transport) {
 
 both!(
     kick_pulse_and_physical_av_are_described_as_written,
+    studio_is_described_and_laid_out,
     a_structural_reload_pushes_graph,
     schematic_move_writes_positions_and_pushes_graph,
     schematic_move_writes_a_group_at_once,

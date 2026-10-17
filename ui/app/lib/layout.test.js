@@ -12,7 +12,7 @@ const noComments = (css) => css.replace(/\/\*[\s\S]*?\*\//g, '');
 const SCROLLS = /overflow(-x|-y)?\s*:\s*(auto|scroll)/g;
 
 const controls = readdirSync(new URL('controls/', ui)).filter((f) => f.endsWith('.js'));
-const panels = ['default-panel.html', '../projects/kick/ui/main.html', '../projects/pulse/ui/main.html', '../projects/physical-av/ui/main.html'];
+const panels = ['default-panel.html', '../projects/kick/ui/main.html', '../projects/pulse/ui/main.html', '../projects/physical-av/ui/main.html', '../projects/studio/ui/main.html'];
 
 test('the window has one scroll container: the shown tab', () => {
   const css = noComments(read('app/app.css'));
