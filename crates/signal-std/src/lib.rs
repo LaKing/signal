@@ -85,6 +85,7 @@
 //! | `std.random` | [`Random`] | direct | `core` |
 //! | `std.note_seq` | [`NoteSeq`] | direct, takes a `notes` pattern | `event` |
 //! | `std.step_seq8` | [`StepSeq8`] | direct, takes a `steps` pattern | `event` |
+//! | `std.ladder` | [`Ladder`] | direct | `filter` |
 //! | `std.pack<N>` | [`Pack`]`<N>` | direct | `core` |
 //! | `std.unpack<N>` | [`Unpack`]`<N>` | direct | `core` |
 //! | `std.index<N>` | [`Index`]`<N>` | direct | `core` |
@@ -154,6 +155,7 @@ mod exciter;
 mod exp_env;
 mod function;
 mod gain;
+mod ladder;
 mod lag;
 mod lfo;
 mod logic;
@@ -204,6 +206,7 @@ pub use exciter::Exciter;
 pub use exp_env::ExpEnv;
 pub use function::{Atan2, Cos, Exp, Log, Pow, Sin, SinCycles, Sqrt, Tan, Tanh};
 pub use gain::Gain;
+pub use ladder::Ladder;
 pub use lag::Lag;
 pub use lfo::Lfo;
 pub use logic::{And, Compare, Not, Or, Select};
@@ -362,6 +365,7 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<Random>(),
         direct::<NoteSeq>(),
         direct::<StepSeq8>(),
+        direct::<Ladder>(),
     ] {
         registry.register(module_type)?;
     }
@@ -713,6 +717,20 @@ mod tests {
     /// its pattern kind.
     const SEQUENCERS: [&str; 2] = ["std.note_seq", "std.step_seq8"];
 
+    /// M2.11-2: the transistor-ladder filter.
+    const LADDER: [&str; 1] = ["std.ladder"];
+
+    /// M2.11-2 AC1: `std.ladder` is a direct `filter` at the master rate.
+    #[test]
+    fn the_ladder_is_a_direct_filter() {
+        let mut registry = Registry::new();
+        register(&mut registry).unwrap();
+        let d = registry.get("std.ladder").unwrap().descriptor;
+        assert_eq!(d.category, Some(category::FILTER));
+        assert_eq!(d.feedthrough, signal_core::Feedthrough::Direct);
+        assert_eq!(d.rate(), Some(RateDivisor::ONE));
+    }
+
     /// A `Set` counts at most the transport's largest per-frame count, so a
     /// sequencer's work per event is bounded.
     #[test]
@@ -745,10 +763,15 @@ mod tests {
         register(&mut registry).unwrap();
         assert_eq!(
             registry.len(),
-            NAMES.len() + SEQUENCERS.len() + vector::types().len()
+            NAMES.len() + SEQUENCERS.len() + LADDER.len() + vector::types().len()
         );
         let vectors = vector::types().iter().map(|t| t.descriptor.type_name);
-        for name in NAMES.into_iter().chain(SEQUENCERS).chain(vectors) {
+        for name in NAMES
+            .into_iter()
+            .chain(SEQUENCERS)
+            .chain(LADDER)
+            .chain(vectors)
+        {
             let module_type = registry.get(name).unwrap_or_else(|| panic!("{name}"));
             assert_eq!(module_type.descriptor.type_name, name);
             assert_eq!(
@@ -769,7 +792,7 @@ mod tests {
         );
         assert_eq!(
             registry.len(),
-            NAMES.len() + SEQUENCERS.len() + vector::types().len()
+            NAMES.len() + SEQUENCERS.len() + LADDER.len() + vector::types().len()
         );
 
         // A type registered first under a std name blocks that name.

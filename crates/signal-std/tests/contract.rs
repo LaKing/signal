@@ -72,6 +72,10 @@ mod onepole {
     signal_contract::contract_tests!(super::std_type("std.onepole"));
 }
 
+mod ladder {
+    signal_contract::contract_tests!(super::std_type("std.ladder"));
+}
+
 mod adsr {
     signal_contract::contract_tests!(super::std_type("std.adsr"));
 }

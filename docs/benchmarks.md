@@ -93,6 +93,30 @@ Measured *N* → median ns per frame: 1 → 296, 2 → 462, 4 → 790, 8 → 1 4
 | `std.transport` | 29.0 | 31.8 |
 | `std.unit_delay` | 11.5 | 19.6 |
 
+### `std.ladder` against `std.svf` (M2.11-2)
+
+**Seat measurement**, 2026-10-17 14:15–14:20 UTC, from a devpanel seat. Command: `signal --json bench` from a release build of f6f82e2 plus the M2.11-2 change (uncommitted), default `--seconds 1`, the method above. Both rows come from the same run. They are a single-host measurement, not a threshold. The table above is from an earlier run on a less loaded host, so compare these two rows with each other, not with it.
+
+- Machine (from `system_profiler SPHardwareDataType`, `uname -a` and `sw_vers`; `sysctl` is refused in the seat sandbox, so `machine` in the JSON is all null): Mac Studio (Mac17,14), Apple M5 Max, 18 cores (6 Super and 12 Performance), 64 GB, macOS 27.0.1.
+- Conditions: shared with other work. The load average was 5.3 at the start and 5.0 at the end. The run was not pinned to a core. Stimulus 122.2 ns and empty plan 8.5 ns in this run.
+- **Default parameters only.** The bench runs every primitive at its defaults, so the ladder runs at resonance 0 and drive 0 (k = 0). There the zero-delay solve stops after two Newton steps, three `tanh` a frame, which is its cheapest path. The resonant worst case (up to 8 steps, nine `tanh`) is not measured by `signal bench`.
+
+| Primitive | Median | p99 |
+|---|---:|---:|
+| `std.ladder` | 99.0 | 101.4 |
+| `std.svf` | 32.7 | 35.1 |
+
+The ladder costs about 3.0× the state-variable filter per instance at default parameters.
+
+**The resonant worst case** (review of M2.11-2, after the closed-bracket fix of the solve). **Measurement on one host**, 2026-10-17 14:44 UTC, the same Mac Studio (Mac17,14, Apple M5 Max, 64 GB, macOS 27.0.1), shared with other work (load average 3.0–3.6), not pinned. `signal bench` cannot set parameters, so this is timed differently: `signal render --threads 1` of three projects at 96 kHz, 480 000 frames, from a release build of 1fdedc1 plus the M2.11-2 change (uncommitted): a 440 Hz saw into `std.audio_out` alone (the base), and the same with 32 ladders on the saw summed into the output, once at default parameters and once at `cutoff_hz` 43 200 (0.45·sr), resonance 1 and drive 10. The cost per ladder frame is (time − base time)/(32 · 480 000), from the median of 3 runs each.
+
+| Ladders at | `--block 1` | `--block 256` |
+|---|---:|---:|
+| default parameters | 99.1 | 80.4 |
+| cutoff 0.45·sr, resonance 1, drive 10 | 183.7 | 169.6 |
+
+At `--block 1` the default row agrees with `signal bench` above (99.0). The worst case costs about 1.85× the default, about 5.6× `std.svf`. There the solve takes 3.5 Newton steps on average and at most 5 (counted in a copy of the solve on the same input), against 2 at default parameters; the bound is 8.
+
 ### Block sizes (M2.6-1)
 
 `signal bench` times the kick and the kick voices (the count within 25 % of the budget at *k* = 1) in blocks of *k* = 1, 64 and 256 frames (`blocks` in the JSON; ADR 0019 §1, `semantics.md` §13). Each repeat is still 1024 frames, run as 1024 / *k* calls of `Engine::run_block(k)`, with the engine's block capacity set to *k*. The output is the same at every *k* (the determinism matrix in `docs/testing-and-evaluation.md`); only the time changes.

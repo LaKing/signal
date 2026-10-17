@@ -169,6 +169,7 @@ expression: text
             "std.index64",
             "std.index8",
             "std.integrator",
+            "std.ladder",
             "std.lag",
             "std.latch",
             "std.lfo",

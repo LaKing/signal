@@ -158,7 +158,7 @@ The `std.*` types are listed with their class and category in the rustdoc of `cr
 |---|---|
 | `core` | `add`, `sub`, `mul`, `div`, `neg`, `abs`, `min`, `max`, `clamp`, `scale`, `mod`, `fract`, `floor`, `round`, `sign`; `sqrt`, `exp`, `log`, `pow`, `sin`, `cos`, `tan`, `tanh`, `atan2`, `sin_cycles`; `const`, `sample_rate`, `frames`; `compare`, `select`, `and`, `or`, `not`; `gain`, `mix`, `pan`, `unit_delay`; `phasor`, `counter`, `integrator`; `buffer1k`, `buffer64k`, `buffer1m`, `table<N>`; `latch`, `to_events`, `route`; `random`; `pack<N>`, `unpack<N>`, `index<N>`, `reduce<N>`, `vadd<N>`, `vmul<N>` |
 | `generator` | `sine_osc`, `osc`, `lfo`, `noise` |
-| `filter` | `svf`, `onepole`, `dc_block`, `lag`, `tanh_shaper` |
+| `filter` | `svf`, `onepole`, `ladder`, `dc_block`, `lag`, `tanh_shaper` |
 | `envelope` | `exp_env`, `adsr` |
 | `delay` | `delay` |
 | `physical` | `string`, `modal`, `mass_spring`, `exciter`, `mesh2d_audio` |

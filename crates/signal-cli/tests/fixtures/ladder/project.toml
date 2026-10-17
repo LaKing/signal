@@ -1,0 +1,22 @@
+# The std.ladder golden (M2.11-2): a saw through the ladder, its cutoff swept
+# by an LFO; lp on the left, lp12 on the right.
+schema_version = 1
+
+[project]
+name = "ladder"
+sample_rate = 48000
+seed = 1
+
+[instances]
+saw = { module = "std.osc", shape = 1, freq = 110 }
+sweep = { module = "std.lfo", freq_hz = 2 }
+ladder = { module = "std.ladder", cutoff_hz = 800, resonance = 0.8, drive = 2 }
+out = { module = "std.audio_out", gain = 0.5 }
+
+[wiring]
+connections = [
+  { from = "saw.out", to = "ladder.in" },
+  { from = "sweep.out", to = "ladder.cutoff_hz", scale = 600 },
+  { from = "ladder.lp", to = "out.l" },
+  { from = "ladder.lp12", to = "out.r" },
+]

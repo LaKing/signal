@@ -45,7 +45,7 @@
 - **Threshold: 1e-9.** A decaying value is set to exactly 0 when its magnitude falls below 1e-9. This applies to envelopes and to the state of a recursive filter's feedback path. 1e-9 is −180 dBFS, about 40 dB below the smallest step of 24-bit audio (2⁻²³ ≈ 1.2e-7), so the flush is inaudible.
   - `std.exp_env` flushes its output and goes idle.
   - `std.dc_block` flushes `y[n]`, which is its output and its feedback state.
-  - `std.svf` and `std.onepole` flush each integrator state (`s₁`, `s₂`; `s`).
+  - `std.svf` and `std.onepole` flush each integrator state (`s₁`, `s₂`; `s`), and `std.ladder` each stage's (`s₁`…`s₄`).
   - `std.adsr` flushes its release to exactly 0 and goes idle. Its decay ends at exactly the sustain level when the distance to it falls below 1e-9.
   - `std.lag` flushes the difference `x[n] − y[n]`: below 1e-9 the output is exactly the input.
 - A primitive whose output can only be subnormal when its input is subnormal (a gain, a delay) need not flush.
@@ -62,6 +62,7 @@
   - When `|u[n] − u[n−1]|` is below a small threshold, the quotient is ill-conditioned. Use its limit `f((u[n] + u[n−1])/2)` instead. `std.tanh_shaper` uses 1e-6.
   - Sum the difference `F(u[n]) − F(u[n−1])` in a form with as little cancellation as possible.
   - ADAA delays the signal by half a frame. Every ADAA primitive documents that delay.
+- **`std.ladder`'s `tanh` is not antialiased.** It sits inside the zero-delay feedback loop, where ADAA's half frame of delay would detune the cutoff and the self-oscillation.
 - **Oversampling is not used in M1.** The M3 lab experiment compares it with ADAA (ADR 0015 governs promotion).
 - Oscillators produce only band-limited waveforms. A waveform with discontinuities needs its own antialiasing: see the next section.
 
@@ -90,6 +91,7 @@ Filters are written in the topology-preserving transform (TPT, Zavalishin) form:
 - A trapezoidal integrator keeps one state `s`. Each frame computes `v = g·u`, outputs `y = v + s`, and stores `s ← y + v`.
 - **One-pole** (`std.onepole`): `G = g/(1 + g)`, `v = (x − s)·G`, `lp = v + s`, `s ← lp + v`, `hp = x − lp`.
 - **State-variable** (`std.svf`): `k = 1/q`, then `hp = (x − (k + g)·s₁ − s₂)/(1 + k·g + g²)`, `bp` and `lp` from two integrators in series. `lp + k·bp + hp = x`, and `bp` has gain `q` at the cutoff.
+- **Ladder** (`std.ladder`, Zavalishin rev. 2.1.x §5.2–5.3, §6.3–6.5): four one-pole stages in a feedback loop of gain `k = 4.2·resonance`, with one `tanh` at the loop's input, `u = tanh((1 + drive)·x − k·y₄)`. The zero-delay feedback equation is solved by at most 8 bracketed Newton steps per frame, and the passband is compensated by `1 + k`. Its cutoff is clamped to `[1, 0.45·sr]`, not `0.49·sr`. The rustdoc has the formula and the output bound.
 - Coefficients that need a transcendental function are recomputed only when their inputs change, which is never more than once per frame. The result does not depend on how the frames are split into calls.
 - The integrator states are flushed below 1e-9 (see "Denormals").
 
