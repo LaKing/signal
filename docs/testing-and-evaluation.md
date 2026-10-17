@@ -197,6 +197,7 @@ A milestone's listening verdict (V14 for M1) is a file `experiments/<id>/verdict
 | Verdict | File |
 |---|---|
 | M1, V14 | `experiments/m1-kick-v14/verdict.md` |
+| M2.11, studio demo (also covers `std.ladder` in use) | `experiments/m2-11-studio/verdict.md` |
 
 ## The M2 test project: `projects/pulse`
 
