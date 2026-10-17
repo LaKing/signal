@@ -19,8 +19,10 @@
     "signal-button": ["bind", "skin", "label", "class"],
     "signal-meter": ["bind", "skin", "label", "class", "source", "channel", "floor"],
     "signal-scope": ["bind", "skin", "label", "class", "mode", "rate", "trigger-level", "trigger-edge"],
-    "signal-canvas": ["bind", "skin", "label", "class", "renderer", "rate", "grid", "tilt", "height", "backend"]
+    "signal-canvas": ["bind", "skin", "label", "class", "renderer", "rate", "grid", "tilt", "height", "backend"],
+    "signal-piano-roll": ["pattern", "label", "class", "snap", "beats-per-bar", "position"],
+    "signal-step-grid": ["pattern", "label", "class", "step"]
   },
   "boolean": ["bipolar"],
-  "order": ["renderer", "bind", "source", "channel", "mode", "orientation", "taper", "floor", "min", "max", "default", "unit", "digits", "rate", "grid", "tilt", "height", "sweep", "bipolar", "drag", "spring", "trigger-level", "trigger-edge", "backend", "label", "skin", "class"]
+  "order": ["renderer", "pattern", "bind", "source", "channel", "mode", "orientation", "taper", "floor", "min", "max", "default", "unit", "digits", "rate", "grid", "tilt", "height", "sweep", "bipolar", "drag", "spring", "trigger-level", "trigger-edge", "backend", "snap", "beats-per-bar", "position", "step", "label", "skin", "class"]
 }

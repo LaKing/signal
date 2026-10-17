@@ -13,6 +13,7 @@ use crate::descriptor::{Feedthrough, ModuleDescriptor};
 use crate::event::Event;
 use crate::registry::Lent;
 use crate::rng::RngStream;
+use crate::table::Table;
 use serde::Serialize;
 
 /// What [`prepare`](DirectPrimitive::prepare) learns about the run it is prepared for.
@@ -62,6 +63,7 @@ pub struct Inputs<'a> {
     parameters: &'a [f64],
     events: &'a [Event],
     event_ends: &'a [usize],
+    table: Option<&'a Table>,
 }
 
 impl<'a> Inputs<'a> {
@@ -79,7 +81,21 @@ impl<'a> Inputs<'a> {
             parameters,
             events,
             event_ends,
+            table: None,
         }
+    }
+
+    /// These views with the instance's table (ADR 0028 §4): what the engine
+    /// hands an instance whose plan gives it one.
+    pub fn with_table(self, table: Option<&'a Table>) -> Inputs<'a> {
+        Inputs { table, ..self }
+    }
+
+    /// The instance's table, if its plan gives it one. It changes only at a
+    /// plan swap (a live edit), between two calls; a module reads it in every
+    /// call and keeps no index into it across calls.
+    pub fn table(&self) -> Option<&'a Table> {
+        self.table
     }
 
     /// The number of frames *k* ≥ 1 in this call.

@@ -50,7 +50,7 @@ use signal_project::live::{
 use signal_project::patch::{self, Op};
 use signal_project::schematic::{self, SCHEMATIC_FILE};
 use signal_project::session::{LiveRecorder, SessionRecorder, sink_of};
-use signal_project::{Diagnostic, LoadError, PROJECT_FILE, Project, located};
+use signal_project::{Diagnostic, LoadError, PATTERNS, PROJECT_FILE, Project, located};
 
 use crate::PROTOCOL;
 use crate::app::{self, Status};
@@ -2220,6 +2220,8 @@ impl Host {
             "panel.check" => self.panel_check(&message).map(Some),
             "panel.read" => self.panel_read(&message).map(Some),
             "panel.write" => self.panel_write(&message).map(Some),
+            "pattern.read" => self.pattern_read(&message).map(Some),
+            "pattern.write" => self.pattern_write(&message).map(Some),
             "setup.get" => Ok(Some(self.setup_get())),
             "setup.devices" => self.setup_devices(&message).map(Some),
             "setup.check" => self.setup_check(&message).map(Some),
@@ -2274,6 +2276,16 @@ impl Host {
                         "file": reply.get("file").cloned().unwrap_or(Value::Null),
                         "base": reply.get("base").cloned().unwrap_or(Value::Null),
                         "html": message.get("html").cloned().unwrap_or(Value::Null),
+                    });
+                    self.broadcast(&pushed);
+                }
+                // Every client learns of the written pattern (ADR 0028 §7).
+                if kind == "pattern.write" {
+                    let pushed = json!({
+                        "type": "pattern.written",
+                        "name": reply.get("name").cloned().unwrap_or(Value::Null),
+                        "base": reply.get("base").cloned().unwrap_or(Value::Null),
+                        "text": message.get("text").cloned().unwrap_or(Value::Null),
                     });
                     self.broadcast(&pushed);
                 }
@@ -2577,7 +2589,10 @@ impl Host {
     /// `patch` names.
     fn files_json(&self) -> Value {
         let mut files = serde_json::Map::new();
-        for source in signal_project::read_sources(&self.dir).unwrap_or_default() {
+        let sources = signal_project::read_sources(&self.dir).unwrap_or_default();
+        // A pattern's base is `pattern.read`'s, not a patch's.
+        let patterns = format!("{PATTERNS}/");
+        for source in sources.iter().filter(|s| !s.path.starts_with(&patterns)) {
             let key = match source.path.as_str() {
                 PROJECT_FILE => String::new(),
                 path => path
@@ -4048,6 +4063,182 @@ impl Host {
             return Ok((main, false));
         }
         Err(unknown())
+    }
+
+    /// The pattern file of `pattern.read` and `pattern.write` (ADR 0028 §7):
+    /// `patterns/<name>.toml` of the project served, from a name (never a
+    /// path), and whether it is reached through a link (a linked `patterns/`
+    /// or file, never read or written).
+    fn pattern_path(&self, message: &Value) -> Result<(String, PathBuf, bool), Failure> {
+        if self.app.as_ref().is_some_and(|m| !m.opened) {
+            return Err(fail("no-project", "open a project folder first"));
+        }
+        let name = message
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| fail("bad-message", "a pattern message needs `name`"))?;
+        let mut chars = name.chars();
+        let valid = chars.next().is_some_and(|c| c.is_ascii_lowercase())
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+        if !valid {
+            return Err(fail(
+                "bad-value",
+                format!(
+                    "`{name}` is not a pattern name: a-z, 0-9 and _, starting with a-z (the file is patterns/<name>.toml)"
+                ),
+            ));
+        }
+        let folder = self.dir.join(PATTERNS);
+        let path = folder.join(format!("{name}.toml"));
+        let link =
+            |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+        let linked = link(&folder) || link(&path);
+        Ok((name.to_owned(), path, linked))
+    }
+
+    /// `pattern.read` (ADR 0028 §7): a pattern file's text, its SHA-256 (the
+    /// `base` a `pattern.write` names) and its kind (`null` for a file that
+    /// does not read as a pattern). A missing file reads as `exists: false`.
+    fn pattern_read(&self, message: &Value) -> Result<Value, Failure> {
+        let (name, path, linked) = self.pattern_path(message)?;
+        if linked {
+            return Err(fail(
+                "unknown-pattern",
+                format!(
+                    "{PATTERNS}/{name}.toml is reached through a link: patterns are read and written only in the project's own {PATTERNS}/"
+                ),
+            ));
+        }
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(
+                    json!({"type": "pattern.read", "name": name, "exists": false,
+                    "base": null, "text": null, "kind": null}),
+                );
+            }
+            Err(error) => {
+                return Err(fail(
+                    "unknown-pattern",
+                    format!("{PATTERNS}/{name}.toml: {error}"),
+                ));
+            }
+        };
+        Ok(json!({
+            "type": "pattern.read",
+            "name": name,
+            "exists": true,
+            "base": sha256_hex(text.as_bytes()),
+            "kind": signal_project::pattern_kind(&text),
+            "text": text,
+        }))
+    }
+
+    /// `pattern.write` (ADR 0028 §7, as `patch` and `panel.write`): `text`
+    /// becomes `patterns/<name>.toml` when the file is still the version
+    /// `base` names (`null`: it does not exist yet; `conflict` otherwise,
+    /// with its text) and the project, with it, loads and plans as a reload
+    /// would (`does-not-load` names every problem); written atomically,
+    /// never through a link, and not taken as seen, so the watch applies it
+    /// live (a swap at an edit frame). Nothing is written when a step
+    /// refuses.
+    fn pattern_write(&mut self, message: &Value) -> Result<Value, Failure> {
+        let (name, path, linked) = self.pattern_path(message)?;
+        let file = format!("{PATTERNS}/{name}.toml");
+        let text = message
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| fail("bad-message", "pattern.write needs `text`"))?;
+        let base = match message.get("base") {
+            Some(Value::String(base)) => Some(base.as_str()),
+            None | Some(Value::Null) => None,
+            Some(_) => return Err(fail("bad-message", "`base` is a string or null")),
+        };
+        if linked {
+            return Err(fail(
+                "write-failed",
+                format!(
+                    "{file} was not written: it is reached through a link, and patterns are written only in the project's own {PATTERNS}/"
+                ),
+            ));
+        }
+        let current = |path: &Path| -> Result<Option<String>, Failure> {
+            match fs::read_to_string(path) {
+                Ok(text) => Ok(Some(text)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(fail("write-failed", format!("{file}: {error}"))),
+            }
+        };
+        let conflict = |before: Option<String>| {
+            let now = before.as_deref().map(|t| sha256_hex(t.as_bytes()));
+            fail_with(
+                "conflict",
+                format!("{file} changed since the version the editor started from"),
+                json!({"name": name, "file": file, "base": now, "text": before}),
+            )
+        };
+        let before = current(&path)?;
+        if before
+            .as_deref()
+            .map(|t| sha256_hex(t.as_bytes()))
+            .as_deref()
+            != base
+        {
+            return Err(conflict(before));
+        }
+        // The project with the new text, loaded and compiled as a reload
+        // would: the pattern's own errors and those of the instances naming it.
+        let mut sources = signal_project::read_sources(&self.dir)
+            .map_err(|e| fail("does-not-load", e.to_string()))?;
+        sources.retain(|s| s.path != file);
+        sources.push(signal_project::SourceFile {
+            path: file.clone(),
+            text: text.to_owned(),
+        });
+        let does_not_load = |diagnostics: Vec<Diagnostic>| {
+            let lines: Vec<String> = located(&self.dir, diagnostics)
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            fail_with(
+                "does-not-load",
+                format!("not written: {}", lines.join("\n")),
+                json!({"name": name, "file": file, "diagnostics": lines}),
+            )
+        };
+        let new = Project::from_sources(sources).map_err(does_not_load)?;
+        let planned = new.plan(&self.registry).map_err(does_not_load)?.plan;
+        sink_of(&new, &planned).map_err(does_not_load)?;
+        if let Some(run) = &self.run {
+            signal_project::live::check_edit(
+                &run.current,
+                self.plan.as_ref(),
+                &new,
+                planned,
+                &self.registry,
+            )
+            .map_err(does_not_load)?;
+        }
+        // The file as it is now, not as it was read: an edit from elsewhere
+        // since then is a conflict, never overwritten.
+        let now = current(&path)?;
+        if now != before {
+            return Err(conflict(now));
+        }
+        let failed =
+            |e: std::io::Error| fail("write-failed", format!("{file} was not written: {e}"));
+        if let Some(folder) = path.parent() {
+            fs::create_dir_all(folder).map_err(failed)?;
+        }
+        write_file(&path, text).map_err(failed)?;
+        // Playing, the watch reloads the file and swaps it in.
+        Ok(json!({
+            "type": "pattern.written",
+            "name": name,
+            "file": file,
+            "base": sha256_hex(text.as_bytes()),
+            "created": before.is_none(),
+        }))
     }
 
     /// `panel.read` (ADR 0026 §5): a panel file's text and its SHA-256 (the

@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use serde::Serialize;
-use signal_core::{InstanceAddress, ModuleDescriptor, PortAddress, PortShape};
+use signal_core::{InstanceAddress, ModuleDescriptor, PortAddress, PortShape, Table};
 
 use crate::error::GraphWarning;
 
@@ -43,6 +43,11 @@ pub struct PlanInstance {
     /// `type_name`.
     #[serde(skip)]
     pub descriptor: ModuleDescriptor,
+    /// Its table (ADR 0028 §4), compiled by its type's library from the
+    /// data the project names for it, or `None`. Not serialized: it comes
+    /// from a project file the caller hashes.
+    #[serde(skip)]
+    pub table: Option<Table>,
 }
 
 /// One incoming connection of an input port.

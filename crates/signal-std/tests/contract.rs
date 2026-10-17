@@ -136,6 +136,14 @@ mod step_seq {
     signal_contract::contract_tests!(super::std_type("std.step_seq"));
 }
 
+mod note_seq {
+    signal_contract::contract_tests!(super::std_type("std.note_seq"));
+}
+
+mod step_seq8 {
+    signal_contract::contract_tests!(super::std_type("std.step_seq8"));
+}
+
 mod string {
     signal_contract::contract_tests!(super::std_type("std.string"));
 }

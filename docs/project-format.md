@@ -10,6 +10,7 @@ Terms are those of `00-vision.md` §3a: Project, Module, Primitive, Composite, I
 <project>/
   project.toml            the project: settings, instances, wiring
   composites/<name>.toml  one composite per file (optional folder)
+  patterns/<name>.toml    note and step data, one pattern per file (optional folder; §12)
   ui/*.html               panels (optional; ui/main.html is the main one)
   ui/assets/              their SVG and PNG files
   ui/schematic.toml       the schematic's positions (optional, presentation only; §11)
@@ -91,7 +92,7 @@ Ports are written `instance.port`, with the inner instance's local name. Export 
 
 ```toml
 [instances]
-<name> = { module = "<ref>", gpu = "<device>", <parameter> = <number>, … }
+<name> = { module = "<ref>", gpu = "<device>", pattern = "<name>", <parameter> = <number>, … }
 ```
 
 - **`<name>`** is the instance's local name, `[a-z][a-z0-9_]*`. Instance addresses follow from names: `/voice/low` is instance `low` inside the instance `voice` of the project (ADR 0016 §1).
@@ -99,6 +100,7 @@ Ports are written `instance.port`, with the inner instance's local name. Export 
   - a reference containing a dot, such as **`std.sine_osc`**, resolves to a **primitive type in the registry** (`signal modules` lists them);
   - a **bare name**, such as `voice`, resolves to the **composite in `composites/voice.toml`**.
 - **`gpu`** (M2.7-2, optional) pins a **GPU-backed primitive instance** to a GPU device: a device's stable id or its index in the machine's pool, as a string (`gpu = "metal-apple-m5-max"`, `gpu = "1"`; `signal devices --compute` lists both; an index counts the devices the Setup's `gpu_devices` allows, sorted by id). Without it the instance is placed by the rule: round-robin over the devices sorted by id, by instance address (`docs/realtime-rules.md` "GPU"). A pin naming no device of the machine is reported and the instance is placed by the rule; a pin on an instance that uses no GPU is reported and ignored. It is an error on a composite instance (pin the instances inside it) and when empty. `gpu` is **reserved**: no composite may export a parameter named `gpu`. A running project keeps its placement: a live edit that changes a pin, or adds a pinned instance, is refused (restart the project). The render manifest records the placement.
+- **`pattern`** (M2.11-1, ADR 0028 §3, optional) names the pattern file `patterns/<name>.toml` (§12) whose data the instance takes, as a string (`pattern = "melody"`). A module type declares whether it takes a pattern, and of which kind (`std.note_seq` a `notes` pattern, `std.step_seq8` a `steps` pattern); its library compiles the pattern into the instance's table when the plan is built. It is an error, at the value and naming the instance and the file, when the file does not exist, when its kind is not the one the type takes, when the type takes no pattern, on a composite instance (name the pattern inside the composite), and when the library refuses the data (a key `std.note_seq` cannot play). A type that takes a pattern may be given none: it then plays nothing. `pattern` is **reserved**: no composite may export a parameter named `pattern`. A changed pattern file is a live edit: a swap at an edit frame in which every instance survives, keeping its state (`semantics.md` §12).
 - **Parameters** are every other key. The value is a number (integer or float). For a primitive, the key must be one of its declared parameters, and the value must lie in the parameter's range. For a composite, the key must be one of its exported parameters. When parameters are set at several levels, the outermost instance's value wins.
 
 ## 5. Connections
@@ -152,7 +154,7 @@ Hashes are 16 lowercase hex digits. Provenance is read when the render runs, not
 
 ## 8. JSON Schema
 
-`signal schema` prints a JSON Schema (draft 2020-12) that accepts exactly one of the two file kinds. Module references are restricted to the registry's type names or a bare composite name. The schema is generated from the same model the loader uses. It cannot check what needs the registry's descriptors or other files: parameter names and ranges, ports, and whether a composite exists.
+`signal schema` prints a JSON Schema (draft 2020-12) that accepts exactly one of the four file kinds: `project.toml`, a composite, and a pattern file of `kind = "notes"` or `kind = "steps"` (§12). Module references are restricted to the registry's type names or a bare composite name. The schema is generated from the same model the loader uses. It cannot check what needs the registry's descriptors or other files: parameter names and ranges, ports, and whether a composite exists.
 
 ## 9. Setup (machine settings)
 
@@ -213,13 +215,14 @@ A **project file** is a project folder as one file (ADR 0025): a zip archive of 
 
 - `project.toml`;
 - `composites/*.toml` (directly in `composites/`);
+- `patterns/*.toml` (directly in `patterns/`, §12);
 - every file under `ui/` (panels and their `assets/`, at any depth).
 
 **What stays out.** Everything else, in particular:
 
 - hidden files and folders, at any depth: any name that starts with `.` (`.DS_Store`, `.git/`, an editor's temporary file);
-- `renders/` and `sessions/`, and any other folder beside `composites/` and `ui/`;
-- any other file at the root (notes, a `.signal` file) or in `composites/` (a file that is not `.toml`, a sub-folder).
+- `renders/` and `sessions/`, and any other folder beside `composites/`, `patterns/` and `ui/`;
+- any other file at the root (notes, a `.signal` file) or in `composites/` or `patterns/` (a file that is not `.toml`, a sub-folder).
 
 A symbolic link where a project file would be is refused, not followed, and a folder without `project.toml` is not packed.
 
@@ -249,3 +252,94 @@ osc = { x = 0, y = 30 }
 ```
 
 One table per graph level: `[top]` for the top level, `[composite.<name>]` for a composite's inside; each key is an instance of that level, its value `{ x, y }`, integers in the schematic's units. `schematic.move` (`ui-protocol.md`) writes it with `toml_edit`, atomically, as `commit` writes `project.toml`, keeping comments and everything else; "Reset layout" removes a level's table, or the whole file. Read leniently, since it is never the project: an entry that is not `{ x = integer, y = integer }` and any other table are ignored; an instance or level that does not exist (any more) is kept in the file and in `graph`'s `layout.positions` as read, and ignored by the drawing; a file that does not parse is reported with `graph` (`layout.error`) and taken as empty.
+
+## 12. Pattern files (`patterns/<name>.toml`)
+
+A **pattern** is note or step data as text (ADR 0028): what a piano roll or a step grid edits. It is data, not logic, and never holds an expression (ADR 0010). Pattern files are project files (§1): every `.toml` file directly in `patterns/` is loaded and validated whether an instance names it or not, hashed into a render's manifest (§7), copied into a session for every plan version (`session-format.md` §3), packed into a `.signal` file (§10) and watched: a changed pattern is applied to a running project as a live edit. `<name>` is the file name without `.toml`, `[a-z][a-z0-9_]*`; an instance names it with `pattern = "<name>"` (§4). **Unknown keys are errors**, as everywhere.
+
+### Notes (`kind = "notes"`)
+
+```toml
+schema_version = 1
+kind = "notes"
+length = 4                    # beats: the loop
+
+[[notes]]
+key = 60                      # 60 = middle C (the library's convention)
+start = 0                     # beats from the pattern's start
+length = 0.5                  # beats
+velocity = 0.8
+
+[[notes]]
+key = 64
+start = 1
+length = 1
+velocity = 1
+```
+
+The same pattern with the notes written inline (one array: a file uses one form or the other):
+
+```toml
+schema_version = 1
+kind = "notes"
+length = 4
+notes = [
+  { key = 60, start = 0, length = 0.5, velocity = 0.8 },
+  { key = 64, start = 1, length = 1, velocity = 1 },
+]
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `schema_version` | integer, required | `1`. |
+| `kind` | string, required | `"notes"`. |
+| `length` | number, required | The loop length in beats, above 0 and at most 65536. |
+| `notes` | array of tables, required | At most 16384 notes, in any order; `notes = []` is a pattern of no notes. Written inline (`notes = [ { … }, … ]`, what the UI writes, one table per line) or as `[[notes]]` tables. Each has exactly `key`, `start`, `length` and `velocity`. |
+| `notes[].key` | integer, required | A TOML integer from 0 to 127 (`60.0` and `60.5` are errors). |
+| `notes[].start` | number, required | Beats, finite, at least 0. A note starting at or after `length` never plays. |
+| `notes[].length` | number, required | Beats, finite, above 0. A note may cross the loop end. |
+| `notes[].velocity` | number, required | 0 to 1. |
+
+`start`, `length` and `velocity` take integers or floats (`start = 1` is `1.0`). Notes are sorted by start, then key, when read. Two notes *a*, *b* on one key (*a*.start ≤ *b*.start) overlap iff `a.start + a.length > b.start`, compared exactly, with no tolerance; that is an error at the later one. Touching notes (equal) are allowed.
+
+A player counts the loop in ticks, `T = max(1, round_half_up(length · ppq))`, and starts a note on tick `round_half_up(start · ppq)` (`std.note_seq`). A note starting just before the loop end can round to tick *T*, the loop's end: it then **wraps** to tick 0 of the next loop, where it falls in time (from the second loop on, as a wrapped step), so no note that starts before `length` is lost.
+
+### Steps (`kind = "steps"`)
+
+```toml
+schema_version = 1
+kind = "steps"
+steps = 16                    # steps in the loop
+step = 0.25                   # beats per step: 16ths
+
+[lanes]                       # in output order: the first lane is t1
+kick = "X...x...x...x..x"
+snare = "....X.......X..."
+hat = "..x...x...x...x."
+
+[levels]                      # optional: a lane not listed has level 1
+kick = 0.9
+hat = 0.6
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `schema_version` | integer, required | `1`. |
+| `kind` | string, required | `"steps"`. |
+| `steps` | integer, required | A TOML integer, 1 to 256. |
+| `step` | number, required | Beats per step, above 0 and at most 64. |
+| `[lanes]` | table, required | 1 to 64 lanes (`std.step_seq8` plays up to 8), in the order written, which is the output order. A lane name is `[a-z][a-z0-9_]*`, unique (TOML refuses a repeated key). A lane is a string of exactly `steps` cells, one character per step: `.` rest, `x` hit, `X` accent; any other length or character is an error. |
+| `[levels]` | table, optional | `<lane> = <number>`: a lane's level, its hit value, 0 to 1 (integer or float). Every key must name a lane of `[lanes]` (an error naming the key otherwise). A lane not listed has level 1. |
+
+The loop is `steps · step` beats. A player places step *i* on its tick, `round_half_up(i · step · ppq)` (`std.step_seq8`, with swing delaying the even steps by whole ticks). When `step · ppq` is not a whole number of ticks, a step can land on the loop's end or past it (steps that round up to the loop end, or the last step delayed by swing); it then **wraps** and plays on the next loop's first ticks, where it falls in time (from the second loop on). No step of a pattern is ever lost. A whole number of ticks per step never wraps. A player's playhead (`std.step_seq8`'s `step`) shows the loop position: on each tick, the latest step whose tick (without swing) is at or before it. A wrapped step fires without moving the playhead back, so when wrapped hits share a tick with the next loop's steps, the playhead shows the next loop's.
+
+### The source the library compiles
+
+The loader reads a pattern into its kind's canonical **source**, a header and rows of numbers, which the library of the type naming it compiles into that instance's table (ADR 0028 §4; `module-contract.md` "Tables"):
+
+- `notes`: header `[length]`; one row `[key, start, length, velocity]` per note, sorted by start, then key;
+- `steps`: header `[steps, step]`; one row `[level, c₀ … c₍steps−1₎]` per lane in file order (`level` from `[levels]`, 1 when not listed), each cell 0 (rest), 1 (hit) or 2 (accent).
+
+### Editing over the UI protocol
+
+`pattern.read` and `pattern.write` (`ui-protocol.md`) read and write these files whole, with the checks of a reload. A client message is at most 64 KiB, so a pattern editable over the protocol is one whose text, JSON-escaped, fits that with its envelope: about 63 KiB of TOML, some 1200 notes written one per line, or any steps pattern up to 64 lanes of 256 steps. Larger files load from disk and are edited as text.

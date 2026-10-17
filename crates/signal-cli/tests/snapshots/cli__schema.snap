@@ -110,7 +110,7 @@ expression: text
       "additionalProperties": {
         "type": "number"
       },
-      "description": "An instance: its module, the GPU device it is pinned to (`gpu`, a device id or index; GPU-backed instances only), and the parameter values set on it.",
+      "description": "An instance: its module, the GPU device it is pinned to (`gpu`, a device id or index; GPU-backed instances only), the pattern whose data it takes (`pattern`, the name of patterns/<name>.toml; types that take one only), and the parameter values set on it.",
       "properties": {
         "gpu": {
           "minLength": 1,
@@ -118,6 +118,10 @@ expression: text
         },
         "module": {
           "$ref": "#/$defs/ModuleRef"
+        },
+        "pattern": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "type": "string"
         }
       },
       "required": [
@@ -181,6 +185,7 @@ expression: text
             "std.neg",
             "std.noise",
             "std.not",
+            "std.note_seq",
             "std.onepole",
             "std.or",
             "std.osc",
@@ -215,6 +220,7 @@ expression: text
             "std.sine_osc",
             "std.sqrt",
             "std.step_seq",
+            "std.step_seq8",
             "std.string",
             "std.sub",
             "std.svf",
@@ -260,6 +266,82 @@ expression: text
         }
       ],
       "description": "A module reference: a registered primitive type, or the name of a composite in composites/<name>.toml."
+    },
+    "NoteEntry": {
+      "additionalProperties": false,
+      "description": "One note.",
+      "properties": {
+        "key": {
+          "description": "The key, an integer from 0 to 127 (60 = middle C by the library's\nconvention).",
+          "format": "int64",
+          "maximum": 127,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "length": {
+          "description": "How long it sounds, in beats, above 0.",
+          "format": "double",
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "start": {
+          "description": "Where it starts, in beats from the pattern's start, at least 0.",
+          "format": "double",
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "velocity": {
+          "description": "Its velocity, from 0 to 1.",
+          "format": "double",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        }
+      },
+      "required": [
+        "key",
+        "start",
+        "length",
+        "velocity"
+      ],
+      "type": "object"
+    },
+    "NotesFile": {
+      "additionalProperties": false,
+      "description": "A note pattern file (`kind = \"notes\"`).",
+      "properties": {
+        "kind": {
+          "const": "notes",
+          "description": "`\"notes\"`.",
+          "type": "string"
+        },
+        "length": {
+          "description": "The loop length in beats, above 0 and at most 65536.",
+          "format": "double",
+          "maximum": 65536.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "notes": {
+          "description": "The notes, in any order (required; `notes = []` for none): an\ninline array of tables or `[[notes]]` tables.",
+          "items": {
+            "$ref": "#/$defs/NoteEntry"
+          },
+          "type": "array"
+        },
+        "schema_version": {
+          "const": 1,
+          "description": "The format version of this file; this version of Signal reads 1.",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "length",
+        "notes"
+      ],
+      "type": "object"
     },
     "ProjectFile": {
       "additionalProperties": false,
@@ -320,6 +402,61 @@ expression: text
       ],
       "type": "object"
     },
+    "StepsFile": {
+      "additionalProperties": false,
+      "description": "A step pattern file (`kind = \"steps\"`).",
+      "properties": {
+        "kind": {
+          "const": "steps",
+          "description": "`\"steps\"`.",
+          "type": "string"
+        },
+        "lanes": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The lanes, in output order: `name = \"x...X...\"`, one cell per step\n(`.` rest, `x` hit, `X` accent).",
+          "type": "object"
+        },
+        "levels": {
+          "additionalProperties": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "default": {},
+          "description": "The lanes' levels, `name = 0.9`, each from 0 to 1; every key names a\nlane, and a lane not listed has level 1.",
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 1,
+          "description": "The format version of this file; this version of Signal reads 1.",
+          "type": "integer"
+        },
+        "step": {
+          "description": "The beats per step (0.25 for 16ths), above 0 and at most 64.",
+          "format": "double",
+          "maximum": 64.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "steps": {
+          "description": "The number of steps, 1 to 256.",
+          "format": "int64",
+          "maximum": 256,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "steps",
+        "step",
+        "lanes"
+      ],
+      "type": "object"
+    },
     "Targets": {
       "anyOf": [
         {
@@ -357,7 +494,13 @@ expression: text
     },
     {
       "$ref": "#/$defs/CompositeFile"
+    },
+    {
+      "$ref": "#/$defs/NotesFile"
+    },
+    {
+      "$ref": "#/$defs/StepsFile"
     }
   ],
-  "title": "Signal project and composite files"
+  "title": "Signal project, composite and pattern files"
 }

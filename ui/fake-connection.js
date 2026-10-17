@@ -110,8 +110,53 @@ function failure(code, message) {
   return Promise.reject(error);
 }
 
+/** The demo project's pattern files (`patterns/<name>.toml`, project-format.md §12). */
+export const FAKE_PATTERNS = Object.freeze({
+  melody: `schema_version = 1
+kind = "notes"
+length = 4
+notes = [
+  { key = 60, start = 0, length = 0.5, velocity = 0.8 },
+  { key = 64, start = 1, length = 0.5, velocity = 0.8 },
+  { key = 67, start = 2, length = 1, velocity = 1 },
+]
+`,
+  drums: `schema_version = 1
+kind = "steps"
+steps = 16
+step = 0.25
+
+[lanes]
+kick  = "X...x...x...x..x"
+snare = "....X.......X..."
+
+[levels]
+kick = 0.9
+`,
+});
+
+/**
+ * The fake's stand-in for a file's SHA-256: a deterministic 64-bit FNV-1a
+ * hash of the text, as 16 hex digits. Clients only compare it.
+ */
+export function fakeSha(text) {
+  let h = 0xcbf29ce484222325n;
+  for (const byte of new TextEncoder().encode(text)) {
+    h ^= BigInt(byte);
+    h = (h * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return h.toString(16).padStart(16, '0');
+}
+
+const PATTERN_NAME = /^[a-z][a-z0-9_]*$/;
+
+/** The kind a pattern text declares (`kind = "notes"` or `"steps"`), or null. */
+function patternKind(text) {
+  return /^kind\s*=\s*"(notes|steps)"\s*(#.*)?$/m.exec(text)?.[1] ?? null;
+}
+
 export class FakeConnection {
-  constructor({ timers = globalThis } = {}) {
+  constructor({ timers = globalThis, patterns = FAKE_PATTERNS } = {}) {
     this.timers = timers;
     this.status = 'connecting';
     this.description = fakeDescription();
@@ -123,6 +168,8 @@ export class FakeConnection {
     this.listeners = new Map();
     this.triggers = [];
     this.unsaved = null;
+    /** The pattern files, in memory: name → text. */
+    this.patterns = new Map(Object.entries(patterns));
   }
 
   on(event, fn) {
@@ -201,6 +248,42 @@ export class FakeConnection {
 
   revert(address) {
     return failure('not-unsaved', `${address} is not unsaved`);
+  }
+
+  /** `Connection.readPattern`: `{ text, sha, base, exists, kind }` of an in-memory pattern. */
+  readPattern(name) {
+    if (typeof name !== 'string' || !PATTERN_NAME.test(name)) return failure('bad-value', `\`${name}\` is not a pattern name`);
+    const text = this.patterns.get(name);
+    if (text === undefined) return Promise.resolve({ text: null, sha: null, base: null, exists: false, kind: null });
+    const sha = fakeSha(text);
+    return Promise.resolve({ text, sha, base: sha, exists: true, kind: patternKind(text) });
+  }
+
+  /**
+   * `Connection.writePattern`: replaces the pattern when `base` is its
+   * current sha (null: it does not exist yet), else rejects `conflict`
+   * (its `reply` carries the current `text` and `base`); a text without a
+   * pattern `kind` is refused (`does-not-load`; the server validates the
+   * whole format). Every listener gets `pattern.written`, as the server
+   * pushes it.
+   */
+  writePattern(name, text, base) {
+    if (typeof name !== 'string' || !PATTERN_NAME.test(name)) return failure('bad-value', `\`${name}\` is not a pattern name`);
+    if (typeof text !== 'string') return failure('bad-message', 'pattern.write needs `text`');
+    const before = this.patterns.get(name);
+    const current = before === undefined ? null : fakeSha(before);
+    if ((base ?? null) !== current) {
+      const error = new Error(`patterns/${name}.toml changed since the version the editor started from`);
+      error.code = 'conflict';
+      error.reply = { type: 'error', code: 'conflict', message: error.message, name, base: current, text: before ?? null };
+      return Promise.reject(error);
+    }
+    const kind = patternKind(text);
+    if (!kind) return failure('does-not-load', `patterns/${name}.toml: a pattern file needs \`kind\`: "notes" or "steps"`);
+    this.patterns.set(name, text);
+    const sha = fakeSha(text);
+    this.emit('pattern.written', { type: 'pattern.written', name, base: sha, text });
+    return Promise.resolve({ sha, base: sha, created: before === undefined });
   }
 
   trigger(address) {

@@ -42,6 +42,8 @@ pub(crate) struct InstanceSpans {
     pub(crate) parameters: BTreeMap<String, (Span, Span)>,
     /// Its `gpu` pin (M2.7-2) and the value's span.
     pub(crate) gpu: Option<(String, Span)>,
+    /// The pattern it names (ADR 0028 §3) and the value's span.
+    pub(crate) pattern: Option<(String, Span)>,
 }
 
 /// The spans of one connection.
@@ -275,6 +277,12 @@ impl<'a> Locator<'a> {
     pub(crate) fn pin(&self, address: &InstanceAddress) -> Option<&'a str> {
         let (_, instance) = self.instance(address)?;
         instance.gpu.as_ref().map(|(pin, _)| pin.as_str())
+    }
+
+    /// The pattern the instance at `address` names, if any.
+    pub(crate) fn pattern(&self, address: &InstanceAddress) -> Option<&'a str> {
+        let (_, instance) = self.instance(address)?;
+        instance.pattern.as_ref().map(|(name, _)| name.as_str())
     }
 
     fn instance_key(&self, address: &InstanceAddress) -> Option<Location> {

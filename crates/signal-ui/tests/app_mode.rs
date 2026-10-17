@@ -679,6 +679,46 @@ fn a_panel_write_marks_a_signal_project_edited(transport: Transport) {
     rig.finish();
 }
 
+/// M2.11-1 (ADR 0028 §7): a `pattern.write` is a file in a `.signal`
+/// project's working folder, so the project becomes edited (here the first
+/// write of a pattern no instance names yet), and Save packs it.
+fn a_pattern_write_marks_a_signal_project_edited(transport: Transport) {
+    let mut rig = app_rig("signal-pattern-write", transport, None);
+    let file = packed(&rig, "tone");
+    let (mut ws, _) = rig.client();
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    let working = PathBuf::from(opened["dir"].as_str().unwrap());
+    assert!(!rig.host().project_status().unwrap().edited);
+    let text = "schema_version = 1\nkind = \"steps\"\nsteps = 4\nstep = 0.25\n\n[lanes]\nkick = \"x.x.\"\n";
+    let written = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "pattern.write", "name": "beat", "text": text, "base": null}),
+        "pattern.written",
+    );
+    assert_eq!(written["created"], true);
+    assert!(working.join("patterns/beat.toml").is_file());
+    assert!(
+        rig.host().project_status().unwrap().edited,
+        "the write edits the project"
+    );
+    rig.request(&mut ws, 3, json!({"type": "project.save"}), "saved");
+    assert!(!rig.host().project_status().unwrap().edited);
+    let unpacked = file.with_extension("check");
+    archive::unpack(&fs::read(&file).unwrap(), &unpacked).unwrap();
+    assert_eq!(
+        fs::read_to_string(unpacked.join("patterns/beat.toml")).unwrap(),
+        text,
+        "saved with the pattern"
+    );
+    rig.finish();
+}
+
 /// M2.9-3: stopped, a patch writes the file and pushes `graph` at once (no
 /// watch reload to wait for), with the instance in it.
 fn a_stopped_patch_writes_and_pushes_graph(transport: Transport) {
@@ -1396,6 +1436,7 @@ both!(
     signal_ui_refuses_the_app_s_messages,
     a_signal_file_opens_in_a_working_folder,
     a_panel_write_marks_a_signal_project_edited,
+    a_pattern_write_marks_a_signal_project_edited,
     a_stopped_patch_writes_and_pushes_graph,
     a_patch_marks_a_signal_project_edited,
     steps_never_wait_for_a_document_comparison,

@@ -26,7 +26,8 @@ pub enum ProjectEdit {
     /// value differs, in address order. Empty when nothing that runs changed
     /// (identical files, or whitespace and comments only).
     Parameters(Vec<ParameterChange>),
-    /// Instances, types or connections changed: swap to `plan`. `removed` and
+    /// Instances, types, connections or a survivor's table (a pattern, ADR
+    /// 0028 §4) changed: swap to `plan`. `removed` and
     /// `added` are the instances that do not survive (same address and module
     /// type), for the removal protocol (`docs/semantics.md` §12); a retyped
     /// instance is in both. `sets` are the survivors' parameters whose file
@@ -167,9 +168,16 @@ pub(crate) fn diff_plans(
         before.instances.iter().map(|i| (&i.address, i)).collect();
     let mut sets = Vec::new();
     let mut added = Vec::new();
+    // ADR 0028 §4: a changed table reaches the kept instance by a swap.
+    let mut tables_changed = false;
     for instance in &after.instances {
         match old_instances.get(&instance.address) {
             Some(previous) if previous.type_name == instance.type_name => {
+                tables_changed |= match (&previous.table, &instance.table) {
+                    (None, None) => false,
+                    (Some(a), Some(b)) => !a.identical(b),
+                    _ => true,
+                };
                 for (name, &value) in &instance.parameters {
                     let unchanged = previous
                         .parameters
@@ -202,7 +210,8 @@ pub(crate) fn diff_plans(
         .map(|i| i.address.clone())
         .collect();
 
-    if added.is_empty() && removed.is_empty() && before.sources == after.sources {
+    if added.is_empty() && removed.is_empty() && !tables_changed && before.sources == after.sources
+    {
         Ok(ProjectEdit::Parameters(sets))
     } else {
         Ok(ProjectEdit::Structural {

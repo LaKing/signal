@@ -93,6 +93,9 @@ impl Validator<'_> {
                     "minimum" => value
                         .as_f64()
                         .is_none_or(|x| x >= argument.as_f64().unwrap()),
+                    "maximum" => value
+                        .as_f64()
+                        .is_none_or(|x| x <= argument.as_f64().unwrap()),
                     "pattern" => {
                         assert_eq!(
                             argument, "^[a-z][a-z0-9_]*$",
@@ -187,4 +190,45 @@ fn module_references_list_the_registry() {
         .collect();
     assert_eq!(listed, names);
     assert!(listed.contains(&"std.sine_osc"));
+}
+
+/// M2.11-1 (ADR 0028 §2): both pattern kinds validate, a file is exactly one
+/// kind, and what the loader refuses by schema the schema refuses.
+#[test]
+fn pattern_files_validate_by_kind() {
+    let notes = "schema_version = 1\nkind = \"notes\"\nlength = 4\n\n[[notes]]\nkey = 60\nstart = 0\nlength = 1\nvelocity = 0.5\n";
+    let steps = "schema_version = 1\nkind = \"steps\"\nsteps = 4\nstep = 0.25\n\n[lanes]\nkick = \"x..X\"\nhat = \".x.x\"\n\n[levels]\nhat = 0.5\n";
+    assert!(validates(notes));
+    assert!(validates(steps));
+    assert!(validates(&notes.replace(
+        "\n[[notes]]\nkey = 60\nstart = 0\nlength = 1\nvelocity = 0.5\n",
+        "notes = []\n"
+    )));
+    for case in [
+        notes.replace("kind = \"notes\"", "kind = \"steps\""),
+        notes.replace("velocity = 0.5", "velocity = 1.5"),
+        notes.replace("velocity = 0.5", "velocity = 0.5\ncolour = 1"),
+        notes.replace("length = 4\n", ""),
+        steps.replace("steps = 4", "steps = 300"),
+        notes.replace("key = 60", "key = 60.5"),
+        notes.replace("key = 60", "key = 128"),
+        notes.replace(
+            "\n[[notes]]\nkey = 60\nstart = 0\nlength = 1\nvelocity = 0.5\n",
+            "",
+        ),
+        steps.replace("hat = 0.5", "hat = 1.5"),
+        steps.replace("hat = \".x.x\"", "hat = { cells = \".x.x\", level = 0.5 }"),
+        steps.replace("kind = \"steps\"", "kind = \"chords\""),
+    ] {
+        assert!(!validates(&case), "accepted:\n{case}");
+    }
+    let project = example("project.toml");
+    assert!(validates(&project.replace(
+        "module = \"std.audio_out\"",
+        "module = \"std.audio_out\", pattern = \"beat\""
+    )));
+    assert!(!validates(&project.replace(
+        "module = \"std.audio_out\"",
+        "module = \"std.audio_out\", pattern = 3"
+    )));
 }

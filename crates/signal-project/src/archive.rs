@@ -3,7 +3,7 @@
 //! own (`docs/project-format.md` §10).
 //!
 //! [`pack`] takes what a project reads (`project.toml`, `composites/*.toml`,
-//! the files under `ui/`) and nothing else, in sorted path order, deflated,
+//! `patterns/*.toml`, the files under `ui/`) and nothing else, in sorted path order, deflated,
 //! with a fixed timestamp and fixed permissions, so the same folder always
 //! gives the same bytes. [`unpack`] checks every entry before it writes one:
 //! relative paths only, regular files only, at most [`Limits::DEFAULT`]
@@ -143,12 +143,13 @@ pub fn is_project_file(path: &Path) -> bool {
 }
 
 /// Whether a project reads the file at `relative` (`/`-separated): its
-/// `project.toml`, a composite in `composites/` or a file under `ui/`.
+/// `project.toml`, a composite in `composites/`, a pattern in `patterns/` or
+/// a file under `ui/`.
 fn read_by_project(relative: &str) -> bool {
     let parts: Vec<&str> = relative.split('/').collect();
     match parts.as_slice() {
         [PROJECT_FILE] => true,
-        ["composites", name] => name.ends_with(".toml"),
+        ["composites" | "patterns", name] => name.ends_with(".toml"),
         ["ui", _, ..] => true,
         _ => false,
     }
@@ -171,13 +172,16 @@ fn project_files(dir: &Path) -> Result<BTreeMap<String, PathBuf>, ArchiveError> 
             }
             let relative = format!("{prefix}{name}");
             let kind = entry.file_type().map_err(io_error(&path))?;
-            if kind.is_symlink() && prefix.is_empty() && (name == "composites" || name == "ui") {
+            if kind.is_symlink()
+                && prefix.is_empty()
+                && (name == "composites" || name == "patterns" || name == "ui")
+            {
                 return Err(ArchiveError::Symlink(relative));
             }
             if kind.is_dir() {
-                // Only composites/ and ui/ hold files a project reads.
+                // Only composites/, patterns/ and ui/ hold files a project reads.
                 let top = relative.split('/').next().unwrap_or_default();
-                if top == "composites" && prefix.is_empty() || top == "ui" {
+                if (top == "composites" || top == "patterns") && prefix.is_empty() || top == "ui" {
                     pending.push((path, format!("{relative}/")));
                 }
             } else if read_by_project(&relative) {
@@ -553,10 +557,11 @@ mod tests {
     }
 
     #[test]
-    fn a_project_reads_its_toml_composites_and_ui() {
+    fn a_project_reads_its_toml_composites_patterns_and_ui() {
         for read in [
             "project.toml",
             "composites/kick.toml",
+            "patterns/melody.toml",
             "ui/main.html",
             "ui/assets/a.png",
         ] {
@@ -566,6 +571,8 @@ mod tests {
             "notes.txt",
             "composites/a.txt",
             "composites/x/a.toml",
+            "patterns/a.txt",
+            "patterns/x/a.toml",
             "renders/a.wav",
             "ui",
         ] {

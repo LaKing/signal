@@ -295,3 +295,45 @@ test('power off stops the streams and power on subscribes again', () => {
   socket.receive({ type: 'app' });
   assert.equal(connection.streaming, true, 'signal ui has no power: it streams');
 });
+
+test('readPattern and writePattern wrap pattern.read and pattern.write', async () => {
+  const { connection, socket } = connected();
+  const read = connection.readPattern('melody');
+  const r = socket.last('pattern.read');
+  assert.deepEqual([r.type, r.name], ['pattern.read', 'melody']);
+  socket.receive({ type: 'pattern.read', id: r.id, name: 'melody', exists: true, base: 'abc', text: 'kind = "notes"\n', kind: 'notes' });
+  assert.deepEqual(await read, { text: 'kind = "notes"\n', sha: 'abc', base: 'abc', exists: true, kind: 'notes' });
+
+  const missing = connection.readPattern('none');
+  const m = socket.last('pattern.read');
+  socket.receive({ type: 'pattern.read', id: m.id, name: 'none', exists: false, base: null, text: null, kind: null });
+  assert.deepEqual(await missing, { text: null, sha: null, base: null, exists: false, kind: null });
+
+  const written = connection.writePattern('melody', 'new text', 'abc');
+  const w = socket.last('pattern.write');
+  assert.deepEqual([w.type, w.name, w.text, w.base], ['pattern.write', 'melody', 'new text', 'abc']);
+  socket.receive({ type: 'pattern.written', id: w.id, name: 'melody', file: 'patterns/melody.toml', base: 'def', created: false });
+  assert.deepEqual(await written, { sha: 'def', base: 'def', created: false });
+
+  // A first write names no base: null on the wire.
+  connection.writePattern('fresh', 'x').catch(() => {});
+  assert.equal(socket.last('pattern.write').base, null);
+
+  const conflict = connection.writePattern('melody', 'mine', 'abc');
+  const c = socket.last('pattern.write');
+  socket.receive({ type: 'error', id: c.id, code: 'conflict', message: 'patterns/melody.toml changed', base: 'def', text: 'theirs' });
+  await assert.rejects(conflict, (error) => {
+    assert.ok(error instanceof Error);
+    assert.equal(error.code, 'conflict');
+    assert.equal(error.message, 'patterns/melody.toml changed');
+    assert.equal(error.reply.base, 'def');
+    return true;
+  });
+  const refused = connection.writePattern('melody', 'kind = 3', 'def');
+  const f = socket.last('pattern.write');
+  socket.receive({ type: 'error', id: f.id, code: 'does-not-load', message: 'patterns/melody.toml:1:8: error: unknown pattern kind' });
+  await assert.rejects(refused, { code: 'does-not-load', message: 'patterns/melody.toml:1:8: error: unknown pattern kind' });
+  const bad = connection.readPattern('../x');
+  socket.receive({ type: 'error', id: socket.last('pattern.read').id, code: 'bad-value', message: 'not a pattern name' });
+  await assert.rejects(bad, { code: 'bad-value' });
+});

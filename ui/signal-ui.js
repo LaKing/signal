@@ -27,6 +27,12 @@ function closedError() {
   return error;
 }
 
+/** `readPattern`'s value from a `pattern.read` reply: `sha` is the protocol's `base`. */
+function patternRead(reply) {
+  const sha = reply.base ?? null;
+  return { text: reply.text ?? null, sha, base: sha, exists: reply.exists !== false, kind: reply.kind ?? null };
+}
+
 /** The plan parameter port at `address` in a `describe` reply, or null. */
 function planParameter(description, address) {
   for (const instance of description.instances ?? []) {
@@ -290,6 +296,34 @@ export class Connection {
   /** Sets an unsaved parameter's live value back to the file's. */
   revert(address) {
     return this.request({ type: 'revert', address });
+  }
+
+  /**
+   * `pattern.read` (ADR 0028 §7, docs/ui-protocol.md): resolves `{ text,
+   * sha, base, exists, kind }`, the whole `patterns/<name>.toml` and its
+   * SHA-256 (`sha`, also as `base`, the protocol's name, which a write
+   * names); a missing file resolves `exists: false` with the rest null.
+   * Rejects with an Error whose `code` is the server's (`unknown-pattern`,
+   * `bad-value`, `no-project`).
+   */
+  readPattern(name) {
+    return this.request({ type: 'pattern.read', name }).then(patternRead);
+  }
+
+  /**
+   * `pattern.write`: writes `text` as `patterns/<name>.toml` when the file
+   * is still the one whose SHA-256 is `base` (null: it does not exist yet).
+   * Resolves `{ sha, base, created }` (`sha` = `base`, the written file's);
+   * rejects with an Error whose `code` and message are the server's
+   * (`conflict`: the file changed since `base`; `does-not-load`: the text
+   * was refused, the message names the problem), its `reply` the error.
+   */
+  writePattern(name, text, base) {
+    return this.request({ type: 'pattern.write', name, text, base: base ?? null }).then((reply) => ({
+      sha: reply.base,
+      base: reply.base,
+      created: Boolean(reply.created),
+    }));
   }
 
   /**

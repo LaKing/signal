@@ -217,6 +217,67 @@ fn a_signal_file_renders_as_its_folder() {
     no_temporary_left(&base);
 }
 
+/// M2.11-1 (ADR 0028 §1): a pattern file is a project file: hashed into the
+/// render's manifest, packed into the `.signal` file, and rendered from it
+/// as from the folder.
+#[test]
+fn a_pattern_is_hashed_packed_and_rendered() {
+    let base = base("pattern");
+    let folder = base.join("seq");
+    fs::create_dir_all(folder.join("patterns")).unwrap();
+    fs::write(
+        folder.join("project.toml"),
+        "schema_version = 1\n\n[project]\nname = \"seq\"\nsample_rate = 8000\n\n[instances]\n\
+         clock = { module = \"std.transport\" }\n\
+         seq = { module = \"std.note_seq\", pattern = \"tune\" }\n\
+         osc = { module = \"std.sine_osc\" }\n\
+         out = { module = \"std.audio_out\" }\n\n[wiring]\nconnections = [\n\
+         { from = \"clock.tick\", to = \"seq.tick\" },\n\
+         { from = \"seq.hz\", to = \"osc.freq\" },\n\
+         { from = \"osc.out\", to = \"out.l\" },\n\
+         { from = \"seq.gate\", to = \"out.r\" },\n]\n",
+    )
+    .unwrap();
+    fs::write(
+        folder.join("patterns/tune.toml"),
+        "schema_version = 1\nkind = \"notes\"\nlength = 2\nnotes = [{ key = 69, start = 0, length = 1, velocity = 1 }]\n",
+    )
+    .unwrap();
+    let file = base.join("seq.signal");
+    let out = signal(&base, &["pack", &text(&folder), &text(&file), "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let render = |source: &Path, out: &str| {
+        let out = signal(
+            &base,
+            &[
+                "render",
+                &text(source),
+                "--frames",
+                "8000",
+                "--out",
+                &text(&base.join(out)),
+                "--json",
+            ],
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        json(&out)["manifest"].clone()
+    };
+    let from_folder = render(&folder, "folder");
+    assert_eq!(render(&file, "file"), from_folder);
+    let hashes = &from_folder["provenance"]["project_file_hashes"];
+    assert!(hashes["patterns/tune.toml"].is_string(), "{hashes}");
+    assert!(hashes["project.toml"].is_string());
+    no_temporary_left(&base);
+}
+
 /// AC11: `play` and `ui check` take a .signal file too, and say where its
 /// edits go (a temporary copy) when watching.
 #[test]

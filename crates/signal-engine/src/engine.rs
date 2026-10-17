@@ -21,7 +21,7 @@ use signal_core::{
     BlockLatency, Combine, DirectPrimitive, Direction, Due, Event, EventPayload, EventSink,
     Feedthrough, Frame, Inputs, InstanceAddress, LossCause, MAX_VECTOR_WIDTH, ModuleDescriptor,
     Outputs, PortAddress, PortKind, PortShape, PrepareContext, Primitive, Range, Registry,
-    Reproducibility, RngStream, SinkKind, StateOutputPrimitive, fnv1a64_words,
+    Reproducibility, RngStream, SinkKind, StateOutputPrimitive, Table, fnv1a64_words,
 };
 use signal_graph::ExecutionPlan;
 
@@ -452,6 +452,10 @@ pub(crate) struct Slot {
     /// (0 before its first), which its outputs hold between ticks. Empty for
     /// *d* = 1.
     hold: Vec<f64>,
+    /// Its table (ADR 0028 §4), handed to every call. A swap that changes it
+    /// builds a new slot with the new one; the old one leaves with the old
+    /// plan, dropped off the real-time thread.
+    table: Option<Table>,
 }
 
 impl Slot {
@@ -980,6 +984,8 @@ impl PlanState {
                 } else {
                     Vec::new()
                 },
+                // A survivor takes the new plan's table (ADR 0028 §4).
+                table: instance.table.clone(),
             });
             primitives.push(primitive);
             types.push(kind);
@@ -3796,7 +3802,8 @@ fn process(
         lane.call_params.get(..params * len).unwrap_or(&[]),
         &slot.events,
         &slot.ends,
-    );
+    )
+    .with_table(slot.table.as_ref());
     let mut outputs = Outputs::new(
         len,
         lane.call_outputs.get_mut(..out * len).unwrap_or(&mut []),
@@ -3832,7 +3839,8 @@ fn absorb_call(module: &mut dyn StateOutputPrimitive, (slot, lane): (&Slot, &Lan
         lane.call_params.get(..params).unwrap_or(&[]),
         &slot.events,
         &slot.ends,
-    );
+    )
+    .with_table(slot.table.as_ref());
     module.absorb(&inputs);
 }
 

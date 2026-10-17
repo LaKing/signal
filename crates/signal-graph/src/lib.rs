@@ -134,6 +134,7 @@ pub fn build_plan(
             type_name: instance.descriptor.type_name,
             parameters: instance.parameters,
             descriptor: instance.descriptor,
+            table: None,
         })
         .collect();
 

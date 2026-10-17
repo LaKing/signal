@@ -10,6 +10,7 @@ use crate::address::InstanceAddress;
 use crate::convert::{self, CONVERTER_PREFIX};
 use crate::descriptor::{Feedthrough, ModuleDescriptor};
 use crate::module::Primitive;
+use crate::table::TableRule;
 
 /// Something a [`Host`] lends one instance (M2.7-2): opaque to the engine,
 /// which passes it to `prepare` in [`PrepareContext::lent`](crate::PrepareContext::lent)
@@ -49,6 +50,8 @@ pub struct Registry {
     costs: BTreeMap<&'static str, u32>,
     /// (type, input) → (source type, source output).
     inputs: BTreeMap<(&'static str, &'static str), (&'static str, &'static str)>,
+    /// type → what it takes as its table (ADR 0028 §3).
+    tables: BTreeMap<&'static str, TableRule>,
     host: Option<Arc<dyn Host>>,
 }
 
@@ -131,6 +134,19 @@ impl Registry {
             .iter()
             .find(|((t, p), _)| *t == type_name && *p == port)
             .map(|(_, rule)| *rule)
+    }
+
+    /// Declares that instances of `type_name` take a table (ADR 0028 §3, §4):
+    /// the data of `rule.kind` a project names for the instance, compiled by
+    /// `rule.compile` when the plan is built. A type without a rule takes none.
+    pub fn set_table_rule(&mut self, type_name: &'static str, rule: TableRule) {
+        self.tables.insert(type_name, rule);
+    }
+
+    /// What `type_name` takes as its table, if anything
+    /// ([`set_table_rule`](Registry::set_table_rule)).
+    pub fn table_rule(&self, type_name: &str) -> Option<TableRule> {
+        self.tables.get(type_name).copied()
     }
 
     /// Sets what lends this registry's instances their resources (M2.7-2).

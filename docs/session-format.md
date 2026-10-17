@@ -11,6 +11,7 @@ Edit commands come from project changes through `signal_project::diff` (§5).
   session.toml                       format version, run settings, provenance, machine, plan versions
   projects/v0/project.toml           version 0: the project the engine was built from
   projects/v0/composites/<name>.toml
+  projects/v0/patterns/<name>.toml   its pattern files (`project-format.md` §12)
   projects/v1/…                      one folder per plan version swapped in
   edits.jsonl                        every command, with its effective frame
   boundaries.jsonl                   latent modules only: each due block's outcome (§4a)
@@ -77,7 +78,7 @@ Unknown keys are errors.
 
 ## 3. `projects/v<N>/`
 
-An exact copy of the project files (`project-format.md` §1) of plan version *N*. Version 0 is the project the engine was built from; version *N* ≥ 1 is the one the *N*-th swap put in. Every file must be listed in `[versions.files]` with its hash, and every listed file must exist; a changed copy is an error. The run settings of the copies are not read: the session's `sample_rate` and `seed` apply.
+An exact copy of the project files (`project-format.md` §1) of plan version *N*, its pattern files included: a pattern edit is a swap (`semantics.md` §12), so it starts a version whose copy holds the new pattern, and replay plans each version from its copy. Version 0 is the project the engine was built from; version *N* ≥ 1 is the one the *N*-th swap put in. Every file must be listed in `[versions.files]` with its hash, and every listed file must exist; a changed copy is an error. The run settings of the copies are not read: the session's `sample_rate` and `seed` apply.
 
 Every version must have exactly one audio sink (`semantics.md` §8), at the same address and with as many signal inputs as version 0's.
 

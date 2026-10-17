@@ -79,3 +79,39 @@ test('vector streams arrive at 60 snapshots per second on whole frames', () => {
   fake.subscribe({ stream: 'vector', port: '/osc.out' }, () => {}, { onError: (e) => (refused = e.code) });
   assert.equal(refused, 'not-a-vector-output');
 });
+
+test('patterns live in memory: read, write on the base, conflict, refusal', async () => {
+  const fake = new FakeConnection({ timers: timers() });
+  const melody = await fake.readPattern('melody');
+  assert.equal(melody.exists, true);
+  assert.equal(melody.kind, 'notes');
+  assert.equal(melody.sha, melody.base);
+  assert.match(melody.sha, /^[0-9a-f]{16}$/);
+  assert.equal((await fake.readPattern('drums')).kind, 'steps');
+
+  const pushed = [];
+  fake.on('pattern.written', (m) => pushed.push(m));
+  const text = melody.text.replace('key = 67', 'key = 69');
+  const written = await fake.writePattern('melody', text, melody.base);
+  assert.notEqual(written.sha, melody.sha);
+  assert.equal(written.base, written.sha);
+  assert.equal(written.created, false);
+  assert.deepEqual(await fake.readPattern('melody'), { text, sha: written.sha, base: written.sha, exists: true, kind: 'notes' });
+  assert.deepEqual(pushed, [{ type: 'pattern.written', name: 'melody', base: written.sha, text }]);
+
+  // The old base is stale now.
+  await assert.rejects(fake.writePattern('melody', melody.text, melody.base), (error) => {
+    assert.equal(error.code, 'conflict');
+    assert.equal(error.reply.base, written.sha);
+    assert.equal(error.reply.text, text);
+    return true;
+  });
+  await assert.rejects(fake.writePattern('melody', 'schema_version = 1\n', written.sha), { code: 'does-not-load' });
+  await assert.rejects(fake.readPattern('../etc'), { code: 'bad-value' });
+
+  // A missing pattern reads as not existing, and a first write names no base.
+  assert.deepEqual(await fake.readPattern('fresh'), { text: null, sha: null, base: null, exists: false, kind: null });
+  await assert.rejects(fake.writePattern('fresh', melody.text, 'abc'), { code: 'conflict' });
+  assert.equal((await fake.writePattern('fresh', melody.text, null)).created, true);
+  assert.equal(new FakeConnection({ timers: timers(), patterns: {} }).patterns.size, 0);
+});

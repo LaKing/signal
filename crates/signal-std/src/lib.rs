@@ -83,6 +83,8 @@
 //! | `std.to_events` | [`ToEvents`] | direct | `core` |
 //! | `std.route` | [`Route`] | direct | `core` |
 //! | `std.random` | [`Random`] | direct | `core` |
+//! | `std.note_seq` | [`NoteSeq`] | direct, takes a `notes` pattern | `event` |
+//! | `std.step_seq8` | [`StepSeq8`] | direct, takes a `steps` pattern | `event` |
 //! | `std.pack<N>` | [`Pack`]`<N>` | direct | `core` |
 //! | `std.unpack<N>` | [`Unpack`]`<N>` | direct | `core` |
 //! | `std.index<N>` | [`Index`]`<N>` | direct | `core` |
@@ -163,15 +165,18 @@ mod mix;
 mod modal;
 mod mul;
 mod noise;
+mod note_seq;
 mod onepole;
 mod osc;
 mod pan;
 mod particles;
+pub mod pattern;
 mod random;
 mod sample_hold;
 mod sine_osc;
 mod state;
 mod step_seq;
+mod step_seq8;
 mod string;
 mod svf;
 mod tanh_shaper;
@@ -210,6 +215,7 @@ pub use mix::Mix;
 pub use modal::Modal;
 pub use mul::Mul;
 pub use noise::Noise;
+pub use note_seq::NoteSeq;
 pub use onepole::OnePole;
 pub use osc::Osc;
 pub use pan::Pan;
@@ -219,6 +225,7 @@ pub use sample_hold::SampleHold;
 pub use sine_osc::SineOsc;
 pub use state::{Counter, Integrator, Phasor};
 pub use step_seq::StepSeq;
+pub use step_seq8::StepSeq8;
 pub use string::StringModel;
 pub use svf::Svf;
 pub use tanh_shaper::TanhShaper;
@@ -353,9 +360,15 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<ToEvents>(),
         direct::<Route>(),
         direct::<Random>(),
+        direct::<NoteSeq>(),
+        direct::<StepSeq8>(),
     ] {
         registry.register(module_type)?;
     }
+    // ADR 0028 §3, §4: the sequencers take a pattern, compiled into their
+    // table when the plan is built.
+    registry.set_table_rule("std.note_seq", pattern::NOTE_RULE);
+    registry.set_table_rule("std.step_seq8", pattern::STEP_RULE);
     for module_type in vector::types() {
         registry.register(*module_type)?;
     }
@@ -425,6 +438,52 @@ pub(crate) fn sine_of_cycles(cycles: f64) -> f64 {
 /// The value of `values` at `index`, or `fallback` if there is none.
 pub(crate) fn at(values: &[f64], index: usize, fallback: f64) -> f64 {
     values.get(index).copied().unwrap_or(fallback)
+}
+
+/// The default ticks per beat of `std.transport`'s `tick` and of the
+/// sequencers that count them (ADR 0028 §5).
+pub(crate) const DEFAULT_PPQ: f64 = 96.0;
+/// The most ticks per beat.
+pub(crate) const MAX_PPQ: f64 = 960.0;
+
+/// The `ppq` parameter (ticks per beat, integer, `[1, 960]`, default 96) of
+/// `std.transport` and of the sequencers, which must equal the transport's.
+pub(crate) const PPQ: ParameterDescriptor = parameter(
+    "ppq",
+    PortKind::Generic,
+    Some("ticks/beat"),
+    1.0,
+    MAX_PPQ,
+    DEFAULT_PPQ,
+    Combine::Add,
+);
+
+/// `ppq` read at `index`: rounded half up into `[1, 960]` (NaN reads as 1).
+pub(crate) fn ppq_at(values: &[f64], index: usize) -> u64 {
+    (round_half_up(at(values, index, DEFAULT_PPQ)).clamp(1.0, MAX_PPQ) as u64).max(1)
+}
+
+/// The most ticks one `Set` on a sequencer's `tick` counts for: the
+/// transport's largest `Set(n − 1)`. A frame holds at most ⌊R⌋ + 1 ticks,
+/// R = bpm·ppq / (60·sr) ≤ 400·960 / 60 = 6400 at the lowest rate (1 Hz),
+/// so the transport's count is always exact, and a `Set` from any other
+/// source costs at most this many steps of a sequencer's work (16 events a
+/// frame at most): bounded work per call (`docs/realtime-rules.md`).
+pub(crate) const MAX_TICKS_PER_EVENT: u64 = 6400;
+
+/// The ticks one event of a `tick` stream stands for: `std.transport`'s
+/// `tick` contract (ADR 0028 §5) is that each frame holding *n* ≥ 1 ticks
+/// carries a `Trigger` and, when *n* > 1, a `Set(n − 1)`, so a counter adds
+/// 1 for a `Trigger` and *v* (rounded half up, at least 0, at most
+/// [`MAX_TICKS_PER_EVENT`]) for a `Set(v)`; a `Ramp` counts nothing.
+pub(crate) fn tick_count(payload: EventPayload) -> u64 {
+    match payload {
+        EventPayload::Trigger => 1,
+        EventPayload::Set(v) if v.is_finite() => {
+            round_half_up(v).clamp(0.0, MAX_TICKS_PER_EVENT as f64) as u64
+        }
+        _ => 0,
+    }
 }
 
 /// Whether `events` (sorted by offset) hold a `Trigger` on frame `n`. `next`
@@ -650,13 +709,46 @@ mod tests {
         "std.random",
     ];
 
+    /// M2.11-1: the sequencers of ADR 0028 §6, category `event`, each with
+    /// its pattern kind.
+    const SEQUENCERS: [&str; 2] = ["std.note_seq", "std.step_seq8"];
+
+    /// A `Set` counts at most the transport's largest per-frame count, so a
+    /// sequencer's work per event is bounded.
+    #[test]
+    fn a_tick_set_counts_at_most_the_transport_s_largest() {
+        assert_eq!(tick_count(EventPayload::Trigger), 1);
+        assert_eq!(tick_count(EventPayload::Set(20.0)), 20);
+        assert_eq!(tick_count(EventPayload::Set(6400.0)), 6400);
+        assert_eq!(tick_count(EventPayload::Set(1e9)), MAX_TICKS_PER_EVENT);
+        assert_eq!(tick_count(EventPayload::Set(-3.0)), 0);
+        assert_eq!(tick_count(EventPayload::Set(f64::NAN)), 0);
+        // 400 bpm at 960 ppq and 1 Hz: at most 6401 ticks in a frame.
+        assert_eq!(400 * 960 / 60 + 1, MAX_TICKS_PER_EVENT + 1);
+    }
+
+    #[test]
+    fn the_sequencers_take_their_pattern_kinds() {
+        let mut registry = Registry::new();
+        register(&mut registry).unwrap();
+        for (name, kind) in SEQUENCERS.into_iter().zip([pattern::NOTES, pattern::STEPS]) {
+            let d = registry.get(name).unwrap().descriptor;
+            assert_eq!(d.category, Some(category::EVENT), "{name}");
+            assert_eq!(registry.table_rule(name).map(|r| r.kind), Some(kind));
+        }
+        assert!(registry.table_rule("std.step_seq").is_none());
+    }
+
     #[test]
     fn register_adds_every_type_under_its_name() {
         let mut registry = Registry::new();
         register(&mut registry).unwrap();
-        assert_eq!(registry.len(), NAMES.len() + vector::types().len());
+        assert_eq!(
+            registry.len(),
+            NAMES.len() + SEQUENCERS.len() + vector::types().len()
+        );
         let vectors = vector::types().iter().map(|t| t.descriptor.type_name);
-        for name in NAMES.into_iter().chain(vectors) {
+        for name in NAMES.into_iter().chain(SEQUENCERS).chain(vectors) {
             let module_type = registry.get(name).unwrap_or_else(|| panic!("{name}"));
             assert_eq!(module_type.descriptor.type_name, name);
             assert_eq!(
@@ -675,7 +767,10 @@ mod tests {
             register(&mut registry),
             Err(RegistryError::DuplicateTypeName("std.sine_osc"))
         );
-        assert_eq!(registry.len(), NAMES.len() + vector::types().len());
+        assert_eq!(
+            registry.len(),
+            NAMES.len() + SEQUENCERS.len() + vector::types().len()
+        );
 
         // A type registered first under a std name blocks that name.
         let mut registry = Registry::new();

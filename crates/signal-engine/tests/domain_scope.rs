@@ -132,3 +132,56 @@ fn the_check_recognises_the_names() {
     );
     assert!(offences("again, against the gainst").is_empty());
 }
+
+/// Musical words (ADR 0028, AGENTS.md rule 1): notes, keys, steps and the
+/// rest of a pattern's vocabulary belong to `signal-std` and to the project
+/// format's parsing. The instance table path is rows of numbers only.
+const MUSICAL: [&str; 16] = [
+    "velocity",
+    "ppq",
+    "swing",
+    "note",
+    "notes",
+    "pattern",
+    "patterns",
+    "midi",
+    "MIDI",
+    "piano",
+    "bpm",
+    "tempo",
+    "beat",
+    "beats",
+    "accent",
+    "step_seq8",
+];
+
+/// Core, graph and engine name no musical concept in a code line (M2.11-1
+/// AC12): the instance table they carry is domain-free.
+#[test]
+fn core_graph_and_engine_name_no_musical_concept() {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut found = Vec::new();
+    for name in ["signal-core", "signal-graph", "signal-engine"] {
+        let mut files = Vec::new();
+        rust_files(&crates.join(name).join("src"), &mut files);
+        assert!(!files.is_empty(), "{name}: no sources found");
+        for file in &files {
+            let text = fs::read_to_string(file).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") {
+                    continue;
+                }
+                for word in MUSICAL.iter().filter(|w| has_word(code, w)) {
+                    found.push(format!("{}:{}: `{word}` in {code}", file.display(), n + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "musical concepts in a domain-free crate:\n{}",
+        found.join("\n")
+    );
+    assert!(has_word("let velocity = 1.0;", "velocity"));
+}

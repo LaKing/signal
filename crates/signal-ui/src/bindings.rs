@@ -5,7 +5,9 @@
 //! controls (the top-level parameters `commit` writes to `project.toml`), a
 //! value any parameter (a control or a plan parameter port), a button an
 //! event input, a meter a signal input of the audio sink, a scope signal
-//! outputs or inputs.
+//! outputs or inputs. The pattern controls (`<signal-piano-roll>`,
+//! `<signal-step-grid>`) bind nothing: their `pattern` attribute names a
+//! pattern file of the project of the kind each edits.
 //!
 //! `signal ui check` runs it on the project's files and the protocol's
 //! `panel.check` on the running plan, so a panel shows at load the same
@@ -142,7 +144,19 @@ fn control(name: &str) -> Option<(Wants, usize, usize)> {
 }
 
 const CONTROLS: &str = "signal-fader, signal-knob, signal-xy, signal-button, signal-toggle, \
-                        signal-meter, signal-scope, signal-value, signal-canvas";
+                        signal-meter, signal-scope, signal-value, signal-canvas, \
+                        signal-piano-roll, signal-step-grid";
+
+/// The pattern controls (ADR 0028 §7): the kind of pattern each edits. They
+/// take no `bind`; their `pattern` attribute names a project pattern
+/// (`patterns/<name>.toml`, `project-format.md` §12) of that kind.
+fn pattern_control(name: &str) -> Option<&'static str> {
+    match name {
+        "signal-piano-roll" => Some(signal_project::NOTES),
+        "signal-step-grid" => Some(signal_project::STEPS),
+        _ => None,
+    }
+}
 
 /// A diagnostic of the check, with the control it is about: its index among
 /// the file's controls (the `signal-*` elements other than `<signal-panel>`,
@@ -655,6 +669,45 @@ pub fn check(file: &str, text: &str, targets: &Targets<'_>) -> Checked {
                 diagnostic: at(offset, severity, message),
             });
         };
+        if let Some(kind) = pattern_control(&element.name) {
+            let name = &element.name;
+            if let Some(bind) = element.attribute("bind") {
+                finding(
+                    bind.value.as_ref().map_or(element.offset, |(_, at)| *at),
+                    Severity::Error,
+                    format!(
+                        "<{name}> takes no bind: it edits the `{kind}` pattern its `pattern` attribute names"
+                    ),
+                );
+            }
+            match element.attribute("pattern").and_then(|a| a.value.as_ref()) {
+                None => finding(
+                    element.offset,
+                    Severity::Error,
+                    format!(
+                        "<{name}> has no pattern: it needs pattern=\"<name>\", a `{kind}` pattern of the project (patterns/<name>.toml)"
+                    ),
+                ),
+                Some((pattern, at)) => match targets.panel.pattern_kind(pattern) {
+                    None => finding(
+                        *at,
+                        Severity::Error,
+                        format!(
+                            "unknown pattern `{pattern}`: the project has no patterns/{pattern}.toml; <{name}> edits a `{kind}` pattern"
+                        ),
+                    ),
+                    Some(found) if found != kind => finding(
+                        *at,
+                        Severity::Error,
+                        format!(
+                            "wrong kind: patterns/{pattern}.toml is a `{found}` pattern; <{name}> edits a `{kind}` pattern"
+                        ),
+                    ),
+                    Some(_) => {}
+                },
+            }
+            continue;
+        }
         let Some((wants, least, most)) = control(&element.name) else {
             finding(
                 element.offset,

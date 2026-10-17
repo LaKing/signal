@@ -11,6 +11,8 @@
 //!   contract (ADR 0002, 0016 §5), normative in `docs/module-contract.md`.
 //! - [`ModuleType`] and [`Registry`]: primitive types by name, and the
 //!   [`Host`] that lends instances what the program provides ([`Lent`]).
+//! - [`Table`] and [`TableRule`]: immutable rows of numbers a library compiles
+//!   for an instance when a plan is built, handed to it in every call (ADR 0028 §4).
 //! - [`converter`] and [`Conversion`]: the hold and decimate rate converters
 //!   (ADR 0005, M2.8-6) the graph compiler inserts between rate divisors.
 //!
@@ -37,6 +39,7 @@ mod event;
 mod module;
 mod registry;
 mod rng;
+mod table;
 mod time;
 
 pub use address::{AddressError, InstanceAddress, PortAddress};
@@ -52,4 +55,5 @@ pub use module::{
 };
 pub use registry::{Host, Lent, ModuleType, Registry, RegistryError};
 pub use rng::{Fnv1a64, RngStream, SplitMix64, Xoshiro256PlusPlus, fnv1a64, fnv1a64_words};
+pub use table::{MAX_TABLE_VALUES, Table, TableError, TableRule};
 pub use time::{Frame, RateDivisor};

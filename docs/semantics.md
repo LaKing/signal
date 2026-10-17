@@ -355,6 +355,8 @@ An instance **survives** when the new plan has an instance at the same address w
 
 The new plan's parameter values do not apply to a survivor: its bases move. A caller that wants a new value sends a `set`.
 
+A survivor takes the new plan's **table** (ADR 0028 §4, `module-contract.md` "Tables"): from the swap frame on, its calls see the new plan's table, and its state moves as above, so a changed pattern reaches the playing instance at an exact frame without a reset. A table is not state: the old one leaves with the old plan, dropped off the real-time thread. A swap whose only change is a survivor's table is a swap like any other, recorded and replayed as one (`session-format.md`).
+
 ### Connections
 
 Connection changes between survivors take effect on the swap frame with no fade (crossfading changed connections is not done). This includes a disconnect that leaves a parameter with no signal sources: from the swap frame it uses its base (§5).

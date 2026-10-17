@@ -4,7 +4,7 @@
 //!
 //! Every table refuses unknown keys. Instance tables are open (their keys are
 //! parameter names), so the graph checks those keys against the module;
-//! `module` and `gpu` (M2.7-2) are reserved there.
+//! `module`, `gpu` (M2.7-2) and `pattern` (ADR 0028 §3) are reserved there.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -141,12 +141,15 @@ fn schema_version(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "type": "integer", "const": 1 })
 }
 
-/// An instance: `{ module = "<ref>", gpu = "<device>", <parameter> = <number>, … }`.
+/// An instance: `{ module = "<ref>", gpu = "<device>", pattern = "<name>", <parameter> = <number>, … }`.
 pub(crate) struct InstanceEntry {
     pub(crate) module: Spanned<String>,
     /// M2.7-2: the GPU device a GPU-backed instance is pinned to, by id or
     /// index.
     pub(crate) gpu: Option<Spanned<String>>,
+    /// ADR 0028 §3: the pattern file (`patterns/<name>.toml`) whose data the
+    /// instance takes.
+    pub(crate) pattern: Option<Spanned<String>>,
     pub(crate) parameters: BTreeMap<Spanned<String>, Spanned<f64>>,
 }
 
@@ -159,18 +162,20 @@ impl<'de> Deserialize<'de> for InstanceEntry {
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str(
-                    "an instance table `{ module = \"<ref>\", gpu = \"<device>\", <parameter> = <number>, … }`",
+                    "an instance table `{ module = \"<ref>\", gpu = \"<device>\", pattern = \"<name>\", <parameter> = <number>, … }`",
                 )
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<InstanceEntry, A::Error> {
                 let mut module = None;
                 let mut gpu = None;
+                let mut pattern = None;
                 let mut parameters = BTreeMap::new();
                 while let Some(key) = map.next_key::<Spanned<String>>()? {
                     match key.get_ref().as_str() {
                         "module" => module = Some(map.next_value::<Spanned<String>>()?),
                         "gpu" => gpu = Some(map.next_value::<Spanned<String>>()?),
+                        "pattern" => pattern = Some(map.next_value::<Spanned<String>>()?),
                         _ => {
                             parameters.insert(key, map.next_value::<Spanned<f64>>()?);
                         }
@@ -180,6 +185,7 @@ impl<'de> Deserialize<'de> for InstanceEntry {
                 Ok(InstanceEntry {
                     module,
                     gpu,
+                    pattern,
                     parameters,
                 })
             }
@@ -197,11 +203,12 @@ impl JsonSchema for InstanceEntry {
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         let module = generator.subschema_for::<ModuleRef>();
         json_schema!({
-            "description": "An instance: its module, the GPU device it is pinned to (`gpu`, a device id or index; GPU-backed instances only), and the parameter values set on it.",
+            "description": "An instance: its module, the GPU device it is pinned to (`gpu`, a device id or index; GPU-backed instances only), the pattern whose data it takes (`pattern`, the name of patterns/<name>.toml; types that take one only), and the parameter values set on it.",
             "type": "object",
             "properties": {
                 "module": module,
-                "gpu": { "type": "string", "minLength": 1 }
+                "gpu": { "type": "string", "minLength": 1 },
+                "pattern": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }
             },
             "required": ["module"],
             "additionalProperties": { "type": "number" }

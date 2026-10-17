@@ -34,6 +34,7 @@ pub mod live;
 mod locate;
 mod model;
 pub mod patch;
+mod pattern;
 pub mod provenance;
 mod schema;
 pub mod schematic;
@@ -47,7 +48,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use signal_core::{InstanceAddress, Registry};
+use signal_core::{InstanceAddress, Registry, Table};
 use signal_graph::{
     CompositeDef, ConnectionDef, ExecutionPlan, Exports, InputExport, InstanceDef, OutputExport,
     ParameterExport, build_plan,
@@ -56,6 +57,9 @@ use toml::Spanned;
 
 pub use diagnostic::{Diagnostic, Severity, located};
 pub use diff::{DiffOptions, ParameterChange, ProjectEdit, diff, diff_with};
+pub use pattern::{
+    MAX_LANES, MAX_LENGTH, MAX_NOTES, MAX_STEP, MAX_STEPS, NOTES, PATTERNS, STEPS, pattern_kind,
+};
 pub use schema::schema;
 pub use write::{WriteError, write_parameter};
 
@@ -64,6 +68,7 @@ use locate::{
     SourceMap, Span,
 };
 use model::{CompositeFile, ExportTargets, Instances, ProjectFile, Targets, Wiring};
+use pattern::Pattern;
 
 /// The project file's path in a project folder.
 pub const PROJECT_FILE: &str = "project.toml";
@@ -133,6 +138,8 @@ pub struct Project {
     pub root: CompositeDef,
     /// Every composite in `composites/`, in name order.
     pub composites: Vec<CompositeDef>,
+    /// Every pattern in `patterns/` by name, with the index of its file.
+    patterns: BTreeMap<String, (usize, Pattern)>,
     spans: SourceMap,
     /// The byte offsets in `project.toml` of the `sample_rate` and `seed`
     /// values (0 for a key left out).
@@ -147,34 +154,32 @@ pub struct Planned {
     pub warnings: Vec<Diagnostic>,
 }
 
-/// A project folder's files as read: `project.toml` and every
-/// `composites/*.toml` in name order, without checking what they say (a
-/// project that does not load can still be read and patched).
+/// A project folder's files as read: `project.toml`, every
+/// `composites/*.toml` and every `patterns/*.toml`, each folder in name
+/// order, without checking what they say (a project that does not load can
+/// still be read and patched).
 pub fn read_sources(dir: &Path) -> Result<Vec<SourceFile>, LoadError> {
     let mut paths = vec![PROJECT_FILE.to_owned()];
-    let composites = dir.join(COMPOSITES);
-    match fs::read_dir(&composites) {
-        Ok(entries) => {
-            let mut names = Vec::new();
-            for entry in entries {
-                let entry = entry.map_err(|error| LoadError::Io {
-                    path: composites.clone(),
-                    error,
-                })?;
-                let path = entry.path();
-                if path.extension().is_some_and(|e| e == "toml") && path.is_file() {
-                    names.push(entry.file_name().to_string_lossy().into_owned());
+    for folder in [COMPOSITES, pattern::PATTERNS] {
+        let full = dir.join(folder);
+        match fs::read_dir(&full) {
+            Ok(entries) => {
+                let mut names = Vec::new();
+                for entry in entries {
+                    let entry = entry.map_err(|error| LoadError::Io {
+                        path: full.clone(),
+                        error,
+                    })?;
+                    let path = entry.path();
+                    if path.extension().is_some_and(|e| e == "toml") && path.is_file() {
+                        names.push(entry.file_name().to_string_lossy().into_owned());
+                    }
                 }
+                names.sort();
+                paths.extend(names.into_iter().map(|n| format!("{folder}/{n}")));
             }
-            names.sort();
-            paths.extend(names.into_iter().map(|n| format!("{COMPOSITES}/{n}")));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(LoadError::Io {
-                path: composites,
-                error,
-            });
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(LoadError::Io { path: full, error }),
         }
     }
 
@@ -201,6 +206,14 @@ pub fn read_sources(dir: &Path) -> Result<Vec<SourceFile>, LoadError> {
 }
 
 impl Project {
+    /// The patterns of `patterns/` (`project-format.md` §12), by name, with
+    /// their kind ([`NOTES`] or [`STEPS`]).
+    pub fn patterns(&self) -> impl Iterator<Item = (&str, &'static str)> {
+        self.patterns
+            .iter()
+            .map(|(name, (_, pattern))| (name.as_str(), pattern.kind))
+    }
+
     /// Loads the project folder `dir`: `project.toml` and every
     /// `composites/*.toml`.
     pub fn load(dir: &Path) -> Result<Project, LoadError> {
@@ -256,16 +269,34 @@ impl Project {
             diagnostics: Vec::new(),
         };
         let root = builder.project();
+        let pattern_prefix = format!("{}/", pattern::PATTERNS);
+        let is_pattern = |file: usize| {
+            files
+                .get(file)
+                .is_some_and(|f| f.path.starts_with(&pattern_prefix))
+        };
         let composites: Vec<_> = (1..files.len())
+            .filter(|&file| !is_pattern(file))
             .filter_map(|file| builder.composite(file))
+            .collect();
+        let patterns: BTreeMap<String, (usize, Pattern)> = (1..files.len())
+            .filter(|&file| is_pattern(file))
+            .filter_map(|file| builder.pattern(file))
+            .collect();
+        // Every pattern file there is, read or refused (its own errors say why).
+        let pattern_names: BTreeSet<&str> = files
+            .iter()
+            .filter_map(|f| f.path.strip_prefix(&pattern_prefix)?.strip_suffix(".toml"))
             .collect();
         let Some((settings, root, root_spans)) = root else {
             return Err(builder.diagnostics);
         };
         let names: BTreeSet<&str> = composites.iter().map(|(c, _)| c.name.as_str()).collect();
         builder.check_pins(&root_spans, &names);
+        builder.check_patterns(&root_spans, &names, &pattern_names);
         for (_, spans) in &composites {
             builder.check_pins(spans, &names);
+            builder.check_patterns(spans, &names, &pattern_names);
         }
         if !builder.diagnostics.is_empty() {
             return Err(builder.diagnostics);
@@ -286,6 +317,7 @@ impl Project {
             files,
             root,
             composites,
+            patterns,
             spans,
             settings_at: (settings.sample_rate_at, settings.seed_at),
         })
@@ -358,10 +390,73 @@ impl Project {
             }
         }
 
+        let tables = self.tables(registry, &mut errors);
         match planned {
-            Some(planned) if errors.is_empty() => Ok(planned),
+            Some(mut planned) if errors.is_empty() => {
+                for instance in &mut planned.plan.instances {
+                    instance.table = root
+                        .pattern(&instance.address)
+                        .and_then(|name| tables.get(&(name, instance.type_name)))
+                        .cloned();
+                }
+                Ok(planned)
+            }
             _ => Err(errors),
         }
+    }
+
+    /// ADR 0028 §3, §4: every instance that names a pattern, in the project
+    /// and in every composite (used or not), takes one of the kind its type
+    /// declares; each such pattern is compiled by the type's library. Returns
+    /// the tables by (pattern, type); refusals go to `errors`, at the
+    /// instance's `pattern` value.
+    fn tables<'s>(
+        &'s self,
+        registry: &Registry,
+        errors: &mut Vec<Diagnostic>,
+    ) -> BTreeMap<(&'s str, &'static str), Table> {
+        let mut tables = BTreeMap::new();
+        let defs = std::iter::once(&self.spans.root).chain(self.spans.composites.values());
+        for def in defs {
+            for (name, instance) in &def.instances {
+                let Some((pattern, span)) = &instance.pattern else {
+                    continue;
+                };
+                // Unknown modules and composites are reported elsewhere.
+                let (Some(module_type), Some((_, source))) =
+                    (registry.get(&instance.module), self.patterns.get(pattern))
+                else {
+                    continue;
+                };
+                let type_name = module_type.descriptor.type_name;
+                let file = format!("{}/{pattern}.toml", pattern::PATTERNS);
+                let location = Location {
+                    file: def.file,
+                    offset: span.start,
+                };
+                let refused = match registry.table_rule(type_name) {
+                    None => Some(format!(
+                        "{name}: `{type_name}` takes no pattern, so it cannot take {file}"
+                    )),
+                    Some(rule) if rule.kind != source.kind => Some(format!(
+                        "{name}: `{type_name}` takes a `{}` pattern; {file} is `{}`",
+                        rule.kind, source.kind
+                    )),
+                    Some(_) if tables.contains_key(&(pattern.as_str(), type_name)) => None,
+                    Some(rule) => match (rule.compile)(&source.header, &source.rows) {
+                        Ok(table) => {
+                            tables.insert((pattern.as_str(), type_name), table);
+                            None
+                        }
+                        Err(why) => Some(format!("{name}: {file}: {why}")),
+                    },
+                };
+                if let Some(message) = refused {
+                    push_unique(errors, self.diagnostic(Severity::Error, location, message));
+                }
+            }
+        }
+        tables
     }
 
     /// The `gpu` pins (M2.7-2) of `plan`'s instances (a plan of this
@@ -531,6 +626,88 @@ impl Builder<'_> {
         }
     }
 
+    /// ADR 0028 §3: `pattern` names a pattern file of the project, on a
+    /// primitive instance; a composite cannot export a parameter named
+    /// `pattern` (the key is reserved in instance tables).
+    fn check_patterns(
+        &mut self,
+        def: &DefSpans,
+        composites: &BTreeSet<&str>,
+        patterns: &BTreeSet<&str>,
+    ) {
+        for (name, instance) in &def.instances {
+            let Some((pattern, span)) = &instance.pattern else {
+                continue;
+            };
+            if composites.contains(instance.module.as_str()) {
+                self.error(
+                    def.file,
+                    span.start,
+                    format!(
+                        "{name}: `pattern` gives a primitive instance its data; `{}` is a composite, which takes no pattern",
+                        instance.module
+                    ),
+                );
+            } else if !valid_name(pattern) {
+                self.error(
+                    def.file,
+                    span.start,
+                    format!(
+                        "{name}: invalid pattern name `{pattern}`; names use a-z, 0-9, _ and start with a-z"
+                    ),
+                );
+            } else if !patterns.contains(pattern.as_str()) {
+                self.error(
+                    def.file,
+                    span.start,
+                    format!(
+                        "{name}: pattern `{pattern}`: {}/{pattern}.toml does not exist",
+                        pattern::PATTERNS
+                    ),
+                );
+            }
+        }
+        for export in &def.exports {
+            if export.kind == ExportKind::Parameter && export.name == "pattern" {
+                self.error(
+                    def.file,
+                    export.key.start,
+                    "a composite cannot export a parameter named `pattern`: the key is reserved in instance tables".to_owned(),
+                );
+            }
+        }
+    }
+
+    /// A pattern file (ADR 0028 §1–2): its name and what it holds.
+    fn pattern(&mut self, file: usize) -> Option<(String, (usize, Pattern))> {
+        let source = self.files.get(file)?;
+        let stem = source
+            .path
+            .strip_prefix(&format!("{}/", pattern::PATTERNS))
+            .and_then(|p| p.strip_suffix(".toml"))
+            .unwrap_or(&source.path)
+            .to_owned();
+        if !valid_name(&stem) {
+            self.error(
+                file,
+                0,
+                format!(
+                    "invalid pattern name `{stem}`; a pattern file is patterns/<name>.toml, and names use a-z, 0-9, _ and start with a-z"
+                ),
+            );
+            return None;
+        }
+        match pattern::parse(&source.text) {
+            Ok(parsed) => Some((stem, (file, parsed))),
+            Err(problems) => {
+                for (offset, message) in problems {
+                    self.error(file, offset, message);
+                }
+                None
+            }
+        }
+    }
+
     fn schema_version(&mut self, file: usize, version: &Spanned<i64>) {
         if *version.get_ref() != 1 {
             self.error(
@@ -641,6 +818,7 @@ fn definition(
         let module_span = entry.module.span();
         let module = entry.module.into_inner();
         let gpu = entry.gpu.map(|g| (g.get_ref().clone(), g.span()));
+        let pattern = entry.pattern.map(|p| (p.get_ref().clone(), p.span()));
         let mut parameters = BTreeMap::new();
         let mut parameter_spans = BTreeMap::new();
         for (key, value) in entry.parameters {
@@ -657,6 +835,7 @@ fn definition(
                 module_span,
                 parameters: parameter_spans,
                 gpu,
+                pattern,
             },
         );
         def.instances.push(InstanceDef {

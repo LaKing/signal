@@ -114,7 +114,7 @@ fn a_broken_panel_fails_with_located_diagnostics() {
             at("<signal-fadr", 0),
             "error: unknown control <signal-fadr>; the controls are signal-fader, signal-knob, \
              signal-xy, signal-button, signal-toggle, signal-meter, signal-scope, signal-value, \
-             signal-canvas"
+             signal-canvas, signal-piano-roll, signal-step-grid"
                 .to_owned(),
         ),
         (
@@ -164,4 +164,67 @@ fn a_project_without_panels_gets_the_generated_one() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["panels"], serde_json::json!([]));
     assert_eq!(value["generated"], true);
+}
+
+/// M2.11-1 (ADR 0028 §7): the pattern controls take no `bind`; their
+/// `pattern` names a project pattern of their kind (`notes` for the piano
+/// roll, `steps` for the step grid), else an error at the panel line.
+#[test]
+fn pattern_controls_name_a_pattern_of_their_kind() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ui-check-patterns");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("patterns")).unwrap();
+    fs::create_dir_all(dir.join("ui")).unwrap();
+    fs::write(
+        dir.join("project.toml"),
+        "schema_version = 1\n\n[project]\nname = \"patterns\"\n\n[instances]\nclock = { module = \"std.transport\" }\nseq = { module = \"std.note_seq\", pattern = \"melody\" }\nout = { module = \"std.audio_out\" }\n\n[wiring]\nconnections = [\n  { from = \"clock.tick\", to = \"seq.tick\" },\n  { from = \"seq.gate\", to = \"out.l\" },\n]\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("patterns/melody.toml"),
+        "schema_version = 1\nkind = \"notes\"\nlength = 4\nnotes = [\n  { key = 60, start = 0, length = 1, velocity = 1 },\n]\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("patterns/drums.toml"),
+        "schema_version = 1\nkind = \"steps\"\nsteps = 4\nstep = 0.25\n\n[lanes]\nkick = \"x...\"\n",
+    )
+    .unwrap();
+    let good = "<signal-panel>\n<signal-piano-roll pattern=\"melody\" label=\"melody\"></signal-piano-roll>\n<signal-step-grid pattern=\"drums\" step=\"0\"></signal-step-grid>\n</signal-panel>\n";
+    fs::write(dir.join("ui/main.html"), good).unwrap();
+    let output = check(&dir, false);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("ui/main.html: 2 controls, 0 bindings: ok"),
+        "{stderr}"
+    );
+
+    let bad = "<signal-panel>\n<signal-piano-roll pattern=\"drums\"></signal-piano-roll>\n<signal-step-grid pattern=\"beat\"></signal-step-grid>\n<signal-step-grid bind=\"/seq.tick\"></signal-step-grid>\n</signal-panel>\n";
+    let panel = dir.join("ui/main.html");
+    fs::write(&panel, bad).unwrap();
+    let output = check(&dir, false);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    let file = panel.display();
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            format!(
+                "{file}:2:29: error: wrong kind: patterns/drums.toml is a `steps` pattern; <signal-piano-roll> edits a `notes` pattern"
+            ),
+            format!(
+                "{file}:3:28: error: unknown pattern `beat`: the project has no patterns/beat.toml; <signal-step-grid> edits a `steps` pattern"
+            ),
+            format!(
+                "{file}:4:25: error: <signal-step-grid> takes no bind: it edits the `steps` pattern its `pattern` attribute names"
+            ),
+            format!(
+                "{file}:4:1: error: <signal-step-grid> has no pattern: it needs pattern=\"<name>\", a `steps` pattern of the project (patterns/<name>.toml)"
+            ),
+        ],
+        "{stderr}"
+    );
+    let _ = fs::remove_dir_all(&dir);
 }

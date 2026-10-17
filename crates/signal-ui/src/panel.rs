@@ -93,6 +93,9 @@ struct Instance {
 #[derive(Clone, Debug, Default)]
 pub struct Panel {
     instances: Vec<Instance>,
+    /// The project's patterns (`patterns/<name>.toml`) and their kinds, for
+    /// the pattern controls' check.
+    patterns: Vec<(String, &'static str)>,
     /// The values being dragged (each send carries the latest value to all
     /// of a parameter's ports, so only the latest send says what they hold).
     drags: BTreeMap<(String, String), Drag>,
@@ -193,6 +196,10 @@ impl Panel {
         }
         Panel {
             instances,
+            patterns: project
+                .patterns()
+                .map(|(name, kind)| (name.to_owned(), kind))
+                .collect(),
             drags: BTreeMap::new(),
         }
     }
@@ -279,6 +286,16 @@ impl Panel {
     /// keeping the drags in progress.
     pub fn replace(&mut self, other: Panel) {
         self.instances = other.instances;
+        self.patterns = other.patterns;
+    }
+
+    /// The kind of the project's pattern `name` (`patterns/<name>.toml`), if
+    /// it has one.
+    pub fn pattern_kind(&self, name: &str) -> Option<&'static str> {
+        self.patterns
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, kind)| *kind)
     }
 
     /// What the window draws, with the effective `values` the runner reported.
@@ -554,7 +571,19 @@ pub fn write_file(path: &Path, text: &str) -> io::Result<()> {
     name.push(".tmp");
     let temporary = path.with_file_name(name);
     let written = (|| {
-        let mut file = fs::File::create(&temporary)?;
+        // Never through what is already there: a leftover temporary file or
+        // a link at that name is removed (a link itself, not its target),
+        // and the new one is created exclusively (`O_EXCL`, which does not
+        // follow a link), so nothing outside the folder is written and the
+        // renamed file is a regular file.
+        match fs::remove_file(&temporary) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         fs::rename(&temporary, path)
