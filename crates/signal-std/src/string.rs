@@ -85,6 +85,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::PHYSICAL),
 };
 
 /// `std.string`: an extended Karplus–Strong string, a single-delay-loop

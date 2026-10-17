@@ -158,6 +158,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
         block_frames: BLOCK_FRAMES as u32,
     }),
     reproducibility: Reproducibility::SameMachine,
+    category: None,
 };
 
 /// A block's parameters.

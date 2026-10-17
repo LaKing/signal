@@ -48,6 +48,7 @@ const LATENT: ModuleDescriptor = ModuleDescriptor {
         block_frames: BLOCK as u32,
     }),
     reproducibility: Reproducibility::SameMachine,
+    category: None,
 };
 
 /// `due` polls before a block's result arrives.

@@ -172,6 +172,106 @@ mod body2d {
     signal_contract::contract_tests!(super::std_type("std.body2d"));
 }
 
+mod div {
+    signal_contract::contract_tests!(super::std_type("std.div"));
+}
+
+mod neg {
+    signal_contract::contract_tests!(super::std_type("std.neg"));
+}
+
+mod modulo {
+    signal_contract::contract_tests!(super::std_type("std.mod"));
+}
+
+mod fract {
+    signal_contract::contract_tests!(super::std_type("std.fract"));
+}
+
+mod floor {
+    signal_contract::contract_tests!(super::std_type("std.floor"));
+}
+
+mod round {
+    signal_contract::contract_tests!(super::std_type("std.round"));
+}
+
+mod sign {
+    signal_contract::contract_tests!(super::std_type("std.sign"));
+}
+
+mod sqrt {
+    signal_contract::contract_tests!(super::std_type("std.sqrt"));
+}
+
+mod exp {
+    signal_contract::contract_tests!(super::std_type("std.exp"));
+}
+
+mod log {
+    signal_contract::contract_tests!(super::std_type("std.log"));
+}
+
+mod pow {
+    signal_contract::contract_tests!(super::std_type("std.pow"));
+}
+
+mod sin {
+    signal_contract::contract_tests!(super::std_type("std.sin"));
+}
+
+mod cos {
+    signal_contract::contract_tests!(super::std_type("std.cos"));
+}
+
+mod tan {
+    signal_contract::contract_tests!(super::std_type("std.tan"));
+}
+
+mod tanh {
+    signal_contract::contract_tests!(super::std_type("std.tanh"));
+}
+
+mod atan2 {
+    signal_contract::contract_tests!(super::std_type("std.atan2"));
+}
+
+mod sin_cycles {
+    signal_contract::contract_tests!(super::std_type("std.sin_cycles"));
+}
+
+mod constant {
+    signal_contract::contract_tests!(super::std_type("std.const"));
+}
+
+mod sample_rate {
+    signal_contract::contract_tests!(super::std_type("std.sample_rate"));
+}
+
+mod frames {
+    signal_contract::contract_tests!(super::std_type("std.frames"));
+}
+
+mod compare {
+    signal_contract::contract_tests!(super::std_type("std.compare"));
+}
+
+mod select {
+    signal_contract::contract_tests!(super::std_type("std.select"));
+}
+
+mod and {
+    signal_contract::contract_tests!(super::std_type("std.and"));
+}
+
+mod or {
+    signal_contract::contract_tests!(super::std_type("std.or"));
+}
+
+mod not {
+    signal_contract::contract_tests!(super::std_type("std.not"));
+}
+
 /// The physical models stay finite when their parameters jump between range
 /// limits on every frame (finding auditor-1-modal-modulation-overflow): a
 /// unit impulse on every signal input and a trigger on every event input on

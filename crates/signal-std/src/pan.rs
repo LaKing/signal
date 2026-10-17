@@ -30,6 +30,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::CORE),
 };
 
 /// `std.pan`: an equal-power panner from one signal to two.

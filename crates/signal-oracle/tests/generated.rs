@@ -379,7 +379,9 @@ fn draw() -> impl Strategy<Value = Draw> {
 /// vector ports. The M2.8-7 types (`std.count`, the visual-rate physics and
 /// `std.mesh2d_audio`) carry vectors, which the generator's wiring and its
 /// probe (scalar signals) do not reach; the contract suite and the engine
-/// tests cover them, and leaving them out keeps every earlier case as drawn.
+/// tests cover them. From M2.10-1 the pool includes the core types
+/// (`std.div` to `std.not`), so a seed drawn before then draws a different
+/// graph (`docs/testing-and-evaluation.md`).
 fn scalar(d: &signal_core::ModuleDescriptor) -> bool {
     d.rate() == Some(signal_core::RateDivisor::ONE)
         && d.ports

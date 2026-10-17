@@ -86,6 +86,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::PHYSICAL),
 };
 
 /// `std.mass_spring`: a one-dimensional chain of equal masses and springs.

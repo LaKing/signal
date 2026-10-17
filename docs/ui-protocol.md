@@ -133,7 +133,7 @@ Playing, `graph` describes the running project (the last version that loaded, as
  "composites": [{"module": "kick", "composite": true, "description": null, "ports": […], "parameters": […]}]}
 ```
 
-`primitives` are the registry's types, `composites` the project's (every `composites/*.toml`, used or not), each in name order. Ports and parameters are what `graph` gives an instance of the type (a composite's: its exports, with the shape of what they reach) **without `address`**: there is no instance. The registry holds lab types only in a `lab` build. Of the project `graph` describes (playing, the running one; stopped, the folder's, cached with its structure), and the same reply every time. Errors: `does-not-load`, `no-project`.
+`primitives` are the registry's types, `composites` the project's (every `composites/*.toml`, used or not), each in name order. A primitive carries its palette group as `"category"` (ADR 0027 §1, e.g. `"filter"`) when its type has one; the key is absent otherwise, and on composites. Ports and parameters are what `graph` gives an instance of the type (a composite's: its exports, with the shape of what they reach) **without `address`**: there is no instance. The registry holds lab types only in a `lab` build. Of the project `graph` describes (playing, the running one; stopped, the folder's, cached with its structure), and the same reply every time. Errors: `does-not-load`, `no-project`.
 
 ### `patch`
 

@@ -27,6 +27,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::FILTER),
 };
 
 /// `std.dc_block`: a first-order high-pass that removes DC (a one-pole,

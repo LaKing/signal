@@ -40,6 +40,7 @@ impl DirectPrimitive for Half {
             sink: None,
             latency: None,
             reproducibility: signal_core::Reproducibility::BitExact,
+            category: None,
         }
     }
     fn prepare(&mut self, _ctx: &PrepareContext) {}

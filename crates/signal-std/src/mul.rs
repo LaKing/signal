@@ -20,6 +20,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::CORE),
 };
 
 /// `std.mul`: the product of two signals.
@@ -33,6 +34,10 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 /// **Feedthrough:** direct.
 ///
 /// **Formula:** `out[n] = a[n]·b[n]`. Stateless; constant work per frame.
+///
+/// **Operands:** ordered ports `a` and `b`; the product is commutative, so
+/// swapping them never changes the output (several sources into one port sum
+/// first, in canonical source order, `docs/semantics.md` §3).
 #[derive(Clone, Debug, Default)]
 pub struct Mul;
 

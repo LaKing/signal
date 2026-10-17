@@ -327,6 +327,98 @@ fn modules_lists_the_catalogue() {
     assert!(text.contains("std.delay (state-output)"));
 }
 
+/// The M2.10-1 core types (ADR 0027 §1), all in the `core` category.
+const M2_10_1_TYPES: [&str; 25] = [
+    "std.div",
+    "std.neg",
+    "std.mod",
+    "std.fract",
+    "std.floor",
+    "std.round",
+    "std.sign",
+    "std.sqrt",
+    "std.exp",
+    "std.log",
+    "std.pow",
+    "std.sin",
+    "std.cos",
+    "std.tan",
+    "std.tanh",
+    "std.atan2",
+    "std.sin_cycles",
+    "std.const",
+    "std.sample_rate",
+    "std.frames",
+    "std.compare",
+    "std.select",
+    "std.and",
+    "std.or",
+    "std.not",
+];
+
+fn type_names(modules: &Value) -> Vec<&str> {
+    modules
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["type_name"].as_str().unwrap())
+        .collect()
+}
+
+/// M2.10-1 AC2, AC3, AC14: every std type is listed with its category, the
+/// new core types included; `--category` keeps only that
+/// group, as JSON and as text; a group no type has is a usage error.
+#[test]
+fn modules_have_categories_and_filter_by_one() {
+    let output = signal(&["modules", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let all = stdout_json(&output);
+    for module in all.as_array().unwrap() {
+        let name = module["type_name"].as_str().unwrap();
+        if name.starts_with("std.") {
+            assert!(module["category"].is_string(), "{name}");
+        }
+    }
+    let names = type_names(&all);
+    for name in M2_10_1_TYPES {
+        assert!(names.contains(&name), "{name}");
+    }
+
+    let output = signal(&["modules", "--category", "core", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let core = stdout_json(&output);
+    let core_names = type_names(&core);
+    for name in M2_10_1_TYPES
+        .into_iter()
+        .chain(["std.add", "std.sub", "std.mul"])
+    {
+        assert!(core_names.contains(&name), "{name}");
+    }
+    assert!(!core_names.contains(&"std.svf"));
+    assert!(
+        core.as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["category"] == "core")
+    );
+
+    let output = signal(&["modules", "--category", "event"]);
+    assert_eq!(output.status.code(), Some(0));
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("std.edge (direct)") && text.contains("  category: event\n"));
+    assert!(!text.contains("std.svf") && !text.contains("category: core"));
+
+    let output = signal(&["modules", "--category", "nope", "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = &stdout_json(&output)["error"];
+    assert_eq!(error["kind"], "usage");
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.contains("`nope`") && message.contains("core, delay"),
+        "{message}"
+    );
+}
+
 #[test]
 #[cfg_attr(
     feature = "lab",

@@ -214,6 +214,7 @@ pub fn converter(
             sink: None,
             latency: None,
             reproducibility: Reproducibility::BitExact,
+            category: None,
         },
         create: || Primitive::Direct(Box::new(Converter)),
     }));
@@ -278,6 +279,7 @@ impl DirectPrimitive for Converter {
             sink: None,
             latency: None,
             reproducibility: Reproducibility::BitExact,
+            category: None,
         }
     }
 

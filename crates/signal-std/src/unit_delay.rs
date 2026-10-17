@@ -19,6 +19,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::CORE),
 };
 
 /// `std.unit_delay`: a one-frame delay, z⁻¹.

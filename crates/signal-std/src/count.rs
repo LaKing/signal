@@ -28,6 +28,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::EVENT),
 };
 
 /// `std.count`: the event bridge into divided-rate types (operator decisions

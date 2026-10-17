@@ -58,6 +58,7 @@ const FLOOD_REVERSE: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: None,
 };
 
 impl DirectPrimitive for FloodReverse {

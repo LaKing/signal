@@ -55,6 +55,7 @@ const fn latent(type_name: &'static str) -> ModuleDescriptor {
             block_frames: BLOCK as u32,
         }),
         reproducibility: Reproducibility::SameMachine,
+        category: None,
     }
 }
 

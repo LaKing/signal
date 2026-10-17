@@ -4,5 +4,10 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
+#
+# Since M2.10-1 the generator's type pool includes the core types, so these
+# seeds build other graphs than the ones they shrank to: they still run, as
+# extra cases, but no longer reproduce their original failures
+# (docs/testing-and-evaluation.md).
 cc de786809dd33e20d8d45023e97a2a9d560cfd11d7435d367b2a358bc258f8fab # shrinks to draw = Draw { seed: 7534287649857870938, instances: 5, frames: 256, rate: 1000, probe: false, swaps: 2 }
 cc f25e5175e26a64d50a8ef51c2d79c528b0875429495ed5bb8b975459001e6b16 # shrinks to draw = Draw { seed: 2660892436932128037, instances: 8, frames: 256, rate: 1000, probe: true, swaps: 2 }

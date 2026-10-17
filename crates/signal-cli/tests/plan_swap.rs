@@ -90,3 +90,44 @@ fn surviving_sine_osc_continues_its_phase_exactly() {
     // Not trivially equal: the phase has moved well away from 0 by the swap.
     assert!(f64::from_bits(unswapped[SWAP as usize]).abs() > 0.0);
 }
+
+/// M2.10-1 AC6 (ADR 0006): a `std.frames` that survives a swap keeps its
+/// count, so at the swap frame it reads `SWAP` and goes on; one the swap
+/// adds starts at 0. The counts stay below 10⁶, so `lo` is the count (`hi`
+/// is 0; the carry is tested in `core_bound.rs`).
+#[test]
+fn surviving_frames_keeps_its_count_and_an_added_one_starts_at_zero() {
+    let before = plan(
+        vec![
+            inst("count", "std.frames", &[]),
+            inst("out", "std.audio_out", &[]),
+        ],
+        vec![conn("count.lo", "out.l")],
+    );
+    let after = plan(
+        vec![
+            inst("count", "std.frames", &[]),
+            inst("fresh", "std.frames", &[]),
+            inst("out", "std.audio_out", &[]),
+        ],
+        vec![conn("count.lo", "out.l"), conn("fresh.lo", "out.r")],
+    );
+    let registry = registry();
+    let mut engine =
+        Engine::new(&before, &registry, EngineConfig::new(RATE, 7), Vec::new()).unwrap();
+    let count: PortAddress = "/count.lo".parse().unwrap();
+    let fresh: PortAddress = "/fresh.lo".parse().unwrap();
+    for frame in 0..FRAMES {
+        if frame == SWAP {
+            let mut swap = engine.prepare_swap(&after, &registry).unwrap();
+            engine.commit_swap(&mut swap, Frame(frame)).unwrap();
+        }
+        engine.run_frame();
+        engine.drain_log(&mut |_| {});
+        assert_eq!(engine.signal_output(&count), Some(frame as f64), "{frame}");
+        if frame >= SWAP {
+            let added = engine.signal_output(&fresh);
+            assert_eq!(added, Some((frame - SWAP) as f64), "{frame}");
+        }
+    }
+}

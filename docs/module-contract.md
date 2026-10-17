@@ -12,6 +12,7 @@
    - `parameters` (`ParameterDescriptor`: name, kind, rate divisor, optional unit, range, default, `combine`).
    - `feedthrough`: must name the class whose trait you implement.
    - `sink`: `Some(SinkKind::Audio)` if the module has an external effect, else `None`.
+   - `category`: the palette group, a free-form tag (`Some("filter")`), or `None`. Its vocabulary belongs to the library that registers the type, never to the core ("The standard library" below).
 
    Port and parameter names follow `[a-z][a-z0-9_]*` and are unique within the module, because parameters are input ports and share the address form `<instance>.<name>` (ADR 0004). Rates and vector shapes: "Rates and vectors" below.
 3. **Implement the trait**: `describe` returns the descriptor; `prepare`, `reset`, and either `process` or `emit` + `absorb`.
@@ -143,6 +144,44 @@ M2.8-6 (ADR 0005, `semantics.md` §16).
   The visual types `std.particles` (`emit`, `impulse`), `std.mesh2d` (`strike`) and `std.body2d` (`kick`) take events this way. **This is a deviation from M2.8-7's wording** ("emit and impulse events"): their inputs are `std.count` readings, not event ports. A bridge input takes one connection at scale 1 from a `std.count`'s `window`: **building the plan refuses** a scale other than 1, more than one connection, and any other source there, each at the connection as written (M2.8-9, ADR 0024: `std` registers the rule with `Registry::restrict_input`, the graph checks it, `GraphError::RestrictedInput`). What still reaches an input decodes only as a whole reading (the check rows): one reading at a scale other than 1, several at scale 1, any two at any scales and any at scales ≥ 0 never decode except as a genuine one; rows that are no reading apply nothing. The bridge is for types at divisor 800 only; a divisor-1 type takes events directly (`std.mesh2d_audio`'s `strike`).
   - Tests: `crates/signal-std/src/count.rs` and `bridge.rs` (the reading against a brute force, every element inside the guard, the quantization, every consumer rule), `crates/signal-cli/tests/blocks.rs` (`events_act_at_the_first_tick_at_or_after_their_frame`) and `crates/signal-cli/tests/physical_av.rs` (suspensions, the removal protocol at every phase, re-adds, reconnection, E1, E2, the value limit, replay of creation generations).
 - **Converters.** Where a connection joins two rates one of which divides the other, the graph compiler inserts a converter instance, an ordinary direct primitive of type `core.<hold|decimate>.d<from>.d<to>.<signal|vectorN>.<kind>` that copies each input row to its output row at its own rate (`signal_core::converter`). A project may also name one explicitly by that type name; every registry knows them (`Registry::get`) without listing them. A `core.` name that is not exactly such a name is an unknown module.
+
+## The standard library
+
+The `std.*` types are listed with their class and category in the rustdoc of `crates/signal-std/src/lib.rs`, and `signal modules` prints them (`--category <name>` for one group, `--json` for the descriptors). Each type's rustdoc states its ports, parameters and formula.
+
+**Categories** (ADR 0027 §1). Every `std.*` type has one, from the vocabulary in `signal_std::category`; the core crates see only a free-form tag. The `core` category is a palette group, not ADR 0027's core set: core-set members that hide a loop or carry events are in their own groups (`std.delay` in `delay`, `std.lag` and `std.onepole` in `filter`, `std.noise` in `generator`, `std.sample_hold`, `std.edge` and `std.clock_div` in `event`).
+
+| Category | Types |
+|---|---|
+| `core` | `add`, `sub`, `mul`, `div`, `neg`, `abs`, `min`, `max`, `clamp`, `scale`, `mod`, `fract`, `floor`, `round`, `sign`; `sqrt`, `exp`, `log`, `pow`, `sin`, `cos`, `tan`, `tanh`, `atan2`, `sin_cycles`; `const`, `sample_rate`, `frames`; `compare`, `select`, `and`, `or`, `not`; `gain`, `mix`, `pan`, `unit_delay` |
+| `generator` | `sine_osc`, `osc`, `lfo`, `noise` |
+| `filter` | `svf`, `onepole`, `dc_block`, `lag`, `tanh_shaper` |
+| `envelope` | `exp_env`, `adsr` |
+| `delay` | `delay` |
+| `physical` | `string`, `modal`, `mass_spring`, `exciter`, `mesh2d_audio` |
+| `event` | `sample_hold`, `edge`, `clock_div`, `step_seq`, `count`, `transport` |
+| `visual` | `particles`, `mesh2d`, `body2d` |
+| `io` | `audio_out` |
+
+**The core arithmetic, functions, constants and comparisons** (M2.10-1) are direct, at divisor 1, and **total**: finite inputs give finite outputs.
+- **Results are clamped to ±10⁶, the engine's magnitude bound (`semantics.md` §7), so a core primitive never faults on its own.** That bounds `div`, `exp`, `pow` and `tan`, which grow beyond it (e.g. `div(1, 1e−7)`, `exp(14)`, `pow(10, 7)`, `tan` near π/2 all give ±10⁶), and every other M2.10-1 type's output on an input that a fan-in sum or a connection scale took beyond the bound. One constant, `SIGNAL_BOUND` in `signal-std`, holds it. The types that predate M2.10-1 (`add`, `sub`, `mul`, `abs`, `min`, `max`, `scale`, `clamp`, `gain`, `mix`, `pan`, `unit_delay`) are unchanged: `mul`, `add`, `sub`, `scale` and `gain` can still exceed the bound, and the fault guard then mutes them as before.
+- Division by ±0 gives 0 (`div`, `mod`, and `pow` of 0 to a negative power).
+- `sqrt` of x ≤ 0 is 0, and so is `pow` of a negative base to a non-integer power.
+- `log` of x ≤ 0 is the log of the smallest positive normal, about −708.40.
+- No stateless type flushes a subnormal result: below the normal range `exp` and `pow` give `libm`'s value, a subnormal or 0. They hold no state, so nothing decays into the subnormal range across frames.
+- `mod` is floored, with the sign of `b`; `fract` is in [0, 1); `round` rounds half to even; `sign` gives −1, 0 or 1.
+- `sin_cycles` takes cycles and is exact at whole, half and quarter cycles.
+- `compare` outputs a gate, 0 or 1, by `mode` (0 `lt`, 1 `le`, 2 `eq`, 3 `ge`, 4 `gt`, 5 `ne`); a ramped or modulated mode passes through every mode between its ends. `select`, `and`, `or` and `not` take gates, where > 0 is true.
+- `const`'s `value` ranges over ±10⁶, the magnitude bound.
+- `sample_rate` outputs the master rate and its period, from `prepare`. `frames` counts the frames its instance has run on two outputs, `lo` = count mod 10⁶ and `hi` = ⌊count / 10⁶⌋, so count = `hi`·10⁶ + `lo`: both exact integers within the bound, exact up to 10¹² frames, where the count stops (`lo` = 0, `hi` = 10⁶). A single output would fault after 10⁶ frames, about 21 s at 48 kHz. A plan swap that keeps the instance keeps the count (ADR 0006).
+
+Transcendental functions are `libm`'s (ADR 0007). These types are not rate-generic: see the dated note in ADR 0027 §5.
+
+**Ordered operands.** A type whose result depends on the order of its operands takes them on separate, named ports (`a`, `b`, or `in` and named parameters), so the result never depends on the address order of what is connected. Several sources into one port are summed first, in canonical source order (`semantics.md` §3).
+- `sub`, `div`, `mod`, `pow`, `atan2` (`a` is y, `b` is x), `compare` and `select` are order-dependent, and their ports say which operand is which.
+- `add` and `mul` are commutative.
+- `min` and `max` are commutative: on aarch64 `f64::min` and `f64::max` compile to `FMINNM` and `FMAXNM`, which order −0 below +0, so `min(±0, ∓0)` = −0 and `max(±0, ∓0)` = +0 in either order (a unit test pins it; Rust leaves this unspecified, so another target may differ).
+- `abs`, `clamp` and `scale` have one signal operand.
 
 ## Testing a primitive: the contract suite
 

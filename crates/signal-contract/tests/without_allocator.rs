@@ -30,6 +30,7 @@ impl DirectPrimitive for Silence {
             sink: None,
             latency: None,
             reproducibility: signal_core::Reproducibility::BitExact,
+            category: None,
         }
     }
 

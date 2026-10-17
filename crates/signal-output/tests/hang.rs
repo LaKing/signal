@@ -62,6 +62,7 @@ impl DirectPrimitive for Stall {
             sink: None,
             latency: None,
             reproducibility: signal_core::Reproducibility::BitExact,
+            category: None,
         }
     }
     fn prepare(&mut self, _ctx: &PrepareContext) {}

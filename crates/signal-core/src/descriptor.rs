@@ -232,6 +232,11 @@ pub struct ModuleDescriptor {
     /// How far its output reproduces.
     #[serde(skip_serializing_if = "Reproducibility::is_bit_exact")]
     pub reproducibility: Reproducibility,
+    /// A free-form palette group (ADR 0027 §1), e.g. for `signal modules
+    /// --category`. The vocabulary belongs to the library that registers the
+    /// type (`signal_std::category`), never to the core; `None` for none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<&'static str>,
 }
 
 impl ModuleDescriptor {
@@ -291,6 +296,7 @@ mod tests {
             sink: None,
             latency: None,
             reproducibility: Reproducibility::BitExact,
+            category: None,
         };
         descriptor.rate().map(RateDivisor::get)
     }

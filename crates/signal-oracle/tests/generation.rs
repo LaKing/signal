@@ -42,6 +42,7 @@ const RECORDER: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: Reproducibility::BitExact,
+    category: None,
 };
 
 struct Recorder;

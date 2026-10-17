@@ -30,6 +30,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::FILTER),
 };
 
 /// `std.tanh_shaper`: `tanh` saturation, antialiased by first-order

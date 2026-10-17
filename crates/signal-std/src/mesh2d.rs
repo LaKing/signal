@@ -203,6 +203,7 @@ const VISUAL_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::VISUAL),
 };
 
 const AUDIO_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
@@ -214,6 +215,7 @@ const AUDIO_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::PHYSICAL),
 };
 
 /// `std.mesh2d` (`Mesh2d<false>`, at the visual divisor 800) and

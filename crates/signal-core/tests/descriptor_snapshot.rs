@@ -67,6 +67,7 @@ const SAMPLE: ModuleDescriptor = ModuleDescriptor {
     sink: Some(SinkKind::Audio),
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: None,
 };
 
 #[test]

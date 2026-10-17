@@ -27,6 +27,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: Some(SinkKind::Audio),
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::IO),
 };
 
 /// `std.audio_out`: the stereo audio sink (`sink = Audio`). A plan has exactly

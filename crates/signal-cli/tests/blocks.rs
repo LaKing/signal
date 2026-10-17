@@ -558,6 +558,111 @@ fn a_loop_through_std_delay_at_one_to_three_frames_matches_per_frame() {
     }
 }
 
+/// M2.10-1 AC14: a graph of the new core types (a phase from `std.frames`
+/// and `std.sample_rate`, `std.sin_cycles`, `std.compare`, `std.round`,
+/// `std.mod`, `std.and`, `std.select` between `std.pow` and `std.div`, and
+/// `std.log` into `std.tanh`), with `std.const` values set mid-block, renders
+/// the same audio and log per frame, at k = 1, 2, 3, 7, 64, 128, 256 and a
+/// random partition, and on 1, 2, 3, 4 and 8 threads at k = 1, 64 and 256.
+#[test]
+fn a_graph_of_core_types_is_bit_identical_in_blocks_and_on_threads() {
+    let project = project(
+        "sr = { module = \"std.sample_rate\" }\n\
+         n = { module = \"std.frames\" }\n\
+         t = { module = \"std.mul\" }\n\
+         hz = { module = \"std.const\", value = 220 }\n\
+         ph = { module = \"std.mul\" }\n\
+         sine = { module = \"std.sin_cycles\" }\n\
+         th = { module = \"std.const\", value = 0.3 }\n\
+         cmp = { module = \"std.compare\", mode = 4 }\n\
+         rnd = { module = \"std.round\" }\n\
+         two = { module = \"std.const\", value = 2 }\n\
+         par = { module = \"std.mod\" }\n\
+         both = { module = \"std.and\" }\n\
+         mag = { module = \"std.abs\" }\n\
+         ex = { module = \"std.const\", value = 1.5 }\n\
+         pw = { module = \"std.pow\" }\n\
+         three = { module = \"std.const\", value = 3 }\n\
+         third = { module = \"std.div\" }\n\
+         sel = { module = \"std.select\" }\n\
+         wrap = { module = \"std.const\", value = 0.37 }\n\
+         m = { module = \"std.mod\" }\n\
+         ln = { module = \"std.log\" }\n\
+         sh = { module = \"std.tanh\" }\n\
+         out = { module = \"std.audio_out\" }\n",
+        "  { from = \"n.lo\", to = \"t.a\" },\n\
+         \x20 { from = \"sr.period\", to = \"t.b\" },\n\
+         \x20 { from = \"t.out\", to = \"ph.a\" },\n\
+         \x20 { from = \"hz.out\", to = \"ph.b\" },\n\
+         \x20 { from = \"ph.out\", to = \"sine.in\" },\n\
+         \x20 { from = \"sine.out\", to = \"cmp.a\" },\n\
+         \x20 { from = \"th.out\", to = \"cmp.b\" },\n\
+         \x20 { from = \"ph.out\", to = \"rnd.in\" },\n\
+         \x20 { from = \"rnd.out\", to = \"par.a\" },\n\
+         \x20 { from = \"two.out\", to = \"par.b\" },\n\
+         \x20 { from = \"cmp.out\", to = \"both.a\" },\n\
+         \x20 { from = \"par.out\", to = \"both.b\" },\n\
+         \x20 { from = \"sine.out\", to = \"mag.in\" },\n\
+         \x20 { from = \"mag.out\", to = \"pw.a\" },\n\
+         \x20 { from = \"ex.out\", to = \"pw.b\" },\n\
+         \x20 { from = \"sine.out\", to = \"third.a\" },\n\
+         \x20 { from = \"three.out\", to = \"third.b\" },\n\
+         \x20 { from = \"both.out\", to = \"sel.gate\" },\n\
+         \x20 { from = \"pw.out\", to = \"sel.a\" },\n\
+         \x20 { from = \"third.out\", to = \"sel.b\" },\n\
+         \x20 { from = \"ph.out\", to = \"m.a\" },\n\
+         \x20 { from = \"wrap.out\", to = \"m.b\" },\n\
+         \x20 { from = \"m.out\", to = \"ln.in\" },\n\
+         \x20 { from = \"ln.out\", to = \"sh.in\" },\n\
+         \x20 { from = \"sel.out\", to = \"out.l\", scale = 0.5 },\n\
+         \x20 { from = \"sh.out\", to = \"out.r\", scale = 0.5 },\n",
+    );
+    let plan = project.plan(&registry()).unwrap().plan;
+    let events = [(37, "/hz.value", 330.0), (1_000, "/th.value", -0.2)];
+    let run = |partition, threads| {
+        let mut pushed = false;
+        render(&plan, (8_000, 5, 4_000), partition, threads, |engine| {
+            if !pushed {
+                pushed = true;
+                for (n, &(frame, target, value)) in events.iter().enumerate() {
+                    engine
+                        .push_external(ExternalEvent {
+                            frame: Frame(frame),
+                            sequence: n as u64,
+                            target: target.parse().unwrap(),
+                            payload: EventPayload::Set(value),
+                        })
+                        .unwrap();
+                }
+            }
+            Ok(None)
+        })
+    };
+    let reference = run(Partition::PerFrame, 1);
+    // Neither channel is silent or constant.
+    assert_eq!(reference.channels, 2);
+    let left: Vec<f64> = reference.samples.iter().step_by(2).copied().collect();
+    let right: Vec<f64> = reference
+        .samples
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .copied()
+        .collect();
+    assert!(left.iter().any(|&x| x > 0.0) && left.iter().any(|&x| x < 0.0));
+    assert!(right.iter().any(|&x| x != right[0]));
+    let reference = hashes(&reference);
+    let runs = partitions().map(|p| (p, 1)).chain(thread_grid());
+    for (partition, threads) in runs {
+        assert_eq!(
+            hashes(&run(partition, threads)),
+            reference,
+            "{partition:?}, {threads} threads"
+        );
+    }
+    assert_no_violation();
+}
+
 fn signal(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_signal"))
         .args(args)

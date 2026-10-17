@@ -140,6 +140,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::VISUAL),
 };
 
 /// `std.body2d`: four rigid circles (bodies 0–3) and two rigid boxes (4–5),

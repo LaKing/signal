@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::error::ErrorKind;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use signal_core::{Direction, Feedthrough, ModuleDescriptor, Registry};
 use signal_project::Diagnostic;
@@ -75,9 +75,18 @@ enum Command {
     /// sizes; with --compute, the compute devices instead.
     Devices(devices::DevicesArgs),
     /// Print the catalogue of module descriptors.
-    Modules,
+    Modules(ModulesArgs),
     /// Print the JSON Schema of project and composite files.
     Schema,
+}
+
+/// Arguments of `signal modules`.
+#[derive(Args)]
+struct ModulesArgs {
+    /// Only the types of this palette group (a descriptor's `category`, e.g.
+    /// `core`, `filter`; ADR 0027 §1).
+    #[arg(long)]
+    category: Option<String>,
 }
 
 /// Why a command failed.
@@ -224,16 +233,14 @@ fn execute(cli: &Cli) -> Result<(), Failure> {
         Command::Unpack(args) => files::unpack(args, cli.json),
         Command::Bench(args) => bench::run(args, &registry, setup, cli.json),
         Command::Devices(args) => devices::run(args, cli.json),
-        Command::Modules => {
+        Command::Modules(args) => {
+            let descriptors = modules(&registry, args.category.as_deref())?;
             if cli.json {
-                let descriptors: Vec<ModuleDescriptor> =
-                    registry.iter().map(|t| t.descriptor).collect();
                 let text = serde_json::to_string_pretty(&descriptors)
                     .map_err(|e| Failure::Internal(e.to_string()))?;
                 print_stdout(&text);
             } else {
-                let blocks: Vec<String> =
-                    registry.iter().map(|t| describe(&t.descriptor)).collect();
+                let blocks: Vec<String> = descriptors.iter().map(describe).collect();
                 print_stdout(&blocks.join("\n"));
             }
             Ok(())
@@ -248,7 +255,31 @@ fn execute(cli: &Cli) -> Result<(), Failure> {
     }
 }
 
-/// A module descriptor for people: name, class, doc, ports and parameters.
+/// The registry's descriptors, or with `category` only the types of that
+/// palette group; a group no type has is a usage error naming those there are.
+fn modules(registry: &Registry, category: Option<&str>) -> Result<Vec<ModuleDescriptor>, Failure> {
+    let all = registry.iter().map(|t| t.descriptor);
+    let Some(category) = category else {
+        return Ok(all.collect());
+    };
+    let chosen: Vec<ModuleDescriptor> = all.filter(|d| d.category == Some(category)).collect();
+    if chosen.is_empty() {
+        let mut known: Vec<&str> = registry
+            .iter()
+            .filter_map(|t| t.descriptor.category)
+            .collect();
+        known.sort_unstable();
+        known.dedup();
+        return Err(Failure::Usage(format!(
+            "no module type has category `{category}`; categories: {}",
+            known.join(", ")
+        )));
+    }
+    Ok(chosen)
+}
+
+/// A module descriptor for people: name, class, doc, category, ports and
+/// parameters.
 fn describe(d: &ModuleDescriptor) -> String {
     let class = match d.feedthrough {
         Feedthrough::Direct => "direct",
@@ -271,6 +302,9 @@ fn describe(d: &ModuleDescriptor) -> String {
         "{} ({class}{sink}{latency}{machine})\n  {}\n",
         d.type_name, d.doc
     );
+    if let Some(category) = d.category {
+        text.push_str(&format!("  category: {category}\n"));
+    }
     for port in d.ports {
         let direction = match port.direction {
             Direction::In => "in ",

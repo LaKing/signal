@@ -25,6 +25,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::GENERATOR),
 };
 
 /// `std.noise`: uniform white noise from the instance's `RngStream` (ADR 0008).

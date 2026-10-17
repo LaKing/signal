@@ -372,6 +372,7 @@ impl EventSink {
 ///     sink: None,
 ///     latency: None,
 ///     reproducibility: signal_core::Reproducibility::BitExact,
+///     category: None,
 /// };
 ///
 /// impl DirectPrimitive for Gain {
@@ -468,6 +469,7 @@ pub trait DirectPrimitive: Send {
 ///     sink: None,
 ///     latency: None,
 ///     reproducibility: signal_core::Reproducibility::BitExact,
+///     category: None,
 /// };
 ///
 /// impl StateOutputPrimitive for UnitDelay {

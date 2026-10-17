@@ -29,6 +29,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::FILTER),
 };
 
 /// `std.onepole`: a 1-pole filter in topology-preserving transform (TPT) form

@@ -68,6 +68,7 @@ const fn descriptor(
         sink,
         latency: None,
         reproducibility: signal_core::Reproducibility::BitExact,
+        category: None,
     }
 }
 
@@ -1215,6 +1216,7 @@ pub const MIXED_LATENT: ModuleDescriptor = ModuleDescriptor {
         block_frames: MIXED_BLOCK as u32,
     }),
     reproducibility: signal_core::Reproducibility::SameMachine,
+    category: None,
     ..descriptor(
         "test.mixed_latent",
         &[

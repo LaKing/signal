@@ -57,6 +57,7 @@ impl<const D: u32> DirectPrimitive for Vec4<D> {
             sink: None,
             latency: None,
             reproducibility: signal_core::Reproducibility::BitExact,
+            category: None,
         }
     }
     fn prepare(&mut self, _ctx: &PrepareContext) {}

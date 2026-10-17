@@ -40,6 +40,7 @@ const PROBE: ModuleDescriptor = ModuleDescriptor {
     sink: Some(SinkKind::Audio),
     latency: None,
     reproducibility: Reproducibility::BitExact,
+    category: None,
 };
 
 struct Probe;

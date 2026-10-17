@@ -622,6 +622,15 @@ fn modules_is_deterministic(transport: Transport) {
         unaddressed(&svf["parameters"])
     );
     assert!(svf["ports"][0].get("address").is_none());
+    // ADR 0027 §1: a primitive's palette group (M2.10-1).
+    assert_eq!(svf["category"], "filter");
+    let div = first["primitives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["module"] == "std.div")
+        .unwrap();
+    assert_eq!(div["category"], "core");
     rig.finish();
     let mut rig = project_rig("patch-modules-kick", transport, "kick");
     let (mut ws, _) = rig.client();
@@ -633,6 +642,14 @@ fn modules_is_deterministic(transport: Transport) {
         .map(|c| c["module"].as_str().unwrap())
         .collect();
     assert_eq!(composites, ["drums", "kick"]);
+    // A composite has no category: the key is absent.
+    assert!(
+        kick["composites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c.get("category").is_none())
+    );
     rig.finish();
 }
 

@@ -52,6 +52,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::FILTER),
 };
 
 /// `std.svf`: a 2-pole state-variable filter in Zavalishin's

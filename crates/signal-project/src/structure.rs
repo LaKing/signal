@@ -111,7 +111,7 @@ impl Project {
             .iter()
             .map(|t| {
                 let d = &t.descriptor;
-                json!({
+                let mut primitive = json!({
                     "module": d.type_name,
                     "composite": false,
                     "description": d.doc,
@@ -121,7 +121,12 @@ impl Project {
                     "parameters": d.parameters.iter()
                         .map(|p| unaddressed(parameter_json(p, p.name, "")))
                         .collect::<Vec<_>>(),
-                })
+                });
+                // ADR 0027 §1: the palette group, only when the type has one.
+                if let (Some(category), Value::Object(fields)) = (d.category, &mut primitive) {
+                    fields.insert("category".to_owned(), json!(category));
+                }
+                primitive
             })
             .collect();
         let walk = self.walk(registry, BTreeMap::new());

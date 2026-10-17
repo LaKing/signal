@@ -19,7 +19,7 @@ Missing from std today: division and the transcendental functions, comparison an
 ## Decision
 1. **The core set is a deliberately complete, minimal set of Rust primitives in `std.*`**, marked by a new descriptor field `category` (`core`, `generator`, `filter`, `envelope`, `delay`, `physical`, `event`, `visual`, `io`), which groups the palette and `signal modules --category`. Not `core.*`: that prefix is the converters' (`docs/module-contract.md`), and "core" already names the domain-free crates. The existing std arithmetic is part of the set and keeps its names. Every core primitive:
    - passes the contract suite and states its formula in its rustdoc;
-   - is total: finite in, finite out (`div` by 0 gives 0, `sqrt` of x < 0 gives 0, `log` of x ≤ 0 gives the log of the smallest normal, `pow` defined everywhere), each case documented and tested;
+   - is total: finite in, finite out (`div` by 0 gives 0, `sqrt` of x < 0 gives 0, `log` of x ≤ 0 gives the log of the smallest normal, `pow` defined everywhere), each case documented and tested; and within the engine's magnitude bound (`docs/semantics.md` §7): results are clamped to ±1e6, so a core primitive never faults on its own (M2.10-1 review, operator decision 2026-10-17);
    - takes **ordered operands** (`a`, `b`, …) wherever association matters, so a result never depends on fan-in address order;
    - computes transcendental functions with `libm` (ADR 0007).
 
@@ -27,7 +27,7 @@ Missing from std today: division and the transcendental functions, comparison an
    |---|---|
    | Arithmetic | add✓ sub✓ mul✓ div neg abs✓ min✓ max✓ clamp✓ scale✓ mod (floored) fract floor round (half-even) sign |
    | Functions | sqrt exp log pow sin cos tan tanh atan2 (radians), sin_cycles (cycles, the oscillator convention) |
-   | Constants and rate | const, sample_rate (sr and 1/sr), frames (frames run, exact to 2^53) |
+   | Constants and rate | const, sample_rate (sr and 1/sr), frames (frames run: lo and hi, count = hi·1e6 + lo) |
    | Compare and select | compare (lt, le, eq, ge, gt, ne → gate), select (gate > 0 ? a : b), and, or, not |
    | State (hides the loop) | unit_delay✓ delay✓ phasor (wrap, reset), counter (triggers → count, modulo, reset, wrap trigger), integrator (TPT step, reset), lag✓ onepole✓ |
    | Memory | buffer (N frames, N fixed per instance, allocated in prepare; write index, value, gate; R read taps; interpolation none, linear, Hermite; read-after-write within a frame defined), table (read-only, from parameters or a project asset; interpolated) |
@@ -44,6 +44,8 @@ Missing from std today: division and the transcendental functions, comparison an
    - **Validation:** every library composite with a native counterpart is rendered against it on the same stimulus: bit-exact, or within a stated, measured tolerance; the cost ratio is recorded in `docs/benchmarks.md`. Native primitives remain as references and as the fast path.
 
 5. **Rates for core math** (decided in the issue that builds it): core arithmetic, function, compare and select types become rate-generic, an instance key `rate = <divisor>` choosing the divisor, so a coefficient graph can run at control rate with the converters inserted as today, Signal's substitute for Reaktor's compute-on-change. If that contract change is refused there, coefficient graphs run at divisor 1 at the measured cost.
+
+   **Note (2026-10-17, M2.10-1): not done in M2.10-1.** The core types built there (arithmetic, functions, constants and rate, compare and select) are at divisor 1 only, and coefficient graphs run at divisor 1 at the measured cost. The reasons: (a) a type's rate is fixed by its `'static` descriptor (`ModuleDescriptor::rate`, `docs/semantics.md` §16), so a per-instance divisor needs a descriptor made per type and divisor, as the converters' are, in the core registry; (b) `rate` cannot simply become an instance key: instance keys other than `module` and `gpu` are parameters (`project-format.md` §4) and `std.particles` already has a parameter named `rate`, so it would need a reserved key or another spelling, with the format, the schema, patch ops and the panel's file writer; (c) the swap survival rule ("same type and descriptor", §12) and the oracle's independent implementation of §16 would have to learn per-instance rates for the oracle's bit-for-bit parity to hold; (d) nothing needs it yet: no library coefficient graph exists, and an acyclic node costs about 2.5 ns per frame at divisor 1 (Context), so doing it before a measured need would put the renders' bit-identity at risk across the graph compiler for no gain. **Revisit** when the first library composite's coefficient graph measurably misses its budget (`docs/benchmarks.md`); a separate issue then designs the per-instance rate (key spelling, descriptor synthesis, survival rule, oracle parity).
 
 6. **UI:** the palette groups by `category` (and library, project); a library composite opens by semantic zoom (ADR 0026), read-only, with "vendor to edit"; a native primitive shows its formula when selected.
 

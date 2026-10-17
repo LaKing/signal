@@ -70,6 +70,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::EVENT),
 };
 
 /// `std.transport`: a tempo clock that emits beats, accents and seeded ghost

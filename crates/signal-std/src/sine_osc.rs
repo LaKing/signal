@@ -33,6 +33,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::GENERATOR),
 };
 
 /// `std.sine_osc`: a sine oscillator whose phase is an f64 accumulator in cycles.

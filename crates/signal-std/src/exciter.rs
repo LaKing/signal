@@ -57,6 +57,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::PHYSICAL),
 };
 
 /// The kind of excitation sounding.

@@ -84,6 +84,7 @@ fn descriptor(
         sink: None,
         latency: None,
         reproducibility: signal_core::Reproducibility::BitExact,
+        category: None,
     }
 }
 

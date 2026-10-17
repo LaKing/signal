@@ -41,6 +41,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::FILTER),
 };
 
 /// `std.lag`: a one-pole lag (slew) whose time constant depends on the

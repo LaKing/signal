@@ -110,6 +110,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::PHYSICAL),
 };
 
 /// A free–free bar (Euler–Bernoulli beam): `(β_k/β_1)²`, β_k the roots of

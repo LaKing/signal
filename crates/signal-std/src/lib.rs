@@ -9,47 +9,81 @@
 //!
 //! [`register`] adds every type to a [`Registry`] under its `std.*` name:
 //!
-//! | Type | Primitive | Class |
-//! |---|---|---|
-//! | `std.sine_osc` | [`SineOsc`] | direct |
-//! | `std.exp_env` | [`ExpEnv`] | direct |
-//! | `std.mul` | [`Mul`] | direct |
-//! | `std.add` | [`Add`] | direct |
-//! | `std.tanh_shaper` | [`TanhShaper`] | direct |
-//! | `std.dc_block` | [`DcBlock`] | direct |
-//! | `std.unit_delay` | [`UnitDelay`] | state-output |
-//! | `std.lfo` | [`Lfo`] | direct |
-//! | `std.noise` | [`Noise`] | direct |
-//! | `std.transport` | [`Transport`] | direct |
-//! | `std.audio_out` | [`AudioOut`] | direct, audio sink |
-//! | `std.osc` | [`Osc`] | direct |
-//! | `std.svf` | [`Svf`] | direct |
-//! | `std.onepole` | [`OnePole`] | direct |
-//! | `std.adsr` | [`Adsr`] | direct |
-//! | `std.lag` | [`Lag`] | direct |
-//! | `std.delay` | [`Delay`] | state-output |
-//! | `std.mix` | [`Mix`] | direct |
-//! | `std.pan` | [`Pan`] | direct |
-//! | `std.gain` | [`Gain`] | direct |
-//! | `std.sub` | [`Sub`] | direct |
-//! | `std.min` | [`Min`] | direct |
-//! | `std.max` | [`Max`] | direct |
-//! | `std.abs` | [`Abs`] | direct |
-//! | `std.scale` | [`Scale`] | direct |
-//! | `std.clamp` | [`Clamp`] | direct |
-//! | `std.sample_hold` | [`SampleHold`] | direct |
-//! | `std.edge` | [`Edge`] | direct |
-//! | `std.clock_div` | [`ClockDiv`] | direct |
-//! | `std.step_seq` | [`StepSeq`] | direct |
-//! | `std.string` | [`StringModel`] | direct |
-//! | `std.modal` | [`Modal`] | direct |
-//! | `std.mass_spring` | [`MassSpring`] | direct |
-//! | `std.exciter` | [`Exciter`] | direct |
-//! | `std.count` | [`Count`] | direct (the event bridge) |
-//! | `std.particles` | [`Particles`] | direct, divisor 800 |
-//! | `std.mesh2d` | [`Mesh2d`]`<false>` | direct, divisor 800 |
-//! | `std.mesh2d_audio` | [`Mesh2d`]`<true>` | direct |
-//! | `std.body2d` | [`Body2d`] | direct, divisor 800 |
+//! | Type | Primitive | Class | Category |
+//! |---|---|---|---|
+//! | `std.sine_osc` | [`SineOsc`] | direct | `generator` |
+//! | `std.exp_env` | [`ExpEnv`] | direct | `envelope` |
+//! | `std.mul` | [`Mul`] | direct | `core` |
+//! | `std.add` | [`Add`] | direct | `core` |
+//! | `std.tanh_shaper` | [`TanhShaper`] | direct | `filter` |
+//! | `std.dc_block` | [`DcBlock`] | direct | `filter` |
+//! | `std.unit_delay` | [`UnitDelay`] | state-output | `core` |
+//! | `std.lfo` | [`Lfo`] | direct | `generator` |
+//! | `std.noise` | [`Noise`] | direct | `generator` |
+//! | `std.transport` | [`Transport`] | direct | `event` |
+//! | `std.audio_out` | [`AudioOut`] | direct, audio sink | `io` |
+//! | `std.osc` | [`Osc`] | direct | `generator` |
+//! | `std.svf` | [`Svf`] | direct | `filter` |
+//! | `std.onepole` | [`OnePole`] | direct | `filter` |
+//! | `std.adsr` | [`Adsr`] | direct | `envelope` |
+//! | `std.lag` | [`Lag`] | direct | `filter` |
+//! | `std.delay` | [`Delay`] | state-output | `delay` |
+//! | `std.mix` | [`Mix`] | direct | `core` |
+//! | `std.pan` | [`Pan`] | direct | `core` |
+//! | `std.gain` | [`Gain`] | direct | `core` |
+//! | `std.sub` | [`Sub`] | direct | `core` |
+//! | `std.min` | [`Min`] | direct | `core` |
+//! | `std.max` | [`Max`] | direct | `core` |
+//! | `std.abs` | [`Abs`] | direct | `core` |
+//! | `std.scale` | [`Scale`] | direct | `core` |
+//! | `std.clamp` | [`Clamp`] | direct | `core` |
+//! | `std.sample_hold` | [`SampleHold`] | direct | `event` |
+//! | `std.edge` | [`Edge`] | direct | `event` |
+//! | `std.clock_div` | [`ClockDiv`] | direct | `event` |
+//! | `std.step_seq` | [`StepSeq`] | direct | `event` |
+//! | `std.string` | [`StringModel`] | direct | `physical` |
+//! | `std.modal` | [`Modal`] | direct | `physical` |
+//! | `std.mass_spring` | [`MassSpring`] | direct | `physical` |
+//! | `std.exciter` | [`Exciter`] | direct | `physical` |
+//! | `std.count` | [`Count`] | direct (the event bridge) | `event` |
+//! | `std.particles` | [`Particles`] | direct, divisor 800 | `visual` |
+//! | `std.mesh2d` | [`Mesh2d`]`<false>` | direct, divisor 800 | `visual` |
+//! | `std.mesh2d_audio` | [`Mesh2d`]`<true>` | direct | `physical` |
+//! | `std.body2d` | [`Body2d`] | direct, divisor 800 | `visual` |
+//! | `std.div` | [`Div`] | direct | `core` |
+//! | `std.neg` | [`Neg`] | direct | `core` |
+//! | `std.mod` | [`Mod`] | direct | `core` |
+//! | `std.fract` | [`Fract`] | direct | `core` |
+//! | `std.floor` | [`Floor`] | direct | `core` |
+//! | `std.round` | [`Round`] | direct | `core` |
+//! | `std.sign` | [`Sign`] | direct | `core` |
+//! | `std.sqrt` | [`Sqrt`] | direct | `core` |
+//! | `std.exp` | [`Exp`] | direct | `core` |
+//! | `std.log` | [`Log`] | direct | `core` |
+//! | `std.pow` | [`Pow`] | direct | `core` |
+//! | `std.sin` | [`Sin`] | direct | `core` |
+//! | `std.cos` | [`Cos`] | direct | `core` |
+//! | `std.tan` | [`Tan`] | direct | `core` |
+//! | `std.tanh` | [`Tanh`] | direct | `core` |
+//! | `std.atan2` | [`Atan2`] | direct | `core` |
+//! | `std.sin_cycles` | [`SinCycles`] | direct | `core` |
+//! | `std.const` | [`Const`] | direct | `core` |
+//! | `std.sample_rate` | [`SampleRate`] | direct | `core` |
+//! | `std.frames` | [`Frames`] | direct | `core` |
+//! | `std.compare` | [`Compare`] | direct | `core` |
+//! | `std.select` | [`Select`] | direct | `core` |
+//! | `std.and` | [`And`] | direct | `core` |
+//! | `std.or` | [`Or`] | direct | `core` |
+//! | `std.not` | [`Not`] | direct | `core` |
+//!
+//! Every type carries its palette group ([`category`]; ADR 0027 §1), which
+//! `signal modules --category` filters by. The M2.10 core arithmetic,
+//! functions, constants and rate, and comparison and selection (from
+//! `std.div` on) are total: finite inputs give finite outputs, each edge case
+//! documented with the type's formula (`docs/module-contract.md`, "The
+//! standard library"). Their results are clamped to ±1e6 ([`SIGNAL_BOUND`],
+//! the engine's magnitude bound, `docs/semantics.md` §7), so a core
+//! primitive never faults on its own.
 //!
 //! The M2.8 physical models (`std.string`, `std.modal`, `std.mass_spring`,
 //! `std.exciter`) document their equations and are checked against analytic
@@ -81,19 +115,24 @@
 
 mod add;
 mod adsr;
+mod arith;
 mod audio_out;
 mod body2d;
 mod bridge;
+pub mod category;
 mod clock_div;
+mod constant;
 mod count;
 mod dc_block;
 mod delay;
 mod edge;
 mod exciter;
 mod exp_env;
+mod function;
 mod gain;
 mod lag;
 mod lfo;
+mod logic;
 mod mass_spring;
 mod math;
 mod mesh2d;
@@ -119,19 +158,23 @@ mod testing;
 
 pub use add::Add;
 pub use adsr::Adsr;
+pub use arith::{Div, Floor, Fract, Mod, Neg, Round, Sign};
 pub use audio_out::AudioOut;
 pub use body2d::Body2d;
 pub use bridge::BRIDGE_ROWS;
 pub use clock_div::ClockDiv;
+pub use constant::{Const, Frames, SampleRate};
 pub use count::Count;
 pub use dc_block::DcBlock;
 pub use delay::Delay;
 pub use edge::Edge;
 pub use exciter::Exciter;
 pub use exp_env::ExpEnv;
+pub use function::{Atan2, Cos, Exp, Log, Pow, Sin, SinCycles, Sqrt, Tan, Tanh};
 pub use gain::Gain;
 pub use lag::Lag;
 pub use lfo::Lfo;
+pub use logic::{And, Compare, Not, Or, Select};
 pub use mass_spring::MassSpring;
 pub use math::{Abs, Clamp, Max, Min, Scale, Sub};
 pub use mesh2d::Mesh2d;
@@ -162,7 +205,8 @@ use signal_core::{
 /// per-primitive medians of `docs/benchmarks.md` (M2-5, one frame at a time),
 /// rounded up. The engine groups cheap units into tasks by them (ADR 0019
 /// §2); they never change the output. The M2.8 physical models are not
-/// benchmarked yet and take the engine's default cost.
+/// benchmarked yet and take the engine's default cost, as do the M2.10 core
+/// types (`std.div` to `std.not`).
 pub const COST_NS: [(&str, u32); 30] = [
     ("std.abs", 11),
     ("std.add", 11),
@@ -243,6 +287,31 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<Mesh2d<false>>(),
         direct::<Mesh2d<true>>(),
         direct::<Body2d>(),
+        direct::<Div>(),
+        direct::<Neg>(),
+        direct::<Mod>(),
+        direct::<Fract>(),
+        direct::<Floor>(),
+        direct::<Round>(),
+        direct::<Sign>(),
+        direct::<Sqrt>(),
+        direct::<Exp>(),
+        direct::<Log>(),
+        direct::<Pow>(),
+        direct::<Sin>(),
+        direct::<Cos>(),
+        direct::<Tan>(),
+        direct::<Tanh>(),
+        direct::<Atan2>(),
+        direct::<SinCycles>(),
+        direct::<Const>(),
+        direct::<SampleRate>(),
+        direct::<Frames>(),
+        direct::<Compare>(),
+        direct::<Select>(),
+        direct::<And>(),
+        direct::<Or>(),
+        direct::<Not>(),
     ] {
         registry.register(module_type)?;
     }
@@ -278,6 +347,14 @@ fn state_output<T: StateOutputPrimitive + Default + 'static>() -> ModuleType {
     }
 }
 
+/// The engine's magnitude bound, 10⁶ (`docs/semantics.md` §7): a signal output
+/// beyond it in magnitude is a `magnitude` fault, which mutes the instance
+/// for the run. The core types (ADR 0027 §1) clamp every result that could
+/// grow beyond it to `±SIGNAL_BOUND`, so a core primitive never faults on its
+/// own; `std.const`'s range and the `scale` and `clamp` parameters are
+/// bounded by it too.
+pub(crate) const SIGNAL_BOUND: f64 = 1e6;
+
 /// Decaying state whose magnitude falls below this is set to exactly 0
 /// (`docs/dsp-conventions.md`, "Denormals").
 pub(crate) const FLUSH_THRESHOLD: f64 = 1e-9;
@@ -288,7 +365,10 @@ pub(crate) fn round_half_up(x: f64) -> f64 {
     libm::floor(x + 0.5)
 }
 
-/// The fractional part `x − ⌊x⌋`, in `[0, 1)` for finite `x`.
+/// The fractional part `x − ⌊x⌋` for finite `x`: in `[0, 1)`, except that the
+/// subtraction rounds to exactly 1 for a tiny negative `x` (e.g. `−1e−20`).
+/// The oscillators use it as is; `std.fract` (`arith::fraction`) maps that 1
+/// to the largest double below 1.
 pub(crate) fn fract(x: f64) -> f64 {
     x - libm::floor(x)
 }
@@ -449,7 +529,7 @@ pub(crate) const BIPOLAR: Option<Range> = Some(Range {
 mod tests {
     use super::*;
 
-    const NAMES: [&str; 39] = [
+    const NAMES: [&str; 64] = [
         "std.sine_osc",
         "std.exp_env",
         "std.mul",
@@ -489,6 +569,31 @@ mod tests {
         "std.mesh2d",
         "std.mesh2d_audio",
         "std.body2d",
+        "std.div",
+        "std.neg",
+        "std.mod",
+        "std.fract",
+        "std.floor",
+        "std.round",
+        "std.sign",
+        "std.sqrt",
+        "std.exp",
+        "std.log",
+        "std.pow",
+        "std.sin",
+        "std.cos",
+        "std.tan",
+        "std.tanh",
+        "std.atan2",
+        "std.sin_cycles",
+        "std.const",
+        "std.sample_rate",
+        "std.frames",
+        "std.compare",
+        "std.select",
+        "std.and",
+        "std.or",
+        "std.not",
     ];
 
     #[test]
@@ -524,6 +629,28 @@ mod tests {
             register(&mut registry),
             Err(RegistryError::DuplicateTypeName("std.mul"))
         );
+    }
+
+    /// AC1, AC3: every std type has a category, and only from [`category::ALL`].
+    #[test]
+    fn every_type_has_a_category_of_the_vocabulary() {
+        let mut registry = Registry::new();
+        register(&mut registry).unwrap();
+        for module_type in registry.iter() {
+            let d = module_type.descriptor;
+            let category = d.category.unwrap_or_else(|| panic!("{}", d.type_name));
+            assert!(
+                category::ALL.contains(&category),
+                "{}: {category}",
+                d.type_name
+            );
+        }
+        for name in &NAMES[39..] {
+            let d = registry.get(name).unwrap().descriptor;
+            assert_eq!(d.category, Some(category::CORE), "{name}");
+            assert_eq!(d.feedthrough, signal_core::Feedthrough::Direct, "{name}");
+            assert_eq!(d.rate(), Some(RateDivisor::ONE), "{name}");
+        }
     }
 
     #[test]

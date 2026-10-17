@@ -69,6 +69,7 @@ const fn descriptor(
         sink,
         latency: None,
         reproducibility: signal_core::Reproducibility::BitExact,
+        category: None,
     }
 }
 

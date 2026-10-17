@@ -1414,6 +1414,7 @@ mod tests {
                 sink: None,
                 latency: None,
                 reproducibility: signal_core::Reproducibility::BitExact,
+                category: None,
             }
         }
         fn prepare(&mut self, _ctx: &PrepareContext) {}
@@ -1438,6 +1439,7 @@ mod tests {
                 sink: Some(SinkKind::Audio),
                 latency: None,
                 reproducibility: signal_core::Reproducibility::BitExact,
+                category: None,
             }
         }
         fn prepare(&mut self, _ctx: &PrepareContext) {}

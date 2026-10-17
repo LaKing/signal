@@ -47,6 +47,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     sink: None,
     latency: None,
     reproducibility: signal_core::Reproducibility::BitExact,
+    category: Some(crate::category::EVENT),
 };
 
 /// `std.step_seq`: an eight-step sequencer of values.
