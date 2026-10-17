@@ -10,5 +10,7 @@ export { SignalMeter } from './meter.js';
 export { SignalScope } from './scope.js';
 export { SignalValue } from './value.js';
 export { SignalCanvas } from './canvas.js';
+export { SignalPianoRoll } from './piano-roll.js';
+export { SignalStepGrid } from './step-grid.js';
 export { SignalPanel } from './panel.js';
 export { SignalSchematic } from './schematic.js';

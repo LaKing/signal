@@ -29,6 +29,11 @@
   table { border-collapse: collapse; margin-top: .5rem; }
   td, th { text-align: left; padding: .15rem .8rem .15rem 0; vertical-align: top; }
   kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--signal-track); border-radius: 3px; padding: 0 .3em; }
+  .patterns { display: flex; flex-direction: column; gap: 1.5rem; }
+  figure.pattern { align-items: stretch; }
+  figure.pattern figcaption { max-width: none; text-align: left; }
+  figure.pattern pre { font: 11px/1.4 ui-monospace, Menlo, monospace; color: var(--signal-fg); background: var(--signal-panel); padding: .6rem .8rem; border-radius: 6px; max-height: 18rem; overflow: auto; }
+  figure.pattern button { font: inherit; color: var(--signal-fg); background: var(--signal-track); border: 1px solid #3a414d; border-radius: 3px; padding: 0 .5em; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -112,6 +117,20 @@
   <figure class="wide"><signal-canvas renderer="points" bind="/sparks.pos /sparks.life" skin="strip:assets/spark-strip.png;frames=8;orientation=horizontal" label="sprites"></signal-canvas><figcaption>a PNG sprite sheet, its frame chosen by age (Canvas 2D)</figcaption></figure>
   <figure class="wide"><signal-canvas renderer="bodies" bind="/bodies.bodies" label="bodies"></signal-canvas><figcaption><code>renderer="bodies"</code>: circles and boxes in the box</figcaption></figure>
   <figure class="wide"><signal-canvas renderer="bodies" bind="/bodies.bodies" skin="svg:assets/body.svg" label="SVG bodies"></signal-canvas><figcaption>an SVG skin</figcaption></figure>
+</div>
+
+<h2>Patterns</h2>
+<p class="note">ADR 0028 pattern text: the controls edit a <code>notes</code> and a <code>steps</code> pattern; the text below each is what <code>.text</code> writes to <code>patterns/&lt;name&gt;.toml</code>. With <code>pattern="&lt;name&gt;"</code> and a connection offering <code>readPattern</code>/<code>writePattern</code> they load and write that file (ui/lib/pattern-sync.js). The playhead and running light here are a fake 120 BPM clock.</p>
+<div class="patterns">
+  <figure class="pattern"><signal-piano-roll id="roll" label="melody" snap="1/16"></signal-piano-roll>
+    <figcaption>click empty grid to add, drag to move, drag the right edge to resize, double-click or <kbd>Delete</kbd> to remove; rubber band and <kbd>Shift</kbd>-click select; <kbd>↑</kbd><kbd>↓</kbd> a semitone (<kbd>Shift</kbd> an octave), <kbd>←</kbd><kbd>→</kbd> one snap; <kbd>⌘</kbd>+wheel zooms time, <kbd>Alt</kbd>+wheel the keys; <kbd>⌘Z</kbd> / <kbd>⇧⌘Z</kbd>
+      · <button type="button" id="stress">1200 notes</button> <button type="button" id="melody">melody</button> <label><input type="checkbox" id="play" checked> play</label></figcaption>
+    <details><summary>patterns/melody.toml</summary><pre id="roll-text"></pre></details>
+  </figure>
+  <figure class="pattern"><signal-step-grid id="steps" label="drums"></signal-step-grid>
+    <figcaption>click cycles rest → hit → accent, drag paints; the accent row accents a step's hits; level knobs drag, wheel, double-click resets; arrows and <kbd>Space</kbd> edit from the keyboard</figcaption>
+    <details><summary>patterns/drums.toml</summary><pre id="steps-text"></pre></details>
+  </figure>
 </div>
 
 <h2>Values</h2>
@@ -200,6 +219,78 @@ connection.on('describe', (description) => {
     project(description);
   }
 });
+
+// The pattern demos (ADR 0028): a melody and a 16-step, 8-lane beat.
+function melody() {
+  // A minor riff over four bars: (key, start, length, velocity).
+  const riff = [
+    [45, 0, 0.5, 1], [57, 0.5, 0.25, 0.55], [45, 0.75, 0.25, 0.7], [52, 1, 0.5, 0.85], [55, 1.5, 0.5, 0.6], [57, 2, 0.75, 0.95], [60, 2.75, 0.25, 0.5], [59, 3, 1, 0.8],
+    [41, 4, 0.5, 1], [53, 4.5, 0.25, 0.5], [41, 4.75, 0.25, 0.7], [48, 5, 0.5, 0.85], [53, 5.5, 0.5, 0.6], [57, 6, 0.75, 0.9], [55, 6.75, 0.25, 0.45], [53, 7, 1, 0.75],
+    [43, 8, 0.5, 1], [55, 8.5, 0.25, 0.55], [43, 8.75, 0.25, 0.7], [50, 9, 0.5, 0.85], [55, 9.5, 0.5, 0.6], [59, 10, 0.75, 0.95], [62, 10.75, 0.25, 0.5], [60, 11, 1, 0.8],
+    [40, 12, 0.5, 1], [52, 12.5, 0.25, 0.5], [40, 12.75, 0.25, 0.7], [47, 13, 0.5, 0.8], [52, 13.5, 0.5, 0.6], [56, 14, 1, 1], [59, 15, 0.5, 0.65], [62, 15.5, 0.5, 0.9],
+  ];
+  // A held pad an octave up on each bar's chord.
+  const pads = [[69, 72, 76], [65, 69, 72], [67, 71, 74], [64, 68, 71]].flatMap((chord, bar) => chord.map((key) => [key, bar * 4, 4, 0.4]));
+  return { schema_version: 1, kind: 'notes', length: 16, notes: [...riff, ...pads].map(([key, start, length, velocity]) => ({ key, start, length, velocity })) };
+}
+function stress() {
+  // About 1200 notes over 64 bars, deterministic.
+  let seed = 7;
+  const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  const notes = [];
+  for (let i = 0; i < 1400; i++) notes.push({ key: 36 + Math.floor(random() * 48), start: Math.floor(random() * 1020) / 4, length: 0.25 * (1 + Math.floor(random() * 3)), velocity: Math.round(random() * 100) / 100 });
+  notes.sort((a, b) => a.start - b.start);
+  const seen = new Map();
+  const kept = notes.filter((n) => {
+    const end = seen.get(n.key) ?? 0;
+    if (n.start < end) return false;
+    seen.set(n.key, n.start + n.length);
+    return true;
+  });
+  return { schema_version: 1, kind: 'notes', length: 256, notes: kept };
+}
+const beat = {
+  schema_version: 1, kind: 'steps', steps: 16, step: 0.25,
+  lanes: [
+    { name: 'kick', hits: 'X...x...x...x..x', level: 1 },
+    { name: 'snare', hits: '....X.......X...', level: 0.85 },
+    { name: 'clap', hits: '....x.......x..x', level: 0.6 },
+    { name: 'closed_hat', hits: 'x.x.x.x.x.xxx.x.', level: 0.7 },
+    { name: 'open_hat', hits: '..x...x...x...X.', level: 0.55 },
+    { name: 'low_tom', hits: '..........x..x..', level: 0.75 },
+    { name: 'rim', hits: '...x..x....x....', level: 0.5 },
+    { name: 'cymbal', hits: 'X...............', level: 0.65 },
+  ],
+};
+const roll = document.getElementById('roll');
+const grid = document.getElementById('steps');
+const showText = (element, id) => { document.getElementById(id).textContent = element.text; };
+roll.value = melody();
+grid.value = beat;
+showText(roll, 'roll-text');
+showText(grid, 'steps-text');
+roll.addEventListener('change', () => showText(roll, 'roll-text'));
+grid.addEventListener('change', () => showText(grid, 'steps-text'));
+document.getElementById('stress').addEventListener('click', () => { roll.value = stress(); showText(roll, 'roll-text'); });
+document.getElementById('melody').addEventListener('click', () => { roll.value = melody(); showText(roll, 'roll-text'); });
+const play = document.getElementById('play');
+const started = performance.now();
+const clock = () => {
+  if (play.checked) {
+    const beats = ((performance.now() - started) / 1000) * 2; // 120 BPM
+    roll.position = beats;
+    grid.step = Math.floor(beats / grid.value.step);
+  }
+  requestAnimationFrame(clock);
+};
+const still = new URLSearchParams(location.search).get('position');
+if (still !== null) {
+  // A fixed playhead (for screenshots): ?position=<beats>.
+  play.checked = false;
+  roll.position = Number(still);
+  grid.step = Math.floor(Number(still) / beat.step);
+}
+requestAnimationFrame(clock);
 
 setDefaultConnection(connection);
 if (!live) connection.start();

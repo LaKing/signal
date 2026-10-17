@@ -333,16 +333,18 @@ fn a_link_at_the_temporary_path_is_not_followed(transport: Transport) {
 }
 
 /// A panel holding the pattern controls (`<signal-piano-roll>` on a
-/// `notes` pattern, `<signal-step-grid>` on a `steps` one; no `bind`) is
-/// written by `panel.write` and passes `panel.check`; a missing pattern, a
-/// wrong kind, no `pattern` or a `bind` is refused at its line.
+/// `notes` pattern, its playhead bound to `/seq.position`;
+/// `<signal-step-grid>` on a `steps` one; no `bind`) is written by
+/// `panel.write` and passes `panel.check`; a missing pattern, a wrong kind,
+/// no `pattern`, a `bind`, or a playhead naming no signal output is refused
+/// at its line.
 fn a_panel_with_pattern_controls(transport: Transport) {
     let mut rig = melody("pattern-panel", transport);
     fs::write(rig.dir.join("patterns/beat.toml"), STEPS).unwrap();
     let (mut ws, _) = rig.client();
     // The watch loads the new pattern file (a project file) into the panel.
     rig.wait(&mut ws, "the reload", |got| got.of("reload").cloned());
-    let html = "\n  <div class=\"signal-cards\">\n    <section class=\"signal-card\">\n      <h2>patterns</h2>\n      <div class=\"row\">\n        <signal-piano-roll pattern=\"melody\" label=\"melody\" snap=\"1/16\" beats-per-bar=\"4\"></signal-piano-roll>\n        <signal-step-grid pattern=\"beat\" label=\"drums\"></signal-step-grid>\n      </div>\n    </section>\n  </div>\n";
+    let html = "\n  <div class=\"signal-cards\">\n    <section class=\"signal-card\">\n      <h2>patterns</h2>\n      <div class=\"row\">\n        <signal-piano-roll pattern=\"melody\" label=\"melody\" snap=\"1/16\" beats-per-bar=\"4\" position-bind=\"/seq.position\"></signal-piano-roll>\n        <signal-step-grid pattern=\"beat\" label=\"drums\"></signal-step-grid>\n      </div>\n    </section>\n  </div>\n";
     let written = rig.request(
         &mut ws,
         1,
@@ -358,6 +360,7 @@ fn a_panel_with_pattern_controls(transport: Transport) {
     );
     assert_eq!(check["ok"], true, "{check}");
     assert_eq!(check["controls"], 2);
+    assert_eq!(check["bindings"], 1, "the playhead is a binding: {check}");
     let file = rig.dir.join("ui/main.html");
     let mut base = json!(sha256_hex(fs::read_to_string(&file).unwrap().as_bytes()));
     for (id, (from, to, why)) in [
@@ -370,6 +373,16 @@ fn a_panel_with_pattern_controls(transport: Transport) {
             "pattern=\"beat\"",
             "pattern=\"drums\"",
             "unknown pattern `drums`: the project has no patterns/drums.toml; <signal-step-grid> edits a `steps` pattern",
+        ),
+        (
+            "position-bind=\"/seq.position\"",
+            "position-bind=\"/osc.freq\"",
+            "wrong kind: /osc.freq is a parameter; <signal-piano-roll> position-bind takes a signal output of the plan (its playhead is read, never written)",
+        ),
+        (
+            "position-bind=\"/seq.position\"",
+            "position-bind=\"/out.l\"",
+            "wrong kind: /out.l is a signal input of the audio sink; <signal-piano-roll> position-bind takes a signal output of the plan (its playhead is read, never written)",
         ),
         (
             "<signal-step-grid pattern=\"beat\"",

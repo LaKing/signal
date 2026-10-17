@@ -6,7 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { checkTree, generatedTree, parseContent, serialize, shape } from './panel-tree.js';
 import { defaultPanel } from './panel.js';
 import { textOutsideCards } from './cards.test.js';
@@ -122,20 +122,8 @@ test('the whitelist names each control’s observed attributes, plus class', () 
     'signal-piano-roll': ['piano-roll.js', 'SignalPianoRoll'],
     'signal-step-grid': ['step-grid.js', 'SignalStepGrid'],
   };
-  // The pattern controls (M2.11-3) land after the server accepts them
-  // (M2.11-1): until their files exist, their entries are the ones those
-  // controls observe, fixed here; once a file exists it is checked as all.
-  const pending = {
-    'signal-piano-roll': ['pattern', 'label', 'snap', 'beats-per-bar', 'position'],
-    'signal-step-grid': ['pattern', 'label', 'step'],
-  };
   assert.deepEqual(Object.keys(whitelist.controls).sort(), Object.keys(classes).sort());
   for (const [tag, [file, name]] of Object.entries(classes)) {
-    if (pending[tag] && !existsSync(new URL(`controls/${file}`, ui))) {
-      assert.deepEqual(whitelist.controls[tag].filter((a) => a !== 'class'), pending[tag], tag);
-      for (const a of whitelist.controls[tag]) assert.ok(whitelist.order.includes(a), `${a} has a place in the order`);
-      continue;
-    }
     const listed = whitelist.controls[tag].filter((a) => a !== 'class');
     assert.deepEqual([...listed].sort(), [...new Set(observed(file, name))].sort(), tag);
     for (const a of whitelist.controls[tag]) assert.ok(whitelist.order.includes(a), `${a} has a place in the order`);

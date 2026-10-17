@@ -143,13 +143,24 @@ fn control(name: &str) -> Option<(Wants, usize, usize)> {
     })
 }
 
+/// The attribute naming a pattern control's playhead output: the piano
+/// roll's `position` (beats), the step grid's `step`.
+fn playhead_attribute(name: &str) -> &'static str {
+    if name == "signal-piano-roll" {
+        "position-bind"
+    } else {
+        "step-bind"
+    }
+}
+
 const CONTROLS: &str = "signal-fader, signal-knob, signal-xy, signal-button, signal-toggle, \
                         signal-meter, signal-scope, signal-value, signal-canvas, \
                         signal-piano-roll, signal-step-grid";
 
 /// The pattern controls (ADR 0028 §7): the kind of pattern each edits. They
 /// take no `bind`; their `pattern` attribute names a project pattern
-/// (`patterns/<name>.toml`, `project-format.md` §12) of that kind.
+/// (`patterns/<name>.toml`, `project-format.md` §12) of that kind, and an
+/// optional `position-bind` / `step-bind` a signal output for the playhead.
 fn pattern_control(name: &str) -> Option<&'static str> {
     match name {
         "signal-piano-roll" => Some(signal_project::NOTES),
@@ -705,6 +716,59 @@ pub fn check(file: &str, text: &str, targets: &Targets<'_>) -> Checked {
                     ),
                     Some(_) => {}
                 },
+            }
+            // The playhead (`position-bind`, `step-bind`): a signal output
+            // of the plan, read through a scope stream; never written.
+            let playhead = playhead_attribute(name);
+            if let Some(attribute) = element.attribute(playhead) {
+                let (value, value_at) = attribute
+                    .value
+                    .as_ref()
+                    .map_or(("", element.offset), |(v, at)| (v.trim(), *at));
+                let wants = "a signal output of the plan (its playhead is read, never written)";
+                if value.is_empty() {
+                    finding(
+                        value_at,
+                        Severity::Error,
+                        format!("<{name}> {playhead} is empty: it needs {wants}"),
+                    );
+                } else {
+                    bindings += 1;
+                    match value.parse::<PortAddress>() {
+                        Err(error) => finding(
+                            value_at,
+                            Severity::Error,
+                            format!("'{value}' is not a port address: {error}"),
+                        ),
+                        Ok(port) => match targets.find(&port) {
+                            None => finding(value_at, Severity::Error, targets.unknown(&port)),
+                            Some(Found::Port {
+                                direction: Direction::Out,
+                                shape: PortShape::Signal,
+                                ..
+                            }) => {}
+                            Some(Found::Port {
+                                direction,
+                                shape,
+                                sink,
+                            }) => finding(
+                                value_at,
+                                Severity::Error,
+                                format!(
+                                    "wrong kind: {port} is {}; <{name}> {playhead} takes {wants}",
+                                    describe_port(direction, shape, sink)
+                                ),
+                            ),
+                            Some(Found::Parameter { .. }) => finding(
+                                value_at,
+                                Severity::Error,
+                                format!(
+                                    "wrong kind: {port} is a parameter; <{name}> {playhead} takes {wants}"
+                                ),
+                            ),
+                        },
+                    }
+                }
             }
             continue;
         }

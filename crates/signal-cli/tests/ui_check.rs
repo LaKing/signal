@@ -228,3 +228,74 @@ fn pattern_controls_name_a_pattern_of_their_kind() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// M2.11-3: a pattern control's playhead attribute (`position-bind` on the
+/// piano roll, `step-bind` on the step grid) names a signal output of the
+/// plan; an unknown port, an input or a parameter is an error at its value.
+#[test]
+fn pattern_controls_bind_their_playhead_to_an_output() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ui-check-playheads");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("patterns")).unwrap();
+    fs::create_dir_all(dir.join("ui")).unwrap();
+    fs::write(
+        dir.join("project.toml"),
+        "schema_version = 1\n\n[project]\nname = \"playheads\"\n\n[instances]\nclock = { module = \"std.transport\" }\nseq = { module = \"std.note_seq\", pattern = \"melody\" }\ndrums = { module = \"std.step_seq8\", pattern = \"drums\" }\nout = { module = \"std.audio_out\" }\n\n[wiring]\nconnections = [\n  { from = \"clock.tick\", to = \"seq.tick\" },\n  { from = \"clock.tick\", to = \"drums.tick\" },\n  { from = \"seq.gate\", to = \"out.l\" },\n]\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("patterns/melody.toml"),
+        "schema_version = 1\nkind = \"notes\"\nlength = 4\nnotes = [\n  { key = 60, start = 0, length = 1, velocity = 1 },\n]\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("patterns/drums.toml"),
+        "schema_version = 1\nkind = \"steps\"\nsteps = 4\nstep = 0.25\n\n[lanes]\nkick = \"x...\"\n",
+    )
+    .unwrap();
+    let good = "<signal-panel>\n<signal-piano-roll pattern=\"melody\" position-bind=\"/seq.position\"></signal-piano-roll>\n<signal-step-grid pattern=\"drums\" step-bind=\"/drums.step\"></signal-step-grid>\n</signal-panel>\n";
+    let panel = dir.join("ui/main.html");
+    fs::write(&panel, good).unwrap();
+    let output = check(&dir, false);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("ui/main.html: 2 controls, 2 bindings: ok"),
+        "{stderr}"
+    );
+
+    let bad = "<signal-panel>\n<signal-piano-roll pattern=\"melody\" position-bind=\"/seq.nope\"></signal-piano-roll>\n<signal-step-grid pattern=\"drums\" step-bind=\"/out.l\"></signal-step-grid>\n<signal-step-grid pattern=\"drums\" step-bind=\"/clock.bpm\"></signal-step-grid>\n<signal-piano-roll pattern=\"melody\" position-bind=\"\"></signal-piano-roll>\n</signal-panel>\n";
+    fs::write(&panel, bad).unwrap();
+    let output = check(&dir, false);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    let file = panel.display();
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines.len(), 4, "{stderr}");
+    assert!(
+        lines[0].starts_with(&format!("{file}:2:52: error: ")) && lines[0].contains("/seq.nope"),
+        "{stderr}"
+    );
+    assert_eq!(
+        lines[1],
+        format!(
+            "{file}:3:46: error: wrong kind: /out.l is a signal input of the audio sink; <signal-step-grid> step-bind takes a signal output of the plan (its playhead is read, never written)"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(
+        lines[2],
+        format!(
+            "{file}:4:46: error: wrong kind: /clock.bpm is a parameter; <signal-step-grid> step-bind takes a signal output of the plan (its playhead is read, never written)"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(
+        lines[3],
+        format!(
+            "{file}:5:52: error: <signal-piano-roll> position-bind is empty: it needs a signal output of the plan (its playhead is read, never written)"
+        ),
+        "{stderr}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
