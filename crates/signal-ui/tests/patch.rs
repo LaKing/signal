@@ -631,6 +631,18 @@ fn modules_is_deterministic(transport: Transport) {
         .find(|p| p["module"] == "std.div")
         .unwrap();
     assert_eq!(div["category"], "core");
+    // ADR 0027 §6: a primitive's description is its rustdoc summary with
+    // its formula, which the palette and the sidebar show.
+    let add = first["primitives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["module"] == "std.add")
+        .unwrap();
+    assert_eq!(
+        add["description"],
+        "Adds its two signal inputs: out = a + b."
+    );
     rig.finish();
     let mut rig = project_rig("patch-modules-kick", transport, "kick");
     let (mut ws, _) = rig.client();

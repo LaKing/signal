@@ -10,6 +10,7 @@ import { hitKey } from './schematic-select.js';
 import { EDIT_OFF } from './schematic-menu.js';
 import { LEGEND, MEMBERS_SHOWN, addressesText, connectionsOf, sidebar, tooLargeText } from './schematic-sidebar.js';
 import { KICK } from './schematic-scene.test.js';
+import { moduleInfo } from './schematic-palette.js';
 
 const layouts = new Map();
 const layoutOf = (level) => {
@@ -75,6 +76,24 @@ test('an instance: what it is, its pins with their connections as links, its par
   const inner = sidebar([kick], context());
   assert.equal(field(inner, 'level'), 'composite drums, 1 instance');
   assert.ok(inner.parameters.every((p) => !p.editable), 'read-only inside a composite');
+});
+
+test('a primitive shows what its type is (its formula) and its category; a composite its group', () => {
+  const types = moduleInfo({
+    primitives: [{ module: 'std.audio_out', composite: false, category: 'io', description: 'Stereo audio sink: the driver records gain·l and gain·r.' }],
+    composites: [{ module: 'drums', composite: true, description: null }],
+  });
+  const out = sidebar([box('out')], context({ types }));
+  assert.equal(out.about, 'Stereo audio sink: the driver records gain·l and gain·r.');
+  assert.equal(field(out, 'category'), 'io');
+  assert.deepEqual(out.fields.map(([l]) => l), ['address', 'module', 'category', 'composite', 'level']);
+  const unknown = sidebar([box('out')], context());
+  assert.equal(unknown.about, null, 'until the types are known: nothing');
+  assert.equal(field(unknown, 'category'), '—');
+  const drums = sidebar([box('drums')], context());
+  assert.equal(drums.about, null, 'a composite has no formula');
+  assert.equal(field(drums, 'category'), 'project', 'known without the types');
+  assert.equal(sidebar([wireOf('/lfo.out')], context({ types })).about, undefined, 'a wire: none');
 });
 
 test('a wire: its ends as links, shape, rate, scale, converters; Edit scale and Delete', () => {

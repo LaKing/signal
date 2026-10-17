@@ -8,6 +8,7 @@
 
 import { shapeName } from './schematic-layout.js';
 import { levelRect } from './schematic-scene.js';
+import { groupOf } from './schematic-palette.js';
 
 /** An instance name: `[a-z][a-z0-9_]*`. */
 export const NAME = /^[a-z][a-z0-9_]*$/;
@@ -139,8 +140,19 @@ export function levelAt(drawn, point) {
   return drawn.levels[0];
 }
 
-/** The add palette's entries from a `modules` reply, as `searchPalette` searches them. */
+/**
+ * The add palette's entries from a `modules` reply, as `searchPalette` and
+ * `paletteRows` (ui/lib/schematic-palette.js) search them, each with its
+ * palette `group` (`groupOf`) and `description`.
+ */
 export function paletteEntries(modules) {
-  const entry = (m) => ({ address: m.module, label: m.description ?? (m.composite ? 'composite' : ''), module: m.module, composite: Boolean(m.composite) });
+  const entry = (m) => ({
+    address: m.module,
+    label: m.description ?? (m.composite ? 'composite' : ''),
+    module: m.module,
+    composite: Boolean(m.composite),
+    group: groupOf(m),
+    description: m.description ?? null,
+  });
   return [...(modules?.primitives ?? []).map(entry), ...(modules?.composites ?? []).map(entry)];
 }

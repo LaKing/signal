@@ -163,4 +163,7 @@ test('the palette lists primitives then composites, searched by name and descrip
   assert.deepEqual(entries.map((e) => e.module), ['std.svf', 'std.lfo', 'kick']);
   assert.deepEqual(searchPalette(entries, 'filter').shown.map((e) => e.module), ['std.svf']);
   assert.deepEqual(searchPalette(entries, 'composite').shown.map((e) => e.module), ['kick']);
+  // ADR 0027 §6: each with its palette group (a composite's the project's) and description.
+  const grouped = paletteEntries({ primitives: [{ module: 'std.svf', category: 'filter', description: 'State-variable filter' }], composites: [{ module: 'kick', description: null, composite: true }] });
+  assert.deepEqual(grouped.map((e) => [e.module, e.group, e.description]), [['std.svf', 'filter', 'State-variable filter'], ['kick', 'project', null]]);
 });

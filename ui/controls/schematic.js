@@ -40,6 +40,7 @@ import { ContextMenu, MENU_CSS, menusClaimed } from './context-menu.js';
 import { paletteLevel, removeConnection } from '../lib/schematic-patch.js';
 import { disconnectOps, schematicMenu } from '../lib/schematic-menu.js';
 import { LEGEND, addressesText, sidebar, tooLargeText } from '../lib/schematic-sidebar.js';
+import { moduleInfo, projectKey } from '../lib/schematic-palette.js';
 import { allOf, deletePlan, dragGroup, has, hitKey, inside, moveMessages, reselectAll, toggled, union } from '../lib/schematic-select.js';
 import { formatFixed } from '../lib/format.js';
 import { dragPosition, layout } from '../lib/schematic-layout.js';
@@ -139,6 +140,7 @@ svg.stale { opacity: 0.4; filter: grayscale(1); }
 .side h3 { margin: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .side h4 { margin: 10px 0 4px; font-size: 11px; color: var(--signal-muted, #8a93a3); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
 .side .subtitle { color: var(--signal-muted, #8a93a3); margin-bottom: 6px; }
+.side .about { margin: 0 0 6px; padding: 4px 6px; line-height: 1.35; overflow-wrap: anywhere; border-left: 2px solid var(--signal-accent, #4fc3f7); background: var(--signal-track, #2a2f38); border-radius: 0 3px 3px 0; }
 .side dl { display: grid; grid-template-columns: 6.5rem 1fr; gap: 2px 8px; margin: 0; }
 .side dt { color: var(--signal-muted, #8a93a3); }
 .side dd { margin: 0; overflow-wrap: anywhere; }
@@ -202,6 +204,8 @@ export class SignalSchematic extends HTMLElement {
     this.view = IDENTITY;
     this.viewport = { w: 0, h: 0 };
     this.graph = null;
+    /** What each module type is (`moduleInfo` of the last `modules` reply), and of which project; a request in flight. */
+    this.modulesKnown = { info: null, project: null, asking: null };
     this.layouts = new Map();
     /** Positions moved here and not yet in a pushed `graph`: level → instance → {x, y}. */
     this.moved = new Map();
@@ -1378,6 +1382,39 @@ export class SignalSchematic extends HTMLElement {
     return `${open} ${open && Boolean(level) && s.node.w * level.transform.k >= CLOSE_PX}`;
   }
 
+  /**
+   * A `modules` reply (the add palette's, or the sidebar's own request):
+   * what each type is, for the sidebar's description and group.
+   */
+  modulesSeen(modules) {
+    this.modulesKnown = { info: moduleInfo(modules), project: projectKey(this.graph), asking: null };
+    if (this.selected.length === 1 && this.selected[0].kind === 'instance') this.showSide();
+  }
+
+  /**
+   * The types' descriptions for the sidebar: asked for once per project
+   * when a primitive is selected (ADR 0027 §6: a native primitive shows its
+   * formula when selected); null until known.
+   */
+  typeInfo() {
+    const known = this.modulesKnown;
+    const project = projectKey(this.graph);
+    if (known.info && known.project === project) return known.info;
+    const want = this.selected.length === 1 && this.selected[0].kind === 'instance' && !this.selected[0].node.composite;
+    if (want && known.asking !== project && this.connection?.request) {
+      known.asking = project;
+      this.connection.request({ type: 'modules' }).then(
+        (modules) => {
+          if (projectKey(this.graph) === project) this.modulesSeen(modules);
+        },
+        () => {
+          if (this.modulesKnown === known) known.asking = null;
+        },
+      );
+    }
+    return known.project === project ? known.info : null;
+  }
+
   /** The sidebar's model of the selection now (ui/lib/schematic-sidebar.js). */
   sideModel() {
     const drawn = this.drawn;
@@ -1385,6 +1422,7 @@ export class SignalSchematic extends HTMLElement {
     return sidebar(this.selected, {
       graph: this.graph,
       description: this.connection?.description,
+      types: this.typeInfo(),
       layoutOf: (level) => this.layoutOf(level),
       editing: this.editor.editing,
       shown: { path: crumb.path, level: crumb.level },
@@ -1409,6 +1447,8 @@ export class SignalSchematic extends HTMLElement {
     this.sideKey = key;
     this.sideTitle.textContent = model.kind === 'project' ? 'Project' : model.kind === 'group' ? 'Selection' : model.kind === 'port' ? 'Pin' : model.kind === 'wire' ? 'Connection' : 'Instance';
     const parts = [html('h3', { textContent: model.title, title: model.title }), html('div', { className: 'subtitle', textContent: model.subtitle })];
+    // What a primitive's type is: its rustdoc summary with its formula (ADR 0027 §6).
+    if (model.about) parts.push(html('p', { className: 'about', textContent: model.about }));
     if (model.actions?.length) parts.push(this.actionButtons(model.actions));
     if (model.fields.length) {
       const list = html('dl');

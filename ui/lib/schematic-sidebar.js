@@ -15,6 +15,7 @@
 import { card, converterText } from './schematic-inspector.js';
 import { EDIT_OFF, schematicMenu } from './schematic-menu.js';
 import { instanceCount } from './schematic-patch.js';
+import { groupOf } from './schematic-palette.js';
 import { INPUTS, OUTPUTS } from './schematic-layout.js';
 import { portHit, wireHit } from './schematic-hit.js';
 import { deletePlan, hitKey } from './schematic-select.js';
@@ -113,12 +114,15 @@ function entryOf(hit, layoutOf) {
 /**
  * The sidebar for `selected` (the selection: a list of hits, the last the
  * one added last) in `context`: `graph`, `description` (as the card takes
- * them), `layoutOf(level)`, `editing` (Edit patch), `shown` (the level
+ * them), `types` (what each module type is: `moduleInfo`'s Map, null
+ * until known), `layoutOf(level)`, `editing` (Edit patch), `shown` (the level
  * shown, `{path, level}`) and `menu(hit)` (the context menu's state for
  * `hit`, `menuContext`'s). Returns `{kind, title, subtitle, fields:
  * [[label, text]], …}` with, by kind:
  * - `project` (nothing selected): `legend`;
- * - `instance`: `pins` (pin rows, each with its connections), the card's
+ * - `instance`: `about` (its type's description, a native primitive's
+ *   formula; null for a composite or until `types` is known), its
+ *   `category` field (the palette's group), `pins` (pin rows, each with its connections), the card's
  *   `parameters` and `editable`, `actions`;
  * - `wire`: `links` (`from`, `to`), `actions`;
  * - `port`: `connections`, `meter` (whether a level bar can show its level:
@@ -130,7 +134,7 @@ function entryOf(hit, layoutOf) {
  * An `actions` entry is a menu item (`{id, label, disabled, title?}`).
  */
 export function sidebar(selected, context = {}) {
-  const { graph, description, layoutOf, editing = false, shown = { path: '', level: '' } } = context;
+  const { graph, description, types = null, layoutOf, editing = false, shown = { path: '', level: '' } } = context;
   const menu = (hit) => ({ editing, level: shown.level, ...(context.menu?.(hit) ?? {}) });
   const list = (selected ?? []).filter((s) => s && s.kind !== 'background');
   if (list.length === 0) return projectSidebar(graph, layoutOf, shown);
@@ -141,11 +145,16 @@ export function sidebar(selected, context = {}) {
   if (hit.kind === 'instance') {
     const node = hit.node;
     const inside = node.composite ? (graph?.composites?.[node.module]?.instances ?? []).length : 0;
+    const type = types?.get(node.module) ?? null;
+    // A composite's group needs no reply; a primitive's is its type's category.
+    const category = type?.group ?? (node.composite ? groupOf(node) : null);
     return {
       ...base,
+      about: node.composite ? null : (type?.description ?? null),
       fields: [
         ['address', hit.address],
         ['module', node.module],
+        ['category', category ?? '—'],
         ['composite', node.composite ? `yes, ${inside} instance${inside === 1 ? '' : 's'} inside` : 'no'],
         ['level', levelText(graph, hit.level)],
       ],

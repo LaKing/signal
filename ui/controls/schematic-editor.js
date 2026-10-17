@@ -11,7 +11,6 @@
 // Off, nothing here takes a pointer or a key.
 
 import { ValueEntry } from './entry-field.js';
-import { searchPalette } from '../lib/panel-edit.js';
 import { PatchSession, patchKey } from '../lib/schematic-edit.js';
 import {
   addConnection,
@@ -26,12 +25,13 @@ import {
   removeInstance,
   scaleConnection,
 } from '../lib/schematic-patch.js';
+import { EXPANDED, moveCursor, paletteKey, paletteRows, placeCursor, toggled, windowRows } from '../lib/schematic-palette.js';
 import { toLocal, toScreen } from '../lib/schematic-view.js';
 import { cordCurve, curveData } from '../lib/schematic-wire.js';
 import { formatFixed } from '../lib/format.js';
 
-/** The rows the palette shows at most (the list keeps its height). */
-const PALETTE_ROWS = 8;
+/** The rows the palette shows at once (the list keeps its height and never scrolls: the cursor moves its window). */
+const PALETTE_ROWS = 12;
 
 /** The editor's look, in <signal-schematic>'s shadow root: fixed sizes, absolutely placed. */
 export const EDITOR_CSS = `
@@ -46,9 +46,15 @@ svg.rubber path { fill: none; stroke: var(--signal-focus, #5aa9ff); stroke-width
   background: var(--signal-panel, #1f232b); border: 1px solid var(--signal-focus, #5aa9ff); border-radius: var(--signal-radius, 6px); }
 .palette input { width: 100%; box-sizing: border-box; font: inherit; color: inherit; background: var(--signal-bg, #16181d); border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 3px; margin: 0 0 4px; }
 .palette ol { list-style: none; margin: 0 0 4px; padding: 0; height: calc(${PALETTE_ROWS} * 1.6em); overflow: hidden; }
-.palette li { height: 1.6em; line-height: 1.6em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; padding: 0 4px; border-radius: 3px; }
+.palette li { height: 1.6em; line-height: 1.6em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; padding: 0 4px 0 1.6em; border-radius: 3px; }
+.palette li.group { display: flex; gap: 0.6ch; padding-left: 4px; color: var(--signal-muted, #8a93a3); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.92em; }
+.palette li.group .twisty { flex: none; width: 1.2em; text-align: center; }
+.palette li.group .name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.palette li.group .count { flex: none; font-weight: normal; font-variant-numeric: tabular-nums; }
 .palette li[aria-selected="true"] { background: var(--signal-knob, #262b34); color: var(--signal-accent, #4fc3f7); }
 .palette li .what { color: var(--signal-muted, #8a93a3); margin-left: 1ch; }
+.palette .about { height: 3.9em; line-height: 1.3em; overflow: hidden; color: var(--signal-fg, #d6dbe4); margin: 0 0 4px; overflow-wrap: anywhere; }
+.palette .about .group-name { color: var(--signal-muted, #8a93a3); }
 .palette .more, .palette .why { height: 1.3em; color: var(--signal-muted, #8a93a3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .palette .why { color: var(--signal-effective, #ffb74d); }
 .palette .buttons { display: flex; gap: 6px; justify-content: flex-end; }
@@ -76,6 +82,8 @@ export class SchematicEditor {
     this.connecting = null;
     this.placing = null;
     this.modules = null;
+    // The palette's open groups, kept for the page's session (memory only).
+    this.expanded = new Set(EXPANDED);
   }
 
   get editing() {
@@ -263,7 +271,9 @@ export class SchematicEditor {
   buildPalette() {
     const box = html('section', { className: 'palette' });
     this.search = html('input', { type: 'text', placeholder: 'Search modules', spellcheck: false, autocomplete: 'off' });
-    this.list = html('ol');
+    this.list = html('ol', { role: 'listbox' });
+    this.list.setAttribute('aria-label', 'Module types by group');
+    this.about = html('div', { className: 'about' });
     this.more = html('div', { className: 'more' });
     this.name = html('input', { type: 'text', placeholder: 'name', spellcheck: false, autocomplete: 'off' });
     this.why = html('div', { className: 'why' });
@@ -271,10 +281,20 @@ export class SchematicEditor {
     const cancel = html('button', { type: 'button', textContent: 'Cancel' });
     const buttons = html('div', { className: 'buttons' });
     buttons.append(cancel, add);
-    box.append(this.search, this.list, this.more, this.name, this.why, buttons);
+    box.append(this.search, this.list, this.more, this.about, this.name, this.why, buttons);
     this.search.addEventListener('input', () => this.showEntries());
     this.search.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') this.add();
+      const placing = this.placing;
+      if (!placing || !this.view) return;
+      const action = paletteKey(event, this.view, placing.cursor);
+      if (!action) return;
+      event.preventDefault();
+      if (action === 'add') this.add();
+      else if (action.toggle) this.toggleGroup(action.toggle);
+      else if (action.move) {
+        placing.cursor = moveCursor(this.view, placing.cursor, action.move);
+        this.showEntries();
+      }
     });
     this.name.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') this.add();
@@ -282,6 +302,13 @@ export class SchematicEditor {
     this.name.addEventListener('input', () => (this.why.textContent = ''));
     add.addEventListener('click', () => this.add());
     cancel.addEventListener('click', () => this.closePalette());
+    // The wheel over the list moves its window (it never scrolls).
+    this.list.addEventListener('wheel', (event) => {
+      if (!this.placing || !this.view) return;
+      event.preventDefault();
+      this.placing.top = Math.max(0, Math.min(this.view.rows.length - PALETTE_ROWS, this.placing.top + Math.sign(event.deltaY) * 3));
+      this.showEntries({ follow: false });
+    });
     // Its pointer and wheel are its own, not the schematic's.
     for (const type of ['pointerdown', 'pointerup', 'pointermove', 'dblclick', 'wheel']) box.addEventListener(type, (event) => event.stopPropagation());
     return box;
@@ -290,9 +317,9 @@ export class SchematicEditor {
   /** Opens the palette at screen `point` on `level` (a scene level: `paletteLevel`'s). */
   openPalette(point, level) {
     if (!this.editing || !level) return;
-    this.placing = { level: level.level, at: toLocal(level.transform, point), names: namesOf(this.levelGraph(level.level)), module: null };
+    this.placing = { level: level.level, at: toLocal(level.transform, point), names: namesOf(this.levelGraph(level.level)), module: null, cursor: null, top: 0 };
     const left = Math.max(0, Math.min(point.x, this.s.viewport.w - 352));
-    const top = Math.max(0, Math.min(point.y, this.s.viewport.h - 300));
+    const top = Math.max(0, Math.min(point.y, this.s.viewport.h - 420));
     this.palette.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
     this.palette.style.visibility = 'visible';
     this.search.value = '';
@@ -303,30 +330,87 @@ export class SchematicEditor {
     this.s.connection?.request?.({ type: 'modules' }).then(
       (modules) => {
         this.modules = paletteEntries(modules);
+        this.s.modulesSeen?.(modules);
         this.showEntries();
       },
       (error) => (this.why.textContent = error.message),
     );
   }
 
-  showEntries() {
+  /**
+   * The list built again: the groups in their order, a search's matches
+   * under their (open) groups, the cursor's row marked and scrolled into
+   * view (unless `follow` is false: the wheel moved the window), and what
+   * the chosen type is under it.
+   */
+  showEntries({ follow = true } = {}) {
     const placing = this.placing;
     if (!placing) return;
-    const { shown, more } = searchPalette(this.modules ?? [], this.search.value, PALETTE_ROWS);
-    if (!shown.some((e) => e.module === placing.module)) this.choose(shown[0] ?? null);
+    const view = paletteRows(this.modules ?? [], this.search.value, this.expanded);
+    this.view = view;
+    placing.cursor = placeCursor(view, placing.cursor);
+    const row = view.rows.find((r) => r.key === placing.cursor);
+    // The cursor on an entry chooses it; on a heading, the last choice stays.
+    if (row?.kind === 'entry') {
+      if (row.entry.module !== placing.module) this.choose(row.entry);
+    } else if (!row && placing.module !== null) this.choose(null);
+    // The window of rows shown, moved to keep the cursor's in sight, its group's heading first.
+    const { top, shown, above, below } = windowRows(view.rows, follow ? view.rows.indexOf(row) : -1, placing.top, PALETTE_ROWS);
+    placing.top = top;
     this.list.replaceChildren(
-      ...shown.map((entry) => {
-        const item = html('li', { title: entry.label });
-        item.append(document.createTextNode(entry.module), html('span', { className: 'what', textContent: entry.label }));
-        item.setAttribute('aria-selected', String(entry.module === placing.module));
-        item.addEventListener('click', () => {
-          this.choose(entry);
-          this.showEntries();
-        });
+      ...shown.map((r) => {
+        const item = r.kind === 'group' ? this.groupItem(r, view) : this.entryItem(r.entry);
+        item.setAttribute('aria-selected', String(r.key === placing.cursor));
         return item;
       }),
     );
-    this.more.textContent = this.modules === null ? 'Loading…' : more ? `${more} more: narrow the search` : '';
+    const hidden = above || below ? ` (${[above ? `${above} above` : '', below ? `${below} below` : ''].filter(Boolean).join(', ')})` : '';
+    const chosen = this.modules?.find((e) => e.module === placing.module) ?? null;
+    this.about.replaceChildren(
+      ...(chosen ? [html('span', { className: 'group-name', textContent: `${chosen.group} · ` }), document.createTextNode(chosen.description ?? (chosen.composite ? 'a composite of this project' : 'no description'))] : []),
+    );
+    this.about.title = chosen?.description ?? '';
+    this.more.textContent =
+      this.modules === null
+        ? 'Loading…'
+        : view.searching
+          ? view.matched
+            ? `${view.matched} match${view.matched === 1 ? '' : 'es'}${hidden}`
+            : 'No module matches'
+          : `${view.matched} types${hidden}: ↑↓ move, Enter adds or opens`;
+  }
+
+  groupItem(r, view) {
+    const item = html('li', { className: 'group' });
+    item.setAttribute('role', 'option');
+    if (!view.searching) item.setAttribute('aria-expanded', String(r.expanded));
+    item.append(html('span', { className: 'twisty', textContent: r.expanded ? '▾' : '▸' }), html('span', { className: 'name', textContent: r.group }), html('span', { className: 'count', textContent: String(r.count) }));
+    item.addEventListener('click', () => {
+      this.placing.cursor = r.key;
+      if (!view.searching) this.toggleGroup(r.group);
+      else this.showEntries();
+      this.search.focus({ preventScroll: true });
+    });
+    return item;
+  }
+
+  entryItem(entry) {
+    const item = html('li', { title: entry.label });
+    item.setAttribute('role', 'option');
+    item.append(document.createTextNode(entry.module), html('span', { className: 'what', textContent: entry.label }));
+    item.addEventListener('click', () => {
+      this.placing.cursor = `m:${entry.module}`;
+      this.choose(entry);
+      this.showEntries();
+      this.search.focus({ preventScroll: true });
+    });
+    return item;
+  }
+
+  /** Group `group` opened or closed (kept for the session). */
+  toggleGroup(group) {
+    this.expanded = toggled(this.expanded, group);
+    this.showEntries();
   }
 
   /** `entry` chosen: its default name, editable before adding. */
@@ -346,6 +430,8 @@ export class SchematicEditor {
       return;
     }
     this.closePalette();
+    // The hidden palette's field lets the focus go: ⌘Z, Delete and Escape are the schematic's again.
+    this.s.focus({ preventScroll: true });
     this.write(0, placing.level, [addInstance(name, placing.module, placing.at)]);
   }
 
