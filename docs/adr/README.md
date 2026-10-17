@@ -32,3 +32,4 @@ To change a decision, add a new ADR that supersedes the old one. Do not rewrite 
 | [0025](0025-project-files.md) | Project files: a project folder as one `.signal` zip, opened, saved and saved as in Signal.app |
 | [0026](0026-schematic-and-panel-editor.md) | The signal schematic (`graph`, infinite-zoom SVG, layout in `ui/schematic.toml`) and the panel layout editor (M2.9) |
 | [0027](0027-core-set-and-built-in-library.md) | The core set (complete minimal std primitives), the built-in `lib.*` library of composites, and what stays native (M2.10) |
+| [0028](0028-patterns-as-project-text.md) | Patterns as project text: `patterns/*.toml` note and step data, the transport's tick clock, `std.note_seq` and `std.step_seq8`, `pattern.read`/`pattern.write` (M2.11) |
