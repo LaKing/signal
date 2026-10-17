@@ -1367,8 +1367,9 @@ fn stimulus_graph() -> CompositeDef {
 /// The stimulus and [`INSTANCES`] instances of `type_name`, each input fed by
 /// it: signals by the saw (phase inputs scaled to 0.05 cycles), gates by the
 /// LFO, the first event input by the beats and ghost notes, any other by the
-/// accents, and a `std.count` reading (the event bridge of the visual-rate
-/// types, M2.8-7) by one counter of the beats, shared by the instances.
+/// accents, a `std.count` reading (the event bridge of the visual-rate
+/// types, M2.8-7) by one counter of the beats, and any other vector of N by
+/// one `std.pack<N>` of the saw, both shared by the instances.
 /// Outputs are left open; every instance runs regardless.
 fn primitive_graph(registry: &Registry, type_name: &str) -> Result<CompositeDef, Failure> {
     let descriptor = registry
@@ -1388,6 +1389,30 @@ fn primitive_graph(registry: &Registry, type_name: &str) -> Result<CompositeDef,
             .connections
             .push(connection("transport.beat", "bridge.in", None));
     }
+    // Any other vector input (the M2.10-2 vector types) is fed by one
+    // `std.pack<N>` of the saw, shared by the instances.
+    let mut widths: Vec<u32> = descriptor
+        .ports
+        .iter()
+        .filter(|p| p.direction == Direction::In && p.shape != window)
+        .filter_map(|p| match p.shape {
+            PortShape::Vector(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+    widths.sort_unstable();
+    widths.dedup();
+    for n in &widths {
+        let pack = format!("pack{n}");
+        graph
+            .instances
+            .push(instance(&pack, &format!("std.pack{n}"), &[]));
+        for e in 0..*n {
+            graph
+                .connections
+                .push(connection("saw.out", &format!("{pack}.e{e}"), None));
+        }
+    }
     for i in 0..INSTANCES {
         let name = format!("p{i}");
         graph.instances.push(instance(&name, type_name, &[]));
@@ -1403,6 +1428,11 @@ fn primitive_graph(registry: &Registry, type_name: &str) -> Result<CompositeDef,
                 (PortShape::Signal, PortKind::Gate) => &[("gate.out", None)],
                 (PortShape::Signal, _) => &[("saw.out", None)],
                 (shape, _) if shape == window => &[("bridge.window", None)],
+                (PortShape::Vector(n), _) => {
+                    let from = format!("pack{n}.out");
+                    graph.connections.push(connection(&from, &to, None));
+                    continue;
+                }
                 (PortShape::Events, _) => {
                     events += 1;
                     if events == 1 {

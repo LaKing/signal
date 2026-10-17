@@ -158,6 +158,32 @@ fn a_vector_too_wide_is_an_error_at_its_module() {
     );
 }
 
+/// M2.10-2 AC6: the vector types exist at the registered widths only, so a
+/// width outside `signal_std::VECTOR_WIDTHS` is an unknown module.
+#[test]
+fn an_unregistered_vector_width_is_an_unknown_module() {
+    let text = VALID.replace("std.sine_osc\", freq = 440", "std.pack3\"");
+    assert_eq!(
+        project_errors(&text),
+        "project.toml:8:18: error: /osc: unknown module `std.pack3` (neither a registered \
+         primitive type nor a composite)"
+    );
+}
+
+/// M2.10-2 AC3: a table's values are its parameters, validated when the
+/// project loads: one outside ±1e6 is refused at the value.
+#[test]
+fn a_table_value_out_of_range_is_refused_at_load() {
+    let text = VALID.replace(
+        "osc = { module = \"std.sine_osc\", freq = 440 }",
+        "osc = { module = \"std.sine_osc\", freq = 440 }\ntab = { module = \"std.table4\", v0 = 1, v2 = 2e6 }",
+    );
+    assert_eq!(
+        project_errors(&text),
+        "project.toml:9:45: error: /tab.v2: value 2000000 is outside [-1000000, 1000000]"
+    );
+}
+
 #[test]
 fn unknown_port() {
     let text = VALID.replacen(r#"from = "osc.out""#, r#"from = "osc.output""#, 1);

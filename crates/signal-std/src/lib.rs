@@ -75,6 +75,25 @@
 //! | `std.and` | [`And`] | direct | `core` |
 //! | `std.or` | [`Or`] | direct | `core` |
 //! | `std.not` | [`Not`] | direct | `core` |
+//! | `std.phasor` | [`Phasor`] | direct | `core` |
+//! | `std.counter` | [`Counter`] | direct | `core` |
+//! | `std.integrator` | [`Integrator`] | direct | `core` |
+//! | `std.buffer1k`, `std.buffer64k`, `std.buffer1m` | [`Buffer`]`<C>` | direct | `core` |
+//! | `std.latch` | [`Latch`] | direct | `core` |
+//! | `std.to_events` | [`ToEvents`] | direct | `core` |
+//! | `std.route` | [`Route`] | direct | `core` |
+//! | `std.random` | [`Random`] | direct | `core` |
+//! | `std.pack<N>` | [`Pack`]`<N>` | direct | `core` |
+//! | `std.unpack<N>` | [`Unpack`]`<N>` | direct | `core` |
+//! | `std.index<N>` | [`Index`]`<N>` | direct | `core` |
+//! | `std.reduce<N>` | [`Reduce`]`<N>` | direct | `core` |
+//! | `std.vadd<N>` | [`Vadd`]`<N>` | direct | `core` |
+//! | `std.vmul<N>` | [`Vmul`]`<N>` | direct | `core` |
+//! | `std.table<N>` | [`Table`]`<N>` | direct | `core` |
+//!
+//! The last seven are one type per width N of [`VECTOR_WIDTHS`] (2, 4, 8, 16,
+//! 64, 256, 1024), named with the width as a suffix: `std.pack4`,
+//! `std.reduce1024`, `std.table16`.
 //!
 //! Every type carries its palette group ([`category`]; ADR 0027 §1), which
 //! `signal modules --category` filters by. The M2.10 core arithmetic,
@@ -83,7 +102,9 @@
 //! documented with the type's formula (`docs/module-contract.md`, "The
 //! standard library"). Their results are clamped to ±1e6 ([`SIGNAL_BOUND`],
 //! the engine's magnitude bound, `docs/semantics.md` §7), so a core
-//! primitive never faults on its own.
+//! primitive never faults on its own. Core set II (M2.10-2, from
+//! `std.phasor` on: state, memory, value events, randomness and vectors)
+//! keeps every output and every emitted value within the same bound.
 //!
 //! The M2.8 physical models (`std.string`, `std.modal`, `std.mass_spring`,
 //! `std.exciter`) document their equations and are checked against analytic
@@ -126,6 +147,7 @@ mod count;
 mod dc_block;
 mod delay;
 mod edge;
+mod events;
 mod exciter;
 mod exp_env;
 mod function;
@@ -135,6 +157,7 @@ mod lfo;
 mod logic;
 mod mass_spring;
 mod math;
+mod memory;
 mod mesh2d;
 mod mix;
 mod modal;
@@ -144,14 +167,17 @@ mod onepole;
 mod osc;
 mod pan;
 mod particles;
+mod random;
 mod sample_hold;
 mod sine_osc;
+mod state;
 mod step_seq;
 mod string;
 mod svf;
 mod tanh_shaper;
 mod transport;
 mod unit_delay;
+mod vector;
 
 #[cfg(test)]
 mod testing;
@@ -168,6 +194,7 @@ pub use count::Count;
 pub use dc_block::DcBlock;
 pub use delay::Delay;
 pub use edge::Edge;
+pub use events::{Latch, Route, ToEvents};
 pub use exciter::Exciter;
 pub use exp_env::ExpEnv;
 pub use function::{Atan2, Cos, Exp, Log, Pow, Sin, SinCycles, Sqrt, Tan, Tanh};
@@ -177,6 +204,7 @@ pub use lfo::Lfo;
 pub use logic::{And, Compare, Not, Or, Select};
 pub use mass_spring::MassSpring;
 pub use math::{Abs, Clamp, Max, Min, Scale, Sub};
+pub use memory::{BUFFER_CAPACITIES, Buffer, Buffer1k, Buffer1m, Buffer64k, Table};
 pub use mesh2d::Mesh2d;
 pub use mix::Mix;
 pub use modal::Modal;
@@ -186,14 +214,17 @@ pub use onepole::OnePole;
 pub use osc::Osc;
 pub use pan::Pan;
 pub use particles::Particles;
+pub use random::Random;
 pub use sample_hold::SampleHold;
 pub use sine_osc::SineOsc;
+pub use state::{Counter, Integrator, Phasor};
 pub use step_seq::StepSeq;
 pub use string::StringModel;
 pub use svf::Svf;
 pub use tanh_shaper::TanhShaper;
 pub use transport::Transport;
 pub use unit_delay::UnitDelay;
+pub use vector::{Index, Pack, Reduce, Unpack, VECTOR_WIDTHS, Vadd, Vmul};
 
 use signal_core::{
     Combine, DirectPrimitive, Direction, Event, EventPayload, ModuleType, Outputs,
@@ -206,7 +237,7 @@ use signal_core::{
 /// rounded up. The engine groups cheap units into tasks by them (ADR 0019
 /// §2); they never change the output. The M2.8 physical models are not
 /// benchmarked yet and take the engine's default cost, as do the M2.10 core
-/// types (`std.div` to `std.not`).
+/// types (`std.div` to `std.not`, and core set II from `std.phasor` on).
 pub const COST_NS: [(&str, u32); 30] = [
     ("std.abs", 11),
     ("std.add", 11),
@@ -312,8 +343,21 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<And>(),
         direct::<Or>(),
         direct::<Not>(),
+        direct::<Phasor>(),
+        direct::<Counter>(),
+        direct::<Integrator>(),
+        direct::<Buffer1k>(),
+        direct::<Buffer64k>(),
+        direct::<Buffer1m>(),
+        direct::<Latch>(),
+        direct::<ToEvents>(),
+        direct::<Route>(),
+        direct::<Random>(),
     ] {
         registry.register(module_type)?;
+    }
+    for module_type in vector::types() {
+        registry.register(*module_type)?;
     }
     for (name, ns) in COST_NS {
         registry.set_cost(name, ns);
@@ -529,7 +573,7 @@ pub(crate) const BIPOLAR: Option<Range> = Some(Range {
 mod tests {
     use super::*;
 
-    const NAMES: [&str; 64] = [
+    const NAMES: [&str; 74] = [
         "std.sine_osc",
         "std.exp_env",
         "std.mul",
@@ -594,14 +638,25 @@ mod tests {
         "std.and",
         "std.or",
         "std.not",
+        "std.phasor",
+        "std.counter",
+        "std.integrator",
+        "std.buffer1k",
+        "std.buffer64k",
+        "std.buffer1m",
+        "std.latch",
+        "std.to_events",
+        "std.route",
+        "std.random",
     ];
 
     #[test]
     fn register_adds_every_type_under_its_name() {
         let mut registry = Registry::new();
         register(&mut registry).unwrap();
-        assert_eq!(registry.len(), NAMES.len());
-        for name in NAMES {
+        assert_eq!(registry.len(), NAMES.len() + vector::types().len());
+        let vectors = vector::types().iter().map(|t| t.descriptor.type_name);
+        for name in NAMES.into_iter().chain(vectors) {
             let module_type = registry.get(name).unwrap_or_else(|| panic!("{name}"));
             assert_eq!(module_type.descriptor.type_name, name);
             assert_eq!(
@@ -620,7 +675,7 @@ mod tests {
             register(&mut registry),
             Err(RegistryError::DuplicateTypeName("std.sine_osc"))
         );
-        assert_eq!(registry.len(), NAMES.len());
+        assert_eq!(registry.len(), NAMES.len() + vector::types().len());
 
         // A type registered first under a std name blocks that name.
         let mut registry = Registry::new();
@@ -645,11 +700,25 @@ mod tests {
                 d.type_name
             );
         }
-        for name in &NAMES[39..] {
+        let vectors = vector::types().iter().map(|t| t.descriptor.type_name);
+        for name in NAMES[39..].iter().copied().chain(vectors) {
             let d = registry.get(name).unwrap().descriptor;
             assert_eq!(d.category, Some(category::CORE), "{name}");
             assert_eq!(d.feedthrough, signal_core::Feedthrough::Direct, "{name}");
             assert_eq!(d.rate(), Some(RateDivisor::ONE), "{name}");
+        }
+        // M2.10-2 AC1, AC4: the core set's earlier state and event types keep
+        // the groups M2.10-1 gave them.
+        for (name, group) in [
+            ("std.unit_delay", category::CORE),
+            ("std.delay", category::DELAY),
+            ("std.lag", category::FILTER),
+            ("std.onepole", category::FILTER),
+            ("std.sample_hold", category::EVENT),
+            ("std.edge", category::EVENT),
+            ("std.clock_div", category::EVENT),
+        ] {
+            assert_eq!(registry.get(name).unwrap().descriptor.category, Some(group));
         }
     }
 

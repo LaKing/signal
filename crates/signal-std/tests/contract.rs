@@ -272,6 +272,316 @@ mod not {
     signal_contract::contract_tests!(super::std_type("std.not"));
 }
 
+mod phasor {
+    signal_contract::contract_tests!(super::std_type("std.phasor"));
+}
+
+mod counter {
+    signal_contract::contract_tests!(super::std_type("std.counter"));
+}
+
+mod integrator {
+    signal_contract::contract_tests!(super::std_type("std.integrator"));
+}
+
+mod buffer1k {
+    signal_contract::contract_tests!(super::std_type("std.buffer1k"));
+}
+
+mod buffer64k {
+    signal_contract::contract_tests!(super::std_type("std.buffer64k"));
+}
+
+mod buffer1m {
+    signal_contract::contract_tests!(super::std_type("std.buffer1m"));
+}
+
+mod latch {
+    signal_contract::contract_tests!(super::std_type("std.latch"));
+}
+
+mod to_events {
+    signal_contract::contract_tests!(super::std_type("std.to_events"));
+}
+
+mod route {
+    signal_contract::contract_tests!(super::std_type("std.route"));
+}
+
+mod random {
+    signal_contract::contract_tests!(super::std_type("std.random"));
+}
+
+/// Every vector type and table (`signal_std::VECTOR_WIDTHS`), which
+/// `vector_types_are_every_operation_at_every_width` checks against the
+/// registry; each has its contract module below.
+const VECTOR_TYPES: &[&str] = &[
+    "std.pack2",
+    "std.unpack2",
+    "std.index2",
+    "std.reduce2",
+    "std.vadd2",
+    "std.vmul2",
+    "std.table2",
+    "std.pack4",
+    "std.unpack4",
+    "std.index4",
+    "std.reduce4",
+    "std.vadd4",
+    "std.vmul4",
+    "std.table4",
+    "std.pack8",
+    "std.unpack8",
+    "std.index8",
+    "std.reduce8",
+    "std.vadd8",
+    "std.vmul8",
+    "std.table8",
+    "std.pack16",
+    "std.unpack16",
+    "std.index16",
+    "std.reduce16",
+    "std.vadd16",
+    "std.vmul16",
+    "std.table16",
+    "std.pack64",
+    "std.unpack64",
+    "std.index64",
+    "std.reduce64",
+    "std.vadd64",
+    "std.vmul64",
+    "std.table64",
+    "std.pack256",
+    "std.unpack256",
+    "std.index256",
+    "std.reduce256",
+    "std.vadd256",
+    "std.vmul256",
+    "std.table256",
+    "std.pack1024",
+    "std.unpack1024",
+    "std.index1024",
+    "std.reduce1024",
+    "std.vadd1024",
+    "std.vmul1024",
+    "std.table1024",
+];
+
+#[test]
+fn vector_types_are_every_operation_at_every_width() {
+    let mut registry = Registry::new();
+    signal_std::register(&mut registry).expect("std names are unique");
+    let mut registered: Vec<&str> = registry
+        .iter()
+        .map(|t| t.descriptor.type_name)
+        .filter(|name| {
+            let op = name.trim_end_matches(|c: char| c.is_ascii_digit());
+            let families = ["pack", "unpack", "index", "reduce", "vadd", "vmul", "table"];
+            families.iter().any(|f| op == format!("std.{f}"))
+        })
+        .collect();
+    let mut covered = VECTOR_TYPES.to_vec();
+    registered.sort_unstable();
+    covered.sort_unstable();
+    assert_eq!(registered, covered);
+}
+
+mod pack2 {
+    signal_contract::contract_tests!(super::std_type("std.pack2"));
+}
+
+mod unpack2 {
+    signal_contract::contract_tests!(super::std_type("std.unpack2"));
+}
+
+mod index2 {
+    signal_contract::contract_tests!(super::std_type("std.index2"));
+}
+
+mod reduce2 {
+    signal_contract::contract_tests!(super::std_type("std.reduce2"));
+}
+
+mod vadd2 {
+    signal_contract::contract_tests!(super::std_type("std.vadd2"));
+}
+
+mod vmul2 {
+    signal_contract::contract_tests!(super::std_type("std.vmul2"));
+}
+
+mod table2 {
+    signal_contract::contract_tests!(super::std_type("std.table2"));
+}
+
+mod pack4 {
+    signal_contract::contract_tests!(super::std_type("std.pack4"));
+}
+
+mod unpack4 {
+    signal_contract::contract_tests!(super::std_type("std.unpack4"));
+}
+
+mod index4 {
+    signal_contract::contract_tests!(super::std_type("std.index4"));
+}
+
+mod reduce4 {
+    signal_contract::contract_tests!(super::std_type("std.reduce4"));
+}
+
+mod vadd4 {
+    signal_contract::contract_tests!(super::std_type("std.vadd4"));
+}
+
+mod vmul4 {
+    signal_contract::contract_tests!(super::std_type("std.vmul4"));
+}
+
+mod table4 {
+    signal_contract::contract_tests!(super::std_type("std.table4"));
+}
+
+mod pack8 {
+    signal_contract::contract_tests!(super::std_type("std.pack8"));
+}
+
+mod unpack8 {
+    signal_contract::contract_tests!(super::std_type("std.unpack8"));
+}
+
+mod index8 {
+    signal_contract::contract_tests!(super::std_type("std.index8"));
+}
+
+mod reduce8 {
+    signal_contract::contract_tests!(super::std_type("std.reduce8"));
+}
+
+mod vadd8 {
+    signal_contract::contract_tests!(super::std_type("std.vadd8"));
+}
+
+mod vmul8 {
+    signal_contract::contract_tests!(super::std_type("std.vmul8"));
+}
+
+mod table8 {
+    signal_contract::contract_tests!(super::std_type("std.table8"));
+}
+
+mod pack16 {
+    signal_contract::contract_tests!(super::std_type("std.pack16"));
+}
+
+mod unpack16 {
+    signal_contract::contract_tests!(super::std_type("std.unpack16"));
+}
+
+mod index16 {
+    signal_contract::contract_tests!(super::std_type("std.index16"));
+}
+
+mod reduce16 {
+    signal_contract::contract_tests!(super::std_type("std.reduce16"));
+}
+
+mod vadd16 {
+    signal_contract::contract_tests!(super::std_type("std.vadd16"));
+}
+
+mod vmul16 {
+    signal_contract::contract_tests!(super::std_type("std.vmul16"));
+}
+
+mod table16 {
+    signal_contract::contract_tests!(super::std_type("std.table16"));
+}
+
+mod pack64 {
+    signal_contract::contract_tests!(super::std_type("std.pack64"));
+}
+
+mod unpack64 {
+    signal_contract::contract_tests!(super::std_type("std.unpack64"));
+}
+
+mod index64 {
+    signal_contract::contract_tests!(super::std_type("std.index64"));
+}
+
+mod reduce64 {
+    signal_contract::contract_tests!(super::std_type("std.reduce64"));
+}
+
+mod vadd64 {
+    signal_contract::contract_tests!(super::std_type("std.vadd64"));
+}
+
+mod vmul64 {
+    signal_contract::contract_tests!(super::std_type("std.vmul64"));
+}
+
+mod table64 {
+    signal_contract::contract_tests!(super::std_type("std.table64"));
+}
+
+mod pack256 {
+    signal_contract::contract_tests!(super::std_type("std.pack256"));
+}
+
+mod unpack256 {
+    signal_contract::contract_tests!(super::std_type("std.unpack256"));
+}
+
+mod index256 {
+    signal_contract::contract_tests!(super::std_type("std.index256"));
+}
+
+mod reduce256 {
+    signal_contract::contract_tests!(super::std_type("std.reduce256"));
+}
+
+mod vadd256 {
+    signal_contract::contract_tests!(super::std_type("std.vadd256"));
+}
+
+mod vmul256 {
+    signal_contract::contract_tests!(super::std_type("std.vmul256"));
+}
+
+mod table256 {
+    signal_contract::contract_tests!(super::std_type("std.table256"));
+}
+
+mod pack1024 {
+    signal_contract::contract_tests!(super::std_type("std.pack1024"));
+}
+
+mod unpack1024 {
+    signal_contract::contract_tests!(super::std_type("std.unpack1024"));
+}
+
+mod index1024 {
+    signal_contract::contract_tests!(super::std_type("std.index1024"));
+}
+
+mod reduce1024 {
+    signal_contract::contract_tests!(super::std_type("std.reduce1024"));
+}
+
+mod vadd1024 {
+    signal_contract::contract_tests!(super::std_type("std.vadd1024"));
+}
+
+mod vmul1024 {
+    signal_contract::contract_tests!(super::std_type("std.vmul1024"));
+}
+
+mod table1024 {
+    signal_contract::contract_tests!(super::std_type("std.table1024"));
+}
+
 /// The physical models stay finite when their parameters jump between range
 /// limits on every frame (finding auditor-1-modal-modulation-overflow): a
 /// unit impulse on every signal input and a trigger on every event input on

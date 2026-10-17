@@ -4,12 +4,14 @@
 //!
 //! The vocabulary lives here, never in the domain-free crates (AGENTS.md
 //! rule 1): to the core a category is a free-form tag. `core` is a palette
-//! group, not ADR 0027's core set: core-set members that hide a loop or carry
-//! events are in their own groups (e.g. `std.delay` in `delay`, `std.edge` in
-//! `event`).
+//! group, not ADR 0027's core set: the core-set members that existed before
+//! M2.10-2 and hide a loop or carry events kept their own groups (e.g.
+//! `std.delay` in `delay`, `std.edge` in `event`); the M2.10-2 types (state,
+//! memory, value events, randomness, vectors) are all in `core`.
 
-/// Stateless arithmetic, functions, constants, comparison and selection, and
-/// the basic mixing utilities.
+/// Arithmetic, functions, constants, comparison and selection, the basic
+/// mixing utilities, and core set II (state, memory, value events,
+/// randomness, vectors).
 pub const CORE: &str = "core";
 /// Oscillators and noise.
 pub const GENERATOR: &str = "generator";

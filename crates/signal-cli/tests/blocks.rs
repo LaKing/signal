@@ -663,6 +663,149 @@ fn a_graph_of_core_types_is_bit_identical_in_blocks_and_on_threads() {
     assert_no_violation();
 }
 
+/// M2.10-2 AC8: a graph of core set II renders the same audio and log per
+/// frame, in every partition (k = 1, 2, 3, 7, 64, 128, 256 and a random
+/// one), and on 1, 2, 3, 4 and 8 threads at k = 1, 64 and 256: phasors (one
+/// reset by another's wrap), a counter, an integrator, a buffer written and
+/// read by moving taps (Hermite), a wrapping table, two `std.random`s (one
+/// triggered through a `std.clock_div`), `std.to_events` into latches
+/// directly and through `std.route`, two to_events meeting in one latch, and
+/// pack, vadd, vmul, reduce, index and unpack; with values set mid-block,
+/// among them the buffer's `size` (64 to 8 at frame 1 001), which it reads
+/// on every frame.
+#[test]
+fn a_graph_of_core_set_two_is_bit_identical_in_blocks_and_on_threads() {
+    let project = project(
+        "clk = { module = \"std.phasor\", freq = 50 }\n\
+         fast = { module = \"std.phasor\", freq = 330, reset_phase = 0.25 }\n\
+         slow = { module = \"std.phasor\", freq = 7 }\n\
+         cnt = { module = \"std.counter\", step = 2, modulo = 5 }\n\
+         integ = { module = \"std.integrator\", cutoff = 200 }\n\
+         rnd = { module = \"std.random\", lo = -1, hi = 1 }\n\
+         cd = { module = \"std.clock_div\", divide = 3 }\n\
+         rnd2 = { module = \"std.random\" }\n\
+         n = { module = \"std.frames\" }\n\
+         on = { module = \"std.const\", value = 1 }\n\
+         buf = { module = \"std.buffer1k\", size = 64, interp = 2 }\n\
+         tab = { module = \"std.table4\", v1 = 1, v2 = -1, v3 = 0.5, wrap = 1, interp = 2 }\n\
+         te = { module = \"std.to_events\", threshold = 0.01 }\n\
+         te2 = { module = \"std.to_events\", on_change = 0 }\n\
+         lat = { module = \"std.latch\" }\n\
+         rt = { module = \"std.route\" }\n\
+         la = { module = \"std.latch\" }\n\
+         lb = { module = \"std.latch\" }\n\
+         pk = { module = \"std.pack4\" }\n\
+         vs = { module = \"std.vadd4\" }\n\
+         vm = { module = \"std.vmul4\" }\n\
+         red = { module = \"std.reduce4\" }\n\
+         ix = { module = \"std.index4\" }\n\
+         up = { module = \"std.unpack4\" }\n\
+         out = { module = \"std.audio_out\" }\n",
+        "  { from = \"clk.wrap\", to = \"fast.reset\" },\n\
+         \x20 { from = \"clk.wrap\", to = \"cnt.trigger\" },\n\
+         \x20 { from = \"clk.wrap\", to = \"integ.reset\" },\n\
+         \x20 { from = \"clk.wrap\", to = \"rnd.trigger\" },\n\
+         \x20 { from = \"fast.wrap\", to = \"cd.in\" },\n\
+         \x20 { from = \"cd.out\", to = \"rnd2.trigger\" },\n\
+         \x20 { from = \"fast.phase\", to = \"integ.in\", scale = 2 },\n\
+         \x20 { from = \"n.lo\", to = \"buf.index\" },\n\
+         \x20 { from = \"fast.phase\", to = \"buf.value\" },\n\
+         \x20 { from = \"on.out\", to = \"buf.gate\" },\n\
+         \x20 { from = \"slow.phase\", to = \"buf.read0\", scale = 64 },\n\
+         \x20 { from = \"n.lo\", to = \"buf.read1\" },\n\
+         \x20 { from = \"fast.phase\", to = \"tab.pos\", scale = 4 },\n\
+         \x20 { from = \"integ.out\", to = \"te.in\" },\n\
+         \x20 { from = \"clk.wrap\", to = \"te.trigger\" },\n\
+         \x20 { from = \"fast.phase\", to = \"te2.in\" },\n\
+         \x20 { from = \"clk.wrap\", to = \"te2.trigger\" },\n\
+         \x20 { from = \"te.out\", to = \"lat.in\" },\n\
+         \x20 { from = \"te2.out\", to = \"lat.in\" },\n\
+         \x20 { from = \"te.out\", to = \"rt.in\" },\n\
+         \x20 { from = \"rnd.out\", to = \"rt.gate\" },\n\
+         \x20 { from = \"rt.a\", to = \"la.in\" },\n\
+         \x20 { from = \"rt.b\", to = \"lb.in\" },\n\
+         \x20 { from = \"fast.phase\", to = \"pk.e0\" },\n\
+         \x20 { from = \"integ.out\", to = \"pk.e1\" },\n\
+         \x20 { from = \"rnd.out\", to = \"pk.e2\" },\n\
+         \x20 { from = \"cnt.count\", to = \"pk.e3\" },\n\
+         \x20 { from = \"pk.out\", to = \"vs.a\" },\n\
+         \x20 { from = \"pk.out\", to = \"vs.b\" },\n\
+         \x20 { from = \"pk.out\", to = \"vm.a\" },\n\
+         \x20 { from = \"vs.out\", to = \"vm.b\" },\n\
+         \x20 { from = \"vm.out\", to = \"red.in\" },\n\
+         \x20 { from = \"vs.out\", to = \"ix.in\" },\n\
+         \x20 { from = \"fast.phase\", to = \"ix.pos\", scale = 3 },\n\
+         \x20 { from = \"vm.out\", to = \"up.in\" },\n\
+         \x20 { from = \"buf.out0\", to = \"out.l\", scale = 0.1 },\n\
+         \x20 { from = \"buf.out1\", to = \"out.l\", scale = 0.1 },\n\
+         \x20 { from = \"tab.out\", to = \"out.l\", scale = 0.1 },\n\
+         \x20 { from = \"lat.out\", to = \"out.l\", scale = 0.1 },\n\
+         \x20 { from = \"la.out\", to = \"out.l\", scale = 0.05 },\n\
+         \x20 { from = \"red.sum\", to = \"out.l\", scale = 0.01 },\n\
+         \x20 { from = \"ix.out\", to = \"out.l\", scale = 0.05 },\n\
+         \x20 { from = \"up.e3\", to = \"out.l\", scale = 0.01 },\n\
+         \x20 { from = \"integ.out\", to = \"out.r\", scale = 0.1 },\n\
+         \x20 { from = \"rnd.out\", to = \"out.r\", scale = 0.1 },\n\
+         \x20 { from = \"rnd2.out\", to = \"out.r\", scale = 0.1 },\n\
+         \x20 { from = \"lb.out\", to = \"out.r\", scale = 0.05 },\n\
+         \x20 { from = \"red.mean\", to = \"out.r\", scale = 0.05 },\n\
+         \x20 { from = \"red.min\", to = \"out.r\", scale = 0.05 },\n\
+         \x20 { from = \"red.max\", to = \"out.r\", scale = 0.05 },\n\
+         \x20 { from = \"cnt.count\", to = \"out.r\", scale = 0.01 },\n",
+    );
+    let plan = project.plan(&registry()).unwrap().plan;
+    let events = [
+        (37, "/rnd.hi", 2.0),
+        (1_000, "/cnt.step", -1.0),
+        (1_001, "/buf.size", 8.0),
+        (2_500, "/fast.freq", 500.0),
+    ];
+    let run = |partition, threads| {
+        let mut pushed = false;
+        render(&plan, (8_000, 5, 4_000), partition, threads, |engine| {
+            if !pushed {
+                pushed = true;
+                for (n, &(frame, target, value)) in events.iter().enumerate() {
+                    engine
+                        .push_external(ExternalEvent {
+                            frame: Frame(frame),
+                            sequence: n as u64,
+                            target: target.parse().unwrap(),
+                            payload: EventPayload::Set(value),
+                        })
+                        .unwrap();
+                }
+            }
+            Ok(None)
+        })
+    };
+    let reference = run(Partition::PerFrame, 1);
+    assert_eq!(reference.channels, 2);
+    for channel in 0..2 {
+        let samples: Vec<f64> = reference
+            .samples
+            .iter()
+            .skip(channel)
+            .step_by(2)
+            .copied()
+            .collect();
+        assert!(
+            samples.iter().any(|&x| x != samples[0]),
+            "channel {channel}"
+        );
+    }
+    let reference = hashes(&reference);
+    let runs = partitions().map(|p| (p, 1)).chain(thread_grid());
+    for (partition, threads) in runs {
+        assert_eq!(
+            hashes(&run(partition, threads)),
+            reference,
+            "{partition:?}, {threads} threads"
+        );
+    }
+    assert_no_violation();
+}
+
 fn signal(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_signal"))
         .args(args)
