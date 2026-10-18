@@ -205,7 +205,7 @@ Transcendental functions are `libm`'s (ADR 0007). These types are not rate-gener
 
 ## The library
 
-The **built-in library** (ADR 0027 §4, M2.10-3) is composites shipped with Signal, referenced as `lib.<name>` (`project-format.md` §4). They live in the crate `signal-lib` as `crates/signal-lib/lib/<name>.toml`, embedded with `include_str!`; `signal-project` resolves `lib.` references and reads them by the rules of any composite file. They are ordinary composites (ADR 0010: no logic), so a library composite costs what its primitives cost (ADR 0027 §2) and runs through the same engine, determinism and fault guards. `signal modules` lists them after the primitive types (`--category` included), each with its category, description, content hash, ports and parameters (the composite's own defaults); `signal schema` accepts their references.
+The **built-in library** (ADR 0027 §4, M2.10-3) is composites shipped with Signal, referenced as `lib.<name>` (`project-format.md` §4). They live in the crate `signal-lib` as `crates/signal-lib/lib/<name>.toml`, embedded with `include_str!`; `signal-project` resolves `lib.` references and reads them by the rules of any composite file. They are ordinary composites (ADR 0010: no logic), so a library composite costs what its primitives cost (ADR 0027 §2) and runs through the same engine, determinism and fault guards. `signal modules` lists them after the primitive types (`--category` included), each with its category, description, content hash, ports and parameters (the composite's own defaults); `signal schema` accepts their references. A **validation reference** (M2.10-4, ADR 0027 §4 "Validation") is a library composite that rebuilds a native std type from core primitives to be compared with it (`crates/signal-lib/tests/validation.rs`), not a building block: `signal_lib::VALIDATION` pairs it with its native type, and its `signal modules` entry carries `"reference_for": "std.<type>"` (text: a `reference for:` line), which no other entry has; the schematic palette lists these in their own group `reference`, last and closed (`ui-controls.md`). Their range differences from the natives (the ±1e6 bound on every intermediate) are in each one's description and in `docs/benchmarks.md` ("Validation pairs").
 
 **What a library composite must be.**
 - It uses `std.*` and other `lib.*` modules only, never a project composite; no `gpu` pin, no `pattern`. A cycle among library composites is refused when a plan is built.
@@ -231,7 +231,7 @@ The **built-in library** (ADR 0027 §4, M2.10-3) is composites shipped with Sign
 | `lib.crossfade` | `core` | `a·(1 − mix) + b·mix`, the mix clamped to [0, 1] |
 | `lib.stereo_width` | `core` | Mid/side width, `width` clamped to [0, 2] |
 
-`projects/library-demo` uses every one (`testing-and-evaluation.md`). Not yet: the schematic palette and opening a library composite in the UI (ADR 0027 §6), and the validation of library composites against native references (ADR 0027 §4, M2.10-4).
+`projects/library-demo` uses every one (`testing-and-evaluation.md`); the seven validation references (`lib.<type>_core`, above) are not in this table and not in the demo. The schematic palette lists them (`library`, and the references under `reference`; `ui-controls.md`) and adds them by a patch; not yet: opening a library composite's inside in the UI (ADR 0027 §6). The validation of library composites against native references (ADR 0027 §4) is M2.10-4's (above, and `testing-and-evaluation.md`).
 
 ## Testing a primitive: the contract suite
 

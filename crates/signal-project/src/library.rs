@@ -48,6 +48,21 @@ impl Library {
     /// and sessions record it.
     pub const VERSION: &str = signal_lib::VERSION;
 
+    /// Whether the built-in composite `name` (without the prefix) is a
+    /// validation reference (`signal_lib::VALIDATION`, M2.10-4): a std type
+    /// rebuilt from core primitives to be compared with it, which the
+    /// library demo leaves out.
+    pub fn is_validation(name: &str) -> bool {
+        signal_lib::is_validation(name)
+    }
+
+    /// The native type the built-in composite `name` (without the prefix)
+    /// is a validation reference for (`signal_lib::reference_for`), shown
+    /// as `reference_for` by `signal modules`.
+    pub fn reference_for(name: &str) -> Option<&'static str> {
+        signal_lib::reference_for(name)
+    }
+
     /// The library shipped with Signal (`signal-lib`).
     pub fn builtin() -> &'static Library {
         static BUILTIN: OnceLock<Library> = OnceLock::new();

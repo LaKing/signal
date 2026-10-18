@@ -102,7 +102,9 @@ impl Project {
     }
 
     /// The module types an instance can be added from (`docs/ui-protocol.md`
-    /// "modules"): `registry`'s primitive types and the project's composites,
+    /// "modules"): `registry`'s primitive types, then the project's
+    /// composites and the built-in library's ([`library_modules`], with
+    /// `library: true` and, on a validation reference, `reference_for`),
     /// each in name order, with their ports and parameters as `graph` gives
     /// an instance's, without `address` (there is no instance).
     pub fn modules(&self, registry: &Registry) -> Value {
@@ -135,7 +137,7 @@ impl Project {
             })
             .collect();
         let walk = self.walk(registry, BTreeMap::new());
-        let composites: Vec<Value> = self
+        let mut composites: Vec<Value> = self
             .composites
             .iter()
             .map(|def| {
@@ -149,6 +151,10 @@ impl Project {
                 })
             })
             .collect();
+        // ADR 0027 §6: the palette groups by category and library. The
+        // built-in library always loads (signal-lib's tests), so a failure
+        // here only leaves it out.
+        composites.extend(library_modules(registry).unwrap_or_default());
         json!({"primitives": primitives, "composites": composites})
     }
 
@@ -215,6 +221,33 @@ impl Project {
     }
 }
 
+/// The exported parameters, in declared order, of the built-in library
+/// composite `module` (`lib.<name>`), or `None` when the library has none
+/// of that name: what a patch's `instance.add` needs to write an instance of
+/// it (`patch::Context::module`).
+pub fn library_parameters(module: &str) -> Option<Vec<String>> {
+    let name = module.strip_prefix(LIBRARY_PREFIX)?;
+    Library::builtin().get(name)?;
+    let text = format!(
+        "schema_version = 1\n\n[project]\nname = \"library\"\n\n[instances]\nx = {{ module = \"{module}\" }}\n"
+    );
+    let project = Project::from_sources(vec![SourceFile {
+        path: PROJECT_FILE.to_owned(),
+        text,
+    }])
+    .ok()?;
+    let found = project.library.iter().find(|l| l.name == module)?;
+    Some(
+        found
+            .def
+            .exports
+            .parameters
+            .iter()
+            .map(|e| e.name.clone())
+            .collect(),
+    )
+}
+
 /// The built-in library's composites as `signal modules` lists them (ADR 0027
 /// §4), in name order: each one's `module` (`lib.<name>`), `library: true`,
 /// its `category`, `description` and content `hash`, and its ports and
@@ -258,7 +291,7 @@ pub fn library_modules(registry: &Registry) -> Result<Vec<Value>, Vec<Diagnostic
                     fields.insert("default".to_owned(), json!(value));
                 }
             }
-            json!({
+            let mut entry = json!({
                 "module": l.name,
                 "composite": true,
                 "library": true,
@@ -267,7 +300,17 @@ pub fn library_modules(registry: &Registry) -> Result<Vec<Value>, Vec<Diagnostic
                 "hash": l.hash,
                 "ports": ports.into_iter().map(unaddressed).collect::<Vec<_>>(),
                 "parameters": parameters.into_iter().map(unaddressed).collect::<Vec<_>>(),
-            })
+            });
+            // M2.10-4: a validation reference names its native type, only
+            // when it is one (the palette groups these apart, last).
+            let reference = l
+                .name
+                .strip_prefix(LIBRARY_PREFIX)
+                .and_then(Library::reference_for);
+            if let (Some(native), Value::Object(fields)) = (reference, &mut entry) {
+                fields.insert("reference_for".to_owned(), json!(native));
+            }
+            entry
         })
         .collect())
 }

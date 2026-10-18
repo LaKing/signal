@@ -51,5 +51,19 @@ whole signal path; `lfo_shapes` once per shape, with every output).
 - `lib.stereo_width` (core), mid/side width, computed as the change from the input from halves taken first (no intermediate beyond the inputs or outputs; width 1 exact): `4398c461e58ecc48`
 - `lib.tape_echo` (delay), from the M2.11 studio's tape delay: `2229c4b8e2b245b9`
 
+The validation references (M2.10-4, ADR 0027 §4 "Validation"): std types
+rebuilt from core primitives, each rendered against its native counterpart
+by `tests/validation.rs` (`signal_lib::VALIDATION`; the library demo leaves
+them out, and `signal modules` names the native type as `reference_for`). Each line: the composite, its category, how it compares, and its
+pinned render hash.
+
+- `lib.adsr_core` (envelope), `std.adsr` as a stage machine of signals, within 1e-9: `79558ea641c77ef5`
+- `lib.delay_core` (delay), `std.delay` on a `std.buffer1m`, bit-exact at whole-frame delays, within 1e-9 of the input's peak at fractional ones; direct, so a loop through it needs a `std.unit_delay`: `07fd4ab98b0d06a1`
+- `lib.lag_core` (filter), `std.lag`, within 1e-9: `d29413a0768c6695`
+- `lib.onepole_core` (filter), `std.onepole`, bit-exact up to 649 610 Hz: `4e558aa8ced1a6e1`
+- `lib.osc_core` (generator), `std.osc`'s sine, bit-exact, and a naive saw (no polyBLEP): `5543b2e26d5c32f5`
+- `lib.svf_core` (filter), `std.svf`, bit-exact up to 649 610 Hz: `940cf89f0188e264`
+- `lib.tanh_shaper_core` (filter), `std.tanh_shaper` without ADAA (the midpoint form), within 1e-9 + 0.035·Δu² per frame, a meaningful comparison at low drive only: `73ac862501564041`
+
 Every drum's velocity is clamped to [0, 2]. The defaults keep each composite
 within ±1 on its stimulus (`tests/library.rs`).

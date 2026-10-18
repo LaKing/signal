@@ -1,0 +1,88 @@
+# `std.delay` rebuilt from core primitives (M2.10-4, the validation suite): a
+# fractional delay on a std.buffer1m used as a circular memory of 10⁶
+# frames, written at the frame count and read with the same 4-point Hermite
+# interpolator.
+#
+#   t′  = time_ms of the frame before (0 on the first frame)
+#   d   = clamp(min(t′, 999 999/(sr/1000))·(sr/1000), 1, 10·min(sr, 99 999))
+#   memory[n mod 10⁶] = in[n];   out[n] = hermite(memory, n − d)
+#
+# The time goes through the unit delay before the clamp, so on the first
+# frame d = 1 and the read is of a slot never written: 0, as the native's
+# first output. For whole-frame delays (d an integer) the pair is bit-exact
+# from frame 0. For fractional delays it is within a stated tolerance
+# relative to the input, at most 1e-9 times the input's largest magnitude:
+# t = p − ⌊p⌋ here against 1 − frac(d − 1) in the native, and time·(sr/1000)
+# against (time·sr)/1000 (time·sr exceeds the engine's ±1e6 bound on a
+# signal), move the read by about an ulp of a position up to 10⁶ (about
+# 1e-10 of a frame), and the error is that times the signal's slope
+# (measured up to 3.4e-10 of the input's peak with a 959 940-frame delay
+# past 10⁶ frames). For 1 < d < 2 the native uses a causal fallback (its newest point
+# replaces the current input); this one reads the current input, which a
+# direct buffer can, so the two differ there by design (crates/signal-lib/
+# tests/validation.rs measures both).
+#
+# Differences of use and range: this composite is direct (the current input
+# reaches the buffer before the read), so unlike std.delay it cannot close a
+# feedback loop without a std.unit_delay. Positions are signals and the frame
+# count wraps at 10⁶, so the longest delay is 10·sr frames up to 99 999 Hz
+# and 999 990 frames above (5.2 s at 192 kHz, where std.delay holds 10 s).
+schema_version = 1
+
+[composite]
+name = "delay_core"
+category = "delay"
+description = "std.delay rebuilt from core primitives (validation reference, bit-exact with std.delay at whole-frame delays, within 1e-9 of the input's peak at fractional ones): a buffer-based fractional delay with Hermite interpolation, at least 1 frame. Unlike std.delay it is direct: the input reaches the output in the same frame's read, so a feedback loop through it needs a std.unit_delay. Input: in. Output: out. Parameter: time_ms (ms, clamped to [0, 10 000], default 250; the value of frame n sets the delay of frame n + 1; at most 10·sr frames up to 99 999 Hz and 999 990 frames above, 5.2 s at 192 kHz)."
+
+[instances]
+time = { module = "std.const", value = 250 }
+time_lim = { module = "std.clamp", lo = 0, hi = 10000 }
+time_before = { module = "std.unit_delay" }
+rate = { module = "std.sample_rate" }
+one = { module = "std.const", value = 1 }
+thousand = { module = "std.const", value = 1000 }
+top = { module = "std.const", value = 999999 }
+rate_top = { module = "std.const", value = 99999 }
+per_ms = { module = "std.div" }
+time_top = { module = "std.div" }
+time_bound = { module = "std.min" }
+frames_raw = { module = "std.mul" }
+at_least_one = { module = "std.max" }
+rate_capped = { module = "std.min" }
+longest = { module = "std.scale", mul = 10 }
+d = { module = "std.min" }
+count = { module = "std.frames" }
+position = { module = "std.sub" }
+write = { module = "std.const", value = 1 }
+memory = { module = "std.buffer1m", size = 1000000, interp = 2 }
+
+[wiring]
+connections = [
+  { from = "time.out", to = "time_lim.in" },
+  { from = "time_lim.out", to = "time_before.in" },
+  { from = "rate.sr", to = "per_ms.a" },
+  { from = "thousand.out", to = "per_ms.b" },
+  { from = "top.out", to = "time_top.a" },
+  { from = "per_ms.out", to = "time_top.b" },
+  { from = "time_before.out", to = "time_bound.a" },
+  { from = "time_top.out", to = "time_bound.b" },
+  { from = "time_bound.out", to = "frames_raw.a" },
+  { from = "per_ms.out", to = "frames_raw.b" },
+  { from = "frames_raw.out", to = "at_least_one.a" },
+  { from = "one.out", to = "at_least_one.b" },
+  { from = "rate.sr", to = "rate_capped.a" },
+  { from = "rate_top.out", to = "rate_capped.b" },
+  { from = "rate_capped.out", to = "longest.in" },
+  { from = "at_least_one.out", to = "d.a" },
+  { from = "longest.out", to = "d.b" },
+  { from = "count.lo", to = "memory.index" },
+  { from = "write.out", to = "memory.gate" },
+  { from = "count.lo", to = "position.a" },
+  { from = "d.out", to = "position.b" },
+  { from = "position.out", to = "memory.read0" },
+]
+
+[exports]
+inputs = { in = "memory.value" }
+outputs = { out = "memory.out0" }
+parameters = { time_ms = "time.value" }

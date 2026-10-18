@@ -51,7 +51,8 @@ macro_rules! library {
 }
 
 /// Every library composite, in name order.
-static COMPOSITES: [LibraryFile; 13] = library![
+static COMPOSITES: [LibraryFile; 20] = library![
+    "adsr_core",
     "analog_clap",
     "analog_cymbal",
     "analog_hat",
@@ -61,11 +62,88 @@ static COMPOSITES: [LibraryFile; 13] = library![
     "analog_tom",
     "ar_env",
     "crossfade",
+    "delay_core",
     "ladder_voice",
+    "lag_core",
     "lfo_shapes",
+    "onepole_core",
+    "osc_core",
     "stereo_width",
+    "svf_core",
+    "tanh_shaper_core",
     "tape_echo",
 ];
+
+/// One validation pair (ADR 0027 §4, M2.10-4): a library composite rebuilt
+/// from core primitives and the native `std.*` type it is rendered against,
+/// with the outputs they share (same names on both). `tests/validation.rs`
+/// compares each pair; `docs/benchmarks.md` records their costs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ValidationPair {
+    /// The library composite, without the `lib.` prefix.
+    pub composite: &'static str,
+    /// The native reference type.
+    pub native: &'static str,
+    /// The outputs compared.
+    pub outputs: &'static [&'static str],
+}
+
+/// The validation references: library composites that exist to be compared
+/// with a native type, not to be used in place of it. The library demo
+/// leaves them out (`projects/library-demo` uses every other composite).
+pub static VALIDATION: [ValidationPair; 7] = [
+    ValidationPair {
+        composite: "adsr_core",
+        native: "std.adsr",
+        outputs: &["out"],
+    },
+    ValidationPair {
+        composite: "delay_core",
+        native: "std.delay",
+        outputs: &["out"],
+    },
+    ValidationPair {
+        composite: "lag_core",
+        native: "std.lag",
+        outputs: &["out"],
+    },
+    ValidationPair {
+        composite: "onepole_core",
+        native: "std.onepole",
+        outputs: &["lp", "hp"],
+    },
+    ValidationPair {
+        composite: "osc_core",
+        native: "std.osc",
+        outputs: &["out"],
+    },
+    ValidationPair {
+        composite: "svf_core",
+        native: "std.svf",
+        outputs: &["lp", "bp", "hp"],
+    },
+    ValidationPair {
+        composite: "tanh_shaper_core",
+        native: "std.tanh_shaper",
+        outputs: &["out"],
+    },
+];
+
+/// Whether `name` (without the `lib.` prefix) is a validation reference.
+pub fn is_validation(name: &str) -> bool {
+    reference_for(name).is_some()
+}
+
+/// The native type the library composite `name` (without the `lib.` prefix)
+/// is a validation reference for (`"std.svf"` for `svf_core`), or `None`
+/// for a composite meant as a building block. `signal modules` and the
+/// palette show it as `reference_for` (`docs/module-contract.md`).
+pub fn reference_for(name: &str) -> Option<&'static str> {
+    VALIDATION
+        .iter()
+        .find(|pair| pair.composite == name)
+        .map(|pair| pair.native)
+}
 
 /// Every library composite, in name order.
 pub fn composites() -> &'static [LibraryFile] {
@@ -92,6 +170,24 @@ mod tests {
         assert_eq!(get("tape_echo").map(|f| f.name), Some("tape_echo"));
         assert!(get("lib.tape_echo").is_none());
         assert_eq!(get("tape_echo").unwrap().hash().len(), 16);
+    }
+
+    /// Every validation pair names a library composite, once.
+    #[test]
+    fn validation_pairs_are_library_composites() {
+        for (i, pair) in VALIDATION.iter().enumerate() {
+            assert!(get(pair.composite).is_some(), "{}", pair.composite);
+            assert!(pair.native.starts_with("std."), "{}", pair.native);
+            assert!(
+                !VALIDATION[..i]
+                    .iter()
+                    .any(|p| p.composite == pair.composite)
+            );
+        }
+        assert!(is_validation("svf_core"));
+        assert!(!is_validation("tape_echo"));
+        assert_eq!(reference_for("svf_core"), Some("std.svf"));
+        assert_eq!(reference_for("tape_echo"), None);
     }
 
     /// The version is MAJOR.MINOR of the workspace's version.

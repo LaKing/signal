@@ -1,0 +1,92 @@
+# `std.onepole` rebuilt from core primitives (M2.10-4, the validation suite):
+# the TPT one-pole, the same operations in the same order as the native, so
+# the pair is bit-exact (crates/signal-lib/tests/validation.rs).
+#
+#   fc = min(max(cutoff_hz, 1), min(0.49·sr, 318 309))
+#   g  = tan(π·fc/sr),   G = g/(1 + g)
+#   v  = (in − s)·G,   lp = v + s,   s ← flush(lp + v)
+#   hp = in − lp
+#
+# flush(x) is exactly 0 when |x| < 1e-9, as the native's. The loop (s
+# through a std.unit_delay) runs one frame at a time; hp is outside it.
+#
+# Range differences from `std.onepole` (none at 8 to 192 kHz): the cutoff's
+# upper limit is capped at 318 309 Hz so π·fc stays within ±1e6; the cap
+# only acts above 649 610 Hz. Above 999 999 Hz std.sample_rate faults. The
+# state (about twice lp) is a signal: its std.add faults beyond ±1e6, and
+# in − s (a std.sub) clamps to it silently, so a large input faults, or near
+# the bound may clamp, where the native would not (measured: no fault and
+# bit-exact up to an input of 10⁴; docs/benchmarks.md, "Validation pairs").
+schema_version = 1
+
+[composite]
+name = "onepole_core"
+category = "filter"
+description = "std.onepole rebuilt from core primitives (validation reference, bit-exact with std.onepole): a TPT one-pole filter. Input: in. Outputs: lp, hp (lp + hp = in). Parameter: cutoff_hz (Hz, limited to [1, 0.49·sr] and to 318 309, which acts only above 649 610 Hz, default 1000)."
+
+[instances]
+cutoff = { module = "std.const", value = 1000 }
+rate = { module = "std.sample_rate" }
+one = { module = "std.const", value = 1 }
+pi = { module = "std.const", value = 3.141592653589793 }
+cap = { module = "std.const", value = 318309 }
+nyquist = { module = "std.scale", mul = 0.49 }
+limit = { module = "std.min" }
+fc_lo = { module = "std.max" }
+fc = { module = "std.min" }
+pi_fc = { module = "std.mul" }
+w = { module = "std.div" }
+g = { module = "std.tan" }
+one_g = { module = "std.add" }
+big_g = { module = "std.div" }
+threshold = { module = "std.const", value = 1e-9 }
+s = { module = "std.unit_delay" }
+x_s = { module = "std.sub" }
+v = { module = "std.mul" }
+lp = { module = "std.add" }
+s_next = { module = "std.add" }
+s_abs = { module = "std.abs" }
+s_small = { module = "std.compare", mode = 0 }
+s_flush = { module = "std.select" }
+hp = { module = "std.sub" }
+
+[wiring]
+connections = [
+  { from = "rate.sr", to = "nyquist.in" },
+  { from = "nyquist.out", to = "limit.a" },
+  { from = "cap.out", to = "limit.b" },
+  { from = "cutoff.out", to = "fc_lo.a" },
+  { from = "one.out", to = "fc_lo.b" },
+  { from = "fc_lo.out", to = "fc.a" },
+  { from = "limit.out", to = "fc.b" },
+  { from = "fc.out", to = "pi_fc.a" },
+  { from = "pi.out", to = "pi_fc.b" },
+  { from = "pi_fc.out", to = "w.a" },
+  { from = "rate.sr", to = "w.b" },
+  { from = "w.out", to = "g.in" },
+  { from = "one.out", to = "one_g.a" },
+  { from = "g.out", to = "one_g.b" },
+  { from = "g.out", to = "big_g.a" },
+  { from = "one_g.out", to = "big_g.b" },
+  # v = (in − s)·G, lp = v + s, s ← flush(lp + v)
+  { from = "s.out", to = "x_s.b" },
+  { from = "x_s.out", to = "v.a" },
+  { from = "big_g.out", to = "v.b" },
+  { from = "v.out", to = "lp.a" },
+  { from = "s.out", to = "lp.b" },
+  { from = "lp.out", to = "s_next.a" },
+  { from = "v.out", to = "s_next.b" },
+  { from = "s_next.out", to = "s_abs.in" },
+  { from = "s_abs.out", to = "s_small.a" },
+  { from = "threshold.out", to = "s_small.b" },
+  { from = "s_small.out", to = "s_flush.gate" },
+  { from = "s_next.out", to = "s_flush.b" },
+  { from = "s_flush.out", to = "s.in" },
+  # hp = in − lp
+  { from = "lp.out", to = "hp.b" },
+]
+
+[exports]
+inputs = { in = ["x_s.a", "hp.a"] }
+outputs = { lp = "lp.out", hp = "hp.out" }
+parameters = { cutoff_hz = "cutoff.value" }

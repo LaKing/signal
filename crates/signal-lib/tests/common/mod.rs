@@ -25,11 +25,13 @@ pub fn registry() -> Registry {
 /// 375 ms, so 1 s holds two trips round its feedback loop; `lfo_shapes` at
 /// its default 1 Hz wraps once in 1 s; `ladder_voice` and `ar_env` see two
 /// and a half gate cycles (and the voice two pitch steps, so its glide moves)
-/// in 0.5 s. Every other composite (and any other project) renders 0.2 s.
+/// in 0.5 s; `delay_core`'s default 250 ms delay repeats its input and
+/// `adsr_core` sees two and a half gate cycles in 0.5 s. Every other
+/// composite (and any other project) renders 0.2 s.
 pub fn frames(name: &str) -> u64 {
     match name {
         "tape_echo" | "lfo_shapes" => 48_000,
-        "ladder_voice" | "ar_env" => 24_000,
+        "ladder_voice" | "ar_env" | "adsr_core" | "delay_core" => 24_000,
         _ => FRAMES,
     }
 }
@@ -104,6 +106,48 @@ pub fn stimulus(name: &str) -> (&'static str, &'static str) {
             "{ from = \"tone.out\", to = \"x.l\" },\n{ from = \"saw.out\", to = \"x.r\" },\n\
              { from = \"x.out_l\", to = \"out.l\" },\n{ from = \"x.out_r\", to = \"out.r\" },\n",
         ),
+        // The validation references (M2.10-4): a 220 Hz sine at half level
+        // into the filters, the delay and the shaper; a 5 Hz square into the
+        // lag; the envelope's 5 Hz gate and 8 Hz trigger; the oscillator's
+        // phase modulated by the sine at 0.05 cycles.
+        "svf_core" => (
+            "tone = { module = \"std.sine_osc\", freq = 220 }\n",
+            "{ from = \"tone.out\", to = \"x.in\", scale = 0.5 },\n\
+             { from = \"x.lp\", to = \"out.l\" },\n{ from = \"x.bp\", to = \"out.r\" },\n",
+        ),
+        "onepole_core" => (
+            "tone = { module = \"std.sine_osc\", freq = 220 }\n",
+            "{ from = \"tone.out\", to = \"x.in\", scale = 0.5 },\n\
+             { from = \"x.lp\", to = \"out.l\" },\n{ from = \"x.hp\", to = \"out.r\" },\n",
+        ),
+        "delay_core" | "tanh_shaper_core" => (
+            "tone = { module = \"std.sine_osc\", freq = 220 }\n",
+            "{ from = \"tone.out\", to = \"x.in\", scale = 0.5 },\n\
+             { from = \"x.out\", to = \"out.l\" },\n{ from = \"x.out\", to = \"out.r\" },\n",
+        ),
+        "lag_core" => (
+            "gate_clock = { module = \"std.phasor\", freq = 5 }\n\
+             gate = { module = \"std.compare\", mode = 0 }\n\
+             half = { module = \"std.const\", value = 0.5 }\n",
+            "{ from = \"gate_clock.phase\", to = \"gate.a\" },\n\
+             { from = \"half.out\", to = \"gate.b\" },\n{ from = \"gate.out\", to = \"x.in\" },\n\
+             { from = \"x.out\", to = \"out.l\" },\n{ from = \"x.out\", to = \"out.r\" },\n",
+        ),
+        "adsr_core" => (
+            "gate_clock = { module = \"std.phasor\", freq = 5 }\n\
+             gate = { module = \"std.compare\", mode = 0 }\n\
+             half = { module = \"std.const\", value = 0.5 }\n\
+             clock = { module = \"std.phasor\", freq = 8 }\n",
+            "{ from = \"gate_clock.phase\", to = \"gate.a\" },\n\
+             { from = \"half.out\", to = \"gate.b\" },\n{ from = \"gate.out\", to = \"x.gate\" },\n\
+             { from = \"clock.wrap\", to = \"x.trigger\" },\n\
+             { from = \"x.out\", to = \"out.l\" },\n{ from = \"x.out\", to = \"out.r\" },\n",
+        ),
+        "osc_core" => (
+            "tone = { module = \"std.sine_osc\", freq = 220 }\n",
+            "{ from = \"tone.out\", to = \"x.pm\", scale = 0.05 },\n\
+             { from = \"x.out\", to = \"out.l\" },\n{ from = \"x.saw\", to = \"out.r\" },\n",
+        ),
         other => panic!("no stimulus for lib.{other}: add one to tests/common/mod.rs"),
     }
 }
@@ -138,6 +182,21 @@ pub fn cases(name: &str) -> Vec<Case> {
                 ),
             })
             .collect(),
+        // Every output of the state-variable filter: lp and bp, then hp.
+        "svf_core" => vec![
+            Case {
+                parameters: String::new(),
+                instances: instances.to_owned(),
+                connections: connections.to_owned(),
+            },
+            Case {
+                parameters: String::new(),
+                instances: instances.to_owned(),
+                connections: "{ from = \"tone.out\", to = \"x.in\", scale = 0.5 },\n\
+                              { from = \"x.hp\", to = \"out.l\" },\n{ from = \"x.hp\", to = \"out.r\" },\n"
+                    .to_owned(),
+            },
+        ],
         _ => vec![Case {
             parameters: String::new(),
             instances: instances.to_owned(),
@@ -156,13 +215,24 @@ pub fn project(name: &str, parameters: &str) -> Project {
 /// The project rendering `lib.<name>` with `parameters` on its instance and
 /// these stimulus lines.
 pub fn project_with(name: &str, parameters: &str, instances: &str, connections: &str) -> Project {
+    project_at(name, parameters, instances, connections, RATE)
+}
+
+/// [`project_with`] at the sample rate `rate`.
+pub fn project_at(
+    name: &str,
+    parameters: &str,
+    instances: &str,
+    connections: &str,
+    rate: u32,
+) -> Project {
     let set = if parameters.is_empty() {
         String::new()
     } else {
         format!(", {parameters}")
     };
     let text = format!(
-        "schema_version = 1\n\n[project]\nname = \"{name}\"\nsample_rate = {RATE}\nseed = {SEED}\n\n\
+        "schema_version = 1\n\n[project]\nname = \"{name}\"\nsample_rate = {rate}\nseed = {SEED}\n\n\
          [instances]\nx = {{ module = \"lib.{name}\"{set} }}\n{instances}\
          out = {{ module = \"std.audio_out\", gain = 1 }}\n\n\
          [wiring]\nconnections = [\n{connections}]\n"

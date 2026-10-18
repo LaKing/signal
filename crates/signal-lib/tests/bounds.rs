@@ -13,12 +13,17 @@
 //! exported to several targets with different ranges would make the plan
 //! refuse the value at one of them, so the plan succeeding also shows that
 //! fanned-out targets accept the range shown.
+//!
+//! M2.10-4 AC10: the validation references (`signal_lib::VALIDATION`), whose
+//! limits derive from the sample rate, run the same extremes again at 8 kHz,
+//! 192 kHz and 999 999 Hz, the highest rate std.sample_rate's own output
+//! stays within the bound at.
 
 mod common;
 
 use std::collections::BTreeMap;
 
-use common::{faults, peak, project, registry, render};
+use common::{RATE, faults, peak, project_at, registry, render, stimulus};
 use serde_json::Value;
 use signal_project::library_modules;
 
@@ -42,60 +47,84 @@ fn assignments(parameters: &BTreeMap<String, f64>) -> String {
         .join(", ")
 }
 
-/// Renders `parameters`, and again with [`base`] over them.
-fn check_with_base(name: &str, case: &str, parameters: BTreeMap<String, f64>) {
-    check(name, case, &assignments(&parameters));
+/// Renders `parameters` at `rate`, and again with [`base`] over them.
+fn check_with_base(name: &str, case: &str, parameters: BTreeMap<String, f64>, rate: u32) {
+    check(name, case, &assignments(&parameters), rate);
     let mut held = parameters.clone();
     for (key, value) in base(name) {
         held.insert((*key).to_owned(), *value);
     }
     if held != parameters {
-        check(name, &format!("{case}, base"), &assignments(&held));
+        check(name, &format!("{case}, base"), &assignments(&held), rate);
     }
 }
 
-fn check(name: &str, case: &str, parameters: &str) {
-    let rendered = render(&project(name, parameters));
+fn check(name: &str, case: &str, parameters: &str, rate: u32) {
+    let (instances, connections) = stimulus(name);
+    let rendered = render(&project_at(name, parameters, instances, connections, rate));
     assert_eq!(
         faults(&rendered),
         Vec::<String>::new(),
-        "lib.{name}, {case}: {parameters}"
+        "lib.{name}, {case} at {rate} Hz: {parameters}"
     );
     let peak = peak(&rendered);
-    assert!(peak <= 1e6, "lib.{name}, {case}: peak {peak}");
+    assert!(peak <= 1e6, "lib.{name}, {case} at {rate} Hz: peak {peak}");
 }
 
 #[test]
 fn no_fault_at_parameter_extremes() {
     for module in library_modules(&registry()).unwrap() {
+        extremes(&module, RATE);
+    }
+}
+
+/// M2.10-4 AC10: the validation references at the ends of the audio range
+/// and at 999 999 Hz.
+#[test]
+fn validation_references_hold_their_bound_at_every_rate() {
+    for module in library_modules(&registry()).unwrap() {
         let name = module["module"]
             .as_str()
             .unwrap()
             .strip_prefix("lib.")
-            .unwrap()
-            .to_owned();
-        let ranges: Vec<(String, f64, f64)> = module["parameters"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|p: &Value| {
-                let bound = |k: &str| p["range"][k].as_f64().unwrap();
-                (
-                    p["name"].as_str().unwrap().to_owned(),
-                    bound("min"),
-                    bound("max"),
-                )
-            })
-            .collect();
-        let all = |pick: fn(&(String, f64, f64)) -> f64| {
-            ranges.iter().map(|r| (r.0.clone(), pick(r))).collect()
-        };
-        check_with_base(&name, "all at minimum", all(|r| r.1));
-        check_with_base(&name, "all at maximum", all(|r| r.2));
-        for (parameter, min, max) in &ranges {
-            let one = |value: f64| BTreeMap::from([(parameter.clone(), value)]);
-            check_with_base(&name, "one at minimum", one(*min));
-            check_with_base(&name, "one at maximum", one(*max));
+            .unwrap();
+        if signal_lib::is_validation(name) {
+            for rate in [8_000, 192_000, 999_999] {
+                extremes(&module, rate);
+            }
         }
+    }
+}
+
+/// Every extreme of `module`'s parameters at `rate`.
+fn extremes(module: &Value, rate: u32) {
+    let name = module["module"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("lib.")
+        .unwrap()
+        .to_owned();
+    let ranges: Vec<(String, f64, f64)> = module["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p: &Value| {
+            let bound = |k: &str| p["range"][k].as_f64().unwrap();
+            (
+                p["name"].as_str().unwrap().to_owned(),
+                bound("min"),
+                bound("max"),
+            )
+        })
+        .collect();
+    let all = |pick: fn(&(String, f64, f64)) -> f64| {
+        ranges.iter().map(|r| (r.0.clone(), pick(r))).collect()
+    };
+    check_with_base(&name, "all at minimum", all(|r| r.1), rate);
+    check_with_base(&name, "all at maximum", all(|r| r.2), rate);
+    for (parameter, min, max) in &ranges {
+        let one = |value: f64| BTreeMap::from([(parameter.clone(), value)]);
+        check_with_base(&name, "one at minimum", one(*min), rate);
+        check_with_base(&name, "one at maximum", one(*max), rate);
     }
 }

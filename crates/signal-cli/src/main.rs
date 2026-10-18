@@ -271,7 +271,8 @@ fn execute(cli: &Cli) -> Result<(), Failure> {
 }
 
 /// The registry's descriptors and the library composites (ADR 0027 §4,
-/// each `{"type_name": "lib.<name>", "library": true, …}`), or with
+/// each `{"type_name": "lib.<name>", "library": true, …}`, a validation
+/// reference with `"reference_for": "std.<type>"`), or with
 /// `category` only those of that palette group; a group none has is a usage
 /// error naming those there are.
 fn modules(
@@ -344,6 +345,11 @@ fn describe_library(entry: &Value) -> String {
         text_of(&entry["doc"]),
         text_of(&entry["category"])
     );
+    if let Some(native) = entry["reference_for"].as_str() {
+        text.push_str(&format!(
+            "  reference for: {native} (a validation reference, not a building block)\n"
+        ));
+    }
     for port in entry["ports"].as_array().into_iter().flatten() {
         let direction = if port["direction"] == "in" {
             "in "

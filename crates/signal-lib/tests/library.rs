@@ -128,6 +128,20 @@ fn every_library_composite_declares_its_category_and_documents_its_exports() {
                 "{name}: the description does not name the export `{export}`"
             );
         }
+        // M2.10-4: a validation reference names its native type
+        // (`reference_for`) and says what it is; no other composite does.
+        let bare = name.strip_prefix("lib.").unwrap();
+        assert_eq!(
+            module.get("reference_for").and_then(|v| v.as_str()),
+            signal_lib::reference_for(bare),
+            "{name}"
+        );
+        if let Some(native) = signal_lib::reference_for(bare) {
+            assert!(
+                description.starts_with(native) && description.contains("validation reference"),
+                "{name}: the description names neither {native} nor its role"
+            );
+        }
     }
 }
 

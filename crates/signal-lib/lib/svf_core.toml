@@ -1,0 +1,143 @@
+# `std.svf` rebuilt from core primitives (M2.10-4, the validation suite):
+# the Zavalishin TPT state-variable filter, the same operations in the same
+# order as the native, so the pair is bit-exact (crates/signal-lib/tests/
+# validation.rs). The native stays the fast path; this is its reference.
+#
+#   fc = min(max(cutoff_hz, 1), min(0.49·sr, 318 309))
+#   g  = tan(π·fc/sr),   k = 1/q,   d = 1/(1 + k·g + g²)
+#   hp = (in − (k + g)·s₁ − s₂)·d
+#   v₁ = g·hp,   bp = v₁ + s₁,   s₁ ← flush(bp + v₁)
+#   v₂ = g·bp,   lp = v₂ + s₂,   s₂ ← flush(lp + v₂)
+#
+# flush(x) is exactly 0 when |x| < 1e-9 (abs, compare, select), as the
+# native's. The coefficients are acyclic; the loop (s₁, s₂ through two
+# std.unit_delay) runs one frame at a time (docs/semantics.md §13).
+#
+# Range differences from `std.svf` (none at 8 to 192 kHz): q is clamped to
+# the native's [0.5, 40] inside; the cutoff's upper limit is also capped at
+# 318 309 Hz, so π·fc stays within the engine's ±1e6 bound (docs/semantics.md
+# §7); the cap only acts above 649 610 Hz, where 0.49·sr exceeds it. Above
+# 999 999 Hz std.sample_rate itself faults. Every intermediate is a signal
+# within ±1e6: the std.add and std.mul ones fault beyond it (states about
+# twice the outputs, (k + g)·s₁), the std.sub ones clamp to it silently, so
+# a large input faults, or near the bound may clamp, where the native's
+# internal state would not (measured: no fault and bit-exact up to an input
+# of 10⁴; docs/benchmarks.md, "Validation pairs").
+schema_version = 1
+
+[composite]
+name = "svf_core"
+category = "filter"
+description = "std.svf rebuilt from core primitives (validation reference, bit-exact with std.svf): a TPT state-variable filter. Input: in. Outputs: lp, bp, hp (low-, band-, high-pass). Parameters: cutoff_hz (Hz, limited to [1, 0.49·sr] and to 318 309, which acts only above 649 610 Hz, default 1000), q (clamped to [0.5, 40], default 0.7071)."
+
+[instances]
+cutoff = { module = "std.const", value = 1000 }
+q = { module = "std.const", value = 0.7071 }
+q_lim = { module = "std.clamp", lo = 0.5, hi = 40 }
+rate = { module = "std.sample_rate" }
+one = { module = "std.const", value = 1 }
+pi = { module = "std.const", value = 3.141592653589793 }
+cap = { module = "std.const", value = 318309 }
+nyquist = { module = "std.scale", mul = 0.49 }
+limit = { module = "std.min" }
+fc_lo = { module = "std.max" }
+fc = { module = "std.min" }
+pi_fc = { module = "std.mul" }
+w = { module = "std.div" }
+g = { module = "std.tan" }
+k = { module = "std.div" }
+kg = { module = "std.mul" }
+one_kg = { module = "std.add" }
+gg = { module = "std.mul" }
+den = { module = "std.add" }
+d = { module = "std.div" }
+k_g = { module = "std.add" }
+threshold = { module = "std.const", value = 1e-9 }
+s1 = { module = "std.unit_delay" }
+s2 = { module = "std.unit_delay" }
+t1 = { module = "std.mul" }
+a1 = { module = "std.sub" }
+a2 = { module = "std.sub" }
+hp = { module = "std.mul" }
+v1 = { module = "std.mul" }
+bp = { module = "std.add" }
+s1_next = { module = "std.add" }
+s1_abs = { module = "std.abs" }
+s1_small = { module = "std.compare", mode = 0 }
+s1_flush = { module = "std.select" }
+v2 = { module = "std.mul" }
+lp = { module = "std.add" }
+s2_next = { module = "std.add" }
+s2_abs = { module = "std.abs" }
+s2_small = { module = "std.compare", mode = 0 }
+s2_flush = { module = "std.select" }
+
+[wiring]
+connections = [
+  { from = "q.out", to = "q_lim.in" },
+  { from = "rate.sr", to = "nyquist.in" },
+  { from = "nyquist.out", to = "limit.a" },
+  { from = "cap.out", to = "limit.b" },
+  { from = "cutoff.out", to = "fc_lo.a" },
+  { from = "one.out", to = "fc_lo.b" },
+  { from = "fc_lo.out", to = "fc.a" },
+  { from = "limit.out", to = "fc.b" },
+  { from = "fc.out", to = "pi_fc.a" },
+  { from = "pi.out", to = "pi_fc.b" },
+  { from = "pi_fc.out", to = "w.a" },
+  { from = "rate.sr", to = "w.b" },
+  { from = "w.out", to = "g.in" },
+  { from = "one.out", to = "k.a" },
+  { from = "q_lim.out", to = "k.b" },
+  { from = "k.out", to = "kg.a" },
+  { from = "g.out", to = "kg.b" },
+  { from = "one.out", to = "one_kg.a" },
+  { from = "kg.out", to = "one_kg.b" },
+  { from = "g.out", to = "gg.a" },
+  { from = "g.out", to = "gg.b" },
+  { from = "one_kg.out", to = "den.a" },
+  { from = "gg.out", to = "den.b" },
+  { from = "one.out", to = "d.a" },
+  { from = "den.out", to = "d.b" },
+  { from = "k.out", to = "k_g.a" },
+  { from = "g.out", to = "k_g.b" },
+  # hp = (in − (k + g)·s₁ − s₂)·d
+  { from = "k_g.out", to = "t1.a" },
+  { from = "s1.out", to = "t1.b" },
+  { from = "t1.out", to = "a1.b" },
+  { from = "a1.out", to = "a2.a" },
+  { from = "s2.out", to = "a2.b" },
+  { from = "a2.out", to = "hp.a" },
+  { from = "d.out", to = "hp.b" },
+  # bp = g·hp + s₁, s₁ ← flush(bp + g·hp)
+  { from = "g.out", to = "v1.a" },
+  { from = "hp.out", to = "v1.b" },
+  { from = "v1.out", to = "bp.a" },
+  { from = "s1.out", to = "bp.b" },
+  { from = "bp.out", to = "s1_next.a" },
+  { from = "v1.out", to = "s1_next.b" },
+  { from = "s1_next.out", to = "s1_abs.in" },
+  { from = "s1_abs.out", to = "s1_small.a" },
+  { from = "threshold.out", to = "s1_small.b" },
+  { from = "s1_small.out", to = "s1_flush.gate" },
+  { from = "s1_next.out", to = "s1_flush.b" },
+  { from = "s1_flush.out", to = "s1.in" },
+  # lp = g·bp + s₂, s₂ ← flush(lp + g·bp)
+  { from = "g.out", to = "v2.a" },
+  { from = "bp.out", to = "v2.b" },
+  { from = "v2.out", to = "lp.a" },
+  { from = "s2.out", to = "lp.b" },
+  { from = "lp.out", to = "s2_next.a" },
+  { from = "v2.out", to = "s2_next.b" },
+  { from = "s2_next.out", to = "s2_abs.in" },
+  { from = "s2_abs.out", to = "s2_small.a" },
+  { from = "threshold.out", to = "s2_small.b" },
+  { from = "s2_small.out", to = "s2_flush.gate" },
+  { from = "s2_next.out", to = "s2_flush.b" },
+  { from = "s2_flush.out", to = "s2.in" },
+]
+
+[exports]
+inputs = { in = "a1.a" }
+outputs = { lp = "lp.out", bp = "bp.out", hp = "hp.out" }
+parameters = { cutoff_hz = "cutoff.value", q = "q.value" }

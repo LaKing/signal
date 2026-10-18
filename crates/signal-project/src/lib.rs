@@ -67,7 +67,7 @@ pub use pattern::{
     MAX_LANES, MAX_LENGTH, MAX_NOTES, MAX_STEP, MAX_STEPS, NOTES, PATTERNS, STEPS, pattern_kind,
 };
 pub use schema::schema;
-pub use structure::library_modules;
+pub use structure::{library_modules, library_parameters};
 pub use write::{WriteError, write_parameter};
 
 use locate::{

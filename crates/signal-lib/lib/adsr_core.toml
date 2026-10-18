@@ -1,0 +1,432 @@
+# `std.adsr` rebuilt from core primitives (M2.10-4, the validation suite):
+# the native's stage machine (idle 0, attack 1, decay 2, sustain 3,
+# release 4) as one loop of signals, each state through a std.unit_delay:
+# the level L, the stage, the stage's frame counter i, the segment's start
+# F, the decay or release factor E, and the attack length A held from the
+# attack's first frame.
+#
+#   start attack  when the gate rises above 0.5, or a trigger frame while on
+#   start release when the gate falls
+#   A      = ⌊(attack·sr)/1000 + ½⌋        (attack ≤ 999 999/(sr/1000) ms)
+#   attack:  out = F + (1 − F)·(i/A);  after A frames, decay from 1
+#   decay:   out = F·E + S·(1 − E),  E ← E·e^rd;  |out − S| < 1e-9 → sustain
+#   sustain: out = S; a changed S decays from the level towards it
+#   release: out = F·E,  E ← E·e^rr;  out < 1e-9 → 0, idle
+#   rd = (−1000/sr)/decay_ms,  rr = (−1000/sr)/release_ms   (= −1/τ)
+#
+# As in the native, a change of τd or S during the decay (of τr during the
+# release) continues from the last output with the factor's first step, and
+# A = 0 starts the decay at 1 on the attack's frame. Triggers are counted by
+# a std.counter modulo 2, so several on one frame count once.
+#
+# Within a stated tolerance of the native, not bit-exact: frame counts and
+# τ in frames exceed the engine's ±1e6 bound on a signal (docs/semantics.md
+# §7) for long decays and releases, so the native's closed form
+# e^(−t/τ) becomes the recursion E ← E·e^r (rounding grows with t), r is
+# computed in another order, and a flush to the sustain level or to 0 can
+# fall one frame apart (at most the flush threshold, 1e-9).
+#
+# The attack length is the native's exactly: attack·sr can pass 10⁶, so it
+# is computed scaled by 2⁻¹⁶, as attack·(sr·2⁻¹⁶) divided by 1000·2⁻¹⁶
+# (0.0152587890625). A power of two scales a product and its rounding alike,
+# so this rounds to exactly the native's (attack·sr)/1000 bit for bit, and
+# the product stays below 60 000·999 999·2⁻¹⁶ ≈ 915 526. (An attack length
+# one frame apart would differ by up to 1/A.) The attack counter must stay a signal, so the attack is at
+# most 999 999 frames: 20.8 s at 48 kHz, 10.4 s at 96 kHz, 5.2 s at 192 kHz
+# (std.adsr allows 60 s) (crates/signal-lib/tests/validation.rs).
+schema_version = 1
+
+[composite]
+name = "adsr_core"
+category = "envelope"
+description = "std.adsr rebuilt from core primitives (validation reference, within 1e-9 of std.adsr): a gated ADSR envelope, linear attack from the current level, exponential decay and release. Inputs: gate (on above 0.5), trigger (restarts the attack while the gate is on). Output: out, within [0, 1]. Parameters: attack_ms (ms, clamped to [0, 60 000] and to 999 999 frames, default 5), decay_ms (ms, clamped to [0.1, 60 000], default 200), sustain (clamped to [0, 1], default 0.7), release_ms (ms, clamped to [0.1, 60 000], default 300)."
+
+[instances]
+# Parameters and constants.
+attack = { module = "std.const", value = 5 }
+decay = { module = "std.const", value = 200 }
+sustain = { module = "std.const", value = 0.7 }
+release = { module = "std.const", value = 300 }
+attack_lim = { module = "std.clamp", lo = 0, hi = 60000 }
+decay_lim = { module = "std.clamp", lo = 0.1, hi = 60000 }
+sustain_lim = { module = "std.clamp", lo = 0, hi = 1 }
+release_lim = { module = "std.clamp", lo = 0.1, hi = 60000 }
+rate = { module = "std.sample_rate" }
+one = { module = "std.const", value = 1 }
+two = { module = "std.const", value = 2 }
+three = { module = "std.const", value = 3 }
+four = { module = "std.const", value = 4 }
+half = { module = "std.const", value = 0.5 }
+thousand = { module = "std.const", value = 1000 }
+minus_1000 = { module = "std.const", value = -1000 }
+top = { module = "std.const", value = 999999 }
+threshold = { module = "std.const", value = 1e-9 }
+# The attack length A = ⌊(a·sr)/1000 + ½⌋, a = min(attack, 999 999/(sr/1000)),
+# computed as (a·(sr·2⁻¹⁶))/(1000·2⁻¹⁶): the native's rounding, within ±1e6.
+per_ms = { module = "std.div" }
+attack_top = { module = "std.div" }
+attack_bound = { module = "std.min" }
+rate_scaled = { module = "std.scale", mul = 0.0000152587890625 }
+thousand_scaled = { module = "std.const", value = 0.0152587890625 }
+attack_product = { module = "std.mul" }
+attack_frames = { module = "std.div" }
+attack_half = { module = "std.add" }
+length = { module = "std.floor" }
+length_zero = { module = "std.compare", mode = 2 }
+# The decay and release factors per frame, e^r with r = (−1000/sr)/ms.
+per_ms_neg = { module = "std.div" }
+decay_r = { module = "std.div" }
+decay_q = { module = "std.exp" }
+release_r = { module = "std.div" }
+release_q = { module = "std.exp" }
+# Parameter changes since the frame before.
+decay_before = { module = "std.unit_delay" }
+decay_changed = { module = "std.compare", mode = 5 }
+sustain_before = { module = "std.unit_delay" }
+sustain_changed = { module = "std.compare", mode = 5 }
+release_before = { module = "std.unit_delay" }
+release_changed = { module = "std.compare", mode = 5 }
+# Edges and triggers.
+on = { module = "std.compare", mode = 4 }
+on_before = { module = "std.unit_delay" }
+triggers = { module = "std.counter", modulo = 2 }
+triggers_before = { module = "std.unit_delay" }
+triggered = { module = "std.compare", mode = 5 }
+was_off = { module = "std.not" }
+rise_or_trigger = { module = "std.or" }
+start_attack = { module = "std.and" }
+off = { module = "std.not" }
+start_release = { module = "std.and" }
+restart = { module = "std.or" }
+# The loop's state, as of the frame before.
+level = { module = "std.unit_delay" }
+stage = { module = "std.unit_delay" }
+counter = { module = "std.unit_delay" }
+from = { module = "std.unit_delay" }
+factor = { module = "std.unit_delay" }
+held_length = { module = "std.unit_delay" }
+# This frame's stage, counter, start and factor after the edges.
+attack_stage = { module = "std.select" }
+stage_r = { module = "std.select" }
+stage0 = { module = "std.select" }
+counter0 = { module = "std.select" }
+attack_from = { module = "std.select" }
+from_r = { module = "std.select" }
+from0 = { module = "std.select" }
+factor0 = { module = "std.select" }
+length0 = { module = "std.select" }
+is_attack = { module = "std.compare", mode = 2 }
+is_decay = { module = "std.compare", mode = 2 }
+is_sustain = { module = "std.compare", mode = 2 }
+is_release = { module = "std.compare", mode = 2 }
+decaying = { module = "std.or" }
+running = { module = "std.compare", mode = 4 }
+# Attack: F + (1 − F)·(i/A).
+rest = { module = "std.sub" }
+fraction = { module = "std.div" }
+rise = { module = "std.mul" }
+attack_out = { module = "std.add" }
+counter1 = { module = "std.add" }
+attack_done = { module = "std.compare", mode = 3 }
+# Decay and sustain: F·E + S·(1 − E).
+decay_or_sustain_changed = { module = "std.or" }
+decay_running = { module = "std.and" }
+decay_restart = { module = "std.and" }
+sustain_moved = { module = "std.compare", mode = 5 }
+sustain_restart = { module = "std.and" }
+decay_continue = { module = "std.or" }
+sustain_same = { module = "std.compare", mode = 2 }
+holding = { module = "std.and" }
+decay_from = { module = "std.select" }
+decay_factor = { module = "std.select" }
+decay_head = { module = "std.mul" }
+decay_rest = { module = "std.sub" }
+decay_tail = { module = "std.mul" }
+decay_value = { module = "std.add" }
+decay_gap = { module = "std.sub" }
+decay_gap_abs = { module = "std.abs" }
+decay_reached = { module = "std.compare", mode = 0 }
+decay_out = { module = "std.select" }
+decay_next = { module = "std.mul" }
+# Release: F·E.
+release_running = { module = "std.and" }
+release_restart = { module = "std.and" }
+release_from = { module = "std.select" }
+release_factor = { module = "std.select" }
+release_value = { module = "std.mul" }
+release_ended = { module = "std.compare", mode = 0 }
+release_out = { module = "std.select" }
+release_next = { module = "std.mul" }
+# The output and the next state.
+held_out = { module = "std.select" }
+out_r = { module = "std.select" }
+out_d = { module = "std.select" }
+out = { module = "std.select" }
+to_sustain = { module = "std.or" }
+stage_attack = { module = "std.select" }
+stage_decay = { module = "std.select" }
+stage_release = { module = "std.select" }
+stage_rn = { module = "std.select" }
+stage_dn = { module = "std.select" }
+stage_next = { module = "std.select" }
+counter_attack = { module = "std.select" }
+counter_rn = { module = "std.select" }
+counter_dn = { module = "std.select" }
+counter_next = { module = "std.select" }
+from_attack = { module = "std.select" }
+from_rn = { module = "std.select" }
+from_dn = { module = "std.select" }
+from_next = { module = "std.select" }
+factor_rn = { module = "std.select" }
+factor_dn = { module = "std.select" }
+factor_next = { module = "std.select" }
+
+[wiring]
+connections = [
+  { from = "attack.out", to = "attack_lim.in" },
+  { from = "decay.out", to = "decay_lim.in" },
+  { from = "sustain.out", to = "sustain_lim.in" },
+  { from = "release.out", to = "release_lim.in" },
+  # A
+  { from = "rate.sr", to = "per_ms.a" },
+  { from = "thousand.out", to = "per_ms.b" },
+  { from = "top.out", to = "attack_top.a" },
+  { from = "per_ms.out", to = "attack_top.b" },
+  { from = "attack_lim.out", to = "attack_bound.a" },
+  { from = "attack_top.out", to = "attack_bound.b" },
+  { from = "rate.sr", to = "rate_scaled.in" },
+  { from = "attack_bound.out", to = "attack_product.a" },
+  { from = "rate_scaled.out", to = "attack_product.b" },
+  { from = "attack_product.out", to = "attack_frames.a" },
+  { from = "thousand_scaled.out", to = "attack_frames.b" },
+  { from = "attack_frames.out", to = "attack_half.a" },
+  { from = "half.out", to = "attack_half.b" },
+  { from = "attack_half.out", to = "length.in" },
+  { from = "length.out", to = "length_zero.a" },
+  # e^r
+  { from = "minus_1000.out", to = "per_ms_neg.a" },
+  { from = "rate.sr", to = "per_ms_neg.b" },
+  { from = "per_ms_neg.out", to = "decay_r.a" },
+  { from = "decay_lim.out", to = "decay_r.b" },
+  { from = "decay_r.out", to = "decay_q.in" },
+  { from = "per_ms_neg.out", to = "release_r.a" },
+  { from = "release_lim.out", to = "release_r.b" },
+  { from = "release_r.out", to = "release_q.in" },
+  # changes
+  { from = "decay_lim.out", to = "decay_before.in" },
+  { from = "decay_lim.out", to = "decay_changed.a" },
+  { from = "decay_before.out", to = "decay_changed.b" },
+  { from = "sustain_lim.out", to = "sustain_before.in" },
+  { from = "sustain_lim.out", to = "sustain_changed.a" },
+  { from = "sustain_before.out", to = "sustain_changed.b" },
+  { from = "release_lim.out", to = "release_before.in" },
+  { from = "release_lim.out", to = "release_changed.a" },
+  { from = "release_before.out", to = "release_changed.b" },
+  # edges
+  { from = "half.out", to = "on.b" },
+  { from = "on.out", to = "on_before.in" },
+  { from = "triggers.count", to = "triggers_before.in" },
+  { from = "triggers.count", to = "triggered.a" },
+  { from = "triggers_before.out", to = "triggered.b" },
+  { from = "on_before.out", to = "was_off.in" },
+  { from = "was_off.out", to = "rise_or_trigger.a" },
+  { from = "triggered.out", to = "rise_or_trigger.b" },
+  { from = "on.out", to = "start_attack.a" },
+  { from = "rise_or_trigger.out", to = "start_attack.b" },
+  { from = "on.out", to = "off.in" },
+  { from = "off.out", to = "start_release.a" },
+  { from = "on_before.out", to = "start_release.b" },
+  { from = "start_attack.out", to = "restart.a" },
+  { from = "start_release.out", to = "restart.b" },
+  # stage0 = attack start ? (A = 0 ? 2 : 1) : release start ? 4 : stage
+  { from = "length_zero.out", to = "attack_stage.gate" },
+  { from = "two.out", to = "attack_stage.a" },
+  { from = "one.out", to = "attack_stage.b" },
+  { from = "start_release.out", to = "stage_r.gate" },
+  { from = "four.out", to = "stage_r.a" },
+  { from = "stage.out", to = "stage_r.b" },
+  { from = "start_attack.out", to = "stage0.gate" },
+  { from = "attack_stage.out", to = "stage0.a" },
+  { from = "stage_r.out", to = "stage0.b" },
+  # counter0 = restart ? 0 : counter
+  { from = "restart.out", to = "counter0.gate" },
+  { from = "counter.out", to = "counter0.b" },
+  # from0 = attack start ? (A = 0 ? 1 : L) : release start ? L : from
+  { from = "length_zero.out", to = "attack_from.gate" },
+  { from = "one.out", to = "attack_from.a" },
+  { from = "level.out", to = "attack_from.b" },
+  { from = "start_release.out", to = "from_r.gate" },
+  { from = "level.out", to = "from_r.a" },
+  { from = "from.out", to = "from_r.b" },
+  { from = "start_attack.out", to = "from0.gate" },
+  { from = "attack_from.out", to = "from0.a" },
+  { from = "from_r.out", to = "from0.b" },
+  # factor0 = restart ? 1 : factor;  length0 = attack start ? A : held
+  { from = "restart.out", to = "factor0.gate" },
+  { from = "one.out", to = "factor0.a" },
+  { from = "factor.out", to = "factor0.b" },
+  { from = "start_attack.out", to = "length0.gate" },
+  { from = "length.out", to = "length0.a" },
+  { from = "held_length.out", to = "length0.b" },
+  { from = "length0.out", to = "held_length.in" },
+  # stage flags
+  { from = "stage0.out", to = "is_attack.a" },
+  { from = "one.out", to = "is_attack.b" },
+  { from = "stage0.out", to = "is_decay.a" },
+  { from = "two.out", to = "is_decay.b" },
+  { from = "stage0.out", to = "is_sustain.a" },
+  { from = "three.out", to = "is_sustain.b" },
+  { from = "stage0.out", to = "is_release.a" },
+  { from = "four.out", to = "is_release.b" },
+  { from = "is_decay.out", to = "decaying.a" },
+  { from = "is_sustain.out", to = "decaying.b" },
+  { from = "counter0.out", to = "running.a" },
+  # attack
+  { from = "one.out", to = "rest.a" },
+  { from = "from0.out", to = "rest.b" },
+  { from = "counter0.out", to = "fraction.a" },
+  { from = "length0.out", to = "fraction.b" },
+  { from = "rest.out", to = "rise.a" },
+  { from = "fraction.out", to = "rise.b" },
+  { from = "from0.out", to = "attack_out.a" },
+  { from = "rise.out", to = "attack_out.b" },
+  { from = "counter0.out", to = "counter1.a" },
+  { from = "one.out", to = "counter1.b" },
+  { from = "counter1.out", to = "attack_done.a" },
+  { from = "length0.out", to = "attack_done.b" },
+  # decay and sustain
+  { from = "decay_changed.out", to = "decay_or_sustain_changed.a" },
+  { from = "sustain_changed.out", to = "decay_or_sustain_changed.b" },
+  { from = "is_decay.out", to = "decay_running.a" },
+  { from = "running.out", to = "decay_running.b" },
+  { from = "decay_running.out", to = "decay_restart.a" },
+  { from = "decay_or_sustain_changed.out", to = "decay_restart.b" },
+  { from = "sustain_lim.out", to = "sustain_moved.a" },
+  { from = "level.out", to = "sustain_moved.b" },
+  { from = "is_sustain.out", to = "sustain_restart.a" },
+  { from = "sustain_moved.out", to = "sustain_restart.b" },
+  { from = "decay_restart.out", to = "decay_continue.a" },
+  { from = "sustain_restart.out", to = "decay_continue.b" },
+  { from = "sustain_lim.out", to = "sustain_same.a" },
+  { from = "level.out", to = "sustain_same.b" },
+  { from = "is_sustain.out", to = "holding.a" },
+  { from = "sustain_same.out", to = "holding.b" },
+  { from = "decay_continue.out", to = "decay_from.gate" },
+  { from = "level.out", to = "decay_from.a" },
+  { from = "from0.out", to = "decay_from.b" },
+  { from = "decay_continue.out", to = "decay_factor.gate" },
+  { from = "decay_q.out", to = "decay_factor.a" },
+  { from = "factor0.out", to = "decay_factor.b" },
+  { from = "decay_from.out", to = "decay_head.a" },
+  { from = "decay_factor.out", to = "decay_head.b" },
+  { from = "one.out", to = "decay_rest.a" },
+  { from = "decay_factor.out", to = "decay_rest.b" },
+  { from = "sustain_lim.out", to = "decay_tail.a" },
+  { from = "decay_rest.out", to = "decay_tail.b" },
+  { from = "decay_head.out", to = "decay_value.a" },
+  { from = "decay_tail.out", to = "decay_value.b" },
+  { from = "decay_value.out", to = "decay_gap.a" },
+  { from = "sustain_lim.out", to = "decay_gap.b" },
+  { from = "decay_gap.out", to = "decay_gap_abs.in" },
+  { from = "decay_gap_abs.out", to = "decay_reached.a" },
+  { from = "threshold.out", to = "decay_reached.b" },
+  { from = "decay_reached.out", to = "decay_out.gate" },
+  { from = "sustain_lim.out", to = "decay_out.a" },
+  { from = "decay_value.out", to = "decay_out.b" },
+  { from = "decay_factor.out", to = "decay_next.a" },
+  { from = "decay_q.out", to = "decay_next.b" },
+  # release
+  { from = "is_release.out", to = "release_running.a" },
+  { from = "running.out", to = "release_running.b" },
+  { from = "release_running.out", to = "release_restart.a" },
+  { from = "release_changed.out", to = "release_restart.b" },
+  { from = "release_restart.out", to = "release_from.gate" },
+  { from = "level.out", to = "release_from.a" },
+  { from = "from0.out", to = "release_from.b" },
+  { from = "release_restart.out", to = "release_factor.gate" },
+  { from = "release_q.out", to = "release_factor.a" },
+  { from = "factor0.out", to = "release_factor.b" },
+  { from = "release_from.out", to = "release_value.a" },
+  { from = "release_factor.out", to = "release_value.b" },
+  { from = "release_value.out", to = "release_ended.a" },
+  { from = "threshold.out", to = "release_ended.b" },
+  { from = "release_ended.out", to = "release_out.gate" },
+  { from = "release_value.out", to = "release_out.b" },
+  { from = "release_factor.out", to = "release_next.a" },
+  { from = "release_q.out", to = "release_next.b" },
+  # out = attack ? attack_out : decay/sustain ? (hold ? S : decay_out) : release ? release_out : 0
+  { from = "holding.out", to = "held_out.gate" },
+  { from = "sustain_lim.out", to = "held_out.a" },
+  { from = "decay_out.out", to = "held_out.b" },
+  { from = "is_release.out", to = "out_r.gate" },
+  { from = "release_out.out", to = "out_r.a" },
+  { from = "decaying.out", to = "out_d.gate" },
+  { from = "held_out.out", to = "out_d.a" },
+  { from = "out_r.out", to = "out_d.b" },
+  { from = "is_attack.out", to = "out.gate" },
+  { from = "attack_out.out", to = "out.a" },
+  { from = "out_d.out", to = "out.b" },
+  { from = "out.out", to = "level.in" },
+  # stage_next
+  { from = "holding.out", to = "to_sustain.a" },
+  { from = "decay_reached.out", to = "to_sustain.b" },
+  { from = "attack_done.out", to = "stage_attack.gate" },
+  { from = "two.out", to = "stage_attack.a" },
+  { from = "one.out", to = "stage_attack.b" },
+  { from = "to_sustain.out", to = "stage_decay.gate" },
+  { from = "three.out", to = "stage_decay.a" },
+  { from = "two.out", to = "stage_decay.b" },
+  { from = "release_ended.out", to = "stage_release.gate" },
+  { from = "four.out", to = "stage_release.b" },
+  { from = "is_release.out", to = "stage_rn.gate" },
+  { from = "stage_release.out", to = "stage_rn.a" },
+  { from = "decaying.out", to = "stage_dn.gate" },
+  { from = "stage_decay.out", to = "stage_dn.a" },
+  { from = "stage_rn.out", to = "stage_dn.b" },
+  { from = "is_attack.out", to = "stage_next.gate" },
+  { from = "stage_attack.out", to = "stage_next.a" },
+  { from = "stage_dn.out", to = "stage_next.b" },
+  { from = "stage_next.out", to = "stage.in" },
+  # counter_next: attack ? (done ? 0 : i + 1) : decay/sustain/release ? 1 : 0
+  { from = "attack_done.out", to = "counter_attack.gate" },
+  { from = "counter1.out", to = "counter_attack.b" },
+  { from = "is_release.out", to = "counter_rn.gate" },
+  { from = "one.out", to = "counter_rn.a" },
+  { from = "decaying.out", to = "counter_dn.gate" },
+  { from = "one.out", to = "counter_dn.a" },
+  { from = "counter_rn.out", to = "counter_dn.b" },
+  { from = "is_attack.out", to = "counter_next.gate" },
+  { from = "counter_attack.out", to = "counter_next.a" },
+  { from = "counter_dn.out", to = "counter_next.b" },
+  { from = "counter_next.out", to = "counter.in" },
+  # from_next: attack ? (done ? 1 : F) : decay ? Fd : release ? Fr : F
+  { from = "attack_done.out", to = "from_attack.gate" },
+  { from = "one.out", to = "from_attack.a" },
+  { from = "from0.out", to = "from_attack.b" },
+  { from = "is_release.out", to = "from_rn.gate" },
+  { from = "release_from.out", to = "from_rn.a" },
+  { from = "from0.out", to = "from_rn.b" },
+  { from = "decaying.out", to = "from_dn.gate" },
+  { from = "decay_from.out", to = "from_dn.a" },
+  { from = "from_rn.out", to = "from_dn.b" },
+  { from = "is_attack.out", to = "from_next.gate" },
+  { from = "from_attack.out", to = "from_next.a" },
+  { from = "from_dn.out", to = "from_next.b" },
+  { from = "from_next.out", to = "from.in" },
+  # factor_next: attack ? 1 : decay ? E·qd : release ? E·qr : 1
+  { from = "is_release.out", to = "factor_rn.gate" },
+  { from = "release_next.out", to = "factor_rn.a" },
+  { from = "one.out", to = "factor_rn.b" },
+  { from = "decaying.out", to = "factor_dn.gate" },
+  { from = "decay_next.out", to = "factor_dn.a" },
+  { from = "factor_rn.out", to = "factor_dn.b" },
+  { from = "is_attack.out", to = "factor_next.gate" },
+  { from = "one.out", to = "factor_next.a" },
+  { from = "factor_dn.out", to = "factor_next.b" },
+  { from = "factor_next.out", to = "factor.in" },
+]
+
+[exports]
+inputs = { gate = "on.a", trigger = "triggers.trigger" }
+outputs = { out = "out.out" }
+parameters = { attack_ms = "attack.value", decay_ms = "decay.value", sustain = "sustain.value", release_ms = "release.value" }

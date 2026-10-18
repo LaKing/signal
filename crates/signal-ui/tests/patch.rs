@@ -560,9 +560,10 @@ fn a_patch_is_heard_after_the_reload(transport: Transport) {
     rig.finish();
 }
 
-/// `modules`: the registry's types and the project's composites in name
-/// order, ports and parameters as `graph` gives them (without `address`),
-/// the same reply every time.
+/// `modules`: the registry's types, then the project's composites and the
+/// built-in library's (M2.10-4 review), each in name order, ports and
+/// parameters as `graph` gives them (without `address`), the same reply
+/// every time.
 fn modules_is_deterministic(transport: Transport) {
     let mut rig = project_rig("patch-modules", transport, "pulse");
     let (mut ws, _) = rig.client();
@@ -588,7 +589,37 @@ fn modules_is_deterministic(transport: Transport) {
                 .iter()
                 .any(|n| n.starts_with("lab.") || n.starts_with("core."))
     );
-    assert_eq!(first["composites"], json!([]));
+    // Pulse has no composites of its own: only the library's, every one
+    // marked `library`, in name order, as `signal modules` lists them.
+    let library: Vec<&Value> = first["composites"].as_array().unwrap().iter().collect();
+    assert!(
+        library
+            .iter()
+            .all(|c| c["library"] == true && c["composite"] == true)
+    );
+    let library_names: Vec<&str> = library
+        .iter()
+        .map(|c| c["module"].as_str().unwrap())
+        .collect();
+    let builtin: Vec<String> = signal_project::Library::builtin()
+        .names()
+        .map(|n| format!("lib.{n}"))
+        .collect();
+    assert_eq!(library_names, builtin);
+    let echo = library
+        .iter()
+        .find(|c| c["module"] == "lib.tape_echo")
+        .unwrap();
+    assert_eq!(echo["category"], "delay");
+    assert!(echo["description"].as_str().unwrap().contains("feedback"));
+    assert!(echo.get("reference_for").is_none());
+    assert!(echo["ports"][0].get("address").is_none());
+    let references: Vec<(&str, &str)> = library
+        .iter()
+        .filter_map(|c| Some((c["module"].as_str()?, c["reference_for"].as_str()?)))
+        .collect();
+    assert_eq!(references.len(), 7);
+    assert!(references.contains(&("lib.svf_core", "std.svf")));
     // std.svf as graph shows pulse's filter, without addresses.
     let graph = rig.request(&mut ws, 3, json!({"type": "graph"}), "graph");
     let filter = graph["top"]["instances"]
@@ -653,13 +684,16 @@ fn modules_is_deterministic(transport: Transport) {
         .iter()
         .map(|c| c["module"].as_str().unwrap())
         .collect();
-    assert_eq!(composites, ["drums", "kick"]);
-    // A composite has no category: the key is absent.
+    // The project's composites first, then the library's.
+    assert_eq!(composites[..2], ["drums", "kick"]);
+    assert!(composites[2..].iter().all(|c| c.starts_with("lib.")));
+    // A project composite has no category: the key is absent.
     assert!(
         kick["composites"]
             .as_array()
             .unwrap()
             .iter()
+            .filter(|c| c.get("library").is_none())
             .all(|c| c.get("category").is_none())
     );
     rig.finish();
@@ -772,7 +806,66 @@ fn same_named_copies_have_different_project_ids(transport: Transport) {
     );
 }
 
+/// M2.10-4 review: the palette adds a library composite as any type: the
+/// patch writes `module = "lib.tape_echo"` with its parameter, the project
+/// reloads with the instance (its interface in `graph`), and the undo
+/// restores the file byte for byte.
+fn a_library_composite_is_added_by_a_patch(transport: Transport) {
+    let mut rig = project_rig("patch-library", transport, "kick");
+    let (mut ws, _) = rig.client();
+    let file = rig.dir.join("project.toml");
+    let original = fs::read_to_string(&file).unwrap();
+    let first = base(&mut rig, &mut ws, 1, "");
+    let patched = rig.request(
+        &mut ws,
+        2,
+        patch(
+            "",
+            &first,
+            json!([{"op": "instance.add", "name": "echo", "module": "lib.tape_echo",
+                "params": {"time_ms": 300}, "x": 10, "y": 20},
+                {"op": "connection.add", "from": "echo.out", "to": "out.l", "scale": 0.25}]),
+        ),
+        "patched",
+    );
+    let after = fs::read_to_string(&file).unwrap();
+    assert!(
+        after.contains("echo = { module = \"lib.tape_echo\", time_ms = 300 }"),
+        "{after}"
+    );
+    let base_after = patched["base"].as_str().unwrap().to_owned();
+    let graph = rig.wait(&mut ws, "the graph with the library instance", |got| {
+        got.of("graph")
+            .filter(|g| g["files"][""] == base_after.as_str())
+            .cloned()
+    });
+    let echo = graph["top"]["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["name"] == "echo")
+        .unwrap_or_else(|| panic!("{graph}"))
+        .clone();
+    assert_eq!(echo["module"], "lib.tape_echo");
+    assert!(
+        echo["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "time_ms")
+    );
+    rig.request(
+        &mut ws,
+        3,
+        patch("", &base_after, patched["inverse"].clone()),
+        "patched",
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), original);
+    rig.finish();
+}
+
 both!(
+    a_library_composite_is_added_by_a_patch,
     same_named_copies_have_different_project_ids,
     every_op_round_trips_on_kick_pulse_physical_av_and_a_composite,
     the_errors_write_nothing,

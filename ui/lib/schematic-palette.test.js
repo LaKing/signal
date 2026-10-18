@@ -9,6 +9,7 @@ import {
   EXPANDED,
   GROUPS,
   OTHER,
+  REFERENCE,
   cursorRows,
   groupOf,
   groupOrder,
@@ -158,8 +159,8 @@ test('the window of rows the list shows follows the cursor and never runs past t
 
 test('what a type is, for the sidebar: its description (a primitive’s formula) and group', () => {
   const info = moduleInfo(MODULES);
-  assert.deepEqual(info.get('std.add'), { module: 'std.add', description: 'Adds its two signal inputs: out = a + b.', group: 'core', composite: false });
-  assert.deepEqual(info.get('kick'), { module: 'kick', description: null, group: 'project', composite: true });
+  assert.deepEqual(info.get('std.add'), { module: 'std.add', description: 'Adds its two signal inputs: out = a + b.', group: 'core', composite: false, referenceFor: null });
+  assert.deepEqual(info.get('kick'), { module: 'kick', description: null, group: 'project', composite: true, referenceFor: null });
   assert.equal(moduleInfo(null).size, 0);
   assert.equal(projectKey({ projectId: 'p1', folder: '/a', project: 'kick' }), 'p1');
   assert.equal(projectKey({ folder: '/a', project: 'kick' }), '/a\nkick');
@@ -178,4 +179,33 @@ test('a window starting inside a group shows its heading first, in place of one 
   assert.deepEqual(keys(mid.shown), ['g:core', 'm:std.mul', 'g:generator', 'g:filter'], 'the heading named although scrolled away');
   assert.deepEqual([mid.above, mid.below], [4, 4]);
   assert.equal(windowRows([], -1, 0, 4).shown.length, 0);
+});
+
+test('validation references (reference_for) form their own group, last and collapsed', () => {
+  const modules = {
+    primitives: MODULES.primitives,
+    composites: [
+      ...MODULES.composites,
+      { module: 'lib.tape_echo', composite: true, library: true, category: 'delay', description: 'A tape echo.' },
+      { module: 'lib.svf_core', composite: true, library: true, category: 'filter', description: 'std.svf rebuilt.', reference_for: 'std.svf' },
+      { module: 'lib.adsr_core', composite: true, library: true, category: 'envelope', description: 'std.adsr rebuilt.', reference_for: 'std.adsr' },
+    ],
+  };
+  assert.equal(REFERENCE, 'reference');
+  assert.equal(groupOf({ module: 'lib.svf_core', library: true, reference_for: 'std.svf' }), REFERENCE);
+  assert.equal(groupOf({ module: 'lib.svf_core', library: true, reference_for: '' }), 'library', 'an empty name is no reference');
+  assert.deepEqual([REFERENCE, OTHER, 'library', 'zeta', 'project'].sort(groupOrder), ['project', 'library', 'zeta', OTHER, REFERENCE]);
+  assert.ok(!EXPANDED.includes(REFERENCE), 'collapsed until the viewer opens it');
+  const entries = paletteEntries(modules);
+  const view = paletteRows(entries, '', new Set(EXPANDED));
+  const headings = view.rows.filter((r) => r.kind === 'group');
+  assert.deepEqual(headings.at(-1), { kind: 'group', key: 'g:reference', group: REFERENCE, count: 2, expanded: false });
+  assert.equal(headings.find((r) => r.group === 'library').count, 1, 'not hidden: only moved out of the library');
+  assert.ok(!view.rows.some((r) => r.key === 'm:lib.svf_core'), 'collapsed: its entries do not show');
+  const searched = paletteRows(entries, 'svf', new Set());
+  assert.deepEqual(keys(searched.rows), ['g:filter', 'm:std.svf', 'g:reference', 'm:lib.svf_core'], 'a search finds them, last');
+  const info = moduleInfo(modules);
+  assert.equal(info.get('lib.svf_core').referenceFor, 'std.svf');
+  assert.equal(info.get('lib.svf_core').group, REFERENCE);
+  assert.equal(info.get('lib.tape_echo').referenceFor, null);
 });

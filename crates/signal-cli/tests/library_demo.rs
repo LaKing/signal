@@ -1,5 +1,5 @@
 //! The M2.10-3 library demo `projects/library-demo` (AC11): it uses every
-//! library composite, and its golden render (8 s, with no fault, no mute and
+//! library composite but the M2.10-4 validation references, and its golden render (8 s, with no fault, no mute and
 //! the output stage's safe peak) lists each with its content hash. How to
 //! update the golden: `docs/testing-and-evaluation.md`. The committed
 //! project is only read.
@@ -34,16 +34,22 @@ fn read_json(path: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
 }
 
-/// AC11: every library composite is in the plan, and no project composite.
+/// The library composites the demo shows: every one but the validation
+/// references (M2.10-4), which exist to be compared with their native types.
+fn demonstrated() -> impl Iterator<Item = &'static str> {
+    Library::builtin()
+        .names()
+        .filter(|n| !Library::is_validation(n))
+}
+
+/// AC11: every library composite (but the validation references) is in the
+/// plan, and no project composite.
 #[test]
 fn the_demo_uses_every_library_composite() {
     let project = Project::load(&demo()).unwrap();
     assert!(project.composites.is_empty());
     let used: Vec<String> = project.library_hashes().into_keys().collect();
-    let all: Vec<String> = Library::builtin()
-        .names()
-        .map(|n| format!("lib.{n}"))
-        .collect();
+    let all: Vec<String> = demonstrated().map(|n| format!("lib.{n}")).collect();
     assert_eq!(used, all);
 }
 
@@ -129,7 +135,7 @@ fn golden_library_demo_8_seconds() {
             .as_object()
             .unwrap()
             .len(),
-        Library::builtin().names().count()
+        demonstrated().count()
     );
 
     let golden = repository().join("tests/golden/library-demo/manifest.json");

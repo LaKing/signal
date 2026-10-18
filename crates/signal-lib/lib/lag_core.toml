@@ -1,0 +1,99 @@
+# `std.lag` rebuilt from core primitives (M2.10-4, the validation suite): a
+# one-pole lag whose time constant depends on the direction of the change.
+#
+#   ms   = rise_ms if in > out[n−1], else fall_ms        (each in [0, 60 000])
+#   c    = 1 − e^r,   r = (−1000/sr)/ms                  (= −1/τ, τ = ms·sr/1000)
+#   y    = out[n−1] + (in − out[n−1])·c
+#   out  = in if ms = 0;  else in if |in − y| < 1e-9;  else y
+#
+# Within a stated tolerance of the native, not bit-exact: the native computes
+# −1/((ms·sr)/1000), but ms·sr and τ exceed the engine's ±1e6 bound on a
+# signal (docs/semantics.md §7) beyond about 20 ms at 48 kHz, so r is
+# computed as (−1000/sr)/ms, a different rounding order; the flush to `in`
+# can then fall one frame apart. Both coefficients are computed outside the
+# loop; the loop picks one by the direction (crates/signal-lib/tests/
+# validation.rs states and measures the tolerance).
+schema_version = 1
+
+[composite]
+name = "lag_core"
+category = "filter"
+description = "std.lag rebuilt from core primitives (validation reference, within 1e-9 of std.lag): a one-pole lag with separate rise and fall times. Input: in. Output: out. Parameters: rise_ms (ms, clamped to [0, 60 000], default 10: used while in rises above out), fall_ms (ms, clamped to [0, 60 000], default 10)."
+
+[instances]
+rise = { module = "std.const", value = 10 }
+fall = { module = "std.const", value = 10 }
+rise_lim = { module = "std.clamp", lo = 0, hi = 60000 }
+fall_lim = { module = "std.clamp", lo = 0, hi = 60000 }
+rate = { module = "std.sample_rate" }
+one = { module = "std.const", value = 1 }
+minus_1000 = { module = "std.const", value = -1000 }
+threshold = { module = "std.const", value = 1e-9 }
+per_ms = { module = "std.div" }
+rise_r = { module = "std.div" }
+rise_e = { module = "std.exp" }
+rise_c = { module = "std.sub" }
+rise_zero = { module = "std.compare", mode = 2 }
+fall_r = { module = "std.div" }
+fall_e = { module = "std.exp" }
+fall_c = { module = "std.sub" }
+fall_zero = { module = "std.compare", mode = 2 }
+y = { module = "std.unit_delay" }
+up = { module = "std.compare", mode = 4 }
+c = { module = "std.select" }
+zero = { module = "std.select" }
+diff = { module = "std.sub" }
+step = { module = "std.mul" }
+moved = { module = "std.add" }
+rest = { module = "std.sub" }
+rest_abs = { module = "std.abs" }
+small = { module = "std.compare", mode = 0 }
+flushed = { module = "std.select" }
+out = { module = "std.select" }
+
+[wiring]
+connections = [
+  { from = "rise.out", to = "rise_lim.in" },
+  { from = "fall.out", to = "fall_lim.in" },
+  { from = "minus_1000.out", to = "per_ms.a" },
+  { from = "rate.sr", to = "per_ms.b" },
+  { from = "per_ms.out", to = "rise_r.a" },
+  { from = "rise_lim.out", to = "rise_r.b" },
+  { from = "rise_r.out", to = "rise_e.in" },
+  { from = "one.out", to = "rise_c.a" },
+  { from = "rise_e.out", to = "rise_c.b" },
+  { from = "rise_lim.out", to = "rise_zero.a" },
+  { from = "per_ms.out", to = "fall_r.a" },
+  { from = "fall_lim.out", to = "fall_r.b" },
+  { from = "fall_r.out", to = "fall_e.in" },
+  { from = "one.out", to = "fall_c.a" },
+  { from = "fall_e.out", to = "fall_c.b" },
+  { from = "fall_lim.out", to = "fall_zero.a" },
+  # The loop: the direction picks the coefficient.
+  { from = "y.out", to = "up.b" },
+  { from = "up.out", to = "c.gate" },
+  { from = "rise_c.out", to = "c.a" },
+  { from = "fall_c.out", to = "c.b" },
+  { from = "up.out", to = "zero.gate" },
+  { from = "rise_zero.out", to = "zero.a" },
+  { from = "fall_zero.out", to = "zero.b" },
+  { from = "y.out", to = "diff.b" },
+  { from = "diff.out", to = "step.a" },
+  { from = "c.out", to = "step.b" },
+  { from = "y.out", to = "moved.a" },
+  { from = "step.out", to = "moved.b" },
+  { from = "moved.out", to = "rest.b" },
+  { from = "rest.out", to = "rest_abs.in" },
+  { from = "rest_abs.out", to = "small.a" },
+  { from = "threshold.out", to = "small.b" },
+  { from = "small.out", to = "flushed.gate" },
+  { from = "moved.out", to = "flushed.b" },
+  { from = "zero.out", to = "out.gate" },
+  { from = "flushed.out", to = "out.b" },
+  { from = "out.out", to = "y.in" },
+]
+
+[exports]
+inputs = { in = ["up.a", "diff.a", "rest.a", "flushed.a", "out.a"] }
+outputs = { out = "out.out" }
+parameters = { rise_ms = "rise.value", fall_ms = "fall.value" }

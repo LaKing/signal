@@ -2959,6 +2959,11 @@ impl Host {
         };
         let registry = &self.registry;
         let order = |module: &str| -> Option<Vec<String>> {
+            // A built-in library composite (`lib.<name>`, ADR 0027 §4): its
+            // exported parameters (no project file can take its name).
+            if let Some(order) = signal_project::library_parameters(module) {
+                return Some(order);
+            }
             if let Some(t) = registry.get(module) {
                 return Some(
                     t.descriptor

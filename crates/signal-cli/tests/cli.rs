@@ -470,7 +470,7 @@ fn modules_lists_library_composites_by_category() {
         .iter()
         .filter(|m| m["library"] == true)
         .collect();
-    assert_eq!(library.len(), 13);
+    assert_eq!(library.len(), 20);
     let echo = library
         .iter()
         .find(|m| m["type_name"] == "lib.tape_echo")
@@ -485,6 +485,24 @@ fn modules_lists_library_composites_by_category() {
         .find(|p| p["name"] == "time_ms")
         .unwrap();
     assert_eq!(time["default"], 375.0);
+    // M2.10-4: only the validation references name a native type.
+    assert!(echo.get("reference_for").is_none());
+    let references: Vec<(&str, &str)> = library
+        .iter()
+        .filter_map(|m| Some((m["type_name"].as_str()?, m["reference_for"].as_str()?)))
+        .collect();
+    assert_eq!(
+        references,
+        [
+            ("lib.adsr_core", "std.adsr"),
+            ("lib.delay_core", "std.delay"),
+            ("lib.lag_core", "std.lag"),
+            ("lib.onepole_core", "std.onepole"),
+            ("lib.osc_core", "std.osc"),
+            ("lib.svf_core", "std.svf"),
+            ("lib.tanh_shaper_core", "std.tanh_shaper"),
+        ]
+    );
 
     let output = signal(&["modules", "--category", "generator", "--json"]);
     assert_eq!(output.status.code(), Some(0));
@@ -516,6 +534,8 @@ fn modules_lists_library_composites_by_category() {
         "  in  gate (Signal, Generic)\n",
         "  out out (Signal, Control)\n",
         "  parameter attack (Control) [ms]: 0 to 60000, default 5, Add\n",
+        "lib.adsr_core (library composite, hash ",
+        "  reference for: std.adsr (a validation reference, not a building block)\n",
     ] {
         assert!(text.contains(line), "{line:?} in\n{text}");
     }

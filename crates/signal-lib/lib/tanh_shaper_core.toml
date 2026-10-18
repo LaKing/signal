@@ -1,0 +1,55 @@
+# `std.tanh_shaper` rebuilt from core primitives without ADAA (M2.10-4, the
+# validation suite): tanh of the midpoint of this frame's and the last
+# frame's drive·in, so it keeps the native's half frame of delay.
+#
+#   u   = drive·in                 (drive clamped to [0.1, 20])
+#   out = tanh((u[n] + u[n−1])/2)  (u[−1] = 0)
+#
+# The expected difference: the native's first-order ADAA is the mean of tanh
+# over the step from u[n−1] to u[n]; this is tanh at the step's midpoint,
+# which differs from that mean by the curvature term, at most about
+# |tanh″|·Δu²/24 (|Δu| = |u[n] − u[n−1]|). The native takes exactly this
+# midpoint form when |Δu| < 1e-6, so the pair is bit-exact there; elsewhere
+# crates/signal-lib/tests/validation.rs asserts |error| ≤ 1e-9 + 0.035·Δu²
+# per frame (the midpoint rule's term, |tanh″| ≤ 4/(3√3) ≈ 0.770 over 24,
+# with a margin) and measures it. The comparison is meaningful only at low
+# drive: the error grows as Δu², and at drive 5 or 20 on full-scale noise it
+# is of the order of the output (0.24, 0.73). A plain tanh(u[n]) would also
+# differ by the half-frame lag.
+#
+# drive·in (a std.mul) and the sum of two frames (a std.add) are signals
+# that fault beyond ±1e6 where the native would not (docs/benchmarks.md,
+# "Validation pairs").
+schema_version = 1
+
+[composite]
+name = "tanh_shaper_core"
+category = "filter"
+description = "std.tanh_shaper rebuilt from core primitives without ADAA (validation reference, within 1e-9 + 0.035·Δu² per frame of std.tanh_shaper, u = drive·in: a meaningful comparison at low drive only, the error growing as the step Δu squared): tanh of the midpoint of drive·in over two frames. Input: in. Output: out, within [-1, 1]. Parameter: drive (clamped to [0.1, 20], default 1)."
+
+[instances]
+drive = { module = "std.const", value = 1 }
+drive_lim = { module = "std.clamp", lo = 0.1, hi = 20 }
+u = { module = "std.mul" }
+u_before = { module = "std.unit_delay" }
+sum = { module = "std.add" }
+two = { module = "std.const", value = 2 }
+mid = { module = "std.div" }
+out = { module = "std.tanh" }
+
+[wiring]
+connections = [
+  { from = "drive.out", to = "drive_lim.in" },
+  { from = "drive_lim.out", to = "u.b" },
+  { from = "u.out", to = "u_before.in" },
+  { from = "u.out", to = "sum.a" },
+  { from = "u_before.out", to = "sum.b" },
+  { from = "sum.out", to = "mid.a" },
+  { from = "two.out", to = "mid.b" },
+  { from = "mid.out", to = "out.in" },
+]
+
+[exports]
+inputs = { in = "u.a" }
+outputs = { out = "out.out" }
+parameters = { drive = "drive.value" }

@@ -1,0 +1,209 @@
+M2.10-4 AC6: instrumented timing of a cycle member's per-frame call path.
+
+MEASUREMENT ONLY. Never apply this to the repository or compile it into a
+delivered build; apply it to a throwaway copy.
+
+Base: commit 30a9d51 (the M2.10-4 delivery's parent). It was measured on
+b481fdb, whose crates/signal-engine and crates/signal-cli/src are byte for
+byte those of 30a9d51 (`git diff b481fdb 30a9d51 -- crates/signal-engine
+crates/signal-cli/src` is empty; M2.10-4 changes neither file the patch
+touches: engine.rs, lib.rs and render.rs). The hunks carry
+line numbers of that engine.rs: on a later commit whose engine.rs moved,
+archive the base instead, or re-apply the sections by hand.
+
+  mkdir /tmp/instr && git archive 30a9d51 | tar -x -C /tmp/instr
+  cd /tmp/instr && patch -p1 < <repo>/docs/measurements/m2.10-4-cycle-timing.patch
+  cargo build --release --locked --offline -p signal-cli --target-dir /tmp/instr-target
+  SIGNAL_PROF_SECTION=<s> /tmp/instr-target/release/signal render <loop project> \
+    --seconds 5 --threads 1 --out /tmp/out
+
+It times, with std::time::Instant, one section per run (SIGNAL_PROF_SECTION,
+0 to 8, listed in prof.rs) of whole_unit's cycle branch and whole_direct (the
+one-thread path), for one-frame calls only, and prints the total, the count
+and the mean at the end of `signal render`. Section 8 is an empty section:
+the timer's own cost, subtracted from the others. docs/benchmarks.md, "The
+cost of cycle units", gives the method, the projects and the results.
+
+--- a/crates/signal-engine/src/engine.rs
++++ b/crates/signal-engine/src/engine.rs
+@@ -4055,15 +4055,21 @@
+         } => {
+             let member = |m: usize| fx.units.members.get(m).copied();
+             for f in a..b {
++                let t0 = crate::prof::start(0);
++                let t7 = crate::prof::start(7);
+                 for i in state_outputs.clone().filter_map(member) {
+                     whole_emit(fx, w, i, f);
+                 }
++                crate::prof::stop(7, t7);
+                 for i in direct.clone().filter_map(member) {
+                     whole_direct(fx, w, i, f, f + 1);
+                 }
++                let t7 = crate::prof::start(7);
+                 for i in state_outputs.clone().filter_map(member) {
+                     whole_absorb(fx, w, i, f);
+                 }
++                crate::prof::stop(7, t7);
++                crate::prof::stop(0, t0);
+             }
+         }
+     }
+@@ -4071,6 +4077,10 @@
+ 
+ /// [`run_direct`] for a sequential segment.
+ fn whole_direct(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, a: usize, b: usize) {
++    let one = b - a == 1;
++    let t8 = if one { crate::prof::start(8) } else { None };
++    crate::prof::stop(8, t8);
++    let t1 = if one { crate::prof::start(1) } else { None };
+     if !w.has(i) {
+         return;
+     }
+@@ -4080,6 +4090,8 @@
+     }
+     let len = b - a;
+     let rollback = len > 1 && w.slots.get(i).is_some_and(|s| s.mode() == Mode::Running);
++    crate::prof::stop(1, t1);
++    let t2 = if one { crate::prof::start(2) } else { None };
+     let mode = {
+         let Some(mut g) = w.gathering(i) else {
+             return;
+@@ -4089,8 +4101,10 @@
+         }
+         gather(fx, &mut g, a, b)
+     };
++    crate::prof::stop(2, t2);
+     match mode {
+         Mode::Running => {
++            let t3 = if one { crate::prof::start(3) } else { None };
+             w.load_call(i, a, len);
+             let Some(slot) = w.slots.get(i) else {
+                 return;
+@@ -4099,15 +4113,20 @@
+             for sink in sinks.iter_mut() {
+                 sink.start_call(len);
+             }
++            crate::prof::stop(3, t3);
++            let t4 = if one { crate::prof::start(4) } else { None };
+             let completed = match w.primitives.get_mut(i) {
+                 Some(Some(Primitive::Direct(module))) => {
+                     let lane = &mut *w.lane;
+                     guarded(fx.hang, (0, i), || {
++                        let t5 = if one { crate::prof::start(5) } else { None };
+                         process(module.as_mut(), (slot, lane, sinks), len);
++                        crate::prof::stop(5, t5);
+                     })
+                 }
+                 _ => true,
+             };
++            crate::prof::stop(4, t4);
+             if !completed {
+                 let Some(mut r) = w.running(i) else {
+                     return;
+@@ -4116,6 +4135,7 @@
+                 w.mute(fx, i, (a, b), rollback, fault);
+                 return;
+             }
++            let t6 = if one { crate::prof::start(6) } else { None };
+             let fault = {
+                 let Some(mut r) = w.running(i) else {
+                     return;
+@@ -4124,6 +4144,7 @@
+                 keep_events(&mut r, a, b, fault.map(|(n, _, _)| n));
+                 fault
+             };
++            crate::prof::stop(6, t6);
+             if let Some(fault) = fault {
+                 w.mute(fx, i, (a, b), rollback, fault);
+             }
+--- a/crates/signal-engine/src/lib.rs
++++ b/crates/signal-engine/src/lib.rs
+@@ -69,6 +69,7 @@
+ mod sync;
+ mod tasks;
+ mod units;
++pub mod prof;
+ mod wake;
+ 
+ pub use cores::{
+--- a/crates/signal-engine/src/prof.rs
++++ b/crates/signal-engine/src/prof.rs
+@@ -0,0 +1,68 @@
++//! M2.10-4 AC6 measurement only (docs/measurements/m2.10-4-cycle-timing.patch):
++//! never part of the delivered engine. Section totals of the per-frame call
++//! path of a cycle member, timed with `Instant`, one section per run
++//! (`SIGNAL_PROF_SECTION`), printed by `signal render` at the end.
++
++use std::sync::OnceLock;
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::time::Instant;
++
++/// The sections: 0 a cycle's frame (all members), 1 view, 2 gather,
++/// 3 load_call and start_call, 4 guarded (process included), 5 process
++/// (the `dyn` call and the primitive's work), 6 commit and keep_events,
++/// 7 a cycle's state-output emits and absorbs, 8 an empty section (timer
++/// calibration, next to section 1's point).
++pub const NAMES: [&str; 9] = [
++    "cycle frame",
++    "view (access.call)",
++    "gather",
++    "load_call + start_call",
++    "guarded (incl. process)",
++    "process (dyn call + primitive)",
++    "commit + keep_events",
++    "state emits + absorbs",
++    "empty (timer)",
++];
++
++static NANOS: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
++static COUNT: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
++static SECTION: OnceLock<usize> = OnceLock::new();
++
++fn section() -> usize {
++    *SECTION.get_or_init(|| {
++        std::env::var("SIGNAL_PROF_SECTION")
++            .ok()
++            .and_then(|s| s.parse().ok())
++            .unwrap_or(usize::MAX)
++    })
++}
++
++/// A start time if `s` is the section timed in this run.
++#[inline(always)]
++pub fn start(s: usize) -> Option<Instant> {
++    (section() == s).then(Instant::now)
++}
++
++/// Adds the time since `t` to section `s`.
++#[inline(always)]
++pub fn stop(s: usize, t: Option<Instant>) {
++    if let Some(t) = t {
++        NANOS[s].fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
++        COUNT[s].fetch_add(1, Ordering::Relaxed);
++    }
++}
++
++/// Prints the timed section's total, count and mean.
++pub fn report() {
++    for s in 0..NAMES.len() {
++        let n = COUNT[s].load(Ordering::Relaxed);
++        if n > 0 {
++            let ns = NANOS[s].load(Ordering::Relaxed);
++            eprintln!(
++                "PROF section {s} {}: {n} calls, {ns} ns, {:.2} ns per call",
++                NAMES[s],
++                ns as f64 / n as f64
++            );
++        }
++    }
++}
+--- a/crates/signal-cli/src/render.rs
++++ b/crates/signal-cli/src/render.rs
+@@ -117,6 +117,7 @@
+     let mut engine = Engine::new(plan, gpu.registry(), config, Vec::new())
+         .map_err(|e| Failure::Internal(e.to_string()))?;
+     let mut rendered = render(&mut engine, frames).map_err(|e| render_failure(&project, dir, e))?;
++    signal_engine::prof::report();
+     (rendered.compute_devices, rendered.placement) = gpu.record();
+     let gpu_warnings = gpu.warnings();
+     let mut provenance = provenance::collect(&provenance::source_dir(), &project.files);

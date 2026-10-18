@@ -1,0 +1,71 @@
+# `std.osc`'s sine shape rebuilt from core primitives (M2.10-4, the
+# validation suite): a naive oscillator on its own phase accumulator, with
+# no polyBLEP.
+#
+#   f    = min(max(freq, 0), sr/2),   Δ = f/sr
+#   out  = sin(2π·(φ + pm))                   (libm::sin, as std.osc's sine)
+#   saw  = 2·fract(φ + pm) − 1                (naive)
+#   φ    ← fract(φ + Δ)                       (φ = 0 on the first frame)
+#
+# `out` is bit-exact with `std.osc` at shape 0: the sine shape has no
+# polyBLEP, and this is the native's formula with its operations in the
+# same order. It is not built on std.phasor (which multiplies by 1/sr where
+# std.osc divides by sr) or std.sin_cycles (another argument reduction).
+# `saw` has no polyBLEP correction, so against `std.osc` at shape 1 it
+# differs by the polyBLEP residual (at most 1) on the frames whose phase is
+# within one step of the wrap, and equals it elsewhere: the expected
+# difference, measured by crates/signal-lib/tests/validation.rs. Square and
+# triangle have no counterpart here.
+#
+# (φ + pm)·2π is a signal, so |pm| beyond about 159 150 cycles faults where
+# the native would not (docs/benchmarks.md, "Validation pairs").
+schema_version = 1
+
+[composite]
+name = "osc_core"
+category = "generator"
+description = "std.osc's sine rebuilt from core primitives (validation reference, bit-exact with std.osc at shape 0), naive: no polyBLEP. Input: pm (phase offset, cycles). Outputs: out (sine), saw (naive saw, which differs from std.osc's band-limited saw near each wrap). Parameter: freq (Hz, limited to [0, sr/2], default 440)."
+
+[instances]
+freq = { module = "std.const", value = 440 }
+rate = { module = "std.sample_rate" }
+nyquist = { module = "std.scale", mul = 0.5 }
+f_pos = { module = "std.max" }
+f = { module = "std.min" }
+delta = { module = "std.div" }
+phase = { module = "std.unit_delay" }
+sum = { module = "std.add" }
+next = { module = "std.fract" }
+cycles = { module = "std.add" }
+tau = { module = "std.const", value = 6.283185307179586 }
+angle = { module = "std.mul" }
+sine = { module = "std.sin" }
+p = { module = "std.fract" }
+saw = { module = "std.scale", mul = 2, add = -1 }
+
+[wiring]
+connections = [
+  { from = "rate.sr", to = "nyquist.in" },
+  { from = "freq.out", to = "f_pos.a" },
+  { from = "f_pos.out", to = "f.a" },
+  { from = "nyquist.out", to = "f.b" },
+  { from = "f.out", to = "delta.a" },
+  { from = "rate.sr", to = "delta.b" },
+  # φ ← fract(φ + Δ)
+  { from = "phase.out", to = "sum.a" },
+  { from = "delta.out", to = "sum.b" },
+  { from = "sum.out", to = "next.in" },
+  { from = "next.out", to = "phase.in" },
+  # out = sin(2π·(φ + pm)), saw = 2·fract(φ + pm) − 1
+  { from = "phase.out", to = "cycles.a" },
+  { from = "cycles.out", to = "angle.a" },
+  { from = "tau.out", to = "angle.b" },
+  { from = "angle.out", to = "sine.in" },
+  { from = "cycles.out", to = "p.in" },
+  { from = "p.out", to = "saw.in" },
+]
+
+[exports]
+inputs = { pm = "cycles.b" }
+outputs = { out = "sine.out", saw = "saw.out" }
+parameters = { freq = "freq.value" }

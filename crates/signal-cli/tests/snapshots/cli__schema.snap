@@ -279,6 +279,7 @@ expression: text
         },
         {
           "enum": [
+            "lib.adsr_core",
             "lib.analog_clap",
             "lib.analog_cymbal",
             "lib.analog_hat",
@@ -288,9 +289,15 @@ expression: text
             "lib.analog_tom",
             "lib.ar_env",
             "lib.crossfade",
+            "lib.delay_core",
             "lib.ladder_voice",
+            "lib.lag_core",
             "lib.lfo_shapes",
+            "lib.onepole_core",
+            "lib.osc_core",
             "lib.stereo_width",
+            "lib.svf_core",
+            "lib.tanh_shaper_core",
             "lib.tape_echo"
           ]
         },

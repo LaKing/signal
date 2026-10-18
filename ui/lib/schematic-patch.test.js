@@ -167,3 +167,20 @@ test('the palette lists primitives then composites, searched by name and descrip
   const grouped = paletteEntries({ primitives: [{ module: 'std.svf', category: 'filter', description: 'State-variable filter' }], composites: [{ module: 'kick', description: null, composite: true }] });
   assert.deepEqual(grouped.map((e) => [e.module, e.group, e.description]), [['std.svf', 'filter', 'State-variable filter'], ['kick', 'project', null]]);
 });
+
+test('a library composite from `modules` is added as any type: lib.<name>, named by its last segment', () => {
+  const modules = {
+    primitives: [],
+    composites: [
+      { module: 'drums', composite: true, description: null },
+      { module: 'lib.tape_echo', composite: true, library: true, category: 'delay', description: 'A tape echo.' },
+      { module: 'lib.svf_core', composite: true, library: true, category: 'filter', description: 'std.svf rebuilt.', reference_for: 'std.svf' },
+    ],
+  };
+  const entries = paletteEntries(modules);
+  assert.deepEqual(entries.map((e) => [e.module, e.group]), [['drums', 'project'], ['lib.tape_echo', 'library'], ['lib.svf_core', 'reference']]);
+  assert.equal(entries[1].label, 'A tape echo.');
+  const name = defaultName('lib.tape_echo', new Set(['tape_echo']));
+  assert.equal(name, 'tape_echo_2');
+  assert.deepEqual(addInstance(name, 'lib.tape_echo', { x: 1, y: 2 }), { op: 'instance.add', name: 'tape_echo_2', module: 'lib.tape_echo', x: 1, y: 2 });
+});
