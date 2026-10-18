@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 signal-core = { workspace = true }
 signal-graph = { workspace = true }
+# ADR 0027 §4: the built-in library that `lib.<name>` references resolve to.
+signal-lib = { workspace = true }
 # Sessions (`session`): replay renders through the engine, and the recorder
 # takes its reports and provenance.
 signal-engine = { workspace = true }

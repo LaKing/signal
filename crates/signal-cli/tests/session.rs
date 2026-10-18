@@ -12,7 +12,7 @@ use signal_core::{Curve, EventPayload, Frame, InstanceAddress, PortAddress, Regi
 use signal_engine::{Engine, EngineConfig, EngineError, Provenance};
 use signal_output::{Render, render_with};
 use signal_project::session::{self, EditKind, Session, SessionRecorder, replay};
-use signal_project::{Project, ProjectEdit, diff};
+use signal_project::{Project, ProjectEdit, SourceFile, diff};
 
 /// The frames of the scripted session.
 const FRAMES: u64 = 3_000;
@@ -59,6 +59,7 @@ fn provenance() -> Provenance {
         signal_dirty: Some(false),
         rustc_version: "rustc (test)".to_owned(),
         project_file_hashes: Default::default(),
+        library_composite_hashes: Default::default(),
         cargo_lock_hash: "0000000000000000".to_owned(),
     }
 }
@@ -1066,4 +1067,69 @@ fn ideal_replay_is_labelled_and_changes_nothing_without_latent_modules() {
     assert_eq!(ideal["boundaries"], "ideal");
     assert_eq!(ideal["manifest"]["ideal"], true);
     assert_eq!(hashes(&ideal), hashes(&exact));
+}
+
+/// A project with these instance and connection lines, its sink at gain 0.25.
+fn library_version_project(instances: &str, connections: &str) -> Project {
+    let text = format!(
+        "schema_version = 1\n\n[project]\nname = \"lib-swap\"\nsample_rate = 48000\nseed = 3\n\n\
+         [instances]\na = {{ module = \"std.sine_osc\", freq = 220 }}\n{instances}\
+         out = {{ module = \"std.audio_out\", gain = 0.25 }}\n\n\
+         [wiring]\nconnections = [\n{connections}]\n"
+    );
+    Project::from_sources(vec![SourceFile {
+        path: "project.toml".to_owned(),
+        text,
+    }])
+    .unwrap()
+}
+
+/// M2.10-3 (ADR 0027 §4): a library composite that only a swap brings in
+/// (version 1, not version 0) is recorded in `[provenance]`'s
+/// `library_composite_hashes`, as the union over every version; `signal
+/// replay` compares it with this build's library and warns only when they
+/// differ (here: a recording whose `lib.crossfade` had another hash).
+#[test]
+fn a_library_composite_a_swap_brings_in_is_recorded_and_compared() {
+    let registry = registry();
+    let v0 = library_version_project("", "{ from = \"a.out\", to = \"out.l\" },\n");
+    let v1 = library_version_project(
+        "b = { module = \"std.sine_osc\", freq = 330 }\nx = { module = \"lib.crossfade\" }\n",
+        "{ from = \"a.out\", to = \"x.a\" },\n{ from = \"b.out\", to = \"x.b\" },\n\
+         { from = \"x.out\", to = \"out.l\" },\n",
+    );
+    assert!(v0.library_hashes().is_empty());
+    let mut recorder = SessionRecorder::new(&v0, &registry, 48_000, 3, provenance()).unwrap();
+    recorder.applied_swap(Frame(1_000), &v1, &registry).unwrap();
+    recorder.set_end(2_000).unwrap();
+    let dir = out_dir("library-swap");
+    recorder.write(&dir).unwrap();
+
+    let session = Session::load(&dir, &registry).unwrap();
+    let recorded = session.provenance.library_composite_hashes.clone();
+    assert_eq!(
+        recorded.keys().collect::<Vec<_>>(),
+        ["lib.crossfade"],
+        "{recorded:?}"
+    );
+    assert_eq!(recorded, v1.library_hashes());
+    assert_eq!(recorded, session.library_hashes());
+
+    let differ = |json: &Value| {
+        json["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("library composites differ"))
+    };
+    let json = replayed(&dir, &[]);
+    assert!(!differ(&json), "{json}");
+
+    let hash = recorded["lib.crossfade"].clone();
+    rewrite(&dir, "session.toml", |text| {
+        assert!(text.contains(&hash), "{text}");
+        text.replace(&hash, "0123456789abcdef")
+    });
+    let json = replayed(&dir, &[]);
+    assert!(differ(&json), "{json}");
 }

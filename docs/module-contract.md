@@ -203,6 +203,36 @@ Transcendental functions are `libm`'s (ADR 0007). These types are not rate-gener
 - `min` and `max` are commutative: on aarch64 `f64::min` and `f64::max` compile to `FMINNM` and `FMAXNM`, which order −0 below +0, so `min(±0, ∓0)` = −0 and `max(±0, ∓0)` = +0 in either order (a unit test pins it; Rust leaves this unspecified, so another target may differ).
 - `abs`, `clamp` and `scale` have one signal operand.
 
+## The library
+
+The **built-in library** (ADR 0027 §4, M2.10-3) is composites shipped with Signal, referenced as `lib.<name>` (`project-format.md` §4). They live in the crate `signal-lib` as `crates/signal-lib/lib/<name>.toml`, embedded with `include_str!`; `signal-project` resolves `lib.` references and reads them by the rules of any composite file. They are ordinary composites (ADR 0010: no logic), so a library composite costs what its primitives cost (ADR 0027 §2) and runs through the same engine, determinism and fault guards. `signal modules` lists them after the primitive types (`--category` included), each with its category, description, content hash, ports and parameters (the composite's own defaults); `signal schema` accepts their references.
+
+**What a library composite must be.**
+- It uses `std.*` and other `lib.*` modules only, never a project composite; no `gpu` pin, no `pattern`. A cycle among library composites is refused when a plan is built.
+- It declares its `category` (the ADR 0027 vocabulary, `signal_std::category`) and a `description` that names every export with its unit or range and default (`crates/signal-lib/tests/library.rs` checks both and that each plans on its own).
+- **Safe levels.** At its defaults, on its stimulus, its output stays within ±1 (`tests/library.rs`); any exported value that scales a signal is clamped inside it (a drum's `velocity` to [0, 2], the tape echo's `feedback` to [0, 0.75]), so no setting makes it fault: `tests/bounds.rs` renders each one with every parameter at its range's minimum and maximum, all together and one at a time, and finds no fault and no output beyond ±10⁶. Whether a level is pleasant is a listener's judgement.
+- **Ordered operands** where association matters (`std.sub`, `std.add`, `std.mul` rather than a fan-in sum of two exported inputs), so the output never depends on the source addresses outside the composite (ADR 0027, Context).
+- **Headroom.** Arithmetic is arranged so that no intermediate exceeds the inputs or the result: weights before sums, halves before differences (`lib.crossfade`, `lib.stereo_width`; `tests/library.rs` renders both at ±10⁶). A result within the engine's bound never faults on the way.
+- **Pinned output.** `tests/pinned.rs` renders each on a fixed stimulus at 48 kHz, long enough for its whole signal path (`tests/common/mod.rs`: `frames` and `cases`; a composite whose outputs or settings a single render does not reach, as `lfo_shapes`' shapes, is pinned by several renders), and compares the audio hash with `tests/pinned.toml`. A new library composite needs a stimulus that reaches every export. **Versioning** (`crates/signal-lib/CHANGELOG.md`): the library is the app's MAJOR.MINOR; an output change is a new name, or a MINOR change with a changelog entry under the current version naming the composite and its new hash (the test fails without it); earlier versions' sections are history, frozen by their hashes (`tests/released.toml`); names are never reused; a removal warns for one MINOR first.
+
+**Provenance.** A render manifest lists every library composite the plan instantiates with its hash (`library_composite_hashes`, `project-format.md` §7); a session records the library composites of every plan version and the library version (`session-format.md` §2), and `signal replay` warns when this build's differ; a `.signal` archive records the library version in its comment (`project-format.md` §10).
+
+**Vendoring.** `signal vendor <project> lib.<name> [--as <copy>]` copies a library composite and those it uses into the project's `composites/`, where they are the project's own, editable text, and rewrites the project's references to them; it never overwrites a file: a dependency the project already has with exactly the copy's text (vendored before) is kept, and any other file of a copy's name refuses the whole operation. It writes all or nothing as far as the file system allows (temporary files, linked or renamed into place, the project's files last, the project loaded again, and everything taken back on a failure) (`project-format.md` §4).
+
+**The first composites** (M2.10-3; `signal modules --category <group>` gives each one's exports):
+
+| Composite | Category | What |
+|---|---|---|
+| `lib.ladder_voice` | `generator` | A monophonic three-oscillator voice with a ladder low-pass, two contours and glide (from the M2.11 studio's voice) |
+| `lib.tape_echo` | `delay` | A delay with wow, flutter and a darkened, saturated feedback whose loop gain stays below 1 |
+| `lib.analog_kick`, `lib.analog_snare`, `lib.analog_clap`, `lib.analog_hat`, `lib.analog_tom`, `lib.analog_rim`, `lib.analog_cymbal` | `generator` | Synthesised drum voices (from the M2.11 studio's drum machine); the hat has `closed` and `open` inputs, the closed choking the open |
+| `lib.lfo_shapes` | `generator` | Sine, triangle, saw, square and sample-and-hold random from one `std.phasor`, with `rate` and `shape` |
+| `lib.ar_env` | `envelope` | Attack-release from a gate through `std.lag` |
+| `lib.crossfade` | `core` | `a·(1 − mix) + b·mix`, the mix clamped to [0, 1] |
+| `lib.stereo_width` | `core` | Mid/side width, `width` clamped to [0, 2] |
+
+`projects/library-demo` uses every one (`testing-and-evaluation.md`). Not yet: the schematic palette and opening a library composite in the UI (ADR 0027 §6), and the validation of library composites against native references (ADR 0027 §4, M2.10-4).
+
 ## Testing a primitive: the contract suite
 
 The contract suite, `crates/signal-contract`, checks the rules on this page and in `realtime-rules.md` for every primitive in `crates/` and `lab/`. It is a dev-dependency only. Its own tests (`crates/signal-contract/tests/self_test.rs`) are a complete example.

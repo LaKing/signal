@@ -43,6 +43,22 @@ expression: text
       "additionalProperties": false,
       "description": "`[composite]`.",
       "properties": {
+        "category": {
+          "default": null,
+          "description": "The palette group (ADR 0027 §1: `core`, `generator`, `filter`,\n`envelope`, `delay`, `physical`, `event`, `visual`, `io`), as a\nprimitive type's descriptor has one. Required in a library composite.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "default": null,
+          "description": "What the composite does and what each export means. Required in a\nlibrary composite.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "description": "The composite's name: its file name without `.toml`, used as the module\nreference of its instances.",
           "type": "string"
@@ -262,11 +278,28 @@ expression: text
           ]
         },
         {
+          "enum": [
+            "lib.analog_clap",
+            "lib.analog_cymbal",
+            "lib.analog_hat",
+            "lib.analog_kick",
+            "lib.analog_rim",
+            "lib.analog_snare",
+            "lib.analog_tom",
+            "lib.ar_env",
+            "lib.crossfade",
+            "lib.ladder_voice",
+            "lib.lfo_shapes",
+            "lib.stereo_width",
+            "lib.tape_echo"
+          ]
+        },
+        {
           "pattern": "^[a-z][a-z0-9_]*$",
           "type": "string"
         }
       ],
-      "description": "A module reference: a registered primitive type, or the name of a composite in composites/<name>.toml."
+      "description": "A module reference: a registered primitive type, a library composite (lib.<name>, ADR 0027 §4), or the name of a composite in composites/<name>.toml."
     },
     "NoteEntry": {
       "additionalProperties": false,

@@ -1,0 +1,41 @@
+# A crossfade between two signals: out = a·(1 − mix) + b·mix, with the mix
+# clamped to [0, 1], so 0 is `a`, 1 is `b` (exactly: the other is weighted
+# by 0), and the output always lies between them (a linear, not
+# equal-power, fade).
+#
+#   a ─► × (1 − mix) ─┐
+#   b ─► × mix ─────── + ─► out
+#
+# Each input is weighted before the sum, so no intermediate exceeds the
+# larger input: inputs within the engine's bound (±1e6) never fault on the
+# way. Ordered operands throughout (std.mul, std.add), so the result never
+# depends on the order of fan-in sources outside the composite (ADR 0027 §1).
+schema_version = 1
+
+[composite]
+name = "crossfade"
+category = "core"
+description = "A linear crossfade of two signals: out = a·(1 − mix) + b·mix. Inputs: a, b. Output: out, always between a and b. Parameter: mix (clamped to [0, 1]: 0 is a, 1 is b; default 0.5)."
+
+[instances]
+mix = { module = "std.const", value = 0.5 }
+mix_lim = { module = "std.clamp", lo = 0, hi = 1 }
+keep = { module = "std.scale", mul = -1, add = 1 }
+weighted_a = { module = "std.mul" }
+weighted_b = { module = "std.mul" }
+sum = { module = "std.add" }
+
+[wiring]
+connections = [
+  { from = "mix.out", to = "mix_lim.in" },
+  { from = "mix_lim.out", to = "keep.in" },
+  { from = "keep.out", to = "weighted_a.b" },
+  { from = "mix_lim.out", to = "weighted_b.b" },
+  { from = "weighted_a.out", to = "sum.a" },
+  { from = "weighted_b.out", to = "sum.b" },
+]
+
+[exports]
+inputs = { a = "weighted_a.a", b = "weighted_b.a" }
+outputs = { out = "sum.out" }
+parameters = { mix = "mix.value" }

@@ -1,0 +1,49 @@
+# Stereo width by mid/side: the side (difference) of a pair scaled by
+# `width`, the mid (sum) kept:
+#
+#   out_l = (l + r)/2 + w·(l − r)/2,  out_r = (l + r)/2 − w·(l − r)/2
+#
+# computed as the change from the input, with w clamped to [0, 2]:
+#
+#   d = l/2 − r/2,  k = w − 1
+#   out_l = l + k·d,  out_r = r − k·d
+#
+# Width 1 passes the pair unchanged (k = 0), 0 makes it mono (both channels
+# the mid), 2 doubles the side. The halves are taken before the difference,
+# so d is within the larger input and k·d within the outputs' half
+# difference: inputs and outputs within the engine's bound (±1e6) never
+# fault on the way. Ordered operands throughout (ADR 0027 §1).
+schema_version = 1
+
+[composite]
+name = "stereo_width"
+category = "core"
+description = "Stereo width by mid/side. Inputs: l, r. Outputs: out_l, out_r. Parameter: width (clamped to [0, 2]; 0 mono, 1 unchanged, 2 the side doubled; default 1). With width w the outputs are (l + r)/2 ± w·(l − r)/2, so at most |l| + |r| in magnitude."
+
+[instances]
+width = { module = "std.const", value = 1 }
+width_lim = { module = "std.clamp", lo = 0, hi = 2 }
+change = { module = "std.scale", mul = 1, add = -1 }
+half_l = { module = "std.scale", mul = 0.5, add = 0 }
+half_r = { module = "std.scale", mul = 0.5, add = 0 }
+diff = { module = "std.sub" }
+side = { module = "std.mul" }
+left = { module = "std.add" }
+right = { module = "std.sub" }
+
+[wiring]
+connections = [
+  { from = "width.out", to = "width_lim.in" },
+  { from = "width_lim.out", to = "change.in" },
+  { from = "half_l.out", to = "diff.a" },
+  { from = "half_r.out", to = "diff.b" },
+  { from = "diff.out", to = "side.a" },
+  { from = "change.out", to = "side.b" },
+  { from = "side.out", to = "left.b" },
+  { from = "side.out", to = "right.b" },
+]
+
+[exports]
+inputs = { l = ["half_l.in", "left.a"], r = ["half_r.in", "right.a"] }
+outputs = { out_l = "left.out", out_r = "right.out" }
+parameters = { width = "width.value" }

@@ -1,0 +1,99 @@
+# A tape echo: a delay line whose time wanders with a slow wow and a faster
+# flutter, and a feedback path that darkens and saturates each repeat.
+#
+#   in ─┬──────────────────────────────────────────── dry (×(1 − mix)) ─┐
+#       └─► delay ─┬─► wet (×mix) ─────────────────────────────────────── out
+#           ▲      └─► tone (onepole lp) ─► sat (tanh, drive 2) ─► ×0.5 ─► ×feedback ─┐
+#           └─────────────────────────────────────────────────────────────────────────┘
+#   delay.time_ms = time_ms + wow·lfo(0.5 Hz) + flutter·(noise through two 5 Hz low-passes)
+#
+# The delay closes the loop on its own: std.delay is state-output (ADR 0016 §2).
+#
+# Loop gain below 1 at every setting. Every exported value is limited inside
+# the composite, so whatever the file or a knob sets:
+# - the feedback factor is clamped to [0, 0.75] (`fb_lim`);
+# - the tone cutoff is 1 Hz plus a value clamped to [0, 4999] (`tone_lim`),
+#   so at most 5 kHz, below sr/4 at every rate from 20 kHz up. A TPT one-pole
+#   low-pass below sr/4 updates its state as a convex combination, so its
+#   output never exceeds the peak of its input (gain 1, also while the cutoff
+#   moves);
+# - the saturation is fixed: tanh_shaper at drive 2 then ×0.5. The ADAA output
+#   is a mean of tanh over a segment, so |0.5·tanh_shaper(2x)| ≤ max(|x[n]|, |x[n−1]|);
+# - std.delay's 4-point Hermite interpolation weighs its four taps with
+#   absolute weights summing to at most 1.25 (at a fractional delay of ½;
+#   1 at whole-frame delays), whatever the time or its modulation.
+# So one trip round the loop multiplies the peak by at most
+# 1.25 × 1 × 1 × 0.75 = 0.9375 < 1, and the small-signal gain is at most 0.75:
+# the repeats always die away, and the loop holds at most 1/(1 − 0.9375) = 16
+# times the input's peak. A time below one frame is clamped to one frame by
+# std.delay; the mix is clamped to [0, 1].
+schema_version = 1
+
+[composite]
+name = "tape_echo"
+category = "delay"
+description = "A tape-style echo: a delay line whose time wanders with a slow wow and a faster flutter, and a feedback path that darkens and saturates each repeat; the loop gain stays below 1 at every setting, so the repeats always die away. Input: in. Output: out (the dry and wet signals crossfaded by mix; at most 16 times the input's peak inside the loop). Parameters: time_ms (the repeat time in ms, default 375), feedback (clamped to [0, 0.75], default 0.45), tone (the feedback low-pass cutoff above 1 Hz, clamped to [0, 4999], default 2800), wow (ms of time wander at 0.5 Hz, default 1.2), flutter (the flutter's depth, default 15: about 0.11 ms RMS), mix (clamped to [0, 1], default 0.3)."
+
+[instances]
+# Dotted eighth at 120 bpm: 3/4 of a 500 ms beat.
+delay = { module = "std.delay", time_ms = 375 }
+
+# Wow: ±1.2 ms at 0.5 Hz. Flutter: white noise through two 5 Hz one-poles
+# measures 0.0076 RMS (0.028 peak over 30 s at 48 kHz), so ×15 moves the time
+# by about 0.11 ms RMS.
+wow_lfo = { module = "std.lfo", freq_hz = 0.5 }
+wow_depth = { module = "std.scale", mul = 1.2, add = 0 }
+flutter_noise = { module = "std.noise" }
+flutter_lp1 = { module = "std.onepole", cutoff_hz = 5 }
+flutter_lp2 = { module = "std.onepole", cutoff_hz = 5 }
+flutter_depth = { module = "std.scale", mul = 15, add = 0 }
+
+tone_amt = { module = "std.const", value = 2800 }
+tone_lim = { module = "std.clamp", lo = 0, hi = 4999 }
+tone = { module = "std.onepole", cutoff_hz = 1 }
+sat = { module = "std.tanh_shaper", drive = 2 }
+sat_norm = { module = "std.scale", mul = 0.5, add = 0 }
+feedback = { module = "std.const", value = 0.45 }
+fb_lim = { module = "std.clamp", lo = 0, hi = 0.75 }
+fb_vca = { module = "std.mul" }
+
+mix_amt = { module = "std.const", value = 0.3 }
+mix_lim = { module = "std.clamp", lo = 0, hi = 1 }
+dry_amt = { module = "std.scale", mul = -1, add = 1 }
+wet = { module = "std.mul" }
+dry = { module = "std.mul" }
+sum = { module = "std.add" }
+
+[wiring]
+connections = [
+  # Repeat time, wow and flutter.
+  { from = "wow_lfo.out", to = "wow_depth.in" },
+  { from = "wow_depth.out", to = "delay.time_ms" },
+  { from = "flutter_noise.out", to = "flutter_lp1.in" },
+  { from = "flutter_lp1.lp", to = "flutter_lp2.in" },
+  { from = "flutter_lp2.lp", to = "flutter_depth.in" },
+  { from = "flutter_depth.out", to = "delay.time_ms" },
+  # The feedback path: darken, saturate, scale, back into the delay.
+  { from = "tone_amt.out", to = "tone_lim.in" },
+  { from = "tone_lim.out", to = "tone.cutoff_hz" },
+  { from = "delay.out", to = "tone.in" },
+  { from = "tone.lp", to = "sat.in" },
+  { from = "sat.out", to = "sat_norm.in" },
+  { from = "sat_norm.out", to = "fb_vca.a" },
+  { from = "feedback.out", to = "fb_lim.in" },
+  { from = "fb_lim.out", to = "fb_vca.b" },
+  { from = "fb_vca.out", to = "delay.in" },
+  # Dry and wet, crossfaded by the mix.
+  { from = "mix_amt.out", to = "mix_lim.in" },
+  { from = "mix_lim.out", to = "wet.b" },
+  { from = "mix_lim.out", to = "dry_amt.in" },
+  { from = "dry_amt.out", to = "dry.b" },
+  { from = "delay.out", to = "wet.a" },
+  { from = "wet.out", to = "sum.a" },
+  { from = "dry.out", to = "sum.b" },
+]
+
+[exports]
+inputs = { in = ["delay.in", "dry.a"] }
+outputs = { out = "sum.out" }
+parameters = { time_ms = "delay.time_ms", feedback = "feedback.value", tone = "tone_amt.value", wow = "wow_depth.mul", flutter = "flutter_depth.mul", mix = "mix_amt.value" }

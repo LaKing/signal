@@ -454,6 +454,7 @@ struct SessionOut<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     frames: Option<u64>,
     conversion: &'static str,
+    library_version: &'static str,
     provenance: &'a Provenance,
     machine: &'a Machine,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -478,6 +479,8 @@ struct SessionIn {
     frames: Option<u64>,
     #[serde(default)]
     conversion: Option<toml::Spanned<String>>,
+    #[serde(default)]
+    library_version: Option<String>,
     provenance: Provenance,
     #[serde(default)]
     machine: Option<Machine>,
@@ -523,6 +526,10 @@ fn error(file: &str, line: usize, column: usize, message: String) -> Diagnostic 
 /// A diagnostic of version `version`'s project, with its path relative to the
 /// session directory.
 fn rebased(version: u64, diagnostic: Diagnostic) -> Diagnostic {
+    if crate::is_library_file(&diagnostic.file) {
+        // A library composite's file is the program's, in no version.
+        return diagnostic;
+    }
     Diagnostic {
         file: format!("{}/{}", version_dir(version), diagnostic.file),
         ..diagnostic
@@ -902,6 +909,8 @@ impl SessionRecorder {
         mut provenance: Provenance,
     ) -> Result<SessionRecorder, SessionError> {
         provenance.project_file_hashes = file_hashes(&initial.files);
+        // Version 0's; every swap adds its version's (`applied_swap_as`).
+        provenance.library_composite_hashes = initial.library_hashes();
         if i64::try_from(seed).is_err() {
             return Err(SessionError::Refused(format!(
                 "seed {seed} does not fit a session file (at most 2^63 - 1)"
@@ -1076,6 +1085,11 @@ impl SessionRecorder {
         plan.version = version;
         self.state.swap(&plan, version);
         self.versions.push((project.files.clone(), plan));
+        // ADR 0027 §4: the library composites of every version, so a swap
+        // that brings one in is recorded too (`Session::library_hashes`).
+        self.provenance
+            .library_composite_hashes
+            .extend(project.library_hashes());
         self.last_swap = Some(frame);
         self.next_seq = self.next_seq.max(seq.saturating_add(1));
         self.edits.push(Edit {
@@ -1206,6 +1220,7 @@ impl SessionRecorder {
             frames: self.end,
             // The real-time runner's conversion: what the device received.
             conversion: Conversion::Device.name(),
+            library_version: signal_lib::VERSION,
             provenance: &self.provenance,
             machine: &self.machine,
             boundaries: boundaries.map(|b| BoundariesToml {
@@ -1572,6 +1587,10 @@ pub struct Session {
     /// `conversion`), which replay applies; `None` for a session written
     /// before it was recorded, which replays as before.
     pub conversion: Option<Conversion>,
+    /// The built-in library's version (the app's MAJOR.MINOR, ADR 0027 §4)
+    /// of the build that recorded it; `None` for a session written before
+    /// it was recorded.
+    pub library_version: Option<String>,
     /// The build that recorded it.
     pub provenance: Provenance,
     /// The machine that recorded it (M2.7-8); `None` for a session written
@@ -1807,6 +1826,7 @@ impl Session {
             seed: file.seed,
             frames: file.frames,
             conversion: conversion.flatten(),
+            library_version: file.library_version,
             provenance: file.provenance,
             machine: file.machine,
             versions,
@@ -1819,6 +1839,17 @@ impl Session {
     /// Whether any version has a module with a declared latency.
     pub fn latent(&self) -> bool {
         latent(&self.plans.iter().collect::<Vec<_>>())
+    }
+
+    /// The library composites (ADR 0027 §4) that any version's plan
+    /// instantiates, with their content hashes as this build's library has
+    /// them: what `[provenance]`'s `library_composite_hashes` records for the
+    /// recording build, and what `signal replay` compares it with.
+    pub fn library_hashes(&self) -> BTreeMap<String, String> {
+        self.versions
+            .iter()
+            .flat_map(Project::library_hashes)
+            .collect()
     }
 
     /// The default replay length: the recorded end, else the last command's

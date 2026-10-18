@@ -1,0 +1,122 @@
+# The M2.10-3 library demo: every composite of the built-in library
+# (`signal modules`, the `lib.*` entries) in one patch, at 120 bpm. No
+# project composites: everything but the sequencers and the master stage is
+# `lib.*`.
+#
+# Signal flow:
+#
+#   transport.tick ─► melody (patterns/melody.toml) ─ hz, gate, velocity ─► voice (lib.ladder_voice)
+#   voice ─┬─────────────────────────── fade.a ─┐
+#          └─► echo (lib.tape_echo) ─── fade.b ─┴─ fade (lib.crossfade) ─► bus_l.c, bus_r.c
+#   transport.tick ─► drums (patterns/drums.toml) ─ t1 … t8 ─► lib.analog_kick, _snare, _clap,
+#                                                             _hat (closed, open), _tom, _rim, _cymbal
+#   lfo (lib.lfo_shapes, square) ─► env (lib.ar_env) ─► × pad (a 110 Hz saw) ─► bus_l.d, bus_r.d
+#   bus_l, bus_r ─► width (lib.stereo_width) ─► dc ─► limiter (tanh) ─► out (gain 0.25)
+#
+# Each drum lane goes to its voice's trigger and to its `velocity` parameter,
+# as in projects/studio. The drums sit a little left, the pad a little right,
+# and `width` widens the pair.
+#
+# Safe gain: each channel's limiter is a tanh, whose output never exceeds 1,
+# and the output gain is 0.25, so the project never plays above 0.25
+# (−12 dBFS) whatever the composites do.
+schema_version = 1
+
+[project]
+name = "library-demo"
+sample_rate = 48000
+seed = 13
+
+[instances]
+# The tempo; ticks at 96 per beat for the sequencers.
+transport = { module = "std.transport", bpm = 120, ppq = 96 }
+melody = { module = "std.note_seq", pattern = "melody", ppq = 96 }
+drums = { module = "std.step_seq8", pattern = "drums", ppq = 96, accent_level = 1.5 }
+
+voice = { module = "lib.ladder_voice", cutoff = 400, emphasis = 0.5 }
+echo = { module = "lib.tape_echo", mix = 1, feedback = 0.4 }
+fade = { module = "lib.crossfade", mix = 0.35 }
+
+kick = { module = "lib.analog_kick" }
+snare = { module = "lib.analog_snare" }
+clap = { module = "lib.analog_clap" }
+hats = { module = "lib.analog_hat" }
+tom = { module = "lib.analog_tom" }
+rim = { module = "lib.analog_rim" }
+cymbal = { module = "lib.analog_cymbal" }
+
+# A pad, gated by a slow square LFO through an attack-release envelope.
+lfo = { module = "lib.lfo_shapes", rate = 0.5, shape = 3 }
+env = { module = "lib.ar_env", attack = 120, release = 400 }
+pad = { module = "std.osc", shape = 1, freq = 110 }
+pad_amp = { module = "std.mul" }
+
+drum_a = { module = "std.mix" }
+drum_b = { module = "std.mix" }
+# Drums on a and b, the voice on c, the pad on d.
+bus_l = { module = "std.mix", gain_a = 0.5, gain_b = 0.45, gain_c = 0.5, gain_d = 0.15 }
+bus_r = { module = "std.mix", gain_a = 0.4, gain_b = 0.35, gain_c = 0.5, gain_d = 0.25 }
+width = { module = "lib.stereo_width", width = 1.3 }
+dc_l = { module = "std.dc_block" }
+dc_r = { module = "std.dc_block" }
+limiter_l = { module = "std.tanh_shaper", drive = 1 }
+limiter_r = { module = "std.tanh_shaper", drive = 1 }
+out = { module = "std.audio_out", gain = 0.25 }
+
+[wiring]
+connections = [
+  { from = "transport.tick", to = "melody.tick" },
+  { from = "transport.tick", to = "drums.tick" },
+  # The voice, dry and echoed.
+  { from = "melody.hz", to = "voice.hz" },
+  { from = "melody.gate", to = "voice.gate" },
+  { from = "melody.velocity", to = "voice.velocity" },
+  { from = "voice.out", to = "echo.in" },
+  { from = "voice.out", to = "fade.a" },
+  { from = "echo.out", to = "fade.b" },
+  # The drums: each lane triggers its voice and sets its velocity.
+  { from = "drums.t1", to = "kick.trigger" },
+  { from = "drums.t1", to = "kick.velocity" },
+  { from = "drums.t2", to = "snare.trigger" },
+  { from = "drums.t2", to = "snare.velocity" },
+  { from = "drums.t3", to = "clap.trigger" },
+  { from = "drums.t3", to = "clap.velocity" },
+  { from = "drums.t4", to = "hats.closed" },
+  { from = "drums.t4", to = "hats.closed_velocity" },
+  { from = "drums.t5", to = "hats.open" },
+  { from = "drums.t5", to = "hats.open_velocity" },
+  { from = "drums.t6", to = "tom.trigger" },
+  { from = "drums.t6", to = "tom.velocity" },
+  { from = "drums.t7", to = "rim.trigger" },
+  { from = "drums.t7", to = "rim.velocity" },
+  { from = "drums.t8", to = "cymbal.trigger" },
+  { from = "drums.t8", to = "cymbal.velocity" },
+  { from = "kick.out", to = "drum_a.a" },
+  { from = "snare.out", to = "drum_a.b" },
+  { from = "clap.out", to = "drum_a.c" },
+  { from = "hats.out", to = "drum_a.d" },
+  { from = "tom.out", to = "drum_b.a" },
+  { from = "rim.out", to = "drum_b.b" },
+  { from = "cymbal.out", to = "drum_b.c" },
+  # The pad.
+  { from = "lfo.out", to = "env.gate" },
+  { from = "pad.out", to = "pad_amp.a" },
+  { from = "env.out", to = "pad_amp.b" },
+  # The buses and the master stage.
+  { from = "drum_a.out", to = "bus_l.a" },
+  { from = "drum_b.out", to = "bus_l.b" },
+  { from = "fade.out", to = "bus_l.c" },
+  { from = "pad_amp.out", to = "bus_l.d" },
+  { from = "drum_a.out", to = "bus_r.a" },
+  { from = "drum_b.out", to = "bus_r.b" },
+  { from = "fade.out", to = "bus_r.c" },
+  { from = "pad_amp.out", to = "bus_r.d" },
+  { from = "bus_l.out", to = "width.l" },
+  { from = "bus_r.out", to = "width.r" },
+  { from = "width.out_l", to = "dc_l.in" },
+  { from = "width.out_r", to = "dc_r.in" },
+  { from = "dc_l.out", to = "limiter_l.in" },
+  { from = "dc_r.out", to = "limiter_r.in" },
+  { from = "limiter_l.out", to = "out.l" },
+  { from = "limiter_r.out", to = "out.r" },
+]

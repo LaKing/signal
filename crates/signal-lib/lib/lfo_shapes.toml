@@ -1,0 +1,94 @@
+# Five LFO shapes from one phasor p (cycles, [0, 1)), and one of them chosen
+# by `shape`. Core primitives only (ADR 0027 §2: acyclic; the phasor holds the
+# one recurrence).
+#
+#   p ─┬─► sin_cycles ─────────────────────── sine      sin(2π·p)
+#      ├─► ×2 − 1 ─────────────────────────── saw       2p − 1
+#      ├─► − ½ ─► abs ─► ×(−4) + 1 ────────── triangle  1 − 4·|p − ½|
+#      ├─► compare(p ≥ ½) ─► ×2 − 1 ───────── square    +1 on the second half, −1 on the first
+#      └─ wrap ─► random [−1, 1) ──────────── random    a new value each cycle, held
+#      (frame 0: const 1 ─► edge.rise, and reset, also trigger random)
+#
+#   shape (clamped to [0, 4], rounded) ─► select chain ─► out
+#
+# Every output is within [−1, 1]. `shape` 0 is the sine, 1 the triangle, 2
+# the saw, 3 the square, 4 the random; a value between two is rounded to the
+# nearer (ties to even), so a knob between positions never mixes shapes.
+#
+# The random draws at every cycle's start: on frame 0 (`start`: a constant 1
+# through std.edge, whose gate is off before frame 0, so it rises once, on
+# frame 0), on every wrap, and on every reset (the phasor emits no wrap on a
+# reset frame, so `reset` triggers the draw itself). So the first cycle holds
+# a random value too, never a constant −1.
+schema_version = 1
+
+[composite]
+name = "lfo_shapes"
+category = "generator"
+description = "A low-frequency oscillator with five shapes from one phasor. Outputs: sine (sin 2πp), triangle (1 − 4|p − ½|), saw (2p − 1), square (−1 then +1 each cycle) and random (a uniform value in [−1, 1) drawn at each cycle's start, the first frame and every reset included, and held), all within [−1, 1], and out, the shape chosen by `shape`. Input: reset (trigger: the phase restarts at 0 and random draws a new value). Parameters: rate (Hz, 0 to the oscillator limit, default 1), shape (0 sine, 1 triangle, 2 saw, 3 square, 4 random; clamped to [0, 4] and rounded; default 0)."
+
+[instances]
+phasor = { module = "std.phasor", freq = 1 }
+sine = { module = "std.sin_cycles" }
+saw = { module = "std.scale", mul = 2, add = -1 }
+tri_centre = { module = "std.scale", mul = 1, add = -0.5 }
+tri_abs = { module = "std.abs" }
+triangle = { module = "std.scale", mul = -4, add = 1 }
+half = { module = "std.const", value = 0.5 }
+square_gate = { module = "std.compare", mode = 3 }
+square = { module = "std.scale", mul = 2, add = -1 }
+random = { module = "std.random", lo = -1, hi = 1 }
+start = { module = "std.const", value = 1 }
+start_edge = { module = "std.edge" }
+
+shape = { module = "std.const", value = 0 }
+shape_lim = { module = "std.clamp", lo = 0, hi = 4 }
+shape_step = { module = "std.round" }
+# Each select passes its `a` while the rounded shape is above its threshold.
+above_0 = { module = "std.scale", mul = 1, add = -0.5 }
+above_1 = { module = "std.scale", mul = 1, add = -1.5 }
+above_2 = { module = "std.scale", mul = 1, add = -2.5 }
+above_3 = { module = "std.scale", mul = 1, add = -3.5 }
+pick_0 = { module = "std.select" }
+pick_1 = { module = "std.select" }
+pick_2 = { module = "std.select" }
+pick_3 = { module = "std.select" }
+
+[wiring]
+connections = [
+  { from = "phasor.phase", to = "sine.in" },
+  { from = "phasor.phase", to = "saw.in" },
+  { from = "phasor.phase", to = "tri_centre.in" },
+  { from = "tri_centre.out", to = "tri_abs.in" },
+  { from = "tri_abs.out", to = "triangle.in" },
+  { from = "phasor.phase", to = "square_gate.a" },
+  { from = "half.out", to = "square_gate.b" },
+  { from = "square_gate.out", to = "square.in" },
+  { from = "phasor.wrap", to = "random.trigger" },
+  { from = "start.out", to = "start_edge.in" },
+  { from = "start_edge.rise", to = "random.trigger" },
+  # The chosen shape: 0 sine, 1 triangle, 2 saw, 3 square, 4 random.
+  { from = "shape.out", to = "shape_lim.in" },
+  { from = "shape_lim.out", to = "shape_step.in" },
+  { from = "shape_step.out", to = "above_0.in" },
+  { from = "shape_step.out", to = "above_1.in" },
+  { from = "shape_step.out", to = "above_2.in" },
+  { from = "shape_step.out", to = "above_3.in" },
+  { from = "above_3.out", to = "pick_3.gate" },
+  { from = "random.out", to = "pick_3.a" },
+  { from = "square.out", to = "pick_3.b" },
+  { from = "above_2.out", to = "pick_2.gate" },
+  { from = "pick_3.out", to = "pick_2.a" },
+  { from = "saw.out", to = "pick_2.b" },
+  { from = "above_1.out", to = "pick_1.gate" },
+  { from = "pick_2.out", to = "pick_1.a" },
+  { from = "triangle.out", to = "pick_1.b" },
+  { from = "above_0.out", to = "pick_0.gate" },
+  { from = "pick_1.out", to = "pick_0.a" },
+  { from = "sine.out", to = "pick_0.b" },
+]
+
+[exports]
+inputs = { reset = ["phasor.reset", "random.trigger"] }
+outputs = { out = "pick_0.out", sine = "sine.out", triangle = "triangle.out", saw = "saw.out", square = "square.out", random = "random.out" }
+parameters = { rate = "phasor.freq", shape = "shape.value" }

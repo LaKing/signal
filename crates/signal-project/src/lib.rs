@@ -26,10 +26,14 @@
 //!   `graph` (ADR 0026 §1); [`schematic`]: the schematic's positions in
 //!   `ui/schematic.toml` (ADR 0026 §3); [`patch`]: patching from the
 //!   schematic, written as text (ADR 0026 §6).
+//! - [`Library`]: the built-in library (ADR 0027 §4) that `lib.<name>`
+//!   module references resolve to; [`vendor`]: `signal vendor`, a library
+//!   composite copied into a project.
 
 pub mod archive;
 mod diagnostic;
 mod diff;
+mod library;
 pub mod live;
 mod locate;
 mod model;
@@ -40,6 +44,7 @@ mod schema;
 pub mod schematic;
 pub mod session;
 mod structure;
+pub mod vendor;
 mod write;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,7 +53,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use signal_core::{InstanceAddress, Registry, Table};
+use signal_core::{InstanceAddress, LIBRARY_PREFIX, Registry, Table};
 use signal_graph::{
     CompositeDef, ConnectionDef, ExecutionPlan, Exports, InputExport, InstanceDef, OutputExport,
     ParameterExport, build_plan,
@@ -57,10 +62,12 @@ use toml::Spanned;
 
 pub use diagnostic::{Diagnostic, Severity, located};
 pub use diff::{DiffOptions, ParameterChange, ProjectEdit, diff, diff_with};
+pub use library::{LIBRARY_FOLDER, Library, LibraryComposite, is_library_file};
 pub use pattern::{
     MAX_LANES, MAX_LENGTH, MAX_NOTES, MAX_STEP, MAX_STEPS, NOTES, PATTERNS, STEPS, pattern_kind,
 };
 pub use schema::schema;
+pub use structure::library_modules;
 pub use write::{WriteError, write_parameter};
 
 use locate::{
@@ -138,6 +145,10 @@ pub struct Project {
     pub root: CompositeDef,
     /// Every composite in `composites/`, in name order.
     pub composites: Vec<CompositeDef>,
+    /// The library composites (`lib.<name>`, ADR 0027 §4) the project's
+    /// files reference, transitively, in name order. Not project files:
+    /// they are in neither `files` nor `composites`.
+    pub library: Vec<LibraryComposite>,
     /// Every pattern in `patterns/` by name, with the index of its file.
     patterns: BTreeMap<String, (usize, Pattern)>,
     spans: SourceMap,
@@ -250,8 +261,17 @@ impl Project {
     }
 
     /// Loads a project from in-memory files: `project.toml` and any
-    /// `composites/<name>.toml`.
-    pub fn from_sources(mut files: Vec<SourceFile>) -> Result<Project, Vec<Diagnostic>> {
+    /// `composites/<name>.toml`, its `lib.<name>` references resolved in the
+    /// built-in library.
+    pub fn from_sources(files: Vec<SourceFile>) -> Result<Project, Vec<Diagnostic>> {
+        Project::from_sources_with(files, Library::builtin())
+    }
+
+    /// [`from_sources`](Project::from_sources) with `library` as the library.
+    pub fn from_sources_with(
+        mut files: Vec<SourceFile>,
+        library: &Library,
+    ) -> Result<Project, Vec<Diagnostic>> {
         files.sort_by(|a, b| {
             (a.path != PROJECT_FILE, &a.path).cmp(&(b.path != PROJECT_FILE, &b.path))
         });
@@ -266,6 +286,7 @@ impl Project {
         }
         let mut builder = Builder {
             files: &files,
+            library,
             diagnostics: Vec::new(),
         };
         let root = builder.project();
@@ -294,14 +315,35 @@ impl Project {
         let names: BTreeSet<&str> = composites.iter().map(|(c, _)| c.name.as_str()).collect();
         builder.check_pins(&root_spans, &names);
         builder.check_patterns(&root_spans, &names, &pattern_names);
+        builder.check_shadowing(&root_spans, &names);
         for (_, spans) in &composites {
             builder.check_pins(spans, &names);
             builder.check_patterns(spans, &names, &pattern_names);
+            builder.check_shadowing(spans, &names);
+        }
+
+        // ADR 0027 §4: the library composites the files reference,
+        // transitively, read after the project's files (their diagnostics'
+        // file indices follow the project's).
+        let referenced = std::iter::once(&root).chain(composites.iter().map(|(c, _)| c));
+        let mut combined = files.clone();
+        combined.extend(library.closure(referenced));
+        let mut builder = Builder {
+            files: &combined,
+            library,
+            diagnostics: builder.diagnostics,
+        };
+        let used: Vec<_> = (files.len()..combined.len())
+            .filter_map(|file| builder.composite(file))
+            .collect();
+        for (def, spans) in &used {
+            builder.check_library(def, spans);
         }
         if !builder.diagnostics.is_empty() {
             return Err(builder.diagnostics);
         }
-        let (composites, spans): (Vec<_>, Vec<_>) = composites.into_iter().unzip();
+        let library_sources = combined.split_off(files.len());
+        let (composites, spans): (Vec<_>, Vec<_>) = composites.into_iter().chain(used).unzip();
         let spans = SourceMap {
             root: root_spans,
             composites: composites
@@ -310,6 +352,19 @@ impl Project {
                 .zip(spans)
                 .collect(),
         };
+        let (library, composites): (Vec<_>, Vec<_>) = composites
+            .into_iter()
+            .partition(|c| c.name.starts_with(LIBRARY_PREFIX));
+        let library = library
+            .into_iter()
+            .zip(library_sources)
+            .map(|(def, source)| LibraryComposite {
+                name: def.name.clone(),
+                hash: format!("{:016x}", signal_core::fnv1a64(source.text.as_bytes())),
+                source,
+                def,
+            })
+            .collect();
         Ok(Project {
             name: settings.name,
             sample_rate: settings.sample_rate,
@@ -317,6 +372,7 @@ impl Project {
             files,
             root,
             composites,
+            library,
             patterns,
             spans,
             settings_at: (settings.sample_rate_at, settings.seed_at),
@@ -335,7 +391,10 @@ impl Project {
             map: &self.spans,
             root: Root::Project,
         };
-        let planned = match build_plan(&self.root, &self.composites, registry, PLAN_VERSION) {
+        // The project's composites and the library composites it references
+        // (ADR 0027 §4), resolved alike by their module references.
+        let definitions = self.definitions();
+        let planned = match build_plan(&self.root, &definitions, registry, PLAN_VERSION) {
             Ok(plan) => {
                 let mut warnings = Vec::new();
                 for warning in &plan.warnings {
@@ -360,21 +419,22 @@ impl Project {
         };
 
         let reachable = self.reachable_composites();
-        for composite in &self.composites {
+        for composite in &definitions {
             if reachable.contains(composite.name.as_str()) {
                 continue;
             }
+            // A library composite's instance is named by its name without
+            // `lib.` (an instance name has no dot).
             let synthetic = CompositeDef {
                 name: String::new(),
                 instances: vec![InstanceDef {
-                    name: composite.name.clone(),
+                    name: locate::instance_name(&composite.name).to_owned(),
                     module: composite.name.clone(),
                     parameters: BTreeMap::new(),
                 }],
                 ..CompositeDef::default()
             };
-            if let Err(graph_errors) =
-                build_plan(&synthetic, &self.composites, registry, PLAN_VERSION)
+            if let Err(graph_errors) = build_plan(&synthetic, &definitions, registry, PLAN_VERSION)
             {
                 let locator = Locator {
                     map: &self.spans,
@@ -390,6 +450,7 @@ impl Project {
             }
         }
 
+        self.check_categories(registry, &mut errors);
         let tables = self.tables(registry, &mut errors);
         match planned {
             Some(mut planned) if errors.is_empty() => {
@@ -402,6 +463,63 @@ impl Project {
                 Ok(planned)
             }
             _ => Err(errors),
+        }
+    }
+
+    /// The project's composites, then the library composites it references.
+    fn definitions(&self) -> Vec<CompositeDef> {
+        let library = self.library.iter().map(|l| &l.def);
+        self.composites.iter().chain(library).cloned().collect()
+    }
+
+    /// The library composites the plan instantiates, transitively, with
+    /// their content hashes (ADR 0027 §4, ADR 0008): the render manifest's
+    /// `library_composite_hashes`. A library composite only an unused
+    /// project composite references is not listed.
+    pub fn library_hashes(&self) -> BTreeMap<String, String> {
+        let reached = self.reachable_composites();
+        self.library
+            .iter()
+            .filter(|l| reached.contains(l.name.as_str()))
+            .map(|l| (l.name.clone(), l.hash.clone()))
+            .collect()
+    }
+
+    /// The `category` a composite (of the project or the library) declares.
+    pub fn category(&self, composite: &str) -> Option<&str> {
+        let spans = self.spans.composites.get(composite)?;
+        spans.category.as_ref().map(|(c, _)| c.as_str())
+    }
+
+    /// The `description` a composite (of the project or the library) gives.
+    pub fn description(&self, composite: &str) -> Option<&str> {
+        self.spans.composites.get(composite)?.description.as_deref()
+    }
+
+    /// ADR 0027 §1: a composite's `category` is one of the palette groups,
+    /// those the registry's types carry (the vocabulary is the library's
+    /// that registers them, never this crate's).
+    fn check_categories(&self, registry: &Registry, errors: &mut Vec<Diagnostic>) {
+        let known: BTreeSet<&str> = registry
+            .iter()
+            .filter_map(|t| t.descriptor.category)
+            .collect();
+        for def in self.spans.composites.values() {
+            let Some((category, span)) = &def.category else {
+                continue;
+            };
+            if !known.contains(category.as_str()) {
+                let list: Vec<&str> = known.iter().copied().collect();
+                let location = Location {
+                    file: def.file,
+                    offset: span.start,
+                };
+                let message = format!(
+                    "unknown category `{category}`; categories: {}",
+                    list.join(", ")
+                );
+                push_unique(errors, self.diagnostic(Severity::Error, location, message));
+            }
         }
     }
 
@@ -494,12 +612,14 @@ impl Project {
         self.diagnostic(Severity::Error, Location { file: 0, offset }, message)
     }
 
-    /// The composites reachable from the project root through instance module
-    /// references.
+    /// The composites, of the project and the library, reachable from the
+    /// project root through instance module references.
     fn reachable_composites(&self) -> BTreeSet<&str> {
+        let library = self.library.iter().map(|l| &l.def);
         let by_name: BTreeMap<&str, &CompositeDef> = self
             .composites
             .iter()
+            .chain(library)
             .map(|c| (c.name.as_str(), c))
             .collect();
         let mut reached = BTreeSet::new();
@@ -520,7 +640,13 @@ impl Project {
     }
 
     fn diagnostic(&self, severity: Severity, location: Location, message: String) -> Diagnostic {
-        match self.files.get(location.file) {
+        // Library files are numbered after the project's.
+        let library = location
+            .file
+            .checked_sub(self.files.len())
+            .and_then(|i| self.library.get(i))
+            .map(|l| &l.source);
+        match self.files.get(location.file).or(library) {
             Some(file) => {
                 Diagnostic::at(severity, &file.path, &file.text, location.offset, message)
             }
@@ -562,6 +688,7 @@ struct Settings {
 /// Parses files into definitions and span tables, collecting diagnostics.
 struct Builder<'f> {
     files: &'f [SourceFile],
+    library: &'f Library,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -678,6 +805,72 @@ impl Builder<'_> {
         }
     }
 
+    /// ADR 0027 §4: a project composite does not shadow a library one. A
+    /// direct reference to `lib.x` where the project also has a composite
+    /// `x` is an error naming both (references inside library composites do
+    /// not count: `signal vendor` may copy one of their dependencies alone).
+    fn check_shadowing(&mut self, def: &DefSpans, composites: &BTreeSet<&str>) {
+        for (name, instance) in &def.instances {
+            let Some(bare) = instance.module.strip_prefix(LIBRARY_PREFIX) else {
+                continue;
+            };
+            if composites.contains(bare) && self.library.get(bare).is_some() {
+                self.error(
+                    def.file,
+                    instance.module_span.start,
+                    format!(
+                        "{name}: `{LIBRARY_PREFIX}{bare}` is a library composite, and composites/{bare}.toml is a project composite named like it; a project composite may not shadow a library one: use `{bare}` (the project's) or rename composites/{bare}.toml"
+                    ),
+                );
+            }
+        }
+    }
+
+    /// ADR 0027 §4: a library composite uses `std.*` and `lib.*` modules
+    /// only, never a project composite, and takes no `gpu` pin or `pattern`
+    /// (both name things of a project or a machine); it declares its
+    /// category and gives a description.
+    fn check_library(&mut self, def: &CompositeDef, spans: &DefSpans) {
+        if spans.category.is_none() {
+            self.error(
+                spans.file,
+                spans.name.start,
+                format!("library composite `{}` declares no `category`", def.name),
+            );
+        }
+        if spans.description.is_none() {
+            self.error(
+                spans.file,
+                spans.name.start,
+                format!("library composite `{}` gives no `description`", def.name),
+            );
+        }
+        for (name, instance) in &spans.instances {
+            let module = instance.module.as_str();
+            if !module.starts_with("std.") && !module.starts_with(LIBRARY_PREFIX) {
+                self.error(
+                    spans.file,
+                    instance.module_span.start,
+                    format!(
+                        "{name}: `{module}`: the library composite `{}` may use std.* and {LIBRARY_PREFIX}* modules only, never a project composite",
+                        def.name
+                    ),
+                );
+            }
+            for (key, value) in [("gpu", &instance.gpu), ("pattern", &instance.pattern)] {
+                if let Some((_, span)) = value {
+                    self.error(
+                        spans.file,
+                        span.start,
+                        format!(
+                            "{name}: a library composite takes no `{key}`: it names something of a project or a machine"
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
     /// A pattern file (ADR 0028 §1–2): its name and what it holds.
     fn pattern(&mut self, file: usize) -> Option<(String, (usize, Pattern))> {
         let source = self.files.get(file)?;
@@ -755,14 +948,37 @@ impl Builder<'_> {
         let parsed: CompositeFile = self.parse(file)?;
         self.schema_version(file, &parsed.schema_version);
         let path = &self.files.get(file)?.path;
+        // A library composite (`signal-lib:lib/<name>.toml`) is defined as
+        // `lib.<name>`.
+        let (folder, in_library) = match library::library_stem(path) {
+            Some(_) => (library::LIBRARY_FOLDER, true),
+            None => (COMPOSITES, false),
+        };
         let stem = path
-            .strip_prefix(&format!("{COMPOSITES}/"))
+            .strip_prefix(&format!("{folder}/"))
             .and_then(|p| p.strip_suffix(".toml"))
             .unwrap_or(path)
             .to_owned();
         let name = parsed.composite.name;
         let name_span = name.span();
         let name = name.into_inner();
+        // ADR 0027 §4: a project composite named as a library one.
+        let shadowed = [name.as_str(), stem.as_str()]
+            .into_iter()
+            .filter_map(|n| n.strip_prefix(LIBRARY_PREFIX))
+            .find(|bare| self.library.get(bare).is_some())
+            .filter(|_| !in_library)
+            .map(str::to_owned);
+        if let Some(bare) = shadowed {
+            self.error(
+                file,
+                name_span.start,
+                format!(
+                    "{path}: a project composite cannot be named `{LIBRARY_PREFIX}{bare}`: that is the library composite `{LIBRARY_PREFIX}{bare}`, which a project composite may not shadow; `signal vendor <project> {LIBRARY_PREFIX}{bare}` copies it into composites/{bare}.toml"
+                ),
+            );
+            return None;
+        }
         if !valid_name(&name) {
             self.error(
                 file,
@@ -775,17 +991,28 @@ impl Builder<'_> {
             self.error(
                 file,
                 name_span.start,
-                format!("composite `{name}` must be defined in composites/{name}.toml, not {path}"),
+                format!("composite `{name}` must be defined in {folder}/{name}.toml, not {path}"),
             );
         }
-        Some(definition(
+        let defined = if in_library {
+            format!("{LIBRARY_PREFIX}{name}")
+        } else {
+            name
+        };
+        let (def, mut spans) = definition(
             file,
-            name,
+            defined,
             name_span,
             parsed.instances,
             parsed.wiring,
             parsed.exports,
-        ))
+        );
+        spans.category = parsed
+            .composite
+            .category
+            .map(|c| (c.get_ref().clone(), c.span()));
+        spans.description = parsed.composite.description;
+        Some((def, spans))
     }
 }
 
@@ -805,6 +1032,8 @@ fn definition(
         instances: BTreeMap::new(),
         connections: Vec::new(),
         exports: Vec::new(),
+        category: None,
+        description: None,
     };
     let mut def = CompositeDef {
         name,

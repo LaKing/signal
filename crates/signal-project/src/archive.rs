@@ -9,6 +9,10 @@
 //! relative paths only, regular files only, at most [`Limits::DEFAULT`]
 //! entries and unpacked bytes, and `project.toml` at the root. A refused
 //! archive leaves nothing behind, and the [`ArchiveError`] names the reason.
+//!
+//! The archive's comment records the built-in library's version (ADR 0027
+//! §4) of the build that packed it, `signal-library <MAJOR.MINOR>`
+//! ([`library_version`]): provenance only, never a refusal, and no file.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -24,6 +28,9 @@ use crate::PROJECT_FILE;
 
 /// A project file's extension.
 pub const EXTENSION: &str = "signal";
+
+/// What the archive comment says before the library version.
+const LIBRARY_COMMENT: &str = "signal-library ";
 
 /// The file type bits of a Unix mode.
 const TYPE_BITS: u32 = 0o170_000;
@@ -217,6 +224,9 @@ pub fn pack(dir: &Path) -> Result<Vec<u8>, ArchiveError> {
         .unix_permissions(0o644)
         .system(System::Unix);
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    writer
+        .set_comment(format!("{LIBRARY_COMMENT}{}", crate::Library::VERSION))
+        .map_err(zip_error)?;
     let mut total = 0u64;
     for (name, path) in &files {
         let bytes = fs::read(path).map_err(io_error(path))?;
@@ -297,6 +307,22 @@ pub struct Unpacked {
     pub files: Vec<String>,
     /// Their bytes together.
     pub bytes: u64,
+    /// The library version the archive records ([`library_version`]).
+    pub library_version: Option<String>,
+}
+
+/// The built-in library's version (the app's MAJOR.MINOR, ADR 0027 §4) that
+/// the archive `bytes` records in its comment; `None` when it records none
+/// (an archive packed before it was recorded, or by another tool).
+pub fn library_version(bytes: &[u8]) -> Result<Option<String>, ArchiveError> {
+    let archive = ZipArchive::new(Cursor::new(bytes)).map_err(zip_error)?;
+    Ok(comment_version(archive.comment()))
+}
+
+fn comment_version(comment: &[u8]) -> Option<String> {
+    let comment = std::str::from_utf8(comment).ok()?;
+    let version = comment.strip_prefix(LIBRARY_COMMENT)?.trim();
+    (!version.is_empty()).then(|| version.to_owned())
 }
 
 /// Why an entry's name is refused, if it is.
@@ -428,6 +454,7 @@ fn extract(
     Ok(Unpacked {
         files: files.iter().map(|(_, name)| name.clone()).collect(),
         bytes: total,
+        library_version: comment_version(archive.comment()),
     })
 }
 

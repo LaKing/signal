@@ -1,0 +1,5 @@
+# The released changelog sections (`tests/pinned.rs`): each earlier
+# `## MAJOR.MINOR` section of CHANGELOG.md with the FNV-1a 64 of its text
+# (the lines after the heading, trimmed). When a new MINOR starts, add the
+# section it ends here (the test prints the line); from then on it is
+# history and must not change. Empty while 0.1 is the current version.

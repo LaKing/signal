@@ -26,6 +26,7 @@ fn provenance() -> Provenance {
         project_file_hashes: [("project.toml".to_owned(), "0123456789abcdef".to_owned())]
             .into_iter()
             .collect(),
+        library_composite_hashes: Default::default(),
         cargo_lock_hash: "fedcba9876543210".to_owned(),
     }
 }

@@ -8,10 +8,10 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
-use signal_core::{Direction, ParameterDescriptor, PortDescriptor, Registry};
+use signal_core::{Direction, LIBRARY_PREFIX, ParameterDescriptor, PortDescriptor, Registry};
 use signal_graph::{CompositeDef, ExecutionPlan, GraphWarning, InstanceDef};
 
-use crate::Project;
+use crate::{Diagnostic, Library, PROJECT_FILE, Project, SourceFile};
 
 /// What a written endpoint (`instance.port`) finally reaches.
 enum Endpoint {
@@ -82,6 +82,11 @@ impl Project {
         let top = walk.level(&self.root, "", false);
         let mut composites = Map::new();
         for (name, prefix) in &first {
+            // A library composite's instance shows its interface; its inside
+            // is not opened in the UI yet (ADR 0027 §6, a later issue).
+            if name.starts_with(signal_core::LIBRARY_PREFIX) {
+                continue;
+            }
             let Some(def) = walk.by_name.get(name.as_str()) else {
                 continue;
             };
@@ -155,7 +160,11 @@ impl Project {
         let mut instances = BTreeMap::new();
         let (mut outputs, mut inputs, mut parameters) =
             (ByExport::new(), ByExport::new(), ByExport::new());
-        for def in std::iter::once(&self.root).chain(&self.composites) {
+        let library = self.library.iter().map(|l| &l.def);
+        for def in std::iter::once(&self.root)
+            .chain(&self.composites)
+            .chain(library.clone())
+        {
             let name = def.name.as_str();
             let by_name = def.instances.iter().map(|i| (i.name.as_str(), i));
             instances.insert(name, by_name.collect());
@@ -178,6 +187,7 @@ impl Project {
             by_name: self
                 .composites
                 .iter()
+                .chain(library)
                 .map(|c| (c.name.as_str(), c))
                 .collect(),
             instances,
@@ -203,6 +213,63 @@ impl Project {
         });
         instances
     }
+}
+
+/// The built-in library's composites as `signal modules` lists them (ADR 0027
+/// §4), in name order: each one's `module` (`lib.<name>`), `library: true`,
+/// its `category`, `description` and content `hash`, and its ports and
+/// parameters as an instance of it shows them (the interface `graph` gives an
+/// instance), without `address`.
+pub fn library_modules(registry: &Registry) -> Result<Vec<Value>, Vec<Diagnostic>> {
+    let instances: String = Library::builtin()
+        .names()
+        .map(|n| format!("{n} = {{ module = \"{LIBRARY_PREFIX}{n}\" }}\n"))
+        .collect();
+    let text =
+        format!("schema_version = 1\n\n[project]\nname = \"library\"\n\n[instances]\n{instances}");
+    let project = Project::from_sources(vec![SourceFile {
+        path: PROJECT_FILE.to_owned(),
+        text,
+    }])?;
+    let walk = project.walk(registry, BTreeMap::new());
+    let unaddressed = |mut value: Value| {
+        if let Value::Object(fields) = &mut value {
+            fields.remove("address");
+        }
+        value
+    };
+    Ok(project
+        .library
+        .iter()
+        .map(|l| {
+            let (ports, mut parameters) = walk.interface(&l.def, &|_| String::new());
+            // The default is the value the composite sets, where it sets one.
+            for parameter in &mut parameters {
+                let set = parameter["name"]
+                    .as_str()
+                    .and_then(|name| l.def.exports.parameters.iter().find(|e| e.name == name))
+                    .and_then(|export| export.to.first())
+                    .and_then(|target| target.split_once('.'))
+                    .and_then(|(instance, key)| {
+                        let found = l.def.instances.iter().find(|i| i.name == instance)?;
+                        found.parameters.get(key).copied()
+                    });
+                if let (Some(value), Value::Object(fields)) = (set, parameter) {
+                    fields.insert("default".to_owned(), json!(value));
+                }
+            }
+            json!({
+                "module": l.name,
+                "composite": true,
+                "library": true,
+                "category": project.category(&l.name),
+                "description": project.description(&l.name),
+                "hash": l.hash,
+                "ports": ports.into_iter().map(unaddressed).collect::<Vec<_>>(),
+                "parameters": parameters.into_iter().map(unaddressed).collect::<Vec<_>>(),
+            })
+        })
+        .collect())
 }
 
 impl Walk<'_> {

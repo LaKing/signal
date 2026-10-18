@@ -31,6 +31,18 @@ pub(crate) struct DefSpans {
     pub(crate) instances: BTreeMap<String, InstanceSpans>,
     pub(crate) connections: Vec<ConnectionSpans>,
     pub(crate) exports: Vec<ExportSpans>,
+    /// A composite's `category` (ADR 0027 §1) and the value's span.
+    pub(crate) category: Option<(String, Span)>,
+    /// A composite's `description`.
+    pub(crate) description: Option<String>,
+}
+
+/// The instance name a synthetic root gives the composite `name`: the name
+/// itself, or a library composite's without its `lib.` (an instance name has
+/// no dot).
+pub(crate) fn instance_name(name: &str) -> &str {
+    name.strip_prefix(signal_core::LIBRARY_PREFIX)
+        .unwrap_or(name)
 }
 
 /// The spans of one instance.
@@ -251,7 +263,7 @@ impl<'a> Locator<'a> {
             Root::Project => (&self.map.root, segments),
             Root::Composite(name) => {
                 let (first, rest) = segments.split_first()?;
-                if first != name {
+                if first != instance_name(name) {
                     return None;
                 }
                 (self.map.composites.get(name)?, rest)

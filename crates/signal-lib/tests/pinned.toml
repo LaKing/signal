@@ -1,0 +1,18 @@
+# The pinned render hash of every library composite (`tests/pinned.rs`):
+# FNV-1a 64 of the audio at 48 kHz, seed 1, on its fixed stimulus at its
+# defaults, for as long as its whole signal path needs (`common::frames`);
+# for `lfo_shapes`, of its five per-shape renders' hashes. A changed row needs a CHANGELOG.md entry naming the
+# composite with the new hash (CHANGELOG.md, "Versioning").
+analog_clap = "998f4706c835f181"
+analog_cymbal = "8aa09a97621232e1"
+analog_hat = "7e038d7e1126fb35"
+analog_kick = "339b880fcac1f285"
+analog_rim = "4d858832caea2739"
+analog_snare = "07993fd454049105"
+analog_tom = "be2e4e676af0efa1"
+ar_env = "9fccd4e2baaad1fd"
+crossfade = "85b54d5bd8141c4d"
+ladder_voice = "b10bcbec2ba1d575"
+lfo_shapes = "3cdbb0eb89ca6716"
+stereo_width = "4398c461e58ecc48"
+tape_echo = "2229c4b8e2b245b9"

@@ -1,0 +1,70 @@
+# The snare: two tuned sines (`tune` and 1.83 × `tune`) with a short pitch
+# drop and their own decay, plus noise through a state-variable high-pass with
+# a longer "snappy" envelope.
+#
+#   tune ─► sine a, sine b (+ pitch_env) ─► tones × body_env·velocity ─────────┐
+#   noise ─► hp (`tone`) × snap_env·velocity ─► × snappy ───────────────────── add ─► level
+#
+# The velocity scales the envelopes (control signals), not the audio, which
+# is the same sound with fewer stages between audio and generic ports.
+# The velocity is clamped to [0, 2] (an accent of 1.5 on a level of 1 fits),
+# so no setting can scale the voice beyond twice its plain level.
+schema_version = 1
+
+[composite]
+name = "analog_snare"
+category = "generator"
+description = "An analogue-style snare drum: two tuned sines (tune and 1.83 × tune) with a short pitch drop, and noise through a state-variable high-pass with a longer snappy envelope. Input: trigger. Output: out (about ±1 at the defaults). Parameters: tune (Hz, default 185), tone (the noise high-pass cutoff in Hz, default 3500), snappy (the noise's level, clamped to [0, 2], default 0.7), decay (ms, the noise's decay, default 150), level (dB, default −4), velocity (clamped to [0, 2], default 1)."
+
+[instances]
+tune = { module = "std.const", value = 185 }
+pitch_env = { module = "std.exp_env", attack_ms = 0, decay_ms = 15 }
+osc_a = { module = "std.sine_osc", freq = 0 }
+osc_b = { module = "std.sine_osc", freq = 0 }
+tones = { module = "std.mix", gain_a = 0.6, gain_b = 0.4 }
+body_env = { module = "std.exp_env", attack_ms = 0, decay_ms = 90 }
+body_amp = { module = "std.mul" }
+body = { module = "std.mul" }
+noise = { module = "std.noise" }
+noise_hp = { module = "std.svf", cutoff_hz = 3500, q = 0.7 }
+snap_env = { module = "std.exp_env", attack_ms = 0, decay_ms = 150 }
+snap_amp = { module = "std.mul" }
+snap = { module = "std.mul" }
+snappy = { module = "std.const", value = 0.7 }
+snappy_lim = { module = "std.clamp", lo = 0, hi = 2 }
+snappy_vca = { module = "std.mul" }
+velocity = { module = "std.const", value = 1 }
+velocity_lim = { module = "std.clamp", lo = 0, hi = 2 }
+sum = { module = "std.add" }
+level = { module = "std.gain", db = -4 }
+
+[wiring]
+connections = [
+  { from = "velocity.out", to = "velocity_lim.in" },
+  { from = "tune.out", to = "osc_a.freq" },
+  { from = "tune.out", to = "osc_b.freq", scale = 1.83 },
+  { from = "pitch_env.out", to = "osc_a.freq", scale = 60 },
+  { from = "pitch_env.out", to = "osc_b.freq", scale = 90 },
+  { from = "osc_a.out", to = "tones.a" },
+  { from = "osc_b.out", to = "tones.b" },
+  { from = "body_env.out", to = "body_amp.a" },
+  { from = "velocity_lim.out", to = "body_amp.b" },
+  { from = "tones.out", to = "body.a" },
+  { from = "body_amp.out", to = "body.b" },
+  { from = "noise.out", to = "noise_hp.in" },
+  { from = "snap_env.out", to = "snap_amp.a" },
+  { from = "velocity_lim.out", to = "snap_amp.b" },
+  { from = "noise_hp.hp", to = "snap.a" },
+  { from = "snap_amp.out", to = "snap.b" },
+  { from = "snap.out", to = "snappy_vca.a" },
+  { from = "snappy.out", to = "snappy_lim.in" },
+  { from = "snappy_lim.out", to = "snappy_vca.b" },
+  { from = "body.out", to = "sum.a" },
+  { from = "snappy_vca.out", to = "sum.b" },
+  { from = "sum.out", to = "level.in" },
+]
+
+[exports]
+inputs = { trigger = ["pitch_env.trigger", "body_env.trigger", "snap_env.trigger"] }
+outputs = { out = "level.out" }
+parameters = { tune = "tune.value", tone = "noise_hp.cutoff_hz", snappy = "snappy.value", decay = "snap_env.decay_ms", level = "level.db", velocity = "velocity.value" }

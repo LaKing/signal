@@ -91,6 +91,16 @@ pub(crate) struct CompositeSection {
     /// reference of its instances.
     #[schemars(with = "String")]
     pub(crate) name: Spanned<String>,
+    /// The palette group (ADR 0027 §1: `core`, `generator`, `filter`,
+    /// `envelope`, `delay`, `physical`, `event`, `visual`, `io`), as a
+    /// primitive type's descriptor has one. Required in a library composite.
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub(crate) category: Option<Spanned<String>>,
+    /// What the composite does and what each export means. Required in a
+    /// library composite.
+    #[serde(default)]
+    pub(crate) description: Option<String>,
 }
 
 /// `[wiring]`.

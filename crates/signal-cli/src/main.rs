@@ -1,5 +1,5 @@
 //! The `signal` command (headless entry point; ADR 0013): `render`, `replay`,
-//! `play`, `ui`, `pack`, `unpack`, `bench`, `devices`, `modules` and `schema`. `--json` makes every command print machine-readable output on
+//! `play`, `ui`, `pack`, `unpack`, `vendor`, `bench`, `devices`, `modules` and `schema`. `--json` makes every command print machine-readable output on
 //! stdout. Exit codes: 0 ok, 1 validation or user error, 2 internal error.
 //! The command layer only: sessions, live edits and provenance live in
 //! `signal-project`, the audio device in `signal-audio`.
@@ -12,6 +12,7 @@ mod play;
 mod render;
 mod replay;
 mod ui;
+mod vendor;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -19,7 +20,7 @@ use std::process::ExitCode;
 
 use clap::error::ErrorKind;
 use clap::{Args, Parser, Subcommand};
-use serde_json::json;
+use serde_json::{Value, json};
 use signal_core::{Direction, Feedthrough, ModuleDescriptor, Registry};
 use signal_project::Diagnostic;
 
@@ -68,13 +69,17 @@ enum Command {
     /// Unpack a .signal file into a new folder; every entry is checked
     /// first, and a refused file writes nothing.
     Unpack(files::UnpackArgs),
+    /// Copy a library composite (and the library composites it uses) into a
+    /// project's composites/, as the project's own text, and point the
+    /// project's references at the copies (ADR 0027 §4).
+    Vendor(vendor::VendorArgs),
     /// Measure the per-frame engine at 96 kHz (V13): every `std.*`
     /// primitive, the empty engine, the kick project and kick voices.
     Bench(bench::BenchArgs),
     /// List the audio devices with their sample rates, channels and buffer
     /// sizes; with --compute, the compute devices instead.
     Devices(devices::DevicesArgs),
-    /// Print the catalogue of module descriptors.
+    /// Print the catalogue of module descriptors and library composites.
     Modules(ModulesArgs),
     /// Print the JSON Schema of project and composite files.
     Schema,
@@ -231,16 +236,26 @@ fn execute(cli: &Cli) -> Result<(), Failure> {
         Command::Ui(args) => ui::run(args, &registry, cli.setup.as_deref(), cli.json),
         Command::Pack(args) => files::pack(args, cli.json),
         Command::Unpack(args) => files::unpack(args, cli.json),
+        Command::Vendor(args) => vendor::run(args, cli.json),
         Command::Bench(args) => bench::run(args, &registry, setup, cli.json),
         Command::Devices(args) => devices::run(args, cli.json),
         Command::Modules(args) => {
-            let descriptors = modules(&registry, args.category.as_deref())?;
+            let (descriptors, library) = modules(&registry, args.category.as_deref())?;
             if cli.json {
-                let text = serde_json::to_string_pretty(&descriptors)
+                let mut all = serde_json::to_value(&descriptors)
+                    .map_err(|e| Failure::Internal(e.to_string()))?;
+                if let Value::Array(entries) = &mut all {
+                    entries.extend(library);
+                }
+                let text = serde_json::to_string_pretty(&all)
                     .map_err(|e| Failure::Internal(e.to_string()))?;
                 print_stdout(&text);
             } else {
-                let blocks: Vec<String> = descriptors.iter().map(describe).collect();
+                let blocks: Vec<String> = descriptors
+                    .iter()
+                    .map(describe)
+                    .chain(library.iter().map(describe_library))
+                    .collect();
                 print_stdout(&blocks.join("\n"));
             }
             Ok(())
@@ -255,18 +270,43 @@ fn execute(cli: &Cli) -> Result<(), Failure> {
     }
 }
 
-/// The registry's descriptors, or with `category` only the types of that
-/// palette group; a group no type has is a usage error naming those there are.
-fn modules(registry: &Registry, category: Option<&str>) -> Result<Vec<ModuleDescriptor>, Failure> {
+/// The registry's descriptors and the library composites (ADR 0027 §4,
+/// each `{"type_name": "lib.<name>", "library": true, …}`), or with
+/// `category` only those of that palette group; a group none has is a usage
+/// error naming those there are.
+fn modules(
+    registry: &Registry,
+    category: Option<&str>,
+) -> Result<(Vec<ModuleDescriptor>, Vec<Value>), Failure> {
+    let library: Vec<Value> = signal_project::library_modules(registry)
+        .map_err(|d| Failure::Internal(format!("the built-in library does not load: {d:?}")))?
+        .into_iter()
+        .map(|mut entry| {
+            if let Value::Object(fields) = &mut entry {
+                let name = fields.remove("module").unwrap_or(Value::Null);
+                let doc = fields.remove("description").unwrap_or(Value::Null);
+                fields.remove("composite");
+                fields.insert("type_name".to_owned(), name);
+                fields.insert("doc".to_owned(), doc);
+            }
+            entry
+        })
+        .collect();
     let all = registry.iter().map(|t| t.descriptor);
     let Some(category) = category else {
-        return Ok(all.collect());
+        return Ok((all.collect(), library));
     };
     let chosen: Vec<ModuleDescriptor> = all.filter(|d| d.category == Some(category)).collect();
-    if chosen.is_empty() {
+    let library_chosen: Vec<Value> = library
+        .iter()
+        .filter(|e| e["category"] == category)
+        .cloned()
+        .collect();
+    if chosen.is_empty() && library_chosen.is_empty() {
         let mut known: Vec<&str> = registry
             .iter()
             .filter_map(|t| t.descriptor.category)
+            .chain(library.iter().filter_map(|e| e["category"].as_str()))
             .collect();
         known.sort_unstable();
         known.dedup();
@@ -275,7 +315,62 @@ fn modules(registry: &Registry, category: Option<&str>) -> Result<Vec<ModuleDesc
             known.join(", ")
         )));
     }
-    Ok(chosen)
+    Ok((chosen, library_chosen))
+}
+
+/// A library composite for people, in the form [`describe`] gives a
+/// primitive type: name, description, category, ports (shape, kind, unit)
+/// and parameters (kind, unit, range, the composite's own default, combine).
+fn describe_library(entry: &Value) -> String {
+    let text_of = |v: &Value| v.as_str().unwrap_or_default().to_owned();
+    // `"audio"` as the descriptors' `Audio`, `"add"` as `Add`.
+    let named = |v: &Value| {
+        text_of(v)
+            .split('_')
+            .map(|word| {
+                let mut chars = word.chars();
+                chars.next().map_or_else(String::new, |first| {
+                    first.to_uppercase().chain(chars).collect()
+                })
+            })
+            .collect::<String>()
+    };
+    let unit = |v: &Value| v.as_str().map(|u| format!(" [{u}]")).unwrap_or_default();
+    let number = |v: &Value| v.as_f64().map_or_else(|| v.to_string(), |x| x.to_string());
+    let mut text = format!(
+        "{} (library composite, hash {})\n  {}\n  category: {}\n",
+        text_of(&entry["type_name"]),
+        text_of(&entry["hash"]),
+        text_of(&entry["doc"]),
+        text_of(&entry["category"])
+    );
+    for port in entry["ports"].as_array().into_iter().flatten() {
+        let direction = if port["direction"] == "in" {
+            "in "
+        } else {
+            "out"
+        };
+        text.push_str(&format!(
+            "  {direction} {} ({}, {}){}\n",
+            text_of(&port["name"]),
+            named(&port["shape"]),
+            named(&port["kind"]),
+            unit(&port["unit"])
+        ));
+    }
+    for p in entry["parameters"].as_array().into_iter().flatten() {
+        text.push_str(&format!(
+            "  parameter {} ({}){}: {} to {}, default {}, {}\n",
+            text_of(&p["name"]),
+            named(&p["kind"]),
+            unit(&p["unit"]),
+            number(&p["range"]["min"]),
+            number(&p["range"]["max"]),
+            number(&p["default"]),
+            named(&p["combine"])
+        ));
+    }
+    text
 }
 
 /// A module descriptor for people: name, class, doc, category, ports and

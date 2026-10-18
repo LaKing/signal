@@ -1,0 +1,76 @@
+# The kick, synthesised, no samples: a sine whose pitch falls exponentially
+# from about 230 Hz to `tune` (50 Hz), soft tanh drive on the steady sine,
+# then the amplitude envelope, a short noise click and a DC blocker.
+#
+#   sine (tune + 180·pitch_env) ─► shaper ─► × amp_env × velocity ─┐
+#   noise ─► hp 1.5 kHz ─► × click_env × velocity ─► × attack ───── add ─► dc ─► level
+#
+# The drive comes before the envelope, so the shaper sees a full-scale sine on
+# every hit and the decay is the envelope's alone (a drive after it would
+# lift the tail and stretch the decay). At the default decay (τ = 170 ms) the
+# body is about 25 dB down 500 ms after a hit, the next beat at 120 bpm.
+#
+# `velocity` takes the step sequencer's hit value (its lane level, ×accent_level
+# on an accented step): it adds to the shaper's drive and scales the
+# envelopes, so an accent saturates harder and is louder. It scales the
+# envelopes (control signals) rather than the audio, so the whole voice has one
+# audio-to-generic boundary per path.
+# The velocity is clamped to [0, 2] (an accent of 1.5 on a level of 1 fits),
+# so no setting can scale the voice beyond twice its plain level.
+schema_version = 1
+
+[composite]
+name = "analog_kick"
+category = "generator"
+description = "An analogue-style bass drum, synthesised: a sine falling from about tune + 180 Hz to tune, soft tanh drive, an amplitude decay, a short noise click and a DC blocker. Input: trigger (a hit on each Trigger). Output: out (about ±1 at the defaults). Parameters: tune (Hz, the body's final pitch, default 50), decay (ms, the body's decay, default 170), attack (the click's level, clamped to [0, 2], default 0.5), drive (the shaper's drive before the velocity is added, default 0.6), level (dB, default −3), velocity (the hit's strength, clamped to [0, 2], default 1; a sequencer lane's Set event sets it)."
+
+[instances]
+osc = { module = "std.sine_osc", freq = 50 }
+pitch_env = { module = "std.exp_env", attack_ms = 0, decay_ms = 28 }
+shaper = { module = "std.tanh_shaper", drive = 0.6 }
+amp_env = { module = "std.exp_env", attack_ms = 0.5, decay_ms = 170 }
+amp = { module = "std.mul" }
+body = { module = "std.mul" }
+click_noise = { module = "std.noise" }
+click_hp = { module = "std.onepole", cutoff_hz = 1500 }
+click_env = { module = "std.exp_env", attack_ms = 0, decay_ms = 3 }
+click_amp = { module = "std.mul" }
+click = { module = "std.mul" }
+attack = { module = "std.const", value = 0.5 }
+attack_lim = { module = "std.clamp", lo = 0, hi = 2 }
+click_level = { module = "std.mul" }
+velocity = { module = "std.const", value = 1 }
+velocity_lim = { module = "std.clamp", lo = 0, hi = 2 }
+sum = { module = "std.add" }
+dc = { module = "std.dc_block" }
+level = { module = "std.gain", db = -3 }
+
+[wiring]
+connections = [
+  { from = "velocity.out", to = "velocity_lim.in" },
+  { from = "pitch_env.out", to = "osc.freq", scale = 180 },
+  # Drive 0.6 + velocity: 1.5 on a plain hit of 0.9, 1.95 on an accent.
+  { from = "osc.out", to = "shaper.in" },
+  { from = "velocity_lim.out", to = "shaper.drive" },
+  { from = "amp_env.out", to = "amp.a" },
+  { from = "velocity_lim.out", to = "amp.b" },
+  { from = "shaper.out", to = "body.a" },
+  { from = "amp.out", to = "body.b" },
+  { from = "click_noise.out", to = "click_hp.in" },
+  { from = "click_env.out", to = "click_amp.a" },
+  { from = "velocity_lim.out", to = "click_amp.b" },
+  { from = "click_hp.hp", to = "click.a" },
+  { from = "click_amp.out", to = "click.b" },
+  { from = "click.out", to = "click_level.a" },
+  { from = "attack.out", to = "attack_lim.in" },
+  { from = "attack_lim.out", to = "click_level.b" },
+  { from = "body.out", to = "sum.a" },
+  { from = "click_level.out", to = "sum.b" },
+  { from = "sum.out", to = "dc.in" },
+  { from = "dc.out", to = "level.in" },
+]
+
+[exports]
+inputs = { trigger = ["pitch_env.trigger", "amp_env.trigger", "click_env.trigger"] }
+outputs = { out = "level.out" }
+parameters = { tune = "osc.freq", decay = "amp_env.decay_ms", attack = "attack.value", drive = "shaper.drive", level = "level.db", velocity = "velocity.value" }

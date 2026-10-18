@@ -1,0 +1,55 @@
+# The built-in library: changelog
+
+The library composites (`lib.<name>`, ADR 0027 §4) shipped with Signal. A
+project that uses one sounds the same in every build of one library version;
+this file says what changed between versions.
+
+## Versioning
+
+- **The library's version is the app's MAJOR.MINOR** (`signal_lib::VERSION`,
+  the workspace version in the root `Cargo.toml`). A `.signal` archive and a
+  session record it; a render manifest lists every library composite it used
+  with its content hash (`library_composite_hashes`).
+- **A change of a composite's output is a new name, or a MINOR change with an
+  entry here.** The output is pinned: `tests/pinned.rs` renders every
+  composite on a fixed stimulus and compares the hash with
+  `tests/pinned.toml`. A changed hash fails the test until its row is updated
+  **and** an entry under the current version's section (`## MAJOR.MINOR`)
+  names the composite (as `` `lib.<name>` ``) with the new hash; an unchanged
+  hash may stay named by the section that introduced it. A change that keeps
+  the output (comments, the description) needs neither.
+- **Earlier sections are history.** When a new MINOR starts, the section of
+  the version it ends is recorded in `tests/released.toml` with its hash, and
+  the test fails if it is edited or removed afterwards.
+- **Names are never reused.** A removed or renamed composite's name is never
+  given to a different composite.
+- **A removal warns for one MINOR first.** A composite to be removed stays,
+  marked deprecated in its description and here, for one MINOR version
+  before it goes.
+
+A project that wants a composite never to change copies it into its own
+`composites/` with `signal vendor <project> lib.<name>`; the copy is the
+project's text.
+
+## 0.1
+
+The first library (M2.10-3). Each line: the composite, its category, and its
+pinned render hash (`tests/pinned.rs`: its stimulus long enough for its
+whole signal path; `lfo_shapes` once per shape, with every output).
+
+- `lib.analog_clap` (generator), from the M2.11 studio's clap: `998f4706c835f181`
+- `lib.analog_cymbal` (generator), from the M2.11 studio's cymbal: `8aa09a97621232e1`
+- `lib.analog_hat` (generator), from the M2.11 studio's hi-hat: `7e038d7e1126fb35`
+- `lib.analog_kick` (generator), from the M2.11 studio's kick, its click level clamped and its default level −3 dB: `339b880fcac1f285`
+- `lib.analog_rim` (generator), from the M2.11 studio's rim shot, its default level 1 dB: `4d858832caea2739`
+- `lib.analog_snare` (generator), from the M2.11 studio's snare, its snappy level clamped and its default level −4 dB: `07993fd454049105`
+- `lib.analog_tom` (generator), from the M2.11 studio's tom, its default level −1 dB: `be2e4e676af0efa1`
+- `lib.ar_env` (envelope), an attack-release envelope from a lag: `9fccd4e2baaad1fd`
+- `lib.crossfade` (core), a linear crossfade, each input weighted before the sum (no intermediate beyond the larger input): `85b54d5bd8141c4d`
+- `lib.ladder_voice` (generator), from the M2.11 studio's three-oscillator voice, its key tracking and velocity clamped: `b10bcbec2ba1d575`
+- `lib.lfo_shapes` (generator), five LFO shapes from one phasor, the random drawn at every cycle's start (frame 0 and every reset included): `3cdbb0eb89ca6716`
+- `lib.stereo_width` (core), mid/side width, computed as the change from the input from halves taken first (no intermediate beyond the inputs or outputs; width 1 exact): `4398c461e58ecc48`
+- `lib.tape_echo` (delay), from the M2.11 studio's tape delay: `2229c4b8e2b245b9`
+
+Every drum's velocity is clamped to [0, 2]. The defaults keep each composite
+within ±1 on its stimulus (`tests/library.rs`).

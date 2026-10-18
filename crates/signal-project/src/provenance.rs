@@ -37,6 +37,8 @@ pub fn collect(source: &Path, files: &[SourceFile]) -> Provenance {
             .iter()
             .map(|file| (file.path.clone(), hex(fnv1a64(file.text.as_bytes()))))
             .collect(),
+        // The caller's: what the project's plan uses (`Project::library_hashes`).
+        library_composite_hashes: Default::default(),
         cargo_lock_hash: fs::read(source.join("Cargo.lock"))
             .map_or_else(|_| UNKNOWN.to_owned(), |bytes| hex(fnv1a64(&bytes))),
     }

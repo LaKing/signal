@@ -66,6 +66,7 @@ pub(crate) fn unpack(args: &UnpackArgs, json: bool) -> Result<(), Failure> {
                 "folder": args.folder.display().to_string(),
                 "files": unpacked.files,
                 "bytes": unpacked.bytes,
+                "library_version": unpacked.library_version,
             })
             .to_string(),
         );

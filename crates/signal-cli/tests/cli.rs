@@ -1,7 +1,8 @@
 //! The built `signal` binary: rendering a fixture project, its artifacts, JSON
-//! output, determinism, `modules`, `schema`, and exit codes.
+//! output, determinism, `modules`, `schema`, `vendor`, and exit codes.
 
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -31,6 +32,10 @@ fn out_dir(name: &str) -> PathBuf {
 
 fn stdout_json(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("stdout is JSON")
+}
+
+fn read_json(path: &Path) -> Value {
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
 }
 
 fn keys(value: &Value) -> BTreeSet<&str> {
@@ -440,4 +445,139 @@ fn schema_output() {
     for name in M2_7_TYPES {
         assert!(types.iter().any(|t| t == name), "{name}");
     }
+    // M2.10-3: the library composites' references.
+    let library = schema["$defs"]["ModuleRef"]["anyOf"][1]["enum"]
+        .as_array()
+        .unwrap();
+    assert!(library.iter().any(|t| t == "lib.tape_echo"));
+    assert!(
+        library
+            .iter()
+            .all(|t| t.as_str().unwrap().starts_with("lib."))
+    );
+}
+
+/// M2.10-3 AC5 (ADR 0027 §4): `signal modules` lists the library
+/// composites after the primitives, with their category, description,
+/// hash, ports and parameters; `--category` keeps those of the group, as
+/// JSON and as text.
+#[test]
+fn modules_lists_library_composites_by_category() {
+    let all = stdout_json(&signal(&["modules", "--json"]));
+    let library: Vec<&Value> = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["library"] == true)
+        .collect();
+    assert_eq!(library.len(), 13);
+    let echo = library
+        .iter()
+        .find(|m| m["type_name"] == "lib.tape_echo")
+        .unwrap();
+    assert_eq!(echo["category"], "delay");
+    assert_eq!(echo["hash"].as_str().unwrap().len(), 16);
+    assert!(echo["doc"].as_str().unwrap().contains("feedback"));
+    let time = echo["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "time_ms")
+        .unwrap();
+    assert_eq!(time["default"], 375.0);
+
+    let output = signal(&["modules", "--category", "generator", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let generators = stdout_json(&output);
+    let names = type_names(&generators);
+    for name in [
+        "lib.ladder_voice",
+        "lib.analog_kick",
+        "lib.analog_cymbal",
+        "lib.lfo_shapes",
+        "std.osc",
+    ] {
+        assert!(names.contains(&name), "{name}");
+    }
+    assert!(!names.contains(&"lib.tape_echo"));
+    assert!(
+        generators
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["category"] == "generator")
+    );
+
+    let output = signal(&["modules", "--category", "envelope"]);
+    let text = String::from_utf8(output.stdout).unwrap();
+    // Formatted as a primitive type's entry: kinds, units, ranges, combine.
+    for line in [
+        "lib.ar_env (library composite, hash ",
+        "  in  gate (Signal, Generic)\n",
+        "  out out (Signal, Control)\n",
+        "  parameter attack (Control) [ms]: 0 to 60000, default 5, Add\n",
+    ] {
+        assert!(text.contains(line), "{line:?} in\n{text}");
+    }
+}
+
+/// M2.10-3 AC6: `signal vendor` copies a library composite into a project,
+/// points the project at the copy, and refuses to overwrite it; the project
+/// renders the same audio as before.
+#[test]
+fn vendor_copies_a_library_composite_into_a_project() {
+    let dir = out_dir("vendor-project");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("project.toml"),
+        "schema_version = 1\n\n[project]\nname = \"v\"\nsample_rate = 8000\nseed = 3\n\n\
+         [instances]\nnoise = { module = \"std.noise\" }\n\
+         echo = { module = \"lib.tape_echo\", mix = 0.5 }\n\
+         out = { module = \"std.audio_out\", gain = 0.25 }\n\n\
+         [wiring]\nconnections = [\n  { from = \"noise.out\", to = \"echo.in\" },\n\
+         { from = \"echo.out\", to = \"out.l\" },\n]\n",
+    )
+    .unwrap();
+    let project = dir.display().to_string();
+    let render = |name: &str| {
+        let out = out_dir(name);
+        let out_text = out.display().to_string();
+        let output = signal(&["render", &project, "--frames", "8000", "--out", &out_text]);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        read_json(&out.join("manifest.json"))
+    };
+    let before = render("vendor-before");
+    assert!(before["provenance"]["library_composite_hashes"]["lib.tape_echo"].is_string());
+
+    let output = signal(&[
+        "vendor",
+        &project,
+        "lib.tape_echo",
+        "--as",
+        "echo_copy",
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let report = stdout_json(&output);
+    assert_eq!(report["copied"][0], "composites/echo_copy.toml");
+    assert_eq!(report["rewritten"][0], "project.toml");
+    let text = fs::read_to_string(dir.join("project.toml")).unwrap();
+    assert!(text.contains("module = \"echo_copy\""), "{text}");
+
+    let after = render("vendor-after");
+    assert_eq!(after["audio_fnv1a64"], before["audio_fnv1a64"]);
+    assert_eq!(after["log_fnv1a64"], before["log_fnv1a64"]);
+    assert!(
+        after["provenance"]
+            .get("library_composite_hashes")
+            .is_none()
+    );
+
+    let output = signal(&["vendor", &project, "lib.tape_echo", "--as", "echo_copy"]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        error.contains("composites/echo_copy.toml exists"),
+        "{error}"
+    );
 }

@@ -3159,6 +3159,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "signal-lib"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "signal-core",
+ "signal-engine",
+ "signal-output",
+ "signal-project",
+ "signal-std",
+ "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
 name = "signal-oracle"
 version = "0.1.0"
 dependencies = [
@@ -3197,6 +3210,7 @@ dependencies = [
  "signal-core",
  "signal-engine",
  "signal-graph",
+ "signal-lib",
  "signal-output",
  "signal-std",
  "toml 1.1.8+spec-1.1.0",

@@ -1,0 +1,43 @@
+# The rim shot: a sine at `tune` and a square at 3.5 × `tune` through a
+# band-pass, with a very short decay.
+# The velocity is clamped to [0, 2] (an accent of 1.5 on a level of 1 fits),
+# so no setting can scale the voice beyond twice its plain level.
+schema_version = 1
+
+[composite]
+name = "analog_rim"
+category = "generator"
+description = "An analogue-style rim shot: a sine at tune and a square at 3.5 × tune through a band-pass, with a very short decay. Input: trigger. Output: out (about ±1 at the defaults). Parameters: tune (Hz, default 480), decay (ms, default 9), level (dB, default 1), velocity (clamped to [0, 2], default 1)."
+
+[instances]
+tune = { module = "std.const", value = 480 }
+tone_a = { module = "std.sine_osc", freq = 0 }
+tone_b = { module = "std.osc", shape = 2, freq = 0 }
+tones = { module = "std.mix", gain_a = 0.7, gain_b = 0.4 }
+band = { module = "std.svf", cutoff_hz = 1700, q = 1.2 }
+env = { module = "std.exp_env", attack_ms = 0, decay_ms = 9 }
+amp = { module = "std.mul" }
+velocity = { module = "std.const", value = 1 }
+velocity_lim = { module = "std.clamp", lo = 0, hi = 2 }
+vel_vca = { module = "std.mul" }
+level = { module = "std.gain", db = 1 }
+
+[wiring]
+connections = [
+  { from = "velocity.out", to = "velocity_lim.in" },
+  { from = "tune.out", to = "tone_a.freq" },
+  { from = "tune.out", to = "tone_b.freq", scale = 3.5 },
+  { from = "tone_a.out", to = "tones.a" },
+  { from = "tone_b.out", to = "tones.b" },
+  { from = "tones.out", to = "band.in" },
+  { from = "band.bp", to = "amp.a" },
+  { from = "env.out", to = "amp.b" },
+  { from = "amp.out", to = "vel_vca.a" },
+  { from = "velocity_lim.out", to = "vel_vca.b" },
+  { from = "vel_vca.out", to = "level.in" },
+]
+
+[exports]
+inputs = { trigger = "env.trigger" }
+outputs = { out = "level.out" }
+parameters = { tune = "tune.value", decay = "env.decay_ms", level = "level.db", velocity = "velocity.value" }

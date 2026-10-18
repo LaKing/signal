@@ -18,6 +18,11 @@ pub struct Provenance {
     pub rustc_version: String,
     /// A hash of every project file, by path relative to the project folder.
     pub project_file_hashes: BTreeMap<String, String>,
+    /// A hash of every composite the render used that the program ships
+    /// rather than the project holds (ADR 0027 §4), by module reference.
+    /// Absent when there are none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub library_composite_hashes: BTreeMap<String, String>,
     /// A hash of `Cargo.lock`.
     pub cargo_lock_hash: String,
 }

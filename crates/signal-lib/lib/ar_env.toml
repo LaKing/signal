@@ -1,0 +1,29 @@
+# An attack-release envelope: the gate, clamped to [0, 1], through a lag
+# whose rise time is the attack and whose fall time is the release.
+#
+#   gate ─► clamp [0, 1] ─► lag (rise = attack, fall = release) ─► out
+#
+# While the gate is open the output rises towards 1 with time constant
+# `attack`; once it closes it falls towards 0 with time constant `release`
+# (a one-pole curve: about 63 % of the way after one time constant). 0 ms
+# follows the gate at once. The output is always within [0, 1].
+schema_version = 1
+
+[composite]
+name = "ar_env"
+category = "envelope"
+description = "An attack-release envelope from a gate. Input: gate (open above 0; clamped to [0, 1], so a gate of 0.5 rises to 0.5). Output: out, within [0, 1]. Parameters: attack (ms, 0 to 60 000, default 5: the rise's time constant while the gate is open), release (ms, 0 to 60 000, default 200: the fall's time constant once it closes)."
+
+[instances]
+gate_lim = { module = "std.clamp", lo = 0, hi = 1 }
+lag = { module = "std.lag", rise_ms = 5, fall_ms = 200 }
+
+[wiring]
+connections = [
+  { from = "gate_lim.out", to = "lag.in" },
+]
+
+[exports]
+inputs = { gate = "gate_lim.in" }
+outputs = { out = "lag.out" }
+parameters = { attack = "lag.rise_ms", release = "lag.fall_ms" }

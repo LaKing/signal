@@ -72,13 +72,18 @@ impl fmt::Display for Diagnostic {
     }
 }
 
-/// Diagnostics with their file paths joined to the project folder `dir`.
+/// Diagnostics with their file paths joined to the project folder `dir`
+/// (a library composite's `signal-lib:lib/<name>.toml` is left as it is).
 pub fn located(dir: &Path, diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
     diagnostics
         .into_iter()
-        .map(|d| Diagnostic {
-            file: dir.join(&d.file).display().to_string(),
-            ..d
+        .map(|d| match crate::is_library_file(&d.file) {
+            // A library composite's file is the program's, not the project's.
+            true => d,
+            false => Diagnostic {
+                file: dir.join(&d.file).display().to_string(),
+                ..d
+            },
         })
         .collect()
 }

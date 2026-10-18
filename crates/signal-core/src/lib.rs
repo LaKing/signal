@@ -53,7 +53,7 @@ pub use module::{
     DirectPrimitive, Due, EventSink, Inputs, LossCause, Outputs, PrepareContext, Primitive,
     StateOutputPrimitive,
 };
-pub use registry::{Host, Lent, ModuleType, Registry, RegistryError};
+pub use registry::{Host, LIBRARY_PREFIX, Lent, ModuleType, Registry, RegistryError};
 pub use rng::{Fnv1a64, RngStream, SplitMix64, Xoshiro256PlusPlus, fnv1a64, fnv1a64_words};
 pub use table::{MAX_TABLE_VALUES, Table, TableError, TableRule};
 pub use time::{Frame, RateDivisor};

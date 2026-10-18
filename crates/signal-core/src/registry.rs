@@ -12,6 +12,12 @@ use crate::descriptor::{Feedthrough, ModuleDescriptor};
 use crate::module::Primitive;
 use crate::table::TableRule;
 
+/// The namespace of module references that name composites shipped with the
+/// program rather than primitive types (ADR 0027 §4): reserved, so no type can
+/// be registered under it. To the core it is only a reserved prefix; what it
+/// resolves to is the project loader's.
+pub const LIBRARY_PREFIX: &str = "lib.";
+
 /// Something a [`Host`] lends one instance (M2.7-2): opaque to the engine,
 /// which passes it to `prepare` in [`PrepareContext::lent`](crate::PrepareContext::lent)
 /// and never reads it.
@@ -62,7 +68,8 @@ impl Registry {
     }
 
     /// Adds `module_type`, refusing a type name that is already registered,
-    /// or one in the converters' reserved `core.` namespace (M2.8-6).
+    /// or one in the converters' reserved `core.` namespace (M2.8-6) or the
+    /// library's reserved `lib.` namespace ([`LIBRARY_PREFIX`]).
     /// Refuses a declared latency that is not a state-output type's, or whose
     /// `latency_blocks` or `block_frames` is 0 (ADR 0019 §3).
     pub fn register(&mut self, module_type: ModuleType) -> Result<(), RegistryError> {
@@ -71,7 +78,7 @@ impl Registry {
         if self.types.contains_key(name) {
             return Err(RegistryError::DuplicateTypeName(name));
         }
-        if name.starts_with(CONVERTER_PREFIX) {
+        if name.starts_with(CONVERTER_PREFIX) || name.starts_with(LIBRARY_PREFIX) {
             return Err(RegistryError::ReservedTypeName(name));
         }
         if let Some(latency) = descriptor.latency
@@ -184,13 +191,18 @@ pub enum RegistryError {
     /// A declared latency on a type that is not state-output, or with 0
     /// blocks or 0 frames per block.
     InvalidLatency(&'static str),
-    /// A name in the converters' reserved `core.` namespace (M2.8-6).
+    /// A name in the converters' reserved `core.` namespace (M2.8-6) or the
+    /// library's reserved `lib.` namespace.
     ReservedTypeName(&'static str),
 }
 
 impl fmt::Display for RegistryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            RegistryError::ReservedTypeName(name) if name.starts_with(LIBRARY_PREFIX) => write!(
+                f,
+                "module type `{name}`: names starting with `{LIBRARY_PREFIX}` are reserved for library composites"
+            ),
             RegistryError::ReservedTypeName(name) => write!(
                 f,
                 "module type `{name}`: names starting with `{CONVERTER_PREFIX}` are reserved for rate converters"
@@ -227,5 +239,18 @@ mod tests {
             registry.register(taken),
             Err(RegistryError::ReservedTypeName("core.x"))
         );
+    }
+
+    /// M2.10-3 (ADR 0027 §4): `lib.` names library composites, so no type
+    /// can be registered under it.
+    #[test]
+    fn the_library_namespace_is_reserved() {
+        let mut registry = Registry::new();
+        let mut taken = *registry.get("core.hold.d64.d1.signal.control").unwrap();
+        taken.descriptor.type_name = "lib.tape_echo";
+        let error = registry.register(taken).unwrap_err();
+        assert_eq!(error, RegistryError::ReservedTypeName("lib.tape_echo"));
+        assert!(error.to_string().contains("library composites"), "{error}");
+        assert!(registry.get("lib.tape_echo").is_none());
     }
 }

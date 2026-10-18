@@ -69,6 +69,7 @@ fn provenance() -> Provenance {
         signal_dirty: Some(false),
         rustc_version: "rustc (test)".to_owned(),
         project_file_hashes: Default::default(),
+        library_composite_hashes: Default::default(),
         cargo_lock_hash: "0000000000000000".to_owned(),
     }
 }

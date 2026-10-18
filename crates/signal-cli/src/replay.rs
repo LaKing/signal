@@ -62,10 +62,11 @@ pub(crate) fn run(
         LoadError::Invalid(diagnostics) => Failure::InvalidSession(located(dir, diagnostics)),
         error @ LoadError::Io { .. } => Failure::Io(error.to_string()),
     })?;
-    let provenance = provenance::collect(
+    let mut provenance = provenance::collect(
         &provenance::source_dir(),
         session.versions.first().map_or(&[][..], |p| &p.files),
     );
+    provenance.library_composite_hashes = session.library_hashes();
     // M2.7-2: latent instances placed on this machine's devices, by the
     // first version's pins (a running project cannot change them).
     let pins = match (session.versions.first(), session.plans.first()) {
@@ -107,6 +108,14 @@ pub(crate) fn run(
         warnings.push(format!(
             "the session was recorded by another build (revision {}, {}, Cargo.lock {}); replay is bit-exact only on the same build (ADR 0008)",
             recorded.signal_revision, recorded.rustc_version, recorded.cargo_lock_hash
+        ));
+    }
+    // ADR 0027 §4: `lib.*` resolves in this build's library.
+    if recorded.library_composite_hashes != provenance.library_composite_hashes {
+        warnings.push(format!(
+            "the session's library composites differ from this build's (recorded with library {}); the replay uses this build's library ({})",
+            session.library_version.as_deref().unwrap_or("unknown"),
+            signal_project::Library::VERSION
         ));
     }
     warnings.extend(boundary_warnings(&replayed, session.latent()));

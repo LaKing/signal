@@ -16,6 +16,8 @@ signal-core = { path = "crates/signal-core" }
 signal-graph = { path = "crates/signal-graph" }
 signal-project = { path = "crates/signal-project" }
 signal-std = { path = "crates/signal-std" }
+# ADR 0027 §4: the built-in library (`lib.*` composites shipped with Signal).
+signal-lib = { path = "crates/signal-lib" }
 signal-engine = { path = "crates/signal-engine" }
 signal-output = { path = "crates/signal-output" }
 signal-eval = { path = "crates/signal-eval" }

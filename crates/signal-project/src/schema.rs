@@ -3,15 +3,17 @@
 
 use schemars::generate::SchemaSettings;
 use serde_json::{Value, json};
-use signal_core::Registry;
+use signal_core::{LIBRARY_PREFIX, Registry};
 
+use crate::Library;
 use crate::model::{CompositeFile, ProjectFile};
 use crate::pattern::{NotesFile, StepsFile};
 
 /// The JSON Schema (draft 2020-12) of `project.toml`,
 /// `composites/<name>.toml` and `patterns/<name>.toml` (`kind = "notes"` or
 /// `"steps"`): a file is exactly one of the four. A module reference is one
-/// of the type names in `registry` or a composite name.
+/// of the type names in `registry`, a library composite's `lib.<name>`, or a
+/// composite name.
 pub fn schema(registry: &Registry) -> Value {
     let mut generator = SchemaSettings::draft2020_12().into_generator();
     let project = generator.subschema_for::<ProjectFile>();
@@ -20,12 +22,17 @@ pub fn schema(registry: &Registry) -> Value {
     let steps = generator.subschema_for::<StepsFile>();
     let mut definitions = generator.take_definitions(true);
     let types: Vec<&str> = registry.iter().map(|t| t.descriptor.type_name).collect();
+    let library: Vec<String> = Library::builtin()
+        .names()
+        .map(|n| format!("{LIBRARY_PREFIX}{n}"))
+        .collect();
     definitions.insert(
         "ModuleRef".to_owned(),
         json!({
-            "description": "A module reference: a registered primitive type, or the name of a composite in composites/<name>.toml.",
+            "description": "A module reference: a registered primitive type, a library composite (lib.<name>, ADR 0027 §4), or the name of a composite in composites/<name>.toml.",
             "anyOf": [
                 { "enum": types },
+                { "enum": library },
                 { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }
             ]
         }),

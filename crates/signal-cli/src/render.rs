@@ -119,7 +119,8 @@ pub(crate) fn run(
     let mut rendered = render(&mut engine, frames).map_err(|e| render_failure(&project, dir, e))?;
     (rendered.compute_devices, rendered.placement) = gpu.record();
     let gpu_warnings = gpu.warnings();
-    let provenance = provenance::collect(&provenance::source_dir(), &project.files);
+    let mut provenance = provenance::collect(&provenance::source_dir(), &project.files);
+    provenance.library_composite_hashes = project.library_hashes();
     let (manifest, metrics) = write_artifacts(&rendered, &args.out, provenance)
         .map_err(|e| e.into_failure(|e| render_failure(&project, dir, e)))?;
 
