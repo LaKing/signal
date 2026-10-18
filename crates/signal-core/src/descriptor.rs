@@ -80,8 +80,23 @@ pub enum PortKind {
     Gain,
     /// A phase position.
     Phase,
-    /// Anything else.
+    /// Any kind: a port that does not constrain what its values mean, such
+    /// as the core arithmetic, function and compare types (ADR 0027), which
+    /// sit between ports of any kind. A connection with a `Generic` end is
+    /// never a kind mismatch ([`PortKind::matches`]).
     Generic,
+}
+
+impl PortKind {
+    /// Whether a connection from a port of kind `self` to one of kind `to`
+    /// joins compatible kinds: equal kinds, or either end `Generic`. A
+    /// connection that does not is accepted with a kind-mismatch warning
+    /// (ADR 0005, dated note of 2026-10-18).
+    pub const fn matches(self, to: PortKind) -> bool {
+        matches!(self, PortKind::Generic)
+            || matches!(to, PortKind::Generic)
+            || self as u8 == to as u8
+    }
 }
 
 /// An inclusive value range `[min, max]`.
@@ -273,6 +288,20 @@ impl ModuleDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generic_matches_every_kind_and_others_only_themselves() {
+        use PortKind::*;
+        let all = [
+            Audio, Control, Gate, Trigger, Frequency, Gain, Phase, Generic,
+        ];
+        for a in all {
+            for b in all {
+                let expected = a == b || a == Generic || b == Generic;
+                assert_eq!(a.matches(b), expected, "{a:?} -> {b:?}");
+            }
+        }
+    }
 
     fn port(name: &'static str, direction: Direction, shape: PortShape, d: u32) -> PortDescriptor {
         PortDescriptor {

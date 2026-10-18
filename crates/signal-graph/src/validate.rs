@@ -1,5 +1,6 @@
 //! Checks on the flattened graph, after converter insertion: connections need
-//! equal shape and rate (a kind mismatch is only a warning; a rate mismatch
+//! equal shape and rate (a kind mismatch, between two different kinds
+//! neither of which is `Generic`, is only a warning; a rate mismatch
 //! left here is one no converter joins), except that a parameter accepts
 //! both a signal and events, and
 //! parameter values must lie in their declared range. Fan-in and fan-out are
@@ -150,7 +151,8 @@ pub(crate) fn validate(
                 to_rate,
             });
         }
-        if from_kind != to_kind {
+        // A `Generic` end takes any kind (`PortKind::matches`).
+        if !from_kind.matches(to_kind) {
             warnings.push(GraphWarning::KindMismatch {
                 from: written.clone(),
                 to: to.clone(),

@@ -14,6 +14,8 @@ Interconnectivity is Signal's core strength (G13): ports should be typed in the 
 - Connections may configure conversion inline (`via = ...` plus parameters).
 - No expression language inside connections for now.
 
+**Note (2026-10-18, operator decision): `generic` matches every kind.** A port of kind `generic` means "any kind": a connection where either end is `generic` is never a kind mismatch, so it gives no warning. A connection between two different kinds neither of which is `generic` is still accepted with a kind-mismatch warning. The core arithmetic, function and compare types (ADR 0027) are `generic` precisely so they can sit between typed ports. Converter insertion is unaffected: an implicit converter is chosen by shape and rate divisor only and carries the source port's kind, so a `generic` end neither triggers nor blocks one (`signal_core::PortKind::matches`, `crates/signal-graph/src/validate.rs`).
+
 ## Alternatives considered
 - Always explicit converters: simpler, but less convenient.
 - One untyped audio-rate signal everywhere: maximally interchangeable, but loses meaning and wastes CPU on low-rate domains.

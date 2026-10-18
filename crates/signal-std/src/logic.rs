@@ -2,7 +2,8 @@
 //! set's comparison and selection (ADR 0027 §1). A gate is a signal of kind
 //! `gate`; any value above 0 is true, and the gates these types output are
 //! exactly 0 or 1. Feeding a gate input from an output of another kind is
-//! accepted with the graph's usual kind-mismatch warning. Direct, at rate
+//! accepted with the graph's usual kind-mismatch warning (none from a
+//! `generic` output, which matches any kind). Direct, at rate
 //! divisor 1, category `core`; unconnected inputs read 0. Stateless; constant
 //! work per frame.
 

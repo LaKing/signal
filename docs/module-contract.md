@@ -8,7 +8,7 @@
 2. **Write the descriptor** as a `const ModuleDescriptor`:
    - `type_name`: e.g. `std.sine_osc`, unique in the registry.
    - `doc`: one or two sentences for `signal modules`.
-   - `ports`: every port that is not a parameter (`PortDescriptor`: name, direction, shape, rate divisor, kind, optional unit and range).
+   - `ports`: every port that is not a parameter (`PortDescriptor`: name, direction, shape, rate divisor, kind, optional unit and range). Kind `generic` means any kind: a connection with a `generic` end is never a kind mismatch (ADR 0005, note of 2026-10-18).
    - `parameters` (`ParameterDescriptor`: name, kind, rate divisor, optional unit, range, default, `combine`).
    - `feedthrough`: must name the class whose trait you implement.
    - `sink`: `Some(SinkKind::Audio)` if the module has an external effect, else `None`.

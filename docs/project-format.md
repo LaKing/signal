@@ -137,7 +137,7 @@ composites/voice.toml:7:34: error: /voice/osc.typo: unknown parameter
 - **Every composite file is validated**, whether or not the project uses it:
   - a composite the project uses is checked where it is instantiated;
   - one that nothing in `project.toml` reaches is checked as if instantiated once under its own name, with no parameters set and nothing connected. Its errors are reported; its warnings are not.
-- **Warnings** do not stop loading: a kind mismatch on a connection, or an instance from which no sink is reachable.
+- **Warnings** do not stop loading: a kind mismatch on a connection (between two different kinds, neither of them `generic`: a `generic` port matches any kind, ADR 0005, note of 2026-10-18), or an instance from which no sink is reachable.
 
 A delay-free feedback cycle is an error. A loop through a state-output module such as `std.unit_delay` is fine (ADR 0016 §2).
 

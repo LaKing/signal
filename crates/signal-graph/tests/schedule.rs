@@ -236,3 +236,69 @@ fn kind_mismatch_is_a_warning() {
         }]
     );
 }
+
+/// A `Generic` end matches any kind (ADR 0005, note of 2026-10-18): Audio
+/// into Generic and Generic into Audio give no warning; Audio into Control
+/// still does.
+#[test]
+fn a_generic_end_is_never_a_kind_mismatch() {
+    let project = composite(
+        "project",
+        vec![
+            inst("osc", "test.osc"),
+            inst("gen", "test.gen"),
+            inst("vca", "test.vca"),
+            inst("spk", "test.out"),
+        ],
+        vec![
+            conn("osc.out", "gen.in"),
+            conn("gen.out", "vca.in"),
+            conn("osc.out", "vca.cv"),
+            conn("vca.out", "spk.in"),
+        ],
+    );
+    let plan = build(&project, &[]).unwrap();
+    assert_eq!(
+        plan.warnings,
+        [GraphWarning::KindMismatch {
+            from: port_addr("/osc.out"),
+            to: port_addr("/vca.cv"),
+            from_kind: PortKind::Audio,
+            to_kind: PortKind::Control,
+        }]
+    );
+}
+
+/// Through an inserted converter, which carries the source's kind, a
+/// `Generic` end still matches: the converter is inserted as for any kind,
+/// and is the only warning.
+#[test]
+fn a_generic_end_through_a_converter_is_not_a_kind_mismatch() {
+    let project = composite(
+        "project",
+        vec![
+            inst("src", "test.gen_slow"),
+            inst("slow", "test.slow"),
+            inst("gen", "test.gen"),
+            inst("spk", "test.out"),
+        ],
+        vec![
+            conn("src.out", "spk.in"),
+            conn("slow.out", "gen.in"),
+            conn("gen.out", "spk.in"),
+        ],
+    );
+    let plan = build(&project, &[]).unwrap();
+    let kinds: Vec<_> = plan
+        .warnings
+        .iter()
+        .filter(|w| matches!(w, GraphWarning::KindMismatch { .. }))
+        .collect();
+    assert!(kinds.is_empty(), "{kinds:?}");
+    let converters = plan
+        .warnings
+        .iter()
+        .filter(|w| matches!(w, GraphWarning::ConverterInserted { .. }))
+        .count();
+    assert_eq!(converters, 2, "{:?}", plan.warnings);
+}

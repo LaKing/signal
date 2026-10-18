@@ -145,6 +145,29 @@ const SLOW: ModuleDescriptor = descriptor(
     None,
 );
 
+/// Generic (any kind) input and output, as the core arithmetic types.
+const GEN: ModuleDescriptor = descriptor(
+    "test.gen",
+    &[
+        port("in", In, Signal, PortKind::Generic),
+        port("out", Out, Signal, PortKind::Generic),
+    ],
+    &[],
+    Feedthrough::Direct,
+    None,
+);
+/// Generic output at rate divisor 2.
+const GEN_SLOW: ModuleDescriptor = descriptor(
+    "test.gen_slow",
+    &[PortDescriptor {
+        rate: TWO,
+        ..port("out", Out, Signal, PortKind::Generic)
+    }],
+    &[],
+    Feedthrough::Direct,
+    None,
+);
+
 /// Event output at rate divisor 2.
 const SLOW_TRIG: ModuleDescriptor = descriptor(
     "test.slow_trig",
@@ -276,7 +299,7 @@ pub fn registry() -> Registry {
     let mut registry = Registry::new();
     for descriptor in [
         OSC, ENV, VCA, TRIG, OUT, SLOW, SLOW_TRIG, SLOW64, SLOW3, IN3, IN64, IN1600, VSRC, VSLOW,
-        VIN64, VIN2,
+        VIN64, VIN2, GEN, GEN_SLOW,
     ] {
         let module_type = ModuleType {
             descriptor,
