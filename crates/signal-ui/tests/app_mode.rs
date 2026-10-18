@@ -320,13 +320,65 @@ fn signal_ui_refuses_the_app_s_messages(transport: Transport) {
         },
     );
     let (mut ws, _) = rig.client();
-    for (id, kind) in [(1, "project.open"), (2, "transport.stop"), (3, "app.get")] {
+    for (id, kind) in [(1, "project.open"), (3, "app.get")] {
         let refused = rig.request(&mut ws, id, json!({"type": kind, "path": "/tmp"}), "error");
         assert_eq!(refused["code"], "not-allowed", "{kind}");
     }
     let described = rig.request(&mut ws, 4, json!({"type": "describe"}), "describe");
     assert_eq!(described["playing"], true, "signal ui still plays");
     rig.finish();
+}
+
+/// M2.12-1 (ADR 0029 §2): `signal ui` stops on `transport.stop` and plays
+/// the project it serves again from frame 0 on `transport.play`, `describe`
+/// pushed after each; a run that records refuses both.
+fn signal_ui_stops_and_plays(transport: Transport) {
+    let mut rig = rig(
+        "ui-transport",
+        Options {
+            transport,
+            ..Options::default()
+        },
+    );
+    let (mut ws, _) = rig.client();
+    for _ in 0..8 {
+        rig.pump();
+    }
+    let stopped = rig.request(&mut ws, 1, json!({"type": "transport.stop"}), "transport");
+    assert_eq!(stopped["playing"], false);
+    let described = rig.request(&mut ws, 2, json!({"type": "describe"}), "describe");
+    assert_eq!(described["playing"], false, "{described}");
+    let pong = rig.request(&mut ws, 3, json!({"type": "ping"}), "pong");
+    assert_eq!(pong["frame"], Value::Null, "nothing runs");
+    let played = rig.request(&mut ws, 4, json!({"type": "transport.play"}), "transport");
+    assert_eq!(played["playing"], true);
+    let pong = rig.request(&mut ws, 5, json!({"type": "ping"}), "pong");
+    assert!(
+        pong["frame"].as_u64().is_some_and(|f| f < 48_000),
+        "played again from frame 0: {pong}"
+    );
+    rig.finish();
+
+    let mut rig = rig_recording("ui-transport-recording", transport);
+    let (mut ws, _) = rig.client();
+    for (id, kind) in [(1, "transport.stop"), (2, "transport.play")] {
+        let refused = rig.request(&mut ws, id, json!({"type": kind}), "error");
+        assert_eq!(refused["code"], "recording", "{kind}");
+    }
+    let described = rig.request(&mut ws, 3, json!({"type": "describe"}), "describe");
+    assert_eq!(described["playing"], true, "a recording run plays on");
+    rig.finish();
+}
+
+fn rig_recording(name: &str, transport: Transport) -> Rig {
+    rig(
+        name,
+        Options {
+            transport,
+            recording: true,
+            ..Options::default()
+        },
+    )
 }
 
 /// M2.8-8: a commit that fails while stopped is unsaved, and stays so (its
@@ -1434,6 +1486,7 @@ both!(
     a_commit_while_stopped_writes_once,
     a_stopped_commit_updates_the_inner_bases,
     signal_ui_refuses_the_app_s_messages,
+    signal_ui_stops_and_plays,
     a_signal_file_opens_in_a_working_folder,
     a_panel_write_marks_a_signal_project_edited,
     a_pattern_write_marks_a_signal_project_edited,

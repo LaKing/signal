@@ -1,4 +1,5 @@
-//! Test hooks: an in-process duplex byte stream, so that the protocol's
+//! In process (the `in-process` feature: `signal mcp` and the tests): an
+//! in-process duplex byte stream, so that the protocol's
 //! tests run the server's WebSocket connection code (handshake, Origin,
 //! `hello`, the bounded writer, the reads) where no port can be bound. Each
 //! direction holds at most [`CAPACITY`] bytes, as a socket's buffer does: a

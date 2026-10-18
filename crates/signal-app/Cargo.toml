@@ -51,7 +51,7 @@ clap = { workspace = true }
 
 [dev-dependencies]
 signal-app = { path = ".", features = ["test-hooks"] }
-signal-ui = { workspace = true, features = ["test-hooks"] }
+signal-ui = { workspace = true, features = ["test-hooks", "in-process"] }
 tungstenite = { workspace = true }
 
 [lints]

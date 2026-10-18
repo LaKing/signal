@@ -5,7 +5,8 @@
 //! stop request that hands the Runner back. M2.5-1 AC5: so does the input
 //! callback body, `InputCallback::capture` (metering only), run under the
 //! same guard, including while its meter queue is full, and `fill` with an
-//! explicit channel map.
+//! explicit channel map. M2.12-1: `fill` with an output ceiling that
+//! holds samples.
 
 signal_contract::install_counting_allocator!();
 
@@ -81,7 +82,10 @@ fn the_callback_allocates_and_frees_nothing() {
     let plan = project.plan(&registry).unwrap().plan;
     let rate = project.sample_rate;
     let config = RealtimeConfig::new(rate, project.seed);
-    let (runner, mut controller) = realtime(&plan, &registry, config).unwrap();
+    let (mut runner, mut controller) = realtime(&plan, &registry, config).unwrap();
+    // M2.12-1: with an output ceiling the kick passes (`signal mcp`'s
+    // `--max-gain`), holding samples allocates nothing either.
+    runner.set_ceiling(Some(0.05));
 
     let stats = Arc::new(CallbackStats::default());
     // The stereo sink on device channels 4 and 3 of 4.
@@ -120,9 +124,11 @@ fn the_callback_allocates_and_frees_nothing() {
             }
         }
     }
+    let runner = control.take_runner();
+    assert!(runner.is_some(), "the stop request was served");
     assert!(
-        control.take_runner().is_some(),
-        "the stop request was served"
+        runner.is_some_and(|r| r.ceilinged() > 0),
+        "the ceiling held samples"
     );
     assert_eq!(stats.snapshot().callbacks, 4_000);
     input_meters.drain(|_| metered += 1);

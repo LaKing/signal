@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
 
 use clap::{Args, Subcommand};
 use serde_json::json;
@@ -27,6 +26,7 @@ use signal_ui::setup::setup_path;
 use signal_ui::{FirstRun, Host, HostConfig, ServerOptions, project_ui};
 
 use crate::devices::compute_lines;
+use crate::drive::{Pace, drive};
 use crate::files::{project_arg, temporary_note};
 use crate::gpu::Gpu;
 use crate::play::{DriverKind, PlayArgs, check, write_wav};
@@ -90,59 +90,12 @@ pub(crate) fn run(
     };
     check(play)?;
     let null = play.driver == DriverKind::Null;
-    // A .signal file is served from a temporary folder, which the host keeps
-    // (and its Setup field reopens, M2.8-12).
-    let opened = project_arg(&play.project)?;
-    temporary_note(&opened);
-    let (dir, shown) = (opened.dir().to_owned(), opened.shown().to_owned());
-    let dir = &dir;
-    let project = Project::load(dir).map_err(|error| match error {
-        LoadError::Invalid(diagnostics) => Failure::Invalid(located(&shown, diagnostics)),
-        error @ LoadError::Io { .. } => Failure::Io(error.to_string()),
-    })?;
-    let plan = project
-        .plan(registry)
-        .map_err(|diagnostics| Failure::Invalid(located(&shown, diagnostics)))?
-        .plan;
-    let (_, width) = sink_of(&project, &plan).map_err(|d| Failure::Invalid(located(&shown, d)))?;
-    // As `play --watch`: GPU-backed instances on this machine's devices,
-    // kept until the run is gone.
-    let mut gpu = Gpu::new(registry, true, project.gpu_pins(&plan), setup);
-    for warning in gpu.warnings() {
-        eprintln!("signal: {warning}");
-    }
-    let setup_path = setup_path(
-        setup,
-        std::env::var_os("SIGNAL_SETUP"),
-        std::env::var_os("HOME"),
-    )
-    .map_err(Failure::Usage)?;
-    // Under the null driver the Setup's devices are still the machine's,
-    // so `setup.*` resolves them as Signal.app would.
-    let backend = if null {
-        Backend::Null(signal_audio::devices().unwrap_or_default())
-    } else {
-        Backend::CoreAudio
-    };
-    // The bundle's ui/ (Contents/Resources/ui, beside Contents/Helpers),
-    // else the repository's the CLI was built from.
-    let ui_dir = args.ui_dir.clone().unwrap_or_else(|| {
-        let exe = std::env::current_exe().ok();
-        let built = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui"));
-        signal_ui::library_dir(exe.as_deref(), built)
-    });
-    let config = HostConfig {
-        dir: dir.clone(),
-        source: shown.clone(),
-        temporary: opened.into_temporary(),
-        registry: gpu.registry().clone(),
-        setup_path,
-        backend,
-        first: FirstRun {
-            device: play.device.clone(),
-            buffer: play.buffer,
-            threads: play.threads,
-        },
+    let played = Played {
+        project: &play.project,
+        null,
+        device: play.device.clone(),
+        buffer: play.buffer,
+        threads: play.threads,
         rt: RtOptions {
             policy: play.rt_policy,
             computation: play.rt_computation,
@@ -150,16 +103,21 @@ pub(crate) fn run(
         },
         boundary_data: play.record_boundary_data,
         recording: play.record_session.is_some() || play.record_audio.is_some(),
-        provenance: provenance::collect(&provenance::source_dir(), &project.files),
-        compute: compute_lines(),
-        server: ServerOptions {
-            port: args.port,
-            remote: args.remote,
-            ui_dir,
-            project_ui: project_ui(dir),
-            client_queue: CLIENT_QUEUE,
-        },
+        ceiling: None,
     };
+    let server = ServerOptions {
+        port: args.port,
+        remote: args.remote,
+        ui_dir: args.ui_dir.clone().unwrap_or_else(default_ui_dir),
+        project_ui: PathBuf::new(),
+        client_queue: CLIENT_QUEUE,
+    };
+    let Serve {
+        config,
+        gpu,
+        shown,
+        width,
+    } = serve(&played, registry, setup, server)?;
     let mut host = Host::new(config).map_err(Failure::Device)?;
     let rate = host.sample_rate();
     let url = host.url();
@@ -214,67 +172,19 @@ pub(crate) fn run(
             }
         });
     }
-    let limit = play.seconds.map(|s| (s * f64::from(rate)).round() as u64);
+    let pace = Pace {
+        null,
+        buffer: play.buffer,
+        fast: play.fast,
+        limit: play.seconds.map(|s| (s * f64::from(rate)).round() as u64),
+    };
     let mut audio = play.record_audio.is_some().then(Vec::new);
-    let started = Instant::now();
-    let mut played = 0u64;
-    let mut stopping: Option<Instant> = None;
-    loop {
-        let status = host.controller().map(|c| (c.status(), c.in_flight()));
-        // The null driver counts its chunks; a device, its runner's frames,
-        // or the time since the start while nothing plays (a refused
-        // restart), so that `--seconds` always ends the run.
-        let frame = match (&status, null) {
-            (_, true) => played,
-            (Some((s, _)), false) => s.next_frame.0,
-            (None, false) => (started.elapsed().as_secs_f64() * f64::from(rate)) as u64,
-        };
-        // A failed engine plays only silence: stop (docs/semantics.md §14).
-        if limit.is_some_and(|limit| frame >= limit)
-            || status.as_ref().is_some_and(|(s, _)| s.failure.is_some())
-        {
-            break;
-        }
-        // Stopped: once every command sent has applied (or a second has
-        // passed), so an edit just made is played and recorded.
-        if stop.load(Ordering::Relaxed) {
-            let since = *stopping.get_or_insert_with(Instant::now);
-            if status.is_none_or(|(_, in_flight)| in_flight == 0)
-                || since.elapsed() > Duration::from_secs(1)
-            {
-                break;
-            }
-        }
-        if null {
-            let chunk = limit.map_or(u64::from(play.buffer), |limit| {
-                (limit - frame).min(u64::from(play.buffer))
-            });
-            // Nothing runs after a refused restart; the chunk is counted
-            // anyway, so the run still ends at `--seconds`, on time.
-            let _ = host.run_null(chunk, |out| {
-                if let Some(audio) = audio.as_mut() {
-                    audio.extend_from_slice(out);
-                }
-            });
-            played += chunk;
-            for message in host.step() {
-                eprintln!("signal: {message}");
-            }
-            if !play.fast {
-                let due = started + Duration::from_secs_f64(played as f64 / f64::from(rate));
-                if let Some(wait) = due.checked_duration_since(Instant::now()) {
-                    thread::sleep(wait);
-                }
-            }
-        } else {
-            let interval = Duration::from_secs_f64(f64::from(play.buffer) / f64::from(rate))
-                .min(Duration::from_millis(1));
-            thread::sleep(interval);
-            for message in host.step() {
-                eprintln!("signal: {message}");
-            }
-        }
-    }
+    drive(
+        &mut host,
+        &pace,
+        &|| stop.load(Ordering::Relaxed),
+        audio.as_mut(),
+    );
     let Some(finished) = host.finish() else {
         return Ok(());
     };
@@ -313,6 +223,114 @@ pub(crate) fn run(
         );
     }
     Ok(())
+}
+
+/// How a host plays a project (`signal ui`'s options, or `signal mcp`'s).
+pub(crate) struct Played<'a> {
+    /// The project folder, or a `.signal` file.
+    pub(crate) project: &'a Path,
+    /// The null driver (no device) instead of CoreAudio.
+    pub(crate) null: bool,
+    pub(crate) device: Option<String>,
+    pub(crate) buffer: u32,
+    pub(crate) threads: u32,
+    pub(crate) rt: RtOptions,
+    pub(crate) boundary_data: bool,
+    /// The run records a session (or its audio): it is never restarted.
+    pub(crate) recording: bool,
+    /// The output ceiling (`signal mcp --max-gain`; `None`: none).
+    pub(crate) ceiling: Option<f64>,
+}
+
+/// What a host needs to play a project, read and planned.
+pub(crate) struct Serve {
+    pub(crate) config: HostConfig,
+    /// GPU-backed instances on this machine's devices, kept until the run
+    /// is gone.
+    pub(crate) gpu: Gpu,
+    /// The project as the person named it.
+    pub(crate) shown: PathBuf,
+    /// The audio sink's channels.
+    pub(crate) width: usize,
+}
+
+/// The UI library: the bundle's ui/ (Contents/Resources/ui, beside
+/// Contents/Helpers), else the repository's the CLI was built from.
+pub(crate) fn default_ui_dir() -> PathBuf {
+    let exe = std::env::current_exe().ok();
+    let built = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui"));
+    signal_ui::library_dir(exe.as_deref(), built)
+}
+
+/// Loads and plans the project `played` names and makes its host's
+/// configuration, as `signal ui` plays it (`server.project_ui` is set to the
+/// project's own `ui/`).
+pub(crate) fn serve(
+    played: &Played,
+    registry: &Registry,
+    setup: Option<&Path>,
+    mut server: ServerOptions,
+) -> Result<Serve, Failure> {
+    // A .signal file is served from a temporary folder, which the host keeps
+    // (and its Setup field reopens, M2.8-12).
+    let opened = project_arg(played.project)?;
+    temporary_note(&opened);
+    let (dir, shown) = (opened.dir().to_owned(), opened.shown().to_owned());
+    let project = Project::load(&dir).map_err(|error| match error {
+        LoadError::Invalid(diagnostics) => Failure::Invalid(located(&shown, diagnostics)),
+        error @ LoadError::Io { .. } => Failure::Io(error.to_string()),
+    })?;
+    let plan = project
+        .plan(registry)
+        .map_err(|diagnostics| Failure::Invalid(located(&shown, diagnostics)))?
+        .plan;
+    let (_, width) = sink_of(&project, &plan).map_err(|d| Failure::Invalid(located(&shown, d)))?;
+    // As `play --watch`: GPU-backed instances on this machine's devices,
+    // kept until the run is gone.
+    let mut gpu = Gpu::new(registry, true, project.gpu_pins(&plan), setup);
+    for warning in gpu.warnings() {
+        eprintln!("signal: {warning}");
+    }
+    let setup_path = setup_path(
+        setup,
+        std::env::var_os("SIGNAL_SETUP"),
+        std::env::var_os("HOME"),
+    )
+    .map_err(Failure::Usage)?;
+    // Under the null driver the Setup's devices are still the machine's,
+    // so `setup.*` resolves them as Signal.app would.
+    let backend = if played.null {
+        Backend::Null(signal_audio::devices().unwrap_or_default())
+    } else {
+        Backend::CoreAudio
+    };
+    server.project_ui = project_ui(&dir);
+    let config = HostConfig {
+        dir: dir.clone(),
+        source: shown.clone(),
+        temporary: opened.into_temporary(),
+        registry: gpu.registry().clone(),
+        setup_path,
+        backend,
+        first: FirstRun {
+            device: played.device.clone(),
+            buffer: played.buffer,
+            threads: played.threads,
+        },
+        rt: played.rt,
+        boundary_data: played.boundary_data,
+        recording: played.recording,
+        provenance: provenance::collect(&provenance::source_dir(), &project.files),
+        compute: compute_lines(),
+        server,
+        ceiling: played.ceiling,
+    };
+    Ok(Serve {
+        config,
+        gpu,
+        shown,
+        width,
+    })
 }
 
 /// `signal ui check`: the binding check of every panel of the project.

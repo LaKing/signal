@@ -1,13 +1,15 @@
 //! The `signal` command (headless entry point; ADR 0013): `render`, `replay`,
-//! `play`, `ui`, `pack`, `unpack`, `vendor`, `bench`, `devices`, `modules` and `schema`. `--json` makes every command print machine-readable output on
+//! `play`, `ui`, `mcp`, `pack`, `unpack`, `vendor`, `bench`, `devices`, `modules` and `schema`. `--json` makes every command print machine-readable output on
 //! stdout. Exit codes: 0 ok, 1 validation or user error, 2 internal error.
 //! The command layer only: sessions, live edits and provenance live in
 //! `signal-project`, the audio device in `signal-audio`.
 
 mod bench;
 mod devices;
+mod drive;
 mod files;
 mod gpu;
+mod mcp;
 mod play;
 mod render;
 mod replay;
@@ -63,6 +65,11 @@ enum Command {
     /// panel in the default browser. `signal ui check <project>` checks the
     /// panels' bindings instead.
     Ui(ui::UiArgs),
+    /// Run an MCP (Model Context Protocol) server over stdio, so an LLM client
+    /// can do what a person at the panel can (ADR 0029,
+    /// docs/agent-interface.md); stdout carries protocol frames only.
+    #[command(long_about = mcp::LONG_ABOUT)]
+    Mcp(mcp::McpArgs),
     /// Pack a project folder into one .signal file (a deterministic zip of
     /// the files a project reads; docs/project-format.md §10).
     Pack(files::PackArgs),
@@ -128,8 +135,35 @@ impl Failure {
         }
     }
 
+    /// The failure as one text: its message, then its diagnostics, one per
+    /// line (`signal mcp`'s tool errors).
+    pub(crate) fn message(&self) -> String {
+        let (_, message, diagnostics) = self.parts();
+        std::iter::once(message)
+            .chain(diagnostics.iter().map(ToString::to_string))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn report(&self, json: bool) {
-        let (kind, message, diagnostics) = match self {
+        let (kind, message, diagnostics) = self.parts();
+        if json {
+            let output = json!({
+                "error": { "kind": kind, "message": message, "diagnostics": diagnostics }
+            });
+            print_stdout(&serde_json::to_string_pretty(&output).unwrap_or_default());
+        } else if diagnostics.is_empty() {
+            eprintln!("signal: {message}");
+        } else {
+            for diagnostic in diagnostics {
+                eprintln!("{diagnostic}");
+            }
+        }
+    }
+
+    /// Its kind, message and diagnostics.
+    fn parts(&self) -> (&'static str, String, &[Diagnostic]) {
+        match self {
             Failure::Usage(message) => ("usage", message.clone(), &[][..]),
             Failure::Invalid(diagnostics) => (
                 "validation",
@@ -158,18 +192,6 @@ impl Failure {
             Failure::Replay(message) => ("replay", message.clone(), &[][..]),
             Failure::Mismatch(message) => ("replay-mismatch", message.clone(), &[][..]),
             Failure::Internal(message) => ("internal", message.clone(), &[][..]),
-        };
-        if json {
-            let output = json!({
-                "error": { "kind": kind, "message": message, "diagnostics": diagnostics }
-            });
-            print_stdout(&serde_json::to_string_pretty(&output).unwrap_or_default());
-        } else if diagnostics.is_empty() {
-            eprintln!("signal: {message}");
-        } else {
-            for diagnostic in diagnostics {
-                eprintln!("{diagnostic}");
-            }
         }
     }
 }
@@ -234,6 +256,7 @@ fn execute(cli: &Cli) -> Result<(), Failure> {
         Command::Replay(args) => replay::run(args, &registry, setup, cli.json),
         Command::Play(args) => play::run(args, &registry, setup, cli.json),
         Command::Ui(args) => ui::run(args, &registry, cli.setup.as_deref(), cli.json),
+        Command::Mcp(args) => mcp::run(args, &registry, cli.setup.as_deref()),
         Command::Pack(args) => files::pack(args, cli.json),
         Command::Unpack(args) => files::unpack(args, cli.json),
         Command::Vendor(args) => vendor::run(args, cli.json),

@@ -12,7 +12,11 @@
 //! - maps sink input *i* to device channel *i* (extra device channels 0);
 //! - converts to the device's `f32` ([`device_sample`]: clamped to [−1, 1],
 //!   non-finite as 0, counted as clipped) and meters each channel per
-//!   callback.
+//!   callback;
+//! - in real time only, with an output ceiling ([`Runner::set_ceiling`],
+//!   `signal mcp`'s `--max-gain`; none by default), holds every device
+//!   sample within ±ceiling ([`hold`]), counted; offline renders never
+//!   hold.
 //!
 //! [`render`] (the offline WAV writer, [`Render::write`]) and the real-time
 //! [`Runner`] (any [`Driver`]: the [`NullDriver`] here, CoreAudio in
@@ -44,7 +48,7 @@ mod vectors;
 pub use audio::{Conversion, Meter, RenderError, device_sample};
 pub use driver::{CallbackSizes, Driver, DriverError, MAX_CALLBACK_FRAMES, NullDriver};
 pub use render::{Render, render, render_blocks, render_blocks_tapped, render_with};
-pub use runner::{Controller, ReadySwap, Runner, realtime, realtime_with};
+pub use runner::{Controller, ReadySwap, Runner, ceiling_level, hold, realtime, realtime_with};
 pub use scope::{SCOPE_POINTS, SCOPE_SLOTS, ScopeBlock, ScopeError};
 pub use vectors::{
     VECTOR_MAX_ROWS, VECTOR_SLOTS, VectorError, VectorSnapshot, VectorTap, VectorTrack,

@@ -50,6 +50,7 @@ use signal_project::live::{
 use signal_project::patch::{self, Op};
 use signal_project::schematic::{self, SCHEMATIC_FILE};
 use signal_project::session::{LiveRecorder, SessionRecorder, sink_of};
+use signal_project::vendor::{self, VendorError};
 use signal_project::{Diagnostic, LoadError, PATTERNS, PROJECT_FILE, Project, located};
 
 use crate::PROTOCOL;
@@ -114,6 +115,9 @@ pub struct HostConfig {
     pub compute: Vec<String>,
     /// The servers.
     pub server: ServerOptions,
+    /// The output ceiling of every run ([`signal_output::Runner::set_ceiling`]):
+    /// `signal mcp`'s `--max-gain`; `None` for `signal ui` and the app.
+    pub ceiling: Option<f64>,
 }
 
 /// What Signal.app's server runs ([`Host::new_app`]): the Setup file, the
@@ -404,6 +408,8 @@ pub struct Host {
     boundary_data: bool,
     recording: bool,
     provenance: Provenance,
+    /// The output ceiling of every run ([`HostConfig::ceiling`]).
+    ceiling: Option<f64>,
     server: Server,
     run: Option<Run>,
     panel: Panel,
@@ -579,26 +585,26 @@ impl Host {
         Host::with_server(config, server)
     }
 
-    /// Test hooks: a host whose servers bind nothing; clients connect with
+    /// In process (`in-process`: `signal mcp` and the tests): a host whose servers bind nothing; clients connect with
     /// [`connect_local`](Host::connect_local) and are served by the same
     /// WebSocket connection code as over TCP.
-    #[cfg(feature = "test-hooks")]
+    #[cfg(feature = "in-process")]
     pub fn new_local(config: HostConfig) -> Result<Host, String> {
         let server = Server::start_local(&config.server)
             .map_err(|error| format!("the UI server did not start: {error}"))?;
         Host::with_server(config, server)
     }
 
-    /// Test hooks: a new client's end of an in-process connection (a
+    /// In process (`in-process`): a new client's end of an in-process connection (a
     /// [`new_local`](Host::new_local) host's only way in).
-    #[cfg(feature = "test-hooks")]
+    #[cfg(feature = "in-process")]
     pub fn connect_local(&self) -> crate::LocalStream {
         self.server.connect_local()
     }
 
-    /// Test hooks: a new HTTP client's end of an in-process connection,
+    /// In process (`in-process`): a new HTTP client's end of an in-process connection,
     /// served by the HTTP workers (its requests carry `Host: 127.0.0.1:0`).
-    #[cfg(feature = "test-hooks")]
+    #[cfg(feature = "in-process")]
     pub fn connect_local_http(&self) -> crate::LocalStream {
         self.server.local_connector().connect_http()
     }
@@ -611,9 +617,9 @@ impl Host {
         Ok(Host::with_app(config, server))
     }
 
-    /// Test hooks: [`new_app`](Host::new_app) with servers that bind
+    /// In process (`in-process`): [`new_app`](Host::new_app) with servers that bind
     /// nothing (clients connect in process).
-    #[cfg(feature = "test-hooks")]
+    #[cfg(feature = "in-process")]
     pub fn new_app_local(config: AppHostConfig) -> Result<Host, String> {
         let server = Server::start_local(&config.server)
             .map_err(|error| format!("the UI server did not start: {error}"))?;
@@ -650,6 +656,7 @@ impl Host {
             provenance: Provenance::default(),
             compute,
             server: options,
+            ceiling: None,
         };
         let mut host = Host::blank(config, server, Some(AppMode::default()));
         host.open_root = open_root;
@@ -692,6 +699,7 @@ impl Host {
             boundary_data: config.boundary_data,
             recording: config.recording,
             provenance: config.provenance,
+            ceiling: config.ceiling,
             server,
             run: None,
             panel: Panel::default(),
@@ -754,8 +762,8 @@ impl Host {
         self.server.url_of(path)
     }
 
-    /// Test hooks: what connects in-process clients from another thread.
-    #[cfg(feature = "test-hooks")]
+    /// In process (`in-process`): what connects in-process clients from another thread.
+    #[cfg(feature = "in-process")]
     pub fn local_connector(&self) -> crate::LocalConnector {
         self.server.local_connector()
     }
@@ -1245,10 +1253,11 @@ impl Host {
         self.abandon();
     }
 
-    /// `transport.play`, `transport.stop` (app mode).
+    /// `transport.play`, `transport.stop` (app mode; `signal ui`'s are
+    /// [`Host::serve_transport`]).
     fn transport(&mut self, play: bool) -> Result<Value, Failure> {
         if self.app.is_none() {
-            return Err(app_only());
+            return self.serve_transport(play);
         }
         let result = if play && !self.powered() {
             Err(powered_off())
@@ -1262,6 +1271,30 @@ impl Host {
             Ok(())
         };
         self.noted(result)?;
+        Ok(json!({"type": "transport", "playing": self.run.is_some()}))
+    }
+
+    /// `signal ui`'s `transport.stop` and `transport.play` (M2.12-1, ADR 0029
+    /// §2): stop stops the run as the app's Stop does (edits waiting for
+    /// reports are abandoned; the unsaved controls keep their values); play
+    /// plays the project it serves again from frame 0 from its files, as
+    /// `project.open` of that project does. Both are refused while the run
+    /// records, since a recording covers one run from frame 0.
+    fn serve_transport(&mut self, play: bool) -> Result<Value, Failure> {
+        if self.recording {
+            return Err(fail(
+                "recording",
+                "a run that records a session or its audio is not stopped or played again (a recording covers one run from frame 0)",
+            ));
+        }
+        self.stop_app();
+        if play {
+            self.failed.clear();
+            let (run, notes) = self.build(true).map_err(|e| fail("does-not-load", e))?;
+            self.install(run);
+            self.rearm();
+            self.messages.extend(notes);
+        }
         Ok(json!({"type": "transport", "playing": self.run.is_some()}))
     }
 
@@ -1680,13 +1713,14 @@ impl Host {
             config.engine.record_boundary_data = true;
             config.boundary_data = (rate as usize).saturating_mul(latent.max(1));
         }
-        let (runner, controller) = realtime_with(
+        let (mut runner, controller) = realtime_with(
             &plan,
             &self.registry,
             config,
             Some(rt_thread::mach_semaphores),
         )
         .map_err(|e| e.to_string())?;
+        runner.set_ceiling(self.ceiling);
         let recorder = SessionRecorder::new(
             &project,
             &self.registry,
@@ -2222,6 +2256,9 @@ impl Host {
             "panel.write" => self.panel_write(&message).map(Some),
             "pattern.read" => self.pattern_read(&message).map(Some),
             "pattern.write" => self.pattern_write(&message).map(Some),
+            "file.read" => self.file_read(&message).map(Some),
+            "file.write" => self.file_write(&message).map(Some),
+            "vendor" => self.vendor(&message).map(Some),
             "setup.get" => Ok(Some(self.setup_get())),
             "setup.devices" => self.setup_devices(&message).map(Some),
             "setup.check" => self.setup_check(&message).map(Some),
@@ -2919,10 +2956,7 @@ impl Host {
             .iter()
             .position(|s| s.path == file)
             .ok_or_else(unknown)?;
-        let link =
-            |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
-        if link(&self.dir.join(&file)) || (!level.is_empty() && link(&self.dir.join("composites")))
-        {
+        if self.linked_file(&file) {
             return Err(fail(
                 "unknown-level",
                 format!(
@@ -3030,20 +3064,7 @@ impl Host {
                 json!({"diagnostics": lines}),
             )
         };
-        let new = new.map_err(does_not_load)?;
-        let planned = new.plan(&self.registry).map_err(does_not_load)?.plan;
-        sink_of(&new, &planned).map_err(does_not_load)?;
-        if let Some(run) = &self.run {
-            // `self.plan` is the running project's plan, kept with it.
-            signal_project::live::check_edit(
-                &run.current,
-                self.plan.as_ref(),
-                &new,
-                planned,
-                &self.registry,
-            )
-            .map_err(does_not_load)?;
-        }
+        self.loads_as_edit(new).map_err(does_not_load)?;
         // Every written patch stays undoable: its undo and redo requests fit
         // a client message, with room for every parameter its instances
         // could be committed with meanwhile.
@@ -3133,6 +3154,264 @@ impl Host {
             "file": file,
             "base": sha256_hex(patched.text.as_bytes()),
             "inverse": patched.inverse,
+        }))
+    }
+
+    /// Whether `file` (relative to the project) is reached through a link:
+    /// the file itself, or for a composite the `composites/` folder. The
+    /// project's files are written only in its own folder (`patch`,
+    /// `file.write`, `vendor`).
+    fn linked_file(&self, file: &str) -> bool {
+        let link =
+            |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+        link(&self.dir.join(file))
+            || (file.starts_with("composites/") && link(&self.dir.join("composites")))
+    }
+
+    /// The edited project `new` (its files as an edit would leave them),
+    /// planned as a reload would: it must have its audio sink and, while
+    /// playing, the running project must be able to take it. Every edit of
+    /// the project's text checks this before it writes (`patch`,
+    /// `pattern.write`, `file.write`, `vendor`).
+    fn loads_as_edit(&self, new: Result<Project, Vec<Diagnostic>>) -> Result<(), Vec<Diagnostic>> {
+        let new = new?;
+        let planned = new.plan(&self.registry)?.plan;
+        sink_of(&new, &planned)?;
+        if let Some(run) = &self.run {
+            // `self.plan` is the running project's plan, kept with it.
+            signal_project::live::check_edit(
+                &run.current,
+                self.plan.as_ref(),
+                &new,
+                planned,
+                &self.registry,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The file a `file.read` or `file.write` names: `project.toml` or
+    /// `composites/<name>.toml`, never any other path (`bad-value`).
+    fn project_text_file(message: &Value) -> Result<String, Failure> {
+        let file = message
+            .get("file")
+            .and_then(Value::as_str)
+            .ok_or_else(|| fail("bad-message", "needs `file`"))?;
+        let composite = file
+            .strip_prefix("composites/")
+            .and_then(|f| f.strip_suffix(".toml"))
+            .is_some_and(|name| {
+                name.starts_with(|c: char| c.is_ascii_lowercase())
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            });
+        if file == PROJECT_FILE || composite {
+            Ok(file.to_owned())
+        } else {
+            Err(fail(
+                "bad-value",
+                format!(
+                    "`{file}` is not project.toml or composites/<name>.toml: patterns are pattern.*, panels panel.*, positions schematic.*"
+                ),
+            ))
+        }
+    }
+
+    /// `file.read` (M2.12-1, ADR 0029 §2): the text of `project.toml` or a
+    /// composite's file and its SHA-256 (the `base` a `file.write` names);
+    /// a missing composite reads as `exists: false`.
+    fn file_read(&self, message: &Value) -> Result<Value, Failure> {
+        let file = Self::project_text_file(message)?;
+        if self.linked_file(&file) {
+            return Err(fail(
+                "bad-value",
+                format!("{file} is reached through a link: only the project's own files are read"),
+            ));
+        }
+        match fs::read_to_string(self.dir.join(&file)) {
+            Ok(text) => Ok(json!({
+                "type": "file.read",
+                "file": file,
+                "exists": true,
+                "base": sha256_hex(text.as_bytes()),
+                "text": text,
+            })),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(json!({
+                "type": "file.read", "file": file, "exists": false, "base": null, "text": null,
+            })),
+            Err(error) => Err(fail("bad-value", format!("{file}: {error}"))),
+        }
+    }
+
+    /// `file.write` (M2.12-1, ADR 0029 §2, operator decision of 2026-10-18):
+    /// `text` becomes `project.toml` or `composites/<name>.toml` with the
+    /// rules of `patch` and `pattern.write`: never through a link, only when
+    /// the file is still the version `base` names (`null`: a composite that
+    /// does not exist yet; `conflict` otherwise, with its text), only when the
+    /// project with it loads and plans as a reload would (`does-not-load`),
+    /// written atomically, and not taken as seen, so the watch applies it live.
+    fn file_write(&mut self, message: &Value) -> Result<Value, Failure> {
+        let file = Self::project_text_file(message)?;
+        let text = message
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| fail("bad-message", "file.write needs `text`"))?;
+        let base = match message.get("base") {
+            Some(Value::String(base)) => Some(base.as_str()),
+            None | Some(Value::Null) => None,
+            Some(_) => return Err(fail("bad-message", "`base` is a string or null")),
+        };
+        if self.linked_file(&file) {
+            return Err(fail(
+                "write-failed",
+                format!(
+                    "{file} was not written: it is reached through a link, and only the project's own files are written"
+                ),
+            ));
+        }
+        let path = self.dir.join(&file);
+        let current = || -> Result<Option<String>, Failure> {
+            match fs::read_to_string(&path) {
+                Ok(text) => Ok(Some(text)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(fail("write-failed", format!("{file}: {error}"))),
+            }
+        };
+        let conflict = |before: Option<String>| {
+            let now = before.as_deref().map(|t| sha256_hex(t.as_bytes()));
+            fail_with(
+                "conflict",
+                format!("{file} changed since the version the write names"),
+                json!({"file": file, "base": now, "text": before}),
+            )
+        };
+        let before = current()?;
+        let hash = before.as_deref().map(|t| sha256_hex(t.as_bytes()));
+        if hash.as_deref() != base {
+            return Err(conflict(before));
+        }
+        let mut sources = signal_project::read_sources(&self.dir)
+            .map_err(|e| fail("does-not-load", e.to_string()))?;
+        sources.retain(|s| s.path != file);
+        sources.push(signal_project::SourceFile {
+            path: file.clone(),
+            text: text.to_owned(),
+        });
+        let does_not_load = |diagnostics: Vec<Diagnostic>| {
+            let lines: Vec<String> = located(&self.dir, diagnostics)
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            fail_with(
+                "does-not-load",
+                format!("not written: {}", lines.join("\n")),
+                json!({"file": file, "diagnostics": lines}),
+            )
+        };
+        self.loads_as_edit(Project::from_sources(sources))
+            .map_err(does_not_load)?;
+        // The file as it is now, not as it was read: an edit from elsewhere
+        // since then is a conflict, never overwritten.
+        let now = current()?;
+        if now != before {
+            return Err(conflict(now));
+        }
+        let failed =
+            |e: std::io::Error| fail("write-failed", format!("{file} was not written: {e}"));
+        if let Some(folder) = path.parent() {
+            fs::create_dir_all(folder).map_err(failed)?;
+        }
+        write_file(&path, text).map_err(failed)?;
+        // Playing, the watch reloads the file and pushes `graph` once it
+        // swaps; stopped, at once.
+        if self.run.is_none() {
+            self.push_graph(false);
+        }
+        Ok(json!({
+            "type": "file.written",
+            "file": file,
+            "base": sha256_hex(text.as_bytes()),
+            "created": before.is_none(),
+        }))
+    }
+
+    /// `vendor` (M2.12-1, ADR 0027 §4, operator decision of 2026-10-18): the
+    /// library composite `composite` (`lib.<name>`) copied into the project's
+    /// `composites/` as `signal vendor` copies it (`as`: the copy's name), by
+    /// its all-or-nothing writer, after the host's own checks: `project.toml`
+    /// is still the version `base` names (`conflict`), no file it writes is
+    /// reached through a link, and the project as it would be left plans as a
+    /// reload would (`does-not-load`).
+    fn vendor(&mut self, message: &Value) -> Result<Value, Failure> {
+        let composite = message
+            .get("composite")
+            .and_then(Value::as_str)
+            .ok_or_else(|| fail("bad-message", "vendor needs `composite`"))?;
+        let name = match message.get("as") {
+            Some(Value::String(name)) => Some(name.as_str()),
+            None | Some(Value::Null) => None,
+            Some(_) => return Err(fail("bad-message", "`as` is a string or null")),
+        };
+        let base = message.get("base").and_then(Value::as_str).ok_or_else(|| {
+            fail(
+                "bad-message",
+                "vendor needs `base`, the SHA-256 of project.toml",
+            )
+        })?;
+        let now = fs::read(self.dir.join(PROJECT_FILE))
+            .ok()
+            .map(|bytes| sha256_hex(&bytes));
+        if now.as_deref() != Some(base) {
+            return Err(fail_with(
+                "conflict",
+                format!("{PROJECT_FILE} changed since the version the vendor names"),
+                json!({"file": PROJECT_FILE, "base": now}),
+            ));
+        }
+        let library = signal_project::Library::builtin();
+        let refused = |error: VendorError| match error {
+            VendorError::NotInLibrary(_) => fail("unknown-module", error.to_string()),
+            VendorError::InvalidName(_) | VendorError::Exists(_) => {
+                fail("bad-value", error.to_string())
+            }
+            VendorError::Syntax { .. } | VendorError::Invalid(_) => {
+                fail("does-not-load", error.to_string())
+            }
+            VendorError::Io { .. } => fail("write-failed", error.to_string()),
+        };
+        let prepared = vendor::prepare(&self.dir, composite, name, library).map_err(refused)?;
+        if let Some(file) = prepared.paths().find(|file| self.linked_file(file)) {
+            return Err(fail(
+                "write-failed",
+                format!(
+                    "nothing was vendored: {file} is reached through a link, and only the project's own files are written"
+                ),
+            ));
+        }
+        let does_not_load = |diagnostics: Vec<Diagnostic>| {
+            let lines: Vec<String> = located(&self.dir, diagnostics)
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            fail_with(
+                "does-not-load",
+                format!("not vendored: {}", lines.join("\n")),
+                json!({"diagnostics": lines}),
+            )
+        };
+        self.loads_as_edit(Project::from_sources(prepared.after()))
+            .map_err(does_not_load)?;
+        let vendored = vendor::write(&self.dir, prepared, library).map_err(refused)?;
+        if self.run.is_none() {
+            self.push_graph(false);
+        }
+        Ok(json!({
+            "type": "vendored",
+            "composite": composite,
+            "copied": vendored.copied,
+            "reused": vendored.reused,
+            "rewritten": vendored.rewritten,
         }))
     }
 
@@ -4211,19 +4490,8 @@ impl Host {
                 json!({"name": name, "file": file, "diagnostics": lines}),
             )
         };
-        let new = Project::from_sources(sources).map_err(does_not_load)?;
-        let planned = new.plan(&self.registry).map_err(does_not_load)?.plan;
-        sink_of(&new, &planned).map_err(does_not_load)?;
-        if let Some(run) = &self.run {
-            signal_project::live::check_edit(
-                &run.current,
-                self.plan.as_ref(),
-                &new,
-                planned,
-                &self.registry,
-            )
+        self.loads_as_edit(Project::from_sources(sources))
             .map_err(does_not_load)?;
-        }
         // The file as it is now, not as it was read: an edit from elsewhere
         // since then is a conflict, never overwritten.
         let now = current(&path)?;
@@ -4811,6 +5079,8 @@ impl Host {
             "vectorOverflows": controller.map(Controller::vector_overflows),
             "commandOverflows": controller.map(|c| c.command_overflows()),
             "clipped": controller.map(Controller::clipped),
+            "ceiling": self.ceiling,
+            "ceilinged": controller.map(Controller::ceilinged),
             "writes": self.writes,
         })
     }

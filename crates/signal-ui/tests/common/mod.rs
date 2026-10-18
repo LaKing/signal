@@ -146,6 +146,8 @@ pub struct Options {
     /// Serve the copy as `signal ui` serves a `.signal` file (M2.8-12): it
     /// is packed into `project.signal` and played from a temporary unpack.
     pub packed: bool,
+    /// The runs' output ceiling (`HostConfig::ceiling`, `signal mcp`).
+    pub ceiling: Option<f64>,
 }
 
 impl Default for Options {
@@ -156,6 +158,7 @@ impl Default for Options {
             transport: Transport::Tcp,
             project: None,
             packed: false,
+            ceiling: None,
         }
     }
 }
@@ -230,6 +233,7 @@ pub fn rig(name: &str, options: Options) -> Rig {
             project_ui: project_ui(&dir),
             client_queue: options.client_queue,
         },
+        ceiling: options.ceiling,
     };
     let host = match options.transport {
         Transport::Tcp => Host::new(config),

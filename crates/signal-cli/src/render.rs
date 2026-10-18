@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::gpu::{Gpu, uses_gpu};
 
 use clap::{ArgGroup, Args};
-use serde_json::json;
+use serde_json::{Value, json};
 use signal_core::{Registry, SinkKind};
 use signal_engine::{Engine, EngineConfig, Manifest, Provenance};
 use signal_eval::Metrics;
@@ -25,31 +25,31 @@ pub(crate) const FILES: [&str; 4] = ["audio.wav", "manifest.json", "log.jsonl", 
 #[command(group(ArgGroup::new("length").required(true).args(["seconds", "frames"])))]
 pub(crate) struct RenderArgs {
     /// The project folder (containing project.toml), or a .signal file.
-    project: PathBuf,
+    pub(crate) project: PathBuf,
     /// Render this many seconds (rounded to the nearest frame).
     #[arg(long)]
-    seconds: Option<f64>,
+    pub(crate) seconds: Option<f64>,
     /// Render this many frames.
     #[arg(long)]
-    frames: Option<u64>,
+    pub(crate) frames: Option<u64>,
     /// The folder to write the artifacts to (created if needed).
     #[arg(long)]
-    out: PathBuf,
+    pub(crate) out: PathBuf,
     /// The master seed, instead of the project's.
     #[arg(long)]
-    seed: Option<u64>,
+    pub(crate) seed: Option<u64>,
     /// The sample rate in Hz, instead of the project's.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
-    sample_rate: Option<u32>,
+    pub(crate) sample_rate: Option<u32>,
     /// Frames the engine runs at once (1 to 4096). A performance setting:
     /// the output is identical for every block size.
     #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..=4096))]
-    block: u32,
+    pub(crate) block: u32,
     /// Threads a block runs on, the calling thread included (0: one per
     /// performance core; 1: no worker threads). A performance setting: the
     /// output is identical for every count.
     #[arg(long, default_value_t = 0)]
-    threads: u32,
+    pub(crate) threads: u32,
 }
 
 pub(crate) fn run(
@@ -58,6 +58,33 @@ pub(crate) fn run(
     setup: Option<&Path>,
     json: bool,
 ) -> Result<(), Failure> {
+    let rendered = render_project(args, registry, setup)?;
+    if json {
+        print_stdout(&serde_json::to_string_pretty(&rendered.output).unwrap_or_default());
+    } else {
+        for note in &rendered.notes {
+            eprintln!("{note}");
+        }
+        print_stdout(&rendered.text);
+    }
+    Ok(())
+}
+
+/// What a render wrote and says: `--json`'s object, the text summary, and
+/// the warnings it gives on stderr (shared by `signal render` and `signal
+/// mcp`'s `render` tool).
+pub(crate) struct Rendered {
+    pub(crate) output: Value,
+    pub(crate) text: String,
+    pub(crate) notes: Vec<String>,
+}
+
+/// Renders the project `args` names into `args.out`.
+pub(crate) fn render_project(
+    args: &RenderArgs,
+    registry: &Registry,
+    setup: Option<&Path>,
+) -> Result<Rendered, Failure> {
     // A .signal file is read from a temporary folder, kept until the end.
     let opened = crate::files::project_arg(&args.project)?;
     let (load_dir, dir) = (opened.dir(), opened.shown());
@@ -129,49 +156,45 @@ pub(crate) fn run(
     // result was lost (no usable GPU): the render is not what the project
     // means. Said only when it happened, so other renders print as before.
     let late = engine.late_results();
-    if json {
-        let mut output = json!({
-            "out": args.out.display().to_string(),
-            "frames": rendered.frames,
-            "sample_rate": rendered.sample_rate,
-            "channels": rendered.channels,
-            "files": FILES,
-            "warnings": warnings,
-            "manifest": manifest,
-            "metrics": metrics,
-        });
-        if late > 0 {
-            output["late_results"] = json!(late);
-        }
-        if !gpu_warnings.is_empty() {
-            output["gpu_warnings"] = json!(gpu_warnings);
-        }
-        if let Some(setup) = gpu.setup_json() {
-            output["gpu_setup"] = setup;
-        }
-        print_stdout(&serde_json::to_string_pretty(&output).unwrap_or_default());
-    } else {
-        for warning in &warnings {
-            eprintln!("{warning}");
-        }
-        for warning in &gpu_warnings {
-            eprintln!("signal: {warning}");
-        }
-        if late > 0 {
-            eprintln!(
-                "warning: {late} due results of GPU-backed modules were lost (late_result faults in log.jsonl): those blocks are silent"
-            );
-        }
-        print_stdout(&format!(
-            "rendered {} frames at {} Hz ({} channels) to {}\naudio_fnv1a64 {}",
-            rendered.frames,
-            rendered.sample_rate,
-            rendered.channels,
-            args.out.display(),
-            manifest.audio_fnv1a64
+    let mut output = json!({
+        "out": args.out.display().to_string(),
+        "frames": rendered.frames,
+        "sample_rate": rendered.sample_rate,
+        "channels": rendered.channels,
+        "files": FILES,
+        "warnings": warnings,
+        "manifest": manifest,
+        "metrics": metrics,
+    });
+    if late > 0 {
+        output["late_results"] = json!(late);
+    }
+    if !gpu_warnings.is_empty() {
+        output["gpu_warnings"] = json!(gpu_warnings);
+    }
+    if let Some(setup) = gpu.setup_json() {
+        output["gpu_setup"] = setup;
+    }
+    let mut notes: Vec<String> = warnings.iter().map(ToString::to_string).collect();
+    notes.extend(gpu_warnings.iter().map(|w| format!("signal: {w}")));
+    if late > 0 {
+        notes.push(format!(
+            "warning: {late} due results of GPU-backed modules were lost (late_result faults in log.jsonl): those blocks are silent"
         ));
     }
-    Ok(())
+    let text = format!(
+        "rendered {} frames at {} Hz ({} channels) to {}\naudio_fnv1a64 {}",
+        rendered.frames,
+        rendered.sample_rate,
+        rendered.channels,
+        args.out.display(),
+        manifest.audio_fnv1a64
+    );
+    Ok(Rendered {
+        output,
+        text,
+        notes,
+    })
 }
 
 /// Why [`write_artifacts`] failed.

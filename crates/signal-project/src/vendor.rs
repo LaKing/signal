@@ -109,13 +109,67 @@ impl std::error::Error for VendorError {}
 /// Copies the library composite `reference` (`lib.<name>`) and the library
 /// composites it uses into the project folder `dir`, the first as `name`
 /// (default: its name without `lib.`), and rewrites the project's references
-/// to them.
+/// to them: [`prepare`], then [`write`].
 pub fn vendor(
     dir: &Path,
     reference: &str,
     name: Option<&str>,
     library: &Library,
 ) -> Result<Vendored, VendorError> {
+    write(dir, prepare(dir, reference, name, library)?, library)
+}
+
+/// What vendoring would write, checked and not written yet (`signal ui`'s
+/// `vendor` message checks it again as an edit of the running project before
+/// it [`write`]s).
+#[derive(Debug)]
+pub struct Prepared {
+    copies: Vec<(String, String)>,
+    edits: Vec<(String, String)>,
+    reused: Vec<String>,
+    files: Vec<SourceFile>,
+    loaded_before: bool,
+}
+
+impl Prepared {
+    /// Every file it would write (new and rewritten), relative to the project.
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        self.copies
+            .iter()
+            .chain(&self.edits)
+            .map(|(path, _)| path.as_str())
+    }
+
+    /// The project's files as vendoring would leave them.
+    pub fn after(&self) -> Vec<SourceFile> {
+        let mut after: Vec<SourceFile> = self
+            .files
+            .iter()
+            .map(|file| {
+                let edited = self.edits.iter().find(|(path, _)| *path == file.path);
+                SourceFile {
+                    path: file.path.clone(),
+                    text: edited.map_or_else(|| file.text.clone(), |(_, text)| text.clone()),
+                }
+            })
+            .collect();
+        after.extend(self.copies.iter().map(|(path, text)| SourceFile {
+            path: path.clone(),
+            text: text.clone(),
+        }));
+        after
+    }
+}
+
+/// Checks what vendoring `reference` into `dir` would write, writing nothing
+/// (the checks of [`vendor`]: names, existing files, parsing, and that the
+/// project would still load).
+pub fn prepare(
+    dir: &Path,
+    reference: &str,
+    name: Option<&str>,
+    library: &Library,
+) -> Result<Prepared, VendorError> {
     let not_in_library = || VendorError::NotInLibrary(reference.to_owned());
     let bare = reference
         .strip_prefix(LIBRARY_PREFIX)
@@ -210,26 +264,29 @@ pub fn vendor(
     // The project as vendoring would leave it must load if it loaded before
     // (e.g. `--as x` beside a remaining `lib.x` reference would not: §4).
     let loaded_before = Project::from_sources_with(files.clone(), library).is_ok();
-    if loaded_before {
-        let mut after: Vec<SourceFile> = files
-            .iter()
-            .map(|file| {
-                let edited = edits.iter().find(|(path, _)| *path == file.path);
-                SourceFile {
-                    path: file.path.clone(),
-                    text: edited.map_or_else(|| file.text.clone(), |(_, text)| text.clone()),
-                }
-            })
-            .collect();
-        after.extend(copies.iter().map(|(path, text)| SourceFile {
-            path: path.clone(),
-            text: text.clone(),
-        }));
-        if let Err(diagnostics) = Project::from_sources_with(after, library) {
-            return Err(VendorError::Invalid(diagnostics));
-        }
+    let prepared = Prepared {
+        copies,
+        edits,
+        reused,
+        files,
+        loaded_before,
+    };
+    if loaded_before && let Err(diagnostics) = Project::from_sources_with(prepared.after(), library)
+    {
+        return Err(VendorError::Invalid(diagnostics));
     }
+    Ok(prepared)
+}
 
+/// Writes what [`prepare`] checked, all or nothing (see the module's notes).
+pub fn write(dir: &Path, prepared: Prepared, library: &Library) -> Result<Vendored, VendorError> {
+    let Prepared {
+        copies,
+        edits,
+        reused,
+        files,
+        loaded_before,
+    } = prepared;
     let mut vendored = Vendored {
         copied: Vec::new(),
         reused,

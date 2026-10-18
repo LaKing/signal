@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use serde_json::json;
+use serde_json::{Value, json};
 use signal_core::Registry;
 use signal_project::LoadError;
 use signal_project::provenance;
@@ -24,31 +24,31 @@ use crate::{Failure, print_stdout};
 #[derive(Args)]
 pub(crate) struct ReplayArgs {
     /// The session directory (containing session.toml).
-    session: PathBuf,
+    pub(crate) session: PathBuf,
     /// The folder to write the artifacts to (created if needed). Without it,
     /// nothing is written and only the hashes are printed.
     #[arg(long)]
-    out: Option<PathBuf>,
+    pub(crate) out: Option<PathBuf>,
     /// Render this many frames, instead of the last command's frame plus one
     /// second.
     #[arg(long)]
-    frames: Option<u64>,
+    pub(crate) frames: Option<u64>,
     /// Threads a block runs on, the calling thread included (0: one per
     /// performance core; 1: no worker threads). The output is identical for
     /// every count.
     #[arg(long, default_value_t = 0)]
-    threads: u32,
+    pub(crate) threads: u32,
     /// Render ideally: wait for every result of a latent (GPU-backed)
     /// module, whatever the session recorded. Not what was played: the
     /// manifest says `ideal`.
     #[arg(long)]
-    ideal: bool,
+    pub(crate) ideal: bool,
     /// Replay exactly although the session was recorded by another build or
     /// on another machine, whose results of latent modules this one must
     /// recompute. Each result is still checked against its recorded hash;
     /// the manifest says `trust_provenance`.
     #[arg(long, conflicts_with = "ideal")]
-    trust_provenance: bool,
+    pub(crate) trust_provenance: bool,
 }
 
 pub(crate) fn run(
@@ -57,6 +57,32 @@ pub(crate) fn run(
     setup: Option<&Path>,
     json: bool,
 ) -> Result<(), Failure> {
+    let replayed = replay_session(args, registry, setup)?;
+    if json {
+        print_stdout(&serde_json::to_string_pretty(&replayed.output).unwrap_or_default());
+    } else {
+        for warning in &replayed.warnings {
+            eprintln!("signal: warning: {warning}");
+        }
+        print_stdout(&replayed.text);
+    }
+    Ok(())
+}
+
+/// What a replay says: `--json`'s object, the text summary and its warnings
+/// (shared by `signal replay` and `signal mcp`'s `replay` tool).
+pub(crate) struct Replayed {
+    pub(crate) output: Value,
+    pub(crate) text: String,
+    pub(crate) warnings: Vec<String>,
+}
+
+/// Replays the session `args` names (writing its artifacts to `args.out`).
+pub(crate) fn replay_session(
+    args: &ReplayArgs,
+    registry: &Registry,
+    setup: Option<&Path>,
+) -> Result<Replayed, Failure> {
     let dir = &args.session;
     let session = Session::load(dir, registry).map_err(|error| match error {
         LoadError::Invalid(diagnostics) => Failure::InvalidSession(located(dir, diagnostics)),
@@ -132,51 +158,48 @@ pub(crate) fn run(
         None => (rendered.manifest(provenance), metrics_of(rendered)),
     };
 
-    if json {
-        let output = json!({
-            "session": dir.display().to_string(),
-            "out": args.out.as_ref().map(|out| out.display().to_string()),
-            "frames": rendered.frames,
-            "sample_rate": rendered.sample_rate,
-            "channels": rendered.channels,
-            "commands": session.edits.len(),
-            "skipped": replayed.skipped,
-            "ideal": replayed.boundaries.ideal(),
-            "unverified": replayed.unverified,
-            "trust_provenance": replayed.trusted_provenance,
-            "clipped": rendered.clipped(),
-            "boundaries": match replayed.boundaries {
-                BoundaryReplay::NotLatent => "not-latent",
-                BoundaryReplay::Exact => "exact",
-                BoundaryReplay::NotRecorded => "not-recorded",
-                BoundaryReplay::Ideal => "ideal",
-            },
-            "files": if args.out.is_some() { &FILES[..] } else { &[][..] },
-            "warnings": warnings,
-            "manifest": manifest,
-            "metrics": metrics,
-        });
-        print_stdout(&serde_json::to_string_pretty(&output).unwrap_or_default());
-    } else {
-        for warning in &warnings {
-            eprintln!("signal: warning: {warning}");
-        }
-        let target = args
-            .out
-            .as_ref()
-            .map(|out| format!(" to {}", out.display()))
-            .unwrap_or_default();
-        print_stdout(&format!(
-            "replayed {} commands over {} frames at {} Hz ({} channels){target}\naudio_fnv1a64 {}\nlog_fnv1a64 {}",
-            session.edits.len() - replayed.skipped,
-            rendered.frames,
-            rendered.sample_rate,
-            rendered.channels,
-            manifest.audio_fnv1a64,
-            manifest.log_fnv1a64
-        ));
-    }
-    Ok(())
+    let output = json!({
+        "session": dir.display().to_string(),
+        "out": args.out.as_ref().map(|out| out.display().to_string()),
+        "frames": rendered.frames,
+        "sample_rate": rendered.sample_rate,
+        "channels": rendered.channels,
+        "commands": session.edits.len(),
+        "skipped": replayed.skipped,
+        "ideal": replayed.boundaries.ideal(),
+        "unverified": replayed.unverified,
+        "trust_provenance": replayed.trusted_provenance,
+        "clipped": rendered.clipped(),
+        "boundaries": match replayed.boundaries {
+            BoundaryReplay::NotLatent => "not-latent",
+            BoundaryReplay::Exact => "exact",
+            BoundaryReplay::NotRecorded => "not-recorded",
+            BoundaryReplay::Ideal => "ideal",
+        },
+        "files": if args.out.is_some() { &FILES[..] } else { &[][..] },
+        "warnings": warnings,
+        "manifest": manifest,
+        "metrics": metrics,
+    });
+    let target = args
+        .out
+        .as_ref()
+        .map(|out| format!(" to {}", out.display()))
+        .unwrap_or_default();
+    let text = format!(
+        "replayed {} commands over {} frames at {} Hz ({} channels){target}\naudio_fnv1a64 {}\nlog_fnv1a64 {}",
+        session.edits.len() - replayed.skipped,
+        rendered.frames,
+        rendered.sample_rate,
+        rendered.channels,
+        manifest.audio_fnv1a64,
+        manifest.log_fnv1a64
+    );
+    Ok(Replayed {
+        output,
+        text,
+        warnings,
+    })
 }
 
 /// What a replay of a session (with latent modules, `latent`) says about its

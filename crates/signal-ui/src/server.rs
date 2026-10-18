@@ -132,10 +132,10 @@ pub(crate) struct Server {
     /// another project while running: [`Server::set_project_ui`]).
     project: Arc<RwLock<PathBuf>>,
     /// How a client's connection is made (shared with the accept thread).
-    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+    #[cfg_attr(not(feature = "in-process"), allow(dead_code))]
     accept: Arc<Accept>,
     /// The HTTP workers' queue (test hooks: in-process HTTP clients).
-    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+    #[cfg_attr(not(feature = "in-process"), allow(dead_code))]
     http_queue: SyncSender<HttpConnection>,
 }
 
@@ -200,7 +200,7 @@ impl Server {
     /// connect through [`connect_local`](Server::connect_local), HTTP clients
     /// through [`LocalConnector::connect_http`], and are served by the same
     /// connection code and HTTP workers as over TCP.
-    #[cfg(feature = "test-hooks")]
+    #[cfg(feature = "in-process")]
     pub(crate) fn start_local(options: &ServerOptions) -> io::Result<Server> {
         let token = token()?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -240,16 +240,16 @@ impl Server {
         })
     }
 
-    /// Test hooks: a client's end of an in-process connection, served by a
+    /// In process (`in-process`): a client's end of an in-process connection, served by a
     /// client thread exactly as an accepted TCP connection is.
-    #[cfg(feature = "test-hooks")]
+    #[cfg(feature = "in-process")]
     pub(crate) fn connect_local(&self) -> crate::local::LocalStream {
         self.local_connector().connect()
     }
 
-    /// Test hooks: what makes in-process connections, for another thread
+    /// In process (`in-process`): what makes in-process connections, for another thread
     /// than the one that owns the servers.
-    #[cfg(feature = "test-hooks")]
+    #[cfg(feature = "in-process")]
     pub(crate) fn local_connector(&self) -> LocalConnector {
         LocalConnector {
             accept: Arc::clone(&self.accept),
@@ -345,16 +345,16 @@ pub(crate) fn loopback(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "[::1]")
 }
 
-/// Test hooks: makes in-process connections to a server (from any thread),
+/// In process (`in-process`, `signal mcp` and the tests): makes in-process connections to a server (from any thread),
 /// served by a client thread exactly as an accepted TCP connection is.
-#[cfg(feature = "test-hooks")]
+#[cfg(feature = "in-process")]
 #[derive(Clone)]
 pub struct LocalConnector {
     accept: Arc<Accept>,
     http: SyncSender<HttpConnection>,
 }
 
-#[cfg(feature = "test-hooks")]
+#[cfg(feature = "in-process")]
 impl LocalConnector {
     /// A new client's end of an in-process connection.
     pub fn connect(&self) -> crate::local::LocalStream {

@@ -3,7 +3,8 @@
 //! the engine's own (and dereferences to it); the adapter adds only the
 //! audio policy (`crate::audio`): the sink's channels times its `gain`,
 //! converted for the device, mapped to the same device channels, metered and
-//! counted as clipped.
+//! counted as clipped; with a [`ceiling`](Runner::set_ceiling) (`signal
+//! mcp`'s `--max-gain`), every device sample is then held within it.
 //!
 //! [`Runner::process`] allocates, frees, locks and blocks nowhere.
 
@@ -57,6 +58,8 @@ pub fn realtime_with(
         sink,
         meters: meter_tx,
         clipped: 0,
+        ceiling: None,
+        ceilinged: 0,
         meter_overflows: 0,
         counts: Arc::clone(&counts),
         scopes,
@@ -76,6 +79,7 @@ pub fn realtime_with(
 #[derive(Debug, Default)]
 struct Counts {
     clipped: AtomicU64,
+    ceilinged: AtomicU64,
     meter_overflows: AtomicU64,
     scopes: ScopeCounts,
     vectors: VectorCounts,
@@ -92,6 +96,10 @@ pub struct Runner {
     levels: Vec<(f32, f64)>,
     meters: Producer<Meter>,
     clipped: u64,
+    /// The output ceiling: every device sample is held within ±it.
+    ceiling: Option<f32>,
+    /// Device samples the ceiling held, since the start.
+    ceilinged: u64,
     meter_overflows: u64,
     counts: Arc<Counts>,
     /// The scope adapter's slots (`crate::scope`).
@@ -130,6 +138,8 @@ impl Runner {
                 first: first_frame.0,
                 levels: &mut self.levels,
                 clipped: &mut self.clipped,
+                ceiling: self.ceiling,
+                ceilinged: &mut self.ceilinged,
                 scopes: &mut self.scopes,
                 vectors: &mut self.vectors,
             };
@@ -154,6 +164,9 @@ impl Runner {
         }
         self.counts.clipped.store(self.clipped, Ordering::Relaxed);
         self.counts
+            .ceilinged
+            .store(self.ceilinged, Ordering::Relaxed);
+        self.counts
             .meter_overflows
             .store(self.meter_overflows, Ordering::Relaxed);
         self.scopes.publish(&self.counts.scopes);
@@ -169,6 +182,54 @@ impl Runner {
     /// Meters dropped because the meter queue was full.
     pub fn meter_overflows(&self) -> u64 {
         self.meter_overflows
+    }
+
+    /// Sets the output ceiling (output policy, ADR 0022): from the next
+    /// callback every device sample, after the conversion to `f32`, is held
+    /// within ±`ceiling` (a sample outside it becomes ±`ceiling`, and is
+    /// counted in [`ceilinged`](Runner::ceilinged)); the meters measure the
+    /// held samples. `None` (the default) holds nothing, so the device gets
+    /// exactly [`device_sample`](crate::device_sample). A ceiling that is not
+    /// finite or not positive is taken as 0 (silence). `signal mcp` sets
+    /// its `--max-gain` here (`docs/agent-interface.md` "Safety"); no
+    /// other command sets one. Not a semantic of the project: offline
+    /// renders never apply it.
+    pub fn set_ceiling(&mut self, ceiling: Option<f64>) {
+        self.ceiling = ceiling.map(ceiling_level);
+    }
+
+    /// The output ceiling ([`set_ceiling`](Runner::set_ceiling)).
+    pub fn ceiling(&self) -> Option<f32> {
+        self.ceiling
+    }
+
+    /// Device samples the ceiling held, since the start.
+    pub fn ceilinged(&self) -> u64 {
+        self.ceilinged
+    }
+}
+
+/// The level a ceiling of `ceiling` holds samples within: `ceiling` as
+/// `f32`, at most 1 (the device's own range), and 0 for one that is not
+/// finite or not positive.
+pub fn ceiling_level(ceiling: f64) -> f32 {
+    if ceiling.is_finite() && ceiling > 0.0 {
+        ceiling.min(1.0) as f32
+    } else {
+        0.0
+    }
+}
+
+/// `sample` held within ±`ceiling` (`None`: as it is); a held sample is
+/// counted. The ceiling's whole rule, shared with whoever checks a capture
+/// against a replay. Allocates nothing.
+pub fn hold(sample: f32, ceiling: Option<f32>, held: &mut u64) -> f32 {
+    match ceiling {
+        Some(c) if sample.abs() > c => {
+            *held = held.saturating_add(1);
+            sample.clamp(-c, c)
+        }
+        _ => sample,
     }
 }
 
@@ -197,6 +258,8 @@ struct Device<'a> {
     first: u64,
     levels: &'a mut [(f32, f64)],
     clipped: &'a mut u64,
+    ceiling: Option<f32>,
+    ceilinged: &'a mut u64,
     scopes: &'a mut Scopes,
     vectors: &'a mut Vectors,
 }
@@ -227,7 +290,11 @@ impl SinkOutput for Device<'_> {
                 let x = engine
                     .sink_input_at(self.sink.id, channel, f)
                     .unwrap_or(0.0);
-                let sample = to_device(gain.map_or(x, |g| g * x), self.clipped);
+                let sample = hold(
+                    to_device(gain.map_or(x, |g| g * x), self.clipped),
+                    self.ceiling,
+                    self.ceilinged,
+                );
                 if let Some(level) = self.levels.get_mut(channel) {
                     level.0 = level.0.max(sample.abs());
                     level.1 += f64::from(sample) * f64::from(sample);
@@ -343,6 +410,12 @@ impl Controller {
     /// The runner's clipped samples, as of its last callback.
     pub fn clipped(&self) -> u64 {
         self.counts.clipped.load(Ordering::Relaxed)
+    }
+
+    /// Device samples the runner's ceiling held, as of its last callback
+    /// ([`Runner::set_ceiling`]).
+    pub fn ceilinged(&self) -> u64 {
+        self.counts.ceilinged.load(Ordering::Relaxed)
     }
 
     /// The runner's dropped meters, as of its last callback.

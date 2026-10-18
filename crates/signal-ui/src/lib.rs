@@ -36,7 +36,7 @@ mod entities;
 pub mod frames;
 mod host;
 mod http;
-#[cfg(feature = "test-hooks")]
+#[cfg(feature = "in-process")]
 mod local;
 pub mod panel;
 pub mod panel_write;
@@ -49,9 +49,9 @@ use std::path::{Path, PathBuf};
 pub use host::{
     AppHostConfig, Edits, Finished, FirstRun, Host, HostConfig, ProjectStatus, project_ui,
 };
-#[cfg(feature = "test-hooks")]
+#[cfg(feature = "in-process")]
 pub use local::LocalStream;
-#[cfg(feature = "test-hooks")]
+#[cfg(feature = "in-process")]
 pub use server::LocalConnector;
 pub use server::{MAX_CLIENTS, ServerOptions};
 

@@ -1,6 +1,6 @@
 # The UI protocol (version 1)
 
-The interface through which a web page describes, observes and edits a running project (ADR 0023 §1). Signal.app's WebView, a browser and later remote devices all use it. The server is the crate `signal-ui`; `signal ui <project>` runs it (see "Running it").
+The interface through which a web page describes, observes and edits a running project (ADR 0023 §1). Signal.app's WebView, a browser and later remote devices all use it. The server is the crate `signal-ui`; `signal ui <project>` runs it (see "Running it"). LLM clients use it through `signal mcp`, an MCP server that is a client of this protocol (ADR 0029): see [`agent-interface.md`](agent-interface.md).
 
 ## Servers
 
@@ -332,6 +332,50 @@ Reply: `{"type": "pattern.written", "id": 11, "name": "melody", "file": "pattern
 
 Tests: `crates/signal-ui/tests/pattern.rs` over both transports (a read, a write and its push and live swap, a conflict, refused text naming the problem, a wrong kind, names and links, a first write, a message over the limit closing the connection with nothing written), `crates/signal-ui/tests/app_mode.rs` (`a_pattern_write_marks_a_signal_project_edited`).
 
+### `file.read`, `file.write`, `vendor`
+
+The project's own text as a whole file (M2.12-1, ADR 0029 §2, operator decision of 2026-10-18), for `signal mcp`'s `read_file`, `write_file` and `vendor` tools (`agent-interface.md`). They follow the rules of `patch` and `pattern.write`, and share their code.
+
+```json
+{"type": "file.read", "id": 12, "file": "project.toml"}
+```
+
+→ `{"type": "file.read", "id": 12, "file": "project.toml", "exists": true, "base": "<sha-256 of the file>", "text": "<the whole file>"}`. `file` is `project.toml` or `composites/<name>.toml` (`[a-z][a-z0-9_]*`), never another path (`bad-value`). Patterns are `pattern.*`, panels `panel.*` and positions `schematic.*`. A missing composite reads `exists: false` with `base` and `text` null; a file reached through a link is `bad-value`.
+
+```json
+{"type": "file.write", "id": 13, "file": "project.toml", "text": "schema_version = 1\n…", "base": "<sha-256 it was read with>"}
+```
+
+`text` is the whole new file; `base` is the SHA-256 it was read with, or null for a composite that does not exist yet. The server, never trusting the client:
+
+1. takes `file` as above (`bad-value`), and refuses a file, or `composites/`, reached through a link (`write-failed`), as `patch` does;
+2. refuses a file that changed since `base` (or exists when `base` is null) with `conflict`, carrying its current `base` and `text`;
+3. loads and plans the project with the new text as a reload would, and while playing checks that the running project can take it (`patch`'s step 5): `does-not-load` with `diagnostics`;
+4. reads the file again: one that changed since step 2 is `conflict`;
+5. writes atomically (a hidden temporary file, synced and renamed, as `commit` writes), creating `composites/` if needed. The watch is not told the write was seen: playing, its reload applies the file live; stopped, `graph` is pushed at once.
+
+Reply: `{"type": "file.written", "id": 13, "file": "project.toml", "base": "<sha-256 of the written file>", "created": false}`.
+
+```json
+{"type": "vendor", "id": 14, "composite": "lib.tape_echo", "as": "echo", "base": "<sha-256 of project.toml>"}
+```
+
+Copies a built-in library composite, and the library composites it uses, into the project's `composites/` as `signal vendor` does (ADR 0027 §4, `signal_project::vendor`). It uses that command's all-or-nothing writer: temporary files linked into place, rewritten files renamed last, rolled back on failure. The host checks first:
+
+- `project.toml` is still the version `base` names (`conflict`);
+- no file it would write is reached through a link (`write-failed`);
+- the project as it would be left plans as a reload would (`does-not-load`).
+
+Reply: `{"type": "vendored", "id": 14, "composite": "lib.tape_echo", "copied": ["composites/echo.toml"], "reused": [], "rewritten": []}`. Errors:
+
+- `unknown-module`: not a library composite;
+- `bad-value`: a bad `as`, or a file of a copy's name exists already;
+- `does-not-load`;
+- `write-failed`;
+- `conflict`.
+
+Tests: `crates/signal-ui/tests/file_write.rs` over both transports (a write applied live, a new composite, a conflict with the current text, refused text naming the problem, other files and links refused with nothing written, `vendor` with its base check and an unknown composite).
+
 ### Pushed: `reload`, `reload.error`
 
 Every 100 ms the server checks the project folder (hidden files ignored, as `signal play --watch`) and applies a change live. It pushes `{"type": "reload", "sets": 2, "swap": 1, "removed": 0, "message": "applied a swap to version 1 (2 sets, 0 removed)"}`, or `{"type": "reload.error", "message": …}` when the folder does not load or cannot replace the running project (the last good version keeps playing).
@@ -354,7 +398,15 @@ The interface setup dialog's functions (M2.5), without a window. The Setup file 
 
 ### Signal.app (app mode)
 
-Signal.app's control thread runs the host in **app mode** (`Host::new_app`, M2.8-4): its window's WebView loads `http://127.0.0.1:<http port>/ui/app/index.html#ws=…&token=…` from it. App mode starts **stopped**, on the project the app was given or else the Setup's last project, and plays every run with the Setup (its output, channel map, buffer, CPU workers, wake policy and input), with the rules of the app's state (`crates/signal-ui/src/app.rs`, shared with `signal-app`'s `AppState`). `describe` answers while stopped (with `"playing": false`), and `commit` writes while stopped. Its own messages, which `signal ui` refuses with `not-allowed`:
+**`signal ui` and `transport.*`** (M2.12-1, ADR 0029 §2): `signal ui`, and `signal mcp`'s own host, also take `transport.stop` and `transport.play`; the other app messages stay refused in `signal ui`.
+
+- `transport.stop` stops the run as the app's Stop does: edits waiting for reports are answered `abandoned`, the unsaved controls keep their values, subscriptions are kept.
+- `transport.play` plays the project it serves again from frame 0 from its files, as `project.open` of that project does.
+- Both reply `{"type": "transport", "playing"}` and push `describe`. A run that records a session or its audio refuses both with `recording`.
+- Under the null driver, `--seconds` still ends a stopped run on time.
+- Tests: `crates/signal-ui/tests/app_mode.rs` (`signal_ui_stops_and_plays`, both transports) and `crates/signal-cli/src/drive.rs`.
+
+Signal.app's control thread runs the host in **app mode** (`Host::new_app`, M2.8-4): its window's WebView loads `http://127.0.0.1:<http port>/ui/app/index.html#ws=…&token=…` from it. App mode starts **stopped**, on the project the app was given or else the Setup's last project, and plays every run with the Setup (its output, channel map, buffer, CPU workers, wake policy and input), with the rules of the app's state (`crates/signal-ui/src/app.rs`, shared with `signal-app`'s `AppState`). `describe` answers while stopped (with `"playing": false`), and `commit` writes while stopped. Its own messages, which `signal ui` refuses with `not-allowed` (but `transport.*`, above):
 
 | Message | Does | Reply |
 |---|---|---|
@@ -371,11 +423,11 @@ Signal.app's control thread runs the host in **app mode** (`Host::new_app`, M2.8
 
 ### `stats`, `ping`
 
-`stats` → `{"type": "stats", "frame", "clients": [{"client", "dropped"}], "evicted", "meterOverflows", "scopeOverflows", "vectorOverflows", "commandOverflows", "clipped", "writes"}`. `ping` → `{"type": "pong", "frame"}`.
+`stats` → `{"type": "stats", "frame", "clients": [{"client", "dropped"}], "evicted", "meterOverflows", "scopeOverflows", "vectorOverflows", "commandOverflows", "clipped", "ceiling", "ceilinged", "writes"}`. `ceiling` is the output ceiling the host's runs hold every device sample within (`signal mcp`'s `--max-gain`, `agent-interface.md` "Safety"; `null` for `signal ui` and the app) and `ceilinged` the samples it held in the current run. `ping` → `{"type": "pong", "frame"}`.
 
 ### Errors
 
-`{"type": "error", "id": …, "code": "…", "message": "…"}`. Codes: `unauthorized`, `protocol`, `already-authenticated`, `bad-message`, `unknown-type`, `unknown-address`, `unknown-sub`, `unknown-device`, `unknown-panel`, `bad-address`, `bad-value`, `bad-rate`, `bad-device`, `not-a-signal-output`, `no-scope-slot`, `not-a-vector-output`, `no-vector-slot`, `busy`, `refused`, `not-playing`, `too-many-clients`, `not-editable`, `write-failed`, `not-unsaved`, `playing`, `recording`, `unknown-level`, `unknown-instance`, `does-not-load` (`graph`, `schematic.*`, `modules`, `patch`, `pattern.write`), `conflict` (`panel.write`, `patch`, `pattern.write`), `unknown-pattern` (`pattern.read`), `in-use`, `unknown-module` (`patch`), `no-project` (`patch`, `modules`), and in Signal.app's messages `not-allowed`, `no-project`, `does-not-load`, `device`, `powered-off` (`transport.play` and `subscribe` while switched off).
+`{"type": "error", "id": …, "code": "…", "message": "…"}`. Codes: `unauthorized`, `protocol`, `already-authenticated`, `bad-message`, `unknown-type`, `unknown-address`, `unknown-sub`, `unknown-device`, `unknown-panel`, `bad-address`, `bad-value`, `bad-rate`, `bad-device`, `not-a-signal-output`, `no-scope-slot`, `not-a-vector-output`, `no-vector-slot`, `busy`, `refused`, `not-playing`, `too-many-clients`, `not-editable`, `write-failed`, `not-unsaved`, `playing`, `recording`, `unknown-level`, `unknown-instance`, `does-not-load` (`graph`, `schematic.*`, `modules`, `patch`, `pattern.write`, `file.write`, `vendor`), `conflict` (`panel.write`, `patch`, `pattern.write`, `file.write`, `vendor`), `unknown-pattern` (`pattern.read`), `in-use`, `unknown-module` (`patch`, `vendor`), `no-project` (`patch`, `modules`), and in Signal.app's messages `not-allowed`, `no-project`, `does-not-load`, `device`, `powered-off` (`transport.play` and `subscribe` while switched off).
 
 ## Binary frames
 
@@ -414,7 +466,7 @@ The control thread never waits for a client. Each client has a thread that write
 - **A token per session.** 32 bytes from the system's random source (`/dev/urandom`), hex, new for every run of the server, compared in constant time. It is required in the first message of every WebSocket connection. It is in the URL's fragment, never in an HTTP request. Anyone with the URL can control the run and write the project's `project.toml`, so the URL is a credential: `signal ui` prints it on the terminal only.
 - **Origin.** A browser connecting to the WebSocket must come from the HTTP server's own origin: `http://127.0.0.1:<http port>` (or `localhost`, `[::1]`); with `--remote`, the host the request was sent to and the HTTP port. Another site's page is refused at the handshake (403), before the token. A client without `Origin` is not a browser page and goes on to the token check.
 - **Host.** Without `--remote`, the HTTP server answers only the loopback names with its port, so another site cannot read the files through a name that resolves to 127.0.0.1 (DNS rebinding).
-- **Files.** Only the two `ui/` folders are served (above). A client writes only through `commit` (a top-level parameter in `project.toml`), `schematic.move` and `schematic.reset` (the project's `ui/schematic.toml`, presentation only, never through a linked `ui/` or file), `panel.write` (a panel file in the project's `ui/`, its `<signal-panel>` content only, within the editor's whitelist), `pattern.write` (M2.11-1: `patterns/<name>.toml` of the served project, by name, never through a linked `patterns/` or file, after the same load and compile as a reload), `patch` (M2.9-3: the served project's `project.toml` and `composites/*.toml`, the files the project itself read, never one reached through a link; and its `ui/schematic.toml`, never through a linked `ui/` or file; after the same load and compile as a reload, and inverse-only `edits` limited to what the op means, the comment lines above a restored entry and its `gpu` pin) and `setup.apply` (the Setup file the server was started with).
+- **Files.** Only the two `ui/` folders are served (above). A client writes only through `commit` (a top-level parameter in `project.toml`), `schematic.move` and `schematic.reset` (the project's `ui/schematic.toml`, presentation only, never through a linked `ui/` or file), `panel.write` (a panel file in the project's `ui/`, its `<signal-panel>` content only, within the editor's whitelist), `pattern.write` (M2.11-1: `patterns/<name>.toml` of the served project, by name, never through a linked `patterns/` or file, after the same load and compile as a reload), `patch` (M2.9-3: the served project's `project.toml` and `composites/*.toml`, the files the project itself read, never one reached through a link; and its `ui/schematic.toml`, never through a linked `ui/` or file; after the same load and compile as a reload, and inverse-only `edits` limited to what the op means, the comment lines above a restored entry and its `gpu` pin), `file.write` (M2.12-1: the served project's `project.toml` and `composites/<name>.toml` as whole text, never through a link, after the same load and compile as a reload), `vendor` (M2.12-1: library composites copied into the served project's `composites/` by `signal vendor`'s writer, never through a link, after the same checks) and `setup.apply` (the Setup file the server was started with).
 - **`project.open` opens another project only in Signal.app's app mode**; `signal ui` refuses it (`not-allowed`) for every path but the project it serves, so a client of `signal ui` cannot point it at another folder. For the project it serves (its folder, its `project.toml`, or the `.signal` file it was started with, compared after resolving links) `signal ui` plays it again from frame 0 from its files, a `.signal` file unpacked again into a new temporary folder (M2.8-12); while recording that is refused with `recording`, as `setup.apply` does not restart a recording run. In the app, a client with the token may open any folder it names: the host then writes the Setup file the app was started with (`last_project`), serves that folder's `ui/` (its panels and `ui/assets/`, by the rules above) under `/project/`, and later `commit`s write that folder's `project.toml`. The token rules are unchanged, and the app binds 127.0.0.1 only.
 - **Clients.** At most 32 WebSocket connections are served at once, a connection that has not sent `hello` yet included. Such a connection holds its place for at most 5 s from its acceptance: an absolute deadline over its WebSocket handshake and its `hello` with the token, not a timeout per read, so a client that trickles its handshake a byte at a time loses its place as one that sends nothing does (it is told `unauthorized` if its handshake was complete, else closed without a reason), and a stop ends it at once. Connections before `hello` have no budget of their own apart from the 32: anyone who can connect can open as many as it likes, so a smaller budget would refuse a newcomer just as the full one does; the deadline bounds how long any of them holds a place. One past that is refused: once it has sent its handshake it is told `{"type": "error", "code": "too-many-clients"}` and closed with code 1013 (try again later) and the reason `too-many-clients`, all within 1 s; one that sends no handshake in that time is closed without a reason (a close reason needs a WebSocket). Two threads refuse, with 16 connections waiting for them; while those are taken, accepting waits rather than drop a connection. None of these threads is waited for at shutdown (`crates/signal-ui/tests/backpressure.rs`).
 - **Limits.** A client message is at most 64 KiB (a larger one closes the client's connection; a `patch` whose undo would need more is refused before it is written); numbers a client sends are checked before use (an unsupported rate is `bad-rate`, a value outside its range is clamped); messages from all clients wait in a bounded queue; at most 256 are handled per control step.
@@ -429,6 +481,8 @@ signal ui projects/kick --port 8800        # a fixed HTTP port
 ```
 
 `signal ui` takes every option of `signal play` (`--device`, `--buffer`, `--seconds`, `--threads`, `--rt-policy`, `--rt-computation`, `--rt-trace`, `--driver`, `--fast`, `--record-session`, `--record-audio`, `--record-boundary-data`) and always watches the folder, as `play --watch` does. It stops on Enter (or at `--seconds`), and with `--json` prints `{"url", "panel", "http", "ws"}` when it starts. The UI library's folder is the app bundle's `Contents/Resources/ui` when the program runs from a bundle, else the repository's `ui/` of the build (`--ui-dir` for another).
+
+`signal mcp <project>` plays a project the same way for an LLM client, speaking to it in process; `signal mcp --attach <url> <project>` shares a running `signal ui` with one (`agent-interface.md`).
 
 `signal ui` also prints the schematic's page, `http://127.0.0.1:<http port>/schematic#ws=…&token=…` (`--json`: `schematic`).
 

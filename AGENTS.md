@@ -11,6 +11,7 @@ Signal is a macOS (Apple Silicon) application that is internally a platform for 
 | Writing tests, changing a test project or a golden render | `docs/testing-and-evaluation.md` |
 | Changing a design decision | `docs/adr/` — never contradict an accepted ADR silently; propose a superseding ADR |
 | Picking up work | `docs/roadmap.md` — current milestone and exit conditions |
+| Working through `signal mcp`, or changing it or the UI protocol | `docs/agent-interface.md` — the MCP tools, schemas and safety rules (ADR 0029) |
 
 ## Commands
 If `cargo` is not on PATH (Homebrew rustup), prefix with `PATH=/opt/homebrew/opt/rustup/bin:$PATH`. The toolchain is pinned by `rust-toolchain.toml`. Do not change it without an explicit decision.

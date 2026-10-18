@@ -7,7 +7,13 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
+# In-process connections (`Host::new_local`, `LocalStream`): a host that binds
+# no port, served by the same WebSocket connection code as over TCP. `signal
+# mcp` talks to the project it plays this way (docs/agent-interface.md).
+in-process = []
 # Test hooks: hold a client's writer, so a stalled client is deterministic.
+# Only dev-dependencies turn it on (signal-engine's `test_hooks_scope`); the
+# tests' in-process clients turn on `in-process` beside it.
 test-hooks = []
 
 [dependencies]
@@ -28,7 +34,7 @@ serde_json = { workspace = true }
 tungstenite = { workspace = true }
 
 [dev-dependencies]
-signal-ui = { path = ".", features = ["test-hooks"] }
+signal-ui = { path = ".", features = ["test-hooks", "in-process"] }
 signal-std = { workspace = true }
 
 [lints]
