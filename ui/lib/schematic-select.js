@@ -277,3 +277,21 @@ export function dragGroup(selected, hit) {
   const others = selected.filter((s) => s.kind === 'instance' && s.path === hit.path && s.node.name !== hit.node.name).map((s) => s.node.name);
   return [hit.node.name, ...new Set(others)];
 }
+
+/**
+ * What T and the sidebar's Trace signal trace for `selected`: the part
+ * selected last, but for several pins (a collapsed port group clicked, M2.13-2,
+ * or pins Shift-clicked) all of them, as the context menu traces a group:
+ * a `group` hit (`{kind: 'group', ports, address, label}`, `startOf`'s,
+ * ui/lib/schematic-trace.js), its `address` the pins' box when they share
+ * one and its `label` their group's (`osc1_*`) else their count. Null for
+ * nothing selected.
+ */
+export function traceTarget(selected) {
+  const list = (selected ?? []).filter((s) => s && s.kind !== 'background');
+  if (list.length < 2 || !list.every((s) => s.kind === 'port')) return list.at(-1) ?? null;
+  const box = (s) => (s.node.kind === 'instance' ? `${s.path}/${s.node.name}` : s.path);
+  const address = list.every((s) => box(s) === box(list[0])) ? box(list[0]) : '';
+  const group = list.every((s) => s.group && s.group === list[0].group) && address ? list[0].group : null;
+  return { kind: 'group', path: list[0].path, level: list[0].level, ports: list, address, label: group ?? `${list.length} pins` };
+}

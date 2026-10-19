@@ -1093,57 +1093,67 @@ fn definition(
     }
 
     let mut exported = Exports::default();
-    for (name, targets) in fan_out(exports.inputs) {
+    for (name, targets, group) in fan_out(exports.inputs) {
         exported.inputs.push(InputExport {
             name: name.0.clone(),
             to: targets.iter().map(|(t, _)| t.clone()).collect(),
         });
         spans
             .exports
-            .push(export_spans(ExportKind::Input, name, targets));
+            .push(export_spans(ExportKind::Input, name, targets, group));
     }
     for (name, target) in exports.outputs {
-        let (key, target) = ((name.get_ref().clone(), name.span()), target);
-        let targets = vec![(target.get_ref().clone(), target.span())];
+        let (key, span) = ((name.get_ref().clone(), name.span()), target.span());
+        let target = target.into_inner();
+        let targets = vec![(target.from.clone(), span)];
         exported.outputs.push(OutputExport {
             name: key.0.clone(),
-            from: target.into_inner(),
+            from: target.from,
         });
         spans
             .exports
-            .push(export_spans(ExportKind::Output, key, targets));
+            .push(export_spans(ExportKind::Output, key, targets, target.group));
     }
-    for (name, targets) in fan_out(exports.parameters) {
+    for (name, targets, group) in fan_out(exports.parameters) {
         exported.parameters.push(ParameterExport {
             name: name.0.clone(),
             to: targets.iter().map(|(t, _)| t.clone()).collect(),
         });
         spans
             .exports
-            .push(export_spans(ExportKind::Parameter, name, targets));
+            .push(export_spans(ExportKind::Parameter, name, targets, group));
     }
     def.exports = exported;
     (def, spans)
 }
 
-/// An export name and its targets, each with its span.
-type FanOut = ((String, Span), Vec<(String, Span)>);
+/// An export name and its targets, each with its span, and its schematic group.
+type FanOut = ((String, Span), Vec<(String, Span)>, Option<String>);
 
 /// Export tables as names and target lists; a single target string is a list
-/// of one at the string's span.
+/// of one at the string's span (the table form's: the table's span).
 fn fan_out(table: ExportTargets) -> Vec<FanOut> {
+    fn list(targets: Targets, span: Span) -> Vec<(String, Span)> {
+        match targets {
+            Targets::One(target) => vec![(target, span)],
+            Targets::Many(list) => list
+                .into_iter()
+                .map(|t| (t.get_ref().clone(), t.span()))
+                .collect(),
+            Targets::Grouped(inner, _) => list(*inner, span),
+        }
+    }
     table
         .into_iter()
         .map(|(name, targets)| {
             let span = targets.span();
-            let targets = match targets.into_inner() {
-                Targets::One(target) => vec![(target, span)],
-                Targets::Many(list) => list
-                    .into_iter()
-                    .map(|t| (t.get_ref().clone(), t.span()))
-                    .collect(),
-            };
-            ((name.get_ref().clone(), name.span()), targets)
+            let targets = targets.into_inner();
+            let group = targets.group().map(str::to_owned);
+            (
+                (name.get_ref().clone(), name.span()),
+                list(targets, span),
+                group,
+            )
         })
         .collect()
 }
@@ -1152,11 +1162,13 @@ fn export_spans(
     kind: ExportKind,
     name: (String, Span),
     targets: Vec<(String, Span)>,
+    group: Option<String>,
 ) -> ExportSpans {
     ExportSpans {
         kind,
         name: name.0,
         key: name.1,
         targets,
+        group,
     }
 }

@@ -5,8 +5,12 @@
 // (2026-10-17: pins are meant to be easy to hit; the reach shrinks with a
 // box small on screen). Tolerances are screen pixels, so they hold at
 // every zoom, and a wire is hit on its curve, not its flattened points. No
-// DOM.
+// DOM. M2.13-2: a level drawn with bundles (`entry.bundles`, ui/lib/
+// schematic-bundle.js) is hit on what is drawn, the topmost first: a solo
+// wire above its bundle, a bundle as a `bundle` hit carrying its wires'.
 
+import { nearBundle } from './schematic-bundle.js';
+import { groupAnchors } from './schematic-groups.js';
 import { INPUTS, OUTPUTS } from './schematic-layout.js';
 import { toLocal } from './schematic-view.js';
 import { curveDistance, distanceToSegment } from './schematic-wire.js';
@@ -62,10 +66,31 @@ export function wireHit(entry, wire) {
 }
 
 /**
+ * The hit of a collapsed port group's pin (M2.13-2, ui/lib/schematic-groups.js)
+ * of box `node` at level `entry`: never one member, all of them as `ports`
+ * (their hits), the box's address and the group's `label`. Not a patch end.
+ */
+export function groupHit(entry, node, group) {
+  const at = new Map([...node.ins, ...node.outs].map((p) => [p.name, p]));
+  // Each member knows its group (`group`, its label), so that a selection of them is shown and traced as the group.
+  const ports = group.pins
+    .map((p) => portHit(entry, node, at.get(p.name)))
+    .filter((h) => h.port)
+    .map((h) => ({ ...h, group: group.label }));
+  return { kind: 'group', path: entry.path, level: entry.level, node, group, label: group.label, ports, address: `${entry.path}/${node.name}` };
+}
+
+/** The hit of `bundle` (ui/lib/schematic-bundle.js) at level `entry`: its wires' hits as `wires`. */
+export function bundleHit(entry, bundle) {
+  return { kind: 'bundle', path: entry.path, level: entry.level, bundle, wires: bundle.wires.map((w) => wireHit(entry, w)) };
+}
+
+/**
  * What screen point `point` is over: `{kind: 'port' | 'instance' | 'wire' |
- * 'background', path, level, node?, port?, wire?, address?}`. A port's and
- * an instance's `address` is the concrete one (`/drums/kick.out`); a wire
- * gives `from` and `to`.
+ * 'bundle' | 'group' | 'background', path, level, node?, port?, wire?,
+ * bundle?, address?}` (a collapsed port group: `groupHit`). A port's and an instance's `address` is the concrete one
+ * (`/drums/kick.out`); a wire gives `from` and `to`; a bundle its wires'
+ * hits as `wires`.
  */
 export function hitTest(drawn, point) {
   for (let i = drawn.levels.length - 1; i >= 0; i--) {
@@ -78,16 +103,37 @@ export function hitTest(drawn, point) {
       if (node.kind !== 'instance' && !entry.path) continue;
       // A box small on screen (zoomed out) keeps its body: its pins reach less.
       const reach = Math.min(PORT_PX, (node.h * scale) / 4);
+      // M2.13-2: a collapsed box (`entry.collapsed`) is hit as drawn: a group of several by its one pin, its members' rows not at all.
+      const anchors = entry.collapsed && node.groups ? groupAnchors(node) : null;
+      const seen = new Set();
       for (const port of [...node.ins, ...node.outs]) {
+        const anchor = anchors?.get(port.name);
+        if (anchor) {
+          if (seen.has(anchor.group)) continue;
+          seen.add(anchor.group);
+          const d = Math.hypot(anchor.x - local.x, anchor.y - local.y) * scale;
+          if (d <= reach && (!best || d < best.d)) best = { d, node, port, anchor };
+          continue;
+        }
         const d = Math.hypot(port.x - local.x, port.y - local.y) * scale;
         if (d <= reach && (!best || d < best.d)) best = { d, node, port };
       }
     }
+    if (best?.anchor) return groupHit(entry, best.node, best.anchor.group);
     if (best) return portHit(entry, best.node, best.port);
     for (const node of entry.nodes) {
       if (node.kind !== 'instance') continue;
       // An open composite's inside was tried first; its box still counts.
       if (local.x >= node.x && local.x <= node.x + node.w && local.y >= node.y && local.y <= node.y + node.h) return instanceHit(entry, node);
+    }
+    if (entry.bundles) {
+      for (let j = entry.bundles.length - 1; j >= 0; j--) {
+        const item = entry.bundles[j];
+        if (item.kind === 'bundle' ? nearBundle(item, local, WIRE_PX / scale) : nearWire(item, local, WIRE_PX / scale)) {
+          return item.kind === 'bundle' ? bundleHit(entry, item) : wireHit(entry, item);
+        }
+      }
+      continue;
     }
     for (const wire of entry.wires) if (nearWire(wire, local, WIRE_PX / scale)) return wireHit(entry, wire);
   }

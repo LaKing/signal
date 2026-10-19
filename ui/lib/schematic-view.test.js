@@ -112,3 +112,15 @@ test('wheel and keys', () => {
   assert.deepEqual(keyView(IDENTITY, 'ArrowDown', viewport, bounds), { k: 1, x: 0, y: -20 });
   assert.equal(keyView(IDENTITY, 'a', viewport, bounds), null);
 });
+
+test('a fit can keep clear of a bar at the top and of labels at the sides', () => {
+  const rect = { x: 0, y: 0, w: 1000, h: 1000 };
+  const plain = fit(rect, { w: 1000, h: 1000 });
+  assert.equal(plain.y, 500);
+  const barred = fit(rect, { w: 1000, h: 1000 }, 24, 40);
+  // The rectangle's top edge lands at the bar's bottom, its bottom edge at the margin.
+  assert.ok(Math.abs(barred.y - barred.k * 500 - 40) < 1e-9);
+  assert.ok(Math.abs(barred.y + barred.k * 500 - (1000 - 24)) < 1e-9);
+  const sided = fit({ x: 0, y: 0, w: 1000, h: 10 }, { w: 1000, h: 1000 }, 24, 24, 120);
+  assert.ok(Math.abs(sided.k - 760 / 1000) < 1e-9);
+});

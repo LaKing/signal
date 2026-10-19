@@ -11,6 +11,7 @@ use serde_json::{Map, Value, json};
 use signal_core::{Direction, LIBRARY_PREFIX, ParameterDescriptor, PortDescriptor, Registry};
 use signal_graph::{CompositeDef, ExecutionPlan, GraphWarning, InstanceDef};
 
+use crate::locate::ExportKind;
 use crate::{Diagnostic, Library, PROJECT_FILE, Project, SourceFile};
 
 /// What a written endpoint (`instance.port`) finally reaches.
@@ -92,13 +93,50 @@ impl Project {
             };
             let mut level = walk.level(def, prefix, true);
             if let Value::Object(fields) = &mut level {
-                fields.insert("inputs".to_owned(), walk.exported_inputs(def));
-                fields.insert("outputs".to_owned(), walk.exported_outputs(def));
-                fields.insert("parameters".to_owned(), walk.exported_parameters(def));
+                let mut inputs = walk.exported_inputs(def);
+                let mut outputs = walk.exported_outputs(def);
+                let mut parameters = walk.exported_parameters(def);
+                self.presentation(name, ExportKind::Input, &mut inputs);
+                self.presentation(name, ExportKind::Output, &mut outputs);
+                self.presentation(name, ExportKind::Parameter, &mut parameters);
+                fields.insert("inputs".to_owned(), inputs);
+                fields.insert("outputs".to_owned(), outputs);
+                fields.insert("parameters".to_owned(), parameters);
             }
             composites.insert(name.clone(), level);
         }
         json!({"top": top, "composites": composites})
+    }
+
+    /// M2.13-2 (`docs/ui-protocol.md` "graph"): each export of `kind` of
+    /// composite `name` in `list` (`graph`'s, in name order) given `order`,
+    /// its place among the composite's exports of that kind as the file
+    /// writes them, and its `group` when the file names one. Presentation
+    /// only, for the schematic; read from the file's spans.
+    fn presentation(&self, name: &str, kind: ExportKind, list: &mut Value) {
+        let Some(spans) = self.spans.composites.get(name) else {
+            return;
+        };
+        let mut written: Vec<&crate::locate::ExportSpans> =
+            spans.exports.iter().filter(|e| e.kind == kind).collect();
+        written.sort_by_key(|e| e.key.start);
+        let Value::Array(entries) = list else {
+            return;
+        };
+        for entry in entries {
+            let Value::Object(fields) = entry else {
+                continue;
+            };
+            let at = written
+                .iter()
+                .position(|e| fields.get("name").and_then(Value::as_str) == Some(e.name.as_str()));
+            if let Some(at) = at {
+                fields.insert("order".to_owned(), json!(at));
+                if let Some(group) = &written[at].group {
+                    fields.insert("group".to_owned(), json!(group));
+                }
+            }
+        }
     }
 
     /// The module types an instance can be added from (`docs/ui-protocol.md`

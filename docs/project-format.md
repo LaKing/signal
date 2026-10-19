@@ -90,6 +90,15 @@ parameters = { freq = ["low.freq", "high.freq"], drive = "shaper.drive" }
 
 Ports are written `instance.port`, with the inner instance's local name. Export names share one namespace: a name may appear in only one of `inputs`, `outputs` and `parameters`. A list must not be empty.
 
+**Groups** (M2.13-2, ADR 0030 §3; optional, presentation only). Any export may instead be written as a table naming the group the schematic shows it in: `{ to = <port or list>, group = "<name>" }` for an input or a parameter, `{ from = "instance.port", group = "<name>" }` for an output. The ports mean exactly what the plain form's do; no other key is allowed, and `to` (or `from`) is required. A box with many ports orders them by group, each group by the order the exports are written in the file; an export without `group` is grouped by its name's prefix (`osc1_octave` with `osc1_detune`, up to the first `_`), else stands alone (`ui-controls.md` "Schematic"). Nothing else reads it: the plan, the audio and the hashes are the same with or without it.
+
+```toml
+[exports]
+inputs = { hz = { to = ["glide.in", "hz_prev.in"], group = "pitch" } }
+outputs = { out = { from = "volume.out", group = "audio" } }
+parameters = { glide = { to = ["glide.rise_ms", "glide.fall_ms"], group = "pitch" }, volume = "volume.db" }
+```
+
 ## 4. Instances and module references
 
 ```toml

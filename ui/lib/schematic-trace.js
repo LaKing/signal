@@ -9,6 +9,14 @@
 // used twice is traced once per instance, as the canvas draws it). Cycles
 // end where a pin is reached again. No DOM.
 //
+// Depth (M2.13-2): `next` (to the next module, as above) or `through`
+// (through modules): a primitive is crossed as well, from any input or
+// parameter to all its outputs downstream and from an output to all its
+// inputs and parameters upstream, until sinks (no outputs) and sources (no
+// input ports; a constant's parameters are set by their values). A structural path, not a signal-dependent one: a
+// gain at 0 or a switch turned off still passes, since the trace reads the
+// project's structure and never its values.
+//
 // Addresses are the canvas's: `/synth.hz` is the composite instance's port,
 // which is also the boundary pin `hz` of the level drawn at `/synth`;
 // `/synth/glide.in` a pin inside it. A wire is named by its level's path and
@@ -18,6 +26,8 @@
 
 /** The directions of a trace. */
 export const DIRECTIONS = ['up', 'down', 'both'];
+/** Its depths: to the next module, or through modules. */
+export const DEPTHS = ['next', 'through'];
 
 /** A level's edges by end (relative: `inst.port`, or `@.name` for its frame), computed once per level object. */
 const edgeCache = new WeakMap();
@@ -142,6 +152,25 @@ function edgesFrom(address, dir, r) {
   return found;
 }
 
+/**
+ * Through modules: the pins of primitive pin `address`'s own instance it
+ * leads to in direction `dir` (downstream from an input or a parameter, all
+ * its outputs; upstream from an output, all its inputs and parameters), as
+ * `{path, edge: null, next, through}`; none for a composite's pin.
+ */
+function crossing(address, dir, r) {
+  const at = splitAddress(address);
+  const node = at && r.instance(at.instance);
+  if (!node || node.composite) return [];
+  const port = (node.ports ?? []).find((p) => p.name === at.port);
+  const output = port?.direction === 'out';
+  const path = parentPath(at.instance);
+  const via = (name) => ({ path, edge: null, next: `${at.instance}.${name}`, through: at.instance });
+  if (dir === 'down' && !output) return (node.ports ?? []).filter((p) => p.direction === 'out').map((p) => via(p.name));
+  if (dir === 'up' && output) return [...(node.ports ?? []).filter((p) => p.direction !== 'out'), ...(node.parameters ?? [])].map((p) => via(p.name));
+  return [];
+}
+
 /** Whether level path `path` is `inside` (the composite instance's own level, or one deeper). */
 export function within(path, inside) {
   return path === inside || path.startsWith(`${inside}/`);
@@ -160,7 +189,7 @@ export function wireKey(written) {
  * edges taken, the pins with no edge onward (the starts only when they
  * are reached again), and how many edges led back to a pin already reached.
  */
-function walk(starts, dir, r, keep = () => true) {
+function walk(starts, dir, r, keep = () => true, through = false) {
   const pins = new Map();
   const wires = [];
   const endpoints = [];
@@ -175,35 +204,55 @@ function walk(starts, dir, r, keep = () => true) {
     const address = queue[i];
     const here = pins.get(address);
     const onward = edgesFrom(address, dir, r).filter((e) => keep(e.path));
+    if (through) onward.push(...crossing(address, dir, r));
     if (!onward.length && !here.start) endpoints.push(address);
-    for (const { path, edge, next } of onward) {
-      wires.push({ path, edge });
+    for (const { path, edge, next, through: crossed } of onward) {
+      if (edge) wires.push({ path, edge });
       if (pins.has(next)) {
-        cycles += 1;
+        // A module's own pin reached again through it is not a loop.
+        if (edge) cycles += 1;
         continue;
       }
-      pins.set(next, { hops: here.hops + 1, via: [...here.via, ...edge.converters.map((c) => c.name)], from: address, start: false });
+      pins.set(next, { hops: here.hops + 1, via: edge ? [...here.via, ...edge.converters.map((c) => c.name)] : here.via, from: address, start: false, through: crossed ?? null });
       queue.push(next);
     }
   }
   return { pins, wires, endpoints, cycles };
 }
 
-/** What kind of end pin `address` is: `primitive`, `library` (opaque), `unconnected` (a composite's port leading nowhere), `unknown`. */
-function endKind(info) {
+/**
+ * What kind of end pin `address` is: `primitive`, `library` (opaque),
+ * `unconnected` (an open end: a composite's port leading nowhere, or a
+ * module's output reached downstream, its input upstream, with nothing
+ * connected on), `unknown`; through
+ * modules, a primitive with no outputs reached downstream is a `sink`, one
+ * with no input ports (a constant: parameters only) reached upstream a
+ * `source`.
+ */
+function endKind(info, dir, through, r) {
   if (!info) return 'unknown';
-  if (!info.composite) return 'primitive';
-  return info.opaque ? 'library' : 'unconnected';
+  if (info.composite) return info.opaque ? 'library' : 'unconnected';
+  // A module's output reached downstream (or its input upstream) that leads nowhere: an open end, never a sink or a source (M2.13-2).
+  if (!info.parameter && (dir === 'down' ? info.direction === 'out' : info.direction !== 'out')) return 'unconnected';
+  if (through) {
+    const node = r.instance(info.instance);
+    const outs = (node?.ports ?? []).filter((p) => p.direction === 'out').length;
+    // A source has no input ports: its parameters, if any, set by their values (a constant).
+    const ins = (node?.ports ?? []).length - outs;
+    if (dir === 'down' && outs === 0) return 'sink';
+    if (dir === 'up' && ins === 0) return 'source';
+  }
+  return 'primitive';
 }
 
-function endpointOf(address, reached, r, graph) {
+function endpointOf(address, reached, r, graph, dir = 'down', through = false) {
   const info = pinInfo(graph, address, r);
   return {
     address,
     instance: info?.instance ?? splitAddress(address)?.instance ?? '',
     port: info?.port ?? splitAddress(address)?.port ?? '',
     level: parentPath(info?.instance ?? splitAddress(address)?.instance ?? ''),
-    kind: endKind(info),
+    kind: endKind(info, dir, through, r),
     module: info?.module ?? null,
     direction: info?.direction ?? null,
     hops: reached.hops,
@@ -222,6 +271,8 @@ export function startOf(hit) {
   if (hit.kind === 'port') return { kind: 'pin', address: hit.address };
   if (hit.kind === 'instance') return { kind: 'instance', address: hit.address };
   if (hit.kind === 'wire') return { kind: 'wire', path: hit.path, written: { ...hit.wire.written } };
+  // A collapsed port group (M2.13-2): its members together.
+  if (hit.kind === 'group') return { kind: 'pins', addresses: hit.ports.map((p) => p.address), label: [hit.address, hit.label].filter(Boolean).join(' ') };
   return null;
 }
 
@@ -248,10 +299,13 @@ export function wireEnds(path, written, r) {
  * wires: count}`. A pin start traces upstream from it, downstream from it
  * or both; an instance from its inputs and parameters upstream and its
  * outputs downstream; a wire from its source upstream and its target
- * downstream, the wire itself included.
+ * downstream, the wire itself included. `depth` is `next` (stop at the next
+ * module) or `through` (cross modules, see above); the result carries it,
+ * and `hops`: each pin's fewest connections or crossings from the start.
  */
-export function trace(graph, start, direction = 'both') {
+export function trace(graph, start, direction = 'both', { depth = 'next' } = {}) {
   if (!graph || !start) return null;
+  const through = depth === 'through';
   const r = resolver(graph);
   const ups = [];
   const downs = [];
@@ -262,6 +316,12 @@ export function trace(graph, start, direction = 'both') {
     ups.push(start.address);
     downs.push(start.address);
     label = start.address;
+  } else if (start.kind === 'pins') {
+    const found = start.addresses.filter((a) => pinInfo(graph, a, r));
+    if (!found.length) return null;
+    ups.push(...found);
+    downs.push(...found);
+    label = start.label ?? found.join(', ');
   } else if (start.kind === 'instance') {
     const node = r.instance(start.address);
     if (!node) return null;
@@ -294,12 +354,16 @@ export function trace(graph, start, direction = 'both') {
     pins.add(seed.ends.from);
     pins.add(seed.ends.to);
   }
+  const hops = new Map();
   const side = (starts, dir) => {
-    const w = walk(starts, dir, r);
+    const w = walk(starts, dir, r, () => true, through);
     cycles += w.cycles;
-    for (const address of w.pins.keys()) pins.add(address);
+    for (const [address, reached] of w.pins) {
+      pins.add(address);
+      if (!(hops.get(address) <= reached.hops)) hops.set(address, reached.hops);
+    }
     w.wires.forEach(addWire);
-    const endpoints = w.endpoints.map((a) => endpointOf(a, w.pins.get(a), r, graph));
+    const endpoints = w.endpoints.map((a) => endpointOf(a, w.pins.get(a), r, graph, dir, through));
     for (const e of endpoints) if (e.kind === 'library') opaque.add(e.address);
     return { endpoints, pins: w.pins.size, wires: w.wires.length };
   };
@@ -317,15 +381,17 @@ export function trace(graph, start, direction = 'both') {
     instances.add(at.instance);
     levels.add(parentPath(at.instance));
   }
-  const depth = (p) => (p ? p.split('/').length - 1 : 0);
+  const nesting = (p) => (p ? p.split('/').length - 1 : 0);
   return {
     start,
     direction,
+    depth: through ? 'through' : 'next',
+    hops,
     label,
     pins,
     instances,
     wires,
-    levels: [...levels].sort((a, b) => depth(a) - depth(b) || (a < b ? -1 : a > b ? 1 : 0)),
+    levels: [...levels].sort((a, b) => nesting(a) - nesting(b) || (a < b ? -1 : a > b ? 1 : 0)),
     up,
     down,
     cycles,
@@ -354,7 +420,27 @@ export function behind(graph, address, side, r = resolver(graph)) {
   const direction = side === 'inside' ? (incoming ? 'down' : 'up') : incoming ? 'up' : 'down';
   const keep = side === 'inside' ? (path) => within(path, info.instance) : (path) => !within(path, info.instance);
   const w = walk([address], direction, r, keep);
-  return { direction, endpoints: w.endpoints.map((a) => endpointOf(a, w.pins.get(a), r, graph)), opaque: false };
+  return { direction, endpoints: w.endpoints.map((a) => endpointOf(a, w.pins.get(a), r, graph, direction)), opaque: false };
+}
+
+/**
+ * The pins one connection away from composite pin `address` on side `side`
+ * (`inside`: the inner ports its export forwards to or from; `outside`: the
+ * ends of the connections at its box's level, a parent frame's pin
+ * included): `{direction, addresses, opaque}`, in the graph's order; null
+ * for a pin that is not a composite's. A boundary's note (M2.13-2,
+ * ui/lib/schematic-labels.js), where `behind` walks on to the endpoints.
+ */
+export function neighbours(graph, address, side, r = resolver(graph)) {
+  const info = pinInfo(graph, address, r);
+  if (!info?.composite) return null;
+  const incoming = info.direction !== 'out';
+  const direction = side === 'inside' ? (incoming ? 'down' : 'up') : incoming ? 'up' : 'down';
+  const path = side === 'inside' ? info.instance : parentPath(info.instance);
+  const addresses = edgesFrom(address, direction, r)
+    .filter((e) => e.path === path)
+    .map((e) => e.next);
+  return { direction, addresses, opaque: side === 'inside' && info.opaque };
 }
 
 /** The most names a badge lists. */
@@ -388,21 +474,30 @@ export function badgeText(answer, address, side) {
   return answer.direction === 'down' ? `→ to ${list}` : `← from ${list}`;
 }
 
+/** A trace spanning more pins than this shows its levels collapsed, but the start's. */
+export const COLLAPSE_PINS = 40;
+
 /**
  * The trace as a tree by level for the sidebar: `[{path, label, wires,
- * pins, children: [{address, name, module, composite, opaque, children:
- * [{address, port, direction, role}]}]}]`, the levels outermost first,
- * instances and pins in the graph's order. `role` is `start`, `endpoint`
- * (of either direction) or `through`. `label` names the level ("top
- * level", "/synth (moog_voice)").
+ * pins, collapsed, children: [{address, name, module, composite, opaque,
+ * children: [{address, port, direction, role}]}]}]`, the levels outermost
+ * first, instances and pins in the graph's order; through modules, in the
+ * chain's order instead (by their fewest hops from the start, then the
+ * graph's). `role` is `start`, `endpoint` (of either direction), `open` (an
+ * endpoint that is an open end: leads nowhere) or `through`. `label` names the level ("top level", "/synth (moog_voice)").
+ * A trace of more than COLLAPSE_PINS pins has every level `collapsed` but
+ * the start's.
  */
 export function traceTree(graph, result) {
   if (!result) return [];
   const r = resolver(graph);
-  const ends = new Set([...(result.up?.endpoints ?? []), ...(result.down?.endpoints ?? [])].map((e) => e.address));
+  const all = [...(result.up?.endpoints ?? []), ...(result.down?.endpoints ?? [])];
+  const ends = new Set(all.map((e) => e.address));
+  const open = new Set(all.filter((e) => e.kind === 'unconnected').map((e) => e.address));
   const starts = new Set();
   if (result.start.kind === 'pin') starts.add(result.start.address);
   if (result.start.kind === 'instance') for (const a of result.pins) if (splitAddress(a)?.instance === result.start.address) starts.add(a);
+  if (result.start.kind === 'pins') for (const a of result.start.addresses ?? []) starts.add(a);
   const byLevel = new Map(result.levels.map((p) => [p, new Map()]));
   for (const address of result.pins) {
     const at = splitAddress(address);
@@ -414,13 +509,19 @@ export function traceTree(graph, result) {
     level.get(at.instance).push(at.port);
   }
   const tree = [];
+  const chain = result.depth === 'through';
+  const hop = (address) => result.hops?.get(address) ?? Infinity;
+  const startAddress = result.start.kind === 'pins' ? result.start.addresses?.[0] : result.start.address;
+  const startPath = result.start.kind === 'wire' ? result.start.path : startAddress ? parentPath(splitAddress(startAddress)?.instance ?? startAddress) : '';
+  const collapse = result.pins.size > COLLAPSE_PINS;
   for (const path of result.levels) {
     const data = r.level(path);
     const node = path ? r.instance(path) : null;
     const instances = byLevel.get(path) ?? new Map();
     const order = new Map((data?.instances ?? []).map((n, i) => [`${path}/${n.name}`, i]));
+    const first = (ports, instance) => Math.min(...ports.map((p) => hop(`${instance}.${p}`)));
     const children = [...instances.entries()]
-      .sort(([a], [b]) => (order.get(a) ?? 1e9) - (order.get(b) ?? 1e9) || (a < b ? -1 : 1))
+      .sort(([a, pa], [b, pb]) => (chain ? first(pa, a) - first(pb, b) : 0) || (order.get(a) ?? 1e9) - (order.get(b) ?? 1e9) || (a < b ? -1 : 1))
       .map(([instance, ports]) => {
         const entry = r.instance(instance);
         const portOrder = [...(entry?.ports ?? []).map((p) => p.name), ...(entry?.parameters ?? []).map((p) => p.name)];
@@ -431,11 +532,11 @@ export function traceTree(graph, result) {
           composite: Boolean(entry?.composite),
           opaque: Boolean(entry?.composite) && !r.level(instance),
           children: ports
-            .sort((a, b) => portOrder.indexOf(a) - portOrder.indexOf(b))
+            .sort((a, b) => (chain ? hop(`${instance}.${a}`) - hop(`${instance}.${b}`) : 0) || portOrder.indexOf(a) - portOrder.indexOf(b))
             .map((port) => {
               const address = `${instance}.${port}`;
               const info = pinInfo(graph, address, r);
-              return { address, port, direction: info?.direction ?? null, parameter: Boolean(info?.parameter), role: starts.has(address) ? 'start' : ends.has(address) ? 'endpoint' : 'through' };
+              return { address, port, direction: info?.direction ?? null, parameter: Boolean(info?.parameter), role: starts.has(address) ? 'start' : open.has(address) ? 'open' : ends.has(address) ? 'endpoint' : 'through' };
             }),
         };
       });
@@ -444,6 +545,7 @@ export function traceTree(graph, result) {
       label: path ? `${path} (${node?.module ?? '?'})` : 'top level',
       wires: result.wires.get(path)?.size ?? 0,
       pins: children.reduce((n, c) => n + c.children.length, 0),
+      collapsed: collapse && path !== startPath,
       children,
     });
   }

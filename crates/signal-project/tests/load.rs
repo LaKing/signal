@@ -241,3 +241,87 @@ fn parameter_values_are_numbers() {
         ["project.toml:7:32: error: invalid type: string \"loud\", expected f64"]
     );
 }
+
+const GROUPED: &str = r#"schema_version = 1
+
+[composite]
+name = "voice"
+
+[instances]
+osc = { module = "std.sine_osc" }
+amp = { module = "std.gain" }
+amp2 = { module = "std.gain" }
+
+[wiring]
+connections = [{ from = "osc.out", to = "amp.in" }]
+
+[exports]
+inputs = { hz = { to = "osc.freq", group = "pitch" } }
+outputs = { out = { from = "amp.out", group = "audio" } }
+parameters = { level = { to = ["amp.db"], group = "audio" }, plain = "amp2.db" }
+"#;
+
+/// M2.13-2: `group` on an export (its table form) loads, means the same
+/// ports as the plain form, and reaches `graph` beside each export's place
+/// in the file; the plain forms still load.
+#[test]
+fn an_export_may_name_its_schematic_group() {
+    let files = [
+        ("project.toml", PROJECT),
+        ("composites/voice.toml", GROUPED),
+    ]
+    .iter()
+    .map(|(path, text)| SourceFile {
+        path: (*path).to_owned(),
+        text: (*text).to_owned(),
+    })
+    .collect();
+    let project = Project::from_sources(files).unwrap_or_else(|d| panic!("{d:?}"));
+    let voice = &project.composites[0];
+    assert_eq!(voice.exports.inputs[0].to, strings(&["osc.freq"]));
+    assert_eq!(voice.exports.outputs[0].from, "amp.out");
+    let level = &project.plan(&registry()).unwrap();
+    let s = project.structure(&level.plan, &registry());
+    let v = &s["composites"]["voice"];
+    assert_eq!(v["inputs"][0]["group"], "pitch");
+    assert_eq!(v["outputs"][0]["group"], "audio");
+    let params: Vec<_> = v["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["name"].as_str().unwrap(),
+                p["order"].as_u64().unwrap(),
+                p.get("group").cloned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        params,
+        [
+            ("level", 0, Some(serde_json::json!("audio"))),
+            ("plain", 1, None)
+        ]
+    );
+}
+
+#[test]
+fn a_group_table_takes_only_its_ports_and_group() {
+    let voice = GROUPED.replace(r#"group = "pitch""#, r#"groupe = "pitch""#);
+    let errors = load_errors(&[("project.toml", PROJECT), ("composites/voice.toml", &voice)]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains("unknown field `groupe`, expected `to` or `group`"),
+        "{errors:?}"
+    );
+    let voice = GROUPED.replace(
+        r#"{ from = "amp.out", group = "audio" }"#,
+        r#"{ group = "audio" }"#,
+    );
+    let errors = load_errors(&[("project.toml", PROJECT), ("composites/voice.toml", &voice)]);
+    assert!(
+        errors.iter().any(|e| e.contains("missing field `from`")),
+        "{errors:?}"
+    );
+}

@@ -63,21 +63,24 @@ export function pan(view, dx, dy) {
 
 /**
  * The view that shows `rect` (`{x, y, w, h}` in the transform's own
- * coordinates) whole, centred, in a `viewport` (`{w, h}`) less `margin`.
+ * coordinates) whole, centred, in a `viewport` (`{w, h}`) less `margin`
+ * (and `top` at its top edge instead, where a bar lies over it; `side` at
+ * its left and right edges, where labels go).
  */
-export function fit(rect, viewport, margin = 24) {
-  const w = Math.max(1, viewport.w - 2 * margin);
-  const h = Math.max(1, viewport.h - 2 * margin);
+export function fit(rect, viewport, margin = 24, top = margin, side = margin) {
+  const w = Math.max(1, viewport.w - 2 * side);
+  const h = Math.max(1, viewport.h - margin - top);
   const k = clampScale(Math.min(w / Math.max(rect.w, 1e-9), h / Math.max(rect.h, 1e-9)));
-  return { k, ox: rect.x + rect.w / 2, oy: rect.y + rect.h / 2, x: viewport.w / 2, y: viewport.h / 2 };
+  return { k, ox: rect.x + rect.w / 2, oy: rect.y + rect.h / 2, x: viewport.w / 2, y: top + h / 2 };
 }
 
 /**
  * `view` zoomed and moved so that the screen rectangle `rect` (a part as
- * it is drawn now) fills the viewport: a breadcrumb, Escape, a double-click.
+ * it is drawn now) fills the viewport (`top` as `fit`'s): a breadcrumb,
+ * Escape, a double-click.
  */
-export function focus(view, rect, viewport, margin = 24) {
-  const target = fit(rect, viewport, margin);
+export function focus(view, rect, viewport, margin = 24, top = margin, side = margin) {
+  const target = fit(rect, viewport, margin, top, side);
   // `rect` is in screen pixels: compose `target` (screen → screen) with view.
   const next = {
     ...view,

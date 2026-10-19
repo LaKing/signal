@@ -96,13 +96,13 @@ fn kick_is_described_as_written_with_its_nested_composites() {
         inner["outputs"],
         json!([{"name": "out", "from": "kick.out", "direction": "out",
         "address": "out", "shape": "signal", "rate": 1, "kind": inner["outputs"][0]["kind"],
-        "unit": null, "range": inner["outputs"][0]["range"]}])
+        "unit": null, "range": inner["outputs"][0]["range"], "order": 0}])
     );
     assert_eq!(
         inner["parameters"],
         json!([
-            {"name": "kick_decay", "to": ["kick.decay"]},
-            {"name": "kick_drive", "to": ["kick.drive"]},
+            {"name": "kick_decay", "to": ["kick.decay"], "order": 0},
+            {"name": "kick_drive", "to": ["kick.drive"], "order": 1},
         ])
     );
     let kick = &s["composites"]["kick"];
@@ -176,4 +176,61 @@ fn physical_av_names_the_decimate_converter_on_its_rate_change() {
         .find(|p| p["name"] == "rate")
         .unwrap();
     assert_eq!(rate["rate"], 800);
+}
+
+/// The studio's structure, as the schematic's node tests read it
+/// (`ui/lib/fixtures/studio-graph.json`, M2.13-2: the deep trace of
+/// `/synth.hz` and its timing, the boundary notes, the bundles), is the one
+/// `graph` gives for `projects/studio`: a copy that cannot drift. Run with
+/// `SIGNAL_WRITE_UI_FIXTURE=1` to write it again after the studio changes;
+/// without it this test only reads.
+#[test]
+fn studio_structure_matches_the_ui_fixture() {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui/lib/fixtures/studio-graph.json");
+    let s = structure("studio");
+    if std::env::var_os("SIGNAL_WRITE_UI_FIXTURE").is_some() {
+        std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
+        std::fs::write(&fixture, serde_json::to_string_pretty(&s).unwrap() + "\n").unwrap();
+    }
+    let text = std::fs::read_to_string(&fixture).unwrap_or_default();
+    let written: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    assert!(
+        written == s,
+        "{} differs from the studio's structure; write it again with SIGNAL_WRITE_UI_FIXTURE=1",
+        fixture.display()
+    );
+}
+
+/// M2.13-2 (`docs/ui-protocol.md` "graph"): a composite's exports carry
+/// `order`, their place in the file among their kind (`graph` lists them by
+/// name), for the schematic's port groups.
+#[test]
+fn composite_exports_carry_their_order_in_the_file() {
+    let s = structure("studio");
+    let voice = &s["composites"]["moog_voice"];
+    let order = |kind: &str| -> Vec<(String, u64)> {
+        let mut all: Vec<_> = voice[kind]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["name"].as_str().unwrap().to_owned(),
+                    e["order"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        all.sort_by_key(|(_, o)| *o);
+        all
+    };
+    let inputs: Vec<_> = order("inputs").into_iter().map(|(n, _)| n).collect();
+    assert_eq!(inputs, ["hz", "gate", "velocity"]);
+    let parameters: Vec<_> = order("parameters").into_iter().map(|(n, _)| n).collect();
+    assert_eq!(
+        &parameters[..4],
+        ["glide", "osc1_octave", "osc1_detune", "osc1_wave"]
+    );
+    assert_eq!(parameters.last().unwrap(), "volume");
+    assert!(voice["inputs"][0].get("group").is_none());
 }

@@ -4,11 +4,12 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { layout } from './schematic-layout.js';
 import { instanceHit, portHit, wireHit } from './schematic-hit.js';
 import { hitKey } from './schematic-select.js';
 import { EDIT_OFF } from './schematic-menu.js';
-import { LEGEND, MEMBERS_SHOWN, TRACE_DIRECTIONS, addressesText, connectionsOf, sidebar, tooLargeText, traceSection } from './schematic-sidebar.js';
+import { LEGEND, MEMBERS_SHOWN, TRACE_DEPTHS, TRACE_DIRECTIONS, addressesText, connectionsOf, sidebar, tooLargeText, traceSection } from './schematic-sidebar.js';
 import { trace } from './schematic-trace.js';
 import { GRAPH } from './schematic-trace.test.js';
 import { KICK } from './schematic-scene.test.js';
@@ -234,4 +235,42 @@ test('the Trace section: one direction, an empty side, converters, a library com
   assert.match(lib.notes[0], /^1 end at a library composite/);
   const fx = lib.levels[0].children.find((c) => c.label === 'fx');
   assert.equal(fx.note, 'lib.tape_echo (opaque)');
+});
+
+test('the Trace section: the depth toggle, the structural note, collapsed levels (M2.13-2)', () => {
+  const next = traceSection(trace(GRAPH, { kind: 'pin', address: '/seq.hz' }, 'down'), GRAPH);
+  assert.equal(next.depth, 'next');
+  assert.deepEqual(
+    next.depths.map((d) => [d.id, d.on]),
+    [
+      ['next', true],
+      ['through', false],
+    ],
+  );
+  assert.ok(!next.notes.some((n) => n.startsWith('Through modules')));
+  const deep = traceSection(trace(GRAPH, { kind: 'pin', address: '/mix.a' }, 'up', { depth: 'through' }), GRAPH);
+  assert.equal(deep.depths.find((d) => d.on).id, 'through');
+  assert.equal(TRACE_DEPTHS.length, 2);
+  assert.ok(deep.notes.some((n) => /structural path/.test(n)));
+  assert.ok(deep.sides[0].endpoints.every((e) => /: source$/.test(e.note)), deep.sides[0].endpoints.map((e) => e.note).join(' | '));
+  assert.ok(deep.levels.every((l) => l.collapsed === false));
+});
+
+test('a trace’s open ends are listed after its real ends, counted apart and marked', () => {
+  const studio = JSON.parse(readFileSync(new URL('./fixtures/studio-graph.json', import.meta.url), 'utf8'));
+  const section = traceSection(trace(studio, { kind: 'pin', address: '/synth.hz' }, 'down', { depth: 'through' }), studio);
+  const [down] = section.sides;
+  assert.equal(down.title, 'Goes to');
+  assert.equal(down.counted, '2, 2 open ends');
+  assert.deepEqual(
+    down.endpoints.map((e) => [e.label, e.open]),
+    [
+      ['/out.l', false],
+      ['/out.r', false],
+      ['/synth/ladder.lp12', true],
+      ['/echo/tone.hp', true],
+    ],
+  );
+  assert.match(down.endpoints[2].note, /^open end/);
+  assert.match(down.endpoints[0].note, /sink$/);
 });

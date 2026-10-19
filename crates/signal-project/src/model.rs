@@ -139,8 +139,8 @@ pub(crate) struct ExportsSection {
     pub(crate) inputs: ExportTargets,
     /// Exported outputs: each maps to exactly one inner output port.
     #[serde(default)]
-    #[schemars(with = "BTreeMap<String, String>")]
-    pub(crate) outputs: BTreeMap<Spanned<String>, Spanned<String>>,
+    #[schemars(with = "BTreeMap<String, OutputTarget>")]
+    pub(crate) outputs: BTreeMap<Spanned<String>, Spanned<OutputTarget>>,
     /// Exported parameters: each maps to one inner parameter or a list of them.
     #[serde(default)]
     #[schemars(with = "BTreeMap<String, Targets>")]
@@ -246,6 +246,87 @@ pub(crate) enum Targets {
     One(String),
     /// A list of ports (fan-out).
     Many(Vec<Spanned<String>>),
+    /// M2.13-2: `{ to = <port or list>, group = "<name>" }`, the same ports
+    /// with the group the schematic shows the export in (presentation only).
+    Grouped(Box<Targets>, String),
+}
+
+impl Targets {
+    /// The schematic's group of the export, if the table form names one.
+    pub(crate) fn group(&self) -> Option<&str> {
+        match self {
+            Targets::Grouped(_, group) => Some(group),
+            _ => None,
+        }
+    }
+}
+
+/// The inner port of an exported output: `"instance.port"`, or (M2.13-2)
+/// `{ from = "instance.port", group = "<name>" }` with the group the
+/// schematic shows it in.
+pub(crate) struct OutputTarget {
+    pub(crate) from: String,
+    pub(crate) group: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for OutputTarget {
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct OutputVisitor;
+
+        impl<'de> Visitor<'de> for OutputVisitor {
+            type Value = OutputTarget;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                // The plain form's wording, which a list (the common mistake) is told.
+                f.write_str("a string")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<OutputTarget, E> {
+                Ok(OutputTarget {
+                    from: value.to_owned(),
+                    group: None,
+                })
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<OutputTarget, A::Error> {
+                let (mut from, mut group) = (None, None);
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "from" => from = Some(map.next_value::<String>()?),
+                        "group" => group = Some(map.next_value::<String>()?),
+                        other => {
+                            return Err(de::Error::unknown_field(other, &["from", "group"]));
+                        }
+                    }
+                }
+                let from = from.ok_or_else(|| de::Error::missing_field("from"))?;
+                Ok(OutputTarget { from, group })
+            }
+        }
+
+        deserializer.deserialize_any(OutputVisitor)
+    }
+}
+
+impl JsonSchema for OutputTarget {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "OutputTarget".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "One inner output port `instance.port`, or a table with it as `from` and the schematic's `group` of the export.",
+            "anyOf": [
+                { "type": "string" },
+                {
+                    "type": "object",
+                    "properties": { "from": { "type": "string" }, "group": { "type": "string" } },
+                    "required": ["from"],
+                    "additionalProperties": false
+                }
+            ]
+        })
+    }
 }
 
 impl<'de> Deserialize<'de> for Targets {
@@ -256,7 +337,30 @@ impl<'de> Deserialize<'de> for Targets {
             type Value = Targets;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a port `instance.port` or a list of them")
+                f.write_str(
+                    "a port `instance.port`, a list of them, or a table `{ to = <port or list>, group = \"<name>\" }`",
+                )
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Targets, A::Error> {
+                let (mut to, mut group) = (None, None);
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "to" => to = Some(map.next_value::<Targets>()?),
+                        "group" => group = Some(map.next_value::<String>()?),
+                        other => return Err(de::Error::unknown_field(other, &["to", "group"])),
+                    }
+                }
+                let to = to.ok_or_else(|| de::Error::missing_field("to"))?;
+                if matches!(to, Targets::Grouped(..)) {
+                    return Err(de::Error::custom(
+                        "`to` is a port or a list of ports, not a table",
+                    ));
+                }
+                Ok(match group {
+                    Some(group) => Targets::Grouped(Box::new(to), group),
+                    None => to,
+                })
             }
 
             fn visit_str<E: de::Error>(self, value: &str) -> Result<Targets, E> {
@@ -283,10 +387,24 @@ impl JsonSchema for Targets {
 
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
         json_schema!({
-            "description": "One inner port `instance.port`, or a non-empty list of them (fan-out).",
+            "description": "One inner port `instance.port`, or a non-empty list of them (fan-out), or a table with them as `to` and the schematic's `group` of the export.",
             "anyOf": [
                 { "type": "string" },
-                { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+                { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                {
+                    "type": "object",
+                    "properties": {
+                        "to": {
+                            "anyOf": [
+                                { "type": "string" },
+                                { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+                            ]
+                        },
+                        "group": { "type": "string" }
+                    },
+                    "required": ["to"],
+                    "additionalProperties": false
+                }
             ]
         })
     }

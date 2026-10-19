@@ -81,6 +81,8 @@ pub(crate) struct ExportSpans {
     pub(crate) name: String,
     pub(crate) key: Span,
     pub(crate) targets: Vec<(String, Span)>,
+    /// M2.13-2: the schematic's group of the export (`group = "…"`), if any.
+    pub(crate) group: Option<String>,
 }
 
 /// The spans of every definition of a project.

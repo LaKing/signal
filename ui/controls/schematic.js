@@ -37,10 +37,17 @@
 // context menu, T on the selection) follows a pin's, a wire's or a box's
 // connections across composite boundaries (ui/lib/schematic-trace.js); the
 // trace is highlighted at every level drawn and the rest dimmed, boundary
-// pins and closed composites' pins carry a badge saying what lies behind
-// them, and the sidebar's Trace section lists it by level, each node a
-// link that reveals it. It survives entering and leaving composites and
-// a `graph` push; Escape ends it.
+// pins' labels say what lies behind them, and the sidebar's Trace section
+// lists it by level, each node a link that reveals it. It survives
+// entering and leaving composites and a `graph` push; Escape ends it; it
+// goes to the next module or through modules (M2.13-2).
+// M2.13-2 (ADR 0030 §1, §3; the owner's "on the outside of the composite
+// you can't see which of the 20 inputs is what"): composites' and frames'
+// pins are labelled at a fixed size, grouped where they would collide
+// (ui/lib/schematic-labels.js), a frame's pins with where they connect
+// outside and a box's, hovered or traced, where they go inside; a pair's
+// wires are one bundle at small scale, fanning out as the view zooms in
+// (ui/lib/schematic-bundle.js).
 
 import { onDefaultConnection } from '../signal-ui.js';
 import { ENTRY_CSS, ValueEntry } from './entry-field.js';
@@ -51,16 +58,19 @@ import { disconnectOps, schematicMenu } from '../lib/schematic-menu.js';
 import { LEGEND, addressesText, sidebar, tooLargeText, traceSection } from '../lib/schematic-sidebar.js';
 import { badgeText, behind, parentPath, resolver, splitAddress, startOf, trace, wireKey } from '../lib/schematic-trace.js';
 import { moduleInfo, projectKey } from '../lib/schematic-palette.js';
-import { allOf, deletePlan, dragGroup, has, hitKey, inside, moveMessages, reselectAll, toggled, union } from '../lib/schematic-select.js';
+import { allOf, deletePlan, dragGroup, has, hitKey, inside, moveMessages, reselectAll, toggled, traceTarget, union } from '../lib/schematic-select.js';
 import { formatFixed } from '../lib/format.js';
-import { ROW, dragPosition, layout } from '../lib/schematic-layout.js';
+import { HEADER, dragPosition, layout } from '../lib/schematic-layout.js';
 import { DragFollow } from '../lib/schematic-drag.js';
 import { CLOSE_PX, breadcrumbs, chain, levelRect, nodeRect, rebase, reroot, scene } from '../lib/schematic-scene.js';
 import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
 import { hitTest, instanceHit, portHit, reselect } from '../lib/schematic-hit.js';
 import { cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
 import { LEVEL_RATE, SLOTS, candidates, levelFraction, levelPlan } from '../lib/schematic-levels.js';
-import { IDENTITY, fit, focus, keyView, matrix, pan, toScreen, wheelFactor, zoomAt } from '../lib/schematic-view.js';
+import { IDENTITY, fit, focus, keyView, matrix, pan, screenRect, toLocal, toScreen, wheelFactor, zoomAt } from '../lib/schematic-view.js';
+import { LABEL_PX, PITCH_PX, insideNote, outsideNote, pinText, placeCounts, placeLabels, setMeasure } from '../lib/schematic-labels.js';
+import { bundleClick, bundleText, bundleWires, countPlaces, countsShown, fanOf, nearestWire } from '../lib/schematic-bundle.js';
+import { collapsedAt, exportFacts, groupAnchors } from '../lib/schematic-groups.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 /** A press that moves less than this (px) is a click. */
@@ -75,14 +85,14 @@ const SETTLE_MS = 150;
 const MANY_MARKS = 64;
 /** Where the sidebar's collapse is kept, per viewer (localStorage). */
 const SIDE_KEY = 'signal.schematic.sidebar';
-/** A trace's badges show on a level whose pins are at least this far apart on screen (px). */
-const BADGE_ROW_PX = 13;
-/** At most this many badges are drawn (the nearest the screen's centre first). */
-const MAX_BADGES = 80;
-/** A level with no more badges than this shows them on rows down to MIN_TEXT_PX apart. */
-const FEW_BADGES = 6;
-/** A badge's width per character (px, 10 px text), for keeping badges off each other without measuring them. */
-const BADGE_CHAR_PX = 5.6;
+/** An open composite's own pins are at most this radius on screen (px). */
+const OPEN_PIN_PX = 4;
+/** A fitted view keeps this far (px) from the stage's top edge: the bar (breadcrumbs, Fit) lies over it. */
+const BAR_PX = 40;
+/** A view's margin (px) on its other edges. */
+const MARGIN_PX = 24;
+/** A composite's inside fitted to the view keeps this far (px) from the left and right edges: room for its frame's labels, outside its pins. */
+const FRAME_SIDE_PX = 120;
 
 const CSS = `
 :host { display: block; position: relative; overflow: hidden; height: 100%; outline: none; --side-width: 300px;
@@ -129,6 +139,8 @@ svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; t
 .overlay { pointer-events: none; }
 /* Many selected (more than MANY_MARKS): strokes only, no glow, halo or ring, which would cost a filter or two paths each. */
 svg.many .selected > .box { filter: none; }
+/* An open composite selected: its outline only; its glow would grow with the zoom over its inside. */
+.selected.open > .box { filter: none; }
 svg.many .wire.selected { stroke-width: 4; }
 .level { fill: var(--signal-track, #2a2f38); }
 .level-fill { fill: var(--signal-meter-rms, #3ecf8e); }
@@ -144,7 +156,7 @@ svg.stale { opacity: 0.4; filter: grayscale(1); }
 .diagnostics { position: absolute; left: 8px; right: 8px; bottom: 28px; max-height: 40%; overflow: hidden; visibility: hidden; padding: 6px 8px;
   white-space: pre-wrap; background: var(--signal-panel, #1f232b); border: 1px solid var(--signal-effective, #ffb74d); border-radius: var(--signal-radius, 6px); }
 .diagnostics h3 { margin: 0 0 4px; font-size: 12px; color: var(--signal-effective, #ffb74d); }
-.tip { position: absolute; left: 0; top: 0; pointer-events: none; visibility: hidden; white-space: nowrap; padding: 2px 6px;
+.tip { position: absolute; left: 0; top: 0; pointer-events: none; visibility: hidden; white-space: pre; padding: 2px 6px;
   background: var(--signal-knob, #262b34); border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 4px; }
 /* The sidebar (2026-10-17): a fixed column at the left, never over the drawing; its content scrolls inside it. */
 .side { position: absolute; left: 0; top: 0; bottom: 0; width: var(--side-width); box-sizing: border-box; display: flex; flex-direction: column;
@@ -198,10 +210,15 @@ svg.tracing .node:not(.traced) > :not(.frame) { opacity: 0.35; }
 svg.tracing .node.traced > .box { stroke: var(--signal-fg, #d6dbe4); }
 svg.tracing .pin:not(.traced) { opacity: 0.4; }
 svg.tracing .pin.traced { stroke: var(--signal-fg, #d6dbe4); stroke-width: 2.5; }
-.badges { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
-.badge { position: absolute; left: 0; top: 0; white-space: nowrap; max-width: 46%; overflow: hidden; text-overflow: ellipsis; padding: 0 5px; font-size: 10px; line-height: 14px;
-  color: var(--signal-fg, #d6dbe4); background: var(--signal-panel, #1f232b); border: 1px solid var(--signal-focus, #5aa9ff); border-radius: 7px; opacity: 0.95; }
-.badge.up { border-color: var(--signal-meter-rms, #3ecf8e); }
+.labels { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+/* A composite's or a frame's port label (M2.13-2): a fixed size, never wider than placed (ui/lib/schematic-labels.js). */
+.plabel { position: absolute; left: 0; top: 0; box-sizing: border-box; white-space: pre; overflow: hidden; text-overflow: ellipsis; padding: 0 2px;
+  font-size: ${LABEL_PX}px; line-height: ${PITCH_PX - 2}px; height: ${PITCH_PX}px; color: var(--signal-muted, #8a93a3); border: 1px solid transparent; border-radius: 4px; }
+.plabel.centre { text-align: center; color: var(--signal-fg, #d6dbe4); background: var(--signal-panel, #1f232b); }
+.plabel.right { text-align: right; }
+.plabel.count { text-align: center; color: var(--signal-bg, #16181d); background: var(--signal-muted, #8a93a3); border-radius: 6px; }
+.plabel.noted { color: var(--signal-fg, #d6dbe4); background: var(--signal-panel, #1f232b); }
+.plabel.traced { border-color: var(--signal-focus, #5aa9ff); color: var(--signal-fg, #d6dbe4); background: var(--signal-panel, #1f232b); }
 .side .trace { margin: 0 0 10px; padding: 6px; border: 1px solid var(--signal-focus, #5aa9ff); border-radius: var(--signal-radius, 6px); }
 .side .trace-head { display: flex; align-items: center; gap: 4px; }
 .side .trace-head h3 { flex: 1; min-width: 0; }
@@ -213,6 +230,11 @@ svg.tracing .pin.traced { stroke: var(--signal-fg, #d6dbe4); stroke-width: 2.5; 
 .side .trace .tree .count { color: var(--signal-muted, #8a93a3); margin-left: 4px; }
 .side .trace .tree .role-start { font-weight: 600; }
 .side .trace .tree .role-endpoint::after { content: " ●"; color: var(--signal-focus, #5aa9ff); }
+/* An open end (M2.13-2): leads nowhere; marked apart from the real ends. */
+.side .trace .tree .role-open::after { content: " ○ open end"; color: var(--signal-muted, #8a93a3); font-weight: normal; }
+.side .trace .end.open { border-left: 2px dashed var(--signal-muted, #8a93a3); padding-left: 4px; }
+.side .trace .end.open .what { font-style: italic; }
+.side .trace summary .count { color: var(--signal-muted, #8a93a3); margin-left: 4px; }
 .side .trace details > summary { cursor: pointer; }
 .row { display: grid; grid-template-columns: 1fr auto auto 1ch; gap: 2px 6px; align-items: center; margin-top: 4px; }
 .row .readout { position: relative; font-variant-numeric: tabular-nums; white-space: pre; color: var(--signal-muted, #8a93a3); }
@@ -294,8 +316,12 @@ export class SignalSchematic extends HTMLElement {
     /** The trace (ADR 0030 §1): `{start, direction, result, badges, version}`, or null. */
     this.tracing = null;
     this.traceVersion = 0;
-    /** The badge elements, reused. */
-    this.badgePool = [];
+    /** The port label elements, reused (M2.13-2). */
+    this.labelPool = [];
+    /** A boundary pin's one-hop note, by side and address, for the `graph` shown. */
+    this.notes = new Map();
+    /** The closed composite under the pointer (its address), whose pins show where they go inside. */
+    this.hoveredBox = null;
   }
 
   /** The part selected last (the context menu's and the keyboard's), or null. */
@@ -338,7 +364,7 @@ export class SignalSchematic extends HTMLElement {
     this.bar = html('div', { className: 'bar' });
     this.crumbs = html('nav', { className: 'crumbs' });
     const fitButton = html('button', { type: 'button', textContent: 'Fit', title: 'Fit (0)' });
-    fitButton.addEventListener('click', () => this.setView(fit(this.rootBounds(), this.viewport)));
+    fitButton.addEventListener('click', () => this.setView(this.fitAll()));
     const reset = html('button', { type: 'button', textContent: 'Reset layout', title: 'Forget the moved positions of the level shown' });
     reset.addEventListener('click', () => this.resetLayout(this.currentLevel()));
     const resetAll = html('button', { type: 'button', textContent: 'Reset all', title: 'Forget every moved position (removes ui/schematic.toml)' });
@@ -348,8 +374,8 @@ export class SignalSchematic extends HTMLElement {
     this.staleBox = html('section', { className: 'diagnostics' });
     this.tip = html('div', { className: 'tip' });
     this.marquee = html('div', { className: 'marquee' });
-    this.badgeLayer = html('div', { className: 'badges' });
-    this.stage.append(this.svg, this.badgeLayer, this.bar, this.message, this.staleBox, this.tip, this.marquee);
+    this.labelLayer = html('div', { className: 'labels' });
+    this.stage.append(this.svg, this.labelLayer, this.bar, this.message, this.staleBox, this.tip, this.marquee);
     root.append(style, this.buildSide(), this.stage);
     this.editor = new SchematicEditor(this);
     this.editor.build(this.bar, this.stage);
@@ -364,6 +390,7 @@ export class SignalSchematic extends HTMLElement {
     this.svg.addEventListener('pointerleave', () => {
       this.hideTip();
       this.hoverWire(null);
+      this.hoverBox(null);
     });
     this.svg.addEventListener('dblclick', (e) => this.doubleClick(e));
     this.svg.addEventListener('wheel', (e) => this.wheel(e), { passive: false });
@@ -451,6 +478,8 @@ export class SignalSchematic extends HTMLElement {
       old.clear();
     }
     this.graph = graph;
+    this.notes = new Map();
+    this.noteResolver = resolver(graph);
     this.editor.graphSeen(graph);
     this.layouts.clear();
     // A move the graph holds, or written, goes; one still being written (a
@@ -533,13 +562,19 @@ export class SignalSchematic extends HTMLElement {
       const source = level === '' ? this.graph.top : this.graph.composites?.[level];
       if (!source) return null;
       const stored = { ...(this.graph.layout?.positions?.[level] ?? {}), ...Object.fromEntries(this.moved.get(level) ?? []) };
-      this.layouts.set(level, layout(source, stored));
+      // M2.13-2: a composite's box lays its pins out in groups (ui/lib/schematic-groups.js).
+      this.layouts.set(level, layout(source, stored, { factsOf: (module) => exportFacts(this.graph.composites?.[module] ?? null) }));
     }
     return this.layouts.get(level);
   }
 
   rootBounds() {
     return this.layoutOf('')?.bounds ?? { x: 0, y: 0, w: 1, h: 1 };
+  }
+
+  /** The whole top level in view, clear of the bar over the stage's top edge. */
+  fitAll() {
+    return fit(this.rootBounds(), this.viewport, MARGIN_PX, BAR_PX);
   }
 
   setView(view) {
@@ -560,7 +595,7 @@ export class SignalSchematic extends HTMLElement {
   render() {
     if (!this.graph || this.viewport.w === 0) return;
     if (!this.fitted) {
-      this.view = fit(this.rootBounds(), this.viewport);
+      this.view = this.fitAll();
       this.fitted = true;
     }
     const layoutOf = (level) => this.layoutOf(level);
@@ -615,12 +650,13 @@ export class SignalSchematic extends HTMLElement {
       const wires = el('g');
       const overlay = el('g', { class: 'overlay' });
       const nodes = el('g');
-      drawn = { g: el('g'), wires, overlay, nodes, baked: null, wireCache: new Map(), nodeCache: new Map(), shown: null };
+      drawn = { g: el('g'), wires, overlay, nodes, baked: null, wireCache: new Map(), nodeCache: new Map(), bundleCache: new Map(), shown: null };
       drawn.g.append(wires, overlay, nodes);
       this.groups.set(level.path, drawn);
     }
     const transform = level.transform;
     if (!drawn.baked || drawn.layout !== level.layout || !bakeHolds(drawn.baked, transform, this.viewport)) {
+      if (drawn.layout !== level.layout) drawn.bundleCache = new Map();
       drawn.baked = bake(transform, this.viewport);
       drawn.layout = level.layout;
       drawn.wireCache = new Map();
@@ -630,25 +666,54 @@ export class SignalSchematic extends HTMLElement {
     const placed = bakedMatrix(drawn.baked, transform);
     if (!drawn.baked.representable || !inBounds(placed)) return null;
     const text = (px) => px * transform.k >= MIN_TEXT_PX;
-    const sizes = `${text(12)} ${text(9)}`;
     const open = level.nodes.filter((n) => n.composite && this.drawn.open.has(`${level.path}/${n.name}`)).map((n) => n.name).join('/');
+    // An open composite's own pins keep about their size on screen (in half-octave steps of the scale): never huge discs over its frame.
+    level.pinK = open ? 2 ** (Math.floor(Math.log2(transform.k) * 2) / 2) : 1;
+    const sizes = `${text(12)} ${text(9)}${open ? ` ${level.pinK}` : ''}`;
+    // M2.13-2: a pair's wires bundled at small scale (ui/lib/schematic-bundle.js), the traced and selected ones on their own above.
+    const solo = this.soloWires(level.path);
+    // A level a box of which is dragged: every wire on its own, as DragFollow moves them by id.
+    const dragging = this.levelDragged(level);
+    const fan = dragging ? 1 : fanOf(transform.k);
+    // Small, a composite's port groups are one pin each, its wires joining it (not while a box of the level is dragged).
+    const collapsed = !dragging && collapsedAt(transform.k);
+    level.collapsed = collapsed;
+    const soloKey = [...solo].join('\t');
     const shown = drawn.shown;
-    const same = shown && shown.sizes === sizes && shown.open === open && sameItems(shown.nodes, level.nodes) && sameItems(shown.wires, level.wires);
-    if (!same) {
+    const same =
+      shown &&
+      shown.sizes === sizes &&
+      shown.open === open &&
+      shown.fan === fan &&
+      shown.collapsed === collapsed &&
+      shown.solo === soloKey &&
+      sameItems(shown.nodes, level.nodes) &&
+      sameItems(shown.wires, level.wires);
+    if (same) level.bundles = shown.items;
+    else {
       const baked = drawn.baked;
-      const wires = reconcile(drawn.wireCache, level.wires, (w) => w.id, () => '', (w) => this.wireElement(level, w, baked));
+      const ends = collapsed ? this.groupEnds(level.layout) : null;
+      const items = bundleWires(level.wires, transform.k, { solo, bottom: level.layout.bottom, cache: drawn.bundleCache, fanned: dragging, ends });
+      level.bundles = items;
+      const wires = reconcile(
+        drawn.wireCache,
+        items,
+        (w) => (w.kind === 'bundle' ? `bundle ${w.key}` : w.id),
+        () => '',
+        (w) => (w.kind === 'bundle' ? this.bundleElement(level, w, baked) : this.wireElement(level, w, baked)),
+      );
       const nodes = reconcile(
         drawn.nodeCache,
         level.nodes,
         (n) => n.id,
-        (n) => `${this.drawn.open.has(`${level.path}/${n.name}`)} ${sizes}`,
-        (n) => this.nodeElement(level, n, baked, text),
+        (n) => `${this.drawn.open.has(`${level.path}/${n.name}`)} ${sizes} ${collapsed}`,
+        (n) => this.nodeElement(level, n, baked, text, collapsed),
       );
       if (!sameItems([...drawn.wires.children], wires.elements)) drawn.wires.replaceChildren(...wires.elements);
       if (!sameItems([...drawn.nodes.children], nodes.elements)) drawn.nodes.replaceChildren(...nodes.elements);
       drawn.wireCache = wires.cache;
       drawn.nodeCache = nodes.cache;
-      drawn.shown = { sizes, open, nodes: level.nodes, wires: level.wires };
+      drawn.shown = { sizes, open, fan, collapsed, solo: soloKey, items, nodes: level.nodes, wires: level.wires };
     }
     drawn.placed = placed;
     drawn.g.setAttribute('transform', matrix(placed));
@@ -666,7 +731,52 @@ export class SignalSchematic extends HTMLElement {
     });
   }
 
-  nodeElement(level, node, baked, text) {
+  /** A bundle (M2.13-2): one thick path of its pair while folded, else its wires fanning out; its count is over the drawing (drawLabels). */
+  bundleElement(level, bundle, baked) {
+    const shape = bundle.wires[0].shape;
+    const group = el('g', { class: 'bundle', 'data-label': bundle.wires.map((w) => w.label).join('\n'), 'data-part': 'schematic' });
+    if (!bundle.members.length) {
+      const path = el('path', { class: `wire ${shape}`, d: bakedPath(baked, bundle.points, bundle.curve) });
+      path.style.strokeWidth = `${1.5 + Math.log2(bundle.count)}px`;
+      group.append(path);
+    }
+    for (const m of bundle.members) group.append(el('path', { class: ['wire', m.wire.shape, m.wire.dashed ? 'dashed' : ''].join(' ').trim(), d: bakedPath(baked, m.points, m.curve) }));
+    return group;
+  }
+
+  /** Whether a box of `level` (a scene entry) is being dragged: its wires each on their own, its groups open. */
+  levelDragged(level) {
+    return Boolean(this.gesture?.follow && this.gesture.moved && this.gesture.hit.level === level.level);
+  }
+
+  /**
+   * The ends of `layout`'s wires to and from a collapsed port group (M2.13-2,
+   * ui/lib/schematic-groups.js): its pin, and the group's key, for
+   * `bundleWires`; null for a wire with neither end in a group of several.
+   */
+  groupEnds(layout) {
+    let ends = this.groupEndsOf?.get(layout);
+    if (ends) return ends;
+    const anchors = new Map(layout.nodes.filter((n) => n.groups).map((n) => [n.id, groupAnchors(n)]));
+    ends = (w) => {
+      const a = anchors.get(w.from.node)?.get(w.from.port);
+      const b = anchors.get(w.to.node)?.get(w.to.port);
+      if (!a && !b) return null;
+      return { a: a ? { x: a.x, y: a.y } : w.curve.start, b: b ? { x: b.x, y: b.y } : w.curve.segs.at(-1).to, key: `${a?.group.key ?? ''}|${b?.group.key ?? ''}` };
+    };
+    this.groupEndsOf ??= new WeakMap();
+    this.groupEndsOf.set(layout, ends);
+    return ends;
+  }
+
+  /** The `wireKey`s of level `path`'s wires drawn on their own over their bundles: the selected and the traced. */
+  soloWires(path) {
+    const solo = new Set(this.tracing?.result?.wires.get(path) ?? []);
+    for (const s of this.selected) if (s.kind === 'wire' && s.path === path) solo.add(wireKey(s.wire.written));
+    return solo;
+  }
+
+  nodeElement(level, node, baked, text, collapsed = false) {
     const m = baked.m;
     const address = `${level.path}/${node.name}`;
     const isOpen = this.drawn.open.has(address);
@@ -692,15 +802,41 @@ export class SignalSchematic extends HTMLElement {
       label({ x: node.x + 8, y: node.y + 27 }, 10, { class: 'module' }, node.module);
     }
     const bars = [];
+    // An open composite's pins drawn at OPEN_PIN_PX on screen at most (zoomed into its inside, they would grow over its frame).
+    const radius = isOpen ? Math.min(3, OPEN_PIN_PX / (level.pinK ?? 1)) : 3;
+    // A collapsed box (M2.13-2): one pin per group of several, at its middle.
+    const anchors = collapsed && node.groups ? groupAnchors(node) : null;
+    const grouped = new Set();
     for (const pin of [...node.ins, ...node.outs]) {
       const out = pin.direction === 'out';
+      const anchor = anchors?.get(pin.name);
+      if (anchor) {
+        if (grouped.has(anchor.group)) continue;
+        grouped.add(anchor.group);
+        const g = anchor.group;
+        const address = node.kind === 'instance' ? `${level.path}/${node.name}.${pin.name}` : `${level.path}.${pin.name}`;
+        const shape = bakedPin(baked, level.transform, this.viewport, { ...pin, x: anchor.x, y: anchor.y }, radius);
+        const prefix = node.kind === 'instance' ? `${level.path}/${node.name}.` : `${level.path}.`;
+        const data = {
+          class: `pin group ${pin.shape} connected`,
+          'data-address': address,
+          'data-members': g.pins.map((p) => `${prefix}${p.name}`).join(' '),
+          'data-direction': pin.direction,
+          'data-label': `${g.label} (${g.pins.length})`,
+          'data-part': 'schematic',
+        };
+        if (shape.circle) group.append(el('circle', { ...data, ...shape.circle }));
+        else if (shape.polygon.length) group.append(el('polygon', { ...data, points: shape.polygon.map((p) => `${p.x},${p.y}`).join(' ') }));
+        continue;
+      }
       const portAddress = node.kind === 'instance' ? `${address}.${pin.name}` : `${level.path}.${pin.name}`;
       const kind = ['pin', pin.shape, pin.parameter ? 'parameter' : '', pin.connected ? 'connected' : ''].filter(Boolean).join(' ');
       const data = { class: kind, 'data-address': portAddress, 'data-direction': pin.direction, 'data-label': pin.name, 'data-part': 'schematic' };
-      const shape = bakedPin(baked, level.transform, this.viewport, pin);
+      const shape = bakedPin(baked, level.transform, this.viewport, pin, radius);
       if (shape.circle) group.append(el('circle', { ...data, ...shape.circle }));
       else if (shape.polygon.length) group.append(el('polygon', { ...data, points: shape.polygon.map((p) => `${p.x},${p.y}`).join(' ') }));
-      if (text(9) && !isOpen) {
+      // A composite's and a frame's pins are labelled at a fixed size over the drawing (drawLabels).
+      if (text(9) && !isOpen && !node.composite && node.kind === 'instance') {
         label({ x: pin.x + (out ? -6 : 6), y: pin.y + 3 }, 9, { class: 'pin-label', 'text-anchor': out ? 'end' : 'start' }, pin.name);
       }
       if (out && node.kind === 'instance' && pin.shape === 'signal' && !isOpen) {
@@ -740,6 +876,10 @@ export class SignalSchematic extends HTMLElement {
       const group = hit.node.kind === 'instance' ? this.nodeGroup(`${hit.path}/${hit.node.name}`) : (this.groups.get(hit.path)?.nodeCache.get(hit.node.id)?.el ?? null);
       for (const pin of group?.querySelectorAll('.pin') ?? []) {
         if (pin.dataset.address === hit.address && pin.dataset.direction === hit.port.direction) return pin;
+      }
+      // A member of a collapsed group (M2.13-2): the group's pin is what is drawn of it.
+      for (const pin of group?.querySelectorAll('.pin') ?? []) {
+        if (pin.dataset.members?.split(' ').includes(hit.address) && pin.dataset.direction === hit.port.direction) return pin;
       }
     }
     return null;
@@ -873,11 +1013,11 @@ export class SignalSchematic extends HTMLElement {
   goTo(path) {
     for (const open of [...this.pinned]) if (open !== path && open.startsWith(`${path}/`)) this.pinned.delete(open);
     if (path === '') {
-      this.setView(fit(this.rootBounds(), this.viewport));
+      this.setView(this.fitAll());
       return;
     }
     const rect = this.drawn && levelRect(this.drawn, path);
-    if (rect) this.setView(focus(this.view, rect, this.viewport));
+    if (rect) this.setView(focus(this.view, rect, this.viewport, MARGIN_PX, BAR_PX, FRAME_SIDE_PX));
   }
 
   // Input.
@@ -932,7 +1072,11 @@ export class SignalSchematic extends HTMLElement {
       return;
     }
     if (event.pointerId !== gesture.pointer) return;
-    if (Math.hypot(at.x - gesture.start.x, at.y - gesture.start.y) > DRAG_PX) gesture.moved = true;
+    if (!gesture.moved && Math.hypot(at.x - gesture.start.x, at.y - gesture.start.y) > DRAG_PX) {
+      gesture.moved = true;
+      // Its level drawn again unbundled, so that the wires of a box dragged follow it.
+      if (gesture.follow) this.schedule();
+    }
     if (gesture.connect) {
       this.editor.connectMove(at);
       return;
@@ -985,12 +1129,26 @@ export class SignalSchematic extends HTMLElement {
     }
     if (!gesture.moved) {
       const hit = gesture.hit.kind === 'background' ? null : gesture.hit;
+      // A bundle (M2.13-2): its wires, selected together; they are then drawn on their own, so a second click takes one.
+      // A collapsed port group (M2.13-2): its members, never one picked for the user.
+      if (hit?.kind === 'group') {
+        this.select(gesture.additive ? union(this.selected, hit.ports) : hit.ports);
+        return;
+      }
+      if (hit?.kind === 'bundle') {
+        this.select(gesture.additive ? union(this.selected, hit.wires) : bundleClick(this.selected, hit, () => this.singleHit(hit, at)));
+        return;
+      }
       if (gesture.additive) {
         if (hit) this.select(toggled(this.selected, hit));
       } else this.select(hit ? [hit] : []);
       return;
     }
-    if (gesture.follow) this.drop(gesture, at);
+    if (gesture.follow) {
+      this.drop(gesture, at);
+      // Its level bundled again.
+      this.schedule();
+    }
   }
 
   /**
@@ -1057,6 +1215,7 @@ export class SignalSchematic extends HTMLElement {
 
   cancelGesture() {
     this.gesture?.follow?.restore();
+    if (this.gesture?.follow) this.schedule();
     if (this.gesture?.marquee) this.hideMarquee();
     if (this.gesture?.connect) this.editor.cancelConnect();
     this.gesture = null;
@@ -1067,14 +1226,50 @@ export class SignalSchematic extends HTMLElement {
     if (!this.drawn) return;
     const hit = hitTest(this.drawn, at);
     this.hoverWire(hit.kind === 'wire' ? hit : null);
+    // A closed composite's box or pin under the pointer: its pins say where they go inside.
+    const box = (hit.kind === 'instance' || hit.kind === 'port') && hit.node.kind === 'instance' && hit.node.composite ? `${hit.path}/${hit.node.name}` : null;
+    this.hoverBox(box && !this.drawn.open.has(box) ? box : null);
+    if (hit.kind === 'port' && (hit.node.composite || hit.node.kind !== 'instance')) {
+      // A boundary pin: its label's whole text, which a small box shows cut short.
+      this.showTip(this.pinLabel(hit.node.kind === 'instance', hit.address, hit.port.name, true), at);
+      return;
+    }
+    if (hit.kind === 'bundle') {
+      this.showTip(bundleText(hit.bundle), at);
+      return;
+    }
+    if (hit.kind === 'group') {
+      // A collapsed port group (M2.13-2): its members; zoom in to take one.
+      this.showTip([`${hit.label} (${hit.ports.length})`, ...hit.ports.map((p) => p.address)].join('\n'), at);
+      return;
+    }
     if (hit.kind !== 'wire') {
       this.hideTip();
       return;
     }
     const converters = hit.wire.converters ?? [];
-    this.tip.textContent = converters.length ? `${hit.from} → ${hit.to}: ${converters.map(converterText).join('; ')}` : `${hit.from} → ${hit.to}`;
+    this.showTip(converters.length ? `${hit.from} → ${hit.to}: ${converters.map(converterText).join('; ')}` : `${hit.from} → ${hit.to}`, at);
+  }
+
+  /** `hit`, or for a bundle (M2.13-2) the hit of its wire nearest screen `point`: what a menu acts on, one wire. */
+  singleHit(hit, point) {
+    if (hit.kind !== 'bundle') return hit;
+    const entry = this.levelOf(hit.path);
+    const wire = nearestWire(hit.bundle, toLocal(entry.transform, point));
+    return hit.wires.find((w) => w.wire === wire) ?? hit.wires[0];
+  }
+
+  showTip(text, at) {
+    this.tip.textContent = text;
     this.tip.style.transform = `translate(${Math.round(at.x + 12)}px, ${Math.round(at.y + 12)}px)`;
     this.tip.style.visibility = 'visible';
+  }
+
+  /** The closed composite under the pointer (its address, or null): its pins' labels say where they go inside. */
+  hoverBox(address) {
+    if (this.hoveredBox === address) return;
+    this.hoveredBox = address;
+    this.drawLabels();
   }
 
   hideTip() {
@@ -1095,11 +1290,22 @@ export class SignalSchematic extends HTMLElement {
     this.enter(hit);
   }
 
-  /** Composite instance `hit` opened and its inside filling the view (a double-click, the menu's Enter). */
+  /**
+   * Composite instance `hit` opened and its inside filling the view (a
+   * double-click, the menu's Enter): the inside's own layout fitted, so it
+   * is drawn readable however tall and narrow its box (a box of many pins
+   * holds a wide inside small, centred in it); the box's frame reaches past
+   * the view's edges.
+   */
   enter(hit) {
     this.pinned.add(hit.address);
+    const inner = hit.node?.composite ? this.layoutOf(hit.node.module) : null;
+    if (inner && chain((level) => this.layoutOf(level), hit.address)) {
+      this.setView({ ...fit(inner.bounds, this.viewport, MARGIN_PX, BAR_PX, FRAME_SIDE_PX), path: hit.address });
+      return;
+    }
     const rect = nodeRect(this.drawn, hit.address);
-    if (rect) this.setView(focus(this.view, rect, this.viewport));
+    if (rect) this.setView(focus(this.view, rect, this.viewport, MARGIN_PX, BAR_PX));
   }
 
   wheel(event) {
@@ -1130,10 +1336,10 @@ export class SignalSchematic extends HTMLElement {
       this.endTrace();
       return;
     }
-    // T: trace the selection (the part selected last).
+    // T: trace the selection (the part selected last; several pins, such as a collapsed group's, together).
     if (own && !event.metaKey && !event.ctrlKey && !event.altKey && event.key.toLowerCase() === 't') {
       event.preventDefault();
-      if (this.selection) this.startTrace(this.selection);
+      if (this.selection) this.startTrace(traceTarget(this.selected));
       else this.say('Trace: select a pin, a wire or a box first, then press T');
       return;
     }
@@ -1195,7 +1401,7 @@ export class SignalSchematic extends HTMLElement {
     const anchored = this.keyMenu ?? (origin === this ? this.menuAnchor() : null);
     if (!anchored && origin !== this.svg && !this.svg.contains(origin)) return null;
     const point = anchored ? anchored.point : this.point(event);
-    const target = { hit: anchored ? anchored.hit : hitTest(this.drawn, point), point };
+    const target = { hit: anchored ? anchored.hit : this.singleHit(hitTest(this.drawn, point), point), point };
     this.endMenu();
     this.menuState = { target, close };
     this.hoverWire(this.hovered);
@@ -1305,7 +1511,7 @@ export class SignalSchematic extends HTMLElement {
   /** Item `id` of the menu opened on `target` (`{hit, point}`). */
   menuAct(id, { hit, point }) {
     if (id === 'inspect') {
-      this.select([hit]);
+      this.select(hit.kind === 'group' ? hit.ports : [hit]);
       this.revealSide();
     } else if (id === 'trace') this.startTrace(hit);
     else if (id === 'delete-selected') this.deleteSelection();
@@ -1330,7 +1536,7 @@ export class SignalSchematic extends HTMLElement {
       else this.say(`Nothing to disconnect at ${hit.address}`);
     }
     else if (id === 'add') this.editor.openPalette(point, paletteLevel(hit, this.drawn, point));
-    else if (id === 'fit') this.setView(fit(this.rootBounds(), this.viewport));
+    else if (id === 'fit') this.setView(this.fitAll());
     else if (id === 'reset-layout') this.resetLayout(this.currentLevel());
     else if (id === 'edit') this.editor.setEditing(!this.editor.editing);
   }
@@ -1516,7 +1722,7 @@ export class SignalSchematic extends HTMLElement {
     const scroll = key === this.sideKey || this.keepSideScroll ? this.sideBody.scrollTop : 0;
     this.keepSideScroll = false;
     this.sideKey = key;
-    this.sideTitle.textContent = model.kind === 'project' ? 'Project' : model.kind === 'group' ? 'Selection' : model.kind === 'port' ? 'Pin' : model.kind === 'wire' ? 'Connection' : 'Instance';
+    this.sideTitle.textContent = model.kind === 'project' ? 'Project' : model.kind === 'group' ? (model.pinGroup ? 'Pin group' : 'Selection') : model.kind === 'port' ? 'Pin' : model.kind === 'wire' ? 'Connection' : 'Instance';
     const parts = [...this.traceParts(), html('h3', { textContent: model.title, title: model.title }), html('div', { className: 'subtitle', textContent: model.subtitle })];
     // What a primitive's type is: its rustdoc summary with its formula (ADR 0027 §6).
     if (model.about) parts.push(html('p', { className: 'about', textContent: model.about }));
@@ -1561,6 +1767,7 @@ export class SignalSchematic extends HTMLElement {
     this.focus({ preventScroll: true });
     if (id === 'delete-all') this.deleteSelection();
     else if (id === 'copy-addresses') this.copy(addressesText(selected));
+    else if (id === 'trace' && selected.length > 1) this.startTrace(traceTarget(selected));
     else if (selected.length === 1) this.menuAct(id, { hit: selected[0], point: { x: this.viewport.w / 2, y: this.viewport.h / 2 } });
     // What the action changed (Open in place, Close) shows at the next frame's check; the rest now.
     this.schedule();
@@ -1670,7 +1877,8 @@ export class SignalSchematic extends HTMLElement {
       list.append(item);
     }
     if (model.more) list.append(html('li', { className: 'subtitle', textContent: `and ${model.more} more` }));
-    parts.push(list, html('div', { className: 'subtitle', textContent: 'Drag one of the boxes to move those of its level together.' }));
+    parts.push(list);
+    if (model.counts.instance) parts.push(html('div', { className: 'subtitle', textContent: 'Drag one of the boxes to move those of its level together.' }));
     return parts;
   }
 
@@ -1763,20 +1971,23 @@ export class SignalSchematic extends HTMLElement {
   // The trace (ADR 0030 §1).
 
   /** A trace of `hit` (a pin, a frame's pin, a wire, a box) in `direction` (the last trace's, else both): highlighted, badged, in the sidebar. */
-  startTrace(hit, direction = this.traceDirectionLast ?? 'both') {
+  startTrace(hit, direction = this.traceDirectionLast ?? 'both', depth = this.traceDepthLast ?? 'next') {
     const start = startOf(hit);
-    const result = start && this.graph ? trace(this.graph, start, direction) : null;
+    const result = start && this.graph ? trace(this.graph, start, direction, { depth }) : null;
     if (!result) {
       this.say('Nothing to trace there');
       return;
     }
-    this.setTrace({ start, direction, result });
+    this.setTrace({ start, direction, depth, result });
     this.revealSide();
   }
 
   setTrace(tracing) {
     this.tracing = tracing ? { ...tracing, badges: new Map(), resolver: resolver(this.graph) } : null;
-    if (tracing) this.traceDirectionLast = tracing.direction;
+    if (tracing) {
+      this.traceDirectionLast = tracing.direction;
+      this.traceDepthLast = tracing.depth;
+    }
     this.traceVersion += 1;
     this.showSide();
     this.schedule();
@@ -1786,13 +1997,20 @@ export class SignalSchematic extends HTMLElement {
   traceDirection(direction) {
     const t = this.tracing;
     if (!t || t.direction === direction) return;
-    this.setTrace({ start: t.start, direction, result: trace(this.graph, t.start, direction) });
+    this.setTrace({ ...t, direction, result: trace(this.graph, t.start, direction, { depth: t.depth }) });
+  }
+
+  /** The trace's depth changed (the sidebar's toggle, M2.13-2): to the next module, or through modules. */
+  traceDepth(depth) {
+    const t = this.tracing;
+    if (!t || t.depth === depth) return;
+    this.setTrace({ ...t, depth, result: trace(this.graph, t.start, t.direction, { depth }) });
   }
 
   /** The trace computed again on a new `graph` (its start found by name); ended, and said, when its start went. */
   retrace() {
     const t = this.tracing;
-    const result = trace(this.graph, t.start, t.direction);
+    const result = trace(this.graph, t.start, t.direction, { depth: t.depth });
     if (!result) {
       this.say(`Trace ended: ${t.result.label} is no longer in the project`);
       this.tracing = null;
@@ -1820,11 +2038,13 @@ export class SignalSchematic extends HTMLElement {
       if (drawn.tracedFor?.version === this.traceVersion && drawn.tracedFor.shown === drawn.shown) continue;
       drawn.tracedFor = { version: this.traceVersion, shown: drawn.shown };
       const wires = result?.wires.get(path);
-      for (const { item, el: wire } of drawn.wireCache.values()) wire.classList.toggle('traced', Boolean(wires?.has(wireKey(item.written))));
+      // A bundle stays as it is: its traced wires are drawn on their own above it.
+      for (const { item, el: wire } of drawn.wireCache.values()) if (item.kind !== 'bundle') wire.classList.toggle('traced', Boolean(wires?.has(wireKey(item.written))));
       for (const { item, el: group } of drawn.nodeCache.values()) {
         let any = false;
         for (const pin of group.querySelectorAll('.pin')) {
-          const on = Boolean(result?.pins.has(pin.dataset.address));
+          // A collapsed group's pin is traced when any of its members is.
+          const on = Boolean(result && (pin.dataset.members ? pin.dataset.members.split(' ').some((a) => result.pins.has(a)) : result.pins.has(pin.dataset.address)));
           pin.classList.toggle('traced', on);
           any ||= on;
         }
@@ -1832,81 +2052,125 @@ export class SignalSchematic extends HTMLElement {
         group.classList.toggle('traced', instance || any);
       }
     }
-    this.drawBadges();
+    this.drawLabels();
   }
 
-  /** A badge's text for composite pin `address` on `side` (`inside`, `outside`), cached per trace. */
+  /** A trace's summary for composite pin `address` on `side` (`inside`, `outside`), cached per trace. */
   badgeFor(address, side) {
     const t = this.tracing;
     const key = `${side} ${address}`;
     if (!t.badges.has(key)) {
       const answer = behind(this.graph, address, side, t.resolver);
-      t.badges.set(key, answer ? { text: badgeText(answer, address, side), direction: answer.direction } : null);
+      t.badges.set(key, answer ? badgeText(answer, address, side) : null);
     }
     return t.badges.get(key);
   }
 
   /**
-   * The badges of the trace's composite pins on screen: on a closed
-   * composite's pin what is inside it, on a frame's pin (a composite's
-   * inside, shown) what is outside. Only on levels whose pins are far
-   * enough apart to read them; placed beside the pin, away from its box.
+   * The label of a boundary pin (M2.13-2): its name; on a frame's pin
+   * (`box` false) where it connects outside, always; on a closed
+   * composite's (`box`) where it goes inside, when `inside` (the box
+   * hovered) or traced; and a traced pin's trace summary after its note,
+   * never instead of it.
    */
-  drawBadges() {
-    const result = this.tracing?.result;
-    const wanted = [];
-    if (result && this.drawn) {
+  pinLabel(box, address, name, inside) {
+    const side = box ? 'inside' : 'outside';
+    const traced = Boolean(this.tracing?.result?.pins.has(address));
+    let note = null;
+    if (!box || inside || traced) {
+      const key = `${side} ${address}`;
+      if (!this.notes.has(key)) this.notes.set(key, (box ? insideNote : outsideNote)(this.graph, address, this.noteResolver));
+      note = this.notes.get(key);
+    }
+    return pinText(name, note, traced ? this.badgeFor(address, side) : null);
+  }
+
+  /**
+   * The port labels of the closed composites' boxes and of the frames on
+   * screen (M2.13-2, ui/lib/schematic-labels.js): a fixed size, grouped
+   * where they would collide, none on another; computed again for every
+   * view (the labels keep their size while the boxes scale). The traced
+   * ones are marked.
+   */
+  drawLabels() {
+    // Widths measured in the labels' own font, once per text (canvas measureText), so a label always holds its text.
+    if (!this.labelFont) {
+      const family = getComputedStyle(this.labelLayer).fontFamily;
+      const context = document.createElement('canvas').getContext('2d');
+      if (family && context) {
+        this.labelFont = `${LABEL_PX}px ${family}`;
+        context.font = this.labelFont;
+        setMeasure((text) => context.measureText(text).width);
+      }
+    }
+    const boxes = [];
+    const addresses = [];
+    if (this.drawn && this.graph) {
+      const screen = { w: this.viewport.w, h: this.viewport.h };
       for (const level of this.drawn.levels) {
-        const rowPx = ROW * level.transform.k;
-        if (level.behind || rowPx < MIN_TEXT_PX) continue;
-        const here = [];
+        if (level.behind) continue;
         for (const node of level.nodes) {
           const frame = node.kind !== 'instance';
           const instance = `${level.path}/${node.name}`;
-          if (!frame && (!node.composite || this.drawn.open.has(instance))) continue;
-          for (const pin of [...node.ins, ...node.outs]) {
-            const address = frame ? `${level.path}.${pin.name}` : `${instance}.${pin.name}`;
-            if (!result.pins.has(address)) continue;
-            const at = toScreen(level.transform, pin);
-            if (at.x < 0 || at.y < 0 || at.x > this.viewport.w || at.y > this.viewport.h) continue;
-            // Left of an input on a box, right of an output; a frame's the other way round (into the inside).
-            const left = frame ? node.kind === 'output' : pin.direction !== 'out';
-            here.push({ address, side: frame ? 'outside' : 'inside', at, left });
+          if (frame ? !level.path : !node.composite || this.drawn.open.has(instance)) continue;
+          const rect = screenRect(level.transform, node);
+          if (rect.x > screen.w || rect.y > screen.h || rect.x + rect.w < 0 || rect.y + rect.h < 0) continue;
+          const at = (p) => ({ name: p.name, ...toScreen(level.transform, p) });
+          const box = { kind: frame ? node.kind : 'instance', name: node.name, rect, ins: node.ins.map(at), outs: node.outs.map(at), texts: new Map(), header: HEADER * level.transform.k };
+          // M2.13-2: its port groups; collapsed, they are labelled, not its hidden pins.
+          if (node.groups) {
+            box.groups = node.groups;
+            box.collapsed = !this.levelDragged(level) && collapsedAt(level.transform.k);
           }
+          const pinAddress = (name) => (frame ? `${level.path}.${name}` : `${instance}.${name}`);
+          const inside = this.hoveredBox === instance;
+          for (const p of [...node.ins, ...node.outs]) box.texts.set(p.name, this.pinLabel(!frame, pinAddress(p.name), p.name, inside));
+          boxes.push(box);
+          addresses.push(pinAddress);
         }
-        // Rows far enough apart for a badge each, or only a few badges (a pin's trace) on closer rows.
-        if (rowPx >= BADGE_ROW_PX || here.length <= FEW_BADGES) wanted.push(...here);
       }
     }
-    const centre = { x: this.viewport.w / 2, y: this.viewport.h / 2 };
-    wanted.sort((a, b) => Math.hypot(a.at.x - centre.x, a.at.y - centre.y) - Math.hypot(b.at.x - centre.x, b.at.y - centre.y));
+    const { labels } = placeLabels(boxes, { viewport: this.viewport });
+    // A bundle's count (M2.13-2): along its curve where no other label is, else moved off it, never left out.
+    const counts = [];
+    for (const level of this.drawn && this.graph ? this.drawn.levels : []) {
+      // A level drawn too small to read shows no counts: they would pile up on it.
+      if (!countsShown(level.transform.k)) continue;
+      for (const item of level.bundles ?? []) {
+        if (item.kind !== 'bundle') continue;
+        const at = toScreen(level.transform, item.mid);
+        if (at.x < 0 || at.y < 0 || at.x > this.viewport.w || at.y > this.viewport.h) continue;
+        counts.push({ text: String(item.count), at: countPlaces(item).map((p) => toScreen(level.transform, p)) });
+      }
+    }
+    labels.push(...placeCounts(labels, counts, this.viewport));
+    const pins = this.tracing?.result?.pins;
     let used = 0;
-    // Nearest the centre first; one that would cover a badge placed is left out (its pin keeps its highlight).
-    const placed = [];
-    for (const w of wanted) {
-      if (used >= MAX_BADGES) break;
-      const badge = this.badgeFor(w.address, w.side);
-      if (!badge?.text) continue;
-      const width = Math.min(BADGE_CHAR_PX * badge.text.length + 12, this.viewport.w * 0.46);
-      const x0 = w.left ? w.at.x - 9 - width : w.at.x + 9;
-      const box = { x0, x1: x0 + width, y0: w.at.y - 8, y1: w.at.y + 8 };
-      if (placed.some((p) => p.x0 < box.x1 && box.x0 < p.x1 && p.y0 < box.y1 && box.y0 < p.y1)) continue;
-      placed.push(box);
-      let el = this.badgePool[used];
+    for (const label of labels) {
+      let el = this.labelPool[used];
       if (!el) {
-        el = html('div', { className: 'badge' });
-        this.badgeLayer.append(el);
-        this.badgePool.push(el);
+        el = html('div', { className: 'plabel' });
+        this.labelLayer.append(el);
+        this.labelPool.push(el);
       }
       used += 1;
-      if (el.textContent !== badge.text) el.textContent = badge.text;
-      el.title = badge.text;
-      el.className = `badge ${badge.direction}`;
-      const x = Math.round(w.at.x + (w.left ? -9 : 9));
-      el.style.transform = `translate(${x}px, ${Math.round(w.at.y)}px) translate(${w.left ? '-100%' : '0'}, -50%)`;
-      el.style.visibility = 'visible';
+      const one = label.pins.length === 1 ? label.pins[0] : null;
+      const traced = Boolean(pins && label.pins.some((p) => pins.has(addresses[p.box](p.name))));
+      const noted = Boolean(one && label.text !== one.name);
+      const className = label.count ? 'plabel count' : `plabel ${label.align}${traced ? ' traced' : ''}${noted ? ' noted' : ''}`;
+      if (el.className !== className) el.className = className;
+      // What fits is shown (cut short ending in …, a summary on its lines); the whole text is its title.
+      const shown = label.shown ?? label.text;
+      if (el.textContent !== shown) el.textContent = shown;
+      if (el.title !== label.text) el.title = label.text;
+      el.style.width = `${Math.ceil(label.x1 - label.x0)}px`;
+      const height = `${(label.lines ?? 1) * PITCH_PX}px`;
+      if (el.style.height !== height) el.style.height = height;
+      el.style.transform = `translate(${Math.round(label.x0)}px, ${Math.round(label.y0)}px)`;
+      // A summary too small to read shows nothing (its box's name is not drawn either).
+      el.style.visibility = shown ? 'visible' : 'hidden';
     }
-    for (let i = used; i < this.badgePool.length; i++) this.badgePool[i].style.visibility = 'hidden';
+    for (let i = used; i < this.labelPool.length; i++) this.labelPool[i].style.visibility = 'hidden';
   }
 
   /** The sidebar's Trace section (above the selection's), or nothing without a trace. */
@@ -1934,20 +2198,33 @@ export class SignalSchematic extends HTMLElement {
       });
       toggle.append(button);
     }
-    box.append(head, html('div', { className: 'subtitle', textContent: model.subtitle }), toggle);
+    const depths = html('div', { className: 'toggle' });
+    depths.setAttribute('role', 'group');
+    depths.setAttribute('aria-label', 'Depth');
+    for (const d of model.depths) {
+      const button = html('button', { type: 'button', textContent: d.label, title: d.title });
+      button.setAttribute('aria-pressed', String(d.on));
+      button.addEventListener('click', () => {
+        this.focus({ preventScroll: true });
+        this.traceDepth(d.id);
+      });
+      depths.append(button);
+    }
+    box.append(head, html('div', { className: 'subtitle', textContent: model.subtitle }), toggle, depths);
     for (const note of model.notes) box.append(html('div', { className: 'note', textContent: note }));
     for (const side of model.sides) {
-      box.append(html('h4', { textContent: `${side.title} (${side.count})` }));
+      box.append(html('h4', { textContent: `${side.title} (${side.counted ?? side.count})` }));
       if (!side.endpoints.length) box.append(html('div', { className: 'subtitle', textContent: side.empty }));
       for (const e of side.endpoints) {
-        const row = html('div', { className: 'end' });
+        const row = html('div', { className: e.open ? 'end open' : 'end' });
         row.append(this.revealLink(e.label, e.reveal), html('span', { className: 'what', textContent: e.note }));
         box.append(row);
       }
     }
     box.append(html('h4', { textContent: 'By level' }));
     for (const level of model.levels) {
-      const details = html('details', { open: true });
+      // A long trace's levels start collapsed, but the start's (M2.13-2).
+      const details = html('details', { open: !level.collapsed });
       const summary = html('summary');
       summary.append(this.revealLink(level.label, level.reveal), html('span', { className: 'count', textContent: level.count }));
       details.append(summary);
@@ -2032,7 +2309,7 @@ export class SignalSchematic extends HTMLElement {
         rect = { x: c.x - w / 2, y: c.y - h / 2, w, h };
       }
     }
-    const view = fit(rect, this.viewport);
+    const view = fit(rect, this.viewport, MARGIN_PX, BAR_PX);
     this.view = { ...view, path };
     this.keepSideScroll = true;
     if (hit) this.select([hit]);

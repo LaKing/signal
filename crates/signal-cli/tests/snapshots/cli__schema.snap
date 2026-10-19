@@ -106,9 +106,8 @@ expression: text
         },
         "outputs": {
           "additionalProperties": {
-            "type": "string"
+            "$ref": "#/$defs/OutputTarget"
           },
-          "default": {},
           "description": "Exported outputs: each maps to exactly one inner output port.",
           "type": "object"
         },
@@ -390,6 +389,29 @@ expression: text
       ],
       "type": "object"
     },
+    "OutputTarget": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "group": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "One inner output port `instance.port`, or a table with it as `from` and the schematic's `group` of the export."
+    },
     "ProjectFile": {
       "additionalProperties": false,
       "description": "A Signal project file, `project.toml`.",
@@ -515,9 +537,35 @@ expression: text
           },
           "minItems": 1,
           "type": "array"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "group": {
+              "type": "string"
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                }
+              ]
+            }
+          },
+          "required": [
+            "to"
+          ],
+          "type": "object"
         }
       ],
-      "description": "One inner port `instance.port`, or a non-empty list of them (fan-out)."
+      "description": "One inner port `instance.port`, or a non-empty list of them (fan-out), or a table with them as `to` and the schematic's `group` of the export."
     },
     "Wiring": {
       "additionalProperties": false,

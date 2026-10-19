@@ -46,6 +46,8 @@ export function schematicMenu(hit, state = {}) {
 function partMenu(hit, state) {
   const editing = Boolean(state.editing);
   const editOff = editing ? null : EDIT_OFF;
+  // A collapsed port group (M2.13-2): its members inspected or traced together; zoom in to work on one.
+  if (hit?.kind === 'group') return [unless({ id: 'inspect', label: 'Inspect' }, null), unless(TRACE, null)];
   if (hit?.kind === 'instance') {
     const composite = Boolean(hit.node?.composite);
     const notComposite = composite ? null : 'A primitive has no inside';

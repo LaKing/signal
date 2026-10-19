@@ -130,7 +130,9 @@ function entryOf(hit, layoutOf) {
  *   connection is removed by its own `remove-connection`);
  * - `group` (several): `members` (links, the first `MEMBERS_SHOWN`; `more`
  *   counts the rest), `counts`, `plan` (`deletePlan`'s), `notes` and
- *   `actions` (Delete N, what would be deleted; Copy addresses).
+ *   `actions` (Trace signal for pins only; Delete N, what would be
+ *   deleted; Copy addresses); `pinGroup` when they are one collapsed port
+ *   group's members, titled by the group.
  * An `actions` entry is a menu item (`{id, label, disabled, title?}`).
  */
 export function sidebar(selected, context = {}) {
@@ -249,6 +251,10 @@ function groupSidebar(list, editing) {
     .map(([n, one, many]) => `${n} ${n === 1 ? one : many}`);
   const plan = deletePlan(list);
   const levels = plan.patches.length;
+  // Pins only (a collapsed port group clicked, M2.13-2): traced together, as the group's menu traces them.
+  const pins = list.every((s) => s.kind === 'port');
+  const box = (s) => (s.node?.kind === 'instance' ? `${s.path}/${s.node.name}` : s.path);
+  const group = pins && list.every((s) => s.group && s.group === list[0].group && box(s) === box(list[0])) ? list[0].group : null;
   const nothing = levels === 0 ? 'Nothing here is deleted: pins and exports stay' : tooLargeText(plan);
   const notes = [];
   if (plan.tooLarge.length) notes.push(tooLargeText(plan));
@@ -256,8 +262,9 @@ function groupSidebar(list, editing) {
   if (plan.skipped > 0 && levels > 0) notes.push(`${plan.skipped} pin${plan.skipped === 1 ? '' : 's'} or export${plan.skipped === 1 ? '' : 's'} not deleted`);
   return {
     kind: 'group',
-    title: `${list.length} selected`,
-    subtitle: words.join(', '),
+    pinGroup: group !== null,
+    title: group !== null ? `${box(list[0])} ${group} (${list.length})` : `${list.length} selected`,
+    subtitle: group !== null ? `a group of ${list.length} pins, collapsed at this zoom: zoom in to work on one` : words.join(', '),
     fields: [
       ['instances', String(counts.instance)],
       ['wires', String(counts.wire)],
@@ -269,6 +276,7 @@ function groupSidebar(list, editing) {
     plan,
     notes,
     actions: [
+      ...(pins ? [{ id: 'trace', label: 'Trace signal', disabled: false, title: 'Trace these pins together (T)' }] : []),
       { id: 'delete-all', label: plan.deleted ? `Delete ${plan.deleted}` : 'Delete all', disabled: !editing || Boolean(nothing), ...(editing ? (nothing ? { title: nothing } : {}) : { title: EDIT_OFF }) },
       { id: 'copy-addresses', label: 'Copy addresses', disabled: false },
     ],
@@ -287,13 +295,19 @@ export const TRACE_DIRECTIONS = [
   { id: 'both', label: 'Both', title: 'Upstream and downstream' },
 ];
 
+/** A trace's depths (M2.13-2): to the next module, or through modules. */
+export const TRACE_DEPTHS = [
+  { id: 'next', label: 'To next module', title: 'Stop at the first module reached' },
+  { id: 'through', label: 'Through modules', title: 'Cross every module, from its inputs to all its outputs, to the sinks and sources (a structural path: values are not read)' },
+];
+
 function plural(n, one, many = `${one}s`) {
   return `${n} ${n === 1 ? one : many}`;
 }
 
 /** What an endpoint is, in a few words: its module, a library composite's opacity, an open end, the converters on the way. */
 function endNote(end) {
-  const what = { primitive: end.module ?? 'primitive', library: `${end.module}: library composite, inside not in the graph`, unconnected: `open end of ${end.module}`, unknown: 'not in the graph' }[end.kind] ?? end.kind;
+  const what = { primitive: end.module ?? 'primitive', sink: `${end.module}: sink`, source: `${end.module}: source`, library: `${end.module}: library composite, inside not in the graph`, unconnected: `open end: nothing connected (${end.module})`, unknown: 'not in the graph' }[end.kind] ?? end.kind;
   return end.via.length ? `${what}; via converter ${end.via.join(', ')}` : what;
 }
 
@@ -320,6 +334,7 @@ export function traceSection(result, graph) {
   const levels = tree.map((level) => ({
     label: level.label,
     count: `${plural(level.wires, 'wire')}, ${plural(level.pins, 'pin')}`,
+    collapsed: level.collapsed,
     reveal: { kind: 'level', path: level.path },
     children: level.children.map((inst) => ({
       label: inst.name,
@@ -330,22 +345,31 @@ export function traceSection(result, graph) {
   }));
   const notes = [];
   if (result.opaque.length) notes.push(`${plural(result.opaque.length, 'end')} at a library composite: its inside is not in the graph, so the trace stops at its pins`);
+  if (result.depth === 'through') notes.push('Through modules: a structural path, every output of each module crossed whatever its values');
   if (result.cycles > 0) notes.push(`${plural(result.cycles, 'connection')} ${result.cycles === 1 ? 'leads' : 'lead'} back to a pin already traced (a loop): followed once`);
   return {
     title: result.label,
     subtitle: `${plural(result.levels.length, 'level')}, ${plural(wires, 'wire')}, ${plural(pins, 'pin')}`,
     direction: result.direction,
     directions: TRACE_DIRECTIONS.map((d) => ({ ...d, on: d.id === result.direction })),
+    depth: result.depth ?? 'next',
+    depths: TRACE_DEPTHS.map((d) => ({ ...d, on: d.id === (result.depth ?? 'next') })),
     sides,
     levels,
     notes,
   };
 }
 
+/** A side of a trace: its real ends first, then its open ends (`open`: leading nowhere), each marked. */
 function sideOf(side, empty) {
+  const open = (end) => end.kind === 'unconnected';
+  const ends = [...side.endpoints.filter((e) => !open(e)), ...side.endpoints.filter(open)];
+  const opens = ends.filter(open).length;
   return {
     count: side.endpoints.length,
+    open: opens,
+    counted: opens ? `${side.endpoints.length - opens}, ${plural(opens, 'open end')}` : String(side.endpoints.length),
     empty,
-    endpoints: side.endpoints.map((end) => ({ label: end.address, note: endNote(end), kind: end.kind, reveal: { kind: 'pin', address: end.address } })),
+    endpoints: ends.map((end) => ({ label: end.address, note: endNote(end), kind: end.kind, open: open(end), reveal: { kind: 'pin', address: end.address } })),
   };
 }

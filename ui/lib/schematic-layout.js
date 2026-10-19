@@ -10,6 +10,7 @@
 // `movedWires` gives them again for a box being dragged. No DOM.
 
 import { wireGeometry } from './schematic-wire.js';
+import { exportFacts, orderedPins, portGroups } from './schematic-groups.js';
 
 /** Geometry, in the layout's own units. */
 export const HEADER = 34;
@@ -44,12 +45,19 @@ function pin(port, direction) {
   return { name: port.name, shape: shapeName(port.shape), kind: port.kind ?? null, rate: port.rate ?? null, direction };
 }
 
-/** The nodes of a level, before placement. */
-function nodesOf(level) {
+/**
+ * The nodes of a level, before placement. `factsOf(module)` (M2.13-2) gives
+ * a composite's export facts (ui/lib/schematic-groups.js `exportFacts`):
+ * its box's pins are then ordered in groups, kept as `groups`.
+ */
+function nodesOf(level, factsOf = null) {
   const nodes = [];
+  // A composite's own frame orders its pins as its box outside does (M2.13-2): by group, in export order.
+  const own = factsOf ? exportFacts(level) : null;
+  const framePins = (pins) => (own ? orderedPins(pins, own) : pins);
   const inputs = [...(level.inputs ?? []), ...(level.parameters ?? []).map((p) => ({ ...p, shape: 'signal' }))];
   if (inputs.length) {
-    nodes.push({ id: INPUTS, name: 'inputs', module: '', kind: 'input', composite: false, ins: [], outs: inputs.map((p) => pin(p, 'out')) });
+    nodes.push({ id: INPUTS, name: 'inputs', module: '', kind: 'input', composite: false, ins: [], outs: framePins(inputs.map((p) => pin(p, 'out'))) });
   }
   for (const instance of level.instances ?? []) {
     const ports = instance.ports ?? [];
@@ -67,9 +75,16 @@ function nodesOf(level) {
       ],
       outs: ports.filter((p) => p.direction === 'out').map((p) => pin(p, 'out')),
     });
+    const facts = instance.composite && factsOf ? factsOf(instance.module) : null;
+    if (facts) {
+      const node = nodes.at(-1);
+      node.ins = orderedPins(node.ins, facts);
+      node.outs = orderedPins(node.outs, facts);
+      node.groups = { ins: portGroups(node.ins, facts), outs: portGroups(node.outs, facts) };
+    }
   }
   if ((level.outputs ?? []).length) {
-    nodes.push({ id: OUTPUTS, name: 'outputs', module: '', kind: 'output', composite: false, ins: level.outputs.map((p) => pin(p, 'in')), outs: [] });
+    nodes.push({ id: OUTPUTS, name: 'outputs', module: '', kind: 'output', composite: false, ins: framePins(level.outputs.map((p) => pin(p, 'in'))), outs: [] });
   }
   for (const node of nodes) {
     const longestIn = Math.max(0, ...node.ins.map((p) => p.name.length));
@@ -245,8 +260,8 @@ export function laneY(bottom, lane) {
  * converter changes the rate), `feedback` and, for a feedback wire, its
  * `lane` below `bottom` (the lowest box's bottom edge).
  */
-export function layout(level, positions = {}) {
-  const nodes = nodesOf(level ?? {});
+export function layout(level, positions = {}, { factsOf = null } = {}) {
+  const nodes = nodesOf(level ?? {}, factsOf);
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const edges = edgesOf(level ?? {}, byId);
   const back = backEdges(nodes, edges);
