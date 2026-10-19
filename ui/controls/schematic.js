@@ -1971,7 +1971,7 @@ export class SignalSchematic extends HTMLElement {
   // The trace (ADR 0030 §1).
 
   /** A trace of `hit` (a pin, a frame's pin, a wire, a box) in `direction` (the last trace's, else both): highlighted, badged, in the sidebar. */
-  startTrace(hit, direction = this.traceDirectionLast ?? 'both', depth = this.traceDepthLast ?? 'next') {
+  startTrace(hit, direction = this.traceDirectionLast ?? 'both', depth = this.traceDepthLast ?? 'through') {
     const start = startOf(hit);
     const result = start && this.graph ? trace(this.graph, start, direction, { depth }) : null;
     if (!result) {
