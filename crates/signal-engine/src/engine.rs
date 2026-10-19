@@ -175,6 +175,11 @@ pub struct Schedule {
     pub budget_ns: u64,
     /// Keep the wake-up trace ([`Engine::wake_stats`]).
     pub trace: bool,
+    /// Use only the worker budget of each plan (M2.10-5): the threads its
+    /// estimated schedule can use (`docs/realtime-rules.md` "Worker
+    /// threads"); the other workers are never woken and never join a job.
+    /// False: every worker, as before M2.10-5. Timing only.
+    pub plan_budget: bool,
 }
 
 impl Schedule {
@@ -187,14 +192,16 @@ impl Schedule {
         policy: RtPolicy::Park50,
         budget_ns: 0,
         trace: false,
+        plan_budget: true,
     };
 
-    /// Every segment of every plan with two tasks or more on the workers,
-    /// one task per unit: for tests and the bench.
+    /// Every segment of every plan with two tasks or more on all the
+    /// workers, one task per unit: for tests and the bench.
     pub const FORCED: Schedule = Schedule {
         task_min_ns: 0,
         parallel_min_ns: 0,
         min_frames: 1,
+        plan_budget: false,
         ..Schedule::DEFAULT
     };
 
@@ -249,6 +256,9 @@ pub struct EngineConfig {
     /// it). A module with a declared latency (ADR 0019 §3) is then never
     /// waited for: a result not ready when due is a `late_result` fault.
     /// Offline (`false`) the engine waits for it, so renders stay exact.
+    /// In real time a plan light enough for the calling thread alone gets a
+    /// worker budget of 1 (`docs/realtime-rules.md` "The worker budget");
+    /// timing only.
     pub realtime: bool,
     /// Real time (M2.7-4): with each `delivered` boundary record, also carry
     /// the latent module's delivered result
@@ -1150,7 +1160,20 @@ impl PlanState {
             .iter()
             .map(|(name, _)| f64::from(registry.cost(name).unwrap_or(DEFAULT_COST_NS)))
             .collect();
-        let tasks = tasks(&units, &cost_ns, slots.len(), config.schedule.task_min_ns);
+        // In real time, the block's period bounds the worker budget
+        // (`tasks::SERIAL_SHARE`, M2.10-6).
+        let period_ns = config
+            .realtime
+            .then(|| config.block_capacity as f64 * 1e9 / f64::from(config.sample_rate.max(1)));
+        let tasks = tasks(
+            &units,
+            &cost_ns,
+            slots.len(),
+            config.schedule.task_min_ns,
+            config.threads.clamp(1, MAX_THREADS),
+            config.block_capacity,
+            period_ns,
+        );
 
         // One lane per thread: one call's buffers (the most ports and
         // parameters of any instance) and a parameter's modulation per frame.
@@ -1746,6 +1769,10 @@ pub struct ScheduleStats {
     pub units: usize,
     /// The running plan's tasks.
     pub tasks: usize,
+    /// The threads the running plan may use, the calling thread included:
+    /// its worker budget under `Schedule::plan_budget` (M2.10-5), else every
+    /// thread; never more than the workers running, plus one.
+    pub worker_budget: usize,
     /// The running plan's estimated cost per frame, in ns (rounded): what a
     /// segment's frames multiply against `Schedule::parallel_min_ns`.
     pub estimate_ns: u64,
@@ -2419,15 +2446,28 @@ impl Engine {
             .sort_unstable_by_key(|s| (s.target, s.frame, s.sequence, s.pushed, s.ordinal));
     }
 
-    /// Whether a segment of `frames` frames runs on the workers: there are
-    /// workers and two tasks or more, the segment is long and costly enough
-    /// (`Schedule`), and every task's log has room for its staged external
-    /// events. Otherwise the calling thread runs it alone, with the same
-    /// result.
+    /// The workers the running plan may use: every worker, or under
+    /// `Schedule::plan_budget` its worker budget less the calling thread
+    /// (M2.10-5). Timing only.
+    fn eligible(&self) -> usize {
+        let workers = self.pool.as_ref().map_or(0, Pool::workers);
+        if self.config.schedule.plan_budget {
+            workers.min(self.plan.tasks.budget.saturating_sub(1))
+        } else {
+            workers
+        }
+    }
+
+    /// Whether a segment of `frames` frames runs on the workers: the plan
+    /// may use a worker (`eligible`) and has two tasks or more, the segment
+    /// is long and costly enough (`Schedule`), and every task's log has room
+    /// for its staged external events. Otherwise the calling thread runs it
+    /// alone, with the same result.
     fn parallel(&mut self, frames: usize) -> bool {
         let schedule = self.config.schedule;
+        let eligible = self.eligible();
         let plan = &mut self.plan;
-        if self.pool.as_ref().is_none_or(|pool| pool.workers() == 0)
+        if eligible == 0
             || plan.tasks.len() < 2
             || frames < schedule.min_frames
             || plan.tasks.estimate_ns * (frames as f64) < (schedule.parallel_min_ns as f64)
@@ -2482,6 +2522,7 @@ impl Engine {
     /// failure.
     fn run_segment_units(&mut self, a: usize, b: usize) -> Option<FailureReason> {
         let parallel = self.parallel(b - a);
+        let eligible = self.eligible();
         let trace = self.config.schedule.trace;
         let plan = &mut self.plan;
         let fx = Fixed {
@@ -2519,7 +2560,7 @@ impl Engine {
                 let job = job.with_hook(self.hook);
                 // The job holds the cells until it is run: no worker is in it
                 // once `run` returns.
-                dispatch.run(&job);
+                dispatch.run(&job, eligible);
                 if let Some(reason) = job.failure() {
                     return Some(reason);
                 }
@@ -2728,6 +2769,7 @@ impl Engine {
             workers: pool.map_or(0, Pool::workers),
             units: self.plan.units.order.len(),
             tasks: self.plan.tasks.len(),
+            worker_budget: self.eligible() + 1,
             estimate_ns: self.plan.tasks.estimate_ns.round() as u64,
             parallel_segments: self.parallel_segments,
             worker_tasks: count(stats.map(|s| &s.worker_tasks)),
@@ -2757,21 +2799,24 @@ impl Engine {
 
     /// A driver's callback of `frames` frames starts (the audio thread;
     /// allocates, locks and blocks nowhere): under `semaphore` and `fanout`
-    /// the workers are woken if the running plan can run in parallel in it
-    /// (two tasks or more, and a block of `frames` reaching the schedule's
-    /// thresholds), and the wake-up trace starts the callback. Timing only.
+    /// the plan's eligible workers are woken if it can run in parallel in it
+    /// (a worker it may use, two tasks or more, and a block of `frames`
+    /// reaching the schedule's thresholds), and the wake-up trace starts the
+    /// callback. Timing only.
     #[doc(hidden)]
     pub fn begin_callback(&mut self, frames: usize) {
+        let eligible = self.eligible();
         let Some(pool) = self.pool.as_ref() else {
             return;
         };
         let schedule = self.config.schedule;
         let k = frames.min(self.config.block_capacity);
         let tasks = &self.plan.tasks;
-        let parallel = tasks.len() >= 2
+        let parallel = eligible > 0
+            && tasks.len() >= 2
             && k >= schedule.min_frames
             && tasks.estimate_ns * (k as f64) >= schedule.parallel_min_ns as f64;
-        pool.begin_callback(parallel);
+        pool.begin_callback(parallel, eligible);
     }
 
     /// The callback ends: the wake-up trace folds it in.
@@ -2785,7 +2830,14 @@ impl Engine {
     /// The wake-up trace (`Schedule::trace`), if kept and there are workers.
     #[doc(hidden)]
     pub fn wake_stats(&self) -> Option<WakeStats> {
-        self.pool.as_ref().and_then(Pool::wake_stats)
+        let worker_budget = self.eligible() + 1;
+        self.pool
+            .as_ref()
+            .and_then(Pool::wake_stats)
+            .map(|wake| WakeStats {
+                worker_budget,
+                ..wake
+            })
     }
 
     /// The next frame [`run_frame`](Engine::run_frame) will run.

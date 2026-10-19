@@ -263,6 +263,22 @@ pub struct WakeStats {
     /// The longest task body of each callback that ran a block, on the
     /// workers or on the calling thread alone.
     pub slowest_task: Spread,
+    /// Where the workers' time went (M2.10-5), totals over the trace in ns:
+    /// the task bodies they ran, all workers together; and per worker, in
+    /// worker order, the time in jobs (task bodies and waiting in the job
+    /// for a task to become ready), the time idle but not blocked (the spin
+    /// after a job or a wake, until the next job or the block), and the
+    /// blocks (parks or semaphore waits).
+    pub worker_task_ns: u64,
+    /// Per worker: time in jobs, in ns.
+    pub job_ns: Vec<u64>,
+    /// Per worker: time spinning idle, in ns.
+    pub spin_ns: Vec<u64>,
+    /// Per worker: blocks.
+    pub parks: Vec<u64>,
+    /// The running plan's worker budget when the trace was read
+    /// (`ScheduleStats::worker_budget`).
+    pub worker_budget: usize,
 }
 
 #[cfg(test)]

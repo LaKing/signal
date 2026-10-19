@@ -106,10 +106,18 @@ fn render_with(config: EngineConfig, delays: bool) -> (Render, Engine) {
 /// 255 µs (from the same stream as the delays), so that idle workers spin,
 /// park and are woken at every phase of their wait.
 fn render_callbacks(config: EngineConfig, delays: bool, callbacks: bool) -> (Render, Engine) {
+    let hook: Option<fn(HookPoint)> = delays.then_some(random_delay);
+    render_hooked(config, hook, callbacks)
+}
+
+/// [`render_callbacks`] with `hook` as the task hook.
+fn render_hooked(
+    config: EngineConfig,
+    hook: Option<fn(HookPoint)>,
+    callbacks: bool,
+) -> (Render, Engine) {
     let mut engine = Engine::new(&stress_plan(), &registry(), config, Vec::new()).unwrap();
-    if delays {
-        engine.set_task_hook(Some(random_delay));
-    }
+    engine.set_task_hook(hook);
     let mut sequence = 0;
     let rendered = render_blocks(&mut engine, BLOCKS * BLOCK as u64, BLOCK, |engine| {
         if callbacks {
@@ -251,6 +259,63 @@ fn every_wake_policy_matches_one_thread_under_random_delays_and_gaps() {
         assert!(
             wake.slowest_task.count > 0 && wake.last_join.count > 0,
             "{wake:?}"
+        );
+    }
+    assert_eq!(signal_engine::exclusivity().violations, 0);
+}
+
+/// The highest lane that ran a task under [`lane_and_delay`], plus one.
+static LANES: AtomicU64 = AtomicU64::new(0);
+
+/// [`random_delay`], recording the lane of every task.
+fn lane_and_delay(point: HookPoint) {
+    if let HookPoint::Task { lane, .. } = point {
+        LANES.fetch_max(lane as u64 + 1, Ordering::Relaxed);
+    }
+    random_delay(point);
+}
+
+/// M2.10-5 (AC2, AC3): with the worker budget on (`Schedule::plan_budget`),
+/// under every wake policy, 1 000 callbacks on 8 threads with random gaps
+/// and delays run tasks only on the budget's lanes, on some worker, and give
+/// the same audio, log and counters as one thread.
+#[test]
+fn the_worker_budget_bounds_the_lanes_and_matches_one_thread() {
+    let (reference, one) = render(1, false);
+    for policy in RtPolicy::ALL {
+        let mut config = config_threads(RATE, 42, 8);
+        config.schedule = Schedule {
+            policy,
+            plan_budget: true,
+            trace: true,
+            ..config.schedule
+        };
+        LANES.store(0, Ordering::Relaxed);
+        let (stressed, eight) = render_hooked(config, Some(lane_and_delay), true);
+        assert!(
+            stressed.samples == reference.samples,
+            "{policy}: the audio differs"
+        );
+        assert!(stressed.log == reference.log, "{policy}: the log differs");
+        assert_eq!(eight.log_overflows(), one.log_overflows());
+        assert_eq!(eight.input_overflows(), one.input_overflows());
+        assert_eq!(eight.input_discards(), one.input_discards());
+        let budget = eight.schedule_stats().worker_budget;
+        assert!((2..8).contains(&budget), "{policy}: budget {budget}");
+        let lanes = LANES.load(Ordering::Relaxed);
+        assert!(
+            lanes as usize <= budget,
+            "{policy}: lane {lanes} of {budget}"
+        );
+        let stats = eight.schedule_stats();
+        assert_eq!(stats.parallel_segments, BLOCKS);
+        assert!(stats.worker_tasks > 0, "{policy}: {stats:?}");
+        assert_eq!(stats.task_failures, 0);
+        let wake = eight.wake_stats().unwrap();
+        assert_eq!(wake.worker_budget, budget);
+        assert!(
+            wake.job_ns[budget - 1..].iter().all(|&ns| ns == 0),
+            "{policy}: a worker beyond the budget joined: {wake:?}"
         );
     }
     assert_eq!(signal_engine::exclusivity().violations, 0);

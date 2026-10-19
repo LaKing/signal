@@ -649,6 +649,287 @@ Where the cost of a node in a one-sample loop goes (ADR 0027 Context: about 22 n
 
 The operator confirms these figures on the device: `scripts/validation-cost.sh` for the graph timings, `sample` on a release `signal render` of a loop project for the profile, and the patch's header for the instrumented timing.
 
+### Idle cost (M2.10-5)
+
+**Superseded rule, kept as measured.** Everything in this section was measured on the M2.10-5 build, whose budget was "the fewest threads within 2 % (`BUDGET_SLACK`) of the shortest simulated schedule", without hand-off or wake costs. That rule never shipped. The engine's rule is the cost-aware one with the real-time share rule ("Idle cost, part 2 (M2.10-6)" below, `docs/realtime-rules.md` "The worker budget"). So the budgets here (studio 11 of 12, kick and pulse 3, physical-av 4, 4 voices 9) are that build's, not the engine's; the process-CPU method, the variance findings and the elapsed-time counters still apply.
+
+Where the CPU of a played project goes when its plan has little parallel work, and what the worker budget changes (`docs/realtime-rules.md` "Worker threads"). The starting point is the operator's measurement of 2026-10-17. On the M5 Max, release build, `signal play projects/studio --driver null --seconds 20` read with `ps %cpu` after 8 s gave:
+
+| `--threads` | CPU |
+|---|---|
+| 1 | 26 % |
+| 2 | 50 % |
+| 4 | 75 % |
+| default (12) | 116 % |
+
+The studio's DSP is about 8 % of a core ("The studio project" above).
+
+**Every figure below is a measurement on one host, for the operator to confirm on the device. None is a threshold, and none is a real-time claim.** The null driver runs on ordinary threads, without the audio workgroup or time-constraint policy.
+
+**Method.**
+- Machine: the devpanel seat on the operator's Mac Studio (Mac17,14, Apple M5 Max, 18 cores, 64 GB, macOS 27.0.1; `sysctl` is refused in the seat, so the machine fields come from the rows above).
+- Builds: release builds of the base (a4deadc, from `git archive`) and of the candidate (a4deadc plus M2.10-5, uncommitted), both `cargo build --release --locked --offline -p signal-cli`.
+- Project: a copy of `projects/studio` (48 kHz). Runs are `signal play <copy> --driver null --seconds S --threads T [--rt-policy P] [--buffer B]`, with stdin held open by `sleep … |`.
+- CPU: user + sys from `/usr/bin/time -p` at S = 5 and S = 25. The figure is their difference over the 20 s between them, in % of one core per second of audio, which leaves start-up out. `ps %cpu` is a decaying average that includes start-up, so it reads higher.
+- Order: base and candidate alternate cell by cell. Each matrix ran twice (runs 1 and 2, 07:38–08:22 UTC).
+- Conditions: shared with other sessions, load average 3–25 (each cell's is in the run log), not pinned. A niced (`nice -n 19`, `-j 4`) test build ran beside part of run 2.
+- No script is added: each cell is the command above, timed twice, and the operator repeats them with `ps` or `/usr/bin/time`.
+
+**Why `--threads 1` costs 26 % for an 8 % workload.** Candidate, studio, one thread, three repeats, 09:08–09:20 UTC, **on an idle host** (load average 1.3–1.8). Each row is CPU per second of audio, between the 5 s and 25 s runs:
+
+| Run | Repeats | What it contains |
+|---|---|---|
+| `signal render --threads 1 --block 128` | 7.3, 7.2, 7.4 % | the DSP, the engine's per-block work, the WAV and the log |
+| `signal render --threads 1 --block 1` | 31.6, 32.3, 32.4 % | the same, one frame per call (the per-call cost, "Block sizes") |
+| the empty project (`std.audio_out` alone), `--block 128` | 0.1, 0.1, 0.1 % | the base of the render rows |
+| `signal play --driver null --fast` | 7.3, 7.3, 7.3 % | the null driver's seeded callback sizes (cut to 128-frame chunks), the runner and a control step per chunk, unpaced |
+| `signal play --driver null` (paced) | 26.3, 26.2, 27.1 % | the same, with a `thread::sleep` after each chunk until it is due (375 per second at 128 frames and 48 kHz) |
+
+- **Measurement.** The callback sizes, the runner and the control step cost nothing measurable over the render: 7.3 % both.
+- **Measurement.** The paced run does the same work and costs 3.6 times the CPU time. The pacing loop itself is one `Instant::now` and one `thread::sleep` per chunk; the sleeping is not counted as CPU.
+- **Assumption, not measured.** After each sleep the thread resumes on an efficiency core, or on a performance core at a low clock, because on an otherwise idle Mac the system sees a thread busy for about 7 % of the time. The same instructions then take about 3.6 times longer. The seat cannot read core placement (`powermetrics` needs root); the operator can, with `sudo powermetrics --samplers cpu_power` beside the run.
+- On the busy host of the matrix below, the same one-thread run read mostly 8–11 % and sometimes 27–29 %, which fits the same reading: with the performance cores busy, the scheduling differs.
+
+**The variance is the second finding.** At one thread the base and the candidate run the same code (no worker, no budget), yet the busy host read 27.0 % in one run and 9.8 % in the next. "Repeats" below gives five more alternations of the deciding cells.
+
+CPU per second of audio, studio, % of one core, base → candidate (run 1 / run 2):
+
+| Cell | Base | Candidate |
+|---|---:|---:|
+| `--threads 1`, park50, `--buffer` 128 | 27.0 / 9.8 | 6.5 / 8.2 |
+| `--threads 1`, `--fast` (unpaced) | 9.8 / 8.3 | 7.7 / 9.6 |
+| `--threads 2` | 34.0 / 15.8 | 22.3 / 17.9 |
+| `--threads 4` | 57.4 / 38.0 | 60.4 / 33.7 |
+| default (12 threads), park50 | 93.2 / 73.5 | 90.0 / 62.3 |
+| default, budget-spin | 136.0 / 86.8 | 108.6 / 87.8 |
+| default, semaphore (parks: no Mach waiter on the null driver) | 94.7 / 65.5 | 83.3 / 61.5 |
+| default, fanout | 73.6 / 65.4 | 63.1 / 67.1 |
+| `--threads 1`, `--buffer` 32 | 16.8 / 10.7 | 13.7 / 9.6 |
+| default, `--buffer` 32 | 147.9 / 136.4 | 122.0 / 108.6 |
+| `--threads 1`, `--buffer` 512 | 9.4 / 8.0 | 10.0 / 9.0 |
+| default, `--buffer` 512 | 51.9 / 56.1 | 51.4 / 49.8 |
+| kick, `--threads 1` | 1.9 / 3.4 | 2.1 / 2.1 |
+| kick, default | 1.6 / 1.7 | 1.9 / 2.8 |
+
+**Repeats** (08:23–08:42 UTC, five more alternations of the deciding cells, load average 4–29):
+
+| Cell | Base | Candidate |
+|---|---|---|
+| `--threads 1`, paced, `--buffer` 128 | 10.2, 11.3, 9.0, 8.5, 8.2 | 29.1, 9.4, 8.3, 8.5, 8.3 |
+| `--threads 1`, `--fast` | 14.4, 7.8, 10.4, 8.5, 8.2 | 11.6, 7.8, 8.1, 8.4, 7.9 |
+| default (12 threads), paced | 66.2, 64.6, 71.8, 71.5, 67.3 | 67.0, 66.0, 71.9, 70.1, 68.0 |
+
+- At one thread the two builds are the same code, and the paced figure is bimodal: mostly 8–11 %, sometimes 27–29 % (3 of the 14 one-thread paced readings).
+- At the default the candidate is within 1.4 points of the base in every alternation. **On this host, giving the studio 11 threads instead of 12 saved no measurable CPU.** The two-run matrix above, whose cells were further apart in time, read the candidate 3–11 points lower; the repeats do not confirm that.
+
+**On the idle host** (09:22–09:26 UTC, load average 1.7–2.5, two alternations), where the operator measured:
+
+| Cell | Base | Candidate |
+|---|---|---|
+| default (12 threads), paced | 93.4, 96.9 | 92.7, 91.5 |
+| `--threads 1`, paced | 27.3 | 27.9 |
+
+This is the operator's picture: 26 % at one thread, and about 116 % with `ps` after 8 s, which counts start-up too. The candidate is 0.7 and 5.4 points below the base here, within the spread of the busy host's repeats.
+
+**The worker budget of each project** (`signal play … --rt-trace --json`, `wake.worker_budget`; deterministic, so one run each):
+
+| Project | `--threads` 2 | 4 | 12 (default) | 18 |
+|---|---:|---:|---:|---:|
+| kick | 2 | 3 | 3 | 3 |
+| pulse | 2 | 3 | 3 | 3 |
+| physical-av | 2 | 4 | 4 | 4 |
+| studio | 2 | 4 | 11 | 15 |
+| 80 kick voices | 2 | — | 12 | 18 (and 8: `crates/signal-cli/tests/blocks.rs`) |
+
+**Why the studio keeps 11 of 12.** Its estimated schedule is wide: 151 tasks, about 2 055 ns of estimated work per frame. The budget rule's simulated segment time per frame, on 1 to 12 threads, is:
+
+| Threads | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| ns | 2 055 | 1 169 | 881 | 732 | 644 | 587 | 553 | 520 | 500 | 479 | 470 | 461 |
+
+This curve comes from a scratch build that printed it, never delivered. The 11 is within 2 % of the 12; 8 threads are 13 % slower, 6 are 27 % and 4 are 59 %. The estimate has no per-task cost, so the simulated gain from the eighth thread on is a fraction of a microsecond per 128-frame segment. The real segments are short, so wake hops and claims are not negligible there.
+
+**Where a worker's time goes: elapsed time, not CPU.** The trace's per-worker counters (`--rt-trace`; `wake.job_ms`, `spin_ms`, `parks`, `worker_task_ms` in `signal --json play`) are **elapsed (wall-clock) durations**, read with `Instant`, not CPU time:
+- **job:** from joining a job to leaving it;
+- **task:** the task bodies the workers ran;
+- **job − task:** the rest of the job. It includes waiting on the task board for a task to become ready (a joined worker spins there until every task is claimed: `board.rs`, `participate`), waking two more workers, claiming tasks, and any time the system deschedules the worker;
+- **idle spin:** from the end of a job or a resume to the next job or the block (the 50 µs of park50, or `budget-spin`'s budget);
+- **parks:** how often it blocked;
+- **wake:** from a wake to the worker running.
+
+An elapsed interval in which the worker was descheduled consumed no CPU. So these figures say where a worker's time goes, not how much CPU each part costs. The process total is the only CPU measurement here (`/usr/bin/time`, above), and the seat has no per-thread CPU reading.
+
+Candidate, studio, default threads (budget 11: 10 eligible workers), 20 s (10 195 callbacks at `--buffer` 128), one run per row, 10:22–10:25 UTC, load average 2.7–3.3. One host, null driver, **not real time**. Totals are over the 10 eligible workers; "per callback" divides by the callbacks and by the 10 workers.
+
+| Policy, `--buffer` | job | task | job − task | idle spin | parks | job per callback per worker | idle spin per callback per worker | wake median |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| park50, 128 | 13.30 s | 5.31 s | 7.99 s | 2.02 s | 29 732 | 130 µs | 20 µs | 25 µs |
+| budget-spin, 128 | 12.96 s | 5.24 s | 7.72 s | 9.70 s | 33 228 | 127 µs | 95 µs | 164 µs |
+| semaphore (parks: no Mach waiter on the null driver), 128 | 13.29 s | 5.51 s | 7.78 s | 2.22 s | 30 825 | 130 µs | 22 µs | 31 µs |
+| fanout, 128 | 13.24 s | 5.49 s | 7.75 s | 2.94 s | 45 689 | 130 µs | 29 µs | 57 µs |
+| park50, 32 (36 895 callbacks) | 16.26 s | 5.87 s | 10.40 s | 6.27 s | 96 301 | 44 µs | 17 µs | 25 µs |
+| park50, 512 (3 016 callbacks) | 20.38 s | 6.77 s | 13.61 s | 0.87 s | 10 575 | 676 µs | 29 µs | 115 µs |
+
+In every row the ineligible eleventh worker joined no job and parked once.
+- **Measurement (elapsed).** The eligible workers spend most of their elapsed time inside jobs but outside task bodies: 7.7–8.0 s of 20 s at every policy at 128 frames, 10.4 s at 32 frames and 13.6 s at 512.
+- **Measurement (elapsed).** The idle spin is the smaller term: about 2–3 s, except under `budget-spin`, whose longer spin (0.9 × the computation budget) gives 9.7 s.
+- **Not measured:** how much of "job − task" and of the idle spin was spent running rather than descheduled, and so how much CPU each costs. The process total of the same configuration is 62–97 % of a core (the tables above).
+- **Assumption, from the code.** "Job − task" is mostly the spin on the task board, because a joined worker spins until the job's last task is claimed. The idle spin is all spinning while it runs.
+
+**A narrow plan, base against candidate (AC2).** 4 kick voices (`signal bench --write-voices 4`, 96 kHz) at 12 threads. The candidate gives it a budget of 9: 8 eligible workers.
+- **Process CPU** (`/usr/bin/time`, 25 s minus 5 s, `play --driver null --threads 12 --buffer 128`, park50; base a4deadc and candidate alternating three times; 10:26–10:32 UTC, load average 1.6–2.7): base 61.3, 63.5, 62.5 %; candidate 55.8, 56.8, 57.4 % of a core, about 6 points (10 %) less. Auditor-2's independent run of the same A/B at load average 4.6–7.7 read base 59.0, 59.8, 52.8 % against candidate 37.1, 40.2, 38.1 %.
+- **Trace** (candidate, `--rt-trace`, 20 s): the 3 ineligible workers joined no job and parked once each. Over 20 329 callbacks, the 8 eligible workers spent 7.00 s in jobs (3.67 s in task bodies) and 2.65 s in the idle spin, all elapsed.
+- **In one binary** (`signal --json bench --realtime --rt-voices 4 --rt-schedule base --rt-schedule default --seconds 2`; `base` = every worker, `default` = the budget; paced 128-frame blocks; not real time). At 12 threads, ordinary variant:
+  - `base`: every one of the 11 workers spins 42–47 ms and parks 800–845 times, the last six with 8–22 ms of job time;
+  - `default`: the budget is 9, and workers 9–11 show 0 ms of job, 0 ms of spin and 1 park each, while the others are as before.
+  - The median block was 113.1 against 114.3 µs. The `rt-all` variant shows the same pattern (median 130.0 against 122.7 µs).
+
+**What it means** (measurement and reading, no verdict):
+- **The per-thread overhead.**
+  - For the studio, most of a worker's elapsed time outside its tasks is inside jobs ("job − task"), not in the spin before parking. By the code that is mostly the spin on the task board, but the seat measured elapsed time, not CPU. A worker that joins a segment spins until the segment's last task is claimed. With 10 workers on a plan whose real segments are tens of µs, most of them wait most of the segment.
+  - The 50 µs spin is the smaller term in elapsed time, about a fifth of it, except under `budget-spin`.
+  - Wake latency costs no CPU in itself; it delays the join.
+- **`--threads 1`.**
+  - The work is 7.3 % of a core: render and unpaced play agree.
+  - The 26 % is the same work run after a sleep, 375 times a second: how fast it runs then, not more work (assumption above).
+  - On the busy host, `--buffer` 512 (a quarter of the sleeps) read 8–10 % in both runs.
+- **The budget.** It removes the workers a plan's estimate cannot use:
+  - for the kick, pulse and physical-av that is 8 or 9 of the 11, though those plans hardly go parallel at 128 frames anyway;
+  - for 4 kick voices, 3 of 11, which stay parked; process CPU fell about 10 % on the idle host and about a third in auditor-2's run (above);
+  - for the studio, 1 of 11, which the repeats could not tell from no change.
+  - It keeps every worker for 80 voices.
+  - **AC2 reading:** met for narrow plans that go parallel (fewer workers woken, surplus workers parked, less process CPU, the same output); not measurable for the wide studio, where only a looser rule (options below) would remove more workers.
+- **The 2× target (AC7).** The studio at default settings is not near 2× its single-thread DSP on this host. The DSP is 7.3 %, so 2× is about 15 % of a core; the candidate read 62–90 % at the default on the busy host and 92–93 % on the idle one, against 64–93 % and 93–97 % for the base. **Target not met; the measured result is about 12× the single-thread DSP, not 2×.** The largest remaining term in the eligible workers' elapsed time is "job − task", by the code mostly the spin waiting inside a job; its CPU share is not measured here. Reducing it is a scheduling decision for the operator, not made here, because each option changes how the device's real-time workers behave. The options:
+  - a larger `BUDGET_SLACK`, for example 10 %, which gives the studio 9 threads, or 25 %, which gives 7;
+  - a per-task hand-off cost in the budget's simulation;
+  - workers that park inside a job while no task is ready.
+  The 50 µs spin and the wake policies are unchanged, as decided at the M2.6-5 and M2.7-1 checkpoints.
+
+**Heavy plans keep their capacity (AC5)**, by construction and as measured.
+- **By construction.** A plan whose estimated schedule needs every thread gets every worker, and then runs exactly the scheduling of before M2.10-5: the same workers are woken and join. The additions are one atomic store per job and per callback, and one atomic load per join. 80 kick voices get the budget of every thread on 2, 8, 12 and 18 threads (`crates/signal-cli/tests/blocks.rs`, `eighty_kick_voices_get_every_thread`; the rule's synthetic counterpart, with the reason checked, is `tasks.rs`, `a_heavy_plan_gets_every_thread`).
+- **Measured.** `signal --json bench`, "Scaling" (kick voices within 25 % and 50 % of the budget at k = 128, default schedule, so with the budget in the candidate), base then candidate, 08:48–08:58 UTC, load average 3.3–6.5, `cores_source` `fallback` (18):
+
+| Threads | Base, within 25 % / 50 % | Candidate, within 25 % / 50 % |
+|---:|---:|---:|
+| 1 | 25 / 50 | 25 / 51 |
+| 2 | 33 / 65 | 32 / 65 |
+| 4 | 61 / 119 | 60 / 121 |
+| 8 | 83 / 171 | 95 / 193 |
+| 18 | 130 / 265 | 161 / 336 |
+
+The candidate is not below the base beyond one voice at any thread count. Its higher 8- and 18-thread figures are one run each, and are not attributed to the change.
+
+**The capacity results of M2.6/M2.7 (AC6): what the seat could and could not measure.**
+- **Not measurable here.** The 0 xruns of 80 kick voices and the V12 worst callback (< 0.25 of the period for the single-core kick) are device results: they need the CoreAudio driver, the audio workgroup and the device's clock, and the seat has none of them. They are left for the operator's soaks:
+  - `scripts/soak.sh --silent --voices 80 30 128` at auto (12 threads, park50), expecting 0 xruns and a worst below 0.75 of the period (the capacity gate);
+  - the V12 soak of `projects/kick`, worst below 0.25.
+- **What the source shows.** Neither path changes for those loads:
+  - 80 voices get every worker (above);
+  - the kick, at 96 kHz and 128 frames, never runs a parallel segment, before or after: its estimate times 128 frames is below `parallel_min_ns`, and the trace of `signal play projects/kick --driver null --rt-trace` saw no join in 20 329 callbacks.
+- **What the seat measured, not real time.** `signal bench --realtime --rt-voices 80 --rt-schedule base --rt-schedule default` (paced 128-frame blocks at 96 kHz; ordinary sandbox threads, time-constraint policy offline without a workgroup). In the candidate's own run, the pinned `base` schedule (every worker) and `default` (with the budget) agree: rt-all, 8 threads, median 648.2 against 647.5 µs, p99 2 087.5 against 2 086.5; 12 threads, 649.5 against 650.5, p99 2 159.3 against 2 157.4. Between separate sessions the same rows moved by 2× (the base build's 12-thread rt-all median read 317.1 µs), so only rows of one session compare. At 24 voices, rt-all, the p99 was 423–431 µs for both schedules at 8, 12 and 18 threads.
+
+**Tests that cannot run here (AC9).** The seat refuses binding a TCP port (`Operation not permitted`, os error 1). So these fail here, and fail the same on the base a4deadc (117 failing tests on each, the same names):
+- every `::tcp` variant of `crates/signal-app/tests/server.rs` and of the `crates/signal-ui` suites `app_mode`, `backpressure`, `http`, `panel_write`, `panels`, `patch`, `pattern`, `protocol`, `schematic`, `setup_protocol` and `unsaved`;
+- `a_page_of_another_origin_cannot_open_the_websocket` (`http.rs`) and `a_project_without_a_main_panel_is_served_the_generated_one` (`panels.rs`), which serve over TCP only;
+- `crates/signal-cli/tests/ui.rs` (`signal ui` never prints its URL).
+
+Their `::in_process` twins pass. No test of `cargo test` ran headless Chrome, and the browser layout checks (`scripts/ui-strip.mjs`) were not run: the seat runs no npm or UI build. No test plays audio, and no real-time behaviour is claimed from the seat.
+
+**For the operator at the checkpoint**, on the Mac outside the seat, release build:
+1. The CPU cells above, with `ps %cpu` or `/usr/bin/time` as above: studio at 1 and 12 threads, base and candidate, several alternations; and the same with `signal ui` on CoreAudio (the owner's 120 %). If `powermetrics` is to hand, which cores the one-thread run lands on.
+2. The capacity soak and the V12 soak above.
+3. A decision on the remaining in-job wait: one of the three options under "What it means", or none.
+
+### Idle cost, part 2 (M2.10-6)
+
+What the engine's worker budget is (`docs/realtime-rules.md` "The worker budget": the cost-aware schedule rule, and in real time the share rule), the cost-table corrections it rests on, and what it does to process CPU.
+
+**The target, restated by the operator:** at default threads, the studio's total CPU ≤ 2× the same host's `--threads 1` run (≈ 62 % on the quiet Mac, where `--threads 1` reads 31 %), while 80 kick voices still use every thread with no loss of capacity (late 0, hangs 0, worst callback not worse than base). The operator's starting figures, Mac Studio M5 Max, quiet host, release, null driver, (user + sys)/20 s of `signal play projects/studio --driver null --seconds 20`: `--threads 1` 31 %, `2` 50 %, `4` 73 %, default (12) 111–117 %. With the M2.10-5 candidate's cost-aware rule (studio 7 threads) the operator read 112.9 → 100.0 %.
+
+**Every figure below from the seat is a measurement on one host, for the operator to confirm on the device; none is a threshold and none is a real-time claim.** The machine is the devpanel seat on the operator's Mac Studio (Mac17,14, Apple M5 Max, 18 cores, 64 GB, macOS 27.0.1; `sysctl` is refused in the seat). Builds: release, `cargo build --release --locked --offline -p signal-cli`, of the base f8f8633 (`git archive`) and of the candidate (f8f8633 plus M2.10-6, uncommitted). The host was shared with other sessions and not pinned; load averages are given per run.
+
+**The simulated schedule** (deterministic; the engine's `makespan` at *k* = 128, read from a scratch build that printed it, never delivered). Segment time in µs on 1, 2, 3, 4, 6, 8, 12 and 18 threads:
+
+| Plan | 1 | 2 | 3 | 4 | 6 | 8 | 12 | 18 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| studio (151 tasks) | 270.0 | 278.8 | 211.0 | 176.1 | 144.4 | 127.9 | 116.6 | 112.7 |
+| physical-av (14 tasks) | 71.3 | 72.1 | 71.3 | 71.3 | 71.3 | 71.3 | 71.3 | 71.3 |
+| kick (9 tasks) | 23.2 | 32.8 | 32.8 | 32.8 | 32.8 | 32.8 | 32.8 | 32.8 |
+| 4 kick voices (25 tasks) | 75.2 | 63.4 | 50.9 | 42.1 | 42.1 | 42.1 | 42.1 | 42.1 |
+| 80 kick voices (432 tasks) | 1 397.1 | 1 029.8 | 694.6 | 527.1 | 362.4 | 279.8 | 199.3 | 146.4 |
+
+- On more than one thread every task costs its 1.5 µs hand-off, so the studio's 151 small tasks take longer on 2 threads than on 1 in the simulation.
+- The studio's 4th thread saves 34.9 µs, while the 80 voices' 18th saves 6.9 µs. No gain per thread keeps the studio narrow and the 80 voices wide, which is why the real-time share rule exists. Their serial estimates are 10.1 % and 104.8 % of their periods (2 667 µs at 48 kHz, 1 333 µs at 96 kHz, 128-frame blocks).
+- Budgets: in real time 1 for every plan above but the 80 voices, which get every thread; offline (renders) kick, pulse and physical-av 1, 4 voices 4, studio 8 of 12, 80 voices every thread (`docs/realtime-rules.md`, the table).
+
+**The schedule rule's constants** (`crates/signal-engine/src/tasks.rs`). These are measurements recorded with the M2.10-5 candidate patch on the M5 Max, 2026-10-18, release build, and not re-measured in M2.10-6. The engine never times them at run time.
+- **`HANDOFF_NS` = 1 500 ns per task per segment** (claiming, completing, releasing successors, inputs moving between cores). Method: kick-voice plans of 4, 16 and 80 voices at *k* = 128 on 1 to 4 threads with spinning workers, load average 2.2–2.8. It is (T · t_T − t_1) / tasks, with t_T the time per segment on T threads, which gave 1.5–2.0 µs per task. That is an upper bound, because it also counts any imbalance between the threads. The constant takes the low end.
+- **`WAKE_HOP_NS` = 6 000 ns per hop of the wake tree.** Method: the median first worker's join (`first_join_median_us`) of `signal bench --realtime`, 24 and 80 kick voices, time-constraint workers. It read 4.6–7.2 µs.
+- **`THREAD_GAIN_NS` = 6 000 ns is a choice, not a measurement**: one wake hop, the latency a worker costs before it helps. With it, the 80 voices' 18th thread (which saves 6.9 µs in the simulation) is still used, and the studio's offline budget is 8 of 12 (the table above).
+
+**The cost table** (`COST_NS`, `crates/signal-std/src/lib.rs`). `signal --json bench` of the candidate before the change (`--seconds 1`, 2026-10-18 23:32–23:37 UTC, load average 7.4–7.9, loom running beside it). The run's per-primitive medians sat above the table of "Primitives" above by a host offset: the median difference over the 30 registered types was 12.2 ns. `signal-std`'s `every_cost_names_a_registered_type` checks that every name in the table is a registered type, so a misspelt entry cannot silently leave its type at the default. Every type without a registered cost whose median less that offset was at least 40 ns, twice the engine's default of 20, now has that figure, rounded up: 39 types. Among them `std.mesh2d_audio` 674, `std.modal` 113, `std.ladder` 91 (the M2.11-2 run read 99.0), `std.count` 71, `std.buffer*` 55–60, `std.step_seq8` 48, `std.mass_spring` 44, and the vector types from width 8 or 16 up (to `std.vadd1024` 5 344; the bench feeds them from one shared `std.pack<N>`, included in the figure). Left out on purpose:
+- the visual-rate types `std.mesh2d` (497), `std.particles` (654) and `std.body2d` (111): the estimate does not divide by an instance's rate divisor, so a per-tick figure would overstate them by up to 800× at divisor 800;
+- the registered entries, which stay as measured on the quieter host.
+
+**The estimate against measurement.** One thread, `signal render <project> --threads 1 --block 128`, user + sys from `/usr/bin/time -p` at 25 s minus 5 s of audio, over 20 s, two repeats, candidate, 00:29–00:32 UTC, load average 7.8–11.6. CPU time per second of audio, times the period, is the measured time per 128-frame block:
+
+| Plan | CPU per second of audio | Measured per block | Estimate (after the cost fix) | Estimate ÷ measured |
+|---|---:|---:|---:|---:|
+| studio (48 kHz) | 7.8, 7.6 % | 205 µs | 270 µs | 1.32 (too high) |
+| physical-av (48 kHz) | 16.4, 16.3 % | 436 µs | 71.3 µs (19.1 before) | 0.16 (6.1× too low; 22.8× before) |
+| kick (96 kHz) | 1.4, 1.4 % | 18.7 µs | 23.2 µs | 1.24 (too high) |
+| 80 kick voices (96 kHz) | 81.8, 81.0 % | 1 085 µs | 1 397 µs | 1.29 (too high) |
+
+- **Measurement.** The issue's "studio ~1.5× too high" reads 1.32× here; the error is not in the table (`std.const`, 19 instances in the studio, measures like `std.abs`). **Assumption, not measured:** it comes from the per-call term of cycle members (`PER_CALL_NS`) or from `BLOCK_FACTOR`, both measured on the kick; they are not changed here.
+- **Measurement.** physical-av's 22× is 6.1× after the `std.mesh2d_audio` entry. **Assumption, not measured:** the rest is the membrane at the project's parameters against the bench's defaults, or the visual-rate types' ticks. Its budget is 1 under either rule, because its time is in one unit: its simulated schedule gains nothing from a second thread. On one thread it uses 16.4 % of the period.
+- **The share rule's margin.** `SERIAL_SHARE` (0.15) sits under the workers' computation fraction (0.25) by 1.67×. The three over-estimated plans are on the safe side. A plan with physical-av's 6.1× error estimated just under 15 % would run on the audio thread at about 90 % of the period; none is known (`docs/realtime-rules.md`).
+
+**Process CPU** (AC5, assumption on this host). `signal play <project> --driver null --seconds S [--threads 1]`, stdin held open, user + sys from `/usr/bin/time -p` at S = 25 minus S = 5, over 20 s, in % of one core per second of audio, so start-up is left out (the M2.10-5 method). Base and candidate alternate cell by cell, 00:33–00:48 UTC; the 1-minute load average at each cell is in brackets. These are process CPU; nothing here is elapsed time.
+
+| Studio | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| `--threads 1`, base / candidate | 23.5 / 24.6 (3.0) | 23.5 / 23.3 (3.4) | 23.6 / 23.7 (2.6) |
+| default (12), base / candidate | 94.8 / 23.4 (2.7) | 104.2 / 24.5 (2.6) | 97.6 / 23.6 (2.5) |
+
+| 4 kick voices, default | Run 1 | Run 2 |
+|---|---|---|
+| base / candidate | 66.7 / 14.4 | 71.8 / 15.0 |
+
+- **Measurement (one host).** At default threads the candidate's studio uses 23.4–24.5 % of a core, the same as its own `--threads 1` (23.3–24.6 %): 1.0×, against the target of ≤ 2×. The base uses 94.8–104.2 %, about 4×.
+- **Measurement (one host).** 4 kick voices fall from 67–72 % to 14–15 %.
+- **Why.** Both plans' serial estimates fit in 15 % of the period, so in real time their budget is 1, no worker is woken, and the 11 workers stay parked. This is the mechanism; the size of the gain on the device is the operator's measurement.
+- The seat's `--threads 1` reads 23–25 % here against 7.6–7.8 % for the unpaced render: the paced-run effect of M2.10-5 (after each `thread::sleep` the work runs slower; an assumption about core placement, not measured).
+
+**80 kick voices** (AC6, sandbox only). `signal --json bench --realtime --rt-voices 80 --seconds 2` (paced 128-frame blocks at 96 kHz, 1 501 blocks per row; ordinary sandbox threads; the time-constraint policy offline without a device workgroup; park50). Candidate with `--rt-schedule base --rt-schedule default`, then the base build's `default`, 00:44–00:48 UTC, load average about 4–7. The bench's real-time mode now sets `EngineConfig::realtime`, so its `default` runs the share rule as `signal play` does; for 80 voices that changes nothing (104.8 % of the period). `rt-all` rows (the calling thread also in the time-constraint policy), median / p99 / blocks over the period:
+
+| Threads | Base build, default | Candidate, `base` (every worker) | Candidate, `default` (budget) | Budget |
+|---:|---|---|---|---:|
+| 1 | 1 092.6 / 1 215.9 µs / 0 | 1 089.3 / 1 230.6 / 0 | 1 120.9 / 1 245.8 / 1 | 1 |
+| 8 | 506.6 / 1 786.3 / 143 | 580.4 / 2 090.7 / 139 | 640.9 / 2 090.6 / 155 | 8 |
+| 12 | 627.6 / 2 156.5 / 277 | 529.5 / 2 159.2 / 217 | 468.5 / 2 152.0 / 163 | 12 |
+| 18 | 425.3 / 3 544.2 / 114 | 490.8 / 3 498.3 / 196 | 482.6 / 3 470.2 / 169 | 18 |
+
+- **Measurement.** The budget is every thread on 8, 12 and 18, as the tests assert (`crates/signal-cli/tests/blocks.rs`). The candidate's `base` and `default` schedules run the same workers.
+- Their rows differ within this session's spread: at 12 threads `default` reads lower than `base`, at 8 higher.
+- The base build's rows differ from both by as much again, so only rows of one session compare (as in M2.10-5).
+- The blocks over the period (hundreds of 1 501) are the sandbox's: no workgroup and a shared host. They are not the device's late count. The 0 xruns, 0 hangs and the worst callback are the operator's soak (`scripts/soak.sh --silent --voices 80 30 128`).
+
+**Per-worker skew and task-body inflation** (elapsed time, from the same rows' trace; `wake.job_ms`, `worker_task_ms`, `slowest_task_*`). These are `Instant` durations, not CPU: a descheduled interval costs no CPU.
+- **Skew**, the longest worker's job time ÷ the shortest's, over the joined workers. `rt-all`: 1.58–1.74 at 8 and 12 threads, 3.66–3.84 at 18. `ordinary`: 2.9–6.3. `rt-workers`: 1.1–1.5. With ordinary threads the work goes to the workers that wake first, and the late ones join little.
+- **Inflation of a task body.** The median of each block's longest task body is 10.2 µs on one thread (`rt-all`) and 28.7, 30.7–41.0 and 41.0 µs on 8, 12 and 18 threads. So the same longest task takes about 3–4× longer when the workers run beside it. The workers' task bodies alone add up to 2.9–3.8 ms per block at 8–18 threads (`worker_task_ms` ÷ 1 509 callbacks), against 1.09 ms for the whole block on one thread: at least 2.7–3.5×, a lower bound because the calling thread's tasks are not counted.
+- **Not measured:** how much of this is cache and memory contention, core class (the 6 performance-level-0 cores of 18) or descheduling on the shared host. It is why the simulation's hand-off and wake constants underpredict real parallel time: the 80 voices' simulated 199 µs at 12 threads against a measured median of 468–530 µs.
+
+**Tests that cannot run here** (AC12). The seat refuses binding a TCP port (`Operation not permitted`), and `signal ui` never prints its URL there. `cargo test --workspace --offline` on the candidate: 2 154 passed, 110 failed, 1 ignored. The same crates (`signal-app`, `signal-ui`, `signal-cli`) on the base f8f8633 (`git archive`) fail the same 110 tests, by name: 106 `::tcp` variants (their `::in_process` twins pass), and `a_page_of_another_origin_cannot_open_the_websocket`, `a_project_without_a_main_panel_is_served_the_generated_one`, `attach_to_a_running_signal_ui`, `signal_ui_serves_the_protocol_while_it_plays`. The `::tcp` variants are of these tests: `a_bad_token_a_missing_hello_and_another_version_are_refused`, `a_canvas_binds_vector_outputs`, `a_changed_file_is_a_conflict`, `a_chosen_device_is_found_again_by_identity`, `a_client_connecting_while_off_is_told_and_gets_no_frames`, `a_client_needs_the_token`, `a_client_that_stops_reading_is_dropped_after_the_write_deadline`, `a_commit_while_stopped_writes_once`, `a_failed_commit_stays_unsaved_until_retried`, `a_failed_stopped_commit_is_still_unsaved_when_playing`, `a_file_without_one_panel_is_not_editable`, `a_folder_named_like_a_signal_file_opens_as_a_folder`, `a_knob_of_the_kick_panel_changes_one_value_of_the_toml`, `a_large_asset_arrives_whole`, `a_later_client_describes_every_parameter_while_playing`, `a_library_composite_is_added_by_a_patch`, `a_link_at_the_temporary_path_is_not_followed`, `a_newer_live_edit_is_what_retry_writes`, `a_panel_reached_through_a_link_is_not_written`, `a_panel_that_binds_what_the_plan_lacks_is_told_where`, `a_panel_with_pattern_controls`, `a_panel_write_marks_a_signal_project_edited`, `a_patch_is_heard_after_the_reload`, `a_patch_marks_a_signal_project_edited`, `a_pattern_that_does_not_load_is_not_written`, `a_pattern_write_marks_a_signal_project_edited`, `a_plan_swap_updates_describe`, `a_playing_graph_is_built_once_per_plan_version`, `a_project_that_does_not_load_shows_its_diagnostics`, `a_project_that_stops_loading_pushes_graph_error`, `a_recording_run_saves_the_setup_but_is_not_restarted`, `a_refused_archive_opens_nothing`, `a_refused_binding_writes_nothing`, `a_refused_edit_back_to_the_file_value_stays_unsaved`, `a_refused_element_or_attribute_writes_nothing`, `a_release_masked_by_a_claim_still_restarts_the_release_age`, `a_reload_that_writes_the_parameter_clears_it`, `a_scope_on_the_sinks_input_shows_the_sum_of_its_sources`, `a_signal_file_opens_in_a_working_folder`, `a_stalled_client_blocks_neither_another_request_nor_shutdown`, `a_stalled_client_is_dropped_from_and_evicted_without_blocking_the_others`, `a_stopped_commit_updates_the_inner_bases`, `a_stopped_move_on_4096_voices_writes_once_and_loads_nothing`, `a_stopped_patch_writes_and_pushes_graph`, `a_structural_reload_pushes_graph`, `a_vector_stream_follows_a_swap_that_changes_its_width`, `a_write_is_applied_live`, `a_write_is_pushed_and_applied_live`, `a_write_over_the_message_limit_closes_the_connection`, `a_write_replaces_the_panel_and_is_pushed`, `an_edit_of_the_positions_file_pushes_graph`, `an_edit_the_watch_cannot_see_is_applied_by_the_next_commit`, `an_undo_too_large_is_refused_and_a_commit_pushes_files`, `apply_takes_the_wake_policy_and_plays_again`, `closing_keeps_an_edited_working_folder`, `commit_writes_the_file_once_and_the_watch_does_not_reload_it`, `connections_before_hello_end_at_shutdown`, `connections_past_the_limit_are_refused_with_a_reason`, `connections_that_do_not_say_hello_in_time_give_their_place_back`, `describe_gives_the_plan_its_controls_sinks_and_meters`, `dropping_it_saves_the_setup`, `every_op_round_trips_on_kick_pulse_physical_av_and_a_composite`, `exit_stops_saves_the_window_and_closes_clients`, `graph_is_pushed_when_switched_on_again`, `graph_while_stopped`, `in_use_holds_when_the_project_does_not_load`, `in_use_names_exports_and_panel_bindings`, `it_starts_stopped_on_the_last_project`, `it_starts_stopped_plays_and_stops`, `kick_pulse_and_physical_av_are_described_as_written`, `meters_and_a_scope_stream_arrive`, `modules_is_deterministic`, `names_links_and_a_first_write`, `only_the_served_project_s_panels_are_written`, `opening_a_project_stops_records_it_and_serves_its_panels`, `opening_another_project_can_save_first`, `positions_are_never_written_through_a_link`, `power_off_stops_and_on_restores`, `refusals_write_nothing`, `reopening_the_same_file_with_save_keeps_the_edit`, `revert_restores_the_file_value_live`, `same_named_copies_have_different_project_ids`, `save_as_writes_the_file_and_leaves_the_folder`, `schematic_move_writes_a_group_at_once`, `schematic_move_writes_positions_and_pushes_graph`, `set_ramp_and_trigger_are_acknowledged_with_their_frame`, `shutdown_with_stalled_clients_at_the_limit_is_prompt`, `signal_ui_refuses_the_app_s_messages`, `signal_ui_reopens_only_the_project_it_serves`, `signal_ui_stops_and_plays`, `static_files_have_their_types_and_stay_in_their_folders`, `steps_never_wait_for_a_document_comparison`, `studio_is_described_and_laid_out`, `the_4096_voice_graph_reaches_the_client_and_it_stays_open`, `the_dialog_functions_and_apply_play_again_with_the_setup`, `the_errors_write_nothing`, `the_free_scope_count_is_described_and_pushed`, `the_generated_panel_s_first_write_creates_main_html`, `the_stopped_graph_is_cached_until_the_folder_changes`, `the_text_outside_the_panel_is_kept_byte_for_byte`, `the_url_carries_a_new_token_in_its_fragment`, `the_window_s_requests_reach_the_project`, `unknown_messages_are_answered_with_an_error`, `vector_streams_arrive`, `vendor_copies_a_library_composite`. No test plays audio; the browser layout checks (`scripts/ui-strip.mjs`) were not run (no npm or UI build in the seat).
+
+**Render hashes** (AC9). `signal --json render projects/<p> --seconds 120 --threads T`, base and candidate builds, T = 1, 12 and 18. `audio_fnv1a64` / `log_fnv1a64` equal for every pair: kick 9eec9e756e2d891d / 134f1d3095c5bdd2, pulse 0e2925144758dd17 / d5a4b62fc761cd25, physical a3381da11f117c70 / 877adbebc03a52d9, physical-av 6e949ac556b7e1b5 / 870ae406ab039878, studio ae83d794a40b6941 / c4920d6570c2a66b, library-demo c625006298c22e3b / c690e983602216d4.
+
+**Not re-measured, reused from M2.10-5:** the wake-policy and buffer-size matrix and the idle host's one-thread reading, because nothing in M2.10-6 changes the wake policies, the spin or the paced loop. Also not re-measured: the bench's "Scaling" capacity rows (offline, so the share rule does not apply to them, and the schedule rule is M2.10-5's). **Cut for time:** an idle-host repeat of the CPU table, and the studio and 4 voices with `signal ui` on CoreAudio.
+
+**For the operator at the checkpoint**, on the Mac outside the seat, release build:
+1. The studio CPU cells above (`--threads 1` and default, base and candidate) with `ps %cpu` or `/usr/bin/time`, and the same under `signal ui` on CoreAudio.
+2. The capacity soak `scripts/soak.sh --silent --voices 80 30 128` at auto (12 threads, park50), expecting 0 xruns and the worst callback not worse than base, and the V12 soak of `projects/kick`.
+3. A judgement on `SERIAL_SHARE` = 0.15. It is the one constant behind the real-time result: the studio plays on one thread, at about 6–8 % of its period on this host.
+
 ## What this means for D-EXEC-3
 
 These are interpretations of a single seat measurement. They are not a decision; D-EXEC-3 stays deferred (roadmap M4).

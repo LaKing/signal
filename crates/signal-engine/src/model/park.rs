@@ -4,10 +4,12 @@
 //! (`Parking`) over the real gate; [`Pool`] stands in for `pool.rs`'s side
 //! of it: no spinning (a worker that finds nothing blocks at once), loom's
 //! `park`/`unpark` as the blocker, and a request counter for `Workers::post`.
+//! M1 adds the worker budget (M2.10-5): the eligible workers, through the
+//! same `Gate::join_if` and `Parking::wake` limit as `pool.rs`.
 
 use std::sync::{Arc, OnceLock};
 
-use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use loom::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use loom::thread::{self, JoinHandle, Thread};
 
 use super::{all_eq, counters, counting, explore, flags, plan, set, wait};
@@ -32,6 +34,9 @@ struct Pool {
     live: AtomicBool,
     /// S3: a joined worker stays in the job until shutdown is requested.
     hold: bool,
+    /// The workers that may join a job and be woken for it (`pool.rs`'s
+    /// `Shared::eligible`): every worker, except in M1.
+    eligible: AtomicUsize,
     /// The thread that waits for `joined` and `served`.
     waiter: Thread,
     threads: OnceLock<Vec<Thread>>,
@@ -52,6 +57,7 @@ impl Pool {
             served: flags(WORKERS),
             live: AtomicBool::new(false),
             hold,
+            eligible: AtomicUsize::new(WORKERS),
             waiter: thread::current(),
             threads: OnceLock::new(),
         })
@@ -65,9 +71,10 @@ impl Pool {
     }
 
     /// The segment's wake after the open: at most one parked worker
-    /// (`Dispatch::run`).
+    /// (`Dispatch::run`), among the eligible ones (`Shared::wake`).
     fn wake(&self, n: usize) {
-        self.parking.wake(n, |w| self.signal(w));
+        let eligible = self.eligible.load(Ordering::Relaxed);
+        self.parking.wake(n, eligible, |w| self.signal(w));
     }
 
     /// Starts the workers.
@@ -165,7 +172,9 @@ impl Worker for Pool {
     }
 
     fn join(&self, w: usize, seen: &mut u64) -> bool {
-        self.gate.join(seen, |job| {
+        // As `pool.rs`: the gate's word, then eligibility, then the join.
+        let may_join = || w < self.eligible.load(Ordering::Relaxed);
+        self.gate.join_if(may_join, seen, |job| {
             assert!(self.live.load(Ordering::Acquire), "a join outside serve");
             if let Some(joined) = self.joined.get(w) {
                 set(joined, &self.waiter);
@@ -273,6 +282,34 @@ fn p3_a_posted_request_reaches_every_worker() {
         for served in pool.served.iter() {
             wait(served);
         }
+        pool.stop(workers);
+    });
+}
+
+/// M1 (M2.10-5, the worker budget): job 1 may use one worker (eligible 1,
+/// stored before the open as `Dispatch::run` does), job 2 both. Worker 1
+/// joins job 1 and worker 2 never does: it skips it or parks with its flag
+/// set, which job 1's wakes leave alone. Job 2 must still reach worker 2,
+/// through the production path (the gate's word, then eligibility, then
+/// `join_loaded`; the wake limit): the caller waits for its join before it
+/// closes, so a lost wake or a stale eligibility leaves every thread
+/// parked, which loom reports as a deadlock.
+#[test]
+fn m1_a_larger_budget_reaches_a_skipped_worker() {
+    // Two jobs: a bound of 1 keeps it within the time budget (25 s on the
+    // seat; 2 had not finished after 30 minutes).
+    explore("M1", 1, || {
+        let (gate, mut opener) = Gate::new();
+        let pool = Pool::new(gate, false);
+        let workers = pool.spawn();
+        pool.eligible.store(1, Ordering::Relaxed);
+        pool.serve(&mut opener, 2, || wait(&pool.joined[0]));
+        assert!(
+            !pool.joined[1].load(Ordering::Acquire),
+            "worker 2 joined a job it was not eligible for"
+        );
+        pool.eligible.store(2, Ordering::Relaxed);
+        pool.serve(&mut opener, 2, || wait(&pool.joined[1]));
         pool.stop(workers);
     });
 }

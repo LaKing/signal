@@ -690,31 +690,31 @@ fn the_counts_are_interleavings() {
 /// Each model step: the file under `src/` and its line, and the text on that
 /// line (AC-mapping; `docs/testing-and-evaluation.md` has the same table).
 const MAPPING: &str = "
-callback-start wake   | pool.rs:406   | shared.wake(usize::MAX)
-wake: fence           | park.rs:44    | fence(Ordering::SeqCst);
-wake: swap flag       | park.rs:50    | parked.swap(false, Ordering::SeqCst)
-wake: unpark          | park.rs:51    | signal(w);
-wake: unpark (park)   | pool.rs:236   | thread.unpark();
-wake: unpark (waiter) | pool.rs:239   | waiter.signal(w)
-store job             | shared.rs:1395 | *slot = (job as *const Job<'_>)
+callback-start wake   | pool.rs:454   | shared.wake(usize::MAX)
+wake: fence           | park.rs:46    | fence(Ordering::SeqCst);
+wake: swap flag       | park.rs:52    | parked.swap(false, Ordering::SeqCst)
+wake: unpark          | park.rs:53    | signal(w);
+wake: unpark (park)   | pool.rs:275   | thread.unpark();
+wake: unpark (waiter) | pool.rs:278   | waiter.signal(w)
+store job             | shared.rs:1423 | *slot = (job as *const Job<'_>)
 open                  | gate.rs:101   | (epoch << EPOCH_SHIFT) | OPEN, Ordering::SeqCst
-wake one              | pool.rs:490   | shared.wake(1)
-close                 | gate.rs:130   | fetch_and(!OPEN, Ordering::AcqRel)
-store shutdown        | pool.rs:498   | shutdown.store(true, Ordering::SeqCst)
-shutdown unpark       | pool.rs:500   | self.shared.signal(w);
-shutdown check        | park.rs:100   | pool.shutdown(Ordering::Acquire)
-join                  | park.rs:104   | pool.join(w, &mut seen)
+wake one              | pool.rs:546   | shared.wake(1)
+close                 | gate.rs:139   | fetch_and(!OPEN, Ordering::AcqRel)
+store shutdown        | pool.rs:554   | shutdown.store(true, Ordering::SeqCst)
+shutdown unpark       | pool.rs:556   | self.shared.signal(w);
+shutdown check        | park.rs:102   | pool.shutdown(Ordering::Acquire)
+join                  | park.rs:106   | pool.join(w, &mut seen)
 join (CAS)            | gate.rs:85    | .compare_exchange(word, word + 1
-join (read job)       | shared.rs:1368 | self.job.with(|job| *job)
-wake two              | pool.rs:665   | self.wake(2);
-store flag            | park.rs:117   | parked.store(true, Ordering::SeqCst);
-fence                 | park.rs:120   | fence(Ordering::SeqCst);
-re-read               | park.rs:121   | pool.joinable(seen) || pool.shutdown
+join (read job)       | shared.rs:1376 | self.job.with(|job| *job)
+wake two              | pool.rs:739   | self.wake(2);
+store flag            | park.rs:119   | parked.store(true, Ordering::SeqCst);
+fence                 | park.rs:122   | fence(Ordering::SeqCst);
+re-read               | park.rs:123   | pool.joinable(seen) || pool.shutdown
 re-read gate          | gate.rs:60    | self.word.load(Ordering::SeqCst)
-park                  | park.rs:123   | pool.block(w);
-park (park)           | pool.rs:246   | Blocker::Park => thread::park()
-park (waiter)         | pool.rs:247   | waiter.wait(w)
-clear flag            | park.rs:125   | parked.store(false, Ordering::SeqCst);
+park                  | park.rs:125   | pool.block(w);
+park (park)           | pool.rs:291   | Blocker::Park => thread::park()
+park (waiter)         | pool.rs:292   | waiter.wait(w)
+clear flag            | park.rs:127   | parked.store(false, Ordering::SeqCst);
 ";
 
 /// AC-mapping: every model step is on the line [`MAPPING`] names, and the

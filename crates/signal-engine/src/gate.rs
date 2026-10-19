@@ -102,6 +102,15 @@ impl GateWord {
         Close(&self.word)
     }
 
+    /// Marks the epoch of `word`, read by [`load`](GateWord::load), seen if
+    /// it is open, without joining it: a worker that may not join this job
+    /// (M2.10-5, an ineligible worker) then parks instead of re-reading it.
+    pub(crate) fn skip_loaded(&self, word: u64, seen: &mut u64) {
+        if word & OPEN != 0 {
+            *seen = GateWord::epoch(word);
+        }
+    }
+
     /// Tests only: the number of joined workers and whether the gate is open.
     #[cfg(test)]
     pub(crate) fn state(&self) -> (u64, bool) {

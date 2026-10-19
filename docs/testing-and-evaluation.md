@@ -54,6 +54,7 @@ RUSTFLAGS="--cfg loom" cargo test -p signal-engine --lib --release --locked --of
 | B3 | caller + 2 | 1 | Two epochs on one board (a reset between): slots left from the first are never claimed in the second; each task runs once per epoch, in dependency order. | 0.5 |
 | B4 | caller + 2 | 1 | Test hooks: a claim that finds its slot empty fails the job as an invariant, and the drain still ends. | 0.02 |
 | P1 | caller + 2 | 2 | No lost wake: both workers park; the caller opens a job and wakes one, each worker that joins wakes another, and the caller waits for both joins before closing. | 26.9 |
+| M1 | caller + 2 | 1 | The worker budget (M2.10-6): job 1 with one eligible worker, job 2 with both, each stored before its open. Worker 1 joins job 1 and worker 2 never does; job 2 still reaches worker 2 through `Gate::join_if` and the wake's limit, and the caller waits for its join before closing. | 24.8 |
 | P3 | caller + 2 | 2 | A request posted while the workers decide whether to park (SeqCst, then every worker signalled) reaches both. | 0.02 |
 | S1 | caller + 2 | 2 | Shutdown while the workers are parked or about to park: both exit. | 0.003 |
 | S2 | caller + 2 | 2 | Shutdown straight after a job, the only order the real pool allows: workers have left before `serve` returns, none joins after it, both exit. | 3.0 |
@@ -65,7 +66,7 @@ RUSTFLAGS="--cfg loom" cargo test -p signal-engine --lib --release --locked --of
 
 **Not covered.**
 - **P2, the callback-start wake** (`semaphore`: every parked worker woken before the segment's open). It is in the suite but ignored: loom 0.7.2 reports a deadlock in an execution the C11 model forbids. Both later swaps of a worker's flag read the caller's own earlier `false` although the worker stored `true` and fenced, because loom lets a read-modify-write read any store maximal in its partial modification order (`rt/atomic.rs`, `match_rmw_to_stores`). It runs with `-- --ignored`. The handshake it exercises is checked apart from loom, exhaustively and on real threads (M2.7-10, "The park/wake handshake" below).
-- **Beyond the bound.** Each scenario is exhaustive only within its preemption bound. The board's scenarios use 1: at 2, loom's conservative backtracking for bounded preemption explores schedules in which two workers waiting for a successor (`spin_loop`, a yield) hand the processor to each other while the thread holding its predecessor never runs, and one execution exceeds 100 000 branches. S3 uses 1 to stay within the budget (about 100 s at 2).
+- **Beyond the bound.** Each scenario is exhaustive only within its preemption bound. The board's scenarios use 1: at 2, loom's conservative backtracking for bounded preemption explores schedules in which two workers waiting for a successor (`spin_loop`, a yield) hand the processor to each other while the thread holding its predecessor never runs, and one execution exceeds 100 000 branches. S3 uses 1 to stay within the budget (about 100 s at 2), and so does M1 (two jobs: at 2 it had not finished after 30 minutes).
 - **Load buffering**, which loom does not explore (its README); SeqCst accesses only as far as loom models them (as AcqRel, hence the fences).
 - **Timing**: spinning before parking, `budget-spin` and `fanout`'s propagation (the model's workers block at once), and the `semaphore` policy's Mach waiter (they park).
 - **The request queue's `Mutex`** (`Workers::post`): the model counts requests in an atomic.
@@ -86,19 +87,24 @@ Every model step is on a line of the code (`each_model_step_is_in_the_code` read
 
 | Step | Code |
 |---|---|
-| callback-start wake | `pool.rs:406` |
-| wake: fence, swap flag, unpark | `park.rs:44`, `:50`, `:51` (`pool.rs:236` `park`, `:239` waiter) |
-| store job | `shared.rs:1395` |
+| callback-start wake | `pool.rs:454` |
+| wake: fence, swap flag, unpark | `park.rs:46`, `:52`, `:53` (`pool.rs:275` `park`, `:278` waiter) |
+| store job | `shared.rs:1423` |
 | open | `gate.rs:101` |
-| wake one | `pool.rs:490` |
-| close | `gate.rs:130` |
-| shutdown: store, unpark | `pool.rs:498`, `:500` |
-| shutdown check | `park.rs:100` |
-| join (CAS, job read), wake two | `park.rs:104` (`gate.rs:85`, `shared.rs:1368`), `pool.rs:665` |
-| store flag, fence | `park.rs:117`, `:120` |
-| re-read gate, shutdown | `park.rs:121` (`gate.rs:60`) |
-| park | `park.rs:123` (`pool.rs:246` `park`, `:247` waiter) |
-| clear flag | `park.rs:125` |
+| wake one | `pool.rs:546` |
+| close | `gate.rs:139` |
+| shutdown: store, unpark | `pool.rs:554`, `:556` |
+| shutdown check | `park.rs:102` |
+| join (CAS, job read), wake two | `park.rs:106` (`gate.rs:85`, `shared.rs:1376`), `pool.rs:739` |
+| store flag, fence | `park.rs:119`, `:122` |
+| re-read gate, shutdown | `park.rs:123` (`gate.rs:60`) |
+| park | `park.rs:125` (`pool.rs:291` `park`, `:292` waiter) |
+| clear flag | `park.rs:127` |
+
+**The worker budget** (M2.10-5, `realtime-rules.md` "The worker budget"). The waker takes only the flags of the first `eligible` workers (`Parking::wake`'s limit), and a worker joins through `Gate::join_if` (`shared.rs`): it reads the gate's word, then asks whether it is eligible, then joins (`join_loaded`) or marks the job seen and parks. The opener stores `eligible` before the open. The budget only removes workers from both sides of the handshake at once: the waker never reads or takes the flag of a worker at or beyond the limit, and that worker never joins, so it is sent no wake there is to lose. Its flag stays set while it is parked, so the first wake that counts it eligible again (a plan with a larger budget) takes it through the same handshake as above. Correctness never depends on an ineligible worker: the calling thread runs every task no worker takes, and the close waits only for workers that joined.
+- **Loom M1** (`model/park.rs`, `m1_a_larger_budget_reaches_a_skipped_worker`, M2.10-6) runs that path in the model: the model pool's `join` calls the same `Gate::join_if` and its wake passes the same limit. Two workers; job 1 with eligible 1, job 2 with eligible 2, each stored before its open as `Dispatch::run` does. Worker 1 must join job 1 and worker 2 must not; the caller then waits for worker 2 to join job 2 before closing, so a lost wake, or an eligibility read stale against the open, leaves every thread parked, which loom reports as a deadlock. The other model scenarios run with every worker eligible.
+- The explorer of `tests/handshake.rs` models the full scan (every worker eligible), as before.
+- `pool::tests::ineligible_workers_never_join_and_park` checks, under every policy on real threads, that workers beyond the budget never join and are never woken, and that every worker parks.
 
 Result (the full `cargo test --workspace` run, debug profile, the test binary's three explorations in parallel: 15.7 s): no lost wake, no wrong epoch, every execution ends, for `park` without the callback-start wake (`park50`, `budget-spin`), `park` with it (P2's scenario) and `semaphore`, at 1–3 workers in `Sc` and 1–2 in `Buffered` (3 workers there take about 45 s, beyond the minute with the rest). The largest, `semaphore` with 3 workers in `Sc`: 9.4 × 10¹⁰⁶ interleavings through 4 467 060 states and 16 719 634 transitions in about 16 s; P2's with 3 workers: 6.4 × 10¹⁰⁴ through 1 914 638 states in about 7 s. Run them with `cargo test -p signal-engine --test handshake -- --nocapture` to see every count.
 
@@ -116,7 +122,7 @@ The two fence rows hold in `Sc` as `park.rs` says (the SeqCst accesses alone ord
 
 **The wake before the open on real threads** (`park::tests::the_wake_before_the_open_is_never_lost_on_real_threads`). One worker runs the real `run_worker` over the real `Parking` and `GateWord`; its test pool implements `park::Worker` and pauses it in the calls the loop already makes (`parking`, `joinable`, `pending`, `block`), so no hook exists outside the test build. Each callback: the callback-start wake of every parked worker takes the worker's flag; on its next pass to a park the worker is held before its flag store, after the store and fence, after re-reading the gate closed, or until it has entered `block`; then the caller opens and wakes one, and the worker must join within 5 s. A callback counts as forced only if that wake took the flag and the worker was then held on a pass that began after it; the test asserts what the held worker read (the open gate, or the caller's wake taking its flag) and at least 2 000 forced callbacks per position. 3 000 callbacks per position with `park`'s token and again with a counting semaphore (a `Mutex` and `Condvar` standing in for the Mach waiter): 24 000 callbacks, no lost wake, in about 0.1 s. The forced count per position varies from run to run (2 326 to 3 000 observed); the test requires at least 2 000.
 
-**The `semaphore` waiter** blocks and wakes through the same code as `park`: the flags, fences, swaps and re-reads are `Parking::wake` and `run_worker` under every policy, and the policy only chooses what `Shared::signal` and `Shared::block` call (`pool.rs:232-249`). The one difference is the token: `park` keeps one, a Mach semaphore counts. The handshake needs only that a signal sent before the wait is kept, which both do; a surplus count only makes a later wait return at once, and the loop re-checks after every return. The explorer runs both tokens, and the reproducer both blockers.
+**The `semaphore` waiter** blocks and wakes through the same code as `park`: the flags, fences, swaps and re-reads are `Parking::wake` and `run_worker` under every policy, and the policy only chooses what `Shared::signal` and `Shared::block` call (`pool.rs:271-294`). The one difference is the token: `park` keeps one, a Mach semaphore counts. The handshake needs only that a signal sent before the wait is kept, which both do; a surplus count only makes a later wait return at once, and the loop re-checks after every return. The explorer runs both tokens, and the reproducer both blockers.
 
 **Outside every model**, and what covers it instead:
 - the shared data views (cells, views, readers and claims of `shared.rs`): the checked mode in every debug test (ADR 0020), `parallel.rs`, the determinism matrix and the semantic oracle;

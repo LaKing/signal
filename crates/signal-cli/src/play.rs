@@ -151,6 +151,7 @@ fn spread_json(spread: &Spread) -> serde_json::Value {
 /// `scripts/rt-matrix.sh` reads), then the per-worker latencies.
 pub(crate) fn wake_json(wake: &WakeStats) -> serde_json::Value {
     let us = |ns: u64| (ns as f64 / 100.0).round() / 10.0;
+    let ms = |ns: u64| (ns as f64 / 1e5).round() / 10.0;
     json!({
         "callbacks": wake.callbacks,
         "callbacks_without_join": wake.callbacks_without_join,
@@ -167,6 +168,11 @@ pub(crate) fn wake_json(wake: &WakeStats) -> serde_json::Value {
         "slowest_task_median_us": us(wake.slowest_task.median_ns),
         "slowest_task_p99_us": us(wake.slowest_task.p99_ns),
         "per_worker": wake.per_worker.iter().map(spread_json).collect::<Vec<_>>(),
+        "worker_budget": wake.worker_budget,
+        "worker_task_ms": ms(wake.worker_task_ns),
+        "job_ms": wake.job_ns.iter().copied().map(ms).collect::<Vec<_>>(),
+        "spin_ms": wake.spin_ns.iter().copied().map(ms).collect::<Vec<_>>(),
+        "parks": wake.parks,
     })
 }
 

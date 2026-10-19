@@ -703,6 +703,7 @@ const BASE_SCHEDULE: Schedule = Schedule {
     parallel_min_ns: 50_000,
     min_frames: 16,
     spin_ns: 50_000,
+    plan_budget: false,
     ..Schedule::DEFAULT
 };
 
@@ -818,10 +819,13 @@ fn realtime_table(
                     ..rt_schedule(name, period_ns_whole, threads)?
                 };
                 for variant in RT_VARIANTS {
+                    // In real time, as `signal play` runs: the worker
+                    // budget then takes the block's period (M2.10-6).
                     let config = EngineConfig {
                         block_capacity: RT_BLOCK,
                         threads,
                         schedule,
+                        realtime: true,
                         ..EngineConfig::new(SAMPLE_RATE, SEED)
                     };
                     let mut engine = Engine::with_waiter(

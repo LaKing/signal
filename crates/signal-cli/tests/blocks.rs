@@ -470,6 +470,72 @@ fn thirty_two_kick_voices_are_bit_identical_on_threads() {
     assert_no_violation();
 }
 
+/// M2.10-5 AC5: under the default schedule (the worker budget on), 80 kick
+/// voices get every thread on 2, 8, 12 (the real-time auto count of the
+/// M5 Max) and 18 (all its performance cores); the kick alone, one voice,
+/// does not get the 12. The values are the budget rule's for these plans
+/// (`tasks.rs`, `worker_budget`), read back from the engine.
+#[test]
+fn eighty_kick_voices_get_every_thread() {
+    let registry = registry();
+    let budget = |plan: &ExecutionPlan, rate, seed, threads| {
+        let config = EngineConfig {
+            threads,
+            ..EngineConfig::new(rate, seed)
+        };
+        let engine = Engine::new(plan, &registry, config, Vec::new()).unwrap();
+        engine.schedule_stats().worker_budget
+    };
+    let (plan, rate, seed) = voices(80);
+    for threads in [2, 8, 12, 18] {
+        assert_eq!(budget(&plan, rate, seed, threads), threads, "80 voices");
+    }
+    let (kick, rate, seed) = voices(1);
+    let one = budget(&kick, rate, seed, 12);
+    assert!(one < 12, "one voice: {one}");
+}
+
+/// M2.10-6 AC4–AC6: in real time at 128-frame blocks (the real-time
+/// default), the projects whose serial estimate fits in `SERIAL_SHARE` of
+/// the block's period (the studio, kick, pulse, physical-av, 4 kick voices)
+/// get one thread, so no worker is woken for them, while 80 kick voices
+/// still get every thread on 2, 8, 12 and 18; also after a swap from the
+/// kick to the 80 voices, as `prepare_swap` builds the budget again.
+#[test]
+fn in_real_time_light_projects_run_alone_and_eighty_voices_get_every_thread() {
+    let registry = registry();
+    let config = |rate, seed, threads| EngineConfig {
+        threads,
+        block_capacity: 128,
+        realtime: true,
+        ..EngineConfig::new(rate, seed)
+    };
+    let budget = |plan: &ExecutionPlan, rate, seed, threads| {
+        let engine = Engine::new(plan, &registry, config(rate, seed, threads), Vec::new()).unwrap();
+        engine.schedule_stats().worker_budget
+    };
+    for name in ["studio", "kick", "pulse", "physical-av"] {
+        let project = Project::load(&repository().join("projects").join(name)).unwrap();
+        let plan = project.plan(&registry).unwrap().plan;
+        for threads in [12, 18] {
+            let got = budget(&plan, project.sample_rate, project.seed, threads);
+            assert_eq!(got, 1, "{name} on {threads} threads");
+        }
+    }
+    let (four, rate, seed) = voices(4);
+    assert_eq!(budget(&four, rate, seed, 12), 1, "4 voices");
+    let (eighty, rate, seed) = voices(80);
+    for threads in [2, 8, 12, 18] {
+        assert_eq!(budget(&eighty, rate, seed, threads), threads, "80 voices");
+    }
+    let (kick, rate, seed) = voices(1);
+    let mut engine = Engine::new(&kick, &registry, config(rate, seed, 12), Vec::new()).unwrap();
+    assert_eq!(engine.schedule_stats().worker_budget, 1);
+    let mut swap = engine.prepare_swap(&eighty, &registry).unwrap();
+    engine.commit_swap(&mut swap, Frame(0)).unwrap();
+    assert_eq!(engine.schedule_stats().worker_budget, 12, "after the swap");
+}
+
 /// A one-file project at 8 kHz.
 fn project(instances: &str, connections: &str) -> Project {
     let text = format!(

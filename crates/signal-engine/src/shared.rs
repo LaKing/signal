@@ -1147,6 +1147,9 @@ pub(crate) struct PoolStats {
     pub(crate) trace: bool,
     /// The longest task body since the callback began, in ns (0: none).
     pub(crate) slowest_task_ns: AtomicU64,
+    /// The task bodies the workers ran (not the calling thread), in ns, when
+    /// they are timed (M2.10-5).
+    pub(crate) worker_task_ns: AtomicU64,
 }
 
 /// The work of one task: the engine runs the task's units with the access.
@@ -1268,6 +1271,9 @@ impl<'a> Job<'a> {
                 self.stats
                     .slowest_task_ns
                     .fetch_max(body.max(1), Ordering::Relaxed);
+                if lane != 0 {
+                    self.stats.worker_task_ns.fetch_add(body, Ordering::Relaxed);
+                }
             }
             #[cfg(feature = "test-hooks")]
             if let Some(hook) = self.hook {
@@ -1339,8 +1345,10 @@ impl Gate {
         self.word.joinable(seen)
     }
 
-    /// Joins the open job if it is newer than `seen`, runs `work` on it and
-    /// leaves. Returns whether it joined.
+    /// Tests only: joins the open job if it is newer than `seen`, runs
+    /// `work` on it and leaves. Returns whether it joined. (The pool joins
+    /// through [`join_if`](Gate::join_if).)
+    #[cfg(test)]
     pub(crate) fn join(&self, seen: &mut u64, work: impl FnOnce(&Job<'_>)) -> bool {
         self.join_loaded(self.word.load(), seen, work)
     }
@@ -1368,6 +1376,26 @@ impl Gate {
         let job = unsafe { &*self.job.with(|job| *job) };
         work(job);
         true
+    }
+
+    /// [`join`](Gate::join) for a worker that may not join every job (the
+    /// worker budget, M2.10-5): it reads the gate's word first (Acquire,
+    /// pairing with the open), then asks `may_join`, so a value the opener
+    /// stored before the open is seen. If it may not, it marks an open job
+    /// seen without joining (`GateWord::skip_loaded`), so that the worker
+    /// parks instead of re-reading it. Returns whether it joined.
+    pub(crate) fn join_if(
+        &self,
+        may_join: impl FnOnce() -> bool,
+        seen: &mut u64,
+        work: impl FnOnce(&Job<'_>),
+    ) -> bool {
+        let word = self.word.load();
+        if !may_join() {
+            self.word.skip_loaded(word, seen);
+            return false;
+        }
+        self.join_loaded(word, seen, work)
     }
 }
 

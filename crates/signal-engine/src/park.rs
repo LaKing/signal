@@ -35,15 +35,17 @@ impl Parking {
         }
     }
 
-    /// Wakes up to `n` parked workers, calling `signal(w)` for each worker
-    /// `w` it takes the flag from. SeqCst: the waker's half of the park
-    /// handshake, after its SeqCst open.
-    pub(crate) fn wake(&self, n: usize, mut signal: impl FnMut(usize)) {
+    /// Wakes up to `n` parked workers among the first `limit` (the eligible
+    /// ones, M2.10-5), calling `signal(w)` for each worker `w` it takes the
+    /// flag from; the flag of a worker at or beyond `limit` is left set, so
+    /// the first wake that counts it eligible wakes it. SeqCst: the waker's
+    /// half of the park handshake, after its SeqCst open.
+    pub(crate) fn wake(&self, n: usize, limit: usize, mut signal: impl FnMut(usize)) {
         // Between the waker's open (or post) and its reads of the flags, the
         // fence's half of the handshake (see the module documentation).
         fence(Ordering::SeqCst);
         let mut woken = 0;
-        for (w, parked) in self.parked.iter().enumerate() {
+        for (w, parked) in self.parked.iter().enumerate().take(limit) {
             if woken >= n {
                 break;
             }
@@ -208,7 +210,7 @@ mod tests {
         /// a flag it takes arms that hold for a pass that starts later.
         fn wake(&self, n: usize, arm: Option<At>) -> usize {
             let mut took = 0;
-            self.parking.wake(n, |_| {
+            self.parking.wake(n, usize::MAX, |_| {
                 if let Some(at) = arm {
                     self.after
                         .store(self.passes.load(Ordering::SeqCst), Ordering::SeqCst);

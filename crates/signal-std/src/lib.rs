@@ -245,10 +245,15 @@ use signal_core::{
 /// Each `std.*` type's static cost in ns per frame per instance: the seat's
 /// per-primitive medians of `docs/benchmarks.md` (M2-5, one frame at a time),
 /// rounded up. The engine groups cheap units into tasks by them (ADR 0019
-/// §2); they never change the output. The M2.8 physical models are not
-/// benchmarked yet and take the engine's default cost, as do the M2.10 core
-/// types (`std.div` to `std.not`, and core set II from `std.phasor` on).
-pub const COST_NS: [(&str, u32); 30] = [
+/// §2) and takes a plan's worker budget from them; they never change the
+/// output. The second group (M2.10-6) is every type without a figure before
+/// whose median, less the run's host offset, was at least twice the engine's
+/// default of 20 ns (`docs/benchmarks.md` "Idle cost, part 2 (M2.10-6)").
+/// The visual-rate types (`std.mesh2d`, `std.particles`, `std.body2d`) are
+/// left out: the estimate does not divide by a rate divisor, so a per-tick
+/// figure would overstate them up to 800 times. Every other type takes the
+/// engine's default.
+pub const COST_NS: [(&str, u32); 69] = [
     ("std.abs", 11),
     ("std.add", 11),
     ("std.adsr", 44),
@@ -279,6 +284,46 @@ pub const COST_NS: [(&str, u32); 30] = [
     ("std.tanh_shaper", 30),
     ("std.transport", 29),
     ("std.unit_delay", 12),
+    // M2.10-6: `signal --json bench`, 2026-10-18 23:32 UTC, host offset 12.2 ns.
+    ("std.buffer1k", 55),
+    ("std.buffer1m", 60),
+    ("std.buffer64k", 56),
+    ("std.count", 71),
+    ("std.index1024", 1845),
+    ("std.index256", 486),
+    ("std.index64", 136),
+    ("std.ladder", 91),
+    ("std.mass_spring", 44),
+    ("std.mesh2d_audio", 674),
+    ("std.modal", 113),
+    ("std.pack1024", 3488),
+    ("std.pack16", 62),
+    ("std.pack256", 904),
+    ("std.pack64", 224),
+    ("std.reduce1024", 2746),
+    ("std.reduce16", 48),
+    ("std.reduce256", 707),
+    ("std.reduce64", 177),
+    ("std.step_seq8", 49),
+    ("std.table1024", 3109),
+    ("std.table16", 80),
+    ("std.table256", 753),
+    ("std.table64", 216),
+    ("std.table8", 54),
+    ("std.unpack1024", 3714),
+    ("std.unpack16", 68),
+    ("std.unpack256", 985),
+    ("std.unpack64", 255),
+    ("std.vadd1024", 5344),
+    ("std.vadd16", 93),
+    ("std.vadd256", 1347),
+    ("std.vadd64", 354),
+    ("std.vadd8", 49),
+    ("std.vmul1024", 5482),
+    ("std.vmul16", 91),
+    ("std.vmul256", 1409),
+    ("std.vmul64", 359),
+    ("std.vmul8", 51),
 ];
 
 /// Registers every `std.*` primitive type in `registry`, with its static
@@ -729,6 +774,20 @@ mod tests {
         assert_eq!(d.category, Some(category::FILTER));
         assert_eq!(d.feedthrough, signal_core::Feedthrough::Direct);
         assert_eq!(d.rate(), Some(RateDivisor::ONE));
+    }
+
+    /// M2.10-6: every name in [`COST_NS`] is a registered type, and the
+    /// registry holds its cost after `register`, so no entry is silently
+    /// lost to a misspelt or renamed type (`Registry::set_cost` checks
+    /// nothing).
+    #[test]
+    fn every_cost_names_a_registered_type() {
+        let mut registry = Registry::new();
+        register(&mut registry).unwrap();
+        for (name, ns) in COST_NS {
+            assert!(registry.get(name).is_some(), "{name} is not registered");
+            assert_eq!(registry.cost(name), Some(ns), "{name}");
+        }
     }
 
     /// A `Set` counts at most the transport's largest per-frame count, so a
