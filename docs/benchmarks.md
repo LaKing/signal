@@ -998,3 +998,18 @@ On the Mac outside the sandbox, from the repository root, with `PATH=/opt/homebr
    - *N* as the issue states it, about 60 % of one core's budget times the performance cores *P*: one core's whole budget at *k* = 128 is 4 × the one-thread "within 25 %" count of `signal --json bench` (`scaling.rows[]` where `threads` is 1, `within_25_percent.voices`), so *N* = round(2.4 × N25(1 thread) × *P*); on the operator's 5cb390c numbers 2.4 × 26 × 18 ≈ **1 123**. Then `scripts/soak.sh --voices <N> --threads <P> 30 128`.
    - For information, predicted by arithmetic: that load is 0.6 × *P* core-periods of work per period, so even perfectly spread over *P* threads every callback takes at least 0.6 of the period, above V12's 0.25: a FAIL is expected by construction. Beside it, the heaviest load consistent with V12 is about 0.6 × N25(*P* threads) = 0.6 × 175 ≈ **105** voices (`scaling.rows[]` where `threads` is *P*), which still needs about four cores. The choice of *N* is the operator's.
    - V12 passes with `xruns 0` and a `worst callback` below `0.250`; the soak result (AC-soak-result) is the operator's measurement.
+
+### The native DSP primitives (M2.10, the owner's list)
+
+**Measurement on one host, not a threshold.** `signal --json bench --seconds 0.5`, release build of 6d42e6c plus the uncommitted M2.10 DSP primitives after the review fixes (bounded comb and all-pass reads, the comb's convex damping one-pole, the wavetable's 4096-sample Hermite tables), 2026-10-19 22:16–22:19 UTC, devpanel-shared Mac (load average 9–18). Per-instance medians (16 instances fed by the bench's saw), less the run's host offset of 13.1 ns (the median difference to the first 30 `COST_NS` entries; `std.svf` read 22.3 against its 22, `std.ladder` 94.7 against 91):
+
+| Type | Median | Less offset | `COST_NS` |
+|---|---:|---:|---:|
+| `std.biquad` | 42.1 | 29.0 | 29 |
+| `std.comb` | 45.1 | 32.0 | 32 |
+| `std.allpass_delay` | 44.0 | 30.9 | 31 |
+| `std.fdn_reverb` | 84.8 | 71.7 | 72 |
+| `std.fm_op` | 55.1 | 42.0 | 42 |
+| `std.wavetable` | 44.8 | 31.7 | 32 |
+
+The first run (21:02 UTC, before the fixes, load 5–27) read 27.6, 39.4, 37.9, 74.2, 42.5 and 26.1: the wavetable's 16 Hermite reads cost about 6 ns more than 8 linear ones; the comb and all-pass did not get dearer (the differences are within this host's run-to-run spread). The bench keeps every parameter at its default, so these are the costs with cached coefficients; a parameter modulated at audio rate adds its transcendental functions per frame (`std.biquad` a `tan`, a `pow` and a square root; `std.comb` an `exp` when `damping_hz` moves; `std.fdn_reverb` eight `pow` when `size` or `decay_s` moves).

@@ -48,6 +48,7 @@
   - `std.svf` and `std.onepole` flush each integrator state (`s₁`, `s₂`; `s`), and `std.ladder` each stage's (`s₁`…`s₄`).
   - `std.adsr` flushes its release to exactly 0 and goes idle. Its decay ends at exactly the sustain level when the distance to it falls below 1e-9.
   - `std.lag` flushes the difference `x[n] − y[n]`: below 1e-9 the output is exactly the input.
+  - `std.biquad` flushes its two integrator states; `std.comb`, `std.allpass_delay` and `std.fdn_reverb` flush every value written into a recirculating line and their damping states, and `std.allpass_delay` its output.
 - A primitive whose output can only be subnormal when its input is subnormal (a gain, a delay) need not flush.
 - The contract check `no_subnormals` drives every primitive with an impulse and 65 536 frames of silence. It fails on any subnormal output.
 
@@ -81,7 +82,7 @@ A naive saw, square or triangle computed from the phase has infinitely many harm
   It is added for an upward jump and subtracted for a downward one: `saw = 2p − 1 − blep(p)`.
 - **polyBLAMP** (band-limited ramp) corrects a jump in the slope: the triangle's corners. It is the integral of the polyBLEP residual. For a slope change of 1 per frame it is `(1 − t/Δ)³/6` after the corner and `((t − 1)/Δ + 1)³/6` before it. A slope change of *c* per cycle is *c*·Δ per frame, so the residual is scaled by *c*·Δ.
 - The polynomials assume `Δ ≤ ½`, which the clamp of the frequency to `sr/2` guarantees. With `Δ = 0` there is nothing to correct.
-- A 2-point residual is an approximation. It lowers aliasing but does not remove it, and less is removed as the fundamental rises. Each oscillator documents its measured residual aliasing: `signal_eval::aliasing` on an off-divisor tone, as in `testing-and-evaluation.md`, "The V6 measurement". Wavetables, hard sync and oversampling are out of scope.
+- A 2-point residual is an approximation. It lowers aliasing but does not remove it, and less is removed as the fundamental rises. Each oscillator documents its measured residual aliasing: `signal_eval::aliasing` on an off-divisor tone, as in `testing-and-evaluation.md`, "The V6 measurement". `std.wavetable` avoids the problem instead: its tables are additive, with one mip level per octave holding only harmonics below sr/2 at a constant pitch and `pm` = 0. What remains is the table interpolation's images, largest in the bass: measured on a saw at 48 kHz, −98.4 dB relative to the fundamental at 20 Hz, −102.1 dB at 30 Hz, −116.0 dB at 60 Hz, −129.1 dB at 120 Hz, below −170 dB from 1.2 kHz up (its rustdoc has the table). Hard sync and oversampling are out of scope.
 
 ## TPT filters
 
@@ -92,6 +93,7 @@ Filters are written in the topology-preserving transform (TPT, Zavalishin) form:
 - **One-pole** (`std.onepole`): `G = g/(1 + g)`, `v = (x − s)·G`, `lp = v + s`, `s ← lp + v`, `hp = x − lp`.
 - **State-variable** (`std.svf`): `k = 1/q`, then `hp = (x − (k + g)·s₁ − s₂)/(1 + k·g + g²)`, `bp` and `lp` from two integrators in series. `lp + k·bp + hp = x`, and `bp` has gain `q` at the cutoff.
 - **Ladder** (`std.ladder`, Zavalishin rev. 2.1.x §5.2–5.3, §6.3–6.5): four one-pole stages in a feedback loop of gain `k = 4.2·resonance`, with one `tanh` at the loop's input, `u = tanh((1 + drive)·x − k·y₄)`. The zero-delay feedback equation is solved by at most 8 bracketed Newton steps per frame, and the passband is compensated by `1 + k`. Its cutoff is clamped to `[1, 0.45·sr]`, not `0.49·sr`. The rustdoc has the formula and the output bound.
+- **Biquad** (`std.biquad`): the RBJ cookbook responses as an SVF with output mixing (Simper): `out = m₀·x + m₁·bp + m₂·lp`, with `g` and `k` adjusted for the peak and the shelves. The cookbook's TDF-II gives the same transfer function for fixed coefficients, but its state belongs to the old coefficients when they move, so it is not used.
 - Coefficients that need a transcendental function are recomputed only when their inputs change, which is never more than once per frame. The result does not depend on how the frames are split into calls.
 - The integrator states are flushed below 1e-9 (see "Denormals").
 

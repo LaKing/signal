@@ -157,14 +157,21 @@ The `std.*` types are listed with their class and category in the rustdoc of `cr
 | Category | Types |
 |---|---|
 | `core` | `add`, `sub`, `mul`, `div`, `neg`, `abs`, `min`, `max`, `clamp`, `scale`, `mod`, `fract`, `floor`, `round`, `sign`; `sqrt`, `exp`, `log`, `pow`, `sin`, `cos`, `tan`, `tanh`, `atan2`, `sin_cycles`; `const`, `sample_rate`, `frames`; `compare`, `select`, `and`, `or`, `not`; `gain`, `mix`, `pan`, `unit_delay`; `phasor`, `counter`, `integrator`; `buffer1k`, `buffer64k`, `buffer1m`, `table<N>`; `latch`, `to_events`, `route`; `random`; `pack<N>`, `unpack<N>`, `index<N>`, `reduce<N>`, `vadd<N>`, `vmul<N>` |
-| `generator` | `sine_osc`, `osc`, `lfo`, `noise` |
-| `filter` | `svf`, `onepole`, `ladder`, `dc_block`, `lag`, `tanh_shaper` |
+| `generator` | `sine_osc`, `osc`, `fm_op`, `wavetable`, `lfo`, `noise` |
+| `filter` | `svf`, `onepole`, `ladder`, `biquad`, `dc_block`, `lag`, `tanh_shaper` |
 | `envelope` | `exp_env`, `adsr` |
-| `delay` | `delay` |
+| `delay` | `delay`, `comb`, `allpass_delay`, `fdn_reverb` |
 | `physical` | `string`, `modal`, `mass_spring`, `exciter`, `mesh2d_audio` |
 | `event` | `sample_hold`, `edge`, `clock_div`, `step_seq`, `count`, `transport`, `note_seq`, `step_seq8` |
 | `visual` | `particles`, `mesh2d`, `body2d` |
 | `io` | `audio_out` |
+
+**The native DSP primitives** (M2.10, the owner's list; ADR 0027 §3: algorithms whose per-sample feedback crosses many terms stay native) are direct, at divisor 1, and bounded at every parameter combination: each rustdoc states its formula, its source, and its bound argument, and each output is clamped to ±10⁶ so it never faults on its own (`crates/signal-cli/tests/dsp_bound.rs` drives every one at its extremes through the engine).
+- `biquad`: the eight RBJ cookbook responses by `mode` (0 low-pass, 1 high-pass, 2 band-pass at 0 dB peak, 3 notch, 4 peak, 5 low shelf, 6 high shelf, 7 all-pass), with `cutoff_hz`, `q` and `gain_db`. It runs the cookbook's transfer functions as a TPT state-variable filter with output mixing (Simper), not as the cookbook's TDF-II: the two agree for fixed coefficients (a unit test runs both), and only the SVF is stable under audio-rate modulation.
+- `comb` (feedback comb with a one-pole damping low-pass in the loop) and `allpass_delay` (Schroeder all-pass): `time_ms` up to 1 s, read with `std.delay`'s Hermite interpolation clamped between the two samples it lies between; `feedback` and `gain` range over ±0.999. Both loops are contractions whatever the modulation: the clamped read and the convex one-pole (`lp = s + a·(r − s)`, `0 < a < 1`) never exceed the largest earlier value, so `|comb out| ≤ max|in|/(1 − |feedback|)` and the all-pass's state `≤ max|in|/(1 − |g|)` (its output `≤ (1 + |g|)·max|in|/(1 − |g|)`).
+- `fdn_reverb`: 8 lines, Householder matrix, distinct prime lengths scaled by `size`, per-line gains for the T60 `decay_s` and damping one-poles, `predelay_ms`, `mix`; stereo in and out (mono: `in_l` only). Loop gain ≤ max line gain < 1 (at most 0.9982 from 44.1 kHz up).
+- `fm_op`: a phase-modulation operator (ratio or fixed frequency, `pm` in cycles, self-feedback through the mean of its last two outputs, `level`). Not band-limited: sidebands beyond sr/2 alias.
+- `wavetable`: eight built-in tables (sine, saw, square, triangle, vowels a, e, i, o) morphed by `position`, one mip level per octave so that, at a constant pitch and without `pm`, no harmonic exceeds sr/2, crossfaded between levels.
 
 **The core arithmetic, functions, constants and comparisons** (M2.10-1) are direct, at divisor 1, and **total**: finite inputs give finite outputs.
 - **Results are clamped to ±10⁶, the engine's magnitude bound (`semantics.md` §7), so a core primitive never faults on its own.** That bounds `div`, `exp`, `pow` and `tan`, which grow beyond it (e.g. `div(1, 1e−7)`, `exp(14)`, `pow(10, 7)`, `tan` near π/2 all give ±10⁶), and every other M2.10-1 type's output on an input that a fan-in sum or a connection scale took beyond the bound. One constant, `SIGNAL_BOUND` in `signal-std`, holds it. The types that predate M2.10-1 (`add`, `sub`, `mul`, `abs`, `min`, `max`, `scale`, `clamp`, `gain`, `mix`, `pan`, `unit_delay`) are unchanged: `mul`, `add`, `sub`, `scale` and `gain` can still exceed the bound, and the fault guard then mutes them as before.

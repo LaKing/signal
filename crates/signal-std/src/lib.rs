@@ -93,8 +93,14 @@
 //! | `std.vadd<N>` | [`Vadd`]`<N>` | direct | `core` |
 //! | `std.vmul<N>` | [`Vmul`]`<N>` | direct | `core` |
 //! | `std.table<N>` | [`Table`]`<N>` | direct | `core` |
+//! | `std.biquad` | [`Biquad`] | direct | `filter` |
+//! | `std.comb` | [`Comb`] | direct | `delay` |
+//! | `std.allpass_delay` | [`AllpassDelay`] | direct | `delay` |
+//! | `std.fdn_reverb` | [`FdnReverb`] | direct | `delay` |
+//! | `std.fm_op` | [`FmOp`] | direct | `generator` |
+//! | `std.wavetable` | [`Wavetable`] | direct | `generator` |
 //!
-//! The last seven are one type per width N of [`VECTOR_WIDTHS`] (2, 4, 8, 16,
+//! The seven `<N>` types are one type per width N of [`VECTOR_WIDTHS`] (2, 4, 8, 16,
 //! 64, 256, 1024), named with the width as a suffix: `std.pack4`,
 //! `std.reduce1024`, `std.table16`.
 //!
@@ -124,6 +130,12 @@
 //! `docs/module-contract.md` "Events into divided-rate types"). `std.mesh2d_audio` is the same membrane at divisor 1,
 //! with an event input and an audio pickup.
 //!
+//! The M2.10 native DSP primitives (ADR 0027 §3: filters with modulated
+//! coefficients, band-limited and FM oscillators, reverb cores) are
+//! `std.biquad`, `std.comb`, `std.allpass_delay`, `std.fdn_reverb`,
+//! `std.fm_op` and `std.wavetable`. Each rustdoc gives the formula, its
+//! source, and why it stays bounded at every setting.
+//!
 //! Musical time (tempo, beats) lives here, in [`Transport`], never in the core
 //! (ADR 0003).
 
@@ -141,10 +153,12 @@ mod add;
 mod adsr;
 mod arith;
 mod audio_out;
+mod biquad;
 mod body2d;
 mod bridge;
 pub mod category;
 mod clock_div;
+mod comb;
 mod constant;
 mod count;
 mod dc_block;
@@ -153,11 +167,14 @@ mod edge;
 mod events;
 mod exciter;
 mod exp_env;
+mod fdn;
+mod fm_op;
 mod function;
 mod gain;
 mod ladder;
 mod lag;
 mod lfo;
+mod line;
 mod logic;
 mod mass_spring;
 mod math;
@@ -185,6 +202,7 @@ mod tanh_shaper;
 mod transport;
 mod unit_delay;
 mod vector;
+mod wavetable;
 
 #[cfg(test)]
 mod testing;
@@ -193,9 +211,11 @@ pub use add::Add;
 pub use adsr::Adsr;
 pub use arith::{Div, Floor, Fract, Mod, Neg, Round, Sign};
 pub use audio_out::AudioOut;
+pub use biquad::Biquad;
 pub use body2d::Body2d;
 pub use bridge::BRIDGE_ROWS;
 pub use clock_div::ClockDiv;
+pub use comb::{AllpassDelay, Comb};
 pub use constant::{Const, Frames, SampleRate};
 pub use count::Count;
 pub use dc_block::DcBlock;
@@ -204,6 +224,8 @@ pub use edge::Edge;
 pub use events::{Latch, Route, ToEvents};
 pub use exciter::Exciter;
 pub use exp_env::ExpEnv;
+pub use fdn::FdnReverb;
+pub use fm_op::FmOp;
 pub use function::{Atan2, Cos, Exp, Log, Pow, Sin, SinCycles, Sqrt, Tan, Tanh};
 pub use gain::Gain;
 pub use ladder::Ladder;
@@ -235,6 +257,7 @@ pub use tanh_shaper::TanhShaper;
 pub use transport::Transport;
 pub use unit_delay::UnitDelay;
 pub use vector::{Index, Pack, Reduce, Unpack, VECTOR_WIDTHS, Vadd, Vmul};
+pub use wavetable::Wavetable;
 
 use signal_core::{
     Combine, DirectPrimitive, Direction, Event, EventPayload, ModuleType, Outputs,
@@ -249,11 +272,13 @@ use signal_core::{
 /// output. The second group (M2.10-6) is every type without a figure before
 /// whose median, less the run's host offset, was at least twice the engine's
 /// default of 20 ns (`docs/benchmarks.md` "Idle cost, part 2 (M2.10-6)").
+/// The third group is the M2.10 native DSP primitives, each measured when it
+/// was added.
 /// The visual-rate types (`std.mesh2d`, `std.particles`, `std.body2d`) are
 /// left out: the estimate does not divide by a rate divisor, so a per-tick
 /// figure would overstate them up to 800 times. Every other type takes the
 /// engine's default.
-pub const COST_NS: [(&str, u32); 69] = [
+pub const COST_NS: [(&str, u32); 75] = [
     ("std.abs", 11),
     ("std.add", 11),
     ("std.adsr", 44),
@@ -324,6 +349,17 @@ pub const COST_NS: [(&str, u32); 69] = [
     ("std.vmul256", 1409),
     ("std.vmul64", 359),
     ("std.vmul8", 51),
+    // M2.10, the native DSP primitives: `signal --json bench --seconds 0.5`,
+    // release, 2026-10-19 22:16 UTC (after the review fixes), load average
+    // 9–18 (shared host), host offset 13.1 ns (the median difference over the
+    // first 30 entries; `std.svf` read 22.3 against its 22, `std.ladder` 94.7
+    // against 91). Each is the median less that offset, rounded up.
+    ("std.allpass_delay", 31),
+    ("std.biquad", 29),
+    ("std.comb", 32),
+    ("std.fdn_reverb", 72),
+    ("std.fm_op", 42),
+    ("std.wavetable", 32),
 ];
 
 /// Registers every `std.*` primitive type in `registry`, with its static
@@ -411,6 +447,12 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<NoteSeq>(),
         direct::<StepSeq8>(),
         direct::<Ladder>(),
+        direct::<Biquad>(),
+        direct::<Comb>(),
+        direct::<AllpassDelay>(),
+        direct::<FdnReverb>(),
+        direct::<FmOp>(),
+        direct::<Wavetable>(),
     ] {
         registry.register(module_type)?;
     }
@@ -765,6 +807,31 @@ mod tests {
     /// M2.11-2: the transistor-ladder filter.
     const LADDER: [&str; 1] = ["std.ladder"];
 
+    /// M2.10 (the owner's list): the native DSP primitives, with their
+    /// categories.
+    const DSP: [(&str, &str); 6] = [
+        ("std.biquad", category::FILTER),
+        ("std.comb", category::DELAY),
+        ("std.allpass_delay", category::DELAY),
+        ("std.fdn_reverb", category::DELAY),
+        ("std.fm_op", category::GENERATOR),
+        ("std.wavetable", category::GENERATOR),
+    ];
+
+    /// The native DSP primitives are direct, at the master rate, in their
+    /// categories.
+    #[test]
+    fn the_dsp_primitives_are_direct_in_their_categories() {
+        let mut registry = Registry::new();
+        register(&mut registry).unwrap();
+        for (name, group) in DSP {
+            let d = registry.get(name).unwrap().descriptor;
+            assert_eq!(d.category, Some(group), "{name}");
+            assert_eq!(d.feedthrough, signal_core::Feedthrough::Direct, "{name}");
+            assert_eq!(d.rate(), Some(RateDivisor::ONE), "{name}");
+        }
+    }
+
     /// M2.11-2 AC1: `std.ladder` is a direct `filter` at the master rate.
     #[test]
     fn the_ladder_is_a_direct_filter() {
@@ -822,13 +889,14 @@ mod tests {
         register(&mut registry).unwrap();
         assert_eq!(
             registry.len(),
-            NAMES.len() + SEQUENCERS.len() + LADDER.len() + vector::types().len()
+            NAMES.len() + SEQUENCERS.len() + LADDER.len() + DSP.len() + vector::types().len()
         );
         let vectors = vector::types().iter().map(|t| t.descriptor.type_name);
         for name in NAMES
             .into_iter()
             .chain(SEQUENCERS)
             .chain(LADDER)
+            .chain(DSP.map(|(name, _)| name))
             .chain(vectors)
         {
             let module_type = registry.get(name).unwrap_or_else(|| panic!("{name}"));
@@ -851,7 +919,7 @@ mod tests {
         );
         assert_eq!(
             registry.len(),
-            NAMES.len() + SEQUENCERS.len() + LADDER.len() + vector::types().len()
+            NAMES.len() + SEQUENCERS.len() + LADDER.len() + DSP.len() + vector::types().len()
         );
 
         // A type registered first under a std name blocks that name.

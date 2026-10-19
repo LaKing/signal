@@ -792,3 +792,27 @@ mod modulation {
         }
     }
 }
+
+mod biquad {
+    signal_contract::contract_tests!(super::std_type("std.biquad"));
+}
+
+mod comb {
+    signal_contract::contract_tests!(super::std_type("std.comb"));
+}
+
+mod allpass_delay {
+    signal_contract::contract_tests!(super::std_type("std.allpass_delay"));
+}
+
+mod fdn_reverb {
+    signal_contract::contract_tests!(super::std_type("std.fdn_reverb"));
+}
+
+mod fm_op {
+    signal_contract::contract_tests!(super::std_type("std.fm_op"));
+}
+
+mod wavetable {
+    signal_contract::contract_tests!(super::std_type("std.wavetable"));
+}
