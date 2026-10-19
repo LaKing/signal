@@ -34,3 +34,4 @@ To change a decision, add a new ADR that supersedes the old one. Do not rewrite 
 | [0027](0027-core-set-and-built-in-library.md) | The core set (complete minimal std primitives), the built-in `lib.*` library of composites, and what stays native (M2.10) |
 | [0028](0028-patterns-as-project-text.md) | Patterns as project text: `patterns/*.toml` note and step data, the transport's tick clock, `std.note_seq` and `std.step_seq8`, `pattern.read`/`pattern.write` (M2.11) |
 | [0029](0029-agent-interface-mcp.md) | An agent interface: `signal mcp`, the Model Context Protocol over the UI protocol (M2.12) |
+| [0030](0030-schematic-path-tracing-and-wire-scaling.md) | Path tracing across composite boundaries, continuous in-place zoom, and wires that scale (M2.13) |
