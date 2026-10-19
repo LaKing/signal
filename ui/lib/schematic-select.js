@@ -126,6 +126,7 @@ export function reselectAll(selected, layoutOf) {
         level,
         drawn && {
           nodes: new Map(drawn.nodes.filter((n) => n.kind === 'instance').map((n) => [n.name, n])),
+          frames: new Map(drawn.nodes.filter((n) => n.kind !== 'instance').map((n) => [n.id, n])),
           wires: new Map(drawn.wires.map((w) => [`${w.written.from}\n${w.written.to}`, w])),
         },
       );
@@ -155,7 +156,7 @@ export function reselectAll(selected, layoutOf) {
       if (wire) found.push({ ...s, wire });
       continue;
     }
-    const node = drawn.nodes.get(s.node.name);
+    const node = s.node.kind === 'instance' ? drawn.nodes.get(s.node.name) : drawn.frames.get(s.node.id);
     if (!node) continue;
     if (s.kind === 'instance') found.push({ ...s, node });
     else {

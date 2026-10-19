@@ -49,6 +49,7 @@ import './lib/context-menu.test.js';
 import './lib/schematic-menu.test.js';
 import './lib/schematic-select.test.js';
 import './lib/schematic-sidebar.test.js';
+import './lib/schematic-trace.test.js';
 import './lib/schematic-palette.test.js';
 import './controls/context-menu.test.js';
 import './lib/pattern-text.test.js';

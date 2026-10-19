@@ -37,9 +37,15 @@ export function instanceHit(entry, node) {
   return { kind: 'instance', path: entry.path, level: entry.level, node, address: `${entry.path}/${node.name}` };
 }
 
-/** The hit of pin `port` of instance `node` at level `entry`. */
+/**
+ * The hit of pin `port` of instance `node` at level `entry`; of a
+ * composite's frame (`node` its inputs or outputs, ADR 0030 §1) the
+ * composite instance's port, which is what the frame's pin stands for
+ * (`/drums.trigger` at level `/drums`).
+ */
 export function portHit(entry, node, port) {
-  return { kind: 'port', path: entry.path, level: entry.level, node, port, address: `${entry.path}/${node.name}.${port.name}` };
+  const address = node.kind === 'instance' ? `${entry.path}/${node.name}.${port.name}` : `${entry.path}.${port.name}`;
+  return { kind: 'port', path: entry.path, level: entry.level, node, port, address };
 }
 
 /** The hit of `wire` (a layout's) at level `entry`: its ends' addresses as `from` and `to`. */
@@ -68,7 +74,8 @@ export function hitTest(drawn, point) {
     const scale = entry.transform.k;
     let best = null;
     for (const node of entry.nodes) {
-      if (node.kind !== 'instance') continue;
+      // A composite's frame pins too (ADR 0030 §1: a trace starts there); its boxes are not hit.
+      if (node.kind !== 'instance' && !entry.path) continue;
       // A box small on screen (zoomed out) keeps its body: its pins reach less.
       const reach = Math.min(PORT_PX, (node.h * scale) / 4);
       for (const port of [...node.ins, ...node.outs]) {
@@ -112,7 +119,9 @@ export function reselect(selection, layoutOf) {
     const wire = drawn.wires.find((w) => w.written.from === from && w.written.to === to);
     return wire ? { ...selection, wire } : null;
   }
-  const node = drawn.nodes.find((n) => n.kind === 'instance' && n.name === selection.node.name);
+  // A frame's pin by its frame (`@inputs`, `@outputs`).
+  const frame = selection.node.kind !== 'instance';
+  const node = drawn.nodes.find((n) => (frame ? n.id === selection.node.id : n.kind === 'instance' && n.name === selection.node.name));
   if (!node) return null;
   if (selection.kind === 'instance') return { ...selection, node };
   const port = [...node.ins, ...node.outs].find((p) => p.name === selection.port.name && p.direction === selection.port.direction);

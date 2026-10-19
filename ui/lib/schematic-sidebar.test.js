@@ -8,7 +8,9 @@ import { layout } from './schematic-layout.js';
 import { instanceHit, portHit, wireHit } from './schematic-hit.js';
 import { hitKey } from './schematic-select.js';
 import { EDIT_OFF } from './schematic-menu.js';
-import { LEGEND, MEMBERS_SHOWN, addressesText, connectionsOf, sidebar, tooLargeText } from './schematic-sidebar.js';
+import { LEGEND, MEMBERS_SHOWN, TRACE_DIRECTIONS, addressesText, connectionsOf, sidebar, tooLargeText, traceSection } from './schematic-sidebar.js';
+import { trace } from './schematic-trace.js';
+import { GRAPH } from './schematic-trace.test.js';
 import { KICK } from './schematic-scene.test.js';
 import { moduleInfo } from './schematic-palette.js';
 
@@ -64,14 +66,14 @@ test('an instance: what it is, its pins with their connections as links, its par
   assert.equal(hitKey(l.connections[0].end.hit), 'port /drums.out out', 'and the other end');
   assert.equal(l.connections[0].removable, true);
   assert.deepEqual(model.parameters.map((p) => [p.address, p.editable]), [['/out.gain', true]], 'the card’s rows, editable at the top level');
-  assert.deepEqual(ids(model), ['copy-address', 'delete'], 'a primitive has no inside: no Enter, no Open');
+  assert.deepEqual(ids(model), ['trace', 'copy-address', 'delete'], 'a primitive has no inside: no Enter, no Open');
   assert.equal(action(model, 'delete').disabled, false);
   const off = sidebar([box('out')], context());
   assert.equal(action(off, 'delete').title, EDIT_OFF, 'the same reason as the menu’s');
 
   const drums = sidebar([box('drums')], context({ menu: () => ({ open: true, wide: false }) }));
   assert.equal(field(drums, 'composite'), 'yes, 1 instance inside');
-  assert.deepEqual(ids(drums), ['enter', 'close', 'copy-address', 'delete'], 'an open composite closes');
+  assert.deepEqual(ids(drums), ['trace', 'enter', 'close', 'copy-address', 'delete'], 'an open composite closes');
   const kick = instanceHit({ path: '/drums', level: 'drums' }, nodeOf('drums', 'kick'));
   const inner = sidebar([kick], context());
   assert.equal(field(inner, 'level'), 'composite drums, 1 instance');
@@ -107,12 +109,13 @@ test('a wire: its ends as links, shape, rate, scale, converters; Edit scale and 
     ['from', '/lfo.out', 'port /lfo.out out'],
     ['to', '/drums.kick_decay', 'port /drums.kick_decay in'],
   ]);
-  assert.deepEqual(ids(model), ['scale', 'copy-address', 'delete']);
+  assert.deepEqual(ids(model), ['trace', 'scale', 'copy-address', 'delete']);
   assert.ok(model.actions.every((a) => !a.disabled));
-  // An export: its end on the frame has no pin to select, and it is not edited.
+  // An export: its end on the frame selects the frame's pin (ADR 0030 §1), and it is not edited.
   const exported = wireHit({ path: '/drums', level: 'drums' }, layoutOf('drums').wires.find((w) => w.kind === 'export' && w.from.node === '@inputs'));
   const frame = sidebar([exported], context({ editing: true }));
-  assert.equal(frame.links[0].hit, null);
+  assert.equal(hitKey(frame.links[0].hit), 'port /drums.trigger out');
+  assert.equal(frame.links[0].hit.node.id, '@inputs');
   assert.equal(frame.links[0].label, '/drums.trigger');
   assert.equal(action(frame, 'delete').disabled, true);
 });
@@ -125,7 +128,7 @@ test('a pin: what it is, its connections (removable in Edit patch), a level for 
   assert.equal(field(out, 'connected'), '1 wire');
   assert.equal(out.meter, true);
   assert.deepEqual(out.connections.map((c) => [c.wire.label, hitKey(c.end.hit), c.removable]), [['→ /drums.kick_decay', 'port /drums.kick_decay in', true]]);
-  assert.deepEqual(ids(out), ['copy-address', 'disconnect']);
+  assert.deepEqual(ids(out), ['trace', 'copy-address', 'disconnect']);
   assert.equal(action(out, 'disconnect').disabled, false);
   const outNode = nodeOf('', 'out');
   const gain = sidebar([portHit(TOP, outNode, outNode.ins.find((p) => p.name === 'gain'))], context());
@@ -136,11 +139,17 @@ test('a pin: what it is, its connections (removable in Edit patch), a level for 
   assert.equal(action(gain, 'disconnect').disabled, true);
 });
 
-test('connections of a pin at a composite’s level: an export’s end on the frame selects nothing', () => {
+test('connections of a pin at a composite’s level: an export’s end on the frame selects the frame’s pin', () => {
   const entry = { path: '/drums/kick', level: 'kick', layout: layoutOf('kick') };
   const env = nodeOf('kick', 'env');
   const [trigger] = connectionsOf(entry, env, env.ins.find((p) => p.name === 'trigger'));
-  assert.equal(trigger.end.hit, null);
+  assert.equal(hitKey(trigger.end.hit), 'port /drums/kick.trigger out');
+  // The frame's pin itself: a boundary pin, its connections inside.
+  const pin = sidebar([trigger.end.hit], context({ layoutOf }));
+  assert.equal(field(pin, 'direction'), 'exported input (boundary)');
+  assert.match(pin.subtitle, /^boundary pin of \/drums\/kick/);
+  assert.equal(pin.connections.length, 1);
+  assert.equal(pin.meter, false);
   assert.equal(trigger.removable, false);
   const osc = nodeOf('kick', 'osc');
   const [toDc] = connectionsOf(entry, osc, osc.outs[0]);
@@ -181,4 +190,48 @@ test('a large group: the first 200 members listed and the rest counted; a Delete
   assert.equal(few.more, 0);
   assert.equal(action(few, 'delete-all').disabled, false);
   assert.equal(tooLargeText(few.plan), null);
+});
+
+test('the Trace section: the direction toggle, where it comes from and goes, the tree by level, each node revealing what it names', () => {
+  assert.equal(traceSection(null, GRAPH), null);
+  const model = traceSection(trace(GRAPH, { kind: 'pin', address: '/voice.hz' }, 'both'), GRAPH);
+  assert.equal(model.title, '/voice.hz');
+  assert.equal(model.subtitle, '3 levels, 5 wires, 6 pins');
+  assert.deepEqual(model.directions.map((d) => [d.id, d.on]), [['up', false], ['down', false], ['both', true]]);
+  assert.deepEqual(model.directions.map((d) => d.id), TRACE_DIRECTIONS.map((d) => d.id));
+  assert.deepEqual(
+    model.sides.map((s) => [s.name, s.title, s.count, s.endpoints.map((e) => e.label)]),
+    [
+      ['up', 'Comes from', 1, ['/seq.hz']],
+      ['down', 'Goes to', 3, ['/voice/pitch/r1.in', '/voice/pitch/r2.in', '/voice/pitch/r3.in']],
+    ],
+  );
+  assert.equal(model.sides[0].endpoints[0].note, 'std.note_seq');
+  assert.deepEqual(model.sides[0].endpoints[0].reveal, { kind: 'pin', address: '/seq.hz' });
+  assert.deepEqual(
+    model.levels.map((l) => [l.label, l.count, l.reveal]),
+    [
+      ['top level', '1 wire, 2 pins', { kind: 'level', path: '' }],
+      ['/voice (voice)', '1 wire, 1 pin', { kind: 'level', path: '/voice' }],
+      ['/voice/pitch (pitch)', '3 wires, 3 pins', { kind: 'level', path: '/voice/pitch' }],
+    ],
+  );
+  const voice = model.levels[0].children[1];
+  assert.deepEqual([voice.label, voice.note, voice.reveal], ['voice', 'voice', { kind: 'instance', address: '/voice' }]);
+  assert.deepEqual(voice.children, [{ label: 'hz', role: 'start', direction: 'in', reveal: { kind: 'pin', address: '/voice.hz' } }]);
+  assert.deepEqual(model.notes, []);
+});
+
+test('the Trace section: one direction, an empty side, converters, a library composite noted', () => {
+  const up = traceSection(trace(GRAPH, { kind: 'pin', address: '/voice/filt.cutoff' }, 'up'), GRAPH);
+  assert.deepEqual(up.sides.map((s) => s.name), ['up']);
+  assert.equal(up.sides[0].endpoints[0].note, 'std.osc; via converter out_d800');
+  const none = traceSection(trace(GRAPH, { kind: 'pin', address: '/seq.hz' }, 'up'), GRAPH);
+  assert.equal(none.sides[0].count, 0);
+  assert.equal(none.sides[0].empty, 'nothing upstream');
+  const lib = traceSection(trace(GRAPH, { kind: 'pin', address: '/mix.out' }, 'down'), GRAPH);
+  assert.equal(lib.sides[0].endpoints[0].note, 'lib.tape_echo: library composite, inside not in the graph');
+  assert.match(lib.notes[0], /^1 end at a library composite/);
+  const fx = lib.levels[0].children.find((c) => c.label === 'fx');
+  assert.equal(fx.note, 'lib.tape_echo (opaque)');
 });

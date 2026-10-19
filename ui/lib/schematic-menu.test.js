@@ -18,7 +18,7 @@ const PIN = { kind: 'port', path: '', level: '', address: '/lfo.out', node: PRIM
 
 test('an instance: Inspect, Open, Enter, Copy address, Delete; a primitive has no inside', () => {
   const items = schematicMenu(PRIMITIVE, { editing: true });
-  assert.deepEqual(ids(items), ['inspect', 'open', 'enter', 'separator', 'copy-address', 'separator', 'delete']);
+  assert.deepEqual(ids(items), ['inspect', 'trace', 'open', 'enter', 'separator', 'copy-address', 'separator', 'delete']);
   assert.equal(item(items, 'open').disabled, true);
   assert.equal(item(items, 'open').title, 'A primitive has no inside');
   assert.equal(item(items, 'enter').disabled, true);
@@ -32,7 +32,7 @@ test('an instance: Inspect, Open, Enter, Copy address, Delete; a primitive has n
 
 test('an open composite: Close (not while the zoom holds it open) and Add module here', () => {
   const open = schematicMenu(COMPOSITE, { editing: true, open: true, wide: false, addable: true });
-  assert.deepEqual(ids(open), ['inspect', 'close', 'enter', 'separator', 'copy-address', 'separator', 'add', 'delete']);
+  assert.deepEqual(ids(open), ['inspect', 'trace', 'close', 'enter', 'separator', 'copy-address', 'separator', 'add', 'delete']);
   assert.equal(item(open, 'close').disabled, false);
   assert.equal(item(open, 'add').disabled, false);
   const wide = schematicMenu(COMPOSITE, { editing: false, open: true, wide: true, addable: true });
@@ -43,7 +43,7 @@ test('an open composite: Close (not while the zoom holds it open) and Add module
 
 test('a wire: Inspect, Edit scale, Go to source and target, Copy addresses, Delete; an export is not edited', () => {
   const items = schematicMenu(WIRE, { editing: true });
-  assert.deepEqual(ids(items), ['inspect', 'scale', 'separator', 'source', 'target', 'copy-address', 'separator', 'delete']);
+  assert.deepEqual(ids(items), ['inspect', 'trace', 'scale', 'separator', 'source', 'target', 'copy-address', 'separator', 'delete']);
   assert.ok(items.filter((i) => i.id !== 'separator').every((i) => !i.disabled));
   const off = schematicMenu(WIRE, { editing: false });
   assert.deepEqual(['scale', 'delete'].map((id) => item(off, id).title), [EDIT_OFF, EDIT_OFF]);
@@ -54,7 +54,7 @@ test('a wire: Inspect, Edit scale, Go to source and target, Copy addresses, Dele
 });
 
 test('a pin: Inspect, Copy address, Disconnect all while something is connected', () => {
-  assert.deepEqual(ids(schematicMenu(PIN, {})), ['inspect', 'copy-address', 'separator', 'disconnect']);
+  assert.deepEqual(ids(schematicMenu(PIN, {})), ['inspect', 'trace', 'copy-address', 'separator', 'disconnect']);
   assert.equal(item(schematicMenu(PIN, { editing: true, connected: 2 }), 'disconnect').disabled, false);
   assert.equal(item(schematicMenu(PIN, { editing: true, connected: 0 }), 'disconnect').title, 'Nothing is connected here');
   assert.equal(item(schematicMenu(PIN, { editing: false, connected: 2 }), 'disconnect').title, EDIT_OFF);
@@ -115,4 +115,14 @@ test('Delete selected counts what it would delete; off when nothing would be, or
   const large = schematicMenu(PRIMITIVE, { editing: true, group: 4000, deleted: 4000, tooLarge: 'Too much to delete at once' });
   assert.equal(item(large, 'delete-selected').disabled, true);
   assert.equal(item(large, 'delete-selected').title, 'Too much to delete at once');
+});
+
+test('Trace signal (ADR 0030 §1): on an instance, a wire, an export, a pin, always on; never on the background', () => {
+  for (const hit of [PRIMITIVE, COMPOSITE, WIRE, EXPORT, PIN]) {
+    for (const editing of [false, true]) {
+      const trace = item(schematicMenu(hit, { editing }), 'trace');
+      assert.deepEqual([trace.label, trace.disabled], ['Trace signal', false]);
+    }
+  }
+  assert.equal(item(schematicMenu({ kind: 'background' }, {}), 'trace'), undefined);
 });

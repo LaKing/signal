@@ -16,9 +16,9 @@ import { card, converterText } from './schematic-inspector.js';
 import { EDIT_OFF, schematicMenu } from './schematic-menu.js';
 import { instanceCount } from './schematic-patch.js';
 import { groupOf } from './schematic-palette.js';
-import { INPUTS, OUTPUTS } from './schematic-layout.js';
 import { portHit, wireHit } from './schematic-hit.js';
 import { deletePlan, hitKey } from './schematic-select.js';
+import { traceTree } from './schematic-trace.js';
 
 /** The most members the sidebar lists; the rest are counted ("and N more"). */
 export const MEMBERS_SHOWN = 200;
@@ -80,7 +80,7 @@ export function connectionsOf(entry, node, port) {
     const there = out ? wire.to : wire.from;
     const hit = wireHit(entry, wire);
     const other = entry.layout.nodes.find((n) => n.id === there.node);
-    const pin = other?.kind === 'instance' ? (out ? other.ins : other.outs).find((p) => p.name === there.port) : null;
+    const pin = other ? (out ? other.ins : other.outs).find((p) => p.name === there.port) : null;
     const label = out ? hit.to : hit.from;
     list.push({
       wire: { label: `${out ? '→' : '←'} ${label}`, hit },
@@ -161,7 +161,7 @@ export function sidebar(selected, context = {}) {
       pins: [...node.ins, ...node.outs].map((p) => pinRow(entry, node, p)),
       // A primitive has no inside: its sidebar leaves Enter and Open out
       // (the context menu keeps them, disabled, with the reason).
-      actions: actionsOf(hit, menu(hit), node.composite ? ['enter', 'open', 'close', 'copy-address', 'delete'] : ['copy-address', 'delete']),
+      actions: actionsOf(hit, menu(hit), node.composite ? ['trace', 'enter', 'open', 'close', 'copy-address', 'delete'] : ['trace', 'copy-address', 'delete']),
     };
   }
   if (hit.kind === 'wire') {
@@ -170,7 +170,6 @@ export function sidebar(selected, context = {}) {
     const converters = wire.converters ?? [];
     const endOf = (side) => {
       const end = wire[side];
-      if (end.node === INPUTS || end.node === OUTPUTS) return null;
       const node = entry.layout?.nodes.find((n) => n.id === end.node);
       const pin = (side === 'from' ? node?.outs : node?.ins)?.find((p) => p.name === end.port);
       return pin ? portHit(entry, node, pin) : null;
@@ -188,15 +187,17 @@ export function sidebar(selected, context = {}) {
         { name: 'from', label: hit.from, hit: endOf('from') },
         { name: 'to', label: hit.to, hit: endOf('to') },
       ],
-      actions: actionsOf(hit, menu(hit), ['scale', 'copy-address', 'delete']),
+      actions: actionsOf(hit, menu(hit), ['trace', 'scale', 'copy-address', 'delete']),
     };
   }
   // A pin.
   const port = hit.port;
   const declared = port.parameter ? (hit.node.parameters ?? []).find((p) => p.name === port.name) : null;
+  // A composite's frame pin (ADR 0030 §1): the composite instance's port, seen from inside.
+  const frame = hit.node.kind !== 'instance';
   const fields = [
     ['address', hit.address],
-    ['direction', port.parameter ? 'parameter (in)' : port.direction === 'out' ? 'output' : 'input'],
+    ['direction', frame ? (hit.node.kind === 'input' ? 'exported input (boundary)' : 'exported output (boundary)') : port.parameter ? 'parameter (in)' : port.direction === 'out' ? 'output' : 'input'],
     ['shape', shapeText(port.shape)],
     ['kind', port.kind ?? '—'],
     ['rate', rateText(port.rate)],
@@ -210,10 +211,11 @@ export function sidebar(selected, context = {}) {
   fields.push(['connected', connections.length ? `${connections.length} wire${connections.length === 1 ? '' : 's'}` : port.connected ? 'yes' : 'no']);
   return {
     ...base,
+    ...(frame ? { subtitle: `boundary pin of ${hit.path}: ${hit.node.kind === 'input' ? 'what reaches its port outside comes in here' : 'what reaches it here leaves by its port'}` } : {}),
     fields,
     connections,
     meter: hit.node.kind === 'instance' && port.direction === 'out' && port.shape === 'signal',
-    actions: actionsOf(hit, menu(hit), ['copy-address', 'disconnect']),
+    actions: actionsOf(hit, menu(hit), ['trace', 'copy-address', 'disconnect']),
   };
 }
 
@@ -276,4 +278,74 @@ function groupSidebar(list, editing) {
 /** The text "Copy addresses" copies: one line per member, a wire as `from → to`. */
 export function addressesText(selected) {
   return selected.map((s) => (s.kind === 'wire' ? `${s.from} → ${s.to}` : s.address)).join('\n');
+}
+
+/** The trace's direction toggle: `[{id, label, title}]`. */
+export const TRACE_DIRECTIONS = [
+  { id: 'up', label: '← Up', title: 'Where the signal comes from (upstream)' },
+  { id: 'down', label: 'Down →', title: 'Where the signal goes (downstream)' },
+  { id: 'both', label: 'Both', title: 'Upstream and downstream' },
+];
+
+function plural(n, one, many = `${one}s`) {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/** What an endpoint is, in a few words: its module, a library composite's opacity, an open end, the converters on the way. */
+function endNote(end) {
+  const what = { primitive: end.module ?? 'primitive', library: `${end.module}: library composite, inside not in the graph`, unconnected: `open end of ${end.module}`, unknown: 'not in the graph' }[end.kind] ?? end.kind;
+  return end.via.length ? `${what}; via converter ${end.via.join(', ')}` : what;
+}
+
+/**
+ * The sidebar's Trace section for `result` (`trace()`'s, ui/lib/schematic-trace.js)
+ * over `graph`: `{title, subtitle, direction, directions: [{id, label,
+ * title, on}], sides: [{name, title, count, empty, endpoints: [{label,
+ * note, kind, reveal}]}], levels: [{label, count, reveal, children:
+ * [{label, note, reveal, children: [{label, role, reveal}]}]}], notes}`;
+ * null without a trace. A `reveal` names what a click shows: `{kind:
+ * 'level', path}`, `{kind: 'instance', address}` or `{kind: 'pin',
+ * address}` (the control opens the composites on its way, centres and
+ * selects it).
+ */
+export function traceSection(result, graph) {
+  if (!result) return null;
+  const pins = result.pins.size;
+  let wires = 0;
+  for (const set of result.wires.values()) wires += set.size;
+  const sides = [];
+  if (result.up) sides.push({ name: 'up', title: 'Comes from', ...sideOf(result.up, 'nothing upstream') });
+  if (result.down) sides.push({ name: 'down', title: 'Goes to', ...sideOf(result.down, 'nothing downstream') });
+  const tree = traceTree(graph, result);
+  const levels = tree.map((level) => ({
+    label: level.label,
+    count: `${plural(level.wires, 'wire')}, ${plural(level.pins, 'pin')}`,
+    reveal: { kind: 'level', path: level.path },
+    children: level.children.map((inst) => ({
+      label: inst.name,
+      note: inst.opaque ? `${inst.module} (opaque)` : inst.module,
+      reveal: { kind: 'instance', address: inst.address },
+      children: inst.children.map((pin) => ({ label: pin.port, role: pin.role, direction: pin.direction, reveal: { kind: 'pin', address: pin.address } })),
+    })),
+  }));
+  const notes = [];
+  if (result.opaque.length) notes.push(`${plural(result.opaque.length, 'end')} at a library composite: its inside is not in the graph, so the trace stops at its pins`);
+  if (result.cycles > 0) notes.push(`${plural(result.cycles, 'connection')} ${result.cycles === 1 ? 'leads' : 'lead'} back to a pin already traced (a loop): followed once`);
+  return {
+    title: result.label,
+    subtitle: `${plural(result.levels.length, 'level')}, ${plural(wires, 'wire')}, ${plural(pins, 'pin')}`,
+    direction: result.direction,
+    directions: TRACE_DIRECTIONS.map((d) => ({ ...d, on: d.id === result.direction })),
+    sides,
+    levels,
+    notes,
+  };
+}
+
+function sideOf(side, empty) {
+  return {
+    count: side.endpoints.length,
+    empty,
+    endpoints: side.endpoints.map((end) => ({ label: end.address, note: endNote(end), kind: end.kind, reveal: { kind: 'pin', address: end.address } })),
+  };
 }

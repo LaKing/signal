@@ -218,3 +218,24 @@ test('zoomed out, a box keeps its body: a pin reaches no more than a quarter of 
   const body = hitTest(drawn, { x: pin.x - reach * 1.2, y: pin.y });
   assert.deepEqual([body.kind, body.address], ['instance', '/lfo'], 'just past it: the box');
 });
+
+test('a composite’s frame pin is hit (ADR 0030 §1): the composite instance’s port, found again after a push', () => {
+  const view = fit(layoutOf('').bounds, { w: 2000, h: 2000 });
+  const drawn = scene({ layoutOf, view, viewport: { w: 2000, h: 2000 }, pinned: new Set(['/drums']) });
+  const inner = drawn.levels.find((l) => l.path === '/drums');
+  const frame = inner.layout.nodes.find((n) => n.id === '@inputs');
+  const pin = frame.outs[0];
+  const at = toScreen(inner.transform, pin);
+  const hit = hitTest(drawn, at);
+  assert.deepEqual([hit.kind, hit.address, hit.node.id, hit.port.direction], ['port', `/drums.${pin.name}`, '@inputs', 'out']);
+  assert.equal(hitKey(hit), `port /drums.${pin.name} out`);
+  // A frame's box is not a part: beside its pins, the inside's background (or what is behind).
+  const beside = hitTest(drawn, toScreen(inner.transform, { x: frame.x + 4, y: frame.y + frame.h - 4 }));
+  assert.notEqual(beside.node?.id, '@inputs');
+  // Found again in a new layout, by its frame.
+  layouts.clear();
+  const again = reselect(hit, layoutOf);
+  assert.equal(again.node.id, '@inputs');
+  assert.notEqual(again.node, hit.node);
+  assert.deepEqual(keys(reselectAll([hit], layoutOf)), [hitKey(hit)]);
+});

@@ -9,6 +9,8 @@
 import { removeConnection, written } from './schematic-patch.js';
 
 const SEPARATOR = { id: 'separator' };
+/** Trace signal (ADR 0030 §1): the part's path upstream and downstream, across composites; T on the selection. */
+const TRACE = { id: 'trace', label: 'Trace signal' };
 /** Why an edit is off outside Edit patch. */
 export const EDIT_OFF = 'Turn on Edit patch to change the patch';
 
@@ -47,7 +49,7 @@ function partMenu(hit, state) {
   if (hit?.kind === 'instance') {
     const composite = Boolean(hit.node?.composite);
     const notComposite = composite ? null : 'A primitive has no inside';
-    const items = [unless({ id: 'inspect', label: 'Inspect' }, null)];
+    const items = [unless({ id: 'inspect', label: 'Inspect' }, null), unless(TRACE, null)];
     if (composite && state.open) items.push(unless({ id: 'close', label: 'Close' }, state.wide ? 'Open by the zoom: zoom out to close it' : null));
     else items.push(unless({ id: 'open', label: 'Open in place' }, notComposite));
     items.push(unless({ id: 'enter', label: 'Enter' }, notComposite), SEPARATOR, unless({ id: 'copy-address', label: 'Copy address' }, null), SEPARATOR);
@@ -59,6 +61,7 @@ function partMenu(hit, state) {
     const exported = hit.wire?.kind === 'connection' ? null : 'An export is not edited here';
     return [
       unless({ id: 'inspect', label: 'Inspect' }, null),
+      unless(TRACE, null),
       unless({ id: 'scale', label: 'Edit scale…' }, editOff ?? exported),
       SEPARATOR,
       unless({ id: 'source', label: 'Go to source' }, null),
@@ -71,6 +74,7 @@ function partMenu(hit, state) {
   if (hit?.kind === 'port') {
     return [
       unless({ id: 'inspect', label: 'Inspect' }, null),
+      unless(TRACE, null),
       unless({ id: 'copy-address', label: 'Copy address' }, null),
       SEPARATOR,
       unless({ id: 'disconnect', label: 'Disconnect all' }, editOff ?? (state.connected > 0 ? null : state.exported > 0 ? 'Only an export reaches it: exports are not edited here' : 'Nothing is connected here')),

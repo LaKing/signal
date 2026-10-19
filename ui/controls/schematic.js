@@ -32,6 +32,15 @@
 // collapsible, and several parts can be selected at once
 // (ui/lib/schematic-select.js): Shift- or ⌘-click, a Shift-drag on the
 // background, ⌘A; a group's boxes drag together and Delete removes them all.
+// ADR 0030 §1 (the owner's "we can not trace neither visually, nor in the
+// side panel where the signal goes and comes from"): Trace signal (the
+// context menu, T on the selection) follows a pin's, a wire's or a box's
+// connections across composite boundaries (ui/lib/schematic-trace.js); the
+// trace is highlighted at every level drawn and the rest dimmed, boundary
+// pins and closed composites' pins carry a badge saying what lies behind
+// them, and the sidebar's Trace section lists it by level, each node a
+// link that reveals it. It survives entering and leaving composites and
+// a `graph` push; Escape ends it.
 
 import { onDefaultConnection } from '../signal-ui.js';
 import { ENTRY_CSS, ValueEntry } from './entry-field.js';
@@ -39,15 +48,16 @@ import { EDITOR_CSS, SchematicEditor } from './schematic-editor.js';
 import { ContextMenu, MENU_CSS, menusClaimed } from './context-menu.js';
 import { paletteLevel, removeConnection } from '../lib/schematic-patch.js';
 import { disconnectOps, schematicMenu } from '../lib/schematic-menu.js';
-import { LEGEND, addressesText, sidebar, tooLargeText } from '../lib/schematic-sidebar.js';
+import { LEGEND, addressesText, sidebar, tooLargeText, traceSection } from '../lib/schematic-sidebar.js';
+import { badgeText, behind, parentPath, resolver, splitAddress, startOf, trace, wireKey } from '../lib/schematic-trace.js';
 import { moduleInfo, projectKey } from '../lib/schematic-palette.js';
 import { allOf, deletePlan, dragGroup, has, hitKey, inside, moveMessages, reselectAll, toggled, union } from '../lib/schematic-select.js';
 import { formatFixed } from '../lib/format.js';
-import { dragPosition, layout } from '../lib/schematic-layout.js';
+import { ROW, dragPosition, layout } from '../lib/schematic-layout.js';
 import { DragFollow } from '../lib/schematic-drag.js';
-import { CLOSE_PX, breadcrumbs, levelRect, nodeRect, rebase, reroot, scene } from '../lib/schematic-scene.js';
+import { CLOSE_PX, breadcrumbs, chain, levelRect, nodeRect, rebase, reroot, scene } from '../lib/schematic-scene.js';
 import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
-import { hitTest, reselect } from '../lib/schematic-hit.js';
+import { hitTest, instanceHit, portHit, reselect } from '../lib/schematic-hit.js';
 import { cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
 import { LEVEL_RATE, SLOTS, candidates, levelFraction, levelPlan } from '../lib/schematic-levels.js';
 import { IDENTITY, fit, focus, keyView, matrix, pan, toScreen, wheelFactor, zoomAt } from '../lib/schematic-view.js';
@@ -65,6 +75,14 @@ const SETTLE_MS = 150;
 const MANY_MARKS = 64;
 /** Where the sidebar's collapse is kept, per viewer (localStorage). */
 const SIDE_KEY = 'signal.schematic.sidebar';
+/** A trace's badges show on a level whose pins are at least this far apart on screen (px). */
+const BADGE_ROW_PX = 13;
+/** At most this many badges are drawn (the nearest the screen's centre first). */
+const MAX_BADGES = 80;
+/** A level with no more badges than this shows them on rows down to MIN_TEXT_PX apart. */
+const FEW_BADGES = 6;
+/** A badge's width per character (px, 10 px text), for keeping badges off each other without measuring them. */
+const BADGE_CHAR_PX = 5.6;
 
 const CSS = `
 :host { display: block; position: relative; overflow: hidden; height: 100%; outline: none; --side-width: 300px;
@@ -173,6 +191,29 @@ svg.stale { opacity: 0.4; filter: grayscale(1); }
 /* The marquee: a Shift-drag on the background. */
 .marquee { position: absolute; left: 0; top: 0; width: 0; height: 0; visibility: hidden; pointer-events: none; box-sizing: border-box;
   border: 1px dashed var(--signal-focus, #5aa9ff); background: rgba(90, 169, 255, 0.12); }
+/* A trace (ADR 0030 §1): its wires and pins stand out, the rest is dimmed; boundary pins carry badges. */
+svg.tracing .wire:not(.traced) { opacity: 0.12; }
+svg.tracing .wire.traced { stroke-width: 3; }
+svg.tracing .node:not(.traced) > :not(.frame) { opacity: 0.35; }
+svg.tracing .node.traced > .box { stroke: var(--signal-fg, #d6dbe4); }
+svg.tracing .pin:not(.traced) { opacity: 0.4; }
+svg.tracing .pin.traced { stroke: var(--signal-fg, #d6dbe4); stroke-width: 2.5; }
+.badges { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.badge { position: absolute; left: 0; top: 0; white-space: nowrap; max-width: 46%; overflow: hidden; text-overflow: ellipsis; padding: 0 5px; font-size: 10px; line-height: 14px;
+  color: var(--signal-fg, #d6dbe4); background: var(--signal-panel, #1f232b); border: 1px solid var(--signal-focus, #5aa9ff); border-radius: 7px; opacity: 0.95; }
+.badge.up { border-color: var(--signal-meter-rms, #3ecf8e); }
+.side .trace { margin: 0 0 10px; padding: 6px; border: 1px solid var(--signal-focus, #5aa9ff); border-radius: var(--signal-radius, 6px); }
+.side .trace-head { display: flex; align-items: center; gap: 4px; }
+.side .trace-head h3 { flex: 1; min-width: 0; }
+.side .trace .toggle { display: flex; gap: 2px; margin: 6px 0 2px; }
+.side .trace .toggle button[aria-pressed="true"] { background: var(--signal-focus, #5aa9ff); color: var(--signal-bg, #16181d); border-color: var(--signal-focus, #5aa9ff); }
+.side .trace .end { display: grid; grid-template-columns: 1fr; margin: 3px 0 3px 4px; }
+.side .trace .end .what { color: var(--signal-muted, #8a93a3); overflow-wrap: anywhere; }
+.side .trace .tree { margin-left: 10px; }
+.side .trace .tree .count { color: var(--signal-muted, #8a93a3); margin-left: 4px; }
+.side .trace .tree .role-start { font-weight: 600; }
+.side .trace .tree .role-endpoint::after { content: " ●"; color: var(--signal-focus, #5aa9ff); }
+.side .trace details > summary { cursor: pointer; }
 .row { display: grid; grid-template-columns: 1fr auto auto 1ch; gap: 2px 6px; align-items: center; margin-top: 4px; }
 .row .readout { position: relative; font-variant-numeric: tabular-nums; white-space: pre; color: var(--signal-muted, #8a93a3); }
 .row input { grid-column: 1 / 4; width: 100%; margin: 0; }
@@ -250,6 +291,11 @@ export class SignalSchematic extends HTMLElement {
     this.cardRows = [];
     /** The sidebar's live level of a selected pin: `{address, fill, state}`, or null. */
     this.sideMeter = null;
+    /** The trace (ADR 0030 §1): `{start, direction, result, badges, version}`, or null. */
+    this.tracing = null;
+    this.traceVersion = 0;
+    /** The badge elements, reused. */
+    this.badgePool = [];
   }
 
   /** The part selected last (the context menu's and the keyboard's), or null. */
@@ -302,7 +348,8 @@ export class SignalSchematic extends HTMLElement {
     this.staleBox = html('section', { className: 'diagnostics' });
     this.tip = html('div', { className: 'tip' });
     this.marquee = html('div', { className: 'marquee' });
-    this.stage.append(this.svg, this.bar, this.message, this.staleBox, this.tip, this.marquee);
+    this.badgeLayer = html('div', { className: 'badges' });
+    this.stage.append(this.svg, this.badgeLayer, this.bar, this.message, this.staleBox, this.tip, this.marquee);
     root.append(style, this.buildSide(), this.stage);
     this.editor = new SchematicEditor(this);
     this.editor.build(this.bar, this.stage);
@@ -374,6 +421,7 @@ export class SignalSchematic extends HTMLElement {
       this.graph = null;
       this.layouts.clear();
       this.selected = [];
+      this.tracing = null;
       this.closeMenu();
       this.fitted = false;
       this.svg.replaceChildren();
@@ -399,6 +447,7 @@ export class SignalSchematic extends HTMLElement {
       this.fitted = false;
       this.selected = [];
       this.view = IDENTITY;
+      this.tracing = null;
       old.clear();
     }
     this.graph = graph;
@@ -416,6 +465,8 @@ export class SignalSchematic extends HTMLElement {
     this.say(graph.layout?.error ? `Positions ignored: ${graph.layout.error}` : '');
     // The selection is found again in the new graph; what went is let go.
     this.selected = reselectAll(this.selected, (level) => this.layoutOf(level));
+    // So is the trace, computed again on the new structure.
+    if (this.tracing) this.retrace();
     // So is an open menu's target; a menu whose target went closes.
     const target = this.menuState?.target;
     if (target && target.hit.kind !== 'background') {
@@ -541,6 +592,7 @@ export class SignalSchematic extends HTMLElement {
     }
     if (changed) this.collectBars();
     this.applyMarks();
+    this.applyTrace();
     this.applyDrag();
     this.drawCrumbs();
     // A selected composite opened or closed by the zoom (or the sidebar's
@@ -684,7 +736,8 @@ export class SignalSchematic extends HTMLElement {
     if (hit?.kind === 'instance') return this.nodeGroup(hit.address);
     if (hit?.kind === 'wire') return this.groups.get(hit.path)?.wireCache.get(hit.wire.id)?.el ?? null;
     if (hit?.kind === 'port') {
-      const group = this.nodeGroup(`${hit.path}/${hit.node.name}`);
+      // A frame's pin: its frame's group, by the frame's id.
+      const group = hit.node.kind === 'instance' ? this.nodeGroup(`${hit.path}/${hit.node.name}`) : (this.groups.get(hit.path)?.nodeCache.get(hit.node.id)?.el ?? null);
       for (const pin of group?.querySelectorAll('.pin') ?? []) {
         if (pin.dataset.address === hit.address && pin.dataset.direction === hit.port.direction) return pin;
       }
@@ -1069,8 +1122,21 @@ export class SignalSchematic extends HTMLElement {
     // The menu's keys are its own (it stops them too): never the selection's Delete or ⌘Z.
     if (event.composedPath().includes(this.menu.list)) return;
     const own = event.composedPath()[0] === this;
-    // Escape lets the selection go first (the add palette's Escape is the
-    // palette's), then leaves Edit patch, then goes back out of a level.
+    // Escape ends a trace first (ADR 0030 §1), then lets the selection go
+    // (the add palette's Escape is the palette's), then leaves Edit patch,
+    // then goes back out of a level.
+    if (own && event.key === 'Escape' && this.tracing && !this.editor.placing) {
+      event.preventDefault();
+      this.endTrace();
+      return;
+    }
+    // T: trace the selection (the part selected last).
+    if (own && !event.metaKey && !event.ctrlKey && !event.altKey && event.key.toLowerCase() === 't') {
+      event.preventDefault();
+      if (this.selection) this.startTrace(this.selection);
+      else this.say('Trace: select a pin, a wire or a box first, then press T');
+      return;
+    }
     if (own && event.key === 'Escape' && this.selected.length && !this.editor.placing) {
       event.preventDefault();
       this.select([]);
@@ -1217,6 +1283,8 @@ export class SignalSchematic extends HTMLElement {
 
   /** "Disconnect all" on pin `hit`: one op per connection of it at its level. */
   portOps(hit) {
+    // A frame's pin has no connection of its own here: only exports reach it.
+    if (hit.node.kind !== 'instance') return [];
     return disconnectOps(this.editor.levelGraph(hit.level), hit.node.name, hit.port);
   }
 
@@ -1239,7 +1307,8 @@ export class SignalSchematic extends HTMLElement {
     if (id === 'inspect') {
       this.select([hit]);
       this.revealSide();
-    } else if (id === 'delete-selected') this.deleteSelection();
+    } else if (id === 'trace') this.startTrace(hit);
+    else if (id === 'delete-selected') this.deleteSelection();
     else if (id === 'open') {
       this.pinned.add(hit.address);
       this.schedule();
@@ -1283,7 +1352,7 @@ export class SignalSchematic extends HTMLElement {
     const node = level?.layout.nodes.find((n) => n.id === end.node);
     const port = (side === 'from' ? node?.outs : node?.ins)?.find((p) => p.name === end.port);
     if (!port) return;
-    if (node.kind === 'instance') this.select([{ kind: 'port', path: hit.path, level: hit.level, node, port, address: `${hit.path}/${node.name}.${port.name}` }]);
+    this.select([portHit(level, node, port)]);
     const at = toScreen(level.transform, port);
     this.setView(pan(this.view, this.viewport.w / 2 - at.x, this.viewport.h / 2 - at.y));
   }
@@ -1443,10 +1512,12 @@ export class SignalSchematic extends HTMLElement {
     this.sideMeter = null;
     this.sideShownKey = this.sideStateKey();
     const key = this.selected.map(hitKey).join('\n');
-    const scroll = key === this.sideKey ? this.sideBody.scrollTop : 0;
+    // A Trace section's link keeps the sidebar where it is (the person walks down its tree).
+    const scroll = key === this.sideKey || this.keepSideScroll ? this.sideBody.scrollTop : 0;
+    this.keepSideScroll = false;
     this.sideKey = key;
     this.sideTitle.textContent = model.kind === 'project' ? 'Project' : model.kind === 'group' ? 'Selection' : model.kind === 'port' ? 'Pin' : model.kind === 'wire' ? 'Connection' : 'Instance';
-    const parts = [html('h3', { textContent: model.title, title: model.title }), html('div', { className: 'subtitle', textContent: model.subtitle })];
+    const parts = [...this.traceParts(), html('h3', { textContent: model.title, title: model.title }), html('div', { className: 'subtitle', textContent: model.subtitle })];
     // What a primitive's type is: its rustdoc summary with its formula (ADR 0027 §6).
     if (model.about) parts.push(html('p', { className: 'about', textContent: model.about }));
     if (model.actions?.length) parts.push(this.actionButtons(model.actions));
@@ -1687,6 +1758,285 @@ export class SignalSchematic extends HTMLElement {
     this.cardStop = null;
     this.cardKey = null;
     this.cardValues.clear();
+  }
+
+  // The trace (ADR 0030 §1).
+
+  /** A trace of `hit` (a pin, a frame's pin, a wire, a box) in `direction` (the last trace's, else both): highlighted, badged, in the sidebar. */
+  startTrace(hit, direction = this.traceDirectionLast ?? 'both') {
+    const start = startOf(hit);
+    const result = start && this.graph ? trace(this.graph, start, direction) : null;
+    if (!result) {
+      this.say('Nothing to trace there');
+      return;
+    }
+    this.setTrace({ start, direction, result });
+    this.revealSide();
+  }
+
+  setTrace(tracing) {
+    this.tracing = tracing ? { ...tracing, badges: new Map(), resolver: resolver(this.graph) } : null;
+    if (tracing) this.traceDirectionLast = tracing.direction;
+    this.traceVersion += 1;
+    this.showSide();
+    this.schedule();
+  }
+
+  /** The trace's direction changed (the sidebar's toggle). */
+  traceDirection(direction) {
+    const t = this.tracing;
+    if (!t || t.direction === direction) return;
+    this.setTrace({ start: t.start, direction, result: trace(this.graph, t.start, direction) });
+  }
+
+  /** The trace computed again on a new `graph` (its start found by name); ended, and said, when its start went. */
+  retrace() {
+    const t = this.tracing;
+    const result = trace(this.graph, t.start, t.direction);
+    if (!result) {
+      this.say(`Trace ended: ${t.result.label} is no longer in the project`);
+      this.tracing = null;
+      this.traceVersion += 1;
+      return;
+    }
+    this.tracing = { ...t, result, badges: new Map(), resolver: resolver(this.graph) };
+    this.traceVersion += 1;
+  }
+
+  endTrace() {
+    if (!this.tracing) return;
+    this.setTrace(null);
+  }
+
+  /**
+   * The trace on the elements drawn: `traced` on its wires, pins and boxes
+   * (each level's written again only when its elements or the trace
+   * changed; a pan writes nothing), `tracing` on the SVG, and the badges.
+   */
+  applyTrace() {
+    const result = this.tracing?.result ?? null;
+    this.svg.classList.toggle('tracing', Boolean(result));
+    for (const [path, drawn] of this.groups) {
+      if (drawn.tracedFor?.version === this.traceVersion && drawn.tracedFor.shown === drawn.shown) continue;
+      drawn.tracedFor = { version: this.traceVersion, shown: drawn.shown };
+      const wires = result?.wires.get(path);
+      for (const { item, el: wire } of drawn.wireCache.values()) wire.classList.toggle('traced', Boolean(wires?.has(wireKey(item.written))));
+      for (const { item, el: group } of drawn.nodeCache.values()) {
+        let any = false;
+        for (const pin of group.querySelectorAll('.pin')) {
+          const on = Boolean(result?.pins.has(pin.dataset.address));
+          pin.classList.toggle('traced', on);
+          any ||= on;
+        }
+        const instance = item.kind === 'instance' && Boolean(result?.instances.has(`${path}/${item.name}`));
+        group.classList.toggle('traced', instance || any);
+      }
+    }
+    this.drawBadges();
+  }
+
+  /** A badge's text for composite pin `address` on `side` (`inside`, `outside`), cached per trace. */
+  badgeFor(address, side) {
+    const t = this.tracing;
+    const key = `${side} ${address}`;
+    if (!t.badges.has(key)) {
+      const answer = behind(this.graph, address, side, t.resolver);
+      t.badges.set(key, answer ? { text: badgeText(answer, address, side), direction: answer.direction } : null);
+    }
+    return t.badges.get(key);
+  }
+
+  /**
+   * The badges of the trace's composite pins on screen: on a closed
+   * composite's pin what is inside it, on a frame's pin (a composite's
+   * inside, shown) what is outside. Only on levels whose pins are far
+   * enough apart to read them; placed beside the pin, away from its box.
+   */
+  drawBadges() {
+    const result = this.tracing?.result;
+    const wanted = [];
+    if (result && this.drawn) {
+      for (const level of this.drawn.levels) {
+        const rowPx = ROW * level.transform.k;
+        if (level.behind || rowPx < MIN_TEXT_PX) continue;
+        const here = [];
+        for (const node of level.nodes) {
+          const frame = node.kind !== 'instance';
+          const instance = `${level.path}/${node.name}`;
+          if (!frame && (!node.composite || this.drawn.open.has(instance))) continue;
+          for (const pin of [...node.ins, ...node.outs]) {
+            const address = frame ? `${level.path}.${pin.name}` : `${instance}.${pin.name}`;
+            if (!result.pins.has(address)) continue;
+            const at = toScreen(level.transform, pin);
+            if (at.x < 0 || at.y < 0 || at.x > this.viewport.w || at.y > this.viewport.h) continue;
+            // Left of an input on a box, right of an output; a frame's the other way round (into the inside).
+            const left = frame ? node.kind === 'output' : pin.direction !== 'out';
+            here.push({ address, side: frame ? 'outside' : 'inside', at, left });
+          }
+        }
+        // Rows far enough apart for a badge each, or only a few badges (a pin's trace) on closer rows.
+        if (rowPx >= BADGE_ROW_PX || here.length <= FEW_BADGES) wanted.push(...here);
+      }
+    }
+    const centre = { x: this.viewport.w / 2, y: this.viewport.h / 2 };
+    wanted.sort((a, b) => Math.hypot(a.at.x - centre.x, a.at.y - centre.y) - Math.hypot(b.at.x - centre.x, b.at.y - centre.y));
+    let used = 0;
+    // Nearest the centre first; one that would cover a badge placed is left out (its pin keeps its highlight).
+    const placed = [];
+    for (const w of wanted) {
+      if (used >= MAX_BADGES) break;
+      const badge = this.badgeFor(w.address, w.side);
+      if (!badge?.text) continue;
+      const width = Math.min(BADGE_CHAR_PX * badge.text.length + 12, this.viewport.w * 0.46);
+      const x0 = w.left ? w.at.x - 9 - width : w.at.x + 9;
+      const box = { x0, x1: x0 + width, y0: w.at.y - 8, y1: w.at.y + 8 };
+      if (placed.some((p) => p.x0 < box.x1 && box.x0 < p.x1 && p.y0 < box.y1 && box.y0 < p.y1)) continue;
+      placed.push(box);
+      let el = this.badgePool[used];
+      if (!el) {
+        el = html('div', { className: 'badge' });
+        this.badgeLayer.append(el);
+        this.badgePool.push(el);
+      }
+      used += 1;
+      if (el.textContent !== badge.text) el.textContent = badge.text;
+      el.title = badge.text;
+      el.className = `badge ${badge.direction}`;
+      const x = Math.round(w.at.x + (w.left ? -9 : 9));
+      el.style.transform = `translate(${x}px, ${Math.round(w.at.y)}px) translate(${w.left ? '-100%' : '0'}, -50%)`;
+      el.style.visibility = 'visible';
+    }
+    for (let i = used; i < this.badgePool.length; i++) this.badgePool[i].style.visibility = 'hidden';
+  }
+
+  /** The sidebar's Trace section (above the selection's), or nothing without a trace. */
+  traceParts() {
+    const model = traceSection(this.tracing?.result ?? null, this.graph);
+    if (!model) return [];
+    const box = html('section', { className: 'trace' });
+    box.setAttribute('aria-label', 'Trace');
+    const head = html('div', { className: 'trace-head' });
+    const end = html('button', { type: 'button', textContent: '×', title: 'End the trace (Escape)' });
+    end.addEventListener('click', () => {
+      this.focus({ preventScroll: true });
+      this.endTrace();
+    });
+    head.append(html('h3', { textContent: `Trace: ${model.title}`, title: model.title }), end);
+    const toggle = html('div', { className: 'toggle' });
+    toggle.setAttribute('role', 'group');
+    toggle.setAttribute('aria-label', 'Direction');
+    for (const d of model.directions) {
+      const button = html('button', { type: 'button', textContent: d.label, title: d.title });
+      button.setAttribute('aria-pressed', String(d.on));
+      button.addEventListener('click', () => {
+        this.focus({ preventScroll: true });
+        this.traceDirection(d.id);
+      });
+      toggle.append(button);
+    }
+    box.append(head, html('div', { className: 'subtitle', textContent: model.subtitle }), toggle);
+    for (const note of model.notes) box.append(html('div', { className: 'note', textContent: note }));
+    for (const side of model.sides) {
+      box.append(html('h4', { textContent: `${side.title} (${side.count})` }));
+      if (!side.endpoints.length) box.append(html('div', { className: 'subtitle', textContent: side.empty }));
+      for (const e of side.endpoints) {
+        const row = html('div', { className: 'end' });
+        row.append(this.revealLink(e.label, e.reveal), html('span', { className: 'what', textContent: e.note }));
+        box.append(row);
+      }
+    }
+    box.append(html('h4', { textContent: 'By level' }));
+    for (const level of model.levels) {
+      const details = html('details', { open: true });
+      const summary = html('summary');
+      summary.append(this.revealLink(level.label, level.reveal), html('span', { className: 'count', textContent: level.count }));
+      details.append(summary);
+      const list = html('ul', { className: 'tree' });
+      for (const inst of level.children) {
+        const item = html('li');
+        item.append(this.revealLink(inst.label, inst.reveal), html('span', { className: 'count', textContent: inst.note ?? '' }));
+        const pins = html('ul', { className: 'tree' });
+        for (const pin of inst.children) {
+          const li = html('li');
+          const link = this.revealLink(`${pin.direction === 'out' ? '→' : '←'} ${pin.label}`, pin.reveal);
+          link.classList.add(`role-${pin.role}`);
+          li.append(link);
+          pins.append(li);
+        }
+        item.append(pins);
+        list.append(item);
+      }
+      details.append(list);
+      box.append(details);
+    }
+    return [box];
+  }
+
+  /** A link that reveals `target` (a Trace section node's `reveal`). */
+  revealLink(label, target) {
+    const button = html('button', { type: 'button', className: 'link', textContent: label, title: `Show ${label}` });
+    button.addEventListener('click', () => {
+      this.focus({ preventScroll: true });
+      this.reveal(target);
+    });
+    return button;
+  }
+
+  /**
+   * `target` (`{kind: 'level' | 'instance' | 'pin', path | address}`) shown:
+   * the composites on its way opened (as a double-click opens them), the
+   * view in its level's coordinates around it, and an instance or a pin
+   * selected. A pin of the composite whose inside is shown is shown as its
+   * frame's pin there; any other at the level of its box.
+   */
+  reveal(target) {
+    if (!this.graph) return;
+    const shown = this.drawn ? breadcrumbs(this.drawn, this.viewport).at(-1).path : '';
+    let path;
+    let pick = null;
+    if (target.kind === 'level') path = target.path;
+    else if (target.kind === 'instance') {
+      path = parentPath(target.address);
+      pick = { name: target.address.slice(target.address.lastIndexOf('/') + 1) };
+    } else {
+      const at = splitAddress(target.address);
+      if (!at) return;
+      const inside = at.instance === shown && shown !== '';
+      path = inside ? at.instance : parentPath(at.instance);
+      pick = inside ? { frame: true, port: at.port } : { name: at.instance.slice(at.instance.lastIndexOf('/') + 1), port: at.port };
+    }
+    const links = chain((level) => this.layoutOf(level), path);
+    if (!links) {
+      this.say(`Cannot show ${target.address ?? target.path}: its level is not drawn`);
+      return;
+    }
+    const entry = links.at(-1);
+    // Every composite on the way stays open (Escape or a breadcrumb closes
+    // them); those an earlier reveal opened off this way close.
+    const way = new Set(links.slice(1).map((link) => link.path));
+    for (const path of this.revealPinned ?? []) if (!way.has(path)) this.pinned.delete(path);
+    this.revealPinned = new Set([...way].filter((path) => !this.pinned.has(path) || this.revealPinned?.has(path)));
+    for (const path of way) this.pinned.add(path);
+    let rect = entry.layout.bounds;
+    let hit = null;
+    if (pick) {
+      const node = entry.layout.nodes.find((n) => (pick.frame ? n.kind !== 'instance' && [...n.ins, ...n.outs].some((p) => p.name === pick.port) : n.kind === 'instance' && n.name === pick.name));
+      if (node) {
+        const pin = pick.port ? [...node.ins, ...node.outs].find((p) => p.name === pick.port) : null;
+        hit = pin ? portHit(entry, node, pin) : pick.port ? null : instanceHit(entry, node);
+        // Around the pin, or the box, at a readable size (pins about 20 px
+        // apart, so their badges read): a few boxes' room on each side.
+        const w = Math.max(node.w * 5, 800);
+        const h = pin ? 440 : Math.max(node.h * 1.3, 440);
+        const c = pin ?? { x: node.x + node.w / 2, y: node.y + node.h / 2 };
+        rect = { x: c.x - w / 2, y: c.y - h / 2, w, h };
+      }
+    }
+    const view = fit(rect, this.viewport);
+    this.view = { ...view, path };
+    this.keepSideScroll = true;
+    if (hit) this.select([hit]);
+    else this.schedule();
   }
 
   // Level bars.
