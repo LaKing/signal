@@ -2,7 +2,8 @@
 #
 # Build Signal.app: the GUI (signal-app) as Contents/MacOS/Signal, the CLI
 # as Contents/Helpers/signal and the UI library (ui/, without its tests) as
-# Contents/Resources/ui, which both serve (ADR 0023), signed ad hoc with the
+# Contents/Resources/ui, which both serve (ADR 0023), with LICENSE and
+# THIRD-PARTY-NOTICES.md in Contents/Resources (ADR 0031), signed ad hoc with the
 # hardened runtime and the audio-input entitlement. (Not both binaries in
 # MacOS/: on the usual case-insensitive volume Signal and signal are one file.)
 #
@@ -27,7 +28,7 @@ while [[ $# -gt 0 ]]; do
     --release) PROFILE=release ;;
     --target-dir) [[ $# -ge 2 ]] || die "--target-dir needs a directory"; TARGET_DIR=$2; shift ;;
     --out) [[ $# -ge 2 ]] || die "--out needs a directory"; OUT=$2; shift ;;
-    -h|--help) sed -n '3,16p' "$0"; exit 0 ;;
+    -h|--help) sed -n '3,18p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
   shift
@@ -92,6 +93,8 @@ cp -R "$ROOT/ui" "$APP/Contents/Resources/ui"
 find "$APP/Contents/Resources/ui" -name '*.test.js' -delete
 rm -f "$APP/Contents/Resources/ui/index.js"
 [[ -f $APP/Contents/Resources/ui/signal-ui.js ]] || die "the UI library was not copied"
+# ADR 0031: the licence and the third-party notice travel with the binaries.
+cp "$ROOT/LICENSE" "$ROOT/THIRD-PARTY-NOTICES.md" "$APP/Contents/Resources/"
 # printf, not a here-document: macOS's bash 3.2 writes those to a temporary
 # file outside $TMPDIR, which a sandbox may refuse.
 printf '%s\n' \

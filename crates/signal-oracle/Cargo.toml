@@ -4,6 +4,7 @@ description = "Test support (M2.7-6): the semantic oracle, a deliberately simple
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 # signal-core only: the oracle shares no code with signal-engine (or the

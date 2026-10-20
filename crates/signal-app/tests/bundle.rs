@@ -131,6 +131,14 @@ fn bundle_app_builds_a_signed_bundle() {
     }
     assert!(!ui.join("index.js").exists(), "the node test entry");
     assert!(!ui.join("app/lib/menu.test.js").exists(), "a node test");
+    // ADR 0031: the licence and the third-party notice, as committed.
+    for file in ["LICENSE", "THIRD-PARTY-NOTICES.md"] {
+        assert_eq!(
+            fs::read(app.join("Contents/Resources").join(file)).unwrap(),
+            fs::read(root().join(file)).unwrap(),
+            "Resources/{file}"
+        );
+    }
 
     run(Command::new("codesign")
         .args(["--verify", "--deep", "--strict"])

@@ -1,0 +1,56 @@
+name: Release
+
+# ADR 0031 §4: a `v*` tag runs every CI check (ci.yml, called), then
+# scripts/release.sh, the script that is also run locally, and publishes its
+# assets as a GitHub release: a pre-release while the version is 0.*.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: ci
+    runs-on: macos-15
+    permissions:
+      contents: write
+    env:
+      CARGO_TERM_COLOR: always
+      TAG: ${{ github.ref_name }}
+    steps:
+      # Full history and tags: scripts/version.sh counts from vMAJOR.MINOR.0.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      # release.sh builds offline (--locked --offline), as on a developer's Mac
+      # after ./install.sh. The target directory is .cargo/config.toml's
+      # /tmp/signal-project-target (CARGO_TARGET_DIR would override it).
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+      - name: The tag names the version this commit builds
+        run: |
+          version=$(scripts/version.sh)
+          [[ "v$version" == "$TAG" ]] || { echo "tag $TAG, but scripts/version.sh says $version (set it in Cargo.toml, refresh Cargo.lock with cargo update -w --offline, commit both, then tag)"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Build the release (scripts/release.sh)
+        run: scripts/release.sh --out "$RUNNER_TEMP/release"
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          out="$RUNNER_TEMP/release"
+          prerelease=()
+          [[ $VERSION == 0.* ]] && prerelease=(--prerelease)
+          gh release create "$TAG" --verify-tag "${prerelease[@]}" \
+            --title "Signal $VERSION" --notes-file "$out/RELEASE-NOTES.md" \
+            "$out/Signal-$VERSION-macos-arm64.zip" \
+            "$out/signal-$VERSION-macos-arm64.tar.gz" \
+            "$out/Signal-$VERSION-projects.zip" \
+            "$out/SHA256SUMS"

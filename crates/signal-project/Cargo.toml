@@ -4,6 +4,7 @@ description = "Signal project folders: TOML model, loading, validation, JSON Sch
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [dependencies]

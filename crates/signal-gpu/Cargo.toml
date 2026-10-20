@@ -4,6 +4,7 @@ description = "Signal's GPU device service (wgpu) and support for GPU-backed mod
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [features]

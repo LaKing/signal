@@ -4,6 +4,7 @@ description = "Signal primitive contract test suite; used as a dev-dependency on
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

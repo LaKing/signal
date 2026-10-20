@@ -4,6 +4,7 @@ description = "Signal's UI protocol and local server: HTTP for the UI files, a W
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [features]

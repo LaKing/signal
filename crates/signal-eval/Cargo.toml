@@ -4,6 +4,7 @@ description = "Signal evaluation: analysis, metrics, comparisons, listening pack
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [dependencies]

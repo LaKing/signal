@@ -22,9 +22,11 @@ cargo fmt --all --check                                          # formatting (C
 cargo clippy --workspace --all-targets --offline -- -D warnings  # lints as errors (CI)
 cargo test --workspace --offline                                 # tests (CI uses cargo nextest run --workspace)
 scripts/version.sh                                               # the version this commit builds
+node scripts/third-party-notices.mjs                             # rewrite THIRD-PARTY-NOTICES.md after a Cargo.lock change
+scripts/release.sh --out DIR                                     # the release assets (ADR 0031; CI runs it on v* tags)
 ```
 
-**Versions.** `MAJOR.MINOR.N`: `MAJOR.MINOR` is the workspace version in the root `Cargo.toml`, and `N` counts the commits since the tag `vMAJOR.MINOR.0`, so every commit is a version of its own and the same commit always builds the same one (`scripts/version.sh`; `scripts/bundle-app.sh` builds it into Signal.app and `signal --version`). A new `MAJOR.MINOR` is an owner's decision: set it in `Cargo.toml` and tag that commit `vMAJOR.MINOR.0`.
+**Versions.** `MAJOR.MINOR.N`: `MAJOR.MINOR` is the workspace version in the root `Cargo.toml`, and `N` counts the commits since the tag `vMAJOR.MINOR.0`, so every commit is a version of its own and the same commit always builds the same one (`scripts/version.sh`; `scripts/bundle-app.sh` builds it into Signal.app and `signal --version`). A new `MAJOR.MINOR` is an owner's decision: set it in `Cargo.toml`, refresh `Cargo.lock` (`cargo update -w --offline`, which records every workspace crate's version), commit both and tag that commit `vMAJOR.MINOR.0`.
 
 Development runs through **devpanel** (`~/devpanel`, project `signal-project`); its seats build **offline**.
 
@@ -35,7 +37,7 @@ Development runs through **devpanel** (`~/devpanel`, project `signal-project`); 
 4. **Text is the source of truth.** Anything a project means must be expressible in its files. The GUI and tools edit files; they hold no hidden state (ADR 0009, 0013).
 5. **Experimental work goes in `lab/`** behind the `lab` feature. Promotion requires the contract suite, benchmarks, and a recorded human verdict (ADR 0015).
 6. **Metrics never decide quality.** Present renders and metrics; a human records the verdict.
-7. **Dependencies** come only from the root `[workspace.dependencies]`, which `./install.sh` has already fetched. Moving a locked crate into another crate is fine; adding a new crate is an operator step (edit the root Cargo.toml, run `./install.sh`). Licences must be permissive (MIT, Apache-2.0, BSD, ISC, Zlib); MPL-2.0 only with a note; never GPL (ADR 0014).
+7. **Dependencies** come only from the root `[workspace.dependencies]`, which `./install.sh` has already fetched. Moving a locked crate into another crate is fine; adding a new crate is an operator step (edit the root Cargo.toml, run `./install.sh`). Signal itself is GPL-3.0-or-later, but dependency licences must stay permissive (MIT, Apache-2.0, BSD, ISC, Zlib, Unicode); MPL-2.0 only with a note; never GPL (ADR 0031). `THIRD-PARTY-NOTICES.md` is generated (`node scripts/third-party-notices.mjs`) and a test fails when it is stale or a linked licence is outside that set.
 8. **Don't build ahead of the roadmap.** Create crates, port types, and features when a milestone or test project needs them.
 9. **`unsafe` is denied workspace-wide.** Exceptions need an ADR and a single audited module: `signal-contract/src/alloc_counter.rs` (ADR 0017), `signal-audio/src/rt_thread.rs` (ADR 0019 §4) and `signal-engine/src/shared.rs` (ADR 0020).
 

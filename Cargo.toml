@@ -6,11 +6,14 @@ members = ["crates/*", "lab"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
-publish = false      # ADR 0014: all rights reserved, unpublished
+license = "GPL-3.0-or-later"   # ADR 0031; the text is LICENSE
+publish = false      # ADR 0031: not on crates.io
 
 # Every dependency is declared here once, pinned by Cargo.lock, and fetched by
 # ./install.sh. devpanel seats build offline, so they cannot add new crates:
-# adding one is an operator change (edit here, run ./install.sh). ADR 0014: permissive licences only.
+# adding one is an operator change (edit here, run ./install.sh). ADR 0031: dependencies stay
+# permissive (MIT, Apache-2.0, BSD, ISC, Zlib, Unicode; MPL-2.0 with a note; never GPL);
+# scripts/third-party-notices.mjs checks the linked ones and writes THIRD-PARTY-NOTICES.md.
 [workspace.dependencies]
 signal-core = { path = "crates/signal-core" }
 signal-graph = { path = "crates/signal-graph" }
