@@ -7,6 +7,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { BADGE_NAMES, COLLAPSE_PINS, badgeText, behind, pinInfo, startOf, trace, traceTree, tracedWire, wireKey, within } from './schematic-trace.js';
+import { layout } from './schematic-layout.js';
+import { exportFacts } from './schematic-groups.js';
+import { openedLayout } from './schematic-open.js';
 
 const port = (name, direction, shape = 'signal') => ({ name, direction, shape, kind: 'generic', rate: 1 });
 /** An instance entry as `graph` gives it. */
@@ -563,4 +566,26 @@ test('a composite instance start goes through its inside, both ways, its ends st
   // A library composite's inside is not in graph: nothing more.
   const fx = trace(GRAPH, { kind: 'instance', address: '/fx' }, 'both');
   assert.ok(![...fx.levels].some((p) => p.startsWith('/fx')));
+});
+
+// M2.13-3 (AC7, AC8): the synth open in place. Its box grown into a frame, the
+// top level's wires to it are routed again to the frame's edge; a trace still
+// names them (they keep what they connect) and goes on inside the frame.
+test('a trace across an open synth: its re-routed wires are traced, and the trace goes on inside', () => {
+  const factsOf = (m) => exportFacts(STUDIO.composites[m] ?? null);
+  const top = layout(STUDIO.top, {}, { factsOf });
+  const inner = layout(STUDIO.composites.moog_voice, {}, { factsOf });
+  const opened = openedLayout(top, 'synth', inner.bounds);
+  const frame = opened.nodes.find((n) => n.name === 'synth');
+  const t = trace(STUDIO, { kind: 'pin', address: '/melody.hz' }, 'down');
+  const crossing = opened.wires.filter((w) => w.crossing && tracedWire(t, '', w.written));
+  assert.ok(crossing.length >= 1, 'the wire into the frame is traced');
+  for (const w of crossing) {
+    const stored = top.wires.find((s) => s.id === w.id);
+    assert.equal(wireKey(w.written), wireKey(stored.written), 'the same key as the stored wire');
+    assert.notDeepEqual(w.curve.segs.at(-1).to, stored.curve.segs.at(-1).to, 'routed again');
+    const pin = frame.ins.find((p) => p.name === w.to.port);
+    assert.deepEqual(w.curve.segs.at(-1).to, { x: pin.x, y: pin.y }, `${w.label} ends at the frame's pin`);
+  }
+  assert.ok(t.wires.get('/synth')?.size > 0, 'and the trace continues inside the frame');
 });

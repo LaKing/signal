@@ -126,3 +126,30 @@ test('Trace signal (ADR 0030 §1): on an instance, a wire, an export, a pin, alw
   }
   assert.equal(item(schematicMenu({ kind: 'background' }, {}), 'trace'), undefined);
 });
+
+// The operator's review of M2.13-3 (2026-10-20): around the innermost open
+// composite the edits are off, with why; a library composite does not open in place.
+test('around the open composite: Delete, Edit scale, Disconnect all, Add and Delete selected off with the reason; inspecting stays', () => {
+  const around = 'the top level is around the open /synth: zoom out of it to edit it';
+  const off = (items, id) => assert.deepEqual([item(items, id).disabled, item(items, id).title], [true, around], id);
+  const on = (items, id) => assert.equal(item(items, id).disabled, false, id);
+  const instance = schematicMenu(PRIMITIVE, { editing: true, around });
+  off(instance, 'delete');
+  for (const id of ['inspect', 'trace', 'copy-address']) on(instance, id);
+  off(schematicMenu(WIRE, { editing: true, around }), 'delete');
+  off(schematicMenu(WIRE, { editing: true, around }), 'scale');
+  off(schematicMenu(PIN, { editing: true, around, connected: 1 }), 'disconnect');
+  off(schematicMenu({ kind: 'background', path: '' }, { editing: true, around, addable: true }), 'add');
+  off(schematicMenu(PRIMITIVE, { editing: true, around, group: 2, deleted: 2 }), 'delete-selected');
+  // The open composite's own Add module here… adds inside it, at the level edited: on.
+  on(schematicMenu(COMPOSITE, { editing: true, around, open: true, addable: true }), 'add');
+  // Outside Edit patch the reason is Edit patch's.
+  assert.equal(item(schematicMenu(PRIMITIVE, { editing: false, around }), 'delete').title, EDIT_OFF);
+});
+
+test('a library composite is not opened in place: Open in place off, Enter on', () => {
+  const items = schematicMenu(COMPOSITE, { editing: false, opaque: true });
+  assert.deepEqual([item(items, 'open').disabled, item(items, 'open').title], [true, 'A library composite: its inside is not in the graph']);
+  assert.equal(item(items, 'enter').disabled, false);
+  assert.equal(item(schematicMenu(COMPOSITE, {}), 'open').disabled, false);
+});

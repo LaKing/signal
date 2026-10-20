@@ -24,6 +24,7 @@ import { layout } from './schematic-layout.js';
 import { nodeRect, scene } from './schematic-scene.js';
 import { hitTest } from './schematic-hit.js';
 import { fit, toLocal } from './schematic-view.js';
+import { closedFit } from './schematic-open.js';
 
 const port = (name, direction, shape = 'signal') => ({ name, direction, shape, kind: 'audio', rate: 1 });
 const TOP = {
@@ -136,13 +137,19 @@ test('a double-click inside an open composite adds to that composite, where it w
   assert.equal(level.path, '/drums');
   const at = toLocal(level.transform, point);
   assert.ok(Number.isFinite(at.x) && Number.isFinite(at.y));
-  // The background adds to the top level; an instance that is not open, nowhere.
+  // M2.13-3 (AC3): while drums is open, the top level's background around
+  // it adds nowhere (it added to the top level before): only the innermost
+  // open level is edited.
   const outside = { x: 2, y: 2 };
-  assert.equal(paletteLevel(hitTest(drawn, outside), drawn, outside).level, '');
-  const closed = scene({ layoutOf, view: fit(layoutOf('').bounds, viewport), viewport });
+  assert.equal(hitTest(drawn, outside).kind, 'background');
+  assert.equal(paletteLevel(hitTest(drawn, outside), drawn, outside), null);
+  // Fitted as Fit does (M2.13-3, `closedFit`): a plain fit would now open drums by its readability.
+  const closed = scene({ layoutOf, view: closedFit(layoutOf(''), layoutOf, viewport), viewport });
   const r = nodeRect(closed, '/drums');
   const center = { x: r.x + r.w / 2, y: r.y + r.h / 2 };
   assert.equal(paletteLevel(hitTest(closed, center), closed, center), null);
+  // Nothing open, the background adds to the top level.
+  assert.equal(paletteLevel(hitTest(closed, outside), closed, outside).level, '');
 });
 
 test('a composite level’s edit reaches every instance of it, through the nesting', () => {

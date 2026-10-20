@@ -31,7 +31,11 @@ function unless(item, reason) {
  * the level shown (`level`, `""` the top level) and `addable`. A part that
  * is one of several selected (`group`: how many) ends with Delete selected,
  * which removes them all (`deletePlan`, ui/lib/schematic-select.js),
- * counting what it would delete (`deleted`), off with `tooLarge`'s reason. Items are
+ * counting what it would delete (`deleted`), off with `tooLarge`'s reason.
+ * `around` (M2.13-3): why the part's level is not edited now, it being
+ * around the innermost open composite; its edits are off with it (an open
+ * composite's own Add module here… adds inside it and stays). A library
+ * composite (`opaque`) is not opened in place. Items are
  * `{id, label, disabled, title?}` and separators, `{id: 'separator'}`.
  */
 export function schematicMenu(hit, state = {}) {
@@ -39,7 +43,7 @@ export function schematicMenu(hit, state = {}) {
   if (hit?.kind !== 'background' && hit && state.group > 1) {
     // Counted as Delete would delete (`deleted`, `deletePlan`'s): pins and exports stay.
     const n = state.deleted ?? state.group;
-    const why = state.editing ? (n > 0 ? (state.tooLarge ?? null) : 'Nothing selected is deleted: pins and exports stay') : EDIT_OFF;
+    const why = state.editing ? (state.around ?? (n > 0 ? (state.tooLarge ?? null) : 'Nothing selected is deleted: pins and exports stay')) : EDIT_OFF;
     items.push(SEPARATOR, unless({ id: 'delete-selected', label: `Delete selected (${n})` }, why));
   }
   return items;
@@ -47,7 +51,8 @@ export function schematicMenu(hit, state = {}) {
 
 function partMenu(hit, state) {
   const editing = Boolean(state.editing);
-  const editOff = editing ? null : EDIT_OFF;
+  const inside = editing ? null : EDIT_OFF;
+  const editOff = inside ?? state.around ?? null;
   // A collapsed port group (M2.13-2): its members inspected or traced together; zoom in to work on one.
   if (hit?.kind === 'group') return [unless({ id: 'inspect', label: 'Inspect' }, null), unless(TRACE, null)];
   if (hit?.kind === 'instance') {
@@ -55,9 +60,9 @@ function partMenu(hit, state) {
     const notComposite = composite ? null : 'A primitive has no inside';
     const items = [unless({ id: 'inspect', label: 'Inspect' }, null), unless(TRACE, null)];
     if (composite && state.open) items.push(unless({ id: 'close', label: 'Close' }, state.wide ? 'Open by the zoom: zoom out to close it' : null));
-    else items.push(unless({ id: 'open', label: 'Open in place' }, notComposite));
+    else items.push(unless({ id: 'open', label: 'Open in place' }, notComposite ?? (state.opaque ? 'A library composite: its inside is not in the graph' : null)));
     items.push(unless({ id: 'enter', label: 'Enter' }, notComposite), SEPARATOR, unless({ id: 'copy-address', label: 'Copy address' }, null), SEPARATOR);
-    if (composite && state.open) items.push(unless({ id: 'add', label: 'Add module here…' }, editOff ?? (state.addable ? null : 'Nothing can be added here')));
+    if (composite && state.open) items.push(unless({ id: 'add', label: 'Add module here…' }, inside ?? (state.addable ? null : 'Nothing can be added here')));
     items.push(unless({ id: 'delete', label: 'Delete instance' }, editOff));
     return items;
   }

@@ -11,6 +11,7 @@ import { COUNT_UNITS, FRAME_LABEL_UNITS, LABEL_PX, MAX_LABELS, PITCH_PX, boxLabe
 import { GAP_X, HEADER, layout } from './schematic-layout.js';
 import { exportFacts, portGroups } from './schematic-groups.js';
 import { badgeText, behind } from './schematic-trace.js';
+import { openedLayout } from './schematic-open.js';
 
 /** The studio's `graph` structure (`top`, `composites`), as `Project::structure` gives it (crates/signal-project/tests/structure.rs keeps it equal). */
 const STUDIO =JSON.parse(readFileSync(new URL('./fixtures/studio-graph.json', import.meta.url), 'utf8'));
@@ -372,11 +373,16 @@ test('a summary too wide even wrapped shows a shorter form, else nothing: never 
   assert.ok(small.x1 - small.x0 <= 30);
 });
 
-test('a noted pin cut short keeps its name whole: `out…`, never `ou…`', () => {
+test('a noted pin that does not fit shows its short form or its name, its note never cut short (the operator’s review)', () => {
   const text = 'out → /echo.in · trace: → 4 ends';
-  assert.equal(shownText(text, textWidth('out…'), 'out'), 'out…');
+  assert.equal(shownText(text, textWidth('out…'), 'out'), 'out');
   assert.equal(shownText(text, textWidth('out'), 'out'), 'out');
-  assert.match(shownText(text, textWidth('out → /ec…'), 'out'), /^out → \/e/);
+  assert.equal(shownText(text, textWidth('out → /ec…'), 'out'), 'out', 'not `out → /ec…`');
+  const many = 'hz → 2: glide.in, hz_prev.in';
+  assert.equal(shownText(many, textWidth('hz → 2: gl…'), 'hz'), 'hz → 2', 'not `hz → 2:…`');
+  assert.equal(shownText(many, textWidth('hz →'), 'hz'), 'hz');
+  assert.equal(shownText(many, textWidth(many), 'hz'), many);
+  assert.equal(shownText('ou', textWidth('o…'), 'out'), fitText('ou', textWidth('o…')), 'not a noted pin: cut short');
   assert.equal(shownText('osc1_* (4)', textWidth('osc1_*')), 'osc1_*');
 });
 
@@ -448,4 +454,32 @@ test('bundle counts in a level’s units: COUNT_UNITS large, on no other label',
     assert.equal(c.scale, COUNT_UNITS / LABEL_PX);
     for (const l of [...labels, ...counts]) if (l !== c) assert.ok(!overlaps(c, l), `${c.text} on ${l.text}`);
   }
+});
+
+// M2.13-3 (AC8): the synth open in place, its box grown into a frame. Its pins
+// are named outside the frame's edge, each on its own (the Outside side), and
+// its inside, drawn unchanged, names each port with where it connects outside.
+test('an open synth’s grown frame names each pin outside its edge; its inside’s Outside notes are unchanged', () => {
+  const top = layout(STUDIO.top, {}, { factsOf });
+  const inner = layout(STUDIO.composites.moog_voice, {}, { factsOf });
+  const frame = openedLayout(top, 'synth', inner.bounds).nodes.find((n) => n.name === 'synth');
+  const synth = top.nodes.find((n) => n.name === 'synth');
+  assert.ok(frame.w > synth.w);
+  const box = unitsBox(frame, { outward: true });
+  const labels = levelLabels([box], 'pins');
+  assert.equal(labels.length, frame.ins.length + frame.outs.length, 'one label a pin');
+  for (const l of labels) {
+    assert.equal(l.pins.length, 1);
+    const pin = [...frame.ins, ...frame.outs].find((p) => p.name === l.pins[0].name);
+    if (pin.direction === 'out') assert.ok(l.x0 > frame.x + frame.w - 1e-9, `${l.text} right of the frame`);
+    else assert.ok(l.x1 < frame.x + 1e-9, `${l.text} left of the frame`);
+  }
+  // The frame inside: the stored inside, its notes as the graph says, opened or not.
+  assert.deepEqual(openedLayout(inner, 'none', inner.bounds), inner);
+  const ports = inner.nodes.find((n) => n.kind === 'input');
+  const texts = new Map(ports.outs.map((p) => [p.name, pinText(p.name, outsideNote(STUDIO, `/synth.${p.name}`))]));
+  assert.equal(texts.get('hz'), 'hz ← /melody.hz');
+  assert.equal(texts.get('gate'), 'gate ← /melody.gate');
+  const named = levelLabels([unitsBox(ports, { texts, groups: { ins: [], outs: portGroups(ports.outs, factsOf('moog_voice')) } })], 'pins');
+  assert.equal(named.length, ports.outs.length);
 });

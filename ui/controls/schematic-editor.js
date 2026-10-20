@@ -27,6 +27,7 @@ import {
 } from '../lib/schematic-patch.js';
 import { EXPANDED, moveCursor, paletteKey, paletteRows, placeCursor, toggled, windowRows } from '../lib/schematic-palette.js';
 import { toLocal, toScreen } from '../lib/schematic-view.js';
+import { editLevel } from '../lib/schematic-open.js';
 import { cordCurve, curveData } from '../lib/schematic-wire.js';
 import { formatFixed } from '../lib/format.js';
 
@@ -148,6 +149,13 @@ export class SchematicEditor {
    */
   write(step, level = '', ops = []) {
     if (!this.editing) return Promise.resolve(false);
+    // Only the innermost open level is edited (M2.13-3), undo and redo included (the entry stays for when it is shown).
+    const shown = editLevel(this.s.drawn);
+    const target = this.session.levelOf(step, level);
+    if (target !== null && target !== shown.level) {
+      this.s.say(`Not ${step < 0 ? 'undone' : step > 0 ? 'redone' : 'edited'}: ${target || 'the top level'} is around the open ${shown.path || 'level'}; ${step ? 'go out to it first' : 'edit it from there'}`);
+      return Promise.resolve(false);
+    }
     const asked = step === 0 ? this.session.request(level, ops) : step < 0 ? this.session.undo() : this.session.redo();
     if (!asked) return Promise.resolve(false);
     if (asked.refused) {

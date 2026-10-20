@@ -133,6 +133,12 @@ export class PatchSession {
     return { message: patchMessage(level, base, ops), pending: this.pending };
   }
 
+  /** The level a write of `step` (0: a new patch at `level`, -1 undo, +1 redo) would patch, or null when there is none to write. */
+  levelOf(step, level = '') {
+    if (step === 0) return level;
+    return (step < 0 ? this.history.undo() : this.history.redo())?.level ?? null;
+  }
+
   undo() {
     const entry = this.history.undo();
     return entry ? this.request(entry.level, entry.backward, -1) : null;

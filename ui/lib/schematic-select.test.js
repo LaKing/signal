@@ -6,7 +6,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { layout } from './schematic-layout.js';
-import { OPEN_PX, scene } from './schematic-scene.js';
+import { scene } from './schematic-scene.js';
+import { closedFit, opensAt } from './schematic-open.js';
 import { hitTest, instanceHit, portHit, reselect, wireHit } from './schematic-hit.js';
 import { MESSAGE_LIMIT, allOf, deletePlan, dragGroup, has, hitKey, inside, messageBytes, moveMessages, reselectAll, toggled, union, unique } from './schematic-select.js';
 import { fit, screenRect, toScreen } from './schematic-view.js';
@@ -50,7 +51,8 @@ test('Shift- or ⌘-click adds a part, a second takes it out; the background cha
 });
 
 test('the marquee takes the boxes wholly inside it and the connections between them', () => {
-  const view = fit(layoutOf('').bounds, viewport);
+  // Fitted as Fit does (M2.13-3, `closedFit`): drums closed, as a plain fit had it.
+  const view = closedFit(layoutOf(''), layoutOf, viewport);
   const drawn = scene({ layoutOf, view, viewport });
   const top = drawn.levels[0];
   const rect = (names) => {
@@ -76,7 +78,8 @@ test('the marquee takes the boxes wholly inside it and the connections between t
 test('the marquee does not take the boxes inside an open composite it takes', () => {
   // drums opened in place: its inside is drawn, and kick inside it.
   const drums = nodeOf('', 'drums');
-  const k = (OPEN_PX + 40) / drums.w;
+  // M2.13-3: drums opens by its inside's readability on screen, no longer by its box's width.
+  const k = opensAt(drums, layoutOf('drums').bounds) * 1.1;
   const view = { k, x: viewport.w / 2 - (drums.x + drums.w / 2) * k, y: viewport.h / 2 - (drums.y + drums.h / 2) * k };
   const drawn = scene({ layoutOf, view, viewport });
   assert.ok(drawn.levels.some((l) => l.path === '/drums'), 'drums is open');

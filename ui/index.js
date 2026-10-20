@@ -53,6 +53,7 @@ import './lib/schematic-trace.test.js';
 import './lib/schematic-labels.test.js';
 import './lib/schematic-bundle.test.js';
 import './lib/schematic-groups.test.js';
+import './lib/schematic-open.test.js';
 import './lib/schematic-palette.test.js';
 import './controls/context-menu.test.js';
 import './lib/pattern-text.test.js';

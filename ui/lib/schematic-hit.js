@@ -97,8 +97,12 @@ export function hitTest(drawn, point) {
     const entry = drawn.levels[i];
     const local = toLocal(entry.transform, point);
     const scale = entry.transform.k;
+    // An open composite's frame (M2.13-3) lies over its neighbours: inside it, only its own pins and box are hit.
+    const frame = entry.layout?.opened ? entry.nodes.find((n) => n.kind === 'instance' && n.name === entry.layout.opened) : null;
+    const covered = frame && local.x >= frame.x && local.x <= frame.x + frame.w && local.y >= frame.y && local.y <= frame.y + frame.h;
+    const nodes = covered ? [frame] : entry.nodes;
     let best = null;
-    for (const node of entry.nodes) {
+    for (const node of nodes) {
       // A composite's frame pins too (ADR 0030 §1: a trace starts there); its boxes are not hit.
       if (node.kind !== 'instance' && !entry.path) continue;
       // A box small on screen (zoomed out) keeps its body: its pins reach less.
@@ -121,7 +125,7 @@ export function hitTest(drawn, point) {
     }
     if (best?.anchor) return groupHit(entry, best.node, best.anchor.group);
     if (best) return portHit(entry, best.node, best.port);
-    for (const node of entry.nodes) {
+    for (const node of nodes) {
       if (node.kind !== 'instance') continue;
       // An open composite's inside was tried first; its box still counts.
       if (local.x >= node.x && local.x <= node.x + node.w && local.y >= node.y && local.y <= node.y + node.h) return instanceHit(entry, node);

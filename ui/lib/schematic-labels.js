@@ -134,15 +134,18 @@ export function minWidth(text) {
 /**
  * What a label `width` px wide shows of `text`: all of it, else a group's
  * names without its count (`osc1_*` of `osc1_* (4)`), else a noted pin's
- * name `name` whole with `…` for its note (or the name alone), else cut short.
+ * short form (`hz → 2` of `hz → 2: glide.in, hz_prev.in`), else its name
+ * `name` alone (a note is never cut short: `hz → 2:…` read as noise, the
+ * operator's review), else cut short.
  */
 export function shownText(text, width, name = null) {
   if (textWidth(text) <= width) return text;
   const bare = /^(.*\S) \(\d+\)$/.exec(text)?.[1];
   if (bare && textWidth(bare) <= width) return bare;
   if (name && name !== text && text.startsWith(name)) {
-    if (textWidth(`${name} …`) <= width) return fitText(text, width);
-    if (textWidth(`${name}…`) <= width) return `${name}…`;
+    const counted = /^ ([←→]) (\d+):/.exec(text.slice(name.length));
+    const short = counted ? `${name} ${counted[1]} ${counted[2]}` : null;
+    if (short && textWidth(short) <= width) return short;
     if (textWidth(name) <= width) return name;
   }
   return fitText(text, width);

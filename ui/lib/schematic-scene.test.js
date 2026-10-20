@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { layout } from './schematic-layout.js';
-import { CLOSE_PX, MIN_PX, OPEN_PX, boundaryLinks, breadcrumbs, inside, levelRect, nodeRect, planPort, rebase, scene } from './schematic-scene.js';
+import { MIN_PX, boundaryLinks, breadcrumbs, inside, levelRect, nodeRect, planPort, rebase, scene } from './schematic-scene.js';
+import { CLOSE_K, OPEN_K, closedFit, closedScale, closedView, grownNode, linkScale, opensAt } from './schematic-open.js';
 import { bake, bakeHolds, bakedMatrix, bakedRect, SVG_MAX_SCALE, SVG_MAX_TRANSLATE, SVG_MIN_SCALE } from './schematic-draw.js';
 import { hitTest, reselect } from './schematic-hit.js';
 import { fit, focus, pan, screenRect, toScreen, zoomAt } from './schematic-view.js';
@@ -50,44 +51,60 @@ const layoutOf = (level) => {
 const viewport = { w: 1000, h: 600 };
 const drums = () => layoutOf('').nodes.find((n) => n.name === 'drums');
 
-/** The view that makes drums `width` pixels wide, centred. */
-function drumsAt(width) {
+/**
+ * The view at `factor` times the scale at which drums opens (M2.13-3: its
+ * inside drawn at OPEN_K; it was its box's width on screen), drums centred.
+ */
+function drumsAt(factor) {
   const node = drums();
-  const k = width / node.w;
+  const k = opensAt(node, layoutOf('drums').bounds) * factor;
   return { k, x: viewport.w / 2 - (node.x + node.w / 2) * k, y: viewport.h / 2 - (node.y + node.h / 2) * k };
 }
 
 /** Opened drums, then the view focused on kick inside it, as a double-click does. */
 function kickFocused() {
-  const view = drumsAt(OPEN_PX + 1);
+  const view = drumsAt(1.01);
   return focus(view, nodeRect(scene({ layoutOf, view, viewport }), '/drums/kick'), viewport);
 }
 
+// M2.13-3: kick's three boxes fitted would draw drums' inside readable, so
+// it would open; Fit (`closedFit`) keeps to the scale at which none is open.
 test('fitted, only the top level is drawn: composites are closed boxes', () => {
-  const view = fit(layoutOf('').bounds, viewport);
+  assert.equal(scene({ layoutOf, view: fit(layoutOf('').bounds, viewport), viewport }).levels.length, 2, 'a plain fit is past drums’ threshold');
+  const view = closedFit(layoutOf(''), layoutOf, viewport);
   const drawn = scene({ layoutOf, view, viewport });
   assert.equal(drawn.levels.length, 1);
+  assert.ok(view.k < fit(layoutOf('').bounds, viewport).k && view.k * linkScale(drums(), layoutOf('drums').bounds) < CLOSE_K);
   assert.deepEqual(drawn.levels[0].nodes.map((n) => n.name), ['lfo', 'drums', 'out']);
   assert.deepEqual(breadcrumbs(drawn, viewport).map((c) => c.path), ['']);
 });
 
+// M2.13-3: the threshold is the inside's readability (OPEN_K, CLOSE_K on
+// screen) instead of the box's width (360 and 300 px), and the inside is
+// drawn in the box grown into a frame instead of in the box.
 test('a composite opens in place past the threshold, recursively, and closes with hysteresis', () => {
-  let drawn = scene({ layoutOf, view: drumsAt(OPEN_PX + 1), viewport });
+  assert.equal(scene({ layoutOf, view: drumsAt(0.99), viewport }).levels.length, 1, 'closed just below OPEN_K');
+  let drawn = scene({ layoutOf, view: drumsAt(1.01), viewport });
   assert.deepEqual(drawn.levels.map((l) => [l.path, l.level]), [['', ''], ['/drums', 'drums']]);
   const inner = drawn.levels[1];
-  // Its inside is scaled into its box.
-  const box = screenRect(drawn.levels[0].transform, drums());
+  // Its inside is drawn readable, in its frame: its box grown where it is.
+  assert.ok(inner.transform.k >= OPEN_K, `inside at ${inner.transform.k}`);
+  const frame = drawn.levels[0].layout.nodes.find((n) => n.name === 'drums');
+  const box = drums();
+  assert.ok(frame.w > box.w && frame.x <= box.x && frame.y <= box.y && frame.x + frame.w >= box.x + box.w && frame.y + frame.h >= box.y + box.h, 'the frame holds the box');
+  assert.ok(Math.abs(frame.x + frame.w / 2 - (box.x + box.w / 2)) < 1e-9 && Math.abs(frame.y + frame.h / 2 - (box.y + box.h / 2)) < 1e-9, 'about its centre');
+  const shown = screenRect(drawn.levels[0].transform, frame);
   const inside = levelRect(drawn, '/drums');
-  assert.ok(inside.x >= box.x && inside.x + inside.w <= box.x + box.w + 1e-9);
-  assert.ok(inside.y >= box.y && inside.y + inside.h <= box.y + box.h + 1e-9);
-  assert.ok(inner.transform.k < drawn.levels[0].transform.k);
+  assert.ok(inside.x >= shown.x && inside.x + inside.w <= shown.x + shown.w + 1e-9);
+  assert.ok(inside.y >= shown.y && inside.y + inside.h <= shown.y + shown.h + 1e-9);
+  assert.equal(layoutOf('').nodes.find((n) => n.name === 'drums'), box, 'the stored layout is not changed');
 
   // Between the two thresholds it stays as it was.
-  const between = drumsAt((OPEN_PX + CLOSE_PX) / 2);
+  const between = drumsAt((1 + CLOSE_K / OPEN_K) / 2);
   assert.equal(scene({ layoutOf, view: between, viewport }).levels.length, 1, 'closed stays closed');
   drawn = scene({ layoutOf, view: between, viewport, open: drawn.open });
   assert.equal(drawn.levels.length, 2, 'open stays open');
-  assert.equal(scene({ layoutOf, view: drumsAt(CLOSE_PX - 1), viewport, open: drawn.open }).levels.length, 1, 'closes below CLOSE_PX');
+  assert.equal(scene({ layoutOf, view: drumsAt((CLOSE_K / OPEN_K) * 0.99), viewport, open: drawn.open }).levels.length, 1, 'closes below CLOSE_K');
 
   // Zoomed far in, kick opens inside drums.
   const deep = scene({ layoutOf, view: kickFocused(), viewport, open: new Set(['/drums']) });
@@ -115,9 +132,18 @@ test('only what is on screen is drawn', () => {
 test('the breadcrumbs’ levels and parts can be focused', () => {
   const deep = scene({ layoutOf, view: kickFocused(), viewport, open: new Set(['/drums']) });
   const rect = levelRect(deep, '/drums');
-  const back = focus(kickFocused(), rect, viewport);
+  const from = kickFocused();
+  const focused = focus(from, rect, viewport);
+  // M2.13-3: as a breadcrumb does, kept below the scale at which kick, still in `open`, would stay open
+  // (focused, drums' inside alone would show kick readable).
+  const drumsLevel = deep.levels.find((l) => l.path === '/drums');
+  const k = drumsLevel.transform.k * (focused.k / from.k);
+  const centre = fit(rect, viewport);
+  assert.ok(k > closedScale(drumsLevel.layout, layoutOf), 'a plain focus would leave kick open');
+  const back = closedView(focused, k, closedScale(drumsLevel.layout, layoutOf), { x: centre.x, y: centre.y });
   const out = scene({ layoutOf, view: back, viewport, open: deep.open });
   assert.equal(breadcrumbs(out, viewport).at(-1).path, '/drums', 'the view shows drums’ inside');
+  assert.ok(!out.open.has('/drums/kick'), 'kick closed although it was open');
   assert.ok(nodeRect(deep, '/drums/kick'));
   assert.equal(nodeRect(deep, '/nope'), null);
 });
@@ -151,7 +177,7 @@ test('hit testing finds ports, boxes, wires and the background, innermost first'
   assert.equal(hitTest(drawn, { x: -50, y: -50 }).kind, 'background');
 
   // Opened, a box inside drums wins over drums itself.
-  const deep = scene({ layoutOf, view: drumsAt(OPEN_PX + 1), viewport });
+  const deep = scene({ layoutOf, view: drumsAt(1.01), viewport });
   const inner = deep.levels[1];
   const kick = inner.layout.nodes.find((n) => n.name === 'kick');
   const at = toScreen(inner.transform, { x: kick.x + kick.w / 2, y: kick.y + kick.h / 2 });
@@ -240,7 +266,8 @@ function bakedInBounds(drawn, bakes, viewport) {
   }
 }
 
-// AC16–AC19: ten nested composites, each drawn at about 6e-5 of its box;
+// AC16–AC19: ten nested composites, each inside 1e4 times its box, so its
+// frame (M2.13-3: GROW_MAX times its box's scale) draws it at about 5e-4;
 // zooming in about the innermost one reaches a total scale past 1e40, the
 // view re-rooted at the deepest level, every matrix within the bounds.
 test('zooming through ten levels to a total scale of 1e40 keeps every matrix small', () => {
@@ -273,7 +300,11 @@ test('zooming through ten levels to a total scale of 1e40 keeps every matrix sma
   assert.equal(drawn.levels.length, 11, 'ten levels open');
   assert.ok(drawn.levels[0].transform.k >= 1e40, `total scale ${drawn.levels[0].transform.k}`);
   assert.equal(view.path, '/c/c/c/c/c/c/c/c/c/c', 'the view is in the deepest level’s coordinates');
-  assert.ok(view.k < 1e6, `and its numbers are small: ${view.k}`);
+  // Its numbers are the leaf's own, thirty orders below the total. (Before
+  // M2.13-3 `view.k < 1e6`: the frames' growth leaves the leaf at about
+  // 1.06e7 when the total reaches 1e40, measured.)
+  assert.equal(view.k, drawn.levels[10].transform.k, 'the view carries the leaf’s own scale');
+  assert.ok(view.k <= drawn.levels[0].transform.k * 1e-30, `and its numbers are small: ${view.k}`);
   // AC17: the parents' other boxes, far off screen, are culled; and a
   // parent that shows only the inside of its open box is not drawn at all.
   for (const parent of drawn.levels.slice(0, 10)) assert.deepEqual(parent.nodes.map((n) => n.name), ['c']);
@@ -285,6 +316,63 @@ test('zooming through ten levels to a total scale of 1e40 keeps every matrix sma
   const at = toScreen(leaf.transform, centreOf(p));
   assert.ok(at.x > 0 && at.x < viewport.w && at.y > 0 && at.y < viewport.h);
   assert.equal(hitTest(drawn, at).address, '/c/c/c/c/c/c/c/c/c/c/p');
+});
+
+// M2.13-3 (AC5, the owner's intent): ten nested composites of an ordinary
+// size, each opened by zooming alone about the innermost one, readable
+// every time, the breadcrumbs the open chain, within 400 wheel steps.
+test('ten nested composites of ordinary size are reached by zooming, each opening readable', () => {
+  const level = (i) => {
+    const nodes = [stubNode('a', 0, 0, 120, 90), stubNode('b', 880, 410, 120, 90)];
+    nodes.push(i < 10 ? stubNode('c', 440, 205, 120, 90, `L${i + 1}`) : stubNode('p', 440, 205, 120, 90));
+    return stub(nodes);
+  };
+  const layouts = new Map(Array.from({ length: 11 }, (_, i) => [i === 0 ? '' : `L${i}`, level(i)]));
+  const layoutOf = (name) => layouts.get(name) ?? null;
+  const centreOf = (n) => ({ x: n.x + n.w / 2, y: n.y + n.h / 2 });
+  let view = closedFit(layoutOf(''), layoutOf, viewport);
+  let open = new Set();
+  let drawn = null;
+  let steps = 0;
+  const bakes = new Map();
+  for (; steps < 400; steps++) {
+    drawn = scene({ layoutOf, view, viewport, open });
+    for (const l of drawn.levels.slice(1)) assert.ok(l.transform.k >= CLOSE_K, `step ${steps}: ${l.path} drawn at ${l.transform.k}`);
+    if (drawn.levels.length > open.size + 1) assert.ok(drawn.levels.at(-1).transform.k >= OPEN_K, `${drawn.levels.at(-1).path} opened readable`);
+    open = drawn.open;
+    view = drawn.view;
+    bakedInBounds(drawn, bakes, viewport);
+    if (drawn.levels.length === 11) break;
+    const deepest = drawn.levels.at(-1);
+    const target = deepest.layout.nodes.find((n) => n.name === 'c');
+    view = zoomAt(view, 1.25, toScreen(deepest.transform, centreOf(target)));
+  }
+  assert.equal(drawn.levels.length, 11, `ten levels open after ${steps} steps`);
+  assert.deepEqual(breadcrumbs(drawn).map((c) => c.name), ['', 'c', 'c', 'c', 'c', 'c', 'c', 'c', 'c', 'c', 'c']);
+  assert.equal(view.path, '/c/c/c/c/c/c/c/c/c/c');
+  const leaf = drawn.levels[10];
+  const at = toScreen(leaf.transform, centreOf(leaf.layout.nodes.find((n) => n.name === 'p')));
+  assert.equal(hitTest(drawn, at).address, '/c/c/c/c/c/c/c/c/c/c/p');
+});
+
+test('the breadcrumbs are the open levels; inside an open frame only the frame is hit', () => {
+  const drawn = scene({ layoutOf, view: drumsAt(1.01), viewport, at: { x: 0, y: 0 } });
+  // auditor-2-focus-containment: zoomed beside drums, the nearest qualifying composite opens.
+  assert.deepEqual(breadcrumbs(drawn).map((c) => c.path), ['', '/drums']);
+  // A neighbour under the grown frame: a point over it is the frame's.
+  const top = stub([stubNode('c', 0, 0, 120, 90, 'inner'), stubNode('n', 130, 0, 120, 90)]);
+  const inner = stub([stubNode('x', 0, 0, 120, 90), stubNode('y', 880, 410, 120, 90)]);
+  const stubs = (name) => (name === '' ? top : name === 'inner' ? inner : null);
+  const c = top.nodes[0];
+  const k = opensAt(c, inner.bounds) * 1.01;
+  const shown = scene({ layoutOf: stubs, view: { k, ox: 60, oy: 45, x: 500, y: 300 }, viewport });
+  assert.deepEqual(shown.levels.map((l) => l.path), ['', '/c']);
+  const frame = shown.levels[0].layout.nodes.find((n) => n.name === 'c');
+  const n = top.nodes[1];
+  assert.ok(frame.x + frame.w > n.x + n.w / 2, 'the frame covers n’s middle');
+  const over = toScreen(shown.levels[0].transform, { x: n.x + n.w / 2, y: n.y + n.h / 2 });
+  assert.equal(hitTest(shown, over).address, '/c');
+  assert.equal(hitTest(scene({ layoutOf: stubs, view: { k: k * 0.5, ox: 60, oy: 45, x: 500, y: 300 }, viewport }), toScreen({ k: k * 0.5, ox: 60, oy: 45, x: 500, y: 300 }, { x: n.x + n.w / 2, y: n.y + n.h / 2 })).address, '/n', 'closed, n is hit');
 });
 
 // auditor-2-far-parent-cull-and-translation-clamp: a voice at the bottom of
@@ -312,12 +400,16 @@ test('a parent far from its origin stays drawn, and re-rooting moves nothing', (
     const box = bakedRect(baked, voice);
     const matrix = bakedMatrix(baked, parent.transform);
     assert.ok(Math.abs(box.x * matrix.k + matrix.x - 500) < 0.01, `k ${k}: edge at ${box.x * matrix.k + matrix.x}`);
-    if (voice.w * k >= OPEN_PX) assert.equal(drawn.view.path, '/voice_4095', `k ${k}: re-rooted in the voice`);
-    // Panned 100 px right, the centre leaves the voice: re-rooted at the top.
-    const out = scene({ layoutOf, view: pan(drawn.view, 100, 0), viewport, open: drawn.open });
+    if (k * linkScale(voice, inner.bounds) >= OPEN_K) assert.equal(drawn.view.path, '/voice_4095', `k ${k}: re-rooted in the voice`);
+    // Panned 100 px right past its frame's left edge (M2.13-3: the box grows
+    // into a frame about its centre, so its edge is left of the box's), the
+    // centre leaves the voice: re-rooted at the top.
+    const margin = (voice.x - grownNode(voice, inner.bounds).x) * k;
+    const out = scene({ layoutOf, view: pan(drawn.view, margin + 100, 0), viewport, open: drawn.open });
     assert.equal(out.view.path, '', `k ${k}`);
     const now = toScreen(out.levels[0].transform, edge);
-    assert.ok(Math.abs(now.x - 600) < 0.01 && Math.abs(now.y - 300) < 0.01, `k ${k}: the edge moved with the pan only (${now.x})`);
+    const to = 600 + margin;
+    assert.ok(Math.abs(now.x - to) < 0.01 && Math.abs(now.y - 300) < 0.01, `k ${k}: the edge moved with the pan only (${now.x})`);
   }
 });
 

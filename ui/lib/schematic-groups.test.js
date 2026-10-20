@@ -16,6 +16,8 @@ import { startOf, trace } from './schematic-trace.js';
 import { schematicMenu } from './schematic-menu.js';
 import { SchematicEditor } from '../controls/schematic-editor.js';
 import { traceTarget } from './schematic-select.js';
+import { openedLayout } from './schematic-open.js';
+import { boundaryLinks, inside } from './schematic-scene.js';
 import { sidebar } from './schematic-sidebar.js';
 
 /** The studio's `graph` structure (crates/signal-project/tests/structure.rs keeps it equal to `Project::structure`). */
@@ -277,4 +279,30 @@ test('level of detail by size (2026-10-20): every pin, then groups while their t
   // The owner's scales: 0.3 summary, 0.5 groups, 0.8 and up every pin; notes from 0.8.
   assert.deepEqual([0.3, 0.5, 0.8, 1.2, 2].map(labelDetail), ['summary', 'groups', 'pins', 'pins', 'pins']);
   assert.deepEqual([0.5, 0.8, 1.2].map(notesAt), [false, true, true]);
+});
+
+// M2.13-3 (AC7): the synth open in place, its level's groups collapsed. Each
+// group's pin is on the grown frame's edge, where the wires crossing into it
+// end, and the links across the edge start at that pin: the path stays joined.
+test('collapsed groups on an open synth’s frame: anchors on its edge, the edge links from them', () => {
+  const factsOf = (m) => exportFacts(STUDIO.composites[m] ?? null);
+  const top = layout(STUDIO.top, {}, { factsOf });
+  const inner = layout(STUDIO.composites.moog_voice, {}, { factsOf });
+  const frame = openedLayout(top, 'synth', inner.bounds).nodes.find((n) => n.name === 'synth');
+  const anchors = groupAnchors(frame);
+  assert.ok(anchors.size > 0, 'the synth has groups of several');
+  const t = inside(frame, inner.bounds);
+  const links = boundaryLinks(frame, inner, anchors);
+  let grouped = 0;
+  for (const [name, anchor] of anchors) {
+    const pin = [...frame.ins, ...frame.outs].find((p) => p.name === name);
+    assert.equal(anchor.x, pin.x, `${name}: its group's pin is on the frame's edge`);
+    assert.ok(anchor.y >= frame.y && anchor.y <= frame.y + frame.h);
+    const link = links.find((l) => l.name === name);
+    if (!link) continue;
+    const end = link.direction === 'in' ? link.from : link.to;
+    assert.ok(Math.abs(end.x * t.k + t.x - anchor.x) < 1e-6 && Math.abs(end.y * t.k + t.y - anchor.y) < 1e-6, `${name}: its link starts at the group's pin`);
+    grouped++;
+  }
+  assert.ok(grouped > 0);
 });

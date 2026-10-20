@@ -1,22 +1,20 @@
 // The schematic's semantic zoom (M2.9-1, ADR 0026 §2): what is drawn for a
-// view. A composite whose box is wider on screen than OPEN_PX (and stays
-// open down to CLOSE_PX), or that was double-clicked, opens in place: its
-// own layout is drawn scaled into its box, recursively. The view is in the
+// view. A composite whose inside would be drawn readable (`chooseOpen`,
+// ui/lib/schematic-open.js: at OPEN_K on screen, open down to CLOSE_K), or
+// that was double-clicked, opens in place (M2.13-3): its box grows into a
+// frame and its own layout is drawn in it, recursively, one per level. The view is in the
 // coordinates of a level (its `path`, the deepest drawn under the screen's
 // centre): the levels above it are derived from it upward and the others
 // downward from them (M2.9-1b), so a deep view never passes through huge
 // numbers, and `scene` returns the view re-rooted at the deepest level
 // drawn under the centre now. Only what is on screen is listed (a node or a
 // wire smaller than MIN_PX is not), so the flattened plan is never drawn
-// whole and parents far outside the screen are culled. Breadcrumbs follow
-// the open boxes under the view's centre. No DOM.
+// whole and parents far outside the screen are culled. Breadcrumbs are
+// the open levels, the innermost last. No DOM.
 
 import { HEADER, PAD } from './schematic-layout.js';
+import { chooseOpen, grownNode, openedLayout } from './schematic-open.js';
 import { compose, screenRect, uncompose } from './schematic-view.js';
-
-/** A composite opens past this on-screen width (px), and closes below CLOSE_PX. */
-export const OPEN_PX = 360;
-export const CLOSE_PX = 300;
 /** Smaller than this on screen (px), a node or a wire is not drawn. */
 export const MIN_PX = 2;
 /** Nested deeper than this, nothing more opens (a guard; projects are shallower). */
@@ -61,8 +59,9 @@ function wireBox(wire) {
 /**
  * The open composites from the top level down to the level at `path`, as
  * `[{path, level, layout, node, inner}]` (`node` the instance's box in its
- * parent, `inner` its inside's transform), the top level first with no
- * node; null when `path` is not a chain of composites in these layouts.
+ * parent, grown into its frame, `layout` with the next one open, `inner`
+ * its inside's transform), the top level first with no node; null when
+ * `path` is not a chain of composites in these layouts.
  */
 export function chain(layoutOf, path = '') {
   const top = layoutOf('');
@@ -70,10 +69,12 @@ export function chain(layoutOf, path = '') {
   const links = [{ path: '', level: '', layout: top, node: null, inner: null }];
   let at = '';
   for (const name of String(path).split('/').filter(Boolean)) {
-    const parent = links.at(-1).layout;
-    const node = parent.nodes.find((n) => n.kind === 'instance' && n.name === name);
-    const drawn = node?.composite ? layoutOf(node.module) : null;
+    const parent = links.at(-1);
+    const box = parent.layout.nodes.find((n) => n.kind === 'instance' && n.name === name);
+    const drawn = box?.composite ? layoutOf(box.module) : null;
     if (!drawn) return null;
+    parent.layout = openedLayout(parent.layout, name, drawn.bounds);
+    const node = grownNode(box, drawn.bounds);
     at = `${at}/${name}`;
     links.push({ path: at, level: node.module, layout: drawn, node, inner: inside(node, drawn.bounds) });
   }
@@ -97,10 +98,12 @@ function upward(links, view) {
  * an open composite instance's address (`""` for the top level); `view` is
  * in the coordinates of the level at `view.path` (the top level when
  * absent or no longer there); `open` is the set of paths open in the last
- * scene, `pinned` those double-clicked. `view` comes back re-rooted at the
- * deepest level drawn under the screen's centre.
+ * scene, `pinned` those double-clicked, `at` the screen point zoomed about
+ * (the centre when absent; `chooseOpen`), `opening` false when nothing
+ * may open that is not open or pinned already (a pan). `view` comes back
+ * re-rooted at the deepest level drawn under the screen's centre.
  */
-export function scene({ layoutOf, view, viewport, open = new Set(), pinned = new Set() }) {
+export function scene({ layoutOf, view, viewport, open = new Set(), pinned = new Set(), at = { x: viewport.w / 2, y: viewport.h / 2 }, opening = true }) {
   const screen = { x: 0, y: 0, w: viewport.w, h: viewport.h };
   const links = chain(layoutOf, view.path ?? '') ?? chain(layoutOf, '');
   const along = new Map();
@@ -110,9 +113,11 @@ export function scene({ layoutOf, view, viewport, open = new Set(), pinned = new
   }
   const levels = [];
   const visit = (path, level, transform, depth, parent) => {
-    const drawn = layoutOf(level);
-    if (!drawn) return;
-    const entry = { path, level, layout: drawn, transform, nodes: [], wires: [], parent };
+    const stored = layoutOf(level);
+    if (!stored) return;
+    const pick = depth < MAX_DEPTH ? chooseOpen({ path, layout: stored, transform, screen, layoutOf, open, pinned, at, opening }) : null;
+    const drawn = pick ? openedLayout(stored, pick.node.name, pick.inner.bounds) : stored;
+    const entry = { path, level, layout: drawn, stored, transform, nodes: [], wires: [], parent };
     levels.push(entry);
     for (const node of drawn.nodes) {
       const rect = screenRect(transform, node);
@@ -127,27 +132,54 @@ export function scene({ layoutOf, view, viewport, open = new Set(), pinned = new
       const at = screenRect(transform, { x: box.x0, y: box.y0, w: 0, h: 0 });
       if (intersects({ x: at.x, y: at.y, w: w + 1, h: h + 1 }, screen)) entry.wires.push(wire);
     }
-    if (depth >= MAX_DEPTH) return;
-    for (const node of entry.nodes) {
-      if (!node.composite) continue;
-      const child = `${path}/${node.name}`;
-      const width = node.w * transform.k;
-      const opens = pinned.has(child) || width >= (open.has(child) ? CLOSE_PX : OPEN_PX);
-      const inner = opens ? layoutOf(node.module) : null;
-      if (!inner) continue;
-      // A level on the view's chain has its transform from the view itself.
-      const next = along.get(child) ?? compose(transform, inside(node, inner.bounds));
-      visit(child, node.module, next, depth + 1, entry);
-    }
+    if (!pick) return;
+    const child = `${path}/${pick.node.name}`;
+    const frame = grownNode(pick.node, pick.inner.bounds);
+    // A level on the view's chain has its transform from the view itself.
+    const next = along.get(child) ?? compose(transform, inside(frame, pick.inner.bounds));
+    visit(child, pick.node.module, next, depth + 1, entry);
   };
   visit('', '', along.get('') ?? view, 0, null);
   const drawn = { levels, open: new Set(levels.slice(1).map((l) => l.path)) };
   for (const entry of levels) entry.behind = behind(entry, drawn.open, screen);
   // Re-rooted at the deepest level drawn under the centre.
-  const deepest = breadcrumbs(drawn, viewport).at(-1).path;
+  const deepest = underCentre(drawn, viewport).at(-1).path;
   const root = levels.find((l) => l.path === deepest) ?? levels[0];
   drawn.view = root ? { ...root.transform, path: root.path } : view;
   return drawn;
+}
+
+/**
+ * The pan (screen px, `{dx, dy}`) that keeps a composite opened by a zoom
+ * where the zoom was (M2.13-3, the operator's review), or null when none
+ * opened: the first level of `drawn` (a scene) whose open composite was
+ * not open `before` (a set of paths). The point of the box under `at`
+ * (the zoom's point), as a fraction of its width and height, is under
+ * `at` again in its frame (clamped to the box: a zoom about a point
+ * beside it keeps the nearest edge), so the zoom goes on into the part of
+ * the inside that was under the pointer, never into an empty part of the
+ * frame; then, when the frame fits below the bar (`bar` px at the top),
+ * its header is kept below it.
+ */
+export function openAnchor(drawn, before, at, viewport, bar = 0) {
+  for (let i = 0; i + 1 < drawn.levels.length; i++) {
+    const level = drawn.levels[i];
+    const child = drawn.levels[i + 1];
+    const name = level.layout?.opened;
+    if (!name || before.has(child.path) || child.path !== `${level.path}/${name}`) continue;
+    const frame = level.layout.nodes.find((n) => n.kind === 'instance' && n.name === name);
+    const node = level.stored?.nodes.find((n) => n.kind === 'instance' && n.name === name);
+    if (!frame?.grown || !node) return null;
+    const box = screenRect(level.transform, node);
+    const r = screenRect(level.transform, frame);
+    const fx = Math.min(1, Math.max(0, (at.x - box.x) / box.w));
+    const fy = Math.min(1, Math.max(0, (at.y - box.y) / box.h));
+    const dx = box.x + fx * box.w - (r.x + fx * r.w);
+    let dy = box.y + fy * box.h - (r.y + fy * r.h);
+    if (r.h <= viewport.h - bar && r.y + dy < bar) dy = bar - r.y;
+    return { dx, dy };
+  }
+  return null;
 }
 
 /** How far past the screen (px) a stroke may reach. */
@@ -212,8 +244,13 @@ export function isOpen(drawn, path) {
   return drawn.open.has(path);
 }
 
-/** The breadcrumbs: the top level, then each open box under the view's centre, `[{path, level, name}]`. */
-export function breadcrumbs(drawn, viewport) {
+/** The breadcrumbs: the top level, then each open level inside it, the innermost last (`[{path, level, name}]`). */
+export function breadcrumbs(drawn) {
+  return drawn.levels.map((l) => ({ path: l.path, level: l.level, name: l.path ? l.path.split('/').at(-1) : '' }));
+}
+
+/** The top level, then each open box under the view's centre, `[{path, level, name}]`: the deepest is the level the view is kept in. */
+function underCentre(drawn, viewport) {
   const centre = { x: viewport.w / 2, y: viewport.h / 2, w: 0, h: 0 };
   const crumbs = [{ path: '', level: '', name: '' }];
   let current = drawn.levels[0];

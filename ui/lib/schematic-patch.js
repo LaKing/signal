@@ -120,14 +120,16 @@ export function instanceCount(graph, level) {
  * The level a double-click at screen `point` on `hit` (in `drawn`, a scene)
  * adds to in edit mode, as a scene level (`{path, level, transform, …}`),
  * or null: on the background, the innermost level there; inside an open
- * composite (which hit-tests as its box), that composite's level.
+ * composite (which hit-tests as its box), that composite's level. Only the
+ * innermost open level is added to (M2.13-3): elsewhere, null.
  */
 export function paletteLevel(hit, drawn, point) {
-  if (hit?.kind === 'background') return levelAt(drawn, point);
-  if (hit?.kind === 'instance' && hit.node?.composite && drawn?.open?.has(hit.address)) {
-    return drawn.levels.find((l) => l.path === hit.address) ?? null;
+  let level = null;
+  if (hit?.kind === 'background') level = levelAt(drawn, point);
+  else if (hit?.kind === 'instance' && hit.node?.composite && drawn?.open?.has(hit.address)) {
+    level = drawn.levels.find((l) => l.path === hit.address) ?? null;
   }
-  return null;
+  return level && level === drawn.levels.at(-1) ? level : null;
 }
 
 /** The innermost level drawn under screen `point` (an open composite's inside, else the top level). */

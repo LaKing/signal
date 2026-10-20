@@ -141,7 +141,7 @@ export function sidebar(selected, context = {}) {
   const menu = (hit) => ({ editing, level: shown.level, ...(context.menu?.(hit) ?? {}) });
   const list = (selected ?? []).filter((s) => s && s.kind !== 'background');
   if (list.length === 0) return projectSidebar(graph, layoutOf, shown);
-  if (list.length > 1) return groupSidebar(list, editing);
+  if (list.length > 1) return groupSidebar(list, editing, menu);
   const hit = list[0];
   const entry = entryOf(hit, layoutOf);
   const base = card(hit, { graph, description });
@@ -158,7 +158,7 @@ export function sidebar(selected, context = {}) {
         ['address', hit.address],
         ['module', node.module],
         ['category', category ?? '—'],
-        ['composite', node.composite ? `yes, ${inside} instance${inside === 1 ? '' : 's'} inside` : 'no'],
+        ['composite', !node.composite ? 'no' : graph?.composites?.[node.module] ? `yes, ${inside} instance${inside === 1 ? '' : 's'} inside` : 'yes, a library composite (its inside is not in the graph)'],
         ['level', levelText(graph, hit.level)],
       ],
       pins: [...node.ins, ...node.outs].map((p) => pinRow(entry, node, p)),
@@ -252,6 +252,12 @@ export function acrossOf(graph, hit) {
   };
 }
 
+/** The project's library composites (`lib.*`) at the top level, by type: a row when there are any. */
+function libraryRow(graph, layoutOf) {
+  const types = new Set((layoutOf?.('')?.nodes ?? []).filter((n) => n.kind === 'instance' && n.composite && !graph.composites?.[n.module]).map((n) => n.module));
+  return types.size ? [['library composites', String(types.size)]] : [];
+}
+
 function projectSidebar(graph, layoutOf, shown) {
   if (!graph) return { kind: 'project', title: 'No schematic', subtitle: '', fields: [], legend: LEGEND };
   const top = graph.top ?? {};
@@ -259,6 +265,8 @@ function projectSidebar(graph, layoutOf, shown) {
     ['instances', String((top.instances ?? []).length)],
     ['connections', String((top.connections ?? []).length)],
     ['composites', String(Object.keys(graph.composites ?? {}).length)],
+    // A library composite's inside is not in `graph` (its type is), so it is counted apart.
+    ...libraryRow(graph, layoutOf),
     ['level shown', shown.level ? `${shown.path} (${shown.level})` : 'top level'],
   ];
   if (shown.level) {
@@ -270,7 +278,7 @@ function projectSidebar(graph, layoutOf, shown) {
   return { kind: 'project', title: graph.project ?? 'project', subtitle: 'nothing selected: click a box, a pin or a wire', fields, legend: LEGEND };
 }
 
-function groupSidebar(list, editing) {
+function groupSidebar(list, editing, menu = () => ({})) {
   const counts = { instance: 0, wire: 0, port: 0 };
   for (const s of list) counts[s.kind] = (counts[s.kind] ?? 0) + 1;
   const words = [
@@ -286,7 +294,9 @@ function groupSidebar(list, editing) {
   const pins = list.every((s) => s.kind === 'port');
   const box = (s) => (s.node?.kind === 'instance' ? `${s.path}/${s.node.name}` : s.path);
   const group = pins && list.every((s) => s.group && s.group === list[0].group && box(s) === box(list[0])) ? list[0].group : null;
-  const nothing = levels === 0 ? 'Nothing here is deleted: pins and exports stay' : tooLargeText(plan);
+  // A part around the innermost open composite (M2.13-3): not edited now.
+  const around = list.map((s) => menu(s).around).find(Boolean) ?? null;
+  const nothing = around ?? (levels === 0 ? 'Nothing here is deleted: pins and exports stay' : tooLargeText(plan));
   const notes = [];
   if (plan.tooLarge.length) notes.push(tooLargeText(plan));
   if (levels > 1) notes.push(`Delete writes ${levels} patches, one per level (${plan.patches.map((p) => p.level || 'top level').join(', ')}): each is undone on its own`);

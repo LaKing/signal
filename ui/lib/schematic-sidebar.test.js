@@ -326,3 +326,18 @@ test('a library composite box pin: Go inside is off, its inside not in the graph
   const model = sidebar([hit], { graph: GRAPH, layoutOf: (l) => (l === '' ? lay : null) });
   assert.ok(action(model, 'go-inside').disabled);
 });
+
+test('a library composite is said to be one, its inside not in the graph, and counted apart (the operator’s review of M2.13-3)', () => {
+  const lib = new Map();
+  const libOf = (level) => {
+    if (!lib.has(level)) lib.set(level, level === '' ? layout(GRAPH.top) : GRAPH.composites[level] ? layout(GRAPH.composites[level]) : null);
+    return lib.get(level);
+  };
+  const fx = instanceHit(TOP, libOf('').nodes.find((n) => n.name === 'fx'));
+  const model = sidebar([fx], { graph: GRAPH, layoutOf: libOf });
+  assert.equal(field(model, 'composite'), 'yes, a library composite (its inside is not in the graph)');
+  assert.equal(action(sidebar([fx], { graph: GRAPH, layoutOf: libOf, menu: () => ({ opaque: true }) }), 'open').disabled, true, 'Open in place off');
+  const project = sidebar([], { graph: GRAPH, layoutOf: libOf });
+  assert.equal(field(project, 'library composites'), '1');
+  assert.equal(field(sidebar([], { graph: KICK, layoutOf }), 'library composites'), undefined, 'none: no row');
+});
