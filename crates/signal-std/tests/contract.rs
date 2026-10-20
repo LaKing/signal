@@ -605,12 +605,14 @@ mod modulation {
     use signal_core::{EventPayload, ModuleDescriptor};
 
     /// `alternating`: (name, even-frame value, odd-frame value); `fixed`:
-    /// (name, value).
+    /// (name, value); every vector input row alternates between `rows.0`
+    /// and `rows.1`.
     fn stimulus(
         descriptor: &ModuleDescriptor,
         frames: usize,
         alternating: &[(&str, f64, f64)],
         fixed: &[(&str, f64)],
+        rows: (f64, f64),
     ) -> Stimulus {
         let ports = descriptor.ports.iter();
         let inputs = ports.filter(|p| p.direction == signal_core::Direction::In);
@@ -624,6 +626,12 @@ mod modulation {
                     signals.push(x);
                 }
                 signal_core::PortShape::Events => events.push(vec![(0, EventPayload::Trigger)]),
+                signal_core::PortShape::Vector(width) => {
+                    let row: Vec<f64> = (0..frames)
+                        .map(|n| if n % 2 == 0 { rows.0 } else { rows.1 })
+                        .collect();
+                    signals.extend((0..width).map(|_| row.clone()));
+                }
                 _ => {}
             }
         }
@@ -667,7 +675,107 @@ mod modulation {
             ("law", 0.0),
             ("position", 0.5),
         ];
-        stimulus(descriptor, frames, &[("freq", 100.0, 21_000.0)], &fixed)
+        stimulus(
+            descriptor,
+            frames,
+            &[("freq", 100.0, 21_000.0)],
+            &fixed,
+            (0.0, 0.0),
+        )
+    }
+
+    /// M2.10-8: every continuous parameter of the bank but the decay and
+    /// its tilt between its range limits, and every vector row between 15 and 0
+    /// (factors 16 and 1); 64 modes, decay 60 s and law 0 so the excitation
+    /// keeps ringing (`modal_decay` moves those). `gain` is at its maximum on
+    /// the even frames: on the odd ones `freq` 21 kHz times `mode_freq`'s 16
+    /// puts every mode above Nyquist, where the bank's Nyquist fade makes it
+    /// silent, so the loud frames are the low ones and the bank is heard.
+    fn modal_all(descriptor: &ModuleDescriptor, _seed: u64, frames: usize) -> Stimulus {
+        let alternating: Vec<(&str, f64, f64)> = descriptor
+            .parameters
+            .iter()
+            .filter(|p| !["modes", "decay_s", "law", "damping_tilt"].contains(&p.name))
+            .map(|p| match p.name {
+                "freq" => ("freq", 100.0, 21_000.0),
+                "gain" => ("gain", p.range.max, p.range.min),
+                _ => (p.name, p.range.min, p.range.max),
+            })
+            .collect();
+        let fixed = [("modes", 64.0), ("decay_s", 60.0), ("law", 0.0)];
+        stimulus(descriptor, frames, &alternating, &fixed, (15.0, 0.0))
+    }
+
+    /// The decay between its limits: `decay_s` 60 and 0.01, `law` 0 and 3,
+    /// `damping_tilt` 0 and 10,
+    /// every vector row 63 and −1 (factors 64 and 0, `mode_decay` 64 and
+    /// 1/64). The excitation dies out (checked for finiteness only).
+    fn modal_decay(descriptor: &ModuleDescriptor, _seed: u64, frames: usize) -> Stimulus {
+        let alternating = [
+            ("decay_s", 60.0, 0.01),
+            ("law", 0.0, 3.0),
+            ("damping_tilt", 0.0, 10.0),
+            ("freq", 100.0, 21_000.0),
+        ];
+        stimulus(
+            descriptor,
+            frames,
+            &alternating,
+            &[("modes", 64.0)],
+            (63.0, -1.0),
+        )
+    }
+
+    /// The same at the largest gain the parameters allow: decay 60 s, law 0,
+    /// gain 4, rows between 15 and 63 (factors 16 and 64), with only the
+    /// frequency, material and pickup moving.
+    fn modal_loud(descriptor: &ModuleDescriptor, _seed: u64, frames: usize) -> Stimulus {
+        let alternating = [
+            ("freq", 100.0, 21_000.0),
+            ("material", 0.0, 5.0),
+            ("pickup", 0.01, 0.99),
+            ("brightness", -1.0, 1.0),
+        ];
+        let fixed = [
+            ("modes", 64.0),
+            ("decay_s", 60.0),
+            ("law", 0.0),
+            ("gain", 4.0),
+            ("pickup_mix", 1.0),
+        ];
+        stimulus(descriptor, frames, &alternating, &fixed, (15.0, 63.0))
+    }
+
+    /// M2.10-8: the exciter's level, hardness and added parameters between
+    /// their range limits and its duration between 5 and 50 ms on every
+    /// frame (a length change rebases the excitation every frame), as a bow
+    /// and as a noise burst.
+    fn exciter_with(descriptor: &ModuleDescriptor, frames: usize, kind: f64) -> Stimulus {
+        let alternating: Vec<(&str, f64, f64)> = descriptor
+            .parameters
+            .iter()
+            .filter(|p| p.name != "kind")
+            .map(|p| match p.name {
+                "duration_ms" => ("duration_ms", 5.0, 50.0),
+                "level" => ("level", 1.0, 0.2),
+                _ => (p.name, p.range.min, p.range.max),
+            })
+            .collect();
+        stimulus(
+            descriptor,
+            frames,
+            &alternating,
+            &[("kind", kind)],
+            (0.0, 0.0),
+        )
+    }
+
+    fn exciter_bow(descriptor: &ModuleDescriptor, _seed: u64, frames: usize) -> Stimulus {
+        exciter_with(descriptor, frames, 3.0)
+    }
+
+    fn exciter_noise(descriptor: &ModuleDescriptor, _seed: u64, frames: usize) -> Stimulus {
+        exciter_with(descriptor, frames, 2.0)
     }
 
     /// freq, brightness and stiffness between their range limits, decay_s 60.
@@ -678,14 +786,26 @@ mod modulation {
             ("brightness", 0.0, 1.0),
             ("stiffness", 1.0, 0.0),
         ];
-        stimulus(descriptor, frames, &alternating, &[("decay_s", 60.0)])
+        stimulus(
+            descriptor,
+            frames,
+            &alternating,
+            &[("decay_s", 60.0)],
+            (0.0, 0.0),
+        )
     }
 
     /// The same as [`string`] with only the frequency moving, between 20 Hz
     /// and 20 000 Hz, at full stiffness.
     fn string_freq(descriptor: &ModuleDescriptor, _seed: u64, frames: usize) -> Stimulus {
         let fixed = [("decay_s", 60.0), ("stiffness", 1.0), ("brightness", 1.0)];
-        stimulus(descriptor, frames, &[("freq", 20.0, 20_000.0)], &fixed)
+        stimulus(
+            descriptor,
+            frames,
+            &[("freq", 20.0, 20_000.0)],
+            &fixed,
+            (0.0, 0.0),
+        )
     }
 
     /// The auditor's stimulus (finding auditor-1-mass-spring-modulation-
@@ -695,7 +815,13 @@ mod modulation {
     fn mass_spring(descriptor: &ModuleDescriptor, _seed: u64, frames: usize) -> Stimulus {
         let (lo, hi) = range(descriptor, "spring_hz");
         let fixed = [("masses", 32.0), ("decay_s", 60.0), ("boundary", 0.0)];
-        stimulus(descriptor, frames, &[("spring_hz", hi, lo)], &fixed)
+        stimulus(
+            descriptor,
+            frames,
+            &[("spring_hz", hi, lo)],
+            &fixed,
+            (0.0, 0.0),
+        )
     }
 
     /// The same with the boundary alternating too, heard at the free end.
@@ -703,7 +829,7 @@ mod modulation {
         let (lo, hi) = range(descriptor, "spring_hz");
         let alternating = [("spring_hz", hi, lo), ("boundary", 0.0, 1.0)];
         let fixed = [("masses", 32.0), ("decay_s", 60.0), ("pickup_node", 32.0)];
-        stimulus(descriptor, frames, &alternating, &fixed)
+        stimulus(descriptor, frames, &alternating, &fixed, (0.0, 0.0))
     }
 
     fn finite(name: &str, stimulus: signal_contract::StimulusFn) {
@@ -774,6 +900,24 @@ mod modulation {
     fn modal_stays_finite_when_freq_alternates_every_frame() {
         excited("std.modal", modal);
         finite("std.modal", modal);
+    }
+
+    /// M2.10-8 (AC6, AC10): every parameter and vector row of the bank.
+    #[test]
+    fn modal_stays_finite_when_every_parameter_alternates_every_frame() {
+        for stimulus in [modal_all, modal_loud] {
+            excited("std.modal", stimulus);
+            finite("std.modal", stimulus);
+        }
+        finite("std.modal", modal_decay);
+    }
+
+    /// M2.10-8 (AC7): the exciter under every parameter at once.
+    #[test]
+    fn exciter_stays_finite_when_its_parameters_alternate_every_frame() {
+        for stimulus in [exciter_bow, exciter_noise] {
+            finite("std.exciter", stimulus);
+        }
     }
 
     #[test]

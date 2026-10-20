@@ -56,6 +56,14 @@ impl Library {
         signal_lib::is_validation(name)
     }
 
+    /// Whether the library demo (`projects/library-demo`) shows the built-in
+    /// composite `name` (without the prefix): every one but the validation
+    /// references and the composites added after it
+    /// (`signal_lib::NOT_IN_DEMO`), so its golden render never changes.
+    pub fn in_demo(name: &str) -> bool {
+        signal_lib::in_demo(name)
+    }
+
     /// The native type the built-in composite `name` (without the prefix)
     /// is a validation reference for (`signal_lib::reference_for`), shown
     /// as `reference_for` by `signal modules`.

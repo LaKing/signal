@@ -278,7 +278,7 @@ use signal_core::{
 /// left out: the estimate does not divide by a rate divisor, so a per-tick
 /// figure would overstate them up to 800 times. Every other type takes the
 /// engine's default.
-pub const COST_NS: [(&str, u32); 75] = [
+pub const COST_NS: [(&str, u32); 76] = [
     ("std.abs", 11),
     ("std.add", 11),
     ("std.adsr", 44),
@@ -320,7 +320,6 @@ pub const COST_NS: [(&str, u32); 75] = [
     ("std.ladder", 91),
     ("std.mass_spring", 44),
     ("std.mesh2d_audio", 674),
-    ("std.modal", 113),
     ("std.pack1024", 3488),
     ("std.pack16", 62),
     ("std.pack256", 904),
@@ -360,6 +359,20 @@ pub const COST_NS: [(&str, u32); 75] = [
     ("std.fdn_reverb", 72),
     ("std.fm_op", 42),
     ("std.wavetable", 32),
+    // M2.10-8 (indicative, pending the operator's device check):
+    // `signal --json bench --seconds 0.5`, release, 2026-10-20 01:17 CEST,
+    // devpanel sandbox, host offset 11.1 ns. The bench feeds every vector
+    // input with its saw, so `std.modal` is measured with all 192 per-mode
+    // rows changing on every frame (every mode recomputed every frame); with
+    // the rows unconnected it costs about a tenth of that
+    // (`docs/benchmarks.md`, "The modal bank and exciter"). The figure is
+    // per type, not per setting: the worst case, 64 modes with every
+    // parameter modulated, measured about 4.6–5.1 µs per frame at the
+    // primitive level (16 modes about 1.4–1.6 µs; static 0.27 and 0.12 µs),
+    // so a bank of 64 fully modulated modes costs about five times this
+    // estimate (review of M2.10-8; the same section).
+    ("std.exciter", 47),
+    ("std.modal", 956),
 ];
 
 /// Registers every `std.*` primitive type in `registry`, with its static

@@ -50,6 +50,7 @@ whole signal path; `lfo_shapes` once per shape, with every output).
 - `lib.lfo_shapes` (generator), five LFO shapes from one phasor, the random drawn at every cycle's start (frame 0 and every reset included): `3cdbb0eb89ca6716`
 - `lib.stereo_width` (core), mid/side width, computed as the change from the input from halves taken first (no intermediate beyond the inputs or outputs; width 1 exact): `4398c461e58ecc48`
 - `lib.tape_echo` (delay), from the M2.11 studio's tape delay: `2229c4b8e2b245b9`
+- `lib.modal_voice` (generator), added in M2.10-8: `std.exciter` into a fully modulatable `std.modal` with a loudness contour and velocity to level and brightness, every control and the bank's per-mode vector inputs exported; not in the library demo (`NOT_IN_DEMO`): `9ce7810f4cfa9c81`
 
 The validation references (M2.10-4, ADR 0027 §4 "Validation"): std types
 rebuilt from core primitives, each rendered against its native counterpart

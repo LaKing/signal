@@ -470,7 +470,7 @@ fn modules_lists_library_composites_by_category() {
         .iter()
         .filter(|m| m["library"] == true)
         .collect();
-    assert_eq!(library.len(), 20);
+    assert_eq!(library.len(), 21);
     let echo = library
         .iter()
         .find(|m| m["type_name"] == "lib.tape_echo")
@@ -513,6 +513,7 @@ fn modules_lists_library_composites_by_category() {
         "lib.analog_kick",
         "lib.analog_cymbal",
         "lib.lfo_shapes",
+        "lib.modal_voice",
         "std.osc",
     ] {
         assert!(names.contains(&name), "{name}");

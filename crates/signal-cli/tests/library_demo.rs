@@ -1,5 +1,6 @@
 //! The M2.10-3 library demo `projects/library-demo` (AC11): it uses every
-//! library composite but the M2.10-4 validation references, and its golden render (8 s, with no fault, no mute and
+//! library composite but the M2.10-4 validation references and the
+//! composites added after it (`signal_lib::NOT_IN_DEMO`), and its golden render (8 s, with no fault, no mute and
 //! the output stage's safe peak) lists each with its content hash. How to
 //! update the golden: `docs/testing-and-evaluation.md`. The committed
 //! project is only read.
@@ -35,11 +36,11 @@ fn read_json(path: &Path) -> Value {
 }
 
 /// The library composites the demo shows: every one but the validation
-/// references (M2.10-4), which exist to be compared with their native types.
+/// references (M2.10-4), which exist to be compared with their native types,
+/// and the composites added after the demo (`signal_lib::NOT_IN_DEMO`,
+/// M2.10-8's `lib.modal_voice`), whose golden is never regenerated.
 fn demonstrated() -> impl Iterator<Item = &'static str> {
-    Library::builtin()
-        .names()
-        .filter(|n| !Library::is_validation(n))
+    Library::builtin().names().filter(|n| Library::in_demo(n))
 }
 
 /// AC11: every library composite (but the validation references) is in the

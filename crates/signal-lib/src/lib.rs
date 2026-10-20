@@ -51,7 +51,7 @@ macro_rules! library {
 }
 
 /// Every library composite, in name order.
-static COMPOSITES: [LibraryFile; 20] = library![
+static COMPOSITES: [LibraryFile; 21] = library![
     "adsr_core",
     "analog_clap",
     "analog_cymbal",
@@ -66,6 +66,7 @@ static COMPOSITES: [LibraryFile; 20] = library![
     "ladder_voice",
     "lag_core",
     "lfo_shapes",
+    "modal_voice",
     "onepole_core",
     "osc_core",
     "stereo_width",
@@ -128,6 +129,19 @@ pub static VALIDATION: [ValidationPair; 7] = [
         outputs: &["out"],
     },
 ];
+
+/// Library composites added after the M2.10-3 library demo
+/// (`projects/library-demo`), which uses every other composite but the
+/// validation references: its golden render is never regenerated
+/// (`docs/testing-and-evaluation.md`), so a newer composite is shown by its
+/// own pinned render (`tests/pinned.rs`) instead.
+pub static NOT_IN_DEMO: [&str; 1] = ["modal_voice"];
+
+/// Whether the library demo leaves `name` (without the `lib.` prefix) out:
+/// a validation reference or a composite in [`NOT_IN_DEMO`].
+pub fn in_demo(name: &str) -> bool {
+    !is_validation(name) && !NOT_IN_DEMO.contains(&name)
+}
 
 /// Whether `name` (without the `lib.` prefix) is a validation reference.
 pub fn is_validation(name: &str) -> bool {

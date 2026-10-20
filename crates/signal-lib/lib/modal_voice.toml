@@ -1,0 +1,70 @@
+# A struck, plucked, bowed or blown modal voice: std.exciter into std.modal
+# (M2.10-8), shaped by a loudness contour, with velocity mapped to the
+# strike's level and the body's brightness. Driven by a sequencer's `hz`,
+# `gate` and `velocity`.
+#
+#   gate ─► edge (rise) ─► exciter ─► modal ─► × contour ─► safe ─► volume ─► out
+#   hz ─► pitch ─────────────────────► modal.freq
+#   velocity ─► clamp [0, 1] ─┬──────► exciter.level
+#                             └─ × velocity_brightness ─► modal.brightness
+#   gate ─► contour (adsr)
+#
+# Each rising gate strikes once; the body rings on while the gate is high
+# and the contour releases it when the gate falls, so a note's length damps
+# the ring. `hz`, clamped to [0, 10⁶] (so no input can fault `pitch`), sets
+# the frequency of ratio 1 (below 1 the bank reads 1 Hz); the
+# velocity, clamped to [0, 1], is the exciter's level and, times
+# `velocity_brightness`, is added to the body's brightness (the bank clamps
+# the sum to [−1, 1]), so a harder note is louder and brighter.
+#
+# The per-mode inputs `mode_freq`, `mode_gain` and `mode_decay` go to the
+# bank unchanged: each element v multiplies its mode's frequency, gain or
+# decay by 1 + v (unconnected: by 1; std.modal's rustdoc).
+#
+# Gain staging: the bank's output is within ±10⁶ and the contour within
+# [0, 1]; `safe` clamps to ±63 000 before `volume`, whose +24 dB (×15.85)
+# then stays within ±10⁶, so no exported setting can fault the voice. At the
+# defaults a full-velocity strike peaks near ±0.5.
+schema_version = 1
+
+[composite]
+name = "modal_voice"
+category = "generator"
+description = "A modal voice for patching: an exciter strikes, plucks, bows or blows a modal resonator bank once per rising gate, shaped by a loudness contour, with velocity mapped to level and brightness. Inputs: hz (the frequency of the bank's ratio 1, clamped to [0, 10⁶]), gate (each rise excites; the contour runs while it is above 0.5), velocity (clamped to [0, 1]; the exciter's level, and times velocity_brightness added to the brightness), mode_freq, mode_gain, mode_decay (64 elements each, per-mode factors 1 + v on frequency, gain and decay; unconnected 1). Output: out (near ±0.5 at full velocity). Parameters: exciter_kind (0 pluck, 1 strike, 2 noise, 3 bow; default 1), exciter_ms (the excitation's length, default 3 ms), hardness (default 0.6), bow_speed (default 1), friction (default 0.25), noise_color (default 0), exciter_position (the excitation's low-pass, default 0); material (0 string … 4 bell, 5 explicit, morphing between; default 1), modes (default 16), decay (T60 of ratio 1 in s, default 1.5), law (default 1), strike_position (default 0.3), inharmonicity (default 0), damping_tilt (default 0), brightness (default 0), pickup (default 0.5), pickup_mix (default 0), spread (default 0), body_gain (the bank's gain, default 0.4), ratio_1, ratio_2, ratio_3, ratio_4, ratio_5, ratio_6, ratio_7, ratio_8, ratio_9, ratio_10, ratio_11, ratio_12, ratio_13, ratio_14, ratio_15, ratio_16 (the explicit ratios, defaults 1 to 16); a_attack, a_decay, a_sustain, a_release (the loudness contour, defaults 1 ms, 50 ms, 1, 400 ms); velocity_brightness (default 0.3); volume (dB, default 0)."
+
+[instances]
+pitch = { module = "std.clamp", lo = 0, hi = 1000000 }
+gate_edge = { module = "std.edge" }
+vel_lim = { module = "std.clamp", lo = 0, hi = 1 }
+vel_bright = { module = "std.const", value = 0.3 }
+vel_amt = { module = "std.mul" }
+
+exciter = { module = "std.exciter", kind = 1, level = 0, duration_ms = 3, hardness = 0.6, bow_speed = 1, friction = 0.25, noise_color = 0, position = 0 }
+modal = { module = "std.modal", freq = 0, material = 1, modes = 16, decay_s = 1.5, law = 1, position = 0.3, gain = 0.4 }
+
+aenv = { module = "std.adsr", attack_ms = 1, decay_ms = 50, sustain = 1, release_ms = 400 }
+vca = { module = "std.mul" }
+safe = { module = "std.clamp", lo = -63000, hi = 63000 }
+volume = { module = "std.gain", db = 0 }
+
+[wiring]
+connections = [
+  { from = "pitch.out", to = "modal.freq" },
+  { from = "gate_edge.rise", to = "exciter.trigger" },
+  # Velocity: the exciter's level, and a share of the brightness.
+  { from = "vel_lim.out", to = "exciter.level" },
+  { from = "vel_lim.out", to = "vel_amt.a" },
+  { from = "vel_bright.out", to = "vel_amt.b" },
+  { from = "vel_amt.out", to = "modal.brightness" },
+  # The body, its contour and the output stage.
+  { from = "exciter.out", to = "modal.in" },
+  { from = "modal.out", to = "vca.a" },
+  { from = "aenv.out", to = "vca.b" },
+  { from = "vca.out", to = "safe.in" },
+  { from = "safe.out", to = "volume.in" },
+]
+
+[exports]
+inputs = { hz = "pitch.in", gate = ["gate_edge.in", "aenv.gate"], velocity = "vel_lim.in", mode_freq = "modal.mode_freq", mode_gain = "modal.mode_gain", mode_decay = "modal.mode_decay" }
+outputs = { out = "volume.out" }
+parameters = { exciter_kind = "exciter.kind", exciter_ms = "exciter.duration_ms", hardness = "exciter.hardness", bow_speed = "exciter.bow_speed", friction = "exciter.friction", noise_color = "exciter.noise_color", exciter_position = "exciter.position", material = "modal.material", modes = "modal.modes", decay = "modal.decay_s", law = "modal.law", strike_position = "modal.position", inharmonicity = "modal.inharmonicity", damping_tilt = "modal.damping_tilt", brightness = "modal.brightness", pickup = "modal.pickup", pickup_mix = "modal.pickup_mix", spread = "modal.spread", body_gain = "modal.gain", ratio_1 = "modal.ratio_1", ratio_2 = "modal.ratio_2", ratio_3 = "modal.ratio_3", ratio_4 = "modal.ratio_4", ratio_5 = "modal.ratio_5", ratio_6 = "modal.ratio_6", ratio_7 = "modal.ratio_7", ratio_8 = "modal.ratio_8", ratio_9 = "modal.ratio_9", ratio_10 = "modal.ratio_10", ratio_11 = "modal.ratio_11", ratio_12 = "modal.ratio_12", ratio_13 = "modal.ratio_13", ratio_14 = "modal.ratio_14", ratio_15 = "modal.ratio_15", ratio_16 = "modal.ratio_16", a_attack = "aenv.attack_ms", a_decay = "aenv.decay_ms", a_sustain = "aenv.sustain", a_release = "aenv.release_ms", velocity_brightness = "vel_bright.value", volume = "volume.db" }

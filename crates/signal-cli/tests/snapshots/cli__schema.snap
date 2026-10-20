@@ -298,6 +298,7 @@ expression: text
             "lib.ladder_voice",
             "lib.lag_core",
             "lib.lfo_shapes",
+            "lib.modal_voice",
             "lib.onepole_core",
             "lib.osc_core",
             "lib.stereo_width",

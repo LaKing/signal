@@ -237,8 +237,9 @@ The **built-in library** (ADR 0027 §4, M2.10-3) is composites shipped with Sign
 | `lib.ar_env` | `envelope` | Attack-release from a gate through `std.lag` |
 | `lib.crossfade` | `core` | `a·(1 − mix) + b·mix`, the mix clamped to [0, 1] |
 | `lib.stereo_width` | `core` | Mid/side width, `width` clamped to [0, 2] |
+| `lib.modal_voice` | `generator` | M2.10-8: `std.exciter` into `std.modal` once per rising gate, a loudness contour, velocity to level and brightness; every exciter and bank control exported, and the bank's `mode_freq`, `mode_gain`, `mode_decay` vector inputs (each element `v` a factor `1 + v`, unconnected 1). Not in `projects/library-demo` (`signal_lib::NOT_IN_DEMO`: the demo's golden is never regenerated) |
 
-`projects/library-demo` uses every one (`testing-and-evaluation.md`); the seven validation references (`lib.<type>_core`, above) are not in this table and not in the demo. The schematic palette lists them (`library`, and the references under `reference`; `ui-controls.md`) and adds them by a patch; not yet: opening a library composite's inside in the UI (ADR 0027 §6). The validation of library composites against native references (ADR 0027 §4) is M2.10-4's (above, and `testing-and-evaluation.md`).
+`projects/library-demo` uses every one but the validation references and the composites added after it (`signal_lib::NOT_IN_DEMO`: `lib.modal_voice`) (`testing-and-evaluation.md`); the seven validation references (`lib.<type>_core`, above) are not in this table and not in the demo. The schematic palette lists them (`library`, and the references under `reference`; `ui-controls.md`) and adds them by a patch; not yet: opening a library composite's inside in the UI (ADR 0027 §6). The validation of library composites against native references (ADR 0027 §4) is M2.10-4's (above, and `testing-and-evaluation.md`).
 
 ## Testing a primitive: the contract suite
 

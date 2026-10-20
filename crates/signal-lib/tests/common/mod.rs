@@ -31,7 +31,7 @@ pub fn registry() -> Registry {
 pub fn frames(name: &str) -> u64 {
     match name {
         "tape_echo" | "lfo_shapes" => 48_000,
-        "ladder_voice" | "ar_env" | "adsr_core" | "delay_core" => 24_000,
+        "ladder_voice" | "modal_voice" | "ar_env" | "adsr_core" | "delay_core" => 24_000,
         _ => FRAMES,
     }
 }
@@ -58,7 +58,7 @@ pub fn stimulus(name: &str) -> (&'static str, &'static str) {
         ),
         // The pitch steps between 110 and 220 Hz at 3 Hz (so the glide and
         // the first-note path both act), the gate opens and closes at 5 Hz.
-        "ladder_voice" => (
+        "ladder_voice" | "modal_voice" => (
             "step_clock = { module = \"std.phasor\", freq = 3 }\n\
              step = { module = \"std.compare\", mode = 0 }\n\
              hz = { module = \"std.scale\", mul = 110, add = 110 }\n\

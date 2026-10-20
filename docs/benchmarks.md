@@ -1013,3 +1013,45 @@ On the Mac outside the sandbox, from the repository root, with `PATH=/opt/homebr
 | `std.wavetable` | 44.8 | 31.7 | 32 |
 
 The first run (21:02 UTC, before the fixes, load 5–27) read 27.6, 39.4, 37.9, 74.2, 42.5 and 26.1: the wavetable's 16 Hermite reads cost about 6 ns more than 8 linear ones; the comb and all-pass did not get dearer (the differences are within this host's run-to-run spread). The bench keeps every parameter at its default, so these are the costs with cached coefficients; a parameter modulated at audio rate adds its transcendental functions per frame (`std.biquad` a `tan`, a `pow` and a square root; `std.comb` an `exp` when `damping_hz` moves; `std.fdn_reverb` eight `pow` when `size` or `decay_s` moves).
+
+### The modal bank and exciter (M2.10-8)
+
+**Indicative, sandbox figures pending the operator's confirmation on the device (AC9-device); not a threshold.** Two measurements of the release build of 1ad8514 plus the uncommitted M2.10-8 candidate, 2026-10-20 around 01:15–01:20 CEST, devpanel sandbox (load average about 3.3; a debug `cargo clippy` build overlapped the end of the bench run).
+
+*Primitive level* (`cargo test --release -p signal-std --lib -- --ignored modal_cost --nocapture`; one bank, 48 kHz, 1 s of noise input in calls of 256, `material` 0; a parameter "modulated" follows a 0.7–1.6 kHz sine over its range, so it changes on every frame). Nanoseconds per frame, and per mode and frame:
+
+| Modulated | 1 mode | 16 modes | 64 modes |
+|---|---:|---:|---:|
+| nothing (static) | 91.6 | 103.4 (6.5 per mode) | 220.8 (3.5 per mode) |
+| `freq` | 108.7 | 265.3 (16.6) | 861.6 (13.5) |
+| `decay_s` | 163.8 | 472.7 (29.5) | 1642.9 (25.7) |
+| `position` | 82.2 | 260.3 (16.3) | 916.6 (14.3) |
+| `material` (0–5) | 106.3 | 517.3 (32.3) | 1573.1 (24.6) |
+| ten parameters at once | 152.7 | 1436.1 (89.8) | 4047.6 (63.2) |
+
+The static cost is about 90 ns per frame of reading and comparing the bank's 29 parameters, plus 2–4 ns per sounding mode (the recurrence and its three vector-row reads). A modulated parameter recomputes only what depends on it (`std.modal`'s rustdoc, "Coefficients"): `freq` a `cos` and a `sin` per mode, `decay_s` two `pow`, `position` a `sin` and a `pow`; everything at once about 60–90 ns per mode and frame, so 64 fully modulated modes take about 4 µs per frame at 48 kHz (a fifth of the frame period).
+
+*Engine level* (`signal --json bench --seconds 0.5`, per-instance medians of 16 instances, less the run's host offset of 11.1 ns, the median difference to the first 30 `COST_NS` entries; `std.svf` read 35.2 against its 22, `std.ladder` 99.7 against 91):
+
+| Type | Median | Less offset | `COST_NS` |
+|---|---:|---:|---:|
+| `std.modal` | 966.2 | 955.1 | 956 (was 113) |
+| `std.exciter` | 57.7 | 46.7 | 47 (was the default 20) |
+
+The bench feeds every vector input with one `std.pack<N>` of its saw (`crates/signal-cli/src/bench.rs`, `primitive_graph`), so its `std.modal` rows change on every frame and every one of its 16 modes is recomputed on every frame: the figure is the bank with its three per-mode inputs modulated at audio rate, the dearest way to use it, not the bank with them unconnected, which the primitive level puts at about a tenth of it. `COST_NS` follows the table's rule (the bench's median less the offset), so the schedule's estimate is conservative for a bank whose rows are unconnected; the operator may confirm or revise it with the device figures. The exciter now reads its eight parameters on every frame and runs the colour filter on every frame.
+
+After the review fix that visits only the modes whose inputs changed (a `gain` change visits none, `ratio_k` mode k only), the bench was run again (2026-10-20 02:45–02:55 CEST, host offset 11.8 ns): `std.modal` 981.5 (969.7 less the offset), `std.exciter` 57.5 (45.7). The bench's case is unchanged by the fix, since its rows move on every frame and every mode is visited either way, and the difference is within the run-to-run spread, so `COST_NS` keeps the first run's figures. They follow the table's written rule, the median less the offset rounded up (`COST_NS`'s rustdoc; 955.1 → 956, 46.7 → 47), as the M2.10-7 rows do (30.9 → 31, 71.7 → 72).
+
+**Worst case and the second review (2026-10-20, about 04:20–04:30 CEST, devpanel sandbox, load average 2.6–5.5; indicative).** Two figures per setting at 48 kHz in calls of 256: the primitive test `modal_cost` (two runs) and the reviewer's probe, which times only `process` over prepared buffers, with all 29 parameters following sines of 0.05–1.7 kHz and, in "+ rows", every row of the three vector inputs moving too. Nanoseconds per frame:
+
+| Setting | 16 modes | 64 modes |
+|---|---:|---:|
+| static (`modal_cost`; probe) | 121–127; 101 | 266–267; 258 |
+| only `modes` toggling every 3 frames (probe) | 120 | 261 |
+| only `gain` modulated (probe) | 114 | 254 |
+| `decay_s` modulated (`modal_cost`) | 506–511 (was 648) | 1710–1715 (was 2197) |
+| `position` modulated (`modal_cost`) | 316–320 (was 340) | 1023–1027 (was 1218) |
+| every parameter modulated (`modal_cost` "all"; probe) | 1627–1628; 1438 | 4918–5052; 4564 |
+| every parameter and row modulated (probe) | 1527 | 4906 |
+
+The worst case is about 77 ns per mode and frame: 64 fully modulated modes take about 4.6–5.1 µs per frame, a quarter of the frame at 48 kHz and about nine tenths of it at 192 kHz (5.2 µs) on one core. `COST_NS` (956) is per type, the bench's 16 modes with modulated rows; a 64-mode bank with every parameter modulated costs about five times it, so the schedule's estimate is low for such a bank. The fix of that review caches `r_k^law` (keyed on `r_k` and `law`) and `k^b` (keyed on `brightness`) apart from the rest of `ρ_k` and `a_k`, so `decay_s`, `damping_tilt` or `mode_decay` alone costs one `pow` per mode instead of two, and `position` alone a `sin` instead of a `sin` and a `pow`: bit-identical, since the same expressions are evaluated. **Decided against:** a control-rate recompute (every N frames, interpolating the coefficients in between) changes the output of any bank whose parameters move, which the bank's per-frame formula and the existing renders fix, and per-frame interpolation of `ρ·cos θ` is not the coefficient of the interpolated frequency, so it is neither simple nor exact; and `exp(x·ln 10)` for `pow(10, x)` rounds differently, so it would change the radius of static settings and the goldens. The per-frame recompute stays.
