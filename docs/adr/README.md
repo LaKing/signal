@@ -19,7 +19,7 @@ To change a decision, add a new ADR that supersedes the old one. Do not rewrite 
 | [0011](0011-audio-io.md) | Audio I/O via cpal behind a driver trait |
 | [0012](0012-offline-first.md) | Offline-first delivery |
 | [0013](0013-application-and-gui.md) | Signal.app and GUI architecture |
-| [0014](0014-licence.md) | Licence: provisional, all rights reserved |
+| [0014](0014-licence.md) | Licence: provisional, all rights reserved (superseded by 0031) |
 | [0015](0015-workspace-and-lab-tier.md) | Workspace layout and the lab tier |
 | [0016](0016-execution-contract.md) | Execution contract: scheduling, feedback, same-frame ordering  |
 | [0017](0017-unsafe-exception-counting-allocator.md) | Unsafe exception: the counting allocator |
@@ -35,3 +35,4 @@ To change a decision, add a new ADR that supersedes the old one. Do not rewrite 
 | [0028](0028-patterns-as-project-text.md) | Patterns as project text: `patterns/*.toml` note and step data, the transport's tick clock, `std.note_seq` and `std.step_seq8`, `pattern.read`/`pattern.write` (M2.11) |
 | [0029](0029-agent-interface-mcp.md) | An agent interface: `signal mcp`, the Model Context Protocol over the UI protocol (M2.12) |
 | [0030](0030-schematic-path-tracing-and-wire-scaling.md) | Path tracing across composite boundaries, continuous in-place zoom, and wires that scale (M2.13) |
+| [0031](0031-licence-gpl-and-first-public-release.md) | Licence GPL-3.0-or-later and the first public release, v0.2.0 (M2.14) |

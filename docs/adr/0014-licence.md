@@ -1,6 +1,6 @@
 # ADR 0014: Licence: provisional, all rights reserved
 
-- **Status:** Accepted (provisional, chosen by the agent on the PO's delegation)
+- **Status:** Superseded by [ADR 0031](0031-licence-gpl-and-first-public-release.md) (2026-10-20). Was: accepted (provisional, chosen by the agent on the PO's delegation)
 - **Date:** 2026-10-11
 
 ## Context
