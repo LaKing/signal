@@ -43,11 +43,18 @@
 // goes to the next module or through modules (M2.13-2).
 // M2.13-2 (ADR 0030 §1, §3; the owner's "on the outside of the composite
 // you can't see which of the 20 inputs is what"): composites' and frames'
-// pins are labelled at a fixed size, grouped where they would collide
+// pins are labelled (at first at a fixed size; see 2026-10-20 below), grouped where they would collide
 // (ui/lib/schematic-labels.js), a frame's pins with where they connect
 // outside and a box's, hovered or traced, where they go inside; a pair's
 // wires are one bundle at small scale, fanning out as the view zooms in
 // (ui/lib/schematic-bundle.js).
+// 2026-10-20 (the owner's "everything should zoom nicely", "on the outside
+// and on the inside of the composite, the connecting interface should be
+// named", "tracing must be able to go through the composite"): every text
+// is drawn in its level's units and scales with the view (labels, summaries,
+// counts in each level's group; detail by size, too small hidden); an open
+// composite's box pins are joined to its frame pins and named outside its
+// edge; a boundary pin's sidebar lists its other side, Go inside / outside.
 
 import { onDefaultConnection } from '../signal-ui.js';
 import { ENTRY_CSS, ValueEntry } from './entry-field.js';
@@ -62,23 +69,25 @@ import { allOf, deletePlan, dragGroup, has, hitKey, inside, moveMessages, resele
 import { formatFixed } from '../lib/format.js';
 import { HEADER, dragPosition, layout } from '../lib/schematic-layout.js';
 import { DragFollow } from '../lib/schematic-drag.js';
-import { CLOSE_PX, breadcrumbs, chain, levelRect, nodeRect, rebase, reroot, scene } from '../lib/schematic-scene.js';
+import { CLOSE_PX, boundaryLinks, breadcrumbs, chain, levelRect, nodeRect, rebase, reroot, scene } from '../lib/schematic-scene.js';
 import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
 import { hitTest, instanceHit, portHit, reselect } from '../lib/schematic-hit.js';
 import { cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
 import { LEVEL_RATE, SLOTS, candidates, levelFraction, levelPlan } from '../lib/schematic-levels.js';
-import { IDENTITY, fit, focus, keyView, matrix, pan, screenRect, toLocal, toScreen, wheelFactor, zoomAt } from '../lib/schematic-view.js';
-import { LABEL_PX, PITCH_PX, insideNote, outsideNote, pinText, placeCounts, placeLabels, setMeasure } from '../lib/schematic-labels.js';
+import { IDENTITY, fit, focus, keyView, matrix, pan, toLocal, toScreen, wheelFactor, zoomAt } from '../lib/schematic-view.js';
+import { COUNT_UNITS, LABEL_PX, PITCH_PX, READ_PX, insideNote, levelCounts, levelLabels, outsideNote, pinText, setMeasure } from '../lib/schematic-labels.js';
 import { bundleClick, bundleText, bundleWires, countPlaces, countsShown, fanOf, nearestWire } from '../lib/schematic-bundle.js';
-import { collapsedAt, exportFacts, groupAnchors } from '../lib/schematic-groups.js';
+import { collapsedAt, exportFacts, groupAnchors, labelDetail, notesAt, portGroups } from '../lib/schematic-groups.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 /** A press that moves less than this (px) is a click. */
 const DRAG_PX = 3;
 /** A control-click is a right click on a Mac only. */
 const MAC = /Mac/i.test(globalThis.navigator?.userAgentData?.platform ?? globalThis.navigator?.platform ?? '');
-/** Text smaller than this on screen (px) is not drawn. */
-const MIN_TEXT_PX = 4;
+/** Text smaller than this on screen (px) is not drawn (READ_PX: every text of the drawing scales with it, 2026-10-20). */
+const MIN_TEXT_PX = READ_PX;
+/** An open composite's box's pin names are hidden above this text size on screen (px): zoomed into it, its frame inside names the same ports. */
+const OUTWARD_MAX_PX = 40;
 /** After the view settles (ms), the level streams follow it. */
 const SETTLE_MS = 150;
 /** Above this many parts selected, each is marked by its stroke alone. */
@@ -210,15 +219,19 @@ svg.tracing .node:not(.traced) > :not(.frame) { opacity: 0.35; }
 svg.tracing .node.traced > .box { stroke: var(--signal-fg, #d6dbe4); }
 svg.tracing .pin:not(.traced) { opacity: 0.4; }
 svg.tracing .pin.traced { stroke: var(--signal-fg, #d6dbe4); stroke-width: 2.5; }
-.labels { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
-/* A composite's or a frame's port label (M2.13-2): a fixed size, never wider than placed (ui/lib/schematic-labels.js). */
-.plabel { position: absolute; left: 0; top: 0; box-sizing: border-box; white-space: pre; overflow: hidden; text-overflow: ellipsis; padding: 0 2px;
-  font-size: ${LABEL_PX}px; line-height: ${PITCH_PX - 2}px; height: ${PITCH_PX}px; color: var(--signal-muted, #8a93a3); border: 1px solid transparent; border-radius: 4px; }
-.plabel.centre { text-align: center; color: var(--signal-fg, #d6dbe4); background: var(--signal-panel, #1f232b); }
-.plabel.right { text-align: right; }
-.plabel.count { text-align: center; color: var(--signal-bg, #16181d); background: var(--signal-muted, #8a93a3); border-radius: 6px; }
-.plabel.noted { color: var(--signal-fg, #d6dbe4); background: var(--signal-panel, #1f232b); }
-.plabel.traced { border-color: var(--signal-focus, #5aa9ff); color: var(--signal-fg, #d6dbe4); background: var(--signal-panel, #1f232b); }
+/* A composite's or a frame's port label, a summary, a bundle's count (M2.13-2; 2026-10-20: in the level's units, scaling with the drawing, ui/lib/schematic-labels.js). */
+.labels { pointer-events: none; }
+.lbl { fill: var(--signal-muted, #8a93a3); white-space: pre; paint-order: stroke; stroke: var(--signal-bg, #16181d); stroke-linejoin: round; }
+.lbl.count { stroke: none; }
+.lbl.centre, .lbl.noted, .lbl.traced { fill: var(--signal-fg, #d6dbe4); }
+.lbl.count { fill: var(--signal-bg, #16181d); font-weight: 600; }
+.lbg { fill: var(--signal-panel, #1f232b); stroke: none; }
+.lbg.traced { stroke: var(--signal-focus, #5aa9ff); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.lbg.count { fill: var(--signal-muted, #8a93a3); }
+/* An open composite's edge crossed (2026-10-20): its box pin to its frame pin, so a path is one drawing. */
+.wire.link { stroke-width: 1; opacity: 0.3; pointer-events: none; }
+/* Traced (or under a trace): the path crossing the edge stands out. */
+.wire.link.traced, svg.tracing .wire.link.traced { opacity: 1; stroke-width: 3; }
 .side .trace { margin: 0 0 10px; padding: 6px; border: 1px solid var(--signal-focus, #5aa9ff); border-radius: var(--signal-radius, 6px); }
 .side .trace-head { display: flex; align-items: center; gap: 4px; }
 .side .trace-head h3 { flex: 1; min-width: 0; }
@@ -316,8 +329,6 @@ export class SignalSchematic extends HTMLElement {
     /** The trace (ADR 0030 §1): `{start, direction, result, badges, version}`, or null. */
     this.tracing = null;
     this.traceVersion = 0;
-    /** The port label elements, reused (M2.13-2). */
-    this.labelPool = [];
     /** A boundary pin's one-hop note, by side and address, for the `graph` shown. */
     this.notes = new Map();
     /** The closed composite under the pointer (its address), whose pins show where they go inside. */
@@ -374,8 +385,7 @@ export class SignalSchematic extends HTMLElement {
     this.staleBox = html('section', { className: 'diagnostics' });
     this.tip = html('div', { className: 'tip' });
     this.marquee = html('div', { className: 'marquee' });
-    this.labelLayer = html('div', { className: 'labels' });
-    this.stage.append(this.svg, this.labelLayer, this.bar, this.message, this.staleBox, this.tip, this.marquee);
+    this.stage.append(this.svg, this.bar, this.message, this.staleBox, this.tip, this.marquee);
     root.append(style, this.buildSide(), this.stage);
     this.editor = new SchematicEditor(this);
     this.editor.build(this.bar, this.stage);
@@ -605,7 +615,8 @@ export class SignalSchematic extends HTMLElement {
     this.open = this.drawn.open;
     // A level with nothing on screen is not drawn, nor a parent of which
     // only open boxes' insides show (the background's colour).
-    const shown = this.drawn.levels.filter((level) => (level.nodes.length || level.wires.length) && !level.behind);
+    // An open composite's inside is drawn even with nothing of it on screen: the links across its edge lead into it (2026-10-20).
+    const shown = this.drawn.levels.filter((level) => (level.nodes.length || level.wires.length || level.parent) && !level.behind);
     let changed = false;
     const paths = [];
     for (const level of shown) {
@@ -650,8 +661,11 @@ export class SignalSchematic extends HTMLElement {
       const wires = el('g');
       const overlay = el('g', { class: 'overlay' });
       const nodes = el('g');
-      drawn = { g: el('g'), wires, overlay, nodes, baked: null, wireCache: new Map(), nodeCache: new Map(), bundleCache: new Map(), shown: null };
-      drawn.g.append(wires, overlay, nodes);
+      // An open composite's edge crossed (its box's pins to its frame's), and the level's labels in its own units (2026-10-20).
+      const links = el('g');
+      const labels = el('g', { class: 'labels' });
+      drawn = { g: el('g'), wires, links, overlay, nodes, labels, baked: null, wireCache: new Map(), nodeCache: new Map(), bundleCache: new Map(), shown: null, labelKey: null, sizes: [] };
+      drawn.g.append(wires, links, overlay, nodes, labels);
       this.groups.set(level.path, drawn);
     }
     const transform = level.transform;
@@ -669,7 +683,10 @@ export class SignalSchematic extends HTMLElement {
     const open = level.nodes.filter((n) => n.composite && this.drawn.open.has(`${level.path}/${n.name}`)).map((n) => n.name).join('/');
     // An open composite's own pins keep about their size on screen (in half-octave steps of the scale): never huge discs over its frame.
     level.pinK = open ? 2 ** (Math.floor(Math.log2(transform.k) * 2) / 2) : 1;
-    const sizes = `${text(12)} ${text(9)}${open ? ` ${level.pinK}` : ''}`;
+    level.openKey = open;
+    // The box around this level's inside, when it is open in place: its pins are joined to the frame's (its groups collapsed or not).
+    const parentCollapsed = Boolean(level.parent?.collapsed);
+    const sizes = `${text(12)} ${text(9)}${open ? ` ${level.pinK}` : ''} ${parentCollapsed}`;
     // M2.13-2: a pair's wires bundled at small scale (ui/lib/schematic-bundle.js), the traced and selected ones on their own above.
     const solo = this.soloWires(level.path);
     // A level a box of which is dragged: every wire on its own, as DragFollow moves them by id.
@@ -710,6 +727,7 @@ export class SignalSchematic extends HTMLElement {
         (n) => this.nodeElement(level, n, baked, text, collapsed),
       );
       if (!sameItems([...drawn.wires.children], wires.elements)) drawn.wires.replaceChildren(...wires.elements);
+      drawn.links.replaceChildren(...this.linkElements(level, baked));
       if (!sameItems([...drawn.nodes.children], nodes.elements)) drawn.nodes.replaceChildren(...nodes.elements);
       drawn.wireCache = wires.cache;
       drawn.nodeCache = nodes.cache;
@@ -731,7 +749,7 @@ export class SignalSchematic extends HTMLElement {
     });
   }
 
-  /** A bundle (M2.13-2): one thick path of its pair while folded, else its wires fanning out; its count is over the drawing (drawLabels). */
+  /** A bundle (M2.13-2): one thick path of its pair while folded, else its wires fanning out; its count is with the level's labels (drawLabels). */
   bundleElement(level, bundle, baked) {
     const shape = bundle.wires[0].shape;
     const group = el('g', { class: 'bundle', 'data-label': bundle.wires.map((w) => w.label).join('\n'), 'data-part': 'schematic' });
@@ -835,7 +853,7 @@ export class SignalSchematic extends HTMLElement {
       const shape = bakedPin(baked, level.transform, this.viewport, pin, radius);
       if (shape.circle) group.append(el('circle', { ...data, ...shape.circle }));
       else if (shape.polygon.length) group.append(el('polygon', { ...data, points: shape.polygon.map((p) => `${p.x},${p.y}`).join(' ') }));
-      // A composite's and a frame's pins are labelled at a fixed size over the drawing (drawLabels).
+      // A composite's and a frame's pins are labelled by the level's labels (drawLabels), in its units as well.
       if (text(9) && !isOpen && !node.composite && node.kind === 'instance') {
         label({ x: pin.x + (out ? -6 : 6), y: pin.y + 3 }, 9, { class: 'pin-label', 'text-anchor': out ? 'end' : 'start' }, pin.name);
       }
@@ -1483,6 +1501,8 @@ export class SignalSchematic extends HTMLElement {
       // Wires of the level's exports reaching it (not edited here).
       const ends = (w) => (hit.port.direction === 'out' ? w.from : w.to);
       context.exported = (this.levelOf(hit.path)?.layout.wires ?? []).filter((w) => w.kind === 'export' && ends(w).node === hit.node.id && ends(w).port === hit.port.name).length;
+      // A library composite's box pin: its inside is not in `graph`, so Go inside is off.
+      context.opaque = hit.node.kind === 'instance' && Boolean(hit.node.composite) && !this.graph?.composites?.[hit.node.module];
     }
     return context;
   }
@@ -1522,6 +1542,9 @@ export class SignalSchematic extends HTMLElement {
       for (const path of [...this.pinned]) if (path === hit.address || path.startsWith(`${hit.address}/`)) this.pinned.delete(path);
       this.schedule();
     } else if (id === 'enter') this.enter(hit);
+    // A boundary pin's other side (2026-10-20): the frame's pin inside its composite, or its box's pin around it.
+    else if (id === 'go-inside') this.reveal({ kind: 'pin', address: hit.address, side: 'frame' });
+    else if (id === 'go-outside') this.reveal({ kind: 'pin', address: hit.address, side: 'box' });
     else if (id === 'copy-address') this.copy(hit.kind === 'wire' ? `${hit.from} → ${hit.to}` : hit.address);
     else if (id === 'delete') this.editor.remove(hit);
     else if (id === 'scale') {
@@ -1864,6 +1887,20 @@ export class SignalSchematic extends HTMLElement {
       for (const c of model.connections) list.append(this.connectionItem(c, this.selected[0].level));
       parts.push(list);
     } else parts.push(html('div', { className: 'subtitle', textContent: 'none' }));
+    // A boundary pin's other side (2026-10-20): each a link that goes there (into the composite, or back out).
+    const across = model.across;
+    if (across) {
+      parts.push(html('h4', { textContent: `${across.title} (${across.items.length})` }));
+      if (across.items.length) {
+        const list = html('ul', { className: 'wires across' });
+        for (const item of across.items) {
+          const li = html('li');
+          li.append(this.revealLink(item.label, item.reveal));
+          list.append(li);
+        }
+        parts.push(list);
+      } else parts.push(html('div', { className: 'subtitle', textContent: across.empty }));
+    }
     return parts;
   }
 
@@ -2040,6 +2077,8 @@ export class SignalSchematic extends HTMLElement {
       const wires = result?.wires.get(path);
       // A bundle stays as it is: its traced wires are drawn on their own above it.
       for (const { item, el: wire } of drawn.wireCache.values()) if (item.kind !== 'bundle') wire.classList.toggle('traced', Boolean(wires?.has(wireKey(item.written))));
+      // The links across an open composite's edge: traced with their port.
+      for (const link of drawn.links.children) link.classList.toggle('traced', Boolean(result?.pins.has(link.dataset.address)));
       for (const { item, el: group } of drawn.nodeCache.values()) {
         let any = false;
         for (const pin of group.querySelectorAll('.pin')) {
@@ -2086,16 +2125,20 @@ export class SignalSchematic extends HTMLElement {
   }
 
   /**
-   * The port labels of the closed composites' boxes and of the frames on
-   * screen (M2.13-2, ui/lib/schematic-labels.js): a fixed size, grouped
-   * where they would collide, none on another; computed again for every
-   * view (the labels keep their size while the boxes scale). The traced
-   * ones are marked.
+   * The port labels of the closed composites' boxes and of the frames, the
+   * boxes' summaries and the bundles' counts (M2.13-2), for every level
+   * drawn: in each level's own units, in its group, so they scale with the
+   * drawing like its boxes (2026-10-20, the owner's "everything should zoom
+   * nicely"). What they say goes by size (`labelDetail`): every pin, else
+   * the groups, else a summary; a note where a pin connects from NOTE_PX;
+   * a text smaller than READ_PX on screen is hidden, never kept at a size.
+   * A level's labels are built again only when what they say changes; a
+   * zoom shows or hides each size of text (its group) and moves nothing.
    */
   drawLabels() {
     // Widths measured in the labels' own font, once per text (canvas measureText), so a label always holds its text.
     if (!this.labelFont) {
-      const family = getComputedStyle(this.labelLayer).fontFamily;
+      const family = getComputedStyle(this.svg).fontFamily;
       const context = document.createElement('canvas').getContext('2d');
       if (family && context) {
         this.labelFont = `${LABEL_PX}px ${family}`;
@@ -2103,74 +2146,141 @@ export class SignalSchematic extends HTMLElement {
         setMeasure((text) => context.measureText(text).width);
       }
     }
+    if (!this.drawn || !this.graph) return;
+    for (const level of this.drawn.levels) {
+      const drawn = this.groups.get(level.path);
+      if (!drawn || !drawn.baked || drawn.layout !== level.layout) continue;
+      this.levelLabels(level, drawn);
+    }
+  }
+
+  /** The labels of `level` (a scene entry) in its group `drawn`: built when what they say changed, each size shown or hidden by the zoom. */
+  levelLabels(level, drawn) {
+    const k = level.transform.k;
+    let detail = labelDetail(k);
+    // A box dragged: its level's pins are each drawn, so each is named.
+    if (detail === 'groups' && !level.collapsed) detail = 'pins';
+    const notes = detail === 'pins' && notesAt(k);
+    const hovered = this.hoveredBox && parentPath(this.hoveredBox) === level.path ? this.hoveredBox : null;
+    const counts = countsShown(k) ? level.bundles : null;
+    const key = [detail, notes, level.collapsed, level.openKey, this.traceVersion, hovered, drawn.baked, level.layout, counts];
+    if (!drawn.labelKey || key.some((v, i) => v !== drawn.labelKey[i])) {
+      drawn.labelKey = key;
+      this.buildLabels(level, drawn, { detail, notes, hovered, counts });
+    }
+    for (const g of drawn.sizes) {
+      const px = Number(g.dataset.size) * k;
+      const display = px >= READ_PX && !(g.dataset.outward && px > OUTWARD_MAX_PX) ? '' : 'none';
+      if (g.style.display !== display) g.style.display = display;
+    }
+  }
+
+  buildLabels(level, drawn, { detail, notes, hovered, counts }) {
+    const baked = drawn.baked;
+    const m = baked.m;
     const boxes = [];
     const addresses = [];
-    if (this.drawn && this.graph) {
-      const screen = { w: this.viewport.w, h: this.viewport.h };
-      for (const level of this.drawn.levels) {
-        if (level.behind) continue;
-        for (const node of level.nodes) {
-          const frame = node.kind !== 'instance';
-          const instance = `${level.path}/${node.name}`;
-          if (frame ? !level.path : !node.composite || this.drawn.open.has(instance)) continue;
-          const rect = screenRect(level.transform, node);
-          if (rect.x > screen.w || rect.y > screen.h || rect.x + rect.w < 0 || rect.y + rect.h < 0) continue;
-          const at = (p) => ({ name: p.name, ...toScreen(level.transform, p) });
-          const box = { kind: frame ? node.kind : 'instance', name: node.name, rect, ins: node.ins.map(at), outs: node.outs.map(at), texts: new Map(), header: HEADER * level.transform.k };
-          // M2.13-2: its port groups; collapsed, they are labelled, not its hidden pins.
-          if (node.groups) {
-            box.groups = node.groups;
-            box.collapsed = !this.levelDragged(level) && collapsedAt(level.transform.k);
-          }
-          const pinAddress = (name) => (frame ? `${level.path}.${name}` : `${instance}.${name}`);
-          const inside = this.hoveredBox === instance;
-          for (const p of [...node.ins, ...node.outs]) box.texts.set(p.name, this.pinLabel(!frame, pinAddress(p.name), p.name, inside));
-          boxes.push(box);
-          addresses.push(pinAddress);
-        }
-      }
+    for (const node of level.layout.nodes) {
+      const frame = node.kind !== 'instance';
+      const instance = `${level.path}/${node.name}`;
+      if (frame ? !level.path : !node.composite) continue;
+      // An open composite's box keeps its pins named, outside its edge (its inside drawn in it, its frame named there too).
+      const open = !frame && this.drawn.open.has(instance);
+      if (open && detail === 'summary') continue;
+      const at = (p) => ({ name: p.name, x: p.x, y: p.y });
+      const box = { kind: frame ? node.kind : 'instance', name: node.name, rect: { x: node.x, y: node.y, w: node.w, h: node.h }, ins: node.ins.map(at), outs: node.outs.map(at), texts: new Map(), header: HEADER, outward: open };
+      // Its port groups (M2.13-2): a box's collapse with the level; a frame's (the same groups) are named as runs.
+      if (node.groups) {
+        box.groups = node.groups;
+        box.collapsed = level.collapsed;
+      } else if (frame) box.groups = this.frameGroups(level.level, node);
+      const pinAddress = (name) => (frame ? `${level.path}.${name}` : `${instance}.${name}`);
+      for (const p of [...node.ins, ...node.outs]) box.texts.set(p.name, notes && !open ? this.pinLabel(!frame, pinAddress(p.name), p.name, hovered === instance) : p.name);
+      boxes.push(box);
+      addresses.push(pinAddress);
     }
-    const { labels } = placeLabels(boxes, { viewport: this.viewport });
+    const labels = levelLabels(boxes, detail);
     // A bundle's count (M2.13-2): along its curve where no other label is, else moved off it, never left out.
-    const counts = [];
-    for (const level of this.drawn && this.graph ? this.drawn.levels : []) {
-      // A level drawn too small to read shows no counts: they would pile up on it.
-      if (!countsShown(level.transform.k)) continue;
-      for (const item of level.bundles ?? []) {
-        if (item.kind !== 'bundle') continue;
-        const at = toScreen(level.transform, item.mid);
-        if (at.x < 0 || at.y < 0 || at.x > this.viewport.w || at.y > this.viewport.h) continue;
-        counts.push({ text: String(item.count), at: countPlaces(item).map((p) => toScreen(level.transform, p)) });
-      }
+    if (counts) {
+      const list = counts.filter((item) => item.kind === 'bundle').map((item) => ({ text: String(item.count), at: countPlaces(item) }));
+      labels.push(...levelCounts(labels, list, COUNT_UNITS));
     }
-    labels.push(...placeCounts(labels, counts, this.viewport));
     const pins = this.tracing?.result?.pins;
-    let used = 0;
+    const bySize = new Map();
     for (const label of labels) {
-      let el = this.labelPool[used];
-      if (!el) {
-        el = html('div', { className: 'plabel' });
-        this.labelLayer.append(el);
-        this.labelPool.push(el);
+      const shown = label.shown ?? label.text;
+      if (!shown) continue;
+      const f = label.scale ?? 1;
+      const size = LABEL_PX * f;
+      const outward = Boolean(boxes[label.pins[0]?.box]?.outward);
+      const group = `${size}${outward ? ' outward' : ''}`;
+      let g = bySize.get(group);
+      if (!g) {
+        g = el('g', { 'data-size': size, ...(outward ? { 'data-outward': '1' } : {}) });
+        bySize.set(group, g);
       }
-      used += 1;
       const one = label.pins.length === 1 ? label.pins[0] : null;
       const traced = Boolean(pins && label.pins.some((p) => pins.has(addresses[p.box](p.name))));
       const noted = Boolean(one && label.text !== one.name);
-      const className = label.count ? 'plabel count' : `plabel ${label.align}${traced ? ' traced' : ''}${noted ? ' noted' : ''}`;
-      if (el.className !== className) el.className = className;
-      // What fits is shown (cut short ending in …, a summary on its lines); the whole text is its title.
-      const shown = label.shown ?? label.text;
-      if (el.textContent !== shown) el.textContent = shown;
-      if (el.title !== label.text) el.title = label.text;
-      el.style.width = `${Math.ceil(label.x1 - label.x0)}px`;
-      const height = `${(label.lines ?? 1) * PITCH_PX}px`;
-      if (el.style.height !== height) el.style.height = height;
-      el.style.transform = `translate(${Math.round(label.x0)}px, ${Math.round(label.y0)}px)`;
-      // A summary too small to read shows nothing (its box's name is not drawn either).
-      el.style.visibility = shown ? 'visible' : 'hidden';
+      const kind = label.count ? 'count' : `${label.align}${traced ? ' traced' : ''}${noted ? ' noted' : ''}`;
+      if (label.count || label.align === 'centre' || traced || noted) {
+        const r = bakedRect(baked, { x: label.x0, y: label.y0, w: label.x1 - label.x0, h: label.y1 - label.y0 });
+        if (r) g.append(el('rect', { class: `lbg ${kind}`, ...r, rx: (label.count ? 6 : 4) * f * m }));
+      }
+      const pad = 3 * f;
+      const x = label.align === 'left' ? label.x0 + pad : label.align === 'right' ? label.x1 - pad : (label.x0 + label.x1) / 2;
+      const anchor = label.align === 'left' ? 'start' : label.align === 'right' ? 'end' : 'middle';
+      shown.split('\n').forEach((line, i) => {
+        const at = bakedPoint(baked, { x, y: label.y0 + PITCH_PX * f * (i + 0.5) + 0.34 * size });
+        // A halo of the background's colour around its letters (as wide as the text is large), so a label reads over wires.
+        const text = el('text', { class: `lbl ${kind}`, x: at.x, y: at.y, 'font-size': size * m, 'stroke-width': 0.3 * size * m, 'text-anchor': anchor }, line);
+        if (shown !== label.text && i === 0) text.append(el('title', {}, label.text));
+        g.append(text);
+      });
     }
-    for (let i = used; i < this.labelPool.length; i++) this.labelPool[i].style.visibility = 'hidden';
+    drawn.sizes = [...bySize.values()];
+    drawn.labels.replaceChildren(...drawn.sizes);
+  }
+
+  /** A frame's pins in its composite's groups (as its box outside, `portGroups`), per level layout. */
+  frameGroups(module, node) {
+    this.frameGroupsOf ??= new WeakMap();
+    let groups = this.frameGroupsOf.get(node);
+    if (!groups) {
+      const facts = exportFacts(this.graph?.composites?.[module] ?? null);
+      groups = { ins: portGroups(node.ins, facts), outs: portGroups(node.outs, facts) };
+      this.frameGroupsOf.set(node, groups);
+    }
+    return groups;
+  }
+
+  /**
+   * The links across the edge of the composite whose inside `level` is,
+   * open in place (2026-10-20, `boundaryLinks`): from each of its box's
+   * pins to its frame's pin of the same port, coloured as the port, traced
+   * with it. None for the top level.
+   */
+  linkElements(level, baked) {
+    const parent = level.parent;
+    if (!parent) return [];
+    const name = level.path.slice(level.path.lastIndexOf('/') + 1);
+    const node = parent.layout.nodes.find((n) => n.kind === 'instance' && n.name === name);
+    const anchors = parent.collapsed && node?.groups ? groupAnchors(node) : null;
+    return boundaryLinks(node, level.layout, anchors).map((l) => {
+      const dx = Math.max(Math.abs(l.to.x - l.from.x) / 2, 1);
+      const c1 = { x: l.from.x + dx, y: l.from.y };
+      const c2 = { x: l.to.x - dx, y: l.to.y };
+      const points = [];
+      for (let i = 0; i <= 16; i++) {
+        const t = i / 16;
+        const u = 1 - t;
+        points.push({
+          x: u * u * u * l.from.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * l.to.x,
+          y: u * u * u * l.from.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * l.to.y,
+        });
+      }
+      return el('path', { class: `wire link ${l.shape}`, d: bakedPath(baked, points), 'data-address': `${level.path}.${l.name}` });
+    });
   }
 
   /** The sidebar's Trace section (above the selection's), or nothing without a trace. */
@@ -2278,7 +2388,10 @@ export class SignalSchematic extends HTMLElement {
     } else {
       const at = splitAddress(target.address);
       if (!at) return;
-      const inside = at.instance === shown && shown !== '';
+      // `side` (Go inside, Go outside): a composite's port as its frame's pin inside it, or as its box's pin around it.
+      const inside = target.side ? target.side === 'frame' : at.instance === shown && shown !== '';
+      // Going outside closes what a double-click or a reveal held open there, so its box's pins show.
+      if (target.side === 'box') for (const open of [...this.pinned]) if (open === at.instance || open.startsWith(`${at.instance}/`)) this.pinned.delete(open);
       path = inside ? at.instance : parentPath(at.instance);
       pick = inside ? { frame: true, port: at.port } : { name: at.instance.slice(at.instance.lastIndexOf('/') + 1), port: at.port };
     }

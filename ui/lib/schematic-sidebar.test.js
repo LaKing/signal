@@ -9,7 +9,7 @@ import { layout } from './schematic-layout.js';
 import { instanceHit, portHit, wireHit } from './schematic-hit.js';
 import { hitKey } from './schematic-select.js';
 import { EDIT_OFF } from './schematic-menu.js';
-import { LEGEND, MEMBERS_SHOWN, TRACE_DEPTHS, TRACE_DIRECTIONS, addressesText, connectionsOf, sidebar, tooLargeText, traceSection } from './schematic-sidebar.js';
+import { LEGEND, MEMBERS_SHOWN, acrossOf, TRACE_DEPTHS, TRACE_DIRECTIONS, addressesText, connectionsOf, sidebar, tooLargeText, traceSection } from './schematic-sidebar.js';
 import { trace } from './schematic-trace.js';
 import { GRAPH } from './schematic-trace.test.js';
 import { KICK } from './schematic-scene.test.js';
@@ -273,4 +273,56 @@ test('a trace’s open ends are listed after its real ends, counted apart and ma
   );
   assert.match(down.endpoints[2].note, /^open end/);
   assert.match(down.endpoints[0].note, /sink$/);
+});
+
+/** The studio's `graph` (the owner's repro of 2026-10-20: /synth.gate selected at the top level). */
+const STUDIO = JSON.parse(readFileSync(new URL('./fixtures/studio-graph.json', import.meta.url), 'utf8'));
+
+test('a composite box pin lists its inside too, each a link into the composite; Go inside (2026-10-20)', () => {
+  const layouts = new Map();
+  const studioLayout = (level) => {
+    if (!layouts.has(level)) layouts.set(level, level === '' ? layout(STUDIO.top) : STUDIO.composites[level] ? layout(STUDIO.composites[level]) : null);
+    return layouts.get(level);
+  };
+  const synth = studioLayout('').nodes.find((n) => n.name === 'synth');
+  const gate = portHit(TOP, synth, synth.ins.find((p) => p.name === 'gate'));
+  const model = sidebar([gate], { graph: STUDIO, layoutOf: studioLayout });
+  // Outside, as before: the wire from the melody.
+  assert.deepEqual(model.connections.map((c) => c.wire.label), ['← /melody.gate']);
+  // Inside: every inner port the export forwards to, each revealing that pin.
+  assert.equal(model.across.side, 'inside');
+  assert.equal(model.across.title, 'Inside /synth');
+  assert.deepEqual(model.across.items.map((i) => i.label), ['→ /synth/fenv.gate', '→ /synth/aenv.gate']);
+  assert.deepEqual(model.across.items[1].reveal, { kind: 'pin', address: '/synth/aenv.gate' });
+  assert.ok(ids(model).includes('go-inside') && !action(model, 'go-inside').disabled);
+  // An exported parameter, and an output (where it comes from inside).
+  const cutoff = sidebar([portHit(TOP, synth, synth.ins.find((p) => p.name === 'cutoff'))], { graph: STUDIO, layoutOf: studioLayout });
+  assert.ok(cutoff.across.items.length >= 1 && cutoff.across.items.every((i) => i.label.startsWith('→ /synth/')), JSON.stringify(cutoff.across.items));
+  const out = acrossOf(STUDIO, portHit(TOP, synth, synth.outs[0]));
+  assert.deepEqual(out.items.map((i) => i.label), ['← /synth/volume.out']);
+  // Inside the composite, its frame pin lists where its port connects outside, links that go back out; Go outside.
+  const inner = { path: '/synth', level: 'moog_voice' };
+  const frame = studioLayout('moog_voice').nodes.find((n) => n.kind === 'input');
+  const fgate = portHit(inner, frame, frame.outs.find((p) => p.name === 'gate'));
+  assert.equal(fgate.address, '/synth.gate');
+  const fm = sidebar([fgate], { graph: STUDIO, layoutOf: studioLayout });
+  assert.equal(fm.across.side, 'outside');
+  assert.equal(fm.across.title, 'Outside, at the top level');
+  assert.deepEqual(fm.across.items, [{ label: '← /melody.gate', reveal: { kind: 'pin', address: '/melody.gate' } }]);
+  assert.ok(ids(fm).includes('go-outside') && !ids(fm).includes('go-inside'));
+  // A primitive's pin has no other side.
+  const melody = studioLayout('').nodes.find((n) => n.name === 'melody');
+  assert.equal(acrossOf(STUDIO, portHit(TOP, melody, melody.outs[0])), null);
+  assert.equal(sidebar([portHit(TOP, melody, melody.outs[0])], { graph: STUDIO, layoutOf: studioLayout }).across, null);
+});
+
+test('a library composite box pin: Go inside is off, its inside not in the graph', () => {
+  const lay = layout(GRAPH.top);
+  const fx = lay.nodes.find((n) => n.name === 'fx');
+  const hit = portHit(TOP, fx, fx.ins[0]);
+  const across = acrossOf(GRAPH, hit);
+  assert.equal(across.opaque, true);
+  assert.equal(across.items.length, 0);
+  const model = sidebar([hit], { graph: GRAPH, layoutOf: (l) => (l === '' ? lay : null) });
+  assert.ok(action(model, 'go-inside').disabled);
 });

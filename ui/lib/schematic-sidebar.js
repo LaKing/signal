@@ -18,7 +18,7 @@ import { instanceCount } from './schematic-patch.js';
 import { groupOf } from './schematic-palette.js';
 import { portHit, wireHit } from './schematic-hit.js';
 import { deletePlan, hitKey } from './schematic-select.js';
-import { traceTree } from './schematic-trace.js';
+import { neighbours, traceTree } from './schematic-trace.js';
 
 /** The most members the sidebar lists; the rest are counted ("and N more"). */
 export const MEMBERS_SHOWN = 200;
@@ -125,7 +125,8 @@ function entryOf(hit, layoutOf) {
  *   `category` field (the palette's group), `pins` (pin rows, each with its connections), the card's
  *   `parameters` and `editable`, `actions`;
  * - `wire`: `links` (`from`, `to`), `actions`;
- * - `port`: `connections`, `meter` (whether a level bar can show its level:
+ * - `port`: `connections`, `across` (`acrossOf`'s: a boundary pin's other
+ *   side), `meter` (whether a level bar can show its level:
  *   an instance's signal output), `actions` (Disconnect all; one
  *   connection is removed by its own `remove-connection`);
  * - `group` (several): `members` (links, the first `MEMBERS_SHOWN`; `more`
@@ -211,13 +212,43 @@ export function sidebar(selected, context = {}) {
   }
   const connections = connectionsOf(entry, hit.node, port);
   fields.push(['connected', connections.length ? `${connections.length} wire${connections.length === 1 ? '' : 's'}` : port.connected ? 'yes' : 'no']);
+  const across = acrossOf(graph, hit);
   return {
     ...base,
     ...(frame ? { subtitle: `boundary pin of ${hit.path}: ${hit.node.kind === 'input' ? 'what reaches its port outside comes in here' : 'what reaches it here leaves by its port'}` } : {}),
     fields,
     connections,
+    across,
     meter: hit.node.kind === 'instance' && port.direction === 'out' && port.shape === 'signal',
-    actions: actionsOf(hit, menu(hit), ['trace', 'copy-address', 'disconnect']),
+    actions: actionsOf(hit, { ...menu(hit), opaque: across?.opaque ?? false }, ['trace', 'go-inside', 'go-outside', 'copy-address', 'disconnect']),
+  };
+}
+
+/**
+ * The other side of a boundary pin (2026-10-20, the owner's "it does not
+ * mention the connections on the inside of the composite, so you cannot
+ * move into the composite from there"): for a composite box's pin, the
+ * inner ports its export forwards to (an input or a parameter) or comes
+ * from (an output); for a frame's pin, the ports its composite's port
+ * connects to outside. `{side: 'inside' | 'outside', title, items: [{label,
+ * reveal: {kind: 'pin', address}}], opaque, empty}`; null for any other pin.
+ */
+export function acrossOf(graph, hit) {
+  if (hit?.kind !== 'port' || !graph) return null;
+  const frame = hit.node.kind !== 'instance';
+  if (!frame && !hit.node.composite) return null;
+  const side = frame ? 'outside' : 'inside';
+  const answer = neighbours(graph, hit.address, side);
+  if (!answer) return null;
+  const arrow = answer.direction === 'down' ? '→' : '←';
+  const items = answer.addresses.map((address) => ({ label: `${arrow} ${address}`, reveal: { kind: 'pin', address } }));
+  const title = frame ? `Outside, at ${hit.path.slice(0, hit.path.lastIndexOf('/')) || 'the top level'}` : `Inside ${hit.address.slice(0, hit.address.lastIndexOf('.'))}`;
+  return {
+    side,
+    title,
+    items,
+    opaque: Boolean(answer.opaque),
+    empty: answer.opaque ? 'inside a library composite: not in the graph' : frame ? 'nothing connected outside' : 'nothing inside',
   };
 }
 

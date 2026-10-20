@@ -2,7 +2,12 @@
 // (M2.13-2, ADR 0030 §1; the owner's "on the outside of the composite you
 // can't see which of the 20 inputs is what … labels on the edge of the
 // composite too"): always readable, at a fixed size on screen whatever the
-// zoom, and never on each other. Where they would collide they are grouped,
+// zoom, and never on each other. (2026-10-20, the owner's "everything should
+// zoom nicely": the control now places them in each level's own units with
+// `levelLabels`, where they scale with the drawing like its boxes; what they
+// say goes by size, `labelDetail` in ui/lib/schematic-groups.js, and a text
+// too small to read is hidden, never kept at a size on screen. The screen
+// placement below is what it is built on.) Where they would collide they are grouped,
 // never overlapped and never left out: a box's side shows every pin, else
 // its runs of one name prefix (`osc1_* (3)`), else those runs merged
 // (`osc1_*, osc2_* (6)`), else a count (`31 inputs`); a box whose sides
@@ -37,6 +42,21 @@ export const SUMMARY = 5;
 export const COLLAPSED_PX = 66;
 /** The most names a note lists. */
 export const NOTE_NAMES = 3;
+/**
+ * Text smaller than this on screen (px) is not drawn (2026-10-20): drawn in
+ * its level's units, a label scales with the drawing and is hidden below
+ * it, or replaced by a coarser one (`labelDetail`, ui/lib/schematic-groups.js),
+ * never kept at a size on screen.
+ */
+export const READ_PX = 4;
+/** A boundary pin's note (`hz ← /melody.hz`) is shown from this text size on screen (px). */
+export const NOTE_PX = 7;
+/** A bundle's count's text, in its level's units (LABEL_PX the pins'): readable while bundles are drawn. */
+export const COUNT_UNITS = 18;
+/** The most a summary's text grows, in multiples of a pin label's size: so it reads where pins' names no longer do. */
+export const SUMMARY_GROW = 6;
+/** A frame's label is at most this wide in its level's units: longer, it is cut short (the whole is its title). */
+export const FRAME_LABEL_UNITS = 260;
 
 /**
  * Character advances in em of a system sans-serif (SF, Helvetica), each
@@ -424,15 +444,16 @@ export function boxLabels(box, index, forced = 1, viewport = null) {
       }
       // A frame's labels kept on screen: where they would leave it, on their pins' other side (inside the frame).
       const off = (lb) => lb.x0 < 0 || lb.x1 > viewport.w;
-      labels.push(...(box.kind !== 'instance' && viewport && side.some(off) ? flipped(side, xs) : side));
+      // An open composite's box (`outward`, 2026-10-20): its inside is drawn in it, so its pins are named outside its edge.
+      labels.push(...(box.outward || (box.kind !== 'instance' && viewport && side.some(off)) ? flipped(side, xs) : side));
     }
-    if (box.kind === 'instance') {
+    if (box.kind === 'instance' && !box.outward) {
       const kept = insideBox(box, labels);
       if (kept) return { level: Math.max(level, 1), labels: kept };
     } else {
       const left = labels.filter((l) => l.align === 'left');
       const right = labels.filter((l) => l.align === 'right');
-      if (!left.some((a) => right.some((b) => overlaps(a, b)))) return { level: Math.max(level, 1), labels };
+      if (box.outward || !left.some((a) => right.some((b) => overlaps(a, b)))) return { level: Math.max(level, 1), labels };
     }
   }
   return { level: SUMMARY, labels: [summaryLabel(box, index)] };
@@ -447,8 +468,54 @@ function summaryLabel(box, index) {
   const r = box.rect;
   const header = box.header ?? 0;
   const body = header > 0 && r.h - header >= PITCH_PX ? { x: r.x, y: r.y + header, w: r.w, h: r.h - header } : r;
-  if (box.kind === 'instance') return centredIn(`${box.name}: ${box.ins.length} in · ${box.outs.length} out`, body, pinsOf(box, index), {}, [box.name]);
-  return labelAt(`${boxName(box)}: ${box.ins.length + box.outs.length}`, r.x + r.w / 2, r.y + r.h / 2, 'centre', pinsOf(box, index));
+  const text = box.kind === 'instance' ? `${box.name}: ${box.ins.length} in · ${box.outs.length} out` : `${boxName(box)}: ${box.ins.length + box.outs.length}`;
+  // In a level's units (`grow`, 2026-10-20): as large as its box holds it whole, up to SUMMARY_GROW times a pin's label.
+  if (box.grow) {
+    for (let f = SUMMARY_GROW; f > 1; f -= 0.5) {
+      const area = { x: body.x / f, y: body.y / f, w: body.w / f, h: body.h / f };
+      const label = box.kind === 'instance' ? centredIn(text, area, pinsOf(box, index)) : labelAt(text, area.x + area.w / 2, area.y + area.h / 2, 'centre', pinsOf(box, index));
+      if (label.shown.split('\n').join(' ') === text && label.x1 - label.x0 <= area.w && label.y1 - label.y0 <= area.h) return scaleLabel(label, f);
+    }
+  }
+  if (box.kind === 'instance') return centredIn(text, body, pinsOf(box, index), {}, [box.name]);
+  return labelAt(text, r.x + r.w / 2, r.y + r.h / 2, 'centre', pinsOf(box, index));
+}
+
+/** `label` `f` times as large (its coordinates and its text's size, `scale`), from the origin. */
+export function scaleLabel(label, f) {
+  if (f === 1) return label;
+  return { ...label, x0: label.x0 * f, y0: label.y0 * f, x1: label.x1 * f, y1: label.y1 * f, scale: (label.scale ?? 1) * f };
+}
+
+/**
+ * The port labels of a level's boxes in its own units (2026-10-20, the
+ * owner's "everything should zoom nicely"): drawn in the level, they scale
+ * with it like its boxes. `boxes` as `placeLabels` takes them, in the
+ * level's coordinates (`grow` set: a summary as large as its box holds);
+ * `detail` (`labelDetail`'s) the coarsest a box starts at: `pins` every pin
+ * named, `groups` its groups (`osc1_* (4)`; a box's groups collapsed, a
+ * frame's runs of one group), `summary` one summary. A frame's labels are
+ * at most FRAME_LABEL_UNITS wide. Pure.
+ */
+export function levelLabels(boxes, detail = 'pins') {
+  const level = detail === 'summary' ? SUMMARY : detail === 'groups' ? 2 : 1;
+  const { labels } = placeLabels(boxes.map((b) => ({ grow: true, ...b })), { cap: Infinity, level });
+  return labels.map((l) => {
+    const box = boxes[l.pins[0]?.box];
+    return box && box.kind !== 'instance' && !l.scale && l.x1 - l.x0 > FRAME_LABEL_UNITS ? narrowed(l, FRAME_LABEL_UNITS) : l;
+  });
+}
+
+/**
+ * Bundles' counts (as `placeCounts` takes them, in a level's units) placed
+ * among `labels` at COUNT_UNITS (`size` units their text): none on another
+ * label, each its `scale`.
+ */
+export function levelCounts(labels, counts, size = COUNT_UNITS) {
+  const f = size / LABEL_PX;
+  const down = (l) => ({ ...l, x0: l.x0 / f, y0: l.y0 / f, x1: l.x1 / f, y1: l.y1 / f });
+  const placed = placeCounts(labels.map(down), counts.map((c) => ({ ...c, at: c.at.map((p) => ({ x: p.x / f, y: p.y / f })) })));
+  return placed.map((l) => scaleLabel(l, f));
 }
 
 /** One label for the boxes `members` of `boxes`, centred on them. */
@@ -507,10 +574,13 @@ function firstOverlap(units) {
  * Each step coarsens a box (at most five times each) or merges two units,
  * so it ends within 6 × boxes steps, at worst as one cluster. More than
  * `cap` labels: every box is made coarser, and when all are summaries,
- * neighbours in order are merged, until at most `cap` remain.
+ * neighbours in order are merged, until at most `cap` remain. `level`: the
+ * coarsest every box starts at (1 every pin … SUMMARY). A box with `grow`
+ * has its summary as large as it holds whole (`scale`); one with `outward`
+ * (an open composite's) its labels outside its edge.
  */
-export function placeLabels(boxes, { cap = MAX_LABELS, viewport = null } = {}) {
-  let units = boxes.map((box, i) => ({ members: [i], ...boxLabels(box, i, 1, viewport) }));
+export function placeLabels(boxes, { cap = MAX_LABELS, viewport = null, level = 1 } = {}) {
+  let units = boxes.map((box, i) => ({ members: [i], ...boxLabels(box, i, level, viewport) }));
   let iterations = 0;
   const coarsen = (u) => Object.assign(u, boxLabels(boxes[u.members[0]], u.members[0], u.level + 1, viewport));
   const merge = (a, b) => {

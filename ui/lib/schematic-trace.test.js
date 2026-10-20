@@ -538,3 +538,29 @@ test('through modules, an output leading nowhere is an open end, never a sink (t
     ['/synth/volume.out primitive'],
   );
 });
+
+test('a composite instance start goes through its inside, both ways, its ends staying outside (2026-10-20)', () => {
+  const t = trace(GRAPH, { kind: 'instance', address: '/voice' }, 'both');
+  // Inward from its inputs: the export wires and the inner pins they reach, nested composite included.
+  assert.ok(tracedWire(t, '/voice', { from: 'hz', to: 'pitch.hz' }), 'hz → pitch.hz');
+  assert.ok(tracedWire(t, '/voice/pitch', { from: 'hz', to: 'r1.in' }), 'into the nested composite');
+  assert.ok(t.pins.has('/voice/pitch.hz') && t.pins.has('/voice/pitch/r1.in') && t.pins.has('/voice/env.gate') && t.pins.has('/voice/filt.cutoff'));
+  // Inward from its output, upstream: vca.out → out.
+  assert.ok(tracedWire(t, '/voice', { from: 'vca.out', to: 'out' }));
+  assert.ok(t.pins.has('/voice/vca.out'));
+  assert.ok(t.levels.includes('/voice') && t.levels.includes('/voice/pitch'));
+  // The ends are still the outside ones.
+  assert.deepEqual(ends(t.up), ['/lfo.out', '/seq.gate', '/seq.hz']);
+  assert.deepEqual(ends(t.down), ['/mix.a']);
+  // Through modules, the inside is crossed from the inputs to the output.
+  const deep = trace(GRAPH, { kind: 'instance', address: '/voice' }, 'down', { depth: 'through' });
+  for (const a of ['/voice/osc1.out', '/voice/sum.out', '/voice/filt.out', '/voice/vca.a']) assert.ok(deep.pins.has(a), a);
+  assert.ok(tracedWire(deep, '/voice', { from: 'filt.out', to: 'vca.a' }));
+  // Down only: the inputs go inward, the output is not walked inward upstream.
+  const down = trace(GRAPH, { kind: 'instance', address: '/voice' }, 'down');
+  assert.ok(tracedWire(down, '/voice', { from: 'hz', to: 'pitch.hz' }));
+  assert.ok(!tracedWire(down, '/voice', { from: 'vca.out', to: 'out' }));
+  // A library composite's inside is not in graph: nothing more.
+  const fx = trace(GRAPH, { kind: 'instance', address: '/fx' }, 'both');
+  assert.ok(![...fx.levels].some((p) => p.startsWith('/fx')));
+});

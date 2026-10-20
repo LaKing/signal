@@ -286,3 +286,34 @@ export function planPort(graph, address, { parameter = false } = {}) {
   }
   return null;
 }
+
+/**
+ * The links across an open composite's edge (2026-10-20, the owner's
+ * "tracing must be able to go through the composite"): from each pin of
+ * its box (`node`, in its parent's layout) to the same port's pin on the
+ * frame inside it (`inner`, its own layout), so an outer wire, its box pin
+ * and the inner wires are one drawn path. In the inside's coordinates:
+ * `[{name, direction, shape, from: {x, y}, to: {x, y}}]`, `from` the
+ * upstream end (an input's box pin, an output's frame pin). `anchors`
+ * (`groupAnchors` of the box, when its groups are collapsed) moves a
+ * grouped box pin to its group's pin.
+ */
+export function boundaryLinks(node, inner, anchors = null) {
+  if (!node || !inner) return [];
+  const t = inside(node, inner.bounds);
+  const local = (p) => ({ x: (p.x - t.x) / t.k, y: (p.y - t.y) / t.k });
+  const boxPin = (p) => local(anchors?.get(p.name) ?? p);
+  const links = [];
+  const frame = (kind) => inner.nodes.find((n) => n.kind === kind);
+  const ins = new Map((frame('input')?.outs ?? []).map((p) => [p.name, p]));
+  const outs = new Map((frame('output')?.ins ?? []).map((p) => [p.name, p]));
+  for (const p of node.ins) {
+    const f = ins.get(p.name);
+    if (f) links.push({ name: p.name, direction: 'in', shape: f.shape ?? p.shape, from: boxPin(p), to: { x: f.x, y: f.y } });
+  }
+  for (const p of node.outs) {
+    const f = outs.get(p.name);
+    if (f) links.push({ name: p.name, direction: 'out', shape: f.shape ?? p.shape, from: { x: f.x, y: f.y }, to: boxPin(p) });
+  }
+  return links;
+}

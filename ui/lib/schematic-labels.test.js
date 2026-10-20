@@ -7,8 +7,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { MAX_LABELS, PITCH_PX, boxLabels, estimateWidth, fitText, shownText, insideNote, minWidth, outsideNote, overlaps, pinText, placeCounts, placeLabels, prefixOf, setMeasure, textWidth, wrapText } from './schematic-labels.js';
-import { GAP_X, layout } from './schematic-layout.js';
+import { COUNT_UNITS, FRAME_LABEL_UNITS, LABEL_PX, MAX_LABELS, PITCH_PX, boxLabels, levelCounts, levelLabels, estimateWidth, fitText, shownText, insideNote, minWidth, outsideNote, overlaps, pinText, placeCounts, placeLabels, prefixOf, setMeasure, textWidth, wrapText } from './schematic-labels.js';
+import { GAP_X, HEADER, layout } from './schematic-layout.js';
+import { exportFacts, portGroups } from './schematic-groups.js';
 import { badgeText, behind } from './schematic-trace.js';
 
 /** The studio's `graph` structure (`top`, `composites`), as `Project::structure` gives it (crates/signal-project/tests/structure.rs keeps it equal). */
@@ -377,4 +378,74 @@ test('a noted pin cut short keeps its name whole: `out…`, never `ou…`', () =
   assert.equal(shownText(text, textWidth('out'), 'out'), 'out');
   assert.match(shownText(text, textWidth('out → /ec…'), 'out'), /^out → \/e/);
   assert.equal(shownText('osc1_* (4)', textWidth('osc1_*')), 'osc1_*');
+});
+
+/** A level's boxes in its own units, as the control hands them to `levelLabels` (2026-10-20). */
+function unitsBox(node, extra = {}) {
+  const at = (p) => ({ name: p.name, x: p.x, y: p.y });
+  return { kind: node.kind === 'instance' ? 'instance' : node.kind, name: node.name, rect: { x: node.x, y: node.y, w: node.w, h: node.h }, ins: node.ins.map(at), outs: node.outs.map(at), texts: new Map(), header: HEADER, ...extra };
+}
+const factsOf = (m) => exportFacts(STUDIO.composites[m] ?? null);
+
+test('in a level’s units the studio synth names every pin inside its box, whatever the zoom (2026-10-20)', () => {
+  const synth = layout(STUDIO.top, {}, { factsOf }).nodes.find((n) => n.name === 'synth');
+  const box = unitsBox(synth, { groups: synth.groups, collapsed: false });
+  const labels = levelLabels([box], 'pins');
+  // One label a pin, each its own name, at the pin labels' size (no scale): they scale with the drawing only.
+  assert.equal(labels.length, synth.ins.length + synth.outs.length);
+  for (const l of labels) {
+    assert.equal(l.pins.length, 1);
+    assert.equal(l.scale, undefined);
+    assert.ok(l.x0 >= box.rect.x - 1e-9 && l.x1 <= box.rect.x + box.rect.w + 1e-9, `${l.text} inside the box`);
+  }
+  sound([box], labels, 'synth in units');
+  // Its groups collapsed: each group named with its count, never its hidden pins.
+  const groups = levelLabels([{ ...box, collapsed: true }], 'groups');
+  assert.ok(groups.some((l) => l.shown === 'osc1_* (4)' || l.text === 'osc1_* (4)'), groups.map((l) => l.text).join(' | '));
+  assert.ok(groups.length < labels.length);
+  // A summary: one, larger than a pin's label, whole, inside the box below its title.
+  const [summary, ...rest] = levelLabels([box], 'summary');
+  assert.equal(rest.length, 0);
+  assert.ok(summary.scale > 1, `scale ${summary.scale}`);
+  assert.equal(summary.shown.split('\n').join(' '), 'synth: 31 in · 1 out');
+  assert.ok(summary.x0 >= box.rect.x && summary.x1 <= box.rect.x + box.rect.w && summary.y0 >= box.rect.y + HEADER && summary.y1 <= box.rect.y + box.rect.h, JSON.stringify(summary));
+});
+
+test('inside the synth, its frame names each port on its own with where it connects outside; groups only as the coarser step', () => {
+  const inside = layout(STUDIO.composites.moog_voice, {}, { factsOf });
+  const frame = inside.nodes.find((n) => n.kind === 'input');
+  const texts = new Map(frame.outs.map((p) => [p.name, pinText(p.name, outsideNote(STUDIO, `/synth.${p.name}`))]));
+  const box = unitsBox(frame, { texts, groups: { ins: [], outs: portGroups(frame.outs, factsOf('moog_voice')) } });
+  const labels = levelLabels([box], 'pins');
+  assert.equal(labels.length, frame.outs.length, 'one label a port: never "hz, gate (2)"');
+  assert.ok(labels.find((l) => l.text === 'hz ← /melody.hz'));
+  assert.ok(labels.find((l) => l.text === 'gate ← /melody.gate'));
+  for (const l of labels) assert.ok(l.x1 - l.x0 <= FRAME_LABEL_UNITS + 1e-9);
+  // The coarser step: the frame's runs of one group, as its box outside collapses them.
+  const coarse = levelLabels([{ ...box, texts: new Map() }], 'groups');
+  assert.ok(coarse.some((l) => l.text === 'osc1_* (4)'), coarse.map((l) => l.text).join(' | '));
+  assert.ok(coarse.length < labels.length);
+});
+
+test('an open composite’s box names its pins outside its edge (its inside drawn in it)', () => {
+  const synth = layout(STUDIO.top, {}, { factsOf }).nodes.find((n) => n.name === 'synth');
+  const box = unitsBox(synth, { outward: true });
+  const labels = levelLabels([box], 'pins');
+  assert.equal(labels.length, synth.ins.length + synth.outs.length);
+  for (const l of labels) {
+    const pin = [...synth.ins, ...synth.outs].find((p) => p.name === l.pins[0].name);
+    if (pin.direction === 'out') assert.ok(l.x0 > box.rect.x + box.rect.w - 1e-9, `${l.text} right of the box`);
+    else assert.ok(l.x1 < box.rect.x + 1e-9, `${l.text} left of the box`);
+  }
+});
+
+test('bundle counts in a level’s units: COUNT_UNITS large, on no other label', () => {
+  const b = box('synth', { x: 0, y: 0, w: 120 });
+  const labels = levelLabels([b], 'pins');
+  const counts = levelCounts(labels, [{ text: '4', at: [{ x: 60, y: 100 }] }, { text: '3', at: [{ x: 60, y: 100 }] }]);
+  assert.equal(counts.length, 2);
+  for (const c of counts) {
+    assert.equal(c.scale, COUNT_UNITS / LABEL_PX);
+    for (const l of [...labels, ...counts]) if (l !== c) assert.ok(!overlaps(c, l), `${c.text} on ${l.text}`);
+  }
 });

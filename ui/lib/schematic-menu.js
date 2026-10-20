@@ -25,7 +25,9 @@ function unless(item, reason) {
  * composite is `open` in place and stays open by the zoom alone (`wide`)
  * and whether something can be added inside it (`addable`); for a pin how
  * many connections reach it at its level (`connected`) and how many of the
- * level's exports (`exported`, which are not edited here); for the background
+ * level's exports (`exported`, which are not edited here), and for a
+ * composite's pin whether its inside is not in `graph` (`opaque`, a library
+ * composite: Go inside off; a box pin goes inside, a frame pin outside); for the background
  * the level shown (`level`, `""` the top level) and `addable`. A part that
  * is one of several selected (`group`: how many) ends with Delete selected,
  * which removes them all (`deletePlan`, ui/lib/schematic-select.js),
@@ -74,9 +76,14 @@ function partMenu(hit, state) {
     ];
   }
   if (hit?.kind === 'port') {
+    // A boundary pin (2026-10-20): to its other side, the composite's inside or around it.
+    const across = [];
+    if (hit.node?.kind === 'instance' && hit.node.composite) across.push(unless({ id: 'go-inside', label: 'Go inside' }, state.opaque ? 'A library composite: its inside is not in the graph' : null));
+    if (hit.node && hit.node.kind !== 'instance') across.push(unless({ id: 'go-outside', label: 'Go outside' }, null));
     return [
       unless({ id: 'inspect', label: 'Inspect' }, null),
       unless(TRACE, null),
+      ...across,
       unless({ id: 'copy-address', label: 'Copy address' }, null),
       SEPARATOR,
       unless({ id: 'disconnect', label: 'Disconnect all' }, editOff ?? (state.connected > 0 ? null : state.exported > 0 ? 'Only an export reaches it: exports are not edited here' : 'Nothing is connected here')),

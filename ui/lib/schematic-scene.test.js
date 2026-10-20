@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { layout } from './schematic-layout.js';
-import { CLOSE_PX, MIN_PX, OPEN_PX, breadcrumbs, inside, levelRect, nodeRect, planPort, rebase, scene } from './schematic-scene.js';
+import { CLOSE_PX, MIN_PX, OPEN_PX, boundaryLinks, breadcrumbs, inside, levelRect, nodeRect, planPort, rebase, scene } from './schematic-scene.js';
 import { bake, bakeHolds, bakedMatrix, bakedRect, SVG_MAX_SCALE, SVG_MAX_TRANSLATE, SVG_MIN_SCALE } from './schematic-draw.js';
 import { hitTest, reselect } from './schematic-hit.js';
 import { fit, focus, pan, screenRect, toScreen, zoomAt } from './schematic-view.js';
@@ -352,4 +352,30 @@ test('a new layout rebases the view on what did not move', () => {
   assert.ok(Math.abs(a.x - b.x) < 1e-6 && Math.abs(a.y - b.y) < 1e-6, 'lfo stays where it was');
   // The kick inside moved with drums' box.
   assert.ok(inside(drumsMoved.nodes.find((n) => n.name === 'drums'), layoutOf('drums').bounds).x !== inside(drums(), layoutOf('drums').bounds).x);
+});
+
+test('the links across an open composite’s edge: each box pin to its frame pin, in the inside’s units (2026-10-20)', () => {
+  const box = drums();
+  const inner = layoutOf('drums');
+  const links = boundaryLinks(box, inner);
+  const frameIns = inner.nodes.find((n) => n.kind === 'input');
+  const frameOuts = inner.nodes.find((n) => n.kind === 'output');
+  assert.equal(links.length, (frameIns?.outs.length ?? 0) + (frameOuts?.ins.length ?? 0));
+  const t = inside(box, inner.bounds);
+  for (const l of links) {
+    const boxPin = (l.direction === 'in' ? box.ins : box.outs).find((p) => p.name === l.name);
+    const framePin = (l.direction === 'in' ? frameIns.outs : frameOuts.ins).find((p) => p.name === l.name);
+    // The box pin's end, taken back to the parent's units, is the box pin; the other end the frame pin.
+    const boxEnd = l.direction === 'in' ? l.from : l.to;
+    const frameEnd = l.direction === 'in' ? l.to : l.from;
+    assert.ok(Math.abs(boxEnd.x * t.k + t.x - boxPin.x) < 1e-6 && Math.abs(boxEnd.y * t.k + t.y - boxPin.y) < 1e-6, l.name);
+    assert.deepEqual(frameEnd, { x: framePin.x, y: framePin.y });
+    // Upstream to downstream: an input's box pin is left of its frame pin, an output's right of it.
+    assert.ok(l.from.x < l.to.x, `${l.name}: ${l.from.x} < ${l.to.x}`);
+  }
+  // A grouped box pin (its groups collapsed) starts at its group's pin.
+  const anchors = new Map([[links[0].name, { x: box.x, y: box.y + 100 }]]);
+  const moved = boundaryLinks(box, inner, anchors)[0];
+  assert.ok(Math.abs(moved.from.y * t.k + t.y - (box.y + 100)) < 1e-6);
+  assert.deepEqual(boundaryLinks(null, inner), []);
 });

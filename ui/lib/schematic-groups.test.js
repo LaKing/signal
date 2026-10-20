@@ -7,10 +7,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { GROUP_PX, collapsedAt, exportFacts, groupAnchors, orderedPins, portGroups } from './schematic-groups.js';
+import { GROUP_PX, collapsedAt, exportFacts, groupAnchors, labelDetail, notesAt, orderedPins, portGroups } from './schematic-groups.js';
 import { ROW, layout } from './schematic-layout.js';
 import { bundleWires } from './schematic-bundle.js';
-import { boxLabels, overlaps } from './schematic-labels.js';
+import { LABEL_PX, NOTE_PX, READ_PX, boxLabels, overlaps } from './schematic-labels.js';
 import { hitTest } from './schematic-hit.js';
 import { startOf, trace } from './schematic-trace.js';
 import { schematicMenu } from './schematic-menu.js';
@@ -260,4 +260,21 @@ test('a collapsed group clicked selects its members; T, the sidebar and the menu
   const mixed = traceTarget([selected[0], hz]);
   assert.equal(startOf(mixed).label, '2 pins');
   assert.equal(sidebar([selected[0], hz], {}).pinGroup, false);
+});
+
+test('level of detail by size (2026-10-20): every pin, then groups while their text reads, then summaries; notes from NOTE_PX', () => {
+  const seen = [];
+  for (let k = 3; k >= 0.05; k *= 0.97) {
+    const d = labelDetail(k);
+    if (seen.at(-1) !== d) seen.push(d);
+    // Groups open exactly while every pin is drawn: a pin drawn on its own is always named.
+    assert.equal(d === 'pins', !collapsedAt(k));
+    // A group's label is only shown readable.
+    if (d === 'groups') assert.ok(LABEL_PX * k >= READ_PX);
+    assert.equal(notesAt(k), LABEL_PX * k >= NOTE_PX);
+  }
+  assert.deepEqual(seen, ['pins', 'groups', 'summary']);
+  // The owner's scales: 0.3 summary, 0.5 groups, 0.8 and up every pin; notes from 0.8.
+  assert.deepEqual([0.3, 0.5, 0.8, 1.2, 2].map(labelDetail), ['summary', 'groups', 'pins', 'pins', 'pins']);
+  assert.deepEqual([0.5, 0.8, 1.2].map(notesAt), [false, true, true]);
 });

@@ -298,7 +298,8 @@ export function wireEnds(path, written, r) {
  * instance, port, level, kind, module, direction, hops, via}], pins: count,
  * wires: count}`. A pin start traces upstream from it, downstream from it
  * or both; an instance from its inputs and parameters upstream and its
- * outputs downstream; a wire from its source upstream and its target
+ * outputs downstream (a composite instance also through its inside: its
+ * inputs inward downstream, its outputs inward upstream); a wire from its source upstream and its target
  * downstream, the wire itself included. `depth` is `next` (stop at the next
  * module) or `through` (cross modules, see above); the result carries it,
  * and `hops`: each pin's fewest connections or crossings from the start.
@@ -370,6 +371,24 @@ export function trace(graph, start, direction = 'both', { depth = 'next' } = {})
   // A wire's own ends count even when the direction leaves one side out.
   const up = wantUp ? side(ups, 'up') : null;
   const down = wantDown ? side(downs, 'down') : null;
+  // A composite instance's inside is part of it (2026-10-20, the owner's "tracing
+  // must be able to go through the composite"): its inputs followed inward
+  // downstream, its outputs inward upstream, within it only, so the trace
+  // continues past its frame; its ends stay the outside ones.
+  if (start.kind === 'instance' && r.instance(start.address)?.composite && r.level(start.address)) {
+    const keep = (path) => within(path, start.address);
+    const inner = (starts, dir) => {
+      const w = walk(starts, dir, r, keep, through);
+      cycles += w.cycles;
+      for (const [address, reached] of w.pins) {
+        pins.add(address);
+        if (!(hops.get(address) <= reached.hops)) hops.set(address, reached.hops);
+      }
+      w.wires.forEach(addWire);
+    };
+    if (wantDown) inner(ups, 'down');
+    if (wantUp) inner(downs, 'up');
+  }
   if (start.kind !== 'wire') {
     // The start's pins are part of the trace whatever the direction.
     for (const a of [...ups, ...downs]) if (a) pins.add(a);

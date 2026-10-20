@@ -10,7 +10,7 @@
 // a bundle. Pure; no DOM.
 
 import { ROW } from './schematic-layout.js';
-import { PITCH_PX, prefixOf } from './schematic-labels.js';
+import { LABEL_PX, NOTE_PX, PITCH_PX, READ_PX, prefixOf } from './schematic-labels.js';
 
 /**
  * A box's groups collapse below this many px a row on screen: a label's
@@ -22,6 +22,25 @@ export const GROUP_PX = PITCH_PX;
 /** Whether a box's groups are collapsed at scale `k`. */
 export function collapsedAt(k) {
   return ROW * k < GROUP_PX;
+}
+
+/**
+ * How much a level's port labels say at scale `k` (2026-10-20, the owner's
+ * "everything should zoom nicely"): the labels are drawn in the level's own
+ * units and scale with it, so detail goes by size, never by keeping text at
+ * a size on screen. `pins`: every pin named (its groups open); `groups`:
+ * each group's pin named (`osc1_* (4)`) while that text is still READ_PX on
+ * screen; `summary`: one summary per box (`synth: 31 in · 1 out`), drawn
+ * larger, hidden in turn when it is too small to read.
+ */
+export function labelDetail(k) {
+  if (!collapsedAt(k)) return 'pins';
+  return LABEL_PX * k >= READ_PX ? 'groups' : 'summary';
+}
+
+/** Whether a boundary pin's label carries its note (`hz ← /melody.hz`) at scale `k`: its text NOTE_PX on screen or more. */
+export function notesAt(k) {
+  return LABEL_PX * k >= NOTE_PX;
 }
 
 /**
