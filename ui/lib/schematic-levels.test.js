@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { CLAIM_MS, RETRY_MS, candidates, levelFraction, levelPlan } from './schematic-levels.js';
 import { layout } from './schematic-layout.js';
 import { scene } from './schematic-scene.js';
-import { closedFit } from './schematic-open.js';
+import { fit } from './schematic-view.js';
 
 const p = (name, direction, shape = 'signal', rate = 1) => ({ name, direction, shape, kind: 'audio', rate });
 const GRAPH = {
@@ -27,8 +27,8 @@ const layoutOf = (level) => {
   if (!layouts.has(level)) layouts.set(level, layout(level === '' ? GRAPH.top : GRAPH.composites[level]));
   return layouts.get(level);
 };
-// Fitted as Fit does (M2.13-3, `closedFit`): every composite closed, as a plain fit had them.
-const fitted = () => scene({ layoutOf, view: closedFit(layoutOf(''), layoutOf, viewport), viewport });
+// Fitted as Fit does: every composite closed.
+const fitted = () => scene({ layoutOf, view: fit(layoutOf('').bounds, viewport), viewport });
 
 test('the candidates: visible signal outputs, any rate divisor, in screen order, the selected instance first', () => {
   const list = candidates(fitted(), GRAPH);

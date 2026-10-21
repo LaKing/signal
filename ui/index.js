@@ -56,6 +56,7 @@ import './lib/schematic-groups.test.js';
 import './lib/schematic-open.test.js';
 import './lib/schematic-palette.test.js';
 import './controls/context-menu.test.js';
+import './controls/schematic.test.js';
 import './lib/pattern-text.test.js';
 import './lib/piano-roll-model.test.js';
 import './lib/step-grid-model.test.js';

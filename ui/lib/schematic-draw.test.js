@@ -238,10 +238,12 @@ test('a pan at Fit keeps every level’s elements and bake; only matrices move',
   };
   const viewport = { w: 1000, h: 600 };
   const view = fit(layoutOf('').bounds, viewport);
-  const before = scene({ layoutOf, view, viewport });
+  // drums open (as a click opens it), so a pan moves two levels.
+  const pinned = new Set(['/drums']);
+  const before = scene({ layoutOf, view, viewport, pinned });
   const bakes = before.levels.map((l) => bake(l.transform, viewport));
   for (const dx of [1, 7, -30]) {
-    const after = scene({ layoutOf, view: pan(before.view, dx, 0), viewport, open: before.open });
+    const after = scene({ layoutOf, view: pan(before.view, dx, 0), viewport, pinned });
     assert.deepEqual(after.levels.map((l) => l.path), before.levels.map((l) => l.path), 'no level opened or closed');
     after.levels.forEach((level, i) => {
       assert.ok(sameItems(level.nodes, before.levels[i].nodes), 'the same nodes, element by element');

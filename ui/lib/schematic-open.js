@@ -4,28 +4,29 @@
 // links across it (`boundaryLinks`, ui/lib/schematic-scene.js) carry them on
 // to the inner pins. The frame's scale (`linkScale`) depends on the layouts
 // only, never on the view, so a level and its open inside stay one exact
-// affine link (`compose`, `uncompose`). A composite opens when its inside
-// would be drawn at OPEN_K or more on screen and closes below CLOSE_K; at
-// most one is open per level (`chooseOpen`), as grown frames would cover
-// each other. Positions are never changed: the opened copy of a level
+// affine link (`compose`, `uncompose`). A composite opens when the person
+// opens it (2026-10-22, the owner: a click on its box, a double-click,
+// Enter, Open in place, a reveal: it is pinned, `pinOne`) and closes when
+// they close it (the × in its frame's header, `closeBox`; Escape, Close, a
+// breadcrumb, Fit: unpinned, `unpin`), never because of the view's scale:
+// a zoom or a pan only moves the view. At most one is open per level
+// (`chooseOpen`, `pinOne`), as grown frames would cover each other.
+// Positions are never changed: the opened copy of a level
 // (`openedLayout`) is drawn, its other boxes moved out of the frame's way
 // (`makeRoom`), the stored layout is what is moved. No DOM.
 
 import { CHAR, GAP_Y, HEADER, PAD, laneY, levelBottom } from './schematic-layout.js';
+import { READ_PX } from './schematic-labels.js';
 import { wireGeometry } from './schematic-wire.js';
 import { fit, focus, zoomAt } from './schematic-view.js';
 
-/** An inside opens when drawn at this scale on screen or more (Enter's readability, about 0.45 for the studio's synth), and closes below CLOSE_K. */
-export const OPEN_K = 0.45;
-/** More than a wheel tick (×1.22) below OPEN_K (2026-10-20, the operator's review: at 0.375 one tick out closed it again). */
-export const CLOSE_K = OPEN_K / 1.6;
 /**
  * Enter, a double-click and a breadcrumb show an inside at this scale at
- * least: a margin above OPEN_K, never on the threshold itself (two wheel
- * ticks out still keep it open, CLOSE_K being well below). Small: at 1.25
- * times OPEN_K the studio's synth no longer fitted the view.
+ * least (about the readability Enter gives the studio's synth; it was 5 %
+ * above the zoom's opening threshold, 0.45, before 2026-10-22). Small: at
+ * 0.56 the studio's synth no longer fitted the view.
  */
-export const READ_K = OPEN_K * 1.05;
+export const READ_K = 0.4725;
 /** An open inside is drawn at this scale of its parent's units, */
 export const FRAME_K = 0.4;
 /** unless its frame would then be more than this many times its box (or it fits its box larger already). */
@@ -72,11 +73,6 @@ export function grownNode(node, bounds) {
 /** The scale (inside's units → its parent's) of `node`'s inside of layout `bounds` when it is open. */
 export function linkScale(node, bounds) {
   return fitScale(grownNode(node, bounds), bounds);
-}
-
-/** The scale of the parent's level on screen at which `node` opens. */
-export function opensAt(node, bounds) {
-  return OPEN_K / linkScale(node, bounds);
 }
 
 /** Room (layout units) kept clear beside a frame's edges for its pins' names, drawn outside it: about this many units per character, */
@@ -220,28 +216,6 @@ export function openedLayout(layout, name, bounds) {
   return opened;
 }
 
-/**
- * The largest scale on screen of a level laid out as `layout` at which
- * none of its composites is open, nor stays open (below every CLOSE_K):
- * what Fit, a breadcrumb and Escape keep to, so that going out of a level
- * never shows it open again (Infinity when it holds no inside known to
- * `layoutOf`).
- */
-export function closedScale(layout, layoutOf) {
-  let k = Infinity;
-  for (const node of layout?.nodes ?? []) {
-    if (!node.composite || node.kind !== 'instance') continue;
-    const inner = layoutOf(node.module);
-    if (inner) k = Math.min(k, (CLOSE_K / linkScale(node, inner.bounds)) * 0.999);
-  }
-  return k;
-}
-
-/** `view` zoomed out about the screen point `at` until its level, drawn at scale `k` now, is at most `max` (`closedScale`). */
-export function closedView(view, k, max, at) {
-  return k > max ? zoomAt(view, max / k, at) : view;
-}
-
 /** `view` zoomed in about the screen point `at` until its level, drawn at scale `k` now, is at least READ_K: what Enter and a breadcrumb show, readable, the inside overflowing the view if need be. */
 export function readableView(view, k, at) {
   return k < READ_K ? zoomAt(view, READ_K / k, at) : view;
@@ -256,38 +230,13 @@ export function enterView(bounds, viewport, ...margins) {
 /**
  * A breadcrumb's view of the open level `level` (a scene entry, drawn in
  * `view` now) whose layout is `rect` on screen: fitted as `focus` does,
- * readable (`readableView`), and with none of its own composites open
- * (`closedScale`, which wins).
+ * and readable (`readableView`). What is open below it is closed by the
+ * breadcrumb itself (`unpin`), not by the view.
  */
-export function crumbView(view, level, rect, viewport, layoutOf, ...margins) {
+export function crumbView(view, level, rect, viewport, ...margins) {
   const focused = focus(view, rect, viewport, ...margins);
   const target = fit(rect, viewport, ...margins);
-  const at = { x: target.x, y: target.y };
-  const k = level.transform.k * (focused.k / view.k);
-  const readable = readableView(focused, k, at);
-  return closedView(readable, k * (readable.k / focused.k), closedScale(level.layout, layoutOf), at);
-}
-
-/**
- * The pins left after a zoom by `factor` of the scene `drawn`: a zoom out
- * that takes a pinned composite's inside below CLOSE_K unpins it and what
- * is pinned inside it (`pinned` itself when nothing changes; a zoom in
- * never unpins, auditor-2-unpin-direction).
- */
-export function unpinned(pinned, drawn, factor) {
-  if (factor >= 1 || !pinned.size) return pinned;
-  const closing = drawn.levels.filter((l) => l.path && pinned.has(l.path) && l.transform.k * factor < CLOSE_K).map((l) => l.path);
-  if (!closing.length) return pinned;
-  return new Set([...pinned].filter((path) => !closing.some((c) => path === c || path.startsWith(`${c}/`))));
-}
-
-/**
- * The zoom factor from the scene `drawn` to `view` (as `scene` takes it):
- * every zoom since that scene, however many came before the next frame;
- * null when `view` is in another level's coordinates (a breadcrumb, Enter).
- */
-export function zoomSince(drawn, view) {
-  return (view.path ?? '') === (drawn.view.path ?? '') ? view.k / drawn.view.k : null;
+  return readableView(focused, level.transform.k * (focused.k / view.k), { x: target.x, y: target.y });
 }
 
 /** `pinned` with `address` pinned instead of any sibling of it (and what is pinned inside those): one open per level. */
@@ -298,6 +247,12 @@ export function pinOne(pinned, address) {
     return !top || top === address;
   });
   return new Set([...kept, address]);
+}
+
+/** `pinned` without `address` and what is pinned inside it (its × or Escape, Close, Go outside; `pinned` itself when neither is pinned). */
+export function unpin(pinned, address) {
+  const closing = (path) => path === address || path.startsWith(`${address}/`);
+  return [...pinned].some(closing) ? new Set([...pinned].filter((path) => !closing(path))) : pinned;
 }
 
 /** The level edited (M2.13-3, AC3): the innermost open one of the scene `drawn` (`{path, level}`). */
@@ -320,7 +275,7 @@ export function editable(drawn, hit) {
 export function aroundReason(drawn, hit) {
   if (!hit || editable(drawn, hit)) return null;
   const where = hit.path ? hit.path : 'the top level';
-  return `${where} is around the open ${editLevel(drawn).path}: zoom out of it to edit ${hit.path ? 'there' : 'it'}`;
+  return `${where} is around the open ${editLevel(drawn).path}: close it (×) to edit ${hit.path ? 'there' : 'it'}`;
 }
 
 /** A level's nodes in drawing order: the open composite's frame (`opened`) last, over its neighbours. */
@@ -330,61 +285,37 @@ export function drawOrder(nodes, opened) {
   return frame.length ? [...nodes.filter((n) => !frame.includes(n)), ...frame] : nodes;
 }
 
-/** `fit` of a level laid out as `layout` (`fit`'s margins after), its composites closed (`closedScale`): Fit, and `0`. */
-export function closedFit(layout, layoutOf, viewport, ...margins) {
-  const view = fit(layout.bounds, viewport, ...margins);
-  return closedView(view, view.k, closedScale(layout, layoutOf), { x: view.x, y: view.y });
-}
-
-function intersects(a, b) {
-  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
-}
-
-function onScreen(transform, r) {
-  return {
-    x: (r.x - (transform.ox ?? 0)) * transform.k + transform.x,
-    y: (r.y - (transform.oy ?? 0)) * transform.k + transform.y,
-    w: r.w * transform.k,
-    h: r.h * transform.k,
-  };
-}
-
 /**
- * The composite of a level to open: `{node, inner}` (`node` its box in the
- * level's stored `layout`, `inner` its inside's layout), or null. The level
- * at `path` is drawn with `transform` on `screen`; `layoutOf(module)` gives
- * an inside (a library composite's is unknown: never opened). A pinned
- * one (double-clicked) first; else the one `open` held, while its inside is
- * drawn at CLOSE_K or more and its frame is on screen; else one whose
- * inside would be drawn at OPEN_K or more, its box on screen: the one
- * under `at` (the zoom's point), else the nearest to it; but only when
- * `opening` (a zoom, Enter, a breadcrumb: never a pan alone, the
- * operator's review, so panning across a level opens nothing new).
+ * The composite of the level at `path` (laid out as `layout`) to open:
+ * `{node, inner}` (`node` its box in the level's stored layout, `inner`
+ * its inside's layout), or null. Only a pinned one opens (2026-10-22: a
+ * click, a double-click, Enter, Open in place, a reveal), never one the
+ * view's scale or position would pick; `layoutOf(module)` gives an inside
+ * (a library composite's is unknown: never opened).
  */
-export function chooseOpen({ path, layout, transform, screen, layoutOf, open = new Set(), pinned = new Set(), at, opening = true }) {
-  let kept = null;
-  let best = null;
+export function chooseOpen({ path, layout, layoutOf, pinned = new Set() }) {
+  if (!pinned.size) return null;
   for (const node of layout.nodes) {
-    if (!node.composite || node.kind !== 'instance') continue;
-    const child = `${path}/${node.name}`;
-    const isPinned = pinned.has(child);
-    const wasOpen = open.has(child);
+    if (!node.composite || node.kind !== 'instance' || !pinned.has(`${path}/${node.name}`)) continue;
     const inner = layoutOf(node.module);
-    if (!inner) continue;
-    if (isPinned) return { node, inner };
-    const k = transform.k * linkScale(node, inner.bounds);
-    if (wasOpen && !kept && k >= CLOSE_K && intersects(onScreen(transform, grownNode(node, inner.bounds)), screen)) {
-      kept = { node, inner };
-      continue;
-    }
-    if (!opening || k < OPEN_K) continue;
-    const r = onScreen(transform, node);
-    if (!intersects(r, screen)) continue;
-    const dx = Math.max(r.x - at.x, 0, at.x - r.x - r.w);
-    const dy = Math.max(r.y - at.y, 0, at.y - r.y - r.h);
-    const d = Math.hypot(dx, dy);
-    if (!best || d < best.d) best = { node, inner, d };
+    if (inner) return { node, inner };
   }
-  if (kept) return kept;
-  return best ? { node: best.node, inner: best.inner } : null;
+  return null;
+}
+
+/** The close button's square (the × in an open frame's header, top right; 2026-10-22), in its level's units, */
+export const CLOSE_UNITS = 22;
+/** its letter's size in those units (scaling with the view as every text does, ADR 0030's 2026-10-20 refinement), */
+export const CLOSE_TEXT = 16;
+/** and its distance from the frame's right edge. */
+export const CLOSE_INSET = 6;
+
+/** The square of the × that closes `frame` (an open composite's grown box), in its level's units: inside the frame, in its header, at its top right. */
+export function closeBox(frame) {
+  return { x: frame.x + frame.w - CLOSE_INSET - CLOSE_UNITS, y: frame.y + (HEADER - CLOSE_UNITS) / 2, w: CLOSE_UNITS, h: CLOSE_UNITS };
+}
+
+/** Whether the × is drawn (and hit) at a level drawn at scale `k`: its letter READ_PX or more on screen, else hidden as any text (Escape still closes). */
+export function closeShown(k) {
+  return CLOSE_TEXT * k >= READ_PX;
 }

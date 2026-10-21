@@ -30,15 +30,14 @@ test('an instance: Inspect, Open, Enter, Copy address, Delete; a primitive has n
   assert.equal(item(composite, 'delete').title, EDIT_OFF);
 });
 
-test('an open composite: Close (not while the zoom holds it open) and Add module here', () => {
-  const open = schematicMenu(COMPOSITE, { editing: true, open: true, wide: false, addable: true });
+test('an open composite: Close (always: the zoom holds nothing open, 2026-10-22) and Add module here', () => {
+  const open = schematicMenu(COMPOSITE, { editing: true, open: true, addable: true });
   assert.deepEqual(ids(open), ['inspect', 'trace', 'close', 'enter', 'separator', 'copy-address', 'separator', 'add', 'delete']);
   assert.equal(item(open, 'close').disabled, false);
   assert.equal(item(open, 'add').disabled, false);
-  const wide = schematicMenu(COMPOSITE, { editing: false, open: true, wide: true, addable: true });
-  assert.equal(item(wide, 'close').disabled, true);
-  assert.match(item(wide, 'close').title, /zoom out/);
-  assert.equal(item(wide, 'add').title, EDIT_OFF);
+  const viewing = schematicMenu(COMPOSITE, { editing: false, open: true, addable: true });
+  assert.equal(item(viewing, 'close').disabled, false);
+  assert.equal(item(viewing, 'add').title, EDIT_OFF);
 });
 
 test('a wire: Inspect, Edit scale, Go to source and target, Copy addresses, Delete; an export is not edited', () => {
@@ -130,7 +129,7 @@ test('Trace signal (ADR 0030 §1): on an instance, a wire, an export, a pin, alw
 // The operator's review of M2.13-3 (2026-10-20): around the innermost open
 // composite the edits are off, with why; a library composite does not open in place.
 test('around the open composite: Delete, Edit scale, Disconnect all, Add and Delete selected off with the reason; inspecting stays', () => {
-  const around = 'the top level is around the open /synth: zoom out of it to edit it';
+  const around = 'the top level is around the open /synth: close it (×) to edit it';
   const off = (items, id) => assert.deepEqual([item(items, id).disabled, item(items, id).title], [true, around], id);
   const on = (items, id) => assert.equal(item(items, id).disabled, false, id);
   const instance = schematicMenu(PRIMITIVE, { editing: true, around });

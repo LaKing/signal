@@ -8,10 +8,13 @@
 // DOM. M2.13-2: a level drawn with bundles (`entry.bundles`, ui/lib/
 // schematic-bundle.js) is hit on what is drawn, the topmost first: a solo
 // wire above its bundle, a bundle as a `bundle` hit carrying its wires'.
+// 2026-10-22: an open frame's × (`closeBox`, ui/lib/schematic-open.js) is
+// hit before anything else, the innermost frame's first, as a `close` hit.
 
 import { nearBundle } from './schematic-bundle.js';
 import { groupAnchors } from './schematic-groups.js';
 import { INPUTS, OUTPUTS } from './schematic-layout.js';
+import { closeBox, closeShown } from './schematic-open.js';
 import { toLocal } from './schematic-view.js';
 import { curveDistance, distanceToSegment } from './schematic-wire.js';
 
@@ -87,12 +90,15 @@ export function bundleHit(entry, bundle) {
 
 /**
  * What screen point `point` is over: `{kind: 'port' | 'instance' | 'wire' |
- * 'bundle' | 'group' | 'background', path, level, node?, port?, wire?,
- * bundle?, address?}` (a collapsed port group: `groupHit`). A port's and an instance's `address` is the concrete one
+ * 'bundle' | 'group' | 'close' | 'background', path, level, node?, port?,
+ * wire?, bundle?, address?}` (a collapsed port group: `groupHit`; an open
+ * frame's ×: `closeHit`). A port's and an instance's `address` is the concrete one
  * (`/drums/kick.out`); a wire gives `from` and `to`; a bundle its wires'
  * hits as `wires`.
  */
 export function hitTest(drawn, point) {
+  const close = closeHit(drawn, point);
+  if (close) return close;
   for (let i = drawn.levels.length - 1; i >= 0; i--) {
     const entry = drawn.levels[i];
     const local = toLocal(entry.transform, point);
@@ -142,6 +148,26 @@ export function hitTest(drawn, point) {
     for (const wire of entry.wires) if (nearWire(wire, local, WIRE_PX / scale)) return wireHit(entry, wire);
   }
   return { kind: 'background', path: '', level: '' };
+}
+
+/**
+ * The × of an open frame under screen point `point` (2026-10-22), the
+ * innermost first: `{kind: 'close', path, level, node, address}` (`node`
+ * the frame, `address` the composite instance it closes), or null. Only
+ * where it is drawn (`closeShown`).
+ */
+export function closeHit(drawn, point) {
+  for (let i = drawn.levels.length - 1; i >= 0; i--) {
+    const entry = drawn.levels[i];
+    const name = entry.layout?.opened;
+    if (!name || !closeShown(entry.transform.k)) continue;
+    const frame = entry.layout.nodes.find((n) => n.kind === 'instance' && n.name === name);
+    if (!frame) continue;
+    const local = toLocal(entry.transform, point);
+    const r = closeBox(frame);
+    if (local.x >= r.x && local.x <= r.x + r.w && local.y >= r.y && local.y <= r.y + r.h) return { kind: 'close', path: entry.path, level: entry.level, node: frame, address: `${entry.path}/${name}` };
+  }
+  return null;
 }
 
 /**

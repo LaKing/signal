@@ -72,7 +72,7 @@ test('an instance: what it is, its pins with their connections as links, its par
   const off = sidebar([box('out')], context());
   assert.equal(action(off, 'delete').title, EDIT_OFF, 'the same reason as the menu’s');
 
-  const drums = sidebar([box('drums')], context({ menu: () => ({ open: true, wide: false }) }));
+  const drums = sidebar([box('drums')], context({ menu: () => ({ open: true }) }));
   assert.equal(field(drums, 'composite'), 'yes, 1 instance inside');
   assert.deepEqual(ids(drums), ['trace', 'enter', 'close', 'copy-address', 'delete'], 'an open composite closes');
   const kick = instanceHit({ path: '/drums', level: 'drums' }, nodeOf('drums', 'kick'));

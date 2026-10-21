@@ -24,7 +24,6 @@ import { layout } from './schematic-layout.js';
 import { nodeRect, scene } from './schematic-scene.js';
 import { hitTest } from './schematic-hit.js';
 import { fit, toLocal } from './schematic-view.js';
-import { closedFit } from './schematic-open.js';
 
 const port = (name, direction, shape = 'signal') => ({ name, direction, shape, kind: 'audio', rate: 1 });
 const TOP = {
@@ -143,8 +142,8 @@ test('a double-click inside an open composite adds to that composite, where it w
   const outside = { x: 2, y: 2 };
   assert.equal(hitTest(drawn, outside).kind, 'background');
   assert.equal(paletteLevel(hitTest(drawn, outside), drawn, outside), null);
-  // Fitted as Fit does (M2.13-3, `closedFit`): a plain fit would now open drums by its readability.
-  const closed = scene({ layoutOf, view: closedFit(layoutOf(''), layoutOf, viewport), viewport });
+  // Fitted as Fit does, nothing open.
+  const closed = scene({ layoutOf, view: fit(layoutOf('').bounds, viewport), viewport });
   const r = nodeRect(closed, '/drums');
   const center = { x: r.x + r.w / 2, y: r.y + r.h / 2 };
   assert.equal(paletteLevel(hitTest(closed, center), closed, center), null);

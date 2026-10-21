@@ -1,24 +1,24 @@
 // A composite opened in place (M2.13-3, ADR 0030 §2): its box grown into a
-// frame, the wires continuing across its edge, one open per level.
+// frame, the wires continuing across its edge, one open per level; opened
+// and closed by the person only, never by the zoom (2026-10-22).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { HEADER, PAD, ROW, layout } from './schematic-layout.js';
 import {
-  CLOSE_K, FRAME_K, GROW_MAX, OPEN_K, READ_K, aroundReason, chooseOpen, makeRoom, closedFit, closedScale, crumbView, drawOrder, editLevel, editable, enterView, grownNode, linkScale, openedLayout, opensAt, pinOne, unpinned, zoomSince,
+  CLOSE_TEXT, CLOSE_UNITS, FRAME_K, GROW_MAX, READ_K, aroundReason, chooseOpen, closeBox, closeShown, makeRoom, crumbView, drawOrder, editLevel, editable, enterView, grownNode, linkScale, openedLayout, pinOne, unpin,
 } from './schematic-open.js';
 import { PatchSession } from './schematic-edit.js';
 import { SchematicEditor } from '../controls/schematic-editor.js';
 import { boundaryLinks, breadcrumbs, inside, levelRect, openAnchor, scene } from './schematic-scene.js';
-import { hitTest } from './schematic-hit.js';
-import { fit, focus, pan, toScreen, wheelFactor, zoomAt } from './schematic-view.js';
+import { closeHit, hitTest } from './schematic-hit.js';
+import { fit, focus, pan, toScreen, zoomAt } from './schematic-view.js';
 import { exportFacts } from './schematic-groups.js';
 import { KICK } from './schematic-scene.test.js';
 
 const STUDIO = JSON.parse(readFileSync(new URL('./fixtures/studio-graph.json', import.meta.url), 'utf8'));
 const viewport = { w: 1000, h: 600 };
-const screen = { x: 0, y: 0, w: viewport.w, h: viewport.h };
 const centre = { x: viewport.w / 2, y: viewport.h / 2 };
 
 function layoutsOf(graph) {
@@ -38,6 +38,9 @@ const nodeOf = (layoutOf, level, name) => layoutOf(level).nodes.find((n) => n.na
 const near = (a, b, message) => assert.ok(Math.abs(a.x - b.x) < 1e-9 && Math.abs(a.y - b.y) < 1e-9, `${message}: ${a.x},${a.y} vs ${b.x},${b.y}`);
 /** A point of an inside (`t`: inside → parent) in its parent's units. */
 const out = (t, p) => ({ x: p.x * t.k + t.x, y: p.y * t.k + t.y });
+/** The scale of a level on screen at which `node`'s inside (of layout `bounds`), open, is drawn at READ_K. */
+const readableAt = (node, bounds) => READ_K / linkScale(node, bounds);
+const SYNTH = new Set(['/synth']);
 
 test('a box grows into a frame where it is: its inside at FRAME_K, its pins on its edges in order', () => {
   const box = nodeOf(kickOf, '', 'drums');
@@ -73,15 +76,14 @@ test('the studio’s synth opens with its inside as readable as Enter draws it, 
   const k = linkScale(synth, bounds);
   assert.ok(Math.abs(k - natural * GROW_MAX) < 1e-12, `capped: ${k} = ${natural} × ${GROW_MAX}`);
   assert.ok(Math.abs(k - 0.363) < 0.001, `measured 0.363: ${k}`);
-  // Zoomed to its threshold about its centre, it opens, its inside drawn at OPEN_K.
-  const at = opensAt(synth, bounds) * 1.001;
-  const view = { k: at, ox: synth.x + synth.w / 2, oy: synth.y + synth.h / 2, x: centre.x, y: centre.y };
-  const drawn = scene({ layoutOf: studioOf, view, viewport });
+  // Opened (pinned) at the scale Enter draws it at, its inside is drawn at READ_K.
+  const view = { k: readableAt(synth, bounds), ox: synth.x + synth.w / 2, oy: synth.y + synth.h / 2, x: centre.x, y: centre.y };
+  const drawn = scene({ layoutOf: studioOf, view, viewport, pinned: SYNTH });
   assert.deepEqual(drawn.levels.map((l) => l.path), ['', '/synth']);
-  assert.ok(drawn.levels[1].transform.k >= OPEN_K && drawn.levels[1].transform.k < OPEN_K * 1.01, `inside at ${drawn.levels[1].transform.k}`);
+  assert.ok(Math.abs(drawn.levels[1].transform.k - READ_K) < 1e-9, `inside at ${drawn.levels[1].transform.k}`);
   // The surrounding level is still drawn around it (its boxes moved out of the frame's way: off this small stage, on a larger one).
   assert.ok(!drawn.levels[0].behind);
-  const wide = scene({ layoutOf: studioOf, view: { ...view, x: 1000, y: 600 }, viewport: { w: 2000, h: 1200 } });
+  const wide = scene({ layoutOf: studioOf, view: { ...view, x: 1000, y: 600 }, viewport: { w: 2000, h: 1200 }, pinned: SYNTH });
   assert.ok(wide.levels[0].nodes.length > 1, `${wide.levels[0].nodes.map((n) => n.name)}`);
 });
 
@@ -133,7 +135,7 @@ test('outer wires continue across the frame edge to the inner wires, nested too'
   const tk = inside(kickFrame, kickInside.bounds);
   assert.equal(check(drumsOpened, kickFrame, kickInside, tk, boundaryLinks(kickFrame, kickInside)), 3, 'trigger, decay and out cross kick’s edge');
   // In the scene the two links compose: drums' inside is drawn with kick open.
-  const drawn = scene({ layoutOf: kickOf, view: { k: opensAt(kickFrame, kickInside.bounds) / t.k * 1.01, ox: out(t, { x: kickFrame.x + kickFrame.w / 2, y: kickFrame.y + kickFrame.h / 2 }).x, oy: out(t, { x: kickFrame.x + kickFrame.w / 2, y: kickFrame.y + kickFrame.h / 2 }).y, x: centre.x, y: centre.y }, viewport, open: new Set(['/drums']) });
+  const drawn = scene({ layoutOf: kickOf, view: { k: readableAt(kickFrame, kickInside.bounds) / t.k, ox: out(t, { x: kickFrame.x + kickFrame.w / 2, y: kickFrame.y + kickFrame.h / 2 }).x, oy: out(t, { x: kickFrame.x + kickFrame.w / 2, y: kickFrame.y + kickFrame.h / 2 }).y, x: centre.x, y: centre.y }, viewport, pinned: new Set(['/drums', '/drums/kick']) });
   assert.deepEqual(drawn.levels.map((l) => l.path), ['', '/drums', '/drums/kick']);
   assert.equal(drawn.levels[1].layout, drumsOpened, 'drums is drawn with kick grown');
 });
@@ -167,47 +169,40 @@ function pair() {
   return { top, inner, layoutOf: (level) => (level === '' ? top : level === 'inner' ? inner : null) };
 }
 
-test('one composite open per level: pinned, else held, else under the zoom point, else nearest', () => {
-  const { top, inner, layoutOf } = pair();
-  const a = top.nodes.find((n) => n.name === 'a');
-  const b = top.nodes.find((n) => n.name === 'b');
-  const k = opensAt(a, inner.bounds) * 1.2;
-  const transform = { k, x: 0, y: 0 };
-  const pick = (options) => chooseOpen({ path: '', layout: top, transform, screen: { x: -1e9, y: -1e9, w: 2e9, h: 2e9 }, layoutOf, ...options })?.node.name ?? null;
-  const middle = (n) => ({ x: (n.x + n.w / 2) * k, y: (n.y + n.h / 2) * k });
-  assert.equal(pick({ at: middle(a) }), 'a');
-  assert.equal(pick({ at: middle(b) }), 'b');
-  // auditor-2-focus-containment: beside both, the nearest.
-  assert.equal(pick({ at: { x: middle(b).x + 1e4, y: middle(b).y } }), 'b');
-  assert.equal(pick({ at: middle(b), open: new Set(['/a']) }), 'a', 'the one open stays open');
-  assert.equal(pick({ at: middle(a), pinned: new Set(['/b']) }), 'b', 'a pinned one first');
-  // Below OPEN_K nothing opens; between CLOSE_K and OPEN_K only what was open.
-  const lower = (f) => chooseOpen({ path: '', layout: top, transform: { k: opensAt(a, inner.bounds) * f, x: 0, y: 0 }, screen: { x: -1e9, y: -1e9, w: 2e9, h: 2e9 }, layoutOf, open: new Set(['/a']), at: { x: 0, y: 0 } })?.node.name ?? null;
-  assert.equal(lower((1 + CLOSE_K / OPEN_K) / 2), 'a');
-  assert.equal(lower((CLOSE_K / OPEN_K) * 0.99), null);
+test('only a pinned composite opens, at any scale: never one the view would pick (2026-10-22)', () => {
+  const { top, layoutOf } = pair();
+  const pick = (pinned) => chooseOpen({ path: '', layout: top, layoutOf, pinned })?.node.name ?? null;
+  assert.equal(pick(new Set()), null, 'nothing pinned: nothing open, however near or large');
+  assert.equal(pick(new Set(['/a'])), 'a');
+  assert.equal(pick(new Set(['/b', '/b/x'])), 'b');
+  assert.equal(pick(new Set(['/c'])), null, 'no such instance');
   // AC6: a library composite (its inside not in `graph`) never opens, not even pinned.
-  assert.notEqual(pick({ pinned: new Set(['/lib']), at: middle(top.nodes.find((n) => n.name === 'lib')) }), 'lib');
-  const libOnly = { ...top, nodes: top.nodes.filter((n) => n.name === 'lib') };
-  assert.equal(chooseOpen({ path: '', layout: libOnly, transform: { k: 1e6, x: 0, y: 0 }, screen, layoutOf, pinned: new Set(['/lib']), at: centre }), null);
-  // Fit keeps every composite closed.
-  const fitted = closedFit(top, layoutOf, viewport);
-  assert.ok(fitted.k <= closedScale(top, layoutOf) && fitted.k * linkScale(a, inner.bounds) < CLOSE_K);
+  assert.equal(pick(new Set(['/lib'])), null);
+  // A scene, zoomed far into a, opens nothing that is not pinned.
+  const a = top.nodes.find((n) => n.name === 'a');
+  for (const k of [0.01, 1, 100, 1e6]) {
+    const view = { k, ox: a.x + a.w / 2, oy: a.y + a.h / 2, x: centre.x, y: centre.y };
+    assert.deepEqual([...scene({ layoutOf, view, viewport }).open], [], `at ${k}: closed`);
+    assert.deepEqual([...scene({ layoutOf, view, viewport, pinned: new Set(['/a']) }).open], ['/a'], `at ${k}: pinned, open`);
+  }
 });
 
 // Slice 2: the person's navigation and the level edited.
 
-/** The studio's synth opened by zooming (no pin), at a 1000 px stage: its scene. */
-function synthZoomed(factor = 1.2) {
+/** The studio's synth opened (pinned, as a click opens it) and drawn readable about its centre, at a 1000 px stage: its scene. */
+function synthOpen(factor = 1.2) {
   const synth = nodeOf(studioOf, '', 'synth');
-  const view = { k: opensAt(synth, studioOf('moog_voice').bounds) * factor, ox: synth.x + synth.w / 2, oy: synth.y + synth.h / 2, x: centre.x, y: centre.y };
-  return scene({ layoutOf: studioOf, view, viewport });
+  const view = { k: readableAt(synth, studioOf('moog_voice').bounds) * factor, ox: synth.x + synth.w / 2, oy: synth.y + synth.h / 2, x: centre.x, y: centre.y };
+  return scene({ layoutOf: studioOf, view, viewport, pinned: SYNTH });
 }
+/** The studio's top level fitted, everything closed (Fit). */
+const fitted = () => scene({ layoutOf: studioOf, view: fit(studioOf('').bounds, viewport), viewport });
 
-test('Enter fits the synth readable at a 1000 px stage, overflowing rather than below OPEN_K (auditor-2-focus-below-close)', () => {
+test('Enter fits the synth readable at a 1000 px stage, overflowing rather than below READ_K (auditor-2-focus-below-close)', () => {
   const bounds = studioOf('moog_voice').bounds;
   const middle = { x: bounds.x + bounds.w / 2, y: bounds.y + bounds.h / 2 };
   const plain = fit(bounds, viewport, 24, 40, 120);
-  assert.ok(plain.k < OPEN_K, `a plain fit is ${plain.k}`);
+  assert.ok(plain.k < READ_K, `a plain fit is ${plain.k}`);
   const view = enterView(bounds, viewport, 24, 40, 120);
   assert.ok(Math.abs(view.k - READ_K) < 1e-12);
   near(toScreen(view, middle), toScreen(plain, middle), 'about the fit’s centre');
@@ -216,43 +211,51 @@ test('Enter fits the synth readable at a 1000 px stage, overflowing rather than 
 });
 
 test('a breadcrumb to the open synth keeps it open and readable (auditor-2-focus-below-close)', () => {
-  const drawn = synthZoomed();
+  const drawn = synthOpen();
   assert.deepEqual(breadcrumbs(drawn).map((c) => c.path), ['', '/synth']);
   const rect = levelRect(drawn, '/synth');
   const plain = focus(drawn.view, rect, viewport, 24, 40, 120);
   const plainK = drawn.levels[1].transform.k * (plain.k / drawn.view.k);
-  assert.ok(plainK < OPEN_K, `a plain focus draws it at ${plainK}, less readable than OPEN_K`);
-  const view = crumbView(drawn.view, drawn.levels[1], rect, viewport, studioOf, 24, 40, 120);
-  const after = scene({ layoutOf: studioOf, view, viewport, open: drawn.open });
+  assert.ok(plainK < READ_K, `a plain focus draws it at ${plainK}, less readable than READ_K`);
+  const view = crumbView(drawn.view, drawn.levels[1], rect, viewport, 24, 40, 120);
+  const after = scene({ layoutOf: studioOf, view, viewport, pinned: SYNTH });
   assert.deepEqual(breadcrumbs(after).map((c) => c.path), ['', '/synth'], 'still open');
   assert.ok(after.levels[1].transform.k >= READ_K - 1e-9, `at ${after.levels[1].transform.k}`);
 });
 
-test('only a zoom out below CLOSE_K unpins: Enter, then a step in, keeps it open (auditor-1-pinned-never-closes, auditor-2-unpin-direction)', () => {
+test('a zoom never opens nor closes: Enter, then steps in and out, keeps it open; unpinned it stays closed (2026-10-22)', () => {
   const bounds = studioOf('moog_voice').bounds;
-  let pinned = pinOne(new Set(), '/synth');
-  let view = { ...enterView(bounds, viewport, 24, 40, 120), path: '/synth' };
-  let drawn = scene({ layoutOf: studioOf, view, viewport, pinned });
+  const pinned = pinOne(new Set(), '/synth');
+  let drawn = scene({ layoutOf: studioOf, view: { ...enterView(bounds, viewport, 24, 40, 120), path: '/synth' }, viewport, pinned });
   assert.deepEqual(breadcrumbs(drawn).map((c) => c.path), ['', '/synth']);
-  assert.equal(unpinned(pinned, drawn, 1.25), pinned, 'a step in keeps it');
-  drawn = scene({ layoutOf: studioOf, view: zoomAt(drawn.view, 1.25, centre), viewport, pinned, open: drawn.open });
-  assert.ok(drawn.open.has('/synth'));
-  // Steps out: kept while its inside stays at CLOSE_K or more, then unpinned and closed.
-  let steps = 0;
-  while (pinned.has('/synth') && steps++ < 100) {
-    const k = drawn.levels.find((l) => l.path === '/synth').transform.k;
-    pinned = unpinned(pinned, drawn, 0.8);
-    if (pinned.has('/synth')) assert.ok(k * 0.8 >= CLOSE_K, `kept at ${k * 0.8}`);
-    drawn = scene({ layoutOf: studioOf, view: zoomAt(drawn.view, 0.8, centre), viewport, pinned, open: drawn.open });
+  // Far out (its inside a few hundredths of a pixel per unit) and far in: open throughout.
+  for (const factor of [...Array(20).fill(0.7), ...Array(40).fill(1.3)]) {
+    drawn = scene({ layoutOf: studioOf, view: zoomAt(drawn.view, factor, centre), viewport, pinned });
+    assert.ok(drawn.open.has('/synth'), `open at ${drawn.view.k}`);
   }
-  assert.ok(!pinned.has('/synth'), 'unpinned by zooming out');
-  assert.deepEqual(breadcrumbs(drawn).map((c) => c.path), [''], 'and closed');
+  // Closed, the same zooms open nothing, about the synth itself.
+  const synth = nodeOf(studioOf, '', 'synth');
+  let view = { k: 0.05, ox: synth.x + synth.w / 2, oy: synth.y + synth.h / 2, x: centre.x, y: centre.y };
+  for (let i = 0; i < 40; i++) {
+    view = zoomAt(view, 1.3, centre);
+    const closed = scene({ layoutOf: studioOf, view, viewport });
+    assert.deepEqual([...closed.open], [], `closed at ${view.k}`);
+    view = closed.view;
+  }
+});
+
+test('a pan never opens nor closes (2026-10-22)', () => {
+  const drawn = synthOpen();
+  for (const [dx, dy] of [[5000, 0], [0, -5000], [-1e5, 1e5]]) {
+    assert.deepEqual([...scene({ layoutOf: studioOf, view: pan(drawn.view, dx, dy), viewport, pinned: SYNTH }).open], ['/synth'], `panned ${dx},${dy}: open`);
+    assert.deepEqual([...scene({ layoutOf: studioOf, view: pan(drawn.view, dx, dy), viewport }).open], [], `panned ${dx},${dy} unpinned: closed`);
+  }
 });
 
 test('one pin per level, the frame drawn last, editing at the innermost open level only (AC3)', () => {
   assert.deepEqual([...pinOne(new Set(['/a', '/a/x', '/b/y']), '/b')].sort(), ['/b', '/b/y']);
   assert.deepEqual([...pinOne(new Set(['/a', '/a/x']), '/a/z')].sort(), ['/a', '/a/z']);
-  const drawn = synthZoomed();
+  const drawn = synthOpen();
   const top = drawn.levels[0];
   const order = drawOrder(top.nodes, top.layout.opened);
   assert.equal(order.at(-1).name, 'synth');
@@ -272,37 +275,13 @@ test('one pin per level, the frame drawn last, editing at the innermost open lev
   const within = hitTest(drawn, toScreen(inner.transform, { x: box.x + box.w / 2, y: box.y + box.h / 2 }));
   assert.equal(within.path, '/synth');
   assert.equal(editable(drawn, within), true);
-  const closed = scene({ layoutOf: studioOf, view: closedFit(studioOf(''), studioOf, viewport), viewport });
+  const closed = fitted();
   assert.equal(editable(closed, onFrame), true, 'nothing open: the top level is edited');
-});
-
-// auditor-1-pinned-never-closes (round 2): several zoom events before a frame.
-test('zoom-outs that arrive before a render count together: the pinned synth unpins and closes', () => {
-  const bounds = studioOf('moog_voice').bounds;
-  let pinned = pinOne(new Set(), '/synth');
-  const drawn = scene({ layoutOf: studioOf, view: { ...enterView(bounds, viewport, 24, 40, 120), path: '/synth' }, viewport, pinned });
-  const inside = drawn.levels.find((l) => l.path === '/synth').transform.k;
-  assert.ok(Math.abs(inside - READ_K) < 1e-9);
-  // Two steps of 0.75, as zoomBy takes them, no scene between: each alone keeps it (0.354), together 0.266, below CLOSE_K.
-  let view = drawn.view;
-  for (let i = 0; i < 2; i++) {
-    view = zoomAt(view, 0.75, centre);
-    const since = zoomSince(drawn, view);
-    assert.ok(Math.abs(since - 0.75 ** (i + 1)) < 1e-12, `the zoom since the last scene: ${since}`);
-    pinned = unpinned(pinned, drawn, since);
-    if (i === 0) assert.ok(pinned.has('/synth'), 'the first step alone keeps it');
-    // The old reading, the last scene's scale times this one step, would keep it after the second as well.
-    if (i === 1) assert.ok(unpinned(pinOne(new Set(), '/synth'), drawn, 0.75).has('/synth'));
-  }
-  assert.ok(!pinned.has('/synth'), 'unpinned');
-  const after = scene({ layoutOf: studioOf, view, viewport, pinned, open: drawn.open });
-  assert.deepEqual(breadcrumbs(after).map((c) => c.path), [''], 'and closed');
-  assert.equal(zoomSince(drawn, { ...view, path: '/other' }), null, 'a view of another level is no zoom');
 });
 
 // auditor-1-editing-level-ungated (round 2): undo and redo, and a drag whose level stops being the innermost.
 test('undo and redo of another level are refused while a composite is open; the entry stays', async () => {
-  const drawn = synthZoomed();
+  const drawn = synthOpen();
   const said = [];
   const sent = [];
   const editor = Object.create(SchematicEditor.prototype);
@@ -320,24 +299,24 @@ test('undo and redo of another level are refused while a composite is open; the 
   // At the innermost level a patch is written; with nothing open, the undo is.
   assert.equal(await editor.write(0, 'moog_voice', [{ op: 'z' }]), true);
   assert.equal(sent.length, 1);
-  editor.s.drawn = scene({ layoutOf: studioOf, view: closedFit(studioOf(''), studioOf, viewport), viewport });
+  editor.s.drawn = fitted();
   session.history.at = 1;
   session.history.entries = [{ level: '', forward: [], backward: [{ op: 'y' }] }];
   assert.equal(await editor.write(-1), true);
   assert.equal(sent.length, 2);
 });
 
-test('a drag begun at the top level is not editable once a zoom opened the synth (what pointerUp checks before a drop)', () => {
-  const closed = scene({ layoutOf: studioOf, view: closedFit(studioOf(''), studioOf, viewport), viewport });
+test('a drag begun at the top level is not editable once the synth opened (what pointerUp checks before a drop)', () => {
+  const closed = fitted();
   const melody = closed.levels[0].layout.nodes.find((n) => n.name === 'melody');
   const press = { kind: 'instance', path: '', level: '', node: melody, address: '/melody' };
   assert.equal(editable(closed, press), true, 'pressed: a drag starts');
-  assert.equal(editable(synthZoomed(), press), false, 'released after the synth opened: no move written');
+  assert.equal(editable(synthOpen(), press), false, 'released after the synth opened: no move written');
 });
 
 // The operator's review of M2.13-3 (2026-10-20): room made for the frame,
-// the wires across its edge in their direction, hysteresis, the zoom's
-// point kept, nothing opened by a pan, outer edits off.
+// the wires across its edge in their direction, the pointer's point kept
+// (a click's since 2026-10-22), outer edits off.
 
 const overlap = (a, b, gap = 0) => a.x < b.x + b.w + gap && b.x < a.x + a.w + gap && a.y < b.y + b.h + gap && b.y < a.y + a.h + gap;
 
@@ -408,29 +387,18 @@ test('a wire across the frame’s edge runs in the direction it ran to the box: 
   assert.equal(opened.wires.filter((w) => w.feedback).length, top.wires.filter((w) => w.feedback).length);
 });
 
-test('hysteresis: a wheel tick out of a composite at its threshold, or of Enter’s view, keeps it open', () => {
-  const tick = wheelFactor(100);
-  assert.ok(tick < 1 && OPEN_K * tick >= CLOSE_K, `a tick (${tick}) from OPEN_K stays above CLOSE_K`);
-  assert.ok(OPEN_K * tick * tick >= CLOSE_K, 'two ticks too');
-  assert.ok(Math.abs(OPEN_K / CLOSE_K - 1.6) < 1e-12);
-  assert.ok(READ_K > OPEN_K);
-  const bounds = studioOf('moog_voice').bounds;
-  const view = enterView(bounds, { w: 1300, h: 1000 }, 24, 40, 120);
-  assert.ok(view.k >= READ_K - 1e-12 && view.k * tick >= CLOSE_K, `${view.k}`);
-});
-
-test('a composite opened by a zoom keeps the box’s point under the pointer there in its frame, its header below the bar (openAnchor)', () => {
+test('a composite opened by a click keeps the box’s point under the pointer there in its frame, its header below the bar (openAnchor)', () => {
   const synth = nodeOf(studioOf, '', 'synth');
   const bounds = studioOf('moog_voice').bounds;
-  const k = opensAt(synth, bounds) * 1.01;
+  const k = readableAt(synth, bounds);
   const big = { w: 1300, h: 1000 };
   const at = { x: 650, y: 500 };
   for (const [fx, fy] of [[0.5, 0.5], [0.1, 0.3], [0.9, 0.8]]) {
     const view = { k, ox: synth.x + synth.w * fx, oy: synth.y + synth.h * fy, x: at.x, y: at.y };
-    const drawn = scene({ layoutOf: studioOf, view, viewport: big, at });
+    const drawn = scene({ layoutOf: studioOf, view, viewport: big, pinned: SYNTH });
     assert.deepEqual([...drawn.open], ['/synth']);
     const anchor = openAnchor(drawn, new Set(), at, big, 0);
-    const after = scene({ layoutOf: studioOf, view: pan(drawn.view, anchor.dx, anchor.dy), viewport: big, open: drawn.open, opening: false, at });
+    const after = scene({ layoutOf: studioOf, view: pan(drawn.view, anchor.dx, anchor.dy), viewport: big, pinned: SYNTH });
     assert.deepEqual([...after.open], ['/synth'], `${fx},${fy}: still open`);
     const top = after.levels[0];
     const frame = top.layout.nodes.find((n) => n.name === 'synth');
@@ -442,25 +410,83 @@ test('a composite opened by a zoom keeps the box’s point under the pointer the
   }
   // With a bar: the frame's header kept below it when the frame fits.
   const view = { k, ox: synth.x + synth.w / 2, oy: synth.y, x: 650, y: 10 };
-  const drawn = scene({ layoutOf: studioOf, view, viewport: big, at: { x: 650, y: 10 } });
+  const drawn = scene({ layoutOf: studioOf, view, viewport: big, pinned: SYNTH });
   const anchor = openAnchor(drawn, new Set(), { x: 650, y: 10 }, big, 40);
   const top = drawn.levels[0];
   const frame = top.layout.nodes.find((n) => n.name === 'synth');
   assert.ok(toScreen(top.transform, frame).y + anchor.dy >= 40 - 1e-9);
 });
 
-test('a pan opens nothing new: only a zoom, Enter or a breadcrumb do (opening)', () => {
-  const synth = nodeOf(studioOf, '', 'synth');
-  const view = { k: opensAt(synth, studioOf('moog_voice').bounds) * 1.2, ox: synth.x + synth.w / 2, oy: synth.y + synth.h / 2, x: centre.x, y: centre.y };
-  assert.deepEqual([...scene({ layoutOf: studioOf, view, viewport }).open], ['/synth']);
-  assert.deepEqual([...scene({ layoutOf: studioOf, view, viewport, opening: false }).open], [], 'panned onto it: stays closed');
-  assert.deepEqual([...scene({ layoutOf: studioOf, view, viewport, opening: false, open: new Set(['/synth']) }).open], ['/synth'], 'open: stays open');
-  assert.deepEqual([...scene({ layoutOf: studioOf, view, viewport, opening: false, pinned: new Set(['/synth']) }).open], ['/synth'], 'pinned: open');
+test('around the open composite, edits are off with the reason (aroundReason)', () => {
+  const drawn = synthOpen();
+  assert.equal(aroundReason(drawn, { path: '/synth' }), null);
+  assert.match(aroundReason(drawn, { path: '' }), /^the top level is around the open \/synth: close it \(×\)/);
+  assert.equal(aroundReason(scene({ layoutOf: studioOf, view: { k: 0.1, x: 0, y: 0 }, viewport }), { path: '' }), null, 'nothing open: the top level is edited');
 });
 
-test('around the open composite, edits are off with the reason (aroundReason)', () => {
-  const drawn = synthZoomed();
-  assert.equal(aroundReason(drawn, { path: '/synth' }), null);
-  assert.match(aroundReason(drawn, { path: '' }), /^the top level is around the open \/synth/);
-  assert.equal(aroundReason(scene({ layoutOf: studioOf, view: { k: 0.1, x: 0, y: 0 }, viewport }), { path: '' }), null, 'nothing open: the top level is edited');
+// 2026-10-22, the owner: "it would be better if it opened on a click, and
+// there were an × in the top-right corner to close it".
+
+test('a click opens by pinning: one per level, a sibling closing with what was open inside it (pinOne); unpin closes with what is inside', () => {
+  assert.deepEqual([...pinOne(new Set(['/drums', '/drums/kick']), '/other')].sort(), ['/other']);
+  assert.deepEqual([...pinOne(new Set(['/drums']), '/drums/kick')].sort(), ['/drums', '/drums/kick'], 'inside the open one: both open');
+  assert.deepEqual([...unpin(new Set(['/drums', '/drums/kick', '/drumsx']), '/drums')], ['/drumsx'], 'what is inside goes, a name sharing its prefix stays');
+  assert.deepEqual([...unpin(new Set(['/drums', '/drums/kick']), '/drums/kick')], ['/drums']);
+  const same = new Set(['/a']);
+  assert.equal(unpin(same, '/b'), same, 'nothing to close: the same set');
+  const drawn = scene({ layoutOf: kickOf, view: fit(kickOf('').bounds, viewport), viewport, pinned: pinOne(new Set(), '/drums') });
+  assert.deepEqual([...drawn.open], ['/drums']);
+});
+
+test('every open frame has an × in its header’s top right, in its level’s units, hit before anything else (closeBox, closeHit)', () => {
+  const synth = nodeOf(studioOf, '', 'synth');
+  const bounds = studioOf('moog_voice').bounds;
+  const big = { w: 1300, h: 1000 };
+  const drawn = scene({ layoutOf: studioOf, view: { k: readableAt(synth, bounds), ox: synth.x + synth.w / 2, oy: synth.y, x: 650, y: 200 }, viewport: big, pinned: SYNTH });
+  const top = drawn.levels[0];
+  const frame = top.layout.nodes.find((n) => n.name === 'synth');
+  const r = closeBox(frame);
+  assert.ok(r.x > frame.x + frame.w / 2 && r.x + r.w < frame.x + frame.w && r.y > frame.y && r.y + r.h < frame.y + HEADER, 'inside the frame, in its header, at its right');
+  assert.equal(r.w, CLOSE_UNITS);
+  const middle = toScreen(top.transform, { x: r.x + r.w / 2, y: r.y + r.h / 2 });
+  const hit = hitTest(drawn, middle);
+  assert.deepEqual([hit.kind, hit.address, hit.path], ['close', '/synth', '']);
+  assert.equal(hit.node, frame);
+  // Beside it, the frame's box as before.
+  const beside = hitTest(drawn, toScreen(top.transform, { x: frame.x + frame.w / 2, y: frame.y + 4 }));
+  assert.deepEqual([beside.kind, beside.address], ['instance', '/synth']);
+  // It scales with the view and is hidden (not hit) when its letter would be under 4 px.
+  assert.ok(closeShown(4 / CLOSE_TEXT) && !closeShown(3.9 / CLOSE_TEXT));
+  const far = scene({ layoutOf: studioOf, view: zoomAt(drawn.view, 3.5 / CLOSE_TEXT / top.transform.k, { x: 650, y: 200 }), viewport: big, pinned: SYNTH });
+  const farTop = far.levels[0];
+  assert.ok(farTop.transform.k * CLOSE_TEXT < 4);
+  assert.equal(closeHit(far, toScreen(farTop.transform, { x: r.x + r.w / 2, y: r.y + r.h / 2 })), null);
+  // Nested: the inner frame's × is hit at its own level.
+  const kickBox = nodeOf(kickOf, 'drums', 'kick');
+  const nested = scene({ layoutOf: kickOf, view: fit(kickOf('').bounds, { w: 4000, h: 3000 }), viewport: { w: 4000, h: 3000 }, pinned: new Set(['/drums', '/drums/kick']) });
+  const drums = nested.levels.find((l) => l.path === '/drums');
+  const kickFrame = drums.layout.nodes.find((n) => n.name === 'kick');
+  assert.ok(kickFrame && kickBox);
+  const kr = closeBox(kickFrame);
+  if (closeShown(drums.transform.k)) assert.equal(hitTest(nested, toScreen(drums.transform, { x: kr.x + kr.w / 2, y: kr.y + kr.h / 2 })).address, '/drums/kick');
+});
+
+test('the × closes its composite and what is open inside it; Escape the innermost (unpin)', () => {
+  const pinned = new Set(['/drums', '/drums/kick']);
+  const big = { w: 2400, h: 1600 };
+  const drawn = scene({ layoutOf: kickOf, view: fit(kickOf('').bounds, big), viewport: big, pinned });
+  assert.deepEqual([...drawn.open].sort(), ['/drums', '/drums/kick']);
+  const top = drawn.levels[0];
+  const r = closeBox(top.layout.nodes.find((n) => n.name === 'drums'));
+  const hit = hitTest(drawn, toScreen(top.transform, { x: r.x + r.w / 2, y: r.y + r.h / 2 }));
+  assert.equal(hit.kind, 'close');
+  const left = unpin(pinned, hit.address);
+  assert.deepEqual([...left], []);
+  const after = scene({ layoutOf: kickOf, view: drawn.view, viewport: big, pinned: left });
+  assert.deepEqual([...after.open], [], 'closed, with kick inside it');
+  assert.equal(after.levels[0].transform.k, top.transform.k, 'not zoomed');
+  // Escape: the innermost open one (the last breadcrumb).
+  const crumbs = breadcrumbs(drawn);
+  assert.equal(crumbs.at(-1).path, '/drums/kick');
+  assert.deepEqual([...unpin(pinned, crumbs.at(-1).path)], ['/drums']);
 });

@@ -5,7 +5,7 @@ import { bake, bakedMatrix, bakedPath } from './schematic-draw.js';
 import { layout, routed, movedWires } from './schematic-layout.js';
 import { focus, matrix, toScreen } from './schematic-view.js';
 import { nodeRect, rebase, reroot, scene } from './schematic-scene.js';
-import { opensAt } from './schematic-open.js';
+import { READ_K, linkScale } from './schematic-open.js';
 import { KICK } from './schematic-scene.test.js';
 
 /** An element: its attributes, and how many writes it took. */
@@ -135,25 +135,26 @@ test('released inside a composite the view is in, that inside stays where it is'
     return layouts.get(level);
   };
   const node = layoutOf('').nodes.find((n) => n.name === 'drums');
-  // M2.13-3: drums opens by its inside's readability on screen, no longer by its box's width.
-  const k = opensAt(node, layoutOf('drums').bounds) * 1.01;
+  // Drums and kick inside it opened (pinned, as clicks open them; 2026-10-22), drums' inside readable.
+  const pinned = new Set(['/drums', '/drums/kick']);
+  const k = (READ_K / linkScale(node, layoutOf('drums').bounds)) * 1.01;
   const opened = { k, x: viewport.w / 2 - (node.x + node.w / 2) * k, y: viewport.h / 2 - (node.y + node.h / 2) * k };
-  const view = scene({ layoutOf, view: focus(opened, nodeRect(scene({ layoutOf, view: opened, viewport }), '/drums/kick'), viewport), viewport }).view;
+  const view = scene({ layoutOf, view: focus(opened, nodeRect(scene({ layoutOf, view: opened, viewport, pinned }), '/drums/kick'), viewport), viewport, pinned }).view;
   assert.equal(view.path, '/drums/kick');
   const kickAt = (drawn) => drawn.levels.find((l) => l.path === '/drums/kick').transform;
-  const before = scene({ layoutOf, view, viewport });
+  const before = scene({ layoutOf, view, viewport, pinned });
   // osc dropped far below: kick's bounds, so its fit in its box, change.
   const osc = layoutOf('kick').nodes.find((n) => n.name === 'osc');
   const moved = layout(KICK.composites.kick, { osc: { x: osc.x, y: osc.y + 400 } });
   const after = (level) => (level === 'kick' ? moved : layoutOf(level));
-  const kept = scene({ layoutOf: after, view: reroot(view, layoutOf, '/drums/kick'), viewport });
+  const kept = scene({ layoutOf: after, view: reroot(view, layoutOf, '/drums/kick'), viewport, pinned });
   const was = kickAt(before);
   const now = kickAt(kept);
   for (const key of ['k', 'x', 'y']) assert.ok(Math.abs(now[key] - was[key]) < 1e-9, `${key} ${now[key]} vs ${was[key]}`);
   // Kept from outside instead, the inside is fitted to its box again
   // (M2.13-3: its frame, grown for the new bounds; at FRAME_K the inside's
   // scale stays, so it is its place on screen that changes, not its scale).
-  const refit = kickAt(scene({ layoutOf: after, view: rebase(view, layoutOf, after), viewport }));
+  const refit = kickAt(scene({ layoutOf: after, view: rebase(view, layoutOf, after), viewport, pinned }));
   const corner = (t) => toScreen(t, { x: 0, y: 0 });
   assert.ok(Math.abs(refit.k - was.k) > 1e-6 || Math.abs(corner(refit).y - corner(was).y) > 1e-6);
   assert.deepEqual(reroot(view, layoutOf, '/nope'), view);

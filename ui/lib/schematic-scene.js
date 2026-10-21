@@ -1,8 +1,8 @@
 // The schematic's semantic zoom (M2.9-1, ADR 0026 §2): what is drawn for a
-// view. A composite whose inside would be drawn readable (`chooseOpen`,
-// ui/lib/schematic-open.js: at OPEN_K on screen, open down to CLOSE_K), or
-// that was double-clicked, opens in place (M2.13-3): its box grows into a
-// frame and its own layout is drawn in it, recursively, one per level. The view is in the
+// view. A composite the person opened (pinned: a click, a double-click,
+// Enter; `chooseOpen`, ui/lib/schematic-open.js; never the view's scale,
+// 2026-10-22) opens in place (M2.13-3): its box grows into a frame and its
+// own layout is drawn in it, recursively, one per level. The view is in the
 // coordinates of a level (its `path`, the deepest drawn under the screen's
 // centre): the levels above it are derived from it upward and the others
 // downward from them (M2.9-1b), so a deep view never passes through huge
@@ -97,13 +97,12 @@ function upward(links, view) {
  * level's layout (`""`: the top level, else a composite's name); `path` is
  * an open composite instance's address (`""` for the top level); `view` is
  * in the coordinates of the level at `view.path` (the top level when
- * absent or no longer there); `open` is the set of paths open in the last
- * scene, `pinned` those double-clicked, `at` the screen point zoomed about
- * (the centre when absent; `chooseOpen`), `opening` false when nothing
- * may open that is not open or pinned already (a pan). `view` comes back
- * re-rooted at the deepest level drawn under the screen's centre.
+ * absent or no longer there: a level just closed keeps the view of the
+ * levels around it still); `pinned` is the set of paths opened (`open`,
+ * returned, those of them drawn). `view` comes back re-rooted at the
+ * deepest level drawn under the screen's centre.
  */
-export function scene({ layoutOf, view, viewport, open = new Set(), pinned = new Set(), at = { x: viewport.w / 2, y: viewport.h / 2 }, opening = true }) {
+export function scene({ layoutOf, view, viewport, pinned = new Set() }) {
   const screen = { x: 0, y: 0, w: viewport.w, h: viewport.h };
   const links = chain(layoutOf, view.path ?? '') ?? chain(layoutOf, '');
   const along = new Map();
@@ -115,7 +114,7 @@ export function scene({ layoutOf, view, viewport, open = new Set(), pinned = new
   const visit = (path, level, transform, depth, parent) => {
     const stored = layoutOf(level);
     if (!stored) return;
-    const pick = depth < MAX_DEPTH ? chooseOpen({ path, layout: stored, transform, screen, layoutOf, open, pinned, at, opening }) : null;
+    const pick = depth < MAX_DEPTH ? chooseOpen({ path, layout: stored, layoutOf, pinned }) : null;
     const drawn = pick ? openedLayout(stored, pick.node.name, pick.inner.bounds) : stored;
     const entry = { path, level, layout: drawn, stored, transform, nodes: [], wires: [], parent };
     levels.push(entry);
@@ -150,16 +149,16 @@ export function scene({ layoutOf, view, viewport, open = new Set(), pinned = new
 }
 
 /**
- * The pan (screen px, `{dx, dy}`) that keeps a composite opened by a zoom
- * where the zoom was (M2.13-3, the operator's review), or null when none
- * opened: the first level of `drawn` (a scene) whose open composite was
- * not open `before` (a set of paths). The point of the box under `at`
- * (the zoom's point), as a fraction of its width and height, is under
- * `at` again in its frame (clamped to the box: a zoom about a point
- * beside it keeps the nearest edge), so the zoom goes on into the part of
- * the inside that was under the pointer, never into an empty part of the
- * frame; then, when the frame fits below the bar (`bar` px at the top),
- * its header is kept below it.
+ * The pan (screen px, `{dx, dy, path, k}`: the composite opened, its
+ * parent's scale on screen) that keeps a composite opened by a click
+ * where the click was (M2.13-3, the operator's review; a zoom opened it
+ * before 2026-10-22), or null when none opened: the first level of `drawn`
+ * (a scene) whose open composite was not open `before` (a set of paths).
+ * The point of the box under `at` (the click), as a fraction of its width
+ * and height, is under `at` again in its frame (clamped to the box), so
+ * the view does not jump: what was under the pointer is the same part of
+ * the frame; then, when the frame fits below the bar (`bar` px at the
+ * top), its header is kept below it.
  */
 export function openAnchor(drawn, before, at, viewport, bar = 0) {
   for (let i = 0; i + 1 < drawn.levels.length; i++) {
@@ -177,7 +176,7 @@ export function openAnchor(drawn, before, at, viewport, bar = 0) {
     const dx = box.x + fx * box.w - (r.x + fx * r.w);
     let dy = box.y + fy * box.h - (r.y + fy * r.h);
     if (r.h <= viewport.h - bar && r.y + dy < bar) dy = bar - r.y;
-    return { dx, dy };
+    return { dx, dy, path: child.path, k: level.transform.k };
   }
   return null;
 }

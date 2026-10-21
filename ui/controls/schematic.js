@@ -3,7 +3,9 @@
 // docs/ui-controls.md "Schematic"). It draws the `graph` message: the top
 // level's instances and connections, laid out (ui/lib/schematic-layout.js)
 // with the positions stored in ui/schematic.toml; a composite opens in place
-// when zoomed in or double-clicked (ui/lib/schematic-scene.js). One view
+// when clicked or double-clicked and closes by the × in its frame's header
+// or Escape, never by the zoom (2026-10-22; ui/lib/schematic-scene.js,
+// ui/lib/schematic-open.js). One view
 // transform, wheel and pinch zoom about the pointer, the background drags to
 // pan, keys + − 0 and the arrows. Clicking selects an instance, a port or a
 // wire and shows it in the sidebar; dragging a box moves it, its wires
@@ -55,6 +57,12 @@
 // counts in each level's group; detail by size, too small hidden); an open
 // composite's box pins are joined to its frame pins and named outside its
 // edge; a boundary pin's sidebar lists its other side, Go inside / outside.
+// 2026-10-22 (the owner's "when I zoom in, a composite opens automatically.
+// It would be better if it opened on a click, and there were an × in the
+// top-right corner to close it"): a click on a closed composite's box opens
+// it where it is, the box's point under the pointer kept in its frame; the
+// frame's × (and Escape) closes it and what is open inside it, the view
+// kept still; zooming and panning open and close nothing.
 
 import { onDefaultConnection } from '../signal-ui.js';
 import { ENTRY_CSS, ValueEntry } from './entry-field.js';
@@ -69,7 +77,7 @@ import { allOf, deletePlan, dragGroup, has, hitKey, inside, moveMessages, resele
 import { formatFixed } from '../lib/format.js';
 import { HEADER, dragPosition, layout } from '../lib/schematic-layout.js';
 import { DragFollow } from '../lib/schematic-drag.js';
-import { CLOSE_K, aroundReason, closedFit, crumbView, drawOrder, editable, editLevel, enterView, linkScale, pinOne, unpinned, zoomSince } from '../lib/schematic-open.js';
+import { CLOSE_TEXT, aroundReason, closeBox, closeShown, crumbView, drawOrder, editable, editLevel, enterView, pinOne, unpin } from '../lib/schematic-open.js';
 import { boundaryLinks, breadcrumbs, chain, levelRect, nodeRect, openAnchor, rebase, reroot, scene } from '../lib/schematic-scene.js';
 import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
 import { hitTest, instanceHit, portHit, reselect } from '../lib/schematic-hit.js';
@@ -103,6 +111,9 @@ const BAR_PX = 40;
 const MARGIN_PX = 24;
 /** A composite's inside fitted to the view keeps this far (px) from the left and right edges: room for its frame's labels, outside its pins. */
 const FRAME_SIDE_PX = 120;
+/** A second click within this long (ms) and DOUBLE_PX of a click that opened or closed a composite is the double-click's, not one of its own. */
+const DOUBLE_MS = 500;
+const DOUBLE_PX = 6;
 
 const CSS = `
 :host { display: block; position: relative; overflow: hidden; height: 100%; outline: none; --side-width: 300px;
@@ -116,6 +127,11 @@ svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; t
 .composite > .box { stroke: var(--signal-muted, #8a93a3); stroke-width: 2; }
 .composite > .frame { fill: none; stroke: var(--signal-muted, #8a93a3); stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
 .open > .box { fill: var(--signal-bg, #16181d); }
+.close-button { cursor: pointer; }
+.close-button > rect { fill: transparent; }
+.close-button > text { fill: var(--signal-muted, #8a93a3); }
+.close-button:hover > text { fill: var(--signal-fg, #d6dbe4); }
+svg.closing { cursor: pointer; }
 .pins > .box { fill: none; stroke: var(--signal-track, #2a2f38); stroke-dasharray: 2 4; }
 /* The target of an open context menu. */
 .hover > .box { stroke: var(--signal-fg, #d6dbe4); stroke-width: 2; }
@@ -160,6 +176,9 @@ svg.many .wire.selected { stroke-width: 4; }
 .bar { position: absolute; left: 8px; top: 8px; right: 8px; display: flex; gap: 6px; align-items: center; pointer-events: none; }
 .bar > * { pointer-events: auto; }
 .crumbs { display: flex; gap: 2px; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; }
+/* The breadcrumbs' empty stretch lets the pointer through to the drawing (an open frame's × may lie under it, 2026-10-22). */
+.bar > .crumbs { pointer-events: none; }
+.crumbs > * { pointer-events: auto; }
 button { font: inherit; color: inherit; background: var(--signal-knob, #262b34); border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 4px; padding: 2px 8px; }
 .message { position: absolute; left: 8px; bottom: 8px; color: var(--signal-muted, #8a93a3); pointer-events: none; }
 svg.stale { opacity: 0.4; filter: grayscale(1); }
@@ -274,6 +293,13 @@ function html(name, properties = {}) {
   return Object.assign(document.createElement(name), properties);
 }
 
+/** `hit` as the part it stands for: an open frame's × (2026-10-22) as its composite's box, for a menu; any other as it is. */
+function partHit(drawn, hit) {
+  if (hit.kind !== 'close') return hit;
+  const entry = drawn.levels.find((l) => l.path === hit.path);
+  return entry ? instanceHit(entry, hit.node) : hit;
+}
+
 /** Where the box a gesture drags goes (`dragPosition`). */
 function dragTo(gesture) {
   return dragPosition(gesture.hit.node, { x: gesture.last.x - gesture.start.x, y: gesture.last.y - gesture.start.y }, gesture.k);
@@ -292,6 +318,8 @@ export class SignalSchematic extends HTMLElement {
     this.moved = new Map();
     this.open = new Set();
     this.pinned = new Set();
+    /** How far opening each composite by a click panned the view (its parent's units, by path): undone when it closes. */
+    this.openShifts = new Map();
     this.drawn = null;
     /** Each drawn level's group and its elements, by path. */
     this.groups = new Map();
@@ -380,7 +408,7 @@ export class SignalSchematic extends HTMLElement {
     this.bar = html('div', { className: 'bar' });
     this.crumbs = html('nav', { className: 'crumbs' });
     const fitButton = html('button', { type: 'button', textContent: 'Fit', title: 'Fit (0)' });
-    fitButton.addEventListener('click', () => this.setView(this.fitAll()));
+    fitButton.addEventListener('click', () => this.fitTop());
     const reset = html('button', { type: 'button', textContent: 'Reset layout', title: 'Forget the moved positions of the level shown' });
     reset.addEventListener('click', () => this.resetLayout(this.currentLevel()));
     const resetAll = html('button', { type: 'button', textContent: 'Reset all', title: 'Forget every moved position (removes ui/schematic.toml)' });
@@ -587,22 +615,20 @@ export class SignalSchematic extends HTMLElement {
     return this.layoutOf('')?.bounds ?? { x: 0, y: 0, w: 1, h: 1 };
   }
 
-  /** The whole top level in view, clear of the bar over the stage's top edge, every composite closed (M2.13-3). */
+  /** The whole top level in view, clear of the bar over the stage's top edge (its composites are closed by Fit itself, `fitTop`). */
   fitAll() {
-    const top = this.layoutOf('');
-    return top ? closedFit(top, (level) => this.layoutOf(level), this.viewport, MARGIN_PX, BAR_PX) : fit(this.rootBounds(), this.viewport, MARGIN_PX, BAR_PX);
+    return fit(this.rootBounds(), this.viewport, MARGIN_PX, BAR_PX);
   }
 
-  /** The view set (a zoom, Enter, a breadcrumb, Fit): what it shows readable may open (`chooseOpen`). */
+  /** Fit, 0 and the top breadcrumb: every composite closed, the whole top level in view (M2.13-3). */
+  fitTop() {
+    this.pinned = new Set();
+    this.openedAt = null;
+    this.setView(this.fitAll());
+  }
+
+  /** The view set (a zoom, a pan, Enter, a breadcrumb, Fit): it only moves the view, opening and closing nothing (2026-10-22). */
   setView(view) {
-    this.view = view;
-    this.opening = true;
-    this.zoomed = false;
-    this.schedule();
-  }
-
-  /** The view panned (a drag on the background, the arrows): what is open stays open, nothing more opens (the operator's review). */
-  panTo(view) {
     this.view = view;
     this.schedule();
   }
@@ -624,22 +650,21 @@ export class SignalSchematic extends HTMLElement {
       this.fitted = true;
     }
     const layoutOf = (level) => this.layoutOf(level);
-    // What opens is chosen where the last zoom was about (M2.13-3), else at the centre.
-    const opening = Boolean(this.opening);
-    const zoomed = Boolean(this.zoomed);
-    this.opening = false;
-    this.zoomed = false;
-    const at = this.zoomPoint ? { at: this.zoomPoint } : {};
-    this.drawn = scene({ layoutOf, view: this.view, viewport: this.viewport, open: this.open, pinned: this.pinned, opening, ...at });
-    // A composite a zoom opened keeps what was under the pointer there, its header below the bar (the operator's review).
-    const anchor = zoomed && this.zoomPoint ? openAnchor(this.drawn, this.open, this.zoomPoint, this.viewport, BAR_PX) : null;
+    // Only what the person opened is open (`pinned`, 2026-10-22).
+    const openedAt = this.openedAt;
+    this.openedAt = null;
+    this.drawn = scene({ layoutOf, view: this.view, viewport: this.viewport, pinned: this.pinned });
+    // A composite a click opened keeps what was under the pointer there, its header below the bar (the operator's review).
+    const anchor = openedAt ? openAnchor(this.drawn, this.open, openedAt, this.viewport, BAR_PX) : null;
     if (anchor && (anchor.dx || anchor.dy)) {
-      const open = this.drawn.open;
-      this.drawn = scene({ layoutOf, view: pan(this.drawn.view, anchor.dx, anchor.dy), viewport: this.viewport, open, pinned: this.pinned, opening: false, ...at });
+      // Kept, in its parent's units, so that closing it puts the view back (`closeInPlace`).
+      this.openShifts.set(anchor.path, { dx: anchor.dx / anchor.k, dy: anchor.dy / anchor.k });
+      this.drawn = scene({ layoutOf, view: pan(this.drawn.view, anchor.dx, anchor.dy), viewport: this.viewport, pinned: this.pinned });
     }
     // Kept in the coordinates of the deepest level under the centre.
     this.view = this.drawn.view;
     this.open = this.drawn.open;
+    for (const path of this.openShifts.keys()) if (!this.open.has(path)) this.openShifts.delete(path);
     // A level with nothing on screen is not drawn, nor a parent of which
     // only open boxes' insides show (the background's colour).
     // An open composite's inside is drawn even with nothing of it on screen: the links across its edge lead into it (2026-10-20).
@@ -668,8 +693,8 @@ export class SignalSchematic extends HTMLElement {
     this.applyTrace();
     this.applyDrag();
     this.drawCrumbs();
-    // A selected composite opened or closed by the zoom (or the sidebar's
-    // own Open in place): its buttons follow.
+    // A selected composite opened or closed (a click, its ×, the sidebar's
+    // own Open in place or Close): its buttons follow.
     if (this.sideStateKey() !== this.sideShownKey) this.showSide();
     this.applyBars();
     clearTimeout(this.levelTimer);
@@ -713,7 +738,7 @@ export class SignalSchematic extends HTMLElement {
     level.openKey = open;
     // The box around this level's inside, when it is open in place: its pins are joined to the frame's (its groups collapsed or not).
     const parentCollapsed = Boolean(level.parent?.collapsed);
-    const sizes = `${text(12)} ${text(9)}${open ? ` ${level.pinK}` : ''} ${parentCollapsed}`;
+    const sizes = `${text(12)} ${text(9)} ${text(CLOSE_TEXT)}${open ? ` ${level.pinK}` : ''} ${parentCollapsed}`;
     // M2.13-2: a pair's wires bundled at small scale (ui/lib/schematic-bundle.js), the traced and selected ones on their own above.
     const solo = this.soloWires(level);
     // A level a box of which is dragged: every wire on its own, as DragFollow moves them by id.
@@ -859,6 +884,16 @@ export class SignalSchematic extends HTMLElement {
     if (text(12) && node.kind === 'instance') {
       label({ x: node.x + 8, y: node.y + 14 }, 12, { class: 'name' }, node.name);
       label({ x: node.x + 8, y: node.y + 27 }, 10, { class: 'module' }, node.module);
+    }
+    // An open frame's × closes it (2026-10-22): in its header's top right, in the level's units, hidden with the text too small to read (Escape closes it then).
+    if (isOpen && node.kind === 'instance' && closeShown(level.transform.k)) {
+      const r = closeBox(node);
+      const button = el('g', { class: 'close-button', 'data-address': address });
+      const at = bakedRect(baked, r);
+      if (at) button.append(el('rect', at));
+      const c = bakedPoint(baked, { x: r.x + r.w / 2, y: r.y + r.h / 2 + CLOSE_TEXT * 0.35 });
+      button.append(el('text', { x: c.x, y: c.y, 'font-size': CLOSE_TEXT * m, 'text-anchor': 'middle' }, '×'), el('title', {}, `Close ${address}`));
+      group.append(button);
     }
     const bars = [];
     // An open composite's pins drawn at OPEN_PIN_PX on screen at most (zoomed into its inside, they would grow over its frame).
@@ -1068,18 +1103,56 @@ export class SignalSchematic extends HTMLElement {
     return this.drawn ? breadcrumbs(this.drawn).at(-1).level : '';
   }
 
-  /** Back out to the level at `path` (a breadcrumb), its inside filling the view. */
+  /** Back out to the level at `path` (a breadcrumb), its inside filling the view, what is open below it closed. */
   goTo(path) {
-    for (const open of [...this.pinned]) if (open !== path && open.startsWith(`${path}/`)) this.pinned.delete(open);
-    this.zoomPoint = null;
     if (path === '') {
-      this.setView(this.fitAll());
+      this.fitTop();
       return;
     }
+    for (const open of [...this.pinned]) if (open !== path && open.startsWith(`${path}/`)) this.pinned.delete(open);
     const rect = this.drawn && levelRect(this.drawn, path);
     const level = rect && this.levelOf(path);
-    // Its inside filling the view, readable, none of its composites left open (M2.13-3, `crumbView`).
-    if (level) this.setView(crumbView(this.view, level, rect, this.viewport, (l) => this.layoutOf(l), MARGIN_PX, BAR_PX, FRAME_SIDE_PX));
+    // Its inside filling the view, readable (M2.13-3, `crumbView`).
+    if (level) this.setView(crumbView(this.view, level, rect, this.viewport, MARGIN_PX, BAR_PX, FRAME_SIDE_PX));
+    else this.schedule();
+  }
+
+  /**
+   * Composite instance `hit` (a closed one's box, clicked at screen point
+   * `at`) opened in place (2026-10-22): pinned, one per level (`pinOne`),
+   * its frame growing where its box is, the box's point under `at` kept as
+   * the same point of the frame (`openAnchor`), so the view does not jump.
+   * Whether it opened: a library composite (its inside unknown) does not.
+   */
+  openInPlace(hit, at) {
+    if (hit?.kind !== 'instance' || hit.node.kind !== 'instance' || !hit.node.composite || this.drawn?.open.has(hit.address)) return false;
+    if (!this.layoutOf(hit.node.module) || !chain((level) => this.layoutOf(level), hit.address)) return false;
+    this.pinned = pinOne(this.pinned, hit.address);
+    this.openedAt = at;
+    this.schedule();
+    return true;
+  }
+
+  /**
+   * The open composite at `address` closed (its ×, Escape, Close;
+   * 2026-10-22), and what is open inside it: the view is not zoomed, and
+   * the pan its opening by a click made (`openAnchor`, kept in its
+   * parent's units) is undone, so its box comes back where it was before
+   * it opened, at the scale shown now (opened otherwise, the levels around
+   * stay still and the box lies where its frame grew from).
+   */
+  closeInPlace(address) {
+    const shift = this.openShifts.get(address);
+    const parent = this.drawn?.levels.find((l) => l.path === address.slice(0, address.lastIndexOf('/')));
+    this.pinned = unpin(this.pinned, address);
+    if (this.revealPinned) this.revealPinned = unpin(this.revealPinned, address);
+    if (shift && parent) this.setView(pan(this.view, -shift.dx * parent.transform.k, -shift.dy * parent.transform.k));
+    else this.schedule();
+  }
+
+  /** Whether a click at `at` (screen px, at `time`) is the second of a double-click whose first opened or closed a composite (`last`, else `lastToggle`). */
+  secondClick(at, time, last = this.lastToggle) {
+    return Boolean(last) && time - last.time <= DOUBLE_MS && Math.hypot(at.x - last.at.x, at.y - last.at.y) <= DOUBLE_PX;
   }
 
   // Input.
@@ -1101,6 +1174,11 @@ export class SignalSchematic extends HTMLElement {
     // Shift or ⌘ adds to the selection or takes out of it.
     const additive = event.shiftKey || event.metaKey || (!MAC && event.ctrlKey);
     const base = { start: at, last: at, hit, moved: false, additive, pointer: event.pointerId };
+    // An open frame's × (2026-10-22): closes on release, never selects, drags or pans.
+    if (hit.kind === 'close') {
+      this.gesture = { ...base, close: true };
+      return;
+    }
     // Shift-drag on the background: the marquee (a plain drag pans).
     if (hit.kind === 'background' && event.shiftKey) {
       this.gesture = { ...base, marquee: true };
@@ -1147,19 +1225,16 @@ export class SignalSchematic extends HTMLElement {
       this.editor.connectMove(at);
       return;
     }
-    if (!gesture.moved) return;
+    if (!gesture.moved || gesture.close) return;
     const last = gesture.last;
     gesture.last = at;
     if (gesture.marquee) this.showMarquee(gesture);
     else if (gesture.follow) this.scheduleDrag();
     else if (gesture.held) {
       // A box around the open composite (M2.13-3): not moved, and said so once.
-      if (!gesture.said) this.say(`Not moved: ${gesture.hit.address} is around the open ${editLevel(this.drawn).path}; zoom out to close it first`);
+      if (!gesture.said) this.say(`Not moved: ${gesture.hit.address} is around the open ${editLevel(this.drawn).path}; close it (×) first`);
       gesture.said = true;
-    } else {
-      this.zoomPoint = null;
-      this.panTo(pan(this.view, at.x - last.x, at.y - last.y));
-    }
+    } else this.setView(pan(this.view, at.x - last.x, at.y - last.y));
   }
 
   /** The marquee's rectangle on screen, from the press to the pointer (`{x, y, w, h}`, `w` and `h` positive). */
@@ -1192,6 +1267,15 @@ export class SignalSchematic extends HTMLElement {
       return;
     }
     if (gesture.connect) this.editor.cancelConnect();
+    if (gesture.close) {
+      // Let go on its × still (a press slid off it does nothing).
+      const over = gesture.moved ? hitTest(this.drawn, at) : gesture.hit;
+      if (over.kind === 'close' && over.address === gesture.hit.address) {
+        this.closeInPlace(gesture.hit.address);
+        this.lastToggle = { at, time: event.timeStamp };
+      }
+      return;
+    }
     if (gesture.marquee) {
       this.hideMarquee();
       if (!gesture.moved) return;
@@ -1201,6 +1285,8 @@ export class SignalSchematic extends HTMLElement {
       return;
     }
     if (!gesture.moved) {
+      // The second click of a double-click on what the first opened or closed: the double-click's alone (`doubleClick`).
+      if (this.secondClick(at, event.timeStamp)) return;
       const hit = gesture.hit.kind === 'background' ? null : gesture.hit;
       // A bundle (M2.13-2): its wires, selected together; they are then drawn on their own, so a second click takes one.
       // A collapsed port group (M2.13-2): its members, never one picked for the user.
@@ -1214,7 +1300,11 @@ export class SignalSchematic extends HTMLElement {
       }
       if (gesture.additive) {
         if (hit) this.select(toggled(this.selected, hit));
-      } else this.select(hit ? [hit] : []);
+      } else {
+        this.select(hit ? [hit] : []);
+        // A plain click on a closed composite's box opens it in place (2026-10-22: the zoom no longer does).
+        if (this.openInPlace(hit, at)) this.lastToggle = { at, time: event.timeStamp, hit };
+      }
       return;
     }
     // A drag whose level is no longer the innermost open one (a zoom opened another meanwhile) moves nothing (M2.13-3).
@@ -1305,6 +1395,8 @@ export class SignalSchematic extends HTMLElement {
   hover(at) {
     if (!this.drawn) return;
     const hit = hitTest(this.drawn, at);
+    // An open frame's × (2026-10-22): a pointer, and its title says what it closes.
+    this.svg.classList.toggle('closing', hit.kind === 'close');
     this.hoverWire(hit.kind === 'wire' ? hit : null);
     // A closed composite's box or pin under the pointer: its pins say where they go inside.
     const box = (hit.kind === 'instance' || hit.kind === 'port') && hit.node.kind === 'instance' && hit.node.composite ? `${hit.path}/${hit.node.name}` : null;
@@ -1358,6 +1450,13 @@ export class SignalSchematic extends HTMLElement {
 
   doubleClick(event) {
     if (!this.drawn) return;
+    // Its first click opened the composite (or closed it, by its ×): what it opened is entered, nothing else happens.
+    const last = this.lastToggle;
+    this.lastToggle = null;
+    if (last && this.secondClick(this.point(event), event.timeStamp, last)) {
+      if (last.hit) this.enter(last.hit);
+      return;
+    }
     const hit = hitTest(this.drawn, this.point(event));
     // Edit patch: the add palette, where the background or an open
     // composite's inside was double-clicked.
@@ -1375,13 +1474,14 @@ export class SignalSchematic extends HTMLElement {
    * double-click, the menu's Enter): the inside's own layout fitted, so it
    * is drawn readable however tall and narrow its box (a box of many pins
    * holds a wide inside small, centred in it), and never less readable
-   * than OPEN_K (`enterView`: a wide inside overflows the view); the box's
+   * than READ_K (`enterView`: a wide inside overflows the view); the box's
    * frame reaches past the view's edges. One composite is pinned per level
    * (M2.13-3); a library composite (its inside unknown) is only focused.
    */
   enter(hit) {
     const inner = hit.node?.composite ? this.layoutOf(hit.node.module) : null;
     if (inner && chain((level) => this.layoutOf(level), hit.address)) {
+      this.openShifts.delete(hit.address);
       this.pinned = pinOne(this.pinned, hit.address);
       this.setView({ ...enterView(inner.bounds, this.viewport, MARGIN_PX, BAR_PX, FRAME_SIDE_PX), path: hit.address });
       return;
@@ -1390,19 +1490,9 @@ export class SignalSchematic extends HTMLElement {
     if (rect) this.setView(focus(this.view, rect, this.viewport, MARGIN_PX, BAR_PX));
   }
 
-  /**
-   * The person's zoom by `factor` about screen point `at` (null: the
-   * centre): what opens is chosen there, and a zoom out that takes a pinned
-   * composite's inside below CLOSE_K closes it (`unpinned`).
-   */
+  /** The person's zoom by `factor` about screen point `at` (null: the centre): the view only, opening and closing nothing (2026-10-22). */
   zoomBy(factor, at = null) {
-    const view = zoomAt(this.view, factor, at ?? { x: this.viewport.w / 2, y: this.viewport.h / 2 });
-    // Against the scene last drawn, with every zoom since (several events may come before a frame).
-    const since = this.drawn ? zoomSince(this.drawn, view) : null;
-    if (since !== null) this.pinned = unpinned(this.pinned, this.drawn, since);
-    this.zoomPoint = at;
-    this.setView(view);
-    this.zoomed = true;
+    this.setView(zoomAt(this.view, factor, at ?? { x: this.viewport.w / 2, y: this.viewport.h / 2 }));
   }
 
   wheel(event) {
@@ -1424,12 +1514,18 @@ export class SignalSchematic extends HTMLElement {
     // The menu's keys are its own (it stops them too): never the selection's Delete or ⌘Z.
     if (event.composedPath().includes(this.menu.list)) return;
     const own = event.composedPath()[0] === this;
-    // Escape ends a trace first (ADR 0030 §1), then lets the selection go
-    // (the add palette's Escape is the palette's), then leaves Edit patch,
-    // then goes back out of a level.
+    // Escape ends a trace first (ADR 0030 §1), then closes the innermost
+    // open composite in place (2026-10-22; a click that opens one also
+    // selects it), then lets the selection go (the add palette's Escape is
+    // the palette's), then leaves Edit patch.
     if (own && event.key === 'Escape' && this.tracing && !this.editor.placing) {
       event.preventDefault();
       this.endTrace();
+      return;
+    }
+    if (own && event.key === 'Escape' && !this.editor.placing && this.drawn && breadcrumbs(this.drawn).length > 1) {
+      event.preventDefault();
+      this.closeInPlace(breadcrumbs(this.drawn).at(-1).path);
       return;
     }
     // T: trace the selection (the part selected last; several pins, such as a collapsed group's, together).
@@ -1463,11 +1559,6 @@ export class SignalSchematic extends HTMLElement {
       return;
     }
     if (event.key === 'Escape') {
-      const crumbs = this.drawn ? breadcrumbs(this.drawn) : [];
-      if (crumbs.length > 1) {
-        this.pinned.delete(crumbs.at(-1).path);
-        this.goTo(crumbs.at(-2).path);
-      }
       event.preventDefault();
       return;
     }
@@ -1486,11 +1577,10 @@ export class SignalSchematic extends HTMLElement {
       return;
     }
     if (view) {
-      // An arrow pans: what opens is chosen at the centre again, as after a pointer pan.
+      // An arrow pans, as a pointer pan: nothing opens or closes.
       event.preventDefault();
       this.closeMenu();
-      this.zoomPoint = null;
-      this.panTo(view);
+      this.setView(view);
     }
   }
 
@@ -1512,7 +1602,7 @@ export class SignalSchematic extends HTMLElement {
     const anchored = this.keyMenu ?? (origin === this ? this.menuAnchor() : null);
     if (!anchored && origin !== this.svg && !this.svg.contains(origin)) return null;
     const point = anchored ? anchored.point : this.point(event);
-    const target = { hit: anchored ? anchored.hit : this.singleHit(hitTest(this.drawn, point), point), point };
+    const target = { hit: anchored ? anchored.hit : this.singleHit(partHit(this.drawn, hitTest(this.drawn, point)), point), point };
     this.endMenu();
     this.menuState = { target, close };
     this.hoverWire(this.hovered);
@@ -1583,10 +1673,7 @@ export class SignalSchematic extends HTMLElement {
     }
     if (hit.kind === 'background') context.addable = Boolean(paletteLevel(hit, this.drawn, point));
     if (hit.kind === 'instance' && hit.node.composite) {
-      const level = this.levelOf(hit.path);
       context.open = this.drawn.open.has(hit.address);
-      // Held open by the zoom, not by a double-click: closing it is zooming out.
-      context.wide = context.open && this.heldByZoom(hit.node, level);
       context.addable = context.open && Boolean(paletteLevel(hit, this.drawn, point));
       // A library composite (its inside not in `graph`) is not opened in place.
       context.opaque = !this.graph?.composites?.[hit.node.module];
@@ -1630,13 +1717,9 @@ export class SignalSchematic extends HTMLElement {
       this.revealSide();
     } else if (id === 'trace') this.startTrace(hit);
     else if (id === 'delete-selected') this.deleteSelection();
-    else if (id === 'open') {
-      this.pinned = pinOne(this.pinned, hit.address);
-      this.schedule();
-    } else if (id === 'close') {
-      for (const path of [...this.pinned]) if (path === hit.address || path.startsWith(`${hit.address}/`)) this.pinned.delete(path);
-      this.schedule();
-    } else if (id === 'enter') this.enter(hit);
+    else if (id === 'open') this.openInPlace(hit, point);
+    else if (id === 'close') this.closeInPlace(hit.address);
+    else if (id === 'enter') this.enter(hit);
     // A boundary pin's other side (2026-10-20): the frame's pin inside its composite, or its box's pin around it.
     else if (id === 'go-inside') this.reveal({ kind: 'pin', address: hit.address, side: 'frame' });
     else if (id === 'go-outside') this.reveal({ kind: 'pin', address: hit.address, side: 'box' });
@@ -1654,7 +1737,7 @@ export class SignalSchematic extends HTMLElement {
       else this.say(`Nothing to disconnect at ${hit.address}`);
     }
     else if (id === 'add') this.editor.openPalette(point, paletteLevel(hit, this.drawn, point));
-    else if (id === 'fit') this.setView(this.fitAll());
+    else if (id === 'fit') this.fitTop();
     else if (id === 'reset-layout') this.resetLayout(this.currentLevel());
     else if (id === 'edit') this.editor.setEditing(!this.editor.editing);
   }
@@ -1766,22 +1849,14 @@ export class SignalSchematic extends HTMLElement {
     this.sideBody.scrollTop = 0;
   }
 
-  /** What the sidebar's buttons depend on besides the selection: a selected composite open, and held open by the zoom. */
+  /** What the sidebar's buttons depend on besides the selection: a selected composite open (its Open in place or Close). */
   sideStateKey() {
     if (!this.drawn) return '';
     // The level edited (M2.13-3): a part around it has its edits off, so its buttons follow it opening and closing.
     const edited = this.selected.length ? editLevel(this.drawn).path : '';
     const s = this.selected.length === 1 ? this.selected[0] : null;
     if (s?.kind !== 'instance' || !s.node.composite) return edited;
-    const level = this.levelOf(s.path);
-    const open = this.drawn.open.has(s.address);
-    return `${edited} ${open} ${open && this.heldByZoom(s.node, level)}`;
-  }
-
-  /** Whether composite `node`, open in scene level `level`, is held open by the zoom: its inside drawn at CLOSE_K or more (M2.13-3). */
-  heldByZoom(node, level) {
-    const inner = this.layoutOf(node.module);
-    return Boolean(level && inner) && level.transform.k * linkScale(node, inner.bounds) >= CLOSE_K;
+    return `${edited} ${this.drawn.open.has(s.address)}`;
   }
 
   /**
@@ -1921,7 +1996,7 @@ export class SignalSchematic extends HTMLElement {
       else swatch.append(el('circle', { class: entry.swatch, cx: 14, cy: 5, r: 3.5 }));
       list.append(swatch, html('span', { textContent: entry.label }));
     }
-    return [html('h4', { textContent: 'Legend' }), list, html('div', { className: 'subtitle', textContent: 'Shift- or ⌘-click adds to the selection, Shift-drag on the background selects the boxes inside, ⌘A the level shown, Escape lets go.' })];
+    return [html('h4', { textContent: 'Legend' }), list, html('div', { className: 'subtitle', textContent: 'A click on a composite opens it in place, the × in its corner (or Escape) closes it. Shift- or ⌘-click adds to the selection, Shift-drag on the background selects the boxes inside, ⌘A the level shown, Escape lets go.' })];
   }
 
   /** A connection's line: the wire (a link), its other end (a link), and in Edit patch its removal. */
@@ -2502,7 +2577,7 @@ export class SignalSchematic extends HTMLElement {
       // `side` (Go inside, Go outside): a composite's port as its frame's pin inside it, or as its box's pin around it.
       const inside = target.side ? target.side === 'frame' : at.instance === shown && shown !== '';
       // Going outside closes what a double-click or a reveal held open there, so its box's pins show.
-      if (target.side === 'box') for (const open of [...this.pinned]) if (open === at.instance || open.startsWith(`${at.instance}/`)) this.pinned.delete(open);
+      if (target.side === 'box') this.pinned = unpin(this.pinned, at.instance);
       path = inside ? at.instance : parentPath(at.instance);
       pick = inside ? { frame: true, port: at.port } : { name: at.instance.slice(at.instance.lastIndexOf('/') + 1), port: at.port };
     }
@@ -2517,7 +2592,10 @@ export class SignalSchematic extends HTMLElement {
     const way = new Set(links.slice(1).map((link) => link.path));
     for (const path of this.revealPinned ?? []) if (!way.has(path)) this.pinned.delete(path);
     this.revealPinned = new Set([...way].filter((path) => !this.pinned.has(path) || this.revealPinned?.has(path)));
-    for (const path of way) this.pinned = pinOne(this.pinned, path);
+    for (const path of way) {
+      if (!this.pinned.has(path)) this.openShifts.delete(path);
+      this.pinned = pinOne(this.pinned, path);
+    }
     let rect = entry.layout.bounds;
     let hit = null;
     if (pick) {

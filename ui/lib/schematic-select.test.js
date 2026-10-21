@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { layout } from './schematic-layout.js';
 import { scene } from './schematic-scene.js';
-import { closedFit, opensAt } from './schematic-open.js';
+import { READ_K, linkScale } from './schematic-open.js';
 import { hitTest, instanceHit, portHit, reselect, wireHit } from './schematic-hit.js';
 import { MESSAGE_LIMIT, allOf, deletePlan, dragGroup, has, hitKey, inside, messageBytes, moveMessages, reselectAll, toggled, union, unique } from './schematic-select.js';
 import { fit, screenRect, toScreen } from './schematic-view.js';
@@ -51,8 +51,8 @@ test('Shift- or ⌘-click adds a part, a second takes it out; the background cha
 });
 
 test('the marquee takes the boxes wholly inside it and the connections between them', () => {
-  // Fitted as Fit does (M2.13-3, `closedFit`): drums closed, as a plain fit had it.
-  const view = closedFit(layoutOf(''), layoutOf, viewport);
+  // Fitted as Fit does: drums closed.
+  const view = fit(layoutOf('').bounds, viewport);
   const drawn = scene({ layoutOf, view, viewport });
   const top = drawn.levels[0];
   const rect = (names) => {
@@ -78,10 +78,10 @@ test('the marquee takes the boxes wholly inside it and the connections between t
 test('the marquee does not take the boxes inside an open composite it takes', () => {
   // drums opened in place: its inside is drawn, and kick inside it.
   const drums = nodeOf('', 'drums');
-  // M2.13-3: drums opens by its inside's readability on screen, no longer by its box's width.
-  const k = opensAt(drums, layoutOf('drums').bounds) * 1.1;
+  // Opened (pinned, as a click opens it; 2026-10-22), its inside readable.
+  const k = (READ_K / linkScale(drums, layoutOf('drums').bounds)) * 1.1;
   const view = { k, x: viewport.w / 2 - (drums.x + drums.w / 2) * k, y: viewport.h / 2 - (drums.y + drums.h / 2) * k };
-  const drawn = scene({ layoutOf, view, viewport });
+  const drawn = scene({ layoutOf, view, viewport, pinned: new Set(['/drums']) });
   assert.ok(drawn.levels.some((l) => l.path === '/drums'), 'drums is open');
   const all = inside(drawn, { x: -1e6, y: -1e6, w: 2e6, h: 2e6 });
   assert.ok(keys(all).includes('instance /drums'));

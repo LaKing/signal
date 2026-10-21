@@ -22,7 +22,7 @@ function unless(item, reason) {
 /**
  * The menu of `hit` (`hitTest`'s: `{kind, node?, port?, wire?, …}`) in
  * `state`: `editing` (Edit patch on), and for an instance whether its
- * composite is `open` in place and stays open by the zoom alone (`wide`)
+ * composite is `open` in place (Close then, as its × does; 2026-10-22)
  * and whether something can be added inside it (`addable`); for a pin how
  * many connections reach it at its level (`connected`) and how many of the
  * level's exports (`exported`, which are not edited here), and for a
@@ -59,7 +59,7 @@ function partMenu(hit, state) {
     const composite = Boolean(hit.node?.composite);
     const notComposite = composite ? null : 'A primitive has no inside';
     const items = [unless({ id: 'inspect', label: 'Inspect' }, null), unless(TRACE, null)];
-    if (composite && state.open) items.push(unless({ id: 'close', label: 'Close' }, state.wide ? 'Open by the zoom: zoom out to close it' : null));
+    if (composite && state.open) items.push(unless({ id: 'close', label: 'Close' }, null));
     else items.push(unless({ id: 'open', label: 'Open in place' }, notComposite ?? (state.opaque ? 'A library composite: its inside is not in the graph' : null)));
     items.push(unless({ id: 'enter', label: 'Enter' }, notComposite), SEPARATOR, unless({ id: 'copy-address', label: 'Copy address' }, null), SEPARATOR);
     if (composite && state.open) items.push(unless({ id: 'add', label: 'Add module here…' }, inside ?? (state.addable ? null : 'Nothing can be added here')));
