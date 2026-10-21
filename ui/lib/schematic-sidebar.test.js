@@ -62,7 +62,7 @@ test('an instance: what it is, its pins with their connections as links, its par
   assert.deepEqual(model.pins.map((p) => [p.name, p.role, p.connected, p.connections.length]), [['l', 'input', true, 1], ['r', 'input', false, 0], ['gain', 'parameter', false, 0]]);
   const [l] = model.pins;
   assert.equal(hitKey(l.hit), 'port /out.l in');
-  assert.equal(l.connections[0].wire.label, '← /drums.out');
+  assert.equal(l.connections[0].wire.label, '/drums.out →');
   assert.equal(hitKey(l.connections[0].wire.hit), 'wire  /drums.out /out.l', 'the link selects that wire');
   assert.equal(hitKey(l.connections[0].end.hit), 'port /drums.out out', 'and the other end');
   assert.equal(l.connections[0].removable, true);
@@ -288,7 +288,7 @@ test('a composite box pin lists its inside too, each a link into the composite; 
   const gate = portHit(TOP, synth, synth.ins.find((p) => p.name === 'gate'));
   const model = sidebar([gate], { graph: STUDIO, layoutOf: studioLayout });
   // Outside, as before: the wire from the melody.
-  assert.deepEqual(model.connections.map((c) => c.wire.label), ['← /melody.gate']);
+  assert.deepEqual(model.connections.map((c) => c.wire.label), ['/melody.gate →']);
   // Inside: every inner port the export forwards to, each revealing that pin.
   assert.equal(model.across.side, 'inside');
   assert.equal(model.across.title, 'Inside /synth');
@@ -299,7 +299,7 @@ test('a composite box pin lists its inside too, each a link into the composite; 
   const cutoff = sidebar([portHit(TOP, synth, synth.ins.find((p) => p.name === 'cutoff'))], { graph: STUDIO, layoutOf: studioLayout });
   assert.ok(cutoff.across.items.length >= 1 && cutoff.across.items.every((i) => i.label.startsWith('→ /synth/')), JSON.stringify(cutoff.across.items));
   const out = acrossOf(STUDIO, portHit(TOP, synth, synth.outs[0]));
-  assert.deepEqual(out.items.map((i) => i.label), ['← /synth/volume.out']);
+  assert.deepEqual(out.items.map((i) => i.label), ['/synth/volume.out →']);
   // Inside the composite, its frame pin lists where its port connects outside, links that go back out; Go outside.
   const inner = { path: '/synth', level: 'moog_voice' };
   const frame = studioLayout('moog_voice').nodes.find((n) => n.kind === 'input');
@@ -308,7 +308,7 @@ test('a composite box pin lists its inside too, each a link into the composite; 
   const fm = sidebar([fgate], { graph: STUDIO, layoutOf: studioLayout });
   assert.equal(fm.across.side, 'outside');
   assert.equal(fm.across.title, 'Outside, at the top level');
-  assert.deepEqual(fm.across.items, [{ label: '← /melody.gate', reveal: { kind: 'pin', address: '/melody.gate' } }]);
+  assert.deepEqual(fm.across.items, [{ label: '/melody.gate →', reveal: { kind: 'pin', address: '/melody.gate' } }]);
   assert.ok(ids(fm).includes('go-outside') && !ids(fm).includes('go-inside'));
   // A primitive's pin has no other side.
   const melody = studioLayout('').nodes.find((n) => n.name === 'melody');

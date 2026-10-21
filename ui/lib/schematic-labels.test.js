@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { COUNT_UNITS, FRAME_LABEL_UNITS, LABEL_PX, MAX_LABELS, PITCH_PX, boxLabels, levelCounts, levelLabels, estimateWidth, fitText, shownText, insideNote, minWidth, outsideNote, overlaps, pinText, placeCounts, placeLabels, prefixOf, setMeasure, textWidth, wrapText } from './schematic-labels.js';
+import { COUNT_UNITS, FRAME_LABEL_UNITS, LABEL_PX, MAX_LABELS, PITCH_PX, boxLabels, levelCounts, levelLabels, estimateWidth, fitText, shownText, insideNote, noteText, minWidth, outsideNote, overlaps, pinText, placeCounts, placeLabels, prefixOf, setMeasure, textWidth, wrapText } from './schematic-labels.js';
 import { GAP_X, HEADER, layout } from './schematic-layout.js';
 import { exportFacts, portGroups } from './schematic-groups.js';
 import { badgeText, behind } from './schematic-trace.js';
@@ -155,13 +155,13 @@ test('the cap: more labels than allowed are grouped, every box and pin still lab
 });
 
 test('a frame pin says where it connects outside; a box pin where it goes inside (the studio)', () => {
-  assert.equal(pinText('hz', outsideNote(STUDIO, '/synth.hz')), 'hz ← /melody.hz');
+  assert.equal(pinText('hz', outsideNote(STUDIO, '/synth.hz')), '/melody.hz → hz');
   assert.equal(pinText('out', outsideNote(STUDIO, '/synth.out')), 'out → /echo.in');
   assert.equal(pinText('hz', insideNote(STUDIO, '/synth.hz')), 'hz → 2: glide.in, hz_prev.in');
   assert.equal(pinText('gate', insideNote(STUDIO, '/synth.gate')), 'gate → 2: fenv.gate, aenv.gate');
-  assert.equal(pinText('out', insideNote(STUDIO, '/synth.out')), 'out ← volume.out');
+  assert.equal(pinText('out', insideNote(STUDIO, '/synth.out')), 'volume.out → out');
   // A port fed by several: a count, at most three names.
-  assert.match(outsideNote(STUDIO, '/kick.trigger'), /^← \/drums\.t1$/);
+  assert.match(outsideNote(STUDIO, '/kick.trigger'), /^\/drums\.t1 →$/);
 });
 
 /** /a (a composite whose out comes from inner.out) → /b (a composite whose in goes to sink.in). */
@@ -181,18 +181,18 @@ const NESTED = {
 
 test('a traced frame pin keeps where it connects outside, and the trace summary follows it', () => {
   const note = outsideNote(NESTED, '/b.in');
-  assert.equal(note, '← /a.out');
+  assert.equal(note, '/a.out →');
   const summary = badgeText(behind(NESTED, '/b.in', 'outside'), '/b.in', 'outside');
-  assert.equal(summary, '← from /a/inner.out');
+  assert.equal(summary, 'from /a/inner.out');
   const label = pinText('in', note, summary);
-  assert.equal(label, 'in ← /a.out · trace: ← from /a/inner.out');
+  assert.equal(label, '/a.out → in · trace: from /a/inner.out');
   // A closed box's traced pin the same way: inside note, then the summary.
   const inside = pinText('out', insideNote(NESTED, '/a.out'), badgeText(behind(NESTED, '/a.out', 'inside'), '/a.out', 'inside'));
-  assert.equal(inside, 'out ← inner.out · trace: ← inside from inner.out');
+  assert.equal(inside, 'inner.out → out · trace: inside from inner.out');
 });
 
 test('labels carry the notes: a longer text groups sooner rather than overlapping', () => {
-  const texts = new Map(VOICE_INS.map((n) => [n, `${n} ← /a/very/long/address.of_some_port`]));
+  const texts = new Map(VOICE_INS.map((n) => [n, `/a/very/long/address.of_some_port → ${n}`]));
   const boxes = [box('a', { texts, pitch: 12 }), box('b', { x: 200, texts, pitch: 12 })];
   const { labels } = placeLabels(boxes);
   sound(boxes, labels, 'noted');
@@ -227,7 +227,7 @@ test('the studio synth hovered or traced at zoom 1 keeps its 32 labels, its note
   sound([hovered], labels, 'hovered synth');
   assert.equal(labels.length, 32);
   assert.ok(labels.find((l) => l.text === 'hz → 2: glide.in, hz_prev.in'));
-  assert.ok(labels.find((l) => l.text === 'out ← volume.out'));
+  assert.ok(labels.find((l) => l.text === 'volume.out → out'));
   // Traced: the summary after the note, still 32 labels on the box's edge.
   texts.set('hz', pinText('hz', insideNote(STUDIO, '/synth.hz'), badgeText(behind(STUDIO, '/synth.hz', 'inside'), '/synth.hz', 'inside')));
   const traced = placeLabels([{ ...plain, texts }]).labels;
@@ -276,10 +276,10 @@ test('a count displaced by a strip along the top edge stays inside the viewport'
 
 test('widths are measured: a label holds its whole text, padding included, whatever the measure', () => {
   // The estimate is never narrower than the labels' font at 9 px (-apple-system, measured by canvas measureText in Chrome on macOS).
-  const measured = { hz: 10.48, decay: 26.22, 2: 5.6, 12: 9.94, 'osc1_* (4)': 44.94, 'f_* (4)': 28.28, 'gate ← /melody.gate': 89.54, 'synth: 31 in · 1 out': 79.93, WWW: 26.63, '…': 7.41 };
+  const measured = { hz: 10.48, decay: 26.22, 2: 5.6, 12: 9.94, 'osc1_* (4)': 44.94, 'f_* (4)': 28.28, '/melody.gate → gate': 89.54, 'synth: 31 in · 1 out': 79.93, WWW: 26.63, '…': 7.41 };
   for (const [t, w] of Object.entries(measured)) assert.ok(estimateWidth(t) >= w, `${t}: ${estimateWidth(t)} < ${w}`);
   // .plabel: 2 px padding and a 1 px border each side.
-  for (const t of ['hz', 'decay', '2', 'osc1_* (4)', 'gate ← /melody.gate']) assert.ok(textWidth(t) >= estimateWidth(t) + 6, t);
+  for (const t of ['hz', 'decay', '2', 'osc1_* (4)', '/melody.gate → gate']) assert.ok(textWidth(t) >= estimateWidth(t) + 6, t);
   // A measure set by the control replaces the estimate (and is used once per text).
   let calls = 0;
   setMeasure((t) => {
@@ -341,7 +341,7 @@ test('a closed box keeps every label inside it, a long one cut beside its neighb
 
 test('a frame’s labels leaving the viewport go on their pins’ other side, inside it', () => {
   // The frame's inputs (their pins on its right edge, labels to the left) at the viewport's left edge.
-  const frame = { kind: 'input', name: 'inputs', rect: { x: -20, y: 0, w: 30, h: 200 }, ins: [], outs: ['gate', 'hz'].map((n, i) => ({ name: n, x: 10, y: 20 + 16 * i })), texts: new Map([['gate', 'gate ← /melody.gate']]) };
+  const frame = { kind: 'input', name: 'inputs', rect: { x: -20, y: 0, w: 30, h: 200 }, ins: [], outs: ['gate', 'hz'].map((n, i) => ({ name: n, x: 10, y: 20 + 16 * i })), texts: new Map([['gate', '/melody.gate → gate']]) };
   const viewport = { w: 400, h: 300 };
   const out = placeLabels([frame]).labels;
   assert.ok(out.some((l) => l.x0 < 0), 'without a viewport: outward');
@@ -386,6 +386,42 @@ test('a noted pin that does not fit shows its short form or its name, its note n
   assert.equal(shownText('osc1_* (4)', textWidth('osc1_*')), 'osc1_*');
 });
 
+test('a note shows the signal’s path: the arrow the way it flows, the source first (2026-10-21)', () => {
+  const up = (addresses, extra = {}) => ({ direction: 'up', addresses, ...extra });
+  const down = (addresses, extra = {}) => ({ direction: 'down', addresses, ...extra });
+  // Upstream: the other end feeds the pin, so it comes first.
+  assert.equal(noteText(up(['/melody.hz'])), '/melody.hz →');
+  assert.equal(pinText('hz', noteText(up(['/melody.hz']))), '/melody.hz → hz');
+  assert.equal(pinText('out', noteText(up(['/s/a.out', '/s/b.out']), '/s')), '2: a.out, b.out → out');
+  assert.equal(pinText('out', noteText(up(['a', 'b', 'c', 'd', 'e']))), '5: a, b, c, … 2 more → out');
+  assert.equal(pinText('x', noteText(up([], { opaque: true }))), 'inside a library composite → x');
+  assert.equal(pinText('x', noteText(up([]))), 'nothing → x');
+  // Downstream: the pin feeds the other end, so the pin comes first.
+  assert.equal(pinText('hz', noteText(down(['/echo.in']))), 'hz → /echo.in');
+  assert.equal(pinText('hz', noteText(down(['/s/glide.in', '/s/hz_prev.in']), '/s')), 'hz → 2: glide.in, hz_prev.in');
+  assert.equal(pinText('x', noteText(down([], { opaque: true }))), 'x → inside a library composite');
+  assert.equal(pinText('x', noteText(down([]))), 'x → nothing');
+  // No answer, no note; a trace's summary after the whole label either way.
+  assert.equal(noteText(null), null);
+  assert.equal(pinText('hz', null, 'from /seq.hz'), 'hz · trace: from /seq.hz');
+  assert.equal(pinText('hz', '/melody.hz →', 'from /seq.hz'), '/melody.hz → hz · trace: from /seq.hz');
+  assert.equal(pinText('hz', '→ /echo.in', '→ to /out.l'), 'hz → /echo.in · trace: → to /out.l');
+});
+
+test('an upstream note’s short form is `2 → out`, else the name alone, never a cut-off note', () => {
+  const many = '2: a.out, b.out → out';
+  assert.equal(shownText(many, textWidth(many), 'out'), many);
+  assert.equal(shownText(many, textWidth('2: a.out, b…'), 'out'), '2 → out', 'not `2: a.out, b…`');
+  assert.equal(shownText(many, textWidth('2 → out') - 1, 'out'), 'out');
+  const traced = `${many} · trace: inside from a.out, b.out`;
+  assert.equal(shownText(traced, textWidth(many), 'out'), '2 → out', 'the trace’s summary never makes it a cut-off note');
+  const one = '/melody.hz → hz';
+  assert.equal(shownText(one, textWidth('/melody.h…'), 'hz'), 'hz', 'one source: no count, the name alone');
+  assert.equal(shownText('nothing → x', textWidth('x…'), 'x'), 'x');
+  // A name that only ends the same is not the pin's: cut short as any text.
+  assert.equal(shownText('/a.hz → hz2', textWidth('/a.h…'), 'hz'), fitText('/a.hz → hz2', textWidth('/a.h…')));
+});
+
 /** A level's boxes in its own units, as the control hands them to `levelLabels` (2026-10-20). */
 function unitsBox(node, extra = {}) {
   const at = (p) => ({ name: p.name, x: p.x, y: p.y });
@@ -424,8 +460,8 @@ test('inside the synth, its frame names each port on its own with where it conne
   const box = unitsBox(frame, { texts, groups: { ins: [], outs: portGroups(frame.outs, factsOf('moog_voice')) } });
   const labels = levelLabels([box], 'pins');
   assert.equal(labels.length, frame.outs.length, 'one label a port: never "hz, gate (2)"');
-  assert.ok(labels.find((l) => l.text === 'hz ← /melody.hz'));
-  assert.ok(labels.find((l) => l.text === 'gate ← /melody.gate'));
+  assert.ok(labels.find((l) => l.text === '/melody.hz → hz'));
+  assert.ok(labels.find((l) => l.text === '/melody.gate → gate'));
   for (const l of labels) assert.ok(l.x1 - l.x0 <= FRAME_LABEL_UNITS + 1e-9);
   // The coarser step: the frame's runs of one group, as its box outside collapses them.
   const coarse = levelLabels([{ ...box, texts: new Map() }], 'groups');
@@ -478,8 +514,8 @@ test('an open synth’s grown frame names each pin outside its edge; its inside�
   assert.deepEqual(openedLayout(inner, 'none', inner.bounds), inner);
   const ports = inner.nodes.find((n) => n.kind === 'input');
   const texts = new Map(ports.outs.map((p) => [p.name, pinText(p.name, outsideNote(STUDIO, `/synth.${p.name}`))]));
-  assert.equal(texts.get('hz'), 'hz ← /melody.hz');
-  assert.equal(texts.get('gate'), 'gate ← /melody.gate');
+  assert.equal(texts.get('hz'), '/melody.hz → hz');
+  assert.equal(texts.get('gate'), '/melody.gate → gate');
   const named = levelLabels([unitsBox(ports, { texts, groups: { ins: [], outs: portGroups(ports.outs, factsOf('moog_voice')) } })], 'pins');
   assert.equal(named.length, ports.outs.length);
 });

@@ -473,24 +473,26 @@ function relative(address, base) {
 /**
  * A badge's text for `behind`'s answer of pin `address` on `side`:
  * "→ 3 inside: osc1.freq, osc2.freq, osc3.freq", "→ inside: vca.b" (one),
- * "← from /melody.hz",
- * "→ to /echo.in", "← inside from volume.out"; null without an answer.
+ * "from /melody.hz", "→ to /echo.in", "inside from volume.out"; null
+ * without an answer. An arrow only where it points the way the signal
+ * flows (2026-10-21, the owner's "show the signal's path"): an upstream
+ * summary says "from" and carries none.
  */
 export function badgeText(answer, address, side) {
   if (!answer) return null;
   const base = splitAddress(address)?.instance ?? '';
-  const arrow = answer.direction === 'down' ? '→' : '←';
-  if (answer.opaque) return `${arrow} inside a library composite (not in the graph)`;
+  const down = answer.direction === 'down';
+  if (answer.opaque) return `${down ? '→ ' : ''}inside a library composite (not in the graph)`;
   const names = answer.endpoints.map((e) => relative(e.address, side === 'inside' ? base : '') + (e.kind === 'library' ? ' (library)' : e.kind === 'unconnected' ? ' (open end)' : ''));
   const n = names.length;
   const list = names.slice(0, BADGE_NAMES).join(', ') + (n > BADGE_NAMES ? `, … ${n - BADGE_NAMES} more` : '');
   if (side === 'inside') {
-    if (n === 0) return `${arrow} nothing inside`;
-    if (answer.direction === 'up') return `← inside from ${list}`;
+    if (n === 0) return `${down ? '→ ' : ''}nothing inside`;
+    if (!down) return `inside from ${list}`;
     return n === 1 ? `→ inside: ${list}` : `→ ${n} inside: ${list}`;
   }
-  if (n === 0) return answer.direction === 'down' ? '→ nothing outside' : '← nothing outside';
-  return answer.direction === 'down' ? `→ to ${list}` : `← from ${list}`;
+  if (n === 0) return down ? '→ nothing outside' : 'nothing outside';
+  return down ? `→ to ${list}` : `from ${list}`;
 }
 
 /** A trace spanning more pins than this shows its levels collapsed, but the start's. */

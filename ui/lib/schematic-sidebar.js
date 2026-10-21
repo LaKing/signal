@@ -83,7 +83,8 @@ export function connectionsOf(entry, node, port) {
     const pin = other ? (out ? other.ins : other.outs).find((p) => p.name === there.port) : null;
     const label = out ? hit.to : hit.from;
     list.push({
-      wire: { label: `${out ? '→' : '←'} ${label}`, hit },
+      // The signal's path (2026-10-21): an output's wire `→ /echo.in`, an input's `/drums.out →`.
+      wire: { label: out ? `→ ${label}` : `${label} →`, hit },
       end: { label, hit: pin ? portHit(entry, other, pin) : null },
       removable: wire.kind === 'connection',
     });
@@ -240,8 +241,9 @@ export function acrossOf(graph, hit) {
   const side = frame ? 'outside' : 'inside';
   const answer = neighbours(graph, hit.address, side);
   if (!answer) return null;
-  const arrow = answer.direction === 'down' ? '→' : '←';
-  const items = answer.addresses.map((address) => ({ label: `${arrow} ${address}`, reveal: { kind: 'pin', address } }));
+  // The signal's path (2026-10-21): where the pin leads `→ glide.in`, what feeds it `/melody.gate →`.
+  const down = answer.direction === 'down';
+  const items = answer.addresses.map((address) => ({ label: down ? `→ ${address}` : `${address} →`, reveal: { kind: 'pin', address } }));
   const title = frame ? `Outside, at ${hit.path.slice(0, hit.path.lastIndexOf('/')) || 'the top level'}` : `Inside ${hit.address.slice(0, hit.address.lastIndexOf('.'))}`;
   return {
     side,

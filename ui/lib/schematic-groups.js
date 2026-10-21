@@ -38,7 +38,7 @@ export function labelDetail(k) {
   return LABEL_PX * k >= READ_PX ? 'groups' : 'summary';
 }
 
-/** Whether a boundary pin's label carries its note (`hz ← /melody.hz`) at scale `k`: its text NOTE_PX on screen or more. */
+/** Whether a boundary pin's label carries its note (`/melody.hz → hz`) at scale `k`: its text NOTE_PX on screen or more. */
 export function notesAt(k) {
   return LABEL_PX * k >= NOTE_PX;
 }

@@ -276,15 +276,15 @@ test('behind: what a boundary pin hides, inside and outside, and the badge text'
   assert.deepEqual(ends(inside), ['/voice/pitch/r1.in', '/voice/pitch/r2.in', '/voice/pitch/r3.in']);
   assert.equal(badgeText(inside, '/voice.hz', 'inside'), '→ 3 inside: pitch/r1.in, pitch/r2.in, pitch/r3.in');
   const outside = behind(GRAPH, '/voice.hz', 'outside');
-  assert.equal(badgeText(outside, '/voice.hz', 'outside'), '← from /seq.hz');
+  assert.equal(badgeText(outside, '/voice.hz', 'outside'), 'from /seq.hz');
   assert.equal(badgeText(behind(GRAPH, '/voice.out', 'outside'), '/voice.out', 'outside'), '→ to /mix.a');
-  assert.equal(badgeText(behind(GRAPH, '/voice.out', 'inside'), '/voice.out', 'inside'), '← inside from vca.out');
+  assert.equal(badgeText(behind(GRAPH, '/voice.out', 'inside'), '/voice.out', 'inside'), 'inside from vca.out');
   assert.equal(badgeText(behind(GRAPH, '/voice.spare', 'inside'), '/voice.spare', 'inside'), '→ nothing inside');
-  assert.equal(badgeText(behind(GRAPH, '/voice.spare', 'outside'), '/voice.spare', 'outside'), '← nothing outside');
+  assert.equal(badgeText(behind(GRAPH, '/voice.spare', 'outside'), '/voice.spare', 'outside'), 'nothing outside');
   // Outside goes through other composites to their primitives, never into this one.
-  assert.equal(badgeText(behind(GRAPH, '/voice/pitch.hz', 'outside'), '/voice/pitch.hz', 'outside'), '← from /seq.hz');
+  assert.equal(badgeText(behind(GRAPH, '/voice/pitch.hz', 'outside'), '/voice/pitch.hz', 'outside'), 'from /seq.hz');
   assert.equal(badgeText(behind(GRAPH, '/fx.in', 'inside'), '/fx.in', 'inside'), '→ inside a library composite (not in the graph)');
-  assert.equal(badgeText(behind(GRAPH, '/fx.in', 'outside'), '/fx.in', 'outside'), '← from /mix.out');
+  assert.equal(badgeText(behind(GRAPH, '/fx.in', 'outside'), '/fx.in', 'outside'), 'from /mix.out');
   assert.equal(behind(GRAPH, '/mix.a', 'inside'), null, 'a primitive has no inside');
   // Long lists are cut.
   const g = structuredClone(GRAPH);

@@ -1928,10 +1928,14 @@ export class SignalSchematic extends HTMLElement {
   connectionItem(c, level) {
     const item = html('li');
     const what = html('span');
-    // The wire (its arrow), then the pin at its other end.
-    const wire = this.link(`${c.wire.label.slice(0, 1)} wire`, c.wire.hit);
+    // In the signal's direction: an output's wire, then the pin it reaches
+    // (`→ wire /echo.in`); an input's source, then its wire (`/melody.hz wire →`).
+    const out = c.wire.label.startsWith('→');
+    const wire = this.link(out ? '→ wire' : 'wire →', c.wire.hit);
     wire.title = `Select the wire ${c.wire.hit.from} → ${c.wire.hit.to}`;
-    what.append(wire, ' ', this.link(c.end.label, c.end.hit));
+    const end = this.link(c.end.label, c.end.hit);
+    if (out) what.append(wire, ' ', end);
+    else what.append(end, ' ', wire);
     item.append(what);
     if (this.editor.editing && c.removable) {
       // Around the innermost open composite (M2.13-3): shown, off, its title saying why.
@@ -2451,7 +2455,8 @@ export class SignalSchematic extends HTMLElement {
         const pins = html('ul', { className: 'tree' });
         for (const pin of inst.children) {
           const li = html('li');
-          const link = this.revealLink(`${pin.direction === 'out' ? '→' : '←'} ${pin.label}`, pin.reveal);
+          // The signal's path (2026-10-21): it leaves an output `label →` and enters an input `→ label`.
+          const link = this.revealLink(pin.direction === 'out' ? `${pin.label} →` : `→ ${pin.label}`, pin.reveal);
           link.classList.add(`role-${pin.role}`);
           li.append(link);
           pins.append(li);

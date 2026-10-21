@@ -21,8 +21,11 @@
 // whole), a summary wraps; a frame's labels go on their pins' other side
 // where they would leave the viewport. Also the
 // notes beside a boundary's pins: where a frame's pin connects outside
-// (`hz ← /melody.hz`) and where a box's pin goes inside (`hz → 2:
-// glide.in, hz_prev.in`), one connection away. Pure; no DOM.
+// (`/melody.hz → hz`) and where a box's pin goes inside (`hz → 2:
+// glide.in, hz_prev.in`), one connection away. A note shows the signal's
+// path (2026-10-21, the owner's "show the signal's path"): its arrow points
+// the way the signal flows, the source first, so the pin's name stands
+// after an upstream note and before a downstream one. Pure; no DOM.
 
 import { neighbours } from './schematic-trace.js';
 
@@ -49,7 +52,7 @@ export const NOTE_NAMES = 3;
  * never kept at a size on screen.
  */
 export const READ_PX = 4;
-/** A boundary pin's note (`hz ← /melody.hz`) is shown from this text size on screen (px). */
+/** A boundary pin's note (`/melody.hz → hz`) is shown from this text size on screen (px). */
 export const NOTE_PX = 7;
 /** A bundle's count's text, in its level's units (LABEL_PX the pins'): readable while bundles are drawn. */
 export const COUNT_UNITS = 18;
@@ -134,19 +137,25 @@ export function minWidth(text) {
 /**
  * What a label `width` px wide shows of `text`: all of it, else a group's
  * names without its count (`osc1_*` of `osc1_* (4)`), else a noted pin's
- * short form (`hz → 2` of `hz → 2: glide.in, hz_prev.in`), else its name
- * `name` alone (a note is never cut short: `hz → 2:…` read as noise, the
- * operator's review), else cut short.
+ * short form (`hz → 2` of `hz → 2: glide.in, hz_prev.in`, `2 → out` of
+ * `2: a.out, b.out → out`), else its name `name` alone (a note is never cut
+ * short: `hz → 2:…` read as noise, the operator's review), else cut short.
  */
 export function shownText(text, width, name = null) {
   if (textWidth(text) <= width) return text;
   const bare = /^(.*\S) \(\d+\)$/.exec(text)?.[1];
   if (bare && textWidth(bare) <= width) return bare;
-  if (name && name !== text && text.startsWith(name)) {
-    const counted = /^ ([←→]) (\d+):/.exec(text.slice(name.length));
-    const short = counted ? `${name} ${counted[1]} ${counted[2]}` : null;
-    if (short && textWidth(short) <= width) return short;
-    if (textWidth(name) <= width) return name;
+  if (name && name !== text) {
+    // The label without a trace's summary: the name then a downstream note, or an upstream note then the name.
+    const head = text.split(' · trace: ')[0];
+    const down = head.startsWith(`${name} → `);
+    const up = head.endsWith(` → ${name}`);
+    if (head === name || down || up) {
+      const count = /^(\d+):/.exec(down ? head.slice(name.length + 3) : up ? head : '')?.[1];
+      const short = count ? (down ? `${name} → ${count}` : `${count} → ${name}`) : null;
+      if (short && textWidth(short) <= width) return short;
+      if (textWidth(name) <= width) return name;
+    }
   }
   return fitText(text, width);
 }
@@ -632,23 +641,28 @@ function relative(address, base) {
 }
 
 /**
- * A note for `neighbours`' answer of a composite pin: `← /melody.hz`, `→
- * /echo.in`, `→ 2: glide.in, hz_prev.in` (inside, relative to the
- * composite instance `base`), `… n more` past NOTE_NAMES; null without an
- * answer.
+ * A note for `neighbours`' answer of a composite pin, the signal's path
+ * (2026-10-21, the owner's "show the signal's path"): downstream (the
+ * other end is fed by the pin) it starts with the arrow, `→ /echo.in`,
+ * `→ 2: glide.in, hz_prev.in` (inside, relative to the composite instance
+ * `base`); upstream (the other end feeds the pin) it ends with it,
+ * `/melody.hz →`, `2: a.out, b.out →`, `inside a library composite →`,
+ * `nothing →`; `… n more` past NOTE_NAMES; null without an answer.
+ * `pinText` puts the pin's name on the arrow's other side.
  */
 export function noteText(answer, base = '') {
   if (!answer) return null;
-  const arrow = answer.direction === 'down' ? '→' : '←';
-  if (answer.opaque) return `${arrow} inside a library composite`;
+  const down = answer.direction === 'down';
+  const arrowed = (text) => (down ? `→ ${text}` : `${text} →`);
+  if (answer.opaque) return arrowed('inside a library composite');
   const names = answer.addresses.map((a) => relative(a, base));
   const n = names.length;
-  if (n === 0) return `${arrow} nothing`;
+  if (n === 0) return arrowed('nothing');
   const list = names.slice(0, NOTE_NAMES).join(', ') + (n > NOTE_NAMES ? `, … ${n - NOTE_NAMES} more` : '');
-  return n === 1 ? `${arrow} ${list}` : `${arrow} ${n}: ${list}`;
+  return arrowed(n === 1 ? list : `${n}: ${list}`);
 }
 
-/** Where a frame's pin (`/synth.hz` at level `/synth`) connects outside: `← /melody.hz`. */
+/** Where a frame's pin (`/synth.hz` at level `/synth`) connects outside: `/melody.hz →` (its label `/melody.hz → hz`). */
 export function outsideNote(graph, address, r) {
   return noteText(neighbours(graph, address, 'outside', r));
 }
@@ -659,8 +673,13 @@ export function insideNote(graph, address, r) {
   return noteText(neighbours(graph, address, 'inside', r), base);
 }
 
-/** A pin's label: its name, its note, and a trace's summary after it (never instead of it). */
+/**
+ * A pin's label: its name and its note in the signal's direction (an
+ * upstream note, ending in `→`, before the name: `/melody.hz → hz`; a
+ * downstream one after it: `hz → /echo.in`), and a trace's summary after
+ * the whole (never instead of it).
+ */
 export function pinText(name, note = null, traced = null) {
-  const head = note ? `${name} ${note}` : name;
+  const head = !note ? name : note.endsWith('→') ? `${note} ${name}` : `${name} ${note}`;
   return traced ? `${head} · trace: ${traced}` : head;
 }
