@@ -15,11 +15,17 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Debug tests at opt-level 1: debug assertions, overflow checks and the
+  # checked mode stay on; unoptimised, the contract suite alone took hours on
+  # the 3-core hosted runner (measured locally at 3 threads: 5 min at
+  # opt-level 1). Output is identical at every opt-level (the release job).
+  CARGO_PROFILE_DEV_OPT_LEVEL: "1"
 
 jobs:
   check:
     # Apple Silicon runner: the only target platform (vision C1).
     runs-on: macos-15
+    timeout-minutes: 90
     steps:
       # Full history and tags: scripts/version.sh counts the commits since
       # vMAJOR.MINOR.0, and the bundle test compares the app's version with it.
@@ -44,6 +50,7 @@ jobs:
     # M2.7-3 (finding 6): the tests also pass in release builds, where the
     # checked mode's exclusivity tracker is not compiled in.
     runs-on: macos-15
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,6 +69,7 @@ jobs:
     # never rebuilds over the default jobs' artifacts. The seat runs these
     # two command lines as they are (crates/signal-cli/tests/ci_lab_job.rs).
     runs-on: macos-15
+    timeout-minutes: 90
     env:
       CARGO_TARGET_DIR: /tmp/signal-project-target-lab
     steps:
