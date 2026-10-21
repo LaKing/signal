@@ -26,7 +26,7 @@ node scripts/third-party-notices.mjs                             # rewrite THIRD
 scripts/release.sh --out DIR                                     # the release assets (ADR 0031; CI runs it on v* tags)
 ```
 
-**Versions.** `MAJOR.MINOR.N`: `MAJOR.MINOR` is the workspace version in the root `Cargo.toml`, and `N` counts the commits since the tag `vMAJOR.MINOR.0`, so every commit is a version of its own and the same commit always builds the same one (`scripts/version.sh`; `scripts/bundle-app.sh` builds it into Signal.app and `signal --version`). A new `MAJOR.MINOR` is an owner's decision: set it in `Cargo.toml`, refresh `Cargo.lock` (`cargo update -w --offline`, which records every workspace crate's version), commit both and tag that commit `vMAJOR.MINOR.0`.
+**Versions.** `MAJOR.MINOR.N`: `MAJOR.MINOR` is the workspace version in the root `Cargo.toml`, and `N` counts the commits since the tag `vMAJOR.MINOR.0`, so every commit is a version of its own and the same commit always builds the same one (`scripts/version.sh`; `scripts/bundle-app.sh` builds it into Signal.app and `signal --version`). A new `MAJOR.MINOR` is an owner's decision: set it in `Cargo.toml`, refresh `Cargo.lock` (`cargo update -w --offline`, which records every workspace crate's version), start the built-in library's `## MAJOR.MINOR` section in `crates/signal-lib/CHANGELOG.md` and record the section it ends in `crates/signal-lib/tests/released.toml` (`tests/pinned.rs` prints the line), commit all and tag that commit `vMAJOR.MINOR.0`.
 
 Development runs through **devpanel** (`~/devpanel`, project `signal-project`); its seats build **offline**.
 

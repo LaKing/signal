@@ -31,6 +31,12 @@ A project that wants a composite never to change copies it into its own
 `composites/` with `signal vendor <project> lib.<name>`; the copy is the
 project's text.
 
+## 0.2
+
+The library of Signal 0.2.0, the first public release. No composite changed
+its output or was added or removed since 0.1: every entry under `## 0.1`
+still holds.
+
 ## 0.1
 
 The first library (M2.10-3). Each line: the composite, its category, and its
