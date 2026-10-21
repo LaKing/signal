@@ -157,10 +157,10 @@ export function scene({ layoutOf, view, viewport, pinned = new Set() }) {
  * The point of the box under `at` (the click), as a fraction of its width
  * and height, is under `at` again in its frame (clamped to the box), so
  * the view does not jump: what was under the pointer is the same part of
- * the frame; then, when the frame fits below the bar (`bar` px at the
- * top), its header is kept below it.
+ * the frame; then, when the frame fits on the stage, its header (and its
+ * ×) is kept on it.
  */
-export function openAnchor(drawn, before, at, viewport, bar = 0) {
+export function openAnchor(drawn, before, at, viewport) {
   for (let i = 0; i + 1 < drawn.levels.length; i++) {
     const level = drawn.levels[i];
     const child = drawn.levels[i + 1];
@@ -175,7 +175,7 @@ export function openAnchor(drawn, before, at, viewport, bar = 0) {
     const fy = Math.min(1, Math.max(0, (at.y - box.y) / box.h));
     const dx = box.x + fx * box.w - (r.x + fx * r.w);
     let dy = box.y + fy * box.h - (r.y + fy * r.h);
-    if (r.h <= viewport.h - bar && r.y + dy < bar) dy = bar - r.y;
+    if (r.h <= viewport.h && r.y + dy < 0) dy = -r.y;
     return { dx, dy, path: child.path, k: level.transform.k };
   }
   return null;

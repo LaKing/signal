@@ -105,8 +105,6 @@ const MANY_MARKS = 64;
 const SIDE_KEY = 'signal.schematic.sidebar';
 /** An open composite's own pins are at most this radius on screen (px). */
 const OPEN_PIN_PX = 4;
-/** A fitted view keeps this far (px) from the stage's top edge: the bar (breadcrumbs, Fit) lies over it. */
-const BAR_PX = 40;
 /** A view's margin (px) on its other edges. */
 const MARGIN_PX = 24;
 /** A composite's inside fitted to the view keeps this far (px) from the left and right edges: room for its frame's labels, outside its pins. */
@@ -120,8 +118,10 @@ const CSS = `
   color: var(--signal-fg, #d6dbe4); background: var(--signal-bg, #16181d);
   font: var(--signal-font, 11px/1.3 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif); }
 :host([side-collapsed]) { --side-width: 28px; }
-/* The drawing area: everything right of the sidebar. Its size changes only with the element's or the sidebar's collapse. */
-.stage { position: absolute; top: 0; right: 0; bottom: 0; left: var(--side-width); overflow: hidden; }
+/* Everything right of the sidebar: the schematic's toolbar, then the drawing area below it (2026-10-22: nothing lies over the drawing). */
+.main { position: absolute; top: 0; right: 0; bottom: 0; left: var(--side-width); display: flex; flex-direction: column; }
+/* The drawing area. Its size changes only with the element's or the sidebar's collapse. */
+.stage { position: relative; flex: 1; min-height: 0; overflow: hidden; }
 svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
 .box { fill: var(--signal-panel, #1f232b); stroke: var(--signal-knob-edge, #3a414d); vector-effect: non-scaling-stroke; }
 .composite > .box { stroke: var(--signal-muted, #8a93a3); stroke-width: 2; }
@@ -173,12 +173,15 @@ svg.many .wire.selected { stroke-width: 4; }
 .level-mark { fill: var(--signal-muted, #8a93a3); visibility: hidden; }
 [data-state="no-slot"] > .level-mark { visibility: visible; }
 [data-state="no-slot"] > .level-fill, [data-state="idle"] > .level-fill, [data-state="pending"] > .level-fill { visibility: hidden; }
-.bar { position: absolute; left: 8px; top: 8px; right: 8px; display: flex; gap: 6px; align-items: center; pointer-events: none; }
-.bar > * { pointer-events: auto; }
-.crumbs { display: flex; gap: 2px; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; }
-/* The breadcrumbs' empty stretch lets the pointer through to the drawing (an open frame's × may lie under it, 2026-10-22). */
-.bar > .crumbs { pointer-events: none; }
-.crumbs > * { pointer-events: auto; }
+/* The toolbar (the owner's, 2026-10-22: "these buttons should sit on a toolbar that belongs to the schematic view"): Edit patch and the breadcrumbs left, Fit and the resets right. */
+.bar { flex: none; display: flex; gap: 6px; align-items: center; height: 32px; box-sizing: border-box; padding: 0 8px;
+  background: var(--signal-panel, #1f232b); border-bottom: 1px solid var(--signal-knob-edge, #3a414d); }
+.bar > button { flex: none; }
+/* The breadcrumbs, cut in the middle when they do not fit (\`fitCrumbs\`), never wrapping. */
+.crumbs { display: flex; gap: 2px; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; align-items: center; }
+.crumbs > button { flex: none; }
+.crumbs > button:last-child { flex: 0 1 auto; min-width: 2em; overflow: hidden; text-overflow: ellipsis; }
+.crumbs > .cut { flex: none; padding: 0 2px; color: var(--signal-muted, #8a93a3); }
 button { font: inherit; color: inherit; background: var(--signal-knob, #262b34); border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 4px; padding: 2px 8px; }
 .message { position: absolute; left: 8px; bottom: 8px; color: var(--signal-muted, #8a93a3); pointer-events: none; }
 svg.stale { opacity: 0.4; filter: grayscale(1); }
@@ -418,8 +421,10 @@ export class SignalSchematic extends HTMLElement {
     this.staleBox = html('section', { className: 'diagnostics' });
     this.tip = html('div', { className: 'tip' });
     this.marquee = html('div', { className: 'marquee' });
-    this.stage.append(this.svg, this.bar, this.message, this.staleBox, this.tip, this.marquee);
-    root.append(style, this.buildSide(), this.stage);
+    this.stage.append(this.svg, this.message, this.staleBox, this.tip, this.marquee);
+    const main = html('div', { className: 'main' });
+    main.append(this.bar, this.stage);
+    root.append(style, this.buildSide(), main);
     this.editor = new SchematicEditor(this);
     this.editor.build(this.bar, this.stage);
     this.svg.addEventListener('pointerdown', (e) => this.pointerDown(e));
@@ -595,6 +600,7 @@ export class SignalSchematic extends HTMLElement {
   measure() {
     const rect = this.stage.getBoundingClientRect();
     this.viewport = { w: rect.width, h: rect.height };
+    if (this.crumbs.children.length) this.fitCrumbs();
     // A hidden tab is 0×0: nothing to draw, nothing to stream.
     this.activity();
   }
@@ -615,9 +621,9 @@ export class SignalSchematic extends HTMLElement {
     return this.layoutOf('')?.bounds ?? { x: 0, y: 0, w: 1, h: 1 };
   }
 
-  /** The whole top level in view, clear of the bar over the stage's top edge (its composites are closed by Fit itself, `fitTop`). */
+  /** The whole top level in view on the stage (its composites are closed by Fit itself, `fitTop`). */
   fitAll() {
-    return fit(this.rootBounds(), this.viewport, MARGIN_PX, BAR_PX);
+    return fit(this.rootBounds(), this.viewport, MARGIN_PX);
   }
 
   /** Fit, 0 and the top breadcrumb: every composite closed, the whole top level in view (M2.13-3). */
@@ -654,8 +660,8 @@ export class SignalSchematic extends HTMLElement {
     const openedAt = this.openedAt;
     this.openedAt = null;
     this.drawn = scene({ layoutOf, view: this.view, viewport: this.viewport, pinned: this.pinned });
-    // A composite a click opened keeps what was under the pointer there, its header below the bar (the operator's review).
-    const anchor = openedAt ? openAnchor(this.drawn, this.open, openedAt, this.viewport, BAR_PX) : null;
+    // A composite a click opened keeps what was under the pointer there, its header on the stage (the operator's review).
+    const anchor = openedAt ? openAnchor(this.drawn, this.open, openedAt, this.viewport) : null;
     if (anchor && (anchor.dx || anchor.dy)) {
       // Kept, in its parent's units, so that closing it puts the view back (`closeInPlace`).
       this.openShifts.set(anchor.path, { dx: anchor.dx / anchor.k, dy: anchor.dy / anchor.k });
@@ -1096,6 +1102,25 @@ export class SignalSchematic extends HTMLElement {
         return button;
       }),
     );
+    this.fitCrumbs();
+  }
+
+  /**
+   * The breadcrumbs cut in the middle to fit the toolbar (2026-10-22: never
+   * wrapping over the drawing, nor scrolling): the top level and the
+   * innermost stay, the ones after the first hidden one by one behind a
+   * "…" until the rest fit (the last cut short, `text-overflow`, if even
+   * that is too wide).
+   */
+  fitCrumbs() {
+    const buttons = [...this.crumbs.children].filter((b) => b.tagName === 'BUTTON');
+    this.crumbs.querySelector('.cut')?.remove();
+    for (const b of buttons) b.hidden = false;
+    if (buttons.length < 3 || this.crumbs.scrollWidth <= this.crumbs.clientWidth) return;
+    const cut = html('span', { className: 'cut', textContent: '…' });
+    buttons[0].after(cut);
+    for (let i = 1; i < buttons.length - 1 && this.crumbs.scrollWidth > this.crumbs.clientWidth; i++) buttons[i].hidden = true;
+    cut.title = buttons.filter((b) => b.hidden).map((b) => b.textContent).join(' / ');
   }
 
   /** The level shown: the deepest breadcrumb's (`""` the top level, else its composite). */
@@ -1113,7 +1138,7 @@ export class SignalSchematic extends HTMLElement {
     const rect = this.drawn && levelRect(this.drawn, path);
     const level = rect && this.levelOf(path);
     // Its inside filling the view, readable (M2.13-3, `crumbView`).
-    if (level) this.setView(crumbView(this.view, level, rect, this.viewport, MARGIN_PX, BAR_PX, FRAME_SIDE_PX));
+    if (level) this.setView(crumbView(this.view, level, rect, this.viewport, MARGIN_PX, MARGIN_PX, FRAME_SIDE_PX));
     else this.schedule();
   }
 
@@ -1483,11 +1508,11 @@ export class SignalSchematic extends HTMLElement {
     if (inner && chain((level) => this.layoutOf(level), hit.address)) {
       this.openShifts.delete(hit.address);
       this.pinned = pinOne(this.pinned, hit.address);
-      this.setView({ ...enterView(inner.bounds, this.viewport, MARGIN_PX, BAR_PX, FRAME_SIDE_PX), path: hit.address });
+      this.setView({ ...enterView(inner.bounds, this.viewport, MARGIN_PX, MARGIN_PX, FRAME_SIDE_PX), path: hit.address });
       return;
     }
     const rect = nodeRect(this.drawn, hit.address);
-    if (rect) this.setView(focus(this.view, rect, this.viewport, MARGIN_PX, BAR_PX));
+    if (rect) this.setView(focus(this.view, rect, this.viewport, MARGIN_PX));
   }
 
   /** The person's zoom by `factor` about screen point `at` (null: the centre): the view only, opening and closing nothing (2026-10-22). */
@@ -2611,7 +2636,7 @@ export class SignalSchematic extends HTMLElement {
         rect = { x: c.x - w / 2, y: c.y - h / 2, w, h };
       }
     }
-    const view = fit(rect, this.viewport, MARGIN_PX, BAR_PX);
+    const view = fit(rect, this.viewport, MARGIN_PX);
     this.view = { ...view, path };
     this.keepSideScroll = true;
     if (hit) this.select([hit]);

@@ -127,7 +127,7 @@ test('a click on a closed composite’s box opens it where it is and selects it;
   assert.deepEqual([...s.drawn.open], ['/drums']);
   assert.deepEqual(s.selected.map((p) => p.address), ['/drums']);
   assert.equal(topK(s), k, 'the same scale');
-  // The box's point under the pointer is the same point of its frame (across; down, its header may be kept below the bar).
+  // The box's point under the pointer is the same point of its frame (across; down, its header may be kept on the stage).
   const top = s.drawn.levels[0];
   const frame = top.layout.nodes.find((n) => n.name === 'drums');
   const p = toScreen(top.transform, { x: frame.x + fx * frame.w, y: frame.y });

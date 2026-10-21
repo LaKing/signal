@@ -387,7 +387,7 @@ test('a wire across the frame’s edge runs in the direction it ran to the box: 
   assert.equal(opened.wires.filter((w) => w.feedback).length, top.wires.filter((w) => w.feedback).length);
 });
 
-test('a composite opened by a click keeps the box’s point under the pointer there in its frame, its header below the bar (openAnchor)', () => {
+test('a composite opened by a click keeps the box’s point under the pointer there in its frame, its header on the stage (openAnchor)', () => {
   const synth = nodeOf(studioOf, '', 'synth');
   const bounds = studioOf('moog_voice').bounds;
   const k = readableAt(synth, bounds);
@@ -397,7 +397,7 @@ test('a composite opened by a click keeps the box’s point under the pointer th
     const view = { k, ox: synth.x + synth.w * fx, oy: synth.y + synth.h * fy, x: at.x, y: at.y };
     const drawn = scene({ layoutOf: studioOf, view, viewport: big, pinned: SYNTH });
     assert.deepEqual([...drawn.open], ['/synth']);
-    const anchor = openAnchor(drawn, new Set(), at, big, 0);
+    const anchor = openAnchor(drawn, new Set(), at, big);
     const after = scene({ layoutOf: studioOf, view: pan(drawn.view, anchor.dx, anchor.dy), viewport: big, pinned: SYNTH });
     assert.deepEqual([...after.open], ['/synth'], `${fx},${fy}: still open`);
     const top = after.levels[0];
@@ -406,15 +406,15 @@ test('a composite opened by a click keeps the box’s point under the pointer th
     const head = toScreen(top.transform, frame).y;
     // Under the pointer, unless that would take its header above the screen's top (the frame fits: it is kept below).
     assert.ok(Math.abs(p.x - at.x) < 1e-9 && (Math.abs(p.y - at.y) < 1e-9 || Math.abs(head) < 1e-9), `the frame's point ${fx},${fy} under the pointer: ${p.x},${p.y}, header at ${head}`);
-    assert.equal(openAnchor(drawn, drawn.open, at, big, 0), null, 'already open: no anchor');
+    assert.equal(openAnchor(drawn, drawn.open, at, big), null, 'already open: no anchor');
   }
-  // With a bar: the frame's header kept below it when the frame fits.
+  // Opened at the stage's top edge: the frame's header (and its ×) kept on the stage when the frame fits.
   const view = { k, ox: synth.x + synth.w / 2, oy: synth.y, x: 650, y: 10 };
   const drawn = scene({ layoutOf: studioOf, view, viewport: big, pinned: SYNTH });
-  const anchor = openAnchor(drawn, new Set(), { x: 650, y: 10 }, big, 40);
+  const anchor = openAnchor(drawn, new Set(), { x: 650, y: 10 }, big);
   const top = drawn.levels[0];
   const frame = top.layout.nodes.find((n) => n.name === 'synth');
-  assert.ok(toScreen(top.transform, frame).y + anchor.dy >= 40 - 1e-9);
+  assert.ok(toScreen(top.transform, frame).y + anchor.dy >= -1e-9);
 });
 
 test('around the open composite, edits are off with the reason (aroundReason)', () => {
