@@ -14,3 +14,15 @@ not (
   | (binary_id(signal-output::hang) & test(=a_run_without_a_stall_reports_no_hang))
 )
 """
+
+# Two more tests time the host and pass on the device, but only by a margin
+# a loaded virtual machine sometimes misses: on the runner the workers under
+# a time constraint once took no task (the caller ran them all), and a hidden
+# edit was shown after 2.30 s against a 2.25 s bound. They run, with retries;
+# nextest reports a pass after a retry as flaky.
+[[profile.ci.overrides]]
+filter = """
+    (binary_id(signal-audio::rt_workers) & test(=time_constraint_workers_play_the_offline_render))
+  | (binary_id(signal-ui::document) & test(=the_display_shows_a_hidden_edit_within_the_bound))
+"""
+retries = 2
