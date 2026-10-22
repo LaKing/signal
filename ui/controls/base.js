@@ -11,6 +11,7 @@ import { dragDelta, keyAction, wheelDelta } from '../lib/gesture.js';
 import { parseSkin } from '../lib/skin.js';
 import { loadSkin, mountSkin, showSkin } from './skin-dom.js';
 import { ENTRY_CSS, ValueEntry, entryDisabled } from './entry-field.js';
+import { ClickPair, READOUT_SLACK_PX } from '../lib/entry.js';
 
 export { Binding, COMMIT_DELAY_MS, RAMP_MS, numberAttribute, quietly } from '../lib/binding.js';
 
@@ -354,6 +355,8 @@ export class SignalValueElement extends SignalElement {
   static commits = true;
   /** The readout a typed value replaces. */
   static readout = '.readout';
+  /** Whether the readout tells a double-click from its own presses (false: `setup` does). */
+  static entryPointer = false;
 
   constructor() {
     super();
@@ -379,23 +382,48 @@ export class SignalValueElement extends SignalElement {
     if (this.constructor.commits && !this.redrawUnsaved) this.redrawUnsaved = unsavedMark(this, () => [this.binding]);
     // A control without a readout (the toggle) takes nothing typed.
     const readout = this.$(this.constructor.readout);
-    if (readout) this.entry ??= bindingEntry(this, readout, () => this.binding);
+    // Its presses are the control's (it captures the pointer), so the
+    // control tells the double-click (`setup`), unless it has no drag
+    // (`<signal-value>`: the readout tells its own).
+    if (readout) this.entry ??= bindingEntry(this, readout, () => this.binding, { pointer: this.constructor.entryPointer });
     this.redrawUnsaved?.();
   }
 
   setup() {
+    // A double-click is told from the presses (`ClickPair`), not from
+    // `dblclick` alone: the pointer is captured on a press, and what a
+    // browser makes of `dblclick` then (its target, whether it comes) is its
+    // own. Its second press does not drag: on the readout it types a value
+    // (on its release), elsewhere it resets (on a release without a move).
+    this.clicks = new ClickPair();
     this.addEventListener('pointerdown', (event) => {
       if (event.button !== 0) return;
+      const onReadout = Boolean(this.entry?.at(event));
+      // A pair seen here: the browser's `dblclick` that follows is not acted on again.
+      this.paired = this.clicks.down(event);
+      this.second = this.paired ? (onReadout ? 'entry' : 'reset') : null;
       this.capture(event);
+      if (this.second === 'entry') return;
       this.dragging = true;
       this.moved = false;
-      this.dragStart(event);
+      // A press on the readout drags only once it has moved a little, so a
+      // double-click's first press never moves the value.
+      this.slack = onReadout ? { x: event.clientX, y: event.clientY } : null;
+      if (!this.slack) this.dragStart(event);
     });
     this.addEventListener('pointermove', (event) => {
       if (!this.dragging) return;
+      if (this.slack) {
+        if (Math.hypot(event.clientX - this.slack.x, event.clientY - this.slack.y) < READOUT_SLACK_PX) return;
+        this.slack = null;
+        this.clicks.reset();
+        this.dragStart(event);
+        return;
+      }
       const position = this.dragMove(event);
       if (position !== null && position !== undefined) {
         this.moved = true;
+        this.clicks.reset();
         this.binding.moveTo(position, 'ramp');
         this.update();
       }
@@ -403,19 +431,46 @@ export class SignalValueElement extends SignalElement {
     const end = () => {
       if (!this.dragging) return;
       this.dragging = false;
+      this.slack = null;
       this.dragEnd();
       this.update();
     };
-    this.addEventListener('pointerup', end);
-    this.addEventListener('pointercancel', end);
+    this.addEventListener('pointerup', () => {
+      const second = this.second;
+      this.second = null;
+      const moved = this.dragging && this.moved;
+      end();
+      if (second === 'entry') this.typeOrReset();
+      else if (second === 'reset' && !moved) this.resetValue();
+    });
+    this.addEventListener('pointercancel', () => {
+      this.second = null;
+      end();
+    });
     this.addEventListener('lostpointercapture', end);
     this.addEventListener('dblclick', (event) => {
-      // On the readout (a captured pointer's double-click is the control's): type a value.
-      if (this.entry?.at(event) && this.entry.open()) return;
-      this.binding.reset();
-      this.update();
+      // The pair was seen as presses (above), or an open field's.
+      if (this.paired || this.entry?.isOpen) {
+        this.paired = false;
+        return;
+      }
+      // No presses came (a double-click made by a script or an assistive
+      // tool): on the readout (a captured pointer's double-click is the
+      // control's) type a value, elsewhere reset.
+      if (this.entry?.at(event)) this.typeOrReset();
+      else this.resetValue();
     });
     this.addEventListener('wheel', (event) => this.onWheel(event), { passive: false });
+  }
+
+  /** A double-click on the readout: a typed value, or (entry off) a reset. */
+  typeOrReset() {
+    if (!this.entry?.open()) this.resetValue();
+  }
+
+  resetValue() {
+    this.binding.reset();
+    this.update();
   }
 
   /** A drag ended: commit where it is (a click without a move commits nothing). */

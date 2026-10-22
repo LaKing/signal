@@ -8,6 +8,7 @@ import { formatValue } from '../lib/format.js';
 import { clamp } from '../lib/taper.js';
 import { SLOT_RETRY_MS, alignXY, slotRetry, triggerStart } from '../lib/trigger.js';
 import { SignalElement, bindAddresses, numberAttribute } from './base.js';
+import { ValueEntry, entryDisabled } from './entry-field.js';
 
 /** Points shown in time mode, at most: half of what arrived, so a trigger has room. */
 const SHOWN = 256;
@@ -50,6 +51,30 @@ canvas { width: var(--signal-scope-width, 100%); height: var(--signal-scope-heig
 
   template() {
     return `<div class="control"><canvas part="canvas"></canvas><div class="label"></div><div class="readout"></div></div>`;
+  }
+
+  /**
+   * The trigger level is typed on the readout (docs/ui-controls.md "Value
+   * entry"): a double-click on it or Enter, in time mode; -1..1, kept as
+   * typed (the keys' steps round to 0.001). The clamp's reason is the
+   * scope's tooltip for its time.
+   */
+  setup() {
+    this.entry = new ValueEntry(this.$('.readout'), {
+      enabled: () => !this.xy && !this.problemText && !entryDisabled(this),
+      spec: () => ({ unit: null, range: { min: -1, max: 1 }, taper: 'linear', kind: null }),
+      value: () => this.level,
+      apply: (value) => {
+        this.setAttribute('trigger-level', String(clamp(value, -1, 1)));
+        this.update();
+      },
+      note: (text) => {
+        if (text) this.setAttribute('title', text);
+        else this.removeAttribute('title');
+      },
+      closed: () => this.update(),
+      focus: () => this.focus({ preventScroll: true }),
+    });
   }
 
   streams(connection) {
@@ -138,6 +163,7 @@ canvas { width: var(--signal-scope-width, 100%); height: var(--signal-scope-heig
   }
 
   onKey(event) {
+    if (event.key === 'Enter') return this.entry?.open() ?? false;
     const step = event.shiftKey ? 0.001 : 0.01;
     const steps = { ArrowUp: step, ArrowDown: -step, PageUp: 0.1, PageDown: -0.1 };
     if (event.key in steps) this.setLevel(this.level + steps[event.key]);
@@ -175,9 +201,9 @@ canvas { width: var(--signal-scope-width, 100%); height: var(--signal-scope-heig
     const what = this.xy ? `X–Y of ${this.ports.slice(0, 2).join(' and ')}` : `${this.ports[0] ?? 'no port'}, trigger ${this.edge} at ${this.level}`;
     if (!this.hasAttribute('aria-label')) this.setAttribute('aria-label', label ? `${label} scope` : 'scope');
     this.setAttribute('aria-description', what);
-    this.setAttribute('aria-keyshortcuts', this.xy ? 'Space' : 'ArrowUp ArrowDown PageUp PageDown Home End E Space');
+    this.setAttribute('aria-keyshortcuts', this.xy ? 'Space' : 'ArrowUp ArrowDown PageUp PageDown Home End E Space Enter');
     const state = this.frozen ? ' · frozen' : '';
-    this.$('.readout').textContent = this.problemText ?? (this.xy ? `X–Y${state}` : `trigger ${this.edge === 'rising' ? '↑' : '↓'} ${formatValue(this.level)}${state}`);
+    if (!this.entry?.isOpen) this.$('.readout').textContent = this.problemText ?? (this.xy ? `X–Y${state}` : `trigger ${this.edge === 'rising' ? '↑' : '↓'} ${formatValue(this.level)}${state}`);
     // A changed level or edge shows at once, frozen or not.
     this.schedule();
   }

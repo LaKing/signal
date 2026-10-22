@@ -5,7 +5,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { NOT_FOUND, applyMessage, choiceOf, choicesOf, choose, cpuWorkers, draftOf, refreshed, selection, withFields } from './draft.js';
+import { NOT_FOUND, applyMessage, bufferFrames, choiceOf, choicesOf, choose, cpuWorkers, draftOf, refreshed, selection, withFields } from './draft.js';
 
 const dell = (id, signature = '2 ch, 48000 Hz') => ({ name: 'DELL U3219Q', id, signature, direction: 'output' });
 const ssl = { name: 'SSL 2+', id: 'coreaudio:ssl', signature: '2 ch, 44100-96000 Hz', direction: 'output' };
@@ -82,4 +82,16 @@ test('Apply sends the draft as setup.apply takes it', () => {
   assert.equal(applyMessage({ ...draft, channels: '' }).outputChannels, null, 'the identity map');
   assert.equal(cpuWorkers(''), 'auto');
   assert.throws(() => cpuWorkers('65'), /1 to 64/);
+});
+
+test('the buffer and CPU workers take a decimal comma or dot as every typed number', () => {
+  assert.equal(bufferFrames('256'), 256);
+  assert.equal(bufferFrames('256,0'), 256);
+  assert.equal(bufferFrames('127.6'), 128);
+  assert.equal(bufferFrames(64), 64);
+  assert.equal(bufferFrames('0'), 1);
+  assert.throws(() => bufferFrames('abc'), /frames/);
+  assert.throws(() => bufferFrames(''), /frames/);
+  assert.equal(cpuWorkers('4,0'), 4);
+  assert.throws(() => cpuWorkers('4,5'), /1 to 64/);
 });

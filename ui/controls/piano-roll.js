@@ -56,6 +56,7 @@ import {
   zoomX,
   zoomY,
 } from '../lib/piano-roll-model.js';
+import { parseNumber } from '../lib/entry.js';
 import { SignalElement } from './base.js';
 
 const KEYS_W = 64;
@@ -185,7 +186,7 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
   <div class="toolbar">
     <span class="title"></span>
     <label>Snap <select class="snap" aria-label="Snap">${snaps}</select></label>
-    <label>Loop <input class="length" type="number" min="1" step="1" aria-label="Loop length in beats"> beats</label>
+    <label>Loop <input class="length" type="text" inputmode="decimal" spellcheck="false" autocomplete="off" aria-label="Loop length in beats" title="Loop length in beats; ↑↓ step by one"> beats</label>
     <span class="group" role="group" aria-label="Zoom time"><button class="zx-out" title="Zoom out (time)">−</button><button class="zx-in" title="Zoom in (time)">+</button></span>
     <span class="group" role="group" aria-label="Zoom keys"><button class="zy-out" title="Smaller keys">▾</button><button class="zy-in" title="Taller keys">▴</button></span>
     <span class="group"><button class="fit" title="Fit the loop">Fit</button></span>
@@ -217,11 +218,25 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
       this.redraw();
     });
     const length = $('.length');
-    length.addEventListener('change', () => {
-      const beats = Number(length.value);
+    // Typed as text, not `type="number"`: WebKit's number field drops a
+    // decimal comma; `parseNumber` takes `8,5` and `8.5` alike (snapped to
+    // whole beats). ↑↓ step by one beat, as the number field did.
+    const setLoop = (beats) => {
       if (this.locked) this.redraw();
-      else if (Number.isFinite(beats) && beats > 0 && this.model.setLength(beats, 1)) this.changed();
+      else if (beats !== null && beats > 0 && this.model.setLength(beats, 1)) this.changed();
       else this.redraw();
+    };
+    length.addEventListener('change', () => {
+      setLoop(parseNumber(length.value));
+      // The loop as it is now (snapped, or kept when the text was no number).
+      length.value = String(this.model.length);
+    });
+    length.addEventListener('keydown', (event) => {
+      const step = { ArrowUp: 1, ArrowDown: -1 }[event.key];
+      if (step === undefined) return;
+      event.preventDefault();
+      setLoop(Math.max(1, (parseNumber(length.value) ?? this.model.length) + step));
+      length.value = String(this.model.length);
     });
     const zoom = (axis, factor) => {
       this.view = axis === 'x' ? zoomX(this.view, factor, this.view.width / 2, this.totalBeats()) : zoomY(this.view, factor, this.view.height / 2, this.totalBeats());

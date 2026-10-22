@@ -128,7 +128,9 @@ export class SignalXY extends SignalElement {
     this.addEventListener('lostpointercapture', end);
     this.addEventListener('dblclick', (event) => {
       // On x's or y's readout (a captured pointer's double-click is the pad's): type that value.
-      if (this.entries?.some((entry) => entry.at(event) && entry.open())) return;
+      // (Its readouts tell their own double-click from their presses, which
+      // the pad never captures; an open field's double-click is the field's.)
+      if (this.entries?.some((entry) => entry.isOpen || (entry.at(event) && entry.open()))) return;
       this.x.reset();
       this.y.reset();
       this.update();

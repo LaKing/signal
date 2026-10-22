@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { COMMIT_DELAY_MS } from './binding.js';
-import { EntryField, NOTE_MS, clampEntry, entryText, parseValue } from './entry.js';
+import { ClickPair, DOUBLE_CLICK_MS, DOUBLE_CLICK_PX, EntryField, NOTE_MS, clampEntry, entryText, parseNumber, parseValue } from './entry.js';
 import { keyAction } from './gesture.js';
 import { toPosition, toValue } from './taper.js';
 
@@ -243,4 +243,46 @@ test('the minus sign U+2212 and −∞ dB on a dB parameter and a linear gain', 
   assert.deepEqual(parseValue('−∞', { unit: 'dB', range: { min: -60, max: 0 } }), { value: -60 });
   assert.deepEqual(parseValue('-inf dB', { kind: 'gain', range: { min: 0, max: 4 } }), { value: 0 });
   assert.equal(parseValue('-inf', { unit: 'Hz', range: { min: 20, max: 20000 } }).reason, 'not-finite');
+});
+
+test('ClickPair: a second press of the same button, near in time and place, is a double-click', () => {
+  const press = (timeStamp, clientX = 10, clientY = 10, button = 0) => ({ timeStamp, clientX, clientY, button });
+  const pair = new ClickPair();
+  assert.equal(pair.down(press(1000)), false);
+  assert.equal(pair.down(press(1000 + DOUBLE_CLICK_MS, 10 + DOUBLE_CLICK_PX)), true, 'at the limits');
+  assert.equal(pair.down(press(1700)), false, 'a third press starts a new pair');
+  assert.equal(pair.down(press(1800)), true);
+  assert.equal(pair.down(press(5000)), false);
+  assert.equal(pair.down(press(5000 + DOUBLE_CLICK_MS + 1)), false, 'too slow');
+  assert.equal(pair.down(press(9000)), false);
+  assert.equal(pair.down(press(9100, 10 + DOUBLE_CLICK_PX + 1)), false, 'too far');
+  assert.equal(pair.down(press(9150, 10 + DOUBLE_CLICK_PX + 1, 10, 2)), false, 'another button');
+  pair.reset();
+  assert.equal(pair.down(press(9200)), false, 'reset forgets the first press');
+});
+
+test('parseNumber: a decimal comma or dot, nothing else after the number', () => {
+  assert.equal(parseNumber('8,5'), 8.5);
+  assert.equal(parseNumber(' 8.5 '), 8.5);
+  assert.equal(parseNumber('-0,25'), -0.25);
+  assert.equal(parseNumber(',5'), 0.5);
+  assert.equal(parseNumber('1e3'), 1000);
+  assert.equal(parseNumber(''), null);
+  assert.equal(parseNumber('abc'), null);
+  assert.equal(parseNumber('8 Hz'), null);
+  assert.equal(parseNumber('256,0', { integer: true }), 256);
+  assert.equal(parseNumber('256,5', { integer: true }), null);
+});
+
+test('parseValue: a decimal comma and a dot mean the same, with a unit or a prefix', () => {
+  for (const [comma, dot, spec] of [
+    ['0,5', '0.5', {}],
+    ['130,5 bpm', '130.5 bpm', { unit: 'bpm', range: { min: 20, max: 400 } }],
+    ['1,2k', '1.2k', { unit: 'Hz', range: { min: 20, max: 20000 } }],
+    ['-6,5 dB', '-6.5 dB', { kind: 'gain', range: { min: 0, max: 4 } }],
+    ['2,5E-2', '2.5E-2', {}],
+  ]) {
+    assert.deepEqual(parseValue(comma, spec), parseValue(dot, spec), comma);
+    assert.ok('value' in parseValue(comma, spec), comma);
+  }
 });

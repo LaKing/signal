@@ -234,3 +234,141 @@ test('a double-click on the 2D pad readout writes nothing before its field opens
   pad.dispatch('pointerdown', { button: 0, shiftKey: false, composedPath: () => [new FakeElement(), pad] });
   assert.deepEqual(writes, [['move', 0.75, 0, 'ramp']], 'a press on the pad still moves it');
 });
+
+// 2026-10-22: the double-click is told from the presses, not from `dblclick`
+// alone (a captured pointer's `dblclick` is the browser's to target).
+
+test('two quick presses on a readout open its field; slow ones do not', () => {
+  const { readout, entry } = entryOn();
+  const press = (timeStamp) => {
+    readout.dispatch('pointerdown', { button: 0, timeStamp, clientX: 5, clientY: 5 });
+    readout.dispatch('pointerup', { button: 0, timeStamp: timeStamp + 60, clientX: 5, clientY: 5 });
+  };
+  press(1000);
+  press(2000);
+  assert.equal(entry.isOpen, false, 'a second apart is two clicks');
+  press(2200);
+  assert.ok(entry.isOpen, 'the pair opens it, on its release');
+  let stopped = false;
+  readout.dispatch('dblclick', { stopPropagation: () => (stopped = true) });
+  assert.ok(stopped, "the browser's dblclick that follows is the open field's, never a reset around it");
+  assert.equal(readout.children.length, 1, 'one field');
+});
+
+test('a readout whose owner tells the double-click leaves the presses to it', () => {
+  const readout = new FakeElement();
+  const entry = new ValueEntry(readout, { pointer: false, spec: () => ({ unit: null, range: { min: 0, max: 1 } }), value: () => 0.5, apply() {}, note() {} });
+  for (const timeStamp of [1000, 1100]) {
+    readout.dispatch('pointerdown', { button: 0, timeStamp, clientX: 5, clientY: 5 });
+    readout.dispatch('pointerup', { button: 0, timeStamp, clientX: 5, clientY: 5 });
+  }
+  assert.equal(entry.isOpen, false);
+});
+
+/** A knob-like control (`SignalValueElement.setup`) on stubs, recording what it does. */
+async function valueControl({ entryOn: enabled = true } = {}) {
+  const { SignalValueElement } = await import('./base.js');
+  const control = new FakeElement();
+  const did = [];
+  let open = false;
+  const proto = SignalValueElement.prototype;
+  Object.assign(control, {
+    capture() {},
+    update() {},
+    dragStart: (event) => did.push(['start', event.clientY]),
+    dragMove: (event) => event.clientY / 100,
+    dragEnd: proto.dragEnd,
+    typeOrReset: proto.typeOrReset,
+    resetValue: proto.resetValue,
+    binding: {
+      value: 0.5,
+      moveTo: (position, how) => did.push(['move', position, how]),
+      setValue: (value, how) => did.push(['set', value, how]),
+      reset: () => did.push(['reset']),
+    },
+    entry: {
+      at: (event) => Boolean(event.onReadout),
+      open: () => {
+        if (!enabled || open) return false;
+        open = true;
+        did.push(['open']);
+        return true;
+      },
+      get isOpen() {
+        return open;
+      },
+    },
+  });
+  proto.setup.call(control);
+  const press = (timeStamp, { onReadout = false, y = 50, upY = y } = {}) => {
+    control.dispatch('pointerdown', { button: 0, timeStamp, clientX: 20, clientY: y, onReadout });
+    if (upY !== y) control.dispatch('pointermove', { clientX: 20, clientY: upY, onReadout });
+    control.dispatch('pointerup', { button: 0, timeStamp: timeStamp + 50, clientX: 20, clientY: upY, onReadout });
+  };
+  return { control, did, press };
+}
+
+test('a double-click on a knob or fader readout opens the field and moves nothing, even with a little jitter', async () => {
+  const { control, did, press } = await valueControl();
+  press(1000, { onReadout: true, y: 50, upY: 52 });
+  press(1150, { onReadout: true, y: 51, upY: 53 });
+  assert.deepEqual(did, [['open']], 'no drag start, no move, no commit, no reset');
+  control.dispatch('dblclick', { onReadout: true });
+  assert.deepEqual(did, [['open']], "the browser's dblclick after it does nothing more");
+});
+
+test('a double-click elsewhere on the control resets, once', async () => {
+  const { control, did, press } = await valueControl();
+  press(1000);
+  press(1200);
+  control.dispatch('dblclick', {});
+  assert.deepEqual(
+    did.filter(([what]) => what !== 'start'),
+    [['reset']],
+  );
+});
+
+test('with typed entry off, a double-click on the readout resets', async () => {
+  const { did, press } = await valueControl({ entryOn: false });
+  press(1000, { onReadout: true });
+  press(1100, { onReadout: true });
+  assert.deepEqual(did, [['reset']]);
+});
+
+test('a dblclick without presses (a script, an assistive tool) still types on the readout and resets elsewhere', async () => {
+  const { control, did } = await valueControl();
+  control.dispatch('dblclick', { onReadout: true });
+  assert.deepEqual(did, [['open']]);
+  const other = await valueControl();
+  other.control.dispatch('dblclick', {});
+  assert.deepEqual(other.did, [['reset']]);
+});
+
+test('a drag that starts on the readout moves the value once past its slack', async () => {
+  const { control, did } = await valueControl();
+  control.dispatch('pointerdown', { button: 0, timeStamp: 1000, clientX: 20, clientY: 50, onReadout: true });
+  control.dispatch('pointermove', { clientX: 20, clientY: 52 });
+  assert.deepEqual(did, [], 'within the slack');
+  control.dispatch('pointermove', { clientX: 20, clientY: 60 });
+  control.dispatch('pointermove', { clientX: 20, clientY: 70 });
+  control.dispatch('pointerup', { button: 0, timeStamp: 1400, clientX: 20, clientY: 70 });
+  assert.deepEqual(did, [['start', 60], ['move', 0.7, 'ramp'], ['set', 0.5, 'commit']]);
+});
+
+test("the scope's trigger level is typed on its readout, a decimal comma or dot", async () => {
+  const { SignalScope } = await import('./scope.js');
+  const readout = new FakeElement();
+  const scope = new FakeElement();
+  Object.assign(scope, { $: () => readout, xy: false, problemText: null, update() {} });
+  Object.defineProperty(scope, 'level', { get: () => Number(scope.getAttribute('trigger-level') ?? 0) });
+  SignalScope.prototype.setup.call(scope);
+  readout.dispatch('dblclick');
+  assert.equal(scope.entry.input.value, '0');
+  scope.entry.input.value = '0,25';
+  scope.entry.input.dispatch('input');
+  scope.entry.input.dispatch('keydown', { key: 'Enter' });
+  assert.equal(scope.getAttribute('trigger-level'), '0.25');
+  scope.xy = true;
+  readout.dispatch('dblclick');
+  assert.equal(scope.entry.isOpen, false, 'none in X–Y mode');
+});

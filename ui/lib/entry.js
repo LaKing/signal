@@ -9,6 +9,54 @@ import { effectiveTaper } from './taper.js';
 /** How long a clamped value and its reason are shown. */
 export const NOTE_MS = 2000;
 
+/** A double-click's two presses: at most this far apart in time (ms)… */
+export const DOUBLE_CLICK_MS = 500;
+/** …and in space (CSS pixels). */
+export const DOUBLE_CLICK_PX = 6;
+/** How far a press on a control's readout moves before it drags the value (CSS pixels). */
+export const READOUT_SLACK_PX = 4;
+
+/**
+ * A double-click told from pointer presses, not from the `dblclick` event
+ * (docs/ui-controls.md "Value entry"): a control captures the pointer on a
+ * press, and what the browser then makes of `dblclick` (its target, whether
+ * it comes) is the browser's. `down(event)` is true for the second press of
+ * a pair: the same button, within `DOUBLE_CLICK_MS` and `DOUBLE_CLICK_PX`
+ * of the first. A third press starts a new pair.
+ */
+export class ClickPair {
+  constructor({ ms = DOUBLE_CLICK_MS, px = DOUBLE_CLICK_PX } = {}) {
+    this.ms = ms;
+    this.px = px;
+    this.last = null;
+  }
+
+  down({ timeStamp = 0, clientX = 0, clientY = 0, button = 0 }) {
+    const last = this.last;
+    const second =
+      last !== null && button === last.button && timeStamp >= last.time && timeStamp - last.time <= this.ms && Math.hypot(clientX - last.x, clientY - last.y) <= this.px;
+    this.last = second ? null : { time: timeStamp, x: clientX, y: clientY, button };
+    return second;
+  }
+
+  /** Forgets the first press (a drag, a key, the field opened). */
+  reset() {
+    this.last = null;
+  }
+}
+
+/**
+ * A number typed in a plain numeric field (a loop length, a buffer size):
+ * `parseValue` without a unit, so `8,5` and `8.5` are both 8.5; null when it
+ * is not one. With `integer`, only a whole number.
+ */
+export function parseNumber(text, { integer = false } = {}) {
+  const parsed = parseValue(text, { unit: null, range: {} });
+  if ('error' in parsed) return null;
+  if (integer && !Number.isInteger(parsed.value)) return null;
+  return parsed.value;
+}
+
 const NUMBER = /^([+-]?)(\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE]([+-]?\d+))?\s*(.*)$/;
 const INFINITY = /^([+-]?)\s*(?:inf(?:inity)?|∞)\s*(.*)$/i;
 const PREFIXES = { k: 1e3, m: 1e-3, M: 1e6 };

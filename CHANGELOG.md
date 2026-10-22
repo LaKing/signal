@@ -13,6 +13,7 @@ All notable changes to Signal are recorded here, by milestone (`docs/roadmap.md`
 
 ### Changed
 
+- Typed values (the owner's, 2026-10-22: double-click a number to type it, with a decimal comma or dot): the double-click on a control's value text is told from the two presses (500 ms, 6 px), not only from the browser's `dblclick`, and its presses no longer move or write the value before the field opens (a press on a fader's or knob's readout drags only past 4 px). The scope's trigger level takes a typed value. The piano roll's loop length and Signal.app's Setup buffer and CPU workers read a decimal comma as a dot (text fields instead of WebKit's number field, which dropped it).
 - Signal.app's toolbar has no Play or Stop: the open project plays while the power is on (when the app starts, when a project opens, when the power comes on) and starts and stops from its own panel. In Signal.app, `transport.play` while playing plays the project again from frame 0. To list the devices again, switch the power off.
 
 ## [0.2.0] - 2026-10-22

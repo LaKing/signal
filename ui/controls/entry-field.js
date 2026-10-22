@@ -1,10 +1,11 @@
 // A readout that takes a typed value (docs/ui-controls.md "Value entry",
 // M2.9-4): a double-click on it, or `open()` (Enter on its control), puts a
 // text field over exactly the readout's box, out of the flow, so nothing
-// moves. The states and the parsing are ui/lib/entry.js. Used by the
+// moves. The double-click is told from the presses (`ClickPair`), not only
+// from `dblclick`. The states and the parsing are ui/lib/entry.js. Used by the
 // controls, Signal.app's parameter list and the schematic's inspector.
 
-import { EntryField, NOTE_MS } from '../lib/entry.js';
+import { ClickPair, EntryField, NOTE_MS } from '../lib/entry.js';
 
 /** The field's look; the readout it covers needs `position: relative`. */
 export const ENTRY_CSS = `
@@ -41,7 +42,10 @@ export function entryDisabled(element) {
  * `apply(value)` sends a committed value, `note(text)` shows a reason in the
  * owner's message place (null clears it), `closed()` redraws the readout,
  * `focus()` gives the focus back to the owner, `enabled()` (default: always),
- * `next()` what Tab opens after a commit (the 2D pad's y after its x).
+ * `next()` what Tab opens after a commit (the 2D pad's y after its x),
+ * `pointer` (default true): the readout tells a double-click from its own
+ * presses; false where the owner captures the pointer and does it (the
+ * fader's and knob's `SignalValueElement`).
  */
 export class ValueEntry {
   constructor(readout, options) {
@@ -50,8 +54,23 @@ export class ValueEntry {
     this.field = new EntryField();
     this.input = null;
     this.timer = null;
+    if (options.pointer !== false) {
+      const pair = new ClickPair();
+      let second = false;
+      readout.addEventListener('pointerdown', (event) => {
+        second = event.button === 0 && !this.input && pair.down(event);
+      });
+      readout.addEventListener('pointerup', () => {
+        if (!second) return;
+        second = false;
+        this.open();
+      });
+    }
+    // Where no presses came (or the owner left them to it), the browser's
+    // double-click; one on an open field's readout is the field's, never a
+    // reset of the control around it.
     readout.addEventListener('dblclick', (event) => {
-      if (this.open()) event.stopPropagation();
+      if (this.input || this.open()) event.stopPropagation();
     });
   }
 

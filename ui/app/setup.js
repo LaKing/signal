@@ -5,7 +5,7 @@
 // Refresh (not while playing) and Apply. Plain ES module.
 
 import { el } from './app.js';
-import { NOT_FOUND, applyMessage, choicesOf, choose, draftOf, refreshed, withFields } from './lib/draft.js';
+import { NOT_FOUND, applyMessage, bufferFrames, choicesOf, choose, draftOf, refreshed, withFields } from './lib/draft.js';
 import { getDefaultConnection, onDefaultConnection } from '../signal-ui.js';
 
 const REFRESH_WHILE_PLAYING = 'switch the power off to refresh: listing devices pauses metering and status';
@@ -21,7 +21,8 @@ export class SignalAppSetup extends HTMLElement {
     this.check = el('div', { className: 'check' });
     this.input = el('select', { name: 'input' });
     this.inputWhy = el('div', { className: 'warn' });
-    this.buffer = el('input', { name: 'buffer', type: 'number', min: '1', max: '8192', step: '1' });
+    // Text, not `type="number"` (WebKit's drops a decimal comma): read by `bufferFrames`.
+    this.buffer = el('input', { name: 'buffer', type: 'text', inputMode: 'numeric', size: 6, spellcheck: false, autocomplete: 'off' });
     this.workers = el('input', { name: 'cpuWorkers', type: 'text', size: 6, placeholder: 'auto' });
     this.channels = el('input', { name: 'channels', type: 'text', size: 12, placeholder: '1, 2' });
     this.policy = el('select', { name: 'rtPolicy' });
@@ -153,7 +154,7 @@ export class SignalAppSetup extends HTMLElement {
     this.check.textContent = '';
     if (!device || !this.rate) return;
     try {
-      const checked = await this.request({ type: 'setup.check', output: device.index, buffer: Number(this.buffer.value) || 1 });
+      const checked = await this.request({ type: 'setup.check', output: device.index, buffer: bufferFrames(this.buffer.value) });
       this.check.textContent = checked.message;
       this.check.className = checked.ok ? 'check' : 'check error';
     } catch (error) {

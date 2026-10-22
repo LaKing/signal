@@ -5,6 +5,8 @@
 // own lookup). A saved device that is not found is unresolved: shown as
 // such, kept by Apply, replaced only by an explicit choice. No DOM.
 
+import { parseNumber } from '../../lib/entry.js';
+
 /** What the page shows for a saved device that is not found (one string). */
 export const NOT_FOUND = '— not found: choose a device —';
 
@@ -88,9 +90,19 @@ export function selection(choice) {
 export function cpuWorkers(text) {
   const t = String(text ?? '').trim().toLowerCase();
   if (t === '' || t === 'auto') return 'auto';
-  const n = Number(t);
+  const n = parseNumber(t);
   if (!Number.isInteger(n) || n < 1 || n > 64) throw new Error('CPU workers is auto or 1 to 64');
   return n;
+}
+
+/**
+ * The buffer as typed, in frames: a number (a decimal comma or dot, as every
+ * typed number, ui/lib/entry.js `parseNumber`), rounded, at least 1.
+ */
+export function bufferFrames(text) {
+  const n = parseNumber(String(text ?? ''));
+  if (n === null) throw new Error('Buffer is a number of frames, 1 or more');
+  return Math.max(1, Math.round(n));
 }
 
 /** The `setup.apply` message of a draft. */
@@ -99,7 +111,7 @@ export function applyMessage(draft) {
     type: 'setup.apply',
     output: selection(draft.output),
     input: selection(draft.input),
-    buffer: Math.max(1, Math.round(Number(draft.buffer) || 1)),
+    buffer: bufferFrames(draft.buffer),
     cpuWorkers: cpuWorkers(draft.cpuWorkers),
     outputChannels: String(draft.channels ?? '').trim() === '' ? null : String(draft.channels),
     rtPolicy: draft.rtPolicy,
