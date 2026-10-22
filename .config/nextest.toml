@@ -18,10 +18,14 @@ not (
 )
 """
 
-# A test that times the host passes on the device, but only by a margin a
+# Two tests time the host and pass on the device, but only by a margin a
 # loaded virtual machine sometimes misses: a hidden edit was shown after
-# 2.30 s against a 2.25 s bound. It runs, with retries; nextest reports a
-# pass after a retry as flaky.
+# 2.30 s against a 2.25 s bound, and in a release build 4 096 frames once
+# ran before any worker woke (the caller ran every task). They run, with
+# retries; nextest reports a pass after a retry as flaky.
 [[profile.ci.overrides]]
-filter = "binary_id(signal-ui::document) & test(=the_display_shows_a_hidden_edit_within_the_bound)"
+filter = """
+    (binary_id(signal-ui::document) & test(=the_display_shows_a_hidden_edit_within_the_bound))
+  | (binary_id(signal-engine::worker_setup) & test(=requests_between_blocks_change_no_output))
+"""
 retries = 2
