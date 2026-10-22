@@ -1,0 +1,54 @@
+<!doctype html>
+<!-- A panel window of Signal.app (ADR 0032, docs/ui-controls.md "Cards
+     across windows"): the project's main panel (/project/main.html) in a
+     same-origin frame filling the window, showing only the cards this
+     window holds, as the app tells it (`signal-window`). A card is dragged
+     by its heading to another window, or out of every window for a new
+     panel window. The project's ui/windows.toml says which window holds
+     which card. The URL's fragment carries the WebSocket's port and the
+     session token. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signal — Panel</title>
+<link rel="stylesheet" href="../controls/theme.css">
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; overflow: hidden; background: var(--signal-bg); color: var(--signal-muted); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+  iframe { display: block; width: 100%; height: 100%; border: 0; }
+  .empty { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<iframe class="project-panel" title="Project panel"></iframe>
+<p class="empty" hidden>Drag a card here by its heading, from the main window's Panel tab or another panel window.</p>
+<script type="module">
+import { connectFromPage, setDefaultConnection } from '../signal-ui.js';
+import { connectCards } from './lib/cards.js';
+import { panelReloads, panelSource } from './lib/menu.js';
+
+const frame = document.querySelector('iframe');
+const empty = document.querySelector('.empty');
+frame.src = panelSource(location.hash);
+connectCards(frame, window, (count) => { empty.hidden = count > 0; });
+
+// Another project opened: its panel.
+const connection = connectFromPage();
+if (connection) {
+  setDefaultConnection(connection);
+  let shown;
+  const app = (message) => {
+    const dir = message?.project?.dir ?? null;
+    if (panelReloads(shown, dir)) frame.contentWindow?.location.reload();
+    if (dir || shown === undefined) shown = dir;
+  };
+  connection.on('app', app);
+  const opened = () => connection.request({ type: 'app.get' }).then(app, () => {});
+  connection.on('status', (s) => s === 'open' && opened());
+  if (connection.status === 'open') opened();
+}
+</script>
+</body>
+</html>

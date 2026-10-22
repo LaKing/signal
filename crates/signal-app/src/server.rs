@@ -65,7 +65,12 @@ enum Request {
     SaveAs(PathBuf, Sender<Result<(), String>>),
     /// Open this folder or `.signal` file.
     Open(PathBuf, Edits, Sender<Result<(), String>>),
+    /// Edit `ui/windows.toml` of this project folder (ADR 0032).
+    WriteWindows(PathBuf, WindowsEdit, Sender<Result<(), String>>),
 }
+
+/// An edit of `ui/windows.toml`'s text (`signal_ui::Host::write_windows`).
+pub type WindowsEdit = Box<dyn FnOnce(&str) -> Result<String, String> + Send>;
 
 /// What the control thread hands back once its host runs.
 struct Ready {
@@ -196,6 +201,39 @@ impl AppServer {
         self.ask(|a| Request::Open(path, edits, a), Err(GONE.to_owned()))
     }
 
+    /// The window layout of the project folder `dir` (ADR 0032): its
+    /// `ui/windows.toml` edited by `edit`, written by the control thread,
+    /// which takes the write as seen (nothing reloads); refused when `dir`
+    /// is no longer the open project.
+    pub fn write_windows(&self, dir: &Path, edit: WindowsEdit) -> Result<(), String> {
+        let dir = dir.to_owned();
+        self.ask(
+            |a| Request::WriteWindows(dir, edit, a),
+            Err(GONE.to_owned()),
+        )
+    }
+
+    /// [`write_windows`](AppServer::write_windows) without waiting: the
+    /// answer comes on the receiver, so the window's event loop never
+    /// waits for the write (and its sync).
+    pub fn write_windows_later(
+        &self,
+        dir: &Path,
+        edit: WindowsEdit,
+    ) -> mpsc::Receiver<Result<(), String>> {
+        let (answer, answered) = mpsc::channel();
+        let gone = answer.clone();
+        let request = Request::WriteWindows(dir.to_owned(), edit, answer);
+        if self
+            .requests
+            .as_ref()
+            .is_none_or(|requests| requests.send(request).is_err())
+        {
+            let _ = gone.send(Err(GONE.to_owned()));
+        }
+        answered
+    }
+
     /// Stops playing, records the window's size (if known) in the Setup,
     /// saves it, closes the project (an edited one's working folder is kept
     /// unless `discard`), stops the servers (their clients are closed), and
@@ -272,6 +310,9 @@ fn run(host: &mut Host, requests: &Receiver<Request>, on_project: Option<OnProje
             }
             Ok(Request::Open(path, edits, answer)) => {
                 let _ = answer.send(host.open_project(&path, edits));
+            }
+            Ok(Request::WriteWindows(dir, edit, answer)) => {
+                let _ = answer.send(host.write_windows(&dir, edit));
             }
             Err(TryRecvError::Empty) => {}
         }

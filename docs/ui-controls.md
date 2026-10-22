@@ -231,6 +231,24 @@ Errors: an address that is not one, an unknown port (the message lists what the 
 
 **The example panels.** `projects/kick/ui/main.html`: decay and drive knobs (an SVG skin, `projects/kick/ui/assets/knob.svg`), the gain fader, the output meters, a scope of the kick. `projects/pulse/ui/main.html`: cutoff and resonance on a 2D pad, the delay's time, feedback and level on knobs (a PNG filmstrip, `projects/pulse/ui/assets/knob-strip.png` and `@2x`, drawn by `node scripts/ui-strip.mjs pulse`), the eight sequence steps as faders (55–440 Hz), the gain, meters and a scope of the filter. `projects/physical-av/ui/main.html` (M2.8-7): three canvases (the membrane seen, as a mesh; the sparks with the PNG sprite sheet; the bodies with the SVG skin), a strike button, knobs, meters and a scope of the membrane heard. `projects/studio/ui/main.html` (M2.11-4): three sections styled after the instruments they recall, with generic titles and no marks, by the project's own `ui/studio.css` (custom properties per section, group captions as `::before` text of class tokens, so the panel stays within the editor's whitelist) and SVG skins: MONO SYNTH (black panel, wood cheeks, the voice's knobs grouped as controllers, oscillator bank with three-position waveform levers — knobs with `sweep="60"` —, mixer, modifiers, contours and output) with the melody's `<signal-piano-roll>`, RHYTHM COMPOSER (warm grey, a knob column per drum voice, tempo, shuffle and accent) with the beat's `<signal-step-grid>`, TAPE ECHO (cream and green, chicken-head knobs), and the master bus's gain (its fader stops at 0.25), meters and scope.
 
+### Cards across windows
+
+Signal.app can show the project's panel over several windows (ADR 0032): a main window's Panel tab and any number of panel windows (`ui/app/panel-window.html`, the main panel in a frame). The main panel stays the one source of the cards; a panel window shows the cards it holds, in its order, and the main windows show every card no panel window holds. Cards are hidden (`display: none`) and ordered (`order`) with inline CSS only, never moved in the DOM, so the panel file, Edit layout and `panel.written` see the panel as written. Which window holds which card is the project's `ui/windows.toml` (`project-format.md` §13), per screen configuration.
+
+**Card ids.** A card (a `.signal-card` not inside another, or a generated panel's group) is known by its `id` attribute when it has one (letters, digits, `-`, `_`, `.`, `:`), else by the slug of its first heading (`<h2>Tape echo</h2>` is `tape-echo`), else `card`; a second card of the same slug gets `-2`, then `-3`, in the panel's order (`cardIds` in `ui/app/lib/cards.js`). A panel that will be split over windows should give its cards an `id`, so a renamed heading or a new card of the same heading keeps each in its window; the example panels are left as they are, their headings giving `kick`, `kick-2`, `output`, `scope`.
+
+**Drag and drop.** A card is dragged by its heading (its controls work as before; not while Edit layout is on): a press that moves 6 px, released anywhere, the pointer captured; Escape cancels. The drop goes through the app rather than HTML5 drag and drop (ADR 0032 §8). The messages between a window's page and the app (wry's `window.ipc.postMessage`, JSON; window events the other way) are not UI protocol messages:
+
+| From | Message | Meaning |
+|---|---|---|
+| page | `{"type": "window.ready"}` | the page listens; the app answers with `signal-window` (and runs a menu action waiting for a new main window) |
+| app | `signal-window` event, `detail` `{"view": "panel", "cards": [ids]}` or `{"view": "main", "held": [ids], "order": [ids]}` | what this window shows |
+| page | `{"type": "card.drag", "card": id}` | a card's drag ended: the app finds the window under the pointer (the most recently focused first); outside every window it opens a panel window there holding the card; on a schematic window nothing changes |
+| app | `signal-card-drop` event, `detail` `{"card", "x", "y"}` (the point in the page's coordinates) | a card was dropped on this window |
+| page | `{"type": "card.place", "card": id, "before": id or null}` | it goes before that card (on a card's first half, else the next; `null` at the end); the app moves it, tells every window, and writes `ui/windows.toml` a second later |
+
+In a browser (`signal ui`) there is no `window.ipc`: nothing of this runs and the panel shows every card.
+
 ### Editing a panel
 
 **Edit layout** (M2.9-2, ADR 0026 §4–5) is a switch at the start of `<signal-panel>`'s bar: the Panel tab's top line in Signal.app, and the panel page of `signal ui` in a browser (`ui/controls/panel-editor.js`). It needs a plan, since every write is checked against it: without one the switch is shown disabled and its tooltip says why. In edit mode:

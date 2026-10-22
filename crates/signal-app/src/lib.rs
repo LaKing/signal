@@ -18,7 +18,10 @@
 //!   UI protocol's host in app mode; the window's page is its client.
 //! - [`window`]: what the window decides without a window (its native menu
 //!   bar and what each item does, where it may navigate, the size the Setup
-//!   records).
+//!   records, what each view loads and is titled).
+//! - [`layout`]: several windows over the screens (ADR 0032): the screen
+//!   configuration's key, its layout in the project's `ui/windows.toml`,
+//!   where each window opens, and the panel cards moved between windows.
 
 #![cfg_attr(
     not(test),
@@ -39,6 +42,7 @@ pub const VERSION: &str = match option_env!("SIGNAL_VERSION") {
 };
 
 pub mod dialog;
+pub mod layout;
 pub mod meter;
 pub use signal_ui::{panel, setup};
 pub mod server;

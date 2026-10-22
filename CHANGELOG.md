@@ -2,6 +2,12 @@
 
 All notable changes to Signal are recorded here, by milestone (`docs/roadmap.md`). The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions are `MAJOR.MINOR.N`, where `N` counts the commits since the tag `vMAJOR.MINOR.0` (`scripts/version.sh`); a section covers a `MAJOR.MINOR` line.
 
+## [Unreleased]
+
+### Added
+
+- **Several windows over the screens** (ADR 0032, owner's request of 2026-10-22). Signal.app opens any number of main, schematic and panel windows on the running project (Window ▸ New Main Window ⇧⌘N, New Schematic Window, New Panel Window), each on any screen or full screen, with the system's Minimize, Zoom, Bring All to Front and window list. The project panel's cards are dragged by their heading between windows, reordered, or dropped outside every window for a new panel window. The layout is kept in the project's `ui/windows.toml` under a key describing the connected screens (names, resolutions, scale, arrangement); another screen configuration opens in the default state (one main window on the main screen with every card), and Window ▸ Reset Layout returns to it. Closing the last window quits as before; closing any other just closes it.
+
 ## [0.2.0] - 2026-10-21
 
 The first public release (M2.14, ADR 0031): Signal plays in real time, edits live, runs as a Mac app with a web UI, and has a schematic, a built-in library, patterns and an agent interface.

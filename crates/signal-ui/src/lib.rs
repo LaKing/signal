@@ -65,6 +65,11 @@ pub const APP_PAGE: &str = "/ui/app/index.html";
 /// library's `schematic.html`.
 pub const SCHEMATIC_PAGE: &str = "/schematic";
 
+/// Signal.app's window layout in a project folder (ADR 0032): per screen
+/// configuration, its windows and the panel cards each holds. Presentation
+/// only, as `ui/schematic.toml` is; written by [`Host::write_windows`].
+pub const WINDOWS_FILE: &str = "ui/windows.toml";
+
 /// The UI library to serve: the app bundle's own (`Contents/Resources/ui`,
 /// beside `Contents/MacOS` and `Contents/Helpers`, where `exe` runs from),
 /// else `built`, the repository's `ui/` the program was built from.

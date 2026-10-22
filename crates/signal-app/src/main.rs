@@ -1,19 +1,40 @@
-//! `signal-app`: Signal.app's window (ADR 0013, 0023), a tao window with a
-//! wry WebView on the app's own UI server ([`AppServer`]). `--setup <file>`
-//! and `--project <dir or .signal>` choose the Setup file and the project to
-//! open, for tests and scripting.
+//! `signal-app`: Signal.app's windows (ADR 0013, 0023, 0032), each a tao
+//! window with a wry WebView on the app's own UI server ([`AppServer`]):
+//! a main window (the app's page), a schematic window or a panel window,
+//! any number of each, on any screen. `--setup <file>` and `--project <dir
+//! or .signal>` choose the Setup file and the project to open, for tests
+//! and scripting.
 //!
 //! The menu bar is native (`muda`, M2.8-11): the app menu, File (Open…,
-//! Save, Save As…, Interface Setup…, Quit) and Edit, so the page's text
-//! fields get the system's shortcuts. Save and Interface Setup are handed
-//! to the page, which runs them (a `signal-menu` event). Open… and Save As…
-//! show the system's panels; a chosen, dropped or Finder-opened folder,
-//! `project.toml` or `.signal` file is opened by the server (M2.8-12).
-//! While a `.signal` project is edited, closing the window, Quit and opening
-//! another project ask "Save changes to <name>?" (`window::prompt_buttons`).
+//! Save, Save As…, Interface Setup…, Quit), Edit, so the page's text
+//! fields get the system's shortcuts, and Window (New Main, Schematic and
+//! Panel Window, Reset Layout, Minimize, Zoom, full screen and the window
+//! list). Save and Interface Setup are handed to a main window's page,
+//! which runs them (a `signal-menu` event; without a main window one is
+//! opened for them). Open… and Save As… show the system's panels; a
+//! chosen, dropped or Finder-opened folder, `project.toml` or `.signal`
+//! file is opened by the server (M2.8-12). While a `.signal` project is
+//! edited, closing the last window, Quit and opening another project ask
+//! "Save changes to <name>?" (`window::prompt_buttons`); closing any other
+//! window just closes it.
+//!
+//! The windows' layout (ADR 0032) is the project's `ui/windows.toml`,
+//! under the key of the connected screens (`layout::screen_key`): applied
+//! at start, when another project opens and when the screens change
+//! (looked at every second); without an entry for the key, the default
+//! state (one main window on the main screen with every card). Moving,
+//! resizing, opening or closing a window, or moving a card, writes the
+//! key's entry a second after the last change (through the control
+//! thread, which takes the write as seen). A panel card dragged by its
+//! heading is dropped where the pointer is when released: the page tells
+//! the app (`card.drag`, wry's IPC), the app finds the window under the
+//! pointer and asks its page where the card goes (`signal-card-drop`,
+//! answered with `card.place`), or opens a new panel window there.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use muda::accelerator::{CMD_OR_CTRL, Key, KeyAccelerator, Modifiers};
@@ -23,20 +44,27 @@ use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSModalResponseOK, NSOpenPanel, NSSavePanel,
 };
 use objc2_foundation::NSString;
-use signal_app::server::{AppConfig, AppServer};
+use serde_json::{Value, json};
+use signal_app::layout::{
+    CardDrop, Change, Layout, LayoutWindow, Monitor, Screens, Seen, Tracker, WindowView,
+    default_layout, held, move_card, place, read_layout, record, screens_of, similar, window_at,
+    write_layout,
+};
+use signal_app::panel::write_file;
+use signal_app::server::{AppConfig, AppServer, WindowsEdit};
 use signal_app::setup::{Setup, setup_path};
 use signal_app::state::Backend;
 use signal_app::window::{
-    ExitPlan, MENU_BAR, MenuAction, MenuItem, NATIVE_MENU_SCRIPT, Prompt, QuitRoute,
-    default_save_name, dropped, exit_plan, may_navigate, origin_of, prompt_buttons, prompt_text,
-    save_target, title, window_of,
+    ExitPlan, MENU_BAR, MenuAction, MenuItem, NATIVE_MENU_SCRIPT, Prompt, QuitRoute, WINDOW_MENU,
+    default_save_name, dropped, exit_plan, may_navigate, origin_of, page_url, prompt_buttons,
+    prompt_text, save_target, view_path, view_title, window_of,
 };
 use signal_ui::document::open_root;
-use signal_ui::{Edits, ProjectStatus};
-use tao::dpi::LogicalSize;
+use signal_ui::{Edits, ProjectStatus, WINDOWS_FILE};
+use tao::dpi::{LogicalPosition, LogicalSize};
 use tao::event::{Event, StartCause, WindowEvent};
-use tao::event_loop::{ControlFlow, EventLoopBuilder};
-use tao::window::WindowBuilder;
+use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget};
+use tao::window::{Fullscreen, WindowBuilder, WindowId};
 use wry::{DragDropEvent, WebViewBuilder};
 
 /// Signal.app: interface setup, play and stop, meters, panels.
@@ -53,30 +81,48 @@ struct Args {
     project: Option<PathBuf>,
 }
 
-/// What the menu bar, the WebView and the server tell the event loop.
+/// What the menu bar, the WebViews and the server tell the event loop.
 #[derive(Debug)]
 enum UserEvent {
     /// One of Signal's own menu items.
     Menu(MenuAction),
-    /// What was dropped on the window (a folder or `.signal` file is opened).
+    /// What was dropped on a window (a folder or `.signal` file is opened).
     Dropped(PathBuf),
-    /// The open project or its edited state changed (the title).
+    /// The open project or its edited state changed (the titles).
     Project(Option<ProjectStatus>),
+    /// A window's page said something (wry's IPC: `window.ready`,
+    /// `card.drag`, `card.place`).
+    Page(WindowId, String),
 }
 
-/// The native menu bar of [`MENU_BAR`]; built on the main thread, as `muda`
-/// requires.
-fn menu_bar() -> muda::Result<Menu> {
+type Target = EventLoopWindowTarget<UserEvent>;
+/// A write's answer from the control thread.
+type Answer = Receiver<Result<(), String>>;
+type Proxy = EventLoopProxy<UserEvent>;
+
+/// How often the screens are looked at (tao tells no screen change).
+const SCREEN_POLL: Duration = Duration::from_secs(1);
+/// A new panel window's size, in points.
+const PANEL_SIZE: (f64, f64) = (480.0, 360.0);
+
+/// The native menu bar of [`MENU_BAR`] and its Window menu; built on the
+/// main thread, as `muda` requires.
+fn menu_bar() -> muda::Result<(Menu, Option<Submenu>)> {
     let bar = Menu::new();
+    let mut windows = None;
     for (name, items) in MENU_BAR {
         let built: Vec<Box<dyn IsMenuItem>> = items
             .iter()
             .map(|item| menu_item(*item))
             .collect::<muda::Result<_>>()?;
         let refs: Vec<&dyn IsMenuItem> = built.iter().map(AsRef::as_ref).collect();
-        bar.append(&Submenu::with_items(name, true, &refs)?)?;
+        let submenu = Submenu::with_items(name, true, &refs)?;
+        bar.append(&submenu)?;
+        if name == WINDOW_MENU {
+            windows = Some(submenu);
+        }
     }
-    Ok(bar)
+    Ok((bar, windows))
 }
 
 fn menu_item(item: MenuItem) -> muda::Result<Box<dyn IsMenuItem>> {
@@ -93,6 +139,9 @@ fn menu_item(item: MenuItem) -> muda::Result<Box<dyn IsMenuItem>> {
                 Key::Character(key.to_string()),
             )))?;
             Box::new(own)
+        }
+        MenuItem::Plain(action, label) => {
+            Box::new(muda::MenuItem::with_id(action.id(), label, true, None))
         }
         MenuItem::About => Box::new(PredefinedMenuItem::about(
             None,
@@ -111,8 +160,589 @@ fn menu_item(item: MenuItem) -> muda::Result<Box<dyn IsMenuItem>> {
         MenuItem::Copy => Box::new(PredefinedMenuItem::copy(None)),
         MenuItem::Paste => Box::new(PredefinedMenuItem::paste(None)),
         MenuItem::SelectAll => Box::new(PredefinedMenuItem::select_all(None)),
+        MenuItem::Minimize => Box::new(PredefinedMenuItem::minimize(None)),
+        MenuItem::Zoom => Box::new(PredefinedMenuItem::zoom(None)),
+        MenuItem::Fullscreen => Box::new(PredefinedMenuItem::fullscreen(None)),
+        MenuItem::BringAllToFront => Box::new(PredefinedMenuItem::bring_all_to_front(None)),
         MenuItem::Separator => Box::new(PredefinedMenuItem::separator()),
     })
+}
+
+/// The connected screens as tao lists them.
+fn screens(target: &Target) -> Screens {
+    let handles: Vec<_> = target.available_monitors().collect();
+    let primary = target.primary_monitor();
+    let monitors: Vec<Monitor> = handles
+        .iter()
+        .map(|m| Monitor {
+            name: m.name().unwrap_or_else(|| "screen".to_owned()),
+            width: m.size().width,
+            height: m.size().height,
+            scale: m.scale_factor(),
+            x: m.position().x,
+            y: m.position().y,
+        })
+        .collect();
+    let primary = primary.and_then(|p| handles.iter().position(|m| *m == p));
+    screens_of(&monitors, primary)
+}
+
+/// The script that dispatches window event `event` with `detail` (JSON).
+fn event_script(event: &str, detail: &Value) -> String {
+    format!("window.dispatchEvent(new CustomEvent('{event}', {{ detail: {detail} }}))")
+}
+
+/// One open window.
+struct Shown {
+    view: WindowView,
+    /// A panel window's cards; a main window's card order.
+    cards: Vec<String>,
+    // Before `window`: fields drop in order, so the WebView goes first.
+    webview: wry::WebView,
+    window: tao::window::Window,
+    /// Its page said `window.ready` (it listens for `signal-window`).
+    ready: bool,
+    /// Scripts to run once it is ready (a menu action for a main window
+    /// opened for it).
+    pending: Vec<String>,
+}
+
+impl Shown {
+    /// Its frame's corner and content's size, in the desktop's points.
+    fn frame(&self) -> ((f64, f64), (f64, f64)) {
+        let scale = self.window.scale_factor();
+        let at = self
+            .window
+            .outer_position()
+            .map(|p| p.to_logical::<f64>(scale))
+            .map_or((0.0, 0.0), |p| (p.x, p.y));
+        let size = self.window.inner_size().to_logical::<f64>(scale);
+        (at, (size.width, size.height))
+    }
+
+    /// Its content's `(x, y, width, height)` in the desktop's points.
+    fn content(&self) -> (f64, f64, f64, f64) {
+        let scale = self.window.scale_factor();
+        let at = self
+            .window
+            .inner_position()
+            .map(|p| p.to_logical::<f64>(scale))
+            .map_or((0.0, 0.0), |p| (p.x, p.y));
+        let size = self.window.inner_size().to_logical::<f64>(scale);
+        (at.0, at.1, size.width, size.height)
+    }
+
+    fn fullscreen(&self) -> bool {
+        self.window.fullscreen().is_some()
+    }
+
+    /// Full screen (natively, on its screen) or not, as `want` says.
+    fn set_fullscreen(&self, want: bool) {
+        if want != self.fullscreen() {
+            self.window
+                .set_fullscreen(want.then_some(Fullscreen::Borderless(None)));
+        }
+    }
+
+    fn run(&self, script: &str) {
+        if let Err(error) = self.webview.evaluate_script(script) {
+            eprintln!("signal-app: {error}");
+        }
+    }
+}
+
+/// The open windows and their layout (ADR 0032).
+struct Windows {
+    list: Vec<Shown>,
+    /// The windows, the most recently focused first.
+    front: Vec<WindowId>,
+    screens: Screens,
+    polled: Instant,
+    /// The project whose `ui/windows.toml` holds the layout.
+    dir: Option<PathBuf>,
+    project: Option<ProjectStatus>,
+    app_url: String,
+    origin: String,
+    /// The Setup's `[window]`: the default main window's size.
+    size: Option<(f64, f64)>,
+    /// When to write (the screens' key, the person's changes, the guard).
+    tracker: Tracker,
+    /// The layout as last read or written for the key.
+    written: Option<Layout>,
+    /// A write under way: its answer, the layout written and when it was
+    /// asked.
+    writing: Option<(Answer, Layout, Instant)>,
+}
+
+impl Windows {
+    /// Opens a window of `view` holding `cards` at `at`.
+    fn open(
+        &mut self,
+        target: &Target,
+        proxy: &Proxy,
+        view: WindowView,
+        cards: Vec<String>,
+        at: &LayoutWindow,
+    ) -> Result<usize, String> {
+        let placed = place(at, &self.screens);
+        let window = WindowBuilder::new()
+            .with_title(view_title(view, self.project.as_ref()))
+            .with_inner_size(LogicalSize::new(placed.width, placed.height))
+            .with_position(LogicalPosition::new(placed.x, placed.y))
+            .build(target)
+            .map_err(|error| format!("the window did not open: {error}"))?;
+        let id = window.id();
+        let origin = self.origin.clone();
+        let drops = proxy.clone();
+        let pages = proxy.clone();
+        let webview = WebViewBuilder::new()
+            .with_url(page_url(&self.app_url, view_path(view)))
+            // The page leaves the menu's shortcuts to the native menu.
+            .with_initialization_script(NATIVE_MENU_SCRIPT)
+            .with_navigation_handler(move |to| may_navigate(&to, &origin))
+            .with_ipc_handler(move |request: wry::http::Request<String>| {
+                let _ = pages.send_event(UserEvent::Page(id, request.into_body()));
+            })
+            .with_drag_drop_handler(move |event| {
+                if let DragDropEvent::Drop { paths, .. } = event
+                    && let Some(path) = paths.into_iter().next()
+                {
+                    let _ = drops.send_event(UserEvent::Dropped(path));
+                }
+                // The server opens what was dropped; nothing is navigated to.
+                true
+            })
+            .build(&window)
+            .map_err(|error| format!("the WebView did not open: {error}"))?;
+        self.list.push(Shown {
+            view,
+            cards,
+            window,
+            webview,
+            ready: false,
+            pending: Vec::new(),
+        });
+        self.front.insert(0, id);
+        if at.fullscreen
+            && let Some(shown) = self.list.last()
+        {
+            shown.set_fullscreen(true);
+        }
+        self.tracker.change(Instant::now(), Change::Structure);
+        Ok(self.list.len() - 1)
+    }
+
+    /// A new window of `view` near the front window, on its screen.
+    fn open_new(&mut self, target: &Target, proxy: &Proxy, view: WindowView) -> Option<usize> {
+        let mut at = default_layout(&self.screens, self.size).windows.remove(0);
+        if view != WindowView::Main
+            && let Some(front) = self.index(self.front.first().copied())
+        {
+            let ((x, y), _) = self.list[front].frame();
+            let size = if view == WindowView::Panel {
+                PANEL_SIZE
+            } else {
+                (at.width, at.height)
+            };
+            at = record(view, Vec::new(), (x + 40.0, y + 40.0), size, &self.screens);
+        }
+        match self.open(target, proxy, view, Vec::new(), &at) {
+            Ok(index) => Some(index),
+            Err(error) => {
+                eprintln!("signal-app: {error}");
+                None
+            }
+        }
+    }
+
+    fn index(&self, id: Option<WindowId>) -> Option<usize> {
+        id.and_then(|id| self.list.iter().position(|w| w.window.id() == id))
+    }
+
+    /// The layout the windows have now.
+    fn layout(&self) -> Layout {
+        Layout {
+            windows: self
+                .list
+                .iter()
+                .map(|shown| {
+                    let (at, size) = shown.frame();
+                    let cards = match shown.view {
+                        WindowView::Schematic => Vec::new(),
+                        _ => shown.cards.clone(),
+                    };
+                    LayoutWindow {
+                        fullscreen: shown.fullscreen(),
+                        ..record(shown.view, cards, at, size, &self.screens)
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// The layout of the project for the screens now: its entry for their
+    /// key, else the default state.
+    fn stored(&self) -> Layout {
+        let text = self
+            .dir
+            .as_ref()
+            .and_then(|dir| std::fs::read_to_string(dir.join(WINDOWS_FILE)).ok())
+            .unwrap_or_default();
+        match read_layout(&text, &self.screens.key) {
+            Ok(Some(layout)) if !layout.windows.is_empty() => layout,
+            Ok(_) => default_layout(&self.screens, self.size),
+            Err(problem) => {
+                eprintln!("signal-app: {WINDOWS_FILE}: {problem}; the default layout");
+                default_layout(&self.screens, self.size)
+            }
+        }
+    }
+
+    /// Shows `layout`: each of its windows reuses an open window of the
+    /// same view (its page kept), moved there, or opens; the others close.
+    fn apply(&mut self, target: &Target, proxy: &Proxy, layout: &Layout) {
+        let mut old: Vec<Option<Shown>> = std::mem::take(&mut self.list)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let mut kept: Vec<Shown> = Vec::new();
+        let mut opened: Vec<&LayoutWindow> = Vec::new();
+        for want in &layout.windows {
+            let reuse = old
+                .iter_mut()
+                .find(|w| w.as_ref().is_some_and(|w| w.view == want.view))
+                .and_then(Option::take);
+            match reuse {
+                Some(mut shown) => {
+                    shown.set_fullscreen(false);
+                    let placed = place(want, &self.screens);
+                    shown
+                        .window
+                        .set_outer_position(LogicalPosition::new(placed.x, placed.y));
+                    shown
+                        .window
+                        .set_inner_size(LogicalSize::new(placed.width, placed.height));
+                    shown.cards = want.cards.clone();
+                    if want.fullscreen {
+                        shown.set_fullscreen(true);
+                    }
+                    kept.push(shown);
+                }
+                None => opened.push(want),
+            }
+        }
+        // What is left closes (dropped).
+        drop(old);
+        self.list = kept;
+        for want in opened {
+            if let Err(error) = self.open(target, proxy, want.view, want.cards.clone(), want) {
+                eprintln!("signal-app: {error}");
+            }
+        }
+        let open: Vec<WindowId> = self.list.iter().map(|w| w.window.id()).collect();
+        self.front.retain(|id| open.contains(id));
+        self.written = Some(layout.clone());
+        self.tracker.applied(Instant::now());
+        self.tell_cards();
+    }
+
+    /// Tells every ready page which cards it shows.
+    fn tell_cards(&self) {
+        let held = held(&self.layout());
+        for shown in self.list.iter().filter(|w| w.ready) {
+            if let Some(script) = Self::cards_script(shown, &held) {
+                shown.run(&script);
+            }
+        }
+    }
+
+    fn cards_script(shown: &Shown, held: &[String]) -> Option<String> {
+        let detail = match shown.view {
+            WindowView::Schematic => return None,
+            WindowView::Panel => json!({"view": "panel", "cards": shown.cards}),
+            WindowView::Main => json!({"view": "main", "held": held, "order": shown.cards}),
+        };
+        Some(event_script("signal-window", &detail))
+    }
+
+    /// Runs `script` in a main window's page (the front one), opening one
+    /// for it when there is none.
+    fn in_main(&mut self, target: &Target, proxy: &Proxy, script: String) {
+        let front = self
+            .front
+            .iter()
+            .filter_map(|id| self.index(Some(*id)))
+            .find(|&i| self.list[i].view == WindowView::Main)
+            .or_else(|| self.list.iter().position(|w| w.view == WindowView::Main));
+        let index = match front {
+            Some(index) => Some(index),
+            None => self.open_new(target, proxy, WindowView::Main),
+        };
+        if let Some(shown) = index.and_then(|i| self.list.get_mut(i)) {
+            if shown.ready {
+                shown.run(&script);
+            } else {
+                shown.pending.push(script);
+            }
+        }
+    }
+
+    /// Hands `text` to a main window's page as the window event `event` (a
+    /// notice or an error, shown where the app shows its messages).
+    fn tell(&mut self, target: &Target, proxy: &Proxy, event: &str, text: &str) {
+        self.in_main(target, proxy, event_script(event, &json!(text)));
+    }
+
+    /// The edit of `ui/windows.toml` that writes `layout` for the key now:
+    /// its entry, removed when it is the default state.
+    fn edit_for(&self, layout: &Layout) -> WindowsEdit {
+        let key = self.screens.key.clone();
+        let entry =
+            (!similar(layout, &default_layout(&self.screens, self.size))).then(|| layout.clone());
+        Box::new(move |text: &str| write_layout(text, &key, entry.as_ref()))
+    }
+
+    /// Writes the layout when the person changed it and it settled
+    /// (`Tracker::due`), without waiting for the answer, which
+    /// [`Self::answered`] takes; `force` (Quit, opening another project)
+    /// does not wait for it to settle, and waits for the write.
+    fn save(&mut self, server: &AppServer, force: bool) {
+        let now = Instant::now();
+        if force && let Some((answer, layout, asked)) = self.writing.take() {
+            let answer = answer.recv_timeout(Duration::from_secs(5));
+            self.answer(answer.ok(), layout, asked);
+        }
+        if self.writing.is_some() || !self.tracker.due(now, force) {
+            return;
+        }
+        let layout = self.layout();
+        let Some(dir) = self.dir.clone() else {
+            self.tracker.written(now);
+            return;
+        };
+        if self.written.as_ref().is_some_and(|w| similar(w, &layout)) {
+            self.tracker.written(now);
+            return;
+        }
+        let edit = self.edit_for(&layout);
+        if force {
+            let answer = server.write_windows(&dir, edit);
+            self.answer(Some(answer), layout, now);
+        } else {
+            self.writing = Some((server.write_windows_later(&dir, edit), layout, now));
+        }
+    }
+
+    /// A write's answer, if it came.
+    fn answered(&mut self) {
+        let Some((answer, ..)) = &self.writing else {
+            return;
+        };
+        let answer = match answer.try_recv() {
+            Ok(answer) => Some(answer),
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => None,
+        };
+        if let Some((_, layout, asked)) = self.writing.take() {
+            self.answer(answer, layout, asked);
+        }
+    }
+
+    /// What a write answered: written, or tried again once settled anew
+    /// (the failure goes to the log).
+    fn answer(&mut self, answer: Option<Result<(), String>>, layout: Layout, asked: Instant) {
+        match answer {
+            Some(Ok(())) => {
+                self.written = Some(layout);
+                self.tracker.written(asked);
+            }
+            Some(Err(message)) => {
+                eprintln!("signal-app: {message}");
+                self.tracker.failed(asked, Instant::now());
+            }
+            None => {
+                eprintln!("signal-app: {WINDOWS_FILE} was not written: no answer");
+                self.tracker.failed(asked, Instant::now());
+            }
+        }
+    }
+
+    /// Another project was opened from a page (the menu writes first): the
+    /// layout's pending change goes into the project it was of, directly,
+    /// since the control thread serves the new one now: a folder project,
+    /// whose folder stays (a `.signal` project's working folder closed with
+    /// its document).
+    fn flush_to(&mut self, old: Option<&ProjectStatus>) {
+        let now = Instant::now();
+        let Some(old) = old.filter(|p| p.file.is_none() && p.dir.is_dir()) else {
+            return;
+        };
+        if !self.tracker.due(now, true) {
+            return;
+        }
+        let layout = self.layout();
+        if self.written.as_ref().is_some_and(|w| similar(w, &layout)) {
+            return;
+        }
+        let path = old.dir.join(WINDOWS_FILE);
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let written = (self.edit_for(&layout))(&text).and_then(|after| {
+            if after == text {
+                return Ok(());
+            }
+            if let Some(folder) = path.parent() {
+                std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
+            }
+            write_file(&path, &after).map_err(|e| e.to_string())
+        });
+        if let Err(message) = written {
+            eprintln!("signal-app: {} was not written: {message}", path.display());
+        }
+        self.tracker.written(now);
+    }
+
+    /// Looks at the screens (once a second): another configuration, once
+    /// stable (`Tracker::screens`), shows its layout; meanwhile nothing is
+    /// applied or written.
+    fn poll(&mut self, target: &Target, proxy: &Proxy) {
+        if self.polled.elapsed() < SCREEN_POLL {
+            return;
+        }
+        let now = Instant::now();
+        self.polled = now;
+        let seen = screens(target);
+        let key = (!seen.screens.is_empty()).then_some(seen.key.as_str());
+        match self.tracker.screens(now, key) {
+            Seen::Same => self.screens = seen,
+            Seen::Waiting => {}
+            Seen::Switch => {
+                self.screens = seen;
+                let layout = self.stored();
+                self.apply(target, proxy, &layout);
+            }
+        }
+    }
+
+    /// The window's page said `text`.
+    fn page(&mut self, target: &Target, proxy: &Proxy, id: WindowId, text: &str) {
+        let Some(index) = self.index(Some(id)) else {
+            return;
+        };
+        let Ok(message) = serde_json::from_str::<Value>(text) else {
+            return;
+        };
+        let card = message
+            .get("card")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        match (message.get("type").and_then(Value::as_str), card) {
+            (Some("window.ready"), _) => {
+                let held = held(&self.layout());
+                let shown = &mut self.list[index];
+                shown.ready = true;
+                if let Some(script) = Self::cards_script(shown, &held) {
+                    shown.run(&script);
+                }
+                for script in std::mem::take(&mut shown.pending) {
+                    shown.run(&script);
+                }
+            }
+            (Some("card.drag"), Some(card)) => self.dragged(target, proxy, &card),
+            (Some("card.place"), Some(card)) => {
+                let before = message
+                    .get("before")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let mut layout = self.layout();
+                if move_card(
+                    &mut layout,
+                    &card,
+                    CardDrop::Into {
+                        window: index,
+                        before,
+                    },
+                ) {
+                    self.cards_from(&layout);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A card was dragged out and released: the window under the pointer
+    /// is asked where it goes; over no window, a new panel window holds it.
+    fn dragged(&mut self, target: &Target, proxy: &Proxy, card: &str) {
+        let Ok(cursor) = target.cursor_position() else {
+            return;
+        };
+        let scale = self.screens.primary_scale;
+        let at = (cursor.x / scale, cursor.y / scale);
+        let frames: Vec<_> = self.list.iter().map(Shown::content).collect();
+        let front: Vec<usize> = self
+            .front
+            .iter()
+            .filter_map(|id| self.index(Some(*id)))
+            .collect();
+        match window_at(at, &frames, &front) {
+            Some(index) if self.list[index].view == WindowView::Schematic => {}
+            Some(index) => {
+                let (x, y, ..) = frames[index];
+                let detail = json!({"card": card, "x": at.0 - x, "y": at.1 - y});
+                self.list[index].run(&event_script("signal-card-drop", &detail));
+            }
+            None => {
+                let mut layout = self.layout();
+                let corner = (at.0 - 40.0, at.1 - 12.0);
+                let window = record(
+                    WindowView::Panel,
+                    Vec::new(),
+                    corner,
+                    PANEL_SIZE,
+                    &self.screens,
+                );
+                if move_card(&mut layout, card, CardDrop::New(window.clone())) {
+                    self.cards_from(&layout);
+                    if let Err(error) = self.open(
+                        target,
+                        proxy,
+                        WindowView::Panel,
+                        vec![card.to_owned()],
+                        &window,
+                    ) {
+                        eprintln!("signal-app: {error}");
+                    }
+                    self.tell_cards();
+                }
+            }
+        }
+    }
+
+    /// Takes the cards of `layout`'s windows (by index; a new window at its
+    /// end is opened by the caller) and tells the pages.
+    fn cards_from(&mut self, layout: &Layout) {
+        for (shown, window) in self.list.iter_mut().zip(&layout.windows) {
+            shown.cards = window.cards.clone();
+        }
+        self.tracker.change(Instant::now(), Change::Structure);
+        self.tell_cards();
+    }
+
+    /// The titles, after the project or its edited state changed.
+    fn titles(&self) {
+        for shown in &self.list {
+            shown
+                .window
+                .set_title(&view_title(shown.view, self.project.as_ref()));
+        }
+    }
+
+    /// The default main window's size for the Setup: the first main
+    /// window's, in points.
+    fn main_size(&self) -> Option<signal_app::setup::Window> {
+        let shown = self.list.iter().find(|w| w.view == WindowView::Main)?;
+        let (_, (width, height)) = shown.frame();
+        window_of(width, height)
+    }
 }
 
 fn main() -> ExitCode {
@@ -128,7 +758,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    // Read here for the window's size and to report problems on the
+    // Read here for the main window's size and to report problems on the
     // terminal too; the control thread reads it again as its own.
     let (setup, problems) = Setup::load(&path);
     for problem in &problems {
@@ -166,7 +796,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let menu = match menu_bar() {
+    let (menu, window_menu) = match menu_bar() {
         Ok(menu) => menu,
         Err(error) => {
             eprintln!("signal-app: the menu bar was not built: {error}");
@@ -181,90 +811,135 @@ fn main() -> ExitCode {
             let _ = proxy.send_event(UserEvent::Menu(action));
         }
     }));
-    let mut builder = WindowBuilder::new().with_title("Signal");
-    if let Some(window) = setup.window {
-        builder = builder.with_inner_size(LogicalSize::new(
-            f64::from(window.width),
-            f64::from(window.height),
-        ));
-    }
-    let window = match builder.build(&event_loop) {
-        Ok(window) => window,
-        Err(error) => {
-            eprintln!("signal-app: the window did not open: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
+
+    let proxy = event_loop.create_proxy();
     let url = server.url().to_owned();
-    let origin = origin_of(&url).to_owned();
-    let drops = event_loop.create_proxy();
-    let webview = WebViewBuilder::new()
-        .with_url(url)
-        // The page leaves the menu's shortcuts to the native menu.
-        .with_initialization_script(NATIVE_MENU_SCRIPT)
-        .with_navigation_handler(move |to| may_navigate(&to, &origin))
-        .with_drag_drop_handler(move |event| {
-            if let DragDropEvent::Drop { paths, .. } = event
-                && let Some(path) = paths.into_iter().next()
-            {
-                let _ = drops.send_event(UserEvent::Dropped(path));
-            }
-            // The server opens what was dropped; nothing is navigated to.
-            true
-        })
-        .build(&window);
-    let webview = match webview {
-        Ok(webview) => webview,
-        Err(error) => {
-            eprintln!("signal-app: the WebView did not open: {error}");
-            return ExitCode::FAILURE;
-        }
+    let project = server.project();
+    let mut windows = Windows {
+        list: Vec::new(),
+        front: Vec::new(),
+        screens: screens(&event_loop),
+        polled: Instant::now(),
+        tracker: Tracker::new("", Instant::now()),
+        dir: project.as_ref().map(|p| p.dir.clone()),
+        project,
+        origin: origin_of(&url).to_owned(),
+        app_url: url,
+        size: setup
+            .window
+            .map(|w| (f64::from(w.width), f64::from(w.height))),
+        written: None,
+        writing: None,
     };
+    windows.tracker = Tracker::new(&windows.screens.key, Instant::now());
+    let layout = windows.stored();
+    windows.apply(&event_loop, &proxy, &layout);
+    if windows.list.is_empty() {
+        eprintln!("signal-app: no window opened");
+        return ExitCode::FAILURE;
+    }
 
     let mut server = Some(server);
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
+    event_loop.run(move |event, target, control_flow| {
+        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
         // What closes the app, and the prompt's route.
         let quit = match event {
             // The application exists now: its menu bar is set.
             Event::NewEvents(StartCause::Init) => {
                 menu.init_for_nsapp();
+                if let Some(window_menu) = &window_menu {
+                    window_menu.set_as_windows_menu_for_nsapp();
+                }
+                None
+            }
+            Event::MainEventsCleared => {
+                windows.poll(target, &proxy);
+                windows.answered();
+                if let Some(server) = server.as_ref() {
+                    windows.save(server, false);
+                }
                 None
             }
             Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => Some(QuitRoute::Window),
+                window_id, event, ..
+            } => match event {
+                // Closing a window just closes it; closing the last one
+                // quits, as Signal's one window did.
+                WindowEvent::CloseRequested if windows.list.len() > 1 => {
+                    windows.list.retain(|w| w.window.id() != window_id);
+                    windows.front.retain(|id| *id != window_id);
+                    windows.tracker.change(Instant::now(), Change::Structure);
+                    windows.tell_cards();
+                    None
+                }
+                WindowEvent::CloseRequested => Some(QuitRoute::Window),
+                WindowEvent::Focused(true) => {
+                    windows.front.retain(|id| *id != window_id);
+                    windows.front.insert(0, window_id);
+                    None
+                }
+                WindowEvent::Moved(_)
+                | WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. } => {
+                    windows.tracker.change(Instant::now(), Change::Geometry);
+                    None
+                }
+                _ => None,
+            },
             Event::UserEvent(UserEvent::Menu(MenuAction::Quit)) => Some(QuitRoute::Menu),
             // The Dock's Quit or logout: termination is already decided.
             Event::LoopDestroyed => Some(QuitRoute::Terminate),
+            Event::UserEvent(UserEvent::Menu(MenuAction::NewMain)) => {
+                windows.open_new(target, &proxy, WindowView::Main);
+                None
+            }
+            Event::UserEvent(UserEvent::Menu(MenuAction::NewSchematic)) => {
+                windows.open_new(target, &proxy, WindowView::Schematic);
+                None
+            }
+            Event::UserEvent(UserEvent::Menu(MenuAction::NewPanel)) => {
+                windows.open_new(target, &proxy, WindowView::Panel);
+                None
+            }
+            // Everything back on one main window on the main screen; the
+            // key's entry is removed.
+            Event::UserEvent(UserEvent::Menu(MenuAction::ResetLayout)) => {
+                let layout = default_layout(&windows.screens, windows.size);
+                windows.apply(target, &proxy, &layout);
+                if let (Some(server), Some(dir)) = (server.as_ref(), windows.dir.clone()) {
+                    let key = windows.screens.key.clone();
+                    let edit = Box::new(move |text: &str| write_layout(text, &key, None));
+                    if let Err(message) = server.write_windows(&dir, edit) {
+                        eprintln!("signal-app: {message}");
+                    }
+                }
+                None
+            }
             // Open…: the system's chooser; a choice opens as a drop does, a
             // cancel does nothing.
             Event::UserEvent(UserEvent::Menu(MenuAction::Open))
                 if MainThreadMarker::new().is_some() =>
             {
                 if let (Some(path), Some(server)) = (choose_project(), server.as_ref()) {
-                    open_project(server, &webview, &path);
+                    open_project(server, &mut windows, target, &proxy, &path);
                 }
                 None
             }
             Event::UserEvent(UserEvent::Menu(MenuAction::SaveAs)) => {
                 if let Some(server) = server.as_ref() {
-                    save_as(server, &webview);
+                    save_as(server, &mut windows, target, &proxy);
                 }
                 None
             }
             Event::UserEvent(UserEvent::Menu(action)) => {
-                if let Some(script) = action.page_script()
-                    && let Err(error) = webview.evaluate_script(&script)
-                {
-                    eprintln!("signal-app: {error}");
+                if let Some(script) = action.page_script() {
+                    windows.in_main(target, &proxy, script);
                 }
                 None
             }
             Event::UserEvent(UserEvent::Dropped(path)) => {
                 if let Some(server) = server.as_ref() {
-                    open_project(server, &webview, &path);
+                    open_project(server, &mut windows, target, &proxy, &path);
                 }
                 None
             }
@@ -273,12 +948,25 @@ fn main() -> ExitCode {
             Event::Opened { urls } => {
                 let path = urls.iter().find_map(|url| url.to_file_path().ok());
                 if let (Some(path), Some(server)) = (path, server.as_ref()) {
-                    open_project(server, &webview, &path);
+                    open_project(server, &mut windows, target, &proxy, &path);
                 }
                 None
             }
             Event::UserEvent(UserEvent::Project(status)) => {
-                window.set_title(&title(status.as_ref()));
+                let dir = status.as_ref().map(|s| s.dir.clone());
+                let old = std::mem::replace(&mut windows.project, status);
+                windows.titles();
+                // Another project: its layout for these screens.
+                if dir.is_some() && dir != windows.dir {
+                    windows.flush_to(old.as_ref());
+                    windows.dir = dir;
+                    let layout = windows.stored();
+                    windows.apply(target, &proxy, &layout);
+                }
+                None
+            }
+            Event::UserEvent(UserEvent::Page(id, text)) => {
+                windows.page(target, &proxy, id, &text);
                 None
             }
             _ => None,
@@ -289,14 +977,14 @@ fn main() -> ExitCode {
         let Some(running) = server.as_ref() else {
             return;
         };
-        let discard = match closing(running, &webview, route) {
-            Some(discard) => discard,
-            None => return,
+        // The layout's last change first, so the prompt asks about it too.
+        windows.save(running, true);
+        let Some(discard) = closing(running, &mut windows, target, &proxy, route) else {
+            return;
         };
-        // The size the window has now, in points, goes into the Setup.
-        let size = window.inner_size().to_logical::<f64>(window.scale_factor());
+        let size = windows.main_size();
         if let Some(mut server) = server.take() {
-            server.exit(window_of(size.width, size.height), discard);
+            server.exit(size, discard);
         }
         *control_flow = ControlFlow::Exit;
     })
@@ -305,7 +993,13 @@ fn main() -> ExitCode {
 /// Before the app closes by `route`: an edited `.signal` project's prompt.
 /// `None` stays (Cancel, or a failed save); else whether the edits are let
 /// go (an unanswered prompt keeps them in the working folder).
-fn closing(server: &AppServer, webview: &wry::WebView, route: QuitRoute) -> Option<bool> {
+fn closing(
+    server: &AppServer,
+    windows: &mut Windows,
+    target: &Target,
+    proxy: &Proxy,
+    route: QuitRoute,
+) -> Option<bool> {
     let project = server.project();
     let edited = project.as_ref().is_some_and(|p| p.edited);
     let answer = match &project {
@@ -316,29 +1010,39 @@ fn closing(server: &AppServer, webview: &wry::WebView, route: QuitRoute) -> Opti
         ExitPlan::Go | ExitPlan::Keep => Some(false),
         ExitPlan::Discard => Some(true),
         ExitPlan::Stay => None,
-        ExitPlan::Save => match server.save() {
-            Ok(()) => Some(false),
-            // Terminating cannot stay: the working folder keeps the edits.
-            Err(message) if route == QuitRoute::Terminate => {
-                eprintln!("signal-app: {message}");
-                Some(false)
+        ExitPlan::Save => {
+            match server.save() {
+                Ok(()) => Some(false),
+                // Terminating cannot stay: the working folder keeps the edits.
+                Err(message) if route == QuitRoute::Terminate => {
+                    eprintln!("signal-app: {message}");
+                    Some(false)
+                }
+                Err(message) => {
+                    windows.tell(target, proxy, "signal-app-error", &message);
+                    None
+                }
             }
-            Err(message) => {
-                tell_page(webview, "signal-app-error", &message);
-                None
-            }
-        },
+        }
     }
 }
 
 /// Opens what was chosen, dropped or opened in the Finder: refused unless a
 /// folder, `project.toml` or `.signal` file; an edited project is asked
-/// about first.
-fn open_project(server: &AppServer, webview: &wry::WebView, path: &Path) {
-    let target = match dropped(path) {
-        Ok(target) => target,
-        Err(refusal) => return tell_page(webview, "signal-app-error", refusal),
+/// about first. The layout's last change is written to the project it is
+/// of first.
+fn open_project(
+    server: &AppServer,
+    windows: &mut Windows,
+    target: &Target,
+    proxy: &Proxy,
+    path: &Path,
+) {
+    let target_path = match dropped(path) {
+        Ok(target_path) => target_path,
+        Err(refusal) => return windows.tell(target, proxy, "signal-app-error", refusal),
     };
+    windows.save(server, true);
     let project = server.project();
     let edits = match &project {
         Some(project) if project.edited => {
@@ -351,40 +1055,31 @@ fn open_project(server: &AppServer, webview: &wry::WebView, path: &Path) {
         }
         _ => Edits::Ask,
     };
-    if let Err(message) = server.open(target, edits) {
-        tell_page(webview, "signal-app-error", &message);
+    if let Err(message) = server.open(target_path, edits) {
+        windows.tell(target, proxy, "signal-app-error", &message);
     }
 }
 
 /// Save As…: the system's save panel with `<project name>.signal`; the
 /// project is that file from then on.
-fn save_as(server: &AppServer, webview: &wry::WebView) {
+fn save_as(server: &AppServer, windows: &mut Windows, target: &Target, proxy: &Proxy) {
     let name = default_save_name(server.project().as_ref());
     let Some(file) = choose_save(&name) else {
         return;
     };
     let file = match save_target(file) {
         Ok(file) => file,
-        Err(message) => return tell_page(webview, "signal-app-error", &message),
+        Err(message) => return windows.tell(target, proxy, "signal-app-error", &message),
     };
+    windows.save(server, true);
     match server.save_as(&file) {
-        Ok(()) => tell_page(
-            webview,
+        Ok(()) => windows.tell(
+            target,
+            proxy,
             "signal-app-notice",
             &format!("saved as {}", file.display()),
         ),
-        Err(message) => tell_page(webview, "signal-app-error", &message),
-    }
-}
-
-/// Hands `text` to the page as the window event `event` (a notice or an
-/// error, shown where the app shows its messages).
-fn tell_page(webview: &wry::WebView, event: &str, text: &str) {
-    let quoted = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_owned());
-    let script =
-        format!("window.dispatchEvent(new CustomEvent('{event}', {{ detail: {quoted} }}))");
-    if let Err(error) = webview.evaluate_script(&script) {
-        eprintln!("signal-app: {error}");
+        Err(message) => windows.tell(target, proxy, "signal-app-error", &message),
     }
 }
 

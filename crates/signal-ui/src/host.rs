@@ -1520,6 +1520,53 @@ impl Host {
         })
     }
 
+    /// App mode (ADR 0032): `ui/windows.toml` of the project folder `dir`
+    /// edited by `edit` (given the file's text, empty when it is missing),
+    /// written atomically through a hidden temporary file, and taken as
+    /// seen by the watch, so it reloads nothing. Refused when `dir` is no
+    /// longer the open project (the layout was of another one), and when
+    /// `ui/` or the file is a link (only the project's own files are
+    /// written); nothing is written then.
+    pub fn write_windows(
+        &mut self,
+        dir: &Path,
+        edit: impl FnOnce(&str) -> Result<String, String>,
+    ) -> Result<(), String> {
+        let file = Path::new(crate::WINDOWS_FILE);
+        if self.dir != dir || self.app.as_ref().is_some_and(|m| !m.opened) {
+            return Err(format!(
+                "{} was not written: {} is not the open project",
+                file.display(),
+                dir.display()
+            ));
+        }
+        let path = self.dir.join(file);
+        let link =
+            |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+        if link(&project_ui(&self.dir)) || link(&path) {
+            return Err(format!(
+                "{} was not written: it is reached through a link, and the layout is written only into the project's own files",
+                file.display()
+            ));
+        }
+        let failed = |error: String| format!("{} was not written: {error}", path.display());
+        let before = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(failed(error.to_string())),
+        };
+        let after = edit(&before).map_err(failed)?;
+        if after == before {
+            return Ok(());
+        }
+        if let Some(folder) = path.parent() {
+            fs::create_dir_all(folder).map_err(|e| failed(e.to_string()))?;
+        }
+        write_file(&path, &after).map_err(|e| failed(e.to_string()))?;
+        self.seen(file);
+        Ok(())
+    }
+
     /// Save of a `.signal` project: the working folder written back to the
     /// file atomically. A folder project has nothing to write here (its
     /// parameters are written by `retry`).

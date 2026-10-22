@@ -491,6 +491,7 @@ fn every_example_of_the_format_loads() {
     )
     .unwrap();
     let section = &doc[doc.find("## 12.").unwrap()..];
+    let section = &section[..section.find("\n## 13.").unwrap_or(section.len())];
     let examples: Vec<&str> = section
         .split("```toml\n")
         .skip(1)

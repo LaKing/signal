@@ -14,6 +14,7 @@ Terms are those of `00-vision.md` §3a: Project, Module, Primitive, Composite, I
   ui/*.html               panels (optional; ui/main.html is the main one)
   ui/assets/              their SVG and PNG files
   ui/schematic.toml       the schematic's positions (optional, presentation only; §11)
+  ui/windows.toml         Signal.app's windows per screen configuration (optional, presentation only; §13)
 ```
 
 These are the **project files**. Signal loads every one of them, validates every one of them, and hashes every one of them into a render's manifest (§7). A recorded session keeps an exact copy of them for every plan version (`session-format.md`). Nothing else in the folder is read, except by `signal ui`, which serves the folder's `ui/` (panels and their `assets/`) to web pages as files and never plans them (`ui-protocol.md`). A panel is an HTML page whose controls bind to ports by address; `signal ui check <project>` checks every binding against the plan, and moving a control writes `project.toml`, never the panel (`ui-controls.md` "Panels"). Machine settings (Setup: devices, channel mapping) never live here.
@@ -358,3 +359,30 @@ The loader reads a pattern into its kind's canonical **source**, a header and ro
 ### Editing over the UI protocol
 
 `pattern.read` and `pattern.write` (`ui-protocol.md`) read and write these files whole, with the checks of a reload. A client message is at most 64 KiB, so a pattern editable over the protocol is one whose text, JSON-escaped, fits that with its envelope: about 63 KiB of TOML, some 1200 notes written one per line, or any steps pattern up to 64 lanes of 256 steps. Larger files load from disk and are edited as text.
+
+## 13. Window layout (`ui/windows.toml`)
+
+Signal.app's windows on each screen configuration (ADR 0032): which windows are open, where, and which panel cards each holds. It is **presentation only**, like `ui/schematic.toml` (§11): it never changes what the project means, renders, plays or hashes, and deleting it loses nothing but the layout. Like every file under `ui/` it is packed in a `.signal` file (§10), so moving a window edits a `.signal` project.
+
+```toml
+[[layout."Monitor #41234 3024x1964@2 +0+0 | Monitor #16711 2560x1440@1 +3024+0".windows]]
+view = "main"                    # "main", "schematic" or "panel"
+screen = 0                       # the screen, an index in the key's order
+x = 156                          # the frame's corner from the screen's, in points
+y = 97
+width = 1200                     # the content's size, in points
+height = 800
+cards = []                       # a main window: the order of the cards it shows first
+
+[[layout."Monitor #41234 3024x1964@2 +0+0 | Monitor #16711 2560x1440@1 +3024+0".windows]]
+view = "panel"
+screen = 1
+x = 40
+y = 80
+width = 480
+height = 360
+cards = ["kick", "output"]       # the cards this window holds, in order
+fullscreen = true                # optional: it opens full screen (x, y, width, height: its normal frame)
+```
+
+One entry per **screen configuration**, under its key: for each connected monitor, left to right then top to bottom, its name (its type), size in pixels, scale factor and top-left corner in pixels, joined by ` | `. Signal.app applies the entry of the screens connected now, at start, when the project opens and when the screens change; without one it opens the default state (one main window on the main screen, every card in it). It writes only that entry, with `toml_edit`, atomically, a second after the last change, keeping the other entries and comments; Window ▸ Reset Layout removes it. A card id is a card's `id`, else its first heading's slug (`ui-controls.md` "Cards across windows"). A panel window's cards are hidden from the main windows' Panel tab. An entry that does not read is reported and the default state is used; unknown keys in a window are errors there.

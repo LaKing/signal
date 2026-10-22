@@ -407,6 +407,8 @@ The interface setup dialog's functions (M2.5), without a window. The Setup file 
 - Under the null driver, `--seconds` still ends a stopped run on time.
 - Tests: `crates/signal-ui/tests/app_mode.rs` (`signal_ui_stops_and_plays`, both transports) and `crates/signal-cli/src/drive.rs`.
 
+**Several windows** (ADR 0032): every window of Signal.app is one more client of the same server, with the same token: a main window loads `/ui/app/index.html`, a schematic window `/schematic`, a panel window `/ui/app/panel-window.html` (the project's `/project/main.html` in a frame); each is sent every push, so what one window does shows in all (`crates/signal-app/tests/server.rs`, three clients). The window layout, `ui/windows.toml` (`project-format.md` §13), is written by the app through the control thread (`Host::write_windows`), taken as seen by the watch; it is no protocol message. What a window's page and the app tell each other about panel cards is in `ui-controls.md` "Cards across windows".
+
 Signal.app's control thread runs the host in **app mode** (`Host::new_app`, M2.8-4): its window's WebView loads `http://127.0.0.1:<http port>/ui/app/index.html#ws=…&token=…` from it. App mode starts **stopped**, on the project the app was given or else the Setup's last project, and plays every run with the Setup (its output, channel map, buffer, CPU workers, wake policy and input), with the rules of the app's state (`crates/signal-ui/src/app.rs`, shared with `signal-app`'s `AppState`). `describe` answers while stopped (with `"playing": false`), and `commit` writes while stopped. Its own messages, which `signal ui` refuses with `not-allowed` (but `transport.*`, above):
 
 | Message | Does | Reply |

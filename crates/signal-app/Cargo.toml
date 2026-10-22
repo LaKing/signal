@@ -45,6 +45,9 @@ signal-gpu = { workspace = true }
 # The Setup file.
 serde = { workspace = true }
 toml = { workspace = true }
+# ADR 0032: `ui/windows.toml`, one screen configuration's layout edited,
+# the others kept as written.
+toml_edit = { workspace = true }
 # A dropped folder's path, quoted for the page.
 serde_json = { workspace = true }
 # `--setup` and `--project`.

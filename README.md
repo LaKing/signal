@@ -30,7 +30,7 @@ Signal is pre-1.0 and early: version **0.2.0** is its first public pre-release. 
 
 - Offline rendering, deterministic to the bit (`signal render`), and real-time audio through CoreAudio (`signal play`).
 - Live edits: save a project file while it plays and the change is heard at once. Sessions are recorded and replay bit for bit.
-- Signal.app: a native window with a web UI. Interface setup (devices, channels, buffer), transport, meters, project panels, File → Open, Save and Save As, and `.signal` single-file projects.
+- Signal.app: a native window with a web UI. Interface setup (devices, channels, buffer), transport, meters, project panels, File → Open, Save and Save As, `.signal` single-file projects, and several windows over several screens (Window → New Main, Schematic or Panel Window, Reset Layout; panel cards dragged between windows).
 - Panels as project text, with knobs, faders, 2D pads, buttons, meters, scopes, a piano roll, a step grid and a canvas.
 - The schematic: zoom into composites, follow a signal through modules and composite boundaries, see live levels, and patch.
 - The `std.*` core set and the built-in `lib.*` library of composites: LFOs, envelopes, oscillators, a ladder filter, a tape echo, drum voices and more.

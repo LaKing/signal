@@ -17,6 +17,7 @@ import { ValueEntry } from '../controls/entry-field.js';
 import { ContextMenu, claimMenus, focusable } from '../controls/context-menu.js';
 import { formatFixed } from '../lib/format.js';
 import { applyProps } from './lib/dom.js';
+import { connectCards } from './lib/cards.js';
 import { pageHandlesShortcuts, panelReloads, panelSource, shortcut } from './lib/menu.js';
 import { dragMessage, fileNote, planUpdate, releaseMessage, resetMessage, rows, shown, structureKey, valuesOf } from './lib/parameters.js';
 import { INITIAL, controls, powerRequest, reduce } from './lib/power.js';
@@ -640,7 +641,9 @@ export class SignalAppParameters extends AppElement {
  * The project's panel (M2.8-3, `/project/main.html`) in the Panel tab: a
  * same-origin frame filling the tab, kept while other tabs show, whose
  * shortcuts also work while the panel has the focus (without a native
- * menu). Opening another project shows its panel.
+ * menu). Opening another project shows its panel. In Signal.app it shows
+ * the cards no panel window holds, each draggable by its heading to
+ * another window (ADR 0032, ./lib/cards.js).
  */
 export class SignalAppPanel extends AppElement {
   connectedCallback() {
@@ -657,6 +660,7 @@ export class SignalAppPanel extends AppElement {
         };
       });
       this.append(this.frame);
+      connectCards(this.frame);
     }
     super.connectedCallback();
   }

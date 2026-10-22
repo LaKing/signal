@@ -462,7 +462,142 @@ fn the_window_s_requests_reach_the_project(transport: Transport) {
     fs::remove_dir_all(&base).unwrap();
 }
 
+/// ADR 0032: every window is one more client of the one server: each
+/// gets the pushes, so what one window does (Play here) shows in all.
+fn several_windows_are_clients_of_one_server(transport: Transport) {
+    let (base, path) = setup("windows", transport);
+    let server = start(transport, &path);
+    let mut pages: Vec<Ws> = (0..3).map(|_| connect(&server, transport)).collect();
+    for page in &mut pages {
+        hello(page, server.token());
+        of(page, "welcome");
+    }
+    const { assert!(signal_ui::MAX_CLIENTS >= 16, "room for many windows") };
+    let played = request(
+        &mut pages[0],
+        json!({"type": "transport.play", "id": 1}),
+        "transport",
+    );
+    assert_eq!(played["playing"], true);
+    for page in &mut pages[1..] {
+        loop {
+            let app = of(page, "app");
+            if app["playing"] == true {
+                break;
+            }
+        }
+    }
+    drop(server);
+    fs::remove_dir_all(&base).unwrap();
+}
+
+/// Messages of type `kind` within `within`.
+fn seen_within(ws: &mut Ws, kind: &str, within: Duration) -> bool {
+    let until = Instant::now() + within;
+    while Instant::now() < until {
+        match ws.read() {
+            Ok(Message::Text(text)) => {
+                let v: Value = serde_json::from_str(&text).unwrap();
+                if v["type"] == kind {
+                    return true;
+                }
+            }
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(e))
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+/// ADR 0032: the window layout is written into the open project's
+/// `ui/windows.toml` by the control thread and taken as seen (nothing
+/// reloads, where a write by anyone else does); a layout of another
+/// project, or through a linked `ui/`, is refused and writes nothing.
+fn the_layout_is_written_into_the_project_as_seen(transport: Transport) {
+    let (base, path) = setup("layout", transport);
+    let dir = base.join("tone");
+    fs::create_dir_all(&dir).unwrap();
+    fs::copy(tone().join("project.toml"), dir.join("project.toml")).unwrap();
+    let server = start_with(transport, &path, Some(dir.clone()));
+    let mut page = connect(&server, transport);
+    hello(&mut page, server.token());
+    of(&mut page, "welcome");
+    let played = request(
+        &mut page,
+        json!({"type": "transport.play", "id": 1}),
+        "transport",
+    );
+    assert_eq!(played["playing"], true);
+
+    server
+        .write_windows(&dir, Box::new(|text| Ok(format!("{text}# one\n"))))
+        .unwrap();
+    server
+        .write_windows(&dir, Box::new(|text| Ok(format!("{text}# two\n"))))
+        .unwrap();
+    // Without waiting: the answer comes on its own.
+    let answer = server.write_windows_later(&dir, Box::new(|text| Ok(format!("{text}# three\n"))));
+    answer
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap()
+        .unwrap();
+    let refused = server.write_windows_later(&tone(), Box::new(|_| Ok("x".to_owned())));
+    assert!(
+        refused
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .is_err()
+    );
+    let file = dir.join(signal_ui::WINDOWS_FILE);
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "# one\n# two\n# three\n"
+    );
+    assert!(
+        !seen_within(&mut page, "reload", Duration::from_millis(800)),
+        "the app's own write reloads nothing"
+    );
+    fs::write(dir.join("ui/other.toml"), "x = 1\n").unwrap();
+    assert!(
+        seen_within(&mut page, "reload", Duration::from_secs(10)),
+        "another writer's change is reloaded"
+    );
+
+    let refused = server
+        .write_windows(&tone(), Box::new(|_| Ok("x".to_owned())))
+        .unwrap_err();
+    assert!(refused.contains("is not the open project"), "{refused}");
+    let failed = server
+        .write_windows(&dir, Box::new(|_| Err("bad".to_owned())))
+        .unwrap_err();
+    assert!(failed.contains("bad"), "{failed}");
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "# one\n# two\n# three\n"
+    );
+
+    // A linked ui/ is served, never written.
+    let elsewhere = base.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::remove_dir_all(dir.join("ui")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, dir.join("ui")).unwrap();
+    let linked = server
+        .write_windows(&dir, Box::new(|_| Ok("x".to_owned())))
+        .unwrap_err();
+    assert!(linked.contains("link"), "{linked}");
+    assert!(!elsewhere.join("windows.toml").exists());
+    drop(server);
+    fs::remove_dir_all(&base).unwrap();
+}
+
 both!(
+    several_windows_are_clients_of_one_server,
+    the_layout_is_written_into_the_project_as_seen,
     a_later_client_describes_every_parameter_while_playing,
     the_url_carries_a_new_token_in_its_fragment,
     a_client_needs_the_token,

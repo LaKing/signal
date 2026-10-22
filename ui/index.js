@@ -23,6 +23,7 @@ import './app/lib/draft.test.js';
 import './app/lib/parameters.test.js';
 import './app/lib/dom.test.js';
 import './app/lib/tabs.test.js';
+import './app/lib/cards.test.js';
 import './app/lib/power.test.js';
 import './app/lib/status.test.js';
 import './app/lib/save.test.js';

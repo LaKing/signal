@@ -3,13 +3,16 @@
 //! does, where the WebView may navigate, and the size recorded in the Setup;
 //! and for `.signal` projects (M2.8-12): what a drop or a choice opens, the
 //! window's title, Save As's default name, and what the "Save changes?"
-//! prompt offers and leads to on each way of quitting.
+//! prompt offers and leads to on each way of quitting. For several windows
+//! over the screens (ADR 0032): what each view loads and how it is titled
+//! (the layout itself is [`crate::layout`]).
 
 use std::path::{Path, PathBuf};
 
 use signal_project::archive;
-use signal_ui::ProjectStatus;
+use signal_ui::{APP_PAGE, ProjectStatus, SCHEMATIC_PAGE};
 
+use crate::layout::WindowView;
 use crate::setup::Window;
 
 /// What one of Signal's own menu items does.
@@ -29,18 +32,32 @@ pub enum MenuAction {
     SaveAs,
     /// Interface Setup…: the page shows the Setup tab.
     Setup,
-    /// Quit: the window closes as with its close button (the Setup records
-    /// its size).
+    /// Quit: as closing the last window (the Setup records the open
+    /// windows).
     Quit,
+    /// Window ▸ New Main Window (ADR 0032): another window on the app's page.
+    NewMain,
+    /// Window ▸ New Schematic Window: a window on the schematic alone.
+    NewSchematic,
+    /// Window ▸ New Panel Window: an empty panel window, to drop cards in.
+    NewPanel,
+    /// Window ▸ Reset Layout: everything back on one main window on the
+    /// main screen; the screen configuration's layout is removed from
+    /// `ui/windows.toml`.
+    ResetLayout,
 }
 
 impl MenuAction {
-    const ALL: [MenuAction; 5] = [
+    const ALL: [MenuAction; 9] = [
         MenuAction::Open,
         MenuAction::Save,
         MenuAction::SaveAs,
         MenuAction::Setup,
         MenuAction::Quit,
+        MenuAction::NewMain,
+        MenuAction::NewSchematic,
+        MenuAction::NewPanel,
+        MenuAction::ResetLayout,
     ];
 
     /// The menu item's id.
@@ -51,6 +68,10 @@ impl MenuAction {
             MenuAction::SaveAs => "save-as",
             MenuAction::Setup => "setup",
             MenuAction::Quit => "quit",
+            MenuAction::NewMain => "new-main-window",
+            MenuAction::NewSchematic => "new-schematic-window",
+            MenuAction::NewPanel => "new-panel-window",
+            MenuAction::ResetLayout => "reset-layout",
         }
     }
 
@@ -59,16 +80,26 @@ impl MenuAction {
         MenuAction::ALL.into_iter().find(|a| a.id() == id)
     }
 
-    /// Whether its Cmd-key takes Shift too (Save As…, ⇧⌘S).
+    /// Whether its Cmd-key takes Shift too (Save As…, ⇧⌘S; New Main
+    /// Window, ⇧⌘N).
     pub fn shift(self) -> bool {
-        self == MenuAction::SaveAs
+        matches!(self, MenuAction::SaveAs | MenuAction::NewMain)
     }
 
     /// The script that hands the action to the page (a `signal-menu`
-    /// event, `ui/app/app.js`); none for Save As and Quit, which the window
-    /// does.
+    /// event, `ui/app/app.js`, so a main window's); none for Save As, Quit
+    /// and the new windows, which the app does.
     pub fn page_script(self) -> Option<String> {
-        (!matches!(self, MenuAction::Quit | MenuAction::SaveAs)).then(|| {
+        (!matches!(
+            self,
+            MenuAction::Quit
+                | MenuAction::SaveAs
+                | MenuAction::NewMain
+                | MenuAction::NewSchematic
+                | MenuAction::NewPanel
+                | MenuAction::ResetLayout
+        ))
+        .then(|| {
             let quoted = serde_json::to_string(self.id()).unwrap_or_else(|_| "\"\"".to_owned());
             format!("window.dispatchEvent(new CustomEvent('signal-menu', {{ detail: {quoted} }}))")
         })
@@ -80,6 +111,9 @@ impl MenuAction {
 pub enum MenuItem {
     /// One of Signal's own: its action, label and Cmd-key.
     Own(MenuAction, &'static str, char),
+    /// One of Signal's own without a shortcut.
+    Plain(MenuAction, &'static str),
+
     // The system's items (`muda`'s predefined ones) act on the app or, for
     // the Edit menu, on the focused text field.
     /// About Signal.
@@ -102,14 +136,26 @@ pub enum MenuItem {
     Paste,
     /// Select All.
     SelectAll,
+    /// Minimize the focused window.
+    Minimize,
+    /// Zoom it.
+    Zoom,
+    /// Enter or leave full screen (on the screen the window is on).
+    Fullscreen,
+    /// Bring every window of Signal to the front.
+    BringAllToFront,
     /// A line between items.
     Separator,
 }
 
+/// The Window menu's name; the system adds the list of open windows to it.
+pub const WINDOW_MENU: &str = "Window";
+
 const QUIT: MenuItem = MenuItem::Own(MenuAction::Quit, "Quit Signal", 'q');
 
-/// The menu bar: the app menu, File and Edit, in order (ADR 0023).
-pub const MENU_BAR: [(&str, &[MenuItem]); 3] = [
+/// The menu bar: the app menu, File, Edit and Window, in order (ADR 0023,
+/// 0032).
+pub const MENU_BAR: [(&str, &[MenuItem]); 4] = [
     (
         "Signal",
         &[
@@ -146,7 +192,62 @@ pub const MENU_BAR: [(&str, &[MenuItem]); 3] = [
             MenuItem::SelectAll,
         ],
     ),
+    (
+        WINDOW_MENU,
+        &[
+            MenuItem::Own(MenuAction::NewMain, "New Main Window", 'n'),
+            MenuItem::Plain(MenuAction::NewSchematic, "New Schematic Window"),
+            MenuItem::Plain(MenuAction::NewPanel, "New Panel Window"),
+            MenuItem::Separator,
+            MenuItem::Plain(MenuAction::ResetLayout, "Reset Layout"),
+            MenuItem::Separator,
+            MenuItem::Minimize,
+            MenuItem::Zoom,
+            MenuItem::Fullscreen,
+            MenuItem::Separator,
+            MenuItem::BringAllToFront,
+        ],
+    ),
 ];
+
+/// The path (from `/`) a window of `view` loads: a panel window's is the
+/// card host page (`ui/app/panel-window.html`), which shows the project's main
+/// panel in a frame, only the cards that window holds.
+pub fn view_path(view: WindowView) -> &'static str {
+    match view {
+        WindowView::Main => APP_PAGE,
+        WindowView::Schematic => SCHEMATIC_PAGE,
+        WindowView::Panel => PANEL_WINDOW_PAGE,
+    }
+}
+
+/// A panel window's page in the UI library.
+pub const PANEL_WINDOW_PAGE: &str = "/ui/app/panel-window.html";
+
+/// The URL of `path` on the app's server: `app_url`'s origin and fragment
+/// (the WebSocket's port and the session token), so every window is a
+/// client of the same server.
+pub fn page_url(app_url: &str, path: &str) -> String {
+    let fragment = app_url
+        .find('#')
+        .and_then(|i| app_url.get(i..))
+        .unwrap_or("");
+    format!("{}{path}{fragment}", origin_of(app_url))
+}
+
+/// The title of a window of `view`: a main window's is [`title`]; the
+/// others say what they show, then the project's title.
+pub fn view_title(view: WindowView, project: Option<&ProjectStatus>) -> String {
+    let shows = match view {
+        WindowView::Main => return title(project),
+        WindowView::Schematic => "Schematic",
+        WindowView::Panel => "Panel",
+    };
+    match project {
+        Some(_) => format!("Signal — {shows} — {}", title(project)),
+        None => format!("Signal — {shows}"),
+    }
+}
 
 /// What the WebView runs before the page: it tells the page that the
 /// native menu takes the shortcuts (`ui/app/lib/menu.js`).
@@ -324,7 +425,8 @@ pub fn exit_plan(edited: bool, answer: Option<Prompt>) -> ExitPlan {
     }
 }
 
-/// The window's size in points, as the Setup records it.
+/// The window's size in points, as the Setup records it (the default main
+/// window's size, ADR 0032).
 pub fn window_of(width: f64, height: f64) -> Option<Window> {
     (width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0).then_some(Window {
         width: width as f32,
@@ -350,11 +452,12 @@ mod tests {
             .collect()
     }
 
-    /// M2.8-11 AC12, AC15: the app menu, File and Edit.
+    /// M2.8-11 AC12, AC15: the app menu, File and Edit (and Window, ADR
+    /// 0032).
     #[test]
     fn the_menu_bar_has_the_app_menu_file_and_edit() {
         let names: Vec<&str> = MENU_BAR.iter().map(|(name, _)| *name).collect();
-        assert_eq!(names, ["Signal", "File", "Edit"]);
+        assert_eq!(names, ["Signal", "File", "Edit", "Window"]);
         assert_eq!(
             own("File"),
             [
@@ -366,7 +469,11 @@ mod tests {
             ]
         );
         let shifted: Vec<MenuAction> = MenuAction::ALL.into_iter().filter(|a| a.shift()).collect();
-        assert_eq!(shifted, [MenuAction::SaveAs], "only Save As is ⇧⌘S");
+        assert_eq!(
+            shifted,
+            [MenuAction::SaveAs, MenuAction::NewMain],
+            "⇧⌘S and ⇧⌘N"
+        );
         let (_, app) = MENU_BAR[0];
         for item in [MenuItem::About, MenuItem::Hide, QUIT] {
             assert!(app.contains(&item), "{item:?}");
@@ -390,11 +497,98 @@ mod tests {
         );
     }
 
+    /// ADR 0032: the Window menu opens main, schematic and panel windows,
+    /// resets the layout, and has the system's window items; no shortcut is
+    /// taken twice.
+    #[test]
+    fn the_window_menu_opens_more_windows() {
+        let (_, window) = MENU_BAR[3];
+        assert_eq!(
+            window,
+            [
+                MenuItem::Own(MenuAction::NewMain, "New Main Window", 'n'),
+                MenuItem::Plain(MenuAction::NewSchematic, "New Schematic Window"),
+                MenuItem::Plain(MenuAction::NewPanel, "New Panel Window"),
+                MenuItem::Separator,
+                MenuItem::Plain(MenuAction::ResetLayout, "Reset Layout"),
+                MenuItem::Separator,
+                MenuItem::Minimize,
+                MenuItem::Zoom,
+                MenuItem::Fullscreen,
+                MenuItem::Separator,
+                MenuItem::BringAllToFront,
+            ]
+        );
+        let mut keys: Vec<(char, bool)> = MENU_BAR
+            .iter()
+            .flat_map(|(_, items)| items.iter())
+            .filter_map(|item| match item {
+                MenuItem::Own(action, _, key) => Some((*key, action.shift())),
+                _ => None,
+            })
+            .collect();
+        // File ▸ Quit and Signal ▸ Quit Signal are one action twice.
+        keys.retain(|k| *k != ('q', false));
+        let all = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), all, "a shortcut taken twice: {keys:?}");
+        // Minimize ⌘M, Hide ⌘H, full screen ⌃⌘F, the Edit menu's: none of
+        // Signal's own.
+        for taken in ['m', 'h', 'z', 'x', 'c', 'v', 'a', 'f'] {
+            assert!(!keys.contains(&(taken, false)), "{taken}");
+        }
+        for action in [
+            MenuAction::NewMain,
+            MenuAction::NewSchematic,
+            MenuAction::NewPanel,
+            MenuAction::ResetLayout,
+        ] {
+            assert_eq!(action.page_script(), None, "{action:?}: the app does it");
+            assert_eq!(MenuAction::of(action.id()), Some(action));
+        }
+    }
+
+    /// ADR 0032: every view is a page of the same server, with the same
+    /// fragment, so each window is one more client; titles say the view.
+    #[test]
+    fn each_view_is_a_page_of_the_app_s_server() {
+        let app = "http://127.0.0.1:5123/ui/app/index.html#ws=5124&token=ab";
+        let url = |view| page_url(app, view_path(view));
+        assert_eq!(url(WindowView::Main), app);
+        assert_eq!(
+            url(WindowView::Schematic),
+            "http://127.0.0.1:5123/schematic#ws=5124&token=ab"
+        );
+        assert_eq!(
+            url(WindowView::Panel),
+            "http://127.0.0.1:5123/ui/app/panel-window.html#ws=5124&token=ab"
+        );
+        for view in [WindowView::Main, WindowView::Schematic, WindowView::Panel] {
+            assert!(may_navigate(&url(view), origin_of(app)));
+        }
+        let kick = status(Some("/p/kick.signal"), "kick", true);
+        assert_eq!(
+            view_title(WindowView::Main, Some(&kick)),
+            "kick.signal — Edited"
+        );
+        assert_eq!(
+            view_title(WindowView::Schematic, Some(&kick)),
+            "Signal — Schematic — kick.signal — Edited"
+        );
+        assert_eq!(
+            view_title(WindowView::Panel, Some(&kick)),
+            "Signal — Panel — kick.signal — Edited"
+        );
+        assert_eq!(view_title(WindowView::Panel, None), "Signal — Panel");
+        assert_eq!(view_title(WindowView::Main, None), "Signal");
+    }
+
     #[test]
     fn each_own_item_has_its_action_and_the_page_gets_all_but_quit() {
         for (_, items) in MENU_BAR {
             for item in items {
-                if let MenuItem::Own(action, ..) = item {
+                if let MenuItem::Own(action, ..) | MenuItem::Plain(action, _) = item {
                     assert_eq!(MenuAction::of(action.id()), Some(*action));
                 }
             }
