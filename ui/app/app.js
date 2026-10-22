@@ -642,8 +642,9 @@ export class SignalAppParameters extends AppElement {
  * same-origin frame filling the tab, kept while other tabs show, whose
  * shortcuts also work while the panel has the focus (without a native
  * menu). Opening another project shows its panel. In Signal.app it shows
- * the cards no panel window holds, each draggable by its heading to
- * another window (ADR 0032, ./lib/cards.js).
+ * every card, one another window holds as a placeholder, and a right click
+ * on a card puts its Move items first in this page's menu (ADR 0032,
+ * ./lib/cards.js).
  */
 export class SignalAppPanel extends AppElement {
   connectedCallback() {

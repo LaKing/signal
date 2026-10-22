@@ -238,6 +238,25 @@ pub fn page_url(app_url: &str, path: &str) -> String {
 /// The title of a window of `view`: a main window's is [`title`]; the
 /// others say what they show, then the project's title.
 pub fn view_title(view: WindowView, project: Option<&ProjectStatus>) -> String {
+    window_title(view, "", project)
+}
+
+/// The title of a window of `view` named `name` (`layout::labels`: "Panel
+/// window 2 (screen 3)", the screen left out of the title): a main
+/// window's is [`title`]; the others say which window they are, then the
+/// project's title.
+pub fn window_title(view: WindowView, name: &str, project: Option<&ProjectStatus>) -> String {
+    let name = name.split(" (screen").next().unwrap_or(name);
+    if !name.is_empty() && view != WindowView::Main {
+        return match project {
+            Some(_) => format!("Signal — {name} — {}", title(project)),
+            None => format!("Signal — {name}"),
+        };
+    }
+    view_title_plain(view, project)
+}
+
+fn view_title_plain(view: WindowView, project: Option<&ProjectStatus>) -> String {
     let shows = match view {
         WindowView::Main => return title(project),
         WindowView::Schematic => "Schematic",
@@ -582,6 +601,15 @@ mod tests {
         );
         assert_eq!(view_title(WindowView::Panel, None), "Signal — Panel");
         assert_eq!(view_title(WindowView::Main, None), "Signal");
+        assert_eq!(
+            window_title(WindowView::Panel, "Panel window 2 (screen 3)", Some(&kick)),
+            "Signal — Panel window 2 — kick.signal — Edited"
+        );
+        assert_eq!(
+            window_title(WindowView::Main, "Main window 2", None),
+            "Signal",
+            "a main window's is the project's"
+        );
     }
 
     #[test]

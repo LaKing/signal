@@ -3,7 +3,8 @@
 //! configuration as the project's `ui/windows.toml` holds it, where each
 //! window opens (kept inside its screen's visible area), the default state
 //! (one main window on the main screen holding every card), and how a
-//! panel card dragged out of one window lands in another, or in a new one.
+//! panel card moves from one window to another, or to a new one (its
+//! context menu).
 //!
 //! The layout is presentation, as `ui/schematic.toml` is: it changes
 //! nothing the project plays. It is project text (rule 4), under a key per
@@ -110,9 +111,6 @@ pub struct Screens {
     pub screens: Vec<Screen>,
     /// The main screen's index in `screens`.
     pub primary: usize,
-    /// The main screen's scale factor (tao gives the pointer's place in
-    /// its pixels).
-    pub primary_scale: f64,
 }
 
 /// The key of a screen configuration: each monitor's name, size in pixels,
@@ -165,16 +163,12 @@ pub fn screens_of(monitors: &[Monitor], primary: Option<usize>) -> Screens {
             }
         })
         .collect();
-    let primary_scale = primary
-        .and_then(|p| monitors.get(p))
-        .map_or(1.0, |m| if m.scale > 0.0 { m.scale } else { 1.0 });
     Screens {
         key: screen_key(monitors),
         screens,
         primary: primary
             .and_then(|p| order.iter().position(|&i| i == p))
             .unwrap_or(0),
-        primary_scale,
     }
 }
 
@@ -505,18 +499,137 @@ impl Tracker {
     }
 }
 
-/// Where a dragged card is dropped.
+/// The smallest window opened for cards, in points.
+pub const MIN_SIZE: (f64, f64) = (320.0, 160.0);
+
+/// A window of `view` and content `size` with its frame's top-left corner
+/// at `at` (in the desktop's points), on the screen holding
+/// that point, moved (and made smaller only when larger) to lie wholly in
+/// its visible area.
+pub fn at_point(
+    view: WindowView,
+    at: (f64, f64),
+    size: (f64, f64),
+    screens: &Screens,
+) -> LayoutWindow {
+    let index = screens.at(at);
+    let width = size.0.max(MIN_SIZE.0);
+    let height = size.1.max(MIN_SIZE.1);
+    let Some(screen) = screens.get(index) else {
+        return LayoutWindow {
+            view,
+            screen: 0,
+            x: at.0,
+            y: at.1,
+            width,
+            height,
+            cards: Vec::new(),
+            fullscreen: false,
+        };
+    };
+    let wanted = LayoutWindow {
+        view,
+        screen: index,
+        x: at.0 - screen.x,
+        y: at.1 - screen.y,
+        width,
+        height,
+        cards: Vec::new(),
+        fullscreen: false,
+    };
+    let placed = place(&wanted, screens);
+    LayoutWindow {
+        x: (placed.x - screen.x).round(),
+        y: (placed.y - screen.y).round(),
+        width: placed.width.round(),
+        height: placed.height.round(),
+        ..wanted
+    }
+}
+
+/// A window of `view` and content `size`, centred in the visible area of
+/// screen `screen` (the main one when it names none).
+pub fn centred(
+    view: WindowView,
+    size: (f64, f64),
+    screen: usize,
+    screens: &Screens,
+) -> LayoutWindow {
+    let index = if screen < screens.screens.len() {
+        screen
+    } else {
+        screens.primary
+    };
+    let Some(s) = screens.get(index) else {
+        return at_point(view, (0.0, MENU_BAR_INSET), size, screens);
+    };
+    let (vx, vy, vw, vh) = s.visible();
+    let width = size.0.min(vw);
+    let height = size.1.min(vh - TITLE_BAR);
+    let corner = (
+        vx + (vw - width) / 2.0,
+        vy + ((vh - height - TITLE_BAR) / 2.0).max(0.0),
+    );
+    at_point(view, corner, (width, height), screens)
+}
+
+/// The content height a window (laid out as `window`) takes to fit
+/// content `height` points high: at least [`MIN_SIZE`]'s, and no lower than
+/// its screen's visible area.
+pub fn fit_height(window: &LayoutWindow, height: f64, screens: &Screens) -> f64 {
+    let room = screens.get(window.screen).map_or(height, |s| {
+        let (_, vy, _, vh) = s.visible();
+        vy + vh - (s.y + window.y) - TITLE_BAR
+    });
+    height.max(MIN_SIZE.1).min(room.max(MIN_SIZE.1)).round()
+}
+
+/// Each window's name, as the cards' menus and placeholders say it: "Main
+/// window" ("Main window 2" when there are several), "Panel window 1
+/// (screen 2)", "Schematic window".
+pub fn labels(layout: &Layout) -> Vec<String> {
+    let mains = layout
+        .windows
+        .iter()
+        .filter(|w| w.view == WindowView::Main)
+        .count();
+    let (mut main, mut schematic, mut panel) = (0usize, 0usize, 0usize);
+    layout
+        .windows
+        .iter()
+        .map(|w| {
+            let count = match w.view {
+                WindowView::Main => &mut main,
+                WindowView::Schematic => &mut schematic,
+                WindowView::Panel => &mut panel,
+            };
+            *count += 1;
+            let k = *count;
+            match w.view {
+                WindowView::Main if mains > 1 => format!("Main window {k}"),
+                WindowView::Main => "Main window".to_owned(),
+                WindowView::Schematic if k > 1 => format!("Schematic window {k}"),
+                WindowView::Schematic => "Schematic window".to_owned(),
+                WindowView::Panel => format!("Panel window {k} (screen {})", w.screen + 1),
+            }
+        })
+        .collect()
+}
+
+/// The panel window holding `card`, if one does.
+pub fn holder(layout: &Layout, card: &str) -> Option<usize> {
+    layout
+        .windows
+        .iter()
+        .position(|w| w.view == WindowView::Panel && w.cards.iter().any(|c| c == card))
+}
+
+/// Where a card is moved (its menu, a placeholder's Bring back).
 #[derive(Clone, Debug, PartialEq)]
-pub enum CardDrop {
-    /// Into window `window` (an index of the layout), before card `before`
-    /// (at the end without it).
-    Into {
-        /// The window.
-        window: usize,
-        /// The card it goes before.
-        before: Option<String>,
-    },
-    /// Nowhere a window is: a new panel window there.
+pub enum CardMove {
+    /// Into window `0` (an index of the layout), at its end.
+    Into(usize),
+    /// Into a new panel window laid out so.
     New(LayoutWindow),
 }
 
@@ -532,22 +645,13 @@ pub fn held(layout: &Layout) -> Vec<String> {
 
 /// Moves `card` to `to`: out of every window that had it, into a panel
 /// window (which then holds it) or a main window (which then shows it,
-/// placed as asked). Whether anything changed; a drop on a schematic window
-/// or on no window of the layout changes nothing.
-pub fn move_card(layout: &mut Layout, card: &str, to: CardDrop) -> bool {
+/// placed last). Whether anything changed; a move into a schematic window
+/// or a window the layout does not have changes nothing.
+pub fn move_card(layout: &mut Layout, card: &str, to: CardMove) -> bool {
     if !is_card_id(card) {
         return false;
     }
-    // Dropped on itself: it stays where it is.
-    if let CardDrop::Into {
-        before: Some(before),
-        ..
-    } = &to
-        && before == card
-    {
-        return false;
-    }
-    if let CardDrop::Into { window, .. } = &to
+    if let CardMove::Into(window) = &to
         && !layout
             .windows
             .get(*window)
@@ -560,21 +664,55 @@ pub fn move_card(layout: &mut Layout, card: &str, to: CardDrop) -> bool {
         window.cards.retain(|c| c != card);
     }
     match to {
-        CardDrop::Into { window, before } => {
+        CardMove::Into(window) => {
             if let Some(target) = layout.windows.get_mut(window) {
-                let at = before
-                    .and_then(|b| target.cards.iter().position(|c| *c == b))
-                    .unwrap_or(target.cards.len());
-                target.cards.insert(at, card.to_owned());
+                target.cards.push(card.to_owned());
             }
         }
-        CardDrop::New(mut window) => {
+        CardMove::New(mut window) => {
             window.view = WindowView::Panel;
             window.cards = vec![card.to_owned()];
             layout.windows.push(window);
         }
     }
     *layout != before
+}
+
+/// Window `window`'s cards in the order `order` (Move up, Move down): a
+/// panel window keeps the cards it holds, those `order` names first; a
+/// main window's order becomes `order`, less the cards panel windows hold.
+/// Whether anything changed.
+pub fn reorder(layout: &mut Layout, window: usize, order: &[String]) -> bool {
+    let held = held(layout);
+    let Some(target) = layout.windows.get_mut(window) else {
+        return false;
+    };
+    let mut cards: Vec<String> = match target.view {
+        WindowView::Schematic => return false,
+        WindowView::Panel => order
+            .iter()
+            .filter(|c| target.cards.contains(c))
+            .cloned()
+            .collect(),
+        WindowView::Main => order
+            .iter()
+            .filter(|c| is_card_id(c) && !held.contains(c))
+            .cloned()
+            .collect(),
+    };
+    cards.dedup();
+    if target.view == WindowView::Panel {
+        for card in &target.cards {
+            if !cards.contains(card) {
+                cards.push(card.clone());
+            }
+        }
+    }
+    if cards == target.cards {
+        return false;
+    }
+    target.cards = cards;
+    true
 }
 
 /// Whether `id` may be a card's id: the ids `ui/app/lib/cards.js` gives
@@ -586,25 +724,6 @@ pub fn is_card_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
-}
-
-/// The window under the point `at` among `frames` (each window's content
-/// `(x, y, width, height)` in the desktop's points, by layout index),
-/// looked at in `front` order (the most recently focused first, which is
-/// how they are stacked); `None` over no window.
-pub fn window_at(
-    at: (f64, f64),
-    frames: &[(f64, f64, f64, f64)],
-    front: &[usize],
-) -> Option<usize> {
-    let inside = |&(x, y, w, h): &(f64, f64, f64, f64)| {
-        at.0 >= x && at.0 < x + w && at.1 >= y - TITLE_BAR && at.1 < y + h
-    };
-    front
-        .iter()
-        .copied()
-        .chain(0..frames.len())
-        .find(|&i| frames.get(i).is_some_and(inside))
 }
 
 /// The layout of screen configuration `key` in `ui/windows.toml`'s `text`:
@@ -814,7 +933,6 @@ mod tests {
 
         let screens = screens_of(&desk(), Some(0));
         assert_eq!(screens.primary, 1, "the built-in, second by position");
-        assert_eq!(screens.primary_scale, 2.0);
         assert_eq!(
             screens.screens,
             [
@@ -947,8 +1065,8 @@ mod tests {
     }
 
     /// ADR 0032: a card moves between windows: a panel window holds it, the
-    /// main window shows what none holds, a drop nowhere opens a panel
-    /// window with it, a drop on the schematic changes nothing.
+    /// main window shows the rest, a new panel window holds the card moved
+    /// into it, a schematic takes none; Move up and down reorder.
     #[test]
     fn cards_move_between_windows() {
         let screens = screens_of(&desk(), Some(0));
@@ -957,94 +1075,53 @@ mod tests {
             .windows
             .push(window(WindowView::Schematic, 0, (0.0, 0.0), (900.0, 700.0)));
         let fresh = window(WindowView::Panel, 0, (1000.0, 100.0), (400.0, 300.0));
-        assert!(move_card(&mut layout, "kick", CardDrop::New(fresh)));
+        assert!(move_card(&mut layout, "kick", CardMove::New(fresh)));
         assert_eq!(layout.windows.len(), 3);
         assert_eq!(layout.windows[2].view, WindowView::Panel);
         assert_eq!(held(&layout), ["kick"]);
-        assert!(move_card(
-            &mut layout,
-            "output",
-            CardDrop::Into {
-                window: 2,
-                before: None
-            }
-        ));
-        assert!(move_card(
-            &mut layout,
-            "scope",
-            CardDrop::Into {
-                window: 2,
-                before: Some("output".to_owned())
-            }
-        ));
-        assert_eq!(layout.windows[2].cards, cards(&["kick", "scope", "output"]));
-        // Reordered within its window.
-        assert!(move_card(
-            &mut layout,
-            "output",
-            CardDrop::Into {
-                window: 2,
-                before: Some("kick".to_owned())
-            }
-        ));
-        assert_eq!(layout.windows[2].cards, cards(&["output", "kick", "scope"]));
+        assert!(move_card(&mut layout, "output", CardMove::Into(2)));
+        assert!(move_card(&mut layout, "scope", CardMove::Into(2)));
+        assert_eq!(layout.windows[2].cards, cards(&["kick", "output", "scope"]));
         assert!(
-            !move_card(
-                &mut layout,
-                "output",
-                CardDrop::Into {
-                    window: 2,
-                    before: Some("kick".to_owned())
-                }
-            ),
+            !move_card(&mut layout, "scope", CardMove::Into(2)),
             "already there"
         );
-        // Back to the main window: shown there, first.
-        let first = Some("intro".to_owned());
-        assert!(move_card(
+        // Move up and down: the window's order.
+        assert!(reorder(
             &mut layout,
-            "kick",
-            CardDrop::Into {
-                window: 0,
-                before: first
-            }
+            2,
+            &cards(&["output", "kick", "scope"])
         ));
-        assert_eq!(held(&layout), ["output", "scope"]);
+        assert_eq!(layout.windows[2].cards, cards(&["output", "kick", "scope"]));
+        assert!(!reorder(
+            &mut layout,
+            2,
+            &cards(&["output", "kick", "scope"])
+        ));
+        assert!(
+            reorder(&mut layout, 2, &cards(&["scope", "intro"])),
+            "only its own"
+        );
+        assert_eq!(layout.windows[2].cards, cards(&["scope", "output", "kick"]));
+        // Back to the main window: shown there, last; its order.
+        assert!(move_card(&mut layout, "kick", CardMove::Into(0)));
+        assert_eq!(held(&layout), ["scope", "output"]);
         assert_eq!(layout.windows[0].cards, ["kick"]);
+        assert!(reorder(&mut layout, 0, &cards(&["intro", "kick", "scope"])));
+        assert_eq!(
+            layout.windows[0].cards,
+            cards(&["intro", "kick"]),
+            "not the held"
+        );
         let unchanged = layout.clone();
-        assert!(!move_card(
-            &mut layout,
-            "scope",
-            CardDrop::Into {
-                window: 1,
-                before: None
-            }
-        ));
-        assert!(!move_card(
-            &mut layout,
-            "scope",
-            CardDrop::Into {
-                window: 9,
-                before: None
-            }
-        ));
-        assert!(!move_card(
-            &mut layout,
-            "a b",
-            CardDrop::Into {
-                window: 2,
-                before: None
-            }
-        ));
-        let itself = Some("scope".to_owned());
-        assert!(!move_card(
-            &mut layout,
-            "scope",
-            CardDrop::Into {
-                window: 2,
-                before: itself
-            }
-        ));
+        assert!(
+            !move_card(&mut layout, "scope", CardMove::Into(1)),
+            "a schematic"
+        );
+        assert!(!move_card(&mut layout, "scope", CardMove::Into(9)));
+        assert!(!move_card(&mut layout, "a b", CardMove::Into(2)));
+        assert!(!reorder(&mut layout, 1, &cards(&["scope"])));
+        assert!(!reorder(&mut layout, 9, &cards(&["scope"])));
         assert_eq!(layout, unchanged);
     }
 
@@ -1185,6 +1262,137 @@ mod tests {
         assert!(tracker.due(seconds(t, 6.5), false));
     }
 
+    /// The owner's three screens (2026-10-22): 3840x2160 at scale 1 side by
+    /// side, x up to 11520.
+    fn three() -> Screens {
+        let m = |name: &str, x| monitor(name, (3840, 2160), 1.0, (x, 0));
+        screens_of(
+            &[
+                m("Monitor #41253", 3840),
+                m("Monitor #41252", 7680),
+                m("Monitor #41253", 0),
+            ],
+            Some(2),
+        )
+    }
+
+    /// Review 6: placement on three same-scale screens at large
+    /// coordinates; the y axis is tao's (top left of the main screen, down),
+    /// so the window at y = 1740 of the owner's file is near the bottom of
+    /// screen 1, not flipped.
+    #[test]
+    fn three_screens_side_by_side() {
+        let screens = three();
+        assert_eq!(
+            screens.key,
+            "Monitor #41253 3840x2160@1 +0+0 | Monitor #41253 3840x2160@1 +3840+0 | Monitor #41252 3840x2160@1 +7680+0"
+        );
+        assert_eq!(screens.primary, 0);
+        assert_eq!(screens.at((11519.0, 2159.0)), 2);
+        assert_eq!(screens.at((7680.0, 0.0)), 2);
+        assert_eq!(screens.at((3839.9, 100.0)), 0);
+        assert_eq!(
+            screens.at((20000.0, 100.0)),
+            0,
+            "off every screen: the main one"
+        );
+        let owner = window(WindowView::Panel, 0, (705.0, 1740.0), (480.0, 360.0));
+        let placed = place(&owner, &screens);
+        assert_eq!((placed.x, placed.y), (705.0, 1740.0));
+        assert!(
+            placed.y + placed.height + TITLE_BAR <= 2160.0,
+            "inside, near the bottom"
+        );
+        // A window cornered near screen 3's bottom-right lies wholly on it.
+        let cornered = at_point(
+            WindowView::Panel,
+            (11400.0, 2100.0),
+            (1200.0, 700.0),
+            &screens,
+        );
+        assert_eq!(cornered.screen, 2);
+        let p = place(&cornered, &screens);
+        assert!(p.x >= 7680.0 && p.x + p.width <= 11520.0, "{p:?}");
+        assert!(
+            p.y >= MENU_BAR_INSET && p.y + p.height + TITLE_BAR <= 2160.0,
+            "{p:?}"
+        );
+        assert_eq!((p.width, p.height), (1200.0, 700.0), "the card's size");
+        assert_eq!(
+            (cornered.x, cornered.y),
+            (3840.0 - 1200.0, 2160.0 - 700.0 - TITLE_BAR)
+        );
+    }
+
+    /// Owner, 2026-10-22: a card's new window takes its size (at least
+    /// MIN_SIZE), New Panel Window opens centred on the front window's
+    /// screen, and a window fits its content's height within its screen.
+    #[test]
+    fn panel_windows_fit_their_cards() {
+        let screens = three();
+        let small = at_point(WindowView::Panel, (100.0, 100.0), (50.0, 20.0), &screens);
+        assert_eq!((small.width, small.height), MIN_SIZE);
+        let new = centred(WindowView::Panel, (600.0, 400.0), 1, &screens);
+        assert_eq!(new.screen, 1);
+        assert_eq!(new.x, (3840.0 - 600.0) / 2.0);
+        assert_eq!(
+            new.y,
+            MENU_BAR_INSET + ((2160.0 - MENU_BAR_INSET - 400.0 - TITLE_BAR) / 2.0).round()
+        );
+        assert_eq!(
+            centred(WindowView::Panel, (600.0, 400.0), 9, &screens).screen,
+            0
+        );
+        let w = window(WindowView::Panel, 0, (100.0, 1000.0), (600.0, 400.0));
+        assert_eq!(fit_height(&w, 700.0, &screens), 700.0);
+        assert_eq!(
+            fit_height(&w, 5000.0, &screens),
+            2160.0 - 1000.0 - TITLE_BAR,
+            "not past the screen"
+        );
+        assert_eq!(fit_height(&w, 10.0, &screens), MIN_SIZE.1);
+    }
+
+    /// Owner, 2026-10-22: "every instrument's surface disappeared": the
+    /// placeholders and menus name each window; closing a panel window gives
+    /// its cards back to the main window.
+    #[test]
+    fn windows_are_named_and_closing_one_gives_its_cards_back() {
+        let screens = three();
+        let mut layout = default_layout(&screens, None);
+        let a = window(WindowView::Panel, 1, (0.0, 0.0), (600.0, 400.0));
+        let b = window(WindowView::Panel, 2, (0.0, 0.0), (600.0, 400.0));
+        move_card(&mut layout, "mono-synth", CardMove::New(a));
+        move_card(&mut layout, "rhythm-composer", CardMove::New(b));
+        layout
+            .windows
+            .push(window(WindowView::Schematic, 0, (0.0, 0.0), (900.0, 700.0)));
+        assert_eq!(
+            labels(&layout),
+            [
+                "Main window",
+                "Panel window 1 (screen 2)",
+                "Panel window 2 (screen 3)",
+                "Schematic window"
+            ]
+        );
+        assert_eq!(holder(&layout, "rhythm-composer"), Some(2));
+        assert_eq!(holder(&layout, "tape-echo"), None, "in the main window");
+        layout.windows.remove(1);
+        assert_eq!(
+            held(&layout),
+            ["rhythm-composer"],
+            "the synth is back in main"
+        );
+        assert_eq!(holder(&layout, "mono-synth"), None);
+        layout.windows.push(LayoutWindow {
+            view: WindowView::Main,
+            ..window(WindowView::Main, 0, (0.0, 0.0), (9.0, 9.0))
+        });
+        assert_eq!(labels(&layout)[0], "Main window 1");
+        assert_eq!(labels(&layout)[3], "Main window 2");
+    }
+
     #[test]
     fn layouts_a_point_or_two_apart_are_similar() {
         let screens = screens_of(&desk(), Some(0));
@@ -1204,20 +1412,6 @@ mod tests {
         assert!(!similar(&layout, &Layout::default()));
     }
 
-    #[test]
-    fn the_window_under_the_pointer_is_the_frontmost() {
-        let frames = [(0.0, 40.0, 800.0, 600.0), (500.0, 100.0, 400.0, 300.0)];
-        assert_eq!(window_at((600.0, 200.0), &frames, &[]), Some(0));
-        assert_eq!(window_at((600.0, 200.0), &frames, &[1, 0]), Some(1));
-        assert_eq!(
-            window_at((600.0, 20.0), &frames, &[]),
-            Some(0),
-            "its title bar"
-        );
-        assert_eq!(window_at((850.0, 50.0), &frames, &[1]), None);
-        assert_eq!(window_at((2000.0, 50.0), &frames, &[]), None);
-    }
-
     /// ADR 0032: `ui/windows.toml` keeps one entry per key; writing one
     /// keeps the others (and the comments) as written; Reset removes it.
     #[test]
@@ -1225,7 +1419,7 @@ mod tests {
         let screens = screens_of(&desk(), Some(0));
         let mut layout = default_layout(&screens, Some((900.0, 640.0)));
         let fresh = window(WindowView::Panel, 0, (100.0, 300.0), (800.0, 600.0));
-        move_card(&mut layout, "kick-2", CardDrop::New(fresh));
+        move_card(&mut layout, "kick-2", CardMove::New(fresh));
         layout.windows.push(window(
             WindowView::Schematic,
             0,

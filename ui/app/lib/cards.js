@@ -1,18 +1,35 @@
 // The project panel's cards across Signal.app's windows (ADR 0032,
 // docs/ui-controls.md "Cards across windows"). The project's main panel
 // (`ui/main.html`) stays the one source of its cards; each window shows a
-// subset: a panel window the cards it holds, in its order, and the main
-// window's Panel tab every card no panel window holds. Which window holds
-// which card is the project's `ui/windows.toml`, kept by the app (the
-// native side); a page only shows what it is told (`signal-window`) and
-// reports a card dragged by its heading (`card.drag`), and, when a card is
-// dropped on it (`signal-card-drop`), where it goes (`card.place`). Cards
-// are only hidden and ordered with CSS, never moved in the DOM, so the
-// panel file, its editor and `panel.written` see the panel as written.
+// subset: a panel window the cards it holds, in its order (none until told,
+// so a new panel window is empty), and a main window's Panel tab every card,
+// those another window holds as a compact placeholder in their place ("—
+// in Panel window 2 (screen 1)", Show, Bring back). Which window holds which
+// card is the project's `ui/windows.toml`, kept by the app (the native
+// side); a page only shows what it is told (`signal-window`) and says what
+// the person chose (`card.move`, `card.order`, `window.show`, `window.fit`).
 //
-// A card's id is its `id` attribute when it has one, else the slug of its
-// first heading (`kick`, `output`; a second card of the same heading
-// `kick-2`), else `card` (`card-2`, …), in the panel's order.
+// A card is moved from its context menu (owner's decision, 2026-10-22: "not
+// drag and drop — the panel elements should be movable from the context
+// menu"): a right click on a card (its background or heading; a control
+// bound to a parameter keeps its own menu, a text field the system's) shows
+// Move to each other window, Move to new panel window, in a panel window
+// Bring back to main window, and Move up / Move down where it has
+// neighbours. In a main window these items come first in the app's own
+// menu (the card is a `part` of it, as the schematic is); in a panel window
+// the same menu element (ui/controls/context-menu.js) opens in the page.
+// Not while the panel's layout is edited.
+//
+// Nothing is added to the panel's own DOM: the placeholders are an overlay
+// in the frame's body, outside `<signal-panel>`, and cards are only hidden,
+// ordered and collapsed with inline CSS, so the panel file, its editor and
+// `panel.written` see the panel as written. A card's id is its `id`
+// attribute when it has one, else the slug of its first heading (`kick`,
+// `output`; a second card of the same heading `kick-2`), else `card`
+// (`card-2`, …), in the panel's order.
+
+import { ContextMenu, menusClaimed } from '../../controls/context-menu.js';
+import { keepsSystemMenu } from './context.js';
 
 /** A heading's slug: lowercase letters and digits, the rest as single `-`. */
 export function slug(text) {
@@ -51,139 +68,149 @@ export function cardIds(cards) {
   });
 }
 
+/** What a panel window shows before the app says: nothing. */
+export const EMPTY_PANEL = Object.freeze({ view: 'panel', cards: [] });
+
 /**
  * What a window shows of the cards `ids` (in the panel's order), told by
  * the app as `state`: a panel window (`{ view: 'panel', cards }`) its cards
- * in its order; a main window (`{ view: 'main', held, order }`) every card
- * not `held`, those in `order` first. Returns `[{ id, shown, order }]`.
+ * in its order, none without them; a main window (`{ view: 'main', held,
+ * order }`) every card, those in `order` first, a `held` one (`{ card,
+ * where }`, `where` the window holding it) as a placeholder. `null` (a
+ * browser, or a main window not told yet): every card. Returns `[{ id,
+ * shown, order, held }]`, `held` the placeholder's text or null.
  */
 export function arrangement(ids, state) {
   const panel = state?.view === 'panel';
   const listed = panel ? (state.cards ?? []) : (state?.order ?? []);
-  const held = new Set(panel ? [] : (state?.held ?? []));
+  const held = new Map(panel ? [] : (state?.held ?? []).map((h) => (typeof h === 'string' ? [h, ''] : [h.card, h.where ?? ''])));
   const rank = new Map(listed.map((id, i) => [id, i]));
-  return ids.map((id, i) => {
-    const shown = panel ? rank.has(id) : !held.has(id);
-    const order = rank.has(id) ? rank.get(id) : listed.length + i;
-    return { id, shown, order };
-  });
+  return ids.map((id, i) => ({
+    id,
+    shown: panel ? rank.has(id) : true,
+    order: rank.has(id) ? rank.get(id) : listed.length + i,
+    held: held.has(id) ? held.get(id) : null,
+  }));
 }
 
 /**
- * Where a card dropped at `point` goes, among the shown cards' `boxes`
- * (`[{ id, left, top, right, bottom }]`, in the order shown): before the
- * card it is dropped on (on its first half, reading left to right) or the
- * one after it, at the end below or after them all; `null` is the end.
+ * The order of a window's own cards (`placed`, `arrangement`'s, without
+ * the hidden and held ones) with `card` moved one place by `step` (-1 up,
+ * +1 down); null when it cannot move that way.
  */
-export function dropBefore(boxes, point) {
-  for (let i = 0; i < boxes.length; i += 1) {
-    const b = boxes[i];
-    if (point.x >= b.left && point.x < b.right && point.y >= b.top && point.y < b.bottom) {
-      const firstHalf = point.x < (b.left + b.right) / 2;
-      return firstHalf ? b.id : (boxes[i + 1]?.id ?? null);
-    }
-  }
-  // Above a card's row, before the first card that starts below the point.
-  const after = boxes.find((b) => b.top > point.y);
-  return after ? after.id : null;
+export function moved(placed, card, step) {
+  const order = placed
+    .filter((c) => c.shown && c.held === null)
+    .sort((a, b) => a.order - b.order)
+    .map((c) => c.id);
+  const at = order.indexOf(card);
+  const to = at + step;
+  if (at < 0 || to < 0 || to >= order.length) return null;
+  [order[at], order[to]] = [order[to], order[at]];
+  return order;
 }
 
-/** How far the pointer moves before a press on a heading is a drag. */
-export const DRAG_DISTANCE = 6;
+/**
+ * The card menu's items for `card` in a window told `state` (`placed` its
+ * arrangement): Move to each other window (`state.targets`, `{ index,
+ * label }`), Move to new panel window, in a panel window Bring back to main
+ * window, and Move up / Move down when the window has other cards. Items
+ * are ui/lib/context-menu.js's (`{ id, label, disabled? }`).
+ */
+export function cardMenu(state, placed, card) {
+  const items = (state?.targets ?? []).map((t) => ({ id: `move:${t.index}`, label: `Move to ${t.label}` }));
+  items.push({ id: 'new', label: 'Move to new panel window' });
+  if (state?.view === 'panel') items.push({ id: 'main', label: 'Bring back to main window' });
+  const own = placed.filter((c) => c.shown && c.held === null).length;
+  if (own > 1) {
+    items.push({ id: 'separator' });
+    items.push({ id: 'up', label: 'Move up', disabled: !moved(placed, card, -1) });
+    items.push({ id: 'down', label: 'Move down', disabled: !moved(placed, card, 1) });
+  }
+  return items;
+}
+
+/**
+ * What choosing `id` of the card menu for `card` sends the app (`size`:
+ * the window a new one needs), or null.
+ */
+export function menuMessage(id, card, placed, size) {
+  if (id === 'up' || id === 'down') {
+    const cards = moved(placed, card, id === 'up' ? -1 : 1);
+    return cards ? { type: 'card.order', cards } : null;
+  }
+  if (id === 'new' || id === 'main') return { type: 'card.move', card, to: id, size };
+  if (id.startsWith('move:')) {
+    const to = Number(id.slice(5));
+    return Number.isInteger(to) && to >= 0 ? { type: 'card.move', card, to } : null;
+  }
+  return null;
+}
+
+/** A placeholder's height (the held card's place). */
+export const PLACEHOLDER_HEIGHT = '2.25rem';
 
 /** The cards of panel document `doc`: its `.signal-card`s, or a generated panel's groups. */
 export function findCards(doc) {
   const own = [...doc.querySelectorAll('.signal-card')].filter((c) => !c.parentElement?.closest('.signal-card'));
   if (own.length) return own;
-  const generated = [...doc.querySelectorAll('signal-panel')].flatMap((p) => [...(p.shadowRoot?.querySelectorAll('.generated > section') ?? [])]);
-  return generated;
+  return [...doc.querySelectorAll('signal-panel')].flatMap((p) => [...(p.shadowRoot?.querySelectorAll('.generated > section') ?? [])]);
 }
 
 function heading(card) {
   return [...card.children].find((c) => /^H[1-6]$/.test(c.tagName)) ?? null;
 }
 
-/** `[{ element, id }]` of `doc`'s cards. */
+/** `[{ element, id, title }]` of `doc`'s cards. */
 export function cardsOf(doc) {
   const elements = findCards(doc);
-  const ids = cardIds(elements.map((e) => ({ id: e.id, title: heading(e)?.textContent ?? '' })));
-  return elements.map((element, i) => ({ element, id: ids[i] }));
+  const titles = elements.map((e) => (heading(e)?.textContent ?? '').trim());
+  const ids = cardIds(elements.map((e, i) => ({ id: e.id, title: titles[i] })));
+  return elements.map((element, i) => ({ element, id: ids[i], title: titles[i] || ids[i] }));
 }
 
-/** Shows `doc`'s cards as `state` says (hidden and ordered with CSS only). */
+/** The attribute of a card another window holds (HELD_CSS hides all of it). */
+export const HELD_MARK = 'data-signal-app-held';
+
+/** A held card's inline style: its place kept as one line, nothing of it drawn. */
+export const HELD = Object.freeze({ visibility: 'hidden', height: PLACEHOLDER_HEIGHT, 'min-height': '0', 'max-height': PLACEHOLDER_HEIGHT, overflow: 'hidden', padding: '0' });
+
+/** In the panel's document: no part of a held card shows, whatever its own CSS makes visible. */
+export const HELD_CSS = `[${HELD_MARK}], [${HELD_MARK}] *, [${HELD_MARK}] *::before, [${HELD_MARK}] *::after, [${HELD_MARK}]::before, [${HELD_MARK}]::after { visibility: hidden !important; }`;
+
+/** Shows `doc`'s cards as `state` says (hidden, ordered and collapsed with CSS only); returns `[cards, placed]`. */
 export function applyCards(doc, state) {
   const cards = cardsOf(doc);
   const placed = arrangement(cards.map((c) => c.id), state);
-  cards.forEach(({ element }, i) => {
-    element.style.display = placed[i].shown ? '' : 'none';
-    element.style.order = state ? String(placed[i].order) : '';
+  cards.forEach((card, i) => {
+    const { element } = card;
+    const p = placed[i];
+    card.held = p.held;
+    element.style.display = p.shown ? '' : 'none';
+    element.style.order = state ? String(p.order) : '';
+    // A card another window holds keeps only its place (one line), wholly
+    // hidden, its placeholder drawn over it; nothing of the card shows.
+    const held = p.held !== null;
+    for (const [name, value] of Object.entries(HELD)) element.style.setProperty(name, held ? value : '', held ? 'important' : '');
+    if (held) element.setAttribute?.(HELD_MARK, '');
+    else element.removeAttribute?.(HELD_MARK);
   });
-  return cards;
-}
-
-/** The card `doc` would put a card dropped at `point` (its own coordinates) before. */
-export function dropTarget(doc, point) {
-  const boxes = cardsOf(doc)
-    .filter(({ element }) => element.style.display !== 'none')
-    .map(({ element, id }) => {
-      const r = element.getBoundingClientRect();
-      return { id, left: r.left, top: r.top, right: r.right, bottom: r.bottom };
-    })
-    .sort((a, b) => a.top - b.top || a.left - b.left);
-  return dropBefore(boxes, point);
+  return [cards, placed];
 }
 
 /**
- * Lets `doc`'s cards be dragged by their heading: a press that moves
- * DRAG_DISTANCE, released anywhere (the pointer is captured, so outside
- * the window too), calls `dropped(id)`; Escape cancels. Not while the
- * panel's layout is edited (`signal-panel[editing]`). Returns the remover.
+ * Whether a right click along `path` (the event's composed path, from the
+ * target) is the card's: not on a control bound to a parameter (it keeps
+ * its own menu), a text field (the system's), or while the layout is
+ * edited.
  */
-export function dragCards(doc, dropped) {
-  let drag = null;
-  const end = (event, drop) => {
-    if (!drag) return;
-    const { card, id, moved } = drag;
-    drag = null;
-    card.style.opacity = '';
-    doc.documentElement.style.cursor = '';
-    if (drop && moved) {
-      event?.preventDefault();
-      dropped(id);
-    }
-  };
-  const down = (event) => {
-    if (event.button !== 0 || drag) return;
-    const path = event.composedPath();
-    const head = path.find((n) => n.tagName && /^H[1-6]$/.test(n.tagName));
-    const card = head && cardsOf(doc).find((c) => c.element === head.parentElement);
-    if (!card || card.element.closest('signal-panel[editing]') || path.some((n) => n.localName === 'signal-panel' && n.hasAttribute?.('editing'))) return;
-    drag = { card: card.element, id: card.id, x: event.screenX, y: event.screenY, moved: false };
-    head.setPointerCapture?.(event.pointerId);
-  };
-  const move = (event) => {
-    if (!drag || drag.moved) return;
-    if (Math.hypot(event.screenX - drag.x, event.screenY - drag.y) >= DRAG_DISTANCE) {
-      drag.moved = true;
-      drag.card.style.opacity = '0.5';
-      doc.documentElement.style.cursor = 'grabbing';
-    }
-  };
-  const up = (event) => end(event, true);
-  const cancel = () => end(null, false);
-  const key = (event) => event.key === 'Escape' && cancel();
-  doc.addEventListener('pointerdown', down, true);
-  doc.addEventListener('pointermove', move, true);
-  doc.addEventListener('pointerup', up, true);
-  doc.addEventListener('pointercancel', cancel, true);
-  doc.addEventListener('keydown', key, true);
-  return () => {
-    doc.removeEventListener('pointerdown', down, true);
-    doc.removeEventListener('pointermove', move, true);
-    doc.removeEventListener('pointerup', up, true);
-    doc.removeEventListener('pointercancel', cancel, true);
-    doc.removeEventListener('keydown', key, true);
-  };
+export function cardClick(path, card) {
+  for (const node of path) {
+    if (node === card) return true;
+    if (node?.binding?.address || keepsSystemMenu(node)) return false;
+    if (node?.localName === 'signal-panel' && node.hasAttribute?.('editing')) return false;
+  }
+  return false;
 }
 
 /** The app's message channel (wry's `window.ipc`), or null outside Signal.app. */
@@ -192,72 +219,205 @@ export function appChannel(target = globalThis) {
   return ipc && typeof ipc.postMessage === 'function' ? (message) => ipc.postMessage(JSON.stringify(message)) : null;
 }
 
+const STYLE = {
+  layer: 'position:absolute;left:0;top:0;width:0;height:0;z-index:2147483000;',
+  placeholder: 'position:absolute;box-sizing:border-box;display:flex;gap:.6rem;align-items:center;padding:0 .75rem;border:1px solid var(--signal-track,#2a2f38);border-radius:8px;background:var(--signal-bg,#15181d);color:var(--signal-muted,#8a93a3);font:12px/1.3 -apple-system,BlinkMacSystemFont,sans-serif;overflow:hidden;white-space:nowrap;visibility:visible;',
+  button: 'font:inherit;color:var(--signal-fg,#d6dbe4);background:var(--signal-track,#2a2f38);border:1px solid var(--signal-muted,#8a93a3);border-radius:3px;padding:.1rem .6rem;cursor:pointer;',
+};
+
+function make(doc, tag, style, text) {
+  const e = doc.createElement(tag);
+  e.setAttribute('style', style);
+  e.dataset.signalApp = '';
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
 /**
  * Connects panel frame `frame` (a same-origin iframe of the project's
  * panel) of this window to the app: tells it the window is ready, shows its
- * cards as each `signal-window` says, makes them draggable, and answers a
- * `signal-card-drop` (the point in this page's coordinates) with
- * `card.place`; `shownCount` is told how many cards it shows. Outside
+ * cards as each `signal-window` says (`initial` until then: EMPTY_PANEL in
+ * a panel window, null, every card, in a main window), draws the
+ * placeholders, and gives each card its menu: as a part of the app's menu
+ * where the page has one (a main window), else in `menuHost`'s document
+ * (a panel window). `shownCount` is told how many cards it shows. Outside
  * Signal.app it does nothing. Returns the remover.
  */
-export function connectCards(frame, target = globalThis, shownCount = () => {}) {
+export function connectCards(frame, { target = globalThis, initial = null, shownCount = () => {}, menuHost = null } = {}) {
   const post = appChannel(target);
   if (!post) return () => {};
-  let state = null;
-  let stopDrag = null;
-  let observer = null;
+  let state = initial;
+  let cards = [];
+  let placed = [];
+  let layer = null;
+  let stops = [];
+  let frameId = 0;
+  let sizes = null;
+  let menu = null;
   const doc = () => frame.contentDocument;
+
+  // The window a card of `rect` needs: its size with the page's margins
+  // and what is above the cards (the panel's bar).
+  const sizeOf = (rect) => {
+    const d = doc();
+    const grid = d?.querySelector('.signal-cards') ?? d?.querySelector('signal-panel');
+    const above = Math.max(0, (grid?.getBoundingClientRect().top ?? 0) + (d?.defaultView?.scrollY ?? 0));
+    return { width: Math.ceil(rect.width + 24), height: Math.ceil(rect.height + above + 24) };
+  };
+
+  // Each card's menu, as a part of a page menu (`contextMenu`, as
+  // SignalAppContextMenu.part asks).
+  const partOf = (card) => (event) => {
+    if (!cardClick(event.composedPath?.() ?? [], card.element)) return null;
+    return {
+      items: cardMenu(state, placed, card.id),
+      act: (id) => {
+        const message = menuMessage(id, card.id, placed, sizeOf(card.element.getBoundingClientRect()));
+        if (message) post(message);
+      },
+    };
+  };
+
+  // The placeholders, over the held cards where they are now.
+  const draw = () => {
+    frameId = 0;
+    const d = doc();
+    if (!d || !layer) return;
+    layer.replaceChildren();
+    const sx = d.defaultView?.scrollX ?? 0;
+    const sy = d.defaultView?.scrollY ?? 0;
+    for (const card of cards) {
+      if (card.held == null || card.element.style.display === 'none') continue;
+      const r = card.element.getBoundingClientRect();
+      if (!r.width) continue;
+      const box = make(d, 'div', `${STYLE.placeholder}left:${r.left + sx}px;top:${r.top + sy}px;width:${r.width}px;height:${r.height}px;`);
+      const text = make(d, 'span', 'flex:1;overflow:hidden;text-overflow:ellipsis;', `${card.title} — in ${card.held || 'another window'}`);
+      const show = make(d, 'button', STYLE.button, 'Show');
+      const back = make(d, 'button', STYLE.button, 'Bring back');
+      show.type = back.type = 'button';
+      show.addEventListener('click', () => post({ type: 'window.show', card: card.id }));
+      back.addEventListener('click', () => post({ type: 'card.move', card: card.id, to: 'here' }));
+      box.append(text, show, back);
+      layer.append(box);
+    }
+  };
+  // On this page's clock, not the frame's: a frame's document is replaced
+  // when it loads, and a callback asked of the old one never runs.
+  const redraw = () => {
+    if (frameId) return;
+    frameId = target.requestAnimationFrame ? target.requestAnimationFrame(draw) : setTimeout(draw, 16);
+  };
+
   const apply = () => {
     const d = doc();
-    if (!d || !state) return;
-    const cards = applyCards(d, state);
-    shownCount(cards.filter(({ element }) => element.style.display !== 'none').length);
-  };
-  const loaded = () => {
-    stopDrag?.();
-    observer?.disconnect();
-    const d = doc();
     if (!d) return;
-    stopDrag = dragCards(d, (card) => post({ type: 'card.drag', card }));
-    // A generated panel builds its cards once described, and a written
-    // panel is shown in place: shown again as told.
-    const View = frame.contentWindow?.MutationObserver;
-    if (View) {
-      observer = new View(() => {
+    [cards, placed] = state ? applyCards(d, state) : [cardsOf(d), arrangement(cardsOf(d).map((c) => c.id), null)];
+    for (const card of cards) {
+      card.element.contextMenu = partOf(card);
+      sizes?.observe(card.element);
+    }
+    shownCount(cards.filter((c) => c.element.style.display !== 'none').length);
+    redraw();
+    if (state?.view === 'panel') {
+      // The content's height, for a window that fits it.
+      const view = d.defaultView;
+      const shown = cards.filter((c) => c.element.style.display !== 'none');
+      const bottom = Math.max(0, ...shown.map((c) => c.element.getBoundingClientRect().bottom + (view?.scrollY ?? 0)));
+      if (shown.length) post({ type: 'window.fit', height: Math.ceil(bottom + 12) });
+    }
+  };
+
+  // Without a page menu (a panel window): the card's menu opens here.
+  const right = (event) => {
+    const d = doc();
+    if (!d || menusClaimed(d) || !menuHost) return;
+    for (const node of event.composedPath?.() ?? []) {
+      if (typeof node?.contextMenu !== 'function') continue;
+      const part = node.contextMenu(event);
+      if (!part) return;
+      event.preventDefault();
+      menu ??= new ContextMenu({ label: 'Card', doc: menuHost.ownerDocument ?? menuHost });
+      if (!menu.list.isConnected) menuHost.append(menu.list);
+      const box = frame.getBoundingClientRect();
+      menu.show(part.items, { x: event.clientX + box.left, y: event.clientY + box.top, pick: (id) => part.act(id) });
+      return;
+    }
+  };
+  const closeMenu = (event) => {
+    if (menu?.isOpen && !event?.composedPath?.().includes(menu.list)) menu.close();
+  };
+
+  const loaded = () => {
+    for (const stop of stops) stop();
+    stops = [];
+    const d = doc();
+    if (!d?.body) return;
+    frameId = 0;
+    layer = make(d, 'div', STYLE.layer);
+    layer.dataset.signalApp = 'cards';
+    d.body.append(layer);
+    const hide = d.createElement('style');
+    hide.dataset.signalApp = 'held';
+    hide.textContent = HELD_CSS;
+    d.head?.append(hide);
+    stops.push(() => hide.remove());
+    const listen = (on, type, fn, capture = false) => {
+      on.addEventListener(type, fn, capture);
+      stops.push(() => on.removeEventListener(type, fn, capture));
+    };
+    // As it bubbles, so the panel editor's edit mode keeps its own.
+    listen(d, 'contextmenu', right);
+    listen(d, 'pointerdown', closeMenu, true);
+    listen(d, 'keydown', (event) => event.key === 'Escape' && menu?.close());
+    listen(d.defaultView, 'resize', redraw);
+    const View = frame.contentWindow;
+    // A generated panel builds its cards once described, a written panel is
+    // shown in place, and cards change size: shown again as told.
+    if (View?.MutationObserver) {
+      let observer;
+      const observe = () => {
+        observer.observe(d.querySelector('signal-panel') ?? d.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['editing'] });
+        for (const p of d.querySelectorAll('signal-panel')) if (p.shadowRoot) observer.observe(p.shadowRoot, { childList: true, subtree: true });
+      };
+      observer = new View.MutationObserver(() => {
         observer.disconnect();
         apply();
         observe();
       });
-      const observe = () => {
-        observer.observe(d.body ?? d.documentElement, { childList: true, subtree: true });
-        for (const p of d.querySelectorAll('signal-panel')) if (p.shadowRoot) observer.observe(p.shadowRoot, { childList: true, subtree: true });
-      };
       observe();
+      stops.push(() => observer.disconnect());
     }
+    if (View?.ResizeObserver) {
+      sizes = new View.ResizeObserver(redraw);
+      sizes.observe(d.body);
+      stops.push(() => {
+        sizes?.disconnect();
+        sizes = null;
+      });
+    }
+    stops.push(() => layer?.remove());
     apply();
   };
+
   const told = (event) => {
     state = event.detail ?? null;
     apply();
   };
-  const drop = (event) => {
-    const { card, x, y } = event.detail ?? {};
-    if (!isCardId(card)) return;
-    const box = frame.getBoundingClientRect();
-    const d = doc();
-    const before = d ? dropTarget(d, { x: x - box.left, y: y - box.top }) : null;
-    post({ type: 'card.place', card, before });
-  };
+  const outside = (event) => closeMenu(event);
+  const blur = () => menu?.close();
+
   frame.addEventListener('load', loaded);
   target.addEventListener('signal-window', told);
-  target.addEventListener('signal-card-drop', drop);
-  if (doc()?.readyState === 'complete') loaded();
+  target.addEventListener('pointerdown', outside, true);
+  target.addEventListener('blur', blur);
+  if (doc()?.readyState === 'complete' && doc()?.body) loaded();
   post({ type: 'window.ready' });
   return () => {
-    stopDrag?.();
-    observer?.disconnect();
+    for (const stop of stops) stop();
+    menu?.close();
     frame.removeEventListener('load', loaded);
     target.removeEventListener('signal-window', told);
-    target.removeEventListener('signal-card-drop', drop);
+    target.removeEventListener('pointerdown', outside, true);
+    target.removeEventListener('blur', blur);
   };
 }

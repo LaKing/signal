@@ -25,11 +25,10 @@
 //! state (one main window on the main screen with every card). Moving,
 //! resizing, opening or closing a window, or moving a card, writes the
 //! key's entry a second after the last change (through the control
-//! thread, which takes the write as seen). A panel card dragged by its
-//! heading is dropped where the pointer is when released: the page tells
-//! the app (`card.drag`, wry's IPC), the app finds the window under the
-//! pointer and asks its page where the card goes (`signal-card-drop`,
-//! answered with `card.place`), or opens a new panel window there.
+//! thread, which takes the write as seen). A panel card is moved from its
+//! context menu: the page tells the app (`card.move`, `card.order`, wry's
+//! IPC), which moves it and tells every window what it shows
+//! (`signal-window`).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -46,9 +45,9 @@ use objc2_app_kit::{
 use objc2_foundation::NSString;
 use serde_json::{Value, json};
 use signal_app::layout::{
-    CardDrop, Change, Layout, LayoutWindow, Monitor, Screens, Seen, Tracker, WindowView,
-    default_layout, held, move_card, place, read_layout, record, screens_of, similar, window_at,
-    write_layout,
+    CardMove, Change, Layout, LayoutWindow, Monitor, Screens, Seen, Tracker, WindowView, centred,
+    default_layout, fit_height, held, holder, labels, move_card, place, read_layout, record,
+    reorder, screens_of, similar, write_layout,
 };
 use signal_app::panel::write_file;
 use signal_app::server::{AppConfig, AppServer, WindowsEdit};
@@ -57,7 +56,7 @@ use signal_app::state::Backend;
 use signal_app::window::{
     ExitPlan, MENU_BAR, MenuAction, MenuItem, NATIVE_MENU_SCRIPT, Prompt, QuitRoute, WINDOW_MENU,
     default_save_name, dropped, exit_plan, may_navigate, origin_of, page_url, prompt_buttons,
-    prompt_text, save_target, view_path, view_title, window_of,
+    prompt_text, save_target, view_path, view_title, window_of, window_title,
 };
 use signal_ui::document::open_root;
 use signal_ui::{Edits, ProjectStatus, WINDOWS_FILE};
@@ -91,7 +90,7 @@ enum UserEvent {
     /// The open project or its edited state changed (the titles).
     Project(Option<ProjectStatus>),
     /// A window's page said something (wry's IPC: `window.ready`,
-    /// `card.drag`, `card.place`).
+    /// `card.move`, `card.order`, `window.show`, `window.fit`).
     Page(WindowId, String),
 }
 
@@ -102,8 +101,10 @@ type Proxy = EventLoopProxy<UserEvent>;
 
 /// How often the screens are looked at (tao tells no screen change).
 const SCREEN_POLL: Duration = Duration::from_secs(1);
-/// A new panel window's size, in points.
-const PANEL_SIZE: (f64, f64) = (480.0, 360.0);
+/// New Panel Window's size, in points.
+const PANEL_SIZE: (f64, f64) = (600.0, 400.0);
+/// New Schematic Window's size, in points.
+const SCHEMATIC_SIZE: (f64, f64) = (1200.0, 800.0);
 
 /// The native menu bar of [`MENU_BAR`] and its Window menu; built on the
 /// main thread, as `muda` requires.
@@ -205,6 +206,12 @@ struct Shown {
     /// Scripts to run once it is ready (a menu action for a main window
     /// opened for it).
     pending: Vec<String>,
+    /// The person resized it: its size is theirs, never fitted.
+    sized: bool,
+    /// Its cards changed: its page's next `window.fit` sizes it.
+    fit: bool,
+    /// Until then, its resizes are the app's own (a fit).
+    own_until: Instant,
 }
 
 impl Shown {
@@ -218,18 +225,6 @@ impl Shown {
             .map_or((0.0, 0.0), |p| (p.x, p.y));
         let size = self.window.inner_size().to_logical::<f64>(scale);
         (at, (size.width, size.height))
-    }
-
-    /// Its content's `(x, y, width, height)` in the desktop's points.
-    fn content(&self) -> (f64, f64, f64, f64) {
-        let scale = self.window.scale_factor();
-        let at = self
-            .window
-            .inner_position()
-            .map(|p| p.to_logical::<f64>(scale))
-            .map_or((0.0, 0.0), |p| (p.x, p.y));
-        let size = self.window.inner_size().to_logical::<f64>(scale);
-        (at.0, at.1, size.width, size.height)
     }
 
     fn fullscreen(&self) -> bool {
@@ -321,6 +316,9 @@ impl Windows {
             webview,
             ready: false,
             pending: Vec::new(),
+            sized: false,
+            fit: false,
+            own_until: Instant::now(),
         });
         self.front.insert(0, id);
         if at.fullscreen
@@ -334,18 +332,19 @@ impl Windows {
 
     /// A new window of `view` near the front window, on its screen.
     fn open_new(&mut self, target: &Target, proxy: &Proxy, view: WindowView) -> Option<usize> {
-        let mut at = default_layout(&self.screens, self.size).windows.remove(0);
-        if view != WindowView::Main
-            && let Some(front) = self.index(self.front.first().copied())
-        {
-            let ((x, y), _) = self.list[front].frame();
-            let size = if view == WindowView::Panel {
-                PANEL_SIZE
-            } else {
-                (at.width, at.height)
-            };
-            at = record(view, Vec::new(), (x + 40.0, y + 40.0), size, &self.screens);
-        }
+        let at = match view {
+            WindowView::Main => default_layout(&self.screens, self.size).windows.remove(0),
+            // On the front window's screen, in the middle.
+            _ => {
+                let size = if view == WindowView::Panel {
+                    PANEL_SIZE
+                } else {
+                    SCHEMATIC_SIZE
+                };
+                let screen = self.front_screen();
+                centred(view, size, screen, &self.screens)
+            }
+        };
         match self.open(target, proxy, view, Vec::new(), &at) {
             Ok(index) => Some(index),
             Err(error) => {
@@ -353,6 +352,13 @@ impl Windows {
                 None
             }
         }
+    }
+
+    /// The screen of the front window (the main screen without one).
+    fn front_screen(&self) -> usize {
+        self.index(self.front.first().copied())
+            .and_then(|i| self.layout().windows.get(i).map(|w| w.screen))
+            .unwrap_or(self.screens.primary)
     }
 
     fn index(&self, id: Option<WindowId>) -> Option<usize> {
@@ -448,19 +454,49 @@ impl Windows {
 
     /// Tells every ready page which cards it shows.
     fn tell_cards(&self) {
-        let held = held(&self.layout());
-        for shown in self.list.iter().filter(|w| w.ready) {
-            if let Some(script) = Self::cards_script(shown, &held) {
+        let layout = self.layout();
+        let names = labels(&layout);
+        for (index, shown) in self.list.iter().enumerate() {
+            shown.window.set_title(&window_title(
+                shown.view,
+                names.get(index).map_or("", String::as_str),
+                self.project.as_ref(),
+            ));
+            if shown.ready
+                && let Some(script) = Self::cards_script(index, &layout, &names)
+            {
                 shown.run(&script);
             }
         }
     }
 
-    fn cards_script(shown: &Shown, held: &[String]) -> Option<String> {
-        let detail = match shown.view {
+    /// What window `index` of `layout` shows (`signal-window`): its cards,
+    /// a main window's held ones with where they are, and the windows its
+    /// cards may move to.
+    fn cards_script(index: usize, layout: &Layout, names: &[String]) -> Option<String> {
+        let window = layout.windows.get(index)?;
+        let targets: Vec<Value> = layout
+            .windows
+            .iter()
+            .enumerate()
+            .filter(|(i, w)| *i != index && w.view != WindowView::Schematic)
+            .map(|(i, _)| json!({"index": i, "label": names.get(i)}))
+            .collect();
+        let detail = match window.view {
             WindowView::Schematic => return None,
-            WindowView::Panel => json!({"view": "panel", "cards": shown.cards}),
-            WindowView::Main => json!({"view": "main", "held": held, "order": shown.cards}),
+            WindowView::Panel => {
+                json!({"view": "panel", "cards": window.cards, "targets": targets})
+            }
+            WindowView::Main => {
+                let held: Vec<Value> = held(layout)
+                    .into_iter()
+                    .map(|card| {
+                        let at = holder(layout, &card).and_then(|i| names.get(i));
+                        json!({"card": card, "where": at})
+                    })
+                    .collect();
+                json!({"view": "main", "held": held, "order": window.cards, "targets": targets})
+            }
         };
         Some(event_script("signal-window", &detail))
     }
@@ -635,85 +671,144 @@ impl Windows {
             .get("card")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let size = message.get("size").and_then(|size| {
+            let w = size.get("width")?.as_f64()?;
+            let h = size.get("height")?.as_f64()?;
+            (w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0).then_some((w, h))
+        });
         match (message.get("type").and_then(Value::as_str), card) {
             (Some("window.ready"), _) => {
-                let held = held(&self.layout());
+                let layout = self.layout();
+                let script = Self::cards_script(index, &layout, &labels(&layout));
                 let shown = &mut self.list[index];
                 shown.ready = true;
-                if let Some(script) = Self::cards_script(shown, &held) {
+                if let Some(script) = script {
                     shown.run(&script);
                 }
                 for script in std::mem::take(&mut shown.pending) {
                     shown.run(&script);
                 }
             }
-            (Some("card.drag"), Some(card)) => self.dragged(target, proxy, &card),
-            (Some("card.place"), Some(card)) => {
-                let before = message
-                    .get("before")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
+            (Some("card.order"), _) => {
+                let order: Vec<String> = message
+                    .get("cards")
+                    .and_then(Value::as_array)
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let mut layout = self.layout();
-                if move_card(
-                    &mut layout,
-                    &card,
-                    CardDrop::Into {
-                        window: index,
-                        before,
-                    },
-                ) {
+                if reorder(&mut layout, index, &order) {
                     self.cards_from(&layout);
                 }
+            }
+            (Some("card.move"), Some(card)) => {
+                let to = message.get("to");
+                match to.and_then(Value::as_str) {
+                    Some("here") => self.move_to(&card, index),
+                    Some("main") => {
+                        let main = self
+                            .front_index(WindowView::Main)
+                            .or_else(|| self.open_new(target, proxy, WindowView::Main));
+                        if let Some(main) = main {
+                            self.move_to(&card, main);
+                        }
+                    }
+                    Some("new") => {
+                        let screen = self.layout().windows.get(index).map_or(0, |w| w.screen);
+                        let size = size.unwrap_or(PANEL_SIZE);
+                        let window = centred(WindowView::Panel, size, screen, &self.screens);
+                        self.new_window_with(target, proxy, &card, window);
+                    }
+                    _ => {
+                        if let Some(to) = to
+                            .and_then(Value::as_u64)
+                            .and_then(|i| usize::try_from(i).ok())
+                        {
+                            self.move_to(&card, to);
+                        }
+                    }
+                }
+            }
+            (Some("window.show"), Some(card)) => {
+                if let Some(at) = holder(&self.layout(), &card)
+                    && let Some(shown) = self.list.get(at)
+                {
+                    shown.window.set_minimized(false);
+                    shown.window.set_focus();
+                }
+            }
+            (Some("window.fit"), _) => {
+                let height = message.get("height").and_then(Value::as_f64);
+                self.fit(index, height);
             }
             _ => {}
         }
     }
 
-    /// A card was dragged out and released: the window under the pointer
-    /// is asked where it goes; over no window, a new panel window holds it.
-    fn dragged(&mut self, target: &Target, proxy: &Proxy, card: &str) {
-        let Ok(cursor) = target.cursor_position() else {
-            return;
-        };
-        let scale = self.screens.primary_scale;
-        let at = (cursor.x / scale, cursor.y / scale);
-        let frames: Vec<_> = self.list.iter().map(Shown::content).collect();
-        let front: Vec<usize> = self
-            .front
+    /// Moves `card` into window `to`, at its end.
+    fn move_to(&mut self, card: &str, to: usize) {
+        let mut layout = self.layout();
+        if move_card(&mut layout, card, CardMove::Into(to)) {
+            self.cards_from(&layout);
+        }
+    }
+
+    /// The front window of `view`, else the first.
+    fn front_index(&self, view: WindowView) -> Option<usize> {
+        self.front
             .iter()
             .filter_map(|id| self.index(Some(*id)))
-            .collect();
-        match window_at(at, &frames, &front) {
-            Some(index) if self.list[index].view == WindowView::Schematic => {}
-            Some(index) => {
-                let (x, y, ..) = frames[index];
-                let detail = json!({"card": card, "x": at.0 - x, "y": at.1 - y});
-                self.list[index].run(&event_script("signal-card-drop", &detail));
+            .find(|&i| self.list[i].view == view)
+            .or_else(|| self.list.iter().position(|w| w.view == view))
+    }
+
+    /// Opens a panel window laid out as `window` holding `card`.
+    fn new_window_with(
+        &mut self,
+        target: &Target,
+        proxy: &Proxy,
+        card: &str,
+        window: LayoutWindow,
+    ) {
+        let mut layout = self.layout();
+        if move_card(&mut layout, card, CardMove::New(window.clone())) {
+            self.cards_from(&layout);
+            if let Err(error) = self.open(
+                target,
+                proxy,
+                WindowView::Panel,
+                vec![card.to_owned()],
+                &window,
+            ) {
+                eprintln!("signal-app: {error}");
             }
-            None => {
-                let mut layout = self.layout();
-                let corner = (at.0 - 40.0, at.1 - 12.0);
-                let window = record(
-                    WindowView::Panel,
-                    Vec::new(),
-                    corner,
-                    PANEL_SIZE,
-                    &self.screens,
-                );
-                if move_card(&mut layout, card, CardDrop::New(window.clone())) {
-                    self.cards_from(&layout);
-                    if let Err(error) = self.open(
-                        target,
-                        proxy,
-                        WindowView::Panel,
-                        vec![card.to_owned()],
-                        &window,
-                    ) {
-                        eprintln!("signal-app: {error}");
-                    }
-                    self.tell_cards();
-                }
-            }
+            self.tell_cards();
+        }
+    }
+
+    /// Window `index`'s page measured its content `height`: a panel window
+    /// whose cards changed, and that the person has not resized, fits it.
+    fn fit(&mut self, index: usize, height: Option<f64>) {
+        let layout = self.layout();
+        let (Some(height), Some(window), Some(shown)) =
+            (height, layout.windows.get(index), self.list.get_mut(index))
+        else {
+            return;
+        };
+        if !shown.fit || shown.sized || shown.view != WindowView::Panel || shown.fullscreen() {
+            return;
+        }
+        shown.fit = false;
+        let height = fit_height(window, height, &self.screens);
+        if (height - window.height).abs() >= 2.0 {
+            shown.own_until = Instant::now() + Duration::from_secs(1);
+            shown
+                .window
+                .set_inner_size(LogicalSize::new(window.width, height));
         }
     }
 
@@ -721,6 +816,9 @@ impl Windows {
     /// end is opened by the caller) and tells the pages.
     fn cards_from(&mut self, layout: &Layout) {
         for (shown, window) in self.list.iter_mut().zip(&layout.windows) {
+            if shown.cards != window.cards {
+                shown.fit = true;
+            }
             shown.cards = window.cards.clone();
         }
         self.tracker.change(Instant::now(), Change::Structure);
@@ -729,10 +827,11 @@ impl Windows {
 
     /// The titles, after the project or its edited state changed.
     fn titles(&self) {
-        for shown in &self.list {
+        let names = labels(&self.layout());
+        for (shown, name) in self.list.iter().zip(&names) {
             shown
                 .window
-                .set_title(&view_title(shown.view, self.project.as_ref()));
+                .set_title(&window_title(shown.view, name, self.project.as_ref()));
         }
     }
 
@@ -878,9 +977,19 @@ fn main() -> ExitCode {
                     windows.front.insert(0, window_id);
                     None
                 }
-                WindowEvent::Moved(_)
-                | WindowEvent::Resized(_)
-                | WindowEvent::ScaleFactorChanged { .. } => {
+                WindowEvent::Resized(_) => {
+                    let now = Instant::now();
+                    // The person's resize (not the system's, not a fit):
+                    // that window's size is theirs from now on.
+                    if windows.tracker.change(now, Change::Geometry)
+                        && let Some(i) = windows.index(Some(window_id))
+                        && now >= windows.list[i].own_until
+                    {
+                        windows.list[i].sized = true;
+                    }
+                    None
+                }
+                WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => {
                     windows.tracker.change(Instant::now(), Change::Geometry);
                     None
                 }

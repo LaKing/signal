@@ -2,9 +2,10 @@
 <!-- A panel window of Signal.app (ADR 0032, docs/ui-controls.md "Cards
      across windows"): the project's main panel (/project/main.html) in a
      same-origin frame filling the window, showing only the cards this
-     window holds, as the app tells it (`signal-window`). A card is dragged
-     by its heading to another window, or out of every window for a new
-     panel window. The project's ui/windows.toml says which window holds
+     window holds, as the app tells it (`signal-window`; none until then,
+     so a new panel window is empty). A right click on a card opens its
+     menu: Move to another window, to a new panel window, back to the main
+     window, up or down. The project's ui/windows.toml says which window holds
      which card. The URL's fragment carries the WebSocket's port and the
      session token. -->
 <html lang="en">
@@ -17,22 +18,27 @@
   :root { color-scheme: dark; }
   html, body { height: 100%; margin: 0; overflow: hidden; background: var(--signal-bg); color: var(--signal-muted); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
   iframe { display: block; width: 100%; height: 100%; border: 0; }
-  .empty { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none; }
+  .empty { position: fixed; inset: 0; margin: 0; padding: 2rem; display: grid; place-items: center; text-align: center; pointer-events: none; font-size: 15px; }
   [hidden] { display: none !important; }
 </style>
 </head>
 <body>
 <iframe class="project-panel" title="Project panel"></iframe>
-<p class="empty" hidden>Drag a card here by its heading, from the main window's Panel tab or another panel window.</p>
+<p class="empty">Right-click an instrument (in the main window's Panel tab or another panel window) and choose Move to.</p>
 <script type="module">
 import { connectFromPage, setDefaultConnection } from '../signal-ui.js';
-import { connectCards } from './lib/cards.js';
+import { EMPTY_PANEL, connectCards } from './lib/cards.js';
+import { MENU_CSS } from '../controls/context-menu.js';
 import { panelReloads, panelSource } from './lib/menu.js';
 
 const frame = document.querySelector('iframe');
 const empty = document.querySelector('.empty');
 frame.src = panelSource(location.hash);
-connectCards(frame, window, (count) => { empty.hidden = count > 0; });
+// Hidden until its cards are shown as told: never the whole panel at first.
+frame.style.visibility = 'hidden';
+// The card menu: the app's menu element and look (ui/controls/context-menu.js).
+document.head.append(Object.assign(document.createElement('style'), { textContent: MENU_CSS }));
+connectCards(frame, { initial: EMPTY_PANEL, menuHost: document.body, shownCount: (count) => { frame.style.visibility = ''; empty.hidden = count > 0; } });
 
 // Another project opened: its panel.
 const connection = connectFromPage();
