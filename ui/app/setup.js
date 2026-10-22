@@ -154,7 +154,9 @@ export class SignalAppSetup extends HTMLElement {
     this.check.textContent = '';
     if (!device || !this.rate) return;
     try {
-      const checked = await this.request({ type: 'setup.check', output: device.index, buffer: bufferFrames(this.buffer.value) });
+      // By identity: the host may have listed the devices again since.
+      const output = { name: device.name, id: device.id ?? null, signature: device.signature ?? '' };
+      const checked = await this.request({ type: 'setup.check', output, buffer: bufferFrames(this.buffer.value) });
       this.check.textContent = checked.message;
       this.check.className = checked.ok ? 'check' : 'check error';
     } catch (error) {

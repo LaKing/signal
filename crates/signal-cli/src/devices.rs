@@ -168,6 +168,7 @@ mod tests {
                 id: Some("coreaudio:speakers".to_owned()),
                 direction: Direction::Output,
                 default: true,
+                rate: None,
                 configs: vec![ConfigRange {
                     channels: 2,
                     min_rate: 48_000,
@@ -181,6 +182,7 @@ mod tests {
                 id: None,
                 direction: Direction::Input,
                 default: false,
+                rate: None,
                 configs: vec![ConfigRange {
                     channels: 1,
                     min_rate: 8_000,

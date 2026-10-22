@@ -16,12 +16,13 @@ use signal_output::{Driver, DriverError, Runner};
 use crate::callback::{CallbackControl, OutputCallback};
 use crate::config::{
     AudioError, Choice, ConfigRange, DeviceInfo, Direction, choose_input, choose_output,
+    fault_message, start_failure,
 };
 use crate::input::{InputCallback, InputMeters};
 use crate::map::ChannelMap;
 use crate::rt_thread::{self, Workgroup};
 use crate::scheduling::{DeviceMatch, Scheduling, TimeConstraint, WorkerPath, match_device};
-use crate::stats::CallbackStats;
+use crate::stats::{CallbackStats, StreamFault};
 
 /// How long [`CoreAudioDriver::stop`] waits for the callback to hand the
 /// Runner back.
@@ -33,6 +34,23 @@ const WORKER_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How often the device list is read again when it changed while matching.
 const MATCH_ATTEMPTS: usize = 3;
+
+/// How long [`switch_rate`] waits for the device to report the new rate.
+const SWITCH_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long [`switch_rate`] waits for the rate after the probe stream
+/// failed (the switch may still have been made before the failure).
+const SWITCH_FAILED_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// How long [`switch_rate`] lets the device settle at its new rate, so that
+/// the change's late notifications reach no stream that plays.
+const SWITCH_SETTLE: Duration = Duration::from_millis(250);
+
+/// How long [`CoreAudioDriver::stop`] waits at least for a stream the audio
+/// system stopped ([`StreamFault`]), which calls no more back (or two of
+/// its longest periods, if longer: a callback under way hands the Runner
+/// back).
+const FAULT_STOP_TIMEOUT: Duration = Duration::from_millis(50);
 
 fn host_error(error: impl std::fmt::Display) -> AudioError {
     AudioError::Host(error.to_string())
@@ -61,6 +79,20 @@ fn id_of(device: &Device) -> Option<String> {
     device.id().ok().map(|id| id.to_string())
 }
 
+/// The rate `device` runs at now, as cpal reads it without our `unsafe`: the
+/// rate of its current stream format (`kAudioDevicePropertyStreamFormat`),
+/// which follows the nominal rate Audio MIDI Setup shows. `None` when it
+/// cannot be read, among them a device whose format is neither f32 nor i16
+/// (cpal refuses those): such a device is not switched before its stream
+/// is built, and a recovery takes it as ready.
+fn current_rate(device: &Device, direction: Direction) -> Option<u32> {
+    let config = match direction {
+        Direction::Output => device.default_output_config(),
+        Direction::Input => device.default_input_config(),
+    };
+    config.ok().map(|c| c.sample_rate())
+}
+
 /// `device` as plain data. `default` is the default device's id, or its name
 /// when it has none.
 fn info(
@@ -77,6 +109,7 @@ fn info(
     let key = id.as_deref().unwrap_or(name.as_str());
     Ok(DeviceInfo {
         default: default == Some(key),
+        rate: current_rate(device, direction),
         name,
         id,
         direction,
@@ -136,6 +169,49 @@ fn find(direction: Direction, selector: &DeviceSelector) -> Result<Device, Audio
         });
     };
     Ok(device)
+}
+
+/// The output device `selector` names: its name and the rate it runs at now
+/// (`None` when that cannot be read). Read again on each call, so a device
+/// switched in Audio MIDI Setup, or plugged in, is seen.
+pub fn output_rate(selector: &DeviceSelector) -> Result<(String, Option<u32>), AudioError> {
+    let device = find(Direction::Output, selector)?;
+    Ok((name_of(&device)?, current_rate(&device, Direction::Output)))
+}
+
+/// Switches `device` to `config`'s rate before the stream that plays is
+/// built: cpal sets the device's nominal rate while it builds a stream, and a
+/// stream built across the change is stopped by the change's own
+/// notification (measured on BlackHole 64ch, 2026-10-22: cpal reported
+/// `StreamInvalidated`, "Device sample rate changed", and the stream never
+/// called back). A stream built and dropped unplayed makes the switch; the
+/// device then reports the rate, and settles. The probe's error is the
+/// switch's only when the device did not reach the rate.
+fn switch_rate(device: &Device, config: StreamConfig) -> Result<(), cpal::Error> {
+    // The probe stream is dropped at once; only its error is kept.
+    let probe = device
+        .build_output_stream(
+            config,
+            |data: &mut [f32], _: &cpal::OutputCallbackInfo| data.fill(0.0),
+            |_: cpal::Error| {},
+            None,
+        )
+        .map(drop);
+    let deadline = Instant::now()
+        + if probe.is_ok() {
+            SWITCH_TIMEOUT
+        } else {
+            SWITCH_FAILED_TIMEOUT
+        };
+    while current_rate(device, Direction::Output) != Some(config.sample_rate) {
+        if Instant::now() >= deadline {
+            // Not switched: the probe's error, or the device's rate says why.
+            return probe;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    thread::sleep(SWITCH_SETTLE);
+    Ok(())
 }
 
 /// The I/O workgroup of `device`: its CoreAudio object is found by its
@@ -258,6 +334,20 @@ impl CoreAudioDriver {
         Arc::clone(&self.stats)
     }
 
+    /// Why the audio system stopped the playing stream, in plain words, with
+    /// the device's rate read now; `None` while it plays (or before a start).
+    /// Control thread: it reads the device.
+    pub fn fault(&self) -> Option<String> {
+        let fault = self.stats.fault()?;
+        let now = current_rate(&self.device, Direction::Output);
+        Some(fault_message(
+            &self.name,
+            fault,
+            self.choice.sample_rate,
+            now,
+        ))
+    }
+
     /// How the last start scheduled the worker threads (`None` before one).
     pub fn scheduling(&self) -> Option<&Scheduling> {
         self.scheduling.as_ref()
@@ -350,24 +440,63 @@ impl Driver for CoreAudioDriver {
             sample_rate: self.choice.sample_rate,
             buffer_size: BufferSize::Fixed(self.choice.buffer),
         };
+        // A new stream: an earlier one's fault is forgotten.
+        self.stats.clear_fault();
         let stats = Arc::clone(&self.stats);
-        let built = self.device.build_output_stream(
-            config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| callback.fill(data),
-            move |_: cpal::Error| stats.stream_error(),
-            None,
-        );
+        let wanted = self.choice.sample_rate;
+        let before = current_rate(&self.device, Direction::Output);
+        // Never shown bare (CoreAudio's "Unknown property"): with the rates.
+        let failed = |error: cpal::Error| {
+            let after = current_rate(&self.device, Direction::Output);
+            DriverError::Device(start_failure(
+                &self.name,
+                wanted,
+                before,
+                after,
+                "CoreAudio",
+                &error.to_string(),
+            ))
+        };
+        let switched = match before {
+            Some(rate) if rate != wanted => switch_rate(&self.device, config),
+            _ => Ok(()),
+        };
+        // The error callback runs on cpal's listener threads, the overload's
+        // (an xrun) on the audio thread: atomics only. cpal 0.18.2 reports a
+        // rate change (`StreamInvalidated`) only for a device opened by its
+        // id: the system default output's stream (`DefaultOutputMonitor`)
+        // has no rate listener, its AudioUnit converts the rate and plays on;
+        // its loss without another default is `DeviceNotAvailable`.
+        let built = switched.and_then(|()| {
+            self.device.build_output_stream(
+                config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| callback.fill(data),
+                move |error: cpal::Error| {
+                    stats.stream_error();
+                    match error.kind() {
+                        cpal::ErrorKind::StreamInvalidated => {
+                            stats.stream_fault(StreamFault::RateChanged);
+                        }
+                        cpal::ErrorKind::DeviceNotAvailable => {
+                            stats.stream_fault(StreamFault::Gone);
+                        }
+                        _ => {}
+                    }
+                },
+                None,
+            )
+        });
         let stream = match built {
             Ok(stream) => stream,
             Err(error) => {
                 release_workers(&workers);
-                return Err(DriverError::Device(error.to_string()));
+                return Err(failed(error));
             }
         };
         if let Err(error) = stream.play() {
             drop(stream);
             release_workers(&workers);
-            return Err(DriverError::Device(error.to_string()));
+            return Err(failed(error));
         }
         self.running = Some(Running {
             stream,
@@ -387,7 +516,16 @@ impl Driver for CoreAudioDriver {
             return Ok(None);
         };
         control.request_stop();
-        let deadline = Instant::now() + STOP_TIMEOUT;
+        // A stream the audio system stopped calls no more back: its Runner
+        // is dropped with it, here.
+        let timeout = if self.stats.fault().is_some() {
+            let periods =
+                2.0 * f64::from(self.choice.max_frames) / f64::from(self.choice.sample_rate.max(1));
+            FAULT_STOP_TIMEOUT.max(Duration::from_secs_f64(periods))
+        } else {
+            STOP_TIMEOUT
+        };
+        let deadline = Instant::now() + timeout;
         let runner = loop {
             if let Some(runner) = control.take_runner() {
                 break Some(runner);

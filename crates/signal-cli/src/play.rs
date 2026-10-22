@@ -134,6 +134,9 @@ struct Ended {
     wake: Option<WakeStats>,
     /// Sampled demotions of the real-time workers (CoreAudio only).
     demotions: Demotions,
+    /// Why the audio system stopped the stream (its rate changed, it went
+    /// away), if it did: the command fails with it.
+    fault: Option<String>,
 }
 
 /// A distribution in µs, for the JSON.
@@ -455,6 +458,9 @@ pub(crate) fn run(
         write_wav(path, samples, ended.device_channels, rate)?;
     }
 
+    if let Some(fault) = ended.fault {
+        return Err(Failure::Device(fault));
+    }
     let status = ended.status;
     if let Some(failure) = status.failure {
         return Err(Failure::Internal(failure.to_string()));
@@ -668,6 +674,7 @@ fn play_null(
         waiter: runner.schedule_stats().waiter,
         wake: runner.wake_stats(),
         demotions: Demotions::default(),
+        fault: None,
     })
 }
 
@@ -711,6 +718,7 @@ fn play_device(
         .min(Duration::from_millis(1));
     let mut stopping: Option<Instant> = None;
     let mut demotions = Demotions::default();
+    let mut fault = None;
     loop {
         thread::sleep(interval);
         control.step();
@@ -719,6 +727,12 @@ fn play_device(
         let status = control.controller.status();
         // A failed engine plays only silence: stop (docs/semantics.md §14).
         if limit.is_some_and(|limit| status.next_frame.0 >= limit) || status.failure.is_some() {
+            break;
+        }
+        // The audio system stopped the stream (its rate changed, it went
+        // away): it calls no more back.
+        if let Some(stopped) = driver.fault() {
+            fault = Some(stopped);
             break;
         }
         // Stopped: once every command sent has applied (or a second has
@@ -746,7 +760,11 @@ fn play_device(
         ),
         Ok(None) => (control.controller.status(), "unknown", None, adapter_counts),
         Err(error) => {
-            eprintln!("signal: warning: {error}");
+            // A stream the audio system stopped hands no Runner back: the
+            // fault says why.
+            if fault.is_none() {
+                eprintln!("signal: warning: {error}");
+            }
             (control.controller.status(), "unknown", None, adapter_counts)
         }
     };
@@ -762,6 +780,7 @@ fn play_device(
         waiter,
         wake,
         demotions,
+        fault,
     })
 }
 

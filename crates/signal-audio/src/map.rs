@@ -203,6 +203,7 @@ mod tests {
             id: None,
             direction: Direction::Output,
             default: false,
+            rate: None,
             configs: vec![range(2), range(4)],
         };
         let targets = vec![2, 3];

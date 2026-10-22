@@ -43,12 +43,13 @@ mod stats;
 pub use callback::{CallbackControl, OutputCallback};
 pub use config::{
     AudioError, Choice, ConfigRange, DeviceInfo, Direction, choose_input, choose_output,
+    fault_message, start_failure,
 };
-pub use coreaudio::{CoreAudioDriver, DeviceSelector, InputCapture, devices};
+pub use coreaudio::{CoreAudioDriver, DeviceSelector, InputCapture, devices, output_rate};
 pub use input::{InputCallback, InputMeters};
 pub use map::ChannelMap;
 pub use scheduling::{
     Demotions, DeviceMatch, Scheduling, TimeConstraint, WorkerPath, match_device,
 };
 pub use select::{DeviceRef, Resolution, labels, resolve, signature};
-pub use stats::{CallbackStats, StatsSnapshot};
+pub use stats::{CallbackStats, StatsSnapshot, StreamFault};

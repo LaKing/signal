@@ -13,6 +13,7 @@ fn device(id: &str, default: bool, rate: u32) -> DeviceInfo {
         id: Some(id.to_owned()),
         direction: Direction::Output,
         default,
+        rate: None,
         configs: vec![ConfigRange {
             channels: 2,
             min_rate: rate,

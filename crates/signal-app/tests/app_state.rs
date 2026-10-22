@@ -16,6 +16,7 @@ fn device(name: &str, id: &str, direction: Direction, min: u32, max: u32) -> Dev
         id: Some(id.to_owned()),
         direction,
         default: false,
+        rate: None,
         configs: vec![ConfigRange {
             channels: 2,
             min_rate: min,

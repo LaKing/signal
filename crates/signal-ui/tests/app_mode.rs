@@ -9,9 +9,11 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use common::{Options, Rig, Transport, copy_dir, devices, rig, root};
 use serde_json::{Value, json};
+use signal_audio::DeviceInfo;
 use signal_core::Registry;
 use signal_engine::RtPolicy;
 use signal_project::archive;
@@ -28,6 +30,17 @@ fn app_rig(name: &str, transport: Transport, project: Option<&Path>) -> Rig {
 /// [`app_rig`], playing whenever switched on (`plays`, Signal.app's: ADR
 /// 0033) or starting stopped.
 fn app_rig_with(name: &str, transport: Transport, project: Option<&Path>, plays: bool) -> Rig {
+    app_rig_listing(name, transport, project, plays, devices())
+}
+
+/// [`app_rig_with`] on the null backend listing `listed`.
+fn app_rig_listing(
+    name: &str,
+    transport: Transport,
+    project: Option<&Path>,
+    plays: bool,
+    listed: Vec<DeviceInfo>,
+) -> Rig {
     let base = std::env::temp_dir().join(format!(
         "signal-ui-app-{name}-{transport:?}-{}",
         std::process::id()
@@ -49,7 +62,7 @@ fn app_rig_with(name: &str, transport: Transport, project: Option<&Path>, plays:
         project: Some(dir.clone()),
         open_root: base.join("Open"),
         registry,
-        backend: Backend::Null(devices()),
+        backend: Backend::Null(listed),
         compute: vec!["CPU: test".to_owned()],
         server: ServerOptions {
             port: 0,
@@ -1572,7 +1585,167 @@ fn it_plays_while_switched_on(transport: Transport) {
     rig.finish();
 }
 
+/// The default output ("Null Out") running at `rate`, as listed.
+fn listing_at(rate: u32) -> Vec<DeviceInfo> {
+    let mut listed = devices();
+    listed[0].rate = Some(rate);
+    listed
+}
+
+/// Steps for `ms`: nothing is asked meanwhile.
+fn idle(rig: &mut Rig, ms: u64) {
+    let until = Instant::now() + Duration::from_millis(ms);
+    while Instant::now() < until {
+        rig.pump();
+    }
+}
+
+/// The `app` push whose `playing` is `playing`.
+fn app_playing(rig: &mut Rig, ws: &mut common::Ws, playing: bool) -> Value {
+    rig.wait(ws, "app", |got| {
+        got.of("app").filter(|a| a["playing"] == playing).cloned()
+    })
+}
+
+/// The incident of 2026-10-22: the default output ran at another rate than
+/// the project's and could not be switched, and the window said only
+/// "Unknown property". Now it says which rates, waits for the output
+/// without trying the same one again, and plays when it runs at the
+/// project's rate (switched in Audio MIDI Setup); a stream the audio system
+/// stops while playing (its rate changed) does the same; a deliberate stop
+/// holds.
+fn a_run_stopped_by_the_device_plays_when_it_is_back(transport: Transport) {
+    let mut rig = app_rig_listing("device-wait", transport, None, true, listing_at(44_100));
+    let (mut ws, _) = rig.client();
+    let app = rig.request(&mut ws, 1, json!({"type": "app.get"}), "app");
+    assert_eq!(app["playing"], false);
+    let message = app["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(
+            "the device 'Null Out' runs at 44100 Hz and could not be switched to 48000 Hz (null driver: a listed device keeps its rate); set it to 48000 Hz in Audio MIDI Setup, or set sample_rate = 44100 in project.toml"
+        ),
+        "{message}"
+    );
+    assert!(
+        message.ends_with("; Signal plays again once the output runs at 48000 Hz"),
+        "{message}"
+    );
+    // The same output is not tried again.
+    idle(&mut rig, 1_300);
+    assert!(rig.host().controller().is_none());
+    // Switched to the project's rate: it plays from frame 0.
+    rig.host().set_null_devices(listing_at(48_000));
+    let app = app_playing(&mut rig, &mut ws, true);
+    assert_eq!(
+        app["message"],
+        "the output runs at 48000 Hz: playing again from frame 0"
+    );
+    // The audio system stops the stream (the rate changed while playing).
+    rig.host().set_null_devices(listing_at(44_100));
+    rig.host().fail_output(
+        "the device 'Null Out' changed its sample rate to 44100 Hz while playing at 48000 Hz",
+    );
+    let app = app_playing(&mut rig, &mut ws, false);
+    assert_eq!(
+        app["message"],
+        "the device 'Null Out' changed its sample rate to 44100 Hz while playing at 48000 Hz; stopped, Signal plays again once the output runs at 48000 Hz"
+    );
+    rig.host().set_null_devices(listing_at(48_000));
+    app_playing(&mut rig, &mut ws, true);
+    // Stopped on purpose: the device coming back does not play it.
+    rig.host().set_null_devices(listing_at(44_100));
+    rig.host()
+        .fail_output("the device 'Null Out' went away while playing");
+    app_playing(&mut rig, &mut ws, false);
+    rig.request(&mut ws, 2, json!({"type": "transport.stop"}), "transport");
+    rig.host().set_null_devices(listing_at(48_000));
+    idle(&mut rig, 1_300);
+    assert!(rig.host().controller().is_none(), "a deliberate stop holds");
+    rig.finish();
+}
+
+/// Review of 2026-10-23: an output already at the project's rate when the
+/// run stopped (a rate switched away and back, a device busy for a moment)
+/// is tried once at the next look; a try that fails then waits for a change
+/// (no retry every second); a change of the project's files (its
+/// `sample_rate`) is tried too.
+fn a_device_back_at_the_rate_is_tried_once(transport: Transport) {
+    let mut rig = app_rig_listing("device-once", transport, None, true, listing_at(48_000));
+    let (mut ws, _) = rig.client();
+    app_playing(&mut rig, &mut ws, true);
+    // The rate went away and came back before the stream was looked at.
+    rig.host()
+        .fail_output("the device 'Null Out' changed its sample rate while playing at 48000 Hz");
+    let app = app_playing(&mut rig, &mut ws, false);
+    assert_eq!(
+        app["message"],
+        "the device 'Null Out' changed its sample rate while playing at 48000 Hz; stopped, Signal tries the output again in a moment"
+    );
+    let app = app_playing(&mut rig, &mut ws, true);
+    assert_eq!(
+        app["message"],
+        "the output runs at 48000 Hz: playing again from frame 0"
+    );
+    // Stopped while the device runs at 44.1 kHz: the project's sample_rate
+    // set to it in project.toml plays.
+    rig.host().set_null_devices(listing_at(44_100));
+    rig.host().fail_output(
+        "the device 'Null Out' changed its sample rate to 44100 Hz while playing at 48000 Hz",
+    );
+    app_playing(&mut rig, &mut ws, false);
+    idle(&mut rig, 1_300);
+    assert!(
+        rig.host().controller().is_none(),
+        "nothing changed: not tried"
+    );
+    let file = rig.dir.join("project.toml");
+    let text = fs::read_to_string(&file).unwrap();
+    fs::write(
+        &file,
+        text.replace("sample_rate = 48000", "sample_rate = 44100"),
+    )
+    .unwrap();
+    let app = app_playing(&mut rig, &mut ws, true);
+    assert_eq!(
+        app["message"],
+        "the output runs at 44100 Hz: playing again from frame 0"
+    );
+    rig.finish();
+}
+
+/// `signal ui` and `signal mcp` (not app mode): a stream the audio system
+/// stops keeps the run, so what it recorded is written when it finishes,
+/// and the fault is reported once for the command to end with.
+fn signal_ui_keeps_a_run_whose_output_stopped(transport: Transport) {
+    let mut rig = rig_recording("output-fault", transport);
+    let (_ws, _) = rig.client();
+    assert_eq!(rig.host().output_fault(), None);
+    rig.host()
+        .fail_output("the device 'X' went away while playing");
+    let told = rig.host().step();
+    assert_eq!(told, ["the device 'X' went away while playing"]);
+    let told = rig.host().step();
+    assert!(
+        !told.iter().any(|m| m.contains("went away")),
+        "once: {told:?}"
+    );
+    assert!(rig.host().controller().is_some(), "the run is kept");
+    assert_eq!(
+        rig.host().output_fault(),
+        Some("the device 'X' went away while playing")
+    );
+    let host = rig.host.take().unwrap();
+    assert!(
+        host.finish().is_some(),
+        "what it recorded is there to write"
+    );
+    rig.finish();
+}
+
 both!(
+    a_device_back_at_the_rate_is_tried_once,
+    signal_ui_keeps_a_run_whose_output_stopped,
+    a_run_stopped_by_the_device_plays_when_it_is_back,
     it_plays_while_switched_on,
     power_off_stops_and_on_restores,
     a_client_connecting_while_off_is_told_and_gets_no_frames,

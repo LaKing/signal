@@ -6,6 +6,8 @@ use std::fmt;
 
 use serde::Serialize;
 
+use crate::stats::StreamFault;
+
 /// Output or input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -43,6 +45,11 @@ pub struct DeviceInfo {
     pub direction: Direction,
     /// Whether it is the system's default device of its direction.
     pub default: bool,
+    /// The sample rate it runs at now: its current stream format's, which
+    /// follows the nominal rate Audio MIDI Setup shows and sets; `None` when
+    /// it cannot be read (a format cpal does not read). A device opened at
+    /// another rate is switched to it, which can fail.
+    pub rate: Option<u32>,
     /// Its supported configurations.
     pub configs: Vec<ConfigRange>,
 }
@@ -167,6 +174,72 @@ impl fmt::Display for AudioError {
 
 impl std::error::Error for AudioError {}
 
+/// The audio system's error text as a clause (`Unknown property` →
+/// `unknown property`), never shown bare.
+fn host_clause(message: &str) -> String {
+    let message = message.trim();
+    let mut chars = message.chars();
+    let Some(first) = chars.next() else {
+        return "no reason given".to_owned();
+    };
+    // A capitalised word only (`Unknown`), not a name (`CoreAudio`).
+    let word = chars.as_str().split_whitespace().next().unwrap_or("");
+    if !word.is_empty() && word.chars().all(char::is_lowercase) {
+        first.to_lowercase().chain(chars).collect()
+    } else {
+        message.to_owned()
+    }
+}
+
+/// What to do about a device that runs at `now` Hz for a project at
+/// `wanted` Hz.
+fn rate_advice(wanted: u32, now: u32) -> String {
+    format!("set it to {wanted} Hz in Audio MIDI Setup, or set sample_rate = {now} in project.toml")
+}
+
+/// Why the output stream of `device` did not start at `wanted` Hz, in plain
+/// words: `system`'s error (`CoreAudio`, `Unknown property`) with the
+/// device's sample rate before the attempt (`before`) and after it
+/// (`after`), as read. A device at another rate is switched to `wanted`
+/// while the stream is built, which is what fails when it cannot be switched
+/// (CoreAudio then reports, for example, "Unknown property").
+pub fn start_failure(
+    device: &str,
+    wanted: u32,
+    before: Option<u32>,
+    after: Option<u32>,
+    system: &str,
+    error: &str,
+) -> String {
+    let error = host_clause(error);
+    match (before, after) {
+        (Some(before), _) if before != wanted => format!(
+            "the device '{device}' runs at {before} Hz and could not be switched to {wanted} Hz ({system}: {error}); {}",
+            rate_advice(wanted, before)
+        ),
+        (_, Some(after)) if after != wanted => format!(
+            "the device '{device}' changed its sample rate to {after} Hz while starting at {wanted} Hz ({system}: {error}); {}",
+            rate_advice(wanted, after)
+        ),
+        _ => format!("the device '{device}' did not start at {wanted} Hz ({system}: {error})"),
+    }
+}
+
+/// Why a playing output stream of `device` at `wanted` Hz stopped, in plain
+/// words, with the device's sample rate now (`now`), as read.
+pub fn fault_message(device: &str, fault: StreamFault, wanted: u32, now: Option<u32>) -> String {
+    match (fault, now) {
+        (StreamFault::RateChanged, Some(now)) if now != wanted => format!(
+            "the device '{device}' changed its sample rate to {now} Hz while playing at {wanted} Hz; {}",
+            rate_advice(wanted, now)
+        ),
+        (StreamFault::RateChanged, _) => {
+            format!("the device '{device}' changed its sample rate while playing at {wanted} Hz")
+        }
+        (StreamFault::Gone, _) => format!("the device '{device}' went away while playing"),
+    }
+}
+
 /// The output configuration of `device` for a sink of `sink_channels` at
 /// `sample_rate` with a buffer of `buffer` frames: an `f32` configuration
 /// whose rate range holds the rate exactly, preferring as many channels as
@@ -268,6 +341,7 @@ mod tests {
             id: None,
             direction: Direction::Output,
             default: true,
+            rate: None,
             configs,
         }
     }
@@ -309,6 +383,72 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "the device 'Speakers' cannot run at 96000 Hz; it supports 8000-32000, 44100, 48000 Hz. Signal does not resample: set sample_rate in project.toml to one of these"
+        );
+    }
+
+    /// The incident of 2026-10-22: CoreAudio's bare "Unknown property"
+    /// when the device ran at another rate than the project's.
+    #[test]
+    fn a_failed_start_says_which_rates() {
+        assert_eq!(
+            start_failure(
+                "SSL 2+ Mk II",
+                48_000,
+                Some(44_100),
+                Some(44_100),
+                "CoreAudio",
+                "Unknown property"
+            ),
+            "the device 'SSL 2+ Mk II' runs at 44100 Hz and could not be switched to 48000 Hz (CoreAudio: unknown property); set it to 48000 Hz in Audio MIDI Setup, or set sample_rate = 44100 in project.toml"
+        );
+        assert_eq!(
+            start_failure(
+                "X",
+                48_000,
+                Some(48_000),
+                Some(96_000),
+                "CoreAudio",
+                "Sample rate update timed out"
+            ),
+            "the device 'X' changed its sample rate to 96000 Hz while starting at 48000 Hz (CoreAudio: sample rate update timed out); set it to 48000 Hz in Audio MIDI Setup, or set sample_rate = 96000 in project.toml"
+        );
+        // At the rate, or unread: the error alone, as a clause; a name keeps
+        // its capitals.
+        assert_eq!(
+            start_failure(
+                "X",
+                48_000,
+                None,
+                None,
+                "CoreAudio",
+                "CoreAudio error 'who?'"
+            ),
+            "the device 'X' did not start at 48000 Hz (CoreAudio: CoreAudio error 'who?')"
+        );
+        assert_eq!(
+            start_failure("X", 48_000, Some(48_000), Some(48_000), "CoreAudio", " "),
+            "the device 'X' did not start at 48000 Hz (CoreAudio: no reason given)"
+        );
+    }
+
+    #[test]
+    fn a_stopped_stream_says_why() {
+        assert_eq!(
+            fault_message(
+                "SSL 2+ Mk II",
+                StreamFault::RateChanged,
+                48_000,
+                Some(44_100)
+            ),
+            "the device 'SSL 2+ Mk II' changed its sample rate to 44100 Hz while playing at 48000 Hz; set it to 48000 Hz in Audio MIDI Setup, or set sample_rate = 44100 in project.toml"
+        );
+        assert_eq!(
+            fault_message("X", StreamFault::RateChanged, 48_000, None),
+            "the device 'X' changed its sample rate while playing at 48000 Hz"
+        );
+        assert_eq!(
+            fault_message("X", StreamFault::Gone, 48_000, Some(48_000)),
+            "the device 'X' went away while playing"
         );
     }
 

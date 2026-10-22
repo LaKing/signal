@@ -411,12 +411,16 @@ fn in_process(
             "the in-process connection failed: {error}"
         )));
     }
+    let fault = running.host.output_fault().map(str::to_owned);
     if let Some(finished) = running.host.finish()
         && let Some(failure) = finished.status.failure
     {
         eprintln!("signal: the engine failed: {failure}");
     }
-    Ok(())
+    match fault {
+        Some(fault) => Err(Failure::Device(fault)),
+        None => Ok(()),
+    }
 }
 
 /// Sets its flags when dropped: the protocol thread's end, however it ends,
@@ -432,11 +436,13 @@ impl Drop for StopOnDrop {
 }
 
 /// Whether the running engine stopped on a failure (`docs/semantics.md`
-/// §14): it plays nothing until a client plays the project again
+/// §14), or the audio system stopped its output ([`Host::output_fault`]):
+/// it plays nothing until a client plays the project again
 /// (`transport.play`), which builds a new run.
 fn faulted(host: &Host) -> bool {
     host.controller()
         .is_some_and(|c| c.status().failure.is_some())
+        || host.output_fault().is_some()
 }
 
 /// Plays the host until stdin closes, doing what the tools ask of the

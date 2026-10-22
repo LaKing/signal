@@ -79,6 +79,26 @@ fn the_dialog_functions_and_apply_play_again_with_the_setup(transport: Transport
     );
     assert_eq!(check["ok"], true);
     assert_eq!(check["message"], "The project's 48000 Hz is supported.");
+    // By identity, as the dialog sends it: found in the list as it is now.
+    let by_identity = json!({
+        "name": "Null Four",
+        "id": devices[four as usize]["id"],
+        "signature": devices[four as usize]["signature"],
+    });
+    let check = rig.request(
+        &mut ws,
+        51,
+        json!({"type": "setup.check", "output": by_identity}),
+        "setup.check",
+    );
+    assert_eq!(check["ok"], true, "{check}");
+    let missing = rig.request(
+        &mut ws,
+        52,
+        json!({"type": "setup.check", "output": {"name": "Gone", "id": "null:gone", "signature": ""}}),
+        "error",
+    );
+    assert_eq!(missing["code"], "unknown-device");
 
     let bad = rig.request(
         &mut ws,

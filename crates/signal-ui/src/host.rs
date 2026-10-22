@@ -60,7 +60,9 @@ use crate::document::{Document, project_name};
 use crate::frames::{self, frame};
 use crate::panel::{Panel, Target, Written, after_write, ramp_frames, write_file, write_project};
 use crate::panel_write::{check_content, first_file, replace, sha256_hex};
-use crate::player::{Backend, Input, Interface, Output, Selection, open_input, open_output};
+use crate::player::{
+    Backend, Input, Interface, Output, Selection, open_input, open_output, output_state,
+};
 use crate::server::{Inbound, MAX_MESSAGE, Outbound, Server, ServerOptions};
 use crate::setup::{
     Choice, DEFAULT_BUFFER, Setup, Window, capabilities, channels, found, rate_check,
@@ -72,6 +74,9 @@ const MESSAGES_PER_STEP: usize = 256;
 const STATUS_EVERY: Duration = Duration::from_millis(250);
 /// The fastest parameter and meter streams.
 const MAX_RATE_HZ: f64 = 60.0;
+/// How often the output is looked at again while a run stopped by the
+/// device waits for it (app mode, `plays`): the device list is read again.
+const DEVICE_POLL: Duration = Duration::from_secs(1);
 
 /// How the first run plays: `signal play`'s driver options.
 #[derive(Clone, Debug)]
@@ -200,6 +205,26 @@ struct AppMode {
     /// Stopped on purpose (`transport.stop`): with `plays`, Setup ▸ Apply
     /// then plays nothing; the next open, switch-on or restart plays again.
     held: bool,
+    /// Stopped by the device while switched on, with `plays`: it did not
+    /// start, or the audio system stopped its stream. Plays again once the
+    /// output changes and runs at the project's rate ([`Host::retry_device`]).
+    device_wait: Option<DeviceWait>,
+    /// A retry of the device is playing the project ([`Host::retry_device`]):
+    /// its failure waits for a change, not for another try.
+    retrying: bool,
+}
+
+/// What a run stopped by the device waits for.
+struct DeviceWait {
+    /// The output as last seen ([`output_state`]): its key and rate.
+    seen: Option<(String, Option<u32>)>,
+    /// When it was last looked at.
+    probed: Instant,
+    /// Try once at the next look whatever the output: it already ran at the
+    /// project's rate when the run stopped (a rate switched away and back,
+    /// a device busy for a moment), or the project's files changed (its
+    /// `sample_rate` among them).
+    once: bool,
 }
 
 /// What a stopped host leaves: the recorder and the runner's last status.
@@ -237,6 +262,10 @@ struct Run {
     /// The engine's plan version last described.
     version: u64,
     failure_reported: bool,
+    /// Why the audio system stopped the output's stream, once reported
+    /// (`signal ui`, `signal mcp`: the run is kept, so what it recorded is
+    /// written, and the command ends with it).
+    fault: Option<String>,
     /// How the workers are scheduled (app mode: the status line).
     scheduling: Option<Scheduling>,
 }
@@ -927,6 +956,8 @@ impl Host {
     /// Returns what to tell the operator.
     pub fn step(&mut self) -> Vec<String> {
         self.poll();
+        self.check_output();
+        self.retry_device();
         self.watch();
         self.watch_stopped();
         for _ in 0..MESSAGES_PER_STEP {
@@ -947,6 +978,25 @@ impl Host {
     #[cfg(feature = "test-hooks")]
     pub fn graph_counts(&self) -> (u64, u64, u64) {
         self.counts
+    }
+
+    /// Test hook: the null backend's device list from now on (a device
+    /// switched to another rate, plugged in or out), as CoreAudio would list
+    /// it.
+    #[cfg(feature = "test-hooks")]
+    pub fn set_null_devices(&mut self, devices: Vec<DeviceInfo>) {
+        if let Backend::Null(listed) = &mut self.backend {
+            *listed = devices;
+        }
+    }
+
+    /// Test hook: the run's output stopped by the audio system with
+    /// `fault`, as [`Output::fault`] reports a device's.
+    #[cfg(feature = "test-hooks")]
+    pub fn fail_output(&mut self, fault: &str) {
+        if self.run.as_ref().is_some_and(|run| run.fault.is_none()) {
+            self.output_faulted(fault.to_owned());
+        }
     }
 
     /// `unsaved` to every client whenever it changed; a failure whose
@@ -1164,6 +1214,7 @@ impl Host {
         let opened = match self.app.as_mut() {
             Some(mode) => {
                 mode.notes.clear();
+                mode.device_wait = None;
                 mode.opened
             }
             None => return Err(app_only()),
@@ -1212,7 +1263,16 @@ impl Host {
             mode.diagnostics.clear();
             mode.notes.extend(notes);
         }
-        let started = started.map_err(|error| fail("device", error))?;
+        let started = match started {
+            Ok(started) => started,
+            Err(error) => {
+                let error = match self.wait_for_device() {
+                    Some(waiting) => format!("{error}; {waiting}"),
+                    None => error,
+                };
+                return Err(fail("device", error));
+            }
+        };
         let (watcher, reload) = match ProjectWatcher::new(&self.dir) {
             Ok(watcher) => (Some(watcher), ("watching for edits".to_owned(), false)),
             Err(error) => (None, (format!("not watching: {error}"), true)),
@@ -1244,6 +1304,7 @@ impl Host {
             device,
             version: 0,
             failure_reported: false,
+            fault: None,
             scheduling: Some(started.scheduling),
         };
         self.install(run);
@@ -1318,9 +1379,11 @@ impl Host {
                 self.stop_app();
                 self.list_devices();
             }
-            // Stopped on purpose: Setup ▸ Apply does not play it (ADR 0033).
+            // Stopped on purpose: Setup ▸ Apply does not play it (ADR 0033),
+            // nor does the device coming back.
             if let Some(mode) = self.app.as_mut() {
                 mode.held = true;
+                mode.device_wait = None;
             }
             Ok(())
         };
@@ -1376,6 +1439,7 @@ impl Host {
             }
         } else {
             mode.power.off(playing);
+            mode.device_wait = None;
             // The device is released, the workers joined (the Runner is
             // dropped here) and the file watch ends with the run.
             self.stop_app();
@@ -1387,6 +1451,143 @@ impl Host {
         };
         self.noted(result)?;
         Ok(json!({"type": "power", "on": self.powered(), "playing": self.run.is_some()}))
+    }
+
+    /// The run's output stopped by the audio system (the device's rate
+    /// changed, it went away). App mode: the run stops, with the reason in
+    /// plain words, and with `plays` it waits for the device
+    /// ([`Self::retry_device`]). `signal ui`, `signal mcp`: the run is kept
+    /// (what it recorded is written when it finishes) and the fault is
+    /// reported once ([`Self::output_fault`]).
+    fn check_output(&mut self) {
+        let Some(run) = self.run.as_mut() else {
+            return;
+        };
+        if run.fault.is_some() {
+            return;
+        }
+        let Some(fault) = run.output.fault() else {
+            return;
+        };
+        self.output_faulted(fault);
+    }
+
+    /// The run's output stopped with `fault`: [`Self::check_output`]'s
+    /// outcome in either mode.
+    fn output_faulted(&mut self, fault: String) {
+        if self.app.is_some() {
+            return self.output_failed(fault);
+        }
+        if let Some(run) = self.run.as_mut() {
+            run.fault = Some(fault.clone());
+            self.messages.push(fault);
+        }
+    }
+
+    /// Why the audio system stopped the run's output stream, outside app
+    /// mode (`signal ui`, `signal mcp` end the run with it); `None` while
+    /// it plays.
+    pub fn output_fault(&self) -> Option<&str> {
+        self.run.as_ref().and_then(|run| run.fault.as_deref())
+    }
+
+    /// App mode: stops the run whose output failed with `fault`, and says so.
+    fn output_failed(&mut self, fault: String) {
+        self.stop_app();
+        let message = match self.wait_for_device() {
+            Some(waiting) => format!("{fault}; stopped, {waiting}"),
+            None => format!("{fault}; stopped"),
+        };
+        self.messages.push(message.clone());
+        if let Some(mode) = self.app.as_mut() {
+            mode.message = Some(message);
+        }
+    }
+
+    /// App mode with `plays`, switched on and not held: the run stopped by
+    /// the device waits for its output ([`DEVICE_POLL`]); the output as it
+    /// is now is noted. An output already at the project's rate is tried
+    /// once more at the next look, unless that try is what failed. Returns
+    /// what the window says it waits for, or `None` when nothing waits.
+    fn wait_for_device(&mut self) -> Option<String> {
+        let waits = self
+            .app
+            .as_ref()
+            .is_some_and(|m| m.plays && m.opened && m.power.is_on() && !m.held);
+        if !waits {
+            return None;
+        }
+        self.list_devices();
+        let seen = output_state(&self.devices, &self.setup);
+        let rate = self.rate;
+        let ready = ready_at(seen.as_ref(), rate);
+        let mode = self.app.as_mut()?;
+        let once = ready && !mode.retrying;
+        mode.device_wait = Some(DeviceWait {
+            seen,
+            probed: Instant::now(),
+            once,
+        });
+        Some(if once {
+            "Signal tries the output again in a moment".to_owned()
+        } else if ready {
+            "Signal tries again when the output or the project's files change".to_owned()
+        } else {
+            format!("Signal plays again once the output runs at {rate} Hz")
+        })
+    }
+
+    /// A run stopped by the device (app mode, `plays`): every
+    /// [`DEVICE_POLL`] the device list is read again, on this thread. The
+    /// project plays again from frame 0 once the output changed (a rate
+    /// switched in Audio MIDI Setup, a device plugged in, another default)
+    /// and runs at the project's rate (or its rate cannot be read), or once
+    /// at the next look when [`DeviceWait::once`] says so. An output that
+    /// did not change is not tried again. Nothing runs while it waits.
+    fn retry_device(&mut self) {
+        let rate = self.rate;
+        let Some(mode) = self.app.as_mut() else {
+            return;
+        };
+        let Some(wait) = mode.device_wait.as_mut() else {
+            return;
+        };
+        if self.run.is_some() || !mode.power.is_on() || mode.held || !mode.opened {
+            mode.device_wait = None;
+            return;
+        }
+        if wait.probed.elapsed() < DEVICE_POLL {
+            return;
+        }
+        wait.probed = Instant::now();
+        let (seen, once) = (wait.seen.clone(), wait.once);
+        self.list_devices();
+        let now = output_state(&self.devices, &self.setup);
+        let changed = now != seen;
+        if !once && !(changed && ready_at(now.as_ref(), rate)) {
+            if let Some(wait) = self.app.as_mut().and_then(|m| m.device_wait.as_mut()) {
+                wait.seen = now;
+            }
+            return;
+        }
+        if let Some(mode) = self.app.as_mut() {
+            mode.retrying = true;
+        }
+        let result = self.play_app();
+        if let Some(mode) = self.app.as_mut() {
+            mode.retrying = false;
+        }
+        let message = match result {
+            Ok(()) => format!(
+                "the output runs at {} Hz: playing again from frame 0",
+                self.rate
+            ),
+            Err(failure) => failure.message,
+        };
+        self.messages.push(message.clone());
+        if let Some(mode) = self.app.as_mut() {
+            mode.message = Some(message);
+        }
     }
 
     /// Whether the app is switched on (always outside app mode).
@@ -1885,6 +2086,7 @@ impl Host {
             device,
             version: 0,
             failure_reported: false,
+            fault: None,
             scheduling: None,
         };
         Ok((run, notes))
@@ -2848,6 +3050,11 @@ impl Host {
         }
         *polled = Instant::now();
         if watcher.poll().unwrap_or(false) {
+            // Waiting for the device: the project's files changed (its
+            // `sample_rate`, say), so it is tried again.
+            if let Some(wait) = self.app.as_mut().and_then(|m| m.device_wait.as_mut()) {
+                wait.once = true;
+            }
             self.push_graph(false);
         }
     }
@@ -4888,6 +5095,28 @@ impl Host {
                 .iter()
                 .find(|d| d.direction == Direction::Output && d.default)
                 .ok_or_else(|| fail("unknown-device", "no default output is listed"))?,
+            // A chosen device by identity (`{"name", "id", "signature"}`),
+            // found in the list as it is now, or by index.
+            Some(Value::Object(object)) if !object.contains_key("index") => {
+                let Selection::Device(wanted) =
+                    self.selection(message.get("output"), Direction::Output)?
+                else {
+                    return Err(fail("bad-device", "not a device"));
+                };
+                match resolve(&self.devices, Direction::Output, &wanted) {
+                    Resolution::Found(index) => self
+                        .devices
+                        .get(index)
+                        .ok_or_else(|| fail("unknown-device", "the device list changed"))?,
+                    Resolution::Ambiguous { reason, .. } | Resolution::Missing { reason, .. } => {
+                        return Err(fail("unknown-device", reason));
+                    }
+                }
+            }
+            Some(Value::Object(object)) => {
+                let index = object.get("index").unwrap_or(&Value::Null);
+                self.device(index, Direction::Output)?
+            }
             Some(index) => self.device(index, Direction::Output)?,
         };
         let buffer = buffer_of(message, self.setup.buffer)?;
@@ -5325,6 +5554,12 @@ fn level_of<'a>(graph: &'a Value, level: &str) -> Result<&'a Value, Failure> {
 /// The refusal of what needs the app switched on.
 fn powered_off() -> Failure {
     fail("powered-off", "Signal is switched off")
+}
+
+/// Whether an output as [`output_state`] gives it can play at `rate`: it is
+/// there and runs at that rate, or its rate cannot be read.
+fn ready_at(state: Option<&(String, Option<u32>)>, rate: u32) -> bool {
+    state.is_some_and(|(_, at)| at.is_none_or(|at| at == rate))
 }
 
 /// The power switch as `welcome`, `app` and `power` carry it.

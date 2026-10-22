@@ -23,7 +23,8 @@ pub(crate) struct Pace {
     pub(crate) limit: Option<u64>,
 }
 
-/// Plays `host` until `pace.limit`, a failed engine, or `stop()` (then once
+/// Plays `host` until `pace.limit`, a failed engine, an output the audio
+/// system stopped ([`Host::output_fault`]), or `stop()` (then once
 /// every command sent has applied, or a second has passed, so an edit just
 /// made is played and recorded). Under the null driver the samples played
 /// are appended to `audio` when given.
@@ -48,9 +49,12 @@ pub(crate) fn drive(
             (Some((s, _)), false) => s.next_frame.0,
             (None, false) => (started.elapsed().as_secs_f64() * f64::from(rate)) as u64,
         };
-        // A failed engine plays only silence: stop (docs/semantics.md §14).
+        // A failed engine plays only silence: stop (docs/semantics.md §14);
+        // so does an output the audio system stopped (its rate changed, it
+        // went away), which calls no more back.
         if pace.limit.is_some_and(|limit| frame >= limit)
             || status.as_ref().is_some_and(|(s, _)| s.failure.is_some())
+            || host.output_fault().is_some()
         {
             break;
         }

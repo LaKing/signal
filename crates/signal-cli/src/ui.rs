@@ -185,6 +185,9 @@ pub(crate) fn run(
         &|| stop.load(Ordering::Relaxed),
         audio.as_mut(),
     );
+    // An output the audio system stopped ends the run: what it recorded is
+    // still written, and the command then fails with the reason.
+    let fault = host.output_fault().map(str::to_owned);
     let Some(finished) = host.finish() else {
         return Ok(());
     };
@@ -206,6 +209,9 @@ pub(crate) fn run(
     }
     if let Some(failure) = finished.status.failure {
         return Err(Failure::Internal(failure.to_string()));
+    }
+    if let Some(fault) = fault {
+        return Err(Failure::Device(fault));
     }
     if json {
         print_stdout(

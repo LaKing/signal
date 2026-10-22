@@ -1,7 +1,7 @@
 //! Callback statistics (statistics only, never semantics): how long each
 //! callback took against its period, on average and at worst, and the xruns.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -9,6 +9,33 @@ use serde::Serialize;
 /// Buckets of the callback-duration histogram: 0.01 of the period each, up
 /// to 4 periods, and one for longer callbacks.
 const RATIO_BUCKETS: usize = 401;
+
+/// Why the audio system stopped a playing stream: it calls no more back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamFault {
+    /// The device's sample rate changed (Audio MIDI Setup, another
+    /// application): CoreAudio invalidated the stream.
+    RateChanged,
+    /// The device went away (unplugged, or no default output any more).
+    Gone,
+}
+
+impl StreamFault {
+    fn code(self) -> u8 {
+        match self {
+            StreamFault::RateChanged => 1,
+            StreamFault::Gone => 2,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<StreamFault> {
+        match code {
+            1 => Some(StreamFault::RateChanged),
+            2 => Some(StreamFault::Gone),
+            _ => None,
+        }
+    }
+}
 
 /// Counters shared between the audio callback, which records, and the control
 /// thread, which reads. Atomics only: recording allocates, locks and blocks
@@ -29,6 +56,8 @@ pub struct CallbackStats {
     /// The worst duration / period, as f64 bits (finite and ≥ 0, so the bits
     /// order like the values).
     worst: AtomicU64,
+    /// The first [`StreamFault`]'s code, 0 before one.
+    fault: AtomicU8,
 }
 
 /// What [`CallbackStats`] counted.
@@ -67,6 +96,7 @@ impl Default for CallbackStats {
             busy_nanos: AtomicU64::new(0),
             period_nanos: AtomicU64::new(0),
             worst: AtomicU64::new(0),
+            fault: AtomicU8::new(0),
         }
     }
 }
@@ -128,6 +158,24 @@ impl CallbackStats {
         self.stream_errors.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Records why the audio system stopped the stream; the first fault
+    /// stays. Atomics only, as every record.
+    pub fn stream_fault(&self, fault: StreamFault) {
+        let _ = self
+            .fault
+            .compare_exchange(0, fault.code(), Ordering::Relaxed, Ordering::Relaxed);
+    }
+
+    /// Forgets the fault: a new stream starts.
+    pub fn clear_fault(&self) {
+        self.fault.store(0, Ordering::Relaxed);
+    }
+
+    /// The fault that stopped the stream, if one did.
+    pub fn fault(&self) -> Option<StreamFault> {
+        StreamFault::from_code(self.fault.load(Ordering::Relaxed))
+    }
+
     /// The counts now.
     pub fn snapshot(&self) -> StatsSnapshot {
         let stream_errors = self.stream_errors.load(Ordering::Relaxed);
@@ -155,7 +203,7 @@ impl CallbackStats {
 
 #[cfg(test)]
 mod tests {
-    use super::CallbackStats;
+    use super::{CallbackStats, StreamFault};
     use std::time::Duration;
 
     #[test]
@@ -201,6 +249,17 @@ mod tests {
             (s.p99_callback_ratio, s.median_callback_ratio),
             (10.0, 10.0)
         );
+    }
+
+    #[test]
+    fn the_first_fault_stays() {
+        let stats = CallbackStats::default();
+        assert_eq!(stats.fault(), None);
+        stats.stream_fault(StreamFault::RateChanged);
+        stats.stream_fault(StreamFault::Gone);
+        assert_eq!(stats.fault(), Some(StreamFault::RateChanged));
+        stats.clear_fault();
+        assert_eq!(stats.fault(), None);
     }
 
     #[test]

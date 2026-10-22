@@ -7,7 +7,7 @@
 use signal_audio::{
     AudioError, ChannelMap, CoreAudioDriver, DeviceInfo, DeviceRef, DeviceSelector, Direction,
     InputCallback, InputCapture, InputMeters, Resolution, Scheduling, StatsSnapshot, choose_input,
-    choose_output, resolve,
+    choose_output, resolve, start_failure,
 };
 use signal_output::{Driver, DriverError, NullDriver, Runner};
 
@@ -129,6 +129,16 @@ impl Output {
         }
     }
 
+    /// Why the audio system stopped the playing stream (its rate changed,
+    /// it went away), in plain words; `None` while it plays, and for the
+    /// null driver.
+    pub fn fault(&self) -> Option<String> {
+        match self {
+            Output::Device(driver) => driver.fault(),
+            Output::Null(..) => None,
+        }
+    }
+
     /// The null driver, if this is one.
     pub fn null(&mut self) -> Option<&mut NullDriver> {
         match self {
@@ -211,6 +221,21 @@ pub fn selector<'a>(
     }
 }
 
+/// The Setup's output in `devices` as it is now: its id (or name) and the
+/// rate it runs at (`None` unread); the system's default output without a
+/// saved device. `None` when it is not there. What a run stopped by the
+/// device waits to change (`docs/ui-protocol.md`, "Stopped by the device").
+pub fn output_state(devices: &[DeviceInfo], setup: &Setup) -> Option<(String, Option<u32>)> {
+    let device = match &setup.output {
+        Some(entry) => selector(devices, entry, Direction::Output).ok()?.1,
+        None => devices
+            .iter()
+            .find(|d| d.direction == Direction::Output && d.default)?,
+    };
+    let key = device.id.clone().unwrap_or_else(|| device.name.clone());
+    Some((key, device.rate))
+}
+
 /// Opens the Setup's output for `width` sink channels at `rate`, with its
 /// buffer and channel map (a map the device cannot take falls back to the
 /// identity, with a note).
@@ -255,6 +280,27 @@ pub fn open_output(
             .map(|driver| Output::Device(Box::new(driver)))
         }
         Backend::Null(_) => {
+            // A listed device running at another rate stands for one that
+            // cannot be switched (the CoreAudio driver switches it, which
+            // can fail): deterministic, for the tests.
+            let played = output.as_ref().map(|(_, d)| d).or_else(|| {
+                devices
+                    .iter()
+                    .find(|d| d.direction == Direction::Output && d.default)
+            });
+            if let Some(device) = played
+                && let Some(now) = device.rate
+                && now != rate
+            {
+                return Err(start_failure(
+                    &device.name,
+                    rate,
+                    Some(now),
+                    Some(now),
+                    "null driver",
+                    "a listed device keeps its rate",
+                ));
+            }
             // As `CoreAudioDriver::open_selected` chooses, on the listed
             // device (the default output is taken to be that wide).
             let wanted = targets

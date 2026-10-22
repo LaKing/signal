@@ -185,6 +185,7 @@ mod tests {
             id: Some(id.to_owned()),
             direction: Direction::Output,
             default: false,
+            rate: None,
             configs: vec![ConfigRange {
                 channels,
                 min_rate: rate,

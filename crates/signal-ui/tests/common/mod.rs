@@ -108,6 +108,7 @@ fn device(name: &str, direction: Direction, channels: u16, min: u32, max: u32) -
         id: Some(format!("null:{}", name.to_lowercase().replace(' ', "-"))),
         direction,
         default: false,
+        rate: None,
         configs: vec![ConfigRange {
             channels,
             min_rate: min,
