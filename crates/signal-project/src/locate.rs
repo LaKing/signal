@@ -238,6 +238,10 @@ impl<'a> Locator<'a> {
                     .or_else(|| self.connection(from, to))?;
                 Some(at(def, connection.entry.start))
             }
+            GraphError::ExclusiveInputs { from, to, .. } => {
+                let (def, connection) = self.connection(from, to)?;
+                Some(at(def, connection.entry.start))
+            }
             GraphError::Cycle { instances } => self.instance_key(instances.first()?),
             _ => None,
         }

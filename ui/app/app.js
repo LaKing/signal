@@ -1,7 +1,9 @@
 // Signal.app's window (ADR 0023 §2, M2.8-4, M2.8-11, M2.8-12): one page, web
 // components over the page's connection to the app's server. The toolbar
-// (power switch, tabs, Play and Stop, the project's name with "Edited", the
-// status) is always there; the tabs
+// (power switch, tabs, the project's name with "Edited", the status) is
+// always there; the project plays while the power is on, and starts and stops
+// from its own panel (ADR 0033), so there is no Play or Stop: Project ▸
+// Restart from Files plays it again from frame 0 (`transport.play`). The tabs
 // are the project's panel, the parameters (status, meters, messages and the
 // parameter list) and the setup (the project folder and the interface
 // setup), switched without a reload or a new connection. The app's own
@@ -20,7 +22,7 @@ import { applyProps } from './lib/dom.js';
 import { connectCards } from './lib/cards.js';
 import { pageHandlesShortcuts, panelReloads, panelSource, shortcut } from './lib/menu.js';
 import { dragMessage, fileNote, planUpdate, releaseMessage, resetMessage, rows, shown, structureKey, valuesOf } from './lib/parameters.js';
-import { INITIAL, controls, powerRequest, reduce } from './lib/power.js';
+import { INITIAL, controls, powerRequest, reduce, restartRequest } from './lib/power.js';
 import { contextItems, keepsSystemMenu } from './lib/context.js';
 import { PROMPT, fieldValue, openRetry, projectLabel, windowTitle } from './lib/document.js';
 import { archiveSave, saveReport, saveRequests } from './lib/save.js';
@@ -71,12 +73,13 @@ class AppElement extends HTMLElement {
 }
 
 /**
- * The toolbar: the power switch, the tabs (Panel | Parameters | Setup),
- * Play and Stop, the project's name (with "Edited" while a .signal
- * project's working folder differs from its file), and the compact status
- * with the last notice. It switches
- * the tabs, and runs the menu's actions: the native menu's (`signal-menu`)
- * and, without one (a browser), their shortcuts.
+ * The toolbar: the power switch, the tabs (Panel | Parameters | Setup), the
+ * project's name (with "Edited" while a .signal project's working folder
+ * differs from its file), and the compact status with the last notice. No
+ * Play or Stop (ADR 0033): the project runs while the power is on, and its
+ * transport is its own. It switches the tabs, and runs the menu's actions:
+ * the native menu's (`signal-menu`) and, without one (a browser), their
+ * shortcuts.
  */
 export class SignalAppToolbar extends AppElement {
   connectedCallback() {
@@ -93,10 +96,6 @@ export class SignalAppToolbar extends AppElement {
           return [t.id, button];
         }),
       );
-      this.play = el('button', { type: 'button', textContent: '▶ Play' });
-      this.stop = el('button', { type: 'button', textContent: '■ Stop' });
-      this.play.addEventListener('click', () => this.request({ type: 'transport.play' }).catch(failed));
-      this.stop.addEventListener('click', () => this.request({ type: 'transport.stop' }).catch(failed));
       this.line = el('span', { className: 'line' });
       this.note = el('span', { className: 'note' });
       this.project = null;
@@ -106,7 +105,6 @@ export class SignalAppToolbar extends AppElement {
       this.append(
         this.switch,
         el('div', { className: 'tabs', role: 'tablist' }, ...this.tabs.values()),
-        el('div', { className: 'transport' }, this.play, this.stop),
         el('span', { className: 'project-name' }, this.name, this.edited),
         el('output', { className: 'compact-status' }, this.line, this.note),
       );
@@ -161,10 +159,15 @@ export class SignalAppToolbar extends AppElement {
     for (const panel of document.querySelectorAll('[role="tabpanel"][data-tab]')) panel.hidden = panel.dataset.tab !== this.tab;
   }
 
-  /** A menu action: Open…, Save, Interface Setup…. */
+  /** A menu action: Open…, Save, Interface Setup…, Restart from Files. */
   run(action) {
     if (action === 'save') {
       this.save();
+      return;
+    }
+    if (action === 'restart') {
+      // The project again from frame 0, from its files (ADR 0033).
+      this.request(restartRequest()).catch(failed);
       return;
     }
     const target = tabForAction(action);
@@ -242,12 +245,10 @@ export class SignalAppToolbar extends AppElement {
   }
 
   render() {
-    const c = controls(this.power, this.playing);
+    const c = controls(this.power);
     this.switch.setAttribute('aria-checked', String(c.checked));
     this.switch.textContent = `⏻ ${c.label}`;
     this.switch.disabled = c.switchDisabled;
-    this.play.disabled = c.playDisabled;
-    this.stop.disabled = c.stopDisabled;
     this.line.textContent = compactStatus({ power: this.power.power, playing: this.playing, status: this.status });
     const label = projectLabel(this.project);
     this.name.textContent = label.name;
@@ -359,7 +360,7 @@ export class SignalAppMeters extends AppElement {
     const key = JSON.stringify(meters);
     if (key === this.shown) return;
     // Stopped, `describe` lists no meters: the last ones stay, at rest, so
-    // Play and Stop do not rebuild the card ("Stable layout").
+    // a restart or the power switch does not rebuild the card ("Stable layout").
     if (this.shown && (meters.output ?? []).length + (meters.input ?? []).length === 0) return;
     const row = (source, list, label) =>
       list.map((m, i) => el('signal-meter', { source, channel: String(m.channel ?? i), label: label(m, i), floor: '-60' }));
@@ -683,7 +684,7 @@ export class SignalAppPanel extends AppElement {
   app(app) {
     const dir = app.project?.dir ?? null;
     // Not `this.dir`: that is HTMLElement's text direction, which reads
-    // back "" for a folder, so every `app` message (Play, Stop, a written
+    // back "" for a folder, so every `app` message (a restart, the power, a written
     // parameter) reloaded the panel in sight.
     if (panelReloads(this.shownDir, dir)) this.frame.contentWindow?.location.reload();
     // A moment without a project keeps the folder shown.
@@ -695,7 +696,7 @@ export class SignalAppPanel extends AppElement {
  * The context menu (owner's request, 2026-10-16), in place of the WebView's
  * own: on the schematic, the schematic's items for what was clicked (its
  * `contextMenu`, 2026-10-17); on a control bound to a parameter, Reset to
- * default and Copy address; then Play or Stop and the other tabs. A text
+ * default and Copy address; then Restart from Files and the other tabs. A text
  * field keeps the system's menu (Cut, Copy, Paste). One per page; the
  * panel frame's right clicks come here too. The element is
  * ui/controls/context-menu.js's, as the schematic's own in a browser.
@@ -790,7 +791,6 @@ export class SignalAppContextMenu extends AppElement {
     const items = contextItems({
       part: part?.items,
       control,
-      playing: Boolean(toolbar?.playing),
       power: (toolbar?.power?.power ?? 'on') === 'on',
       tab: toolbar?.tab ?? null,
     });
@@ -813,8 +813,7 @@ export class SignalAppContextMenu extends AppElement {
     if (id.startsWith('part:')) part?.act(id.slice(5));
     else if (id === 'reset' && control) this.request(resetMessage(control.address)).catch(failed);
     else if (id === 'copy-address' && control) navigator.clipboard?.writeText(control.address).catch(failed);
-    else if (id === 'play') this.request({ type: 'transport.play' }).catch(failed);
-    else if (id === 'stop') this.request({ type: 'transport.stop' }).catch(failed);
+    else if (id === 'restart') this.request(restartRequest()).catch(failed);
     else if (id.startsWith('tab:')) toolbar?.select(id.slice(4));
   }
 }

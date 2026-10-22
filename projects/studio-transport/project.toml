@@ -1,0 +1,101 @@
+# The studio demo played from a transport inside the project (ADR 0033): the
+# M2.11 studio (projects/studio, unchanged) with its tempo clock replaced by
+# lib.transport, whose position in beats the sequencers follow on a wire. The
+# panel's Transport card starts and stops it, sets its tempo and its rate (a
+# multiplier of the tempo: 0 holds, negative plays backwards), and rewinds it.
+#
+# Signal flow:
+#
+#   transport.position ─► melody (note_seq, patterns/melody.toml, follow) ─ hz, gate, velocity ─► synth ─► echo ─► bus.c
+#   transport.position ─► drums (step_seq8, patterns/drums.toml, follow) ─ t1 … t8 ─► kick, snare, clap, hats, tom, rim, cymbal
+#   kick, snare, clap, hats ─► drum_a ─► bus.a        tom, rim, cymbal ─► drum_b ─► bus.b
+#   bus ─► dc (DC blocker) ─► limiter (tanh) ─► out (gain 0.25) ─► l, r
+#
+# A note or a step fires on the first frame whose position is past its beat
+# (exact in beats: no ticks), one frame after the studio's tick clock places
+# it; stopping releases the sounding note and playing on resumes from the
+# same place; a rewind (or any seek) fires nothing until the position moves
+# on from its new place, where a note starting exactly there plays; the
+# transport's `jump` marks every seek on the sequencers' `reset`.
+#
+# Each drum lane goes to its voice's trigger and to its `velocity` parameter,
+# as in the studio. Safe gain: the limiter is a tanh, whose output never
+# exceeds 1, and the output gain is 0.25 (−12 dBFS at most).
+schema_version = 1
+
+[project]
+name = "studio-transport"
+sample_rate = 48000
+seed = 11
+
+[instances]
+# The transport: a position in beats, played at 120 bpm from frame 0.
+transport = { module = "lib.transport", bpm = 120, run = 1, rate = 1 }
+melody = { module = "std.note_seq", pattern = "melody" }
+drums = { module = "std.step_seq8", pattern = "drums", accent_level = 1.5 }
+
+synth = { module = "moog_voice" }
+echo = { module = "tape_delay" }
+
+kick = { module = "kick909" }
+snare = { module = "snare909" }
+clap = { module = "clap909" }
+hats = { module = "hat909" }
+tom = { module = "tom909" }
+rim = { module = "rim909" }
+cymbal = { module = "cymbal909" }
+
+drum_a = { module = "std.mix" }
+drum_b = { module = "std.mix" }
+# Drums on a and b, the echoed voice on c, levelled so that the limiter
+# only rounds off the loudest hits.
+bus = { module = "std.mix", gain_a = 0.45, gain_b = 0.45, gain_c = 0.55 }
+dc = { module = "std.dc_block" }
+limiter = { module = "std.tanh_shaper", drive = 1 }
+out = { module = "std.audio_out", gain = 0.25 }
+
+[wiring]
+connections = [
+  { from = "transport.position", to = "melody.follow" },
+  { from = "transport.position", to = "drums.follow" },
+  # Every seek (the Rewind button, a jump) marked as one, also a short one.
+  { from = "transport.jump", to = "melody.reset" },
+  { from = "transport.jump", to = "drums.reset" },
+  # The voice, through the echo.
+  { from = "melody.hz", to = "synth.hz" },
+  { from = "melody.gate", to = "synth.gate" },
+  { from = "melody.velocity", to = "synth.velocity" },
+  { from = "synth.out", to = "echo.in" },
+  { from = "echo.out", to = "bus.c" },
+  # The drums: each lane triggers its voice and sets its velocity.
+  { from = "drums.t1", to = "kick.trigger" },
+  { from = "drums.t1", to = "kick.velocity" },
+  { from = "drums.t2", to = "snare.trigger" },
+  { from = "drums.t2", to = "snare.velocity" },
+  { from = "drums.t3", to = "clap.trigger" },
+  { from = "drums.t3", to = "clap.velocity" },
+  { from = "drums.t4", to = "hats.closed" },
+  { from = "drums.t4", to = "hats.closed_velocity" },
+  { from = "drums.t5", to = "hats.open" },
+  { from = "drums.t5", to = "hats.open_velocity" },
+  { from = "drums.t6", to = "tom.trigger" },
+  { from = "drums.t6", to = "tom.velocity" },
+  { from = "drums.t7", to = "rim.trigger" },
+  { from = "drums.t7", to = "rim.velocity" },
+  { from = "drums.t8", to = "cymbal.trigger" },
+  { from = "drums.t8", to = "cymbal.velocity" },
+  { from = "kick.out", to = "drum_a.a" },
+  { from = "snare.out", to = "drum_a.b" },
+  { from = "clap.out", to = "drum_a.c" },
+  { from = "hats.out", to = "drum_a.d" },
+  { from = "tom.out", to = "drum_b.a" },
+  { from = "rim.out", to = "drum_b.b" },
+  { from = "cymbal.out", to = "drum_b.c" },
+  { from = "drum_a.out", to = "bus.a" },
+  { from = "drum_b.out", to = "bus.b" },
+  # The master bus.
+  { from = "bus.out", to = "dc.in" },
+  { from = "dc.out", to = "limiter.in" },
+  { from = "limiter.out", to = "out.l" },
+  { from = "limiter.out", to = "out.r" },
+]

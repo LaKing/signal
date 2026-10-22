@@ -1,0 +1,102 @@
+/* The studio panel's look (ui/main.html). Only the controls' styling hooks
+   are used: the --signal-* custom properties (ui/controls/theme.css) on each
+   section, and the SVG skins in assets/. Captions of the control groups are
+   ::before text of their class tokens, so the panel stays editable (its
+   structure is the panel whitelist's). Nothing here changes a size while
+   values change ("Stable layout"). */
+
+:root { color-scheme: dark; --signal-card-min: 18rem; }
+body { margin: 0; padding: 0.75rem; background: #1b1a18; color: var(--signal-fg); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+
+.signal-card > h2 { font-size: 15px; letter-spacing: 0.22em; }
+
+/* Groups of many knobs wrap inside themselves on a narrow window (the
+   theme keeps a group on one line, which suits a meter pair, not a bank of
+   eight knobs), so the panel never scrolls sideways. */
+.mono-synth .signal-group, .rhythm .signal-group { flex-wrap: wrap; flex: 0 1 auto; max-width: 100%; min-width: 0; }
+
+/* Group captions: small caps above each group of a section. */
+.signal-group { position: relative; padding: 1.3rem 0.5rem 0.4rem; border-radius: 4px; }
+.signal-group::before { position: absolute; top: 0.25rem; left: 0.5rem; right: 0.5rem; font-size: 9px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* MONO SYNTH: a black panel between wooden end cheeks, white-on-black
+   legends, the groups ruled off like the original's sections. */
+.mono-synth {
+  --signal-panel: #111111;
+  --signal-fg: #f4f1e8;
+  --signal-muted: #c9c4b6;
+  --signal-accent: #f4f1e8;
+  --signal-track: #3a3a3a;
+  --signal-knob-size: 46px;
+  --signal-piano-roll-height: 520px;
+  background: #111111;
+  border-left: 22px solid #6b3f22;
+  border-right: 22px solid #6b3f22;
+  border-image: linear-gradient(90deg, #4a2a15, #8a5530 40%, #6b3f22 70%, #3d2210) 1;
+  box-shadow: inset 0 1px 0 #2a2a2a, 0 2px 8px #000;
+}
+.mono-synth > h2 { color: #f4f1e8; }
+.mono-synth .signal-group { border-top: 1px solid #5a5650; }
+.mono-synth .signal-group::before { color: #f4f1e8; }
+.mono-synth .controllers { min-width: 6.5rem; }
+.mono-synth .controllers::before { content: "Controllers"; }
+.mono-synth .oscillators::before { content: "Oscillator bank"; }
+.mono-synth .mixer::before { content: "Mixer"; }
+.mono-synth .modifiers::before { content: "Modifiers \00B7  filter"; }
+.mono-synth .filter-contour::before { content: "Filter contour"; }
+.mono-synth .loudness-contour::before { content: "Loudness contour"; }
+.mono-synth .output::before { content: "Output"; }
+
+/* RHYTHM COMPOSER: the warm grey panel, an orange strip of per-voice knob
+   columns, dark legends. */
+.rhythm {
+  --signal-panel: #c9c4ba;
+  --signal-fg: #1e1c19;
+  --signal-muted: #4a463f;
+  --signal-accent: #f26b1d;
+  --signal-track: #8f8a80;
+  --signal-knob-size: 38px;
+  --signal-readout-width: 10ch;
+  background: linear-gradient(180deg, #d6d2c9, #bdb8ad);
+  border-top: 6px solid #f26b1d;
+}
+.rhythm > h2 { color: #1e1c19; }
+/* The voice columns side by side, top-aligned and sharing the width; on a
+   narrow window they wrap, each column whole. */
+.rhythm > .row { align-items: stretch; flex-wrap: wrap; }
+.rhythm .voice { flex: 1 1 6.5rem; flex-direction: column; flex-wrap: nowrap; align-items: center; justify-content: flex-start; background: #e9e5dc; border: 1px solid #a49f95; }
+.rhythm .voice::before { color: #f26b1d; text-align: center; }
+.rhythm .master::before { content: "Tempo"; }
+.rhythm .kick::before { content: "Bass drum"; }
+.rhythm .snare::before { content: "Snare"; }
+.rhythm .clap::before { content: "Hand clap"; }
+.rhythm .hats::before { content: "Hi-hat"; }
+.rhythm .tom::before { content: "Low tom"; }
+.rhythm .rim::before { content: "Rim shot"; }
+.rhythm .cymbal::before { content: "Cymbal"; }
+
+/* TAPE ECHO: a cream face with a green band and large chicken-head knobs. */
+.tape-echo {
+  --signal-panel: #efe6cc;
+  --signal-fg: #233322;
+  --signal-muted: #3d4a3a;
+  --signal-accent: #2f5d3a;
+  --signal-track: #b9ad8a;
+  --signal-knob-size: 92px;
+  background: linear-gradient(180deg, #2f5d3a 0, #2f5d3a 2.4rem, #efe6cc 2.4rem);
+  border: 1px solid #b9ad8a;
+}
+.tape-echo > h2 { color: #efe6cc; }
+/* The six knobs spread across the face, as on the original's front. */
+.tape-echo .row { justify-content: space-around; align-items: flex-start; padding: 0.8rem 0 0.4rem; }
+
+/* The master bus: scope and meters, as the controls draw them. */
+.master-bus signal-scope { flex: 1 1 20rem; }
+
+/* A phone-width window: thinner margins and cheeks, so the step grid (at
+   least 360 px) and the piano roll (320 px) fit inside their sections. */
+@media (max-width: 480px) {
+  body { padding: 0.25rem; }
+  .signal-card { padding-left: 0.5rem; padding-right: 0.5rem; }
+  .mono-synth { border-left-width: 10px; border-right-width: 10px; }
+}

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { INITIAL, controls, powerRequest, reduce } from './power.js';
+import { INITIAL, controls, powerRequest, reduce, restartRequest } from './power.js';
 
 test('the switch starts on, and a click asks for the other state once', () => {
   assert.deepEqual(INITIAL, { power: 'on', pending: false });
@@ -8,7 +8,7 @@ test('the switch starts on, and a click asks for the other state once', () => {
   const pending = reduce(INITIAL, { type: 'toggle' });
   assert.equal(pending.pending, true);
   assert.equal(reduce(pending, { type: 'toggle' }), pending, 'a second click while pending does nothing');
-  assert.equal(controls(pending, true).switchDisabled, true);
+  assert.equal(controls(pending).switchDisabled, true);
 });
 
 test('the reply and the server’s app state set it; a refusal leaves it', () => {
@@ -22,9 +22,9 @@ test('the reply and the server’s app state set it; a refusal leaves it', () =>
   assert.equal(reduce(off, { type: 'unknown' }), off);
 });
 
-test('off, neither Play nor Stop; on, the one that applies', () => {
+test('the switch alone: no Play or Stop (ADR 0033); Restart from Files plays again from its files', () => {
   const off = { power: 'off', pending: false };
-  assert.deepEqual(controls(off, false), { checked: false, label: 'off', switchDisabled: false, playDisabled: true, stopDisabled: true });
-  assert.deepEqual(controls(INITIAL, false), { checked: true, label: 'on', switchDisabled: false, playDisabled: false, stopDisabled: true });
-  assert.deepEqual(controls(INITIAL, true), { checked: true, label: 'on', switchDisabled: false, playDisabled: true, stopDisabled: false });
+  assert.deepEqual(controls(off), { checked: false, label: 'off', switchDisabled: false });
+  assert.deepEqual(controls(INITIAL), { checked: true, label: 'on', switchDisabled: false });
+  assert.deepEqual(restartRequest(), { type: 'transport.play' });
 });

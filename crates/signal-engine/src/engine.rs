@@ -466,6 +466,10 @@ pub(crate) struct Slot {
     /// builds a new slot with the new one; the old one leaves with the old
     /// plan, dropped off the real-time thread.
     table: Option<Table>,
+    /// Per port of its descriptor, whether the plan connects anything to it
+    /// (ADR 0033), handed to every call. Built with the slot, so a swap that
+    /// connects or disconnects an input changes it with the plan.
+    connected: Vec<bool>,
 }
 
 impl Slot {
@@ -996,6 +1000,8 @@ impl PlanState {
                 },
                 // A survivor takes the new plan's table (ADR 0028 §4).
                 table: instance.table.clone(),
+                // Set below, once every connection is known.
+                connected: vec![false; descriptor.ports.len()],
             });
             primitives.push(primitive);
             types.push(kind);
@@ -1050,6 +1056,20 @@ impl PlanState {
                         PortId(from_id),
                     ),
                     _ => return Err(invalid()),
+                }
+                // ADR 0033: the target port has a connection.
+                if let Some(flag) = plan
+                    .instances
+                    .get(to)
+                    .and_then(|i| {
+                        i.descriptor
+                            .ports
+                            .iter()
+                            .position(|p| p.name == target.port())
+                    })
+                    .and_then(|port| slots.get_mut(to)?.connected.get_mut(port))
+                {
+                    *flag = true;
                 }
                 edges.push((from, to));
             }
@@ -3855,7 +3875,8 @@ fn process(
         &slot.events,
         &slot.ends,
     )
-    .with_table(slot.table.as_ref());
+    .with_table(slot.table.as_ref())
+    .with_connected(&slot.connected);
     let mut outputs = Outputs::new(
         len,
         lane.call_outputs.get_mut(..out * len).unwrap_or(&mut []),
@@ -3892,7 +3913,8 @@ fn absorb_call(module: &mut dyn StateOutputPrimitive, (slot, lane): (&Slot, &Lan
         &slot.events,
         &slot.ends,
     )
-    .with_table(slot.table.as_ref());
+    .with_table(slot.table.as_ref())
+    .with_connected(&slot.connected);
     module.absorb(&inputs);
 }
 

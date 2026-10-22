@@ -22,6 +22,12 @@ use signal_ui::{AppHostConfig, Edits, Host, ServerOptions};
 /// A host in app mode on the null driver, its folder holding the tone
 /// project (or a copy of `project`).
 fn app_rig(name: &str, transport: Transport, project: Option<&Path>) -> Rig {
+    app_rig_with(name, transport, project, false)
+}
+
+/// [`app_rig`], playing whenever switched on (`plays`, Signal.app's: ADR
+/// 0033) or starting stopped.
+fn app_rig_with(name: &str, transport: Transport, project: Option<&Path>, plays: bool) -> Rig {
     let base = std::env::temp_dir().join(format!(
         "signal-ui-app-{name}-{transport:?}-{}",
         std::process::id()
@@ -52,6 +58,7 @@ fn app_rig(name: &str, transport: Transport, project: Option<&Path>) -> Rig {
             project_ui: PathBuf::new(),
             client_queue: 256,
         },
+        plays,
     };
     let host = match transport {
         Transport::Tcp => Host::new_app(config),
@@ -250,7 +257,7 @@ fn a_chosen_device_is_found_again_by_identity(transport: Transport) {
     );
     assert_eq!(
         refused["message"],
-        "stop playback to refresh: listing devices pauses metering and status"
+        "switch the power off to refresh: listing devices pauses metering and status"
     );
     rig.finish();
 }
@@ -1474,7 +1481,99 @@ both!(
     a_project_that_stops_loading_pushes_graph_error,
 );
 
+/// ADR 0033: Signal.app (`plays`) has no Play or Stop. Switched on, the
+/// open project plays: at start, after `project.open`, and when switched on
+/// again even if a `transport.stop` stopped it before; `transport.play`
+/// (Project ▸ Restart from Files) plays it again from frame 0 while it
+/// plays; switched off, nothing runs and a project opened then plays when
+/// switched on.
+fn it_plays_while_switched_on(transport: Transport) {
+    let mut rig = app_rig_with("plays", transport, None, true);
+    let (mut ws, _) = rig.client();
+    let app = rig.request(&mut ws, 1, json!({"type": "app.get"}), "app");
+    assert_eq!(
+        (app["power"].clone(), app["playing"].clone()),
+        (json!("on"), json!(true)),
+        "plays at start"
+    );
+    // Restart from Files: the run starts again from frame 0.
+    let before = rig.wait(&mut ws, "status", |got| {
+        got.of("status")
+            .filter(|s| s["playing"] == true && s["status"]["frame"].as_u64().unwrap_or(0) >= 4_800)
+            .cloned()
+    });
+    let reached = before["status"]["frame"].as_u64().unwrap();
+    let restarted = rig.request(&mut ws, 2, json!({"type": "transport.play"}), "transport");
+    assert_eq!(restarted["playing"], true);
+    let after = rig.wait(&mut ws, "status", |got| {
+        got.of("status").filter(|s| s["playing"] == true).cloned()
+    });
+    assert!(
+        after["status"]["frame"].as_u64().unwrap() < reached,
+        "from frame 0 again: {after} after {reached}"
+    );
+    // A protocol stop still stops (`signal ui`, `signal mcp`, a script) and
+    // holds through Setup ▸ Apply; the switch plays it again.
+    rig.request(&mut ws, 3, json!({"type": "transport.stop"}), "transport");
+    let applied = rig.request(
+        &mut ws,
+        30,
+        json!({"type": "setup.apply", "buffer": 256}),
+        "applied",
+    );
+    assert_eq!(applied["restarted"], false, "a deliberate stop holds");
+    assert!(rig.host().controller().is_none());
+    rig.request(
+        &mut ws,
+        4,
+        json!({"type": "app.power", "on": false}),
+        "power",
+    );
+    let on = rig.request(
+        &mut ws,
+        5,
+        json!({"type": "app.power", "on": true}),
+        "power",
+    );
+    assert_eq!(on["playing"], true, "on plays");
+    // Opened while off: it plays once switched on.
+    rig.request(
+        &mut ws,
+        6,
+        json!({"type": "app.power", "on": false}),
+        "power",
+    );
+    let path = rig.dir.display().to_string();
+    let opened = rig.request(
+        &mut ws,
+        7,
+        json!({"type": "project.open", "path": path}),
+        "project",
+    );
+    assert_eq!(opened["loads"], true);
+    assert!(rig.host().controller().is_none(), "nothing runs while off");
+    let on = rig.request(
+        &mut ws,
+        8,
+        json!({"type": "app.power", "on": true}),
+        "power",
+    );
+    assert_eq!(on["playing"], true);
+    // Opened while on: it plays.
+    let opened = rig.request(
+        &mut ws,
+        9,
+        json!({"type": "project.open", "path": path}),
+        "project",
+    );
+    assert_eq!(opened["loads"], true);
+    let app = rig.request(&mut ws, 10, json!({"type": "app.get"}), "app");
+    assert_eq!(app["playing"], true);
+    rig.finish();
+}
+
 both!(
+    it_plays_while_switched_on,
     power_off_stops_and_on_restores,
     a_client_connecting_while_off_is_told_and_gets_no_frames,
     a_failed_stopped_commit_is_still_unsaved_when_playing,

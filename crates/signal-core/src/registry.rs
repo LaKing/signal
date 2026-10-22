@@ -58,6 +58,9 @@ pub struct Registry {
     inputs: BTreeMap<(&'static str, &'static str), (&'static str, &'static str)>,
     /// type → what it takes as its table (ADR 0028 §3).
     tables: BTreeMap<&'static str, TableRule>,
+    /// (type, input, input): at most one of the two has connections
+    /// (ADR 0033).
+    exclusive: Vec<(&'static str, &'static str, &'static str)>,
     host: Option<Arc<dyn Host>>,
 }
 
@@ -141,6 +144,35 @@ impl Registry {
             .iter()
             .find(|((t, p), _)| *t == type_name && *p == port)
             .map(|(_, rule)| *rule)
+    }
+
+    /// Makes inputs `a` and `b` of `type_name` exclusive (ADR 0033): a plan
+    /// is built only if at most one of them has connections on each
+    /// instance. A structural rule, as [`restrict_input`](Registry::restrict_input):
+    /// the graph compares the names and nothing else; what the two inputs
+    /// mean is the library's.
+    pub fn exclusive_inputs(&mut self, type_name: &'static str, a: &'static str, b: &'static str) {
+        if !self
+            .exclusive
+            .iter()
+            .any(|&(t, x, y)| t == type_name && ((x, y) == (a, b) || (x, y) == (b, a)))
+        {
+            self.exclusive.push((type_name, a, b));
+        }
+    }
+
+    /// The pairs of exclusive inputs of `type_name`
+    /// ([`exclusive_inputs`](Registry::exclusive_inputs)), in the order
+    /// they were declared.
+    pub fn exclusive_pairs(
+        &self,
+        type_name: &str,
+    ) -> impl Iterator<Item = (&'static str, &'static str)> + '_ {
+        let type_name = type_name.to_owned();
+        self.exclusive
+            .iter()
+            .filter(move |(t, _, _)| *t == type_name)
+            .map(|&(_, a, b)| (a, b))
     }
 
     /// Declares that instances of `type_name` take a table (ADR 0028 §3, §4):

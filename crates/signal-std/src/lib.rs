@@ -99,6 +99,7 @@
 //! | `std.fdn_reverb` | [`FdnReverb`] | direct | `delay` |
 //! | `std.fm_op` | [`FmOp`] | direct | `generator` |
 //! | `std.wavetable` | [`Wavetable`] | direct | `generator` |
+//! | `std.playhead` | [`Playhead`] | direct | `event` |
 //!
 //! The seven `<N>` types are one type per width N of [`VECTOR_WIDTHS`] (2, 4, 8, 16,
 //! 64, 256, 1024), named with the width as a suffix: `std.pack4`,
@@ -136,7 +137,8 @@
 //! `std.fm_op` and `std.wavetable`. Each rustdoc gives the formula, its
 //! source, and why it stays bounded at every setting.
 //!
-//! Musical time (tempo, beats) lives here, in [`Transport`], never in the core
+//! Musical time (tempo, beats) lives here, in [`Transport`] (counted ticks)
+//! and [`Playhead`] (a position signal, ADR 0033), never in the core
 //! (ADR 0003).
 
 #![cfg_attr(
@@ -169,6 +171,7 @@ mod exciter;
 mod exp_env;
 mod fdn;
 mod fm_op;
+mod follow;
 mod function;
 mod gain;
 mod ladder;
@@ -190,6 +193,7 @@ mod osc;
 mod pan;
 mod particles;
 pub mod pattern;
+mod playhead;
 mod random;
 mod sample_hold;
 mod sine_osc;
@@ -245,6 +249,7 @@ pub use onepole::OnePole;
 pub use osc::Osc;
 pub use pan::Pan;
 pub use particles::Particles;
+pub use playhead::Playhead;
 pub use random::Random;
 pub use sample_hold::SampleHold;
 pub use sine_osc::SineOsc;
@@ -466,6 +471,7 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<FdnReverb>(),
         direct::<FmOp>(),
         direct::<Wavetable>(),
+        direct::<Playhead>(),
     ] {
         registry.register(module_type)?;
     }
@@ -473,6 +479,9 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     // table when the plan is built.
     registry.set_table_rule("std.note_seq", pattern::NOTE_RULE);
     registry.set_table_rule("std.step_seq8", pattern::STEP_RULE);
+    // ADR 0033: a sequencer counts ticks or follows a position, not both.
+    registry.exclusive_inputs("std.note_seq", "tick", "follow");
+    registry.exclusive_inputs("std.step_seq8", "tick", "follow");
     for module_type in vector::types() {
         registry.register(*module_type)?;
     }
@@ -820,6 +829,9 @@ mod tests {
     /// M2.11-2: the transistor-ladder filter.
     const LADDER: [&str; 1] = ["std.ladder"];
 
+    /// ADR 0033: the position signal.
+    const PLAYHEAD: [&str; 1] = ["std.playhead"];
+
     /// M2.10 (the owner's list): the native DSP primitives, with their
     /// categories.
     const DSP: [(&str, &str); 6] = [
@@ -902,13 +914,19 @@ mod tests {
         register(&mut registry).unwrap();
         assert_eq!(
             registry.len(),
-            NAMES.len() + SEQUENCERS.len() + LADDER.len() + DSP.len() + vector::types().len()
+            NAMES.len()
+                + SEQUENCERS.len()
+                + LADDER.len()
+                + PLAYHEAD.len()
+                + DSP.len()
+                + vector::types().len()
         );
         let vectors = vector::types().iter().map(|t| t.descriptor.type_name);
         for name in NAMES
             .into_iter()
             .chain(SEQUENCERS)
             .chain(LADDER)
+            .chain(PLAYHEAD)
             .chain(DSP.map(|(name, _)| name))
             .chain(vectors)
         {
@@ -932,7 +950,12 @@ mod tests {
         );
         assert_eq!(
             registry.len(),
-            NAMES.len() + SEQUENCERS.len() + LADDER.len() + DSP.len() + vector::types().len()
+            NAMES.len()
+                + SEQUENCERS.len()
+                + LADDER.len()
+                + PLAYHEAD.len()
+                + DSP.len()
+                + vector::types().len()
         );
 
         // A type registered first under a std name blocks that name.

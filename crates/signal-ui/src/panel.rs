@@ -126,9 +126,14 @@ impl Panel {
             return Panel::default();
         };
         let plan = &planned.plan;
+        // The project's composites and the library's it uses (`lib.<name>`,
+        // ADR 0027 §4): a library composite's exported parameters are
+        // controls as a project composite's are (ADR 0033: a panel plays
+        // `lib.transport`).
         let composites: BTreeMap<&str, &CompositeDef> = project
             .composites
             .iter()
+            .chain(project.library.iter().map(|l| &l.def))
             .map(|c| (c.name.as_str(), c))
             .collect();
         let mut instances = Vec::new();

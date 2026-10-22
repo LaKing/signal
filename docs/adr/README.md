@@ -37,3 +37,4 @@ To change a decision, add a new ADR that supersedes the old one. Do not rewrite 
 | [0030](0030-schematic-path-tracing-and-wire-scaling.md) | Path tracing across composite boundaries, continuous in-place zoom, and wires that scale (M2.13) |
 | [0031](0031-licence-gpl-and-first-public-release.md) | Licence GPL-3.0-or-later and the first public release, v0.2.0 (M2.14) |
 | [0032](0032-several-windows-over-the-screens.md) | Several windows over the screens: main, schematic and panel windows, panel cards dragged between them, the layout in `ui/windows.toml` per screen configuration |
+| [0033](0033-the-transport-as-a-signal.md) | The transport as a signal: `std.playhead`'s position in beats on a wire, sequencers that follow it, `lib.transport`, connected and exclusive inputs, and Signal.app without Play or Stop (M3.1) |

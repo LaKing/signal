@@ -71,6 +71,8 @@ pub fn build_plan(
     let mut graph = flatten::flatten(root, composites, registry)?;
     // Before converters: the sources and connections as written (ADR 0024).
     validate::restricted(&graph, registry)?;
+    // Inputs of which at most one may be connected (ADR 0033).
+    validate::exclusive(&graph, registry)?;
     // Canonical order (ADR 0016 §3): by target, then byte-wise by source.
     let canonical = |graph: &mut flatten::FlatGraph| {
         graph.connections.sort_by(|a, b| {

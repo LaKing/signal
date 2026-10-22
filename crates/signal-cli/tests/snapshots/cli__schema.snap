@@ -220,6 +220,7 @@ expression: text
             "std.pan",
             "std.particles",
             "std.phasor",
+            "std.playhead",
             "std.pow",
             "std.random",
             "std.reduce1024",
@@ -304,7 +305,8 @@ expression: text
             "lib.stereo_width",
             "lib.svf_core",
             "lib.tanh_shaper_core",
-            "lib.tape_echo"
+            "lib.tape_echo",
+            "lib.transport"
           ]
         },
         {

@@ -2,6 +2,19 @@
 
 All notable changes to Signal are recorded here, by milestone (`docs/roadmap.md`). The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions are `MAJOR.MINOR.N`, where `N` counts the commits since the tag `vMAJOR.MINOR.0` (`scripts/version.sh`); a section covers a `MAJOR.MINOR` line.
 
+## [Unreleased]
+
+### Added
+
+- **M3.1 Transport as a signal** (ADR 0033, owner's direction of 2026-10-22). `std.playhead`: a position in beats on a signal wire, with `bpm`, `run`, `rate` (a multiplier of the tempo: 0 holds, negative plays backwards; a connected signal replaces it) and a `seek` input, computed from the last change of tempo, rate or run so that it never drifts, and summed with compensation while the rate changes on every frame. `std.note_seq` and `std.step_seq8` take a `follow` input: connected to a position, they play from it instead of counting ticks, exact in beats, a stopped transport releasing its note and a jump firing nothing until the position moves on. `lib.transport` in the built-in library, and `projects/studio-transport`, the studio played from its own Transport card (play, stop, tempo, rate, rewind).
+- Signal.app: **Project ▸ Restart from Files** plays the open project again from frame 0 from its files.
+- A panel binds the exported parameters of a built-in library composite (`lib.*`), as it binds a project composite's.
+- The module contract: a primitive can ask which of its inputs the plan connects (`Inputs::is_connected`), and a library can make two inputs exclusive (`Registry::exclusive_inputs`); a project that connects both is refused with the connection named.
+
+### Changed
+
+- Signal.app's toolbar has no Play or Stop: the open project plays while the power is on (when the app starts, when a project opens, when the power comes on) and starts and stops from its own panel. In Signal.app, `transport.play` while playing plays the project again from frame 0. To list the devices again, switch the power off.
+
 ## [0.2.0] - 2026-10-22
 
 The first public release (M2.14, ADR 0031): Signal plays in real time, edits live, runs as a Mac app with a web UI, and has a schematic, a built-in library, patterns and an agent interface.

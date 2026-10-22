@@ -71,6 +71,49 @@ pub(crate) fn restricted(graph: &FlatGraph, registry: &Registry) -> Result<(), V
     }
 }
 
+/// Before converters are inserted: no instance has connections into both
+/// inputs of a pair its type makes exclusive (`Registry::exclusive_inputs`,
+/// ADR 0033). Each offending instance is reported once per pair, on the
+/// first connection (in canonical order) into the pair's second input.
+pub(crate) fn exclusive(graph: &FlatGraph, registry: &Registry) -> Result<(), Vec<GraphError>> {
+    let mut into: BTreeMap<&PortAddress, Vec<&FlatConnection>> = BTreeMap::new();
+    for connection in &graph.connections {
+        into.entry(&connection.to).or_default().push(connection);
+    }
+    let mut errors = Vec::new();
+    for (address, instance) in &graph.instances {
+        let type_name = instance.descriptor.type_name;
+        for (a, b) in registry.exclusive_pairs(type_name) {
+            let (Ok(first), Ok(second)) =
+                (PortAddress::new(address, a), PortAddress::new(address, b))
+            else {
+                continue;
+            };
+            let (Some(_), Some(connections)) = (into.get(&first), into.get(&second)) else {
+                continue;
+            };
+            let Some(connection) = connections.iter().min_by(|x, y| x.from.cmp(&y.from)) else {
+                continue;
+            };
+            let (from, to) = connection
+                .declared
+                .clone()
+                .unwrap_or_else(|| (connection.from.clone(), connection.to.clone()));
+            errors.push(GraphError::ExclusiveInputs {
+                from,
+                to,
+                inputs: Box::new((second, first)),
+                type_name,
+            });
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
 /// After converters are inserted: the plan's instances, connections and
 /// value rows within their budgets ([`PlanBudget`]). Flattening already
 /// stopped at the instance and connection budgets; converters add to both.

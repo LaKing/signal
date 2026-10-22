@@ -34,7 +34,7 @@ A signal input's value is the sum of its connections' values, in **canonical sou
 
 An input its library restricts (ADR 0024) has at most one connection, at scale 1, from the output it names; a plan that connects it otherwise is not built.
 
-An unconnected input reads 0. The value read is the source's output as other instances see it, after any fade (§6, §7). Floating-point addition is not associative, so the fixed order is what makes sums bit-stable.
+An unconnected input reads 0; whether an input has a connection at all is a property of the plan that a primitive may ask (`Inputs::is_connected`, ADR 0033), constant between swaps; what a library signals between its own primitives, such as a seek (`std.playhead.jump`), is an ordinary event. The value read is the source's output as other instances see it, after any fade (§6, §7). Floating-point addition is not associative, so the fixed order is what makes sums bit-stable.
 
 ## 4. Events
 

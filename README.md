@@ -105,6 +105,7 @@ The projects in [`projects/`](projects) are test fixtures and demos. They are al
 | Project | What it is |
 |---|---|
 | `studio` | The studio demo: a piano-roll melody on a three-oscillator ladder-filter voice, through a tape echo, over a step-sequenced, fully synthesised drum machine, with panels styled after the originals |
+| `studio-transport` | The studio played from its own transport (`lib.transport`, ADR 0033): its sequencers follow a position in beats on a wire, and a Transport card plays, stops, rewinds and sets the tempo and rate |
 | `kick` | The M1 test project: a techno kick at 132 bpm with seeded ghost notes; its render is the first golden |
 | `pulse` | A gliding saw sequence through an enveloped low-pass filter and a feedback delay |
 | `physical` | Physically modelled sound: a plucked string, a struck bell, a mass-spring drum and a bowed string |

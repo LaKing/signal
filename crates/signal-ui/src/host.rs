@@ -140,6 +140,12 @@ pub struct AppHostConfig {
     pub compute: Vec<String>,
     /// The servers (`project_ui` is the open project's, set by the host).
     pub server: ServerOptions,
+    /// Whether the open project plays whenever the app is switched on (ADR
+    /// 0033: Signal.app has no Play or Stop; a project starts and stops from
+    /// its own transport): at start, after a project opens, and when the
+    /// app is switched on again. Signal.app sets it; `false` starts
+    /// stopped, as before, for clients that play and stop themselves.
+    pub plays: bool,
 }
 
 /// What opening another project (or quitting) does with an edited `.signal`
@@ -189,6 +195,11 @@ struct AppMode {
     last: Option<Value>,
     /// The power switch (application state, never written anywhere).
     power: app::Power,
+    /// The open project plays while switched on ([`AppHostConfig::plays`]).
+    plays: bool,
+    /// Stopped on purpose (`transport.stop`): with `plays`, Setup ▸ Apply
+    /// then plays nothing; the next open, switch-on or restart plays again.
+    held: bool,
 }
 
 /// What a stopped host leaves: the recorder and the runner's last status.
@@ -635,6 +646,7 @@ impl Host {
             backend,
             compute,
             server: options,
+            plays,
         } = config;
         // App mode plays every run from the Setup (`app::start`): the
         // first run's options and `rt` are not used.
@@ -658,7 +670,11 @@ impl Host {
             server: options,
             ceiling: None,
         };
-        let mut host = Host::blank(config, server, Some(AppMode::default()));
+        let mode = AppMode {
+            plays,
+            ..AppMode::default()
+        };
+        let mut host = Host::blank(config, server, Some(mode));
         host.open_root = open_root;
         if let Some(path) = app::initial_project(project, &host.setup) {
             // A refused .signal opens nothing; the window says why.
@@ -669,9 +685,34 @@ impl Host {
             } else {
                 // Saved with the next change to the Setup.
                 app::opened(&mut host.setup, path);
+                host.autoplay();
             }
         }
         host
+    }
+
+    /// ADR 0033: with [`AppHostConfig::plays`], switched on and with a
+    /// project open, plays it if it does not play yet; a failure (the
+    /// project does not load, the device does not start) is the window's
+    /// message, and the app stays stopped until the next open, switch-on or
+    /// Project ▸ Restart from Files.
+    fn autoplay(&mut self) {
+        let wanted = self
+            .app
+            .as_ref()
+            .is_some_and(|m| m.plays && m.opened && m.power.is_on());
+        if wanted
+            && self.run.is_none()
+            && let Err(failure) = self.play_app()
+            && let Some(mode) = self.app.as_mut()
+        {
+            // Only a failure is noted, after the message opening left
+            // (unsaved edits let go, a Setup not saved), which stays.
+            mode.message = Some(match mode.message.take() {
+                Some(before) => format!("{before}; {}", failure.message),
+                None => failure.message,
+            });
+        }
     }
 
     fn with_server(config: HostConfig, server: Server) -> Result<Host, String> {
@@ -1118,7 +1159,7 @@ impl Host {
     }
 
     /// App mode: plays the open project from frame 0 with the Setup
-    /// ([`app::start`]), as the app's Play does.
+    /// ([`app::start`]), as `transport.play` and the switch do (Project ▸ Restart from Files).
     fn play_app(&mut self) -> Result<(), Failure> {
         let opened = match self.app.as_mut() {
             Some(mode) => {
@@ -1208,10 +1249,13 @@ impl Host {
         self.install(run);
         self.rearm();
         self.play_carried(carried);
+        if let Some(mode) = self.app.as_mut() {
+            mode.held = false;
+        }
         Ok(())
     }
 
-    /// Stops the run, as the app's Stop does: its last status stays, edits
+    /// Stops the run, as `transport.stop` and the power switch do: its last status stays, edits
     /// waiting for reports are abandoned, subscriptions are kept (scopes
     /// start again with the next run). The unsaved controls keep their values
     /// (played again by the next run); live edits of plan ports end.
@@ -1262,11 +1306,21 @@ impl Host {
         let result = if play && !self.powered() {
             Err(powered_off())
         } else if play {
+            // Plays the project again from frame 0 from its files, playing
+            // or not (Project ▸ Restart from Files, ADR 0033): a run is
+            // stopped first, its unsaved controls kept and played again.
+            if self.run.is_some() {
+                self.stop_app();
+            }
             self.play_app()
         } else {
             if self.run.is_some() {
                 self.stop_app();
                 self.list_devices();
+            }
+            // Stopped on purpose: Setup ▸ Apply does not play it (ADR 0033).
+            if let Some(mode) = self.app.as_mut() {
+                mode.held = true;
             }
             Ok(())
         };
@@ -1275,7 +1329,7 @@ impl Host {
     }
 
     /// `signal ui`'s `transport.stop` and `transport.play` (M2.12-1, ADR 0029
-    /// §2): stop stops the run as the app's Stop does (edits waiting for
+    /// §2): stop stops the run as app mode's `transport.stop` does (edits waiting for
     /// reports are abandoned; the unsaved controls keep their values); play
     /// plays the project it serves again from frame 0 from its files, as
     /// `project.open` of that project does. Both are refused while the run
@@ -1312,7 +1366,10 @@ impl Host {
             return Err(app_only());
         };
         let result = if on {
-            if mode.power.on() {
+            // ADR 0033: with `plays`, switched on plays the open project,
+            // whatever played when it went off.
+            let resume = mode.power.on();
+            if resume || (mode.plays && mode.opened && self.run.is_none()) {
                 self.play_app()
             } else {
                 Ok(())
@@ -1398,6 +1455,14 @@ impl Host {
     }
 
     fn open_with(&mut self, path: &Path, edits: Edits) -> Result<Value, Failure> {
+        let opened = self.open_stopped(path, edits)?;
+        // ADR 0033: switched on, it plays (a failure is the window's message).
+        self.autoplay();
+        Ok(opened)
+    }
+
+    /// [`Host::open_with`] without playing.
+    fn open_stopped(&mut self, path: &Path, edits: Edits) -> Result<Value, Failure> {
         if self.app.is_none() {
             return Err(app_only());
         }
@@ -1422,8 +1487,10 @@ impl Host {
         };
         if let Some(mode) = self.app.as_mut() {
             mode.message = None;
-            // Opened stopped: switching on again plays nothing.
+            // Opened stopped: switching on again plays nothing (with
+            // `plays` it plays, ADR 0033).
             mode.power.forget();
+            mode.held = false;
         }
         // Another project: the unsaved values of this one are let go, and
         // the window says so.
@@ -4989,11 +5056,19 @@ impl Host {
         if let Some(mode) = self.app.as_mut() {
             mode.message = None;
         }
-        if self.run.is_none() {
+        let result = if self.run.is_some() {
+            self.stop_app();
+            self.play_app()
+        } else if self.app.as_ref().is_some_and(|m| {
+            // ADR 0033: with `plays`, a project left stopped by a failure
+            // (not by a `transport.stop`) plays with the Setup just applied.
+            m.plays && m.opened && m.power.is_on() && !m.held
+        }) {
+            self.play_app()
+        } else {
             return json!({"type": "applied", "saved": true, "restarted": false, "setup": self.setup_json()});
-        }
-        self.stop_app();
-        match self.play_app() {
+        };
+        match result {
             Ok(()) => {
                 let notes = self.app.as_ref().map_or_else(Vec::new, |m| m.notes.clone());
                 if let Some(mode) = self.app.as_mut() {

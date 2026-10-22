@@ -297,6 +297,8 @@ struct Inst {
     live: Vec<f64>,
     /// Per signal output row: the output port it belongs to.
     row_ports: Vec<PortAddress>,
+    /// Per descriptor port: whether a connection reaches it (ADR 0033).
+    connected: Vec<bool>,
 }
 
 impl Inst {
@@ -448,6 +450,7 @@ impl Plan {
                 divisor: rate_of(&descriptor)?,
                 live: Vec::new(),
                 row_ports: Vec::new(),
+                connected: vec![false; descriptor.ports.len()],
             };
             for port in descriptor.ports {
                 let address = port_address(&spec.address, port.name)?;
@@ -621,6 +624,9 @@ impl Plan {
             }
             if !found || (signal.is_none() && event.is_none()) {
                 return error(format!("invalid connection {} -> {}", c.from, c.to));
+            }
+            if let Some(i) = inst.descriptor.ports.iter().position(|p| p.name == name) {
+                inst.connected[i] = true;
             }
         }
         Ok(())
@@ -936,7 +942,8 @@ impl Plan {
                     sink.start_call(1);
                 }
                 let params: Vec<f64> = inst.params.iter().map(|p| p.effective).collect();
-                let inputs = Inputs::new(1, &inst.signal_in, &params, &inst.events, &inst.ends);
+                let inputs = Inputs::new(1, &inst.signal_in, &params, &inst.events, &inst.ends)
+                    .with_connected(&inst.connected);
                 let mut out = Outputs::new(1, &mut outputs, &mut inst.sinks);
                 let ok = match &mut inst.primitive {
                     Primitive::Direct(module) => {
@@ -993,7 +1000,8 @@ impl Plan {
         }
         let inst = &mut self.instances[i];
         let params: Vec<f64> = inst.params.iter().map(|p| p.effective).collect();
-        let inputs = Inputs::new(1, &inst.signal_in, &params, &inst.events, &inst.ends);
+        let inputs = Inputs::new(1, &inst.signal_in, &params, &inst.events, &inst.ends)
+            .with_connected(&inst.connected);
         let ok = match &mut inst.primitive {
             Primitive::StateOutput(module) => {
                 catch_unwind(AssertUnwindSafe(|| module.absorb(&inputs))).is_ok()

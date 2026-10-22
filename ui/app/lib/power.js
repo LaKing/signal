@@ -2,6 +2,9 @@
 // shows, from the server's `app` and `power` messages and the switch's
 // clicks. Plain ES module, no DOM. Off, the server runs nothing and the
 // connection streams nothing (signal-ui.js); this only drives the toolbar.
+// On, the open project plays (ADR 0033): the toolbar has no Play or Stop,
+// a project starts and stops from its own transport, and Project ▸ Restart
+// from Files plays it again from frame 0.
 
 /** Before the server said: on (Signal.app starts switched on), nothing pending. */
 export const INITIAL = Object.freeze({ power: 'on', pending: false });
@@ -33,14 +36,20 @@ export function powerRequest(state) {
   return { type: 'app.power', on: state.power !== 'on' };
 }
 
-/** The toolbar's switch, Play and Stop for `state`, playing or not. */
-export function controls(state, playing) {
+/** The toolbar's switch for `state`. */
+export function controls(state) {
   const on = state.power === 'on';
   return {
     checked: on,
     label: on ? 'on' : 'off',
     switchDisabled: state.pending,
-    playDisabled: !on || state.pending || Boolean(playing),
-    stopDisabled: !on || state.pending || !playing,
   };
+}
+
+/**
+ * What Project ▸ Restart from Files sends: `transport.play`, which plays the
+ * open project again from frame 0 from its files (playing or not).
+ */
+export function restartRequest() {
+  return { type: 'transport.play' };
 }

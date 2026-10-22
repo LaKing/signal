@@ -1373,7 +1373,8 @@ fn stimulus_graph() -> CompositeDef {
 /// LFO, the first event input by the beats and ghost notes, any other by the
 /// accents, a `std.count` reading (the event bridge of the visual-rate
 /// types, M2.8-7) by one counter of the beats, and any other vector of N by
-/// one `std.pack<N>` of the saw, both shared by the instances.
+/// one `std.pack<N>` of the saw, both shared by the instances; the second of
+/// two exclusive inputs is left unconnected (ADR 0033).
 /// Outputs are left open; every instance runs regardless.
 fn primitive_graph(registry: &Registry, type_name: &str) -> Result<CompositeDef, Failure> {
     let descriptor = registry
@@ -1421,10 +1422,16 @@ fn primitive_graph(registry: &Registry, type_name: &str) -> Result<CompositeDef,
         let name = format!("p{i}");
         graph.instances.push(instance(&name, type_name, &[]));
         let mut events = 0;
+        // Of two exclusive inputs (ADR 0033: a sequencer's `tick` and
+        // `follow`) only the first is fed, as a plan may connect only one.
+        let skipped: Vec<&str> = registry
+            .exclusive_pairs(type_name)
+            .map(|(_, second)| second)
+            .collect();
         for port in descriptor
             .ports
             .iter()
-            .filter(|p| p.direction == Direction::In)
+            .filter(|p| p.direction == Direction::In && !skipped.contains(&p.name))
         {
             let to = format!("{name}.{}", port.name);
             let sources: &[(&str, Option<f64>)] = match (port.shape, port.kind) {

@@ -53,7 +53,8 @@ test('one page: the toolbar, then the four tabs', () => {
   }
 });
 
-test('the toolbar holds the power switch, the tabs, Play and Stop, then the status, in that order', () => {
+// ADR 0033: no Play or Stop in the toolbar; the project's transport is its own.
+test('the toolbar holds the power switch, the tabs, the project name, then the status, in that order', () => {
   const at = (needle) => {
     const i = app.indexOf(needle);
     assert.ok(i >= 0, needle);
@@ -62,10 +63,12 @@ test('the toolbar holds the power switch, the tabs, Play and Stop, then the stat
   const order = [
     at('this.switch,\n'),
     at("el('div', { className: 'tabs', role: 'tablist' }"),
-    at("el('div', { className: 'transport' }, this.play, this.stop)"),
+    at("el('span', { className: 'project-name' }"),
     at("el('output', { className: 'compact-status' }"),
   ];
   assert.deepEqual([...order].sort((a, b) => a - b), order);
+  assert.doesNotMatch(app, /this\.play\b|this\.stop\b|className: 'transport'/, 'no Play or Stop button');
+  assert.match(app, /action === 'restart'/, 'Restart from Files from the menu');
 });
 
 // AC7: the former Transport page's content is in the Parameters tab, as cards.

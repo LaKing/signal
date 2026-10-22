@@ -10935,6 +10935,16 @@
             "unit": null
           },
           {
+            "address": "/melody.follow",
+            "direction": "in",
+            "kind": "control",
+            "name": "follow",
+            "range": null,
+            "rate": 1,
+            "shape": "signal",
+            "unit": "beats"
+          },
+          {
             "address": "/melody.gate",
             "direction": "out",
             "kind": "gate",
@@ -11078,6 +11088,16 @@
             "rate": 1,
             "shape": "events",
             "unit": null
+          },
+          {
+            "address": "/drums.follow",
+            "direction": "in",
+            "kind": "control",
+            "name": "follow",
+            "range": null,
+            "rate": 1,
+            "shape": "signal",
+            "unit": "beats"
           },
           {
             "address": "/drums.t1",

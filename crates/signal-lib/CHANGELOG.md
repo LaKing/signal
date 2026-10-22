@@ -34,8 +34,10 @@ project's text.
 ## 0.2
 
 The library of Signal 0.2.0, the first public release. No composite changed
-its output or was added or removed since 0.1: every entry under `## 0.1`
-still holds.
+its output or was removed since 0.1: every entry under `## 0.1` still holds.
+Added after the v0.2.0 tag:
+
+- `lib.transport` (event), ADR 0033: the transport as a signal, a `std.playhead` with `bpm`, `run`, `rate` and `seek` exported and `position`, `running` and `tempo` out, for sequencers to follow; not in the library demo (`NOT_IN_DEMO`): `7f20f2bbed23372b`
 
 ## 0.1
 

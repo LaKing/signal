@@ -1,11 +1,13 @@
 //! `std.step_seq8` (ADR 0028 §6): a drum-machine step sequencer playing a
-//! `steps` pattern of up to 8 lanes, counting `std.transport`'s ticks.
+//! `steps` pattern of up to 8 lanes, counting `std.transport`'s ticks or
+//! following a position in beats (`std.playhead`, ADR 0033).
 
 use signal_core::{
     Combine, DirectPrimitive, Direction, Event, EventPayload, Feedthrough, Inputs,
     ModuleDescriptor, Outputs, PortKind, PrepareContext, Range, Table,
 };
 
+use crate::follow::{self, Motion};
 use crate::pattern::{LANES, STEP_WIDTH};
 use crate::{
     PPQ, event_port, parameter, ppq_at, round_half_up, signal_port, tick_count, triggered,
@@ -13,6 +15,10 @@ use crate::{
 
 const TICK: usize = 0;
 const RESET: usize = 1;
+/// `follow`'s place among the descriptor's ports (for
+/// [`Inputs::is_connected`]) and its signal input row.
+const FOLLOW_PORT: usize = 2;
+const FOLLOW: usize = 0;
 
 /// Event outputs: `t1` … `t8` are 0 … 7.
 const ACCENT_OUT: usize = LANES;
@@ -26,10 +32,17 @@ const DEFAULT_ACCENT: f64 = 1.5;
 
 const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     type_name: "std.step_seq8",
-    doc: "Drum-machine step sequencer: plays a `steps` pattern (pattern = \"<name>\") of up to 8 lanes, counting transport ticks; per-lane triggers t1..t8 carrying the lane's level (x accent on accented steps), an accent trigger, swing and a step playhead.",
+    doc: "Drum-machine step sequencer: plays a `steps` pattern (pattern = \"<name>\") of up to 8 lanes, counting transport ticks or following a position in beats (follow, from std.playhead); per-lane triggers t1..t8 carrying the lane's level (x accent on accented steps), an accent trigger, swing and a step playhead.",
     ports: &[
         event_port("tick", Direction::In),
         event_port("reset", Direction::In),
+        signal_port(
+            "follow",
+            Direction::In,
+            PortKind::Control,
+            Some("beats"),
+            None,
+        ),
         event_port("t1", Direction::Out),
         event_port("t2", Direction::Out),
         event_port("t3", Direction::Out),
@@ -87,7 +100,13 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///   `Set(v)` (at most 6400, the transport's largest), so every tick counts,
 ///   also several on one frame.
 /// - `reset` (event in, trigger): the next tick is position 0 (step 1);
-///   applied before the frame's ticks.
+///   applied before the frame's ticks. Following a position, it is a seek
+///   (below): wire `std.playhead.jump` into it, so that a forward seek of
+///   less than a beat does not fire the steps it skips.
+/// - `follow` (signal in, beats; ADR 0033): a position to follow, such as
+///   `std.playhead.position`. **Connected, it drives the sequencer instead
+///   of `tick`** ("Following a position", below); a plan that connects both
+///   `tick` and `follow` is refused. Unconnected, it changes nothing.
 /// - `t1` … `t8` (event out): on a frame where lane *i*'s step fires, a
 ///   `Set(level)` (the lane's `level`, times `accent_level` on an accented step,
 ///   `X`), then a `Trigger`, so envelopes and exciters fire on it (they take
@@ -135,6 +154,20 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 /// back to 0 at the loop's end). Without a table nothing fires and the loop
 /// is 1 beat.
 ///
+/// **Following a position** (ADR 0033). With `follow` connected, each frame
+/// compares the position *x(n)* with the frame before, as `std.note_seq`
+/// does (`crate::follow`, `docs/module-contract.md` "Following a
+/// position"): forward by at most one beat, every step whose beat
+/// `m·L + i·s + (swing delay if i is odd)` (loop *m*, `L = S·s`) lies in
+/// `[x(n − 1), x(n))` fires on this frame, exact in beats, with the swing
+/// delay `swing/100 · s` beats (not rounded to ticks; below `s`, so no step
+/// leaves its loop and nothing wraps); not moving fires nothing; a seek
+/// (a `reset`, where `std.playhead.jump` marks every seek; or, inferred,
+/// backwards, more than one beat, more than 64 loops in a frame, the first
+/// frame) fires nothing and resumes from the new place: a step
+/// exactly there fires on the next frame. `step` shows `⌊place/s⌋` of the
+/// place `x − ⌊x/L⌋·L` in the loop (at most *S* − 1). `ppq` is not read.
+///
 /// **Cost.** Ticks are processed one by one: each counted tick does a
 /// tick's work (binary searches over the steps), so a frame costs in
 /// proportion to the ticks it holds (the transport puts at most ⌊bpm·ppq /
@@ -162,6 +195,8 @@ pub struct StepSeq8 {
     /// then do steps wrapped from the loop's end fire (there was no loop
     /// before the first).
     looped: bool,
+    /// Following a position: the previous frame's, if any.
+    last: Option<f64>,
 }
 
 /// What one frame's ticks fired: per lane the highest level, and accent.
@@ -258,6 +293,119 @@ impl StepSeq8 {
     }
 }
 
+/// A step pattern's header as read when following: steps *S*, step *s*
+/// beats, and the loop `L = S·s` (1 beat, and no steps, without a usable
+/// table).
+fn shape(table: Option<&Table>) -> (u64, f64, f64) {
+    let header = table.map(|t| t.row(0));
+    let steps = header.and_then(|h| h.first()).copied().unwrap_or(0.0);
+    let step = header.and_then(|h| h.get(1)).copied().unwrap_or(1.0);
+    if steps >= 1.0 && step.is_finite() && step > 0.0 {
+        let count = steps as u64;
+        (count, step, follow::period(count as f64 * step))
+    } else {
+        (0, 1.0, 1.0)
+    }
+}
+
+impl StepSeq8 {
+    /// Following a position: fires the steps whose beat lies in `[from,
+    /// to)`.
+    fn cross(
+        table: &Table,
+        (count, step, period): (u64, f64, f64),
+        (accent, swing): (f64, f64),
+        (from, to): (f64, f64),
+        hits: &mut Hits,
+    ) {
+        let header = table.row(0);
+        let delay = swing.clamp(0.0, 75.0) / 100.0 * step;
+        // Strictly increasing in i: the delay is below a step.
+        let fires = |i: u64| i as f64 * step + if i % 2 == 1 { delay } else { 0.0 };
+        for base in follow::loops(from, to, period) {
+            let (mut lo, mut hi) = (0, count);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if base + fires(mid) < from {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            let mut i = lo;
+            while i < count && base + fires(i) < to {
+                let row = table.row(1 + i as usize);
+                for (lane, slot) in hits.level.iter_mut().enumerate() {
+                    let level = header.get(2 + lane).copied().unwrap_or(0.0);
+                    let cell = row.get(lane).copied().unwrap_or(0.0);
+                    let value = if cell == 1.0 {
+                        level
+                    } else if cell == 2.0 {
+                        level * accent
+                    } else {
+                        continue;
+                    };
+                    *slot = Some(slot.map_or(value, |v: f64| v.max(value)));
+                }
+                hits.accent |= row.get(LANES).is_some_and(|&a| a == 1.0);
+                i += 1;
+            }
+        }
+    }
+
+    /// `process` with `follow` connected.
+    fn follow(&mut self, inputs: &Inputs<'_>, outputs: &mut Outputs<'_>, table: Option<&Table>) {
+        let positions = inputs.signal(FOLLOW);
+        let shape = shape(table);
+        let (count, step, period) = shape;
+        let mut next_reset = 0;
+        for n in 0..inputs.frames() {
+            let now = positions.get(n).copied().unwrap_or(0.0);
+            let motion = if triggered(inputs.events(RESET), &mut next_reset, n) {
+                Motion::Seek
+            } else {
+                follow::motion(self.last, now, period)
+            };
+            let mut hits = Hits::default();
+            if let (Motion::Forward { from, to }, Some(table)) = (motion, table) {
+                let settings = (
+                    inputs
+                        .parameter(ACCENT_LEVEL)
+                        .get(n)
+                        .copied()
+                        .unwrap_or(DEFAULT_ACCENT),
+                    inputs.parameter(SWING).get(n).copied().unwrap_or(0.0),
+                );
+                Self::cross(table, shape, settings, (from, to), &mut hits);
+            }
+            self.last = now.is_finite().then_some(now);
+            let index = libm::floor(follow::place(now, period) / step);
+            self.step = if count == 0 {
+                0
+            } else {
+                (index.max(0.0) as u64).min(count - 1)
+            };
+            write(outputs, n, &hits, self.step);
+        }
+    }
+}
+
+/// Frame `n`'s hits and playhead.
+fn write(outputs: &mut Outputs<'_>, n: usize, hits: &Hits, step: u64) {
+    for (lane, level) in hits.level.iter().enumerate() {
+        if let Some(level) = *level {
+            push(outputs, lane, n, EventPayload::Set(level.clamp(-1e6, 1e6)));
+            push(outputs, lane, n, EventPayload::Trigger);
+        }
+    }
+    if hits.accent {
+        push(outputs, ACCENT_OUT, n, EventPayload::Trigger);
+    }
+    if let Some(out) = outputs.signal(STEP).get_mut(n) {
+        *out = step as f64;
+    }
+}
+
 fn push(outputs: &mut Outputs<'_>, port: usize, n: usize, payload: EventPayload) {
     if let Some(sink) = outputs.events(port) {
         sink.push(Event {
@@ -282,6 +430,10 @@ impl DirectPrimitive for StepSeq8 {
 
     fn process(&mut self, inputs: &Inputs<'_>, outputs: &mut Outputs<'_>) {
         let table = inputs.table().filter(|t| t.width() == STEP_WIDTH);
+        if inputs.is_connected(FOLLOW_PORT) {
+            return self.follow(inputs, outputs, table);
+        }
+        self.last = None;
         let ticks = inputs.events(TICK);
         let (mut next_tick, mut next_reset) = (0, 0);
         for n in 0..inputs.frames() {
@@ -311,18 +463,7 @@ impl DirectPrimitive for StepSeq8 {
                 }
                 next_tick += 1;
             }
-            for (lane, level) in hits.level.iter().enumerate() {
-                if let Some(level) = *level {
-                    push(outputs, lane, n, EventPayload::Set(level.clamp(-1e6, 1e6)));
-                    push(outputs, lane, n, EventPayload::Trigger);
-                }
-            }
-            if hits.accent {
-                push(outputs, ACCENT_OUT, n, EventPayload::Trigger);
-            }
-            if let Some(out) = outputs.signal(STEP).get_mut(n) {
-                *out = self.step as f64;
-            }
+            write(outputs, n, &hits, self.step);
         }
     }
 }

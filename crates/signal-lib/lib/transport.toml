@@ -1,0 +1,39 @@
+# The transport as a signal (ADR 0033): a std.playhead with its tempo, its
+# start and stop, its speed and its seek exported, so a project plays, stops,
+# rewinds and changes tempo from its own panel, and its sequencers follow the
+# position on a wire.
+#
+#   bpm, run, rate ─► playhead ─► position (beats), running (0/1), tempo (bpm)
+#   seek ──────────►    │       └► jump (a trigger on each frame a seek lands)
+#
+# Wire `position` into the `follow` input of std.note_seq and std.step_seq8
+# (instead of a std.transport's `tick`): a note fires on the first frame
+# whose position is past its start, exact in beats; a stopped transport
+# releases its notes; a seek (or a rewind) fires nothing until the position
+# moves on from its new place. Wire `jump` into their `reset` too: it marks
+# every seek, also a forward one of less than a beat, which the position
+# alone cannot tell from motion. Two transports in one project are two
+# instances, each with its own sequencers.
+#
+# No `tick` output: a tick count cannot follow a seek or a reverse (a
+# counter has no way to jump back), so a tick derived from the position
+# would be exact only while it plays forward. Sequencers follow the position
+# directly; std.transport keeps the tick clock for the counted path.
+#
+# Vendor it (`signal vendor <project> lib.transport`) to embellish it: a
+# turntable's spin-up on `rate`, a scrub wheel, an external clock smoothed
+# into `rate`, song-mode jumps into `seek`.
+schema_version = 1
+
+[composite]
+name = "transport"
+category = "event"
+description = "The transport as a signal: a position in beats on a wire for sequencers to follow (std.note_seq.follow, std.step_seq8.follow), from a std.playhead. Parameters: bpm (20 to 400, default 120), run (0 or 1, default 1: playing at 1, stopped at 0, keeping its place; a connected gate replaces it), rate (a factor of the tempo, -16 to 16, default 1: 0 holds the place, negative plays backwards; a connected signal replaces it). Input: seek (events: Set(beat) jumps to that beat, a Trigger rewinds to 0). Outputs: jump (a trigger on each frame a seek lands, for the sequencers' reset), position (beats, exact from the last change of bpm, rate or run, never drifting; within ±1e6), running (0 or 1), tempo (bpm·rate while running, else 0)."
+
+[instances]
+playhead = { module = "std.playhead", bpm = 120, run = 1, rate = 1 }
+
+[exports]
+inputs = { seek = "playhead.seek" }
+outputs = { position = "playhead.position", running = "playhead.running", tempo = "playhead.tempo", jump = "playhead.jump" }
+parameters = { bpm = "playhead.bpm", run = "playhead.run", rate = "playhead.rate" }

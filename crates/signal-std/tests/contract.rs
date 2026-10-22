@@ -56,6 +56,10 @@ mod transport {
     signal_contract::contract_tests!(super::std_type("std.transport"));
 }
 
+mod playhead {
+    signal_contract::contract_tests!(super::std_type("std.playhead"));
+}
+
 mod audio_out {
     signal_contract::contract_tests!(super::std_type("std.audio_out"));
 }
@@ -959,4 +963,139 @@ mod fm_op {
 
 mod wavetable {
     signal_contract::contract_tests!(super::std_type("std.wavetable"));
+}
+
+/// ADR 0033: the contract suite feeds no connections (`Inputs::with_connected`
+/// is the engine's), so following a position is checked here: both
+/// sequencers, `follow` connected, through forward motion, a stop, a seek
+/// marked on `reset`, a jump backwards and a reverse, in calls of 1, 7 and
+/// 256 frames, allocate and free nothing in `process`, and give the same
+/// output in every partition.
+mod follow_mode {
+    use signal_contract::alloc_counter::Guard;
+    use signal_core::{
+        DirectPrimitive, Event, EventPayload, EventSink, Inputs, Outputs, PrepareContext,
+        RngStream, Table,
+    };
+    use signal_std::pattern::{compile_notes, compile_steps};
+    use signal_std::{NoteSeq, StepSeq8};
+
+    const FRAMES: usize = 4096;
+
+    /// The followed position per frame: forward at 1/256 beat a frame, held
+    /// from 1000 to 1200, a seek to 3.5 at 2000 (marked on `reset`), back to
+    /// 0.25 at 3000, backwards from 3500.
+    fn positions() -> Vec<f64> {
+        let mut p = 0.0;
+        (0..FRAMES)
+            .map(|n| {
+                match n {
+                    1000..1200 => {}
+                    2000 => p = 3.5,
+                    3000 => p = 0.25,
+                    3500.. => p -= 1.0 / 512.0,
+                    _ => p += 1.0 / 256.0,
+                }
+                p
+            })
+            .collect()
+    }
+
+    fn context() -> PrepareContext {
+        PrepareContext {
+            sample_rate: 48_000.0,
+            max_frames: 256,
+            rng: RngStream::derive(1, &"/f".parse().unwrap()),
+            lent: None,
+            generation: 0,
+        }
+    }
+
+    /// Every output of `seq` over the timeline in calls of `block`.
+    fn run<P: DirectPrimitive + Default>(
+        table: &Table,
+        parameters: &[f64],
+        signals: usize,
+        sinks: usize,
+        block: usize,
+    ) -> (Vec<u64>, Vec<u64>) {
+        let mut seq = P::default();
+        seq.prepare(&context());
+        let positions = positions();
+        let mut connected = [false; 16];
+        connected[2] = true;
+        let mut out = vec![0.0; signals * 256];
+        let mut sinks = vec![EventSink::per_frame(16, 256); sinks];
+        let (mut seen, mut events) = (Vec::new(), Vec::new());
+        let mut start = 0;
+        while start < FRAMES {
+            let k = block.min(FRAMES - start);
+            let params: Vec<f64> = parameters
+                .iter()
+                .flat_map(|&v| std::iter::repeat_n(v, k))
+                .collect();
+            let resets: Vec<Event> = (start..start + k)
+                .filter(|&n| n == 2000)
+                .map(|n| Event {
+                    offset: (n - start) as u32,
+                    payload: EventPayload::Trigger,
+                })
+                .collect();
+            for sink in &mut sinks {
+                sink.start_call(k);
+            }
+            let ends = [0, resets.len()];
+            let inputs = Inputs::new(k, &positions[start..start + k], &params, &resets, &ends)
+                .with_table(Some(table))
+                .with_connected(&connected);
+            let guard = Guard::start();
+            seq.process(
+                &inputs,
+                &mut Outputs::new(k, &mut out[..signals * k], &mut sinks),
+            );
+            let counts = guard.counts();
+            drop(guard);
+            assert!(counts.is_zero(), "{counts:?}");
+            // Frame by frame, then each output's events as (port, frame).
+            for i in 0..k {
+                seen.extend((0..signals).map(|r| out[r * k + i].to_bits()));
+            }
+            for (port, sink) in sinks.iter_mut().enumerate() {
+                events.extend(
+                    sink.events()
+                        .iter()
+                        .map(|e| ((start as u64 + u64::from(e.offset)) << 8) | port as u64),
+                );
+                sink.clear();
+            }
+            start += k;
+        }
+        events.sort_unstable();
+        (seen, events)
+    }
+
+    #[test]
+    fn following_allocates_nothing_and_ignores_the_partition() {
+        let notes = Table::new(
+            4,
+            vec![
+                60.0, 0.0, 0.5, 1.0, 62.0, 0.75, 1.0, 0.5, 64.0, 2.0, 0.25, 0.8, 65.0, 3.5, 1.0,
+                1.0,
+            ],
+        )
+        .unwrap();
+        let notes = compile_notes(&[4.0], &notes).unwrap();
+        let steps = Table::new(5, vec![1.0, 1.0, 0.0, 2.0, 0.0, 0.5, 0.0, 1.0, 1.0, 1.0]).unwrap();
+        let steps = compile_steps(&[4.0, 0.25], &steps).unwrap();
+        let notes_ref = run::<NoteSeq>(&notes, &[96.0], 5, 2, 256);
+        let steps_ref = run::<StepSeq8>(&steps, &[96.0, 1.5, 50.0], 1, 9, 256);
+        assert!(notes_ref.1.len() > 4 && steps_ref.1.len() > 8, "they play");
+        for block in [1, 7] {
+            assert_eq!(run::<NoteSeq>(&notes, &[96.0], 5, 2, block), notes_ref);
+            assert_eq!(
+                run::<StepSeq8>(&steps, &[96.0, 1.5, 50.0], 1, 9, block),
+                steps_ref
+            );
+        }
+    }
 }

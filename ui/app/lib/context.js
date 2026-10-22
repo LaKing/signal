@@ -27,11 +27,12 @@ export function keepsSystemMenu(target) {
  * their ids prefixed `part:`; else for a control bound to a parameter
  * (`control: { address, label, editable }`), Reset to default and Copy
  * address; for a part of the schematic without its items (`control: {
- * address, part: true }`), Copy address; then Play or Stop; then the tabs
- * other than the shown one.
+ * address, part: true }`), Copy address; then Restart from Files (the
+ * project again from frame 0, ADR 0033: no Play or Stop, the project runs
+ * while the power is on); then the tabs other than the shown one.
  * Each item is `{ id, label, disabled?, title? }`; `separator` items divide groups.
  */
-export function contextItems({ part = null, control = null, playing = false, power = true, tab = null } = {}) {
+export function contextItems({ part = null, control = null, power = true, tab = null } = {}) {
   const items = [];
   if (part?.length) {
     for (const item of part) items.push(item.id === 'separator' ? item : { ...item, id: `part:${item.id}` });
@@ -45,7 +46,7 @@ export function contextItems({ part = null, control = null, playing = false, pow
     items.push({ id: 'copy-address', label: 'Copy address' });
     items.push({ id: 'separator' });
   }
-  items.push(playing ? { id: 'stop', label: 'Stop' } : { id: 'play', label: 'Play', disabled: !power });
+  items.push({ id: 'restart', label: 'Restart from Files', disabled: !power });
   items.push({ id: 'separator' });
   for (const t of TABS) if (t.id !== tab) items.push({ id: `tab:${t.id}`, label: `Show ${t.label}` });
   return items;

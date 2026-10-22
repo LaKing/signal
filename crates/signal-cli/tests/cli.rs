@@ -470,7 +470,7 @@ fn modules_lists_library_composites_by_category() {
         .iter()
         .filter(|m| m["library"] == true)
         .collect();
-    assert_eq!(library.len(), 21);
+    assert_eq!(library.len(), 22);
     let echo = library
         .iter()
         .find(|m| m["type_name"] == "lib.tape_echo")

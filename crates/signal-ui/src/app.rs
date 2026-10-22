@@ -19,7 +19,7 @@ use crate::setup::{Setup, Window};
 
 /// Why the devices are not listed again while playing.
 pub const REFRESH_WHILE_PLAYING: &str =
-    "stop playback to refresh: listing devices pauses metering and status";
+    "switch the power off to refresh: listing devices pauses metering and status";
 
 /// The status line.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

@@ -223,7 +223,7 @@ fn devices_are_listed_again_only_while_stopped() {
     let view = state.view();
     assert_eq!(
         view.message.as_deref(),
-        Some("stop playback to refresh: listing devices pauses metering and status")
+        Some("switch the power off to refresh: listing devices pauses metering and status")
     );
     assert_eq!(view.devices, before);
     state.apply(Command::Stop);

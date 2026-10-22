@@ -8,7 +8,7 @@ import { el } from './app.js';
 import { NOT_FOUND, applyMessage, choicesOf, choose, draftOf, refreshed, withFields } from './lib/draft.js';
 import { getDefaultConnection, onDefaultConnection } from '../signal-ui.js';
 
-const REFRESH_WHILE_PLAYING = 'stop playback to refresh: listing devices pauses metering and status';
+const REFRESH_WHILE_PLAYING = 'switch the power off to refresh: listing devices pauses metering and status';
 
 export class SignalAppSetup extends HTMLElement {
   connectedCallback() {

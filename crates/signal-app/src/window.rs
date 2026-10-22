@@ -45,10 +45,16 @@ pub enum MenuAction {
     /// main screen; the screen configuration's layout is removed from
     /// `ui/windows.toml`.
     ResetLayout,
+    /// Project ▸ Restart from Files (ADR 0033): the page sends
+    /// `transport.play`, which plays the open project again from frame 0
+    /// from its files. What the toolbar's Play did: the toolbar has no Play
+    /// or Stop, the project runs while the power is on, and its own
+    /// transport starts and stops it.
+    Restart,
 }
 
 impl MenuAction {
-    const ALL: [MenuAction; 9] = [
+    const ALL: [MenuAction; 10] = [
         MenuAction::Open,
         MenuAction::Save,
         MenuAction::SaveAs,
@@ -58,6 +64,7 @@ impl MenuAction {
         MenuAction::NewSchematic,
         MenuAction::NewPanel,
         MenuAction::ResetLayout,
+        MenuAction::Restart,
     ];
 
     /// The menu item's id.
@@ -72,6 +79,7 @@ impl MenuAction {
             MenuAction::NewSchematic => "new-schematic-window",
             MenuAction::NewPanel => "new-panel-window",
             MenuAction::ResetLayout => "reset-layout",
+            MenuAction::Restart => "restart",
         }
     }
 
@@ -153,9 +161,9 @@ pub const WINDOW_MENU: &str = "Window";
 
 const QUIT: MenuItem = MenuItem::Own(MenuAction::Quit, "Quit Signal", 'q');
 
-/// The menu bar: the app menu, File, Edit and Window, in order (ADR 0023,
-/// 0032).
-pub const MENU_BAR: [(&str, &[MenuItem]); 4] = [
+/// The menu bar: the app menu, File, Edit, Project and Window, in order (ADR
+/// 0023, 0032, 0033).
+pub const MENU_BAR: [(&str, &[MenuItem]); 5] = [
     (
         "Signal",
         &[
@@ -191,6 +199,10 @@ pub const MENU_BAR: [(&str, &[MenuItem]); 4] = [
             MenuItem::Paste,
             MenuItem::SelectAll,
         ],
+    ),
+    (
+        "Project",
+        &[MenuItem::Plain(MenuAction::Restart, "Restart from Files")],
     ),
     (
         WINDOW_MENU,
@@ -472,11 +484,12 @@ mod tests {
     }
 
     /// M2.8-11 AC12, AC15: the app menu, File and Edit (and Window, ADR
-    /// 0032).
+    /// 0032; and Project, ADR 0033, with Restart from Files, handed to the
+    /// page, which sends `transport.play`).
     #[test]
     fn the_menu_bar_has_the_app_menu_file_and_edit() {
         let names: Vec<&str> = MENU_BAR.iter().map(|(name, _)| *name).collect();
-        assert_eq!(names, ["Signal", "File", "Edit", "Window"]);
+        assert_eq!(names, ["Signal", "File", "Edit", "Project", "Window"]);
         assert_eq!(
             own("File"),
             [
@@ -492,6 +505,15 @@ mod tests {
             shifted,
             [MenuAction::SaveAs, MenuAction::NewMain],
             "⇧⌘S and ⇧⌘N"
+        );
+        let (_, project) = MENU_BAR[3];
+        assert_eq!(
+            project,
+            [MenuItem::Plain(MenuAction::Restart, "Restart from Files")]
+        );
+        assert_eq!(
+            MenuAction::Restart.page_script().unwrap(),
+            "window.dispatchEvent(new CustomEvent('signal-menu', { detail: \"restart\" }))"
         );
         let (_, app) = MENU_BAR[0];
         for item in [MenuItem::About, MenuItem::Hide, QUIT] {
@@ -521,7 +543,7 @@ mod tests {
     /// taken twice.
     #[test]
     fn the_window_menu_opens_more_windows() {
-        let (_, window) = MENU_BAR[3];
+        let (_, window) = MENU_BAR[4];
         assert_eq!(
             window,
             [

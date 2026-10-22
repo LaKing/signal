@@ -17,10 +17,9 @@ input, select { font: inherit; color: var(--signal-fg); background: var(--signal
 signal-app-toolbar { display: flex; gap: 0.75rem; align-items: center; height: 2.6rem; padding: 0 0.75rem; border-bottom: 1px solid var(--signal-track); white-space: nowrap; overflow: hidden; }
 .power { width: 5.5em; }
 .power[aria-checked="true"] { border-color: var(--signal-meter-rms); }
-.tabs, .transport { display: flex; gap: 0.25rem; }
+.tabs { display: flex; gap: 0.25rem; }
 .tabs [role="tab"] { width: 7.5em; }
 .tabs [role="tab"][aria-selected="true"] { background: var(--signal-knob-on); border-color: var(--signal-accent); }
-.transport button { width: 5.5em; }
 .compact-status { display: flex; gap: 0.75rem; font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; color: var(--signal-muted); min-width: 0; }
 .compact-status .line { width: 25ch; white-space: pre; overflow: hidden; }
 .compact-status .note { width: 32ch; white-space: pre; overflow: hidden; text-overflow: ellipsis; }

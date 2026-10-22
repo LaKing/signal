@@ -1,11 +1,13 @@
 //! `std.note_seq` (ADR 0028 §6): a monophonic note sequencer playing a
-//! `notes` pattern, counting `std.transport`'s ticks.
+//! `notes` pattern, counting `std.transport`'s ticks or following a
+//! position in beats (`std.playhead`, ADR 0033).
 
 use signal_core::{
     DirectPrimitive, Direction, Event, EventPayload, Feedthrough, Inputs, ModuleDescriptor,
     Outputs, PortKind, PrepareContext, Range, Table,
 };
 
+use crate::follow::{self, Motion};
 use crate::pattern::NOTE_WIDTH;
 use crate::{
     PPQ, SIGNAL_BOUND, event_port, ppq_at, round_half_up, signal_port, tick_count, triggered,
@@ -13,6 +15,10 @@ use crate::{
 
 const TICK: usize = 0;
 const RESET: usize = 1;
+/// `follow`'s place among the descriptor's ports (for
+/// [`Inputs::is_connected`]) and its signal input row.
+const FOLLOW_PORT: usize = 2;
+const FOLLOW: usize = 0;
 
 const GATE: usize = 0;
 const KEY: usize = 1;
@@ -27,10 +33,17 @@ const PPQ_PARAMETER: usize = 0;
 
 const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     type_name: "std.note_seq",
-    doc: "Monophonic note sequencer: plays a `notes` pattern (pattern = \"<name>\"), counting transport ticks; gate, key, hz, velocity, on/off events and a position playhead; loops over the pattern's length, last-note priority.",
+    doc: "Monophonic note sequencer: plays a `notes` pattern (pattern = \"<name>\"), counting transport ticks or following a position in beats (follow, from std.playhead); gate, key, hz, velocity, on/off events and a position playhead; loops over the pattern's length, last-note priority.",
     ports: &[
         event_port("tick", Direction::In),
         event_port("reset", Direction::In),
+        signal_port(
+            "follow",
+            Direction::In,
+            PortKind::Control,
+            Some("beats"),
+            None,
+        ),
         signal_port(
             "gate",
             Direction::Out,
@@ -76,7 +89,14 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///   tick is counted, also when several share a frame.
 /// - `reset` (event in, trigger): a frame with a `Trigger` ends the sounding
 ///   note (`off`) and makes the next tick position 0. It is applied before
-///   the frame's ticks.
+///   the frame's ticks. Following a position, it is a seek (below): wire
+///   `std.playhead.jump` into it so that every seek is one, a forward one
+///   of less than a beat included.
+/// - `follow` (signal in, beats; ADR 0033): a position to follow, such as
+///   `std.playhead.position`. **Connected, it drives the sequencer instead
+///   of `tick`** ("Following a position", below); a plan that connects both
+///   `tick` and `follow` is refused. Unconnected, it changes nothing: the
+///   ticks drive it exactly as without it.
 /// - `gate` (signal out, 0 or 1): 1 while a note sounds.
 /// - `key` (signal out): the key of the last note started (held after it
 ///   ends; 0 before the first).
@@ -94,6 +114,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 /// **Parameters**
 /// - `ppq` (generic, ticks per beat, integer, range `[1, 960]`, default 96):
 ///   must equal the transport's `ppq`; read on every frame with ticks.
+///   Following a position it is not used.
 ///
 /// **Feedthrough:** direct (a tick on frame *n* changes the outputs at *n*).
 ///
@@ -126,6 +147,37 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 /// (ADR 0028 §4); the position, the sounding note and its remaining ticks
 /// carry on. A shorter loop wraps on the next tick.
 ///
+/// **Following a position** (ADR 0033). With `follow` connected, each frame
+/// reads the position *x(n)* and compares it with the frame before
+/// (`crate::follow`, `docs/module-contract.md` "Following a position"):
+/// - **Forward** by at most one beat, the beats `[x(n − 1), x(n))` are
+///   crossed: in order of their beat, the sounding note ends when its end
+///   `S + length` (*S* its start beat) is at or before a note starting in
+///   them, and each note whose start `S = m·L + start` (loop *m*, *L* the
+///   pattern's `length`) lies in them starts, last-note priority as above;
+///   then the sounding note ends if its end lies before *x(n)*. So a note
+///   fires on the first frame whose position is past its start, exact in
+///   beats (no ticks, no `ppq` rounding), and ends on the first frame past
+///   its end; the loop wraps where the position crosses a multiple of *L*,
+///   and a note crossing the loop's end ends in the next loop. A note
+///   starts at most once: consecutive frames share their bound.
+/// - **Not moving** (a stopped or held transport) fires nothing and ends
+///   the sounding note: a stopped transport releases its note.
+/// - **A seek** (a `reset`, which `std.playhead.jump` marks on every seek;
+///   and, inferred from the motion, backwards, more than one beat forward,
+///   more than 64 loops in one frame, the first frame after `prepare`, or a
+///   swap that connected `follow`): nothing fires retroactively; the sounding
+///   note ends (`off` on this frame), and the next frame resumes from the
+///   new place: a note that starts exactly there fires, **a note that spans
+///   it is not restarted** (it began before the place, so playing it would
+///   mean starting a note late, cut at its start; the next note plays on
+///   time). A transport playing backwards therefore plays nothing.
+///
+/// `position` then shows the place of *x(n)* in the loop, `x − ⌊x/L⌋·L`,
+/// exact. The `ppq` parameter is not read. A swap that disconnects
+/// `follow` ends the sounding note and goes on counting ticks from the tick
+/// position it had.
+///
 /// **Cost.** Ticks are processed one by one: a binary search over the notes
 /// per tick, so a frame costs in proportion to the ticks it holds (the
 /// transport puts at most ⌊bpm·ppq / (60·sr)⌋ + 1 on a frame: 1 at 48 kHz
@@ -147,6 +199,27 @@ pub struct NoteSeq {
     key: f64,
     hz: f64,
     velocity: f64,
+    /// Following a position: the previous frame's, if any.
+    last: Option<f64>,
+    /// Following a position: the sounding note's end, in beats of the
+    /// followed position.
+    end: Option<f64>,
+}
+
+/// The first note row (from 1) of the loop starting at beat `base` whose
+/// start beat `base + start` is at least `from`.
+fn first_from(table: &Table, base: f64, from: f64) -> usize {
+    let at = |row: usize| base + table.row(row).first().copied().unwrap_or(0.0);
+    let (mut lo, mut hi) = (1, table.rows());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if at(mid) < from {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
 }
 
 /// The first note row (from 1) whose start tick is at least `p`.
@@ -229,6 +302,110 @@ impl NoteSeq {
     }
 }
 
+impl NoteSeq {
+    /// Whether a note sounds, counted in ticks or followed in beats.
+    fn sounding(&self) -> bool {
+        self.remaining > 0 || self.end.is_some()
+    }
+
+    /// Ends the sounding note, if any.
+    fn silence(&mut self, frame: &mut Frame) {
+        frame.ended |= self.sounding();
+        self.remaining = 0;
+        self.end = None;
+    }
+
+    /// Following a position: the beats `[from, to)` of a forward motion.
+    fn cross(
+        &mut self,
+        table: Option<&Table>,
+        period: f64,
+        (from, to): (f64, f64),
+        frame: &mut Frame,
+    ) {
+        if let Some(table) = table {
+            for base in follow::loops(from, to, period) {
+                let mut row = first_from(table, base, from);
+                while let [start, len, key, velocity, hz] = *table.row(row) {
+                    let at = base + start;
+                    if at >= to {
+                        break;
+                    }
+                    if self.end.is_some_and(|end| end <= at) {
+                        // An `off` only for a note that sounded when the
+                        // frame began: one that started and ended within
+                        // this frame is merged into its `on`.
+                        frame.ended |= !frame.started;
+                        self.end = None;
+                    }
+                    self.end = Some(at + len);
+                    (self.key, self.hz, self.velocity) = (key, hz, velocity);
+                    frame.started = true;
+                    row += 1;
+                }
+            }
+        }
+        if self.end.is_some_and(|end| end < to) {
+            frame.ended = true;
+            self.end = None;
+        }
+    }
+
+    /// `process` with `follow` connected.
+    fn follow(&mut self, inputs: &Inputs<'_>, outputs: &mut Outputs<'_>, table: Option<&Table>) {
+        let positions = inputs.signal(FOLLOW);
+        let period =
+            follow::period(table.map_or(1.0, |t| t.row(0).first().copied().unwrap_or(1.0)));
+        let mut next_reset = 0;
+        for n in 0..inputs.frames() {
+            let now = positions.get(n).copied().unwrap_or(0.0);
+            let mut frame = Frame::default();
+            let motion = if triggered(inputs.events(RESET), &mut next_reset, n) {
+                Motion::Seek
+            } else {
+                follow::motion(self.last, now, period)
+            };
+            match motion {
+                Motion::Seek | Motion::Still => self.silence(&mut frame),
+                Motion::Forward { from, to } => self.cross(table, period, (from, to), &mut frame),
+            }
+            self.last = now.is_finite().then_some(now);
+            let position = follow::place(now, period).clamp(-SIGNAL_BOUND, SIGNAL_BOUND);
+            self.write(outputs, n, &frame, position);
+        }
+    }
+
+    /// Frame `n`'s events and signals.
+    fn write(&self, outputs: &mut Outputs<'_>, n: usize, frame: &Frame, position: f64) {
+        let sounding = self.sounding();
+        match (frame.ended, frame.started) {
+            (true, true) if sounding => {
+                push(outputs, OFF, n);
+                push(outputs, ON, n);
+            }
+            (true, true) => {
+                push(outputs, ON, n);
+                push(outputs, OFF, n);
+            }
+            (true, false) => push(outputs, OFF, n),
+            (false, true) => push(outputs, ON, n),
+            (false, false) => {}
+        }
+        let values = [
+            f64::from(u8::from(sounding)),
+            self.key,
+            self.hz,
+            self.velocity,
+            position,
+        ];
+        for (port, value) in [GATE, KEY, HZ, VELOCITY, POSITION].into_iter().zip(values) {
+            if let Some(out) = outputs.signal(port).get_mut(n) {
+                *out = value;
+            }
+        }
+    }
+}
+
 fn push(outputs: &mut Outputs<'_>, port: usize, n: usize) {
     if let Some(sink) = outputs.events(port) {
         sink.push(Event {
@@ -253,11 +430,21 @@ impl DirectPrimitive for NoteSeq {
 
     fn process(&mut self, inputs: &Inputs<'_>, outputs: &mut Outputs<'_>) {
         let table = inputs.table().filter(|t| t.width() == NOTE_WIDTH);
+        if inputs.is_connected(FOLLOW_PORT) {
+            return self.follow(inputs, outputs, table);
+        }
+        // Counting ticks. A note followed in beats (before a swap that
+        // disconnected `follow`) ends on the first frame.
+        self.last = None;
+        let followed = self.end.take().is_some();
         let ticks = inputs.events(TICK);
         let (mut next_tick, mut next_reset) = (0, 0);
         for n in 0..inputs.frames() {
             let ppq = ppq_at(inputs.parameter(PPQ_PARAMETER), n) as f64;
-            let mut frame = Frame::default();
+            let mut frame = Frame {
+                ended: followed && n == 0,
+                ..Frame::default()
+            };
             if triggered(inputs.events(RESET), &mut next_reset, n) {
                 frame.ended |= self.remaining > 0;
                 self.remaining = 0;
@@ -275,36 +462,11 @@ impl DirectPrimitive for NoteSeq {
                 }
                 next_tick += 1;
             }
-            let sounding = self.remaining > 0;
-            match (frame.ended, frame.started) {
-                (true, true) if sounding => {
-                    push(outputs, OFF, n);
-                    push(outputs, ON, n);
-                }
-                (true, true) => {
-                    push(outputs, ON, n);
-                    push(outputs, OFF, n);
-                }
-                (true, false) => push(outputs, OFF, n),
-                (false, true) => push(outputs, ON, n),
-                (false, false) => {}
-            }
             let position = self.position.map_or(0.0, |p| {
                 let last = loop_ticks(table, ppq) - 1;
                 (p.min(last) as f64 / ppq).clamp(-SIGNAL_BOUND, SIGNAL_BOUND)
             });
-            let values = [
-                f64::from(u8::from(sounding)),
-                self.key,
-                self.hz,
-                self.velocity,
-                position,
-            ];
-            for (port, value) in [GATE, KEY, HZ, VELOCITY, POSITION].into_iter().zip(values) {
-                if let Some(out) = outputs.signal(port).get_mut(n) {
-                    *out = value;
-                }
-            }
+            self.write(outputs, n, &frame, position);
         }
     }
 }

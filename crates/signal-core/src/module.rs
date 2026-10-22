@@ -56,6 +56,10 @@ pub struct PrepareContext {
 ///   events end at `event_ends[p]` and start where port *p − 1*'s end (0 for the
 ///   first). Within a port they are sorted by offset, and events with the same
 ///   offset are in the canonical order of ADR 0016 §3.
+/// - `connected` (ADR 0033): per port of the descriptor's `ports`, in order,
+///   whether the plan gives it at least one connection. It is a property of
+///   the plan, not of the values: it changes only at a plan swap, between
+///   two calls. An unconnected input still reads 0 (`docs/semantics.md` §3).
 #[derive(Clone, Copy, Debug)]
 pub struct Inputs<'a> {
     frames: usize,
@@ -64,6 +68,7 @@ pub struct Inputs<'a> {
     events: &'a [Event],
     event_ends: &'a [usize],
     table: Option<&'a Table>,
+    connected: &'a [bool],
 }
 
 impl<'a> Inputs<'a> {
@@ -82,6 +87,7 @@ impl<'a> Inputs<'a> {
             events,
             event_ends,
             table: None,
+            connected: &[],
         }
     }
 
@@ -89,6 +95,23 @@ impl<'a> Inputs<'a> {
     /// hands an instance whose plan gives it one.
     pub fn with_table(self, table: Option<&'a Table>) -> Inputs<'a> {
         Inputs { table, ..self }
+    }
+
+    /// These views with which of the instance's ports have connections
+    /// (ADR 0033): `connected[i]` for port *i* of the descriptor's `ports`.
+    /// What the engine hands every instance; without it (as from
+    /// [`Inputs::new`]) every port reads unconnected.
+    pub fn with_connected(self, connected: &'a [bool]) -> Inputs<'a> {
+        Inputs { connected, ..self }
+    }
+
+    /// Whether port `port` (an index into the descriptor's `ports`) has at
+    /// least one connection in the plan (ADR 0033). It changes only at a
+    /// plan swap. A module uses it to tell an unconnected input, which reads
+    /// 0, from one connected to a source that outputs 0; an index past the
+    /// ports, or an output, reads `false`.
+    pub fn is_connected(&self, port: usize) -> bool {
+        self.connected.get(port).copied().unwrap_or(false)
     }
 
     /// The instance's table, if its plan gives it one. It changes only at a

@@ -196,8 +196,12 @@ impl Generator<'_> {
         found
     }
 
-    /// Connects each input and parameter of `node` to 0–2 sources.
+    /// Connects each input and parameter of `node` to 0–2 sources, but
+    /// never both inputs of a pair its type makes exclusive (ADR 0033: a
+    /// sequencer's `tick` and `follow`): the second of a pair whose first
+    /// is connected is left unconnected (its draws still made).
     fn wire(&mut self, spec: &mut Spec, node: &Node) {
+        let pairs: Vec<(&str, &str)> = self.registry.exclusive_pairs(node.type_name).collect();
         for port in self.ports(node, Direction::In) {
             let count = match self.rng.below(10) {
                 0..=3 => 0,
@@ -205,11 +209,20 @@ impl Generator<'_> {
                 _ => 2,
             };
             let candidates = self.sources(spec, node, &port);
+            let taken = pairs.iter().any(|&(a, b)| {
+                (port.name == b || port.name == a) && {
+                    let other = if port.name == b { a } else { b };
+                    let to = format!("{}.{other}", node.name);
+                    spec.connections.iter().any(|(_, t, _)| *t == to)
+                }
+            });
             for _ in 0..count {
                 let Some(from) = self.rng.pick(&candidates).cloned() else {
                     break;
                 };
-                self.connect(spec, from, format!("{}.{}", node.name, port.name));
+                if !taken {
+                    self.connect(spec, from, format!("{}.{}", node.name, port.name));
+                }
             }
         }
     }

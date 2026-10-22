@@ -165,6 +165,20 @@ pub enum GraphError {
         /// What is wrong with it.
         reason: Box<Restriction>,
     },
+    /// Two inputs of one instance that its type makes exclusive (ADR 0033,
+    /// `Registry::exclusive_inputs`) both have connections: reported on a
+    /// connection into the second.
+    ExclusiveInputs {
+        /// The declared source endpoint of that connection.
+        from: PortAddress,
+        /// Its declared target endpoint.
+        to: PortAddress,
+        /// The primitive input it reaches, and the other input, which has
+        /// connections too.
+        inputs: Box<(PortAddress, PortAddress)>,
+        /// The instance's type.
+        type_name: &'static str,
+    },
     /// An instance's module declares a vector port of more than
     /// [`MAX_VECTOR_WIDTH`] elements (`docs/semantics.md` §16): for a
     /// converter named in the project, the width in its name.
@@ -321,6 +335,21 @@ impl fmt::Display for GraphError {
                         write!(f, "this one comes from the {port} of a {type_name}")
                     }
                 }
+            }
+            GraphError::ExclusiveInputs {
+                from,
+                to,
+                inputs,
+                type_name,
+            } => {
+                let (input, other) = &**inputs;
+                write!(
+                    f,
+                    "{from} -> {to}: {input} and {other} are both connected; a {type_name} takes \
+                 `{}` or `{}`, not both",
+                    other.port(),
+                    input.port()
+                )
             }
             GraphError::VectorTooWide {
                 instance,

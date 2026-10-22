@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- The waveform switch: a rocker lever in a slot, three positions marked
+       (saw, square, triangle). Used on a knob with sweep="60" and min 1, max 3,
+       so the lever leans left, stands up or leans right. The part "pointer"
+       is drawn upright and turned about (32, 46). -->
+  <g fill="#e8e4d8">
+    <circle cx="16" cy="18" r="1.6"/>
+    <circle cx="32" cy="10" r="1.6"/>
+    <circle cx="48" cy="18" r="1.6"/>
+  </g>
+  <rect x="18" y="40" width="28" height="14" rx="3" fill="#060606" stroke="#3a3a3a"/>
+  <g data-part="pointer" data-cx="32" data-cy="46">
+    <rect x="28" y="16" width="8" height="32" rx="3" fill="#ece8dc" stroke="#9a968c" stroke-width="1"/>
+    <rect x="28" y="16" width="8" height="6" rx="3" fill="#ffffff"/>
+  </g>
+</svg>

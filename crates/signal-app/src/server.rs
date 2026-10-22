@@ -281,6 +281,9 @@ fn host(config: AppConfig, local: bool) -> Result<Host, String> {
             project_ui: PathBuf::new(),
             client_queue: CLIENT_QUEUE,
         },
+        // ADR 0033: no Play or Stop; the open project plays while the app
+        // is switched on.
+        plays: true,
     };
     #[cfg(feature = "test-hooks")]
     if local {

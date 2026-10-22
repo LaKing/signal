@@ -237,14 +237,16 @@ fn a_client_needs_the_token(transport: Transport) {
     fs::remove_dir_all(&base).unwrap();
 }
 
-fn it_starts_stopped_on_the_last_project(transport: Transport) {
+/// ADR 0033: Signal.app has no Play or Stop; switched on, the Setup's last
+/// project plays as the app starts.
+fn it_plays_the_last_project_at_start(transport: Transport) {
     let (base, path) = setup("start", transport);
     let server = start(transport, &path);
     let mut page = connect(&server, transport);
     hello(&mut page, server.token());
     of(&mut page, "welcome");
     let app = request(&mut page, json!({"type": "app.get", "id": 1}), "app");
-    assert_eq!(app["playing"], false);
+    assert_eq!(app["playing"], true);
     assert_eq!(app["project"]["dir"], tone().display().to_string());
     assert_eq!(app["project"]["sampleRate"], 48_000);
     assert_eq!(app["setupPath"], path.display().to_string());
@@ -315,9 +317,11 @@ fn a_later_client_describes_every_parameter_while_playing(transport: Transport) 
     let mut first = connect(&server, transport);
     hello(&mut first, server.token());
     of(&mut first, "welcome");
-    let stopped = request(&mut first, json!({"type": "describe", "id": 1}), "describe");
-    assert_eq!(stopped["playing"], false);
-    let every = controls(&stopped);
+    // Playing from the start (ADR 0033); a restart (Project ▸ Restart from
+    // Files) plays it again.
+    let first_described = request(&mut first, json!({"type": "describe", "id": 1}), "describe");
+    assert_eq!(first_described["playing"], true);
+    let every = controls(&first_described);
     assert!(every.iter().any(|a| a == "/osc.freq"), "{every:?}");
     assert!(every.iter().any(|a| a == "/out.gain"), "{every:?}");
     let played = request(
@@ -473,17 +477,24 @@ fn several_windows_are_clients_of_one_server(transport: Transport) {
         of(page, "welcome");
     }
     const { assert!(signal_ui::MAX_CLIENTS >= 16, "room for many windows") };
-    let played = request(
-        &mut pages[0],
-        json!({"type": "transport.play", "id": 1}),
-        "transport",
-    );
-    assert_eq!(played["playing"], true);
-    for page in &mut pages[1..] {
-        loop {
-            let app = of(page, "app");
-            if app["playing"] == true {
-                break;
+    // It plays from the start (ADR 0033); one window's stop, then its
+    // restart, reach the others.
+    for (id, (kind, playing)) in [("transport.stop", false), ("transport.play", true)]
+        .into_iter()
+        .enumerate()
+    {
+        let reply = request(
+            &mut pages[0],
+            json!({"type": kind, "id": id + 1}),
+            "transport",
+        );
+        assert_eq!(reply["playing"], playing);
+        for page in &mut pages[1..] {
+            loop {
+                let app = of(page, "app");
+                if app["playing"] == playing {
+                    break;
+                }
             }
         }
     }
@@ -601,7 +612,7 @@ both!(
     a_later_client_describes_every_parameter_while_playing,
     the_url_carries_a_new_token_in_its_fragment,
     a_client_needs_the_token,
-    it_starts_stopped_on_the_last_project,
+    it_plays_the_last_project_at_start,
     exit_stops_saves_the_window_and_closes_clients,
     dropping_it_saves_the_setup,
     the_window_s_requests_reach_the_project,
