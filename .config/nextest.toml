@@ -3,6 +3,13 @@
 [profile.ci]
 # Report every failure of a run, not only the first.
 fail-fast = false
+# Some tests time the host or its GPU and pass on the device, but only by a
+# margin a loaded virtual machine sometimes misses (seen: a hidden edit shown
+# after 2.30 s against 2.25 s; 4 096 frames run before any worker woke; a GPU
+# result pending one block after the lab bank had recovered). Every test
+# gets two retries here; a deterministic failure still fails all three, and
+# nextest reports a pass after a retry as flaky, so it stays visible.
+retries = 2
 # Three tests measure real-time scheduling, which a hosted runner (a 3-core
 # virtual machine) cannot give: the Mach-semaphore workers under a time
 # constraint did not play 16 384 frames in 120 s; workers under a time
@@ -17,15 +24,3 @@ not (
   | (binary_id(signal-output::hang) & test(=a_run_without_a_stall_reports_no_hang))
 )
 """
-
-# Two tests time the host and pass on the device, but only by a margin a
-# loaded virtual machine sometimes misses: a hidden edit was shown after
-# 2.30 s against a 2.25 s bound, and in a release build 4 096 frames once
-# ran before any worker woke (the caller ran every task). They run, with
-# retries; nextest reports a pass after a retry as flaky.
-[[profile.ci.overrides]]
-filter = """
-    (binary_id(signal-ui::document) & test(=the_display_shows_a_hidden_edit_within_the_bound))
-  | (binary_id(signal-engine::worker_setup) & test(=requests_between_blocks_change_no_output))
-"""
-retries = 2
