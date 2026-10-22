@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FLAT, LOOP_OUT, REACH_MIN, REACH_TALL, cordCurve, curveBox, hull, split, curveData, curveDistance, flatten, wireCurve, wireGeometry, wirePoints } from './schematic-wire.js';
+import { FLAT, LOOP_OUT, REACH_MIN, REACH_TALL, cordCurve, crosses, curveBox, detour, hull, split, curveData, curveDistance, flatten, wireCurve, wireGeometry, wirePoints } from './schematic-wire.js';
 import { bake, bakeHolds, bakedMatrix, bakedPath } from './schematic-draw.js';
 import { hitTest } from './schematic-hit.js';
 import { toScreen } from './schematic-view.js';
@@ -253,4 +253,34 @@ test('the cord being dragged is a wire’s curve, a loop when dragged back', () 
   assert.ok(back.segs.length > 1);
   assert.ok(samples(back).every((p) => p.y <= 140 + 32 + 1e-9));
   assert.match(curveData(forward), /^M100,100 C[-\d.e]+,100 [-\d.e]+,50 300,50$/);
+});
+
+// 2026-10-22: a forward wire that would pass under an open composite's frame goes around it.
+test('a wire with `avoid` goes around the rect along the shortest lane, leaving and entering horizontally; else as before', () => {
+  const rect = { x: 100, y: 100, w: 200, h: 100 };
+  const lanes = { left: 90, right: 310, top: 90, bottom: 210 };
+  const avoid = { rect, lanes };
+  // Above it to below it: down its left side, the nearer.
+  const a = { x: 80, y: 40 };
+  const b = { x: 140, y: 260 };
+  assert.ok(crosses(wireCurve(a, b), rect), 'the direct cord passes under it');
+  const around = wireCurve(a, b, { avoid });
+  assert.ok(!crosses(around, rect));
+  assert.deepEqual(around.start, a);
+  assert.deepEqual(around.segs.at(-1).to, b);
+  assert.equal(around.segs[0].c1.y, a.y, 'leaves its output horizontally');
+  assert.equal(around.segs.at(-1).c2.y, b.y, 'enters its input horizontally');
+  assert.ok(around.segs.some((s) => !s.c1 && s.to.x === lanes.left && s.to.y === lanes.bottom), 'along the left lane past its bottom');
+  // Left of it to right of it, in its rows: over or under it.
+  const across = wireCurve({ x: 20, y: 120 }, { x: 380, y: 190 }, { avoid });
+  assert.ok(!crosses(across, rect));
+  // Clear of it: the same cord as without.
+  assert.deepEqual(wireCurve({ x: 0, y: 0 }, { x: 80, y: 30 }, { avoid }), wireCurve({ x: 0, y: 0 }, { x: 80, y: 30 }));
+  // An end inside it: no way around (the direct cord kept); a degenerate lane is skipped.
+  assert.equal(detour({ x: 150, y: 150 }, b, avoid), null);
+  assert.deepEqual(wireCurve({ x: 150, y: 150 }, b, { avoid }), wireCurve({ x: 150, y: 150 }, b));
+  // A segment along its edge is not under it; one through its corner is.
+  assert.ok(!crosses({ start: { x: 100, y: 0 }, segs: [{ to: { x: 100, y: 300 } }] }, rect));
+  assert.ok(crosses({ start: { x: 90, y: 120 }, segs: [{ to: { x: 120, y: 90 } }] }, rect));
+  assert.ok(!crosses({ start: { x: 90, y: 110 }, segs: [{ to: { x: 110, y: 90 } }] }, rect), 'touching its corner only');
 });

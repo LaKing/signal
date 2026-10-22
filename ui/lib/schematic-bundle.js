@@ -48,18 +48,20 @@ export function pairKey(wire) {
  * its ends `t` of the way from the bundle's to its own, the count, a `mid`
  * point for it, and the `box` of everything drawn.
  */
-function bundleOf(key, wires, t, bottom, startOf = (w) => w.curve.start, endOf = end) {
+function bundleOf(key, wires, t, bottom, startOf = (w) => w.curve.start, endOf = end, avoid = null) {
   const a = mean(wires.map(startOf));
   const b = mean(wires.map(endOf));
   const feedback = wires.some((w) => w.feedback);
   const lanes = wires.filter((w) => w.feedback && w.under !== null && w.under !== undefined).map((w) => w.under);
   const under = lanes.length ? Math.min(...lanes) : laneY(bottom, 1);
-  const main = wireGeometry(a, b, { feedback, under });
+  // Around an open composite's frame, as its wires go (none of them crossing into it).
+  const around = feedback || wires.some((w) => w.crossing) ? null : avoid;
+  const main = wireGeometry(a, b, { feedback, under, avoid: around });
   const members =
     t > 0
       ? wires.map((w) => {
           const own = w.feedback ? w.under : under;
-          return { wire: w, ...wireGeometry(lerp(a, startOf(w), t), lerp(b, endOf(w), t), { feedback, under: under + ((own ?? under) - under) * t }) };
+          return { wire: w, ...wireGeometry(lerp(a, startOf(w), t), lerp(b, endOf(w), t), { feedback, under: under + ((own ?? under) - under) * t, avoid: around }) };
         })
       : [];
   const boxes = [main.box, ...members.map((m) => m.box)];
@@ -79,9 +81,10 @@ function bundleOf(key, wires, t, bottom, startOf = (w) => w.curve.start, endOf =
  * not built again. `ends(wire)` (M2.13-2, a collapsed port group's pin,
  * ui/lib/schematic-groups.js) may give a wire other ends, `{a, b, key}`:
  * the wires to one collapsed group (`key`) bundle at its pin, and a single
- * wire is drawn to it.
+ * wire is drawn to it. `avoid` (an opened layout's, ui/lib/schematic-open.js):
+ * the frame a bundle goes around, as its wires do.
  */
-export function bundleWires(wires, k, { solo = new Set(), bottom = 0, cache = null, fanned = false, ends = null, written = (w) => `${w.written.from}\n${w.written.to}` } = {}) {
+export function bundleWires(wires, k, { solo = new Set(), bottom = 0, cache = null, fanned = false, ends = null, avoid = null, written = (w) => `${w.written.from}\n${w.written.to}` } = {}) {
   // `fanned`: every wire on its own whatever the scale (a box of the level dragged).
   const t = fanned ? 1 : fanOf(k);
   if (t >= 1 && !ends) return [...wires];
@@ -96,7 +99,7 @@ export function bundleWires(wires, k, { solo = new Set(), bottom = 0, cache = nu
   const endOf = (w) => moved.get(w)?.b ?? end(w);
   const keyOf = (w) => (moved.get(w)?.key ? `${pairKey(w)}\n${moved.get(w).key}` : pairKey(w));
   // A wire alone, its ends moved to a group's pin: drawn there (its id kept).
-  const single = (w) => (moved.has(w) ? { ...w, ...wireGeometry(startOf(w), endOf(w), { feedback: w.feedback, under: w.under ?? laneY(bottom, 1) }) } : w);
+  const single = (w) => (moved.has(w) ? { ...w, ...wireGeometry(startOf(w), endOf(w), { feedback: w.feedback, under: w.under ?? laneY(bottom, 1), avoid: w.feedback || w.crossing ? null : avoid }) } : w);
   const pairs = new Map();
   for (const w of wires) {
     const key = keyOf(w);
@@ -116,7 +119,7 @@ export function bundleWires(wires, k, { solo = new Set(), bottom = 0, cache = nu
     let bundle = cache?.get(key);
     const same = (b) => b.wires.every((m) => startOf(m) === b.ends.get(m)?.a && endOf(m) === b.ends.get(m)?.b);
     if (!bundle || bundle.t !== t || bundle.wires.length !== pair.length || bundle.wires.some((m, i) => m !== pair[i]) || !same(bundle)) {
-      bundle = bundleOf(key, pair, t, bottom, startOf, endOf);
+      bundle = bundleOf(key, pair, t, bottom, startOf, endOf, avoid);
       bundle.ends = new Map(pair.map((m) => [m, { a: startOf(m), b: endOf(m) }]));
       cache?.set(key, bundle);
     }

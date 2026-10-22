@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { layout } from '../lib/schematic-layout.js';
-import { CLOSE_UNITS, READ_K, closeBox } from '../lib/schematic-open.js';
+import { CLOSE_MIN_PX, READ_K, closeBox } from '../lib/schematic-open.js';
 import { hitTest } from '../lib/schematic-hit.js';
 import { fit, toScreen } from '../lib/schematic-view.js';
 import { KICK } from '../lib/schematic-scene.test.js';
@@ -94,7 +94,7 @@ function middleOf(s, path, name) {
 function closeOf(s, path) {
   const cut = path.lastIndexOf('/');
   const level = s.drawn.levels.find((l) => l.path === path.slice(0, cut));
-  const r = closeBox(level.layout.nodes.find((n) => n.name === path.slice(cut + 1)));
+  const r = closeBox(level.layout.nodes.find((n) => n.name === path.slice(cut + 1)), level.transform.k);
   return toScreen(level.transform, { x: r.x + r.w / 2, y: r.y + r.h / 2 });
 }
 
@@ -181,8 +181,10 @@ test('the × closes its composite and what is open inside it, selecting nothing,
   assert.deepEqual([...s.drawn.open], ['/drums'], 'let go elsewhere: still open');
   assert.equal(s.view, view, 'not panned');
   // Slid onto its frame's header beside it: not closed either.
-  click(s, x, { x: x.x - 3 * CLOSE_UNITS * topK(s), y: x.y });
-  assert.equal(hitTest(s.drawn, { x: x.x - 3 * CLOSE_UNITS * topK(s), y: x.y }).kind, 'instance');
+  const side = closeBox(s.drawn.levels[0].layout.nodes.find((n) => n.name === 'drums'), topK(s)).w * topK(s);
+  assert.ok(side >= CLOSE_MIN_PX - 1e-9, `the × ${side} px on screen at least`);
+  click(s, x, { x: x.x - 2 * side, y: x.y });
+  assert.equal(hitTest(s.drawn, { x: x.x - 2 * side, y: x.y }).kind, 'instance');
   assert.deepEqual([...s.drawn.open], ['/drums'], 'let go on the frame: still open');
 });
 

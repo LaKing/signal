@@ -77,14 +77,14 @@ import { allOf, deletePlan, dragGroup, has, hitKey, inside, moveMessages, resele
 import { formatFixed } from '../lib/format.js';
 import { HEADER, dragPosition, layout } from '../lib/schematic-layout.js';
 import { DragFollow } from '../lib/schematic-drag.js';
-import { CLOSE_TEXT, aroundReason, closeBox, closeShown, crumbView, drawOrder, editable, editLevel, enterView, pinOne, unpin } from '../lib/schematic-open.js';
+import { aroundReason, closeBox, closeShown, closeText, crumbView, drawOrder, editable, editLevel, enterView, pinOne, unpin } from '../lib/schematic-open.js';
 import { boundaryLinks, breadcrumbs, chain, levelRect, nodeRect, openAnchor, rebase, reroot, scene } from '../lib/schematic-scene.js';
 import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
 import { hitTest, instanceHit, portHit, reselect } from '../lib/schematic-hit.js';
 import { cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
 import { LEVEL_RATE, SLOTS, candidates, levelFraction, levelPlan } from '../lib/schematic-levels.js';
 import { IDENTITY, fit, focus, keyView, matrix, pan, toLocal, toScreen, wheelFactor, zoomAt } from '../lib/schematic-view.js';
-import { COUNT_UNITS, LABEL_PX, PITCH_PX, READ_PX, insideNote, levelCounts, levelLabels, outsideNote, pinText, setMeasure } from '../lib/schematic-labels.js';
+import { COUNT_UNITS, LABEL_PX, PITCH_PX, READ_PX, frameSides, insideNote, levelCounts, levelLabels, outsideNote, pinText, setMeasure } from '../lib/schematic-labels.js';
 import { bundleClick, bundleText, bundleWires, countPlaces, countsShown, fanOf, nearestWire } from '../lib/schematic-bundle.js';
 import { collapsedAt, exportFacts, groupAnchors, labelDetail, notesAt, portGroups } from '../lib/schematic-groups.js';
 
@@ -722,8 +722,10 @@ export class SignalSchematic extends HTMLElement {
       // An open composite's edge crossed (its box's pins to its frame's), and the level's labels in its own units (2026-10-20).
       const links = el('g');
       const labels = el('g', { class: 'labels' });
-      drawn = { g: el('g'), wires, links, overlay, nodes, labels, baked: null, wireCache: new Map(), nodeCache: new Map(), bundleCache: new Map(), shown: null, labelKey: null, sizes: [] };
-      drawn.g.append(wires, links, overlay, nodes, labels);
+      // An open frame's × (2026-10-22), over everything of its level.
+      const close = el('g');
+      drawn = { g: el('g'), wires, links, overlay, nodes, labels, close, closeKey: null, baked: null, wireCache: new Map(), nodeCache: new Map(), bundleCache: new Map(), shown: null, labelKey: null, sizes: [] };
+      drawn.g.append(wires, links, overlay, nodes, labels, close);
       this.groups.set(level.path, drawn);
     }
     const transform = level.transform;
@@ -744,7 +746,7 @@ export class SignalSchematic extends HTMLElement {
     level.openKey = open;
     // The box around this level's inside, when it is open in place: its pins are joined to the frame's (its groups collapsed or not).
     const parentCollapsed = Boolean(level.parent?.collapsed);
-    const sizes = `${text(12)} ${text(9)} ${text(CLOSE_TEXT)}${open ? ` ${level.pinK}` : ''} ${parentCollapsed}`;
+    const sizes = `${text(12)} ${text(9)}${open ? ` ${level.pinK}` : ''} ${parentCollapsed}`;
     // M2.13-2: a pair's wires bundled at small scale (ui/lib/schematic-bundle.js), the traced and selected ones on their own above.
     const solo = this.soloWires(level);
     // A level a box of which is dragged: every wire on its own, as DragFollow moves them by id.
@@ -768,7 +770,7 @@ export class SignalSchematic extends HTMLElement {
     else {
       const baked = drawn.baked;
       const ends = collapsed ? this.groupEnds(level.layout) : null;
-      const items = bundleWires(level.wires, transform.k, { solo, bottom: level.layout.bottom, cache: drawn.bundleCache, fanned: dragging, ends });
+      const items = bundleWires(level.wires, transform.k, { solo, bottom: level.layout.bottom, cache: drawn.bundleCache, fanned: dragging, ends, avoid: level.layout.avoid ?? null });
       level.bundles = items;
       const wires = reconcile(
         drawn.wireCache,
@@ -794,6 +796,7 @@ export class SignalSchematic extends HTMLElement {
     }
     drawn.placed = placed;
     drawn.g.setAttribute('transform', matrix(placed));
+    this.drawClose(level, drawn);
     // Around an open composite's frame the level is dimmed (M2.13-3): its other boxes and wires, not the frame or the wires crossing into it.
     const surround = Boolean(level.layout.opened);
     if (drawn.surround !== surround) {
@@ -801,6 +804,37 @@ export class SignalSchematic extends HTMLElement {
       drawn.g.setAttribute('class', surround ? 'surround' : '');
     }
     return !same;
+  }
+
+  /**
+   * The × of the frame open in `level` (a scene entry), in its group
+   * `drawn` (2026-10-22): in the frame's top right, at least CLOSE_MIN_PX
+   * on screen (`closeBox`), hidden where it would cover the frame's title
+   * or leave the frame (`closeShown`; Escape closes it then). Built again
+   * only when its square changes: never on a pan.
+   */
+  drawClose(level, drawn) {
+    const name = level.layout.opened;
+    const frame = name ? level.layout.nodes.find((n) => n.kind === 'instance' && n.name === name) : null;
+    const k = level.transform.k;
+    const r = frame && closeShown(frame, k) ? closeBox(frame, k) : null;
+    const key = r ? `${r.x} ${r.y} ${r.w}` : '';
+    if (drawn.closeKey === key && drawn.closeBaked === drawn.baked) return;
+    drawn.closeKey = key;
+    drawn.closeBaked = drawn.baked;
+    if (!r) {
+      drawn.close.replaceChildren();
+      return;
+    }
+    const baked = drawn.baked;
+    const address = `${level.path}/${name}`;
+    const button = el('g', { class: 'close-button', 'data-address': address });
+    const at = bakedRect(baked, r);
+    if (at) button.append(el('rect', at));
+    const size = closeText(r);
+    const c = bakedPoint(baked, { x: r.x + r.w / 2, y: r.y + r.h / 2 + size * 0.35 });
+    button.append(el('text', { x: c.x, y: c.y, 'font-size': size * baked.m, 'text-anchor': 'middle' }, '×'), el('title', {}, `Close ${address}`));
+    drawn.close.replaceChildren(button);
   }
 
   wireElement(level, wire, baked) {
@@ -890,16 +924,6 @@ export class SignalSchematic extends HTMLElement {
     if (text(12) && node.kind === 'instance') {
       label({ x: node.x + 8, y: node.y + 14 }, 12, { class: 'name' }, node.name);
       label({ x: node.x + 8, y: node.y + 27 }, 10, { class: 'module' }, node.module);
-    }
-    // An open frame's × closes it (2026-10-22): in its header's top right, in the level's units, hidden with the text too small to read (Escape closes it then).
-    if (isOpen && node.kind === 'instance' && closeShown(level.transform.k)) {
-      const r = closeBox(node);
-      const button = el('g', { class: 'close-button', 'data-address': address });
-      const at = bakedRect(baked, r);
-      if (at) button.append(el('rect', at));
-      const c = bakedPoint(baked, { x: r.x + r.w / 2, y: r.y + r.h / 2 + CLOSE_TEXT * 0.35 });
-      button.append(el('text', { x: c.x, y: c.y, 'font-size': CLOSE_TEXT * m, 'text-anchor': 'middle' }, '×'), el('title', {}, `Close ${address}`));
-      group.append(button);
     }
     const bars = [];
     // An open composite's pins drawn at OPEN_PIN_PX on screen at most (zoomed into its inside, they would grow over its frame).
@@ -2376,7 +2400,17 @@ export class SignalSchematic extends HTMLElement {
     const key = [detail, notes, level.collapsed, level.openKey, this.traceVersion, hovered, drawn.baked, level.layout, counts];
     if (!drawn.labelKey || key.some((v, i) => v !== drawn.labelKey[i])) {
       drawn.labelKey = key;
-      this.buildLabels(level, drawn, { detail, notes, hovered, counts });
+      drawn.labelBoxes = this.labelBoxes(level, { detail, notes, hovered });
+      drawn.sidesKey = null;
+    }
+    // A frame's names kept in the drawing area (2026-10-22: at deep zoom they went past its left edge, by the sidebar): placed again only when a side turns.
+    const corner = toLocal(level.transform, { x: 0, y: 0 });
+    const far = toLocal(level.transform, { x: this.viewport.w, y: this.viewport.h });
+    const viewport = { x: corner.x, y: corner.y, w: far.x - corner.x, h: far.y - corner.y };
+    const sides = frameSides(drawn.labelBoxes.boxes, detail, viewport);
+    if (sides !== drawn.sidesKey) {
+      drawn.sidesKey = sides;
+      this.buildLabels(level, drawn, { detail, counts, viewport });
     }
     for (const g of drawn.sizes) {
       const px = Number(g.dataset.size) * k;
@@ -2385,9 +2419,8 @@ export class SignalSchematic extends HTMLElement {
     }
   }
 
-  buildLabels(level, drawn, { detail, notes, hovered, counts }) {
-    const baked = drawn.baked;
-    const m = baked.m;
+  /** The boxes whose pins `level`'s labels name (`placeLabels`'), and each one's pins' addresses: `{boxes, addresses}`. */
+  labelBoxes(level, { detail, notes, hovered }) {
     const boxes = [];
     const addresses = [];
     for (const node of level.layout.nodes) {
@@ -2409,7 +2442,15 @@ export class SignalSchematic extends HTMLElement {
       boxes.push(box);
       addresses.push(pinAddress);
     }
-    const labels = levelLabels(boxes, detail);
+    return { boxes, addresses };
+  }
+
+  /** `level`'s labels (its boxes' as `labelBoxes` gave them, a frame's kept in `viewport`, the level's units) drawn in its group `drawn`. */
+  buildLabels(level, drawn, { detail, counts, viewport }) {
+    const baked = drawn.baked;
+    const m = baked.m;
+    const { boxes, addresses } = drawn.labelBoxes;
+    const labels = levelLabels(boxes, detail, viewport);
     // A bundle's count (M2.13-2): along its curve where no other label is, else moved off it, never left out.
     if (counts) {
       const list = counts.filter((item) => item.kind === 'bundle').map((item) => ({ text: String(item.count), at: countPlaces(item) }));

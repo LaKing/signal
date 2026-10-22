@@ -27,7 +27,7 @@
 // the way the signal flows, the source first, so the pin's name stands
 // after an upstream note and before a downstream one. Pure; no DOM.
 
-import { neighbours } from './schematic-trace.js';
+import { neighbours, pinInfo } from './schematic-trace.js';
 
 /** A label's text size (px), whatever the zoom. */
 export const LABEL_PX = 9;
@@ -348,7 +348,13 @@ function insideBox(box, labels) {
   return labels.map((l, i) => narrowed(l, widths[i]));
 }
 
-/** Side labels `labels` (one side's, aligned `align`) of a frame on the other side of their pins (`x` each pin's). */
+/**
+ * Side labels `labels` (one side's, aligned `align`) on the other side of
+ * their pins (`xs`, each pin's x): a frame's kept on screen, an open
+ * composite's box's named outside its edge. Each keeps its width and its
+ * `shown`, so a label is never wider than it was placed: an outward box's
+ * labels are therefore placed without its inside's bound (`boxLabels`).
+ */
 function flipped(labels, xs) {
   return labels.map((l, i) => {
     const w = l.x1 - l.x0;
@@ -449,13 +455,16 @@ export function boxLabels(box, index, forced = 1, viewport = null) {
         const pinX = l === 4 ? pins[0].x : g.pins[0].x;
         const text = g.count ?? groupText(g, box.texts);
         // A closed box's note stays on its own half of the box, cut short (the whole text is the title and the tip), never narrower than the pin's name.
-        const noted = box.kind === 'instance' && g.pins.length === 1 && text !== g.pins[0].name;
-        const width = noted ? Math.min(textWidth(text), Math.max(textWidth(g.pins[0].name), box.rect.w / 2 - INSET_PX)) : null;
+        // An open composite's (`outward`) is named outside its edge, where its box's half is no bound (2026-10-22).
+        const noted = box.kind === 'instance' && !box.outward && g.pins.length === 1 && text !== g.pins[0].name;
+        const whole = box.widest ? Math.min(textWidth(text), box.widest) : null;
+        const width = noted ? Math.min(textWidth(text), Math.max(textWidth(g.pins[0].name), box.rect.w / 2 - INSET_PX)) : whole;
         side.push(labelAt(text, pinX + dir * INSET_PX, centre(g), align, g.pins.map((p) => ({ box: index, name: p.name })), {}, width));
         xs.push(pinX);
       }
-      // A frame's labels kept on screen: where they would leave it, on their pins' other side (inside the frame).
-      const off = (lb) => lb.x0 < 0 || lb.x1 > viewport.w;
+      // A frame's labels kept on screen: where one in its rows would leave it at a side, on their pins' other side (inside the frame). Its corner at `x`, `y` (a level's units), else 0, 0.
+      const [vx, vy] = [viewport?.x ?? 0, viewport?.y ?? 0];
+      const off = (lb) => lb.y1 > vy && lb.y0 < vy + (viewport.h ?? Infinity) && (lb.x0 < vx || lb.x1 > vx + viewport.w);
       // An open composite's box (`outward`, 2026-10-20): its inside is drawn in it, so its pins are named outside its edge.
       labels.push(...(box.outward || (box.kind !== 'instance' && viewport && side.some(off)) ? flipped(side, xs) : side));
     }
@@ -507,15 +516,43 @@ export function scaleLabel(label, f) {
  * `detail` (`labelDetail`'s) the coarsest a box starts at: `pins` every pin
  * named, `groups` its groups (`osc1_* (4)`; a box's groups collapsed, a
  * frame's runs of one group), `summary` one summary. A frame's labels are
- * at most FRAME_LABEL_UNITS wide. Pure.
+ * at most FRAME_LABEL_UNITS wide. With `viewport` (`{x, y, w, h}`, the
+ * drawing area in the level's units) a frame's side whose labels would
+ * leave it is named on its pins' other side, inside the frame
+ * (`frameSides` says when that changes). Pure.
  */
-export function levelLabels(boxes, detail = 'pins') {
-  const level = detail === 'summary' ? SUMMARY : detail === 'groups' ? 2 : 1;
-  const { labels } = placeLabels(boxes.map((b) => ({ grow: true, ...b })), { cap: Infinity, level });
+export function levelLabels(boxes, detail = 'pins', viewport = null) {
+  const { labels } = placeLabels(levelBoxes(boxes), { cap: Infinity, level: detailLevel(detail), viewport });
   return labels.map((l) => {
     const box = boxes[l.pins[0]?.box];
     return box && box.kind !== 'instance' && !l.scale && l.x1 - l.x0 > FRAME_LABEL_UNITS ? narrowed(l, FRAME_LABEL_UNITS) : l;
   });
+}
+
+/** The level (1 every pin … SUMMARY) every box starts at for `labelDetail`'s `detail`. */
+function detailLevel(detail) {
+  return detail === 'summary' ? SUMMARY : detail === 'groups' ? 2 : 1;
+}
+
+/** `boxes` as a level places them: a summary as large as its box holds (`grow`), a frame's label at most FRAME_LABEL_UNITS (`widest`). */
+function levelBoxes(boxes) {
+  return boxes.map((b) => ({ grow: true, ...(b.kind !== 'instance' ? { widest: FRAME_LABEL_UNITS } : {}), ...b }));
+}
+
+/**
+ * Which way the labels of the frames among `boxes` (as `levelLabels` takes
+ * them) point in `viewport` (`{x, y, w, h}`, the drawing area in the
+ * level's units): one letter a label (`l`, `r`), frames apart by `|`. It
+ * changes only when a frame's side would leave the viewport or come back
+ * (2026-10-22: at deep zoom a frame's inputs' names went past the
+ * drawing area's left edge, by the sidebar), so the control places a
+ * level's labels again only then, never on every pan.
+ */
+export function frameSides(boxes, detail, viewport) {
+  const level = detailLevel(detail);
+  return levelBoxes(boxes)
+    .map((b, i) => (b.kind === 'instance' ? '' : boxLabels(b, i, level, viewport).labels.map((l) => l.align[0]).join('')))
+    .join('|');
 }
 
 /**
@@ -662,9 +699,18 @@ export function noteText(answer, base = '') {
   return arrowed(n === 1 ? list : `${n}: ${list}`);
 }
 
-/** Where a frame's pin (`/synth.hz` at level `/synth`) connects outside: `/melody.hz →` (its label `/melody.hz → hz`). */
+/**
+ * Where a frame's pin (`/synth.hz` at level `/synth`) connects outside:
+ * `/melody.hz →` (its label `/melody.hz → hz`). None for a parameter
+ * nothing outside connects to (2026-10-22: `nothing → cutoff` on 28 of
+ * the synth's 31 inputs was noise): it is left to its value, which its
+ * hollow ring and the sidebar say. An unconnected port keeps
+ * `nothing → hz`, an output `out → nothing`.
+ */
 export function outsideNote(graph, address, r) {
-  return noteText(neighbours(graph, address, 'outside', r));
+  const answer = neighbours(graph, address, 'outside', r);
+  if (answer && !answer.opaque && answer.addresses.length === 0 && answer.direction === 'up' && pinInfo(graph, address, r)?.parameter) return null;
+  return noteText(answer);
 }
 
 /** Where a closed composite's pin (`/synth.hz`) goes inside: `→ 2: glide.in, hz_prev.in`. */

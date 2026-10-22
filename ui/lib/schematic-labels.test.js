@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { COUNT_UNITS, FRAME_LABEL_UNITS, LABEL_PX, MAX_LABELS, PITCH_PX, boxLabels, levelCounts, levelLabels, estimateWidth, fitText, shownText, insideNote, noteText, minWidth, outsideNote, overlaps, pinText, placeCounts, placeLabels, prefixOf, setMeasure, textWidth, wrapText } from './schematic-labels.js';
+import { COUNT_UNITS, FRAME_LABEL_UNITS, LABEL_PX, MAX_LABELS, PITCH_PX, boxLabels, frameSides, levelCounts, levelLabels, estimateWidth, fitText, shownText, insideNote, noteText, minWidth, outsideNote, overlaps, pinText, placeCounts, placeLabels, prefixOf, setMeasure, textWidth, wrapText } from './schematic-labels.js';
 import { GAP_X, HEADER, layout } from './schematic-layout.js';
 import { exportFacts, portGroups } from './schematic-groups.js';
 import { badgeText, behind } from './schematic-trace.js';
@@ -518,4 +518,69 @@ test('an open synth’s grown frame names each pin outside its edge; its inside�
   assert.equal(texts.get('gate'), '/melody.gate → gate');
   const named = levelLabels([unitsBox(ports, { texts, groups: { ins: [], outs: portGroups(ports.outs, factsOf('moog_voice')) } })], 'pins');
   assert.equal(named.length, ports.outs.length);
+});
+
+// 2026-10-22 (the operator's review): an open composite's box names its pins
+// outside its edge (`flipped`), where its box's half is no bound; a note was
+// cut to that half all the same (latent: an open box's texts were names only).
+test('an open composite’s noted pin is named whole outside its edge, never cut to half its box', () => {
+  const note = '/melody.velocity → velocity';
+  const narrow = box('voice', { w: 60, ins: ['velocity'], outs: ['out'], texts: new Map([['velocity', note]]) });
+  const closed = boxLabels(narrow, 0).labels.find((l) => l.pins[0].name === 'velocity');
+  assert.ok(closed.x1 - closed.x0 < textWidth(note), 'closed: kept on its half of the box, its note cut');
+  const open = boxLabels({ ...narrow, outward: true }, 0).labels.find((l) => l.pins[0].name === 'velocity');
+  assert.equal(open.align, 'right');
+  assert.equal(open.x1 - open.x0, textWidth(note), 'open: as wide as its text');
+  assert.equal(open.shown, note);
+  assert.ok(open.x1 <= narrow.rect.x + 1e-9, 'left of the box, outside it');
+  // The output's side as well, right of the box.
+  const out = boxLabels({ ...narrow, outward: true, texts: new Map([['out', 'out → /echo.in']]) }, 0).labels.find((l) => l.pins[0].name === 'out');
+  assert.equal(out.align, 'left');
+  assert.equal(out.shown, 'out → /echo.in');
+  assert.ok(out.x0 >= narrow.rect.x + narrow.rect.w - 1e-9);
+});
+
+// 2026-10-22 (the operator's review): at deep zoom a frame's inputs' names
+// went past the drawing area's left edge (by the sidebar). The control gives
+// the viewport in the level's units, its corner anywhere.
+test('a frame’s side is named inside it where its rows on screen would leave a viewport at any corner; `frameSides` says when', () => {
+  const frame = { kind: 'input', name: 'inputs', rect: { x: 980, y: 0, w: 30, h: 400 }, ins: [], outs: ['hz', 'cutoff'].map((n, i) => ({ name: n, x: 1010, y: 20 + 300 * i })), texts: new Map([['hz', '/melody.hz → hz']]) };
+  const all = { x: 900, y: -50, w: 600, h: 500 };
+  const outward = levelLabels([frame], 'pins', all);
+  assert.ok(outward.every((l) => l.align === 'right'), 'all in it: outside the pins');
+  assert.equal(frameSides([frame], 'pins', all), 'rr');
+  // The viewport's left edge at 1000: the pins' names would leave it.
+  const cut = { x: 1000, y: -50, w: 600, h: 500 };
+  const inside = levelLabels([frame], 'pins', cut);
+  for (const l of inside) {
+    assert.equal(l.align, 'left');
+    assert.ok(l.x0 >= 1010 && l.x0 >= cut.x, `${l.text} ${l.x0}`);
+  }
+  assert.equal(frameSides([frame], 'pins', cut), 'll');
+  // Only the rows on screen count: `hz`'s row above it, `cutoff`'s short name fits.
+  const low = { x: 960, y: 200, w: 600, h: 300 };
+  assert.equal(frameSides([frame], 'pins', low), 'rr', 'hz is off screen above: its long note does not turn the side');
+  assert.equal(frameSides([frame], 'pins', { ...low, y: 0 }), 'll', 'hz on screen: the side turns');
+  // A box's labels never turn (they stay inside it), and none without a viewport.
+  const synth = box('synth', { x: 0, w: 120, ins: ['hz'], outs: ['out'] });
+  assert.equal(frameSides([synth, frame], 'pins', cut), '|ll');
+  assert.ok(levelLabels([frame], 'pins').every((l) => l.align === 'right'));
+});
+
+// 2026-10-22 (the operator's review): `nothing → cutoff` on 28 of the
+// synth's 31 inputs was noise.
+test('a frame’s parameter left to its value has no note; a port nothing feeds keeps `nothing → x`', () => {
+  assert.equal(outsideNote(STUDIO, '/synth.cutoff'), null);
+  assert.equal(pinText('cutoff', outsideNote(STUDIO, '/synth.cutoff')), 'cutoff');
+  assert.equal(outsideNote(STUDIO, '/synth.hz'), '/melody.hz →', 'a connected port');
+  assert.equal(outsideNote(STUDIO, '/kick.velocity'), '/drums.t1 →', 'a connected parameter keeps its note');
+  // The synth's frame: a note on its three ports alone.
+  const inside = layout(STUDIO.composites.moog_voice, {}, { factsOf });
+  const ports = inside.nodes.find((n) => n.kind === 'input');
+  const noted = ports.outs.filter((p) => outsideNote(STUDIO, `/synth.${p.name}`) !== null).map((p) => p.name);
+  assert.deepEqual(noted.sort(), ['gate', 'hz', 'velocity']);
+  // A port nothing feeds still says so.
+  const lone = { top: { instances: [{ name: 'v', module: 'voice', composite: true, ports: [{ name: 'in', direction: 'in', shape: 'signal' }], parameters: [{ name: 'p' }] }], connections: [] }, composites: { voice: { instances: [], connections: [], inputs: [{ name: 'in', to: [] }], outputs: [], parameters: [{ name: 'p', to: [] }] } } };
+  assert.equal(pinText('in', outsideNote(lone, '/v.in')), 'nothing → in');
+  assert.equal(outsideNote(lone, '/v.p'), null);
 });

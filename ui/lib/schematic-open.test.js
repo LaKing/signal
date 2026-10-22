@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { HEADER, PAD, ROW, layout } from './schematic-layout.js';
 import {
-  CLOSE_TEXT, CLOSE_UNITS, FRAME_K, GROW_MAX, READ_K, aroundReason, chooseOpen, closeBox, closeShown, makeRoom, crumbView, drawOrder, editLevel, editable, enterView, grownNode, linkScale, openedLayout, pinOne, unpin,
+  CLOSE_MIN_PX, CLOSE_TEXT, CLOSE_UNITS, FRAME_K, GROW_MAX, READ_K, aroundReason, chooseOpen, closeBox, closeShown, closeText, makeRoom, crumbView, drawOrder, editLevel, editable, enterView, grownNode, linkScale, openedLayout, pinOne, unpin,
 } from './schematic-open.js';
 import { PatchSession } from './schematic-edit.js';
 import { SchematicEditor } from '../controls/schematic-editor.js';
@@ -16,6 +16,9 @@ import { closeHit, hitTest } from './schematic-hit.js';
 import { fit, focus, pan, toScreen, zoomAt } from './schematic-view.js';
 import { exportFacts } from './schematic-groups.js';
 import { KICK } from './schematic-scene.test.js';
+import { estimateWidth } from './schematic-labels.js';
+import { crosses, curveBox, flatten } from './schematic-wire.js';
+import { bundleWires } from './schematic-bundle.js';
 
 const STUDIO = JSON.parse(readFileSync(new URL('./fixtures/studio-graph.json', import.meta.url), 'utf8'));
 const viewport = { w: 1000, h: 600 };
@@ -444,10 +447,15 @@ test('every open frame has an × in its header’s top right, in its level’s u
   const big = { w: 1300, h: 1000 };
   const drawn = scene({ layoutOf: studioOf, view: { k: readableAt(synth, bounds), ox: synth.x + synth.w / 2, oy: synth.y, x: 650, y: 200 }, viewport: big, pinned: SYNTH });
   const top = drawn.levels[0];
+  const k = top.transform.k;
   const frame = top.layout.nodes.find((n) => n.name === 'synth');
-  const r = closeBox(frame);
+  assert.ok(CLOSE_UNITS * k >= CLOSE_MIN_PX, `readable here: ${CLOSE_UNITS * k} px`);
+  const r = closeBox(frame, k);
   assert.ok(r.x > frame.x + frame.w / 2 && r.x + r.w < frame.x + frame.w && r.y > frame.y && r.y + r.h < frame.y + HEADER, 'inside the frame, in its header, at its right');
   assert.equal(r.w, CLOSE_UNITS);
+  assert.deepEqual(closeBox(frame), r, 'its size in units where that is CLOSE_MIN_PX or more on screen');
+  assert.equal(closeText(r), CLOSE_TEXT);
+  assert.ok(closeShown(frame, k));
   const middle = toScreen(top.transform, { x: r.x + r.w / 2, y: r.y + r.h / 2 });
   const hit = hitTest(drawn, middle);
   assert.deepEqual([hit.kind, hit.address, hit.path], ['close', '/synth', '']);
@@ -455,20 +463,54 @@ test('every open frame has an × in its header’s top right, in its level’s u
   // Beside it, the frame's box as before.
   const beside = hitTest(drawn, toScreen(top.transform, { x: frame.x + frame.w / 2, y: frame.y + 4 }));
   assert.deepEqual([beside.kind, beside.address], ['instance', '/synth']);
-  // It scales with the view and is hidden (not hit) when its letter would be under 4 px.
-  assert.ok(closeShown(4 / CLOSE_TEXT) && !closeShown(3.9 / CLOSE_TEXT));
-  const far = scene({ layoutOf: studioOf, view: zoomAt(drawn.view, 3.5 / CLOSE_TEXT / top.transform.k, { x: 650, y: 200 }), viewport: big, pinned: SYNTH });
-  const farTop = far.levels[0];
-  assert.ok(farTop.transform.k * CLOSE_TEXT < 4);
-  assert.equal(closeHit(far, toScreen(farTop.transform, { x: r.x + r.w / 2, y: r.y + r.h / 2 })), null);
   // Nested: the inner frame's × is hit at its own level.
   const kickBox = nodeOf(kickOf, 'drums', 'kick');
   const nested = scene({ layoutOf: kickOf, view: fit(kickOf('').bounds, { w: 4000, h: 3000 }), viewport: { w: 4000, h: 3000 }, pinned: new Set(['/drums', '/drums/kick']) });
   const drums = nested.levels.find((l) => l.path === '/drums');
   const kickFrame = drums.layout.nodes.find((n) => n.name === 'kick');
   assert.ok(kickFrame && kickBox);
-  const kr = closeBox(kickFrame);
-  if (closeShown(drums.transform.k)) assert.equal(hitTest(nested, toScreen(drums.transform, { x: kr.x + kr.w / 2, y: kr.y + kr.h / 2 })).address, '/drums/kick');
+  const kr = closeBox(kickFrame, drums.transform.k);
+  if (closeShown(kickFrame, drums.transform.k)) assert.equal(hitTest(nested, toScreen(drums.transform, { x: kr.x + kr.w / 2, y: kr.y + kr.h / 2 })).address, '/drums/kick');
+});
+
+// 2026-10-22, the operator's review: "the close × is about 12 px at fit zoom".
+test('zoomed out, the × keeps CLOSE_MIN_PX on screen and a legible letter, clear of the frame’s title; too small a frame hides it', () => {
+  const synth = nodeOf(studioOf, '', 'synth');
+  const big = { w: 1300, h: 1000 };
+  // The studio fitted, the synth open: the level's scale under CLOSE_MIN_PX / CLOSE_UNITS.
+  const drawn = scene({ layoutOf: studioOf, view: fit(studioOf('').bounds, big), viewport: big, pinned: SYNTH });
+  const top = drawn.levels[0];
+  const k = top.transform.k;
+  assert.ok(CLOSE_UNITS * k < CLOSE_MIN_PX, `small at Fit: ${(CLOSE_UNITS * k).toFixed(1)} px in units alone`);
+  const frame = top.layout.nodes.find((n) => n.name === 'synth');
+  assert.ok(frame.w > synth.w, 'grown');
+  const r = closeBox(frame, k);
+  assert.ok(Math.abs(r.w * k - CLOSE_MIN_PX) < 1e-9 && r.w === r.h, `${r.w * k} px on screen`);
+  assert.ok(r.w * k >= 18 && closeText(r) * k >= 14, 'an 18 px hit area at least, its letter 14 px');
+  assert.ok(r.x + r.w <= frame.x + frame.w && r.y >= frame.y, 'inside the frame, at its top right');
+  assert.ok(closeShown(frame, k));
+  // Clear of the title: right of the name drawn at the frame's top left.
+  assert.ok(r.x > frame.x + 8 + estimateWidth(frame.name) * (12 / 9), 'never over the title');
+  const hit = hitTest(drawn, toScreen(top.transform, { x: r.x + r.w / 2, y: r.y + r.h / 2 }));
+  assert.deepEqual([hit.kind, hit.address], ['close', '/synth']);
+  // Its corner on screen is hit too: the whole square, not the square in units.
+  const corner = toScreen(top.transform, { x: r.x + 1 / k, y: r.y + r.h - 1 / k });
+  assert.equal(hitTest(drawn, corner).kind, 'close');
+  // A frame narrower on screen than its title and the square: no ×, never over the title, nothing hit there.
+  const narrow = { ...frame, w: 60, h: 400, name: 'synth', module: 'moog_voice' };
+  for (const z of [0.2, 0.5, 1]) {
+    const nr = closeBox(narrow, z);
+    const title = 8 + Math.max(estimateWidth(narrow.name) * (12 / 9), estimateWidth(narrow.module) * (10 / 9));
+    assert.equal(closeShown(narrow, z), nr.x >= narrow.x + title + 2, `k ${z}`);
+  }
+  assert.equal(closeShown({ ...narrow, w: 30, name: '', module: '' }, 0.1), false, 'a square larger than the frame');
+  // Far out: the frame is smaller than the square, hidden and not hit.
+  const far = scene({ layoutOf: studioOf, view: zoomAt(drawn.view, 0.05, { x: 650, y: 500 }), viewport: big, pinned: SYNTH });
+  const farTop = far.levels[0];
+  const ff = farTop.layout.nodes.find((n) => n.name === 'synth');
+  assert.equal(closeShown(ff, farTop.transform.k), false);
+  const fr = closeBox(ff, farTop.transform.k);
+  assert.equal(closeHit(far, toScreen(farTop.transform, { x: fr.x + fr.w / 2, y: fr.y + fr.h / 2 })), null);
 });
 
 test('the × closes its composite and what is open inside it; Escape the innermost (unpin)', () => {
@@ -489,4 +531,48 @@ test('the × closes its composite and what is open inside it; Escape the innermo
   const crumbs = breadcrumbs(drawn);
   assert.equal(crumbs.at(-1).path, '/drums/kick');
   assert.deepEqual([...unpin(pinned, crumbs.at(-1).path)], ['/drums']);
+});
+
+// 2026-10-22 (the operator's review): the drums' wires ran under an open
+// voice's frame corner (the studio's synth or kick open). What passes the
+// frame goes around it, wire by wire and bundled alike.
+test('no wire passes under an open frame: the drums’ wires go around the synth’s, the kick’s and every voice’s', () => {
+  const top = studioOf('');
+  const ids = new Map(top.nodes.map((n) => [n.id, n.name]));
+  for (const name of ['synth', 'kick', 'snare', 'hats', 'echo']) {
+    const module = nodeOf(studioOf, '', name).module;
+    const opened = openedLayout(top, name, studioOf(module).bounds);
+    const frame = opened.nodes.find((n) => n.name === name);
+    const rect = { x: frame.x, y: frame.y, w: frame.w, h: frame.h };
+    assert.deepEqual(opened.avoid.rect, rect);
+    // A wire whose boxes stay where they were and that passes clear of the frame is the stored one (in the studio every box moves for frames this large; `opening changes no stored position` checks such wires on KICK).
+    top.wires.forEach((w, i) => {
+      if (w.feedback || [w.from.node, w.to.node].some((id) => ids.get(id) === name || opened.moved.has(ids.get(id))) || crosses(w.curve, rect)) return;
+      assert.equal(opened.wires[i], w, w.label);
+    });
+    for (const w of opened.wires) {
+      if (w.crossing || w.feedback) continue;
+      assert.ok(!crosses(w.curve, rect), `${name} open: ${w.label} under its frame`);
+      // Its geometry is its curve's.
+      assert.deepEqual(w.box, curveBox(w.curve), w.label);
+    }
+    // Bundled at small scale (and fanned half-way), the same.
+    for (const k of [0.1, 0.3]) {
+      for (const item of bundleWires(opened.wires, k, { bottom: opened.bottom, avoid: opened.avoid })) {
+        if (item.kind !== 'bundle' || item.feedback || item.wires.some((w) => w.crossing)) continue;
+        assert.ok(!crosses(item.curve, rect), `${name} open, k ${k}: bundle ${item.key} under its frame`);
+        for (const m of item.members) assert.ok(!crosses(m.curve, rect), `${name} open, k ${k}: ${m.wire.label}`);
+      }
+    }
+  }
+  // The synth open: the drums (left of it, moved aside) reach the voices below it along its left lane, between the boxes and its pins' names.
+  const opened = openedLayout(top, 'synth', studioOf('moog_voice').bounds);
+  const frame = opened.nodes.find((n) => n.name === 'synth');
+  const drums = opened.nodes.find((n) => n.name === 'drums');
+  const t2 = opened.wires.find((w) => w.written.from === '/drums.t2' && w.written.to === '/snare.trigger');
+  const xs = flatten(t2.curve).map((p) => p.x);
+  assert.ok(Math.min(...xs) >= drums.x + drums.w - 1e-9 && Math.min(...xs) < frame.x, 'down the left lane, right of the drums');
+  const lane = opened.avoid.lanes.left;
+  assert.ok(lane > drums.x + drums.w && lane < frame.x, 'the lane between the drums and the frame');
+  assert.ok(flatten(t2.curve).some((p) => p.x === lane && p.y > frame.y && p.y < frame.y + frame.h), 'along it beside the frame');
 });

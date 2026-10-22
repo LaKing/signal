@@ -33,15 +33,18 @@ const at = (p) => ({ x: p.x, y: p.y });
 /**
  * The curve of a wire from output `a` to input `b`: forward, one cubic;
  * `feedback`, the loop around below through lane `under` (a y below both
- * pins).
+ * pins). A forward wire with `avoid` (an open composite's frame, M2.13-3:
+ * `{rect: {x, y, w, h}, lanes: {left, right, top, bottom}}`) that would
+ * pass under it goes around it instead (`detour`).
  */
-export function wireCurve(a, b, { feedback = false, under = 0 } = {}) {
+export function wireCurve(a, b, { feedback = false, under = 0, avoid = null } = {}) {
   if (!feedback) {
     // Half the run, half the height (to REACH_TALL), never under REACH_MIN:
     // two boxes close together are joined by an S that swings out past
     // them, a patch cord's, not a line down their edge.
     const reach = Math.max(REACH_MIN, (b.x - a.x) / 2, Math.min(Math.abs(b.y - a.y) / 2, REACH_TALL));
-    return { start: at(a), segs: [{ c1: { x: a.x + reach, y: a.y }, c2: { x: b.x - reach, y: b.y }, to: at(b) }] };
+    const direct = { start: at(a), segs: [{ c1: { x: a.x + reach, y: a.y }, c2: { x: b.x - reach, y: b.y }, to: at(b) }] };
+    return avoid && crosses(direct, avoid.rect) ? (detour(a, b, avoid) ?? direct) : direct;
   }
   let right = a.x + LOOP_OUT;
   let left = b.x - LOOP_OUT;
@@ -54,6 +57,86 @@ export function wireCurve(a, b, { feedback = false, under = 0 } = {}) {
     right = mid - side * LOOP_RADIUS;
   }
   return rounded([at(a), { x: right, y: a.y }, { x: right, y: under }, { x: left, y: under }, { x: left, y: b.y }, at(b)], LOOP_RADIUS);
+}
+
+/** Whether segment `p`–`q` passes through the inside of `rect` (`{x, y, w, h}`; its edge is not inside). Liang–Barsky. */
+function segmentCrosses(p, q, rect) {
+  let t0 = 0;
+  let t1 = 1;
+  const dx = q.x - p.x;
+  const dy = q.y - p.y;
+  const edges = [
+    [-dx, p.x - rect.x],
+    [dx, rect.x + rect.w - p.x],
+    [-dy, p.y - rect.y],
+    [dy, rect.y + rect.h - p.y],
+  ];
+  for (const [d, room] of edges) {
+    if (d === 0) {
+      if (room <= 0) return false;
+      continue;
+    }
+    const t = room / d;
+    if (d < 0) t0 = Math.max(t0, t);
+    else t1 = Math.min(t1, t);
+    if (t0 >= t1) return false;
+  }
+  return true;
+}
+
+/** Whether `curve` (flattened) passes through the inside of `rect`. */
+export function crosses(curve, rect) {
+  const ps = flatten(curve);
+  for (let i = 1; i < ps.length; i++) if (segmentCrosses(ps[i - 1], ps[i], rect)) return true;
+  return false;
+}
+
+/** The length of polyline `ps`. */
+function lengthOf(ps) {
+  let l = 0;
+  for (let i = 1; i < ps.length; i++) l += Math.hypot(ps[i].x - ps[i - 1].x, ps[i].y - ps[i - 1].y);
+  return l;
+}
+
+/**
+ * A forward wire from `a` to `b` around `avoid.rect` (2026-10-22, the
+ * operator's review: the drums' wires ran under an open voice's frame
+ * corner): along one of its lanes (`avoid.lanes`, outside it: a column
+ * left or right of it, a row above or below), entered from `a` and left
+ * for `b` by cubics that leave an output and enter an input horizontally
+ * as every wire does. Of the ways that stay out of the rect, the shortest
+ * (ties: left, right, top, bottom); null when none does.
+ */
+export function detour(a, b, avoid) {
+  const { rect, lanes } = avoid;
+  const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+  const ways = [
+    ...[lanes.left, lanes.right].map((x) => [
+      { x, y: clamp(a.y, lanes.top, lanes.bottom) },
+      { x, y: clamp(b.y, lanes.top, lanes.bottom) },
+    ]),
+    ...[lanes.top, lanes.bottom].map((y) => [
+      { x: clamp(a.x, lanes.left, lanes.right), y },
+      { x: clamp(b.x, lanes.left, lanes.right), y },
+    ]),
+  ];
+  let best = null;
+  for (const [p, q] of ways) {
+    const [d, l] = unit(p, q);
+    // Both ends on the lane at one point: no way along it.
+    if (!(l > 0)) continue;
+    const segs = [];
+    const ra = Math.min(REACH_TALL, Math.hypot(p.x - a.x, p.y - a.y) / 2);
+    if (ra > 0) segs.push({ c1: { x: a.x + ra, y: a.y }, c2: { x: p.x - d.x * ra, y: p.y - d.y * ra }, to: at(p) });
+    segs.push({ to: at(q) });
+    const rb = Math.min(REACH_TALL, Math.hypot(b.x - q.x, b.y - q.y) / 2);
+    if (rb > 0) segs.push({ c1: { x: q.x + d.x * rb, y: q.y + d.y * rb }, c2: { x: b.x - rb, y: b.y }, to: at(b) });
+    const curve = { start: at(a), segs };
+    if (crosses(curve, rect)) continue;
+    const length = lengthOf(flatten(curve));
+    if (!best || length < best.length) best = { curve, length };
+  }
+  return best?.curve ?? null;
 }
 
 /**

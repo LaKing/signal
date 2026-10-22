@@ -16,8 +16,8 @@
 // (`makeRoom`), the stored layout is what is moved. No DOM.
 
 import { CHAR, GAP_Y, HEADER, PAD, laneY, levelBottom } from './schematic-layout.js';
-import { READ_PX } from './schematic-labels.js';
-import { wireGeometry } from './schematic-wire.js';
+import { LABEL_PX, READ_PX, estimateWidth } from './schematic-labels.js';
+import { crosses, wireGeometry } from './schematic-wire.js';
 import { fit, focus, zoomAt } from './schematic-view.js';
 
 /**
@@ -160,7 +160,9 @@ const openedOf = new WeakMap();
  * into its left pins runs left to right into the frame, one from its
  * right pins on to the right; never a loop because the frame grew), every
  * other one is routed as `layout` routes it, feedback lanes again below
- * the lowest box drawn. Every node and wire that does not change is the
+ * the lowest box drawn, and a forward one that would pass under the frame
+ * around it (`avoid`, kept as the layout's for its bundles: `detour`,
+ * ui/lib/schematic-wire.js). Every node and wire that does not change is the
  * same object. Its `bounds` are `layout`'s, so nothing around depends on
  * what is open inside (a level drawn in a frame of its own may then
  * reach past that frame by the room made); `opened` names the open
@@ -193,6 +195,10 @@ export function openedLayout(layout, name, bounds) {
       const m = shifts.get(id);
       return m ? { x: p.x + m.dx, y: p.y + m.dy } : p;
     };
+    // What passes the frame goes around it (2026-10-22): along a lane between its pins' names and the boxes moved aside, or in the gap above or below it.
+    const beside = roomOf(grown);
+    const frame = { x: grown.x, y: grown.y, w: grown.w, h: grown.h };
+    const avoid = { rect: frame, lanes: { left: frame.x - beside.left + PAD, right: frame.x + frame.w + beside.right - PAD, top: frame.y - GAP_Y / 2, bottom: frame.y + frame.h + GAP_Y / 2 } };
     let lane = 0;
     const wires = layout.wires.map((wire) => {
       const out = wire.from.node === node.id;
@@ -204,12 +210,13 @@ export function openedLayout(layout, name, bounds) {
       if (feedback) lane += 1;
       const under = feedback ? laneY(bottom, lane) : null;
       const shiftedEnd = shifts.has(wire.from.node) || shifts.has(wire.to.node);
-      if (!out && !into && !shiftedEnd && under === wire.under) return wire;
-      const { curve, points, box } = wireGeometry(a, b, { feedback, under: under ?? 0 });
+      const around = !out && !into && !feedback;
+      if (!out && !into && !shiftedEnd && under === wire.under && !(around && crosses(wire.curve, frame))) return wire;
+      const { curve, points, box } = wireGeometry(a, b, { feedback, under: under ?? 0, avoid: around ? avoid : null });
       return { ...wire, feedback, lane: feedback ? lane : 0, under, curve, points, box, crossing: out || into };
     });
     const names = new Map(layout.nodes.map((n) => [n.id, n.name]));
-    opened = { ...layout, nodes, wires, bottom, opened: name, moved: new Map([...shifts].map(([id, m]) => [names.get(id), m])) };
+    opened = { ...layout, nodes, wires, bottom, opened: name, moved: new Map([...shifts].map(([id, m]) => [names.get(id), m])), avoid };
   }
   if (!byName) openedOf.set(layout, (byName = new Map()));
   byName.set(name, { bounds, opened });
@@ -309,13 +316,44 @@ export const CLOSE_UNITS = 22;
 export const CLOSE_TEXT = 16;
 /** and its distance from the frame's right edge. */
 export const CLOSE_INSET = 6;
+/**
+ * Its square is never smaller than this on screen (px; 2026-10-22, the
+ * operator's review: about 12 px at Fit, too small to hit): zoomed out it
+ * keeps this size, its letter CLOSE_TEXT / CLOSE_UNITS of it (14.5 px).
+ */
+export const CLOSE_MIN_PX = 20;
+/** Where a frame's title starts (layout units from its left edge) and its sizes (`nodeElement`'s name and module). */
+const TITLE_X = 8;
+const TITLE_TEXT = 12;
+const MODULE_TEXT = 10;
 
-/** The square of the × that closes `frame` (an open composite's grown box), in its level's units: inside the frame, in its header, at its top right. */
-export function closeBox(frame) {
-  return { x: frame.x + frame.w - CLOSE_INSET - CLOSE_UNITS, y: frame.y + (HEADER - CLOSE_UNITS) / 2, w: CLOSE_UNITS, h: CLOSE_UNITS };
+/**
+ * The square of the × that closes `frame` (an open composite's grown box)
+ * in its level drawn at scale `k`, in its level's units: inside the frame
+ * at its top right, CLOSE_UNITS (in its header) or CLOSE_MIN_PX on screen,
+ * whichever is larger; larger than the header, it reaches below it.
+ */
+export function closeBox(frame, k = Infinity) {
+  const side = Math.max(CLOSE_UNITS, CLOSE_MIN_PX / k);
+  const inset = Math.max(3, (HEADER - side) / 2);
+  // In the header (CLOSE_INSET from its edges at CLOSE_UNITS), larger nearer the corner.
+  return { x: frame.x + frame.w - inset - side, y: frame.y + inset, w: side, h: side };
 }
 
-/** Whether the × is drawn (and hit) at a level drawn at scale `k`: its letter READ_PX or more on screen, else hidden as any text (Escape still closes). */
-export function closeShown(k) {
-  return CLOSE_TEXT * k >= READ_PX;
+/** The × letter's size (units) in `closeBox`'s square `r`. */
+export function closeText(r) {
+  return (r.w * CLOSE_TEXT) / CLOSE_UNITS;
+}
+
+/**
+ * Whether the × of `frame` is drawn (and hit) in its level drawn at scale
+ * `k`: its square (`closeBox`) inside the frame and clear of its title
+ * (the name and module, while drawn: 12 units on screen READ_PX or more),
+ * so it never covers it; else hidden (Escape still closes).
+ */
+export function closeShown(frame, k) {
+  const r = closeBox(frame, k);
+  const titled = TITLE_TEXT * k >= READ_PX;
+  const title = titled ? TITLE_X + Math.max(estimateWidth(frame.name ?? '') * (TITLE_TEXT / LABEL_PX), estimateWidth(frame.module ?? '') * (MODULE_TEXT / LABEL_PX)) : 0;
+  return r.x >= frame.x + Math.max(3, title + 2) && r.y + r.h <= frame.y + frame.h - 3;
 }

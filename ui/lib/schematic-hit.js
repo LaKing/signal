@@ -160,11 +160,11 @@ export function closeHit(drawn, point) {
   for (let i = drawn.levels.length - 1; i >= 0; i--) {
     const entry = drawn.levels[i];
     const name = entry.layout?.opened;
-    if (!name || !closeShown(entry.transform.k)) continue;
+    if (!name) continue;
     const frame = entry.layout.nodes.find((n) => n.kind === 'instance' && n.name === name);
-    if (!frame) continue;
+    if (!frame || !closeShown(frame, entry.transform.k)) continue;
     const local = toLocal(entry.transform, point);
-    const r = closeBox(frame);
+    const r = closeBox(frame, entry.transform.k);
     if (local.x >= r.x && local.x <= r.x + r.w && local.y >= r.y && local.y <= r.y + r.h) return { kind: 'close', path: entry.path, level: entry.level, node: frame, address: `${entry.path}/${name}` };
   }
   return null;
