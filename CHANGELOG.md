@@ -2,13 +2,7 @@
 
 All notable changes to Signal are recorded here, by milestone (`docs/roadmap.md`). The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions are `MAJOR.MINOR.N`, where `N` counts the commits since the tag `vMAJOR.MINOR.0` (`scripts/version.sh`); a section covers a `MAJOR.MINOR` line.
 
-## [Unreleased]
-
-### Added
-
-- **Several windows over the screens** (ADR 0032, owner's request of 2026-10-22). Signal.app opens any number of main, schematic and panel windows on the running project (Window ▸ New Main Window ⇧⌘N, New Schematic Window, New Panel Window), each on any screen or full screen, with the system's Minimize, Zoom, Bring All to Front and window list. The project panel's cards are moved between windows from their context menu (right-click a card: Move to another window, Move to new panel window, Bring back to main window, Move up / Move down); a main window keeps a placeholder (Show, Bring back) for a card held elsewhere. The layout is kept in the project's `ui/windows.toml` under a key describing the connected screens (names, resolutions, scale, arrangement); another screen configuration opens in the default state (one main window on the main screen with every card), and Window ▸ Reset Layout returns to it. Closing the last window quits as before; closing any other just closes it.
-
-## [0.2.0] - 2026-10-21
+## [0.2.0] - 2026-10-22
 
 The first public release (M2.14, ADR 0031): Signal plays in real time, edits live, runs as a Mac app with a web UI, and has a schematic, a built-in library, patterns and an agent interface.
 
@@ -23,8 +17,10 @@ The first public release (M2.14, ADR 0031): Signal plays in real time, edits liv
 - **M2.10 Core set and built-in library** (ADR 0027). A complete minimal core set of `std.*` primitives by category, a validation suite that rebuilds std modules from core primitives against their native references, and the `lib.*` library of composites shipped with Signal (LFOs, envelopes, oscillators, filters, effects, drum voices; `signal vendor` copies one into a project).
 - **M2.11 Studio demo** (ADR 0028). Patterns as project text (`patterns/*.toml`) with live edits, the transport's tick clock, `std.note_seq`, `std.step_seq8`, the `std.ladder` filter, the piano-roll and step-grid controls, and `projects/studio`: a piano roll driving a Moog-style voice through a tape delay over a step-sequenced drum machine with a synthesised 909-style kick.
 - **M2.12 Agent interface** (ADR 0029). `signal mcp`: a Model Context Protocol server over the UI protocol, so an LLM client can inspect, play, adjust, patch and render a project. Audio is off unless `--audio`, and the output is held under a gain ceiling (`--max-gain`).
-- **M2.13 Schematic path tracing** (ADR 0030). Tracing a signal upstream and downstream through modules and across composite boundaries; composites that open in place with continuous wires; labels and text that scale with zoom.
+- **M2.13 Schematic path tracing** (ADR 0030). Tracing a signal upstream and downstream through modules and across composite boundaries; composites that open in place with continuous wires; pin notes that read the way the signal flows; labels and text that scale with zoom.
 - **M2.14 Release** (ADR 0031). `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, this changelog, `THIRD-PARTY-NOTICES.md` generated from `Cargo.lock`, `scripts/release.sh` and a GitHub Actions release workflow.
+- **Several windows over the screens** (ADR 0032, owner's request of 2026-10-22). Signal.app opens any number of main, schematic and panel windows on the running project (Window ▸ New Main Window ⇧⌘N, New Schematic Window, New Panel Window), each on any screen or full screen, with the system's Minimize, Zoom, Bring All to Front and window list. The project panel's cards are moved between windows from their context menu (right-click a card: Move to another window, Move to new panel window, Bring back to main window, Move up / Move down); a main window keeps a placeholder (Show, Bring back) for a card held elsewhere. The layout is kept in the project's `ui/windows.toml` under a key describing the connected screens (names, resolutions, scale, arrangement); another screen configuration opens in the default state (one main window on the main screen with every card), and Window ▸ Reset Layout returns to it. Closing the last window quits as before; closing any other just closes it.
+- **Schematic: open on a click, a toolbar** (ADR 0030, owner's requests of 2026-10-22). A composite opens in place on a click and closes with the × in its frame's corner or Escape; zooming and panning only move the view. The schematic's buttons (Edit patch, breadcrumbs, Fit, Reset layout, Reset all) sit on a toolbar row above the drawing instead of floating over it.
 
 ### Changed
 
