@@ -1,0 +1,37 @@
+# The rim shot: a sine at `tune` and a square at 3.5 × `tune` through a
+# band-pass, with a very short decay.
+schema_version = 1
+
+[composite]
+name = "rim909"
+
+[instances]
+tune = { module = "std.const", value = 480 }
+tone_a = { module = "std.sine_osc", freq = 0 }
+tone_b = { module = "std.osc", shape = 2, freq = 0 }
+tones = { module = "std.mix", gain_a = 0.7, gain_b = 0.4 }
+band = { module = "std.svf", cutoff_hz = 1700, q = 1.2 }
+env = { module = "std.exp_env", attack_ms = 0, decay_ms = 9 }
+amp = { module = "std.mul" }
+velocity = { module = "std.const", value = 1 }
+vel_vca = { module = "std.mul" }
+level = { module = "std.gain", db = 4 }
+
+[wiring]
+connections = [
+  { from = "tune.out", to = "tone_a.freq" },
+  { from = "tune.out", to = "tone_b.freq", scale = 3.5 },
+  { from = "tone_a.out", to = "tones.a" },
+  { from = "tone_b.out", to = "tones.b" },
+  { from = "tones.out", to = "band.in" },
+  { from = "band.bp", to = "amp.a" },
+  { from = "env.out", to = "amp.b" },
+  { from = "amp.out", to = "vel_vca.a" },
+  { from = "velocity.out", to = "vel_vca.b" },
+  { from = "vel_vca.out", to = "level.in" },
+]
+
+[exports]
+inputs = { trigger = "env.trigger" }
+outputs = { out = "level.out" }
+parameters = { tune = "tune.value", decay = "env.decay_ms", level = "level.db", velocity = "velocity.value" }

@@ -1,0 +1,142 @@
+# A monophonic voice in the classic three-oscillator style: three
+# oscillators and noise into a mixer, a transistor-ladder low-pass with its
+# own contour, a loudness contour, and glide. Driven by a sequencer's `hz`,
+# `gate` and `velocity`.
+#
+#   hz ─► glide (lag) ─► ×2^(octave + cents/1200) ─► osc1, osc2, osc3 ─┐
+#                         noise ─────────────────────────────────────── mixer ─► ladder ─► trim ─► vca ─► volume ─► out
+#   cutoff_hz = cutoff + env_amount·filter contour + key_track·hz            amp contour × velocity ─┘
+#
+# Each oscillator's pitch ratio is exp(ln 2·(octave + cents/1200)), its
+# exponent clamped to ±3 octaves. The octave is a stepped range switch: the
+# exported value is clamped to [−2, 2] and rounded to the nearest integer
+# (`std.round`, ties to even: 0.4 → 0, 0.6 → 1), so a knob between two
+# positions never detunes the oscillator; the detune is in cents.
+#
+# Glide: `std.lag` on the pitch in Hz, its rise and fall time `glide`. While
+# the previous frame's `hz` is 0 or below (`hz_none`), −60 000 ms is added to
+# both times, which the lag clamps to 0: it passes its input through. The
+# sequencer's `hz` is 0 before its first note (and after a reset), so the
+# first note starts on its pitch instead of sliding up from 0 Hz; later notes
+# glide from the last one. `pitch` (×1) is the one stage the glided pitch
+# fans out from. A note that overlaps the one before keeps the gate high, so it
+# glides without restarting the contours (legato).
+#
+# The filter contour and key tracking add to the cutoff linearly, in Hz:
+# cutoff_hz = cutoff + env_amount·contour + key_track·hz. This is not the
+# original's exponential (volts-per-octave) control: a contour sweeps evenly
+# in Hz rather than in octaves, and key tracking 1 adds the note's frequency
+# (A1 to E3 moves the cutoff by about 110 Hz) instead of following the pitch
+# by octaves. Simple and bounded; an exponential cutoff would need a pitch
+# path of its own.
+#
+# Gain staging: std.ladder's output is not limited to ±1 (its rustdoc
+# "Level": a ±1 saw peaks up to 5.2 at drive 10), so `trim` (×0.25) follows
+# it and the voice stays near ±1 at full mixer levels.
+schema_version = 1
+
+[composite]
+name = "moog_voice"
+
+[instances]
+glide = { module = "std.lag", rise_ms = 40, fall_ms = 40 }
+hz_prev = { module = "std.unit_delay" }
+hz_none = { module = "std.compare", mode = 1 }
+pitch = { module = "std.scale", mul = 1, add = 0 }
+
+o1_oct = { module = "std.const", value = 0 }
+o1_oct_lim = { module = "std.clamp", lo = -2, hi = 2 }
+o1_oct_step = { module = "std.round" }
+o1_det = { module = "std.const", value = 0 }
+o1_exp_in = { module = "std.clamp", lo = -2.0794415416798357, hi = 2.0794415416798357 }
+o1_ratio = { module = "std.exp" }
+o1_pitch = { module = "std.mul" }
+osc1 = { module = "std.osc", shape = 1, freq = 0 }
+
+o2_oct = { module = "std.const", value = 0 }
+o2_oct_lim = { module = "std.clamp", lo = -2, hi = 2 }
+o2_oct_step = { module = "std.round" }
+o2_det = { module = "std.const", value = 7 }
+o2_exp_in = { module = "std.clamp", lo = -2.0794415416798357, hi = 2.0794415416798357 }
+o2_ratio = { module = "std.exp" }
+o2_pitch = { module = "std.mul" }
+osc2 = { module = "std.osc", shape = 1, freq = 0 }
+
+o3_oct = { module = "std.const", value = -1 }
+o3_oct_lim = { module = "std.clamp", lo = -2, hi = 2 }
+o3_oct_step = { module = "std.round" }
+o3_det = { module = "std.const", value = -4 }
+o3_exp_in = { module = "std.clamp", lo = -2.0794415416798357, hi = 2.0794415416798357 }
+o3_ratio = { module = "std.exp" }
+o3_pitch = { module = "std.mul" }
+osc3 = { module = "std.osc", shape = 2, freq = 0 }
+
+noise = { module = "std.noise" }
+mixer = { module = "std.mix", gain_a = 0.6, gain_b = 0.5, gain_c = 0.5, gain_d = 0 }
+
+ladder = { module = "std.ladder", cutoff_hz = 300, resonance = 0.45, drive = 1 }
+fenv = { module = "std.adsr", attack_ms = 3, decay_ms = 220, sustain = 0.2, release_ms = 180 }
+env_amt = { module = "std.scale", mul = 2600, add = 0 }
+key_amt = { module = "std.scale", mul = 0.5, add = 0 }
+trim = { module = "std.scale", mul = 0.25, add = 0 }
+
+aenv = { module = "std.adsr", attack_ms = 2, decay_ms = 300, sustain = 0.75, release_ms = 120 }
+velamp = { module = "std.mul" }
+vca = { module = "std.mul" }
+volume = { module = "std.gain", db = 0 }
+
+[wiring]
+connections = [
+  # Glide only once there is a pitch to glide from.
+  { from = "hz_prev.out", to = "hz_none.a" },
+  { from = "hz_none.out", to = "glide.rise_ms", scale = -60000 },
+  { from = "hz_none.out", to = "glide.fall_ms", scale = -60000 },
+  { from = "glide.out", to = "pitch.in" },
+  # Pitch: the glided hz times each oscillator's ratio.
+  { from = "o1_oct.out", to = "o1_oct_lim.in" },
+  { from = "o1_oct_lim.out", to = "o1_oct_step.in" },
+  { from = "o1_oct_step.out", to = "o1_exp_in.in", scale = 0.6931471805599453 },
+  { from = "o1_det.out", to = "o1_exp_in.in", scale = 0.0005776226504666211 },
+  { from = "o1_exp_in.out", to = "o1_ratio.in" },
+  { from = "pitch.out", to = "o1_pitch.a" },
+  { from = "o1_ratio.out", to = "o1_pitch.b" },
+  { from = "o1_pitch.out", to = "osc1.freq" },
+  { from = "o2_oct.out", to = "o2_oct_lim.in" },
+  { from = "o2_oct_lim.out", to = "o2_oct_step.in" },
+  { from = "o2_oct_step.out", to = "o2_exp_in.in", scale = 0.6931471805599453 },
+  { from = "o2_det.out", to = "o2_exp_in.in", scale = 0.0005776226504666211 },
+  { from = "o2_exp_in.out", to = "o2_ratio.in" },
+  { from = "pitch.out", to = "o2_pitch.a" },
+  { from = "o2_ratio.out", to = "o2_pitch.b" },
+  { from = "o2_pitch.out", to = "osc2.freq" },
+  { from = "o3_oct.out", to = "o3_oct_lim.in" },
+  { from = "o3_oct_lim.out", to = "o3_oct_step.in" },
+  { from = "o3_oct_step.out", to = "o3_exp_in.in", scale = 0.6931471805599453 },
+  { from = "o3_det.out", to = "o3_exp_in.in", scale = 0.0005776226504666211 },
+  { from = "o3_exp_in.out", to = "o3_ratio.in" },
+  { from = "pitch.out", to = "o3_pitch.a" },
+  { from = "o3_ratio.out", to = "o3_pitch.b" },
+  { from = "o3_pitch.out", to = "osc3.freq" },
+  # Mixer.
+  { from = "osc1.out", to = "mixer.a" },
+  { from = "osc2.out", to = "mixer.b" },
+  { from = "osc3.out", to = "mixer.c" },
+  { from = "noise.out", to = "mixer.d" },
+  # Filter and its contour.
+  { from = "mixer.out", to = "ladder.in" },
+  { from = "fenv.out", to = "env_amt.in" },
+  { from = "env_amt.out", to = "ladder.cutoff_hz" },
+  { from = "pitch.out", to = "key_amt.in" },
+  { from = "key_amt.out", to = "ladder.cutoff_hz" },
+  { from = "ladder.lp", to = "trim.in" },
+  # Loudness: the amp contour times the note's velocity.
+  { from = "aenv.out", to = "velamp.a" },
+  { from = "trim.out", to = "vca.a" },
+  { from = "velamp.out", to = "vca.b" },
+  { from = "vca.out", to = "volume.in" },
+]
+
+[exports]
+inputs = { hz = ["glide.in", "hz_prev.in"], gate = ["fenv.gate", "aenv.gate"], velocity = "velamp.b" }
+outputs = { out = "volume.out" }
+parameters = { glide = ["glide.rise_ms", "glide.fall_ms"], osc1_octave = "o1_oct.value", osc1_detune = "o1_det.value", osc1_wave = "osc1.shape", osc2_octave = "o2_oct.value", osc2_detune = "o2_det.value", osc2_wave = "osc2.shape", osc3_octave = "o3_oct.value", osc3_detune = "o3_det.value", osc3_wave = "osc3.shape", osc1_level = "mixer.gain_a", osc2_level = "mixer.gain_b", osc3_level = "mixer.gain_c", noise_level = "mixer.gain_d", cutoff = "ladder.cutoff_hz", emphasis = "ladder.resonance", drive = "ladder.drive", env_amount = "env_amt.mul", key_track = "key_amt.mul", f_attack = "fenv.attack_ms", f_decay = "fenv.decay_ms", f_sustain = "fenv.sustain", f_release = "fenv.release_ms", a_attack = "aenv.attack_ms", a_decay = "aenv.decay_ms", a_sustain = "aenv.sustain", a_release = "aenv.release_ms", volume = "volume.db" }

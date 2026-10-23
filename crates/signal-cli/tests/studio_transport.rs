@@ -1,4 +1,7 @@
-//! `projects/studio-transport` (ADR 0033): the studio played from
+//! studio-transport (ADR 0033) as committed in M3.1, frozen in
+//! `tests/fixtures/studio-transport` (the project's text files; the owner
+//! goes on tuning `projects/studio-transport` itself, which these tests do
+//! not read): the studio played from
 //! `lib.transport`, its sequencers following the position on a wire. Its
 //! golden render (16 s, with no fault, no mute and a safe peak), the same
 //! hashes in blocks of 1, 64 and 256 frames on one and four threads; every
@@ -20,7 +23,7 @@ use signal_engine::{Engine, EngineConfig, ExternalEvent, Schedule};
 use signal_output::{Render, render_blocks};
 use signal_project::{Project, SourceFile};
 
-/// The project's rate in `projects/studio-transport/project.toml`.
+/// The project's rate in `tests/fixtures/studio-transport/project.toml`.
 const RATE: u32 = 48_000;
 /// 16 s at 48 kHz (8 bars at 120 bpm): the golden's length.
 const GOLDEN_FRAMES: u64 = 16 * 48_000;
@@ -30,7 +33,7 @@ fn repository() -> PathBuf {
 }
 
 fn project_dir() -> PathBuf {
-    repository().join("projects/studio-transport")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/studio-transport")
 }
 
 fn registry() -> Registry {
@@ -174,7 +177,7 @@ fn the_sequencers_follow_the_transport() {
 }
 
 /// `tests/golden/studio-transport/manifest.json` is
-/// `signal render projects/studio-transport --frames 768000 --threads 1`
+/// `signal render crates/signal-cli/tests/fixtures/studio-transport --frames 768000 --threads 1`
 /// (16 s); on the same render the log has no fault or mute, every sample is
 /// finite and the peak is at most 0.25 (the output stage's cap) and below
 /// −1 dBFS.

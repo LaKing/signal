@@ -1,0 +1,46 @@
+# The tom: a sine falling from `tune` + 60 Hz to `tune` with an amplitude
+# decay and a touch of filtered noise on the attack. The velocity scales the
+# envelopes (control signals), not the audio.
+schema_version = 1
+
+[composite]
+name = "tom909"
+
+[instances]
+osc = { module = "std.sine_osc", freq = 105 }
+pitch_env = { module = "std.exp_env", attack_ms = 0, decay_ms = 70 }
+amp_env = { module = "std.exp_env", attack_ms = 0.5, decay_ms = 240 }
+amp = { module = "std.mul" }
+body = { module = "std.mul" }
+noise = { module = "std.noise" }
+noise_lp = { module = "std.onepole", cutoff_hz = 2500 }
+noise_env = { module = "std.exp_env", attack_ms = 0, decay_ms = 20 }
+noise_amp = { module = "std.mul" }
+hit = { module = "std.mul" }
+hit_level = { module = "std.scale", mul = 0.25, add = 0 }
+velocity = { module = "std.const", value = 1 }
+sum = { module = "std.add" }
+level = { module = "std.gain", db = 0 }
+
+[wiring]
+connections = [
+  { from = "pitch_env.out", to = "osc.freq", scale = 60 },
+  { from = "amp_env.out", to = "amp.a" },
+  { from = "velocity.out", to = "amp.b" },
+  { from = "osc.out", to = "body.a" },
+  { from = "amp.out", to = "body.b" },
+  { from = "noise.out", to = "noise_lp.in" },
+  { from = "noise_env.out", to = "noise_amp.a" },
+  { from = "velocity.out", to = "noise_amp.b" },
+  { from = "noise_lp.lp", to = "hit.a" },
+  { from = "noise_amp.out", to = "hit.b" },
+  { from = "hit.out", to = "hit_level.in" },
+  { from = "body.out", to = "sum.a" },
+  { from = "hit_level.out", to = "sum.b" },
+  { from = "sum.out", to = "level.in" },
+]
+
+[exports]
+inputs = { trigger = ["pitch_env.trigger", "amp_env.trigger", "noise_env.trigger"] }
+outputs = { out = "level.out" }
+parameters = { tune = "osc.freq", decay = "amp_env.decay_ms", level = "level.db", velocity = "velocity.value" }
