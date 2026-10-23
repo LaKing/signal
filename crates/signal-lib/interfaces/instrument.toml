@@ -1,0 +1,16 @@
+# A stereo instrument: a voice's inputs, two audio outputs (ADR 0037 §3).
+# A mono voice fits it with `map = { l = "out", r = "out" }`.
+schema_version = 1
+
+[interface]
+name = "instrument"
+description = "A stereo instrument: plays `hz` while `gate` is high, at `velocity` (0 to 1); audio outputs `l` and `r`."
+
+[inputs]
+hz = { kind = "frequency", unit = "Hz", group = "note" }
+gate = { kind = "gate", group = "note" }
+velocity = { kind = "control", range = [0, 1], group = "note" }
+
+[outputs]
+l = { kind = "audio" }
+r = { kind = "audio" }

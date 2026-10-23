@@ -319,12 +319,14 @@ These choices are part of the semantics above. Each was made for M1 and can chan
 
 The output follows from these inputs alone:
 - the plan, and each plan swapped in with its swap frame (§12);
-- the seed: each instance's random stream is `RngStream::derive(seed, address)` (ADR 0008);
+- the seed: each instance's random stream is `RngStream::derive(seed, address)` (ADR 0008), except under a **scope root** (below);
 - the sample rate;
 - the external events and edits, with their effective frames;
 - the build.
 
 Two renders with the same inputs produce byte-identical `audio.wav`, `log.jsonl` and hashes. Any valid schedule produces the same output and the same log.
+
+**Streams under a scope root** (ADR 0035 §4). A composite instance of the description can be marked a scope root with a seed (`InstanceDef::scope`; the project loader marks every included project's instance, `project-format.md` §4). Flattening gives every primitive instance under a scope root a **stream key**: the innermost root's seed and the instance's address relative to that root (`/kick/noise` for `/drums/kick/noise` under `/drums`), `PlanInstance::stream`. The engine and the oracle derive that instance's stream as `RngStream::derive(key.seed, key.relative)`; an instance outside every scope root keeps `derive(seed, address)`. So a project included under `/drums` draws the streams it draws alone, under its own seed, whatever the host's seed (and `--seed`) and whatever the include is named. The key is part of the plan (its dump shows `"stream"`), absent outside scope roots, so plans without them are unchanged byte for byte. A converter (§16) draws nothing and has no key. Sums and event merges need no new rule: every source inside an include shares the include's address prefix, so the byte-wise canonical order of §3 and §4 orders them as alone.
 
 The rounding rules:
 - everything is computed in f64;

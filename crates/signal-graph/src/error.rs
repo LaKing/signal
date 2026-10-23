@@ -43,6 +43,14 @@ pub enum GraphError {
         /// Composite names along the cycle, first and last equal, e.g. `a, b, a`.
         chain: Vec<String>,
     },
+    /// A primitive instance is marked a scope root (ADR 0035 §4); only a
+    /// composite instance can be one.
+    ScopeOnPrimitive {
+        /// The instance.
+        instance: InstanceAddress,
+        /// Its primitive type.
+        module: String,
+    },
     /// An instance, export or parameter name is not `[a-z][a-z0-9_]*`.
     InvalidName {
         /// Where the name is declared.
@@ -233,6 +241,10 @@ impl fmt::Display for GraphError {
             GraphError::RecursiveComposite { instance, chain } => {
                 write!(f, "{instance}: recursive composite {}", chain.join(" -> "))
             }
+            GraphError::ScopeOnPrimitive { instance, module } => write!(
+                f,
+                "{instance}: `{module}` is a primitive type; only a composite instance can be a scope root"
+            ),
             GraphError::InvalidName { scope: s, name } => write!(
                 f,
                 "{}: invalid name `{name}`; names use a-z, 0-9, _ and start with a-z",

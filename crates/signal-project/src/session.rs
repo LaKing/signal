@@ -911,6 +911,13 @@ impl SessionRecorder {
         provenance.project_file_hashes = file_hashes(&initial.files);
         // Version 0's; every swap adds its version's (`applied_swap_as`).
         provenance.library_composite_hashes = initial.library_hashes();
+        // ADR 0035 §13: a session of a host with includes records them, and
+        // is not replayable until phase 4 copies their files too.
+        provenance
+            .project_file_hashes
+            .extend(initial.include_file_hashes());
+        provenance.included_projects = initial.included_projects();
+        provenance.library_interface_hashes = initial.library_interface_hashes();
         if i64::try_from(seed).is_err() {
             return Err(SessionError::Refused(format!(
                 "seed {seed} does not fit a session file (at most 2^63 - 1)"
@@ -1655,6 +1662,21 @@ impl Session {
         }
         if file.versions.is_empty() {
             diagnostics.push(at(0, "the session lists no versions".to_owned()));
+        }
+        if !file.provenance.included_projects.is_empty() {
+            let keys: Vec<&str> = file
+                .provenance
+                .included_projects
+                .iter()
+                .map(|p| p.key.as_str())
+                .collect();
+            diagnostics.push(at(
+                0,
+                format!(
+                    "the session was recorded from a project that includes others ({}); a session with includes cannot be replayed yet (ADR 0035, phase 4)",
+                    keys.join(", ")
+                ),
+            ));
         }
         let conversion = file.conversion.as_ref().map(|name| {
             let found = Conversion::from_name(name.get_ref());

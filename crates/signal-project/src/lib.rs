@@ -33,6 +33,7 @@
 pub mod archive;
 mod diagnostic;
 mod diff;
+mod include;
 mod library;
 pub mod live;
 mod locate;
@@ -43,6 +44,7 @@ pub mod provenance;
 mod schema;
 pub mod schematic;
 pub mod session;
+mod slot;
 mod structure;
 pub mod vendor;
 mod write;
@@ -62,11 +64,15 @@ use toml::Spanned;
 
 pub use diagnostic::{Diagnostic, Severity, located};
 pub use diff::{DiffOptions, ParameterChange, ProjectEdit, diff, diff_with};
+pub use include::{IncludeInfo, MAX_DEPTH, included_paths};
 pub use library::{LIBRARY_FOLDER, Library, LibraryComposite, is_library_file};
 pub use pattern::{
     MAX_LANES, MAX_LENGTH, MAX_NOTES, MAX_STEP, MAX_STEPS, NOTES, PATTERNS, STEPS, pattern_kind,
 };
 pub use schema::schema;
+pub use slot::{
+    Interface, InterfacePort, LibraryInterface, Match, Role, SlotResolution, library_interfaces,
+};
 pub use structure::{library_modules, library_parameters};
 pub use write::{WriteError, write_parameter};
 
@@ -82,6 +88,9 @@ pub const PROJECT_FILE: &str = "project.toml";
 
 /// The folder of composite files in a project folder.
 const COMPOSITES: &str = "composites";
+
+/// The folder of slot interface templates in a project folder (ADR 0037 §3).
+pub const INTERFACES: &str = "interfaces";
 
 /// The plan version of a loaded project (ADR 0006).
 const PLAN_VERSION: u64 = 1;
@@ -130,6 +139,7 @@ impl fmt::Display for LoadError {
 impl std::error::Error for LoadError {}
 
 /// A loaded project: its settings and its graph description.
+#[derive(Clone)]
 pub struct Project {
     /// `[project] name`.
     pub name: String,
@@ -149,12 +159,16 @@ pub struct Project {
     /// files reference, transitively, in name order. Not project files:
     /// they are in neither `files` nor `composites`.
     pub library: Vec<LibraryComposite>,
-    /// Every pattern in `patterns/` by name, with the index of its file.
+    /// Every pattern in `patterns/` by name, with the index of its file
+    /// (and, qualified, every included project's).
     patterns: BTreeMap<String, (usize, Pattern)>,
     spans: SourceMap,
     /// The byte offsets in `project.toml` of the `sample_rate` and `seed`
     /// values (0 for a key left out).
     settings_at: (usize, usize),
+    /// ADR 0035, 0037: the projects this one includes or loads into slots,
+    /// and what they bring.
+    content: include::Content,
 }
 
 /// A validated plan and its warnings.
@@ -163,15 +177,19 @@ pub struct Planned {
     pub plan: ExecutionPlan,
     /// Graph warnings, located in the files.
     pub warnings: Vec<Diagnostic>,
+    /// ADR 0037 §5: what the build decided for every slot (the match
+    /// tables, the dropped wires, the unheard outputs), in definition then
+    /// instance order. The plan carries no record of it.
+    pub slots: Vec<slot::SlotResolution>,
 }
 
 /// A project folder's files as read: `project.toml`, every
-/// `composites/*.toml` and every `patterns/*.toml`, each folder in name
-/// order, without checking what they say (a project that does not load can
-/// still be read and patched).
+/// `composites/*.toml`, every `patterns/*.toml` and every
+/// `interfaces/*.toml`, each folder in name order, without checking what
+/// they say (a project that does not load can still be read and patched).
 pub fn read_sources(dir: &Path) -> Result<Vec<SourceFile>, LoadError> {
     let mut paths = vec![PROJECT_FILE.to_owned()];
-    for folder in [COMPOSITES, pattern::PATTERNS] {
+    for folder in [COMPOSITES, pattern::PATTERNS, INTERFACES] {
         let full = dir.join(folder);
         match fs::read_dir(&full) {
             Ok(entries) => {
@@ -226,9 +244,18 @@ impl Project {
     }
 
     /// Loads the project folder `dir`: `project.toml` and every
-    /// `composites/*.toml`.
+    /// `composites/*.toml`, `patterns/*.toml` and `interfaces/*.toml`, and
+    /// every project it includes (ADR 0035), each read and checked by the
+    /// same rules in its own folder.
     pub fn load(dir: &Path) -> Result<Project, LoadError> {
-        Project::from_sources(read_sources(dir)?).map_err(LoadError::Invalid)
+        let files = read_sources(dir)?;
+        let canonical = fs::canonicalize(dir).map_err(|error| LoadError::Io {
+            path: dir.to_owned(),
+            error,
+        })?;
+        let chain = [canonical.clone()];
+        Project::assemble(files, Library::builtin(), Some(&canonical), &chain)
+            .map_err(LoadError::Invalid)
     }
 
     /// The addresses of every instance of composite `name` in the project
@@ -268,9 +295,24 @@ impl Project {
     }
 
     /// [`from_sources`](Project::from_sources) with `library` as the library.
+    /// Files in memory have no folder, so a project that includes another
+    /// (ADR 0035) is refused here: [`load`](Project::load) it from its folder.
     pub fn from_sources_with(
+        files: Vec<SourceFile>,
+        library: &Library,
+    ) -> Result<Project, Vec<Diagnostic>> {
+        Project::assemble(files, library, None, &[])
+    }
+
+    /// Loads a project from its files; `dir` is its canonical folder, where
+    /// the projects it includes are found, and `chain` the canonical
+    /// folders of the projects including it, outermost first, itself last
+    /// (ADR 0035 §8: cycles and depth).
+    fn assemble(
         mut files: Vec<SourceFile>,
         library: &Library,
+        dir: Option<&Path>,
+        chain: &[PathBuf],
     ) -> Result<Project, Vec<Diagnostic>> {
         files.sort_by(|a, b| {
             (a.path != PROJECT_FILE, &a.path).cmp(&(b.path != PROJECT_FILE, &b.path))
@@ -284,10 +326,28 @@ impl Project {
                 message: "the project folder has no project.toml".to_owned(),
             }]);
         }
+        let interface_prefix = format!("{INTERFACES}/");
+        let is_interface = |file: usize| {
+            files
+                .get(file)
+                .is_some_and(|f| f.path.starts_with(&interface_prefix))
+        };
+        let no_templates = BTreeMap::new();
         let mut builder = Builder {
             files: &files,
             library,
+            templates: &no_templates,
             diagnostics: Vec::new(),
+        };
+        let templates: BTreeMap<String, slot::Interface> = (1..files.len())
+            .filter(|&file| is_interface(file))
+            .filter_map(|file| builder.interface(file))
+            .collect();
+        let mut builder = Builder {
+            files: &files,
+            library,
+            templates: &templates,
+            diagnostics: builder.diagnostics,
         };
         let root = builder.project();
         let pattern_prefix = format!("{}/", pattern::PATTERNS);
@@ -297,7 +357,7 @@ impl Project {
                 .is_some_and(|f| f.path.starts_with(&pattern_prefix))
         };
         let composites: Vec<_> = (1..files.len())
-            .filter(|&file| !is_pattern(file))
+            .filter(|&file| !is_pattern(file) && !is_interface(file))
             .filter_map(|file| builder.composite(file))
             .collect();
         let patterns: BTreeMap<String, (usize, Pattern)> = (1..files.len())
@@ -309,17 +369,29 @@ impl Project {
             .iter()
             .filter_map(|f| f.path.strip_prefix(&pattern_prefix)?.strip_suffix(".toml"))
             .collect();
-        let Some((settings, root, root_spans)) = root else {
+        let Some((settings, mut root, mut root_spans)) = root else {
             return Err(builder.diagnostics);
         };
+        let mut composites = composites;
         let names: BTreeSet<&str> = composites.iter().map(|(c, _)| c.name.as_str()).collect();
         builder.check_pins(&root_spans, &names);
+        builder.check_reserved(&root_spans);
         builder.check_patterns(&root_spans, &names, &pattern_names);
         builder.check_shadowing(&root_spans, &names);
         for (_, spans) in &composites {
             builder.check_pins(spans, &names);
+            builder.check_reserved(spans);
             builder.check_patterns(spans, &names, &pattern_names);
             builder.check_shadowing(spans, &names);
+        }
+
+        // ADR 0035, 0037: the projects the files include or load, each
+        // read and checked in its own folder.
+        let mut content = include::Content::default();
+        {
+            let defs = std::iter::once((&mut root, &mut root_spans))
+                .chain(composites.iter_mut().map(|(c, s)| (c, s)));
+            content.load(defs, dir, chain, library, &mut builder.diagnostics, &files);
         }
 
         // ADR 0027 §4: the library composites the files reference,
@@ -331,6 +403,7 @@ impl Project {
         let mut builder = Builder {
             files: &combined,
             library,
+            templates: &templates,
             diagnostics: builder.diagnostics,
         };
         let used: Vec<_> = (files.len()..combined.len())
@@ -365,7 +438,7 @@ impl Project {
                 def,
             })
             .collect();
-        Ok(Project {
+        let mut project = Project {
             name: settings.name,
             sample_rate: settings.sample_rate,
             seed: settings.seed,
@@ -376,7 +449,11 @@ impl Project {
             patterns,
             spans,
             settings_at: (settings.sample_rate_at, settings.seed_at),
-        })
+            content: include::Content::default(),
+        };
+        project.content = content;
+        project.merge_included();
+        Ok(project)
     }
 
     /// Builds the execution plan with the module types of `registry`.
@@ -385,18 +462,102 @@ impl Project {
     /// its instances as part of the project, every other one as if it were
     /// instantiated once under its own name (its warnings are dropped). Errors
     /// of the first failing graph stage are reported, as `build_plan` does.
+    ///
+    /// Every included project (ADR 0035) is first planned alone, by every
+    /// rule; its problems are located in its files. Inside the host its
+    /// sinks are their taps, and slots (ADR 0037) are resolved into
+    /// ordinary instances of their content before the graph sees them.
     pub fn plan(&self, registry: &Registry) -> Result<Planned, Vec<Diagnostic>> {
         let mut errors = Vec::new();
+        for (canonical, included) in &self.content.projects {
+            let Err(found) = included.project.plan(registry) else {
+                continue;
+            };
+            let count = found.len();
+            for diagnostic in include::reroot(&included.shown, found) {
+                push_unique(&mut errors, diagnostic);
+            }
+            for entry in self
+                .content
+                .entries
+                .iter()
+                .filter(|e| e.canonical == *canonical)
+            {
+                let location = self.entry_location(&entry.def, &entry.instance);
+                let message = format!(
+                    "{}: `{}` does not plan ({count} problem{} in its files)",
+                    entry.instance,
+                    entry.written,
+                    if count == 1 { "" } else { "s" }
+                );
+                push_unique(
+                    &mut errors,
+                    self.diagnostic(Severity::Error, location, message),
+                );
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+
+        // The project's composites and the library composites it references
+        // (ADR 0027 §4), resolved alike by their module references, then
+        // what its includes bring, their sinks as taps (ADR 0035 §3).
+        let mut definitions = self.definitions();
+        definitions.extend(self.tapped(registry, &mut errors));
+        self.check_set(&definitions, registry, &mut errors);
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        let mut root_def = self.root.clone();
+        // ADR 0035 §2: alone, an export of a sink's tap output
+        // (`out.l_out`) names what the sink becomes when the project is
+        // included; it is checked against the tap, and left out here.
+        root_def.exports.outputs.retain(|export| {
+            let Some((instance, port)) = export.from.split_once('.') else {
+                return true;
+            };
+            let tap = self
+                .root
+                .instances
+                .iter()
+                .find(|i| i.name == instance)
+                .and_then(|i| registry.get(&i.module))
+                .filter(|t| t.descriptor.sink.is_some())
+                .and_then(|t| registry.sink_tap(t.descriptor.type_name))
+                .and_then(|tap| registry.get(tap));
+            match tap {
+                Some(tap) => !tap
+                    .descriptor
+                    .ports
+                    .iter()
+                    .any(|p| p.name == port && p.direction == signal_core::Direction::Out),
+                None => true,
+            }
+        });
+        let mut spans = self.spans.clone();
+        let mut extra_warnings = self.content.warnings.clone();
+        let slots = self.resolve_slots(
+            &mut root_def,
+            &mut definitions,
+            &mut spans,
+            registry,
+            &mut errors,
+            &mut extra_warnings,
+        );
+        if !errors.is_empty() {
+            return Err(errors);
+        }
         let root = Locator {
-            map: &self.spans,
+            map: &spans,
             root: Root::Project,
         };
-        // The project's composites and the library composites it references
-        // (ADR 0027 §4), resolved alike by their module references.
-        let definitions = self.definitions();
-        let planned = match build_plan(&self.root, &definitions, registry, PLAN_VERSION) {
+        let planned = match build_plan(&root_def, &definitions, registry, PLAN_VERSION) {
             Ok(plan) => {
                 let mut warnings = Vec::new();
+                for warning in extra_warnings {
+                    push_unique(&mut warnings, warning);
+                }
                 for warning in &plan.warnings {
                     let location = root.warning(warning);
                     push_unique(
@@ -404,7 +565,11 @@ impl Project {
                         self.diagnostic(Severity::Warning, location, warning.to_string()),
                     );
                 }
-                Some(Planned { plan, warnings })
+                Some(Planned {
+                    plan,
+                    warnings,
+                    slots,
+                })
             }
             Err(graph_errors) => {
                 for error in &graph_errors {
@@ -420,7 +585,9 @@ impl Project {
 
         let reachable = self.reachable_composites();
         for composite in &definitions {
-            if reachable.contains(composite.name.as_str()) {
+            // An include's own composites were validated when it was
+            // planned alone.
+            if reachable.contains(composite.name.as_str()) || composite.name.contains('/') {
                 continue;
             }
             // A library composite's instance is named by its name without
@@ -431,13 +598,14 @@ impl Project {
                     name: locate::instance_name(&composite.name).to_owned(),
                     module: composite.name.clone(),
                     parameters: BTreeMap::new(),
+                    scope: None,
                 }],
                 ..CompositeDef::default()
             };
             if let Err(graph_errors) = build_plan(&synthetic, &definitions, registry, PLAN_VERSION)
             {
                 let locator = Locator {
-                    map: &self.spans,
+                    map: &spans,
                     root: Root::Composite(&composite.name),
                 };
                 for error in &graph_errors {
@@ -464,6 +632,25 @@ impl Project {
             }
             _ => Err(errors),
         }
+    }
+
+    /// Where the instance `instance` of the definition `def` (`""`: the
+    /// root) is written: its module, project or load value.
+    fn entry_location(&self, def: &str, instance: &str) -> Location {
+        let spans = if def.is_empty() {
+            Some(&self.spans.root)
+        } else {
+            self.spans.composites.get(def)
+        };
+        spans
+            .and_then(|spans| {
+                let at = spans.instances.get(instance)?.module_span.start;
+                Some(Location {
+                    file: spans.file,
+                    offset: at,
+                })
+            })
+            .unwrap_or(Location { file: 0, offset: 0 })
     }
 
     /// The project's composites, then the library composites it references.
@@ -620,6 +807,7 @@ impl Project {
             .composites
             .iter()
             .chain(library)
+            .chain(&self.content.defs)
             .map(|c| (c.name.as_str(), c))
             .collect();
         let mut reached = BTreeSet::new();
@@ -640,13 +828,29 @@ impl Project {
     }
 
     fn diagnostic(&self, severity: Severity, location: Location, message: String) -> Diagnostic {
-        // Library files are numbered after the project's.
+        // Library files are numbered after the project's, included
+        // projects' files from `include::INCLUDED` on.
         let library = location
             .file
             .checked_sub(self.files.len())
             .and_then(|i| self.library.get(i))
             .map(|l| &l.source);
-        match self.files.get(location.file).or(library) {
+        let included = location
+            .file
+            .checked_sub(include::INCLUDED)
+            .and_then(|i| self.content.files.get(i));
+        // Qualified names read as written (`kick909`, not
+        // `/…/studio/kick909`).
+        let mut message = message;
+        for id in &self.content.ids {
+            message = message.replace(&format!("{id}/"), "");
+        }
+        let file = if location.file >= include::INCLUDED {
+            included
+        } else {
+            self.files.get(location.file).or(library)
+        };
+        match file {
             Some(file) => {
                 Diagnostic::at(severity, &file.path, &file.text, location.offset, message)
             }
@@ -689,6 +893,8 @@ struct Settings {
 struct Builder<'f> {
     files: &'f [SourceFile],
     library: &'f Library,
+    /// The project's interface templates (ADR 0037 §3), by name.
+    templates: &'f BTreeMap<String, slot::Interface>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -748,6 +954,26 @@ impl Builder<'_> {
                     def.file,
                     export.key.start,
                     "a composite cannot export a parameter named `gpu`: the key is reserved in instance tables".to_owned(),
+                );
+            }
+        }
+    }
+
+    /// ADR 0035 §1, ADR 0037 §2: the instance keys `module`, `project`,
+    /// `seed`, `set`, `slot`, `load` and `map` are reserved, so no
+    /// composite or project may export a parameter of those names (`gpu`
+    /// and `pattern` are checked with their own rules).
+    fn check_reserved(&mut self, def: &DefSpans) {
+        const RESERVED: [&str; 7] = ["module", "project", "seed", "set", "slot", "load", "map"];
+        for export in &def.exports {
+            if export.kind == ExportKind::Parameter && RESERVED.contains(&export.name.as_str()) {
+                self.error(
+                    def.file,
+                    export.key.start,
+                    format!(
+                        "a composite or project cannot export a parameter named `{}`: the key is reserved in instance tables",
+                        export.name
+                    ),
                 );
             }
         }
@@ -871,6 +1097,26 @@ impl Builder<'_> {
         }
     }
 
+    /// An interface template file (ADR 0037 §3): its name and interface.
+    fn interface(&mut self, file: usize) -> Option<(String, slot::Interface)> {
+        let source = self.files.get(file)?;
+        let stem = source
+            .path
+            .strip_prefix(&format!("{INTERFACES}/"))
+            .and_then(|p| p.strip_suffix(".toml"))
+            .unwrap_or(&source.path)
+            .to_owned();
+        match slot::parse_interface(&source.text, &stem) {
+            Ok(interface) => Some((stem, interface)),
+            Err(problems) => {
+                for (offset, message) in problems {
+                    self.error(file, offset, message);
+                }
+                None
+            }
+        }
+    }
+
     /// A pattern file (ADR 0028 §1–2): its name and what it holds.
     fn pattern(&mut self, file: usize) -> Option<(String, (usize, Pattern))> {
         let source = self.files.get(file)?;
@@ -933,14 +1179,19 @@ impl Builder<'_> {
             seed_at: seed.span().start,
             seed: seed.into_inner(),
         };
-        let (def, spans) = definition(
+        let templates = self.templates;
+        let (def, spans, problems) = definition(
             0,
             String::new(),
             0..0,
             parsed.instances,
             parsed.wiring,
-            Default::default(),
+            parsed.exports,
+            templates,
         );
+        for (offset, message) in problems {
+            self.error(0, offset, message);
+        }
         Some((settings, def, spans))
     }
 
@@ -999,14 +1250,19 @@ impl Builder<'_> {
         } else {
             name
         };
-        let (def, mut spans) = definition(
+        let templates = self.templates;
+        let (def, mut spans, problems) = definition(
             file,
             defined,
             name_span,
             parsed.instances,
             parsed.wiring,
             parsed.exports,
+            templates,
         );
+        for (offset, message) in problems {
+            self.error(file, offset, message);
+        }
         spans.category = parsed
             .composite
             .category
@@ -1016,7 +1272,15 @@ impl Builder<'_> {
     }
 }
 
-/// A graph definition and its spans from the parsed tables of `file`.
+/// Whether a `load` value names a project (ADR 0037 §2): it contains `/` or
+/// ends in `.signal`; every other value is a module reference.
+pub(crate) fn is_project_path(load: &str) -> bool {
+    load.contains('/') || load.ends_with(".signal")
+}
+
+/// A graph definition and its spans from the parsed tables of `file`, and
+/// the problems found in its instances' project and slot keys (offsets in
+/// `file`). `templates` are the project's interface templates.
 fn definition(
     file: usize,
     name: String,
@@ -1024,7 +1288,9 @@ fn definition(
     instances: Option<Spanned<Instances>>,
     wiring: Wiring,
     exports: model::ExportsSection,
-) -> (CompositeDef, DefSpans) {
+    templates: &BTreeMap<String, slot::Interface>,
+) -> (CompositeDef, DefSpans, Vec<slot::Problem>) {
+    let mut problems = Vec::new();
     let mut spans = DefSpans {
         file,
         name: name_span,
@@ -1034,6 +1300,7 @@ fn definition(
         exports: Vec::new(),
         category: None,
         description: None,
+        contents: BTreeMap::new(),
     };
     let mut def = CompositeDef {
         name,
@@ -1043,9 +1310,8 @@ fn definition(
     for (key, entry) in instances.map(Spanned::into_inner).unwrap_or_default() {
         let key_span = key.span();
         let instance = key.into_inner();
+        let entry_span = entry.span();
         let entry = entry.into_inner();
-        let module_span = entry.module.span();
-        let module = entry.module.into_inner();
         let gpu = entry.gpu.map(|g| (g.get_ref().clone(), g.span()));
         let pattern = entry.pattern.map(|p| (p.get_ref().clone(), p.span()));
         let mut parameters = BTreeMap::new();
@@ -1055,6 +1321,99 @@ fn definition(
             let key = key.into_inner();
             parameters.insert(key.clone(), value.into_inner());
             parameter_spans.insert(key, spans);
+        }
+        // What the instance is: a module (its reference), an included
+        // project or a loaded slot (a placeholder until the include is
+        // read: an empty `module`), or an empty slot (no instance).
+        let (module, module_span, planned) = match (&entry.module, &entry.project, &entry.slot) {
+            (Some(module), _, _) => (module.get_ref().clone(), module.span(), true),
+            (None, Some(project), _) => (String::new(), project.span(), true),
+            (None, None, Some(slot)) => match &entry.load {
+                Some(load) if is_project_path(load.get_ref()) => (String::new(), load.span(), true),
+                Some(load) => (load.get_ref().clone(), load.span(), true),
+                None => (String::new(), slot.span(), false),
+            },
+            (None, None, None) => (String::new(), entry_span.clone(), false),
+        };
+        if entry.module.is_none() {
+            for (key, given) in [("gpu", &gpu), ("pattern", &pattern)] {
+                if let Some((_, span)) = given {
+                    problems.push((
+                        span.start,
+                        format!(
+                            "{instance}: `{key}` belongs on a primitive module instance, not on a project or a slot"
+                        ),
+                    ));
+                }
+            }
+            let slot = entry.slot.as_ref().map(|slot| {
+                let span = slot.span();
+                let interface =
+                    match slot::resolve(slot.get_ref(), span.start, templates) {
+                        Ok(interface) => Some(interface),
+                        Err(found) => {
+                            problems.extend(found.into_iter().map(|(offset, message)| {
+                                (offset, format!("{instance}: {message}"))
+                            }));
+                            None
+                        }
+                    };
+                let map = entry
+                    .map
+                    .as_ref()
+                    .map(|m| {
+                        m.get_ref()
+                            .iter()
+                            .map(|(k, v)| {
+                                (k.get_ref().clone(), k.span(), v.get_ref().clone(), v.span())
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                locate::SlotSpans {
+                    span,
+                    interface,
+                    load: entry.load.as_ref().map(|l| (l.get_ref().clone(), l.span())),
+                    map,
+                }
+            });
+            let seed = entry.seed.as_ref().map(|s| (*s.get_ref(), s.span()));
+            if let (Some(slot), Some((_, span))) = (&slot, &seed)
+                && slot
+                    .load
+                    .as_ref()
+                    .is_none_or(|(load, _)| !is_project_path(load))
+            {
+                problems.push((
+                    span.start,
+                    format!(
+                        "{instance}: `seed` is a project's seed scope; this slot loads no project"
+                    ),
+                ));
+            }
+            let set = entry
+                .set
+                .as_ref()
+                .map(|set| {
+                    set.get_ref()
+                        .iter()
+                        .map(|(k, v)| (k.get_ref().clone(), k.span(), *v.get_ref()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            spans.contents.insert(
+                instance.clone(),
+                locate::ContentSpans {
+                    project: entry
+                        .project
+                        .as_ref()
+                        .map(|p| (p.get_ref().clone(), p.span())),
+                    slot,
+                    seed,
+                    set,
+                    included: None,
+                },
+            );
         }
         spans.instances.insert(
             instance.clone(),
@@ -1067,11 +1426,14 @@ fn definition(
                 pattern,
             },
         );
-        def.instances.push(InstanceDef {
-            name: instance,
-            module,
-            parameters,
-        });
+        if planned {
+            def.instances.push(InstanceDef {
+                name: instance,
+                module,
+                parameters,
+                scope: None,
+            });
+        }
     }
 
     for connection in wiring.connections {
@@ -1124,7 +1486,7 @@ fn definition(
             .push(export_spans(ExportKind::Parameter, name, targets, group));
     }
     def.exports = exported;
-    (def, spans)
+    (def, spans, problems)
 }
 
 /// An export name and its targets, each with its span, and its schematic group.

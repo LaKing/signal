@@ -35,6 +35,7 @@ fn runner_process_with_vector_streams_allocates_and_frees_nothing() {
             .iter()
             .map(|&(k, v)| (k.to_owned(), v))
             .collect::<BTreeMap<_, _>>(),
+        scope: None,
     };
     let connection = |from: &str, to: &str| ConnectionDef {
         from: from.to_owned(),

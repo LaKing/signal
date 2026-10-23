@@ -306,6 +306,7 @@ fn composite(spec: &Spec) -> CompositeDef {
                 name: n.name.clone(),
                 module: n.type_name.to_owned(),
                 parameters: n.parameters.iter().cloned().collect(),
+                scope: None,
             })
             .collect(),
         connections: spec
@@ -340,6 +341,7 @@ fn graph(spec: &Spec, version: u64, seed: u64) -> Graph {
             address: address(&n.name),
             type_name: n.type_name.to_owned(),
             parameters: n.parameters.clone(),
+            stream: None,
         })
         .collect();
     let connections = spec

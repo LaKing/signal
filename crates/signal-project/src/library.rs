@@ -124,7 +124,8 @@ impl Library {
             if let Ok(file) = toml::from_str::<CompositeFile>(text) {
                 let instances = file.instances.map(|i| i.into_inner()).unwrap_or_default();
                 pending.extend(instances.into_values().filter_map(|entry| {
-                    let module = entry.into_inner().module.into_inner();
+                    let entry = entry.into_inner();
+                    let module = entry.module.or(entry.load)?.into_inner();
                     module.strip_prefix(LIBRARY_PREFIX).map(str::to_owned)
                 }));
             }

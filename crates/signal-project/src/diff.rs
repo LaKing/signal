@@ -86,21 +86,15 @@ pub fn diff_with(
     diff_plans(old, &before, new, after, options)
 }
 
-/// A changed sample rate or seed, which no running engine can take: the
-/// errors, located at the keys in `new`'s `project.toml`.
+/// A changed seed, which no running engine can take: the errors, located at
+/// the key in `new`'s `project.toml`. A changed `sample_rate` is no error
+/// (ADR 0036, the owner's decision of 2026-10-23): a live run plays at the
+/// output device's rate, never the project's, which is the rate of its
+/// renders and replays; the edit takes effect in the next render, and the
+/// running engine keeps the device's rate.
 pub(crate) fn restart(old: &Project, new: &Project) -> Result<(), Vec<Diagnostic>> {
     let mut restart = Vec::new();
-    let (sample_rate_at, seed_at) = new.settings_at;
-    if old.sample_rate != new.sample_rate {
-        restart.push(restart_error(
-            new,
-            sample_rate_at,
-            format!(
-                "sample_rate changed from {} to {}; a running project cannot change it: restart the project",
-                old.sample_rate, new.sample_rate
-            ),
-        ));
-    }
+    let (_, seed_at) = new.settings_at;
     if old.seed != new.seed {
         restart.push(restart_error(
             new,
@@ -154,6 +148,33 @@ pub(crate) fn diff_plans(
         .collect();
     if !repinned.is_empty() {
         return Err(repinned);
+    }
+    // ADR 0035 §4: an instance keeps its random stream when it survives a
+    // swap, so a changed stream key (an include's `seed` edited) cannot be
+    // taken live, as the project's own seed cannot: restart.
+    let old_streams: BTreeMap<&InstanceAddress, &PlanInstance> =
+        before.instances.iter().map(|i| (&i.address, i)).collect();
+    let reseeded: Vec<Diagnostic> = after
+        .instances
+        .iter()
+        .filter(|i| {
+            old_streams
+                .get(&i.address)
+                .is_some_and(|o| o.type_name == i.type_name && o.stream != i.stream)
+        })
+        .map(|i| {
+            new.instance_error(
+                &i.address,
+                format!(
+                    "{}: its random stream changed (an include's `seed`); a running project keeps every instance's stream: restart the project",
+                    i.address
+                ),
+            )
+        })
+        .take(1)
+        .collect();
+    if !reseeded.is_empty() {
+        return Err(reseeded);
     }
     let change = |value: f64| match options.ramp_frames {
         Some(frames) if frames > 0 => EventPayload::Ramp {

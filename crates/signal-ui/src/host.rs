@@ -2890,6 +2890,9 @@ impl Host {
             ),
             "vectors": {"slots": VECTOR_SLOTS, "maxRows": VECTOR_MAX_ROWS},
             "unsaved": self.unsaved_json(),
+            // ADR 0035 §8, ADR 0037 §7: includes (with their rate notes)
+            // and slots; null without either.
+            "content": self.run.as_ref().map(|r| r.current.content_json(&self.registry, self.rate)),
         });
         if restarted {
             describe = with(describe, "restarted", json!(true));

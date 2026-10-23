@@ -3,7 +3,7 @@
 //! own (`docs/project-format.md` §10).
 //!
 //! [`pack`] takes what a project reads (`project.toml`, `composites/*.toml`,
-//! `patterns/*.toml`, the files under `ui/`) and nothing else, in sorted path order, deflated,
+//! `patterns/*.toml`, `interfaces/*.toml`, the files under `ui/`) and nothing else, in sorted path order, deflated,
 //! with a fixed timestamp and fixed permissions, so the same folder always
 //! gives the same bytes. [`unpack`] checks every entry before it writes one:
 //! relative paths only, regular files only, at most [`Limits::DEFAULT`]
@@ -71,6 +71,10 @@ pub enum ArchiveError {
     },
     /// The folder has no `project.toml`, or the archive none at its root.
     NoProjectFile,
+    /// The project includes other projects (ADR 0035), which a `.signal`
+    /// file cannot hold yet (`pack --embed` is phase 4's): their paths as
+    /// written.
+    Includes(Vec<String>),
     /// The bytes are not a zip archive (or one this reader cannot read).
     NotAnArchive(String),
     /// More entries than [`Limits::entries`].
@@ -107,6 +111,11 @@ impl fmt::Display for ArchiveError {
         match self {
             ArchiveError::Io { path, error } => write!(f, "{}: {error}", path.display()),
             ArchiveError::NoProjectFile => write!(f, "no {PROJECT_FILE} at the project's root"),
+            ArchiveError::Includes(paths) => write!(
+                f,
+                "the project includes other projects ({}), which a .signal file cannot hold yet (ADR 0035, phase 4): keep it as a folder",
+                paths.join(", ")
+            ),
             ArchiveError::NotAnArchive(reason) => write!(f, "not a .signal archive: {reason}"),
             ArchiveError::TooManyEntries { count, max } => {
                 write!(f, "{count} entries, more than the {max} allowed")
@@ -150,13 +159,14 @@ pub fn is_project_file(path: &Path) -> bool {
 }
 
 /// Whether a project reads the file at `relative` (`/`-separated): its
-/// `project.toml`, a composite in `composites/`, a pattern in `patterns/` or
-/// a file under `ui/`.
+/// `project.toml`, a composite in `composites/`, a pattern in `patterns/`,
+/// an interface template in `interfaces/` (ADR 0037 §3) or a file under
+/// `ui/`.
 fn read_by_project(relative: &str) -> bool {
     let parts: Vec<&str> = relative.split('/').collect();
     match parts.as_slice() {
         [PROJECT_FILE] => true,
-        ["composites" | "patterns", name] => name.ends_with(".toml"),
+        ["composites" | "patterns" | "interfaces", name] => name.ends_with(".toml"),
         ["ui", _, ..] => true,
         _ => false,
     }
@@ -181,14 +191,19 @@ fn project_files(dir: &Path) -> Result<BTreeMap<String, PathBuf>, ArchiveError> 
             let kind = entry.file_type().map_err(io_error(&path))?;
             if kind.is_symlink()
                 && prefix.is_empty()
-                && (name == "composites" || name == "patterns" || name == "ui")
+                && (name == "composites"
+                    || name == "patterns"
+                    || name == "interfaces"
+                    || name == "ui")
             {
                 return Err(ArchiveError::Symlink(relative));
             }
             if kind.is_dir() {
-                // Only composites/, patterns/ and ui/ hold files a project reads.
+                // Only composites/, patterns/, interfaces/ and ui/ hold files
+                // a project reads.
                 let top = relative.split('/').next().unwrap_or_default();
-                if (top == "composites" || top == "patterns") && prefix.is_empty() || top == "ui" {
+                let flat = matches!(top, "composites" | "patterns" | "interfaces");
+                if flat && prefix.is_empty() || top == "ui" {
                     pending.push((path, format!("{relative}/")));
                 }
             } else if read_by_project(&relative) {
@@ -210,6 +225,14 @@ fn project_files(dir: &Path) -> Result<BTreeMap<String, PathBuf>, ArchiveError> 
 /// The project folder `dir` as a `.signal` archive.
 pub fn pack(dir: &Path) -> Result<Vec<u8>, ArchiveError> {
     let files = project_files(dir)?;
+    // ADR 0035 §13: an include's files are not the folder's; packing the
+    // folder alone would make an archive that does not load.
+    if let Ok(sources) = crate::read_sources(dir) {
+        let included = crate::include::included_paths(&sources);
+        if !included.is_empty() {
+            return Err(ArchiveError::Includes(included));
+        }
+    }
     let limits = Limits::DEFAULT;
     if files.len() > limits.entries {
         return Err(ArchiveError::TooManyEntries {
@@ -589,6 +612,7 @@ mod tests {
             "project.toml",
             "composites/kick.toml",
             "patterns/melody.toml",
+            "interfaces/deck.toml",
             "ui/main.html",
             "ui/assets/a.png",
         ] {
@@ -600,6 +624,7 @@ mod tests {
             "composites/x/a.toml",
             "patterns/a.txt",
             "patterns/x/a.toml",
+            "interfaces/x/a.toml",
             "renders/a.wav",
             "ui",
         ] {

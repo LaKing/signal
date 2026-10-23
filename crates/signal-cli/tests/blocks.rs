@@ -413,6 +413,7 @@ fn voices(n: usize) -> (ExecutionPlan, u32, u64) {
                 name: name.clone(),
                 module: "std.mix".to_owned(),
                 parameters: Default::default(),
+                scope: None,
             });
             for (input, from) in ["a", "b", "c", "d"].iter().zip(group) {
                 root.connections

@@ -125,11 +125,44 @@ expression: text
       "additionalProperties": {
         "type": "number"
       },
-      "description": "An instance: its module, the GPU device it is pinned to (`gpu`, a device id or index; GPU-backed instances only), the pattern whose data it takes (`pattern`, the name of patterns/<name>.toml; types that take one only), and the parameter values set on it.",
+      "description": "An instance: its module (`module`), or an included project (`project`, a folder path, ADR 0035), or a slot (`slot`, its interface, with optional `load` and `map`, ADR 0037); exactly one of the three. A module instance may take a GPU device pin (`gpu`) and a pattern (`pattern`); a project or a slot a `seed` and `set` overrides. Every other key is a parameter value.",
+      "oneOf": [
+        {
+          "required": [
+            "module"
+          ]
+        },
+        {
+          "required": [
+            "project"
+          ]
+        },
+        {
+          "required": [
+            "slot"
+          ]
+        }
+      ],
       "properties": {
         "gpu": {
           "minLength": 1,
           "type": "string"
+        },
+        "load": {
+          "type": "string"
+        },
+        "map": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "const": false
+              }
+            ]
+          },
+          "type": "object"
         },
         "module": {
           "$ref": "#/$defs/ModuleRef"
@@ -137,10 +170,86 @@ expression: text
         "pattern": {
           "pattern": "^[a-z][a-z0-9_]*$",
           "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "seed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "set": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "type": "object"
+        },
+        "slot": {
+          "$ref": "#/$defs/SlotSpec"
+        }
+      },
+      "type": "object"
+    },
+    "InterfaceFile": {
+      "additionalProperties": false,
+      "description": "A slot interface template, `interfaces/<name>.toml` (ADR 0037 §3): ports\nand parameters with their types, and nothing inside.",
+      "properties": {
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/PortSpec"
+          },
+          "description": "Its inputs, by name.",
+          "type": "object"
+        },
+        "interface": {
+          "$ref": "#/$defs/InterfaceSection",
+          "description": "The template's name and description."
+        },
+        "outputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/PortSpec"
+          },
+          "description": "Its outputs, by name.",
+          "type": "object"
+        },
+        "parameters": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ParamSpec"
+          },
+          "description": "Its parameters, by name.",
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 1,
+          "description": "The format version of this file; this version of Signal reads 1.",
+          "type": "integer"
         }
       },
       "required": [
-        "module"
+        "schema_version",
+        "interface"
+      ],
+      "type": "object"
+    },
+    "InterfaceSection": {
+      "additionalProperties": false,
+      "description": "`[interface]`.",
+      "properties": {
+        "description": {
+          "default": null,
+          "description": "What the interface is for.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The template's name: its file name without `.toml`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
       ],
       "type": "object"
     },
@@ -155,6 +264,7 @@ expression: text
             "std.and",
             "std.atan2",
             "std.audio_out",
+            "std.audio_tap",
             "std.biquad",
             "std.body2d",
             "std.buffer1k",
@@ -415,10 +525,113 @@ expression: text
       ],
       "description": "One inner output port `instance.port`, or a table with it as `from` and the schematic's `group` of the export."
     },
+    "ParamSpec": {
+      "additionalProperties": false,
+      "description": "An interface parameter (ADR 0037 §3): a name with an optional `unit` and\n`group`; its range and default come from the content.",
+      "properties": {
+        "group": {
+          "default": null,
+          "description": "Presentation only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unit": {
+          "default": null,
+          "description": "Presentation only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "PortSpec": {
+      "anyOf": [
+        {
+          "enum": [
+            "audio",
+            "control",
+            "gate",
+            "trigger",
+            "frequency",
+            "gain",
+            "phase",
+            "generic",
+            "events"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "group": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "audio",
+                "control",
+                "gate",
+                "trigger",
+                "frequency",
+                "gain",
+                "phase",
+                "generic"
+              ]
+            },
+            "range": {
+              "items": {
+                "type": "number"
+              },
+              "minItems": 2,
+              "type": "array"
+            },
+            "rate": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "shape": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "signal",
+                    "events"
+                  ]
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "vector": {
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "vector"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "unit": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      ],
+      "description": "An interface port (ADR 0037 §3): a kind (a signal of that kind at rate 1), \"events\", or a table."
+    },
     "ProjectFile": {
       "additionalProperties": false,
       "description": "A Signal project file, `project.toml`.",
       "properties": {
+        "exports": {
+          "$ref": "#/$defs/ExportsSection",
+          "description": "ADR 0035 §2: what the project exposes when another project includes\nit (or loads it into a slot). Rendered alone, they mean nothing."
+        },
         "instances": {
           "additionalProperties": {
             "$ref": "#/$defs/InstanceEntry"
@@ -473,6 +686,47 @@ expression: text
         "name"
       ],
       "type": "object"
+    },
+    "SlotSpec": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "inputs": {
+              "additionalProperties": {
+                "$ref": "#/$defs/PortSpec"
+              },
+              "type": "object"
+            },
+            "outputs": {
+              "additionalProperties": {
+                "$ref": "#/$defs/PortSpec"
+              },
+              "type": "object"
+            },
+            "parameters": {
+              "additionalProperties": {
+                "$ref": "#/$defs/ParamSpec"
+              },
+              "type": "object"
+            },
+            "remove": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        }
+      ],
+      "description": "A slot's interface (ADR 0037 §2): a template name (lib.<name> or interfaces/<name>.toml), or a table declaring it, optionally from a template with ports removed, added or retyped."
     },
     "StepsFile": {
       "additionalProperties": false,
@@ -598,7 +852,10 @@ expression: text
     },
     {
       "$ref": "#/$defs/StepsFile"
+    },
+    {
+      "$ref": "#/$defs/InterfaceFile"
     }
   ],
-  "title": "Signal project, composite and pattern files"
+  "title": "Signal project, composite, pattern and interface files"
 }

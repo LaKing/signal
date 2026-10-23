@@ -33,11 +33,13 @@ fn plan(registry: &Registry, scale: f64, gain: f64) -> ExecutionPlan {
                 name: "osc".to_owned(),
                 module: "std.sine_osc".to_owned(),
                 parameters: BTreeMap::from([("freq".to_owned(), 440.0)]),
+                scope: None,
             },
             InstanceDef {
                 name: "out".to_owned(),
                 module: "std.audio_out".to_owned(),
                 parameters: BTreeMap::from([("gain".to_owned(), gain)]),
+                scope: None,
             },
         ],
         connections: vec![connection("out.l"), connection("out.r")],

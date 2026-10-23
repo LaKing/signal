@@ -50,6 +50,7 @@ pub fn graph_of(plan: &ExecutionPlan, seed: u64) -> Graph {
             address: i.address.clone(),
             type_name: i.type_name.to_owned(),
             parameters: i.parameters.iter().map(|(k, &v)| (k.clone(), v)).collect(),
+            stream: i.stream.clone(),
         })
         .collect();
     let connections = plan

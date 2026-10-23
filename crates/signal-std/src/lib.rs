@@ -22,6 +22,7 @@
 //! | `std.noise` | [`Noise`] | direct | `generator` |
 //! | `std.transport` | [`Transport`] | direct | `event` |
 //! | `std.audio_out` | [`AudioOut`] | direct, audio sink | `io` |
+//! | `std.audio_tap` | [`AudioTap`] | direct, the tap of `std.audio_out` (ADR 0035 §3) | `io` |
 //! | `std.osc` | [`Osc`] | direct | `generator` |
 //! | `std.svf` | [`Svf`] | direct | `filter` |
 //! | `std.onepole` | [`OnePole`] | direct | `filter` |
@@ -155,6 +156,7 @@ mod add;
 mod adsr;
 mod arith;
 mod audio_out;
+mod audio_tap;
 mod biquad;
 mod body2d;
 mod bridge;
@@ -215,6 +217,7 @@ pub use add::Add;
 pub use adsr::Adsr;
 pub use arith::{Div, Floor, Fract, Mod, Neg, Round, Sign};
 pub use audio_out::AudioOut;
+pub use audio_tap::AudioTap;
 pub use biquad::Biquad;
 pub use body2d::Body2d;
 pub use bridge::BRIDGE_ROWS;
@@ -399,6 +402,7 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<Noise>(),
         direct::<Transport>(),
         direct::<AudioOut>(),
+        direct::<AudioTap>(),
         direct::<Osc>(),
         direct::<Svf>(),
         direct::<OnePole>(),
@@ -482,6 +486,9 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
     // ADR 0033: a sequencer counts ticks or follows a position, not both.
     registry.exclusive_inputs("std.note_seq", "tick", "follow");
     registry.exclusive_inputs("std.step_seq8", "tick", "follow");
+    // ADR 0035 §3: inside an included project, the audio sink is planned
+    // as its tap.
+    registry.set_sink_tap("std.audio_out", "std.audio_tap");
     for module_type in vector::types() {
         registry.register(*module_type)?;
     }
@@ -745,7 +752,7 @@ pub(crate) const BIPOLAR: Option<Range> = Some(Range {
 mod tests {
     use super::*;
 
-    const NAMES: [&str; 74] = [
+    const NAMES: [&str; 75] = [
         "std.sine_osc",
         "std.exp_env",
         "std.mul",
@@ -757,6 +764,7 @@ mod tests {
         "std.noise",
         "std.transport",
         "std.audio_out",
+        "std.audio_tap",
         "std.osc",
         "std.svf",
         "std.onepole",
@@ -982,7 +990,7 @@ mod tests {
             );
         }
         let vectors = vector::types().iter().map(|t| t.descriptor.type_name);
-        for name in NAMES[39..].iter().copied().chain(vectors) {
+        for name in NAMES[40..].iter().copied().chain(vectors) {
             let d = registry.get(name).unwrap().descriptor;
             assert_eq!(d.category, Some(category::CORE), "{name}");
             assert_eq!(d.feedthrough, signal_core::Feedthrough::Direct, "{name}");

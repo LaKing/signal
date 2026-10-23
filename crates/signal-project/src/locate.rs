@@ -22,6 +22,7 @@ pub(crate) struct Location {
 }
 
 /// The spans of one definition: the project root or a composite.
+#[derive(Clone)]
 pub(crate) struct DefSpans {
     pub(crate) file: usize,
     /// The composite's `name` value; `0..0` for the project root.
@@ -35,6 +36,39 @@ pub(crate) struct DefSpans {
     pub(crate) category: Option<(String, Span)>,
     /// A composite's `description`.
     pub(crate) description: Option<String>,
+    /// ADR 0035, 0037: the instances that include a project or are slots,
+    /// by name, with what they say.
+    pub(crate) contents: BTreeMap<String, ContentSpans>,
+}
+
+/// An instance that includes a project (ADR 0035 §1) or is a slot (ADR 0037
+/// §2), as written.
+#[derive(Clone, Debug)]
+pub(crate) struct ContentSpans {
+    /// `project = "<path>"` and the value's span.
+    pub(crate) project: Option<(String, Span)>,
+    /// The slot, if it is one.
+    pub(crate) slot: Option<SlotSpans>,
+    /// `seed` and the value's span.
+    pub(crate) seed: Option<(u64, Span)>,
+    /// `set`: each key, its span and its value.
+    pub(crate) set: Vec<(String, Span, f64)>,
+    /// The canonical folder of the project it includes or loads, once
+    /// loaded.
+    pub(crate) included: Option<std::path::PathBuf>,
+}
+
+/// A slot's keys, as written.
+#[derive(Clone, Debug)]
+pub(crate) struct SlotSpans {
+    /// The `slot` value's span.
+    pub(crate) span: Span,
+    /// Its resolved interface; `None` when it did not resolve (reported).
+    pub(crate) interface: Option<crate::slot::Interface>,
+    /// `load` and its span.
+    pub(crate) load: Option<(String, Span)>,
+    /// `map`: each key and its span, its value and its span.
+    pub(crate) map: Vec<(String, Span, crate::model::MapValue, Span)>,
 }
 
 /// The instance name a synthetic root gives the composite `name`: the name
@@ -46,6 +80,7 @@ pub(crate) fn instance_name(name: &str) -> &str {
 }
 
 /// The spans of one instance.
+#[derive(Clone)]
 pub(crate) struct InstanceSpans {
     pub(crate) key: Span,
     pub(crate) module: String,
@@ -59,6 +94,7 @@ pub(crate) struct InstanceSpans {
 }
 
 /// The spans of one connection.
+#[derive(Clone)]
 pub(crate) struct ConnectionSpans {
     pub(crate) entry: Span,
     pub(crate) from: (String, Span),
@@ -76,6 +112,7 @@ pub(crate) enum ExportKind {
 }
 
 /// The spans of one export.
+#[derive(Clone)]
 pub(crate) struct ExportSpans {
     pub(crate) kind: ExportKind,
     pub(crate) name: String,
@@ -86,6 +123,7 @@ pub(crate) struct ExportSpans {
 }
 
 /// The spans of every definition of a project.
+#[derive(Clone)]
 pub(crate) struct SourceMap {
     pub(crate) root: DefSpans,
     pub(crate) composites: BTreeMap<String, DefSpans>,

@@ -31,8 +31,10 @@ use signal_core::{Direction, PortAddress, PortShape, Registry};
 
 pub use def::{
     CompositeDef, ConnectionDef, Exports, InputExport, InstanceDef, OutputExport, ParameterExport,
+    ScopeDef,
 };
 pub use error::{GraphError, GraphWarning, PlanBudget, Restriction};
+pub use flatten::ModulePort;
 pub use plan::{ExecutionPlan, PlanInstance, Source};
 
 /// The most instances, composite or primitive, a plan flattens to: about 9
@@ -51,6 +53,21 @@ pub const MAX_PLAN_CONNECTIONS: usize = 1 << 20;
 /// this bounds those buffers to 1 GiB; the engine checks its whole footprint
 /// again at the block capacity it runs (`docs/semantics.md` §16).
 pub const MAX_PLAN_ROWS: usize = 1 << 19;
+
+/// The ports and parameters an instance of `module` has (ADR 0037 §4): a
+/// primitive type's declared ports and parameters (in descriptor order), or
+/// a composite's exports (in name order), each with the direction, shape,
+/// rate and kind of the inner port behind it, as flattening resolves it. A
+/// pure query over the definitions: nothing is planned. `Err` with the
+/// graph errors when `module` does not resolve, or its definition is
+/// broken.
+pub fn ports_of(
+    module: &str,
+    composites: &[CompositeDef],
+    registry: &Registry,
+) -> Result<Vec<ModulePort>, Vec<GraphError>> {
+    flatten::ports_of(module, composites, registry)
+}
 
 /// Builds the execution plan of the project `root`.
 ///
@@ -137,6 +154,7 @@ pub fn build_plan(
             parameters: instance.parameters,
             descriptor: instance.descriptor,
             table: None,
+            stream: instance.stream,
         })
         .collect();
 

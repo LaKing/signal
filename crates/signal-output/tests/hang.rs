@@ -99,6 +99,7 @@ fn plan(registry: &Registry) -> ExecutionPlan {
         name: name.to_owned(),
         module: module.to_owned(),
         parameters: Default::default(),
+        scope: None,
     };
     let connection = |from: &str, to: &str| ConnectionDef {
         from: from.to_owned(),

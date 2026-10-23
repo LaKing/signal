@@ -1,0 +1,21 @@
+# A playing song (ADR 0037 §3): follows a position if given one; stereo
+# out. Any project matches its outputs through its sink's default exports
+# `l` and `r` (ADR 0035 §2).
+schema_version = 1
+
+[interface]
+name = "deck"
+description = "A playing song: follows a position in beats (with its jumps, running gate and tempo) if given one; stereo out. `release` is what its playhead does when following stops."
+
+[inputs]
+position = { kind = "control", unit = "beats", group = "transport" }
+jump = { shape = "events", kind = "trigger", group = "transport" }
+running = { kind = "gate", group = "transport" }
+tempo = { kind = "control", unit = "bpm", group = "transport" }
+
+[outputs]
+l = { kind = "audio" }
+r = { kind = "audio" }
+
+[parameters]
+release = { group = "transport" }

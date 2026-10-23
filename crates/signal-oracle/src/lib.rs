@@ -26,7 +26,7 @@
 mod oracle;
 mod probe;
 
-use signal_core::{EventPayload, InstanceAddress, PortAddress};
+use signal_core::{EventPayload, InstanceAddress, PortAddress, StreamKey};
 
 pub use oracle::{OracleError, run};
 pub use probe::{PROBE_INPUTS, register_probe};
@@ -52,6 +52,9 @@ pub struct Instance {
     pub type_name: String,
     /// Initial parameter bases by name; the descriptor's default otherwise.
     pub parameters: Vec<(String, f64)>,
+    /// Its random stream's key under a scope root (ADR 0035 §4); `None`
+    /// derives the stream from the script's seed and the address.
+    pub stream: Option<StreamKey>,
 }
 
 /// A connection; `scale` multiplies a signal (events are not scaled).

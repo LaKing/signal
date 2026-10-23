@@ -99,6 +99,10 @@ struct ModulesArgs {
     /// `core`, `filter`; ADR 0027 §1).
     #[arg(long)]
     category: Option<String>,
+    /// List the library's slot interface templates instead (`lib.voice`,
+    /// `lib.instrument`, `lib.deck`; ADR 0037 §3).
+    #[arg(long, conflicts_with = "category")]
+    interfaces: bool,
 }
 
 /// Why a command failed.
@@ -262,6 +266,21 @@ fn execute(cli: &Cli) -> Result<(), Failure> {
         Command::Vendor(args) => vendor::run(args, cli.json),
         Command::Bench(args) => bench::run(args, &registry, setup, cli.json),
         Command::Devices(args) => devices::run(args, cli.json),
+        Command::Modules(args) if args.interfaces => {
+            let templates = signal_project::library_interfaces();
+            let text = if cli.json {
+                serde_json::to_string_pretty(&templates)
+                    .map_err(|e| Failure::Internal(e.to_string()))?
+            } else {
+                templates
+                    .iter()
+                    .map(describe_interface)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            print_stdout(&text);
+            Ok(())
+        }
         Command::Modules(args) => {
             let (descriptors, library) = modules(&registry, args.category.as_deref())?;
             if cli.json {
@@ -345,6 +364,42 @@ fn modules(
 /// A library composite for people, in the form [`describe`] gives a
 /// primitive type: name, description, category, ports (shape, kind, unit)
 /// and parameters (kind, unit, range, the composite's own default, combine).
+/// A library interface template, as `signal modules --interfaces` prints it.
+fn describe_interface(template: &signal_project::LibraryInterface) -> String {
+    let mut text = format!(
+        "{} (interface template, hash {})\n  {}\n",
+        template.name,
+        template.hash,
+        template
+            .interface
+            .description
+            .as_deref()
+            .unwrap_or_default()
+    );
+    for port in &template.interface.ports {
+        let role = match port.role {
+            signal_project::Role::Input => "in   ",
+            signal_project::Role::Output => "out  ",
+            signal_project::Role::Parameter => "param",
+        };
+        let shape = match port.shape {
+            signal_core::PortShape::Events => "events".to_owned(),
+            signal_core::PortShape::Vector(n) => format!("vector {n}"),
+            _ => "signal".to_owned(),
+        };
+        let unit = port
+            .unit
+            .as_ref()
+            .map(|u| format!(" [{u}]"))
+            .unwrap_or_default();
+        text.push_str(&format!(
+            "  {role} {} {shape} {:?}{unit}\n",
+            port.name, port.kind
+        ));
+    }
+    text
+}
+
 fn describe_library(entry: &Value) -> String {
     let text_of = |v: &Value| v.as_str().unwrap_or_default().to_owned();
     // `"audio"` as the descriptors' `Audio`, `"add"` as `Add`.

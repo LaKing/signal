@@ -236,7 +236,9 @@ impl Schedule {
 pub struct EngineConfig {
     /// The master rate in frames per second (the project sample rate).
     pub sample_rate: u32,
-    /// The master seed; each instance's stream is `RngStream::derive(seed, address)`.
+    /// The master seed; each instance's stream is `RngStream::derive(seed, address)`,
+    /// except under a scope root, where its plan instance's stream key decides
+    /// (ADR 0035 §4).
     pub seed: u64,
     /// The capacity of each incremental input queue: pushed external events
     /// ([`Engine::push_external`]) and pushed edits ([`Engine::push_suspend`]).
@@ -859,7 +861,7 @@ impl PlanState {
                     let context = PrepareContext {
                         sample_rate: f64::from(config.sample_rate),
                         max_frames: config.block_capacity,
-                        rng: RngStream::derive(config.seed, address),
+                        rng: RngStream::for_key(config.seed, address, instance.stream.as_ref()),
                         lent: lent.get_mut(index).and_then(Option::take),
                         generation,
                     };
@@ -1841,7 +1843,8 @@ pub(crate) struct Saved {
 impl Engine {
     /// Instantiates `plan`: creates every primitive through `registry`, prepares
     /// it with the sample rate, the block capacity and
-    /// `RngStream::derive(seed, address)`, and allocates every buffer the
+    /// `RngStream::derive(seed, address)` (or, under a scope root, from the
+    /// instance's stream key, ADR 0035 §4), and allocates every buffer the
     /// blocks need.
     ///
     /// `external` is the caller's frame-stamped event list, a convenience beside

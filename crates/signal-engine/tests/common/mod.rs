@@ -1049,6 +1049,7 @@ pub fn inst(name: &str, module: &str) -> InstanceDef {
         name: name.to_owned(),
         module: module.to_owned(),
         parameters: Default::default(),
+        scope: None,
     }
 }
 

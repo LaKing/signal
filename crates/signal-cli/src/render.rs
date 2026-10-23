@@ -148,6 +148,13 @@ pub(crate) fn render_project(
     let gpu_warnings = gpu.warnings();
     let mut provenance = provenance::collect(&provenance::source_dir(), &project.files);
     provenance.library_composite_hashes = project.library_hashes();
+    // ADR 0035 §13, ADR 0037 §3: what includes and slots bring; absent
+    // without them.
+    provenance
+        .project_file_hashes
+        .extend(project.include_file_hashes());
+    provenance.included_projects = project.included_projects();
+    provenance.library_interface_hashes = project.library_interface_hashes();
     let (manifest, metrics) = write_artifacts(&rendered, &args.out, provenance)
         .map_err(|e| e.into_failure(|e| render_failure(&project, dir, e)))?;
 
@@ -166,6 +173,12 @@ pub(crate) fn render_project(
         "manifest": manifest,
         "metrics": metrics,
     });
+    // ADR 0035 §8: an include written for another rate plays at the
+    // render's; said, never an error.
+    let rate_notes = project.rate_notes(sample_rate);
+    if !rate_notes.is_empty() {
+        output["notes"] = json!(rate_notes);
+    }
     if late > 0 {
         output["late_results"] = json!(late);
     }
@@ -177,6 +190,7 @@ pub(crate) fn render_project(
     }
     let mut notes: Vec<String> = warnings.iter().map(ToString::to_string).collect();
     notes.extend(gpu_warnings.iter().map(|w| format!("signal: {w}")));
+    notes.extend(rate_notes.iter().map(|n| format!("note: {n}")));
     if late > 0 {
         notes.push(format!(
             "warning: {late} due results of GPU-backed modules were lost (late_result faults in log.jsonl): those blocks are silent"

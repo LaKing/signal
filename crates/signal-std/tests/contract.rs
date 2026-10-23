@@ -64,6 +64,10 @@ mod audio_out {
     signal_contract::contract_tests!(super::std_type("std.audio_out"));
 }
 
+mod audio_tap {
+    signal_contract::contract_tests!(super::std_type("std.audio_tap"));
+}
+
 mod osc {
     signal_contract::contract_tests!(super::std_type("std.osc"));
 }

@@ -90,11 +90,13 @@ fn plan(registry: &Registry, gain: Option<f64>, version: u64) -> ExecutionPlan {
                 name: "source".to_owned(),
                 module: "test.half".to_owned(),
                 parameters: BTreeMap::new(),
+                scope: None,
             },
             InstanceDef {
                 name: "out".to_owned(),
                 module: module.to_owned(),
                 parameters,
+                scope: None,
             },
         ],
         connections: vec![connection("out.l"), connection("out.r")],

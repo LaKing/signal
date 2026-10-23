@@ -1,0 +1,48 @@
+# Two studios played together in one host (ADR 0035, phase 1): the M2.11
+# studio and the studio played from its own transport, each included as a
+# composite instance of the whole project, each on its own clock and its own
+# seed, mixed by the host.
+#
+# Signal flow:
+#
+#   studio (../studio, std.transport)                 ─ l, r ─► mix_l.a, mix_r.a
+#   studio_transport (./studio-transport, lib.transport) ─ l, r ─► mix_l.b, mix_r.b
+#   mix_l, mix_r (std.mix, 0.5 each) ─► out (gain 1) ─► l, r
+#
+# Neither included project declares `[exports]`, so each exports its audio
+# sink's channels `l` and `r`: inside the host its `std.audio_out` is planned
+# as its tap, `std.audio_tap`, whose outputs are what its own render records
+# (`audio.wav`, before the conversion to f32). The host's `out` is the one
+# audio sink. Mixing is a module here: `std.mix`, whose operands are ordered,
+# so the sum does not depend on the include names (`lib.mixer` comes with
+# ADR 0035's phase 3).
+#
+# `studio-transport/` is a copy of projects/studio-transport as committed in
+# M3.1, so this project's golden render does not move when that one is
+# edited.
+#
+# Safe gain: each studio plays at most 0.25 (−12 dBFS); halved and summed,
+# the host plays at most 0.25 too.
+schema_version = 1
+
+[project]
+name = "two-studios"
+sample_rate = 48000
+seed = 3
+
+[instances]
+studio = { project = "../studio" }
+studio_transport = { project = "studio-transport" }
+mix_l = { module = "std.mix", gain_a = 0.5, gain_b = 0.5 }
+mix_r = { module = "std.mix", gain_a = 0.5, gain_b = 0.5 }
+out = { module = "std.audio_out" }
+
+[wiring]
+connections = [
+  { from = "studio.l", to = "mix_l.a" },
+  { from = "studio.r", to = "mix_r.a" },
+  { from = "studio_transport.l", to = "mix_l.b" },
+  { from = "studio_transport.r", to = "mix_r.b" },
+  { from = "mix_l.out", to = "out.l" },
+  { from = "mix_r.out", to = "out.r" },
+]

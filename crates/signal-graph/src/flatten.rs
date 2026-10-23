@@ -16,10 +16,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use signal_core::{
     Direction, InstanceAddress, MAX_VECTOR_WIDTH, ModuleDescriptor, PortAddress, PortShape,
-    Registry, converter_shape,
+    Registry, StreamKey, converter_shape,
 };
 
-use crate::def::{CompositeDef, ConnectionDef};
+use crate::def::{CompositeDef, ConnectionDef, InstanceDef};
 use crate::error::{GraphError, PlanBudget};
 
 /// A primitive instance of the flattened graph.
@@ -28,6 +28,8 @@ pub(crate) struct FlatInstance {
     /// Every declared parameter: the default, or the value set on the instance
     /// or on an enclosing composite instance (the outermost wins).
     pub(crate) parameters: BTreeMap<String, f64>,
+    /// Its stream key under the innermost scope root (ADR 0035 §4), if any.
+    pub(crate) stream: Option<StreamKey>,
 }
 
 /// A connection between primitive ports.
@@ -175,6 +177,9 @@ struct Flattener<'a> {
     made: usize,
     /// The budget flattening stopped at, if any: nothing more is expanded.
     exceeded: Option<PlanBudget>,
+    /// The scope roots (ADR 0035 §4) being expanded, outermost first: each
+    /// root's address and seed.
+    scopes: Vec<(InstanceAddress, u64)>,
 }
 
 /// The widest vector port of `descriptor`, if any is wider than
@@ -227,6 +232,7 @@ pub(crate) fn flatten(
         errors,
         made: 0,
         exceeded: None,
+        scopes: Vec::new(),
     };
     flattener.expand(root, None, &mut vec![root.name.as_str()]);
     if flattener.errors.is_empty() {
@@ -269,7 +275,7 @@ impl<'a> Flattener<'a> {
                 });
                 continue;
             };
-            let local = self.instantiate(&address, &instance.module, &instance.parameters, stack);
+            let local = self.instantiate(&address, instance, stack);
             locals.insert(instance.name.as_str(), (address, local));
         }
 
@@ -333,15 +339,16 @@ impl<'a> Flattener<'a> {
         }
     }
 
-    /// Resolves the instance at `address` of module `module`, with the
-    /// parameter values set on it.
+    /// Resolves `instance` at `address`: its module, with the parameter
+    /// values set on it, under its scope root if it is one.
     fn instantiate(
         &mut self,
         address: &InstanceAddress,
-        module: &str,
-        parameters: &BTreeMap<String, f64>,
+        instance: &'a InstanceDef,
         stack: &mut Vec<&'a str>,
     ) -> Option<Local> {
+        let module = instance.module.as_str();
+        let parameters = &instance.parameters;
         if self.exceeded.is_some() {
             return None;
         }
@@ -371,9 +378,17 @@ impl<'a> Flattener<'a> {
                     None => self.unknown_parameter(address, name),
                 }
             }
+            if instance.scope.is_some() {
+                self.errors.push(GraphError::ScopeOnPrimitive {
+                    instance: address.clone(),
+                    module: module.to_owned(),
+                });
+                return None;
+            }
             let instance = FlatInstance {
                 descriptor,
                 parameters: values,
+                stream: self.stream_key(address),
             };
             self.instances.insert(address.clone(), instance);
             return Some(Local::Primitive(descriptor));
@@ -409,7 +424,13 @@ impl<'a> Flattener<'a> {
 
         let errors_before = self.errors.len();
         stack.push(def.name.as_str());
+        if let Some(scope) = instance.scope {
+            self.scopes.push((address.clone(), scope.seed));
+        }
         let interface = self.expand(def, Some(address), stack);
+        if instance.scope.is_some() {
+            self.scopes.pop();
+        }
         stack.pop();
         if self.errors.len() > errors_before {
             // The composite is broken, so its exports may be incomplete.
@@ -431,6 +452,19 @@ impl<'a> Flattener<'a> {
             }
         }
         Some(Local::Composite(interface))
+    }
+
+    /// The stream key of the primitive at `address` (ADR 0035 §4): the
+    /// innermost scope root's seed and the address relative to it; `None`
+    /// outside every scope root.
+    fn stream_key(&self, address: &InstanceAddress) -> Option<StreamKey> {
+        let (root, seed) = self.scopes.last()?;
+        // The root is a strict prefix of `address`: it is being expanded.
+        let relative = address.as_str().strip_prefix(root.as_str())?;
+        Some(StreamKey {
+            seed: *seed,
+            relative: relative.parse().ok()?,
+        })
     }
 
     /// Stops flattening at `budget`, reporting it once with the count it
@@ -591,4 +625,156 @@ impl<'a> Flattener<'a> {
     fn ok<T>(&mut self, result: Result<T, GraphError>) -> Option<T> {
         result.map_err(|error| self.errors.push(error)).ok()
     }
+}
+
+/// One port or parameter of a module as an instance of it shows it: a
+/// primitive's declared port or parameter, or a composite's export with the
+/// type of the inner port behind it ([`crate::ports_of`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModulePort {
+    /// Its name: the port, parameter or export name.
+    pub name: String,
+    /// In or out; a parameter is in.
+    pub direction: Direction,
+    /// Whether it is a parameter.
+    pub parameter: bool,
+    /// Its shape; a parameter is a signal.
+    pub shape: PortShape,
+    /// Its rate divisor.
+    pub rate: signal_core::RateDivisor,
+    /// Its kind.
+    pub kind: signal_core::PortKind,
+}
+
+/// The ports of `descriptor`'s type, in descriptor order: ports, then
+/// parameters.
+fn descriptor_ports(descriptor: &ModuleDescriptor) -> Vec<ModulePort> {
+    let ports = descriptor.ports.iter().map(|p| ModulePort {
+        name: p.name.to_owned(),
+        direction: p.direction,
+        parameter: false,
+        shape: p.shape,
+        rate: p.rate,
+        kind: p.kind,
+    });
+    let parameters = descriptor.parameters.iter().map(|p| ModulePort {
+        name: p.name.to_owned(),
+        direction: Direction::In,
+        parameter: true,
+        shape: PortShape::Signal,
+        rate: p.rate,
+        kind: p.kind,
+    });
+    ports.chain(parameters).collect()
+}
+
+/// See [`crate::ports_of`].
+pub(crate) fn ports_of(
+    module: &str,
+    composites: &[CompositeDef],
+    registry: &Registry,
+) -> Result<Vec<ModulePort>, Vec<GraphError>> {
+    if let Some(module_type) = registry.get(module) {
+        return Ok(descriptor_ports(&module_type.descriptor));
+    }
+    let instance = InstanceDef {
+        name: "module".to_owned(),
+        module: module.to_owned(),
+        ..InstanceDef::default()
+    };
+    let root = CompositeDef {
+        instances: vec![instance],
+        ..CompositeDef::default()
+    };
+    let mut library = BTreeMap::new();
+    for def in composites {
+        library.entry(def.name.as_str()).or_insert(def);
+    }
+    let mut flattener = Flattener {
+        registry,
+        composites: library,
+        instances: BTreeMap::new(),
+        connections: Vec::new(),
+        errors: Vec::new(),
+        made: 0,
+        exceeded: None,
+        scopes: Vec::new(),
+    };
+    let address: InstanceAddress = "/module".parse().map_err(|_| Vec::new())?;
+    let Some(root_instance) = root.instances.first() else {
+        return Err(Vec::new());
+    };
+    let local = flattener.instantiate(&address, root_instance, &mut vec![""]);
+    let interface = match local {
+        Some(Local::Composite(interface)) if flattener.errors.is_empty() => interface,
+        _ => return Err(flattener.errors),
+    };
+    let port_of = |port: &PortAddress| {
+        let descriptor = flattener.instances.get(&port.instance())?.descriptor;
+        descriptor
+            .ports
+            .iter()
+            .find(|p| p.name == port.port())
+            .copied()
+    };
+    let parameter_of = |port: &PortAddress| {
+        let descriptor = flattener.instances.get(&port.instance())?.descriptor;
+        descriptor
+            .parameters
+            .iter()
+            .find(|p| p.name == port.port())
+            .copied()
+    };
+    let mut ports = Vec::new();
+    for (name, targets) in &interface.inputs {
+        // The first inner port (in address order) gives the type; an input
+        // that fans out to ports of different types is the graph's to check
+        // per connection.
+        if let Some(port) = targets.first().and_then(port_of) {
+            ports.push(ModulePort {
+                name: name.clone(),
+                direction: Direction::In,
+                parameter: false,
+                shape: port.shape,
+                rate: port.rate,
+                kind: port.kind,
+            });
+        } else if let Some(parameter) = targets.first().and_then(parameter_of) {
+            // An exported input onto an inner parameter is still an input.
+            ports.push(ModulePort {
+                name: name.clone(),
+                direction: Direction::In,
+                parameter: false,
+                shape: PortShape::Signal,
+                rate: parameter.rate,
+                kind: parameter.kind,
+            });
+        }
+    }
+    for (name, from) in &interface.outputs {
+        if let Some(port) = port_of(from) {
+            ports.push(ModulePort {
+                name: name.clone(),
+                direction: Direction::Out,
+                parameter: false,
+                shape: port.shape,
+                rate: port.rate,
+                kind: port.kind,
+            });
+        }
+    }
+    for (name, targets) in &interface.parameters {
+        if let Some(parameter) = targets.first().and_then(parameter_of) {
+            ports.push(ModulePort {
+                name: name.clone(),
+                direction: Direction::In,
+                parameter: true,
+                shape: PortShape::Signal,
+                rate: parameter.rate,
+                kind: parameter.kind,
+            });
+        }
+    }
+    ports.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(ports)
 }

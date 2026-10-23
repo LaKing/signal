@@ -25,3 +25,11 @@ svf_core = "940cf89f0188e264"
 tanh_shaper_core = "73ac862501564041"
 tape_echo = "2229c4b8e2b245b9"
 transport = "7f20f2bbed23372b"
+
+# The library interface templates (ADR 0037 §3): FNV-1a 64 of each file's
+# text (a template has no render). A changed port set or type is a new name;
+# any changed row needs a CHANGELOG.md entry naming `lib.<name>` with it.
+[interfaces]
+deck = "c8fa72b11d0b70d4"
+instrument = "07b3870f5381b455"
+voice = "2dc66859dd2f5871"

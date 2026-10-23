@@ -36,6 +36,19 @@ pub struct InstanceDef {
     /// Parameter values by parameter name (for a composite, by exported parameter name).
     #[serde(default)]
     pub parameters: BTreeMap<String, f64>,
+    /// Makes this composite instance a **scope root** (ADR 0035 §4): every
+    /// primitive instance under it draws its random stream from the root's
+    /// seed and its address relative to the root, not from the plan's seed
+    /// and its full address. `None` (the default) changes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ScopeDef>,
+}
+
+/// A scope root's settings (ADR 0035 §4).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeDef {
+    /// The seed every random stream under the root derives from.
+    pub seed: u64,
 }
 
 /// A connection from an output port to an input port, both written `inst.port`

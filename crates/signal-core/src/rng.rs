@@ -118,6 +118,19 @@ impl Xoshiro256PlusPlus {
     }
 }
 
+/// Where an instance's random stream comes from when it lies under a scope
+/// root (ADR 0035 §4): the root's seed and the instance's address relative
+/// to that root (`/kick/noise` for `/drums/kick/noise` under the root
+/// `/drums`). The graph computes it; the engine derives the stream with
+/// [`RngStream::for_key`]. Domain-free: a seed and an address.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+pub struct StreamKey {
+    /// The scope root's seed.
+    pub seed: u64,
+    /// The address relative to the innermost scope root.
+    pub relative: InstanceAddress,
+}
+
 /// An instance's random stream: Xoshiro256++ seeded from the master seed and
 /// the instance address (ADR 0008), so every instance gets its own reproducible
 /// stream and renaming an instance changes it.
@@ -130,6 +143,20 @@ pub struct RngStream {
 const TWO_POW_NEG_53: f64 = 1.0 / (1u64 << 53) as f64;
 
 impl RngStream {
+    /// The stream of the instance at `address`: [`derive`](RngStream::derive)
+    /// from `key`'s seed and relative address when it lies under a scope root
+    /// (ADR 0035 §4), else from `master_seed` and `address`, as always.
+    pub fn for_key(
+        master_seed: u64,
+        address: &InstanceAddress,
+        key: Option<&StreamKey>,
+    ) -> RngStream {
+        match key {
+            Some(key) => RngStream::derive(key.seed, &key.relative),
+            None => RngStream::derive(master_seed, address),
+        }
+    }
+
     /// The stream of `address` under `master_seed`: Xoshiro256++ seeded with four
     /// successive SplitMix64 outputs, starting from
     /// `master_seed ^ fnv1a64(address.as_str().as_bytes())`.

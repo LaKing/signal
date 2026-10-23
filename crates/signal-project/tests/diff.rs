@@ -309,15 +309,15 @@ fn a_structural_edit_sets_only_survivors_whose_value_changed() {
 }
 
 #[test]
-fn a_changed_sample_rate_or_seed_is_an_error() {
-    let errors = edit_errors(&edited("sample_rate = 48000", "sample_rate = 44100"));
-    assert_eq!(errors.len(), 1);
-    assert!(
-        errors[0].starts_with("project.toml:6:15: error: sample_rate changed from 48000 to 44100"),
-        "{}",
-        errors[0]
+fn a_changed_seed_is_an_error_a_changed_sample_rate_is_not() {
+    // ADR 0036: a live run plays at the device's rate, so an edit of the
+    // project's sample_rate (its renders' rate) is no error.
+    let edit = diff(
+        &project(PROJECT),
+        &edited("sample_rate = 48000", "sample_rate = 44100"),
+        &registry(),
     );
-    assert!(errors[0].contains("restart the project"), "{}", errors[0]);
+    assert!(edit.is_ok(), "{:?}", edit.err());
 
     let errors = edit_errors(&edited("seed = 7", "seed = 8"));
     assert_eq!(errors.len(), 1);

@@ -95,6 +95,8 @@ pub(crate) fn insert(
                     FlatInstance {
                         descriptor: module_type.descriptor,
                         parameters: BTreeMap::new(),
+                        // A converter draws no random numbers.
+                        stream: None,
                     },
                 );
                 if let Ok(to) = PortAddress::new(&address, "in") {

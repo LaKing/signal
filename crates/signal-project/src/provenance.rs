@@ -39,6 +39,8 @@ pub fn collect(source: &Path, files: &[SourceFile]) -> Provenance {
             .collect(),
         // The caller's: what the project's plan uses (`Project::library_hashes`).
         library_composite_hashes: Default::default(),
+        library_interface_hashes: Default::default(),
+        included_projects: Vec::new(),
         cargo_lock_hash: fs::read(source.join("Cargo.lock"))
             .map_or_else(|_| UNKNOWN.to_owned(), |bytes| hex(fnv1a64(&bytes))),
     }

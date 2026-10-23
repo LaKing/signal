@@ -61,6 +61,8 @@ pub struct Registry {
     /// (type, input, input): at most one of the two has connections
     /// (ADR 0033).
     exclusive: Vec<(&'static str, &'static str, &'static str)>,
+    /// sink type → its tap type (ADR 0035 §3).
+    taps: BTreeMap<&'static str, &'static str>,
     host: Option<Arc<dyn Host>>,
 }
 
@@ -173,6 +175,23 @@ impl Registry {
             .iter()
             .filter(move |(t, _, _)| *t == type_name)
             .map(|&(_, a, b)| (a, b))
+    }
+
+    /// Registers `tap` as the tap of the sink type `sink` (ADR 0035 §3): the
+    /// type a project loader plans in place of a `sink` instance where that
+    /// instance must not be a sink (inside a project included in another).
+    /// A name-to-name table, domain-free like
+    /// [`exclusive_inputs`](Registry::exclusive_inputs): what a tap computes
+    /// is its library's (`docs/module-contract.md` "Sink taps"). A later
+    /// registration for the same sink replaces the earlier one.
+    pub fn set_sink_tap(&mut self, sink: &'static str, tap: &'static str) {
+        self.taps.insert(sink, tap);
+    }
+
+    /// The tap registered for the sink type `sink`, if any
+    /// ([`set_sink_tap`](Registry::set_sink_tap)).
+    pub fn sink_tap(&self, sink: &str) -> Option<&'static str> {
+        self.taps.get(sink).copied()
     }
 
     /// Declares that instances of `type_name` take a table (ADR 0028 §3, §4):

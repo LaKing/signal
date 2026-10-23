@@ -23,8 +23,33 @@ pub struct Provenance {
     /// Absent when there are none.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub library_composite_hashes: BTreeMap<String, String>,
+    /// A hash of every slot interface template the program ships that the
+    /// render's slots start from (ADR 0037 §3), by reference (`lib.deck`).
+    /// Absent when there are none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub library_interface_hashes: BTreeMap<String, String>,
+    /// The projects the render includes as content (ADR 0035 §13), one per
+    /// including instance. Absent when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub included_projects: Vec<IncludedProject>,
     /// A hash of `Cargo.lock`.
     pub cargo_lock_hash: String,
+}
+
+/// A project included as content (ADR 0035 §13).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncludedProject {
+    /// The including instance (`drums`, or `<composite>.<instance>`).
+    pub key: String,
+    /// The path as written.
+    pub path: String,
+    /// The included project's name.
+    pub name: String,
+    /// Its seed scope.
+    pub seed: u64,
+    /// FNV-1a 64 of its files' hashes (`<path> <hash>` lines in path
+    /// order, its own includes' as `include:<key>/<path>`).
+    pub files_fnv1a64: String,
 }
 
 /// Everything needed to reproduce a render and check the result.

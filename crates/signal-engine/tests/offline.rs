@@ -27,6 +27,8 @@ fn provenance() -> Provenance {
             .into_iter()
             .collect(),
         library_composite_hashes: Default::default(),
+        library_interface_hashes: Default::default(),
+        included_projects: Vec::new(),
         cargo_lock_hash: "fedcba9876543210".to_owned(),
     }
 }

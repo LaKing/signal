@@ -740,6 +740,7 @@ mod tests {
                 name: "sparks".to_owned(),
                 module: "std.particles".to_owned(),
                 parameters: BTreeMap::new(),
+                scope: None,
             }],
             connections: Vec::new(),
             exports: Exports::default(),

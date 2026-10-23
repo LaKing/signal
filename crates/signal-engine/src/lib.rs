@@ -88,7 +88,7 @@ pub use log::{
     DiscardReason, EngineFailure, FailureReason, FaultReason, InstanceId, LineSource, LogLine,
     LogRecord, LogSource, PortId,
 };
-pub use manifest::{ComputeDevice, Manifest, Placement, Provenance, SameMachine};
+pub use manifest::{ComputeDevice, IncludedProject, Manifest, Placement, Provenance, SameMachine};
 pub use offline::{Offline, OfflineError, run_offline};
 #[cfg(feature = "test-hooks")]
 #[doc(hidden)]

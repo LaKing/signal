@@ -102,6 +102,7 @@ fn plan(registry: &Registry, module: &str) -> ExecutionPlan {
         name: name.to_owned(),
         module: module.to_owned(),
         parameters: BTreeMap::new(),
+        scope: None,
     };
     let root = CompositeDef {
         name: "project".to_owned(),

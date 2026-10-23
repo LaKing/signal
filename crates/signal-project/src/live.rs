@@ -145,7 +145,8 @@ impl fmt::Display for Applied {
 #[derive(Debug)]
 pub enum EditError {
     /// The new project cannot replace the running one: its plan is invalid,
-    /// it changes the sample rate, seed or audio sink.
+    /// it changes the seed or audio sink (a changed sample rate is no error,
+    /// ADR 0036).
     Invalid(Vec<Diagnostic>),
     /// The Controller refused a command (a full queue, a refused swap).
     Refused(String),
@@ -320,7 +321,9 @@ pub fn send_edit_observed(
             let commands = 2 * removed.len() + 1 + sets.len();
             controller.poll(&mut Both(live, observer));
             room(controller, commands)?;
-            let files = new.files.clone();
+            // The project that now plays, kept as planned: re-reading it from
+            // its files in memory would lose what it includes (ADR 0035).
+            let current = new.clone();
             let plan = live
                 .swap_plan(new)
                 .map_err(|e| EditError::Refused(e.to_string()))?;
@@ -367,7 +370,6 @@ pub fn send_edit_observed(
                     .map_err(refused)?;
                 applied.sets += 1;
             }
-            let current = Project::from_sources(files).map_err(EditError::Invalid)?;
             Ok((current, applied))
         }
     }

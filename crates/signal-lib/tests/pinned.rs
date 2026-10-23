@@ -54,6 +54,62 @@ fn pinned_hash(name: &str) -> String {
     }
 }
 
+/// `tests/pinned.toml`: the composites' render hashes (its top-level
+/// `name = "hash"` rows) and the interface templates' text hashes (its
+/// `[interfaces]` table, ADR 0037 §3).
+fn pinned_tables() -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+    let table: toml::Table = toml::from_str(&crate_file("tests/pinned.toml"))
+        .expect("tests/pinned.toml: `name = \"hash\"` rows and an [interfaces] table");
+    let mut composites = BTreeMap::new();
+    let mut interfaces = BTreeMap::new();
+    for (key, value) in table {
+        match value {
+            toml::Value::String(hash) => {
+                composites.insert(key, hash);
+            }
+            toml::Value::Table(rows) if key == "interfaces" => {
+                for (name, hash) in rows {
+                    let hash = hash.as_str().expect("an interface row is a hash string");
+                    interfaces.insert(name, hash.to_owned());
+                }
+            }
+            other => panic!("tests/pinned.toml: unexpected `{key}` = {other}"),
+        }
+    }
+    (composites, interfaces)
+}
+
+/// ADR 0037 §3, test 7: every library interface template's text is pinned
+/// by its FNV-1a 64 (a template has no render), and the changelog names
+/// each with its hash, as for a composite: a changed template is a new name
+/// (never an incompatible change), or a changelog entry.
+#[test]
+fn every_library_interface_has_its_pinned_text_hash() {
+    let (_, pinned) = pinned_tables();
+    let released: BTreeMap<String, String> = toml::from_str(&crate_file("tests/released.toml"))
+        .expect("tests/released.toml: a table of `\"MAJOR.MINOR\" = \"hash\"`");
+    let fresh: BTreeMap<String, String> = signal_lib::interfaces()
+        .iter()
+        .map(|file| (file.name.to_owned(), file.hash()))
+        .collect();
+    let table: String = fresh
+        .iter()
+        .map(|(name, hash)| format!("{name} = \"{hash}\"\n"))
+        .collect();
+    assert_eq!(
+        pinned, fresh,
+        "a library interface template's text changed, or one was added or removed. \
+         A changed port set or type is a new name (ADR 0037 §3). Fresh [interfaces] table:\n{table}"
+    );
+    let errors = check_changelog(
+        &crate_file("CHANGELOG.md"),
+        signal_lib::VERSION,
+        &pinned,
+        &released,
+    );
+    assert_eq!(errors, Vec::<String>::new());
+}
+
 /// A `## <MAJOR.MINOR>` section of the changelog: its version and its text
 /// (the lines after the heading, up to the next `## ` heading).
 struct Section {
@@ -151,8 +207,7 @@ fn check_changelog(
 
 #[test]
 fn every_library_composite_renders_its_pinned_hash() {
-    let pinned: BTreeMap<String, String> = toml::from_str(&crate_file("tests/pinned.toml"))
-        .expect("tests/pinned.toml: a table of `name = \"hash\"`");
+    let (pinned, _) = pinned_tables();
     let released: BTreeMap<String, String> = toml::from_str(&crate_file("tests/released.toml"))
         .expect("tests/released.toml: a table of `\"MAJOR.MINOR\" = \"hash\"`");
 

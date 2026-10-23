@@ -11,6 +11,7 @@ Terms are those of `00-vision.md` §3a: Project, Module, Primitive, Composite, I
   project.toml            the project: settings, instances, wiring
   composites/<name>.toml  one composite per file (optional folder)
   patterns/<name>.toml    note and step data, one pattern per file (optional folder; §12)
+  interfaces/<name>.toml  slot interface templates, one per file (optional folder; §14)
   ui/*.html               panels (optional; ui/main.html is the main one)
   ui/assets/              their SVG and PNG files
   ui/schematic.toml       the schematic's positions (optional, presentation only; §11)
@@ -46,10 +47,11 @@ connections = [
 |---|---|---|
 | `schema_version` | integer, required | The format version. This version of Signal reads `1` and refuses any other value. |
 | `[project] name` | string, required | The project's name. |
-| `[project] sample_rate` | integer ≥ 1 | The master rate in frames per second. Default **96000**. `signal render --sample-rate` overrides it. |
+| `[project] sample_rate` | integer ≥ 1 | The master rate in frames per second of renders and replays, and the rate the project is written for. Default **96000**. `signal render --sample-rate` overrides it. A live run plays at the rate the output device runs at instead, never switching it (ADR 0036, the owner's decision of 2026-10-23: the device's clock is the run's), says so when they differ, and records the rate played in its session. |
 | `[project] seed` | integer, 0 to 2⁶³−1 | The master seed of every random stream (ADR 0008). Default 0. `signal render --seed` overrides it. |
 | `[instances]` | table | The project's instances (§4). |
 | `[wiring] connections` | array of tables | The project's connections (§5). |
+| `[exports]` | tables | ADR 0035 §2: what the project exposes when another project includes it or a slot loads it (§15), with the syntax and meaning of a composite's (§3: inputs fan out, one source per output, parameters fan out, groups). Rendered alone, a project's exports mean nothing: they are checked (each names a port that exists) and change no render. Without `outputs`, an included project exports its audio sink's channels (§15). |
 
 ## 3. `composites/<name>.toml`
 
@@ -116,6 +118,23 @@ parameters = { glide = { to = ["glide.rise_ms", "glide.fall_ms"], group = "pitch
 - **`pattern`** (M2.11-1, ADR 0028 §3, optional) names the pattern file `patterns/<name>.toml` (§12) whose data the instance takes, as a string (`pattern = "melody"`). A module type declares whether it takes a pattern, and of which kind (`std.note_seq` a `notes` pattern, `std.step_seq8` a `steps` pattern); its library compiles the pattern into the instance's table when the plan is built. It is an error, at the value and naming the instance and the file, when the file does not exist, when its kind is not the one the type takes, when the type takes no pattern, on a composite instance (name the pattern inside the composite), and when the library refuses the data (a key `std.note_seq` cannot play). A type that takes a pattern may be given none: it then plays nothing. `pattern` is **reserved**: no composite may export a parameter named `pattern`. A changed pattern file is a live edit: a swap at an edit frame in which every instance survives, keeping its state (`semantics.md` §12).
 - **Parameters** are every other key. The value is a number (integer or float). For a primitive, the key must be one of its declared parameters, and the value must lie in the parameter's range. For a composite, the key must be one of its exported parameters. When parameters are set at several levels, the outermost instance's value wins.
 
+An instance names **exactly one** of `module`, `project` (ADR 0035) and `slot` (ADR 0037):
+
+```toml
+[instances]
+drums  = { project = "../studio-transport" }                     # an included project (§15)
+bass   = { project = "parts/bass", seed = 3, bpm = 128, set = { "synth.cutoff" = 400 } }
+synth  = { slot = "lib.voice", load = "moog_voice" }              # a slot (§14)
+deck_b = { slot = { from = "lib.deck", inputs = { cue = "gate" } }, load = "../studio", seed = 3 }
+spare  = { slot = "lib.voice" }                                   # an empty slot
+```
+
+- **`project`** is a project folder (holding `project.toml`), as a path relative to the folder of the project whose file names it (for a composite's file too: the project's folder, not `composites/`). It is read and checked by every rule of this document in its own folder, and planned as a composite instance of the whole project (§15). An absolute path is allowed, with a warning (not portable). A `.signal` file comes with ADR 0035's phase 4 and is refused for now, as is an include in a project read from files in memory (it has no folder).
+- **`slot`** declares the slot's interface (§14): a template name, short for `{ from = "<name>" }`, or a table. **`load`** (optional) is its content: a value containing `/` or ending in `.signal` is a project path (as `project`; a project in a subfolder is written `./bass`), every other value a module reference as `module`'s. **`map`** (optional) overrides the match: `{ <slot port or parameter> = "<content name>" | false }`.
+- **`seed`** (optional, an included project or a slot loading one): the include's seed scope (§15); the default is the included project's own `[project] seed`. On a slot that loads a module it is an error.
+- **`set`** (optional): overrides of the content's own parameters outside its exports or interface: for a project, its top-level instances' parameters, keyed `"<instance>.<parameter>"`, with the rules of that instance's entry in the included `project.toml` (a key naming no top-level instance is an error at the key); for a module in a slot, that module's parameters outside the slot's interface (an unknown one is an error). The host writes there what its panels change in an included project; it never writes the included project's files.
+- **Reserved keys:** `module`, `gpu`, `pattern`, `project`, `seed`, `set`, `slot`, `load` and `map`; no composite or project may export a parameter of any of these names (an error at the export). `load` and `map` are a slot's only; `seed` and `set` a project's or a slot's; `gpu` and `pattern` a module instance's (an error on a project or a slot).
+
 ## 5. Connections
 
 ```toml
@@ -148,6 +167,8 @@ composites/voice.toml:7:34: error: /voice/osc.typo: unknown parameter
   - a composite the project uses is checked where it is instantiated;
   - one that nothing in `project.toml` reaches is checked as if instantiated once under its own name, with no parameters set and nothing connected. Its errors are reported; its warnings are not.
 - **Warnings** do not stop loading: a kind mismatch on a connection (between two different kinds, neither of them `generic`: a `generic` port matches any kind, ADR 0005, note of 2026-10-18), or an instance from which no sink is reachable.
+- **Included projects** (§15) are checked alone first, by every rule, in their own folders. Their diagnostics are located in their files, named from the including project's folder (`../studio-transport/composites/kick909.toml:7:3: error: …`), with an error at the including entry (`` drums: `../studio-transport` does not load (1 problem in its files) ``, or `does not plan`). Their composites read as written in messages (`kick909`, never their qualified names).
+- **Slots** (§14): an interface that does not resolve, a wire on a slot port its interface does not declare, or of another shape or rate, and a content that does not match are errors located at the `slot`, wire endpoint, `load` or `map` value, naming both sides; a kind mismatch is a warning, so is a loaded slot that matches nothing and a wired slot port left unmatched beside an unmatched content port of its kind and direction ("did you mean `map = { … }`?").
 
 A delay-free feedback cycle is an error. A loop through a state-output module such as `std.unit_delay` is fine (ADR 0016 §2).
 
@@ -161,14 +182,17 @@ A delay-free feedback cycle is an error. A loop through a state-output module su
 | `signal_dirty` | `git status --porcelain` there: `false` for empty output (a clean tree), `true` otherwise | `"unknown"` if git fails or exits non-zero |
 | `rustc_version` | `rustc -V`, run in that workspace (so the pinned toolchain answers) | `"unknown"` if it fails or prints nothing |
 | `project_file_hashes` | FNV-1a 64 of each project file (§1) as loaded, by relative path | always available |
-| `library_composite_hashes` | FNV-1a 64 of each library composite (§4) the plan instantiates, directly or inside another composite, by reference (`lib.<name>`). One that only an unused project composite references is validated but not listed | absent when there are none |
+| `library_composite_hashes` | FNV-1a 64 of each library composite (§4) the plan instantiates, directly or inside another composite, by reference (`lib.<name>`), included projects' too. One that only an unused project composite references is validated but not listed | absent when there are none |
+| `project_file_hashes` of includes | ADR 0035 §13: each included project's files under `include:<key>/<path>`, `<key>` the including instance (`drums`, or `<composite>.<instance>`), an include's own includes nested the same way | none without includes |
+| `included_projects` | ADR 0035 §13: per including instance its `key`, the `path` as written, the project's `name`, its `seed` scope, and `files_fnv1a64`, the FNV-1a 64 of its file hashes (`<path> <hash>` lines in path order) | absent when there are none |
+| `library_interface_hashes` | ADR 0037 §3: FNV-1a 64 of the text of each library interface template a slot starts from, by reference (`lib.deck`) | absent when there are none |
 | `cargo_lock_hash` | FNV-1a 64 of the workspace's `Cargo.lock` | `"unknown"` if it cannot be read |
 
 Hashes are 16 lowercase hex digits. Provenance is read when the render runs, not when the binary is built.
 
 ## 8. JSON Schema
 
-`signal schema` prints a JSON Schema (draft 2020-12) that accepts exactly one of the four file kinds: `project.toml`, a composite, and a pattern file of `kind = "notes"` or `kind = "steps"` (§12). Module references are restricted to the registry's type names, the library composites' `lib.<name>` (§4) or a bare composite name. The schema is generated from the same model the loader uses. It cannot check what needs the registry's descriptors or other files: parameter names and ranges, ports, and whether a composite exists.
+`signal schema` prints a JSON Schema (draft 2020-12) that accepts exactly one of the five file kinds: `project.toml`, a composite, a pattern file of `kind = "notes"` or `kind = "steps"` (§12), and an interface template (§14). Module references are restricted to the registry's type names, the library composites' `lib.<name>` (§4) or a bare composite name. The schema is generated from the same model the loader uses. It cannot check what needs the registry's descriptors or other files: parameter names and ranges, ports, and whether a composite exists.
 
 ## 9. Setup (machine settings)
 
@@ -180,7 +204,7 @@ The **Setup** holds how this machine plays projects. It is never part of a proje
 
 ```toml
 version = 1
-buffer = 128                      # frames requested from the device
+buffer = 128                      # frames requested from the device, or "device"
 cpu_workers = "auto"              # threads per block: "auto" or a number
 output_channels = [1, 2]          # device channel (from 1) of each sink channel
 last_project = "/Users/me/projects/kick"
@@ -203,7 +227,7 @@ height = 640.0
 | Key | Meaning | Default |
 |---|---|---|
 | `version` | the format version; another version makes the whole file default | `1` |
-| `buffer` | the buffer to request, in frames, at least 1 | `128` |
+| `buffer` | the buffer to request, in frames, at least 1, when Signal is the output's only client; a device that runs for another app keeps its own buffer, whatever is asked (ADR 0036). `"device"`: never request one, always follow the device's current buffer (not yet offered in the interface dialog, which shows the default for it; choosing another number there replaces it) | `128` |
 | `cpu_workers` | "CPU workers" in the interface dialog: the threads a block runs on, the audio thread included (`EngineConfig::threads`; 1 runs no worker threads), or `"auto"`, one per performance core (ADR 0019 §2). It changes the timing, never the output | `"auto"` |
 | `output_channels` | sink channel *i* plays on device channel `output_channels[i]` (from 1). The device is opened in a configuration with at least as many channels as the highest of them. A map whose length is not the project's sink width, or that names a channel the device does not have or one channel twice, is reported and the identity map is used | the identity map |
 | `last_project` | the last project opened: a folder, or a `.signal` file (§10), never its working folder; opened at start when `--project` is not given | none |
@@ -221,6 +245,21 @@ height = 640.0
 
 **Interface changes and meters.** Applying interface settings while playing stops the run and starts it again from frame 0. Device lists are refreshed only while stopped, because listing devices pauses the control thread. Meters show, per output and input channel, the peak in dBFS held for 1.5 s, the RMS over 300 ms, and a clip indicator that latches until clicked (a block peak of 1.0 or more: an output sample clamped to full scale reads exactly 1.0). While a live edit is planned and its swap prepared, the meter blocks of that time are not shown (the reload drains them into the session recorder). A peak or clip inside that gap can be missed by the meters and the clip indicator. The status line's clipped-sample count comes from the runner and counts every clamped sample.
 
+**Keyboard shortcuts (`keys.toml`, ADR 0034).** Beside the Setup file, in the same folder (`~/Library/Application Support/Signal/keys.toml`; with `--setup` or `$SIGNAL_SETUP`, beside that file), a machine's preference and never part of a project. It holds only overrides of the built-in keymap (`ui/lib/keys.default.js`), one table per command id's first part, each command a list of chords (`[]` unbinds it):
+
+```toml
+version = 1
+
+[view]
+page_down = ["PageDown", "Space", "F7"]   # the view's Page Down: three chords
+wheel_inside = ["Ctrl+Alt+Wheel"]         # the wheel modifier (built in: Alt+Wheel, ⌥)
+
+[schematic]
+fit = ["Home", "Cmd+0"]
+```
+
+A chord is `Ctrl`, `Alt`, `Shift`, `Cmd` (any order) and a key: a letter, a digit, the character typed (`+`, not `Shift+=`), a named key (`PageDown`, `Space`, `Escape`, `ArrowUp`, `F1`…) or `Wheel` for a wheel command. Signal ▸ Settings… writes it (each change at once, with `toml_edit`: comments and other entries kept; atomically, as the Setup is, and where a link points when it is a link; an override equal to the built-in chords is removed; never a file that does not read or is of another `version`); an edit made elsewhere applies within a quarter second. A missing file is the built-in keymap. An unknown command, a fixed one (the Edit menu's, text fields', menus'), a chord that does not parse or is of the wrong kind is reported with its line and column and left out; conflicts (two commands of one scope on a chord; a control's chord hiding a parent's where the built-in keymap does not; a wheel chord holding the wheel modifier) are reported at the override that made them; a file that is not TOML, or of another `version`, is reported and the built-in keys are used. Nothing in it can stop Signal from starting.
+
 ## 10. Project files (`.signal`)
 
 A **project file** is a project folder as one file (ADR 0025): a zip archive of the project files of §1, with `project.toml` at the archive's root. It is only a container. The text files in it are the project, read and written exactly as in a folder, and nothing in the archive means anything of its own (ADR 0009, 0013). `signal pack <folder> <file.signal>` writes one, `signal unpack <file.signal> <folder>` unpacks one, and `signal render`, `signal play` and `signal ui` take a `.signal` file wherever they take a project folder: they unpack it into a temporary folder for the run and remove it at the end. A render of a `.signal` file is the render of its folder, hashes and provenance included. In `signal play --watch` and `signal ui` the edits go to that temporary copy and are not written back. Signal.app opens, saves and saves as `.signal` files (§9 and `ui-protocol.md` "Signal.app").
@@ -230,6 +269,7 @@ A **project file** is a project folder as one file (ADR 0025): a zip archive of 
 - `project.toml`;
 - `composites/*.toml` (directly in `composites/`);
 - `patterns/*.toml` (directly in `patterns/`, §12);
+- `interfaces/*.toml` (directly in `interfaces/`, §14);
 - every file under `ui/` (panels and their `assets/`, at any depth).
 
 **What stays out.** Everything else, in particular:
@@ -386,3 +426,67 @@ fullscreen = true                # optional: it opens full screen (x, y, width, 
 ```
 
 One entry per **screen configuration**, under its key: for each connected monitor, left to right then top to bottom, its name (its type), size in pixels, scale factor and top-left corner in pixels, joined by ` | `. Signal.app applies the entry of the screens connected now, at start, when the project opens and when the screens change; without one it opens the default state (one main window on the main screen, every card in it). It writes only that entry, with `toml_edit`, atomically, a second after the last change, keeping the other entries and comments; Window ▸ Reset Layout removes it. A card id is a card's `id`, else its first heading's slug (`ui-controls.md` "Cards across windows"). A panel window's cards are hidden from the main windows' Panel tab. An entry that does not read is reported and the default state is used; unknown keys in a window are errors there.
+
+## 14. Slots and interfaces (ADR 0037)
+
+A **slot** is an instance whose ports and parameters are **its own interface**, declared on it and editable, and whose module is whatever its `load` names, or nothing. Wiring names the slot's ports, so changing the content never rewrites the host's wires.
+
+```toml
+[instances]
+fx     = { slot = { inputs = { in = "audio" }, outputs = { out = "audio" } } }
+synth  = { slot = "lib.voice", load = "moog_voice", set = { cutoff = 400 } }
+pad    = { slot = "lib.instrument", load = "moog_voice", map = { l = "out", r = "out" } }
+blank  = { slot = {} }                                            # no ports yet
+
+[instances.bus_in]                     # the same, as a table, for a long interface
+load = "./bus"
+[instances.bus_in.slot]
+from       = "deck"                    # interfaces/deck.toml
+remove     = ["tempo"]
+inputs     = { position = "control", sync = "events" }
+parameters = { volume = { unit = "dB", group = "out" } }
+```
+
+**The interface.** A table with `inputs`, `outputs` and `parameters` (one namespace; `slot = {}` is valid). With `from`, it starts from a template: the template's ports, then `remove = [names]` drops some, then each entry adds a port or replaces the template's port of that name (a retype). A name both removed and declared, a `remove` of a name the template does not have (or with no `from`), and `from` or `remove` as a port name are errors. The template is a reference: an edit of `interfaces/<name>.toml` reaches every slot naming it.
+
+**Ports**: `shape` (`"signal"`, the default, `"events"` or `{ vector = N }`), `rate` (a divisor, default 1), `kind` (a `PortKind`: `audio`, `control`, `gate`, `trigger`, `frequency`, `gain`, `phase`, `generic`, the default), and `unit`, `range = [min, max]` and `group`, presentation only. The short form `name = "<kind>"` is a signal of that kind at rate 1, and `"events"` an event port. **Parameters** declare a name with an optional `unit` and `group`; their range and default come from the content. A value set on the slot (`volume = -6`) must name an interface parameter; it reaches the matched content parameter, and on an empty or unmatched slot it is kept and applied to nothing. An interface lists its ports by role (inputs, outputs, parameters), each in name order.
+
+**Templates**: `interfaces/<name>.toml` in the project (project files: loaded, validated, hashed and packed like `composites/`), or the library's `lib.voice`, `lib.instrument` and `lib.deck` (`module-contract.md` "Interfaces"):
+
+```toml
+schema_version = 1
+[interface]
+name = "deck"                          # must be the file's name
+description = "A playing song: follows a position if given one; stereo out."
+[inputs]
+position = { kind = "control", unit = "beats", group = "transport" }
+jump     = { shape = "events", kind = "trigger", group = "transport" }
+[outputs]
+l = { kind = "audio" }
+r = { kind = "audio" }
+[parameters]
+release = { group = "transport" }
+```
+
+**Wires on a slot** are checked against its interface, loaded or not: an undeclared port, a wrong direction, or another shape or rate than the other end's is an error at the wire; a kind mismatch a warning. So loading content never makes the host's wiring invalid.
+
+**Matching** (when the plan is built; by exact name only). For each slot port or parameter *p*, the content name is `map[p]`, nothing for `false`, else *p*. The content's ports are a primitive's declared ports and parameters, a composite's or a project's exports (with the types of the inner ports behind them, `signal_graph::ports_of`), and, for a project without `[exports] outputs`, its sink's channels `l`, `r` (§15). A name found with the same direction, shape and rate is matched (another kind, neither `generic`: a warning); another direction, a port matched to a parameter, another shape or rate, a `map` key that is no slot port, a `map` value naming no content port, and two slot inputs (or parameters) onto one content input are errors. Several slot outputs may match one content output (mono to `l` and `r`).
+
+**What the plan is.** A loaded slot is planned exactly as an ordinary instance of its content under the slot's name: each host wire on a matched slot port becomes a wire on the content's matched name, and a wire on an unmatched port is left out (the receivers read 0, `is_connected` false). The plan is byte-identical to that explicit form, so canonical order, converters, exclusive and restricted inputs, cycles and `is_connected` behave as for written wires. An **empty slot** contributes no instance and no connection: it is valid and silent. A content output not in the interface is still computed and heard nowhere. The build's side table, `Planned::slots` (per slot: its resolved interface, load, match table, the wires left out and the unheard outputs), is what `describe` lists (`content.slots`); the plan carries no record of it. Slots may appear in `project.toml` and in project composites (the same for every instance of the composite), not in library composites.
+
+## 15. Projects as content (ADR 0035)
+
+A project included as an instance (`drums = { project = "../studio-transport" }`, §4) or loaded into a slot (§14) is an ordinary composite instance of the whole project: its insides are `/drums/transport/playhead`, `/drums/kick/env` and so on.
+
+- **Read in its own folder.** Its composites resolve in its own `composites/`, its patterns in its own `patterns/`, its interfaces in its own `interfaces/`; `lib.*` in the same library. Its definitions are planned under qualified names (`<its canonical folder>/<name>`, which no bare or `lib.` name can be), so they never collide with the host's, and two instances of one project share them.
+- **Its exports are its ports** (§2). Without `[exports] outputs`, it exports its audio sink's channels, named after the sink's inputs (`l`, `r`), so any project can be included without editing it.
+- **Its sinks are taps.** Inside an include, every instance of a sink type is planned as the tap its library registers for it (`module-contract.md` "Sink taps"): `std.audio_out` as `std.audio_tap`, at the same address with the same inputs, parameters and connections, whose outputs `l_out`, `r_out` are what the project records alone. The host's own `std.audio_out` stays the plan's one audio sink. A sink type without a tap makes the project refused as an include, at the instance in its file. Nothing mixes implicitly: the host wires the outputs where it wants them (a `std.mix`, an effect, its `audio_out`); an output it does not wire is computed and heard nowhere.
+- **Its seed.** The include is a scope root (`semantics.md` §11) with the entry's `seed`, else the included project's own `[project] seed`: inside, every random stream is the one the project draws alone. The host's seed and `--seed` reach the host's own instances only. Two instances of one project with one seed draw the same streams.
+- **Its rate.** It runs at its host's rate (offline the host's `sample_rate` or `--sample-rate`, live the device's), never resampled. Its own `sample_rate` is noted, never an error: `signal render --json` gives `notes` ("studio-transport is written for 48000 Hz and plays at 96000 Hz here"), and `describe` the same as each include's `note` (`content.includes`).
+- **Cycles and depth.** A project that includes itself, directly or through other includes or slot loads, is refused at the entry that closes the cycle, naming the chain by the projects' canonical paths (symbolic links resolved: `/…/two-studios → /…/studio-transport → /…/two-studios`). The same project included twice, not in a cycle, is fine. Includes and project loads nest 8 deep at most (a guard, not a semantic limit).
+- **What is bit-identical** (ADR 0035 §4): included, run at its `sample_rate` with no `set` and none of its exports driven, every output, event and parameter value inside is the project's alone, on any partition and thread count; its tap's outputs, converted to f32, are its own `audio.wav` byte for byte (`crates/signal-cli/tests/two_studios.rs`).
+- **Exports of a tap output.** `[exports] outputs` may name a sink's tap output (`l = "out.l_out"`): alone it is checked against the tap and means nothing, included it is the tap's output.
+- **Live edits.** A host with includes takes live edits of its own files; an edit that changes an include's `seed` (so the random streams of instances that would survive) is refused with "restart the project", as a changed `[project] seed` is.
+- **Packing and sessions, until phase 4.** `signal pack` refuses a project with includes (naming them) rather than writing an archive that does not load; a session recorded from one records the includes in its provenance (`included_projects`, the include files' hashes) and is refused by `signal replay` with the reason.
+- Not yet (ADR 0035's later phases): watching an include's files live and joining or leaving live (phase 2), rooted include panels and the `set` overrides written from them (phase 3), `.signal` includes, `pack --embed`, sessions with includes and `vendor --include` (phase 4). A project with includes plays and renders from its folder; edits made in memory (Signal.app's live edits) refuse an include until phase 2.
+

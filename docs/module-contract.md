@@ -250,6 +250,28 @@ The **built-in library** (ADR 0027 §4, M2.10-3) is composites shipped with Sign
 
 `projects/library-demo` uses every one but the validation references and the composites added after it (`signal_lib::NOT_IN_DEMO`: `lib.modal_voice`, `lib.transport`) (`testing-and-evaluation.md`); the seven validation references (`lib.<type>_core`, above) are not in this table and not in the demo. The schematic palette lists them (`library`, and the references under `reference`; `ui-controls.md`) and adds them by a patch; not yet: opening a library composite's inside in the UI (ADR 0027 §6). The validation of library composites against native references (ADR 0027 §4) is M2.10-4's (above, and `testing-and-evaluation.md`).
 
+### Interfaces
+
+**Slot interface templates** (ADR 0037 §3) ship with the library beside the composites: `crates/signal-lib/interfaces/<name>.toml`, referenced from a slot as `slot = "lib.<name>"` (`project-format.md` §14), read-only, and listed by `signal_lib::interfaces()`. A template is "a composite with only exports" whose ports declare their types, since nothing inside them could tell; it has no render, so `tests/pinned.toml` pins each one's **text hash** (its `[interfaces]` table, `tests/pinned.rs`), and `CHANGELOG.md` names each with its hash, under the same rules as a composite's render hash. A template is **never changed incompatibly**: a changed port set or type is a new name. A render manifest lists the templates its slots start from (`library_interface_hashes`). The templates of phase 1, because its use cases need them (hard rule 8):
+
+| Template | Inputs | Outputs | Parameters | Matches |
+|---|---|---|---|---|
+| `lib.voice` | `hz` (frequency, Hz), `gate` (gate), `velocity` (control, 0 to 1) | `out` (audio) | — | the studios' `moog_voice`, with no `map` |
+| `lib.instrument` | as `lib.voice` | `l`, `r` (audio) | — | a mono voice through `map = { l = "out", r = "out" }` |
+| `lib.deck` | `position` (control, beats), `jump` (events, trigger), `running` (gate), `tempo` (control, bpm) | `l`, `r` (audio) | `release` | any project, through its default sink exports `l`, `r` (ADR 0035 §2) |
+
+The conventions: a template's port names are the ones the matching modules already use (exact names, ADR 0037 §4), a stereo pair is `l` and `r`, and a kind is given where it says what a port carries (a mismatch is only a warning). Others (`lib.effect`, …) wait until a project needs them.
+
+## Sink taps
+
+A **sink tap** (ADR 0035 §3) is the type a project loader plans in place of a sink instance where that instance must not be a sink: inside a project included in another, whose host's own sink is the run's one device sink. A library registers it with `Registry::set_sink_tap(sink, tap)` (queried with `Registry::sink_tap`), a name-to-name table the core does not interpret, like `exclusive_inputs`. A tap:
+
+- has the sink's inputs and parameters, under the same names, so the instance keeps its address, inputs, parameters and connections;
+- has no sink kind, and for each signal input `x` an audio output `x_out` carrying exactly what the sink's adapter would have taken from the sink: the same expression on the same parameter row, so a tap's outputs equal, as numbers, what the included project records alone (−0 included);
+- clamps nothing: the clamp to the device's range happens once, at the host's sink.
+
+`std.audio_tap` is `std.audio_out`'s (`l_out = gain·l`, `r_out = gain·r`). A sink type with no tap makes a project that holds one refused as an include, at the instance. Unlike a sink, whose inputs are recorded whatever they hold, a tap's outputs are checked like any output: a non-finite value or one beyond 10⁶ faults the tap (`semantics.md` §7).
+
 ## Testing a primitive: the contract suite
 
 The contract suite, `crates/signal-contract`, checks the rules on this page and in `realtime-rules.md` for every primitive in `crates/` and `lab/`. It is a dev-dependency only. Its own tests (`crates/signal-contract/tests/self_test.rs`) are a complete example.

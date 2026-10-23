@@ -188,6 +188,7 @@ pub fn prepare(
             name: top.to_owned(),
             module: reference.to_owned(),
             parameters: BTreeMap::new(),
+            scope: None,
         }],
         ..CompositeDef::default()
     };

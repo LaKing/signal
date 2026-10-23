@@ -34,6 +34,7 @@ fn runner_process_with_scopes_allocates_and_frees_nothing() {
             .map(|f| ("freq".to_owned(), f))
             .into_iter()
             .collect::<BTreeMap<_, _>>(),
+        scope: None,
     };
     let connection = |from: &str, to: &str| ConnectionDef {
         from: from.to_owned(),

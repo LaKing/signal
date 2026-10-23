@@ -1469,9 +1469,10 @@ mod tests {
             name: name.to_owned(),
             module: module.to_owned(),
             parameters: Default::default(),
+            scope: None,
         };
         let root = CompositeDef {
-            name: "project".to_owned(),
+            name: "root".to_owned(),
             instances: vec![instance("half", "unit.half"), instance("out", "unit.sink")],
             connections: vec![ConnectionDef {
                 from: "half.out".to_owned(),

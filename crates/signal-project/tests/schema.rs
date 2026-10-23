@@ -171,7 +171,10 @@ fn the_schema_rejects_what_the_loader_rejects() {
         project.replace(r#"scale = 0.5"#, r#"scale = "half""#),
         composite.replace(r#"out = "shaper.out""#, r#"out = ["shaper.out"]"#),
         composite.replace(r#"pm = ["low.pm", "high.pm"]"#, "pm = []"),
-        composite.replace("[composite]\n", "[project]\n"),
+        // ADR 0035 §2: a project may export, so a composite's text under
+        // `[project]` is a valid project now; under `[interface]` it is
+        // none of the file kinds (an interface has no instances).
+        composite.replace("[composite]\n", "[interface]\n"),
     ];
     for case in &cases {
         assert!(!validates(case), "accepted:\n{case}");

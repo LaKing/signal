@@ -31,6 +31,7 @@ fn plan(registry: &Registry, with_b: bool, version: u64) -> ExecutionPlan {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), *v))
             .collect::<BTreeMap<_, _>>(),
+        scope: None,
     };
     let connection = |from: &str, to: &str| ConnectionDef {
         from: from.to_owned(),

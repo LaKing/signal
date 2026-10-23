@@ -185,3 +185,55 @@ fn core_graph_and_engine_name_no_musical_concept() {
     );
     assert!(has_word("let velocity = 1.0;", "velocity"));
 }
+
+/// Project words (ADR 0035 §1, ADR 0037 §5, AGENTS.md rule 1): an included
+/// project and a slot are resolved by `signal-project` into ordinary
+/// composite instances before the graph sees them; the core, the graph and
+/// the engine know a generic scope root, the `ports_of` query and nothing
+/// else. The ADRs also list `slot`, `interface` and `load`, but those are
+/// already these crates' own generic words (the engine's per-instance state
+/// slots, a composite's resolved exports in the flattener, atomic loads), so
+/// the check names the project format's spellings of the two concepts
+/// instead (ADR 0037, note of 2026-10-23).
+const PROJECT_WORDS: [&str; 9] = [
+    "project",
+    "projects",
+    "include",
+    "includes",
+    "included",
+    "interfaces",
+    "SlotResolution",
+    "SlotResolutions",
+    "InterfaceFile",
+];
+
+/// Core, graph and engine name no project or slot concept in a code line.
+#[test]
+fn core_graph_and_engine_name_no_project_or_slot() {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut found = Vec::new();
+    for name in ["signal-core", "signal-graph", "signal-engine"] {
+        let mut files = Vec::new();
+        rust_files(&crates.join(name).join("src"), &mut files);
+        assert!(!files.is_empty(), "{name}: no sources found");
+        for file in &files {
+            let text = fs::read_to_string(file).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") {
+                    continue;
+                }
+                for word in PROJECT_WORDS.iter().filter(|w| has_word(code, w)) {
+                    found.push(format!("{}:{}: `{word}` in {code}", file.display(), n + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "project or slot concepts in a domain-free crate:\n{}",
+        found.join("\n")
+    );
+    assert!(has_word("let project = load();", "project"));
+    assert!(!has_word("include_str!(\"x\")", "include"));
+}

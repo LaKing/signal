@@ -409,3 +409,58 @@ fn reload_keeps_the_last_good_version_and_applies_a_good_one() {
     assert!(current.files[0].text.contains("freq = 440"), "replaced");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// ADR 0035: a host with an include takes a structural edit live and keeps
+/// what it includes (the running project is the planned one, not re-read
+/// from files in memory); a changed include `seed` changes the streams of
+/// surviving instances, which no running engine can take: refused with
+/// "restart", the last good version playing on.
+#[test]
+fn a_host_with_an_include_reloads_and_refuses_a_reseed() {
+    let registry = registry();
+    let dir = std::env::temp_dir().join(format!("signal-reload-include-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("inner")).unwrap();
+    let inner = "schema_version = 1\n[project]\nname = \"inner\"\nseed = 4\n[instances]\nn = { module = \"std.noise\" }\nout = { module = \"std.audio_out\" }\n[wiring]\nconnections = [ { from = \"n.out\", to = \"out.l\" } ]\n";
+    std::fs::write(dir.join("inner/project.toml"), inner).unwrap();
+    let host = |entry: &str, extra: &str| {
+        format!(
+            "schema_version = 1\n[project]\nname = \"host\"\nsample_rate = {RATE}\n[instances]\nm = {{ project = \"inner\"{entry} }}\n{extra}out = {{ module = \"std.audio_out\" }}\n[wiring]\nconnections = [ {{ from = \"m.l\", to = \"out.l\" }} ]\n"
+        )
+    };
+    std::fs::write(dir.join("project.toml"), host("", "")).unwrap();
+    let mut current = Project::load(&dir).unwrap();
+    let (mut driver, mut controller, mut live) = start(&current, &registry);
+    run(&mut driver, &mut controller, &mut live, 1_024);
+
+    std::fs::write(
+        dir.join("project.toml"),
+        host("", "tone = { module = \"std.sine_osc\" }\n"),
+    )
+    .unwrap();
+    let applied = reload(&mut controller, &mut live, &mut current, &dir, &registry).unwrap();
+    assert!(applied.swap.is_some(), "{applied}");
+    assert_eq!(current.includes().len(), 1, "the include is kept");
+    run(&mut driver, &mut controller, &mut live, 1_024);
+
+    std::fs::write(
+        dir.join("project.toml"),
+        host(", seed = 9", "tone = { module = \"std.sine_osc\" }\n"),
+    )
+    .unwrap();
+    let error = reload(&mut controller, &mut live, &mut current, &dir, &registry).unwrap_err();
+    let ReloadError::Invalid(diagnostics) = error else {
+        panic!("expected diagnostics, got {error:?}");
+    };
+    assert!(
+        diagnostics[0].message.contains("random stream changed")
+            && diagnostics[0].message.contains("restart"),
+        "{diagnostics:?}"
+    );
+    assert_eq!(
+        current.includes()[0].seed,
+        4,
+        "the last good version plays on"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

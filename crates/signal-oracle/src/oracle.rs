@@ -409,7 +409,7 @@ impl Plan {
                     let context = PrepareContext {
                         sample_rate: f64::from(script.sample_rate),
                         max_frames: 1,
-                        rng: RngStream::derive(script.seed, &spec.address),
+                        rng: RngStream::for_key(script.seed, &spec.address, spec.stream.as_ref()),
                         lent: None,
                         generation,
                     };
@@ -1269,6 +1269,7 @@ pub(crate) fn with_converters(registry: &Registry, graph: &Graph) -> Result<Grap
                 address: address.clone(),
                 type_name: format!("core.{word}.d{s}.d{t}.{shape}.{}", kind_name(source.kind)?),
                 parameters: Vec::new(),
+                stream: None,
             });
             out.connections.push(crate::Connection {
                 from: c.from.clone(),

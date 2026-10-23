@@ -75,6 +75,7 @@ fn plan(registry: &Registry, with_b: bool, version: u64) -> ExecutionPlan {
         name: name.to_owned(),
         module: module.to_owned(),
         parameters: BTreeMap::new(),
+        scope: None,
     };
     let mut instances = vec![
         instance("a", "test.generation"),

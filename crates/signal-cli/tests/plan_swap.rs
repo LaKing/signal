@@ -26,6 +26,7 @@ fn inst(name: &str, module: &str, parameters: &[(&str, f64)]) -> InstanceDef {
             .iter()
             .map(|(name, value)| ((*name).to_owned(), *value))
             .collect(),
+        scope: None,
     }
 }
 

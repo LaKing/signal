@@ -169,7 +169,7 @@ M2.7-4 (audit finding 2). A latent module (`module-contract.md` "Declared latenc
 - **parameters only** (same instances, types and connections in the flattened plans): one `set` per parameter whose flattened file value changed (`diff_with` and `DiffOptions::ramp_frames` make them `ramp`s over *N* frames instead);
 - **anything else**: `ProjectEdit::Structural` with the new plan, the instances `removed` and `added` (a retyped instance is in both), and `set`s for survivors whose file value changed, since survivors keep their bases across a swap;
 - **identical, or only whitespace and comments**: the empty edit;
-- **a changed `sample_rate` or `seed`**: an error at that key: the project must be restarted.
+- **a changed `seed`**: an error at that key: the project must be restarted. A changed `sample_rate` is no error (ADR 0036): a live run plays at the output device's rate, and the project's is the rate of its renders; the running engine keeps the device's rate.
 
 A driver removes instances by suspending them at *s* and swapping at `Engine::removal_swap_frame(s)`, so that they fade out. `signal_project::live::send_edit` sends an edit's commands only once its swap is prepared (`Controller::prepare_swap`, then `send_swap`) and the `Controller` can take all of them, suspends, swap and sets, plus the resumes that would undo the suspends (`Controller::available`); otherwise it sends none, so a removal never stops half-way with instances left suspended. Because each removal also reserves its resume, one edit can remove at most about half the command queue (511 instances at the default 1 024). After preparing the swap, which can take long, `send_edit` polls again, so the suspend and the swap are stamped from a fresh status and keep the removal's fade.
 

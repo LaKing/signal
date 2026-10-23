@@ -13,6 +13,11 @@
 //! change with a changelog entry; names are never reused; a removed composite
 //! warns for one MINOR first. `tests/pinned.rs` pins every composite's render
 //! hash.
+//!
+//! **Interfaces** (ADR 0037 §3): the slot interface templates `lib.voice`,
+//! `lib.instrument` and `lib.deck`, embedded from `interfaces/<name>.toml`.
+//! A template is only a starting point a slot names with `from`; it has no
+//! render, so `tests/pinned.toml` pins its text hash.
 
 use signal_core::fnv1a64;
 
@@ -75,6 +80,37 @@ static COMPOSITES: [LibraryFile; 22] = library![
     "tape_echo",
     "transport",
 ];
+
+/// Every library interface template (ADR 0037 §3), in name order: a slot
+/// starts from one with `slot = "lib.<name>"`. Read-only; pinned by text
+/// hash (`tests/pinned.toml`, `[interfaces]`), since a template has no
+/// render, and never changed incompatibly: a changed port set or type is a
+/// new name.
+static INTERFACES: [LibraryFile; 3] = [
+    LibraryFile {
+        name: "deck",
+        text: include_str!("../interfaces/deck.toml"),
+    },
+    LibraryFile {
+        name: "instrument",
+        text: include_str!("../interfaces/instrument.toml"),
+    },
+    LibraryFile {
+        name: "voice",
+        text: include_str!("../interfaces/voice.toml"),
+    },
+];
+
+/// Every library interface template, in name order (ADR 0037 §3).
+pub fn interfaces() -> &'static [LibraryFile] {
+    &INTERFACES
+}
+
+/// The library interface template `name` (without the `lib.` prefix), if
+/// there is one.
+pub fn interface(name: &str) -> Option<&'static LibraryFile> {
+    INTERFACES.iter().find(|file| file.name == name)
+}
 
 /// One validation pair (ADR 0027 §4, M2.10-4): a library composite rebuilt
 /// from core primitives and the native `std.*` type it is rendered against,
@@ -185,6 +221,13 @@ mod tests {
         assert_eq!(get("tape_echo").map(|f| f.name), Some("tape_echo"));
         assert!(get("lib.tape_echo").is_none());
         assert_eq!(get("tape_echo").unwrap().hash().len(), 16);
+        let names: Vec<&str> = interfaces().iter().map(|f| f.name).collect();
+        assert_eq!(names, ["deck", "instrument", "voice"]);
+        assert_eq!(interface("voice").map(|f| f.name), Some("voice"));
+        // A template's namespace is the `slot` key's own, and no composite
+        // shares a template's name, so `lib.<name>` names one thing in the
+        // changelog.
+        assert!(interfaces().iter().all(|f| get(f.name).is_none()));
     }
 
     /// Every validation pair names a library composite, once.

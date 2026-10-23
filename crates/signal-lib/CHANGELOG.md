@@ -38,6 +38,9 @@ its output or was removed since 0.1: every entry under `## 0.1` still holds.
 Added after the v0.2.0 tag:
 
 - `lib.transport` (event), ADR 0033: the transport as a signal, a `std.playhead` with `bpm`, `run`, `rate` and `seek` exported and `position`, `running` and `tempo` out, for sequencers to follow; not in the library demo (`NOT_IN_DEMO`): `7f20f2bbed23372b`
+- `lib.voice` (interface template, ADR 0037 §3): a mono voice, inputs `hz` (frequency, Hz), `gate` (gate), `velocity` (control, 0 to 1), output `out` (audio); text hash `2dc66859dd2f5871`
+- `lib.instrument` (interface template, ADR 0037 §3): `lib.voice`'s inputs, outputs `l` and `r` (audio); text hash `07b3870f5381b455`
+- `lib.deck` (interface template, ADR 0037 §3): inputs `position` (control, beats), `jump` (events, trigger), `running` (gate), `tempo` (control, bpm), outputs `l` and `r` (audio), parameter `release`; text hash `c8fa72b11d0b70d4`
 
 ## 0.1
 

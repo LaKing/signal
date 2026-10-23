@@ -29,6 +29,7 @@ fn instance(name: &str, module: &str, parameters: &[(&str, f64)]) -> InstanceDef
             .iter()
             .map(|(k, v)| ((*k).to_owned(), *v))
             .collect::<BTreeMap<_, _>>(),
+        scope: None,
     }
 }
 

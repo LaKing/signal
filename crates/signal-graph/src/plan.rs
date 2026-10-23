@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use serde::Serialize;
-use signal_core::{InstanceAddress, ModuleDescriptor, PortAddress, PortShape, Table};
+use signal_core::{InstanceAddress, ModuleDescriptor, PortAddress, PortShape, StreamKey, Table};
 
 use crate::error::GraphWarning;
 
@@ -48,6 +48,12 @@ pub struct PlanInstance {
     /// from a project file the caller hashes.
     #[serde(skip)]
     pub table: Option<Table>,
+    /// Its random stream's key when it lies under a scope root (ADR 0035
+    /// §4): the innermost root's seed and its address relative to that
+    /// root. `None` (and not serialized) outside any scope root: the
+    /// stream is then derived from the run's seed and `address`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<StreamKey>,
 }
 
 /// One incoming connection of an input port.

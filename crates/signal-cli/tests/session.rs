@@ -60,6 +60,8 @@ fn provenance() -> Provenance {
         rustc_version: "rustc (test)".to_owned(),
         project_file_hashes: Default::default(),
         library_composite_hashes: Default::default(),
+        library_interface_hashes: Default::default(),
+        included_projects: Vec::new(),
         cargo_lock_hash: "0000000000000000".to_owned(),
     }
 }
