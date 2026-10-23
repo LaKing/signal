@@ -4,23 +4,25 @@
 # Report every failure of a run, not only the first.
 fail-fast = false
 # Some tests time the host or its GPU and pass on the device, but only by a
-# margin a loaded virtual machine sometimes misses (seen: a hidden edit shown
-# after 2.30 s against 2.25 s; 4 096 frames run before any worker woke; a GPU
-# result pending one block after the lab bank had recovered). Every test
-# gets two retries here; a deterministic failure still fails all three, and
-# nextest reports a pass after a retry as flaky, so it stays visible.
+# margin a loaded virtual machine sometimes misses (seen: 4 096 frames run
+# before any worker woke; a GPU result pending one block after the lab bank
+# had recovered). Every test gets two retries here; a deterministic failure
+# still fails all three, and nextest reports a pass after a retry as flaky, so
+# it stays visible.
 retries = 2
-# Three tests measure real-time scheduling, which a hosted runner (a 3-core
-# virtual machine) cannot give: the Mach-semaphore workers under a time
-# constraint did not play 16 384 frames in 120 s; workers under a time
-# constraint took no task in a release build, three tries running (the
-# caller ran every task before they woke); and a 108 ms stall of the virtual
-# machine was reported as a hang (the threshold is 100 ms). They run on the
-# device: `cargo test` and the default nextest profile run them.
+# Four tests time the host more closely than a hosted runner (a 3-core
+# virtual machine) can: the Mach-semaphore workers under a time constraint
+# did not play 16 384 frames in 120 s; workers under a time constraint took
+# no task in a release build, three tries running (the caller ran every task
+# before they woke); a 108 ms stall of the virtual machine was reported as a
+# hang (the threshold is 100 ms); and a hidden edit was shown after 2.30 s
+# against a 2.25 s bound, three tries running (run 39962042041). They run on
+# the device: `cargo test` and the default nextest profile run them.
 default-filter = """
 not (
     (binary_id(signal-audio::rt_workers) & test(=semaphore_workers_are_reached_by_every_wake_and_stop_cleanly))
   | (binary_id(signal-audio::rt_workers) & test(=time_constraint_workers_play_the_offline_render))
   | (binary_id(signal-output::hang) & test(=a_run_without_a_stall_reports_no_hang))
+  | (binary_id(signal-ui::document) & test(=the_display_shows_a_hidden_edit_within_the_bound))
 )
 """
