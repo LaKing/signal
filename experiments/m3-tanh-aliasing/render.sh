@@ -21,6 +21,10 @@ out="$root/renders/m3-tanh-aliasing"
 signal=""
 if [ "${1:-}" = "--signal" ]; then signal=$2; fi
 if [ -z "$signal" ]; then
+  # Homebrew's rustup keeps cargo off PATH (AGENTS.md, Commands).
+  if ! command -v cargo >/dev/null && [ -x /opt/homebrew/opt/rustup/bin/cargo ]; then
+    PATH=/opt/homebrew/opt/rustup/bin:$PATH
+  fi
   target=$(cd "$root" && cargo metadata --locked --offline --no-deps --format-version 1 |
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
   signal="$target/release/signal"
