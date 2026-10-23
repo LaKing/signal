@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { LINE_PX, PAGE_SHARE, isTextField, scrollView, scrollerFor, setViewScroller } from './keyboard.js';
+import { LINE_PX, PAGE_SHARE, install, isTextField, registerWheel, scrollView, scrollerFor, setViewScroller } from './keyboard.js';
 
 const el = (localName, more = {}) => ({ nodeType: 1, localName, ...more });
 
@@ -50,4 +50,29 @@ test('the box scrolled is the scrolling one around the focus, else the page view
   assert.equal(scrollerFor(hidden, hidden.ownerDocument), view);
   setViewScroller(null);
   assert.equal(scrollerFor(hidden, hidden.ownerDocument), null, 'nothing scrolls');
+});
+
+test('a control that uses the wheel at some of its points takes a gesture only when it starts at one', () => {
+  const listeners = [];
+  const doc = { addEventListener: (type, fn, options) => listeners.push({ type, fn, capture: options === true || options?.capture }), defaultView: { innerWidth: 1000, innerHeight: 800 } };
+  install(doc);
+  // A focused step grid: it owns the wheel, but only its level knobs use it.
+  const grid = {
+    nodeType: 1, localName: 'signal-step-grid', ownerDocument: doc,
+    getAttribute: () => null, matches: (q) => q === ':focus-within',
+    getBoundingClientRect: () => ({ width: 400, height: 200 }),
+  };
+  registerWheel(grid, (event) => event.clientX < 50);
+  const first = listeners.find((l) => l.type === 'wheel' && l.capture).fn;
+  const last = listeners.find((l) => l.type === 'wheel' && !l.capture).fn;
+  const wheel = (clientX, timeStamp) => {
+    const event = { currentTarget: doc, clientX, clientY: 10, deltaY: 4, timeStamp, composedPath: () => [grid], prevented: false, preventDefault() { this.prevented = true; } };
+    first(event);
+    last(event);
+    return event.prevented;
+  };
+  assert.equal(wheel(200, 1000), false, 'over the steps the page scrolls');
+  assert.equal(wheel(20, 1100), false, 'and keeps scrolling over a knob in the same gesture');
+  assert.equal(wheel(20, 2000), true, 'a gesture starting over a knob is the grid\'s');
+  assert.equal(wheel(200, 2100), true, 'and never scrolls the page');
 });

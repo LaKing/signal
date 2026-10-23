@@ -175,7 +175,8 @@ svg.grid { width: 100%; height: auto; display: block; overflow: visible; touch-a
       const hit = this.at(event);
       if (hit?.area === 'knob') this.edit(() => this.model.resetLevel(hit.lane));
     });
-    registerWheel(this);
+    // Only the level knobs use the wheel: over the steps a gesture scrolls the page.
+    registerWheel(this, (event) => this.at(event)?.area === 'knob');
     svg.addEventListener(
       'wheel',
       (event) => {

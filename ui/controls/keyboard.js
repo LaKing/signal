@@ -179,11 +179,25 @@ export function verticalDelta(event) {
 
 /** Controls that use the wheel (scroll, zoom or change a value): the gesture's first event decides whether one takes it. */
 const wheelControls = new WeakSet();
+/** A control that uses the wheel only at some of its points: whether `event` is at one. */
+const wheelParts = new WeakMap();
 
-/** Marks `element` as a control that uses the wheel (every part of it: a gesture it takes never scrolls the page). */
-export function registerWheel(element) {
+/**
+ * Marks `element` as a control that uses the wheel: every part of it, or,
+ * with `uses(event)`, only where that says so (the step grid's level
+ * knobs). A gesture starting elsewhere on it is the page's. A gesture it
+ * takes never scrolls the page.
+ */
+export function registerWheel(element, uses) {
   wheelControls.add(element);
+  if (uses) wheelParts.set(element, uses);
   install(element.ownerDocument);
+}
+
+/** Whether `event` is at a point of `element` that uses the wheel. */
+function usesWheelAt(element, event) {
+  const uses = wheelParts.get(element);
+  return !uses || Boolean(uses(event));
 }
 
 /** Whether `element` owns the wheel for `event` (ui/lib/wheel.js). */
@@ -201,6 +215,11 @@ function ownsFor(element, event) {
 
 /** A new gesture's first event over `element`: it takes the gesture, or (once, when due) the hint says how. */
 function decide(latch, element, event) {
+  // Over a part without a wheel use the gesture is the page's, without a hint.
+  if (!usesWheelAt(element, event)) {
+    latch.claim(element, false);
+    return;
+  }
   const owns = ownsFor(element, event);
   latch.claim(element, owns);
   if (!owns && latch.hint(element)) showHint(element.ownerDocument, event);
