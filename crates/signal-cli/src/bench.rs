@@ -21,6 +21,10 @@
 //!   two threads (every segment on the workers) against one thread, and the
 //!   smallest per-segment estimate at which two threads were faster.
 //!
+//! - `--only PREFIX` (M3, `experiments/m3-tanh-aliasing/`), instead of all the
+//!   above: the per-instance rows of the primitives whose type name starts
+//!   with PREFIX, in any namespace (a lab build's `lab.*` ones too, but never
+//!   a GPU type), with `--param NAME=VALUE` setting a parameter of each.
 //! - `--realtime` (ADR 0019 §4, M2.6-3), instead of all the above: kick
 //!   voices in blocks of 128 frames paced at the 96 kHz period, timed block
 //!   by block on 1, 8 and all performance cores (and one fewer): ordinary;
@@ -149,11 +153,21 @@ pub(crate) struct BenchArgs {
     /// a fraction of the period (more than 0, at most 1).
     #[arg(long, requires = "realtime", value_parser = parse_computation, default_value = "0.25")]
     rt_computation: Computation,
+    /// Measure only the primitives whose type name starts with PREFIX (any
+    /// namespace, e.g. `lab.tanh` in a lab build; never a GPU type): the
+    /// per-instance rows, without the kick, voice, block and scaling rows.
+    #[arg(long, value_name = "PREFIX", conflicts_with_all = ["write_voices", "realtime"])]
+    only: Option<String>,
+    /// With --only: set parameter NAME of every measured instance that has
+    /// it to VALUE (repeatable), e.g. `--param drive=20`. A NAME that no
+    /// measured type has is refused.
+    #[arg(long, value_name = "NAME=VALUE", requires = "only", value_parser = parse_param)]
+    param: Vec<(String, f64)>,
     /// Measure only the GPU partial bank (`lab.gpu_partials`): its cost per
     /// block on each GPU device the Setup allows (M2.7-2), next to its CPU
     /// reference.
     #[cfg(feature = "lab")]
-    #[arg(long, conflicts_with_all = ["write_voices", "realtime"])]
+    #[arg(long, conflicts_with_all = ["write_voices", "realtime", "only"])]
     gpu: bool,
 }
 
@@ -240,6 +254,32 @@ pub(crate) fn run(
         return Ok(());
     }
 
+    let measured_type = |name: &str| match &args.only {
+        Some(prefix) => name.starts_with(prefix.as_str()) && !is_gpu_type(name),
+        None => name.starts_with("std."),
+    };
+    if let Some(prefix) = &args.only {
+        let measured: Vec<_> = registry
+            .iter()
+            .filter(|t| measured_type(t.descriptor.type_name))
+            .collect();
+        if measured.is_empty() {
+            return Err(Failure::Usage(format!(
+                "--only {prefix}: no measurable type starts with `{prefix}`"
+            )));
+        }
+        for (param, _) in &args.param {
+            let known = measured
+                .iter()
+                .any(|t| t.descriptor.parameters.iter().any(|d| d.name == param));
+            if !known {
+                return Err(Failure::Usage(format!(
+                    "--param {param}: no type measured by --only {prefix} has a parameter `{param}`"
+                )));
+            }
+        }
+    }
+
     let empty = measure(
         &plan_of(&CompositeDef::default(), &[], registry)?,
         registry,
@@ -254,10 +294,22 @@ pub(crate) fn run(
     let mut primitives = Vec::new();
     for module_type in registry.iter() {
         let name = module_type.descriptor.type_name;
-        if !name.starts_with("std.") {
+        if !measured_type(name) {
             continue;
         }
-        let graph = primitive_graph(registry, name)?;
+        let parameters: Vec<(&str, f64)> = args
+            .param
+            .iter()
+            .filter(|(p, _)| {
+                module_type
+                    .descriptor
+                    .parameters
+                    .iter()
+                    .any(|d| d.name == p)
+            })
+            .map(|(p, v)| (p.as_str(), *v))
+            .collect();
+        let graph = primitive_graph(registry, name, &parameters)?;
         let timing = measure(&plan_of(&graph, &[], registry)?, registry, seconds)?;
         let per_instance = Timing {
             median: (timing.median - stimulus.median) / INSTANCES as f64,
@@ -268,6 +320,11 @@ pub(crate) fn run(
             eprintln!("signal: bench: {name} {:.1} ns", per_instance.median);
         }
         primitives.push((name, per_instance, timing));
+    }
+    if let Some(prefix) = &args.only {
+        let rows = (&empty, &stimulus, primitives.as_slice());
+        only_table(prefix, &args.param, rows, (profile, seconds, budget), json);
+        return Ok(());
     }
 
     let kick = kick_project()?;
@@ -522,6 +579,100 @@ pub(crate) fn run(
         print_stdout(&text);
     }
     Ok(())
+}
+
+/// A measured primitive: its name, its per-instance timing and its graph's.
+type PrimitiveRow<'a> = (&'a str, Timing, Timing);
+
+/// Prints the `--only` table: the empty plan, the stimulus and the
+/// per-instance rows, as the full table has them.
+fn only_table(
+    prefix: &str,
+    parameters: &[(String, f64)],
+    (empty, stimulus, primitives): (&Timing, &Timing, &[PrimitiveRow<'_>]),
+    (profile, seconds, budget): (&str, f64, f64),
+    json: bool,
+) {
+    if json {
+        let output = json!({
+            "label": "measurement",
+            "profile": profile,
+            "machine": machine(),
+            "sample_rate": SAMPLE_RATE,
+            "budget_ns": budget,
+            "seconds_per_case": seconds,
+            "frames_per_repeat": REPEAT_FRAMES,
+            "only": prefix,
+            "parameters": parameters.iter().map(|(p, v)| (p.clone(), json!(v))).collect::<serde_json::Map<_, _>>(),
+            "engine_empty": empty.json(),
+            "stimulus": stimulus.json(),
+            "primitives": primitives.iter().map(|(name, per_instance, graph)| json!({
+                "type": name,
+                "instances": INSTANCES,
+                "median_ns": per_instance.median,
+                "p99_ns": per_instance.p99,
+                "repeats": per_instance.repeats,
+                "graph": graph.json(),
+            })).collect::<Vec<_>>(),
+        });
+        print_stdout(&serde_json::to_string_pretty(&output).unwrap_or_default());
+        return;
+    }
+    let set: Vec<String> = parameters
+        .iter()
+        .map(|(p, v)| format!("{p} = {v}"))
+        .collect();
+    let mut text = format!(
+        "measurement, {profile} build, {SAMPLE_RATE} Hz (budget {budget:.0} ns per frame)\n\
+         engine, empty plan        {:>9.1} ns/frame (p99 {:.1})\n\
+         stimulus alone            {:>9.1} ns/frame (p99 {:.1})\n\
+         per instance (median, p99 ns/frame; {INSTANCES} instances minus the stimulus; \
+         types starting with `{prefix}`{}):",
+        empty.median,
+        empty.p99,
+        stimulus.median,
+        stimulus.p99,
+        if set.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", set.join(", "))
+        }
+    );
+    for (name, timing, _) in primitives {
+        text.push_str(&format!(
+            "\n  {name:<22}  {:>8.1}  {:>8.1}",
+            timing.median, timing.p99
+        ));
+    }
+    print_stdout(&text);
+}
+
+/// `NAME=VALUE` of `--param`.
+fn parse_param(text: &str) -> Result<(String, f64), String> {
+    let (name, value) = text
+        .split_once('=')
+        .ok_or_else(|| format!("expected NAME=VALUE, not `{text}`"))?;
+    let value: f64 = value
+        .trim()
+        .parse()
+        .map_err(|_| format!("`{value}` is not a number"))?;
+    if !value.is_finite() {
+        return Err(format!("`{value}` is not finite"));
+    }
+    Ok((name.trim().to_owned(), value))
+}
+
+/// Whether `name` runs on a GPU device (never measured by `--only`).
+fn is_gpu_type(name: &str) -> bool {
+    #[cfg(feature = "lab")]
+    {
+        signal_lab::GPU_TYPES.contains(&name)
+    }
+    #[cfg(not(feature = "lab"))]
+    {
+        let _ = name;
+        false
+    }
 }
 
 /// The kick project, as committed.
@@ -1377,7 +1528,11 @@ fn stimulus_graph() -> CompositeDef {
 /// one `std.pack<N>` of the saw, both shared by the instances; the second of
 /// two exclusive inputs is left unconnected (ADR 0033).
 /// Outputs are left open; every instance runs regardless.
-fn primitive_graph(registry: &Registry, type_name: &str) -> Result<CompositeDef, Failure> {
+fn primitive_graph(
+    registry: &Registry,
+    type_name: &str,
+    parameters: &[(&str, f64)],
+) -> Result<CompositeDef, Failure> {
     let descriptor = registry
         .iter()
         .find(|t| t.descriptor.type_name == type_name)
@@ -1421,7 +1576,7 @@ fn primitive_graph(registry: &Registry, type_name: &str) -> Result<CompositeDef,
     }
     for i in 0..INSTANCES {
         let name = format!("p{i}");
-        graph.instances.push(instance(&name, type_name, &[]));
+        graph.instances.push(instance(&name, type_name, parameters));
         let mut events = 0;
         // Of two exclusive inputs (ADR 0033: a sequencer's `tick` and
         // `follow`) only the first is fed, as a plan may connect only one.

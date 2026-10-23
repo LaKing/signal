@@ -15,6 +15,8 @@ What the engine costs at 96 kHz, one frame at a time (*k* = 1, ADR 0016; the inp
 | Kick voices | The kick project with its `drums` instance duplicated *N* times (every connection to and from it repeated) and the copies summed by a tree of 4-input `std.mix` into `out` | The largest *N* whose **median** stays within 25 % and within 50 % of the budget (doubling, then bisection; every *N* measured is listed in `kick_voices.measured`) |
 | Block sizes | The kick project, and the kick voices at the *N* within 25 % | Per frame, in blocks of *k* = 1, 64 and 256 (`blocks.measured`) |
 
+**Only some primitives** (M3): `signal bench --only <PREFIX> [--param NAME=VALUE …]` measures the empty plan, the stimulus and only the primitives whose type name starts with PREFIX, in any namespace. A `--features lab` build includes the `lab.*` types but never a GPU type. Each `--param` sets that parameter on every measured instance that has it. The JSON has the same `engine_empty`, `stimulus` and `primitives[]` fields, plus `only` and `parameters`, and no kick, voice, block or scaling rows. The M3 tanh experiment uses it (`experiments/m3-tanh-aliasing/README.md`, "CPU"): `signal bench --only lab.tanh --param drive=20`.
+
 ## Reproducing a row
 
 From the repository root, on an otherwise idle Mac, with a release build:

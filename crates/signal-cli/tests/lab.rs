@@ -182,3 +182,16 @@ fn render_says_when_due_results_were_lost() {
     }
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// `bench --gpu` and `--only` (M3) exclude each other: the GPU table measures
+/// a GPU type, which `--only` never does.
+#[test]
+fn bench_gpu_and_only_conflict() {
+    let output = Command::new(env!("CARGO_BIN_EXE_signal"))
+        .args(["bench", "--gpu", "--only", "lab.tanh"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("the signal binary runs");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+}

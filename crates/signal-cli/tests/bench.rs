@@ -417,3 +417,75 @@ fn realtime_rows_per_wake_policy() {
     let bad = signal(&["bench", "--realtime", "--rt-computation", "0"]);
     assert_eq!(bad.status.code(), Some(1), "a computation of 0 is refused");
 }
+
+/// `--only PREFIX` (M3, `experiments/m3-tanh-aliasing/`): the empty plan, the
+/// stimulus and the rows of the types starting with PREFIX, with the
+/// parameters `--param` sets, and nothing else. Shape only.
+#[test]
+fn bench_only_measures_the_named_types() {
+    let output = Command::new(env!("CARGO_BIN_EXE_signal"))
+        .args([
+            "--json",
+            "bench",
+            "--seconds",
+            "0.05",
+            "--only",
+            "std.tanh",
+            "--param",
+            "drive=20",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("the signal binary runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bench: Value = serde_json::from_slice(&output.stdout).expect("JSON on stdout");
+    assert_eq!(bench["label"], "measurement");
+    assert_eq!(bench["only"], "std.tanh");
+    assert_eq!(bench["parameters"]["drive"], 20.0);
+    timing(&bench["engine_empty"], "engine_empty");
+    timing(&bench["stimulus"], "stimulus");
+    let names: Vec<&str> = bench["primitives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["std.tanh", "std.tanh_shaper"]);
+    for key in ["kick", "kick_voices", "blocks", "scaling"] {
+        assert!(bench.get(key).is_none(), "{key} is not measured");
+    }
+
+    let refused = Command::new(env!("CARGO_BIN_EXE_signal"))
+        .args(["bench", "--only", "std.tanh", "--param", "drive"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("the signal binary runs");
+    assert!(!refused.status.success(), "a NAME=VALUE is required");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("expected NAME=VALUE"));
+}
+
+/// `--only` refuses a `--param` that no measured type has, and a prefix that
+/// names no type, before measuring anything.
+#[test]
+fn bench_only_refuses_what_it_would_not_measure() {
+    for (args, needle) in [
+        (
+            &["bench", "--only", "std.tanh", "--param", "cutoff_hz=5"][..],
+            "has a parameter `cutoff_hz`",
+        ),
+        (&["bench", "--only", "nosuch."][..], "no measurable type"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_signal"))
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("the signal binary runs");
+        assert!(!output.status.success(), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(needle), "{args:?}: {stderr}");
+    }
+}

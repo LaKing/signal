@@ -1,0 +1,37 @@
+# M3 tanh aliasing experiment (experiments/m3-tanh-aliasing/README.md): an
+# eighth-note saw bass line (A1 A1 C2 A1 E2 D2 C2 G1 at 120 bpm), low-passed,
+# enveloped and driven into the shaper at drive 8. render.sh swaps
+# `std.tanh_shaper` for each candidate in a copy.
+schema_version = 1
+
+[project]
+name = "m3-bass"
+sample_rate = 48000
+seed = 1
+
+[instances]
+# 240 bpm beats: eighth notes at 120 bpm.
+clock = { module = "std.transport", bpm = 240 }
+notes = { module = "std.step_seq", s1 = 55, s2 = 55, s3 = 65.40639132514966, s4 = 55, s5 = 82.40688922821748, s6 = 73.41619197935188, s7 = 65.40639132514966, s8 = 48.999429497718666 }
+osc = { module = "std.osc", freq = 0, shape = 1 }
+filter = { module = "std.svf", cutoff_hz = 900, q = 1.2 }
+env = { module = "std.exp_env", attack_ms = 2, decay_ms = 220 }
+vca = { module = "std.mul" }
+shaper = { module = "std.tanh_shaper", drive = 8 }
+dc = { module = "std.dc_block" }
+# Quiet: the peak stays at or below 0.25.
+out = { module = "std.audio_out", gain = 0.16 }
+
+[wiring]
+connections = [
+  { from = "clock.beat", to = "notes.step" },
+  { from = "clock.beat", to = "env.trigger" },
+  { from = "notes.out", to = "osc.freq" },
+  { from = "osc.out", to = "filter.in" },
+  { from = "filter.lp", to = "vca.a" },
+  { from = "env.out", to = "vca.b" },
+  { from = "vca.out", to = "shaper.in" },
+  { from = "shaper.out", to = "dc.in" },
+  { from = "dc.out", to = "out.l" },
+  { from = "dc.out", to = "out.r" },
+]
