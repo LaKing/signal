@@ -63,6 +63,8 @@ Reaktor-inspired: a hierarchy, the split between built-in low-level units and us
 | **Instance** | One occurrence of a module type in a project graph, with a stable ID and hierarchical address (`/mixer/ch3/eq`). | Module instance |
 | **Port** / **Connection** | Typed input/output with a rate; a directed link between ports. | Port / Wire |
 | **Parameter** | A named, typed, addressable value of an instance, settable by events or modulation. | Knob / Control |
+| **Interface** | *Added 2026-10-23 (ADR 0037).* A set of typed input and output ports and parameters with nothing inside. Every slot has its own; a named one (`interfaces/<name>.toml`, or the library's `lib.deck`, `lib.voice`) is a template a slot may start from. | (Macro ports) |
+| **Slot** | *Added 2026-10-23 (ADR 0037).* An instance whose ports and parameters are its own editable interface and whose content is whatever module or project it loads, or nothing. Loading connects the content by matching port names; the host's wires to the slot stay written. Resolved to an ordinary instance before planning, so not a runtime concept. | (Plugin slot) |
 | **Preset** (or Snapshot) | A stored set of parameter values for a module or project. | Snapshot |
 | **Setup** | *[Rec]* Per-machine configuration, kept outside projects: audio device selection, sample rate support, mapping of physical channels to a project's logical inputs and outputs, network interfaces. Edited in the GUI's interface setup dialog. Projects stay portable between machines. | (Audio and MIDI settings) |
 | **Library** | A versioned collection of module types (primitives and composites) a project can depend on. | Library / User Library |
