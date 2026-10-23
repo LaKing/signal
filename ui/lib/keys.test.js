@@ -43,7 +43,7 @@ test('the built-in keymap is whole: every chord parses, scopes exist, no clash w
   }
   // Within a scope no two commands share a chord, and no wheel chord holds the wheel modifier.
   const map = buildKeymap(DEFAULTS, {});
-  const all = buildKeymap(DEFAULTS, { 'view.page_down': ['PageDown', 'Space', 'F20'] });
+  const all = buildKeymap(DEFAULTS, { 'view.page_down': ['PageDown', 'F20'] });
   assert.deepEqual(all.conflicts, []);
   for (const [scope, table] of map.bindings) {
     const counted = DEFAULTS.commands.filter((c) => c.scope === scope).reduce((n, c) => n + c.keys.length, 0);
@@ -91,7 +91,11 @@ test('lookup: a scope only; fine commands take Shift as finer', () => {
   assert.deepEqual(lookup(map, 'slider', 'Shift+ArrowUp'), { id: 'slider.increase', fine: true });
   assert.deepEqual(lookup(map, 'slider', 'Shift+Home'), null);
   assert.deepEqual(lookup(map, 'slider', 'Space'), null);
-  assert.deepEqual(lookup(map, 'view', 'Space'), { id: 'view.page_down', fine: false });
+  // ADR 0039: Space no longer scrolls; it is the project's transport, below the view.
+  assert.deepEqual(lookup(map, 'view', 'Space'), null);
+  assert.deepEqual(lookup(map, 'view', 'Shift+Space'), null);
+  assert.deepEqual(lookup(map, 'project', 'Space'), { id: 'transport.toggle', fine: false });
+  assert.deepEqual(lookup(map, 'view', 'PageDown'), { id: 'view.page_down', fine: false });
   assert.deepEqual(lookup(map, 'piano_roll', 'Shift+ArrowUp'), { id: 'piano_roll.octave_up', fine: false });
 });
 
@@ -115,12 +119,12 @@ test('the wheel modifier only takes the wheel: it is left out of a control wheel
 test('applyKeys replaces the page keymap and tells the listeners', () => {
   const seen = [];
   const stop = onKeys((map, info) => seen.push([map.commands.get('view.page_down').keys, info.problems]));
-  applyKeys({ overrides: { 'view.page_down': ['PageDown'] }, path: '/x/keys.toml', problems: ['p'] });
-  assert.deepEqual(seen, [[['PageDown'], ['p']]]);
-  assert.equal(keyCommand('view', key(' '), { mac: true }), null);
+  applyKeys({ overrides: { 'view.page_down': ['PageDown', 'Space'] }, path: '/x/keys.toml', problems: ['p'] });
+  assert.deepEqual(seen, [[['PageDown', 'Space'], ['p']]]);
+  assert.deepEqual(keyCommand('view', key(' '), { mac: true }), { id: 'view.page_down', fine: false });
   stop();
   applyKeys({ overrides: {} });
-  assert.deepEqual(keyCommand('view', key(' '), { mac: true }), { id: 'view.page_down', fine: false });
+  assert.equal(keyCommand('view', key(' '), { mac: true }), null);
   assert.equal(seen.length, 1);
 });
 
@@ -145,4 +149,23 @@ test('a wheel modifier of two keys takes the wheel only with both, and hides onl
   assert.equal(wheelModifierHeld({ ctrlKey: true }, { mac: true }), false);
   assert.equal(wheelModifierHeld({ ctrlKey: true, altKey: true }, { mac: true }), true);
   applyKeys({ overrides: {} });
+});
+
+test('Space is the transport (ADR 0039): the controls that keep it shadow it; a view override hides it, a conflict', () => {
+  const map = buildKeymap(DEFAULTS, {});
+  assert.equal(map.scopes.get('view').parent, 'project');
+  assert.equal(map.scopes.get('project').parent, 'app');
+  assert.deepEqual(map.commands.get('view.page_down').keys, ['PageDown']);
+  assert.deepEqual(map.commands.get('view.page_up').keys, ['PageUp']);
+  assert.equal(map.commands.get('transport.toggle').menu, false, 'a page command, never a bare-key menu item');
+  for (const [scope, id] of [['button', 'button.press'], ['toggle', 'toggle.flip'], ['step_grid', 'step_grid.cycle'], ['meter', 'meter.clear_clip'], ['oscilloscope', 'oscilloscope.freeze']]) {
+    assert.deepEqual(lookup(map, scope, 'Space'), { id, fine: false }, scope);
+  }
+  for (const scope of ['slider', 'xy', 'piano_roll', 'schematic', 'value']) assert.equal(lookup(map, scope, 'Space'), null, scope);
+  assert.deepEqual(map.conflicts, [], 'the built-in shadows are not conflicts');
+  // Space back on the view: it hides the transport there, said as a conflict.
+  const scrolled = buildKeymap(DEFAULTS, { 'view.page_down': ['PageDown', 'Space'] });
+  assert.deepEqual(scrolled.conflicts.map(({ kind, chord, command, with: w }) => ({ kind, chord, command, with: w })), [{ kind: 'shadow', chord: 'Space', command: 'view.page_down', with: 'transport.toggle' }]);
+  // Two project commands cannot share it either; another key works.
+  assert.deepEqual(buildKeymap(DEFAULTS, { 'transport.toggle': ['F5'] }).conflicts, []);
 });

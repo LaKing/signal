@@ -10945,6 +10945,16 @@
             "unit": "beats"
           },
           {
+            "address": "/melody.audition",
+            "direction": "in",
+            "kind": "trigger",
+            "name": "audition",
+            "range": null,
+            "rate": 1,
+            "shape": "events",
+            "unit": null
+          },
+          {
             "address": "/melody.gate",
             "direction": "out",
             "kind": "gate",

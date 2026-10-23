@@ -25,6 +25,14 @@
 // adds a note at the cursor (the last place pressed) and moves past it.
 // A double-click on empty grid adds nothing (the first click's note is
 // taken back). While a `pattern` is first read, nothing can be edited.
+//
+// The keys play (ADR 0039): a press on the keyboard strip sounds that key
+// on the instrument the roll's sequencer drives while it is held (pointer
+// capture; sliding over the keys moves the note, legato), louder towards
+// the key's tip, the key lit. The note goes, through the connection's
+// `note`, to the `audition` attribute's event input, else the `audition`
+// of the sequencer `position-bind` follows, else of the project's only
+// `std.note_seq` (ui/lib/audition.js). It is live only: nothing is written.
 
 import { canSyncPatterns, PatternSync, shortNotice } from '../lib/pattern-sync.js';
 import { playheadAddress, playheadStream } from '../lib/playhead.js';
@@ -57,6 +65,7 @@ import {
   zoomY,
 } from '../lib/piano-roll-model.js';
 import { parseNumber } from '../lib/entry.js';
+import { BLACK_SHARE, auditionTarget, keyAt } from '../lib/audition.js';
 import { SignalElement, registerWheel, takesWheel, verticalDelta } from './base.js';
 import { ariaShortcuts, keyCommand, wheelCommand } from '../lib/keys.js';
 
@@ -85,7 +94,7 @@ const COLORS = {
 
 export class SignalPianoRoll extends SignalElement {
   static role = 'application';
-  static observedAttributes = ['pattern', 'label', 'snap', 'beats-per-bar', 'position', 'position-bind', 'wheel'];
+  static observedAttributes = ['pattern', 'label', 'snap', 'beats-per-bar', 'position', 'position-bind', 'wheel', 'audition'];
   static resubscribe = ['pattern', 'position-bind'];
   static css = `
 :host { display: block; height: var(--signal-piano-roll-height, 460px); min-width: 320px; background: var(--signal-panel, #1f232b); border-radius: 8px; overflow: hidden; }
@@ -258,6 +267,7 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
       button.addEventListener('pointerdown', (event) => event.stopPropagation());
     }
     this.gridEvents();
+    this.keysEvents();
     this.velocityEvents();
     this.rulerEvents();
     this.scrollbarEvents();
@@ -277,6 +287,7 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
   }
 
   disconnectedCallback() {
+    this.release();
     super.disconnectedCallback();
     cancelAnimationFrame(this.frame);
     this.frame = 0;
@@ -446,6 +457,80 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
         this.model.redoStack.pop();
         this.changed();
       } else if (this.model.remove([hit.id])) this.changed();
+    });
+  }
+
+  // ------------------------------------------------ the keys play (ADR 0039)
+
+  keysEvents() {
+    const canvas = this.canvases.keys;
+    canvas.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      const { x, y } = this.local(event, canvas);
+      const hit = keyAt(x, y, this.view, canvas.clientWidth);
+      if (!hit) return;
+      this.capture(event);
+      this.release();
+      this.press(hit, event.pointerId);
+    });
+    canvas.addEventListener('pointermove', (event) => {
+      const held = this.pressed;
+      if (!held || held.pointerId !== event.pointerId) {
+        canvas.style.cursor = 'pointer';
+        return;
+      }
+      const { x, y } = this.local(event, canvas);
+      const hit = keyAt(clamp(x, 0, canvas.clientWidth), y, this.view, canvas.clientWidth);
+      if (!hit || hit.key === held.key) return;
+      // A slide: the new key first, so the voice goes on legato; then the old one's off (the sequencer ignores it).
+      this.press(hit, event.pointerId);
+      this.sendNote(held, false);
+    });
+    const end = (event) => {
+      if (this.pressed?.pointerId === event.pointerId) this.release();
+    };
+    canvas.addEventListener('pointerup', end);
+    canvas.addEventListener('pointercancel', end);
+    canvas.addEventListener('lostpointercapture', end);
+  }
+
+  /** Where the live notes go (ui/lib/audition.js), or null. */
+  auditionAddress() {
+    return auditionTarget({ audition: this.getAttribute('audition'), positionBind: this.getAttribute('position-bind') }, this.connection?.description);
+  }
+
+  /** Sounds `hit` (`{key, velocity}`) and lights its key. */
+  press(hit, pointerId) {
+    this.pressed = { ...hit, pointerId, address: this.auditionAddress(), connection: this.connection };
+    this.sendNote(this.pressed, true);
+    this.redraw();
+  }
+
+  /** Ends the held note, if any. */
+  release() {
+    const held = this.pressed;
+    if (!held) return;
+    this.pressed = null;
+    this.sendNote(held, false);
+    this.redraw();
+  }
+
+  /**
+   * A note on or off through the connection it was pressed on; silent when
+   * nothing plays or nothing takes it. A refused note off (the Controller's
+   * queue full) is sent once more 100 ms later, unless that key is held
+   * again by then; if that fails too, the server still holds it for this
+   * client and ends it when the client goes (docs/ui-protocol.md "note").
+   */
+  sendNote({ key, velocity, address, connection }, on, retry = !on) {
+    if (!address || typeof connection?.note !== 'function') return;
+    Promise.resolve(connection.note(address, key, on ? { velocity, on } : { on })).catch((error) => {
+      if (!retry || error?.code === 'closed') return;
+      setTimeout(() => {
+        const again = this.pressed;
+        if (again?.key === key && again.address === address && again.connection === connection) return;
+        this.sendNote({ key, address, connection }, false, false);
+      }, 100);
     });
   }
 
@@ -629,6 +714,8 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
   // ------------------------------------------------ the adapter (ADR 0028 §7)
 
   streams(connection) {
+    // A key held on the connection before: let go there.
+    this.release();
     this.sync?.close();
     this.sync = null;
     const playhead = this.playheadStreams(connection);
@@ -883,15 +970,17 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
     const p = this.playhead();
     const sounding = new Set();
     if (p !== null) for (const n of this.model.notes) if (p >= n.start && p < n.start + n.length) sounding.add(n.key);
-    const blackW = Math.round(w * 0.6);
+    // The key held down (ADR 0039) is lit as a sounding one, more strongly.
+    const pressed = this.pressed?.key;
+    const blackW = Math.round(w * BLACK_SHARE);
     // White keys: a boundary where two white keys meet (B|C, E|F) or in the middle of a black key.
     ctx.fillStyle = '#b9b8b2';
     for (let k = top; k >= bottom; k--) {
       const y = keyToY(k, v);
-      if (sounding.has(k) && !isBlack(k)) {
+      if ((sounding.has(k) || k === pressed) && !isBlack(k)) {
         const below = isBlack(k - 1) ? v.rowPx / 2 : 0;
         const above = isBlack(k + 1) ? v.rowPx / 2 : 0;
-        ctx.fillStyle = 'rgba(79, 195, 247, 0.55)';
+        ctx.fillStyle = k === pressed ? 'rgba(255, 183, 77, 0.85)' : 'rgba(79, 195, 247, 0.55)';
         ctx.fillRect(0, y - above, w, v.rowPx + above + below);
         ctx.fillStyle = '#b9b8b2';
       }
@@ -904,9 +993,10 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
       if (!isBlack(k)) continue;
       const y = keyToY(k, v);
       const grad = ctx.createLinearGradient(0, 0, blackW, 0);
-      grad.addColorStop(0, sounding.has(k) ? '#2d7fa6' : '#16171a');
-      grad.addColorStop(0.85, sounding.has(k) ? '#4fc3f7' : '#2c2e33');
-      grad.addColorStop(1, sounding.has(k) ? '#3aa0cf' : '#1d1f23');
+      const lit = k === pressed ? ['#a8661a', '#ffb74d', '#e0962e'] : sounding.has(k) ? ['#2d7fa6', '#4fc3f7', '#3aa0cf'] : ['#16171a', '#2c2e33', '#1d1f23'];
+      grad.addColorStop(0, lit[0]);
+      grad.addColorStop(0.85, lit[1]);
+      grad.addColorStop(1, lit[2]);
       ctx.fillStyle = grad;
       roundRect(ctx, 0, y + 0.5, blackW, v.rowPx - 1, [0, 2, 2, 0]);
       ctx.fill();

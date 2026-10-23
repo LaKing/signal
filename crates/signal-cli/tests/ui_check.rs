@@ -299,3 +299,71 @@ fn pattern_controls_bind_their_playhead_to_an_output() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// ADR 0039: the piano roll's `audition` names an event input of the plan
+/// (a sequencer's `audition`) or `none`; a signal port, a parameter, an
+/// unknown port or an empty value is an error at its value.
+#[test]
+fn the_piano_roll_auditions_into_an_event_input() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ui-check-audition");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("patterns")).unwrap();
+    fs::create_dir_all(dir.join("ui")).unwrap();
+    fs::write(
+        dir.join("project.toml"),
+        "schema_version = 1\n\n[project]\nname = \"audition\"\n\n[instances]\nseq = { module = \"std.note_seq\", pattern = \"melody\" }\nout = { module = \"std.audio_out\" }\n\n[wiring]\nconnections = [\n  { from = \"seq.gate\", to = \"out.l\" },\n]\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("patterns/melody.toml"),
+        "schema_version = 1\nkind = \"notes\"\nlength = 4\nnotes = [\n  { key = 60, start = 0, length = 1, velocity = 1 },\n]\n",
+    )
+    .unwrap();
+    let panel = dir.join("ui/main.html");
+    let good = "<signal-panel>\n<signal-piano-roll pattern=\"melody\" audition=\"/seq.audition\"></signal-piano-roll>\n<signal-piano-roll pattern=\"melody\" audition=\"none\"></signal-piano-roll>\n</signal-panel>\n";
+    fs::write(&panel, good).unwrap();
+    let output = check(&dir, false);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+
+    let bad = "<signal-panel>\n<signal-piano-roll pattern=\"melody\" audition=\"/seq.gate\"></signal-piano-roll>\n<signal-piano-roll pattern=\"melody\" audition=\"/seq.ppq\"></signal-piano-roll>\n<signal-piano-roll pattern=\"melody\" audition=\"/seq.nope\"></signal-piano-roll>\n<signal-piano-roll pattern=\"melody\" audition=\"\"></signal-piano-roll>\n<signal-piano-roll pattern=\"melody\" audition=\"/seq.tick\"></signal-piano-roll>\n</signal-panel>\n";
+    fs::write(&panel, bad).unwrap();
+    let output = check(&dir, false);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    let file = panel.display();
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines.len(), 5, "{stderr}");
+    let wants = "a sequencer's `audition` input of the plan (std.note_seq), or none";
+    assert_eq!(
+        lines[0],
+        format!(
+            "{file}:2:47: error: wrong kind: /seq.gate is a signal output; <signal-piano-roll> audition takes {wants}"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(
+        lines[1],
+        format!(
+            "{file}:3:47: error: wrong kind: /seq.ppq is a parameter; <signal-piano-roll> audition takes {wants}"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        lines[2].starts_with(&format!("{file}:4:47: error: ")) && lines[2].contains("/seq.nope"),
+        "{stderr}"
+    );
+    assert_eq!(
+        lines[3],
+        format!("{file}:5:47: error: <signal-piano-roll> audition is empty: it needs {wants}"),
+        "{stderr}"
+    );
+    assert_eq!(
+        lines[4],
+        format!(
+            "{file}:6:47: error: wrong kind: /seq.tick is an event input but no `audition`; <signal-piano-roll> audition takes {wants}"
+        ),
+        "{stderr}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}

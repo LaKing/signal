@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { LINE_PX, PAGE_SHARE, install, isTextField, registerWheel, scrollView, scrollerFor, setViewScroller } from './keyboard.js';
+import { LINE_PX, PAGE_SHARE, install, isTextField, registerWheel, runProjectCommand, scrollView, scrollerFor, setViewScroller } from './keyboard.js';
+import { setDefaultConnection } from '../signal-ui.js';
 
 const el = (localName, more = {}) => ({ nodeType: 1, localName, ...more });
 
@@ -75,4 +76,94 @@ test('a control that uses the wheel at some of its points takes a gesture only w
   assert.equal(wheel(20, 1100), false, 'and keeps scrolling over a knob in the same gesture');
   assert.equal(wheel(20, 2000), true, 'a gesture starting over a knob is the grid\'s');
   assert.equal(wheel(200, 2100), true, 'and never scrolls the page');
+});
+
+/** A connection to studio-transport as `describe` gives it, recording its commits. */
+function transportConnection(base = 1) {
+  return {
+    status: 'open',
+    commits: [],
+    description: {
+      playing: true,
+      instances: [{ address: '/transport/playhead', module: 'std.playhead', parameters: [{ name: 'run', address: '/transport/playhead.run' }] }],
+      controls: [{ address: '/transport.run', ports: ['/transport/playhead.run'], base, min: 0, max: 1, default: 1, modulated: false }],
+    },
+    commit(address, value) {
+      this.commits.push([address, value]);
+      return Promise.resolve({ type: 'committed' });
+    },
+  };
+}
+
+test('Space plays and stops the transport where no control, field or button takes it (ADR 0039)', () => {
+  const listeners = [];
+  const scrolled = [];
+  const doc = {
+    addEventListener: (type, fn, options) => listeners.push({ type, fn, capture: options === true || options?.capture }),
+    defaultView: { top: null, innerWidth: 1000, innerHeight: 800, getComputedStyle: () => ({ overflowY: 'auto' }), matchMedia: () => ({ matches: true }), dispatchEvent: () => true },
+    scrollingElement: { nodeType: 1, clientHeight: 400, scrollHeight: 2000, scrollBy: (o) => scrolled.push(o.top), scrollTo: () => {} },
+  };
+  doc.defaultView.top = doc.defaultView;
+  doc.defaultView.document = doc;
+  doc.scrollingElement.ownerDocument = doc;
+  install(doc);
+  const onKey = listeners.find((l) => l.type === 'keydown' && !l.capture).fn;
+  const connection = transportConnection(1);
+  setDefaultConnection(connection);
+  const press = (target, more = {}) => {
+    const event = { key: ' ', code: 'Space', currentTarget: doc, target, composedPath: () => [target], defaultPrevented: false, prevented: false, preventDefault() { this.prevented = true; }, ...more };
+    onKey(event);
+    return event.prevented;
+  };
+  const body = el('body', { parentElement: null });
+  assert.equal(press(body), true, 'taken');
+  assert.deepEqual(connection.commits, [['/transport.run', 0]], 'running: stopped, as a click on its toggle writes');
+  assert.equal(press(body), true);
+  assert.deepEqual(connection.commits.at(-1), ['/transport.run', 1], 'before the next describe: what was sent counts');
+  assert.equal(press(body, { repeat: true }), true, 'a held Space');
+  assert.equal(connection.commits.length, 2, 'repeats do nothing');
+  assert.deepEqual(scrolled, [], 'Space no longer scrolls');
+  // A native button, a text field and a focused control that handled it keep their Space.
+  assert.equal(press(el('button')), false);
+  assert.equal(press(el('input', { type: 'text' })), false);
+  assert.equal(press(body, { defaultPrevented: true }), false);
+  assert.equal(connection.commits.length, 2);
+  // Page Down still scrolls the page.
+  onKey({ key: 'PageDown', currentTarget: doc, target: body, composedPath: () => [body], defaultPrevented: false, preventDefault() {} });
+  assert.deepEqual(scrolled, [400 * PAGE_SHARE]);
+  setDefaultConnection(null);
+});
+
+test('the transport command does nothing without a connection, while nothing plays, or with no transport', () => {
+  assert.equal(runProjectCommand('view.page_down', transportConnection()), false, 'not a project command');
+  assert.equal(runProjectCommand('transport.toggle', null), true);
+  const closed = { ...transportConnection(), status: 'reconnecting' };
+  runProjectCommand('transport.toggle', closed);
+  assert.deepEqual(closed.commits, []);
+  const stopped = transportConnection();
+  stopped.description = { ...stopped.description, playing: false };
+  runProjectCommand('transport.toggle', stopped);
+  assert.deepEqual(stopped.commits, []);
+  const none = transportConnection();
+  none.description = { ...none.description, instances: [] };
+  runProjectCommand('transport.toggle', none);
+  assert.deepEqual(none.commits, []);
+  // A new description: its base is the truth again.
+  const fresh = transportConnection(0);
+  runProjectCommand('transport.toggle', fresh);
+  fresh.description = { ...fresh.description, controls: fresh.description.controls.map((c) => ({ ...c, base: 1 })) };
+  runProjectCommand('transport.toggle', fresh);
+  assert.deepEqual(fresh.commits, [['/transport.run', 1], ['/transport.run', 0]]);
+});
+
+test('a refused transport write is not counted: the next press goes by the description again', async () => {
+  const refusing = transportConnection(1);
+  refusing.commit = function (address, value) {
+    this.commits.push([address, value]);
+    return Promise.reject(Object.assign(new Error('write-failed'), { code: 'write-failed' }));
+  };
+  runProjectCommand('transport.toggle', refusing);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  runProjectCommand('transport.toggle', refusing);
+  assert.deepEqual(refusing.commits, [['/transport.run', 0], ['/transport.run', 0]], 'still running as described: stop again');
 });

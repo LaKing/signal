@@ -25,6 +25,8 @@ signal-engine = { workspace = true }
 signal-output = { workspace = true }
 # Projects, the live reload, the parameter write (toml_edit), sessions.
 signal-project = { workspace = true }
+# The live note value of std.note_seq's `audition` (ADR 0039, `note`).
+signal-std = { workspace = true }
 # Devices, the CoreAudio driver and input capture (the Setup's Apply).
 signal-audio = { workspace = true }
 # The Setup file.
@@ -39,7 +41,6 @@ tungstenite = { workspace = true }
 
 [dev-dependencies]
 signal-ui = { path = ".", features = ["test-hooks", "in-process"] }
-signal-std = { workspace = true }
 
 [lints]
 workspace = true

@@ -122,7 +122,7 @@
 <h2>Patterns</h2>
 <p class="note">ADR 0028 pattern text: the controls edit a <code>notes</code> and a <code>steps</code> pattern; the text below each is what <code>.text</code> writes to <code>patterns/&lt;name&gt;.toml</code>. With <code>pattern="&lt;name&gt;"</code> and a connection offering <code>readPattern</code>/<code>writePattern</code> they load and write that file (ui/lib/pattern-sync.js). The playhead and running light here are a fake 120 BPM clock.</p>
 <div class="patterns">
-  <figure class="pattern"><signal-piano-roll id="roll" label="melody" snap="1/16"></signal-piano-roll>
+  <figure class="pattern"><signal-piano-roll id="roll" label="melody" snap="1/16" audition="/synth.audition"></signal-piano-roll>
     <figcaption>click empty grid to add, drag to move, drag the right edge to resize, double-click or <kbd>Delete</kbd> to remove; rubber band and <kbd>Shift</kbd>-click select; <kbd>↑</kbd><kbd>↓</kbd> a semitone (<kbd>Shift</kbd> an octave), <kbd>←</kbd><kbd>→</kbd> one snap; <kbd>⌘</kbd>+wheel zooms time, <kbd>Alt</kbd>+wheel the keys; <kbd>⌘Z</kbd> / <kbd>⇧⌘Z</kbd>
       · <button type="button" id="stress">1200 notes</button> <button type="button" id="melody">melody</button> <label><input type="checkbox" id="play" checked> play</label></figcaption>
     <details><summary>patterns/melody.toml</summary><pre id="roll-text"></pre></details>

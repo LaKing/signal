@@ -167,6 +167,7 @@ export class FakeConnection {
     this.nextSub = 1;
     this.listeners = new Map();
     this.triggers = [];
+    this.notes = [];
     this.unsaved = null;
     /** The pattern files, in memory: name → text. */
     this.patterns = new Map(Object.entries(patterns));
@@ -290,6 +291,15 @@ export class FakeConnection {
     if (address !== '/synth.trigger') return failure('unknown-address', `no event input ${address}`);
     this.triggers.push(this.frameNumber);
     this.emit('trigger', { address, frame: this.frameNumber });
+    return Promise.resolve({ type: 'ack', frame: this.frameNumber, requested: this.frameNumber, late: false, outcome: 'scheduled' });
+  }
+
+  /** A live note at `/synth.audition` (ADR 0039), kept in `notes`. */
+  note(address, key, { velocity = 0.8, on = true } = {}) {
+    if (address !== '/synth.audition') return failure('unknown-address', `no event input ${address}`);
+    if (!Number.isInteger(key) || key < 0 || key > 127) return failure('bad-value', '`key` must be an integer from 0 to 127');
+    this.notes.push({ key, velocity, on, frame: this.frameNumber });
+    this.emit('note', { address, key, velocity, on, frame: this.frameNumber });
     return Promise.resolve({ type: 'ack', frame: this.frameNumber, requested: this.frameNumber, late: false, outcome: 'scheduled' });
   }
 

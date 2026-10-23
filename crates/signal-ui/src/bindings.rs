@@ -770,6 +770,70 @@ pub fn check(file: &str, text: &str, targets: &Targets<'_>) -> Checked {
                     }
                 }
             }
+            // The piano roll's keys (ADR 0039): `audition` names the event
+            // input its live notes go to, or `none`; checked when given.
+            if name == "signal-piano-roll"
+                && let Some(attribute) = element.attribute("audition")
+            {
+                let (value, value_at) = attribute
+                    .value
+                    .as_ref()
+                    .map_or(("", element.offset), |(v, at)| (v.trim(), *at));
+                let wants = "a sequencer's `audition` input of the plan (std.note_seq), or none";
+                if value.is_empty() {
+                    finding(
+                        value_at,
+                        Severity::Error,
+                        format!("<{name}> audition is empty: it needs {wants}"),
+                    );
+                } else if value != "none" {
+                    match value.parse::<PortAddress>() {
+                        Err(error) => finding(
+                            value_at,
+                            Severity::Error,
+                            format!("'{value}' is not a port address: {error}"),
+                        ),
+                        Ok(port) => match targets.find(&port) {
+                            None => finding(value_at, Severity::Error, targets.unknown(&port)),
+                            Some(Found::Port {
+                                direction: Direction::In,
+                                shape: PortShape::Events,
+                                ..
+                            }) if port.port() == "audition" => {}
+                            Some(Found::Port {
+                                direction: Direction::In,
+                                shape: PortShape::Events,
+                                ..
+                            }) => finding(
+                                value_at,
+                                Severity::Error,
+                                format!(
+                                    "wrong kind: {port} is an event input but no `audition`; <{name}> audition takes {wants}"
+                                ),
+                            ),
+                            Some(Found::Port {
+                                direction,
+                                shape,
+                                sink,
+                            }) => finding(
+                                value_at,
+                                Severity::Error,
+                                format!(
+                                    "wrong kind: {port} is {}; <{name}> audition takes {wants}",
+                                    describe_port(direction, shape, sink)
+                                ),
+                            ),
+                            Some(Found::Parameter { .. }) => finding(
+                                value_at,
+                                Severity::Error,
+                                format!(
+                                    "wrong kind: {port} is a parameter; <{name}> audition takes {wants}"
+                                ),
+                            ),
+                        },
+                    }
+                }
+            }
             continue;
         }
         let Some((wants, least, most)) = control(&element.name) else {

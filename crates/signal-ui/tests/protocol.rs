@@ -650,6 +650,219 @@ fn a_release_masked_by_a_claim_still_restarts_the_release_age(transport: Transpo
     rig.finish();
 }
 
+/// A sequencer's voice, for `note` (ADR 0039): `std.note_seq` without a
+/// pattern, its gate and hz into a sine through a multiplier.
+const AUDITION: &str = r#"schema_version = 1
+
+[project]
+name = "audition"
+sample_rate = 48000
+seed = 1
+
+[instances]
+melody = { module = "std.note_seq" }
+tone = { module = "std.sine_osc", freq = 0 }
+vca = { module = "std.mul" }
+out = { module = "std.audio_out", gain = 0.5 }
+
+[wiring]
+connections = [
+  { from = "melody.hz", to = "tone.freq" },
+  { from = "tone.out", to = "vca.a" },
+  { from = "melody.gate", to = "vca.b" },
+  { from = "vca.out", to = "out.l" },
+  { from = "vca.out", to = "out.r" },
+]
+"#;
+
+/// ADR 0039: `note` plays a live note on a sequencer's `audition` input
+/// while it is held, is acknowledged like `trigger`, refuses a bad key or
+/// target, and a client that goes with a note held has it ended.
+fn a_note_sounds_while_held_and_ends_when_its_client_goes(transport: Transport) {
+    let source = std::env::temp_dir().join(format!(
+        "signal-ui-audition-source-{transport:?}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&source);
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("project.toml"), AUDITION).unwrap();
+    let mut rig = rig(
+        "audition",
+        Options {
+            transport,
+            project: Some(source.clone()),
+            ..Options::default()
+        },
+    );
+    let (mut ws, _) = rig.client();
+    let scope = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "subscribe", "stream": "scope", "port": "/melody.gate", "rate": 4800}),
+        "subscribed",
+    );
+    let sub = scope["sub"].as_u64().unwrap();
+    let gate = |rig: &mut Rig, ws: &mut common::Ws, after: u64, level: f32, what: &str| {
+        rig.wait(ws, what, |got| {
+            got.frame(SCOPE, sub)
+                .filter(|f| f.first > after && f.f32s().iter().all(|&g| g == level))
+        });
+    };
+    gate(&mut rig, &mut ws, 0, 0.0, "silent at first");
+    let ack = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "note", "address": "/melody.audition", "key": 72, "velocity": 1.0, "on": true}),
+        "ack",
+    );
+    assert_eq!(ack["outcome"], "scheduled");
+    gate(
+        &mut rig,
+        &mut ws,
+        ack["frame"].as_u64().unwrap(),
+        1.0,
+        "held",
+    );
+    let ack = rig.request(
+        &mut ws,
+        3,
+        json!({"type": "note", "address": "/melody.audition", "key": 72, "on": false}),
+        "ack",
+    );
+    gate(
+        &mut rig,
+        &mut ws,
+        ack["frame"].as_u64().unwrap(),
+        0.0,
+        "released",
+    );
+
+    for (id, message, code) in [
+        (
+            4,
+            json!({"type": "note", "address": "/melody.audition", "key": 128, "on": true}),
+            "bad-value",
+        ),
+        (
+            5,
+            json!({"type": "note", "address": "/melody.audition", "key": 60}),
+            "bad-value",
+        ),
+        (
+            6,
+            json!({"type": "note", "address": "/melody.audition", "key": 60, "velocity": "loud", "on": true}),
+            "bad-value",
+        ),
+        (
+            7,
+            json!({"type": "note", "address": "/out.gain", "key": 60, "on": true}),
+            "unknown-address",
+        ),
+        (
+            8,
+            json!({"type": "note", "address": "/melody.gate", "key": 60, "on": true}),
+            "unknown-address",
+        ),
+        // An event input that is no `audition`: a tick, a reset.
+        (
+            10,
+            json!({"type": "note", "address": "/melody.tick", "key": 60, "on": true}),
+            "not-an-audition-input",
+        ),
+        (
+            11,
+            json!({"type": "note", "address": "/melody.reset", "key": 60, "on": true}),
+            "not-an-audition-input",
+        ),
+    ] {
+        let refused = rig.request(&mut ws, id, message.clone(), "error");
+        assert_eq!(refused["code"], code, "{message}");
+    }
+
+    // Another client presses a key and goes without letting it go.
+    let (mut other, _) = rig.client();
+    let ack = rig.request(
+        &mut other,
+        1,
+        json!({"type": "note", "address": "/melody.audition", "key": 60, "on": true}),
+        "ack",
+    );
+    gate(
+        &mut rig,
+        &mut ws,
+        ack["frame"].as_u64().unwrap(),
+        1.0,
+        "the other's note",
+    );
+    drop(other);
+    let ping = rig.request(&mut ws, 9, json!({"type": "ping"}), "pong");
+    gate(
+        &mut rig,
+        &mut ws,
+        ping["frame"].as_u64().unwrap(),
+        0.0,
+        "ended when its client went",
+    );
+
+    // A slide (60, then 62, then 60's off) and a client gone: 62 ends too.
+    let (mut slider, _) = rig.client();
+    for (id, key, on) in [(1, 60, true), (2, 62, true), (3, 60, false)] {
+        rig.request(
+            &mut slider,
+            id,
+            json!({"type": "note", "address": "/melody.audition", "key": key, "on": on}),
+            "ack",
+        );
+    }
+    let ping = rig.request(&mut ws, 12, json!({"type": "ping"}), "pong");
+    gate(
+        &mut rig,
+        &mut ws,
+        ping["frame"].as_u64().unwrap(),
+        1.0,
+        "62 still held",
+    );
+    drop(slider);
+    let ping = rig.request(&mut ws, 13, json!({"type": "ping"}), "pong");
+    gate(
+        &mut rig,
+        &mut ws,
+        ping["frame"].as_u64().unwrap(),
+        0.0,
+        "the slid-to key ended with its client",
+    );
+
+    // Two rolls of one page on one port: the first's release leaves the second's key.
+    let (mut page, _) = rig.client();
+    for (id, key, on) in [(1, 64, true), (2, 67, true), (3, 64, false)] {
+        rig.request(
+            &mut page,
+            id,
+            json!({"type": "note", "address": "/melody.audition", "key": key, "on": on}),
+            "ack",
+        );
+    }
+    let ping = rig.request(&mut ws, 14, json!({"type": "ping"}), "pong");
+    gate(
+        &mut rig,
+        &mut ws,
+        ping["frame"].as_u64().unwrap(),
+        1.0,
+        "67 still held",
+    );
+    drop(page);
+    let ping = rig.request(&mut ws, 15, json!({"type": "ping"}), "pong");
+    gate(
+        &mut rig,
+        &mut ws,
+        ping["frame"].as_u64().unwrap(),
+        0.0,
+        "67 ended with its client",
+    );
+    rig.finish();
+    let _ = fs::remove_dir_all(&source);
+}
+
 fn with_id(message: &Value, id: u64) -> Value {
     let mut message = message.clone();
     message["id"] = json!(id);
@@ -665,6 +878,7 @@ both!(
     describe_gives_the_plan_its_controls_sinks_and_meters,
     meters_and_a_scope_stream_arrive,
     set_ramp_and_trigger_are_acknowledged_with_their_frame,
+    a_note_sounds_while_held_and_ends_when_its_client_goes,
     commit_writes_the_file_once_and_the_watch_does_not_reload_it,
     an_edit_the_watch_cannot_see_is_applied_by_the_next_commit,
     a_plan_swap_updates_describe,

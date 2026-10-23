@@ -247,7 +247,7 @@ pub use mix::Mix;
 pub use modal::Modal;
 pub use mul::Mul;
 pub use noise::Noise;
-pub use note_seq::NoteSeq;
+pub use note_seq::{NoteSeq, audition_value};
 pub use onepole::OnePole;
 pub use osc::Osc;
 pub use pan::Pan;

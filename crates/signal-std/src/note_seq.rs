@@ -1,6 +1,7 @@
 //! `std.note_seq` (ADR 0028 §6): a monophonic note sequencer playing a
 //! `notes` pattern, counting `std.transport`'s ticks or following a
-//! position in beats (`std.playhead`, ADR 0033).
+//! position in beats (`std.playhead`, ADR 0033), with live notes merged in
+//! from its `audition` input (ADR 0039).
 
 use signal_core::{
     DirectPrimitive, Direction, Event, EventPayload, Feedthrough, Inputs, ModuleDescriptor,
@@ -8,13 +9,15 @@ use signal_core::{
 };
 
 use crate::follow::{self, Motion};
-use crate::pattern::NOTE_WIDTH;
+use crate::pattern::{self, KEYS, NOTE_WIDTH};
 use crate::{
     PPQ, SIGNAL_BOUND, event_port, ppq_at, round_half_up, signal_port, tick_count, triggered,
 };
 
 const TICK: usize = 0;
 const RESET: usize = 1;
+/// `audition`'s event input row (ADR 0039).
+const AUDITION: usize = 2;
 /// `follow`'s place among the descriptor's ports (for
 /// [`Inputs::is_connected`]) and its signal input row.
 const FOLLOW_PORT: usize = 2;
@@ -33,7 +36,7 @@ const PPQ_PARAMETER: usize = 0;
 
 const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     type_name: "std.note_seq",
-    doc: "Monophonic note sequencer: plays a `notes` pattern (pattern = \"<name>\"), counting transport ticks or following a position in beats (follow, from std.playhead); gate, key, hz, velocity, on/off events and a position playhead; loops over the pattern's length, last-note priority.",
+    doc: "Monophonic note sequencer: plays a `notes` pattern (pattern = \"<name>\"), counting transport ticks or following a position in beats (follow, from std.playhead); gate, key, hz, velocity, on/off events and a position playhead; loops over the pattern's length, last-note priority. Live notes on `audition` (events: Set(128·key + v), v the velocity in 1 to 127, starts a note, v = 0 or a Trigger ends it) take the voice while held.",
     ports: &[
         event_port("tick", Direction::In),
         event_port("reset", Direction::In),
@@ -44,6 +47,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
             Some("beats"),
             None,
         ),
+        event_port("audition", Direction::In),
         signal_port(
             "gate",
             Direction::Out,
@@ -178,6 +182,24 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 /// `follow` ends the sounding note and goes on counting ticks from the tick
 /// position it had.
 ///
+/// **Audition** (ADR 0039). A frame's `audition` events apply after the
+/// pattern's ticks or crossing of that frame, in their order on the port
+/// (the engine's canonical order: by stamp, then source; determinism rule
+/// 3). An audition note **takes the voice while it is held**: it starts as
+/// a pattern note does (`key`, `hz`, `velocity`, `on`, the gate stays high;
+/// a sounding note it takes over from ends, merged into the frame's `off`
+/// and `on`), the pattern's notes starting while it is held do not sound,
+/// and when it ends (`off`, the gate low) the pattern's note it took over
+/// from, or one that started under it, does not come back: the next
+/// pattern note plays on time, also one starting on the very frame of the
+/// release (its `off`, then the pattern note's `on`, the gate staying high;
+/// a key both pressed and released within one frame does not count as held
+/// before it, so there the pattern's note is not taken back). A second audition note takes over from the
+/// first (last-note priority, legato: a slide across the keys). The
+/// pattern's position, loop and ticks go on underneath, unchanged; a
+/// `reset` or a seek does not end an audition note. So an unconnected
+/// `audition` (no events) leaves every output bit for bit as without it.
+///
 /// **Cost.** Ticks are processed one by one: a binary search over the notes
 /// per tick, so a frame costs in proportion to the ticks it holds (the
 /// transport puts at most ⌊bpm·ppq / (60·sr)⌋ + 1 on a frame: 1 at 48 kHz
@@ -204,6 +226,56 @@ pub struct NoteSeq {
     /// Following a position: the sounding note's end, in beats of the
     /// followed position.
     end: Option<f64>,
+    /// The held audition note: its key, hz and velocity (ADR 0039).
+    held: Option<(f64, f64, f64)>,
+}
+
+/// The `audition` value of a live note (ADR 0039): `128·key + v`, with `v`
+/// the velocity in 127ths, rounded and kept within 1 to 127 for a note on
+/// (a velocity that is not a number is 1), 0 for a note off. `key` is
+/// clamped to [`KEYS`]. Sent as `Set(value)` to `std.note_seq.audition`.
+pub fn audition_value(key: u8, velocity: f64, on: bool) -> f64 {
+    let key = f64::from(key).clamp(KEYS.0, KEYS.1);
+    let v = if on {
+        let scaled = (velocity * 127.0).round();
+        if scaled.is_nan() {
+            1.0
+        } else {
+            scaled.clamp(1.0, 127.0)
+        }
+    } else {
+        0.0
+    };
+    128.0 * key + v
+}
+
+/// One `audition` event, read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Audition {
+    /// Start a note: key, velocity (0 to 1].
+    On(f64, f64),
+    /// End the held note, if it has this key (`None`: any key).
+    Off(Option<f64>),
+}
+
+/// Reads an `audition` event: `None` for a value that is no note.
+fn read_audition(payload: EventPayload) -> Option<Audition> {
+    match payload {
+        EventPayload::Trigger => Some(Audition::Off(None)),
+        EventPayload::Set(x) if x.is_finite() && x == x.trunc() && x >= 0.0 => {
+            let key = (x / 128.0).trunc();
+            let v = x - 128.0 * key;
+            if !(KEYS.0..=KEYS.1).contains(&key) {
+                return None;
+            }
+            Some(if v >= 1.0 {
+                Audition::On(key, v / 127.0)
+            } else {
+                Audition::Off(Some(key))
+            })
+        }
+        _ => None,
+    }
 }
 
 /// The first note row (from 1) of the loop starting at beat `base` whose
@@ -356,7 +428,7 @@ impl NoteSeq {
         let positions = inputs.signal(FOLLOW);
         let period =
             follow::period(table.map_or(1.0, |t| t.row(0).first().copied().unwrap_or(1.0)));
-        let mut next_reset = 0;
+        let (mut next_reset, mut next_audition) = (0, 0);
         for n in 0..inputs.frames() {
             let now = positions.get(n).copied().unwrap_or(0.0);
             let mut frame = Frame::default();
@@ -370,14 +442,71 @@ impl NoteSeq {
                 Motion::Forward { from, to } => self.cross(table, period, (from, to), &mut frame),
             }
             self.last = now.is_finite().then_some(now);
+            self.audition(inputs.events(AUDITION), &mut next_audition, n, &mut frame);
             let position = follow::place(now, period).clamp(-SIGNAL_BOUND, SIGNAL_BOUND);
             self.write(outputs, n, &frame, position);
         }
     }
 
+    /// Frame `n`'s `audition` events, after the pattern's (ADR 0039): a
+    /// held note owns the voice; the pattern's note it took over from, or
+    /// one starting under it, is ended without a word.
+    fn audition(&mut self, events: &[Event], next: &mut usize, n: usize, frame: &mut Frame) {
+        // What the pattern did on this frame, for a release on it.
+        let (pattern, pattern_note) = (frame.started, (self.key, self.hz, self.velocity));
+        let held_before = self.held.is_some();
+        if let Some(note) = self.held {
+            // Held since an earlier frame: what the pattern did here is not heard.
+            *frame = Frame::default();
+            (self.key, self.hz, self.velocity) = note;
+        }
+        let mut owned = held_before;
+        while let Some(event) = events.get(*next) {
+            if event.offset as usize > n {
+                break;
+            }
+            *next += 1;
+            if event.offset as usize != n {
+                continue;
+            }
+            match read_audition(event.payload) {
+                Some(Audition::On(key, velocity)) => {
+                    // A note that sounded when the frame began ends here; one
+                    // that started within it is merged into this `on`.
+                    if (self.sounding() || self.held.is_some()) && !frame.started {
+                        frame.ended = true;
+                    }
+                    let note = (key, pattern::hz(key), velocity);
+                    self.held = Some(note);
+                    (self.key, self.hz, self.velocity) = note;
+                    frame.started = true;
+                    owned = true;
+                }
+                Some(Audition::Off(key)) => {
+                    if let Some((held, ..)) = self.held
+                        && key.is_none_or(|k| k == held)
+                    {
+                        self.held = None;
+                        frame.ended = true;
+                    }
+                }
+                None => {}
+            }
+        }
+        if held_before && self.held.is_none() && pattern && self.sounding() {
+            // Released on the frame a pattern note starts (and still sounds):
+            // that note plays, on time; the release's `off` comes first.
+            (self.key, self.hz, self.velocity) = pattern_note;
+            frame.started = true;
+        } else if owned {
+            self.remaining = 0;
+            self.end = None;
+        }
+    }
+
     /// Frame `n`'s events and signals.
     fn write(&self, outputs: &mut Outputs<'_>, n: usize, frame: &Frame, position: f64) {
-        let sounding = self.sounding();
+        let sounding = self.sounding() || self.held.is_some();
         match (frame.ended, frame.started) {
             (true, true) if sounding => {
                 push(outputs, OFF, n);
@@ -438,7 +567,7 @@ impl DirectPrimitive for NoteSeq {
         self.last = None;
         let followed = self.end.take().is_some();
         let ticks = inputs.events(TICK);
-        let (mut next_tick, mut next_reset) = (0, 0);
+        let (mut next_tick, mut next_reset, mut next_audition) = (0, 0, 0);
         for n in 0..inputs.frames() {
             let ppq = ppq_at(inputs.parameter(PPQ_PARAMETER), n) as f64;
             let mut frame = Frame {
@@ -462,6 +591,7 @@ impl DirectPrimitive for NoteSeq {
                 }
                 next_tick += 1;
             }
+            self.audition(inputs.events(AUDITION), &mut next_audition, n, &mut frame);
             let position = self.position.map_or(0.0, |p| {
                 let last = loop_ticks(table, ppq) - 1;
                 (p.min(last) as f64 / ppq).clamp(-SIGNAL_BOUND, SIGNAL_BOUND)
@@ -653,5 +783,189 @@ mod tests {
             &mut Outputs::new(3, &mut signals, &mut sinks),
         );
         assert_eq!(signals[12..15], [700.0 / 96.0, 7.0, 0.0]);
+    }
+
+    /// Runs `frames` frames counting a tick on every frame, with `audition`
+    /// events; per frame (gate, key, velocity) and the on/off frames.
+    fn audition_run(
+        table: Option<&Table>,
+        audition: &[(u32, EventPayload)],
+        frames: usize,
+        block: usize,
+    ) -> (Vec<[f64; 3]>, Vec<u64>, Vec<u64>) {
+        let mut seq = NoteSeq::default();
+        seq.prepare(&context(48_000.0, block, 1));
+        let mut state = Vec::new();
+        let (mut on, mut off) = (Vec::new(), Vec::new());
+        let mut start = 0;
+        while start < frames {
+            let k = block.min(frames - start);
+            let mut events: Vec<Event> = (0..k as u32)
+                .map(|offset| Event {
+                    offset,
+                    payload: EventPayload::Trigger,
+                })
+                .collect();
+            let ticks = events.len();
+            events.extend(
+                audition
+                    .iter()
+                    .filter(|(at, _)| (start..start + k).contains(&(*at as usize)))
+                    .map(|&(at, payload)| Event {
+                        offset: at - start as u32,
+                        payload,
+                    }),
+            );
+            let ends = [ticks, ticks, events.len()];
+            let parameters = vec![4.0; k];
+            let mut signals = vec![0.0; 5 * k];
+            let mut sinks = vec![EventSink::per_frame(16, k); 2];
+            for sink in &mut sinks {
+                sink.start_call(k);
+            }
+            seq.process(
+                &Inputs::new(k, &[], &parameters, &events, &ends).with_table(table),
+                &mut Outputs::new(k, &mut signals, &mut sinks),
+            );
+            state.extend((0..k).map(|n| [signals[n], signals[k + n], signals[3 * k + n]]));
+            let at = |sink: &EventSink| {
+                sink.events()
+                    .iter()
+                    .map(|e| (start + e.offset as usize) as u64)
+                    .collect::<Vec<_>>()
+            };
+            on.extend(at(&sinks[0]));
+            off.extend(at(&sinks[1]));
+            start += k;
+        }
+        (state, on, off)
+    }
+
+    fn on(key: u8, velocity: f64) -> EventPayload {
+        EventPayload::Set(audition_value(key, velocity, true))
+    }
+
+    fn off(key: u8) -> EventPayload {
+        EventPayload::Set(audition_value(key, 0.0, false))
+    }
+
+    #[test]
+    fn audition_values_encode_key_and_velocity() {
+        assert_eq!(audition_value(60, 1.0, true), 128.0 * 60.0 + 127.0);
+        assert_eq!(audition_value(60, 0.5, true), 128.0 * 60.0 + 64.0);
+        assert_eq!(
+            audition_value(60, 0.0, true),
+            128.0 * 60.0 + 1.0,
+            "at least 1"
+        );
+        assert_eq!(audition_value(60, f64::NAN, true), 128.0 * 60.0 + 1.0);
+        assert_eq!(audition_value(60, 9.0, false), 128.0 * 60.0);
+        assert_eq!(audition_value(200, 1.0, true), 128.0 * 127.0 + 127.0);
+        assert_eq!(read_audition(on(61, 1.0)), Some(Audition::On(61.0, 1.0)));
+        assert_eq!(read_audition(off(61)), Some(Audition::Off(Some(61.0))));
+        assert_eq!(
+            read_audition(EventPayload::Trigger),
+            Some(Audition::Off(None))
+        );
+        for x in [-1.0, 0.5, 128.0 * 128.0, f64::NAN, f64::INFINITY, 1e300] {
+            assert_eq!(read_audition(EventPayload::Set(x)), None, "{x}");
+        }
+        let ramp = EventPayload::Ramp {
+            to: 7000.0,
+            frames: 2,
+            curve: signal_core::Curve::Linear,
+        };
+        assert_eq!(read_audition(ramp), None);
+    }
+
+    /// A held audition note takes the voice from the pattern, the pattern's
+    /// notes under it are not heard, and after it the next pattern note
+    /// plays on time; a slide takes over legato; a note off of another key
+    /// is ignored.
+    #[test]
+    fn audition_takes_the_voice_while_held() {
+        // 4 ticks a beat, a tick a frame: notes at frames 0 (2 frames), 4
+        // (2) and 8 (2), loop 3 beats = 12 frames.
+        let table = notes(
+            3.0,
+            &[
+                [60.0, 0.0, 0.5, 0.5],
+                [62.0, 1.0, 0.5, 0.5],
+                [64.0, 2.0, 0.5, 0.5],
+            ],
+        );
+        let audition = [
+            (1, on(72, 1.0)),  // takes over from 60 (sounding since 0)
+            (4, on(74, 0.25)), // a slide: 72 → 74, over the pattern's 62
+            (5, off(72)),      // the slid-from key: ignored
+            (6, off(74)),      // released
+        ];
+        let (state, on_at, off_at) = audition_run(Some(&table), &audition, 12, 12);
+        let gates: Vec<f64> = state.iter().map(|s| s[0]).collect();
+        let keys: Vec<f64> = state.iter().map(|s| s[1]).collect();
+        assert_eq!(gates, [1., 1., 1., 1., 1., 1., 0., 0., 1., 1., 0., 0.]);
+        assert_eq!(keys[..9], [60., 72., 72., 72., 74., 74., 74., 74., 64.]);
+        assert_eq!(state[1][2], 1.0);
+        assert_eq!(state[4][2], 32.0 / 127.0);
+        // on: 60 at 0, 72 at 1 (off+on), 74 at 4 (off+on), 64 at 8; off at
+        // 1, 4, the release at 6, 64's end at 10.
+        assert_eq!(on_at, [0, 1, 4, 8]);
+        assert_eq!(off_at, [1, 4, 6, 10]);
+        // The same in calls of 1 and 5 frames.
+        for block in [1, 5] {
+            assert_eq!(
+                audition_run(Some(&table), &audition, 12, block),
+                (state.clone(), on_at.clone(), off_at.clone())
+            );
+        }
+    }
+
+    /// A press and release in one frame is an `on` then an `off`; a
+    /// `Trigger` ends any held key; values that are no note change nothing,
+    /// and without events the outputs are the pattern's alone.
+    #[test]
+    fn audition_edges_and_no_events() {
+        let table = notes(4.0, &[[60.0, 0.0, 4.0, 1.0]]);
+        let plain = audition_run(Some(&table), &[], 8, 8);
+        let junk = [
+            (2, EventPayload::Set(-3.0)),
+            (2, EventPayload::Set(0.25)),
+            (3, off(61)),
+        ];
+        assert_eq!(audition_run(Some(&table), &junk, 8, 8), plain);
+        let (state, on_at, off_at) = audition_run(None, &[(2, on(50, 0.5)), (2, off(50))], 4, 4);
+        assert_eq!((on_at, off_at), (vec![2], vec![2]));
+        assert_eq!(state[2][0], 0.0);
+        let (state, _, off_at) =
+            audition_run(None, &[(1, on(50, 0.5)), (3, EventPayload::Trigger)], 5, 5);
+        assert_eq!(
+            state.iter().map(|s| s[0]).collect::<Vec<_>>(),
+            [0., 1., 1., 0., 0.]
+        );
+        assert_eq!(off_at, [3]);
+    }
+
+    /// A pattern note starting on the frame of a release plays, on time:
+    /// `off` then `on`, the gate high, the pattern's key.
+    #[test]
+    fn a_pattern_note_on_the_release_frame_plays() {
+        let table = notes(3.0, &[[60.0, 0.0, 0.5, 0.5], [62.0, 1.0, 0.5, 0.5]]);
+        let audition = [(1, on(72, 1.0)), (4, off(72))];
+        let (state, on_at, off_at) = audition_run(Some(&table), &audition, 8, 8);
+        assert_eq!(state[3], [1.0, 72.0, 1.0]);
+        assert_eq!(
+            state[4],
+            [1.0, 62.0, 0.5],
+            "62 starts at 4, the release's frame"
+        );
+        assert_eq!(state[6][0], 0.0, "and ends after its 2 frames");
+        assert_eq!(on_at, [0, 1, 4]);
+        assert_eq!(off_at, [1, 4, 6]);
+        for block in [1, 3] {
+            assert_eq!(
+                audition_run(Some(&table), &audition, 8, block),
+                (state.clone(), on_at.clone(), off_at.clone())
+            );
+        }
     }
 }

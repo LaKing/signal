@@ -19,7 +19,7 @@ test('groups: every scope with its commands, searched by name, id, chord or scop
 });
 
 test('what differs from the built-in keymap is marked and counted, conflicts said on both commands', () => {
-  const map = buildKeymap(DEFAULTS, { 'window.new_schematic': ['Shift+Cmd+N'], 'view.page_down': ['PageDown'] });
+  const map = buildKeymap(DEFAULTS, { 'window.new_schematic': ['Shift+Cmd+N'], 'view.page_down': ['PageDown', 'F20'] });
   assert.equal(changedCount(map), 2);
   const rows = groups(map).flatMap((g) => g.commands);
   const schematic = rows.find((c) => c.id === 'window.new_schematic');
@@ -33,7 +33,10 @@ test('what differs from the built-in keymap is marked and counted, conflicts sai
 test('collisions of a chord about to be added: same scope, a parent, a scope under it', () => {
   const map = buildKeymap(DEFAULTS, {});
   assert.deepEqual(collisions(map, 'window.new_schematic', 'Shift+Cmd+N').map((c) => [c.command, c.kind]), [['window.new_main', 'same']]);
-  assert.deepEqual(collisions(map, 'schematic.fit', 'Space').map((c) => [c.command, c.kind]), [['view.page_down', 'hides']]);
+  assert.deepEqual(collisions(map, 'schematic.fit', 'PageDown').map((c) => [c.command, c.kind]), [['schematic.page_down', 'same'], ['view.page_down', 'hides'], ['palette.page_down', 'hidden']]);
+  // ADR 0039: Space is the project's transport, under every control that keeps it.
+  assert.deepEqual(collisions(map, 'schematic.fit', 'Space').map((c) => [c.command, c.kind]), [['transport.toggle', 'hides']]);
+  assert.deepEqual(collisions(map, 'view.page_down', 'Space').map((c) => [c.command, c.kind]).slice(0, 2), [['transport.toggle', 'hides'], ['button.press', 'hidden']]);
   const under = collisions(map, 'view.top', 'T').map((c) => [c.command, c.kind]);
   assert.deepEqual(under, [['schematic.trace', 'hidden']]);
   assert.deepEqual(collisions(map, 'view.top', 'F19'), []);
@@ -48,10 +51,10 @@ test('the writes: added, replaced, removed, back to the built-in keys', () => {
     { type: 'keys.set', command: 'window.new_schematic', keys: ['Shift+Cmd+N'] },
   ]);
   assert.deepEqual(addWrites(map, 'view.page_down', 'PageDown'), [], 'already there');
-  assert.deepEqual(removeWrite(map, 'view.page_down', 'Space'), { type: 'keys.set', command: 'view.page_down', keys: ['PageDown'] });
+  assert.deepEqual(removeWrite(map, 'view.top', 'Cmd+ArrowUp'), { type: 'keys.set', command: 'view.top', keys: ['Home'] });
   assert.equal(removeWrite(map, 'view.page_down', 'F1'), null);
-  const changed = buildKeymap(DEFAULTS, { 'view.page_down': ['PageDown'] });
-  assert.deepEqual(addWrites(changed, 'view.page_down', 'Space'), [{ type: 'keys.set', command: 'view.page_down', keys: null }], 'the built-in keys again');
+  const changed = buildKeymap(DEFAULTS, { 'view.top': ['Home'] });
+  assert.deepEqual(addWrites(changed, 'view.top', 'Cmd+ArrowUp'), [{ type: 'keys.set', command: 'view.top', keys: null }], 'the built-in keys again');
   assert.deepEqual(resetMessage('view.top'), { type: 'keys.reset', command: 'view.top' });
   assert.deepEqual(resetMessage(), { type: 'keys.reset' });
 });

@@ -9,7 +9,8 @@ export default {
   "version": 1,
   "scopes": [
     { "id": "app", "label": "Signal.app", "parent": null, "about": "The menu bar's commands: they work in every window (in a browser, the page takes the ones it can)." },
-    { "id": "view", "label": "Page and view", "parent": "app", "about": "Where no focused control takes the key: the page (the shown tab, a panel, the panel frame) scrolls. The wheel scrolls the page too; a control takes it only once clicked (until the focus leaves it, or Escape), while the wheel modifier is held, or when it fills the window (the schematic)." },
+    { "id": "project", "label": "Project", "parent": "app", "about": "The open project's commands on every page (Signal.app's main window and its tabs, panel windows and frames, the schematic window; signal ui in a browser), where no focused control, text field or the view takes the key (ADR 0039). Not menu items: a bare key in the menu would be taken from every text field." },
+    { "id": "view", "label": "Page and view", "parent": "project", "about": "Where no focused control takes the key: the page (the shown tab, a panel, the panel frame) scrolls. The wheel scrolls the page too; a control takes it only once clicked (until the focus leaves it, or Escape), while the wheel modifier is held, or when it fills the window (the schematic)." },
     { "id": "text", "label": "Text fields", "parent": null, "about": "A field being typed in (a typed value, a search, a name) keeps its keys: these, and the system's editing keys.", "fixed": true },
     { "id": "menu", "label": "Context menus", "parent": null, "about": "An open context menu keeps its keys.", "fixed": true },
     { "id": "slider", "label": "Fader and knob", "parent": "view", "about": "A focused fader or knob (ARIA slider: it keeps Page Up and Page Down for large steps)." },
@@ -50,8 +51,10 @@ export default {
     { "id": "window.fullscreen", "scope": "app", "label": "Enter Full Screen", "keys": ["Ctrl+Cmd+F"], "fixed": true },
     { "id": "help.keyboard_shortcuts", "scope": "app", "label": "Keyboard Shortcuts", "keys": ["Cmd+/"], "menu": true },
 
-    { "id": "view.page_down", "scope": "view", "label": "Scroll down a page", "keys": ["PageDown", "Space"] },
-    { "id": "view.page_up", "scope": "view", "label": "Scroll up a page", "keys": ["PageUp", "Shift+Space"] },
+    { "id": "transport.toggle", "scope": "project", "label": "Play / stop the transport", "keys": ["Space"] },
+
+    { "id": "view.page_down", "scope": "view", "label": "Scroll down a page", "keys": ["PageDown"] },
+    { "id": "view.page_up", "scope": "view", "label": "Scroll up a page", "keys": ["PageUp"] },
     { "id": "view.line_down", "scope": "view", "label": "Scroll down a little", "keys": ["ArrowDown"] },
     { "id": "view.line_up", "scope": "view", "label": "Scroll up a little", "keys": ["ArrowUp"] },
     { "id": "view.top", "scope": "view", "label": "Scroll to the top", "keys": ["Home", "Cmd+ArrowUp"] },

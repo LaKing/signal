@@ -313,6 +313,21 @@ pub struct Conflict {
     pub with_scope: String,
 }
 
+impl Conflict {
+    /// Whether `other` is this conflict: a control's chord hiding its
+    /// parents' is the same one whichever parent it hides (ADR 0039: a
+    /// focused button's Space hides the transport's, or the view's when an
+    /// override puts Space back there), so a built-in shadow stays unreported.
+    fn same_as(&self, other: &Conflict) -> bool {
+        self.kind == other.kind
+            && self.chord == other.chord
+            && self.scope == other.scope
+            && self.command == other.command
+            && (self.kind == "shadow"
+                || (self.with == other.with && self.with_scope == other.with_scope))
+    }
+}
+
 /// The person's keys: the overrides as read, what is wrong with the file,
 /// and whether the built-in keys are used for want of a readable file.
 #[derive(Clone, Debug, PartialEq)]
@@ -532,7 +547,9 @@ impl Keys {
                 .unwrap_or_default()
         });
         let now = bind(&|id: &str| self.keys_of(id));
-        now.into_iter().filter(|c| !base.contains(c)).collect()
+        now.into_iter()
+            .filter(|c| !base.iter().any(|b| b.same_as(c)))
+            .collect()
     }
 
     /// The menu items' chords: each menu command and its first key chord.
@@ -714,7 +731,7 @@ pub fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
     Some((meta.modified().ok()?, meta.len()))
 }
 
-const HEADER: &str = "# Signal's keyboard shortcuts: overrides of the built-in keymap (ADR 0034,\n# ui/lib/keys.default.js). One group per command id's first part:\n#   [view]\n#   page_down = [\"PageDown\", \"Space\"]   # [] unbinds it\n# Signal.app ▸ Settings… edits this file; an edit here applies at once.\nversion = 1\n";
+const HEADER: &str = "# Signal's keyboard shortcuts: overrides of the built-in keymap (ADR 0034,\n# ui/lib/keys.default.js). One group per command id's first part:\n#   [view]\n#   page_down = [\"PageDown\", \"F20\"]   # [] unbinds it\n# Signal.app ▸ Settings… edits this file; an edit here applies at once.\nversion = 1\n";
 
 /// Checks `chords` for command `id` as the file would take them: the
 /// canonical chords, or why not.

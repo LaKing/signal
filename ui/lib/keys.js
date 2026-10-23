@@ -241,8 +241,9 @@ export function buildKeymap(defaults = DEFAULTS, overrides = {}) {
   return { scopes, commands, bindings, conflicts: [], problems };
 }
 
+/** A conflict's identity: a shadow is the same whichever parent's chord it hides (ADR 0039; the server's `Conflict::same_as`). */
 function conflictKey(c) {
-  return `${c.kind}|${c.chord}|${c.command}|${c.with}`;
+  return c.kind === 'shadow' ? `shadow|${c.chord}|${c.scope}|${c.command}` : `${c.kind}|${c.chord}|${c.command}|${c.with}`;
 }
 
 /** Whether two chord lists hold the same chords (any order). */

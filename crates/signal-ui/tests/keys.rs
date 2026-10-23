@@ -190,12 +190,20 @@ fn writing_keeps_comments_and_holds_only_overrides() {
     let next = with_override(&next, "view.page_down", None).unwrap();
     assert!(!next.contains("page_down"), "{next}");
     assert!(next.starts_with("# mine\nversion = 1\n"), "{next}");
-    let next = with_override("", "view.page_up", Some(&["pgup".to_owned()])).unwrap();
+    let next = with_override(
+        "",
+        "view.page_up",
+        Some(&["pgup".to_owned(), "f19".to_owned()]),
+    )
+    .unwrap();
     assert!(next.starts_with("# Signal's keyboard shortcuts"), "{next}");
-    assert!(next.contains("[view]\npage_up = [\"PageUp\"]\n"), "{next}");
+    assert!(
+        next.contains("[view]\npage_up = [\"PageUp\", \"F19\"]\n"),
+        "{next}"
+    );
     let parsed = Keys::parse(&next, &file());
     assert!(parsed.problems.is_empty());
-    assert_eq!(parsed.overrides["view.page_up"], vec!["PageUp"]);
+    assert_eq!(parsed.overrides["view.page_up"], vec!["PageUp", "F19"]);
     // An unbound command is an empty list.
     let next = with_override(&next, "view.line_up", Some(&[])).unwrap();
     assert!(next.contains("line_up = []"), "{next}");
@@ -283,21 +291,27 @@ fn keys_over_the_protocol(transport: Transport) {
     let set = rig.request(
         &mut ws,
         2,
-        json!({"type": "keys.set", "command": "view.page_down", "keys": ["pagedown"]}),
+        json!({"type": "keys.set", "command": "view.page_down", "keys": ["pagedown", "f20"]}),
         "keys",
     );
-    assert_eq!(set["overrides"]["view.page_down"], json!(["PageDown"]));
+    assert_eq!(
+        set["overrides"]["view.page_down"],
+        json!(["PageDown", "F20"])
+    );
     assert!(
         fs::read_to_string(&path)
             .unwrap()
-            .contains("page_down = [\"PageDown\"]")
+            .contains("page_down = [\"PageDown\", \"F20\"]")
     );
     assert!(rig.host().keys_version() > version);
     // The other client is pushed the change.
     let pushed = rig.wait(&mut other, "keys", |got| {
         got.of("keys").filter(|v| v.get("id").is_none()).cloned()
     });
-    assert_eq!(pushed["overrides"]["view.page_down"], json!(["PageDown"]));
+    assert_eq!(
+        pushed["overrides"]["view.page_down"],
+        json!(["PageDown", "F20"])
+    );
 
     let refused = rig.request(
         &mut ws,
@@ -329,7 +343,10 @@ fn keys_over_the_protocol(transport: Transport) {
             .unwrap()
             .contains("unknown command 'view.nothing'")
     );
-    assert_eq!(pushed["overrides"]["view.page_down"], json!(["PageDown"]));
+    assert_eq!(
+        pushed["overrides"]["view.page_down"],
+        json!(["PageDown", "F20"])
+    );
 
     let reset = rig.request(
         &mut ws,

@@ -71,6 +71,10 @@ use crate::setup::{
 
 /// Client messages handled per step at most.
 const MESSAGES_PER_STEP: usize = 256;
+/// The event input a `note` goes to (ADR 0039): `std.note_seq`'s.
+pub const AUDITION_INPUT: &str = "audition";
+/// A `note` without a `velocity` (ADR 0039): the piano roll's default note's.
+const NOTE_VELOCITY: f64 = 0.8;
 
 /// How often the keyboard shortcuts file is looked at (ADR 0034).
 const KEYS_POLL: Duration = Duration::from_millis(250);
@@ -507,6 +511,9 @@ pub struct Host {
     /// Live edits of plan parameter ports that are no control: the value,
     /// and whether the Controller took it.
     port_edits: BTreeMap<PortAddress, (f64, bool)>,
+    /// Live notes each client holds (`note`, ADR 0039): the port and key,
+    /// ended when the client goes so that no note is left sounding.
+    auditions: BTreeMap<u64, BTreeSet<(PortAddress, u8)>>,
     next_failure: u64,
     /// The `unsaved` message last pushed.
     unsaved_pushed: Option<Value>,
@@ -827,6 +834,7 @@ impl Host {
             failed: BTreeMap::new(),
             resend: BTreeSet::new(),
             port_edits: BTreeMap::new(),
+            auditions: BTreeMap::new(),
             next_failure: 1,
             unsaved_pushed: None,
             graph_pushed: None,
@@ -1393,6 +1401,7 @@ impl Host {
         self.values.clear();
         self.resend.clear();
         self.port_edits.clear();
+        self.auditions.clear();
         self.abandon();
     }
 
@@ -2190,6 +2199,7 @@ impl Host {
         self.values.clear();
         self.resend.clear();
         self.port_edits.clear();
+        self.auditions.clear();
         self.run = Some(run);
     }
 
@@ -2650,7 +2660,9 @@ impl Host {
             "patch" => self.patch(&message).map(Some),
             "subscribe" => self.subscribe(client, &message).map(Some),
             "unsubscribe" => self.unsubscribe(client, &message).map(Some),
-            "set" | "ramp" | "trigger" => self.edit(client, &id, kind, &message).map(|()| None),
+            "set" | "ramp" | "trigger" | "note" => {
+                self.edit(client, &id, kind, &message).map(|()| None)
+            }
             "commit" => self.commit(&message).map(Some),
             "retry" => self.retry(&message).map(Some),
             "revert" => self.revert(&message).map(Some),
@@ -4156,30 +4168,43 @@ impl Host {
                 .filter(|v| v.is_finite())
                 .ok_or_else(|| fail("bad-value", format!("`{key}` must be a finite number")))
         };
+        let mut note = None;
         let (ports, payload, drag) = match kind {
-            "trigger" => {
-                let port: PortAddress = address
-                    .parse()
-                    .map_err(|e| fail("bad-address", format!("{address}: {e}")))?;
-                let is_trigger = self.plan.as_ref().is_some_and(|plan| {
-                    plan.instances
-                        .iter()
-                        .find(|i| i.address == port.instance())
-                        .is_some_and(|i| {
-                            i.descriptor.ports.iter().any(|p| {
-                                p.name == port.port()
-                                    && p.direction == PortDirection::In
-                                    && p.shape == PortShape::Events
-                            })
-                        })
-                });
-                if !is_trigger {
+            "trigger" => (
+                vec![self.event_input(address)?],
+                EventPayload::Trigger,
+                None,
+            ),
+            "note" => {
+                // A live note (ADR 0039): `std.note_seq.audition`'s value,
+                // only into an input named `audition` (into any other event
+                // input the value would be a huge impulse or a tick count).
+                let port = self.event_input(address)?;
+                if port.port() != AUDITION_INPUT {
                     return Err(fail(
-                        "unknown-address",
-                        format!("{address} is not an event input of the running plan"),
+                        "not-an-audition-input",
+                        format!(
+                            "{address} is an event input but no `audition`: a note goes to a sequencer's `audition` (std.note_seq)"
+                        ),
                     ));
                 }
-                (vec![port], EventPayload::Trigger, None)
+                let key = message
+                    .get("key")
+                    .and_then(Value::as_u64)
+                    .and_then(|k| u8::try_from(k).ok())
+                    .filter(|k| *k <= 127)
+                    .ok_or_else(|| fail("bad-value", "`key` must be an integer from 0 to 127"))?;
+                let on = message
+                    .get("on")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| fail("bad-value", "`on` must be true or false"))?;
+                let velocity = match message.get("velocity") {
+                    None | Some(Value::Null) => NOTE_VELOCITY,
+                    Some(_) => within(number("velocity")?, 0.0, 1.0),
+                };
+                let payload = EventPayload::Set(signal_std::audition_value(key, velocity, on));
+                note = Some((port.clone(), key, on));
+                (vec![port], payload, None)
             }
             "set" => {
                 let aim = self.aim(address)?;
@@ -4242,6 +4267,24 @@ impl Host {
         }
         if let Some(error) = refused {
             return Err(fail("refused", error));
+        }
+        // The notes this client holds, ended for it if it goes.
+        if let Some((port, key, on)) = note {
+            let held = self.auditions.entry(client).or_default();
+            if on {
+                // One held note per port and client: a new one takes over,
+                // as the sequencer's voice does.
+                held.retain(|(p, _)| *p != port);
+                held.insert((port, key));
+            } else {
+                // Only the key held ends: an off of a key slid away from (or
+                // of another roll's key on the port) leaves the held one,
+                // which the sequencer still sounds.
+                held.remove(&(port, key));
+            }
+            if held.is_empty() {
+                self.auditions.remove(&client);
+            }
         }
         let key = self.next_ack;
         self.next_ack += 1;
@@ -5680,6 +5723,43 @@ impl Host {
     fn remove(&mut self, client: u64) {
         self.clients.remove(&client);
         self.release(client);
+        // A client gone with a key held (a closed page, a lost connection):
+        // its notes end, unacknowledged, so none is left sounding.
+        if let Some(held) = self.auditions.remove(&client)
+            && let Some(run) = self.run.as_mut()
+        {
+            for (port, key) in held {
+                let off = EventPayload::Set(signal_std::audition_value(key, 0.0, false));
+                let _ = run.controller.send_event(port, off, Stamp::Default);
+            }
+        }
+    }
+
+    /// `address` as an event input of the running plan (`trigger`, `note`).
+    fn event_input(&self, address: &str) -> Result<PortAddress, Failure> {
+        let port: PortAddress = address
+            .parse()
+            .map_err(|e| fail("bad-address", format!("{address}: {e}")))?;
+        let found = self.plan.as_ref().is_some_and(|plan| {
+            plan.instances
+                .iter()
+                .find(|i| i.address == port.instance())
+                .is_some_and(|i| {
+                    i.descriptor.ports.iter().any(|p| {
+                        p.name == port.port()
+                            && p.direction == PortDirection::In
+                            && p.shape == PortShape::Events
+                    })
+                })
+        });
+        if found {
+            Ok(port)
+        } else {
+            Err(fail(
+                "unknown-address",
+                format!("{address} is not an event input of the running plan"),
+            ))
+        }
     }
 
     fn release(&mut self, client: u64) {

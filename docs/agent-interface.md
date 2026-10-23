@@ -197,6 +197,7 @@ The session tools are offered only without `--attach`: a recording covers one ru
   - **Fail closed.** When the project's files do not load and plan as they are now (a person or another tool mid-edit, while the last good version plays), every tool that changes something is refused (`does-not-load`, with the diagnostics), since no change can be checked; so is an edit that would leave them not loading, a `patch` this server cannot simulate, a `vendor` it cannot prepare, and a `patch` whose `base` is not the file's current one (`conflict`).
   - Removing an instance that feeds a gain leaves its modulation held, and counts as modulated: remove the connection first.
   - A `trigger`, or a `set` of anything in a modulated gain's fan-in, changes that gain's modulation and falls under R2.
+  - The UI protocol's `note` (ADR 0039: a live note held on a sequencer's `audition`, the piano roll's keys) is **not a tool**: it plays a note that sounds until its note off, and a held note's gain cannot be judged by these rules beforehand (it is a new source of modulation in every fan-in the sequencer reaches). An agent that wants a note heard edits a pattern (`write_pattern`), which is checked; a `trigger` into `audition` (which only ends a held note) is allowed as any `trigger` is.
   - `commit` also refuses to write an over-ceiling value that the file did not already hold, whatever the live value.
   - A call made while a reload is pending (the files differ from what plays) is refused: try again.
   - `write_panel` cannot reach a parameter and is not checked.

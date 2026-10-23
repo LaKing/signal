@@ -464,3 +464,60 @@ fn a_host_with_an_include_reloads_and_refuses_a_reseed() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// ADR 0039: live notes into `std.note_seq.audition` (as the UI protocol's
+/// `note` sends them) are recorded as the `set`s they are, and the session
+/// replays to what was played.
+#[test]
+fn audition_notes_are_recorded_and_replay() {
+    use signal_core::{EventPayload, PortAddress};
+    use signal_engine::Stamp;
+    let registry = registry();
+    let text = format!(
+        "schema_version = 1\n\n[project]\nname = \"audition\"\nsample_rate = {RATE}\nseed = 5\n\n[instances]\n\
+         melody = {{ module = \"std.note_seq\" }}\n\
+         tone = {{ module = \"std.sine_osc\", freq = 0 }}\n\
+         vca = {{ module = \"std.mul\" }}\n\
+         out = {{ module = \"std.audio_out\", gain = 0.5 }}\n\
+         \n[wiring]\nconnections = [\n  {{ from = \"melody.hz\", to = \"tone.freq\" }},\n  \
+         {{ from = \"tone.out\", to = \"vca.a\" }},\n  {{ from = \"melody.gate\", to = \"vca.b\" }},\n  \
+         {{ from = \"vca.out\", to = \"out.l\" }},\n  {{ from = \"vca.out\", to = \"out.r\" }},\n]\n"
+    );
+    let project = Project::from_sources(vec![SourceFile {
+        path: "project.toml".to_owned(),
+        text,
+    }])
+    .unwrap();
+    let (mut driver, mut controller, mut live) = start(&project, &registry);
+    let port: PortAddress = "/melody.audition".parse().unwrap();
+    run(&mut driver, &mut controller, &mut live, 1_024);
+    let note = |key, on| EventPayload::Set(signal_std::audition_value(key, 0.8, on));
+    for (key, on) in [(69, true), (72, true), (69, false), (72, false)] {
+        controller
+            .send_event(port.clone(), note(key, on), Stamp::Default)
+            .unwrap();
+        run(&mut driver, &mut controller, &mut live, 2_048);
+    }
+    let runner = driver.stop().unwrap().unwrap();
+    controller.poll(&mut live);
+    live.finish(runner.next_frame()).unwrap();
+    assert_eq!(live.refused(), &[] as &[String]);
+    let recorder = live.into_recorder();
+    let edits = recorder.edits();
+    assert_eq!(kinds(&edits), ["event"; 4]);
+    assert!(
+        edits[0]
+            .to_line()
+            .contains(r#""kind":"set","target":"/melody.audition""#)
+    );
+    let output = driver.output();
+    assert!(output.iter().any(|&x| x.abs() > 0.1), "the notes are heard");
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("live/audition");
+    let _ = std::fs::remove_dir_all(&dir);
+    recorder.write(&dir).unwrap();
+    let session = Session::load(&dir, &registry).unwrap();
+    let replayed = replay(&session, &registry, None, 1).unwrap();
+    let samples: Vec<f32> = replayed.render.samples.iter().map(|&x| x as f32).collect();
+    assert_eq!(samples, output, "replay equals what was played");
+}

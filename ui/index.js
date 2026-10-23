@@ -64,6 +64,8 @@ import './lib/step-grid-model.test.js';
 import './lib/pattern-sync.test.js';
 import './lib/playhead.test.js';
 import './lib/keys.test.js';
+import './lib/transport-toggle.test.js';
+import './lib/audition.test.js';
 import './lib/wheel.test.js';
 import './app/lib/keys-editor.test.js';
 import './controls/keyboard.test.js';

@@ -37,7 +37,8 @@
   ],
   "overrides": [
     { "about": "no overrides", "overrides": {}, "problems": 0, "conflicts": [] },
-    { "about": "Page Down on Space only", "overrides": { "view.page_down": ["Space"] }, "problems": 0, "conflicts": [] },
+    { "about": "Page Down on Space only", "overrides": { "view.page_down": ["Space"] }, "problems": 0, "conflicts": [{ "kind": "shadow", "chord": "Space", "command": "view.page_down", "with": "transport.toggle" }] },
+    { "about": "the transport on another key", "overrides": { "transport.toggle": ["Shift+Space"] }, "problems": 0, "conflicts": [] },
     {
       "about": "a second command on Shift+Cmd+N: the first in the file keeps it",
       "overrides": { "window.new_schematic": ["Shift+Cmd+N"] },

@@ -1,5 +1,5 @@
 // The UI protocol client (docs/ui-protocol.md) for pages and controls:
-// connection, describe, subscribe, set, ramp, trigger, commit, reconnect.
+// connection, describe, subscribe, set, ramp, trigger, note, commit, reconnect.
 // Plain ES module, no dependencies; built on lib/protocol.js. Nothing here
 // touches the DOM when imported, so `node --test ui/` can load it.
 
@@ -281,6 +281,15 @@ export class Connection {
   /** An event at an event input of the plan. */
   trigger(address, { at } = {}) {
     return this.request({ type: 'trigger', address, ...(at === undefined ? {} : { at }) });
+  }
+
+  /**
+   * A live note (ADR 0039) at an event input, a sequencer's `audition`:
+   * `key` 0 to 127, `velocity` 0 to 1 (note on), `on` false ends it. Never
+   * saved; the server ends a note its client left held when it goes.
+   */
+  note(address, key, { velocity, on = true, at } = {}) {
+    return this.request({ type: 'note', address, key, on, ...(velocity === undefined ? {} : { velocity }), ...(at === undefined ? {} : { at }) });
   }
 
   /** Writes a control's value into project.toml (null removes the key). */

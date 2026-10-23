@@ -5,9 +5,15 @@
 //   server's `keys` arrives (`keys.get` on each connect, pushed on every
 //   change of the person's keys.toml, docs/ui-protocol.md);
 // - the view's keys: where no focused control takes a key, Page Up, Page
-//   Down, Space, Home, End and the arrows scroll the page (the scrolling box
+//   Down, Home, End and the arrows scroll the page (the scrolling box
 //   around the focus, else the page's view: `setViewScroller`); an open text
 //   field keeps every key;
+// - the project's commands (scope `project`, ADR 0039): where neither a
+//   focused control nor the view takes a key, Space plays and stops the
+//   project's transport, on the page's own connection (every page has one:
+//   Signal.app's main window, its panel frames and windows, `signal ui` in
+//   a browser), as a click on the transport's toggle does
+//   (`runProjectCommand`, ui/lib/transport-toggle.js);
 // - Signal.app's commands (scope `app`): inside Signal.app the native menu
 //   takes each command's first chord, and another chord is handed to it
 //   (wry's IPC, `menu.run`); in a browser the page is told (`signal-command`
@@ -19,6 +25,7 @@
 import { getDefaultConnection, onDefaultConnection } from '../signal-ui.js';
 import { applyKeys, eventChord, formatChord, isMac, keyCommand, keymap, splitChord, wheelModifierHeld } from '../lib/keys.js';
 import { WheelLatch, fillsWindow, ownsWheel, wheelHint } from '../lib/wheel.js';
+import { toggleTransport, transportTargets } from '../lib/transport-toggle.js';
 
 /** How far the arrows scroll the page, in CSS pixels. */
 export const LINE_PX = 40;
@@ -101,6 +108,38 @@ export function scrollView(box, id) {
   return true;
 }
 
+/** Per connection: the values `transport.toggle` sent since the description it read (a press before the next `describe` push sees them). */
+const toggled = new WeakMap();
+
+/**
+ * Runs project command `id` on `connection`; whether `id` is one. Nothing
+ * happens (and nothing is said) without an open connection, while nothing
+ * plays, or when the project has no transport to toggle. `transport.toggle`
+ * writes each target's new `run` as a click on its toggle does (`commit`:
+ * live, then the file; ADR 0039), so the unsaved marks and every other
+ * client see the same.
+ */
+export function runProjectCommand(id, connection) {
+  if (id !== 'transport.toggle') return false;
+  const description = connection?.description;
+  if (!connection || connection.status !== 'open' || !description || description.playing === false) return true;
+  let memo = toggled.get(connection);
+  if (memo?.description !== description) {
+    memo = { description, values: new Map() };
+    toggled.set(connection, memo);
+  }
+  const plan = toggleTransport(transportTargets(description), memo.values);
+  for (const { address, value } of plan?.sets ?? []) {
+    // Counted at once (a second press before the reply sees it), forgotten
+    // if the write is refused: the description's base is the truth again.
+    memo.values.set(address, value);
+    Promise.resolve(connection.commit?.(address, value)).catch(() => {
+      if (memo.values.get(address) === value) memo.values.delete(address);
+    });
+  }
+  return true;
+}
+
 /** The window Signal.app's commands are told on: the top one of the same origin. */
 function commandWindow(view) {
   try {
@@ -124,8 +163,18 @@ function onKey(event) {
   const { mods } = splitChord(chord);
   if (field && !mods.has('Cmd') && !mods.has('Ctrl')) return;
   const viewCommand = field ? null : keyCommand('view', event);
-  if (viewCommand && !(isPressable(target) && /(^|\+)(Space|Enter)$/.test(chord))) {
+  const pressing = isPressable(target) && /(^|\+)(Space|Enter)$/.test(chord);
+  if (viewCommand && !pressing) {
     if (scrollView(scrollerFor(target, doc), viewCommand.id)) event.preventDefault();
+    return;
+  }
+  // The project's commands: below the view, above the app's menu. A native
+  // button or link keeps its Space and Enter.
+  const project = keyCommand('project', event);
+  if (project) {
+    if (pressing) return;
+    event.preventDefault();
+    if (!event.repeat) runProjectCommand(project.id, getDefaultConnection());
     return;
   }
   const app = keyCommand('app', event);
