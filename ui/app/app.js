@@ -20,7 +20,9 @@ import { ContextMenu, claimMenus, focusable } from '../controls/context-menu.js'
 import { formatFixed } from '../lib/format.js';
 import { applyProps } from './lib/dom.js';
 import { connectCards } from './lib/cards.js';
-import { pageHandlesShortcuts, panelReloads, panelSource, shortcut } from './lib/menu.js';
+import { menuAction, pageHandlesShortcuts, panelReloads, panelSource } from './lib/menu.js';
+import { setViewScroller } from '../controls/keyboard.js';
+import { onKeys } from '../lib/keys.js';
 import { dragMessage, fileNote, planUpdate, releaseMessage, resetMessage, rows, shown, structureKey, valuesOf } from './lib/parameters.js';
 import { INITIAL, controls, powerRequest, reduce, restartRequest } from './lib/power.js';
 import { contextItems, keepsSystemMenu } from './lib/context.js';
@@ -78,8 +80,9 @@ class AppElement extends HTMLElement {
  * differs from its file), and the compact status with the last notice. No
  * Play or Stop (ADR 0033): the project runs while the power is on, and its
  * transport is its own. It switches the tabs, and runs the menu's actions:
- * the native menu's (`signal-menu`) and, without one (a browser), their
- * shortcuts.
+ * the native menu's (`signal-menu`) and, without one (a browser), the app
+ * commands' chords (`signal-command`, ui/controls/keyboard.js). A problem
+ * with the person's keyboard shortcuts file shows as its notice.
  */
 export class SignalAppToolbar extends AppElement {
   connectedCallback() {
@@ -114,7 +117,24 @@ export class SignalAppToolbar extends AppElement {
       window.addEventListener('signal-menu', this.menu);
       window.addEventListener('signal-app-notice', this.noticed);
       window.addEventListener('signal-app-error', this.errored);
-      this.unlisten = SignalAppToolbar.listen(document);
+      // An app command's chord in a browser (ui/controls/keyboard.js): run here, if the page can.
+      this.command = (event) => {
+        const action = menuAction(event.detail);
+        if (!action || !pageHandlesShortcuts(globalThis)) return;
+        event.preventDefault();
+        if (!event.repeat) this.run(action);
+      };
+      window.addEventListener('signal-command', this.command);
+      this.unkeys = onKeys((map, info) => {
+        if (info.problems.length) this.notice(`Keyboard shortcuts: ${info.problems.length === 1 ? 'a problem' : `${info.problems.length} problems`} in ${info.path ?? 'keys.toml'}${info.fallback ? ' (the built-in keys are used)' : ''}; see Settings`, true);
+      });
+      // The view the page's keys scroll (Page Down, Space, …): the shown tab, or the panel frame's page.
+      setViewScroller(() => {
+        const tab = document.querySelector('[role="tabpanel"][data-tab]:not([hidden])');
+        const frame = tab?.querySelector('iframe');
+        if (frame) return frame.contentDocument?.scrollingElement ?? null;
+        return tab?.classList.contains('tab-scroll') ? tab : null;
+      });
       this.select(INITIAL_TAB);
       this.render();
     }
@@ -125,21 +145,9 @@ export class SignalAppToolbar extends AppElement {
     window.removeEventListener('signal-menu', this.menu);
     window.removeEventListener('signal-app-notice', this.noticed);
     window.removeEventListener('signal-app-error', this.errored);
-    this.unlisten?.();
+    window.removeEventListener('signal-command', this.command);
+    this.unkeys?.();
     super.disconnectedCallback();
-  }
-
-  /** The menu's shortcuts in `doc` (this page's, or its panel frame's), without a native menu; returns the remover. */
-  static listen(doc) {
-    if (!pageHandlesShortcuts(globalThis)) return null;
-    const keys = (event) => {
-      const action = shortcut(event);
-      if (!action) return;
-      event.preventDefault();
-      window.dispatchEvent(new CustomEvent('signal-menu', { detail: action }));
-    };
-    doc.addEventListener('keydown', keys);
-    return () => doc.removeEventListener('keydown', keys);
   }
 
   attach(connection) {
@@ -159,8 +167,14 @@ export class SignalAppToolbar extends AppElement {
     for (const panel of document.querySelectorAll('[role="tabpanel"][data-tab]')) panel.hidden = panel.dataset.tab !== this.tab;
   }
 
-  /** A menu action: Open…, Save, Interface Setup…, Restart from Files. */
+  /** A menu action: Open…, Save, Interface Setup…, Restart from Files; in a browser also Settings… and Keyboard Shortcuts. */
   run(action) {
+    if (action === 'settings' || action === 'keys') {
+      // The Settings page (ui/app/settings.html), in its own window.
+      const view = action === 'keys' ? '?view=reference' : '';
+      window.open(`settings.html${view}${location.hash}`, 'signal-settings');
+      return;
+    }
     if (action === 'save') {
       this.save();
       return;
@@ -641,8 +655,8 @@ export class SignalAppParameters extends AppElement {
 /**
  * The project's panel (M2.8-3, `/project/main.html`) in the Panel tab: a
  * same-origin frame filling the tab, kept while other tabs show, whose
- * shortcuts also work while the panel has the focus (without a native
- * menu). Opening another project shows its panel. In Signal.app it shows
+ * keys are its own page's (ui/controls/keyboard.js: the app commands'
+ * chords reach this page as `signal-command`). Opening another project shows its panel. In Signal.app it shows
  * every card, one another window holds as a placeholder, and a right click
  * on a card puts its Move items first in this page's menu (ADR 0032,
  * ./lib/cards.js).
@@ -654,12 +668,8 @@ export class SignalAppPanel extends AppElement {
       this.frame.addEventListener('load', () => {
         this.unlisten?.();
         const doc = this.frame.contentDocument;
-        const keys = doc ? SignalAppToolbar.listen(doc) : null;
         const menu = doc ? SignalAppContextMenu.listen(doc, this.frame) : null;
-        this.unlisten = () => {
-          keys?.();
-          menu?.();
-        };
+        this.unlisten = () => menu?.();
       });
       this.append(this.frame);
       connectCards(this.frame);

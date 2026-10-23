@@ -26,7 +26,8 @@ import { canSyncPatterns, PatternSync, shortNotice } from '../lib/pattern-sync.j
 import { playheadAddress, playheadStream } from '../lib/playhead.js';
 import { PatternError, REST, parsePattern, serializePattern, validatePattern } from '../lib/pattern-text.js';
 import { STEP_COUNTS, STEP_LENGTHS, StepGridModel, accentAt, gridLayout, groupOf, hitGrid, laneY, stepX } from '../lib/step-grid-model.js';
-import { SignalElement } from './base.js';
+import { SignalElement, registerWheel, takesWheel, verticalDelta } from './base.js';
+import { keyCommand, wheelCommand } from '../lib/keys.js';
 
 const STATE_CLASS = { '.': 'rest', x: 'hit', X: 'accent' };
 const escapeText = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -35,7 +36,7 @@ const printed = (name) => name.replace(/[_-]+/g, ' ').toUpperCase();
 
 export class SignalStepGrid extends SignalElement {
   static role = 'grid';
-  static observedAttributes = ['pattern', 'label', 'step', 'step-bind'];
+  static observedAttributes = ['pattern', 'label', 'step', 'step-bind', 'wheel'];
   static resubscribe = ['pattern', 'step-bind'];
   static css = `
 :host { display: block; min-width: 360px; border-radius: 10px; color: #2f2d2a; }
@@ -174,14 +175,17 @@ svg.grid { width: 100%; height: auto; display: block; overflow: visible; touch-a
       const hit = this.at(event);
       if (hit?.area === 'knob') this.edit(() => this.model.resetLevel(hit.lane));
     });
+    registerWheel(this);
     svg.addEventListener(
       'wheel',
       (event) => {
         const hit = this.at(event);
-        if (hit?.area !== 'knob') return;
+        // Only a level knob takes the wheel, and only while the grid owns it (ADR 0034).
+        if (hit?.area !== 'knob' || !takesWheel(this, event)) return;
         event.preventDefault();
-        if (this.locked) return;
-        const step = (event.shiftKey ? 0.01 : 0.05) * -Math.sign(event.deltaY);
+        const command = wheelCommand('step_grid', event);
+        if (this.locked || command?.id !== 'step_grid.wheel') return;
+        const step = (command.fine ? 0.01 : 0.05) * -Math.sign(verticalDelta(event));
         if (this.model.setLevel(hit.lane, this.model.level(hit.lane) + step)) {
           this.update();
           clearTimeout(this.wheelTimer);
@@ -283,41 +287,43 @@ svg.grid { width: 100%; height: auto; display: block; overflow: visible; touch-a
     else this.update();
   }
 
+  /** The `step_grid` scope's keys (ui/lib/keys.default.js). */
   onKey(event) {
     const target = event.composedPath?.()[0];
     if (target && (target.tagName === 'SELECT' || target.tagName === 'BUTTON')) return false;
     if (this.locked) return false;
+    const found = keyCommand('step_grid', event);
+    if (!found) return false;
+    const command = found.id;
     const m = this.model;
-    const cmd = event.metaKey || event.ctrlKey;
-    const k = event.key;
-    if (cmd && (k === 'z' || k === 'Z')) {
-      this.edit(() => (event.shiftKey ? m.redo() : m.undo()));
+    if (command === 'step_grid.undo' || command === 'step_grid.redo') {
+      this.edit(() => (command === 'step_grid.redo' ? m.redo() : m.undo()));
       return true;
     }
     const { lane, step } = this.cursor;
     const onKnob = step < 0;
     // The level knob: the cursor left of step 1 (Up/Down, Shift fine, Home, End, Delete resets);
     // Page Up / Page Down change the cursor lane's level anywhere.
-    const levelStep = { ArrowUp: 0.05, ArrowDown: -0.05, PageUp: 0.1, PageDown: -0.1 }[k];
-    if (levelStep !== undefined && !cmd && (onKnob || k.startsWith('Page'))) {
-      if (m.setLevel(lane, m.level(lane) + levelStep * (event.shiftKey ? 0.2 : 1))) this.update();
+    const levelStep = { 'step_grid.up': 0.05, 'step_grid.down': -0.05, 'step_grid.level_up': 0.1, 'step_grid.level_down': -0.1 }[command];
+    if (levelStep !== undefined && (onKnob || command.startsWith('step_grid.level_'))) {
+      if (m.setLevel(lane, m.level(lane) + levelStep * (found.fine ? 0.2 : 1))) this.update();
       clearTimeout(this.wheelTimer);
       this.wheelTimer = setTimeout(() => this.settleLevel(), 250);
       return true;
     }
-    if (onKnob && (k === 'Home' || k === 'End')) {
-      if (m.setLevel(lane, k === 'Home' ? 0 : 1)) this.update();
+    if (onKnob && (command === 'step_grid.level_min' || command === 'step_grid.level_max')) {
+      if (m.setLevel(lane, command === 'step_grid.level_min' ? 0 : 1)) this.update();
       this.settleLevel();
       return true;
     }
-    if (onKnob && (k === 'Delete' || k === 'Backspace')) {
+    if (onKnob && command === 'step_grid.clear') {
       this.edit(() => m.resetLevel(lane));
       return true;
     }
-    const moves = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] };
-    if (moves[k] && !cmd) {
+    const moves = { 'step_grid.up': [-1, 0], 'step_grid.down': [1, 0], 'step_grid.left': [0, -1], 'step_grid.right': [0, 1] };
+    if (moves[command]) {
       this.settleLevel();
-      const [dl, ds] = moves[k];
+      const [dl, ds] = moves[command];
       const lanes = Math.max(1, m.lanes.length);
       // Steps wrap; left of step 1 is the lane's level knob.
       const next = step + ds < -1 ? m.steps - 1 : step + ds >= m.steps ? -1 : step + ds;
@@ -326,14 +332,14 @@ svg.grid { width: 100%; height: auto; display: block; overflow: visible; touch-a
       return true;
     }
     if (onKnob) return false;
-    if (k === ' ' || k === 'Enter') {
+    if (command === 'step_grid.cycle') {
       this.edit(() => {
         m.press(lane, step);
         return m.release();
       });
       return true;
     }
-    if (k === 'Delete' || k === 'Backspace') {
+    if (command === 'step_grid.clear') {
       this.edit(() => {
         const before = m.snapshot();
         if (!m.put(lane, step, REST)) return false;

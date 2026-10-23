@@ -5,11 +5,17 @@
 //! or .signal>` choose the Setup file and the project to open, for tests
 //! and scripting.
 //!
-//! The menu bar is native (`muda`, M2.8-11): the app menu, File (Open…,
-//! Save, Save As…, Interface Setup…, Quit), Edit, so the page's text
-//! fields get the system's shortcuts, and Window (New Main, Schematic and
-//! Panel Window, Reset Layout, Minimize, Zoom, full screen and the window
-//! list). Save and Interface Setup are handed to a main window's page,
+//! The menu bar is native (`muda`, M2.8-11): the app menu (Settings…,
+//! Quit), File (Open…, Save, Save As…, Interface Setup…, Quit), Edit, so
+//! the page's text fields get the system's shortcuts, Project, Window (New
+//! Main, Schematic and Panel Window, Reset Layout, Minimize, Zoom, full
+//! screen and the window list) and Help (Keyboard Shortcuts). Each of
+//! Signal's own items takes its chord from the keymap (ADR 0034: the
+//! built-in `ui/lib/keys.default.js` and the person's `keys.toml` beside
+//! the Setup), set again whenever the control thread says it changed; a
+//! command's other chords come from the page (`menu.run`). Settings… and
+//! Help ▸ Keyboard Shortcuts open the Settings window, which is no project
+//! window (never in the layout; closing it closes only it). Save and Interface Setup are handed to a main window's page,
 //! which runs them (a `signal-menu` event; without a main window one is
 //! opened for them). Open… and Save As… show the system's panels; a
 //! chosen, dropped or Finder-opened folder, `project.toml` or `.signal`
@@ -36,7 +42,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use muda::accelerator::{CMD_OR_CTRL, Key, KeyAccelerator, Modifiers};
+use muda::accelerator::KeyAccelerator;
 use muda::{AboutMetadata, IsMenuItem, Menu, MenuEvent, PredefinedMenuItem, Submenu};
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
@@ -54,11 +60,13 @@ use signal_app::server::{AppConfig, AppServer, WindowsEdit};
 use signal_app::setup::{Setup, setup_path};
 use signal_app::state::Backend;
 use signal_app::window::{
-    ExitPlan, MENU_BAR, MenuAction, MenuItem, NATIVE_MENU_SCRIPT, Prompt, QuitRoute, WINDOW_MENU,
-    default_save_name, dropped, exit_plan, may_navigate, origin_of, page_url, prompt_buttons,
-    prompt_text, save_target, view_path, view_title, window_of, window_title,
+    ExitPlan, HELP_MENU, MENU_BAR, MenuAction, MenuItem, NATIVE_MENU_SCRIPT, Prompt, QuitRoute,
+    SETTINGS_TITLE, WINDOW_MENU, default_save_name, dropped, exit_plan, may_navigate, menu_chords,
+    origin_of, page_url, prompt_buttons, prompt_text, save_target, settings_path, view_path,
+    view_title, window_of, window_title,
 };
 use signal_ui::document::open_root;
+use signal_ui::keys::{Keys, keys_path};
 use signal_ui::{Edits, ProjectStatus, WINDOWS_FILE};
 use tao::dpi::{LogicalPosition, LogicalSize};
 use tao::event::{Event, StartCause, WindowEvent};
@@ -90,8 +98,10 @@ enum UserEvent {
     /// The open project or its edited state changed (the titles).
     Project(Option<ProjectStatus>),
     /// A window's page said something (wry's IPC: `window.ready`,
-    /// `card.move`, `card.order`, `window.show`, `window.fit`).
+    /// `card.move`, `card.order`, `window.show`, `window.fit`, `menu.run`).
     Page(WindowId, String),
+    /// The keymap changed (ADR 0034): each menu action's chord.
+    Keys(Vec<(MenuAction, Option<String>)>),
 }
 
 type Target = EventLoopWindowTarget<UserEvent>;
@@ -105,44 +115,85 @@ const SCREEN_POLL: Duration = Duration::from_secs(1);
 const PANEL_SIZE: (f64, f64) = (600.0, 400.0);
 /// New Schematic Window's size, in points.
 const SCHEMATIC_SIZE: (f64, f64) = (1200.0, 800.0);
+/// The Settings window's size, in points.
+const SETTINGS_SIZE: (f64, f64) = (760.0, 640.0);
 
-/// The native menu bar of [`MENU_BAR`] and its Window menu; built on the
-/// main thread, as `muda` requires.
-fn menu_bar() -> muda::Result<(Menu, Option<Submenu>)> {
+/// The menu bar as built: the bar, its Window and Help menus, and Signal's
+/// own items, whose chords follow the keymap.
+struct MenuBar {
+    bar: Menu,
+    windows: Option<Submenu>,
+    help: Option<Submenu>,
+    items: Vec<(MenuAction, muda::MenuItem)>,
+}
+
+impl MenuBar {
+    /// Gives each of Signal's own items its chord (ADR 0034); a chord
+    /// `muda` does not take is reported and left off.
+    fn set_chords(&self, chords: &[(MenuAction, Option<String>)]) {
+        for (action, item) in &self.items {
+            let chord = chords
+                .iter()
+                .find(|(a, _)| a == action)
+                .and_then(|(_, c)| c.as_deref());
+            let accelerator = chord.and_then(|text| match text.parse::<KeyAccelerator>() {
+                Ok(accelerator) => Some(accelerator),
+                Err(error) => {
+                    eprintln!(
+                        "signal-app: the menu cannot show {text} for {}: {error}",
+                        action.command()
+                    );
+                    None
+                }
+            });
+            if let Err(error) = item.set_key_accelerator(accelerator) {
+                eprintln!("signal-app: {}: {error}", action.command());
+            }
+        }
+    }
+}
+
+/// The native menu bar of [`MENU_BAR`], its Window and Help menus, its
+/// items' chords the keymap's (`chords`); built on the main thread, as
+/// `muda` requires.
+fn menu_bar(chords: &[(MenuAction, Option<String>)]) -> muda::Result<MenuBar> {
     let bar = Menu::new();
     let mut windows = None;
+    let mut help = None;
+    let mut own = Vec::new();
     for (name, items) in MENU_BAR {
         let built: Vec<Box<dyn IsMenuItem>> = items
             .iter()
-            .map(|item| menu_item(*item))
+            .map(|item| menu_item(*item, &mut own))
             .collect::<muda::Result<_>>()?;
         let refs: Vec<&dyn IsMenuItem> = built.iter().map(AsRef::as_ref).collect();
         let submenu = Submenu::with_items(name, true, &refs)?;
         bar.append(&submenu)?;
         if name == WINDOW_MENU {
             windows = Some(submenu);
+        } else if name == HELP_MENU {
+            help = Some(submenu);
         }
     }
-    Ok((bar, windows))
+    let menu = MenuBar {
+        bar,
+        windows,
+        help,
+        items: own,
+    };
+    menu.set_chords(chords);
+    Ok(menu)
 }
 
-fn menu_item(item: MenuItem) -> muda::Result<Box<dyn IsMenuItem>> {
+fn menu_item(
+    item: MenuItem,
+    own: &mut Vec<(MenuAction, muda::MenuItem)>,
+) -> muda::Result<Box<dyn IsMenuItem>> {
     Ok(match item {
-        MenuItem::Own(action, label, key) => {
-            let own = muda::MenuItem::with_id(action.id(), label, true, None);
-            let modifiers = if action.shift() {
-                CMD_OR_CTRL | Modifiers::SHIFT
-            } else {
-                CMD_OR_CTRL
-            };
-            own.set_key_accelerator(Some(KeyAccelerator::new(
-                modifiers,
-                Key::Character(key.to_string()),
-            )))?;
-            Box::new(own)
-        }
-        MenuItem::Plain(action, label) => {
-            Box::new(muda::MenuItem::with_id(action.id(), label, true, None))
+        MenuItem::Own(action, label) => {
+            let made = muda::MenuItem::with_id(action.id(), label, true, None);
+            own.push((action, made.clone()));
+            Box::new(made)
         }
         MenuItem::About => Box::new(PredefinedMenuItem::about(
             None,
@@ -267,6 +318,15 @@ struct Windows {
     /// A write under way: its answer, the layout written and when it was
     /// asked.
     writing: Option<(Answer, Layout, Instant)>,
+    /// The Settings window (ADR 0034), when open: no project window, never
+    /// in the layout.
+    settings: Option<Settings>,
+}
+
+/// The Settings window: its WebView and window (dropped in this order).
+struct Settings {
+    webview: wry::WebView,
+    window: tao::window::Window,
 }
 
 impl Windows {
@@ -328,6 +388,56 @@ impl Windows {
         }
         self.tracker.change(Instant::now(), Change::Structure);
         Ok(self.list.len() - 1)
+    }
+
+    /// Whether `id` is the Settings window's.
+    fn is_settings(&self, id: WindowId) -> bool {
+        self.settings.as_ref().is_some_and(|s| s.window.id() == id)
+    }
+
+    /// Shows the Settings window (ADR 0034), opening it on the front
+    /// window's screen; `reference`: its shortcuts as a reference.
+    fn open_settings(&mut self, target: &Target, proxy: &Proxy, reference: bool) {
+        if let Some(settings) = &self.settings {
+            let view = if reference { "reference" } else { "edit" };
+            let script = event_script("signal-settings", &json!({ "view": view }));
+            if let Err(error) = settings.webview.evaluate_script(&script) {
+                eprintln!("signal-app: {error}");
+            }
+            settings.window.set_minimized(false);
+            settings.window.set_focus();
+            return;
+        }
+        let screen = self.front_screen();
+        let at = centred(WindowView::Panel, SETTINGS_SIZE, screen, &self.screens);
+        let placed = place(&at, &self.screens);
+        let window = match WindowBuilder::new()
+            .with_title(SETTINGS_TITLE)
+            .with_inner_size(LogicalSize::new(SETTINGS_SIZE.0, SETTINGS_SIZE.1))
+            .with_position(LogicalPosition::new(placed.x, placed.y))
+            .build(target)
+        {
+            Ok(window) => window,
+            Err(error) => {
+                eprintln!("signal-app: the Settings window did not open: {error}");
+                return;
+            }
+        };
+        let id = window.id();
+        let origin = self.origin.clone();
+        let pages = proxy.clone();
+        let webview = WebViewBuilder::new()
+            .with_url(page_url(&self.app_url, settings_path(reference)))
+            .with_initialization_script(NATIVE_MENU_SCRIPT)
+            .with_navigation_handler(move |to| may_navigate(&to, &origin))
+            .with_ipc_handler(move |request: wry::http::Request<String>| {
+                let _ = pages.send_event(UserEvent::Page(id, request.into_body()));
+            })
+            .build(&window);
+        match webview {
+            Ok(webview) => self.settings = Some(Settings { webview, window }),
+            Err(error) => eprintln!("signal-app: the Settings page did not open: {error}"),
+        }
     }
 
     /// A new window of `view` near the front window, on its screen.
@@ -661,10 +771,22 @@ impl Windows {
 
     /// The window's page said `text`.
     fn page(&mut self, target: &Target, proxy: &Proxy, id: WindowId, text: &str) {
-        let Some(index) = self.index(Some(id)) else {
+        let Ok(message) = serde_json::from_str::<Value>(text) else {
             return;
         };
-        let Ok(message) = serde_json::from_str::<Value>(text) else {
+        // ADR 0034: a menu command's other chord, pressed in any window
+        // (the native menu takes the first): as if its item were chosen.
+        if message.get("type").and_then(Value::as_str) == Some("menu.run") {
+            if let Some(action) = message
+                .get("command")
+                .and_then(Value::as_str)
+                .and_then(MenuAction::of_command)
+            {
+                let _ = proxy.send_event(UserEvent::Menu(action));
+            }
+            return;
+        }
+        let Some(index) = self.index(Some(id)) else {
             return;
         };
         let card = message
@@ -863,6 +985,9 @@ fn main() -> ExitCode {
     for problem in &problems {
         eprintln!("signal-app: {problem}");
     }
+    // ADR 0034: the menu's chords at start (the control thread reports the
+    // file's problems and tells of every change).
+    let keys = Keys::load(&keys_path(&path));
     // Absolute, because it becomes the Setup's last project, and
     // Signal.app opened from the Finder starts in `/`.
     let project = args
@@ -877,6 +1002,7 @@ fn main() -> ExitCode {
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let projects = event_loop.create_proxy();
+    let keymaps = event_loop.create_proxy();
     let server = AppServer::start(AppConfig {
         setup_path: path,
         project,
@@ -885,6 +1011,9 @@ fn main() -> ExitCode {
         ui_dir: signal_ui::library_dir(exe.as_deref(), built),
         on_project: Some(Box::new(move |status| {
             let _ = projects.send_event(UserEvent::Project(status));
+        })),
+        on_keys: Some(Box::new(move |keys: &Keys| {
+            let _ = keymaps.send_event(UserEvent::Keys(menu_chords(keys)));
         })),
     });
     let server = match server {
@@ -895,7 +1024,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let (menu, window_menu) = match menu_bar() {
+    let menu = match menu_bar(&menu_chords(&keys)) {
         Ok(menu) => menu,
         Err(error) => {
             eprintln!("signal-app: the menu bar was not built: {error}");
@@ -929,6 +1058,7 @@ fn main() -> ExitCode {
             .map(|w| (f64::from(w.width), f64::from(w.height))),
         written: None,
         writing: None,
+        settings: None,
     };
     windows.tracker = Tracker::new(&windows.screens.key, Instant::now());
     let layout = windows.stored();
@@ -945,10 +1075,18 @@ fn main() -> ExitCode {
         let quit = match event {
             // The application exists now: its menu bar is set.
             Event::NewEvents(StartCause::Init) => {
-                menu.init_for_nsapp();
-                if let Some(window_menu) = &window_menu {
+                menu.bar.init_for_nsapp();
+                if let Some(window_menu) = &menu.windows {
                     window_menu.set_as_windows_menu_for_nsapp();
                 }
+                if let Some(help) = &menu.help {
+                    help.set_as_help_menu_for_nsapp();
+                }
+                None
+            }
+            // ADR 0034: the keymap changed; the menu's chords follow it.
+            Event::UserEvent(UserEvent::Keys(chords)) => {
+                menu.set_chords(&chords);
                 None
             }
             Event::MainEventsCleared => {
@@ -962,6 +1100,13 @@ fn main() -> ExitCode {
             Event::WindowEvent {
                 window_id, event, ..
             } => match event {
+                // The Settings window is no project window: closing it
+                // closes it, whatever else is open.
+                WindowEvent::CloseRequested if windows.is_settings(window_id) => {
+                    windows.settings = None;
+                    None
+                }
+                _ if windows.is_settings(window_id) => None,
                 // Closing a window just closes it; closing the last one
                 // quits, as Signal's one window did.
                 WindowEvent::CloseRequested if windows.list.len() > 1 => {
@@ -1008,6 +1153,15 @@ fn main() -> ExitCode {
             }
             Event::UserEvent(UserEvent::Menu(MenuAction::NewPanel)) => {
                 windows.open_new(target, &proxy, WindowView::Panel);
+                None
+            }
+            // ADR 0034: Settings… and Help ▸ Keyboard Shortcuts.
+            Event::UserEvent(UserEvent::Menu(MenuAction::Settings)) => {
+                windows.open_settings(target, &proxy, false);
+                None
+            }
+            Event::UserEvent(UserEvent::Menu(MenuAction::KeysHelp)) => {
+                windows.open_settings(target, &proxy, true);
                 None
             }
             // Everything back on one main window on the main screen; the

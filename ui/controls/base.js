@@ -7,7 +7,11 @@
 
 import { onDefaultConnection } from '../signal-ui.js';
 import { Binding } from '../lib/binding.js';
-import { dragDelta, keyAction, wheelDelta } from '../lib/gesture.js';
+import { dragDelta, stepAction, wheelDelta } from '../lib/gesture.js';
+import { keyCommand, wheelCommand } from '../lib/keys.js';
+import { registerWheel, takesWheel, verticalDelta } from './keyboard.js';
+
+export { registerWheel, takesWheel, verticalDelta } from './keyboard.js';
 import { parseSkin } from '../lib/skin.js';
 import { loadSkin, mountSkin, showSkin } from './skin-dom.js';
 import { ENTRY_CSS, ValueEntry, entryDisabled } from './entry-field.js';
@@ -461,6 +465,7 @@ export class SignalValueElement extends SignalElement {
       else this.resetValue();
     });
     this.addEventListener('wheel', (event) => this.onWheel(event), { passive: false });
+    registerWheel(this);
   }
 
   /** A double-click on the readout: a typed value, or (entry off) a reset. */
@@ -478,9 +483,18 @@ export class SignalValueElement extends SignalElement {
     if (this.moved) this.binding.setValue(this.binding.value, 'commit');
   }
 
+  /**
+   * The wheel changes the value only while the control owns it (a click or
+   * the focus, or the wheel modifier held: ADR 0034); otherwise the page
+   * scrolls. Shift is finer (`slider.wheel`).
+   */
   onWheel(event) {
+    if (!takesWheel(this, event)) return;
     event.preventDefault();
-    const delta = wheelDelta(event.deltaY, { fine: event.shiftKey, deltaMode: event.deltaMode });
+    const command = wheelCommand('slider', event);
+    if (command?.id !== 'slider.wheel') return;
+    const delta = wheelDelta(verticalDelta(event), { fine: command.fine, deltaMode: event.deltaMode });
+    if (!delta) return;
     this.binding.moveTo(this.binding.position + delta, 'nudge');
     this.update();
   }
@@ -501,14 +515,17 @@ export class SignalValueElement extends SignalElement {
     this.update();
   }
 
+  /** The `slider` scope's keys (ui/lib/keys.default.js). */
   onKey(event) {
-    if (event.key === 'Enter') return this.entry?.open() ?? false;
-    if (event.key === 'Delete' || event.key === 'Backspace') {
+    const command = keyCommand('slider', event);
+    if (!command) return false;
+    if (command.id === 'slider.type_value') return this.entry?.open() ?? false;
+    if (command.id === 'slider.reset') {
       this.binding.reset();
       this.update();
       return true;
     }
-    const position = keyAction(event.key, this.binding.position, { fine: event.shiftKey });
+    const position = stepAction(command.id, this.binding.position, { fine: command.fine });
     if (position === null) return false;
     this.binding.moveTo(position, 'nudge');
     this.update();

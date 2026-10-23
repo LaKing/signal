@@ -113,6 +113,7 @@ fn start_with(transport: Transport, setup_path: &Path, project: Option<PathBuf>)
         backend: Backend::Null(Vec::new()),
         ui_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui"),
         on_project: None,
+        on_keys: None,
     };
     match transport {
         Transport::Tcp => AppServer::start(config),
@@ -362,6 +363,7 @@ fn start_seen(
         on_project: Some(Box::new(move |status| {
             let _ = seen.send(status);
         })),
+        on_keys: None,
     };
     let server = match transport {
         Transport::Tcp => AppServer::start(config),
@@ -606,7 +608,43 @@ fn the_layout_is_written_into_the_project_as_seen(transport: Transport) {
     fs::remove_dir_all(&base).unwrap();
 }
 
+/// ADR 0034: the window is told when the keymap changes (`keys.toml`
+/// beside the Setup, edited elsewhere), with the menu's chords in it.
+fn the_window_is_told_when_the_keys_change(transport: Transport) {
+    let (base, path) = setup("keys", transport);
+    let (told, heard) = mpsc::channel();
+    let config = AppConfig {
+        setup_path: path.clone(),
+        project: Some(tone()),
+        open_root: path.with_file_name("Open"),
+        backend: Backend::Null(Vec::new()),
+        ui_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui"),
+        on_project: None,
+        on_keys: Some(Box::new(move |keys: &signal_ui::keys::Keys| {
+            let _ = told.send(keys.menu_chords());
+        })),
+    };
+    let server = match transport {
+        Transport::Tcp => AppServer::start(config),
+        Transport::Local => AppServer::start_local(config),
+    }
+    .unwrap();
+    fs::write(
+        signal_ui::keys::keys_path(&path),
+        "version = 1\n[window]\nnew_schematic = [\"Shift+Cmd+N\"]\n",
+    )
+    .unwrap();
+    let chords = heard.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(chords.contains(&(
+        "window.new_schematic".to_owned(),
+        Some("Shift+Cmd+N".to_owned())
+    )));
+    drop(server);
+    fs::remove_dir_all(&base).unwrap();
+}
+
 both!(
+    the_window_is_told_when_the_keys_change,
     several_windows_are_clients_of_one_server,
     the_layout_is_written_into_the_project_as_seen,
     a_later_client_describes_every_parameter_while_playing,

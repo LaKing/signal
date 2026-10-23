@@ -6,6 +6,7 @@
 // and key input. Notes carry an `id` here only; `pattern()` strips it.
 
 import { SCHEMA_VERSION, compareNotes, normalizePattern, notesOverlap } from './pattern-text.js';
+import { keyCommand } from './keys.js';
 
 export const KEYS = 128;
 export const MIN_KEY = 0;
@@ -544,30 +545,43 @@ function sameNotes(a, b) {
 
 /**
  * What a key does to the model, or null when it is not the piano roll's:
- * arrows move the selection (up/down a semitone, Shift an octave;
- * left/right one snap), Delete removes, ⌘A selects all, ⌘D duplicates,
- * ⌘Z / ⇧⌘Z undo and redo, Escape clears the selection.
+ * the `piano_roll` scope's commands (ui/lib/keys.default.js; by default
+ * arrows move the selection up/down a semitone, Shift an octave, left/right
+ * one snap; Delete removes, ⌘A selects all, ⌘D duplicates, ⌘Z / ⇧⌘Z undo
+ * and redo, Escape cancels a drag or clears the selection). `command` is
+ * the command's id when the caller looked it up already.
  */
-export function rollKey(model, event, grid) {
-  const cmd = event.metaKey || event.ctrlKey;
-  const k = event.key;
-  if (cmd && (k === 'z' || k === 'Z')) return event.shiftKey ? model.redo() || 'handled' : model.undo() || 'handled';
-  if (cmd && (k === 'y' || k === 'Y')) return model.redo() || 'handled';
-  if (cmd && (k === 'a' || k === 'A')) {
-    model.selectAll();
-    return 'selection';
+export function rollKey(model, event, grid, command = keyCommand('piano_roll', event)?.id) {
+  switch (command) {
+    case 'piano_roll.undo':
+      return model.undo() || 'handled';
+    case 'piano_roll.redo':
+      return model.redo() || 'handled';
+    case 'piano_roll.select_all':
+      model.selectAll();
+      return 'selection';
+    case 'piano_roll.duplicate':
+      return model.duplicate(grid) || 'handled';
+    case 'piano_roll.delete':
+      return model.remove() || 'handled';
+    case 'piano_roll.deselect':
+      if (model.drag) model.cancelDrag();
+      else model.selected = new Set();
+      return 'selection';
+    default:
+      break;
   }
-  if (cmd && (k === 'd' || k === 'D')) return model.duplicate(grid) || 'handled';
-  if (k === 'Delete' || k === 'Backspace') return model.remove() || 'handled';
-  if (k === 'Escape') {
-    if (model.drag) model.cancelDrag();
-    else model.selected = new Set();
-    return 'selection';
-  }
-  const moves = { ArrowUp: [0, 1], ArrowDown: [0, -1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
-  if (moves[k] && !cmd) {
-    const [b, n] = moves[k];
-    return model.moveSelection(b * grid, n * (event.shiftKey ? 12 : 1)) || 'handled';
+  const moves = {
+    'piano_roll.move_up': [0, 1],
+    'piano_roll.move_down': [0, -1],
+    'piano_roll.octave_up': [0, 12],
+    'piano_roll.octave_down': [0, -12],
+    'piano_roll.move_left': [-1, 0],
+    'piano_roll.move_right': [1, 0],
+  };
+  if (moves[command]) {
+    const [b, n] = moves[command];
+    return model.moveSelection(b * grid, n) || 'handled';
   }
   return null;
 }

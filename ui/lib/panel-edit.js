@@ -5,6 +5,7 @@
 // where a drag drops. No DOM: ui/controls/panel-editor.js uses them.
 
 import { controlSpec } from './panel.js';
+import { keyCommand } from './keys.js';
 
 /** Every node of `tree` with its parent and index, in document order. */
 function* walk(node, parent = null) {
@@ -452,19 +453,19 @@ export function insertionIndex(rects, { x, y }) {
 const FIELDS = new Set(['input', 'textarea', 'select']);
 
 /**
- * What a key does in edit mode: `undo` (⌘Z), `redo` (⇧⌘Z), `leave`
- * (Escape, wherever the focus is), or null; ⌘Z in a text field is the
- * field's own.
+ * What a key does in edit mode (the `panel_edit` scope, ui/lib/keys.default.js):
+ * `undo` (⌘Z), `redo` (⇧⌘Z), `leave` (Escape, wherever the focus is), or
+ * null; ⌘Z in a text field is the field's own.
  */
-export function editKey(event) {
+export function editKey(event, scope = 'panel_edit') {
+  const command = keyCommand(scope, event)?.id;
   // Escape leaves from anywhere, a field included (its text not applied).
-  if (event?.key === 'Escape') return 'leave';
+  if (command === `${scope}.leave`) return 'leave';
   // The element itself, inside a shadow root too (the editor's own fields).
   const target = event?.composedPath?.()[0] ?? event?.target;
   if (FIELDS.has(target?.localName ?? '')) return null;
-  if (event.metaKey && !event.ctrlKey && !event.altKey && String(event.key).toLowerCase() === 'z') {
-    return event.shiftKey ? 'redo' : 'undo';
-  }
+  if (command === `${scope}.undo`) return 'undo';
+  if (command === `${scope}.redo`) return 'redo';
   return null;
 }
 

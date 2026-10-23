@@ -3,7 +3,8 @@
 // Its readout is two boxes, x and y, each taking a typed value.
 
 import { formatValue } from '../lib/format.js';
-import { FINE, PAGE_STEP, keyAction } from '../lib/gesture.js';
+import { FINE, KEY_STEP, PAGE_STEP } from '../lib/gesture.js';
+import { ariaShortcuts, keyCommand } from '../lib/keys.js';
 import { clamp } from '../lib/taper.js';
 import { Binding, SignalElement, bindAddresses, bindingEntry, quietly, unsavedMark, unsavedStream } from './base.js';
 
@@ -176,29 +177,38 @@ export class SignalXY extends SignalElement {
     this.update();
   }
 
+  /** The `xy` scope's keys (ui/lib/keys.default.js). */
   onKey(event) {
-    const fine = { fine: event.shiftKey };
-    const key = event.key;
-    if (key === 'ArrowLeft' || key === 'ArrowRight') {
-      this.x.moveTo(keyAction(key, this.x.position, fine), 'nudge');
-    } else if (key === 'ArrowUp' || key === 'ArrowDown') {
-      this.y.moveTo(keyAction(key, this.y.position, fine), 'nudge');
-    } else if (key === 'PageUp' || key === 'PageDown') {
-      const axis = event.altKey ? this.x : this.y;
-      const step = (key === 'PageUp' ? PAGE_STEP : -PAGE_STEP) * (event.shiftKey ? FINE : 1);
-      axis.moveTo(clamp(axis.position + step, 0, 1), 'nudge');
-    } else if (key === 'Home' || key === 'End') {
-      this.x.moveTo(key === 'Home' ? 0 : 1, 'nudge');
-      this.y.moveTo(key === 'Home' ? 0 : 1, 'nudge');
-    } else if (key === 'Delete' || key === 'Backspace') {
-      this.x.reset();
-      this.y.reset();
-    } else if (key === 'Enter') {
-      return this.entries?.[0].open() ?? false;
-    } else if (key === 'Escape' && this.hasAttribute('spring')) {
-      this.springBack();
-    } else {
-      return false;
+    const command = keyCommand('xy', event);
+    if (!command) return false;
+    const scale = command.fine ? FINE : 1;
+    const nudge = (axis, step) => axis.moveTo(clamp(axis.position + step * scale, 0, 1), 'nudge');
+    switch (command.id) {
+      case 'xy.right': nudge(this.x, KEY_STEP); break;
+      case 'xy.left': nudge(this.x, -KEY_STEP); break;
+      case 'xy.up': nudge(this.y, KEY_STEP); break;
+      case 'xy.down': nudge(this.y, -KEY_STEP); break;
+      case 'xy.page_up': nudge(this.y, PAGE_STEP); break;
+      case 'xy.page_down': nudge(this.y, -PAGE_STEP); break;
+      case 'xy.x_page_up': nudge(this.x, PAGE_STEP); break;
+      case 'xy.x_page_down': nudge(this.x, -PAGE_STEP); break;
+      case 'xy.minimum':
+      case 'xy.maximum':
+        this.x.moveTo(command.id === 'xy.minimum' ? 0 : 1, 'nudge');
+        this.y.moveTo(command.id === 'xy.minimum' ? 0 : 1, 'nudge');
+        break;
+      case 'xy.reset':
+        this.x.reset();
+        this.y.reset();
+        break;
+      case 'xy.type_value':
+        return this.entries?.[0].open() ?? false;
+      case 'xy.spring_back':
+        if (!this.hasAttribute('spring')) return false;
+        this.springBack();
+        break;
+      default:
+        return false;
     }
     this.update();
     return true;
@@ -214,7 +224,7 @@ export class SignalXY extends SignalElement {
     const { x, y } = this;
     const label = this.getAttribute('label') ?? '';
     if (!this.hasAttribute('aria-label')) this.setAttribute('aria-label', label || `${x.address ?? 'x'} and ${y.address ?? 'y'}`);
-    this.setAttribute('aria-keyshortcuts', 'ArrowLeft ArrowRight ArrowUp ArrowDown PageUp PageDown Home End Delete Enter');
+    this.setAttribute('aria-keyshortcuts', ariaShortcuts('xy'));
     for (const [binding, element] of [[x, this.$('.axis-x')], [y, this.$('.axis-y')]]) {
       const { min, max } = binding.range;
       element.setAttribute('aria-valuemin', String(min));

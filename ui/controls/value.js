@@ -5,6 +5,7 @@
 
 import { formatValue } from '../lib/format.js';
 import { clamp } from '../lib/taper.js';
+import { ariaShortcuts, keyCommand } from '../lib/keys.js';
 import { SignalValueElement, numberAttribute } from './base.js';
 
 const MAX_DIGITS = 6;
@@ -30,12 +31,14 @@ export class SignalValue extends SignalValueElement {
     return this.shownDigits ?? numberAttribute(this, 'digits') ?? null;
   }
 
+  /** The `value` scope's keys (ui/lib/keys.default.js). */
   onKey(event) {
-    if (event.key === 'Enter') return this.entry?.open() ?? false;
+    const command = keyCommand('value', event)?.id;
+    if (command === 'value.type_value') return this.entry?.open() ?? false;
     const current = this.digits ?? 3;
-    const keys = { ArrowUp: current + 1, ArrowRight: current + 1, ArrowDown: current - 1, ArrowLeft: current - 1, Home: 0, End: MAX_DIGITS };
-    if (!(event.key in keys)) return false;
-    this.shownDigits = clamp(keys[event.key], 0, MAX_DIGITS);
+    const digits = { 'value.more_digits': current + 1, 'value.fewer_digits': current - 1, 'value.fewest_digits': 0, 'value.most_digits': MAX_DIGITS };
+    if (!(command in digits)) return false;
+    this.shownDigits = clamp(digits[command], 0, MAX_DIGITS);
     this.update();
     return true;
   }
@@ -50,7 +53,7 @@ export class SignalValue extends SignalValueElement {
     // every frame; none while a value field is over it.
     if (element.textContent !== text && !this.entry?.isOpen) element.textContent = text;
     if (!this.hasAttribute('aria-label')) this.setAttribute('aria-label', this.getAttribute('label') ?? this.binding.address ?? 'value');
-    this.setAttribute('aria-keyshortcuts', 'ArrowUp ArrowDown Home End Enter');
+    this.setAttribute('aria-keyshortcuts', ariaShortcuts('value'));
   }
 }
 

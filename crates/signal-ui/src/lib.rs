@@ -18,6 +18,8 @@
 //!   app mode ([`Host::new_app`], M2.8-4).
 //! - [`document`]: a `.signal` project opened in the app (M2.8-12): its
 //!   working folder and whether it is edited.
+//! - [`keys`]: the keyboard shortcuts (ADR 0034): the built-in keymap and
+//!   the person's `keys.toml` beside the Setup, read, checked and written.
 
 #![cfg_attr(
     not(test),
@@ -36,6 +38,7 @@ mod entities;
 pub mod frames;
 mod host;
 mod http;
+pub mod keys;
 #[cfg(feature = "in-process")]
 mod local;
 pub mod panel;

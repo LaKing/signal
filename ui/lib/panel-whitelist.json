@@ -11,8 +11,8 @@
     "p": { "attributes": ["class"], "children": ["text"] }
   },
   "controls": {
-    "signal-fader": ["bind", "skin", "label", "class", "orientation", "taper", "floor", "min", "max", "default", "unit"],
-    "signal-knob": ["bind", "skin", "label", "class", "sweep", "bipolar", "drag", "taper", "floor", "min", "max", "default", "unit"],
+    "signal-fader": ["bind", "skin", "label", "class", "wheel", "orientation", "taper", "floor", "min", "max", "default", "unit"],
+    "signal-knob": ["bind", "skin", "label", "class", "wheel", "sweep", "bipolar", "drag", "taper", "floor", "min", "max", "default", "unit"],
     "signal-xy": ["bind", "skin", "label", "class", "spring", "taper", "floor", "min", "max", "default"],
     "signal-toggle": ["bind", "skin", "label", "class", "taper", "floor", "min", "max", "default", "unit"],
     "signal-value": ["bind", "skin", "label", "class", "digits", "taper", "floor", "min", "max", "default", "unit"],
@@ -20,9 +20,9 @@
     "signal-meter": ["bind", "skin", "label", "class", "source", "channel", "floor"],
     "signal-scope": ["bind", "skin", "label", "class", "mode", "rate", "trigger-level", "trigger-edge"],
     "signal-canvas": ["bind", "skin", "label", "class", "renderer", "rate", "grid", "tilt", "height", "backend"],
-    "signal-piano-roll": ["pattern", "label", "class", "snap", "beats-per-bar", "position", "position-bind"],
-    "signal-step-grid": ["pattern", "label", "class", "step", "step-bind"]
+    "signal-piano-roll": ["pattern", "label", "class", "wheel", "snap", "beats-per-bar", "position", "position-bind"],
+    "signal-step-grid": ["pattern", "label", "class", "wheel", "step", "step-bind"]
   },
   "boolean": ["bipolar"],
-  "order": ["renderer", "pattern", "bind", "source", "channel", "mode", "orientation", "taper", "floor", "min", "max", "default", "unit", "digits", "rate", "grid", "tilt", "height", "sweep", "bipolar", "drag", "spring", "trigger-level", "trigger-edge", "backend", "snap", "beats-per-bar", "position", "position-bind", "step", "step-bind", "label", "skin", "class"]
+  "order": ["renderer", "pattern", "bind", "source", "channel", "mode", "orientation", "taper", "floor", "min", "max", "default", "unit", "digits", "rate", "grid", "tilt", "height", "sweep", "bipolar", "drag", "spring", "trigger-level", "trigger-edge", "backend", "snap", "beats-per-bar", "position", "position-bind", "step", "step-bind", "wheel", "label", "skin", "class"]
 }

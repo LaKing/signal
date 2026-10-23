@@ -57,7 +57,8 @@ import {
   zoomY,
 } from '../lib/piano-roll-model.js';
 import { parseNumber } from '../lib/entry.js';
-import { SignalElement } from './base.js';
+import { SignalElement, registerWheel, takesWheel, verticalDelta } from './base.js';
+import { ariaShortcuts, keyCommand, wheelCommand } from '../lib/keys.js';
 
 const KEYS_W = 64;
 const RULER_H = 26;
@@ -84,7 +85,7 @@ const COLORS = {
 
 export class SignalPianoRoll extends SignalElement {
   static role = 'application';
-  static observedAttributes = ['pattern', 'label', 'snap', 'beats-per-bar', 'position', 'position-bind'];
+  static observedAttributes = ['pattern', 'label', 'snap', 'beats-per-bar', 'position', 'position-bind', 'wheel'];
   static resubscribe = ['pattern', 'position-bind'];
   static css = `
 :host { display: block; height: var(--signal-piano-roll-height, 460px); min-width: 320px; background: var(--signal-panel, #1f232b); border-radius: 8px; overflow: hidden; }
@@ -263,6 +264,7 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
     for (const [name, canvas] of Object.entries(this.canvases)) {
       canvas.addEventListener('wheel', (event) => this.onWheel(event, name), { passive: false });
     }
+    registerWheel(this);
     this.resizer = new ResizeObserver(() => this.resized());
     this.resizer.observe($('.gridcell'));
     this.resizer.observe($('.velocity'));
@@ -557,35 +559,58 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
     }
   }
 
+  /**
+   * The wheel scrolls and zooms inside only while the roll owns it (a click
+   * or the focus, or the wheel modifier held: ADR 0034); otherwise the page
+   * scrolls past it. Inside, it never runs on into the page.
+   */
   onWheel(event, where) {
+    if (!takesWheel(this, event)) return;
     event.preventDefault();
     const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 200 : 1;
     const dx = event.deltaX * scale;
     const dy = event.deltaY * scale;
+    // Shift on a Mac with a mouse turns the wheel's delta into deltaX; a sideways swipe never zooms.
+    const delta = verticalDelta(event) * scale;
     const box = this.canvases.grid.getBoundingClientRect();
     const total = this.totalBeats();
-    if (event.ctrlKey || event.metaKey) {
-      this.view = zoomX(this.view, Math.exp(-dy * 0.0025), clamp(event.clientX - box.left, 0, this.view.width), total);
-    } else if (event.altKey) {
-      this.view = zoomY(this.view, Math.exp(-dy * 0.0025), clamp(event.clientY - box.top, 0, this.view.height), total);
-    } else if (event.shiftKey || where === 'ruler' || where === 'velocity') {
+    const command = wheelCommand('piano_roll', event)?.id;
+    if (command === 'piano_roll.zoom_time') {
+      this.view = zoomX(this.view, Math.exp(-delta * 0.0025), clamp(event.clientX - box.left, 0, this.view.width), total);
+    } else if (command === 'piano_roll.zoom_keys') {
+      this.view = zoomY(this.view, Math.exp(-delta * 0.0025), clamp(event.clientY - box.top, 0, this.view.height), total);
+    } else if (command === 'piano_roll.scroll_time' || (command === 'piano_roll.scroll' && (where === 'ruler' || where === 'velocity'))) {
       this.view = clampScroll({ ...this.view, scrollX: this.view.scrollX + (dx || dy) }, total);
-    } else {
+    } else if (command === 'piano_roll.scroll') {
       this.view = clampScroll({ ...this.view, scrollX: this.view.scrollX + dx, scrollY: this.view.scrollY + dy }, total);
+    } else {
+      return;
     }
     this.redraw();
   }
 
+  /** The `piano_roll` scope's keys (ui/lib/keys.default.js); the loop field's keys are its own. */
   onKey(event) {
     const target = event.composedPath?.()[0];
     if (target && (target.tagName === 'INPUT' || target.tagName === 'SELECT')) return false;
-    if (event.key === '=' || event.key === '+' || event.key === '-') {
-      this.view = zoomX(this.view, event.key === '-' ? 1 / 1.25 : 1.25, this.view.width / 2, this.totalBeats());
+    const command = keyCommand('piano_roll', event)?.id;
+    if (!command) return false;
+    const total = () => this.totalBeats();
+    const view = {
+      'piano_roll.zoom_in': () => zoomX(this.view, 1.25, this.view.width / 2, total()),
+      'piano_roll.zoom_out': () => zoomX(this.view, 1 / 1.25, this.view.width / 2, total()),
+      'piano_roll.page_up': () => clampScroll({ ...this.view, scrollY: this.view.scrollY - this.view.height * 0.875 }, total()),
+      'piano_roll.page_down': () => clampScroll({ ...this.view, scrollY: this.view.scrollY + this.view.height * 0.875 }, total()),
+      'piano_roll.start': () => clampScroll({ ...this.view, scrollX: 0 }, total()),
+      'piano_roll.end': () => clampScroll({ ...this.view, scrollX: total() * this.view.beatPx }, total()),
+    }[command];
+    if (view) {
+      this.view = view();
       this.redraw();
       return true;
     }
     if (this.locked) return false;
-    if (event.key === 'Enter' && !event.metaKey && !event.ctrlKey) {
+    if (command === 'piano_roll.add_note') {
       // A note at the cursor (the last pressed place, else the playhead on C4), and the cursor after it.
       const at = this.cursor ?? { beat: snapFloor(this.playhead() ?? 0, this.grid), key: 60 };
       const id = this.model.add(at.beat, at.key, { grid: this.grid, velocity: this.lastVelocity ?? 0.8 });
@@ -594,7 +619,7 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
       this.changed();
       return true;
     }
-    const result = rollKey(this.model, event, this.grid);
+    const result = rollKey(this.model, event, this.grid, command);
     if (result === null) return false;
     if (result === true) this.changed();
     else this.redraw();
@@ -713,7 +738,11 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
     $('.notice-full').textContent = notice;
     const aria = `${this.getAttribute('label') ?? 'piano roll'}: ${n} notes, loop ${this.model.length} beats${this.locked ? ' (loading)' : ''}`;
     if (this.getAttribute('aria-label') !== aria) this.setAttribute('aria-label', aria);
-    if (!this.hasAttribute('aria-keyshortcuts')) this.setAttribute('aria-keyshortcuts', 'Enter ArrowUp ArrowDown ArrowLeft ArrowRight Delete Meta+A Meta+D Meta+Z Shift+Meta+Z Escape');
+    // The keymap's, unless the page's author gave its own.
+    if (!this.hasAttribute('aria-keyshortcuts') || this.ownAriaKeys) {
+      this.setAttribute('aria-keyshortcuts', ariaShortcuts('piano_roll'));
+      this.ownAriaKeys = true;
+    }
     $('.roll').toggleAttribute('aria-busy', this.locked);
   }
 

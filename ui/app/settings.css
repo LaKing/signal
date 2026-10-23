@@ -1,0 +1,59 @@
+/* The Settings window (ADR 0034), in the setup page's look (app.css): the
+   page list on the left, the page on the right, which alone scrolls. Nothing
+   changes size with what it shows (docs/ui-controls.md "Stable layout"). */
+
+:root { color-scheme: dark; }
+html, body { height: 100%; margin: 0; overflow: hidden; }
+body { display: grid; grid-template-columns: 11rem minmax(0, 1fr); background: var(--signal-bg); color: var(--signal-fg); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+button { font: inherit; color: var(--signal-fg); background: var(--signal-knob); border: 1px solid var(--signal-knob-edge); border-radius: var(--signal-radius); padding: 0.2rem 0.7rem; }
+button:disabled { opacity: 0.45; }
+input { font: inherit; color: var(--signal-fg); background: var(--signal-panel); border: 1px solid var(--signal-track); border-radius: 4px; padding: 0.2rem 0.4rem; }
+:focus-visible { outline: 2px solid var(--signal-focus); outline-offset: 1px; }
+[hidden] { display: none !important; }
+.muted { color: var(--signal-muted); }
+.error { color: var(--signal-clip); }
+.warn { color: var(--signal-meter-hot); }
+
+.pages { display: flex; flex-direction: column; gap: 0.25rem; padding: 0.75rem 0.5rem; border-right: 1px solid var(--signal-track); }
+.pages .page { text-align: left; border-color: transparent; background: transparent; }
+.pages .page[aria-current="page"] { background: var(--signal-knob-on); border-color: var(--signal-accent); }
+
+main { overflow: auto; min-height: 0; padding: 0.75rem 1rem 2rem; }
+signal-settings-keys { display: block; max-width: 56rem; }
+
+.keys-head { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.keys-head h1 { font-size: 1.15rem; margin: 0 auto 0 0; font-weight: 600; }
+.keys-head .search { width: 16rem; }
+.keys-file { margin: 0.4rem 0; font-family: ui-monospace, Menlo, monospace; font-size: 0.9em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.keys-problems { margin: 0.3rem 0 0.6rem; padding: 0.4rem 0.6rem 0.4rem 1.6rem; border: 1px solid var(--signal-clip); border-radius: 6px; }
+.keys-problems li { margin: 0.1rem 0; font-family: ui-monospace, Menlo, monospace; font-size: 0.9em; }
+.keys-note { min-height: 1.4em; margin: 0.2rem 0; }
+
+.scope { margin: 1.1rem 0 0.4rem; }
+.scope h2 { font-size: 1rem; margin: 0; font-weight: 600; }
+.scope .about { margin: 0.1rem 0 0.4rem; }
+table.commands { width: 100%; table-layout: fixed; border-collapse: collapse; }
+.commands td { padding: 0.25rem 0.4rem 0.25rem 0; vertical-align: top; border-top: 1px solid var(--signal-track); }
+.commands .col-changed { width: 1.2rem; }
+.commands .col-label { width: 40%; }
+.commands .col-actions { width: 10.5rem; text-align: right; white-space: nowrap; }
+.commands .changed { color: var(--signal-accent); }
+.commands .id { display: block; font-family: ui-monospace, Menlo, monospace; font-size: 0.82em; }
+.chords { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; }
+.chord { display: inline-flex; align-items: center; gap: 0.2rem; padding: 0.05rem 0.45rem; border: 1px solid var(--signal-knob-edge); border-radius: 4px; background: var(--signal-panel); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.chord .remove { border: 0; background: transparent; padding: 0 0.15rem; color: var(--signal-muted); line-height: 1; }
+.chord .remove:hover { color: var(--signal-fg); }
+.none { font-style: italic; }
+.commands .actions button { padding: 0.05rem 0.5rem; }
+.record { margin-top: 0.3rem; display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
+.record .listening { color: var(--signal-accent); }
+.record input { width: 9rem; }
+.conflict { margin-top: 0.2rem; color: var(--signal-meter-hot); font-size: 0.92em; }
+.fixed-mark { font-size: 0.85em; }
+
+/* The reference: the same rows, read only and denser. */
+.reference .actions, .reference .remove, .reference .record, .reference .id { display: none; }
+.reference .commands td { padding: 0.12rem 0.4rem 0.12rem 0; }
+
+.prompt { background: var(--signal-panel); color: inherit; border: 1px solid var(--signal-track); border-radius: 8px; padding: 1rem 1.2rem; }
+.prompt .buttons { display: flex; gap: 0.5rem; justify-content: flex-end; }

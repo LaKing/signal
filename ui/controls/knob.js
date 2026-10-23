@@ -21,7 +21,7 @@ function arc(from, to) {
 }
 
 export class SignalKnob extends SignalValueElement {
-  static observedAttributes = [...SignalValueElement.observedAttributes, 'sweep', 'bipolar', 'drag'];
+  static observedAttributes = [...SignalValueElement.observedAttributes, 'sweep', 'bipolar', 'drag', 'wheel'];
   static css = `
 .control { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 4px; }
 .art { width: var(--signal-knob-size, 64px); height: var(--signal-knob-size, 64px); cursor: ns-resize; }

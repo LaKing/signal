@@ -1,6 +1,6 @@
 //! What the window decides without a window: its native menu bar (as data;
 //! `muda` builds it on the main thread), what each of Signal's own items
-//! does, where the WebView may navigate, and the size recorded in the Setup;
+//! does and its keymap command (ADR 0034: its chord is the command's), where the WebView may navigate, and the size recorded in the Setup;
 //! and for `.signal` projects (M2.8-12): what a drop or a choice opens, the
 //! window's title, Save As's default name, and what the "Save changes?"
 //! prompt offers and leads to on each way of quitting. For several windows
@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use signal_project::archive;
+use signal_ui::keys::Keys;
 use signal_ui::{APP_PAGE, ProjectStatus, SCHEMATIC_PAGE};
 
 use crate::layout::WindowView;
@@ -51,10 +52,16 @@ pub enum MenuAction {
     /// or Stop, the project runs while the power is on, and its own
     /// transport starts and stops it.
     Restart,
+    /// Signal ▸ Settings… (ADR 0034): the Settings window, on its Keyboard
+    /// Shortcuts page.
+    Settings,
+    /// Help ▸ Keyboard Shortcuts: the Settings window's shortcuts as a
+    /// reference (read first, edited from there).
+    KeysHelp,
 }
 
 impl MenuAction {
-    const ALL: [MenuAction; 10] = [
+    const ALL: [MenuAction; 12] = [
         MenuAction::Open,
         MenuAction::Save,
         MenuAction::SaveAs,
@@ -65,6 +72,8 @@ impl MenuAction {
         MenuAction::NewPanel,
         MenuAction::ResetLayout,
         MenuAction::Restart,
+        MenuAction::Settings,
+        MenuAction::KeysHelp,
     ];
 
     /// The menu item's id.
@@ -80,7 +89,34 @@ impl MenuAction {
             MenuAction::NewPanel => "new-panel-window",
             MenuAction::ResetLayout => "reset-layout",
             MenuAction::Restart => "restart",
+            MenuAction::Settings => "settings",
+            MenuAction::KeysHelp => "keyboard-shortcuts",
         }
+    }
+
+    /// Its command in the keymap (`ui/lib/keys.default.js`, ADR 0034),
+    /// whose first key chord is the item's.
+    pub fn command(self) -> &'static str {
+        match self {
+            MenuAction::Open => "file.open",
+            MenuAction::Save => "file.save",
+            MenuAction::SaveAs => "file.save_as",
+            MenuAction::Setup => "file.interface_setup",
+            MenuAction::Quit => "app.quit",
+            MenuAction::NewMain => "window.new_main",
+            MenuAction::NewSchematic => "window.new_schematic",
+            MenuAction::NewPanel => "window.new_panel",
+            MenuAction::ResetLayout => "window.reset_layout",
+            MenuAction::Restart => "transport.restart",
+            MenuAction::Settings => "app.settings",
+            MenuAction::KeysHelp => "help.keyboard_shortcuts",
+        }
+    }
+
+    /// The action of keymap command `id` (a page's `menu.run`), if it is a
+    /// menu item's.
+    pub fn of_command(id: &str) -> Option<MenuAction> {
+        MenuAction::ALL.into_iter().find(|a| a.command() == id)
     }
 
     /// The action of the menu item `id`, if it is one of Signal's own.
@@ -88,15 +124,9 @@ impl MenuAction {
         MenuAction::ALL.into_iter().find(|a| a.id() == id)
     }
 
-    /// Whether its Cmd-key takes Shift too (Save As…, ⇧⌘S; New Main
-    /// Window, ⇧⌘N).
-    pub fn shift(self) -> bool {
-        matches!(self, MenuAction::SaveAs | MenuAction::NewMain)
-    }
-
     /// The script that hands the action to the page (a `signal-menu`
-    /// event, `ui/app/app.js`, so a main window's); none for Save As, Quit
-    /// and the new windows, which the app does.
+    /// event, `ui/app/app.js`, so a main window's); none for Save As, Quit,
+    /// the new windows and Settings, which the app does.
     pub fn page_script(self) -> Option<String> {
         (!matches!(
             self,
@@ -106,6 +136,8 @@ impl MenuAction {
                 | MenuAction::NewSchematic
                 | MenuAction::NewPanel
                 | MenuAction::ResetLayout
+                | MenuAction::Settings
+                | MenuAction::KeysHelp
         ))
         .then(|| {
             let quoted = serde_json::to_string(self.id()).unwrap_or_else(|_| "\"\"".to_owned());
@@ -117,10 +149,9 @@ impl MenuAction {
 /// An item of the menu bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuItem {
-    /// One of Signal's own: its action, label and Cmd-key.
-    Own(MenuAction, &'static str, char),
-    /// One of Signal's own without a shortcut.
-    Plain(MenuAction, &'static str),
+    /// One of Signal's own: its action and label; its chord is its
+    /// command's first in the keymap (ADR 0034), none without one.
+    Own(MenuAction, &'static str),
 
     // The system's items (`muda`'s predefined ones) act on the app or, for
     // the Edit menu, on the focused text field.
@@ -159,15 +190,20 @@ pub enum MenuItem {
 /// The Window menu's name; the system adds the list of open windows to it.
 pub const WINDOW_MENU: &str = "Window";
 
-const QUIT: MenuItem = MenuItem::Own(MenuAction::Quit, "Quit Signal", 'q');
+/// The Help menu's name.
+pub const HELP_MENU: &str = "Help";
 
-/// The menu bar: the app menu, File, Edit, Project and Window, in order (ADR
-/// 0023, 0032, 0033).
-pub const MENU_BAR: [(&str, &[MenuItem]); 5] = [
+const QUIT: MenuItem = MenuItem::Own(MenuAction::Quit, "Quit Signal");
+
+/// The menu bar: the app menu, File, Edit, Project, Window and Help, in
+/// order (ADR 0023, 0032, 0033, 0034).
+pub const MENU_BAR: [(&str, &[MenuItem]); 6] = [
     (
         "Signal",
         &[
             MenuItem::About,
+            MenuItem::Separator,
+            MenuItem::Own(MenuAction::Settings, "Settings…"),
             MenuItem::Separator,
             MenuItem::Hide,
             MenuItem::HideOthers,
@@ -179,13 +215,13 @@ pub const MENU_BAR: [(&str, &[MenuItem]); 5] = [
     (
         "File",
         &[
-            MenuItem::Own(MenuAction::Open, "Open…", 'o'),
-            MenuItem::Own(MenuAction::Save, "Save", 's'),
-            MenuItem::Own(MenuAction::SaveAs, "Save As…", 's'),
+            MenuItem::Own(MenuAction::Open, "Open…"),
+            MenuItem::Own(MenuAction::Save, "Save"),
+            MenuItem::Own(MenuAction::SaveAs, "Save As…"),
             MenuItem::Separator,
-            MenuItem::Own(MenuAction::Setup, "Interface Setup…", ','),
+            MenuItem::Own(MenuAction::Setup, "Interface Setup…"),
             MenuItem::Separator,
-            MenuItem::Own(MenuAction::Quit, "Quit", 'q'),
+            MenuItem::Own(MenuAction::Quit, "Quit"),
         ],
     ),
     (
@@ -202,16 +238,16 @@ pub const MENU_BAR: [(&str, &[MenuItem]); 5] = [
     ),
     (
         "Project",
-        &[MenuItem::Plain(MenuAction::Restart, "Restart from Files")],
+        &[MenuItem::Own(MenuAction::Restart, "Restart from Files")],
     ),
     (
         WINDOW_MENU,
         &[
-            MenuItem::Own(MenuAction::NewMain, "New Main Window", 'n'),
-            MenuItem::Plain(MenuAction::NewSchematic, "New Schematic Window"),
-            MenuItem::Plain(MenuAction::NewPanel, "New Panel Window"),
+            MenuItem::Own(MenuAction::NewMain, "New Main Window"),
+            MenuItem::Own(MenuAction::NewSchematic, "New Schematic Window"),
+            MenuItem::Own(MenuAction::NewPanel, "New Panel Window"),
             MenuItem::Separator,
-            MenuItem::Plain(MenuAction::ResetLayout, "Reset Layout"),
+            MenuItem::Own(MenuAction::ResetLayout, "Reset Layout"),
             MenuItem::Separator,
             MenuItem::Minimize,
             MenuItem::Zoom,
@@ -220,7 +256,41 @@ pub const MENU_BAR: [(&str, &[MenuItem]); 5] = [
             MenuItem::BringAllToFront,
         ],
     ),
+    (
+        HELP_MENU,
+        &[MenuItem::Own(MenuAction::KeysHelp, "Keyboard Shortcuts")],
+    ),
 ];
+
+/// Each of Signal's own menu actions and its chord in `keys` (the
+/// command's first key chord, as `muda` parses it), none without one.
+pub fn menu_chords(keys: &Keys) -> Vec<(MenuAction, Option<String>)> {
+    let chords = keys.menu_chords();
+    MenuAction::ALL
+        .into_iter()
+        .map(|action| {
+            let chord = chords
+                .iter()
+                .find(|(id, _)| id == action.command())
+                .and_then(|(_, chord)| chord.clone());
+            (action, chord)
+        })
+        .collect()
+}
+
+/// The Settings page (ADR 0034): its own window, not part of a project's
+/// layout; `reference` opens its shortcuts as a reference (Help ▸ Keyboard
+/// Shortcuts).
+pub fn settings_path(reference: bool) -> &'static str {
+    if reference {
+        "/ui/app/settings.html?view=reference"
+    } else {
+        "/ui/app/settings.html"
+    }
+}
+
+/// The Settings window's title.
+pub const SETTINGS_TITLE: &str = "Signal — Settings";
 
 /// The path (from `/`) a window of `view` loads: a panel window's is the
 /// card host page (`ui/app/panel-window.html`), which shows the project's main
@@ -469,7 +539,9 @@ pub fn window_of(width: f64, height: f64) -> Option<Window> {
 mod tests {
     use super::*;
 
-    fn own(menu: &str) -> Vec<(&'static str, char)> {
+    /// The items of `menu` and their chords in the built-in keymap.
+    fn own(menu: &str) -> Vec<(&'static str, Option<String>)> {
+        let chords = menu_chords(&Keys::built_in(Path::new("keys.toml")));
         MENU_BAR
             .iter()
             .find(|(name, _)| *name == menu)
@@ -477,40 +549,49 @@ mod tests {
             .1
             .iter()
             .filter_map(|item| match item {
-                MenuItem::Own(_, label, key) => Some((*label, *key)),
+                MenuItem::Own(action, label) => {
+                    let chord = chords.iter().find(|(a, _)| a == action).unwrap().1.clone();
+                    Some((*label, chord))
+                }
                 _ => None,
             })
             .collect()
     }
 
+    fn chord(text: &str) -> Option<String> {
+        Some(text.to_owned())
+    }
+
     /// M2.8-11 AC12, AC15: the app menu, File and Edit (and Window, ADR
-    /// 0032; and Project, ADR 0033, with Restart from Files, handed to the
-    /// page, which sends `transport.play`).
+    /// 0032; Project, ADR 0033, with Restart from Files, handed to the
+    /// page, which sends `transport.play`; Settings… and Help, ADR 0034).
+    /// The chords are the keymap's (`ui/lib/keys.default.js`).
     #[test]
     fn the_menu_bar_has_the_app_menu_file_and_edit() {
         let names: Vec<&str> = MENU_BAR.iter().map(|(name, _)| *name).collect();
-        assert_eq!(names, ["Signal", "File", "Edit", "Project", "Window"]);
+        assert_eq!(
+            names,
+            ["Signal", "File", "Edit", "Project", "Window", "Help"]
+        );
         assert_eq!(
             own("File"),
             [
-                ("Open…", 'o'),
-                ("Save", 's'),
-                ("Save As…", 's'),
-                ("Interface Setup…", ','),
-                ("Quit", 'q')
+                ("Open…", chord("Cmd+O")),
+                ("Save", chord("Cmd+S")),
+                ("Save As…", chord("Shift+Cmd+S")),
+                ("Interface Setup…", chord("Alt+Cmd+,")),
+                ("Quit", chord("Cmd+Q"))
             ]
         );
-        let shifted: Vec<MenuAction> = MenuAction::ALL.into_iter().filter(|a| a.shift()).collect();
         assert_eq!(
-            shifted,
-            [MenuAction::SaveAs, MenuAction::NewMain],
-            "⇧⌘S and ⇧⌘N"
+            own("Signal"),
+            [
+                ("Settings…", chord("Cmd+,")),
+                ("Quit Signal", chord("Cmd+Q"))
+            ]
         );
-        let (_, project) = MENU_BAR[3];
-        assert_eq!(
-            project,
-            [MenuItem::Plain(MenuAction::Restart, "Restart from Files")]
-        );
+        assert_eq!(own("Project"), [("Restart from Files", None)]);
+        assert_eq!(own("Help"), [("Keyboard Shortcuts", chord("Cmd+/"))]);
         assert_eq!(
             MenuAction::Restart.page_script().unwrap(),
             "window.dispatchEvent(new CustomEvent('signal-menu', { detail: \"restart\" }))"
@@ -539,19 +620,19 @@ mod tests {
     }
 
     /// ADR 0032: the Window menu opens main, schematic and panel windows,
-    /// resets the layout, and has the system's window items; no shortcut is
-    /// taken twice.
+    /// resets the layout, and has the system's window items; no chord is
+    /// taken twice (ADR 0034: the keymap's conflicts).
     #[test]
     fn the_window_menu_opens_more_windows() {
         let (_, window) = MENU_BAR[4];
         assert_eq!(
             window,
             [
-                MenuItem::Own(MenuAction::NewMain, "New Main Window", 'n'),
-                MenuItem::Plain(MenuAction::NewSchematic, "New Schematic Window"),
-                MenuItem::Plain(MenuAction::NewPanel, "New Panel Window"),
+                MenuItem::Own(MenuAction::NewMain, "New Main Window"),
+                MenuItem::Own(MenuAction::NewSchematic, "New Schematic Window"),
+                MenuItem::Own(MenuAction::NewPanel, "New Panel Window"),
                 MenuItem::Separator,
-                MenuItem::Plain(MenuAction::ResetLayout, "Reset Layout"),
+                MenuItem::Own(MenuAction::ResetLayout, "Reset Layout"),
                 MenuItem::Separator,
                 MenuItem::Minimize,
                 MenuItem::Zoom,
@@ -560,34 +641,67 @@ mod tests {
                 MenuItem::BringAllToFront,
             ]
         );
-        let mut keys: Vec<(char, bool)> = MENU_BAR
-            .iter()
-            .flat_map(|(_, items)| items.iter())
-            .filter_map(|item| match item {
-                MenuItem::Own(action, _, key) => Some((*key, action.shift())),
-                _ => None,
-            })
-            .collect();
-        // File ▸ Quit and Signal ▸ Quit Signal are one action twice.
-        keys.retain(|k| *k != ('q', false));
-        let all = keys.len();
-        keys.sort_unstable();
-        keys.dedup();
-        assert_eq!(keys.len(), all, "a shortcut taken twice: {keys:?}");
+        assert_eq!(own("Window")[0], ("New Main Window", chord("Shift+Cmd+N")));
+        let chords = menu_chords(&Keys::built_in(Path::new("keys.toml")));
+        let mut taken: Vec<String> = chords.iter().filter_map(|(_, c)| c.clone()).collect();
+        let all = taken.len();
+        taken.sort_unstable();
+        taken.dedup();
+        assert_eq!(taken.len(), all, "a chord taken twice: {taken:?}");
         // Minimize ⌘M, Hide ⌘H, full screen ⌃⌘F, the Edit menu's: none of
         // Signal's own.
-        for taken in ['m', 'h', 'z', 'x', 'c', 'v', 'a', 'f'] {
-            assert!(!keys.contains(&(taken, false)), "{taken}");
+        for system in [
+            "Cmd+M",
+            "Cmd+H",
+            "Cmd+Z",
+            "Cmd+X",
+            "Cmd+C",
+            "Cmd+V",
+            "Cmd+A",
+            "Ctrl+Cmd+F",
+        ] {
+            assert!(!taken.iter().any(|c| c == system), "{system}");
         }
         for action in [
             MenuAction::NewMain,
             MenuAction::NewSchematic,
             MenuAction::NewPanel,
             MenuAction::ResetLayout,
+            MenuAction::Settings,
+            MenuAction::KeysHelp,
         ] {
             assert_eq!(action.page_script(), None, "{action:?}: the app does it");
             assert_eq!(MenuAction::of(action.id()), Some(action));
         }
+    }
+
+    /// ADR 0034: every menu action is a menu command of the keymap, and
+    /// every menu command is one of the menu's actions; a chord from
+    /// `keys.toml` is the item's.
+    #[test]
+    fn the_menu_s_chords_are_the_keymap_s() {
+        let defaults = signal_ui::keys::defaults();
+        let menu: Vec<&str> = defaults
+            .commands
+            .iter()
+            .filter(|c| c.menu)
+            .map(|c| c.id.as_str())
+            .collect();
+        for action in MenuAction::ALL {
+            assert!(menu.contains(&action.command()), "{action:?}");
+            assert_eq!(MenuAction::of_command(action.command()), Some(action));
+        }
+        assert_eq!(menu.len(), MenuAction::ALL.len());
+        assert_eq!(MenuAction::of_command("view.page_down"), None);
+        let keys = Keys::parse(
+            "[window]\nnew_schematic = [\"Shift+Cmd+N\", \"F5\"]\nnew_main = []\n",
+            Path::new("keys.toml"),
+        );
+        let chords = menu_chords(&keys);
+        let of = |action| chords.iter().find(|(a, _)| *a == action).unwrap().1.clone();
+        assert_eq!(of(MenuAction::NewSchematic), chord("Shift+Cmd+N"));
+        assert_eq!(of(MenuAction::NewMain), None);
+        assert_eq!(settings_path(true), "/ui/app/settings.html?view=reference");
     }
 
     /// ADR 0032: every view is a page of the same server, with the same
@@ -638,7 +752,7 @@ mod tests {
     fn each_own_item_has_its_action_and_the_page_gets_all_but_quit() {
         for (_, items) in MENU_BAR {
             for item in items {
-                if let MenuItem::Own(action, ..) | MenuItem::Plain(action, _) = item {
+                if let MenuItem::Own(action, _) = item {
                     assert_eq!(MenuAction::of(action.id()), Some(*action));
                 }
             }

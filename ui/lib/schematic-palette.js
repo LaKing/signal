@@ -6,6 +6,8 @@
 // group) for the palette and the sidebar. Entries are `paletteEntries`'
 // (ui/lib/schematic-patch.js). No DOM.
 
+import { keyCommand } from './keys.js';
+
 /**
  * The palette's groups, in the order they show: the project's composites,
  * the library's (`lib.*`, ADR 0027 §4: `modules` lists them), then the std categories
@@ -122,7 +124,8 @@ export function moveCursor(view, key, delta) {
 }
 
 /**
- * What a key in the palette's search field does, by the cursor's row:
+ * What a key in the palette's search field does (the `palette` scope,
+ * ui/lib/keys.default.js), by the cursor's row:
  * `{move: delta}` for the arrows, Home and End (with a modifier only:
  * plain Home and End are the field's), `{toggle: group}` for Enter on a
  * heading or ArrowRight / ArrowLeft opening / closing it (no search), `add`
@@ -130,18 +133,15 @@ export function moveCursor(view, key, delta) {
  */
 export function paletteKey(event, view, key) {
   const row = view.rows.find((r) => r.key === key);
-  if (event.key === 'ArrowDown') return { move: 1 };
-  if (event.key === 'ArrowUp') return { move: -1 };
-  if (event.key === 'PageDown') return { move: 8 };
-  if (event.key === 'PageUp') return { move: -8 };
-  if ((event.metaKey || event.ctrlKey) && event.key === 'Home') return { move: -Infinity };
-  if ((event.metaKey || event.ctrlKey) && event.key === 'End') return { move: Infinity };
+  const command = keyCommand('palette', event)?.id;
+  const moves = { 'palette.down': 1, 'palette.up': -1, 'palette.page_down': 8, 'palette.page_up': -8, 'palette.first': -Infinity, 'palette.last': Infinity };
+  if (command in moves) return { move: moves[command] };
   if (row?.kind === 'group' && !view.searching) {
-    if (event.key === 'Enter') return { toggle: row.group };
-    if (event.key === 'ArrowRight' && !row.expanded) return { toggle: row.group };
-    if (event.key === 'ArrowLeft' && row.expanded) return { toggle: row.group };
+    if (command === 'palette.choose') return { toggle: row.group };
+    if (command === 'palette.open_group' && !row.expanded) return { toggle: row.group };
+    if (command === 'palette.close_group' && row.expanded) return { toggle: row.group };
   }
-  if (event.key === 'Enter') return 'add';
+  if (command === 'palette.choose') return 'add';
   return null;
 }
 

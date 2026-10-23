@@ -185,6 +185,17 @@ fn the_dialog_functions_and_apply_play_again_with_the_setup(transport: Transport
 
     let get = rig.request(&mut ws, 11, json!({"type": "setup.get"}), "setup");
     assert_eq!(get["setup"]["outputChannels"], json!([4, 3]));
+
+    // ADR 0036: `"device"` follows the device's buffer; a number given
+    // replaces it, even the one the Setup holds; absent keeps it.
+    let apply = |buffer: Value| json!({"type": "setup.apply", "buffer": buffer});
+    rig.request(&mut ws, 12, apply(json!("device")), "applied");
+    assert!(Setup::load(&rig.setup).0.buffer_device);
+    rig.request(&mut ws, 13, json!({"type": "setup.apply"}), "applied");
+    assert!(Setup::load(&rig.setup).0.buffer_device, "absent keeps it");
+    rig.request(&mut ws, 14, apply(json!(256)), "applied");
+    let (saved, _) = Setup::load(&rig.setup);
+    assert!(!saved.buffer_device && saved.buffer == 256);
     rig.finish();
 }
 

@@ -29,6 +29,7 @@ fn full() -> Setup {
             signature: "2 ch, 44100-192000 Hz".to_owned(),
         }),
         buffer: 256,
+        buffer_device: false,
         cpu_workers: Some(4),
         output_channels: Some(vec![3, 4]),
         last_project: Some(PathBuf::from("/Users/me/projects/kick")),
@@ -107,6 +108,30 @@ fn the_wake_policy_and_computation_are_advanced_keys() {
     let text = Setup::default().to_toml();
     assert!(!text.contains("rt_"), "{text}");
     assert!(full().to_toml().contains("rt_policy = \"semaphore\""));
+}
+
+/// ADR 0036: `buffer = "device"` follows the device's current buffer; it
+/// is written back as it was read, and anything else not a number of frames
+/// falls back with a reason.
+#[test]
+fn the_buffer_can_follow_the_device() {
+    let (setup, problems) = parse("buffer = \"device\"\n");
+    assert!(problems.is_empty(), "{problems:?}");
+    assert!(setup.buffer_device);
+    assert_eq!(setup.buffer, Setup::default().buffer);
+    assert!(
+        setup.to_toml().contains("buffer = \"device\""),
+        "{}",
+        setup.to_toml()
+    );
+    assert_eq!(parse(&setup.to_toml()), (setup, Vec::new()));
+    assert!(Setup::default().to_toml().contains("buffer = 128"));
+    for bad in ["buffer = 0\n", "buffer = -4\n", "buffer = \"auto\"\n"] {
+        let (setup, problems) = parse(bad);
+        assert_eq!(setup, Setup::default(), "{bad}");
+        assert_eq!(problems.len(), 1, "{bad}");
+        assert!(problems[0].contains("\"device\""), "{problems:?}");
+    }
 }
 
 fn parse(text: &str) -> (Setup, Vec<String>) {

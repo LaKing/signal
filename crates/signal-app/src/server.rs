@@ -18,6 +18,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use signal_core::Registry;
+use signal_ui::keys::Keys;
 use signal_ui::{APP_PAGE, AppHostConfig, Edits, Host, ProjectStatus, ServerOptions};
 
 use crate::setup::{Setup, Window};
@@ -33,6 +34,10 @@ const OFF_WAIT: Duration = Duration::from_millis(100);
 /// What the window is told whenever the open project or its edited state
 /// changes (its title).
 pub type OnProject = Box<dyn Fn(Option<ProjectStatus>) + Send>;
+
+/// What the window is told whenever the keymap changes (ADR 0034: the
+/// person's `keys.toml` written or edited elsewhere): its menu's chords.
+pub type OnKeys = Box<dyn Fn(&Keys) + Send>;
 
 /// What the server in the app runs.
 pub struct AppConfig {
@@ -50,6 +55,8 @@ pub struct AppConfig {
     pub ui_dir: PathBuf,
     /// Told on the control thread whenever the project shown changes.
     pub on_project: Option<OnProject>,
+    /// Told on the control thread whenever the keymap changes.
+    pub on_keys: Option<OnKeys>,
 }
 
 /// What the window asks the control thread.
@@ -114,6 +121,7 @@ impl AppServer {
         let (ready_tx, ready) = mpsc::channel::<Result<Ready, String>>();
         let (requests, received) = mpsc::channel::<Request>();
         let on_project = config.on_project.take();
+        let on_keys = config.on_keys.take();
         let thread = thread::Builder::new()
             .name("signal-control".to_owned())
             .spawn(move || {
@@ -131,7 +139,7 @@ impl AppServer {
                     #[cfg(feature = "test-hooks")]
                     connector: host.local_connector(),
                 }));
-                run(&mut host, &received, on_project);
+                run(&mut host, &received, on_project, on_keys);
             })
             .map_err(|error| format!("the control thread did not start: {error}"))?;
         let ready = match ready.recv() {
@@ -296,8 +304,14 @@ fn host(config: AppConfig, local: bool) -> Result<Host, String> {
 /// The control loop: steps the host and answers the window until it exits
 /// (or goes away without saying so, which saves without the window's size
 /// and keeps an edited project's working folder).
-fn run(host: &mut Host, requests: &Receiver<Request>, on_project: Option<OnProject>) {
+fn run(
+    host: &mut Host,
+    requests: &Receiver<Request>,
+    on_project: Option<OnProject>,
+    on_keys: Option<OnKeys>,
+) {
     let mut shown = None;
+    let mut keys = host.keys_version();
     loop {
         match requests.try_recv() {
             Ok(Request::Exit(window, discard)) => return exit(host, window, discard),
@@ -328,6 +342,12 @@ fn run(host: &mut Host, requests: &Receiver<Request>, on_project: Option<OnProje
                 on_project(now.clone());
                 shown = now;
             }
+        }
+        if let Some(on_keys) = &on_keys
+            && host.keys_version() != keys
+        {
+            keys = host.keys_version();
+            on_keys(host.keys());
         }
         if host.powered() {
             thread::sleep(Duration::from_millis(1));

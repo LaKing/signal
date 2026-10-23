@@ -3,6 +3,7 @@
 // positions (0..1, see taper.js), so it is the same at every taper.
 
 import { clamp } from './taper.js';
+import { keymap, lookup } from './keys.js';
 
 /** Fine adjust (the Shift key) scales every step by this. */
 export const FINE = 0.1;
@@ -53,24 +54,35 @@ export function wheelDelta(deltaY, { fine = false, deltaMode = 0 } = {}) {
   return -notches * KEY_STEP * (fine ? FINE : 1);
 }
 
+/** The slider commands' steps (ui/lib/keys.default.js, scope `slider`). */
+const STEPS = Object.freeze({
+  'slider.increase': KEY_STEP,
+  'slider.decrease': -KEY_STEP,
+  'slider.increase_page': PAGE_STEP,
+  'slider.decrease_page': -PAGE_STEP,
+});
+
 /**
- * A key's new position, or null when the key does nothing: arrows ±1 %,
- * Page Up/Down ±10 % (both ×0.1 with `fine`), Home 0, End 1.
+ * The new position after slider command `id` (`slider.increase` ±1 %,
+ * `slider.increase_page` ±10 %, both ×0.1 with `fine`; `slider.minimum` 0,
+ * `slider.maximum` 1), or null for another command.
+ */
+export function stepAction(id, position, { fine = false } = {}) {
+  const step = STEPS[id];
+  if (step !== undefined) return clamp(position + step * (fine ? FINE : 1), 0, 1);
+  if (id === 'slider.minimum') return 0;
+  if (id === 'slider.maximum') return 1;
+  return null;
+}
+
+/**
+ * A key's new position, or null when the key does nothing: the slider
+ * command the key does in the page's keymap (by default arrows ±1 %, Page
+ * Up/Down ±10 %, Home 0, End 1; `fine` ×0.1).
  */
 export function keyAction(key, position, { fine = false } = {}) {
-  const scale = fine ? FINE : 1;
-  const step = {
-    ArrowUp: KEY_STEP,
-    ArrowRight: KEY_STEP,
-    ArrowDown: -KEY_STEP,
-    ArrowLeft: -KEY_STEP,
-    PageUp: PAGE_STEP,
-    PageDown: -PAGE_STEP,
-  }[key];
-  if (step !== undefined) return clamp(position + step * scale, 0, 1);
-  if (key === 'Home') return 0;
-  if (key === 'End') return 1;
-  return null;
+  const command = lookup(keymap(), 'slider', key === ' ' ? 'Space' : key);
+  return command ? stepAction(command.id, position, { fine: fine || command.fine }) : null;
 }
 
 /** The value a reset (double-click, Delete) goes to: the default, else min. */

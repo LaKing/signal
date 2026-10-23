@@ -6,6 +6,7 @@
 
 import { formatValue } from '../lib/format.js';
 import { clamp } from '../lib/taper.js';
+import { ariaShortcuts, keyCommand } from '../lib/keys.js';
 import { SLOT_RETRY_MS, alignXY, slotRetry, triggerStart } from '../lib/trigger.js';
 import { SignalElement, bindAddresses, numberAttribute } from './base.js';
 import { ValueEntry, entryDisabled } from './entry-field.js';
@@ -162,15 +163,18 @@ canvas { width: var(--signal-scope-width, 100%); height: var(--signal-scope-heig
     });
   }
 
+  /** The `oscilloscope` scope's keys (ui/lib/keys.default.js): what it shows, nothing is sent. */
   onKey(event) {
-    if (event.key === 'Enter') return this.entry?.open() ?? false;
-    const step = event.shiftKey ? 0.001 : 0.01;
-    const steps = { ArrowUp: step, ArrowDown: -step, PageUp: 0.1, PageDown: -0.1 };
-    if (event.key in steps) this.setLevel(this.level + steps[event.key]);
-    else if (event.key === 'Home') this.setLevel(0);
-    else if (event.key === 'End') this.setLevel(this.autoLevel());
-    else if (event.key === 'e' || event.key === 'E') this.setAttribute('trigger-edge', this.edge === 'rising' ? 'falling' : 'rising');
-    else if (event.key === ' ') this.frozen = !this.frozen;
+    const command = keyCommand('oscilloscope', event);
+    if (!command) return false;
+    if (command.id === 'oscilloscope.type_level') return this.entry?.open() ?? false;
+    const step = command.fine ? 0.001 : 0.01;
+    const steps = { 'oscilloscope.level_up': step, 'oscilloscope.level_down': -step, 'oscilloscope.level_page_up': 0.1, 'oscilloscope.level_page_down': -0.1 };
+    if (command.id in steps) this.setLevel(this.level + steps[command.id]);
+    else if (command.id === 'oscilloscope.level_zero') this.setLevel(0);
+    else if (command.id === 'oscilloscope.level_auto') this.setLevel(this.autoLevel());
+    else if (command.id === 'oscilloscope.edge') this.setAttribute('trigger-edge', this.edge === 'rising' ? 'falling' : 'rising');
+    else if (command.id === 'oscilloscope.freeze') this.frozen = !this.frozen;
     else return false;
     this.update();
     this.draw();
@@ -201,7 +205,7 @@ canvas { width: var(--signal-scope-width, 100%); height: var(--signal-scope-heig
     const what = this.xy ? `X–Y of ${this.ports.slice(0, 2).join(' and ')}` : `${this.ports[0] ?? 'no port'}, trigger ${this.edge} at ${this.level}`;
     if (!this.hasAttribute('aria-label')) this.setAttribute('aria-label', label ? `${label} scope` : 'scope');
     this.setAttribute('aria-description', what);
-    this.setAttribute('aria-keyshortcuts', this.xy ? 'Space' : 'ArrowUp ArrowDown PageUp PageDown Home End E Space Enter');
+    this.setAttribute('aria-keyshortcuts', this.xy ? 'Space' : ariaShortcuts('oscilloscope'));
     const state = this.frozen ? ' · frozen' : '';
     if (!this.entry?.isOpen) this.$('.readout').textContent = this.problemText ?? (this.xy ? `X–Y${state}` : `trigger ${this.edge === 'rising' ? '↑' : '↓'} ${formatValue(this.level)}${state}`);
     // A changed level or edge shows at once, frozen or not.

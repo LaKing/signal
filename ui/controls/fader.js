@@ -9,7 +9,7 @@ const END = 10; // track inset from each end
 const TRAVEL = LENGTH - 2 * END;
 
 export class SignalFader extends SignalValueElement {
-  static observedAttributes = [...SignalValueElement.observedAttributes, 'orientation'];
+  static observedAttributes = [...SignalValueElement.observedAttributes, 'orientation', 'wheel'];
   static css = `
 .control { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 4px; }
 :host([orientation="horizontal"]) .control { flex-direction: row; }

@@ -86,12 +86,15 @@ fn the_callback_allocates_and_frees_nothing() {
     // M2.12-1: with an output ceiling the kick passes (`signal mcp`'s
     // `--max-gain`), holding samples allocates nothing either.
     runner.set_ceiling(Some(0.05));
+    // ADR 0036 §4: the fade in, and the fade out before the stop, allocate
+    // nothing either.
+    runner.fade_in(480);
 
     let stats = Arc::new(CallbackStats::default());
     // The stereo sink on device channels 4 and 3 of 4.
     let map = ChannelMap::with_targets(2, 4, vec![3, 2]).unwrap();
-    let (mut callback, mut control) =
-        OutputCallback::new(runner, map, 256, rate, Arc::clone(&stats));
+    let (callback, mut control) = OutputCallback::new(runner, map, 256, rate, Arc::clone(&stats));
+    let mut callback = callback.with_fade_out(480);
     // A 2-channel input with room for 64 meters, drained every 16 callbacks
     // except from callback 1 000 to 2 000, when its queue fills.
     let (mut input_callback, mut input_meters) = InputCallback::new(2, 64);
@@ -104,7 +107,7 @@ fn the_callback_allocates_and_frees_nothing() {
     let mut sizes = CallbackSizes::new(4);
     let mut total = Counts::default();
     for callback_index in 0..4_000 {
-        if callback_index == 3_990 {
+        if callback_index == 3_900 {
             control.request_stop();
         }
         let frames = sizes.next_size().min(1_024);

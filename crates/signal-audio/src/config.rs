@@ -48,7 +48,7 @@ pub struct DeviceInfo {
     /// The sample rate it runs at now: its current stream format's, which
     /// follows the nominal rate Audio MIDI Setup shows and sets; `None` when
     /// it cannot be read (a format cpal does not read). A device opened at
-    /// another rate is switched to it, which can fail.
+    /// another rate is refused: Signal switches no device's rate (ADR 0036).
     pub rate: Option<u32>,
     /// Its supported configurations.
     pub configs: Vec<ConfigRange>,
@@ -191,17 +191,18 @@ fn host_clause(message: &str) -> String {
     }
 }
 
-/// What to do about a device that runs at `now` Hz for a project at
-/// `wanted` Hz.
-fn rate_advice(wanted: u32, now: u32) -> String {
-    format!("set it to {wanted} Hz in Audio MIDI Setup, or set sample_rate = {now} in project.toml")
+/// What to do about a device that runs at `now` Hz for a run prepared at
+/// `wanted` Hz: play again, at the device's rate (ADR 0036; Signal switches
+/// no device's rate).
+fn rate_advice(_wanted: u32, now: u32) -> String {
+    format!("play again to play at {now} Hz")
 }
 
 /// Why the output stream of `device` did not start at `wanted` Hz, in plain
 /// words: `system`'s error (`CoreAudio`, `Unknown property`) with the
 /// device's sample rate before the attempt (`before`) and after it
-/// (`after`), as read. A device at another rate is switched to `wanted`
-/// while the stream is built, which is what fails when it cannot be switched
+/// (`after`), as read. Signal switches no device's rate (ADR 0036), so a
+/// device found at another rate than `wanted` is why it did not start
 /// (CoreAudio then reports, for example, "Unknown property").
 pub fn start_failure(
     device: &str,
@@ -214,7 +215,7 @@ pub fn start_failure(
     let error = host_clause(error);
     match (before, after) {
         (Some(before), _) if before != wanted => format!(
-            "the device '{device}' runs at {before} Hz and could not be switched to {wanted} Hz ({system}: {error}); {}",
+            "the device '{device}' runs at {before} Hz and did not start at {wanted} Hz ({system}: {error}); {}",
             rate_advice(wanted, before)
         ),
         (_, Some(after)) if after != wanted => format!(
@@ -223,6 +224,25 @@ pub fn start_failure(
         ),
         _ => format!("the device '{device}' did not start at {wanted} Hz ({system}: {error})"),
     }
+}
+
+/// Why a run prepared at `wanted` Hz did not start on `device`, which runs
+/// at `now` Hz: its rate changed between the open and the start. Signal
+/// switches no device's rate (ADR 0036, the owner's decision of 2026-10-23:
+/// the device's clock is the run's); a run started again plays at `now`.
+pub fn rate_moved(device: &str, wanted: u32, now: u32) -> String {
+    format!(
+        "the device '{device}' runs at {now} Hz, not at the {wanted} Hz this run was prepared for; Signal does not switch a device's rate: play again to play at {now} Hz"
+    )
+}
+
+/// The notice of a live run at the device's rate, `plays` Hz, for a project
+/// written for `written` Hz (its `sample_rate`, the rate of its renders);
+/// `None` when they are the same (ADR 0036).
+pub fn rate_notice(device: &str, project: &str, written: u32, plays: u32) -> Option<String> {
+    (written != plays).then(|| {
+        format!("'{device}' runs at {plays} Hz; {project} is written for {written} Hz and plays at {plays} Hz")
+    })
 }
 
 /// Why a playing output stream of `device` at `wanted` Hz stopped, in plain
@@ -399,7 +419,7 @@ mod tests {
                 "CoreAudio",
                 "Unknown property"
             ),
-            "the device 'SSL 2+ Mk II' runs at 44100 Hz and could not be switched to 48000 Hz (CoreAudio: unknown property); set it to 48000 Hz in Audio MIDI Setup, or set sample_rate = 44100 in project.toml"
+            "the device 'SSL 2+ Mk II' runs at 44100 Hz and did not start at 48000 Hz (CoreAudio: unknown property); play again to play at 44100 Hz"
         );
         assert_eq!(
             start_failure(
@@ -410,7 +430,7 @@ mod tests {
                 "CoreAudio",
                 "Sample rate update timed out"
             ),
-            "the device 'X' changed its sample rate to 96000 Hz while starting at 48000 Hz (CoreAudio: sample rate update timed out); set it to 48000 Hz in Audio MIDI Setup, or set sample_rate = 96000 in project.toml"
+            "the device 'X' changed its sample rate to 96000 Hz while starting at 48000 Hz (CoreAudio: sample rate update timed out); play again to play at 96000 Hz"
         );
         // At the rate, or unread: the error alone, as a clause; a name keeps
         // its capitals.
@@ -431,6 +451,23 @@ mod tests {
         );
     }
 
+    /// ADR 0036: a run plays at the device's rate, with a notice when the
+    /// project is written for another; a rate that moved is refused.
+    #[test]
+    fn the_device_rate_is_the_runs() {
+        assert_eq!(
+            rate_notice("SSL 2+ Mk II", "studio", 48_000, 44_100).as_deref(),
+            Some(
+                "'SSL 2+ Mk II' runs at 44100 Hz; studio is written for 48000 Hz and plays at 44100 Hz"
+            )
+        );
+        assert_eq!(rate_notice("X", "kick", 48_000, 48_000), None);
+        assert_eq!(
+            rate_moved("X", 48_000, 44_100),
+            "the device 'X' runs at 44100 Hz, not at the 48000 Hz this run was prepared for; Signal does not switch a device's rate: play again to play at 44100 Hz"
+        );
+    }
+
     #[test]
     fn a_stopped_stream_says_why() {
         assert_eq!(
@@ -440,7 +477,7 @@ mod tests {
                 48_000,
                 Some(44_100)
             ),
-            "the device 'SSL 2+ Mk II' changed its sample rate to 44100 Hz while playing at 48000 Hz; set it to 48000 Hz in Audio MIDI Setup, or set sample_rate = 44100 in project.toml"
+            "the device 'SSL 2+ Mk II' changed its sample rate to 44100 Hz while playing at 48000 Hz; play again to play at 44100 Hz"
         );
         assert_eq!(
             fault_message("X", StreamFault::RateChanged, 48_000, None),

@@ -1,19 +1,28 @@
-// Signal.app's menu actions (ADR 0023, M2.8-11, M2.8-12). The menu is
-// native (muda): File (Open…, Save, Save As…, Interface Setup…, Quit), the
-// app menu, Edit, Project (Restart from Files, ADR 0033) and Window. It
-// hands Save, Interface Setup and Restart from Files (and Open… without its
-// chooser) to the page as a `signal-menu` event; Save As… is the window's
-// alone. In a browser (`signal ui`, or the app's URL opened
-// elsewhere) there is no native menu, so the page takes Cmd-O, Cmd-S and
-// Cmd-comma itself, and has no Save As and no chooser. Plain ES module, no
-// DOM.
+// Signal.app's menu actions (ADR 0023, M2.8-11, M2.8-12, ADR 0034). The
+// menu is native (muda): the app menu (Settings…, Quit), File (Open…, Save,
+// Save As…, Interface Setup…, Quit), Edit, Project (Restart from Files, ADR
+// 0033), Window and Help (Keyboard Shortcuts); its chords are the keymap's
+// (ui/lib/keys.default.js and the person's keys.toml). It hands Save,
+// Interface Setup and Restart from Files (and Open… without its chooser) to
+// the page as a `signal-menu` event; Save As… is the window's alone. In a
+// browser (`signal ui`, or the app's URL opened elsewhere) there is no
+// native menu, so the page takes the commands it can run itself
+// (ui/controls/keyboard.js tells it with `signal-command`), and has no Save
+// As and no chooser. Plain ES module, no DOM.
 
-const KEYS = Object.freeze({ o: 'open', s: 'save', ',': 'setup' });
+/** The page's action for app command `id` in a browser (`signal-command`), or null for one the page cannot run. */
+const ACTIONS = Object.freeze({
+  'file.open': 'open',
+  'file.save': 'save',
+  'file.interface_setup': 'setup',
+  'transport.restart': 'restart',
+  'app.settings': 'settings',
+  'help.keyboard_shortcuts': 'keys',
+});
 
-/** The action a keydown asks for (Cmd-O, Cmd-S, Cmd-comma), or null. */
-export function shortcut(event) {
-  if (!event?.metaKey || event.altKey || event.ctrlKey || event.shiftKey) return null;
-  return KEYS[String(event.key ?? '').toLowerCase()] ?? null;
+/** The page action of app command `id` (ui/lib/keys.default.js), or null. */
+export function menuAction(id) {
+  return ACTIONS[id] ?? null;
 }
 
 /**

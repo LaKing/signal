@@ -1,8 +1,9 @@
 //! The cpal glue (ADR 0011): device listing, the output stream and the input
 //! stream (metering only), and the real-time workers' lifecycle around the
 //! output stream (ADR 0019 §4). The only code that calls cpal; everything it
-//! decides is in [`choose_output`], [`OutputCallback`], [`InputCallback`],
-//! [`CallbackStats`] and [`Scheduling`].
+//! decides is in [`choose_output`], [`plan_join`] (ADR 0036: what of a device
+//! may be changed), [`OutputCallback`], [`InputCallback`], [`CallbackStats`]
+//! and [`Scheduling`].
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
@@ -11,14 +12,17 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, Device, Stream, StreamConfig, SupportedBufferSize};
 use signal_engine::{Computation, Workers};
+use signal_output::fade::fade_frames;
 use signal_output::{Driver, DriverError, Runner};
 
 use crate::callback::{CallbackControl, OutputCallback};
 use crate::config::{
     AudioError, Choice, ConfigRange, DeviceInfo, Direction, choose_input, choose_output,
-    fault_message, start_failure,
+    fault_message, rate_moved, start_failure,
 };
+use crate::device_props;
 use crate::input::{InputCallback, InputMeters};
+use crate::join::{BufferRequest, DeviceState, JoinPlan, plan_join};
 use crate::map::ChannelMap;
 use crate::rt_thread::{self, Workgroup};
 use crate::scheduling::{DeviceMatch, Scheduling, TimeConstraint, WorkerPath, match_device};
@@ -34,17 +38,6 @@ const WORKER_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How often the device list is read again when it changed while matching.
 const MATCH_ATTEMPTS: usize = 3;
-
-/// How long [`switch_rate`] waits for the device to report the new rate.
-const SWITCH_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// How long [`switch_rate`] waits for the rate after the probe stream
-/// failed (the switch may still have been made before the failure).
-const SWITCH_FAILED_TIMEOUT: Duration = Duration::from_millis(500);
-
-/// How long [`switch_rate`] lets the device settle at its new rate, so that
-/// the change's late notifications reach no stream that plays.
-const SWITCH_SETTLE: Duration = Duration::from_millis(250);
 
 /// How long [`CoreAudioDriver::stop`] waits at least for a stream the audio
 /// system stopped ([`StreamFault`]), which calls no more back (or two of
@@ -83,8 +76,7 @@ fn id_of(device: &Device) -> Option<String> {
 /// rate of its current stream format (`kAudioDevicePropertyStreamFormat`),
 /// which follows the nominal rate Audio MIDI Setup shows. `None` when it
 /// cannot be read, among them a device whose format is neither f32 nor i16
-/// (cpal refuses those): such a device is not switched before its stream
-/// is built, and a recovery takes it as ready.
+/// (cpal refuses those): a recovery takes such a device as ready.
 fn current_rate(device: &Device, direction: Direction) -> Option<u32> {
     let config = match direction {
         Direction::Output => device.default_output_config(),
@@ -179,45 +171,10 @@ pub fn output_rate(selector: &DeviceSelector) -> Result<(String, Option<u32>), A
     Ok((name_of(&device)?, current_rate(&device, Direction::Output)))
 }
 
-/// Switches `device` to `config`'s rate before the stream that plays is
-/// built: cpal sets the device's nominal rate while it builds a stream, and a
-/// stream built across the change is stopped by the change's own
-/// notification (measured on BlackHole 64ch, 2026-10-22: cpal reported
-/// `StreamInvalidated`, "Device sample rate changed", and the stream never
-/// called back). A stream built and dropped unplayed makes the switch; the
-/// device then reports the rate, and settles. The probe's error is the
-/// switch's only when the device did not reach the rate.
-fn switch_rate(device: &Device, config: StreamConfig) -> Result<(), cpal::Error> {
-    // The probe stream is dropped at once; only its error is kept.
-    let probe = device
-        .build_output_stream(
-            config,
-            |data: &mut [f32], _: &cpal::OutputCallbackInfo| data.fill(0.0),
-            |_: cpal::Error| {},
-            None,
-        )
-        .map(drop);
-    let deadline = Instant::now()
-        + if probe.is_ok() {
-            SWITCH_TIMEOUT
-        } else {
-            SWITCH_FAILED_TIMEOUT
-        };
-    while current_rate(device, Direction::Output) != Some(config.sample_rate) {
-        if Instant::now() >= deadline {
-            // Not switched: the probe's error, or the device's rate says why.
-            return probe;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    thread::sleep(SWITCH_SETTLE);
-    Ok(())
-}
-
-/// The I/O workgroup of `device`: its CoreAudio object is found by its
-/// position in the system's device list, which cpal lists in the same order
-/// (`match_device`), or why there is none.
-fn workgroup_of(device: &Device) -> Result<Workgroup, String> {
+/// The CoreAudio object of `device`: found by its position in the system's
+/// device list, which cpal lists in the same order (`match_device`), or why
+/// there is none.
+fn object_of(device: &Device) -> Result<u32, String> {
     let id = id_of(device).ok_or_else(|| "the device has no id".to_owned())?;
     let host = cpal::default_host();
     for _ in 0..MATCH_ATTEMPTS {
@@ -229,12 +186,89 @@ fn workgroup_of(device: &Device) -> Result<Workgroup, String> {
             .collect();
         let after = rt_thread::device_ids()?;
         match match_device(&before, &ids, &after, &id) {
-            Ok(object) => return rt_thread::device_workgroup(object),
+            Ok(object) => return Ok(object),
             Err(DeviceMatch::Changed) => continue,
             Err(absent) => return Err(absent.to_string()),
         }
     }
     Err(DeviceMatch::Changed.to_string())
+}
+
+/// The I/O workgroup of `device`, or why there is none.
+fn workgroup_of(device: &Device) -> Result<Workgroup, String> {
+    rt_thread::device_workgroup(object_of(device)?)
+}
+
+/// How long [`state_of`] waits for a device that runs for this process to
+/// stop (Signal's own stream, just stopped), so that it is not taken for
+/// another app's.
+const OWN_STOP_WAIT: Duration = Duration::from_millis(100);
+
+/// `device`'s shared state (ADR 0036), read now; all unknown when its
+/// CoreAudio object is not found. A device that runs for this process is
+/// read again for up to [`OWN_STOP_WAIT`] until it no longer does (measured
+/// on BlackHole 64ch, 2026-10-23: it reads stopped at once after
+/// [`CoreAudioDriver::stop`]); one that still does then (Signal's input on
+/// it) is taken as in use.
+fn state_of(device: &Device) -> DeviceState {
+    let Ok(object) = object_of(device) else {
+        return DeviceState::default();
+    };
+    let deadline = Instant::now() + OWN_STOP_WAIT;
+    loop {
+        let state = device_props::state(object);
+        if state.running_here != Some(true) || Instant::now() >= deadline {
+            return state;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The shared state of the device `selector` names, read now (ADR 0036):
+/// whether it runs for any process, its buffer and its nominal rate.
+pub fn device_state(
+    direction: Direction,
+    selector: &DeviceSelector,
+) -> Result<DeviceState, AudioError> {
+    Ok(state_of(&find(direction, selector)?))
+}
+
+/// The physical format of the device `selector` names, as cpal reads it on
+/// the device object (ADR 0036's measurements); `None` when it does not
+/// read.
+pub fn physical_format(
+    direction: Direction,
+    selector: &DeviceSelector,
+) -> Result<Option<device_props::PhysicalFormat>, AudioError> {
+    let device = find(direction, selector)?;
+    Ok(object_of(&device)
+        .ok()
+        .and_then(device_props::physical_format))
+}
+
+/// The frames per callback the output device `selector` names would run at
+/// with the buffer `request`, decided now ([`plan_join`]): what a run sizes
+/// its engine for before the driver is opened.
+pub fn output_period(selector: &DeviceSelector, request: BufferRequest) -> Result<u32, AudioError> {
+    let device = find(Direction::Output, selector)?;
+    Ok(plan_join(request, &state_of(&device)).period)
+}
+
+/// The rate a live run on the output device `selector` names plays at (the
+/// owner's decision of 2026-10-23, ADR 0036): the device's clock is the
+/// run's, so its current rate, never switched; `project_rate` (the
+/// project's `sample_rate`, the rate of its renders) only when the device's
+/// cannot be read. With the device's name.
+pub fn live_rate(
+    selector: &DeviceSelector,
+    project_rate: u32,
+) -> Result<(String, u32), AudioError> {
+    let device = find(Direction::Output, selector)?;
+    let rate = state_of(&device)
+        .rate
+        .or_else(|| current_rate(&device, Direction::Output))
+        .unwrap_or(project_rate);
+    Ok((name_of(&device)?, rate))
 }
 
 /// Takes the workers out of real-time scheduling ([`rt_thread::exit`]),
@@ -243,6 +277,21 @@ fn workgroup_of(device: &Device) -> Result<Workgroup, String> {
 fn release_workers(workers: &Workers) {
     let generation = workers.post(|_| rt_thread::exit());
     let _ = workers.wait(generation, WORKER_TIMEOUT);
+}
+
+/// Why a start was refused: the device changed between the open, which
+/// decided `open` (and sized the engine for its period), and the start,
+/// which reads `now` (ADR 0036).
+fn join_moved(device: &str, open: JoinPlan, now: JoinPlan) -> String {
+    let what = if now.shared && !open.shared {
+        "another app started playing on it, and Signal sets no buffer on a device in use".to_owned()
+    } else {
+        format!(
+            "its buffer is now {} frames, not the {} the run was prepared for",
+            now.period, open.period
+        )
+    };
+    format!("the device '{device}' changed since the run was prepared: {what}; play again")
 }
 
 /// What a started stream holds.
@@ -262,6 +311,11 @@ pub struct CoreAudioDriver {
     device: Device,
     name: String,
     choice: Choice,
+    /// The buffer the Setup asks for (ADR 0036).
+    request: BufferRequest,
+    /// How the open decided to join the device (ADR 0036); each start
+    /// keeps to it or refuses.
+    plan: JoinPlan,
     map: ChannelMap,
     stats: Arc<CallbackStats>,
     running: Option<Running>,
@@ -270,9 +324,12 @@ pub struct CoreAudioDriver {
 
 impl CoreAudioDriver {
     /// Opens the output device named `name` (the default output device
-    /// without one) for a sink of `sink_channels` at `sample_rate`, with a
-    /// fixed buffer of `buffer` frames requested. The device must support the
-    /// rate exactly: Signal does not resample.
+    /// without one) for a sink of `sink_channels` at `sample_rate`, with
+    /// `buffer` frames requested when Signal is the device's only client (a
+    /// device in use keeps its own buffer, ADR 0036). `sample_rate` must be
+    /// the rate the device runs at ([`live_rate`]): Signal does not resample,
+    /// and [`start`](Driver::start) switches no device's rate; it refuses a
+    /// device found at another.
     pub fn open(
         name: Option<&str>,
         sample_rate: u32,
@@ -297,12 +354,46 @@ impl CoreAudioDriver {
         sink_channels: usize,
         targets: Option<Vec<usize>>,
     ) -> Result<CoreAudioDriver, AudioError> {
+        CoreAudioDriver::open_with(
+            selector,
+            sample_rate,
+            BufferRequest::Frames(buffer),
+            sink_channels,
+            targets,
+        )
+    }
+
+    /// [`open_selected`](CoreAudioDriver::open_selected) with the buffer
+    /// `request` (ADR 0036): the frames are requested only when Signal is
+    /// the device's only client; a device that runs for another app, or
+    /// [`BufferRequest::Device`], keeps its own buffer. Which applies is
+    /// decided here, once ([`period`](CoreAudioDriver::period),
+    /// [`joined`](CoreAudioDriver::joined)); [`start`](Driver::start) keeps
+    /// to it, or refuses when the device changed so that it no longer holds.
+    pub fn open_with(
+        selector: &DeviceSelector,
+        sample_rate: u32,
+        request: BufferRequest,
+        sink_channels: usize,
+        targets: Option<Vec<usize>>,
+    ) -> Result<CoreAudioDriver, AudioError> {
         let device = find(Direction::Output, selector)?;
         let info = info(&device, Direction::Output, None)?;
         let width = targets
             .as_deref()
             .map_or(sink_channels, |t| ChannelMap::width_for(sink_channels, t));
-        let choice = choose_output(&info, sample_rate, buffer, width)?;
+        let plan = plan_join(request, &state_of(&device));
+        // A buffer that is not set is not checked against the range: it is
+        // the device's own (as for the input).
+        let choice = match choose_output(&info, sample_rate, plan.period, width) {
+            Err(AudioError::BufferSize { min, max, .. }) if plan.set_buffer.is_none() => {
+                let mut choice =
+                    choose_output(&info, sample_rate, plan.period.clamp(min, max), width)?;
+                choice.buffer = plan.period;
+                choice
+            }
+            other => other?,
+        };
         let channels = usize::from(choice.channels);
         let map = match targets {
             Some(targets) => ChannelMap::with_targets(sink_channels, channels, targets)?,
@@ -313,10 +404,24 @@ impl CoreAudioDriver {
             name: info.name,
             map,
             choice,
+            request,
+            plan,
             stats: Arc::new(CallbackStats::default()),
             running: None,
             scheduling: None,
         })
+    }
+
+    /// The frames a callback is expected to hold, decided at the open
+    /// (ADR 0036): what the engine is sized for.
+    pub fn period(&self) -> u32 {
+        self.plan.period
+    }
+
+    /// How the open decided to join the device, which every start keeps
+    /// to: whether it was in use, and what is set.
+    pub fn joined(&self) -> Option<JoinPlan> {
+        Some(self.plan)
     }
 
     /// The device's name.
@@ -425,20 +530,49 @@ impl Driver for CoreAudioDriver {
         if self.running.is_some() {
             return Err(DriverError::Running);
         }
+        // ADR 0036: a device that runs for another app is joined as it is,
+        // and no device's rate is switched: the run must be at its rate.
+        let state = state_of(&self.device);
+        let now = state
+            .rate
+            .or_else(|| current_rate(&self.device, Direction::Output));
+        if let Some(now) = now
+            && now != self.choice.sample_rate
+        {
+            return Err(DriverError::Device(rate_moved(
+                &self.name,
+                self.choice.sample_rate,
+                now,
+            )));
+        }
+        // The open's decision holds, or the start is refused: never a
+        // silent change of the period the engine was sized for.
+        let plan = self.plan;
+        let now_plan = plan_join(self.request, &state);
+        let left = plan.shared && !now_plan.shared;
+        if now_plan != plan && !(left && state.buffer.is_none_or(|b| b == plan.period)) {
+            return Err(DriverError::Device(join_moved(&self.name, plan, now_plan)));
+        }
         // Before the first block: the workers enter real-time scheduling.
+        let mut runner = runner;
+        let fade = fade_frames(self.choice.sample_rate);
+        runner.fade_in(fade);
         let workers = runner.workers();
         self.scheduling = Some(self.schedule(&workers, runner.rt_options().computation));
-        let (mut callback, control) = OutputCallback::new(
+        let (callback, control) = OutputCallback::new(
             runner,
             self.map.clone(),
             self.max_frames(),
             self.choice.sample_rate,
             Arc::clone(&self.stats),
         );
+        let mut callback = callback.with_fade_out(fade);
         let config = StreamConfig {
             channels: self.choice.channels,
             sample_rate: self.choice.sample_rate,
-            buffer_size: BufferSize::Fixed(self.choice.buffer),
+            buffer_size: plan
+                .set_buffer
+                .map_or(BufferSize::Default, BufferSize::Fixed),
         };
         // A new stream: an earlier one's fault is forgotten.
         self.stats.clear_fault();
@@ -457,17 +591,13 @@ impl Driver for CoreAudioDriver {
                 &error.to_string(),
             ))
         };
-        let switched = match before {
-            Some(rate) if rate != wanted => switch_rate(&self.device, config),
-            _ => Ok(()),
-        };
         // The error callback runs on cpal's listener threads, the overload's
         // (an xrun) on the audio thread: atomics only. cpal 0.18.2 reports a
         // rate change (`StreamInvalidated`) only for a device opened by its
         // id: the system default output's stream (`DefaultOutputMonitor`)
         // has no rate listener, its AudioUnit converts the rate and plays on;
         // its loss without another default is `DeviceNotAvailable`.
-        let built = switched.and_then(|()| {
+        let built = {
             self.device.build_output_stream(
                 config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| callback.fill(data),
@@ -485,7 +615,7 @@ impl Driver for CoreAudioDriver {
                 },
                 None,
             )
-        });
+        };
         let stream = match built {
             Ok(stream) => stream,
             Err(error) => {
@@ -493,6 +623,17 @@ impl Driver for CoreAudioDriver {
                 return Err(failed(error));
             }
         };
+        // cpal 0.18.2 sets the nominal rate while it builds a stream when the
+        // device's differs (its `set_sample_rate`): a rate that changed since
+        // the check above would have been switched. Read again; refuse.
+        let after = state_of(&self.device).rate;
+        if let Some(after) = after
+            && after != wanted
+        {
+            drop(stream);
+            release_workers(&workers);
+            return Err(DriverError::Device(rate_moved(&self.name, wanted, after)));
+        }
         if let Err(error) = stream.play() {
             drop(stream);
             release_workers(&workers);
@@ -568,8 +709,9 @@ pub struct InputCapture {
 }
 
 impl InputCapture {
-    /// Opens and starts the input device `selector` names at `sample_rate`
-    /// exactly, with every channel it offers there, requesting a buffer of
+    /// Opens and starts the input device `selector` names at the rate it
+    /// runs at (never switched, ADR 0036; `sample_rate` only when its rate
+    /// cannot be read), with every channel it offers there, requesting a buffer of
     /// `buffer` frames (the device's own when it cannot use that), with room
     /// for `capacity` meters between drains.
     pub fn open(
@@ -578,10 +720,34 @@ impl InputCapture {
         buffer: u32,
         capacity: usize,
     ) -> Result<InputCapture, AudioError> {
+        InputCapture::open_with(
+            selector,
+            sample_rate,
+            BufferRequest::Frames(buffer),
+            capacity,
+        )
+    }
+
+    /// [`open`](InputCapture::open) with the buffer `request` (ADR 0036): a
+    /// device that runs for another app keeps its buffer.
+    pub fn open_with(
+        selector: &DeviceSelector,
+        sample_rate: u32,
+        request: BufferRequest,
+        capacity: usize,
+    ) -> Result<InputCapture, AudioError> {
         let device = find(Direction::Input, selector)?;
         let info = info(&device, Direction::Input, None)?;
-        let (choice, buffer_size) = match choose_input(&info, sample_rate, buffer) {
-            Ok(choice) => (choice, BufferSize::Fixed(choice.buffer)),
+        let state = state_of(&device);
+        // Never switched (ADR 0036): metered at the rate it runs at.
+        let sample_rate = state.rate.or(info.rate).unwrap_or(sample_rate);
+        let plan = plan_join(request, &state);
+        let fixed = |choice: Choice| match plan.set_buffer {
+            Some(_) => BufferSize::Fixed(choice.buffer),
+            None => BufferSize::Default,
+        };
+        let (choice, buffer_size) = match choose_input(&info, sample_rate, plan.period) {
+            Ok(choice) => (choice, fixed(choice)),
             Err(AudioError::BufferSize { min, .. }) => {
                 (choose_input(&info, sample_rate, min)?, BufferSize::Default)
             }

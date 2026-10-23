@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 use clap::{Args, ValueEnum};
 use serde_json::json;
 use signal_audio::{
-    CallbackStats, CoreAudioDriver, Demotions, Scheduling, StatsSnapshot, rt_thread,
+    BufferRequest, CallbackStats, CoreAudioDriver, Demotions, DeviceSelector, JoinPlan, Scheduling,
+    StatsSnapshot, live_rate, output_period, rate_notice, rt_thread,
 };
 use signal_core::{Frame, Registry};
 use signal_engine::{
@@ -137,6 +138,9 @@ struct Ended {
     /// Why the audio system stopped the stream (its rate changed, it went
     /// away), if it did: the command fails with it.
     fault: Option<String>,
+    /// How the device was joined (ADR 0036; CoreAudio only): whether it ran
+    /// for another app, and the frames per callback it ran at.
+    joined: Option<JoinPlan>,
 }
 
 /// A distribution in µs, for the JSON.
@@ -230,6 +234,8 @@ struct Control<'a> {
     dir: &'a Path,
     watch: Option<(ProjectWatcher, Instant)>,
     current: Project,
+    /// The rate the run plays at (ADR 0036: the device's with CoreAudio).
+    rate: u32,
     edits: Edits,
 }
 
@@ -355,10 +361,37 @@ pub(crate) fn run(
     }
     let registry = gpu.registry();
     let (_, width) = sink_of(&project, &plan).map_err(|d| Failure::Invalid(located(shown, d)))?;
-    let (rate, seed) = (project.sample_rate, project.seed);
+    let seed = project.seed;
+    let selector = args
+        .device
+        .clone()
+        .map_or(DeviceSelector::Default, DeviceSelector::Name);
+    // ADR 0036 (the owner's decision of 2026-10-23): the device's clock is
+    // the run's. CoreAudio plays at the rate the output runs at, never
+    // switching it; the project's `sample_rate` is its renders' rate.
+    let rate = if null {
+        project.sample_rate
+    } else {
+        match live_rate(&selector, project.sample_rate) {
+            Ok((name, rate)) => {
+                if let Some(notice) = rate_notice(&name, &project.name, project.sample_rate, rate) {
+                    eprintln!("signal: {notice}");
+                }
+                rate
+            }
+            Err(_) => project.sample_rate,
+        }
+    };
     let limit = args.seconds.map(|s| (s * f64::from(rate)).round() as u64);
 
-    let mut config = RealtimeConfig::with_buffer(rate, seed, u64::from(args.buffer));
+    // ADR 0036: sized for the period the device runs at (its own while it
+    // runs for another app).
+    let period = if null {
+        args.buffer
+    } else {
+        output_period(&selector, BufferRequest::Frames(args.buffer)).unwrap_or(args.buffer)
+    };
+    let mut config = RealtimeConfig::with_buffer(rate, seed, u64::from(period));
     config.engine.threads = args.threads as usize;
     if args.record_boundary_data {
         // About a second of delivered results per latent instance.
@@ -405,6 +438,7 @@ pub(crate) fn run(
         dir,
         watch,
         current: project,
+        rate,
         edits: Edits::default(),
     };
 
@@ -487,6 +521,11 @@ pub(crate) fn run(
             "sink_channels": width,
             "device_channels": ended.device_channels,
             "buffer": args.buffer,
+            "device": ended.joined.map(|j| json!({
+                "shared": j.shared,
+                "period": j.period,
+                "set_buffer": j.set_buffer,
+            })),
             "threads": scheduling.threads,
             "workers": scheduling.workers.len(),
             "scheduling": {
@@ -602,7 +641,7 @@ fn play_null(
     limit: Option<u64>,
     stop: &AtomicBool,
 ) -> Result<Ended, Failure> {
-    let rate = control.current.sample_rate;
+    let rate = control.rate;
     let workers = runner.workers();
     let scheduling = Scheduling::ordinary(workers.threads(), workers.count(), "null driver");
     let mut driver = NullDriver::new(rate, width, control.current.seed);
@@ -675,6 +714,7 @@ fn play_null(
         wake: runner.wake_stats(),
         demotions: Demotions::default(),
         fault: None,
+        joined: None,
     })
 }
 
@@ -689,7 +729,7 @@ fn play_device(
     limit: Option<u64>,
     stop: &AtomicBool,
 ) -> Result<Ended, Failure> {
-    let rate = control.current.sample_rate;
+    let rate = control.rate;
     let device = |e: &dyn std::fmt::Display| Failure::Device(e.to_string());
     let mut driver = CoreAudioDriver::open(args.device.as_deref(), rate, args.buffer, width)
         .map_err(|e| device(&e))?;
@@ -703,18 +743,24 @@ fn play_device(
         );
     }
     driver.start(runner).map_err(|e| device(&e))?;
+    let shared = driver.joined().is_some_and(|j| j.shared);
     eprintln!(
-        "signal: playing {} at {rate} Hz on '{}' (buffer {} frames); press Enter to stop",
+        "signal: playing {} at {rate} Hz on '{}' (buffer {} frames{}); press Enter to stop",
         args.project.display(),
         driver.name(),
-        args.buffer
+        driver.period(),
+        if shared {
+            ", the device's own: it runs for another app"
+        } else {
+            ""
+        }
     );
     let scheduling = driver
         .scheduling()
         .cloned()
         .ok_or_else(|| Failure::Internal("the driver reported no scheduling".to_owned()))?;
     report_scheduling(&scheduling);
-    let interval = Duration::from_secs_f64(f64::from(args.buffer) / f64::from(rate))
+    let interval = Duration::from_secs_f64(f64::from(driver.period()) / f64::from(rate))
         .min(Duration::from_millis(1));
     let mut stopping: Option<Instant> = None;
     let mut demotions = Demotions::default();
@@ -781,6 +827,7 @@ fn play_device(
         wake,
         demotions,
         fault,
+        joined: driver.joined(),
     })
 }
 

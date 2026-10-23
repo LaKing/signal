@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
 use signal_audio::{
@@ -58,10 +58,11 @@ use crate::app::{self, Status};
 use crate::bindings::{MAIN_PANEL, Targets, check, panel_content};
 use crate::document::{Document, project_name};
 use crate::frames::{self, frame};
+use crate::keys::{self, Keys};
 use crate::panel::{Panel, Target, Written, after_write, ramp_frames, write_file, write_project};
 use crate::panel_write::{check_content, first_file, replace, sha256_hex};
 use crate::player::{
-    Backend, Input, Interface, Output, Selection, open_input, open_output, output_state,
+    Backend, Input, Interface, Output, Selection, live_rate, open_input, open_output, output_state,
 };
 use crate::server::{Inbound, MAX_MESSAGE, Outbound, Server, ServerOptions};
 use crate::setup::{
@@ -70,6 +71,9 @@ use crate::setup::{
 
 /// Client messages handled per step at most.
 const MESSAGES_PER_STEP: usize = 256;
+
+/// How often the keyboard shortcuts file is looked at (ADR 0034).
+const KEYS_POLL: Duration = Duration::from_millis(250);
 /// How often the status line is pushed while playing (app mode).
 const STATUS_EVERY: Duration = Duration::from_millis(250);
 /// The fastest parameter and meter streams.
@@ -77,6 +81,12 @@ const MAX_RATE_HZ: f64 = 60.0;
 /// How often the output is looked at again while a run stopped by the
 /// device waits for it (app mode, `plays`): the device list is read again.
 const DEVICE_POLL: Duration = Duration::from_secs(1);
+
+/// Retries of a device in a row before the wait ends (a flapping device).
+const MAX_DEVICE_RETRIES: u32 = 5;
+
+/// A retried run that played this long resets the count of retries.
+const DEVICE_STABLE: Duration = Duration::from_secs(30);
 
 /// How the first run plays: `signal play`'s driver options.
 #[derive(Clone, Debug)]
@@ -206,12 +216,20 @@ struct AppMode {
     /// then plays nothing; the next open, switch-on or restart plays again.
     held: bool,
     /// Stopped by the device while switched on, with `plays`: it did not
-    /// start, or the audio system stopped its stream. Plays again once the
-    /// output changes and runs at the project's rate ([`Host::retry_device`]).
+    /// start, or the audio system stopped its stream. Plays again, at the
+    /// output's rate (ADR 0036), once the output changes and is there
+    /// ([`Host::retry_device`]).
     device_wait: Option<DeviceWait>,
     /// A retry of the device is playing the project ([`Host::retry_device`]):
     /// its failure waits for a change, not for another try.
     retrying: bool,
+    /// Retries of the device in a row ([`Host::retry_device`]): each doubles
+    /// the wait before the next look, and after [`MAX_DEVICE_RETRIES`] the
+    /// wait ends. Reset by a play that is no retry, and by a retried run
+    /// that played [`DEVICE_STABLE`].
+    retries: u32,
+    /// When the last retry played.
+    retried: Option<Instant>,
 }
 
 /// What a run stopped by the device waits for.
@@ -220,10 +238,9 @@ struct DeviceWait {
     seen: Option<(String, Option<u32>)>,
     /// When it was last looked at.
     probed: Instant,
-    /// Try once at the next look whatever the output: it already ran at the
-    /// project's rate when the run stopped (a rate switched away and back,
-    /// a device busy for a moment), or the project's files changed (its
-    /// `sample_rate` among them).
+    /// Try once at the next look whatever the output: it was there when the
+    /// run stopped (a rate switched, a device busy for a moment), or the
+    /// project's files changed.
     once: bool,
 }
 
@@ -515,6 +532,13 @@ pub struct Host {
     /// App mode, stopped and switched on: the project folder's watch, for
     /// the `graph` push (a run has its own), and when it was last polled.
     idle_watch: Option<(ProjectWatcher, Instant)>,
+    /// ADR 0034: the person's keyboard shortcuts (`keys.toml` beside the
+    /// Setup), the file's stamp as last read, when it was last looked at,
+    /// and how many times the keymap changed.
+    keys: Keys,
+    keys_stamp: Option<(SystemTime, u64)>,
+    keys_polled: Instant,
+    keys_version: u64,
 }
 
 fn joined(diagnostics: Vec<Diagnostic>) -> String {
@@ -754,6 +778,9 @@ impl Host {
 
     fn blank(config: HostConfig, server: Server, app: Option<AppMode>) -> Host {
         let (setup, setup_problems) = Setup::load(&config.setup_path);
+        let keys_file = keys::keys_path(&config.setup_path);
+        let keys_stamp = keys::stamp(&keys_file);
+        let keys = Keys::load(&keys_file);
         let mut host = Host {
             registry: config.registry,
             dir: config.dir,
@@ -810,7 +837,14 @@ impl Host {
             scopes_freed: None,
             scopes_released: false,
             idle_watch: None,
+            keys,
+            keys_stamp,
+            keys_polled: Instant::now(),
+            keys_version: 0,
         };
+        for problem in host.keys.report() {
+            host.messages.push(format!("keys: {problem}"));
+        }
         host.list_devices();
         host
     }
@@ -960,6 +994,7 @@ impl Host {
         self.retry_device();
         self.watch();
         self.watch_stopped();
+        self.watch_keys();
         for _ in 0..MESSAGES_PER_STEP {
             match self.server.inbound.try_recv() {
                 Ok(message) => self.inbound(message),
@@ -1215,6 +1250,9 @@ impl Host {
             Some(mode) => {
                 mode.notes.clear();
                 mode.device_wait = None;
+                if !mode.retrying {
+                    mode.retries = 0;
+                }
                 mode.opened
             }
             None => return Err(app_only()),
@@ -1506,8 +1544,9 @@ impl Host {
 
     /// App mode with `plays`, switched on and not held: the run stopped by
     /// the device waits for its output ([`DEVICE_POLL`]); the output as it
-    /// is now is noted. An output already at the project's rate is tried
-    /// once more at the next look, unless that try is what failed. Returns
+    /// is now is noted. An output that is there (at any rate: the next run
+    /// plays at it, ADR 0036) is tried once more at the next look, unless
+    /// that try is what failed. Returns
     /// what the window says it waits for, or `None` when nothing waits.
     fn wait_for_device(&mut self) -> Option<String> {
         let waits = self
@@ -1519,8 +1558,7 @@ impl Host {
         }
         self.list_devices();
         let seen = output_state(&self.devices, &self.setup);
-        let rate = self.rate;
-        let ready = ready_at(seen.as_ref(), rate);
+        let ready = ready_at(seen.as_ref());
         let mode = self.app.as_mut()?;
         let once = ready && !mode.retrying;
         mode.device_wait = Some(DeviceWait {
@@ -1533,19 +1571,18 @@ impl Host {
         } else if ready {
             "Signal tries again when the output or the project's files change".to_owned()
         } else {
-            format!("Signal plays again once the output runs at {rate} Hz")
+            "Signal plays again once the output is there".to_owned()
         })
     }
 
     /// A run stopped by the device (app mode, `plays`): every
     /// [`DEVICE_POLL`] the device list is read again, on this thread. The
-    /// project plays again from frame 0 once the output changed (a rate
-    /// switched in Audio MIDI Setup, a device plugged in, another default)
-    /// and runs at the project's rate (or its rate cannot be read), or once
+    /// project plays again from frame 0, at the output's rate (ADR 0036),
+    /// once the output changed (a rate switched in Audio MIDI Setup, a
+    /// device plugged in, another default) and is there, or once
     /// at the next look when [`DeviceWait::once`] says so. An output that
     /// did not change is not tried again. Nothing runs while it waits.
     fn retry_device(&mut self) {
-        let rate = self.rate;
         let Some(mode) = self.app.as_mut() else {
             return;
         };
@@ -1556,7 +1593,13 @@ impl Host {
             mode.device_wait = None;
             return;
         }
-        if wait.probed.elapsed() < DEVICE_POLL {
+        // A retried run that played long enough was no flapping device.
+        if mode.retried.is_some_and(|at| at.elapsed() >= DEVICE_STABLE) {
+            mode.retries = 0;
+            mode.retried = None;
+        }
+        // Backoff: each retry in a row doubles the wait (1, 2, 4, 8, 16 s).
+        if wait.probed.elapsed() < DEVICE_POLL * (1 << mode.retries.min(4)) {
             return;
         }
         wait.probed = Instant::now();
@@ -1564,13 +1607,24 @@ impl Host {
         self.list_devices();
         let now = output_state(&self.devices, &self.setup);
         let changed = now != seen;
-        if !once && !(changed && ready_at(now.as_ref(), rate)) {
+        if !once && !(changed && ready_at(now.as_ref())) {
             if let Some(wait) = self.app.as_mut().and_then(|m| m.device_wait.as_mut()) {
                 wait.seen = now;
             }
             return;
         }
         if let Some(mode) = self.app.as_mut() {
+            if mode.retries >= MAX_DEVICE_RETRIES {
+                mode.device_wait = None;
+                let message = format!(
+                    "the output failed {MAX_DEVICE_RETRIES} times in a row; Signal stopped trying: restart the project (Project ▸ Restart from Files) or switch the power off and on"
+                );
+                mode.message = Some(message.clone());
+                self.messages.push(message);
+                return;
+            }
+            mode.retries += 1;
+            mode.retried = Some(Instant::now());
             mode.retrying = true;
         }
         let result = self.play_app();
@@ -1980,8 +2034,39 @@ impl Host {
             .plan;
         plan.version = 0;
         let (_, width) = sink_of(&project, &plan).map_err(|d| joined(located(dir, d)))?;
-        let (rate, seed) = (project.sample_rate, project.seed);
+        let seed = project.seed;
         let mut notes = Vec::new();
+        // ADR 0036: the run plays at the rate the output runs at, never
+        // switching it (the owner's decision of 2026-10-23).
+        let (rate, notice) = match (&self.backend, first) {
+            (Backend::CoreAudio, true) => {
+                let selector = self.first.device.clone().map_or(
+                    signal_audio::DeviceSelector::Default,
+                    signal_audio::DeviceSelector::Name,
+                );
+                signal_audio::live_rate(&selector, project.sample_rate).map_or(
+                    (project.sample_rate, None),
+                    |(name, rate)| {
+                        let notice = signal_audio::rate_notice(
+                            &name,
+                            &project.name,
+                            project.sample_rate,
+                            rate,
+                        );
+                        (rate, notice)
+                    },
+                )
+            }
+            (Backend::Null(_), true) => (project.sample_rate, None),
+            (_, false) => live_rate(
+                &self.backend,
+                &self.devices,
+                &self.setup,
+                project.sample_rate,
+                &project.name,
+            ),
+        };
+        notes.extend(notice);
         let (mut output, buffer, threads) = if first {
             let output = match &self.backend {
                 Backend::CoreAudio => Output::Device(Box::new(
@@ -2015,6 +2100,8 @@ impl Host {
                 self.setup.cpu_workers.unwrap_or(0),
             )
         };
+        // ADR 0036: the period the device runs at (its own while in use).
+        let buffer = output.period().unwrap_or(buffer);
         let mut config = RealtimeConfig::with_buffer(rate, seed, u64::from(buffer));
         config.engine.threads = threads as usize;
         config.rt = self.rt;
@@ -2579,6 +2666,9 @@ impl Host {
             "setup.devices" => self.setup_devices(&message).map(Some),
             "setup.check" => self.setup_check(&message).map(Some),
             "setup.apply" => self.setup_apply(&message).map(Some),
+            "keys.get" => Ok(Some(self.keys.message())),
+            "keys.set" => self.keys_set(&message).map(Some),
+            "keys.reset" => self.keys_reset(&message).map(Some),
             "app.get" => match self.app {
                 Some(_) => Ok(Some(self.app_json())),
                 None => Err(app_only()),
@@ -4962,6 +5052,95 @@ impl Host {
         }))
     }
 
+    /// The keyboard shortcuts in force (ADR 0034): the person's
+    /// `keys.toml` as last read, checked.
+    pub fn keys(&self) -> &Keys {
+        &self.keys
+    }
+
+    /// How many times the keymap changed since the host started (Signal.app
+    /// gives its menu items their chords again on a new one).
+    pub fn keys_version(&self) -> u64 {
+        self.keys_version
+    }
+
+    /// Looks at `keys.toml` every [`KEYS_POLL`]: a change made elsewhere (an
+    /// editor, another Signal) applies at once, pushed to every client.
+    fn watch_keys(&mut self) {
+        if self.keys_polled.elapsed() < KEYS_POLL {
+            return;
+        }
+        self.keys_polled = Instant::now();
+        let path = keys::keys_path(&self.setup_path);
+        if keys::stamp(&path) != self.keys_stamp {
+            self.reload_keys();
+        }
+    }
+
+    /// Reads `keys.toml` again, tells the operator what is wrong with it and
+    /// pushes `keys` to every client.
+    fn reload_keys(&mut self) {
+        let path = keys::keys_path(&self.setup_path);
+        self.keys_stamp = keys::stamp(&path);
+        self.keys = Keys::load(&path);
+        self.keys_version += 1;
+        for problem in self.keys.report() {
+            self.messages.push(format!("keys: {problem}"));
+        }
+        let pushed = self.keys.message();
+        self.broadcast(&pushed);
+    }
+
+    /// `keys.set`: command `command` gets the chords `keys` (null: its
+    /// built-in ones) in `keys.toml`, written at once; every client is
+    /// pushed the new keymap.
+    fn keys_set(&mut self, message: &Value) -> Result<Value, Failure> {
+        let command = message
+            .get("command")
+            .and_then(Value::as_str)
+            .ok_or_else(|| fail("bad-message", "keys.set needs a command"))?;
+        let chords: Option<Vec<String>> = match message.get("keys") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(list)) => Some(
+                list.iter()
+                    .map(|k| k.as_str().map(str::to_owned))
+                    .collect::<Option<Vec<String>>>()
+                    .ok_or_else(|| fail("bad-message", "keys must be a list of chords"))?,
+            ),
+            Some(_) => {
+                return Err(fail(
+                    "bad-message",
+                    "keys must be a list of chords, or null",
+                ));
+            }
+        };
+        let path = keys::keys_path(&self.setup_path);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(fail("write-failed", format!("{}: {error}", path.display()))),
+        };
+        let next = keys::with_override(&text, command, chords.as_deref())
+            .map_err(|reason| fail("bad-value", reason))?;
+        keys::write_atomic(&path, &next)
+            .map_err(|error| fail("write-failed", format!("{}: {error}", path.display())))?;
+        self.reload_keys();
+        Ok(self.keys.message())
+    }
+
+    /// `keys.reset`: `command` back to its built-in chords, or (without
+    /// one) every command.
+    fn keys_reset(&mut self, message: &Value) -> Result<Value, Failure> {
+        if let Some(command) = message.get("command").and_then(Value::as_str) {
+            let reset = json!({"command": command, "keys": Value::Null});
+            return self.keys_set(&reset);
+        }
+        let path = keys::keys_path(&self.setup_path);
+        keys::reset(&path).map_err(|reason| fail("write-failed", reason))?;
+        self.reload_keys();
+        Ok(self.keys.message())
+    }
+
     fn setup_json(&self) -> Value {
         json!({
             "output": self.setup.output,
@@ -5215,6 +5394,13 @@ impl Host {
             output_channels,
         }
         .apply(&mut self.setup);
+        // ADR 0036: `"buffer": "device"` follows the device's buffer; a
+        // number given replaces it, even the one the Setup holds.
+        match message.get("buffer") {
+            Some(Value::String(device)) if device == "device" => self.setup.buffer_device = true,
+            Some(_) => self.setup.buffer_device = false,
+            None => {}
+        }
         self.setup.rt_policy = rt_policy;
         if let Err(error) = app::save(&self.setup, &self.setup_path) {
             if let Some(mode) = self.app.as_mut() {
@@ -5510,6 +5696,8 @@ impl Host {
 fn buffer_of(message: &Value, default: u32) -> Result<u32, Failure> {
     match message.get("buffer") {
         None => Ok(default),
+        // ADR 0036: the device's own buffer (`setup.apply`).
+        Some(Value::String(device)) if device == "device" => Ok(default),
         Some(v) => v
             .as_u64()
             .filter(|b| (1..=8192).contains(b))
@@ -5556,10 +5744,10 @@ fn powered_off() -> Failure {
     fail("powered-off", "Signal is switched off")
 }
 
-/// Whether an output as [`output_state`] gives it can play at `rate`: it is
-/// there and runs at that rate, or its rate cannot be read.
-fn ready_at(state: Option<&(String, Option<u32>)>, rate: u32) -> bool {
-    state.is_some_and(|(_, at)| at.is_none_or(|at| at == rate))
+/// Whether an output as [`output_state`] gives it can play: it is there, at
+/// any rate (ADR 0036: a run plays at the rate the output runs at).
+fn ready_at(state: Option<&(String, Option<u32>)>) -> bool {
+    state.is_some()
 }
 
 /// The power switch as `welcome`, `app` and `power` carry it.

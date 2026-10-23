@@ -1,21 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { pageHandlesShortcuts, panelReloads, panelSource, shortcut } from './menu.js';
+import { menuAction, pageHandlesShortcuts, panelReloads, panelSource } from './menu.js';
 
 const page = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
 
-test('Cmd-O, Cmd-S and Cmd-comma are the menu’s shortcuts', () => {
-  assert.equal(shortcut({ metaKey: true, key: 'o' }), 'open');
-  assert.equal(shortcut({ metaKey: true, key: 'O' }), 'open');
-  assert.equal(shortcut({ metaKey: true, key: 's' }), 'save');
-  assert.equal(shortcut({ metaKey: true, key: ',' }), 'setup');
-  assert.equal(shortcut({ key: 's' }), null, 'without Cmd');
-  assert.equal(shortcut({ metaKey: true, shiftKey: true, key: 's' }), null, 'Save As (⇧⌘S) is native only');
-  assert.equal(shortcut({ metaKey: true, shiftKey: true, key: 'S' }), null);
-  assert.equal(shortcut({ metaKey: true, key: 'v' }), null, 'paste is the Edit menu’s');
-  assert.equal(shortcut({ metaKey: true, key: 'q' }), null, 'Quit is the native menu’s');
+test('in a browser the page runs the app commands it can (Open, Save, Interface Setup, Restart, Settings, Keyboard Shortcuts)', () => {
+  assert.equal(menuAction('file.open'), 'open');
+  assert.equal(menuAction('file.save'), 'save');
+  assert.equal(menuAction('file.interface_setup'), 'setup');
+  assert.equal(menuAction('transport.restart'), 'restart');
+  assert.equal(menuAction('app.settings'), 'settings');
+  assert.equal(menuAction('help.keyboard_shortcuts'), 'keys');
+  assert.equal(menuAction('file.save_as'), null, 'Save As is native only');
+  assert.equal(menuAction('app.quit'), null, 'Quit is the native menu’s');
+  assert.equal(menuAction('window.new_main'), null);
 });
 
 // AC16: inside Signal.app the native menu takes the shortcuts; in a browser the page does.

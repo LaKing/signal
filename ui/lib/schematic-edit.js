@@ -7,6 +7,7 @@
 // `patched` replies and `graph.files`). No DOM.
 
 import { editKey } from './panel-edit.js';
+import { keyCommand } from './keys.js';
 import { patchMessage } from './schematic-patch.js';
 
 /**
@@ -64,17 +65,18 @@ export class PatchHistory {
 }
 
 /**
- * What a key does in edit mode: the panel editor's (`undo`, `redo`, `leave`),
- * and `delete` (Delete, Backspace). With the add palette open (`palette`),
- * Escape closes it (`close`): a second Escape leaves.
+ * What a key does in Edit patch (the `schematic_edit` scope,
+ * ui/lib/keys.default.js): `undo`, `redo`, `leave` (Escape, a field
+ * included) and `delete` (Delete, Backspace; not in a field). With the add
+ * palette open (`palette`), Escape closes it (`close`): a second Escape leaves.
  */
 export function patchKey(event, { palette = false } = {}) {
-  const action = editKey(event);
+  const action = editKey(event, 'schematic_edit');
   if (action === 'leave' && palette) return 'close';
   if (action) return action;
   const target = event?.composedPath?.()[0] ?? event?.target;
   if (['input', 'textarea', 'select'].includes(target?.localName ?? '')) return null;
-  if ((event?.key === 'Delete' || event?.key === 'Backspace') && !event.metaKey && !event.ctrlKey && !event.altKey) return 'delete';
+  if (keyCommand('schematic_edit', event)?.id === 'schematic_edit.delete') return 'delete';
   return null;
 }
 

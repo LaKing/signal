@@ -16,7 +16,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use signal_audio::{DeviceInfo, DeviceRef, Direction, Resolution, choose_output, resolve};
+use signal_audio::{
+    BufferRequest, DeviceInfo, DeviceRef, Direction, Resolution, choose_output, resolve,
+};
 use signal_engine::{Computation, RtPolicy};
 
 /// The file's format version.
@@ -104,8 +106,12 @@ pub struct Setup {
     pub output: Option<DeviceEntry>,
     /// The input device, metered only; no input without one.
     pub input: Option<DeviceEntry>,
-    /// The buffer to request, in frames.
+    /// The buffer to request, in frames, when Signal is the output's only
+    /// client (ADR 0036: a device that runs for another app keeps its own).
     pub buffer: u32,
+    /// `buffer = "device"` (ADR 0036): never request a buffer, follow the
+    /// device's current one; [`buffer`](Setup::buffer) is then the default.
+    pub buffer_device: bool,
     /// "CPU workers": the threads a block runs on, the audio thread
     /// included (`EngineConfig::threads`; 1: no worker threads); `None` is
     /// auto, one per performance core. A machine setting, never a project's.
@@ -136,6 +142,7 @@ impl Default for Setup {
             output: None,
             input: None,
             buffer: DEFAULT_BUFFER,
+            buffer_device: false,
             cpu_workers: None,
             output_channels: None,
             last_project: None,
@@ -151,7 +158,8 @@ impl Default for Setup {
 #[derive(Serialize)]
 struct File<'a> {
     version: i64,
-    buffer: u32,
+    /// A number of frames, or `"device"`.
+    buffer: toml::Value,
     /// `"auto"` or a number of threads.
     cpu_workers: toml::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -211,6 +219,16 @@ pub fn setup_path(
 }
 
 impl Setup {
+    /// The buffer the drivers are asked for (ADR 0036): the frames, or the
+    /// device's own with `buffer = "device"`.
+    pub fn buffer_request(&self) -> BufferRequest {
+        if self.buffer_device {
+            BufferRequest::Device
+        } else {
+            BufferRequest::Frames(self.buffer)
+        }
+    }
+
     /// Reads the Setup at `path`: a missing file is the default; anything
     /// that does not read is reported (one reason per problem) and replaced
     /// by its default.
@@ -258,10 +276,15 @@ impl Setup {
             };
             match key.as_str() {
                 "version" => {}
-                "buffer" => match value.try_into::<u32>() {
-                    Ok(frames) if frames > 0 => setup.buffer = frames,
-                    Ok(_) => bad("must be at least 1 frame".to_owned()),
-                    Err(error) => bad(error.to_string()),
+                "buffer" => match value {
+                    toml::Value::String(device) if device == "device" => {
+                        setup.buffer_device = true;
+                    }
+                    toml::Value::Integer(frames) => match u32::try_from(frames) {
+                        Ok(frames) if frames > 0 => setup.buffer = frames,
+                        _ => bad("must be at least 1 frame, or \"device\"".to_owned()),
+                    },
+                    _ => bad("must be a number of frames, or \"device\"".to_owned()),
                 },
                 "cpu_workers" => match value {
                     toml::Value::String(text) if text == "auto" => setup.cpu_workers = None,
@@ -334,7 +357,11 @@ impl Setup {
     pub fn to_toml(&self) -> String {
         let file = File {
             version: VERSION,
-            buffer: self.buffer,
+            buffer: if self.buffer_device {
+                toml::Value::String("device".to_owned())
+            } else {
+                toml::Value::Integer(i64::from(self.buffer))
+            },
             cpu_workers: match self.cpu_workers {
                 Some(n) => toml::Value::Integer(i64::from(n)),
                 None => toml::Value::String("auto".to_owned()),

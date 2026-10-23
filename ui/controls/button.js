@@ -2,6 +2,7 @@
 // <signal-toggle> (a parameter at its min or max) (docs/ui-controls.md).
 
 import { SignalElement, SignalValueElement, bindAddresses, quietly } from './base.js';
+import { keyCommand } from '../lib/keys.js';
 
 const CSS = `
 .control { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 4px; }
@@ -36,7 +37,7 @@ export class SignalButton extends SignalElement {
     });
     for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) this.addEventListener(name, () => this.release());
     this.addEventListener('keyup', (event) => {
-      if (event.key === ' ' || event.key === 'Enter') this.release();
+      if (keyCommand('button', event)?.id === 'button.press') this.release();
     });
     this.addEventListener('blur', () => this.release());
   }
@@ -57,8 +58,9 @@ export class SignalButton extends SignalElement {
     this.update();
   }
 
+  /** The `button` scope's keys (ui/lib/keys.default.js). */
   onKey(event) {
-    if (event.key !== ' ' && event.key !== 'Enter') return false;
+    if (keyCommand('button', event)?.id !== 'button.press') return false;
     if (!event.repeat) this.press();
     return true;
   }
@@ -102,21 +104,12 @@ export class SignalToggle extends SignalValueElement {
     });
   }
 
+  /** The `toggle` scope's keys (ui/lib/keys.default.js); Page Up, Page Down, Home and End are the page's. */
   onKey(event) {
-    const turns = {
-      ' ': !this.on,
-      Enter: !this.on,
-      ArrowRight: true,
-      ArrowUp: true,
-      PageUp: true,
-      End: true,
-      ArrowLeft: false,
-      ArrowDown: false,
-      PageDown: false,
-      Home: false,
-    };
-    if (!(event.key in turns)) return false;
-    if (!event.repeat || !(event.key === ' ' || event.key === 'Enter')) this.turn(turns[event.key], 'nudge');
+    const command = keyCommand('toggle', event)?.id;
+    const turns = { 'toggle.flip': !this.on, 'toggle.on': true, 'toggle.off': false };
+    if (!(command in turns)) return false;
+    if (!event.repeat || command !== 'toggle.flip') this.turn(turns[command], 'nudge');
     return true;
   }
 

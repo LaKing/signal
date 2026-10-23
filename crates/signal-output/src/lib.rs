@@ -16,7 +16,11 @@
 //! - in real time only, with an output ceiling ([`Runner::set_ceiling`],
 //!   `signal mcp`'s `--max-gain`; none by default), holds every device
 //!   sample within ±ceiling ([`hold`]), counted; offline renders never
-//!   hold.
+//!   hold;
+//! - in real time only, when a device driver asks (ADR 0036 §4), ramps the
+//!   device output in over 10 ms when its stream starts and out before a
+//!   deliberate stop ([`Runner::fade_in`], [`Runner::fade_out`], [`fade`]);
+//!   offline renders and the null driver never fade.
 //!
 //! [`render`] (the offline WAV writer, [`Render::write`]) and the real-time
 //! [`Runner`] (any [`Driver`]: the [`NullDriver`] here, CoreAudio in
@@ -40,6 +44,7 @@
 
 mod audio;
 mod driver;
+pub mod fade;
 mod render;
 mod runner;
 mod scope;

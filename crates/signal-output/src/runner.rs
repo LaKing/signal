@@ -20,6 +20,7 @@ use signal_engine::{
 use signal_graph::ExecutionPlan;
 
 use crate::audio::{AudioSink, Meter, to_device};
+use crate::fade::Fade;
 use crate::scope::{ScopeBlock, ScopeControl, ScopeCounts, ScopeError, Scopes, scopes};
 use crate::vectors::{
     VectorControl, VectorCounts, VectorError, VectorSnapshot, VectorUnbound, Vectors, vectors,
@@ -64,6 +65,7 @@ pub fn realtime_with(
         counts: Arc::clone(&counts),
         scopes,
         vectors,
+        fade: Fade::default(),
     };
     let controller = Controller {
         controller,
@@ -106,6 +108,9 @@ pub struct Runner {
     scopes: Scopes,
     /// The vector adapter's slots (`crate::vectors`).
     vectors: Vectors,
+    /// The device fade (`crate::fade`, ADR 0036): steady unless a driver
+    /// asks.
+    fade: Fade,
 }
 
 impl Runner {
@@ -148,6 +153,8 @@ impl Runner {
         if let Some(rest) = out.get_mut(done.saturating_mul(channels)..) {
             rest.fill(0.0);
         }
+        // After the meters' levels: they measure the project's output.
+        self.fade.apply(out, channels);
         if done > 0 {
             for (channel, &(peak, sum_squares)) in self.levels.iter().enumerate() {
                 let meter = Meter {
@@ -206,6 +213,30 @@ impl Runner {
     /// Device samples the ceiling held, since the start.
     pub fn ceilinged(&self) -> u64 {
         self.ceilinged
+    }
+
+    /// Ramps the device output in over `frames` frames from silence, from
+    /// the next callback (ADR 0036 §4: a device driver asks when its stream
+    /// starts). Output policy, after the conversion and the ceiling, never a
+    /// semantic of the project: offline renders never fade, and a Runner no
+    /// driver asks (the null driver's) plays exactly
+    /// [`device_sample`](crate::device_sample). The meters measure the
+    /// samples before the fade.
+    pub fn fade_in(&mut self, frames: u32) {
+        self.fade.start_in(frames);
+    }
+
+    /// Ramps the device output out over `frames` frames from the level it is
+    /// at, from the next callback, then plays silence
+    /// ([`faded_out`](Runner::faded_out)); a device driver asks before a
+    /// deliberate stop (ADR 0036 §4). The engine runs on meanwhile.
+    pub fn fade_out(&mut self, frames: u32) {
+        self.fade.start_out(frames);
+    }
+
+    /// Whether a [`fade_out`](Runner::fade_out) has ended: silence from here.
+    pub fn faded_out(&self) -> bool {
+        self.fade.is_silent()
     }
 }
 

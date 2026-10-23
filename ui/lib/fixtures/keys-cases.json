@@ -1,0 +1,72 @@
+{
+  "about": "Cases both keymap readers must agree on (ADR 0034): ui/lib/keys.test.js and crates/signal-ui/tests/keys.rs. A chord's canonical text (or that it is refused), and overrides with the conflicts and the number of problems they give against ui/lib/keys.default.js.",
+  "chords": [
+    { "text": "Cmd+S", "chord": "Cmd+S" },
+    { "text": "cmd+shift+s", "chord": "Shift+Cmd+S" },
+    { "text": "Command+Option+,", "chord": "Alt+Cmd+," },
+    { "text": "⌃⌘F", "error": true },
+    { "text": "Ctrl+Cmd+F", "chord": "Ctrl+Cmd+F" },
+    { "text": "Cmd+Ctrl+f", "chord": "Ctrl+Cmd+F" },
+    { "text": "pagedown", "chord": "PageDown" },
+    { "text": "PgUp", "chord": "PageUp" },
+    { "text": "Shift+Space", "chord": "Shift+Space" },
+    { "text": "space", "chord": "Space" },
+    { "text": "esc", "chord": "Escape" },
+    { "text": "Return", "chord": "Enter" },
+    { "text": "Cmd+Up", "chord": "Cmd+ArrowUp" },
+    { "text": "+", "chord": "+" },
+    { "text": "Cmd++", "chord": "Cmd++" },
+    { "text": "Cmd+plus", "chord": "Cmd++" },
+    { "text": "=", "chord": "=" },
+    { "text": "Shift+=", "error": true },
+    { "text": "Shift+1", "error": true },
+    { "text": "Shift+a", "chord": "Shift+A" },
+    { "text": "t", "chord": "T" },
+    { "text": "ö", "chord": "Ö" },
+    { "text": "Alt+Wheel", "chord": "Alt+Wheel" },
+    { "text": "wheel", "chord": "Wheel" },
+    { "text": "F10", "chord": "F10" },
+    { "text": "shift+f10", "chord": "Shift+F10" },
+    { "text": "Cmd+Cmd+S", "error": true },
+    { "text": "Hyper+S", "error": true },
+    { "text": "Cmd+", "error": true },
+    { "text": "Cmd", "error": true },
+    { "text": "", "error": true },
+    { "text": "PageDownn", "error": true },
+    { "text": "Cmd+ab", "error": true }
+  ],
+  "overrides": [
+    { "about": "no overrides", "overrides": {}, "problems": 0, "conflicts": [] },
+    { "about": "Page Down on Space only", "overrides": { "view.page_down": ["Space"] }, "problems": 0, "conflicts": [] },
+    {
+      "about": "a second command on Shift+Cmd+N: the first in the file keeps it",
+      "overrides": { "window.new_schematic": ["Shift+Cmd+N"] },
+      "problems": 0,
+      "conflicts": [{ "kind": "same", "chord": "Shift+Cmd+N", "command": "window.new_schematic", "with": "window.new_main" }]
+    },
+    {
+      "about": "a menu command on the system's Cmd+Z",
+      "overrides": { "file.save": ["Cmd+Z"] },
+      "problems": 0,
+      "conflicts": [{ "kind": "same", "chord": "Cmd+Z", "command": "file.save", "with": "edit.undo" }]
+    },
+    {
+      "about": "a control's chord hiding a new view chord",
+      "overrides": { "view.top": ["T"] },
+      "problems": 0,
+      "conflicts": [{ "kind": "shadow", "chord": "T", "command": "schematic.trace", "with": "view.top" }]
+    },
+    {
+      "about": "a wheel chord with the wheel modifier",
+      "overrides": { "piano_roll.zoom_keys": ["Alt+Wheel"] },
+      "problems": 0,
+      "conflicts": [{ "kind": "wheel", "chord": "Alt+Wheel", "command": "piano_roll.zoom_keys", "with": "view.wheel_inside" }]
+    },
+    {
+      "about": "unknown, fixed, unparsable, of the wrong kind",
+      "overrides": { "view.nothing": ["A"], "edit.undo": ["Cmd+U"], "view.page_up": ["Shift+=", "PageUp"], "slider.wheel": ["W"], "view.wheel_inside": ["Wheel"], "file.save": ["S", "Shift+S", "F5", "Alt+S"] },
+      "problems": 7,
+      "conflicts": []
+    }
+  ]
+}

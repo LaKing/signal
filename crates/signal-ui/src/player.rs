@@ -7,7 +7,7 @@
 use signal_audio::{
     AudioError, ChannelMap, CoreAudioDriver, DeviceInfo, DeviceRef, DeviceSelector, Direction,
     InputCallback, InputCapture, InputMeters, Resolution, Scheduling, StatsSnapshot, choose_input,
-    choose_output, resolve, start_failure,
+    choose_output, rate_moved, rate_notice, resolve,
 };
 use signal_output::{Driver, DriverError, NullDriver, Runner};
 
@@ -61,7 +61,11 @@ impl Interface {
     pub fn apply(self, setup: &mut Setup) {
         self.output.apply(&mut setup.output);
         self.input.apply(&mut setup.input);
-        setup.buffer = self.buffer.max(1);
+        // ADR 0036: `buffer = "device"` stays until another number is chosen
+        // (the dialog shows the default for it).
+        let buffer = self.buffer.max(1);
+        setup.buffer_device &= buffer == setup.buffer;
+        setup.buffer = buffer;
         setup.cpu_workers = self.cpu_workers.map(|n| n.max(1));
         setup.output_channels = self.output_channels;
     }
@@ -118,6 +122,16 @@ impl Output {
         match self {
             Output::Device(driver) => driver.stats().snapshot(),
             Output::Null(..) => StatsSnapshot::default(),
+        }
+    }
+
+    /// The frames a device callback is expected to hold (ADR 0036: the
+    /// device's own buffer while it runs for another app); `None` for the
+    /// null driver, whose owner chooses.
+    pub fn period(&self) -> Option<u32> {
+        match self {
+            Output::Device(driver) => Some(driver.period()),
+            Output::Null(..) => None,
         }
     }
 
@@ -236,6 +250,49 @@ pub fn output_state(devices: &[DeviceInfo], setup: &Setup) -> Option<(String, Op
     Some((key, device.rate))
 }
 
+/// The rate a live run plays at with the Setup's output (ADR 0036, the
+/// owner's decision of 2026-10-23: the device's clock is the run's): the
+/// rate the output runs at now, never switched, and the notice to show when
+/// it is not `project_rate`, the project's `sample_rate` (the rate of its
+/// renders and a preference, `project` naming it). `project_rate` when the
+/// output's rate cannot be read or it is not found (opening it then says
+/// why). The null backend takes a listed device's rate, as CoreAudio would.
+pub fn live_rate(
+    backend: &Backend,
+    devices: &[DeviceInfo],
+    setup: &Setup,
+    project_rate: u32,
+    project: &str,
+) -> (u32, Option<String>) {
+    let found = match backend {
+        Backend::CoreAudio => {
+            let selector = match &setup.output {
+                Some(entry) => match selector(devices, entry, Direction::Output) {
+                    Ok((selector, _)) => selector,
+                    Err(_) => return (project_rate, None),
+                },
+                None => DeviceSelector::Default,
+            };
+            signal_audio::live_rate(&selector, project_rate).ok()
+        }
+        Backend::Null(_) => {
+            let device = match &setup.output {
+                Some(entry) => selector(devices, entry, Direction::Output)
+                    .ok()
+                    .map(|s| s.1),
+                None => devices
+                    .iter()
+                    .find(|d| d.direction == Direction::Output && d.default),
+            };
+            device.map(|d| (d.name.clone(), d.rate.unwrap_or(project_rate)))
+        }
+    };
+    match found {
+        Some((name, rate)) => (rate, rate_notice(&name, project, project_rate, rate)),
+        None => (project_rate, None),
+    }
+}
+
 /// Opens the Setup's output for `width` sink channels at `rate`, with its
 /// buffer and channel map (a map the device cannot take falls back to the
 /// identity, with a note).
@@ -267,8 +324,9 @@ pub fn open_output(
     let opened = match backend {
         Backend::CoreAudio => {
             let selector = output.map_or(DeviceSelector::Default, |(s, _)| s);
+            let request = setup.buffer_request();
             let open =
-                |targets| CoreAudioDriver::open_selected(&selector, rate, buffer, width, targets);
+                |targets| CoreAudioDriver::open_with(&selector, rate, request, width, targets);
             match open(targets.clone()) {
                 Err(error @ AudioError::ChannelMap(_)) => {
                     let channels = setup.output_channels.clone().unwrap_or_default();
@@ -280,9 +338,9 @@ pub fn open_output(
             .map(|driver| Output::Device(Box::new(driver)))
         }
         Backend::Null(_) => {
-            // A listed device running at another rate stands for one that
-            // cannot be switched (the CoreAudio driver switches it, which
-            // can fail): deterministic, for the tests.
+            // A listed device at another rate than the run's: the run was
+            // not prepared at the device's rate ([`live_rate`]); no device's
+            // rate is switched (ADR 0036), as the CoreAudio driver refuses.
             let played = output.as_ref().map(|(_, d)| d).or_else(|| {
                 devices
                     .iter()
@@ -292,14 +350,7 @@ pub fn open_output(
                 && let Some(now) = device.rate
                 && now != rate
             {
-                return Err(start_failure(
-                    &device.name,
-                    rate,
-                    Some(now),
-                    Some(now),
-                    "null driver",
-                    "a listed device keeps its rate",
-                ));
+                return Err(rate_moved(&device.name, rate, now));
             }
             // As `CoreAudioDriver::open_selected` chooses, on the listed
             // device (the default output is taken to be that wide).
@@ -349,16 +400,20 @@ pub fn open_input(
     };
     let opened = match backend {
         Backend::CoreAudio => {
-            InputCapture::open(&selector, rate, buffer, INPUT_METERS).map(|mut capture| {
-                let channels = capture.meters().channels();
-                (Input::Device(capture), channels)
+            InputCapture::open_with(&selector, rate, setup.buffer_request(), INPUT_METERS).map(
+                |mut capture| {
+                    let channels = capture.meters().channels();
+                    (Input::Device(capture), channels)
+                },
+            )
+        }
+        Backend::Null(_) => {
+            choose_input(&device, device.rate.unwrap_or(rate), buffer).map(|choice| {
+                let channels = usize::from(choice.channels);
+                let (callback, meters) = InputCallback::new(channels, INPUT_METERS);
+                (Input::Null(Box::new(callback), meters), channels)
             })
         }
-        Backend::Null(_) => choose_input(&device, rate, buffer).map(|choice| {
-            let channels = usize::from(choice.channels);
-            let (callback, meters) = InputCallback::new(channels, INPUT_METERS);
-            (Input::Null(Box::new(callback), meters), channels)
-        }),
     };
     match opened {
         Ok(input) => Some(input),

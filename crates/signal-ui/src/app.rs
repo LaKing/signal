@@ -14,7 +14,7 @@ use signal_output::{Controller, realtime_with};
 use signal_project::session::{SessionRecorder, sink_of};
 use signal_project::{LoadError, Project, located};
 
-use crate::player::{Backend, Input, Output, open_input, open_output};
+use crate::player::{Backend, Input, Output, live_rate, open_input, open_output};
 use crate::setup::{Setup, Window};
 
 /// Why the devices are not listed again while playing.
@@ -128,6 +128,21 @@ pub fn realtime_config(setup: &Setup, rate: u32, seed: u64) -> RealtimeConfig {
     config
 }
 
+/// `config` for a device buffer of `buffer` frames: its block capacity,
+/// latency and hang period as [`RealtimeConfig::with_buffer`] sets them.
+fn sized(config: RealtimeConfig, rate: u32, seed: u64, buffer: u32) -> RealtimeConfig {
+    let sized = RealtimeConfig::with_buffer(rate, seed, u64::from(buffer));
+    RealtimeConfig {
+        engine: signal_engine::EngineConfig {
+            block_capacity: sized.engine.block_capacity,
+            ..config.engine
+        },
+        buffer_frames: sized.buffer_frames,
+        latency_frames: sized.latency_frames,
+        ..config
+    }
+}
+
 /// A run started by [`start`].
 pub struct Started {
     /// The output, playing.
@@ -138,9 +153,11 @@ pub struct Started {
     pub recorder: SessionRecorder,
     /// The Setup's input, metered, and its channels.
     pub input: Option<(Input, usize)>,
-    /// The project's sample rate.
+    /// The rate the run plays at: the output's (ADR 0036), which the
+    /// session records.
     pub rate: u32,
-    /// The buffer requested.
+    /// The buffer the device runs at (ADR 0036: the Setup's, or the
+    /// device's own while it runs for another app).
     pub buffer: u32,
     /// How the workers are scheduled.
     pub scheduling: Scheduling,
@@ -148,7 +165,8 @@ pub struct Started {
 
 /// Plays `plan` (of `project`, `width` sink channels) from frame 0 with the
 /// Setup: its output and channel map, buffer, CPU workers, wake policy, and
-/// its input, metered. Notes on the run (the channel map, the input) go to
+/// its input, metered, at the rate the output runs at (ADR 0036). Notes on
+/// the run (the rate, the channel map, the input) go to
 /// `notes`; the error is the refusal to show.
 #[allow(clippy::too_many_arguments)]
 pub fn start(
@@ -161,10 +179,18 @@ pub fn start(
     width: usize,
     notes: &mut Vec<String>,
 ) -> Result<Started, String> {
-    let (rate, seed, buffer) = (project.sample_rate, project.seed, setup.buffer);
+    // ADR 0036 (the owner's decision of 2026-10-23): the device's clock is
+    // the run's. The run plays at the rate the output runs at, never
+    // switching it; the project's `sample_rate` is its renders' rate.
+    let (rate, notice) = live_rate(backend, devices, setup, project.sample_rate, &project.name);
+    notes.extend(notice);
+    let seed = project.seed;
     let mut output = open_output(backend, devices, setup, rate, width, seed, notes)?;
+    // ADR 0036: the engine is sized for the period the device runs at (its
+    // own while it runs for another app).
+    let buffer = output.period().unwrap_or(setup.buffer);
     plan.version = 0;
-    let config = realtime_config(setup, rate, seed);
+    let config = sized(realtime_config(setup, rate, seed), rate, seed, buffer);
     let (runner, controller) =
         realtime_with(&plan, registry, config, Some(rt_thread::mach_semaphores))
             .map_err(|error| error.to_string())?;

@@ -1,6 +1,6 @@
 # ADR 0011: Audio I/O via cpal behind a driver trait
 
-- **Status:** Accepted. Amended by ADR 0022 (M2.7-9): the driver trait and the null driver live in `signal-output`, with the audio adapter.
+- **Status:** Accepted. Amended by ADR 0022 (M2.7-9): the driver trait and the null driver live in `signal-output`, with the audio adapter. Amended by ADR 0036 (2026-10-23): a live run plays at the rate the output device runs at, never switching it, and a device that runs for another app keeps its buffer.
 - **Date:** 2026-10-11
 
 ## Context

@@ -4,6 +4,7 @@
 import { ChannelMeter, blocksFromFrame } from '../lib/ballistics.js';
 import { formatValue } from '../lib/format.js';
 import { clamp } from '../lib/taper.js';
+import { ariaShortcuts, keyCommand } from '../lib/keys.js';
 import { findMeter } from '../signal-ui.js';
 import { SignalElement, bindAddresses, numberAttribute } from './base.js';
 
@@ -119,13 +120,15 @@ export class SignalMeter extends SignalElement {
     this.subscribed = null;
   }
 
+  /** The `meter` scope's keys (ui/lib/keys.default.js): what it shows, nothing is sent. */
   onKey(event) {
     const view = this.floor;
-    const steps = { ArrowUp: 6, ArrowDown: -6, PageUp: 24, PageDown: -24 };
-    if (event.key in steps) this.view = clamp(view + steps[event.key], FLOORS[0], FLOORS[1]);
-    else if (event.key === 'Home') this.view = FLOORS[0];
-    else if (event.key === 'End') this.view = null;
-    else if (event.key === 'Enter' || event.key === ' ' || event.key === 'Delete') this.clearClip();
+    const command = keyCommand('meter', event)?.id;
+    const steps = { 'meter.floor_up': 6, 'meter.floor_down': -6, 'meter.floor_page_up': 24, 'meter.floor_page_down': -24 };
+    if (command in steps) this.view = clamp(view + steps[command], FLOORS[0], FLOORS[1]);
+    else if (command === 'meter.floor_lowest') this.view = FLOORS[0];
+    else if (command === 'meter.floor_default') this.view = null;
+    else if (command === 'meter.clear_clip') this.clearClip();
     else return false;
     this.drawScale();
     this.update();
@@ -151,7 +154,7 @@ export class SignalMeter extends SignalElement {
     const label = this.getAttribute('label') ?? '';
     this.$('.label').textContent = label;
     if (!this.hasAttribute('aria-label')) this.setAttribute('aria-label', label || `meter ${bindAddresses(this)[0] ?? `channel ${numberAttribute(this, 'channel') ?? 0}`}`);
-    this.setAttribute('aria-keyshortcuts', 'Enter Space Delete');
+    this.setAttribute('aria-keyshortcuts', ariaShortcuts('meter'));
     this.setAttribute('aria-valuemin', String(floor));
     this.setAttribute('aria-valuemax', '0');
     // aria-valuenow must be a number: silence (−∞) reads as the floor.

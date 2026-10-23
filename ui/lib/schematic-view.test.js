@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  IDENTITY, MAX_SCALE, MIN_SCALE, compose, fit, focus, keyView, pan, screenRect, toLocal, toScreen, uncompose, wheelFactor, zoomAt,
+  IDENTITY, MAX_SCALE, MIN_SCALE, commandView, compose, fit, focus, pan, screenRect, toLocal, toScreen, uncompose, wheelFactor, zoomAt,
 } from './schematic-view.js';
 
 const close = (a, b, message) => assert.ok(Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b)), `${message}: ${a} vs ${b}`);
@@ -105,12 +105,13 @@ test('wheel and keys', () => {
   close(wheelFactor(3, { deltaMode: 1 }), wheelFactor(48), 'lines are 16 pixels');
   const viewport = { w: 400, h: 200 };
   const bounds = { x: 0, y: 0, w: 100, h: 50 };
-  assert.ok(keyView(IDENTITY, '+', viewport, bounds).k > 1);
-  assert.ok(keyView(IDENTITY, '−', viewport, bounds).k < 1);
-  assert.deepEqual(keyView(IDENTITY, '0', viewport, bounds), fit(bounds, viewport));
-  assert.deepEqual(keyView(IDENTITY, 'ArrowLeft', viewport, bounds), { k: 1, x: 40, y: 0 });
-  assert.deepEqual(keyView(IDENTITY, 'ArrowDown', viewport, bounds), { k: 1, x: 0, y: -20 });
-  assert.equal(keyView(IDENTITY, 'a', viewport, bounds), null);
+  assert.ok(commandView(IDENTITY, 'schematic.zoom_in', viewport, bounds).k > 1);
+  assert.ok(commandView(IDENTITY, 'schematic.zoom_out', viewport, bounds).k < 1);
+  assert.deepEqual(commandView(IDENTITY, 'schematic.fit', viewport, bounds), fit(bounds, viewport));
+  assert.deepEqual(commandView(IDENTITY, 'schematic.pan_left', viewport, bounds), { k: 1, x: 40, y: 0 });
+  assert.deepEqual(commandView(IDENTITY, 'schematic.pan_down', viewport, bounds), { k: 1, x: 0, y: -20 });
+  assert.deepEqual(commandView(IDENTITY, 'schematic.page_down', viewport, bounds), { k: 1, x: 0, y: -viewport.h * 0.875 });
+  assert.equal(commandView(IDENTITY, 'schematic.trace', viewport, bounds), null);
 });
 
 test('a fit can keep clear of a bar at the top and of labels at the sides', () => {

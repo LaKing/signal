@@ -1602,78 +1602,70 @@ fn idle(rig: &mut Rig, ms: u64) {
 
 /// The `app` push whose `playing` is `playing`.
 fn app_playing(rig: &mut Rig, ws: &mut common::Ws, playing: bool) -> Value {
+    // `app` is pushed on a change only, so a run that started before this
+    // client said hello is not pushed to it (in a release build the start
+    // can win that race over TCP): ask for the state too, as Signal.app's
+    // window does when it connects, and take the reply or a push.
+    common::send(ws, json!({"type": "app.get"}));
     rig.wait(ws, "app", |got| {
         got.of("app").filter(|a| a["playing"] == playing).cloned()
     })
 }
 
-/// The incident of 2026-10-22: the default output ran at another rate than
-/// the project's and could not be switched, and the window said only
-/// "Unknown property". Now it says which rates, waits for the output
-/// without trying the same one again, and plays when it runs at the
-/// project's rate (switched in Audio MIDI Setup); a stream the audio system
-/// stops while playing (its rate changed) does the same; a deliberate stop
-/// holds.
-fn a_run_stopped_by_the_device_plays_when_it_is_back(transport: Transport) {
+/// The owner's decision of 2026-10-23 (ADR 0036): the device's clock is the
+/// run's. The default output runs at 44.1 kHz and the project is written
+/// for 48 kHz: it plays at 44.1 kHz, never switching the device, with a
+/// notice (the incident of 2026-10-22 refused it). A stream the audio
+/// system stops while playing (its rate changed) plays again at the
+/// output's new rate; a deliberate stop holds.
+fn a_project_plays_at_the_rate_of_the_output(transport: Transport) {
     let mut rig = app_rig_listing("device-wait", transport, None, true, listing_at(44_100));
     let (mut ws, _) = rig.client();
-    let app = rig.request(&mut ws, 1, json!({"type": "app.get"}), "app");
-    assert_eq!(app["playing"], false);
-    let message = app["message"].as_str().unwrap();
+    let app = app_playing(&mut rig, &mut ws, true);
+    assert_eq!(rig.host().sample_rate(), 44_100);
+    let notes = app["notes"].as_array().unwrap();
     assert!(
-        message.starts_with(
-            "the device 'Null Out' runs at 44100 Hz and could not be switched to 48000 Hz (null driver: a listed device keeps its rate); set it to 48000 Hz in Audio MIDI Setup, or set sample_rate = 44100 in project.toml"
-        ),
-        "{message}"
+        notes.iter().any(|n| n
+            .as_str()
+            .is_some_and(|n| n.starts_with("'Null Out' runs at 44100 Hz; ")
+                && n.ends_with(" is written for 48000 Hz and plays at 44100 Hz"))),
+        "{notes:?}"
     );
-    assert!(
-        message.ends_with("; Signal plays again once the output runs at 48000 Hz"),
-        "{message}"
-    );
-    // The same output is not tried again.
-    idle(&mut rig, 1_300);
-    assert!(rig.host().controller().is_none());
-    // Switched to the project's rate: it plays from frame 0.
+    // The audio system stops the stream (the rate changed while playing):
+    // it plays again, at the new rate.
     rig.host().set_null_devices(listing_at(48_000));
+    rig.host().fail_output(
+        "the device 'Null Out' changed its sample rate to 48000 Hz while playing at 44100 Hz",
+    );
+    let app = app_playing(&mut rig, &mut ws, false);
+    assert_eq!(
+        app["message"],
+        "the device 'Null Out' changed its sample rate to 48000 Hz while playing at 44100 Hz; stopped, Signal tries the output again in a moment"
+    );
     let app = app_playing(&mut rig, &mut ws, true);
     assert_eq!(
         app["message"],
         "the output runs at 48000 Hz: playing again from frame 0"
     );
-    // The audio system stops the stream (the rate changed while playing).
-    rig.host().set_null_devices(listing_at(44_100));
-    rig.host().fail_output(
-        "the device 'Null Out' changed its sample rate to 44100 Hz while playing at 48000 Hz",
-    );
-    let app = app_playing(&mut rig, &mut ws, false);
-    assert_eq!(
-        app["message"],
-        "the device 'Null Out' changed its sample rate to 44100 Hz while playing at 48000 Hz; stopped, Signal plays again once the output runs at 48000 Hz"
-    );
-    rig.host().set_null_devices(listing_at(48_000));
-    app_playing(&mut rig, &mut ws, true);
+    assert_eq!(rig.host().sample_rate(), 48_000);
     // Stopped on purpose: the device coming back does not play it.
-    rig.host().set_null_devices(listing_at(44_100));
     rig.host()
         .fail_output("the device 'Null Out' went away while playing");
     app_playing(&mut rig, &mut ws, false);
     rig.request(&mut ws, 2, json!({"type": "transport.stop"}), "transport");
-    rig.host().set_null_devices(listing_at(48_000));
+    rig.host().set_null_devices(listing_at(44_100));
     idle(&mut rig, 1_300);
     assert!(rig.host().controller().is_none(), "a deliberate stop holds");
     rig.finish();
 }
 
-/// Review of 2026-10-23: an output already at the project's rate when the
-/// run stopped (a rate switched away and back, a device busy for a moment)
-/// is tried once at the next look; a try that fails then waits for a change
-/// (no retry every second); a change of the project's files (its
-/// `sample_rate`) is tried too.
-fn a_device_back_at_the_rate_is_tried_once(transport: Transport) {
+/// Review of 2026-10-23: an output that is there when the run stopped (a
+/// rate switched away and back, a device busy for a moment) is tried once
+/// at the next look, at the rate it runs at then (ADR 0036).
+fn a_device_back_is_tried_once(transport: Transport) {
     let mut rig = app_rig_listing("device-once", transport, None, true, listing_at(48_000));
     let (mut ws, _) = rig.client();
     app_playing(&mut rig, &mut ws, true);
-    // The rate went away and came back before the stream was looked at.
     rig.host()
         .fail_output("the device 'Null Out' changed its sample rate while playing at 48000 Hz");
     let app = app_playing(&mut rig, &mut ws, false);
@@ -1686,29 +1678,22 @@ fn a_device_back_at_the_rate_is_tried_once(transport: Transport) {
         app["message"],
         "the output runs at 48000 Hz: playing again from frame 0"
     );
-    // Stopped while the device runs at 44.1 kHz: the project's sample_rate
-    // set to it in project.toml plays.
+    // Stopped while the device runs at 44.1 kHz: it plays at 44.1 kHz,
+    // the project's sample_rate unchanged.
     rig.host().set_null_devices(listing_at(44_100));
     rig.host().fail_output(
         "the device 'Null Out' changed its sample rate to 44100 Hz while playing at 48000 Hz",
     );
     app_playing(&mut rig, &mut ws, false);
-    idle(&mut rig, 1_300);
-    assert!(
-        rig.host().controller().is_none(),
-        "nothing changed: not tried"
-    );
-    let file = rig.dir.join("project.toml");
-    let text = fs::read_to_string(&file).unwrap();
-    fs::write(
-        &file,
-        text.replace("sample_rate = 48000", "sample_rate = 44100"),
-    )
-    .unwrap();
     let app = app_playing(&mut rig, &mut ws, true);
     assert_eq!(
         app["message"],
         "the output runs at 44100 Hz: playing again from frame 0"
+    );
+    let text = fs::read_to_string(rig.dir.join("project.toml")).unwrap();
+    assert!(
+        text.contains("sample_rate = 48000"),
+        "the file is not changed"
     );
     rig.finish();
 }
@@ -1743,9 +1728,9 @@ fn signal_ui_keeps_a_run_whose_output_stopped(transport: Transport) {
 }
 
 both!(
-    a_device_back_at_the_rate_is_tried_once,
+    a_device_back_is_tried_once,
     signal_ui_keeps_a_run_whose_output_stopped,
-    a_run_stopped_by_the_device_plays_when_it_is_back,
+    a_project_plays_at_the_rate_of_the_output,
     it_plays_while_switched_on,
     power_off_stops_and_on_restores,
     a_client_connecting_while_off_is_told_and_gets_no_frames,

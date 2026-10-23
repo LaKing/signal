@@ -59,7 +59,7 @@ The tests include `THIRD-PARTY-NOTICES.md`: it must match `Cargo.lock`, and ever
 6. **Metrics never decide quality.** Present renders and metrics; a human records the verdict.
 7. **Dependencies** come only from the root `[workspace.dependencies]`. Their licences must be permissive (MIT, Apache-2.0, BSD, ISC, Zlib, Unicode); MPL-2.0 only with a note; never GPL (ADR 0031). Adding a crate is an operator step: edit the root `Cargo.toml`, then run `./install.sh`.
 8. **Don't build ahead of the roadmap** ([`docs/roadmap.md`](docs/roadmap.md)).
-9. **`unsafe` is denied** workspace-wide, except in three audited modules, each with its own ADR.
+9. **`unsafe` is denied** workspace-wide, except in four audited modules, each with its own ADR.
 
 Use the terminology of [`docs/00-vision.md`](docs/00-vision.md) §3a: Project, Module, Primitive, Composite, Instance, Port, Connection, Parameter, Preset, Library, Setup.
 

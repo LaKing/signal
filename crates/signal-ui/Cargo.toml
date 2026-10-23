@@ -30,6 +30,9 @@ signal-audio = { workspace = true }
 # The Setup file.
 serde = { workspace = true }
 toml = { workspace = true }
+# ADR 0034: the keyboard shortcuts file (keys.toml), read with its places
+# and edited with its comments kept.
+toml_edit = { workspace = true }
 # The protocol's control messages.
 serde_json = { workspace = true }
 tungstenite = { workspace = true }

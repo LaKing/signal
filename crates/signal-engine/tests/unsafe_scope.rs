@@ -1,5 +1,6 @@
-//! AGENTS.md rule 9 (ADR 0017, ADR 0019 §4, ADR 0020): `unsafe` code appears
-//! only in the three audited modules, and `#![allow(unsafe_code)]` only there.
+//! AGENTS.md rule 9 (ADR 0017, ADR 0019 §4, ADR 0020, ADR 0036): `unsafe`
+//! code appears only in the four audited modules, and `#![allow(unsafe_code)]`
+//! only there.
 //! Every `.rs` file under `crates/` and `lab/` is read; comment lines are
 //! skipped, so prose may name the word.
 
@@ -7,10 +8,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// The audited modules, relative to the repository root.
-const AUDITED: [&str; 3] = [
+const AUDITED: [&str; 4] = [
     "crates/signal-contract/src/alloc_counter.rs",
     "crates/signal-audio/src/rt_thread.rs",
     "crates/signal-engine/src/shared.rs",
+    "crates/signal-audio/src/device_props.rs",
 ];
 
 fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
@@ -79,10 +81,57 @@ fn unsafe_appears_only_in_the_audited_modules() {
         offenders.is_empty(),
         "the keyword outside the audited modules:\n{offenders:#?}"
     );
-    // The three audited modules do use it.
+    // The four audited modules do use it.
     for module in AUDITED {
         assert!(audited_found.iter().any(|f| f == module), "{module}");
     }
+}
+
+/// The lines of `text` that use the keyword without a comment holding
+/// `SAFETY:` right above them (attributes may stand between), and how many
+/// lines use it.
+fn without_safety_comments(text: &str) -> (usize, Vec<String>) {
+    let keyword = concat!("un", "safe");
+    let lines: Vec<&str> = text.lines().map(str::trim_start).collect();
+    let mut uses = 0;
+    let mut missing = Vec::new();
+    for (n, line) in lines.iter().enumerate() {
+        if line.starts_with("//") || !has_keyword(line, keyword) {
+            continue;
+        }
+        uses += 1;
+        let mut above = lines[..n]
+            .iter()
+            .rev()
+            .skip_while(|l| l.starts_with("#["))
+            .take_while(|l| l.starts_with("//"));
+        if !above.any(|l| l.contains("SAFETY:")) {
+            missing.push(format!("{}: {line}", n + 1));
+        }
+    }
+    (uses, missing)
+}
+
+/// ADR 0036: every use of the keyword in `device_props.rs` follows a
+/// `SAFETY:` comment, and the module only reads: it never sets a property.
+#[test]
+fn device_props_only_reads_with_safety_comments() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let text = fs::read_to_string(root.join(AUDITED[3])).unwrap();
+    let (uses, missing) = without_safety_comments(&text);
+    assert!(uses >= 1, "device_props.rs uses the keyword {uses} times");
+    assert!(
+        missing.is_empty(),
+        "without a SAFETY comment:\n{missing:#?}"
+    );
+    let code: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect();
+    assert!(
+        !code.iter().any(|l| l.contains("SetPropertyData")),
+        "device_props.rs sets a property"
+    );
 }
 
 /// ADR 0019 §4 (M2.6-3): every line of `rt_thread.rs` that uses the keyword

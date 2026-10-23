@@ -164,33 +164,39 @@ export function wheelFactor(deltaY, { deltaMode = 0, pinch = false } = {}) {
   return Math.exp(-pixels * (pinch ? 0.01 : 0.002));
 }
 
-/** The keys' step: + and − zoom by this about the centre, arrows pan a tenth of the viewport. */
+/** The keys' step: zooming in and out from the keyboard is by this about the centre; the arrows pan a tenth of the viewport. */
 export const KEY_ZOOM = 1.25;
 
+/** A page of panning (Page Up, Page Down): this share of the viewport's height. */
+export const PAGE_SHARE = 0.875;
+
 /**
- * The view after key `key` (`+`, `=`, `-`, `−`, `0`, the arrows) in a
- * `viewport`; `bounds` is what `0` fits. Null for another key.
+ * The view after the schematic's view command `id` (ui/lib/keys.default.js,
+ * scope `schematic`: `schematic.zoom_in`, `zoom_out`, `fit`, `pan_*`,
+ * `page_up`, `page_down`) in a `viewport`; `bounds` is what `fit` fits.
+ * Null for another command.
  */
-export function keyView(view, key, viewport, bounds) {
+export function commandView(view, id, viewport, bounds) {
   const centre = { x: viewport.w / 2, y: viewport.h / 2 };
-  switch (key) {
-    case '+':
-    case '=':
+  switch (id) {
+    case 'schematic.zoom_in':
       return zoomAt(view, KEY_ZOOM, centre);
-    case '-':
-    case '−':
-    case '_':
+    case 'schematic.zoom_out':
       return zoomAt(view, 1 / KEY_ZOOM, centre);
-    case '0':
+    case 'schematic.fit':
       return fit(bounds, viewport);
-    case 'ArrowLeft':
+    case 'schematic.pan_left':
       return pan(view, viewport.w / 10, 0);
-    case 'ArrowRight':
+    case 'schematic.pan_right':
       return pan(view, -viewport.w / 10, 0);
-    case 'ArrowUp':
+    case 'schematic.pan_up':
       return pan(view, 0, viewport.h / 10);
-    case 'ArrowDown':
+    case 'schematic.pan_down':
       return pan(view, 0, -viewport.h / 10);
+    case 'schematic.page_up':
+      return pan(view, 0, viewport.h * PAGE_SHARE);
+    case 'schematic.page_down':
+      return pan(view, 0, -viewport.h * PAGE_SHARE);
     default:
       return null;
   }

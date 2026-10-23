@@ -14,7 +14,8 @@ signal-output = { workspace = true }
 # `Frame` in the input meters.
 signal-core = { workspace = true }
 cpal = { workspace = true }
-# ADR 0019 §4: real-time worker threads (rt_thread.rs only).
+# ADR 0019 §4: real-time worker threads (rt_thread.rs); ADR 0036: a device's
+# shared state, read only (device_props.rs).
 objc2-core-audio = { workspace = true }
 libc = { workspace = true }
 # The callback's stop request and Runner return (one-slot SPSC queues).

@@ -88,3 +88,49 @@ fn a_stop_request_hands_the_runner_back_and_silence_follows() {
     assert!(out.iter().all(|&x| x == 0.0));
     assert!(control.take_runner().is_none());
 }
+
+/// ADR 0036 §4: with a fade-out, a stop request ramps the output down over
+/// the fade (the Runner running on), hands the Runner back once it has
+/// faded out, and silence follows; a Runner asked to fade in rises from
+/// silence. The steps stay small: no click on either edge.
+#[test]
+fn a_fade_out_runs_before_the_runner_goes_back() {
+    let (mut runner, reference, rate) = kick(4_800);
+    let fade = signal_output::fade::fade_frames(rate);
+    runner.fade_in(fade);
+    let stats = Arc::new(CallbackStats::default());
+    let (callback, mut control) =
+        OutputCallback::new(runner, ChannelMap::new(2, 2), 128, rate, stats);
+    let mut callback = callback.with_fade_out(fade);
+    let mut played = Vec::new();
+    let mut out = vec![0.0f32; 100 * 2];
+    // 40 callbacks of 100 frames, the stop requested after 30.
+    for n in 0..40 {
+        if n == 30 {
+            control.request_stop();
+        }
+        callback.fill(&mut out);
+        played.extend_from_slice(&out);
+    }
+    let runner = control.take_runner().expect("the runner comes back");
+    let fade = fade as usize;
+    // Whole callbacks: the one the fade ends in is the last it runs.
+    assert_eq!(
+        runner.next_frame().0,
+        3_000 + fade.div_ceil(100) as u64 * 100,
+        "it ran on for the fade"
+    );
+    let left: Vec<f32> = played.chunks(2).map(|f| f[0]).collect();
+    let wanted: Vec<f32> = reference.chunks(2).map(|f| f[0]).collect();
+    // The rise: from 0, below the reference in magnitude, then exact.
+    assert_eq!(left[0], 0.0);
+    for i in 0..fade {
+        assert!(left[i].abs() <= wanted[i].abs() + 1e-7, "frame {i}");
+    }
+    assert_eq!(&left[fade..3_000], &wanted[fade..3_000]);
+    // The fall, then silence.
+    for i in 3_000..3_000 + fade {
+        assert!(left[i].abs() <= wanted[i].abs() + 1e-7, "frame {i}");
+    }
+    assert!(left[3_000 + fade..].iter().all(|&x| x == 0.0));
+}

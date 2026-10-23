@@ -83,7 +83,9 @@ import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRec
 import { hitTest, instanceHit, portHit, reselect } from '../lib/schematic-hit.js';
 import { cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
 import { LEVEL_RATE, SLOTS, candidates, levelFraction, levelPlan } from '../lib/schematic-levels.js';
-import { IDENTITY, fit, focus, keyView, matrix, pan, toLocal, toScreen, wheelFactor, zoomAt } from '../lib/schematic-view.js';
+import { IDENTITY, commandView, fit, focus, matrix, pan, toLocal, toScreen, wheelFactor, zoomAt } from '../lib/schematic-view.js';
+import { keyCommand, keymap, shownKeys, wheelCommand } from '../lib/keys.js';
+import { registerWheel, takesWheel, verticalDelta } from './keyboard.js';
 import { COUNT_UNITS, LABEL_PX, PITCH_PX, READ_PX, frameSides, insideNote, levelCounts, levelLabels, outsideNote, pinText, setMeasure } from '../lib/schematic-labels.js';
 import { bundleClick, bundleText, bundleWires, countPlaces, countsShown, fanOf, nearestWire } from '../lib/schematic-bundle.js';
 import { collapsedAt, exportFacts, groupAnchors, labelDetail, notesAt, portGroups } from '../lib/schematic-groups.js';
@@ -442,6 +444,7 @@ export class SignalSchematic extends HTMLElement {
     });
     this.svg.addEventListener('dblclick', (e) => this.doubleClick(e));
     this.svg.addEventListener('wheel', (e) => this.wheel(e), { passive: false });
+    registerWheel(this);
     // Safari's pinch.
     this.svg.addEventListener('gesturestart', (e) => this.pinch(e, true));
     this.svg.addEventListener('gesturechange', (e) => this.pinch(e, false));
@@ -1544,10 +1547,15 @@ export class SignalSchematic extends HTMLElement {
     this.setView(zoomAt(this.view, factor, at ?? { x: this.viewport.w / 2, y: this.viewport.h / 2 }));
   }
 
+  /** The wheel zooms (`schematic.zoom`): the schematic fills its window, so it owns the wheel (ADR 0034); smaller, in a page, it takes it once clicked. */
   wheel(event) {
+    if (!takesWheel(this, event)) return;
     event.preventDefault();
+    if (wheelCommand('schematic', event)?.id !== 'schematic.zoom') return;
     this.closeMenu();
-    this.zoomBy(wheelFactor(event.deltaY, { deltaMode: event.deltaMode, pinch: event.ctrlKey }), this.point(event));
+    const delta = verticalDelta(event);
+    if (!delta) return;
+    this.zoomBy(wheelFactor(delta, { deltaMode: event.deltaMode, pinch: event.ctrlKey }), this.point(event));
   }
 
   pinch(event, start) {
@@ -1559,38 +1567,49 @@ export class SignalSchematic extends HTMLElement {
     if (Number.isFinite(factor) && factor > 0) this.zoomBy(factor, this.point(event));
   }
 
+  /** The `schematic` scope's keys (ui/lib/keys.default.js), then Edit patch's (`schematic_edit`). */
   key(event) {
     // The menu's keys are its own (it stops them too): never the selection's Delete or ⌘Z.
     if (event.composedPath().includes(this.menu.list)) return;
     const own = event.composedPath()[0] === this;
-    // Escape ends a trace first (ADR 0030 §1), then closes the innermost
-    // open composite in place (2026-10-22; a click that opens one also
-    // selects it), then lets the selection go (the add palette's Escape is
-    // the palette's), then leaves Edit patch.
-    if (own && event.key === 'Escape' && this.tracing && !this.editor.placing) {
+    const command = keyCommand('schematic', event)?.id;
+    // Edit patch is the child scope: its chords come first, but for the
+    // built-in Escape order (a trace, an open composite and the selection go
+    // before Edit patch is left).
+    if (this.editor.editing) {
+      const edit = keyCommand('schematic_edit', event)?.id;
+      const cascade = edit === 'schematic_edit.leave' && command === 'schematic.back';
+      if (edit && !cascade && this.editor.key(event)) return;
+    }
+    const back = own && command === 'schematic.back' && !this.editor.placing;
+    // Escape (`schematic.back`) ends a trace first (ADR 0030 §1), then
+    // closes the innermost open composite in place (2026-10-22; a click
+    // that opens one also selects it), then lets the selection go (the add
+    // palette's Escape is the palette's), then leaves Edit patch.
+    if (back && this.tracing) {
       event.preventDefault();
       this.endTrace();
       return;
     }
-    if (own && event.key === 'Escape' && !this.editor.placing && this.drawn && breadcrumbs(this.drawn).length > 1) {
+    if (back && this.drawn && breadcrumbs(this.drawn).length > 1) {
       event.preventDefault();
       this.closeInPlace(breadcrumbs(this.drawn).at(-1).path);
       return;
     }
-    // T: trace the selection (the part selected last; several pins, such as a collapsed group's, together).
-    if (own && !event.metaKey && !event.ctrlKey && !event.altKey && event.key.toLowerCase() === 't') {
+    // Trace the selection (the part selected last; several pins, such as a collapsed group's, together).
+    if (own && command === 'schematic.trace') {
       event.preventDefault();
       if (this.selection) this.startTrace(traceTarget(this.selected));
-      else this.say('Trace: select a pin, a wire or a box first, then press T');
+      else this.say(`Trace: select a pin, a wire or a box first, then press ${shownKeys(keymap(), 'schematic.trace') || 'T'}`);
       return;
     }
-    if (own && event.key === 'Escape' && this.selected.length && !this.editor.placing) {
+    if (back && this.selected.length) {
       event.preventDefault();
       this.select([]);
       return;
     }
-    // ⌘A (Ctrl+A elsewhere): every instance and connection of the level shown.
-    if (own && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'a') {
+    // Every instance and connection of the level shown.
+    if (own && command === 'schematic.select_all') {
       event.preventDefault();
       this.selectAll();
       return;
@@ -1600,33 +1619,33 @@ export class SignalSchematic extends HTMLElement {
     if (this.editor.key(event)) return;
     // Keys of the sidebar's sliders and buttons and the bar's are theirs (an
     // event from the shadow tree reaches this listener retargeted to the host).
-    if (!own) return;
+    if (!own || !command) return;
     // The context menu from the keyboard, for the selection (else the background).
-    if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
+    if (command === 'schematic.context_menu') {
       event.preventDefault();
       this.keyboardMenu();
       return;
     }
-    if (event.key === 'Escape') {
+    if (command === 'schematic.back') {
       event.preventDefault();
       return;
     }
-    // 0 goes out to the top level as its breadcrumb does, every composite closed; + and − zoom about the centre.
-    if (event.key === '0') {
+    // Out to the top level as its breadcrumb does, every composite closed.
+    if (command === 'schematic.top_level') {
       event.preventDefault();
       this.closeMenu();
       this.goTo('');
       return;
     }
-    const view = keyView(this.view, event.key, this.viewport, this.rootBounds());
-    if (view && view.k !== this.view.k) {
+    const view = commandView(this.view, command, this.viewport, this.rootBounds());
+    if (view && view.k !== this.view.k && command !== 'schematic.fit') {
       event.preventDefault();
       this.closeMenu();
       this.zoomBy(view.k / this.view.k);
       return;
     }
     if (view) {
-      // An arrow pans, as a pointer pan: nothing opens or closes.
+      // An arrow or a page pans, as a pointer pan: nothing opens or closes.
       event.preventDefault();
       this.closeMenu();
       this.setView(view);
