@@ -55,7 +55,8 @@ fn bundle_app_builds_a_signed_bundle() {
         .arg("--target-dir")
         .arg(&target)
         .arg("--out")
-        .arg(&out));
+        .arg(&out)
+        .env_remove("SIGNAL_SIGN_IDENTITY"));
     let app = out.join("Signal.app");
     let gui = app.join("Contents/MacOS/Signal");
     let cli = app.join("Contents/Helpers/signal");

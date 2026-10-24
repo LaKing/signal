@@ -3,7 +3,7 @@
 # Build Signal.app: the GUI (signal-app) as Contents/MacOS/Signal, the CLI
 # as Contents/Helpers/signal and the UI library (ui/, without its tests) as
 # Contents/Resources/ui, which both serve (ADR 0023), with LICENSE and
-# THIRD-PARTY-NOTICES.md in Contents/Resources (ADR 0031), signed ad hoc with the
+# THIRD-PARTY-NOTICES.md in Contents/Resources (ADR 0031), signed (ad hoc by default) with the
 # hardened runtime and the audio-input entitlement. (Not both binaries in
 # MacOS/: on the usual case-insensitive volume Signal and signal are one file.)
 #
@@ -12,10 +12,15 @@
 #   scripts/bundle-app.sh --target-dir DIR   build in DIR (else CARGO_TARGET_DIR,
 #                                            else .cargo/config.toml, as cargo does)
 #   scripts/bundle-app.sh --out DIR          write DIR/Signal.app instead of dist/
+#   scripts/bundle-app.sh --sign IDENTITY    sign with this keychain identity
+#                                            (else SIGNAL_SIGN_IDENTITY, else ad hoc)
 #
 # Builds with --locked --offline (devpanel seats have no network). The
 # binaries are taken from the target directory cargo reports, never a fixed
-# path. Needs no signing identity. Written for macOS's /bin/bash 3.2.
+# path. Needs no signing identity: ad hoc is the default. An ad hoc signature
+# changes with every build, so macOS asks for the microphone again after each
+# one; a keychain identity keeps the answer (start.sh picks one when it can).
+# Written for macOS's /bin/bash 3.2.
 set -euo pipefail
 
 die () { printf 'bundle-app: %s\n' "$*" >&2; exit 1; }
@@ -23,12 +28,14 @@ die () { printf 'bundle-app: %s\n' "$*" >&2; exit 1; }
 PROFILE=debug
 TARGET_DIR=
 OUT=
+SIGN=${SIGNAL_SIGN_IDENTITY:--}
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --release) PROFILE=release ;;
     --target-dir) [[ $# -ge 2 ]] || die "--target-dir needs a directory"; TARGET_DIR=$2; shift ;;
     --out) [[ $# -ge 2 ]] || die "--out needs a directory"; OUT=$2; shift ;;
-    -h|--help) sed -n '3,18p' "$0"; exit 0 ;;
+    --sign) [[ $# -ge 2 ]] || die "--sign needs an identity"; SIGN=$2; shift ;;
+    -h|--help) sed -n '3,24p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
   shift
@@ -171,12 +178,14 @@ printf '%s\n' \
 plutil -lint "$APP/Contents/Info.plist"
 
 # --- sign -------------------------------------------------------------------
-# Ad hoc, hardened runtime. The CLI first (it plays and lists devices too),
+# Ad hoc unless --sign names an identity, hardened runtime, no timestamp (it
+# would need the network). The CLI first (it plays and lists devices too),
 # then the bundle, whose seal covers it.
 ENTITLEMENTS=$ROOT/scripts/Signal.entitlements
-codesign --force --sign - --options runtime --entitlements "$ENTITLEMENTS" \
+codesign --force --sign "$SIGN" --timestamp=none --options runtime --entitlements "$ENTITLEMENTS" \
   --identifier hu.d250.signal.cli "$APP/Contents/Helpers/signal"
-codesign --force --sign - --options runtime --entitlements "$ENTITLEMENTS" "$APP"
+codesign --force --sign "$SIGN" --timestamp=none --options runtime --entitlements "$ENTITLEMENTS" "$APP"
 codesign --verify --deep --strict "$APP"
+[[ $SIGN == - ]] && SIGNED="ad hoc" || SIGNED="signed: $SIGN"
 
-echo "bundle-app: $APP ($PROFILE, version $VERSION, macOS $MINIMUM+, from $BIN)"
+echo "bundle-app: $APP ($PROFILE, version $VERSION, macOS $MINIMUM+, from $BIN, $SIGNED)"

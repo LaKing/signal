@@ -11,6 +11,9 @@
 #   ./start.sh --no-build ...       start the existing dist/Signal.app as it is
 #
 # A running Signal is asked to quit first, so the fresh build is what starts.
+# The build is signed with SIGNAL_SIGN_IDENTITY, else the keychain's first
+# "Apple Development" identity, else ad hoc: a stable identity keeps macOS's
+# microphone permission from one build to the next.
 # Run ./install.sh once on a new Mac (toolchain and dependencies); this script
 # builds offline and says so if something is missing. Written for macOS's
 # /bin/bash 3.2.
@@ -28,7 +31,7 @@ while [[ $# -gt 0 ]]; do
     --debug) PROFILE=debug ;;
     --no-build) BUILD=0 ;;
     --cli) CLI=1 ;;
-    -h|--help) sed -n '3,16p' "$0"; exit 0 ;;
+    -h|--help) sed -n '3,19p' "$0"; exit 0 ;;
     -*) die "unknown option: $1 (see ./start.sh --help)" ;;
     *) [[ -z $PROJECT ]] || die "give one project folder, not several"; PROJECT=$1 ;;
   esac
@@ -57,6 +60,9 @@ if [[ $BUILD == 1 ]]; then
 
   BUNDLE_ARGS=()
   [[ $PROFILE == release ]] && BUNDLE_ARGS+=(--release)
+  SIGN=${SIGNAL_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
+    | sed -n 's/^ *[0-9]*) \([0-9A-F]\{40\}\) "Apple Development: .*/\1/p' | head -1)}
+  [[ -n $SIGN ]] && BUNDLE_ARGS+=(--sign "$SIGN")
   say "building Signal.app ($PROFILE)"
   scripts/bundle-app.sh ${BUNDLE_ARGS[@]+"${BUNDLE_ARGS[@]}"} \
     || die "the build failed (offline). If dependencies changed, run ./install.sh"

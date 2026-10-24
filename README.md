@@ -77,7 +77,7 @@ git clone <this repository> signal && cd signal
 ./start.sh --cli projects/kick   # play it in the terminal instead (live reload)
 ```
 
-Step by step, `scripts/bundle-app.sh [--release]` builds `dist/Signal.app`. The GUI is `Contents/MacOS/Signal` and the CLI is `Contents/Helpers/signal`; both are signed ad hoc with the hardened runtime. `scripts/release.sh --out DIR` builds the release downloads. Builds run offline after `./install.sh`. Cargo's target directory is `/tmp/signal-project-target` (`.cargo/config.toml`); [`CONTRIBUTING.md`](CONTRIBUTING.md) explains why and how to override it.
+Step by step, `scripts/bundle-app.sh [--release]` builds `dist/Signal.app`. The GUI is `Contents/MacOS/Signal` and the CLI is `Contents/Helpers/signal`; both are signed with the hardened runtime, ad hoc unless `--sign IDENTITY` (or `SIGNAL_SIGN_IDENTITY`) names a keychain identity. `./start.sh` signs with the keychain's first Apple Development identity when there is one, so macOS keeps the microphone permission from one build to the next; release builds stay ad hoc. `scripts/release.sh --out DIR` builds the release downloads. Builds run offline after `./install.sh`. Cargo's target directory is `/tmp/signal-project-target` (`.cargo/config.toml`); [`CONTRIBUTING.md`](CONTRIBUTING.md) explains why and how to override it.
 
 ## The command line
 

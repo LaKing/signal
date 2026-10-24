@@ -60,7 +60,8 @@ PROJECTS_ZIP=Signal-$VERSION-projects.zip
 
 # --- the notice, then the build ---------------------------------------------
 node scripts/third-party-notices.mjs --check
-BUNDLE=(--release --out "$STAGE")
+# Releases are signed ad hoc (ADR 0031), whatever SIGNAL_SIGN_IDENTITY says.
+BUNDLE=(--release --out "$STAGE" --sign -)
 [[ -n $TARGET_DIR ]] && BUNDLE+=(--target-dir "$TARGET_DIR")
 scripts/bundle-app.sh "${BUNDLE[@]}"
 APP=$STAGE/Signal.app
