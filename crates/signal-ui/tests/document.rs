@@ -238,3 +238,153 @@ fn save_and_close_do_not_depend_on_a_pending_comparison() {
     );
     fs::remove_dir_all(&base).unwrap();
 }
+
+/// What the `.signal` file `file` holds in its `project.toml`, unpacked
+/// beside it.
+fn saved_toml(file: &Path) -> String {
+    let dir = file.with_extension("check");
+    let _ = fs::remove_dir_all(&dir);
+    archive::unpack(&fs::read(file).unwrap(), &dir).unwrap();
+    let text = fs::read_to_string(dir.join("project.toml")).unwrap();
+    fs::remove_dir_all(&dir).unwrap();
+    text
+}
+
+/// Refreshes until `held` save threads are held, at most 20 s.
+fn until_saves_held(document: &mut Document, held: usize) {
+    refresh_until(document, "a held save", |d| d.saves_held() == held);
+}
+
+/// Audit (save-blocks-control): a Save packs and writes on a thread of its
+/// own, so a refresh never waits for it (deterministic: the save is held
+/// after packing, and refreshes go on); its result is told by its ticket.
+/// A save that finishes after a newer edit (one it did not pack) never
+/// clears that edit; the next save does.
+#[test]
+fn a_save_never_holds_up_a_refresh_and_a_stale_one_keeps_newer_edits() {
+    let base = base("save-stale");
+    let pulse = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/pulse");
+    let file = base.join("pulse.signal");
+    archive::write_atomic(&file, &archive::pack(&pulse).unwrap()).unwrap();
+    let mut document = Document::open(&file, &base.join("Open")).unwrap();
+    let working = document.working().to_owned();
+    let toml = working.join("project.toml");
+    let text = fs::read_to_string(&toml).unwrap();
+
+    fs::write(&toml, text.replace("gain = 0.33", "gain = 0.4")).unwrap();
+    assert!(document.check());
+    document.hold_saves(true);
+    let ticket = document.start_save();
+    until_saves_held(&mut document, 1);
+    for _ in 0..100 {
+        assert!(document.refresh(), "edited until the save is written");
+    }
+    assert!(document.saving(), "no refresh waited for the save");
+    assert_eq!(document.saves_held(), 1);
+    assert!(document.take_saved().is_empty(), "not written yet");
+    assert!(saved_toml(&file).contains("gain = 0.33"));
+
+    // An edit after it packed: not in what it writes.
+    fs::write(&toml, text.replace("gain = 0.33", "gain = 0.45")).unwrap();
+    document.hold_saves(false);
+    refresh_until(&mut document, "the save written", |d| !d.saving());
+    assert_eq!(document.take_saved(), vec![(ticket, Ok(file.clone()))]);
+    assert!(saved_toml(&file).contains("gain = 0.4 }"));
+    assert!(document.edited(), "a stale save never clears a newer edit");
+    assert!(document.check(), "the newer edit is still to save");
+
+    // The next save writes it, and clears it.
+    let next = document.start_save();
+    assert_ne!(next, ticket);
+    refresh_until(&mut document, "the next save written", |d| !d.saving());
+    assert_eq!(document.take_saved(), vec![(next, Ok(file.clone()))]);
+    assert!(!document.edited());
+    assert!(!document.check());
+    assert!(saved_toml(&file).contains("gain = 0.45"));
+    assert_eq!(document.close(false), None);
+    fs::remove_dir_all(&base).unwrap();
+}
+
+/// Saves asked while one runs wait for it, in order; Saves asked while
+/// another waits to start share it (it packs the folder later than both
+/// were asked); a failed save is told, and the folder stays edited.
+#[test]
+fn saves_asked_while_one_runs_wait_and_share() {
+    let base = base("save-queue");
+    let pulse = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/pulse");
+    let file = base.join("pulse.signal");
+    archive::write_atomic(&file, &archive::pack(&pulse).unwrap()).unwrap();
+    let mut document = Document::open(&file, &base.join("Open")).unwrap();
+    let working = document.working().to_owned();
+    let toml = working.join("project.toml");
+    let text = fs::read_to_string(&toml).unwrap();
+
+    fs::write(&toml, text.replace("gain = 0.33", "gain = 0.4")).unwrap();
+    document.hold_saves(true);
+    let first = document.start_save();
+    until_saves_held(&mut document, 1);
+    fs::write(&toml, text.replace("gain = 0.33", "gain = 0.45")).unwrap();
+    let second = document.start_save();
+    let third = document.start_save();
+    assert_ne!(first, second);
+    assert_eq!(second, third, "a Save waiting to start is shared");
+    document.hold_saves(false);
+    document.finish_saves();
+    assert!(!document.saving());
+    assert_eq!(
+        document.take_saved(),
+        vec![(first, Ok(file.clone())), (second, Ok(file.clone()))]
+    );
+    assert!(!document.edited(), "the last save had every edit");
+    assert!(saved_toml(&file).contains("gain = 0.45"));
+
+    // A Save As into a folder that is not there fails, and is told.
+    fs::write(&toml, text.replace("gain = 0.33", "gain = 0.5")).unwrap();
+    let nowhere = base.join("missing/pulse.signal");
+    let failed = document.start_save_as(&nowhere);
+    document.finish_saves();
+    let told = document.take_saved();
+    assert_eq!(told.len(), 1);
+    assert_eq!(told[0].0, failed);
+    let message = told[0].1.as_ref().unwrap_err();
+    assert!(message.contains("was not saved"), "{message}");
+    assert!(document.check(), "still edited");
+    assert_eq!(document.file(), file, "still the file it was");
+    document.close(true);
+    fs::remove_dir_all(&base).unwrap();
+}
+
+/// Save, then close at once: close waits for the save, so the edits reach
+/// the file and the folder, saved, is removed; with Don't Save after it,
+/// the save still writes what it packed before the folder goes.
+#[test]
+fn close_finishes_a_pending_save() {
+    let base = base("save-close");
+    let pulse = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/pulse");
+    let file = base.join("pulse.signal");
+    archive::write_atomic(&file, &archive::pack(&pulse).unwrap()).unwrap();
+    for (discard, from, to) in [
+        (false, "gain = 0.33", "gain = 0.5"),
+        (true, "gain = 0.5", "gain = 0.6"),
+    ] {
+        let mut document = Document::open(&file, &base.join("Open")).unwrap();
+        let working = document.working().to_owned();
+        let toml = working.join("project.toml");
+        let text = fs::read_to_string(&toml).unwrap();
+        fs::write(&toml, text.replace(from, to)).unwrap();
+        document.hold_saves(true);
+        document.start_save();
+        until_saves_held(&mut document, 1);
+        // Released from another thread while close waits for the save.
+        let release = document.save_releaser();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            release();
+        });
+        assert_eq!(document.close(discard), None, "saved: removed");
+        releaser.join().unwrap();
+        assert!(!working.exists());
+        assert!(saved_toml(&file).contains(to), "discard {discard}");
+    }
+    fs::remove_dir_all(&base).unwrap();
+}

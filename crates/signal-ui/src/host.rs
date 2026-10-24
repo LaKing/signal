@@ -57,7 +57,7 @@ use signal_project::{Diagnostic, LoadError, PATTERNS, PROJECT_FILE, Project, loc
 use crate::PROTOCOL;
 use crate::app::{self, Status};
 use crate::bindings::{MAIN_PANEL, Targets, check, panel_content};
-use crate::document::{Document, project_name};
+use crate::document::{Document, Ticket, project_name};
 use crate::frames::{self, frame};
 use crate::keys::{self, Keys};
 use crate::panel::{Panel, Target, Written, after_write, ramp_frames, write_file, write_project};
@@ -454,6 +454,24 @@ impl ControlSink for Observed<'_> {
     }
 }
 
+/// What a finished save of the document is told to: Signal.app's window
+/// (its answer), or the client that sent `project.save` (`saved`, or
+/// `not-saved`, with its message's id).
+pub type SaveDone = Box<dyn FnOnce(Result<(), String>) + Send>;
+
+enum SaveWaiter {
+    Client { client: u64, id: Value },
+    Call(SaveDone),
+}
+
+/// A save of the document not yet answered: its ticket, the file of a Save
+/// As (recorded in the Setup when written), and whom to tell.
+struct SaveWait {
+    ticket: Ticket,
+    save_as: Option<PathBuf>,
+    waiter: SaveWaiter,
+}
+
 /// The protocol's host.
 pub struct Host {
     registry: Registry,
@@ -504,6 +522,8 @@ pub struct Host {
     open_root: PathBuf,
     /// App mode: the open `.signal` file and its working folder.
     document: Option<Document>,
+    /// App mode: the document's saves not yet answered, in the order asked.
+    saves: Vec<SaveWait>,
     /// Controls whose last write failed.
     failed: BTreeMap<(String, String), Failed>,
     /// Controls written while their live send was refused: the reload of
@@ -836,6 +856,7 @@ impl Host {
             temporary: config.temporary,
             open_root: PathBuf::new(),
             document: None,
+            saves: Vec::new(),
             failed: BTreeMap::new(),
             resend: BTreeSet::new(),
             port_edits: BTreeMap::new(),
@@ -890,9 +911,12 @@ impl Host {
     /// Signal.app exits: stops playing, records the window's size (when
     /// known) in the Setup and saves it. A `.signal` project's working
     /// folder is removed, unless it is edited and `discard` is false: then it
-    /// is kept, and the message says where. Returns what to tell the operator.
+    /// is kept, and the message says where. A save still running is
+    /// finished first (and answered), so that what it saves is not lost and
+    /// the folder is not removed under it. Returns what to tell the operator.
     pub fn close(&mut self, window: Option<Window>, discard: bool) -> Vec<String> {
         self.stop_app();
+        self.finish_saves();
         if let Some(document) = self.document.take() {
             let name = document.name();
             if let Some(kept) = document.close(discard) {
@@ -1150,6 +1174,7 @@ impl Host {
         if let Some(document) = self.document.as_mut() {
             document.refresh();
         }
+        self.answer_saves();
         let Some(mode) = self.app.as_mut() else {
             return;
         };
@@ -1744,6 +1769,8 @@ impl Host {
         if self.app.is_none() {
             return Err(app_only());
         }
+        // A save still running decides what is edited: finished first.
+        self.finish_saves();
         let edited = self.document.as_mut().is_some_and(Document::check);
         if edited && edits == Edits::Ask {
             return Err(fail(
@@ -1843,8 +1870,11 @@ impl Host {
     }
 
     /// App mode: the open project as the window shows it, its edited state
-    /// looked at now; `None` without one.
+    /// looked at now (after a save still running, which it waits for: the
+    /// window asks before a decision, the "Save changes?" prompt); `None`
+    /// without one.
     pub fn project_status(&mut self) -> Option<ProjectStatus> {
+        self.finish_saves();
         if let Some(document) = self.document.as_mut() {
             document.check();
         }
@@ -1913,50 +1943,168 @@ impl Host {
         Ok(())
     }
 
-    /// Save of a `.signal` project: the working folder written back to the
-    /// file atomically. A folder project has nothing to write here (its
-    /// parameters are written by `retry`).
+    /// Save of a `.signal` project, waiting for it: the working folder
+    /// written back to the file atomically. A folder project has nothing to
+    /// write here (its parameters are written by `retry`). The control
+    /// thread's Save is [`Host::save_document_then`].
     pub fn save_document(&mut self) -> Result<(), String> {
-        match self.document.as_mut() {
+        let result = match self.document.as_mut() {
             Some(document) => document.save(),
             None => Ok(()),
-        }
-    }
-
-    /// Save As (app mode): the project written to the `.signal` file
-    /// `file`, which it is from then on (the Setup's last project). A folder
-    /// project's folder is left as it is: the project is opened again, from
-    /// the new file, stopped.
-    pub fn save_as(&mut self, file: &Path) -> Result<(), String> {
-        if self.app.is_none() {
-            return Err(app_only().message);
-        }
-        let saved = match self.document.as_mut() {
-            Some(document) => document.save_as(file),
-            None => {
-                let bytes = archive::pack(&self.dir)
-                    .map_err(|e| format!("{} was not saved: {e}", file.display()))?;
-                archive::write_atomic(file, &bytes)
-                    .map_err(|e| format!("{} was not saved: {e}", file.display()))?;
-                return self.open_project(file, Edits::Discard);
-            }
         };
-        saved?;
-        app::opened(&mut self.setup, file.to_owned());
-        app::save(&self.setup, &self.setup_path)
+        self.answer_saves();
+        result
     }
 
-    /// `project.save` (app mode): [`Host::save_document`].
-    fn project_save(&mut self) -> Result<Value, Failure> {
+    /// Save of a `.signal` project on a thread of its own (the window's
+    /// Save): `done` is called with its result by a later step, when it is
+    /// written; the control thread goes on meanwhile. A folder project's
+    /// is called at once.
+    pub fn save_document_then(&mut self, done: SaveDone) {
+        match self.document.as_mut() {
+            Some(document) => {
+                let ticket = document.start_save();
+                self.saves.push(SaveWait {
+                    ticket,
+                    save_as: None,
+                    waiter: SaveWaiter::Call(done),
+                });
+            }
+            None => done(Ok(())),
+        }
+    }
+
+    /// Whether a save of the document is running or waiting to start (the
+    /// control loop then steps rather than sleeping in a wait).
+    pub fn saving(&self) -> bool {
+        self.document.as_ref().is_some_and(Document::saving)
+    }
+
+    /// Save As (app mode), waiting for it: the project written to the
+    /// `.signal` file `file`, which it is from then on (the Setup's last
+    /// project). A folder project's folder is left as it is: the project is
+    /// opened again, from the new file, stopped.
+    pub fn save_as(&mut self, file: &Path) -> Result<(), String> {
+        let (answer, answered) = std::sync::mpsc::channel();
+        self.save_as_then(
+            file,
+            Box::new(move |result| {
+                let _ = answer.send(result);
+            }),
+        );
+        self.finish_saves();
+        answered
+            .try_recv()
+            .unwrap_or_else(|_| Err(format!("{} was not saved", file.display())))
+    }
+
+    /// Save As (app mode) of a `.signal` project on a thread of its own, as
+    /// [`Host::save_document_then`]; the Setup records the new file when it
+    /// is written. A folder project is packed and opened again from the new
+    /// file at once (opening stops the run anyway), and `done` called.
+    pub fn save_as_then(&mut self, file: &Path, done: SaveDone) {
+        if self.app.is_none() {
+            return done(Err(app_only().message));
+        }
+        match self.document.as_mut() {
+            Some(document) => {
+                let ticket = document.start_save_as(file);
+                self.saves.push(SaveWait {
+                    ticket,
+                    save_as: Some(file.to_owned()),
+                    waiter: SaveWaiter::Call(done),
+                });
+            }
+            None => {
+                let saved = archive::pack(&self.dir)
+                    .and_then(|bytes| archive::write_atomic(file, &bytes))
+                    .map_err(|e| format!("{} was not saved: {e}", file.display()));
+                done(saved.and_then(|()| self.open_project(file, Edits::Discard)));
+            }
+        }
+    }
+
+    /// Waits for the document's saves to finish, and answers them.
+    fn finish_saves(&mut self) {
+        if let Some(document) = self.document.as_mut() {
+            document.finish_saves();
+        }
+        self.answer_saves();
+    }
+
+    /// Answers the document's saves that finished: a Save As written is the
+    /// Setup's last project from then on; a client's `project.save` is
+    /// answered `saved` (or `not-saved`) and is the window's message, as an
+    /// app message's outcome is.
+    fn answer_saves(&mut self) {
+        let Some(document) = self.document.as_mut() else {
+            return;
+        };
+        let finished = document.take_saved();
+        for (ticket, result) in finished {
+            let (answered, waiting): (Vec<SaveWait>, Vec<SaveWait>) =
+                std::mem::take(&mut self.saves)
+                    .into_iter()
+                    .partition(|wait| wait.ticket == ticket);
+            self.saves = waiting;
+            for wait in answered {
+                // The file this save wrote, whatever the document's file is
+                // by now (a Save As asked after it may have written since).
+                let written = result.as_ref().ok().cloned();
+                let result = match (&result, &wait.save_as) {
+                    (Ok(_), Some(file)) => {
+                        app::opened(&mut self.setup, file.clone());
+                        app::save(&self.setup, &self.setup_path)
+                    }
+                    (Ok(_), None) => Ok(()),
+                    (Err(message), _) => Err(message.clone()),
+                };
+                match wait.waiter {
+                    SaveWaiter::Call(done) => done(result),
+                    SaveWaiter::Client { client, id } => {
+                        let reply = self.noted(result.map_err(|m| fail("not-saved", m)));
+                        let reply = match reply {
+                            Ok(()) => json!({
+                                "type": "saved",
+                                "id": id,
+                                "file": written.map(|file| file.display().to_string()),
+                            }),
+                            Err(failure) => json!({
+                                "type": "error",
+                                "id": id,
+                                "code": failure.code,
+                                "message": failure.message,
+                            }),
+                        };
+                        self.send_text(client, &reply);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `project.save` (app mode): a `.signal` project's working folder
+    /// written back to its file on a thread of its own; answered (`saved`,
+    /// or `not-saved`) when it is written, other messages being answered
+    /// meanwhile. A folder project's is answered at once.
+    fn project_save(&mut self, client: u64, id: &Value) -> Result<Option<Value>, Failure> {
         if self.app.is_none() {
             return Err(app_only());
         }
-        let saved = self.save_document().map_err(|m| fail("not-saved", m));
-        self.noted(saved)?;
-        Ok(json!({
-            "type": "saved",
-            "file": self.document.as_ref().map(|d| d.file().display().to_string()),
-        }))
+        let Some(document) = self.document.as_mut() else {
+            self.noted(Ok::<(), Failure>(()))?;
+            return Ok(Some(json!({"type": "saved", "file": null})));
+        };
+        let ticket = document.start_save();
+        self.saves.push(SaveWait {
+            ticket,
+            save_as: None,
+            waiter: SaveWaiter::Client {
+                client,
+                id: id.clone(),
+            },
+        });
+        Ok(None)
     }
 
     /// `signal ui`'s `project.open`: only the project it serves (its folder,
@@ -2704,7 +2852,7 @@ impl Host {
             "transport.play" => self.transport(true).map(Some),
             "transport.stop" => self.transport(false).map(Some),
             "project.open" => self.project_open(&message).map(Some),
-            "project.save" => self.project_save().map(Some),
+            "project.save" => self.project_save(client, &id),
             "stats" => Ok(Some(self.stats())),
             "ping" => Ok(Some(json!({
                 "type": "pong",

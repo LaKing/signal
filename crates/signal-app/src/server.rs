@@ -66,6 +66,8 @@ enum Request {
     Exit(Option<Window>, bool),
     /// The open project, its edited state looked at now.
     Project(Sender<Option<ProjectStatus>>),
+    /// The open project as last shown, waiting for nothing.
+    Shown(Sender<Option<ProjectStatus>>),
     /// Save.
     Save(Sender<Result<(), String>>),
     /// Save As this `.signal` file.
@@ -186,9 +188,16 @@ impl AppServer {
         }
     }
 
-    /// The open project, whether it is edited looked at now.
+    /// The open project, whether it is edited looked at now (after a save
+    /// still running, which the control thread waits for): for a decision.
     pub fn project(&self) -> Option<ProjectStatus> {
         self.ask(Request::Project, None)
+    }
+
+    /// The open project as last shown, without waiting for a save or a
+    /// comparison: for its name or folder, never for whether it is edited.
+    pub fn project_shown(&self) -> Option<ProjectStatus> {
+        self.ask(Request::Shown, None)
     }
 
     /// Save: a `.signal` project's working folder written back to its file.
@@ -319,11 +328,23 @@ fn run(
             Ok(Request::Project(answer)) => {
                 let _ = answer.send(host.project_status());
             }
+            Ok(Request::Shown(answer)) => {
+                let _ = answer.send(host.project_shown());
+            }
+            // Packed and written on a thread of their own: answered by a
+            // later step, the control thread going on meanwhile.
             Ok(Request::Save(answer)) => {
-                let _ = answer.send(host.save_document());
+                host.save_document_then(Box::new(move |result| {
+                    let _ = answer.send(result);
+                }));
             }
             Ok(Request::SaveAs(file, answer)) => {
-                let _ = answer.send(host.save_as(&file));
+                host.save_as_then(
+                    &file,
+                    Box::new(move |result| {
+                        let _ = answer.send(result);
+                    }),
+                );
             }
             Ok(Request::Open(path, edits, answer)) => {
                 let _ = answer.send(host.open_project(&path, edits));
@@ -349,7 +370,8 @@ fn run(
             keys = host.keys_version();
             on_keys(host.keys());
         }
-        if host.powered() {
+        // A save running is answered by the step after it is written.
+        if host.powered() || host.saving() {
             thread::sleep(Duration::from_millis(1));
         } else {
             // Switched off: nothing runs or streams, so the thread sleeps
