@@ -532,6 +532,10 @@ pub struct Host {
     /// Test hooks: projects loaded, structures built and schematic writes.
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     counts: (u64, u64, u64),
+    /// Test hooks: run by `patch` just before it takes the project's writer
+    /// lock, as another process's write landing then would.
+    #[cfg(feature = "test-hooks")]
+    before_lock: Option<Box<dyn FnMut() + Send>>,
     /// The free scope slots last pushed (`scopes`), and when they last rose.
     scopes_pushed: Option<usize>,
     scopes_freed: Option<Instant>,
@@ -842,6 +846,8 @@ impl Host {
             graph_stopped: None,
             graph_playing: None,
             counts: (0, 0, 0),
+            #[cfg(feature = "test-hooks")]
+            before_lock: None,
             scopes_pushed: None,
             scopes_freed: None,
             scopes_released: false,
@@ -965,6 +971,13 @@ impl Host {
             }
             None => false,
         }
+    }
+
+    /// Test hooks: `hook` runs in `patch` just before it takes the
+    /// project's writer lock (ADR 0040), once per patch.
+    #[cfg(feature = "test-hooks")]
+    pub fn set_before_lock(&mut self, hook: Option<Box<dyn FnMut() + Send>>) {
+        self.before_lock = hook;
     }
 
     /// Test hooks: the open `.signal` project, for one.
@@ -3542,6 +3555,10 @@ impl Host {
         // since then is a conflict, never overwritten. Checked and written
         // under the project's writer lock (ADR 0040).
         let path = self.dir.join(&file);
+        #[cfg(feature = "test-hooks")]
+        if let Some(hook) = self.before_lock.as_mut() {
+            hook();
+        }
         let _lock = ProjectLock::acquire(&self.dir)
             .map_err(|e| fail("write-failed", format!("{file} was not written: {e}")))?;
         let now = fs::read(&path).ok().map(|bytes| sha256_hex(&bytes));
@@ -3551,6 +3568,26 @@ impl Host {
                 format!("{file} changed since the version the patch names"),
                 json!({"level": level, "file": file, "base": now}),
             ));
+        }
+        // The positions the patch was built on are still the file's: a
+        // `schematic.move` from elsewhere meanwhile is a conflict, never lost.
+        if patched.positions_changed {
+            let now = match fs::read_to_string(&positions_path) {
+                Ok(text) => Some(text),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(fail("write-failed", format!("{SCHEMATIC_FILE}: {error}")));
+                }
+            };
+            if now != positions {
+                return Err(fail_with(
+                    "conflict",
+                    format!(
+                        "{SCHEMATIC_FILE} changed since the patch read it; nothing was written"
+                    ),
+                    json!({"level": level, "file": SCHEMATIC_FILE, "base": base}),
+                ));
+            }
         }
         write_file(&path, &patched.text)
             .map_err(|e| fail("write-failed", format!("{file} was not written: {e}")))?;

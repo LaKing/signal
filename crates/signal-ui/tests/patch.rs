@@ -453,6 +453,40 @@ fn positions_are_never_written_through_a_link(transport: Transport) {
     rig.finish();
 }
 
+/// ADR 0040 (review of the audit fix): a `schematic.move` from another
+/// process lands after a patch that moves a position read
+/// `ui/schematic.toml` and before it takes the project's writer lock (the
+/// test hook runs then). The patch is a `conflict` and writes nothing: the
+/// other writer's positions and `project.toml` stay. Read again, the same
+/// patch is written and keeps them.
+fn a_position_written_meanwhile_is_a_conflict(transport: Transport) {
+    let mut rig = project_rig("patch-positions-meanwhile", transport, "kick");
+    let (mut ws, _) = rig.client();
+    let top = base(&mut rig, &mut ws, 1, "");
+    let file = rig.dir.join("project.toml");
+    let original = fs::read_to_string(&file).unwrap();
+    let schematic = rig.dir.join("ui/schematic.toml");
+    let theirs = "[top]\nlfo = { x = 5, y = 6 }\n";
+    let hooked = schematic.clone();
+    rig.host().set_before_lock(Some(Box::new(move || {
+        fs::create_dir_all(hooked.parent().unwrap()).unwrap();
+        fs::write(&hooked, theirs).unwrap();
+    })));
+    let svf = json!([{"op": "instance.add", "name": "svf", "module": "std.svf", "x": 10, "y": 20}]);
+    let refused = answer(&mut rig, &mut ws, 2, patch("", &top, svf.clone()));
+    assert_eq!(refused["code"], "conflict", "{refused}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), original);
+    assert_eq!(fs::read_to_string(&schematic).unwrap(), theirs);
+    rig.host().set_before_lock(None);
+    rig.request(&mut ws, 3, patch("", &top, svf), "patched");
+    let positions = fs::read_to_string(&schematic).unwrap();
+    assert!(
+        positions.contains("lfo = { x = 5, y = 6 }") && positions.contains("svf"),
+        "{positions}"
+    );
+    rig.finish();
+}
+
 /// At a composite level of a project that does not load now, the edited
 /// project still names the removal's references: `in-use`, not written.
 fn in_use_holds_when_the_project_does_not_load(transport: Transport) {
@@ -874,5 +908,6 @@ both!(
     modules_is_deterministic,
     an_undo_too_large_is_refused_and_a_commit_pushes_files,
     positions_are_never_written_through_a_link,
+    a_position_written_meanwhile_is_a_conflict,
     in_use_holds_when_the_project_does_not_load,
 );

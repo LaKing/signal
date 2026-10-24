@@ -22,23 +22,28 @@ The host's other write paths compared the file with `base` just before writing. 
 
 1. **Staging files of the writer's own.** `stage` creates `.<name>.<pid>.<n>.tmp` beside the target. `n` is a counter of the process. The file is created exclusively (`O_EXCL`, which never follows a link), synced, and then:
    - renamed over the target (`Staged::replace`), or
-   - hard-linked to a new name, which never replaces a file (`Staged::create`).
+   - hard-linked to a new name, which never replaces a file (`Staged::create`). On a file system without hard links (exFAT answers `ENOTSUP`), the bytes are instead copied into the new name, created exclusively, which never replaces a file either.
 
    An entry already at a name is left alone and the next name is taken. A writer removes only the staging file it created, so another writer's file is never deleted, renamed or written through. `write_atomic` is `stage` plus `replace`. `panel::write_file`, `archive::write_atomic`, `keys::write_atomic`, `Setup::save` and vendoring's writer all use it. The temporary name is not semantics (rule 3): it never reaches a file, render or log.
 2. **One writer at a time per project.** `ProjectLock` is an advisory `flock` taken through `std::fs::File::lock` on the project folder itself, so no lock file is left in the person's folder and no `unsafe` is needed. A writer takes it before its conflict check and holds it until its files are written.
-   - **Who takes it:** `write_project` (commit, the M2.5 panel, `retry`), `patch`, `file.write`, `pattern.write`, `panel.write`, `schematic.*`, the `ui/windows.toml` layout writes, `vendor::write`, and the packing of a `.signal` working folder on Save.
+   - **Who takes it:** `write_project` (commit, the M2.5 panel, `retry`), `patch`, `file.write`, `pattern.write`, `panel.write`, `schematic.*`, the `ui/windows.toml` layout writes, and `vendor::write`.
+   - **Who does not:** packing a `.signal` working folder on Save, and `Host::save_as` packing a folder. A working folder is private to its process. Packing can take long (and may run on a background save thread), so holding the lock would stall every control-thread writer for the whole pack, and fail them after 10 s. A pack's consistency is the save's own check (pack again until the folder has settled), not the lock's.
    - **Waiting:** a writer waits at most 10 s, then fails with `write-failed`.
    - **Release:** explicit when the guard drops, so a child process forked meanwhile does not keep the lock. The system also releases it when a process ends.
+   - **No locks on the volume:** a file system with no locks (`Unsupported`, `ENOTSUP`, `EOPNOTSUPP` or `ENOLCK`, as some network and FAT volumes answer) gives a lock that holds nothing. A warning is printed once per process, the writer goes on, and the byte comparisons still refuse what changed.
    - **Re-entry:** the lock is per open file, so a writer must not take it twice. Writers that hold it never call another writer that takes it.
 3. **Vendoring revalidates.** Under the lock, `vendor::write` first reads the project's files again. Any file changed, added or removed since `prepare` refuses the commit with `VendorError::Changed`, and nothing is written. The UI protocol maps it to `conflict`, and `signal vendor` reports it. The host also checks that the `project.toml` it prepared from is the version `base` names. Rollback writes an original back, or removes a new copy, only while the file still holds exactly what vendoring wrote, so an edit made in between is kept.
+4. **`patch` checks every file it writes.** A patch that moves a position writes `ui/schematic.toml` as well as the level's file. Under the lock, it reads the positions file again, and if the text differs from the text the patch was built on (a `schematic.move` from another process meanwhile), the patch is a `conflict` and nothing is written.
 
 ## Consequences
 - Two Signal processes on one project no longer lose or mix each other's bytes. A version check and the write that follows it are one step for every Signal writer.
 - A person's editor takes no lock. Its edits are still caught by the byte comparisons (`base`, and vendoring's revalidation), but an editor that saves in the instant between a check and the rename can still be overwritten. Closing that gap would need every editor to cooperate, so it stays open.
+- **Stale staging files stay.** A staging file left by a crashed writer is never cleaned up, because a writer cannot tell it from another writer's file in progress. It is hidden, so the watch and `pack` skip it, and it costs only disk space. Removing one is the person's call.
 - A planted entry at an old staging name (`.<name>.tmp`) is now left in place rather than removed: a writer cannot tell a stale file from another writer's file in progress. The hidden name keeps it out of the watch and out of packed archives.
 - Tests:
   - `crates/signal-project/tests/transaction.rs`: the two-writer interleaving, a foreign staging file, vendoring's conflict on an edited and on an added file, and the lock released;
-  - unit tests in `transaction.rs` (staging apart, lock exclusion, `create` never replacing), `vendor.rs` (rollback keeps an edit) and `panel.rs` (the auditor's interleaving through `write_file`).
+  - `crates/signal-ui/tests/patch.rs` `a_position_written_meanwhile_is_a_conflict` (a test hook writes the positions just before the patch takes the lock);
+  - unit tests in `transaction.rs` (staging apart, lock exclusion, `create` never replacing, a planted link at the next staging name skipped, the copy without hard links, which errors mean "unsupported"), `vendor.rs` (rollback keeps an edit) and `panel.rs` (the auditor's interleaving through `write_file`).
 
 ## Alternatives considered
 - **A lock file (`.signal.lock`).** It works on any file system, but it leaves a file in the person's folder. Locking the folder itself needs no file.

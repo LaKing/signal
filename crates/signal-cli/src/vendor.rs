@@ -32,7 +32,8 @@ pub(crate) fn run(args: &VendorArgs, json: bool) -> Result<(), Failure> {
         Library::builtin(),
     )
     .map_err(|error| match error {
-        VendorError::Io { .. } => Failure::Io(error.to_string()),
+        // A conflict is a runtime failure of the files, not of the arguments.
+        VendorError::Io { .. } | VendorError::Changed(_) => Failure::Io(error.to_string()),
         error => Failure::Usage(error.to_string()),
     })?;
     if json {

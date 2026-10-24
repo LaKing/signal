@@ -58,10 +58,52 @@ impl Staged {
 
     /// Links the staging file to `target` as a new file: fails with
     /// [`io::ErrorKind::AlreadyExists`] when `target` exists (a link never
-    /// replaces a file). The staging name is removed either way.
+    /// replaces a file). On a file system without hard links (exFAT:
+    /// `ENOTSUP`) the bytes are copied into `target` created exclusively
+    /// instead, which never replaces a file either. The staging name is
+    /// removed either way.
     pub fn create(self, target: &Path) -> io::Result<()> {
-        fs::hard_link(&self.path, target)
+        self.create_with(target, |from, to| fs::hard_link(from, to))
     }
+
+    /// [`Staged::create`] with `link` in place of [`fs::hard_link`].
+    fn create_with(
+        self,
+        target: &Path,
+        link: impl FnOnce(&Path, &Path) -> io::Result<()>,
+    ) -> io::Result<()> {
+        match link(&self.path, target) {
+            Err(error) if unsupported(&error) => {
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(target)?;
+                let copied = File::open(&self.path)
+                    .and_then(|mut from| io::copy(&mut from, &mut file))
+                    .and_then(|_| file.sync_all());
+                if copied.is_err() {
+                    // Only the file made here.
+                    let _ = fs::remove_file(target);
+                }
+                copied
+            }
+            linked => linked,
+        }
+    }
+}
+
+/// Whether `error` says the file system cannot do this at all (no locks, no
+/// hard links), rather than that it failed this time.
+fn unsupported(error: &io::Error) -> bool {
+    // ENOTSUP, EOPNOTSUPP, ENOLCK.
+    #[cfg(target_os = "linux")]
+    const CODES: [i32; 3] = [95, 95, 37];
+    #[cfg(not(target_os = "linux"))]
+    const CODES: [i32; 3] = [45, 102, 77];
+    error.kind() == io::ErrorKind::Unsupported
+        || error
+            .raw_os_error()
+            .is_some_and(|code| CODES.contains(&code))
 }
 
 impl Drop for Staged {
@@ -76,11 +118,20 @@ impl Drop for Staged {
 /// `bytes` in a new staging file of this writer's beside `target`, synced.
 pub fn stage(target: &Path, bytes: &[u8]) -> io::Result<Staged> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    stage_numbered(target, bytes, || NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// [`stage`] with the staging names numbered by `next`.
+fn stage_numbered(
+    target: &Path,
+    bytes: &[u8],
+    mut next: impl FnMut() -> u64,
+) -> io::Result<Staged> {
     let name = target.file_name().unwrap_or_default().to_string_lossy();
     let pid = std::process::id();
     let mut attempts = 0u32;
     let (path, mut file) = loop {
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let n = next();
         let path = target.with_file_name(format!(".{name}.{pid}.{n}.tmp"));
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(file) => break (path, file),
@@ -112,7 +163,8 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// the guard lives.
 #[derive(Debug)]
 pub struct ProjectLock {
-    folder: File,
+    /// `None`: the file system has no locks; the writer goes on unlocked.
+    folder: Option<File>,
 }
 
 impl ProjectLock {
@@ -142,11 +194,27 @@ impl ProjectLock {
     }
 
     /// The lock of `dir` if no other writer holds it now, `None` otherwise.
+    /// On a file system that has no locks (`Unsupported`, `ENOTSUP`,
+    /// `EOPNOTSUPP`, `ENOLCK`: some network and FAT volumes) the writer goes
+    /// on without one, after a warning printed once per process: the
+    /// writers' byte comparisons still refuse what changed.
     pub fn try_acquire(dir: &Path) -> io::Result<Option<ProjectLock>> {
         let folder = File::open(dir)?;
         match folder.try_lock() {
-            Ok(()) => Ok(Some(ProjectLock { folder })),
+            Ok(()) => Ok(Some(ProjectLock {
+                folder: Some(folder),
+            })),
             Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(error)) if unsupported(&error) => {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    eprintln!(
+                        "signal: {}: the file system has no file locks ({error}); project files are written without the writer lock",
+                        dir.display()
+                    );
+                });
+                Ok(Some(ProjectLock { folder: None }))
+            }
             Err(fs::TryLockError::Error(error)) => Err(error),
         }
     }
@@ -157,7 +225,9 @@ impl Drop for ProjectLock {
         // Released explicitly, not only by the close: a child process
         // forked meanwhile (and not yet exec'd) shares the descriptor and
         // would keep the lock until it execs.
-        let _ = self.folder.unlock();
+        if let Some(folder) = &self.folder {
+            let _ = folder.unlock();
+        }
     }
 }
 
@@ -211,6 +281,90 @@ mod tests {
         assert!(ProjectLock::try_acquire(&dir).unwrap().is_some());
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "no lock file");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A link planted at the next staging name is neither followed nor
+    /// removed: the name after it is taken.
+    #[test]
+    fn a_planted_staging_name_is_skipped() {
+        let dir = folder("planted");
+        let path = dir.join("project.toml");
+        let outside = dir.join("outside.txt");
+        fs::write(&outside, "outside").unwrap();
+        let pid = std::process::id();
+        let planted = dir.join(format!(".project.toml.{pid}.0.tmp"));
+        std::os::unix::fs::symlink(&outside, &planted).unwrap();
+        let mut n = 0;
+        let staged = stage_numbered(&path, b"new", || {
+            n += 1;
+            n - 1
+        })
+        .unwrap();
+        assert_eq!(
+            staged.path(),
+            dir.join(format!(".project.toml.{pid}.1.tmp"))
+        );
+        staged.replace(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(fs::read(&outside).unwrap(), b"outside");
+        assert!(
+            fs::symlink_metadata(&planted)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Without hard links (exFAT answers `ENOTSUP`, 45 on macOS) a new file
+    /// is copied into a file created exclusively: it never replaces one.
+    #[test]
+    fn create_copies_where_links_are_unsupported() {
+        let dir = folder("nolink");
+        let path = dir.join("a.toml");
+        #[cfg(target_os = "linux")]
+        let enotsup = 95;
+        #[cfg(not(target_os = "linux"))]
+        let enotsup = 45;
+        let no_link = |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(enotsup));
+        stage(&path, b"one")
+            .unwrap()
+            .create_with(&path, no_link)
+            .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"one");
+        let again = stage(&path, b"two")
+            .unwrap()
+            .create_with(&path, no_link)
+            .unwrap_err();
+        assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).unwrap(), b"one");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "no staging left");
+        // Another failure is reported as it is, nothing copied.
+        let other = dir.join("b.toml");
+        let denied = |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(13));
+        assert!(
+            stage(&other, b"x")
+                .unwrap()
+                .create_with(&other, denied)
+                .is_err()
+        );
+        assert!(!other.exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The errors that mean "no locks or links here" and those that do not.
+    #[test]
+    fn unsupported_errors() {
+        #[cfg(target_os = "linux")]
+        let codes = [95, 37];
+        #[cfg(not(target_os = "linux"))]
+        let codes = [45, 102, 77];
+        for code in codes {
+            assert!(unsupported(&io::Error::from_raw_os_error(code)), "{code}");
+        }
+        assert!(unsupported(&io::Error::from(io::ErrorKind::Unsupported)));
+        assert!(!unsupported(&io::Error::from_raw_os_error(13)));
+        assert!(!unsupported(&io::Error::from(io::ErrorKind::WouldBlock)));
     }
 
     /// A new file is created by a link only where none is.
