@@ -557,6 +557,7 @@ fn unknown_messages_are_answered_with_an_error(transport: Transport) {
     assert_eq!(error["code"], "unknown-type");
     let pong = rig.request(&mut ws, 2, json!({"type": "ping"}), "pong");
     assert!(pong["frame"].is_u64());
+    assert!(pong["latency"].is_u64(), "{pong}");
     rig.finish();
 }
 

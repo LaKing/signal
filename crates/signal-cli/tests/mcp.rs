@@ -278,6 +278,7 @@ fn project_info() {
     assert_eq!(info["driver"], "null", "no --audio: the null driver");
     assert_eq!(info["maxGain"], 0.25);
     assert_eq!(info["playing"], true);
+    assert_eq!(info["writerLock"], true, "APFS gives the lock: {info}");
     assert_eq!(info["files"][""].as_str().unwrap().len(), 64);
     let gain = &info["gain"][0];
     assert_eq!(gain["port"], "/out.gain");
@@ -443,7 +444,7 @@ fn transport_tempo_on_a_playhead() {
     let streams = mcp.ok("read_stream", json!({}));
     assert_eq!(
         streams["transport"],
-        json!([{"instance": "/transport/playhead", "control": "/transport.bpm", "bpm": 140.0, "planBpm": 120.0}]),
+        json!([{"instance": "/transport/playhead", "control": "/transport.bpm", "wired": null, "bpm": 140.0, "planBpm": 120.0}]),
         "{streams}"
     );
     let ramp = mcp.ok("transport", json!({"action": "tempo", "bpm": 90, "ms": 5}));
@@ -514,6 +515,25 @@ fn transport_tempo_on_several_playheads() {
     }
     assert_eq!(control_base(&mut mcp, "/a.bpm"), 132.0);
     assert_eq!(control_base(&mut mcp, "/b.bpm"), 132.0);
+    // `read_stream` names the wired control as `wired`, never as the
+    // control `tempo` sets, and claims no bpm for what plays there.
+    let read = mcp.ok(
+        "read_stream",
+        json!({"ports": ["/osc.out"], "window_ms": 500}),
+    );
+    let entries = read["transport"].as_array().unwrap();
+    let wired = entries
+        .iter()
+        .find(|e| e["wired"] == "/c.bpm")
+        .unwrap_or_else(|| panic!("{read}"));
+    assert_eq!(wired["control"], Value::Null, "{wired}");
+    assert_eq!(wired["bpm"], Value::Null, "{wired}");
+    let set = entries
+        .iter()
+        .find(|e| e["control"] == "/b.bpm")
+        .unwrap_or_else(|| panic!("{read}"));
+    assert_eq!(set["bpm"], 132.0, "{set}");
+    assert_eq!(set["wired"], Value::Null, "{set}");
     // A ramp: the same, its start on one frame.
     let ramp = mcp.ok("transport", json!({"action": "tempo", "bpm": 90, "ms": 50}));
     for ack in ramp["acks"].as_array().unwrap() {
@@ -569,6 +589,31 @@ fn live_edits_and_tempo_in_a_project_with_includes() {
     );
     let checked = mcp.ok("check", json!({}));
     assert_eq!(checked["ok"], true, "{checked}");
+    // The host's edit paths load the edited files from the folder too
+    // (review of ADR 0040): a patch and a file write are written, not
+    // refused `does-not-load` for the includes.
+    let patched = mcp.ok(
+        "patch",
+        json!({"ops": [{"op": "instance.add", "name": "spare", "module": "std.sine_osc", "params": {"freq": 220}}]}),
+    );
+    assert_eq!(patched["file"], "project.toml", "{patched}");
+    assert!(
+        mcp.file("project.toml")
+            .contains("spare = { module = \"std.sine_osc\", freq = 220 }"),
+        "{}",
+        mcp.file("project.toml")
+    );
+    let read = mcp.ok("read_file", json!({"file": "project.toml"}));
+    let text = read["text"].as_str().unwrap();
+    let mix = "mix_l = { module = \"std.mix\", gain_a = 0.5, gain_b = 0.5 }";
+    assert!(text.contains(mix), "{text}");
+    let edited = text.replace(mix, &mix.replace("gain_a = 0.5", "gain_a = 0.25"));
+    let written = mcp.ok(
+        "write_file",
+        json!({"file": "project.toml", "text": edited, "base": read["base"]}),
+    );
+    assert_eq!(written["file"], "project.toml", "{written}");
+    assert_eq!(mcp.file("project.toml"), edited);
     assert!(mcp.finish().success());
 }
 

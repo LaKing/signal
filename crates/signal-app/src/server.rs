@@ -79,7 +79,7 @@ enum Request {
 }
 
 /// An edit of `ui/windows.toml`'s text (`signal_ui::Host::write_windows`).
-pub type WindowsEdit = Box<dyn FnOnce(&str) -> Result<String, String> + Send>;
+pub type WindowsEdit = Box<dyn Fn(&str) -> Result<String, String> + Send>;
 
 /// What the control thread hands back once its host runs.
 struct Ready {

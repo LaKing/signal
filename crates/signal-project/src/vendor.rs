@@ -273,7 +273,7 @@ pub fn prepare(
 
     // The project as vendoring would leave it must load if it loaded before
     // (e.g. `--as x` beside a remaining `lib.x` reference would not: §4).
-    let loaded_before = Project::from_sources_with(files.clone(), library).is_ok();
+    let loaded_before = Project::from_sources_in_with(files.clone(), library, dir).is_ok();
     let prepared = Prepared {
         copies,
         edits,
@@ -281,7 +281,8 @@ pub fn prepare(
         files,
         loaded_before,
     };
-    if loaded_before && let Err(diagnostics) = Project::from_sources_with(prepared.after(), library)
+    if loaded_before
+        && let Err(diagnostics) = Project::from_sources_in_with(prepared.after(), library, dir)
     {
         return Err(VendorError::Invalid(diagnostics));
     }
@@ -325,7 +326,7 @@ pub fn write(dir: &Path, prepared: Prepared, library: &Library) -> Result<Vendor
     if loaded_before {
         let check = read_sources(dir)
             .ok()
-            .map(|files| Project::from_sources_with(files, library));
+            .map(|files| Project::from_sources_in_with(files, library, dir));
         if let Some(Err(diagnostics)) = check {
             written.undo();
             return Err(VendorError::Invalid(diagnostics));

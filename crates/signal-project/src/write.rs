@@ -103,7 +103,13 @@ impl Project {
         for file in files.iter_mut().filter(|f| f.path == PROJECT_FILE) {
             file.text = write_parameter(&file.text, instance, parameter, value, order)?;
         }
-        Project::from_sources(files).map_err(WriteError::Invalid)
+        // The projects it includes are found from its folder, as it was
+        // loaded (ADR 0035).
+        match &self.content.dir {
+            Some(dir) => Project::from_sources_in(files, dir),
+            None => Project::from_sources(files),
+        }
+        .map_err(WriteError::Invalid)
     }
 }
 

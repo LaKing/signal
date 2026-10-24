@@ -539,36 +539,91 @@ pub fn after_write(
 /// the file as it was; `order` is the module's parameter order, for where a
 /// new key goes. Atomic ([`write_file`]). Gives the file's text before and
 /// after.
+///
+/// The edit is based on the file as read at the start. It is read, edited
+/// and written under the project's writer lock (ADR 0040), and the file is
+/// read once more just before the rename: one that no longer holds the text
+/// the edit was based on is [`ProjectWriteError::Changed`], and nothing is
+/// written. Under the lock that catches only a writer that takes none (an
+/// editor). Unlocked (a volume without locks) it also catches another
+/// Signal writer, except one renaming in the instant between that last read
+/// and this rename: without a lock the two are not one step.
 pub fn write_project(
     dir: &Path,
     instance: &str,
     parameter: &str,
     value: Option<f64>,
     order: &[&str],
-) -> Result<(String, String), String> {
+) -> Result<(String, String), ProjectWriteError> {
+    write_project_between(dir, instance, parameter, value, order, &mut || {})
+}
+
+/// [`write_project`], running `between` after the edit is made and before
+/// the file is read again (a test interleaves another writer there).
+fn write_project_between(
+    dir: &Path,
+    instance: &str,
+    parameter: &str,
+    value: Option<f64>,
+    order: &[&str],
+    between: &mut dyn FnMut(),
+) -> Result<(String, String), ProjectWriteError> {
+    use signal_project::transaction::{ProjectLock, replace_unchanged};
     let path = dir.join(signal_project::PROJECT_FILE);
-    // Read, edited and written under the project's writer lock (ADR 0040),
-    // so no other writer's edit lands in between and is lost.
-    let lock = signal_project::transaction::ProjectLock::acquire(dir);
-    lock.as_ref()
-        .map_err(ToString::to_string)
-        .and_then(|_| fs::read_to_string(&path).map_err(|e| e.to_string()))
-        .and_then(|before| {
-            signal_project::write_parameter(&before, instance, parameter, value, order)
-                .map(|after| (before, after))
-                .map_err(|e| e.to_string())
-        })
-        .and_then(|(before, after)| {
-            write_file(&path, &after)
-                .map(|()| (before, after))
-                .map_err(|e| e.to_string())
-        })
-        .map_err(|error| {
-            format!(
-                "{instance}.{parameter} was not written to {}: {error}",
-                path.display()
-            )
-        })
+    let failed = |error: String| {
+        ProjectWriteError::Failed(format!(
+            "{instance}.{parameter} was not written to {}: {error}",
+            path.display()
+        ))
+    };
+    let _lock = ProjectLock::acquire(dir).map_err(|e| failed(e.to_string()))?;
+    let before = fs::read_to_string(&path).map_err(|e| failed(e.to_string()))?;
+    let after = signal_project::write_parameter(&before, instance, parameter, value, order)
+        .map_err(|e| failed(e.to_string()))?;
+    between();
+    let written = replace_unchanged(&path, Some(before.as_bytes()), after.as_bytes())
+        .map_err(|e| failed(e.to_string()))?;
+    if !written {
+        return Err(ProjectWriteError::Changed(format!(
+            "{instance}.{parameter} was not written to {}: {} changed while the value was \
+             written (another writer); nothing was written",
+            path.display(),
+            signal_project::PROJECT_FILE
+        )));
+    }
+    Ok((before, after))
+}
+
+/// Why [`write_project`] wrote nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectWriteError {
+    /// `project.toml` changed between the read the edit was based on and
+    /// the rename (another writer, or the person's editor): the protocol's
+    /// `conflict`.
+    Changed(String),
+    /// Anything else (no lock within its wait, unreadable, not TOML, the
+    /// write failed): `write-failed`.
+    Failed(String),
+}
+
+impl ProjectWriteError {
+    /// The UI protocol's error code for it.
+    pub fn code(&self) -> &'static str {
+        match self {
+            ProjectWriteError::Changed(_) => "conflict",
+            ProjectWriteError::Failed(_) => "write-failed",
+        }
+    }
+}
+
+impl std::fmt::Display for ProjectWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProjectWriteError::Changed(message) | ProjectWriteError::Failed(message) => {
+                f.write_str(message)
+            }
+        }
+    }
 }
 
 /// Writes `text` to `path` through a hidden staging file of this writer's
@@ -633,6 +688,39 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// ADR 0040 (review): `write_project` compares, as the other writers
+    /// do. A writer that takes no lock (an editor, or any writer on a volume
+    /// without locks) replaces `project.toml` after the commit read it and
+    /// before its rename: the commit is `conflict`, the other writer's text
+    /// stays, and no staging file is left.
+    #[test]
+    fn a_commit_refuses_a_file_changed_before_its_rename() {
+        let dir = std::env::temp_dir().join(format!("signal-panel-commit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("project.toml");
+        let ours =
+            "schema_version = 1\n[instances]\nout = { module = \"std.audio_out\", gain = 0.25 }\n";
+        let theirs = ours.replace("0.25", "0.125");
+        fs::write(&path, ours).unwrap();
+        let refused = write_project_between(&dir, "out", "gain", Some(0.5), &["gain"], &mut || {
+            fs::write(&path, &theirs).unwrap();
+        })
+        .unwrap_err();
+        assert_eq!(refused.code(), "conflict", "{refused}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), theirs);
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            1,
+            "no staging file left"
+        );
+        // Read again, the same commit is written onto their text.
+        let (before, after) = write_project(&dir, "out", "gain", Some(0.5), &["gain"]).unwrap();
+        assert_eq!(before, theirs);
+        assert!(after.contains("gain = 0.5"), "{after}");
         fs::remove_dir_all(&dir).unwrap();
     }
 

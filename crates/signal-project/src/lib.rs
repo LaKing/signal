@@ -300,6 +300,16 @@ impl Project {
     /// projects they include (ADR 0035) are found from `dir`, as
     /// [`load`](Project::load) finds them.
     pub fn from_sources_in(files: Vec<SourceFile>, dir: &Path) -> Result<Project, Vec<Diagnostic>> {
+        Project::from_sources_in_with(files, Library::builtin(), dir)
+    }
+
+    /// [`from_sources_in`](Project::from_sources_in) with `library` as the
+    /// library.
+    pub(crate) fn from_sources_in_with(
+        files: Vec<SourceFile>,
+        library: &Library,
+        dir: &Path,
+    ) -> Result<Project, Vec<Diagnostic>> {
         let canonical = fs::canonicalize(dir).map_err(|error| {
             vec![Diagnostic {
                 severity: Severity::Error,
@@ -313,7 +323,7 @@ impl Project {
             }]
         })?;
         let chain = [canonical.clone()];
-        Project::assemble(files, Library::builtin(), Some(&canonical), &chain)
+        Project::assemble(files, library, Some(&canonical), &chain)
     }
 
     /// [`from_sources`](Project::from_sources) with `library` as the library.

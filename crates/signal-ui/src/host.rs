@@ -50,7 +50,7 @@ use signal_project::live::{
 use signal_project::patch::{self, Op};
 use signal_project::schematic::{self, SCHEMATIC_FILE};
 use signal_project::session::{LiveRecorder, SessionRecorder, sink_of};
-use signal_project::transaction::ProjectLock;
+use signal_project::transaction::{self, ProjectLock};
 use signal_project::vendor::{self, VendorError};
 use signal_project::{Diagnostic, LoadError, PATTERNS, PROJECT_FILE, Project, located};
 
@@ -1905,7 +1905,7 @@ impl Host {
     pub fn write_windows(
         &mut self,
         dir: &Path,
-        edit: impl FnOnce(&str) -> Result<String, String>,
+        edit: impl Fn(&str) -> Result<String, String>,
     ) -> Result<(), String> {
         let file = Path::new(crate::WINDOWS_FILE);
         if self.dir != dir || self.app.as_ref().is_some_and(|m| !m.opened) {
@@ -1926,20 +1926,14 @@ impl Host {
         }
         let failed = |error: String| format!("{} was not written: {error}", path.display());
         let _lock = ProjectLock::acquire(&self.dir).map_err(|e| failed(e.to_string()))?;
-        let before = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(error) => return Err(failed(error.to_string())),
-        };
-        let after = edit(&before).map_err(failed)?;
-        if after == before {
-            return Ok(());
+        // Edited again if it changes before the rename (ADR 0040).
+        let written = transaction::edit_text(&path, |before| {
+            edit(before).map(|after| (after != before).then_some(after))
+        })
+        .map_err(failed)?;
+        if written {
+            self.seen(file);
         }
-        if let Some(folder) = path.parent() {
-            fs::create_dir_all(folder).map_err(|e| failed(e.to_string()))?;
-        }
-        write_file(&path, &after).map_err(|e| failed(e.to_string()))?;
-        self.seen(file);
         Ok(())
     }
 
@@ -2857,6 +2851,7 @@ impl Host {
             "ping" => Ok(Some(json!({
                 "type": "pong",
                 "frame": self.run.as_ref().map(|r| r.controller.status().next_frame.0),
+                "latency": self.run.as_ref().map(|r| r.controller.latency_frames()),
             }))),
             "hello" => Err(fail(
                 "already-authenticated",
@@ -3463,7 +3458,7 @@ impl Host {
     /// `graph` is pushed at once instead).
     fn write_schematic(
         &mut self,
-        edit: impl FnOnce(&str) -> Result<String, String>,
+        edit: impl Fn(&str) -> Result<String, String>,
     ) -> Result<(), Failure> {
         self.schematic_unlinked()?;
         let path = self.dir.join(SCHEMATIC_FILE);
@@ -3474,16 +3469,8 @@ impl Host {
             )
         };
         let _lock = ProjectLock::acquire(&self.dir).map_err(|e| failed(e.to_string()))?;
-        let before = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(error) => return Err(failed(error.to_string())),
-        };
-        let after = edit(&before).map_err(failed)?;
-        if let Some(folder) = path.parent() {
-            fs::create_dir_all(folder).map_err(|e| failed(e.to_string()))?;
-        }
-        write_file(&path, &after).map_err(|e| failed(e.to_string()))?;
+        // Edited again if it changes before the rename (ADR 0040).
+        transaction::edit_text(&path, |before| edit(before).map(Some)).map_err(failed)?;
         self.counts.2 += 1;
         self.seen(Path::new(SCHEMATIC_FILE));
         Ok(())
@@ -3579,7 +3566,7 @@ impl Host {
         let loaded = match &self.run {
             Some(run) if run.current.files == sources => Some(&run.current),
             _ => {
-                parsed = Project::from_sources(sources.clone()).ok();
+                parsed = Project::from_sources_in(sources.clone(), &self.dir).ok();
                 parsed.as_ref()
             }
         };
@@ -3625,7 +3612,7 @@ impl Host {
         if let Some(source) = edited.get_mut(index) {
             source.text = patched.text.clone();
         }
-        let new = Project::from_sources(edited);
+        let new = Project::from_sources_in(edited, &self.dir);
         // The edited project when the current one does not load: a level's
         // edit leaves its exports and the paths of its instances as they were.
         let references = self.references(
@@ -3727,24 +3714,52 @@ impl Host {
                     return Err(fail("write-failed", format!("{SCHEMATIC_FILE}: {error}")));
                 }
             };
+            // The conflict names the level's file and its base (unchanged,
+            // as just checked), the version a client builds the patch on
+            // again; the positions are read again with it.
             if now != positions {
                 return Err(fail_with(
                     "conflict",
                     format!(
                         "{SCHEMATIC_FILE} changed since the patch read it; nothing was written"
                     ),
-                    json!({"level": level, "file": SCHEMATIC_FILE, "base": base}),
+                    json!({"level": level, "file": file, "base": base}),
                 ));
             }
         }
-        write_file(&path, &patched.text)
-            .map_err(|e| fail("write-failed", format!("{file} was not written: {e}")))?;
+        // Compared once more just before the rename (ADR 0040): the file
+        // still holds `before`, the text `base` names.
+        let renamed =
+            transaction::replace_unchanged(&path, Some(before.as_bytes()), patched.text.as_bytes())
+                .map_err(|e| fail("write-failed", format!("{file} was not written: {e}")))?;
+        if !renamed {
+            let now = fs::read(&path).ok().map(|bytes| sha256_hex(&bytes));
+            return Err(fail_with(
+                "conflict",
+                format!("{file} changed since the version the patch names"),
+                json!({"level": level, "file": file, "base": now}),
+            ));
+        }
         if patched.positions_changed {
             let written = match &patched.positions {
                 Some(text) => positions_path
                     .parent()
                     .map_or(Ok(()), fs::create_dir_all)
-                    .and_then(|()| write_file(&positions_path, text)),
+                    // Compared once more just before the rename (ADR 0040).
+                    .and_then(|()| {
+                        transaction::replace_unchanged(
+                            &positions_path,
+                            positions.as_deref().map(str::as_bytes),
+                            text.as_bytes(),
+                        )
+                    })
+                    .and_then(|renamed| {
+                        if renamed {
+                            Ok(())
+                        } else {
+                            Err(std::io::Error::other("another writer changed it meanwhile"))
+                        }
+                    }),
                 None => match fs::remove_file(&positions_path) {
                     Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
                     _ => Ok(()),
@@ -3928,7 +3943,7 @@ impl Host {
                 json!({"file": file, "diagnostics": lines}),
             )
         };
-        self.loads_as_edit(Project::from_sources(sources))
+        self.loads_as_edit(Project::from_sources_in(sources, &self.dir))
             .map_err(does_not_load)?;
         // The file as it is now, not as it was read: an edit from elsewhere
         // since then is a conflict, never overwritten. Checked and written
@@ -3944,7 +3959,16 @@ impl Host {
         if let Some(folder) = path.parent() {
             fs::create_dir_all(folder).map_err(failed)?;
         }
-        write_file(&path, text).map_err(failed)?;
+        // Compared once more just before the rename (ADR 0040).
+        if !transaction::replace_unchanged(
+            &path,
+            now.as_deref().map(str::as_bytes),
+            text.as_bytes(),
+        )
+        .map_err(failed)?
+        {
+            return Err(conflict(current()?));
+        }
         // Playing, the watch reloads the file and pushes `graph` once it
         // swaps; stopped, at once.
         if self.run.is_none() {
@@ -4042,7 +4066,7 @@ impl Host {
                 json!({"diagnostics": lines}),
             )
         };
-        self.loads_as_edit(Project::from_sources(prepared.after()))
+        self.loads_as_edit(Project::from_sources_in(prepared.after(), &self.dir))
             .map_err(does_not_load)?;
         let vendored = vendor::write(&self.dir, prepared, library).map_err(refused)?;
         if self.run.is_none() {
@@ -4648,8 +4672,8 @@ impl Host {
         let (before, after) = match write_project(&self.dir, instance, parameter, value, &order) {
             Ok(texts) => texts,
             Err(error) => {
-                unwritten(self, error.clone());
-                return Err(fail("write-failed", error));
+                unwritten(self, error.to_string());
+                return Err(fail(error.code(), error.to_string()));
             }
         };
         let file = Path::new(signal_project::PROJECT_FILE);
@@ -5163,7 +5187,7 @@ impl Host {
                 json!({"name": name, "file": file, "diagnostics": lines}),
             )
         };
-        self.loads_as_edit(Project::from_sources(sources))
+        self.loads_as_edit(Project::from_sources_in(sources, &self.dir))
             .map_err(does_not_load)?;
         // The file as it is now, not as it was read: an edit from elsewhere
         // since then is a conflict, never overwritten. Checked and written
@@ -5179,7 +5203,16 @@ impl Host {
         if let Some(folder) = path.parent() {
             fs::create_dir_all(folder).map_err(failed)?;
         }
-        write_file(&path, text).map_err(failed)?;
+        // Compared once more just before the rename (ADR 0040).
+        if !transaction::replace_unchanged(
+            &path,
+            now.as_deref().map(str::as_bytes),
+            text.as_bytes(),
+        )
+        .map_err(failed)?
+        {
+            return Err(conflict(current(&path)?));
+        }
         // Playing, the watch reloads the file and swaps it in.
         Ok(json!({
             "type": "pattern.written",
@@ -5254,16 +5287,18 @@ impl Host {
             Err(e) => return Err(fail("write-failed", format!("ui/{name}: {e}"))),
         };
         let exists = before.is_some();
-        let current = before.as_deref().map(|t| sha256_hex(t.as_bytes()));
-        if current.as_deref() != base {
-            let html = before
-                .as_deref()
-                .and_then(|t| panel_content(t).ok().map(|(s, e)| t[s..e].to_owned()));
-            return Err(fail_with(
+        let conflict = |before: Option<&str>| {
+            let current = before.map(|t| sha256_hex(t.as_bytes()));
+            let html = before.and_then(|t| panel_content(t).ok().map(|(s, e)| t[s..e].to_owned()));
+            fail_with(
                 "conflict",
                 format!("ui/{name} changed since the version the editor started from"),
                 json!({"file": name, "base": current, "text": before, "html": html}),
-            ));
+            )
+        };
+        let current = before.as_deref().map(|t| sha256_hex(t.as_bytes()));
+        if current.as_deref() != base {
+            return Err(conflict(before.as_deref()));
         }
         let after = match &before {
             Some(text) => {
@@ -5309,7 +5344,17 @@ impl Host {
         if let Some(folder) = path.parent() {
             fs::create_dir_all(folder).map_err(failed)?;
         }
-        write_file(&path, &after).map_err(failed)?;
+        // Compared once more just before the rename (ADR 0040).
+        if !transaction::replace_unchanged(
+            &path,
+            before.as_deref().map(str::as_bytes),
+            after.as_bytes(),
+        )
+        .map_err(failed)?
+        {
+            let now = fs::read_to_string(&path).ok();
+            return Err(conflict(now.as_deref()));
+        }
         self.seen(&Path::new("ui").join(name));
         Ok(json!({
             "type": "panel.written",

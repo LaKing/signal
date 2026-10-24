@@ -475,6 +475,10 @@ fn a_position_written_meanwhile_is_a_conflict(transport: Transport) {
     let svf = json!([{"op": "instance.add", "name": "svf", "module": "std.svf", "x": 10, "y": 20}]);
     let refused = answer(&mut rig, &mut ws, 2, patch("", &top, svf.clone()));
     assert_eq!(refused["code"], "conflict", "{refused}");
+    // The conflict's shape: the level's file and its current base, which
+    // the client builds the patch on again.
+    assert_eq!(refused["file"], "project.toml", "{refused}");
+    assert_eq!(refused["base"], json!(top), "{refused}");
     assert_eq!(fs::read_to_string(&file).unwrap(), original);
     assert_eq!(fs::read_to_string(&schematic).unwrap(), theirs);
     rig.host().set_before_lock(None);

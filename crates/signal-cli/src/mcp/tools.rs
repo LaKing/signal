@@ -881,6 +881,9 @@ fn project_info(context: &Context, _: &Value) -> Outcome {
     let instances = describe["instances"].as_array().map_or(0, Vec::len);
     let project = describe["project"].clone();
     let playing = describe["playing"] != json!(false);
+    // ADR 0040: whether the folder's file system gives the writer lock now
+    // (null when the folder cannot be opened).
+    let writer_lock = signal_project::transaction::locks_work(&context.dir).ok();
     let structured = json!({
         "project": project,
         "dir": context.dir.display().to_string(),
@@ -893,6 +896,7 @@ fn project_info(context: &Context, _: &Value) -> Outcome {
         "maxGain": context.max_gain,
         "outputCeiling": context.ceiling,
         "readOnly": context.read_only,
+        "writerLock": writer_lock,
         "out": context.out.display().to_string(),
         "files": graph["files"],
         "instances": instances,
@@ -902,7 +906,7 @@ fn project_info(context: &Context, _: &Value) -> Outcome {
         "gain": gains.map(|g| g.report(&live, context.max_gain)).unwrap_or_default(),
     });
     let summary = format!(
-        "{} at {} Hz, {}; {} primitive instances; {} ({} driver); max gain {}{}",
+        "{} at {} Hz, {}; {} primitive instances; {} ({} driver); max gain {}{}{}",
         project.as_str().unwrap_or("?"),
         describe["sampleRate"],
         if playing { "playing" } else { "stopped" },
@@ -910,7 +914,12 @@ fn project_info(context: &Context, _: &Value) -> Outcome {
         context.mode,
         context.driver,
         context.max_gain,
-        if context.read_only { "; read-only" } else { "" }
+        if context.read_only { "; read-only" } else { "" },
+        if writer_lock == Some(false) {
+            "; no writer lock on this volume now: writes go on unlocked (ADR 0040)"
+        } else {
+            ""
+        }
     );
     Ok((structured, summary))
 }
@@ -1198,17 +1207,20 @@ fn transport(context: &Context, arguments: &Value) -> Outcome {
     // One stamp for every target, so several transports change on the same
     // frame and stay in step (a playhead integrates its bpm: changes a block
     // apart would leave them a lasting phase apart). The stamp is ahead of
-    // the current frame by enough for every request to arrive before it
-    // (`TEMPO_LEAD_S` for each target, and once more).
+    // the current frame by enough for every request to arrive before it:
+    // `TEMPO_LEAD_S` for each target, and once more, or the controller's
+    // latency (`pong.latency`, two device buffers) instead of that once
+    // more when it is longer, so a large device buffer does not make the
+    // later targets late.
     let rate = describe["sampleRate"]
         .as_f64()
         .filter(|r| *r >= 1.0)
         .unwrap_or(48_000.0);
-    let now = ask(context, json!({"type": "ping"}))?["frame"]
-        .as_u64()
-        .unwrap_or(0);
-    let lead = TEMPO_LEAD_S * (1.0 + addresses.len() as f64) * rate;
-    let at = now + lead.ceil() as u64;
+    let pong = ask(context, json!({"type": "ping"}))?;
+    let now = pong["frame"].as_u64().unwrap_or(0);
+    let latency = pong["latency"].as_u64().unwrap_or(0);
+    let per_target = (TEMPO_LEAD_S * rate).ceil() as u64;
+    let at = now + per_target.max(latency) + per_target * addresses.len() as u64;
     let mut acks = Vec::new();
     for address in &addresses {
         let message = if ms > 0.0 {
@@ -1933,8 +1945,13 @@ fn read_stream(context: &Context, arguments: &Value) -> Outcome {
     // Each transport's bpm: the live base of the control `tempo` sets
     // (`control`; null when no top-level control reaches it), else the
     // plan's base (`planBpm`: the files' value, which a live change does not
-    // move until it is committed).
-    let reach = tempo_targets(&describe).reach;
+    // move until it is committed). A control a connection drives
+    // (`modulated`) is not one `tempo` sets: it is named as `wired`, with
+    // `control` and `bpm` null, since what plays is what the connection
+    // makes of it.
+    let targets = tempo_targets(&describe);
+    let reach = targets.reach;
+    let wired = targets.skipped;
     let bpm: Vec<Value> = instances
         .iter()
         .filter(|i| TEMPO_MODULES.iter().any(|m| i["module"] == json!(m)))
@@ -1946,9 +1963,19 @@ fn read_stream(context: &Context, arguments: &Value) -> Outcome {
                 .find(|p| p["name"] == json!("bpm"))
                 .map_or(Value::Null, |p| p["base"].clone());
             let control = bpm_port(i).and_then(|p| reach.get(&p).cloned());
+            if let Some((address, _)) = control.as_ref().filter(|c| wired.contains(&c.0)) {
+                return json!({
+                    "instance": i["address"],
+                    "control": null,
+                    "wired": address,
+                    "bpm": null,
+                    "planBpm": plan,
+                });
+            }
             json!({
                 "instance": i["address"],
                 "control": control.as_ref().map(|c| c.0.clone()),
+                "wired": null,
                 "bpm": control.map_or_else(|| plan.clone(), |c| c.1),
                 "planBpm": plan,
             })

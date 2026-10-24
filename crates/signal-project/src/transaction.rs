@@ -159,6 +159,63 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     stage(path, bytes)?.replace(path)
 }
 
+/// Writes `bytes` to `path` atomically, as [`write_atomic`] does, only while
+/// `path` still holds `before` (`None`: it does not exist): the file is read
+/// again once the bytes are staged, just before the rename. `Ok(false)`: it
+/// changed, and nothing was written. Under the [`ProjectLock`] this catches
+/// a writer that takes no lock (an editor); without one (a volume without
+/// locks) it also catches another Signal writer, except one renaming in the
+/// instant between that read and this rename.
+pub fn replace_unchanged(path: &Path, before: Option<&[u8]>, bytes: &[u8]) -> io::Result<bool> {
+    let staged = stage(path, bytes)?;
+    // Dropped unrenamed when it changed: only this writer's staging file goes.
+    if current(path)?.as_deref() != before {
+        return Ok(false);
+    }
+    staged.replace(path)?;
+    Ok(true)
+}
+
+/// How often [`edit_text`] reads and edits a file again that changed
+/// before its rename.
+const EDIT_TRIES: usize = 3;
+
+/// A read-modify-write of `path` for a writer that holds no `base` (the
+/// schematic's positions, the window layout): `edit` is given the file's
+/// text (empty when it does not exist) and returns the new text, or `None`
+/// when nothing is to be written. Written with [`replace_unchanged`], its
+/// folder created first; a file changed meanwhile is read and edited again
+/// (at most [`EDIT_TRIES`] times), so another writer's edit is kept, never
+/// overwritten. `Ok(false)`: nothing was to be written.
+pub fn edit_text(
+    path: &Path,
+    edit: impl Fn(&str) -> Result<Option<String>, String>,
+) -> Result<bool, String> {
+    for _ in 0..EDIT_TRIES {
+        let before = current(path).map_err(|e| e.to_string())?;
+        let text = match &before {
+            Some(bytes) => {
+                std::str::from_utf8(bytes).map_err(|_| "the file is not UTF-8 text".to_owned())?
+            }
+            None => "",
+        };
+        let Some(after) = edit(text)? else {
+            return Ok(false);
+        };
+        if let Some(folder) = path.parent() {
+            fs::create_dir_all(folder).map_err(|e| e.to_string())?;
+        }
+        if replace_unchanged(path, before.as_deref(), after.as_bytes())
+            .map_err(|e| e.to_string())?
+        {
+            return Ok(true);
+        }
+    }
+    Err(format!(
+        "another writer changed it each of {EDIT_TRIES} times it was edited; nothing was written"
+    ))
+}
+
 /// The project folder's writer lock (see the module's notes), held while
 /// the guard lives.
 #[derive(Debug)]
@@ -194,10 +251,14 @@ impl ProjectLock {
     }
 
     /// The lock of `dir` if no other writer holds it now, `None` otherwise.
-    /// On a file system that has no locks (`Unsupported`, `ENOTSUP`,
-    /// `EOPNOTSUPP`, `ENOLCK`: some network and FAT volumes) the writer goes
-    /// on without one, after a warning printed once per process: the
-    /// writers' byte comparisons still refuse what changed.
+    /// When the file system gives no lock (`Unsupported`, `ENOTSUP`,
+    /// `EOPNOTSUPP`: some network and FAT volumes have none; `ENOLCK`: none
+    /// is available now) the writer goes on without one, after a warning
+    /// printed once per process, and the next writer asks again. Unlocked,
+    /// every writer still compares the files it writes with what it read
+    /// just before renaming (ADR 0040): a change made before that read is
+    /// refused, but the read and the rename are not one step, so a writer
+    /// renaming in between is not seen.
     pub fn try_acquire(dir: &Path) -> io::Result<Option<ProjectLock>> {
         let folder = File::open(dir)?;
         match folder.try_lock() {
@@ -217,6 +278,23 @@ impl ProjectLock {
             }
             Err(fs::TryLockError::Error(error)) => Err(error),
         }
+    }
+}
+
+/// Whether the file system of the project folder `dir` gives the writer
+/// lock now: `false` when writers go on unlocked (see
+/// [`ProjectLock::try_acquire`]). Another writer holding it counts as
+/// giving it. Asks without waiting and prints no warning.
+pub fn locks_work(dir: &Path) -> io::Result<bool> {
+    let folder = File::open(dir)?;
+    match folder.try_lock() {
+        Ok(()) => {
+            let _ = folder.unlock();
+            Ok(true)
+        }
+        Err(fs::TryLockError::WouldBlock) => Ok(true),
+        Err(fs::TryLockError::Error(error)) if unsupported(&error) => Ok(false),
+        Err(fs::TryLockError::Error(error)) => Err(error),
     }
 }
 
@@ -270,6 +348,58 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// ADR 0040 item 5: `replace_unchanged` renames only over the bytes it
+    /// was given (or over nothing, for `None`); a changed file is kept and
+    /// no staging file is left.
+    #[test]
+    fn replace_unchanged_refuses_a_changed_file() {
+        let dir = folder("unchanged");
+        let path = dir.join("project.toml");
+        fs::write(&path, "theirs").unwrap();
+        assert!(!replace_unchanged(&path, Some(b"ours"), b"new").unwrap());
+        assert_eq!(fs::read(&path).unwrap(), b"theirs");
+        assert!(
+            !replace_unchanged(&path, None, b"new").unwrap(),
+            "it exists"
+        );
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            1,
+            "no staging file left"
+        );
+        assert!(replace_unchanged(&path, Some(b"theirs"), b"new").unwrap());
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let fresh = dir.join("fresh.toml");
+        assert!(replace_unchanged(&fresh, None, b"first").unwrap());
+        assert_eq!(fs::read(&fresh).unwrap(), b"first");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `edit_text` edits a file changed before its rename again, keeping the
+    /// other writer's edit; `None` writes nothing.
+    #[test]
+    fn edit_text_edits_a_changed_file_again() {
+        let dir = folder("edit");
+        let path = dir.join("ui/schematic.toml");
+        let tries = std::cell::Cell::new(0);
+        let written = edit_text(&path, |text| {
+            tries.set(tries.get() + 1);
+            if tries.get() == 1 {
+                // Another writer, after this read and before the rename.
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, "theirs\n").unwrap();
+            }
+            Ok(Some(format!("{text}ours\n")))
+        })
+        .unwrap();
+        assert!(written);
+        assert_eq!(tries.get(), 2);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "theirs\nours\n");
+        assert!(!edit_text(&path, |_| Ok(None)).unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "theirs\nours\n");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// The lock excludes a second writer, in this process too, until the
     /// first one's guard drops.
     #[test]
@@ -277,7 +407,12 @@ mod tests {
         let dir = folder("lock");
         let held = ProjectLock::acquire(&dir).unwrap();
         assert!(ProjectLock::try_acquire(&dir).unwrap().is_none());
+        assert!(
+            locks_work(&dir).unwrap(),
+            "held by another writer: it works"
+        );
         drop(held);
+        assert!(locks_work(&dir).unwrap());
         assert!(ProjectLock::try_acquire(&dir).unwrap().is_some());
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "no lock file");
         fs::remove_dir_all(&dir).unwrap();

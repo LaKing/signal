@@ -55,7 +55,6 @@ use signal_app::layout::{
     default_layout, fit_height, held, holder, labels, move_card, place, read_layout, record,
     reorder, screens_of, similar, write_layout,
 };
-use signal_app::panel::write_file;
 use signal_app::server::{AppConfig, AppServer, WindowsEdit};
 use signal_app::setup::{Setup, setup_path};
 use signal_app::state::Backend;
@@ -737,15 +736,10 @@ impl Windows {
             eprintln!("signal-app: {} was not written: {error}", path.display());
             return;
         }
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let written = (self.edit_for(&layout))(&text).and_then(|after| {
-            if after == text {
-                return Ok(());
-            }
-            if let Some(folder) = path.parent() {
-                std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
-            }
-            write_file(&path, &after).map_err(|e| e.to_string())
+        // Edited again if it changes before the rename.
+        let edit = self.edit_for(&layout);
+        let written = signal_project::transaction::edit_text(&path, |text| {
+            edit(text).map(|after| (after != text).then_some(after))
         });
         if let Err(message) = written {
             eprintln!("signal-app: {} was not written: {message}", path.display());

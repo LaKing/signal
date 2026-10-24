@@ -662,7 +662,7 @@ impl AppState {
         let order: Vec<&str> = target.order.iter().map(String::as_str).collect();
         let dir = PathBuf::from(&self.project_dir);
         if let Err(error) = write_project(&dir, instance, parameter, value, &order) {
-            return self.refuse(error);
+            return self.refuse(error.to_string());
         }
         self.writes += 1;
         let current = self.playing.as_mut().map(|p| &mut p.current);
