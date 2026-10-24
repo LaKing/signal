@@ -63,8 +63,11 @@ pub enum SnapshotError {
     Invalid(String),
     /// The file changed meanwhile (another writer): nothing was written.
     Changed(String),
-    /// The file could not be read or written, or is reached through a link.
+    /// The file could not be read or written.
     Io(String),
+    /// `snapshots.toml` is a symbolic link, which is never read or written
+    /// through.
+    Link(String),
 }
 
 impl SnapshotError {
@@ -77,6 +80,7 @@ impl SnapshotError {
             SnapshotError::Invalid(_) => "does-not-load",
             SnapshotError::Changed(_) => "conflict",
             SnapshotError::Io(_) => "write-failed",
+            SnapshotError::Link(_) => "bad-value",
         }
     }
 }
@@ -87,7 +91,8 @@ impl fmt::Display for SnapshotError {
             SnapshotError::BadName(message)
             | SnapshotError::Invalid(message)
             | SnapshotError::Changed(message)
-            | SnapshotError::Io(message) => f.write_str(message),
+            | SnapshotError::Io(message)
+            | SnapshotError::Link(message) => f.write_str(message),
             SnapshotError::Unknown(name) => write!(f, "no snapshot is named \"{name}\""),
             SnapshotError::Exists(name) => write!(
                 f,
@@ -120,7 +125,46 @@ pub fn name(raw: &str) -> Result<String, SnapshotError> {
             "a snapshot's name cannot hold a control character (a tab, a line break)".to_owned(),
         ));
     }
+    if raw
+        .chars()
+        .any(|c| format_char(c) || c == '\u{2028}' || c == '\u{2029}')
+    {
+        return Err(SnapshotError::BadName(
+            "a snapshot's name cannot hold an invisible format character (a zero-width space, \
+             a byte-order mark, a direction mark) or a line or paragraph separator"
+                .to_owned(),
+        ));
+    }
+    if name.chars().all(invisible) {
+        return Err(SnapshotError::BadName(
+            "a snapshot's name must show something (it is all blank characters)".to_owned(),
+        ));
+    }
     Ok(name.to_owned())
+}
+
+/// Whether `c` is of the Unicode general category Cf (format: zero-width
+/// and direction marks, the byte-order mark, …), Unicode 15.1. Names are not
+/// normalised (no crate of the workspace offers it), so these are refused
+/// rather than kept as invisible differences.
+fn format_char(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD | 0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x0890..=0x0891 | 0x08E2
+        | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F
+        | 0xFEFF | 0xFFF9..=0xFFFB | 0x110BD | 0x110CD | 0x13430..=0x1343F
+        | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F)
+}
+
+/// Whether `c` shows nothing: white space, and the blank letters and
+/// fillers that render as space (Hangul fillers, the blank Braille cell,
+/// the combining grapheme joiner).
+fn invisible(c: char) -> bool {
+    c.is_whitespace()
+        || format_char(c)
+        || matches!(
+            c as u32,
+            0x034F | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x2800 | 0x3164 | 0xFFA0
+        )
 }
 
 /// `text`, a `snapshots.toml`, read. An empty text (or only comments) is
@@ -217,6 +261,13 @@ pub fn render(snapshots: &Snapshots) -> String {
 /// (`None`: no file, which is no snapshots).
 pub fn read(dir: &Path) -> Result<(Snapshots, Option<String>), SnapshotError> {
     let path = dir.join(SNAPSHOTS_FILE);
+    // Never followed: its target's text would reach every reader (and an
+    // error quoting it), whatever file the link names.
+    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(SnapshotError::Link(format!(
+            "{SNAPSHOTS_FILE} is a link; snapshots are read only from the project's own file"
+        )));
+    }
     let bytes = transaction::current(&path)
         .map_err(|e| SnapshotError::Io(format!("{} could not be read: {e}", path.display())))?;
     match bytes {
@@ -236,13 +287,14 @@ pub fn read(dir: &Path) -> Result<(Snapshots, Option<String>), SnapshotError> {
 /// just before its rename: a file that no longer holds what was read is
 /// [`SnapshotError::Changed`] and nothing is written. A file that does not
 /// read ([`parse`]) is refused and never overwritten; a file reached through
-/// a link is refused. Gives `edit`'s result and the text written (`None`
-/// when the edit left the text as it was, and nothing was written).
+/// a link is refused. Gives `edit`'s result, the file's text as this call
+/// left it (the text written, or the text read under the lock when it
+/// already was the edit's), and whether it wrote.
 pub fn edit<T>(
     dir: &Path,
     check: impl FnOnce(Option<&str>) -> Result<(), SnapshotError>,
     edit: impl FnOnce(&mut Snapshots) -> Result<T, SnapshotError>,
-) -> Result<(T, Option<String>), SnapshotError> {
+) -> Result<(T, String, bool), SnapshotError> {
     let path = dir.join(SNAPSHOTS_FILE);
     let failed =
         |error: String| SnapshotError::Io(format!("{} was not written: {error}", path.display()));
@@ -257,7 +309,7 @@ pub fn edit<T>(
     let result = edit(&mut snapshots)?;
     let after = render(&snapshots);
     if before.as_deref() == Some(after.as_str()) {
-        return Ok((result, None));
+        return Ok((result, after, false));
     }
     let written = transaction::replace_unchanged(
         &path,
@@ -271,19 +323,20 @@ pub fn edit<T>(
             path.display()
         )));
     }
-    Ok((result, Some(after)))
+    Ok((result, after, true))
 }
 
 /// Saves `values` as the snapshot `name` of `dir` ([`edit`]): refused with
 /// [`SnapshotError::Exists`] when one has that name and `overwrite` is
-/// false. Gives whether it replaced one, and the text written.
+/// false. Gives whether it replaced one, then the file's text and whether
+/// it wrote ([`edit`]).
 pub fn save(
     dir: &Path,
     name: &str,
     values: Values,
     overwrite: bool,
     check: impl FnOnce(Option<&str>) -> Result<(), SnapshotError>,
-) -> Result<(bool, Option<String>), SnapshotError> {
+) -> Result<(bool, String, bool), SnapshotError> {
     let name = self::name(name)?;
     edit(dir, check, |snapshots| {
         let replaced = snapshots.snapshots.contains_key(&name);
@@ -297,12 +350,13 @@ pub fn save(
 
 /// Deletes the snapshot `name` of `dir` ([`edit`]): [`SnapshotError::Unknown`]
 /// when none has that name. The file stays, with `schema_version` alone,
-/// when the last one goes. Gives the snapshot's values and the text written.
+/// when the last one goes. Gives the snapshot's values, then the file's
+/// text and whether it wrote ([`edit`]).
 pub fn delete(
     dir: &Path,
     name: &str,
     check: impl FnOnce(Option<&str>) -> Result<(), SnapshotError>,
-) -> Result<(Values, Option<String>), SnapshotError> {
+) -> Result<(Values, String, bool), SnapshotError> {
     let name = self::name(name)?;
     edit(dir, check, |snapshots| {
         snapshots
@@ -325,6 +379,23 @@ mod tests {
         );
         assert!(matches!(name("   "), Err(SnapshotError::BadName(_))));
         assert!(matches!(name("a\tb"), Err(SnapshotError::BadName(_))));
+        for bad in [
+            "a\u{200B}b",
+            "\u{FEFF}Verse",
+            "x\u{2028}y",
+            "x\u{2029}y",
+            "\u{200E}rtl",
+            "\u{3164}",
+            "\u{2800}\u{2800}",
+            "\u{3000}",
+        ] {
+            assert!(
+                matches!(name(bad), Err(SnapshotError::BadName(_))),
+                "{bad:?}"
+            );
+        }
+        // Composed and decomposed forms are not normalised: two names.
+        assert_ne!(name("e\u{301}").unwrap(), name("\u{e9}").unwrap());
         let long = "é".repeat(MAX_NAME_CHARS);
         assert_eq!(name(&long).unwrap(), long, "64 characters, 128 bytes");
         assert!(matches!(

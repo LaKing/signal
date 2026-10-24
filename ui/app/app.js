@@ -37,6 +37,7 @@ import {
   entries,
   exists,
   listMessage,
+  listProblem,
   overwritePrompt,
   refusalText,
   restoreMessage,
@@ -706,6 +707,8 @@ export class SignalAppSnapshots extends AppElement {
     // The files changed (an editor, another writer) or another project opened.
     this.stops.push(connection.on('reload', () => this.refresh()));
     this.stops.push(connection.on('app', () => this.refresh()));
+    // Stopped, the folder's watch pushes `graph` (not `reload`) after an edit.
+    this.stops.push(connection.on('graph', () => this.refresh()));
   }
 
   opened() {
@@ -715,12 +718,13 @@ export class SignalAppSnapshots extends AppElement {
   refresh() {
     this.request(listMessage()).then(
       (list) => this.show(list),
-      () => this.show(null),
+      (error) => this.show(null, error),
     );
   }
 
-  show(list) {
+  show(list, error = null) {
     this.list = list;
+    this.problem = list ? null : error;
     this.draw();
   }
 
@@ -741,7 +745,10 @@ export class SignalAppSnapshots extends AppElement {
         return el('li', {}, el('span', { className: 'snapshot-name', textContent: name, title: name }), el('span', { className: 'muted snapshot-count', textContent: countText(count) }), restore, remove);
       }),
     );
-    if (!rows.length) this.rows.append(el('li', { className: 'muted', textContent: this.list ? 'No snapshots yet: type a name and Save.' : 'Snapshots appear once a project is open.' }));
+    if (!rows.length) {
+      const text = this.list ? 'No snapshots yet: type a name and Save.' : listProblem(this.problem);
+      this.rows.append(el('li', { className: this.problem && this.problem.code !== 'no-project' ? 'warn' : 'muted', textContent: text, title: text }));
+    }
   }
 
   /** The refusal said, and the list read again after a conflict. */

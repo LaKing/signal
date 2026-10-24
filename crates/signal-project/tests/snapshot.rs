@@ -39,7 +39,7 @@ fn save_overwrite_and_delete() {
         0,
         "no file is no snapshots"
     );
-    let (replaced, text) = snapshot::save(
+    let (replaced, text, wrote) = snapshot::save(
         &dir,
         "  Verse A  ",
         values(&[("/out.gain", 0.25), ("/osc.freq", 440.0)]),
@@ -48,7 +48,7 @@ fn save_overwrite_and_delete() {
     )
     .unwrap();
     assert!(!replaced);
-    let text = text.unwrap();
+    assert!(wrote);
     assert_eq!(fs::read_to_string(&path).unwrap(), text);
     assert!(
         text.contains("[snapshots.\"Verse A\"]\n\"/osc.freq\" = 440\n\"/out.gain\" = 0.25\n"),
@@ -59,7 +59,7 @@ fn save_overwrite_and_delete() {
     let refused = snapshot::save(&dir, "Verse A", values(&[("/out.gain", 1.0)]), false, ok);
     assert_eq!(refused, Err(SnapshotError::Exists("Verse A".to_owned())));
     assert_eq!(fs::read_to_string(&path).unwrap(), text, "nothing written");
-    let (replaced, _) =
+    let (replaced, ..) =
         snapshot::save(&dir, "Verse A", values(&[("/out.gain", 1.0)]), true, ok).unwrap();
     assert!(replaced);
     let (all, _) = snapshot::read(&dir).unwrap();
@@ -81,7 +81,7 @@ fn save_overwrite_and_delete() {
         "byte order"
     );
 
-    let (deleted, _) = snapshot::delete(&dir, "Árvíztűrő tükörfúrógép", ok).unwrap();
+    let (deleted, ..) = snapshot::delete(&dir, "Árvíztűrő tükörfúrógép", ok).unwrap();
     assert_eq!(deleted, values(&[("/out.gain", 0.5)]));
     assert_eq!(
         snapshot::delete(&dir, "Árvíztűrő tükörfúrógép", ok),
@@ -117,8 +117,9 @@ fn the_file_is_byte_stable() {
     snapshot::save(&b, "one", one.clone(), false, ok).unwrap();
     let text = fs::read(a.join(SNAPSHOTS_FILE)).unwrap();
     assert_eq!(text, fs::read(b.join(SNAPSHOTS_FILE)).unwrap());
-    let (_, written) = snapshot::save(&a, "one", one, true, ok).unwrap();
-    assert_eq!(written, None, "the same text: nothing written");
+    let (_, now, wrote) = snapshot::save(&a, "one", one, true, ok).unwrap();
+    assert!(!wrote, "the same text: nothing written");
+    assert_eq!(now.as_bytes(), text, "the text read under the lock");
     assert_eq!(fs::read(a.join(SNAPSHOTS_FILE)).unwrap(), text);
     let (all, _) = snapshot::read(&a).unwrap();
     assert_eq!(
@@ -193,6 +194,11 @@ fn a_bad_file_or_a_link_is_refused() {
     let refused = snapshot::save(&dir, "b", values(&[("/out.gain", 0.5)]), false, ok);
     assert_eq!(refused.unwrap_err().code(), "write-failed");
     assert_eq!(fs::read_to_string(&outside).unwrap(), "");
+    // Never read through either: the target's text is not quoted anywhere.
+    fs::write(&outside, "secret = \"do not show\"\n").unwrap();
+    let read = snapshot::read(&dir).unwrap_err();
+    assert_eq!(read.code(), "bad-value");
+    assert!(!read.to_string().contains("do not show"), "{read}");
     let _ = fs::remove_dir_all(&dir);
 }
 

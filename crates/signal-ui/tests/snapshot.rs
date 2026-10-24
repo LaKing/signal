@@ -13,10 +13,13 @@ mod common;
 
 use std::fs;
 
-use common::{Got, Options, Rig, Transport, Ws, receive, rig};
+use std::time::{Duration, Instant};
+
+use common::{Got, Options, ReadOnly, Rig, Transport, Ws, receive, rig};
 use serde_json::{Value, json};
 use signal_core::Registry;
 use signal_project::snapshot::{self, SNAPSHOTS_FILE};
+use signal_ui::panel_write::sha256_hex;
 
 fn tone(name: &str, transport: Transport) -> Rig {
     rig(
@@ -225,7 +228,14 @@ fn names_overwrites_conflicts_and_delete(transport: Transport) {
     );
     assert_eq!(stale["code"], "conflict");
     assert_eq!(stale["base"], saved["base"]);
-    for (id, name) in [(4, json!("   ")), (5, json!("x".repeat(65))), (6, json!(3))] {
+    for (id, name) in [
+        (4, json!("   ")),
+        (5, json!("x".repeat(65))),
+        (6, json!(3)),
+        (60, json!("a\u{200B}b")),
+        (61, json!("\u{FEFF}")),
+        (62, json!("x\u{2028}y")),
+    ] {
         let bad = rig.request(
             &mut ws,
             id,
@@ -262,6 +272,13 @@ fn names_overwrites_conflicts_and_delete(transport: Transport) {
         "snapshot.deleted",
     );
     assert_eq!(deleted["name"], "Chorus");
+    // The hash of what the call wrote, not of a later read.
+    assert_eq!(deleted["base"], sha256_hex(&fs::read(&path).unwrap()));
+    assert_eq!(
+        replaced["base"].as_str().map(str::len),
+        Some(64),
+        "{replaced}"
+    );
     let list = rig.request(&mut ws, 11, json!({"type": "snapshot.list"}), "snapshots");
     assert_eq!(list["snapshots"], json!([]));
     let again = rig.request(
@@ -280,10 +297,143 @@ fn names_overwrites_conflicts_and_delete(transport: Transport) {
     rig.finish();
 }
 
+/// Steps for `ms`, collecting every JSON message `ws` receives.
+fn drain(rig: &mut Rig, ws: &mut Ws, ms: u64) -> Vec<Value> {
+    let mut got = Vec::new();
+    let until = Instant::now() + Duration::from_millis(ms);
+    while Instant::now() < until {
+        rig.pump();
+        while let Some(message) = receive(ws) {
+            if let Some(json) = message.json() {
+                got.push(json.clone());
+            }
+        }
+    }
+    got
+}
+
+/// Review of 2026-10-24, 1: a restore that writes one control and only
+/// sends another (its file already holds the value) pushes `describe` once
+/// every value is sent: each describe another client is pushed shows both.
+fn a_mixed_restore_pushes_what_it_sent(transport: Transport) {
+    let mut rig = tone("snapshot-mixed", transport);
+    let (mut a, _) = rig.client();
+    let (mut b, _) = rig.client();
+    rig.request(
+        &mut a,
+        1,
+        json!({"type": "snapshot.save", "name": "base"}),
+        "snapshot.saved",
+    );
+    commit(&mut rig, &mut a, 2, "/a.freq", 330.0);
+    // Live only: the file keeps 220.
+    rig.request(
+        &mut a,
+        3,
+        json!({"type": "set", "address": "/b.freq", "value": 100}),
+        "ack",
+    );
+    drain(&mut rig, &mut b, 300);
+    let restored = rig.request(
+        &mut a,
+        4,
+        json!({"type": "snapshot.restore", "name": "base"}),
+        "snapshot.restored",
+    );
+    assert_eq!(restored["written"], json!(["/a.freq"]), "{restored}");
+    let pushed: Vec<Value> = drain(&mut rig, &mut b, 300)
+        .into_iter()
+        .filter(|m| m["type"] == "describe")
+        .collect();
+    assert!(!pushed.is_empty(), "describe is pushed");
+    for describe in &pushed {
+        assert_eq!(control(describe, "/a.freq")["base"], 440.0);
+        assert_eq!(
+            control(describe, "/b.freq")["base"],
+            220.0,
+            "the sent value"
+        );
+        assert_eq!(describe["unsaved"]["count"], 0, "{}", describe["unsaved"]);
+    }
+    rig.finish();
+}
+
+/// Review of 2026-10-24, 2: stopped, an edit of the files by another
+/// program is what a save records, and a restore decides what to write on
+/// the file as it reads it under the writer lock.
+fn stopped_a_save_and_restore_see_the_files(transport: Transport) {
+    let mut rig = tone("snapshot-stopped", transport);
+    let (mut ws, _) = rig.client();
+    let path = rig.dir.join("project.toml");
+    rig.request(&mut ws, 1, json!({"type": "transport.stop"}), "transport");
+    let edited = common::TONE.replace("freq = 440", "freq = 300");
+    fs::write(&path, &edited).unwrap();
+    let saved = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "snapshot.save", "name": "outside"}),
+        "snapshot.saved",
+    );
+    let (all, _) = snapshot::read(&rig.dir).unwrap();
+    assert_eq!(all.snapshots["outside"]["/a.freq"], 300.0, "{saved}");
+    // Another program moves /b.freq; /a.freq stays as saved.
+    fs::write(&path, edited.replace("freq = 220", "freq = 111")).unwrap();
+    let restored = rig.request(
+        &mut ws,
+        3,
+        json!({"type": "snapshot.restore", "name": "outside"}),
+        "snapshot.restored",
+    );
+    assert_eq!(restored["written"], json!(["/b.freq"]), "{restored}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+    rig.finish();
+}
+
+/// Review of 2026-10-24, 7: a restore whose write fails still sends every
+/// value (each stays live and unsaved, as after a failed commit) and says
+/// what it skipped and clamped beside the error.
+fn a_failed_restore_sends_and_reports(transport: Transport) {
+    let mut rig = tone("snapshot-failed", transport);
+    let (mut ws, _) = rig.client();
+    fs::write(
+        rig.dir.join(SNAPSHOTS_FILE),
+        "schema_version = 1\n\n[snapshots.old]\n\"/a.freq\" = 330\n\"/gone.freq\" = 3\n",
+    )
+    .unwrap();
+    let Some(_read_only) = ReadOnly::new(&rig.dir) else {
+        return rig.finish();
+    };
+    let refused = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "snapshot.restore", "name": "old"}),
+        "error",
+    );
+    assert_eq!(refused["code"], "write-failed", "{refused}");
+    assert_eq!(refused["unwritten"], json!(["/a.freq"]), "{refused}");
+    assert_eq!(refused["skipped"][0]["address"], "/gone.freq", "{refused}");
+    assert_eq!(refused["clamped"], json!([]));
+    assert_eq!(refused["sent"], true);
+    let now = describe(&mut rig, &mut ws, 2);
+    assert_eq!(control(&now, "/a.freq")["base"], 330.0, "sent live");
+    let unsaved: Vec<&str> = now["unsaved"]["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["address"].as_str().unwrap())
+        .collect();
+    assert_eq!(unsaved, ["/a.freq"]);
+    drop(_read_only);
+    rig.finish();
+}
+
 both!(
     a_restore_undoes_later_changes,
     gone_entries_are_skipped_and_out_of_range_clamped,
     names_overwrites_conflicts_and_delete,
+    a_mixed_restore_pushes_what_it_sent,
+    stopped_a_save_and_restore_see_the_files,
+    a_failed_restore_sends_and_reports,
 );
 
 /// `signal snapshot`'s restore from the files alone: the values that differ

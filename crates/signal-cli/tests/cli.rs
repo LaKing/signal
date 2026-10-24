@@ -636,4 +636,32 @@ fn snapshot_saves_restores_and_deletes() {
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     let output = signal(&["snapshot", "list", &project, "--json"]);
     assert_eq!(stdout_json(&output)["snapshots"], serde_json::json!([]));
+
+    // A project that loads but does not plan has no controls: save and
+    // restore fail, and nothing is written (no empty snapshot replaces one).
+    let before = fs::read_to_string(dir.join("snapshots.toml")).unwrap();
+    signal(&["snapshot", "save", &project, "keep"]);
+    let kept = fs::read_to_string(dir.join("snapshots.toml")).unwrap();
+    fs::write(
+        dir.join("project.toml"),
+        text.replace(
+            "connections = [{ from = \"osc.out\", to = \"out.l\" }]",
+            "connections = [{ from = \"osc.out\", to = \"out.l\" }, { from = \"osc.out\", to = \"osc.freq\" }]",
+        ),
+    )
+    .unwrap();
+    for args in [
+        &["snapshot", "save", &project, "keep", "--overwrite"][..],
+        &["snapshot", "restore", &project, "keep"][..],
+    ] {
+        let output = signal(args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("does not plan"), "{error}");
+    }
+    assert_eq!(
+        fs::read_to_string(dir.join("snapshots.toml")).unwrap(),
+        kept
+    );
+    assert_ne!(before, kept);
 }

@@ -17,7 +17,7 @@ use signal_core::{PortAddress, Registry};
 use signal_project::Project;
 use signal_project::snapshot::Values;
 
-use crate::panel::{Panel, ParameterView, ProjectWriteError, Target, write_project_all};
+use crate::panel::{Panel, ParameterView, ProjectWriteError, Target, write_project_chosen};
 
 /// The values a snapshot saves: every control of `panel` at
 /// `/instance.parameter`, with the value `base` gives for it from its
@@ -50,6 +50,27 @@ pub struct Edit {
     pub target: Target,
     /// The snapshot's value, within the range.
     pub value: f64,
+}
+
+impl Edit {
+    /// The module's parameter order, for where a new key goes.
+    pub fn order(&self) -> Vec<&str> {
+        self.target.order.iter().map(String::as_str).collect()
+    }
+
+    /// Whether `text` (a `project.toml`) already holds this value: the key
+    /// with exactly this value, or no key while every port's own default is
+    /// this value. Decided on the text a writer read under the lock.
+    pub fn held_by(&self, text: &str) -> bool {
+        let bits = self.value.to_bits();
+        match signal_project::read_parameter(text, &self.instance, &self.parameter) {
+            Some(v) => v.to_bits() == bits,
+            None => {
+                !self.target.defaults.is_empty()
+                    && self.target.defaults.iter().all(|d| d.to_bits() == bits)
+            }
+        }
+    }
 }
 
 /// An entry a restore skipped, and why.
@@ -153,7 +174,8 @@ pub struct Restored {
 
 /// Restores `values` into the project folder `dir` from its files alone
 /// (`signal snapshot restore`): every control whose file value differs is
-/// written into `project.toml` as one change ([`write_project_all`]); a
+/// written into `project.toml` as one change ([`write_project_chosen`],
+/// decided on the text read under the writer lock); a
 /// running Signal applies it through its watch. Values are clamped and
 /// gone entries skipped as [`plan`] says.
 pub fn restore_files(
@@ -161,23 +183,11 @@ pub fn restore_files(
     registry: &Registry,
     values: &Values,
 ) -> Result<Restored, RestoreError> {
-    let project = Project::load(dir).map_err(|e| RestoreError::DoesNotLoad(e.to_string()))?;
-    let panel = Panel::new(&project, registry);
+    let panel = planned_panel(dir, registry)?;
     let restore = plan(&panel, values);
-    let changed: Vec<&Edit> = restore
+    let orders: Vec<Vec<&str>> = restore.edits.iter().map(Edit::order).collect();
+    let edits: Vec<(&str, &str, Option<f64>, &[&str])> = restore
         .edits
-        .iter()
-        .filter(|e| {
-            panel
-                .file_base(&e.instance, &e.parameter)
-                .is_none_or(|(base, _)| base.to_bits() != e.value.to_bits())
-        })
-        .collect();
-    let orders: Vec<Vec<&str>> = changed
-        .iter()
-        .map(|e| e.target.order.iter().map(String::as_str).collect())
-        .collect();
-    let edits: Vec<(&str, &str, Option<f64>, &[&str])> = changed
         .iter()
         .zip(&orders)
         .map(|(e, order)| {
@@ -189,11 +199,32 @@ pub fn restore_files(
             )
         })
         .collect();
-    if !edits.is_empty() {
-        write_project_all(dir, &edits).map_err(RestoreError::Write)?;
-    }
-    let written = changed.iter().map(|e| e.address.clone()).collect();
+    let (_, _, kept) = write_project_chosen(dir, &edits, &|text, i| {
+        restore.edits.get(i).is_some_and(|e| !e.held_by(text))
+    })
+    .map_err(RestoreError::Write)?;
+    let written = kept
+        .iter()
+        .filter_map(|&i| restore.edits.get(i).map(|e| e.address.clone()))
+        .collect();
     Ok(Restored { restore, written })
+}
+
+/// The panel of the project in `dir` as its files are now, refused
+/// ([`RestoreError::DoesNotLoad`]) when it does not load or does not plan:
+/// a project that does not plan has no controls, so a save of it would be
+/// an empty snapshot (with `--overwrite`, replacing a good one) and a
+/// restore would skip every entry.
+pub fn planned_panel(dir: &Path, registry: &Registry) -> Result<Panel, RestoreError> {
+    let project = Project::load(dir).map_err(|e| RestoreError::DoesNotLoad(e.to_string()))?;
+    if let Err(diagnostics) = project.plan(registry) {
+        let lines: Vec<String> = diagnostics.iter().map(ToString::to_string).collect();
+        return Err(RestoreError::DoesNotLoad(format!(
+            "the project does not plan, so it has no parameters:\n{}",
+            lines.join("\n")
+        )));
+    }
+    Ok(Panel::new(&project, registry))
 }
 
 /// Why [`restore_files`] wrote nothing.

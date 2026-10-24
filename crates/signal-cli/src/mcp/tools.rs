@@ -1563,18 +1563,18 @@ fn snapshot_restore(context: &Context, arguments: &Value) -> Outcome {
             let min = control["min"].as_f64().unwrap_or(f64::MIN);
             let max = control["max"].as_f64().unwrap_or(f64::MAX);
             let written = value.max(min).min(max);
-            let file = control["inFile"]
-                .as_bool()
-                .filter(|in_file| *in_file)
-                .and_then(|_| file_value(context, control))
-                .unwrap_or_else(|| control["default"].as_f64().unwrap_or(1.0));
             for port in control["ports"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
             {
-                if gains.is_gain(port) && !gain::commit_allowed(context.max_gain, written, file) {
+                // Only a gain port is judged against the file, whose value
+                // the gain table already holds (loaded once).
+                let file = gains.file_value(port);
+                if let Some(file) = file
+                    && !gain::commit_allowed(context.max_gain, written, file)
+                {
                     return Err(refused(format!(
                         "refused: restoring \"{name}\" would write {port} = {written} into project.toml, above --max-gain {} and above the file's {file}. Start `signal mcp` with a higher --max-gain to allow it.",
                         context.max_gain

@@ -94,6 +94,26 @@ pub fn write_parameter(
     Ok(document.to_string())
 }
 
+/// The value `text` (a `project.toml`) sets for `parameter` of the
+/// top-level `instance`: `None` when the entry has no such key (or the text
+/// does not read), so the parameter is at its default.
+pub fn read_parameter(text: &str, instance: &str, parameter: &str) -> Option<f64> {
+    let document: DocumentMut = text.parse().ok()?;
+    let value = document
+        .get("instances")?
+        .as_table_like()?
+        .get(instance)?
+        .as_table_like()?
+        .get(parameter)?
+        .as_value()?
+        .clone();
+    match value {
+        Value::Integer(i) => Some(*i.value() as f64),
+        Value::Float(f) => Some(*f.value()),
+        _ => None,
+    }
+}
+
 /// `text` with every edit of `edits` applied in order by [`write_parameter`]:
 /// `(instance, parameter, value, order)`. One text, so a caller writes the
 /// edits as one change (a snapshot's restore, ADR 0041).

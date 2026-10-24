@@ -76,7 +76,7 @@ pub use slot::{
     Interface, InterfacePort, LibraryInterface, Match, Role, SlotResolution, library_interfaces,
 };
 pub use structure::{library_modules, library_parameters};
-pub use write::{WriteError, write_parameter, write_parameters};
+pub use write::{WriteError, read_parameter, write_parameter, write_parameters};
 
 use locate::{
     ConnectionSpans, DefSpans, ExportKind, ExportSpans, InstanceSpans, Location, Locator, Root,

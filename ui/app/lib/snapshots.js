@@ -17,7 +17,21 @@ export function snapshotName(raw) {
   const length = [...name].length;
   if (length > MAX_NAME) return { error: `A name is at most ${MAX_NAME} characters (this one has ${length}).` };
   if (/[\u0000-\u001f\u007f-\u009f]/u.test(name)) return { error: 'A name cannot hold a tab or a line break.' };
+  if (/[\p{Cf}\u2028\u2029]/u.test(String(raw ?? ''))) return { error: 'A name cannot hold an invisible character (a zero-width space, a byte-order mark, a direction mark) or a line separator.' };
+  if (/^[\p{White_Space}\p{Cf}\u034f\u115f\u1160\u17b4\u17b5\u2800\u3164\uffa0]+$/u.test(name)) return { error: 'A name must show something (it is all blank characters).' };
+  // Not normalised: a composed "é" and "e" + combining accent are two names, as on the server.
   return { name };
+}
+
+/**
+ * What the card shows instead of the list: why the list could not be read
+ * (a `snapshots.toml` that does not read, a link, no project), or, before
+ * any answer, that a project must be open.
+ */
+export function listProblem(error) {
+  if (!error) return 'Snapshots appear once a project is open.';
+  if (error.code === 'no-project') return 'Snapshots appear once a project is open.';
+  return `Snapshots cannot be read: ${error.message ?? String(error)}`;
 }
 
 /** The card's rows from a `snapshots` message: `{ name, count }` in the server's (byte) order. */

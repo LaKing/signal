@@ -62,7 +62,7 @@ use crate::frames::{self, frame};
 use crate::keys::{self, Keys};
 use crate::panel::{
     Panel, ParameterView, Target, WriteEdit, Written, after_write_all, ramp_frames,
-    write_project_all,
+    write_project_all, write_project_chosen,
 };
 use crate::panel_write::{check_content, first_file, replace, sha256_hex};
 use crate::player::{
@@ -4738,52 +4738,14 @@ impl Host {
         edits: &[ControlWrite],
         retrying: bool,
     ) -> Result<ControlsWritten, Failure> {
-        let mut sent = Vec::with_capacity(edits.len());
-        for edit in edits {
-            let last = self.panel.dragged(&edit.instance, &edit.parameter);
-            let ports = &edit.target.ports;
-            sent.push(match edit.value {
-                Some(v) => match last {
-                    Some(d) if d.sent && d.value.to_bits() == v.to_bits() => true,
-                    _ => self.send_ramps(ports.iter().cloned().map(|p| (p, v)).collect()),
-                },
-                // Each port back to its own default, as the panel's Reset.
-                None => self.send_ramps(
-                    ports
-                        .iter()
-                        .cloned()
-                        .zip(edit.target.defaults.iter().copied())
-                        .collect(),
-                ),
-            });
-        }
-        let unwritten = |host: &mut Host, error: &str| {
-            for (edit, &sent) in edits.iter().zip(&sent) {
-                match edit.value {
-                    Some(v) => host.panel.drag(&edit.instance, &edit.parameter, v, sent),
-                    None => {
-                        host.panel.release(&edit.instance, &edit.parameter);
-                    }
-                }
-                let seq = host.next_failure;
-                host.next_failure += 1;
-                host.failed.insert(
-                    (edit.instance.clone(), edit.parameter.clone()),
-                    Failed {
-                        error: error.to_owned(),
-                        seq,
-                        reset: edit.value.is_none().then_some(sent),
-                    },
-                );
-            }
-        };
+        let sent = self.send_controls(edits);
         if retrying && sent.iter().any(|s| !s) {
             let addresses: Vec<&str> = edits.iter().map(|e| e.address.as_str()).collect();
             let error = format!(
                 "{}: the running project did not take the value",
                 addresses.join(", ")
             );
-            unwritten(self, &error);
+            self.controls_unwritten(edits, &sent, &error);
             return Err(fail("refused", format!("{error}; nothing was written")));
         }
         let orders: Vec<Vec<&str>> = edits
@@ -4805,10 +4767,81 @@ impl Host {
         let (before, after) = match write_project_all(&self.dir, &texts) {
             Ok(texts) => texts,
             Err(error) => {
-                unwritten(self, &error.to_string());
+                self.controls_unwritten(edits, &sent, &error.to_string());
                 return Err(fail(error.code(), error.to_string()));
             }
         };
+        let note = self.controls_written(edits, &sent, &before, after);
+        let describe = self.describe(false);
+        self.broadcast(&describe);
+        // `graph.files` names the written file's new SHA-256.
+        self.push_graph(false);
+        Ok(ControlsWritten { sent, note })
+    }
+
+    /// Sends each value of `edits` live (a 5 ms ramp to every port; `None`:
+    /// each port to its own default), unless every port already took
+    /// exactly that value: whether the Controller took each.
+    fn send_controls(&mut self, edits: &[ControlWrite]) -> Vec<bool> {
+        let mut sent = Vec::with_capacity(edits.len());
+        for edit in edits {
+            let last = self.panel.dragged(&edit.instance, &edit.parameter);
+            let ports = &edit.target.ports;
+            sent.push(match edit.value {
+                Some(v) => match last {
+                    Some(d) if d.sent && d.value.to_bits() == v.to_bits() => true,
+                    _ => self.send_ramps(ports.iter().cloned().map(|p| (p, v)).collect()),
+                },
+                // Each port back to its own default, as the panel's Reset.
+                None => self.send_ramps(
+                    ports
+                        .iter()
+                        .cloned()
+                        .zip(edit.target.defaults.iter().copied())
+                        .collect(),
+                ),
+            });
+        }
+        sent
+    }
+
+    /// A write of `edits` that failed (`error`): each value stays its
+    /// control's live drag, unsaved with the error (`docs/ui-protocol.md`
+    /// "Unsaved").
+    fn controls_unwritten(&mut self, edits: &[ControlWrite], sent: &[bool], error: &str) {
+        for (edit, &sent) in edits.iter().zip(sent) {
+            match edit.value {
+                Some(v) => self.panel.drag(&edit.instance, &edit.parameter, v, sent),
+                None => {
+                    self.panel.release(&edit.instance, &edit.parameter);
+                }
+            }
+            let seq = self.next_failure;
+            self.next_failure += 1;
+            self.failed.insert(
+                (edit.instance.clone(), edit.parameter.clone()),
+                Failed {
+                    error: error.to_owned(),
+                    seq,
+                    reset: edit.value.is_none().then_some(sent),
+                },
+            );
+        }
+    }
+
+    /// After `edits` were written into `project.toml` (`before` the text
+    /// read, `after` the text written) with their live sends `sent`: the
+    /// running project takes the same edit, so the watch's reload applies
+    /// nothing twice; each control is saved, or unsaved until the reload
+    /// sends it when its live send was refused. A note on the running
+    /// project, if any. `describe` and `graph` are the caller's to push.
+    fn controls_written(
+        &mut self,
+        edits: &[ControlWrite],
+        sent: &[bool],
+        before: &str,
+        after: String,
+    ) -> Option<String> {
         let file = Path::new(signal_project::PROJECT_FILE);
         // The written file, read at once: a later edit differs from it.
         let stamp = self
@@ -4833,7 +4866,7 @@ impl Host {
         let mut held = false;
         let written: Vec<WriteEdit<'_>> = edits
             .iter()
-            .zip(&sent)
+            .zip(sent)
             .map(|(e, &sent)| WriteEdit {
                 target: &e.target,
                 instance: &e.instance,
@@ -4893,7 +4926,7 @@ impl Host {
                 watcher.accept(file, stamp);
             }
         }
-        for (edit, &sent) in edits.iter().zip(&sent) {
+        for (edit, &sent) in edits.iter().zip(sent) {
             let key = (edit.instance.clone(), edit.parameter.clone());
             self.failed.remove(&key);
             if sent {
@@ -4902,11 +4935,7 @@ impl Host {
                 self.resend.insert(key);
             }
         }
-        let describe = self.describe(false);
-        self.broadcast(&describe);
-        // `graph.files` names the written file's new SHA-256.
-        self.push_graph(false);
-        Ok(ControlsWritten { sent, note })
+        note
     }
 
     /// A control's live base, as `describe` gives it: the last value the
@@ -4944,10 +4973,31 @@ impl Host {
     }
 
     /// A snapshot message's project: refused in an app with no project
-    /// open, and (`plays`) when the project does not load.
-    fn snapshot_project(&self, plans: bool) -> Result<(), Failure> {
+    /// open, and (`plans`) when the project does not load and plan. With
+    /// `plans` and nothing playing, the panel is first built again from the
+    /// folder: stopped, nothing else follows an edit of the files (the watch
+    /// pushes `graph` only), so a save or restore would work on old values.
+    fn snapshot_project(&mut self, plans: bool) -> Result<(), Failure> {
         if self.app.as_ref().is_some_and(|m| !m.opened) {
             return Err(fail("no-project", "open a project folder first"));
+        }
+        if plans && self.run.is_none() {
+            match app::load(&self.dir, &self.registry) {
+                Ok((project, plan, _)) => {
+                    let panel = Panel::new(&project, &self.registry);
+                    self.reconcile(panel);
+                    self.plan = Some(plan);
+                }
+                Err(diagnostics) => {
+                    return Err(fail(
+                        "does-not-load",
+                        format!(
+                            "the project does not load, so it has no parameters:\n{}",
+                            diagnostics.join("\n")
+                        ),
+                    ));
+                }
+            }
         }
         if plans && self.plan.is_none() {
             return Err(fail(
@@ -4959,7 +5009,7 @@ impl Host {
     }
 
     /// `snapshot.list`.
-    fn snapshot_list(&self) -> Result<Value, Failure> {
+    fn snapshot_list(&mut self) -> Result<Value, Failure> {
         self.snapshot_project(false)?;
         self.snapshots_json()
     }
@@ -4985,7 +5035,7 @@ impl Host {
         let check = base_check(message)?;
         let values = snapshot::values(&self.panel, |instance, p| self.control_base(instance, p));
         let count = values.len();
-        let (replaced, written) = snapshots::save(&self.dir, &name, values, overwrite, check)
+        let (replaced, text, _) = snapshots::save(&self.dir, &name, values, overwrite, check)
             .map_err(|e| self.snapshot_refused(e))?;
         self.snapshots_written();
         Ok(json!({
@@ -4993,7 +5043,9 @@ impl Host {
             "name": name,
             "count": count,
             "replaced": replaced,
-            "base": written.map(|t| sha256_hex(t.as_bytes())).or_else(|| self.snapshot_base()),
+            // The file as this call left it (written, or read under the
+            // lock when it already held this), never a later read.
+            "base": sha256_hex(text.as_bytes()),
         }))
     }
 
@@ -5002,14 +5054,14 @@ impl Host {
         self.snapshot_project(false)?;
         let name = snapshot_name(message)?;
         let check = base_check(message)?;
-        let (values, _) =
+        let (values, text, _) =
             snapshots::delete(&self.dir, &name, check).map_err(|e| self.snapshot_refused(e))?;
         self.snapshots_written();
         Ok(json!({
             "type": "snapshot.deleted",
             "name": name,
             "count": values.len(),
-            "base": self.snapshot_base(),
+            "base": sha256_hex(text.as_bytes()),
         }))
     }
 
@@ -5028,42 +5080,97 @@ impl Host {
             .get(&name)
             .ok_or_else(|| snapshot_failure(SnapshotError::Unknown(name.clone())))?;
         let restore = snapshot::plan(&self.panel, values);
-        let mut writes = Vec::new();
-        let mut sends = Vec::new();
-        for edit in &restore.edits {
-            let key = (edit.instance.clone(), edit.parameter.clone());
-            let file = self.panel.file_base(&edit.instance, &edit.parameter);
-            let in_file = file.is_some_and(|(base, _)| base.to_bits() == edit.value.to_bits());
-            let control = ControlWrite {
+        let skipped: Vec<Value> = restore
+            .skipped
+            .iter()
+            .map(|s| json!({"address": s.address, "reason": s.reason}))
+            .collect();
+        let clamped: Vec<Value> = restore
+            .clamped
+            .iter()
+            .map(|c| json!({"address": c.address, "value": c.value, "to": c.to}))
+            .collect();
+        let controls: Vec<ControlWrite> = restore
+            .edits
+            .iter()
+            .map(|edit| ControlWrite {
                 address: edit.address.clone(),
                 instance: edit.instance.clone(),
                 parameter: edit.parameter.clone(),
                 target: edit.target.clone(),
                 value: Some(edit.value),
-            };
-            if !in_file {
-                writes.push(control);
-                continue;
+            })
+            .collect();
+        // What is written is decided on `project.toml` as read under the
+        // writer lock: each value it does not hold.
+        let orders: Vec<Vec<&str>> = restore.edits.iter().map(snapshot::Edit::order).collect();
+        let texts: Vec<(&str, &str, Option<f64>, &[&str])> = restore
+            .edits
+            .iter()
+            .zip(&orders)
+            .map(|(e, order)| {
+                (
+                    e.instance.as_str(),
+                    e.parameter.as_str(),
+                    Some(e.value),
+                    order.as_slice(),
+                )
+            })
+            .collect();
+        let chosen = write_project_chosen(&self.dir, &texts, &|text, i| {
+            restore.edits.get(i).is_some_and(|e| !e.held_by(text))
+        });
+        // A control whose file holds the value is only sent, and only when
+        // its live value may differ (a drag, a failed write or reset, ports
+        // in doubt).
+        let settled = |host: &Host, c: &ControlWrite| {
+            let key = (c.instance.clone(), c.parameter.clone());
+            host.panel.dragged(&c.instance, &c.parameter).is_none()
+                && !host.resend.contains(&key)
+                && !host.failed.contains_key(&key)
+        };
+        let (writes, sends, written) = match chosen {
+            Ok((before, after, kept)) => {
+                let (writes, rest): (Vec<_>, Vec<_>) = controls
+                    .into_iter()
+                    .enumerate()
+                    .partition(|(i, _)| kept.contains(i));
+                let writes: Vec<ControlWrite> = writes.into_iter().map(|(_, c)| c).collect();
+                let sends: Vec<ControlWrite> = rest
+                    .into_iter()
+                    .map(|(_, c)| c)
+                    .filter(|c| !settled(self, c))
+                    .collect();
+                (writes, sends, Ok((before, after)))
             }
-            // The file holds it: only a live value that may differ (a drag,
-            // a failed write or reset, ports in doubt) is sent back to it.
-            let settled = self
-                .panel
-                .dragged(&edit.instance, &edit.parameter)
-                .is_none()
-                && !self.resend.contains(&key)
-                && !self.failed.contains_key(&key);
-            if !settled {
-                sends.push(control);
+            Err(error) => {
+                // Nothing written: every value is still sent, and each one
+                // the file did not hold stays live and unsaved with the
+                // error, as after a failed commit.
+                let (writes, rest): (Vec<_>, Vec<_>) = controls.into_iter().partition(|c| {
+                    self.panel
+                        .file_base(&c.instance, &c.parameter)
+                        .is_none_or(|(base, _)| Some(base.to_bits()) != c.value.map(f64::to_bits))
+                });
+                let sends = rest.into_iter().filter(|c| !settled(self, c)).collect();
+                (writes, sends, Err(error))
             }
-        }
+        };
+        let sent_writes = self.send_controls(&writes);
+        let mut sent = sent_writes.iter().all(|s| *s);
         let mut note = None;
-        let mut sent = true;
-        if !writes.is_empty() {
-            let written = self.write_controls(&writes, false)?;
-            sent &= written.sent.iter().all(|s| *s);
-            note = written.note;
-        }
+        let failure = match written {
+            Ok((before, after)) => {
+                if !writes.is_empty() {
+                    note = self.controls_written(&writes, &sent_writes, &before, after);
+                }
+                None
+            }
+            Err(error) => {
+                self.controls_unwritten(&writes, &sent_writes, &error.to_string());
+                Some(error)
+            }
+        };
         for control in &sends {
             let ports = control.target.ports.iter().cloned();
             let value = control.value.unwrap_or_default();
@@ -5080,25 +5187,36 @@ impl Host {
                     .drag(&control.instance, &control.parameter, value, false);
             }
         }
-        if writes.is_empty() && !sends.is_empty() {
+        // Pushed once every value is sent and written, so it shows them all.
+        if !writes.is_empty() || !sends.is_empty() {
             let describe = self.describe(false);
             self.broadcast(&describe);
         }
-        let skipped: Vec<Value> = restore
-            .skipped
-            .iter()
-            .map(|s| json!({"address": s.address, "reason": s.reason}))
-            .collect();
-        let clamped: Vec<Value> = restore
-            .clamped
-            .iter()
-            .map(|c| json!({"address": c.address, "value": c.value, "to": c.to}))
-            .collect();
+        let wrote = failure.is_none() && !writes.is_empty();
+        if wrote {
+            // `graph.files` names the written file's new SHA-256.
+            self.push_graph(false);
+        }
+        let addresses: Vec<&str> = writes.iter().map(|w| w.address.as_str()).collect();
+        if let Some(error) = failure {
+            return Err(fail_with(
+                error.code(),
+                format!("{error}; the values were sent live and stay unsaved"),
+                json!({
+                    "name": name,
+                    "restored": restore.edits.len(),
+                    "unwritten": addresses,
+                    "sent": sent,
+                    "skipped": skipped,
+                    "clamped": clamped,
+                }),
+            ));
+        }
         Ok(json!({
             "type": "snapshot.restored",
             "name": name,
             "restored": restore.edits.len(),
-            "written": writes.iter().map(|w| w.address.as_str()).collect::<Vec<_>>(),
+            "written": addresses,
             "file": signal_project::PROJECT_FILE,
             "sent": sent,
             "skipped": skipped,

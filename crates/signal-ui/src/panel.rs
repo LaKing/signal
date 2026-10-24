@@ -618,7 +618,13 @@ pub fn write_project(
     value: Option<f64>,
     order: &[&str],
 ) -> Result<(String, String), ProjectWriteError> {
-    write_project_between(dir, &[(instance, parameter, value, order)], &mut || {})
+    write_project_between(
+        dir,
+        &[(instance, parameter, value, order)],
+        &|_, _| true,
+        &mut || {},
+    )
+    .map(|(b, a, _)| (b, a))
 }
 
 /// [`write_project`] for several parameters at once, `(instance,
@@ -630,7 +636,21 @@ pub fn write_project_all(
     dir: &Path,
     edits: &[(&str, &str, Option<f64>, &[&str])],
 ) -> Result<(String, String), ProjectWriteError> {
-    write_project_between(dir, edits, &mut || {})
+    write_project_between(dir, edits, &|_, _| true, &mut || {}).map(|(b, a, _)| (b, a))
+}
+
+/// [`write_project_all`] of the edits `keep` takes, decided from the text
+/// read under the writer lock (`keep(text, index)`), so the choice is made
+/// on the version written over, not on a cached one: a snapshot's restore
+/// writes only the values the file does not hold. Gives the texts before and
+/// after and the indices written; nothing is written (and the lock is the
+/// only step taken) when `keep` takes none.
+pub fn write_project_chosen(
+    dir: &Path,
+    edits: &[(&str, &str, Option<f64>, &[&str])],
+    keep: &dyn Fn(&str, usize) -> bool,
+) -> Result<(String, String, Vec<usize>), ProjectWriteError> {
+    write_project_between(dir, edits, keep, &mut || {})
 }
 
 /// [`write_project_all`], running `between` after the edit is made and
@@ -638,8 +658,9 @@ pub fn write_project_all(
 fn write_project_between(
     dir: &Path,
     edits: &[(&str, &str, Option<f64>, &[&str])],
+    keep: &dyn Fn(&str, usize) -> bool,
     between: &mut dyn FnMut(),
-) -> Result<(String, String), ProjectWriteError> {
+) -> Result<(String, String, Vec<usize>), ProjectWriteError> {
     use signal_project::transaction::{ProjectLock, replace_unchanged};
     let path = dir.join(signal_project::PROJECT_FILE);
     let what = match edits {
@@ -651,8 +672,13 @@ fn write_project_between(
     };
     let _lock = ProjectLock::acquire(dir).map_err(|e| failed(e.to_string()))?;
     let before = fs::read_to_string(&path).map_err(|e| failed(e.to_string()))?;
+    let kept: Vec<usize> = (0..edits.len()).filter(|&i| keep(&before, i)).collect();
+    if kept.is_empty() {
+        return Ok((before.clone(), before, kept));
+    }
+    let chosen: Vec<_> = kept.iter().filter_map(|&i| edits.get(i).copied()).collect();
     let after =
-        signal_project::write_parameters(&before, edits).map_err(|e| failed(e.to_string()))?;
+        signal_project::write_parameters(&before, &chosen).map_err(|e| failed(e.to_string()))?;
     between();
     let written = replace_unchanged(&path, Some(before.as_bytes()), after.as_bytes())
         .map_err(|e| failed(e.to_string()))?;
@@ -664,7 +690,7 @@ fn write_project_between(
             signal_project::PROJECT_FILE
         )));
     }
-    Ok((before, after))
+    Ok((before, after, kept))
 }
 
 /// Why [`write_project`] wrote nothing.
@@ -782,6 +808,7 @@ mod tests {
         let refused = write_project_between(
             &dir,
             &[("out", "gain", Some(0.5), &["gain"][..])],
+            &|_, _| true,
             &mut || {
                 fs::write(&path, &theirs).unwrap();
             },

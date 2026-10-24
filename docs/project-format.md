@@ -513,10 +513,10 @@ schema_version = 1
 | Key | Meaning |
 |---|---|
 | `schema_version` | `1`; required once the file has a snapshot |
-| `snapshots."<name>"` | One snapshot. The name is any text, 1 to 64 characters (Unicode scalar values) with no space around it and no control character; it is a TOML key, quoted when it needs it. Names are exact (`Chorus` ≠ `chorus`) |
+| `snapshots."<name>"` | One snapshot. The name is any text, 1 to 64 characters (Unicode scalar values) with no space around it, no control or format character (category Cf), no U+2028 or U+2029, and not only blank characters; it is a TOML key, quoted when it needs it. Names are exact and not normalised (`Chorus` ≠ `chorus`; a composed and a decomposed `é` are two names) |
 | `"/<instance>.<parameter>" = <number>` | One value: the parameter's full address, as the UI protocol and `signal mcp` name a control, and a finite number (an integer or a float) |
 
-Unknown keys, a bad name, an address that is not `/<instance>.<parameter>` and a value that is not a finite number are errors; a file with an error is refused by every snapshot write and never overwritten.
+Unknown keys, a bad name, an address that is not `/<instance>.<parameter>` and a value that is not a finite number are errors; a file with an error is refused by every snapshot write and never overwritten. A `snapshots.toml` that is a symbolic link is neither read nor written.
 
 - **What a snapshot holds.** Every **control** of the project: each top-level instance's own parameters (for a composite or an included project, its exported ones, §3, §15), the parameters an edit writes into `project.toml` (§9). A parameter inside a composite is in the composite's file, shared by its instances, and is in no snapshot.
 - **Save** records each control's value as it plays (in Signal.app and `signal ui`: its live base, an unsaved edit included; with `signal snapshot save`, the files' value), defaults included, and a modulated control's base, not its modulated signal. A name in use is replaced only when asked.

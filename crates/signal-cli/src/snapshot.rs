@@ -10,10 +10,8 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 use serde_json::json;
 use signal_core::Registry;
-use signal_project::Project;
 use signal_project::snapshot::{self, SnapshotError};
-use signal_ui::panel::Panel;
-use signal_ui::snapshot::{RestoreError, restore_files, values};
+use signal_ui::snapshot::{RestoreError, planned_panel, restore_files, values};
 
 use crate::{Failure, print_stdout};
 
@@ -90,14 +88,13 @@ pub(crate) fn run(args: &SnapshotArgs, registry: &Registry, json: bool) -> Resul
             name,
             overwrite,
         } => {
-            let loaded = Project::load(project).map_err(|e| match e {
-                signal_project::LoadError::Invalid(d) => Failure::Invalid(d),
-                e => Failure::Io(e.to_string()),
+            let panel = planned_panel(project, registry).map_err(|e| match e {
+                RestoreError::DoesNotLoad(message) => Failure::Io(message),
+                RestoreError::Write(error) => Failure::Io(error.to_string()),
             })?;
-            let panel = Panel::new(&loaded, registry);
             let values = values(&panel, |_, p| p.base);
             let count = values.len();
-            let (replaced, _) =
+            let (replaced, ..) =
                 snapshot::save(project, name, values, *overwrite, |_| Ok(())).map_err(failure)?;
             let name = snapshot::name(name).map_err(failure)?;
             if json {
@@ -152,7 +149,7 @@ pub(crate) fn run(args: &SnapshotArgs, registry: &Registry, json: bool) -> Resul
             Ok(())
         }
         Action::Delete { project, name } => {
-            let (values, _) = snapshot::delete(project, name, |_| Ok(())).map_err(failure)?;
+            let (values, ..) = snapshot::delete(project, name, |_| Ok(())).map_err(failure)?;
             let name = snapshot::name(name).map_err(failure)?;
             if json {
                 print_stdout(&json!({"name": name, "count": values.len()}).to_string());

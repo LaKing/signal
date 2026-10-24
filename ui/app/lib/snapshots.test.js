@@ -9,6 +9,7 @@ import {
   entries,
   exists,
   listMessage,
+  listProblem,
   overwritePrompt,
   refusalText,
   restoreMessage,
@@ -34,6 +35,10 @@ test('names are trimmed and bounded as the server takes them', () => {
   assert.ok(snapshotName('   ').error);
   assert.ok(snapshotName(null).error);
   assert.ok(snapshotName('a\tb').error, 'a tab');
+  for (const invisible of ['a\u200bb', '\ufeffVerse', 'x\u2028y', 'x\u2029y', '\u200ertl', '\u3164', '\u2800\u2800', '\u3000']) {
+    assert.ok(snapshotName(invisible).error, JSON.stringify(invisible));
+  }
+  assert.notEqual(snapshotName('e\u0301').name, snapshotName('\u00e9').name, 'not normalised, as on the server');
   const long = 'é'.repeat(MAX_NAME);
   assert.deepEqual(snapshotName(long), { name: long }, '64 characters, though 128 bytes');
   assert.match(snapshotName(`${long}x`).error, /at most 64 characters \(this one has 65\)/);
@@ -95,4 +100,14 @@ test('what the card says after each action', () => {
   assert.equal(deletedText({ name: 'Chorus' }), 'Deleted “Chorus”.');
   assert.match(refusalText({ code: 'conflict', message: 'snapshots.toml changed since it was listed (base); nothing was written' }), /try once more\.$/);
   assert.equal(refusalText({ code: 'exists', message: 'a snapshot is named "Chorus" already' }), 'a snapshot is named "Chorus" already');
+});
+
+// Review of 2026-10-24, 5: a list the server refuses is said, not taken for "no project".
+test('a refused list says why', () => {
+  assert.equal(listProblem(null), 'Snapshots appear once a project is open.');
+  assert.equal(listProblem({ code: 'no-project', message: 'open a project folder first' }), 'Snapshots appear once a project is open.');
+  assert.equal(
+    listProblem({ code: 'does-not-load', message: 'snapshots.toml: "/out.gain" must be a finite number' }),
+    'Snapshots cannot be read: snapshots.toml: "/out.gain" must be a finite number',
+  );
 });
