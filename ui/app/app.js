@@ -489,6 +489,7 @@ export class SignalAppMessages extends AppElement {
     this.line(app.reload?.message, app.reload?.error);
     const notes = [];
     if (app.message) notes.push({ text: app.message, className: 'warn' });
+    if (app.muted) notes.push({ text: app.muted, className: 'error' });
     for (const d of app.project?.diagnostics ?? []) notes.push({ text: d, className: 'error' });
     for (const n of app.notes ?? []) notes.push({ text: n, className: '' });
     for (const p of app.setupProblems ?? []) notes.push({ text: p, className: 'warn' });

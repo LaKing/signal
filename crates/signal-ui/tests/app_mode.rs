@@ -507,6 +507,73 @@ fn power_off_stops_and_on_restores(transport: Transport) {
     rig.finish();
 }
 
+/// A sine through a `std.scale` (as kick909's `attack` reaches its click):
+/// a `mul` of −1e6 takes the scale's output beyond ±10⁶.
+const SCALED: &str = r#"schema_version = 1
+
+[project]
+name = "scaled"
+sample_rate = 48000
+seed = 1
+
+[instances]
+osc = { module = "std.sine_osc", freq = 440 }
+click = { module = "std.scale", mul = 0.5 }
+out = { module = "std.audio_out", gain = 0.25 }
+
+[wiring]
+connections = [
+  { from = "osc.out", to = "click.in", scale = 2 },
+  { from = "click.out", to = "out.l" },
+  { from = "click.out", to = "out.r" },
+]
+"#;
+
+/// The owner's kick (2026-10-25): a control dragged to its range's end took
+/// an instance's output beyond ±10⁶, the fault guard muted it for the run,
+/// and setting the control back (a snapshot's restore) showed the value but
+/// brought no sound, with nothing saying why. The window now says which
+/// instance is muted, why and how it comes back, for as long as the run
+/// lasts; playing again clears it.
+fn a_muted_instance_is_shown_until_the_project_plays_again(transport: Transport) {
+    let source = std::env::temp_dir().join(format!(
+        "signal-ui-app-muted-source-{transport:?}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&source);
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("project.toml"), SCALED).unwrap();
+    let mut rig = app_rig("muted", transport, Some(&source));
+    let (mut ws, _) = rig.client();
+    rig.request(&mut ws, 1, json!({"type": "transport.play"}), "transport");
+    let app = rig.request(&mut ws, 2, json!({"type": "app.get"}), "app");
+    assert_eq!(app["muted"], Value::Null, "nothing muted yet: {app}");
+
+    let set = |value: f64| json!({"type": "commit", "address": "/click.mul", "value": value});
+    rig.request(&mut ws, 3, set(-1e6), "committed");
+    let muted = rig.wait(&mut ws, "muted", |got| {
+        got.of("app")
+            .and_then(|a| a["muted"].as_str())
+            .map(str::to_owned)
+    });
+    assert!(
+        muted.starts_with("/click was muted at frame ") && muted.contains("beyond ±10⁶"),
+        "{muted}"
+    );
+    // Back in range: the control takes the value, the instance stays muted,
+    // and the window still says so.
+    rig.request(&mut ws, 4, set(0.5), "committed");
+    let app = rig.request(&mut ws, 5, json!({"type": "app.get"}), "app");
+    assert_eq!(app["muted"], json!(muted), "still muted: {app}");
+
+    rig.request(&mut ws, 6, json!({"type": "transport.stop"}), "transport");
+    rig.request(&mut ws, 7, json!({"type": "transport.play"}), "transport");
+    let app = rig.request(&mut ws, 8, json!({"type": "app.get"}), "app");
+    assert_eq!(app["muted"], Value::Null, "a new run: {app}");
+    rig.finish();
+    let _ = fs::remove_dir_all(&source);
+}
+
 /// auditor-1-power-initial-state: a client that connects while the app is
 /// off (the panel's frame, reloaded because another project was opened) is
 /// told so in `welcome`; no subscription is taken while off and no stream
@@ -1910,6 +1977,7 @@ both!(
     a_project_plays_at_the_rate_of_the_output,
     it_plays_while_switched_on,
     power_off_stops_and_on_restores,
+    a_muted_instance_is_shown_until_the_project_plays_again,
     a_client_connecting_while_off_is_told_and_gets_no_frames,
     a_failed_stopped_commit_is_still_unsaved_when_playing,
     it_starts_stopped_plays_and_stops,

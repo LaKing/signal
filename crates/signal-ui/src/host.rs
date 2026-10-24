@@ -35,8 +35,8 @@ use signal_core::{
     Curve, Direction as PortDirection, EventPayload, Frame, PortAddress, PortShape, Registry,
 };
 use signal_engine::{
-    CommandId, ControlSink, HangLine, Outcome, ParameterValue, Provenance, RealtimeConfig, Report,
-    RtOptions, RtPolicy, RunnerStatus, SentCommand, Stamp,
+    CommandId, ControlSink, FaultReason, HangLine, LogLine, Outcome, ParameterValue, Provenance,
+    RealtimeConfig, Report, RtOptions, RtPolicy, RunnerStatus, SentCommand, Stamp,
 };
 use signal_graph::ExecutionPlan;
 use signal_output::{
@@ -289,6 +289,9 @@ struct Run {
     /// The engine's plan version last described.
     version: u64,
     failure_reported: bool,
+    /// The instances the fault guard muted in this run, in the order
+    /// reported: each stays silent until the project plays again.
+    muted: Vec<Muted>,
     /// Why the audio system stopped the output's stream, once reported
     /// (`signal ui`, `signal mcp`: the run is kept, so what it recorded is
     /// written, and the command ends with it).
@@ -429,15 +432,76 @@ impl Aim {
     }
 }
 
-/// The values and reports of one poll, beside the session recorder.
+/// The values, reports and mutes of one poll, beside the session recorder.
 struct Observed<'a> {
     values: &'a mut BTreeMap<PortAddress, ParameterValue>,
     reports: &'a mut Vec<Report>,
+    muted: &'a mut Vec<Muted>,
+}
+
+/// An instance the fault guard muted (`docs/semantics.md` §7, §14): it is
+/// never called again in this run, so its outputs stay 0 whatever its
+/// parameters are set to.
+#[derive(Clone, Debug, PartialEq)]
+struct Muted {
+    frame: Frame,
+    address: String,
+    reason: FaultReason,
+}
+
+impl Muted {
+    /// What the operator is told: which instance, why, and how it comes back.
+    fn message(&self) -> String {
+        let why = match self.reason {
+            FaultReason::NonFinite => "an output or event value that is not finite",
+            FaultReason::Magnitude => "an output or event value beyond ±10⁶",
+            FaultReason::EventOverflow => "more than 16 events on an output in one frame",
+            FaultReason::Panic => "its call panicked",
+            FaultReason::LateResult => "a late result",
+        };
+        format!(
+            "{} was muted at frame {} ({why}): it stays silent for the rest of this run, \
+             whatever its parameters are set to; with its values back in range, play the \
+             project again (Project ▸ Restart from Files, or the power off and on) to hear it",
+            self.address, self.frame.0
+        )
+    }
+}
+
+/// Signal.app's note for the instances muted in a run (not empty): the
+/// first one's message, and the addresses of the others.
+fn muted_message(muted: &[Muted]) -> String {
+    let first = muted.first().map(Muted::message).unwrap_or_default();
+    match muted.get(1..) {
+        Some(rest) if !rest.is_empty() => {
+            let others: Vec<&str> = rest.iter().map(|m| m.address.as_str()).collect();
+            format!("{first} (also muted: {})", others.join(", "))
+        }
+        _ => first,
+    }
 }
 
 impl ControlSink for Observed<'_> {
     fn report(&mut self, report: &Report, _command: &SentCommand) {
         self.reports.push(*report);
+    }
+    /// A fault that mutes its instance for the run: every reason but
+    /// `late_result`, which only silences one block of its own (§7).
+    fn log(&mut self, line: LogLine<'_>) {
+        if let LogLine::Fault {
+            frame,
+            address,
+            reason,
+            ..
+        } = line
+            && reason != FaultReason::LateResult
+        {
+            self.muted.push(Muted {
+                frame,
+                address: address.to_string(),
+                reason,
+            });
+        }
     }
     fn parameter(&mut self, port: &PortAddress, value: ParameterValue) {
         match self.values.get_mut(port) {
@@ -508,6 +572,8 @@ pub struct Host {
     vector_slots: [Option<u32>; VECTOR_SLOTS],
     values: BTreeMap<PortAddress, ParameterValue>,
     reports: Vec<Report>,
+    /// Instances muted since the last poll ([`Observed`]).
+    muted: Vec<Muted>,
     meters: Vec<Meter>,
     inputs: Vec<Meter>,
     blocks: Vec<ScopeBlock>,
@@ -912,6 +978,7 @@ impl Host {
             vector_slots: [None; VECTOR_SLOTS],
             values: BTreeMap::new(),
             reports: Vec::new(),
+            muted: Vec::new(),
             meters: Vec::new(),
             inputs: Vec::new(),
             blocks: Vec::new(),
@@ -1322,6 +1389,11 @@ impl Host {
             "reload": mode.reload.as_ref().map(|(message, error)| json!({"message": message, "error": error})),
             "notes": mode.notes,
             "message": mode.message,
+            "muted": self
+                .run
+                .as_ref()
+                .filter(|run| !run.muted.is_empty())
+                .map(|run| muted_message(&run.muted)),
             "writes": self.writes,
             "setupPath": self.setup_path.display().to_string(),
             "setupProblems": self.setup_problems,
@@ -1459,6 +1531,7 @@ impl Host {
             device,
             version: 0,
             failure_reported: false,
+            muted: Vec::new(),
             fault: None,
             scheduling: Some(started.scheduling),
         };
@@ -2409,6 +2482,7 @@ impl Host {
             device,
             version: 0,
             failure_reported: false,
+            muted: Vec::new(),
             fault: None,
             scheduling: None,
         };
@@ -2439,12 +2513,20 @@ impl Host {
         let mut observed = Observed {
             values: &mut self.values,
             reports: &mut self.reports,
+            muted: &mut self.muted,
         };
         let meters = &mut self.meters;
         run.controller
             .poll_with(&mut Both(&mut run.live, &mut observed), |m: &Meter| {
                 meters.push(*m);
             });
+        // A muted instance is silent for the rest of the run, while its
+        // controls still show (and take) the values sent: say so, once each.
+        // Signal.app shows them as long as the run lasts (`app.muted`).
+        for muted in self.muted.drain(..) {
+            self.messages.push(muted.message());
+            run.muted.push(muted);
+        }
         let blocks = &mut self.blocks;
         run.controller.poll_scopes(|b| blocks.push(*b));
         let snapshots = &mut self.snapshots;
@@ -2558,6 +2640,8 @@ impl Host {
         let mut observed = Observed {
             values: &mut self.values,
             reports: &mut self.reports,
+            // Taken to the run by the next `poll`.
+            muted: &mut self.muted,
         };
         let result = reload_observed(
             &mut run.controller,
