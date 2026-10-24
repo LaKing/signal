@@ -1326,7 +1326,8 @@ fn open_project(
 /// Save As…: the system's save panel with `<project name>.signal`; the
 /// project is that file from then on.
 fn save_as(server: &AppServer, windows: &mut Windows, target: &Target, proxy: &Proxy) {
-    let name = default_save_name(server.project().as_ref());
+    // The name only: never waits for a save still running.
+    let name = default_save_name(server.project_shown().as_ref());
     let Some(file) = choose_save(&name) else {
         return;
     };

@@ -104,9 +104,12 @@ fn differs(working: &Path, saved: &[u8]) -> bool {
 /// A save's ticket: its result is told by it ([`Document::take_saved`]).
 pub type Ticket = u64;
 
-/// How many times a save packs the folder again when it changed while it
-/// was packed, before it writes the last packing (and the folder stays
-/// edited).
+/// A finished save's result: the file it wrote, or why it did not.
+pub type Saved = Result<PathBuf, String>;
+
+/// How many times a save packs the folder again when a packing failed or
+/// the folder changed while it was packed, before it writes the last
+/// packing made (and the folder stays edited).
 const SETTLE_TRIES: usize = 3;
 
 /// A save asked for and not yet started: to the document's file as it is
@@ -138,24 +141,49 @@ struct Saving {
 }
 
 /// Packs `working` and writes it over `file` atomically: a save's work, on
-/// its thread. A folder that changed while it was packed (it no longer
-/// packs to the bytes made, [`archive::packs_to`]) is packed again, at most
-/// [`SETTLE_TRIES`] times; the bytes written are always one packing's, and
+/// its thread ([`settle`]). The bytes written are always one packing's, and
 /// say whether that packing settled.
 fn pack_and_write(working: &Path, file: &Path, hold: &SaveHold) -> Packed {
     let failed = |e: ArchiveError| format!("{} was not saved: {e}", file.display());
-    let mut bytes = archive::pack(working).map_err(failed)?;
-    let mut settled = false;
-    for _ in 0..SETTLE_TRIES {
-        if archive::packs_to(working, &bytes).is_ok_and(|same| same) {
-            settled = true;
-            break;
-        }
-        bytes = archive::pack(working).map_err(failed)?;
-    }
+    let (bytes, settled) = settle(
+        || archive::pack(working),
+        |bytes| archive::packs_to(working, bytes).is_ok_and(|same| same),
+    )
+    .map_err(failed)?;
     held(hold);
     archive::write_atomic(file, &bytes).map_err(failed)?;
     Ok((bytes, settled))
+}
+
+/// A packing of a folder that may change while it is packed: `pack` is
+/// tried at most `SETTLE_TRIES + 1` times, and each packing made is
+/// checked with `same` (the folder still packs to it). The first that
+/// checks is settled. A packing that fails (a file removed between the
+/// listing and its read, as an editor that deletes and creates again does)
+/// or does not check is tried again; when none checks, the last one made is
+/// returned unsettled, and the save keeps the folder *edited*
+/// ([`Document::refresh`] then compares it with what was written); when
+/// none was made, the last error.
+fn settle<E>(
+    mut pack: impl FnMut() -> Result<Vec<u8>, E>,
+    mut same: impl FnMut(&[u8]) -> bool,
+) -> Result<(Vec<u8>, bool), E> {
+    let mut made = None;
+    for _ in 0..SETTLE_TRIES {
+        match pack() {
+            Ok(bytes) if same(&bytes) => return Ok((bytes, true)),
+            Ok(bytes) => made = Some(bytes),
+            Err(_) => {}
+        }
+    }
+    match (pack(), made) {
+        (Ok(bytes), _) => {
+            let settled = same(&bytes);
+            Ok((bytes, settled))
+        }
+        (Err(_), Some(bytes)) => Ok((bytes, false)),
+        (Err(e), None) => Err(e),
+    }
 }
 
 /// Test hooks: what holds a save after it packed and before it writes
@@ -239,7 +267,7 @@ pub struct Document {
     saving: Option<Saving>,
     asked: VecDeque<Asked>,
     /// Finished saves' results, until taken.
-    saved_results: Vec<(Ticket, Result<(), String>)>,
+    saved_results: Vec<(Ticket, Saved)>,
     next_ticket: Ticket,
     save_hold: SaveHold,
     #[cfg(feature = "test-hooks")]
@@ -492,7 +520,7 @@ impl Document {
     /// order they finished (the order asked). Taken by
     /// [`refresh`](Document::refresh) and
     /// [`finish_saves`](Document::finish_saves).
-    pub fn take_saved(&mut self) -> Vec<(Ticket, Result<(), String>)> {
+    pub fn take_saved(&mut self) -> Vec<(Ticket, Saved)> {
         std::mem::take(&mut self.saved_results)
     }
 
@@ -528,7 +556,7 @@ impl Document {
     fn wait_for(&mut self, ticket: Ticket) -> Result<(), String> {
         loop {
             if let Some(at) = self.saved_results.iter().position(|(t, _)| *t == ticket) {
-                return self.saved_results.remove(at).1;
+                return self.saved_results.remove(at).1.map(|_| ());
             }
             if !self.saving() {
                 return Err(format!("{} was not saved", self.file.display()));
@@ -575,7 +603,7 @@ impl Document {
         let result = match outcome {
             Ok(Ok((bytes, settled))) => {
                 if job.rename {
-                    self.file = job.file;
+                    self.file = job.file.clone();
                 }
                 self.saved = Arc::new(bytes);
                 // A comparison still running compared with the old content.
@@ -587,7 +615,7 @@ impl Document {
                 self.look = current;
                 self.edited = !unchanged;
                 self.wanted = !unchanged;
-                Ok(())
+                Ok(job.file)
             }
             Ok(Err(message)) => Err(message),
             Err(()) => Err(format!(
@@ -671,5 +699,96 @@ impl Document {
         }
         let _ = fs::remove_dir_all(&self.working);
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Packings that fail, or do not check, are tried again within the
+    /// bound; the first that checks is settled.
+    #[test]
+    fn a_failed_or_changed_packing_is_tried_again() {
+        let mut tries = 0;
+        let packed = settle(
+            || {
+                tries += 1;
+                if tries <= 2 {
+                    Err("gone")
+                } else {
+                    Ok(vec![tries])
+                }
+            },
+            |bytes| bytes == [4],
+        );
+        assert_eq!(packed, Ok((vec![4], true)));
+        assert_eq!(tries, 4);
+    }
+
+    /// A folder that never settles: at most `SETTLE_TRIES + 1` packings, the
+    /// last one made written unsettled; one that never packs fails.
+    #[test]
+    fn a_packing_that_never_settles_is_unsettled() {
+        let mut tries = 0u8;
+        let packed = settle(
+            || -> Result<Vec<u8>, &str> {
+                tries += 1;
+                Ok(vec![tries])
+            },
+            |_| false,
+        );
+        let last = u8::try_from(SETTLE_TRIES + 1).unwrap();
+        assert_eq!(packed, Ok((vec![last], false)));
+        assert_eq!(tries, last);
+
+        // The last packing failed: the last one made.
+        let mut tries = 0;
+        let packed = settle(
+            || {
+                tries += 1;
+                if tries > SETTLE_TRIES {
+                    Err("gone")
+                } else {
+                    Ok(vec![1])
+                }
+            },
+            |_| false,
+        );
+        assert_eq!(packed, Ok((vec![1], false)));
+
+        let failed = settle(|| Err::<Vec<u8>, _>("gone"), |_| true);
+        assert_eq!(failed, Err("gone"));
+    }
+
+    /// A save whose packing did not settle keeps the folder edited, though
+    /// its files look as when it started, and asks for a comparison with
+    /// what it wrote.
+    #[test]
+    fn an_unsettled_save_keeps_the_folder_edited() {
+        let base = std::env::temp_dir().join(format!("signal-ui-unsettled-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let pulse = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/pulse");
+        let file = base.join("pulse.signal");
+        archive::write_atomic(&file, &archive::pack(&pulse).unwrap()).unwrap();
+        for settled in [false, true] {
+            let mut document = Document::open(&file, &base.join("Open")).unwrap();
+            let bytes = archive::pack(document.working()).unwrap();
+            let (_, result) = mpsc::sync_channel(1);
+            document.saving = Some(Saving {
+                ticket: 7,
+                file: file.clone(),
+                rename: false,
+                look: look(document.working()),
+                result,
+            });
+            document.finish_save(Ok(Ok((bytes, settled))));
+            assert_eq!(document.take_saved(), vec![(7, Ok(file.clone()))]);
+            assert_eq!(document.edited(), !settled, "settled {settled}");
+            assert_eq!(document.wanted, !settled);
+            document.close(true);
+        }
+        fs::remove_dir_all(&base).unwrap();
     }
 }

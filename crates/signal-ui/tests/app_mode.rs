@@ -960,6 +960,57 @@ fn steps_never_wait_for_a_save(transport: Transport) {
     rig.finish();
 }
 
+/// Each save is answered with the file it wrote: the page's Save of the
+/// file, then the window's Save As of another file asked while it runs,
+/// both finished by opening another project; the first is told its file,
+/// not the one the project has by then.
+fn a_save_is_answered_with_the_file_it_wrote(transport: Transport) {
+    let mut rig = app_rig("signal-save-file", transport, None);
+    let file = packed(&rig, "tone");
+    let other = file.with_file_name("other.signal");
+    let (mut ws, _) = rig.client();
+    rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    commit(&mut rig, &mut ws, 2, 0.25);
+    wait_edited(&mut rig, &mut ws);
+    rig.host().document().unwrap().hold_saves(true);
+    common::send(&mut ws, json!({"type": "project.save", "id": 3}));
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while rig.host().document().unwrap().saves_held() == 0 {
+        assert!(std::time::Instant::now() < until, "no save started");
+        rig.pump();
+    }
+    let (answer, answered) = std::sync::mpsc::channel();
+    rig.host().save_as_then(
+        &other,
+        Box::new(move |result| {
+            let _ = answer.send(result);
+        }),
+    );
+    let release = rig.host().document().unwrap().save_releaser();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        release();
+    });
+    let folder = rig.dir.clone();
+    rig.host().open_project(&folder, Edits::Discard).unwrap();
+    releaser.join().unwrap();
+    assert_eq!(answered.try_recv(), Ok(Ok(())), "the Save As, answered");
+    let saved = rig.reply(&mut ws, 3, "saved");
+    assert_eq!(
+        saved["file"],
+        file.display().to_string(),
+        "the file it wrote"
+    );
+    assert!(gain_of(&file).contains("gain = 0.25"));
+    assert!(gain_of(&other).contains("gain = 0.25"));
+    rig.finish();
+}
+
 /// A failed `project.save` (the file's folder made read-only while it
 /// runs) is answered `not-saved` when it fails, and is the window's message.
 fn a_failed_save_is_answered_when_it_fails(transport: Transport) {
@@ -1877,6 +1928,7 @@ both!(
     a_patch_marks_a_signal_project_edited,
     steps_never_wait_for_a_document_comparison,
     steps_never_wait_for_a_save,
+    a_save_is_answered_with_the_file_it_wrote,
     a_failed_save_is_answered_when_it_fails,
     close_waits_for_a_save,
     opening_another_project_can_save_first,

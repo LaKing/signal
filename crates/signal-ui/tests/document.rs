@@ -288,7 +288,7 @@ fn a_save_never_holds_up_a_refresh_and_a_stale_one_keeps_newer_edits() {
     fs::write(&toml, text.replace("gain = 0.33", "gain = 0.45")).unwrap();
     document.hold_saves(false);
     refresh_until(&mut document, "the save written", |d| !d.saving());
-    assert_eq!(document.take_saved(), vec![(ticket, Ok(()))]);
+    assert_eq!(document.take_saved(), vec![(ticket, Ok(file.clone()))]);
     assert!(saved_toml(&file).contains("gain = 0.4 }"));
     assert!(document.edited(), "a stale save never clears a newer edit");
     assert!(document.check(), "the newer edit is still to save");
@@ -297,7 +297,7 @@ fn a_save_never_holds_up_a_refresh_and_a_stale_one_keeps_newer_edits() {
     let next = document.start_save();
     assert_ne!(next, ticket);
     refresh_until(&mut document, "the next save written", |d| !d.saving());
-    assert_eq!(document.take_saved(), vec![(next, Ok(()))]);
+    assert_eq!(document.take_saved(), vec![(next, Ok(file.clone()))]);
     assert!(!document.edited());
     assert!(!document.check());
     assert!(saved_toml(&file).contains("gain = 0.45"));
@@ -333,7 +333,7 @@ fn saves_asked_while_one_runs_wait_and_share() {
     assert!(!document.saving());
     assert_eq!(
         document.take_saved(),
-        vec![(first, Ok(())), (second, Ok(()))]
+        vec![(first, Ok(file.clone())), (second, Ok(file.clone()))]
     );
     assert!(!document.edited(), "the last save had every edit");
     assert!(saved_toml(&file).contains("gain = 0.45"));

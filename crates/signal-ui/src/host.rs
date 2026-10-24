@@ -2033,12 +2033,16 @@ impl Host {
                     .partition(|wait| wait.ticket == ticket);
             self.saves = waiting;
             for wait in answered {
+                // The file this save wrote, whatever the document's file is
+                // by now (a Save As asked after it may have written since).
+                let written = result.as_ref().ok().cloned();
                 let result = match (&result, &wait.save_as) {
-                    (Ok(()), Some(file)) => {
+                    (Ok(_), Some(file)) => {
                         app::opened(&mut self.setup, file.clone());
                         app::save(&self.setup, &self.setup_path)
                     }
-                    _ => result.clone(),
+                    (Ok(_), None) => Ok(()),
+                    (Err(message), _) => Err(message.clone()),
                 };
                 match wait.waiter {
                     SaveWaiter::Call(done) => done(result),
@@ -2048,7 +2052,7 @@ impl Host {
                             Ok(()) => json!({
                                 "type": "saved",
                                 "id": id,
-                                "file": self.document.as_ref().map(|d| d.file().display().to_string()),
+                                "file": written.map(|file| file.display().to_string()),
                             }),
                             Err(failure) => json!({
                                 "type": "error",
