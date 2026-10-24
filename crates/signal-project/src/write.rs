@@ -94,6 +94,20 @@ pub fn write_parameter(
     Ok(document.to_string())
 }
 
+/// `text` with every edit of `edits` applied in order by [`write_parameter`]:
+/// `(instance, parameter, value, order)`. One text, so a caller writes the
+/// edits as one change (a snapshot's restore, ADR 0041).
+pub fn write_parameters(
+    text: &str,
+    edits: &[(&str, &str, Option<f64>, &[&str])],
+) -> Result<String, WriteError> {
+    let mut text = text.to_owned();
+    for (instance, parameter, value, order) in edits {
+        text = write_parameter(&text, instance, parameter, *value, order)?;
+    }
+    Ok(text)
+}
+
 impl Project {
     /// This project with [`write_parameter`] applied to its `project.toml`:
     /// what the running project becomes when a value is written back, so
@@ -106,9 +120,18 @@ impl Project {
         value: Option<f64>,
         order: &[&str],
     ) -> Result<Project, WriteError> {
+        self.with_parameters(&[(instance, parameter, value, order)])
+    }
+
+    /// [`Project::with_parameter`] for several edits at once
+    /// ([`write_parameters`]).
+    pub fn with_parameters(
+        &self,
+        edits: &[(&str, &str, Option<f64>, &[&str])],
+    ) -> Result<Project, WriteError> {
         let mut files = self.files.clone();
         for file in files.iter_mut().filter(|f| f.path == PROJECT_FILE) {
-            file.text = write_parameter(&file.text, instance, parameter, value, order)?;
+            file.text = write_parameters(&file.text, edits)?;
         }
         // A project that includes others is not rebuilt here: read from its
         // folder again, an included project changed on disk but not yet

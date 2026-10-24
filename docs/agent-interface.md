@@ -94,6 +94,7 @@ Addresses are as in the UI protocol: `/instance` or `/composite/inner`, and port
 | `modules` | `category?`, `query?` | `primitives` and `composites` (the project's, then `lib.*`) as the schematic's palette lists them, filtered |
 | `describe_instance` | `address` | the plan instances at or inside it, its controls, its `graph` entry |
 | `read_file` | `file` | `project.toml`, `composites/<name>.toml` (`file.read`), `patterns/<name>.toml` (`pattern.read`, with `kind`), `ui/<name>.html` (`panel.read`, with the `<signal-panel>` `html`), `ui/schematic.toml`: `{exists, base, text}` |
+| `snapshot_list` | — | `snapshot.list`: `base` (the SHA-256 of `snapshots.toml`, null without one) and `snapshots`, each `{name, count, values}` (ADR 0041) |
 | `stats` | — | `stats` (frame, clients, drops, overflows, clipped, `ceiling` and `ceilinged`: the output ceiling and the device samples it held, writes) |
 
 ### Play and adjust
@@ -106,6 +107,9 @@ Addresses are as in the UI protocol: `/instance` or `/composite/inner`, and port
 | `transport` | `action`: `start` / `stop` / `tempo`; `bpm`, `ms?` | `transport.play` (plays again from frame 0 from the files; refused, as `revert` is, when that would raise a lowered gain above `--max-gain`) / `transport.stop`; `tempo` sets or ramps the tempo (below) |
 | `commit` | `address`, `value?` (default: the live value; `null`: remove the key) | `commit`: writes the control's value into `project.toml` |
 | `revert` | `address` | `revert`: each port gets the file's value again |
+| `snapshot_save` | `name`, `overwrite?` (false) | `snapshot.save`: every control's live base under `name` in `snapshots.toml` (1 to 64 characters, trimmed); a name in use is refused (`exists`) unless `overwrite` |
+| `snapshot_restore` | `name` | `snapshot.restore` with the `base` the tool listed: the snapshot's values written into `project.toml` as one change and sent live, as `commit` does; `{restored, written, sent, skipped, clamped, note}`. Checked by the gain guard as a `commit` of each value ("Safety") |
+| `snapshot_delete` | `name` | `snapshot.delete` |
 
 **The tempo** (`transport` `tempo`) follows the rule Space's `transport.toggle` follows for `run` (ADR 0039 §6, `ui/lib/transport-toggle.js`), for `bpm`: its targets are the top-level controls (`describe.controls`: a top-level instance's parameter, or a composite's export such as `lib.transport`'s `/transport.bpm` on studio-transport) whose ports reach the `bpm` of a `std.transport` or a `std.playhead` (`lib.transport` is one), skipping a control a connection drives (`modulated`: a value set by hand would not be what plays). An included project's transport (ADR 0035) is reached only when `describe.controls` lists a top-level control for its `bpm`; two-studios' includes declare no `[exports]` and have none, so there the tempo is refused, naming both (tested). **Several** (two transports in one project) are all set, or ramped, to the same `bpm` **on the same frame**, so they stay in step (a playhead integrates its `bpm`, so changes a block apart would leave a lasting phase offset): every request carries the same `at`: the current frame plus 50 ms for each target, plus once more 50 ms or the controller's latency (`pong.latency`, two device buffers) when that is longer, so a large device buffer does not make the later targets late. The reply: `addresses` (the controls set), `at`, `acks` (each with its `frame` and `requested`), `late` (any applied after `at`, so out of step: also said in the summary), `skipped` (the wired ones) and `unreached` (bpm ports no top-level control reaches, such as a parameter inside a composite that does not export it). Each is a live `set` (or `ramp`) as `set_parameter` sends it, under the same gain guard; `commit` writes it into `project.toml`. Refused when nothing is left: no transport ("the project has no transport"), or "no tempo to set: " naming the wired ones ("a connection drives …") and the unreached ones ("no top-level control reaches …").
 
@@ -190,7 +194,7 @@ The session tools are offered only without `--attach`: a recording covers one ru
 
   The live base before a change is the one the runner last reported (a `parameters` stream). The base after:
 
-  - for `set`, `ramp` (its target), `commit` and `revert`, the value it sends;
+  - for `set`, `ramp` (its target), `commit`, `revert` and `snapshot_restore` (each value of the snapshot, clamped to its control's range), the value it sends;
   - for an edit of the files (`patch`, `write_file`, `write_pattern`, `vendor`, checked in memory on the text at `base`), the file's new value when it changes or the port is new, otherwise the live base. A reload sends a parameter only when its file value changes (`ui-protocol.md` "Unsaved"). An absent `gain` key is the declared default, 1.0;
   - for playing again from the files (`transport` start, `session_start` with `discard`), the file's value of every unsaved parameter, as for `revert`: a lowered live gain is not raised that way. Commit the lowered value first.
 
@@ -200,7 +204,7 @@ The session tools are offered only without `--attach`: a recording covers one ru
   - Removing an instance that feeds a gain leaves its modulation held, and counts as modulated: remove the connection first.
   - A `trigger`, or a `set` of anything in a modulated gain's fan-in, changes that gain's modulation and falls under R2.
   - The UI protocol's `note` (ADR 0039: a live note held on a sequencer's `audition`, the piano roll's keys) is **not a tool**: it plays a note that sounds until its note off, and a held note's gain cannot be judged by these rules beforehand (it is a new source of modulation in every fan-in the sequencer reaches). An agent that wants a note heard edits a pattern (`write_pattern`), which is checked; a `trigger` into `audition` (which only ends a held note) is allowed as any `trigger` is.
-  - `commit` also refuses to write an over-ceiling value that the file did not already hold, whatever the live value.
+  - `commit` also refuses to write an over-ceiling value that the file did not already hold, whatever the live value; so does `snapshot_restore`, for each gain the snapshot holds.
   - A call made while a reload is pending (the files differ from what plays) is refused: try again.
   - `write_panel` cannot reach a parameter and is not checked.
   - When attached, the person can change values between the check and the change. The check judges what the agent's own change does.
@@ -208,8 +212,8 @@ The session tools are offered only without `--attach`: a recording covers one ru
   The project as the person wrote it is played as it is, even with a gain above the ceiling (`project_info.gain` says `aboveCeiling`); without `--attach` its output is still held.
 - **Attached** (`--attach`), the running server's output is its own: `signal mcp` sets no output ceiling there, and only the parameter guard applies. Every guard, `write_panel`, `schematic_move` and `transport` first check that the server still plays the folder named (`graph.projectId`; Signal.app can open another project meanwhile) and refuse otherwise.
 - **Changes outside `signal mcp`.** The guard covers what this server's tools do. An agent that also edits the project's files with tools of its own (a file editor) changes them as a person would: the watch applies those edits live and no guard sees them. The output ceiling of an in-process `signal mcp` still holds the device output.
-- **The person's files** change only through the UI protocol's write paths: `commit`, `patch`, `schematic.*`, `panel.write`, `pattern.write`, `file.write` and `vendor`. Each checks the base, writes atomically, never writes through a link and validates before writing. `file.write` and `vendor` were added for this interface by the operator's decision of 2026-10-18: `file.write` uses `patch`'s helpers, and `vendor` uses `signal vendor`'s writer with the host's checks. Renders, sessions and replays are written only under `--out`.
-- **`--read-only`** offers only the inspect, observe and render tools: `project_info`, `graph`, `modules`, `describe_instance`, `read_file`, `stats`, `meter`, `scope`, `read_stream`, `render`.
+- **The person's files** change only through the UI protocol's write paths: `commit`, `patch`, `schematic.*`, `panel.write`, `pattern.write`, `file.write`, `vendor` and `snapshot.*` (ADR 0041: `snapshots.toml`, and a restore's `project.toml` as `commit` writes it). Each checks the base, writes atomically, never writes through a link and validates before writing. `file.write` and `vendor` were added for this interface by the operator's decision of 2026-10-18: `file.write` uses `patch`'s helpers, and `vendor` uses `signal vendor`'s writer with the host's checks. Renders, sessions and replays are written only under `--out`.
+- **`--read-only`** offers only the inspect, observe and render tools: `project_info`, `graph`, `modules`, `describe_instance`, `read_file`, `snapshot_list`, `stats`, `meter`, `scope`, `read_stream`, `render`.
 - **The engine's rules are unchanged**: real-time rules, the magnitude bound, determinism. The agent reaches the audio thread only through the messages a panel sends.
 
 ## Limits
@@ -222,7 +226,7 @@ The session tools are offered only without `--attach`: a recording covers one ru
 
 ## Tests
 
-- `crates/signal-cli/tests/mcp.rs`: conformance in both eras, one test per tool, read-only mode, `--help`, the AC11 session on a copy of `projects/studio`, and `attach_to_a_running_signal_ui` (loopback).
+- `crates/signal-cli/tests/mcp.rs`: conformance in both eras, one test per tool (the four snapshot tools in `snapshots`), read-only mode, `--help`, the AC11 session on a copy of `projects/studio`, and `attach_to_a_running_signal_ui` (loopback).
 - `crates/signal-cli/tests/mcp_gain.rs`: the gain guard, each path and each rule; failing closed when the files do not load; restarts; the device output held at the ceiling after a ×20 patch.
 - `crates/signal-cli/src/mcp/` unit tests: the rules, attach URLs, the result cap, the project identity.
 - `crates/signal-output/tests/ceiling.rs`: the output ceiling at the adapter (null driver), its meters and counts, renders never held; `crates/signal-audio/tests/no_allocation.rs`: the callback with a ceiling allocates nothing.

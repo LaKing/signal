@@ -78,6 +78,10 @@ test('the Parameters tab holds the status, meters, messages and parameter list a
     assert.match(parameters, new RegExp(`<section class="signal-card"><h2>\\w+</h2><${card}>`), card);
   }
   assert.match(parameters, /<signal-app-parameters>/);
+  // ADR 0041: the Snapshots card, before the parameter list.
+  assert.match(parameters, /<section class="signal-card wide"><h2>Snapshots<\/h2><signal-app-snapshots><\/signal-app-snapshots><\/section>/);
+  assert.ok(parameters.indexOf('<signal-app-snapshots>') < parameters.indexOf('<signal-app-parameters>'));
+  assert.match(app, /\['signal-app-snapshots', SignalAppSnapshots\]/);
   assert.match(app, /el\('section', \{ className: 'signal-card wide' \}, el\('h2'/, 'a card per instance');
   const setup = page.slice(page.indexOf('data-tab="setup"'));
   assert.match(setup, /<signal-app-project>/);

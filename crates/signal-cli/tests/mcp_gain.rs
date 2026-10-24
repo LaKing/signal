@@ -57,6 +57,24 @@ fn live_gain(mcp: &mut Mcp) -> f64 {
     info["gain"][0]["live"].as_f64().unwrap()
 }
 
+/// ADR 0041: restoring a snapshot is a commit of each of its values, so a
+/// gain above the ceiling and above the file's is refused (R1) and nothing
+/// is written; one within it is restored.
+#[test]
+fn a_snapshot_above_the_ceiling_is_not_restored() {
+    let dir = project(&tone("0.2"), "gain-snapshot");
+    std::fs::write(
+        dir.join("snapshots.toml"),
+        "schema_version = 1\n\n[snapshots.loud]\n\"/out.gain\" = 0.9\n\n[snapshots.quiet]\n\"/out.gain\" = 0.1\n",
+    )
+    .unwrap();
+    let mut mcp = Mcp::started(&dir, &[]);
+    refused(&mut mcp, "snapshot_restore", json!({"name": "loud"}));
+    mcp.ok("snapshot_restore", json!({"name": "quiet"}));
+    assert!(mcp.file("project.toml").contains("gain = 0.1"));
+    assert!(mcp.finish().success());
+}
+
 #[test]
 fn set_and_ramp_above_the_ceiling_are_refused() {
     let mut mcp = Mcp::started(&project(&tone("0.2"), "gain-set"), &[]);

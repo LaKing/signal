@@ -28,6 +28,23 @@ import { INITIAL, controls, powerRequest, reduce, restartRequest } from './lib/p
 import { contextItems, keepsSystemMenu } from './lib/context.js';
 import { PROMPT, fieldValue, openRetry, projectLabel, windowTitle } from './lib/document.js';
 import { archiveSave, saveReport, saveRequests } from './lib/save.js';
+import {
+  MAX_NAME,
+  countText,
+  deleteMessage,
+  deletePrompt,
+  deletedText,
+  entries,
+  exists,
+  listMessage,
+  overwritePrompt,
+  refusalText,
+  restoreMessage,
+  restoredText,
+  saveMessage,
+  savedText,
+  snapshotName,
+} from './lib/snapshots.js';
 import { compactStatus, statusFields } from './lib/status.js';
 import { INITIAL_TAB, TABS, select, tabForAction } from './lib/tabs.js';
 import { retryMessage, revertMessage, unsavedLine, unsavedOf } from '../lib/unsaved.js';
@@ -653,6 +670,143 @@ export class SignalAppParameters extends AppElement {
 }
 
 /**
+ * The project's snapshots (ADR 0041), a card of the Parameters tab: a name
+ * field with Save (Enter in the field saves), then a row per snapshot with
+ * Restore and Delete. Saving under a name in use asks "Replace?" and
+ * Delete asks first (Cancel focused, Escape cancels). Every request carries
+ * the list's `base`, so another writer's change meanwhile is a conflict
+ * and the list is read again. The list follows the server's pushes, a
+ * reload of the files and another project; the last outcome shows in a
+ * line of fixed height.
+ */
+export class SignalAppSnapshots extends AppElement {
+  connectedCallback() {
+    if (!this.firstChild) {
+      this.list = null;
+      this.field = el('input', { name: 'snapshot', type: 'text', placeholder: 'snapshot name', spellcheck: false, maxLength: MAX_NAME * 2, size: 32 });
+      this.field.setAttribute('aria-label', 'Snapshot name');
+      const save = el('button', { type: 'submit', textContent: 'Save', title: 'Save every parameter’s value under this name' });
+      const form = el('form', { className: 'snapshot-save' }, this.field, save);
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        this.save(this.field.value);
+      });
+      this.rows = el('ul', { className: 'snapshots' });
+      this.line = el('div', { className: 'snapshot-line line', role: 'status' });
+      this.prompt = el('dialog', { className: 'prompt' });
+      this.append(form, this.rows, this.line, this.prompt);
+      this.draw();
+    }
+    super.connectedCallback();
+  }
+
+  attach(connection) {
+    super.attach(connection);
+    this.stops.push(connection.on('snapshots', (list) => this.show(list)));
+    // The files changed (an editor, another writer) or another project opened.
+    this.stops.push(connection.on('reload', () => this.refresh()));
+    this.stops.push(connection.on('app', () => this.refresh()));
+  }
+
+  opened() {
+    this.refresh();
+  }
+
+  refresh() {
+    this.request(listMessage()).then(
+      (list) => this.show(list),
+      () => this.show(null),
+    );
+  }
+
+  show(list) {
+    this.list = list;
+    this.draw();
+  }
+
+  say(text, warn = false) {
+    this.line.textContent = text ?? '';
+    this.line.title = text ?? '';
+    this.line.classList.toggle('warn', Boolean(warn));
+  }
+
+  draw() {
+    const rows = entries(this.list);
+    this.rows.replaceChildren(
+      ...rows.map(({ name, count }) => {
+        const restore = el('button', { type: 'button', textContent: 'Restore', title: `Write “${name}”’s values into project.toml and play them` });
+        restore.addEventListener('click', () => this.restore(name));
+        const remove = el('button', { type: 'button', textContent: 'Delete', title: `Delete “${name}”` });
+        remove.addEventListener('click', () => this.remove(name));
+        return el('li', {}, el('span', { className: 'snapshot-name', textContent: name, title: name }), el('span', { className: 'muted snapshot-count', textContent: countText(count) }), restore, remove);
+      }),
+    );
+    if (!rows.length) this.rows.append(el('li', { className: 'muted', textContent: this.list ? 'No snapshots yet: type a name and Save.' : 'Snapshots appear once a project is open.' }));
+  }
+
+  /** The refusal said, and the list read again after a conflict. */
+  refused(error) {
+    this.say(refusalText(error), true);
+    if (error?.code === 'conflict') this.refresh();
+  }
+
+  async save(raw) {
+    const { name, error } = snapshotName(raw);
+    if (error) {
+      this.say(error, true);
+      this.field.focus();
+      return;
+    }
+    const base = this.list ? (this.list.base ?? null) : undefined;
+    const overwrite = exists(this.list, name);
+    if (overwrite && (await this.ask(overwritePrompt(name))) !== 'confirm') return;
+    try {
+      const reply = await this.request(saveMessage(name, { overwrite, base }));
+      this.say(savedText(reply));
+      this.field.value = '';
+    } catch (refusal) {
+      this.refused(refusal);
+    }
+  }
+
+  async restore(name) {
+    try {
+      const reply = await this.request(restoreMessage(name, this.list?.base ?? undefined));
+      const { text, warn } = restoredText(reply);
+      this.say(text, warn);
+    } catch (refusal) {
+      this.refused(refusal);
+    }
+  }
+
+  async remove(name) {
+    if ((await this.ask(deletePrompt(name))) !== 'confirm') return;
+    try {
+      const reply = await this.request(deleteMessage(name, this.list?.base ?? undefined));
+      this.say(deletedText(reply));
+    } catch (refusal) {
+      this.refused(refusal);
+    }
+  }
+
+  /** A confirmation in the page: resolves to the id of the button chosen (`cancel` on Escape). */
+  ask({ text, buttons }) {
+    return new Promise((resolve) => {
+      const shown = buttons.map((b) => {
+        const button = el('button', { type: 'button', textContent: b.label });
+        button.addEventListener('click', () => this.prompt.close(b.id));
+        return button;
+      });
+      this.prompt.replaceChildren(el('p', { textContent: text }), el('div', { className: 'buttons' }, ...shown));
+      this.prompt.returnValue = 'cancel';
+      this.prompt.addEventListener('close', () => resolve(this.prompt.returnValue || 'cancel'), { once: true });
+      this.prompt.showModal();
+      shown[0].focus();
+    });
+  }
+}
+
+/**
  * The project's panel (M2.8-3, `/project/main.html`) in the Panel tab: a
  * same-origin frame filling the tab, kept while other tabs show, whose
  * keys are its own page's (ui/controls/keyboard.js: the app commands'
@@ -837,6 +991,7 @@ for (const [name, element] of [
   ['signal-app-meters', SignalAppMeters],
   ['signal-app-messages', SignalAppMessages],
   ['signal-app-parameters', SignalAppParameters],
+  ['signal-app-snapshots', SignalAppSnapshots],
 ]) {
   customElements.get(name) ?? customElements.define(name, element);
 }

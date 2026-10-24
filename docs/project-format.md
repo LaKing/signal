@@ -16,6 +16,7 @@ Terms are those of `00-vision.md` §3a: Project, Module, Primitive, Composite, I
   ui/assets/              their SVG and PNG files
   ui/schematic.toml       the schematic's positions (optional, presentation only; §11)
   ui/windows.toml         Signal.app's windows per screen configuration (optional, presentation only; §13)
+  snapshots.toml          parameter values stored under names (optional, never played; §16)
 ```
 
 These are the **project files**. Signal loads every one of them, validates every one of them, and hashes every one of them into a render's manifest (§7). A recorded session keeps an exact copy of them for every plan version (`session-format.md`). Nothing else in the folder is read, except by `signal ui`, which serves the folder's `ui/` (panels and their `assets/`) to web pages as files and never plans them (`ui-protocol.md`). A panel is an HTML page whose controls bind to ports by address; `signal ui check <project>` checks every binding against the plan, and moving a control writes `project.toml`, never the panel (`ui-controls.md` "Panels"). Machine settings (Setup: devices, channel mapping) never live here.
@@ -270,7 +271,8 @@ A **project file** is a project folder as one file (ADR 0025): a zip archive of 
 - `composites/*.toml` (directly in `composites/`);
 - `patterns/*.toml` (directly in `patterns/`, §12);
 - `interfaces/*.toml` (directly in `interfaces/`, §14);
-- every file under `ui/` (panels and their `assets/`, at any depth).
+- every file under `ui/` (panels and their `assets/`, at any depth);
+- `snapshots.toml` (§16, ADR 0041).
 
 **What stays out.** Everything else, in particular:
 
@@ -490,3 +492,34 @@ A project included as an instance (`drums = { project = "../studio-transport" }`
 - **Packing and sessions, until phase 4.** `signal pack` refuses a project with includes (naming them) rather than writing an archive that does not load; a session recorded from one records the includes in its provenance (`included_projects`, the include files' hashes) and is refused by `signal replay` with the reason.
 - Not yet (ADR 0035's later phases): watching an include's files live and joining or leaving live (phase 2), rooted include panels and the `set` overrides written from them (phase 3), `.signal` includes, `pack --embed`, sessions with includes and `vendor --include` (phase 4). A project with includes plays and renders from its folder; edits made in memory (Signal.app's live edits) refuse an include until phase 2.
 
+## 16. Snapshots (`snapshots.toml`, ADR 0041)
+
+A **snapshot** (`00-vision.md` §3a: a Preset or Snapshot) is the value of every control of the project stored under a name a person gives, so that it can be restored later. The optional file `snapshots.toml` at the project's root holds them; a missing file means no snapshots. It is **never played**: `signal render`, `signal play` and the plan do not read it, so it changes no render and no hash, but it is the project's own text and a `.signal` file packs it (§10).
+
+```toml
+# Snapshots: parameter values under a name (docs/project-format.md §16).
+# Signal writes this file whole; comments are not kept.
+schema_version = 1
+
+[snapshots."Verse A"]
+"/drums.kick_decay" = 300
+"/out.gain" = 0.25
+
+[snapshots.chorus]
+"/drums.kick_decay" = 450
+"/out.gain" = 0.4
+```
+
+| Key | Meaning |
+|---|---|
+| `schema_version` | `1`; required once the file has a snapshot |
+| `snapshots."<name>"` | One snapshot. The name is any text, 1 to 64 characters (Unicode scalar values) with no space around it and no control character; it is a TOML key, quoted when it needs it. Names are exact (`Chorus` ≠ `chorus`) |
+| `"/<instance>.<parameter>" = <number>` | One value: the parameter's full address, as the UI protocol and `signal mcp` name a control, and a finite number (an integer or a float) |
+
+Unknown keys, a bad name, an address that is not `/<instance>.<parameter>` and a value that is not a finite number are errors; a file with an error is refused by every snapshot write and never overwritten.
+
+- **What a snapshot holds.** Every **control** of the project: each top-level instance's own parameters (for a composite or an included project, its exported ones, §3, §15), the parameters an edit writes into `project.toml` (§9). A parameter inside a composite is in the composite's file, shared by its instances, and is in no snapshot.
+- **Save** records each control's value as it plays (in Signal.app and `signal ui`: its live base, an unsaved edit included; with `signal snapshot save`, the files' value), defaults included, and a modulated control's base, not its modulated signal. A name in use is replaced only when asked.
+- **Restore** writes each value that differs from the file into the control's entry in `project.toml` exactly where a parameter edit writes it (§9, "The parameter panel"; a value out of the control's range clamped, as an edit clamps), all of them in one write, and applies them live as a parameter edit is applied. An entry whose instance or parameter no longer exists is skipped and reported; controls the snapshot does not name are left alone. In a project that includes others only the host's `project.toml` is written, never an included project's files.
+- **Canonical text.** Signal writes the whole file: the header, `schema_version`, then the snapshots in byte order of their names, each one's values in byte order of their addresses, each value in the shortest form that reads back to the same `f64` (an integer when it is one). The same snapshots give the same bytes. No time or date is written. Deleting the last snapshot leaves `schema_version` alone in the file.
+- **Writers.** Every write is under the project's writer lock and compared just before its rename (ADR 0040); a change by another writer meanwhile is refused (`conflict`), never lost.

@@ -60,7 +60,10 @@ use crate::bindings::{MAIN_PANEL, Targets, check, panel_content};
 use crate::document::{Document, Ticket, project_name};
 use crate::frames::{self, frame};
 use crate::keys::{self, Keys};
-use crate::panel::{Panel, Target, Written, after_write, ramp_frames, write_project};
+use crate::panel::{
+    Panel, ParameterView, Target, WriteEdit, Written, after_write_all, ramp_frames,
+    write_project_all,
+};
 use crate::panel_write::{check_content, first_file, replace, sha256_hex};
 use crate::player::{
     Backend, Input, Interface, Output, Selection, live_rate, open_input, open_output, output_state,
@@ -69,6 +72,8 @@ use crate::server::{Inbound, MAX_MESSAGE, Outbound, Server, ServerOptions};
 use crate::setup::{
     Choice, DEFAULT_BUFFER, Setup, Window, capabilities, channels, found, rate_check,
 };
+use crate::snapshot;
+use signal_project::snapshot::{self as snapshots, SNAPSHOTS_FILE, SnapshotError};
 
 /// Client messages handled per step at most.
 const MESSAGES_PER_STEP: usize = 256;
@@ -626,6 +631,62 @@ fn bits(base: Option<(f64, bool)>) -> Option<(u64, bool)> {
 
 fn within(value: f64, min: f64, max: f64) -> f64 {
     value.max(min).min(max)
+}
+
+/// Controls written as one change ([`Host::write_controls`]).
+struct ControlWrite {
+    address: String,
+    instance: String,
+    parameter: String,
+    target: Target,
+    value: Option<f64>,
+}
+
+/// What [`Host::write_controls`] did: whether each value's live send was
+/// taken, and a note on the running project.
+struct ControlsWritten {
+    sent: Vec<bool>,
+    note: Option<String>,
+}
+
+/// A snapshot message's `name` (ADR 0041): trimmed, 1 to 64 characters.
+fn snapshot_name(message: &Value) -> Result<String, Failure> {
+    let raw = message
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| fail("bad-value", "a snapshot message needs `name` (text)"))?;
+    snapshots::name(raw).map_err(snapshot_failure)
+}
+
+/// A snapshot message's `base`: absent takes the file as it is; null asks
+/// that there be no `snapshots.toml`; else the SHA-256 it was listed with.
+#[allow(clippy::type_complexity)]
+fn base_check(
+    message: &Value,
+) -> Result<Box<dyn FnOnce(Option<&str>) -> Result<(), SnapshotError>>, Failure> {
+    let expected: Option<Option<String>> = match message.get("base") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(base)) => Some(Some(base.clone())),
+        Some(_) => return Err(fail("bad-value", "`base` must be a SHA-256 or null")),
+    };
+    Ok(Box::new(move |text: Option<&str>| {
+        let Some(expected) = expected else {
+            return Ok(());
+        };
+        let now = text.map(|t| sha256_hex(t.as_bytes()));
+        if now == expected {
+            Ok(())
+        } else {
+            Err(SnapshotError::Changed(format!(
+                "{SNAPSHOTS_FILE} changed since it was listed (base); nothing was written"
+            )))
+        }
+    }))
+}
+
+fn snapshot_failure(error: SnapshotError) -> Failure {
+    fail(error.code(), error.to_string())
 }
 
 /// A message's `rate`, `default` without one: a number of at least 1.
@@ -2821,6 +2882,10 @@ impl Host {
                 self.edit(client, &id, kind, &message).map(|()| None)
             }
             "commit" => self.commit(&message).map(Some),
+            "snapshot.list" => self.snapshot_list().map(Some),
+            "snapshot.save" => self.snapshot_save(&message).map(Some),
+            "snapshot.restore" => self.snapshot_restore(&message).map(Some),
+            "snapshot.delete" => self.snapshot_delete(&message).map(Some),
             "retry" => self.retry(&message).map(Some),
             "revert" => self.revert(&message).map(Some),
             "panel.check" => self.panel_check(&message).map(Some),
@@ -3000,18 +3065,7 @@ impl Host {
                     continue;
                 };
                 let address = format!("/{}.{}", instance.name, p.name);
-                // The live base: the last value the Controller took for every
-                // port (not one it refused; one a runner refused afterwards
-                // still counts), each port's default after a reset.
-                let reset = self
-                    .failed
-                    .get(&(instance.name.clone(), p.name.clone()))
-                    .is_some_and(|f| f.reset.is_some());
-                let base = match self.panel.dragged(&instance.name, &p.name) {
-                    Some(drag) => drag.applied,
-                    None if reset => p.default,
-                    None => p.base,
-                };
+                let base = self.control_base(&instance.name, p);
                 controls.push(json!({
                     "address": address,
                     "instance": instance.name,
@@ -4652,51 +4706,106 @@ impl Host {
         value: Option<f64>,
         retrying: bool,
     ) -> Result<Value, Failure> {
-        let key = (instance.to_owned(), parameter.to_owned());
-        let last = self.panel.dragged(instance, parameter);
-        let sent = match value {
-            Some(v) => match last {
-                Some(d) if d.sent && d.value.to_bits() == v.to_bits() => true,
-                _ => self.send_ramps(target.ports.iter().cloned().map(|p| (p, v)).collect()),
-            },
-            // Each port back to its own default, as the panel's Reset.
-            None => self.send_ramps(
-                target
-                    .ports
-                    .iter()
-                    .cloned()
-                    .zip(target.defaults.iter().copied())
-                    .collect(),
-            ),
+        let edit = ControlWrite {
+            address: address.to_owned(),
+            instance: instance.to_owned(),
+            parameter: parameter.to_owned(),
+            target: target.clone(),
+            value,
         };
-        let unwritten = |host: &mut Host, error: String| {
-            match value {
-                Some(v) => host.panel.drag(instance, parameter, v, sent),
-                None => {
-                    host.panel.release(instance, parameter);
-                }
-            }
-            let seq = host.next_failure;
-            host.next_failure += 1;
-            host.failed.insert(
-                key.clone(),
-                Failed {
-                    error,
-                    seq,
-                    reset: value.is_none().then_some(sent),
+        let written = self.write_controls(std::slice::from_ref(&edit), retrying)?;
+        Ok(json!({
+            "type": "committed",
+            "address": address,
+            "value": value,
+            "file": signal_project::PROJECT_FILE,
+            "writes": self.writes,
+            "sent": written.sent.first().copied().unwrap_or(true),
+            "note": written.note,
+        }))
+    }
+
+    /// Writes the values of `edits` into `project.toml` as one change (one
+    /// read, edit and rename under the writer lock, ADR 0040), each sent live
+    /// first unless every port already took exactly that value: `commit`,
+    /// `retry` (`retrying`: a live send that is refused writes nothing) and
+    /// a snapshot's restore. A failed write keeps each value as its
+    /// control's live drag, with the error (`docs/ui-protocol.md`
+    /// "Unsaved"); a write keeps a control unsaved until the reload of the
+    /// written file sends it, when its live send was refused.
+    fn write_controls(
+        &mut self,
+        edits: &[ControlWrite],
+        retrying: bool,
+    ) -> Result<ControlsWritten, Failure> {
+        let mut sent = Vec::with_capacity(edits.len());
+        for edit in edits {
+            let last = self.panel.dragged(&edit.instance, &edit.parameter);
+            let ports = &edit.target.ports;
+            sent.push(match edit.value {
+                Some(v) => match last {
+                    Some(d) if d.sent && d.value.to_bits() == v.to_bits() => true,
+                    _ => self.send_ramps(ports.iter().cloned().map(|p| (p, v)).collect()),
                 },
-            );
+                // Each port back to its own default, as the panel's Reset.
+                None => self.send_ramps(
+                    ports
+                        .iter()
+                        .cloned()
+                        .zip(edit.target.defaults.iter().copied())
+                        .collect(),
+                ),
+            });
+        }
+        let unwritten = |host: &mut Host, error: &str| {
+            for (edit, &sent) in edits.iter().zip(&sent) {
+                match edit.value {
+                    Some(v) => host.panel.drag(&edit.instance, &edit.parameter, v, sent),
+                    None => {
+                        host.panel.release(&edit.instance, &edit.parameter);
+                    }
+                }
+                let seq = host.next_failure;
+                host.next_failure += 1;
+                host.failed.insert(
+                    (edit.instance.clone(), edit.parameter.clone()),
+                    Failed {
+                        error: error.to_owned(),
+                        seq,
+                        reset: edit.value.is_none().then_some(sent),
+                    },
+                );
+            }
         };
-        if retrying && !sent {
-            let error = format!("{address}: the running project did not take the value");
-            unwritten(self, error.clone());
+        if retrying && sent.iter().any(|s| !s) {
+            let addresses: Vec<&str> = edits.iter().map(|e| e.address.as_str()).collect();
+            let error = format!(
+                "{}: the running project did not take the value",
+                addresses.join(", ")
+            );
+            unwritten(self, &error);
             return Err(fail("refused", format!("{error}; nothing was written")));
         }
-        let order: Vec<&str> = target.order.iter().map(String::as_str).collect();
-        let (before, after) = match write_project(&self.dir, instance, parameter, value, &order) {
+        let orders: Vec<Vec<&str>> = edits
+            .iter()
+            .map(|e| e.target.order.iter().map(String::as_str).collect())
+            .collect();
+        let texts: Vec<(&str, &str, Option<f64>, &[&str])> = edits
+            .iter()
+            .zip(&orders)
+            .map(|(e, order)| {
+                (
+                    e.instance.as_str(),
+                    e.parameter.as_str(),
+                    e.value,
+                    order.as_slice(),
+                )
+            })
+            .collect();
+        let (before, after) = match write_project_all(&self.dir, &texts) {
             Ok(texts) => texts,
             Err(error) => {
-                unwritten(self, error.to_string());
+                unwritten(self, &error.to_string());
                 return Err(fail(error.code(), error.to_string()));
             }
         };
@@ -4714,27 +4823,31 @@ impl Host {
             .as_mut()
             .and_then(|r| r.file.take())
             .is_some_and(|text| text == before);
-        self.panel.release(instance, parameter);
+        for edit in edits {
+            self.panel.release(&edit.instance, &edit.parameter);
+        }
         self.writes += 1;
         let mut note = None;
         // Whether the running project now holds exactly the file: then the
         // watch need not reload the write it would otherwise see.
         let mut held = false;
+        let written: Vec<WriteEdit<'_>> = edits
+            .iter()
+            .zip(&sent)
+            .map(|(e, &sent)| WriteEdit {
+                target: &e.target,
+                instance: &e.instance,
+                parameter: &e.parameter,
+                value: e.value,
+                sent,
+            })
+            .collect();
         let current = self.run.as_mut().map(|r| &mut r.current);
-        match after_write(
-            current,
-            &self.dir,
-            target,
-            instance,
-            parameter,
-            value,
-            sent,
-            &self.registry,
-        ) {
+        match after_write_all(current, &self.dir, &written, &self.registry) {
             // The plan too, which `describe` reads the instances' (and so a
             // composite's inner parameters') bases from.
             Written::Taken(panel) => {
-                held = sent && known;
+                held = sent.iter().all(|s| *s) && known;
                 self.reconcile(panel);
                 let plan = self
                     .run
@@ -4780,25 +4893,236 @@ impl Host {
                 watcher.accept(file, stamp);
             }
         }
-        self.failed.remove(&key);
-        if sent {
-            self.resend.remove(&key);
-        } else {
-            self.resend.insert(key);
+        for (edit, &sent) in edits.iter().zip(&sent) {
+            let key = (edit.instance.clone(), edit.parameter.clone());
+            self.failed.remove(&key);
+            if sent {
+                self.resend.remove(&key);
+            } else {
+                self.resend.insert(key);
+            }
         }
         let describe = self.describe(false);
         self.broadcast(&describe);
         // `graph.files` names the written file's new SHA-256.
         self.push_graph(false);
+        Ok(ControlsWritten { sent, note })
+    }
+
+    /// A control's live base, as `describe` gives it: the last value the
+    /// Controller took for every port (not one it refused; one a runner
+    /// refused afterwards still counts), each port's default after a reset,
+    /// else the file's value (its default without a key).
+    fn control_base(&self, instance: &str, p: &ParameterView) -> f64 {
+        let reset = self
+            .failed
+            .get(&(instance.to_owned(), p.name.clone()))
+            .is_some_and(|f| f.reset.is_some());
+        match self.panel.dragged(instance, &p.name) {
+            Some(drag) => drag.applied,
+            None if reset => p.default,
+            None => p.base,
+        }
+    }
+
+    /// The snapshots of the project (ADR 0041), as `snapshot.list` answers
+    /// and every write pushes them: the file's `base` and each snapshot's
+    /// name and values, in name order.
+    fn snapshots_json(&self) -> Result<Value, Failure> {
+        let (all, text) = snapshots::read(&self.dir).map_err(snapshot_failure)?;
+        let list: Vec<Value> = all
+            .snapshots
+            .iter()
+            .map(|(name, values)| json!({"name": name, "count": values.len(), "values": values}))
+            .collect();
         Ok(json!({
-            "type": "committed",
-            "address": address,
-            "value": value,
+            "type": "snapshots",
+            "file": SNAPSHOTS_FILE,
+            "base": text.map(|t| sha256_hex(t.as_bytes())),
+            "snapshots": list,
+        }))
+    }
+
+    /// A snapshot message's project: refused in an app with no project
+    /// open, and (`plays`) when the project does not load.
+    fn snapshot_project(&self, plans: bool) -> Result<(), Failure> {
+        if self.app.as_ref().is_some_and(|m| !m.opened) {
+            return Err(fail("no-project", "open a project folder first"));
+        }
+        if plans && self.plan.is_none() {
+            return Err(fail(
+                "does-not-load",
+                "the project does not load, so it has no parameters",
+            ));
+        }
+        Ok(())
+    }
+
+    /// `snapshot.list`.
+    fn snapshot_list(&self) -> Result<Value, Failure> {
+        self.snapshot_project(false)?;
+        self.snapshots_json()
+    }
+
+    /// After a write of `snapshots.toml`: the watch takes it as seen (no
+    /// reload: nothing that plays changed) and every client gets the list.
+    fn snapshots_written(&mut self) {
+        self.seen(Path::new(SNAPSHOTS_FILE));
+        if let Ok(list) = self.snapshots_json() {
+            self.broadcast(&list);
+        }
+    }
+
+    /// `snapshot.save`: every control's live base under `name`.
+    fn snapshot_save(&mut self, message: &Value) -> Result<Value, Failure> {
+        self.snapshot_project(true)?;
+        let name = snapshot_name(message)?;
+        let overwrite = match message.get("overwrite") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err(fail("bad-value", "`overwrite` must be true or false")),
+        };
+        let check = base_check(message)?;
+        let values = snapshot::values(&self.panel, |instance, p| self.control_base(instance, p));
+        let count = values.len();
+        let (replaced, written) = snapshots::save(&self.dir, &name, values, overwrite, check)
+            .map_err(|e| self.snapshot_refused(e))?;
+        self.snapshots_written();
+        Ok(json!({
+            "type": "snapshot.saved",
+            "name": name,
+            "count": count,
+            "replaced": replaced,
+            "base": written.map(|t| sha256_hex(t.as_bytes())).or_else(|| self.snapshot_base()),
+        }))
+    }
+
+    /// `snapshot.delete`.
+    fn snapshot_delete(&mut self, message: &Value) -> Result<Value, Failure> {
+        self.snapshot_project(false)?;
+        let name = snapshot_name(message)?;
+        let check = base_check(message)?;
+        let (values, _) =
+            snapshots::delete(&self.dir, &name, check).map_err(|e| self.snapshot_refused(e))?;
+        self.snapshots_written();
+        Ok(json!({
+            "type": "snapshot.deleted",
+            "name": name,
+            "count": values.len(),
+            "base": self.snapshot_base(),
+        }))
+    }
+
+    /// `snapshot.restore`: the snapshot's values written into `project.toml`
+    /// as one change and sent live, as `commit` writes and sends one value;
+    /// entries that are gone are skipped, values out of range clamped, and
+    /// both reported.
+    fn snapshot_restore(&mut self, message: &Value) -> Result<Value, Failure> {
+        self.snapshot_project(true)?;
+        let name = snapshot_name(message)?;
+        let check = base_check(message)?;
+        let (all, text) = snapshots::read(&self.dir).map_err(snapshot_failure)?;
+        check(text.as_deref()).map_err(|e| self.snapshot_refused(e))?;
+        let values = all
+            .snapshots
+            .get(&name)
+            .ok_or_else(|| snapshot_failure(SnapshotError::Unknown(name.clone())))?;
+        let restore = snapshot::plan(&self.panel, values);
+        let mut writes = Vec::new();
+        let mut sends = Vec::new();
+        for edit in &restore.edits {
+            let key = (edit.instance.clone(), edit.parameter.clone());
+            let file = self.panel.file_base(&edit.instance, &edit.parameter);
+            let in_file = file.is_some_and(|(base, _)| base.to_bits() == edit.value.to_bits());
+            let control = ControlWrite {
+                address: edit.address.clone(),
+                instance: edit.instance.clone(),
+                parameter: edit.parameter.clone(),
+                target: edit.target.clone(),
+                value: Some(edit.value),
+            };
+            if !in_file {
+                writes.push(control);
+                continue;
+            }
+            // The file holds it: only a live value that may differ (a drag,
+            // a failed write or reset, ports in doubt) is sent back to it.
+            let settled = self
+                .panel
+                .dragged(&edit.instance, &edit.parameter)
+                .is_none()
+                && !self.resend.contains(&key)
+                && !self.failed.contains_key(&key);
+            if !settled {
+                sends.push(control);
+            }
+        }
+        let mut note = None;
+        let mut sent = true;
+        if !writes.is_empty() {
+            let written = self.write_controls(&writes, false)?;
+            sent &= written.sent.iter().all(|s| *s);
+            note = written.note;
+        }
+        for control in &sends {
+            let ports = control.target.ports.iter().cloned();
+            let value = control.value.unwrap_or_default();
+            let taken = self.send_ramps(ports.map(|p| (p, value)).collect());
+            sent &= taken;
+            if taken {
+                // Live and file agree again: nothing is unsaved.
+                self.panel.release(&control.instance, &control.parameter);
+                let key = (control.instance.clone(), control.parameter.clone());
+                self.failed.remove(&key);
+                self.resend.remove(&key);
+            } else {
+                self.panel
+                    .drag(&control.instance, &control.parameter, value, false);
+            }
+        }
+        if writes.is_empty() && !sends.is_empty() {
+            let describe = self.describe(false);
+            self.broadcast(&describe);
+        }
+        let skipped: Vec<Value> = restore
+            .skipped
+            .iter()
+            .map(|s| json!({"address": s.address, "reason": s.reason}))
+            .collect();
+        let clamped: Vec<Value> = restore
+            .clamped
+            .iter()
+            .map(|c| json!({"address": c.address, "value": c.value, "to": c.to}))
+            .collect();
+        Ok(json!({
+            "type": "snapshot.restored",
+            "name": name,
+            "restored": restore.edits.len(),
+            "written": writes.iter().map(|w| w.address.as_str()).collect::<Vec<_>>(),
             "file": signal_project::PROJECT_FILE,
-            "writes": self.writes,
             "sent": sent,
+            "skipped": skipped,
+            "clamped": clamped,
             "note": note,
         }))
+    }
+
+    /// The SHA-256 of `snapshots.toml` now, `None` without one.
+    fn snapshot_base(&self) -> Option<String> {
+        transaction::current(&self.dir.join(SNAPSHOTS_FILE))
+            .ok()
+            .flatten()
+            .map(|bytes| sha256_hex(&bytes))
+    }
+
+    /// A refused snapshot write: a `conflict` carries the file's base now.
+    fn snapshot_refused(&self, error: SnapshotError) -> Failure {
+        match error {
+            SnapshotError::Changed(message) => {
+                fail_with("conflict", message, json!({"base": self.snapshot_base()}))
+            }
+            error => snapshot_failure(error),
+        }
     }
 
     /// `retry`: commits an unsaved control's live value again (the latest

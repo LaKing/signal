@@ -45,6 +45,7 @@ mod schema;
 pub mod schematic;
 pub mod session;
 mod slot;
+pub mod snapshot;
 mod structure;
 pub mod transaction;
 pub mod vendor;
@@ -75,7 +76,7 @@ pub use slot::{
     Interface, InterfacePort, LibraryInterface, Match, Role, SlotResolution, library_interfaces,
 };
 pub use structure::{library_modules, library_parameters};
-pub use write::{WriteError, write_parameter};
+pub use write::{WriteError, write_parameter, write_parameters};
 
 use locate::{
     ConnectionSpans, DefSpans, ExportKind, ExportSpans, InstanceSpans, Location, Locator, Root,

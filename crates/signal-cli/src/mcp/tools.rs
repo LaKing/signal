@@ -141,6 +141,13 @@ const TOOLS: &[Tool] = &[
         run: read_file,
     },
     Tool {
+        name: "snapshot_list",
+        group: Group::Inspect,
+        description: "The project's snapshots (snapshots.toml, ADR 0041): each name with the values it holds (every top-level control's value, by address), and the file's `base`.",
+        schema: none,
+        run: snapshot_list,
+    },
+    Tool {
         name: "stats",
         group: Group::Inspect,
         description: "The server's counters: the frame, each client's dropped frames, evictions, meter/scope/vector/command overflows, clipped samples, writes.",
@@ -209,6 +216,32 @@ const TOOLS: &[Tool] = &[
         description: "Drops a parameter's unsaved live value: each of its ports gets the file's value again.",
         schema: || object(json!({"address": {"type": "string"}}), &["address"]),
         run: revert,
+    },
+    Tool {
+        name: "snapshot_save",
+        group: Group::Adjust,
+        description: "Saves the live value of every top-level control (as `project_info.controls` lists them: the base, never a modulated signal) under `name` (1 to 64 characters, trimmed; spaces and accents are fine) in snapshots.toml. A name in use is refused unless `overwrite` is true.",
+        schema: || {
+            object(
+                json!({"name": {"type": "string"}, "overwrite": {"type": "boolean"}}),
+                &["name"],
+            )
+        },
+        run: snapshot_save,
+    },
+    Tool {
+        name: "snapshot_restore",
+        group: Group::Adjust,
+        description: "Restores the snapshot `name`: its values are written into project.toml as one change, where `commit` writes them, and sent live as a commit sends them (clamped to each control's range). Entries whose instance or parameter is gone are skipped and listed (`skipped`), clamped ones listed (`clamped`); controls the snapshot does not name are left alone. Refused, as `commit` is, when a gain would go above --max-gain.",
+        schema: || object(json!({"name": {"type": "string"}}), &["name"]),
+        run: snapshot_restore,
+    },
+    Tool {
+        name: "snapshot_delete",
+        group: Group::Adjust,
+        description: "Deletes the snapshot `name` from snapshots.toml.",
+        schema: || object(json!({"name": {"type": "string"}}), &["name"]),
+        run: snapshot_delete,
     },
     // Edit the graph.
     Tool {
@@ -1464,6 +1497,118 @@ fn revert(context: &Context, arguments: &Value) -> Outcome {
     }
     let reply = bare(ask(context, json!({"type": "revert", "address": address}))?);
     let summary = format!("reverted {address} to the file's {}", reply["value"]);
+    Ok((reply, summary))
+}
+
+// ---------------------------------------------------------------------------
+// Snapshots (ADR 0041).
+
+fn snapshot_list(context: &Context, _: &Value) -> Outcome {
+    let reply = bare(ask(context, json!({"type": "snapshot.list"}))?);
+    let names: Vec<&str> = reply["snapshots"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    let summary = match names.len() {
+        0 => "no snapshots".to_owned(),
+        n => format!("{n} snapshots: {}", names.join(", ")),
+    };
+    Ok((reply, summary))
+}
+
+fn snapshot_save(context: &Context, arguments: &Value) -> Outcome {
+    let mut message = json!({"type": "snapshot.save", "name": text_arg(arguments, "name")});
+    if let Some(overwrite) = arguments.get("overwrite") {
+        message["overwrite"] = overwrite.clone();
+    }
+    let reply = bare(ask(context, message)?);
+    let summary = format!(
+        "{} snapshot \"{}\" ({} values)",
+        if reply["replaced"] == json!(true) {
+            "replaced"
+        } else {
+            "saved"
+        },
+        reply["name"].as_str().unwrap_or(""),
+        reply["count"]
+    );
+    Ok((reply, summary))
+}
+
+fn snapshot_restore(context: &Context, arguments: &Value) -> Outcome {
+    let name = text_arg(arguments, "name").trim().to_owned();
+    // The snapshot as checked is the one restored: its `base` goes with the
+    // restore, which a change in between makes a `conflict`.
+    let list = ask(context, json!({"type": "snapshot.list"}))?;
+    let snapshot = list["snapshots"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|s| s["name"] == json!(name))
+        .cloned();
+    if let Some(snapshot) = &snapshot {
+        // Each restored control is a commit of its value (`docs/agent-interface.md` "Safety").
+        let describe = ask(context, json!({"type": "describe"}))?;
+        let gains = current_gains(context)?;
+        let mut reached = Vec::new();
+        for control in describe["controls"].as_array().into_iter().flatten() {
+            let Some(value) = control["address"]
+                .as_str()
+                .and_then(|a| snapshot["values"][a].as_f64())
+            else {
+                continue;
+            };
+            let min = control["min"].as_f64().unwrap_or(f64::MIN);
+            let max = control["max"].as_f64().unwrap_or(f64::MAX);
+            let written = value.max(min).min(max);
+            let file = control["inFile"]
+                .as_bool()
+                .filter(|in_file| *in_file)
+                .and_then(|_| file_value(context, control))
+                .unwrap_or_else(|| control["default"].as_f64().unwrap_or(1.0));
+            for port in control["ports"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                if gains.is_gain(port) && !gain::commit_allowed(context.max_gain, written, file) {
+                    return Err(refused(format!(
+                        "refused: restoring \"{name}\" would write {port} = {written} into project.toml, above --max-gain {} and above the file's {file}. Start `signal mcp` with a higher --max-gain to allow it.",
+                        context.max_gain
+                    )));
+                }
+                reached.push((port.to_owned(), Some(written)));
+            }
+        }
+        guard_live(context, &reached)?;
+    }
+    let reply = bare(ask(
+        context,
+        json!({"type": "snapshot.restore", "name": name, "base": list["base"]}),
+    )?);
+    let count = |key: &str| reply[key].as_array().map_or(0, Vec::len);
+    let summary = format!(
+        "restored \"{name}\": {} values, {} written into project.toml, {} skipped, {} clamped",
+        reply["restored"],
+        count("written"),
+        count("skipped"),
+        count("clamped")
+    );
+    Ok((reply, summary))
+}
+
+fn snapshot_delete(context: &Context, arguments: &Value) -> Outcome {
+    let reply = bare(ask(
+        context,
+        json!({"type": "snapshot.delete", "name": text_arg(arguments, "name")}),
+    )?);
+    let summary = format!(
+        "deleted snapshot \"{}\"",
+        reply["name"].as_str().unwrap_or("")
+    );
     Ok((reply, summary))
 }
 

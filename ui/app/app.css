@@ -81,6 +81,17 @@ signal-app-messages { display: block; }
 .parameters button { padding: 0 0.5rem; }
 .read-only { color: var(--signal-muted); }
 
+/* The snapshots (ADR 0041): a row per snapshot, its buttons in fixed places. */
+signal-app-snapshots { display: block; }
+.snapshot-save { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.4rem; }
+.snapshots { list-style: none; padding: 0; margin: 0; }
+.snapshots li { display: flex; gap: 0.5rem; align-items: center; height: 1.9rem; }
+.snapshots button { padding: 0 0.5rem; }
+.snapshot-name { width: 24rem; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.snapshot-count { width: 9ch; font-variant-numeric: tabular-nums; }
+.snapshot-line { height: 1.4em; margin-top: 0.3rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--signal-muted); }
+.snapshot-line.warn { color: var(--signal-meter-hot); }
+
 /* The setup. */
 .project { display: flex; gap: 0.5rem; align-items: center; }
 .field { margin: 0.6rem 0; }

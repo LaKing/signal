@@ -602,3 +602,38 @@ fn vendor_copies_a_library_composite_into_a_project() {
         "{error}"
     );
 }
+
+/// ADR 0041: `signal snapshot` saves the files' values under a name,
+/// lists it, restores it into project.toml after a change, refuses a name
+/// in use without --overwrite, and deletes it.
+#[test]
+fn snapshot_saves_restores_and_deletes() {
+    let dir = out_dir("snapshot-project");
+    fs::create_dir_all(&dir).unwrap();
+    let text = "schema_version = 1\n\n[project]\nname = \"s\"\nsample_rate = 8000\nseed = 3\n\n\
+         [instances]\nosc = { module = \"std.sine_osc\", freq = 440 }\n\
+         out = { module = \"std.audio_out\", gain = 0.25 }\n\n\
+         [wiring]\nconnections = [{ from = \"osc.out\", to = \"out.l\" }]\n";
+    fs::write(dir.join("project.toml"), text).unwrap();
+    let project = dir.display().to_string();
+    let output = signal(&["snapshot", "save", &project, "Első", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(stdout_json(&output)["replaced"], false);
+    let output = signal(&["snapshot", "save", &project, "Első"]);
+    assert_eq!(output.status.code(), Some(1), "a name in use");
+    fs::write(
+        dir.join("project.toml"),
+        text.replace("freq = 440", "freq = 220"),
+    )
+    .unwrap();
+    let output = signal(&["snapshot", "restore", &project, "Első", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(stdout_json(&output)["written"][0], "/osc.freq");
+    assert_eq!(fs::read_to_string(dir.join("project.toml")).unwrap(), text);
+    let output = signal(&["snapshot", "list", &project, "--json"]);
+    assert_eq!(stdout_json(&output)["snapshots"][0]["name"], "Első");
+    let output = signal(&["snapshot", "delete", &project, "Első"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let output = signal(&["snapshot", "list", &project, "--json"]);
+    assert_eq!(stdout_json(&output)["snapshots"], serde_json::json!([]));
+}

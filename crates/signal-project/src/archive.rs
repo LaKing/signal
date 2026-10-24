@@ -3,7 +3,7 @@
 //! own (`docs/project-format.md` §10).
 //!
 //! [`pack`] takes what a project reads (`project.toml`, `composites/*.toml`,
-//! `patterns/*.toml`, `interfaces/*.toml`, the files under `ui/`) and nothing else, in sorted path order, deflated,
+//! `patterns/*.toml`, `interfaces/*.toml`, the files under `ui/`, `snapshots.toml`) and nothing else, in sorted path order, deflated,
 //! with a fixed timestamp and fixed permissions, so the same folder always
 //! gives the same bytes. [`unpack`] checks every entry before it writes one:
 //! relative paths only, regular files only, at most [`Limits::DEFAULT`]
@@ -160,12 +160,12 @@ pub fn is_project_file(path: &Path) -> bool {
 
 /// Whether a project reads the file at `relative` (`/`-separated): its
 /// `project.toml`, a composite in `composites/`, a pattern in `patterns/`,
-/// an interface template in `interfaces/` (ADR 0037 §3) or a file under
-/// `ui/`.
+/// an interface template in `interfaces/` (ADR 0037 §3), a file under
+/// `ui/`, or its `snapshots.toml` (ADR 0041).
 fn read_by_project(relative: &str) -> bool {
     let parts: Vec<&str> = relative.split('/').collect();
     match parts.as_slice() {
-        [PROJECT_FILE] => true,
+        [PROJECT_FILE] | [crate::snapshot::SNAPSHOTS_FILE] => true,
         ["composites" | "patterns" | "interfaces", name] => name.ends_with(".toml"),
         ["ui", _, ..] => true,
         _ => false,
@@ -580,6 +580,7 @@ mod tests {
     fn a_project_reads_its_toml_composites_patterns_and_ui() {
         for read in [
             "project.toml",
+            "snapshots.toml",
             "composites/kick.toml",
             "patterns/melody.toml",
             "interfaces/deck.toml",
