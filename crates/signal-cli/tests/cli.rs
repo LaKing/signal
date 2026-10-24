@@ -689,3 +689,48 @@ fn snapshot_saves_restores_and_deletes() {
     );
     assert_ne!(before, kept);
 }
+
+/// ADR 0041 §7 (review 2 of 2026-10-24): `signal snapshot restore` whose
+/// project.toml write fails (an immutable file) keeps the undo snapshot
+/// from before; the undo snapshot holds only what the restore can change.
+#[test]
+fn snapshot_restore_that_fails_keeps_the_undo_snapshot() {
+    let dir = out_dir("snapshot-undo-kept");
+    fs::create_dir_all(&dir).unwrap();
+    let text = "schema_version = 1\n\n[project]\nname = \"s\"\nsample_rate = 8000\nseed = 3\n\n\
+         [instances]\nosc = { module = \"std.sine_osc\", freq = 440 }\n\
+         out = { module = \"std.audio_out\", gain = 0.25 }\n\n\
+         [wiring]\nconnections = [{ from = \"osc.out\", to = \"out.l\" }]\n";
+    fs::write(dir.join("project.toml"), text).unwrap();
+    fs::write(
+        dir.join("snapshots.toml"),
+        "schema_version = 1\n\n[snapshots.a]\n\"/osc.freq\" = 330\n\n[snapshots.b]\n\"/osc.freq\" = 550\n",
+    )
+    .unwrap();
+    let project = dir.display().to_string();
+    let output = signal(&["snapshot", "restore", &project, "a"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let before = fs::read_to_string(dir.join("snapshots.toml")).unwrap();
+    assert!(
+        before.contains("[undo]\n\"/osc.freq\" = 440\n\n"),
+        "only the restored control: {before}"
+    );
+    let path = dir.join("project.toml");
+    let locked = Command::new("chflags")
+        .arg("uchg")
+        .arg(&path)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !locked {
+        eprintln!("skipping: chflags uchg is not available");
+        return;
+    }
+    let output = signal(&["snapshot", "restore", &project, "b"]);
+    let _ = Command::new("chflags").arg("nouchg").arg(&path).status();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(dir.join("snapshots.toml")).unwrap(),
+        before,
+        "the undo snapshot from before"
+    );
+}

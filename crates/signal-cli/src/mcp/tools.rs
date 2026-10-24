@@ -828,6 +828,15 @@ fn unsubscribe(context: &Context, sub: u32) {
 /// event, or a base that does not change).
 fn guard_live(context: &Context, ports: &[(String, Option<f64>)]) -> Result<(), Refused> {
     let gains = current_gains(context)?;
+    guard_live_with(context, gains, ports)
+}
+
+/// [`guard_live`] with the gains already read (one load of the files).
+fn guard_live_with(
+    context: &Context,
+    gains: Gains,
+    ports: &[(String, Option<f64>)],
+) -> Result<(), Refused> {
     let live_before = live_gains(context, &gains)?;
     let mut live = Live::default();
     for (port, value) in ports {
@@ -1564,10 +1573,10 @@ fn guard_snapshot(context: &Context, values: &Value, what: &str) -> Result<(), R
     let gains = current_gains(context)?;
     let mut reached = Vec::new();
     for control in describe["controls"].as_array().into_iter().flatten() {
-        // A control left out of snapshots is skipped by the restore.
-        if control["inSnapshots"] == json!(false) {
-            continue;
-        }
+        // Every control the values name is judged, including one left out
+        // of snapshots (which the restore skips): a `snapshot.exclude` from
+        // another client between this check and the restore can then only
+        // narrow what is restored, never add an unchecked value.
         let Some(value) = control["address"].as_str().and_then(|a| values[a].as_f64()) else {
             continue;
         };
@@ -1593,7 +1602,7 @@ fn guard_snapshot(context: &Context, values: &Value, what: &str) -> Result<(), R
             reached.push((port.to_owned(), Some(written)));
         }
     }
-    guard_live(context, &reached)
+    guard_live_with(context, gains, &reached)
 }
 
 fn restored_summary(reply: &Value, what: &str) -> String {

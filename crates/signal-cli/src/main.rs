@@ -81,9 +81,9 @@ enum Command {
     /// project's composites/, as the project's own text, and point the
     /// project's references at the copies (ADR 0027 §4).
     Vendor(vendor::VendorArgs),
-    /// A project's snapshots (ADR 0041): list, save, restore or delete the
-    /// values of its top-level parameters stored under a name in
-    /// snapshots.toml.
+    /// A project's snapshots (ADR 0041): list, save, restore, undo or delete
+    /// the values of its top-level parameters stored under a name in
+    /// snapshots.toml, and exclude a control from them.
     Snapshot(snapshot::SnapshotArgs),
     /// Measure the per-frame engine at 96 kHz (V13): every `std.*`
     /// primitive, the empty engine, the kick project and kick voices.

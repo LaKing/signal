@@ -322,6 +322,36 @@ pub fn edit<T>(
     edit: impl FnOnce(&mut Snapshots) -> Result<T, SnapshotError>,
 ) -> Result<(T, String, bool), SnapshotError> {
     let path = dir.join(SNAPSHOTS_FILE);
+    let lock = ProjectLock::acquire(dir)
+        .map_err(|e| SnapshotError::Io(format!("{} was not written: {e}", path.display())))?;
+    let edited = edit_locked(dir, &lock, check, edit)?;
+    Ok((edited.result, edited.after, edited.wrote))
+}
+
+/// What [`edit_locked`] did.
+#[derive(Debug)]
+pub struct Edited<T> {
+    /// The edit's result.
+    pub result: T,
+    /// The file's text as read under the lock (`None`: no file).
+    pub before: Option<String>,
+    /// The file's text as the edit left it.
+    pub after: String,
+    /// Whether it wrote.
+    pub wrote: bool,
+}
+
+/// [`edit`] by a writer that already holds the project's writer `lock`
+/// (ADR 0040: a writer never takes it twice), so that it can write
+/// `snapshots.toml` and `project.toml` under one lock (a restore and its
+/// undo snapshot, ADR 0041 §7).
+pub fn edit_locked<T>(
+    dir: &Path,
+    _lock: &ProjectLock,
+    check: impl FnOnce(Option<&str>) -> Result<(), SnapshotError>,
+    edit: impl FnOnce(&mut Snapshots) -> Result<T, SnapshotError>,
+) -> Result<Edited<T>, SnapshotError> {
+    let path = dir.join(SNAPSHOTS_FILE);
     let failed =
         |error: String| SnapshotError::Io(format!("{} was not written: {error}", path.display()));
     if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -329,13 +359,17 @@ pub fn edit<T>(
             "it is a link, and snapshots are written only into the project's own file".to_owned(),
         ));
     }
-    let _lock = ProjectLock::acquire(dir).map_err(|e| failed(e.to_string()))?;
     let (mut snapshots, before) = read(dir)?;
     check(before.as_deref())?;
     let result = edit(&mut snapshots)?;
     let after = render(&snapshots);
     if before.as_deref() == Some(after.as_str()) {
-        return Ok((result, after, false));
+        return Ok(Edited {
+            result,
+            before,
+            after,
+            wrote: false,
+        });
     }
     let written = transaction::replace_unchanged(
         &path,
@@ -349,7 +383,28 @@ pub fn edit<T>(
             path.display()
         )));
     }
-    Ok((result, after, true))
+    Ok(Edited {
+        result,
+        before,
+        after,
+        wrote: true,
+    })
+}
+
+/// Puts `snapshots.toml` back to `before` after a write of `written` whose
+/// change must not stay (a restore whose `project.toml` write failed: its
+/// undo snapshot goes back to the one before). Under the held `lock`, and
+/// only while the file still holds `written` (compared, ADR 0040): gives
+/// whether it was put back.
+pub fn put_back(
+    dir: &Path,
+    _lock: &ProjectLock,
+    written: &str,
+    before: &str,
+) -> Result<bool, SnapshotError> {
+    let path = dir.join(SNAPSHOTS_FILE);
+    transaction::replace_unchanged(&path, Some(written.as_bytes()), before.as_bytes())
+        .map_err(|e| SnapshotError::Io(format!("{} was not put back: {e}", path.display())))
 }
 
 /// Saves `values` as the snapshot `name` of `dir` ([`edit`]): refused with

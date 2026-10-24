@@ -16,7 +16,7 @@ use signal_core::Registry;
 use signal_project::snapshot::{self, SnapshotError, Values};
 use signal_project::transaction::{ProjectLock, replace_unchanged};
 use signal_ui::panel::Panel;
-use signal_ui::snapshot::{RestoreError, Restored, planned_panel, restore_files, values};
+use signal_ui::snapshot::{RestoreError, Restored, planned_panel, restore_files_with, values};
 
 use crate::{Failure, print_stdout};
 
@@ -94,6 +94,7 @@ fn restore_failure(error: RestoreError) -> Failure {
     match error {
         RestoreError::DoesNotLoad(message) => Failure::Io(message),
         RestoreError::Write(error) => Failure::Io(error.to_string()),
+        RestoreError::Snapshot(error) => failure(error),
     }
 }
 
@@ -103,26 +104,17 @@ fn panel(project: &Path, registry: &Registry) -> Result<Panel, Failure> {
 }
 
 /// Restores what `take` gives from the snapshots (a named one, or the undo
-/// snapshot) after the files' values of every control in snapshots become
-/// the undo snapshot, in the same write; then writes them into
-/// project.toml.
+/// snapshot) from the files alone ([`restore_files_with`]: one writer lock,
+/// the undo snapshot put back if project.toml cannot be written).
 fn restore_with(
     project: &Path,
     registry: &Registry,
     take: impl FnOnce(&mut snapshot::Snapshots) -> Result<Values, SnapshotError>,
 ) -> Result<Restored, Failure> {
-    let now = values(&panel(project, registry)?, |_, p| p.base);
-    let (values, ..) = snapshot::edit(
-        project,
-        |_| Ok(()),
-        |all| {
-            let values = take(all)?;
-            all.undo = Some(now);
-            Ok(values)
-        },
-    )
-    .map_err(failure)?;
-    restore_files(project, registry, &values).map_err(restore_failure)
+    restore_files_with(project, registry, take).map_err(|e| match e {
+        RestoreError::Snapshot(error) => failure(error),
+        error => restore_failure(error),
+    })
 }
 
 fn report(name: &str, restored: &Restored, json: bool) {
@@ -242,17 +234,16 @@ pub(crate) fn run(args: &SnapshotArgs, registry: &Registry, json: bool) -> Resul
             address,
             include,
         } => {
-            let control = panel(project, registry)?;
+            let not_control = || {
+                Failure::Usage(format!(
+                    "{address} is no control: only a top-level instance's parameters go into snapshots"
+                ))
+            };
             let (instance, parameter) = address
                 .strip_prefix('/')
                 .and_then(|a| a.split_once('.'))
                 .filter(|(i, _)| !i.contains('/'))
-                .filter(|(i, p)| control.target(i, p).is_some())
-                .ok_or_else(|| {
-                    Failure::Usage(format!(
-                        "{address} is no control: only a top-level instance's parameters go into snapshots"
-                    ))
-                })?;
+                .ok_or_else(not_control)?;
             let path = project.join(signal_project::PROJECT_FILE);
             let io = |e: String| Failure::Io(format!("{}: {e}", path.display()));
             let _lock = ProjectLock::acquire(project).map_err(|e| io(e.to_string()))?;
@@ -260,6 +251,26 @@ pub(crate) fn run(args: &SnapshotArgs, registry: &Registry, json: bool) -> Resul
             let after =
                 signal_project::write_snapshot_exclude(&before, instance, parameter, !include)
                     .map_err(|e| io(e.to_string()))?;
+            // Checked on the text read under the lock, as it would be left.
+            let mut files = signal_project::read_sources(project).map_err(|e| io(e.to_string()))?;
+            for file in files
+                .iter_mut()
+                .filter(|f| f.path == signal_project::PROJECT_FILE)
+            {
+                after
+                    .as_deref()
+                    .unwrap_or(&before)
+                    .clone_into(&mut file.text);
+            }
+            let checked = signal_project::Project::from_sources_in(files, project)
+                .map_err(Failure::Invalid)?;
+            checked.plan(registry).map_err(Failure::Invalid)?;
+            if Panel::new(&checked, registry)
+                .target(instance, parameter)
+                .is_none()
+            {
+                return Err(not_control());
+            }
             if let Some(after) = &after
                 && !replace_unchanged(&path, Some(before.as_bytes()), after.as_bytes())
                     .map_err(|e| io(e.to_string()))?

@@ -62,7 +62,7 @@ use crate::frames::{self, frame};
 use crate::keys::{self, Keys};
 use crate::panel::{
     Panel, ParameterView, Target, WriteEdit, Written, after_write_all, ramp_frames,
-    write_project_all, write_project_chosen,
+    write_project_all, write_project_chosen_locked,
 };
 use crate::panel_write::{check_content, first_file, replace, sha256_hex};
 use crate::player::{
@@ -649,6 +649,15 @@ struct ControlsWritten {
     note: Option<String>,
 }
 
+/// Diagnostics as lines, for a message.
+fn lines(diagnostics: &[Diagnostic]) -> String {
+    diagnostics
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// A snapshot message's `name` (ADR 0041): trimmed, 1 to 64 characters.
 fn snapshot_name(message: &Value) -> Result<String, Failure> {
     let raw = message
@@ -658,12 +667,12 @@ fn snapshot_name(message: &Value) -> Result<String, Failure> {
     snapshots::name(raw).map_err(snapshot_failure)
 }
 
+/// A snapshot write's check of the file's version (`base`).
+type BaseCheck = Box<dyn FnOnce(Option<&str>) -> Result<(), SnapshotError>>;
+
 /// A snapshot message's `base`: absent takes the file as it is; null asks
 /// that there be no `snapshots.toml`; else the SHA-256 it was listed with.
-#[allow(clippy::type_complexity)]
-fn base_check(
-    message: &Value,
-) -> Result<Box<dyn FnOnce(Option<&str>) -> Result<(), SnapshotError>>, Failure> {
+fn base_check(message: &Value) -> Result<BaseCheck, Failure> {
     let expected: Option<Option<String>> = match message.get("base") {
         None => None,
         Some(Value::Null) => Some(None),
@@ -5080,22 +5089,18 @@ impl Host {
         self.snapshot_project(true)?;
         let name = snapshot_name(message)?;
         let check = base_check(message)?;
-        // ADR 0041 §7: the values playing now, of every control a restore
-        // may change, become the undo snapshot first, in the same write that
-        // reads the snapshot; a refused write restores nothing.
-        let now = snapshot::values(&self.panel, |instance, p| self.control_base(instance, p));
-        let (values, _, _) = snapshots::edit(&self.dir, check, |all| {
-            let values = all
-                .snapshots
-                .get(&name)
-                .cloned()
-                .ok_or_else(|| SnapshotError::Unknown(name.clone()))?;
-            all.undo = Some(now);
-            Ok(values)
-        })
-        .map_err(|e| self.snapshot_refused(e))?;
-        self.snapshots_written();
-        self.apply_snapshot(&name, "snapshot.restored", &values)
+        let wanted = name.clone();
+        self.restore_from(
+            check,
+            move |all| {
+                all.snapshots
+                    .get(&wanted)
+                    .cloned()
+                    .ok_or(SnapshotError::Unknown(wanted))
+            },
+            &name,
+            "snapshot.restored",
+        )
     }
 
     /// `snapshot.undo` (ADR 0041 §7): the undo snapshot restored, after the
@@ -5103,25 +5108,93 @@ impl Host {
     fn snapshot_undo(&mut self, message: &Value) -> Result<Value, Failure> {
         self.snapshot_project(true)?;
         let check = base_check(message)?;
-        let now = snapshot::values(&self.panel, |instance, p| self.control_base(instance, p));
-        let (values, _, _) = snapshots::edit(&self.dir, check, |all| {
-            let values = all.undo.take().ok_or(SnapshotError::NoUndo)?;
-            all.undo = Some(now);
+        self.restore_from(
+            check,
+            |all| all.undo.take().ok_or(SnapshotError::NoUndo),
+            "undo",
+            "snapshot.undone",
+        )
+    }
+
+    /// A control's live base by name ([`Host::control_base`]): the last value
+    /// the Controller took, each port's default after a failed reset, else
+    /// the file's value.
+    fn live_base(&self, instance: &str, parameter: &str) -> f64 {
+        let key = (instance.to_owned(), parameter.to_owned());
+        let reset = self.failed.get(&key).is_some_and(|f| f.reset.is_some());
+        let default = self
+            .panel
+            .target(instance, parameter)
+            .and_then(|t| t.defaults.first().copied());
+        match (self.panel.dragged(instance, parameter), default) {
+            (Some(drag), _) => drag.applied,
+            (None, Some(default)) if reset => default,
+            _ => self
+                .panel
+                .file_base(instance, parameter)
+                .map_or(0.0, |(base, _)| base),
+        }
+    }
+
+    /// Restores what `take` gives from the snapshots (ADR 0041 §3, §7), all
+    /// under one writer lock: first the values playing now of the controls
+    /// this restore can change (the entries that exist and go into
+    /// snapshots) become the undo snapshot, in the write that reads the
+    /// snapshot (an empty set leaves the undo snapshot as it was; a write
+    /// that fails or is a `conflict` restores nothing); then `project.toml`
+    /// is written. If that write fails, `snapshots.toml` is put back
+    /// (compared), so the undo snapshot from before is kept.
+    fn restore_from(
+        &mut self,
+        check: BaseCheck,
+        take: impl FnOnce(&mut snapshots::Snapshots) -> Result<snapshots::Values, SnapshotError>,
+        name: &str,
+        kind: &str,
+    ) -> Result<Value, Failure> {
+        let lock = ProjectLock::acquire(&self.dir).map_err(|e| {
+            fail(
+                "write-failed",
+                format!(
+                    "{} was not written: {e}",
+                    self.dir.join(SNAPSHOTS_FILE).display()
+                ),
+            )
+        })?;
+        let edited = snapshots::edit_locked(&self.dir, &lock, check, |all| {
+            let before = all.undo.clone();
+            let values = take(all)?;
+            let undo = snapshot::undo_of(&self.panel, &values, |i, p| self.live_base(i, p));
+            all.undo = if undo.is_empty() { before } else { Some(undo) };
             Ok(values)
         })
         .map_err(|e| self.snapshot_refused(e))?;
-        self.snapshots_written();
-        self.apply_snapshot("undo", "snapshot.undone", &values)
+        if edited.wrote {
+            self.snapshots_written();
+        }
+        let undo = edited
+            .wrote
+            .then(|| {
+                edited
+                    .before
+                    .clone()
+                    .map(|before| (edited.after.clone(), before))
+            })
+            .flatten();
+        self.apply_snapshot(name, kind, &edited.result, lock, undo)
     }
 
     /// Restores `values` (the snapshot `name`, or the undo snapshot) into the
-    /// controls: written where `commit` writes them, as one change, and sent
-    /// live; the reply of type `kind`.
+    /// controls: written where `commit` writes them, as one change, under
+    /// the held `lock`, and sent live; the reply of type `kind`. `undo` is
+    /// the undo snapshot's write (the text written, the text before), put
+    /// back when `project.toml` cannot be written.
     fn apply_snapshot(
         &mut self,
         name: &str,
         kind: &str,
         values: &snapshots::Values,
+        lock: ProjectLock,
+        undo: Option<(String, String)>,
     ) -> Result<Value, Failure> {
         let restore = snapshot::plan(&self.panel, values);
         let skipped: Vec<Value> = restore
@@ -5161,9 +5234,20 @@ impl Host {
                 )
             })
             .collect();
-        let chosen = write_project_chosen(&self.dir, &texts, &|text, i| {
+        let chosen = write_project_chosen_locked(&self.dir, &lock, &texts, &|text, i| {
             restore.edits.get(i).is_some_and(|e| !e.held_by(text))
         });
+        // Not written: the undo snapshot goes back to the one before.
+        let put_back = match (&chosen, &undo) {
+            (Err(_), Some((written, before))) => {
+                snapshots::put_back(&self.dir, &lock, written, before).unwrap_or(false)
+            }
+            _ => false,
+        };
+        drop(lock);
+        if put_back {
+            self.snapshots_written();
+        }
         // A control whose file holds the value is only sent, and only when
         // its live value may differ (a drag, a failed write or reset, ports
         // in doubt).
@@ -5249,6 +5333,7 @@ impl Host {
                 json!({
                     "name": name,
                     "restored": restore.edits.len(),
+                    "undoKept": put_back,
                     "unwritten": addresses,
                     "sent": sent,
                     "skipped": skipped,
@@ -5295,9 +5380,6 @@ impl Host {
             )
         };
         let (instance, parameter) = control_of(&port).ok_or_else(not_editable)?;
-        if self.panel.target(&instance, &parameter).is_none() {
-            return Err(not_editable());
-        }
         let path = self.dir.join(signal_project::PROJECT_FILE);
         let failed = |error: String| {
             fail(
@@ -5309,6 +5391,39 @@ impl Host {
         let before = fs::read_to_string(&path).map_err(|e| failed(e.to_string()))?;
         let after = signal_project::write_snapshot_exclude(&before, &instance, &parameter, exclude)
             .map_err(|e| failed(e.to_string()))?;
+        // Checked on the text read under the lock, as it would be left: a
+        // control of the project as it plans then (never a stale panel's).
+        let text = after.as_deref().unwrap_or(&before);
+        let checked = signal_project::read_sources(&self.dir)
+            .map_err(|e| fail("does-not-load", e.to_string()))
+            .and_then(|mut files| {
+                for file in files
+                    .iter_mut()
+                    .filter(|f| f.path == signal_project::PROJECT_FILE)
+                {
+                    text.clone_into(&mut file.text);
+                }
+                let project = Project::from_sources_in(files, &self.dir)
+                    .map_err(|d| fail("does-not-load", lines(&d)))?;
+                let planned = project.plan(&self.registry);
+                Ok((project, planned))
+            })?;
+        let (project_after, planned) = checked;
+        if let Err(diagnostics) = planned {
+            return Err(fail(
+                "does-not-load",
+                format!(
+                    "{address}: the project would not plan, so nothing was written:\n{}",
+                    lines(&diagnostics)
+                ),
+            ));
+        }
+        if Panel::new(&project_after, &self.registry)
+            .target(&instance, &parameter)
+            .is_none()
+        {
+            return Err(not_editable());
+        }
         let written = match &after {
             Some(after) => {
                 if !replace_unchanged(&path, Some(before.as_bytes()), after.as_bytes())
@@ -5330,22 +5445,50 @@ impl Host {
         if let Some(after) = after {
             self.writes += 1;
             let file = Path::new(signal_project::PROJECT_FILE);
+            // Whether the reload of the folder will push what changed instead.
+            let mut deferred = false;
             match self.run.as_mut() {
-                // The running project takes the same text (nothing in it
-                // plays), so the watch's reload has nothing to apply.
+                // The running project takes the same edit of its own text
+                // (not the file's, which may hold an edit the watch has not
+                // applied yet), so the reload applies exactly what it would
+                // have; only when the file was the running project's text
+                // is the write taken as seen.
                 Some(run) => {
                     let known = run.file.as_deref() == Some(before.as_str());
-                    if let Ok(project) = run.current.with_project_text(&after) {
-                        let panel = Panel::new(&project, &self.registry);
-                        run.current = project;
-                        if known {
-                            run.file = Some(after);
-                            if let Some(watcher) = run.watcher.as_mut() {
-                                let stamp = watcher.stamp(file);
-                                watcher.accept(file, stamp);
+                    let own = run
+                        .current
+                        .files
+                        .iter()
+                        .find(|f| f.path == signal_project::PROJECT_FILE)
+                        .map(|f| f.text.clone())
+                        .unwrap_or_default();
+                    let edited = signal_project::write_snapshot_exclude(
+                        &own, &instance, &parameter, exclude,
+                    );
+                    let project = match edited {
+                        Ok(Some(text)) => run.current.with_project_text(&text).map(Some),
+                        Ok(None) => Ok(None),
+                        Err(error) => Err(error),
+                    };
+                    match project {
+                        Ok(project) => {
+                            if let Some(project) = project {
+                                run.current = project;
                             }
+                            let panel = Panel::new(&run.current, &self.registry);
+                            if known {
+                                run.file = Some(after);
+                                if let Some(watcher) = run.watcher.as_mut() {
+                                    let stamp = watcher.stamp(file);
+                                    watcher.accept(file, stamp);
+                                }
+                            }
+                            self.reconcile(panel);
                         }
-                        self.reconcile(panel);
+                        // A project with includes (or a text the running
+                        // project cannot take): the reload applies the file
+                        // and pushes `describe` then.
+                        Err(_) => deferred = true,
                     }
                 }
                 None => {
@@ -5355,9 +5498,11 @@ impl Host {
                     }
                 }
             }
-            let describe = self.describe(false);
-            self.broadcast(&describe);
-            self.push_graph(false);
+            if !deferred {
+                let describe = self.describe(false);
+                self.broadcast(&describe);
+                self.push_graph(false);
+            }
         }
         Ok(json!({
             "type": "snapshot.excluded",
@@ -5371,7 +5516,12 @@ impl Host {
 
     /// The SHA-256 of `snapshots.toml` now, `None` without one.
     fn snapshot_base(&self) -> Option<String> {
-        transaction::current(&self.dir.join(SNAPSHOTS_FILE))
+        let path = self.dir.join(SNAPSHOTS_FILE);
+        // A link is never read (its target's bytes are not the file's).
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return None;
+        }
+        transaction::current(&path)
             .ok()
             .flatten()
             .map(|bytes| sha256_hex(&bytes))

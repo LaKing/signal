@@ -656,7 +656,187 @@ fn excluded_controls_survive_save_restore_and_undo(transport: Transport) {
     rig.finish();
 }
 
+/// `chflags uchg` on `path` (macOS: the file cannot be replaced, so a
+/// rename over it fails while it still reads), undone when dropped.
+struct Immutable(std::path::PathBuf);
+
+impl Immutable {
+    fn new(path: &std::path::Path) -> Option<Immutable> {
+        let done = std::process::Command::new("chflags")
+            .arg("uchg")
+            .arg(path)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !done {
+            eprintln!("skipping: chflags uchg is not available");
+        }
+        done.then(|| Immutable(path.to_owned()))
+    }
+}
+
+impl Drop for Immutable {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("chflags")
+            .arg("nouchg")
+            .arg(&self.0)
+            .status();
+    }
+}
+
+/// Review 2 of 2026-10-24, 2: a restore whose project.toml write fails (an
+/// immutable file) leaves the undo snapshot from before, not the one it
+/// wrote for itself, since both are written under one lock and the undo
+/// snapshot is put back.
+fn a_failed_restore_keeps_the_undo_snapshot(transport: Transport) {
+    let mut rig = tone("snapshot-undo-kept", transport);
+    let (mut ws, _) = rig.client();
+    fs::write(
+        rig.dir.join(SNAPSHOTS_FILE),
+        "schema_version = 1\n\n[snapshots.a]\n\"/a.freq\" = 330\n\n[snapshots.b]\n\"/a.freq\" = 550\n",
+    )
+    .unwrap();
+    rig.request(
+        &mut ws,
+        1,
+        json!({"type": "snapshot.restore", "name": "a"}),
+        "snapshot.restored",
+    );
+    let before = fs::read(rig.dir.join(SNAPSHOTS_FILE)).unwrap();
+    assert_eq!(
+        snapshot::read(&rig.dir).unwrap().0.undo.unwrap()["/a.freq"],
+        440.0
+    );
+    let Some(locked) = Immutable::new(&rig.dir.join("project.toml")) else {
+        return rig.finish();
+    };
+    let refused = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "snapshot.restore", "name": "b"}),
+        "error",
+    );
+    drop(locked);
+    assert_eq!(refused["code"], "write-failed", "{refused}");
+    assert_eq!(refused["undoKept"], true, "{refused}");
+    assert_eq!(
+        fs::read(rig.dir.join(SNAPSHOTS_FILE)).unwrap(),
+        before,
+        "the undo snapshot from before"
+    );
+    rig.finish();
+}
+
+/// The operator's decision (review 2, 5): the undo snapshot holds only the
+/// controls this restore can change, so an undo never reverts a later edit
+/// of another control; a restore that changes nothing (every entry
+/// skipped) leaves the undo snapshot as it was.
+fn the_undo_snapshot_holds_what_the_restore_changes(transport: Transport) {
+    let mut rig = tone("snapshot-undo-scope", transport);
+    let (mut ws, _) = rig.client();
+    fs::write(
+        rig.dir.join(SNAPSHOTS_FILE),
+        "schema_version = 1\n\n[snapshots.few]\n\"/a.freq\" = 330\n\"/gone.freq\" = 3\n\n[snapshots.none]\n\"/gone.freq\" = 3\n",
+    )
+    .unwrap();
+    rig.request(
+        &mut ws,
+        1,
+        json!({"type": "snapshot.restore", "name": "few"}),
+        "snapshot.restored",
+    );
+    let undo = snapshot::read(&rig.dir).unwrap().0.undo.unwrap();
+    assert_eq!(
+        undo.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["/a.freq"],
+        "only what the restore can change"
+    );
+    commit(&mut rig, &mut ws, 2, "/b.freq", 123.0);
+    let kept = fs::read(rig.dir.join(SNAPSHOTS_FILE)).unwrap();
+    rig.request(
+        &mut ws,
+        3,
+        json!({"type": "snapshot.restore", "name": "none"}),
+        "snapshot.restored",
+    );
+    assert_eq!(
+        fs::read(rig.dir.join(SNAPSHOTS_FILE)).unwrap(),
+        kept,
+        "nothing to change: the undo snapshot stays"
+    );
+    rig.request(
+        &mut ws,
+        4,
+        json!({"type": "snapshot.undo"}),
+        "snapshot.undone",
+    );
+    let now = describe(&mut rig, &mut ws, 5);
+    assert_eq!(control(&now, "/a.freq")["base"], 440.0);
+    assert_eq!(
+        control(&now, "/b.freq")["base"],
+        123.0,
+        "a later edit stays"
+    );
+    rig.finish();
+}
+
+/// Review 2 of 2026-10-24, 1: an edit of project.toml the watch has not
+/// applied yet is not taken as applied by a `snapshot.exclude` right after
+/// it: the reload still sends it.
+fn an_exclude_does_not_swallow_a_pending_edit(transport: Transport) {
+    let mut rig = tone("snapshot-exclude-pending", transport);
+    let (mut ws, _) = rig.client();
+    let sub = rig.watch_parameter(&mut ws, 1, "/a.freq");
+    let path = rig.dir.join("project.toml");
+    let edited = fs::read_to_string(&path)
+        .unwrap()
+        .replace("freq = 440", "freq = 880");
+    fs::write(&path, edited).unwrap();
+    rig.request(
+        &mut ws,
+        2,
+        json!({"type": "snapshot.exclude", "address": "/out.gain"}),
+        "snapshot.excluded",
+    );
+    rig.wait_base(&mut ws, sub, 880.0);
+    assert!(fs::read_to_string(&path).unwrap().contains("freq = 880"));
+    rig.finish();
+}
+
+/// Review 2 of 2026-10-24, 3: stopped, `snapshot.exclude` checks the
+/// control on the files as read under the lock, not on a panel from before
+/// another program's edit; a name that would stop the project planning is
+/// refused and nothing is written.
+fn an_exclude_is_checked_on_the_files(transport: Transport) {
+    let mut rig = tone("snapshot-exclude-checked", transport);
+    let (mut ws, _) = rig.client();
+    rig.request(&mut ws, 1, json!({"type": "transport.stop"}), "transport");
+    let path = rig.dir.join("project.toml");
+    // `env` becomes an oscillator: it has no `decay_ms` any more.
+    let edited = fs::read_to_string(&path).unwrap().replace(
+        "env = { module = \"std.exp_env\", decay_ms = 50 }",
+        "env = { module = \"std.sine_osc\" }",
+    );
+    fs::write(&path, &edited).unwrap();
+    let refused = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "snapshot.exclude", "address": "/env.decay_ms"}),
+        "error",
+    );
+    assert_eq!(refused["code"], "does-not-load", "{refused}");
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        edited,
+        "nothing written"
+    );
+    rig.finish();
+}
+
 both!(
+    a_failed_restore_keeps_the_undo_snapshot,
+    the_undo_snapshot_holds_what_the_restore_changes,
+    an_exclude_does_not_swallow_a_pending_edit,
+    an_exclude_is_checked_on_the_files,
     a_restore_undoes_later_changes,
     gone_entries_are_skipped_and_out_of_range_clamped,
     names_overwrites_conflicts_and_delete,

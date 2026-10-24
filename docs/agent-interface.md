@@ -94,7 +94,7 @@ Addresses are as in the UI protocol: `/instance` or `/composite/inner`, and port
 | `modules` | `category?`, `query?` | `primitives` and `composites` (the project's, then `lib.*`) as the schematic's palette lists them, filtered |
 | `describe_instance` | `address` | the plan instances at or inside it, its controls, its `graph` entry |
 | `read_file` | `file` | `project.toml`, `composites/<name>.toml` (`file.read`), `patterns/<name>.toml` (`pattern.read`, with `kind`), `ui/<name>.html` (`panel.read`, with the `<signal-panel>` `html`), `ui/schematic.toml`: `{exists, base, text}` |
-| `snapshot_list` | — | `snapshot.list`: `base` (the SHA-256 of `snapshots.toml`, null without one) and `snapshots`, each `{name, count, values}` (ADR 0041) |
+| `snapshot_list` | — | `snapshot.list`: `base` (the SHA-256 of `snapshots.toml`, null without one), `snapshots`, each `{name, count, values}`, and the undo snapshot apart: `undo` (whether there is one), `undoCount`, `undoValues` (ADR 0041) |
 | `stats` | — | `stats` (frame, clients, drops, overflows, clipped, `ceiling` and `ceilinged`: the output ceiling and the device samples it held, writes) |
 
 ### Play and adjust
@@ -109,7 +109,7 @@ Addresses are as in the UI protocol: `/instance` or `/composite/inner`, and port
 | `revert` | `address` | `revert`: each port gets the file's value again |
 | `snapshot_save` | `name`, `overwrite?` (false) | `snapshot.save`: every control's live base under `name` in `snapshots.toml` (1 to 64 characters, trimmed); a name in use is refused (`exists`) unless `overwrite` |
 | `snapshot_restore` | `name` | `snapshot.restore` with the `base` the tool listed (it writes the undo snapshot first): the snapshot's values written into `project.toml` as one change and sent live, as `commit` does; `{restored, written, sent, skipped, clamped, note}`. Checked by the gain guard as a `commit` of each value ("Safety") |
-| `snapshot_undo` | — | `snapshot.undo`: the values the last restore (or undo) replaced, restored as a restore is (a second undo redoes); gain-guarded as `snapshot_restore`. `snapshot_list.undo` says whether there is one |
+| `snapshot_undo` | — | `snapshot.undo`: the values the last restore (or undo) replaced, restored as a restore is (a second undo redoes); gain-guarded as `snapshot_restore`. The guard judges every value the snapshot holds for a control, even one left out of snapshots (which the restore skips), so a `snapshot.exclude` by another client between the check and the restore can only narrow what is restored. `snapshot_list.undo` says whether there is one |
 | `snapshot_exclude` | `address`, `exclude?` (true) | `snapshot.exclude`: the control left out of snapshots, or put back (false); `project_info.controls[].inSnapshots` shows it |
 | `snapshot_delete` | `name` | `snapshot.delete` |
 
@@ -228,7 +228,7 @@ The session tools are offered only without `--attach`: a recording covers one ru
 
 ## Tests
 
-- `crates/signal-cli/tests/mcp.rs`: conformance in both eras, one test per tool (the four snapshot tools in `snapshots`), read-only mode, `--help`, the AC11 session on a copy of `projects/studio`, and `attach_to_a_running_signal_ui` (loopback).
+- `crates/signal-cli/tests/mcp.rs`: conformance in both eras, one test per tool (the six snapshot tools in `snapshots`), read-only mode, `--help`, the AC11 session on a copy of `projects/studio`, and `attach_to_a_running_signal_ui` (loopback).
 - `crates/signal-cli/tests/mcp_gain.rs`: the gain guard, each path and each rule; failing closed when the files do not load; restarts; the device output held at the ceiling after a ×20 patch.
 - `crates/signal-cli/src/mcp/` unit tests: the rules, attach URLs, the result cap, the project identity.
 - `crates/signal-output/tests/ceiling.rs`: the output ceiling at the adapter (null driver), its meters and counts, renders never held; `crates/signal-audio/tests/no_allocation.rs`: the callback with a ceiling allocates nothing.

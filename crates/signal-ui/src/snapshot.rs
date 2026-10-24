@@ -17,7 +17,10 @@ use signal_core::{PortAddress, Registry};
 use signal_project::Project;
 use signal_project::snapshot::Values;
 
-use crate::panel::{Panel, ParameterView, ProjectWriteError, Target, write_project_chosen};
+use signal_project::snapshot::{self, SnapshotError, Snapshots};
+use signal_project::transaction::ProjectLock;
+
+use crate::panel::{Panel, ParameterView, ProjectWriteError, Target, write_project_chosen_locked};
 
 /// The values a snapshot saves: every control of `panel` at
 /// `/instance.parameter`, with the value `base` gives for it from its
@@ -182,7 +185,7 @@ pub struct Restored {
 
 /// Restores `values` into the project folder `dir` from its files alone
 /// (`signal snapshot restore`): every control whose file value differs is
-/// written into `project.toml` as one change ([`write_project_chosen`],
+/// written into `project.toml` as one change ([`crate::panel::write_project_chosen`],
 /// decided on the text read under the writer lock); a
 /// running Signal applies it through its watch. Values are clamped and
 /// gone entries skipped as [`plan`] says.
@@ -191,8 +194,25 @@ pub fn restore_files(
     registry: &Registry,
     values: &Values,
 ) -> Result<Restored, RestoreError> {
+    let lock = ProjectLock::acquire(dir).map_err(|e| {
+        RestoreError::Write(ProjectWriteError::Failed(format!(
+            "{} was not written: {e}",
+            dir.join(signal_project::PROJECT_FILE).display()
+        )))
+    })?;
     let panel = planned_panel(dir, registry)?;
-    let restore = plan(&panel, values);
+    restore_locked(dir, &lock, &panel, values)
+}
+
+/// [`restore_files`] by a writer that holds the project's writer `lock`,
+/// with `panel` read under it.
+fn restore_locked(
+    dir: &Path,
+    lock: &ProjectLock,
+    panel: &Panel,
+    values: &Values,
+) -> Result<Restored, RestoreError> {
+    let restore = plan(panel, values);
     let orders: Vec<Vec<&str>> = restore.edits.iter().map(Edit::order).collect();
     let edits: Vec<(&str, &str, Option<f64>, &[&str])> = restore
         .edits
@@ -207,7 +227,7 @@ pub fn restore_files(
             )
         })
         .collect();
-    let (_, _, kept) = write_project_chosen(dir, &edits, &|text, i| {
+    let (_, _, kept) = write_project_chosen_locked(dir, lock, &edits, &|text, i| {
         restore.edits.get(i).is_some_and(|e| !e.held_by(text))
     })
     .map_err(RestoreError::Write)?;
@@ -216,6 +236,64 @@ pub fn restore_files(
         .filter_map(|&i| restore.edits.get(i).map(|e| e.address.clone()))
         .collect();
     Ok(Restored { restore, written })
+}
+
+/// The undo snapshot of a restore of `values` into `panel`'s controls
+/// (ADR 0041 §7): the value `base` gives (now) for each control the restore
+/// can change, the snapshot's entries that exist and go into snapshots.
+pub fn undo_of(panel: &Panel, values: &Values, base: impl Fn(&str, &str) -> f64) -> Values {
+    plan(panel, values)
+        .edits
+        .iter()
+        .map(|e| (e.address.clone(), base(&e.instance, &e.parameter)))
+        .collect()
+}
+
+/// Restores from the files alone what `take` gives from the snapshots (a
+/// named snapshot, or the undo snapshot), as `signal snapshot restore` and
+/// `undo` do: under one writer lock, the files' values of the controls it
+/// can change become the undo snapshot ([`undo_of`]; an empty set leaves
+/// the undo snapshot as it was), then `project.toml` is written
+/// ([`restore_files`]). If that write fails, `snapshots.toml` is put back
+/// (compared), so the undo snapshot from before is not lost.
+pub fn restore_files_with(
+    dir: &Path,
+    registry: &Registry,
+    take: impl FnOnce(&mut Snapshots) -> Result<Values, SnapshotError>,
+) -> Result<Restored, RestoreError> {
+    let lock = ProjectLock::acquire(dir).map_err(|e| {
+        RestoreError::Write(ProjectWriteError::Failed(format!(
+            "{} was not written: {e}",
+            dir.join(signal_project::PROJECT_FILE).display()
+        )))
+    })?;
+    let panel = planned_panel(dir, registry)?;
+    let edited = snapshot::edit_locked(
+        dir,
+        &lock,
+        |_| Ok(()),
+        |all| {
+            let before = all.undo.clone();
+            let values = take(all)?;
+            let undo = undo_of(&panel, &values, |i, p| {
+                panel.file_base(i, p).map_or(0.0, |(base, _)| base)
+            });
+            all.undo = if undo.is_empty() { before } else { Some(undo) };
+            Ok(values)
+        },
+    )
+    .map_err(RestoreError::Snapshot)?;
+    match restore_locked(dir, &lock, &panel, &edited.result) {
+        Ok(restored) => Ok(restored),
+        Err(error) => {
+            if edited.wrote
+                && let Some(before) = &edited.before
+            {
+                let _ = snapshot::put_back(dir, &lock, &edited.after, before);
+            }
+            Err(error)
+        }
+    }
 }
 
 /// The panel of the project in `dir` as its files are now, refused
@@ -242,6 +320,8 @@ pub enum RestoreError {
     DoesNotLoad(String),
     /// `project.toml` was not written.
     Write(ProjectWriteError),
+    /// `snapshots.toml` was not read or written.
+    Snapshot(SnapshotError),
 }
 
 impl std::fmt::Display for RestoreError {
@@ -249,6 +329,7 @@ impl std::fmt::Display for RestoreError {
         match self {
             RestoreError::DoesNotLoad(message) => f.write_str(message),
             RestoreError::Write(error) => write!(f, "{error}"),
+            RestoreError::Snapshot(error) => write!(f, "{error}"),
         }
     }
 }

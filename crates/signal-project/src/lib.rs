@@ -855,8 +855,15 @@ impl Project {
                         Severity::Error,
                         location,
                         format!(
-                            "{}: `snapshot_exclude` names `{name}`, which is no parameter of `{}`",
-                            instance.name, instance.module
+                            "{}: `snapshot_exclude` names `{name}`, which is no parameter of {}",
+                            instance.name,
+                            // An include's or a slot's content is planned under a
+                            // qualified name (`<project id>/<name>`), no name to show.
+                            if instance.module.is_empty() || instance.module.contains('/') {
+                                "its content (the project or slot it holds)".to_owned()
+                            } else {
+                                format!("`{}`", instance.module)
+                            }
                         ),
                     );
                     push_unique(errors, diagnostic);
@@ -1208,6 +1215,15 @@ impl Builder<'_> {
                         ),
                     );
                 }
+            }
+            if let Some((_, span)) = instance.snapshot_exclude.first() {
+                self.error(
+                    spans.file,
+                    span.start,
+                    format!(
+                        "{name}: a library composite takes no `snapshot_exclude`: it says which of a project's controls go into its snapshots, in project.toml"
+                    ),
+                );
             }
         }
     }

@@ -18,6 +18,7 @@ use signal_core::{InstanceAddress, ParameterDescriptor, PortAddress, PortShape, 
 use signal_engine::ParameterValue;
 use signal_graph::{CompositeDef, ExecutionPlan};
 use signal_project::Project;
+use signal_project::transaction::ProjectLock;
 
 /// The ramp a dragged value moves along, against zipper noise.
 pub const RAMP_MS: f64 = 5.0;
@@ -675,16 +676,49 @@ fn write_project_between(
     keep: &dyn Fn(&str, usize) -> bool,
     between: &mut dyn FnMut(),
 ) -> Result<(String, String, Vec<usize>), ProjectWriteError> {
-    use signal_project::transaction::{ProjectLock, replace_unchanged};
-    let path = dir.join(signal_project::PROJECT_FILE);
-    let what = match edits {
+    let lock = ProjectLock::acquire(dir).map_err(|e| {
+        ProjectWriteError::Failed(format!(
+            "{} not written to {}: {e}",
+            what_of(edits),
+            dir.join(signal_project::PROJECT_FILE).display()
+        ))
+    })?;
+    write_project_locked(dir, &lock, edits, keep, between)
+}
+
+/// "out.gain was", or "3 parameters were", for an error.
+fn what_of(edits: &[(&str, &str, Option<f64>, &[&str])]) -> String {
+    match edits {
         [(instance, parameter, ..)] => format!("{instance}.{parameter} was"),
         _ => format!("{} parameters were", edits.len()),
-    };
+    }
+}
+
+/// [`write_project_chosen`] by a writer that already holds the project's
+/// writer `lock` (ADR 0040: never taken twice), so a restore writes its undo
+/// snapshot and `project.toml` under one lock (ADR 0041 §7).
+pub fn write_project_chosen_locked(
+    dir: &Path,
+    lock: &ProjectLock,
+    edits: &[(&str, &str, Option<f64>, &[&str])],
+    keep: &dyn Fn(&str, usize) -> bool,
+) -> Result<(String, String, Vec<usize>), ProjectWriteError> {
+    write_project_locked(dir, lock, edits, keep, &mut || {})
+}
+
+fn write_project_locked(
+    dir: &Path,
+    _lock: &ProjectLock,
+    edits: &[(&str, &str, Option<f64>, &[&str])],
+    keep: &dyn Fn(&str, usize) -> bool,
+    between: &mut dyn FnMut(),
+) -> Result<(String, String, Vec<usize>), ProjectWriteError> {
+    use signal_project::transaction::replace_unchanged;
+    let path = dir.join(signal_project::PROJECT_FILE);
+    let what = what_of(edits);
     let failed = |error: String| {
         ProjectWriteError::Failed(format!("{what} not written to {}: {error}", path.display()))
     };
-    let _lock = ProjectLock::acquire(dir).map_err(|e| failed(e.to_string()))?;
     let before = fs::read_to_string(&path).map_err(|e| failed(e.to_string()))?;
     let kept: Vec<usize> = (0..edits.len()).filter(|&i| keep(&before, i)).collect();
     if kept.is_empty() {
