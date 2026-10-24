@@ -425,7 +425,8 @@ fn transport() {
 
 /// The tempo of `lib.transport` (a std.playhead, ADR 0033): studio-transport's
 /// `/transport.bpm`, set live as `set_parameter` sets a control (the file
-/// unchanged until a commit), and ramped.
+/// unchanged until a commit), and ramped; `read_stream` shows the live value
+/// and the control next to the plan's.
 #[test]
 fn transport_tempo_on_a_playhead() {
     let mut mcp = Mcp::started(&fixture("studio-transport", "tool-tempo-playhead"), &[]);
@@ -433,9 +434,18 @@ fn transport_tempo_on_a_playhead() {
     let tempo = mcp.ok("transport", json!({"action": "tempo", "bpm": 140}));
     assert_eq!(tempo["addresses"], json!(["/transport.bpm"]), "{tempo}");
     assert_eq!(tempo["skipped"], json!([]), "{tempo}");
+    assert_eq!(tempo["unreached"], json!([]), "{tempo}");
+    assert_eq!(tempo["late"], json!([]), "{tempo}");
     assert_eq!(tempo["acks"][0]["outcome"], "scheduled", "{tempo}");
+    assert_eq!(tempo["acks"][0]["requested"], tempo["at"], "{tempo}");
     assert_eq!(control_base(&mut mcp, "/transport.bpm"), 140.0);
     assert_eq!(mcp.file("project.toml"), file, "a live set, not committed");
+    let streams = mcp.ok("read_stream", json!({}));
+    assert_eq!(
+        streams["transport"],
+        json!([{"instance": "/transport/playhead", "control": "/transport.bpm", "bpm": 140.0, "planBpm": 120.0}]),
+        "{streams}"
+    );
     let ramp = mcp.ok("transport", json!({"action": "tempo", "bpm": 90, "ms": 5}));
     assert_eq!(ramp["acks"][0]["outcome"], "scheduled", "{ramp}");
     assert_eq!(control_base(&mut mcp, "/transport.bpm"), 90.0);
@@ -445,17 +455,13 @@ fn transport_tempo_on_a_playhead() {
         "{}",
         mcp.file("project.toml")
     );
-    let streams = mcp.ok("read_stream", json!({}));
-    assert_eq!(
-        streams["transport"][0]["instance"], "/transport/playhead",
-        "{streams}"
-    );
-    assert!(streams["transport"][0]["bpm"].is_number(), "{streams}");
     assert!(mcp.finish().success());
 }
 
 /// Several transports: every top-level control reaching an unwired bpm is
-/// set together; one a connection drives is skipped; only wired ones: refused.
+/// set on one frame (all acks the same requested and effective frame, none
+/// late); one a connection drives is skipped, one no top-level control
+/// reaches is listed as unreached; with nothing left: refused, naming both.
 #[test]
 fn transport_tempo_on_several_playheads() {
     let text = |c_bpm: &str| {
@@ -466,6 +472,7 @@ fn transport_tempo_on_several_playheads() {
              a = {{ module = \"lib.transport\" }}\n\
              b = {{ module = \"std.playhead\", bpm = 100 }}\n\
              c = {{ module = \"lib.transport\" }}\n\
+             h = {{ module = \"hidden\" }}\n\
              k = {{ module = \"std.const\", value = 128 }}\n\
              osc = {{ module = \"std.sine_osc\", freq = 440 }}\n\
              out = {{ module = \"std.audio_out\", gain = 0.5 }}\n\
@@ -475,8 +482,19 @@ fn transport_tempo_on_several_playheads() {
              {{ from = \"osc.out\", to = \"out.r\" }},\n]\n"
         )
     };
+    // A playhead inside a composite that exports no bpm.
+    let hidden = "schema_version = 1\n\
+                  [composite]\nname = \"hidden\"\n\
+                  [instances]\nplayhead = { module = \"std.playhead\" }\n\
+                  [exports]\noutputs = { position = \"playhead.position\" }\n";
+    let with_hidden = |text: &str, name: &str| {
+        let dir = mcp_common::project(text, name);
+        fs::create_dir_all(dir.join("composites")).unwrap();
+        fs::write(dir.join("composites/hidden.toml"), hidden).unwrap();
+        dir
+    };
     let mut mcp = Mcp::started(
-        &mcp_common::project(
+        &with_hidden(
             &text("{ from = \"k.out\", to = \"c.bpm\" },\n"),
             "tool-tempo-several",
         ),
@@ -485,17 +503,72 @@ fn transport_tempo_on_several_playheads() {
     let tempo = mcp.ok("transport", json!({"action": "tempo", "bpm": 132}));
     assert_eq!(tempo["addresses"], json!(["/a.bpm", "/b.bpm"]), "{tempo}");
     assert_eq!(tempo["skipped"], json!(["/c.bpm"]), "{tempo}");
+    assert_eq!(tempo["unreached"], json!(["/h/playhead.bpm"]), "{tempo}");
+    assert_eq!(tempo["late"], json!([]), "{tempo}");
+    let acks = tempo["acks"].as_array().unwrap();
+    assert_eq!(acks.len(), 2, "{tempo}");
+    for ack in acks {
+        assert_eq!(ack["requested"], tempo["at"], "one stamp: {tempo}");
+        assert_eq!(ack["frame"], tempo["at"], "applied on that frame: {tempo}");
+        assert_eq!(ack["late"], false, "{tempo}");
+    }
     assert_eq!(control_base(&mut mcp, "/a.bpm"), 132.0);
     assert_eq!(control_base(&mut mcp, "/b.bpm"), 132.0);
+    // A ramp: the same, its start on one frame.
+    let ramp = mcp.ok("transport", json!({"action": "tempo", "bpm": 90, "ms": 50}));
+    for ack in ramp["acks"].as_array().unwrap() {
+        assert_eq!(ack["requested"], ramp["at"], "{ramp}");
+        assert_eq!(ack["late"], false, "{ramp}");
+    }
+    assert_eq!(ramp["acks"][0]["frame"], ramp["acks"][1]["frame"], "{ramp}");
     assert!(mcp.finish().success());
 
     let wired = "{ from = \"k.out\", to = \"a.bpm\" },\n\
                  { from = \"k.out\", to = \"b.bpm\" },\n\
                  { from = \"k.out\", to = \"c.bpm\" },\n";
-    let mut mcp = Mcp::started(&mcp_common::project(&text(wired), "tool-tempo-wired"), &[]);
+    let mut mcp = Mcp::started(&with_hidden(&text(wired), "tool-tempo-wired"), &[]);
     let refused = mcp.refused("transport", json!({"action": "tempo", "bpm": 132}));
-    assert!(refused.contains("a connection drives"), "{refused}");
-    assert!(refused.contains("/a.bpm, /b.bpm, /c.bpm"), "{refused}");
+    assert!(
+        refused.contains("a connection drives /a.bpm, /b.bpm, /c.bpm"),
+        "{refused}"
+    );
+    assert!(
+        refused.contains("no top-level control reaches /h/playhead.bpm"),
+        "{refused}"
+    );
+    assert!(mcp.finish().success());
+}
+
+/// A project with includes (ADR 0035: projects/two-studios, with the studio
+/// beside it as `../studio`): the gain guard loads it from its folder, so a
+/// live edit and `check` work there. Neither include exports its `bpm`
+/// (they declare no `[exports]`), so no top-level control reaches either
+/// transport: the tempo is refused, naming both.
+#[test]
+fn live_edits_and_tempo_in_a_project_with_includes() {
+    let base = mcp_common::scratch("tool-includes");
+    let dir = base.join("two-studios");
+    mcp_common::copy_dir(&mcp_common::root().join("projects/two-studios"), &dir);
+    mcp_common::copy_dir(
+        &mcp_common::root().join("projects/studio"),
+        &base.join("studio"),
+    );
+    let mut mcp = Mcp::started(&dir, &[]);
+    let set = mcp.ok(
+        "set_parameter",
+        json!({"address": "/mix_l.gain_a", "value": 0.4}),
+    );
+    assert_eq!(set["outcome"], "scheduled", "{set}");
+    assert_eq!(control_base(&mut mcp, "/mix_l.gain_a"), 0.4);
+    let refused = mcp.refused("transport", json!({"action": "tempo", "bpm": 126}));
+    assert!(
+        refused.contains(
+            "no tempo to set: no top-level control reaches /studio/transport.bpm, /studio_transport/transport/playhead.bpm"
+        ),
+        "{refused}"
+    );
+    let checked = mcp.ok("check", json!({}));
+    assert_eq!(checked["ok"], true, "{checked}");
     assert!(mcp.finish().success());
 }
 

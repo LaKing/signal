@@ -290,7 +290,7 @@ The device gate is the run of the checks on the Mac itself (outside the sandbox,
 
 ```sh
 SIGNAL_REQUIRE_GPU=1 cargo test -p signal-gpu -p signal-lab --features signal-lab/lab --locked --offline -- --nocapture
-SIGNAL_REQUIRE_GPU=1 cargo test -p signal-cli --features lab --locked --offline --test lab
+SIGNAL_REQUIRE_GPU=1 cargo test -p signal-cli --features lab --locked --offline -- --nocapture
 ```
 
 Every `GPU:` line names the adapter (`GPU: <name> (Metal)`), and no line says `skipped`.

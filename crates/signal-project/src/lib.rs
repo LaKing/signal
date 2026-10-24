@@ -294,6 +294,27 @@ impl Project {
         Project::from_sources_with(files, Library::builtin())
     }
 
+    /// [`from_sources`](Project::from_sources) for files of the project
+    /// folder `dir` (as they are, or as an edit would leave them): the
+    /// projects they include (ADR 0035) are found from `dir`, as
+    /// [`load`](Project::load) finds them.
+    pub fn from_sources_in(files: Vec<SourceFile>, dir: &Path) -> Result<Project, Vec<Diagnostic>> {
+        let canonical = fs::canonicalize(dir).map_err(|error| {
+            vec![Diagnostic {
+                severity: Severity::Error,
+                file: PROJECT_FILE.to_owned(),
+                line: 1,
+                column: 1,
+                message: format!(
+                    "the project folder {} cannot be read: {error}",
+                    dir.display()
+                ),
+            }]
+        })?;
+        let chain = [canonical.clone()];
+        Project::assemble(files, Library::builtin(), Some(&canonical), &chain)
+    }
+
     /// [`from_sources`](Project::from_sources) with `library` as the library.
     /// Files in memory have no folder, so a project that includes another
     /// (ADR 0035) is refused here: [`load`](Project::load) it from its folder.

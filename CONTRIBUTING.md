@@ -49,7 +49,7 @@ CI also runs the scheduler's loom model tests (`RUSTFLAGS="--cfg loom" cargo tes
 
 ```sh
 SIGNAL_REQUIRE_GPU=1 cargo test -p signal-gpu -p signal-lab --features signal-lab/lab --locked --offline -- --nocapture
-SIGNAL_REQUIRE_GPU=1 cargo test -p signal-cli --features lab --locked --offline --test lab
+SIGNAL_REQUIRE_GPU=1 cargo test -p signal-cli --features lab --locked --offline -- --nocapture
 ```
 
 CI's runners have no GPU, so CI never sets `SIGNAL_REQUIRE_GPU`.
