@@ -20,6 +20,9 @@ pub enum WriteError {
     NotFinite(String),
     /// The project with the value written does not load.
     Invalid(Vec<Diagnostic>),
+    /// The project includes others (ADR 0035): the running project does not
+    /// take the write, and the watch's reload of the folder applies it.
+    Includes,
 }
 
 impl fmt::Display for WriteError {
@@ -44,6 +47,10 @@ impl fmt::Display for WriteError {
                 }
                 Ok(())
             }
+            WriteError::Includes => write!(
+                f,
+                "the project includes others, so the reload of its folder applies the write"
+            ),
         }
     }
 }
@@ -103,13 +110,15 @@ impl Project {
         for file in files.iter_mut().filter(|f| f.path == PROJECT_FILE) {
             file.text = write_parameter(&file.text, instance, parameter, value, order)?;
         }
-        // The projects it includes are found from its folder, as it was
-        // loaded (ADR 0035).
-        match &self.content.dir {
-            Some(dir) => Project::from_sources_in(files, dir),
-            None => Project::from_sources(files),
+        // A project that includes others is not rebuilt here: read from its
+        // folder again, an included project changed on disk but not yet
+        // reloaded would be taken as running, and the reload that follows
+        // would find no difference and never apply it. The watch's reload
+        // applies the write instead.
+        if !self.content.projects.is_empty() || !self.content.files.is_empty() {
+            return Err(WriteError::Includes);
         }
-        .map_err(WriteError::Invalid)
+        Project::from_sources(files).map_err(WriteError::Invalid)
     }
 }
 

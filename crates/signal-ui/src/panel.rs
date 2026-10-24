@@ -724,6 +724,79 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Copies the folder `from` to `to`, recursively.
+    fn copy_dir(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+
+    /// Review of ADR 0040: a commit in a project that includes others
+    /// (two-studios, with the studio beside it) is not taken by the running
+    /// project. An included project's file changed on disk and not reloaded
+    /// yet stays the reload's to apply: the running project is not rebuilt
+    /// from the folder, so the diff to the folder still holds the change.
+    #[test]
+    fn a_commit_with_includes_leaves_their_changes_to_the_reload() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let base =
+            std::env::temp_dir().join(format!("signal-panel-includes-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let dir = base.join("two-studios");
+        copy_dir(&root.join("projects/two-studios"), &dir);
+        copy_dir(&root.join("projects/studio"), &base.join("studio"));
+        let mut registry = Registry::new();
+        signal_std::register(&mut registry).unwrap();
+        let mut current = Project::load(&dir).unwrap();
+        let before = current.files.clone();
+        let target = Panel::new(&current, &registry)
+            .target("mix_l", "gain_a")
+            .unwrap();
+        // The included studio's bus, edited on disk and not reloaded.
+        let studio = base.join("studio/project.toml");
+        let text = fs::read_to_string(&studio).unwrap();
+        let edited = text.replace(
+            "bus = { module = \"std.mix\", gain_a = 0.45,",
+            "bus = { module = \"std.mix\", gain_a = 0.4,",
+        );
+        assert_ne!(edited, text);
+        fs::write(&studio, edited).unwrap();
+        let order: Vec<&str> = target.order.iter().map(String::as_str).collect();
+        write_project(&dir, "mix_l", "gain_a", Some(0.3), &order).unwrap();
+        let written = after_write(
+            Some(&mut current),
+            &dir,
+            &target,
+            "mix_l",
+            "gain_a",
+            Some(0.3),
+            true,
+            &registry,
+        );
+        assert!(matches!(written, Written::NotTaken(_)), "not taken");
+        assert_eq!(current.files, before, "the running project is unchanged");
+        let reloaded = Project::load(&dir).unwrap();
+        match signal_project::diff(&current, &reloaded, &registry).unwrap() {
+            signal_project::ProjectEdit::Parameters(changes) => {
+                let ports: Vec<String> = changes.iter().map(|c| c.port.to_string()).collect();
+                assert!(
+                    ports.contains(&"/mix_l.gain_a".to_owned())
+                        && ports.contains(&"/studio/bus.gain_a".to_owned()),
+                    "the reload applies the commit and the include's change: {ports:?}"
+                );
+            }
+            edit => panic!("{edit:?}"),
+        }
+        fs::remove_dir_all(&base).unwrap();
+    }
+
     /// M2.8-9 AC2 (`docs/ui-protocol.md` "Unsaved"): `describe`'s `base` is
     /// a drag's `applied`, the last value the Controller took for every
     /// port. A runner refusing that value afterwards leaves it (the value is

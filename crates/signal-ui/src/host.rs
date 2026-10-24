@@ -60,7 +60,7 @@ use crate::bindings::{MAIN_PANEL, Targets, check, panel_content};
 use crate::document::{Document, Ticket, project_name};
 use crate::frames::{self, frame};
 use crate::keys::{self, Keys};
-use crate::panel::{Panel, Target, Written, after_write, ramp_frames, write_file, write_project};
+use crate::panel::{Panel, Target, Written, after_write, ramp_frames, write_project};
 use crate::panel_write::{check_content, first_file, replace, sha256_hex};
 use crate::player::{
     Backend, Input, Interface, Output, Selection, live_rate, open_input, open_output, output_state,
@@ -3741,39 +3741,63 @@ impl Host {
             ));
         }
         if patched.positions_changed {
+            // Each compared once more just before it changes (ADR 0040): a
+            // positions file changed meanwhile is `Ok(false)`.
             let written = match &patched.positions {
                 Some(text) => positions_path
                     .parent()
                     .map_or(Ok(()), fs::create_dir_all)
-                    // Compared once more just before the rename (ADR 0040).
                     .and_then(|()| {
                         transaction::replace_unchanged(
                             &positions_path,
                             positions.as_deref().map(str::as_bytes),
                             text.as_bytes(),
                         )
-                    })
-                    .and_then(|renamed| {
-                        if renamed {
-                            Ok(())
-                        } else {
-                            Err(std::io::Error::other("another writer changed it meanwhile"))
-                        }
                     }),
-                None => match fs::remove_file(&positions_path) {
-                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
-                    _ => Ok(()),
-                },
+                None => transaction::current(&positions_path).and_then(|now| {
+                    if now.as_deref() != positions.as_deref().map(str::as_bytes) {
+                        return Ok(false);
+                    }
+                    match fs::remove_file(&positions_path) {
+                        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+                        _ => Ok(true),
+                    }
+                }),
             };
-            if let Err(error) = written {
-                let message = match write_file(&path, &before) {
-                    Ok(()) => format!(
-                        "{SCHEMATIC_FILE} was not written ({error}); {file} was put back: nothing changed"
+            let why = match written {
+                Ok(true) => None,
+                Ok(false) => Some((true, "another writer changed it meanwhile".to_owned())),
+                Err(error) => Some((false, error.to_string())),
+            };
+            if let Some((mut changed, why)) = why {
+                // The level's file put back only while it holds the patch.
+                let put_back = transaction::replace_unchanged(
+                    &path,
+                    Some(patched.text.as_bytes()),
+                    before.as_bytes(),
+                );
+                let message = match put_back {
+                    Ok(true) => format!(
+                        "{SCHEMATIC_FILE} was not written ({why}); {file} was put back: nothing changed"
                     ),
+                    Ok(false) => {
+                        changed = true;
+                        format!(
+                            "{SCHEMATIC_FILE} was not written ({why}) and {file} could not be put back (another writer changed it meanwhile; its edit is kept): the positions do not hold the patch"
+                        )
+                    }
                     Err(again) => format!(
-                        "{SCHEMATIC_FILE} was not written ({error}) and {file} could not be put back ({again}): {file} holds the patch, the positions do not"
+                        "{SCHEMATIC_FILE} was not written ({why}) and {file} could not be put back ({again}): {file} holds the patch, the positions do not"
                     ),
                 };
+                if changed {
+                    let now = fs::read(&path).ok().map(|bytes| sha256_hex(&bytes));
+                    return Err(fail_with(
+                        "conflict",
+                        message,
+                        json!({"level": level, "file": file, "base": now}),
+                    ));
+                }
                 return Err(fail("write-failed", message));
             }
             self.seen(Path::new(SCHEMATIC_FILE));
