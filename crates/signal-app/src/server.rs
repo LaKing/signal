@@ -319,11 +319,20 @@ fn run(
             Ok(Request::Project(answer)) => {
                 let _ = answer.send(host.project_status());
             }
+            // Packed and written on a thread of their own: answered by a
+            // later step, the control thread going on meanwhile.
             Ok(Request::Save(answer)) => {
-                let _ = answer.send(host.save_document());
+                host.save_document_then(Box::new(move |result| {
+                    let _ = answer.send(result);
+                }));
             }
             Ok(Request::SaveAs(file, answer)) => {
-                let _ = answer.send(host.save_as(&file));
+                host.save_as_then(
+                    &file,
+                    Box::new(move |result| {
+                        let _ = answer.send(result);
+                    }),
+                );
             }
             Ok(Request::Open(path, edits, answer)) => {
                 let _ = answer.send(host.open_project(&path, edits));
@@ -349,7 +358,8 @@ fn run(
             keys = host.keys_version();
             on_keys(host.keys());
         }
-        if host.powered() {
+        // A save running is answered by the step after it is written.
+        if host.powered() || host.saving() {
             thread::sleep(Duration::from_millis(1));
         } else {
             // Switched off: nothing runs or streams, so the thread sleeps

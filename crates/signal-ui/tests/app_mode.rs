@@ -612,6 +612,15 @@ fn commit(rig: &mut Rig, ws: &mut common::Ws, id: u64, value: f64) {
     );
 }
 
+/// Steps until an `app` push says the project is edited.
+fn wait_edited(rig: &mut Rig, ws: &mut common::Ws) {
+    rig.wait(ws, "edited", |got| {
+        got.of("app")
+            .filter(|a| a["project"]["edited"] == true)
+            .cloned()
+    });
+}
+
 /// M2.8-12 AC13, AC15-AC18: a .signal file opens into a working folder
 /// under the Open folder, the Setup records the file, a commit makes it
 /// edited and Save writes it back; opening another project while edited is
@@ -904,6 +913,123 @@ fn steps_never_wait_for_a_document_comparison(transport: Transport) {
     assert!(rig.host().project_shown().unwrap().edited);
     rig.request(&mut ws, 13, json!({"type": "project.save"}), "saved");
     assert!(!rig.host().project_status().unwrap().edited);
+    rig.finish();
+}
+
+/// Audit (save-blocks-control): `project.save` packs and writes on a thread
+/// of its own; while it is held (as a large project's would take long),
+/// steps go on: other requests are answered and a commit is taken, and
+/// `saved` comes when it is written. A Save while one runs is answered after
+/// it, with the commit made meanwhile written.
+fn steps_never_wait_for_a_save(transport: Transport) {
+    let mut rig = app_rig("signal-save-held", transport, None);
+    let file = packed(&rig, "tone");
+    let (mut ws, _) = rig.client();
+    rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    commit(&mut rig, &mut ws, 2, 0.25);
+    wait_edited(&mut rig, &mut ws);
+    rig.host().document().unwrap().hold_saves(true);
+    common::send(&mut ws, json!({"type": "project.save", "id": 3}));
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while rig.host().document().unwrap().saves_held() == 0 {
+        assert!(std::time::Instant::now() < until, "no save started");
+        rig.pump();
+    }
+    for id in 4..14 {
+        let app = rig.request(&mut ws, id, json!({"type": "app.get"}), "app");
+        assert_eq!(app["project"]["edited"], true, "not written yet");
+    }
+    commit(&mut rig, &mut ws, 14, 0.75);
+    common::send(&mut ws, json!({"type": "project.save", "id": 15}));
+    rig.request(&mut ws, 16, json!({"type": "ping"}), "pong");
+    let document = rig.host().document().unwrap();
+    assert_eq!(document.saves_held(), 1, "no step waited for the save");
+    assert!(document.saving());
+    assert!(gain_of(&file).contains("gain = 0.5"), "not written yet");
+    document.hold_saves(false);
+    let first = rig.reply(&mut ws, 3, "saved");
+    assert_eq!(first["file"], file.display().to_string());
+    rig.reply(&mut ws, 15, "saved");
+    assert!(gain_of(&file).contains("gain = 0.75"), "the later Save's");
+    assert!(!rig.host().project_status().unwrap().edited);
+    rig.finish();
+}
+
+/// A failed `project.save` (the file's folder made read-only while it
+/// runs) is answered `not-saved` when it fails, and is the window's message.
+fn a_failed_save_is_answered_when_it_fails(transport: Transport) {
+    let mut rig = app_rig("signal-save-fails", transport, None);
+    let file = packed(&rig, "tone");
+    let (mut ws, _) = rig.client();
+    rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    commit(&mut rig, &mut ws, 2, 0.25);
+    wait_edited(&mut rig, &mut ws);
+    let Some(read_only) = common::ReadOnly::new(file.parent().unwrap()) else {
+        // Run as root: a read-only folder is still writable.
+        return rig.finish();
+    };
+    common::send(&mut ws, json!({"type": "project.save", "id": 3}));
+    let failed = rig.reply(&mut ws, 3, "error");
+    drop(read_only);
+    assert_eq!(failed["code"], "not-saved");
+    let message = failed["message"].as_str().unwrap();
+    assert!(message.contains("was not saved"), "{message}");
+    let app = rig.request(&mut ws, 4, json!({"type": "app.get"}), "app");
+    assert_eq!(app["message"], message);
+    assert_eq!(app["project"]["edited"], true);
+    rig.finish();
+}
+
+/// Save, then close at once (the window's Save, then Quit): close waits for
+/// the save, which is answered, and removes the folder it saved.
+fn close_waits_for_a_save(transport: Transport) {
+    let mut rig = app_rig("signal-save-close", transport, None);
+    let file = packed(&rig, "tone");
+    let (mut ws, _) = rig.client();
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    let working = PathBuf::from(opened["dir"].as_str().unwrap());
+    commit(&mut rig, &mut ws, 2, 0.25);
+    rig.host().document().unwrap().hold_saves(true);
+    let (answer, answered) = std::sync::mpsc::channel();
+    rig.host().save_document_then(Box::new(move |result| {
+        let _ = answer.send(result);
+    }));
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while rig.host().document().unwrap().saves_held() == 0 {
+        assert!(std::time::Instant::now() < until, "no save started");
+        rig.pump();
+    }
+    rig.pump();
+    assert!(answered.try_recv().is_err(), "not answered while held");
+    let release = rig.host().document().unwrap().save_releaser();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        release();
+    });
+    let messages = rig.host().close(None, false);
+    releaser.join().unwrap();
+    assert_eq!(answered.try_recv(), Ok(Ok(())), "answered by the close");
+    assert!(
+        !messages.iter().any(|m| m.contains("are kept")),
+        "{messages:?}"
+    );
+    assert!(!working.exists(), "saved: removed");
+    assert!(gain_of(&file).contains("gain = 0.25"));
     rig.finish();
 }
 
@@ -1750,6 +1876,9 @@ both!(
     a_stopped_patch_writes_and_pushes_graph,
     a_patch_marks_a_signal_project_edited,
     steps_never_wait_for_a_document_comparison,
+    steps_never_wait_for_a_save,
+    a_failed_save_is_answered_when_it_fails,
+    close_waits_for_a_save,
     opening_another_project_can_save_first,
     reopening_the_same_file_with_save_keeps_the_edit,
     a_refused_archive_opens_nothing,
