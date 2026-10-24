@@ -45,6 +45,7 @@ mod schema;
 pub mod schematic;
 pub mod session;
 mod slot;
+pub mod snapshot;
 mod structure;
 pub mod transaction;
 pub mod vendor;
@@ -75,7 +76,9 @@ pub use slot::{
     Interface, InterfacePort, LibraryInterface, Match, Role, SlotResolution, library_interfaces,
 };
 pub use structure::{library_modules, library_parameters};
-pub use write::{WriteError, write_parameter};
+pub use write::{
+    WriteError, read_parameter, write_parameter, write_parameters, write_snapshot_exclude,
+};
 
 use locate::{
     ConnectionSpans, DefSpans, ExportKind, ExportSpans, InstanceSpans, Location, Locator, Root,
@@ -413,6 +416,7 @@ impl Project {
         for (_, spans) in &composites {
             builder.check_pins(spans, &names);
             builder.check_reserved(spans);
+            builder.check_snapshot_files(spans);
             builder.check_patterns(spans, &names, &pattern_names);
             builder.check_shadowing(spans, &names);
         }
@@ -538,6 +542,7 @@ impl Project {
         let mut definitions = self.definitions();
         definitions.extend(self.tapped(registry, &mut errors));
         self.check_set(&definitions, registry, &mut errors);
+        self.check_snapshot_exclude(&definitions, registry, &mut errors);
         if !errors.is_empty() {
             return Err(errors);
         }
@@ -809,6 +814,64 @@ impl Project {
             .collect()
     }
 
+    /// ADR 0041: the parameters of the top-level instance `instance` that
+    /// its `snapshot_exclude` leaves out of snapshots (empty: all go in).
+    pub fn snapshot_excluded(&self, instance: &str) -> BTreeSet<String> {
+        self.spans
+            .root
+            .instances
+            .get(instance)
+            .map(|i| i.snapshot_exclude.iter().map(|(n, _)| n.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// ADR 0041: each name in a top-level instance's `snapshot_exclude` is
+    /// one of its parameters (a composite's exported one), as a parameter
+    /// key is.
+    fn check_snapshot_exclude(
+        &self,
+        defs: &[CompositeDef],
+        registry: &Registry,
+        errors: &mut Vec<Diagnostic>,
+    ) {
+        for instance in &self.root.instances {
+            let Some(spans) = self.spans.root.instances.get(&instance.name) else {
+                continue;
+            };
+            if spans.snapshot_exclude.is_empty() {
+                continue;
+            }
+            // A module that does not resolve is reported where it is written.
+            let Ok(ports) = signal_graph::ports_of(&instance.module, defs, registry) else {
+                continue;
+            };
+            for (name, span) in &spans.snapshot_exclude {
+                if !ports.iter().any(|p| p.parameter && p.name == *name) {
+                    let location = locate::Location {
+                        file: self.spans.root.file,
+                        offset: span.start,
+                    };
+                    let diagnostic = self.diagnostic(
+                        Severity::Error,
+                        location,
+                        format!(
+                            "{}: `snapshot_exclude` names `{name}`, which is no parameter of {}",
+                            instance.name,
+                            // An include's or a slot's content is planned under a
+                            // qualified name (`<project id>/<name>`), no name to show.
+                            if instance.module.is_empty() || instance.module.contains('/') {
+                                "its content (the project or slot it holds)".to_owned()
+                            } else {
+                                format!("`{}`", instance.module)
+                            }
+                        ),
+                    );
+                    push_unique(errors, diagnostic);
+                }
+            }
+        }
+    }
+
     /// An error located at the declaration of the instance at `address`, or at
     /// the start of `project.toml` if there is none.
     pub fn instance_error(&self, address: &InstanceAddress, message: String) -> Diagnostic {
@@ -992,11 +1055,21 @@ impl Builder<'_> {
     }
 
     /// ADR 0035 §1, ADR 0037 §2: the instance keys `module`, `project`,
-    /// `seed`, `set`, `slot`, `load` and `map` are reserved, so no
+    /// `seed`, `set`, `slot`, `load`, `map` and `snapshot_exclude` (ADR 0041)
+    /// are reserved, so no
     /// composite or project may export a parameter of those names (`gpu`
     /// and `pattern` are checked with their own rules).
     fn check_reserved(&mut self, def: &DefSpans) {
-        const RESERVED: [&str; 7] = ["module", "project", "seed", "set", "slot", "load", "map"];
+        const RESERVED: [&str; 8] = [
+            "module",
+            "project",
+            "seed",
+            "set",
+            "slot",
+            "load",
+            "map",
+            "snapshot_exclude",
+        ];
         for export in &def.exports {
             if export.kind == ExportKind::Parameter && RESERVED.contains(&export.name.as_str()) {
                 self.error(
@@ -1005,6 +1078,23 @@ impl Builder<'_> {
                     format!(
                         "a composite or project cannot export a parameter named `{}`: the key is reserved in instance tables",
                         export.name
+                    ),
+                );
+            }
+        }
+    }
+
+    /// ADR 0041: `snapshot_exclude` says which controls of the project go
+    /// into its snapshots, so it belongs in `project.toml` only: in a
+    /// composite's file it would name parameters of every instance of it.
+    fn check_snapshot_files(&mut self, def: &DefSpans) {
+        for (name, instance) in &def.instances {
+            if let Some((_, span)) = instance.snapshot_exclude.first() {
+                self.error(
+                    def.file,
+                    span.start,
+                    format!(
+                        "{name}: `snapshot_exclude` belongs in project.toml (it says which of the project's controls go into its snapshots)"
                     ),
                 );
             }
@@ -1125,6 +1215,15 @@ impl Builder<'_> {
                         ),
                     );
                 }
+            }
+            if let Some((_, span)) = instance.snapshot_exclude.first() {
+                self.error(
+                    spans.file,
+                    span.start,
+                    format!(
+                        "{name}: a library composite takes no `snapshot_exclude`: it says which of a project's controls go into its snapshots, in project.toml"
+                    ),
+                );
             }
         }
     }
@@ -1346,6 +1445,23 @@ fn definition(
         let entry = entry.into_inner();
         let gpu = entry.gpu.map(|g| (g.get_ref().clone(), g.span()));
         let pattern = entry.pattern.map(|p| (p.get_ref().clone(), p.span()));
+        let mut snapshot_exclude: Vec<(String, Span)> = Vec::new();
+        for name in entry
+            .snapshot_exclude
+            .map(Spanned::into_inner)
+            .unwrap_or_default()
+        {
+            let span = name.span();
+            let name = name.into_inner();
+            if snapshot_exclude.iter().any(|(n, _)| *n == name) {
+                problems.push((
+                    span.start,
+                    format!("{instance}: `{name}` is in `snapshot_exclude` twice"),
+                ));
+            } else {
+                snapshot_exclude.push((name, span));
+            }
+        }
         let mut parameters = BTreeMap::new();
         let mut parameter_spans = BTreeMap::new();
         for (key, value) in entry.parameters {
@@ -1456,6 +1572,7 @@ fn definition(
                 parameters: parameter_spans,
                 gpu,
                 pattern,
+                snapshot_exclude,
             },
         );
         if planned {

@@ -19,12 +19,13 @@ use std::time::{Duration, Instant};
 use mcp_common::{Mcp, copy_of, fixture, stale};
 use serde_json::{Value, json};
 
-const TOOLS: [&str; 28] = [
+const TOOLS: [&str; 34] = [
     "project_info",
     "graph",
     "modules",
     "describe_instance",
     "read_file",
+    "snapshot_list",
     "stats",
     "set_parameter",
     "ramp_parameter",
@@ -32,6 +33,11 @@ const TOOLS: [&str; 28] = [
     "transport",
     "commit",
     "revert",
+    "snapshot_save",
+    "snapshot_restore",
+    "snapshot_undo",
+    "snapshot_exclude",
+    "snapshot_delete",
     "patch",
     "schematic_move",
     "vendor",
@@ -209,6 +215,7 @@ fn read_only_exposes_only_inspect_observe_and_render() {
             "modules",
             "describe_instance",
             "read_file",
+            "snapshot_list",
             "stats",
             "meter",
             "scope",
@@ -232,6 +239,11 @@ fn read_only_exposes_only_inspect_observe_and_render() {
         ),
         ("check", json!({})),
         ("session_start", json!({})),
+        ("snapshot_save", json!({"name": "a"})),
+        ("snapshot_restore", json!({"name": "a"})),
+        ("snapshot_delete", json!({"name": "a"})),
+        ("snapshot_undo", json!({})),
+        ("snapshot_exclude", json!({"address": "/osc.freq"})),
     ] {
         let refused = mcp.rpc("tools/call", json!({"name": name, "arguments": arguments}));
         assert_eq!(refused["error"]["code"], -32602, "{name}: {refused}");
@@ -633,6 +645,77 @@ fn commit() {
     );
     mcp.ok("commit", json!({"address": "/osc.freq", "value": 220}));
     assert!(mcp.file("project.toml").contains("freq = 220"));
+    assert!(mcp.finish().success());
+}
+
+/// ADR 0041: a snapshot saved, the project changed, the snapshot restored
+/// into project.toml (and live), overwritten only when asked, deleted.
+#[test]
+fn snapshots() {
+    let mut mcp = Mcp::started(&fixture("sine", "tool-snapshots"), &[]);
+    assert_eq!(mcp.ok("snapshot_list", json!({}))["snapshots"], json!([]));
+    let saved = mcp.ok("snapshot_save", json!({"name": " Első rész "}));
+    assert_eq!(saved["name"], "Első rész");
+    assert_eq!(saved["replaced"], false);
+    assert_eq!(saved["count"], 2, "{saved}");
+    let list = mcp.ok("snapshot_list", json!({}));
+    assert_eq!(list["snapshots"][0]["values"]["/osc.freq"], 440.0, "{list}");
+    assert_eq!(list["snapshots"][0]["values"]["/out.gain"], 0.5, "{list}");
+    assert!(
+        mcp.file("snapshots.toml")
+            .contains("[snapshots.\"Első rész\"]")
+    );
+
+    mcp.ok("commit", json!({"address": "/osc.freq", "value": 330}));
+    assert!(
+        mcp.refused("snapshot_save", json!({"name": "Első rész"}))
+            .contains("exists")
+    );
+    let restored = mcp.ok("snapshot_restore", json!({"name": "Első rész"}));
+    assert_eq!(restored["written"], json!(["/osc.freq"]), "{restored}");
+    assert_eq!(restored["skipped"], json!([]));
+    assert!(mcp.file("project.toml").contains("freq = 440"));
+    assert_eq!(control_base(&mut mcp, "/osc.freq"), 440.0);
+
+    // The undo snapshot: what the restore replaced comes back, then again.
+    let list = mcp.ok("snapshot_list", json!({}));
+    assert_eq!(list["undo"], true, "{list}");
+    mcp.ok("snapshot_undo", json!({}));
+    assert_eq!(control_base(&mut mcp, "/osc.freq"), 330.0);
+    mcp.ok("snapshot_undo", json!({}));
+    assert_eq!(control_base(&mut mcp, "/osc.freq"), 440.0, "redone");
+    // Left out of snapshots: a restore leaves it alone.
+    let excluded = mcp.ok(
+        "snapshot_exclude",
+        json!({"address": "/osc.freq", "exclude": true}),
+    );
+    assert_eq!(excluded["inSnapshots"], false);
+    assert!(
+        mcp.file("project.toml")
+            .contains("snapshot_exclude = [\"freq\"]")
+    );
+    mcp.ok("commit", json!({"address": "/osc.freq", "value": 300}));
+    let kept = mcp.ok("snapshot_restore", json!({"name": "Első rész"}));
+    assert_eq!(kept["skipped"][0]["reason"], "excluded", "{kept}");
+    assert_eq!(control_base(&mut mcp, "/osc.freq"), 300.0);
+    mcp.ok(
+        "snapshot_exclude",
+        json!({"address": "/osc.freq", "exclude": false}),
+    );
+
+    mcp.ok("commit", json!({"address": "/osc.freq", "value": 220}));
+    let replaced = mcp.ok(
+        "snapshot_save",
+        json!({"name": "Első rész", "overwrite": true}),
+    );
+    assert_eq!(replaced["replaced"], true);
+    assert!(mcp.file("snapshots.toml").contains("\"/osc.freq\" = 220"));
+    assert!(
+        mcp.refused("snapshot_restore", json!({"name": "nincs"}))
+            .contains("unknown-snapshot")
+    );
+    mcp.ok("snapshot_delete", json!({"name": "Első rész"}));
+    assert_eq!(mcp.ok("snapshot_list", json!({}))["snapshots"], json!([]));
     assert!(mcp.finish().success());
 }
 

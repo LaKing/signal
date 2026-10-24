@@ -602,3 +602,160 @@ fn vendor_copies_a_library_composite_into_a_project() {
         "{error}"
     );
 }
+
+/// ADR 0041: `signal snapshot` saves the files' values under a name,
+/// lists it, restores it into project.toml after a change, refuses a name
+/// in use without --overwrite, and deletes it.
+#[test]
+fn snapshot_saves_restores_and_deletes() {
+    let dir = out_dir("snapshot-project");
+    fs::create_dir_all(&dir).unwrap();
+    let text = "schema_version = 1\n\n[project]\nname = \"s\"\nsample_rate = 8000\nseed = 3\n\n\
+         [instances]\nosc = { module = \"std.sine_osc\", freq = 440 }\n\
+         out = { module = \"std.audio_out\", gain = 0.25 }\n\n\
+         [wiring]\nconnections = [{ from = \"osc.out\", to = \"out.l\" }]\n";
+    fs::write(dir.join("project.toml"), text).unwrap();
+    let project = dir.display().to_string();
+    let output = signal(&["snapshot", "save", &project, "Első", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(stdout_json(&output)["replaced"], false);
+    let output = signal(&["snapshot", "save", &project, "Első"]);
+    assert_eq!(output.status.code(), Some(1), "a name in use");
+    fs::write(
+        dir.join("project.toml"),
+        text.replace("freq = 440", "freq = 220"),
+    )
+    .unwrap();
+    let output = signal(&["snapshot", "restore", &project, "Első", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(stdout_json(&output)["written"][0], "/osc.freq");
+    assert_eq!(fs::read_to_string(dir.join("project.toml")).unwrap(), text);
+    let output = signal(&["snapshot", "list", &project, "--json"]);
+    assert_eq!(stdout_json(&output)["snapshots"][0]["name"], "Első");
+    assert_eq!(
+        stdout_json(&output)["undo"],
+        true,
+        "the restore kept what it replaced"
+    );
+    // Undo puts back what the restore replaced; again, it redoes.
+    let output = signal(&["snapshot", "undo", &project]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(dir.join("project.toml")).unwrap(),
+        text.replace("freq = 440", "freq = 220")
+    );
+    signal(&["snapshot", "undo", &project]);
+    assert_eq!(fs::read_to_string(dir.join("project.toml")).unwrap(), text);
+    // A control left out of snapshots, and back in.
+    let output = signal(&["snapshot", "exclude", &project, "/osc.freq"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        fs::read_to_string(dir.join("project.toml"))
+            .unwrap()
+            .contains("snapshot_exclude = [\"freq\"]")
+    );
+    signal(&["snapshot", "exclude", &project, "/osc.freq", "--include"]);
+    assert_eq!(fs::read_to_string(dir.join("project.toml")).unwrap(), text);
+    let output = signal(&["snapshot", "delete", &project, "Első"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let output = signal(&["snapshot", "list", &project, "--json"]);
+    assert_eq!(stdout_json(&output)["snapshots"], serde_json::json!([]));
+
+    // A project that loads but does not plan has no controls: save and
+    // restore fail, and nothing is written (no empty snapshot replaces one).
+    let before = fs::read_to_string(dir.join("snapshots.toml")).unwrap();
+    signal(&["snapshot", "save", &project, "keep"]);
+    let kept = fs::read_to_string(dir.join("snapshots.toml")).unwrap();
+    fs::write(
+        dir.join("project.toml"),
+        text.replace(
+            "connections = [{ from = \"osc.out\", to = \"out.l\" }]",
+            "connections = [{ from = \"osc.out\", to = \"out.l\" }, { from = \"osc.out\", to = \"osc.freq\" }]",
+        ),
+    )
+    .unwrap();
+    for args in [
+        &["snapshot", "save", &project, "keep", "--overwrite"][..],
+        &["snapshot", "restore", &project, "keep"][..],
+    ] {
+        let output = signal(args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("does not plan"), "{error}");
+    }
+    assert_eq!(
+        fs::read_to_string(dir.join("snapshots.toml")).unwrap(),
+        kept
+    );
+    assert_ne!(before, kept);
+}
+
+/// ADR 0041 §7 (review 2 of 2026-10-24): `signal snapshot restore` whose
+/// project.toml write fails (an immutable file) keeps the undo snapshot
+/// from before; the undo snapshot holds only what the restore can change.
+#[test]
+fn snapshot_restore_that_fails_keeps_the_undo_snapshot() {
+    let dir = out_dir("snapshot-undo-kept");
+    fs::create_dir_all(&dir).unwrap();
+    let text = "schema_version = 1\n\n[project]\nname = \"s\"\nsample_rate = 8000\nseed = 3\n\n\
+         [instances]\nosc = { module = \"std.sine_osc\", freq = 440 }\n\
+         out = { module = \"std.audio_out\", gain = 0.25 }\n\n\
+         [wiring]\nconnections = [{ from = \"osc.out\", to = \"out.l\" }]\n";
+    fs::write(dir.join("project.toml"), text).unwrap();
+    fs::write(
+        dir.join("snapshots.toml"),
+        "schema_version = 1\n\n[snapshots.a]\n\"/osc.freq\" = 330\n\n[snapshots.b]\n\"/osc.freq\" = 550\n",
+    )
+    .unwrap();
+    let project = dir.display().to_string();
+    let output = signal(&["snapshot", "restore", &project, "a"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let before = fs::read_to_string(dir.join("snapshots.toml")).unwrap();
+    assert!(
+        before.contains("[undo]\n\"/osc.freq\" = 440\n\n"),
+        "only the restored control: {before}"
+    );
+    let path = dir.join("project.toml");
+    let locked = Command::new("chflags")
+        .arg("uchg")
+        .arg(&path)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !locked {
+        eprintln!("skipping: chflags uchg is not available");
+        return;
+    }
+    let output = signal(&["snapshot", "restore", &project, "b"]);
+    let _ = Command::new("chflags").arg("nouchg").arg(&path).status();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        error.contains("the undo snapshot from before was put back"),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("snapshots.toml")).unwrap(),
+        before,
+        "the undo snapshot from before"
+    );
+}
+
+/// Review 3 of 2026-10-24, 5: `signal snapshot exclude --include` removes a
+/// stale name (no parameter any more) as long as the project plans after.
+#[test]
+fn snapshot_exclude_removes_a_stale_name() {
+    let dir = out_dir("snapshot-stale-exclude");
+    fs::create_dir_all(&dir).unwrap();
+    let text = "schema_version = 1\n\n[project]\nname = \"s\"\nsample_rate = 8000\nseed = 3\n\n\
+         [instances]\nosc = { module = \"std.noise\", snapshot_exclude = [\"freq\"] }\n\
+         out = { module = \"std.audio_out\", gain = 0.25 }\n\n\
+         [wiring]\nconnections = [{ from = \"osc.out\", to = \"out.l\" }]\n";
+    fs::write(dir.join("project.toml"), text).unwrap();
+    let project = dir.display().to_string();
+    let output = signal(&["snapshot", "exclude", &project, "/osc.freq", "--include"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(dir.join("project.toml")).unwrap(),
+        text.replace(", snapshot_exclude = [\"freq\"]", "")
+    );
+}

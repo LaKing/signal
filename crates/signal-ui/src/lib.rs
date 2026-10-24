@@ -46,6 +46,7 @@ pub mod panel_write;
 pub mod player;
 mod server;
 pub mod setup;
+pub mod snapshot;
 
 use std::path::{Path, PathBuf};
 

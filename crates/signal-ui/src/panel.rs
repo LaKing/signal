@@ -18,6 +18,7 @@ use signal_core::{InstanceAddress, ParameterDescriptor, PortAddress, PortShape, 
 use signal_engine::ParameterValue;
 use signal_graph::{CompositeDef, ExecutionPlan};
 use signal_project::Project;
+use signal_project::transaction::ProjectLock;
 
 /// The ramp a dragged value moves along, against zipper noise.
 pub const RAMP_MS: f64 = 5.0;
@@ -53,6 +54,9 @@ pub struct ParameterView {
     pub modulated: bool,
     /// Whether the panel may write it (top-level parameters only).
     pub editable: bool,
+    /// ADR 0041 §8: whether it goes into snapshots (not named in its
+    /// instance's `snapshot_exclude`); false inside a composite.
+    pub in_snapshots: bool,
 }
 
 /// One top-level instance.
@@ -138,6 +142,7 @@ impl Panel {
             .collect();
         let mut instances = Vec::new();
         for def in &project.root.instances {
+            let excluded = project.snapshot_excluded(&def.name);
             let Ok(address) = format!("/{}", def.name).parse::<InstanceAddress>() else {
                 continue;
             };
@@ -188,6 +193,7 @@ impl Panel {
                         effective: None,
                         modulated: ports.iter().any(|p| modulated(plan, p)),
                         editable: true,
+                        in_snapshots: !excluded.contains(name),
                     },
                     ports,
                     defaults,
@@ -221,6 +227,19 @@ impl Panel {
             max: row.view.max,
             order: i.order.clone(),
         })
+    }
+
+    /// ADR 0041 §8: whether the control `parameter` of `instance` goes into
+    /// snapshots; `None` for no such control.
+    pub fn in_snapshots(&self, instance: &str, parameter: &str) -> Option<bool> {
+        let i = self.instances.iter().find(|i| i.name == instance)?;
+        let row = i.parameters.iter().find(|r| r.view.name == parameter)?;
+        Some(row.view.in_snapshots)
+    }
+
+    /// Whether the panel has the top-level instance `instance`.
+    pub fn has_instance(&self, instance: &str) -> bool {
+        self.instances.iter().any(|i| i.name == instance)
     }
 
     /// Records the value being dragged, and whether the Controller took it.
@@ -460,6 +479,7 @@ fn inner(plan: &ExecutionPlan, address: &InstanceAddress) -> Vec<Row> {
                     effective: None,
                     modulated: modulated(plan, &port),
                     editable: false,
+                    in_snapshots: false,
                 },
                 ports: vec![port],
                 defaults: vec![p.default],
@@ -506,20 +526,78 @@ pub fn after_write(
     sent: bool,
     registry: &Registry,
 ) -> Written {
+    after_write_all(
+        current,
+        dir,
+        &[WriteEdit {
+            target,
+            instance,
+            parameter,
+            value,
+            sent,
+        }],
+        registry,
+    )
+}
+
+/// One parameter written into `project.toml` with others, as one change
+/// ([`write_project_all`], [`after_write_all`]): a snapshot's restore.
+#[derive(Clone, Copy, Debug)]
+pub struct WriteEdit<'a> {
+    /// The control.
+    pub target: &'a Target,
+    /// Its instance.
+    pub instance: &'a str,
+    /// Its parameter.
+    pub parameter: &'a str,
+    /// The value written (`None`: the key removed).
+    pub value: Option<f64>,
+    /// Whether the Controller took its live send for every port.
+    pub sent: bool,
+}
+
+/// [`after_write`] for several parameters written as one change: the
+/// running project takes every edit at once, each one whose live send was
+/// refused as a value no port has.
+pub fn after_write_all(
+    current: Option<&mut Project>,
+    dir: &Path,
+    edits: &[WriteEdit<'_>],
+    registry: &Registry,
+) -> Written {
     let Some(current) = current else {
         return Written::Stopped(
             crate::app::load(dir, registry)
                 .map(|(project, plan, _)| (Panel::new(&project, registry), plan)),
         );
     };
-    let order: Vec<&str> = target.order.iter().map(String::as_str).collect();
-    match current.with_parameter(instance, parameter, value, &order) {
+    let orders: Vec<Vec<&str>> = edits
+        .iter()
+        .map(|e| e.target.order.iter().map(String::as_str).collect())
+        .collect();
+    let written: Vec<(&str, &str, Option<f64>, &[&str])> = edits
+        .iter()
+        .zip(&orders)
+        .map(|(e, order)| (e.instance, e.parameter, e.value, order.as_slice()))
+        .collect();
+    match current.with_parameters(&written) {
         Ok(project) => {
             let panel = Panel::new(&project, registry);
-            let running = match target.unlike(value).filter(|_| !sent) {
-                Some(unlike) => current.with_parameter(instance, parameter, Some(unlike), &order),
-                // Sent, or a single-valued range (every send was that value).
-                None => Ok(project),
+            // Sent, or a single-valued range (every send was that value):
+            // the written value; else one no port has.
+            let unlikes: Vec<Option<f64>> = edits
+                .iter()
+                .map(|e| e.target.unlike(e.value).filter(|_| !e.sent))
+                .collect();
+            let running = if unlikes.iter().all(Option::is_none) {
+                Ok(project)
+            } else {
+                let held: Vec<(&str, &str, Option<f64>, &[&str])> = written
+                    .iter()
+                    .zip(&unlikes)
+                    .map(|(&(i, p, v, o), unlike)| (i, p, unlike.or(v), o))
+                    .collect();
+                current.with_parameters(&held)
             };
             match running {
                 Ok(running) => {
@@ -555,43 +633,112 @@ pub fn write_project(
     value: Option<f64>,
     order: &[&str],
 ) -> Result<(String, String), ProjectWriteError> {
-    write_project_between(dir, instance, parameter, value, order, &mut || {})
+    write_project_between(
+        dir,
+        &[(instance, parameter, value, order)],
+        &|_, _| true,
+        &mut || {},
+    )
+    .map(|(b, a, _)| (b, a))
 }
 
-/// [`write_project`], running `between` after the edit is made and before
-/// the file is read again (a test interleaves another writer there).
+/// [`write_project`] for several parameters at once, `(instance,
+/// parameter, value, order)` each: one edit of the text, read, edited and
+/// written under the writer lock as one change, compared just before its
+/// rename (a snapshot's restore, ADR 0041). Nothing is written when any edit
+/// fails.
+pub fn write_project_all(
+    dir: &Path,
+    edits: &[(&str, &str, Option<f64>, &[&str])],
+) -> Result<(String, String), ProjectWriteError> {
+    write_project_between(dir, edits, &|_, _| true, &mut || {}).map(|(b, a, _)| (b, a))
+}
+
+/// [`write_project_all`] of the edits `keep` takes, decided from the text
+/// read under the writer lock (`keep(text, index)`), so the choice is made
+/// on the version written over, not on a cached one: a snapshot's restore
+/// writes only the values the file does not hold. Gives the texts before and
+/// after and the indices written; nothing is written (and the lock is the
+/// only step taken) when `keep` takes none.
+pub fn write_project_chosen(
+    dir: &Path,
+    edits: &[(&str, &str, Option<f64>, &[&str])],
+    keep: &dyn Fn(&str, usize) -> bool,
+) -> Result<(String, String, Vec<usize>), ProjectWriteError> {
+    write_project_between(dir, edits, keep, &mut || {})
+}
+
+/// [`write_project_all`], running `between` after the edit is made and
+/// before the file is read again (a test interleaves another writer there).
 fn write_project_between(
     dir: &Path,
-    instance: &str,
-    parameter: &str,
-    value: Option<f64>,
-    order: &[&str],
+    edits: &[(&str, &str, Option<f64>, &[&str])],
+    keep: &dyn Fn(&str, usize) -> bool,
     between: &mut dyn FnMut(),
-) -> Result<(String, String), ProjectWriteError> {
-    use signal_project::transaction::{ProjectLock, replace_unchanged};
-    let path = dir.join(signal_project::PROJECT_FILE);
-    let failed = |error: String| {
+) -> Result<(String, String, Vec<usize>), ProjectWriteError> {
+    let lock = ProjectLock::acquire(dir).map_err(|e| {
         ProjectWriteError::Failed(format!(
-            "{instance}.{parameter} was not written to {}: {error}",
-            path.display()
+            "{} not written to {}: {e}",
+            what_of(edits),
+            dir.join(signal_project::PROJECT_FILE).display()
         ))
+    })?;
+    write_project_locked(dir, &lock, edits, keep, between)
+}
+
+/// "out.gain was", or "3 parameters were", for an error.
+fn what_of(edits: &[(&str, &str, Option<f64>, &[&str])]) -> String {
+    match edits {
+        [(instance, parameter, ..)] => format!("{instance}.{parameter} was"),
+        _ => format!("{} parameters were", edits.len()),
+    }
+}
+
+/// [`write_project_chosen`] by a writer that already holds the project's
+/// writer `lock` (ADR 0040: never taken twice), so a restore writes its undo
+/// snapshot and `project.toml` under one lock (ADR 0041 §7).
+pub fn write_project_chosen_locked(
+    dir: &Path,
+    lock: &ProjectLock,
+    edits: &[(&str, &str, Option<f64>, &[&str])],
+    keep: &dyn Fn(&str, usize) -> bool,
+) -> Result<(String, String, Vec<usize>), ProjectWriteError> {
+    write_project_locked(dir, lock, edits, keep, &mut || {})
+}
+
+fn write_project_locked(
+    dir: &Path,
+    _lock: &ProjectLock,
+    edits: &[(&str, &str, Option<f64>, &[&str])],
+    keep: &dyn Fn(&str, usize) -> bool,
+    between: &mut dyn FnMut(),
+) -> Result<(String, String, Vec<usize>), ProjectWriteError> {
+    use signal_project::transaction::replace_unchanged;
+    let path = dir.join(signal_project::PROJECT_FILE);
+    let what = what_of(edits);
+    let failed = |error: String| {
+        ProjectWriteError::Failed(format!("{what} not written to {}: {error}", path.display()))
     };
-    let _lock = ProjectLock::acquire(dir).map_err(|e| failed(e.to_string()))?;
     let before = fs::read_to_string(&path).map_err(|e| failed(e.to_string()))?;
-    let after = signal_project::write_parameter(&before, instance, parameter, value, order)
-        .map_err(|e| failed(e.to_string()))?;
+    let kept: Vec<usize> = (0..edits.len()).filter(|&i| keep(&before, i)).collect();
+    if kept.is_empty() {
+        return Ok((before.clone(), before, kept));
+    }
+    let chosen: Vec<_> = kept.iter().filter_map(|&i| edits.get(i).copied()).collect();
+    let after =
+        signal_project::write_parameters(&before, &chosen).map_err(|e| failed(e.to_string()))?;
     between();
     let written = replace_unchanged(&path, Some(before.as_bytes()), after.as_bytes())
         .map_err(|e| failed(e.to_string()))?;
     if !written {
         return Err(ProjectWriteError::Changed(format!(
-            "{instance}.{parameter} was not written to {}: {} changed while the value was \
+            "{what} not written to {}: {} changed while the value was \
              written (another writer); nothing was written",
             path.display(),
             signal_project::PROJECT_FILE
         )));
     }
-    Ok((before, after))
+    Ok((before, after, kept))
 }
 
 /// Why [`write_project`] wrote nothing.
@@ -706,9 +853,14 @@ mod tests {
             "schema_version = 1\n[instances]\nout = { module = \"std.audio_out\", gain = 0.25 }\n";
         let theirs = ours.replace("0.25", "0.125");
         fs::write(&path, ours).unwrap();
-        let refused = write_project_between(&dir, "out", "gain", Some(0.5), &["gain"], &mut || {
-            fs::write(&path, &theirs).unwrap();
-        })
+        let refused = write_project_between(
+            &dir,
+            &[("out", "gain", Some(0.5), &["gain"][..])],
+            &|_, _| true,
+            &mut || {
+                fs::write(&path, &theirs).unwrap();
+            },
+        )
         .unwrap_err();
         assert_eq!(refused.code(), "conflict", "{refused}");
         assert_eq!(fs::read_to_string(&path).unwrap(), theirs);

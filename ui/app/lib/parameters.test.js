@@ -25,6 +25,8 @@ test('instances with their parameters, and a composite’s inside read-only', ()
   const [drums, out] = list;
   assert.equal(drums.parameters[0].address, '/drums.kick_decay');
   assert.equal(drums.parameters[0].editable, true);
+  assert.equal(drums.parameters[0].inSnapshots, true, 'in snapshots unless the server says not');
+  assert.equal(rows({ ...description, controls: [{ ...description.controls[0], inSnapshots: false }] })[0].parameters[0].inSnapshots, false);
   assert.deepEqual(drums.inner.map((p) => [p.name, p.editable, p.base]), [['kick/amp_env.decay_ms', false, 420]]);
   assert.deepEqual(out.inner, [], 'a primitive has nothing inside');
 });

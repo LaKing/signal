@@ -569,6 +569,9 @@ pub(crate) struct InstanceEntry {
     /// ADR 0028 §3: the pattern file (`patterns/<name>.toml`) whose data the
     /// instance takes.
     pub(crate) pattern: Option<Spanned<String>>,
+    /// ADR 0041: the instance's controls left out of snapshots, by
+    /// parameter name (only in `project.toml`).
+    pub(crate) snapshot_exclude: Option<Spanned<Vec<Spanned<String>>>>,
     pub(crate) parameters: BTreeMap<Spanned<String>, Spanned<f64>>,
 }
 
@@ -602,6 +605,7 @@ impl<'de> Deserialize<'de> for InstanceEntry {
                     set: None,
                     gpu: None,
                     pattern: None,
+                    snapshot_exclude: None,
                     parameters: BTreeMap::new(),
                 };
                 while let Some(key) = map.next_key::<Spanned<String>>()? {
@@ -615,6 +619,7 @@ impl<'de> Deserialize<'de> for InstanceEntry {
                         "set" => entry.set = Some(map.next_value()?),
                         "gpu" => entry.gpu = Some(map.next_value()?),
                         "pattern" => entry.pattern = Some(map.next_value()?),
+                        "snapshot_exclude" => entry.snapshot_exclude = Some(map.next_value()?),
                         _ => {
                             entry
                                 .parameters
@@ -689,7 +694,13 @@ impl JsonSchema for InstanceEntry {
                 "seed": { "type": "integer", "minimum": 0 },
                 "set": { "type": "object", "additionalProperties": { "type": "number" } },
                 "gpu": { "type": "string", "minLength": 1 },
-                "pattern": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }
+                "pattern": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+                "snapshot_exclude": {
+                    "description": "ADR 0041: the instance's controls (its parameters, or a composite's exported ones) left out of snapshots; only in project.toml.",
+                    "type": "array",
+                    "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+                    "uniqueItems": true
+                }
             },
             "oneOf": [
                 { "required": ["module"] },

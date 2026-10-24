@@ -33,6 +33,8 @@ export function rows(description) {
       base: c.base,
       inFile: c.inFile,
       modulated: c.modulated,
+      // ADR 0041 §8: whether it goes into snapshots (an older server says nothing: it does).
+      inSnapshots: c.inSnapshots !== false,
       taper: controlSpec(c, description).taper,
       kind: findParameter(description, c.address)?.kind ?? null,
       editable: true,

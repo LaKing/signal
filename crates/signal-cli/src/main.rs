@@ -1,5 +1,5 @@
 //! The `signal` command (headless entry point; ADR 0013): `render`, `replay`,
-//! `play`, `ui`, `mcp`, `pack`, `unpack`, `vendor`, `bench`, `devices`, `modules` and `schema`. `--json` makes every command print machine-readable output on
+//! `play`, `ui`, `mcp`, `pack`, `unpack`, `vendor`, `snapshot`, `bench`, `devices`, `modules` and `schema`. `--json` makes every command print machine-readable output on
 //! stdout. Exit codes: 0 ok, 1 validation or user error, 2 internal error.
 //! The command layer only: sessions, live edits and provenance live in
 //! `signal-project`, the audio device in `signal-audio`.
@@ -13,6 +13,7 @@ mod mcp;
 mod play;
 mod render;
 mod replay;
+mod snapshot;
 mod ui;
 mod vendor;
 
@@ -80,6 +81,10 @@ enum Command {
     /// project's composites/, as the project's own text, and point the
     /// project's references at the copies (ADR 0027 §4).
     Vendor(vendor::VendorArgs),
+    /// A project's snapshots (ADR 0041): list, save, restore, undo or delete
+    /// the values of its top-level parameters stored under a name in
+    /// snapshots.toml, and exclude a control from them.
+    Snapshot(snapshot::SnapshotArgs),
     /// Measure the per-frame engine at 96 kHz (V13): every `std.*`
     /// primitive, the empty engine, the kick project and kick voices.
     Bench(bench::BenchArgs),
@@ -264,6 +269,7 @@ fn execute(cli: &Cli) -> Result<(), Failure> {
         Command::Pack(args) => files::pack(args, cli.json),
         Command::Unpack(args) => files::unpack(args, cli.json),
         Command::Vendor(args) => vendor::run(args, cli.json),
+        Command::Snapshot(args) => snapshot::run(args, &registry, cli.json),
         Command::Bench(args) => bench::run(args, &registry, setup, cli.json),
         Command::Devices(args) => devices::run(args, cli.json),
         Command::Modules(args) if args.interfaces => {

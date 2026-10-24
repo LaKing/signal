@@ -28,6 +28,28 @@ import { INITIAL, controls, powerRequest, reduce, restartRequest } from './lib/p
 import { contextItems, keepsSystemMenu } from './lib/context.js';
 import { PROMPT, fieldValue, openRetry, projectLabel, windowTitle } from './lib/document.js';
 import { archiveSave, saveReport, saveRequests } from './lib/save.js';
+import {
+  MAX_NAME,
+  countText,
+  deleteMessage,
+  deletePrompt,
+  deletedText,
+  entries,
+  exists,
+  listMessage,
+  listProblem,
+  overwritePrompt,
+  refusalText,
+  restoreMessage,
+  restoredText,
+  excludeMessage,
+  hasUndo,
+  undoMessage,
+  undoneText,
+  saveMessage,
+  savedText,
+  snapshotName,
+} from './lib/snapshots.js';
 import { compactStatus, statusFields } from './lib/status.js';
 import { INITIAL_TAB, TABS, select, tabForAction } from './lib/tabs.js';
 import { retryMessage, revertMessage, unsavedLine, unsavedOf } from '../lib/unsaved.js';
@@ -553,7 +575,7 @@ export class SignalAppParameters extends AppElement {
     this.streamKey = undefined;
     this.cells = new Map();
     const columns = () =>
-      el('colgroup', {}, ...['name', 'slider', 'base', 'note', 'effective', 'reset', 'mark'].map((c) => el('col', { className: `col-${c}` })));
+      el('colgroup', {}, ...['name', 'slider', 'base', 'note', 'effective', 'reset', 'snap', 'mark'].map((c) => el('col', { className: `col-${c}` })));
     const cards = list.map((instance) => {
       const table = el('table', { className: 'parameters' }, columns());
       for (const p of instance.parameters) table.append(this.row(p));
@@ -582,6 +604,7 @@ export class SignalAppParameters extends AppElement {
       }
       cells.file = fileNote(p);
       if (!cells.notice) cells.note.textContent = cells.file;
+      if (cells.snap) cells.snap.checked = p.inSnapshots !== false;
     }
   }
 
@@ -593,7 +616,7 @@ export class SignalAppParameters extends AppElement {
     const name = el('td', { className: 'name', textContent: p.name, title: p.name });
     if (!p.editable) {
       this.cells.set(p.address, { base, note, unit: p.unit });
-      return el('tr', { className: 'read-only' }, name, el('td', {}, slider), base, note, effective, el('td', { className: 'muted', textContent: 'read-only' }), el('td'));
+      return el('tr', { className: 'read-only' }, name, el('td', {}, slider), base, note, effective, el('td', { className: 'muted', textContent: 'read-only' }), el('td'), el('td'));
     }
     const reset = el('button', { type: 'button', textContent: 'Reset', title: `Reset to default (${shown(p.default, p.unit)})` });
     reset.addEventListener('click', () => this.request(resetMessage(p.address)).catch(failed));
@@ -603,7 +626,17 @@ export class SignalAppParameters extends AppElement {
     revert.addEventListener('click', () => this.request(revertMessage(p.address)).catch(failed));
     const mark = el('td', { className: 'unsaved', role: 'alert' }, el('span', { textContent: '⚠ ' }), retry, revert);
     mark.style.visibility = 'hidden';
-    const cells = { slider, base, note, effective, mark, unit: p.unit, value: p.base, file: fileNote(p), notice: null };
+    // ADR 0041 §8: the control's "in snapshots" property, written to project.toml.
+    const snap = el('input', { type: 'checkbox', checked: p.inSnapshots !== false, title: 'In snapshots: saved, restored and undone with them' });
+    snap.setAttribute('aria-label', `${p.name} in snapshots`);
+    snap.addEventListener('change', () => {
+      this.request(excludeMessage(p.address, !snap.checked)).catch((error) => {
+        snap.checked = !snap.checked;
+        failed(error);
+      });
+    });
+    const snapCell = el('td', { className: 'snap' }, el('label', { title: snap.title }, snap, el('span', { className: 'muted', textContent: ' snapshots' })));
+    const cells = { slider, base, note, effective, mark, snap, unit: p.unit, value: p.base, file: fileNote(p), notice: null };
     slider.addEventListener('input', () => {
       this.dragging = slider;
       cells.value = Number(slider.value);
@@ -644,11 +677,169 @@ export class SignalAppParameters extends AppElement {
       if (event.key === 'Enter' && cells.entry.open()) event.preventDefault();
     });
     this.cells.set(p.address, cells);
-    const tr = el('tr', {}, name, el('td', {}, slider), base, note, effective, el('td', {}, reset), mark);
+    const tr = el('tr', {}, name, el('td', {}, slider), base, note, effective, el('td', {}, reset), snapCell, mark);
     // The context menu's Reset and Copy address.
     tr.dataset.address = p.address;
     tr.dataset.label = p.name;
     return tr;
+  }
+}
+
+/**
+ * The project's snapshots (ADR 0041), a card of the Parameters tab: a name
+ * field with Save (Enter in the field saves), then a row per snapshot with
+ * Restore and Delete. Saving under a name in use asks "Replace?" and
+ * Delete asks first (Cancel focused, Escape cancels). Every request carries
+ * the list's `base`, so another writer's change meanwhile is a conflict
+ * and the list is read again. The list follows the server's pushes, a
+ * reload of the files and another project; the last outcome shows in a
+ * line of fixed height.
+ */
+export class SignalAppSnapshots extends AppElement {
+  connectedCallback() {
+    if (!this.firstChild) {
+      this.list = null;
+      this.field = el('input', { name: 'snapshot', type: 'text', placeholder: 'snapshot name', spellcheck: false, maxLength: MAX_NAME * 2, size: 32 });
+      this.field.setAttribute('aria-label', 'Snapshot name');
+      const save = el('button', { type: 'submit', textContent: 'Save', title: 'Save every parameter’s value under this name' });
+      const form = el('form', { className: 'snapshot-save' }, this.field, save);
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        this.save(this.field.value);
+      });
+      this.undo = el('button', { type: 'button', className: 'snapshot-undo', textContent: 'Undo restore', title: 'Put back the values the last restore replaced (again: redo it)' });
+      this.undo.addEventListener('click', () => this.undoRestore());
+      form.append(this.undo);
+      this.rows = el('ul', { className: 'snapshots' });
+      this.line = el('div', { className: 'snapshot-line line', role: 'status' });
+      this.prompt = el('dialog', { className: 'prompt' });
+      this.append(form, this.rows, this.line, this.prompt);
+      this.draw();
+    }
+    super.connectedCallback();
+  }
+
+  attach(connection) {
+    super.attach(connection);
+    this.stops.push(connection.on('snapshots', (list) => this.show(list)));
+    // The files changed (an editor, another writer) or another project opened.
+    this.stops.push(connection.on('reload', () => this.refresh()));
+    this.stops.push(connection.on('app', () => this.refresh()));
+    // Stopped, the folder's watch pushes `graph` (not `reload`) after an edit.
+    this.stops.push(connection.on('graph', () => this.refresh()));
+  }
+
+  opened() {
+    this.refresh();
+  }
+
+  refresh() {
+    this.request(listMessage()).then(
+      (list) => this.show(list),
+      (error) => this.show(null, error),
+    );
+  }
+
+  show(list, error = null) {
+    this.list = list;
+    this.problem = list ? null : error;
+    this.draw();
+  }
+
+  say(text, warn = false) {
+    this.line.textContent = text ?? '';
+    this.line.title = text ?? '';
+    this.line.classList.toggle('warn', Boolean(warn));
+  }
+
+  draw() {
+    // Its place is kept whether or not there is something to undo ("Stable layout").
+    this.undo.style.visibility = hasUndo(this.list) ? 'visible' : 'hidden';
+    const rows = entries(this.list);
+    this.rows.replaceChildren(
+      ...rows.map(({ name, count }) => {
+        const restore = el('button', { type: 'button', textContent: 'Restore', title: `Write “${name}”’s values into project.toml and play them` });
+        restore.addEventListener('click', () => this.restore(name));
+        const remove = el('button', { type: 'button', textContent: 'Delete', title: `Delete “${name}”` });
+        remove.addEventListener('click', () => this.remove(name));
+        return el('li', {}, el('span', { className: 'snapshot-name', textContent: name, title: name }), el('span', { className: 'muted snapshot-count', textContent: countText(count) }), restore, remove);
+      }),
+    );
+    if (!rows.length) {
+      const text = this.list ? 'No snapshots yet: type a name and Save.' : listProblem(this.problem);
+      this.rows.append(el('li', { className: this.problem && this.problem.code !== 'no-project' ? 'warn' : 'muted', textContent: text, title: text }));
+    }
+  }
+
+  /** The refusal said, and the list read again after a conflict. */
+  refused(error) {
+    this.say(refusalText(error), true);
+    if (error?.code === 'conflict') this.refresh();
+  }
+
+  async save(raw) {
+    const { name, error } = snapshotName(raw);
+    if (error) {
+      this.say(error, true);
+      this.field.focus();
+      return;
+    }
+    const base = this.list ? (this.list.base ?? null) : undefined;
+    const overwrite = exists(this.list, name);
+    if (overwrite && (await this.ask(overwritePrompt(name))) !== 'confirm') return;
+    try {
+      const reply = await this.request(saveMessage(name, { overwrite, base }));
+      this.say(savedText(reply));
+      this.field.value = '';
+    } catch (refusal) {
+      this.refused(refusal);
+    }
+  }
+
+  async restore(name) {
+    try {
+      const reply = await this.request(restoreMessage(name, this.list?.base ?? undefined));
+      const { text, warn } = restoredText(reply);
+      this.say(text, warn);
+    } catch (refusal) {
+      this.refused(refusal);
+    }
+  }
+
+  async undoRestore() {
+    try {
+      const reply = await this.request(undoMessage(this.list?.base ?? undefined));
+      const { text, warn } = undoneText(reply);
+      this.say(text, warn);
+    } catch (refusal) {
+      this.refused(refusal);
+    }
+  }
+
+  async remove(name) {
+    if ((await this.ask(deletePrompt(name))) !== 'confirm') return;
+    try {
+      const reply = await this.request(deleteMessage(name, this.list?.base ?? undefined));
+      this.say(deletedText(reply));
+    } catch (refusal) {
+      this.refused(refusal);
+    }
+  }
+
+  /** A confirmation in the page: resolves to the id of the button chosen (`cancel` on Escape). */
+  ask({ text, buttons }) {
+    return new Promise((resolve) => {
+      const shown = buttons.map((b) => {
+        const button = el('button', { type: 'button', textContent: b.label });
+        button.addEventListener('click', () => this.prompt.close(b.id));
+        return button;
+      });
+      this.prompt.replaceChildren(el('p', { textContent: text }), el('div', { className: 'buttons' }, ...shown));
+      this.prompt.returnValue = 'cancel';
+      this.prompt.addEventListener('close', () => resolve(this.prompt.returnValue || 'cancel'), { once: true });
+      this.prompt.showModal();
+      shown[0].focus();
+    });
   }
 }
 
@@ -837,6 +1028,7 @@ for (const [name, element] of [
   ['signal-app-meters', SignalAppMeters],
   ['signal-app-messages', SignalAppMessages],
   ['signal-app-parameters', SignalAppParameters],
+  ['signal-app-snapshots', SignalAppSnapshots],
 ]) {
   customElements.get(name) ?? customElements.define(name, element);
 }

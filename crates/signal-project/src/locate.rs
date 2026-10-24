@@ -91,6 +91,9 @@ pub(crate) struct InstanceSpans {
     pub(crate) gpu: Option<(String, Span)>,
     /// The pattern it names (ADR 0028 §3) and the value's span.
     pub(crate) pattern: Option<(String, Span)>,
+    /// ADR 0041: the parameters it leaves out of snapshots, each with its
+    /// span.
+    pub(crate) snapshot_exclude: Vec<(String, Span)>,
 }
 
 /// The spans of one connection.
