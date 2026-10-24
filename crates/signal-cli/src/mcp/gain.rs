@@ -25,6 +25,7 @@
 //! "Unsaved").
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use signal_core::Registry;
 use signal_project::{Project, SourceFile};
@@ -60,8 +61,14 @@ pub(crate) struct Gains {
 impl Gains {
     /// The gain ports of the project `files` make, or why it does not load
     /// and plan (its diagnostics, one per line): then no change is judged,
-    /// and every guard refuses (`docs/agent-interface.md` "Safety").
-    pub(crate) fn of(files: Vec<SourceFile>, registry: &Registry) -> Result<Gains, String> {
+    /// and every guard refuses (`docs/agent-interface.md` "Safety"). `dir`
+    /// is the project's folder, where the projects the files include are
+    /// found (ADR 0035); without one an include does not load.
+    pub(crate) fn of(
+        files: Vec<SourceFile>,
+        dir: Option<&Path>,
+        registry: &Registry,
+    ) -> Result<Gains, String> {
         let lines = |diagnostics: Vec<signal_project::Diagnostic>| {
             diagnostics
                 .iter()
@@ -69,7 +76,11 @@ impl Gains {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let project = Project::from_sources(files).map_err(lines)?;
+        let project = match dir {
+            Some(dir) => Project::from_sources_in(files, dir),
+            None => Project::from_sources(files),
+        }
+        .map_err(lines)?;
         let plan = project.plan(registry).map_err(lines)?.plan;
         let instances: BTreeSet<String> = plan
             .instances
@@ -301,7 +312,7 @@ mod tests {
             path: "project.toml".to_owned(),
             text: text.to_owned(),
         }];
-        Gains::of(files, &registry()).unwrap()
+        Gains::of(files, None, &registry()).unwrap()
     }
 
     const HEAD: &str =

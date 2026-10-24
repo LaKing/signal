@@ -182,7 +182,7 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "transport",
         group: Group::Adjust,
-        description: "`stop` stops the run; `start` plays the project again from frame 0 from its files; `tempo` sets (or with `ms`, ramps) the `bpm` of the project's std.transport instances.",
+        description: "`stop` stops the run; `start` plays the project again from frame 0 from its files; `tempo` sets (or with `ms`, ramps) the project's tempo: every top-level control that reaches the `bpm` of a std.transport or std.playhead (lib.transport's `/transport.bpm`) and that no connection drives, all of them together.",
         schema: || {
             object(
                 json!({"action": {"type": "string", "enum": ["start", "stop", "tempo"]}, "bpm": {"type": "number"}, "ms": {"type": "number", "minimum": 0}}),
@@ -312,7 +312,7 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "read_stream",
         group: Group::Observe,
-        description: "The sequencers' playheads: every std.step_seq8 `step` (0..255) and std.note_seq `position` (beats) output, or the signal outputs in `ports`, read over `window_ms` (default 1000; at least 256/rate s) at `rate` points per second (default 512): first, last, minimum and maximum, with the frame and each std.transport's bpm.",
+        description: "The sequencers' playheads: every std.step_seq8 `step` (0..255) and std.note_seq `position` (beats) output, or the signal outputs in `ports`, read over `window_ms` (default 1000; at least 256/rate s) at `rate` points per second (default 512): first, last, minimum and maximum, with the frame and each std.transport's and std.playhead's bpm.",
         schema: || {
             object(
                 json!({"ports": {"type": "array", "items": {"type": "string"}, "maxItems": 8}, "rate": {"type": "number", "minimum": 1}, "window_ms": {"type": "number", "minimum": 1, "maximum": 10000}}),
@@ -754,7 +754,7 @@ fn does_not_load(message: String, why: &str) -> Refused {
 /// The gain ports of the project's files as they are now; refused when
 /// they do not load and plan: no change is judged then (fail closed).
 fn current_gains(context: &Context) -> Result<Gains, Refused> {
-    Gains::of(sources(context)?, context.registry).map_err(|why| {
+    Gains::of(sources(context)?, Some(&context.dir), context.registry).map_err(|why| {
         does_not_load(
             format!(
                 "refused: the project's files do not load and plan as they are now, so no change can be checked against --max-gain (fix the files first; `check` shows why):\n{why}"
@@ -795,7 +795,7 @@ fn guard_live(context: &Context, ports: &[(String, Option<f64>)]) -> Result<(), 
 /// leave them.
 fn guard_files(context: &Context, after: Vec<SourceFile>) -> Result<(), Refused> {
     let before = current_gains(context)?;
-    let after = Gains::of(after, context.registry).map_err(|why| {
+    let after = Gains::of(after, Some(&context.dir), context.registry).map_err(|why| {
         does_not_load(
             format!(
                 "does-not-load: the project would not load and plan with this change, so nothing is written:\n{why}"
@@ -873,7 +873,7 @@ fn project_info(context: &Context, _: &Value) -> Outcome {
     let describe = ask(context, json!({"type": "describe"}))?;
     let graph = ask(context, json!({"type": "graph"}))?;
     let pong = ask(context, json!({"type": "ping"}))?;
-    let gains = Gains::of(sources(context)?, context.registry).ok();
+    let gains = Gains::of(sources(context)?, Some(&context.dir), context.registry).ok();
     let live = match &gains {
         Some(gains) => live_gains(context, gains).unwrap_or_default(),
         None => BTreeMap::new(),
@@ -1164,39 +1164,188 @@ fn transport(context: &Context, arguments: &Value) -> Outcome {
         return Err(refused("tempo needs `bpm`"));
     };
     let describe = ask(context, json!({"type": "describe"}))?;
-    let addresses: Vec<String> = describe["instances"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|i| i["module"] == json!("std.transport"))
-        .filter_map(|i| i["address"].as_str().map(|a| format!("{a}.bpm")))
-        .collect();
-    if addresses.is_empty() {
-        return Err(refused(
-            "the project has no std.transport: it has no tempo to set",
-        ));
+    let targets = tempo_targets(&describe);
+    if targets.controls.is_empty() {
+        let mut why = Vec::new();
+        if !targets.skipped.is_empty() {
+            why.push(format!(
+                "a connection drives {} (a value set by hand would not be what plays)",
+                targets.skipped.join(", ")
+            ));
+        }
+        if !targets.unreached.is_empty() {
+            why.push(format!(
+                "no top-level control reaches {} (export it from its composite)",
+                targets.unreached.join(", ")
+            ));
+        }
+        return Err(refused(if targets.transports.is_empty() {
+            "the project has no transport (no std.transport and no std.playhead, as in lib.transport): it has no tempo to set".to_owned()
+        } else {
+            format!("no tempo to set: {}", why.join("; "))
+        }));
     }
+    let addresses: Vec<String> = targets.controls.iter().map(|(a, _)| a.clone()).collect();
     guard_live(
         context,
-        &addresses
+        &targets
+            .controls
             .iter()
-            .map(|a| (a.clone(), Some(bpm)))
+            .flat_map(|(_, ports)| ports.iter().map(|p| (p.clone(), Some(bpm))))
             .collect::<Vec<_>>(),
     )?;
     let ms = arguments.get("ms").and_then(Value::as_f64).unwrap_or(0.0);
+    // One stamp for every target, so several transports change on the same
+    // frame and stay in step (a playhead integrates its bpm: changes a block
+    // apart would leave them a lasting phase apart). The stamp is ahead of
+    // the current frame by enough for every request to arrive before it
+    // (`TEMPO_LEAD_S` for each target, and once more).
+    let rate = describe["sampleRate"]
+        .as_f64()
+        .filter(|r| *r >= 1.0)
+        .unwrap_or(48_000.0);
+    let now = ask(context, json!({"type": "ping"}))?["frame"]
+        .as_u64()
+        .unwrap_or(0);
+    let lead = TEMPO_LEAD_S * (1.0 + addresses.len() as f64) * rate;
+    let at = now + lead.ceil() as u64;
     let mut acks = Vec::new();
     for address in &addresses {
         let message = if ms > 0.0 {
-            json!({"type": "ramp", "address": address, "to": bpm, "ms": ms})
+            json!({"type": "ramp", "address": address, "to": bpm, "ms": ms, "at": at})
         } else {
-            json!({"type": "set", "address": address, "value": bpm})
+            json!({"type": "set", "address": address, "value": bpm, "at": at})
         };
         acks.push(bare(ask(context, message)?));
     }
+    let late: Vec<String> = addresses
+        .iter()
+        .zip(&acks)
+        .filter(|(_, ack)| ack["late"] == json!(true))
+        .map(|(a, _)| a.clone())
+        .collect();
+    let mut summary = format!("tempo {bpm} bpm on {} at frame {at}", addresses.join(", "));
+    if !late.is_empty() {
+        summary.push_str(&format!(
+            "; late (applied after frame {at}, so out of step): {}",
+            late.join(", ")
+        ));
+    }
+    if !targets.skipped.is_empty() {
+        summary.push_str(&format!(
+            "; skipped (wired): {}",
+            targets.skipped.join(", ")
+        ));
+    }
+    if !targets.unreached.is_empty() {
+        summary.push_str(&format!(
+            "; not reached by a top-level control: {}",
+            targets.unreached.join(", ")
+        ));
+    }
     Ok((
-        json!({"bpm": bpm, "addresses": addresses, "acks": acks}),
-        format!("tempo {bpm} bpm on {}", addresses.join(", ")),
+        json!({
+            "bpm": bpm,
+            "at": at,
+            "addresses": addresses,
+            "skipped": targets.skipped,
+            "unreached": targets.unreached,
+            "late": late,
+            "acks": acks,
+        }),
+        summary,
     ))
+}
+
+/// How far ahead of the current frame `transport` `tempo` stamps its
+/// changes, in seconds for each target and once more (all on one frame).
+const TEMPO_LEAD_S: f64 = 0.05;
+
+/// The modules whose `bpm` is a project's tempo: the tick clock and the
+/// playhead (`lib.transport` is a std.playhead, ADR 0033).
+const TEMPO_MODULES: [&str; 2] = ["std.transport", "std.playhead"];
+
+/// What `transport` `tempo` sets in a `describe` message, by the rule
+/// Space's `transport.toggle` follows for `run` (ADR 0039 §6,
+/// `ui/lib/transport-toggle.js`).
+struct TempoTargets {
+    /// The `bpm` parameter ports of every std.transport and std.playhead.
+    transports: Vec<String>,
+    /// The top-level controls (`describe.controls`) whose ports reach one
+    /// and that no connection drives, in `describe`'s order, each with its
+    /// ports: every one is set, so several transports stay in step.
+    controls: Vec<(String, Vec<String>)>,
+    /// The controls that reach one but are `modulated` (a connection drives
+    /// them: a value set by hand would not be what plays).
+    skipped: Vec<String>,
+    /// The transports' bpm ports no top-level control reaches (inside a
+    /// composite that does not export it): never set.
+    unreached: Vec<String>,
+    /// Each reached bpm port's control: its address and live base.
+    reach: BTreeMap<String, (String, Value)>,
+}
+
+fn tempo_targets(describe: &Value) -> TempoTargets {
+    let transports: Vec<String> = describe["instances"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| TEMPO_MODULES.iter().any(|m| i["module"] == json!(m)))
+        .filter_map(bpm_port)
+        .collect();
+    let mut controls = Vec::new();
+    let mut skipped = Vec::new();
+    let mut reach = BTreeMap::new();
+    for control in describe["controls"].as_array().into_iter().flatten() {
+        let Some(address) = control["address"].as_str() else {
+            continue;
+        };
+        let ports: Vec<String> = control["ports"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        let reached: Vec<&String> = ports.iter().filter(|p| transports.contains(p)).collect();
+        if reached.is_empty() {
+            continue;
+        }
+        for port in reached {
+            reach
+                .entry(port.clone())
+                .or_insert_with(|| (address.to_owned(), control["base"].clone()));
+        }
+        if control["modulated"] == json!(true) {
+            skipped.push(address.to_owned());
+        } else {
+            controls.push((address.to_owned(), ports));
+        }
+    }
+    let unreached = transports
+        .iter()
+        .filter(|p| !reach.contains_key(*p))
+        .cloned()
+        .collect();
+    TempoTargets {
+        transports,
+        controls,
+        skipped,
+        unreached,
+        reach,
+    }
+}
+
+/// The `bpm` parameter port of a `describe` instance.
+fn bpm_port(instance: &Value) -> Option<String> {
+    let bpm = instance["parameters"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p["name"] == json!("bpm"))
+        .and_then(|p| p["address"].as_str())
+        .map(str::to_owned);
+    bpm.or_else(|| Some(format!("{}.bpm", instance["address"].as_str()?)))
 }
 
 fn commit(context: &Context, arguments: &Value) -> Outcome {
@@ -1264,7 +1413,7 @@ fn commit(context: &Context, arguments: &Value) -> Outcome {
 
 /// A control's value in project.toml (the plan's base for its first port).
 fn file_value(context: &Context, control: &Value) -> Option<f64> {
-    let project = Project::from_sources(sources(context).ok()?).ok()?;
+    let project = Project::from_sources_in(sources(context).ok()?, &context.dir).ok()?;
     let plan = project.plan(context.registry).ok()?.plan;
     let port = control["ports"].get(0)?.as_str()?;
     let (instance, parameter) = port.rsplit_once('.')?;
@@ -1281,7 +1430,7 @@ fn revert(context: &Context, arguments: &Value) -> Outcome {
     let ports = ports_of(context, &address)?;
     {
         let gains = current_gains(context)?;
-        let project = Project::from_sources(sources(context)?).ok();
+        let project = Project::from_sources_in(sources(context)?, &context.dir).ok();
         let plan = project
             .and_then(|p| p.plan(context.registry).ok())
             .map(|p| p.plan);
@@ -1343,7 +1492,7 @@ fn patch_tool(context: &Context, arguments: &Value) -> Outcome {
     }
     // The edited files, as the server would write them, for the gain check.
     {
-        let project = Project::from_sources(files.clone()).ok();
+        let project = Project::from_sources_in(files.clone(), &context.dir).ok();
         let order = |module: &str| -> Option<Vec<String>> {
             if let Some(order) = signal_project::library_parameters(module) {
                 return Some(order);
@@ -1781,17 +1930,28 @@ fn read_stream(context: &Context, arguments: &Value) -> Outcome {
         }
         read.push(entry);
     }
+    // Each transport's bpm: the live base of the control `tempo` sets
+    // (`control`; null when no top-level control reaches it), else the
+    // plan's base (`planBpm`: the files' value, which a live change does not
+    // move until it is committed).
+    let reach = tempo_targets(&describe).reach;
     let bpm: Vec<Value> = instances
         .iter()
-        .filter(|i| i["module"] == json!("std.transport"))
+        .filter(|i| TEMPO_MODULES.iter().any(|m| i["module"] == json!(m)))
         .map(|i| {
-            let base = i["parameters"]
+            let plan = i["parameters"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .find(|p| p["name"] == json!("bpm"))
-                .map(|p| p["base"].clone());
-            json!({"instance": i["address"], "bpm": base})
+                .map_or(Value::Null, |p| p["base"].clone());
+            let control = bpm_port(i).and_then(|p| reach.get(&p).cloned());
+            json!({
+                "instance": i["address"],
+                "control": control.as_ref().map(|c| c.0.clone()),
+                "bpm": control.map_or_else(|| plan.clone(), |c| c.1),
+                "planBpm": plan,
+            })
         })
         .collect();
     let pong = ask(context, json!({"type": "ping"}))?;
@@ -1913,7 +2073,7 @@ fn check(context: &Context, _: &Value) -> Outcome {
     let lines =
         |d: Vec<_>| -> Vec<String> { located(dir, d).iter().map(ToString::to_string).collect() };
     let loaded = match read_sources(dir) {
-        Ok(files) => Project::from_sources(files).map_err(lines),
+        Ok(files) => Project::from_sources_in(files, dir).map_err(lines),
         Err(e) => Err(vec![e.to_string()]),
     };
     let result = loaded.and_then(|project| {

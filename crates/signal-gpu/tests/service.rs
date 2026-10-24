@@ -494,8 +494,16 @@ fn shutdown_is_bounded_and_reported() {
     assert!(stuck.is_lost());
 }
 
+/// Whether a usable adapter is required (`SIGNAL_REQUIRE_GPU` set and not
+/// `0`, as on the device gate): then a test that finds none fails instead
+/// of skipping (`docs/testing-and-evaluation.md`).
+fn gpu_required() -> bool {
+    std::env::var_os("SIGNAL_REQUIRE_GPU").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
 /// The machine's first GPU, or `None` after saying why (the noop device
 /// computes nothing): the audit's adapter reproductions, run by the operator.
+/// With `SIGNAL_REQUIRE_GPU`, no adapter is a failure.
 fn gpu() -> Option<Lease> {
     let pool = Arc::new(DevicePool::open(&Selection::All));
     match pool.devices().first() {
@@ -504,6 +512,11 @@ fn gpu() -> Option<Lease> {
             Some(DevicePool::lease(&pool, 0))
         }
         None => {
+            assert!(
+                !gpu_required(),
+                "SIGNAL_REQUIRE_GPU is set, but there is no usable GPU adapter ({:?})",
+                signal_gpu::inventory().error
+            );
             eprintln!(
                 "skipped: no usable GPU adapter ({:?}); the operator runs this on the M5 Max",
                 signal_gpu::inventory().error
