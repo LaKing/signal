@@ -728,9 +728,34 @@ fn snapshot_restore_that_fails_keeps_the_undo_snapshot() {
     let output = signal(&["snapshot", "restore", &project, "b"]);
     let _ = Command::new("chflags").arg("nouchg").arg(&path).status();
     assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        error.contains("the undo snapshot from before was put back"),
+        "{error}"
+    );
     assert_eq!(
         fs::read_to_string(dir.join("snapshots.toml")).unwrap(),
         before,
         "the undo snapshot from before"
+    );
+}
+
+/// Review 3 of 2026-10-24, 5: `signal snapshot exclude --include` removes a
+/// stale name (no parameter any more) as long as the project plans after.
+#[test]
+fn snapshot_exclude_removes_a_stale_name() {
+    let dir = out_dir("snapshot-stale-exclude");
+    fs::create_dir_all(&dir).unwrap();
+    let text = "schema_version = 1\n\n[project]\nname = \"s\"\nsample_rate = 8000\nseed = 3\n\n\
+         [instances]\nosc = { module = \"std.noise\", snapshot_exclude = [\"freq\"] }\n\
+         out = { module = \"std.audio_out\", gain = 0.25 }\n\n\
+         [wiring]\nconnections = [{ from = \"osc.out\", to = \"out.l\" }]\n";
+    fs::write(dir.join("project.toml"), text).unwrap();
+    let project = dir.display().to_string();
+    let output = signal(&["snapshot", "exclude", &project, "/osc.freq", "--include"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(dir.join("project.toml")).unwrap(),
+        text.replace(", snapshot_exclude = [\"freq\"]", "")
     );
 }

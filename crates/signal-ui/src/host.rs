@@ -5186,8 +5186,14 @@ impl Host {
     /// Restores `values` (the snapshot `name`, or the undo snapshot) into the
     /// controls: written where `commit` writes them, as one change, under
     /// the held `lock`, and sent live; the reply of type `kind`. `undo` is
-    /// the undo snapshot's write (the text written, the text before), put
-    /// back when `project.toml` cannot be written.
+    /// the undo snapshot's write (the text written, the text before). When
+    /// `project.toml` cannot be written, the values are still sent; the new
+    /// undo snapshot is kept when any of them reached the engine (it holds
+    /// what played before, which nothing else holds now: the values may not
+    /// have been saved), and put back to the one before only when none did.
+    /// The reply's `undoSnapshot` says which: `new`, `previous`,
+    /// `unchanged` (none was written) or `changed` (another writer changed
+    /// the file meanwhile; left as it is).
     fn apply_snapshot(
         &mut self,
         name: &str,
@@ -5237,17 +5243,6 @@ impl Host {
         let chosen = write_project_chosen_locked(&self.dir, &lock, &texts, &|text, i| {
             restore.edits.get(i).is_some_and(|e| !e.held_by(text))
         });
-        // Not written: the undo snapshot goes back to the one before.
-        let put_back = match (&chosen, &undo) {
-            (Err(_), Some((written, before))) => {
-                snapshots::put_back(&self.dir, &lock, written, before).unwrap_or(false)
-            }
-            _ => false,
-        };
-        drop(lock);
-        if put_back {
-            self.snapshots_written();
-        }
         // A control whose file holds the value is only sent, and only when
         // its live value may differ (a drag, a failed write or reset, ports
         // in doubt).
@@ -5299,11 +5294,15 @@ impl Host {
                 Some(error)
             }
         };
+        // Whether any value reached an engine (stopped, nothing plays).
+        let playing = self.run.is_some();
+        let mut reached = playing && sent_writes.iter().any(|s| *s);
         for control in &sends {
             let ports = control.target.ports.iter().cloned();
             let value = control.value.unwrap_or_default();
             let taken = self.send_ramps(ports.map(|p| (p, value)).collect());
             sent &= taken;
+            reached |= playing && taken;
             if taken {
                 // Live and file agree again: nothing is unsaved.
                 self.panel.release(&control.instance, &control.parameter);
@@ -5314,6 +5313,36 @@ impl Host {
                 self.panel
                     .drag(&control.instance, &control.parameter, value, false);
             }
+        }
+        // ADR 0041 §7: which undo snapshot stays, decided under the lock.
+        let mut undo_note = None;
+        let undo_state = match (&failure, &undo) {
+            (_, None) => "unchanged",
+            (None, Some(_)) => "new",
+            // Something played: the new undo snapshot holds what played
+            // before the restore, which is what an undo must bring back.
+            (Some(_), Some(_)) if reached => "new",
+            (Some(_), Some((written, before))) => {
+                match snapshots::put_back(&self.dir, &lock, written, before) {
+                    Ok(true) => "previous",
+                    Ok(false) => {
+                        undo_note = Some(format!(
+                            "{SNAPSHOTS_FILE} changed meanwhile (another writer); its undo snapshot was left as it is"
+                        ));
+                        "changed"
+                    }
+                    Err(error) => {
+                        undo_note = Some(format!(
+                            "the undo snapshot from before could not be put back: {error}"
+                        ));
+                        "new"
+                    }
+                }
+            }
+        };
+        drop(lock);
+        if undo_state == "previous" {
+            self.snapshots_written();
         }
         // Pushed once every value is sent and written, so it shows them all.
         if !writes.is_empty() || !sends.is_empty() {
@@ -5327,13 +5356,20 @@ impl Host {
         }
         let addresses: Vec<&str> = writes.iter().map(|w| w.address.as_str()).collect();
         if let Some(error) = failure {
+            let undo_said = match undo_state {
+                "new" => "the undo snapshot holds what played before",
+                "previous" => "nothing played, so the undo snapshot is the one from before",
+                "changed" => "the undo snapshot is as another writer left it",
+                _ => "the undo snapshot did not change",
+            };
+            let tail = undo_note.map(|n| format!("; {n}")).unwrap_or_default();
             return Err(fail_with(
                 error.code(),
-                format!("{error}; the values were sent live and stay unsaved"),
+                format!("{error}; the values were sent live and stay unsaved; {undo_said}{tail}"),
                 json!({
                     "name": name,
                     "restored": restore.edits.len(),
-                    "undoKept": put_back,
+                    "undoSnapshot": undo_state,
                     "unwritten": addresses,
                     "sent": sent,
                     "skipped": skipped,
@@ -5350,6 +5386,7 @@ impl Host {
             "sent": sent,
             "skipped": skipped,
             "clamped": clamped,
+            "undoSnapshot": undo_state,
             "note": note,
         }))
     }
@@ -5418,9 +5455,13 @@ impl Host {
                 ),
             ));
         }
-        if Panel::new(&project_after, &self.registry)
-            .target(&instance, &parameter)
-            .is_none()
+        // Putting a name back in needs no control: a stale one (no longer a
+        // parameter, which stops the project planning) is removed so, as long
+        // as the text plans afterwards.
+        if exclude
+            && Panel::new(&project_after, &self.registry)
+                .target(&instance, &parameter)
+                .is_none()
         {
             return Err(not_editable());
         }
@@ -5486,8 +5527,10 @@ impl Host {
                             self.reconcile(panel);
                         }
                         // A project with includes (or a text the running
-                        // project cannot take): the reload applies the file
-                        // and pushes `describe` then.
+                        // project cannot take): it is not rebuilt (the reload
+                        // applies the file; an exclusion changes nothing it
+                        // plays, so it pushes nothing), and the panel is taken
+                        // from the project as checked above.
                         Err(_) => deferred = true,
                     }
                 }
@@ -5498,11 +5541,12 @@ impl Host {
                     }
                 }
             }
-            if !deferred {
-                let describe = self.describe(false);
-                self.broadcast(&describe);
-                self.push_graph(false);
+            if deferred {
+                self.reconcile(Panel::new(&project_after, &self.registry));
             }
+            let describe = self.describe(false);
+            self.broadcast(&describe);
+            self.push_graph(false);
         }
         Ok(json!({
             "type": "snapshot.excluded",

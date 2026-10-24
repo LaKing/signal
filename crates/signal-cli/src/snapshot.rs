@@ -265,9 +265,12 @@ pub(crate) fn run(args: &SnapshotArgs, registry: &Registry, json: bool) -> Resul
             let checked = signal_project::Project::from_sources_in(files, project)
                 .map_err(Failure::Invalid)?;
             checked.plan(registry).map_err(Failure::Invalid)?;
-            if Panel::new(&checked, registry)
-                .target(instance, parameter)
-                .is_none()
+            // Putting a stale name back in needs no control (it is removed so
+            // as long as the text plans afterwards).
+            if !*include
+                && Panel::new(&checked, registry)
+                    .target(instance, parameter)
+                    .is_none()
             {
                 return Err(not_control());
             }

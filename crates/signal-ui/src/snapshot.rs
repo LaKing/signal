@@ -286,12 +286,29 @@ pub fn restore_files_with(
     match restore_locked(dir, &lock, &panel, &edited.result) {
         Ok(restored) => Ok(restored),
         Err(error) => {
-            if edited.wrote
-                && let Some(before) = &edited.before
-            {
-                let _ = snapshot::put_back(dir, &lock, &edited.after, before);
-            }
-            Err(error)
+            // Nothing is sent from the files alone: the undo snapshot goes
+            // back to the one before, and the error says how that went.
+            let undo = match (edited.wrote, &edited.before) {
+                (true, Some(before)) => {
+                    match snapshot::put_back(dir, &lock, &edited.after, before) {
+                        Ok(true) => "the undo snapshot from before was put back".to_owned(),
+                        Ok(false) => format!(
+                            "{} changed meanwhile (another writer); its undo snapshot was left as it is",
+                            snapshot::SNAPSHOTS_FILE
+                        ),
+                        Err(e) => {
+                            format!("the undo snapshot from before could not be put back: {e}")
+                        }
+                    }
+                }
+                _ => "the undo snapshot did not change".to_owned(),
+            };
+            Err(match error {
+                RestoreError::Write(e) => {
+                    RestoreError::Write(ProjectWriteError::Failed(format!("{e}; {undo}")))
+                }
+                other => other,
+            })
         }
     }
 }

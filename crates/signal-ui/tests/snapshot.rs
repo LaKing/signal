@@ -683,46 +683,81 @@ impl Drop for Immutable {
     }
 }
 
-/// Review 2 of 2026-10-24, 2: a restore whose project.toml write fails (an
-/// immutable file) leaves the undo snapshot from before, not the one it
-/// wrote for itself, since both are written under one lock and the undo
-/// snapshot is put back.
-fn a_failed_restore_keeps_the_undo_snapshot(transport: Transport) {
+/// Review 3 of 2026-10-24, 1 (the operator's decision): a restore whose
+/// project.toml write fails (an immutable file) still sends its values;
+/// playing, the new undo snapshot is kept, since it holds what played
+/// before (here a live value never saved), and undo brings that back.
+/// Stopped (nothing reaches an engine), the undo snapshot from before is
+/// put back. Both writes are under one lock.
+fn a_failed_restore_keeps_what_played_for_undo(transport: Transport) {
     let mut rig = tone("snapshot-undo-kept", transport);
     let (mut ws, _) = rig.client();
     fs::write(
         rig.dir.join(SNAPSHOTS_FILE),
-        "schema_version = 1\n\n[snapshots.a]\n\"/a.freq\" = 330\n\n[snapshots.b]\n\"/a.freq\" = 550\n",
+        "schema_version = 1\n\n[snapshots.s]\n\"/b.freq\" = 330\n\n[snapshots.t]\n\"/b.freq\" = 550\n",
     )
     .unwrap();
+    // A live value the file does not hold.
     rig.request(
         &mut ws,
         1,
-        json!({"type": "snapshot.restore", "name": "a"}),
-        "snapshot.restored",
+        json!({"type": "set", "address": "/b.freq", "value": 100}),
+        "ack",
     );
-    let before = fs::read(rig.dir.join(SNAPSHOTS_FILE)).unwrap();
-    assert_eq!(
-        snapshot::read(&rig.dir).unwrap().0.undo.unwrap()["/a.freq"],
-        440.0
-    );
-    let Some(locked) = Immutable::new(&rig.dir.join("project.toml")) else {
+    let path = rig.dir.join("project.toml");
+    let Some(locked) = Immutable::new(&path) else {
         return rig.finish();
     };
     let refused = rig.request(
         &mut ws,
         2,
-        json!({"type": "snapshot.restore", "name": "b"}),
+        json!({"type": "snapshot.restore", "name": "s"}),
+        "error",
+    );
+    assert_eq!(refused["code"], "write-failed", "{refused}");
+    assert_eq!(refused["undoSnapshot"], "new", "{refused}");
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("holds what played before"),
+        "{refused}"
+    );
+    assert_eq!(
+        snapshot::read(&rig.dir).unwrap().0.undo.unwrap()["/b.freq"],
+        100.0,
+        "the live value that played"
+    );
+    drop(locked);
+    rig.request(
+        &mut ws,
+        3,
+        json!({"type": "snapshot.undo"}),
+        "snapshot.undone",
+    );
+    let now = describe(&mut rig, &mut ws, 4);
+    assert_eq!(
+        control(&now, "/b.freq")["base"],
+        100.0,
+        "the live value is back"
+    );
+
+    // Stopped: nothing reaches an engine, so the undo snapshot from before
+    // is put back.
+    rig.request(&mut ws, 5, json!({"type": "transport.stop"}), "transport");
+    let before = fs::read(rig.dir.join(SNAPSHOTS_FILE)).unwrap();
+    let Some(locked) = Immutable::new(&path) else {
+        return rig.finish();
+    };
+    let refused = rig.request(
+        &mut ws,
+        6,
+        json!({"type": "snapshot.restore", "name": "t"}),
         "error",
     );
     drop(locked);
-    assert_eq!(refused["code"], "write-failed", "{refused}");
-    assert_eq!(refused["undoKept"], true, "{refused}");
-    assert_eq!(
-        fs::read(rig.dir.join(SNAPSHOTS_FILE)).unwrap(),
-        before,
-        "the undo snapshot from before"
-    );
+    assert_eq!(refused["undoSnapshot"], "previous", "{refused}");
+    assert_eq!(fs::read(rig.dir.join(SNAPSHOTS_FILE)).unwrap(), before);
     rig.finish();
 }
 
@@ -832,8 +867,127 @@ fn an_exclude_is_checked_on_the_files(transport: Transport) {
     rig.finish();
 }
 
+/// Review 3 of 2026-10-24, 2: in a project that includes another (ADR
+/// 0035), the running project is not rebuilt by an exclusion, but the
+/// panel is: `describe` is pushed with the control out of snapshots, and a
+/// save leaves it out.
+fn an_exclude_with_includes_updates_the_panel(transport: Transport) {
+    let base = std::env::temp_dir().join(format!(
+        "signal-ui-include-source-{transport:?}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&base);
+    let included = base.join("inc");
+    fs::create_dir_all(&included).unwrap();
+    fs::write(
+        included.join("project.toml"),
+        "schema_version = 1\n\n[project]\nname = \"inc\"\nsample_rate = 48000\nseed = 2\n\n[instances]\nosc = { module = \"std.sine_osc\", freq = 110 }\nout = { module = \"std.audio_out\", gain = 0.5 }\n\n[wiring]\nconnections = [{ from = \"osc.out\", to = \"out.l\" }]\n",
+    )
+    .unwrap();
+    let host = base.join("host");
+    fs::create_dir_all(&host).unwrap();
+    fs::write(
+        host.join("project.toml"),
+        common::TONE.replace(
+            "[wiring]",
+            &format!(
+                "inc = {{ project = \"{}\" }}\n\n[wiring]",
+                included.display()
+            ),
+        ),
+    )
+    .unwrap();
+    let mut rig = rig(
+        "snapshot-include",
+        Options {
+            transport,
+            project: Some(host),
+            ..Options::default()
+        },
+    );
+    let (mut ws, _) = rig.client();
+    let (mut other, _) = rig.client();
+    drain(&mut rig, &mut other, 200);
+    rig.request(
+        &mut ws,
+        1,
+        json!({"type": "snapshot.exclude", "address": "/a.freq"}),
+        "snapshot.excluded",
+    );
+    let pushed: Vec<Value> = drain(&mut rig, &mut other, 300)
+        .into_iter()
+        .filter(|m| m["type"] == "describe")
+        .collect();
+    assert!(!pushed.is_empty(), "describe is pushed");
+    assert_eq!(
+        control(pushed.last().unwrap(), "/a.freq")["inSnapshots"],
+        false
+    );
+    rig.request(
+        &mut ws,
+        2,
+        json!({"type": "snapshot.save", "name": "S"}),
+        "snapshot.saved",
+    );
+    let (all, _) = snapshot::read(&rig.dir).unwrap();
+    assert!(!all.snapshots["S"].contains_key("/a.freq"));
+    assert!(all.snapshots["S"].contains_key("/b.freq"));
+    rig.finish();
+    let _ = fs::remove_dir_all(&base);
+}
+
+/// Review 3 of 2026-10-24, 5: a name in `snapshot_exclude` that is no
+/// parameter any more (another program changed the module) stops the
+/// project planning; putting it back in (`exclude: false`) removes it
+/// without a control to check, since the text plans afterwards.
+fn a_stale_exclusion_can_be_removed(transport: Transport) {
+    let mut rig = tone("snapshot-exclude-stale", transport);
+    let (mut ws, _) = rig.client();
+    rig.request(
+        &mut ws,
+        1,
+        json!({"type": "snapshot.exclude", "address": "/env.decay_ms"}),
+        "snapshot.excluded",
+    );
+    rig.request(&mut ws, 2, json!({"type": "transport.stop"}), "transport");
+    let path = rig.dir.join("project.toml");
+    let stale = fs::read_to_string(&path).unwrap().replace(
+        "module = \"std.exp_env\", decay_ms = 50,",
+        "module = \"std.sine_osc\",",
+    );
+    assert!(
+        stale.contains("snapshot_exclude = [\"decay_ms\"]"),
+        "{stale}"
+    );
+    fs::write(&path, &stale).unwrap();
+    let removed = rig.request(
+        &mut ws,
+        3,
+        json!({"type": "snapshot.exclude", "address": "/env.decay_ms", "exclude": false}),
+        "snapshot.excluded",
+    );
+    assert_eq!(removed["written"], true);
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("snapshot_exclude"), "{text}");
+    assert!(
+        text.contains("env = { module = \"std.sine_osc\" }"),
+        "{text}"
+    );
+    // Leaving it out again is refused: it is no control.
+    let refused = rig.request(
+        &mut ws,
+        4,
+        json!({"type": "snapshot.exclude", "address": "/env.decay_ms"}),
+        "error",
+    );
+    assert_eq!(refused["code"], "does-not-load", "{refused}");
+    rig.finish();
+}
+
 both!(
-    a_failed_restore_keeps_the_undo_snapshot,
+    an_exclude_with_includes_updates_the_panel,
+    a_stale_exclusion_can_be_removed,
+    a_failed_restore_keeps_what_played_for_undo,
     the_undo_snapshot_holds_what_the_restore_changes,
     an_exclude_does_not_swallow_a_pending_edit,
     an_exclude_is_checked_on_the_files,
