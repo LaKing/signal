@@ -161,7 +161,7 @@ The `std.*` types are listed with their class and category in the rustdoc of `cr
 |---|---|
 | `core` | `add`, `sub`, `mul`, `div`, `neg`, `abs`, `min`, `max`, `clamp`, `scale`, `mod`, `fract`, `floor`, `round`, `sign`; `sqrt`, `exp`, `log`, `pow`, `sin`, `cos`, `tan`, `tanh`, `atan2`, `sin_cycles`; `const`, `sample_rate`, `frames`; `compare`, `select`, `and`, `or`, `not`; `gain`, `mix`, `pan`, `unit_delay`; `phasor`, `counter`, `integrator`; `buffer1k`, `buffer64k`, `buffer1m`, `table<N>`; `latch`, `to_events`, `route`; `random`; `pack<N>`, `unpack<N>`, `index<N>`, `reduce<N>`, `vadd<N>`, `vmul<N>` |
 | `generator` | `sine_osc`, `osc`, `fm_op`, `wavetable`, `lfo`, `noise` |
-| `filter` | `svf`, `onepole`, `ladder`, `biquad`, `dc_block`, `lag`, `tanh_shaper` |
+| `filter` | `svf`, `onepole`, `ladder`, `biquad`, `dc_block`, `lag`, `tanh_shaper`, `tanh_shaper_os8` |
 | `envelope` | `exp_env`, `adsr` |
 | `delay` | `delay`, `comb`, `allpass_delay`, `fdn_reverb` |
 | `physical` | `string`, `modal`, `mass_spring`, `exciter`, `mesh2d_audio` |
@@ -175,6 +175,8 @@ The `std.*` types are listed with their class and category in the rustdoc of `cr
 - `fdn_reverb`: 8 lines, Householder matrix, distinct prime lengths scaled by `size`, per-line gains for the T60 `decay_s` and damping one-poles, `predelay_ms`, `mix`; stereo in and out (mono: `in_l` only). Loop gain ≤ max line gain < 1 (at most 0.9982 from 44.1 kHz up).
 - `fm_op`: a phase-modulation operator (ratio or fixed frequency, `pm` in cycles, self-feedback through the mean of its last two outputs, `level`). Not band-limited: sidebands beyond sr/2 alias.
 - `wavetable`: eight built-in tables (sine, saw, square, triangle, vowels a, e, i, o) morphed by `position`, one mip level per octave so that, at a constant pitch and without `pm`, no harmonic exceeds sr/2, crossfaded between levels.
+
+**The oversampled shaper** (M3, `experiments/m3-tanh-aliasing/`). `tanh_shaper_os8` has `tanh_shaper`'s ports and `drive`, and runs its first-order ADAA at 8× the rate through linear-phase FIR resampling (`dsp-conventions.md`, "Antialiasing"). It delays by 73.8125 frames at every rate, a property its rustdoc and `doc` state, since a direct type declares no latency and the engine compensates none, and its `out` declares no range: a clipped high tone overshoots to about 1.27.
 
 **The core arithmetic, functions, constants and comparisons** (M2.10-1) are direct, at divisor 1, and **total**: finite inputs give finite outputs.
 - **Results are clamped to ±10⁶, the engine's magnitude bound (`semantics.md` §7), so a core primitive never faults on its own.** That bounds `div`, `exp`, `pow` and `tan`, which grow beyond it (e.g. `div(1, 1e−7)`, `exp(14)`, `pow(10, 7)`, `tan` near π/2 all give ±10⁶), and every other M2.10-1 type's output on an input that a fan-in sum or a connection scale took beyond the bound. One constant, `SIGNAL_BOUND` in `signal-std`, holds it. The types that predate M2.10-1 (`add`, `sub`, `mul`, `abs`, `min`, `max`, `scale`, `clamp`, `gain`, `mix`, `pan`, `unit_delay`) are unchanged: `mul`, `add`, `sub`, `scale` and `gain` can still exceed the bound, and the fault guard then mutes them as before.

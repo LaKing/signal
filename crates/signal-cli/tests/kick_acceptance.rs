@@ -322,16 +322,16 @@ const V6_SKIP: u64 = 1000;
 /// whole-hertz V6 tone, so the Hann window adds no leakage.
 const V6_FRAMES: usize = 96_000;
 
-/// `std.tanh_shaper` at drive 20 on a pure `std.sine_osc` tone of `freq` Hz at
-/// 96 kHz: the inharmonic ratio in dB with ADAA (the shaper), and of naive
-/// `tanh(20·x)` on the same sine for comparison.
-fn shaper_aliasing(freq: u32) -> (f64, f64) {
+/// `shaper` (a type with `std.tanh_shaper`'s ports) at drive 20 on a pure
+/// `std.sine_osc` tone of `freq` Hz at 96 kHz: the inharmonic ratio in dB of
+/// the shaper, and of naive `tanh(20·x)` on the same sine for comparison.
+fn shaper_aliasing(shaper: &str, freq: u32) -> (f64, f64) {
     let text = format!(
         "schema_version = 1\n\
          [project]\nname = \"shaper\"\nsample_rate = 96000\n\
          [instances]\n\
          osc = {{ module = \"std.sine_osc\", freq = {freq} }}\n\
-         shaper = {{ module = \"std.tanh_shaper\", drive = 20 }}\n\
+         shaper = {{ module = \"{shaper}\", drive = 20 }}\n\
          out = {{ module = \"std.audio_out\" }}\n\
          [wiring]\nconnections = [\n\
            {{ from = \"osc.out\", to = \"shaper.in\" }},\n\
@@ -356,23 +356,28 @@ fn shaper_aliasing(freq: u32) -> (f64, f64) {
     (ratio(&shaped), ratio(&naive))
 }
 
-/// V6 (gating, owner decision sq-4aece389 option A): the shaper's inharmonic
-/// energy is at least 60 dB below the fundamental at 1009, 2003, 4001 and
-/// 8009 Hz. These tones do not divide 96 kHz, so the aliases land between the
-/// harmonics and are counted. Naive tanh is printed for comparison.
+/// V6 (gating, owner decision sq-4aece389 option A): the oversampled shaper
+/// `std.tanh_shaper_os8`'s inharmonic energy is at least 60 dB below the
+/// fundamental at 1009, 2003, 4001 and 8009 Hz. These tones do not divide
+/// 96 kHz, so the aliases land between the harmonics and are counted. Naive
+/// tanh is printed for comparison.
+///
+/// Since M3 (verdict 2026-10-23, `experiments/m3-tanh-aliasing/verdict.md`)
+/// V6 applies to `std.tanh_shaper_os8`, the shaper a project chooses where
+/// aliasing matters; the threshold is unchanged. `std.tanh_shaper` (the
+/// kick's, first-order ADAA at the frame rate) stays as it was and measures,
+/// against naive tanh, 1009 Hz 49.0 / 43.8 dB, 2003 Hz 33.5 / 27.3 dB,
+/// 4001 Hz 26.1 / 18.5 dB, 8009 Hz 22.0 / 13.1 dB
+/// (`docs/testing-and-evaluation.md`, "The V6 measurement").
 #[test]
-#[ignore = "std.tanh_shaper misses 60 dB on off-divisor tones; follow-up issue \
-            2026-10-11-follow-up-bring-std-tanh-shaper-aliasing-to-60-db-on-off-div. \
-            Measured ADAA / naive tanh: 1009 Hz 49.0 / 43.8 dB, 2003 Hz 33.5 / 27.3 dB, \
-            4001 Hz 26.1 / 18.5 dB, 8009 Hz 22.0 / 13.1 dB"]
 fn v6_shaper_aliasing_at_least_60_db() {
     let mut misses = Vec::new();
     for freq in [1009, 2003, 4001, 8009] {
-        let (adaa, naive) = shaper_aliasing(freq);
-        println!("V6 {freq} Hz: ADAA {adaa:.1} dB, naive tanh {naive:.1} dB");
+        let (shaped, naive) = shaper_aliasing("std.tanh_shaper_os8", freq);
+        println!("V6 {freq} Hz: std.tanh_shaper_os8 {shaped:.1} dB, naive tanh {naive:.1} dB");
         // A NaN measurement is a miss, not a pass.
-        if adaa.is_nan() || adaa < 60.0 {
-            misses.push(format!("{freq} Hz: {adaa:.1} dB"));
+        if shaped.is_nan() || shaped < 60.0 {
+            misses.push(format!("{freq} Hz: {shaped:.1} dB"));
         }
     }
     assert!(misses.is_empty(), "below 60 dB: {}", misses.join(", "));

@@ -64,7 +64,7 @@
   - Sum the difference `F(u[n]) − F(u[n−1])` in a form with as little cancellation as possible.
   - ADAA delays the signal by half a frame. Every ADAA primitive documents that delay.
 - **`std.ladder`'s `tanh` is not antialiased.** It sits inside the zero-delay feedback loop, where ADAA's half frame of delay would detune the cutoff and the self-oscillation.
-- **Oversampling is not used in M1.** The M3 lab experiment compares it with ADAA (ADR 0015 governs promotion): `experiments/m3-tanh-aliasing/` (`lab.tanh_*`), awaiting the owner's verdict.
+- **Oversampling is used by one std type, `std.tanh_shaper_os8`** (since M3). It runs `std.tanh_shaper`'s first-order ADAA at 8× the rate, raised and brought back by three ×2 linear-phase FIR stages (`signal_std::oversample`: Kaiser-windowed sinc, β = 9, designed in `prepare` in normalized frequency so the coefficients are the same at every rate; polyphase, fixed work per frame). Oversampling costs a delay, 73.8125 frames, which the type documents as an ADAA primitive documents its half frame, and a band-limited clipped output overshoots 1. So it is a separate type, chosen where aliasing matters and the delay does not, and `std.tanh_shaper` stays the default shaper. The comparison and the verdict are `experiments/m3-tanh-aliasing/` (ADR 0015); its other candidates stay in the lab (`lab.tanh_*`).
 - Oscillators produce only band-limited waveforms. A waveform with discontinuities needs its own antialiasing: see the next section.
 
 ## Band-limited oscillators: polyBLEP and polyBLAMP

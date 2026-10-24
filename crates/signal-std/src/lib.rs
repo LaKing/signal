@@ -101,6 +101,7 @@
 //! | `std.fm_op` | [`FmOp`] | direct | `generator` |
 //! | `std.wavetable` | [`Wavetable`] | direct | `generator` |
 //! | `std.playhead` | [`Playhead`] | direct | `event` |
+//! | `std.tanh_shaper_os8` | [`TanhShaperOs8`] | direct | `filter` |
 //!
 //! The seven `<N>` types are one type per width N of [`VECTOR_WIDTHS`] (2, 4, 8, 16,
 //! 64, 256, 1024), named with the width as a suffix: `std.pack4`,
@@ -137,6 +138,12 @@
 //! `std.biquad`, `std.comb`, `std.allpass_delay`, `std.fdn_reverb`,
 //! `std.fm_op` and `std.wavetable`. Each rustdoc gives the formula, its
 //! source, and why it stays bounded at every setting.
+//!
+//! `std.tanh_shaper_os8` (M3, promoted from the lab after the verdict of
+//! 2026-10-23, `experiments/m3-tanh-aliasing/`) is `std.tanh_shaper`'s
+//! saturation at 8× the rate, with the same ports and parameter: far less
+//! aliasing, at 73.8125 frames of delay and an output that overshoots 1. Its
+//! resampling filters are [`oversample`].
 //!
 //! Musical time (tempo, beats) lives here, in [`Transport`] (counted ticks)
 //! and [`Playhead`] (a position signal, ADR 0033), never in the core
@@ -192,6 +199,7 @@ mod noise;
 mod note_seq;
 mod onepole;
 mod osc;
+pub mod oversample;
 mod pan;
 mod particles;
 pub mod pattern;
@@ -205,6 +213,7 @@ mod step_seq8;
 mod string;
 mod svf;
 mod tanh_shaper;
+mod tanh_shaper_os8;
 mod transport;
 mod unit_delay;
 mod vector;
@@ -262,6 +271,7 @@ pub use step_seq8::StepSeq8;
 pub use string::StringModel;
 pub use svf::Svf;
 pub use tanh_shaper::TanhShaper;
+pub use tanh_shaper_os8::TanhShaperOs8;
 pub use transport::Transport;
 pub use unit_delay::UnitDelay;
 pub use vector::{Index, Pack, Reduce, Unpack, VECTOR_WIDTHS, Vadd, Vmul};
@@ -286,7 +296,7 @@ use signal_core::{
 /// left out: the estimate does not divide by a rate divisor, so a per-tick
 /// figure would overstate them up to 800 times. Every other type takes the
 /// engine's default.
-pub const COST_NS: [(&str, u32); 76] = [
+pub const COST_NS: [(&str, u32); 77] = [
     ("std.abs", 11),
     ("std.add", 11),
     ("std.adsr", 44),
@@ -381,6 +391,11 @@ pub const COST_NS: [(&str, u32); 76] = [
     // estimate (review of M2.10-8; the same section).
     ("std.exciter", 47),
     ("std.modal", 956),
+    // M3 (promoted 2026-10-23): `std.tanh_shaper`'s 30 scaled by the
+    // experiment's measured ratio, 249 against 55 ns per frame at drive 20
+    // (`signal bench --only`, `experiments/m3-tanh-aliasing/README.md`, CPU),
+    // rounded up.
+    ("std.tanh_shaper_os8", 136),
 ];
 
 /// Registers every `std.*` primitive type in `registry`, with its static
@@ -476,6 +491,7 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<FmOp>(),
         direct::<Wavetable>(),
         direct::<Playhead>(),
+        direct::<TanhShaperOs8>(),
     ] {
         registry.register(module_type)?;
     }
@@ -840,6 +856,9 @@ mod tests {
     /// ADR 0033: the position signal.
     const PLAYHEAD: [&str; 1] = ["std.playhead"];
 
+    /// M3: the oversampled shaper, promoted from the lab.
+    const SHAPER_OS8: [&str; 1] = ["std.tanh_shaper_os8"];
+
     /// M2.10 (the owner's list): the native DSP primitives, with their
     /// categories.
     const DSP: [(&str, &str); 6] = [
@@ -926,6 +945,7 @@ mod tests {
                 + SEQUENCERS.len()
                 + LADDER.len()
                 + PLAYHEAD.len()
+                + SHAPER_OS8.len()
                 + DSP.len()
                 + vector::types().len()
         );
@@ -935,6 +955,7 @@ mod tests {
             .chain(SEQUENCERS)
             .chain(LADDER)
             .chain(PLAYHEAD)
+            .chain(SHAPER_OS8)
             .chain(DSP.map(|(name, _)| name))
             .chain(vectors)
         {
@@ -962,6 +983,7 @@ mod tests {
                 + SEQUENCERS.len()
                 + LADDER.len()
                 + PLAYHEAD.len()
+                + SHAPER_OS8.len()
                 + DSP.len()
                 + vector::types().len()
         );

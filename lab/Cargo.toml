@@ -9,13 +9,16 @@ publish.workspace = true
 
 [features]
 # Without it the crate is empty and links nothing beyond signal-core: the
-# default build never links wgpu through here (M2.6-4, AC2b).
-lab = ["dep:signal-gpu"]
+# default build never links wgpu through here (M2.6-4, AC2b). The M3 tanh
+# candidates build on `signal_std::oversample`, the resampling of the
+# promoted `std.tanh_shaper_os8`.
+lab = ["dep:signal-gpu", "dep:signal-std"]
 
 [dependencies]
 signal-core = { workspace = true }
 libm = { workspace = true }
 signal-gpu = { workspace = true, optional = true }
+signal-std = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The noop device, for the job path and kernel validation where no GPU is usable.

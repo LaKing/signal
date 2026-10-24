@@ -2,11 +2,11 @@
 
 The first M3 lab experiment (`docs/roadmap.md`, M3 Evaluation loop), run by an agent for follow-up issue `2026-10-11-follow-up-bring-std-tanh-shaper-aliasing-to-60-db-on-off-div`. V6 asks that `std.tanh_shaper` at drive 20 and 96 kHz keep its inharmonic (aliased) energy at least 60 dB below the fundamental at 1009, 2003, 4001 and 8009 Hz. The current shaper (first-order ADAA) measures 49.0 / 33.5 / 26.1 / 22.0 dB. The threshold stays where it is.
 
-**Status: awaiting the owner's verdict** (`verdict.md`, empty). Nothing in `std` has changed: `std.tanh_shaper`, V6's `#[ignore]` and every golden are as they were. ADR 0015 lets a candidate be promoted only after the contract suite, benchmarks and a recorded human verdict, and promotion changes renders (see "What promotion would change").
+**Status: verdict given 2026-10-23, see `verdict.md`.** The owner heard no difference and left the choice to the operator. `lab.tanh_os8_adaa1` was **promoted as a new type, `std.tanh_shaper_os8`** (`crates/signal-std/src/tanh_shaper_os8.rs`, its filters in `crates/signal-std/src/oversample.rs`), beside `std.tanh_shaper`, which is unchanged. V6 is retargeted to the new type at the same conditions and threshold, and passes (141.2 / 130.9 / 119.0 / 101.6 dB); its `#[ignore]` is gone. No golden and no project changed: the promotion adds a type and replaces none, so "What promotion would change" below did not happen. The other four candidates stay in `lab/` as this experiment's record, built on the std resampling. The measurements below were recorded under the lab name `lab.tanh_os8_adaa1`; `std.tanh_shaper_os8` is the same DSP and reproduces them: the table printed by `tanh_aliasing.rs` and all 24 render hashes of `render.sh`, rerun on 2026-10-23 after the promotion, are identical. `render.sh` and `tanh_aliasing.rs` now name `std.tanh_shaper_os8`, so a new package puts its renders under `<input>/tanh_shaper_os8/`.
 
 ## The candidates
 
-All five are `lab.*` primitives in `lab/src/tanh_shapers.rs`. They compile only with the `lab` feature. Each has `std.tanh_shaper`'s ports and parameter (`in`, `out`, `drive` 0.1–20, default 1, combine `add`), so a project switches to one by changing the type name and nothing else.
+All five were `lab.*` primitives in `lab/src/tanh_shapers.rs`, compiled only with the `lab` feature; `lab.tanh_os8_adaa1` is now `std.tanh_shaper_os8`. Each has `std.tanh_shaper`'s ports and parameter (`in`, `out`, `drive` 0.1–20, default 1, combine `add`), so a project switches to one by changing the type name and nothing else.
 
 | Type | Method | Delay (frames) | CPU, ns per frame (median of 3 runs) |
 |---|---|---:|---:|
@@ -14,7 +14,7 @@ All five are `lab.*` primitives in `lab/src/tanh_shapers.rs`. They compile only 
 | `lab.tanh_adaa2` | second-order ADAA at the frame rate (Bilbao et al. 2017), F₂ through Li₂; its inner mean integrated by 3-point Gauss–Legendre for steps below 0.01, output clamped to [−1, 1] | 1 | 97 |
 | `lab.tanh_os2_adaa1` | ×2 oversampling, first-order ADAA at 2·sr | 65.25 | 139 |
 | `lab.tanh_os4_adaa1` | ×4 oversampling, first-order ADAA at 4·sr | 71.625 | 180 |
-| `lab.tanh_os8_adaa1` | ×8 oversampling, first-order ADAA at 8·sr | 73.8125 | 249 |
+| `std.tanh_shaper_os8` (was `lab.tanh_os8_adaa1`) | ×8 oversampling, first-order ADAA at 8·sr | 73.8125 | 249 |
 | `lab.tanh_os8` | ×8 oversampling, plain `tanh` at 8·sr | 73.75 | 184 |
 
 **Oversampling.** `u = drive·in` is raised by cascaded ×2 stages, shaped at the high rate, and brought back through the same stages. Every stage is a linear-phase FIR (Kaiser-windowed sinc, β = 9, about 90 dB stopband), used polyphase both ways:
@@ -27,7 +27,7 @@ The coefficients are computed in `prepare` in normalized frequency, so they are 
 
 **ADAA2's numerics.** The first version's inner quotient was a difference of F₂ values, which left a cancellation floor of about 3·10⁻⁷ absolute near u = 0 and for steps just above its 10⁻⁵ switch. The quotient is now integrated directly by three-point Gauss–Legendre for steps below 0.01. On slow sines with steps from 2·10⁻⁶ to 10⁻³ the output stays within its smoothing term of `tanh` one frame late, and the error falls as Δu²: 6.9·10⁻⁸ at Δu ≈ 9·10⁻⁴, 4.4·10⁻¹⁴ at 2·10⁻⁶ (`adaa2_has_no_cancellation_floor_on_slow_inputs`). Its output is clamped to [−1, 1], because rounding could exceed the declared range by about 10⁻¹⁰.
 
-**Contract and real-time rules.** All five pass the contract suite: partition invariance, reset determinism, finite output, no allocation, state-output honesty, rate agnosticism and no subnormals, at 44.1, 48, 96 and 192 kHz (`lab/tests/contract.rs`). A render with every candidate in one project gives the same audio hash on 1 thread and on 4 workers (`the_candidates_render_the_same_on_any_thread_count`). They use no `unsafe` and no new crate: `libm` only, already a dependency of `lab`. Each frame does fixed work: no data-dependent loops, and no allocation outside `prepare`. They are bounded synchronous calls, like `std.tanh_shaper`, so they need no latent boundary.
+**Contract and real-time rules.** All five pass the contract suite: partition invariance, reset determinism, finite output, no allocation, state-output honesty, rate agnosticism and no subnormals, at 44.1, 48, 96 and 192 kHz (`lab/tests/contract.rs`; for `std.tanh_shaper_os8`, `crates/signal-std/tests/contract.rs`). A render with every candidate in one project gives the same audio hash on 1 thread and on 4 workers (`the_candidates_render_the_same_on_any_thread_count`). They use no `unsafe` and no new crate: `libm`, already a dependency of `lab`, and since the promotion the workspace's own `signal-std` (its `oversample` module), which `lab` takes with its `lab` feature. Each frame does fixed work: no data-dependent loops, and no allocation outside `prepare`. They are bounded synchronous calls, like `std.tanh_shaper`, so they need no latent boundary.
 
 ## Measured results
 
@@ -42,7 +42,7 @@ Everything below is a measurement (rule 6: metrics inform, the owner decides). V
 | `lab.tanh_adaa2` | 53.9 | 38.9 | 32.0 | 29.1 |
 | `lab.tanh_os2_adaa1` | **125.0** | **76.0** | 53.3 | 39.6 |
 | `lab.tanh_os4_adaa1` | **141.4** | **131.7** | **92.4** | **62.7** |
-| `lab.tanh_os8_adaa1` | **141.2** | **130.9** | **119.0** | **101.6** |
+| `std.tanh_shaper_os8` | **141.2** | **130.9** | **119.0** | **101.6** |
 | `lab.tanh_os8` | **141.1** | **130.9** | **119.0** | **73.2** |
 
 ### 48 kHz, drive 20 (the studio projects' rate)
@@ -54,7 +54,7 @@ Everything below is a measurement (rule 6: metrics inform, the owner decides). V
 | `lab.tanh_adaa2` | 39.1 | 32.0 | 29.1 | 19.6 |
 | `lab.tanh_os2_adaa1` | **75.8** | 53.2 | 39.5 | 41.2 |
 | `lab.tanh_os4_adaa1` | **127.0** | **92.2** | **62.7** | 56.9 |
-| `lab.tanh_os8_adaa1` | **126.6** | **119.4** | **101.5** | **79.5** |
+| `std.tanh_shaper_os8` | **126.6** | **119.4** | **101.5** | **79.5** |
 | `lab.tanh_os8` | **126.6** | **119.5** | **73.1** | 45.7 |
 
 ### Lower drives
@@ -66,7 +66,7 @@ Everything below is a measurement (rule 6: metrics inform, the owner decides). V
 | `lab.tanh_adaa2` | 143.2 / 79.5 / 48.8 / 35.8 | 251.9 / 162.8 / 89.3 / 55.7 | 79.6 / 48.8 / 35.8 / 22.1 | 163.0 / 89.3 / 55.7 / 29.6 |
 | `lab.tanh_os2_adaa1` | 229.9 / 173.8 / 120.3 / 67.8 | 263.5 / 256.3 / 178.8 / 129.5 | 167.4 / 120.0 / 67.8 / 55.7 | 250.0 / 180.0 / 129.4 / 93.7 |
 | `lab.tanh_os4_adaa1` | 229.1 / 173.3 / 139.4 / 127.7 | 263.5 / 255.8 / 180.0 / 146.1 | 166.7 / 140.7 / 126.6 / 93.9 | 249.1 / 181.5 / 144.9 / 116.5 |
-| `lab.tanh_os8_adaa1` | 228.8 / 171.8 / 136.3 / 127.6 | 263.5 / 255.1 / 176.1 / 145.6 | 166.2 / 137.1 / 126.7 / 110.0 | 249.0 / 176.9 / 144.7 / 116.0 |
+| `std.tanh_shaper_os8` | 228.8 / 171.8 / 136.3 / 127.6 | 263.5 / 255.1 / 176.1 / 145.6 | 166.2 / 137.1 / 126.7 / 110.0 | 249.0 / 176.9 / 144.7 / 116.0 |
 | `lab.tanh_os8` | 228.7 / 172.0 / 137.0 / 127.5 | 263.5 / 255.2 / 176.9 / 145.6 | 166.2 / 137.8 / 126.6 / 110.0 | 248.8 / 177.8 / 144.6 / 116.0 |
 
 Cells are dB at 1009 / 2003 / 4001 / 8009 Hz. The metric's own floor in f64 is about 260 dB: naive `tanh` reads 263.5 dB at drive 2. The shared ceiling of the ×4 and ×8 candidates at 1009 Hz, about 141 dB at 96 kHz and 126.6 dB at 48 kHz (plain `tanh` included), comes from **stage 1's stopband**. This is measured: a throwaway build with stage 1 at β = 12 and 155 taps (about 117 dB of stopband, not kept) raised it to 169.6–170.0 dB at 96 kHz and 145.3–147.5 dB at 48 kHz. The same build left every candidate's worst tone unchanged (62.7 / 101.7 / 73.2 dB at 8009 Hz and 96 kHz). So stage 1 sets a ceiling on the oversampled candidates, about 126–141 dB at drive 20, far above V6's 60 dB. It is not what limits them at the high tones.
@@ -81,7 +81,7 @@ Drive 0.1 on a sine of amplitude 0.1, which keeps `tanh` linear to within 3·10�
 | `lab.tanh_adaa2` | −0.012 / 1 | −1.29 / 1 | −5.92 / 1 | −0.049 / 1 | −5.92 / 1 | −17.2 (sign flipped) | −12.3 (sign flipped) |
 | `lab.tanh_os2_adaa1` | −0.001 / 65.25 | −0.12 / 65.25 | −0.47 / 65.25 | −0.005 / 65.25 | −0.47 / 65.25 | −1.60 / 65.25 | −2.13 / 65.25 |
 | `lab.tanh_os4_adaa1` | −0.000 / 71.625 | −0.03 / 71.625 | −0.12 / 71.625 | −0.001 / 71.625 | −0.12 / 71.625 | −0.38 / 71.625 | −0.60 / 71.625 |
-| `lab.tanh_os8_adaa1` | −0.000 / 73.81 | −0.007 / 73.81 | −0.03 / 73.81 | −0.000 / 73.81 | −0.03 / 73.81 | −0.10 / 73.81 | −0.24 / 73.81 |
+| `std.tanh_shaper_os8` | −0.000 / 73.81 | −0.007 / 73.81 | −0.03 / 73.81 | −0.000 / 73.81 | −0.03 / 73.81 | −0.10 / 73.81 | −0.24 / 73.81 |
 | `lab.tanh_os8` | −0.000 / 73.75 | −0.000 / 73.75 | −0.000 / 73.75 | −0.000 / 73.75 | −0.000 / 73.75 | −0.000 / 73.75 | −0.12 / 73.75 |
 
 Every delay is constant across the band: there is no phase distortion beyond the pure delay. ADAA's averaging is also a low-pass in the linear region. First order is a two-tap mean (cos(πf/sr)), and second order is (x[n] + x[n−1] + x[n−2])/3, which crosses zero at sr/3, so its phase reading flips at 18 and 20 kHz at 48 kHz. **The current shaper is already 2 dB down at 10 kHz and 8.3 dB down at 18 kHz at 48 kHz, even at low drive.** In the oversampled candidates ADAA runs at the high rate, where this droop is small. At 20 kHz and 48 kHz, stage 1's transition band starts (19.2 kHz).
@@ -93,7 +93,7 @@ Every delay is constant across the band: there is no phase distortion beyond the
 | `std.tanh_shaper`, `lab.tanh_adaa2` | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
 | `lab.tanh_os2_adaa1` | 1.0000 | 1.0892 | 1.1429 | 1.2440 |
 | `lab.tanh_os4_adaa1` | 1.0000 | 1.0974 | 1.1733 | 1.2659 |
-| `lab.tanh_os8_adaa1` | 1.0000 | 1.0996 | 1.1784 | 1.2708 |
+| `std.tanh_shaper_os8` | 1.0000 | 1.0996 | 1.1784 | 1.2708 |
 | `lab.tanh_os8` | 1.0000 | 1.1003 | 1.1796 | 1.2712 |
 
 A band-limited square overshoots. At 8 kHz and 48 kHz only its fundamental lies below the passband edge, and a lone fundamental peaks at 4/π ≈ 1.27. So the oversampled candidates' output is not bounded to [−1, 1], and their `out` port declares no range. `std.tanh_shaper` declares [−1, 1].
@@ -108,7 +108,7 @@ From `signal bench --only <prefix> --param drive=20` (release build, 96 kHz). Th
 | `lab.tanh_adaa2` | 97.0, 96.8, 92.4 | 117.4 | 0.9 % |
 | `lab.tanh_os2_adaa1` | 147.7, 139.0, 139.2 | 219.7 | 1.3 % |
 | `lab.tanh_os4_adaa1` | 191.4, 179.0, 179.6 | 270.6 | 1.7 % |
-| `lab.tanh_os8_adaa1` | 270.8, 247.0, 248.8 | 379.9 | 2.4 % |
+| `std.tanh_shaper_os8` | 270.8, 247.0, 248.8 | 379.9 | 2.4 % |
 | `lab.tanh_os8` | 197.2, 183.5, 183.7 | 306.2 | 1.8 % |
 
 ## The listening package
@@ -131,7 +131,7 @@ This writes `renders/m3-tanh-aliasing/<input>/<shaper>/audio.wav` (32-bit float 
 
 **How to listen.** Use headphones or monitors at a comfortable level, in a player that can switch between files: Audacity with the tracks stacked and soloed in turn, or Finder's Quick Look one file after another. Every file of an input has the same output gain, so levels match within a fraction of a dB. Do not compare levels across inputs. Suggested order:
 
-1. **`sweep`, `tanh_shaper` then `tanh_os8_adaa1`.** At drive 20 the sine becomes nearly a square. The aliases are tones that do not follow the sweep: they whistle downward or wander while the sweep rises, from about 1 kHz upward and loudest in the last third. The current shaper and `tanh_adaa2` should have them clearly. `tanh_os2_adaa1`, `tanh_os4_adaa1` and `tanh_os8` should have less, mainly near the end. `tanh_os8_adaa1` should have the least. The oversampled files also keep more top end, because ADAA's droop is gone, and they peak higher (about 1.27× near the end; see "Peak").
+1. **`sweep`, `tanh_shaper` then `tanh_shaper_os8`.** At drive 20 the sine becomes nearly a square. The aliases are tones that do not follow the sweep: they whistle downward or wander while the sweep rises, from about 1 kHz upward and loudest in the last third. The current shaper and `tanh_adaa2` should have them clearly. `tanh_os2_adaa1`, `tanh_os4_adaa1` and `tanh_os8` should have less, mainly near the end. `tanh_shaper_os8` should have the least. The oversampled files also keep more top end, because ADAA's droop is gone, and they peak higher (about 1.27× near the end; see "Peak").
 2. **`bass`.** Here aliasing shows up as fizz or roughness on top of the bass, not as tones. Listen whether the current shaper's top sounds grainy next to the oversampled ones, or whether the difference cannot be heard.
 3. **`kick`.** The kick's tone sits below 200 Hz at drive 2.5–4, so little aliases. Expect the files to sound nearly or exactly alike. That is the point of this input: on the kick, promotion would cost a re-recorded golden for little audible change. The oversampled files start 74 frames (0.77 ms) later.
 4. **`studio`.** This is what promotion would do to the owner's demo. The differences, if any, are in the tape echoes' saturated repeats and on the master limiter. The oversampled shapers add ≈ 74 frames (1.5 ms at 48 kHz) to every pass through the tape delay's feedback loop, so each repeat lands about 1.5 ms later than the one before (the n-th about n × 1.5 ms later). The whole mix is also 1.5 ms late, through the limiter.
@@ -140,7 +140,7 @@ This writes `renders/m3-tanh-aliasing/<input>/<shaper>/audio.wav` (32-bit float 
 
 ### The renders (revision `77db2f0` plus this experiment's working tree, release build)
 
-| Input | `std.tanh_shaper` | `lab.tanh_adaa2` | `lab.tanh_os2_adaa1` | `lab.tanh_os4_adaa1` | `lab.tanh_os8_adaa1` | `lab.tanh_os8` |
+| Input | `std.tanh_shaper` | `lab.tanh_adaa2` | `lab.tanh_os2_adaa1` | `lab.tanh_os4_adaa1` | `std.tanh_shaper_os8` | `lab.tanh_os8` |
 |---|---|---|---|---|---|---|
 | sweep (384 000 frames) | `faf96eb4c86ffe19` | `0ad036309c87d1d1` | `2abce91498018539` | `32084ed3870ece09` | `e522c7c85a8f521d` | `6d2883476672b725` |
 | bass (384 000) | `7b6e0b3ece7df6e1` | `b1fd9f3a2c5e3d3d` | `075da89b7cd25f19` | `66aba898d6e29c25` | `107abe154c397789` | `534eb339b35f7569` |
@@ -151,7 +151,7 @@ The values are `audio_fnv1a64`. Peaks run from 0.166 to 0.231, every one at or b
 
 ## Recommendation (the agent's opinion, not a verdict)
 
-`lab.tanh_os8_adaa1` is the only candidate that clears 60 dB with margin under V6 (worst tone 101.6 dB at 96 kHz) and also at 48 kHz (worst 79.5 dB at 8009 Hz). Its passband is flatter than the current shaper's: −0.03 dB against −2.0 dB at 10 kHz at 48 kHz. It costs about 250 ns per frame (2.4 % of a 96 kHz frame, about 4.5× the current shaper) and 73.8 frames of delay. The others:
+`std.tanh_shaper_os8` is the only candidate that clears 60 dB with margin under V6 (worst tone 101.6 dB at 96 kHz) and also at 48 kHz (worst 79.5 dB at 8009 Hz). Its passband is flatter than the current shaper's: −0.03 dB against −2.0 dB at 10 kHz at 48 kHz. It costs about 250 ns per frame (2.4 % of a 96 kHz frame, about 4.5× the current shaper) and 73.8 frames of delay. The others:
 - `lab.tanh_os4_adaa1` (180 ns) passes V6 at 96 kHz, but only by 2.7 dB at 8009 Hz, and misses at 48 kHz (56.9 dB).
 - `lab.tanh_os8` without ADAA misses at 48 kHz (45.7 dB). ADAA at the high rate is what carries the high tones.
 - Second-order ADAA alone gains only 5–7 dB over first order, which is far from enough, and its passband droop is worse.

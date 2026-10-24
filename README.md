@@ -11,7 +11,7 @@ Signal is pre-1.0 and early: version **0.2.0** is its first public pre-release. 
 | Milestone | Status | What it brought |
 |---|---|---|
 | M0 Foundations | Done | Vision, ADRs, workspace, real-time rules, CI |
-| M1 Core + offline | Done (V6 waived until M3) | Module contract, graph, TOML projects, offline renderer, `projects/kick` and its golden render |
+| M1 Core + offline | Done (V6 waived in M1; passes on `std.tanh_shaper_os8` since M3) | Module contract, graph, TOML projects, offline renderer, `projects/kick` and its golden render |
 | M2 Real time + live edits | Done | CoreAudio, live edits while playing, session recording and bit-exact replay, the core primitive library |
 | M2.5 Signal.app shell | Done | The Mac app, interface setup, meters |
 | M2.6 Multi-core engine | Done (one criterion open) | Deterministic multi-core scheduler, real-time workers, GPU modules (lab) |
@@ -44,7 +44,7 @@ Signal is pre-1.0 and early: version **0.2.0** is its first public pre-release. 
 - Inputs and outputs: no MIDI, OSC or DMX yet (M6).
 - Audio: no plugin hosting or export, and no sampler.
 - Evaluation: the comparison and listening workflow is M3.
-- Known shortfalls: `std.tanh_shaper` aliases more than its target on some tones. Under heavy multi-core load, the worst audio callback is about 0.4 of the period: within the capacity gate, but above the single-voice target.
+- Known shortfalls: `std.tanh_shaper` aliases more than its target on some tones (`std.tanh_shaper_os8` meets it, at 74 frames of delay). Under heavy multi-core load, the worst audio callback is about 0.4 of the period: within the capacity gate, but above the single-voice target.
 - Screens and wording may still change between 0.x versions, and so may the project file format.
 
 ## System requirements

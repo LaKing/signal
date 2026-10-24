@@ -63,22 +63,19 @@ mod tanh_os4_adaa1 {
     signal_contract::contract_tests!(super::lab_type("lab.tanh_os4_adaa1"));
 }
 
-mod tanh_os8_adaa1 {
-    signal_contract::contract_tests!(super::lab_type("lab.tanh_os8_adaa1"));
-}
-
 mod tanh_os8 {
     signal_contract::contract_tests!(super::lab_type("lab.tanh_os8"));
 }
 
-/// Every `lab.tanh_*` type has its contract tests above.
+/// Every `lab.tanh_*` type has its contract tests above. The promoted
+/// `lab.tanh_os8_adaa1` is gone from the lab: it is `std.tanh_shaper_os8`,
+/// with the std contract suite (`crates/signal-std/tests/contract.rs`).
 #[test]
 fn every_tanh_candidate_has_contract_tests() {
     let listed = [
         "lab.tanh_adaa2",
         "lab.tanh_os2_adaa1",
         "lab.tanh_os4_adaa1",
-        "lab.tanh_os8_adaa1",
         "lab.tanh_os8",
     ];
     assert_eq!(signal_lab::tanh_shapers::TYPES, listed);
@@ -88,4 +85,5 @@ fn every_tanh_candidate_has_contract_tests() {
         .filter(|n| n.starts_with("lab.tanh"))
         .collect();
     assert_eq!(registered.len(), listed.len(), "{registered:?}");
+    assert!(common::registry().get("lab.tanh_os8_adaa1").is_none());
 }

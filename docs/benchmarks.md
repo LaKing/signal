@@ -95,6 +95,17 @@ Measured *N* → median ns per frame: 1 → 296, 2 → 462, 4 → 790, 8 → 1 4
 | `std.transport` | 29.0 | 31.8 |
 | `std.unit_delay` | 11.5 | 19.6 |
 
+### `std.tanh_shaper_os8` against `std.tanh_shaper` (M3)
+
+**Seat measurement**, 2026-10-24 00:12 local time, on the operator's Mac Studio (Apple M5 Max). Command: `signal --json bench --seconds 2 --only std.tanh_shaper --param drive=20`, release build with the `lab` feature, three runs; the method above (16 instances on the stimulus's saw, at 96 kHz). The host was not idle (load average 5.1 falling from 13), so treat the figures as upper estimates. Both rows come from the same runs; compare them with each other, not with the table above.
+
+| Primitive | Median, ns per frame (3 runs) | p99 (worst run) | Share of the 96 kHz budget |
+|---|---|---:|---:|
+| `std.tanh_shaper` | 51.7, 52.1, 51.7 | 58.4 | 0.5 % |
+| `std.tanh_shaper_os8` | 231.9, 235.4, 230.7 | 277.8 | 2.3 % |
+
+About 4.5 times `std.tanh_shaper`, as in the M3 experiment (`experiments/m3-tanh-aliasing/README.md`, "CPU": 249 against 55 ns, measured as `lab.tanh_os8_adaa1`). The scheduler's estimate in `COST_NS` is 136 ns, `std.tanh_shaper`'s 30 scaled by that experiment's ratio.
+
 ### `std.ladder` against `std.svf` (M2.11-2)
 
 **Seat measurement**, 2026-10-17 14:15–14:20 UTC, from a devpanel seat. Command: `signal --json bench` from a release build of f6f82e2 plus the M2.11-2 change (uncommitted), default `--seconds 1`, the method above. Both rows come from the same run. They are a single-host measurement, not a threshold. The table above is from an earlier run on a less loaded host, so compare these two rows with each other, not with it.

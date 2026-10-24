@@ -3,9 +3,11 @@
 //! `2026-10-11-follow-up-bring-std-tanh-shaper-aliasing-to-60-db-on-off-div`):
 //! V6's measurement (`kick_acceptance.rs`, `shaper_aliasing`; the method is
 //! `docs/testing-and-evaluation.md`, "The V6 measurement") run on
-//! `std.tanh_shaper`, naive `tanh` and every `lab.tanh_*` candidate, at 96
-//! and 48 kHz and at several drives, with each candidate's delay and its gain
-//! and phase in the passband.
+//! `std.tanh_shaper`, naive `tanh`, the promoted candidate
+//! `std.tanh_shaper_os8` (formerly `lab.tanh_os8_adaa1`, verdict 2026-10-23)
+//! and the `lab.tanh_*` candidates left in the lab, at 96 and 48 kHz and at
+//! several drives, with each candidate's delay and its gain and phase in the
+//! passband. V6 itself now gates `std.tanh_shaper_os8` (`kick_acceptance.rs`).
 //!
 //! The numbers are **measurements, not verdicts** (AGENTS.md rule 6): no test
 //! here compares a candidate with the 60 dB threshold. The quick tests check
@@ -28,15 +30,30 @@ use signal_project::{Project, SourceFile};
 const SKIP: u64 = 1000;
 /// V6's tones (off-divisor at 96 kHz; at 48 kHz too).
 const TONES: [u32; 4] = [1009, 2003, 4001, 8009];
-/// The current shaper, then the candidates.
+/// The current shaper, then the candidates, in the experiment's order.
 const SHAPERS: [&str; 6] = [
     "std.tanh_shaper",
     "lab.tanh_adaa2",
     "lab.tanh_os2_adaa1",
     "lab.tanh_os4_adaa1",
-    "lab.tanh_os8_adaa1",
+    "std.tanh_shaper_os8",
     "lab.tanh_os8",
 ];
+
+/// The candidates: every shaper but the current one.
+fn candidates() -> impl Iterator<Item = &'static str> {
+    SHAPERS.into_iter().skip(1)
+}
+
+/// The documented delay of `shaper` in frames: `std.tanh_shaper`'s half
+/// frame, `std.tanh_shaper_os8`'s 73.8125, or a lab candidate's.
+fn delay_frames(shaper: &str) -> Option<f64> {
+    match shaper {
+        "std.tanh_shaper" => Some(0.5),
+        "std.tanh_shaper_os8" => Some(signal_std::TanhShaperOs8::DELAY_FRAMES),
+        _ => signal_lab::tanh_shapers::delay_frames(shaper),
+    }
+}
 
 fn registry() -> Registry {
     let mut registry = Registry::new();
@@ -127,7 +144,7 @@ fn passband(shaper: &str, freq: u32, rate: u32) -> (f64, f64) {
     // Phase lag of out against the reference, in cycles, unwrapped by the
     // documented delay (which can exceed one period at 10 kHz).
     let lag = (b.1.atan2(b.0) - a.1.atan2(a.0)) / std::f64::consts::TAU;
-    let documented = signal_lab::tanh_shapers::delay_frames(shaper).unwrap_or(0.5) * f / r;
+    let documented = delay_frames(shaper).unwrap() * f / r;
     let lag = lag + (documented - lag).round();
     (gain_db, lag * r / f)
 }
@@ -154,8 +171,8 @@ fn the_measurement_reproduces_v6_for_the_current_shaper() {
 /// (ADAA's own droop there: −0.005 dB for first order, −0.012 dB for second).
 #[test]
 fn every_candidate_has_its_documented_delay() {
-    for shaper in signal_lab::tanh_shapers::TYPES {
-        let documented = signal_lab::tanh_shapers::delay_frames(shaper).unwrap();
+    for shaper in candidates() {
+        let documented = delay_frames(shaper).unwrap();
         let (gain_db, delay) = passband(shaper, 1000, 96_000);
         assert!(
             (delay - documented).abs() < 0.01,
@@ -163,6 +180,14 @@ fn every_candidate_has_its_documented_delay() {
         );
         assert!(gain_db.abs() < 0.02, "{shaper}: {gain_db} dB");
     }
+}
+
+/// The candidates are the lab's and the promoted one.
+#[test]
+fn the_candidates_are_the_lab_s_and_the_promoted_one() {
+    let mut expected: Vec<&str> = signal_lab::tanh_shapers::TYPES.to_vec();
+    expected.insert(3, "std.tanh_shaper_os8");
+    assert_eq!(candidates().collect::<Vec<_>>(), expected);
 }
 
 /// Every candidate renders the same bits on one thread and on four workers
@@ -176,7 +201,7 @@ fn the_candidates_render_the_same_on_any_thread_count() {
          out = { module = \"std.audio_out\", gain = 0.1 }\n",
     );
     let mut wiring = String::from("[wiring]\nconnections = [\n");
-    for (i, shaper) in signal_lab::tanh_shapers::TYPES.iter().enumerate() {
+    for (i, shaper) in candidates().enumerate() {
         text.push_str(&format!("s{i} = {{ module = \"{shaper}\", drive = 10 }}\n"));
         wiring.push_str(&format!(
             "{{ from = \"osc.out\", to = \"s{i}.in\" }},\n\

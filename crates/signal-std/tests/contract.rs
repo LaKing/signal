@@ -36,6 +36,10 @@ mod tanh_shaper {
     signal_contract::contract_tests!(super::std_type("std.tanh_shaper"));
 }
 
+mod tanh_shaper_os8 {
+    signal_contract::contract_tests!(super::std_type("std.tanh_shaper_os8"));
+}
+
 mod dc_block {
     signal_contract::contract_tests!(super::std_type("std.dc_block"));
 }

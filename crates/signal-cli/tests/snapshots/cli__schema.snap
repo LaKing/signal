@@ -366,6 +366,7 @@ expression: text
             "std.tan",
             "std.tanh",
             "std.tanh_shaper",
+            "std.tanh_shaper_os8",
             "std.to_events",
             "std.transport",
             "std.unit_delay",

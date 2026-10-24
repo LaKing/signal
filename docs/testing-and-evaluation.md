@@ -155,7 +155,7 @@ The two fence rows hold in `Sc` as `park.rs` says (the SeqCst accesses alone ord
 | V3 | `v3_triggers_on_the_integer_grid_and_first_onset` | Every beat and ghost trigger in `log.jsonl` is on the transport's integer formula (ghosts recomputed from the seed's stream), accents fall on every third beat, nothing is discarded, and the first kick's first non-zero sample is frame 1 (the derivation is in the test). The owner accepted this as satisfying V3 for M1 (sq-22037848): every beat or ghost trigger frame matches the transport formula, and the first kick's audio onset is checked; later onsets in the audio are not. |
 | V4 | `v4_seed_changes_only_ghosts` | Seeds 42 and 43 give the same beats and accents and different ghosts; the audio is bit-identical up to the first frame where the ghosts differ. |
 | V5 | `v5_floors_over_64_bars` | 64 bars: no NaN or infinity, **4× oversampled** peak ≤ −0.3 dBFS, \|mean\| < 1e-4 per channel. |
-| V6 | `v6_shaper_aliasing_at_least_60_db` | `std.tanh_shaper` at drive 20 on 1009, 2003, 4001 and 8009 Hz sines at 96 kHz: inharmonic energy ≥ 60 dB below the fundamental. **Ignored** until the shaper fix; see below. |
+| V6 | `v6_shaper_aliasing_at_least_60_db` | `std.tanh_shaper_os8` (the oversampled shaper, since M3) at drive 20 on 1009, 2003, 4001 and 8009 Hz sines at 96 kHz: inharmonic energy ≥ 60 dB below the fundamental. Passes; see below. |
 | V7 | `v7_delay_free_feedback_is_rejected` | The kick with its feedback loop closed without the unit delay: `signal render` exits 1 and names the cycle. |
 | V8 | `v8_pitch_at_every_rate` | Renders at 44.1, 48, 96 and 192 kHz. The first kick's early sweep (trigger to 105 ms) follows f(t) = 48 + 132·e^(−t/35 ms), 180 Hz at the trigger, period by period within a tolerance derived from the kick; its tail (from 250 ms after the trigger to the next trigger) is 48 Hz within 1 % by zero crossings. See below. |
 | Golden | `golden_kick_16_bars` | The seed-42, 16-bar render matches `tests/golden/kick/manifest.json`. |
@@ -163,7 +163,7 @@ The two fence rows hold in `Sc` as `park.rs` says (the SeqCst accesses alone ord
 
 Thresholds are fixed by the PO and are never lowered to make a test pass. If a measurement misses one, the test is marked `#[ignore = "…"]` with the measured values, and the values go to the PO.
 
-Printed values (V4, V5, V8) are shown with `cargo test -p signal-cli --test kick_acceptance -- --nocapture`; V6's with `cargo test -p signal-cli --test kick_acceptance -- --ignored v6 --nocapture`.
+Printed values (V4, V5, V6, V8) are shown with `cargo test -p signal-cli --test kick_acceptance -- --nocapture`.
 
 ### The V6 measurement
 
@@ -171,18 +171,16 @@ Printed values (V4, V5, V8) are shown with `cargo test -p signal-cli --test kick
 
 **Tones.** The tones are fixed at 1009, 2003, 4001 and 8009 Hz (owner decision sq-4aece389, option A). They do not divide 96 kHz, so the shaped tone is not periodic in whole frames and its aliases fall between the harmonics, where they are counted. The original tones, 1, 2, 4 and 8 kHz, divide 96 kHz: the shaped tone repeated every 96, 48, 24 or 12 frames, every alias landed exactly on a harmonic, and the test passed for naive `tanh` as well (ADAA 253–306 dB, naive 244–294 dB), so it could not tell antialiasing from none. That check is removed, not kept as a sanity check, because it measures nothing.
 
-**Status: ignored pending the shaper fix.** The threshold stays at 60 dB. The current first-order ADAA `std.tanh_shaper` misses it, so the test is marked `#[ignore]` with the measured values, and it prints the shaper's ratio and that of naive `tanh(20·x)` on the same sine:
+**Status: passes on `std.tanh_shaper_os8` (since M3, 2026-10-23).** The threshold stays at 60 dB. The first-order ADAA `std.tanh_shaper` misses it, and the owner waived V6 for M1 on its values (sq-22037848; `roadmap.md`). The M3 experiment (below) did not replace that shaper: its verdict (`experiments/m3-tanh-aliasing/verdict.md`, the choice delegated to the operator) promoted `lab.tanh_os8_adaa1` as a new type, `std.tanh_shaper_os8`, and V6 was retargeted to it at the same conditions, with the `#[ignore]` removed (follow-up issue `2026-10-11-follow-up-bring-std-tanh-shaper-aliasing-to-60-db-on-off-div`). The test prints its ratio and that of naive `tanh(20·x)` on the same sine. `std.tanh_shaper`'s values are kept for reference; `tanh_aliasing.rs` checks that the measurement still reproduces them:
 
-| Tone | ADAA (`std.tanh_shaper`) | Naive `tanh` |
-|---|---|---|
-| 1009 Hz | 49.0 dB | 43.8 dB |
-| 2003 Hz | 33.5 dB | 27.3 dB |
-| 4001 Hz | 26.1 dB | 18.5 dB |
-| 8009 Hz | 22.0 dB | 13.1 dB |
+| Tone | `std.tanh_shaper_os8` | `std.tanh_shaper` (ADAA, not gated) | Naive `tanh` |
+|---|---|---|---|
+| 1009 Hz | 141.2 dB | 49.0 dB | 43.8 dB |
+| 2003 Hz | 130.9 dB | 33.5 dB | 27.3 dB |
+| 4001 Hz | 119.0 dB | 26.1 dB | 18.5 dB |
+| 8009 Hz | 101.6 dB | 22.0 dB | 13.1 dB |
 
-Bringing the shaper to ≥ 60 dB is follow-up issue `2026-10-11-follow-up-bring-std-tanh-shaper-aliasing-to-60-db-on-off-div`, tracked for the M3 ADAA-versus-oversampling experiment. The `#[ignore]` is removed when that lands. The owner waived V6 for M1 on these values (sq-22037848; `roadmap.md`).
-
-**The M3 experiment (2026-10-23, awaiting the owner's verdict).** `experiments/m3-tanh-aliasing/` compares five `lab.*` candidates (`lab/src/tanh_shapers.rs`: second-order ADAA, and ×2, ×4 and ×8 oversampling with first-order ADAA or plain `tanh` at the high rate) with the current shaper. It reuses this measurement at 96 and 48 kHz and drives 2, 5 and 20, and adds the passband gain, delay, peak and CPU cost of each, plus a listening package. `crates/signal-cli/tests/tanh_aliasing.rs` (lab builds) holds the measurements. Its quick tests check that it reproduces the values above for `std.tanh_shaper` and naive `tanh`, that every candidate has its documented delay, and that renders are the same on 1 and 4 threads. The table itself is printed by `cargo test --release -p signal-cli --features lab --test tanh_aliasing -- --ignored --nocapture`, and no test compares a candidate with the threshold (rule 6). `lab/tests/contract.rs` runs the contract suite on each candidate. Until the owner records a verdict in `experiments/m3-tanh-aliasing/verdict.md`, `std.tanh_shaper`, this test's `#[ignore]` and every golden stay as they are.
+**The M3 experiment (2026-10-23, verdict recorded).** `experiments/m3-tanh-aliasing/` compares five candidates (second-order ADAA, and ×2, ×4 and ×8 oversampling with first-order ADAA or plain `tanh` at the high rate) with the current shaper. The promoted one is `std.tanh_shaper_os8`; the other four stay in `lab/src/tanh_shapers.rs`, built on its resampling (`signal_std::oversample`). It reuses this measurement at 96 and 48 kHz and drives 2, 5 and 20, and adds the passband gain, delay, peak and CPU cost of each, plus a listening package. `crates/signal-cli/tests/tanh_aliasing.rs` (lab builds) holds the measurements. Its quick tests check that it reproduces the values above for `std.tanh_shaper` and naive `tanh`, that every candidate has its documented delay, and that renders are the same on 1 and 4 threads. The table itself is printed by `cargo test --release -p signal-cli --features lab --test tanh_aliasing -- --ignored --nocapture`, and no test compares a candidate with the threshold (rule 6). `lab/tests/contract.rs` runs the contract suite on each lab candidate, `crates/signal-std/tests/contract.rs` on `std.tanh_shaper_os8`. `std.tanh_shaper` and every golden are unchanged by the promotion.
 
 ### The V8 measurement
 
@@ -206,7 +204,7 @@ A milestone's listening verdict (V14 for M1) is a file `experiments/<id>/verdict
 |---|---|
 | M1, V14 | `experiments/m1-kick-v14/verdict.md` |
 | M2.11, studio demo (also covers `std.ladder` in use) | `experiments/m2-11-studio/verdict.md` |
-| M3, `std.tanh_shaper` aliasing: ADAA versus oversampling (V6), **pending** | `experiments/m3-tanh-aliasing/verdict.md` (empty until the owner gives it) |
+| M3, `std.tanh_shaper` aliasing: ADAA versus oversampling (V6), 2026-10-23: no audible difference, choice delegated; `std.tanh_shaper_os8` added | `experiments/m3-tanh-aliasing/verdict.md` |
 
 ## The M2 test project: `projects/pulse`
 

@@ -454,7 +454,10 @@ fn bench_only_measures_the_named_types() {
         .iter()
         .map(|p| p["type"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["std.tanh", "std.tanh_shaper"]);
+    assert_eq!(
+        names,
+        ["std.tanh", "std.tanh_shaper", "std.tanh_shaper_os8"]
+    );
     for key in ["kick", "kick_voices", "blocks", "scaling"] {
         assert!(bench.get(key).is_none(), "{key} is not measured");
     }

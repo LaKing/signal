@@ -29,12 +29,14 @@ if [ -z "$signal" ]; then
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
   signal="$target/release/signal"
 fi
-if ! "$signal" modules 2>/dev/null | grep -q '^lab.tanh_os8_adaa1 '; then
+if ! "$signal" modules 2>/dev/null | grep -q '^lab.tanh_os8 '; then
   echo "render.sh: $signal is not a lab build (cargo build --release -p signal-cli --features lab)" >&2
   exit 1
 fi
 
-shapers="std.tanh_shaper lab.tanh_adaa2 lab.tanh_os2_adaa1 lab.tanh_os4_adaa1 lab.tanh_os8_adaa1 lab.tanh_os8"
+# std.tanh_shaper_os8 is the promoted lab.tanh_os8_adaa1 (verdict.md): the
+# same DSP, so the same audio, under its std name.
+shapers="std.tanh_shaper lab.tanh_adaa2 lab.tanh_os2_adaa1 lab.tanh_os4_adaa1 std.tanh_shaper_os8 lab.tanh_os8"
 
 # input name, source folder, seconds, output gain (the same for every shaper;
 # empty keeps the project's).

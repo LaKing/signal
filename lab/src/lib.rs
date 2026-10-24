@@ -6,9 +6,9 @@
 //! - `lab.gpu_partials` ([`gpu_partials`]): a bank of 1 024 sine partials
 //!   computed per block on the GPU, with a declared latency (ADR 0019 §3).
 //! - `lab.tanh_adaa2`, `lab.tanh_os2_adaa1`, `lab.tanh_os4_adaa1`,
-//!   `lab.tanh_os8_adaa1`, `lab.tanh_os8` ([`tanh_shapers`]): the M3
-//!   "ADAA versus oversampling" candidates for `std.tanh_shaper`
-//!   (`experiments/m3-tanh-aliasing/`).
+//!   `lab.tanh_os8` ([`tanh_shapers`]): the M3 "ADAA versus oversampling"
+//!   candidates for `std.tanh_shaper` (`experiments/m3-tanh-aliasing/`) that
+//!   were not promoted; the one that was is `std.tanh_shaper_os8`.
 
 #![cfg_attr(
     not(test),
@@ -38,12 +38,11 @@ pub const GPU_TYPES: [&str; 1] = ["lab.gpu_partials"];
 /// Registers every `lab.*` primitive type in `registry`.
 #[cfg(feature = "lab")]
 pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
-    use tanh_shapers::{Os2Adaa1, Os4Adaa1, Os8, Os8Adaa1, OversampledShaper, TanhAdaa2};
+    use tanh_shapers::{Os2Adaa1, Os4Adaa1, Os8, OversampledShaper, TanhAdaa2};
     registry.register(state_output::<gpu_partials::GpuPartials>())?;
     registry.register(direct::<TanhAdaa2>())?;
     registry.register(direct::<OversampledShaper<Os2Adaa1>>())?;
     registry.register(direct::<OversampledShaper<Os4Adaa1>>())?;
-    registry.register(direct::<OversampledShaper<Os8Adaa1>>())?;
     registry.register(direct::<OversampledShaper<Os8>>())
 }
 

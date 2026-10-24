@@ -83,7 +83,7 @@ fn softplus_term(u: f64) -> f64 {
 /// of the bounded `ln(1 + ·)` terms; the `ln 2` terms cancel exactly. For a
 /// small step of one sign the first part is exact, so the quotient's rounding
 /// error stays near `1e-16 / |step|` even for large `|u|`.
-fn adaa(u: f64, previous: f64) -> f64 {
+pub(crate) fn adaa(u: f64, previous: f64) -> f64 {
     let step = u - previous;
     if step.abs() < EPSILON {
         libm::tanh((u + previous) / 2.0)
