@@ -493,43 +493,13 @@ pub fn read_archive(path: &Path) -> Result<Vec<u8>, ArchiveError> {
     fs::read(path).map_err(io_error(path))
 }
 
-/// Writes `bytes` to `path` atomically: to a hidden temporary file beside
-/// it, synced, then renamed over it. A failure leaves the old file as it was.
-/// The temporary file is always a new one (created exclusively, which never
-/// follows a link): an entry already at its name is left alone and another
-/// name is taken.
+/// Writes `bytes` to `path` atomically: to a hidden staging file of this
+/// writer's beside it, synced, then renamed over it. A failure leaves the old
+/// file as it was. The staging file is always a new one (created
+/// exclusively, which never follows a link): an entry already at its name is
+/// left alone and another name is taken ([`crate::transaction::stage`]).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ArchiveError> {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let pid = std::process::id();
-    let mut attempt = 0u32;
-    let (temporary, mut file) = loop {
-        let temporary = match attempt {
-            0 => path.with_file_name(format!(".{name}.{pid}.tmp")),
-            n => path.with_file_name(format!(".{name}.{pid}.{n}.tmp")),
-        };
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-        {
-            Ok(file) => break (temporary, file),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists && attempt < 1000 => {
-                attempt += 1;
-            }
-            Err(error) => return Err(io_error(path)(error)),
-        }
-    };
-    let written = (|| {
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, path)
-    })();
-    if written.is_err() {
-        // Only the file made here.
-        let _ = fs::remove_file(&temporary);
-    }
-    written.map_err(io_error(path))
+    crate::transaction::write_atomic(path, bytes).map_err(io_error(path))
 }
 
 /// A new folder of this process's under `parent`, named after `stem`.

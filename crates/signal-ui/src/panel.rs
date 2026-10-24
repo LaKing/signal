@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
 
 use signal_core::{InstanceAddress, ParameterDescriptor, PortAddress, PortShape, Registry};
@@ -547,8 +547,12 @@ pub fn write_project(
     order: &[&str],
 ) -> Result<(String, String), String> {
     let path = dir.join(signal_project::PROJECT_FILE);
-    fs::read_to_string(&path)
-        .map_err(|e| e.to_string())
+    // Read, edited and written under the project's writer lock (ADR 0040),
+    // so no other writer's edit lands in between and is lost.
+    let lock = signal_project::transaction::ProjectLock::acquire(dir);
+    lock.as_ref()
+        .map_err(ToString::to_string)
+        .and_then(|_| fs::read_to_string(&path).map_err(|e| e.to_string()))
         .and_then(|before| {
             signal_project::write_parameter(&before, instance, parameter, value, order)
                 .map(|after| (before, after))
@@ -567,41 +571,70 @@ pub fn write_project(
         })
 }
 
-/// Writes `text` to `path` through a hidden temporary file beside it (the
-/// watch ignores hidden files), synced, then renamed over `path`, so a reader
-/// sees the old file or the new one.
+/// Writes `text` to `path` through a hidden staging file of this writer's
+/// beside it (the watch ignores hidden files), synced, then renamed over
+/// `path`, so a reader sees the old file or the new one
+/// ([`signal_project::transaction::write_atomic`], ADR 0040). The staging
+/// file is created exclusively under a name of its own (`O_EXCL`, which does
+/// not follow a link), so nothing outside the folder is written, the renamed
+/// file is a regular file, and another writer's staging file is never
+/// removed or renamed. A caller that checks the file's version first holds
+/// the project's [`signal_project::transaction::ProjectLock`] from the check
+/// to the write.
 pub fn write_file(path: &Path, text: &str) -> io::Result<()> {
-    let mut name = std::ffi::OsString::from(".");
-    name.push(path.file_name().unwrap_or_default());
-    name.push(".tmp");
-    let temporary = path.with_file_name(name);
-    let written = (|| {
-        // Never through what is already there: a leftover temporary file or
-        // a link at that name is removed (a link itself, not its target),
-        // and the new one is created exclusively (`O_EXCL`, which does not
-        // follow a link), so nothing outside the folder is written and the
-        // renamed file is a regular file.
-        match fs::remove_file(&temporary) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-            _ => {}
-        }
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)
-    })();
-    if written.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    written
+    signal_project::transaction::write_atomic(path, text.as_bytes())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// audit 2026-10-23 (writer): the auditor's interleaving, fixed. Another
+    /// writer has its staging file open at the shared name earlier builds
+    /// used (`.main.html.tmp`) with one byte of its text written; this write
+    /// commits exactly its own complete text and never removes, renames or
+    /// writes the other writer's file (before the fix it removed it, or
+    /// committed it as its own and returned `Ok`).
+    #[test]
+    fn a_write_never_takes_another_writers_staging_file() {
+        let dir = std::env::temp_dir().join(format!("signal-panel-writers-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.html");
+        fs::write(&path, "old").unwrap();
+        let theirs = dir.join(".main.html.tmp");
+        let mut second = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&theirs)
+            .unwrap();
+        io::Write::write_all(&mut second, b"B").unwrap();
+        let a = "A".repeat(1 << 20);
+        write_file(&path, &a).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), a);
+        assert_eq!(fs::read(&theirs).unwrap(), b"B");
+        drop(second);
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            2,
+            "theirs and the file"
+        );
+        // `write_project` the same way, under the project's lock, which it
+        // releases.
+        fs::write(
+            dir.join("project.toml"),
+            "schema_version = 1\n[instances]\nout = { module = \"std.audio_out\", gain = 0.25 }\n",
+        )
+        .unwrap();
+        let (_, after) = write_project(&dir, "out", "gain", Some(0.5), &["gain"]).unwrap();
+        assert!(after.contains("gain = 0.5"), "{after}");
+        assert!(
+            signal_project::transaction::ProjectLock::try_acquire(&dir)
+                .unwrap()
+                .is_some()
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// M2.8-9 AC2 (`docs/ui-protocol.md` "Unsaved"): `describe`'s `base` is
     /// a drag's `applied`, the last value the Controller took for every

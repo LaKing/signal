@@ -295,9 +295,10 @@ fn a_write_over_the_message_limit_closes_the_connection(transport: Transport) {
 }
 
 /// auditor-1-006 (AC10): a link at the write's temporary path
-/// (`patterns/.<name>.toml.tmp`) is not followed: the file it points to
-/// outside the project is untouched, and the pattern written is a regular
-/// file holding the text, for a new file and for an existing one.
+/// (`patterns/.<name>.toml.tmp`, the name earlier builds staged under) is not
+/// followed: the file it points to outside the project is untouched, and the
+/// pattern written is a regular file holding the text, for a new file and for
+/// an existing one. The link itself is left alone (ADR 0040).
 fn a_link_at_the_temporary_path_is_not_followed(transport: Transport) {
     let mut rig = melody("pattern-temp-link", transport);
     let (mut ws, _) = rig.client();
@@ -324,10 +325,22 @@ fn a_link_at_the_temporary_path_is_not_followed(transport: Transport) {
             "{name}: a regular file"
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        // ADR 0040: an entry at that name may be another writer's staging
+        // file: it is left as it was, and no staging file of this write is.
         assert!(
-            fs::symlink_metadata(&temporary).is_err(),
-            "no temporary left"
+            fs::symlink_metadata(&temporary)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the planted link is left alone"
         );
+        let staged = fs::read_dir(rig.dir.join("patterns"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "tmp") && *p != temporary)
+            .count();
+        assert_eq!(staged, 0, "no staging file left");
+        fs::remove_file(&temporary).unwrap();
     }
     rig.finish();
 }

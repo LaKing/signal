@@ -17,7 +17,10 @@
 //! linked to their names (a link never replaces a file) and the project's
 //! rewritten files renamed over theirs last; the project is loaded again from
 //! disk, and on any failure the new files are removed and the originals
-//! written back. Instance names do not change, so the project's addresses,
+//! written back (never over an edit made meanwhile). [`write`] holds the
+//! project's writer lock (ADR 0040) and first checks that the project's
+//! files are still exactly those [`prepare`] read: a change meanwhile is a
+//! conflict ([`VendorError::Changed`]), never overwritten. Instance names do not change, so the project's addresses,
 //! random streams and canonical source order are the same, and it renders
 //! bit-identically.
 
@@ -31,6 +34,7 @@ use signal_core::LIBRARY_PREFIX;
 use signal_graph::{CompositeDef, InstanceDef};
 use toml_edit::{DocumentMut, Item, Value};
 
+use crate::transaction::{self, ProjectLock};
 use crate::{
     COMPOSITES, Diagnostic, Library, LoadError, PROJECT_FILE, Project, SourceFile, read_sources,
     valid_name,
@@ -67,6 +71,9 @@ pub enum VendorError {
     },
     /// The project would not load after vendoring (nothing is written).
     Invalid(Vec<Diagnostic>),
+    /// A file of the project changed after vendoring was prepared (it is
+    /// never overwritten): its path.
+    Changed(String),
     /// Reading or writing a file.
     Io {
         /// The path.
@@ -99,6 +106,10 @@ impl fmt::Display for VendorError {
                 }
                 Ok(())
             }
+            VendorError::Changed(path) => write!(
+                f,
+                "{path} changed after vendoring was prepared; nothing was vendored (prepare again from the files as they are now)"
+            ),
             VendorError::Io { path, error } => write!(f, "{}: {error}", path.display()),
         }
     }
@@ -138,6 +149,12 @@ impl Prepared {
             .iter()
             .chain(&self.edits)
             .map(|(path, _)| path.as_str())
+    }
+
+    /// The project's files as they were read when it was prepared: what
+    /// [`write`] checks they still are.
+    pub fn before(&self) -> &[SourceFile] {
+        &self.files
     }
 
     /// The project's files as vendoring would leave them.
@@ -242,15 +259,7 @@ pub fn prepare(
     }
 
     // The project's own references, rewritten.
-    let files = read_sources(dir).map_err(|error| match error {
-        LoadError::Io { path, error } => VendorError::Io { path, error },
-        LoadError::Invalid(diagnostics) => VendorError::Syntax {
-            path: diagnostics
-                .first()
-                .map_or_else(|| PROJECT_FILE.to_owned(), |d| d.file.clone()),
-            message: "the file is not UTF-8".to_owned(),
-        },
-    })?;
+    let files = project_sources(dir)?;
     let mut edits = Vec::new();
     for file in files
         .iter()
@@ -279,7 +288,12 @@ pub fn prepare(
     Ok(prepared)
 }
 
-/// Writes what [`prepare`] checked, all or nothing (see the module's notes).
+/// Writes what [`prepare`] checked, all or nothing (see the module's notes),
+/// holding the project's writer lock ([`ProjectLock`], ADR 0040) from the
+/// conflict check to the last check of what was written. The project's files
+/// must still be exactly those [`prepare`] read: any file changed, added or
+/// removed meanwhile (an edit of `project.toml`, by Signal or a person) is a
+/// [`VendorError::Changed`], and nothing is written.
 pub fn write(dir: &Path, prepared: Prepared, library: &Library) -> Result<Vendored, VendorError> {
     let Prepared {
         copies,
@@ -288,6 +302,11 @@ pub fn write(dir: &Path, prepared: Prepared, library: &Library) -> Result<Vendor
         files,
         loaded_before,
     } = prepared;
+    let _lock = ProjectLock::acquire(dir).map_err(|error| VendorError::Io {
+        path: dir.to_owned(),
+        error,
+    })?;
+    unchanged(dir, &files)?;
     let mut vendored = Vendored {
         copied: Vec::new(),
         reused,
@@ -302,7 +321,7 @@ pub fn write(dir: &Path, prepared: Prepared, library: &Library) -> Result<Vendor
         }
     }
     // The project as it is now on disk must load if it loaded before (the
-    // same check as above, on the files written: nothing changed meanwhile).
+    // same check as above, on the files written).
     if loaded_before {
         let check = read_sources(dir)
             .ok()
@@ -317,46 +336,66 @@ pub fn write(dir: &Path, prepared: Prepared, library: &Library) -> Result<Vendor
     Ok(vendored)
 }
 
+/// The project's files as [`read_sources`] reads them.
+fn project_sources(dir: &Path) -> Result<Vec<SourceFile>, VendorError> {
+    read_sources(dir).map_err(|error| match error {
+        LoadError::Io { path, error } => VendorError::Io { path, error },
+        LoadError::Invalid(diagnostics) => VendorError::Syntax {
+            path: diagnostics
+                .first()
+                .map_or_else(|| PROJECT_FILE.to_owned(), |d| d.file.clone()),
+            message: "the file is not UTF-8".to_owned(),
+        },
+    })
+}
+
+/// The conflict check: the project's files on disk are exactly `read`, the
+/// files [`prepare`] judged (the same paths, the same text).
+fn unchanged(dir: &Path, read: &[SourceFile]) -> Result<(), VendorError> {
+    let now = project_sources(dir).map_err(|error| match error {
+        VendorError::Syntax { path, .. } => VendorError::Changed(path),
+        error => error,
+    })?;
+    let then: BTreeMap<&str, &str> = read
+        .iter()
+        .map(|f| (f.path.as_str(), f.text.as_str()))
+        .collect();
+    let now: BTreeMap<&str, &str> = now
+        .iter()
+        .map(|f| (f.path.as_str(), f.text.as_str()))
+        .collect();
+    match then
+        .keys()
+        .chain(now.keys())
+        .find(|path| then.get(*path) != now.get(*path))
+    {
+        Some(path) => Err(VendorError::Changed((*path).to_owned())),
+        None => Ok(()),
+    }
+}
+
 /// The files [`vendor`] wrote, so that a failure can take them back: each
-/// new file is written under a temporary name and linked to its own name
-/// only once every one is written (a link never replaces a file), then
-/// each rewritten project file replaces its original by a rename. On a
-/// failure the new files are removed and the originals written back.
+/// file is staged first ([`transaction::stage`]), each new file then linked
+/// to its own name (a link never replaces a file), and each rewritten
+/// project file renamed over its original last. On a failure the new files
+/// are removed and the originals written back, each only while it still
+/// holds exactly what vendoring wrote: a file edited meanwhile (by a
+/// person's editor, which takes no lock) is left as it is.
 struct Written<'d> {
     dir: &'d Path,
-    temporary: Vec<PathBuf>,
-    created: Vec<PathBuf>,
-    replaced: Vec<(PathBuf, String)>,
+    /// A new file and the text written to it.
+    created: Vec<(PathBuf, String)>,
+    /// A replaced file, its original text and the text written over it.
+    replaced: Vec<(PathBuf, String, String)>,
 }
 
 impl<'d> Written<'d> {
     fn new(dir: &'d Path) -> Written<'d> {
         Written {
             dir,
-            temporary: Vec::new(),
             created: Vec::new(),
             replaced: Vec::new(),
         }
-    }
-
-    /// A temporary file beside `path` (`.<name>.vendor`) holding `text`,
-    /// created new.
-    fn temporary(&mut self, path: &Path, text: &str) -> Result<PathBuf, VendorError> {
-        let name = path
-            .file_name()
-            .map_or_else(Default::default, |n| n.to_string_lossy());
-        let temporary = path.with_file_name(format!(".{name}.vendor"));
-        let io = |error| VendorError::Io {
-            path: temporary.clone(),
-            error,
-        };
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        let mut file = options.open(&temporary).map_err(io)?;
-        self.temporary.push(temporary.clone());
-        io::Write::write_all(&mut file, text.as_bytes()).map_err(io)?;
-        file.sync_all().map_err(io)?;
-        Ok(temporary)
     }
 
     fn apply(
@@ -372,60 +411,66 @@ impl<'d> Written<'d> {
                 error,
             })?;
         }
+        let staging = |full: &Path, text: &str| {
+            transaction::stage(full, text.as_bytes()).map_err(|error| VendorError::Io {
+                path: full.to_owned(),
+                error,
+            })
+        };
+        // Every file staged first; a staged file not committed is removed
+        // when dropped, on any return.
         let mut staged = Vec::new();
         for (path, text) in copies {
             let full = self.dir.join(path);
-            staged.push((self.temporary(&full, text)?, full, path));
+            staged.push((staging(&full, text)?, full, path, text));
         }
         let mut replacing = Vec::new();
         for (path, text) in edits {
             let full = self.dir.join(path);
-            replacing.push((self.temporary(&full, text)?, full, path));
+            replacing.push((staging(&full, text)?, full, path, text));
         }
         // The new files: a hard link fails if the name was taken meanwhile.
-        for (temporary, full, path) in staged {
-            fs::hard_link(&temporary, &full).map_err(|error| match error.kind() {
+        for (file, full, path, text) in staged {
+            file.create(&full).map_err(|error| match error.kind() {
                 io::ErrorKind::AlreadyExists => VendorError::Exists(path.clone()),
                 _ => VendorError::Io {
                     path: full.clone(),
                     error,
                 },
             })?;
-            self.created.push(full);
+            self.created.push((full, text.clone()));
         }
         // The project's own files last, each replaced at once.
-        for (temporary, full, path) in replacing {
+        for (file, full, path, text) in replacing {
             let original = files
                 .iter()
                 .find(|f| f.path == *path)
                 .map(|f| f.text.clone())
                 .unwrap_or_default();
-            fs::rename(&temporary, &full).map_err(|error| VendorError::Io {
+            file.replace(&full).map_err(|error| VendorError::Io {
                 path: full.clone(),
                 error,
             })?;
-            self.temporary.retain(|t| *t != temporary);
-            self.replaced.push((full, original));
+            self.replaced.push((full, original, text.clone()));
         }
-        self.clean();
         Ok(())
     }
 
-    /// Removes the temporary files left.
-    fn clean(&mut self) {
-        for temporary in self.temporary.drain(..) {
-            let _ = fs::remove_file(temporary);
-        }
-    }
-
-    /// Takes back what was written, as far as the file system lets it.
+    /// Takes back what was written, as far as the file system lets it, and
+    /// never over an edit made since it was written.
     fn undo(&mut self) {
-        self.clean();
-        for (full, original) in self.replaced.drain(..) {
-            let _ = fs::write(full, original);
+        let ours = |full: &Path, text: &str| {
+            transaction::current(full).is_ok_and(|now| now.as_deref() == Some(text.as_bytes()))
+        };
+        for (full, original, text) in self.replaced.drain(..) {
+            if ours(&full, &text) {
+                let _ = transaction::write_atomic(&full, original.as_bytes());
+            }
         }
-        for full in self.created.drain(..) {
-            let _ = fs::remove_file(full);
+        for (full, text) in self.created.drain(..) {
+            if ours(&full, &text) {
+                let _ = fs::remove_file(full);
+            }
         }
     }
 }
@@ -469,5 +514,50 @@ fn replace(item: &mut Item, text: &str) {
         let decor = value.decor().clone();
         *value = Value::from(text);
         *value.decor_mut() = decor;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// audit 2026-10-23: taking back a vendoring never overwrites an edit
+    /// made after it wrote (a person's editor takes no lock): a rewritten
+    /// file edited since is left as edited, a new file edited since is kept;
+    /// the files still as vendoring wrote them are taken back.
+    #[test]
+    fn undo_keeps_an_edit_made_meanwhile() {
+        let dir = std::env::temp_dir().join(format!("signal-vendor-undo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(COMPOSITES)).unwrap();
+        let project = dir.join(PROJECT_FILE);
+        let copy = dir.join("composites/a.toml");
+        let other = dir.join("composites/b.toml");
+        fs::write(&project, "rewritten").unwrap();
+        fs::write(&copy, "copy").unwrap();
+        fs::write(&other, "copy b").unwrap();
+        let mut written = Written::new(&dir);
+        written
+            .replaced
+            .push((project.clone(), "original".into(), "rewritten".into()));
+        written.created.push((copy.clone(), "copy".into()));
+        written.created.push((other.clone(), "copy b".into()));
+        // Edited after vendoring wrote: gain 0.25 -> 0.5, and one copy.
+        fs::write(&project, "edited: gain = 0.5").unwrap();
+        fs::write(&other, "copy b, edited").unwrap();
+        written.undo();
+        assert_eq!(fs::read_to_string(&project).unwrap(), "edited: gain = 0.5");
+        assert!(!copy.exists(), "the untouched copy is taken back");
+        assert_eq!(fs::read_to_string(&other).unwrap(), "copy b, edited");
+
+        // Not edited: the original is written back.
+        let mut written = Written::new(&dir);
+        fs::write(&project, "rewritten").unwrap();
+        written
+            .replaced
+            .push((project.clone(), "original".into(), "rewritten".into()));
+        written.undo();
+        assert_eq!(fs::read_to_string(&project).unwrap(), "original");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

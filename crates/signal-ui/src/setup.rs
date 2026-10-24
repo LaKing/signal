@@ -12,7 +12,7 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -382,25 +382,15 @@ impl Setup {
         toml::to_string(&file).unwrap_or_default()
     }
 
-    /// Writes the Setup to `path` atomically: to a temporary file beside it,
-    /// synced, then renamed over it. A failure leaves the old file as it was.
+    /// Writes the Setup to `path` atomically: to a staging file of this
+    /// writer's beside it, synced, then renamed over it
+    /// ([`signal_project::transaction::write_atomic`], ADR 0040). A failure
+    /// leaves the old file as it was.
     pub fn save(&self, path: &Path) -> io::Result<()> {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             fs::create_dir_all(dir)?;
         }
-        let mut name = path.file_name().unwrap_or_default().to_owned();
-        name.push(".tmp");
-        let temporary = path.with_file_name(name);
-        let written = (|| {
-            let mut file = fs::File::create(&temporary)?;
-            file.write_all(self.to_toml().as_bytes())?;
-            file.sync_all()?;
-            fs::rename(&temporary, path)
-        })();
-        if written.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        written
+        signal_project::transaction::write_atomic(path, self.to_toml().as_bytes())
     }
 }
 

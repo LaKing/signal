@@ -50,6 +50,7 @@ use signal_project::live::{
 use signal_project::patch::{self, Op};
 use signal_project::schematic::{self, SCHEMATIC_FILE};
 use signal_project::session::{LiveRecorder, SessionRecorder, sink_of};
+use signal_project::transaction::ProjectLock;
 use signal_project::vendor::{self, VendorError};
 use signal_project::{Diagnostic, LoadError, PATTERNS, PROJECT_FILE, Project, located};
 
@@ -1881,6 +1882,7 @@ impl Host {
             ));
         }
         let failed = |error: String| format!("{} was not written: {error}", path.display());
+        let _lock = ProjectLock::acquire(&self.dir).map_err(|e| failed(e.to_string()))?;
         let before = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -3271,6 +3273,8 @@ impl Host {
         match message.get("level") {
             None | Some(Value::Null) => {
                 self.schematic_unlinked()?;
+                let _lock = ProjectLock::acquire(&self.dir)
+                    .map_err(|e| fail("write-failed", format!("{}: {e}", path.display())))?;
                 match fs::remove_file(&path) {
                     Ok(()) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -3308,6 +3312,7 @@ impl Host {
                 format!("{} was not written: {error}", path.display()),
             )
         };
+        let _lock = ProjectLock::acquire(&self.dir).map_err(|e| failed(e.to_string()))?;
         let before = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -3534,8 +3539,11 @@ impl Host {
             self.schematic_unlinked()?;
         }
         // The file as it is now, not as it was read: an edit from elsewhere
-        // since then is a conflict, never overwritten.
+        // since then is a conflict, never overwritten. Checked and written
+        // under the project's writer lock (ADR 0040).
         let path = self.dir.join(&file);
+        let _lock = ProjectLock::acquire(&self.dir)
+            .map_err(|e| fail("write-failed", format!("{file} was not written: {e}")))?;
         let now = fs::read(&path).ok().map(|bytes| sha256_hex(&bytes));
         if now.as_deref() != Some(base) {
             return Err(fail_with(
@@ -3738,7 +3746,10 @@ impl Host {
         self.loads_as_edit(Project::from_sources(sources))
             .map_err(does_not_load)?;
         // The file as it is now, not as it was read: an edit from elsewhere
-        // since then is a conflict, never overwritten.
+        // since then is a conflict, never overwritten. Checked and written
+        // under the project's writer lock (ADR 0040).
+        let _lock = ProjectLock::acquire(&self.dir)
+            .map_err(|e| fail("write-failed", format!("{file} was not written: {e}")))?;
         let now = current()?;
         if now != before {
             return Err(conflict(now));
@@ -3804,9 +3815,29 @@ impl Host {
             VendorError::Syntax { .. } | VendorError::Invalid(_) => {
                 fail("does-not-load", error.to_string())
             }
+            VendorError::Changed(ref file) => fail_with(
+                "conflict",
+                error.to_string(),
+                json!({"file": file, "base": fs::read(self.dir.join(file)).ok().map(|bytes| sha256_hex(&bytes))}),
+            ),
             VendorError::Io { .. } => fail("write-failed", error.to_string()),
         };
         let prepared = vendor::prepare(&self.dir, composite, name, library).map_err(refused)?;
+        // What was prepared is the version `base` names (the file may have
+        // changed since the check above); `vendor::write` then commits it
+        // only while the files are still the ones prepared (ADR 0040).
+        let prepared_base = prepared
+            .before()
+            .iter()
+            .find(|f| f.path == PROJECT_FILE)
+            .map(|f| sha256_hex(f.text.as_bytes()));
+        if prepared_base.as_deref() != Some(base) {
+            return Err(fail_with(
+                "conflict",
+                format!("{PROJECT_FILE} changed since the version the vendor names"),
+                json!({"file": PROJECT_FILE, "base": prepared_base}),
+            ));
+        }
         if let Some(file) = prepared.paths().find(|file| self.linked_file(file)) {
             return Err(fail(
                 "write-failed",
@@ -4950,7 +4981,10 @@ impl Host {
         self.loads_as_edit(Project::from_sources(sources))
             .map_err(does_not_load)?;
         // The file as it is now, not as it was read: an edit from elsewhere
-        // since then is a conflict, never overwritten.
+        // since then is a conflict, never overwritten. Checked and written
+        // under the project's writer lock (ADR 0040).
+        let _lock = ProjectLock::acquire(&self.dir)
+            .map_err(|e| fail("write-failed", format!("{file} was not written: {e}")))?;
         let now = current(&path)?;
         if now != before {
             return Err(conflict(now));
@@ -5023,16 +5057,18 @@ impl Host {
             None | Some(Value::Null) => None,
             Some(_) => return Err(fail("bad-message", "`base` is a string or null")),
         };
-        let (path, exists) = self.panel_path(name)?;
+        let (path, _) = self.panel_path(name)?;
         check_content(html).map_err(|why| fail("bad-html", format!("not written: {why}")))?;
-        let before = if exists {
-            Some(
-                fs::read_to_string(&path)
-                    .map_err(|e| fail("write-failed", format!("ui/{name}: {e}")))?,
-            )
-        } else {
-            None
+        // The version check and the write under the project's writer lock
+        // (ADR 0040), on the file as it is now.
+        let _lock = ProjectLock::acquire(&self.dir)
+            .map_err(|e| fail("write-failed", format!("ui/{name} was not written: {e}")))?;
+        let before = match fs::read_to_string(&path) {
+            Ok(text) => Some(text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(fail("write-failed", format!("ui/{name}: {e}"))),
         };
+        let exists = before.is_some();
         let current = before.as_deref().map(|t| sha256_hex(t.as_bytes()));
         if current.as_deref() != base {
             let html = before

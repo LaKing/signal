@@ -372,9 +372,10 @@ Reply: `{"type": "file.written", "id": 13, "file": "project.toml", "base": "<sha
 {"type": "vendor", "id": 14, "composite": "lib.tape_echo", "as": "echo", "base": "<sha-256 of project.toml>"}
 ```
 
-Copies a built-in library composite, and the library composites it uses, into the project's `composites/` as `signal vendor` does (ADR 0027 §4, `signal_project::vendor`). It uses that command's all-or-nothing writer: temporary files linked into place, rewritten files renamed last, rolled back on failure. The host checks first:
+Copies a built-in library composite, and the library composites it uses, into the project's `composites/` as `signal vendor` does (ADR 0027 §4, `signal_project::vendor`). It uses that command's all-or-nothing writer: temporary files linked into place, rewritten files renamed last, rolled back on failure (never over an edit made meanwhile). The host checks first:
 
-- `project.toml` is still the version `base` names (`conflict`);
+- `project.toml` is still the version `base` names, and the vendoring was prepared from that version (`conflict`);
+- when it commits, under the project's writer lock (ADR 0040), every file of the project is still exactly what the vendoring was prepared from: a file changed, added or removed meanwhile is a `conflict` naming it, and nothing is written;
 - no file it would write is reached through a link (`write-failed`);
 - the project as it would be left plans as a reload would (`does-not-load`).
 

@@ -358,7 +358,14 @@ impl Document {
     }
 
     fn write(&mut self, file: &Path) -> Result<(), String> {
-        let bytes = archive::pack(&self.working)
+        // Packed under the working folder's writer lock (ADR 0040), so no
+        // commit of several files (a vendoring) is packed half written.
+        let bytes = signal_project::transaction::ProjectLock::acquire(&self.working)
+            .map_err(|e| archive::ArchiveError::Io {
+                path: self.working.clone(),
+                error: e,
+            })
+            .and_then(|_lock| archive::pack(&self.working))
             .map_err(|e| format!("{} was not saved: {e}", file.display()))?;
         archive::write_atomic(file, &bytes)
             .map_err(|e| format!("{} was not saved: {e}", file.display()))?;

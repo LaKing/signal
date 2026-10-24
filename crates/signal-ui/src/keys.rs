@@ -20,7 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
@@ -898,7 +898,7 @@ pub fn without_overrides(text: &str) -> Result<String, String> {
     Ok(document.to_string())
 }
 
-/// Writes `text` to `path` atomically: a temporary file beside it (beside
+/// Writes `text` to `path` atomically: a staging file of its own beside it (beside
 /// the file a link names, for a link), synced, then renamed over it.
 pub fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
     // A linked file (a keys.toml kept elsewhere, in dotfiles) is written
@@ -908,19 +908,8 @@ pub fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         fs::create_dir_all(dir)?;
     }
-    let mut name = path.file_name().unwrap_or_default().to_owned();
-    name.push(".tmp");
-    let temporary = path.with_file_name(name);
-    let written = (|| {
-        let mut file = fs::File::create(&temporary)?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)
-    })();
-    if written.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    written
+    // A staging file of this writer's, never another's (ADR 0040).
+    signal_project::transaction::write_atomic(path, text.as_bytes())
 }
 
 fn read_or_empty(path: &Path) -> Result<String, String> {

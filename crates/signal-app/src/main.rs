@@ -731,6 +731,12 @@ impl Windows {
             return;
         }
         let path = old.dir.join(WINDOWS_FILE);
+        // Read, edited and written under the project's writer lock (ADR 0040).
+        let lock = signal_project::transaction::ProjectLock::acquire(&old.dir);
+        if let Err(error) = &lock {
+            eprintln!("signal-app: {} was not written: {error}", path.display());
+            return;
+        }
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let written = (self.edit_for(&layout))(&text).and_then(|after| {
             if after == text {

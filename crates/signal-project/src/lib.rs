@@ -46,6 +46,7 @@ pub mod schematic;
 pub mod session;
 mod slot;
 mod structure;
+pub mod transaction;
 pub mod vendor;
 mod write;
 

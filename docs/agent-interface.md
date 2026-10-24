@@ -123,7 +123,7 @@ Addresses are as in the UI protocol: `/instance` or `/composite/inner`, and port
 | `write_panel` | `html`, `base`, `file?` (`main.html`) | `panel.write`: the `<signal-panel>` content, within the panel whitelist |
 | `write_file` | `file`, `text`, `base` | `project.toml` and `composites/<name>.toml`: `file.write`; `patterns/<name>.toml`: `pattern.write`. Panels and positions have their own tools |
 
-Every write is checked the way a reload would load it, and is written atomically, never through a link, and only when the file is still the version `base` names. Otherwise the refusal is a `conflict` carrying the current `base` and `text`. The watch then applies the file live.
+Every write is checked the way a reload would load it, and is written atomically, never through a link, and only when the file is still the version `base` names, checked and written under the project's writer lock so that another Signal or `signal mcp` process on the same project cannot write in between (ADR 0040). Otherwise the refusal is a `conflict` carrying the current `base` and `text`. The watch then applies the file live.
 
 Example:
 
