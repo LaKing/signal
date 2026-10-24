@@ -419,7 +419,84 @@ fn transport() {
     let mut sine = Mcp::started(&fixture("sine", "tool-transport-none"), &[]);
     let none = sine.refused("transport", json!({"action": "tempo", "bpm": 100}));
     assert!(none.contains("no std.transport"), "{none}");
+    assert!(none.contains("no std.playhead"), "{none}");
     assert!(sine.finish().success());
+}
+
+/// The tempo of `lib.transport` (a std.playhead, ADR 0033): studio-transport's
+/// `/transport.bpm`, set live as `set_parameter` sets a control (the file
+/// unchanged until a commit), and ramped.
+#[test]
+fn transport_tempo_on_a_playhead() {
+    let mut mcp = Mcp::started(&fixture("studio-transport", "tool-tempo-playhead"), &[]);
+    let file = mcp.file("project.toml");
+    let tempo = mcp.ok("transport", json!({"action": "tempo", "bpm": 140}));
+    assert_eq!(tempo["addresses"], json!(["/transport.bpm"]), "{tempo}");
+    assert_eq!(tempo["skipped"], json!([]), "{tempo}");
+    assert_eq!(tempo["acks"][0]["outcome"], "scheduled", "{tempo}");
+    assert_eq!(control_base(&mut mcp, "/transport.bpm"), 140.0);
+    assert_eq!(mcp.file("project.toml"), file, "a live set, not committed");
+    let ramp = mcp.ok("transport", json!({"action": "tempo", "bpm": 90, "ms": 5}));
+    assert_eq!(ramp["acks"][0]["outcome"], "scheduled", "{ramp}");
+    assert_eq!(control_base(&mut mcp, "/transport.bpm"), 90.0);
+    mcp.ok("commit", json!({"address": "/transport.bpm"}));
+    assert!(
+        mcp.file("project.toml").contains("bpm = 90"),
+        "{}",
+        mcp.file("project.toml")
+    );
+    let streams = mcp.ok("read_stream", json!({}));
+    assert_eq!(
+        streams["transport"][0]["instance"], "/transport/playhead",
+        "{streams}"
+    );
+    assert!(streams["transport"][0]["bpm"].is_number(), "{streams}");
+    assert!(mcp.finish().success());
+}
+
+/// Several transports: every top-level control reaching an unwired bpm is
+/// set together; one a connection drives is skipped; only wired ones: refused.
+#[test]
+fn transport_tempo_on_several_playheads() {
+    let text = |c_bpm: &str| {
+        format!(
+            "schema_version = 1\n\
+             [project]\nname = \"tempi\"\nsample_rate = 48000\nseed = 1\n\
+             [instances]\n\
+             a = {{ module = \"lib.transport\" }}\n\
+             b = {{ module = \"std.playhead\", bpm = 100 }}\n\
+             c = {{ module = \"lib.transport\" }}\n\
+             k = {{ module = \"std.const\", value = 128 }}\n\
+             osc = {{ module = \"std.sine_osc\", freq = 440 }}\n\
+             out = {{ module = \"std.audio_out\", gain = 0.5 }}\n\
+             [wiring]\nconnections = [\n\
+             {c_bpm}\
+             {{ from = \"osc.out\", to = \"out.l\" }},\n\
+             {{ from = \"osc.out\", to = \"out.r\" }},\n]\n"
+        )
+    };
+    let mut mcp = Mcp::started(
+        &mcp_common::project(
+            &text("{ from = \"k.out\", to = \"c.bpm\" },\n"),
+            "tool-tempo-several",
+        ),
+        &[],
+    );
+    let tempo = mcp.ok("transport", json!({"action": "tempo", "bpm": 132}));
+    assert_eq!(tempo["addresses"], json!(["/a.bpm", "/b.bpm"]), "{tempo}");
+    assert_eq!(tempo["skipped"], json!(["/c.bpm"]), "{tempo}");
+    assert_eq!(control_base(&mut mcp, "/a.bpm"), 132.0);
+    assert_eq!(control_base(&mut mcp, "/b.bpm"), 132.0);
+    assert!(mcp.finish().success());
+
+    let wired = "{ from = \"k.out\", to = \"a.bpm\" },\n\
+                 { from = \"k.out\", to = \"b.bpm\" },\n\
+                 { from = \"k.out\", to = \"c.bpm\" },\n";
+    let mut mcp = Mcp::started(&mcp_common::project(&text(wired), "tool-tempo-wired"), &[]);
+    let refused = mcp.refused("transport", json!({"action": "tempo", "bpm": 132}));
+    assert!(refused.contains("a connection drives"), "{refused}");
+    assert!(refused.contains("/a.bpm, /b.bpm, /c.bpm"), "{refused}");
+    assert!(mcp.finish().success());
 }
 
 #[test]

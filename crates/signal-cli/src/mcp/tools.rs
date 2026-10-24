@@ -182,7 +182,7 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "transport",
         group: Group::Adjust,
-        description: "`stop` stops the run; `start` plays the project again from frame 0 from its files; `tempo` sets (or with `ms`, ramps) the `bpm` of the project's std.transport instances.",
+        description: "`stop` stops the run; `start` plays the project again from frame 0 from its files; `tempo` sets (or with `ms`, ramps) the project's tempo: every top-level control that reaches the `bpm` of a std.transport or std.playhead (lib.transport's `/transport.bpm`) and that no connection drives, all of them together.",
         schema: || {
             object(
                 json!({"action": {"type": "string", "enum": ["start", "stop", "tempo"]}, "bpm": {"type": "number"}, "ms": {"type": "number", "minimum": 0}}),
@@ -312,7 +312,7 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "read_stream",
         group: Group::Observe,
-        description: "The sequencers' playheads: every std.step_seq8 `step` (0..255) and std.note_seq `position` (beats) output, or the signal outputs in `ports`, read over `window_ms` (default 1000; at least 256/rate s) at `rate` points per second (default 512): first, last, minimum and maximum, with the frame and each std.transport's bpm.",
+        description: "The sequencers' playheads: every std.step_seq8 `step` (0..255) and std.note_seq `position` (beats) output, or the signal outputs in `ports`, read over `window_ms` (default 1000; at least 256/rate s) at `rate` points per second (default 512): first, last, minimum and maximum, with the frame and each std.transport's and std.playhead's bpm.",
         schema: || {
             object(
                 json!({"ports": {"type": "array", "items": {"type": "string"}, "maxItems": 8}, "rate": {"type": "number", "minimum": 1}, "window_ms": {"type": "number", "minimum": 1, "maximum": 10000}}),
@@ -1164,23 +1164,29 @@ fn transport(context: &Context, arguments: &Value) -> Outcome {
         return Err(refused("tempo needs `bpm`"));
     };
     let describe = ask(context, json!({"type": "describe"}))?;
-    let addresses: Vec<String> = describe["instances"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|i| i["module"] == json!("std.transport"))
-        .filter_map(|i| i["address"].as_str().map(|a| format!("{a}.bpm")))
-        .collect();
-    if addresses.is_empty() {
-        return Err(refused(
-            "the project has no std.transport: it has no tempo to set",
-        ));
+    let targets = tempo_targets(&describe);
+    if targets.controls.is_empty() {
+        return Err(refused(if targets.transports.is_empty() {
+            "the project has no transport (no std.transport and no std.playhead, as in lib.transport): it has no tempo to set".to_owned()
+        } else if targets.skipped.is_empty() {
+            format!(
+                "no top-level control reaches the bpm of {}: export it from its composite to set the tempo",
+                targets.transports.join(", ")
+            )
+        } else {
+            format!(
+                "no tempo to set: a connection drives {} (a value set by hand would not be what plays)",
+                targets.skipped.join(", ")
+            )
+        }));
     }
+    let addresses: Vec<String> = targets.controls.iter().map(|(a, _)| a.clone()).collect();
     guard_live(
         context,
-        &addresses
+        &targets
+            .controls
             .iter()
-            .map(|a| (a.clone(), Some(bpm)))
+            .flat_map(|(_, ports)| ports.iter().map(|p| (p.clone(), Some(bpm))))
             .collect::<Vec<_>>(),
     )?;
     let ms = arguments.get("ms").and_then(Value::as_f64).unwrap_or(0.0);
@@ -1194,9 +1200,74 @@ fn transport(context: &Context, arguments: &Value) -> Outcome {
         acks.push(bare(ask(context, message)?));
     }
     Ok((
-        json!({"bpm": bpm, "addresses": addresses, "acks": acks}),
+        json!({"bpm": bpm, "addresses": addresses, "skipped": targets.skipped, "acks": acks}),
         format!("tempo {bpm} bpm on {}", addresses.join(", ")),
     ))
+}
+
+/// The modules whose `bpm` is a project's tempo: the tick clock and the
+/// playhead (`lib.transport` is a std.playhead, ADR 0033).
+const TEMPO_MODULES: [&str; 2] = ["std.transport", "std.playhead"];
+
+/// What `transport` `tempo` sets in a `describe` message, by the rule
+/// Space's `transport.toggle` follows for `run` (ADR 0039 §6,
+/// `ui/lib/transport-toggle.js`).
+struct TempoTargets {
+    /// The `bpm` parameter ports of every std.transport and std.playhead.
+    transports: Vec<String>,
+    /// The top-level controls (`describe.controls`) whose ports reach one
+    /// and that no connection drives, in `describe`'s order, each with its
+    /// ports: every one is set, so several transports stay in step.
+    controls: Vec<(String, Vec<String>)>,
+    /// The controls that reach one but are `modulated` (a connection drives
+    /// them: a value set by hand would not be what plays).
+    skipped: Vec<String>,
+}
+
+fn tempo_targets(describe: &Value) -> TempoTargets {
+    let transports: Vec<String> = describe["instances"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| TEMPO_MODULES.iter().any(|m| i["module"] == json!(m)))
+        .filter_map(|i| {
+            let bpm = i["parameters"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|p| p["name"] == json!("bpm"))
+                .and_then(|p| p["address"].as_str())
+                .map(str::to_owned);
+            bpm.or_else(|| Some(format!("{}.bpm", i["address"].as_str()?)))
+        })
+        .collect();
+    let mut controls = Vec::new();
+    let mut skipped = Vec::new();
+    for control in describe["controls"].as_array().into_iter().flatten() {
+        let Some(address) = control["address"].as_str() else {
+            continue;
+        };
+        let ports: Vec<String> = control["ports"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        if !ports.iter().any(|p| transports.contains(p)) {
+            continue;
+        }
+        if control["modulated"] == json!(true) {
+            skipped.push(address.to_owned());
+        } else {
+            controls.push((address.to_owned(), ports));
+        }
+    }
+    TempoTargets {
+        transports,
+        controls,
+        skipped,
+    }
 }
 
 fn commit(context: &Context, arguments: &Value) -> Outcome {
@@ -1783,7 +1854,7 @@ fn read_stream(context: &Context, arguments: &Value) -> Outcome {
     }
     let bpm: Vec<Value> = instances
         .iter()
-        .filter(|i| i["module"] == json!("std.transport"))
+        .filter(|i| TEMPO_MODULES.iter().any(|m| i["module"] == json!(m)))
         .map(|i| {
             let base = i["parameters"]
                 .as_array()

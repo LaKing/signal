@@ -45,6 +45,15 @@ node --test ui/                                              # the web UI's logi
 
 CI also runs the scheduler's loom model tests (`RUSTFLAGS="--cfg loom" cargo test -p signal-engine --lib --release model::`). Tests that need a tool that is missing (`node`, `codesign`) skip with a message rather than fail. CI runs nextest with the `ci` profile of [`.config/nextest.toml`](.config/nextest.toml): every failure is reported, and the four tests that time the device more closely than a hosted runner's virtual machine can (`semaphore_workers_are_reached_by_every_wake_and_stop_cleanly`, `time_constraint_workers_play_the_offline_render`, `a_run_without_a_stall_reports_no_hang`, `the_display_shows_a_hidden_edit_within_the_bound`) are left out, and every test gets two retries, for those that time the host by a margin it sometimes misses (a pass after a retry is reported as flaky); run them on a Mac with `cargo test`.
 
+**The device gate** (on the Mac, at a checkpoint and before a release; `docs/testing-and-evaluation.md` "The device gate") is plain `cargo test` with no retries: the commands above, which also run those four tests, and the GPU tests with an adapter required, so that a missing GPU fails instead of skipping:
+
+```sh
+SIGNAL_REQUIRE_GPU=1 cargo test -p signal-gpu -p signal-lab --features signal-lab/lab --locked --offline -- --nocapture
+SIGNAL_REQUIRE_GPU=1 cargo test -p signal-cli --features lab --locked --offline --test lab
+```
+
+CI's runners have no GPU, so CI never sets `SIGNAL_REQUIRE_GPU`.
+
 The tests include `THIRD-PARTY-NOTICES.md`: it must match `Cargo.lock`, and every linked crate's licence must be allowed. After a dependency change, run `node scripts/third-party-notices.mjs` and commit the result.
 
 ## The hard rules, in short

@@ -103,9 +103,11 @@ Addresses are as in the UI protocol: `/instance` or `/composite/inner`, and port
 | `set_parameter` | `address`, `value` | `set`, answered once applied: `{frame, requested, late, outcome}` |
 | `ramp_parameter` | `address`, `to`, `ms?` or `frames?` | `ramp` (default 5 ms) |
 | `trigger` | `address` (an event input) | `trigger` |
-| `transport` | `action`: `start` / `stop` / `tempo`; `bpm`, `ms?` | `transport.play` (plays again from frame 0 from the files; refused, as `revert` is, when that would raise a lowered gain above `--max-gain`) / `transport.stop`; `tempo` sets or ramps `bpm` of every `std.transport` |
+| `transport` | `action`: `start` / `stop` / `tempo`; `bpm`, `ms?` | `transport.play` (plays again from frame 0 from the files; refused, as `revert` is, when that would raise a lowered gain above `--max-gain`) / `transport.stop`; `tempo` sets or ramps the tempo (below) |
 | `commit` | `address`, `value?` (default: the live value; `null`: remove the key) | `commit`: writes the control's value into `project.toml` |
 | `revert` | `address` | `revert`: each port gets the file's value again |
+
+**The tempo** (`transport` `tempo`) follows the rule Space's `transport.toggle` follows for `run` (ADR 0039 §6, `ui/lib/transport-toggle.js`), for `bpm`: its targets are the top-level controls (`describe.controls`: a top-level instance's parameter, a composite's export such as `lib.transport`'s `/transport.bpm` on studio-transport, an include's) whose ports reach the `bpm` of a `std.transport` or a `std.playhead` (`lib.transport` is one), skipping a control a connection drives (`modulated`: a value set by hand would not be what plays). **Several** (two transports, two included projects) are all set, or ramped, to the same `bpm`, so they stay in step; the reply lists them in `addresses`, and the wired ones in `skipped`. Each is a live `set` (or `ramp`) as `set_parameter` sends it, under the same gain guard; `commit` writes it into `project.toml`. Refused when nothing is left: no transport ("the project has no transport"), only wired ones ("a connection drives …"), or a bpm no top-level control reaches (a parameter inside a composite that does not export it).
 
 ### Edit the graph
 
@@ -141,7 +143,7 @@ A scope stream delivers blocks of 256 consecutive points, so a window that reads
 | `meter` | `source?` (`output`, `input`), `window_ms?` (500) | the sink's channels: `peak`, `rms` (linear, and `peakDb`, `rmsDb`) over the window, from the `meters` stream |
 | `meter` | `ports` (≤ 8), `window_ms?` (500, ≥ 54) | each signal output's peak and RMS from a scope stream at 4800 points/s: a decimated capture, so its peak can read below the true sample peak |
 | `scope` | `port`, `rate?` (4800), `window_ms?` (200), `points?` (256, ≤ 1024) | the window as numbers, every `every`-th point, with `firstFrame`, `decimation`, `peak`, `rms` |
-| `read_stream` | `ports?`, `rate?` (512), `window_ms?` (1000) | the sequencers' playheads: every `std.step_seq8` `step` (0–255, as `step`) and `std.note_seq` `position` (beats), or the outputs named. Each with `first`, `last`, `min`, `max`, `lastFrame`; also the `frame` and each `std.transport`'s `bpm` |
+| `read_stream` | `ports?`, `rate?` (512), `window_ms?` (1000) | the sequencers' playheads: every `std.step_seq8` `step` (0–255, as `step`) and `std.note_seq` `position` (beats), or the outputs named. Each with `first`, `last`, `min`, `max`, `lastFrame`; also the `frame` and each `std.transport`'s and `std.playhead`'s `bpm` (the plan's base) |
 | `render` | `seconds?` (2, ≤ 600), `seed?` | an offline render of the files as they are now (`signal render`; unsaved live values are not in it), under `--out`: `wav`, `hashes` (`audio_fnv1a64`, `log_fnv1a64`), `manifest`, `metrics`, `warnings`, `played: false`. It never plays, and it is the project as written: the output ceiling is not applied (`outputCeiling: null`), so its samples can be louder than anything the device gets |
 
 The 8 scope slots of a run are shared with every client: a full set refuses `no-scope-slot`, and the tool says so. An observation that receives no data (nothing plays, or the stream delivered nothing within the window plus 5 s) is a refusal, "no data arrived", never an empty result. The meters measure what the device gets, after the output ceiling.

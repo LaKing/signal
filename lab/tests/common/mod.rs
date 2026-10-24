@@ -1,6 +1,7 @@
 //! Shared by the `lab.gpu_partials` tests: the registry, a plan that plays
 //! the bank, and the devices (AC10 of M2.6-4: without a usable adapter the
-//! GPU tests say so and pass vacuously). M2.7-2: every test has its own
+//! GPU tests say so and pass vacuously, unless `SIGNAL_REQUIRE_GPU` is set,
+//! when they fail). M2.7-2: every test has its own
 //! device pool; there is no process-wide service.
 
 #![allow(dead_code)]
@@ -89,8 +90,17 @@ impl Gpu {
     }
 }
 
+/// Whether a usable adapter is required (`SIGNAL_REQUIRE_GPU` set and not
+/// `0`, as on the device gate): then a test that finds none fails instead
+/// of skipping or falling back to the noop device
+/// (`docs/testing-and-evaluation.md`).
+pub fn gpu_required() -> bool {
+    std::env::var_os("SIGNAL_REQUIRE_GPU").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
 /// The machine's GPUs, or `None` after printing why there is none: for the
-/// tests of computed values.
+/// tests of computed values. With `SIGNAL_REQUIRE_GPU`, no adapter is a
+/// failure.
 pub fn gpu() -> Option<Gpu> {
     let pool = DevicePool::open(&Selection::All);
     match pool.devices().first() {
@@ -99,6 +109,11 @@ pub fn gpu() -> Option<Gpu> {
             Some(Gpu::of(pool))
         }
         None => {
+            assert!(
+                !gpu_required(),
+                "SIGNAL_REQUIRE_GPU is set, but there is no usable GPU adapter ({:?})",
+                signal_gpu::inventory().error
+            );
             eprintln!(
                 "skipped: no usable GPU adapter ({:?}); operator steps: docs/benchmarks.md, \"GPU partial bank (M2.6-4)\"",
                 signal_gpu::inventory().error
@@ -109,7 +124,8 @@ pub fn gpu() -> Option<Gpu> {
 }
 
 /// The GPU, or else one noop device (which moves jobs but computes
-/// nothing): for the tests of the job path.
+/// nothing): for the tests of the job path. With `SIGNAL_REQUIRE_GPU`, the
+/// GPU or a failure.
 pub fn device() -> Gpu {
     let gpu = gpu().unwrap_or_else(|| Gpu::of(DevicePool::noop(1).unwrap()));
     eprintln!("device: {}", gpu.pool.devices()[0].id);

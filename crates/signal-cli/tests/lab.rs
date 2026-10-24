@@ -13,6 +13,13 @@ use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
 
+/// Whether a usable adapter is required (`SIGNAL_REQUIRE_GPU` set and not
+/// `0`, as on the device gate): then a test that finds none fails instead
+/// of skipping (`docs/testing-and-evaluation.md`).
+fn gpu_required() -> bool {
+    std::env::var_os("SIGNAL_REQUIRE_GPU").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
 fn signal(args: &[&str]) -> Output {
     signal_with_setup(args, "absent-setup.toml")
 }
@@ -88,6 +95,7 @@ fn bench_gpu_reports_the_gpu_bank_next_to_the_cpu_reference() {
     // failed); with no device at all, the top-level `no_gpu` says why.
     let devices = gpu["devices"].as_array().unwrap();
     if devices.is_empty() {
+        assert!(!gpu_required(), "SIGNAL_REQUIRE_GPU is set: {gpu}");
         assert!(gpu["no_gpu"].is_string(), "{gpu}");
     }
     for device in devices {
@@ -96,7 +104,10 @@ fn bench_gpu_reports_the_gpu_bank_next_to_the_cpu_reference() {
             "{device}"
         );
         match &device["per_block"]["gpu_round_trip"] {
-            Value::Null => assert!(device["no_gpu"].is_string(), "{device}"),
+            Value::Null => {
+                assert!(!gpu_required(), "SIGNAL_REQUIRE_GPU is set: {device}");
+                assert!(device["no_gpu"].is_string(), "{device}");
+            }
             round_trip => timing(round_trip),
         }
     }
@@ -149,6 +160,11 @@ fn devices_compute_lists_the_gpu_adapters() {
     let adapters = gpu["adapters"].as_array().unwrap();
     assert_eq!(gpu["available"], !adapters.is_empty());
     if adapters.is_empty() {
+        assert!(
+            !gpu_required(),
+            "SIGNAL_REQUIRE_GPU is set, but there is no usable GPU adapter ({})",
+            gpu["reason"]
+        );
         eprintln!("skipped: no usable GPU adapter ({})", gpu["reason"]);
         assert!(gpu["reason"].is_string());
     }
@@ -179,6 +195,11 @@ fn render_says_when_due_results_were_lost() {
     match summary.get("late_results") {
         Some(late) => assert_eq!(late.as_u64(), Some(lost)),
         None => assert_eq!(lost, 0),
+    }
+    // On the device gate there is a GPU: nothing is lost.
+    if gpu_required() {
+        assert!(summary.get("late_results").is_none(), "{summary}");
+        assert_eq!(lost, 0);
     }
     let _ = std::fs::remove_dir_all(&out);
 }
