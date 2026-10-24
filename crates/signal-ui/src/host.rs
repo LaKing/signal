@@ -2886,6 +2886,8 @@ impl Host {
             "snapshot.save" => self.snapshot_save(&message).map(Some),
             "snapshot.restore" => self.snapshot_restore(&message).map(Some),
             "snapshot.delete" => self.snapshot_delete(&message).map(Some),
+            "snapshot.undo" => self.snapshot_undo(&message).map(Some),
+            "snapshot.exclude" => self.snapshot_exclude(&message).map(Some),
             "retry" => self.retry(&message).map(Some),
             "revert" => self.revert(&message).map(Some),
             "panel.check" => self.panel_check(&message).map(Some),
@@ -3078,6 +3080,7 @@ impl Host {
                     "default": p.default,
                     "base": base,
                     "inFile": p.in_file,
+                    "inSnapshots": p.in_snapshots,
                     "modulated": p.modulated,
                     "combine": target.ports.first().and_then(combine_of),
                 }));
@@ -4969,6 +4972,10 @@ impl Host {
             "file": SNAPSHOTS_FILE,
             "base": text.map(|t| sha256_hex(t.as_bytes())),
             "snapshots": list,
+            // ADR 0041 §7: the undo snapshot, apart from the named ones.
+            "undo": all.undo.is_some(),
+            "undoCount": all.undo.as_ref().map_or(0, |u| u.len()),
+            "undoValues": all.undo,
         }))
     }
 
@@ -5073,12 +5080,49 @@ impl Host {
         self.snapshot_project(true)?;
         let name = snapshot_name(message)?;
         let check = base_check(message)?;
-        let (all, text) = snapshots::read(&self.dir).map_err(snapshot_failure)?;
-        check(text.as_deref()).map_err(|e| self.snapshot_refused(e))?;
-        let values = all
-            .snapshots
-            .get(&name)
-            .ok_or_else(|| snapshot_failure(SnapshotError::Unknown(name.clone())))?;
+        // ADR 0041 §7: the values playing now, of every control a restore
+        // may change, become the undo snapshot first, in the same write that
+        // reads the snapshot; a refused write restores nothing.
+        let now = snapshot::values(&self.panel, |instance, p| self.control_base(instance, p));
+        let (values, _, _) = snapshots::edit(&self.dir, check, |all| {
+            let values = all
+                .snapshots
+                .get(&name)
+                .cloned()
+                .ok_or_else(|| SnapshotError::Unknown(name.clone()))?;
+            all.undo = Some(now);
+            Ok(values)
+        })
+        .map_err(|e| self.snapshot_refused(e))?;
+        self.snapshots_written();
+        self.apply_snapshot(&name, "snapshot.restored", &values)
+    }
+
+    /// `snapshot.undo` (ADR 0041 §7): the undo snapshot restored, after the
+    /// values playing now take its place, so a second undo redoes.
+    fn snapshot_undo(&mut self, message: &Value) -> Result<Value, Failure> {
+        self.snapshot_project(true)?;
+        let check = base_check(message)?;
+        let now = snapshot::values(&self.panel, |instance, p| self.control_base(instance, p));
+        let (values, _, _) = snapshots::edit(&self.dir, check, |all| {
+            let values = all.undo.take().ok_or(SnapshotError::NoUndo)?;
+            all.undo = Some(now);
+            Ok(values)
+        })
+        .map_err(|e| self.snapshot_refused(e))?;
+        self.snapshots_written();
+        self.apply_snapshot("undo", "snapshot.undone", &values)
+    }
+
+    /// Restores `values` (the snapshot `name`, or the undo snapshot) into the
+    /// controls: written where `commit` writes them, as one change, and sent
+    /// live; the reply of type `kind`.
+    fn apply_snapshot(
+        &mut self,
+        name: &str,
+        kind: &str,
+        values: &snapshots::Values,
+    ) -> Result<Value, Failure> {
         let restore = snapshot::plan(&self.panel, values);
         let skipped: Vec<Value> = restore
             .skipped
@@ -5213,7 +5257,7 @@ impl Host {
             ));
         }
         Ok(json!({
-            "type": "snapshot.restored",
+            "type": kind,
             "name": name,
             "restored": restore.edits.len(),
             "written": addresses,
@@ -5222,6 +5266,106 @@ impl Host {
             "skipped": skipped,
             "clamped": clamped,
             "note": note,
+        }))
+    }
+
+    /// `snapshot.exclude` (ADR 0041 §8): a control left out of snapshots
+    /// (`exclude: true`) or put back in, written as its name in the
+    /// instance's `snapshot_exclude` in `project.toml` (under the writer
+    /// lock, compared just before the rename: ADR 0040). Not a parameter
+    /// value: nothing is sent and nothing plays differently.
+    fn snapshot_exclude(&mut self, message: &Value) -> Result<Value, Failure> {
+        use signal_project::transaction::replace_unchanged;
+        self.snapshot_project(false)?;
+        let address = message.get("address").and_then(Value::as_str).unwrap_or("");
+        let port: PortAddress = address
+            .parse()
+            .map_err(|e| fail("bad-address", format!("{address}: {e}")))?;
+        let exclude = match message.get("exclude") {
+            None => true,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err(fail("bad-value", "`exclude` must be true or false")),
+        };
+        let not_editable = || {
+            fail(
+                "not-editable",
+                format!(
+                    "{address} is no control: only a top-level instance's parameters go into snapshots"
+                ),
+            )
+        };
+        let (instance, parameter) = control_of(&port).ok_or_else(not_editable)?;
+        if self.panel.target(&instance, &parameter).is_none() {
+            return Err(not_editable());
+        }
+        let path = self.dir.join(signal_project::PROJECT_FILE);
+        let failed = |error: String| {
+            fail(
+                "write-failed",
+                format!("{address} was not written to {}: {error}", path.display()),
+            )
+        };
+        let lock = ProjectLock::acquire(&self.dir).map_err(|e| failed(e.to_string()))?;
+        let before = fs::read_to_string(&path).map_err(|e| failed(e.to_string()))?;
+        let after = signal_project::write_snapshot_exclude(&before, &instance, &parameter, exclude)
+            .map_err(|e| failed(e.to_string()))?;
+        let written = match &after {
+            Some(after) => {
+                if !replace_unchanged(&path, Some(before.as_bytes()), after.as_bytes())
+                    .map_err(|e| failed(e.to_string()))?
+                {
+                    return Err(fail(
+                        "conflict",
+                        format!(
+                            "{address} was not written: {} changed meanwhile (another writer); nothing was written",
+                            signal_project::PROJECT_FILE
+                        ),
+                    ));
+                }
+                true
+            }
+            None => false,
+        };
+        drop(lock);
+        if let Some(after) = after {
+            self.writes += 1;
+            let file = Path::new(signal_project::PROJECT_FILE);
+            match self.run.as_mut() {
+                // The running project takes the same text (nothing in it
+                // plays), so the watch's reload has nothing to apply.
+                Some(run) => {
+                    let known = run.file.as_deref() == Some(before.as_str());
+                    if let Ok(project) = run.current.with_project_text(&after) {
+                        let panel = Panel::new(&project, &self.registry);
+                        run.current = project;
+                        if known {
+                            run.file = Some(after);
+                            if let Some(watcher) = run.watcher.as_mut() {
+                                let stamp = watcher.stamp(file);
+                                watcher.accept(file, stamp);
+                            }
+                        }
+                        self.reconcile(panel);
+                    }
+                }
+                None => {
+                    if let Ok((project, plan, _)) = app::load(&self.dir, &self.registry) {
+                        self.reconcile(Panel::new(&project, &self.registry));
+                        self.plan = Some(plan);
+                    }
+                }
+            }
+            let describe = self.describe(false);
+            self.broadcast(&describe);
+            self.push_graph(false);
+        }
+        Ok(json!({
+            "type": "snapshot.excluded",
+            "address": address,
+            "exclude": exclude,
+            "inSnapshots": !exclude,
+            "file": signal_project::PROJECT_FILE,
+            "written": written,
         }))
     }
 

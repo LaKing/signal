@@ -186,6 +186,15 @@ expression: text
         },
         "slot": {
           "$ref": "#/$defs/SlotSpec"
+        },
+        "snapshot_exclude": {
+          "description": "ADR 0041: the instance's controls (its parameters, or a composite's exported ones) left out of snapshots; only in project.toml.",
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]*$",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
         }
       },
       "type": "object"

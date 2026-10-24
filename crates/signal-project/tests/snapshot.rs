@@ -219,3 +219,75 @@ fn a_signal_file_packs_the_snapshots() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&into);
 }
+
+/// ADR 0041 §8: `snapshot_exclude` in an instance entry: written and
+/// removed with only its own text changing, read back by the project,
+/// checked against the instance's parameters, refused twice, and no change
+/// to what plays (the M2-2 diff is empty).
+#[test]
+fn snapshot_exclude_is_text_next_to_the_control() {
+    use signal_project::{Project, ProjectEdit, SourceFile, write_snapshot_exclude};
+    let mut registry = signal_core::Registry::new();
+    signal_std::register(&mut registry).unwrap();
+    let text = "schema_version = 1\n\n[project]\nname = \"s\"\nsample_rate = 48000\nseed = 1\n\n[instances]\nosc = { module = \"std.sine_osc\", freq = 440 } # the tone\nout = { module = \"std.audio_out\", gain = 0.5 }\n\n[wiring]\nconnections = [{ from = \"osc.out\", to = \"out.l\" }]\n";
+    let excluded = write_snapshot_exclude(text, "osc", "freq", true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        excluded,
+        text.replace(
+            "freq = 440 }",
+            "freq = 440, snapshot_exclude = [\"freq\"] }"
+        )
+    );
+    assert_eq!(
+        write_snapshot_exclude(&excluded, "osc", "freq", true).unwrap(),
+        None,
+        "already so"
+    );
+    let load = |text: &str| {
+        Project::from_sources(vec![SourceFile {
+            path: "project.toml".to_owned(),
+            text: text.to_owned(),
+        }])
+    };
+    let before = load(text).unwrap();
+    let after = load(&excluded).unwrap();
+    assert!(after.plan(&registry).is_ok());
+    assert_eq!(
+        after
+            .snapshot_excluded("osc")
+            .into_iter()
+            .collect::<Vec<_>>(),
+        ["freq"]
+    );
+    assert!(before.snapshot_excluded("osc").is_empty());
+    assert!(
+        matches!(
+            signal_project::diff(&before, &after, &registry).unwrap(),
+            ProjectEdit::Parameters(changes) if changes.is_empty()
+        ),
+        "nothing that plays changes"
+    );
+    let back = write_snapshot_exclude(&excluded, "osc", "freq", false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(back, text, "back to the text it was");
+
+    let wrong = text.replace(
+        "freq = 440 }",
+        "freq = 440, snapshot_exclude = [\"nope\"] }",
+    );
+    let refused = load(&wrong).unwrap().plan(&registry).err().unwrap();
+    assert!(
+        refused[0]
+            .message
+            .contains("no parameter of `std.sine_osc`"),
+        "{refused:?}"
+    );
+    let twice = text.replace(
+        "freq = 440 }",
+        "freq = 440, snapshot_exclude = [\"freq\", \"freq\"] }",
+    );
+    assert!(load(&twice).is_err());
+}

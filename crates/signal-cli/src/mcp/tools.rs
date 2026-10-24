@@ -232,9 +232,28 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "snapshot_restore",
         group: Group::Adjust,
-        description: "Restores the snapshot `name`: its values are written into project.toml as one change, where `commit` writes them, and sent live as a commit sends them (clamped to each control's range). Entries whose instance or parameter is gone are skipped and listed (`skipped`), clamped ones listed (`clamped`); controls the snapshot does not name are left alone. Refused, as `commit` is, when a gain would go above --max-gain.",
+        description: "Restores the snapshot `name`: first the values playing now of every control in snapshots become the undo snapshot (snapshot_undo); then its values are written into project.toml as one change, where `commit` writes them, and sent live as a commit sends them (clamped to each control's range). Entries whose instance or parameter is gone, or whose control is left out of snapshots, are skipped and listed (`skipped`, reason `excluded` for the latter), clamped ones listed (`clamped`); controls the snapshot does not name are left alone. Refused, as `commit` is, when a gain would go above --max-gain.",
         schema: || object(json!({"name": {"type": "string"}}), &["name"]),
         run: snapshot_restore,
+    },
+    Tool {
+        name: "snapshot_undo",
+        group: Group::Adjust,
+        description: "Restores the undo snapshot: the values the last snapshot_restore (or snapshot_undo) replaced, written and sent as a restore is; the values it replaces become the undo snapshot, so a second undo redoes. Gain-guarded as a restore. `snapshot_list.undo` says whether there is one.",
+        schema: none,
+        run: snapshot_undo,
+    },
+    Tool {
+        name: "snapshot_exclude",
+        group: Group::Adjust,
+        description: "Leaves a control (`/instance.parameter`, a top-level parameter) out of snapshots (`exclude`: true, the default) or puts it back (false): its name in the instance's `snapshot_exclude` in project.toml. Not a parameter value: nothing plays differently. `project_info.controls[].inSnapshots` shows it.",
+        schema: || {
+            object(
+                json!({"address": {"type": "string"}, "exclude": {"type": "boolean"}}),
+                &["address"],
+            )
+        },
+        run: snapshot_exclude,
     },
     Tool {
         name: "snapshot_delete",
@@ -1537,6 +1556,57 @@ fn snapshot_save(context: &Context, arguments: &Value) -> Outcome {
     Ok((reply, summary))
 }
 
+/// Checks restoring `values` (a snapshot's, or the undo snapshot's) as a
+/// `commit` of each value of a control in snapshots (`docs/agent-interface.md`
+/// "Safety"); `what` names it in a refusal.
+fn guard_snapshot(context: &Context, values: &Value, what: &str) -> Result<(), Refused> {
+    let describe = ask(context, json!({"type": "describe"}))?;
+    let gains = current_gains(context)?;
+    let mut reached = Vec::new();
+    for control in describe["controls"].as_array().into_iter().flatten() {
+        // A control left out of snapshots is skipped by the restore.
+        if control["inSnapshots"] == json!(false) {
+            continue;
+        }
+        let Some(value) = control["address"].as_str().and_then(|a| values[a].as_f64()) else {
+            continue;
+        };
+        let min = control["min"].as_f64().unwrap_or(f64::MIN);
+        let max = control["max"].as_f64().unwrap_or(f64::MAX);
+        let written = value.max(min).min(max);
+        for port in control["ports"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            // Only a gain port is judged against the file, whose value the
+            // gain table already holds (loaded once).
+            if let Some(file) = gains.file_value(port)
+                && !gain::commit_allowed(context.max_gain, written, file)
+            {
+                return Err(refused(format!(
+                    "refused: restoring {what} would write {port} = {written} into project.toml, above --max-gain {} and above the file's {file}. Start `signal mcp` with a higher --max-gain to allow it.",
+                    context.max_gain
+                )));
+            }
+            reached.push((port.to_owned(), Some(written)));
+        }
+    }
+    guard_live(context, &reached)
+}
+
+fn restored_summary(reply: &Value, what: &str) -> String {
+    let count = |key: &str| reply[key].as_array().map_or(0, Vec::len);
+    format!(
+        "restored {what}: {} values, {} written into project.toml, {} skipped, {} clamped; the values it replaced are the undo snapshot",
+        reply["restored"],
+        count("written"),
+        count("skipped"),
+        count("clamped")
+    )
+}
+
 fn snapshot_restore(context: &Context, arguments: &Value) -> Outcome {
     let name = text_arg(arguments, "name").trim().to_owned();
     // The snapshot as checked is the one restored: its `base` goes with the
@@ -1549,53 +1619,46 @@ fn snapshot_restore(context: &Context, arguments: &Value) -> Outcome {
         .find(|s| s["name"] == json!(name))
         .cloned();
     if let Some(snapshot) = &snapshot {
-        // Each restored control is a commit of its value (`docs/agent-interface.md` "Safety").
-        let describe = ask(context, json!({"type": "describe"}))?;
-        let gains = current_gains(context)?;
-        let mut reached = Vec::new();
-        for control in describe["controls"].as_array().into_iter().flatten() {
-            let Some(value) = control["address"]
-                .as_str()
-                .and_then(|a| snapshot["values"][a].as_f64())
-            else {
-                continue;
-            };
-            let min = control["min"].as_f64().unwrap_or(f64::MIN);
-            let max = control["max"].as_f64().unwrap_or(f64::MAX);
-            let written = value.max(min).min(max);
-            for port in control["ports"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-            {
-                // Only a gain port is judged against the file, whose value
-                // the gain table already holds (loaded once).
-                let file = gains.file_value(port);
-                if let Some(file) = file
-                    && !gain::commit_allowed(context.max_gain, written, file)
-                {
-                    return Err(refused(format!(
-                        "refused: restoring \"{name}\" would write {port} = {written} into project.toml, above --max-gain {} and above the file's {file}. Start `signal mcp` with a higher --max-gain to allow it.",
-                        context.max_gain
-                    )));
-                }
-                reached.push((port.to_owned(), Some(written)));
-            }
-        }
-        guard_live(context, &reached)?;
+        guard_snapshot(context, &snapshot["values"], &format!("\"{name}\""))?;
     }
     let reply = bare(ask(
         context,
         json!({"type": "snapshot.restore", "name": name, "base": list["base"]}),
     )?);
-    let count = |key: &str| reply[key].as_array().map_or(0, Vec::len);
+    let summary = restored_summary(&reply, &format!("\"{name}\""));
+    Ok((reply, summary))
+}
+
+fn snapshot_undo(context: &Context, _: &Value) -> Outcome {
+    let list = ask(context, json!({"type": "snapshot.list"}))?;
+    if list["undoValues"].is_object() {
+        guard_snapshot(context, &list["undoValues"], "the undo snapshot")?;
+    }
+    let reply = bare(ask(
+        context,
+        json!({"type": "snapshot.undo", "base": list["base"]}),
+    )?);
+    let summary = restored_summary(&reply, "the undo snapshot");
+    Ok((reply, summary))
+}
+
+fn snapshot_exclude(context: &Context, arguments: &Value) -> Outcome {
+    let address = address(arguments);
+    let exclude = arguments
+        .get("exclude")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let reply = bare(ask(
+        context,
+        json!({"type": "snapshot.exclude", "address": address, "exclude": exclude}),
+    )?);
     let summary = format!(
-        "restored \"{name}\": {} values, {} written into project.toml, {} skipped, {} clamped",
-        reply["restored"],
-        count("written"),
-        count("skipped"),
-        count("clamped")
+        "{address} {} snapshots",
+        if exclude {
+            "is left out of"
+        } else {
+            "goes into"
+        }
     );
     Ok((reply, summary))
 }

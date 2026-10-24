@@ -400,15 +400,20 @@ fn a_failed_restore_sends_and_reports(transport: Transport) {
         "schema_version = 1\n\n[snapshots.old]\n\"/a.freq\" = 330\n\"/gone.freq\" = 3\n",
     )
     .unwrap();
-    let Some(_read_only) = ReadOnly::new(&rig.dir) else {
-        return rig.finish();
-    };
+    // project.toml cannot be read for the write (a folder in its place),
+    // while snapshots.toml takes the undo snapshot.
+    let path = rig.dir.join("project.toml");
+    let kept = rig.dir.join("project.toml.kept");
+    fs::rename(&path, &kept).unwrap();
+    fs::create_dir(&path).unwrap();
     let refused = rig.request(
         &mut ws,
         1,
         json!({"type": "snapshot.restore", "name": "old"}),
         "error",
     );
+    fs::remove_dir(&path).unwrap();
+    fs::rename(&kept, &path).unwrap();
     assert_eq!(refused["code"], "write-failed", "{refused}");
     assert_eq!(refused["unwritten"], json!(["/a.freq"]), "{refused}");
     assert_eq!(refused["skipped"][0]["address"], "/gone.freq", "{refused}");
@@ -423,7 +428,231 @@ fn a_failed_restore_sends_and_reports(transport: Transport) {
         .map(|p| p["address"].as_str().unwrap())
         .collect();
     assert_eq!(unsaved, ["/a.freq"]);
-    drop(_read_only);
+    rig.finish();
+}
+
+/// The owner's decision of 2026-10-24 ("legyen egy undo snapshot"): a
+/// restore keeps what it replaces as the undo snapshot; undo brings those
+/// values back exactly (written and live), and a second undo redoes. The
+/// undo snapshot sits apart from the named ones, and the file after the
+/// redo is byte for byte the file after the restore.
+fn undo_restores_and_a_second_undo_redoes(transport: Transport) {
+    let mut rig = tone("snapshot-undo", transport);
+    let (mut ws, _) = rig.client();
+    let snapshots_path = rig.dir.join(SNAPSHOTS_FILE);
+    commit(&mut rig, &mut ws, 1, "/a.freq", 330.0);
+    rig.request(
+        &mut ws,
+        2,
+        json!({"type": "snapshot.save", "name": "A"}),
+        "snapshot.saved",
+    );
+    let list = rig.request(&mut ws, 3, json!({"type": "snapshot.list"}), "snapshots");
+    assert_eq!(list["undo"], false);
+    let nothing = rig.request(&mut ws, 4, json!({"type": "snapshot.undo"}), "error");
+    assert_eq!(nothing["code"], "unknown-snapshot");
+    // Later: a commit and an unsaved live value.
+    commit(&mut rig, &mut ws, 5, "/a.freq", 500.0);
+    rig.request(
+        &mut ws,
+        6,
+        json!({"type": "set", "address": "/b.freq", "value": 100}),
+        "ack",
+    );
+    let before = describe(&mut rig, &mut ws, 7);
+    let restored = rig.request(
+        &mut ws,
+        8,
+        json!({"type": "snapshot.restore", "name": "A"}),
+        "snapshot.restored",
+    );
+    assert_eq!(
+        restored["restored"],
+        before["controls"].as_array().unwrap().len()
+    );
+    let after_restore = fs::read(&snapshots_path).unwrap();
+    let list = rig.request(&mut ws, 9, json!({"type": "snapshot.list"}), "snapshots");
+    assert_eq!(list["undo"], true);
+    assert_eq!(list["undoValues"]["/a.freq"], 500.0);
+    assert_eq!(
+        list["undoValues"]["/b.freq"], 100.0,
+        "the live value, as it played"
+    );
+    assert_eq!(
+        list["snapshots"].as_array().unwrap().len(),
+        1,
+        "the undo snapshot is no named one"
+    );
+    let undone = rig.request(
+        &mut ws,
+        10,
+        json!({"type": "snapshot.undo", "base": list["base"]}),
+        "snapshot.undone",
+    );
+    assert_eq!(undone["name"], "undo");
+    let back = describe(&mut rig, &mut ws, 11);
+    for c in before["controls"].as_array().unwrap() {
+        let address = c["address"].as_str().unwrap();
+        assert_eq!(
+            control(&back, address)["base"],
+            c["base"],
+            "{address} exactly as before"
+        );
+    }
+    assert_eq!(back["unsaved"]["count"], 0, "{}", back["unsaved"]);
+    let text = fs::read_to_string(rig.dir.join("project.toml")).unwrap();
+    assert!(text.contains("freq = 500"), "{text}");
+    assert!(text.contains("freq = 100"), "{text}");
+    // Undo again: the restore is redone.
+    rig.request(
+        &mut ws,
+        12,
+        json!({"type": "snapshot.undo"}),
+        "snapshot.undone",
+    );
+    let redone = describe(&mut rig, &mut ws, 13);
+    assert_eq!(control(&redone, "/a.freq")["base"], 330.0);
+    assert_eq!(control(&redone, "/b.freq")["base"], 220.0);
+    assert_eq!(
+        fs::read(&snapshots_path).unwrap(),
+        after_restore,
+        "byte-stable"
+    );
+    rig.finish();
+}
+
+/// If the undo snapshot cannot be written (a conflict, a folder that
+/// refuses the write), the restore does not happen: nothing is written or
+/// sent, and the reply says why.
+fn a_failed_undo_write_blocks_the_restore(transport: Transport) {
+    let mut rig = tone("snapshot-undo-blocked", transport);
+    let (mut ws, _) = rig.client();
+    fs::write(
+        rig.dir.join(SNAPSHOTS_FILE),
+        "schema_version = 1\n\n[snapshots.old]\n\"/a.freq\" = 330\n",
+    )
+    .unwrap();
+    let path = rig.dir.join("project.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let stale = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "snapshot.restore", "name": "old", "base": "0".repeat(64)}),
+        "error",
+    );
+    assert_eq!(stale["code"], "conflict", "{stale}");
+    if let Some(read_only) = ReadOnly::new(&rig.dir) {
+        let refused = rig.request(
+            &mut ws,
+            2,
+            json!({"type": "snapshot.restore", "name": "old"}),
+            "error",
+        );
+        assert_eq!(refused["code"], "write-failed", "{refused}");
+        assert!(
+            refused["message"]
+                .as_str()
+                .unwrap()
+                .contains(SNAPSHOTS_FILE),
+            "{refused}"
+        );
+        drop(read_only);
+    }
+    assert_eq!(fs::read_to_string(&path).unwrap(), text, "nothing written");
+    let now = describe(&mut rig, &mut ws, 3);
+    assert_eq!(control(&now, "/a.freq")["base"], 440.0, "nothing sent");
+    assert_eq!(now["unsaved"]["count"], 0);
+    assert!(!snapshot::read(&rig.dir).unwrap().0.undo.is_some());
+    rig.finish();
+}
+
+/// The owner's decision of 2026-10-24 ("lehessen állítani hogy a
+/// snapshotokba bekerüljön vagy nem a tulajdonságaiban"): a control left
+/// out of snapshots (`snapshot.exclude`, its name in the instance's
+/// `snapshot_exclude`) is not saved, a restore of an older snapshot that
+/// holds it leaves it alone (skipped, `excluded`), and the undo snapshot
+/// does not hold it either. Writing the property reloads nothing.
+fn excluded_controls_survive_save_restore_and_undo(transport: Transport) {
+    let mut rig = tone("snapshot-exclude", transport);
+    let (mut ws, _) = rig.client();
+    let path = rig.dir.join("project.toml");
+    let excluded = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "snapshot.exclude", "address": "/out.gain", "exclude": true}),
+        "snapshot.excluded",
+    );
+    assert_eq!(excluded["written"], true);
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains(
+            "out = { module = \"std.audio_out\", gain = 0.5, snapshot_exclude = [\"gain\"] }"
+        ),
+        "{text}"
+    );
+    rig.no_reload(&mut ws, 300);
+    assert_eq!(
+        control(&describe(&mut rig, &mut ws, 2), "/out.gain")["inSnapshots"],
+        false
+    );
+    let saved = rig.request(
+        &mut ws,
+        3,
+        json!({"type": "snapshot.save", "name": "S"}),
+        "snapshot.saved",
+    );
+    let (all, _) = snapshot::read(&rig.dir).unwrap();
+    assert!(!all.snapshots["S"].contains_key("/out.gain"), "{saved}");
+    commit(&mut rig, &mut ws, 4, "/out.gain", 0.25);
+    // An older snapshot that still holds the gain.
+    let mut text = fs::read_to_string(rig.dir.join(SNAPSHOTS_FILE)).unwrap();
+    text.push_str("\n[snapshots.old]\n\"/a.freq\" = 300\n\"/out.gain\" = 0.9\n");
+    fs::write(rig.dir.join(SNAPSHOTS_FILE), text).unwrap();
+    let restored = rig.request(
+        &mut ws,
+        5,
+        json!({"type": "snapshot.restore", "name": "old"}),
+        "snapshot.restored",
+    );
+    assert_eq!(
+        restored["skipped"],
+        json!([{"address": "/out.gain", "reason": "excluded"}])
+    );
+    assert_eq!(restored["written"], json!(["/a.freq"]));
+    let (all, _) = snapshot::read(&rig.dir).unwrap();
+    assert!(!all.undo.as_ref().unwrap().contains_key("/out.gain"));
+    rig.request(
+        &mut ws,
+        6,
+        json!({"type": "snapshot.undo"}),
+        "snapshot.undone",
+    );
+    let now = describe(&mut rig, &mut ws, 7);
+    assert_eq!(
+        control(&now, "/out.gain")["base"],
+        0.25,
+        "left alone throughout"
+    );
+    assert_eq!(control(&now, "/a.freq")["base"], 440.0);
+    // Back into snapshots: the key goes.
+    rig.request(
+        &mut ws,
+        8,
+        json!({"type": "snapshot.exclude", "address": "/out.gain", "exclude": false}),
+        "snapshot.excluded",
+    );
+    assert!(
+        !fs::read_to_string(&path)
+            .unwrap()
+            .contains("snapshot_exclude")
+    );
+    let bad = rig.request(
+        &mut ws,
+        9,
+        json!({"type": "snapshot.exclude", "address": "/a/inner.freq"}),
+        "error",
+    );
+    assert_eq!(bad["code"], "not-editable");
     rig.finish();
 }
 
@@ -434,6 +663,9 @@ both!(
     a_mixed_restore_pushes_what_it_sent,
     stopped_a_save_and_restore_see_the_files,
     a_failed_restore_sends_and_reports,
+    undo_restores_and_a_second_undo_redoes,
+    a_failed_undo_write_blocks_the_restore,
+    excluded_controls_survive_save_restore_and_undo,
 );
 
 /// `signal snapshot`'s restore from the files alone: the values that differ

@@ -27,7 +27,11 @@ use crate::panel::{Panel, ParameterView, ProjectWriteError, Target, write_projec
 pub fn values(panel: &Panel, base: impl Fn(&str, &ParameterView) -> f64) -> Values {
     let mut values = Values::new();
     for instance in panel.view(&BTreeMap::new()) {
-        for p in instance.parameters.iter().filter(|p| p.editable) {
+        for p in instance
+            .parameters
+            .iter()
+            .filter(|p| p.editable && p.in_snapshots)
+        {
             values.insert(
                 format!("/{}.{}", instance.name, p.name),
                 base(&instance.name, p),
@@ -144,6 +148,10 @@ pub fn plan(panel: &Panel, values: &Values) -> Restore {
                 .push(skip(format!("`{instance}` has no parameter `{parameter}`")));
             continue;
         };
+        if panel.in_snapshots(&instance, &parameter) == Some(false) {
+            restore.skipped.push(skip("excluded".to_owned()));
+            continue;
+        }
         let to = value.max(target.min).min(target.max);
         if to.to_bits() != value.to_bits() {
             restore.clamped.push(Clamped {

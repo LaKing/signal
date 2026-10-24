@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use mcp_common::{Mcp, copy_of, fixture, stale};
 use serde_json::{Value, json};
 
-const TOOLS: [&str; 32] = [
+const TOOLS: [&str; 34] = [
     "project_info",
     "graph",
     "modules",
@@ -35,6 +35,8 @@ const TOOLS: [&str; 32] = [
     "revert",
     "snapshot_save",
     "snapshot_restore",
+    "snapshot_undo",
+    "snapshot_exclude",
     "snapshot_delete",
     "patch",
     "schematic_move",
@@ -240,6 +242,8 @@ fn read_only_exposes_only_inspect_observe_and_render() {
         ("snapshot_save", json!({"name": "a"})),
         ("snapshot_restore", json!({"name": "a"})),
         ("snapshot_delete", json!({"name": "a"})),
+        ("snapshot_undo", json!({})),
+        ("snapshot_exclude", json!({"address": "/osc.freq"})),
     ] {
         let refused = mcp.rpc("tools/call", json!({"name": name, "arguments": arguments}));
         assert_eq!(refused["error"]["code"], -32602, "{name}: {refused}");
@@ -672,6 +676,32 @@ fn snapshots() {
     assert_eq!(restored["skipped"], json!([]));
     assert!(mcp.file("project.toml").contains("freq = 440"));
     assert_eq!(control_base(&mut mcp, "/osc.freq"), 440.0);
+
+    // The undo snapshot: what the restore replaced comes back, then again.
+    let list = mcp.ok("snapshot_list", json!({}));
+    assert_eq!(list["undo"], true, "{list}");
+    mcp.ok("snapshot_undo", json!({}));
+    assert_eq!(control_base(&mut mcp, "/osc.freq"), 330.0);
+    mcp.ok("snapshot_undo", json!({}));
+    assert_eq!(control_base(&mut mcp, "/osc.freq"), 440.0, "redone");
+    // Left out of snapshots: a restore leaves it alone.
+    let excluded = mcp.ok(
+        "snapshot_exclude",
+        json!({"address": "/osc.freq", "exclude": true}),
+    );
+    assert_eq!(excluded["inSnapshots"], false);
+    assert!(
+        mcp.file("project.toml")
+            .contains("snapshot_exclude = [\"freq\"]")
+    );
+    mcp.ok("commit", json!({"address": "/osc.freq", "value": 300}));
+    let kept = mcp.ok("snapshot_restore", json!({"name": "Első rész"}));
+    assert_eq!(kept["skipped"][0]["reason"], "excluded", "{kept}");
+    assert_eq!(control_base(&mut mcp, "/osc.freq"), 300.0);
+    mcp.ok(
+        "snapshot_exclude",
+        json!({"address": "/osc.freq", "exclude": false}),
+    );
 
     mcp.ok("commit", json!({"address": "/osc.freq", "value": 220}));
     let replaced = mcp.ok(

@@ -63,6 +63,27 @@ export function restoreMessage(name, base) {
   return { type: 'snapshot.restore', name, ...(base === undefined ? {} : { base }) };
 }
 
+/** `snapshot.undo` (ADR 0041 §7): the undo snapshot restored, as listed (`base`). */
+export function undoMessage(base) {
+  return { type: 'snapshot.undo', ...(base === undefined ? {} : { base }) };
+}
+
+/** Whether the list has an undo snapshot, so the card offers Undo restore. */
+export function hasUndo(list) {
+  return Boolean(list?.undo);
+}
+
+/** `snapshot.exclude` (ADR 0041 §8): a control left out of snapshots, or put back in. */
+export function excludeMessage(address, exclude) {
+  return { type: 'snapshot.exclude', address, exclude: Boolean(exclude) };
+}
+
+/** The card's line after an undo: what came back (a second undo redoes). */
+export function undoneText(reply) {
+  const { text, warn } = restoredText({ ...reply, name: 'the state before the last restore' });
+  return { text: `${text.replace(/^Restored “the state before the last restore”/, 'Undid the last restore')} Undo again to redo it.`, warn };
+}
+
 /** `snapshot.delete` of `name`, as listed (`base`). */
 export function deleteMessage(name, base) {
   return { type: 'snapshot.delete', name, ...(base === undefined ? {} : { base }) };
@@ -97,10 +118,13 @@ export function restoredText(reply) {
   const clamped = reply.clamped ?? [];
   const written = (reply.written ?? []).length;
   const parts = [`Restored “${reply.name}”: ${countText(reply.restored ?? 0)}, ${written} written to ${reply.file ?? 'project.toml'}`];
-  if (skipped.length) parts.push(`skipped ${skipped.map((s) => s.address).join(', ')} (no longer in the project)`);
+  const gone = skipped.filter((s) => s.reason !== 'excluded');
+  const excluded = skipped.filter((s) => s.reason === 'excluded');
+  if (gone.length) parts.push(`skipped ${gone.map((s) => s.address).join(', ')} (no longer in the project)`);
+  if (excluded.length) parts.push(`left ${excluded.map((s) => s.address).join(', ')} alone (not in snapshots)`);
   if (clamped.length) parts.push(`clamped ${clamped.map((c) => `${c.address} to ${c.to}`).join(', ')}`);
   if (reply.sent === false) parts.push('not every value reached the engine; it stays unsaved until it does');
-  return { text: `${parts.join('; ')}.`, warn: Boolean(skipped.length || clamped.length || reply.sent === false) };
+  return { text: `${parts.join('; ')}.`, warn: Boolean(gone.length || clamped.length || reply.sent === false) };
 }
 
 /** The card's line after a delete. */

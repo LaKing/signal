@@ -63,6 +63,24 @@ Every write of `snapshots.toml` goes through `signal_project::snapshot::edit`: u
 - **`signal mcp`:** `snapshot_list` (inspect, kept under `--read-only`), `snapshot_save`, `snapshot_restore`, `snapshot_delete` (`agent-interface.md`). `snapshot_restore` is checked by the gain guard as a `commit` of each value.
 - **CLI:** `signal snapshot list|save|restore|delete <project> [name]` works on the files alone; a restore writes `project.toml` as one change, which a running Signal applies through its watch.
 
+### 7. The undo snapshot (the owner's decision of 2026-10-24)
+The owner's words: "legyen egy "undo snapshot"" ("let there be an undo snapshot"), on a restore having no confirmation and no undo.
+
+- **Before every restore** the values playing now (the live bases, as a save records them) of every control in snapshots are written as the undo snapshot, `[undo]` in `snapshots.toml`, in the same locked write that reads the snapshot (ADR 0040). If that write fails or is a `conflict`, the restore does not happen and the reply says why.
+- **Apart from the named snapshots:** a table of its own, not under `[snapshots]`, so no name is reserved and no person's name can be taken for it. Lists say whether it exists (`undo: true/false`) apart from the named ones.
+- **Undo** (`snapshot.undo`, the card's "Undo restore", `snapshot_undo`, `signal snapshot undo`) restores it exactly as a restore restores a snapshot, after the values playing now take its place: pressing it again redoes. One level only: each restore replaces it.
+- Restore keeps no confirmation (the owner's scope).
+- Tests: `undo_restores_and_a_second_undo_redoes`, `a_failed_undo_write_blocks_the_restore` (`crates/signal-ui/tests/snapshot.rs`), `snapshots` in `mcp.rs`, the undo case in `mcp_gain.rs`, `snapshot_saves_restores_and_deletes` in `cli.rs`.
+
+### 8. Which controls go into snapshots (the owner's decision of 2026-10-24)
+The owner's words: "lehessen állítani hogy a snapshotokba bekerüljön vagy nem a tulajdonságaiban" ("it should be settable in its properties whether it goes into the snapshots or not"), asked about a transport's `run`.
+
+- **Text, where the control is declared:** an optional list in the instance's entry in `project.toml`, `snapshot_exclude = ["run"]` (`project-format.md` §4), next to the control's value. Absent (every existing project) means every control goes in, so no project changes. Each name must be a parameter of the instance; in a composite's file the key is an error, and no composite may export a parameter named `snapshot_exclude` (reserved).
+- **Not a value:** nothing reads it to play; the running project takes the edited text, so the watch reloads nothing, and no render changes (only the file's own hash, where it is written).
+- **Effect:** save leaves an excluded control out; a restore (or undo) of a snapshot that still holds its value skips it (reason `excluded`); the undo snapshot does not hold it.
+- **Editing:** the Parameters tab's row has a "snapshots" box (the control's properties there, beside Reset); `snapshot.exclude`, `snapshot_exclude`, `signal snapshot exclude`. Written with `toml_edit` (only that key changes; names in byte order; the key removed when empty) under the writer lock, compared just before the rename.
+- Tests: `snapshot_exclude_is_text_next_to_the_control` (`crates/signal-project/tests/snapshot.rs`), `excluded_controls_survive_save_restore_and_undo` (`crates/signal-ui/tests/snapshot.rs`), `snapshots` in `mcp.rs`, `cli.rs`.
+
 ## Consequences
 - A person keeps and recalls sounds by name, in the project's own text, diffable and packed with it.
 - A restore is as safe as a commit: the same write path, the same unsaved bookkeeping, the same conflict rule, the same gain guard in `signal mcp`.

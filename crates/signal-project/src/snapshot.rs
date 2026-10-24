@@ -42,11 +42,15 @@ const HEADER: &str = "# Snapshots: parameter values under a name (docs/project-f
 /// its value.
 pub type Values = BTreeMap<String, f64>;
 
-/// A project's snapshots, by name.
+/// A project's snapshots, by name, and the undo snapshot.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Snapshots {
     /// Every snapshot by name, in byte order.
     pub snapshots: BTreeMap<String, Values>,
+    /// The undo snapshot (`[undo]`, ADR 0041 §7): the values the last
+    /// restore (or undo) replaced, apart from the named ones so that no
+    /// name can be taken for it.
+    pub undo: Option<Values>,
 }
 
 /// Why a snapshot was not read, saved, restored or deleted.
@@ -57,6 +61,8 @@ pub enum SnapshotError {
     BadName(String),
     /// No snapshot has this name.
     Unknown(String),
+    /// There is no undo snapshot (no restore was made).
+    NoUndo,
     /// A snapshot has this name already, and overwriting it was not asked.
     Exists(String),
     /// `snapshots.toml` does not read as snapshots (it is never overwritten).
@@ -75,7 +81,7 @@ impl SnapshotError {
     pub fn code(&self) -> &'static str {
         match self {
             SnapshotError::BadName(_) => "bad-value",
-            SnapshotError::Unknown(_) => "unknown-snapshot",
+            SnapshotError::Unknown(_) | SnapshotError::NoUndo => "unknown-snapshot",
             SnapshotError::Exists(_) => "exists",
             SnapshotError::Invalid(_) => "does-not-load",
             SnapshotError::Changed(_) => "conflict",
@@ -94,6 +100,9 @@ impl fmt::Display for SnapshotError {
             | SnapshotError::Io(message)
             | SnapshotError::Link(message) => f.write_str(message),
             SnapshotError::Unknown(name) => write!(f, "no snapshot is named \"{name}\""),
+            SnapshotError::NoUndo => {
+                f.write_str("there is nothing to undo: no restore has been made")
+            }
             SnapshotError::Exists(name) => write!(
                 f,
                 "a snapshot is named \"{name}\" already; save with overwrite to replace it"
@@ -200,34 +209,20 @@ pub fn parse(text: &str) -> Result<Snapshots, SnapshotError> {
                     let values = values.as_table_like().ok_or_else(|| {
                         invalid(format!("snapshot \"{raw}\" must be a table of values"))
                     })?;
-                    let mut read = Values::new();
-                    for (address, value) in values.iter() {
-                        if address.parse::<PortAddress>().is_err() {
-                            return Err(invalid(format!(
-                                "snapshot \"{raw}\": \"{address}\" is not a parameter's address \
-                                 (`/instance.parameter`)"
-                            )));
-                        }
-                        let number = match value.as_value() {
-                            Some(Value::Integer(i)) => Some(*i.value() as f64),
-                            Some(Value::Float(f)) => Some(*f.value()),
-                            _ => None,
-                        }
-                        .filter(|v| v.is_finite())
-                        .ok_or_else(|| {
-                            invalid(format!(
-                                "snapshot \"{raw}\": \"{address}\" must be a finite number"
-                            ))
-                        })?;
-                        read.insert(address.to_owned(), number);
-                    }
+                    let read = values_of(values, &format!("snapshot \"{raw}\""))?;
                     snapshots.snapshots.insert(checked, read);
                 }
+            }
+            "undo" => {
+                let values = item
+                    .as_table_like()
+                    .ok_or_else(|| invalid("`undo` must be a table of values".to_owned()))?;
+                snapshots.undo = Some(values_of(values, "the undo snapshot")?);
             }
             other => return Err(invalid(format!("unknown key `{other}`"))),
         }
     }
-    if version.is_none() && !snapshots.snapshots.is_empty() {
+    if version.is_none() && (!snapshots.snapshots.is_empty() || snapshots.undo.is_some()) {
         return Err(invalid(format!(
             "schema_version = {SCHEMA_VERSION} is missing"
         )));
@@ -235,14 +230,45 @@ pub fn parse(text: &str) -> Result<Snapshots, SnapshotError> {
     Ok(snapshots)
 }
 
-/// The canonical text of `snapshots`: the header, `schema_version`, then
-/// each snapshot as a table `[snapshots."<name>"]` in byte order of the
+/// A table of values (`"/instance.parameter" = <number>`), `what` naming
+/// it in errors.
+fn values_of(values: &dyn toml_edit::TableLike, what: &str) -> Result<Values, SnapshotError> {
+    let invalid = |message: String| SnapshotError::Invalid(format!("{SNAPSHOTS_FILE}: {message}"));
+    let mut read = Values::new();
+    for (address, value) in values.iter() {
+        if address.parse::<PortAddress>().is_err() {
+            return Err(invalid(format!(
+                "{what}: \"{address}\" is not a parameter's address (`/instance.parameter`)"
+            )));
+        }
+        let number = match value.as_value() {
+            Some(Value::Integer(i)) => Some(*i.value() as f64),
+            Some(Value::Float(f)) => Some(*f.value()),
+            _ => None,
+        }
+        .filter(|v| v.is_finite())
+        .ok_or_else(|| invalid(format!("{what}: \"{address}\" must be a finite number")))?;
+        read.insert(address.to_owned(), number);
+    }
+    Ok(read)
+}
+
+/// The canonical text of `snapshots`: the header, `schema_version`, the
+/// undo snapshot `[undo]` when there is one, then each snapshot as a table `[snapshots."<name>"]` in byte order of the
 /// names, its values in byte order of their addresses, each written in the
 /// shortest form that reads back to the same `f64` (an integer when it is
 /// one). The same snapshots always give the same bytes.
 pub fn render(snapshots: &Snapshots) -> String {
     let mut document = DocumentMut::new();
     document.insert("schema_version", toml_edit::value(SCHEMA_VERSION));
+    if let Some(undo) = &snapshots.undo {
+        let mut table = Table::new();
+        table.decor_mut().set_prefix("\n");
+        for (address, value) in undo {
+            table.insert(address, Item::Value(number(*value)));
+        }
+        document.insert("undo", Item::Table(table));
+    }
     let mut all = Table::new();
     all.set_implicit(true);
     for (name, values) in &snapshots.snapshots {
@@ -429,6 +455,17 @@ mod tests {
         );
         let back = parse(&text).unwrap();
         assert_eq!(back, snapshots);
+        let mut with_undo = snapshots.clone();
+        with_undo.undo = Some(Values::from([("/out.gain".to_owned(), 0.5)]));
+        let undone = render(&with_undo);
+        assert!(
+            undone.contains(
+                "schema_version = 1\n\n[undo]\n\"/out.gain\" = 0.5\n\n[snapshots.\"Verse A\"]"
+            ),
+            "{undone}"
+        );
+        assert_eq!(parse(&undone).unwrap(), with_undo);
+        assert_eq!(render(&parse(&undone).unwrap()), undone, "byte-stable");
         assert_eq!(render(&back), text, "byte-stable");
         assert_eq!(
             back.snapshots["chorus"]["/out.gain"].to_bits(),

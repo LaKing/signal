@@ -8,8 +8,12 @@ import {
   deletedText,
   entries,
   exists,
+  excludeMessage,
+  hasUndo,
   listMessage,
   listProblem,
+  undoMessage,
+  undoneText,
   overwritePrompt,
   refusalText,
   restoreMessage,
@@ -110,4 +114,20 @@ test('a refused list says why', () => {
     listProblem({ code: 'does-not-load', message: 'snapshots.toml: "/out.gain" must be a finite number' }),
     'Snapshots cannot be read: snapshots.toml: "/out.gain" must be a finite number',
   );
+});
+
+// The owner's decisions of 2026-10-24: a control can be left out of snapshots; an undo snapshot.
+test('undo restore and the in-snapshots property', () => {
+  assert.equal(hasUndo({ snapshots: [], undo: false }), false);
+  assert.equal(hasUndo({ snapshots: [], undo: true }), true);
+  assert.equal(hasUndo(null), false);
+  assert.deepEqual(undoMessage('ab12'), { type: 'snapshot.undo', base: 'ab12' });
+  assert.deepEqual(undoMessage(), { type: 'snapshot.undo' });
+  assert.deepEqual(excludeMessage('/transport.run', true), { type: 'snapshot.exclude', address: '/transport.run', exclude: true });
+  assert.deepEqual(excludeMessage('/transport.run', false), { type: 'snapshot.exclude', address: '/transport.run', exclude: false });
+  const undone = undoneText({ name: 'undo', restored: 2, written: ['/a.freq'], sent: true, skipped: [], clamped: [] });
+  assert.equal(undone.text, 'Undid the last restore: 2 values, 1 written to project.toml. Undo again to redo it.');
+  const kept = restoredText({ name: 'A', restored: 1, written: [], sent: true, skipped: [{ address: '/transport.run', reason: 'excluded' }], clamped: [] });
+  assert.equal(kept.warn, false, 'an excluded control is no problem');
+  assert.match(kept.text, /left \/transport\.run alone \(not in snapshots\)/);
 });

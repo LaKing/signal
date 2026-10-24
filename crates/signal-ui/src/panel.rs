@@ -53,6 +53,9 @@ pub struct ParameterView {
     pub modulated: bool,
     /// Whether the panel may write it (top-level parameters only).
     pub editable: bool,
+    /// ADR 0041 §8: whether it goes into snapshots (not named in its
+    /// instance's `snapshot_exclude`); false inside a composite.
+    pub in_snapshots: bool,
 }
 
 /// One top-level instance.
@@ -138,6 +141,7 @@ impl Panel {
             .collect();
         let mut instances = Vec::new();
         for def in &project.root.instances {
+            let excluded = project.snapshot_excluded(&def.name);
             let Ok(address) = format!("/{}", def.name).parse::<InstanceAddress>() else {
                 continue;
             };
@@ -188,6 +192,7 @@ impl Panel {
                         effective: None,
                         modulated: ports.iter().any(|p| modulated(plan, p)),
                         editable: true,
+                        in_snapshots: !excluded.contains(name),
                     },
                     ports,
                     defaults,
@@ -221,6 +226,14 @@ impl Panel {
             max: row.view.max,
             order: i.order.clone(),
         })
+    }
+
+    /// ADR 0041 §8: whether the control `parameter` of `instance` goes into
+    /// snapshots; `None` for no such control.
+    pub fn in_snapshots(&self, instance: &str, parameter: &str) -> Option<bool> {
+        let i = self.instances.iter().find(|i| i.name == instance)?;
+        let row = i.parameters.iter().find(|r| r.view.name == parameter)?;
+        Some(row.view.in_snapshots)
     }
 
     /// Whether the panel has the top-level instance `instance`.
@@ -465,6 +478,7 @@ fn inner(plan: &ExecutionPlan, address: &InstanceAddress) -> Vec<Row> {
                     effective: None,
                     modulated: modulated(plan, &port),
                     editable: false,
+                    in_snapshots: false,
                 },
                 ports: vec![port],
                 defaults: vec![p.default],

@@ -73,6 +73,16 @@ fn a_snapshot_above_the_ceiling_is_not_restored() {
     mcp.ok("snapshot_restore", json!({"name": "quiet"}));
     assert!(mcp.file("project.toml").contains("gain = 0.1"));
     assert!(mcp.finish().success());
+    // The undo snapshot is guarded as a restore: one holding a gain above
+    // the ceiling (and above the file's) is not restored.
+    std::fs::write(
+        dir.join("snapshots.toml"),
+        "schema_version = 1\n\n[undo]\n\"/out.gain\" = 0.9\n",
+    )
+    .unwrap();
+    let mut mcp = Mcp::started(&dir, &[]);
+    refused(&mut mcp, "snapshot_undo", json!({}));
+    assert!(mcp.finish().success());
 }
 
 #[test]

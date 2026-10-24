@@ -632,6 +632,30 @@ fn snapshot_saves_restores_and_deletes() {
     assert_eq!(fs::read_to_string(dir.join("project.toml")).unwrap(), text);
     let output = signal(&["snapshot", "list", &project, "--json"]);
     assert_eq!(stdout_json(&output)["snapshots"][0]["name"], "Első");
+    assert_eq!(
+        stdout_json(&output)["undo"],
+        true,
+        "the restore kept what it replaced"
+    );
+    // Undo puts back what the restore replaced; again, it redoes.
+    let output = signal(&["snapshot", "undo", &project]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(dir.join("project.toml")).unwrap(),
+        text.replace("freq = 440", "freq = 220")
+    );
+    signal(&["snapshot", "undo", &project]);
+    assert_eq!(fs::read_to_string(dir.join("project.toml")).unwrap(), text);
+    // A control left out of snapshots, and back in.
+    let output = signal(&["snapshot", "exclude", &project, "/osc.freq"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        fs::read_to_string(dir.join("project.toml"))
+            .unwrap()
+            .contains("snapshot_exclude = [\"freq\"]")
+    );
+    signal(&["snapshot", "exclude", &project, "/osc.freq", "--include"]);
+    assert_eq!(fs::read_to_string(dir.join("project.toml")).unwrap(), text);
     let output = signal(&["snapshot", "delete", &project, "Első"]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     let output = signal(&["snapshot", "list", &project, "--json"]);

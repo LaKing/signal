@@ -62,13 +62,14 @@ signal-app-messages { display: block; }
 .muted { color: var(--signal-muted); }
 
 /* The parameter list: fixed column widths, values in tabular figures. */
-.parameters { table-layout: fixed; border-collapse: collapse; width: calc(12rem + 14rem + 13ch + 7rem + 13ch + 4.5rem + 10rem); }
+.parameters { table-layout: fixed; border-collapse: collapse; width: calc(12rem + 14rem + 13ch + 7rem + 13ch + 4.5rem + 7.5rem + 10rem); }
 .parameters td { padding: 0.15rem 0.5rem 0.15rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; height: 1.7rem; }
 .col-name { width: 12rem; }
 .col-slider { width: 14rem; }
 .col-base, .col-effective { width: 13ch; }
 .col-note { width: 7rem; }
 .col-reset { width: 4.5rem; }
+.col-snap { width: 7.5rem; }
 .col-mark { width: 10rem; }
 .parameters input[type="range"] { width: 13rem; margin: 0; }
 .parameters .value { font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; white-space: pre; }
@@ -84,6 +85,7 @@ signal-app-messages { display: block; }
 /* The snapshots (ADR 0041): a row per snapshot, its buttons in fixed places. */
 signal-app-snapshots { display: block; }
 .snapshot-save { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.4rem; }
+.snapshot-undo { margin-left: 1rem; }
 .snapshots { list-style: none; padding: 0; margin: 0; }
 .snapshots li { display: flex; gap: 0.5rem; align-items: center; height: 1.9rem; }
 .snapshots button { padding: 0 0.5rem; }

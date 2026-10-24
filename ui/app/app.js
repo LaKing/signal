@@ -42,6 +42,10 @@ import {
   refusalText,
   restoreMessage,
   restoredText,
+  excludeMessage,
+  hasUndo,
+  undoMessage,
+  undoneText,
   saveMessage,
   savedText,
   snapshotName,
@@ -571,7 +575,7 @@ export class SignalAppParameters extends AppElement {
     this.streamKey = undefined;
     this.cells = new Map();
     const columns = () =>
-      el('colgroup', {}, ...['name', 'slider', 'base', 'note', 'effective', 'reset', 'mark'].map((c) => el('col', { className: `col-${c}` })));
+      el('colgroup', {}, ...['name', 'slider', 'base', 'note', 'effective', 'reset', 'snap', 'mark'].map((c) => el('col', { className: `col-${c}` })));
     const cards = list.map((instance) => {
       const table = el('table', { className: 'parameters' }, columns());
       for (const p of instance.parameters) table.append(this.row(p));
@@ -600,6 +604,7 @@ export class SignalAppParameters extends AppElement {
       }
       cells.file = fileNote(p);
       if (!cells.notice) cells.note.textContent = cells.file;
+      if (cells.snap) cells.snap.checked = p.inSnapshots !== false;
     }
   }
 
@@ -611,7 +616,7 @@ export class SignalAppParameters extends AppElement {
     const name = el('td', { className: 'name', textContent: p.name, title: p.name });
     if (!p.editable) {
       this.cells.set(p.address, { base, note, unit: p.unit });
-      return el('tr', { className: 'read-only' }, name, el('td', {}, slider), base, note, effective, el('td', { className: 'muted', textContent: 'read-only' }), el('td'));
+      return el('tr', { className: 'read-only' }, name, el('td', {}, slider), base, note, effective, el('td', { className: 'muted', textContent: 'read-only' }), el('td'), el('td'));
     }
     const reset = el('button', { type: 'button', textContent: 'Reset', title: `Reset to default (${shown(p.default, p.unit)})` });
     reset.addEventListener('click', () => this.request(resetMessage(p.address)).catch(failed));
@@ -621,7 +626,17 @@ export class SignalAppParameters extends AppElement {
     revert.addEventListener('click', () => this.request(revertMessage(p.address)).catch(failed));
     const mark = el('td', { className: 'unsaved', role: 'alert' }, el('span', { textContent: '⚠ ' }), retry, revert);
     mark.style.visibility = 'hidden';
-    const cells = { slider, base, note, effective, mark, unit: p.unit, value: p.base, file: fileNote(p), notice: null };
+    // ADR 0041 §8: the control's "in snapshots" property, written to project.toml.
+    const snap = el('input', { type: 'checkbox', checked: p.inSnapshots !== false, title: 'In snapshots: saved, restored and undone with them' });
+    snap.setAttribute('aria-label', `${p.name} in snapshots`);
+    snap.addEventListener('change', () => {
+      this.request(excludeMessage(p.address, !snap.checked)).catch((error) => {
+        snap.checked = !snap.checked;
+        failed(error);
+      });
+    });
+    const snapCell = el('td', { className: 'snap' }, el('label', { title: snap.title }, snap, el('span', { className: 'muted', textContent: ' snapshots' })));
+    const cells = { slider, base, note, effective, mark, snap, unit: p.unit, value: p.base, file: fileNote(p), notice: null };
     slider.addEventListener('input', () => {
       this.dragging = slider;
       cells.value = Number(slider.value);
@@ -662,7 +677,7 @@ export class SignalAppParameters extends AppElement {
       if (event.key === 'Enter' && cells.entry.open()) event.preventDefault();
     });
     this.cells.set(p.address, cells);
-    const tr = el('tr', {}, name, el('td', {}, slider), base, note, effective, el('td', {}, reset), mark);
+    const tr = el('tr', {}, name, el('td', {}, slider), base, note, effective, el('td', {}, reset), snapCell, mark);
     // The context menu's Reset and Copy address.
     tr.dataset.address = p.address;
     tr.dataset.label = p.name;
@@ -692,6 +707,9 @@ export class SignalAppSnapshots extends AppElement {
         event.preventDefault();
         this.save(this.field.value);
       });
+      this.undo = el('button', { type: 'button', className: 'snapshot-undo', textContent: 'Undo restore', title: 'Put back the values the last restore replaced (again: redo it)' });
+      this.undo.addEventListener('click', () => this.undoRestore());
+      form.append(this.undo);
       this.rows = el('ul', { className: 'snapshots' });
       this.line = el('div', { className: 'snapshot-line line', role: 'status' });
       this.prompt = el('dialog', { className: 'prompt' });
@@ -735,6 +753,8 @@ export class SignalAppSnapshots extends AppElement {
   }
 
   draw() {
+    // Its place is kept whether or not there is something to undo ("Stable layout").
+    this.undo.style.visibility = hasUndo(this.list) ? 'visible' : 'hidden';
     const rows = entries(this.list);
     this.rows.replaceChildren(
       ...rows.map(({ name, count }) => {
@@ -780,6 +800,16 @@ export class SignalAppSnapshots extends AppElement {
     try {
       const reply = await this.request(restoreMessage(name, this.list?.base ?? undefined));
       const { text, warn } = restoredText(reply);
+      this.say(text, warn);
+    } catch (refusal) {
+      this.refused(refusal);
+    }
+  }
+
+  async undoRestore() {
+    try {
+      const reply = await this.request(undoMessage(this.list?.base ?? undefined));
+      const { text, warn } = undoneText(reply);
       this.say(text, warn);
     } catch (refusal) {
       this.refused(refusal);

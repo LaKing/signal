@@ -94,6 +94,74 @@ pub fn write_parameter(
     Ok(document.to_string())
 }
 
+/// `text`, a `project.toml`, with `parameter` of the top-level `instance`
+/// left out of snapshots (`excluded`) or put back in (ADR 0041): its name
+/// added to or removed from the entry's `snapshot_exclude` list, kept in
+/// byte order, the key removed when the list is empty (absent: every
+/// control goes in). Nothing else in the text changes; `None` when it already
+/// says so.
+pub fn write_snapshot_exclude(
+    text: &str,
+    instance: &str,
+    parameter: &str,
+    excluded: bool,
+) -> Result<Option<String>, WriteError> {
+    const KEY: &str = "snapshot_exclude";
+    let mut document: DocumentMut = text
+        .parse()
+        .map_err(|e: toml_edit::TomlError| WriteError::Syntax(e.message().to_owned()))?;
+    let entry = document
+        .get_mut("instances")
+        .and_then(Item::as_table_like_mut)
+        .and_then(|instances| instances.get_mut(instance))
+        .ok_or_else(|| WriteError::NoInstance(instance.to_owned()))?;
+    let current = |table: &dyn toml_edit::TableLike| -> Vec<String> {
+        table
+            .get(KEY)
+            .and_then(Item::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut names = match &*entry {
+        Item::Value(Value::InlineTable(table)) => current(table),
+        Item::Table(table) => current(table),
+        _ => return Err(WriteError::NoInstance(instance.to_owned())),
+    };
+    if names.iter().any(|n| n == parameter) == excluded {
+        return Ok(None);
+    }
+    if excluded {
+        names.push(parameter.to_owned());
+        names.sort();
+    } else {
+        names.retain(|n| n != parameter);
+    }
+    let value = (!names.is_empty()).then(|| {
+        let mut array = toml_edit::Array::new();
+        for name in &names {
+            array.push(name.as_str());
+        }
+        Value::Array(array)
+    });
+    match entry {
+        Item::Value(Value::InlineTable(table)) => {
+            // Last in the entry: after every key it has.
+            let mut order: Vec<String> = table.iter().map(|(k, _)| k.to_owned()).collect();
+            order.retain(|k| k != KEY);
+            order.push(KEY.to_owned());
+            let order: Vec<&str> = order.iter().map(String::as_str).collect();
+            inline(table, KEY, value, &order);
+        }
+        Item::Table(table) => standard(table, KEY, value),
+        _ => return Err(WriteError::NoInstance(instance.to_owned())),
+    }
+    Ok(Some(document.to_string()))
+}
+
 /// The value `text` (a `project.toml`) sets for `parameter` of the
 /// top-level `instance`: `None` when the entry has no such key (or the text
 /// does not read), so the parameter is at its default.
@@ -141,6 +209,21 @@ impl Project {
         order: &[&str],
     ) -> Result<Project, WriteError> {
         self.with_parameters(&[(instance, parameter, value, order)])
+    }
+
+    /// This project with `text` as its `project.toml` (an edit that changes
+    /// nothing that plays, such as `snapshot_exclude`, ADR 0041), refused
+    /// for a project that includes others as [`Project::with_parameter`]
+    /// is.
+    pub fn with_project_text(&self, text: &str) -> Result<Project, WriteError> {
+        if !self.content.projects.is_empty() || !self.content.files.is_empty() {
+            return Err(WriteError::Includes);
+        }
+        let mut files = self.files.clone();
+        for file in files.iter_mut().filter(|f| f.path == PROJECT_FILE) {
+            text.clone_into(&mut file.text);
+        }
+        Project::from_sources(files).map_err(WriteError::Invalid)
     }
 
     /// [`Project::with_parameter`] for several edits at once
