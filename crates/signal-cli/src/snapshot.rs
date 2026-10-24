@@ -60,6 +60,16 @@ enum Action {
         /// The project folder.
         project: PathBuf,
     },
+    /// Move a snapshot to a place in the list's order (0-based; past the
+    /// end: the last place).
+    Move {
+        /// The project folder.
+        project: PathBuf,
+        /// The snapshot's name.
+        name: String,
+        /// Its new place, from 0.
+        index: usize,
+    },
     /// Delete a snapshot.
     Delete {
         /// The project folder.
@@ -156,9 +166,12 @@ pub(crate) fn run(args: &SnapshotArgs, registry: &Registry, json: bool) -> Resul
             let (all, _) = snapshot::read(project).map_err(failure)?;
             if json {
                 let list: Vec<_> = all
-                    .snapshots
+                    .names()
                     .iter()
-                    .map(|(name, values)| json!({"name": name, "count": values.len(), "values": values}))
+                    .filter_map(|name| {
+                        let values = all.snapshots.get(name)?;
+                        Some(json!({"name": name, "count": values.len(), "values": values}))
+                    })
                     .collect();
                 print_stdout(
                     &json!({
@@ -169,8 +182,9 @@ pub(crate) fn run(args: &SnapshotArgs, registry: &Registry, json: bool) -> Resul
                     .to_string(),
                 );
             } else {
-                for (name, values) in &all.snapshots {
-                    print_stdout(&format!("{name} ({} values)", values.len()));
+                for name in all.names() {
+                    let count = all.snapshots.get(&name).map_or(0, |v| v.len());
+                    print_stdout(&format!("{name} ({count} values)"));
                 }
                 if let Some(undo) = &all.undo {
                     print_stdout(&format!(
@@ -217,6 +231,25 @@ pub(crate) fn run(args: &SnapshotArgs, registry: &Registry, json: bool) -> Resul
                 all.undo.take().ok_or(SnapshotError::NoUndo)
             })?;
             report("undo", &restored, json);
+            Ok(())
+        }
+        Action::Move {
+            project,
+            name,
+            index,
+        } => {
+            let (to, text, _) =
+                snapshot::move_to(project, name, *index, |_| Ok(())).map_err(failure)?;
+            let name = snapshot::name(name).map_err(failure)?;
+            let order = snapshot::parse(&text).map_err(failure)?.names();
+            if json {
+                print_stdout(&json!({"name": name, "index": to, "order": order}).to_string());
+            } else {
+                print_stdout(&format!(
+                    "moved \"{name}\" to place {to}: {}",
+                    order.join(", ")
+                ));
+            }
             Ok(())
         }
         Action::Delete { project, name } => {

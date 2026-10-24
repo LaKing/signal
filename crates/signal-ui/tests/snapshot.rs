@@ -984,7 +984,89 @@ fn a_stale_exclusion_can_be_removed(transport: Transport) {
     rig.finish();
 }
 
+/// ADR 0041 §9 (the owner's request of 2026-10-25): `snapshot.move` puts a
+/// snapshot at a place in the person's order, kept as text; lists come in
+/// that order and every client is pushed the new one; a stale base is a
+/// conflict; a place past the end is the last; a place that is no whole
+/// number is refused.
+fn snapshots_are_moved_into_the_order(transport: Transport) {
+    let mut rig = tone("snapshot-move", transport);
+    let (mut ws, _) = rig.client();
+    let (mut other, _) = rig.client();
+    for (id, name) in [(1, "Verse A"), (2, "chorus"), (3, "Bridge")] {
+        rig.request(
+            &mut ws,
+            id,
+            json!({"type": "snapshot.save", "name": name}),
+            "snapshot.saved",
+        );
+    }
+    let names = |list: &Value| -> Vec<String> {
+        list["snapshots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let list = rig.request(&mut ws, 4, json!({"type": "snapshot.list"}), "snapshots");
+    assert_eq!(names(&list), ["Verse A", "chorus", "Bridge"], "saved order");
+    drain(&mut rig, &mut other, 200);
+    let moved = rig.request(
+        &mut ws,
+        5,
+        json!({"type": "snapshot.move", "name": "chorus", "to": 0, "base": list["base"]}),
+        "snapshot.moved",
+    );
+    assert_eq!(moved["index"], 0);
+    assert_eq!(names(&moved), ["chorus", "Verse A", "Bridge"]);
+    let pushed = rig.wait(&mut other, "the pushed list", |got| {
+        got.of("snapshots").cloned()
+    });
+    assert_eq!(names(&pushed), ["chorus", "Verse A", "Bridge"]);
+    assert_eq!(pushed["base"], moved["base"]);
+    let text = fs::read_to_string(rig.dir.join(SNAPSHOTS_FILE)).unwrap();
+    assert!(
+        text.contains("order = [\"chorus\", \"Verse A\", \"Bridge\"]"),
+        "{text}"
+    );
+    let stale = rig.request(
+        &mut ws,
+        6,
+        json!({"type": "snapshot.move", "name": "chorus", "to": 0, "base": list["base"]}),
+        "error",
+    );
+    assert_eq!(stale["code"], "conflict");
+    assert_eq!(stale["base"], moved["base"]);
+    let last = rig.request(
+        &mut ws,
+        7,
+        json!({"type": "snapshot.move", "name": "chorus", "to": 99}),
+        "snapshot.moved",
+    );
+    assert_eq!(last["index"], 2, "past the end: the last place");
+    assert_eq!(names(&last), ["Verse A", "Bridge", "chorus"]);
+    for (id, to) in [(8, json!(-1)), (9, json!(1.5)), (10, json!("0"))] {
+        let bad = rig.request(
+            &mut ws,
+            id,
+            json!({"type": "snapshot.move", "name": "Bridge", "to": to}),
+            "error",
+        );
+        assert_eq!(bad["code"], "bad-value", "{to}");
+    }
+    let unknown = rig.request(
+        &mut ws,
+        11,
+        json!({"type": "snapshot.move", "name": "Coda", "to": 0}),
+        "error",
+    );
+    assert_eq!(unknown["code"], "unknown-snapshot");
+    rig.finish();
+}
+
 both!(
+    snapshots_are_moved_into_the_order,
     an_exclude_with_includes_updates_the_panel,
     a_stale_exclusion_can_be_removed,
     a_failed_restore_keeps_what_played_for_undo,

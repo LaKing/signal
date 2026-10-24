@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use mcp_common::{Mcp, copy_of, fixture, stale};
 use serde_json::{Value, json};
 
-const TOOLS: [&str; 34] = [
+const TOOLS: [&str; 35] = [
     "project_info",
     "graph",
     "modules",
@@ -37,6 +37,7 @@ const TOOLS: [&str; 34] = [
     "snapshot_restore",
     "snapshot_undo",
     "snapshot_exclude",
+    "snapshot_move",
     "snapshot_delete",
     "patch",
     "schematic_move",
@@ -243,6 +244,7 @@ fn read_only_exposes_only_inspect_observe_and_render() {
         ("snapshot_restore", json!({"name": "a"})),
         ("snapshot_delete", json!({"name": "a"})),
         ("snapshot_undo", json!({})),
+        ("snapshot_move", json!({"name": "a", "to": 0})),
         ("snapshot_exclude", json!({"address": "/osc.freq"})),
     ] {
         let refused = mcp.rpc("tools/call", json!({"name": name, "arguments": arguments}));
@@ -714,6 +716,15 @@ fn snapshots() {
         mcp.refused("snapshot_restore", json!({"name": "nincs"}))
             .contains("unknown-snapshot")
     );
+    // The order (ADR 0041 §9): a second snapshot, moved first.
+    mcp.ok("snapshot_save", json!({"name": "Bridge"}));
+    let moved = mcp.ok("snapshot_move", json!({"name": "Bridge", "to": 0}));
+    assert_eq!(moved["snapshots"][0]["name"], "Bridge", "{moved}");
+    assert_eq!(
+        mcp.ok("snapshot_list", json!({}))["snapshots"][1]["name"],
+        "Első rész"
+    );
+    mcp.ok("snapshot_delete", json!({"name": "Bridge"}));
     mcp.ok("snapshot_delete", json!({"name": "Első rész"}));
     assert_eq!(mcp.ok("snapshot_list", json!({}))["snapshots"], json!([]));
     assert!(mcp.finish().success());

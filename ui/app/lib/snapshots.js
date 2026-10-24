@@ -84,6 +84,41 @@ export function undoneText(reply) {
   return { text: `${text.replace(/^Restored “the state before the last restore”/, 'Undid the last restore')} Undo again to redo it.`, warn };
 }
 
+/** `snapshot.move` (ADR 0041 §9): `name` to place `to` (0-based), as listed (`base`). */
+export function moveMessage(name, to, base) {
+  return { type: 'snapshot.move', name, to, ...(base === undefined ? {} : { base }) };
+}
+
+/**
+ * Where a keyboard command moves the row at `index` of `count` rows:
+ * `snapshot_list.move_up` one place up, `move_down` one down; null at an
+ * edge or for another command (nothing to send).
+ */
+export function keyMove(command, index, count) {
+  if (command === 'snapshot_list.move_up' && index > 0) return index - 1;
+  if (command === 'snapshot_list.move_down' && index < count - 1) return index + 1;
+  return null;
+}
+
+/**
+ * Whether a drop over a row lands after it: the pointer in its lower half
+ * (`offsetY` from the row's top, `height` the row's).
+ */
+export function dropsAfter(offsetY, height) {
+  return offsetY >= height / 2;
+}
+
+/**
+ * The place a row dragged from `from` takes when dropped before (or
+ * `after`) the row at `over`, as `snapshot.move` counts it (the list
+ * without the dragged row); null when it stays where it is.
+ */
+export function dropIndex(from, over, after) {
+  const at = over + (after ? 1 : 0);
+  const to = from < at ? at - 1 : at;
+  return to === from ? null : to;
+}
+
 /** `snapshot.delete` of `name`, as listed (`base`). */
 export function deleteMessage(name, base) {
   return { type: 'snapshot.delete', name, ...(base === undefined ? {} : { base }) };

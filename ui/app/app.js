@@ -22,7 +22,7 @@ import { applyProps } from './lib/dom.js';
 import { connectCards } from './lib/cards.js';
 import { menuAction, pageHandlesShortcuts, panelReloads, panelSource } from './lib/menu.js';
 import { setViewScroller } from '../controls/keyboard.js';
-import { onKeys } from '../lib/keys.js';
+import { keyCommand, onKeys } from '../lib/keys.js';
 import { dragMessage, fileNote, planUpdate, releaseMessage, resetMessage, rows, shown, structureKey, valuesOf } from './lib/parameters.js';
 import { INITIAL, controls, powerRequest, reduce, restartRequest } from './lib/power.js';
 import { contextItems, keepsSystemMenu } from './lib/context.js';
@@ -42,6 +42,10 @@ import {
   refusalText,
   restoreMessage,
   restoredText,
+  dropIndex,
+  dropsAfter,
+  keyMove,
+  moveMessage,
   excludeMessage,
   hasUndo,
   undoMessage,
@@ -756,15 +760,70 @@ export class SignalAppSnapshots extends AppElement {
     // Its place is kept whether or not there is something to undo ("Stable layout").
     this.undo.style.visibility = hasUndo(this.list) ? 'visible' : 'hidden';
     const rows = entries(this.list);
+    // A rebuild keeps the focused row focused (by name: it may have moved).
+    const focused = this.focusName ?? document.activeElement?.closest?.('li.snapshot-row')?.dataset.name;
     this.rows.replaceChildren(
-      ...rows.map(({ name, count }) => {
+      ...rows.map(({ name, count }, index) => {
         const restore = el('button', { type: 'button', textContent: 'Restore', title: `Write “${name}”’s values into project.toml and play them` });
         restore.addEventListener('click', () => this.restore(name));
         const remove = el('button', { type: 'button', textContent: 'Delete', title: `Delete “${name}”` });
         remove.addEventListener('click', () => this.remove(name));
-        return el('li', {}, el('span', { className: 'snapshot-name', textContent: name, title: name }), el('span', { className: 'muted snapshot-count', textContent: countText(count) }), restore, remove);
+        // ADR 0041 §9: a handle to drag the row by, and the row itself
+        // focusable for Alt+ArrowUp / Alt+ArrowDown (snapshot_list scope).
+        const handle = el('span', { className: 'snapshot-handle', textContent: '⋮⋮', title: 'Drag to move; or focus the row and press Alt+↑ or Alt+↓' });
+        handle.setAttribute('aria-label', `Move ${name}`);
+        handle.setAttribute('role', 'img');
+        const li = el('li', { className: 'snapshot-row', tabIndex: 0, draggable: true }, handle, el('span', { className: 'snapshot-name', textContent: name, title: name }), el('span', { className: 'muted snapshot-count', textContent: countText(count) }), restore, remove);
+        li.dataset.name = name;
+        li.setAttribute('aria-label', `${name}, place ${index + 1} of ${rows.length}`);
+        li.setAttribute('aria-keyshortcuts', 'Alt+ArrowUp Alt+ArrowDown');
+        li.addEventListener('keydown', (event) => {
+          const to = keyMove(keyCommand('snapshot_list', event)?.id, index, rows.length);
+          if (to === null) return;
+          event.preventDefault();
+          event.stopPropagation();
+          this.move(name, to);
+        });
+        li.addEventListener('dragstart', (event) => {
+          this.dragFrom = index;
+          event.dataTransfer?.setData('text/plain', name);
+          if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+          li.classList.add('dragging');
+        });
+        li.addEventListener('dragend', () => {
+          this.dragFrom = null;
+          li.classList.remove('dragging');
+          this.clearDrop();
+        });
+        li.addEventListener('dragover', (event) => {
+          if (this.dragFrom === null || this.dragFrom === undefined) return;
+          event.preventDefault();
+          if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+          const after = dropsAfter(event.offsetY, li.clientHeight);
+          this.clearDrop();
+          li.classList.add(after ? 'drop-after' : 'drop-before');
+        });
+        li.addEventListener('dragleave', () => li.classList.remove('drop-before', 'drop-after'));
+        li.addEventListener('drop', (event) => {
+          event.preventDefault();
+          const from = this.dragFrom;
+          const after = dropsAfter(event.offsetY, li.clientHeight);
+          this.clearDrop();
+          this.dragFrom = null;
+          if (from === null || from === undefined) return;
+          const to = dropIndex(from, index, after);
+          const moved = rows[from]?.name;
+          if (to !== null && moved !== undefined) this.move(moved, to);
+        });
+        return li;
       }),
     );
+    // The moved row keeps the focus (a keyboard move rebuilds the rows).
+    if (focused !== undefined) {
+      const row = [...this.rows.querySelectorAll('li.snapshot-row')].find((r) => r.dataset.name === focused);
+      row?.focus();
+    }
+    this.focusName = undefined;
     if (!rows.length) {
       const text = this.list ? 'No snapshots yet: type a name and Save.' : listProblem(this.problem);
       this.rows.append(el('li', { className: this.problem && this.problem.code !== 'no-project' ? 'warn' : 'muted', textContent: text, title: text }));
@@ -802,6 +861,24 @@ export class SignalAppSnapshots extends AppElement {
       const { text, warn } = restoredText(reply);
       this.say(text, warn);
     } catch (refusal) {
+      this.refused(refusal);
+    }
+  }
+
+  /** The drop indicator off every row. */
+  clearDrop() {
+    for (const row of this.rows.querySelectorAll('.drop-before, .drop-after')) row.classList.remove('drop-before', 'drop-after');
+  }
+
+  /** `snapshot.move` of `name` to place `to`; the list comes back in the reply (and as a push). */
+  async move(name, to) {
+    this.focusName = document.activeElement?.closest?.('li.snapshot-row') ? name : undefined;
+    try {
+      const reply = await this.request(moveMessage(name, to, this.list?.base ?? undefined));
+      this.show({ ...this.list, ...reply, type: 'snapshots' });
+      this.say(`Moved “${name}” to place ${reply.index + 1}.`);
+    } catch (refusal) {
+      this.focusName = undefined;
       this.refused(refusal);
     }
   }

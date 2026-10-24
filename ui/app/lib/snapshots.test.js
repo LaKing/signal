@@ -4,6 +4,10 @@ import {
   MAX_NAME,
   countText,
   deleteMessage,
+  dropIndex,
+  dropsAfter,
+  keyMove,
+  moveMessage,
   deletePrompt,
   deletedText,
   entries,
@@ -130,4 +134,26 @@ test('undo restore and the in-snapshots property', () => {
   const kept = restoredText({ name: 'A', restored: 1, written: [], sent: true, skipped: [{ address: '/transport.run', reason: 'excluded' }], clamped: [] });
   assert.equal(kept.warn, false, 'an excluded control is no problem');
   assert.match(kept.text, /left \/transport\.run alone \(not in snapshots\)/);
+});
+
+// The owner's request of 2026-10-25 (ADR 0041 §9): the list's order by drag and drop, or Alt+Arrow.
+test('moving a snapshot in the list', () => {
+  assert.deepEqual(moveMessage('Bridge', 0, 'ab12'), { type: 'snapshot.move', name: 'Bridge', to: 0, base: 'ab12' });
+  assert.deepEqual(moveMessage('Bridge', 2), { type: 'snapshot.move', name: 'Bridge', to: 2 });
+  // The keys: one place, never past an edge.
+  assert.equal(keyMove('snapshot_list.move_up', 1, 3), 0);
+  assert.equal(keyMove('snapshot_list.move_up', 0, 3), null);
+  assert.equal(keyMove('snapshot_list.move_down', 1, 3), 2);
+  assert.equal(keyMove('snapshot_list.move_down', 2, 3), null);
+  assert.equal(keyMove('view.page_down', 1, 3), null);
+  // Drag and drop: before or after the row under the pointer.
+  assert.equal(dropsAfter(4, 30), false);
+  assert.equal(dropsAfter(15, 30), true);
+  assert.equal(dropIndex(2, 0, false), 0, 'the last before the first');
+  assert.equal(dropIndex(0, 2, true), 2, 'the first after the last');
+  assert.equal(dropIndex(0, 1, true), 1);
+  assert.equal(dropIndex(0, 2, false), 1, 'before the third: second place');
+  assert.equal(dropIndex(1, 1, false), null, 'onto itself');
+  assert.equal(dropIndex(1, 0, true), null, 'just after the row above: where it is');
+  assert.equal(dropIndex(1, 2, false), null, 'just before the row below: where it is');
 });

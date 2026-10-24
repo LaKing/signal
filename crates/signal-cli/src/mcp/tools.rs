@@ -256,6 +256,18 @@ const TOOLS: &[Tool] = &[
         run: snapshot_exclude,
     },
     Tool {
+        name: "snapshot_move",
+        group: Group::Adjust,
+        description: "Moves the snapshot `name` to place `to` (0-based; past the end: the last place) in the list's order, which snapshots.toml keeps as `order` (ADR 0041 §9). Replies with the list in its new order.",
+        schema: || {
+            object(
+                json!({"name": {"type": "string"}, "to": {"type": "integer", "minimum": 0}}),
+                &["name", "to"],
+            )
+        },
+        run: snapshot_move,
+    },
+    Tool {
         name: "snapshot_delete",
         group: Group::Adjust,
         description: "Deletes the snapshot `name` from snapshots.toml.",
@@ -1668,6 +1680,27 @@ fn snapshot_exclude(context: &Context, arguments: &Value) -> Outcome {
         } else {
             "goes into"
         }
+    );
+    Ok((reply, summary))
+}
+
+fn snapshot_move(context: &Context, arguments: &Value) -> Outcome {
+    let list = ask(context, json!({"type": "snapshot.list"}))?;
+    let reply = bare(ask(
+        context,
+        json!({"type": "snapshot.move", "name": text_arg(arguments, "name"), "to": arguments["to"], "base": list["base"]}),
+    )?);
+    let names: Vec<&str> = reply["snapshots"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    let summary = format!(
+        "moved \"{}\" to place {}: {}",
+        reply["name"].as_str().unwrap_or(""),
+        reply["index"],
+        names.join(", ")
     );
     Ok((reply, summary))
 }

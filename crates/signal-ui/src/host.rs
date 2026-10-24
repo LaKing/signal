@@ -658,6 +658,28 @@ fn lines(diagnostics: &[Diagnostic]) -> String {
         .join("\n")
 }
 
+/// The `snapshots` message of `all` read from `text` (ADR 0041): the base,
+/// the snapshots in the person's order (§9), the undo snapshot apart (§7).
+fn snapshot_list_json(all: &snapshots::Snapshots, text: Option<&str>) -> Value {
+    let list: Vec<Value> = all
+        .names()
+        .iter()
+        .filter_map(|name| {
+            let values = all.snapshots.get(name)?;
+            Some(json!({"name": name, "count": values.len(), "values": values}))
+        })
+        .collect();
+    json!({
+        "type": "snapshots",
+        "file": SNAPSHOTS_FILE,
+        "base": text.map(|t| sha256_hex(t.as_bytes())),
+        "snapshots": list,
+        "undo": all.undo.is_some(),
+        "undoCount": all.undo.as_ref().map_or(0, |u| u.len()),
+        "undoValues": all.undo,
+    })
+}
+
 /// A snapshot message's `name` (ADR 0041): trimmed, 1 to 64 characters.
 fn snapshot_name(message: &Value) -> Result<String, Failure> {
     let raw = message
@@ -2896,6 +2918,7 @@ impl Host {
             "snapshot.restore" => self.snapshot_restore(&message).map(Some),
             "snapshot.delete" => self.snapshot_delete(&message).map(Some),
             "snapshot.undo" => self.snapshot_undo(&message).map(Some),
+            "snapshot.move" => self.snapshot_move(&message).map(Some),
             "snapshot.exclude" => self.snapshot_exclude(&message).map(Some),
             "retry" => self.retry(&message).map(Some),
             "revert" => self.revert(&message).map(Some),
@@ -4971,21 +4994,7 @@ impl Host {
     /// name and values, in name order.
     fn snapshots_json(&self) -> Result<Value, Failure> {
         let (all, text) = snapshots::read(&self.dir).map_err(snapshot_failure)?;
-        let list: Vec<Value> = all
-            .snapshots
-            .iter()
-            .map(|(name, values)| json!({"name": name, "count": values.len(), "values": values}))
-            .collect();
-        Ok(json!({
-            "type": "snapshots",
-            "file": SNAPSHOTS_FILE,
-            "base": text.map(|t| sha256_hex(t.as_bytes())),
-            "snapshots": list,
-            // ADR 0041 §7: the undo snapshot, apart from the named ones.
-            "undo": all.undo.is_some(),
-            "undoCount": all.undo.as_ref().map_or(0, |u| u.len()),
-            "undoValues": all.undo,
-        }))
+        Ok(snapshot_list_json(&all, text.as_deref()))
     }
 
     /// A snapshot message's project: refused in an app with no project
@@ -5079,6 +5088,30 @@ impl Host {
             "count": values.len(),
             "base": sha256_hex(text.as_bytes()),
         }))
+    }
+
+    /// `snapshot.move` (ADR 0041 §9): the snapshot `name` to place `to`
+    /// (0-based) in the person's order; an index past the end is the last
+    /// place. Written as `order` in `snapshots.toml` by the ADR 0040 writer,
+    /// with the optional `base`; the reply carries the new list.
+    fn snapshot_move(&mut self, message: &Value) -> Result<Value, Failure> {
+        self.snapshot_project(false)?;
+        let name = snapshot_name(message)?;
+        let to = message
+            .get("to")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| fail("bad-value", "`to` must be a place, a whole number from 0"))?;
+        let to = usize::try_from(to).unwrap_or(usize::MAX);
+        let check = base_check(message)?;
+        let (index, text, _) = snapshots::move_to(&self.dir, &name, to, check)
+            .map_err(|e| self.snapshot_refused(e))?;
+        self.snapshots_written();
+        let all = snapshots::parse(&text).map_err(snapshot_failure)?;
+        // The list as written, with what moved.
+        let list = snapshot_list_json(&all, Some(&text));
+        let list = with(list, "type", json!("snapshot.moved"));
+        let list = with(list, "name", json!(name));
+        Ok(with(list, "index", json!(index)))
     }
 
     /// `snapshot.restore`: the snapshot's values written into `project.toml`

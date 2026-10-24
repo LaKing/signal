@@ -501,6 +501,7 @@ A **snapshot** (`00-vision.md` §3a: a Preset or Snapshot) is the value of every
 # Snapshots: parameter values under a name (docs/project-format.md §16).
 # Signal writes this file whole; comments are not kept.
 schema_version = 1
+order = ["chorus", "Verse A"]
 
 [undo]
 "/drums.kick_decay" = 420
@@ -519,6 +520,7 @@ schema_version = 1
 |---|---|
 | `schema_version` | `1`; required once the file has a snapshot |
 | `snapshots."<name>"` | One snapshot. The name is any text, 1 to 64 characters (Unicode scalar values) with no space around it, no control or format character (category Cf), no U+2028 or U+2029, and not only blank characters; it is a TOML key, quoted when it needs it. Names are exact and not normalised (`Chorus` ≠ `chorus`; a composed and a decomposed `é` are two names) |
+| `order` | The list's order (optional, ADR 0041 §9): an array of snapshot names. The names it lists come first, in its order, then every other snapshot in byte order. Signal writes it only when the order is not byte order, with every name; a name without a snapshot is ignored and dropped on the next write; a name twice is an error |
 | `undo` | The **undo snapshot** (optional): the values the last restore (or undo) replaced, a table of values as a snapshot's. It is apart from the named snapshots, so no name is reserved and none can collide with it |
 | `"/<instance>.<parameter>" = <number>` | One value: the parameter's full address, as the UI protocol and `signal mcp` name a control, and a finite number (an integer or a float) |
 
@@ -530,4 +532,5 @@ Unknown keys, a bad name, an address that is not `/<instance>.<parameter>` and a
 - **Canonical text.** Signal writes the whole file: the header, `schema_version`, `[undo]` when there is one, then the snapshots in byte order of their names, each one's values in byte order of their addresses, each value in the shortest form that reads back to the same `f64` (an integer when it is one). The same snapshots give the same bytes. No time or date is written. Deleting the last snapshot leaves `schema_version` alone in the file.
 - **Left out of snapshots.** A control named in its instance's `snapshot_exclude` (§4) is neither saved nor restored: a snapshot that still holds its value (saved before it was left out) leaves it as it is, and the restore reports it skipped (`excluded`). The undo snapshot holds no value of it either.
 - **Undo.** Before every restore Signal writes the values playing now of the controls the restore can change (the snapshot's entries that exist and go into snapshots) as `[undo]`, in the write that reads the snapshot, under the same writer lock as the `project.toml` write that follows; a restore that cannot write it does not happen, a restore that changes nothing leaves it as it was, and if the `project.toml` write fails the new undo snapshot is kept when a value of the restore reached the engine (it holds what played before) and put back to the one from before when none did (ADR 0041 §7). Undo restores `[undo]` the same way, after the values playing now take its place, so a second undo redoes. One level: each restore replaces it.
+- **Order.** A new snapshot goes to the end of the list, an overwrite keeps its place, a delete takes it out, and a move (`snapshot.move`, a drag in the Snapshots card, Alt+ArrowUp/Down on a row) puts it at a place (past the end: the last). The undo snapshot is in no order.
 - **Writers.** Every write is under the project's writer lock and compared just before its rename (ADR 0040); a change by another writer meanwhile is refused (`conflict`), never lost.

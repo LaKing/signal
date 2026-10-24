@@ -86,6 +86,13 @@ signal-app-messages { display: block; }
 signal-app-snapshots { display: block; }
 .snapshot-save { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.4rem; }
 .snapshot-undo { margin-left: 1rem; }
+/* ADR 0041 §9: rows dragged by their handle (or moved with Alt+Arrow); the drop line shows where it lands. */
+.snapshots li.snapshot-row { border-top: 2px solid transparent; border-bottom: 2px solid transparent; border-radius: 4px; }
+.snapshots li.snapshot-row:focus-visible { outline: 2px solid var(--signal-focus); outline-offset: -2px; }
+.snapshots li.drop-before { border-top-color: var(--signal-accent); }
+.snapshots li.drop-after { border-bottom-color: var(--signal-accent); }
+.snapshots li.dragging { opacity: 0.5; }
+.snapshot-handle { cursor: grab; color: var(--signal-muted); width: 1.5em; text-align: center; user-select: none; }
 .snapshots { list-style: none; padding: 0; margin: 0; }
 .snapshots li { display: flex; gap: 0.5rem; align-items: center; height: 1.9rem; }
 .snapshots button { padding: 0 0.5rem; }
