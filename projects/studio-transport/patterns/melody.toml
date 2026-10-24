@@ -1,24 +1,23 @@
-# The bass/lead line: 4 bars (16 beats) in A minor, Am – Am – F – G/E. Eighth
-# notes, with a slide on the fourth eighth of each bar: that note overlaps the
-# next, so the gate stays high and the voice glides into it (legato).
 schema_version = 1
 kind = "notes"
-length = 16
+length = 4
+
 notes = [
   { key = 33, start = 0, length = 0.4, velocity = 1 },
   { key = 45, start = 0.5, length = 0.4, velocity = 0.7 },
-  { key = 33, start = 1, length = 0.4, velocity = 0.9 },
-  { key = 48, start = 1.5, length = 0.6, velocity = 0.8 },
-  { key = 47, start = 2, length = 0.4, velocity = 0.8 },
-  { key = 45, start = 2.5, length = 0.4, velocity = 0.7 },
-  { key = 40, start = 3, length = 0.4, velocity = 0.9 },
-  { key = 43, start = 3.5, length = 0.4, velocity = 0.7 },
+  { key = 38, start = 0.75, length = 0.6, velocity = 0.8 },
+  { key = 34, start = 1, length = 0.4, velocity = 0.9 },
+  { key = 42, start = 2, length = 0.4, velocity = 0.8 },
+  { key = 37, start = 2.25, length = 0.5, velocity = 0.8 },
+  { key = 44, start = 2.25, length = 0.4, velocity = 0.8 },
+  { key = 33, start = 2.75, length = 0.4, velocity = 0.9 },
+  { key = 39, start = 3.5, length = 0.4, velocity = 0.7 },
   { key = 33, start = 4, length = 0.4, velocity = 1 },
   { key = 45, start = 4.5, length = 0.4, velocity = 0.7 },
   { key = 33, start = 5, length = 0.4, velocity = 0.9 },
-  { key = 52, start = 5.5, length = 0.6, velocity = 0.8 },
   { key = 50, start = 6, length = 0.4, velocity = 0.8 },
   { key = 48, start = 6.5, length = 0.4, velocity = 0.7 },
+  { key = 51, start = 6.75, length = 0.5, velocity = 0.8 },
   { key = 45, start = 7, length = 0.4, velocity = 0.9 },
   { key = 40, start = 7.5, length = 0.4, velocity = 0.7 },
   { key = 29, start = 8, length = 0.4, velocity = 1 },
@@ -37,4 +36,5 @@ notes = [
   { key = 50, start = 14.5, length = 0.4, velocity = 0.7 },
   { key = 47, start = 15, length = 0.4, velocity = 0.8 },
   { key = 43, start = 15.5, length = 0.4, velocity = 0.7 },
+  { key = 38, start = 16.25, length = 0.6, velocity = 0.8 },
 ]
