@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ed02e9c73bea3d1213db878d31b80791c67b7ad74e833f0f0d07b29445fe120d # shrinks to draw = Draw { seed: 3555302421766205500, instances: 9, frames: 256, rate: 1000, swaps: 0 }

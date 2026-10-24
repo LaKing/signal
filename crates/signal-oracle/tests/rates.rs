@@ -237,6 +237,7 @@ impl Generator<'_> {
             .connections
             .iter()
             .any(|(f, t, _)| *f == from && *t == to)
+            || self.exclusive_taken(spec, &to)
         {
             return;
         }
@@ -250,6 +251,28 @@ impl Generator<'_> {
             _ => Some(self.rng.between(-2.0, 2.0)),
         };
         spec.connections.push((from, to, scale));
+    }
+
+    /// Whether an input exclusive with `to` (ADR 0033) is already
+    /// connected: a plan refuses both.
+    fn exclusive_taken(&self, spec: &Spec, to: &str) -> bool {
+        let Some((node, port)) = to.split_once('.') else {
+            return false;
+        };
+        let Some(node) = spec.nodes.iter().find(|n| n.name == node) else {
+            return false;
+        };
+        self.registry
+            .exclusive_pairs(&node.type_name)
+            .filter_map(|(a, b)| match port {
+                p if p == a => Some(b),
+                p if p == b => Some(a),
+                _ => None,
+            })
+            .any(|other| {
+                let other = format!("{}.{other}", node.name);
+                spec.connections.iter().any(|(_, t, _)| *t == other)
+            })
     }
 
     /// Every signal (not vector) output, except the sink's.
