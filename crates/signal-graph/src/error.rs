@@ -547,10 +547,10 @@ pub enum GraphWarning {
         reason: Box<str>,
     },
     /// ADR 0043 §1: a parameter's connections are all constants (`from`, a
-    /// `std.const` nothing modulates, the first of them), and with their
-    /// scales and the base they make it `effective`, outside its `range`:
-    /// the range clamps it. Found by the project (it names `std.const`),
-    /// carried here to be located like the graph's warnings.
+    /// constant source the project identifies, the first of them), and with
+    /// their scales and the base they make it `effective`, outside its
+    /// `range`: the range clamps it. Found by the project, carried here to
+    /// be located like the graph's warnings.
     ConstantBeyondRange {
         /// The first constant source.
         from: PortAddress,

@@ -294,8 +294,9 @@ impl Panel {
         let mut list = Vec::new();
         for i in &self.instances {
             for row in &i.parameters {
+                // As the plan compares (`-0` is `0`: no warning, no correction).
                 if let Some(from) = row.written
-                    && from.to_bits() != row.view.base.to_bits()
+                    && from != row.view.base
                 {
                     list.push(Correction {
                         instance: i.name.clone(),

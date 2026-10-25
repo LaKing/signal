@@ -14,6 +14,8 @@ test('the nearest value: the greater of two as near (as the modules read it); th
   assert.equal(nearestValue(SHAPES, 1.4), 1);
   assert.equal(nearestValue(SHAPES, 0.5), 1, 'saw, as std.osc plays 0.5');
   assert.equal(nearestValue(SHAPES, 1.5), 2);
+  assert.equal(nearestValue(SHAPES, 0.49999999999999994), 1, 'as ⌊x + ½⌋ reads it');
+  assert.equal(nearestValue([{ value: 0 }, { value: 0.25 }, { value: 1 }], 0.125), 0.25, 'elsewhere a tie upward');
   assert.equal(nearestValue(SHAPES, 1.6), 2);
   assert.equal(nearestValue(SHAPES, -9), 0);
   assert.equal(nearestValue(SHAPES, 99), 3);

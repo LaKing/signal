@@ -63,7 +63,7 @@ use crate::frames::{self, frame};
 use crate::keys::{self, Keys};
 use crate::panel::{
     Panel, ParameterView, Target, WriteEdit, Written, after_write_all, ramp_frames,
-    write_project_all, write_project_chosen_locked,
+    write_project_all, write_project_chosen, write_project_chosen_locked,
 };
 use crate::panel_write::{check_content, first_file, replace, sha256_hex};
 use crate::player::{
@@ -238,6 +238,9 @@ struct AppMode {
     notes: Vec<String>,
     /// The last refusal or notice.
     message: Option<String>,
+    /// ADR 0042 §3: why the corrected values were not written before the
+    /// Save running now (it saves anyway); its message once it is saved.
+    correction_error: Option<String>,
     /// The last file-watch outcome, and whether it was an error.
     reload: Option<(String, bool)>,
     /// The status line (of the last run once stopped).
@@ -1626,36 +1629,97 @@ impl Host {
     }
 
     /// ADR 0042, 0043 (the operator's decision of 2026-10-25): before a
-    /// Save, the controls whose `project.toml` value plays corrected
-    /// ("corrected on load") are written with the value that plays, as one
-    /// change (a commit's write), so the saved file holds what played. A
-    /// control with a live value of its own (a drag, unsaved) is left to
-    /// it. Nothing to write is `Ok`.
+    /// `.signal` project's Save, the controls whose `project.toml` value
+    /// plays corrected ("corrected on load") are written with the value
+    /// that plays, as one change, so the saved file holds what played. A
+    /// folder project is never written by a Save (its files are the user's
+    /// own; Save As opens the new file, whose own next Save writes them).
+    /// A failure does not stop the Save: it is kept and said once the file
+    /// is saved, and the corrections stay pending.
+    fn correct_before_save(&mut self) {
+        if self.document.is_none() {
+            return;
+        }
+        let error = self.write_corrections().err();
+        if let Some(mode) = self.app.as_mut() {
+            mode.correction_error = error;
+        }
+    }
+
+    /// Writes the pending corrections ([`Host::correct_before_save`]),
+    /// each only where the file read under the writer lock still holds the
+    /// value it was corrected from (another writer's value is kept, as a
+    /// snapshot's restore keeps a value the file already has). A control
+    /// with a live value of its own (a drag, unsaved) is left to it.
+    /// Nothing to write is `Ok`.
     fn write_corrections(&mut self) -> Result<(), String> {
-        let edits: Vec<ControlWrite> = self
+        let pending: Vec<(ControlWrite, f64)> = self
             .panel
             .corrections()
             .into_iter()
             .filter(|c| self.panel.dragged(&c.instance, &c.parameter).is_none())
             .filter_map(|c| {
                 let target = self.panel.target(&c.instance, &c.parameter)?;
-                Some(ControlWrite {
-                    address: format!("/{}.{}", c.instance, c.parameter),
-                    instance: c.instance,
-                    parameter: c.parameter,
-                    target,
-                    value: Some(c.to),
-                })
+                Some((
+                    ControlWrite {
+                        address: format!("/{}.{}", c.instance, c.parameter),
+                        instance: c.instance,
+                        parameter: c.parameter,
+                        target,
+                        value: Some(c.to),
+                    },
+                    c.from,
+                ))
             })
             .collect();
-        if edits.is_empty() {
+        if pending.is_empty() {
             return Ok(());
         }
-        self.write_controls(&edits, false)
-            .map(|_| ())
-            .map_err(|failure| {
-                format!("the corrected values were not written: {}", failure.message)
+        let orders: Vec<Vec<&str>> = pending
+            .iter()
+            .map(|(e, _)| e.target.order.iter().map(String::as_str).collect())
+            .collect();
+        let texts: Vec<(&str, &str, Option<f64>, &[&str])> = pending
+            .iter()
+            .zip(&orders)
+            .map(|((e, _), order)| {
+                (
+                    e.instance.as_str(),
+                    e.parameter.as_str(),
+                    e.value,
+                    order.as_slice(),
+                )
             })
+            .collect();
+        let chosen = write_project_chosen(&self.dir, &texts, &|text, i| {
+            pending.get(i).is_some_and(|(e, from)| {
+                signal_project::read_parameter(text, &e.instance, &e.parameter)
+                    .is_some_and(|v| v.to_bits() == from.to_bits())
+            })
+        });
+        let (before, after, kept) =
+            chosen.map_err(|error| format!("the corrected values were not written: {error}"))?;
+        if kept.is_empty() {
+            return Ok(());
+        }
+        let edits: Vec<ControlWrite> = kept
+            .iter()
+            .filter_map(|&i| pending.get(i))
+            .map(|(e, _)| ControlWrite {
+                address: e.address.clone(),
+                instance: e.instance.clone(),
+                parameter: e.parameter.clone(),
+                target: e.target.clone(),
+                value: e.value,
+            })
+            .collect();
+        // What plays already: nothing to send.
+        let sent = vec![true; edits.len()];
+        self.controls_written(&edits, &sent, &before, after);
+        let describe = self.describe(false);
+        self.broadcast(&describe);
+        self.push_graph(false);
+        Ok(())
     }
 
     /// App mode: plays the open project from frame 0 with the Setup
@@ -2418,9 +2482,7 @@ impl Host {
     /// write here (its parameters are written by `retry`). The control
     /// thread's Save is [`Host::save_document_then`].
     pub fn save_document(&mut self) -> Result<(), String> {
-        if self.document.is_some() {
-            self.write_corrections()?;
-        }
+        self.correct_before_save();
         let result = match self.document.as_mut() {
             Some(document) => document.save(),
             None => Ok(()),
@@ -2434,11 +2496,7 @@ impl Host {
     /// written; the control thread goes on meanwhile. A folder project's
     /// is called at once.
     pub fn save_document_then(&mut self, done: SaveDone) {
-        if self.document.is_some()
-            && let Err(message) = self.write_corrections()
-        {
-            return done(Err(message));
-        }
+        self.correct_before_save();
         match self.document.as_mut() {
             Some(document) => {
                 let ticket = document.start_save();
@@ -2484,9 +2542,7 @@ impl Host {
         if self.app.is_none() {
             return done(Err(app_only().message));
         }
-        if let Err(message) = self.write_corrections() {
-            return done(Err(message));
-        }
+        self.correct_before_save();
         match self.document.as_mut() {
             Some(document) => {
                 let ticket = document.start_save_as(file);
@@ -2522,6 +2578,7 @@ impl Host {
             return;
         };
         let finished = document.take_saved();
+        let saved_any = finished.iter().any(|(_, result)| result.is_ok());
         for (ticket, result) in finished {
             let (answered, waiting): (Vec<SaveWait>, Vec<SaveWait>) =
                 std::mem::take(&mut self.saves)
@@ -2562,6 +2619,14 @@ impl Host {
                 }
             }
         }
+        // ADR 0042 §3: saved, though the corrected values were not written
+        // first (they stay pending, and the warnings still count them).
+        if saved_any
+            && let Some(mode) = self.app.as_mut()
+            && let Some(error) = mode.correction_error.take()
+        {
+            mode.message = Some(format!("saved; {error}"));
+        }
     }
 
     /// `project.save` (app mode): a `.signal` project's working folder
@@ -2576,9 +2641,7 @@ impl Host {
             self.noted(Ok::<(), Failure>(()))?;
             return Ok(Some(json!({"type": "saved", "file": null})));
         }
-        if let Err(message) = self.write_corrections() {
-            return self.noted(Err(fail("not-saved", message)));
-        }
+        self.correct_before_save();
         let Some(document) = self.document.as_mut() else {
             return Ok(Some(json!({"type": "saved", "file": null})));
         };

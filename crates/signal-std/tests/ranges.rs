@@ -159,7 +159,7 @@ fn a_value_set_snaps_as_process_reads_it() {
             for v in &entries {
                 bases.extend([v - 0.3, v + 0.3, v + 1e-9, v - 1e-9]);
             }
-            bases.extend([1e-9, 0.3, p.range.min, p.range.max]);
+            bases.extend([1e-9, 0.3, 0.49999999999999994, p.range.min, p.range.max]);
             bases.retain(|b| p.range.min <= *b && *b <= p.range.max);
             for base in bases {
                 let snapped = p.snapped(base);
@@ -200,6 +200,8 @@ fn the_reviewed_values_snap_as_they_played() {
             .snapped(value)
     };
     assert_eq!(snapped("std.osc", "shape", 0.5), 1.0, "saw, as before");
+    // `x + ½` rounds to 1 here, so `round_half_up` read saw (review of 5b54fc5).
+    assert_eq!(snapped("std.osc", "shape", 0.49999999999999994), 1.0);
     assert_eq!(snapped("std.fm_op", "mode", 0.5), 1.0);
     assert_eq!(snapped("std.playhead", "run", 0.5), 1.0);
     assert_eq!(snapped("std.to_events", "on_change", 0.3), 1.0);

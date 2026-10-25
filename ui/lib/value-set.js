@@ -12,6 +12,12 @@
  */
 export function nearestValue(values, value, snap) {
   const positive = snap === 'positive';
+  // Consecutive integers: exactly ⌊x + ½⌋ within the ends, as the modules read them.
+  const ends = consecutiveIntegers(values);
+  if (!positive && ends) {
+    const r = Math.floor(value + 0.5);
+    return r >= ends[1] ? ends[1] : r >= ends[0] ? r : ends[0];
+  }
   let best = null;
   for (const pass of [true, false]) {
     for (const entry of values ?? []) {
@@ -23,6 +29,19 @@ export function nearestValue(values, value, snap) {
     if (best !== null || !positive) break;
   }
   return best ?? value;
+}
+
+/** The ends of `values` when they are distinct consecutive integers, else null. */
+function consecutiveIntegers(values) {
+  if (!values?.length) return null;
+  const seen = new Set();
+  for (const entry of values) {
+    if (!Number.isInteger(entry.value) || seen.has(entry.value)) return null;
+    seen.add(entry.value);
+  }
+  const lo = Math.min(...seen);
+  const hi = Math.max(...seen);
+  return hi - lo === values.length - 1 ? [lo, hi] : null;
 }
 
 /** The options of a selector: each value as its text (the option's value) and its name. */

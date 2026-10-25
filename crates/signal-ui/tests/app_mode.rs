@@ -1003,6 +1003,132 @@ fn a_signal_file_with_corrected_values_is_not_edited(transport: Transport) {
     rig.finish();
 }
 
+/// TONE with `a` a `std.osc` whose `freq` and `shape` play corrected.
+fn corrected_tone() -> String {
+    common::TONE.replace(
+        r#"a = { module = "std.sine_osc", freq = 440 }"#,
+        r#"a = { module = "std.osc", freq = 250000, shape = 1.0023 }"#,
+    )
+}
+
+/// The `a` line of the project.toml in the `.signal` file `file`.
+fn a_line_of(file: &Path) -> String {
+    let dir = file.with_extension("check-a");
+    let _ = fs::remove_dir_all(&dir);
+    archive::unpack(&fs::read(file).unwrap(), &dir).unwrap();
+    let text = fs::read_to_string(dir.join("project.toml")).unwrap();
+    fs::remove_dir_all(&dir).unwrap();
+    text.lines()
+        .find(|l| l.starts_with("a ="))
+        .unwrap()
+        .to_owned()
+}
+
+/// Review of 5b54fc5, 1: a correction pending since the file was loaded is
+/// written by Save only where the file still holds the value it was
+/// corrected from, judged under the writer lock: a value another writer
+/// put there meanwhile survives the Save; the other correction is written.
+fn save_keeps_a_value_another_writer_changed(transport: Transport) {
+    let mut rig = app_rig("signal-corrected-race", transport, None);
+    fs::write(rig.dir.join("project.toml"), corrected_tone()).unwrap();
+    let file = packed(&rig, "tone");
+    let (mut ws, _) = rig.client();
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    let working = PathBuf::from(opened["dir"].as_str().unwrap());
+    // Another writer, between the load and the Save (no step between, so
+    // the host's panel still holds the correction of 1.0023).
+    let path = working.join("project.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(&path, text.replace("shape = 1.0023", "shape = 3")).unwrap();
+    rig.host().save_document().unwrap();
+    assert_eq!(
+        a_line_of(&file),
+        r#"a = { module = "std.osc", freq = 100000, shape = 3 }"#,
+        "the outside value survives; the freq correction is written"
+    );
+    rig.finish();
+}
+
+/// Review of 5b54fc5, 2: Save As of a folder project leaves the folder's
+/// files as they are (they are the user's own); the new `.signal` file
+/// opens with the corrections pending, for its own next Save.
+fn save_as_of_a_folder_leaves_its_files(transport: Transport) {
+    let source = std::env::temp_dir().join(format!(
+        "signal-ui-app-saveas-corrected-source-{transport:?}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&source);
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("project.toml"), corrected_tone()).unwrap();
+    let mut rig = app_rig("signal-saveas-corrected", transport, Some(&source));
+    let before = fs::read_to_string(rig.dir.join("project.toml")).unwrap();
+    let (mut ws, _) = rig.client();
+    let file = rig.setup.with_file_name("copy.signal");
+    rig.host().save_as(&file).unwrap();
+    assert_eq!(
+        fs::read_to_string(rig.dir.join("project.toml")).unwrap(),
+        before,
+        "the folder's project.toml is not written"
+    );
+    assert_eq!(
+        a_line_of(&file),
+        r#"a = { module = "std.osc", freq = 250000, shape = 1.0023 }"#
+    );
+    let app = rig.request(&mut ws, 1, json!({"type": "app.get"}), "app");
+    assert_eq!(app["project"]["file"], file.display().to_string());
+    let warnings = app["project"]["warnings"].to_string();
+    assert!(
+        warnings.contains("2 values will be written corrected on the next Save"),
+        "{warnings}"
+    );
+    rig.finish();
+    let _ = fs::remove_dir_all(&source);
+}
+
+/// Review of 5b54fc5, 4: when the corrected values cannot be written (the
+/// working folder read-only), the Save still saves, the corrections stay
+/// pending and counted, and the message says why they were not written.
+fn a_failed_correction_does_not_block_the_save(transport: Transport) {
+    let mut rig = app_rig("signal-corrected-fail", transport, None);
+    fs::write(rig.dir.join("project.toml"), corrected_tone()).unwrap();
+    let file = packed(&rig, "tone");
+    let (mut ws, _) = rig.client();
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    let working = PathBuf::from(opened["dir"].as_str().unwrap());
+    let Some(guard) = common::ReadOnly::new(&working) else {
+        rig.finish();
+        return;
+    };
+    rig.request(&mut ws, 2, json!({"type": "project.save"}), "saved");
+    drop(guard);
+    assert_eq!(
+        a_line_of(&file),
+        r#"a = { module = "std.osc", freq = 250000, shape = 1.0023 }"#
+    );
+    let app = rig.request(&mut ws, 3, json!({"type": "app.get"}), "app");
+    let message = app["message"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        message.starts_with("saved; the corrected values were not written: "),
+        "{app}"
+    );
+    let warnings = app["project"]["warnings"].to_string();
+    assert!(
+        warnings.contains("2 values will be written corrected on the next Save"),
+        "{warnings}"
+    );
+    rig.finish();
+}
+
 /// M2.9-2 (ADR 0026 §5): a `panel.write` is a file in a `.signal`
 /// project's working folder, so the project becomes edited (here the first
 /// write of its generated panel, `ui/main.html` created), and Save packs it.
@@ -2563,6 +2689,9 @@ both!(
     signal_ui_stops_and_plays,
     a_signal_file_opens_in_a_working_folder,
     a_signal_file_with_corrected_values_is_not_edited,
+    save_keeps_a_value_another_writer_changed,
+    save_as_of_a_folder_leaves_its_files,
+    a_failed_correction_does_not_block_the_save,
     a_panel_write_marks_a_signal_project_edited,
     a_pattern_write_marks_a_signal_project_edited,
     a_stopped_patch_writes_and_pushes_graph,

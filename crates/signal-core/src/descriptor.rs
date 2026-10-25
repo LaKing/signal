@@ -124,8 +124,9 @@ pub struct ValueLabel {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Snap {
-    /// The nearest entry; of two as near, the greater (as `⌊x + ½⌋` reads
-    /// a set of consecutive integers).
+    /// The nearest entry; of two as near, the greater. On a set of
+    /// consecutive integers it is exactly `⌊x + ½⌋` limited to the set's
+    /// ends (`round_half_up`, as the primitives read their choices).
     #[default]
     Nearest,
     /// Read as `x > 0`: any value above 0 is the nearest entry above 0, any
@@ -145,6 +146,22 @@ impl Snap {
 /// selects, or `value` itself when the set is empty. Bounded work, no
 /// allocation: a module's `process` may call it.
 pub fn snap_value(values: &[ValueLabel], snap: Snap, value: f64) -> f64 {
+    // A set of consecutive integers is read exactly as `⌊x + ½⌋` limited to
+    // its ends, as the primitives read their choices before ADR 0043
+    // (`round_half_up`): `x + ½` rounds, so the distance alone differs at
+    // e.g. 0.49999999999999994, which `⌊x + ½⌋` takes as 1.
+    if snap == Snap::Nearest
+        && let Some((lo, hi)) = consecutive_integers(values)
+    {
+        let r = (value + 0.5).floor();
+        return if r >= hi {
+            hi
+        } else if r >= lo {
+            r
+        } else {
+            lo
+        };
+    }
     let side = |entry: &ValueLabel| match snap {
         Snap::Nearest => true,
         Snap::Positive => (entry.value > 0.0) == (value > 0.0),
@@ -168,6 +185,25 @@ pub fn snap_value(values: &[ValueLabel], snap: Snap, value: f64) -> f64 {
         }
     }
     best.unwrap_or(value)
+}
+
+/// The ends of `values` when they are distinct consecutive integers (at
+/// least one), else `None`. No allocation.
+fn consecutive_integers(values: &[ValueLabel]) -> Option<(f64, f64)> {
+    let first = values.first()?.value;
+    let (mut lo, mut hi) = (first, first);
+    for (i, entry) in values.iter().enumerate() {
+        let v = entry.value;
+        if !v.is_finite() || v.fract() != 0.0 {
+            return None;
+        }
+        if values.iter().take(i).any(|e| e.value == v) {
+            return None;
+        }
+        lo = lo.min(v);
+        hi = hi.max(v);
+    }
+    (hi - lo == (values.len() - 1) as f64).then_some((lo, hi))
 }
 
 /// A port of a module type that is not a parameter.
@@ -372,6 +408,48 @@ impl ModuleDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn set(values: &[f64]) -> Vec<ValueLabel> {
+        values
+            .iter()
+            .map(|&value| ValueLabel { value, label: "" })
+            .collect()
+    }
+
+    /// Review of 5b54fc5: on consecutive integers Nearest is exactly
+    /// `⌊x + ½⌋` limited to the ends, 0.49999999999999994 included (which
+    /// `x + ½` rounds to 1); elsewhere the nearest, ties upward; Positive
+    /// takes anything above 0 as the nearest entry above 0.
+    #[test]
+    fn snap_value_reads_as_round_half_up() {
+        let shapes = set(&[0.0, 1.0, 2.0, 3.0]);
+        for x in [
+            0.49999999999999994,
+            0.5,
+            1.5,
+            2.4999,
+            -0.5,
+            -7.0,
+            9.0,
+            f64::NAN,
+        ] {
+            let old = ((x + 0.5_f64).floor()).clamp(0.0, 3.0);
+            let old = if old.is_nan() { 0.0 } else { old };
+            assert_eq!(snap_value(&shapes, Snap::Nearest, x), old, "{x}");
+        }
+        assert_eq!(snap_value(&shapes, Snap::Nearest, 0.49999999999999994), 1.0);
+        let uneven = set(&[0.0, 0.25, 1.0]);
+        assert_eq!(
+            snap_value(&uneven, Snap::Nearest, 0.125),
+            0.25,
+            "a tie upward"
+        );
+        assert_eq!(snap_value(&uneven, Snap::Nearest, 0.6), 0.25);
+        let off_on = set(&[0.0, 1.0]);
+        assert_eq!(snap_value(&off_on, Snap::Positive, 1e-300), 1.0);
+        assert_eq!(snap_value(&off_on, Snap::Positive, 0.0), 0.0);
+        assert_eq!(snap_value(&set(&[]), Snap::Nearest, 0.7), 0.7);
+    }
 
     #[test]
     fn generic_matches_every_kind_and_others_only_themselves() {
