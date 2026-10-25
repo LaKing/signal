@@ -4,8 +4,8 @@
 mod common;
 
 use common::{addr, composite, conn, errors, input, inst, inst_with, nested, output, port_addr};
-use signal_core::{Direction, PortShape, Range, RateDivisor};
-use signal_graph::{CompositeDef, ConnectionDef, Exports, GraphError};
+use signal_core::{Direction, PortShape, RateDivisor};
+use signal_graph::{CompositeDef, ConnectionDef, Exports, GraphError, GraphWarning};
 
 const CONVERTER: &str = "converter required (ADR 0005), not available in M1";
 
@@ -260,21 +260,33 @@ fn rate_mismatch() {
 
 #[test]
 fn parameter_out_of_range() {
-    // Set through two levels of exported parameters.
+    // Set through two levels of exported parameters. ADR 0042, 0043 (the
+    // operator's decision of 2026-10-25): clamped, with a warning; the
+    // plan holds the corrected value.
     let (mut project, composites) = nested();
     project.instances[1]
         .parameters
         .insert("kick_pitch".into(), 30_000.0);
-    assert_eq!(
-        errors(&project, &composites),
-        [GraphError::ParameterOutOfRange {
+    let plan = signal_graph::build_plan(&project, &composites, &common::registry(), 1).unwrap();
+    assert!(
+        plan.warnings.contains(&GraphWarning::ParameterCorrected {
             parameter: port_addr("/drums/kick/osc.freq"),
             value: 30_000.0,
-            range: Range {
-                min: 0.0,
-                max: 20_000.0
-            },
-        }]
+            to: 20_000.0,
+            reason: "is outside [0, 20000]".into(),
+        }),
+        "{:?}",
+        plan.warnings
+    );
+    let osc = plan
+        .instances
+        .iter()
+        .find(|i| i.address == addr("/drums/kick/osc"))
+        .unwrap();
+    assert_eq!(
+        osc.parameters.get("freq"),
+        Some(&20_000.0),
+        "the clamped value plays"
     );
 }
 

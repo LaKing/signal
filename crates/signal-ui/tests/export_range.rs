@@ -289,7 +289,67 @@ parameters = { wave = { to = "osc.shape", values = [{ value = 0, label = "sine" 
     let _ = fs::remove_dir_all(&source);
 }
 
+/// ADR 0042, 0043 (the operator's decision of 2026-10-25): a file value
+/// between a value set's values plays as the nearest, `describe` shows that
+/// base and counts the control unsaved, and the next commit writes it.
+fn a_corrected_file_value_shows_and_is_written_by_the_next_commit(transport: Transport) {
+    let source = std::env::temp_dir().join(format!(
+        "signal-ui-corrected-source-{transport:?}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&source);
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("project.toml"),
+        r#"schema_version = 1
+
+[project]
+name = "corrected"
+sample_rate = 48000
+
+[instances]
+o = { module = "std.osc", freq = 110, shape = 1.0023 }
+out = { module = "std.audio_out", gain = 0.25 }
+
+[wiring]
+connections = [{ from = "o.out", to = "out.l" }]
+"#,
+    )
+    .unwrap();
+    let mut rig = rig(
+        "corrected",
+        Options {
+            transport,
+            project: Some(source.clone()),
+            ..Options::default()
+        },
+    );
+    let (mut ws, _) = rig.client();
+    let described = describe(&mut rig, &mut ws, 1);
+    assert_eq!(
+        control(&described, "/o.shape")["base"],
+        1.0,
+        "the nearest plays"
+    );
+    let unsaved = described["unsaved"].to_string();
+    assert!(
+        unsaved.contains("/o.shape"),
+        "unsaved until written: {unsaved}"
+    );
+    rig.request(
+        &mut ws,
+        2,
+        json!({"type": "commit", "address": "/o.shape", "value": 1}),
+        "committed",
+    );
+    let text = fs::read_to_string(rig.dir.join("project.toml")).unwrap();
+    assert!(text.contains("shape = 1 }"), "written: {text}");
+    rig.finish();
+    let _ = fs::remove_dir_all(&source);
+}
+
 both!(
+    a_corrected_file_value_shows_and_is_written_by_the_next_commit,
     a_value_set_control_takes_the_nearest_value,
     describe_and_graph_give_the_export_s_range,
     set_and_commit_clamp_to_the_export_s_range,

@@ -687,6 +687,40 @@ fn the_muted_note_lists_eight_then_counts(transport: Transport) {
     let _ = fs::remove_dir_all(&source);
 }
 
+/// ADR 0042, 0043 (the operator's decision of 2026-10-25): a project whose
+/// files hold a value outside its range or value set opens and plays, and
+/// Signal.app lists the corrections as warnings beside its diagnostics.
+fn corrected_values_are_listed_as_warnings(transport: Transport) {
+    let source = std::env::temp_dir().join(format!(
+        "signal-ui-app-corrected-source-{transport:?}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&source);
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("project.toml"),
+        "schema_version = 1\n\n[project]\nname = \"corrected\"\nsample_rate = 48000\nseed = 1\n\n\
+         [instances]\no = { module = \"std.osc\", freq = 250000, shape = 2.01 }\n\
+         out = { module = \"std.audio_out\", gain = 0.25 }\n\n\
+         [wiring]\nconnections = [{ from = \"o.out\", to = \"out.l\" }]\n",
+    )
+    .unwrap();
+    let mut rig = app_rig("corrected", transport, Some(&source));
+    let (mut ws, _) = rig.client();
+    let played = rig.request(&mut ws, 1, json!({"type": "transport.play"}), "transport");
+    assert_eq!(played["playing"], true, "it plays");
+    let app = rig.request(&mut ws, 2, json!({"type": "app.get"}), "app");
+    assert_eq!(app["project"]["diagnostics"], json!([]), "{app}");
+    let warnings = app["project"]["warnings"].to_string();
+    assert!(
+        warnings.contains("warning: /o.freq: value 250000 is outside [0, 100000]: 100000 plays")
+            && warnings.contains("warning: /o.shape: value 2.01 is not one of 0 sine, 1 saw, 2 square, 3 triangle: 2 plays"),
+        "{warnings}"
+    );
+    rig.finish();
+    let _ = fs::remove_dir_all(&source);
+}
+
 /// auditor-1-power-initial-state: a client that connects while the app is
 /// off (the panel's frame, reloaded because another project was opened) is
 /// told so in `welcome`; no subscription is taken while off and no stream
@@ -2433,6 +2467,7 @@ both!(
     power_off_stops_and_on_restores,
     a_muted_instance_is_shown_until_the_project_plays_again,
     the_muted_note_lists_eight_then_counts,
+    corrected_values_are_listed_as_warnings,
     a_client_connecting_while_off_is_told_and_gets_no_frames,
     a_failed_stopped_commit_is_still_unsaved_when_playing,
     it_starts_stopped_plays_and_stops,

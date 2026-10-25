@@ -100,7 +100,9 @@ pub fn build_plan(
     };
     canonical(&mut graph);
 
-    let mut warnings = Vec::new();
+    let mut warnings = std::mem::take(&mut graph.warnings);
+    // ADR 0042, 0043: values outside their range or set, corrected.
+    validate::correct(&mut graph, &mut warnings);
     let converted = convert::insert(&mut graph, &mut warnings);
     canonical(&mut graph);
     // After converters, which add rows: the whole plan's.

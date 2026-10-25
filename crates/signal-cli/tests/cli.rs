@@ -781,3 +781,60 @@ fn snapshot_exclude_removes_a_stale_name() {
         text.replace(", snapshot_exclude = [\"freq\"]", "")
     );
 }
+
+/// ADR 0042, 0043 (the operator's decision of 2026-10-25): `signal render`
+/// of a project whose files hold a value outside its range and one between
+/// a value set's values renders (exit 0), the corrected values play, and
+/// the warnings are on stderr and in `--json`'s `warnings`.
+#[test]
+fn render_corrects_values_outside_their_range_or_set_with_warnings() {
+    let dir = out_dir("corrected-values");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("project.toml"),
+        "schema_version = 1\n\n[project]\nname = \"corrected\"\nsample_rate = 8000\nseed = 1\n\n\
+         [instances]\nosc = { module = \"std.osc\", freq = 250000, shape = 1.0023 }\n\
+         out = { module = \"std.audio_out\", gain = 0.25 }\n\n\
+         [wiring]\nconnections = [\n  { from = \"osc.out\", to = \"out.l\" },\n]\n",
+    )
+    .unwrap();
+    let out = dir.join("render");
+    let output = signal(&[
+        "render",
+        dir.to_str().unwrap(),
+        "--seconds",
+        "0.1",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("warning: /osc.freq: value 250000 is outside [0, 100000]: 100000 plays"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("warning: /osc.shape: value 1.0023 is not one of 0 sine, 1 saw, 2 square, 3 triangle: 1 plays"),
+        "{stderr}"
+    );
+    let out_json = dir.join("render-json");
+    let output = signal(&[
+        "render",
+        dir.to_str().unwrap(),
+        "--seconds",
+        "0.1",
+        "--json",
+        "--out",
+        out_json.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let warnings = json["warnings"].to_string();
+    assert!(warnings.contains("/osc.shape: value 1.0023"), "{warnings}");
+    assert!(
+        fs::read_to_string(dir.join("project.toml"))
+            .unwrap()
+            .contains("shape = 1.0023"),
+        "the file keeps its text"
+    );
+}

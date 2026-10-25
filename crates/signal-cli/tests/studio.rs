@@ -511,22 +511,28 @@ fn echo_fixture(parameters: &str, once: bool) -> Project {
     fixture_with(&text, "tape_delay", None, true)
 }
 
-/// ADR 0042: the ranged composites refuse a value beyond an export's range
-/// (here the echo's `feedback`, [0, 0.75]); the tests below remove the
-/// ranges to reach the composites' own clamps.
+/// ADR 0042 §3 (amended 2026-10-25): the ranged composites clamp a value
+/// beyond an export's range (here the echo's `feedback`, [0, 0.75]) with a
+/// warning, and 0.75 plays; the tests below remove the ranges to reach the
+/// composites' own clamps.
 #[test]
-fn the_ranged_echo_refuses_a_feedback_beyond_its_range() {
+fn the_ranged_echo_clamps_a_feedback_beyond_its_range() {
     let text = "schema_version = 1\n[project]\nname = \"echo\"\n[instances]\necho = { module = \"tape_delay\", feedback = 1000000 }\nout = { module = \"std.audio_out\" }\n[wiring]\nconnections = [{ from = \"echo.out\", to = \"out.l\" }]\n";
-    let errors = fixture(text, "tape_delay", None)
-        .plan(&registry())
-        .err()
-        .unwrap();
+    let planned = fixture(text, "tape_delay", None).plan(&registry()).unwrap();
     assert!(
-        errors.iter().any(|e| e
+        planned.warnings.iter().any(|w| w
             .to_string()
-            .contains("/echo.feedback: value 1000000 is outside [0, 0.75]")),
-        "{errors:?}"
+            .contains("/echo.feedback: value 1000000 is outside [0, 0.75]: 0.75 plays")),
+        "{:?}",
+        planned.warnings
     );
+    let feedback = planned
+        .plan
+        .instances
+        .iter()
+        .find(|i| i.address.as_str() == "/echo/feedback")
+        .and_then(|i| i.parameters.get("value").copied());
+    assert_eq!(feedback, Some(0.75));
 }
 
 /// AC3: at corner values of every exported parameter (beyond the exports'

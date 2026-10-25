@@ -59,8 +59,8 @@ use std::path::{Path, PathBuf};
 
 use signal_core::{InstanceAddress, LIBRARY_PREFIX, Registry, Table};
 use signal_graph::{
-    CompositeDef, ConnectionDef, ExecutionPlan, Exports, InputExport, InstanceDef, OutputExport,
-    ParameterExport, build_plan,
+    CompositeDef, ConnectionDef, ExecutionPlan, Exports, GraphWarning, InputExport, InstanceDef,
+    OutputExport, ParameterExport, build_plan,
 };
 use toml::Spanned;
 
@@ -181,6 +181,10 @@ pub struct Planned {
     pub plan: ExecutionPlan,
     /// Graph warnings, located in the files.
     pub warnings: Vec<Diagnostic>,
+    /// ADR 0042, 0043: of `warnings`, the parameter values the plan
+    /// corrected (clamped to their range, or the nearest of their value
+    /// set), which Signal.app shows with its diagnostics.
+    pub corrected: Vec<Diagnostic>,
     /// ADR 0037 §5: what the build decided for every slot (the match
     /// tables, the dropped wires, the unheard outputs), in definition then
     /// instance order. The plan carries no record of it.
@@ -592,19 +596,23 @@ impl Project {
         let planned = match build_plan(&root_def, &definitions, registry, PLAN_VERSION) {
             Ok(plan) => {
                 let mut warnings = Vec::new();
+                let mut corrected = Vec::new();
                 for warning in extra_warnings {
                     push_unique(&mut warnings, warning);
                 }
                 for warning in &plan.warnings {
                     let location = root.warning(warning);
-                    push_unique(
-                        &mut warnings,
-                        self.diagnostic(Severity::Warning, location, warning.to_string()),
-                    );
+                    let diagnostic =
+                        self.diagnostic(Severity::Warning, location, warning.to_string());
+                    if matches!(warning, GraphWarning::ParameterCorrected { .. }) {
+                        push_unique(&mut corrected, diagnostic.clone());
+                    }
+                    push_unique(&mut warnings, diagnostic);
                 }
                 Some(Planned {
                     plan,
                     warnings,
+                    corrected,
                     slots,
                 })
             }

@@ -231,6 +231,9 @@ struct AppMode {
     opened: bool,
     /// The open folder's diagnostics, when it does not load.
     diagnostics: Vec<String>,
+    /// ADR 0042, 0043: the values its files hold outside their range or
+    /// value set, corrected (warnings: the project loads and plays them).
+    warnings: Vec<String>,
     /// Notes on the run: the channel map, the input.
     notes: Vec<String>,
     /// The last refusal or notice.
@@ -752,6 +755,21 @@ pub struct Host {
     keys_stamp: Option<(SystemTime, u64)>,
     keys_polled: Instant,
     keys_version: u64,
+}
+
+/// ADR 0042, 0043: the values `project`'s files hold outside their range or
+/// value set, as the plan corrected them, located (`file:line:column:
+/// warning: …`).
+fn corrected_values(dir: &Path, project: &Project, registry: &Registry) -> Vec<String> {
+    project
+        .plan(registry)
+        .map(|planned| {
+            signal_project::located(dir, planned.corrected)
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn joined(diagnostics: Vec<Diagnostic>) -> String {
@@ -1539,6 +1557,7 @@ impl Host {
                 "edited": self.document.as_ref().is_some_and(Document::edited),
                 "sampleRate": (mode.diagnostics.is_empty() && self.rate > 0).then_some(self.rate),
                 "diagnostics": mode.diagnostics,
+                "warnings": mode.warnings,
             })),
             "playing": self.run.is_some(),
             "power": power_json(mode.power),
@@ -1578,6 +1597,7 @@ impl Host {
             Ok((project, plan, _)) => {
                 self.rate = project.sample_rate;
                 mode.diagnostics.clear();
+                mode.warnings = corrected_values(&self.dir, &project, &self.registry);
                 self.panel = Panel::new(&project, &self.registry);
                 self.plan = Some(plan);
             }
@@ -1644,8 +1664,10 @@ impl Host {
             width,
             &mut notes,
         );
+        let warnings = corrected_values(&self.dir, &project, &self.registry);
         if let Some(mode) = self.app.as_mut() {
             mode.diagnostics.clear();
+            mode.warnings = warnings;
             mode.notes.extend(notes);
         }
         let started = match started {
@@ -2943,6 +2965,10 @@ impl Host {
         let notice = match result {
             Ok(applied) => {
                 run.file = file;
+                // ADR 0042, 0043: the reloaded files' corrected values.
+                if let Some(mode) = self.app.as_mut() {
+                    mode.warnings = corrected_values(&self.dir, &run.current, &self.registry);
+                }
                 reloaded = Some((
                     Panel::new(&run.current, &self.registry),
                     run.current.plan(&self.registry).ok().map(|p| p.plan),

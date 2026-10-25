@@ -189,6 +189,8 @@ impl<'a> Locator<'a> {
                 self.connection_or_instance(from, to)
             }
             GraphWarning::NoSinkReachable { instance } => self.instance_key(instance),
+            // ADR 0042, 0043: at the value as written (the outermost that wins).
+            GraphWarning::ParameterCorrected { parameter, .. } => self.winning_value(parameter),
             _ => None,
         };
         location.unwrap_or_else(|| self.fallback())
@@ -251,8 +253,6 @@ impl<'a> Locator<'a> {
             }
             GraphError::ShapeMismatch { from, to, .. }
             | GraphError::RateMismatch { from, to, .. } => self.connection_or_instance(from, to),
-            GraphError::ParameterOutOfRange { parameter, .. }
-            | GraphError::ParameterNotInSet { parameter, .. } => self.winning_value(parameter),
             GraphError::NonFiniteScale { from, to, scale } => {
                 // The connection with this very scale, not merely the first
                 // one between the same ports.

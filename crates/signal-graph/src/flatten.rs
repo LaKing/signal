@@ -20,7 +20,7 @@ use signal_core::{
 };
 
 use crate::def::{CompositeDef, ConnectionDef, InstanceDef};
-use crate::error::{GraphError, PlanBudget};
+use crate::error::{GraphError, GraphWarning, PlanBudget};
 
 /// A primitive instance of the flattened graph.
 pub(crate) struct FlatInstance {
@@ -46,6 +46,9 @@ pub(crate) struct FlatConnection {
 pub(crate) struct FlatGraph {
     pub(crate) instances: BTreeMap<InstanceAddress, FlatInstance>,
     pub(crate) connections: Vec<FlatConnection>,
+    /// Values of exported parameters corrected while flattening (ADR 0042,
+    /// 0043): the plan's warnings.
+    pub(crate) warnings: Vec<GraphWarning>,
 }
 
 /// The primitive ports behind each export of a composite instance.
@@ -183,6 +186,7 @@ struct Flattener<'a> {
     instances: BTreeMap<InstanceAddress, FlatInstance>,
     connections: Vec<FlatConnection>,
     errors: Vec<GraphError>,
+    warnings: Vec<GraphWarning>,
     /// Instances resolved so far, composite or primitive.
     made: usize,
     /// The budget flattening stopped at, if any: nothing more is expanded.
@@ -240,6 +244,7 @@ pub(crate) fn flatten(
         instances: BTreeMap::new(),
         connections: Vec::new(),
         errors,
+        warnings: Vec::new(),
         made: 0,
         exceeded: None,
         scopes: Vec::new(),
@@ -249,6 +254,7 @@ pub(crate) fn flatten(
         Ok(FlatGraph {
             instances: flattener.instances,
             connections: flattener.connections,
+            warnings: flattener.warnings,
         })
     } else {
         Err(flattener.errors)
@@ -451,32 +457,27 @@ impl<'a> Flattener<'a> {
                 self.unknown_parameter(address, name);
                 continue;
             };
-            // ADR 0043: a value that is not one of the export's value set,
-            // likewise.
-            if let Some(set) = interface.value_sets.get(name)
-                && !set.iter().any(|(v, _)| v == value)
-                && let Ok(parameter) = PortAddress::new(address, name)
-            {
-                self.errors.push(GraphError::ParameterNotInSet {
-                    parameter,
-                    value: *value,
-                    allowed: crate::allowed_text(set.iter().map(|(v, l)| (*v, l.as_str()))),
-                });
-                continue;
-            }
-            // ADR 0042: a value outside the export's own range is refused at
-            // the instance's value, as a primitive's out-of-range value is.
+            // ADR 0042, 0043 (the operator's decision of 2026-10-25): a value
+            // outside the export's own range is clamped to it, one not in its
+            // value set taken as the nearest; a warning says so, and the
+            // corrected value is what the targets get.
+            let mut value = *value;
             if let Some(range) = interface.own.get(name)
-                && !(range.min <= *value && *value <= range.max)
-                && let Ok(parameter) = PortAddress::new(address, name)
+                && !(range.min <= value && value <= range.max)
             {
-                self.errors.push(GraphError::ParameterOutOfRange {
-                    parameter,
-                    value: *value,
-                    range: *range,
-                });
-                continue;
+                let to = value.max(range.min).min(range.max);
+                self.corrected(address, name, value, to, outside(*range));
+                value = to;
             }
+            if let Some(set) = interface.value_sets.get(name)
+                && !set.iter().any(|(v, _)| *v == value)
+            {
+                let to = nearest_of(set.iter().map(|(v, _)| *v), value);
+                let allowed = crate::allowed_text(set.iter().map(|(v, l)| (*v, l.as_str())));
+                self.corrected(address, name, value, to, not_one_of(&allowed));
+                value = to;
+            }
+            let value = &value;
             for target in targets {
                 let slot = self
                     .instances
@@ -488,6 +489,25 @@ impl<'a> Flattener<'a> {
             }
         }
         Some(Local::Composite(interface))
+    }
+
+    /// Records a corrected value of `name` on the instance at `address`.
+    fn corrected(
+        &mut self,
+        address: &InstanceAddress,
+        name: &str,
+        value: f64,
+        to: f64,
+        reason: String,
+    ) {
+        if let Ok(parameter) = PortAddress::new(address, name) {
+            self.warnings.push(GraphWarning::ParameterCorrected {
+                parameter,
+                value,
+                to,
+                reason: reason.into(),
+            });
+        }
     }
 
     /// The stream key of the primitive at `address` (ADR 0035 §4): the
@@ -873,6 +893,7 @@ pub(crate) fn ports_of(
         instances: BTreeMap::new(),
         connections: Vec::new(),
         errors: Vec::new(),
+        warnings: Vec::new(),
         made: 0,
         exceeded: None,
         scopes: Vec::new(),
@@ -954,4 +975,25 @@ pub(crate) fn ports_of(
     }
     ports.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(ports)
+}
+
+/// A warning's reason for a value outside `range` (ADR 0042).
+pub(crate) fn outside(range: Range) -> String {
+    format!("is outside [{}, {}]", range.min, range.max)
+}
+
+/// A warning's reason for a value not in a value set (ADR 0043).
+pub(crate) fn not_one_of(allowed: &str) -> String {
+    format!("is not one of {allowed}")
+}
+
+/// The value of `values` nearest to `value` (the lower of two as near).
+pub(crate) fn nearest_of(values: impl IntoIterator<Item = f64>, value: f64) -> f64 {
+    let mut best: Option<f64> = None;
+    for v in values {
+        if best.is_none_or(|b| (v - value).abs() < (b - value).abs()) {
+            best = Some(v);
+        }
+    }
+    best.unwrap_or(value)
 }

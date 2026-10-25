@@ -39,6 +39,28 @@ fn problems(files: &[(&str, &str)]) -> Vec<String> {
     }
 }
 
+/// ADR 0042, 0043 (the operator's decision of 2026-10-25): the warnings of
+/// `files`, which must load and plan, and the plan's value of `port`.
+fn warned(files: &[(&str, &str)]) -> Vec<String> {
+    let project = Project::from_sources(sources(files)).unwrap();
+    let planned = project
+        .plan(&registry())
+        .unwrap_or_else(|e| panic!("it must load: {e:?}"));
+    planned.warnings.iter().map(ToString::to_string).collect()
+}
+
+/// The plan's value of `port` (`/instance.parameter`) for `files`.
+fn played(files: &[(&str, &str)], port: &str) -> f64 {
+    let project = Project::from_sources(sources(files)).unwrap();
+    let plan = project.plan(&registry()).unwrap().plan;
+    let (instance, parameter) = port.rsplit_once('.').unwrap();
+    plan.instances
+        .iter()
+        .find(|i| i.address.as_str() == instance)
+        .and_then(|i| i.parameters.get(parameter).copied())
+        .unwrap_or_else(|| panic!("no {port}"))
+}
+
 fn project(instance: &str) -> String {
     format!(
         r#"schema_version = 1
@@ -181,12 +203,16 @@ fn a_fan_out_range_must_fit_every_target() {
 }
 
 #[test]
-fn a_value_outside_the_range_is_an_error_at_the_value() {
+fn a_value_outside_the_range_is_clamped_with_a_warning() {
     let voice = voice(r#"{ attack = { to = "click.mul", min = 0, max = 2 } }"#);
     let text = project(r#"v = { module = "voice", attack = -50000 }"#);
-    let errors = problems(&[("project.toml", &text), ("composites/voice.toml", &voice)]);
+    let files = [
+        ("project.toml", text.as_str()),
+        ("composites/voice.toml", voice.as_str()),
+    ];
+    let errors = warned(&files);
     assert_eq!(errors.len(), 1, "{errors:?}");
-    // The primitive rule: an error located at the instance's value.
+    // A warning at the instance's value; the clamped value plays.
     let (line, entry) = text
         .lines()
         .enumerate()
@@ -194,10 +220,11 @@ fn a_value_outside_the_range_is_an_error_at_the_value() {
         .unwrap();
     let column = entry.find("-50000").unwrap() + 1;
     assert!(
-        errors[0].starts_with(&format!("project.toml:{}:{column}: error: ", line + 1))
-            && errors[0].contains("/v.attack: value -50000 is outside [0, 2]"),
+        errors[0].starts_with(&format!("project.toml:{}:{column}: warning: ", line + 1))
+            && errors[0].contains("/v.attack: value -50000 is outside [0, 2]: 0 plays"),
         "{errors:?}"
     );
+    assert_eq!(played(&files, "/v/click.mul"), 0.0);
     // Without the range, the same value is within std.scale's ±10⁵ (ADR 0043).
     let plain = self::voice(r#"{ attack = "click.mul" }"#);
     plan_ok(&[("project.toml", &text), ("composites/voice.toml", &plain)]);
@@ -246,7 +273,7 @@ parameters = {parameters}
     );
     // An outer export without a range takes the inner one's for values.
     let plain = outer(r#"{ hit = "inner.attack" }"#, "");
-    let errors = problems(&[
+    let errors = warned(&[
         (
             "project.toml",
             &project(r#"v = { module = "rack", hit = 5 }"#),
@@ -257,12 +284,12 @@ parameters = {parameters}
     assert!(
         errors
             .iter()
-            .any(|e| e.contains("/v.hit: value 5 is outside [0, 2]")),
+            .any(|e| e.contains("/v.hit: value 5 is outside [0, 2]: 2 plays")),
         "{errors:?}"
     );
     // A value inside a composite file is checked against the inner export.
     let inside = outer(r#"{ hit = "inner.attack" }"#, ", attack = 4");
-    let errors = problems(&[
+    let errors = warned(&[
         ("project.toml", &project(r#"v = { module = "rack" }"#)),
         ("composites/voice.toml", &voice),
         ("composites/rack.toml", &inside),
@@ -475,16 +502,16 @@ fn an_export_value_set_must_be_allowed_by_its_target() {
     );
 }
 
-/// ADR 0043: a value in a file that is not one of the value set (the
-/// export's own, or the one it takes from its target) is an error at the
-/// value, as an out-of-range value is; values and a range together are
-/// refused.
+/// ADR 0043 (the operator's decision of 2026-10-25): a value in a file that
+/// is not one of the value set (the export's own, or the one it takes from
+/// its target) takes the nearest of them, with a warning at the value, as an
+/// out-of-range value is clamped; values and a range together are refused.
 #[test]
-fn a_value_not_in_the_set_is_an_error_at_the_value() {
+fn a_value_not_in_the_set_takes_the_nearest_with_a_warning() {
     let own = osc_voice(
         r#"{ wave = { to = "osc.shape", values = [{ value = 0, label = "sine" }, { value = 1, label = "saw" }] } }"#,
     );
-    let errors = problems(&[
+    let errors = warned(&[
         (
             "project.toml",
             &project(r#"v = { module = "voice", wave = 2 }"#),
@@ -493,12 +520,12 @@ fn a_value_not_in_the_set_is_an_error_at_the_value() {
     ]);
     assert!(
         errors.iter().any(|e| e.starts_with("project.toml:")
-            && e.contains("/v.wave: value 2 is not one of 0 sine, 1 saw")),
+            && e.contains("/v.wave: value 2 is outside [0, 1]: 1 plays")),
         "{errors:?}"
     );
     // Inherited from the target: 1.5 is in the range, not in the set.
     let inherited = osc_voice(r#"{ wave = "osc.shape" }"#);
-    let errors = problems(&[
+    let errors = warned(&[
         (
             "project.toml",
             &project(r#"v = { module = "voice", wave = 1.5 }"#),
@@ -506,17 +533,15 @@ fn a_value_not_in_the_set_is_an_error_at_the_value() {
         ("composites/voice.toml", &inherited),
     ]);
     assert!(
-        errors
-            .iter()
-            .any(|e| e
-                .contains("/v.wave: value 1.5 is not one of 0 sine, 1 saw, 2 square, 3 triangle")),
+        errors.iter().any(|e| e.contains(
+            "/v.wave: value 1.5 is not one of 0 sine, 1 saw, 2 square, 3 triangle: 1 plays"
+        )),
         "{errors:?}"
     );
-    // A primitive's own, likewise.
-    let errors = problems(&[(
-        "project.toml",
-        &project(r#"v = { module = "std.osc", shape = 1.5 }"#),
-    )]);
+    // A primitive's own, likewise; the nearest plays.
+    let text = project(r#"v = { module = "std.osc", shape = 1.5 }"#);
+    let errors = warned(&[("project.toml", &text)]);
+    assert_eq!(played(&[("project.toml", &text)], "/v.shape"), 1.0);
     assert!(
         errors
             .iter()
@@ -531,4 +556,48 @@ fn a_value_not_in_the_set_is_an_error_at_the_value() {
         ("composites/voice.toml", &both),
     ]);
     assert!(errors.iter().any(|e| e.contains("not both")), "{errors:?}");
+}
+
+/// The owner's real project of 2026-10-25, sanitised: a voice composite
+/// written before ADR 0043, whose `wave` export has no value set of its own
+/// (it takes `std.osc`'s), set to 1.0023 by a slider; and a frequency
+/// beyond the new 100 kHz end. An upgrade must never make such a project
+/// unopenable (the operator's decision): it loads, the nearest value and
+/// the clamped one play, and two warnings say so at the values.
+#[test]
+fn a_project_from_before_the_ranges_still_loads_and_plays_the_corrected_values() {
+    let voice = r#"schema_version = 1
+
+[composite]
+name = "voice"
+
+[instances]
+osc = { module = "std.osc", freq = 110 }
+
+[exports]
+outputs = { out = "osc.out" }
+parameters = { wave = "osc.shape", freq = "osc.freq" }
+"#;
+    let text = project(r#"v = { module = "voice", wave = 1.0023, freq = 250000 }"#);
+    let files = [
+        ("project.toml", text.as_str()),
+        ("composites/voice.toml", voice),
+    ];
+    let warnings = warned(&files);
+    assert!(
+        warnings.iter().any(|w| w.starts_with("project.toml:8:")
+            && w.contains("warning: /v.wave: value 1.0023 is not one of 0 sine, 1 saw, 2 square, 3 triangle: 1 plays")),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings.iter().any(|w| w.starts_with("project.toml:8:")
+            && w.contains(
+                "warning: /v/osc.freq: value 250000 is outside [0, 100000]: 100000 plays"
+            )),
+        "{warnings:?}"
+    );
+    assert_eq!(played(&files, "/v/osc.shape"), 1.0);
+    assert_eq!(played(&files, "/v/osc.freq"), 100_000.0);
+    // The file keeps its text: nothing was written.
+    assert!(text.contains("wave = 1.0023, freq = 250000"));
 }

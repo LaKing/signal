@@ -156,6 +156,9 @@ impl Panel {
             .map(|c| (c.name.as_str(), c))
             .collect();
         let mut instances = Vec::new();
+        // ADR 0042, 0043: file values the plan corrected (clamped, or the
+        // nearest of a value set): they play, and are unsaved until written.
+        let mut corrected = BTreeMap::new();
         for def in &project.root.instances {
             let excluded = project.snapshot_excluded(&def.name);
             let Ok(address) = format!("/{}", def.name).parse::<InstanceAddress>() else {
@@ -199,6 +202,23 @@ impl Panel {
                     .filter(|first| targets.iter().all(|t| t.3.as_ref() == Some(first)));
                 let default = inner_value.unwrap_or(first.default);
                 let file = def.parameters.get(name).copied();
+                if let Some(written) = file {
+                    let clamped = written.max(min).min(max);
+                    let taken = match &values {
+                        Some(set) => nearest(set, clamped),
+                        None => clamped,
+                    };
+                    if taken.to_bits() != written.to_bits() {
+                        corrected.insert(
+                            (def.name.clone(), name.clone()),
+                            Drag {
+                                value: taken,
+                                sent: true,
+                                applied: taken,
+                            },
+                        );
+                    }
+                }
                 let ports: Vec<PortAddress> = targets.iter().map(|t| t.0.clone()).collect();
                 let defaults = targets.iter().map(|t| t.2.unwrap_or(t.1.default)).collect();
                 // ADR 0043: stepped exactly when it has a value set.
@@ -235,7 +255,7 @@ impl Panel {
                 .patterns()
                 .map(|(name, kind)| (name.to_owned(), kind))
                 .collect(),
-            drags: BTreeMap::new(),
+            drags: corrected,
         }
     }
 
@@ -337,6 +357,11 @@ impl Panel {
     pub fn replace(&mut self, other: Panel) {
         self.instances = other.instances;
         self.patterns = other.patterns;
+        // A value the new files hold outside its range or set: corrected and
+        // unsaved, unless a drag of it is in progress (ADR 0042, 0043).
+        for (key, drag) in other.drags {
+            self.drags.entry(key).or_insert(drag);
+        }
     }
 
     /// The kind of the project's pattern `name` (`patterns/<name>.toml`), if

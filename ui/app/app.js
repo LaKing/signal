@@ -61,7 +61,7 @@ import {
   snapshotName,
 } from './lib/snapshots.js';
 import { compactStatus, statusFields } from './lib/status.js';
-import { appNotes, messageLines, mutedNotice } from './lib/messages.js';
+import { appNotes, messageLines, mutedNotice, warningsNotice } from './lib/messages.js';
 import { INITIAL_TAB, TABS, select, tabForAction } from './lib/tabs.js';
 import { retryMessage, revertMessage, unsavedLine, unsavedOf } from '../lib/unsaved.js';
 import { isDiscrete, selectOptions, selectValue, valueLabel } from '../lib/value-set.js';
@@ -281,6 +281,10 @@ export class SignalAppToolbar extends AppElement {
     const muted = mutedNotice(this.muted ?? null, app.muted ?? null);
     this.muted = app.muted ?? null;
     if (muted) this.notice(muted, true);
+    // ADR 0042, 0043: values corrected on load, said where every tab sees it.
+    const corrected = warningsNotice(this.corrected ?? [], app.project?.warnings ?? []);
+    this.corrected = app.project?.warnings ?? [];
+    if (corrected && !muted) this.notice(corrected, false);
     this.render();
   }
 

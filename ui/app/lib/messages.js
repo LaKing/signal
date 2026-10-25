@@ -22,9 +22,24 @@ export function appNotes(app) {
   if (app.muted) notes.push({ text: app.muted, className: 'error', pinned: true });
   if (app.message) notes.push({ text: app.message, className: 'warn' });
   for (const d of app.project?.diagnostics ?? []) notes.push({ text: d, className: 'error' });
+  // ADR 0042, 0043: values the files hold outside their range or value set, corrected.
+  for (const w of app.project?.warnings ?? []) notes.push({ text: w, className: 'warn' });
   for (const n of app.notes ?? []) notes.push({ text: n, className: '' });
   for (const p of app.setupProblems ?? []) notes.push({ text: p, className: 'warn' });
   return notes;
+}
+
+/**
+ * The toolbar's notice when the open project's corrected values
+ * (`app.project.warnings`, ADR 0042, 0043) change to a non-empty list;
+ * `null` otherwise. `previous` is the list last seen.
+ */
+export function warningsNotice(previous, warnings) {
+  const now = warnings ?? [];
+  if (!now.length || JSON.stringify(now) === JSON.stringify(previous ?? [])) return null;
+  return now.length === 1
+    ? 'A value in the files was corrected on load (see Parameters)'
+    : `${now.length} values in the files were corrected on load (see Parameters)`;
 }
 
 /**

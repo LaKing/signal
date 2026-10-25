@@ -58,6 +58,19 @@ fn project_errors(text: &str) -> String {
     errors(&[("project.toml", text)])
 }
 
+/// ADR 0042, 0043 (the operator's decision of 2026-10-25): the warnings of
+/// `files`, which must load and plan, one per line.
+fn warnings(files: &[(&str, &str)]) -> String {
+    let project = Project::from_sources(sources(files)).unwrap();
+    let planned = project.plan(&registry()).unwrap();
+    planned
+        .warnings
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn valid_project_plans() {
     let project = Project::from_sources(sources(&[("project.toml", VALID)])).unwrap();
@@ -173,14 +186,17 @@ fn an_unregistered_vector_width_is_an_unknown_module() {
 /// M2.10-2 AC3: a table's values are its parameters, validated when the
 /// project loads: one outside ±1e6 is refused at the value.
 #[test]
-fn a_table_value_out_of_range_is_refused_at_load() {
+fn a_table_value_out_of_range_is_clamped_at_load() {
     let text = VALID.replace(
         "osc = { module = \"std.sine_osc\", freq = 440 }",
         "osc = { module = \"std.sine_osc\", freq = 440 }\ntab = { module = \"std.table4\", v0 = 1, v2 = 2e6 }",
     );
-    assert_eq!(
-        project_errors(&text),
-        "project.toml:9:45: error: /tab.v2: value 2000000 is outside [-100000, 100000]"
+    assert!(
+        warnings(&[("project.toml", &text)]).contains(
+            "project.toml:9:45: warning: /tab.v2: value 2000000 is outside [-100000, 100000]: 100000 plays"
+        ),
+        "{}",
+        warnings(&[("project.toml", &text)])
     );
 }
 
@@ -196,7 +212,10 @@ fn out_of_range_parameter() {
         r#"{ module = "std.audio_out" }"#,
         r#"{ module = "std.audio_out", gain = 5 }"#,
     );
-    insta::assert_snapshot!("out_of_range_parameter", project_errors(&text));
+    insta::assert_snapshot!(
+        "out_of_range_parameter",
+        warnings(&[("project.toml", &text)])
+    );
 }
 
 #[test]
@@ -273,7 +292,7 @@ fn error_in_used_composite() {
 fn out_of_range_through_export() {
     insta::assert_snapshot!(
         "out_of_range_through_export",
-        errors(&[
+        warnings(&[
             ("project.toml", VOICE_PROJECT),
             ("composites/voice.toml", VOICE)
         ])
@@ -385,7 +404,7 @@ fn out_of_range_through_aliased_exports() {
     let project = VOICE_PROJECT.replace("drive = 50", "a = 1, z = 50");
     insta::assert_snapshot!(
         "out_of_range_through_aliased_exports",
-        errors(&[
+        warnings(&[
             ("project.toml", &project),
             ("composites/voice.toml", &voice)
         ])

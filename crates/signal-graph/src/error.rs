@@ -168,25 +168,6 @@ pub enum GraphError {
         /// The target's rate divisor.
         to_rate: RateDivisor,
     },
-    /// A parameter value lies outside its declared range.
-    ParameterOutOfRange {
-        /// The parameter.
-        parameter: PortAddress,
-        /// The value.
-        value: f64,
-        /// The declared range.
-        range: Range,
-    },
-    /// ADR 0043: a discrete parameter's value is not one of its value set.
-    ParameterNotInSet {
-        /// The parameter (or a composite instance's exported parameter).
-        parameter: PortAddress,
-        /// The value.
-        value: f64,
-        /// The allowed values with their names, as a message lists them
-        /// (`0 sine, 1 saw, 2 square, 3 triangle`).
-        allowed: String,
-    },
     /// A connection's scale is NaN or infinite.
     NonFiniteScale {
         /// The declared source endpoint.
@@ -380,20 +361,6 @@ impl fmt::Display for GraphError {
                 from_rate.get(),
                 to_rate.get()
             ),
-            GraphError::ParameterOutOfRange {
-                parameter,
-                value,
-                range,
-            } => write!(
-                f,
-                "{parameter}: value {value} is outside [{}, {}]",
-                range.min, range.max
-            ),
-            GraphError::ParameterNotInSet {
-                parameter,
-                value,
-                allowed,
-            } => write!(f, "{parameter}: value {value} is not one of {allowed}"),
             GraphError::NonFiniteScale { from, to, scale } => {
                 write!(f, "{from} -> {to}: scale {scale} is not finite")
             }
@@ -537,6 +504,20 @@ pub enum GraphWarning {
         /// The target's kind.
         to_kind: PortKind,
     },
+    /// ADR 0042, 0043 (the operator's decision of 2026-10-25): a parameter
+    /// value in a file outside its range was clamped to it, or one not in
+    /// its value set taken as the nearest of them; the project loads and
+    /// plays `to`. The file keeps its text until the parameter is written.
+    ParameterCorrected {
+        /// The parameter (or a composite instance's exported parameter).
+        parameter: PortAddress,
+        /// The value written in the file.
+        value: f64,
+        /// The value that plays.
+        to: f64,
+        /// Why: the range it was outside, or the value set it is not one of.
+        reason: Box<str>,
+    },
     /// No sink instance is reachable from this instance, so its output is not
     /// observed. It still runs (ADR 0016 §1).
     NoSinkReachable {
@@ -576,6 +557,15 @@ impl fmt::Display for GraphWarning {
             GraphWarning::NoSinkReachable { instance } => {
                 write!(f, "{instance}: no sink is reachable; its output is unused")
             }
+            GraphWarning::ParameterCorrected {
+                parameter,
+                value,
+                to,
+                reason,
+            } => write!(
+                f,
+                "{parameter}: value {value} {reason}: {to} plays (the file keeps {value} until the parameter is written)"
+            ),
             GraphWarning::ConverterInserted {
                 from,
                 to,

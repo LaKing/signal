@@ -205,36 +205,52 @@ pub(crate) fn validate(
         }
     }
 
-    for (address, instance) in &graph.instances {
-        for parameter in instance.descriptor.parameters {
-            let Some(&value) = instance.parameters.get(parameter.name) else {
-                continue;
-            };
-            let range = parameter.range;
-            if !(range.min <= value && value <= range.max)
-                && let Ok(parameter) = PortAddress::new(address, parameter.name)
-            {
-                errors.push(GraphError::ParameterOutOfRange {
-                    parameter,
-                    value,
-                    range,
-                });
-            } else if let Some(values) = parameter.values
-                && !values.iter().any(|v| v.value == value)
-                && let Ok(port) = PortAddress::new(address, parameter.name)
-            {
-                errors.push(GraphError::ParameterNotInSet {
-                    parameter: port,
-                    value,
-                    allowed: crate::allowed_text(values.iter().map(|v| (v.value, v.label))),
-                });
-            }
-        }
-    }
-
     if errors.is_empty() {
         Ok(())
     } else {
         Err(errors)
+    }
+}
+
+/// ADR 0042, 0043 (the operator's decision of 2026-10-25): every primitive
+/// parameter value outside its declared range is clamped to it, and one not
+/// in its value set taken as the nearest of them, each with a warning; the
+/// corrected value is what the plan holds and what plays.
+pub(crate) fn correct(graph: &mut FlatGraph, warnings: &mut Vec<GraphWarning>) {
+    for (address, instance) in &mut graph.instances {
+        for parameter in instance.descriptor.parameters {
+            let Some(slot) = instance.parameters.get_mut(parameter.name) else {
+                continue;
+            };
+            let value = *slot;
+            let range = parameter.range;
+            let mut to = value;
+            let mut reason = None;
+            if !(range.min <= to && to <= range.max) {
+                to = to.max(range.min).min(range.max);
+                reason = Some(crate::flatten::outside(range));
+            }
+            if let Some(values) = parameter.values
+                && !values.iter().any(|v| v.value == to)
+            {
+                let nearest = crate::flatten::nearest_of(values.iter().map(|v| v.value), to);
+                let allowed = crate::allowed_text(values.iter().map(|v| (v.value, v.label)));
+                // A value both outside the range and between values: the
+                // range's reason says enough, the set's names the result.
+                reason = Some(crate::flatten::not_one_of(&allowed));
+                to = nearest;
+            }
+            if let Some(reason) = reason
+                && let Ok(port) = PortAddress::new(address, parameter.name)
+            {
+                *slot = to;
+                warnings.push(GraphWarning::ParameterCorrected {
+                    parameter: port,
+                    value,
+                    to,
+                    reason: reason.into(),
+                });
+            }
+        }
     }
 }
