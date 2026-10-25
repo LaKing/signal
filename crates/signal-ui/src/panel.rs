@@ -80,6 +80,39 @@ struct Row {
     ports: Vec<PortAddress>,
     /// Each port's own value without this parameter in `project.toml`.
     defaults: Vec<f64>,
+    /// Whether a port it sets is stepped ([`stepped`]).
+    stepped: bool,
+}
+
+/// The widest top of a stepped `Generic` range ([`stepped`]): selectors and
+/// small counts stay below it; continuous values of no kind (`std.const`
+/// and `std.scale` at ±1e6, a biquad's `gain_db` at ±48) do not.
+const STEPPED_MAX: f64 = 64.0;
+
+/// Whether a parameter is stepped, so a snapshot transition (ADR 0041 §10)
+/// switches it at once instead of moving it through the values between:
+/// a gate or trigger, or a value of no kind (`Generic`) whose range lies in
+/// 0 to 64, with whole ends at least 2 apart and a whole default (a mode,
+/// a small count, a selector: a filter's `mode`, an oscillator's `shape`,
+/// a buffer's `interp`). The descriptor marks no parameter as stepped
+/// (that flag is planned with ADR 0042), so this is the rule; a restore
+/// also needs both the value playing and the target to be whole. Known
+/// misses are listed in ADR 0041 §10.
+pub fn stepped(d: &ParameterDescriptor) -> bool {
+    use signal_core::PortKind;
+    let whole = |v: f64| v.is_finite() && v.fract() == 0.0;
+    match d.kind {
+        PortKind::Gate | PortKind::Trigger => true,
+        PortKind::Generic => {
+            whole(d.range.min)
+                && whole(d.range.max)
+                && whole(d.default)
+                && d.range.min >= 0.0
+                && d.range.max <= STEPPED_MAX
+                && d.range.max - d.range.min >= 2.0
+        }
+        _ => false,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -181,6 +214,7 @@ impl Panel {
                 let file = def.parameters.get(name).copied();
                 let ports: Vec<PortAddress> = targets.iter().map(|t| t.0.clone()).collect();
                 let defaults = targets.iter().map(|t| t.2.unwrap_or(t.1.default)).collect();
+                let is_stepped = targets.iter().any(|t| stepped(&t.1));
                 instance.parameters.push(Row {
                     view: ParameterView {
                         name: name.clone(),
@@ -197,6 +231,7 @@ impl Panel {
                     },
                     ports,
                     defaults,
+                    stepped: is_stepped,
                 });
             }
             instance.order = names;
@@ -226,6 +261,7 @@ impl Panel {
             min: row.view.min,
             max: row.view.max,
             order: i.order.clone(),
+            stepped: row.stepped,
         })
     }
 
@@ -368,6 +404,9 @@ pub struct Target {
     pub max: f64,
     /// The module's parameters in declared order.
     pub order: Vec<String>,
+    /// Whether a port it sets is stepped ([`stepped`]): a snapshot
+    /// transition switches it at once.
+    pub stepped: bool,
 }
 
 impl Target {
@@ -483,6 +522,7 @@ fn inner(plan: &ExecutionPlan, address: &InstanceAddress) -> Vec<Row> {
                 },
                 ports: vec![port],
                 defaults: vec![p.default],
+                stepped: stepped(p),
             });
         }
     }
@@ -790,6 +830,41 @@ pub fn write_file(path: &Path, text: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0041 §10 (review of 2026-10-25): over the whole registry, no
+    /// continuous parameter of no kind (a ±1e6 range: `std.const`,
+    /// `std.scale`, behind the library's exports) and no `gain_db` is
+    /// stepped; the selectors are.
+    #[test]
+    fn continuous_parameters_are_not_stepped() {
+        let mut registry = Registry::new();
+        signal_std::register(&mut registry).unwrap();
+        let mut stepped_ones = Vec::new();
+        for module in registry.iter() {
+            for p in module.descriptor.parameters {
+                let wide = p.range.min <= -1e6 || p.range.max >= 1e6;
+                assert!(
+                    !(stepped(p) && (wide || p.name == "gain_db")),
+                    "{}.{} is continuous",
+                    module.descriptor.type_name,
+                    p.name
+                );
+                if stepped(p) {
+                    stepped_ones.push(format!("{}.{}", module.descriptor.type_name, p.name));
+                }
+            }
+        }
+        for selector in ["std.biquad.mode", "std.osc.shape", "std.playhead.run"] {
+            assert!(
+                stepped_ones.iter().any(|s| s == selector),
+                "{selector}: {stepped_ones:?}"
+            );
+        }
+        assert!(
+            !stepped_ones.iter().any(|s| s.ends_with(".ppq")),
+            "ppq (1 to 960) is past the rule's 64: {stepped_ones:?}"
+        );
+    }
 
     /// audit 2026-10-23 (writer): the auditor's interleaving, fixed. Another
     /// writer has its staging file open at the shared name earlier builds

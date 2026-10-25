@@ -60,6 +60,25 @@ enum Action {
         /// The project folder.
         project: PathBuf,
     },
+    /// Move a snapshot to a place in the list's order (0-based; past the
+    /// end: the last place).
+    Move {
+        /// The project folder.
+        project: PathBuf,
+        /// The snapshot's name.
+        name: String,
+        /// Its new place, from 0.
+        index: usize,
+    },
+    /// Set the snapshot transition time (ADR 0041 §10): how long a restore
+    /// in Signal moves each control to its value, in ms (0 to 60000; 0: at
+    /// once). A restore here writes the files only, so it has no ramp.
+    Transition {
+        /// The project folder.
+        project: PathBuf,
+        /// Milliseconds, 0 to 60000.
+        ms: u32,
+    },
     /// Delete a snapshot.
     Delete {
         /// The project folder.
@@ -85,7 +104,8 @@ fn failure(error: SnapshotError) -> Failure {
         SnapshotError::BadName(_)
         | SnapshotError::Unknown(_)
         | SnapshotError::Exists(_)
-        | SnapshotError::NoUndo => Failure::Usage(error.to_string()),
+        | SnapshotError::NoUndo
+        | SnapshotError::BadTransition(_) => Failure::Usage(error.to_string()),
         _ => Failure::Io(error.to_string()),
     }
 }
@@ -156,21 +176,29 @@ pub(crate) fn run(args: &SnapshotArgs, registry: &Registry, json: bool) -> Resul
             let (all, _) = snapshot::read(project).map_err(failure)?;
             if json {
                 let list: Vec<_> = all
-                    .snapshots
+                    .names()
                     .iter()
-                    .map(|(name, values)| json!({"name": name, "count": values.len(), "values": values}))
+                    .filter_map(|name| {
+                        let values = all.snapshots.get(name)?;
+                        Some(json!({"name": name, "count": values.len(), "values": values}))
+                    })
                     .collect();
                 print_stdout(
                     &json!({
                         "snapshots": list,
                         "undo": all.undo.is_some(),
                         "undoCount": all.undo.as_ref().map_or(0, |u| u.len()),
+                        "transitionMs": all.transition_ms,
                     })
                     .to_string(),
                 );
             } else {
-                for (name, values) in &all.snapshots {
-                    print_stdout(&format!("{name} ({} values)", values.len()));
+                for name in all.names() {
+                    let count = all.snapshots.get(&name).map_or(0, |v| v.len());
+                    print_stdout(&format!("{name} ({count} values)"));
+                }
+                if all.transition_ms != 0 {
+                    print_stdout(&format!("(transition: {} ms)", all.transition_ms));
                 }
                 if let Some(undo) = &all.undo {
                     print_stdout(&format!(
@@ -217,6 +245,34 @@ pub(crate) fn run(args: &SnapshotArgs, registry: &Registry, json: bool) -> Resul
                 all.undo.take().ok_or(SnapshotError::NoUndo)
             })?;
             report("undo", &restored, json);
+            Ok(())
+        }
+        Action::Move {
+            project,
+            name,
+            index,
+        } => {
+            let (to, text, _) =
+                snapshot::move_to(project, name, *index, |_| Ok(())).map_err(failure)?;
+            let name = snapshot::name(name).map_err(failure)?;
+            let order = snapshot::parse(&text).map_err(failure)?.names();
+            if json {
+                print_stdout(&json!({"name": name, "index": to, "order": order}).to_string());
+            } else {
+                print_stdout(&format!(
+                    "moved \"{name}\" to place {to}: {}",
+                    order.join(", ")
+                ));
+            }
+            Ok(())
+        }
+        Action::Transition { project, ms } => {
+            let (_, wrote) = snapshot::set_transition(project, *ms, |_| Ok(())).map_err(failure)?;
+            if json {
+                print_stdout(&json!({"transitionMs": ms, "written": wrote}).to_string());
+            } else {
+                print_stdout(&format!("snapshot transition: {ms} ms"));
+            }
             Ok(())
         }
         Action::Delete { project, name } => {

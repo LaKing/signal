@@ -683,6 +683,52 @@ fn lines(diagnostics: &[Diagnostic]) -> String {
         .join("\n")
 }
 
+/// The `snapshots` message of `all` read from `text` (ADR 0041): the base,
+/// the snapshots in the person's order (§9), the undo snapshot apart (§7).
+fn snapshot_list_json(all: &snapshots::Snapshots, text: Option<&str>) -> Value {
+    let list: Vec<Value> = all
+        .names()
+        .iter()
+        .filter_map(|name| {
+            let values = all.snapshots.get(name)?;
+            Some(json!({"name": name, "count": values.len(), "values": values}))
+        })
+        .collect();
+    json!({
+        "type": "snapshots",
+        "file": SNAPSHOTS_FILE,
+        "base": text.map(|t| sha256_hex(t.as_bytes())),
+        "snapshots": list,
+        "undo": all.undo.is_some(),
+        "undoCount": all.undo.as_ref().map_or(0, |u| u.len()),
+        "undoValues": all.undo,
+        "transitionMs": all.transition_ms,
+    })
+}
+
+/// A message's transition time under `key` (`transitionMs` on a restore or
+/// undo, `ms` on `snapshot.transition`, and only that key): absent `None`;
+/// else a whole number of milliseconds from 0 to 60000 (`bad-value`).
+fn transition_of(message: &Value, key: &str) -> Result<Option<u32>, Failure> {
+    match message.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .and_then(|ms| u32::try_from(ms).ok())
+            .filter(|ms| *ms <= snapshots::MAX_TRANSITION_MS)
+            .map(Some)
+            .ok_or_else(|| {
+                fail(
+                    "bad-value",
+                    format!(
+                        "`{key}`: a transition is a whole number of milliseconds from 0 to {}",
+                        snapshots::MAX_TRANSITION_MS
+                    ),
+                )
+            }),
+    }
+}
+
 /// A snapshot message's `name` (ADR 0041): trimmed, 1 to 64 characters.
 fn snapshot_name(message: &Value) -> Result<String, Failure> {
     let raw = message
@@ -3023,6 +3069,8 @@ impl Host {
             "snapshot.restore" => self.snapshot_restore(&message).map(Some),
             "snapshot.delete" => self.snapshot_delete(&message).map(Some),
             "snapshot.undo" => self.snapshot_undo(&message).map(Some),
+            "snapshot.move" => self.snapshot_move(&message).map(Some),
+            "snapshot.transition" => self.snapshot_transition(&message).map(Some),
             "snapshot.exclude" => self.snapshot_exclude(&message).map(Some),
             "retry" => self.retry(&message).map(Some),
             "revert" => self.revert(&message).map(Some),
@@ -5103,21 +5151,7 @@ impl Host {
     /// name and values, in name order.
     fn snapshots_json(&self) -> Result<Value, Failure> {
         let (all, text) = snapshots::read(&self.dir).map_err(snapshot_failure)?;
-        let list: Vec<Value> = all
-            .snapshots
-            .iter()
-            .map(|(name, values)| json!({"name": name, "count": values.len(), "values": values}))
-            .collect();
-        Ok(json!({
-            "type": "snapshots",
-            "file": SNAPSHOTS_FILE,
-            "base": text.map(|t| sha256_hex(t.as_bytes())),
-            "snapshots": list,
-            // ADR 0041 §7: the undo snapshot, apart from the named ones.
-            "undo": all.undo.is_some(),
-            "undoCount": all.undo.as_ref().map_or(0, |u| u.len()),
-            "undoValues": all.undo,
-        }))
+        Ok(snapshot_list_json(&all, text.as_deref()))
     }
 
     /// A snapshot message's project: refused in an app with no project
@@ -5213,6 +5247,30 @@ impl Host {
         }))
     }
 
+    /// `snapshot.move` (ADR 0041 §9): the snapshot `name` to place `to`
+    /// (0-based) in the person's order; an index past the end is the last
+    /// place. Written as `order` in `snapshots.toml` by the ADR 0040 writer,
+    /// with the optional `base`; the reply carries the new list.
+    fn snapshot_move(&mut self, message: &Value) -> Result<Value, Failure> {
+        self.snapshot_project(false)?;
+        let name = snapshot_name(message)?;
+        let to = message
+            .get("to")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| fail("bad-value", "`to` must be a place, a whole number from 0"))?;
+        let to = usize::try_from(to).unwrap_or(usize::MAX);
+        let check = base_check(message)?;
+        let (index, text, _) = snapshots::move_to(&self.dir, &name, to, check)
+            .map_err(|e| self.snapshot_refused(e))?;
+        self.snapshots_written();
+        let all = snapshots::parse(&text).map_err(snapshot_failure)?;
+        // The list as written, with what moved.
+        let list = snapshot_list_json(&all, Some(&text));
+        let list = with(list, "type", json!("snapshot.moved"));
+        let list = with(list, "name", json!(name));
+        Ok(with(list, "index", json!(index)))
+    }
+
     /// `snapshot.restore`: the snapshot's values written into `project.toml`
     /// as one change and sent live, as `commit` writes and sends one value;
     /// entries that are gone are skipped, values out of range clamped, and
@@ -5221,6 +5279,7 @@ impl Host {
         self.snapshot_project(true)?;
         let name = snapshot_name(message)?;
         let check = base_check(message)?;
+        let transition = transition_of(message, "transitionMs")?;
         let wanted = name.clone();
         self.restore_from(
             check,
@@ -5232,6 +5291,7 @@ impl Host {
             },
             &name,
             "snapshot.restored",
+            transition,
         )
     }
 
@@ -5240,12 +5300,32 @@ impl Host {
     fn snapshot_undo(&mut self, message: &Value) -> Result<Value, Failure> {
         self.snapshot_project(true)?;
         let check = base_check(message)?;
+        let transition = transition_of(message, "transitionMs")?;
         self.restore_from(
             check,
             |all| all.undo.take().ok_or(SnapshotError::NoUndo),
             "undo",
             "snapshot.undone",
+            transition,
         )
+    }
+
+    /// `snapshot.transition` (ADR 0041 §10): the snapshot transition time,
+    /// `ms` from 0 to 60000, written as `transition_ms` in `snapshots.toml`
+    /// by the ADR 0040 writer with the optional `base`.
+    fn snapshot_transition(&mut self, message: &Value) -> Result<Value, Failure> {
+        self.snapshot_project(false)?;
+        let ms = transition_of(message, "ms")?
+            .ok_or_else(|| fail("bad-value", "`ms` must be a whole number of milliseconds"))?;
+        let check = base_check(message)?;
+        let (text, _) = snapshots::set_transition(&self.dir, ms, check)
+            .map_err(|e| self.snapshot_refused(e))?;
+        self.snapshots_written();
+        Ok(json!({
+            "type": "snapshot.transition",
+            "ms": ms,
+            "base": sha256_hex(text.as_bytes()),
+        }))
     }
 
     /// A control's live base by name ([`Host::control_base`]): the last value
@@ -5282,6 +5362,7 @@ impl Host {
         take: impl FnOnce(&mut snapshots::Snapshots) -> Result<snapshots::Values, SnapshotError>,
         name: &str,
         kind: &str,
+        transition: Option<u32>,
     ) -> Result<Value, Failure> {
         let lock = ProjectLock::acquire(&self.dir).map_err(|e| {
             fail(
@@ -5297,7 +5378,7 @@ impl Host {
             let values = take(all)?;
             let undo = snapshot::undo_of(&self.panel, &values, |i, p| self.live_base(i, p));
             all.undo = if undo.is_empty() { before } else { Some(undo) };
-            Ok(values)
+            Ok((values, all.transition_ms))
         })
         .map_err(|e| self.snapshot_refused(e))?;
         if edited.wrote {
@@ -5312,7 +5393,52 @@ impl Host {
                     .map(|before| (edited.after.clone(), before))
             })
             .flatten();
-        self.apply_snapshot(name, kind, &edited.result, lock, undo)
+        let (values, file_ms) = &edited.result;
+        // The request's `transitionMs`, else the file's.
+        let ms = transition.unwrap_or(*file_ms);
+        self.apply_snapshot(name, kind, values, lock, undo, ms)
+    }
+
+    /// The ramp each port of `control` moves to `value` along (ADR 0041
+    /// §10): with no transition (`ms` 0) the panel's 5 ms, as before; a
+    /// stepped control ([`crate::panel::stepped`]) whose value playing and
+    /// target are whole switches at once (0 frames, at the start); every
+    /// other control moves linearly over `ms`, from the value playing then
+    /// (a ramp still running included: `semantics.md` "Ramp values").
+    fn transition_frames(&self, control: &ControlWrite, value: f64, ms: u32) -> u64 {
+        if ms == 0 {
+            return ramp_frames(self.rate);
+        }
+        let from = self.live_base(&control.instance, &control.parameter);
+        let whole = |v: f64| v.is_finite() && v.fract() == 0.0;
+        if control.target.stepped && whole(from) && whole(value) {
+            return 0;
+        }
+        (f64::from(self.rate) * f64::from(ms) / 1000.0).round() as u64
+    }
+
+    /// Sends `value` to every port of `control` over `frames` (a linear
+    /// ramp; 0: at once): whether the Controller took every one (true when
+    /// nothing plays).
+    fn send_over(&mut self, control: &ControlWrite, value: f64, frames: u64) -> bool {
+        let Some(run) = self.run.as_mut() else {
+            return true;
+        };
+        for port in &control.target.ports {
+            let payload = EventPayload::Ramp {
+                to: value,
+                frames,
+                curve: Curve::Linear,
+            };
+            if run
+                .controller
+                .send_event(port.clone(), payload, Stamp::Default)
+                .is_err()
+            {
+                return false;
+            }
+        }
+        true
     }
 
     /// Restores `values` (the snapshot `name`, or the undo snapshot) into the
@@ -5333,6 +5459,7 @@ impl Host {
         values: &snapshots::Values,
         lock: ProjectLock,
         undo: Option<(String, String)>,
+        transition_ms: u32,
     ) -> Result<Value, Failure> {
         let restore = snapshot::plan(&self.panel, values);
         let skipped: Vec<Value> = restore
@@ -5411,7 +5538,22 @@ impl Host {
                 (writes, sends, Err(error))
             }
         };
-        let sent_writes = self.send_controls(&writes);
+        // ADR 0041 §10: each value moves over the transition (a stepped one
+        // switches at its start); a value every port already took is not
+        // sent again.
+        let mut sent_writes = Vec::with_capacity(writes.len());
+        for control in &writes {
+            let value = control.value.unwrap_or_default();
+            let last = self.panel.dragged(&control.instance, &control.parameter);
+            let taken = match last {
+                Some(d) if d.sent && d.value.to_bits() == value.to_bits() => true,
+                _ => {
+                    let frames = self.transition_frames(control, value, transition_ms);
+                    self.send_over(control, value, frames)
+                }
+            };
+            sent_writes.push(taken);
+        }
         let mut sent = sent_writes.iter().all(|s| *s);
         let mut note = None;
         let failure = match written {
@@ -5430,9 +5572,9 @@ impl Host {
         let playing = self.run.is_some();
         let mut reached = playing && sent_writes.iter().any(|s| *s);
         for control in &sends {
-            let ports = control.target.ports.iter().cloned();
             let value = control.value.unwrap_or_default();
-            let taken = self.send_ramps(ports.map(|p| (p, value)).collect());
+            let frames = self.transition_frames(control, value, transition_ms);
+            let taken = self.send_over(control, value, frames);
             sent &= taken;
             reached |= playing && taken;
             if taken {
@@ -5519,6 +5661,7 @@ impl Host {
             "skipped": skipped,
             "clamped": clamped,
             "undoSnapshot": undo_state,
+            "transitionMs": transition_ms,
             "note": note,
         }))
     }

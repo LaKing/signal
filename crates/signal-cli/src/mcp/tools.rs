@@ -233,14 +233,24 @@ const TOOLS: &[Tool] = &[
         name: "snapshot_restore",
         group: Group::Adjust,
         description: "Restores the snapshot `name`: first the values playing now of every control in snapshots become the undo snapshot (snapshot_undo); then its values are written into project.toml as one change, where `commit` writes them, and sent live as a commit sends them (clamped to each control's range). Entries whose instance or parameter is gone, or whose control is left out of snapshots, are skipped and listed (`skipped`, reason `excluded` for the latter), clamped ones listed (`clamped`); controls the snapshot does not name are left alone. Refused, as `commit` is, when a gain would go above --max-gain.",
-        schema: || object(json!({"name": {"type": "string"}}), &["name"]),
+        schema: || {
+            object(
+                json!({"name": {"type": "string"}, "transitionMs": {"type": "integer", "minimum": 0, "maximum": 60000}}),
+                &["name"],
+            )
+        },
         run: snapshot_restore,
     },
     Tool {
         name: "snapshot_undo",
         group: Group::Adjust,
         description: "Restores the undo snapshot: the values the last snapshot_restore (or snapshot_undo) replaced, written and sent as a restore is; the values it replaces become the undo snapshot, so a second undo redoes. Gain-guarded as a restore. `snapshot_list.undo` says whether there is one.",
-        schema: none,
+        schema: || {
+            object(
+                json!({"transitionMs": {"type": "integer", "minimum": 0, "maximum": 60000}}),
+                &[],
+            )
+        },
         run: snapshot_undo,
     },
     Tool {
@@ -254,6 +264,30 @@ const TOOLS: &[Tool] = &[
             )
         },
         run: snapshot_exclude,
+    },
+    Tool {
+        name: "snapshot_transition",
+        group: Group::Adjust,
+        description: "Sets the snapshot transition time (ADR 0041 §10): `ms`, 0 to 60000, how long a restore or undo moves each continuous control to its value (stepped ones switch at the start; 0: at once, as before). Kept as `transition_ms` in snapshots.toml; snapshot_restore and snapshot_undo take `transitionMs` to override it once.",
+        schema: || {
+            object(
+                json!({"ms": {"type": "integer", "minimum": 0, "maximum": 60000}}),
+                &["ms"],
+            )
+        },
+        run: snapshot_transition,
+    },
+    Tool {
+        name: "snapshot_move",
+        group: Group::Adjust,
+        description: "Moves the snapshot `name` to place `to` (0-based; past the end: the last place) in the list's order, which snapshots.toml keeps as `order` (ADR 0041 §9). Replies with the list in its new order.",
+        schema: || {
+            object(
+                json!({"name": {"type": "string"}, "to": {"type": "integer", "minimum": 0}}),
+                &["name", "to"],
+            )
+        },
+        run: snapshot_move,
     },
     Tool {
         name: "snapshot_delete",
@@ -1632,20 +1666,20 @@ fn snapshot_restore(context: &Context, arguments: &Value) -> Outcome {
     }
     let reply = bare(ask(
         context,
-        json!({"type": "snapshot.restore", "name": name, "base": list["base"]}),
+        json!({"type": "snapshot.restore", "name": name, "base": list["base"], "transitionMs": arguments.get("transitionMs").cloned().unwrap_or(Value::Null)}),
     )?);
     let summary = restored_summary(&reply, &format!("\"{name}\""));
     Ok((reply, summary))
 }
 
-fn snapshot_undo(context: &Context, _: &Value) -> Outcome {
+fn snapshot_undo(context: &Context, arguments: &Value) -> Outcome {
     let list = ask(context, json!({"type": "snapshot.list"}))?;
     if list["undoValues"].is_object() {
         guard_snapshot(context, &list["undoValues"], "the undo snapshot")?;
     }
     let reply = bare(ask(
         context,
-        json!({"type": "snapshot.undo", "base": list["base"]}),
+        json!({"type": "snapshot.undo", "base": list["base"], "transitionMs": arguments.get("transitionMs").cloned().unwrap_or(Value::Null)}),
     )?);
     let summary = restored_summary(&reply, "the undo snapshot");
     Ok((reply, summary))
@@ -1668,6 +1702,37 @@ fn snapshot_exclude(context: &Context, arguments: &Value) -> Outcome {
         } else {
             "goes into"
         }
+    );
+    Ok((reply, summary))
+}
+
+fn snapshot_transition(context: &Context, arguments: &Value) -> Outcome {
+    let list = ask(context, json!({"type": "snapshot.list"}))?;
+    let reply = bare(ask(
+        context,
+        json!({"type": "snapshot.transition", "ms": arguments["ms"], "base": list["base"]}),
+    )?);
+    let summary = format!("snapshot transition: {} ms", reply["ms"]);
+    Ok((reply, summary))
+}
+
+fn snapshot_move(context: &Context, arguments: &Value) -> Outcome {
+    let list = ask(context, json!({"type": "snapshot.list"}))?;
+    let reply = bare(ask(
+        context,
+        json!({"type": "snapshot.move", "name": text_arg(arguments, "name"), "to": arguments["to"], "base": list["base"]}),
+    )?);
+    let names: Vec<&str> = reply["snapshots"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    let summary = format!(
+        "moved \"{}\" to place {}: {}",
+        reply["name"].as_str().unwrap_or(""),
+        reply["index"],
+        names.join(", ")
     );
     Ok((reply, summary))
 }

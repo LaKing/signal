@@ -32,6 +32,9 @@ pub const SNAPSHOTS_FILE: &str = "snapshots.toml";
 /// The longest name, in characters (Unicode scalar values), after trimming.
 pub const MAX_NAME_CHARS: usize = 64;
 
+/// The longest transition, in milliseconds (ADR 0041 §10).
+pub const MAX_TRANSITION_MS: u32 = 60_000;
+
 /// The file's schema version.
 const SCHEMA_VERSION: i64 = 1;
 
@@ -51,6 +54,83 @@ pub struct Snapshots {
     /// restore (or undo) replaced, apart from the named ones so that no
     /// name can be taken for it.
     pub undo: Option<Values>,
+    /// The person's order of the snapshots (ADR 0041 §9, `order = [...]`):
+    /// the names it lists come first, in its order, then every other name
+    /// in byte order ([`Snapshots::names`]). Holds only names of snapshots
+    /// (a name without one is dropped when read); empty is byte order.
+    pub order: Vec<String>,
+    /// The snapshot transition time (ADR 0041 §10, `transition_ms`): how
+    /// long a restore (or undo) moves each continuous control to its value,
+    /// in milliseconds, 0 to [`MAX_TRANSITION_MS`]; 0 (absent) switches at
+    /// once, as before.
+    pub transition_ms: u32,
+}
+
+impl Snapshots {
+    /// The snapshots' names in the order the list shows them: those
+    /// `order` names, in its order, then the others in byte order.
+    pub fn names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .order
+            .iter()
+            .filter(|n| self.snapshots.contains_key(*n))
+            .cloned()
+            .collect();
+        for name in self.snapshots.keys() {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        names
+    }
+
+    /// Saves `values` as `name`: a new name goes to the end of the order,
+    /// a replaced one keeps its place. Gives whether it replaced one.
+    pub fn insert(&mut self, name: &str, values: Values) -> bool {
+        let replaced = self.snapshots.contains_key(name);
+        if !replaced {
+            let mut order = self.names();
+            order.push(name.to_owned());
+            self.order = order;
+        }
+        self.snapshots.insert(name.to_owned(), values);
+        self.normalise();
+        replaced
+    }
+
+    /// Removes the snapshot `name`, and its place in the order.
+    pub fn remove(&mut self, name: &str) -> Option<Values> {
+        let values = self.snapshots.remove(name)?;
+        self.order.retain(|n| n != name);
+        self.normalise();
+        Some(values)
+    }
+
+    /// Moves the snapshot `name` to place `to` (0-based) in the order; an
+    /// index past the end is the last place. Gives the place it took.
+    pub fn move_to(&mut self, name: &str, to: usize) -> Result<usize, SnapshotError> {
+        if !self.snapshots.contains_key(name) {
+            return Err(SnapshotError::Unknown(name.to_owned()));
+        }
+        let mut order = self.names();
+        order.retain(|n| n != name);
+        let to = to.min(order.len());
+        order.insert(to, name.to_owned());
+        self.order = order;
+        self.normalise();
+        Ok(to)
+    }
+
+    /// `order` as little as says the order: empty when the order is byte
+    /// order, else every name in its place (so the text is canonical).
+    fn normalise(&mut self) {
+        let names = self.names();
+        if names.iter().eq(self.snapshots.keys()) {
+            self.order.clear();
+        } else {
+            self.order = names;
+        }
+    }
 }
 
 /// Why a snapshot was not read, saved, restored or deleted.
@@ -63,6 +143,8 @@ pub enum SnapshotError {
     Unknown(String),
     /// There is no undo snapshot (no restore was made).
     NoUndo,
+    /// A transition time out of its range (0 to [`MAX_TRANSITION_MS`]).
+    BadTransition(u32),
     /// A snapshot has this name already, and overwriting it was not asked.
     Exists(String),
     /// `snapshots.toml` does not read as snapshots (it is never overwritten).
@@ -82,6 +164,7 @@ impl SnapshotError {
         match self {
             SnapshotError::BadName(_) => "bad-value",
             SnapshotError::Unknown(_) | SnapshotError::NoUndo => "unknown-snapshot",
+            SnapshotError::BadTransition(_) => "bad-value",
             SnapshotError::Exists(_) => "exists",
             SnapshotError::Invalid(_) => "does-not-load",
             SnapshotError::Changed(_) => "conflict",
@@ -100,6 +183,10 @@ impl fmt::Display for SnapshotError {
             | SnapshotError::Io(message)
             | SnapshotError::Link(message) => f.write_str(message),
             SnapshotError::Unknown(name) => write!(f, "no snapshot is named \"{name}\""),
+            SnapshotError::BadTransition(ms) => write!(
+                f,
+                "a transition is at most {MAX_TRANSITION_MS} ms ({ms} given)"
+            ),
             SnapshotError::NoUndo => {
                 f.write_str("there is nothing to undo: no restore has been made")
             }
@@ -187,6 +274,7 @@ pub fn parse(text: &str) -> Result<Snapshots, SnapshotError> {
         .map_err(|e: toml_edit::TomlError| invalid(e.to_string().trim_end().to_owned()))?;
     let mut snapshots = Snapshots::default();
     let mut version = None;
+    let mut order: Option<Vec<String>> = None;
     for (key, item) in document.iter() {
         match key {
             "schema_version" => {
@@ -213,6 +301,33 @@ pub fn parse(text: &str) -> Result<Snapshots, SnapshotError> {
                     snapshots.snapshots.insert(checked, read);
                 }
             }
+            "transition_ms" => {
+                snapshots.transition_ms = item
+                    .as_integer()
+                    .and_then(|ms| u32::try_from(ms).ok())
+                    .filter(|ms| *ms <= MAX_TRANSITION_MS)
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "transition_ms must be a whole number of milliseconds from 0 to {MAX_TRANSITION_MS}"
+                        ))
+                    })?;
+            }
+            "order" => {
+                let array = item.as_array().ok_or_else(|| {
+                    invalid("`order` must be an array of snapshot names".to_owned())
+                })?;
+                let mut names = Vec::new();
+                for value in array.iter() {
+                    let name = value.as_str().ok_or_else(|| {
+                        invalid("`order` must be an array of snapshot names".to_owned())
+                    })?;
+                    if names.iter().any(|n: &String| n == name) {
+                        return Err(invalid(format!("`order` names \"{name}\" twice")));
+                    }
+                    names.push(name.to_owned());
+                }
+                order = Some(names);
+            }
             "undo" => {
                 let values = item
                     .as_table_like()
@@ -227,6 +342,14 @@ pub fn parse(text: &str) -> Result<Snapshots, SnapshotError> {
             "schema_version = {SCHEMA_VERSION} is missing"
         )));
     }
+    // A name without a snapshot is left out (and so dropped on the next
+    // write); the order is kept as little as it needs to be.
+    snapshots.order = order
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| snapshots.snapshots.contains_key(n))
+        .collect();
+    snapshots.normalise();
     Ok(snapshots)
 }
 
@@ -261,6 +384,22 @@ fn values_of(values: &dyn toml_edit::TableLike, what: &str) -> Result<Values, Sn
 pub fn render(snapshots: &Snapshots) -> String {
     let mut document = DocumentMut::new();
     document.insert("schema_version", toml_edit::value(SCHEMA_VERSION));
+    // ADR 0041 §10: the transition time, only when it is not 0.
+    if snapshots.transition_ms != 0 {
+        document.insert(
+            "transition_ms",
+            toml_edit::value(i64::from(snapshots.transition_ms)),
+        );
+    }
+    // ADR 0041 §9: the order, only when it is not byte order.
+    let names = snapshots.names();
+    if !names.iter().eq(snapshots.snapshots.keys()) {
+        let mut array = toml_edit::Array::new();
+        for name in &names {
+            array.push(name.as_str());
+        }
+        document.insert("order", toml_edit::value(array));
+    }
     if let Some(undo) = &snapshots.undo {
         let mut table = Table::new();
         table.decor_mut().set_prefix("\n");
@@ -420,12 +559,10 @@ pub fn save(
 ) -> Result<(bool, String, bool), SnapshotError> {
     let name = self::name(name)?;
     edit(dir, check, |snapshots| {
-        let replaced = snapshots.snapshots.contains_key(&name);
-        if replaced && !overwrite {
+        if snapshots.snapshots.contains_key(&name) && !overwrite {
             return Err(SnapshotError::Exists(name.clone()));
         }
-        snapshots.snapshots.insert(name.clone(), values);
-        Ok(replaced)
+        Ok(snapshots.insert(&name, values))
     })
 }
 
@@ -441,10 +578,40 @@ pub fn delete(
     let name = self::name(name)?;
     edit(dir, check, |snapshots| {
         snapshots
-            .snapshots
             .remove(&name)
             .ok_or(SnapshotError::Unknown(name.clone()))
     })
+}
+
+/// Sets the snapshot transition time of `dir` to `ms` ([`edit`], ADR 0041
+/// §10): refused (`bad-value`) above [`MAX_TRANSITION_MS`]. Gives the file's
+/// text and whether it wrote.
+pub fn set_transition(
+    dir: &Path,
+    ms: u32,
+    check: impl FnOnce(Option<&str>) -> Result<(), SnapshotError>,
+) -> Result<(String, bool), SnapshotError> {
+    if ms > MAX_TRANSITION_MS {
+        return Err(SnapshotError::BadTransition(ms));
+    }
+    let ((), text, wrote) = edit(dir, check, |all| {
+        all.transition_ms = ms;
+        Ok(())
+    })?;
+    Ok((text, wrote))
+}
+
+/// Moves the snapshot `name` of `dir` to place `to` (0-based; past the end:
+/// the last place) in the order ([`edit`], ADR 0041 §9). Gives the place it
+/// took, then the file's text and whether it wrote.
+pub fn move_to(
+    dir: &Path,
+    name: &str,
+    to: usize,
+    check: impl FnOnce(Option<&str>) -> Result<(), SnapshotError>,
+) -> Result<(usize, String, bool), SnapshotError> {
+    let name = self::name(name)?;
+    edit(dir, check, |snapshots| snapshots.move_to(&name, to))
 }
 
 #[cfg(test)]
@@ -525,6 +692,84 @@ mod tests {
         assert_eq!(
             back.snapshots["chorus"]["/out.gain"].to_bits(),
             (-0.0f64).to_bits()
+        );
+    }
+
+    #[test]
+    fn the_order_is_text_and_canonical() {
+        let mut all = Snapshots::default();
+        for name in ["b", "a", "c"] {
+            all.insert(name, Values::new());
+        }
+        assert_eq!(all.names(), ["b", "a", "c"], "each new one at the end");
+        let text = render(&all);
+        assert!(
+            text.contains("schema_version = 1\norder = [\"b\", \"a\", \"c\"]\n"),
+            "{text}"
+        );
+        let back = parse(&text).unwrap();
+        assert_eq!(back, all);
+        assert_eq!(render(&back), text, "byte-stable");
+        // Overwriting keeps the place; a move; back to byte order: no key.
+        all.insert("a", Values::from([("/x.y".to_owned(), 1.0)]));
+        assert_eq!(all.names(), ["b", "a", "c"]);
+        assert_eq!(all.move_to("b", 1).unwrap(), 1);
+        assert_eq!(all.names(), ["a", "b", "c"]);
+        assert!(!render(&all).contains("order"), "byte order needs no key");
+        assert_eq!(all.move_to("a", 99).unwrap(), 2, "past the end: last");
+        assert_eq!(all.names(), ["b", "c", "a"]);
+        all.remove("c");
+        assert_eq!(all.names(), ["b", "a"]);
+        assert!(matches!(
+            all.move_to("zz", 0),
+            Err(SnapshotError::Unknown(_))
+        ));
+        // Read: a stale name dropped, the others after the listed ones.
+        let read = parse(
+            "schema_version = 1\norder = [\"c\", \"gone\"]\n[snapshots.a]\n[snapshots.b]\n[snapshots.c]\n",
+        )
+        .unwrap();
+        assert_eq!(read.names(), ["c", "a", "b"]);
+        assert!(!render(&read).contains("gone"));
+        assert!(matches!(
+            parse("schema_version = 1\norder = [\"a\", \"a\"]\n[snapshots.a]\n"),
+            Err(SnapshotError::Invalid(_))
+        ));
+        assert!(matches!(
+            parse("schema_version = 1\norder = \"a\"\n"),
+            Err(SnapshotError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn the_transition_time_is_text() {
+        let mut all = Snapshots::default();
+        all.insert("a", Values::new());
+        all.transition_ms = 2000;
+        let text = render(&all);
+        assert!(
+            text.contains("schema_version = 1\ntransition_ms = 2000\n"),
+            "{text}"
+        );
+        let back = parse(&text).unwrap();
+        assert_eq!(back, all);
+        assert_eq!(render(&back), text, "byte-stable");
+        all.transition_ms = 0;
+        assert!(!render(&all).contains("transition_ms"), "0 is no key");
+        for bad in ["-1", "60001", "1.5", "\"fast\""] {
+            assert!(
+                matches!(
+                    parse(&format!("schema_version = 1\ntransition_ms = {bad}\n")),
+                    Err(SnapshotError::Invalid(_))
+                ),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            parse("schema_version = 1\ntransition_ms = 60000\n")
+                .unwrap()
+                .transition_ms,
+            60_000
         );
     }
 

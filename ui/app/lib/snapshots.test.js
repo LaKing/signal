@@ -4,6 +4,19 @@ import {
   MAX_NAME,
   countText,
   deleteMessage,
+  autoScroll,
+  dragDrop,
+  dragOver,
+  dragStart,
+  dropIndex,
+  dropTarget,
+  dropsAfter,
+  keyMove,
+  moveMessage,
+  transitionMessage,
+  transitionOf,
+  transitionText,
+  transitionValue,
   deletePrompt,
   deletedText,
   entries,
@@ -130,4 +143,74 @@ test('undo restore and the in-snapshots property', () => {
   const kept = restoredText({ name: 'A', restored: 1, written: [], sent: true, skipped: [{ address: '/transport.run', reason: 'excluded' }], clamped: [] });
   assert.equal(kept.warn, false, 'an excluded control is no problem');
   assert.match(kept.text, /left \/transport\.run alone \(not in snapshots\)/);
+});
+
+// The owner's request of 2026-10-25 (ADR 0041 §9): the list's order by drag and drop, or Alt+Arrow.
+test('moving a snapshot in the list', () => {
+  assert.deepEqual(moveMessage('Bridge', 0, 'ab12'), { type: 'snapshot.move', name: 'Bridge', to: 0, base: 'ab12' });
+  assert.deepEqual(moveMessage('Bridge', 2), { type: 'snapshot.move', name: 'Bridge', to: 2 });
+  // The keys: one place, never past an edge.
+  assert.equal(keyMove('snapshot_list.move_up', 1, 3), 0);
+  assert.equal(keyMove('snapshot_list.move_up', 0, 3), null);
+  assert.equal(keyMove('snapshot_list.move_down', 1, 3), 2);
+  assert.equal(keyMove('snapshot_list.move_down', 2, 3), null);
+  assert.equal(keyMove('view.page_down', 1, 3), null);
+  // Drag and drop: before or after the row under the pointer.
+  assert.equal(dropsAfter(4, 30), false);
+  assert.equal(dropsAfter(15, 30), true);
+  assert.equal(dropIndex(2, 0, false), 0, 'the last before the first');
+  assert.equal(dropIndex(0, 2, true), 2, 'the first after the last');
+  assert.equal(dropIndex(0, 1, true), 1);
+  assert.equal(dropIndex(0, 2, false), 1, 'before the third: second place');
+  assert.equal(dropIndex(1, 1, false), null, 'onto itself');
+  assert.equal(dropIndex(1, 0, true), null, 'just after the row above: where it is');
+  assert.equal(dropIndex(1, 2, false), null, 'just before the row below: where it is');
+});
+
+// The owner's request of 2026-10-25 (ADR 0041 §10): a snapshot transition time.
+test('the Transition field', () => {
+  assert.deepEqual(transitionValue('2000'), { ms: 2000 });
+  assert.deepEqual(transitionValue(' 0 '), { ms: 0 });
+  assert.deepEqual(transitionValue(''), { ms: 0 }, 'empty: none');
+  assert.deepEqual(transitionValue('60000'), { ms: 60000 });
+  assert.match(transitionValue('60001').error, /at most 60000 ms/);
+  assert.ok(transitionValue('1.5').error, 'whole milliseconds');
+  assert.ok(transitionValue('-5').error);
+  assert.ok(transitionValue('fast').error);
+  assert.deepEqual(transitionMessage(2000, 'ab12'), { type: 'snapshot.transition', ms: 2000, base: 'ab12' });
+  assert.deepEqual(transitionMessage(0), { type: 'snapshot.transition', ms: 0 });
+  assert.equal(transitionOf({ transitionMs: 1500 }), 1500);
+  assert.equal(transitionOf({}), 0, 'an older server');
+  assert.equal(transitionOf(null), 0);
+  assert.equal(transitionText(0), 'Restores switch at once (no transition).');
+  assert.match(transitionText(2000), /over 2000 ms/);
+});
+
+// Review of 2026-10-25: a drag by pointer events from the handle (Signal.app's WebView passes no HTML5 drop).
+test('dragging a row by its handle', () => {
+  const rects = [
+    { top: 100, bottom: 130 },
+    { top: 130, bottom: 160 },
+    { top: 160, bottom: 190 },
+  ];
+  assert.deepEqual(dropTarget(rects, 104), { over: 0, after: false });
+  assert.deepEqual(dropTarget(rects, 150), { over: 1, after: true });
+  assert.deepEqual(dropTarget(rects, 50), { over: 0, after: false }, 'above all: before the first');
+  assert.deepEqual(dropTarget(rects, 400), { over: 2, after: true }, 'below all: after the last');
+  assert.equal(dropTarget([], 10), null);
+  assert.equal(autoScroll(300, 0, 600), 0);
+  assert.ok(autoScroll(5, 0, 600) < 0, 'near the top: up');
+  assert.ok(autoScroll(595, 0, 600) > 0, 'near the bottom: down');
+  assert.equal(autoScroll(-50, 0, 600), -20, 'at most 20 px');
+  const list = { base: 'b1', snapshots: [{ name: 'Verse A' }, { name: 'chorus' }, { name: 'Bridge' }] };
+  let drag = dragStart(list, 'Bridge');
+  assert.deepEqual(drag, { name: 'Bridge', base: 'b1', from: 2, target: null });
+  assert.equal(dragDrop(drag, list), null, 'no move yet');
+  drag = dragOver(drag, rects, 104);
+  assert.deepEqual(dragDrop(drag, list), { type: 'snapshot.move', name: 'Bridge', to: 0, base: 'b1' });
+  assert.equal(dragDrop(dragOver(drag, rects, 185), list), null, 'back onto its own place');
+  // A push during the drag: the drag is let go, never the wrong snapshot moved.
+  assert.equal(dragDrop(drag, { ...list, base: 'b2' }), null);
+  assert.equal(dragDrop(drag, { base: 'b1', snapshots: [{ name: 'Bridge' }, { name: 'Verse A' }, { name: 'chorus' }] }), null);
+  assert.equal(dragStart(list, 'gone'), null);
 });
