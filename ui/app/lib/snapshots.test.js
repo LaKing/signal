@@ -8,6 +8,10 @@ import {
   dropsAfter,
   keyMove,
   moveMessage,
+  transitionMessage,
+  transitionOf,
+  transitionText,
+  transitionValue,
   deletePrompt,
   deletedText,
   entries,
@@ -156,4 +160,23 @@ test('moving a snapshot in the list', () => {
   assert.equal(dropIndex(1, 1, false), null, 'onto itself');
   assert.equal(dropIndex(1, 0, true), null, 'just after the row above: where it is');
   assert.equal(dropIndex(1, 2, false), null, 'just before the row below: where it is');
+});
+
+// The owner's request of 2026-10-25 (ADR 0041 §10): a snapshot transition time.
+test('the Transition field', () => {
+  assert.deepEqual(transitionValue('2000'), { ms: 2000 });
+  assert.deepEqual(transitionValue(' 0 '), { ms: 0 });
+  assert.deepEqual(transitionValue(''), { ms: 0 }, 'empty: none');
+  assert.deepEqual(transitionValue('60000'), { ms: 60000 });
+  assert.match(transitionValue('60001').error, /at most 60000 ms/);
+  assert.ok(transitionValue('1.5').error, 'whole milliseconds');
+  assert.ok(transitionValue('-5').error);
+  assert.ok(transitionValue('fast').error);
+  assert.deepEqual(transitionMessage(2000, 'ab12'), { type: 'snapshot.transition', ms: 2000, base: 'ab12' });
+  assert.deepEqual(transitionMessage(0), { type: 'snapshot.transition', ms: 0 });
+  assert.equal(transitionOf({ transitionMs: 1500 }), 1500);
+  assert.equal(transitionOf({}), 0, 'an older server');
+  assert.equal(transitionOf(null), 0);
+  assert.equal(transitionText(0), 'Restores switch at once (no transition).');
+  assert.match(transitionText(2000), /over 2000 ms/);
 });

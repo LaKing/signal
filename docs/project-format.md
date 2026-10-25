@@ -501,6 +501,7 @@ A **snapshot** (`00-vision.md` §3a: a Preset or Snapshot) is the value of every
 # Snapshots: parameter values under a name (docs/project-format.md §16).
 # Signal writes this file whole; comments are not kept.
 schema_version = 1
+transition_ms = 500
 order = ["chorus", "Verse A"]
 
 [undo]
@@ -520,6 +521,7 @@ order = ["chorus", "Verse A"]
 |---|---|
 | `schema_version` | `1`; required once the file has a snapshot |
 | `snapshots."<name>"` | One snapshot. The name is any text, 1 to 64 characters (Unicode scalar values) with no space around it, no control or format character (category Cf), no U+2028 or U+2029, and not only blank characters; it is a TOML key, quoted when it needs it. Names are exact and not normalised (`Chorus` ≠ `chorus`; a composed and a decomposed `é` are two names) |
+| `transition_ms` | The snapshot transition time (optional, ADR 0041 §10): a whole number of milliseconds from 0 to 60000. A restore or undo in Signal moves each continuous control to its value over it (a stepped one switches at the start); 0 or absent switches at once. Written only when not 0 |
 | `order` | The list's order (optional, ADR 0041 §9): an array of snapshot names. The names it lists come first, in its order, then every other snapshot in byte order. Signal writes it only when the order is not byte order, with every name; a name without a snapshot is ignored and dropped on the next write; a name twice is an error |
 | `undo` | The **undo snapshot** (optional): the values the last restore (or undo) replaced, a table of values as a snapshot's. It is apart from the named snapshots, so no name is reserved and none can collide with it |
 | `"/<instance>.<parameter>" = <number>` | One value: the parameter's full address, as the UI protocol and `signal mcp` name a control, and a finite number (an integer or a float) |

@@ -32,6 +32,9 @@ pub const SNAPSHOTS_FILE: &str = "snapshots.toml";
 /// The longest name, in characters (Unicode scalar values), after trimming.
 pub const MAX_NAME_CHARS: usize = 64;
 
+/// The longest transition, in milliseconds (ADR 0041 §10).
+pub const MAX_TRANSITION_MS: u32 = 60_000;
+
 /// The file's schema version.
 const SCHEMA_VERSION: i64 = 1;
 
@@ -56,6 +59,11 @@ pub struct Snapshots {
     /// in byte order ([`Snapshots::names`]). Holds only names of snapshots
     /// (a name without one is dropped when read); empty is byte order.
     pub order: Vec<String>,
+    /// The snapshot transition time (ADR 0041 §10, `transition_ms`): how
+    /// long a restore (or undo) moves each continuous control to its value,
+    /// in milliseconds, 0 to [`MAX_TRANSITION_MS`]; 0 (absent) switches at
+    /// once, as before.
+    pub transition_ms: u32,
 }
 
 impl Snapshots {
@@ -286,6 +294,17 @@ pub fn parse(text: &str) -> Result<Snapshots, SnapshotError> {
                     snapshots.snapshots.insert(checked, read);
                 }
             }
+            "transition_ms" => {
+                snapshots.transition_ms = item
+                    .as_integer()
+                    .and_then(|ms| u32::try_from(ms).ok())
+                    .filter(|ms| *ms <= MAX_TRANSITION_MS)
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "transition_ms must be a whole number of milliseconds from 0 to {MAX_TRANSITION_MS}"
+                        ))
+                    })?;
+            }
             "order" => {
                 let array = item.as_array().ok_or_else(|| {
                     invalid("`order` must be an array of snapshot names".to_owned())
@@ -358,6 +377,13 @@ fn values_of(values: &dyn toml_edit::TableLike, what: &str) -> Result<Values, Sn
 pub fn render(snapshots: &Snapshots) -> String {
     let mut document = DocumentMut::new();
     document.insert("schema_version", toml_edit::value(SCHEMA_VERSION));
+    // ADR 0041 §10: the transition time, only when it is not 0.
+    if snapshots.transition_ms != 0 {
+        document.insert(
+            "transition_ms",
+            toml_edit::value(i64::from(snapshots.transition_ms)),
+        );
+    }
     // ADR 0041 §9: the order, only when it is not byte order.
     let names = snapshots.names();
     if !names.iter().eq(snapshots.snapshots.keys()) {
@@ -550,6 +576,26 @@ pub fn delete(
     })
 }
 
+/// Sets the snapshot transition time of `dir` to `ms` ([`edit`], ADR 0041
+/// §10): refused (`bad-value`) above [`MAX_TRANSITION_MS`]. Gives the file's
+/// text and whether it wrote.
+pub fn set_transition(
+    dir: &Path,
+    ms: u32,
+    check: impl FnOnce(Option<&str>) -> Result<(), SnapshotError>,
+) -> Result<(String, bool), SnapshotError> {
+    if ms > MAX_TRANSITION_MS {
+        return Err(SnapshotError::BadName(format!(
+            "a transition is at most {MAX_TRANSITION_MS} ms ({ms} given)"
+        )));
+    }
+    let ((), text, wrote) = edit(dir, check, |all| {
+        all.transition_ms = ms;
+        Ok(())
+    })?;
+    Ok((text, wrote))
+}
+
 /// Moves the snapshot `name` of `dir` to place `to` (0-based; past the end:
 /// the last place) in the order ([`edit`], ADR 0041 §9). Gives the place it
 /// took, then the file's text and whether it wrote.
@@ -688,6 +734,38 @@ mod tests {
             parse("schema_version = 1\norder = \"a\"\n"),
             Err(SnapshotError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn the_transition_time_is_text() {
+        let mut all = Snapshots::default();
+        all.insert("a", Values::new());
+        all.transition_ms = 2000;
+        let text = render(&all);
+        assert!(
+            text.contains("schema_version = 1\ntransition_ms = 2000\n"),
+            "{text}"
+        );
+        let back = parse(&text).unwrap();
+        assert_eq!(back, all);
+        assert_eq!(render(&back), text, "byte-stable");
+        all.transition_ms = 0;
+        assert!(!render(&all).contains("transition_ms"), "0 is no key");
+        for bad in ["-1", "60001", "1.5", "\"fast\""] {
+            assert!(
+                matches!(
+                    parse(&format!("schema_version = 1\ntransition_ms = {bad}\n")),
+                    Err(SnapshotError::Invalid(_))
+                ),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            parse("schema_version = 1\ntransition_ms = 60000\n")
+                .unwrap()
+                .transition_ms,
+            60_000
+        );
     }
 
     #[test]

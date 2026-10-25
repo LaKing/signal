@@ -84,6 +84,37 @@ export function undoneText(reply) {
   return { text: `${text.replace(/^Restored “the state before the last restore”/, 'Undid the last restore')} Undo again to redo it.`, warn };
 }
 
+/** The longest snapshot transition, in ms (the server's rule, ADR 0041 §10). */
+export const MAX_TRANSITION_MS = 60000;
+
+/**
+ * The Transition field's text as the server takes it: a whole number of
+ * milliseconds from 0 to 60000 (empty: 0). `{ ms }`, or `{ error }`.
+ */
+export function transitionValue(raw) {
+  const text = String(raw ?? '').trim();
+  if (!text) return { ms: 0 };
+  if (!/^\d+$/.test(text)) return { error: 'The transition is a whole number of milliseconds.' };
+  const ms = Number(text);
+  if (ms > MAX_TRANSITION_MS) return { error: `The transition is at most ${MAX_TRANSITION_MS} ms.` };
+  return { ms };
+}
+
+/** `snapshot.transition` (ADR 0041 §10): the project's snapshot transition time, as listed (`base`). */
+export function transitionMessage(ms, base) {
+  return { type: 'snapshot.transition', ms, ...(base === undefined ? {} : { base }) };
+}
+
+/** The list's transition time (0 from an older server). */
+export function transitionOf(list) {
+  return Number.isInteger(list?.transitionMs) ? list.transitionMs : 0;
+}
+
+/** The card's line after the transition time was set. */
+export function transitionText(ms) {
+  return ms === 0 ? 'Restores switch at once (no transition).' : `Restores move over ${ms} ms (stepped controls switch at the start).`;
+}
+
 /** `snapshot.move` (ADR 0041 §9): `name` to place `to` (0-based), as listed (`base`). */
 export function moveMessage(name, to, base) {
   return { type: 'snapshot.move', name, to, ...(base === undefined ? {} : { base }) };

@@ -70,6 +70,15 @@ enum Action {
         /// Its new place, from 0.
         index: usize,
     },
+    /// Set the snapshot transition time (ADR 0041 §10): how long a restore
+    /// in Signal moves each control to its value, in ms (0 to 60000; 0: at
+    /// once). A restore here writes the files only, so it has no ramp.
+    Transition {
+        /// The project folder.
+        project: PathBuf,
+        /// Milliseconds, 0 to 60000.
+        ms: u32,
+    },
     /// Delete a snapshot.
     Delete {
         /// The project folder.
@@ -178,6 +187,7 @@ pub(crate) fn run(args: &SnapshotArgs, registry: &Registry, json: bool) -> Resul
                         "snapshots": list,
                         "undo": all.undo.is_some(),
                         "undoCount": all.undo.as_ref().map_or(0, |u| u.len()),
+                        "transitionMs": all.transition_ms,
                     })
                     .to_string(),
                 );
@@ -185,6 +195,9 @@ pub(crate) fn run(args: &SnapshotArgs, registry: &Registry, json: bool) -> Resul
                 for name in all.names() {
                     let count = all.snapshots.get(&name).map_or(0, |v| v.len());
                     print_stdout(&format!("{name} ({count} values)"));
+                }
+                if all.transition_ms != 0 {
+                    print_stdout(&format!("(transition: {} ms)", all.transition_ms));
                 }
                 if let Some(undo) = &all.undo {
                     print_stdout(&format!(
@@ -249,6 +262,15 @@ pub(crate) fn run(args: &SnapshotArgs, registry: &Registry, json: bool) -> Resul
                     "moved \"{name}\" to place {to}: {}",
                     order.join(", ")
                 ));
+            }
+            Ok(())
+        }
+        Action::Transition { project, ms } => {
+            let (_, wrote) = snapshot::set_transition(project, *ms, |_| Ok(())).map_err(failure)?;
+            if json {
+                print_stdout(&json!({"transitionMs": ms, "written": wrote}).to_string());
+            } else {
+                print_stdout(&format!("snapshot transition: {ms} ms"));
             }
             Ok(())
         }

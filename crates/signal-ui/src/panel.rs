@@ -80,6 +80,30 @@ struct Row {
     ports: Vec<PortAddress>,
     /// Each port's own value without this parameter in `project.toml`.
     defaults: Vec<f64>,
+    /// Whether a port it sets is stepped ([`stepped`]).
+    stepped: bool,
+}
+
+/// Whether a parameter is stepped, so a snapshot transition (ADR 0041 §10)
+/// switches it at once instead of moving it through the values between:
+/// a gate or trigger, or a value of no kind (`Generic`) whose range ends
+/// and default are whole numbers at least 2 apart (a mode, a count, a
+/// selector: `ppq`, a filter's `mode`, an oscillator's `shape`). The
+/// descriptor marks no parameter as stepped, so this is the rule; a
+/// restore also needs both the value playing and the target to be whole.
+pub fn stepped(d: &ParameterDescriptor) -> bool {
+    use signal_core::PortKind;
+    let whole = |v: f64| v.is_finite() && v.fract() == 0.0;
+    match d.kind {
+        PortKind::Gate | PortKind::Trigger => true,
+        PortKind::Generic => {
+            whole(d.range.min)
+                && whole(d.range.max)
+                && whole(d.default)
+                && d.range.max - d.range.min >= 2.0
+        }
+        _ => false,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -181,6 +205,7 @@ impl Panel {
                 let file = def.parameters.get(name).copied();
                 let ports: Vec<PortAddress> = targets.iter().map(|t| t.0.clone()).collect();
                 let defaults = targets.iter().map(|t| t.2.unwrap_or(t.1.default)).collect();
+                let is_stepped = targets.iter().any(|t| stepped(&t.1));
                 instance.parameters.push(Row {
                     view: ParameterView {
                         name: name.clone(),
@@ -197,6 +222,7 @@ impl Panel {
                     },
                     ports,
                     defaults,
+                    stepped: is_stepped,
                 });
             }
             instance.order = names;
@@ -226,6 +252,7 @@ impl Panel {
             min: row.view.min,
             max: row.view.max,
             order: i.order.clone(),
+            stepped: row.stepped,
         })
     }
 
@@ -368,6 +395,9 @@ pub struct Target {
     pub max: f64,
     /// The module's parameters in declared order.
     pub order: Vec<String>,
+    /// Whether a port it sets is stepped ([`stepped`]): a snapshot
+    /// transition switches it at once.
+    pub stepped: bool,
 }
 
 impl Target {
@@ -483,6 +513,7 @@ fn inner(plan: &ExecutionPlan, address: &InstanceAddress) -> Vec<Row> {
                 },
                 ports: vec![port],
                 defaults: vec![p.default],
+                stepped: stepped(p),
             });
         }
     }

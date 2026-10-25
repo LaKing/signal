@@ -1065,7 +1065,170 @@ fn snapshots_are_moved_into_the_order(transport: Transport) {
     rig.finish();
 }
 
+/// The tone project with a stepped control: `std.osc`'s `shape` (no kind,
+/// whole range 0 to 3).
+fn stepped_rig(name: &str, transport: Transport) -> Rig {
+    let dir = std::env::temp_dir().join(format!(
+        "signal-ui-stepped-source-{name}-{transport:?}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("project.toml"),
+        common::TONE.replace(
+            "[wiring]",
+            "sh = { module = \"std.osc\", shape = 1 }\n\n[wiring]",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        dir.join(SNAPSHOTS_FILE),
+        "schema_version = 1\n\n[snapshots.target]\n\"/a.freq\" = 330\n\"/sh.shape\" = 3\n\n[snapshots.back]\n\"/a.freq\" = 440\n",
+    )
+    .unwrap();
+    rig(
+        name,
+        Options {
+            transport,
+            project: Some(dir),
+            ..Options::default()
+        },
+    )
+}
+
+/// Parameter frames of `sub` (first frame, bases) until `done` accepts one,
+/// collected in order.
+fn samples(
+    rig: &mut Rig,
+    ws: &mut Ws,
+    sub: u64,
+    done: impl Fn(&[f64]) -> bool,
+) -> Vec<(u64, Vec<f64>)> {
+    let mut got = Vec::new();
+    rig.wait(ws, "the end of the ramp", |message| {
+        let frame = message.frame(3, sub)?;
+        let bases: Vec<f64> = frame.f64s().chunks(2).map(|c| c[0]).collect();
+        let end = done(&bases);
+        got.push((frame.first, bases));
+        end.then_some(())
+    });
+    got
+}
+
+/// ADR 0041 §10 (the owner's request of 2026-10-25): with a transition
+/// time, a restore moves each continuous control to its value along a
+/// linear ramp of that length, a stepped one switches at the start, and the
+/// file holds the targets at once.
+fn a_restore_moves_over_the_transition(transport: Transport) {
+    let mut rig = stepped_rig("snapshot-transition", transport);
+    let (mut ws, _) = rig.client();
+    let set = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "snapshot.transition", "ms": 2000}),
+        "snapshot.transition",
+    );
+    assert_eq!(set["ms"], 2000);
+    assert!(
+        fs::read_to_string(rig.dir.join(SNAPSHOTS_FILE))
+            .unwrap()
+            .contains("transition_ms = 2000\n")
+    );
+    let sub = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "subscribe", "stream": "parameters", "addresses": ["/a.freq", "/sh.shape"], "rate": 60}),
+        "subscribed",
+    )["sub"]
+        .as_u64()
+        .unwrap();
+    let restored = rig.request(
+        &mut ws,
+        3,
+        json!({"type": "snapshot.restore", "name": "target"}),
+        "snapshot.restored",
+    );
+    assert_eq!(restored["transitionMs"], 2000);
+    let text = fs::read_to_string(rig.dir.join("project.toml")).unwrap();
+    assert!(text.contains("freq = 330"), "the target at once: {text}");
+    assert!(text.contains("shape = 3"), "{text}");
+    let got = samples(&mut rig, &mut ws, sub, |b| b[0] == 330.0);
+    let moving: Vec<&(u64, Vec<f64>)> = got
+        .iter()
+        .filter(|(_, b)| b[0] < 440.0 && b[0] > 330.0)
+        .collect();
+    assert!(moving.len() >= 2, "a ramp, not a step: {got:?}");
+    for (_, b) in &moving {
+        assert_eq!(b[1], 3.0, "the stepped control switched at the start");
+    }
+    // The ramp's slope: 110 Hz over 2000 ms at 48 kHz.
+    let (f0, b0) = moving.first().unwrap();
+    let (f1, b1) = moving.last().unwrap();
+    if f1 > f0 {
+        let slope = (b0[0] - b1[0]) / (*f1 - *f0) as f64;
+        let expected = 110.0 / 96_000.0;
+        assert!(
+            (slope - expected).abs() < expected * 0.25,
+            "slope {slope}, expected {expected}: {got:?}"
+        );
+    }
+    rig.finish();
+}
+
+/// A restore during a transition starts each ramp from where the running
+/// one is: no step back to the old value or on to the new one.
+fn a_restore_mid_transition_starts_where_the_ramp_is(transport: Transport) {
+    let mut rig = stepped_rig("snapshot-transition-mid", transport);
+    let (mut ws, _) = rig.client();
+    rig.request(
+        &mut ws,
+        1,
+        json!({"type": "snapshot.transition", "ms": 2000}),
+        "snapshot.transition",
+    );
+    let sub = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "subscribe", "stream": "parameters", "addresses": ["/a.freq"], "rate": 60}),
+        "subscribed",
+    )["sub"]
+        .as_u64()
+        .unwrap();
+    rig.request(
+        &mut ws,
+        3,
+        json!({"type": "snapshot.restore", "name": "target"}),
+        "snapshot.restored",
+    );
+    // Halfway down, the other way.
+    let before = samples(&mut rig, &mut ws, sub, |b| b[0] < 400.0);
+    let (last_frame, last) = before.last().cloned().unwrap();
+    assert!(last[0] > 330.0, "{before:?}");
+    rig.request(
+        &mut ws,
+        4,
+        json!({"type": "snapshot.restore", "name": "back"}),
+        "snapshot.restored",
+    );
+    let after = samples(&mut rig, &mut ws, sub, |b| b[0] == 440.0);
+    let rate = 110.0 / 96_000.0;
+    let mut previous = (last_frame, last[0]);
+    for (frame, b) in &after {
+        let most = rate * frame.saturating_sub(previous.0) as f64 * 1.5 + 1.0;
+        assert!(
+            (b[0] - previous.1).abs() <= most,
+            "a step from {previous:?} to {} at {frame}: {after:?}",
+            b[0]
+        );
+        previous = (*frame, b[0]);
+    }
+    rig.finish();
+}
+
 both!(
+    a_restore_moves_over_the_transition,
+    a_restore_mid_transition_starts_where_the_ramp_is,
     snapshots_are_moved_into_the_order,
     an_exclude_with_includes_updates_the_panel,
     a_stale_exclusion_can_be_removed,

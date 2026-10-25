@@ -46,6 +46,10 @@ import {
   dropsAfter,
   keyMove,
   moveMessage,
+  transitionMessage,
+  transitionOf,
+  transitionText,
+  transitionValue,
   excludeMessage,
   hasUndo,
   undoMessage,
@@ -714,6 +718,18 @@ export class SignalAppSnapshots extends AppElement {
       this.undo = el('button', { type: 'button', className: 'snapshot-undo', textContent: 'Undo restore', title: 'Put back the values the last restore replaced (again: redo it)' });
       this.undo.addEventListener('click', () => this.undoRestore());
       form.append(this.undo);
+      // ADR 0041 §10: the project's snapshot transition time, written on Enter or when the field is left.
+      this.transition = el('input', { name: 'transition', type: 'text', inputMode: 'numeric', size: 6, spellcheck: false, value: '0' });
+      this.transition.setAttribute('aria-label', 'Snapshot transition time in milliseconds');
+      const transitionLabel = el('label', { className: 'snapshot-transition', title: 'How long a restore moves each control to its value; stepped controls switch at the start; 0: at once' }, 'Transition ', this.transition, ' ms');
+      this.transition.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          this.setTransition();
+        }
+      });
+      this.transition.addEventListener('change', () => this.setTransition());
+      form.append(transitionLabel);
       this.rows = el('ul', { className: 'snapshots' });
       this.line = el('div', { className: 'snapshot-line line', role: 'status' });
       this.prompt = el('dialog', { className: 'prompt' });
@@ -757,6 +773,7 @@ export class SignalAppSnapshots extends AppElement {
   }
 
   draw() {
+    if (document.activeElement !== this.transition) this.transition.value = String(transitionOf(this.list));
     // Its place is kept whether or not there is something to undo ("Stable layout").
     this.undo.style.visibility = hasUndo(this.list) ? 'visible' : 'hidden';
     const rows = entries(this.list);
@@ -860,6 +877,22 @@ export class SignalAppSnapshots extends AppElement {
       const reply = await this.request(restoreMessage(name, this.list?.base ?? undefined));
       const { text, warn } = restoredText(reply);
       this.say(text, warn);
+    } catch (refusal) {
+      this.refused(refusal);
+    }
+  }
+
+  /** Writes the Transition field's value, if it changed (`snapshot.transition`). */
+  async setTransition() {
+    const { ms, error } = transitionValue(this.transition.value);
+    if (error) {
+      this.say(error, true);
+      return;
+    }
+    if (ms === transitionOf(this.list)) return;
+    try {
+      const reply = await this.request(transitionMessage(ms, this.list?.base ?? undefined));
+      this.say(transitionText(reply.ms));
     } catch (refusal) {
       this.refused(refusal);
     }
