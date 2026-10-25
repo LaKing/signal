@@ -1130,6 +1130,21 @@ fn a_restore_moves_over_the_transition(transport: Transport) {
         "snapshot.transition",
     );
     assert_eq!(set["ms"], 2000);
+    // One documented key per message, in range.
+    for (id, bad) in [
+        (
+            20,
+            json!({"type": "snapshot.transition", "transitionMs": 5}),
+        ),
+        (21, json!({"type": "snapshot.transition", "ms": 60001})),
+        (
+            22,
+            json!({"type": "snapshot.restore", "name": "target", "transitionMs": -1}),
+        ),
+    ] {
+        let refused = rig.request(&mut ws, id, bad.clone(), "error");
+        assert_eq!(refused["code"], "bad-value", "{bad}");
+    }
     assert!(
         fs::read_to_string(rig.dir.join(SNAPSHOTS_FILE))
             .unwrap()

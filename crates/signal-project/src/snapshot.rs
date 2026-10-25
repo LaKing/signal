@@ -143,6 +143,8 @@ pub enum SnapshotError {
     Unknown(String),
     /// There is no undo snapshot (no restore was made).
     NoUndo,
+    /// A transition time out of its range (0 to [`MAX_TRANSITION_MS`]).
+    BadTransition(u32),
     /// A snapshot has this name already, and overwriting it was not asked.
     Exists(String),
     /// `snapshots.toml` does not read as snapshots (it is never overwritten).
@@ -162,6 +164,7 @@ impl SnapshotError {
         match self {
             SnapshotError::BadName(_) => "bad-value",
             SnapshotError::Unknown(_) | SnapshotError::NoUndo => "unknown-snapshot",
+            SnapshotError::BadTransition(_) => "bad-value",
             SnapshotError::Exists(_) => "exists",
             SnapshotError::Invalid(_) => "does-not-load",
             SnapshotError::Changed(_) => "conflict",
@@ -180,6 +183,10 @@ impl fmt::Display for SnapshotError {
             | SnapshotError::Io(message)
             | SnapshotError::Link(message) => f.write_str(message),
             SnapshotError::Unknown(name) => write!(f, "no snapshot is named \"{name}\""),
+            SnapshotError::BadTransition(ms) => write!(
+                f,
+                "a transition is at most {MAX_TRANSITION_MS} ms ({ms} given)"
+            ),
             SnapshotError::NoUndo => {
                 f.write_str("there is nothing to undo: no restore has been made")
             }
@@ -585,9 +592,7 @@ pub fn set_transition(
     check: impl FnOnce(Option<&str>) -> Result<(), SnapshotError>,
 ) -> Result<(String, bool), SnapshotError> {
     if ms > MAX_TRANSITION_MS {
-        return Err(SnapshotError::BadName(format!(
-            "a transition is at most {MAX_TRANSITION_MS} ms ({ms} given)"
-        )));
+        return Err(SnapshotError::BadTransition(ms));
     }
     let ((), text, wrote) = edit(dir, check, |all| {
         all.transition_ms = ms;

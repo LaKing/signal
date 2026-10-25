@@ -104,7 +104,8 @@ fn failure(error: SnapshotError) -> Failure {
         SnapshotError::BadName(_)
         | SnapshotError::Unknown(_)
         | SnapshotError::Exists(_)
-        | SnapshotError::NoUndo => Failure::Usage(error.to_string()),
+        | SnapshotError::NoUndo
+        | SnapshotError::BadTransition(_) => Failure::Usage(error.to_string()),
         _ => Failure::Io(error.to_string()),
     }
 }

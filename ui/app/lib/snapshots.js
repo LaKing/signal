@@ -140,6 +140,56 @@ export function dropsAfter(offsetY, height) {
 }
 
 /**
+ * Where a pointer at `clientY` drops among rows whose boxes (their
+ * `getBoundingClientRect()`, `{ top, bottom }`, in order) are `rects`:
+ * `{ over, after }`, the row it is over (the first above all, the last
+ * below all) and whether in its lower half; null without rows.
+ */
+export function dropTarget(rects, clientY) {
+  if (!rects.length) return null;
+  let over = rects.findIndex((r) => clientY < r.bottom);
+  if (over < 0) over = rects.length - 1;
+  const r = rects[over];
+  return { over, after: clientY >= r.top + (r.bottom - r.top) / 2 };
+}
+
+/**
+ * How far to scroll a view whose box is `top`..`bottom` while dragging at
+ * `clientY`: within `edge` px of an edge, up to `most` px a move toward it
+ * (negative: up); 0 elsewhere.
+ */
+export function autoScroll(clientY, top, bottom, { edge = 40, most = 20 } = {}) {
+  if (clientY < top + edge) return -Math.ceil(most * Math.min(1, (top + edge - clientY) / edge));
+  if (clientY > bottom - edge) return Math.ceil(most * Math.min(1, (clientY - (bottom - edge)) / edge));
+  return 0;
+}
+
+/**
+ * A drag of a row started on its handle (ADR 0041 §9): what it moves (the
+ * name and the list's base when it started, never a place that a push
+ * could change), and the place it would take now. `dragStart` begins it,
+ * `dragOver` follows the pointer, `dragDrop` gives the `snapshot.move` to
+ * send (null: nothing moves, or the list changed underneath).
+ */
+export function dragStart(list, name) {
+  const from = entries(list).findIndex((e) => e.name === name);
+  return from < 0 ? null : { name, base: list?.base ?? null, from, target: null };
+}
+
+export function dragOver(drag, rects, clientY) {
+  return drag ? { ...drag, target: dropTarget(rects, clientY) } : null;
+}
+
+export function dragDrop(drag, list) {
+  if (!drag?.target) return null;
+  // The list changed underneath (a push from another client): nothing moves.
+  if ((list?.base ?? null) !== drag.base) return null;
+  if (entries(list)[drag.from]?.name !== drag.name) return null;
+  const to = dropIndex(drag.from, drag.target.over, drag.target.after);
+  return to === null ? null : moveMessage(drag.name, to, drag.base ?? undefined);
+}
+
+/**
  * The place a row dragged from `from` takes when dropped before (or
  * `after`) the row at `over`, as `snapshot.move` counts it (the list
  * without the dragged row); null when it stays where it is.

@@ -681,12 +681,11 @@ fn snapshot_list_json(all: &snapshots::Snapshots, text: Option<&str>) -> Value {
     })
 }
 
-/// A message's transition time (`transitionMs` on a restore or undo, `ms`
-/// on `snapshot.transition`): absent `None`; else a whole number of
-/// milliseconds from 0 to 60000 (`bad-value` otherwise).
-fn transition_of(message: &Value) -> Result<Option<u32>, Failure> {
-    let given = message.get("transitionMs").or_else(|| message.get("ms"));
-    match given {
+/// A message's transition time under `key` (`transitionMs` on a restore or
+/// undo, `ms` on `snapshot.transition`, and only that key): absent `None`;
+/// else a whole number of milliseconds from 0 to 60000 (`bad-value`).
+fn transition_of(message: &Value, key: &str) -> Result<Option<u32>, Failure> {
+    match message.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(value) => value
             .as_u64()
@@ -697,7 +696,7 @@ fn transition_of(message: &Value) -> Result<Option<u32>, Failure> {
                 fail(
                     "bad-value",
                     format!(
-                        "a transition is a whole number of milliseconds from 0 to {}",
+                        "`{key}`: a transition is a whole number of milliseconds from 0 to {}",
                         snapshots::MAX_TRANSITION_MS
                     ),
                 )
@@ -5148,7 +5147,7 @@ impl Host {
         self.snapshot_project(true)?;
         let name = snapshot_name(message)?;
         let check = base_check(message)?;
-        let transition = transition_of(message)?;
+        let transition = transition_of(message, "transitionMs")?;
         let wanted = name.clone();
         self.restore_from(
             check,
@@ -5169,7 +5168,7 @@ impl Host {
     fn snapshot_undo(&mut self, message: &Value) -> Result<Value, Failure> {
         self.snapshot_project(true)?;
         let check = base_check(message)?;
-        let transition = transition_of(message)?;
+        let transition = transition_of(message, "transitionMs")?;
         self.restore_from(
             check,
             |all| all.undo.take().ok_or(SnapshotError::NoUndo),
@@ -5184,7 +5183,7 @@ impl Host {
     /// by the ADR 0040 writer with the optional `base`.
     fn snapshot_transition(&mut self, message: &Value) -> Result<Value, Failure> {
         self.snapshot_project(false)?;
-        let ms = transition_of(message)?
+        let ms = transition_of(message, "ms")?
             .ok_or_else(|| fail("bad-value", "`ms` must be a whole number of milliseconds"))?;
         let check = base_check(message)?;
         let (text, _) = snapshots::set_transition(&self.dir, ms, check)

@@ -22,7 +22,7 @@ import { applyProps } from './lib/dom.js';
 import { connectCards } from './lib/cards.js';
 import { menuAction, pageHandlesShortcuts, panelReloads, panelSource } from './lib/menu.js';
 import { setViewScroller } from '../controls/keyboard.js';
-import { keyCommand, onKeys } from '../lib/keys.js';
+import { ariaShortcuts, keyCommand, keymap, onKeys, shownKeys } from '../lib/keys.js';
 import { dragMessage, fileNote, planUpdate, releaseMessage, resetMessage, rows, shown, structureKey, valuesOf } from './lib/parameters.js';
 import { INITIAL, controls, powerRequest, reduce, restartRequest } from './lib/power.js';
 import { contextItems, keepsSystemMenu } from './lib/context.js';
@@ -42,8 +42,10 @@ import {
   refusalText,
   restoreMessage,
   restoredText,
-  dropIndex,
-  dropsAfter,
+  autoScroll,
+  dragDrop,
+  dragOver,
+  dragStart,
   keyMove,
   moveMessage,
   transitionMessage,
@@ -722,10 +724,11 @@ export class SignalAppSnapshots extends AppElement {
       this.transition = el('input', { name: 'transition', type: 'text', inputMode: 'numeric', size: 6, spellcheck: false, value: '0' });
       this.transition.setAttribute('aria-label', 'Snapshot transition time in milliseconds');
       const transitionLabel = el('label', { className: 'snapshot-transition', title: 'How long a restore moves each control to its value; stepped controls switch at the start; 0: at once' }, 'Transition ', this.transition, ' ms');
+      // Enter leaves the field, and `change` alone sends (never twice).
       this.transition.addEventListener('keydown', (event) => {
         if (event.key === 'Enter') {
           event.preventDefault();
-          this.setTransition();
+          this.transition.blur();
         }
       });
       this.transition.addEventListener('change', () => this.setTransition());
@@ -761,6 +764,8 @@ export class SignalAppSnapshots extends AppElement {
   }
 
   show(list, error = null) {
+    // A drag lets go when the list changes underneath it.
+    if (this.drag && (list?.base ?? null) !== this.drag.base) this.endDrag();
     this.list = list;
     this.problem = list ? null : error;
     this.draw();
@@ -778,7 +783,10 @@ export class SignalAppSnapshots extends AppElement {
     this.undo.style.visibility = hasUndo(this.list) ? 'visible' : 'hidden';
     const rows = entries(this.list);
     // A rebuild keeps the focused row focused (by name: it may have moved).
-    const focused = this.focusName ?? document.activeElement?.closest?.('li.snapshot-row')?.dataset.name;
+    const active = document.activeElement;
+    const focused = this.focusName ?? (active?.matches?.('li.snapshot-row') ? active.dataset.name : undefined);
+    const keys = ariaShortcuts('snapshot_list');
+    const shown = [shownKeys(keymap(), 'snapshot_list.move_up'), shownKeys(keymap(), 'snapshot_list.move_down')].filter(Boolean).join(' or ');
     this.rows.replaceChildren(
       ...rows.map(({ name, count }, index) => {
         const restore = el('button', { type: 'button', textContent: 'Restore', title: `Write “${name}”’s values into project.toml and play them` });
@@ -787,51 +795,62 @@ export class SignalAppSnapshots extends AppElement {
         remove.addEventListener('click', () => this.remove(name));
         // ADR 0041 §9: a handle to drag the row by, and the row itself
         // focusable for Alt+ArrowUp / Alt+ArrowDown (snapshot_list scope).
-        const handle = el('span', { className: 'snapshot-handle', textContent: '⋮⋮', title: 'Drag to move; or focus the row and press Alt+↑ or Alt+↓' });
+        const handle = el('span', { className: 'snapshot-handle', textContent: '⋮⋮', title: `Drag to move${shown ? `; or focus the row and press ${shown}` : ''}` });
         handle.setAttribute('aria-label', `Move ${name}`);
         handle.setAttribute('role', 'img');
-        const li = el('li', { className: 'snapshot-row', tabIndex: 0, draggable: true }, handle, el('span', { className: 'snapshot-name', textContent: name, title: name }), el('span', { className: 'muted snapshot-count', textContent: countText(count) }), restore, remove);
+        const li = el('li', { className: 'snapshot-row', tabIndex: 0 }, handle, el('span', { className: 'snapshot-name', textContent: name, title: name }), el('span', { className: 'muted snapshot-count', textContent: countText(count) }), restore, remove);
         li.dataset.name = name;
         li.setAttribute('aria-label', `${name}, place ${index + 1} of ${rows.length}`);
-        li.setAttribute('aria-keyshortcuts', 'Alt+ArrowUp Alt+ArrowDown');
+        if (keys) li.setAttribute('aria-keyshortcuts', keys);
         li.addEventListener('keydown', (event) => {
+          // The row itself, not its Restore or Delete button.
+          if (event.target !== li) return;
           const to = keyMove(keyCommand('snapshot_list', event)?.id, index, rows.length);
           if (to === null) return;
           event.preventDefault();
           event.stopPropagation();
           this.move(name, to);
         });
-        li.addEventListener('dragstart', (event) => {
-          this.dragFrom = index;
-          event.dataTransfer?.setData('text/plain', name);
-          if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+        // ADR 0041 §9: a drag by pointer events from the handle only
+        // (Signal.app's WebView passes no HTML5 drop to the page).
+        handle.addEventListener('pointerdown', (event) => {
+          if (event.button !== 0 || this.drag) return;
+          const drag = dragStart(this.list, name);
+          if (!drag) return;
+          event.preventDefault();
+          handle.setPointerCapture?.(event.pointerId);
+          this.drag = { ...drag, pointerId: event.pointerId, handle };
           li.classList.add('dragging');
+          this.escape = (key) => {
+            if (key.key === 'Escape') {
+              key.preventDefault();
+              this.endDrag();
+            }
+          };
+          window.addEventListener('keydown', this.escape, true);
         });
-        li.addEventListener('dragend', () => {
-          this.dragFrom = null;
-          li.classList.remove('dragging');
+        handle.addEventListener('pointermove', (event) => {
+          if (!this.drag || event.pointerId !== this.drag.pointerId) return;
+          const rowEls = [...this.rows.querySelectorAll('li.snapshot-row')];
+          this.drag = { ...this.drag, ...dragOver(this.drag, rowEls.map((r) => r.getBoundingClientRect()), event.clientY) };
           this.clearDrop();
+          const target = this.drag.target;
+          if (target) rowEls[target.over]?.classList.add(target.after ? 'drop-after' : 'drop-before');
+          // The view scrolls when the pointer nears its edge.
+          const view = this.closest('.tab-scroll');
+          if (view) {
+            const box = view.getBoundingClientRect();
+            const step = autoScroll(event.clientY, box.top, box.bottom);
+            if (step) view.scrollBy(0, step);
+          }
         });
-        li.addEventListener('dragover', (event) => {
-          if (this.dragFrom === null || this.dragFrom === undefined) return;
-          event.preventDefault();
-          if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-          const after = dropsAfter(event.offsetY, li.clientHeight);
-          this.clearDrop();
-          li.classList.add(after ? 'drop-after' : 'drop-before');
+        handle.addEventListener('pointerup', (event) => {
+          if (!this.drag || event.pointerId !== this.drag.pointerId) return;
+          const message = dragDrop(this.drag, this.list);
+          this.endDrag();
+          if (message) this.send(message);
         });
-        li.addEventListener('dragleave', () => li.classList.remove('drop-before', 'drop-after'));
-        li.addEventListener('drop', (event) => {
-          event.preventDefault();
-          const from = this.dragFrom;
-          const after = dropsAfter(event.offsetY, li.clientHeight);
-          this.clearDrop();
-          this.dragFrom = null;
-          if (from === null || from === undefined) return;
-          const to = dropIndex(from, index, after);
-          const moved = rows[from]?.name;
-          if (to !== null && moved !== undefined) this.move(moved, to);
-        });
+        handle.addEventListener('pointercancel', () => this.endDrag());
         return li;
       }),
     );
@@ -882,19 +901,22 @@ export class SignalAppSnapshots extends AppElement {
     }
   }
 
-  /** Writes the Transition field's value, if it changed (`snapshot.transition`). */
+  /** Writes the Transition field's value, if it changed and is not already on its way (`snapshot.transition`). */
   async setTransition() {
     const { ms, error } = transitionValue(this.transition.value);
     if (error) {
       this.say(error, true);
       return;
     }
-    if (ms === transitionOf(this.list)) return;
+    if (ms === transitionOf(this.list) || ms === this.transitionPending) return;
+    this.transitionPending = ms;
     try {
       const reply = await this.request(transitionMessage(ms, this.list?.base ?? undefined));
       this.say(transitionText(reply.ms));
     } catch (refusal) {
       this.refused(refusal);
+    } finally {
+      this.transitionPending = undefined;
     }
   }
 
@@ -903,11 +925,29 @@ export class SignalAppSnapshots extends AppElement {
     for (const row of this.rows.querySelectorAll('.drop-before, .drop-after')) row.classList.remove('drop-before', 'drop-after');
   }
 
-  /** `snapshot.move` of `name` to place `to`; the list comes back in the reply (and as a push). */
-  async move(name, to) {
-    this.focusName = document.activeElement?.closest?.('li.snapshot-row') ? name : undefined;
+  /** Ends a drag (dropped, cancelled, or the list changed): the drop line and the capture go. */
+  endDrag() {
+    const drag = this.drag;
+    this.drag = null;
+    if (!drag) return;
+    if (drag.handle?.hasPointerCapture?.(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId);
+    drag.handle?.closest('li')?.classList.remove('dragging');
+    this.clearDrop();
+    if (this.escape) window.removeEventListener('keydown', this.escape, true);
+    this.escape = null;
+  }
+
+  /** `snapshot.move` of `name` to place `to` (the keyboard); the list comes back in the reply (and as a push). */
+  move(name, to) {
+    this.focusName = document.activeElement?.matches?.('li.snapshot-row') ? name : undefined;
+    return this.send(moveMessage(name, to, this.list?.base ?? undefined));
+  }
+
+  /** Sends a `snapshot.move` message and shows the list it gives. */
+  async send(message) {
+    const name = message.name;
     try {
-      const reply = await this.request(moveMessage(name, to, this.list?.base ?? undefined));
+      const reply = await this.request(message);
       this.show({ ...this.list, ...reply, type: 'snapshots' });
       this.say(`Moved “${name}” to place ${reply.index + 1}.`);
     } catch (refusal) {

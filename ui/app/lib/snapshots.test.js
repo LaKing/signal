@@ -4,7 +4,12 @@ import {
   MAX_NAME,
   countText,
   deleteMessage,
+  autoScroll,
+  dragDrop,
+  dragOver,
+  dragStart,
   dropIndex,
+  dropTarget,
   dropsAfter,
   keyMove,
   moveMessage,
@@ -179,4 +184,33 @@ test('the Transition field', () => {
   assert.equal(transitionOf(null), 0);
   assert.equal(transitionText(0), 'Restores switch at once (no transition).');
   assert.match(transitionText(2000), /over 2000 ms/);
+});
+
+// Review of 2026-10-25: a drag by pointer events from the handle (Signal.app's WebView passes no HTML5 drop).
+test('dragging a row by its handle', () => {
+  const rects = [
+    { top: 100, bottom: 130 },
+    { top: 130, bottom: 160 },
+    { top: 160, bottom: 190 },
+  ];
+  assert.deepEqual(dropTarget(rects, 104), { over: 0, after: false });
+  assert.deepEqual(dropTarget(rects, 150), { over: 1, after: true });
+  assert.deepEqual(dropTarget(rects, 50), { over: 0, after: false }, 'above all: before the first');
+  assert.deepEqual(dropTarget(rects, 400), { over: 2, after: true }, 'below all: after the last');
+  assert.equal(dropTarget([], 10), null);
+  assert.equal(autoScroll(300, 0, 600), 0);
+  assert.ok(autoScroll(5, 0, 600) < 0, 'near the top: up');
+  assert.ok(autoScroll(595, 0, 600) > 0, 'near the bottom: down');
+  assert.equal(autoScroll(-50, 0, 600), -20, 'at most 20 px');
+  const list = { base: 'b1', snapshots: [{ name: 'Verse A' }, { name: 'chorus' }, { name: 'Bridge' }] };
+  let drag = dragStart(list, 'Bridge');
+  assert.deepEqual(drag, { name: 'Bridge', base: 'b1', from: 2, target: null });
+  assert.equal(dragDrop(drag, list), null, 'no move yet');
+  drag = dragOver(drag, rects, 104);
+  assert.deepEqual(dragDrop(drag, list), { type: 'snapshot.move', name: 'Bridge', to: 0, base: 'b1' });
+  assert.equal(dragDrop(dragOver(drag, rects, 185), list), null, 'back onto its own place');
+  // A push during the drag: the drag is let go, never the wrong snapshot moved.
+  assert.equal(dragDrop(drag, { ...list, base: 'b2' }), null);
+  assert.equal(dragDrop(drag, { base: 'b1', snapshots: [{ name: 'Bridge' }, { name: 'Verse A' }, { name: 'chorus' }] }), null);
+  assert.equal(dragStart(list, 'gone'), null);
 });

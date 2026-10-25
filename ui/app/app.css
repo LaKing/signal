@@ -94,7 +94,8 @@ signal-app-snapshots { display: block; }
 .snapshots li.drop-before { border-top-color: var(--signal-accent); }
 .snapshots li.drop-after { border-bottom-color: var(--signal-accent); }
 .snapshots li.dragging { opacity: 0.5; }
-.snapshot-handle { cursor: grab; color: var(--signal-muted); width: 1.5em; text-align: center; user-select: none; }
+.snapshot-handle { cursor: grab; color: var(--signal-muted); width: 1.5em; text-align: center; user-select: none; touch-action: none; }
+.snapshots li.dragging .snapshot-handle { cursor: grabbing; }
 .snapshots { list-style: none; padding: 0; margin: 0; }
 .snapshots li { display: flex; gap: 0.5rem; align-items: center; height: 1.9rem; }
 .snapshots button { padding: 0 0.5rem; }
