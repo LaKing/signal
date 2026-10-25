@@ -100,6 +100,18 @@ fn project(edits: &[(&str, &str, &str)]) -> Project {
 /// A fixture project: `project.toml` is `text`, beside the studio composite
 /// `composite` and the pattern `drums` (`kind = "steps"`) if given.
 fn fixture(text: &str, composite: &str, drums: Option<&str>) -> Project {
+    fixture_with(text, composite, drums, false)
+}
+
+/// [`fixture`], with the composite's export ranges (ADR 0042) removed when
+/// `unranged`: so a value beyond them reaches the composite, as a connected
+/// signal would, and its own clamps are what bound it.
+fn fixture_with(text: &str, composite: &str, drums: Option<&str>, unranged: bool) -> Project {
+    let mut source =
+        fs::read_to_string(studio().join(format!("composites/{composite}.toml"))).unwrap();
+    if unranged {
+        source = without_ranges(&source);
+    }
     let mut files = vec![
         SourceFile {
             path: "project.toml".to_owned(),
@@ -107,8 +119,7 @@ fn fixture(text: &str, composite: &str, drums: Option<&str>) -> Project {
         },
         SourceFile {
             path: format!("composites/{composite}.toml"),
-            text: fs::read_to_string(studio().join(format!("composites/{composite}.toml")))
-                .unwrap(),
+            text: source,
         },
     ];
     if let Some(drums) = drums {
@@ -118,6 +129,26 @@ fn fixture(text: &str, composite: &str, drums: Option<&str>) -> Project {
         });
     }
     Project::from_sources(files).unwrap()
+}
+
+/// A composite's text with each `name = { to = <targets>, min = …, max = … }`
+/// export written `name = <targets>`.
+fn without_ranges(text: &str) -> String {
+    text.lines()
+        .map(
+            |line| match (line.find("= { to = "), line.find(", min = ")) {
+                (Some(open), Some(min)) if line.trim_end().ends_with('}') => {
+                    format!(
+                        "{}= {}",
+                        &line[..open],
+                        &line[open + "= { to = ".len()..min]
+                    )
+                }
+                _ => line.to_owned(),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Renders `frames` of `project` in blocks of `k` on `threads` threads, with
@@ -473,7 +504,26 @@ fn echo_fixture(parameters: &str, once: bool) -> Project {
            {{ from = \"input.out\", to = \"out.r\" }},\n\
          ]\n"
     );
-    fixture(&text, "tape_delay", None)
+    // Its corners lie beyond the exports' ranges: the inner clamps are tested.
+    fixture_with(&text, "tape_delay", None, true)
+}
+
+/// ADR 0042: the ranged composites refuse a value beyond an export's range
+/// (here the echo's `feedback`, [0, 0.75]); the tests below remove the
+/// ranges to reach the composites' own clamps.
+#[test]
+fn the_ranged_echo_refuses_a_feedback_beyond_its_range() {
+    let text = "schema_version = 1\n[project]\nname = \"echo\"\n[instances]\necho = { module = \"tape_delay\", feedback = 1000000 }\nout = { module = \"std.audio_out\" }\n[wiring]\nconnections = [{ from = \"echo.out\", to = \"out.l\" }]\n";
+    let errors = fixture(text, "tape_delay", None)
+        .plan(&registry())
+        .err()
+        .unwrap();
+    assert!(
+        errors.iter().any(|e| e
+            .to_string()
+            .contains("/echo.feedback: value 1000000 is outside [0, 0.75]")),
+        "{errors:?}"
+    );
 }
 
 /// AC3: at corner values of every exported parameter, alone and together,
@@ -562,7 +612,8 @@ fn voice_fixture(parameters: &str) -> Project {
            {{ from = \"voice.out\", to = \"out.r\" }},\n\
          ]\n"
     );
-    fixture(&text, "moog_voice", None)
+    // The octave's 7 lies beyond its export's range: its inner clamp is tested.
+    fixture_with(&text, "moog_voice", None, true)
 }
 
 /// The voice's samples over 0.25 s with `parameters`.

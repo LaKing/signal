@@ -742,6 +742,10 @@
         {
           "name": "decay",
           "order": 1,
+          "range": {
+            "max": 2000.0,
+            "min": 10.0
+          },
           "to": [
             "tail.decay_ms"
           ]
@@ -749,6 +753,10 @@
         {
           "name": "level",
           "order": 2,
+          "range": {
+            "max": 12.0,
+            "min": -120.0
+          },
           "to": [
             "level.db"
           ]
@@ -756,6 +764,10 @@
         {
           "name": "tone",
           "order": 0,
+          "range": {
+            "max": 8000.0,
+            "min": 200.0
+          },
           "to": [
             "band.cutoff_hz"
           ]
@@ -763,6 +775,10 @@
         {
           "name": "velocity",
           "order": 3,
+          "range": {
+            "max": 2.0,
+            "min": 0.0
+          },
           "to": [
             "velocity.value"
           ]
@@ -1941,6 +1957,10 @@
         {
           "name": "decay",
           "order": 1,
+          "range": {
+            "max": 8000.0,
+            "min": 50.0
+          },
           "to": [
             "env.decay_ms"
           ]
@@ -1948,6 +1968,10 @@
         {
           "name": "level",
           "order": 2,
+          "range": {
+            "max": 12.0,
+            "min": -120.0
+          },
           "to": [
             "level.db"
           ]
@@ -1955,6 +1979,10 @@
         {
           "name": "tone",
           "order": 0,
+          "range": {
+            "max": 16000.0,
+            "min": 1000.0
+          },
           "to": [
             "hp.cutoff_hz"
           ]
@@ -1962,6 +1990,10 @@
         {
           "name": "velocity",
           "order": 3,
+          "range": {
+            "max": 2.0,
+            "min": 0.0
+          },
           "to": [
             "velocity.value"
           ]
@@ -3502,6 +3534,10 @@
         {
           "name": "closed_decay",
           "order": 1,
+          "range": {
+            "max": 500.0,
+            "min": 5.0
+          },
           "to": [
             "closed_env.decay_ms"
           ]
@@ -3509,6 +3545,10 @@
         {
           "name": "closed_velocity",
           "order": 4,
+          "range": {
+            "max": 2.0,
+            "min": 0.0
+          },
           "to": [
             "closed_velocity.value"
           ]
@@ -3516,6 +3556,10 @@
         {
           "name": "level",
           "order": 3,
+          "range": {
+            "max": 12.0,
+            "min": -120.0
+          },
           "to": [
             "level.db"
           ]
@@ -3523,6 +3567,10 @@
         {
           "name": "open_decay",
           "order": 2,
+          "range": {
+            "max": 4000.0,
+            "min": 20.0
+          },
           "to": [
             "open_env.decay_ms"
           ]
@@ -3530,6 +3578,10 @@
         {
           "name": "open_velocity",
           "order": 5,
+          "range": {
+            "max": 2.0,
+            "min": 0.0
+          },
           "to": [
             "open_velocity.value"
           ]
@@ -3537,6 +3589,10 @@
         {
           "name": "tone",
           "order": 0,
+          "range": {
+            "max": 16000.0,
+            "min": 2000.0
+          },
           "to": [
             "hp.cutoff_hz"
           ]
@@ -4400,6 +4456,10 @@
         {
           "name": "attack",
           "order": 2,
+          "range": {
+            "max": 2.0,
+            "min": 0.0
+          },
           "to": [
             "click_level.mul"
           ]
@@ -4407,6 +4467,10 @@
         {
           "name": "decay",
           "order": 1,
+          "range": {
+            "max": 2000.0,
+            "min": 10.0
+          },
           "to": [
             "amp_env.decay_ms"
           ]
@@ -4414,6 +4478,10 @@
         {
           "name": "drive",
           "order": 3,
+          "range": {
+            "max": 5.0,
+            "min": 0.1
+          },
           "to": [
             "shaper.drive"
           ]
@@ -4421,6 +4489,10 @@
         {
           "name": "level",
           "order": 4,
+          "range": {
+            "max": 12.0,
+            "min": -120.0
+          },
           "to": [
             "level.db"
           ]
@@ -4428,6 +4500,10 @@
         {
           "name": "tune",
           "order": 0,
+          "range": {
+            "max": 200.0,
+            "min": 20.0
+          },
           "to": [
             "osc.freq"
           ]
@@ -4435,6 +4511,10 @@
         {
           "name": "velocity",
           "order": 5,
+          "range": {
+            "max": 2.0,
+            "min": 0.0
+          },
           "to": [
             "velocity.value"
           ]
@@ -6692,6 +6772,10 @@
         {
           "name": "a_attack",
           "order": 23,
+          "range": {
+            "max": 10000.0,
+            "min": 0.0
+          },
           "to": [
             "aenv.attack_ms"
           ]
@@ -6699,6 +6783,10 @@
         {
           "name": "a_decay",
           "order": 24,
+          "range": {
+            "max": 10000.0,
+            "min": 0.1
+          },
           "to": [
             "aenv.decay_ms"
           ]
@@ -6706,6 +6794,10 @@
         {
           "name": "a_release",
           "order": 26,
+          "range": {
+            "max": 10000.0,
+            "min": 0.1
+          },
           "to": [
             "aenv.release_ms"
           ]
@@ -6713,6 +6805,10 @@
         {
           "name": "a_sustain",
           "order": 25,
+          "range": {
+            "max": 1.0,
+            "min": 0.0
+          },
           "to": [
             "aenv.sustain"
           ]
@@ -6720,6 +6816,10 @@
         {
           "name": "cutoff",
           "order": 14,
+          "range": {
+            "max": 20000.0,
+            "min": 20.0
+          },
           "to": [
             "ladder.cutoff_hz"
           ]
@@ -6727,6 +6827,10 @@
         {
           "name": "drive",
           "order": 16,
+          "range": {
+            "max": 10.0,
+            "min": 0.0
+          },
           "to": [
             "ladder.drive"
           ]
@@ -6734,6 +6838,10 @@
         {
           "name": "emphasis",
           "order": 15,
+          "range": {
+            "max": 1.0,
+            "min": 0.0
+          },
           "to": [
             "ladder.resonance"
           ]
@@ -6741,6 +6849,10 @@
         {
           "name": "env_amount",
           "order": 17,
+          "range": {
+            "max": 10000.0,
+            "min": -10000.0
+          },
           "to": [
             "env_amt.mul"
           ]
@@ -6748,6 +6860,10 @@
         {
           "name": "f_attack",
           "order": 19,
+          "range": {
+            "max": 10000.0,
+            "min": 0.0
+          },
           "to": [
             "fenv.attack_ms"
           ]
@@ -6755,6 +6871,10 @@
         {
           "name": "f_decay",
           "order": 20,
+          "range": {
+            "max": 10000.0,
+            "min": 0.1
+          },
           "to": [
             "fenv.decay_ms"
           ]
@@ -6762,6 +6882,10 @@
         {
           "name": "f_release",
           "order": 22,
+          "range": {
+            "max": 10000.0,
+            "min": 0.1
+          },
           "to": [
             "fenv.release_ms"
           ]
@@ -6769,6 +6893,10 @@
         {
           "name": "f_sustain",
           "order": 21,
+          "range": {
+            "max": 1.0,
+            "min": 0.0
+          },
           "to": [
             "fenv.sustain"
           ]
@@ -6776,6 +6904,10 @@
         {
           "name": "glide",
           "order": 0,
+          "range": {
+            "max": 2000.0,
+            "min": 0.0
+          },
           "to": [
             "glide.rise_ms",
             "glide.fall_ms"
@@ -6791,6 +6923,10 @@
         {
           "name": "noise_level",
           "order": 13,
+          "range": {
+            "max": 2.0,
+            "min": 0.0
+          },
           "to": [
             "mixer.gain_d"
           ]
@@ -6798,6 +6934,10 @@
         {
           "name": "osc1_detune",
           "order": 2,
+          "range": {
+            "max": 1200.0,
+            "min": -1200.0
+          },
           "to": [
             "o1_det.value"
           ]
@@ -6805,6 +6945,10 @@
         {
           "name": "osc1_level",
           "order": 10,
+          "range": {
+            "max": 2.0,
+            "min": 0.0
+          },
           "to": [
             "mixer.gain_a"
           ]
@@ -6812,6 +6956,10 @@
         {
           "name": "osc1_octave",
           "order": 1,
+          "range": {
+            "max": 2.0,
+            "min": -2.0
+          },
           "to": [
             "o1_oct.value"
           ]
@@ -6819,6 +6967,10 @@
         {
           "name": "osc1_wave",
           "order": 3,
+          "range": {
+            "max": 3.0,
+            "min": 0.0
+          },
           "to": [
             "osc1.shape"
           ]
@@ -6826,6 +6978,10 @@
         {
           "name": "osc2_detune",
           "order": 5,
+          "range": {
+            "max": 1200.0,
+            "min": -1200.0
+          },
           "to": [
             "o2_det.value"
           ]
@@ -6833,6 +6989,10 @@
         {
           "name": "osc2_level",
           "order": 11,
+          "range": {
+            "max": 2.0,
+            "min": 0.0
+          },
           "to": [
             "mixer.gain_b"
           ]
@@ -6840,6 +7000,10 @@
         {
           "name": "osc2_octave",
           "order": 4,
+          "range": {
+            "max": 2.0,
+            "min": -2.0
+          },
           "to": [
             "o2_oct.value"
           ]
@@ -6847,6 +7011,10 @@
         {
           "name": "osc2_wave",
           "order": 6,
+          "range": {
+            "max": 3.0,
+            "min": 0.0
+          },
           "to": [
             "osc2.shape"
           ]
@@ -6854,6 +7022,10 @@
         {
           "name": "osc3_detune",
           "order": 8,
+          "range": {
+            "max": 1200.0,
+            "min": -1200.0
+          },
           "to": [
             "o3_det.value"
           ]
@@ -6861,6 +7033,10 @@
         {
           "name": "osc3_level",
           "order": 12,
+          "range": {
+            "max": 2.0,
+            "min": 0.0
+          },
           "to": [
             "mixer.gain_c"
           ]
@@ -6868,6 +7044,10 @@
         {
           "name": "osc3_octave",
           "order": 7,
+          "range": {
+            "max": 2.0,
+            "min": -2.0
+          },
           "to": [
             "o3_oct.value"
           ]
@@ -6875,6 +7055,10 @@
         {
           "name": "osc3_wave",
           "order": 9,
+          "range": {
+            "max": 3.0,
+            "min": 0.0
+          },
           "to": [
             "osc3.shape"
           ]
@@ -6882,6 +7066,10 @@
         {
           "name": "volume",
           "order": 27,
+          "range": {
+            "max": 12.0,
+            "min": -120.0
+          },
           "to": [
             "volume.db"
           ]
@@ -7539,6 +7727,10 @@
         {
           "name": "decay",
           "order": 1,
+          "range": {
+            "max": 200.0,
+            "min": 1.0
+          },
           "to": [
             "env.decay_ms"
           ]
@@ -7546,6 +7738,10 @@
         {
           "name": "level",
           "order": 2,
+          "range": {
+            "max": 12.0,
+            "min": -120.0
+          },
           "to": [
             "level.db"
           ]
@@ -7553,6 +7749,10 @@
         {
           "name": "tune",
           "order": 0,
+          "range": {
+            "max": 2000.0,
+            "min": 100.0
+          },
           "to": [
             "tune.value"
           ]
@@ -7560,6 +7760,10 @@
         {
           "name": "velocity",
           "order": 3,
+          "range": {
+            "max": 2.0,
+            "min": 0.0
+          },
           "to": [
             "velocity.value"
           ]
@@ -8560,6 +8764,10 @@
         {
           "name": "decay",
           "order": 3,
+          "range": {
+            "max": 2000.0,
+            "min": 10.0
+          },
           "to": [
             "snap_env.decay_ms"
           ]
@@ -8567,6 +8775,10 @@
         {
           "name": "level",
           "order": 4,
+          "range": {
+            "max": 12.0,
+            "min": -120.0
+          },
           "to": [
             "level.db"
           ]
@@ -8574,6 +8786,10 @@
         {
           "name": "snappy",
           "order": 2,
+          "range": {
+            "max": 2.0,
+            "min": 0.0
+          },
           "to": [
             "snappy.mul"
           ]
@@ -8581,6 +8797,10 @@
         {
           "name": "tone",
           "order": 1,
+          "range": {
+            "max": 12000.0,
+            "min": 500.0
+          },
           "to": [
             "noise_hp.cutoff_hz"
           ]
@@ -8588,6 +8808,10 @@
         {
           "name": "tune",
           "order": 0,
+          "range": {
+            "max": 500.0,
+            "min": 50.0
+          },
           "to": [
             "tune.value"
           ]
@@ -8595,6 +8819,10 @@
         {
           "name": "velocity",
           "order": 5,
+          "range": {
+            "max": 2.0,
+            "min": 0.0
+          },
           "to": [
             "velocity.value"
           ]
@@ -9739,6 +9967,10 @@
         {
           "name": "feedback",
           "order": 1,
+          "range": {
+            "max": 0.75,
+            "min": 0.0
+          },
           "to": [
             "feedback.value"
           ]
@@ -9746,6 +9978,10 @@
         {
           "name": "flutter",
           "order": 4,
+          "range": {
+            "max": 50.0,
+            "min": 0.0
+          },
           "to": [
             "flutter_depth.mul"
           ]
@@ -9753,6 +9989,10 @@
         {
           "name": "mix",
           "order": 5,
+          "range": {
+            "max": 1.0,
+            "min": 0.0
+          },
           "to": [
             "mix_amt.value"
           ]
@@ -9760,6 +10000,10 @@
         {
           "name": "time_ms",
           "order": 0,
+          "range": {
+            "max": 2000.0,
+            "min": 1.0
+          },
           "to": [
             "delay.time_ms"
           ]
@@ -9767,6 +10011,10 @@
         {
           "name": "tone",
           "order": 2,
+          "range": {
+            "max": 4999.0,
+            "min": 0.0
+          },
           "to": [
             "tone_amt.value"
           ]
@@ -9774,6 +10022,10 @@
         {
           "name": "wow",
           "order": 3,
+          "range": {
+            "max": 10.0,
+            "min": 0.0
+          },
           "to": [
             "wow_depth.mul"
           ]
@@ -10530,6 +10782,10 @@
         {
           "name": "decay",
           "order": 1,
+          "range": {
+            "max": 2000.0,
+            "min": 10.0
+          },
           "to": [
             "amp_env.decay_ms"
           ]
@@ -10537,6 +10793,10 @@
         {
           "name": "level",
           "order": 2,
+          "range": {
+            "max": 12.0,
+            "min": -120.0
+          },
           "to": [
             "level.db"
           ]
@@ -10544,6 +10804,10 @@
         {
           "name": "tune",
           "order": 0,
+          "range": {
+            "max": 500.0,
+            "min": 40.0
+          },
           "to": [
             "osc.freq"
           ]
@@ -10551,6 +10815,10 @@
         {
           "name": "velocity",
           "order": 3,
+          "range": {
+            "max": 2.0,
+            "min": 0.0
+          },
           "to": [
             "velocity.value"
           ]
@@ -11227,7 +11495,7 @@
             "kind": "control",
             "name": "a_attack",
             "range": {
-              "max": 60000.0,
+              "max": 10000.0,
               "min": 0.0
             },
             "rate": 1,
@@ -11240,7 +11508,7 @@
             "kind": "control",
             "name": "a_decay",
             "range": {
-              "max": 60000.0,
+              "max": 10000.0,
               "min": 0.1
             },
             "rate": 1,
@@ -11253,7 +11521,7 @@
             "kind": "control",
             "name": "a_release",
             "range": {
-              "max": 60000.0,
+              "max": 10000.0,
               "min": 0.1
             },
             "rate": 1,
@@ -11279,8 +11547,8 @@
             "kind": "frequency",
             "name": "cutoff",
             "range": {
-              "max": 2104533974.55,
-              "min": 1.0
+              "max": 20000.0,
+              "min": 20.0
             },
             "rate": 1,
             "unit": "Hz"
@@ -11318,8 +11586,8 @@
             "kind": "generic",
             "name": "env_amount",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 10000.0,
+              "min": -10000.0
             },
             "rate": 1,
             "unit": null
@@ -11331,7 +11599,7 @@
             "kind": "control",
             "name": "f_attack",
             "range": {
-              "max": 60000.0,
+              "max": 10000.0,
               "min": 0.0
             },
             "rate": 1,
@@ -11344,7 +11612,7 @@
             "kind": "control",
             "name": "f_decay",
             "range": {
-              "max": 60000.0,
+              "max": 10000.0,
               "min": 0.1
             },
             "rate": 1,
@@ -11357,7 +11625,7 @@
             "kind": "control",
             "name": "f_release",
             "range": {
-              "max": 60000.0,
+              "max": 10000.0,
               "min": 0.1
             },
             "rate": 1,
@@ -11383,7 +11651,7 @@
             "kind": "control",
             "name": "glide",
             "range": {
-              "max": 60000.0,
+              "max": 2000.0,
               "min": 0.0
             },
             "rate": 1,
@@ -11409,7 +11677,7 @@
             "kind": "gain",
             "name": "noise_level",
             "range": {
-              "max": 4.0,
+              "max": 2.0,
               "min": 0.0
             },
             "rate": 1,
@@ -11422,8 +11690,8 @@
             "kind": "generic",
             "name": "osc1_detune",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 1200.0,
+              "min": -1200.0
             },
             "rate": 1,
             "unit": null
@@ -11435,7 +11703,7 @@
             "kind": "gain",
             "name": "osc1_level",
             "range": {
-              "max": 4.0,
+              "max": 2.0,
               "min": 0.0
             },
             "rate": 1,
@@ -11448,8 +11716,8 @@
             "kind": "generic",
             "name": "osc1_octave",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 2.0,
+              "min": -2.0
             },
             "rate": 1,
             "unit": null
@@ -11474,8 +11742,8 @@
             "kind": "generic",
             "name": "osc2_detune",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 1200.0,
+              "min": -1200.0
             },
             "rate": 1,
             "unit": null
@@ -11487,7 +11755,7 @@
             "kind": "gain",
             "name": "osc2_level",
             "range": {
-              "max": 4.0,
+              "max": 2.0,
               "min": 0.0
             },
             "rate": 1,
@@ -11500,8 +11768,8 @@
             "kind": "generic",
             "name": "osc2_octave",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 2.0,
+              "min": -2.0
             },
             "rate": 1,
             "unit": null
@@ -11526,8 +11794,8 @@
             "kind": "generic",
             "name": "osc3_detune",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 1200.0,
+              "min": -1200.0
             },
             "rate": 1,
             "unit": null
@@ -11539,7 +11807,7 @@
             "kind": "gain",
             "name": "osc3_level",
             "range": {
-              "max": 4.0,
+              "max": 2.0,
               "min": 0.0
             },
             "rate": 1,
@@ -11552,8 +11820,8 @@
             "kind": "generic",
             "name": "osc3_octave",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 2.0,
+              "min": -2.0
             },
             "rate": 1,
             "unit": null
@@ -11578,7 +11846,7 @@
             "kind": "control",
             "name": "volume",
             "range": {
-              "max": 24.0,
+              "max": 12.0,
               "min": -120.0
             },
             "rate": 1,
@@ -11641,8 +11909,8 @@
             "kind": "generic",
             "name": "feedback",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 0.75,
+              "min": 0.0
             },
             "rate": 1,
             "unit": null
@@ -11654,8 +11922,8 @@
             "kind": "generic",
             "name": "flutter",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 50.0,
+              "min": 0.0
             },
             "rate": 1,
             "unit": null
@@ -11667,8 +11935,8 @@
             "kind": "generic",
             "name": "mix",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 1.0,
+              "min": 0.0
             },
             "rate": 1,
             "unit": null
@@ -11680,8 +11948,8 @@
             "kind": "control",
             "name": "time_ms",
             "range": {
-              "max": 10000.0,
-              "min": 0.0
+              "max": 2000.0,
+              "min": 1.0
             },
             "rate": 1,
             "unit": "ms"
@@ -11693,8 +11961,8 @@
             "kind": "generic",
             "name": "tone",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 4999.0,
+              "min": 0.0
             },
             "rate": 1,
             "unit": null
@@ -11706,8 +11974,8 @@
             "kind": "generic",
             "name": "wow",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 10.0,
+              "min": 0.0
             },
             "rate": 1,
             "unit": null
@@ -11749,8 +12017,8 @@
             "kind": "generic",
             "name": "attack",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 2.0,
+              "min": 0.0
             },
             "rate": 1,
             "unit": null
@@ -11762,8 +12030,8 @@
             "kind": "control",
             "name": "decay",
             "range": {
-              "max": 60000.0,
-              "min": 0.1
+              "max": 2000.0,
+              "min": 10.0
             },
             "rate": 1,
             "unit": "ms"
@@ -11775,7 +12043,7 @@
             "kind": "gain",
             "name": "drive",
             "range": {
-              "max": 20.0,
+              "max": 5.0,
               "min": 0.1
             },
             "rate": 1,
@@ -11788,7 +12056,7 @@
             "kind": "control",
             "name": "level",
             "range": {
-              "max": 24.0,
+              "max": 12.0,
               "min": -120.0
             },
             "rate": 1,
@@ -11801,8 +12069,8 @@
             "kind": "frequency",
             "name": "tune",
             "range": {
-              "max": 2147483647.5,
-              "min": 0.0
+              "max": 200.0,
+              "min": 20.0
             },
             "rate": 1,
             "unit": "Hz"
@@ -11814,8 +12082,8 @@
             "kind": "generic",
             "name": "velocity",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 2.0,
+              "min": 0.0
             },
             "rate": 1,
             "unit": null
@@ -11857,8 +12125,8 @@
             "kind": "control",
             "name": "decay",
             "range": {
-              "max": 60000.0,
-              "min": 0.1
+              "max": 2000.0,
+              "min": 10.0
             },
             "rate": 1,
             "unit": "ms"
@@ -11870,7 +12138,7 @@
             "kind": "control",
             "name": "level",
             "range": {
-              "max": 24.0,
+              "max": 12.0,
               "min": -120.0
             },
             "rate": 1,
@@ -11883,8 +12151,8 @@
             "kind": "generic",
             "name": "snappy",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 2.0,
+              "min": 0.0
             },
             "rate": 1,
             "unit": null
@@ -11896,8 +12164,8 @@
             "kind": "frequency",
             "name": "tone",
             "range": {
-              "max": 2104533974.55,
-              "min": 1.0
+              "max": 12000.0,
+              "min": 500.0
             },
             "rate": 1,
             "unit": "Hz"
@@ -11909,8 +12177,8 @@
             "kind": "generic",
             "name": "tune",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 500.0,
+              "min": 50.0
             },
             "rate": 1,
             "unit": null
@@ -11922,8 +12190,8 @@
             "kind": "generic",
             "name": "velocity",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 2.0,
+              "min": 0.0
             },
             "rate": 1,
             "unit": null
@@ -11965,8 +12233,8 @@
             "kind": "control",
             "name": "decay",
             "range": {
-              "max": 60000.0,
-              "min": 0.1
+              "max": 2000.0,
+              "min": 10.0
             },
             "rate": 1,
             "unit": "ms"
@@ -11978,7 +12246,7 @@
             "kind": "control",
             "name": "level",
             "range": {
-              "max": 24.0,
+              "max": 12.0,
               "min": -120.0
             },
             "rate": 1,
@@ -11991,8 +12259,8 @@
             "kind": "frequency",
             "name": "tone",
             "range": {
-              "max": 2104533974.55,
-              "min": 1.0
+              "max": 8000.0,
+              "min": 200.0
             },
             "rate": 1,
             "unit": "Hz"
@@ -12004,8 +12272,8 @@
             "kind": "generic",
             "name": "velocity",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 2.0,
+              "min": 0.0
             },
             "rate": 1,
             "unit": null
@@ -12047,8 +12315,8 @@
             "kind": "control",
             "name": "closed_decay",
             "range": {
-              "max": 60000.0,
-              "min": 0.1
+              "max": 500.0,
+              "min": 5.0
             },
             "rate": 1,
             "unit": "ms"
@@ -12060,8 +12328,8 @@
             "kind": "generic",
             "name": "closed_velocity",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 2.0,
+              "min": 0.0
             },
             "rate": 1,
             "unit": null
@@ -12073,7 +12341,7 @@
             "kind": "control",
             "name": "level",
             "range": {
-              "max": 24.0,
+              "max": 12.0,
               "min": -120.0
             },
             "rate": 1,
@@ -12086,8 +12354,8 @@
             "kind": "control",
             "name": "open_decay",
             "range": {
-              "max": 60000.0,
-              "min": 0.1
+              "max": 4000.0,
+              "min": 20.0
             },
             "rate": 1,
             "unit": "ms"
@@ -12099,8 +12367,8 @@
             "kind": "generic",
             "name": "open_velocity",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 2.0,
+              "min": 0.0
             },
             "rate": 1,
             "unit": null
@@ -12112,8 +12380,8 @@
             "kind": "frequency",
             "name": "tone",
             "range": {
-              "max": 2104533974.55,
-              "min": 1.0
+              "max": 16000.0,
+              "min": 2000.0
             },
             "rate": 1,
             "unit": "Hz"
@@ -12165,8 +12433,8 @@
             "kind": "control",
             "name": "decay",
             "range": {
-              "max": 60000.0,
-              "min": 0.1
+              "max": 2000.0,
+              "min": 10.0
             },
             "rate": 1,
             "unit": "ms"
@@ -12178,7 +12446,7 @@
             "kind": "control",
             "name": "level",
             "range": {
-              "max": 24.0,
+              "max": 12.0,
               "min": -120.0
             },
             "rate": 1,
@@ -12191,8 +12459,8 @@
             "kind": "frequency",
             "name": "tune",
             "range": {
-              "max": 2147483647.5,
-              "min": 0.0
+              "max": 500.0,
+              "min": 40.0
             },
             "rate": 1,
             "unit": "Hz"
@@ -12204,8 +12472,8 @@
             "kind": "generic",
             "name": "velocity",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 2.0,
+              "min": 0.0
             },
             "rate": 1,
             "unit": null
@@ -12247,8 +12515,8 @@
             "kind": "control",
             "name": "decay",
             "range": {
-              "max": 60000.0,
-              "min": 0.1
+              "max": 200.0,
+              "min": 1.0
             },
             "rate": 1,
             "unit": "ms"
@@ -12260,7 +12528,7 @@
             "kind": "control",
             "name": "level",
             "range": {
-              "max": 24.0,
+              "max": 12.0,
               "min": -120.0
             },
             "rate": 1,
@@ -12273,8 +12541,8 @@
             "kind": "generic",
             "name": "tune",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 2000.0,
+              "min": 100.0
             },
             "rate": 1,
             "unit": null
@@ -12286,8 +12554,8 @@
             "kind": "generic",
             "name": "velocity",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 2.0,
+              "min": 0.0
             },
             "rate": 1,
             "unit": null
@@ -12329,8 +12597,8 @@
             "kind": "control",
             "name": "decay",
             "range": {
-              "max": 60000.0,
-              "min": 0.1
+              "max": 8000.0,
+              "min": 50.0
             },
             "rate": 1,
             "unit": "ms"
@@ -12342,7 +12610,7 @@
             "kind": "control",
             "name": "level",
             "range": {
-              "max": 24.0,
+              "max": 12.0,
               "min": -120.0
             },
             "rate": 1,
@@ -12355,8 +12623,8 @@
             "kind": "frequency",
             "name": "tone",
             "range": {
-              "max": 2104533974.55,
-              "min": 1.0
+              "max": 16000.0,
+              "min": 1000.0
             },
             "rate": 1,
             "unit": "Hz"
@@ -12368,8 +12636,8 @@
             "kind": "generic",
             "name": "velocity",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 2.0,
+              "min": 0.0
             },
             "rate": 1,
             "unit": null
