@@ -230,7 +230,7 @@ fn lookup(row: &[f64], p: f64) -> f64 {
 ///
 /// **Parameters**
 /// - `freq` (frequency, Hz, range `[0, sr/2]`, default 440, combine `add`).
-///   Declared `[0, (2³² − 1)/2]` as `std.osc`'s; `process` limits it to sr/2.
+///   Declared `[0, 100 000]` (ADR 0043) as `std.osc`'s; `process` limits it to sr/2.
 /// - `position` (generic, no unit, range `[0, 7]`, default 0, combine
 ///   `add`): the table, morphing linearly between neighbours (1.5 is half
 ///   saw, half square).

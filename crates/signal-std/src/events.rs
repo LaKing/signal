@@ -125,18 +125,21 @@ const TO_EVENTS: ModuleDescriptor = ModuleDescriptor {
             PortKind::Generic,
             None,
             0.0,
-            crate::SIGNAL_BOUND,
+            crate::GENERIC,
             0.0,
             Combine::Add,
         ),
-        parameter(
-            "on_change",
-            PortKind::Gate,
-            None,
-            0.0,
-            1.0,
-            1.0,
-            Combine::Replace,
+        crate::choice(
+            parameter(
+                "on_change",
+                PortKind::Gate,
+                None,
+                0.0,
+                1.0,
+                1.0,
+                Combine::Replace,
+            ),
+            crate::OFF_ON,
         ),
     ],
     feedthrough: Feedthrough::Direct,
@@ -155,7 +158,7 @@ const TO_EVENTS: ModuleDescriptor = ModuleDescriptor {
 /// - `out` (event out, generic): `Set` events.
 ///
 /// **Parameters**
-/// - `threshold` (generic, range `[0, 1e6]`, default 0, combine `add`).
+/// - `threshold` (generic, range `[0, 10⁵]` (ADR 0043), default 0, combine `add`).
 /// - `on_change` (gate, range `[0, 1]`, default 1, combine `replace`): above
 ///   0, a change sends.
 ///

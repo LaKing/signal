@@ -102,7 +102,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///
 /// **Parameters**
 /// - `freq` (frequency, Hz, range `[20, sr/8]`, default 220, combine `add`).
-///   Declared `[0, (2³² − 1)/2]` as `std.osc`'s; `process` limits the
+///   Declared `[0, 100 000]` (ADR 0043) as `std.osc`'s; `process` limits the
 ///   effective value to `[20, sr/8]`, so the loop is at least 8 frames long.
 /// - `decay_s` (control, seconds, range `[0.01, 60]`, default 2, combine
 ///   `add`): T60 of the fundamental, the time it takes to fall by 60 dB.

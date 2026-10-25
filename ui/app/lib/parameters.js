@@ -37,6 +37,8 @@ export function rows(description) {
       inSnapshots: c.inSnapshots !== false,
       taper: controlSpec(c, description).taper,
       kind: findParameter(description, c.address)?.kind ?? null,
+      // ADR 0043: a discrete control's values (a selector, not a slider).
+      values: c.values ?? null,
       editable: true,
     });
   }
@@ -54,6 +56,7 @@ export function rows(description) {
           max: p.range?.max ?? 1,
           default: p.default,
           base: p.base,
+          values: p.values ?? null,
           editable: false,
         });
       }
@@ -72,8 +75,8 @@ export function structureKey(list) {
     list.map((i) => [
       i.name,
       i.module,
-      i.parameters.map((p) => [p.address, p.name, p.unit, p.min, p.max, p.editable]),
-      i.inner.map((p) => [p.address, p.name, p.unit, p.min, p.max]),
+      i.parameters.map((p) => [p.address, p.name, p.unit, p.min, p.max, p.editable, p.values ?? null]),
+      i.inner.map((p) => [p.address, p.name, p.unit, p.min, p.max, p.values ?? null]),
     ]),
   );
 }

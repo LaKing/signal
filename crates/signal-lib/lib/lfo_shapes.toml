@@ -95,4 +95,4 @@ outputs = { out = "pick_0.out", sine = "sine.out", triangle = "triangle.out", sa
 # Each exported parameter with its own range (ADR 0042).
 [exports.parameters]
 rate = { to = "phasor.freq", min = 0, max = 1000 }
-shape = { to = "shape.value", min = 0, max = 4 }
+shape = { to = "shape.value", values = [{ value = 0, label = "sine" }, { value = 1, label = "triangle" }, { value = 2, label = "saw" }, { value = 3, label = "square" }, { value = 4, label = "random" }] }

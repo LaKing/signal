@@ -47,6 +47,7 @@ pub use convert::{CONVERTER_PREFIX, Conversion, converter, converter_name, conve
 pub use descriptor::{
     BlockLatency, Combine, Direction, Feedthrough, MAX_VECTOR_WIDTH, ModuleDescriptor,
     ParameterDescriptor, PortDescriptor, PortKind, PortShape, Range, Reproducibility, SinkKind,
+    ValueLabel, nearest_value,
 };
 pub use event::{Curve, Event, EventPayload};
 pub use module::{

@@ -155,7 +155,8 @@ pub fn plan(panel: &Panel, values: &Values) -> Restore {
             restore.skipped.push(skip("excluded".to_owned()));
             continue;
         }
-        let to = value.max(target.min).min(target.max);
+        // ADR 0043: a discrete control's value is the nearest of its values.
+        let to = target.take(*value);
         if to.to_bits() != value.to_bits() {
             restore.clamped.push(Clamped {
                 address: address.clone(),

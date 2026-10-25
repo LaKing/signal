@@ -2,7 +2,7 @@
 # the TPT one-pole, the same operations in the same order as the native, so
 # the pair is bit-exact (crates/signal-lib/tests/validation.rs).
 #
-#   fc = min(max(cutoff_hz, 1), min(0.49·sr, 318 309))
+#   fc = min(max(cutoff_hz, 1), min(0.49·sr, 100 000))
 #   g  = tan(π·fc/sr),   G = g/(1 + g)
 #   v  = (in − s)·G,   lp = v + s,   s ← flush(lp + v)
 #   hp = in − lp
@@ -10,9 +10,9 @@
 # flush(x) is exactly 0 when |x| < 1e-9, as the native's. The loop (s
 # through a std.unit_delay) runs one frame at a time; hp is outside it.
 #
-# Range differences from `std.onepole` (none at 8 to 192 kHz): the cutoff's
-# upper limit is capped at 318 309 Hz so π·fc stays within ±1e6; the cap
-# only acts above 649 610 Hz. Above 999 999 Hz std.sample_rate faults. The
+# Range differences from `std.onepole`: none in the cutoff (both end at
+# 100 kHz, ADR 0043, so π·fc stays within ±1e6). Above 999 999 Hz
+# std.sample_rate faults. The
 # state (about twice lp) is a signal: its std.add faults beyond ±1e6, and
 # in − s (a std.sub) clamps to it silently, so a large input faults, or near
 # the bound may clamp, where the native would not (measured: no fault and
@@ -22,14 +22,16 @@ schema_version = 1
 [composite]
 name = "onepole_core"
 category = "filter"
-description = "std.onepole rebuilt from core primitives (validation reference, bit-exact with std.onepole): a TPT one-pole filter. Input: in. Outputs: lp, hp (lp + hp = in). Parameter: cutoff_hz (Hz, limited to [1, 0.49·sr] and to 318 309, which acts only above 649 610 Hz, default 1000)."
+description = "std.onepole rebuilt from core primitives (validation reference, bit-exact with std.onepole): a TPT one-pole filter. Input: in. Outputs: lp, hp (lp + hp = in). Parameter: cutoff_hz (Hz, 1 to 100 000, limited to 0.49·sr, default 1000)."
 
 [instances]
 cutoff = { module = "std.const", value = 1000 }
 rate = { module = "std.sample_rate" }
 one = { module = "std.const", value = 1 }
 pi = { module = "std.const", value = 3.141592653589793 }
-cap = { module = "std.const", value = 318309 }
+# The cutoff range ends at 100 kHz (ADR 0043), the native's; so does the
+# cap (before, 318 309 Hz, which acted only above 649 610 Hz).
+cap = { module = "std.const", value = 100000 }
 nyquist = { module = "std.scale", mul = 0.49 }
 limit = { module = "std.min" }
 fc_lo = { module = "std.max" }
@@ -92,4 +94,4 @@ outputs = { lp = "lp.out", hp = "hp.out" }
 
 # Each exported parameter with its own range (ADR 0042).
 [exports.parameters]
-cutoff_hz = { to = "cutoff.value", min = 1, max = 1000000 }
+cutoff_hz = { to = "cutoff.value", min = 1, max = 100000 }

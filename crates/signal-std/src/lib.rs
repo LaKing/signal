@@ -280,7 +280,7 @@ pub use wavetable::Wavetable;
 use signal_core::{
     Combine, DirectPrimitive, Direction, Event, EventPayload, ModuleType, Outputs,
     ParameterDescriptor, PortDescriptor, PortKind, PortShape, Primitive, Range, RateDivisor,
-    Registry, RegistryError, StateOutputPrimitive,
+    Registry, RegistryError, StateOutputPrimitive, ValueLabel,
 };
 
 /// Each `std.*` type's static cost in ns per frame per instance: the seat's
@@ -702,6 +702,7 @@ pub(crate) const fn parameter_at(
         range: Range { min, max },
         default,
         combine,
+        values: None,
     }
 }
 
@@ -755,8 +756,44 @@ pub(crate) const fn parameter(
         range: Range { min, max },
         default,
         combine,
+        values: None,
     }
 }
+
+/// `parameter` with a value set (ADR 0043): a discrete parameter whose
+/// allowed values are `values`, each named; its range spans them.
+pub(crate) const fn choice(
+    parameter: ParameterDescriptor,
+    values: &'static [ValueLabel],
+) -> ParameterDescriptor {
+    ParameterDescriptor {
+        values: Some(values),
+        ..parameter
+    }
+}
+
+/// An entry of a value set.
+pub(crate) const fn named(value: f64, label: &'static str) -> ValueLabel {
+    ValueLabel { value, label }
+}
+
+/// ADR 0043: the range of a generic value parameter (`std.const`'s `value`,
+/// `std.scale`'s `mul` and `add`, `std.clamp`'s bounds, a table's elements,
+/// a step's value, …): wide enough for every use in the repository (Hz,
+/// ms, gains, frame counts up to 10⁵), well inside the engine's magnitude
+/// bound ±10⁶ (`docs/semantics.md` §7). A larger value is made with a
+/// connection's scale, which no parameter range limits.
+pub(crate) const GENERIC: f64 = 100_000.0;
+
+/// The interpolations of a buffer or a table.
+pub(crate) const INTERP_VALUES: &[ValueLabel] = &[
+    named(0.0, "none"),
+    named(1.0, "linear"),
+    named(2.0, "Hermite"),
+];
+
+/// An off/on gate parameter's values.
+pub(crate) const OFF_ON: &[ValueLabel] = &[named(0.0, "off"), named(1.0, "on")];
 
 /// The range `[−1, 1]` of a bipolar unit signal.
 pub(crate) const BIPOLAR: Option<Range> = Some(Range {

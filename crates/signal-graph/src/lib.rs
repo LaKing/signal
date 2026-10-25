@@ -30,8 +30,8 @@ use std::collections::BTreeMap;
 use signal_core::{Direction, PortAddress, PortShape, Registry};
 
 pub use def::{
-    CompositeDef, ConnectionDef, Exports, InputExport, InstanceDef, OutputExport, ParameterExport,
-    ScopeDef,
+    CompositeDef, ConnectionDef, ExportValue, Exports, InputExport, InstanceDef, OutputExport,
+    ParameterExport, ScopeDef,
 };
 pub use error::{GraphError, GraphWarning, PlanBudget, Restriction};
 pub use flatten::ModulePort;
@@ -166,4 +166,13 @@ pub fn build_plan(
         sources,
         warnings,
     })
+}
+
+/// ADR 0043: a value set as an error message lists it: `0 sine, 1 saw`.
+pub fn allowed_text<'a>(values: impl IntoIterator<Item = (f64, &'a str)>) -> String {
+    values
+        .into_iter()
+        .map(|(value, label)| format!("{value} {label}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }

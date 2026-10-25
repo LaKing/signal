@@ -397,7 +397,7 @@ const BELL_RATIOS: [f64; 12] = [
 ///
 /// **Parameters** (all combine `add`, all read on every frame)
 /// - `freq` (frequency, Hz, range `[1, sr/2]`, default 220): the frequency
-///   of ratio 1. Declared `[0, (2³² − 1)/2]` as `std.osc`'s; `process`
+///   of ratio 1. Declared `[0, 100 000]` (ADR 0043) as `std.osc`'s; `process`
 ///   limits it to at least 1 Hz, and a mode at or above `0.49·sr` gets no
 ///   excitation; a mode that rings there (moved up by a parameter while
 ///   ringing) fades out of the output by `h_k` and is silent from Nyquist

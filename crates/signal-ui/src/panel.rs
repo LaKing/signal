@@ -57,6 +57,9 @@ pub struct ParameterView {
     /// ADR 0041 §8: whether it goes into snapshots (not named in its
     /// instance's `snapshot_exclude`); false inside a composite.
     pub in_snapshots: bool,
+    /// ADR 0043: its value set (each value and its name), for a discrete
+    /// parameter: a selector instead of a slider; `None` for a continuous one.
+    pub values: Option<Vec<(f64, String)>>,
 }
 
 /// One top-level instance.
@@ -171,12 +174,17 @@ impl Panel {
             };
             for name in &names {
                 let targets = resolve(&composites, registry, &address, &def.module, name);
-                let Some((_, first, inner_value)) = targets.first() else {
+                let Some((_, first, inner_value, _)) = targets.first() else {
                     continue;
                 };
                 let (min, max) = targets.iter().fold((f64::MIN, f64::MAX), |(lo, hi), t| {
                     (lo.max(t.1.range.min), hi.min(t.1.range.max))
                 });
+                // ADR 0043: the value set every target shares, if any.
+                let values = targets
+                    .first()
+                    .and_then(|t| t.3.clone())
+                    .filter(|first| targets.iter().all(|t| t.3.as_ref() == Some(first)));
                 let default = inner_value.unwrap_or(first.default);
                 let file = def.parameters.get(name).copied();
                 let ports: Vec<PortAddress> = targets.iter().map(|t| t.0.clone()).collect();
@@ -194,6 +202,7 @@ impl Panel {
                         modulated: ports.iter().any(|p| modulated(plan, p)),
                         editable: true,
                         in_snapshots: !excluded.contains(name),
+                        values,
                     },
                     ports,
                     defaults,
@@ -226,6 +235,7 @@ impl Panel {
             min: row.view.min,
             max: row.view.max,
             order: i.order.clone(),
+            values: row.view.values.clone(),
         })
     }
 
@@ -368,9 +378,21 @@ pub struct Target {
     pub max: f64,
     /// The module's parameters in declared order.
     pub order: Vec<String>,
+    /// ADR 0043: its value set, if it is discrete.
+    pub values: Option<Vec<(f64, String)>>,
 }
 
 impl Target {
+    /// `value` as this parameter takes it live: clamped to its range and,
+    /// with a value set, the nearest of its values (ADR 0043).
+    pub fn take(&self, value: f64) -> f64 {
+        let clamped = value.max(self.min).min(self.max);
+        match &self.values {
+            Some(values) => nearest(values, clamped),
+            None => clamped,
+        }
+    }
+
     /// A value in range that no port has once `written` is in the file
     /// (`None`: the key removed, each port at its own default); `None` when
     /// the range is a single value. The running project takes it for a
@@ -381,6 +403,13 @@ impl Target {
             Some(value) => vec![value],
             None => self.defaults.clone(),
         };
+        // A discrete parameter takes one of its values that no port has.
+        if let Some(values) = &self.values {
+            return values
+                .iter()
+                .map(|(v, _)| *v)
+                .find(|v| !taken.iter().any(|t| t.to_bits() == v.to_bits()));
+        }
         let steps = taken.len() + 1;
         (0..=steps)
             .map(|k| self.min + (self.max - self.min) * k as f64 / steps as f64)
@@ -406,7 +435,7 @@ fn resolve(
     address: &InstanceAddress,
     module: &str,
     parameter: &str,
-) -> Vec<(PortAddress, ParameterDescriptor, Option<f64>)> {
+) -> Vec<Resolved> {
     if let Some(module) = registry.get(module) {
         let descriptor = module
             .descriptor
@@ -414,7 +443,7 @@ fn resolve(
             .iter()
             .find(|p| p.name == parameter);
         return match (descriptor, PortAddress::new(address, parameter)) {
-            (Some(d), Ok(port)) => vec![(port, *d, None)],
+            (Some(d), Ok(port)) => vec![(port, *d, None, descriptor_values(d))],
             _ => Vec::new(),
         };
     }
@@ -448,10 +477,47 @@ fn resolve(
             if let Some(range) = export.range {
                 target.1.range = range;
             }
+            // ADR 0043: and its own value set (each value allowed by every
+            // target), else the target's.
+            if let Some(values) = &export.values {
+                target.3 = Some(values.iter().map(|v| (v.value, v.label.clone())).collect());
+            }
             targets.push(target);
         }
     }
     targets
+}
+
+/// A resolved primitive parameter of a control: its port, its descriptor
+/// (with an export's own range), the value a composite sets on it, and its
+/// value set (an export's own, else the descriptor's).
+type Resolved = (
+    PortAddress,
+    ParameterDescriptor,
+    Option<f64>,
+    Option<Vec<(f64, String)>>,
+);
+
+/// A descriptor's value set as the panel keeps it (ADR 0043).
+fn descriptor_values(p: &ParameterDescriptor) -> Option<Vec<(f64, String)>> {
+    p.values.map(|values| {
+        values
+            .iter()
+            .map(|v| (v.value, v.label.to_owned()))
+            .collect()
+    })
+}
+
+/// `value` as the nearest of `values` (the lower of two as near); `value`
+/// itself for an empty set.
+pub fn nearest(values: &[(f64, String)], value: f64) -> f64 {
+    let mut best: Option<f64> = None;
+    for (v, _) in values {
+        if best.is_none_or(|b| (v - value).abs() < (b - value).abs()) {
+            best = Some(*v);
+        }
+    }
+    best.unwrap_or(value)
 }
 
 /// The parameters of the primitives inside the composite instance at
@@ -485,6 +551,7 @@ fn inner(plan: &ExecutionPlan, address: &InstanceAddress) -> Vec<Row> {
                     modulated: modulated(plan, &port),
                     editable: false,
                     in_snapshots: false,
+                    values: descriptor_values(p),
                 },
                 ports: vec![port],
                 defaults: vec![p.default],

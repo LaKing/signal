@@ -59,7 +59,10 @@ four = { module = "std.const", value = 4 }
 half = { module = "std.const", value = 0.5 }
 thousand = { module = "std.const", value = 1000 }
 minus_1000 = { module = "std.const", value = -1000 }
-top = { module = "std.const", value = 999999 }
+# 999 999 as 27 027 × 37 (ADR 0043: a constant is within ±10⁵; the
+# product of two integers is exact).
+top_base = { module = "std.const", value = 27027 }
+top = { module = "std.scale", mul = 37 }
 threshold = { module = "std.const", value = 1e-9 }
 # The attack length A = ⌊(a·sr)/1000 + ½⌋, a = min(attack, 999 999/(sr/1000)),
 # computed as (a·(sr·2⁻¹⁶))/(1000·2⁻¹⁶): the native's rounding, within ±1e6.
@@ -183,6 +186,7 @@ factor_next = { module = "std.select" }
 
 [wiring]
 connections = [
+  { from = "top_base.out", to = "top.in" },
   { from = "attack.out", to = "attack_lim.in" },
   { from = "decay.out", to = "decay_lim.in" },
   { from = "sustain.out", to = "sustain_lim.in" },

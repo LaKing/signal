@@ -103,6 +103,7 @@ const fn parameter(
         range: Range { min, max },
         default,
         combine,
+        values: None,
     }
 }
 

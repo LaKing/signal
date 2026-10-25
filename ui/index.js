@@ -32,6 +32,7 @@ import './app/lib/snapshots.test.js';
 import './app/lib/layout.test.js';
 import './app/lib/context.test.js';
 import './app/lib/messages.test.js';
+import './lib/value-set.test.js';
 import './lib/cards.test.js';
 import './controls/panel.test.js';
 import './controls/entry-field.test.js';

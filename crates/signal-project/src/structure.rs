@@ -485,7 +485,15 @@ impl Walk<'_> {
                         if let Some(range) = self.export_range(inner, &export.name) {
                             p.range = range;
                         }
-                        Some(parameter_json(&p, &export.name, &at(&export.name)))
+                        let mut value = parameter_json(&p, &export.name, &at(&export.name));
+                        // ADR 0043: its own value set, else an inner export's on the
+                        // way, else the target's (in the descriptor's JSON).
+                        if let (Some(values), Value::Object(fields)) =
+                            (self.export_values(inner, &export.name), &mut value)
+                        {
+                            fields.insert("values".to_owned(), values);
+                        }
+                        Some(value)
                     }
                     Endpoint::Port(_) => None,
                 }
@@ -533,9 +541,17 @@ impl Walk<'_> {
             def.exports
                 .parameters
                 .iter()
-                .map(|e| match e.range {
-                    Some(range) => json!({"name": e.name, "to": e.to, "range": range}),
-                    None => json!({"name": e.name, "to": e.to}),
+                .map(|e| {
+                    let mut value = json!({"name": e.name, "to": e.to});
+                    if let Value::Object(fields) = &mut value {
+                        if let Some(range) = e.range {
+                            fields.insert("range".to_owned(), json!(range));
+                        }
+                        if let Some(values) = &e.values {
+                            fields.insert("values".to_owned(), json!(values));
+                        }
+                    }
+                    value
                 })
                 .collect(),
         )
@@ -616,6 +632,20 @@ impl Walk<'_> {
         let instance = self.instance(def, instance)?;
         let inner = self.by_name.get(instance.module.as_str())?;
         self.export_range(inner, port)
+    }
+
+    /// ADR 0043: the value set exported parameter `name` of `def` declares,
+    /// else the one an inner composite's export it reaches first declares,
+    /// as `graph` gives it (`[{value, label}]`).
+    fn export_values(&self, def: &CompositeDef, name: &str) -> Option<Value> {
+        let export = def.exports.parameters.iter().find(|e| e.name == name)?;
+        if let Some(values) = &export.values {
+            return Some(json!(values));
+        }
+        let (instance, port) = export.to.first()?.split_once('.')?;
+        let instance = self.instance(def, instance)?;
+        let inner = self.by_name.get(instance.module.as_str())?;
+        self.export_values(inner, port)
     }
 
     /// Instance `name` of `def`.

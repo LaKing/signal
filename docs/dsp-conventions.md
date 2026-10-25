@@ -15,10 +15,11 @@
 ## Ranges
 
 - Every parameter declares a range and a default inside it. The executor clamps the effective value to the range (ADR 0016 §4), so a primitive never sees a value outside it.
-- A descriptor is static, so a range cannot depend on the sample rate. A rate-dependent limit, such as `sr/2` for an oscillator frequency, is declared as the widest static bound and applied in `process`. The rustdoc states both.
+- Every range is meaningful (ADR 0043, the owner's "MINDEN kapjon értelmezési tartományt vagy értékkészletet"): never the engine's ±10⁶ bound as "any value", always finite and within it. A generic value (`std.const`'s, `std.scale`'s, a table's element) takes ±10⁵ (`signal_std::GENERIC`); a larger one comes through a connection's scale.
+- A descriptor is static, so a range cannot depend on the sample rate. A rate-dependent limit, such as `sr/2` for an oscillator frequency, is applied in `process`; the declared range ends at a meaningful static value: 100 kHz for a frequency, a cutoff or a spring frequency (`sr/2` at 200 kHz; the rate-dependent limit acts below it at every lower rate). The rustdoc states both.
 - Declare the range of an output when it is known (`[−1, 1]` for a sine). Declare no range for a signal input that accepts any value.
 - A choice with one value in M1 (such as `std.lfo`'s `shape`) is a parameter with a one-point range, so that later values do not change the port layout.
-- A choice with *N* values is an integer-valued parameter with the static range `[0, N−1]`. `process` rounds it with `round_half_up` on every frame, and the rustdoc lists what each integer selects. Example: `std.osc`'s `shape` (0 sine, 1 saw, 2 square, 3 triangle).
+- A choice with *N* values is an integer-valued parameter with the static range `[0, N−1]` and a **value set** naming each value (ADR 0043: `choice(parameter(…), &[named(0.0, "sine"), …])`), so a panel shows a selector and a file or an edit can only give one of them. `process` rounds it with `round_half_up` on every frame (a connected signal still modulates it), and the rustdoc lists what each integer selects. Example: `std.osc`'s `shape` (0 sine, 1 saw, 2 square, 3 triangle). An on/off gate parameter (`std.playhead`'s `run`, a table's `wrap`) has a value set too; an integer count (`modes`, `divide`, `ppq`) keeps a range.
 
 ## Numbers: f64
 
@@ -88,7 +89,7 @@ A naive saw, square or triangle computed from the phase has infinitely many harm
 
 Filters are written in the topology-preserving transform (TPT, Zavalishin) form: the analog structure is kept, and each integrator is discretised with the trapezoidal rule. The result is the bilinear transform of the analog prototype, prewarped so the cutoff is exact. Unlike a direct-form biquad, the state stays meaningful when the coefficients change, so the filter is stable under audio-rate modulation of its cutoff.
 
-- The integrator gain is `g = tan(π·fc/sr)` (`libm::tan`). The cutoff is clamped in `process` to `[1, 0.49·sr]`, which keeps `g` finite. The declared range is the static bound `[1, 0.49·(2³² − 1)]`.
+- The integrator gain is `g = tan(π·fc/sr)` (`libm::tan`). The cutoff is clamped in `process` to `[1, 0.49·sr]`, which keeps `g` finite. The declared range is `[1, 100 000]` (ADR 0043).
 - A trapezoidal integrator keeps one state `s`. Each frame computes `v = g·u`, outputs `y = v + s`, and stores `s ← y + v`.
 - **One-pole** (`std.onepole`): `G = g/(1 + g)`, `v = (x − s)·G`, `lp = v + s`, `s ← lp + v`, `hp = x − lp`.
 - **State-variable** (`std.svf`): `k = 1/q`, then `hp = (x − (k + g)·s₁ − s₂)/(1 + k·g + g²)`, `bp` and `lp` from two integrators in series. `lp + k·bp + hp = x`, and `bp` has gain `q` at the cutoff.

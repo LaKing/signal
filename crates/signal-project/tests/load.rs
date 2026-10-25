@@ -116,11 +116,13 @@ fn example_loads_into_the_description_model() {
                         name: "drive".to_owned(),
                         to: strings(&["shaper.drive"]),
                         range: None,
+                        values: None,
                     },
                     ParameterExport {
                         name: "freq".to_owned(),
                         to: strings(&["low.freq", "high.freq"]),
                         range: None,
+                        values: None,
                     },
                 ],
             },

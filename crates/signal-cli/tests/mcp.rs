@@ -419,6 +419,29 @@ fn an_export_s_own_range() {
         json!({"address": "/kick.attack", "value": -1000000}),
     );
     assert_eq!(control_base(&mut mcp, "/kick.attack"), 0.0, "clamped");
+    // ADR 0043: a discrete export's value set, named, and the nearest taken.
+    let synth = mcp.ok("describe_instance", json!({"address": "synth"}));
+    let wave = synth["controls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["address"] == "/synth.osc1_wave")
+        .unwrap_or_else(|| panic!("{synth}"))
+        .clone();
+    assert_eq!(
+        wave["values"][3],
+        json!({"value": 3.0, "label": "triangle"}),
+        "{wave}"
+    );
+    mcp.ok(
+        "set_parameter",
+        json!({"address": "/synth.osc1_wave", "value": 2.3}),
+    );
+    assert_eq!(
+        control_base(&mut mcp, "/synth.osc1_wave"),
+        2.0,
+        "the nearest value"
+    );
     assert!(mcp.finish().success());
 }
 

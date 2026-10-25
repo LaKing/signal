@@ -55,6 +55,18 @@ live. No composite's output changed (every pinned hash above holds); each
 composite's content hash in a render manifest (`library_composite_hashes`)
 did.
 
+Ranges and value sets (ADR 0043, the owner's "MINDEN kapjon értelmezési
+tartományt vagy értékkészletet", 2026-10-25): the discrete exports declare a
+value set instead of a range (`lib.ladder_voice`'s oscillator waves and
+octaves, `lib.lfo_shapes`' shape, `lib.modal_voice`'s exciter kind,
+`lib.transport`'s run). Every constant is within the generic ±10⁵ now:
+`lib.adsr_core` and `lib.delay_core` make 999 999 as 27 027 × 37 (exact),
+`lib.onepole_core` and `lib.svf_core` cap the cutoff at 100 000 Hz, their
+range's end and the native's (before, 318 309 Hz, which acted only above
+649 610 Hz), `lib.osc_core`'s frequency ends at 100 000 Hz and
+`lib.modal_voice`'s pitch clamp at 100 000 Hz. No composite's output
+changed (every pinned hash above holds); content hashes did.
+
 ## 0.1
 
 The first library (M2.10-3). Each line: the composite, its category, and its

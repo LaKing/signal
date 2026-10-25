@@ -740,7 +740,18 @@ pub(crate) enum Targets {
         to: Box<Targets>,
         group: Option<String>,
         range: Option<(f64, f64)>,
+        /// ADR 0043: an exported parameter's value set, `values = [{ value
+        /// = 0, label = "sine" }, …]` (not with `min` and `max`).
+        values: Option<Vec<(f64, String)>>,
     },
+}
+
+/// One entry of an export's value set (ADR 0043).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ValueEntry {
+    value: f64,
+    label: String,
 }
 
 impl Targets {
@@ -756,6 +767,14 @@ impl Targets {
     pub(crate) fn range(&self) -> Option<(f64, f64)> {
         match self {
             Targets::Table { range, .. } => *range,
+            _ => None,
+        }
+    }
+
+    /// ADR 0043: the export's own value set, if the table gives one.
+    pub(crate) fn values(&self) -> Option<&[(f64, String)]> {
+        match self {
+            Targets::Table { values, .. } => values.as_deref(),
             _ => None,
         }
     }
@@ -844,20 +863,58 @@ impl<'de> Deserialize<'de> for Targets {
 
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Targets, A::Error> {
                 let (mut to, mut group, mut min, mut max) = (None, None, None, None);
+                let mut values: Option<Vec<ValueEntry>> = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "to" => to = Some(map.next_value::<Targets>()?),
                         "group" => group = Some(map.next_value::<String>()?),
                         "min" => min = Some(map.next_value::<f64>()?),
                         "max" => max = Some(map.next_value::<f64>()?),
+                        "values" => values = Some(map.next_value::<Vec<ValueEntry>>()?),
                         other => {
                             return Err(de::Error::unknown_field(
                                 other,
-                                &["to", "group", "min", "max"],
+                                &["to", "group", "min", "max", "values"],
                             ));
                         }
                     }
                 }
+                if values.is_some() && (min.is_some() || max.is_some()) {
+                    return Err(de::Error::custom(
+                        "an export takes a value set (`values`) or a range (`min`, `max`), not both: its range is the values' span (ADR 0043)",
+                    ));
+                }
+                let values = match values {
+                    None => None,
+                    Some(entries) => {
+                        if entries.is_empty() {
+                            return Err(de::Error::custom("an export's `values` is empty"));
+                        }
+                        let mut set: Vec<(f64, String)> = Vec::new();
+                        for entry in entries {
+                            if !entry.value.is_finite() {
+                                return Err(de::Error::custom(
+                                    "an export's values must be finite numbers",
+                                ));
+                            }
+                            if entry.label.trim().is_empty() {
+                                return Err(de::Error::custom(format!(
+                                    "the value {} of an export has no label",
+                                    entry.value
+                                )));
+                            }
+                            if set.iter().any(|(v, _)| *v == entry.value) {
+                                return Err(de::Error::custom(format!(
+                                    "the value {} is in an export's `values` twice",
+                                    entry.value
+                                )));
+                            }
+                            set.push((entry.value, entry.label));
+                        }
+                        set.sort_by(|a, b| a.0.total_cmp(&b.0));
+                        Some(set)
+                    }
+                };
                 let to = to.ok_or_else(|| de::Error::missing_field("to"))?;
                 if matches!(to, Targets::Table { .. }) {
                     return Err(de::Error::custom(
@@ -885,13 +942,14 @@ impl<'de> Deserialize<'de> for Targets {
                         ));
                     }
                 };
-                Ok(if group.is_none() && range.is_none() {
+                Ok(if group.is_none() && range.is_none() && values.is_none() {
                     to
                 } else {
                     Targets::Table {
                         to: Box::new(to),
                         group,
                         range,
+                        values,
                     }
                 })
             }
@@ -920,7 +978,7 @@ impl JsonSchema for Targets {
 
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
         json_schema!({
-            "description": "One inner port `instance.port`, or a non-empty list of them (fan-out), or a table with them as `to`, the schematic's `group` of the export and (an exported parameter, ADR 0042) its own range `min` and `max`, both or neither, inside every target's range.",
+            "description": "One inner port `instance.port`, or a non-empty list of them (fan-out), or a table with them as `to`, the schematic's `group` of the export and (an exported parameter, ADR 0042) its own range `min` and `max`, both or neither, inside every target's range, or (ADR 0043) its value set `values` instead.",
             "anyOf": [
                 { "type": "string" },
                 { "type": "array", "items": { "type": "string" }, "minItems": 1 },
@@ -935,7 +993,17 @@ impl JsonSchema for Targets {
                         },
                         "group": { "type": "string" },
                         "min": { "type": "number" },
-                        "max": { "type": "number" }
+                        "max": { "type": "number" },
+                        "values": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {
+                                "type": "object",
+                                "properties": { "value": { "type": "number" }, "label": { "type": "string" } },
+                                "required": ["value", "label"],
+                                "additionalProperties": false
+                            }
+                        }
                     },
                     "required": ["to"],
                     "dependentRequired": { "min": ["max"], "max": ["min"] },

@@ -10,11 +10,18 @@ use crate::{at, parameter, round_half_up, signal_port};
 
 /// The most masses a chain has.
 pub(crate) const MAX_MASSES: usize = 32;
+/// The ends `boundary` selects (ADR 0043: its value set).
+const BOUNDARY_VALUES: &[signal_core::ValueLabel] = &[
+    crate::named(0.0, "fixed–fixed"),
+    crate::named(1.0, "fixed–free"),
+];
+
 const MASSES: f64 = 8.0;
 const SPRING_HZ: f64 = 100.0;
 /// The upper end of `spring_hz`'s declared range: the stability bound
 /// `sr/2π` at the highest sample rate the engine accepts.
-const SPRING_MAX: f64 = u32::MAX as f64 / std::f64::consts::TAU;
+/// ADR 0043: 100 kHz; `process` limits it to the stability bound.
+const SPRING_MAX: f64 = 100_000.0;
 const DECAY_S: f64 = 2.0;
 const DRIVE_NODE: f64 = 1.0;
 const PICKUP_NODE: f64 = 2.0;
@@ -54,14 +61,17 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
             DECAY_S,
             Combine::Add,
         ),
-        parameter(
-            "boundary",
-            PortKind::Generic,
-            None,
-            0.0,
-            1.0,
-            0.0,
-            Combine::Replace,
+        crate::choice(
+            parameter(
+                "boundary",
+                PortKind::Generic,
+                None,
+                0.0,
+                1.0,
+                0.0,
+                Combine::Replace,
+            ),
+            BOUNDARY_VALUES,
         ),
         parameter(
             "drive_node",
@@ -102,7 +112,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///   `M = round_half_up(masses)`.
 /// - `spring_hz` (frequency, Hz, range `[0, sr/2π]`, default 100, combine
 ///   `add`): `ω_s/2π`, where `ω_s² = k/m` is one spring on one mass. Declared
-///   `[0, (2³² − 1)/2π]`; `process` limits it to the stability bound `sr/2π`
+///   `[0, 100 000]` (ADR 0043); `process` limits it to the stability bound `sr/2π`
 ///   of the rate it was prepared at.
 /// - `decay_s` (control, seconds, range `[0.01, 60]`, default 2, combine
 ///   `add`): the T60 of every mode.

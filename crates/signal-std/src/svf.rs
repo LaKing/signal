@@ -11,7 +11,9 @@ use crate::{FLUSH_THRESHOLD, at, parameter, signal_port};
 /// sample rate the engine accepts (any non-zero `u32`), so the executor's clamp
 /// to the range never cuts a cutoff below `0.49·sr`. The effective limit is
 /// applied in `process`. `std.onepole` uses it too.
-pub(crate) const CUTOFF_MAX: f64 = 0.49 * u32::MAX as f64;
+/// ADR 0043: a filter's cutoff range ends at 100 kHz; `process` limits it
+/// to `0.49·sr` at lower rates.
+pub(crate) const CUTOFF_MAX: f64 = 100_000.0;
 pub(crate) const CUTOFF: f64 = 1000.0;
 /// The specified default, a readable 0.7071 rather than 1/√2.
 #[allow(clippy::approx_constant)]
@@ -67,7 +69,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///
 /// **Parameters**
 /// - `cutoff_hz` (frequency, Hz, range `[1, 0.49·sr]`, default 1000, combine
-///   `add`). Declared `[1, 0.49·(2³² − 1)]`: `0.49·sr` at the highest sample
+///   `add`). Declared `[1, 100 000]` (ADR 0043; before, `[1, 0.49·(2³² − 1)]`): `0.49·sr` at the highest sample
 ///   rate the engine accepts; `process` limits the effective value to
 ///   `0.49·sr` of the rate it was prepared at.
 /// - `q` (generic, no unit, range `[0.5, 40]`, default 0.7071, combine `add`).

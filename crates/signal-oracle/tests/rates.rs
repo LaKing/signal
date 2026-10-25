@@ -149,10 +149,14 @@ impl Generator<'_> {
         for p in d.parameters {
             if self.rng.chance(50) {
                 let (lo, hi) = (p.range.min.max(-1e3), p.range.max.min(1e3));
-                let value = if lo > hi {
-                    p.range.min
-                } else {
-                    self.rng.between(lo, hi)
+                let value = match p.values {
+                    // ADR 0043: a discrete parameter takes one of its values.
+                    Some(values) if !values.is_empty() => {
+                        let at = self.rng.between(0.0, values.len() as f64) as usize;
+                        values[at.min(values.len() - 1)].value
+                    }
+                    _ if lo > hi => p.range.min,
+                    _ => self.rng.between(lo, hi),
                 };
                 parameters.push((p.name.to_owned(), value));
             }

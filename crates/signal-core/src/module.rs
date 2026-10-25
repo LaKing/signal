@@ -406,6 +406,7 @@ impl EventSink {
 ///         range: Range { min: 0.0, max: 4.0 },
 ///         default: 1.0,
 ///         combine: Combine::Multiply,
+///         values: None,
 ///     }],
 ///     feedthrough: Feedthrough::Direct,
 ///     sink: None,

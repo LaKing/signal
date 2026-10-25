@@ -8,6 +8,10 @@ use signal_core::{
 
 use crate::{SIGNAL_BOUND, at, event_port, parameter, port_at, push_trigger, signal_port};
 
+/// A playhead stopped or running, by `run` (ADR 0043: its value set).
+const RUN_VALUES: &[signal_core::ValueLabel] =
+    &[crate::named(0.0, "stopped"), crate::named(1.0, "running")];
+
 const SEEK: usize = 0;
 
 /// Signal outputs, in order.
@@ -78,7 +82,10 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
             DEFAULT_BPM,
             Combine::Add,
         ),
-        parameter("run", PortKind::Gate, None, 0.0, 1.0, 1.0, Combine::Replace),
+        crate::choice(
+            parameter("run", PortKind::Gate, None, 0.0, 1.0, 1.0, Combine::Replace),
+            RUN_VALUES,
+        ),
         parameter(
             "rate",
             PortKind::Control,

@@ -15,6 +15,16 @@ use signal_core::{
 use crate::math::{bounded, stateless};
 use crate::{at, parameter, round_half_up, signal_port};
 
+/// The comparisons `mode` selects (ADR 0043: its value set).
+const MODE_VALUES: &[signal_core::ValueLabel] = &[
+    crate::named(0.0, "lt"),
+    crate::named(1.0, "le"),
+    crate::named(2.0, "eq"),
+    crate::named(3.0, "ge"),
+    crate::named(4.0, "gt"),
+    crate::named(5.0, "ne"),
+];
+
 /// A gate output: 0 or 1.
 const GATE_OUT: PortDescriptor = signal_port(
     "out",
@@ -49,14 +59,17 @@ const COMPARE: ModuleDescriptor = ModuleDescriptor {
         signal_port("b", Direction::In, PortKind::Generic, None, None),
         GATE_OUT,
     ],
-    parameters: &[parameter(
-        "mode",
-        PortKind::Generic,
-        None,
-        0.0,
-        5.0,
-        0.0,
-        Combine::Replace,
+    parameters: &[crate::choice(
+        parameter(
+            "mode",
+            PortKind::Generic,
+            None,
+            0.0,
+            5.0,
+            0.0,
+            Combine::Replace,
+        ),
+        MODE_VALUES,
     )],
     feedthrough: Feedthrough::Direct,
     sink: None,

@@ -1604,12 +1604,12 @@ fn definition(
     }
 
     let mut exported = Exports::default();
-    for (name, targets, group, range) in fan_out(exports.inputs) {
-        if range.is_some() {
+    for (name, targets, group, range, values) in fan_out(exports.inputs) {
+        if range.is_some() || values.is_some() {
             problems.push((
                 name.1.start,
                 format!(
-                    "export `{}`: `min` and `max` give an exported parameter its range (ADR 0042); an exported input has none",
+                    "export `{}`: `min` and `max` or `values` give an exported parameter its range or value set (ADR 0042, 0043); an exported input has none",
                     name.0
                 ),
             ));
@@ -1634,11 +1634,21 @@ fn definition(
             .exports
             .push(export_spans(ExportKind::Output, key, targets, target.group));
     }
-    for (name, targets, group, range) in fan_out(exports.parameters) {
+    for (name, targets, group, range, values) in fan_out(exports.parameters) {
+        // ADR 0043: a value set's range is its span.
+        let range = range.or_else(|| {
+            let values = values.as_ref()?;
+            Some((values.first()?.0, values.last()?.0))
+        });
         exported.parameters.push(ParameterExport {
             name: name.0.clone(),
             to: targets.iter().map(|(t, _)| t.clone()).collect(),
             range: range.map(|(min, max)| signal_core::Range { min, max }),
+            values: values.map(|set| {
+                set.into_iter()
+                    .map(|(value, label)| signal_graph::ExportValue { value, label })
+                    .collect()
+            }),
         });
         spans
             .exports
@@ -1648,13 +1658,14 @@ fn definition(
     (def, spans, problems)
 }
 
-/// An export name and its targets, each with its span, its schematic group
-/// and its own range (ADR 0042).
+/// An export name and its targets, each with its span, its schematic group,
+/// its own range (ADR 0042) and its own value set (ADR 0043).
 type FanOut = (
     (String, Span),
     Vec<(String, Span)>,
     Option<String>,
     Option<(f64, f64)>,
+    Option<Vec<(f64, String)>>,
 );
 
 /// Export tables as names and target lists; a single target string is a list
@@ -1677,11 +1688,13 @@ fn fan_out(table: ExportTargets) -> Vec<FanOut> {
             let targets = targets.into_inner();
             let group = targets.group().map(str::to_owned);
             let range = targets.range();
+            let values = targets.values().map(<[(f64, String)]>::to_vec);
             (
                 (name.get_ref().clone(), name.span()),
                 list(targets, span),
                 group,
                 range,
+                values,
             )
         })
         .collect()

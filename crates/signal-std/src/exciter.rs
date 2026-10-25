@@ -8,6 +8,14 @@ use signal_core::{
 use crate::svf::flush;
 use crate::{at, event_port, parameter, round_half_up, signal_port, triggered};
 
+/// The excitations `kind` selects (ADR 0043: its value set).
+const KIND_VALUES: &[signal_core::ValueLabel] = &[
+    crate::named(0.0, "pluck"),
+    crate::named(1.0, "strike"),
+    crate::named(2.0, "noise burst"),
+    crate::named(3.0, "bow"),
+];
+
 /// The default `kind`: strike.
 const STRIKE: f64 = 1.0;
 const LEVEL: f64 = 1.0;
@@ -30,14 +38,17 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
         signal_port("out", Direction::Out, PortKind::Audio, None, None),
     ],
     parameters: &[
-        parameter(
-            "kind",
-            PortKind::Generic,
-            None,
-            0.0,
-            3.0,
-            STRIKE,
-            Combine::Replace,
+        crate::choice(
+            parameter(
+                "kind",
+                PortKind::Generic,
+                None,
+                0.0,
+                3.0,
+                STRIKE,
+                Combine::Replace,
+            ),
+            KIND_VALUES,
         ),
         parameter("level", PortKind::Gain, None, 0.0, 1.0, LEVEL, Combine::Add),
         parameter(

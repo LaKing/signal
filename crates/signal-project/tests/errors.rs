@@ -180,7 +180,7 @@ fn a_table_value_out_of_range_is_refused_at_load() {
     );
     assert_eq!(
         project_errors(&text),
-        "project.toml:9:45: error: /tab.v2: value 2000000 is outside [-1000000, 1000000]"
+        "project.toml:9:45: error: /tab.v2: value 2000000 is outside [-100000, 100000]"
     );
 }
 

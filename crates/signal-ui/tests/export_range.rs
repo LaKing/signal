@@ -103,7 +103,10 @@ fn describe_and_graph_give_the_export_s_range(transport: Transport) {
     assert_eq!(attack["default"], 0.5);
     let freq = control(&described, "/v.freq");
     assert_eq!(freq["min"], 0.0, "std.sine_osc's own range: {freq}");
-    assert!(freq["max"].as_f64().unwrap() > 1e6, "{freq}");
+    assert_eq!(
+        freq["max"], 100_000.0,
+        "std.sine_osc's own range (ADR 0043): {freq}"
+    );
 
     let graph = rig.request(&mut ws, 2, json!({"type": "graph"}), "graph");
     let text = graph.to_string();
@@ -172,7 +175,122 @@ fn a_restore_clamps_to_the_export_s_range(transport: Transport) {
     let _ = fs::remove_dir_all(&source);
 }
 
+/// ADR 0043: a discrete control (std.osc's `shape`, and an export of it
+/// with its own value set): `describe` gives its values, named; `set`,
+/// `commit` and a restore take the nearest of them.
+fn a_value_set_control_takes_the_nearest_value(transport: Transport) {
+    let source = std::env::temp_dir().join(format!(
+        "signal-ui-value-set-source-{transport:?}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&source);
+    fs::create_dir_all(source.join("composites")).unwrap();
+    fs::write(
+        source.join("project.toml"),
+        r#"schema_version = 1
+
+[project]
+name = "choices"
+sample_rate = 48000
+
+[instances]
+o = { module = "std.osc", freq = 110, shape = 1 }
+v = { module = "voice" }
+out = { module = "std.audio_out", gain = 0.25 }
+
+[wiring]
+connections = [
+  { from = "o.out", to = "out.l" },
+  { from = "v.out", to = "out.r" },
+]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        source.join("composites/voice.toml"),
+        r#"schema_version = 1
+
+[composite]
+name = "voice"
+
+[instances]
+osc = { module = "std.osc", freq = 220 }
+
+[exports]
+outputs = { out = "osc.out" }
+parameters = { wave = { to = "osc.shape", values = [{ value = 0, label = "sine" }, { value = 2, label = "square" }] } }
+"#,
+    )
+    .unwrap();
+    let mut rig = rig(
+        "value-set",
+        Options {
+            transport,
+            project: Some(source.clone()),
+            ..Options::default()
+        },
+    );
+    let (mut ws, _) = rig.client();
+    let described = describe(&mut rig, &mut ws, 1);
+    assert_eq!(
+        control(&described, "/o.shape")["values"],
+        json!([
+            {"value": 0.0, "label": "sine"},
+            {"value": 1.0, "label": "saw"},
+            {"value": 2.0, "label": "square"},
+            {"value": 3.0, "label": "triangle"},
+        ])
+    );
+    assert_eq!(
+        control(&described, "/v.wave")["values"],
+        json!([{"value": 0.0, "label": "sine"}, {"value": 2.0, "label": "square"}]),
+        "the export's own"
+    );
+    assert_eq!(
+        control(&described, "/out.gain")["values"],
+        Value::Null,
+        "continuous"
+    );
+    rig.request(
+        &mut ws,
+        2,
+        json!({"type": "set", "address": "/o.shape", "value": 2.4}),
+        "ack",
+    );
+    assert_eq!(
+        control(&describe(&mut rig, &mut ws, 3), "/o.shape")["base"],
+        2.0
+    );
+    rig.request(
+        &mut ws,
+        4,
+        json!({"type": "commit", "address": "/v.wave", "value": 1.2}),
+        "committed",
+    );
+    let text = fs::read_to_string(rig.dir.join("project.toml")).unwrap();
+    assert!(text.contains("wave = 2"), "the nearest of 0 and 2: {text}");
+    fs::write(
+        rig.dir.join(SNAPSHOTS_FILE),
+        "schema_version = 1\n\n[snapshots.odd]\n\"/o.shape\" = 0.4\n",
+    )
+    .unwrap();
+    let restored = rig.request(
+        &mut ws,
+        5,
+        json!({"type": "snapshot.restore", "name": "odd"}),
+        "snapshot.restored",
+    );
+    assert_eq!(
+        restored["clamped"],
+        json!([{"address": "/o.shape", "value": 0.4, "to": 0.0}]),
+        "{restored}"
+    );
+    rig.finish();
+    let _ = fs::remove_dir_all(&source);
+}
+
 both!(
+    a_value_set_control_takes_the_nearest_value,
     describe_and_graph_give_the_export_s_range,
     set_and_commit_clamp_to_the_export_s_range,
     a_restore_clamps_to_the_export_s_range,

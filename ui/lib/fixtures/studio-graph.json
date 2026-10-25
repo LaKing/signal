@@ -107,7 +107,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -176,8 +176,8 @@
               "kind": "generic",
               "name": "mul",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -189,8 +189,8 @@
               "kind": "generic",
               "name": "add",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -389,8 +389,8 @@
               "kind": "generic",
               "name": "mul",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -402,8 +402,8 @@
               "kind": "generic",
               "name": "add",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -545,7 +545,7 @@
               "kind": "frequency",
               "name": "cutoff_hz",
               "range": {
-                "max": 2104533974.55,
+                "max": 100000.0,
                 "min": 1.0
               },
               "rate": 1,
@@ -660,8 +660,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -908,7 +908,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -925,7 +925,25 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "sine",
+                  "value": 0.0
+                },
+                {
+                  "label": "saw",
+                  "value": 1.0
+                },
+                {
+                  "label": "square",
+                  "value": 2.0
+                },
+                {
+                  "label": "triangle",
+                  "value": 3.0
+                }
+              ]
             },
             {
               "address": "sq1.pulse_width",
@@ -980,7 +998,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -997,7 +1015,25 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "sine",
+                  "value": 0.0
+                },
+                {
+                  "label": "saw",
+                  "value": 1.0
+                },
+                {
+                  "label": "square",
+                  "value": 2.0
+                },
+                {
+                  "label": "triangle",
+                  "value": 3.0
+                }
+              ]
             },
             {
               "address": "sq2.pulse_width",
@@ -1052,7 +1088,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -1069,7 +1105,25 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "sine",
+                  "value": 0.0
+                },
+                {
+                  "label": "saw",
+                  "value": 1.0
+                },
+                {
+                  "label": "square",
+                  "value": 2.0
+                },
+                {
+                  "label": "triangle",
+                  "value": 3.0
+                }
+              ]
             },
             {
               "address": "sq3.pulse_width",
@@ -1124,7 +1178,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -1141,7 +1195,25 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "sine",
+                  "value": 0.0
+                },
+                {
+                  "label": "saw",
+                  "value": 1.0
+                },
+                {
+                  "label": "square",
+                  "value": 2.0
+                },
+                {
+                  "label": "triangle",
+                  "value": 3.0
+                }
+              ]
             },
             {
               "address": "sq4.pulse_width",
@@ -1196,7 +1268,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -1213,7 +1285,25 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "sine",
+                  "value": 0.0
+                },
+                {
+                  "label": "saw",
+                  "value": 1.0
+                },
+                {
+                  "label": "square",
+                  "value": 2.0
+                },
+                {
+                  "label": "triangle",
+                  "value": 3.0
+                }
+              ]
             },
             {
               "address": "sq5.pulse_width",
@@ -1268,7 +1358,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -1285,7 +1375,25 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "sine",
+                  "value": 0.0
+                },
+                {
+                  "label": "saw",
+                  "value": 1.0
+                },
+                {
+                  "label": "square",
+                  "value": 2.0
+                },
+                {
+                  "label": "triangle",
+                  "value": 3.0
+                }
+              ]
             },
             {
               "address": "sq6.pulse_width",
@@ -1586,7 +1694,7 @@
               "kind": "frequency",
               "name": "cutoff_hz",
               "range": {
-                "max": 2104533974.55,
+                "max": 100000.0,
                 "min": 1.0
               },
               "rate": 1,
@@ -1662,7 +1770,7 @@
               "kind": "frequency",
               "name": "cutoff_hz",
               "range": {
-                "max": 2104533974.55,
+                "max": 100000.0,
                 "min": 1.0
               },
               "rate": 1,
@@ -1836,8 +1944,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -2181,7 +2289,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -2198,7 +2306,25 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "sine",
+                  "value": 0.0
+                },
+                {
+                  "label": "saw",
+                  "value": 1.0
+                },
+                {
+                  "label": "square",
+                  "value": 2.0
+                },
+                {
+                  "label": "triangle",
+                  "value": 3.0
+                }
+              ]
             },
             {
               "address": "sq1.pulse_width",
@@ -2253,7 +2379,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -2270,7 +2396,25 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "sine",
+                  "value": 0.0
+                },
+                {
+                  "label": "saw",
+                  "value": 1.0
+                },
+                {
+                  "label": "square",
+                  "value": 2.0
+                },
+                {
+                  "label": "triangle",
+                  "value": 3.0
+                }
+              ]
             },
             {
               "address": "sq2.pulse_width",
@@ -2325,7 +2469,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -2342,7 +2486,25 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "sine",
+                  "value": 0.0
+                },
+                {
+                  "label": "saw",
+                  "value": 1.0
+                },
+                {
+                  "label": "square",
+                  "value": 2.0
+                },
+                {
+                  "label": "triangle",
+                  "value": 3.0
+                }
+              ]
             },
             {
               "address": "sq3.pulse_width",
@@ -2397,7 +2559,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -2414,7 +2576,25 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "sine",
+                  "value": 0.0
+                },
+                {
+                  "label": "saw",
+                  "value": 1.0
+                },
+                {
+                  "label": "square",
+                  "value": 2.0
+                },
+                {
+                  "label": "triangle",
+                  "value": 3.0
+                }
+              ]
             },
             {
               "address": "sq4.pulse_width",
@@ -2469,7 +2649,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -2486,7 +2666,25 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "sine",
+                  "value": 0.0
+                },
+                {
+                  "label": "saw",
+                  "value": 1.0
+                },
+                {
+                  "label": "square",
+                  "value": 2.0
+                },
+                {
+                  "label": "triangle",
+                  "value": 3.0
+                }
+              ]
             },
             {
               "address": "sq5.pulse_width",
@@ -2541,7 +2739,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -2558,7 +2756,25 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "sine",
+                  "value": 0.0
+                },
+                {
+                  "label": "saw",
+                  "value": 1.0
+                },
+                {
+                  "label": "square",
+                  "value": 2.0
+                },
+                {
+                  "label": "triangle",
+                  "value": 3.0
+                }
+              ]
             },
             {
               "address": "sq6.pulse_width",
@@ -2859,7 +3075,7 @@
               "kind": "frequency",
               "name": "cutoff_hz",
               "range": {
-                "max": 2104533974.55,
+                "max": 100000.0,
                 "min": 1.0
               },
               "rate": 1,
@@ -2994,8 +3210,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -3105,8 +3321,8 @@
               "kind": "generic",
               "name": "step",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -3188,7 +3404,33 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "lt",
+                  "value": 0.0
+                },
+                {
+                  "label": "le",
+                  "value": 1.0
+                },
+                {
+                  "label": "eq",
+                  "value": 2.0
+                },
+                {
+                  "label": "ge",
+                  "value": 3.0
+                },
+                {
+                  "label": "gt",
+                  "value": 4.0
+                },
+                {
+                  "label": "ne",
+                  "value": 5.0
+                }
+              ]
             }
           ],
           "ports": [
@@ -3335,8 +3577,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -3736,7 +3978,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -4046,7 +4288,7 @@
               "kind": "frequency",
               "name": "cutoff_hz",
               "range": {
-                "max": 2104533974.55,
+                "max": 100000.0,
                 "min": 1.0
               },
               "rate": 1,
@@ -4236,8 +4478,8 @@
               "kind": "generic",
               "name": "mul",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -4249,8 +4491,8 @@
               "kind": "generic",
               "name": "add",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -4292,8 +4534,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -4925,7 +5167,33 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "lt",
+                  "value": 0.0
+                },
+                {
+                  "label": "le",
+                  "value": 1.0
+                },
+                {
+                  "label": "eq",
+                  "value": 2.0
+                },
+                {
+                  "label": "ge",
+                  "value": 3.0
+                },
+                {
+                  "label": "gt",
+                  "value": 4.0
+                },
+                {
+                  "label": "ne",
+                  "value": 5.0
+                }
+              ]
             }
           ],
           "ports": [
@@ -4977,8 +5245,8 @@
               "kind": "generic",
               "name": "mul",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -4990,8 +5258,8 @@
               "kind": "generic",
               "name": "add",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5033,8 +5301,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5066,8 +5334,8 @@
               "kind": "generic",
               "name": "lo",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5079,8 +5347,8 @@
               "kind": "generic",
               "name": "hi",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5151,8 +5419,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5184,8 +5452,8 @@
               "kind": "generic",
               "name": "lo",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5197,8 +5465,8 @@
               "kind": "generic",
               "name": "hi",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5308,7 +5576,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -5325,7 +5593,25 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "sine",
+                  "value": 0.0
+                },
+                {
+                  "label": "saw",
+                  "value": 1.0
+                },
+                {
+                  "label": "square",
+                  "value": 2.0
+                },
+                {
+                  "label": "triangle",
+                  "value": 3.0
+                }
+              ]
             },
             {
               "address": "osc1.pulse_width",
@@ -5380,8 +5666,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5413,8 +5699,8 @@
               "kind": "generic",
               "name": "lo",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5426,8 +5712,8 @@
               "kind": "generic",
               "name": "hi",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5498,8 +5784,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5531,8 +5817,8 @@
               "kind": "generic",
               "name": "lo",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5544,8 +5830,8 @@
               "kind": "generic",
               "name": "hi",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5655,7 +5941,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -5672,7 +5958,25 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "sine",
+                  "value": 0.0
+                },
+                {
+                  "label": "saw",
+                  "value": 1.0
+                },
+                {
+                  "label": "square",
+                  "value": 2.0
+                },
+                {
+                  "label": "triangle",
+                  "value": 3.0
+                }
+              ]
             },
             {
               "address": "osc2.pulse_width",
@@ -5727,8 +6031,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5760,8 +6064,8 @@
               "kind": "generic",
               "name": "lo",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5773,8 +6077,8 @@
               "kind": "generic",
               "name": "hi",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5845,8 +6149,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5878,8 +6182,8 @@
               "kind": "generic",
               "name": "lo",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -5891,8 +6195,8 @@
               "kind": "generic",
               "name": "hi",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -6002,7 +6306,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -6019,7 +6323,25 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "sine",
+                  "value": 0.0
+                },
+                {
+                  "label": "saw",
+                  "value": 1.0
+                },
+                {
+                  "label": "square",
+                  "value": 2.0
+                },
+                {
+                  "label": "triangle",
+                  "value": 3.0
+                }
+              ]
             },
             {
               "address": "osc3.pulse_width",
@@ -6208,7 +6530,7 @@
               "kind": "frequency",
               "name": "cutoff_hz",
               "range": {
-                "max": 2104533974.55,
+                "max": 100000.0,
                 "min": 1.0
               },
               "rate": 1,
@@ -6382,8 +6704,8 @@
               "kind": "generic",
               "name": "mul",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -6395,8 +6717,8 @@
               "kind": "generic",
               "name": "add",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -6438,8 +6760,8 @@
               "kind": "generic",
               "name": "mul",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -6451,8 +6773,8 @@
               "kind": "generic",
               "name": "add",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -6494,8 +6816,8 @@
               "kind": "generic",
               "name": "mul",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -6507,8 +6829,8 @@
               "kind": "generic",
               "name": "add",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -6966,6 +7288,28 @@
           },
           "to": [
             "o1_oct.value"
+          ],
+          "values": [
+            {
+              "label": "-2",
+              "value": -2.0
+            },
+            {
+              "label": "-1",
+              "value": -1.0
+            },
+            {
+              "label": "0",
+              "value": 0.0
+            },
+            {
+              "label": "+1",
+              "value": 1.0
+            },
+            {
+              "label": "+2",
+              "value": 2.0
+            }
           ]
         },
         {
@@ -6977,6 +7321,24 @@
           },
           "to": [
             "osc1.shape"
+          ],
+          "values": [
+            {
+              "label": "sine",
+              "value": 0.0
+            },
+            {
+              "label": "saw",
+              "value": 1.0
+            },
+            {
+              "label": "square",
+              "value": 2.0
+            },
+            {
+              "label": "triangle",
+              "value": 3.0
+            }
           ]
         },
         {
@@ -7010,6 +7372,28 @@
           },
           "to": [
             "o2_oct.value"
+          ],
+          "values": [
+            {
+              "label": "-2",
+              "value": -2.0
+            },
+            {
+              "label": "-1",
+              "value": -1.0
+            },
+            {
+              "label": "0",
+              "value": 0.0
+            },
+            {
+              "label": "+1",
+              "value": 1.0
+            },
+            {
+              "label": "+2",
+              "value": 2.0
+            }
           ]
         },
         {
@@ -7021,6 +7405,24 @@
           },
           "to": [
             "osc2.shape"
+          ],
+          "values": [
+            {
+              "label": "sine",
+              "value": 0.0
+            },
+            {
+              "label": "saw",
+              "value": 1.0
+            },
+            {
+              "label": "square",
+              "value": 2.0
+            },
+            {
+              "label": "triangle",
+              "value": 3.0
+            }
           ]
         },
         {
@@ -7054,6 +7456,28 @@
           },
           "to": [
             "o3_oct.value"
+          ],
+          "values": [
+            {
+              "label": "-2",
+              "value": -2.0
+            },
+            {
+              "label": "-1",
+              "value": -1.0
+            },
+            {
+              "label": "0",
+              "value": 0.0
+            },
+            {
+              "label": "+1",
+              "value": 1.0
+            },
+            {
+              "label": "+2",
+              "value": 2.0
+            }
           ]
         },
         {
@@ -7065,6 +7489,24 @@
           },
           "to": [
             "osc3.shape"
+          ],
+          "values": [
+            {
+              "label": "sine",
+              "value": 0.0
+            },
+            {
+              "label": "saw",
+              "value": 1.0
+            },
+            {
+              "label": "square",
+              "value": 2.0
+            },
+            {
+              "label": "triangle",
+              "value": 3.0
+            }
           ]
         },
         {
@@ -7173,8 +7615,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -7206,7 +7648,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -7252,7 +7694,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -7269,7 +7711,25 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "sine",
+                  "value": 0.0
+                },
+                {
+                  "label": "saw",
+                  "value": 1.0
+                },
+                {
+                  "label": "square",
+                  "value": 2.0
+                },
+                {
+                  "label": "triangle",
+                  "value": 3.0
+                }
+              ]
             },
             {
               "address": "tone_b.pulse_width",
@@ -7436,7 +7896,7 @@
               "kind": "frequency",
               "name": "cutoff_hz",
               "range": {
-                "max": 2104533974.55,
+                "max": 100000.0,
                 "min": 1.0
               },
               "rate": 1,
@@ -7610,8 +8070,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -7923,8 +8383,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -8015,7 +8475,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -8061,7 +8521,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -8378,7 +8838,7 @@
               "kind": "frequency",
               "name": "cutoff_hz",
               "range": {
-                "max": 2104533974.55,
+                "max": 100000.0,
                 "min": 1.0
               },
               "rate": 1,
@@ -8591,8 +9051,8 @@
               "kind": "generic",
               "name": "mul",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -8604,8 +9064,8 @@
               "kind": "generic",
               "name": "add",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -8647,8 +9107,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -9059,7 +9519,13 @@
                 "min": 0.0
               },
               "rate": 1,
-              "unit": null
+              "unit": null,
+              "values": [
+                {
+                  "label": "sine",
+                  "value": 0.0
+                }
+              ]
             }
           ],
           "ports": [
@@ -9091,8 +9557,8 @@
               "kind": "generic",
               "name": "mul",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -9104,8 +9570,8 @@
               "kind": "generic",
               "name": "add",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -9169,7 +9635,7 @@
               "kind": "frequency",
               "name": "cutoff_hz",
               "range": {
-                "max": 2104533974.55,
+                "max": 100000.0,
                 "min": 1.0
               },
               "rate": 1,
@@ -9222,7 +9688,7 @@
               "kind": "frequency",
               "name": "cutoff_hz",
               "range": {
-                "max": 2104533974.55,
+                "max": 100000.0,
                 "min": 1.0
               },
               "rate": 1,
@@ -9275,8 +9741,8 @@
               "kind": "generic",
               "name": "mul",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -9288,8 +9754,8 @@
               "kind": "generic",
               "name": "add",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -9331,8 +9797,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -9364,8 +9830,8 @@
               "kind": "generic",
               "name": "lo",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -9377,8 +9843,8 @@
               "kind": "generic",
               "name": "hi",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -9420,7 +9886,7 @@
               "kind": "frequency",
               "name": "cutoff_hz",
               "range": {
-                "max": 2104533974.55,
+                "max": 100000.0,
                 "min": 1.0
               },
               "rate": 1,
@@ -9519,8 +9985,8 @@
               "kind": "generic",
               "name": "mul",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -9532,8 +9998,8 @@
               "kind": "generic",
               "name": "add",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -9575,8 +10041,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -9608,8 +10074,8 @@
               "kind": "generic",
               "name": "lo",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -9621,8 +10087,8 @@
               "kind": "generic",
               "name": "hi",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -9703,8 +10169,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -9736,8 +10202,8 @@
               "kind": "generic",
               "name": "lo",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -9749,8 +10215,8 @@
               "kind": "generic",
               "name": "hi",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -9792,8 +10258,8 @@
               "kind": "generic",
               "name": "mul",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -9805,8 +10271,8 @@
               "kind": "generic",
               "name": "add",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -10155,7 +10621,7 @@
               "kind": "frequency",
               "name": "freq",
               "range": {
-                "max": 2147483647.5,
+                "max": 100000.0,
                 "min": 0.0
               },
               "rate": 1,
@@ -10419,7 +10885,7 @@
               "kind": "frequency",
               "name": "cutoff_hz",
               "range": {
-                "max": 2104533974.55,
+                "max": 100000.0,
                 "min": 1.0
               },
               "rate": 1,
@@ -10609,8 +11075,8 @@
               "kind": "generic",
               "name": "mul",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -10622,8 +11088,8 @@
               "kind": "generic",
               "name": "add",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -10665,8 +11131,8 @@
               "kind": "generic",
               "name": "value",
               "range": {
-                "max": 1000000.0,
-                "min": -1000000.0
+                "max": 100000.0,
+                "min": -100000.0
               },
               "rate": 1,
               "unit": null
@@ -11724,7 +12190,29 @@
               "min": -2.0
             },
             "rate": 1,
-            "unit": null
+            "unit": null,
+            "values": [
+              {
+                "label": "-2",
+                "value": -2.0
+              },
+              {
+                "label": "-1",
+                "value": -1.0
+              },
+              {
+                "label": "0",
+                "value": 0.0
+              },
+              {
+                "label": "+1",
+                "value": 1.0
+              },
+              {
+                "label": "+2",
+                "value": 2.0
+              }
+            ]
           },
           {
             "address": "/synth.osc1_wave",
@@ -11737,7 +12225,25 @@
               "min": 0.0
             },
             "rate": 1,
-            "unit": null
+            "unit": null,
+            "values": [
+              {
+                "label": "sine",
+                "value": 0.0
+              },
+              {
+                "label": "saw",
+                "value": 1.0
+              },
+              {
+                "label": "square",
+                "value": 2.0
+              },
+              {
+                "label": "triangle",
+                "value": 3.0
+              }
+            ]
           },
           {
             "address": "/synth.osc2_detune",
@@ -11776,7 +12282,29 @@
               "min": -2.0
             },
             "rate": 1,
-            "unit": null
+            "unit": null,
+            "values": [
+              {
+                "label": "-2",
+                "value": -2.0
+              },
+              {
+                "label": "-1",
+                "value": -1.0
+              },
+              {
+                "label": "0",
+                "value": 0.0
+              },
+              {
+                "label": "+1",
+                "value": 1.0
+              },
+              {
+                "label": "+2",
+                "value": 2.0
+              }
+            ]
           },
           {
             "address": "/synth.osc2_wave",
@@ -11789,7 +12317,25 @@
               "min": 0.0
             },
             "rate": 1,
-            "unit": null
+            "unit": null,
+            "values": [
+              {
+                "label": "sine",
+                "value": 0.0
+              },
+              {
+                "label": "saw",
+                "value": 1.0
+              },
+              {
+                "label": "square",
+                "value": 2.0
+              },
+              {
+                "label": "triangle",
+                "value": 3.0
+              }
+            ]
           },
           {
             "address": "/synth.osc3_detune",
@@ -11828,7 +12374,29 @@
               "min": -2.0
             },
             "rate": 1,
-            "unit": null
+            "unit": null,
+            "values": [
+              {
+                "label": "-2",
+                "value": -2.0
+              },
+              {
+                "label": "-1",
+                "value": -1.0
+              },
+              {
+                "label": "0",
+                "value": 0.0
+              },
+              {
+                "label": "+1",
+                "value": 1.0
+              },
+              {
+                "label": "+2",
+                "value": 2.0
+              }
+            ]
           },
           {
             "address": "/synth.osc3_wave",
@@ -11841,7 +12409,25 @@
               "min": 0.0
             },
             "rate": 1,
-            "unit": null
+            "unit": null,
+            "values": [
+              {
+                "label": "sine",
+                "value": 0.0
+              },
+              {
+                "label": "saw",
+                "value": 1.0
+              },
+              {
+                "label": "square",
+                "value": 2.0
+              },
+              {
+                "label": "triangle",
+                "value": 3.0
+              }
+            ]
           },
           {
             "address": "/synth.volume",

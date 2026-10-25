@@ -83,6 +83,7 @@ import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRec
 import { hitTest, instanceHit, portHit, reselect } from '../lib/schematic-hit.js';
 import { cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
 import { LEVEL_RATE, SLOTS, candidates, levelPlan, levelSpan, mutedOf, parameterSpan } from '../lib/schematic-levels.js';
+import { isDiscrete, selectOptions, selectValue, valueLabel } from '../lib/value-set.js';
 import { IDENTITY, commandView, fit, focus, matrix, pan, toLocal, toScreen, wheelFactor, zoomAt } from '../lib/schematic-view.js';
 import { keyCommand, keymap, shownKeys, wheelCommand } from '../lib/keys.js';
 import { registerWheel, takesWheel, verticalDelta } from './keyboard.js';
@@ -2223,7 +2224,9 @@ export class SignalSchematic extends HTMLElement {
     box.append(name, base, effective, mark);
     const shown = { row, base, effective, mark, input: null };
     if (row.editable) {
-      const input = html('input', { type: 'range', min: row.min, max: row.max, step: (row.max - row.min) / 1000 || 'any' });
+      // ADR 0043: a discrete parameter is a selector of its named values.
+      const input = isDiscrete(row) ? html('select', {}) : html('input', { type: 'range', min: row.min, max: row.max, step: (row.max - row.min) / 1000 || 'any' });
+      if (isDiscrete(row)) for (const option of selectOptions(row.values)) input.append(html('option', { value: option.value, textContent: option.label, title: option.title }));
       input.dataset.address = row.address;
       input.dataset.label = row.name;
       input.addEventListener('input', () => this.send(dragMessage(row.address, Number(input.value))));
@@ -2237,7 +2240,7 @@ export class SignalSchematic extends HTMLElement {
         value: () => shown.value,
         apply: (value) => {
           shown.value = value;
-          input.value = String(value);
+          input.value = isDiscrete(row) ? selectValue(row.values, value) : String(value);
           this.send(dragMessage(row.address, value));
           this.send(releaseMessage(row.address, value));
         },
@@ -2268,11 +2271,12 @@ export class SignalSchematic extends HTMLElement {
     for (const shown of this.cardRows) {
       const values = rowValues(shown.row, this.cardValues, this.connection?.unsaved, this.connection?.description);
       shown.value = values.base;
-      if (!shown.entry?.isOpen) shown.base.textContent = formatFixed(values.base, shown.row.unit);
-      shown.effective.textContent = formatFixed(values.effective, shown.row.unit);
+      const text = (v) => (isDiscrete(shown.row) ? valueLabel(shown.row.values, v) : formatFixed(v, shown.row.unit));
+      if (!shown.entry?.isOpen) shown.base.textContent = text(values.base);
+      shown.effective.textContent = text(values.effective);
       shown.mark.classList.toggle('on', Boolean(values.unsaved));
       if (shown.input && document.activeElement !== shown.input && this.shadowRoot.activeElement !== shown.input && Number.isFinite(values.base)) {
-        shown.input.value = String(values.base);
+        shown.input.value = isDiscrete(shown.row) ? selectValue(shown.row.values, values.base) : String(values.base);
       }
     }
   }

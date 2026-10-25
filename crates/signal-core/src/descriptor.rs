@@ -108,6 +108,29 @@ pub struct Range {
     pub max: f64,
 }
 
+/// One allowed value of a discrete parameter and its name (ADR 0043): an
+/// entry of a value set, e.g. `0 sine`. Generic: a value and a label.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct ValueLabel {
+    /// The value.
+    pub value: f64,
+    /// Its name, as a control shows it.
+    pub label: &'static str,
+}
+
+/// `value` as one of `values` (ADR 0043): the nearest entry's value (the
+/// lower one when two are as near), or `value` itself when the set is empty.
+pub fn nearest_value(values: &[ValueLabel], value: f64) -> f64 {
+    let mut best: Option<f64> = None;
+    for entry in values {
+        let closer = best.is_none_or(|b| (entry.value - value).abs() < (b - value).abs());
+        if closer {
+            best = Some(entry.value);
+        }
+    }
+    best.unwrap_or(value)
+}
+
 /// A port of a module type that is not a parameter.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct PortDescriptor {
@@ -161,6 +184,12 @@ pub struct ParameterDescriptor {
     pub default: f64,
     /// How base and modulation combine.
     pub combine: Combine,
+    /// ADR 0043: a discrete parameter's allowed values, each with its name
+    /// (inside `range`, which spans them); `None` for a continuous one. A
+    /// parameter with a value set is stepped: a value in a file must be one
+    /// of them, and a live edit takes the nearest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub values: Option<&'static [ValueLabel]>,
 }
 
 /// The feedthrough class of a primitive (ADR 0016 §2).

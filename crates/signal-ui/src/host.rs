@@ -426,10 +426,22 @@ struct Aim {
     ports: Vec<PortAddress>,
     min: f64,
     max: f64,
+    /// ADR 0043: the value set of a discrete parameter.
+    values: Option<Vec<(f64, String)>>,
     control: Option<(String, String)>,
 }
 
 impl Aim {
+    /// `value` as sent: clamped to the range and, with a value set, the
+    /// nearest of its values.
+    fn take(&self, value: f64) -> f64 {
+        let clamped = within(value, self.min, self.max);
+        match &self.values {
+            Some(values) => crate::panel::nearest(values, clamped),
+            None => clamped,
+        }
+    }
+
     /// What sending `value` here edits.
     fn edited(&self, value: f64) -> Option<Edited> {
         match &self.control {
@@ -3277,6 +3289,13 @@ impl Host {
                     "inSnapshots": p.in_snapshots,
                     "modulated": p.modulated,
                     "combine": target.ports.first().and_then(combine_of),
+                    // ADR 0043: a discrete control's values, each named.
+                    "values": p.values.as_ref().map(|values| {
+                        values
+                            .iter()
+                            .map(|(value, label)| json!({"value": value, "label": label}))
+                            .collect::<Vec<_>>()
+                    }),
                 }));
             }
         }
@@ -4634,6 +4653,7 @@ impl Host {
                 ports: target.ports,
                 min: target.min,
                 max: target.max,
+                values: target.values,
                 control: Some((instance, parameter)),
             });
         }
@@ -4653,6 +4673,12 @@ impl Host {
                 ports: vec![port],
                 min: d.range.min,
                 max: d.range.max,
+                values: d.values.map(|values| {
+                    values
+                        .iter()
+                        .map(|v| (v.value, v.label.to_owned()))
+                        .collect()
+                }),
                 control: None,
             }),
             None => Err(fail(
@@ -4723,13 +4749,13 @@ impl Host {
             }
             "set" => {
                 let aim = self.aim(address)?;
-                let value = within(number("value")?, aim.min, aim.max);
+                let value = aim.take(number("value")?);
                 let edited = aim.edited(value);
                 (aim.ports, EventPayload::Set(value), edited)
             }
             _ => {
                 let aim = self.aim(address)?;
-                let to = within(number("to")?, aim.min, aim.max);
+                let to = aim.take(number("to")?);
                 let frames = match (
                     message.get("frames").and_then(Value::as_u64),
                     message.get("ms").and_then(Value::as_f64),
@@ -4868,22 +4894,19 @@ impl Host {
             .panel
             .target(&instance, &parameter)
             .ok_or_else(not_editable)?;
-        let value = match message.get("value") {
-            None => {
-                return Err(fail(
-                    "bad-value",
-                    "commit needs `value` (null: the default)",
-                ));
-            }
-            Some(Value::Null) => None,
-            Some(v) => Some(within(
-                v.as_f64()
-                    .filter(|v| v.is_finite())
-                    .ok_or_else(|| fail("bad-value", "`value` must be a finite number or null"))?,
-                target.min,
-                target.max,
-            )),
-        };
+        let value =
+            match message.get("value") {
+                None => {
+                    return Err(fail(
+                        "bad-value",
+                        "commit needs `value` (null: the default)",
+                    ));
+                }
+                Some(Value::Null) => None,
+                Some(v) => Some(target.take(v.as_f64().filter(|v| v.is_finite()).ok_or_else(
+                    || fail("bad-value", "`value` must be a finite number or null"),
+                )?)),
+            };
         self.commit_control(address, &instance, &parameter, &target, value, false)
     }
 

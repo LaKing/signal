@@ -101,8 +101,8 @@ fn kick_is_described_as_written_with_its_nested_composites() {
     assert_eq!(
         inner["parameters"],
         json!([
-            {"name": "kick_decay", "to": ["kick.decay"], "order": 0},
-            {"name": "kick_drive", "to": ["kick.drive"], "order": 1},
+            {"name": "kick_decay", "to": ["kick.decay"], "order": 0, "range": {"min": 10.0, "max": 2000.0}},
+            {"name": "kick_drive", "to": ["kick.drive"], "order": 1, "range": {"min": 0.1, "max": 5.0}},
         ])
     );
     let kick = &s["composites"]["kick"];

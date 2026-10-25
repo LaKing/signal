@@ -5,14 +5,14 @@
   "provenance": {
     "included_projects": [
       {
-        "files_fnv1a64": "3efc1cd4af3e66f7",
+        "files_fnv1a64": "deed4ab9d355b204",
         "key": "studio",
         "name": "studio",
         "path": "../studio",
         "seed": 11
       },
       {
-        "files_fnv1a64": "3856da2b043ff68d",
+        "files_fnv1a64": "31eddeb5b0f89376",
         "key": "studio_transport",
         "name": "studio-transport",
         "path": "studio-transport",
@@ -20,14 +20,14 @@
       }
     ],
     "library_composite_hashes": {
-      "lib.transport": "fbfa6dabbff987aa"
+      "lib.transport": "743310655b13c16b"
     },
     "project_file_hashes": {
       "include:studio/composites/clap909.toml": "2f6e22d11586da8e",
       "include:studio/composites/cymbal909.toml": "0ba56cff3a798efb",
       "include:studio/composites/hat909.toml": "287b32ff5dba47b7",
       "include:studio/composites/kick909.toml": "b928b88f8fb852ef",
-      "include:studio/composites/moog_voice.toml": "db22a20ea74a337e",
+      "include:studio/composites/moog_voice.toml": "1fd0fe6fdcfdbf18",
       "include:studio/composites/rim909.toml": "fcac79fa4056e542",
       "include:studio/composites/snare909.toml": "b59c9f04b34cc358",
       "include:studio/composites/tape_delay.toml": "b841812dc9545e83",
@@ -39,7 +39,7 @@
       "include:studio_transport/composites/cymbal909.toml": "0ba56cff3a798efb",
       "include:studio_transport/composites/hat909.toml": "287b32ff5dba47b7",
       "include:studio_transport/composites/kick909.toml": "b928b88f8fb852ef",
-      "include:studio_transport/composites/moog_voice.toml": "db22a20ea74a337e",
+      "include:studio_transport/composites/moog_voice.toml": "1fd0fe6fdcfdbf18",
       "include:studio_transport/composites/rim909.toml": "fcac79fa4056e542",
       "include:studio_transport/composites/snare909.toml": "b59c9f04b34cc358",
       "include:studio_transport/composites/tape_delay.toml": "b841812dc9545e83",

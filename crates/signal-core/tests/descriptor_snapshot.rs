@@ -49,6 +49,7 @@ const SAMPLE: ModuleDescriptor = ModuleDescriptor {
             range: Range { min: 0.0, max: 2.0 },
             default: 1.0,
             combine: Combine::Multiply,
+            values: None,
         },
         ParameterDescriptor {
             name: "freq",
@@ -61,6 +62,7 @@ const SAMPLE: ModuleDescriptor = ModuleDescriptor {
             },
             default: 440.0,
             combine: Combine::Add,
+            values: None,
         },
     ],
     feedthrough: Feedthrough::Direct,

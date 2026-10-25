@@ -219,6 +219,15 @@ pub(crate) fn validate(
                     value,
                     range,
                 });
+            } else if let Some(values) = parameter.values
+                && !values.iter().any(|v| v.value == value)
+                && let Ok(port) = PortAddress::new(address, parameter.name)
+            {
+                errors.push(GraphError::ParameterNotInSet {
+                    parameter: port,
+                    value,
+                    allowed: crate::allowed_text(values.iter().map(|v| (v.value, v.label))),
+                });
             }
         }
     }

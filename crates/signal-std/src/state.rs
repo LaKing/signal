@@ -16,6 +16,10 @@ use crate::math::bounded;
 use crate::sine_osc::FREQ_MAX;
 use crate::{at, event_port, parameter, push_trigger, round_half_up, signal_port, triggered};
 
+/// Where the integrator's gain comes from, by `mode` (ADR 0043: its value set).
+const MODE_VALUES: &[signal_core::ValueLabel] =
+    &[crate::named(0.0, "cutoff"), crate::named(1.0, "gain")];
+
 const PHASOR: ModuleDescriptor = ModuleDescriptor {
     type_name: "std.phasor",
     doc: "Phase accumulator: phase in [0, 1) advancing by freq/sr per frame (f64); a reset trigger sets it to reset_phase; a trigger on wrap.",
@@ -157,8 +161,8 @@ const COUNTER: ModuleDescriptor = ModuleDescriptor {
             "step",
             PortKind::Generic,
             None,
-            -COUNT_BOUND,
-            COUNT_BOUND,
+            -crate::GENERIC,
+            crate::GENERIC,
             1.0,
             Combine::Add,
         ),
@@ -192,7 +196,7 @@ const COUNTER: ModuleDescriptor = ModuleDescriptor {
 /// `Set` and `Ramp` events are ignored.
 ///
 /// **Parameters**
-/// - `step` (generic, integer, range `[−1e6, 1e6]`, default 1, combine
+/// - `step` (generic, integer, range `[−10⁵, 10⁵]` (ADR 0043), default 1, combine
 ///   `add`): rounded with `round_half_up`; negative counts down.
 /// - `modulo` (generic, integer, range `[1, 1e6]`, default 1e6, combine
 ///   `add`): rounded with `round_half_up`.
@@ -271,14 +275,17 @@ const INTEGRATOR: ModuleDescriptor = ModuleDescriptor {
         signal_port("out", Direction::Out, PortKind::Generic, None, None),
     ],
     parameters: &[
-        parameter(
-            "mode",
-            PortKind::Generic,
-            None,
-            0.0,
-            1.0,
-            0.0,
-            Combine::Replace,
+        crate::choice(
+            parameter(
+                "mode",
+                PortKind::Generic,
+                None,
+                0.0,
+                1.0,
+                0.0,
+                Combine::Replace,
+            ),
+            MODE_VALUES,
         ),
         parameter(
             "cutoff",
@@ -294,7 +301,7 @@ const INTEGRATOR: ModuleDescriptor = ModuleDescriptor {
             PortKind::Gain,
             Some("1/s"),
             0.0,
-            1e6,
+            crate::GENERIC,
             1.0,
             Combine::Add,
         ),
@@ -321,7 +328,7 @@ const INTEGRATOR: ModuleDescriptor = ModuleDescriptor {
 /// - `cutoff` (frequency, Hz, range `[0, 100 000]`, default 100, combine
 ///   `add`): clamped to `0.49·sr`; `g = tan(π·cutoff/sr)`, the prewarped gain
 ///   of a one-pole at that cutoff.
-/// - `gain` (gain, 1/s, range `[0, 1e6]`, default 1, combine `add`):
+/// - `gain` (gain, 1/s, range `[0, 10⁵]` (ADR 0043), default 1, combine `add`):
 ///   `g = gain/(2·sr)`, so `out` approximates `∫ gain·in dt` (the trapezoidal
 ///   rule).
 ///

@@ -3,7 +3,7 @@
 # order as the native, so the pair is bit-exact (crates/signal-lib/tests/
 # validation.rs). The native stays the fast path; this is its reference.
 #
-#   fc = min(max(cutoff_hz, 1), min(0.49·sr, 318 309))
+#   fc = min(max(cutoff_hz, 1), min(0.49·sr, 100 000))
 #   g  = tan(π·fc/sr),   k = 1/q,   d = 1/(1 + k·g + g²)
 #   hp = (in − (k + g)·s₁ − s₂)·d
 #   v₁ = g·hp,   bp = v₁ + s₁,   s₁ ← flush(bp + v₁)
@@ -14,9 +14,9 @@
 # std.unit_delay) runs one frame at a time (docs/semantics.md §13).
 #
 # Range differences from `std.svf` (none at 8 to 192 kHz): q is clamped to
-# the native's [0.5, 40] inside; the cutoff's upper limit is also capped at
-# 318 309 Hz, so π·fc stays within the engine's ±1e6 bound (docs/semantics.md
-# §7); the cap only acts above 649 610 Hz, where 0.49·sr exceeds it. Above
+# the native's [0.5, 40] inside; the cutoff ends at 100 kHz as the
+# native's (ADR 0043), so π·fc stays within the engine's ±1e6 bound
+# (docs/semantics.md §7). Above
 # 999 999 Hz std.sample_rate itself faults. Every intermediate is a signal
 # within ±1e6: the std.add and std.mul ones fault beyond it (states about
 # twice the outputs, (k + g)·s₁), the std.sub ones clamp to it silently, so
@@ -28,7 +28,7 @@ schema_version = 1
 [composite]
 name = "svf_core"
 category = "filter"
-description = "std.svf rebuilt from core primitives (validation reference, bit-exact with std.svf): a TPT state-variable filter. Input: in. Outputs: lp, bp, hp (low-, band-, high-pass). Parameters: cutoff_hz (Hz, limited to [1, 0.49·sr] and to 318 309, which acts only above 649 610 Hz, default 1000), q (clamped to [0.5, 40], default 0.7071)."
+description = "std.svf rebuilt from core primitives (validation reference, bit-exact with std.svf): a TPT state-variable filter. Input: in. Outputs: lp, bp, hp (low-, band-, high-pass). Parameters: cutoff_hz (Hz, 1 to 100 000, limited to 0.49·sr, default 1000), q (clamped to [0.5, 40], default 0.7071)."
 
 [instances]
 cutoff = { module = "std.const", value = 1000 }
@@ -37,7 +37,9 @@ q_lim = { module = "std.clamp", lo = 0.5, hi = 40 }
 rate = { module = "std.sample_rate" }
 one = { module = "std.const", value = 1 }
 pi = { module = "std.const", value = 3.141592653589793 }
-cap = { module = "std.const", value = 318309 }
+# The cutoff range ends at 100 kHz (ADR 0043), the native's; so does the
+# cap (before, 318 309 Hz, which acted only above 649 610 Hz).
+cap = { module = "std.const", value = 100000 }
 nyquist = { module = "std.scale", mul = 0.49 }
 limit = { module = "std.min" }
 fc_lo = { module = "std.max" }
@@ -143,5 +145,5 @@ outputs = { lp = "lp.out", bp = "bp.out", hp = "hp.out" }
 
 # Each exported parameter with its own range (ADR 0042).
 [exports.parameters]
-cutoff_hz = { to = "cutoff.value", min = 1, max = 1000000 }
+cutoff_hz = { to = "cutoff.value", min = 1, max = 100000 }
 q = { to = "q.value", min = 0.5, max = 40 }

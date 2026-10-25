@@ -134,7 +134,7 @@ fn max_frames(sample_rate: f64) -> f64 {
 /// - `damping_hz` (frequency, Hz, range `[1, 0.49·sr]`, default 8000,
 ///   combine `add`): the cutoff of the one-pole low-pass in the loop, which
 ///   makes high frequencies decay faster (Freeverb's damping, the
-///   Karplus-Strong loss filter). Declared `[1, 0.49·(2³² − 1)]` as
+///   Karplus-Strong loss filter). Declared `[1, 100 000]` (ADR 0043) as
 ///   `std.svf`'s cutoff; `process` limits it to `0.49·sr`. In Hz, not as a
 ///   coefficient, so the sound does not change with the sample rate. The
 ///   filter is the impulse-invariant one-pole (not the TPT one, whose

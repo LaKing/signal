@@ -10,7 +10,7 @@ use crate::{at, parameter, signal_port};
 
 /// The static bound of the `scale` and `clamp` parameters: the engine's
 /// magnitude bound.
-const BOUND: f64 = crate::SIGNAL_BOUND;
+const BOUND: f64 = crate::GENERIC;
 
 /// The ports of the two-operand core types (`std.sub`, `std.min`, `std.div`,
 /// …): ordered operands `a` and `b`, so a result never depends on the
@@ -324,8 +324,8 @@ const SCALE: ModuleDescriptor = ModuleDescriptor {
 /// - `out` (signal out, generic).
 ///
 /// **Parameters**
-/// - `mul` (generic, no unit, range `[−1e6, 1e6]`, default 1, combine `add`).
-/// - `add` (generic, no unit, range `[−1e6, 1e6]`, default 0, combine `add`).
+/// - `mul` (generic, no unit, range `[−10⁵, 10⁵]`, ADR 0043, default 1, combine `add`).
+/// - `add` (generic, no unit, range `[−10⁵, 10⁵]`, ADR 0043, default 0, combine `add`).
 ///
 /// **Feedthrough:** direct.
 ///
@@ -391,8 +391,8 @@ const CLAMP: ModuleDescriptor = ModuleDescriptor {
 /// - `out` (signal out, generic).
 ///
 /// **Parameters**
-/// - `lo` (generic, no unit, range `[−1e6, 1e6]`, default −1, combine `add`).
-/// - `hi` (generic, no unit, range `[−1e6, 1e6]`, default 1, combine `add`).
+/// - `lo` (generic, no unit, range `[−10⁵, 10⁵]`, ADR 0043, default −1, combine `add`).
+/// - `hi` (generic, no unit, range `[−10⁵, 10⁵]`, ADR 0043, default 1, combine `add`).
 ///
 /// **Feedthrough:** direct.
 ///

@@ -183,7 +183,7 @@ fn a_fan_out_range_must_fit_every_target() {
 #[test]
 fn a_value_outside_the_range_is_an_error_at_the_value() {
     let voice = voice(r#"{ attack = { to = "click.mul", min = 0, max = 2 } }"#);
-    let text = project(r#"v = { module = "voice", attack = -1000000 }"#);
+    let text = project(r#"v = { module = "voice", attack = -50000 }"#);
     let errors = problems(&[("project.toml", &text), ("composites/voice.toml", &voice)]);
     assert_eq!(errors.len(), 1, "{errors:?}");
     // The primitive rule: an error located at the instance's value.
@@ -192,13 +192,13 @@ fn a_value_outside_the_range_is_an_error_at_the_value() {
         .enumerate()
         .find(|(_, l)| l.starts_with("v = "))
         .unwrap();
-    let column = entry.find("-1000000").unwrap() + 1;
+    let column = entry.find("-50000").unwrap() + 1;
     assert!(
         errors[0].starts_with(&format!("project.toml:{}:{column}: error: ", line + 1))
-            && errors[0].contains("/v.attack: value -1000000 is outside [0, 2]"),
+            && errors[0].contains("/v.attack: value -50000 is outside [0, 2]"),
         "{errors:?}"
     );
-    // Without the range, the same value is within std.scale's ±1e6.
+    // Without the range, the same value is within std.scale's ±10⁵ (ADR 0043).
     let plain = self::voice(r#"{ attack = "click.mul" }"#);
     plan_ok(&[("project.toml", &text), ("composites/voice.toml", &plain)]);
 }
@@ -345,4 +345,190 @@ fn the_studio_projects_load_with_their_ranges_and_every_value_inside() {
             assert!(export.range.is_some(), "{}.{}", composite.name, export.name);
         }
     }
+}
+
+/// The exported parameters of a composite file's text that declare neither
+/// a range (`min`, `max`) nor a value set (`values`).
+fn undeclared(text: &str) -> Vec<String> {
+    let doc: toml::Table = toml::from_str(text).unwrap();
+    let Some(parameters) = doc
+        .get("exports")
+        .and_then(|e| e.get("parameters"))
+        .and_then(toml::Value::as_table)
+    else {
+        return Vec::new();
+    };
+    parameters
+        .iter()
+        .filter(|(_, export)| {
+            let table = export.as_table();
+            let ranged = table.is_some_and(|t| t.contains_key("min") && t.contains_key("max"));
+            let valued = table.is_some_and(|t| t.contains_key("values"));
+            !(ranged || valued)
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// ADR 0043, "MINDEN kapjon értelmezési tartományt vagy értékkészletet":
+/// every exported parameter of the repository's project composites (and
+/// the frozen studio-transport fixture) and of the built-in library
+/// declares a range or a value set itself.
+#[test]
+fn every_repository_and_library_export_declares_a_range_or_a_value_set() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files: Vec<(String, String)> = Vec::new();
+    fn walk(dir: &Path, files: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, files);
+            } else if path.extension().is_some_and(|e| e == "toml")
+                && path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|d| d == "composites")
+            {
+                let text = std::fs::read_to_string(&path).unwrap();
+                files.push((path.display().to_string(), text));
+            }
+        }
+    }
+    walk(&root.join("projects"), &mut files);
+    walk(
+        &root.join("crates/signal-cli/tests/fixtures/studio-transport"),
+        &mut files,
+    );
+    let project_files = files.len();
+    for library in signal_lib::composites() {
+        files.push((format!("lib.{}", library.name), library.text.to_owned()));
+    }
+    assert!(
+        project_files >= 30,
+        "{project_files} project composite files"
+    );
+    assert!(files.len() > project_files + 20, "{} files", files.len());
+    let missing: Vec<String> = files
+        .iter()
+        .flat_map(|(file, text)| {
+            undeclared(text)
+                .into_iter()
+                .map(move |name| format!("{file}: {name}"))
+        })
+        .collect();
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+/// A voice of a `std.osc` (whose `shape` has a value set: 0 sine, 1 saw,
+/// 2 square, 3 triangle), with `exports` as its parameters line.
+fn osc_voice(parameters: &str) -> String {
+    format!(
+        r#"schema_version = 1
+
+[composite]
+name = "voice"
+
+[instances]
+osc = {{ module = "std.osc", freq = 110 }}
+
+[exports]
+outputs = {{ out = "osc.out" }}
+parameters = {parameters}
+"#
+    )
+}
+
+/// ADR 0043: an export's own value set parses, its range is the values'
+/// span, and a value of it the target does not allow is refused.
+#[test]
+fn an_export_value_set_must_be_allowed_by_its_target() {
+    let voice = osc_voice(
+        r#"{ wave = { to = "osc.shape", values = [{ value = 1, label = "saw" }, { value = 0, label = "sine" }] } }"#,
+    );
+    let planned = plan_ok(&[
+        (
+            "project.toml",
+            &project(r#"v = { module = "voice", wave = 1 }"#),
+        ),
+        ("composites/voice.toml", &voice),
+    ]);
+    let wave = &planned.composites[0].exports.parameters[0];
+    assert_eq!(wave.range, Some(Range { min: 0.0, max: 1.0 }));
+    let labels: Vec<(f64, &str)> = wave
+        .values
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|v| (v.value, v.label.as_str()))
+        .collect();
+    assert_eq!(labels, [(0.0, "sine"), (1.0, "saw")], "sorted by value");
+
+    let half =
+        osc_voice(r#"{ wave = { to = "osc.shape", values = [{ value = 0.5, label = "half" }] } }"#);
+    let errors = problems(&[
+        ("project.toml", &project(r#"v = { module = "voice" }"#)),
+        ("composites/voice.toml", &half),
+    ]);
+    assert!(
+        errors.iter().any(|e| e.contains("export `wave`: its value 0.5 is not one of its target `osc.shape`'s (0 sine, 1 saw, 2 square, 3 triangle)")),
+        "{errors:?}"
+    );
+}
+
+/// ADR 0043: a value in a file that is not one of the value set (the
+/// export's own, or the one it takes from its target) is an error at the
+/// value, as an out-of-range value is; values and a range together are
+/// refused.
+#[test]
+fn a_value_not_in_the_set_is_an_error_at_the_value() {
+    let own = osc_voice(
+        r#"{ wave = { to = "osc.shape", values = [{ value = 0, label = "sine" }, { value = 1, label = "saw" }] } }"#,
+    );
+    let errors = problems(&[
+        (
+            "project.toml",
+            &project(r#"v = { module = "voice", wave = 2 }"#),
+        ),
+        ("composites/voice.toml", &own),
+    ]);
+    assert!(
+        errors.iter().any(|e| e.starts_with("project.toml:")
+            && e.contains("/v.wave: value 2 is not one of 0 sine, 1 saw")),
+        "{errors:?}"
+    );
+    // Inherited from the target: 1.5 is in the range, not in the set.
+    let inherited = osc_voice(r#"{ wave = "osc.shape" }"#);
+    let errors = problems(&[
+        (
+            "project.toml",
+            &project(r#"v = { module = "voice", wave = 1.5 }"#),
+        ),
+        ("composites/voice.toml", &inherited),
+    ]);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e
+                .contains("/v.wave: value 1.5 is not one of 0 sine, 1 saw, 2 square, 3 triangle")),
+        "{errors:?}"
+    );
+    // A primitive's own, likewise.
+    let errors = problems(&[(
+        "project.toml",
+        &project(r#"v = { module = "std.osc", shape = 1.5 }"#),
+    )]);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("/v.shape: value 1.5 is not one of")),
+        "{errors:?}"
+    );
+    let both = osc_voice(
+        r#"{ wave = { to = "osc.shape", min = 0, max = 1, values = [{ value = 0, label = "sine" }] } }"#,
+    );
+    let errors = problems(&[
+        ("project.toml", &project(r#"v = { module = "voice" }"#)),
+        ("composites/voice.toml", &both),
+    ]);
+    assert!(errors.iter().any(|e| e.contains("not both")), "{errors:?}");
 }

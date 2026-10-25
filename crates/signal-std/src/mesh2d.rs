@@ -17,7 +17,8 @@ pub(crate) const NODES: usize = GRID * GRID;
 /// The largest `spring_hz` declared: the stability bound at the highest
 /// sample rate the engine accepts; `process` limits it to the bound of the
 /// rate it was prepared at.
-const SPRING_MAX: f64 = u32::MAX as f64 / std::f64::consts::TAU;
+/// ADR 0043: 100 kHz; `process` limits it to the stability bound.
+const SPRING_MAX: f64 = 100_000.0;
 
 /// Parameter indices.
 const SPRING_HZ: usize = 0;
@@ -250,7 +251,7 @@ const AUDIO_DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///   most 2¹⁹ − 1.
 ///
 /// **Parameters** (at the type's rate)
-/// - `spring_hz` (Hz, `[0, (2³² − 1)/2π]`, default 2 visual, 150 audio,
+/// - `spring_hz` (Hz, `[0, 100 000]` (ADR 0043), default 2 visual, 150 audio,
 ///   `add`): `ω_s/2π` of one spring on one mass, limited to the stability
 ///   bound `r/(2π√2)`, `r` the tick rate (sample rate / divisor).
 /// - `decay_s` (s, `[0, 600]`, default 3 visual, 1.5 audio, `add`): the T60

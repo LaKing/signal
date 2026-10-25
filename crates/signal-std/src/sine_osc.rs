@@ -11,7 +11,9 @@ use crate::{BIPOLAR, at, fract, parameter, signal_port, sine_of_cycles};
 /// engine accepts (any non-zero `u32`), so the executor's clamp to the range
 /// never cuts a frequency below `sr/2`. A descriptor's range is static; the
 /// effective limit `sr/2` is applied in `process`. `std.osc` uses it too.
-pub(crate) const FREQ_MAX: f64 = u32::MAX as f64 / 2.0;
+/// ADR 0043: an oscillator's frequency range ends at 100 kHz (`sr/2` at
+/// 200 kHz); `process` limits it to `sr/2` at lower rates.
+pub(crate) const FREQ_MAX: f64 = 100_000.0;
 
 const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     type_name: "std.sine_osc",
@@ -45,7 +47,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///
 /// **Parameters**
 /// - `freq` (frequency, Hz, range `[0, sr/2]`, default 440, combine `add`).
-///   A descriptor's range is static, so it declares `[0, (2³² − 1)/2]`
+///   A descriptor's range is static, so it declares `[0, 100 000]` (ADR 0043)
 ///   (≈ 2.147 GHz): `sr/2` at the highest sample rate the engine accepts
 ///   (`EngineConfig::sample_rate` is a non-zero `u32`). `process` limits the
 ///   effective value to `sr/2` of the rate it was prepared at.
@@ -165,11 +167,10 @@ mod tests {
     /// phase increment unclamped: the output is the normative formula.
     #[test]
     fn high_sample_rates_keep_frequencies_up_to_half_the_rate() {
+        // ADR 0043: the declared range ends at 100 kHz (sr/2 at 200 kHz);
+        // `process` alone limits a frequency to sr/2, as below.
         let range = DESCRIPTOR.parameters[0].range;
-        assert_eq!(range.max, f64::from(u32::MAX) / 2.0);
-        for sample_rate in [384_000.0, 768_000.0, f64::from(u32::MAX)] {
-            assert!(range.min <= 0.0 && sample_rate / 2.0 <= range.max);
-        }
+        assert_eq!((range.min, range.max), (0.0, 100_000.0));
 
         let (freq, sample_rate, frames) = (150_000.0, 384_000.0, 64);
         let out = tone(freq, sample_rate, frames, &vec![0.0; frames]);

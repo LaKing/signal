@@ -50,6 +50,7 @@ const fn parameter(
         range: Range { min: 0.0, max },
         default,
         combine: Combine::Add,
+        values: None,
     }
 }
 
@@ -396,6 +397,7 @@ pub fn param(name: &str, to: &[&str]) -> ParameterExport {
         name: name.to_owned(),
         to: to.iter().map(|s| (*s).to_owned()).collect(),
         range: None,
+        values: None,
     }
 }
 

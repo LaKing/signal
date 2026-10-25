@@ -8,6 +8,14 @@ use signal_core::{
 use crate::sine_osc::FREQ_MAX;
 use crate::{BIPOLAR, at, fract, parameter, round_half_up, signal_port, sine_of_cycles};
 
+/// The waveforms `shape` selects (ADR 0043: its value set).
+const SHAPE_VALUES: &[signal_core::ValueLabel] = &[
+    crate::named(0.0, "sine"),
+    crate::named(1.0, "saw"),
+    crate::named(2.0, "square"),
+    crate::named(3.0, "triangle"),
+];
+
 /// The default `shape`: saw.
 const SAW: f64 = 1.0;
 const PULSE_WIDTH: f64 = 0.5;
@@ -29,14 +37,17 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
             440.0,
             Combine::Add,
         ),
-        parameter(
-            "shape",
-            PortKind::Generic,
-            None,
-            0.0,
-            3.0,
-            SAW,
-            Combine::Replace,
+        crate::choice(
+            parameter(
+                "shape",
+                PortKind::Generic,
+                None,
+                0.0,
+                3.0,
+                SAW,
+                Combine::Replace,
+            ),
+            SHAPE_VALUES,
         ),
         parameter(
             "pulse_width",
@@ -65,7 +76,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///
 /// **Parameters**
 /// - `freq` (frequency, Hz, range `[0, sr/2]`, default 440, combine `add`).
-///   Declared `[0, (2³² − 1)/2]` as `std.sine_osc`'s; `process` limits the
+///   Declared `[0, 100 000]` (ADR 0043) as `std.sine_osc`'s; `process` limits the
 ///   effective value to `sr/2`.
 /// - `shape` (generic, no unit, choice, range `[0, 3]`, default 1, combine
 ///   `replace`): `round_half_up(shape)` selects 0 sine, 1 saw, 2 square,

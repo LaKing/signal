@@ -33,8 +33,8 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
             "threshold",
             PortKind::Generic,
             None,
-            -1e6,
-            1e6,
+            -crate::GENERIC,
+            crate::GENERIC,
             THRESHOLD,
             Combine::Add,
         ),
@@ -43,7 +43,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
             PortKind::Generic,
             None,
             0.0,
-            1e6,
+            crate::GENERIC,
             HYSTERESIS,
             Combine::Add,
         ),
@@ -65,8 +65,8 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 /// - `gate` (signal out, gate, `{0, 1}`).
 ///
 /// **Parameters**
-/// - `threshold` (generic, no unit, range `[−1e6, 1e6]`, default 0.5, combine `add`).
-/// - `hysteresis` (generic, no unit, range `[0, 1e6]`, default 0.01, combine
+/// - `threshold` (generic, no unit, range `[−10⁵, 10⁵]` (ADR 0043), default 0.5, combine `add`).
+/// - `hysteresis` (generic, no unit, range `[0, 10⁵]` (ADR 0043), default 0.01, combine
 ///   `add`): the width `h` of the band around the threshold.
 ///
 /// **Feedthrough:** direct (`in[n]` decides `gate[n]` and the frame-*n* events).

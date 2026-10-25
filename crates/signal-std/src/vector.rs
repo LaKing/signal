@@ -15,6 +15,10 @@
 //! table then exist at it. A width not in the list is an unknown module in a
 //! project, and a compile error in Rust (`Pack::<3>`; [`describe`]).
 
+/// A table's ends: clamped or wrapped (ADR 0043).
+const WRAP_VALUES: &[signal_core::ValueLabel] =
+    &[crate::named(0.0, "clamp"), crate::named(1.0, "wrap")];
+
 use std::sync::OnceLock;
 
 use signal_core::{
@@ -210,30 +214,36 @@ fn descriptor(op: Op, width: usize) -> ModuleDescriptor {
                     v,
                     PortKind::Generic,
                     None,
-                    -crate::SIGNAL_BOUND,
-                    crate::SIGNAL_BOUND,
+                    -crate::GENERIC,
+                    crate::GENERIC,
                     0.0,
                     Combine::Add,
                 )
             })
             .chain([
-                parameter(
-                    "interp",
-                    PortKind::Generic,
-                    None,
-                    0.0,
-                    2.0,
-                    1.0,
-                    Combine::Replace,
+                crate::choice(
+                    parameter(
+                        "interp",
+                        PortKind::Generic,
+                        None,
+                        0.0,
+                        2.0,
+                        1.0,
+                        Combine::Replace,
+                    ),
+                    crate::INTERP_VALUES,
                 ),
-                parameter(
-                    "wrap",
-                    PortKind::Gate,
-                    None,
-                    0.0,
-                    1.0,
-                    0.0,
-                    Combine::Replace,
+                crate::choice(
+                    parameter(
+                        "wrap",
+                        PortKind::Gate,
+                        None,
+                        0.0,
+                        1.0,
+                        0.0,
+                        Combine::Replace,
+                    ),
+                    WRAP_VALUES,
                 ),
             ])
             .collect(),

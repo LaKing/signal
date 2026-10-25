@@ -508,7 +508,8 @@ fn power_off_stops_and_on_restores(transport: Transport) {
 }
 
 /// A sine through a `std.scale` (as kick909's `attack` reaches its click):
-/// a `mul` of −1e6 takes the scale's output beyond ±10⁶.
+/// a `mul` of −1e5 (the end of its range, ADR 0043) on a sine scaled by 20
+/// takes the scale's output beyond ±10⁶.
 const SCALED: &str = r#"schema_version = 1
 
 [project]
@@ -523,7 +524,7 @@ out = { module = "std.audio_out", gain = 0.25 }
 
 [wiring]
 connections = [
-  { from = "osc.out", to = "click.in", scale = 2 },
+  { from = "osc.out", to = "click.in", scale = 20 },
   { from = "click.out", to = "out.l" },
   { from = "click.out", to = "out.r" },
 ]
@@ -550,7 +551,7 @@ fn a_muted_instance_is_shown_until_the_project_plays_again(transport: Transport)
     assert_eq!(app["muted"], Value::Null, "nothing muted yet: {app}");
 
     let set = |value: f64| json!({"type": "commit", "address": "/click.mul", "value": value});
-    rig.request(&mut ws, 3, set(-1e6), "committed");
+    rig.request(&mut ws, 3, set(-1e5), "committed");
     let muted = rig.wait(&mut ws, "muted", |got| {
         got.of("app")
             .and_then(|a| a["muted"].as_str())
@@ -580,7 +581,7 @@ fn a_muted_instance_is_shown_until_the_project_plays_again(transport: Transport)
     // Muted again (and the file set back), then the power off: no run, no
     // note; on, a new run from the file plays it.
     let mute = |rig: &mut Rig, ws: &mut common::Ws, id: u64| {
-        rig.request(ws, id, set(-1e6), "committed");
+        rig.request(ws, id, set(-1e5), "committed");
         rig.wait(ws, "muted again", |got| {
             got.of("app").and_then(|a| a["muted"].as_str()).map(drop)
         });
@@ -618,7 +619,7 @@ fn a_muted_instance_is_shown_until_the_project_plays_again(transport: Transport)
 
     // Opening a project (this one again) ends the run and the note.
     let clack = |value: f64| json!({"type": "commit", "address": "/clack.mul", "value": value});
-    rig.request(&mut ws, 17, clack(-1e6), "committed");
+    rig.request(&mut ws, 17, clack(-1e5), "committed");
     rig.wait(&mut ws, "muted once more", |got| {
         got.of("app").and_then(|a| a["muted"].as_str()).map(drop)
     });
@@ -655,7 +656,7 @@ fn the_muted_note_lists_eight_then_counts(transport: Transport) {
             "s{n:02} = {{ module = \"std.scale\", mul = 0.5 }}\n"
         ));
         wires.push_str(&format!(
-            "  {{ from = \"osc.out\", to = \"s{n:02}.in\", scale = 2 }},\n  {{ from = \"k.out\", to = \"s{n:02}.mul\" }},\n  {{ from = \"s{n:02}.out\", to = \"out.l\" }},\n"
+            "  {{ from = \"osc.out\", to = \"s{n:02}.in\", scale = 20 }},\n  {{ from = \"k.out\", to = \"s{n:02}.mul\" }},\n  {{ from = \"s{n:02}.out\", to = \"out.l\" }},\n"
         ));
     }
     text.push_str(&format!("\n[wiring]\nconnections = [\n{wires}]\n"));
@@ -666,7 +667,7 @@ fn the_muted_note_lists_eight_then_counts(transport: Transport) {
     rig.request(
         &mut ws,
         2,
-        json!({"type": "commit", "address": "/k.value", "value": 1e6}),
+        json!({"type": "commit", "address": "/k.value", "value": 1e5}),
         "committed",
     );
     let muted = rig.wait(&mut ws, "eleven muted", |got| {

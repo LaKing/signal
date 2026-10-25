@@ -12,7 +12,7 @@ use crate::{at, parameter, signal_port};
 /// (`docs/semantics.md` §7), as for `std.scale` and `std.clamp`. A larger
 /// constant would only fault and mute the instance on its first frame; every
 /// integer up to it is exact, and it holds constants such as 2¹⁹ or 10⁶.
-const VALUE_BOUND: f64 = crate::SIGNAL_BOUND;
+const VALUE_BOUND: f64 = crate::GENERIC;
 
 const CONST: ModuleDescriptor = ModuleDescriptor {
     type_name: "std.const",
@@ -46,7 +46,7 @@ const CONST: ModuleDescriptor = ModuleDescriptor {
 /// - `out` (signal out, generic).
 ///
 /// **Parameters**
-/// - `value` (generic, no unit, range `[−1e6, 1e6]`, the engine's magnitude
+/// - `value` (generic, no unit, range `[−10⁵, 10⁵]` (ADR 0043; a larger constant through a connection's scale), the engine's magnitude
 ///   bound, default 0, combine `add`).
 ///
 /// **Feedthrough:** direct.
@@ -235,10 +235,12 @@ mod tests {
     /// §7): every value in it renders without a fault, and a larger one could
     /// only fault.
     #[test]
-    fn const_range_is_the_magnitude_bound() {
+    fn const_range_is_the_generic_range() {
+        // ADR 0043: ±10⁵, well inside the engine's magnitude bound.
         let range = CONST.parameters[0].range;
-        assert_eq!((range.min, range.max), (-1e6, 1e6));
-        assert_eq!(range.max, crate::SIGNAL_BOUND);
+        assert_eq!((range.min, range.max), (-1e5, 1e5));
+        assert_eq!(range.max, crate::GENERIC);
+        assert!(range.max < crate::SIGNAL_BOUND);
     }
 
     /// AC6: sr and 1/sr from prepare, at every rate, and kept by reset.

@@ -40,5 +40,5 @@ outputs = { position = "playhead.position", running = "playhead.running", tempo 
 # Each exported parameter with its own range (ADR 0042).
 [exports.parameters]
 bpm = { to = "playhead.bpm", min = 20, max = 400 }
-run = { to = "playhead.run", min = 0, max = 1 }
+run = { to = "playhead.run", values = [{ value = 0, label = "stopped" }, { value = 1, label = "running" }] }
 rate = { to = "playhead.rate", min = -16, max = 16 }

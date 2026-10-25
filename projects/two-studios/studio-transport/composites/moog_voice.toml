@@ -144,15 +144,15 @@ outputs = { out = "volume.out" }
 # 0042): a control reaches no value outside it.
 [exports.parameters]
 glide = { to = ["glide.rise_ms", "glide.fall_ms"], min = 0, max = 2000 }
-osc1_octave = { to = "o1_oct.value", min = -2, max = 2 }
+osc1_octave = { to = "o1_oct.value", values = [{ value = -2, label = "-2" }, { value = -1, label = "-1" }, { value = 0, label = "0" }, { value = 1, label = "+1" }, { value = 2, label = "+2" }] }
 osc1_detune = { to = "o1_det.value", min = -1200, max = 1200 }
-osc1_wave = { to = "osc1.shape", min = 0, max = 3 }
-osc2_octave = { to = "o2_oct.value", min = -2, max = 2 }
+osc1_wave = { to = "osc1.shape", values = [{ value = 0, label = "sine" }, { value = 1, label = "saw" }, { value = 2, label = "square" }, { value = 3, label = "triangle" }] }
+osc2_octave = { to = "o2_oct.value", values = [{ value = -2, label = "-2" }, { value = -1, label = "-1" }, { value = 0, label = "0" }, { value = 1, label = "+1" }, { value = 2, label = "+2" }] }
 osc2_detune = { to = "o2_det.value", min = -1200, max = 1200 }
-osc2_wave = { to = "osc2.shape", min = 0, max = 3 }
-osc3_octave = { to = "o3_oct.value", min = -2, max = 2 }
+osc2_wave = { to = "osc2.shape", values = [{ value = 0, label = "sine" }, { value = 1, label = "saw" }, { value = 2, label = "square" }, { value = 3, label = "triangle" }] }
+osc3_octave = { to = "o3_oct.value", values = [{ value = -2, label = "-2" }, { value = -1, label = "-1" }, { value = 0, label = "0" }, { value = 1, label = "+1" }, { value = 2, label = "+2" }] }
 osc3_detune = { to = "o3_det.value", min = -1200, max = 1200 }
-osc3_wave = { to = "osc3.shape", min = 0, max = 3 }
+osc3_wave = { to = "osc3.shape", values = [{ value = 0, label = "sine" }, { value = 1, label = "saw" }, { value = 2, label = "square" }, { value = 3, label = "triangle" }] }
 osc1_level = { to = "mixer.gain_a", min = 0, max = 2 }
 osc2_level = { to = "mixer.gain_b", min = 0, max = 2 }
 osc3_level = { to = "mixer.gain_c", min = 0, max = 2 }

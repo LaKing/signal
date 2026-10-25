@@ -12,7 +12,15 @@ const LENGTH: f64 = 8.0;
 const STEPS: usize = 8;
 
 const fn step(name: &'static str) -> ParameterDescriptor {
-    parameter(name, PortKind::Control, None, -1e6, 1e6, 0.0, Combine::Add)
+    parameter(
+        name,
+        PortKind::Control,
+        None,
+        -crate::GENERIC,
+        crate::GENERIC,
+        0.0,
+        Combine::Add,
+    )
 }
 
 const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
@@ -66,7 +74,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 /// **Parameters**
 /// - `length` (generic, integer, no unit, range `[1, 8]`, default 8, combine
 ///   `add`): rounded with `round_half_up` and read on each step trigger's frame.
-/// - `s1` … `s8` (control, no unit, range `[−1e6, 1e6]`, default 0, combine
+/// - `s1` … `s8` (control, no unit, range `[−10⁵, 10⁵]` (ADR 0043), default 0, combine
 ///   `add`): the step values, read on every frame, so a change is heard at
 ///   once.
 ///

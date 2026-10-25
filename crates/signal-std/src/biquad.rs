@@ -9,6 +9,18 @@ use crate::line::{STATE_BOUND, finite_or_zero};
 use crate::svf::{CUTOFF, CUTOFF_MAX, effective_cutoff, flush, integrator_gain};
 use crate::{SIGNAL_BOUND, at, parameter, round_half_up, signal_port};
 
+/// The filter types `mode` selects (ADR 0043: its value set).
+const MODE_VALUES: &[signal_core::ValueLabel] = &[
+    crate::named(0.0, "low-pass"),
+    crate::named(1.0, "high-pass"),
+    crate::named(2.0, "band-pass"),
+    crate::named(3.0, "notch"),
+    crate::named(4.0, "peak"),
+    crate::named(5.0, "low shelf"),
+    crate::named(6.0, "high shelf"),
+    crate::named(7.0, "all-pass"),
+];
+
 /// The default `mode`: low-pass.
 const LOWPASS: f64 = 0.0;
 /// The specified default, a readable 0.7071 rather than 1/√2.
@@ -25,14 +37,17 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
         signal_port("out", Direction::Out, PortKind::Audio, None, None),
     ],
     parameters: &[
-        parameter(
-            "mode",
-            PortKind::Generic,
-            None,
-            0.0,
-            7.0,
-            LOWPASS,
-            Combine::Replace,
+        crate::choice(
+            parameter(
+                "mode",
+                PortKind::Generic,
+                None,
+                0.0,
+                7.0,
+                LOWPASS,
+                Combine::Replace,
+            ),
+            MODE_VALUES,
         ),
         parameter(
             "cutoff_hz",
@@ -95,7 +110,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///   (bell), 5 low shelf, 6 high shelf, 7 all-pass.
 /// - `cutoff_hz` (frequency, Hz, range `[1, 0.49·sr]`, default 1000, combine
 ///   `add`): the cookbook's f0 (cutoff, centre or shelf midpoint). Declared
-///   `[1, 0.49·(2³² − 1)]` like `std.svf`'s; `process` limits it to `0.49·sr`.
+///   `[1, 100 000]` (ADR 0043) like `std.svf`'s; `process` limits it to `0.49·sr`.
 /// - `q` (generic, no unit, range `[0.1, 40]`, default 0.7071, combine
 ///   `add`): the cookbook's Q (for the shelves, its Q form of the slope;
 ///   0.7071 is the steepest shelf without a bump).

@@ -4,8 +4,8 @@
   "log_fnv1a64": "43a7a5999ec53585",
   "provenance": {
     "project_file_hashes": {
-      "composites/drums.toml": "2fce17af5f01d821",
-      "composites/kick.toml": "94a3f3fcb22d33b8",
+      "composites/drums.toml": "75eeebdd014dde26",
+      "composites/kick.toml": "b8709340a3b84b61",
       "project.toml": "f2f484505c704250"
     }
   },

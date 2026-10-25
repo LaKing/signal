@@ -11,7 +11,7 @@
 #
 # Each rising gate strikes once; the body rings on while the gate is high
 # and the contour releases it when the gate falls, so a note's length damps
-# the ring. `hz`, clamped to [0, 10⁶] (so no input can fault `pitch`), sets
+# the ring. `hz`, clamped to [0, 10⁵] (so no input can fault `pitch`), sets
 # the frequency of ratio 1 (below 1 the bank reads 1 Hz); the
 # velocity, clamped to [0, 1], is the exciter's level and, times
 # `velocity_brightness`, is added to the body's brightness (the bank clamps
@@ -30,10 +30,10 @@ schema_version = 1
 [composite]
 name = "modal_voice"
 category = "generator"
-description = "A modal voice for patching: an exciter strikes, plucks, bows or blows a modal resonator bank once per rising gate, shaped by a loudness contour, with velocity mapped to level and brightness. Inputs: hz (the frequency of the bank's ratio 1, clamped to [0, 10⁶]), gate (each rise excites; the contour runs while it is above 0.5), velocity (clamped to [0, 1]; the exciter's level, and times velocity_brightness added to the brightness), mode_freq, mode_gain, mode_decay (64 elements each, per-mode factors 1 + v on frequency, gain and decay; unconnected 1). Output: out (near ±0.5 at full velocity). Parameters: exciter_kind (0 pluck, 1 strike, 2 noise, 3 bow; default 1), exciter_ms (the excitation's length, default 3 ms), hardness (default 0.6), bow_speed (default 1), friction (default 0.25), noise_color (default 0), exciter_position (the excitation's low-pass, default 0); material (0 string … 4 bell, 5 explicit, morphing between; default 1), modes (default 16), decay (T60 of ratio 1 in s, default 1.5), law (default 1), strike_position (default 0.3), inharmonicity (default 0), damping_tilt (default 0), brightness (default 0), pickup (default 0.5), pickup_mix (default 0), spread (default 0), body_gain (the bank's gain, default 0.4), ratio_1, ratio_2, ratio_3, ratio_4, ratio_5, ratio_6, ratio_7, ratio_8, ratio_9, ratio_10, ratio_11, ratio_12, ratio_13, ratio_14, ratio_15, ratio_16 (the explicit ratios, defaults 1 to 16); a_attack, a_decay, a_sustain, a_release (the loudness contour, defaults 1 ms, 50 ms, 1, 400 ms); velocity_brightness (default 0.3); volume (dB, default 0)."
+description = "A modal voice for patching: an exciter strikes, plucks, bows or blows a modal resonator bank once per rising gate, shaped by a loudness contour, with velocity mapped to level and brightness. Inputs: hz (the frequency of the bank's ratio 1, clamped to [0, 10⁵]), gate (each rise excites; the contour runs while it is above 0.5), velocity (clamped to [0, 1]; the exciter's level, and times velocity_brightness added to the brightness), mode_freq, mode_gain, mode_decay (64 elements each, per-mode factors 1 + v on frequency, gain and decay; unconnected 1). Output: out (near ±0.5 at full velocity). Parameters: exciter_kind (0 pluck, 1 strike, 2 noise, 3 bow; default 1), exciter_ms (the excitation's length, default 3 ms), hardness (default 0.6), bow_speed (default 1), friction (default 0.25), noise_color (default 0), exciter_position (the excitation's low-pass, default 0); material (0 string … 4 bell, 5 explicit, morphing between; default 1), modes (default 16), decay (T60 of ratio 1 in s, default 1.5), law (default 1), strike_position (default 0.3), inharmonicity (default 0), damping_tilt (default 0), brightness (default 0), pickup (default 0.5), pickup_mix (default 0), spread (default 0), body_gain (the bank's gain, default 0.4), ratio_1, ratio_2, ratio_3, ratio_4, ratio_5, ratio_6, ratio_7, ratio_8, ratio_9, ratio_10, ratio_11, ratio_12, ratio_13, ratio_14, ratio_15, ratio_16 (the explicit ratios, defaults 1 to 16); a_attack, a_decay, a_sustain, a_release (the loudness contour, defaults 1 ms, 50 ms, 1, 400 ms); velocity_brightness (default 0.3); volume (dB, default 0)."
 
 [instances]
-pitch = { module = "std.clamp", lo = 0, hi = 1000000 }
+pitch = { module = "std.clamp", lo = 0, hi = 100000 }
 gate_edge = { module = "std.edge" }
 vel_lim = { module = "std.clamp", lo = 0, hi = 1 }
 vel_bright = { module = "std.const", value = 0.3 }
@@ -70,7 +70,7 @@ outputs = { out = "volume.out" }
 
 # Each exported parameter with its own range (ADR 0042).
 [exports.parameters]
-exciter_kind = { to = "exciter.kind", min = 0, max = 3 }
+exciter_kind = { to = "exciter.kind", values = [{ value = 0, label = "pluck" }, { value = 1, label = "strike" }, { value = 2, label = "noise burst" }, { value = 3, label = "bow" }] }
 exciter_ms = { to = "exciter.duration_ms", min = 0, max = 10000 }
 hardness = { to = "exciter.hardness", min = 0, max = 1 }
 bow_speed = { to = "exciter.bow_speed", min = -4, max = 4 }

@@ -9,6 +9,10 @@ use crate::line::finite_or_zero;
 use crate::sine_osc::FREQ_MAX;
 use crate::{BIPOLAR, at, fract, parameter, round_half_up, signal_port, sine_of_cycles};
 
+/// Where the frequency comes from, by `mode` (ADR 0043: its value set).
+const MODE_VALUES: &[signal_core::ValueLabel] =
+    &[crate::named(0.0, "ratio"), crate::named(1.0, "fixed")];
+
 const FREQ: f64 = 440.0;
 const RATIO: f64 = 1.0;
 const RATIO_MAX: f64 = 64.0;
@@ -30,14 +34,17 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
             FREQ,
             Combine::Add,
         ),
-        parameter(
-            "mode",
-            PortKind::Generic,
-            None,
-            0.0,
-            1.0,
-            0.0,
-            Combine::Replace,
+        crate::choice(
+            parameter(
+                "mode",
+                PortKind::Generic,
+                None,
+                0.0,
+                1.0,
+                0.0,
+                Combine::Replace,
+            ),
+            MODE_VALUES,
         ),
         parameter(
             "ratio",
@@ -101,13 +108,13 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 /// - `out` (signal out, audio, `[−1, 1]`).
 ///
 /// **Parameters**
-/// - `freq` (frequency, Hz, range `[0, (2³² − 1)/2]`, default 440, combine
+/// - `freq` (frequency, Hz, range `[0, 100 000]` (ADR 0043), default 440, combine
 ///   `add`): the note frequency the ratio applies to.
 /// - `mode` (generic, no unit, choice, range `[0, 1]`, default 0, combine
 ///   `replace`): `round_half_up(mode)` selects 0 ratio (`f = ratio·freq`) or
 ///   1 fixed (`f = fixed_hz`), on every frame.
 /// - `ratio` (generic, no unit, range `[0, 64]`, default 1, combine `add`).
-/// - `fixed_hz` (frequency, Hz, range `[0, (2³² − 1)/2]`, default 440,
+/// - `fixed_hz` (frequency, Hz, range `[0, 100 000]` (ADR 0043), default 440,
 ///   combine `add`).
 /// - `feedback` (generic, cycles, range `[0, 1]`, default 0, combine `add`):
 ///   the phase offset, in cycles, per unit of the operator's own sine. 1 is

@@ -1191,11 +1191,12 @@ fn adsr_core_attack_is_at_most_999_999_frames() {
     }
 }
 
-/// Range difference: above 649 610 Hz the filters' cutoff is capped at
-/// 318 309 Hz (so π·fc stays within ±1e6). At 999 999 Hz with the cutoff at
-/// its maximum neither faults; the difference from the native is measured.
+/// ADR 0043: the filters' cutoff ends at 100 kHz, the native's range and the
+/// composites' cap (before, 318 309 Hz, which acted only above 649 610 Hz),
+/// so π·fc stays within ±1e6. At 999 999 Hz with the cutoff at its maximum
+/// neither faults, and the pair is bit-exact: no range difference is left.
 #[test]
-fn the_filters_cutoff_cap_acts_only_above_649_610_hz() {
+fn the_filters_cutoff_ends_where_the_native_s_does() {
     for (pair, outputs) in [
         ("svf_core", &["lp", "bp", "hp"][..]),
         ("onepole_core", &["lp", "hp"][..]),
@@ -1203,8 +1204,8 @@ fn the_filters_cutoff_cap_acts_only_above_649_610_hz() {
         for &output in outputs {
             let c = case(
                 pair,
-                "noise, cutoff 1e6",
-                "cutoff_hz = 1000000",
+                "noise, cutoff 1e5",
+                "cutoff_hz = 100000",
                 noise(),
                 vec![("sig.out", "in", 1.0)],
                 (output, output),
@@ -1226,13 +1227,14 @@ fn the_filters_cutoff_cap_acts_only_above_649_610_hz() {
             let (native, composite) = channels(&rendered);
             let e = errors(&native, &composite);
             println!(
-                "VALIDATION {pair} / noise, cutoff at its maximum (cap 318 309 Hz against 489 999.5 Hz) / 999999 Hz / {output}: max {:.3e}, rms {:.3e}, bit-exact {}, {} of {} frames differ",
+                "VALIDATION {pair} / noise, cutoff at its maximum (100 000 Hz, below 0.49·sr = 489 999.5 Hz) / 999999 Hz / {output}: max {:.3e}, rms {:.3e}, bit-exact {}, {} of {} frames differ",
                 e.max,
                 e.rms,
                 e.differing == 0,
                 e.differing,
                 native.len()
             );
+            assert_eq!(e.differing, 0, "{pair} / {output}: bit-exact");
         }
     }
 }

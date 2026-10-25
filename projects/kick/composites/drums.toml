@@ -11,4 +11,4 @@ kick = { module = "kick" }
 [exports]
 inputs = { trigger = "kick.trigger" }
 outputs = { out = "kick.out" }
-parameters = { kick_decay = "kick.decay", kick_drive = "kick.drive" }
+parameters = { kick_decay = { to = "kick.decay", min = 10, max = 2000 }, kick_drive = { to = "kick.drive", min = 0.1, max = 5 } }

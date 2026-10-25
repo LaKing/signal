@@ -22,6 +22,8 @@ fn constants(
     values: [f64; 2],
     outputs: [&str; 2],
 ) -> (Vec<String>, [f64; 2]) {
+    // A constant is within ±10⁵ (ADR 0043): the value is a tenth of it,
+    // scaled by 10 on its connection (exact for these values).
     let text = format!(
         "schema_version = 1\n\n[project]\nname = \"bound\"\nsample_rate = 48000\nseed = 1\n\n\
          [instances]\nx = {{ module = \"{module}\", {parameters} }}\n\
@@ -29,9 +31,14 @@ fn constants(
          v = {{ module = \"std.const\", value = {:?} }}\n\
          out = {{ module = \"std.audio_out\", gain = 1 }}\n\n\
          [wiring]\nconnections = [\n\
-         {{ from = \"u.out\", to = \"x.{}\" }},\n{{ from = \"v.out\", to = \"x.{}\" }},\n\
+         {{ from = \"u.out\", to = \"x.{}\", scale = 10 }},\n{{ from = \"v.out\", to = \"x.{}\", scale = 10 }},\n\
          {{ from = \"x.{}\", to = \"out.l\" }},\n{{ from = \"x.{}\", to = \"out.r\" }},\n]\n",
-        values[0], values[1], inputs[0], inputs[1], outputs[0], outputs[1]
+        values[0] / 10.0,
+        values[1] / 10.0,
+        inputs[0],
+        inputs[1],
+        outputs[0],
+        outputs[1]
     );
     let project = Project::from_sources(vec![SourceFile {
         path: "project.toml".to_owned(),

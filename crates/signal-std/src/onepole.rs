@@ -41,7 +41,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///
 /// **Parameters**
 /// - `cutoff_hz` (frequency, Hz, range `[1, 0.49·sr]`, default 1000, combine
-///   `add`). Declared `[1, 0.49·(2³² − 1)]` as `std.svf`'s; `process` limits
+///   `add`). Declared `[1, 100 000]` (ADR 0043) as `std.svf`'s; `process` limits
 ///   the effective value to `0.49·sr`.
 ///
 /// **Feedthrough:** direct (`in[n]` reaches both outputs on frame *n*).

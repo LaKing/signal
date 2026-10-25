@@ -137,7 +137,14 @@ impl Generator<'_> {
         let mut parameters = Vec::new();
         for p in descriptor.parameters {
             if self.rng.chance(60) {
-                let value = self.value(p.range);
+                // ADR 0043: a discrete parameter takes one of its values.
+                let value = match p.values {
+                    Some(values) if !values.is_empty() => {
+                        let at = self.rng.between(0.0, values.len() as f64) as usize;
+                        values[at.min(values.len() - 1)].value
+                    }
+                    _ => self.value(p.range),
+                };
                 parameters.push((p.name.to_owned(), value));
             }
         }

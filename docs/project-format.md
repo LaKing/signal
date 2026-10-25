@@ -105,6 +105,8 @@ parameters = { glide = { to = ["glide.rise_ms", "glide.fall_ms"], group = "pitch
 
 **Ranges** (ADR 0042; optional). An exported parameter's table may give its own range, `min` and `max`, both or neither (finite, `min ≤ max`): `attack = { to = "click_level.mul", min = 0, max = 2 }`, also with `group`. It must lie inside the range of every target (a primitive parameter's declared range, or an inner composite export's range), else the plan is refused at the export; so it only narrows what the primitives accept. An export without one that reaches an inner export with one takes that range. The range is the control's (`describe.controls`, the panel, the schematic, `signal mcp`): live edits and snapshot restores clamp to it, and a value in a file outside it is an error at the value, as for a primitive's (§6). An exported input takes no range (an error). Nothing is computed with it: the plan, the audio and the hashes are the same with or without it, as long as every value lies inside.
 
+**Value sets** (ADR 0043). An exported parameter may instead name its allowed values: `wave = { to = "osc.shape", values = [{ value = 0, label = "sine" }, { value = 1, label = "saw" }] }` (finite, distinct, each with a label; not with `min` and `max`: its range is their span). Each value must be allowed by every target that has a value set (a primitive's, such as `std.osc`'s `shape`, or an inner export's), else the plan is refused at the export. An export without its own takes the value set its targets share. A value in a file that is not one of the set is an error at the value; a live edit takes the nearest. The repository's and the library's composites declare a range or a value set on every export.
+
 ## 4. Instances and module references
 
 ```toml

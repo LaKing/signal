@@ -217,7 +217,8 @@ impl<'a> Locator<'a> {
             }
             GraphError::ExportNameCollision { scope, name, .. }
             | GraphError::EmptyExport { scope, name, .. }
-            | GraphError::ExportRangeOutside { scope, name, .. } => {
+            | GraphError::ExportRangeOutside { scope, name, .. }
+            | GraphError::ExportValueOutside { scope, name, .. } => {
                 let def = self.def_at(&scope_segments(scope))?;
                 let export = def.exports.iter().rev().find(|e| e.name == *name)?;
                 Some(at(def, export.key.start))
@@ -250,7 +251,8 @@ impl<'a> Locator<'a> {
             }
             GraphError::ShapeMismatch { from, to, .. }
             | GraphError::RateMismatch { from, to, .. } => self.connection_or_instance(from, to),
-            GraphError::ParameterOutOfRange { parameter, .. } => self.winning_value(parameter),
+            GraphError::ParameterOutOfRange { parameter, .. }
+            | GraphError::ParameterNotInSet { parameter, .. } => self.winning_value(parameter),
             GraphError::NonFiniteScale { from, to, scale } => {
                 // The connection with this very scale, not merely the first
                 // one between the same ports.

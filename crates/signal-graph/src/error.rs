@@ -99,6 +99,20 @@ pub enum GraphError {
         /// The export's declared range, then the target's.
         ranges: Box<[Range; 2]>,
     },
+    /// ADR 0043: a value of an export's value set is not allowed by one of
+    /// its targets' value sets.
+    ExportValueOutside {
+        /// The composite instance (`None`: the project root).
+        scope: Option<InstanceAddress>,
+        /// The composite's name.
+        composite: String,
+        /// The export name.
+        name: String,
+        /// The value.
+        value: f64,
+        /// The target, `inst.param`, and its values as a message lists them.
+        target: Box<(String, String)>,
+    },
     /// A connection or export endpoint is not `inst.port`.
     InvalidEndpoint {
         /// The composite instance (`None`: the project root).
@@ -162,6 +176,16 @@ pub enum GraphError {
         value: f64,
         /// The declared range.
         range: Range,
+    },
+    /// ADR 0043: a discrete parameter's value is not one of its value set.
+    ParameterNotInSet {
+        /// The parameter (or a composite instance's exported parameter).
+        parameter: PortAddress,
+        /// The value.
+        value: f64,
+        /// The allowed values with their names, as a message lists them
+        /// (`0 sine, 1 saw, 2 square, 3 triangle`).
+        allowed: String,
     },
     /// A connection's scale is NaN or infinite.
     NonFiniteScale {
@@ -304,6 +328,19 @@ impl fmt::Display for GraphError {
                 ranges[1].min,
                 ranges[1].max
             ),
+            GraphError::ExportValueOutside {
+                scope: s,
+                composite,
+                name,
+                value,
+                target,
+            } => write!(
+                f,
+                "{}: composite `{composite}` export `{name}`: its value {value} is not one of its target `{}`'s ({})",
+                scope(s),
+                target.0,
+                target.1
+            ),
             GraphError::InvalidEndpoint { scope: s, endpoint } => write!(
                 f,
                 "{}: endpoint `{endpoint}` is not `instance.port`",
@@ -352,6 +389,11 @@ impl fmt::Display for GraphError {
                 "{parameter}: value {value} is outside [{}, {}]",
                 range.min, range.max
             ),
+            GraphError::ParameterNotInSet {
+                parameter,
+                value,
+                allowed,
+            } => write!(f, "{parameter}: value {value} is not one of {allowed}"),
             GraphError::NonFiniteScale { from, to, scale } => {
                 write!(f, "{from} -> {to}: scale {scale} is not finite")
             }

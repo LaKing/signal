@@ -135,18 +135,21 @@ fn fixture_with(text: &str, composite: &str, drums: Option<&str>, unranged: bool
 /// export written `name = <targets>`.
 fn without_ranges(text: &str) -> String {
     text.lines()
-        .map(
-            |line| match (line.find("= { to = "), line.find(", min = ")) {
-                (Some(open), Some(min)) if line.trim_end().ends_with('}') => {
+        .map(|line| {
+            let open = line.find("= { to = ");
+            // A range (`, min = …`) or a value set (`, values = […]`, ADR 0043).
+            let end = line.find(", min = ").or_else(|| line.find(", values = "));
+            match (open, end) {
+                (Some(open), Some(end)) if line.trim_end().ends_with('}') => {
                     format!(
                         "{}= {}",
                         &line[..open],
-                        &line[open + "= { to = ".len()..min]
+                        &line[open + "= { to = ".len()..end]
                     )
                 }
                 _ => line.to_owned(),
-            },
-        )
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -526,7 +529,8 @@ fn the_ranged_echo_refuses_a_feedback_beyond_its_range() {
     );
 }
 
-/// AC3: at corner values of every exported parameter, alone and together,
+/// AC3: at corner values of every exported parameter (beyond the exports'
+/// ranges, at the inner constants' ±10⁵ since ADR 0043), alone and together,
 /// the echo never faults, every sample is finite and its output stays within
 /// 16 times the input's peak, the bound `composites/tape_delay.toml` derives
 /// from its loop gain of at most 0.9375.
@@ -534,14 +538,14 @@ fn the_ranged_echo_refuses_a_feedback_beyond_its_range() {
 fn the_tape_delay_is_bounded_at_every_setting() {
     let corners = [
         "",
-        ", feedback = 1000000, tone = 1000000, mix = 1",
-        ", feedback = -1000000, tone = -1000000, mix = -1000000",
-        ", feedback = 0.75, tone = 4999, mix = 1000000",
-        ", time_ms = 0, feedback = 1000000, mix = 1",
-        ", time_ms = 10000, feedback = 1000000, mix = 1",
-        ", wow = 1000000, flutter = 1000000, feedback = 1000000, mix = 1",
-        ", wow = -1000000, flutter = -1000000, feedback = 1000000, mix = 0.5",
-        ", time_ms = 1, wow = 1000000, flutter = -1000000, feedback = 1000000, tone = 1000000, mix = 1",
+        ", feedback = 100000, tone = 100000, mix = 1",
+        ", feedback = -100000, tone = -100000, mix = -100000",
+        ", feedback = 0.75, tone = 4999, mix = 100000",
+        ", time_ms = 0, feedback = 100000, mix = 1",
+        ", time_ms = 10000, feedback = 100000, mix = 1",
+        ", wow = 100000, flutter = 100000, feedback = 100000, mix = 1",
+        ", wow = -100000, flutter = -100000, feedback = 100000, mix = 0.5",
+        ", time_ms = 1, wow = 100000, flutter = -100000, feedback = 100000, tone = 100000, mix = 1",
     ];
     for parameters in corners {
         let rendered = render(
@@ -574,7 +578,7 @@ fn the_tape_delay_s_repeats_decay() {
     };
     let repeat = 375 * 48;
     let rendered = render(
-        &echo_fixture(", feedback = 1000000, tone = 1000000, mix = 1", true),
+        &echo_fixture(", feedback = 100000, tone = 100000, mix = 1", true),
         None,
         10 * repeat,
         (256, 1),

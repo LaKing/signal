@@ -60,6 +60,10 @@ struct Interface {
     /// ADR 0042: the exports that declare a range, or reach one an inner
     /// export declares: a value set outside it is refused at the value.
     own: BTreeMap<String, Range>,
+    /// ADR 0043: each exported parameter's value set: its own, else the one
+    /// every target shares (a primitive's, or an inner export's); a value
+    /// that is not one of it is refused at the value.
+    value_sets: BTreeMap<String, Vec<(f64, String)>>,
 }
 
 /// A resolved instance of the composite being expanded, as endpoints see it.
@@ -447,6 +451,19 @@ impl<'a> Flattener<'a> {
                 self.unknown_parameter(address, name);
                 continue;
             };
+            // ADR 0043: a value that is not one of the export's value set,
+            // likewise.
+            if let Some(set) = interface.value_sets.get(name)
+                && !set.iter().any(|(v, _)| v == value)
+                && let Ok(parameter) = PortAddress::new(address, name)
+            {
+                self.errors.push(GraphError::ParameterNotInSet {
+                    parameter,
+                    value: *value,
+                    allowed: crate::allowed_text(set.iter().map(|(v, l)| (*v, l.as_str()))),
+                });
+                continue;
+            }
             // ADR 0042: a value outside the export's own range is refused at
             // the instance's value, as a primitive's out-of-range value is.
             if let Some(range) = interface.own.get(name)
@@ -600,10 +617,13 @@ impl<'a> Flattener<'a> {
         let mut parameters: Vec<_> = exports
             .parameters
             .iter()
-            .map(|e| (&e.name, &e.to, e.range))
+            .map(|e| (&e.name, &e.to, e.range, e.values.as_deref()))
             .collect();
         parameters.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
-        for (name, targets, declared) in parameters {
+        for (name, targets, declared, values) in parameters {
+            if let Some(set) = self.export_values(def, scope, locals, name, targets, values) {
+                interface.value_sets.insert(name.clone(), set);
+            }
             let ports = self.export_targets(scope, locals, targets, true);
             interface.parameters.insert(name.clone(), ports);
             let (range, own) = self.export_range(def, scope, locals, name, targets, declared);
@@ -687,6 +707,75 @@ impl<'a> Flattener<'a> {
             shared = Some(narrow(shared, range));
         }
         (declared.or(shared), declared.or(inner_own))
+    }
+
+    /// ADR 0043: the value set of exported parameter `name`: `declared`,
+    /// each value of which must be allowed by every target that has a value
+    /// set (a primitive's, or an inner export's), else the set every target
+    /// shares (`None` when one has none or two differ).
+    fn export_values(
+        &mut self,
+        def: &CompositeDef,
+        scope: Option<&InstanceAddress>,
+        locals: &Locals<'_>,
+        name: &str,
+        targets: &[String],
+        declared: Option<&[crate::def::ExportValue]>,
+    ) -> Option<Vec<(f64, String)>> {
+        let mut sorted: Vec<&String> = targets.iter().collect();
+        sorted.sort();
+        let mut sets: Vec<Option<Vec<(f64, String)>>> = Vec::new();
+        for target in sorted {
+            let Some((instance, port)) = target.split_once('.') else {
+                continue;
+            };
+            let Some((_, Some(local))) = locals.get(instance) else {
+                continue;
+            };
+            let set: Option<Vec<(f64, String)>> = match local {
+                Local::Primitive(descriptor) => descriptor
+                    .parameters
+                    .iter()
+                    .find(|p| p.name == port)
+                    .and_then(|p| p.values)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .map(|v| (v.value, v.label.to_owned()))
+                            .collect()
+                    }),
+                Local::Composite(inner) => inner.value_sets.get(port).cloned(),
+            };
+            if let (Some(declared), Some(set)) = (declared, &set) {
+                for entry in declared {
+                    if !set.iter().any(|(v, _)| *v == entry.value) {
+                        self.errors.push(GraphError::ExportValueOutside {
+                            scope: scope.cloned(),
+                            composite: def.name.clone(),
+                            name: name.to_owned(),
+                            value: entry.value,
+                            target: Box::new((
+                                target.clone(),
+                                crate::allowed_text(set.iter().map(|(v, l)| (*v, l.as_str()))),
+                            )),
+                        });
+                    }
+                }
+            }
+            sets.push(set);
+        }
+        if let Some(declared) = declared {
+            return Some(
+                declared
+                    .iter()
+                    .map(|e| (e.value, e.label.clone()))
+                    .collect(),
+            );
+        }
+        let first = sets.first()?.clone()?;
+        sets.iter()
+            .all(|s| s.as_ref() == Some(&first))
+            .then_some(first)
     }
 
     fn export_targets(

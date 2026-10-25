@@ -49,6 +49,7 @@ const fn param(
         range: Range { min, max },
         default,
         combine,
+        values: None,
     }
 }
 

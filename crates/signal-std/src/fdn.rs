@@ -113,7 +113,7 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 ///   (the physical models' `decay_s`, `docs/dsp-conventions.md`).
 /// - `damping_hz` (frequency, Hz, range `[1, 0.49·sr]`, default 6000,
 ///   combine `add`): the cutoff of each line's TPT one-pole low-pass, so high
-///   frequencies decay faster than T60. Declared `[1, 0.49·(2³² − 1)]` as
+///   frequencies decay faster than T60. Declared `[1, 100 000]` (ADR 0043) as
 ///   `std.svf`'s cutoff; `process` limits it to `0.49·sr`.
 /// - `predelay_ms` (control, ms, range `[0, 500]`, default 10, combine
 ///   `add`): delays the input of the network (not the dry signal), read

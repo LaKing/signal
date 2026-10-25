@@ -89,6 +89,7 @@ const DRIVE: ParameterDescriptor = ParameterDescriptor {
     },
     default: 1.0,
     combine: Combine::Add,
+    values: None,
 };
 
 const fn descriptor(

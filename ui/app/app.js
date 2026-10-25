@@ -54,6 +54,7 @@ import { compactStatus, statusFields } from './lib/status.js';
 import { appNotes, messageLines, mutedNotice } from './lib/messages.js';
 import { INITIAL_TAB, TABS, select, tabForAction } from './lib/tabs.js';
 import { retryMessage, revertMessage, unsavedLine, unsavedOf } from '../lib/unsaved.js';
+import { isDiscrete, selectOptions, selectValue, valueLabel } from '../lib/value-set.js';
 
 /** The messages card's lines: the newest, at a fixed height. */
 const MESSAGE_LINES = 6;
@@ -565,7 +566,7 @@ export class SignalAppParameters extends AppElement {
     this.unsubscribe = this.connection.subscribe({ stream: 'parameters', addresses, rate: 15 }, (frame) => {
       for (const [address, v] of valuesOf(addresses, frame)) {
         const cells = this.cells.get(address);
-        if (cells?.effective) cells.effective.textContent = Number.isFinite(v.effective) ? formatFixed(v.effective, cells.unit) : '';
+        if (cells?.effective) cells.effective.textContent = !Number.isFinite(v.effective) ? '' : cells.values ? valueLabel(cells.values, v.effective) : formatFixed(v.effective, cells.unit);
       }
     });
   }
@@ -597,10 +598,10 @@ export class SignalAppParameters extends AppElement {
       if (!cells) continue;
       if (cells.slider && cells.slider !== this.dragging) {
         cells.value = p.base;
-        cells.slider.value = String(p.base);
-        if (!cells.entry.isOpen) cells.base.textContent = formatFixed(p.base, p.unit);
+        cells.slider.value = isDiscrete(p) ? selectValue(p.values, p.base) : String(p.base);
+        if (!cells.entry.isOpen) cells.base.textContent = shownValue(p, p.base);
       } else if (!cells.slider) {
-        cells.base.textContent = formatFixed(p.base, p.unit);
+        cells.base.textContent = shownValue(p, p.base);
       }
       cells.file = fileNote(p);
       if (!cells.notice) cells.note.textContent = cells.file;
@@ -609,13 +610,15 @@ export class SignalAppParameters extends AppElement {
   }
 
   row(p) {
-    const slider = el('input', { type: 'range', min: String(p.min), max: String(p.max), step: 'any', value: String(p.base), disabled: !p.editable });
-    const base = el('td', { className: 'value', textContent: formatFixed(p.base, p.unit) });
+    // ADR 0043: a discrete parameter is a selector of its named values; it
+    // sends what a slider's release sends (its `input`, then its `change`).
+    const slider = isDiscrete(p) ? choice(p) : el('input', { type: 'range', min: String(p.min), max: String(p.max), step: 'any', value: String(p.base), disabled: !p.editable });
+    const base = el('td', { className: 'value', textContent: shownValue(p, p.base) });
     const note = el('td', { className: 'muted', textContent: fileNote(p) });
     const effective = el('td', { className: 'value effective' });
     const name = el('td', { className: 'name', textContent: p.name, title: p.name });
     if (!p.editable) {
-      this.cells.set(p.address, { base, note, unit: p.unit });
+      this.cells.set(p.address, { base, note, unit: p.unit, values: p.values ?? null });
       return el('tr', { className: 'read-only' }, name, el('td', {}, slider), base, note, effective, el('td', { className: 'muted', textContent: 'read-only' }), el('td'), el('td'));
     }
     const reset = el('button', { type: 'button', textContent: 'Reset', title: `Reset to default (${shown(p.default, p.unit)})` });
@@ -636,11 +639,11 @@ export class SignalAppParameters extends AppElement {
       });
     });
     const snapCell = el('td', { className: 'snap' }, el('label', { title: snap.title }, snap, el('span', { className: 'muted', textContent: ' snapshots' })));
-    const cells = { slider, base, note, effective, mark, snap, unit: p.unit, value: p.base, file: fileNote(p), notice: null };
+    const cells = { slider, base, note, effective, mark, snap, unit: p.unit, values: p.values ?? null, value: p.base, file: fileNote(p), notice: null };
     slider.addEventListener('input', () => {
       this.dragging = slider;
       cells.value = Number(slider.value);
-      if (!cells.entry.isOpen) base.textContent = formatFixed(cells.value, p.unit);
+      if (!cells.entry.isOpen) base.textContent = shownValue(p, cells.value);
       this.request(dragMessage(p.address, Number(slider.value))).catch(() => {});
     });
     const released = () => {
@@ -659,7 +662,7 @@ export class SignalAppParameters extends AppElement {
       value: () => cells.value,
       apply: (value) => {
         cells.value = value;
-        slider.value = String(value);
+        slider.value = isDiscrete(p) ? selectValue(p.values, value) : String(value);
         this.request(dragMessage(p.address, value)).catch(() => {});
         this.request(releaseMessage(p.address, value)).catch(failed);
       },
@@ -669,7 +672,7 @@ export class SignalAppParameters extends AppElement {
         note.title = text ?? '';
       },
       closed: () => {
-        base.textContent = formatFixed(cells.value, p.unit);
+        base.textContent = shownValue(p, cells.value);
       },
       focus: () => slider.focus({ preventScroll: true }),
     });
@@ -683,6 +686,20 @@ export class SignalAppParameters extends AppElement {
     tr.dataset.label = p.name;
     return tr;
   }
+}
+
+/** A value as the list shows it: a discrete parameter's name for it (ADR 0043), else the number with its unit. */
+function shownValue(p, value) {
+  return isDiscrete(p) ? valueLabel(p.values, value) : formatFixed(value, p.unit);
+}
+
+/** A discrete parameter's selector (ADR 0043): one option per value, named. */
+function choice(p) {
+  const select = el('select', { disabled: !p.editable });
+  for (const option of selectOptions(p.values)) select.append(el('option', { value: option.value, textContent: option.label, title: option.title }));
+  select.value = selectValue(p.values, p.base);
+  select.setAttribute('aria-label', p.name);
+  return select;
 }
 
 /**

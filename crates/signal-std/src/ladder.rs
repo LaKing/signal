@@ -96,7 +96,7 @@ fn effective_cutoff(cutoff_hz: f64, sample_rate: f64) -> f64 {
 ///
 /// **Parameters**
 /// - `cutoff_hz` (frequency, Hz, range `[1, 0.45·sr]`, default 1000, combine
-///   `add`). Declared `[1, 0.49·(2³² − 1)]` like `std.svf`'s; `process`
+///   `add`). Declared `[1, 100 000]` (ADR 0043) like `std.svf`'s; `process`
 ///   limits the effective value to `0.45·sr` of the rate it was prepared at.
 /// - `resonance` (generic, no unit, range `[0, 1]`, default 0, combine
 ///   `add`): the feedback `k = 4.2·resonance`. The filter self-oscillates

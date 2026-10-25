@@ -68,6 +68,7 @@ impl DirectPrimitive for Gain {
                 range: Range { min: 0.0, max: 4.0 },
                 default: 1.0,
                 combine: Combine::Multiply,
+                values: None,
             }],
             Feedthrough::Direct,
         )
@@ -212,6 +213,7 @@ impl DirectPrimitive for Reciprocal {
                 range: Range { min: 0.0, max: 1.0 },
                 default: 1.0,
                 combine: Combine::Add,
+                values: None,
             }],
             Feedthrough::Direct,
         )
@@ -415,6 +417,7 @@ const GAIN_PARAMETER: ParameterDescriptor = ParameterDescriptor {
     range: Range { min: 0.0, max: 4.0 },
     default: 1.0,
     combine: Combine::Multiply,
+    values: None,
 };
 
 const V4_IN: PortDescriptor = port("in", Direction::In, PortShape::Vector(4));

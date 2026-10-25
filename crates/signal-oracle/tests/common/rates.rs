@@ -66,6 +66,7 @@ fn gain(rate: u32) -> ParameterDescriptor {
         },
         default: 1.0,
         combine: Combine::Add,
+        values: None,
     }
 }
 

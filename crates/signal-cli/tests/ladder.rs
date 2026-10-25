@@ -35,12 +35,28 @@ fn project(text: &str) -> Project {
 
 /// `instances` and `connections` (TOML lines) as a project at `rate`.
 fn project_text(rate: u32, instances: &str, connections: &str) -> String {
+    // A constant is within ±10⁵ (ADR 0043): `top`'s 10⁶ is a tenth of it,
+    // scaled by 10 (exact), so the stimulus still reaches the bound.
+    let (instances, connections) = match instances.contains(TOP) {
+        true => (
+            instances.replace(
+                TOP,
+                "top_tenth = { module = \"std.const\", value = 100000 }\n\
+                 top = { module = \"std.scale\", mul = 10 }",
+            ),
+            format!("{{ from = \"top_tenth.out\", to = \"top.in\" }},\n{connections}"),
+        ),
+        false => (instances.to_owned(), connections.to_owned()),
+    };
     format!(
         "schema_version = 1\n\n[project]\nname = \"ladder\"\nsample_rate = {rate}\nseed = 3\n\n\
          [instances]\n{instances}\nout = {{ module = \"std.audio_out\", gain = 0.5 }}\n\n\
          [wiring]\nconnections = [\n{connections}]\n"
     )
 }
+
+/// The constant of 10⁶ the stimulus writes, made by [`project_text`].
+const TOP: &str = "top = { module = \"std.const\", value = 1000000 }";
 
 /// Renders `frames` of `project` in blocks of `k` on `threads` threads,
 /// every segment on the workers when there is more than one; returns the

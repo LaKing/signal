@@ -53,6 +53,7 @@ const FLOOD_REVERSE: ModuleDescriptor = ModuleDescriptor {
         },
         default: 0.0,
         combine: Combine::Add,
+        values: None,
     }],
     feedthrough: Feedthrough::Direct,
     sink: None,

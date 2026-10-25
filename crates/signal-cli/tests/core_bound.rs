@@ -37,7 +37,35 @@ fn conn(from: &str, to: &str) -> ConnectionDef {
     }
 }
 
-fn plan(instances: Vec<InstanceDef>, connections: Vec<ConnectionDef>) -> ExecutionPlan {
+/// A connection with a scale.
+fn scaled(from: &str, to: &str, scale: f64) -> ConnectionDef {
+    ConnectionDef {
+        scale: Some(scale),
+        ..conn(from, to)
+    }
+}
+
+/// The plan of `instances` and `connections`. A constant beyond the generic
+/// range ±10⁵ (ADR 0043) is made as a tenth of it, scaled by 10 on its way
+/// (a `std.scale` of the constant's name, exact for these values), so the
+/// tests still drive the types at the engine's bound.
+fn plan(instances: Vec<InstanceDef>, mut connections: Vec<ConnectionDef>) -> ExecutionPlan {
+    let mut planned = Vec::new();
+    for instance in instances {
+        let value = instance.parameters.get("value").copied().unwrap_or(0.0);
+        if instance.module == "std.const" && value.abs() > 1e5 {
+            let tenth = format!("{}_tenth", instance.name);
+            planned.push(inst(&tenth, "std.const", &[("value", value / 10.0)]));
+            planned.push(inst(&instance.name, "std.scale", &[("mul", 10.0)]));
+            connections.push(conn(
+                &format!("{tenth}.out"),
+                &format!("{}.in", instance.name),
+            ));
+        } else {
+            planned.push(instance);
+        }
+    }
+    let instances = planned;
     let root = CompositeDef {
         name: "project".to_owned(),
         instances,
@@ -188,11 +216,12 @@ fn core_results_beyond_the_bound_are_clamped_without_a_fault() {
 
 /// M2.10-2 AC10, AC11: core set II rendered past the bound through the
 /// engine, with no fault and nothing muted. A counter stepping 1e5 per
-/// trigger (1.25e7 in all), an integrator of 1e6 at gain 1e6, a buffer write
-/// of a fan-in sum of 2e6, a table's Hermite overshoot of 1.125e6, a random
-/// value at ±1e6, the vector sum of 1024 elements of 1e6, vadd and vmul of
-/// them, a phasor at 1e9 Hz, a latch and a route of an external Set(±5e6),
-/// and to_events of 2e6.
+/// trigger (1.25e7 in all), an integrator of 1e6 at gain 1e5, a buffer write
+/// of a fan-in sum of 2e6, a table's Hermite overshoot (its elements within
+/// ±10⁵ since ADR 0043: 1.125e5), a random value within ±10⁵, the vector sum
+/// of 1024 elements of 1e6, vadd and vmul of them, a phasor at 1e5 Hz (its
+/// range's end, 100 times the rate), a latch and a route of an external
+/// Set(±5e6), and to_events of 2e6.
 #[test]
 fn core_set_two_stays_within_the_bound() {
     let instances = vec![
@@ -201,16 +230,16 @@ fn core_set_two_stays_within_the_bound() {
         inst("one", "std.const", &[("value", 1.0)]),
         inst("half", "std.const", &[("value", 1.5)]),
         inst("clk", "std.phasor", &[("freq", 250.0)]),
-        inst("fast", "std.phasor", &[("freq", 1e9)]),
+        inst("fast", "std.phasor", &[("freq", 1e5)]),
         inst("cnt", "std.counter", &[("step", 1e5)]),
-        inst("int", "std.integrator", &[("mode", 1.0), ("gain", 1e6)]),
+        inst("int", "std.integrator", &[("mode", 1.0), ("gain", 1e5)]),
         inst("buf", "std.buffer1k", &[("size", 16.0)]),
         inst(
             "tab",
             "std.table4",
-            &[("v1", 1e6), ("v2", 1e6), ("interp", 2.0)],
+            &[("v1", 1e5), ("v2", 1e5), ("interp", 2.0)],
         ),
-        inst("rnd", "std.random", &[("lo", -1e6), ("hi", 1e6)]),
+        inst("rnd", "std.random", &[("lo", -1e5), ("hi", 1e5)]),
         inst("pk", "std.pack1024", &[]),
         inst("red", "std.reduce1024", &[]),
         inst("vs", "std.vadd1024", &[]),
@@ -267,13 +296,13 @@ fn core_set_two_stays_within_the_bound() {
     assert!(counts.windows(2).any(|w| w[1] < w[0]), "the count wrapped");
     assert!(phases.iter().all(|p| (0.0..1.0).contains(p)), "{phases:?}");
     assert!(
-        randoms.iter().all(|v| (-1e6..1e6).contains(v)),
+        randoms.iter().all(|v| (-1e5..1e5).contains(v)),
         "{randoms:?}"
     );
     for (port, expected) in [
         ("/int.out", 1e6),
         ("/buf.out0", 1e6),
-        ("/tab.out", 1e6),
+        ("/tab.out", 1.125e5),
         ("/red.sum", 1e6),
         ("/red.mean", 1e6),
         ("/ixs.out", 1e6),
@@ -298,7 +327,8 @@ fn core_set_two_stays_within_the_bound() {
 /// Review item 3, through the engine: `std.pack2` of fan-in sums of ±2e6
 /// clamps its elements to ±1e6; `std.unpack2` of two vectors meeting at its
 /// input ([2e6, −2e6]) clamps its outputs; a `std.buffer1k` holding
-/// [0, 1e6, 1e6, 0] (written from a wrapping table, index modulo 4) read at
+/// [0, 1e6, 1e6, 0] (written from a wrapping table of [0, 1e5, 1e5, 0],
+/// scaled by 10 on its way, index modulo 4) read at
 /// 1.5 with Hermite overshoots to 1.125e6 and is clamped to 1e6. No fault,
 /// nothing muted.
 #[test]
@@ -319,7 +349,7 @@ fn pack_unpack_and_a_buffer_overshoot_stay_within_the_bound() {
             inst(
                 "tab",
                 "std.table4",
-                &[("v1", 1e6), ("v2", 1e6), ("interp", 0.0), ("wrap", 1.0)],
+                &[("v1", 1e5), ("v2", 1e5), ("interp", 0.0), ("wrap", 1.0)],
             ),
             inst("buf", "std.buffer1k", &[("size", 4.0), ("interp", 2.0)]),
             inst("out", "std.audio_out", &[]),
@@ -337,7 +367,7 @@ fn pack_unpack_and_a_buffer_overshoot_stay_within_the_bound() {
             conn("pb.out", "ub.in"),
             conn("n.lo", "tab.pos"),
             conn("n.lo", "buf.index"),
-            conn("tab.out", "buf.value"),
+            scaled("tab.out", "buf.value", 10.0),
             conn("one.out", "buf.gate"),
             conn("half.out", "buf.read0"),
             conn("ub.e0", "out.l"),
@@ -377,8 +407,8 @@ fn random_holds_its_value_when_the_bounds_change() {
     );
     let events = vec![
         external(0, 10, "/rnd.trigger", EventPayload::Trigger),
-        external(1, 20, "/rnd.hi", EventPayload::Set(1e6)),
-        external(2, 30, "/rnd.lo", EventPayload::Set(5e5)),
+        external(1, 20, "/rnd.hi", EventPayload::Set(1e5)),
+        external(2, 30, "/rnd.lo", EventPayload::Set(5e4)),
         external(3, 40, "/rnd.trigger", EventPayload::Trigger),
     ];
     let mut engine = engine_with(&plan, events);
@@ -398,7 +428,7 @@ fn random_holds_its_value_when_the_bounds_change() {
     }
     assert_eq!(run_until(&mut engine, 41), []);
     let drawn = output(&engine, "/rnd.out");
-    assert!((5e5..1e6).contains(&drawn), "{drawn}");
+    assert!((5e4..1e5).contains(&drawn), "{drawn}");
 }
 
 /// M2.10-2 AC4, AC8: `Set` events that meet in one event input on one frame

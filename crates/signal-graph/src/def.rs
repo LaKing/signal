@@ -107,7 +107,22 @@ pub struct ParameterExport {
     /// Inner parameter ports, `inst.param`; at least one.
     pub to: Vec<String>,
     /// ADR 0042: the export's own range, which must lie inside every
-    /// target's; `None` for the range the targets share.
+    /// target's; `None` for the range the targets share. With a value set,
+    /// the values' span.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<signal_core::Range>,
+    /// ADR 0043: the export's own value set, in increasing order, each value
+    /// allowed by every target; `None` for none of its own (it then takes
+    /// the value set its targets share, if they have one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub values: Option<Vec<ExportValue>>,
+}
+
+/// One entry of an export's value set (ADR 0043).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ExportValue {
+    /// The value.
+    pub value: f64,
+    /// Its name.
+    pub label: String,
 }

@@ -912,13 +912,29 @@ fn ports_of(context: &Context, address: &str) -> Result<Vec<String>, Refused> {
     control_of(context, address).map(|(ports, _)| ports)
 }
 
-/// A control's range, `(min, max)`.
-type Bounds = (f64, f64);
+/// A control's range, `(min, max)`, and (ADR 0043) its value set.
+#[derive(Clone, Debug, Default)]
+struct Bounds {
+    range: Option<(f64, f64)>,
+    values: Option<Vec<f64>>,
+}
+
+impl Bounds {
+    /// A control's bounds as `describe` gives them.
+    fn of(control: &Value) -> Bounds {
+        Bounds {
+            range: control["min"].as_f64().zip(control["max"].as_f64()),
+            values: control["values"]
+                .as_array()
+                .map(|values| values.iter().filter_map(|v| v["value"].as_f64()).collect()),
+        }
+    }
+}
 
 /// The ports `address` reaches and, for a control, its range (`min`,
 /// `max`: a composite export's own range, ADR 0042, else the range its
 /// ports share), which the server clamps every value it sends to.
-fn control_of(context: &Context, address: &str) -> Result<(Vec<String>, Option<Bounds>), Refused> {
+fn control_of(context: &Context, address: &str) -> Result<(Vec<String>, Bounds), Refused> {
     let describe = ask(context, json!({"type": "describe"}))?;
     let control = describe["controls"]
         .as_array()
@@ -934,17 +950,29 @@ fn control_of(context: &Context, address: &str) -> Result<(Vec<String>, Option<B
                 .filter_map(Value::as_str)
                 .map(str::to_owned)
                 .collect(),
-            control["min"].as_f64().zip(control["max"].as_f64()),
+            Bounds::of(control),
         ),
-        None => (vec![address.to_owned()], None),
+        None => (vec![address.to_owned()], Bounds::default()),
     })
 }
 
-/// `value` clamped to a control's `range`, as the server sends it.
-fn within(value: f64, range: Option<Bounds>) -> f64 {
-    match range {
+/// `value` as the server sends it: clamped to a control's range and (ADR
+/// 0043) the nearest of its values.
+fn within(value: f64, bounds: &Bounds) -> f64 {
+    let clamped = match bounds.range {
         Some((min, max)) if min <= max => value.max(min).min(max),
         _ => value,
+    };
+    match &bounds.values {
+        Some(values) => values
+            .iter()
+            .copied()
+            .fold(None, |best: Option<f64>, v| match best {
+                Some(b) if (b - clamped).abs() <= (v - clamped).abs() => Some(b),
+                _ => Some(v),
+            })
+            .unwrap_or(clamped),
+        None => clamped,
     }
 }
 
@@ -1193,7 +1221,7 @@ fn set_parameter(context: &Context, arguments: &Value) -> Outcome {
     let value = arguments["value"].as_f64().unwrap_or(0.0);
     let (ports, range) = control_of(context, &address)?;
     // Judged as sent: clamped to the control's range.
-    let sent = within(value, range);
+    let sent = within(value, &range);
     guard_live(
         context,
         &ports
@@ -1212,7 +1240,7 @@ fn ramp_parameter(context: &Context, arguments: &Value) -> Outcome {
     let address = address(arguments);
     let to = arguments["to"].as_f64().unwrap_or(0.0);
     let (ports, range) = control_of(context, &address)?;
-    let sent = within(to, range);
+    let sent = within(to, &range);
     guard_live(
         context,
         &ports
@@ -1475,7 +1503,7 @@ fn commit(context: &Context, arguments: &Value) -> Outcome {
                 .as_f64()
                 .or_else(|| control["default"].as_f64())
                 .unwrap_or(0.0),
-            control["min"].as_f64().zip(control["max"].as_f64()),
+            &Bounds::of(control),
         );
         // The file's own value is the baseline for what is written there
         // (`docs/agent-interface.md` "Safety").

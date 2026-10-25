@@ -431,8 +431,8 @@ fn fan_out(name: &str) -> (PathBuf, PathBuf) {
     let (dir, setup) = copy(name);
     let kick = dir.join("composites/kick.toml");
     let text = fs::read_to_string(&kick).unwrap().replace(
-        "decay = \"amp_env.decay_ms\"",
-        "decay = [\"amp_env.decay_ms\", \"pitch_env.decay_ms\"]",
+        "decay = { to = \"amp_env.decay_ms\",",
+        "decay = { to = [\"amp_env.decay_ms\", \"pitch_env.decay_ms\"],",
     );
     fs::write(&kick, text).unwrap();
     let project = project_toml(&dir).replace(
@@ -567,8 +567,8 @@ fn reset_restores_each_target_of_an_export() {
     let (dir, setup) = copy("fanout");
     let kick = dir.join("composites/kick.toml");
     let text = fs::read_to_string(&kick).unwrap().replace(
-        "decay = \"amp_env.decay_ms\"",
-        "decay = [\"amp_env.decay_ms\", \"pitch_env.decay_ms\"]",
+        "decay = { to = \"amp_env.decay_ms\",",
+        "decay = { to = [\"amp_env.decay_ms\", \"pitch_env.decay_ms\"],",
     );
     fs::write(&kick, text).unwrap();
     let project = project_toml(&dir).replace(

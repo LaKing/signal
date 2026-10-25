@@ -7,6 +7,9 @@ use signal_core::{
 
 use crate::{BIPOLAR, at, fract, parameter, signal_port, sine_of_cycles};
 
+/// The one shape `std.lfo` has (ADR 0043: its value set).
+const SHAPE_VALUES: &[signal_core::ValueLabel] = &[crate::named(0.0, "sine")];
+
 const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     type_name: "std.lfo",
     doc: "Low-frequency sine oscillator with an f64 phase accumulator; output in [-1, 1].",
@@ -27,14 +30,17 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
             1.0,
             Combine::Add,
         ),
-        parameter(
-            "shape",
-            PortKind::Generic,
-            None,
-            0.0,
-            0.0,
-            0.0,
-            Combine::Replace,
+        crate::choice(
+            parameter(
+                "shape",
+                PortKind::Generic,
+                None,
+                0.0,
+                0.0,
+                0.0,
+                Combine::Replace,
+            ),
+            SHAPE_VALUES,
         ),
     ],
     feedthrough: Feedthrough::Direct,

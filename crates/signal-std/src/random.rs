@@ -20,8 +20,8 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
             "lo",
             PortKind::Generic,
             None,
-            -crate::SIGNAL_BOUND,
-            crate::SIGNAL_BOUND,
+            -crate::GENERIC,
+            crate::GENERIC,
             0.0,
             Combine::Add,
         ),
@@ -29,8 +29,8 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
             "hi",
             PortKind::Generic,
             None,
-            -crate::SIGNAL_BOUND,
-            crate::SIGNAL_BOUND,
+            -crate::GENERIC,
+            crate::GENERIC,
             1.0,
             Combine::Add,
         ),
@@ -62,7 +62,7 @@ pub(crate) fn uniform(lo: f64, hi: f64, u: f64) -> f64 {
 /// - `out` (signal out, generic, within `±1e6`).
 ///
 /// **Parameters**
-/// - `lo`, `hi` (generic, range `[−1e6, 1e6]`, defaults 0 and 1, combine
+/// - `lo`, `hi` (generic, range `[−10⁵, 10⁵]` (ADR 0043), defaults 0 and 1, combine
 ///   `add`): read on trigger frames (and on the first frame).
 ///
 /// **Feedthrough:** direct (a trigger on frame *n* sets `out[n]`).

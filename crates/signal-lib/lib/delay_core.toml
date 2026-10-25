@@ -41,7 +41,10 @@ time_before = { module = "std.unit_delay" }
 rate = { module = "std.sample_rate" }
 one = { module = "std.const", value = 1 }
 thousand = { module = "std.const", value = 1000 }
-top = { module = "std.const", value = 999999 }
+# 999 999 as 27 027 × 37 (ADR 0043: a constant is within ±10⁵; the
+# product of two integers is exact).
+top_base = { module = "std.const", value = 27027 }
+top = { module = "std.scale", mul = 37 }
 rate_top = { module = "std.const", value = 99999 }
 per_ms = { module = "std.div" }
 time_top = { module = "std.div" }
@@ -58,6 +61,7 @@ memory = { module = "std.buffer1m", size = 1000000, interp = 2 }
 
 [wiring]
 connections = [
+  { from = "top_base.out", to = "top.in" },
   { from = "time.out", to = "time_lim.in" },
   { from = "time_lim.out", to = "time_before.in" },
   { from = "rate.sr", to = "per_ms.a" },

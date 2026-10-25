@@ -92,6 +92,17 @@ const BUFFER_PORTS: &[PortDescriptor] = &[
     signal_port("out3", Direction::Out, PortKind::Generic, None, None),
 ];
 
+/// A buffer's largest `size`: its capacity, at most 10⁶ frames (ADR 0043:
+/// within the engine's magnitude bound; `std.buffer1m` holds 2²⁰ frames but
+/// takes a size up to 10⁶).
+const fn size_max(capacity: usize) -> f64 {
+    if capacity > 1_000_000 {
+        1_000_000.0
+    } else {
+        capacity as f64
+    }
+}
+
 /// The `'static` descriptor of the buffer named `$name` of `$capacity`
 /// frames: `size` ranges over `[1, capacity]` and defaults to the capacity.
 macro_rules! buffer_descriptor {
@@ -106,18 +117,21 @@ macro_rules! buffer_descriptor {
                     PortKind::Generic,
                     Some("frames"),
                     1.0,
-                    $capacity as f64,
-                    $capacity as f64,
+                    size_max($capacity),
+                    size_max($capacity),
                     Combine::Replace,
                 ),
-                parameter(
-                    "interp",
-                    PortKind::Generic,
-                    None,
-                    0.0,
-                    2.0,
-                    1.0,
-                    Combine::Replace,
+                crate::choice(
+                    parameter(
+                        "interp",
+                        PortKind::Generic,
+                        None,
+                        0.0,
+                        2.0,
+                        1.0,
+                        Combine::Replace,
+                    ),
+                    crate::INTERP_VALUES,
                 ),
             ],
             feedthrough: Feedthrough::Direct,
@@ -289,7 +303,7 @@ impl<const C: usize> DirectPrimitive for Buffer<C> {
 /// - `out` (signal out, generic).
 ///
 /// **Parameters**
-/// - `v0` … `v{L−1}` (generic, range `[−1e6, 1e6]`, default 0, combine
+/// - `v0` … `v{L−1}` (generic, range `[−10⁵, 10⁵]` (ADR 0043), default 0, combine
 ///   `add`): the values, the instance's parameters in the project file,
 ///   validated when the project loads (out of range is an error).
 /// - `interp` (generic, choice, range `[0, 2]`, default 1, combine
@@ -504,7 +518,8 @@ mod tests {
         for (d, capacity) in [
             (Buffer1k::describe(), 1024.0),
             (Buffer64k::describe(), 65_536.0),
-            (Buffer1m::describe(), 1_048_576.0),
+            // ADR 0043: a size within the engine's bound, 10⁶ of its 2²⁰.
+            (Buffer1m::describe(), 1_000_000.0),
         ] {
             let size = &d.parameters[0];
             assert_eq!((size.range.max, size.default), (capacity, capacity));
