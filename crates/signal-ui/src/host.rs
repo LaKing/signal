@@ -185,6 +185,17 @@ pub enum Edits {
     Discard,
 }
 
+/// Why a project is opened: it only changes what the window says of the
+/// unsaved values let go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Opening {
+    /// Another project (or the same one), opened by `project.open`, the
+    /// window's Open…, a drop or Save As.
+    Another,
+    /// Revert to Saved: the same `.signal` file, its changes discarded.
+    Revert,
+}
+
 /// The open project as the window shows it (its title, the close prompt).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectStatus {
@@ -1817,13 +1828,23 @@ impl Host {
             }
         };
         let path = std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path));
-        self.open_with(&path, edits)
+        self.open_with(&path, edits, Opening::Another)
     }
 
     /// App mode: opens the folder (or its `project.toml`) or the `.signal`
     /// file at `path`, as `project.open` does; the error is what to show.
     pub fn open_project(&mut self, path: &Path, edits: Edits) -> Result<(), String> {
-        match self.open_with(path, edits) {
+        self.open_project_as(path, edits, Opening::Another)
+    }
+
+    /// [`Host::open_project`], saying why it opens (the window's message).
+    fn open_project_as(
+        &mut self,
+        path: &Path,
+        edits: Edits,
+        opening: Opening,
+    ) -> Result<(), String> {
+        match self.open_with(path, edits, opening) {
             // As after a `project.open`: every client is told.
             Ok(_) => {
                 let describe = self.describe(false);
@@ -1840,15 +1861,20 @@ impl Host {
         }
     }
 
-    fn open_with(&mut self, path: &Path, edits: Edits) -> Result<Value, Failure> {
-        let opened = self.open_stopped(path, edits)?;
+    fn open_with(&mut self, path: &Path, edits: Edits, opening: Opening) -> Result<Value, Failure> {
+        let opened = self.open_stopped(path, edits, opening)?;
         // ADR 0033: switched on, it plays (a failure is the window's message).
         self.autoplay();
         Ok(opened)
     }
 
     /// [`Host::open_with`] without playing.
-    fn open_stopped(&mut self, path: &Path, edits: Edits) -> Result<Value, Failure> {
+    fn open_stopped(
+        &mut self,
+        path: &Path,
+        edits: Edits,
+        opening: Opening,
+    ) -> Result<Value, Failure> {
         if self.app.is_none() {
             return Err(app_only());
         }
@@ -1899,14 +1925,20 @@ impl Host {
         let saved = app::save(&self.setup, &self.setup_path);
         let mode = self.app.as_mut();
         if let Some(mode) = mode {
-            mode.message = match (&saved, unsaved) {
-                (Err(message), _) => Some(message.clone()),
-                (Ok(()), 0) => None,
-                (Ok(()), 1) => {
+            mode.message = match (&saved, unsaved, opening) {
+                (Err(message), _, _) => Some(message.clone()),
+                (Ok(()), 0, _) => None,
+                (Ok(()), 1, Opening::Another) => {
                     Some("1 unsaved edit of the previous project was not written".to_owned())
                 }
-                (Ok(()), n) => Some(format!(
+                (Ok(()), n, Opening::Another) => Some(format!(
                     "{n} unsaved edits of the previous project were not written"
+                )),
+                (Ok(()), 1, Opening::Revert) => {
+                    Some("1 unsaved edit was discarded by Revert to Saved".to_owned())
+                }
+                (Ok(()), n, Opening::Revert) => Some(format!(
+                    "{n} unsaved edits were discarded by Revert to Saved"
                 )),
             };
         }
@@ -1931,13 +1963,13 @@ impl Host {
     /// removed) and played from frame 0. The error is what to show.
     pub fn revert_project(&mut self) -> Result<(), String> {
         let file = self.revert_file().map_err(|failure| failure.message)?;
-        self.open_project(&file, Edits::Discard)
+        self.open_project_as(&file, Edits::Discard, Opening::Revert)
     }
 
     /// `project.revert`: [`Host::revert_project`] for a client.
     fn project_revert(&mut self) -> Result<Value, Failure> {
         let file = self.revert_file()?;
-        self.open_with(&file, Edits::Discard)
+        self.open_with(&file, Edits::Discard, Opening::Revert)
     }
 
     /// The file Revert to Saved… opens again: the open project's `.signal`

@@ -1281,6 +1281,72 @@ fn revert_waits_for_a_pending_save(transport: Transport) {
     rig.finish();
 }
 
+/// The window's message names what let the unsaved values go: Revert to
+/// Saved says they were discarded by it; opening another project keeps its
+/// own wording.
+fn revert_says_its_unsaved_edits_were_discarded(transport: Transport) {
+    let mut rig = app_rig("signal-revert-unsaved", transport, None);
+    let file = packed(&rig, "tone");
+    let (mut ws, _) = rig.client();
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    let working = PathBuf::from(opened["dir"].as_str().unwrap());
+    // A commit whose write fails stays an unsaved live value.
+    let Some(read_only) = common::ReadOnly::new(&working) else {
+        return rig.finish();
+    };
+    let refused = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "commit", "address": "/out.gain", "value": 0.125}),
+        "error",
+    );
+    drop(read_only);
+    assert_eq!(refused["code"], "write-failed");
+    rig.unsaved(&mut ws, "listed", |u| u["count"] == 1);
+    let status = rig.host().project_status().unwrap();
+    assert_eq!(status.unsaved, 1);
+    assert!(!status.edited && status.revertible(), "unsaved live values");
+    rig.request(&mut ws, 3, json!({"type": "project.revert"}), "project");
+    let app = rig.request(&mut ws, 4, json!({"type": "app.get"}), "app");
+    assert_eq!(
+        app["message"], "1 unsaved edit was discarded by Revert to Saved",
+        "{app}"
+    );
+    assert!(!working.exists());
+
+    // Opening another project keeps its wording.
+    let working = rig.host().project_status().unwrap().dir;
+    let Some(read_only) = common::ReadOnly::new(&working) else {
+        return rig.finish();
+    };
+    rig.request(
+        &mut ws,
+        5,
+        json!({"type": "commit", "address": "/out.gain", "value": 0.25}),
+        "error",
+    );
+    drop(read_only);
+    rig.unsaved(&mut ws, "listed again", |u| u["count"] == 1);
+    let folder = rig.dir.display().to_string();
+    rig.request(
+        &mut ws,
+        6,
+        json!({"type": "project.open", "path": folder, "unsaved": "discard"}),
+        "project",
+    );
+    let app = rig.request(&mut ws, 7, json!({"type": "app.get"}), "app");
+    assert_eq!(
+        app["message"], "1 unsaved edit of the previous project was not written",
+        "{app}"
+    );
+    rig.finish();
+}
+
 /// A folder project is written straight to its files: it has no saved
 /// version, so Revert to Saved does not apply (`no-file`) and changes
 /// nothing.
@@ -2106,6 +2172,7 @@ both!(
     revert_opens_the_saved_file_again,
     revert_waits_for_a_pending_save,
     a_folder_project_is_not_reverted,
+    revert_says_its_unsaved_edits_were_discarded,
     a_refused_archive_opens_nothing,
     save_as_writes_the_file_and_leaves_the_folder,
     closing_keeps_an_edited_working_folder,
