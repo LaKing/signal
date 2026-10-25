@@ -1,13 +1,18 @@
-// The schematic's live levels (M2.9-1, AC14 as decided in operator-request:008):
-// a small bar on each signal output of an instance on screen, from the
-// existing `scope` streams. There are 8 scope slots per run, shared by every
-// client (`docs/ui-protocol.md` "Schematic level bars"), so the visible
-// outputs are taken in order, the selected instance's first, then by their
-// place on screen; those past the free slots show the same bar marked "no
-// slot". Panel scopes come first (M2.9-1b): the schematic asks only for
-// slots the host says are free (`scopes`), and only CLAIM_MS after the free
-// count last rose, longer than a panel scope's 2 s retry. Nothing is
-// subscribed while the tab or the page is hidden, the power is off or
+// The schematic's live levels (M2.9-1, AC14 as decided in operator-request:008;
+// since 2026-10-25 the owner's "csak a kijelölt elem kapjon mérőket, de
+// minden bemeneten és kimeneten - a tartományának megfelelően": only the
+// selected instance gets meters, on every input and output, each scaled to
+// its range). A signal input or output of the selected instance on screen
+// has a bar from a `scope` stream (an input's: the sum it receives); a
+// parameter's shows its effective value from one `parameters` stream. There
+// are 8 scope slots per run, shared by every client (`docs/ui-protocol.md`
+// "Schematic level bars"), so the selected instance's signal ports are
+// taken in order, inputs then outputs, top to bottom; those past the free
+// slots show the same bar marked "no slot". Panel scopes come first
+// (M2.9-1b): the schematic asks only for slots the host says are free
+// (`scopes`), and only CLAIM_MS after the free count last rose, longer than
+// a panel scope's 2 s retry. Event and vector ports have no meter. Nothing
+// is subscribed while the tab or the page is hidden, the power is off or
 // nothing plays. No DOM.
 
 import { meterFraction } from './protocol.js';
@@ -24,35 +29,85 @@ export const CLAIM_MS = RETRY_MS + 500;
 export const SLOTS = 8;
 
 /**
- * The signal outputs of the instances drawn in `drawn` (a scene), as
- * `[{address, port, x, y}]` (`address` the drawn port's, `port` the plan's
- * primitive port behind it): the selected instance's first (`selected`, an
- * instance address), then top to bottom, left to right on screen. Only a
- * port whose own point is inside `viewport` (`{w, h}`) counts, whatever
- * part of its box is on screen. Vector and event outputs have no level; the
- * export pins of a composite's frame are not instances.
+ * The metered ports of the selected instance (`selected`, an instance
+ * address) as drawn in `drawn` (a scene), as `[{address, port, instance,
+ * direction, source, range, x, y}]`: `address` the drawn port's, `port` the
+ * plan's primitive port behind it (a composite's input or parameter: its
+ * export's first target; an output: the primitive it comes from),
+ * `source` `scope` for a signal input or output and `parameter` for a
+ * parameter, `range` the port's declared `{min, max}` or null. Inputs
+ * first, then outputs, each top to bottom. Only a port whose own point is
+ * inside `viewport` (`{w, h}`) counts. Nothing without a selection, for an
+ * open composite (its inside is drawn instead) or a frame's export pins;
+ * event and vector ports have no meter.
  */
 export function candidates(drawn, graph, selected = null, viewport = null) {
   const found = [];
+  if (!selected) return found;
   for (const level of drawn.levels) {
     for (const node of level.nodes) {
       if (node.kind !== 'instance') continue;
-      // An open composite's outputs are drawn by what is inside it.
       const instance = `${level.path}/${node.name}`;
-      if (drawn.open?.has(instance)) continue;
-      for (const out of node.outs) {
-        if (out.shape !== 'signal') continue;
-        const address = `${instance}.${out.name}`;
-        const port = node.composite ? planPort(graph, address) : address;
+      if (instance !== selected || drawn.open?.has(instance)) continue;
+      for (const pin of [...node.ins, ...node.outs]) {
+        if (pin.shape !== 'signal') continue;
+        const address = `${instance}.${pin.name}`;
+        const parameter = Boolean(pin.parameter);
+        const input = pin.direction === 'in' && !parameter;
+        const port = node.composite ? planPort(graph, address, { parameter, input }) : address;
         if (!port) continue;
-        const at = toScreen(level.transform, out);
+        const at = toScreen(level.transform, pin);
         if (viewport && !(at.x >= 0 && at.x <= viewport.w && at.y >= 0 && at.y <= viewport.h)) continue;
-        found.push({ address, port, instance, x: at.x, y: at.y });
+        found.push({
+          address,
+          port,
+          instance,
+          direction: pin.direction,
+          source: parameter ? 'parameter' : 'scope',
+          range: usable(pin.range),
+          x: at.x,
+          y: at.y,
+        });
       }
     }
   }
-  found.sort((a, b) => (b.instance === selected) - (a.instance === selected) || a.y - b.y || a.x - b.x);
+  found.sort((a, b) => (a.direction === 'out') - (b.direction === 'out') || a.y - b.y || a.x - b.x);
   return found;
+}
+
+/** A range a meter can scale to: finite, `min < max`; else null. */
+function usable(range) {
+  if (!range || !Number.isFinite(range.min) || !Number.isFinite(range.max) || !(range.min < range.max)) return null;
+  return { min: range.min, max: range.max };
+}
+
+/** `value`'s place in `range` (0…1, clamped). */
+function within(value, range) {
+  return Math.min(1, Math.max(0, (value - range.min) / (range.max - range.min)));
+}
+
+/**
+ * A scope meter's span (`{lo, hi}`, 0…1 of its bar) from a block's points:
+ * with a range, the block's lowest to highest value in it; without one,
+ * from 0 to its peak on the −60…0 dBFS scale (`levelFraction`).
+ */
+export function levelSpan(points, range = null) {
+  if (!range) return { lo: 0, hi: levelFraction(points) };
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const v of points ?? []) {
+    if (!Number.isFinite(v)) continue;
+    lo = Math.min(lo, v);
+    hi = Math.max(hi, v);
+  }
+  if (lo > hi) return { lo: 0, hi: 0 };
+  return { lo: within(lo, range), hi: within(hi, range) };
+}
+
+/** A parameter meter's span: from its range's minimum to its effective value. */
+export function parameterSpan(value, range = null) {
+  if (!Number.isFinite(value) || !range) return { lo: 0, hi: 0 };
+  return { lo: 0, hi: within(value, range) };
 }
 
 /**
@@ -111,6 +166,19 @@ export function levelPlan({ wanted, granted = new Set(), refused = new Map(), ac
     retry = due.length ? Math.min(...due) : null;
   }
   return { subscribe, unsubscribe, states, retry };
+}
+
+/**
+ * Whether the instance at `address` is muted (`'self'`), holds a muted one
+ * (`'inside'`, a composite: one of `muted`'s addresses is below it), or
+ * neither (null). `muted` is a set of instance addresses (`app.mutedInstances`).
+ */
+export function mutedOf(muted, address) {
+  if (!muted?.size) return null;
+  if (muted.has(address)) return 'self';
+  const prefix = `${address}/`;
+  for (const m of muted) if (m.startsWith(prefix)) return 'inside';
+  return null;
 }
 
 /** A level bar's length (0…1) from a scope block's points: their peak, on a −60…0 dBFS scale. */

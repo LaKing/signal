@@ -1463,6 +1463,12 @@ impl Host {
             "notes": mode.notes,
             "message": mode.message,
             "muted": self.run.as_ref().and_then(|run| run.muted_note.clone()),
+            // The schematic marks them (every one, unlike the note).
+            "mutedInstances": self
+                .run
+                .as_ref()
+                .map(|run| run.muted.iter().map(|m| m.address.clone()).collect::<Vec<_>>())
+                .unwrap_or_default(),
             "writes": self.writes,
             "setupPath": self.setup_path.display().to_string(),
             "setupProblems": self.setup_problems,

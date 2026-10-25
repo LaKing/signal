@@ -565,11 +565,17 @@ fn a_muted_instance_is_shown_until_the_project_plays_again(transport: Transport)
     rig.request(&mut ws, 4, set(0.5), "committed");
     let app = rig.request(&mut ws, 5, json!({"type": "app.get"}), "app");
     assert_eq!(app["muted"], json!(muted), "still muted: {app}");
+    assert_eq!(
+        app["mutedInstances"],
+        json!(["/click"]),
+        "for the schematic: {app}"
+    );
 
     rig.request(&mut ws, 6, json!({"type": "transport.stop"}), "transport");
     rig.request(&mut ws, 7, json!({"type": "transport.play"}), "transport");
     let app = rig.request(&mut ws, 8, json!({"type": "app.get"}), "app");
     assert_eq!(app["muted"], Value::Null, "a new run: {app}");
+    assert_eq!(app["mutedInstances"], json!([]), "{app}");
 
     // Muted again (and the file set back), then the power off: no run, no
     // note; on, a new run from the file plays it.

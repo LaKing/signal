@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CLAIM_MS, RETRY_MS, candidates, levelFraction, levelPlan } from './schematic-levels.js';
+import { CLAIM_MS, RETRY_MS, candidates, levelFraction, levelPlan, levelSpan, mutedOf, parameterSpan } from './schematic-levels.js';
 import { layout } from './schematic-layout.js';
 import { scene } from './schematic-scene.js';
 import { fit } from './schematic-view.js';
@@ -30,13 +30,107 @@ const layoutOf = (level) => {
 // Fitted as Fit does: every composite closed.
 const fitted = () => scene({ layoutOf, view: fit(layoutOf('').bounds, viewport), viewport });
 
-test('the candidates: visible signal outputs, any rate divisor, in screen order, the selected instance first', () => {
-  const list = candidates(fitted(), GRAPH);
-  assert.deepEqual(list.map((c) => c.address), ['/env.out', '/sparks.count', '/drums.out']);
-  assert.equal(list.find((c) => c.address === '/drums.out').port, '/drums/dc.out', 'a composite’s output is its primitive’s');
-  assert.ok(!list.some((c) => c.address === '/sparks.pos' || c.address === '/hub.out'), 'vectors and events have no level');
-  assert.deepEqual(candidates(fitted(), GRAPH, '/drums').map((c) => c.address)[0], '/drums.out');
-  assert.deepEqual(candidates(scene({ layoutOf, view: { k: 1, x: 1e6, y: 0 }, viewport }), GRAPH), [], 'off screen, none');
+test('the candidates: only the selected instance’s signal ports, any rate divisor', () => {
+  assert.deepEqual(candidates(fitted(), GRAPH), [], 'nothing selected, no meter');
+  assert.deepEqual(candidates(fitted(), GRAPH, '/env').map((c) => c.address), ['/env.out']);
+  const sparks = candidates(fitted(), GRAPH, '/sparks');
+  assert.deepEqual(sparks.map((c) => c.address), ['/sparks.count'], 'a vector output has no meter');
+  assert.deepEqual(candidates(fitted(), GRAPH, '/hub'), [], 'an event output has none');
+  const drums = candidates(fitted(), GRAPH, '/drums');
+  assert.deepEqual(drums.map((c) => [c.address, c.port, c.source]), [['/drums.out', '/drums/dc.out', 'scope']], 'a composite’s output is its primitive’s');
+  assert.deepEqual(candidates(scene({ layoutOf, view: { k: 1, x: 1e6, y: 0 }, viewport }), GRAPH, '/env'), [], 'off screen, none');
+});
+
+// 2026-10-25, the owner's "csak a kijelölt elem kapjon mérőket, de minden
+// bemeneten és kimeneten - a tartományának megfelelően".
+const range = (min, max) => ({ min, max });
+const MIXED = {
+  top: {
+    instances: [
+      {
+        name: 'mix',
+        module: 'std.mix',
+        composite: false,
+        ports: [{ ...p('a', 'in'), range: null }, { ...p('b', 'in'), range: null }, { ...p('out', 'out'), range: range(-1, 1) }, p('ev', 'in', 'events')],
+        parameters: [{ name: 'gain_a', kind: 'gain', rate: 1, range: range(0, 4) }],
+      },
+      {
+        name: 'voice',
+        module: 'voice',
+        composite: true,
+        ports: [p('in', 'in'), p('out', 'out')],
+        parameters: [{ name: 'attack', kind: 'generic', rate: 1, range: range(0, 2) }],
+      },
+      { name: 'other', module: 'std.lag', composite: false, ports: [p('out', 'out')], parameters: [] },
+    ],
+    connections: [],
+  },
+  composites: {
+    voice: {
+      instances: [
+        { name: 'amp', module: 'std.gain', composite: false, ports: [p('in', 'in'), p('out', 'out')], parameters: [] },
+        { name: 'click', module: 'std.scale', composite: false, ports: [p('in', 'in'), p('out', 'out')], parameters: [] },
+      ],
+      connections: [],
+      inputs: [{ name: 'in', to: ['amp.in', 'click.in'], shape: 'signal' }],
+      outputs: [{ name: 'out', from: 'amp.out', shape: 'signal' }],
+      parameters: [{ name: 'attack', to: ['click.mul'], range: range(0, 2) }],
+    },
+  },
+};
+const mixedLayouts = new Map();
+const mixedLayoutOf = (level) => {
+  if (!mixedLayouts.has(level)) mixedLayouts.set(level, layout(level === '' ? MIXED.top : MIXED.composites[level]));
+  return mixedLayouts.get(level);
+};
+const mixedScene = () => scene({ layoutOf: mixedLayoutOf, view: fit(mixedLayoutOf('').bounds, viewport), viewport });
+
+test('every input, parameter and output of the selected instance, inputs first, each with its range', () => {
+  const list = candidates(mixedScene(), MIXED, '/mix', viewport);
+  assert.deepEqual(
+    list.map((c) => [c.address, c.direction, c.source, c.range]),
+    [
+      ['/mix.a', 'in', 'scope', null],
+      ['/mix.b', 'in', 'scope', null],
+      ['/mix.gain_a', 'in', 'parameter', range(0, 4)],
+      ['/mix.out', 'out', 'scope', range(-1, 1)],
+    ],
+    'an event input has no meter; a parameter is metered by its value',
+  );
+  assert.ok(!list.some((c) => c.instance !== '/mix'), 'no other instance is metered');
+});
+
+test('a composite’s input and parameter are metered at their export’s first target', () => {
+  const list = candidates(mixedScene(), MIXED, '/voice', viewport);
+  assert.deepEqual(
+    list.map((c) => [c.address, c.port, c.source, c.range]),
+    [
+      ['/voice.in', '/voice/amp.in', 'scope', null],
+      ['/voice.attack', '/voice/click.mul', 'parameter', range(0, 2)],
+      ['/voice.out', '/voice/amp.out', 'scope', null],
+    ],
+  );
+  // Open, its inside is drawn and metered by what is selected there.
+  const open = { ...mixedScene(), open: new Set(['/voice']) };
+  assert.deepEqual(candidates(open, MIXED, '/voice', viewport), []);
+});
+
+test('a meter’s span: the dBFS peak without a range, the block’s lowest to highest value in one', () => {
+  assert.deepEqual(levelSpan([0, -1, 0.5]), { lo: 0, hi: 1 });
+  assert.deepEqual(levelSpan([0.5, -0.5], range(-1, 1)), { lo: 0.25, hi: 0.75 });
+  assert.deepEqual(levelSpan([3, 4], range(0, 2)), { lo: 1, hi: 1 }, 'clamped to the range');
+  assert.deepEqual(levelSpan([NaN], range(0, 1)), { lo: 0, hi: 0 });
+  assert.deepEqual(parameterSpan(0.5, range(0, 2)), { lo: 0, hi: 0.25 });
+  assert.deepEqual(parameterSpan(-1e6, range(0, 2)), { lo: 0, hi: 0 });
+  assert.deepEqual(parameterSpan(1, null), { lo: 0, hi: 0 });
+});
+
+test('a muted instance is marked, and a composite that holds one', () => {
+  const muted = new Set(['/kick/click_level']);
+  assert.equal(mutedOf(muted, '/kick/click_level'), 'self');
+  assert.equal(mutedOf(muted, '/kick'), 'inside');
+  assert.equal(mutedOf(muted, '/kick/click'), null, 'a name that only starts the same is not');
+  assert.equal(mutedOf(new Set(), '/kick'), null);
 });
 
 const wanted = (...ports) => ports.map((port) => ({ address: port, port }));
@@ -183,10 +277,10 @@ test('only ports whose point is on screen are candidates, whatever their box', (
   const shown = scene({ layoutOf: () => drawn, view, viewport: small });
   assert.deepEqual(shown.levels[0].nodes.map((n) => n.name), ['wide'], 'the box is drawn');
   assert.ok(20 + wide.w > small.w, 'its output is off screen');
-  assert.deepEqual(candidates(shown, { top: level, composites: {} }, null, small), []);
+  assert.deepEqual(candidates(shown, { top: level, composites: {} }, '/wide', small).map((c) => c.address), ['/wide.in'], 'its input is on screen');
   const plan = levelPlan({ wanted: [], granted: new Set(['/wide.out']), active: true });
   assert.deepEqual([plan.subscribe, plan.unsubscribe], [[], ['/wide.out']], 'a held slot is let go');
-  // Panned so the output is on screen, it is a candidate again.
+  // Panned so the output is on screen (and the input off), it is a candidate again.
   const back = scene({ layoutOf: () => drawn, view: { k: 1, x: 50 - wide.x - wide.w, y: 10 - wide.y }, viewport: small });
-  assert.deepEqual(candidates(back, { top: level, composites: {} }, null, small).map((c) => c.address), ['/wide.out']);
+  assert.deepEqual(candidates(back, { top: level, composites: {} }, '/wide', small).map((c) => c.address), ['/wide.out']);
 });

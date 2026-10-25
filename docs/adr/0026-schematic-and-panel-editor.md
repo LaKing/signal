@@ -32,3 +32,6 @@ A project's signal path is only visible as text: `project.toml`'s instances and 
 - `ui/schematic.toml` is a new optional project file (`docs/project-format.md`); it is packed with the project.
 - Writing the panel re-formats the `<signal-panel>` element; comments inside it are not kept (outside it everything is).
 - Tests: the layout, the zoom transform, the panel serialiser and the editor's operations are pure functions with `node:test` tests; `graph` and `panel.write` have protocol tests over both transports; the visual and interaction checks (zoom, drag, the meter pair) are the operator's, in the window and headless Chrome.
+
+## Note of 2026-10-25: meters on the selected instance only
+The owner: "csak a kijelölt elem kapjon mérőket, de minden bemeneten és kimeneten - a tartományának megfelelően" (only the selected element gets meters, but on every input and output, each scaled to its range). The live levels of §1 ("only for what is on screen") are narrowed to the selected instance and widened to all its signal inputs, parameters and outputs, each scaled to its declared range (`ui-controls.md` "Level bars"); an instance the fault guard muted is marked. The 8 scope slots are kept.

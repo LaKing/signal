@@ -42,7 +42,7 @@ function endpoint(text) {
 }
 
 function pin(port, direction) {
-  return { name: port.name, shape: shapeName(port.shape), kind: port.kind ?? null, rate: port.rate ?? null, direction };
+  return { name: port.name, shape: shapeName(port.shape), kind: port.kind ?? null, rate: port.rate ?? null, range: port.range ?? null, direction };
 }
 
 /**

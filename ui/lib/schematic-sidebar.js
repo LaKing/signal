@@ -220,7 +220,8 @@ export function sidebar(selected, context = {}) {
     fields,
     connections,
     across,
-    meter: hit.node.kind === 'instance' && port.direction === 'out' && port.shape === 'signal',
+    // 2026-10-25: every signal input, output and parameter of an instance (the selected instance's meters).
+    meter: hit.node.kind === 'instance' && port.shape === 'signal',
     actions: actionsOf(hit, { ...menu(hit), opaque: across?.opaque ?? false }, ['trace', 'go-inside', 'go-outside', 'copy-address', 'disconnect']),
   };
 }

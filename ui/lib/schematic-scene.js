@@ -284,10 +284,10 @@ export function nodeRect(drawn, path) {
  * The running plan's primitive port behind port `address` of an instance as
  * drawn (`/drums.out` → `/drums/kick/dc.out`), following the composites'
  * exported outputs in `graph`, or (`parameter`) their exported parameters'
- * first target (`/drums.kick_decay` → `/drums/kick/amp_env.decay_ms`); null
- * if it reaches none.
+ * first target (`/drums.kick_decay` → `/drums/kick/amp_env.decay_ms`), or
+ * (`input`) their exported inputs' first target; null if it reaches none.
  */
-export function planPort(graph, address, { parameter = false } = {}) {
+export function planPort(graph, address, { parameter = false, input = false } = {}) {
   const dot = address.lastIndexOf('.');
   if (dot < 0) return null;
   const segments = address.slice(1, dot).split('/');
@@ -305,7 +305,9 @@ export function planPort(graph, address, { parameter = false } = {}) {
       for (let depth = 0; inner && depth <= MAX_DEPTH; depth++) {
         const from = parameter
           ? inner.parameters?.find((o) => o.name === port)?.to?.[0]
-          : inner.outputs?.find((o) => o.name === port)?.from;
+          : input
+            ? inner.inputs?.find((o) => o.name === port)?.to?.[0]
+            : inner.outputs?.find((o) => o.name === port)?.from;
         if (!from) return null;
         const cut = from.lastIndexOf('.');
         const name = from.slice(0, cut);

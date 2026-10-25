@@ -12,7 +12,7 @@
 // following (`schematic.move`).
 // M2.9-3: the bar's Edit patch switch edits the patch
 // (ui/controls/schematic-editor.js); off, nothing of it takes an input.
-// Signal outputs on screen carry a level bar from scope streams
+// The selected instance's signal inputs, outputs and parameters on screen carry a meter, scaled to each port's range, from scope and parameters streams
 // (ui/lib/schematic-levels.js). Nothing is drawn or streamed while hidden or
 // switched off, and nothing runs between events: no animation loop.
 // M2.9-1b: each drawn level is one group, kept with its elements; a pan or a
@@ -82,7 +82,7 @@ import { boundaryLinks, breadcrumbs, chain, levelRect, nodeRect, openAnchor, reb
 import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
 import { hitTest, instanceHit, portHit, reselect } from '../lib/schematic-hit.js';
 import { cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
-import { LEVEL_RATE, SLOTS, candidates, levelFraction, levelPlan } from '../lib/schematic-levels.js';
+import { LEVEL_RATE, SLOTS, candidates, levelPlan, levelSpan, mutedOf, parameterSpan } from '../lib/schematic-levels.js';
 import { IDENTITY, commandView, fit, focus, matrix, pan, toLocal, toScreen, wheelFactor, zoomAt } from '../lib/schematic-view.js';
 import { keyCommand, keymap, shownKeys, wheelCommand } from '../lib/keys.js';
 import { registerWheel, takesWheel, verticalDelta } from './keyboard.js';
@@ -173,6 +173,9 @@ svg.many .wire.selected { stroke-width: 4; }
 .level { fill: var(--signal-track, #2a2f38); }
 .level-fill { fill: var(--signal-meter-rms, #3ecf8e); }
 .level-mark { fill: var(--signal-muted, #8a93a3); visibility: hidden; }
+/* 2026-10-25: an instance the fault guard muted (app.muted), or a composite holding one: a dashed red edge and the word. */
+.muted > .box { stroke: var(--signal-error, #e5534b); stroke-width: 2; stroke-dasharray: 4 3; }
+.muted-mark { fill: var(--signal-error, #e5534b); font-weight: 600; }
 [data-state="no-slot"] > .level-mark { visibility: visible; }
 [data-state="no-slot"] > .level-fill, [data-state="idle"] > .level-fill, [data-state="pending"] > .level-fill { visibility: hidden; }
 /* The toolbar (the owner's, 2026-10-22: "these buttons should sit on a toolbar that belongs to the schematic view"): Edit patch and the breadcrumbs left, Fit and the resets right. */
@@ -352,7 +355,15 @@ export class SignalSchematic extends HTMLElement {
     this.barsPending = false;
     this.stops = [];
     this.levelSubs = new Map();
+    /** Each metered plan port's last span, `{lo, hi, text}`. */
     this.levels = new Map();
+    /** Each metered scope port's range (null: the dBFS scale). */
+    this.levelRanges = new Map();
+    /** The parameters stream of the selected instance's parameters: `{key, stop, addresses}`, or null. */
+    this.paramStream = null;
+    /** The instances the fault guard muted in the run (`app.mutedInstances`), as a set of addresses. */
+    this.mutedSet = new Set();
+    this.mutedKey = '';
     this.refused = new Map();
     this.bars = new Map();
     /** A node's element → its level bars, `[[address, {bar, fill, width}]]`. */
@@ -376,6 +387,26 @@ export class SignalSchematic extends HTMLElement {
   /** The part selected last (the context menu's and the keyboard's), or null. */
   get selection() {
     return this.selected.at(-1) ?? null;
+  }
+
+  /**
+   * The instance whose ports carry meters (2026-10-25: only the selected
+   * one): the selected instance, or the instance of a selected pin.
+   */
+  get metered() {
+    const s = this.selection;
+    if (s?.kind === 'instance') return s.address;
+    if (s?.kind === 'port' && s.node?.kind === 'instance') return `${s.path}/${s.node.name}`;
+    return null;
+  }
+
+  /** `app.mutedInstances`: the boxes marked muted change only when the list does. */
+  mutedSeen(app) {
+    const list = Array.isArray(app?.mutedInstances) ? app.mutedInstances : [];
+    const key = list.join('\t');
+    if (key === this.mutedKey) return;
+    this.mutedKey = key;
+    this.mutedSet = new Set(list);
   }
 
   connectedCallback() {
@@ -471,7 +502,10 @@ export class SignalSchematic extends HTMLElement {
     on('welcome', () => this.fetch());
     on('describe', () => this.described());
     on('unsaved', () => this.refreshCard());
-    on('app', () => this.activity());
+    on('app', (app) => {
+      this.mutedSeen(app);
+      this.activity();
+    });
     if (connection.status === undefined || connection.status === 'open') this.fetch();
   }
 
@@ -767,6 +801,8 @@ export class SignalSchematic extends HTMLElement {
       shown.fan === fan &&
       shown.collapsed === collapsed &&
       shown.solo === soloKey &&
+      shown.metered === this.metered &&
+      shown.mutedKey === this.mutedKey &&
       sameItems(shown.nodes, level.nodes) &&
       sameItems(shown.wires, level.wires);
     if (same) level.bundles = shown.items;
@@ -787,7 +823,10 @@ export class SignalSchematic extends HTMLElement {
         drawn.nodeCache,
         drawOrder(level.nodes, level.layout.opened),
         (n) => n.id,
-        (n) => `${this.drawn.open.has(`${level.path}/${n.name}`)} ${sizes} ${collapsed}`,
+        (n) => {
+          const address = `${level.path}/${n.name}`;
+          return `${this.drawn.open.has(address)} ${sizes} ${collapsed} ${this.metered === address} ${mutedOf(this.mutedSet, address)}`;
+        },
         (n) => this.nodeElement(level, n, baked, text, collapsed),
       );
       if (!sameItems([...drawn.wires.children], wires.elements)) drawn.wires.replaceChildren(...wires.elements);
@@ -795,7 +834,7 @@ export class SignalSchematic extends HTMLElement {
       if (!sameItems([...drawn.nodes.children], nodes.elements)) drawn.nodes.replaceChildren(...nodes.elements);
       drawn.wireCache = wires.cache;
       drawn.nodeCache = nodes.cache;
-      drawn.shown = { sizes, open, fan, collapsed, solo: soloKey, items, nodes: level.nodes, wires: level.wires };
+      drawn.shown = { sizes, open, fan, collapsed, solo: soloKey, metered: this.metered, mutedKey: this.mutedKey, items, nodes: level.nodes, wires: level.wires };
     }
     drawn.placed = placed;
     drawn.g.setAttribute('transform', matrix(placed));
@@ -907,7 +946,8 @@ export class SignalSchematic extends HTMLElement {
     const m = baked.m;
     const address = `${level.path}/${node.name}`;
     const isOpen = this.drawn.open.has(address);
-    const classes = ['node', node.kind === 'instance' ? '' : 'pins', node.composite ? 'composite' : '', isOpen ? 'open' : ''];
+    const muted = node.kind === 'instance' ? mutedOf(this.mutedSet, address) : null;
+    const classes = ['node', node.kind === 'instance' ? '' : 'pins', node.composite ? 'composite' : '', isOpen ? 'open' : '', muted ? 'muted' : ''];
     const group = el('g', { class: classes.join(' ').replace(/\s+/g, ' ').trim() });
     if (node.kind === 'instance') {
       group.dataset.address = address;
@@ -928,6 +968,8 @@ export class SignalSchematic extends HTMLElement {
       label({ x: node.x + 8, y: node.y + 14 }, 12, { class: 'name' }, node.name);
       label({ x: node.x + 8, y: node.y + 27 }, 10, { class: 'module' }, node.module);
     }
+    if (muted && text(9)) label({ x: node.x + node.w - 8, y: node.y + 14 }, 9, { class: 'muted-mark', 'text-anchor': 'end' }, muted === 'self' ? 'muted' : 'muted inside');
+    const metered = node.kind === 'instance' && !isOpen && this.metered === address;
     const bars = [];
     // An open composite's pins drawn at OPEN_PIN_PX on screen at most (zoomed into its inside, they would grow over its frame).
     const radius = isOpen ? Math.min(3, OPEN_PIN_PX / (level.pinK ?? 1)) : 3;
@@ -966,10 +1008,10 @@ export class SignalSchematic extends HTMLElement {
       if (text(9) && !isOpen && !node.composite && node.kind === 'instance') {
         label({ x: pin.x + (out ? -6 : 6), y: pin.y + 3 }, 9, { class: 'pin-label', 'text-anchor': out ? 'end' : 'start' }, pin.name);
       }
-      if (out && node.kind === 'instance' && pin.shape === 'signal' && !isOpen) {
-        // Fixed size whatever its state: only the fill's width changes.
+      if (metered && pin.shape === 'signal') {
+        // Fixed size whatever its state: only the fill's place and width change. An input's inside its box at the left, an output's at the right.
         const bar = el('g', { class: 'meter', 'data-state': 'idle' });
-        const x = pin.x - 34;
+        const x = out ? pin.x - 34 : pin.x + 6;
         const y = pin.y + 5;
         const track = bakedRect(baked, { x, y, w: 28, h: 3 });
         if (track) bar.append(el('rect', { class: 'level', ...track }));
@@ -979,7 +1021,7 @@ export class SignalSchematic extends HTMLElement {
         const mark = bakedRect(baked, { x, y: y + 1, w: 28, h: 1 });
         if (mark) bar.append(el('rect', { class: 'level-mark', ...mark }));
         group.append(bar);
-        bars.push([portAddress, { bar, fill, width: 28 * m }]);
+        bars.push([portAddress, { bar, fill, x: at.x, width: 28 * m }]);
       }
     }
     this.barsOf.set(group, bars);
@@ -2709,8 +2751,10 @@ export class SignalSchematic extends HTMLElement {
     clearTimeout(this.retryTimer);
     this.retryTimer = null;
     if (!this.connection) return;
-    const selected = this.selection?.kind === 'instance' ? this.selection.address : null;
-    const wanted = this.drawn && this.graph ? candidates(this.drawn, this.graph, selected, this.viewport) : [];
+    const all = this.drawn && this.graph ? candidates(this.drawn, this.graph, this.metered, this.viewport) : [];
+    const wanted = all.filter((c) => c.source === 'scope');
+    for (const c of wanted) this.levelRanges.set(c.port, c.range);
+    this.updateParameters(all.filter((c) => c.source === 'parameter'));
     const plan = levelPlan({
       wanted,
       granted: new Set(this.levelSubs.keys()),
@@ -2723,6 +2767,11 @@ export class SignalSchematic extends HTMLElement {
     for (const port of plan.unsubscribe) this.dropLevel(port);
     for (const port of plan.subscribe) this.takeLevel(port);
     this.states = new Map(wanted.map((c) => [c.address, { state: plan.states.get(c.address), port: c.port }]));
+    for (const c of all) {
+      if (c.source !== 'parameter') continue;
+      const live = this.active && this.paramStream?.subscribed;
+      this.states.set(c.address, { state: live ? 'live' : this.active ? 'pending' : 'idle', port: `param ${c.port}` });
+    }
     this.applyBars();
     // Only while a request could succeed; otherwise the next `scopes` says.
     if (this.active && plan.retry !== null) this.retryTimer = setTimeout(() => this.updateLevels(), plan.retry);
@@ -2733,7 +2782,8 @@ export class SignalSchematic extends HTMLElement {
     const stop = this.connection.subscribe(
       { stream: 'scope', port, rate: LEVEL_RATE },
       (frame) => {
-        this.levels.set(port, levelFraction(frame.values));
+        const range = this.levelRanges.get(port) ?? null;
+        this.levels.set(port, { ...levelSpan(frame.values, range), text: scopeText(frame.values, range) });
         this.scheduleBars();
       },
       {
@@ -2759,10 +2809,51 @@ export class SignalSchematic extends HTMLElement {
     this.levels.delete(port);
   }
 
+  /**
+   * The selected instance's parameters, as one `parameters` stream (no
+   * scope slot): its effective values, each scaled to its range. A new
+   * set of addresses starts it again; none, or inactive, stops it.
+   */
+  updateParameters(wanted) {
+    const addresses = this.active ? [...new Set(wanted.map((c) => c.port))].slice(0, PARAMETER_STREAM_MAX) : [];
+    const key = addresses.join('\t');
+    if (this.paramStream?.key === key) return;
+    this.paramStream?.stop?.();
+    for (const port of this.paramStream?.addresses ?? []) this.levels.delete(`param ${port}`);
+    this.paramStream = null;
+    if (!addresses.length || !this.connection) return;
+    const ranges = new Map(wanted.map((c) => [c.port, c.range]));
+    const stream = { key, addresses, subscribed: false, stop: null };
+    stream.stop = this.connection.subscribe(
+      { stream: 'parameters', addresses, rate: 30 },
+      (frame) => {
+        for (const [i, port] of addresses.entries()) {
+          const v = frame?.values?.[i];
+          if (!v) continue;
+          this.levels.set(`param ${port}`, { ...parameterSpan(v.effective, ranges.get(port) ?? null), text: valueText(v.effective) });
+        }
+        this.scheduleBars();
+      },
+      {
+        onSubscribed: () => {
+          stream.subscribed = true;
+          for (const entry of this.states?.values() ?? []) if (entry.port.startsWith('param ')) entry.state = 'live';
+          this.applyBars();
+        },
+        onError: () => {
+          if (this.paramStream === stream) this.paramStream = null;
+        },
+      },
+    );
+    this.paramStream = stream;
+  }
+
   releaseLevels() {
     clearTimeout(this.retryTimer);
     clearTimeout(this.levelTimer);
     for (const port of [...this.levelSubs.keys()]) this.dropLevel(port);
+    this.paramStream?.stop?.();
+    this.paramStream = null;
   }
 
   scheduleBars() {
@@ -2778,10 +2869,15 @@ export class SignalSchematic extends HTMLElement {
     for (const [address, shown] of this.bars) {
       const entry = this.states?.get(address);
       const state = entry?.state ?? 'idle';
-      const level = state === 'live' ? this.levels.get(entry.port) ?? 0 : 0;
-      // Written only when changed: a pan frame touches no bar.
+      const span = state === 'live' ? this.levels.get(entry.port) ?? NO_SPAN : NO_SPAN;
+      const level = `${span.lo} ${span.hi}`;
+      // Written only when changed: a pan frame touches no bar. A span at one value is a 1 px tick.
       if (shown.state !== state) shown.bar.setAttribute('data-state', state);
-      if (shown.level !== level) shown.fill.setAttribute('width', String(shown.width * level));
+      if (shown.level !== level) {
+        const width = Math.max(span.hi > span.lo || span.hi > 0 ? 1 : 0, shown.width * (span.hi - span.lo));
+        shown.fill.setAttribute('x', String(shown.x + shown.width * span.lo));
+        shown.fill.setAttribute('width', String(width));
+      }
       shown.state = state;
       shown.level = level;
     }
@@ -2790,15 +2886,43 @@ export class SignalSchematic extends HTMLElement {
     if (meter) {
       const entry = this.states?.get(meter.address);
       const state = entry ? entry.state ?? 'idle' : 'off';
-      const level = state === 'live' ? this.levels.get(entry.port) ?? 0 : 0;
-      const text = { live: level > 0 ? `${(60 * level - 60).toFixed(1)} dB` : '−∞ dB', idle: 'stopped', pending: '…', 'no-slot': 'no slot', off: 'not on screen' }[state] ?? state;
-      if (meter.shown !== `${state} ${level}`) {
-        meter.fill.style.transform = `scaleX(${level})`;
+      const span = state === 'live' ? this.levels.get(entry.port) ?? NO_SPAN : NO_SPAN;
+      const text = { live: span.text ?? '…', idle: 'stopped', pending: '…', 'no-slot': 'no slot', off: 'not on screen' }[state] ?? state;
+      const key = `${state} ${span.lo} ${span.hi} ${text}`;
+      if (meter.shown !== key) {
+        meter.fill.style.transformOrigin = 'left';
+        meter.fill.style.transform = `translateX(${100 * span.lo}%) scaleX(${span.hi - span.lo})`;
         meter.state.textContent = text;
-        meter.shown = `${state} ${level}`;
+        meter.shown = key;
       }
     }
   }
+}
+
+/** A meter with nothing to show. */
+const NO_SPAN = Object.freeze({ lo: 0, hi: 0, text: null });
+
+/** The parameters one schematic stream follows at most (the host's per-callback observation limit). */
+const PARAMETER_STREAM_MAX = 64;
+
+/** A scope block as the sidebar says it: its peak in dBFS without a range, else its lowest and highest value. */
+function scopeText(points, range) {
+  let lo = Infinity;
+  let hi = -Infinity;
+  let peak = 0;
+  for (const v of points ?? []) {
+    if (!Number.isFinite(v)) continue;
+    lo = Math.min(lo, v);
+    hi = Math.max(hi, v);
+    peak = Math.max(peak, Math.abs(v));
+  }
+  if (!range) return peak > 0 ? `${(20 * Math.log10(peak)).toFixed(1)} dB` : '−∞ dB';
+  return lo > hi ? '—' : lo === hi ? valueText(lo) : `${valueText(lo)} … ${valueText(hi)}`;
+}
+
+/** A value, 4 significant digits. */
+function valueText(v) {
+  return Number.isFinite(v) ? String(Number(v.toPrecision(4))) : '—';
 }
 
 customElements.get('signal-schematic') ?? customElements.define('signal-schematic', SignalSchematic);

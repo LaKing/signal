@@ -136,7 +136,7 @@ test('a pin: what it is, its connections (removable in Edit patch), a level for 
   assert.equal(field(gain, 'direction'), 'parameter (in)');
   assert.equal(field(gain, 'unit'), '—');
   assert.equal(field(gain, 'connected'), 'no');
-  assert.equal(gain.meter, false);
+  assert.equal(gain.meter, true, 'a parameter has a meter too (its effective value)');
   assert.equal(action(gain, 'disconnect').disabled, true);
 });
 
