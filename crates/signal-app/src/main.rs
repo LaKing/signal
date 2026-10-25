@@ -6,7 +6,8 @@
 //! and scripting.
 //!
 //! The menu bar is native (`muda`, M2.8-11): the app menu (Settings…,
-//! Quit), File (Open…, Save, Save As…, Interface Setup…, Quit), Edit, so
+//! Quit), File (Open…, Save, Save As…, Revert to Saved…, Interface
+//! Setup…, Quit), Edit, so
 //! the page's text fields get the system's shortcuts, Project, Window (New
 //! Main, Schematic and Panel Window, Reset Layout, Minimize, Zoom, full
 //! screen and the window list) and Help (Keyboard Shortcuts). Each of
@@ -22,7 +23,10 @@
 //! file is opened by the server (M2.8-12). While a `.signal` project is
 //! edited, closing the last window, Quit and opening another project ask
 //! "Save changes to <name>?" (`window::prompt_buttons`); closing any other
-//! window just closes it.
+//! window just closes it. Revert to Saved…, enabled only while a `.signal`
+//! project has changes (`window::can_revert`), asks "Revert to the last
+//! saved version of <name>?" (Cancel, Revert) and then opens the file again
+//! through the server, its changes let go.
 //!
 //! The windows' layout (ADR 0032) is the project's `ui/windows.toml`,
 //! under the key of the connected screens (`layout::screen_key`): applied
@@ -60,9 +64,10 @@ use signal_app::setup::{Setup, setup_path};
 use signal_app::state::Backend;
 use signal_app::window::{
     ExitPlan, HELP_MENU, MENU_BAR, MenuAction, MenuItem, NATIVE_MENU_SCRIPT, Prompt, QuitRoute,
-    SETTINGS_TITLE, WINDOW_MENU, default_save_name, dropped, exit_plan, may_navigate, menu_chords,
-    origin_of, page_url, prompt_buttons, prompt_text, save_target, settings_path, view_path,
-    view_title, window_of, window_title,
+    REVERT_BUTTONS, REVERT_INFORMATIVE, RevertPlan, RevertPrompt, SETTINGS_TITLE, WINDOW_MENU,
+    can_revert, default_save_name, dropped, exit_plan, may_navigate, menu_chords, origin_of,
+    page_url, prompt_buttons, prompt_text, revert_plan, revert_text, save_target, settings_path,
+    view_path, view_title, window_of, window_title,
 };
 use signal_ui::document::open_root;
 use signal_ui::keys::{Keys, keys_path};
@@ -147,6 +152,17 @@ impl MenuBar {
             });
             if let Err(error) = item.set_key_accelerator(accelerator) {
                 eprintln!("signal-app: {}: {error}", action.command());
+            }
+        }
+    }
+
+    /// Enables Revert to Saved… while `project` has changes to let go
+    /// (`window::can_revert`).
+    fn set_project(&self, project: Option<&ProjectStatus>) {
+        let enabled = can_revert(project);
+        for (action, item) in &self.items {
+            if *action == MenuAction::Revert {
+                item.set_enabled(enabled);
             }
         }
     }
@@ -1043,6 +1059,7 @@ fn main() -> ExitCode {
     let proxy = event_loop.create_proxy();
     let url = server.url().to_owned();
     let project = server.project();
+    menu.set_project(project.as_ref());
     let mut windows = Windows {
         list: Vec::new(),
         front: Vec::new(),
@@ -1194,6 +1211,12 @@ fn main() -> ExitCode {
                 }
                 None
             }
+            Event::UserEvent(UserEvent::Menu(MenuAction::Revert)) => {
+                if let Some(server) = server.as_ref() {
+                    revert(server, &mut windows, target, &proxy);
+                }
+                None
+            }
             Event::UserEvent(UserEvent::Menu(action)) => {
                 if let Some(script) = action.page_script() {
                     windows.in_main(target, &proxy, script);
@@ -1216,6 +1239,7 @@ fn main() -> ExitCode {
                 None
             }
             Event::UserEvent(UserEvent::Project(status)) => {
+                menu.set_project(status.as_ref());
                 let dir = status.as_ref().map(|s| s.dir.clone());
                 let old = std::mem::replace(&mut windows.project, status);
                 windows.titles();
@@ -1321,6 +1345,41 @@ fn open_project(
     if let Err(message) = server.open(target_path, edits) {
         windows.tell(target, proxy, "signal-app-error", &message);
     }
+}
+
+/// Revert to Saved…: asked first ("Revert to the last saved version of
+/// <name>?", Cancel the default); Revert opens the `.signal` file again
+/// through the server, as an open of it with its changes let go (a save
+/// still running is waited for, both by the look at the project here and
+/// by the open). Nothing is asked when there is nothing to revert, and the
+/// layout's pending change is not written: the file's `ui/` comes back.
+fn revert(server: &AppServer, windows: &mut Windows, target: &Target, proxy: &Proxy) {
+    let project = server.project();
+    let answer = match &project {
+        Some(shown) if can_revert(Some(shown)) => ask_revert(&shown.name),
+        _ => None,
+    };
+    if revert_plan(project.as_ref(), answer) == RevertPlan::Revert
+        && let Err(message) = server.revert()
+    {
+        windows.tell(target, proxy, "signal-app-error", &message);
+    }
+}
+
+/// "Revert to the last saved version of <name>?" as a native alert
+/// (NSAlert, modal, safe API, as the "Save changes?" prompt) with Cancel
+/// (the first button: the default) and Revert;
+/// the answer, or None when it cannot run.
+fn ask_revert(name: &str) -> Option<RevertPrompt> {
+    let mtm = MainThreadMarker::new()?;
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(&revert_text(name)));
+    alert.setInformativeText(&NSString::from_str(REVERT_INFORMATIVE));
+    for button in REVERT_BUTTONS {
+        alert.addButtonWithTitle(&NSString::from_str(button.label()));
+    }
+    let index = alert.runModal().checked_sub(NSAlertFirstButtonReturn)?;
+    RevertPrompt::of(usize::try_from(index).ok()?)
 }
 
 /// Save As…: the system's save panel with `<project name>.signal`; the

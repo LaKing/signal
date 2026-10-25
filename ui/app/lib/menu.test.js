@@ -14,6 +14,7 @@ test('in a browser the page runs the app commands it can (Open, Save, Interface 
   assert.equal(menuAction('app.settings'), 'settings');
   assert.equal(menuAction('help.keyboard_shortcuts'), 'keys');
   assert.equal(menuAction('file.save_as'), null, 'Save As is native only');
+  assert.equal(menuAction('file.revert'), null, 'Revert to Saved is native only: its prompt is the window\'s');
   assert.equal(menuAction('app.quit'), null, 'Quit is the native menu’s');
   assert.equal(menuAction('window.new_main'), null);
 });

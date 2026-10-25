@@ -54,7 +54,7 @@ test('the built-in keymap is whole: every chord parses, scopes exist, no clash w
 test('the menu commands are the native menu items (crates/signal-app/src/window.rs)', () => {
   const menu = DEFAULTS.commands.filter((c) => c.menu).map((c) => c.id).sort();
   assert.deepEqual(menu, [
-    'app.quit', 'app.settings', 'file.interface_setup', 'file.open', 'file.save', 'file.save_as',
+    'app.quit', 'app.settings', 'file.interface_setup', 'file.open', 'file.revert', 'file.save', 'file.save_as',
     'help.keyboard_shortcuts', 'transport.restart', 'window.new_main', 'window.new_panel', 'window.new_schematic', 'window.reset_layout',
   ]);
 });

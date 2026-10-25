@@ -35,6 +35,7 @@ export default {
     { "id": "file.open", "scope": "app", "label": "Open…", "keys": ["Cmd+O"], "menu": true },
     { "id": "file.save", "scope": "app", "label": "Save", "keys": ["Cmd+S"], "menu": true },
     { "id": "file.save_as", "scope": "app", "label": "Save As…", "keys": ["Shift+Cmd+S"], "menu": true },
+    { "id": "file.revert", "scope": "app", "label": "Revert to Saved…", "keys": [], "menu": true },
     { "id": "file.interface_setup", "scope": "app", "label": "Interface Setup…", "keys": ["Alt+Cmd+,"], "menu": true },
     { "id": "edit.undo", "scope": "app", "label": "Undo (text fields)", "keys": ["Cmd+Z"], "fixed": true },
     { "id": "edit.redo", "scope": "app", "label": "Redo (text fields)", "keys": ["Shift+Cmd+Z"], "fixed": true },

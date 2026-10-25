@@ -196,6 +196,19 @@ pub struct ProjectStatus {
     pub name: String,
     /// The working folder differs from the file.
     pub edited: bool,
+    /// How many parameters are unsaved (live values the files do not hold,
+    /// `unsaved`'s `count`).
+    pub unsaved: usize,
+}
+
+impl ProjectStatus {
+    /// Whether File ▸ Revert to Saved… applies: a `.signal` project with
+    /// changes since it was last saved or opened (edited, or unsaved live
+    /// values). A folder project is written straight to its files, so it
+    /// has no saved version to go back to.
+    pub fn revertible(&self) -> bool {
+        self.file.is_some() && (self.edited || self.unsaved > 0)
+    }
 }
 
 /// Signal.app's state beside the protocol's (app mode): what the app's
@@ -1910,6 +1923,46 @@ impl Host {
         }))
     }
 
+    /// App mode: File ▸ Revert to Saved… (`project.revert`): the open
+    /// `.signal` file opened again exactly as `project.open` of it with
+    /// `unsaved: "discard"` opens it: a save still running is waited for,
+    /// the working folder's changes and the unsaved live values are let go,
+    /// the file is unpacked again into a new working folder (the old one
+    /// removed) and played from frame 0. The error is what to show.
+    pub fn revert_project(&mut self) -> Result<(), String> {
+        let file = self.revert_file().map_err(|failure| failure.message)?;
+        self.open_project(&file, Edits::Discard)
+    }
+
+    /// `project.revert`: [`Host::revert_project`] for a client.
+    fn project_revert(&mut self) -> Result<Value, Failure> {
+        let file = self.revert_file()?;
+        self.open_with(&file, Edits::Discard)
+    }
+
+    /// The file Revert to Saved… opens again: the open project's `.signal`
+    /// file. Refused outside app mode (`not-allowed`), without a project
+    /// (`no-project`), and for a folder project (`no-file`), which Signal
+    /// writes straight to its files.
+    fn revert_file(&self) -> Result<PathBuf, Failure> {
+        let Some(mode) = self.app.as_ref() else {
+            return Err(app_only());
+        };
+        if !mode.opened {
+            return Err(fail("no-project", "no project is open"));
+        }
+        match &self.document {
+            Some(document) => Ok(document.file().to_owned()),
+            None => Err(fail(
+                "no-file",
+                format!(
+                    "{} is a folder project: Signal writes it straight to its files, so there is no saved version to revert to",
+                    self.project_name()
+                ),
+            )),
+        }
+    }
+
     /// App mode, at start: opens `path`, a folder or a `.signal` file.
     fn open_path(&mut self, path: &Path) -> Result<(), String> {
         if archive::is_project_file(path) && !path.is_dir() {
@@ -1940,15 +1993,17 @@ impl Host {
     }
 
     /// App mode: the open project as the window shows it, its edited state
-    /// looked at now (after a save still running, which it waits for: the
-    /// window asks before a decision, the "Save changes?" prompt); `None`
-    /// without one.
+    /// and unsaved count looked at now (after a save still running, which
+    /// it waits for: the window asks before a decision, the "Save changes?"
+    /// and "Revert to Saved?" prompts); `None` without one.
     pub fn project_status(&mut self) -> Option<ProjectStatus> {
         self.finish_saves();
         if let Some(document) = self.document.as_mut() {
             document.check();
         }
+        let unsaved = self.unsaved().len();
         self.project_shown()
+            .map(|status| ProjectStatus { unsaved, ..status })
     }
 
     /// App mode: the open project as last looked at (each step looks at
@@ -1962,7 +2017,19 @@ impl Host {
             file: self.document.as_ref().map(|d| d.file().to_owned()),
             name: self.project_name(),
             edited: self.document.as_ref().is_some_and(Document::edited),
+            unsaved: self.unsaved_count(),
         })
+    }
+
+    /// How many parameters are unsaved, as last pushed (each step pushes
+    /// `unsaved` when it changed), so the window's status costs no listing.
+    fn unsaved_count(&self) -> usize {
+        self.unsaved_pushed
+            .as_ref()
+            .and_then(|pushed| pushed.get("count"))
+            .and_then(Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .unwrap_or(0)
     }
 
     /// App mode (ADR 0032): `ui/windows.toml` of the project folder `dir`
@@ -2923,6 +2990,7 @@ impl Host {
             "transport.stop" => self.transport(false).map(Some),
             "project.open" => self.project_open(&message).map(Some),
             "project.save" => self.project_save(client, &id),
+            "project.revert" => self.project_revert().map(Some),
             "stats" => Ok(Some(self.stats())),
             "ping" => Ok(Some(json!({
                 "type": "pong",
@@ -2945,7 +3013,11 @@ impl Host {
                 // The plan or what plays changed: every client is told.
                 let changed = matches!(
                     kind,
-                    "transport.play" | "transport.stop" | "project.open" | "app.power"
+                    "transport.play"
+                        | "transport.stop"
+                        | "project.open"
+                        | "project.revert"
+                        | "app.power"
                 );
                 let reply = with(reply, "id", id);
                 self.send_text(client, &reply);
