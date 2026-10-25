@@ -40,4 +40,10 @@ connections = [
 [exports]
 inputs = { trigger = "env.trigger" }
 outputs = { out = "level.out" }
-parameters = { tune = "tune.value", decay = "env.decay_ms", level = "level.db", velocity = "velocity.value" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+tune = { to = "tune.value", min = 100, max = 2000 }
+decay = { to = "env.decay_ms", min = 1, max = 200 }
+level = { to = "level.db", min = -120, max = 12 }
+velocity = { to = "velocity.value", min = 0, max = 2 }

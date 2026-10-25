@@ -73,4 +73,12 @@ connections = [
 [exports]
 inputs = { trigger = ["pitch_env.trigger", "amp_env.trigger", "click_env.trigger"] }
 outputs = { out = "level.out" }
-parameters = { tune = "osc.freq", decay = "amp_env.decay_ms", attack = "attack.value", drive = "shaper.drive", level = "level.db", velocity = "velocity.value" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+tune = { to = "osc.freq", min = 20, max = 200 }
+decay = { to = "amp_env.decay_ms", min = 10, max = 2000 }
+attack = { to = "attack.value", min = 0, max = 2 }
+drive = { to = "shaper.drive", min = 0.1, max = 5 }
+level = { to = "level.db", min = -120, max = 12 }
+velocity = { to = "velocity.value", min = 0, max = 2 }

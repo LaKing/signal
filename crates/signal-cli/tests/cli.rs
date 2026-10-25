@@ -534,7 +534,7 @@ fn modules_lists_library_composites_by_category() {
         "lib.ar_env (library composite, hash ",
         "  in  gate (Signal, Generic)\n",
         "  out out (Signal, Control)\n",
-        "  parameter attack (Control) [ms]: 0 to 60000, default 5, Add\n",
+        "  parameter attack (Control) [ms]: 0 to 10000, default 5, Add\n",
         "lib.adsr_core (library composite, hash ",
         "  reference for: std.adsr (a validation reference, not a building block)\n",
     ] {

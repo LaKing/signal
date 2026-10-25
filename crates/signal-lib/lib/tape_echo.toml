@@ -96,4 +96,12 @@ connections = [
 [exports]
 inputs = { in = ["delay.in", "dry.a"] }
 outputs = { out = "sum.out" }
-parameters = { time_ms = "delay.time_ms", feedback = "feedback.value", tone = "tone_amt.value", wow = "wow_depth.mul", flutter = "flutter_depth.mul", mix = "mix_amt.value" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+time_ms = { to = "delay.time_ms", min = 1, max = 2000 }
+feedback = { to = "feedback.value", min = 0, max = 0.75 }
+tone = { to = "tone_amt.value", min = 0, max = 4999 }
+wow = { to = "wow_depth.mul", min = 0, max = 10 }
+flutter = { to = "flutter_depth.mul", min = 0, max = 50 }
+mix = { to = "mix_amt.value", min = 0, max = 1 }

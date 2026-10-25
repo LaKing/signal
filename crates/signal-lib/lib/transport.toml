@@ -36,4 +36,9 @@ playhead = { module = "std.playhead", bpm = 120, run = 1, rate = 1 }
 [exports]
 inputs = { seek = "playhead.seek" }
 outputs = { position = "playhead.position", running = "playhead.running", tempo = "playhead.tempo", jump = "playhead.jump" }
-parameters = { bpm = "playhead.bpm", run = "playhead.run", rate = "playhead.rate" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+bpm = { to = "playhead.bpm", min = 20, max = 400 }
+run = { to = "playhead.run", min = 0, max = 1 }
+rate = { to = "playhead.rate", min = -16, max = 16 }

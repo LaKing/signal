@@ -96,4 +96,8 @@ connections = [
 [exports]
 inputs = { in = ["up.a", "diff.a", "rest.a", "flushed.a", "out.a"] }
 outputs = { out = "out.out" }
-parameters = { rise_ms = "rise.value", fall_ms = "fall.value" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+rise_ms = { to = "rise.value", min = 0, max = 60000 }
+fall_ms = { to = "fall.value", min = 0, max = 60000 }

@@ -52,4 +52,7 @@ connections = [
 [exports]
 inputs = { in = "u.a" }
 outputs = { out = "out.out" }
-parameters = { drive = "drive.value" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+drive = { to = "drive.value", min = 0.1, max = 20 }

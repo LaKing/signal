@@ -150,4 +150,34 @@ connections = [
 [exports]
 inputs = { hz = ["glide.in", "hz_prev.in"], gate = ["fenv.gate", "aenv.gate"], velocity = "vel_lim.in" }
 outputs = { out = "volume.out" }
-parameters = { glide = ["glide.rise_ms", "glide.fall_ms"], osc1_octave = "o1_oct.value", osc1_detune = "o1_det.value", osc1_wave = "osc1.shape", osc2_octave = "o2_oct.value", osc2_detune = "o2_det.value", osc2_wave = "osc2.shape", osc3_octave = "o3_oct.value", osc3_detune = "o3_det.value", osc3_wave = "osc3.shape", osc1_level = "mixer.gain_a", osc2_level = "mixer.gain_b", osc3_level = "mixer.gain_c", noise_level = "mixer.gain_d", cutoff = "ladder.cutoff_hz", emphasis = "ladder.resonance", drive = "ladder.drive", env_amount = "env_amt.mul", key_track = "key_track.value", f_attack = "fenv.attack_ms", f_decay = "fenv.decay_ms", f_sustain = "fenv.sustain", f_release = "fenv.release_ms", a_attack = "aenv.attack_ms", a_decay = "aenv.decay_ms", a_sustain = "aenv.sustain", a_release = "aenv.release_ms", volume = "volume.db" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+glide = { to = ["glide.rise_ms", "glide.fall_ms"], min = 0, max = 2000 }
+osc1_octave = { to = "o1_oct.value", min = -2, max = 2 }
+osc1_detune = { to = "o1_det.value", min = -1200, max = 1200 }
+osc1_wave = { to = "osc1.shape", min = 0, max = 3 }
+osc2_octave = { to = "o2_oct.value", min = -2, max = 2 }
+osc2_detune = { to = "o2_det.value", min = -1200, max = 1200 }
+osc2_wave = { to = "osc2.shape", min = 0, max = 3 }
+osc3_octave = { to = "o3_oct.value", min = -2, max = 2 }
+osc3_detune = { to = "o3_det.value", min = -1200, max = 1200 }
+osc3_wave = { to = "osc3.shape", min = 0, max = 3 }
+osc1_level = { to = "mixer.gain_a", min = 0, max = 2 }
+osc2_level = { to = "mixer.gain_b", min = 0, max = 2 }
+osc3_level = { to = "mixer.gain_c", min = 0, max = 2 }
+noise_level = { to = "mixer.gain_d", min = 0, max = 2 }
+cutoff = { to = "ladder.cutoff_hz", min = 20, max = 20000 }
+emphasis = { to = "ladder.resonance", min = 0, max = 1 }
+drive = { to = "ladder.drive", min = 0, max = 10 }
+env_amount = { to = "env_amt.mul", min = -10000, max = 10000 }
+key_track = { to = "key_track.value", min = 0, max = 2 }
+f_attack = { to = "fenv.attack_ms", min = 0, max = 10000 }
+f_decay = { to = "fenv.decay_ms", min = 0.1, max = 10000 }
+f_sustain = { to = "fenv.sustain", min = 0, max = 1 }
+f_release = { to = "fenv.release_ms", min = 0.1, max = 10000 }
+a_attack = { to = "aenv.attack_ms", min = 0, max = 10000 }
+a_decay = { to = "aenv.decay_ms", min = 0.1, max = 10000 }
+a_sustain = { to = "aenv.sustain", min = 0, max = 1 }
+a_release = { to = "aenv.release_ms", min = 0.1, max = 10000 }
+volume = { to = "volume.db", min = -120, max = 12 }

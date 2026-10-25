@@ -42,6 +42,19 @@ Added after the v0.2.0 tag:
 - `lib.instrument` (interface template, ADR 0037 §3): `lib.voice`'s inputs, outputs `l` and `r` (audio); text hash `07b3870f5381b455`
 - `lib.deck` (interface template, ADR 0037 §3): inputs `position` (control, beats), `jump` (events, trigger), `running` (gate), `tempo` (control, bpm), outputs `l` and `r` (audio), parameter `release`; text hash `c8fa72b11d0b70d4`
 
+Export ranges (ADR 0042, the owner's decision of 2026-10-25): every library
+composite's exported parameters declare their own range (`min` and `max` in
+its `[exports.parameters]`), inside each target's range: the drums' levels
+−120…12 dB and velocities 0…2 as their clamps, the voices' and the echo's
+controls as `projects/studio`'s, the validation references their native
+type's range (the filters' cutoff and the oscillator's frequency up to 10⁶,
+as far as the `std.const` behind each reaches), `lib.modal_voice` its
+targets'. `signal modules`, the panel and
+`signal mcp` show them; a value outside one is refused in a file and clamped
+live. No composite's output changed (every pinned hash above holds); each
+composite's content hash in a render manifest (`library_composite_hashes`)
+did.
+
 ## 0.1
 
 The first library (M2.10-3). Each line: the composite, its category, and its

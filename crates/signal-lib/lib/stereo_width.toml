@@ -46,4 +46,7 @@ connections = [
 [exports]
 inputs = { l = ["half_l.in", "left.a"], r = ["half_r.in", "right.a"] }
 outputs = { out_l = "left.out", out_r = "right.out" }
-parameters = { width = "width.value" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+width = { to = "width.value", min = 0, max = 2 }

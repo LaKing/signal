@@ -38,4 +38,7 @@ connections = [
 [exports]
 inputs = { a = "weighted_a.a", b = "weighted_b.a" }
 outputs = { out = "sum.out" }
-parameters = { mix = "mix.value" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+mix = { to = "mix.value", min = 0, max = 1 }

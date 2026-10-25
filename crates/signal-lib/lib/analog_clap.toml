@@ -54,4 +54,10 @@ connections = [
 [exports]
 inputs = { trigger = ["phasor.reset", "window.trigger", "tail.trigger"] }
 outputs = { out = "level.out" }
-parameters = { tone = "band.cutoff_hz", decay = "tail.decay_ms", level = "level.db", velocity = "velocity.value" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+tone = { to = "band.cutoff_hz", min = 200, max = 8000 }
+decay = { to = "tail.decay_ms", min = 10, max = 2000 }
+level = { to = "level.db", min = -120, max = 12 }
+velocity = { to = "velocity.value", min = 0, max = 2 }

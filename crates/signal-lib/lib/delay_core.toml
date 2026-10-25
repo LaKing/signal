@@ -85,4 +85,7 @@ connections = [
 [exports]
 inputs = { in = "memory.value" }
 outputs = { out = "memory.out0" }
-parameters = { time_ms = "time.value" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+time_ms = { to = "time.value", min = 0, max = 10000 }

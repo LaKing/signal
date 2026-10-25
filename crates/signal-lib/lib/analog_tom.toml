@@ -49,4 +49,10 @@ connections = [
 [exports]
 inputs = { trigger = ["pitch_env.trigger", "amp_env.trigger", "noise_env.trigger"] }
 outputs = { out = "level.out" }
-parameters = { tune = "osc.freq", decay = "amp_env.decay_ms", level = "level.db", velocity = "velocity.value" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+tune = { to = "osc.freq", min = 40, max = 500 }
+decay = { to = "amp_env.decay_ms", min = 10, max = 2000 }
+level = { to = "level.db", min = -120, max = 12 }
+velocity = { to = "velocity.value", min = 0, max = 2 }

@@ -26,4 +26,8 @@ connections = [
 [exports]
 inputs = { gate = "gate_lim.in" }
 outputs = { out = "lag.out" }
-parameters = { attack = "lag.rise_ms", release = "lag.fall_ms" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+attack = { to = "lag.rise_ms", min = 0, max = 10000 }
+release = { to = "lag.fall_ms", min = 0, max = 10000 }

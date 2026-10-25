@@ -91,4 +91,8 @@ connections = [
 [exports]
 inputs = { reset = ["phasor.reset", "random.trigger"] }
 outputs = { out = "pick_0.out", sine = "sine.out", triangle = "triangle.out", saw = "saw.out", square = "square.out", random = "random.out" }
-parameters = { rate = "phasor.freq", shape = "shape.value" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+rate = { to = "phasor.freq", min = 0, max = 1000 }
+shape = { to = "shape.value", min = 0, max = 4 }

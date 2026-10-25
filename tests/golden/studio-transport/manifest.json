@@ -4,7 +4,7 @@
   "log_fnv1a64": "b1539fbd9c96a7e9",
   "provenance": {
     "library_composite_hashes": {
-      "lib.transport": "a57f757c52782d83"
+      "lib.transport": "fbfa6dabbff987aa"
     },
     "project_file_hashes": {
       "composites/clap909.toml": "2f6e22d11586da8e",

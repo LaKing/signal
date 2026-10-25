@@ -67,4 +67,47 @@ connections = [
 [exports]
 inputs = { hz = "pitch.in", gate = ["gate_edge.in", "aenv.gate"], velocity = "vel_lim.in", mode_freq = "modal.mode_freq", mode_gain = "modal.mode_gain", mode_decay = "modal.mode_decay" }
 outputs = { out = "volume.out" }
-parameters = { exciter_kind = "exciter.kind", exciter_ms = "exciter.duration_ms", hardness = "exciter.hardness", bow_speed = "exciter.bow_speed", friction = "exciter.friction", noise_color = "exciter.noise_color", exciter_position = "exciter.position", material = "modal.material", modes = "modal.modes", decay = "modal.decay_s", law = "modal.law", strike_position = "modal.position", inharmonicity = "modal.inharmonicity", damping_tilt = "modal.damping_tilt", brightness = "modal.brightness", pickup = "modal.pickup", pickup_mix = "modal.pickup_mix", spread = "modal.spread", body_gain = "modal.gain", ratio_1 = "modal.ratio_1", ratio_2 = "modal.ratio_2", ratio_3 = "modal.ratio_3", ratio_4 = "modal.ratio_4", ratio_5 = "modal.ratio_5", ratio_6 = "modal.ratio_6", ratio_7 = "modal.ratio_7", ratio_8 = "modal.ratio_8", ratio_9 = "modal.ratio_9", ratio_10 = "modal.ratio_10", ratio_11 = "modal.ratio_11", ratio_12 = "modal.ratio_12", ratio_13 = "modal.ratio_13", ratio_14 = "modal.ratio_14", ratio_15 = "modal.ratio_15", ratio_16 = "modal.ratio_16", a_attack = "aenv.attack_ms", a_decay = "aenv.decay_ms", a_sustain = "aenv.sustain", a_release = "aenv.release_ms", velocity_brightness = "vel_bright.value", volume = "volume.db" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+exciter_kind = { to = "exciter.kind", min = 0, max = 3 }
+exciter_ms = { to = "exciter.duration_ms", min = 0, max = 10000 }
+hardness = { to = "exciter.hardness", min = 0, max = 1 }
+bow_speed = { to = "exciter.bow_speed", min = -4, max = 4 }
+friction = { to = "exciter.friction", min = 0.01, max = 1 }
+noise_color = { to = "exciter.noise_color", min = -1, max = 1 }
+exciter_position = { to = "exciter.position", min = 0, max = 0.5 }
+material = { to = "modal.material", min = 0, max = 5 }
+modes = { to = "modal.modes", min = 1, max = 64 }
+decay = { to = "modal.decay_s", min = 0.01, max = 60 }
+law = { to = "modal.law", min = 0, max = 3 }
+strike_position = { to = "modal.position", min = 0.01, max = 0.99 }
+inharmonicity = { to = "modal.inharmonicity", min = 0, max = 0.1 }
+damping_tilt = { to = "modal.damping_tilt", min = 0, max = 10 }
+brightness = { to = "modal.brightness", min = -1, max = 1 }
+pickup = { to = "modal.pickup", min = 0.01, max = 0.99 }
+pickup_mix = { to = "modal.pickup_mix", min = 0, max = 1 }
+spread = { to = "modal.spread", min = 0, max = 0.1 }
+body_gain = { to = "modal.gain", min = 0, max = 4 }
+ratio_1 = { to = "modal.ratio_1", min = 0.01, max = 100 }
+ratio_2 = { to = "modal.ratio_2", min = 0.01, max = 100 }
+ratio_3 = { to = "modal.ratio_3", min = 0.01, max = 100 }
+ratio_4 = { to = "modal.ratio_4", min = 0.01, max = 100 }
+ratio_5 = { to = "modal.ratio_5", min = 0.01, max = 100 }
+ratio_6 = { to = "modal.ratio_6", min = 0.01, max = 100 }
+ratio_7 = { to = "modal.ratio_7", min = 0.01, max = 100 }
+ratio_8 = { to = "modal.ratio_8", min = 0.01, max = 100 }
+ratio_9 = { to = "modal.ratio_9", min = 0.01, max = 100 }
+ratio_10 = { to = "modal.ratio_10", min = 0.01, max = 100 }
+ratio_11 = { to = "modal.ratio_11", min = 0.01, max = 100 }
+ratio_12 = { to = "modal.ratio_12", min = 0.01, max = 100 }
+ratio_13 = { to = "modal.ratio_13", min = 0.01, max = 100 }
+ratio_14 = { to = "modal.ratio_14", min = 0.01, max = 100 }
+ratio_15 = { to = "modal.ratio_15", min = 0.01, max = 100 }
+ratio_16 = { to = "modal.ratio_16", min = 0.01, max = 100 }
+a_attack = { to = "aenv.attack_ms", min = 0, max = 60000 }
+a_decay = { to = "aenv.decay_ms", min = 0.1, max = 60000 }
+a_sustain = { to = "aenv.sustain", min = 0, max = 1 }
+a_release = { to = "aenv.release_ms", min = 0.1, max = 60000 }
+velocity_brightness = { to = "vel_bright.value", min = -1, max = 1 }
+volume = { to = "volume.db", min = -120, max = 12 }

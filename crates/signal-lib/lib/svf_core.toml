@@ -140,4 +140,8 @@ connections = [
 [exports]
 inputs = { in = "a1.a" }
 outputs = { lp = "lp.out", bp = "bp.out", hp = "hp.out" }
-parameters = { cutoff_hz = "cutoff.value", q = "q.value" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+cutoff_hz = { to = "cutoff.value", min = 1, max = 1000000 }
+q = { to = "q.value", min = 0.5, max = 40 }

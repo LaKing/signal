@@ -68,4 +68,7 @@ connections = [
 [exports]
 inputs = { pm = "cycles.b" }
 outputs = { out = "sine.out", saw = "saw.out" }
-parameters = { freq = "freq.value" }
+
+# Each exported parameter with its own range (ADR 0042).
+[exports.parameters]
+freq = { to = "freq.value", min = 0, max = 1000000 }
