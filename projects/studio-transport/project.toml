@@ -34,7 +34,7 @@ transport = { module = "lib.transport", bpm = 110.35312500000018, run = 1 }
 melody = { module = "std.note_seq", pattern = "melody" }
 drums = { module = "std.step_seq8", pattern = "drums", accent_level = 1.5 }
 
-synth = { module = "moog_voice", a_sustain = 0.0183423913043478, cutoff = 20, drive = 3.1187669836956537, emphasis = 0.3032693614130438, env_amount = 1871.0937499999936, f_attack = 2.0879048841114143, f_decay = 296.7959817008294, f_release = 39.58012447682406, glide = 1, key_track = 132642.663043478, noise_level = 0, osc1_level = 0.45253472900390623, osc1_wave = 1, osc2_level = 0.28619799804687496, osc3_detune = 0, osc3_level = 0.44252294921875013, volume = 2.93085937500004 }
+synth = { module = "moog_voice", a_sustain = 0.0183423913043478, cutoff = 20, drive = 3.1187669836956537, emphasis = 0.3032693614130438, env_amount = 1871.0937499999936, f_attack = 2.0879048841114143, f_decay = 296.7959817008294, f_release = 39.58012447682406, glide = 1, key_track = 1, noise_level = 0, osc1_level = 0.45253472900390623, osc1_wave = 1, osc2_level = 0.28619799804687496, osc3_detune = 0, osc3_level = 0.44252294921875013, volume = 2.93085937500004 }
 echo = { module = "tape_delay", feedback = 0.611982421875, flutter = 4.557812499999993, mix = 0.16884765625, time_ms = 131.90043725624923 }
 
 kick = { module = "kick909", decay = 205.2456974180106, level = 4.8475781250000125 }

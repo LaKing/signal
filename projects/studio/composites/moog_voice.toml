@@ -161,7 +161,7 @@ cutoff = { to = "ladder.cutoff_hz", min = 20, max = 20000 }
 emphasis = { to = "ladder.resonance", min = 0, max = 1 }
 drive = { to = "ladder.drive", min = 0, max = 10 }
 env_amount = { to = "env_amt.mul", min = -10000, max = 10000 }
-key_track = "key_amt.mul"
+key_track = { to = "key_amt.mul", min = 0, max = 2 }
 f_attack = { to = "fenv.attack_ms", min = 0, max = 10000 }
 f_decay = { to = "fenv.decay_ms", min = 0.1, max = 10000 }
 f_sustain = { to = "fenv.sustain", min = 0, max = 1 }

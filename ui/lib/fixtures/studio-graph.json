@@ -6916,6 +6916,10 @@
         {
           "name": "key_track",
           "order": 18,
+          "range": {
+            "max": 2.0,
+            "min": 0.0
+          },
           "to": [
             "key_amt.mul"
           ]
@@ -11664,8 +11668,8 @@
             "kind": "generic",
             "name": "key_track",
             "range": {
-              "max": 1000000.0,
-              "min": -1000000.0
+              "max": 2.0,
+              "min": 0.0
             },
             "rate": 1,
             "unit": null

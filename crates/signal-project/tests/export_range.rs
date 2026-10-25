@@ -338,18 +338,11 @@ fn the_studio_projects_load_with_their_ranges_and_every_value_inside() {
         .find(|e| e.name == "attack")
         .unwrap();
     assert_eq!(attack.range, Some(Range { min: 0.0, max: 2.0 }));
-    // Every export of the studio's composites has a range but moog_voice's
-    // key_track (ADR 0042 §5).
+    // Every export of the studio's composites has a range (ADR 0042 §5),
+    // key_track's [0, 2] since the owner's decision of 2026-10-25.
     for composite in &studio.composites {
         for export in &composite.exports.parameters {
-            let unranged = composite.name == "moog_voice" && export.name == "key_track";
-            assert_eq!(
-                export.range.is_none(),
-                unranged,
-                "{}.{}",
-                composite.name,
-                export.name
-            );
+            assert!(export.range.is_some(), "{}.{}", composite.name, export.name);
         }
     }
 }
