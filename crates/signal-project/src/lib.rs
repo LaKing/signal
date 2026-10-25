@@ -175,6 +175,82 @@ pub struct Project {
     content: include::Content,
 }
 
+/// ADR 0042, 0043: what a corrected value's warning says of the file
+/// holding it: `project.toml` keeps it until the parameter is written (a
+/// commit, a restore, Save); a composite's file is never written for it, so
+/// it is edited, or the composite vendored again.
+fn kept_until(file: &str, value: f64) -> String {
+    if file == PROJECT_FILE {
+        format!(" (the file keeps {value} until the parameter is written)")
+    } else if library::is_library_file(file) {
+        format!(" (the library's {file} keeps {value})")
+    } else {
+        format!(" ({file} keeps {value}: edit it, or vendor the composite again)")
+    }
+}
+
+/// ADR 0043 §1: the parameters every connection of which is a constant (a
+/// `std.const` whose `value` nothing modulates) whose sum, scales and base
+/// included, lies outside the parameter's range, which clamps it. Only
+/// what is certain is reported: a parameter with any other source, an
+/// event source or a converter between is left alone.
+fn constants_beyond_range(plan: &signal_graph::ExecutionPlan) -> Vec<GraphWarning> {
+    let instances: BTreeMap<&InstanceAddress, &signal_graph::PlanInstance> =
+        plan.instances.iter().map(|i| (&i.address, i)).collect();
+    let mut found = Vec::new();
+    for (port, sources) in &plan.sources {
+        let Some(target) = instances.get(&port.instance()) else {
+            continue;
+        };
+        let Some(parameter) = target
+            .descriptor
+            .parameters
+            .iter()
+            .find(|p| p.name == port.port())
+        else {
+            continue;
+        };
+        let mut sum = 0.0;
+        let mut constant = !sources.is_empty();
+        for source in sources {
+            let from = instances.get(&source.from.instance());
+            let value = from
+                .filter(|_| source.shape == signal_core::PortShape::Signal)
+                .filter(|i| i.type_name == "std.const")
+                .filter(|i| {
+                    signal_core::PortAddress::new(&i.address, "value")
+                        .is_ok_and(|v| plan.sources.get(&v).is_none_or(Vec::is_empty))
+                })
+                .and_then(|i| i.parameters.get("value"));
+            match value {
+                Some(value) => sum += value * source.scale,
+                None => constant = false,
+            }
+        }
+        let base = target
+            .parameters
+            .get(parameter.name)
+            .copied()
+            .unwrap_or(parameter.default);
+        let effective = match parameter.combine {
+            signal_core::Combine::Add => base + sum,
+            signal_core::Combine::Multiply => base * sum,
+            signal_core::Combine::Replace => sum,
+        };
+        let range = parameter.range;
+        if constant && effective.is_finite() && !(range.min <= effective && effective <= range.max)
+        {
+            found.push(GraphWarning::ConstantBeyondRange {
+                from: sources[0].from.clone(),
+                to: port.clone(),
+                effective,
+                range,
+            });
+        }
+    }
+    found
+}
+
 /// A validated plan and its warnings.
 pub struct Planned {
     /// The execution plan.
@@ -182,8 +258,8 @@ pub struct Planned {
     /// Graph warnings, located in the files.
     pub warnings: Vec<Diagnostic>,
     /// ADR 0042, 0043: of `warnings`, the parameter values the plan
-    /// corrected (clamped to their range, or the nearest of their value
-    /// set), which Signal.app shows with its diagnostics.
+    /// corrected (clamped to their range, or snapped to their value set),
+    /// which Signal.app shows with its diagnostics.
     pub corrected: Vec<Diagnostic>,
     /// ADR 0037 §5: what the build decided for every slot (the match
     /// tables, the dropped wires, the unheard outputs), in definition then
@@ -600,11 +676,15 @@ impl Project {
                 for warning in extra_warnings {
                     push_unique(&mut warnings, warning);
                 }
-                for warning in &plan.warnings {
+                let constants = constants_beyond_range(&plan);
+                for warning in plan.warnings.iter().chain(&constants) {
                     let location = root.warning(warning);
-                    let diagnostic =
+                    let mut diagnostic =
                         self.diagnostic(Severity::Warning, location, warning.to_string());
-                    if matches!(warning, GraphWarning::ParameterCorrected { .. }) {
+                    if let GraphWarning::ParameterCorrected { value, .. } = warning {
+                        diagnostic
+                            .message
+                            .push_str(&kept_until(&diagnostic.file, *value));
                         push_unique(&mut corrected, diagnostic.clone());
                     }
                     push_unique(&mut warnings, diagnostic);

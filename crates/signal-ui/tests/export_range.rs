@@ -289,9 +289,11 @@ parameters = { wave = { to = "osc.shape", values = [{ value = 0, label = "sine" 
     let _ = fs::remove_dir_all(&source);
 }
 
-/// ADR 0042, 0043 (the operator's decision of 2026-10-25): a file value
-/// between a value set's values plays as the nearest, `describe` shows that
-/// base and counts the control unsaved, and the next commit writes it.
+/// ADR 0042, 0043 (the operator's decisions of 2026-10-25): a file value
+/// between a value set's values plays as the one `process` reads it as,
+/// `describe` shows that base, the control is not unsaved (corrected on
+/// load, not edited), a snapshot saves the value that plays, and the next
+/// commit writes it.
 fn a_corrected_file_value_shows_and_is_written_by_the_next_commit(transport: Transport) {
     let source = std::env::temp_dir().join(format!(
         "signal-ui-corrected-source-{transport:?}-{}",
@@ -331,10 +333,22 @@ connections = [{ from = "o.out", to = "out.l" }]
         1.0,
         "the nearest plays"
     );
-    let unsaved = described["unsaved"].to_string();
+    let unsaved = &described["unsaved"];
+    assert_eq!(
+        unsaved["count"], 0,
+        "corrected on load is not unsaved: {unsaved}"
+    );
+    // Review of c89253a, 9: a snapshot holds the value that plays.
+    rig.request(
+        &mut ws,
+        10,
+        json!({"type": "snapshot.save", "name": "now"}),
+        "snapshot.saved",
+    );
+    let snapshots = fs::read_to_string(rig.dir.join("snapshots.toml")).unwrap();
     assert!(
-        unsaved.contains("/o.shape"),
-        "unsaved until written: {unsaved}"
+        snapshots.contains("\"/o.shape\" = 1\n") && !snapshots.contains("1.0023"),
+        "{snapshots}"
     );
     rig.request(
         &mut ws,

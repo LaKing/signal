@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
-use signal_core::{Direction, LIBRARY_PREFIX, ParameterDescriptor, PortDescriptor, Registry};
+use signal_core::{Direction, LIBRARY_PREFIX, ParameterDescriptor, PortDescriptor, Registry, Snap};
 use signal_graph::{CompositeDef, ExecutionPlan, GraphWarning, InstanceDef};
 
 use crate::locate::ExportKind;
@@ -486,12 +486,18 @@ impl Walk<'_> {
                             p.range = range;
                         }
                         let mut value = parameter_json(&p, &export.name, &at(&export.name));
-                        // ADR 0043: its own value set, else an inner export's on the
-                        // way, else the target's (in the descriptor's JSON).
-                        if let (Some(values), Value::Object(fields)) =
-                            (self.export_values(inner, &export.name), &mut value)
-                        {
-                            fields.insert("values".to_owned(), values);
+                        // ADR 0043: its own value set, else the one its
+                        // targets share, kept to its own range, read as they
+                        // read it; none when they share none (as the plan).
+                        if let Value::Object(fields) = &mut value {
+                            fields.remove("values");
+                            fields.remove("snap");
+                            if let Some((values, snap)) = self.export_values(inner, &export.name) {
+                                fields.insert("values".to_owned(), values);
+                                if snap == Snap::Positive {
+                                    fields.insert("snap".to_owned(), json!(snap));
+                                }
+                            }
                         }
                         Some(value)
                     }
@@ -622,30 +628,120 @@ impl Walk<'_> {
     }
 
     /// ADR 0042: the range exported parameter `name` of `def` declares, else
-    /// the one an inner composite's export it reaches first declares.
+    /// the intersection of every target's (a primitive parameter's, or an
+    /// inner export's, recursively), as the plan and the panel take it.
     fn export_range(&self, def: &CompositeDef, name: &str) -> Option<signal_core::Range> {
         let export = def.exports.parameters.iter().find(|e| e.name == name)?;
         if export.range.is_some() {
             return export.range;
         }
-        let (instance, port) = export.to.first()?.split_once('.')?;
-        let instance = self.instance(def, instance)?;
-        let inner = self.by_name.get(instance.module.as_str())?;
-        self.export_range(inner, port)
+        let mut shared: Option<signal_core::Range> = None;
+        for target in &export.to {
+            let Some(range) = self.target_range(def, target) else {
+                continue;
+            };
+            shared = Some(match shared {
+                Some(a) => signal_core::Range {
+                    min: a.min.max(range.min),
+                    max: a.max.min(range.max),
+                },
+                None => range,
+            });
+        }
+        shared
     }
 
-    /// ADR 0043: the value set exported parameter `name` of `def` declares,
-    /// else the one an inner composite's export it reaches first declares,
-    /// as `graph` gives it (`[{value, label}]`).
-    fn export_values(&self, def: &CompositeDef, name: &str) -> Option<Value> {
-        let export = def.exports.parameters.iter().find(|e| e.name == name)?;
-        if let Some(values) = &export.values {
-            return Some(json!(values));
-        }
-        let (instance, port) = export.to.first()?.split_once('.')?;
+    /// The range of target `text` (`inst.param`) of `def`.
+    fn target_range(&self, def: &CompositeDef, text: &str) -> Option<signal_core::Range> {
+        let (instance, port) = text.split_once('.')?;
         let instance = self.instance(def, instance)?;
-        let inner = self.by_name.get(instance.module.as_str())?;
-        self.export_values(inner, port)
+        if let Some(inner) = self.by_name.get(instance.module.as_str()) {
+            return self.export_range(inner, port);
+        }
+        let descriptor = &self.registry.get(&instance.module)?.descriptor;
+        descriptor
+            .parameters
+            .iter()
+            .find(|p| p.name == port)
+            .map(|p| p.range)
+    }
+
+    /// ADR 0043: the value set of exported parameter `name` of `def`, as
+    /// the plan takes it: the one it declares, else the one all its targets
+    /// share (a primitive's, or an inner export's), kept to its own range;
+    /// with the rule it is read by ([`Snap::Positive`] when every target
+    /// reads it so). As `[{value, label}]`.
+    fn export_values(&self, def: &CompositeDef, name: &str) -> Option<(Value, Snap)> {
+        let (set, snap) = self.export_set(def, name)?;
+        let values: Vec<Value> = set
+            .iter()
+            .map(|(value, label)| json!({"value": value, "label": label}))
+            .collect();
+        Some((Value::Array(values), snap))
+    }
+
+    fn export_set(&self, def: &CompositeDef, name: &str) -> Option<(Vec<(f64, String)>, Snap)> {
+        let export = def.exports.parameters.iter().find(|e| e.name == name)?;
+        let mut sets = Vec::new();
+        let mut positive = true;
+        for target in &export.to {
+            let (set, snap) = self.target_set(def, target);
+            positive &= snap == Snap::Positive;
+            sets.push(set);
+        }
+        let snap = if positive && !sets.is_empty() {
+            Snap::Positive
+        } else {
+            Snap::Nearest
+        };
+        if let Some(values) = &export.values {
+            let set = values.iter().map(|v| (v.value, v.label.clone())).collect();
+            return Some((set, snap));
+        }
+        let first = sets.first()?.clone()?;
+        if !sets.iter().all(|s| s.as_ref() == Some(&first)) {
+            return None;
+        }
+        let kept: Vec<(f64, String)> = match export.range {
+            Some(range) => first
+                .into_iter()
+                .filter(|(v, _)| range.min <= *v && *v <= range.max)
+                .collect(),
+            None => first,
+        };
+        (!kept.is_empty()).then_some((kept, snap))
+    }
+
+    /// The value set of target `text` (`inst.param`) of `def`, and its rule.
+    fn target_set(&self, def: &CompositeDef, text: &str) -> (Option<Vec<(f64, String)>>, Snap) {
+        let Some((instance, port)) = text.split_once('.') else {
+            return (None, Snap::Nearest);
+        };
+        let Some(instance) = self.instance(def, instance) else {
+            return (None, Snap::Nearest);
+        };
+        if let Some(inner) = self.by_name.get(instance.module.as_str()) {
+            return match self.export_set(inner, port) {
+                Some((set, snap)) => (Some(set), snap),
+                None => (None, Snap::Nearest),
+            };
+        }
+        let parameter = self
+            .registry
+            .get(&instance.module)
+            .and_then(|m| m.descriptor.parameters.iter().find(|p| p.name == port));
+        match parameter {
+            Some(p) => (
+                p.values.map(|values| {
+                    values
+                        .iter()
+                        .map(|v| (v.value, v.label.to_owned()))
+                        .collect()
+                }),
+                p.snap,
+            ),
+            None => (None, Snap::Nearest),
+        }
     }
 
     /// Instance `name` of `def`.

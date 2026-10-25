@@ -113,6 +113,20 @@ pub enum GraphError {
         /// The target, `inst.param`, and its values as a message lists them.
         target: Box<(String, String)>,
     },
+    /// ADR 0043: an export declares a range but no value set, and none of
+    /// the value set it takes from its targets lies inside that range.
+    ExportRangeWithoutValues {
+        /// The composite instance (`None`: the project root).
+        scope: Option<InstanceAddress>,
+        /// The composite's name.
+        composite: String,
+        /// The export name.
+        name: String,
+        /// The export's declared range.
+        range: Range,
+        /// Its targets' values as a message lists them.
+        allowed: String,
+    },
     /// A connection or export endpoint is not `inst.port`.
     InvalidEndpoint {
         /// The composite instance (`None`: the project root).
@@ -322,6 +336,19 @@ impl fmt::Display for GraphError {
                 target.0,
                 target.1
             ),
+            GraphError::ExportRangeWithoutValues {
+                scope: s,
+                composite,
+                name,
+                range,
+                allowed,
+            } => write!(
+                f,
+                "{}: composite `{composite}` export `{name}`: its range [{}, {}] holds none of its targets' values ({allowed})",
+                scope(s),
+                range.min,
+                range.max
+            ),
             GraphError::InvalidEndpoint { scope: s, endpoint } => write!(
                 f,
                 "{}: endpoint `{endpoint}` is not `instance.port`",
@@ -506,8 +533,9 @@ pub enum GraphWarning {
     },
     /// ADR 0042, 0043 (the operator's decision of 2026-10-25): a parameter
     /// value in a file outside its range was clamped to it, or one not in
-    /// its value set taken as the nearest of them; the project loads and
-    /// plays `to`. The file keeps its text until the parameter is written.
+    /// its value set snapped to it as `process` reads it; the project loads
+    /// and plays `to`. The file keeps its text (the project says until
+    /// when, by the file the value is in).
     ParameterCorrected {
         /// The parameter (or a composite instance's exported parameter).
         parameter: PortAddress,
@@ -517,6 +545,21 @@ pub enum GraphWarning {
         to: f64,
         /// Why: the range it was outside, or the value set it is not one of.
         reason: Box<str>,
+    },
+    /// ADR 0043 §1: a parameter's connections are all constants (`from`, a
+    /// `std.const` nothing modulates, the first of them), and with their
+    /// scales and the base they make it `effective`, outside its `range`:
+    /// the range clamps it. Found by the project (it names `std.const`),
+    /// carried here to be located like the graph's warnings.
+    ConstantBeyondRange {
+        /// The first constant source.
+        from: PortAddress,
+        /// The parameter.
+        to: PortAddress,
+        /// The value the constants make it, before the clamp.
+        effective: f64,
+        /// The parameter's range.
+        range: Range,
     },
     /// No sink instance is reachable from this instance, so its output is not
     /// observed. It still runs (ADR 0016 §1).
@@ -554,6 +597,18 @@ impl fmt::Display for GraphWarning {
                 f,
                 "{from} ({from_kind:?}) -> {to} ({to_kind:?}): kind mismatch"
             ),
+            GraphWarning::ConstantBeyondRange {
+                from,
+                to,
+                effective,
+                range,
+            } => write!(
+                f,
+                "{to}: the constant {from} makes it {effective} (connection scales and base together), outside its range [{}, {}]: {} plays; a larger value is built on the signal path, as a parameter's range limits its modulation",
+                range.min,
+                range.max,
+                effective.max(range.min).min(range.max)
+            ),
             GraphWarning::NoSinkReachable { instance } => {
                 write!(f, "{instance}: no sink is reachable; its output is unused")
             }
@@ -562,10 +617,7 @@ impl fmt::Display for GraphWarning {
                 value,
                 to,
                 reason,
-            } => write!(
-                f,
-                "{parameter}: value {value} {reason}: {to} plays (the file keeps {value} until the parameter is written)"
-            ),
+            } => write!(f, "{parameter}: value {value} {reason}: {to} plays"),
             GraphWarning::ConverterInserted {
                 from,
                 to,

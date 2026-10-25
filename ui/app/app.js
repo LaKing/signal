@@ -580,7 +580,7 @@ export class SignalAppParameters extends AppElement {
     this.unsubscribe = this.connection.subscribe({ stream: 'parameters', addresses, rate: 15 }, (frame) => {
       for (const [address, v] of valuesOf(addresses, frame)) {
         const cells = this.cells.get(address);
-        if (cells?.effective) cells.effective.textContent = !Number.isFinite(v.effective) ? '' : cells.values ? valueLabel(cells.values, v.effective) : formatFixed(v.effective, cells.unit);
+        if (cells?.effective) cells.effective.textContent = !Number.isFinite(v.effective) ? '' : cells.values ? valueLabel(cells.values, v.effective, cells.valueSnap) : formatFixed(v.effective, cells.unit);
       }
     });
   }
@@ -612,7 +612,7 @@ export class SignalAppParameters extends AppElement {
       if (!cells) continue;
       if (cells.slider && cells.slider !== this.dragging) {
         cells.value = p.base;
-        cells.slider.value = isDiscrete(p) ? selectValue(p.values, p.base) : String(p.base);
+        cells.slider.value = isDiscrete(p) ? selectValue(p.values, p.base, p.snap) : String(p.base);
         if (!cells.entry.isOpen) cells.base.textContent = shownValue(p, p.base);
       } else if (!cells.slider) {
         cells.base.textContent = shownValue(p, p.base);
@@ -632,7 +632,7 @@ export class SignalAppParameters extends AppElement {
     const effective = el('td', { className: 'value effective' });
     const name = el('td', { className: 'name', textContent: p.name, title: p.name });
     if (!p.editable) {
-      this.cells.set(p.address, { base, note, unit: p.unit, values: p.values ?? null });
+      this.cells.set(p.address, { base, note, unit: p.unit, values: p.values ?? null, valueSnap: p.snap });
       return el('tr', { className: 'read-only' }, name, el('td', {}, slider), base, note, effective, el('td', { className: 'muted', textContent: 'read-only' }), el('td'), el('td'));
     }
     const reset = el('button', { type: 'button', textContent: 'Reset', title: `Reset to default (${shown(p.default, p.unit)})` });
@@ -653,7 +653,7 @@ export class SignalAppParameters extends AppElement {
       });
     });
     const snapCell = el('td', { className: 'snap' }, el('label', { title: snap.title }, snap, el('span', { className: 'muted', textContent: ' snapshots' })));
-    const cells = { slider, base, note, effective, mark, snap, unit: p.unit, values: p.values ?? null, value: p.base, file: fileNote(p), notice: null };
+    const cells = { slider, base, note, effective, mark, snap, unit: p.unit, values: p.values ?? null, valueSnap: p.snap, value: p.base, file: fileNote(p), notice: null };
     slider.addEventListener('input', () => {
       this.dragging = slider;
       cells.value = Number(slider.value);
@@ -676,7 +676,7 @@ export class SignalAppParameters extends AppElement {
       value: () => cells.value,
       apply: (value) => {
         cells.value = value;
-        slider.value = isDiscrete(p) ? selectValue(p.values, value) : String(value);
+        slider.value = isDiscrete(p) ? selectValue(p.values, value, p.snap) : String(value);
         this.request(dragMessage(p.address, value)).catch(() => {});
         this.request(releaseMessage(p.address, value)).catch(failed);
       },
@@ -704,14 +704,14 @@ export class SignalAppParameters extends AppElement {
 
 /** A value as the list shows it: a discrete parameter's name for it (ADR 0043), else the number with its unit. */
 function shownValue(p, value) {
-  return isDiscrete(p) ? valueLabel(p.values, value) : formatFixed(value, p.unit);
+  return isDiscrete(p) ? valueLabel(p.values, value, p.snap) : formatFixed(value, p.unit);
 }
 
 /** A discrete parameter's selector (ADR 0043): one option per value, named. */
 function choice(p) {
   const select = el('select', { disabled: !p.editable });
   for (const option of selectOptions(p.values)) select.append(el('option', { value: option.value, textContent: option.label, title: option.title }));
-  select.value = selectValue(p.values, p.base);
+  select.value = selectValue(p.values, p.base, p.snap);
   select.setAttribute('aria-label', p.name);
   return select;
 }

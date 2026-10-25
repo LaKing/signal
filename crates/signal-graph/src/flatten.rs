@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use signal_core::{
     Direction, InstanceAddress, MAX_VECTOR_WIDTH, ModuleDescriptor, PortAddress, PortShape, Range,
-    Registry, StreamKey, converter_shape,
+    Registry, Snap, StreamKey, ValueLabel, converter_shape, snap_value,
 };
 
 use crate::def::{CompositeDef, ConnectionDef, InstanceDef};
@@ -58,15 +58,17 @@ struct Interface {
     outputs: BTreeMap<String, PortAddress>,
     parameters: BTreeMap<String, Vec<PortAddress>>,
     /// ADR 0042: each exported parameter's range: its own when it declares
-    /// one, else the range every target shares (`None`: none shared).
+    /// one, else the intersection of its targets' (`None`: no target has
+    /// one); a value outside it is clamped to it, with a warning.
     ranges: BTreeMap<String, Option<Range>>,
-    /// ADR 0042: the exports that declare a range, or reach one an inner
-    /// export declares: a value set outside it is refused at the value.
-    own: BTreeMap<String, Range>,
     /// ADR 0043: each exported parameter's value set: its own, else the one
-    /// every target shares (a primitive's, or an inner export's); a value
-    /// that is not one of it is refused at the value.
+    /// every target shares (a primitive's, or an inner export's), kept to
+    /// its own range; a value that is not one of it is snapped to it, with
+    /// a warning.
     value_sets: BTreeMap<String, Vec<(f64, String)>>,
+    /// ADR 0043: how each value set is read: its targets' rule
+    /// ([`Snap::Positive`] when every target reads it so).
+    snaps: BTreeMap<String, Snap>,
 }
 
 /// A resolved instance of the composite being expanded, as endpoints see it.
@@ -458,11 +460,14 @@ impl<'a> Flattener<'a> {
                 continue;
             };
             // ADR 0042, 0043 (the operator's decision of 2026-10-25): a value
-            // outside the export's own range is clamped to it, one not in its
-            // value set taken as the nearest; a warning says so, and the
-            // corrected value is what the targets get.
+            // outside the export's range (its own, else the intersection of
+            // its targets', as the panel's control has it) is clamped to it,
+            // one not in its value set snapped as its targets read it; a
+            // warning says so, and the corrected value is what the targets
+            // get.
             let mut value = *value;
-            if let Some(range) = interface.own.get(name)
+            if let Some(Some(range)) = interface.ranges.get(name)
+                && range.min <= range.max
                 && !(range.min <= value && value <= range.max)
             {
                 let to = value.max(range.min).min(range.max);
@@ -472,7 +477,8 @@ impl<'a> Flattener<'a> {
             if let Some(set) = interface.value_sets.get(name)
                 && !set.iter().any(|(v, _)| *v == value)
             {
-                let to = nearest_of(set.iter().map(|(v, _)| *v), value);
+                let snap = interface.snaps.get(name).copied().unwrap_or_default();
+                let to = snapped(set, snap, value);
                 let allowed = crate::allowed_text(set.iter().map(|(v, l)| (*v, l.as_str())));
                 self.corrected(address, name, value, to, not_one_of(&allowed));
                 value = to;
@@ -641,16 +647,30 @@ impl<'a> Flattener<'a> {
             .collect();
         parameters.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
         for (name, targets, declared, values) in parameters {
-            if let Some(set) = self.export_values(def, scope, locals, name, targets, values) {
-                interface.value_sets.insert(name.clone(), set);
-            }
+            let mut set = self.export_values(def, scope, locals, name, targets, values);
             let ports = self.export_targets(scope, locals, targets, true);
             interface.parameters.insert(name.clone(), ports);
-            let (range, own) = self.export_range(def, scope, locals, name, targets, declared);
-            interface.ranges.insert(name.clone(), range);
-            if let Some(own) = own {
-                interface.own.insert(name.clone(), own);
+            let range = self.export_range(def, scope, locals, name, targets, declared);
+            // ADR 0043: an own range with a value set taken from the targets
+            // keeps the values inside it; none left is refused.
+            if let (Some(declared), None, Some((entries, _))) = (declared, values, &mut set) {
+                let allowed = crate::allowed_text(entries.iter().map(|(v, l)| (*v, l.as_str())));
+                entries.retain(|(v, _)| declared.min <= *v && *v <= declared.max);
+                if entries.is_empty() {
+                    self.errors.push(GraphError::ExportRangeWithoutValues {
+                        scope: scope.cloned(),
+                        composite: def.name.clone(),
+                        name: name.clone(),
+                        range: declared,
+                        allowed,
+                    });
+                }
             }
+            if let Some((entries, snap)) = set.filter(|(entries, _)| !entries.is_empty()) {
+                interface.value_sets.insert(name.clone(), entries);
+                interface.snaps.insert(name.clone(), snap);
+            }
+            interface.ranges.insert(name.clone(), range);
         }
 
         let mut outputs: Vec<_> = exports.outputs.iter().map(|e| (&e.name, &e.from)).collect();
@@ -667,9 +687,9 @@ impl<'a> Flattener<'a> {
 
     /// ADR 0042: the range of exported parameter `name`: `declared`, which
     /// must lie inside every target's range (a primitive parameter's, or an
-    /// inner composite's export's), else the range all targets share; and
-    /// its own range: `declared`, else the one the inner exports it reaches
-    /// declare (`None` when none does: the primitives check the value).
+    /// inner composite's export's), else the intersection of the targets'
+    /// ranges (the narrowest, as the panel's control and `describe` have
+    /// it).
     fn export_range(
         &mut self,
         def: &CompositeDef,
@@ -678,7 +698,7 @@ impl<'a> Flattener<'a> {
         name: &str,
         targets: &[String],
         declared: Option<Range>,
-    ) -> (Option<Range>, Option<Range>) {
+    ) -> Option<Range> {
         let narrow = |a: Option<Range>, b: Range| match a {
             Some(a) => Range {
                 min: a.min.max(b.min),
@@ -689,7 +709,6 @@ impl<'a> Flattener<'a> {
         let mut sorted: Vec<&String> = targets.iter().collect();
         sorted.sort();
         let mut shared: Option<Range> = None;
-        let mut inner_own: Option<Range> = None;
         for target in sorted {
             let Some((instance, port)) = target.split_once('.') else {
                 continue;
@@ -703,12 +722,7 @@ impl<'a> Flattener<'a> {
                     .iter()
                     .find(|p| p.name == port)
                     .map(|p| p.range),
-                Local::Composite(inner) => {
-                    if let Some(own) = inner.own.get(port) {
-                        inner_own = Some(narrow(inner_own, *own));
-                    }
-                    inner.ranges.get(port).copied().flatten()
-                }
+                Local::Composite(inner) => inner.ranges.get(port).copied().flatten(),
             };
             let Some(range) = range else {
                 continue;
@@ -726,13 +740,14 @@ impl<'a> Flattener<'a> {
             }
             shared = Some(narrow(shared, range));
         }
-        (declared.or(shared), declared.or(inner_own))
+        declared.or(shared)
     }
 
     /// ADR 0043: the value set of exported parameter `name`: `declared`,
     /// each value of which must be allowed by every target that has a value
     /// set (a primitive's, or an inner export's), else the set every target
-    /// shares (`None` when one has none or two differ).
+    /// shares (`None` when one has none or two differ); with the rule it is
+    /// read by ([`Snap::Positive`] when every target reads it so).
     fn export_values(
         &mut self,
         def: &CompositeDef,
@@ -741,10 +756,11 @@ impl<'a> Flattener<'a> {
         name: &str,
         targets: &[String],
         declared: Option<&[crate::def::ExportValue]>,
-    ) -> Option<Vec<(f64, String)>> {
+    ) -> Option<(Vec<(f64, String)>, Snap)> {
         let mut sorted: Vec<&String> = targets.iter().collect();
         sorted.sort();
         let mut sets: Vec<Option<Vec<(f64, String)>>> = Vec::new();
+        let mut positive = true;
         for target in sorted {
             let Some((instance, port)) = target.split_once('.') else {
                 continue;
@@ -752,20 +768,25 @@ impl<'a> Flattener<'a> {
             let Some((_, Some(local))) = locals.get(instance) else {
                 continue;
             };
-            let set: Option<Vec<(f64, String)>> = match local {
-                Local::Primitive(descriptor) => descriptor
-                    .parameters
-                    .iter()
-                    .find(|p| p.name == port)
-                    .and_then(|p| p.values)
-                    .map(|values| {
-                        values
-                            .iter()
-                            .map(|v| (v.value, v.label.to_owned()))
-                            .collect()
-                    }),
-                Local::Composite(inner) => inner.value_sets.get(port).cloned(),
+            let (set, snap): (Option<Vec<(f64, String)>>, Snap) = match local {
+                Local::Primitive(descriptor) => {
+                    let p = descriptor.parameters.iter().find(|p| p.name == port);
+                    (
+                        p.and_then(|p| p.values).map(|values| {
+                            values
+                                .iter()
+                                .map(|v| (v.value, v.label.to_owned()))
+                                .collect()
+                        }),
+                        p.map(|p| p.snap).unwrap_or_default(),
+                    )
+                }
+                Local::Composite(inner) => (
+                    inner.value_sets.get(port).cloned(),
+                    inner.snaps.get(port).copied().unwrap_or_default(),
+                ),
             };
+            positive &= snap == Snap::Positive;
             if let (Some(declared), Some(set)) = (declared, &set) {
                 for entry in declared {
                     if !set.iter().any(|(v, _)| *v == entry.value) {
@@ -784,18 +805,24 @@ impl<'a> Flattener<'a> {
             }
             sets.push(set);
         }
+        let snap = if positive && !sets.is_empty() {
+            Snap::Positive
+        } else {
+            Snap::Nearest
+        };
         if let Some(declared) = declared {
-            return Some(
+            return Some((
                 declared
                     .iter()
                     .map(|e| (e.value, e.label.clone()))
                     .collect(),
-            );
+                snap,
+            ));
         }
         let first = sets.first()?.clone()?;
         sets.iter()
             .all(|s| s.as_ref() == Some(&first))
-            .then_some(first)
+            .then_some((first, snap))
     }
 
     fn export_targets(
@@ -987,13 +1014,14 @@ pub(crate) fn not_one_of(allowed: &str) -> String {
     format!("is not one of {allowed}")
 }
 
-/// The value of `values` nearest to `value` (the lower of two as near).
-pub(crate) fn nearest_of(values: impl IntoIterator<Item = f64>, value: f64) -> f64 {
-    let mut best: Option<f64> = None;
-    for v in values {
-        if best.is_none_or(|b| (v - value).abs() < (b - value).abs()) {
-            best = Some(v);
-        }
-    }
-    best.unwrap_or(value)
+/// `value` as one of `set` read by `snap` ([`snap_value`], ADR 0043).
+fn snapped(set: &[(f64, String)], snap: Snap, value: f64) -> f64 {
+    let entries: Vec<ValueLabel> = set
+        .iter()
+        .map(|(v, _)| ValueLabel {
+            value: *v,
+            label: "",
+        })
+        .collect();
+    snap_value(&entries, snap, value)
 }

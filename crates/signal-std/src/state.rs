@@ -381,7 +381,9 @@ impl DirectPrimitive for Integrator {
             }
             let g = if sr <= 0.0 {
                 0.0
-            } else if round_half_up(at(mode, n, 0.0)) >= 1.0 {
+            } else if crate::chosen(MODE_VALUES, signal_core::Snap::Nearest, at(mode, n, 0.0))
+                >= 1.0
+            {
                 at(gain, n, 0.0) / (2.0 * sr)
             } else {
                 let fc = at(cutoff, n, 0.0).clamp(0.0, CUTOFF_MAX_RATIO * sr);

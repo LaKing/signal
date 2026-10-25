@@ -129,7 +129,7 @@ const TO_EVENTS: ModuleDescriptor = ModuleDescriptor {
             0.0,
             Combine::Add,
         ),
-        crate::choice(
+        crate::choice_positive(
             parameter(
                 "on_change",
                 PortKind::Gate,
@@ -195,7 +195,11 @@ impl DirectPrimitive for ToEvents {
         let mut next = 0;
         for n in 0..inputs.frames() {
             let x = at(x, n, 0.0);
-            let changed = at(on_change, n, 1.0) > 0.0
+            let changed = crate::chosen(
+                crate::OFF_ON,
+                signal_core::Snap::Positive,
+                at(on_change, n, 1.0),
+            ) > 0.0
                 && self
                     .last
                     .is_none_or(|last| (x - last).abs() > at(threshold, n, 0.0));

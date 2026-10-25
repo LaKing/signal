@@ -280,7 +280,7 @@ pub use wavetable::Wavetable;
 use signal_core::{
     Combine, DirectPrimitive, Direction, Event, EventPayload, ModuleType, Outputs,
     ParameterDescriptor, PortDescriptor, PortKind, PortShape, Primitive, Range, RateDivisor,
-    Registry, RegistryError, StateOutputPrimitive, ValueLabel,
+    Registry, RegistryError, Snap, StateOutputPrimitive, ValueLabel,
 };
 
 /// Each `std.*` type's static cost in ns per frame per instance: the seat's
@@ -703,6 +703,7 @@ pub(crate) const fn parameter_at(
         default,
         combine,
         values: None,
+        snap: signal_core::Snap::Nearest,
     }
 }
 
@@ -757,6 +758,7 @@ pub(crate) const fn parameter(
         default,
         combine,
         values: None,
+        snap: signal_core::Snap::Nearest,
     }
 }
 
@@ -772,6 +774,26 @@ pub(crate) const fn choice(
     }
 }
 
+/// `choice` read as `x > 0` (ADR 0043, [`Snap::Positive`]): an off/on
+/// parameter whose `process` takes anything positive as on.
+pub(crate) const fn choice_positive(
+    parameter: ParameterDescriptor,
+    values: &'static [ValueLabel],
+) -> ParameterDescriptor {
+    ParameterDescriptor {
+        values: Some(values),
+        snap: Snap::Positive,
+        ..parameter
+    }
+}
+
+/// The entry of `values` a discrete parameter's effective value `x` selects
+/// (ADR 0043): what `process` reads it as, by the same rule that snaps a
+/// value in a file or a live edit ([`signal_core::snap_value`]).
+pub(crate) fn chosen(values: &[ValueLabel], snap: Snap, x: f64) -> f64 {
+    signal_core::snap_value(values, snap, x)
+}
+
 /// An entry of a value set.
 pub(crate) const fn named(value: f64, label: &'static str) -> ValueLabel {
     ValueLabel { value, label }
@@ -781,8 +803,10 @@ pub(crate) const fn named(value: f64, label: &'static str) -> ValueLabel {
 /// `std.scale`'s `mul` and `add`, `std.clamp`'s bounds, a table's elements,
 /// a step's value, …): wide enough for every use in the repository (Hz,
 /// ms, gains, frame counts up to 10⁵), well inside the engine's magnitude
-/// bound ±10⁶ (`docs/semantics.md` §7). A larger value is made with a
-/// connection's scale, which no parameter range limits.
+/// bound ±10⁶ (`docs/semantics.md` §7). A larger value is built on the
+/// signal path (a `std.scale`'s `in`, a signal input, with its `mul`); a
+/// connection's scale into a parameter is clamped by the parameter's range
+/// with the rest of its modulation.
 pub(crate) const GENERIC: f64 = 100_000.0;
 
 /// The interpolations of a buffer or a table.

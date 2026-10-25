@@ -407,6 +407,7 @@ impl EventSink {
 ///         default: 1.0,
 ///         combine: Combine::Multiply,
 ///         values: None,
+///         snap: signal_core::Snap::Nearest,
 ///     }],
 ///     feedthrough: Feedthrough::Direct,
 ///     sink: None,

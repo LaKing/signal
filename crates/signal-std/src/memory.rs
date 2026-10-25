@@ -29,7 +29,7 @@ use crate::{at, parameter, round_half_up, signal_port};
 
 /// The interpolation `interp` selects: 0 none, 1 linear, 2 Hermite.
 pub(crate) fn interpolation(interp: f64) -> u8 {
-    round_half_up(interp).clamp(0.0, 2.0) as u8
+    crate::chosen(crate::INTERP_VALUES, signal_core::Snap::Nearest, interp) as u8
 }
 
 /// The value at position `p` (`⌊p⌋` is an element), interpolated as
@@ -304,11 +304,13 @@ impl<const C: usize> DirectPrimitive for Buffer<C> {
 ///
 /// **Parameters**
 /// - `v0` … `v{L−1}` (generic, range `[−10⁵, 10⁵]` (ADR 0043), default 0, combine
-///   `add`): the values, the instance's parameters in the project file,
-///   validated when the project loads (out of range is an error).
+///   `add`): the values, the instance's parameters in the project file; a
+///   value there outside the range is clamped when the project loads, with
+///   a warning (ADR 0042 §3).
 /// - `interp` (generic, choice, range `[0, 2]`, default 1, combine
 ///   `replace`): 0 none, 1 linear, 2 Hermite (the module documentation).
-/// - `wrap` (gate, range `[0, 1]`, default 0, combine `replace`): above 0,
+/// - `wrap` (gate, choice read as positive, range `[0, 1]`, default 0,
+///   combine `replace`): above 0,
 ///   the position and the neighbours wrap modulo L (a cycle, e.g. a
 ///   wavetable); otherwise the position is clamped to `[0, L − 1]` and the
 ///   neighbours to the ends.
@@ -335,7 +337,11 @@ impl<const L: usize> DirectPrimitive for Table<L> {
         let (interp, wrap) = (inputs.parameter(L), inputs.parameter(L + 1));
         let last = L.saturating_sub(1);
         for (n, out) in outputs.signal(0).iter_mut().enumerate() {
-            let wraps = at(wrap, n, 0.0) > 0.0;
+            let wraps = crate::chosen(
+                crate::vector::WRAP_VALUES,
+                signal_core::Snap::Positive,
+                at(wrap, n, 0.0),
+            ) > 0.0;
             let element = |i: i64| {
                 let i = if wraps {
                     i.rem_euclid(L.max(1) as i64) as usize

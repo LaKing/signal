@@ -155,7 +155,7 @@ pub fn plan(panel: &Panel, values: &Values) -> Restore {
             restore.skipped.push(skip("excluded".to_owned()));
             continue;
         }
-        // ADR 0043: a discrete control's value is the nearest of its values.
+        // ADR 0043: a discrete control's value is snapped to its values.
         let to = target.take(*value);
         if to.to_bits() != value.to_bits() {
             restore.clamped.push(Clamped {

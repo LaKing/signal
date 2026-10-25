@@ -456,16 +456,18 @@ struct Aim {
     max: f64,
     /// ADR 0043: the value set of a discrete parameter.
     values: Option<Vec<(f64, String)>>,
+    /// ADR 0043: how a value between its values is read (and snapped).
+    snap: signal_core::Snap,
     control: Option<(String, String)>,
 }
 
 impl Aim {
-    /// `value` as sent: clamped to the range and, with a value set, the
-    /// nearest of its values.
+    /// `value` as sent: clamped to the range and, with a value set, snapped
+    /// as its modules read it.
     fn take(&self, value: f64) -> f64 {
         let clamped = within(value, self.min, self.max);
         match &self.values {
-            Some(values) => crate::panel::nearest(values, clamped),
+            Some(values) => crate::panel::snap_to(values, self.snap, clamped),
             None => clamped,
         }
     }
@@ -755,21 +757,6 @@ pub struct Host {
     keys_stamp: Option<(SystemTime, u64)>,
     keys_polled: Instant,
     keys_version: u64,
-}
-
-/// ADR 0042, 0043: the values `project`'s files hold outside their range or
-/// value set, as the plan corrected them, located (`file:line:column:
-/// warning: …`).
-fn corrected_values(dir: &Path, project: &Project, registry: &Registry) -> Vec<String> {
-    project
-        .plan(registry)
-        .map(|planned| {
-            signal_project::located(dir, planned.corrected)
-                .iter()
-                .map(ToString::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn joined(diagnostics: Vec<Diagnostic>) -> String {
@@ -1597,7 +1584,6 @@ impl Host {
             Ok((project, plan, _)) => {
                 self.rate = project.sample_rate;
                 mode.diagnostics.clear();
-                mode.warnings = corrected_values(&self.dir, &project, &self.registry);
                 self.panel = Panel::new(&project, &self.registry);
                 self.plan = Some(plan);
             }
@@ -1608,6 +1594,68 @@ impl Host {
                 self.plan = None;
             }
         }
+        // Of the panel just built (none when it does not load).
+        self.refresh_warnings();
+    }
+
+    /// App mode, ADR 0042, 0043: the warnings of the values the open
+    /// project's files hold outside their range or value set, as the plan
+    /// the panel was built from corrected them, located (`file:line:column:
+    /// warning: …`), then how many of them the next Save writes corrected
+    /// (`project.toml`'s; a composite's file is edited by hand). Called
+    /// whenever the panel is rebuilt (opened, played, reloaded, written).
+    fn refresh_warnings(&mut self) {
+        let mut warnings: Vec<String> =
+            signal_project::located(&self.dir, self.panel.corrected_warnings().to_vec())
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+        let count = self.panel.corrections().len();
+        if count > 0 {
+            let values = if count == 1 { "value" } else { "values" };
+            warnings.push(match self.document {
+                Some(_) => format!("{count} {values} will be written corrected on the next Save"),
+                None => format!(
+                    "{count} {values} will be written corrected when each is next written (a commit or a restore)"
+                ),
+            });
+        }
+        if let Some(mode) = self.app.as_mut() {
+            mode.warnings = warnings;
+        }
+    }
+
+    /// ADR 0042, 0043 (the operator's decision of 2026-10-25): before a
+    /// Save, the controls whose `project.toml` value plays corrected
+    /// ("corrected on load") are written with the value that plays, as one
+    /// change (a commit's write), so the saved file holds what played. A
+    /// control with a live value of its own (a drag, unsaved) is left to
+    /// it. Nothing to write is `Ok`.
+    fn write_corrections(&mut self) -> Result<(), String> {
+        let edits: Vec<ControlWrite> = self
+            .panel
+            .corrections()
+            .into_iter()
+            .filter(|c| self.panel.dragged(&c.instance, &c.parameter).is_none())
+            .filter_map(|c| {
+                let target = self.panel.target(&c.instance, &c.parameter)?;
+                Some(ControlWrite {
+                    address: format!("/{}.{}", c.instance, c.parameter),
+                    instance: c.instance,
+                    parameter: c.parameter,
+                    target,
+                    value: Some(c.to),
+                })
+            })
+            .collect();
+        if edits.is_empty() {
+            return Ok(());
+        }
+        self.write_controls(&edits, false)
+            .map(|_| ())
+            .map_err(|failure| {
+                format!("the corrected values were not written: {}", failure.message)
+            })
     }
 
     /// App mode: plays the open project from frame 0 with the Setup
@@ -1643,6 +1691,7 @@ impl Host {
             Err(diagnostics) => {
                 if let Some(mode) = self.app.as_mut() {
                     mode.diagnostics = diagnostics;
+                    mode.warnings.clear();
                 }
                 return Err(fail("does-not-load", "the project does not load"));
             }
@@ -1652,6 +1701,7 @@ impl Host {
         // run starts, are played again in it.
         let carried = self.carried();
         self.panel = Panel::new(&project, &self.registry);
+        self.refresh_warnings();
         self.play_carried(carried.clone());
         let mut notes = Vec::new();
         let started = app::start(
@@ -1664,10 +1714,8 @@ impl Host {
             width,
             &mut notes,
         );
-        let warnings = corrected_values(&self.dir, &project, &self.registry);
         if let Some(mode) = self.app.as_mut() {
             mode.diagnostics.clear();
-            mode.warnings = warnings;
             mode.notes.extend(notes);
         }
         let started = match started {
@@ -2370,6 +2418,9 @@ impl Host {
     /// write here (its parameters are written by `retry`). The control
     /// thread's Save is [`Host::save_document_then`].
     pub fn save_document(&mut self) -> Result<(), String> {
+        if self.document.is_some() {
+            self.write_corrections()?;
+        }
         let result = match self.document.as_mut() {
             Some(document) => document.save(),
             None => Ok(()),
@@ -2383,6 +2434,11 @@ impl Host {
     /// written; the control thread goes on meanwhile. A folder project's
     /// is called at once.
     pub fn save_document_then(&mut self, done: SaveDone) {
+        if self.document.is_some()
+            && let Err(message) = self.write_corrections()
+        {
+            return done(Err(message));
+        }
         match self.document.as_mut() {
             Some(document) => {
                 let ticket = document.start_save();
@@ -2427,6 +2483,9 @@ impl Host {
     pub fn save_as_then(&mut self, file: &Path, done: SaveDone) {
         if self.app.is_none() {
             return done(Err(app_only().message));
+        }
+        if let Err(message) = self.write_corrections() {
+            return done(Err(message));
         }
         match self.document.as_mut() {
             Some(document) => {
@@ -2513,8 +2572,14 @@ impl Host {
         if self.app.is_none() {
             return Err(app_only());
         }
-        let Some(document) = self.document.as_mut() else {
+        if self.document.is_none() {
             self.noted(Ok::<(), Failure>(()))?;
+            return Ok(Some(json!({"type": "saved", "file": null})));
+        }
+        if let Err(message) = self.write_corrections() {
+            return self.noted(Err(fail("not-saved", message)));
+        }
+        let Some(document) = self.document.as_mut() else {
             return Ok(Some(json!({"type": "saved", "file": null})));
         };
         let ticket = document.start_save();
@@ -2782,6 +2847,7 @@ impl Host {
     fn install(&mut self, mut run: Run) {
         self.graph_playing = None;
         self.panel = Panel::new(&run.current, &self.registry);
+        self.refresh_warnings();
         self.plan = run.current.plan(&self.registry).ok().map(|p| p.plan);
         self.rate = run.rate;
         run.version = run.controller.status().version;
@@ -2965,10 +3031,6 @@ impl Host {
         let notice = match result {
             Ok(applied) => {
                 run.file = file;
-                // ADR 0042, 0043: the reloaded files' corrected values.
-                if let Some(mode) = self.app.as_mut() {
-                    mode.warnings = corrected_values(&self.dir, &run.current, &self.registry);
-                }
                 reloaded = Some((
                     Panel::new(&run.current, &self.registry),
                     run.current.plan(&self.registry).ok().map(|p| p.plan),
@@ -3502,6 +3564,10 @@ impl Host {
                             .map(|(value, label)| json!({"value": value, "label": label}))
                             .collect::<Vec<_>>()
                     }),
+                    // ADR 0043: how a value between them is read (and
+                    // snapped): `positive` (anything above 0 is on), else
+                    // left out (the nearest, ties upward).
+                    "snap": (p.snap == signal_core::Snap::Positive).then_some("positive"),
                 }));
             }
         }
@@ -4860,6 +4926,7 @@ impl Host {
                 min: target.min,
                 max: target.max,
                 values: target.values,
+                snap: target.snap,
                 control: Some((instance, parameter)),
             });
         }
@@ -4885,6 +4952,7 @@ impl Host {
                         .map(|v| (v.value, v.label.to_owned()))
                         .collect()
                 }),
+                snap: d.snap,
                 control: None,
             }),
             None => Err(fail(
@@ -6216,6 +6284,8 @@ impl Host {
         let panel = &self.panel;
         self.failed.retain(|key, _| kept(panel, key));
         self.resend.retain(|key| kept(panel, key));
+        // ADR 0042, 0043: the corrections of the files as they are now.
+        self.refresh_warnings();
     }
 
     /// The unsaved controls' live values that a new run of the same project

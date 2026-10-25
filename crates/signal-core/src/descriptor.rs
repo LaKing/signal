@@ -118,14 +118,53 @@ pub struct ValueLabel {
     pub label: &'static str,
 }
 
-/// `value` as one of `values` (ADR 0043): the nearest entry's value (the
-/// lower one when two are as near), or `value` itself when the set is empty.
-pub fn nearest_value(values: &[ValueLabel], value: f64) -> f64 {
+/// How a value between a value set's entries is read (ADR 0043): the rule
+/// the module's `process` decides by, so a value snapped by it plays
+/// exactly as the unsnapped one did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Snap {
+    /// The nearest entry; of two as near, the greater (as `⌊x + ½⌋` reads
+    /// a set of consecutive integers).
+    #[default]
+    Nearest,
+    /// Read as `x > 0`: any value above 0 is the nearest entry above 0, any
+    /// other the nearest entry at or below 0 (an off/on set: anything
+    /// positive is on).
+    Positive,
+}
+
+impl Snap {
+    /// Whether this is the default rule (it is then not serialized).
+    pub fn is_nearest(&self) -> bool {
+        *self == Snap::Nearest
+    }
+}
+
+/// `value` as one of `values` read by `snap` (ADR 0043): the entry `snap`
+/// selects, or `value` itself when the set is empty. Bounded work, no
+/// allocation: a module's `process` may call it.
+pub fn snap_value(values: &[ValueLabel], snap: Snap, value: f64) -> f64 {
+    let side = |entry: &ValueLabel| match snap {
+        Snap::Nearest => true,
+        Snap::Positive => (entry.value > 0.0) == (value > 0.0),
+    };
     let mut best: Option<f64> = None;
-    for entry in values {
-        let closer = best.is_none_or(|b| (entry.value - value).abs() < (b - value).abs());
-        if closer {
-            best = Some(entry.value);
+    for pass in [true, false] {
+        for entry in values {
+            if pass && !side(entry) {
+                continue;
+            }
+            let closer = best.is_none_or(|b| {
+                let (d, e) = ((entry.value - value).abs(), (b - value).abs());
+                d < e || (d == e && entry.value > b)
+            });
+            if closer {
+                best = Some(entry.value);
+            }
+        }
+        if best.is_some() {
+            break;
         }
     }
     best.unwrap_or(value)
@@ -187,9 +226,25 @@ pub struct ParameterDescriptor {
     /// ADR 0043: a discrete parameter's allowed values, each with its name
     /// (inside `range`, which spans them); `None` for a continuous one. A
     /// parameter with a value set is stepped: a value in a file must be one
-    /// of them, and a live edit takes the nearest.
+    /// of them (a file's other value is snapped, with a warning), and a live
+    /// edit is snapped ([`ParameterDescriptor::snap`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub values: Option<&'static [ValueLabel]>,
+    /// ADR 0043: how `process` reads a value between `values`' entries, and
+    /// so how a value in a file or a live edit is snapped to one of them.
+    #[serde(skip_serializing_if = "Snap::is_nearest")]
+    pub snap: Snap,
+}
+
+impl ParameterDescriptor {
+    /// `value` as this parameter's value set takes it ([`snap_value`]);
+    /// `value` itself for a continuous parameter.
+    pub fn snapped(&self, value: f64) -> f64 {
+        match self.values {
+            Some(values) => snap_value(values, self.snap, value),
+            None => value,
+        }
+    }
 }
 
 /// The feedthrough class of a primitive (ADR 0016 §2).

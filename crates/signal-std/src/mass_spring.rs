@@ -270,7 +270,11 @@ impl DirectPrimitive for MassSpring {
                 .max(0.0)
                 .min(self.sample_rate / std::f64::consts::TAU);
             let decay_s = at(inputs.parameter(2), n, DECAY_S);
-            let free = round_half_up(at(inputs.parameter(3), n, 0.0)) >= 1.0;
+            let free = crate::chosen(
+                BOUNDARY_VALUES,
+                signal_core::Snap::Nearest,
+                at(inputs.parameter(3), n, 0.0),
+            ) >= 1.0;
             let driven = node(at(inputs.parameter(4), n, DRIVE_NODE), masses);
             let pickup = node(at(inputs.parameter(5), n, PICKUP_NODE), masses);
             if decay_s != self.decay_s {

@@ -269,7 +269,11 @@ impl DirectPrimitive for Playhead {
                 bpm: finite(at(inputs.parameter(BPM), n, DEFAULT_BPM), DEFAULT_BPM)
                     .clamp(20.0, 400.0),
                 rate: finite(at(inputs.parameter(RATE), n, 1.0), 0.0).clamp(-MAX_RATE, MAX_RATE),
-                running: at(inputs.parameter(RUN), n, 1.0) >= 0.5,
+                running: crate::chosen(
+                    RUN_VALUES,
+                    signal_core::Snap::Nearest,
+                    at(inputs.parameter(RUN), n, 1.0),
+                ) >= 1.0,
             };
             // The last seek of this frame, if any.
             let mut seek = None;

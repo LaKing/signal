@@ -2,4 +2,4 @@
 source: crates/signal-project/tests/errors.rs
 expression: "warnings(&[(\"project.toml\", &project), (\"composites/voice.toml\", &voice)])"
 ---
-project.toml:7:36: warning: /v/shaper.drive: value 50 is outside [0.1, 20]: 20 plays (the file keeps 50 until the parameter is written)
+project.toml:7:36: warning: /v.z: value 50 is outside [0.1, 20]: 20 plays (the file keeps 50 until the parameter is written)

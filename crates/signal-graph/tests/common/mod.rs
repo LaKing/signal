@@ -51,6 +51,7 @@ const fn parameter(
         default,
         combine: Combine::Add,
         values: None,
+        snap: signal_core::Snap::Nearest,
     }
 }
 

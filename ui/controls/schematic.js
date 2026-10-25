@@ -2226,6 +2226,8 @@ export class SignalSchematic extends HTMLElement {
     if (row.editable) {
       // ADR 0043: a discrete parameter is a selector of its named values.
       const input = isDiscrete(row) ? html('select', {}) : html('input', { type: 'range', min: row.min, max: row.max, step: (row.max - row.min) / 1000 || 'any' });
+      // ADR 0034: every control has a name a screen reader says.
+      input.setAttribute('aria-label', row.name);
       if (isDiscrete(row)) for (const option of selectOptions(row.values)) input.append(html('option', { value: option.value, textContent: option.label, title: option.title }));
       input.dataset.address = row.address;
       input.dataset.label = row.name;
@@ -2240,7 +2242,7 @@ export class SignalSchematic extends HTMLElement {
         value: () => shown.value,
         apply: (value) => {
           shown.value = value;
-          input.value = isDiscrete(row) ? selectValue(row.values, value) : String(value);
+          input.value = isDiscrete(row) ? selectValue(row.values, value, row.snap) : String(value);
           this.send(dragMessage(row.address, value));
           this.send(releaseMessage(row.address, value));
         },
@@ -2271,12 +2273,12 @@ export class SignalSchematic extends HTMLElement {
     for (const shown of this.cardRows) {
       const values = rowValues(shown.row, this.cardValues, this.connection?.unsaved, this.connection?.description);
       shown.value = values.base;
-      const text = (v) => (isDiscrete(shown.row) ? valueLabel(shown.row.values, v) : formatFixed(v, shown.row.unit));
+      const text = (v) => (isDiscrete(shown.row) ? valueLabel(shown.row.values, v, shown.row.snap) : formatFixed(v, shown.row.unit));
       if (!shown.entry?.isOpen) shown.base.textContent = text(values.base);
       shown.effective.textContent = text(values.effective);
       shown.mark.classList.toggle('on', Boolean(values.unsaved));
       if (shown.input && document.activeElement !== shown.input && this.shadowRoot.activeElement !== shown.input && Number.isFinite(values.base)) {
-        shown.input.value = isDiscrete(shown.row) ? selectValue(shown.row.values, values.base) : String(values.base);
+        shown.input.value = isDiscrete(shown.row) ? selectValue(shown.row.values, values.base, shown.row.snap) : String(values.base);
       }
     }
   }

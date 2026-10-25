@@ -90,6 +90,7 @@ const DRIVE: ParameterDescriptor = ParameterDescriptor {
     default: 1.0,
     combine: Combine::Add,
     values: None,
+    snap: signal_core::Snap::Nearest,
 };
 
 const fn descriptor(

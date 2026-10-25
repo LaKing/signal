@@ -1,8 +1,9 @@
 //! ADR 0042: an exported parameter with its own range. Both forms of an
 //! export parse; a range outside a target's (one target, or any of a
 //! fan-out) is refused at the export; an export without one takes an inner
-//! export's; a value in a file outside an export's range is an error at the
-//! value, as for a primitive's; an exported input takes no range; and the
+//! export's; a value in a file outside an export's range is clamped, with
+//! a warning at the value, as for a primitive's (the operator's decision
+//! of 2026-10-25); an exported input takes no range; and the
 //! studio projects, whose composites now declare ranges, load and plan with
 //! every value they hold inside them.
 
@@ -504,7 +505,7 @@ fn an_export_value_set_must_be_allowed_by_its_target() {
 
 /// ADR 0043 (the operator's decision of 2026-10-25): a value in a file that
 /// is not one of the value set (the export's own, or the one it takes from
-/// its target) takes the nearest of them, with a warning at the value, as an
+/// its target) is snapped to them, with a warning at the value, as an
 /// out-of-range value is clamped; values and a range together are refused.
 #[test]
 fn a_value_not_in_the_set_takes_the_nearest_with_a_warning() {
@@ -534,14 +535,15 @@ fn a_value_not_in_the_set_takes_the_nearest_with_a_warning() {
     ]);
     assert!(
         errors.iter().any(|e| e.contains(
-            "/v.wave: value 1.5 is not one of 0 sine, 1 saw, 2 square, 3 triangle: 1 plays"
+            "/v.wave: value 1.5 is not one of 0 sine, 1 saw, 2 square, 3 triangle: 2 plays"
         )),
         "{errors:?}"
     );
-    // A primitive's own, likewise; the nearest plays.
+    // A primitive's own, likewise; the nearest plays, a tie upward (as
+    // `process` reads it, review of c89253a).
     let text = project(r#"v = { module = "std.osc", shape = 1.5 }"#);
     let errors = warned(&[("project.toml", &text)]);
-    assert_eq!(played(&[("project.toml", &text)], "/v.shape"), 1.0);
+    assert_eq!(played(&[("project.toml", &text)], "/v.shape"), 2.0);
     assert!(
         errors
             .iter()
@@ -591,13 +593,159 @@ parameters = { wave = "osc.shape", freq = "osc.freq" }
     );
     assert!(
         warnings.iter().any(|w| w.starts_with("project.toml:8:")
-            && w.contains(
-                "warning: /v/osc.freq: value 250000 is outside [0, 100000]: 100000 plays"
-            )),
+            && w.contains("warning: /v.freq: value 250000 is outside [0, 100000]: 100000 plays")),
         "{warnings:?}"
     );
     assert_eq!(played(&files, "/v/osc.shape"), 1.0);
     assert_eq!(played(&files, "/v/osc.freq"), 100_000.0);
     // The file keeps its text: nothing was written.
     assert!(text.contains("wave = 1.0023, freq = 250000"));
+}
+
+/// Review of c89253a, 5: a value in a composite's file is never written by
+/// Signal (Save writes `project.toml`'s controls), so its warning says to
+/// edit that file or vendor the composite again; `project.toml`'s says the
+/// next write takes it.
+#[test]
+fn a_value_corrected_in_a_composite_file_says_to_edit_it() {
+    let inner = r#"schema_version = 1
+
+[composite]
+name = "voice"
+
+[instances]
+osc = { module = "std.osc", freq = 250000 }
+
+[exports]
+outputs = { out = "osc.out" }
+parameters = { wave = "osc.shape" }
+"#;
+    let files = [
+        (
+            "project.toml",
+            project(r#"v = { module = "voice", wave = 0.4 }"#),
+        ),
+        ("composites/voice.toml", inner.to_owned()),
+    ];
+    let files: Vec<(&str, &str)> = files.iter().map(|(p, t)| (*p, t.as_str())).collect();
+    let warnings = warned(&files);
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.starts_with("composites/voice.toml:")
+                && w.ends_with(
+                    "/v/osc.freq: value 250000 is outside [0, 100000]: 100000 plays \
+                 (composites/voice.toml keeps 250000: edit it, or vendor the composite again)"
+                )),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings.iter().any(|w| w.starts_with("project.toml:")
+            && w.ends_with("/v.wave: value 0.4 is not one of 0 sine, 1 saw, 2 square, 3 triangle: 0 plays (the file keeps 0.4 until the parameter is written)")),
+        "{warnings:?}"
+    );
+}
+
+/// Review of c89253a, 7: a fanned-out export without a range of its own
+/// takes the intersection of its targets' (as the panel's control and
+/// `describe` do), so a value inside one target's range but not the other's
+/// is clamped once, at the export, and every target gets the same value.
+#[test]
+fn a_fan_out_value_is_clamped_to_the_intersection_at_the_export() {
+    // osc.freq: [0, 10⁵]; shaper.drive: [0.1, 20].
+    let fan = voice(r#"{ both = ["osc.freq", "shaper.drive"] }"#);
+    let text = project(r#"v = { module = "voice", both = 50 }"#);
+    let files = [
+        ("project.toml", text.as_str()),
+        ("composites/voice.toml", &fan),
+    ];
+    let warnings = warned(&files);
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("/v.both: value 50 is outside [0.1, 20]: 20 plays")),
+        "{warnings:?}"
+    );
+    assert_eq!(played(&files, "/v/osc.freq"), 20.0);
+    assert_eq!(played(&files, "/v/shaper.drive"), 20.0);
+}
+
+/// Review of c89253a, 7: an export with its own range and the value set of
+/// its target keeps the values inside its range (a value beyond is clamped
+/// into it, one between them snapped to those kept), and a range that
+/// keeps none of them is refused at the export.
+#[test]
+fn an_own_range_keeps_the_inherited_values_inside_it() {
+    let narrow = osc_voice(r#"{ wave = { to = "osc.shape", min = 0, max = 1 } }"#);
+    let text = project(r#"v = { module = "voice", wave = 3 }"#);
+    let files = [
+        ("project.toml", text.as_str()),
+        ("composites/voice.toml", &narrow),
+    ];
+    let warnings = warned(&files);
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("/v.wave: value 3 is outside [0, 1]: 1 plays")),
+        "{warnings:?}"
+    );
+    assert_eq!(played(&files, "/v/osc.shape"), 1.0);
+    let none = osc_voice(r#"{ wave = { to = "osc.shape", min = 0.2, max = 0.8 } }"#);
+    let errors = problems(&[
+        ("project.toml", &project(r#"v = { module = "voice" }"#)),
+        ("composites/voice.toml", &none),
+    ]);
+    assert!(
+        errors.iter().any(|e| e.starts_with("composites/voice.toml:")
+            && e.contains("export `wave`: its range [0.2, 0.8] holds none of its targets' values (0 sine, 1 saw, 2 square, 3 triangle)")),
+        "{errors:?}"
+    );
+}
+
+/// Review of c89253a, 2: a parameter whose connections are all constants
+/// that, with their scales, take it beyond its range is warned of at the
+/// connection (the range clamps a modulated value); a sum inside the range,
+/// or a source that is not a constant, is not.
+#[test]
+fn a_constant_beyond_a_parameter_s_range_is_warned_of() {
+    let wired = |scale: &str, source: &str| {
+        format!(
+            r#"schema_version = 1
+
+[project]
+name = "constants"
+sample_rate = 48000
+
+[instances]
+c = {{ {source} }}
+v = {{ module = "std.osc", freq = 110 }}
+out = {{ module = "std.audio_out" }}
+
+[wiring]
+connections = [
+  {{ from = "c.out", to = "v.freq", scale = {scale} }},
+  {{ from = "v.out", to = "out.l" }},
+]
+"#
+        )
+    };
+    let beyond = wired("200000", r#"module = "std.const", value = 1"#);
+    let warnings = warned(&[("project.toml", &beyond)]);
+    assert!(
+        warnings.iter().any(|w| w.starts_with("project.toml:")
+            && w.contains("warning: /v.freq: the constant /c.out makes it 200110 (connection scales and base together), outside its range [0, 100000]: 100000 plays")),
+        "{warnings:?}"
+    );
+    let inside = wired("1000", r#"module = "std.const", value = 1"#);
+    let warnings = warned(&[("project.toml", &inside)]);
+    assert!(
+        !warnings.iter().any(|w| w.contains("the constant")),
+        "{warnings:?}"
+    );
+    let moving = wired("200000", r#"module = "std.sine_osc""#);
+    let warnings = warned(&[("project.toml", &moving)]);
+    assert!(
+        !warnings.iter().any(|w| w.contains("the constant")),
+        "{warnings:?}"
+    );
 }

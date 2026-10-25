@@ -16,7 +16,7 @@
 //! project, and a compile error in Rust (`Pack::<3>`; [`describe`]).
 
 /// A table's ends: clamped or wrapped (ADR 0043).
-const WRAP_VALUES: &[signal_core::ValueLabel] =
+pub(crate) const WRAP_VALUES: &[signal_core::ValueLabel] =
     &[crate::named(0.0, "clamp"), crate::named(1.0, "wrap")];
 
 use std::sync::OnceLock;
@@ -233,7 +233,7 @@ fn descriptor(op: Op, width: usize) -> ModuleDescriptor {
                     ),
                     crate::INTERP_VALUES,
                 ),
-                crate::choice(
+                crate::choice_positive(
                     parameter(
                         "wrap",
                         PortKind::Gate,

@@ -69,6 +69,7 @@ impl DirectPrimitive for Gain {
                 default: 1.0,
                 combine: Combine::Multiply,
                 values: None,
+                snap: signal_core::Snap::Nearest,
             }],
             Feedthrough::Direct,
         )
@@ -214,6 +215,7 @@ impl DirectPrimitive for Reciprocal {
                 default: 1.0,
                 combine: Combine::Add,
                 values: None,
+                snap: signal_core::Snap::Nearest,
             }],
             Feedthrough::Direct,
         )
@@ -418,6 +420,7 @@ const GAIN_PARAMETER: ParameterDescriptor = ParameterDescriptor {
     default: 1.0,
     combine: Combine::Multiply,
     values: None,
+    snap: signal_core::Snap::Nearest,
 };
 
 const V4_IN: PortDescriptor = port("in", Direction::In, PortShape::Vector(4));

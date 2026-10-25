@@ -10,13 +10,24 @@ const SHAPES = [
   { value: 3, label: 'triangle' },
 ];
 
-test('the nearest value: the lower of two as near; the value itself without a set', () => {
+test('the nearest value: the greater of two as near (as the modules read it); the value itself without a set', () => {
   assert.equal(nearestValue(SHAPES, 1.4), 1);
-  assert.equal(nearestValue(SHAPES, 1.5), 1);
+  assert.equal(nearestValue(SHAPES, 0.5), 1, 'saw, as std.osc plays 0.5');
+  assert.equal(nearestValue(SHAPES, 1.5), 2);
   assert.equal(nearestValue(SHAPES, 1.6), 2);
   assert.equal(nearestValue(SHAPES, -9), 0);
   assert.equal(nearestValue(SHAPES, 99), 3);
   assert.equal(nearestValue(null, 0.25), 0.25);
+});
+
+test('a value set read as positive: anything above 0 is on, as std.to_events reads on_change', () => {
+  const OFF_ON = [{ value: 0, label: 'off' }, { value: 1, label: 'on' }];
+  assert.equal(nearestValue(OFF_ON, 0.3, 'positive'), 1);
+  assert.equal(nearestValue(OFF_ON, 1e-9, 'positive'), 1);
+  assert.equal(nearestValue(OFF_ON, 0, 'positive'), 0);
+  assert.equal(nearestValue(OFF_ON, 0.3), 0, 'the nearest without it');
+  assert.equal(selectValue(OFF_ON, 0.4, 'positive'), '1');
+  assert.equal(valueLabel(OFF_ON, 0.4, 'positive'), 'on (0.4)');
 });
 
 test('a selector: one option per value, named; it shows the nearest value', () => {

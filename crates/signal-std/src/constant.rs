@@ -8,10 +8,11 @@ use signal_core::{
 
 use crate::{at, parameter, signal_port};
 
-/// The bound of `std.const`'s `value`: the engine's magnitude bound
-/// (`docs/semantics.md` §7), as for `std.scale` and `std.clamp`. A larger
-/// constant would only fault and mute the instance on its first frame; every
-/// integer up to it is exact, and it holds constants such as 2¹⁹ or 10⁶.
+/// The bound of `std.const`'s `value`: the generic ±10⁵ (ADR 0043), as for
+/// `std.scale` and `std.clamp`, well inside the engine's magnitude bound
+/// (`docs/semantics.md` §7). A larger constant is built on the signal path
+/// (a `std.scale`'s `in` with a `mul`), not through a connection's scale
+/// into a parameter, whose range clamps the modulated value.
 const VALUE_BOUND: f64 = crate::GENERIC;
 
 const CONST: ModuleDescriptor = ModuleDescriptor {
@@ -46,8 +47,8 @@ const CONST: ModuleDescriptor = ModuleDescriptor {
 /// - `out` (signal out, generic).
 ///
 /// **Parameters**
-/// - `value` (generic, no unit, range `[−10⁵, 10⁵]` (ADR 0043; a larger constant through a connection's scale), the engine's magnitude
-///   bound, default 0, combine `add`).
+/// - `value` (generic, no unit, range `[−10⁵, 10⁵]` (ADR 0043; a larger
+///   constant is built on the signal path), default 0, combine `add`).
 ///
 /// **Feedthrough:** direct.
 ///

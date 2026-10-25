@@ -39,6 +39,7 @@ export function rows(description) {
       kind: findParameter(description, c.address)?.kind ?? null,
       // ADR 0043: a discrete control's values (a selector, not a slider).
       values: c.values ?? null,
+      snap: c.snap,
       editable: true,
     });
   }
@@ -57,6 +58,7 @@ export function rows(description) {
           default: p.default,
           base: p.base,
           values: p.values ?? null,
+          snap: p.snap,
           editable: false,
         });
       }

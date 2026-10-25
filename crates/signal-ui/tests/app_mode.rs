@@ -921,6 +921,88 @@ fn a_signal_file_opens_in_a_working_folder(transport: Transport) {
     rig.finish();
 }
 
+/// ADR 0042, 0043 (the operator's decision after the review of c89253a): a
+/// `.signal` file whose only difference from what plays is values corrected
+/// on load opens neither edited nor revertible (no prompt on open, quit or
+/// Revert to Saved, which would only loop), shows the corrections in its
+/// warnings with how many the next Save writes, and that Save writes them.
+fn a_signal_file_with_corrected_values_is_not_edited(transport: Transport) {
+    let mut rig = app_rig("signal-corrected", transport, None);
+    let text = common::TONE.replace(
+        r#"a = { module = "std.sine_osc", freq = 440 }"#,
+        r#"a = { module = "std.osc", freq = 250000, shape = 1.0023 }"#,
+    );
+    fs::write(rig.dir.join("project.toml"), &text).unwrap();
+    let file = packed(&rig, "tone");
+    let (mut ws, _) = rig.client();
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    assert_eq!(opened["loads"], true, "{opened}");
+    let working = PathBuf::from(opened["dir"].as_str().unwrap());
+    let status = rig.host().project_status().unwrap();
+    assert!(!status.edited, "corrections do not edit it");
+    assert_eq!(status.unsaved, 0, "nor are they unsaved");
+    assert!(!status.revertible(), "nothing to revert");
+    let refused = rig.request(&mut ws, 2, json!({"type": "project.revert"}), "error");
+    assert_eq!(refused["code"], "not-edited", "{refused}");
+    let app = rig.request(&mut ws, 3, json!({"type": "app.get"}), "app");
+    assert_eq!(app["project"]["edited"], false);
+    let warnings: Vec<String> = app["project"]["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        warnings.iter().any(|w| w.contains(
+            "warning: /a.shape: value 1.0023 is not one of 0 sine, 1 saw, 2 square, 3 triangle: 1 plays"
+        )) && warnings
+            .iter()
+            .any(|w| w.contains("warning: /a.freq: value 250000 is outside [0, 100000]: 100000 plays")),
+        "{warnings:?}"
+    );
+    assert_eq!(
+        warnings.last().map(String::as_str),
+        Some("2 values will be written corrected on the next Save"),
+        "{warnings:?}"
+    );
+    let described = rig.request(&mut ws, 4, json!({"type": "describe"}), "describe");
+    assert_eq!(described["unsaved"]["count"], 0, "{}", described["unsaved"]);
+    let shape = described["controls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["address"] == "/a.shape")
+        .unwrap();
+    assert_eq!(shape["base"], 1.0, "what plays");
+
+    // Save writes the corrected values with the rest.
+    rig.request(&mut ws, 5, json!({"type": "project.save"}), "saved");
+    let unpacked = file.with_extension("check");
+    let _ = fs::remove_dir_all(&unpacked);
+    archive::unpack(&fs::read(&file).unwrap(), &unpacked).unwrap();
+    let saved = fs::read_to_string(unpacked.join("project.toml")).unwrap();
+    assert!(
+        saved.contains(r#"a = { module = "std.osc", freq = 100000, shape = 1 }"#),
+        "{saved}"
+    );
+    assert!(
+        fs::read_to_string(working.join("project.toml"))
+            .unwrap()
+            .contains("shape = 1 }")
+    );
+    let status = rig.host().project_status().unwrap();
+    assert!(!status.edited && !status.revertible(), "{status:?}");
+    let app = rig.request(&mut ws, 6, json!({"type": "app.get"}), "app");
+    assert_eq!(app["project"]["warnings"], json!([]), "{app}");
+    let _ = fs::remove_dir_all(&unpacked);
+    rig.finish();
+}
+
 /// M2.9-2 (ADR 0026 §5): a `panel.write` is a file in a `.signal`
 /// project's working folder, so the project becomes edited (here the first
 /// write of its generated panel, `ui/main.html` created), and Save packs it.
@@ -2480,6 +2562,7 @@ both!(
     signal_ui_refuses_the_app_s_messages,
     signal_ui_stops_and_plays,
     a_signal_file_opens_in_a_working_folder,
+    a_signal_file_with_corrected_values_is_not_edited,
     a_panel_write_marks_a_signal_project_edited,
     a_pattern_write_marks_a_signal_project_edited,
     a_stopped_patch_writes_and_pushes_graph,

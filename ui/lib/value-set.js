@@ -1,13 +1,26 @@
 // A discrete parameter's value set (ADR 0043): `[{value, label}]`, as
-// `describe.controls[].values` and a descriptor's `values` give it. A
-// parameter with one is shown as a selector instead of a slider; the
-// server takes the nearest value of any number sent. No DOM.
+// `describe.controls[].values` and a descriptor's `values` give it, with
+// its `snap` (`'positive'`, else left out: the nearest). A parameter with
+// one is shown as a selector instead of a slider; the server snaps any
+// number sent as the modules read it. No DOM.
 
-/** The value of `values` nearest to `value` (the lower of two as near); `value` without a set. */
-export function nearestValue(values, value) {
+/**
+ * The value of `values` that `value` snaps to, as the modules read it
+ * (`signal_core::snap_value`): the nearest, of two as near the greater;
+ * with `snap` `'positive'`, the nearest above 0 for a value above 0, else
+ * the nearest at or below 0. `value` itself without a set.
+ */
+export function nearestValue(values, value, snap) {
+  const positive = snap === 'positive';
   let best = null;
-  for (const entry of values ?? []) {
-    if (best === null || Math.abs(entry.value - value) < Math.abs(best - value)) best = entry.value;
+  for (const pass of [true, false]) {
+    for (const entry of values ?? []) {
+      if (pass && positive && entry.value > 0 !== value > 0) continue;
+      const d = Math.abs(entry.value - value);
+      const e = best === null ? Infinity : Math.abs(best - value);
+      if (best === null || d < e || (d === e && entry.value > best)) best = entry.value;
+    }
+    if (best !== null || !positive) break;
   }
   return best ?? value;
 }
@@ -17,22 +30,22 @@ export function selectOptions(values) {
   return (values ?? []).map((entry) => ({ value: String(entry.value), label: entry.label, title: `${entry.label} (${entry.value})` }));
 }
 
-/** What a selector shows for `value`: its nearest value's text (an option's value), or '' without a set or a finite value. */
-export function selectValue(values, value) {
+/** What a selector shows for `value`: the text of the value it snaps to (an option's value), or '' without a set or a finite value. */
+export function selectValue(values, value, snap) {
   if (!values?.length || !Number.isFinite(value)) return '';
-  return String(nearestValue(values, value));
+  return String(nearestValue(values, value, snap));
 }
 
 /**
  * A value as a value-set parameter reads: the name of the entry it is
- * (`saw`), else the nearest entry's name with the number (`saw (1.4)`),
- * or '' for a value that is not a number.
+ * (`saw`), else the name of the entry it snaps to with the number
+ * (`saw (1.4)`), or '' for a value that is not a number.
  */
-export function valueLabel(values, value) {
+export function valueLabel(values, value, snap) {
   if (!Number.isFinite(value)) return '';
   const exact = (values ?? []).find((entry) => entry.value === value);
   if (exact) return exact.label;
-  const near = (values ?? []).find((entry) => entry.value === nearestValue(values, value));
+  const near = (values ?? []).find((entry) => entry.value === nearestValue(values, value, snap));
   return near ? `${near.label} (${Number(value.toPrecision(4))})` : String(value);
 }
 

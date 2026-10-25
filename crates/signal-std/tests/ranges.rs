@@ -120,3 +120,91 @@ fn the_value_sets_name_what_the_rustdoc_names() {
     );
     assert_eq!(labels("std.biquad", "mode").len(), 8);
 }
+
+/// ADR 0043 (review of c89253a): snapping a value to a value set gives
+/// exactly what the module's `process` decides for that value. Over the
+/// whole registry, every discrete parameter is driven, with the default
+/// random stimulus otherwise, at a sweep of constant bases (its values, the
+/// halves between them and just beside, small positives, its range's
+/// ends), and the render at each base must equal the render at its
+/// snapped value ([`signal_core::ParameterDescriptor::snapped`]). A
+/// parameter whose values all render alike under the stimulus is listed,
+/// so the sweep cannot pass by not reaching it.
+#[test]
+fn a_value_set_snaps_as_process_reads_it() {
+    const FRAMES: usize = 512;
+    let registry = registry();
+    let mut problems = Vec::new();
+    let mut unreached = Vec::new();
+    let mut checked = 0;
+    for module in registry.iter() {
+        let d = &module.descriptor;
+        for (index, p) in d.parameters.iter().enumerate() {
+            let Some(values) = p.values else {
+                continue;
+            };
+            let at = format!("{}.{}", d.type_name, p.name);
+            let render = |base: f64| {
+                let mut stimulus = signal_contract::stimulus::random(d, 7, FRAMES);
+                stimulus.parameters[index] = vec![base; FRAMES];
+                format!("{:?}", signal_contract::outputs(module, &stimulus, FRAMES))
+            };
+            let mut entries: Vec<f64> = values.iter().map(|v| v.value).collect();
+            entries.sort_by(f64::total_cmp);
+            let mut bases = entries.clone();
+            for pair in entries.windows(2) {
+                let half = (pair[0] + pair[1]) / 2.0;
+                bases.extend([half, half - 1e-9, half + 1e-9]);
+            }
+            for v in &entries {
+                bases.extend([v - 0.3, v + 0.3, v + 1e-9, v - 1e-9]);
+            }
+            bases.extend([1e-9, 0.3, p.range.min, p.range.max]);
+            bases.retain(|b| p.range.min <= *b && *b <= p.range.max);
+            for base in bases {
+                let snapped = p.snapped(base);
+                checked += 1;
+                if render(base) != render(snapped) {
+                    problems.push(format!(
+                        "{at}: {base} snaps to {snapped}, but plays differently"
+                    ));
+                }
+            }
+            let renders: std::collections::BTreeSet<String> =
+                entries.iter().map(|v| render(*v)).collect();
+            if entries.len() > 1 && renders.len() < 2 {
+                unreached.push(at);
+            }
+        }
+    }
+    assert!(checked > 100, "only {checked} bases checked");
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    assert!(
+        unreached.is_empty(),
+        "values that render alike under the stimulus: {unreached:?}"
+    );
+}
+
+/// The measured cases of the review of c89253a, each snapped as `process`
+/// reads it on `main` (ties upward, as `round_half_up`; anything positive
+/// on for a parameter read as `> 0`).
+#[test]
+fn the_reviewed_values_snap_as_they_played() {
+    let registry = registry();
+    let snapped = |module: &str, name: &str, value: f64| {
+        let d = &registry.get(module).unwrap().descriptor;
+        d.parameters
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap()
+            .snapped(value)
+    };
+    assert_eq!(snapped("std.osc", "shape", 0.5), 1.0, "saw, as before");
+    assert_eq!(snapped("std.fm_op", "mode", 0.5), 1.0);
+    assert_eq!(snapped("std.playhead", "run", 0.5), 1.0);
+    assert_eq!(snapped("std.to_events", "on_change", 0.3), 1.0);
+    assert_eq!(snapped("std.to_events", "on_change", 0.0), 0.0);
+    assert_eq!(snapped("std.table16", "wrap", 0.4), 1.0);
+    assert_eq!(snapped("std.table16", "interp", 1.5), 2.0);
+    assert_eq!(snapped("std.table16", "interp", 1.4999), 1.0);
+}

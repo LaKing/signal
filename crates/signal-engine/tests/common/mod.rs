@@ -50,6 +50,7 @@ const fn param(
         default,
         combine,
         values: None,
+        snap: signal_core::Snap::Nearest,
     }
 }
 

@@ -250,3 +250,15 @@ test('Fit and a breadcrumb close what is below them', () => {
   assert.deepEqual([...s.pinned], []);
   assert.deepEqual([...s.drawn.open], []);
 });
+
+// ADR 0034 (review of c89253a, 10): the selection sidebar's parameter
+// controls, a selector of a value set's names or a slider, each carry the
+// parameter's name for a screen reader.
+test('the sidebar’s parameter selector and slider are named for a screen reader', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('./schematic.js', import.meta.url), 'utf8');
+  const made = source.indexOf("const input = isDiscrete(row) ? html('select', {})");
+  assert.ok(made > 0, 'the sidebar makes its selector or slider');
+  const named = source.indexOf("input.setAttribute('aria-label', row.name);", made);
+  assert.ok(named > made && named - made < 400, 'and names it at once');
+});

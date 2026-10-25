@@ -13,7 +13,7 @@ use signal_core::{
 };
 
 use crate::math::{bounded, stateless};
-use crate::{at, parameter, round_half_up, signal_port};
+use crate::{at, parameter, signal_port};
 
 /// The comparisons `mode` selects (ADR 0043: its value set).
 const MODE_VALUES: &[signal_core::ValueLabel] = &[
@@ -41,14 +41,16 @@ fn gate(on: bool) -> f64 {
 
 /// The comparison `mode` selects (see [`Compare`]).
 pub(crate) fn compare(mode: f64, a: f64, b: f64) -> f64 {
-    gate(match round_half_up(mode) as u8 {
-        0 => a < b,
-        1 => a <= b,
-        2 => a == b,
-        3 => a >= b,
-        4 => a > b,
-        _ => a != b,
-    })
+    gate(
+        match crate::chosen(MODE_VALUES, signal_core::Snap::Nearest, mode) as u8 {
+            0 => a < b,
+            1 => a <= b,
+            2 => a == b,
+            3 => a >= b,
+            4 => a > b,
+            _ => a != b,
+        },
+    )
 }
 
 const COMPARE: ModuleDescriptor = ModuleDescriptor {

@@ -14,11 +14,14 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use signal_core::{InstanceAddress, ParameterDescriptor, PortAddress, PortShape, Registry};
+use signal_core::{
+    InstanceAddress, ParameterDescriptor, PortAddress, PortShape, Registry, Snap, ValueLabel,
+    snap_value,
+};
 use signal_engine::ParameterValue;
 use signal_graph::{CompositeDef, ExecutionPlan};
-use signal_project::Project;
 use signal_project::transaction::ProjectLock;
+use signal_project::{Diagnostic, Project};
 
 /// The ramp a dragged value moves along, against zipper noise.
 pub const RAMP_MS: f64 = 5.0;
@@ -60,6 +63,8 @@ pub struct ParameterView {
     /// ADR 0043: its value set (each value and its name), for a discrete
     /// parameter: a selector instead of a slider; `None` for a continuous one.
     pub values: Option<Vec<(f64, String)>>,
+    /// ADR 0043: how a value between `values`' entries is read (and snapped).
+    pub snap: Snap,
 }
 
 /// One top-level instance.
@@ -85,6 +90,9 @@ struct Row {
     defaults: Vec<f64>,
     /// Whether a port it sets is stepped ([`stepped`]).
     stepped: bool,
+    /// The value `project.toml` holds, as written: `view.base` is what it
+    /// plays as, corrected when it lies outside the range or value set.
+    written: Option<f64>,
 }
 
 /// Whether a parameter is stepped, so a snapshot transition (ADR 0041 §10)
@@ -118,6 +126,24 @@ pub struct Panel {
     /// The values being dragged (each send carries the latest value to all
     /// of a parameter's ports, so only the latest send says what they hold).
     drags: BTreeMap<(String, String), Drag>,
+    /// ADR 0042, 0043: the plan's warnings of values it corrected (in any
+    /// file), not yet located in the project's folder.
+    corrected: Vec<Diagnostic>,
+}
+
+/// A control whose value in `project.toml` lies outside its range or value
+/// set: it plays as `to` ("corrected on load"); the next Save, or a write
+/// of it, writes `to`. It does not count as edited or unsaved.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Correction {
+    /// The top-level instance.
+    pub instance: String,
+    /// Its parameter.
+    pub parameter: String,
+    /// The value the file holds.
+    pub from: f64,
+    /// The value that plays.
+    pub to: f64,
 }
 
 /// A parameter's live value that the file may not hold: the latest value
@@ -156,9 +182,6 @@ impl Panel {
             .map(|c| (c.name.as_str(), c))
             .collect();
         let mut instances = Vec::new();
-        // ADR 0042, 0043: file values the plan corrected (clamped, or the
-        // nearest of a value set): they play, and are unsaved until written.
-        let mut corrected = BTreeMap::new();
         for def in &project.root.instances {
             let excluded = project.snapshot_excluded(&def.name);
             let Ok(address) = format!("/{}", def.name).parse::<InstanceAddress>() else {
@@ -195,30 +218,33 @@ impl Panel {
                 let (min, max) = targets.iter().fold((f64::MIN, f64::MAX), |(lo, hi), t| {
                     (lo.max(t.1.range.min), hi.min(t.1.range.max))
                 });
-                // ADR 0043: the value set every target shares, if any.
+                // ADR 0043: the value set every target shares, if any, read
+                // as positive when every target reads it so.
                 let values = targets
                     .first()
                     .and_then(|t| t.3.clone())
                     .filter(|first| targets.iter().all(|t| t.3.as_ref() == Some(first)));
+                let snap = if targets.iter().all(|t| t.1.snap == Snap::Positive) {
+                    Snap::Positive
+                } else {
+                    Snap::Nearest
+                };
                 let default = inner_value.unwrap_or(first.default);
                 let file = def.parameters.get(name).copied();
-                if let Some(written) = file {
-                    let clamped = written.max(min).min(max);
-                    let taken = match &values {
-                        Some(set) => nearest(set, clamped),
-                        None => clamped,
+                // ADR 0042, 0043: a file value outside the range or value set
+                // plays corrected, as the plan has it (the plan's warning
+                // says so); the row's base is what plays.
+                let played = file.map(|written| {
+                    let clamped = if min <= max {
+                        written.max(min).min(max)
+                    } else {
+                        written
                     };
-                    if taken.to_bits() != written.to_bits() {
-                        corrected.insert(
-                            (def.name.clone(), name.clone()),
-                            Drag {
-                                value: taken,
-                                sent: true,
-                                applied: taken,
-                            },
-                        );
+                    match &values {
+                        Some(set) => snap_to(set, snap, clamped),
+                        None => clamped,
                     }
-                }
+                });
                 let ports: Vec<PortAddress> = targets.iter().map(|t| t.0.clone()).collect();
                 let defaults = targets.iter().map(|t| t.2.unwrap_or(t.1.default)).collect();
                 // ADR 0043: stepped exactly when it has a value set.
@@ -230,17 +256,19 @@ impl Panel {
                         min,
                         max,
                         default,
-                        base: file.unwrap_or(default),
+                        base: played.unwrap_or(default),
                         in_file: file.is_some(),
                         effective: None,
                         modulated: ports.iter().any(|p| modulated(plan, p)),
                         editable: true,
                         in_snapshots: !excluded.contains(name),
                         values,
+                        snap,
                     },
                     ports,
                     defaults,
                     stepped: is_stepped,
+                    written: file,
                 });
             }
             instance.order = names;
@@ -255,8 +283,36 @@ impl Panel {
                 .patterns()
                 .map(|(name, kind)| (name.to_owned(), kind))
                 .collect(),
-            drags: corrected,
+            drags: BTreeMap::new(),
+            corrected: planned.corrected.clone(),
         }
+    }
+
+    /// ADR 0042, 0043: the controls whose `project.toml` value plays
+    /// corrected ("corrected on load"), in the panel's order.
+    pub fn corrections(&self) -> Vec<Correction> {
+        let mut list = Vec::new();
+        for i in &self.instances {
+            for row in &i.parameters {
+                if let Some(from) = row.written
+                    && from.to_bits() != row.view.base.to_bits()
+                {
+                    list.push(Correction {
+                        instance: i.name.clone(),
+                        parameter: row.view.name.clone(),
+                        from,
+                        to: row.view.base,
+                    });
+                }
+            }
+        }
+        list
+    }
+
+    /// ADR 0042, 0043: the plan's warnings of the values it corrected, in
+    /// any of the project's files (relative to its folder).
+    pub fn corrected_warnings(&self) -> &[Diagnostic] {
+        &self.corrected
     }
 
     /// The editable parameter `parameter` of `instance`: its primitive
@@ -271,6 +327,7 @@ impl Panel {
             max: row.view.max,
             order: i.order.clone(),
             values: row.view.values.clone(),
+            snap: row.view.snap,
             stepped: row.stepped,
         })
     }
@@ -344,8 +401,9 @@ impl Panel {
         }
     }
 
-    /// The file's value of an editable parameter (its default without a
-    /// key), and whether the file sets it.
+    /// The file's value of an editable parameter as it plays (its default
+    /// without a key; corrected when the file's lies outside its range or
+    /// value set, ADR 0042, 0043), and whether the file sets it.
     pub fn file_base(&self, instance: &str, parameter: &str) -> Option<(f64, bool)> {
         let i = self.instances.iter().find(|i| i.name == instance)?;
         let row = i.parameters.iter().find(|r| r.view.name == parameter)?;
@@ -357,11 +415,7 @@ impl Panel {
     pub fn replace(&mut self, other: Panel) {
         self.instances = other.instances;
         self.patterns = other.patterns;
-        // A value the new files hold outside its range or set: corrected and
-        // unsaved, unless a drag of it is in progress (ADR 0042, 0043).
-        for (key, drag) in other.drags {
-            self.drags.entry(key).or_insert(drag);
-        }
+        self.corrected = other.corrected;
     }
 
     /// The kind of the project's pattern `name` (`patterns/<name>.toml`), if
@@ -421,6 +475,8 @@ pub struct Target {
     pub order: Vec<String>,
     /// ADR 0043: its value set, if it is discrete.
     pub values: Option<Vec<(f64, String)>>,
+    /// ADR 0043: how a value between its values is read (and snapped).
+    pub snap: Snap,
     /// Whether it is stepped (it has a value set, ADR 0043; [`stepped`]): a
     /// snapshot transition switches it at once.
     pub stepped: bool,
@@ -428,11 +484,11 @@ pub struct Target {
 
 impl Target {
     /// `value` as this parameter takes it live: clamped to its range and,
-    /// with a value set, the nearest of its values (ADR 0043).
+    /// with a value set, snapped as its modules read it (ADR 0043).
     pub fn take(&self, value: f64) -> f64 {
         let clamped = value.max(self.min).min(self.max);
         match &self.values {
-            Some(values) => nearest(values, clamped),
+            Some(values) => snap_to(values, self.snap, clamped),
             None => clamped,
         }
     }
@@ -522,9 +578,11 @@ fn resolve(
                 target.1.range = range;
             }
             // ADR 0043: and its own value set (each value allowed by every
-            // target), else the target's.
+            // target), else the target's, kept to its own range (as the plan).
             if let Some(values) = &export.values {
                 target.3 = Some(values.iter().map(|v| (v.value, v.label.clone())).collect());
+            } else if let (Some(range), Some(set)) = (export.range, &mut target.3) {
+                set.retain(|(v, _)| range.min <= *v && *v <= range.max);
             }
             targets.push(target);
         }
@@ -552,16 +610,18 @@ fn descriptor_values(p: &ParameterDescriptor) -> Option<Vec<(f64, String)>> {
     })
 }
 
-/// `value` as the nearest of `values` (the lower of two as near); `value`
-/// itself for an empty set.
-pub fn nearest(values: &[(f64, String)], value: f64) -> f64 {
-    let mut best: Option<f64> = None;
-    for (v, _) in values {
-        if best.is_none_or(|b| (v - value).abs() < (b - value).abs()) {
-            best = Some(*v);
-        }
-    }
-    best.unwrap_or(value)
+/// `value` as one of `values` read by `snap` (ADR 0043,
+/// [`signal_core::snap_value`]: the rule the modules' `process` reads it
+/// by); `value` itself for an empty set.
+pub fn snap_to(values: &[(f64, String)], snap: Snap, value: f64) -> f64 {
+    let entries: Vec<ValueLabel> = values
+        .iter()
+        .map(|(v, _)| ValueLabel {
+            value: *v,
+            label: "",
+        })
+        .collect();
+    snap_value(&entries, snap, value)
 }
 
 /// The parameters of the primitives inside the composite instance at
@@ -596,10 +656,12 @@ fn inner(plan: &ExecutionPlan, address: &InstanceAddress) -> Vec<Row> {
                     editable: false,
                     in_snapshots: false,
                     values: descriptor_values(p),
+                    snap: p.snap,
                 },
                 ports: vec![port],
                 defaults: vec![p.default],
                 stepped: stepped(p),
+                written: None,
             });
         }
     }

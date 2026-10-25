@@ -28,6 +28,26 @@ pub mod stimulus;
 pub use checks::{Case, Check, Failure, RATES, Settings};
 pub use stimulus::{Stimulus, StimulusFn};
 
+/// The outputs of a fresh instance of `module_type` for the first `frames`
+/// frames of `stimulus` (prepared at 48 kHz with seed 1, nothing lent, in
+/// calls of 64 frames): every signal output's samples and every event
+/// output's `(frame, payload)`; `None` when a call panicked. For tests that
+/// compare two renders, such as that a discrete parameter's snapped value
+/// plays exactly as the value itself (ADR 0043).
+#[allow(clippy::type_complexity)]
+pub fn outputs(
+    module_type: &signal_core::ModuleType,
+    stimulus: &Stimulus,
+    frames: usize,
+) -> Option<(Vec<Vec<f64>>, Vec<Vec<(u64, signal_core::EventPayload)>>)> {
+    let mut instance = render::Instance::new(module_type, None, 48_000.0, 64, 1);
+    let rendered = instance.render(stimulus, frames, &[64]);
+    if rendered.panic.is_some() {
+        return None;
+    }
+    Some((rendered.signals, rendered.events))
+}
+
 /// Expands to one `#[test]` per [`Check`], named after it, for a module type.
 ///
 /// `contract_tests!(module_type)` uses the default [`stimulus::random`];

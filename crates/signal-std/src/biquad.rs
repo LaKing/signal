@@ -7,7 +7,7 @@ use signal_core::{
 
 use crate::line::{STATE_BOUND, finite_or_zero};
 use crate::svf::{CUTOFF, CUTOFF_MAX, effective_cutoff, flush, integrator_gain};
-use crate::{SIGNAL_BOUND, at, parameter, round_half_up, signal_port};
+use crate::{SIGNAL_BOUND, at, parameter, signal_port};
 
 /// The filter types `mode` selects (ADR 0043: its value set).
 const MODE_VALUES: &[signal_core::ValueLabel] = &[
@@ -218,7 +218,11 @@ impl DirectPrimitive for Biquad {
         let q = inputs.parameter(2);
         let gain = inputs.parameter(3);
         for (n, out) in outputs.signal(0).iter_mut().enumerate() {
-            let m = round_half_up(at(mode, n, LOWPASS)).clamp(0.0, 7.0);
+            let m = crate::chosen(
+                MODE_VALUES,
+                signal_core::Snap::Nearest,
+                at(mode, n, LOWPASS),
+            );
             let fc = effective_cutoff(at(cutoff, n, CUTOFF), self.sample_rate);
             let key = [m, fc, at(q, n, Q), at(gain, n, 0.0)];
             if key != self.key {

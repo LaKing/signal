@@ -47,10 +47,10 @@ composite's exported parameters declare their own range (`min` and `max` in
 its `[exports.parameters]`), inside each target's range: the drums' levels
 −120…12 dB and velocities 0…2 as their clamps, the voices' and the echo's
 controls as `projects/studio`'s, the validation references their native
-type's range (the filters' cutoff and the oscillator's frequency up to 10⁶,
-as far as the `std.const` behind each reaches), `lib.modal_voice` its
-targets'. `signal modules`, the panel and
-`signal mcp` show them; a value outside one is refused in a file and clamped
+type's range (the filters' cutoff and the oscillator's frequency up to
+100 000 Hz, ADR 0043), `lib.modal_voice` its targets'. `signal modules`, the
+panel and `signal mcp` show them; a value outside one is clamped, in a file
+with a warning at the value (the operator's decision of 2026-10-25), and
 live. No composite's output changed (every pinned hash above holds); each
 composite's content hash in a render manifest (`library_composite_hashes`)
 did.
@@ -65,7 +65,12 @@ octaves, `lib.lfo_shapes`' shape, `lib.modal_voice`'s exciter kind,
 range's end and the native's (before, 318 309 Hz, which acted only above
 649 610 Hz), `lib.osc_core`'s frequency ends at 100 000 Hz and
 `lib.modal_voice`'s pitch clamp at 100 000 Hz. No composite's output
-changed (every pinned hash above holds); content hashes did.
+changed (every pinned hash above holds); content hashes did. A project's
+vendored copy of the old `adsr_core` or `delay_core` (`top = std.const
+999999`, before the 27 027 × 37 replacement) is not replaced: its constant
+is clamped to 10⁵ with a warning at that file's value (edit it, or vendor the
+composite again), so a 5 s delay there arrives at 100 000 frames (2.08 s at
+48 kHz), and an envelope's long stages likewise.
 
 ## 0.1
 

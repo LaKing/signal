@@ -951,6 +951,8 @@ fn ports_of(context: &Context, address: &str) -> Result<Vec<String>, Refused> {
 struct Bounds {
     range: Option<(f64, f64)>,
     values: Option<Vec<f64>>,
+    /// How a value between `values` is read (`describe`'s `snap`).
+    snap: signal_core::Snap,
 }
 
 impl Bounds {
@@ -961,6 +963,10 @@ impl Bounds {
             values: control["values"]
                 .as_array()
                 .map(|values| values.iter().filter_map(|v| v["value"].as_f64()).collect()),
+            snap: match control["snap"].as_str() {
+                Some("positive") => signal_core::Snap::Positive,
+                _ => signal_core::Snap::Nearest,
+            },
         }
     }
 }
@@ -991,21 +997,21 @@ fn control_of(context: &Context, address: &str) -> Result<(Vec<String>, Bounds),
 }
 
 /// `value` as the server sends it: clamped to a control's range and (ADR
-/// 0043) the nearest of its values.
+/// 0043) snapped to its values as its modules read them
+/// ([`signal_core::snap_value`]).
 fn within(value: f64, bounds: &Bounds) -> f64 {
     let clamped = match bounds.range {
         Some((min, max)) if min <= max => value.max(min).min(max),
         _ => value,
     };
     match &bounds.values {
-        Some(values) => values
-            .iter()
-            .copied()
-            .fold(None, |best: Option<f64>, v| match best {
-                Some(b) if (b - clamped).abs() <= (v - clamped).abs() => Some(b),
-                _ => Some(v),
-            })
-            .unwrap_or(clamped),
+        Some(values) => {
+            let entries: Vec<signal_core::ValueLabel> = values
+                .iter()
+                .map(|&value| signal_core::ValueLabel { value, label: "" })
+                .collect();
+            signal_core::snap_value(&entries, bounds.snap, clamped)
+        }
         None => clamped,
     }
 }
@@ -2743,6 +2749,23 @@ pub(crate) fn read_resource(context: &Context, uri: &str) -> Result<Value, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0043 (review of c89253a): a value between a control's values is
+    /// snapped as its modules read it: a tie upward, and for a control
+    /// `describe` marks `snap = "positive"`, anything above 0 on.
+    #[test]
+    fn within_snaps_as_the_modules_read() {
+        let shape = Bounds::of(&json!({"min": 0, "max": 3, "values": [
+            {"value": 0, "label": "sine"}, {"value": 1, "label": "saw"},
+            {"value": 2, "label": "square"}, {"value": 3, "label": "triangle"}]}));
+        assert_eq!(within(0.5, &shape), 1.0);
+        assert_eq!(within(1.49, &shape), 1.0);
+        assert_eq!(within(9.0, &shape), 3.0);
+        let gate = Bounds::of(&json!({"min": 0, "max": 1, "snap": "positive", "values": [
+            {"value": 0, "label": "off"}, {"value": 1, "label": "on"}]}));
+        assert_eq!(within(0.3, &gate), 1.0);
+        assert_eq!(within(0.0, &gate), 0.0);
+    }
 
     /// review L4: a result over the limit keeps its small fields, replaces
     /// the large ones, says so, and is not repeated as text.

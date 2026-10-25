@@ -6,7 +6,7 @@ use signal_core::{
 };
 
 use crate::sine_osc::FREQ_MAX;
-use crate::{BIPOLAR, at, fract, parameter, round_half_up, signal_port, sine_of_cycles};
+use crate::{BIPOLAR, at, fract, parameter, signal_port, sine_of_cycles};
 
 /// The waveforms `shape` selects (ADR 0043: its value set).
 const SHAPE_VALUES: &[signal_core::ValueLabel] = &[
@@ -199,7 +199,9 @@ impl DirectPrimitive for Osc {
             let dt = f / self.sample_rate;
             let cycles = self.phase + at(pm, n, 0.0);
             let p = fract(cycles);
-            *out = match round_half_up(at(shape, n, SAW)) as u8 {
+            *out = match crate::chosen(SHAPE_VALUES, signal_core::Snap::Nearest, at(shape, n, SAW))
+                as u8
+            {
                 0 => sine_of_cycles(cycles),
                 1 => 2.0 * p - 1.0 - blep(p, dt),
                 2 => {

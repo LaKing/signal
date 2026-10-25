@@ -104,6 +104,7 @@ const fn parameter(
         default,
         combine,
         values: None,
+        snap: signal_core::Snap::Nearest,
     }
 }
 

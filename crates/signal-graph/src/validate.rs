@@ -214,7 +214,7 @@ pub(crate) fn validate(
 
 /// ADR 0042, 0043 (the operator's decision of 2026-10-25): every primitive
 /// parameter value outside its declared range is clamped to it, and one not
-/// in its value set taken as the nearest of them, each with a warning; the
+/// in its value set snapped as `process` reads it, each with a warning; the
 /// corrected value is what the plan holds and what plays.
 pub(crate) fn correct(graph: &mut FlatGraph, warnings: &mut Vec<GraphWarning>) {
     for (address, instance) in &mut graph.instances {
@@ -233,7 +233,7 @@ pub(crate) fn correct(graph: &mut FlatGraph, warnings: &mut Vec<GraphWarning>) {
             if let Some(values) = parameter.values
                 && !values.iter().any(|v| v.value == to)
             {
-                let nearest = crate::flatten::nearest_of(values.iter().map(|v| v.value), to);
+                let nearest = parameter.snapped(to);
                 let allowed = crate::allowed_text(values.iter().map(|v| (v.value, v.label)));
                 // A value both outside the range and between values: the
                 // range's reason says enough, the set's names the result.

@@ -185,7 +185,8 @@ impl<'a> Locator<'a> {
     pub(crate) fn warning(&self, warning: &GraphWarning) -> Location {
         let location = match warning {
             GraphWarning::KindMismatch { from, to, .. }
-            | GraphWarning::ConverterInserted { from, to, .. } => {
+            | GraphWarning::ConverterInserted { from, to, .. }
+            | GraphWarning::ConstantBeyondRange { from, to, .. } => {
                 self.connection_or_instance(from, to)
             }
             GraphWarning::NoSinkReachable { instance } => self.instance_key(instance),
@@ -220,6 +221,7 @@ impl<'a> Locator<'a> {
             GraphError::ExportNameCollision { scope, name, .. }
             | GraphError::EmptyExport { scope, name, .. }
             | GraphError::ExportRangeOutside { scope, name, .. }
+            | GraphError::ExportRangeWithoutValues { scope, name, .. }
             | GraphError::ExportValueOutside { scope, name, .. } => {
                 let def = self.def_at(&scope_segments(scope))?;
                 let export = def.exports.iter().rev().find(|e| e.name == *name)?;

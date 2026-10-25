@@ -261,8 +261,9 @@ fn rate_mismatch() {
 #[test]
 fn parameter_out_of_range() {
     // Set through two levels of exported parameters. ADR 0042, 0043 (the
-    // operator's decision of 2026-10-25): clamped, with a warning; the
-    // plan holds the corrected value.
+    // operator's decision of 2026-10-25): clamped to the range of the
+    // outermost export (its targets' intersection), with a warning there;
+    // the plan holds the corrected value.
     let (mut project, composites) = nested();
     project.instances[1]
         .parameters
@@ -270,7 +271,7 @@ fn parameter_out_of_range() {
     let plan = signal_graph::build_plan(&project, &composites, &common::registry(), 1).unwrap();
     assert!(
         plan.warnings.contains(&GraphWarning::ParameterCorrected {
-            parameter: port_addr("/drums/kick/osc.freq"),
+            parameter: port_addr("/drums.kick_pitch"),
             value: 30_000.0,
             to: 20_000.0,
             reason: "is outside [0, 20000]".into(),

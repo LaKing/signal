@@ -7,7 +7,7 @@ use signal_core::{
 
 use crate::line::finite_or_zero;
 use crate::sine_osc::FREQ_MAX;
-use crate::{BIPOLAR, at, fract, parameter, round_half_up, signal_port, sine_of_cycles};
+use crate::{BIPOLAR, at, fract, parameter, signal_port, sine_of_cycles};
 
 /// Where the frequency comes from, by `mode` (ADR 0043: its value set).
 const MODE_VALUES: &[signal_core::ValueLabel] =
@@ -186,7 +186,9 @@ impl DirectPrimitive for FmOp {
         let level = inputs.parameter(5);
         let nyquist = self.sample_rate / 2.0;
         for (n, out) in outputs.signal(0).iter_mut().enumerate() {
-            let f = if round_half_up(at(mode, n, 0.0)) >= 1.0 {
+            let f = if crate::chosen(MODE_VALUES, signal_core::Snap::Nearest, at(mode, n, 0.0))
+                >= 1.0
+            {
                 at(fixed, n, FREQ)
             } else {
                 at(ratio, n, RATIO) * at(freq, n, FREQ)

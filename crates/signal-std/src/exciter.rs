@@ -280,7 +280,7 @@ impl Exciter {
 
     /// Starts the excitation the parameters of frame `n` describe.
     fn start(&mut self, kind: f64, duration_ms: f64, hardness: f64) {
-        self.kind = match round_half_up(kind) as i64 {
+        self.kind = match crate::chosen(KIND_VALUES, signal_core::Snap::Nearest, kind) as i64 {
             0 => Kind::Pluck,
             1 => Kind::Strike,
             2 => Kind::Noise,
