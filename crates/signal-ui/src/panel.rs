@@ -83,6 +83,18 @@ struct Row {
     ports: Vec<PortAddress>,
     /// Each port's own value without this parameter in `project.toml`.
     defaults: Vec<f64>,
+    /// Whether a port it sets is stepped ([`stepped`]).
+    stepped: bool,
+}
+
+/// Whether a parameter is stepped, so a snapshot transition (ADR 0041 §10)
+/// switches it at once instead of moving it through the values between:
+/// exactly when it has a value set (ADR 0043: a filter's `mode`, an
+/// oscillator's `shape`, a buffer's `interp`, a gate's on/off); every other
+/// parameter is continuous. A composite's export is stepped when it has a
+/// value set of its own or takes its target's.
+pub fn stepped(d: &ParameterDescriptor) -> bool {
+    d.values.is_some_and(|values| !values.is_empty())
 }
 
 #[derive(Clone, Debug)]
@@ -189,6 +201,8 @@ impl Panel {
                 let file = def.parameters.get(name).copied();
                 let ports: Vec<PortAddress> = targets.iter().map(|t| t.0.clone()).collect();
                 let defaults = targets.iter().map(|t| t.2.unwrap_or(t.1.default)).collect();
+                // ADR 0043: stepped exactly when it has a value set.
+                let is_stepped = values.is_some();
                 instance.parameters.push(Row {
                     view: ParameterView {
                         name: name.clone(),
@@ -206,6 +220,7 @@ impl Panel {
                     },
                     ports,
                     defaults,
+                    stepped: is_stepped,
                 });
             }
             instance.order = names;
@@ -236,6 +251,7 @@ impl Panel {
             max: row.view.max,
             order: i.order.clone(),
             values: row.view.values.clone(),
+            stepped: row.stepped,
         })
     }
 
@@ -380,6 +396,9 @@ pub struct Target {
     pub order: Vec<String>,
     /// ADR 0043: its value set, if it is discrete.
     pub values: Option<Vec<(f64, String)>>,
+    /// Whether it is stepped (it has a value set, ADR 0043; [`stepped`]): a
+    /// snapshot transition switches it at once.
+    pub stepped: bool,
 }
 
 impl Target {
@@ -555,6 +574,7 @@ fn inner(plan: &ExecutionPlan, address: &InstanceAddress) -> Vec<Row> {
                 },
                 ports: vec![port],
                 defaults: vec![p.default],
+                stepped: stepped(p),
             });
         }
     }
@@ -862,6 +882,47 @@ pub fn write_file(path: &Path, text: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0041 §10, ADR 0043: over the whole registry, a parameter is
+    /// stepped exactly when it has a value set; no continuous one (a generic
+    /// value: `std.const`, `std.scale`; a `gain_db`; a count such as `ppq`)
+    /// is, and the selectors are.
+    #[test]
+    fn continuous_parameters_are_not_stepped() {
+        let mut registry = Registry::new();
+        signal_std::register(&mut registry).unwrap();
+        let mut stepped_ones = Vec::new();
+        for module in registry.iter() {
+            for p in module.descriptor.parameters {
+                assert_eq!(
+                    stepped(p),
+                    p.values.is_some(),
+                    "{}.{}",
+                    module.descriptor.type_name,
+                    p.name
+                );
+                assert!(
+                    !(stepped(p) && p.name == "gain_db"),
+                    "{}.{} is continuous",
+                    module.descriptor.type_name,
+                    p.name
+                );
+                if stepped(p) {
+                    stepped_ones.push(format!("{}.{}", module.descriptor.type_name, p.name));
+                }
+            }
+        }
+        for selector in ["std.biquad.mode", "std.osc.shape", "std.playhead.run"] {
+            assert!(
+                stepped_ones.iter().any(|s| s == selector),
+                "{selector}: {stepped_ones:?}"
+            );
+        }
+        assert!(
+            !stepped_ones.iter().any(|s| s.ends_with(".ppq")),
+            "ppq (1 to 960) is a count, not a choice: {stepped_ones:?}"
+        );
+    }
 
     /// audit 2026-10-23 (writer): the auditor's interleaving, fixed. Another
     /// writer has its staging file open at the shared name earlier builds

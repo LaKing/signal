@@ -1,7 +1,7 @@
 # ADR 0043: Every parameter a range or a value set
 
 - **Status:** Accepted (operator, 2026-10-25, from the owner's direction). The owner's words of 2026-10-25: "MINDEN kapjon értelmezési tartományt vagy értékkészletet" (translated: "EVERYTHING gets a range (domain) or a value set"). The design is the operator's, delegated.
-- **Builds on:** ADR 0042 (composite exports with their own range), ADR 0027 §1 (the core set), ADR 0029 (`signal mcp`), ADR 0041 (snapshots). It extends ADR 0042 to every primitive parameter and adds value sets. It supersedes nothing; the stepped control heuristic of the snapshot branch (`panel::stepped`) is to read the value set once that branch is on main.
+- **Builds on:** ADR 0042 (composite exports with their own range), ADR 0027 §1 (the core set), ADR 0029 (`signal mcp`), ADR 0041 (snapshots). It extends ADR 0042 to every primitive parameter and adds value sets. It supersedes nothing; it replaces the stepped heuristic of ADR 0041 §10: `panel::stepped` is true exactly for a parameter with a value set, so a snapshot transition switches those and ramps every other.
 - **Date:** 2026-10-25
 
 ## Context

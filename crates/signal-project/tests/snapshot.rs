@@ -103,8 +103,9 @@ fn save_overwrite_and_delete() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// The same snapshots give the same bytes, whatever order they were saved
-/// in; saving the same values again writes nothing.
+/// The same snapshots in the same order give the same bytes, however they
+/// got there (saved in another order, then moved); saving the same values
+/// again writes nothing.
 #[test]
 fn the_file_is_byte_stable() {
     let a = folder("stable-a");
@@ -115,6 +116,14 @@ fn the_file_is_byte_stable() {
     snapshot::save(&a, "two", two.clone(), false, ok).unwrap();
     snapshot::save(&b, "two", two.clone(), false, ok).unwrap();
     snapshot::save(&b, "one", one.clone(), false, ok).unwrap();
+    assert!(
+        fs::read_to_string(b.join(SNAPSHOTS_FILE))
+            .unwrap()
+            .contains("order = [\"two\", \"one\"]"),
+        "a new one goes to the end"
+    );
+    let (to, _, wrote) = snapshot::move_to(&b, "one", 0, ok).unwrap();
+    assert_eq!((to, wrote), (0, true));
     let text = fs::read(a.join(SNAPSHOTS_FILE)).unwrap();
     assert_eq!(text, fs::read(b.join(SNAPSHOTS_FILE)).unwrap());
     let (_, now, wrote) = snapshot::save(&a, "one", one, true, ok).unwrap();
@@ -218,6 +227,76 @@ fn a_signal_file_packs_the_snapshots() {
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&into);
+}
+
+/// ADR 0041 §9 (the owner's request of 2026-10-25): the person's order of
+/// the snapshots, as text: a new one at the end, an overwrite keeping its
+/// place, a move, a delete leaving the order, the undo snapshot outside it,
+/// a stale name dropped on the next write, a stale base a conflict.
+#[test]
+fn the_order_is_kept_in_the_file() {
+    let dir = folder("order");
+    let path = dir.join(SNAPSHOTS_FILE);
+    for name in ["Verse A", "chorus", "Bridge"] {
+        snapshot::save(&dir, name, values(&[("/out.gain", 0.5)]), false, ok).unwrap();
+    }
+    let names = |dir: &std::path::Path| snapshot::read(dir).unwrap().0.names();
+    assert_eq!(names(&dir), ["Verse A", "chorus", "Bridge"]);
+    snapshot::save(&dir, "chorus", values(&[("/out.gain", 1.0)]), true, ok).unwrap();
+    assert_eq!(
+        names(&dir),
+        ["Verse A", "chorus", "Bridge"],
+        "an overwrite keeps its place"
+    );
+    snapshot::move_to(&dir, "Bridge", 0, ok).unwrap();
+    assert_eq!(names(&dir), ["Bridge", "Verse A", "chorus"]);
+    // A stale base: a conflict, nothing moved.
+    let stale = snapshot::move_to(&dir, "chorus", 0, |_| {
+        Err(SnapshotError::Changed("base".to_owned()))
+    });
+    assert_eq!(stale.unwrap_err().code(), "conflict");
+    assert_eq!(names(&dir), ["Bridge", "Verse A", "chorus"]);
+    snapshot::delete(&dir, "Verse A", ok).unwrap();
+    assert_eq!(names(&dir), ["Bridge", "chorus"]);
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(
+        !text.contains("order"),
+        "byte order again: the key goes: {text}"
+    );
+    // The undo snapshot is no part of the order.
+    snapshot::edit(&dir, ok, |all| {
+        all.undo = Some(values(&[("/out.gain", 0.25)]));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(names(&dir), ["Bridge", "chorus"]);
+    // A hand edit naming a snapshot that is not there: read without it,
+    // dropped on the next write.
+    let edited = fs::read_to_string(&path).unwrap().replace(
+        "schema_version = 1\n",
+        "schema_version = 1\norder = [\"gone\", \"chorus\", \"Bridge\"]\n",
+    );
+    fs::write(&path, edited).unwrap();
+    assert_eq!(names(&dir), ["chorus", "Bridge"]);
+    snapshot::save(&dir, "Coda", values(&[("/out.gain", 0.5)]), false, ok).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("order = [\"chorus\", \"Bridge\", \"Coda\"]\n"),
+        "{text}"
+    );
+    assert!(!text.contains("gone"), "{text}");
+    // A duplicate is refused, and the file is never overwritten.
+    let duplicate = text.replace(
+        "order = [\"chorus\", \"Bridge\", \"Coda\"]",
+        "order = [\"Bridge\", \"Bridge\"]",
+    );
+    fs::write(&path, &duplicate).unwrap();
+    assert_eq!(
+        snapshot::move_to(&dir, "Coda", 0, ok).unwrap_err().code(),
+        "does-not-load"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), duplicate);
+    let _ = fs::remove_dir_all(&dir);
 }
 
 /// ADR 0041 §8: `snapshot_exclude` in an instance entry: written and

@@ -25,7 +25,8 @@ export default {
     { "id": "schematic", "label": "Schematic", "parent": "view", "about": "A focused schematic (it fills its window or tab, so it always takes the wheel)." },
     { "id": "schematic_edit", "label": "Schematic: Edit patch", "parent": "schematic", "about": "The schematic in Edit patch." },
     { "id": "palette", "label": "Schematic: add palette", "parent": "schematic_edit", "about": "The add palette's search field (Edit patch, double-click the background)." },
-    { "id": "panel_edit", "label": "Panel: Edit layout", "parent": "view", "about": "A panel in Edit layout." }
+    { "id": "panel_edit", "label": "Panel: Edit layout", "parent": "view", "about": "A panel in Edit layout." },
+    { "id": "snapshot_list", "label": "Snapshots list", "parent": "view", "about": "A focused row of the Snapshots card (ADR 0041 §9): the snapshot moves in the list's order, and keeps the focus." }
   ],
   "commands": [
     { "id": "app.settings", "scope": "app", "label": "Settings…", "keys": ["Cmd+,"], "menu": true },
@@ -35,6 +36,7 @@ export default {
     { "id": "file.open", "scope": "app", "label": "Open…", "keys": ["Cmd+O"], "menu": true },
     { "id": "file.save", "scope": "app", "label": "Save", "keys": ["Cmd+S"], "menu": true },
     { "id": "file.save_as", "scope": "app", "label": "Save As…", "keys": ["Shift+Cmd+S"], "menu": true },
+    { "id": "file.revert", "scope": "app", "label": "Revert to Saved…", "keys": [], "menu": true },
     { "id": "file.interface_setup", "scope": "app", "label": "Interface Setup…", "keys": ["Alt+Cmd+,"], "menu": true },
     { "id": "edit.undo", "scope": "app", "label": "Undo (text fields)", "keys": ["Cmd+Z"], "fixed": true },
     { "id": "edit.redo", "scope": "app", "label": "Redo (text fields)", "keys": ["Shift+Cmd+Z"], "fixed": true },
@@ -197,6 +199,8 @@ export default {
 
     { "id": "panel_edit.undo", "scope": "panel_edit", "label": "Undo the last layout change", "keys": ["Cmd+Z"] },
     { "id": "panel_edit.redo", "scope": "panel_edit", "label": "Redo", "keys": ["Shift+Cmd+Z"] },
-    { "id": "panel_edit.leave", "scope": "panel_edit", "label": "Leave Edit layout (from anywhere, a field included)", "keys": ["Escape"] }
+    { "id": "panel_edit.leave", "scope": "panel_edit", "label": "Leave Edit layout (from anywhere, a field included)", "keys": ["Escape"] },
+    { "id": "snapshot_list.move_up", "scope": "snapshot_list", "label": "Move the snapshot one place up", "keys": ["Alt+ArrowUp"] },
+    { "id": "snapshot_list.move_down", "scope": "snapshot_list", "label": "Move the snapshot one place down", "keys": ["Alt+ArrowDown"] }
   ]
 };

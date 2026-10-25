@@ -656,6 +656,28 @@ fn snapshot_saves_restores_and_deletes() {
     );
     signal(&["snapshot", "exclude", &project, "/osc.freq", "--include"]);
     assert_eq!(fs::read_to_string(dir.join("project.toml")).unwrap(), text);
+    // The transition time (ADR 0041 §10).
+    let output = signal(&["snapshot", "transition", &project, "1500"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        fs::read_to_string(dir.join("snapshots.toml"))
+            .unwrap()
+            .contains("transition_ms = 1500\n")
+    );
+    let output = signal(&["snapshot", "transition", &project, "60001"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    signal(&["snapshot", "transition", &project, "0"]);
+    // The order (ADR 0041 §9): a second one at the end, then moved first.
+    signal(&["snapshot", "save", &project, "Bridge"]);
+    let output = signal(&["snapshot", "move", &project, "Bridge", "0", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        stdout_json(&output)["order"],
+        serde_json::json!(["Bridge", "Első"])
+    );
+    let output = signal(&["snapshot", "list", &project, "--json"]);
+    assert_eq!(stdout_json(&output)["snapshots"][0]["name"], "Bridge");
+    signal(&["snapshot", "delete", &project, "Bridge"]);
     let output = signal(&["snapshot", "delete", &project, "Első"]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     let output = signal(&["snapshot", "list", &project, "--json"]);

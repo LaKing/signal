@@ -9,8 +9,9 @@
 //! (`app.power`), it waits blocked for the next message instead.
 //!
 //! The window asks the control thread too (M2.8-12): the open project and
-//! whether it is edited (before a close prompt), Save, Save As and Open of
-//! a chosen or dropped file; each request waits for its answer.
+//! whether it is edited (before a close prompt), Save, Save As, Open of
+//! a chosen or dropped file and Revert to Saved; each request waits for its
+//! answer.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -74,6 +75,9 @@ enum Request {
     SaveAs(PathBuf, Sender<Result<(), String>>),
     /// Open this folder or `.signal` file.
     Open(PathBuf, Edits, Sender<Result<(), String>>),
+    /// Revert to Saved: the open `.signal` file opened again, its changes
+    /// let go.
+    Revert(Sender<Result<(), String>>),
     /// Edit `ui/windows.toml` of this project folder (ADR 0032).
     WriteWindows(PathBuf, WindowsEdit, Sender<Result<(), String>>),
 }
@@ -218,6 +222,14 @@ impl AppServer {
         self.ask(|a| Request::Open(path, edits, a), Err(GONE.to_owned()))
     }
 
+    /// File ▸ Revert to Saved…: the open `.signal` project opened again
+    /// from its file, as [`open`](AppServer::open) of that file with
+    /// [`Edits::Discard`] (a save still running is waited for); refused for
+    /// a folder project.
+    pub fn revert(&self) -> Result<(), String> {
+        self.ask(Request::Revert, Err(GONE.to_owned()))
+    }
+
     /// The window layout of the project folder `dir` (ADR 0032): its
     /// `ui/windows.toml` edited by `edit`, written by the control thread,
     /// which takes the write as seen (nothing reloads); refused when `dir`
@@ -348,6 +360,9 @@ fn run(
             }
             Ok(Request::Open(path, edits, answer)) => {
                 let _ = answer.send(host.open_project(&path, edits));
+            }
+            Ok(Request::Revert(answer)) => {
+                let _ = answer.send(host.revert_project());
             }
             Ok(Request::WriteWindows(dir, edit, answer)) => {
                 let _ = answer.send(host.write_windows(&dir, edit));

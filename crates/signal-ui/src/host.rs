@@ -12,7 +12,8 @@
 //!
 //! In app mode ([`Host::new_app`], Signal.app's server, M2.8-4) it starts
 //! stopped and takes the app's own messages too (`app.get`,
-//! `transport.play`/`stop`, `project.open`, `project.save`), with Signal.app's
+//! `transport.play`/`stop`, `project.open`, `project.save`,
+//! `project.revert`), with Signal.app's
 //! rules ([`crate::app`]): every run plays from the Setup, as the app's state
 //! does. A `.signal` project (M2.8-12) plays from its working folder
 //! ([`crate::document`]); `signal ui` reopens only the project it serves.
@@ -185,6 +186,17 @@ pub enum Edits {
     Discard,
 }
 
+/// Why a project is opened: it only changes what the window says of the
+/// unsaved values let go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Opening {
+    /// Another project (or the same one), opened by `project.open`, the
+    /// window's Open…, a drop or Save As.
+    Another,
+    /// Revert to Saved: the same `.signal` file, its changes discarded.
+    Revert,
+}
+
 /// The open project as the window shows it (its title, the close prompt).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectStatus {
@@ -196,6 +208,19 @@ pub struct ProjectStatus {
     pub name: String,
     /// The working folder differs from the file.
     pub edited: bool,
+    /// How many parameters are unsaved (live values the files do not hold,
+    /// `unsaved`'s `count`).
+    pub unsaved: usize,
+}
+
+impl ProjectStatus {
+    /// Whether File ▸ Revert to Saved… applies: a `.signal` project with
+    /// changes since it was last saved or opened (edited, or unsaved live
+    /// values). A folder project is written straight to its files, so it
+    /// has no saved version to go back to.
+    pub fn revertible(&self) -> bool {
+        self.file.is_some() && (self.edited || self.unsaved > 0)
+    }
 }
 
 /// Signal.app's state beside the protocol's (app mode): what the app's
@@ -807,6 +832,52 @@ fn lines(diagnostics: &[Diagnostic]) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The `snapshots` message of `all` read from `text` (ADR 0041): the base,
+/// the snapshots in the person's order (§9), the undo snapshot apart (§7).
+fn snapshot_list_json(all: &snapshots::Snapshots, text: Option<&str>) -> Value {
+    let list: Vec<Value> = all
+        .names()
+        .iter()
+        .filter_map(|name| {
+            let values = all.snapshots.get(name)?;
+            Some(json!({"name": name, "count": values.len(), "values": values}))
+        })
+        .collect();
+    json!({
+        "type": "snapshots",
+        "file": SNAPSHOTS_FILE,
+        "base": text.map(|t| sha256_hex(t.as_bytes())),
+        "snapshots": list,
+        "undo": all.undo.is_some(),
+        "undoCount": all.undo.as_ref().map_or(0, |u| u.len()),
+        "undoValues": all.undo,
+        "transitionMs": all.transition_ms,
+    })
+}
+
+/// A message's transition time under `key` (`transitionMs` on a restore or
+/// undo, `ms` on `snapshot.transition`, and only that key): absent `None`;
+/// else a whole number of milliseconds from 0 to 60000 (`bad-value`).
+fn transition_of(message: &Value, key: &str) -> Result<Option<u32>, Failure> {
+    match message.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .and_then(|ms| u32::try_from(ms).ok())
+            .filter(|ms| *ms <= snapshots::MAX_TRANSITION_MS)
+            .map(Some)
+            .ok_or_else(|| {
+                fail(
+                    "bad-value",
+                    format!(
+                        "`{key}`: a transition is a whole number of milliseconds from 0 to {}",
+                        snapshots::MAX_TRANSITION_MS
+                    ),
+                )
+            }),
+    }
 }
 
 /// A snapshot message's `name` (ADR 0041): trimmed, 1 to 64 characters.
@@ -1967,13 +2038,23 @@ impl Host {
             }
         };
         let path = std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path));
-        self.open_with(&path, edits)
+        self.open_with(&path, edits, Opening::Another)
     }
 
     /// App mode: opens the folder (or its `project.toml`) or the `.signal`
     /// file at `path`, as `project.open` does; the error is what to show.
     pub fn open_project(&mut self, path: &Path, edits: Edits) -> Result<(), String> {
-        match self.open_with(path, edits) {
+        self.open_project_as(path, edits, Opening::Another)
+    }
+
+    /// [`Host::open_project`], saying why it opens (the window's message).
+    fn open_project_as(
+        &mut self,
+        path: &Path,
+        edits: Edits,
+        opening: Opening,
+    ) -> Result<(), String> {
+        match self.open_with(path, edits, opening) {
             // As after a `project.open`: every client is told.
             Ok(_) => {
                 let describe = self.describe(false);
@@ -1990,15 +2071,20 @@ impl Host {
         }
     }
 
-    fn open_with(&mut self, path: &Path, edits: Edits) -> Result<Value, Failure> {
-        let opened = self.open_stopped(path, edits)?;
+    fn open_with(&mut self, path: &Path, edits: Edits, opening: Opening) -> Result<Value, Failure> {
+        let opened = self.open_stopped(path, edits, opening)?;
         // ADR 0033: switched on, it plays (a failure is the window's message).
         self.autoplay();
         Ok(opened)
     }
 
     /// [`Host::open_with`] without playing.
-    fn open_stopped(&mut self, path: &Path, edits: Edits) -> Result<Value, Failure> {
+    fn open_stopped(
+        &mut self,
+        path: &Path,
+        edits: Edits,
+        opening: Opening,
+    ) -> Result<Value, Failure> {
         if self.app.is_none() {
             return Err(app_only());
         }
@@ -2049,14 +2135,20 @@ impl Host {
         let saved = app::save(&self.setup, &self.setup_path);
         let mode = self.app.as_mut();
         if let Some(mode) = mode {
-            mode.message = match (&saved, unsaved) {
-                (Err(message), _) => Some(message.clone()),
-                (Ok(()), 0) => None,
-                (Ok(()), 1) => {
+            mode.message = match (&saved, unsaved, opening) {
+                (Err(message), _, _) => Some(message.clone()),
+                (Ok(()), 0, _) => None,
+                (Ok(()), 1, Opening::Another) => {
                     Some("1 unsaved edit of the previous project was not written".to_owned())
                 }
-                (Ok(()), n) => Some(format!(
+                (Ok(()), n, Opening::Another) => Some(format!(
                     "{n} unsaved edits of the previous project were not written"
+                )),
+                (Ok(()), 1, Opening::Revert) => {
+                    Some("1 unsaved edit was discarded by Revert to Saved".to_owned())
+                }
+                (Ok(()), n, Opening::Revert) => Some(format!(
+                    "{n} unsaved edits were discarded by Revert to Saved"
                 )),
             };
         }
@@ -2071,6 +2163,73 @@ impl Host {
             "loads": diagnostics.is_empty(),
             "diagnostics": diagnostics,
         }))
+    }
+
+    /// App mode: File ▸ Revert to Saved… (`project.revert`): the open
+    /// `.signal` file opened again exactly as `project.open` of it with
+    /// `unsaved: "discard"` opens it: a save still running is waited for,
+    /// the working folder's changes and the unsaved live values are let go,
+    /// the file is unpacked again into a new working folder (the old one
+    /// removed) and played from frame 0. The error is what to show.
+    pub fn revert_project(&mut self) -> Result<(), String> {
+        let file = self.revert_file().map_err(|failure| failure.message)?;
+        self.open_project_as(&file, Edits::Discard, Opening::Revert)
+    }
+
+    /// `project.revert`: [`Host::revert_project`] for a client.
+    fn project_revert(&mut self) -> Result<Value, Failure> {
+        let file = self.revert_file()?;
+        self.open_with(&file, Edits::Discard, Opening::Revert)
+    }
+
+    /// The file Revert to Saved… opens again: the open project's `.signal`
+    /// file, looked at after every save still running has finished (a Save
+    /// As in flight changes which file that is). Refused outside app mode
+    /// (`not-allowed`), without a project (`no-project`), for a folder
+    /// project (`no-file`), which Signal writes straight to its files, when
+    /// there is nothing to revert (`not-edited`: [`ProjectStatus::revertible`],
+    /// the menu item's test), and when the path is no longer a file
+    /// (`archive`: removed, or a folder in its place). Refused, nothing
+    /// changes: the working folder keeps its edits.
+    fn revert_file(&mut self) -> Result<PathBuf, Failure> {
+        let Some(mode) = self.app.as_ref() else {
+            return Err(app_only());
+        };
+        if !mode.opened {
+            return Err(fail("no-project", "no project is open"));
+        }
+        if self.document.is_none() {
+            return Err(fail(
+                "no-file",
+                format!(
+                    "{} is a folder project: Signal writes it straight to its files, so there is no saved version to revert to",
+                    self.project_name()
+                ),
+            ));
+        }
+        let status = self.project_status();
+        let Some(file) = status.as_ref().and_then(|s| s.file.clone()) else {
+            return Err(fail("no-file", "the project has no file to revert to"));
+        };
+        if !status.as_ref().is_some_and(ProjectStatus::revertible) {
+            return Err(fail(
+                "not-edited",
+                format!(
+                    "{} has no changes since it was last saved or opened: there is nothing to revert",
+                    self.project_name()
+                ),
+            ));
+        }
+        if !file.is_file() {
+            return Err(fail(
+                "archive",
+                format!(
+                    "{} is no longer a file: nothing was reverted, and the changes are kept",
+                    file.display()
+                ),
+            ));
+        }
+        Ok(file)
     }
 
     /// App mode, at start: opens `path`, a folder or a `.signal` file.
@@ -2103,15 +2262,17 @@ impl Host {
     }
 
     /// App mode: the open project as the window shows it, its edited state
-    /// looked at now (after a save still running, which it waits for: the
-    /// window asks before a decision, the "Save changes?" prompt); `None`
-    /// without one.
+    /// and unsaved count looked at now (after a save still running, which
+    /// it waits for: the window asks before a decision, the "Save changes?"
+    /// and "Revert to Saved?" prompts); `None` without one.
     pub fn project_status(&mut self) -> Option<ProjectStatus> {
         self.finish_saves();
         if let Some(document) = self.document.as_mut() {
             document.check();
         }
+        let unsaved = self.unsaved().len();
         self.project_shown()
+            .map(|status| ProjectStatus { unsaved, ..status })
     }
 
     /// App mode: the open project as last looked at (each step looks at
@@ -2125,7 +2286,19 @@ impl Host {
             file: self.document.as_ref().map(|d| d.file().to_owned()),
             name: self.project_name(),
             edited: self.document.as_ref().is_some_and(Document::edited),
+            unsaved: self.unsaved_count(),
         })
+    }
+
+    /// How many parameters are unsaved, as last pushed (each step pushes
+    /// `unsaved` when it changed), so the window's status costs no listing.
+    fn unsaved_count(&self) -> usize {
+        self.unsaved_pushed
+            .as_ref()
+            .and_then(|pushed| pushed.get("count"))
+            .and_then(Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .unwrap_or(0)
     }
 
     /// App mode (ADR 0032): `ui/windows.toml` of the project folder `dir`
@@ -3093,6 +3266,8 @@ impl Host {
             "snapshot.restore" => self.snapshot_restore(&message).map(Some),
             "snapshot.delete" => self.snapshot_delete(&message).map(Some),
             "snapshot.undo" => self.snapshot_undo(&message).map(Some),
+            "snapshot.move" => self.snapshot_move(&message).map(Some),
+            "snapshot.transition" => self.snapshot_transition(&message).map(Some),
             "snapshot.exclude" => self.snapshot_exclude(&message).map(Some),
             "retry" => self.retry(&message).map(Some),
             "revert" => self.revert(&message).map(Some),
@@ -3120,6 +3295,7 @@ impl Host {
             "transport.stop" => self.transport(false).map(Some),
             "project.open" => self.project_open(&message).map(Some),
             "project.save" => self.project_save(client, &id),
+            "project.revert" => self.project_revert().map(Some),
             "stats" => Ok(Some(self.stats())),
             "ping" => Ok(Some(json!({
                 "type": "pong",
@@ -3142,7 +3318,11 @@ impl Host {
                 // The plan or what plays changed: every client is told.
                 let changed = matches!(
                     kind,
-                    "transport.play" | "transport.stop" | "project.open" | "app.power"
+                    "transport.play"
+                        | "transport.stop"
+                        | "project.open"
+                        | "project.revert"
+                        | "app.power"
                 );
                 let reply = with(reply, "id", id);
                 self.send_text(client, &reply);
@@ -5179,21 +5359,7 @@ impl Host {
     /// name and values, in name order.
     fn snapshots_json(&self) -> Result<Value, Failure> {
         let (all, text) = snapshots::read(&self.dir).map_err(snapshot_failure)?;
-        let list: Vec<Value> = all
-            .snapshots
-            .iter()
-            .map(|(name, values)| json!({"name": name, "count": values.len(), "values": values}))
-            .collect();
-        Ok(json!({
-            "type": "snapshots",
-            "file": SNAPSHOTS_FILE,
-            "base": text.map(|t| sha256_hex(t.as_bytes())),
-            "snapshots": list,
-            // ADR 0041 §7: the undo snapshot, apart from the named ones.
-            "undo": all.undo.is_some(),
-            "undoCount": all.undo.as_ref().map_or(0, |u| u.len()),
-            "undoValues": all.undo,
-        }))
+        Ok(snapshot_list_json(&all, text.as_deref()))
     }
 
     /// A snapshot message's project: refused in an app with no project
@@ -5289,6 +5455,30 @@ impl Host {
         }))
     }
 
+    /// `snapshot.move` (ADR 0041 §9): the snapshot `name` to place `to`
+    /// (0-based) in the person's order; an index past the end is the last
+    /// place. Written as `order` in `snapshots.toml` by the ADR 0040 writer,
+    /// with the optional `base`; the reply carries the new list.
+    fn snapshot_move(&mut self, message: &Value) -> Result<Value, Failure> {
+        self.snapshot_project(false)?;
+        let name = snapshot_name(message)?;
+        let to = message
+            .get("to")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| fail("bad-value", "`to` must be a place, a whole number from 0"))?;
+        let to = usize::try_from(to).unwrap_or(usize::MAX);
+        let check = base_check(message)?;
+        let (index, text, _) = snapshots::move_to(&self.dir, &name, to, check)
+            .map_err(|e| self.snapshot_refused(e))?;
+        self.snapshots_written();
+        let all = snapshots::parse(&text).map_err(snapshot_failure)?;
+        // The list as written, with what moved.
+        let list = snapshot_list_json(&all, Some(&text));
+        let list = with(list, "type", json!("snapshot.moved"));
+        let list = with(list, "name", json!(name));
+        Ok(with(list, "index", json!(index)))
+    }
+
     /// `snapshot.restore`: the snapshot's values written into `project.toml`
     /// as one change and sent live, as `commit` writes and sends one value;
     /// entries that are gone are skipped, values out of range clamped, and
@@ -5297,6 +5487,7 @@ impl Host {
         self.snapshot_project(true)?;
         let name = snapshot_name(message)?;
         let check = base_check(message)?;
+        let transition = transition_of(message, "transitionMs")?;
         let wanted = name.clone();
         self.restore_from(
             check,
@@ -5308,6 +5499,7 @@ impl Host {
             },
             &name,
             "snapshot.restored",
+            transition,
         )
     }
 
@@ -5316,12 +5508,32 @@ impl Host {
     fn snapshot_undo(&mut self, message: &Value) -> Result<Value, Failure> {
         self.snapshot_project(true)?;
         let check = base_check(message)?;
+        let transition = transition_of(message, "transitionMs")?;
         self.restore_from(
             check,
             |all| all.undo.take().ok_or(SnapshotError::NoUndo),
             "undo",
             "snapshot.undone",
+            transition,
         )
+    }
+
+    /// `snapshot.transition` (ADR 0041 §10): the snapshot transition time,
+    /// `ms` from 0 to 60000, written as `transition_ms` in `snapshots.toml`
+    /// by the ADR 0040 writer with the optional `base`.
+    fn snapshot_transition(&mut self, message: &Value) -> Result<Value, Failure> {
+        self.snapshot_project(false)?;
+        let ms = transition_of(message, "ms")?
+            .ok_or_else(|| fail("bad-value", "`ms` must be a whole number of milliseconds"))?;
+        let check = base_check(message)?;
+        let (text, _) = snapshots::set_transition(&self.dir, ms, check)
+            .map_err(|e| self.snapshot_refused(e))?;
+        self.snapshots_written();
+        Ok(json!({
+            "type": "snapshot.transition",
+            "ms": ms,
+            "base": sha256_hex(text.as_bytes()),
+        }))
     }
 
     /// A control's live base by name ([`Host::control_base`]): the last value
@@ -5358,6 +5570,7 @@ impl Host {
         take: impl FnOnce(&mut snapshots::Snapshots) -> Result<snapshots::Values, SnapshotError>,
         name: &str,
         kind: &str,
+        transition: Option<u32>,
     ) -> Result<Value, Failure> {
         let lock = ProjectLock::acquire(&self.dir).map_err(|e| {
             fail(
@@ -5373,7 +5586,7 @@ impl Host {
             let values = take(all)?;
             let undo = snapshot::undo_of(&self.panel, &values, |i, p| self.live_base(i, p));
             all.undo = if undo.is_empty() { before } else { Some(undo) };
-            Ok(values)
+            Ok((values, all.transition_ms))
         })
         .map_err(|e| self.snapshot_refused(e))?;
         if edited.wrote {
@@ -5388,7 +5601,52 @@ impl Host {
                     .map(|before| (edited.after.clone(), before))
             })
             .flatten();
-        self.apply_snapshot(name, kind, &edited.result, lock, undo)
+        let (values, file_ms) = &edited.result;
+        // The request's `transitionMs`, else the file's.
+        let ms = transition.unwrap_or(*file_ms);
+        self.apply_snapshot(name, kind, values, lock, undo, ms)
+    }
+
+    /// The ramp each port of `control` moves to `value` along (ADR 0041
+    /// §10): with no transition (`ms` 0) the panel's 5 ms, as before; a
+    /// stepped control ([`crate::panel::stepped`]: one with a value set, ADR
+    /// 0043) switches at once (0 frames, at the start); every
+    /// other control moves linearly over `ms`, from the value playing then
+    /// (a ramp still running included: `semantics.md` "Ramp values").
+    fn transition_frames(&self, control: &ControlWrite, value: f64, ms: u32) -> u64 {
+        if ms == 0 {
+            return ramp_frames(self.rate);
+        }
+        // ADR 0043: a value set's values only, so it never passes between.
+        let _ = value;
+        if control.target.stepped {
+            return 0;
+        }
+        (f64::from(self.rate) * f64::from(ms) / 1000.0).round() as u64
+    }
+
+    /// Sends `value` to every port of `control` over `frames` (a linear
+    /// ramp; 0: at once): whether the Controller took every one (true when
+    /// nothing plays).
+    fn send_over(&mut self, control: &ControlWrite, value: f64, frames: u64) -> bool {
+        let Some(run) = self.run.as_mut() else {
+            return true;
+        };
+        for port in &control.target.ports {
+            let payload = EventPayload::Ramp {
+                to: value,
+                frames,
+                curve: Curve::Linear,
+            };
+            if run
+                .controller
+                .send_event(port.clone(), payload, Stamp::Default)
+                .is_err()
+            {
+                return false;
+            }
+        }
+        true
     }
 
     /// Restores `values` (the snapshot `name`, or the undo snapshot) into the
@@ -5409,6 +5667,7 @@ impl Host {
         values: &snapshots::Values,
         lock: ProjectLock,
         undo: Option<(String, String)>,
+        transition_ms: u32,
     ) -> Result<Value, Failure> {
         let restore = snapshot::plan(&self.panel, values);
         let skipped: Vec<Value> = restore
@@ -5487,7 +5746,22 @@ impl Host {
                 (writes, sends, Err(error))
             }
         };
-        let sent_writes = self.send_controls(&writes);
+        // ADR 0041 §10: each value moves over the transition (a stepped one
+        // switches at its start); a value every port already took is not
+        // sent again.
+        let mut sent_writes = Vec::with_capacity(writes.len());
+        for control in &writes {
+            let value = control.value.unwrap_or_default();
+            let last = self.panel.dragged(&control.instance, &control.parameter);
+            let taken = match last {
+                Some(d) if d.sent && d.value.to_bits() == value.to_bits() => true,
+                _ => {
+                    let frames = self.transition_frames(control, value, transition_ms);
+                    self.send_over(control, value, frames)
+                }
+            };
+            sent_writes.push(taken);
+        }
         let mut sent = sent_writes.iter().all(|s| *s);
         let mut note = None;
         let failure = match written {
@@ -5506,9 +5780,9 @@ impl Host {
         let playing = self.run.is_some();
         let mut reached = playing && sent_writes.iter().any(|s| *s);
         for control in &sends {
-            let ports = control.target.ports.iter().cloned();
             let value = control.value.unwrap_or_default();
-            let taken = self.send_ramps(ports.map(|p| (p, value)).collect());
+            let frames = self.transition_frames(control, value, transition_ms);
+            let taken = self.send_over(control, value, frames);
             sent &= taken;
             reached |= playing && taken;
             if taken {
@@ -5595,6 +5869,7 @@ impl Host {
             "skipped": skipped,
             "clamped": clamped,
             "undoSnapshot": undo_state,
+            "transitionMs": transition_ms,
             "note": note,
         }))
     }

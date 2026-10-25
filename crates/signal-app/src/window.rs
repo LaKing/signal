@@ -2,8 +2,9 @@
 //! `muda` builds it on the main thread), what each of Signal's own items
 //! does and its keymap command (ADR 0034: its chord is the command's), where the WebView may navigate, and the size recorded in the Setup;
 //! and for `.signal` projects (M2.8-12): what a drop or a choice opens, the
-//! window's title, Save As's default name, and what the "Save changes?"
-//! prompt offers and leads to on each way of quitting. For several windows
+//! window's title, Save As's default name, what the "Save changes?"
+//! prompt offers and leads to on each way of quitting, and when Revert to
+//! Saved… applies and what its prompt leads to. For several windows
 //! over the screens (ADR 0032): what each view loads and how it is titled
 //! (the layout itself is [`crate::layout`]).
 
@@ -31,6 +32,10 @@ pub enum MenuAction {
     /// project is written to the chosen `.signal` file and is that file
     /// from then on.
     SaveAs,
+    /// Revert to Saved…: after the window's confirmation ([`revert_plan`]),
+    /// the open `.signal` project opened again from its file, its changes
+    /// let go; enabled only while [`can_revert`].
+    Revert,
     /// Interface Setup…: the page shows the Setup tab.
     Setup,
     /// Quit: as closing the last window (the Setup records the open
@@ -61,10 +66,11 @@ pub enum MenuAction {
 }
 
 impl MenuAction {
-    const ALL: [MenuAction; 12] = [
+    const ALL: [MenuAction; 13] = [
         MenuAction::Open,
         MenuAction::Save,
         MenuAction::SaveAs,
+        MenuAction::Revert,
         MenuAction::Setup,
         MenuAction::Quit,
         MenuAction::NewMain,
@@ -82,6 +88,7 @@ impl MenuAction {
             MenuAction::Open => "open",
             MenuAction::Save => "save",
             MenuAction::SaveAs => "save-as",
+            MenuAction::Revert => "revert",
             MenuAction::Setup => "setup",
             MenuAction::Quit => "quit",
             MenuAction::NewMain => "new-main-window",
@@ -101,6 +108,7 @@ impl MenuAction {
             MenuAction::Open => "file.open",
             MenuAction::Save => "file.save",
             MenuAction::SaveAs => "file.save_as",
+            MenuAction::Revert => "file.revert",
             MenuAction::Setup => "file.interface_setup",
             MenuAction::Quit => "app.quit",
             MenuAction::NewMain => "window.new_main",
@@ -125,13 +133,15 @@ impl MenuAction {
     }
 
     /// The script that hands the action to the page (a `signal-menu`
-    /// event, `ui/app/app.js`, so a main window's); none for Save As, Quit,
-    /// the new windows and Settings, which the app does.
+    /// event, `ui/app/app.js`, so a main window's); none for Save As,
+    /// Revert to Saved, Quit, the new windows and Settings, which the app
+    /// does.
     pub fn page_script(self) -> Option<String> {
         (!matches!(
             self,
             MenuAction::Quit
                 | MenuAction::SaveAs
+                | MenuAction::Revert
                 | MenuAction::NewMain
                 | MenuAction::NewSchematic
                 | MenuAction::NewPanel
@@ -218,6 +228,7 @@ pub const MENU_BAR: [(&str, &[MenuItem]); 6] = [
             MenuItem::Own(MenuAction::Open, "Open…"),
             MenuItem::Own(MenuAction::Save, "Save"),
             MenuItem::Own(MenuAction::SaveAs, "Save As…"),
+            MenuItem::Own(MenuAction::Revert, "Revert to Saved…"),
             MenuItem::Separator,
             MenuItem::Own(MenuAction::Setup, "Interface Setup…"),
             MenuItem::Separator,
@@ -526,6 +537,99 @@ pub fn exit_plan(edited: bool, answer: Option<Prompt>) -> ExitPlan {
     }
 }
 
+/// Whether File ▸ Revert to Saved… is enabled for `project`: a `.signal`
+/// project with changes since it was last saved or opened (edited, or
+/// unsaved live values). Never for a folder project: Signal writes it
+/// straight to its files, so there is no saved version to go back to.
+pub fn can_revert(project: Option<&ProjectStatus>) -> bool {
+    project.is_some_and(ProjectStatus::revertible)
+}
+
+/// A button of the "Revert to Saved?" prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RevertPrompt {
+    /// Stay: nothing is let go.
+    Cancel,
+    /// Let the changes go and open the file again.
+    Revert,
+}
+
+impl RevertPrompt {
+    /// The button's title.
+    pub fn label(self) -> &'static str {
+        match self {
+            RevertPrompt::Cancel => "Cancel",
+            RevertPrompt::Revert => "Revert",
+        }
+    }
+
+    /// Whether the button is marked as destructive (`NSButton`'s
+    /// `hasDestructiveAction`): Revert, which lets the changes go.
+    pub fn destructive(self) -> bool {
+        self == RevertPrompt::Revert
+    }
+
+    /// The key equivalent the alert's button is given explicitly, never
+    /// left to NSAlert's defaults: Escape for Cancel, none for Revert.
+    ///
+    /// NSAlert gives its first button Return and a button titled "Cancel"
+    /// Escape (Apple's `addButtonWithTitle:` documentation), but an
+    /// `NSButton` holds one key equivalent, so a Cancel that is the first
+    /// button cannot hold both, and the documentation does not say which
+    /// wins. A second button that also cancels would need a target and an
+    /// action, which objc2-app-kit sets only through `unsafe` calls (denied
+    /// workspace-wide). So Escape is made certain on Cancel, and Revert has
+    /// no key at all: Return reverts nothing (no button takes it), and only
+    /// a click on Revert reverts.
+    pub fn key_equivalent(self) -> &'static str {
+        match self {
+            RevertPrompt::Cancel => "\u{1b}",
+            RevertPrompt::Revert => "",
+        }
+    }
+
+    /// The button answered: the `index`th of [`REVERT_BUTTONS`]; none for
+    /// another answer.
+    pub fn of(index: usize) -> Option<RevertPrompt> {
+        REVERT_BUTTONS.get(index).copied()
+    }
+}
+
+/// The revert prompt's buttons, Cancel first (with
+/// Escape, [`RevertPrompt::key_equivalent`]), then Revert.
+pub const REVERT_BUTTONS: [RevertPrompt; 2] = [RevertPrompt::Cancel, RevertPrompt::Revert];
+
+/// The revert prompt's text: "Revert to the last saved version of <name>?".
+pub fn revert_text(name: &str) -> String {
+    format!("Revert to the last saved version of {name}?")
+}
+
+/// The revert prompt's informative text.
+pub const REVERT_INFORMATIVE: &str = "Your changes since then are lost.";
+
+/// What Revert to Saved… leads to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RevertPlan {
+    /// Nothing to revert (no `.signal` project, or no change): nothing is
+    /// asked or done.
+    Nothing,
+    /// Cancel, or no answer (the alert could not run): stay, nothing is
+    /// let go.
+    Stay,
+    /// Let the changes go and open the file again.
+    Revert,
+}
+
+/// What Revert to Saved… for `project` leads to, `answer` being the
+/// prompt's (`None` when it was not answered); only Revert lets anything go.
+pub fn revert_plan(project: Option<&ProjectStatus>, answer: Option<RevertPrompt>) -> RevertPlan {
+    match (can_revert(project), answer) {
+        (false, _) => RevertPlan::Nothing,
+        (true, Some(RevertPrompt::Revert)) => RevertPlan::Revert,
+        (true, Some(RevertPrompt::Cancel) | None) => RevertPlan::Stay,
+    }
+}
+
 /// The window's size in points, as the Setup records it (the default main
 /// window's size, ADR 0032).
 pub fn window_of(width: f64, height: f64) -> Option<Window> {
@@ -579,6 +683,7 @@ mod tests {
                 ("Open…", chord("Cmd+O")),
                 ("Save", chord("Cmd+S")),
                 ("Save As…", chord("Shift+Cmd+S")),
+                ("Revert to Saved…", None),
                 ("Interface Setup…", chord("Alt+Cmd+,")),
                 ("Quit", chord("Cmd+Q"))
             ]
@@ -775,6 +880,11 @@ mod tests {
             None,
             "the window's save panel"
         );
+        assert_eq!(
+            MenuAction::Revert.page_script(),
+            None,
+            "the window's prompt"
+        );
     }
 
     #[test]
@@ -824,6 +934,7 @@ mod tests {
             file: file.map(PathBuf::from),
             name: name.to_owned(),
             edited,
+            unsaved: 0,
         }
     }
 
@@ -915,6 +1026,65 @@ mod tests {
         assert_eq!(terminate(0), ExitPlan::Save);
         assert_eq!(terminate(1), ExitPlan::Discard);
         assert_eq!(terminate(2), ExitPlan::Keep, "no Cancel when terminating");
+    }
+
+    /// The owner's request of 2026-10-25 ("jó lenne egy file revert is"):
+    /// Revert to Saved… is enabled for a `.signal` project with changes
+    /// (edited, or unsaved live values), never for a folder project; it
+    /// asks with Cancel (the default) and Revert, and only Revert lets the
+    /// changes go.
+    #[test]
+    fn revert_asks_first_and_only_for_a_changed_signal_file() {
+        let saved = status(Some("/p/kick.signal"), "kick", false);
+        let edited = status(Some("/p/kick.signal"), "kick", true);
+        let live = ProjectStatus {
+            unsaved: 2,
+            ..saved.clone()
+        };
+        let folder = ProjectStatus {
+            unsaved: 3,
+            ..status(None, "pulse", true)
+        };
+        assert!(!can_revert(None));
+        assert!(!can_revert(Some(&saved)), "nothing to go back from");
+        assert!(can_revert(Some(&edited)));
+        assert!(can_revert(Some(&live)), "unsaved live values");
+        assert!(!can_revert(Some(&folder)), "a folder has no saved version");
+
+        assert_eq!(
+            revert_text("kick"),
+            "Revert to the last saved version of kick?"
+        );
+        assert_eq!(REVERT_INFORMATIVE, "Your changes since then are lost.");
+        let labels: Vec<&str> = REVERT_BUTTONS.iter().map(|b| b.label()).collect();
+        assert_eq!(labels, ["Cancel", "Revert"], "Cancel first");
+        assert_eq!(RevertPrompt::of(0), Some(RevertPrompt::Cancel));
+        assert_eq!(RevertPrompt::of(1), Some(RevertPrompt::Revert));
+        assert_eq!(RevertPrompt::of(2), None);
+        assert_eq!(RevertPrompt::Cancel.key_equivalent(), "\u{1b}", "Escape");
+        assert!(RevertPrompt::Revert.destructive());
+        assert!(!RevertPrompt::Cancel.destructive());
+        assert_eq!(
+            RevertPrompt::Revert.key_equivalent(),
+            "",
+            "no key reverts: never Return"
+        );
+
+        let edited = Some(&edited);
+        assert_eq!(revert_plan(edited, RevertPrompt::of(1)), RevertPlan::Revert);
+        assert_eq!(revert_plan(edited, RevertPrompt::of(0)), RevertPlan::Stay);
+        assert_eq!(revert_plan(edited, None), RevertPlan::Stay, "unanswered");
+        assert_eq!(
+            revert_plan(Some(&live), Some(RevertPrompt::Revert)),
+            RevertPlan::Revert
+        );
+        for nothing in [None, Some(&saved), Some(&folder)] {
+            assert_eq!(
+                revert_plan(nothing, Some(RevertPrompt::Revert)),
+                RevertPlan::Nothing,
+                "{nothing:?}"
+            );
+        }
     }
 
     #[test]
