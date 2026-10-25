@@ -1604,7 +1604,16 @@ fn definition(
     }
 
     let mut exported = Exports::default();
-    for (name, targets, group) in fan_out(exports.inputs) {
+    for (name, targets, group, range) in fan_out(exports.inputs) {
+        if range.is_some() {
+            problems.push((
+                name.1.start,
+                format!(
+                    "export `{}`: `min` and `max` give an exported parameter its range (ADR 0042); an exported input has none",
+                    name.0
+                ),
+            ));
+        }
         exported.inputs.push(InputExport {
             name: name.0.clone(),
             to: targets.iter().map(|(t, _)| t.clone()).collect(),
@@ -1625,10 +1634,11 @@ fn definition(
             .exports
             .push(export_spans(ExportKind::Output, key, targets, target.group));
     }
-    for (name, targets, group) in fan_out(exports.parameters) {
+    for (name, targets, group, range) in fan_out(exports.parameters) {
         exported.parameters.push(ParameterExport {
             name: name.0.clone(),
             to: targets.iter().map(|(t, _)| t.clone()).collect(),
+            range: range.map(|(min, max)| signal_core::Range { min, max }),
         });
         spans
             .exports
@@ -1638,8 +1648,14 @@ fn definition(
     (def, spans, problems)
 }
 
-/// An export name and its targets, each with its span, and its schematic group.
-type FanOut = ((String, Span), Vec<(String, Span)>, Option<String>);
+/// An export name and its targets, each with its span, its schematic group
+/// and its own range (ADR 0042).
+type FanOut = (
+    (String, Span),
+    Vec<(String, Span)>,
+    Option<String>,
+    Option<(f64, f64)>,
+);
 
 /// Export tables as names and target lists; a single target string is a list
 /// of one at the string's span (the table form's: the table's span).
@@ -1651,7 +1667,7 @@ fn fan_out(table: ExportTargets) -> Vec<FanOut> {
                 .into_iter()
                 .map(|t| (t.get_ref().clone(), t.span()))
                 .collect(),
-            Targets::Grouped(inner, _) => list(*inner, span),
+            Targets::Table { to, .. } => list(*to, span),
         }
     }
     table
@@ -1660,10 +1676,12 @@ fn fan_out(table: ExportTargets) -> Vec<FanOut> {
             let span = targets.span();
             let targets = targets.into_inner();
             let group = targets.group().map(str::to_owned);
+            let range = targets.range();
             (
                 (name.get_ref().clone(), name.span()),
                 list(targets, span),
                 group,
+                range,
             )
         })
         .collect()

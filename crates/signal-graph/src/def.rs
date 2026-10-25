@@ -106,4 +106,8 @@ pub struct ParameterExport {
     pub name: String,
     /// Inner parameter ports, `inst.param`; at least one.
     pub to: Vec<String>,
+    /// ADR 0042: the export's own range, which must lie inside every
+    /// target's; `None` for the range the targets share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<signal_core::Range>,
 }

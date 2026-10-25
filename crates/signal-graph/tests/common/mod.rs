@@ -395,6 +395,7 @@ pub fn param(name: &str, to: &[&str]) -> ParameterExport {
     ParameterExport {
         name: name.to_owned(),
         to: to.iter().map(|s| (*s).to_owned()).collect(),
+        range: None,
     }
 }
 

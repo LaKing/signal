@@ -216,7 +216,8 @@ impl<'a> Locator<'a> {
                 Some(at(def, def.instances.get(name)?.key.start))
             }
             GraphError::ExportNameCollision { scope, name, .. }
-            | GraphError::EmptyExport { scope, name, .. } => {
+            | GraphError::EmptyExport { scope, name, .. }
+            | GraphError::ExportRangeOutside { scope, name, .. } => {
                 let def = self.def_at(&scope_segments(scope))?;
                 let export = def.exports.iter().rev().find(|e| e.name == *name)?;
                 Some(at(def, export.key.start))

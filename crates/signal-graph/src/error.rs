@@ -85,6 +85,20 @@ pub enum GraphError {
         /// The export name.
         name: String,
     },
+    /// ADR 0042: an exported parameter's own range is not inside the range
+    /// of one of its targets.
+    ExportRangeOutside {
+        /// The composite instance (`None`: the project root).
+        scope: Option<InstanceAddress>,
+        /// The composite's name.
+        composite: String,
+        /// The export name.
+        name: String,
+        /// The target, `inst.param`.
+        target: String,
+        /// The export's declared range, then the target's.
+        ranges: Box<[Range; 2]>,
+    },
     /// A connection or export endpoint is not `inst.port`.
     InvalidEndpoint {
         /// The composite instance (`None`: the project root).
@@ -274,6 +288,21 @@ impl fmt::Display for GraphError {
                 f,
                 "{}: composite `{composite}` export `{name}` maps to no inner port",
                 scope(s)
+            ),
+            GraphError::ExportRangeOutside {
+                scope: s,
+                composite,
+                name,
+                target,
+                ranges,
+            } => write!(
+                f,
+                "{}: composite `{composite}` export `{name}`: its range [{}, {}] is not inside the range [{}, {}] of its target `{target}`",
+                scope(s),
+                ranges[0].min,
+                ranges[0].max,
+                ranges[1].min,
+                ranges[1].max
             ),
             GraphError::InvalidEndpoint { scope: s, endpoint } => write!(
                 f,

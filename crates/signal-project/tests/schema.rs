@@ -73,6 +73,17 @@ impl Validator<'_> {
                             .all(|name| fields.contains_key(name.as_str().unwrap())),
                         None => true,
                     },
+                    "dependentRequired" => match value.as_object() {
+                        Some(fields) => argument.as_object().unwrap().iter().all(|(key, needs)| {
+                            !fields.contains_key(key)
+                                || needs
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .all(|need| fields.contains_key(need.as_str().unwrap()))
+                        }),
+                        None => true,
+                    },
                     "additionalProperties" => match value.as_object() {
                         Some(fields) => {
                             let declared = object.get("properties").and_then(Value::as_object);
@@ -175,10 +186,24 @@ fn the_schema_rejects_what_the_loader_rejects() {
         // `[project]` is a valid project now; under `[interface]` it is
         // none of the file kinds (an interface has no instances).
         composite.replace("[composite]\n", "[interface]\n"),
+        // ADR 0042: an export's range takes both ends, as numbers.
+        composite.replace(
+            r#"drive = "shaper.drive""#,
+            r#"drive = { to = "shaper.drive", min = 1 }"#,
+        ),
+        composite.replace(
+            r#"drive = "shaper.drive""#,
+            r#"drive = { to = "shaper.drive", min = 1, max = "2" }"#,
+        ),
     ];
     for case in &cases {
         assert!(!validates(case), "accepted:\n{case}");
     }
+    // Both ends: valid.
+    assert!(validates(&composite.replace(
+        r#"drive = "shaper.drive""#,
+        r#"drive = { to = "shaper.drive", min = 1, max = 2 }"#,
+    )));
 }
 
 #[test]

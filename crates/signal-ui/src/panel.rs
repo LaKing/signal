@@ -443,6 +443,11 @@ fn resolve(
         let set = def.parameters.get(inner).copied();
         for mut target in resolve(composites, registry, &child, &def.module, inner) {
             target.2 = set.or(target.2);
+            // ADR 0042: the export's own range, inside every target's (the
+            // plan refuses one that is not), is the control's.
+            if let Some(range) = export.range {
+                target.1.range = range;
+            }
             targets.push(target);
         }
     }

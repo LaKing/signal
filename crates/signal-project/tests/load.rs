@@ -115,10 +115,12 @@ fn example_loads_into_the_description_model() {
                     ParameterExport {
                         name: "drive".to_owned(),
                         to: strings(&["shaper.drive"]),
+                        range: None,
                     },
                     ParameterExport {
                         name: "freq".to_owned(),
                         to: strings(&["low.freq", "high.freq"]),
+                        range: None,
                     },
                 ],
             },
@@ -313,7 +315,7 @@ fn a_group_table_takes_only_its_ports_and_group() {
     let errors = load_errors(&[("project.toml", PROJECT), ("composites/voice.toml", &voice)]);
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(
-        errors[0].contains("unknown field `groupe`, expected `to` or `group`"),
+        errors[0].contains("unknown field `groupe`, expected one of `to`, `group`, `min`, `max`"),
         "{errors:?}"
     );
     let voice = GROUPED.replace(

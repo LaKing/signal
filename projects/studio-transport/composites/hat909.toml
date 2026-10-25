@@ -72,4 +72,13 @@ connections = [
 [exports]
 inputs = { closed = ["closed_env.trigger", "choke.reset"], open = ["open_env.trigger", "choke.trigger"] }
 outputs = { out = "level.out" }
-parameters = { tone = "hp.cutoff_hz", closed_decay = "closed_env.decay_ms", open_decay = "open_env.decay_ms", level = "level.db", closed_velocity = "closed_velocity.value", open_velocity = "open_velocity.value" }
+
+# The exported parameters, each with its own range where it has one (ADR
+# 0042): a control reaches no value outside it.
+[exports.parameters]
+tone = { to = "hp.cutoff_hz", min = 2000, max = 16000 }
+closed_decay = { to = "closed_env.decay_ms", min = 5, max = 500 }
+open_decay = { to = "open_env.decay_ms", min = 20, max = 4000 }
+level = { to = "level.db", min = -120, max = 12 }
+closed_velocity = { to = "closed_velocity.value", min = 0, max = 2 }
+open_velocity = { to = "open_velocity.value", min = 0, max = 2 }

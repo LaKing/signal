@@ -733,15 +733,29 @@ pub(crate) enum Targets {
     /// A list of ports (fan-out).
     Many(Vec<Spanned<String>>),
     /// M2.13-2: `{ to = <port or list>, group = "<name>" }`, the same ports
-    /// with the group the schematic shows the export in (presentation only).
-    Grouped(Box<Targets>, String),
+    /// with the group the schematic shows the export in (presentation only);
+    /// ADR 0042: an exported parameter's table may give its own range,
+    /// `min = <number>, max = <number>` (both or neither).
+    Table {
+        to: Box<Targets>,
+        group: Option<String>,
+        range: Option<(f64, f64)>,
+    },
 }
 
 impl Targets {
     /// The schematic's group of the export, if the table form names one.
     pub(crate) fn group(&self) -> Option<&str> {
         match self {
-            Targets::Grouped(_, group) => Some(group),
+            Targets::Table { group, .. } => group.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// ADR 0042: the export's own range `(min, max)`, if the table gives one.
+    pub(crate) fn range(&self) -> Option<(f64, f64)> {
+        match self {
+            Targets::Table { range, .. } => *range,
             _ => None,
         }
     }
@@ -824,28 +838,61 @@ impl<'de> Deserialize<'de> for Targets {
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str(
-                    "a port `instance.port`, a list of them, or a table `{ to = <port or list>, group = \"<name>\" }`",
+                    "a port `instance.port`, a list of them, or a table `{ to = <port or list>, group = \"<name>\", min = <number>, max = <number> }`",
                 )
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Targets, A::Error> {
-                let (mut to, mut group) = (None, None);
+                let (mut to, mut group, mut min, mut max) = (None, None, None, None);
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "to" => to = Some(map.next_value::<Targets>()?),
                         "group" => group = Some(map.next_value::<String>()?),
-                        other => return Err(de::Error::unknown_field(other, &["to", "group"])),
+                        "min" => min = Some(map.next_value::<f64>()?),
+                        "max" => max = Some(map.next_value::<f64>()?),
+                        other => {
+                            return Err(de::Error::unknown_field(
+                                other,
+                                &["to", "group", "min", "max"],
+                            ));
+                        }
                     }
                 }
                 let to = to.ok_or_else(|| de::Error::missing_field("to"))?;
-                if matches!(to, Targets::Grouped(..)) {
+                if matches!(to, Targets::Table { .. }) {
                     return Err(de::Error::custom(
                         "`to` is a port or a list of ports, not a table",
                     ));
                 }
-                Ok(match group {
-                    Some(group) => Targets::Grouped(Box::new(to), group),
-                    None => to,
+                let range = match (min, max) {
+                    (None, None) => None,
+                    (Some(min), Some(max)) => {
+                        if !(min.is_finite() && max.is_finite()) {
+                            return Err(de::Error::custom(
+                                "an export's `min` and `max` must be finite numbers",
+                            ));
+                        }
+                        if min > max {
+                            return Err(de::Error::custom(format!(
+                                "an export's `min` ({min}) is above its `max` ({max})"
+                            )));
+                        }
+                        Some((min, max))
+                    }
+                    _ => {
+                        return Err(de::Error::custom(
+                            "an export's range takes both `min` and `max` (ADR 0042)",
+                        ));
+                    }
+                };
+                Ok(if group.is_none() && range.is_none() {
+                    to
+                } else {
+                    Targets::Table {
+                        to: Box::new(to),
+                        group,
+                        range,
+                    }
                 })
             }
 
@@ -873,7 +920,7 @@ impl JsonSchema for Targets {
 
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
         json_schema!({
-            "description": "One inner port `instance.port`, or a non-empty list of them (fan-out), or a table with them as `to` and the schematic's `group` of the export.",
+            "description": "One inner port `instance.port`, or a non-empty list of them (fan-out), or a table with them as `to`, the schematic's `group` of the export and (an exported parameter, ADR 0042) its own range `min` and `max`, both or neither, inside every target's range.",
             "anyOf": [
                 { "type": "string" },
                 { "type": "array", "items": { "type": "string" }, "minItems": 1 },
@@ -886,9 +933,12 @@ impl JsonSchema for Targets {
                                 { "type": "array", "items": { "type": "string" }, "minItems": 1 }
                             ]
                         },
-                        "group": { "type": "string" }
+                        "group": { "type": "string" },
+                        "min": { "type": "number" },
+                        "max": { "type": "number" }
                     },
                     "required": ["to"],
+                    "dependentRequired": { "min": ["max"], "max": ["min"] },
                     "additionalProperties": false
                 }
             ]

@@ -909,6 +909,16 @@ fn replaced(mut files: Vec<SourceFile>, path: &str, text: &str) -> Vec<SourceFil
 
 /// The ports a control or plan parameter address reaches (`describe`).
 fn ports_of(context: &Context, address: &str) -> Result<Vec<String>, Refused> {
+    control_of(context, address).map(|(ports, _)| ports)
+}
+
+/// A control's range, `(min, max)`.
+type Bounds = (f64, f64);
+
+/// The ports `address` reaches and, for a control, its range (`min`,
+/// `max`: a composite export's own range, ADR 0042, else the range its
+/// ports share), which the server clamps every value it sends to.
+fn control_of(context: &Context, address: &str) -> Result<(Vec<String>, Option<Bounds>), Refused> {
     let describe = ask(context, json!({"type": "describe"}))?;
     let control = describe["controls"]
         .as_array()
@@ -916,15 +926,26 @@ fn ports_of(context: &Context, address: &str) -> Result<Vec<String>, Refused> {
         .flatten()
         .find(|c| c["address"] == json!(address));
     Ok(match control {
-        Some(control) => control["ports"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
-            .collect(),
-        None => vec![address.to_owned()],
+        Some(control) => (
+            control["ports"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+            control["min"].as_f64().zip(control["max"].as_f64()),
+        ),
+        None => (vec![address.to_owned()], None),
     })
+}
+
+/// `value` clamped to a control's `range`, as the server sends it.
+fn within(value: f64, range: Option<Bounds>) -> f64 {
+    match range {
+        Some((min, max)) if min <= max => value.max(min).min(max),
+        _ => value,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,12 +1191,14 @@ fn acked(reply: Value, what: String) -> Outcome {
 fn set_parameter(context: &Context, arguments: &Value) -> Outcome {
     let address = address(arguments);
     let value = arguments["value"].as_f64().unwrap_or(0.0);
-    let ports = ports_of(context, &address)?;
+    let (ports, range) = control_of(context, &address)?;
+    // Judged as sent: clamped to the control's range.
+    let sent = within(value, range);
     guard_live(
         context,
         &ports
             .into_iter()
-            .map(|p| (p, Some(value)))
+            .map(|p| (p, Some(sent)))
             .collect::<Vec<_>>(),
     )?;
     let reply = ask(
@@ -1188,10 +1211,14 @@ fn set_parameter(context: &Context, arguments: &Value) -> Outcome {
 fn ramp_parameter(context: &Context, arguments: &Value) -> Outcome {
     let address = address(arguments);
     let to = arguments["to"].as_f64().unwrap_or(0.0);
-    let ports = ports_of(context, &address)?;
+    let (ports, range) = control_of(context, &address)?;
+    let sent = within(to, range);
     guard_live(
         context,
-        &ports.into_iter().map(|p| (p, Some(to))).collect::<Vec<_>>(),
+        &ports
+            .into_iter()
+            .map(|p| (p, Some(sent)))
+            .collect::<Vec<_>>(),
     )?;
     let mut message = json!({"type": "ramp", "address": address, "to": to});
     for key in ["ms", "frames"] {
@@ -1442,10 +1469,14 @@ fn commit(context: &Context, arguments: &Value) -> Outcome {
             .filter_map(Value::as_str)
             .map(str::to_owned)
             .collect();
-        let written = value
-            .as_f64()
-            .or_else(|| control["default"].as_f64())
-            .unwrap_or(0.0);
+        // As written and sent: clamped to the control's range (ADR 0042).
+        let written = within(
+            value
+                .as_f64()
+                .or_else(|| control["default"].as_f64())
+                .unwrap_or(0.0),
+            control["min"].as_f64().zip(control["max"].as_f64()),
+        );
         // The file's own value is the baseline for what is written there
         // (`docs/agent-interface.md` "Safety").
         {

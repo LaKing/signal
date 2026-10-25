@@ -397,6 +397,31 @@ fn set_parameter() {
     assert!(mcp.finish().success());
 }
 
+/// ADR 0042: a composite export's own range is the control's in MCP, and
+/// a value outside it is clamped (the studio's kick909 `attack`: [0, 2]).
+#[test]
+fn an_export_s_own_range() {
+    let mut mcp = Mcp::started(&copy_of("studio", "tool-export-range"), &[]);
+    let kick = mcp.ok("describe_instance", json!({"address": "kick"}));
+    let attack = kick["controls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["address"] == "/kick.attack")
+        .unwrap_or_else(|| panic!("{kick}"))
+        .clone();
+    assert_eq!(
+        (attack["min"].clone(), attack["max"].clone()),
+        (json!(0.0), json!(2.0))
+    );
+    mcp.ok(
+        "set_parameter",
+        json!({"address": "/kick.attack", "value": -1000000}),
+    );
+    assert_eq!(control_base(&mut mcp, "/kick.attack"), 0.0, "clamped");
+    assert!(mcp.finish().success());
+}
+
 #[test]
 fn ramp_parameter() {
     let mut mcp = Mcp::started(&fixture("sine", "tool-ramp"), &[]);

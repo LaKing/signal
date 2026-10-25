@@ -15,7 +15,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use signal_core::{
-    Direction, InstanceAddress, MAX_VECTOR_WIDTH, ModuleDescriptor, PortAddress, PortShape,
+    Direction, InstanceAddress, MAX_VECTOR_WIDTH, ModuleDescriptor, PortAddress, PortShape, Range,
     Registry, StreamKey, converter_shape,
 };
 
@@ -54,6 +54,12 @@ struct Interface {
     inputs: BTreeMap<String, Vec<PortAddress>>,
     outputs: BTreeMap<String, PortAddress>,
     parameters: BTreeMap<String, Vec<PortAddress>>,
+    /// ADR 0042: each exported parameter's range: its own when it declares
+    /// one, else the range every target shares (`None`: none shared).
+    ranges: BTreeMap<String, Option<Range>>,
+    /// ADR 0042: the exports that declare a range, or reach one an inner
+    /// export declares: a value set outside it is refused at the value.
+    own: BTreeMap<String, Range>,
 }
 
 /// A resolved instance of the composite being expanded, as endpoints see it.
@@ -441,6 +447,19 @@ impl<'a> Flattener<'a> {
                 self.unknown_parameter(address, name);
                 continue;
             };
+            // ADR 0042: a value outside the export's own range is refused at
+            // the instance's value, as a primitive's out-of-range value is.
+            if let Some(range) = interface.own.get(name)
+                && !(range.min <= *value && *value <= range.max)
+                && let Ok(parameter) = PortAddress::new(address, name)
+            {
+                self.errors.push(GraphError::ParameterOutOfRange {
+                    parameter,
+                    value: *value,
+                    range: *range,
+                });
+                continue;
+            }
             for target in targets {
                 let slot = self
                     .instances
@@ -581,12 +600,17 @@ impl<'a> Flattener<'a> {
         let mut parameters: Vec<_> = exports
             .parameters
             .iter()
-            .map(|e| (&e.name, &e.to))
+            .map(|e| (&e.name, &e.to, e.range))
             .collect();
-        parameters.sort();
-        for (name, targets) in parameters {
+        parameters.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        for (name, targets, declared) in parameters {
             let ports = self.export_targets(scope, locals, targets, true);
             interface.parameters.insert(name.clone(), ports);
+            let (range, own) = self.export_range(def, scope, locals, name, targets, declared);
+            interface.ranges.insert(name.clone(), range);
+            if let Some(own) = own {
+                interface.own.insert(name.clone(), own);
+            }
         }
 
         let mut outputs: Vec<_> = exports.outputs.iter().map(|e| (&e.name, &e.from)).collect();
@@ -599,6 +623,70 @@ impl<'a> Flattener<'a> {
             }
         }
         interface
+    }
+
+    /// ADR 0042: the range of exported parameter `name`: `declared`, which
+    /// must lie inside every target's range (a primitive parameter's, or an
+    /// inner composite's export's), else the range all targets share; and
+    /// its own range: `declared`, else the one the inner exports it reaches
+    /// declare (`None` when none does: the primitives check the value).
+    fn export_range(
+        &mut self,
+        def: &CompositeDef,
+        scope: Option<&InstanceAddress>,
+        locals: &Locals<'_>,
+        name: &str,
+        targets: &[String],
+        declared: Option<Range>,
+    ) -> (Option<Range>, Option<Range>) {
+        let narrow = |a: Option<Range>, b: Range| match a {
+            Some(a) => Range {
+                min: a.min.max(b.min),
+                max: a.max.min(b.max),
+            },
+            None => b,
+        };
+        let mut sorted: Vec<&String> = targets.iter().collect();
+        sorted.sort();
+        let mut shared: Option<Range> = None;
+        let mut inner_own: Option<Range> = None;
+        for target in sorted {
+            let Some((instance, port)) = target.split_once('.') else {
+                continue;
+            };
+            let Some((_, Some(local))) = locals.get(instance) else {
+                continue;
+            };
+            let range = match local {
+                Local::Primitive(descriptor) => descriptor
+                    .parameters
+                    .iter()
+                    .find(|p| p.name == port)
+                    .map(|p| p.range),
+                Local::Composite(inner) => {
+                    if let Some(own) = inner.own.get(port) {
+                        inner_own = Some(narrow(inner_own, *own));
+                    }
+                    inner.ranges.get(port).copied().flatten()
+                }
+            };
+            let Some(range) = range else {
+                continue;
+            };
+            if let Some(declared) = declared
+                && !(range.min <= declared.min && declared.max <= range.max)
+            {
+                self.errors.push(GraphError::ExportRangeOutside {
+                    scope: scope.cloned(),
+                    composite: def.name.clone(),
+                    name: name.to_owned(),
+                    target: target.clone(),
+                    ranges: Box::new([declared, range]),
+                });
+            }
+            shared = Some(narrow(shared, range));
+        }
+        (declared.or(shared), declared.or(inner_own))
     }
 
     fn export_targets(

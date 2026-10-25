@@ -57,4 +57,13 @@ connections = [
 [exports]
 inputs = { trigger = ["pitch_env.trigger", "body_env.trigger", "snap_env.trigger"] }
 outputs = { out = "level.out" }
-parameters = { tune = "tune.value", tone = "noise_hp.cutoff_hz", snappy = "snappy.mul", decay = "snap_env.decay_ms", level = "level.db", velocity = "velocity.value" }
+
+# The exported parameters, each with its own range where it has one (ADR
+# 0042): a control reaches no value outside it.
+[exports.parameters]
+tune = { to = "tune.value", min = 50, max = 500 }
+tone = { to = "noise_hp.cutoff_hz", min = 500, max = 12000 }
+snappy = { to = "snappy.mul", min = 0, max = 2 }
+decay = { to = "snap_env.decay_ms", min = 10, max = 2000 }
+level = { to = "level.db", min = -120, max = 12 }
+velocity = { to = "velocity.value", min = 0, max = 2 }

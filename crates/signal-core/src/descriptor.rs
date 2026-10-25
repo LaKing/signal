@@ -5,7 +5,7 @@
 //! Descriptors are built from `'static` data so a primitive can declare its
 //! descriptor as a `const` and reading one never allocates.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::time::RateDivisor;
 
@@ -100,7 +100,7 @@ impl PortKind {
 }
 
 /// An inclusive value range `[min, max]`.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Range {
     /// Lower bound.
     pub min: f64,

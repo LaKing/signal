@@ -807,9 +807,23 @@ expression: text
         },
         {
           "additionalProperties": false,
+          "dependentRequired": {
+            "max": [
+              "min"
+            ],
+            "min": [
+              "max"
+            ]
+          },
           "properties": {
             "group": {
               "type": "string"
+            },
+            "max": {
+              "type": "number"
+            },
+            "min": {
+              "type": "number"
             },
             "to": {
               "anyOf": [
@@ -832,7 +846,7 @@ expression: text
           "type": "object"
         }
       ],
-      "description": "One inner port `instance.port`, or a non-empty list of them (fan-out), or a table with them as `to` and the schematic's `group` of the export."
+      "description": "One inner port `instance.port`, or a non-empty list of them (fan-out), or a table with them as `to`, the schematic's `group` of the export and (an exported parameter, ADR 0042) its own range `min` and `max`, both or neither, inside every target's range."
     },
     "Wiring": {
       "additionalProperties": false,

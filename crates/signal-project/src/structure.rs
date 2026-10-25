@@ -479,7 +479,13 @@ impl Walk<'_> {
                 let target = export.to.first()?;
                 match self.endpoint(inner, target)? {
                     Endpoint::Parameter(p) => {
-                        Some(parameter_json(p, &export.name, &at(&export.name)))
+                        // ADR 0042: the export's own range, else an inner
+                        // export's on the way.
+                        let mut p = *p;
+                        if let Some(range) = self.export_range(inner, &export.name) {
+                            p.range = range;
+                        }
+                        Some(parameter_json(&p, &export.name, &at(&export.name)))
                     }
                     Endpoint::Port(_) => None,
                 }
@@ -527,7 +533,10 @@ impl Walk<'_> {
             def.exports
                 .parameters
                 .iter()
-                .map(|e| json!({"name": e.name, "to": e.to}))
+                .map(|e| match e.range {
+                    Some(range) => json!({"name": e.name, "to": e.to, "range": range}),
+                    None => json!({"name": e.name, "to": e.to}),
+                })
                 .collect(),
         )
     }
@@ -594,6 +603,19 @@ impl Walk<'_> {
                 .flat_map(|t| self.primitives(inner, &address, t, false))
                 .collect()
         }
+    }
+
+    /// ADR 0042: the range exported parameter `name` of `def` declares, else
+    /// the one an inner composite's export it reaches first declares.
+    fn export_range(&self, def: &CompositeDef, name: &str) -> Option<signal_core::Range> {
+        let export = def.exports.parameters.iter().find(|e| e.name == name)?;
+        if export.range.is_some() {
+            return export.range;
+        }
+        let (instance, port) = export.to.first()?.split_once('.')?;
+        let instance = self.instance(def, instance)?;
+        let inner = self.by_name.get(instance.module.as_str())?;
+        self.export_range(inner, port)
     }
 
     /// Instance `name` of `def`.
