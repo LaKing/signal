@@ -1369,8 +1369,8 @@ fn revert(server: &AppServer, windows: &mut Windows, target: &Target, proxy: &Pr
 /// "Revert to the last saved version of <name>?" as a native alert
 /// (NSAlert, modal, safe API, as the "Save changes?" prompt) with Cancel
 /// first and Revert, each given its key equivalent explicitly (Escape on
-/// Cancel, none on Revert: `RevertPrompt::key_equivalent`); the answer, or
-/// None when it cannot run.
+/// Cancel, none on Revert: `RevertPrompt::key_equivalent`), Revert marked
+/// destructive; the answer, or None when it cannot run.
 fn ask_revert(name: &str) -> Option<RevertPrompt> {
     let mtm = MainThreadMarker::new()?;
     let alert = NSAlert::new(mtm);
@@ -1379,6 +1379,7 @@ fn ask_revert(name: &str) -> Option<RevertPrompt> {
     for button in REVERT_BUTTONS {
         let added = alert.addButtonWithTitle(&NSString::from_str(button.label()));
         added.setKeyEquivalent(&NSString::from_str(button.key_equivalent()));
+        added.setHasDestructiveAction(button.destructive());
     }
     let index = alert.runModal().checked_sub(NSAlertFirstButtonReturn)?;
     RevertPrompt::of(usize::try_from(index).ok()?)

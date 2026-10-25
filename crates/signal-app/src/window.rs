@@ -563,6 +563,12 @@ impl RevertPrompt {
         }
     }
 
+    /// Whether the button is marked as destructive (`NSButton`'s
+    /// `hasDestructiveAction`): Revert, which lets the changes go.
+    pub fn destructive(self) -> bool {
+        self == RevertPrompt::Revert
+    }
+
     /// The key equivalent the alert's button is given explicitly, never
     /// left to NSAlert's defaults: Escape for Cancel, none for Revert.
     ///
@@ -589,7 +595,7 @@ impl RevertPrompt {
     }
 }
 
-/// The revert prompt's buttons, the most prominent first: Cancel (with
+/// The revert prompt's buttons, Cancel first (with
 /// Escape, [`RevertPrompt::key_equivalent`]), then Revert.
 pub const REVERT_BUTTONS: [RevertPrompt; 2] = [RevertPrompt::Cancel, RevertPrompt::Revert];
 
@@ -1051,15 +1057,13 @@ mod tests {
         );
         assert_eq!(REVERT_INFORMATIVE, "Your changes since then are lost.");
         let labels: Vec<&str> = REVERT_BUTTONS.iter().map(|b| b.label()).collect();
-        assert_eq!(
-            labels,
-            ["Cancel", "Revert"],
-            "Cancel first, the most prominent"
-        );
+        assert_eq!(labels, ["Cancel", "Revert"], "Cancel first");
         assert_eq!(RevertPrompt::of(0), Some(RevertPrompt::Cancel));
         assert_eq!(RevertPrompt::of(1), Some(RevertPrompt::Revert));
         assert_eq!(RevertPrompt::of(2), None);
         assert_eq!(RevertPrompt::Cancel.key_equivalent(), "\u{1b}", "Escape");
+        assert!(RevertPrompt::Revert.destructive());
+        assert!(!RevertPrompt::Cancel.destructive());
         assert_eq!(
             RevertPrompt::Revert.key_equivalent(),
             "",

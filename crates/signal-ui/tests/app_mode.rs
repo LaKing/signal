@@ -1258,6 +1258,9 @@ fn revert_waits_for_a_pending_save(transport: Transport) {
         rig.pump();
     }
     assert!(gain_of(&file).contains("gain = 0.5"), "not written yet");
+    // An edit after the Save packed: still a change to revert once it is
+    // written.
+    commit(&mut rig, &mut ws, 3, 0.75);
     let release = rig.host().document().unwrap().save_releaser();
     let releaser = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1344,6 +1347,109 @@ fn revert_says_its_unsaved_edits_were_discarded(transport: Transport) {
         app["message"], "1 unsaved edit of the previous project was not written",
         "{app}"
     );
+    rig.finish();
+}
+
+/// Second-opinion review: a Save As in flight decides which file Revert to
+/// Saved opens again. `project.revert` finishes it first, so the new file
+/// (with what it saved) is reopened, not the old one.
+fn revert_follows_a_save_as_in_flight(transport: Transport) {
+    let mut rig = app_rig("signal-revert-save-as", transport, None);
+    let file = packed(&rig, "tone");
+    let other = file.with_file_name("other.signal");
+    let (mut ws, _) = rig.client();
+    rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    commit(&mut rig, &mut ws, 2, 0.25);
+    rig.host().document().unwrap().hold_saves(true);
+    let (answer, answered) = std::sync::mpsc::channel();
+    rig.host().save_as_then(
+        &other,
+        Box::new(move |result| {
+            let _ = answer.send(result);
+        }),
+    );
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while rig.host().document().unwrap().saves_held() == 0 {
+        assert!(std::time::Instant::now() < until, "no save started");
+        rig.pump();
+    }
+    // A change after the Save As packed, to revert.
+    commit(&mut rig, &mut ws, 3, 0.75);
+    let release = rig.host().document().unwrap().save_releaser();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        release();
+    });
+    let reverted = rig.request(&mut ws, 4, json!({"type": "project.revert"}), "project");
+    releaser.join().unwrap();
+    assert_eq!(
+        answered.try_recv(),
+        Ok(Ok(())),
+        "the Save As, answered first"
+    );
+    assert_eq!(
+        reverted["file"],
+        other.display().to_string(),
+        "the new file"
+    );
+    let dir = PathBuf::from(reverted["dir"].as_str().unwrap());
+    assert!(
+        gain_in(&dir).contains("gain = 0.25"),
+        "what the Save As wrote"
+    );
+    assert!(
+        gain_of(&file).contains("gain = 0.5"),
+        "the old file untouched"
+    );
+    assert!(!rig.host().project_status().unwrap().edited);
+    rig.finish();
+}
+
+/// Second-opinion review: Revert to Saved refuses when there is nothing to
+/// revert (`not-edited`), and when the file is gone, corrupt or a folder
+/// now (`archive`); refused, the working folder keeps its edits, the
+/// project stays edited and plays on.
+fn a_refused_revert_keeps_the_edits(transport: Transport) {
+    let mut rig = app_rig_with("signal-revert-refused", transport, None, true);
+    let file = packed(&rig, "tone");
+    let (mut ws, _) = rig.client();
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    let working = PathBuf::from(opened["dir"].as_str().unwrap());
+    let refused = rig.request(&mut ws, 2, json!({"type": "project.revert"}), "error");
+    assert_eq!(refused["code"], "not-edited", "{refused}");
+    assert_eq!(rig.host().project_status().unwrap().dir, working);
+
+    commit(&mut rig, &mut ws, 3, 0.25);
+    let refused_with = |rig: &mut Rig, ws: &mut common::Ws, id: u64, what: &str| {
+        let refused = rig.request(ws, id, json!({"type": "project.revert"}), "error");
+        assert_eq!(refused["code"], "archive", "{what}: {refused}");
+        let status = rig.host().project_status().unwrap();
+        assert_eq!(status.dir, working, "{what}");
+        assert!(status.edited, "{what}: still edited");
+        assert!(gain_in(&working).contains("gain = 0.25"), "{what}: kept");
+        let app = rig.request(ws, id + 1, json!({"type": "app.get"}), "app");
+        assert_eq!(app["playing"], true, "{what}: plays on");
+        refused["message"].as_str().unwrap().to_owned()
+    };
+    fs::write(&file, b"not a zip").unwrap();
+    refused_with(&mut rig, &mut ws, 4, "corrupt");
+    fs::remove_file(&file).unwrap();
+    let message = refused_with(&mut rig, &mut ws, 6, "removed");
+    assert!(message.contains("is no longer a file"), "{message}");
+    fs::create_dir(&file).unwrap();
+    let message = refused_with(&mut rig, &mut ws, 8, "a folder");
+    assert!(message.contains("is no longer a file"), "{message}");
+    fs::remove_dir(&file).unwrap();
     rig.finish();
 }
 
@@ -2173,6 +2279,8 @@ both!(
     revert_waits_for_a_pending_save,
     a_folder_project_is_not_reverted,
     revert_says_its_unsaved_edits_were_discarded,
+    revert_follows_a_save_as_in_flight,
+    a_refused_revert_keeps_the_edits,
     a_refused_archive_opens_nothing,
     save_as_writes_the_file_and_leaves_the_folder,
     closing_keeps_an_edited_working_folder,

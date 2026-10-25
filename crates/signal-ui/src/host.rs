@@ -12,7 +12,8 @@
 //!
 //! In app mode ([`Host::new_app`], Signal.app's server, M2.8-4) it starts
 //! stopped and takes the app's own messages too (`app.get`,
-//! `transport.play`/`stop`, `project.open`, `project.save`), with Signal.app's
+//! `transport.play`/`stop`, `project.open`, `project.save`,
+//! `project.revert`), with Signal.app's
 //! rules ([`crate::app`]): every run plays from the Setup, as the app's state
 //! does. A `.signal` project (M2.8-12) plays from its working folder
 //! ([`crate::document`]); `signal ui` reopens only the project it serves.
@@ -1973,26 +1974,53 @@ impl Host {
     }
 
     /// The file Revert to Saved… opens again: the open project's `.signal`
-    /// file. Refused outside app mode (`not-allowed`), without a project
-    /// (`no-project`), and for a folder project (`no-file`), which Signal
-    /// writes straight to its files.
-    fn revert_file(&self) -> Result<PathBuf, Failure> {
+    /// file, looked at after every save still running has finished (a Save
+    /// As in flight changes which file that is). Refused outside app mode
+    /// (`not-allowed`), without a project (`no-project`), for a folder
+    /// project (`no-file`), which Signal writes straight to its files, when
+    /// there is nothing to revert (`not-edited`: [`ProjectStatus::revertible`],
+    /// the menu item's test), and when the path is no longer a file
+    /// (`archive`: removed, or a folder in its place). Refused, nothing
+    /// changes: the working folder keeps its edits.
+    fn revert_file(&mut self) -> Result<PathBuf, Failure> {
         let Some(mode) = self.app.as_ref() else {
             return Err(app_only());
         };
         if !mode.opened {
             return Err(fail("no-project", "no project is open"));
         }
-        match &self.document {
-            Some(document) => Ok(document.file().to_owned()),
-            None => Err(fail(
+        if self.document.is_none() {
+            return Err(fail(
                 "no-file",
                 format!(
                     "{} is a folder project: Signal writes it straight to its files, so there is no saved version to revert to",
                     self.project_name()
                 ),
-            )),
+            ));
         }
+        let status = self.project_status();
+        let Some(file) = status.as_ref().and_then(|s| s.file.clone()) else {
+            return Err(fail("no-file", "the project has no file to revert to"));
+        };
+        if !status.as_ref().is_some_and(ProjectStatus::revertible) {
+            return Err(fail(
+                "not-edited",
+                format!(
+                    "{} has no changes since it was last saved or opened: there is nothing to revert",
+                    self.project_name()
+                ),
+            ));
+        }
+        if !file.is_file() {
+            return Err(fail(
+                "archive",
+                format!(
+                    "{} is no longer a file: nothing was reverted, and the changes are kept",
+                    file.display()
+                ),
+            ));
+        }
+        Ok(file)
     }
 
     /// App mode, at start: opens `path`, a folder or a `.signal` file.
