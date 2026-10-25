@@ -292,6 +292,13 @@ struct Run {
     /// The instances the fault guard muted in this run, in the order
     /// reported: each stays silent until the project plays again.
     muted: Vec<Muted>,
+    /// Signal.app's note for them (`app.muted`), made when they change.
+    muted_note: Option<String>,
+    /// The log records the runner and the engine had dropped when last
+    /// polled; once it grows, a fault record may have been lost.
+    log_dropped: u64,
+    /// Whether the run dropped log records.
+    log_lost: bool,
     /// Why the audio system stopped the output's stream, once reported
     /// (`signal ui`, `signal mcp`: the run is kept, so what it recorded is
     /// written, and the command ends with it).
@@ -447,38 +454,103 @@ struct Muted {
     frame: Frame,
     address: String,
     reason: FaultReason,
+    /// The instance's module type when it was muted (from the plan then):
+    /// a swap that removes the instance or gives the address another type
+    /// brings a new, unfaulted one (`semantics.md` §14), and the entry goes.
+    module: Option<String>,
 }
+
+/// How many other muted instances the note names before "and N more".
+const MUTED_LISTED: usize = 8;
 
 impl Muted {
     /// What the operator is told: which instance, why, and how it comes back.
     fn message(&self) -> String {
-        let why = match self.reason {
-            FaultReason::NonFinite => "an output or event value that is not finite",
-            FaultReason::Magnitude => "an output or event value beyond ±10⁶",
-            FaultReason::EventOverflow => "more than 16 events on an output in one frame",
-            FaultReason::Panic => "its call panicked",
-            FaultReason::LateResult => "a late result",
+        let (why, back) = match self.reason {
+            FaultReason::NonFinite => (
+                "an output or event value that is not finite",
+                "with its values back in range, play the project again",
+            ),
+            FaultReason::Magnitude => (
+                "an output or event value beyond ±10⁶",
+                "with its values back in range, play the project again",
+            ),
+            FaultReason::EventOverflow => (
+                "more than 16 events on an output in one frame",
+                "with fewer events reaching it, play the project again",
+            ),
+            FaultReason::Panic => (
+                "its call panicked",
+                "its module broke the module contract; play the project again",
+            ),
+            FaultReason::LateResult => ("a late result", "play the project again"),
         };
         format!(
             "{} was muted at frame {} ({why}): it stays silent for the rest of this run, \
-             whatever its parameters are set to; with its values back in range, play the \
-             project again (Project ▸ Restart from Files, or the power off and on) to hear it",
+             whatever its parameters are set to; {back} (Project ▸ Restart from Files, or the \
+             power off and on) to hear it",
             self.address, self.frame.0
         )
     }
 }
 
-/// Signal.app's note for the instances muted in a run (not empty): the
-/// first one's message, and the addresses of the others.
-fn muted_message(muted: &[Muted]) -> String {
-    let first = muted.first().map(Muted::message).unwrap_or_default();
-    match muted.get(1..) {
-        Some(rest) if !rest.is_empty() => {
-            let others: Vec<&str> = rest.iter().map(|m| m.address.as_str()).collect();
-            format!("{first} (also muted: {})", others.join(", "))
-        }
-        _ => first,
+/// Signal.app's note for the instances muted in a run: the first one's
+/// message, the addresses of up to [`MUTED_LISTED`] others and how many
+/// more, and, when the run dropped log records, that the list may be short
+/// (a fault record may be among them). `None` when there is nothing to say.
+fn muted_message(muted: &[Muted], log_lost: bool) -> Option<String> {
+    const LOST: &str =
+        "log records were dropped, so an instance the fault guard muted may be missing here";
+    let Some((first, rest)) = muted.split_first() else {
+        return log_lost.then(|| format!("Some {LOST}"));
+    };
+    let mut text = first.message();
+    if !rest.is_empty() {
+        let named: Vec<&str> = rest
+            .iter()
+            .take(MUTED_LISTED)
+            .map(|m| m.address.as_str())
+            .collect();
+        let more = rest.len().saturating_sub(MUTED_LISTED);
+        let tail = if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        };
+        text = format!("{text} (also muted: {}{tail})", named.join(", "));
     }
+    if log_lost {
+        text = format!("{text}; some {LOST}");
+    }
+    Some(text)
+}
+
+/// Takes the mutes `pending` (from a poll, or a reload's poll) into `run`,
+/// each said once in `messages`, with the instance's module type from
+/// `plan`; the note is made again when anything was taken.
+fn take_muted(
+    pending: &mut Vec<Muted>,
+    run: &mut Run,
+    plan: Option<&ExecutionPlan>,
+    messages: &mut Vec<String>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    for mut muted in pending.drain(..) {
+        muted.module = plan.and_then(|plan| module_at(plan, &muted.address));
+        messages.push(muted.message());
+        run.muted.push(muted);
+    }
+    run.muted_note = muted_message(&run.muted, run.log_lost);
+}
+
+/// The module type of the instance at `address` in `plan`.
+fn module_at(plan: &ExecutionPlan, address: &str) -> Option<String> {
+    plan.instances
+        .iter()
+        .find(|i| i.address.as_str() == address)
+        .map(|i| i.descriptor.type_name.to_owned())
 }
 
 impl ControlSink for Observed<'_> {
@@ -500,6 +572,7 @@ impl ControlSink for Observed<'_> {
                 frame,
                 address: address.to_string(),
                 reason,
+                module: None,
             });
         }
     }
@@ -1389,11 +1462,7 @@ impl Host {
             "reload": mode.reload.as_ref().map(|(message, error)| json!({"message": message, "error": error})),
             "notes": mode.notes,
             "message": mode.message,
-            "muted": self
-                .run
-                .as_ref()
-                .filter(|run| !run.muted.is_empty())
-                .map(|run| muted_message(&run.muted)),
+            "muted": self.run.as_ref().and_then(|run| run.muted_note.clone()),
             "writes": self.writes,
             "setupPath": self.setup_path.display().to_string(),
             "setupProblems": self.setup_problems,
@@ -1532,6 +1601,9 @@ impl Host {
             version: 0,
             failure_reported: false,
             muted: Vec::new(),
+            muted_note: None,
+            log_dropped: 0,
+            log_lost: false,
             fault: None,
             scheduling: Some(started.scheduling),
         };
@@ -2483,6 +2555,9 @@ impl Host {
             version: 0,
             failure_reported: false,
             muted: Vec::new(),
+            muted_note: None,
+            log_dropped: 0,
+            log_lost: false,
             fault: None,
             scheduling: None,
         };
@@ -2501,6 +2576,8 @@ impl Host {
         self.resend.clear();
         self.port_edits.clear();
         self.auditions.clear();
+        // Mutes a last poll left are the last run's, never this one's.
+        self.muted.clear();
         self.run = Some(run);
     }
 
@@ -2523,10 +2600,7 @@ impl Host {
         // A muted instance is silent for the rest of the run, while its
         // controls still show (and take) the values sent: say so, once each.
         // Signal.app shows them as long as the run lasts (`app.muted`).
-        for muted in self.muted.drain(..) {
-            self.messages.push(muted.message());
-            run.muted.push(muted);
-        }
+        take_muted(&mut self.muted, run, self.plan.as_ref(), &mut self.messages);
         let blocks = &mut self.blocks;
         run.controller.poll_scopes(|b| blocks.push(*b));
         let snapshots = &mut self.snapshots;
@@ -2538,6 +2612,26 @@ impl Host {
         let status = run.controller.status();
         let swapped = status.version != run.version;
         run.version = status.version;
+        // A dropped log record may have been a fault's.
+        let dropped = status.log_overflows + status.engine_log_overflows;
+        if dropped > run.log_dropped {
+            run.log_dropped = dropped;
+            if !run.log_lost {
+                run.log_lost = true;
+                run.muted_note = muted_message(&run.muted, true);
+            }
+        }
+        // A swap that removed a muted instance, or gave its address another
+        // type, brought a new, unfaulted one (`semantics.md` §14).
+        if swapped && !run.muted.is_empty() {
+            let plan = self.plan.as_ref();
+            let before = run.muted.len();
+            run.muted
+                .retain(|m| plan.is_none_or(|plan| module_at(plan, &m.address) == m.module));
+            if run.muted.len() != before {
+                run.muted_note = muted_message(&run.muted, run.log_lost);
+            }
+        }
         if let Some(failure) = status.failure
             && !run.failure_reported
         {
@@ -2640,7 +2734,6 @@ impl Host {
         let mut observed = Observed {
             values: &mut self.values,
             reports: &mut self.reports,
-            // Taken to the run by the next `poll`.
             muted: &mut self.muted,
         };
         let result = reload_observed(
@@ -2651,6 +2744,8 @@ impl Host {
             &self.dir,
             &self.registry,
         );
+        // This run's, taken now: a later run must never show them.
+        take_muted(&mut self.muted, run, self.plan.as_ref(), &mut self.messages);
         let mut reloaded = None;
         // A swap's `graph` is pushed once it commits (`poll`).
         let swapping = matches!(&result, Ok(applied) if applied.swap.is_some());
@@ -7013,6 +7108,46 @@ pub fn project_ui(dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn muted(address: &str, reason: FaultReason) -> Muted {
+        Muted {
+            frame: Frame(7),
+            address: address.to_owned(),
+            reason,
+            module: None,
+        }
+    }
+
+    /// The note: the recovery said by reason; dropped log records said,
+    /// alone too; nothing to say without either.
+    #[test]
+    fn the_muted_note_says_how_and_whether_the_list_is_whole() {
+        assert_eq!(muted_message(&[], false), None);
+        let lost = muted_message(&[], true).unwrap();
+        assert!(lost.starts_with("Some log records were dropped"), "{lost}");
+        let magnitude = muted_message(&[muted("/a", FaultReason::Magnitude)], false).unwrap();
+        assert!(
+            magnitude.contains("with its values back in range"),
+            "{magnitude}"
+        );
+        let panic = muted("/b", FaultReason::Panic).message();
+        assert!(
+            panic.contains("its call panicked") && panic.contains("broke the module contract"),
+            "{panic}"
+        );
+        assert!(!panic.contains("values back in range"), "{panic}");
+        let overflow = muted("/c", FaultReason::EventOverflow).message();
+        assert!(
+            overflow.contains("with fewer events reaching it"),
+            "{overflow}"
+        );
+        let both = muted_message(&[muted("/a", FaultReason::NonFinite)], true).unwrap();
+        assert!(
+            both.starts_with("/a was muted at frame 7")
+                && both.ends_with("an instance the fault guard muted may be missing here"),
+            "{both}"
+        );
+    }
 
     /// auditor-1-rate-panic: no client rate panics; the unsupported ones are
     /// refused with `bad-rate`.

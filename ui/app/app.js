@@ -51,6 +51,7 @@ import {
   snapshotName,
 } from './lib/snapshots.js';
 import { compactStatus, statusFields } from './lib/status.js';
+import { appNotes, messageLines, mutedNotice } from './lib/messages.js';
 import { INITIAL_TAB, TABS, select, tabForAction } from './lib/tabs.js';
 import { retryMessage, revertMessage, unsavedLine, unsavedOf } from '../lib/unsaved.js';
 
@@ -265,6 +266,10 @@ export class SignalAppToolbar extends AppElement {
     this.power = reduce(this.power, { type: 'app', app });
     this.playing = app.playing;
     this.project = app.project ?? null;
+    // A newly muted instance: said here too, so it is seen from every tab.
+    const muted = mutedNotice(this.muted ?? null, app.muted ?? null);
+    this.muted = app.muted ?? null;
+    if (muted) this.notice(muted, true);
     this.render();
   }
 
@@ -487,19 +492,13 @@ export class SignalAppMessages extends AppElement {
 
   app(app) {
     this.line(app.reload?.message, app.reload?.error);
-    const notes = [];
-    if (app.message) notes.push({ text: app.message, className: 'warn' });
-    if (app.muted) notes.push({ text: app.muted, className: 'error' });
-    for (const d of app.project?.diagnostics ?? []) notes.push({ text: d, className: 'error' });
-    for (const n of app.notes ?? []) notes.push({ text: n, className: '' });
-    for (const p of app.setupProblems ?? []) notes.push({ text: p, className: 'warn' });
-    this.notes = notes;
+    this.notes = appNotes(app);
     this.draw();
   }
 
-  /** The newest lines first, at most `MESSAGE_LINES`, each cut to one line (all of it in its tooltip). */
+  /** The muted note first, then the newest lines, at most `MESSAGE_LINES`, each cut to one line (all of it in its tooltip). */
   draw() {
-    const items = [...this.events, ...this.notes].slice(0, MESSAGE_LINES);
+    const items = messageLines(this.events, this.notes, MESSAGE_LINES);
     this.list.replaceChildren(...items.map(({ text, className }) => el('li', { className, textContent: text, title: text })));
   }
 }

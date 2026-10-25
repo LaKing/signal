@@ -570,6 +570,111 @@ fn a_muted_instance_is_shown_until_the_project_plays_again(transport: Transport)
     rig.request(&mut ws, 7, json!({"type": "transport.play"}), "transport");
     let app = rig.request(&mut ws, 8, json!({"type": "app.get"}), "app");
     assert_eq!(app["muted"], Value::Null, "a new run: {app}");
+
+    // Muted again (and the file set back), then the power off: no run, no
+    // note; on, a new run from the file plays it.
+    let mute = |rig: &mut Rig, ws: &mut common::Ws, id: u64| {
+        rig.request(ws, id, set(-1e6), "committed");
+        rig.wait(ws, "muted again", |got| {
+            got.of("app").and_then(|a| a["muted"].as_str()).map(drop)
+        });
+        rig.request(ws, id + 1, set(0.5), "committed");
+    };
+    mute(&mut rig, &mut ws, 9);
+    rig.request(
+        &mut ws,
+        11,
+        json!({"type": "app.power", "on": false}),
+        "power",
+    );
+    let app = rig.request(&mut ws, 12, json!({"type": "app.get"}), "app");
+    assert_eq!(app["muted"], Value::Null, "switched off: {app}");
+    let on = rig.request(
+        &mut ws,
+        13,
+        json!({"type": "app.power", "on": true}),
+        "power",
+    );
+    assert_eq!(on["playing"], true);
+    let app = rig.request(&mut ws, 14, json!({"type": "app.get"}), "app");
+    assert_eq!(app["muted"], Value::Null, "switched on again: {app}");
+
+    // A swap that removes the muted instance (renamed by another writer)
+    // brings a new, unfaulted one: the note goes.
+    mute(&mut rig, &mut ws, 15);
+    let renamed = fs::read_to_string(rig.dir.join("project.toml"))
+        .unwrap()
+        .replace("click", "clack");
+    fs::write(rig.dir.join("project.toml"), renamed).unwrap();
+    rig.wait(&mut ws, "the note gone after the swap", |got| {
+        got.of("app").filter(|a| a["muted"].is_null()).map(drop)
+    });
+
+    // Opening a project (this one again) ends the run and the note.
+    let clack = |value: f64| json!({"type": "commit", "address": "/clack.mul", "value": value});
+    rig.request(&mut ws, 17, clack(-1e6), "committed");
+    rig.wait(&mut ws, "muted once more", |got| {
+        got.of("app").and_then(|a| a["muted"].as_str()).map(drop)
+    });
+    rig.request(&mut ws, 18, clack(0.5), "committed");
+    let dir = rig.dir.display().to_string();
+    rig.request(
+        &mut ws,
+        19,
+        json!({"type": "project.open", "path": dir}),
+        "project",
+    );
+    let app = rig.request(&mut ws, 20, json!({"type": "app.get"}), "app");
+    assert_eq!(app["muted"], Value::Null, "opened: {app}");
+    rig.finish();
+    let _ = fs::remove_dir_all(&source);
+}
+
+/// The note names the first muted instance, then up to 8 others and how
+/// many more; a fault's reason chooses how it says the instance comes back.
+fn the_muted_note_lists_eight_then_counts(transport: Transport) {
+    let source = std::env::temp_dir().join(format!(
+        "signal-ui-app-muted-many-source-{transport:?}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&source);
+    fs::create_dir_all(&source).unwrap();
+    // Eleven scales of one sine, each muted by the same `mul`.
+    let mut text = String::from(
+        "schema_version = 1\n\n[project]\nname = \"many\"\nsample_rate = 48000\nseed = 1\n\n[instances]\nosc = { module = \"std.sine_osc\", freq = 440 }\nk = { module = \"std.const\", value = 1 }\nout = { module = \"std.audio_out\", gain = 0.25 }\n",
+    );
+    let mut wires = String::new();
+    for n in 0..11 {
+        text.push_str(&format!(
+            "s{n:02} = {{ module = \"std.scale\", mul = 0.5 }}\n"
+        ));
+        wires.push_str(&format!(
+            "  {{ from = \"osc.out\", to = \"s{n:02}.in\", scale = 2 }},\n  {{ from = \"k.out\", to = \"s{n:02}.mul\" }},\n  {{ from = \"s{n:02}.out\", to = \"out.l\" }},\n"
+        ));
+    }
+    text.push_str(&format!("\n[wiring]\nconnections = [\n{wires}]\n"));
+    fs::write(source.join("project.toml"), text).unwrap();
+    let mut rig = app_rig("muted-many", transport, Some(&source));
+    let (mut ws, _) = rig.client();
+    rig.request(&mut ws, 1, json!({"type": "transport.play"}), "transport");
+    rig.request(
+        &mut ws,
+        2,
+        json!({"type": "commit", "address": "/k.value", "value": 1e6}),
+        "committed",
+    );
+    let muted = rig.wait(&mut ws, "eleven muted", |got| {
+        got.of("app")
+            .and_then(|a| a["muted"].as_str())
+            .filter(|m| m.contains("and 2 more"))
+            .map(str::to_owned)
+    });
+    assert!(muted.starts_with("/s00 was muted at frame "), "{muted}");
+    assert!(muted.contains("with its values back in range"), "{muted}");
+    assert!(
+        muted.contains("(also muted: /s01, /s02, /s03, /s04, /s05, /s06, /s07, /s08 and 2 more)"),
+        "{muted}"
+    );
     rig.finish();
     let _ = fs::remove_dir_all(&source);
 }
@@ -1978,6 +2083,7 @@ both!(
     it_plays_while_switched_on,
     power_off_stops_and_on_restores,
     a_muted_instance_is_shown_until_the_project_plays_again,
+    the_muted_note_lists_eight_then_counts,
     a_client_connecting_while_off_is_told_and_gets_no_frames,
     a_failed_stopped_commit_is_still_unsaved_when_playing,
     it_starts_stopped_plays_and_stops,
