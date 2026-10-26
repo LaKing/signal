@@ -490,16 +490,18 @@ function summaryLabel(box, index) {
   const header = box.header ?? 0;
   const body = header > 0 && r.h - header >= PITCH_PX ? { x: r.x, y: r.y + header, w: r.w, h: r.h - header } : r;
   const text = box.kind === 'instance' ? `${box.name}: ${box.ins.length} in · ${box.outs.length} out` : `${boxName(box)}: ${box.ins.length + box.outs.length}`;
+  // Its box, named even when it has no pins (an empty composite: `e: 0 in · 0 out`).
+  const own = { members: [index] };
   // In a level's units (`grow`, 2026-10-20): as large as its box holds it whole, up to SUMMARY_GROW times a pin's label.
   if (box.grow) {
     for (let f = SUMMARY_GROW; f > 1; f -= 0.5) {
       const area = { x: body.x / f, y: body.y / f, w: body.w / f, h: body.h / f };
-      const label = box.kind === 'instance' ? centredIn(text, area, pinsOf(box, index)) : labelAt(text, area.x + area.w / 2, area.y + area.h / 2, 'centre', pinsOf(box, index));
+      const label = box.kind === 'instance' ? centredIn(text, area, pinsOf(box, index), own) : labelAt(text, area.x + area.w / 2, area.y + area.h / 2, 'centre', pinsOf(box, index), own);
       if (label.shown.split('\n').join(' ') === text && label.x1 - label.x0 <= area.w && label.y1 - label.y0 <= area.h) return scaleLabel(label, f);
     }
   }
-  if (box.kind === 'instance') return centredIn(text, body, pinsOf(box, index), {}, [box.name]);
-  return labelAt(text, r.x + r.w / 2, r.y + r.h / 2, 'centre', pinsOf(box, index));
+  if (box.kind === 'instance') return centredIn(text, body, pinsOf(box, index), own, [box.name]);
+  return labelAt(text, r.x + r.w / 2, r.y + r.h / 2, 'centre', pinsOf(box, index), own);
 }
 
 /** `label` `f` times as large (its coordinates and its text's size, `scale`), from the origin. */
@@ -583,7 +585,7 @@ function clusterLabel(boxes, members) {
   const more = members.length > 2 ? ` +${members.length - 2}` : '';
   const text = `${names.join(', ')}${more}: ${ports} ${ports === 1 ? 'port' : 'ports'}`;
   // Within the boxes it names, as a box's summary is within its box.
-  return centredIn(text, { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, members.flatMap((i) => pinsOf(boxes[i], i)), { cluster: true }, [`${names.join(', ')}${more}`, names[0]]);
+  return centredIn(text, { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, members.flatMap((i) => pinsOf(boxes[i], i)), { cluster: true, members: [...members] }, [`${names.join(', ')}${more}`, names[0]]);
 }
 
 /** The first pair of labels of different units that overlap, by the units' order: `{a, b, la, lb}` (unit indexes), or null. */
@@ -614,7 +616,8 @@ function firstOverlap(units) {
  * bottom (`ins` on its left edge, `outs` on its right), `texts` a Map of a
  * pin's full label (its name and notes) where it has one. A label is
  * `{text, shown, x0, y0, x1, y1, align, pins: [{box, name}], lines?,
- * cluster?}` (`shown` what fits of `text`, lines apart by `\n`); every pin
+ * cluster?, members?}` (`shown` what fits of `text`, lines apart by `\n`;
+ * `members` a summary's or a cluster's boxes, by index); every pin
  * is in exactly one label. With `viewport` (`{w, h}`), a frame's labels
  * stay in it. Each box starts at the finest level it fits at
  * by itself; while two labels of different boxes overlap, the pair's box
@@ -731,16 +734,18 @@ export function pinText(name, note = null, traced = null) {
 }
 
 /**
- * The node id of the one box of `boxes` (as `levelLabels` takes them) that
- * `label` (one it placed) names pins of, an instance's (its name), or null:
- * a frame's, a cluster's of several boxes, a bundle's count. A drag moves
- * the labels of the boxes it moves with them (ui/lib/schematic-drag.js).
+ * The node ids of the boxes of `boxes` (as `levelLabels` takes them, each
+ * its `id`, else its `name`) that `label` (one it placed) belongs to, a
+ * drag moving it with them (ui/lib/schematic-drag.js): an instance's pin
+ * labels and summary its own (a summary even without pins, an empty
+ * composite's), a cluster's all its boxes, frames' included (they never
+ * move, so a cluster with one does not follow); none for a frame's own
+ * labels, which stay, nor a bundle's count.
  */
-export function labelOwner(boxes, label) {
+export function labelOwners(boxes, label) {
+  if (label.count) return [];
   const pins = label.pins ?? [];
-  if (!pins.length || label.count) return null;
-  const at = pins[0].box;
-  if (pins.some((p) => p.box !== at)) return null;
-  const box = boxes[at];
-  return box?.kind === 'instance' ? box.name : null;
+  const at = label.members ?? (pins.length && pins.every((p) => p.box === pins[0].box) ? [pins[0].box] : []);
+  if (at.length === 1 && boxes[at[0]]?.kind !== 'instance') return [];
+  return at.map((i) => boxes[i]).filter(Boolean).map((b) => b.id ?? b.name);
 }

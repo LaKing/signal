@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DragFollow, innerOffset } from './schematic-drag.js';
+import { DragFollow, innerOffset, ownedLabels } from './schematic-drag.js';
 import { bake, bakedMatrix, bakedPath } from './schematic-draw.js';
 import { layout, routed, movedWires } from './schematic-layout.js';
 import { focus, matrix, toScreen } from './schematic-view.js';
@@ -83,14 +83,17 @@ test('a drag writes the box’s offset and the wires that change, each once, and
   assert.equal(group.nodeCache.get('c').el.getAttribute('transform'), null);
 });
 
-test('a composite’s pins’ labels, drawn with its level’s, follow its box during the drag and come back on a cancel', () => {
+/** A level's labelCache (as `ownedLabels` keeps it) from `[ids, elements]` pairs. */
+const labelCache = (...entries) => new Map(entries.map(([ids, elements]) => [ids.join('\n'), { ids, elements }]));
+
+test('a composite’s labels, drawn with its level’s, follow its box during the drag and come back on a cancel', () => {
   // The owner (2026-10-27): "When I drag a freshly added composite, its box
   // moves, but the labels on its inputs and outputs only jump to the new
   // place when I release it." A composite's labels are in the level's labels
-  // group (labelCache: node id → its labels' groups, one per size), not in its box's.
+  // group (labelCache: their boxes' ids → their groups, one per size), not in its box's.
   const { drawn, group, groups, levels } = setup();
   const labels = { c: [new Element(), new Element()], b: [new Element()] };
-  group.labelCache = new Map(Object.entries(labels));
+  group.labelCache = labelCache([['c'], labels.c], [['b'], labels.b]);
   const c = drawn.nodes.find((n) => n.id === 'c');
   const follow = new DragFollow('', 'c');
   follow.apply({ layout: drawn, levels, groups, to: { x: c.x + 30, y: c.y - 10 } });
@@ -100,7 +103,7 @@ test('a composite’s pins’ labels, drawn with its level’s, follow its box d
   assert.equal(labels.b[0].getAttribute('transform'), null, 'another box’s labels stay');
   // A redraw that builds the labels again (new elements) during the drag: the new ones follow.
   const again = [new Element()];
-  group.labelCache = new Map([['c', again]]);
+  group.labelCache = labelCache([['c'], again]);
   follow.apply({ layout: drawn, levels, groups, to: { x: c.x + 30, y: c.y - 10 } });
   assert.equal(again[0].getAttribute('transform'), offset);
   // Cancelled: back where they were drawn.
@@ -109,10 +112,64 @@ test('a composite’s pins’ labels, drawn with its level’s, follow its box d
   // A group dragged: each box's labels by the same offset.
   const both = new DragFollow('', ['c', 'b']);
   const fresh = { c: new Element(), b: new Element() };
-  group.labelCache = new Map([['c', [fresh.c]], ['b', [fresh.b]]]);
+  group.labelCache = labelCache([['c'], [fresh.c]], [['b'], [fresh.b]]);
   both.apply({ layout: drawn, levels, groups, to: { x: c.x + 30, y: c.y - 10 } });
   assert.equal(fresh.c.getAttribute('transform'), offset);
   assert.equal(fresh.b.getAttribute('transform'), offset);
+});
+
+test('a cluster’s label follows when all its boxes move, is hidden while only some do, and is back on release or cancel', () => {
+  const { drawn, group, groups, levels } = setup();
+  const c = drawn.nodes.find((n) => n.id === 'c');
+  const cluster = new Element();
+  group.labelCache = labelCache([['b', 'c'], [cluster]]);
+  const to = { x: c.x + 30, y: c.y - 10 };
+  const offset = `translate(${30 * group.baked.m} ${-10 * group.baked.m})`;
+  // Both of its boxes dragged together: it moves with them.
+  const both = new DragFollow('', ['c', 'b']);
+  both.apply({ layout: drawn, levels, groups, to });
+  assert.equal(cluster.getAttribute('transform'), offset);
+  assert.equal(cluster.getAttribute('visibility'), null);
+  both.restore();
+  assert.equal(cluster.getAttribute('transform'), null);
+  // One of them dragged alone: hidden (it names both, where neither now is), shown again when let go of.
+  const one = new DragFollow('', 'c');
+  one.apply({ layout: drawn, levels, groups, to });
+  assert.equal(cluster.getAttribute('visibility'), 'hidden');
+  assert.equal(cluster.getAttribute('transform'), null, 'not moved');
+  assert.equal(one.apply({ layout: drawn, levels, groups, to }), 0, 'a redraw with nothing moved writes nothing');
+  one.restore();
+  assert.equal(cluster.getAttribute('visibility'), null);
+  // A cluster with a frame (which never moves), its box dragged: hidden; a box of neither: untouched.
+  const framed = new Element();
+  const other = new Element();
+  group.labelCache = labelCache([['c', '\u0000inputs'], [framed]], [['a', 'e'], [other]]);
+  const again = new DragFollow('', 'c');
+  again.apply({ layout: drawn, levels, groups, to });
+  assert.equal(framed.getAttribute('visibility'), 'hidden');
+  assert.equal(other.writes, 0);
+  // The cache rebuilt without it: shown again at once.
+  group.labelCache = labelCache();
+  again.apply({ layout: drawn, levels, groups, to });
+  assert.equal(framed.getAttribute('visibility'), null);
+});
+
+test('ownedLabels: a group per owners and size, appended once to its size’s group, kept by the owners’ ids; none for no owner', () => {
+  const owned = ownedLabels();
+  const small = { children: [], append(...c) { this.children.push(...c); } };
+  const large = { children: [], append(...c) { this.children.push(...c); } };
+  const make = () => Object.assign(new Element(), { kind: 'g' });
+  const a1 = owned.group(small, '12', ['a'], make);
+  assert.equal(owned.group(small, '12', ['a'], make), a1, 'the same group again');
+  const a2 = owned.group(large, '24', ['a'], make);
+  assert.notEqual(a2, a1, 'a size of its own');
+  const ab = owned.group(small, '12', ['a', 'b'], make);
+  assert.equal(owned.group(small, '12', [], make), small, 'no owner: the size’s group itself');
+  assert.deepEqual(small.children, [a1, ab]);
+  assert.deepEqual(large.children, [a2]);
+  assert.equal(a1.getAttribute('data-box'), 'a');
+  assert.equal(ab.getAttribute('data-box'), 'a b');
+  assert.deepEqual([...owned.cache.entries()], [['a', { ids: ['a'], elements: [a1, a2] }], ['a\nb', { ids: ['a', 'b'], elements: [ab] }]]);
 });
 
 test('a wire that stops changing goes back to its own path', () => {

@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { COUNT_UNITS, FRAME_LABEL_UNITS, LABEL_PX, MAX_LABELS, PITCH_PX, boxLabels, frameSides, labelOwner, levelCounts, levelLabels, estimateWidth, fitText, shownText, insideNote, noteText, minWidth, outsideNote, overlaps, pinText, placeCounts, placeLabels, prefixOf, setMeasure, textWidth, wrapText } from './schematic-labels.js';
+import { COUNT_UNITS, FRAME_LABEL_UNITS, LABEL_PX, MAX_LABELS, PITCH_PX, boxLabels, frameSides, labelOwners, levelCounts, levelLabels, estimateWidth, fitText, shownText, insideNote, noteText, minWidth, outsideNote, overlaps, pinText, placeCounts, placeLabels, prefixOf, setMeasure, textWidth, wrapText } from './schematic-labels.js';
 import { GAP_X, HEADER, layout } from './schematic-layout.js';
 import { exportFacts, portGroups } from './schematic-groups.js';
 import { badgeText, behind } from './schematic-trace.js';
@@ -585,7 +585,7 @@ test('a frame’s parameter left to its value has no note; a port nothing feeds 
   assert.equal(outsideNote(lone, '/v.p'), null);
 });
 
-test('each label names its one box’s pins: an instance’s labels are owned by it (a drag moves them with it), a frame’s and a count’s by none', () => {
+test('a label belongs to the boxes it names: an instance’s pins’ labels and summary to it, a cluster’s to all its boxes, a frame’s and a count’s to none', () => {
   const a = box('a', { ins: ['x', 'y'], outs: ['out'] });
   const b = box('b', { x: 400, ins: ['in'], outs: ['o1', 'o2'] });
   const frame = box('inputs', { x: -300, ins: [], outs: ['p', 'q'], kind: 'input' });
@@ -594,13 +594,37 @@ test('each label names its one box’s pins: an instance’s labels are owned by
     const labels = levelLabels(boxes, detail);
     assert.ok(labels.length > 0);
     for (const label of labels) {
-      const owner = labelOwner(boxes, label);
+      const owners = labelOwners(boxes, label);
       const of = new Set(label.pins.map((p) => boxes[p.box].name));
-      if (of.size === 1 && boxes[label.pins[0].box].kind === 'instance') assert.equal(owner, [...of][0], `${detail}: ${label.text}`);
-      else assert.equal(owner, null, `${detail}: ${label.text}`);
+      if (of.size === 1 && boxes[label.pins[0].box].kind === 'instance') assert.deepEqual(owners, [...of], `${detail}: ${label.text}`);
+      else assert.deepEqual(owners, [], `${detail}: ${label.text}`);
     }
-    assert.ok(labels.some((l) => labelOwner(boxes, l) === 'a') && labels.some((l) => labelOwner(boxes, l) === 'b'), detail);
+    assert.ok(['a', 'b'].every((name) => labels.some((l) => labelOwners(boxes, l).includes(name))), detail);
   }
-  assert.equal(labelOwner(boxes, { text: '3', count: true, pins: [] }), null);
-  assert.equal(labelOwner(boxes, { text: 'a, b', pins: [{ box: 0, name: 'x' }, { box: 1, name: 'in' }] }), null, 'a cluster of several boxes');
+  assert.deepEqual(labelOwners(boxes, { text: '3', count: true, pins: [] }), []);
+  // A box's `id` (its node's) when it has one, else its name.
+  assert.deepEqual(labelOwners([{ ...a, id: 'node-a' }], levelLabels([a], 'summary')[0]), ['node-a']);
+});
+
+test('an empty composite’s summary (no pins) belongs to its box, so a drag moves it (the owner’s freshly added composite)', () => {
+  const e = box('e', { ins: [], outs: [] });
+  const [summary, ...rest] = levelLabels([e], 'summary');
+  assert.deepEqual(rest, []);
+  assert.equal(summary.text, 'e: 0 in · 0 out');
+  assert.deepEqual(summary.pins, []);
+  assert.deepEqual(labelOwners([e], summary), ['e']);
+  // At every pin's detail a box without pins has no label at all (nothing to leave behind).
+  assert.deepEqual(levelLabels([e], 'pins'), []);
+});
+
+test('summaries that collide are one cluster, which belongs to every box it names, a frame included', () => {
+  const a = box('a', { ins: ['x'], outs: ['out'] });
+  const b = box('b', { x: 10, ins: ['in'], outs: ['o'] });
+  const frame = box('inputs', { x: 20, ins: [], outs: ['p'], kind: 'input' });
+  const labels = levelLabels([a, b], 'summary');
+  const cluster = labels.find((l) => l.cluster);
+  assert.ok(cluster, labels.map((l) => l.text).join(' | '));
+  assert.deepEqual(labelOwners([a, b], cluster), ['a', 'b']);
+  const withFrame = levelLabels([a, b, frame], 'summary').find((l) => l.cluster);
+  assert.deepEqual(labelOwners([a, b, frame], withFrame), ['a', 'b', 'inputs']);
 });
