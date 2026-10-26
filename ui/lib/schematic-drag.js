@@ -2,7 +2,8 @@
 // owner's "while moving parts around the cables should follow",
 // 2026-10-16), or a group of boxes of one level selected together and
 // dragged by one of them (2026-10-17): the boxes themselves, the wires that change with it
-// (`movedWires`), and an open composite's inside, in every drawn instance
+// (`movedWires`), its pins' labels drawn with its level's (a composite's,
+// `labelCache`), and an open composite's inside, in every drawn instance
 // of the level (a composite's layout is its type's, so each open instance
 // of it shows the drag). Only attributes of elements already drawn change
 // (a box's and a level's `transform`, a wire's `d`), each only when its
@@ -39,7 +40,7 @@ export class DragFollow {
    * The box at `to` (`{x, y}`, layout units) in `layout` (the level's, as
    * now laid out), the group's other boxes moved by as much, in each of
    * `levels` (the scene's, `{path, level, transform}`) drawn in `groups` (path → `{g, baked, placed, wireCache,
-   * nodeCache}`, as <signal-schematic> keeps them). Returns how many
+   * nodeCache, labelCache?}` (labelCache: node id → its labels' elements), as <signal-schematic> keeps them). Returns how many
    * attributes it wrote.
    */
   apply({ layout, levels, groups, to }) {
@@ -77,6 +78,12 @@ export class DragFollow {
         if (!box) continue;
         set(box, 'transform', `translate(${dx * m} ${dy * m})`);
         boxes.add(box);
+        // Its pins' labels, drawn with the level's labels (a composite's, not
+        // in its box's group): moved by as much, so they follow the box.
+        for (const label of group.labelCache?.get(each.id) ?? []) {
+          set(label, 'transform', `translate(${dx * m} ${dy * m})`);
+          boxes.add(label);
+        }
       }
       for (const route of moved) {
         const element = group.wireCache.get(route.wire.id)?.el;

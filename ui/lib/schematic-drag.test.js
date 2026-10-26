@@ -83,6 +83,38 @@ test('a drag writes the box’s offset and the wires that change, each once, and
   assert.equal(group.nodeCache.get('c').el.getAttribute('transform'), null);
 });
 
+test('a composite’s pins’ labels, drawn with its level’s, follow its box during the drag and come back on a cancel', () => {
+  // The owner (2026-10-27): "When I drag a freshly added composite, its box
+  // moves, but the labels on its inputs and outputs only jump to the new
+  // place when I release it." A composite's labels are in the level's labels
+  // group (labelCache: node id → its labels' groups, one per size), not in its box's.
+  const { drawn, group, groups, levels } = setup();
+  const labels = { c: [new Element(), new Element()], b: [new Element()] };
+  group.labelCache = new Map(Object.entries(labels));
+  const c = drawn.nodes.find((n) => n.id === 'c');
+  const follow = new DragFollow('', 'c');
+  follow.apply({ layout: drawn, levels, groups, to: { x: c.x + 30, y: c.y - 10 } });
+  const offset = `translate(${30 * group.baked.m} ${-10 * group.baked.m})`;
+  assert.equal(group.nodeCache.get('c').el.getAttribute('transform'), offset);
+  for (const l of labels.c) assert.equal(l.getAttribute('transform'), offset, 'its labels move as its box does');
+  assert.equal(labels.b[0].getAttribute('transform'), null, 'another box’s labels stay');
+  // A redraw that builds the labels again (new elements) during the drag: the new ones follow.
+  const again = [new Element()];
+  group.labelCache = new Map([['c', again]]);
+  follow.apply({ layout: drawn, levels, groups, to: { x: c.x + 30, y: c.y - 10 } });
+  assert.equal(again[0].getAttribute('transform'), offset);
+  // Cancelled: back where they were drawn.
+  follow.restore();
+  assert.equal(again[0].getAttribute('transform'), null);
+  // A group dragged: each box's labels by the same offset.
+  const both = new DragFollow('', ['c', 'b']);
+  const fresh = { c: new Element(), b: new Element() };
+  group.labelCache = new Map([['c', [fresh.c]], ['b', [fresh.b]]]);
+  both.apply({ layout: drawn, levels, groups, to: { x: c.x + 30, y: c.y - 10 } });
+  assert.equal(fresh.c.getAttribute('transform'), offset);
+  assert.equal(fresh.b.getAttribute('transform'), offset);
+});
+
 test('a wire that stops changing goes back to its own path', () => {
   const { drawn, group, groups, levels } = setup();
   const e = drawn.nodes.find((n) => n.id === 'e');

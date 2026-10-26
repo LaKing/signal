@@ -87,7 +87,7 @@ import { isDiscrete, selectOptions, selectValue, valueLabel } from '../lib/value
 import { IDENTITY, commandView, fit, focus, matrix, pan, toLocal, toScreen, wheelFactor, zoomAt } from '../lib/schematic-view.js';
 import { keyCommand, keymap, shownKeys, wheelCommand } from '../lib/keys.js';
 import { registerWheel, takesWheel, verticalDelta } from './keyboard.js';
-import { COUNT_UNITS, LABEL_PX, PITCH_PX, READ_PX, frameSides, insideNote, levelCounts, levelLabels, outsideNote, pinText, setMeasure } from '../lib/schematic-labels.js';
+import { COUNT_UNITS, LABEL_PX, PITCH_PX, READ_PX, frameSides, insideNote, labelOwner, levelCounts, levelLabels, outsideNote, pinText, setMeasure } from '../lib/schematic-labels.js';
 import { bundleClick, bundleText, bundleWires, countPlaces, countsShown, fanOf, nearestWire } from '../lib/schematic-bundle.js';
 import { collapsedAt, exportFacts, groupAnchors, labelDetail, notesAt, portGroups } from '../lib/schematic-groups.js';
 
@@ -2525,6 +2525,9 @@ export class SignalSchematic extends HTMLElement {
     }
     const pins = this.tracing?.result?.pins;
     const bySize = new Map();
+    // A box's labels in a group of their own (per size), by its node's id, so a drag moves them with it (ui/lib/schematic-drag.js).
+    const byBox = new Map();
+    drawn.labelCache = new Map();
     for (const label of labels) {
       const shown = label.shown ?? label.text;
       if (!shown) continue;
@@ -2532,10 +2535,23 @@ export class SignalSchematic extends HTMLElement {
       const size = LABEL_PX * f;
       const outward = Boolean(boxes[label.pins[0]?.box]?.outward);
       const group = `${size}${outward ? ' outward' : ''}`;
-      let g = bySize.get(group);
-      if (!g) {
-        g = el('g', { 'data-size': size, ...(outward ? { 'data-outward': '1' } : {}) });
-        bySize.set(group, g);
+      let sized = bySize.get(group);
+      if (!sized) {
+        sized = el('g', { 'data-size': size, ...(outward ? { 'data-outward': '1' } : {}) });
+        bySize.set(group, sized);
+      }
+      const id = labelOwner(boxes, label);
+      let g = sized;
+      if (id !== null) {
+        const key = `${group}\n${id}`;
+        g = byBox.get(key);
+        if (!g) {
+          g = el('g', { 'data-box': id });
+          byBox.set(key, g);
+          sized.append(g);
+          if (!drawn.labelCache.has(id)) drawn.labelCache.set(id, []);
+          drawn.labelCache.get(id).push(g);
+        }
       }
       const one = label.pins.length === 1 ? label.pins[0] : null;
       const traced = Boolean(pins && label.pins.some((p) => pins.has(addresses[p.box](p.name))));

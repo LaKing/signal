@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { COUNT_UNITS, FRAME_LABEL_UNITS, LABEL_PX, MAX_LABELS, PITCH_PX, boxLabels, frameSides, levelCounts, levelLabels, estimateWidth, fitText, shownText, insideNote, noteText, minWidth, outsideNote, overlaps, pinText, placeCounts, placeLabels, prefixOf, setMeasure, textWidth, wrapText } from './schematic-labels.js';
+import { COUNT_UNITS, FRAME_LABEL_UNITS, LABEL_PX, MAX_LABELS, PITCH_PX, boxLabels, frameSides, labelOwner, levelCounts, levelLabels, estimateWidth, fitText, shownText, insideNote, noteText, minWidth, outsideNote, overlaps, pinText, placeCounts, placeLabels, prefixOf, setMeasure, textWidth, wrapText } from './schematic-labels.js';
 import { GAP_X, HEADER, layout } from './schematic-layout.js';
 import { exportFacts, portGroups } from './schematic-groups.js';
 import { badgeText, behind } from './schematic-trace.js';
@@ -583,4 +583,24 @@ test('a frame’s parameter left to its value has no note; a port nothing feeds 
   const lone = { top: { instances: [{ name: 'v', module: 'voice', composite: true, ports: [{ name: 'in', direction: 'in', shape: 'signal' }], parameters: [{ name: 'p' }] }], connections: [] }, composites: { voice: { instances: [], connections: [], inputs: [{ name: 'in', to: [] }], outputs: [], parameters: [{ name: 'p', to: [] }] } } };
   assert.equal(pinText('in', outsideNote(lone, '/v.in')), 'nothing → in');
   assert.equal(outsideNote(lone, '/v.p'), null);
+});
+
+test('each label names its one box’s pins: an instance’s labels are owned by it (a drag moves them with it), a frame’s and a count’s by none', () => {
+  const a = box('a', { ins: ['x', 'y'], outs: ['out'] });
+  const b = box('b', { x: 400, ins: ['in'], outs: ['o1', 'o2'] });
+  const frame = box('inputs', { x: -300, ins: [], outs: ['p', 'q'], kind: 'input' });
+  const boxes = [a, b, frame];
+  for (const detail of ['pins', 'groups', 'summary']) {
+    const labels = levelLabels(boxes, detail);
+    assert.ok(labels.length > 0);
+    for (const label of labels) {
+      const owner = labelOwner(boxes, label);
+      const of = new Set(label.pins.map((p) => boxes[p.box].name));
+      if (of.size === 1 && boxes[label.pins[0].box].kind === 'instance') assert.equal(owner, [...of][0], `${detail}: ${label.text}`);
+      else assert.equal(owner, null, `${detail}: ${label.text}`);
+    }
+    assert.ok(labels.some((l) => labelOwner(boxes, l) === 'a') && labels.some((l) => labelOwner(boxes, l) === 'b'), detail);
+  }
+  assert.equal(labelOwner(boxes, { text: '3', count: true, pins: [] }), null);
+  assert.equal(labelOwner(boxes, { text: 'a, b', pins: [{ box: 0, name: 'x' }, { box: 1, name: 'in' }] }), null, 'a cluster of several boxes');
 });

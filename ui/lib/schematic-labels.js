@@ -729,3 +729,18 @@ export function pinText(name, note = null, traced = null) {
   const head = !note ? name : note.endsWith('→') ? `${note} ${name}` : `${name} ${note}`;
   return traced ? `${head} · trace: ${traced}` : head;
 }
+
+/**
+ * The node id of the one box of `boxes` (as `levelLabels` takes them) that
+ * `label` (one it placed) names pins of, an instance's (its name), or null:
+ * a frame's, a cluster's of several boxes, a bundle's count. A drag moves
+ * the labels of the boxes it moves with them (ui/lib/schematic-drag.js).
+ */
+export function labelOwner(boxes, label) {
+  const pins = label.pins ?? [];
+  if (!pins.length || label.count) return null;
+  const at = pins[0].box;
+  if (pins.some((p) => p.box !== at)) return null;
+  const box = boxes[at];
+  return box?.kind === 'instance' ? box.name : null;
+}
