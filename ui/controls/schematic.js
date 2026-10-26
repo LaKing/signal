@@ -1448,6 +1448,10 @@ export class SignalSchematic extends HTMLElement {
     const viewed = this.view.path ?? '';
     const within = path !== '' && (viewed === path || viewed.startsWith(`${path}/`));
     this.view = within ? reroot(this.view, before, path) : rebase(this.view, before, (l) => this.layoutOf(l));
+    // What the drag wrote put back (a cluster's label hidden shown again):
+    // the redraw at the next frame, before it is painted, draws the boxes
+    // and labels where they were let go.
+    gesture.follow.restore();
     this.schedule();
     // A group too large for one message goes as several (`moveMessages`).
     for (const message of moveMessages(level, moves)) {

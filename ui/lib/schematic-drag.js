@@ -36,6 +36,9 @@ export class DragFollow {
     this.cache = null;
     /** The group's nodes in the layout last applied: `{layout, node, nodes, names}`. */
     this.group = null;
+    /** Their ids, and per label cache its entries they belong to (`labelsOf`). */
+    this.ids = null;
+    this.labelMatches = new WeakMap();
   }
 
   /**
@@ -51,6 +54,7 @@ export class DragFollow {
       const byName = new Map((layout?.nodes ?? []).filter((n) => n.kind === 'instance').map((n) => [n.name, n]));
       this.group = { layout, node: byName.get(this.name), nodes: this.names.map((name) => byName.get(name)).filter(Boolean), names: new Set(this.names) };
       this.ids = new Set(this.group.nodes.map((n) => n.id));
+      this.labelMatches = new WeakMap();
     }
     const { node, nodes, names } = this.group;
     if (!node) return 0;
@@ -85,13 +89,11 @@ export class DragFollow {
       }
       // The boxes' labels drawn with the level's (a composite's pins', its
       // summary, a cluster's): moved by as much when every box they belong
-      // to moves; a cluster only some of whose boxes move (or a frame) is
-      // hidden until the release places the labels again.
-      for (const { ids, elements } of group.labelCache?.values() ?? []) {
-        const moving = ids.filter((id) => this.ids.has(id)).length;
-        if (!moving) continue;
+      // to moves; a cluster only some of whose boxes move (one naming a
+      // frame, which never moves, always) is hidden until the release.
+      for (const { elements, follow } of this.labelsOf(group.labelCache)) {
         for (const label of elements) {
-          if (moving === ids.length) {
+          if (follow) {
             set(label, 'transform', `translate(${dx * m} ${dy * m})`);
             boxes.add(label);
           } else {
@@ -164,8 +166,33 @@ export class DragFollow {
     this.inner.clear();
     this.cache = null;
     this.group = null;
+    this.ids = null;
+    this.labelMatches = new WeakMap();
+  }
+
+  /**
+   * The entries of `labelCache` (`ownedLabels`' cache) that a box of the
+   * group belongs to, each `{elements, follow}` (`follow`: all its boxes
+   * move), found once per cache and group: a drag step allocates nothing
+   * for them, and goes over those only.
+   */
+  labelsOf(labelCache) {
+    if (!labelCache) return NO_LABELS;
+    let found = this.labelMatches.get(labelCache);
+    if (!found) {
+      found = [];
+      for (const { ids, elements } of labelCache.values()) {
+        let moving = 0;
+        for (let i = 0; i < ids.length; i++) if (this.ids.has(ids[i])) moving++;
+        if (moving) found.push({ elements, follow: moving === ids.length });
+      }
+      this.labelMatches.set(labelCache, found);
+    }
+    return found;
   }
 }
+
+const NO_LABELS = Object.freeze([]);
 
 /** A level's SVG matrix `placed` moved by `offset` layout units of a parent drawn at scale `k`. */
 export function innerOffset(placed, offset, k) {

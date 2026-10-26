@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DragFollow, innerOffset, ownedLabels } from './schematic-drag.js';
 import { bake, bakedMatrix, bakedPath } from './schematic-draw.js';
-import { layout, routed, movedWires } from './schematic-layout.js';
+import { INPUTS, layout, routed, movedWires } from './schematic-layout.js';
 import { focus, matrix, toScreen } from './schematic-view.js';
 import { nodeRect, rebase, reroot, scene } from './schematic-scene.js';
 import { READ_K, linkScale } from './schematic-open.js';
@@ -143,7 +143,7 @@ test('a cluster’s label follows when all its boxes move, is hidden while only 
   // A cluster with a frame (which never moves), its box dragged: hidden; a box of neither: untouched.
   const framed = new Element();
   const other = new Element();
-  group.labelCache = labelCache([['c', '\u0000inputs'], [framed]], [['a', 'e'], [other]]);
+  group.labelCache = labelCache([['c', INPUTS], [framed]], [['a', 'e'], [other]]);
   const again = new DragFollow('', 'c');
   again.apply({ layout: drawn, levels, groups, to });
   assert.equal(framed.getAttribute('visibility'), 'hidden');
@@ -152,6 +152,17 @@ test('a cluster’s label follows when all its boxes move, is hidden while only 
   group.labelCache = labelCache();
   again.apply({ layout: drawn, levels, groups, to });
   assert.equal(framed.getAttribute('visibility'), null);
+  // The same cache again: its entries found once, a step allocating nothing for them.
+  const cache = labelCache([['c'], [new Element()]]);
+  group.labelCache = cache;
+  again.apply({ layout: drawn, levels, groups, to: { x: to.x + 1, y: to.y } });
+  const found = again.labelsOf(cache);
+  again.apply({ layout: drawn, levels, groups, to: { x: to.x + 2, y: to.y } });
+  assert.equal(again.labelsOf(cache), found);
+  // Released (as `drop` does): everything back, the group forgotten.
+  again.restore();
+  assert.equal(again.ids, null);
+  assert.equal(cache.get('c').elements[0].getAttribute('transform'), null);
 });
 
 test('ownedLabels: a group per owners and size, appended once to its size’s group, kept by the owners’ ids; none for no owner', () => {
