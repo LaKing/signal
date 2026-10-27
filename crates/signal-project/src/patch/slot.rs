@@ -339,6 +339,13 @@ fn apply_change(
         .split_last()
         .ok_or_else(|| bad("a change names no key"))?;
     let value = change.value.as_deref().map(parse_value).transpose()?;
+    if let Some(decor) = &change.decor
+        && !decor_ok(decor)
+    {
+        return Err(bad(
+            "a change's `decor` is spacing and comments only: [key prefix, key suffix, value prefix, value suffix]",
+        ));
+    }
     let mut tab = entry(doc, slot).ok_or_else(|| {
         refused(
             "unknown-instance",
@@ -375,6 +382,43 @@ fn apply_change(
         decor,
     });
     Ok(inverse)
+}
+
+/// Whether `decor` ([`Change::decor`], untrusted) is a key line's spacing
+/// and comments only: the prefix whole lines, each blank or a `#` comment;
+/// the key's suffix and the value's prefix spaces and tabs; the value's
+/// suffix spaces and tabs, then at most a `#` comment, on the line.
+fn decor_ok(decor: &[String]) -> bool {
+    let plain = |c: char| c == ' ' || c == '\t';
+    let comment = |text: &str| text.chars().all(|c| c == '\t' || !c.is_control());
+    let [prefix, key_suffix, value_prefix, value_suffix] = decor else {
+        return false;
+    };
+    let prefix_ok = prefix.split('\n').all(|line| {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let rest = line.trim_start_matches(plain);
+        rest.is_empty() || (rest.starts_with('#') && comment(rest))
+    });
+    let suffix_ok = {
+        let rest = value_suffix.trim_start_matches(plain);
+        rest.is_empty() || (rest.starts_with('#') && comment(rest))
+    };
+    prefix_ok && key_suffix.chars().all(plain) && value_prefix.chars().all(plain) && suffix_ok
+}
+
+/// `doc`'s text without instance `name`'s entry: what an edit of that entry
+/// alone leaves unchanged.
+fn without_entry(mut doc: DocumentMut, name: &str) -> String {
+    match doc.get_mut("instances") {
+        Some(TomlItem::Table(t)) => {
+            t.remove(name);
+        }
+        Some(TomlItem::Value(Value::InlineTable(t))) => {
+            t.remove(name);
+        }
+        _ => {}
+    }
+    doc.to_string()
 }
 
 /// Whether the entry of `name` in `text` is a slot (has a `slot` key).
@@ -781,6 +825,18 @@ impl Patching<'_> {
             .text
             .parse()
             .map_err(|_| refused("does-not-load", "the file does not parse"))?;
+        // What the edit may change outside the slot's entry: the wires and
+        // exports it renames, and nothing else (checked at the end).
+        let mut outside = doc.clone();
+        for (old, new) in wires {
+            let (from, to) = (format!("{slot}.{old}"), format!("{slot}.{new}"));
+            for key in ["wiring", "exports"] {
+                if let Some(item) = outside.get_mut(key) {
+                    rewrite(item, &from, &to);
+                }
+            }
+        }
+        let outside = without_entry(outside, slot);
         let mut inverse = Vec::new();
         // A template name (`slot = "lib.voice"`) edited inside becomes its
         // table form first, so the undo gives the name back.
@@ -820,10 +876,20 @@ impl Patching<'_> {
                 }
             }
             back.insert(new.clone(), old.clone());
-            self.renamed.push((from, to));
+            self.renamed.push((from.clone(), to.clone()));
+            self.follow.push((from, Some(to)));
         }
         inverse.reverse();
-        self.text = doc.to_string();
+        let text = doc.to_string();
+        let after: DocumentMut = text
+            .parse()
+            .map_err(|_| bad("the slot op leaves a file that does not parse"))?;
+        if without_entry(after, slot) != outside {
+            return Err(bad(
+                "a slot op writes only the slot's own entry and the wires on its ports",
+            ));
+        }
+        self.text = text;
         // The slot is still a slot, and the file still parses as a level.
         self.ensure_slot(slot)?;
         Ok((inverse, back))
@@ -1069,7 +1135,7 @@ impl Patching<'_> {
                         changes.push(set(&[name], None));
                     }
                     ports.retain(|p| p.name != *name);
-                    self.removed.push(format!("{slot}.{name}"));
+                    self.follow.push((format!("{slot}.{name}"), None));
                 }
                 // One op renames each port once: a new name that another
                 // rename of the op takes from or gives away would chain them.
@@ -1080,7 +1146,9 @@ impl Patching<'_> {
                         )));
                     }
                 }
+                // Removals come before renames (a rename may take a removed name).
                 let mut exclude = read.exclude.clone();
+                exclude.retain(|n| !remove.contains(n));
                 for (old, new) in rename {
                     let Some(port) = ports.iter().find(|p| p.name == *old).cloned() else {
                         return Err(bad(format!(
@@ -1204,7 +1272,6 @@ impl Patching<'_> {
                     ports.retain(|p| p.name != declared.name);
                     ports.push(declared);
                 }
-                exclude.retain(|n| !remove.contains(n));
                 if exclude != read.exclude {
                     let text = (!exclude.is_empty())
                         .then(|| json_text(&serde_json::json!(exclude)))

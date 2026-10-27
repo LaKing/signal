@@ -391,9 +391,11 @@ pub struct Patched {
     /// ADR 0037 §2: the slot ports renamed, `slot.old` → `slot.new` at the
     /// level, in order: the caller rewrites the panel bindings on them.
     pub renamed: Vec<(String, String)>,
-    /// ADR 0037 §2: the slot ports and parameters removed, `slot.port` at
-    /// the level: the caller removes their snapshots' values (ADR 0041).
-    pub removed: Vec<String>,
+    /// ADR 0037 §2, ADR 0041: the slot ports renamed (`slot.old`,
+    /// `Some(slot.new)`) and removed (`slot.port`, `None`) at the level, in
+    /// the order the ops did them (an op's removals before its renames): the
+    /// caller moves or drops their snapshots' values in that order.
+    pub follow: Vec<(String, Option<String>)>,
 }
 
 /// Applies `ops` in order to `text` (the level file) and `positions`
@@ -412,7 +414,7 @@ pub fn apply(
         ctx,
         notes: Vec::new(),
         renamed: Vec::new(),
-        removed: Vec::new(),
+        follow: Vec::new(),
     };
     map(&patch.text, &Scheme::LEVEL).map_err(|e| refused("does-not-load", e))?;
     let mut inverse = Vec::new();
@@ -427,7 +429,7 @@ pub fn apply(
         inverse,
         notes: patch.notes,
         renamed: patch.renamed,
-        removed: patch.removed,
+        follow: patch.follow,
     })
 }
 
@@ -1420,7 +1422,7 @@ struct Patching<'a> {
     ctx: &'a Context<'a>,
     notes: Vec<String>,
     renamed: Vec<(String, String)>,
-    removed: Vec<String>,
+    follow: Vec<(String, Option<String>)>,
 }
 
 fn valid_name(name: &str) -> bool {

@@ -1443,6 +1443,25 @@ fn the_slot_tools_add_edit_load_and_unload_a_slot() {
     );
     assert!(mcp.file("project.toml").contains("fx = "));
 
+    // `project = ".."` (the folder around this one) is resolved and refused
+    // as any other form; and an instance.add whose untrusted edits write an
+    // include is refused by the edited file's own projects, whatever the op.
+    let text = mcp.file("project.toml");
+    let base = mcp.ok("read_file", json!({"file": "project.toml"}))["base"].clone();
+    let written = text.replace("fx = { slot", "other = { project = \"..\" }\nfx = { slot");
+    let refusal = mcp.refused(
+        "write_file",
+        json!({"file": "project.toml", "text": written, "base": base}),
+    );
+    assert!(refusal.contains("--load-root"), "{refusal}");
+    let refusal = mcp.refused(
+        "patch",
+        json!({"ops": [{"op": "instance.add", "name": "evil", "module": "", "edits": [
+            {"edit": "insert", "at": {"item": "instance:osc", "offset": 1}, "text": "evil = { project = \"../beside\" }\n"}
+        ]}]}),
+    );
+    assert!(refusal.contains("--load-root"), "{refusal}");
+    assert!(!mcp.file("project.toml").contains("evil"));
     // A project beside this one: outside the project's folder.
     let outside = mcp.refused("slot_load", json!({"slot": "fx", "load": "../beside"}));
     assert!(outside.contains("--load-root"), "{outside}");

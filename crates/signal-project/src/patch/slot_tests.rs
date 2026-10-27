@@ -727,7 +727,10 @@ fn snapshot_exclude_follows_the_interface() {
         "{renamed}"
     );
     assert!(renamed.contains("amount = -6"), "{renamed}");
-    assert!(patched.removed.is_empty());
+    assert_eq!(
+        patched.follow,
+        [("fx.volume".to_owned(), Some("fx.amount".to_owned()))]
+    );
     plans(&renamed).unwrap();
     let (removed, patched) = round_trip(
         &text,
@@ -736,7 +739,7 @@ fn snapshot_exclude_follows_the_interface() {
         )],
     );
     assert!(!removed.contains("snapshot_exclude"), "{removed}");
-    assert_eq!(patched.removed, ["fx.volume"]);
+    assert_eq!(patched.follow, [("fx.volume".to_owned(), None)]);
     plans(&removed).unwrap();
     let wrong = text.replace(
         r#"snapshot_exclude = ["volume"]"#,
@@ -823,4 +826,81 @@ fn a_restore_s_undo_removes_the_tables_it_made() {
     );
     assert!(written.contains("map = { x = \"in\" }"), "{written}");
     // The round trip checked the undo byte for byte: no `map = {}` stays.
+}
+
+/// An untrusted restore's `decor` is spacing and comments only: one that
+/// would write a table, a key or a line break after a value is refused,
+/// nothing written; a comment line is taken.
+#[test]
+fn an_untrusted_decor_writes_only_spacing_and_comments() {
+    let text = COMMENTED.replace("seed_note = 1\n", "");
+    let restore = |decor: serde_json::Value| {
+        op(
+            serde_json::json!({"op": "slot.restore", "slot": "bus", "changes": [
+                {"path": ["seed"], "value": "3", "decor": decor}
+            ]}),
+        )
+    };
+    for evil in [
+        serde_json::json!([
+            "\n\n[instances.evil]\nproject = \"/outside\"\n",
+            " ",
+            " ",
+            ""
+        ]),
+        serde_json::json!(["", " ", " ", " # ok\nproject = \"/outside\""]),
+        serde_json::json!(["", " = 1\nmodule = \"x\"\nk", " ", ""]),
+        serde_json::json!(["", " ", " \"/x\" #", ""]),
+        serde_json::json!(["# fine", " "]),
+    ] {
+        let refused = apply(&text, None, &[restore(evil.clone())], &ctx()).unwrap_err();
+        assert_eq!(refused.code, "bad-value", "{evil}");
+    }
+    let patched = apply(
+        &text,
+        None,
+        &[restore(serde_json::json!([
+            "# a seed\n",
+            " ",
+            " ",
+            "  # its own"
+        ]))],
+        &ctx(),
+    )
+    .unwrap();
+    assert!(
+        patched.text.contains("# a seed\nseed = 3  # its own\n"),
+        "{}",
+        patched.text
+    );
+}
+
+/// A rename onto a name the same op removes: the removal comes first, so
+/// the renamed parameter keeps its `snapshot_exclude` entry, and the
+/// follow list says so in order.
+#[test]
+fn a_rename_onto_a_removed_name_keeps_its_snapshot_state() {
+    let text = HOST.replace(
+        r#"outputs = { y = "audio" } }, load = "std.gain", map = { x = "in", y = "out" } }"#,
+        r#"outputs = { y = "audio" }, parameters = { volume = {}, level = {} } }, load = "std.gain", map = { x = "in", y = "out", level = "db" }, snapshot_exclude = ["level", "volume"] }"#,
+    );
+    plans(&text).unwrap();
+    let (edited, patched) = round_trip(
+        &text,
+        &[op(
+            serde_json::json!({"op": "slot.interface", "slot": "fx", "remove": ["volume"], "rename": {"level": "volume"}}),
+        )],
+    );
+    assert!(
+        edited.contains(r#"snapshot_exclude = ["volume"]"#),
+        "{edited}"
+    );
+    assert_eq!(
+        patched.follow,
+        [
+            ("fx.volume".to_owned(), None),
+            ("fx.level".to_owned(), Some("fx.volume".to_owned()))
+        ]
+    );
+    plans(&edited).unwrap();
 }

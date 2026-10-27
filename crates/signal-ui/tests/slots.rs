@@ -478,3 +478,60 @@ fn renames_chain_and_snapshots_follow(transport: Transport) {
 }
 
 both!(renames_chain_and_snapshots_follow);
+
+/// ADR 0041: a removal then a rename onto the removed name, in one patch,
+/// keeps the renamed parameter's values; the write is pushed to every
+/// client as the snapshot list; a rename that moves no value leaves
+/// `snapshots.toml` as it is, byte for byte.
+fn snapshots_follow_in_op_order(transport: Transport) {
+    let mut rig = slots("slot-snap-order", transport);
+    let (mut ws, _) = rig.client();
+    let snapshots = rig.dir.join("snapshots.toml");
+    let mut all = signal_project::snapshot::Snapshots::default();
+    let values: signal_project::snapshot::Values = [
+        ("/fx.volume".to_owned(), -6.0),
+        ("/fx.level".to_owned(), 0.25),
+    ]
+    .into();
+    all.snapshots.insert("a".to_owned(), values);
+    // Not the canonical text: a rename that moves nothing must keep it.
+    let written = format!("{}# kept\n", signal_project::snapshot::render(&all));
+    fs::write(&snapshots, &written).unwrap();
+    patch(
+        &mut rig,
+        &mut ws,
+        1,
+        json!([{"op": "slot.interface", "slot": "fx", "rename": {"x": "input"}}]),
+    );
+    assert_eq!(
+        fs::read_to_string(&snapshots).unwrap(),
+        written,
+        "nothing moved"
+    );
+    rig.wait(&mut ws, "the reload", |got| got.of("reload").cloned());
+    // Another client: it gets the snapshot list the write pushes.
+    let (mut other, _) = rig.client();
+    let reply = patch(
+        &mut rig,
+        &mut ws,
+        3,
+        json!([
+            {"op": "slot.interface", "slot": "fx", "add": [{"name": "level", "role": "parameter"}]},
+            {"op": "slot.interface", "slot": "fx", "remove": ["volume"]},
+            {"op": "slot.interface", "slot": "fx", "rename": {"level": "volume"}}
+        ]),
+    );
+    assert_eq!(reply["snapshots"], "snapshots.toml", "{reply}");
+    let text = fs::read_to_string(&snapshots).unwrap();
+    assert!(
+        text.contains("\"/fx.volume\" = 0.25") && !text.contains("/fx.level"),
+        "{text}"
+    );
+    let pushed = rig.wait(&mut other, "the snapshot list", |got| {
+        got.of("snapshots").cloned()
+    });
+    assert_eq!(pushed["snapshots"][0]["name"], "a", "{pushed}");
+    rig.finish();
+}
+
+both!(snapshots_follow_in_op_order);

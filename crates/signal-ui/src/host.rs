@@ -4486,11 +4486,14 @@ impl Host {
         // ADR 0041: the snapshots' values of a renamed or removed slot
         // parameter follow it (top-level controls only), under the same lock.
         let resnapped = if level.is_empty() {
-            self.resnap(&lock, &patched.renamed, &patched.removed, &mut notes)
+            self.resnap(&lock, &patched.follow, &mut notes)
         } else {
             false
         };
         drop(lock);
+        if resnapped {
+            self.snapshots_written();
+        }
         // Playing, the watch reloads the level's file and pushes `graph`.
         if self.run.is_none() {
             self.push_graph(false);
@@ -4602,56 +4605,59 @@ impl Host {
     }
 
     /// ADR 0041 with ADR 0037 §2: in `snapshots.toml` (when the project has
-    /// one), every snapshot's value of a renamed top-level slot parameter
-    /// (`slot.old` → `slot.new`, in order) moves to its new address and a
-    /// removed one's goes, the undo snapshot's too, written under the held
-    /// `lock` in the file's canonical text. Whether it wrote; a failure is a
-    /// note (the level's file holds the edit).
+    /// one), every snapshot's value (the undo snapshot's too) of a top-level
+    /// slot port renamed or removed by the patch follows it, in the order of
+    /// `follow` (`slot.old` → `Some(slot.new)`, or removed: `None`), written
+    /// under the held `lock` in the file's canonical text; nothing is
+    /// written when no value moves. Whether it wrote; a failure is a note
+    /// (the level's file holds the edit).
     fn resnap(
         &self,
         lock: &ProjectLock,
-        renamed: &[(String, String)],
-        removed: &[String],
+        follow: &[(String, Option<String>)],
         notes: &mut Vec<String>,
     ) -> bool {
-        if (renamed.is_empty() && removed.is_empty())
-            || !self
-                .dir
-                .join(signal_project::snapshot::SNAPSHOTS_FILE)
-                .exists()
-        {
+        if follow.is_empty() || !self.dir.join(SNAPSHOTS_FILE).exists() {
             return false;
         }
+        let apply = |values: &mut snapshots::Values| {
+            let mut moved = false;
+            for (old, new) in follow {
+                if let Some(value) = values.remove(&format!("/{old}")) {
+                    moved = true;
+                    if let Some(new) = new {
+                        values.insert(format!("/{new}"), value);
+                    }
+                }
+            }
+            moved
+        };
         let edited = snapshots::edit_locked(
             &self.dir,
             lock,
             |_| Ok(()),
             |all| {
-                let follow = |values: &mut snapshots::Values| {
-                    for (old, new) in renamed {
-                        if let Some(value) = values.remove(&format!("/{old}")) {
-                            values.insert(format!("/{new}"), value);
-                        }
-                    }
-                    for gone in removed {
-                        values.remove(&format!("/{gone}"));
-                    }
-                };
+                let mut moved = false;
                 for values in all.snapshots.values_mut() {
-                    follow(values);
+                    moved |= apply(values);
                 }
                 if let Some(undo) = &mut all.undo {
-                    follow(undo);
+                    moved |= apply(undo);
                 }
-                Ok(())
+                // Nothing to move: the file is left as it is, byte for byte.
+                if moved {
+                    Ok(())
+                } else {
+                    Err(SnapshotError::Changed(String::new()))
+                }
             },
         );
         match edited {
             Ok(edited) => edited.wrote,
+            Err(SnapshotError::Changed(why)) if why.is_empty() => false,
             Err(error) => {
                 notes.push(format!(
-                    "{}: its values were not renamed ({error})",
-                    signal_project::snapshot::SNAPSHOTS_FILE
+                    "{SNAPSHOTS_FILE}: its values were not renamed ({error})"
                 ));
                 false
             }

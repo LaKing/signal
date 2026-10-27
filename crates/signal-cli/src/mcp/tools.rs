@@ -1890,17 +1890,19 @@ fn patch_tool(context: &Context, arguments: &Value) -> Outcome {
 /// (`slot.add`, `slot.load`, `slot.restore` writing `load`) lies inside a
 /// folder this server may load from (`--load-root`, the project's own).
 fn loads_allowed(context: &Context, ops: &[Op]) -> Result<(), Refused> {
-    projects_allowed(context, patch::loads_of(ops))
+    let projects = patch::loads_of(ops)
+        .into_iter()
+        .filter(|load| load.contains('/') || load.ends_with(".signal"))
+        .collect();
+    projects_allowed(context, projects)
 }
 
 /// Every project path of `loads` lies inside a folder this server may load
 /// a project from (`--load-root`, the project's own).
 fn projects_allowed(context: &Context, loads: Vec<String>) -> Result<(), Refused> {
+    // Each resolved and checked whatever its form (`..`, a bare name, a link):
+    // as include.rs reads it, from the project's folder.
     for load in loads {
-        let is_project = load.contains('/') || load.ends_with(".signal");
-        if !is_project {
-            continue;
-        }
         let Ok(path) = context.dir.join(&load).canonicalize() else {
             return Err(refused(format!(
                 "not loaded: `{load}` is no project folder from {}",
@@ -1987,6 +1989,15 @@ fn patch_ops(context: &Context, level: String, base: Option<String>, ops_json: V
         // A patch that cannot be simulated here is not sent (fail closed).
         let patched = patch::apply(&before, None, &ops, &ctx)
             .map_err(|e| refused(format!("{}: {}", e.code, e.message)))?;
+        // ADR 0037 §7: whatever the ops (a slot op, an instance.add with
+        // edits), a project the edited file newly includes or loads lies
+        // inside the folders this server may load from, as for write_file.
+        let before_projects = patch::projects_in(&before);
+        let new = patch::projects_in(&patched.text)
+            .into_iter()
+            .filter(|p| !before_projects.contains(p))
+            .collect();
+        projects_allowed(context, new)?;
         guard_files(context, replaced(files, &file, &patched.text))?;
     }
     let reply = bare(ask(
