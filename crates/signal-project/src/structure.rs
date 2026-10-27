@@ -91,21 +91,30 @@ impl Project {
             let Some(def) = walk.by_name.get(name.as_str()) else {
                 continue;
             };
-            let mut level = walk.level(def, prefix, true);
-            if let Value::Object(fields) = &mut level {
-                let mut inputs = walk.exported_inputs(def);
-                let mut outputs = walk.exported_outputs(def);
-                let mut parameters = walk.exported_parameters(def);
-                self.presentation(name, ExportKind::Input, &mut inputs);
-                self.presentation(name, ExportKind::Output, &mut outputs);
-                self.presentation(name, ExportKind::Parameter, &mut parameters);
-                fields.insert("inputs".to_owned(), inputs);
-                fields.insert("outputs".to_owned(), outputs);
-                fields.insert("parameters".to_owned(), parameters);
-            }
-            composites.insert(name.clone(), level);
+            composites.insert(name.clone(), self.composite_level(&walk, def, prefix));
         }
         json!({"top": top, "composites": composites})
+    }
+
+    /// Composite `def`'s level as `graph` gives it in `composites`: its
+    /// inside (instances and connections, addresses relative to an instance
+    /// of it at `prefix`) with its exported `inputs`, `outputs` and
+    /// `parameters`, each carrying its `order` and `group`.
+    fn composite_level(&self, walk: &Walk<'_>, def: &CompositeDef, prefix: &str) -> Value {
+        let name = def.name.as_str();
+        let mut level = walk.level(def, prefix, true);
+        if let Value::Object(fields) = &mut level {
+            let mut inputs = walk.exported_inputs(def);
+            let mut outputs = walk.exported_outputs(def);
+            let mut parameters = walk.exported_parameters(def);
+            self.presentation(name, ExportKind::Input, &mut inputs);
+            self.presentation(name, ExportKind::Output, &mut outputs);
+            self.presentation(name, ExportKind::Parameter, &mut parameters);
+            fields.insert("inputs".to_owned(), inputs);
+            fields.insert("outputs".to_owned(), outputs);
+            fields.insert("parameters".to_owned(), parameters);
+        }
+        level
     }
 
     /// M2.13-2 (`docs/ui-protocol.md` "graph"): each export of `kind` of
@@ -180,19 +189,29 @@ impl Project {
             .iter()
             .map(|def| {
                 let (ports, parameters) = walk.interface(def, &|_| String::new());
-                json!({
+                let mut entry = json!({
                     "module": def.name,
                     "composite": true,
-                    "description": null,
+                    // The file's `[composite] description`, else null.
+                    "description": self.description(&def.name),
                     "ports": ports.into_iter().map(unaddressed).collect::<Vec<_>>(),
                     "parameters": parameters.into_iter().map(unaddressed).collect::<Vec<_>>(),
-                })
+                    // The add browser's schematic preview: its inside as `graph` gives a composite's.
+                    "inside": self.composite_level(&walk, def, ""),
+                });
+                // ADR 0027 §1: its category, only when the file names one.
+                if let (Some(category), Value::Object(fields)) =
+                    (self.category(&def.name), &mut entry)
+                {
+                    fields.insert("category".to_owned(), json!(category));
+                }
+                entry
             })
             .collect();
         // ADR 0027 §6: the palette groups by category and library. The
         // built-in library always loads (signal-lib's tests), so a failure
         // here only leaves it out.
-        composites.extend(library_modules(registry).unwrap_or_default());
+        composites.extend(library_entries(registry, true).unwrap_or_default());
         json!({"primitives": primitives, "composites": composites})
     }
 
@@ -292,6 +311,12 @@ pub fn library_parameters(module: &str) -> Option<Vec<String>> {
 /// parameters as an instance of it shows them (the interface `graph` gives an
 /// instance), without `address`.
 pub fn library_modules(registry: &Registry) -> Result<Vec<Value>, Vec<Diagnostic>> {
+    library_entries(registry, false)
+}
+
+/// [`library_modules`], each entry with its `inside` (its level as `graph`
+/// gives a composite's) when `inside` is set: the UI protocol's `modules`.
+fn library_entries(registry: &Registry, inside: bool) -> Result<Vec<Value>, Vec<Diagnostic>> {
     let instances: String = Library::builtin()
         .names()
         .map(|n| format!("{n} = {{ module = \"{LIBRARY_PREFIX}{n}\" }}\n"))
@@ -347,6 +372,12 @@ pub fn library_modules(registry: &Registry) -> Result<Vec<Value>, Vec<Diagnostic
                 .and_then(Library::reference_for);
             if let (Some(native), Value::Object(fields)) = (reference, &mut entry) {
                 fields.insert("reference_for".to_owned(), json!(native));
+            }
+            if let (true, Value::Object(fields)) = (inside, &mut entry) {
+                fields.insert(
+                    "inside".to_owned(),
+                    project.composite_level(&walk, &l.def, ""),
+                );
             }
             entry
         })

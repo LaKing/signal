@@ -33,12 +33,16 @@ test('nothing inside a tab or a panel scrolls on its own', () => {
   // left of the schematic): the sidebar's body scrolls inside the
   // Schematic tab, which itself never scrolls; nothing else of it does.
   const scrollers = (text) => [...text.matchAll(/([^{}\n]+)\{[^}]*overflow(-x|-y)?\s*:\s*(auto|scroll)/g)].map((m) => m[1].trim());
+  // A second (the operator's, 2026-10-27, for the owner's Add module
+  // browser): the browser is a modal dialog over the whole window, and its
+  // two panes, the tree and the detail, scroll inside it at small sizes.
+  const allowed = { 'schematic.js': ['.side-body'], 'module-browser.js': ['.browser .tree', '.browser .detail'] };
   for (const file of controls) {
     const text = read(`controls/${file}`);
-    if (file !== 'schematic.js') assert.deepEqual([...text.matchAll(SCROLLS)], [], file);
+    if (!allowed[file]) assert.deepEqual([...text.matchAll(SCROLLS)], [], file);
     else {
-      assert.equal([...text.matchAll(SCROLLS)].length, 1, file);
-      assert.deepEqual(scrollers(text), ['.side-body'], file);
+      assert.equal([...text.matchAll(SCROLLS)].length, allowed[file].length, file);
+      assert.deepEqual(scrollers(text), allowed[file], file);
     }
   }
   for (const file of ['app/app.js', 'app/setup.js']) assert.deepEqual([...read(file).matchAll(SCROLLS)], [], file);

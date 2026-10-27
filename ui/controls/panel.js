@@ -14,6 +14,18 @@ import { BindingCheck, defaultPanel, formatDiagnostic, panelFile } from '../lib/
 import { unsavedLine } from '../lib/unsaved.js';
 import { EDITOR_CSS, PanelEditor, showWritten } from './panel-editor.js';
 
+/** The generated panel's grid of cards (`generatedSections`), also the Add module browser's panel preview. */
+export const GENERATED_CSS = `
+.generated { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(var(--signal-card-min, 16rem), 100%), 1fr)); gap: .75rem; }
+.generated:empty { display: none; }
+.generated section { min-width: 0; padding: .75rem 1rem; display: flex; flex-direction: column; gap: .6rem; }
+.generated section.wide { grid-column: 1 / -1; }
+.generated h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--signal-muted, #8a93a3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.generated h2 small { font-weight: 400; letter-spacing: 0; text-transform: none; margin-left: .5em; }
+.generated .row { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; align-items: flex-end; }
+.generated .signal-group { display: flex; flex: none; flex-wrap: nowrap; gap: .5rem; align-items: flex-end; }
+.generated signal-scope { flex: 1 1 20rem; min-width: 16rem; }`;
+
 const CSS = `
 :host { display: block; color: var(--signal-fg, #d6dbe4); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
 /* Cards (docs/ui-controls.md "Panels"): the bar, the problems and the
@@ -29,15 +41,7 @@ const CSS = `
 .problems { margin: 0 0 .75rem; padding: .5rem .75rem .5rem 2rem; border: 1px solid var(--signal-clip, #ff5252); font: 11px/1.5 ui-monospace, Menlo, monospace; }
 .problems .warning { color: var(--signal-effective, #ffb74d); }
 .problems .error { color: var(--signal-clip, #ff5252); }
-.generated { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(var(--signal-card-min, 16rem), 100%), 1fr)); gap: .75rem; }
-.generated:empty { display: none; }
-.generated section { min-width: 0; padding: .75rem 1rem; display: flex; flex-direction: column; gap: .6rem; }
-.generated section.wide { grid-column: 1 / -1; }
-.generated h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--signal-muted, #8a93a3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.generated h2 small { font-weight: 400; letter-spacing: 0; text-transform: none; margin-left: .5em; }
-.generated .row { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; align-items: flex-end; }
-.generated .signal-group { display: flex; flex: none; flex-wrap: nowrap; gap: .5rem; align-items: flex-end; }
-.generated signal-scope { flex: 1 1 20rem; min-width: 16rem; }
+${GENERATED_CSS}
 /* The unsaved indicator is a box of fixed width at the bar's end, its text cut
    to its own fixed width: the count or the error changing moves nothing. */
 .unsaved { flex: none; width: 46ch; margin-left: auto; display: flex; align-items: center; color: var(--signal-unsaved, #ffb74d); }
@@ -281,43 +285,52 @@ export class SignalPanel extends HTMLElement {
 
   /** Builds the default panel of `description`. */
   generate(description) {
-    const spec = defaultPanel(description);
-    const element = (name, attributes) => {
-      const e = document.createElement(name);
-      for (const [key, value] of Object.entries(attributes)) e.setAttribute(key, value);
-      return e;
-    };
-    const section = (title, note, children) => {
-      const s = document.createElement('section');
-      const h = document.createElement('h2');
-      h.textContent = title;
-      if (note) {
-        const small = document.createElement('small');
-        small.textContent = note;
-        h.append(small);
-      }
-      const row = document.createElement('div');
-      row.className = 'row';
-      row.append(...children);
-      s.append(h, row);
-      return s;
-    };
-    const sections = spec.groups.map((g) =>
-      section(g.instance, g.module, g.controls.map((c) => element(c.element, { bind: c.bind, label: c.label, taper: c.taper }))),
-    );
-    // The sink's meters side by side, never broken across lines.
-    const meters = document.createElement('div');
-    meters.className = 'signal-group';
-    meters.append(...spec.meters.map((m) => element('signal-meter', { bind: m.bind, label: m.label })));
-    const output = [
-      ...(spec.meters.length ? [meters] : []),
-      ...(spec.scope ? [element('signal-scope', { bind: spec.scope.bind, label: spec.scope.label })] : []),
-    ];
-    // The output card (meters and the scope) spans the grid's width.
-    if (output.length) sections.push(Object.assign(section('output', null, output), { className: 'wide' }));
-    this.$('.generated').replaceChildren(...sections);
+    this.$('.generated').replaceChildren(...generatedSections(defaultPanel(description)));
     this.$('.summary').textContent = 'generated panel (the project has no ui/main.html)';
   }
+}
+
+/**
+ * The generated panel's cards for `spec` (`defaultPanel`'s): a section per
+ * instance, its controls in a row, and a wide output card with the sink's
+ * meters and the scope. Also the Add module browser's panel preview
+ * (./module-browser.js), styled by `GENERATED_CSS` in a `.generated` grid.
+ */
+export function generatedSections(spec) {
+  const element = (name, attributes) => {
+    const e = document.createElement(name);
+    for (const [key, value] of Object.entries(attributes)) e.setAttribute(key, value);
+    return e;
+  };
+  const section = (title, note, children) => {
+    const s = document.createElement('section');
+    const h = document.createElement('h2');
+    h.textContent = title;
+    if (note) {
+      const small = document.createElement('small');
+      small.textContent = note;
+      h.append(small);
+    }
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.append(...children);
+    s.append(h, row);
+    return s;
+  };
+  const sections = spec.groups.map((g) =>
+    section(g.instance, g.module, g.controls.map((c) => element(c.element, { bind: c.bind, label: c.label, taper: c.taper }))),
+  );
+  // The sink's meters side by side, never broken across lines.
+  const meters = document.createElement('div');
+  meters.className = 'signal-group';
+  meters.append(...spec.meters.map((m) => element('signal-meter', { bind: m.bind, label: m.label })));
+  const output = [
+    ...(spec.meters.length ? [meters] : []),
+    ...(spec.scope ? [element('signal-scope', { bind: spec.scope.bind, label: spec.scope.label })] : []),
+  ];
+  // The output card (meters and the scope) spans the grid's width.
+  if (output.length) sections.push(Object.assign(section('output', null, output), { className: 'wide' }));
+  return sections;
 }
 
 customElements.get('signal-panel') ?? customElements.define('signal-panel', SignalPanel);

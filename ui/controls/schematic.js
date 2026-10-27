@@ -476,7 +476,8 @@ export class SignalSchematic extends HTMLElement {
     });
     this.svg.addEventListener('dblclick', (e) => this.doubleClick(e));
     this.svg.addEventListener('wheel', (e) => this.wheel(e), { passive: false });
-    registerWheel(this);
+    // The Add module browser's panes scroll with the wheel: they are not the drawing's.
+    registerWheel(this, (event) => !this.editor.holds(event));
     // Safari's pinch.
     this.svg.addEventListener('gesturestart', (e) => this.pinch(e, true));
     this.svg.addEventListener('gesturechange', (e) => this.pinch(e, false));

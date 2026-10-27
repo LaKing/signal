@@ -234,3 +234,89 @@ fn composite_exports_carry_their_order_in_the_file() {
     assert_eq!(parameters.last().unwrap(), "volume");
     assert!(voice["inputs"][0].get("group").is_none());
 }
+
+/// The add browser (`docs/ui-protocol.md` "modules"): every composite entry
+/// carries its `inside`, its level as `graph` gives a composite's (the
+/// converters aside: there is no plan), and a project composite its file's
+/// `description` and `category`.
+#[test]
+fn modules_give_each_composite_its_inside_description_and_category() {
+    let dir: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/studio");
+    let mut registry = Registry::new();
+    signal_std::register(&mut registry).unwrap();
+    let loaded = Project::load(&dir).unwrap();
+    let planned = loaded.plan(&registry).unwrap();
+    let graph = loaded.structure(&planned.plan, &registry);
+    let modules = loaded.modules(&registry);
+    let composite = |name: &str| -> Value {
+        modules["composites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["module"] == name)
+            .unwrap()
+            .clone()
+    };
+    let no_converters = |mut level: Value| {
+        for c in level["connections"].as_array_mut().unwrap() {
+            c.as_object_mut().unwrap().remove("converters");
+        }
+        level
+    };
+    let voice = composite("moog_voice");
+    assert_eq!(
+        no_converters(voice["inside"].clone()),
+        no_converters(graph["composites"]["moog_voice"].clone())
+    );
+    assert!(voice["description"].is_null() && voice.get("category").is_none());
+    // A library composite's inside: its own instances and connections, relative, with its exports.
+    let echo = composite("lib.tape_echo");
+    let inside = &echo["inside"];
+    assert!(!inside["instances"].as_array().unwrap().is_empty());
+    assert!(!inside["connections"].as_array().unwrap().is_empty());
+    assert!(
+        inside["connections"][0]["from"]
+            .as_str()
+            .is_some_and(|f| !f.starts_with('/'))
+    );
+    let names = |list: &Value| -> Vec<String> {
+        let mut all: Vec<String> = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap().to_owned())
+            .collect();
+        all.sort_unstable();
+        all
+    };
+    assert_eq!(names(&inside["parameters"]), names(&echo["parameters"]));
+    // `signal modules` (the catalogue) has no inside.
+    let catalogue = signal_project::library_modules(&registry).unwrap();
+    assert!(catalogue.iter().all(|c| c.get("inside").is_none()));
+
+    // A project composite that names a description and a category.
+    let files = vec![
+        signal_project::SourceFile {
+            path: "project.toml".to_owned(),
+            text: "schema_version = 1\n\n[project]\nname = \"p\"\n\n[instances]\nv = { module = \"verb\" }\nout = { module = \"std.audio_out\" }\n\n[wiring]\nconnections = [{ from = \"v.out\", to = \"out.l\" }]\n".to_owned(),
+        },
+        signal_project::SourceFile {
+            path: "composites/verb.toml".to_owned(),
+            text: "schema_version = 1\n\n[composite]\nname = \"verb\"\ncategory = \"delay\"\ndescription = \"A short echo.\"\n\n[instances]\nosc = { module = \"std.sine_osc\" }\n\n[exports]\noutputs = { out = \"osc.out\" }\n".to_owned(),
+        },
+    ];
+    let project = Project::from_sources(files).unwrap();
+    let modules = project.modules(&registry);
+    let verb = &modules["composites"][0];
+    assert_eq!(verb["module"], "verb");
+    assert_eq!(verb["description"], "A short echo.");
+    assert_eq!(verb["category"], "delay");
+    let inside = &verb["inside"];
+    assert_eq!(names(&inside["instances"]), ["osc"]);
+    assert_eq!(inside["instances"][0]["module"], "std.sine_osc");
+    assert_eq!(inside["instances"][0]["address"], "osc");
+    assert_eq!(inside["connections"], json!([]));
+    assert_eq!(inside["inputs"], json!([]));
+    assert_eq!(inside["outputs"][0]["name"], "out");
+    assert_eq!(inside["outputs"][0]["from"], "osc.out");
+}

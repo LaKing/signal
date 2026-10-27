@@ -333,6 +333,14 @@ fn modules() {
             .iter()
             .any(|m| m["module"] == "lib.tape_echo")
     );
+    // A composite's `inside` is the Add module browser's, not the catalogue's.
+    assert!(
+        all["composites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m.get("inside").is_none())
+    );
     assert!(mcp.finish().success());
 }
 

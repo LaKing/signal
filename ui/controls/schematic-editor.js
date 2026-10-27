@@ -1,7 +1,8 @@
 // The schematic's Edit patch mode (M2.9-3, ADR 0026 §6, docs/ui-controls.md
 // "Editing the patch"): the switch, Undo and Redo in <signal-schematic>'s
 // bar; dragging from an output to a compatible input or parameter connects
-// them; a double-click on the background opens the add palette there;
+// them; a double-click on the background opens the Add module browser
+// (./module-browser.js) for there;
 // Delete or Backspace removes the selection (several parts: one patch per
 // level); a wire's scale is typed in the sidebar. The context menu's edits (ui/lib/schematic-menu.js)
 // come here too: Delete, Edit scale…, Disconnect all, Add module here…. Every change is a `patch` written at once
@@ -20,19 +21,17 @@ import {
   instanceCount,
   nameError,
   namesOf,
-  paletteEntries,
   removeConnection,
   removeInstance,
   scaleConnection,
 } from '../lib/schematic-patch.js';
-import { EXPANDED, moveCursor, paletteKey, paletteRows, placeCursor, toggled, windowRows } from '../lib/schematic-palette.js';
+import { EXPANDED, browserEntries } from '../lib/module-browser.js';
+import { projectKey } from '../lib/schematic-palette.js';
+import { BROWSER_CSS, ModuleBrowser } from './module-browser.js';
 import { toLocal, toScreen } from '../lib/schematic-view.js';
 import { editLevel } from '../lib/schematic-open.js';
 import { cordCurve, curveData } from '../lib/schematic-wire.js';
 import { formatFixed } from '../lib/format.js';
-
-/** The rows the palette shows at once (the list keeps its height and never scrolls: the cursor moves its window). */
-const PALETTE_ROWS = 12;
 
 /** The editor's look, in <signal-schematic>'s shadow root: fixed sizes, absolutely placed. */
 export const EDITOR_CSS = `
@@ -43,27 +42,16 @@ export const EDITOR_CSS = `
 .pin.target, .pin.parameter.target:not(.connected) { stroke: var(--signal-focus, #5aa9ff); stroke-width: 3; }
 svg.rubber { pointer-events: none; }
 svg.rubber path { fill: none; stroke: var(--signal-focus, #5aa9ff); stroke-width: 1.5; stroke-dasharray: 4 3; }
-.palette { position: absolute; left: 0; top: 0; width: 22rem; box-sizing: border-box; padding: 6px; visibility: hidden; z-index: 2;
-  background: var(--signal-panel, #1f232b); border: 1px solid var(--signal-focus, #5aa9ff); border-radius: var(--signal-radius, 6px); }
-.palette input { width: 100%; box-sizing: border-box; font: inherit; color: inherit; background: var(--signal-bg, #16181d); border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 3px; margin: 0 0 4px; }
-.palette ol { list-style: none; margin: 0 0 4px; padding: 0; height: calc(${PALETTE_ROWS} * 1.6em); overflow: hidden; }
-.palette li { height: 1.6em; line-height: 1.6em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; padding: 0 4px 0 1.6em; border-radius: 3px; }
-.palette li.group { display: flex; gap: 0.6ch; padding-left: 4px; color: var(--signal-muted, #8a93a3); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.92em; }
-.palette li.group .twisty { flex: none; width: 1.2em; text-align: center; }
-.palette li.group .name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-.palette li.group .count { flex: none; font-weight: normal; font-variant-numeric: tabular-nums; }
-.palette li[aria-selected="true"] { background: var(--signal-knob, #262b34); color: var(--signal-accent, #4fc3f7); }
-.palette li .what { color: var(--signal-muted, #8a93a3); margin-left: 1ch; }
-.palette .about { height: 3.9em; line-height: 1.3em; overflow: hidden; color: var(--signal-fg, #d6dbe4); margin: 0 0 4px; overflow-wrap: anywhere; }
-.palette .about .group-name { color: var(--signal-muted, #8a93a3); }
-.palette .more, .palette .why { height: 1.3em; color: var(--signal-muted, #8a93a3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.palette .why { color: var(--signal-effective, #ffb74d); }
-.palette .buttons { display: flex; gap: 6px; justify-content: flex-end; }
 .notice { position: absolute; left: 8px; right: 8px; bottom: 28px; max-height: 30%; overflow: hidden; visibility: hidden; padding: 6px 8px; white-space: pre-wrap;
   background: var(--signal-panel, #1f232b); border: 1px solid var(--signal-effective, #ffb74d); border-radius: var(--signal-radius, 6px); }
 .notice h3 { margin: 0 0 4px; font-size: 12px; color: var(--signal-effective, #ffb74d); }
 .side .reach { color: var(--signal-effective, #ffb74d); margin-top: 4px; }
-`;
+${BROWSER_CSS}`;
+
+/** Which `modules` reply a graph's project would give: its project and the hashes of its files. */
+function modulesKey(graph) {
+  return graph ? `${projectKey(graph)}\n${JSON.stringify(graph.files ?? null)}` : null;
+}
 
 function html(name, properties = {}) {
   return Object.assign(document.createElement(name), properties);
@@ -82,16 +70,19 @@ export class SchematicEditor {
     this.session = new PatchSession();
     this.connecting = null;
     this.placing = null;
-    this.modules = null;
-    // The palette's open groups, kept for the page's session (memory only).
-    this.expanded = new Set(EXPANDED);
+    this.browser = new ModuleBrowser({
+      add: (module, name) => this.add(module, name),
+      closed: () => this.browserClosed(),
+      graph: () => this.s.graph,
+      defaultName: (module) => (this.placing ? defaultName(module, this.placing.names) : ''),
+    });
   }
 
   get editing() {
     return this.session.editing;
   }
 
-  /** Its switch and buttons at the start of `bar`, its palette, rubber band and notice in `root`. */
+  /** Its switch and buttons at the start of `bar`, its Add module browser, rubber band and notice in `root`. */
   build(bar, root) {
     this.toggle = html('button', { type: 'button', className: 'edit', textContent: 'Edit patch', title: 'Edit patch: add and remove instances and connections, written to the project’s files' });
     this.toggle.setAttribute('role', 'switch');
@@ -107,7 +98,8 @@ export class SchematicEditor {
     this.cord = svgEl('path', { visibility: 'hidden' });
     this.rubber.append(this.cord);
     this.notice = html('section', { className: 'notice' });
-    this.palette = this.buildPalette();
+    // The browser's open branches are kept for the page's session (memory only).
+    this.palette = this.browser.build(EXPANDED);
     root.append(this.rubber, this.notice, this.palette);
     this.updateButtons();
   }
@@ -274,178 +266,53 @@ export class SchematicEditor {
     this.cord?.setAttribute('visibility', 'hidden');
   }
 
-  // The add palette.
+  // The Add module browser.
 
-  buildPalette() {
-    const box = html('section', { className: 'palette' });
-    this.search = html('input', { type: 'text', placeholder: 'Search modules', spellcheck: false, autocomplete: 'off' });
-    this.list = html('ol', { role: 'listbox' });
-    this.list.setAttribute('aria-label', 'Module types by group');
-    this.about = html('div', { className: 'about' });
-    this.more = html('div', { className: 'more' });
-    this.name = html('input', { type: 'text', placeholder: 'name', spellcheck: false, autocomplete: 'off' });
-    this.why = html('div', { className: 'why' });
-    const add = html('button', { type: 'button', textContent: 'Add' });
-    const cancel = html('button', { type: 'button', textContent: 'Cancel' });
-    const buttons = html('div', { className: 'buttons' });
-    buttons.append(cancel, add);
-    box.append(this.search, this.list, this.more, this.about, this.name, this.why, buttons);
-    this.search.addEventListener('input', () => this.showEntries());
-    this.search.addEventListener('keydown', (event) => {
-      const placing = this.placing;
-      if (!placing || !this.view) return;
-      const action = paletteKey(event, this.view, placing.cursor);
-      if (!action) return;
-      event.preventDefault();
-      if (action === 'add') this.add();
-      else if (action.toggle) this.toggleGroup(action.toggle);
-      else if (action.move) {
-        placing.cursor = moveCursor(this.view, placing.cursor, action.move);
-        this.showEntries();
-      }
-    });
-    this.name.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') this.add();
-    });
-    this.name.addEventListener('input', () => (this.why.textContent = ''));
-    add.addEventListener('click', () => this.add());
-    cancel.addEventListener('click', () => this.closePalette());
-    // The wheel over the list moves its window (it never scrolls).
-    this.list.addEventListener('wheel', (event) => {
-      if (!this.placing || !this.view) return;
-      event.preventDefault();
-      this.placing.top = Math.max(0, Math.min(this.view.rows.length - PALETTE_ROWS, this.placing.top + Math.sign(event.deltaY) * 3));
-      this.showEntries({ follow: false });
-    });
-    // Its pointer and wheel are its own, not the schematic's.
-    for (const type of ['pointerdown', 'pointerup', 'pointermove', 'dblclick', 'wheel']) box.addEventListener(type, (event) => event.stopPropagation());
-    return box;
+  /** Whether `event` happened in the Add module browser (its wheel scrolls its panes). */
+  holds(event) {
+    return this.browser.holds(event);
   }
 
-  /** Opens the palette at screen `point` on `level` (a scene level: `paletteLevel`'s). */
+  /** Opens the Add module browser for screen `point` on `level` (a scene level: `paletteLevel`'s). */
   openPalette(point, level) {
     if (!this.editing || !level) return;
-    this.placing = { level: level.level, at: toLocal(level.transform, point), names: namesOf(this.levelGraph(level.level)), module: null, cursor: null, top: 0 };
-    const left = Math.max(0, Math.min(point.x, this.s.viewport.w - 352));
-    const top = Math.max(0, Math.min(point.y, this.s.viewport.h - 420));
-    this.palette.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
-    this.palette.style.visibility = 'visible';
-    this.search.value = '';
-    this.name.value = '';
-    this.why.textContent = '';
-    this.showEntries();
-    this.search.focus({ preventScroll: true });
+    this.placing = { level: level.level, at: toLocal(level.transform, point), names: namesOf(this.levelGraph(level.level)) };
+    // The last reply's types show at once while the project's files are the same; the reply that follows replaces them.
+    const key = modulesKey(this.s.graph);
+    const known = this.modulesKnown?.key === key ? this.modulesKnown.entries : null;
+    this.browser.open({ where: level.level ? `inside ${level.level}` : 'at the top level', entries: known });
     this.s.connection?.request?.({ type: 'modules' }).then(
       (modules) => {
-        this.modules = paletteEntries(modules);
+        const entries = browserEntries(modules);
+        this.modulesKnown = { key, entries };
+        if (this.placing) this.browser.setEntries(entries);
         this.s.modulesSeen?.(modules);
-        this.showEntries();
       },
-      (error) => (this.why.textContent = error.message),
+      (error) => this.browser.failed(error.message),
     );
   }
 
-  /**
-   * The list built again: the groups in their order, a search's matches
-   * under their (open) groups, the cursor's row marked and scrolled into
-   * view (unless `follow` is false: the wheel moved the window), and what
-   * the chosen type is under it.
-   */
-  showEntries({ follow = true } = {}) {
+  /** Adds `module` named `name` where the browser was opened: an error text when the name is refused, else null. */
+  add(module, name) {
     const placing = this.placing;
-    if (!placing) return;
-    const view = paletteRows(this.modules ?? [], this.search.value, this.expanded);
-    this.view = view;
-    placing.cursor = placeCursor(view, placing.cursor);
-    const row = view.rows.find((r) => r.key === placing.cursor);
-    // The cursor on an entry chooses it; on a heading, the last choice stays.
-    if (row?.kind === 'entry') {
-      if (row.entry.module !== placing.module) this.choose(row.entry);
-    } else if (!row && placing.module !== null) this.choose(null);
-    // The window of rows shown, moved to keep the cursor's in sight, its group's heading first.
-    const { top, shown, above, below } = windowRows(view.rows, follow ? view.rows.indexOf(row) : -1, placing.top, PALETTE_ROWS);
-    placing.top = top;
-    this.list.replaceChildren(
-      ...shown.map((r) => {
-        const item = r.kind === 'group' ? this.groupItem(r, view) : this.entryItem(r.entry);
-        item.setAttribute('aria-selected', String(r.key === placing.cursor));
-        return item;
-      }),
-    );
-    const hidden = above || below ? ` (${[above ? `${above} above` : '', below ? `${below} below` : ''].filter(Boolean).join(', ')})` : '';
-    const chosen = this.modules?.find((e) => e.module === placing.module) ?? null;
-    this.about.replaceChildren(
-      ...(chosen ? [html('span', { className: 'group-name', textContent: `${chosen.group} · ` }), document.createTextNode(chosen.description ?? (chosen.composite ? 'a composite of this project' : 'no description'))] : []),
-    );
-    this.about.title = chosen?.description ?? '';
-    this.more.textContent =
-      this.modules === null
-        ? 'Loading…'
-        : view.searching
-          ? view.matched
-            ? `${view.matched} match${view.matched === 1 ? '' : 'es'}${hidden}`
-            : 'No module matches'
-          : `${view.matched} types${hidden}: ↑↓ move, Enter adds or opens`;
-  }
-
-  groupItem(r, view) {
-    const item = html('li', { className: 'group' });
-    item.setAttribute('role', 'option');
-    if (!view.searching) item.setAttribute('aria-expanded', String(r.expanded));
-    item.append(html('span', { className: 'twisty', textContent: r.expanded ? '▾' : '▸' }), html('span', { className: 'name', textContent: r.group }), html('span', { className: 'count', textContent: String(r.count) }));
-    item.addEventListener('click', () => {
-      this.placing.cursor = r.key;
-      if (!view.searching) this.toggleGroup(r.group);
-      else this.showEntries();
-      this.search.focus({ preventScroll: true });
-    });
-    return item;
-  }
-
-  entryItem(entry) {
-    const item = html('li', { title: entry.label });
-    item.setAttribute('role', 'option');
-    item.append(document.createTextNode(entry.module), html('span', { className: 'what', textContent: entry.label }));
-    item.addEventListener('click', () => {
-      this.placing.cursor = `m:${entry.module}`;
-      this.choose(entry);
-      this.showEntries();
-      this.search.focus({ preventScroll: true });
-    });
-    return item;
-  }
-
-  /** Group `group` opened or closed (kept for the session). */
-  toggleGroup(group) {
-    this.expanded = toggled(this.expanded, group);
-    this.showEntries();
-  }
-
-  /** `entry` chosen: its default name, editable before adding. */
-  choose(entry) {
-    const placing = this.placing;
-    placing.module = entry?.module ?? null;
-    this.name.value = entry ? defaultName(entry.module, placing.names) : '';
-  }
-
-  add() {
-    const placing = this.placing;
-    if (!placing?.module) return;
-    const name = this.name.value.trim();
+    if (!placing || !module) return null;
     const error = nameError(name, placing.names);
-    if (error) {
-      this.why.textContent = error;
-      return;
-    }
+    if (error) return error;
     this.closePalette();
-    // The hidden palette's field lets the focus go: ⌘Z, Delete and Escape are the schematic's again.
-    this.s.focus({ preventScroll: true });
-    this.write(0, placing.level, [addInstance(name, placing.module, placing.at)]);
+    this.write(0, placing.level, [addInstance(name, module, placing.at)]);
+    return null;
   }
 
+  /** The browser closed (Cancel, Escape, Add): the focus back on the schematic, so ⌘Z, Delete and Escape are its own again. */
+  browserClosed() {
+    this.placing = null;
+    this.s.focus?.({ preventScroll: true });
+  }
+
+  /** Closes the browser (Add, Edit patch left, Escape). */
   closePalette() {
     this.placing = null;
-    if (this.palette) this.palette.style.visibility = 'hidden';
+    this.browser.close();
   }
 
   // The sidebar.
