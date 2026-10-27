@@ -21,7 +21,8 @@
     "signal-scope": ["bind", "skin", "label", "class", "mode", "rate", "trigger-level", "trigger-edge"],
     "signal-canvas": ["bind", "skin", "label", "class", "renderer", "rate", "grid", "tilt", "height", "backend"],
     "signal-piano-roll": ["pattern", "label", "class", "wheel", "snap", "beats-per-bar", "position", "position-bind", "audition"],
-    "signal-step-grid": ["pattern", "label", "class", "wheel", "step", "step-bind"]
+    "signal-step-grid": ["pattern", "label", "class", "wheel", "step", "step-bind"],
+    "signal-slot": ["bind", "skin", "class"]
   },
   "boolean": ["bipolar"],
   "order": ["renderer", "pattern", "bind", "source", "channel", "mode", "orientation", "taper", "floor", "min", "max", "default", "unit", "digits", "rate", "grid", "tilt", "height", "sweep", "bipolar", "drag", "spring", "trigger-level", "trigger-edge", "backend", "snap", "beats-per-bar", "position", "position-bind", "audition", "step", "step-bind", "wheel", "label", "skin", "class"]

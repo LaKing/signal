@@ -84,7 +84,10 @@ test('a type’s source: the project’s composites, the library’s, else its n
   assert.equal(sourceOf({ module: 'std.svf' }), 'std');
   assert.equal(sourceOf({ module: 'lab.thing' }), 'lab');
   assert.equal(sourceOf({ module: 'plain' }), 'other');
-  assert.deepEqual(SOURCES.map((s) => s.id), ['project', 'library', 'std', 'lab'], 'the sources named, in their order (data, not code)');
+  assert.deepEqual(SOURCES.map((s) => s.id), ['project', 'library', 'folders', 'std', 'lab'], 'the sources named, in their order (data, not code)');
+  // ADR 0037 §7: a project folder of the Load dialog.
+  assert.equal(sourceOf({ module: '../studio', composite: true, project: true }), 'folders');
+  assert.equal(sourceLabel('folders'), 'Projects');
   assert.deepEqual(['other', 'zz', 'std', 'lab', 'aa', 'project', 'library'].sort(sourceOrder), ['project', 'library', 'std', 'lab', 'aa', 'zz', 'other']);
   assert.equal(sourceLabel('std'), 'Standard primitives');
   assert.equal(sourceLabel('zz'), 'zz.* primitives');

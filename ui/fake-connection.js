@@ -47,7 +47,45 @@ export function fakeDescription() {
       control('/synth.on', null, 0, 1, 0),
       control('/pad.x', null, 0, 1, 0.5),
       control('/pad.y', null, 0, 1, 0.5),
+      control('/fx.volume', 'dB', -120, 24, -6),
     ],
+    // ADR 0037 §7: a loaded slot and an empty one, for the gallery's slot cards.
+    content: {
+      includes: [],
+      slots: [
+        {
+          slot: '/fx',
+          interface: { ports: [
+            { name: 'side', role: 'input', shape: 'signal', rate: 1, kind: 'audio' },
+            { name: 'x', role: 'input', shape: 'signal', rate: 1, kind: 'audio' },
+            { name: 'y', role: 'output', shape: 'signal', rate: 1, kind: 'audio' },
+            { name: 'volume', role: 'parameter', shape: 'signal', rate: 1, kind: 'generic', unit: 'dB' },
+          ] },
+          load: 'std.gain',
+          matches: [
+            { port: 'side', role: 'input', reason: '`std.gain` has no `side`' },
+            { port: 'x', role: 'input', content: 'in' },
+            { port: 'y', role: 'output', content: 'out' },
+            { port: 'volume', role: 'parameter', content: 'db' },
+          ],
+          dropped: ['osc.out -> fx.side'],
+          unheard: [],
+        },
+        {
+          slot: '/deck',
+          interface: { from: 'lib.deck', ports: [
+            { name: 'jump', role: 'input', shape: 'events', rate: 1, kind: 'trigger' },
+            { name: 'position', role: 'input', shape: 'signal', rate: 1, kind: 'control', unit: 'beats' },
+            { name: 'l', role: 'output', shape: 'signal', rate: 1, kind: 'audio' },
+            { name: 'r', role: 'output', shape: 'signal', rate: 1, kind: 'audio' },
+            { name: 'release', role: 'parameter', shape: 'signal', rate: 1, kind: 'generic' },
+          ] },
+          matches: [],
+          dropped: [],
+          unheard: [],
+        },
+      ],
+    },
     sinks: [{ index: 0, address: '/out', kind: 'audio', inputs: 2 }],
     meters: { output: [{ channel: 0, device: 0 }, { channel: 1, device: 1 }], input: [{ channel: 0 }] },
     scopes: { slots: 8, points: POINTS, maxRate: RATE },

@@ -9,8 +9,19 @@
 // object's key order. Wires are smooth curves (ui/lib/schematic-wire.js);
 // `movedWires` gives them again for a box being dragged. No DOM.
 
+import { slotLabel, slotOf } from './slot.js';
 import { wireGeometry } from './schematic-wire.js';
 import { exportFacts, orderedPins, portGroups } from './schematic-groups.js';
+
+/**
+ * Where a slot box's "+" pin of `side` (`in`, `out`) is: the row after its
+ * last pin of that side (ADR 0037 §7).
+ */
+export function addPinAt(node, side) {
+  const out = side === 'out';
+  const i = out ? node.outs.length : node.ins.length;
+  return { x: out ? node.x + node.w : node.x, y: node.y + HEADER + ROW * (i + 0.5) };
+}
 
 /** Geometry, in the layout's own units. */
 export const HEADER = 34;
@@ -61,12 +72,17 @@ function nodesOf(level, factsOf = null) {
   }
   for (const instance of level.instances ?? []) {
     const ports = instance.ports ?? [];
+    // ADR 0037 §7: a slot's box shows its interface's pins, loaded or not, and what it holds under its name.
+    const slot = slotOf(instance);
     nodes.push({
       id: instance.name,
       name: instance.name,
       module: instance.module,
       kind: 'instance',
       composite: Boolean(instance.composite),
+      slot,
+      // What the box says under its name: the module, or a slot's content ("empty: lib.voice").
+      subtitle: slot ? slotLabel(slot).subtitle : instance.module,
       // As `graph` gives them, for the inspector.
       parameters: instance.parameters ?? [],
       ins: [
@@ -89,8 +105,11 @@ function nodesOf(level, factsOf = null) {
   for (const node of nodes) {
     const longestIn = Math.max(0, ...node.ins.map((p) => p.name.length));
     const longestOut = Math.max(0, ...node.outs.map((p) => p.name.length));
-    node.w = Math.ceil(Math.max(MIN_WIDTH, CHAR * Math.max(node.name.length, node.module.length) + 2 * PAD, CHAR * (longestIn + longestOut) + 4 * PAD));
-    node.h = HEADER + ROW * Math.max(1, node.ins.length, node.outs.length) + PAD;
+    const under = (node.subtitle ?? node.module).length;
+    node.w = Math.ceil(Math.max(MIN_WIDTH, CHAR * Math.max(node.name.length, node.module.length, under) + 2 * PAD, CHAR * (longestIn + longestOut) + 4 * PAD));
+    // A slot's box keeps a row below its pins for the "+" pins that add a port (ADR 0037 §7), drawn in Edit patch.
+    const extra = node.slot ? 1 : 0;
+    node.h = HEADER + ROW * (Math.max(1, node.ins.length, node.outs.length) + extra) + PAD;
   }
   return nodes;
 }

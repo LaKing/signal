@@ -320,6 +320,13 @@ export function generatedSections(spec) {
   const sections = spec.groups.map((g) =>
     section(g.instance, g.module, g.controls.map((c) => element(c.element, { bind: c.bind, label: c.label, taper: c.taper }))),
   );
+  // ADR 0037 §7: a card per slot, loaded or not.
+  for (const name of spec.slots ?? []) {
+    const card = document.createElement('section');
+    card.className = 'slot';
+    card.append(element('signal-slot', { bind: `/${name}` }));
+    sections.push(card);
+  }
   // The sink's meters side by side, never broken across lines.
   const meters = document.createElement('div');
   meters.className = 'signal-group';

@@ -80,7 +80,7 @@ test('a project without a sink still gets its parameters', () => {
   assert.equal(panel.groups.length, 1);
   assert.deepEqual(panel.meters, []);
   assert.equal(panel.scope, null);
-  assert.deepEqual(defaultPanel(null), { project: null, groups: [], meters: [], scope: null });
+  assert.deepEqual(defaultPanel(null), { project: null, groups: [], slots: [], meters: [], scope: null });
 });
 
 /** A BindingCheck whose requests are answered by the test. */

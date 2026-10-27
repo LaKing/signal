@@ -20,6 +20,7 @@ import { isDiscrete, nearestValue } from './value-set.js';
 export const SOURCES = Object.freeze([
   Object.freeze({ id: 'project', label: 'This project', about: 'the project’s own composites (composites/*.toml)' }),
   Object.freeze({ id: 'library', label: 'Library', about: 'the built-in library’s composites (lib.*, ADR 0027 §4)' }),
+  Object.freeze({ id: 'folders', label: 'Projects', about: 'projects beside this one, loaded into a slot as content (ADR 0035, 0037; the Load dialog only)' }),
   Object.freeze({ id: 'std', label: 'Standard primitives', about: 'the native types of signal-std (std.*)' }),
   Object.freeze({ id: 'lab', label: 'Lab primitives', about: 'experimental native types (lab.*, a lab build only)' }),
 ]);
@@ -37,6 +38,7 @@ const NO_SOURCE = 'other';
  */
 export function sourceOf(m) {
   const module = String(m?.module ?? '');
+  if (m?.project === true) return 'folders';
   if (m?.library === true || /^lib\./.test(module)) return 'library';
   if (m?.composite) return 'project';
   const dot = module.indexOf('.');

@@ -57,13 +57,17 @@ function partMenu(hit, state) {
   if (hit?.kind === 'group') return [unless({ id: 'inspect', label: 'Inspect' }, null), unless(TRACE, null)];
   if (hit?.kind === 'instance') {
     const composite = Boolean(hit.node?.composite);
-    const notComposite = composite ? null : 'A primitive has no inside';
+    const slot = hit.node?.slot ?? null;
+    const notComposite = composite ? null : slot ? (slot.load ? 'Its content is not a project composite' : 'An empty slot has no inside') : 'A primitive has no inside';
     const items = [unless({ id: 'inspect', label: 'Inspect' }, null), unless(TRACE, null)];
     if (composite && state.open) items.push(unless({ id: 'close', label: 'Close' }, null));
     else items.push(unless({ id: 'open', label: 'Open in place' }, notComposite ?? (state.opaque ? 'A library composite: its inside is not in the graph' : null)));
     items.push(unless({ id: 'enter', label: 'Enter' }, notComposite), SEPARATOR, unless({ id: 'copy-address', label: 'Copy address' }, null), SEPARATOR);
+    if (slot) items.push(...slotItems(slot, editOff), SEPARATOR);
     if (composite && state.open) items.push(unless({ id: 'add', label: 'Add module here…' }, inside ?? (state.addable ? null : 'Nothing can be added here')));
-    items.push(unless({ id: 'delete', label: 'Delete instance' }, editOff));
+    if (composite && state.open) items.push(unless({ id: 'add-slot', label: 'Add slot here…' }, inside ?? (state.addable ? null : 'Nothing can be added here')));
+    items.push(unless({ id: 'make-interface', label: 'Make interface from this instance…', title: 'Write its ports and parameters as interfaces/<name>.toml, a template slots may start from' }, editOff));
+    items.push(unless({ id: 'delete', label: slot ? 'Delete slot' : 'Delete instance' }, editOff));
     return items;
   }
   if (hit?.kind === 'wire') {
@@ -85,7 +89,7 @@ function partMenu(hit, state) {
     const across = [];
     if (hit.node?.kind === 'instance' && hit.node.composite) across.push(unless({ id: 'go-inside', label: 'Go inside' }, state.opaque ? 'A library composite: its inside is not in the graph' : null));
     if (hit.node && hit.node.kind !== 'instance') across.push(unless({ id: 'go-outside', label: 'Go outside' }, null));
-    return [
+    const items = [
       unless({ id: 'inspect', label: 'Inspect' }, null),
       unless(TRACE, null),
       ...across,
@@ -93,15 +97,46 @@ function partMenu(hit, state) {
       SEPARATOR,
       unless({ id: 'disconnect', label: 'Disconnect all' }, editOff ?? (state.connected > 0 ? null : state.exported > 0 ? 'Only an export reaches it: exports are not edited here' : 'Nothing is connected here')),
     ];
+    // A slot's pin (ADR 0037 §7): its port renamed, retyped or removed.
+    if (hit.node?.kind === 'instance' && hit.node.slot) {
+      const wired = state.connected > 0;
+      items.push(
+        SEPARATOR,
+        unless({ id: 'port-edit', label: 'Rename or retype port…' }, editOff),
+        unless({ id: 'port-remove', label: 'Remove port' }, editOff ?? (wired ? 'Wires name it: remove it with its wires' : null)),
+        unless({ id: 'port-remove-wires', label: 'Remove port and its wires' }, editOff ?? (wired ? null : 'No wire names it')),
+      );
+    }
+    return items;
   }
   const level = state.level ? state.level : 'top level';
   return [
     unless({ id: 'add', label: 'Add module here…' }, editOff ?? (state.addable ? null : 'Nothing can be added here')),
+    unless({ id: 'add-slot', label: 'Add slot here…', title: 'A slot: an instance whose ports are its own interface, and whose content is loaded into it (ADR 0037)' }, editOff ?? (state.addable ? null : 'Nothing can be added here')),
     SEPARATOR,
     unless({ id: 'fit', label: 'Fit' }, null),
     unless({ id: 'reset-layout', label: `Reset layout (${level})`, title: `Forget the moved positions of ${state.level ? state.level : 'the top level'}` }, null),
     SEPARATOR,
     unless({ id: 'edit', label: editing ? 'Leave Edit patch' : 'Edit patch' }, null),
+  ];
+}
+
+/**
+ * A slot box's items (ADR 0037 §7): Load… when it is empty, Replace… and
+ * Unload when loaded, Edit map…, Edit interface…, Save interface as
+ * template… and Detach from template (off without a template); each off
+ * with `editOff`'s reason outside Edit patch.
+ */
+function slotItems(slot, editOff) {
+  const loaded = typeof slot.load === 'string' && slot.load !== '';
+  const template = slot.from ?? slot.interface?.from ?? null;
+  return [
+    loaded ? unless({ id: 'slot-replace', label: 'Replace…', title: `Load other content in place of ${slot.load}` }, editOff) : unless({ id: 'slot-load', label: 'Load…' }, editOff),
+    unless({ id: 'slot-unload', label: 'Unload' }, editOff ?? (loaded ? null : 'The slot is empty')),
+    unless({ id: 'slot-map', label: 'Edit map…' }, editOff),
+    unless({ id: 'slot-interface', label: 'Edit interface…' }, editOff),
+    unless({ id: 'slot-save-template', label: 'Save interface as template…' }, editOff),
+    unless({ id: 'slot-detach', label: 'Detach from template' }, editOff ?? (template ? null : 'Its interface has no template')),
   ];
 }
 

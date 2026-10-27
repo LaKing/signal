@@ -28,6 +28,8 @@ import {
 import { EXPANDED, browserEntries } from '../lib/module-browser.js';
 import { projectKey } from '../lib/schematic-palette.js';
 import { BROWSER_CSS, ModuleBrowser } from './module-browser.js';
+import { SLOT_DIALOG_CSS, SlotDialogs } from './slot-dialogs.js';
+import { addSlotOp, contentMatch, detachOp, instancePorts, isProjectPath, loadOps, mapRows, projectEntries, templateChoices, templateOp, templateText, templates, unloadOp } from '../lib/slot.js';
 import { toLocal, toScreen } from '../lib/schematic-view.js';
 import { editLevel } from '../lib/schematic-open.js';
 import { cordCurve, curveData } from '../lib/schematic-wire.js';
@@ -46,7 +48,8 @@ svg.rubber path { fill: none; stroke: var(--signal-focus, #5aa9ff); stroke-width
   background: var(--signal-panel, #1f232b); border: 1px solid var(--signal-effective, #ffb74d); border-radius: var(--signal-radius, 6px); }
 .notice h3 { margin: 0 0 4px; font-size: 12px; color: var(--signal-effective, #ffb74d); }
 .side .reach { color: var(--signal-effective, #ffb74d); margin-top: 4px; }
-${BROWSER_CSS}`;
+${BROWSER_CSS}
+${SLOT_DIALOG_CSS}`;
 
 /** Which `modules` reply a graph's project would give: its project and the hashes of its files (null when they are not known). */
 function modulesKey(graph) {
@@ -76,6 +79,17 @@ export class SchematicEditor {
       graph: () => this.s.graph,
       defaultName: (module) => (this.placing ? defaultName(module, this.placing.names) : ''),
     });
+    // ADR 0037 §7: the Load dialog (Load…, Replace…), the module browser in its load mode, and the slot dialogs.
+    this.loading = null;
+    this.loader = new ModuleBrowser({
+      mode: 'load',
+      add: (module, _name, options) => this.loadChosen(module, options),
+      closed: () => this.loaderClosed(),
+      graph: () => this.s.graph,
+      defaultName: () => '',
+      matchOf: (entry) => contentMatch(entry, this.loading?.slot),
+    });
+    this.dialogs = new SlotDialogs({ closed: () => this.s.focus?.({ preventScroll: true }) });
   }
 
   get editing() {
@@ -100,7 +114,7 @@ export class SchematicEditor {
     this.notice = html('section', { className: 'notice' });
     // The browser's open branches are kept for the page's session (memory only).
     this.palette = this.browser.build(EXPANDED);
-    root.append(this.rubber, this.notice, this.palette);
+    root.append(this.rubber, this.notice, this.palette, this.loader.build([...EXPANDED, 's:library', 's:folders']), this.dialogs.build());
     this.updateButtons();
   }
 
@@ -110,6 +124,8 @@ export class SchematicEditor {
     this.toggle.setAttribute('aria-checked', String(on));
     this.cancelConnect();
     this.closePalette();
+    this.closeLoader();
+    this.dialogs.close();
     if (!on) this.hideNotice();
     this.s.toggleAttribute('editing', on);
     this.updateButtons();
@@ -161,15 +177,20 @@ export class SchematicEditor {
       this.updateButtons();
       return Promise.resolve(false);
     }
+    this.lastRefusal = null;
     return request.then(
       (reply) => {
         this.session.written(reply, asked.pending);
         this.hideNotice();
         this.s.say('');
+        // ADR 0037 §7: what a slot op says it did besides (a Replace's removed map and set entries, panels rebound).
+        const said = [...(reply?.notes ?? []), ...((reply?.panels ?? []).length ? [`bindings rewritten in ${reply.panels.join(', ')}`] : [])];
+        if (said.length) this.showNotice('Written', said.join('\n'));
         this.updateButtons();
         return true;
       },
       (error) => {
+        this.lastRefusal = error?.message ?? String(error);
         const result = this.session.refused(error, asked.pending);
         if (result.cleared) this.showNotice('Undo history emptied', result.cleared);
         else this.showNotice('Not written', [result.reason, ...result.references.map((r) => `${r.file}${r.line ? `:${r.line}` : ''}: ${r.text}`)].join('\n'));
@@ -268,9 +289,9 @@ export class SchematicEditor {
 
   // The Add module browser.
 
-  /** Whether `event` happened in the Add module browser (its wheel scrolls its panes). */
+  /** Whether `event` happened in the Add module browser, the Load dialog or a slot dialog (its wheel scrolls its panes). */
   holds(event) {
-    return this.browser.holds(event);
+    return this.browser.holds(event) || this.loader.holds(event) || this.dialogs.holds(event);
   }
 
   /** Opens the Add module browser for screen `point` on `level` (a scene level: `paletteLevel`'s). */
@@ -320,6 +341,211 @@ export class SchematicEditor {
   closePalette() {
     this.placing = null;
     this.browser.close();
+  }
+
+  // Slots (ADR 0037 §7, phase 3). Each writes a `patch` as the other
+  // edits do (undoable); a template is a `file.write` of interfaces/.
+
+  /** Writes `ops` at `level`: a promise of `{ok, error}`, the refusal's text for a dialog to show. */
+  writeResult(level, ops) {
+    return this.write(0, level, ops).then((ok) => ({ ok, error: ok ? null : (this.lastRefusal ?? 'Not written') }));
+  }
+
+  /** A slot box (or one of its pins) as the slot ops name it: `{level, name, slot, path}`. */
+  slotTarget(hit) {
+    const node = hit?.node;
+    if (!node?.slot) return null;
+    return { level: hit.level, name: node.name, slot: node.slot, path: hit.path };
+  }
+
+  /** Whether `level` is the one edited now (the innermost open, M2.13-3); says why not. */
+  editable(level) {
+    const shown = editLevel(this.s.drawn);
+    if (level === shown.level) return true;
+    this.s.say(`Not edited: ${level || 'the top level'} is around the open ${shown.path || 'level'}; edit it from there`);
+    return false;
+  }
+
+  /** Add slot here… (the background, an open composite): the Add slot dialog for screen `point` on `level`. */
+  openAddSlot(point, level) {
+    if (!this.editing || !level) return;
+    const at = toLocal(level.transform, point);
+    const names = namesOf(this.levelGraph(level.level));
+    this.dialogs.openAddSlot({
+      where: level.level ? `Inside ${level.level}` : 'At the top level',
+      choices: templateChoices(this.s.graph),
+      names,
+      defaultName: defaultName('slot', names),
+      add: (name, template) => this.writeResult(level.level, [addSlotOp(name, template, at)]),
+    });
+  }
+
+  /**
+   * Load… or Replace… (ADR 0037 §6–7): the Load dialog over the module
+   * types and the projects beside this one, sorted by how many of the
+   * slot's ports each matches. Until phase 2 a Load is one structural edit
+   * (the content's instances fade in as any added instance does) and a
+   * Replace another (`docs/adr/0037-slots.md` Notes).
+   */
+  openLoad(hit) {
+    const target = this.slotTarget(hit);
+    if (!this.editing || !target || !this.editable(target.level)) return;
+    this.loading = target;
+    const title = target.slot.load ? `Replace ${target.slot.load} in ${target.name}` : `Load into ${target.name}`;
+    const key = modulesKey(this.s.graph);
+    const known = key !== null && this.loadKnown?.key === key ? this.loadKnown.entries : null;
+    this.loader.open({ where: target.level ? `inside ${target.level}` : 'at the top level', entries: known, title });
+    if (known) return;
+    const loading = this.loading;
+    const connection = this.s.connection;
+    const modules = connection?.request?.({ type: 'modules', inside: true });
+    const projects = connection?.request?.({ type: 'slot.projects' })?.catch?.(() => ({ projects: [] }));
+    if (!modules) {
+      this.loader.failed('Not connected');
+      return;
+    }
+    Promise.all([modules, projects ?? Promise.resolve({ projects: [] })]).then(
+      ([types, folders]) => {
+        const entries = [...projectEntries(folders), ...browserEntries(types)];
+        this.loadKnown = { key, entries };
+        if (this.loading === loading) this.loader.setEntries(entries);
+        this.s.modulesSeen?.(types);
+      },
+      (error) => {
+        if (this.loading === loading) this.loader.failed(error.message);
+      },
+    );
+  }
+
+  /** The Load dialog's choice: `module` loaded, with the content's unmatched ports added first when asked. */
+  loadChosen(module, { addUnmatched = false, entry = null } = {}) {
+    const target = this.loading;
+    if (!target || !module) return null;
+    const add = addUnmatched ? contentMatch(entry, target.slot).unmatched : [];
+    this.closeLoader();
+    this.write(0, target.level, loadOps(target.name, module, { add }));
+    return null;
+  }
+
+  loaderClosed() {
+    this.loading = null;
+    this.s.focus?.({ preventScroll: true });
+  }
+
+  closeLoader() {
+    this.loading = null;
+    this.loader.close();
+  }
+
+  /** Unload: the slot emptied (its wires stay). */
+  unload(hit) {
+    const target = this.slotTarget(hit);
+    if (target && this.editable(target.level)) this.write(0, target.level, [unloadOp(target.name)]);
+  }
+
+  /** What content `load` offers (a `modules` entry, or a project of `slot.projects`), or null. */
+  contentEntry(load) {
+    const connection = this.s.connection;
+    if (!load || !connection?.request) return Promise.resolve(null);
+    const known = this.loadKnown?.entries?.find((e) => e.module === load);
+    if (known) return Promise.resolve(known);
+    if (isProjectPath(load)) return connection.request({ type: 'slot.projects' }).then((reply) => projectEntries(reply).find((e) => e.module === load) ?? null, () => null);
+    return connection.request({ type: 'modules' }).then((reply) => browserEntries(reply).find((e) => e.module === load) ?? null, () => null);
+  }
+
+  /** Edit map…: the map editor, its choices the content's names. */
+  openMap(hit) {
+    const target = this.slotTarget(hit);
+    if (!this.editing || !target || !this.editable(target.level)) return;
+    this.contentEntry(target.slot.load).then((entry) => {
+      this.dialogs.openMap({ slotName: target.name, load: target.slot.load, rows: mapRows(target.slot, entry), apply: (op) => this.writeResult(target.level, [op]) });
+    });
+  }
+
+  /** Edit interface… (and a pin's Rename or retype port…: `focus` `{port}`; a "+" pin: `{add}`). */
+  openInterface(hit, focus = null) {
+    const target = this.slotTarget(hit);
+    if (!this.editing || !target || !this.editable(target.level)) return;
+    this.dialogs.openInterface({
+      slotName: target.name,
+      slot: target.slot,
+      focus,
+      apply: (op) => this.writeResult(target.level, [op]),
+      saveTemplate: () => this.saveTemplate(hit),
+      detach: () => this.detach(hit),
+    });
+  }
+
+  /** A slot's "+" pin at `address` (`/fx`, `/drums/fx`): the interface editor with a port to add on `side`. */
+  addPort(address, side) {
+    const at = String(address ?? '').lastIndexOf('/');
+    const path = at > 0 ? address.slice(0, at) : '';
+    const name = address.slice(at + 1);
+    const level = this.s.levelOf?.(path);
+    const node = level?.layout.nodes.find((n) => n.kind === 'instance' && n.name === name);
+    if (!node?.slot) return;
+    this.openInterface({ kind: 'instance', path, level: level.level, node, address }, { add: side === 'out' ? 'out' : 'in' });
+  }
+
+  /** A slot pin's Remove port (with its wires: `wires`). */
+  removePort(hit, wires = false) {
+    const target = this.slotTarget(hit);
+    if (!target || !hit.port || !this.editable(target.level)) return;
+    const op = { op: 'slot.interface', slot: target.name, remove: [hit.port.name] };
+    if (wires) op.removeWires = true;
+    this.write(0, target.level, [op]);
+  }
+
+  /** Detach from template: the template's ports written into the slot. */
+  detach(hit) {
+    const target = this.slotTarget(hit);
+    if (!target || !this.editable(target.level)) return;
+    this.dialogs.close();
+    this.write(0, target.level, [detachOp(target.name)]);
+  }
+
+  /** Writes `interfaces/<name>.toml` for `ports` (a new file): a promise of `{ok, error}`. */
+  writeTemplate(name, ports, description) {
+    const request = this.s.connection?.request?.({ type: 'file.write', file: `interfaces/${name}.toml`, text: templateText(name, ports, description), base: null });
+    if (!request) return Promise.resolve({ ok: false, error: 'Not connected' });
+    return request.then(
+      () => ({ ok: true, error: null }),
+      (error) => ({ ok: false, error: error?.message ?? String(error) }),
+    );
+  }
+
+  /** The project's own template names (interfaces/), for a new one's name. */
+  templateNames() {
+    return new Set(templates(this.s.graph).filter((t) => !t.library).map((t) => t.name));
+  }
+
+  /** Save interface as template…: the slot's interface written to interfaces/<name>.toml, then the slot set to it. */
+  saveTemplate(hit) {
+    const target = this.slotTarget(hit);
+    if (!this.editing || !target || !this.editable(target.level)) return;
+    this.dialogs.openTemplateName({
+      title: `Save interface as template: ${target.name}`,
+      note: 'Writes its ports and parameters to interfaces/<name>.toml and sets the slot’s interface to that template (an edit of the file then reaches every slot naming it).',
+      defaultName: target.name,
+      taken: this.templateNames(),
+      save: (name, description) =>
+        this.writeTemplate(name, target.slot.interface?.ports ?? [], description).then((written) => (written.ok ? this.writeResult(target.level, [templateOp(target.name, name)]) : written)),
+    });
+  }
+
+  /** Make interface from this instance… (ADR 0037 §3): any instance's ports and parameters as interfaces/<name>.toml. */
+  makeInterface(hit) {
+    if (!this.editing || hit?.kind !== 'instance') return;
+    const instance = (this.levelGraph(hit.level)?.instances ?? []).find((i) => i.name === hit.node.name);
+    if (!instance) return;
+    const ports = instancePorts(instance);
+    this.dialogs.openTemplateName({
+      title: `Make interface from ${hit.node.name}`,
+      note: `Writes ${ports.length} port${ports.length === 1 ? '' : 's'} and parameters of ${hit.node.name} (${hit.node.module || 'a slot'}) to interfaces/<name>.toml: a template slots may start from.`,
+      defaultName: (hit.node.module || hit.node.name).split('.').pop().replace(/[^a-z0-9_]/g, '_').replace(/^[^a-z]/, 'i'),
+      taken: this.templateNames(),
+      save: (name, description) => this.writeTemplate(name, ports, description),
+    });
   }
 
   // The sidebar.

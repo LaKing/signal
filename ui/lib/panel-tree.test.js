@@ -121,6 +121,7 @@ test('the whitelist names each control’s observed attributes, plus class', () 
     'signal-canvas': ['canvas.js', 'SignalCanvas'],
     'signal-piano-roll': ['piano-roll.js', 'SignalPianoRoll'],
     'signal-step-grid': ['step-grid.js', 'SignalStepGrid'],
+    'signal-slot': ['slot.js', 'SignalSlot'],
   };
   assert.deepEqual(Object.keys(whitelist.controls).sort(), Object.keys(classes).sort());
   for (const [tag, [file, name]] of Object.entries(classes)) {

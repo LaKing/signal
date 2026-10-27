@@ -75,7 +75,8 @@ import { badgeText, behind, parentPath, resolver, splitAddress, startOf, trace, 
 import { moduleInfo, projectKey } from '../lib/schematic-palette.js';
 import { allOf, deletePlan, dragGroup, has, hitKey, inside, moveMessages, reselectAll, toggled, traceTarget, union } from '../lib/schematic-select.js';
 import { formatFixed } from '../lib/format.js';
-import { HEADER, dragPosition, layout } from '../lib/schematic-layout.js';
+import { HEADER, addPinAt, dragPosition, layout } from '../lib/schematic-layout.js';
+import { unmatchedReason } from '../lib/slot.js';
 import { DragFollow, ownedLabels } from '../lib/schematic-drag.js';
 import { aroundReason, closeBox, closeShown, closeText, crumbView, drawOrder, editable, editLevel, enterView, pinOne, unpin } from '../lib/schematic-open.js';
 import { boundaryLinks, breadcrumbs, chain, levelRect, nodeRect, openAnchor, rebase, reroot, scene } from '../lib/schematic-scene.js';
@@ -151,6 +152,13 @@ svg.closing { cursor: pointer; }
 .pin.signal.connected { fill: var(--signal-accent, #4fc3f7); }
 .pin.vector.connected { fill: var(--signal-effective, #ffb74d); }
 .pin.events.connected { fill: var(--signal-meter-rms, #3ecf8e); }
+/* ADR 0037 §7: a slot's box (its interface's pins, loaded or not); an empty one hollow, its outline dashed; an unmatched port's pin hollow. */
+.slot > .box { stroke: var(--signal-accent, #4fc3f7); stroke-width: 1.5; }
+.slot.empty > .box { fill: none; stroke: var(--signal-muted, #8a93a3); stroke-dasharray: 5 3; }
+.slot-content { font-style: italic; }
+.node > .pin.unmatched { fill: var(--signal-bg, #16181d); stroke-dasharray: 2 2; }
+.add-pin { fill: var(--signal-accent, #4fc3f7); font-weight: 700; cursor: pointer; }
+:host(:not([editing])) .add-pin { display: none; }
 .node > .pin.hover { stroke: var(--signal-fg, #d6dbe4); stroke-width: 2.5; }
 /* A selected pin: its stroke in the focus colour, and a ring twice its size around it, with a halo. */
 .node > .pin.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 2; }
@@ -949,7 +957,8 @@ export class SignalSchematic extends HTMLElement {
     const address = `${level.path}/${node.name}`;
     const isOpen = this.drawn.open.has(address);
     const muted = node.kind === 'instance' ? mutedOf(this.mutedSet, address) : null;
-    const classes = ['node', node.kind === 'instance' ? '' : 'pins', node.composite ? 'composite' : '', isOpen ? 'open' : '', muted ? 'muted' : ''];
+    const slotted = node.kind === 'instance' ? node.slot : null;
+    const classes = ['node', node.kind === 'instance' ? '' : 'pins', node.composite ? 'composite' : '', isOpen ? 'open' : '', muted ? 'muted' : '', slotted ? 'slot' : '', slotted && !slotted.load ? 'empty' : ''];
     const group = el('g', { class: classes.join(' ').replace(/\s+/g, ' ').trim() });
     if (node.kind === 'instance') {
       group.dataset.address = address;
@@ -968,7 +977,17 @@ export class SignalSchematic extends HTMLElement {
     if (node.composite) rect({ x: node.x + 3, y: node.y + 3, w: node.w - 6, h: node.h - 6 }, { class: 'frame', rx: 3 * m });
     if (text(12) && node.kind === 'instance') {
       label({ x: node.x + 8, y: node.y + 14 }, 12, { class: 'name' }, node.name);
-      label({ x: node.x + 8, y: node.y + 27 }, 10, { class: 'module' }, node.module);
+      label({ x: node.x + 8, y: node.y + 27 }, 10, { class: slotted ? 'module slot-content' : 'module' }, node.subtitle ?? node.module);
+    }
+    // ADR 0037 §7: a slot's "+" pins add an input or an output to its interface (shown in Edit patch only, by the CSS).
+    if (slotted && !isOpen && text(9)) {
+      for (const side of ['in', 'out']) {
+        const at = addPinAt(node, side);
+        const p = bakedPoint(baked, { x: at.x + (side === 'out' ? -8 : 8), y: at.y + 3 });
+        const plus = el('text', { class: 'add-pin', x: p.x, y: p.y, 'font-size': 11 * m, 'text-anchor': 'middle', 'data-add-pin': side, 'data-address': address }, '+');
+        plus.append(el('title', {}, side === 'out' ? `Add an output to ${node.name}` : `Add an input to ${node.name}`));
+        group.append(plus);
+      }
     }
     if (muted && text(9)) label({ x: node.x + node.w - 8, y: node.y + 14 }, 9, { class: 'muted-mark', 'text-anchor': 'end' }, muted === 'self' ? 'muted' : 'muted inside');
     const metered = node.kind === 'instance' && !isOpen && this.metered === address;
@@ -1001,8 +1020,10 @@ export class SignalSchematic extends HTMLElement {
         continue;
       }
       const portAddress = node.kind === 'instance' ? `${address}.${pin.name}` : `${level.path}.${pin.name}`;
-      const kind = ['pin', pin.shape, pin.parameter ? 'parameter' : '', pin.connected ? 'connected' : ''].filter(Boolean).join(' ');
-      const data = { class: kind, 'data-address': portAddress, 'data-direction': pin.direction, 'data-label': pin.name, 'data-part': 'schematic' };
+      // ADR 0037 §7: an unmatched slot port's pin is hollow, the reason in its tooltip.
+      const reason = slotted ? unmatchedReason(slotted, pin.name) : null;
+      const kind = ['pin', pin.shape, pin.parameter ? 'parameter' : '', pin.connected ? 'connected' : '', reason ? 'unmatched' : ''].filter(Boolean).join(' ');
+      const data = { class: kind, 'data-address': portAddress, 'data-direction': pin.direction, 'data-label': reason ? `${pin.name}: unmatched, ${reason}` : pin.name, 'data-part': 'schematic' };
       const shape = bakedPin(baked, level.transform, this.viewport, pin, radius);
       if (shape.circle) group.append(el('circle', { ...data, ...shape.circle }));
       else if (shape.polygon.length) group.append(el('polygon', { ...data, points: shape.polygon.map((p) => `${p.x},${p.y}`).join(' ') }));
@@ -1261,6 +1282,13 @@ export class SignalSchematic extends HTMLElement {
   pointerDown(event) {
     // A control-click is the Mac's right click: the context menu's, not a press.
     if (event.button !== 0 || (MAC && event.ctrlKey) || !this.drawn) return;
+    // A slot's "+" pin (ADR 0037 §7): its interface editor, with a port to add on that side.
+    const plus = event.target?.closest?.('[data-add-pin]');
+    if (plus && this.editor.editing) {
+      event.preventDefault();
+      this.editor.addPort(plus.dataset.address, plus.dataset.addPin);
+      return;
+    }
     // Another press while one is held: the first is let go, as cancelled.
     if (this.gesture) this.cancelGesture();
     this.focus({ preventScroll: true });
@@ -1853,6 +1881,17 @@ export class SignalSchematic extends HTMLElement {
       else this.say(`Nothing to disconnect at ${hit.address}`);
     }
     else if (id === 'add') this.editor.openPalette(point, paletteLevel(hit, this.drawn, point));
+    // ADR 0037 §7: the slot items.
+    else if (id === 'add-slot') this.editor.openAddSlot(point, paletteLevel(hit, this.drawn, point));
+    else if (id === 'slot-load' || id === 'slot-replace') this.editor.openLoad(hit);
+    else if (id === 'slot-unload') this.editor.unload(hit);
+    else if (id === 'slot-map') this.editor.openMap(hit);
+    else if (id === 'slot-interface') this.editor.openInterface(hit);
+    else if (id === 'slot-save-template') this.editor.saveTemplate(hit);
+    else if (id === 'slot-detach') this.editor.detach(hit);
+    else if (id === 'make-interface') this.editor.makeInterface(hit);
+    else if (id === 'port-edit') this.editor.openInterface(hit, { port: hit.port.name });
+    else if (id === 'port-remove' || id === 'port-remove-wires') this.editor.removePort(hit, id === 'port-remove-wires');
     else if (id === 'fit') this.fitTop();
     else if (id === 'reset-layout') this.resetLayout(this.currentLevel());
     else if (id === 'edit') this.editor.setEditing(!this.editor.editing);

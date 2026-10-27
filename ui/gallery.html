@@ -141,6 +141,13 @@
   <figure><signal-value bind="/synth.drive"></signal-value><figcaption>drive, effective</figcaption></figure>
 </div>
 
+<h2>Slots</h2>
+<p class="note">ADR 0037 §7: <code>&lt;signal-slot bind="/fx"&gt;</code>, a loaded slot (an unmatched port hollow, its interface parameter a knob), and <code>/deck</code>, an empty one from <code>lib.deck</code>. Load…, Replace… and Unload write <code>project.toml</code> through the server (here they say "Not written").</p>
+<div class="row">
+  <figure class="wide"><signal-slot bind="/fx"></signal-slot><figcaption>loaded: std.gain through a map</figcaption></figure>
+  <figure class="wide"><signal-slot bind="/deck"></signal-slot><figcaption>empty: lib.deck</figcaption></figure>
+</div>
+
 <h2>The project’s controls</h2>
 <p class="note" id="project-note">From <code>describe</code>: a fader and a value per control, a meter per audio sink input and a scope of the first signal output.</p>
 <div class="row" id="project"></div>

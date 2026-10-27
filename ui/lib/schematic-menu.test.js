@@ -18,7 +18,7 @@ const PIN = { kind: 'port', path: '', level: '', address: '/lfo.out', node: PRIM
 
 test('an instance: Inspect, Open, Enter, Copy address, Delete; a primitive has no inside', () => {
   const items = schematicMenu(PRIMITIVE, { editing: true });
-  assert.deepEqual(ids(items), ['inspect', 'trace', 'open', 'enter', 'separator', 'copy-address', 'separator', 'delete']);
+  assert.deepEqual(ids(items), ['inspect', 'trace', 'open', 'enter', 'separator', 'copy-address', 'separator', 'make-interface', 'delete']);
   assert.equal(item(items, 'open').disabled, true);
   assert.equal(item(items, 'open').title, 'A primitive has no inside');
   assert.equal(item(items, 'enter').disabled, true);
@@ -32,7 +32,7 @@ test('an instance: Inspect, Open, Enter, Copy address, Delete; a primitive has n
 
 test('an open composite: Close (always: the zoom holds nothing open, 2026-10-22) and Add module here', () => {
   const open = schematicMenu(COMPOSITE, { editing: true, open: true, addable: true });
-  assert.deepEqual(ids(open), ['inspect', 'trace', 'close', 'enter', 'separator', 'copy-address', 'separator', 'add', 'delete']);
+  assert.deepEqual(ids(open), ['inspect', 'trace', 'close', 'enter', 'separator', 'copy-address', 'separator', 'add', 'add-slot', 'make-interface', 'delete']);
   assert.equal(item(open, 'close').disabled, false);
   assert.equal(item(open, 'add').disabled, false);
   const viewing = schematicMenu(COMPOSITE, { editing: false, open: true, addable: true });
@@ -62,8 +62,9 @@ test('a pin: Inspect, Copy address, Disconnect all while something is connected'
 
 test('the background: Add module here, Fit, Reset layout of the level shown, the Edit patch switch', () => {
   const items = schematicMenu({ kind: 'background' }, { editing: false, level: '', addable: true });
-  assert.deepEqual(ids(items), ['add', 'separator', 'fit', 'reset-layout', 'separator', 'edit']);
+  assert.deepEqual(ids(items), ['add', 'add-slot', 'separator', 'fit', 'reset-layout', 'separator', 'edit']);
   assert.equal(item(items, 'add').disabled, true);
+  assert.equal(item(items, 'add-slot').title, EDIT_OFF);
   assert.equal(item(items, 'reset-layout').label, 'Reset layout (top level)');
   assert.equal(item(items, 'edit').label, 'Edit patch');
   const editing = schematicMenu(null, { editing: true, level: 'kick', addable: true });
@@ -151,4 +152,34 @@ test('a library composite is not opened in place: Open in place off, Enter on', 
   assert.deepEqual([item(items, 'open').disabled, item(items, 'open').title], [true, 'A library composite: its inside is not in the graph']);
   assert.equal(item(items, 'enter').disabled, false);
   assert.equal(item(schematicMenu(COMPOSITE, {}), 'open').disabled, false);
+});
+
+const EMPTY_SLOT = { kind: 'instance', path: '', level: '', address: '/spare', node: { kind: 'instance', name: 'spare', module: '', composite: false, slot: { from: 'lib.voice', load: null, interface: { from: 'lib.voice', ports: [] } } } };
+const LOADED_SLOT = { kind: 'instance', path: '', level: '', address: '/fx', node: { kind: 'instance', name: 'fx', module: 'std.gain', composite: false, slot: { from: null, load: 'std.gain', interface: { ports: [] } } } };
+
+test('ADR 0037 §7: a slot box: Load… when empty, Replace… and Unload when loaded, the map, the interface, templates', () => {
+  const empty = schematicMenu(EMPTY_SLOT, { editing: true });
+  assert.deepEqual(ids(empty), ['inspect', 'trace', 'open', 'enter', 'separator', 'copy-address', 'separator', 'slot-load', 'slot-unload', 'slot-map', 'slot-interface', 'slot-save-template', 'slot-detach', 'separator', 'make-interface', 'delete']);
+  assert.equal(item(empty, 'slot-unload').title, 'The slot is empty');
+  assert.equal(item(empty, 'slot-detach').disabled, false, 'it has a template');
+  assert.equal(item(empty, 'open').title, 'An empty slot has no inside');
+  assert.equal(item(empty, 'delete').label, 'Delete slot');
+  const loaded = schematicMenu(LOADED_SLOT, { editing: true });
+  assert.ok(ids(loaded).includes('slot-replace') && !ids(loaded).includes('slot-load'));
+  assert.equal(item(loaded, 'slot-unload').disabled, false);
+  assert.equal(item(loaded, 'slot-detach').title, 'Its interface has no template');
+  const viewing = schematicMenu(LOADED_SLOT, { editing: false });
+  for (const id of ['slot-replace', 'slot-unload', 'slot-map', 'slot-interface', 'slot-save-template', 'make-interface']) assert.equal(item(viewing, id).title, EDIT_OFF, id);
+});
+
+test('ADR 0037 §7: a slot pin: rename or retype, remove (off while wired), remove with its wires', () => {
+  const pin = { kind: 'port', path: '', level: '', address: '/fx.x', node: LOADED_SLOT.node, port: { name: 'x', direction: 'in' } };
+  const wired = schematicMenu(pin, { editing: true, connected: 1 });
+  assert.deepEqual(ids(wired).slice(-4), ['separator', 'port-edit', 'port-remove', 'port-remove-wires']);
+  assert.equal(item(wired, 'port-remove').disabled, true);
+  assert.equal(item(wired, 'port-remove-wires').disabled, false);
+  const free = schematicMenu(pin, { editing: true, connected: 0 });
+  assert.equal(item(free, 'port-remove').disabled, false);
+  assert.equal(item(free, 'port-remove-wires').title, 'No wire names it');
+  assert.ok(!ids(schematicMenu(PIN, { editing: true })).includes('port-edit'), 'a primitive’s pin is not edited');
 });

@@ -115,6 +115,7 @@ function withDocument(body) {
 
 const { ModuleBrowser } = await import('./module-browser.js');
 const { EXPANDED, browserEntries } = await import('../lib/module-browser.js');
+const slotLib = await import('../lib/slot.js');
 
 const MODULES = {
   primitives: [
@@ -427,4 +428,38 @@ test('a refused `modules` reaches the browser', withDocumentAsync(async () => {
   await settle();
   assert.equal(e.browser.failure, 'the project does not load');
   assert.equal(e.browser.count.textContent, 'Not loaded');
+}));
+
+test('ADR 0037 §7: the Load dialog: titled, no name, each row its match, the unmatched ports offered with Load', withDocument(() => {
+  const { contentMatch } = slotLib;
+  const loaded = [];
+  // A slot with one output `out` and an input `in` nothing here offers.
+  const slot = { interface: { ports: [{ name: 'out', role: 'output' }, { name: 'trig', role: 'input' }] } };
+  const b = new ModuleBrowser({
+    mode: 'load',
+    add: (module, _name, options) => {
+      loaded.push([module, options.addUnmatched, options.entry.module]);
+      b.close();
+      return null;
+    },
+    closed: () => {},
+    graph: () => null,
+    defaultName: () => '',
+    matchOf: (entry) => contentMatch(entry, slot),
+  });
+  new Node('signal-slot').append(b.build([...EXPANDED, 's:library', 's:folders']));
+  b.open({ where: '', entries: browserEntries(MODULES), title: 'Load into fx' });
+  assert.equal(b.heading.textContent, 'Load into fx');
+  assert.equal(b.addButton.textContent, 'Load');
+  assert.equal(b.dialog.getAttribute('aria-label'), 'Load into slot');
+  const voice = b.list.children.find((li) => li.children[1]?.textContent === 'voice');
+  assert.match(voice.children[2].textContent, /^1\/2 match/, 'voice offers `out`');
+  // std.osc matches `out` too; std.add nothing: it is ranked last in its branch.
+  assert.equal(b.entries.at(-1).module, 'std.add');
+  assert.match(b.detailPane.textContent, /1 of the slot’s 2 ports and parameters match by name/);
+  assert.equal(b.unmatchedLabel.hidden, true, 'voice offers nothing the slot lacks');
+  b.unmatchedBox.checked = true;
+  b.addButton.dispatch('click');
+  assert.deepEqual(loaded, [['voice', true, 'voice']]);
+  assert.equal(b.isOpen, false);
 }));

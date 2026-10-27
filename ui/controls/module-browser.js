@@ -71,6 +71,7 @@ dialog.browser::backdrop { background: var(--signal-backdrop, rgba(0, 0, 0, 0.5)
 .browser .preview .inert { pointer-events: none; user-select: none; -webkit-user-select: none; }
 .browser svg.preview-svg { position: static; inset: auto; display: block; width: 100%; height: auto; touch-action: auto; }
 .browser .foot label { display: flex; gap: 6px; align-items: center; }
+.browser .foot label[hidden] { display: none; }
 .browser .foot .instance-name { width: 16rem; max-width: 50vw; }
 .browser .foot .why { flex: 1; min-width: 8rem; color: var(--signal-effective, #ffb74d); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .browser .foot .buttons { display: flex; gap: 6px; margin-left: auto; }
@@ -137,7 +138,13 @@ export class ModuleBrowser {
    * without adding; `graph()`: the schematic's graph (stored positions and
    * composites for the previews); `defaultName(module)`: the name proposed.
    */
-  constructor({ add, closed, graph, defaultName }) {
+  constructor({ add, closed, graph, defaultName, mode = 'add', matchOf = null }) {
+    // ADR 0037 §7: `load` is the Load dialog (Load…, Replace… of a slot):
+    // no name, its entries sorted by how many of the slot's ports they
+    // match (`matchOf(entry)`: `{matched, total, unmatched}`), and the
+    // offer to add a content's unmatched ports to the slot.
+    this.mode = mode;
+    this.matchOf = matchOf;
     this.addType = add;
     this.defaultName = defaultName;
     this.closed = closed;
@@ -155,14 +162,16 @@ export class ModuleBrowser {
   /** The dialog, built once. */
   build(expanded) {
     this.expanded = new Set(expanded);
+    const loading = this.mode === 'load';
     const dialog = html('dialog', { className: 'browser' });
-    dialog.setAttribute('aria-label', 'Add module');
+    dialog.setAttribute('aria-label', loading ? 'Load into slot' : 'Add module');
     this.dialog = dialog;
     this.where = html('span', { className: 'where' });
     this.search = html('input', { type: 'search', className: 'search', placeholder: 'Search modules: name or description', spellcheck: false, autocomplete: 'off' });
     this.search.setAttribute('aria-label', 'Search modules');
     this.count = html('span', { className: 'count' });
-    const head = html('div', { className: 'head' }, [html('h2', { textContent: 'Add module' }), this.where, this.search, this.count]);
+    this.heading = html('h2', { textContent: loading ? 'Load into slot' : 'Add module' });
+    const head = html('div', { className: 'head' }, [this.heading, this.where, this.search, this.count]);
     this.list = html('ul', { className: 'tree', id: 'module-tree' });
     this.list.setAttribute('role', 'tree');
     this.list.setAttribute('aria-label', 'Module types by source and category');
@@ -173,9 +182,11 @@ export class ModuleBrowser {
     this.name.setAttribute('aria-label', 'Name of the new instance');
     this.why = html('span', { className: 'why' });
     const cancel = html('button', { type: 'button', textContent: 'Cancel' });
-    this.addButton = html('button', { type: 'button', className: 'add', textContent: 'Add' });
+    this.addButton = html('button', { type: 'button', className: 'add', textContent: loading ? 'Load' : 'Add' });
+    this.unmatchedBox = html('input', { type: 'checkbox', className: 'add-unmatched' });
+    this.unmatchedLabel = html('label', { className: 'unmatched' }, [this.unmatchedBox, document.createTextNode('Add its unmatched ports to the slot')]);
     const foot = html('div', { className: 'foot' }, [
-      html('label', {}, [document.createTextNode('Name'), this.name]),
+      loading ? this.unmatchedLabel : html('label', {}, [document.createTextNode('Name'), this.name]),
       this.why,
       html('span', { className: 'buttons' }, [cancel, this.addButton]),
     ]);
@@ -232,8 +243,10 @@ export class ModuleBrowser {
    * `inside drums`), with the types known so far (`entries`, null until
    * `modules` answers: `setEntries`).
    */
-  open({ where, entries = null }) {
-    this.entries = entries;
+  open({ where, entries = null, title = null }) {
+    if (title) this.heading.textContent = title;
+    if (this.unmatchedBox) this.unmatchedBox.checked = false;
+    this.entries = this.ranked(entries);
     this.failure = null;
     this.detailModule = null;
     this.cursor = null;
@@ -254,9 +267,18 @@ export class ModuleBrowser {
 
   /** The types to browse (`browserEntries`), once `modules` answered. */
   setEntries(entries) {
-    this.entries = entries;
+    this.entries = this.ranked(entries);
     this.failure = null;
     if (this.isOpen) this.show();
+  }
+
+  /** The Load dialog's entries by how many of the slot's ports each matches (most first; a stable sort keeps the reply's order otherwise). */
+  ranked(entries) {
+    if (this.mode !== 'load' || !this.matchOf || !entries) return entries;
+    return entries
+      .map((entry, i) => ({ entry, i, match: this.matchOf(entry) }))
+      .sort((a, b) => b.match.matched - a.match.matched || a.i - b.i)
+      .map(({ entry }) => entry);
   }
 
   /** `modules` was refused: says why, in the panes, until the types come (no more "Loading…"). */
@@ -339,7 +361,9 @@ export class ModuleBrowser {
     item.dataset.key = r.key;
     if (r.kind === 'entry') {
       item.title = r.entry.description ?? r.entry.module;
-      item.append(html('span', { className: 'twisty' }), html('span', { className: 'label', textContent: r.entry.module }), html('span', { className: 'what', textContent: summary(r.entry.description) }));
+      const match = this.mode === 'load' && this.matchOf ? this.matchOf(r.entry) : null;
+      const what = match ? `${match.matched}/${match.total} match · ${summary(r.entry.description)}` : summary(r.entry.description);
+      item.append(html('span', { className: 'twisty' }), html('span', { className: 'label', textContent: r.entry.module }), html('span', { className: 'what', textContent: what }));
     } else {
       item.setAttribute('aria-expanded', String(r.expanded));
       item.append(html('span', { className: 'twisty', textContent: r.expanded ? '▾' : '▸' }), html('span', { className: 'label', textContent: r.label }), html('span', { className: 'n', textContent: String(r.count) }));
@@ -389,7 +413,8 @@ export class ModuleBrowser {
 
   add() {
     if (!this.chosen) return;
-    const error = this.addType?.(this.chosen.module, this.name.value.trim());
+    const options = this.mode === 'load' ? { addUnmatched: Boolean(this.unmatchedBox?.checked), entry: this.chosen } : undefined;
+    const error = this.addType?.(this.chosen.module, this.name.value.trim(), options);
     if (error) this.why.textContent = error;
   }
 
@@ -410,12 +435,20 @@ export class ModuleBrowser {
     const parts = [html('h3', { textContent: d.module }), html('div', { className: 'sub', textContent: `${d.where} · ${d.counts}` })];
     parts.push(html('p', { className: d.description ? 'about' : 'about none', textContent: d.description ?? (entry.composite ? 'This composite has no description (its file may give one: [composite] description).' : 'No description.') }));
     if (d.referenceFor) parts.push(html('div', { className: 'reference', textContent: `A validation reference: rebuilds ${d.referenceFor} from core primitives, to be compared with it.` }));
+    // The Load dialog: how it matches the slot, by name (ADR 0037 §4).
+    const match = this.mode === 'load' && this.matchOf ? this.matchOf(entry) : null;
+    if (match) {
+      const unmatched = match.unmatched.map((c) => `${c.name} (${c.role})`).join(', ');
+      parts.push(html('h4', { textContent: 'Match' }), html('div', { className: 'sub', textContent: `${match.matched} of the slot’s ${match.total} ports and parameters match by name.${unmatched ? ` Not in the slot: ${unmatched} (Add its unmatched ports adds them).` : ''}` }));
+      this.unmatchedLabel.hidden = match.unmatched.length === 0;
+    }
     const portColumns = [['name', 'Name'], ['kind', 'Kind'], ['shape', 'Shape'], ['rate', 'Rate'], ['range', 'Range'], ['unit', 'Unit']];
     const section = (title, rows, columns) => [html('h4', { textContent: `${title} (${rows.length})` }), rows.length ? table(rows, columns) : html('div', { className: 'none-row', textContent: 'none' })];
     parts.push(...section('Inputs', d.inputs, portColumns));
     parts.push(...section('Outputs', d.outputs, portColumns));
     parts.push(...section('Parameters', d.parameters.map((p) => ({ ...p, domain: p.values ?? p.range })), [['name', 'Name'], ['kind', 'Kind'], ['domain', 'Range / values'], ['default', 'Default'], ['unit', 'Unit'], ['combine', 'Combine']]));
-    parts.push(html('h4', { textContent: 'Previews' }), html('div', { className: 'previews' }, [this.panelPreview(entry), this.schematicPreview(entry)]));
+    // The Load dialog shows how a content matches instead: it adds no instance to preview.
+    if (!entry.project && this.mode !== 'load') parts.push(html('h4', { textContent: 'Previews' }), html('div', { className: 'previews' }, [this.panelPreview(entry), this.schematicPreview(entry)]));
     const scroll = this.detailPane.scrollTop;
     const same = this.detailModule === entry.module;
     this.detailModule = entry.module;

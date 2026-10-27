@@ -3,6 +3,8 @@
 // generated default panel of a project without ui/main.html. For
 // <signal-panel>; no DOM.
 
+import { topSlots } from './slot.js';
+
 /** Units whose values a log taper suits (when the range starts above 0). */
 const LOG_UNITS = new Set(['Hz', 'ms', 's']);
 
@@ -52,14 +54,19 @@ export function controlSpec(control, description = {}) {
 
 /**
  * The generated panel of a `describe` reply: the top-level parameters
- * (`controls`) grouped by instance, in order; a meter per signal input of
- * the audio sink; and a scope on the sink's first input (the sum of its
- * sources, each scaled), or null.
+ * (`controls`) grouped by instance, in order, but a slot's (ADR 0037 §7:
+ * `slots`, the top-level slots' names, each a card of its own that shows
+ * its interface parameters); a meter per signal input of the audio sink;
+ * and a scope on the sink's first input (the sum of its sources, each
+ * scaled), or null.
  */
 export function defaultPanel(description) {
   const d = description ?? {};
   const groups = [];
+  // ADR 0037 §7: every top-level slot, loaded or not, has its card (<signal-slot>), which shows its interface parameters.
+  const slots = Object.keys(topSlots(d));
   for (const control of d.controls ?? []) {
+    if (slots.includes(control.instance)) continue;
     let group = groups.find((g) => g.instance === control.instance);
     if (!group) {
       group = { instance: control.instance, module: control.module, controls: [] };
@@ -74,7 +81,7 @@ export function defaultPanel(description) {
   const meters = inputs.map((p) => ({ bind: p.address, label: p.name ?? p.address }));
   const first = inputs[0];
   const scope = first ? { bind: first.address, label: first.address } : null;
-  return { project: d.project ?? null, groups, meters, scope };
+  return { project: d.project ?? null, groups, slots, meters, scope };
 }
 
 /**
