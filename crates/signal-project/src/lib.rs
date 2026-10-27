@@ -73,7 +73,8 @@ pub use pattern::{
 };
 pub use schema::schema;
 pub use slot::{
-    Interface, InterfacePort, LibraryInterface, Match, Role, SlotResolution, library_interfaces,
+    ContentNames, ContentPort, Interface, InterfacePort, LibraryInterface, Match, Role,
+    SlotResolution, content_names, interface_templates, library_interfaces, library_template,
 };
 pub use structure::{library_modules, library_parameters, modules_without_inside};
 pub use write::{

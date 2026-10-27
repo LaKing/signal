@@ -1279,3 +1279,187 @@ pub fn library_interfaces() -> Vec<LibraryInterface> {
         })
         .collect()
 }
+
+/// One port or parameter a slot's content offers ([`ContentNames`]).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ContentPort {
+    /// Its name.
+    pub name: String,
+    /// Input, output or parameter.
+    pub role: Role,
+    /// `signal`, `events` or `{"vector": N}`.
+    #[serde(serialize_with = "shape_json")]
+    pub shape: PortShape,
+    /// Its rate divisor.
+    pub rate: u32,
+    /// Its kind.
+    pub kind: PortKind,
+}
+
+/// What a slot's content offers by name (ADR 0037 §7): its ports and
+/// parameters, and the `set` keys it takes. What a Replace keeps of a
+/// slot's `map` and `set`, and what the Load dialog counts matches by.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ContentNames {
+    /// Its ports and parameters, in its order (a primitive's descriptor
+    /// order, a composite's or a project's exports in name order).
+    pub ports: Vec<ContentPort>,
+    /// The `set` keys it takes: a module's parameters, a project's
+    /// `<inner>.<parameter>` (ADR 0035 §1).
+    pub settable: Vec<String>,
+}
+
+fn content_ports(ports: &[ModulePort]) -> Vec<ContentPort> {
+    ports
+        .iter()
+        .map(|p| ContentPort {
+            name: p.name.clone(),
+            role: if p.parameter {
+                Role::Parameter
+            } else if p.direction == signal_core::Direction::Out {
+                Role::Output
+            } else {
+                Role::Input
+            },
+            shape: p.shape,
+            rate: p.rate.get(),
+            kind: p.kind,
+        })
+        .collect()
+}
+
+/// The definitions a module reference of `project` resolves in: the
+/// project's composites and every library composite (so a `lib.` reference
+/// the project does not use yet resolves too).
+fn module_definitions(project: Option<&Project>) -> Vec<CompositeDef> {
+    static LIBRARY: OnceLock<Vec<CompositeDef>> = OnceLock::new();
+    let library = LIBRARY.get_or_init(|| {
+        let instances: String = crate::Library::builtin()
+            .names()
+            .map(|n| {
+                format!(
+                    "{n} = {{ module = \"{}{n}\" }}\n",
+                    signal_core::LIBRARY_PREFIX
+                )
+            })
+            .collect();
+        let text = format!(
+            "schema_version = 1\n\n[project]\nname = \"library\"\n\n[instances]\n{instances}"
+        );
+        Project::from_sources(vec![crate::SourceFile {
+            path: crate::PROJECT_FILE.to_owned(),
+            text,
+        }])
+        .map(|all| all.library.iter().map(|l| l.def.clone()).collect())
+        .unwrap_or_default()
+    });
+    let mut defs: Vec<CompositeDef> = project.map(Project::definitions).unwrap_or_default();
+    for def in library {
+        if !defs.iter().any(|d| d.name == def.name) {
+            defs.push(def.clone());
+        }
+    }
+    defs
+}
+
+/// What `load` (a slot's content, as written) offers, `project` being the
+/// project the slot is in (its folder `dir`, from which a project path is
+/// read): `None` when it does not resolve (a `.signal` file is not read).
+pub fn content_names(
+    project: Option<&Project>,
+    dir: &std::path::Path,
+    load: &str,
+    registry: &Registry,
+) -> Option<ContentNames> {
+    if !crate::is_project_path(load) {
+        let defs = module_definitions(project);
+        let ports = signal_graph::ports_of(load, &defs, registry).ok()?;
+        let settable = ports
+            .iter()
+            .filter(|p| p.parameter)
+            .map(|p| p.name.clone())
+            .collect();
+        return Some(ContentNames {
+            ports: content_ports(&ports),
+            settable,
+        });
+    }
+    if load.ends_with(".signal") {
+        return None;
+    }
+    let loaded = Project::load(&dir.join(load)).ok()?;
+    project_content(&loaded, registry)
+}
+
+/// What the project `loaded` offers as a slot's content (ADR 0035 §2–3):
+/// its exports, its sinks planned as their taps and, without `[exports]
+/// outputs`, their channels exported.
+pub(crate) fn project_content(loaded: &Project, registry: &Registry) -> Option<ContentNames> {
+    let mut defs = loaded.definitions();
+    defs.extend(loaded.tapped(registry, &mut Vec::new()));
+    let mut root = loaded.root.clone();
+    root.name = "@content".to_owned();
+    let mut channels = Vec::new();
+    for instance in &mut root.instances {
+        let Some(module) = registry.get(&instance.module) else {
+            continue;
+        };
+        if module.descriptor.sink.is_none() {
+            continue;
+        }
+        let Some(tap) = registry.sink_tap(module.descriptor.type_name) else {
+            continue;
+        };
+        for port in
+            module.descriptor.ports.iter().filter(|p| {
+                p.direction == signal_core::Direction::In && p.shape == PortShape::Signal
+            })
+        {
+            channels.push(signal_graph::OutputExport {
+                name: port.name.to_owned(),
+                from: format!("{}.{}_out", instance.name, port.name),
+            });
+        }
+        instance.module = tap.to_owned();
+    }
+    if root.exports.outputs.is_empty() {
+        root.exports.outputs = channels;
+    }
+    let settable = loaded
+        .root
+        .instances
+        .iter()
+        .flat_map(|instance| {
+            signal_graph::ports_of(&instance.module, &defs, registry)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|p| p.parameter)
+                .map(move |p| format!("{}.{}", instance.name, p.name))
+        })
+        .collect();
+    defs.push(root);
+    let ports = signal_graph::ports_of("@content", &defs, registry).ok()?;
+    Some(ContentNames {
+        ports: content_ports(&ports),
+        settable,
+    })
+}
+
+/// The project's interface templates (`interfaces/<name>.toml` of `files`)
+/// by name, each one that reads; the others are the load's to report.
+pub fn interface_templates(files: &[crate::SourceFile]) -> BTreeMap<String, Interface> {
+    let prefix = format!("{}/", crate::INTERFACES);
+    files
+        .iter()
+        .filter_map(|file| {
+            let stem = file.path.strip_prefix(&prefix)?.strip_suffix(".toml")?;
+            let interface = parse_interface(&file.text, stem).ok()?;
+            Some((stem.to_owned(), interface))
+        })
+        .collect()
+}
+
+/// The library template `name` (`lib.voice`), resolved.
+pub fn library_template(name: &str) -> Option<Interface> {
+    library_templates().get(name).cloned()
+}

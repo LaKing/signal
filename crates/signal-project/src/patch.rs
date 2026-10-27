@@ -28,7 +28,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use toml_edit::{Document, DocumentMut, InlineTable, Item as TomlItem, Table, Value};
 
 use crate::schematic::{read_positions, set_position};
+use crate::slot::{ContentNames, Interface};
 use crate::write::{inline, number, standard};
+
+mod slot;
+
+pub use slot::{Change, PortJson};
 
 /// One patch op (`docs/ui-protocol.md` "patch"). `edits` and `layout` are
 /// inverse-only: the server writes them into `inverse`, the page sends them
@@ -108,6 +113,100 @@ pub enum Op {
         /// Inverse-only.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         edits: Option<Vec<Edit>>,
+    },
+    /// ADR 0037: a slot, appended to `[instances]` as `instance.add` appends
+    /// an instance: `name = { slot = <slot>, load = "<load>" }`.
+    #[serde(rename = "slot.add")]
+    SlotAdd {
+        /// Its name at the level.
+        name: String,
+        /// Its interface: a template's name (`"lib.voice"`, `"deck"`) or a
+        /// table (`{"inputs": {"in": "audio"}}`); absent: `{}`.
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        slot: serde_json::Value,
+        /// Its content, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        load: Option<String>,
+        /// Its schematic position.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<f64>,
+        /// Its schematic position.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<f64>,
+    },
+    /// ADR 0037 §6–7: `load` written (a Load, or a Replace of the content
+    /// loaded): `map` and `set` replace the slot's when given, else the
+    /// entries the new content accepts are kept and the rest removed.
+    #[serde(rename = "slot.load")]
+    SlotLoad {
+        /// The slot's name at the level.
+        slot: String,
+        /// The content: a module reference or a project path.
+        load: String,
+        /// The slot's new `map` (`{}` removes it).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        map: Option<BTreeMap<String, serde_json::Value>>,
+        /// The slot's new `set` (`{}` removes it).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        set: Option<BTreeMap<String, f64>>,
+    },
+    /// ADR 0037 §6: `load` removed (and `seed`, a project's): the slot empty.
+    #[serde(rename = "slot.unload")]
+    SlotUnload {
+        /// The slot's name at the level.
+        slot: String,
+    },
+    /// ADR 0037 §4: the slot's `map` written (`{}` removes it).
+    #[serde(rename = "slot.map")]
+    SlotMap {
+        /// The slot's name at the level.
+        slot: String,
+        /// Slot port or parameter → the content's name, or `false`.
+        map: BTreeMap<String, serde_json::Value>,
+    },
+    /// ADR 0037 §2: the slot's interface edited.
+    #[serde(rename = "slot.interface")]
+    SlotInterface {
+        /// The slot's name at the level.
+        slot: String,
+        /// Ports and parameters added.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        add: Vec<PortJson>,
+        /// Removed (a template's: named in `remove`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remove: Vec<String>,
+        /// Renamed, old → new, with the level's wires and exports on them.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        rename: BTreeMap<String, String>,
+        /// Declared anew (shape, rate, kind, unit, range, group).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        retype: Vec<PortJson>,
+        /// Remove the wires on removed ports too (else refused, `in-use`).
+        #[serde(
+            default,
+            rename = "removeWires",
+            skip_serializing_if = "std::ops::Not::not"
+        )]
+        remove_wires: bool,
+        /// "Detach from template": the resolved interface written inline.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        detach: bool,
+        /// The interface set to this template alone (`slot = "<template>"`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        template: Option<String>,
+    },
+    /// The inverse of a slot op: keys of the slot's entry set back to what
+    /// they said, and the level's wires on its ports renamed back.
+    #[serde(rename = "slot.restore")]
+    SlotRestore {
+        /// The slot's name at the level.
+        slot: String,
+        /// The keys, in order.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changes: Vec<Change>,
+        /// Port → port, the wires and exports renamed.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        wires: BTreeMap<String, String>,
     },
 }
 
@@ -265,6 +364,13 @@ pub struct Context<'a> {
     /// A module type's parameters in declared order (a composite's exported
     /// ones), `None` for a module the project does not know.
     pub module: &'a dyn Fn(&str) -> Option<Vec<String>>,
+    /// ADR 0037: the project's interface templates by name
+    /// (`interfaces/<name>.toml`; the library's are known here).
+    pub templates: &'a BTreeMap<String, Interface>,
+    /// ADR 0037 §7: what a slot's content (`load`, as written) offers,
+    /// `None` when it does not resolve: a Replace then keeps every `map` and
+    /// `set` entry, and the load check judges them.
+    pub content: &'a dyn Fn(&str) -> Option<ContentNames>,
 }
 
 /// A patch applied: the level's new text, `ui/schematic.toml`'s (`None`:
@@ -279,6 +385,12 @@ pub struct Patched {
     pub positions_changed: bool,
     /// The ops that undo the patch, in order.
     pub inverse: Vec<Op>,
+    /// What a slot op says it did besides (a Replace's removed `map` and
+    /// `set` entries).
+    pub notes: Vec<String>,
+    /// ADR 0037 §2: the slot ports renamed, `slot.old` → `slot.new` at the
+    /// level, in order: the caller rewrites the panel bindings on them.
+    pub renamed: Vec<(String, String)>,
 }
 
 /// Applies `ops` in order to `text` (the level file) and `positions`
@@ -295,11 +407,13 @@ pub fn apply(
         positions: positions.map(str::to_owned),
         positions_changed: false,
         ctx,
+        notes: Vec::new(),
+        renamed: Vec::new(),
     };
     map(&patch.text, &Scheme::LEVEL).map_err(|e| refused("does-not-load", e))?;
     let mut inverse = Vec::new();
     for op in ops {
-        inverse.push(patch.op(op)?);
+        inverse.extend(patch.op(op)?);
     }
     inverse.reverse();
     Ok(Patched {
@@ -307,6 +421,8 @@ pub fn apply(
         positions: patch.positions,
         positions_changed: patch.positions_changed,
         inverse,
+        notes: patch.notes,
+        renamed: patch.renamed,
     })
 }
 
@@ -1297,6 +1413,8 @@ struct Patching<'a> {
     positions: Option<String>,
     positions_changed: bool,
     ctx: &'a Context<'a>,
+    notes: Vec<String>,
+    renamed: Vec<(String, String)>,
 }
 
 fn valid_name(name: &str) -> bool {
@@ -1465,9 +1583,9 @@ impl Patching<'_> {
         })
     }
 
-    fn op(&mut self, op: &Op) -> Result<Op, PatchError> {
+    fn op(&mut self, op: &Op) -> Result<Vec<Op>, PatchError> {
         let level = self.ctx.level;
-        match op {
+        let one = match op {
             Op::InstanceAdd {
                 name,
                 module,
@@ -1764,8 +1882,114 @@ impl Patching<'_> {
                     edits: Some(inv),
                 })
             }
+            Op::SlotAdd {
+                name,
+                slot,
+                load,
+                x,
+                y,
+            } => {
+                if !valid_name(name) {
+                    return Err(bad(format!("`{name}`: a name is [a-z][a-z0-9_]*")));
+                }
+                if self.level_map()?.entries.iter().any(|e| &e.name == name) {
+                    return Err(bad(format!("the level already has an instance `{name}`")));
+                }
+                let (x, y) = (coordinate(*x, "x")?, coordinate(*y, "y")?);
+                let entry = slot::slot_entry(name, slot, load.as_deref())?;
+                let mut inv = Vec::new();
+                add_instance(&mut self.text, &Scheme::LEVEL, &entry, &mut inv).map_err(written)?;
+                inv.reverse();
+                let layout = match (x, y) {
+                    (Some(x), Some(y)) => {
+                        Some(self.layout(|t, inv| add_position(t, level, name, x, y, inv))?)
+                    }
+                    (None, None) => None,
+                    _ => return Err(bad("a position needs both `x` and `y`")),
+                };
+                Ok(Op::InstanceRemove {
+                    name: name.clone(),
+                    edits: Some(inv),
+                    layout,
+                })
+            }
+            Op::SlotLoad {
+                slot,
+                load,
+                map,
+                set,
+            } => {
+                let edit = slot::SlotEdit::Load {
+                    load,
+                    map: map.as_ref(),
+                    set: set.as_ref(),
+                };
+                return self.slot_edit(slot, edit);
+            }
+            Op::SlotUnload { slot } => return self.slot_edit(slot, slot::SlotEdit::Unload),
+            Op::SlotMap { slot, map } => return self.slot_edit(slot, slot::SlotEdit::Map(map)),
+            Op::SlotInterface {
+                slot,
+                add,
+                remove,
+                rename,
+                retype,
+                remove_wires,
+                detach,
+                template,
+            } => {
+                let edit = slot::SlotEdit::Interface {
+                    add,
+                    remove,
+                    rename,
+                    retype,
+                    remove_wires: *remove_wires,
+                    detach: *detach,
+                    template: template.as_deref(),
+                };
+                return self.slot_edit(slot, edit);
+            }
+            Op::SlotRestore {
+                slot,
+                changes,
+                wires,
+            } => {
+                let (changes, wires) = self.restore(slot, changes, wires)?;
+                Ok(Op::SlotRestore {
+                    slot: slot.clone(),
+                    changes,
+                    wires,
+                })
+            }
+        };
+        one.map(|op| vec![op])
+    }
+}
+
+/// ADR 0037 §7: the contents `ops` would write into slots' `load`
+/// (`slot.add`, `slot.load`, a `slot.restore` of `load`), as written.
+pub fn loads_of(ops: &[Op]) -> Vec<String> {
+    let mut loads = Vec::new();
+    for op in ops {
+        match op {
+            Op::SlotAdd {
+                load: Some(load), ..
+            }
+            | Op::SlotLoad { load, .. } => loads.push(load.clone()),
+            Op::SlotRestore { changes, .. } => {
+                for change in changes.iter().filter(|c| c.path == ["load"]) {
+                    let read = change.value.as_deref().and_then(|text| {
+                        toml::from_str::<toml::Table>(&format!("v = {text}")).ok()
+                    });
+                    if let Some(load) = read.as_ref().and_then(|t| t.get("v")?.as_str()) {
+                        loads.push(load.to_owned());
+                    }
+                }
+            }
+            _ => {}
         }
     }
+    loads
 }
 
 /// The instance names `ops` remove.
@@ -1780,3 +2004,6 @@ pub fn removed_instances(ops: &[Op]) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod slot_tests;

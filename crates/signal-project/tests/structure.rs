@@ -329,3 +329,98 @@ fn modules_give_each_composite_its_inside_description_and_category() {
     assert_eq!(inside["outputs"][0]["name"], "out");
     assert_eq!(inside["outputs"][0]["from"], "osc.out");
 }
+
+/// ADR 0037 §7, test 8: a slot is a box with its interface's ports, loaded
+/// or empty, in the file's order, with `slot`: its interface, template,
+/// load, match table, unmatched ports, unheard outputs and dropped wires.
+#[test]
+fn slots_are_boxes_with_their_interface_loaded_or_not() {
+    let mut registry = Registry::new();
+    signal_std::register(&mut registry).unwrap();
+    let text = r#"schema_version = 1
+
+[project]
+name = "slots"
+
+[instances]
+osc = { module = "std.sine_osc" }
+spare = { slot = "lib.voice" }
+fx = { slot = { inputs = { x = "audio", side = "audio" }, outputs = { y = "audio" }, parameters = { volume = { unit = "dB" } } }, load = "std.gain", map = { x = "in", y = "out", volume = "db" }, volume = -6 }
+out = { module = "std.audio_out" }
+
+[wiring]
+connections = [
+  { from = "osc.out", to = "fx.x" },
+  { from = "osc.out", to = "fx.side" },
+  { from = "fx.y", to = "out.l" },
+  { from = "osc.out", to = "spare.hz" },
+]
+"#;
+    let project = Project::from_sources(vec![signal_project::SourceFile {
+        path: "project.toml".to_owned(),
+        text: text.to_owned(),
+    }])
+    .unwrap();
+    let planned = project.plan(&registry).unwrap();
+    let graph = project.structure(&planned.plan, &registry);
+    let top = &graph["top"];
+    assert_eq!(names(top), ["osc", "spare", "fx", "out"]);
+    let spare = &top["instances"][1];
+    assert_eq!(spare["module"], "");
+    assert_eq!(spare["slot"]["from"], "lib.voice");
+    assert_eq!(spare["slot"]["load"], Value::Null);
+    let ports: Vec<(&str, &str)> = spare["ports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["name"].as_str().unwrap(),
+                p["direction"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ports,
+        [
+            ("gate", "in"),
+            ("hz", "in"),
+            ("velocity", "in"),
+            ("out", "out")
+        ]
+    );
+    assert_eq!(spare["ports"][1]["kind"], "frequency");
+    assert_eq!(spare["slot"]["dropped"], json!(["osc.out -> spare.hz"]));
+    let fx = &top["instances"][2];
+    assert_eq!(fx["module"], "std.gain");
+    assert_eq!(fx["composite"], false);
+    assert_eq!(fx["slot"]["project"], false);
+    assert_eq!(fx["slot"]["interface"]["from"], Value::Null);
+    let volume = &fx["parameters"][0];
+    assert_eq!(volume["name"], "volume");
+    assert_eq!(volume["address"], "/fx.volume");
+    assert_eq!(volume["unit"], "dB");
+    // The content's range and default: std.gain's db.
+    assert!(volume["range"]["min"].is_number() && volume["default"].is_number());
+    assert_eq!(
+        fx["slot"]["unmatched"],
+        json!([{"port": "side", "reason": "`std.gain` has no `side`"}])
+    );
+    let matched: Vec<(&str, &str)> = fx["slot"]["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| Some((m["port"].as_str()?, m["content"].as_str()?)))
+        .collect();
+    assert_eq!(matched, [("x", "in"), ("y", "out"), ("volume", "db")]);
+    // The wires are listed as written, the slot's ports by their names.
+    assert!(
+        top["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["from"] == "/fx.y" && c["to"] == "/out.l")
+    );
+    // An instance that is no slot has no `slot`.
+    assert!(top["instances"][0].get("slot").is_none());
+}

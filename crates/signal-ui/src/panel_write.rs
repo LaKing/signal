@@ -517,7 +517,7 @@ mod tests {
     fn the_whitelist_file_is_read() {
         let value: Value = serde_json::from_str(WHITELIST).unwrap();
         assert_eq!(value["classToken"], "^[a-z][a-z0-9-]*$");
-        assert_eq!(whitelist().controls.len(), 11);
+        assert_eq!(whitelist().controls.len(), 12);
         assert_eq!(whitelist().containers.len(), 7);
         assert!(
             class_token("wide")

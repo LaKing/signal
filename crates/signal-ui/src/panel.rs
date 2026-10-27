@@ -129,6 +129,67 @@ pub struct Panel {
     /// ADR 0042, 0043: the plan's warnings of values it corrected (in any
     /// file), not yet located in the project's folder.
     corrected: Vec<Diagnostic>,
+    /// ADR 0037 §7: each top-level slot's input and output (`/fx.y`), and
+    /// the plan port a binding on it reaches through the match, or why it
+    /// is inactive (the slot empty, the port unmatched).
+    slot_ports: BTreeMap<String, SlotPort>,
+    /// ADR 0037 §7: the top-level slots' names.
+    slots: Vec<String>,
+}
+
+/// What a binding on a slot's port reaches (ADR 0037 §7).
+#[derive(Clone, Debug, PartialEq)]
+pub enum SlotPort {
+    /// The plan port behind the matched content port.
+    Port(PortAddress),
+    /// Nothing, and why: the binding is inactive, not an error.
+    Inactive(String),
+}
+
+/// The plan port that `port` (an input, or an output when `output`) of an
+/// instance of `module` at `address` reaches: itself for a primitive, else
+/// through the composite's export (an input's first target), recursively.
+fn port_behind(
+    composites: &BTreeMap<&str, &CompositeDef>,
+    registry: &Registry,
+    address: &InstanceAddress,
+    module: &str,
+    port: &str,
+    output: bool,
+    depth: usize,
+) -> Option<PortAddress> {
+    if registry.get(module).is_some() {
+        return PortAddress::new(address, port).ok();
+    }
+    if depth > 64 {
+        return None;
+    }
+    let def = composites.get(module)?;
+    let target = if output {
+        def.exports
+            .outputs
+            .iter()
+            .find(|e| e.name == port)
+            .map(|e| e.from.clone())?
+    } else {
+        def.exports
+            .inputs
+            .iter()
+            .find(|e| e.name == port)
+            .and_then(|e| e.to.first().cloned())?
+    };
+    let (name, inner) = target.split_once('.')?;
+    let instance = def.instances.iter().find(|i| i.name == name)?;
+    let child = address.child(name).ok()?;
+    port_behind(
+        composites,
+        registry,
+        &child,
+        &instance.module,
+        inner,
+        output,
+        depth + 1,
+    )
 }
 
 /// A control whose value in `project.toml` lies outside its range or value
@@ -181,6 +242,25 @@ impl Panel {
             .chain(project.library.iter().map(|l| &l.def))
             .map(|c| (c.name.as_str(), c))
             .collect();
+        // ADR 0037 §7: a loaded slot's controls are its interface's
+        // parameters that match the content's (written on the slot's entry,
+        // by the interface's names); the content's other parameters are
+        // `set`'s, which the panel does not write yet.
+        let content_defs = if planned.slots.is_empty() {
+            Vec::new()
+        } else {
+            project.content_definitions(registry)
+        };
+        let mut with_content = composites.clone();
+        for def in &content_defs {
+            with_content.entry(def.name.as_str()).or_insert(def);
+        }
+        let slots: BTreeMap<&str, &signal_project::SlotResolution> = planned
+            .slots
+            .iter()
+            .filter_map(|r| Some((r.slot.strip_prefix('/')?, r)))
+            .filter(|(name, _)| !name.contains('/'))
+            .collect();
         let mut instances = Vec::new();
         for def in &project.root.instances {
             let excluded = project.snapshot_excluded(&def.name);
@@ -194,8 +274,19 @@ impl Panel {
                 parameters: Vec::new(),
                 inner: Vec::new(),
             };
+            let slot = slots.get(def.name.as_str());
             let names: Vec<String> = match (registry.get(&def.module), composites.get(&*def.module))
             {
+                _ if slot.is_some() => slot
+                    .map(|r| {
+                        r.matches
+                            .iter()
+                            .filter(|m| m.role == signal_project::Role::Parameter)
+                            .filter(|m| m.content.is_some())
+                            .map(|m| m.port.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 (Some(module), _) => module
                     .descriptor
                     .parameters
@@ -211,7 +302,16 @@ impl Panel {
                 (None, None) => Vec::new(),
             };
             for name in &names {
-                let targets = resolve(&composites, registry, &address, &def.module, name);
+                // A slot's parameter reaches the content's matched one.
+                let content = slot
+                    .and_then(|r| r.matches.iter().find(|m| m.port == *name))
+                    .and_then(|m| m.content.clone())
+                    .unwrap_or_else(|| name.clone());
+                let targets = if slot.is_some() {
+                    resolve(&with_content, registry, &address, &def.module, &content)
+                } else {
+                    resolve(&composites, registry, &address, &def.module, &content)
+                };
                 let Some((_, first, inner_value, _)) = targets.first() else {
                     continue;
                 };
@@ -277,6 +377,50 @@ impl Panel {
             }
             instances.push(instance);
         }
+        let mut slot_ports = BTreeMap::new();
+        for (name, resolution) in &slots {
+            let module = project
+                .root
+                .instances
+                .iter()
+                .find(|i| i.name == *name)
+                .map(|i| i.module.as_str());
+            let Ok(address) = format!("/{name}").parse::<InstanceAddress>() else {
+                continue;
+            };
+            for port in &resolution.interface.ports {
+                if port.role == signal_project::Role::Parameter {
+                    continue;
+                }
+                let output = port.role == signal_project::Role::Output;
+                let found = resolution.matches.iter().find(|m| m.port == port.name);
+                let reached = match (module, found.and_then(|m| m.content.as_deref())) {
+                    (None, _) => SlotPort::Inactive(format!("/{name} is empty")),
+                    (Some(_), None) => SlotPort::Inactive(
+                        found
+                            .and_then(|m| m.reason.clone())
+                            .unwrap_or_else(|| "unmatched".to_owned()),
+                    ),
+                    (Some(module), Some(content)) => {
+                        match port_behind(
+                            &with_content,
+                            registry,
+                            &address,
+                            module,
+                            content,
+                            output,
+                            0,
+                        ) {
+                            Some(port) => SlotPort::Port(port),
+                            None => SlotPort::Inactive(format!(
+                                "`{content}` reaches no port of the plan"
+                            )),
+                        }
+                    }
+                };
+                slot_ports.insert(format!("/{name}.{}", port.name), reached);
+            }
+        }
         Panel {
             instances,
             patterns: project
@@ -285,7 +429,22 @@ impl Panel {
                 .collect(),
             drags: BTreeMap::new(),
             corrected: planned.corrected.clone(),
+            slot_ports,
+            slots: slots.keys().map(|n| (*n).to_owned()).collect(),
         }
+    }
+
+    /// ADR 0037 §7: whether `name` is a top-level slot, loaded or empty.
+    pub fn is_slot(&self, name: &str) -> bool {
+        let prefix = format!("/{name}.");
+        self.slots.iter().any(|s| s == name)
+            || self.slot_ports.keys().any(|k| k.starts_with(&prefix))
+    }
+
+    /// ADR 0037 §7: what a binding on the slot port `address` (`/fx.y`)
+    /// reaches; `None` when it is no top-level slot's input or output.
+    pub fn slot_port(&self, address: &str) -> Option<&SlotPort> {
+        self.slot_ports.get(address)
     }
 
     /// ADR 0042, 0043: the controls whose `project.toml` value plays

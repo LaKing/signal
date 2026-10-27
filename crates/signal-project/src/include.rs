@@ -816,6 +816,16 @@ impl Project {
 }
 
 impl Project {
+    /// ADR 0035 §2–3, ADR 0037: the definitions the project's includes and
+    /// project-loaded slots bring, qualified, as the plan uses them (sinks
+    /// planned as their taps): what a slot's `module` names when it loads a
+    /// project.
+    pub fn content_definitions(&self, registry: &Registry) -> Vec<CompositeDef> {
+        self.tapped(registry, &mut Vec::new())
+    }
+}
+
+impl Project {
     /// ADR 0037 §3: the library interface templates this project's slots
     /// (and its includes') start from, with their text hashes: the
     /// manifest's `library_interface_hashes`. Empty without one.

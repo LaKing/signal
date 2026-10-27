@@ -113,6 +113,11 @@ pub(crate) struct McpArgs {
     /// tests; meters and scopes then cover less wall time).
     #[arg(long)]
     fast: bool,
+    /// ADR 0037 §7: a folder inside which a slot op may load a project
+    /// (repeatable). The project's own folder always is one; a project
+    /// anywhere else (`../studio`) needs its folder, or one around it, named.
+    #[arg(long = "load-root", value_name = "DIR")]
+    load_root: Vec<PathBuf>,
 }
 
 /// How the tools reach the project.
@@ -193,6 +198,22 @@ pub(crate) struct Context<'a> {
     pub(crate) driver: &'static str,
     /// Renders and sessions.
     pub(crate) out: PathBuf,
+    /// ADR 0037 §7: the folders a slot op may load a project from
+    /// (`--load-root`, canonical, the project's own first).
+    pub(crate) load_roots: Vec<PathBuf>,
+}
+
+/// ADR 0037 §7: the folders a slot op may load a project from: the
+/// project's own, then each `--load-root`, canonical.
+fn load_roots(args: &McpArgs, dir: &Path) -> Result<Vec<PathBuf>, Failure> {
+    let mut roots = vec![dir.to_owned()];
+    for root in &args.load_root {
+        roots.push(
+            root.canonicalize()
+                .map_err(|e| Failure::Usage(format!("--load-root {}: {e}", root.display())))?,
+        );
+    }
+    Ok(roots)
 }
 
 pub(crate) fn run(
@@ -216,6 +237,7 @@ pub(crate) fn run(
         .project
         .canonicalize()
         .map_err(|e| Failure::Io(format!("{}: {e}", args.project.display())))?;
+    load_roots(args, &dir)?;
     let out = match &args.out {
         Some(out) => out.clone(),
         None => std::env::temp_dir().join(format!("signal-mcp-{}", std::process::id())),
@@ -258,6 +280,7 @@ fn attach(
         )));
     }
     eprintln!("signal: mcp attached to {}", dir.display());
+    let roots = load_roots(args, &dir)?;
     let context = Context {
         link: Mutex::new(Link {
             client,
@@ -272,6 +295,7 @@ fn attach(
         mode: "attached",
         driver: "the running server's",
         out,
+        load_roots: roots,
     };
     serve_stdio(&context);
     Ok(())
@@ -379,6 +403,7 @@ fn in_process(
             wanted: Arc::clone(&wanted),
         };
         let dir = dir.clone();
+        let roots = load_roots(args, &dir).unwrap_or_else(|_| vec![dir.clone()]);
         let protocol = scope.spawn(move || {
             // Whatever ends this thread, a tool's panic included, stops the
             // host: the control loop waits for nothing else.
@@ -398,6 +423,7 @@ fn in_process(
                     mode: "in-process",
                     driver: if null { "null" } else { "coreaudio" },
                     out,
+                    load_roots: roots,
                 };
                 serve_stdio(&context);
             });

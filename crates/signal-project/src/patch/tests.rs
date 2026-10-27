@@ -36,10 +36,18 @@ fn modules(module: &str) -> Option<Vec<String>> {
     )
 }
 
+static NO_TEMPLATES: BTreeMap<String, Interface> = BTreeMap::new();
+
+fn no_content(_: &str) -> Option<ContentNames> {
+    None
+}
+
 fn ctx(level: &str) -> Context<'_> {
     Context {
         level,
         module: &modules,
+        templates: &NO_TEMPLATES,
+        content: &no_content,
     }
 }
 

@@ -450,3 +450,33 @@ fn the_device_output_is_held_at_the_ceiling() {
     );
     assert!(mcp.finish().success());
 }
+
+/// ADR 0037 §7 ("Safety"): a slot op is a patch, judged by the same rules.
+/// An empty slot wired into the gain leaves it static; loading a module
+/// into it makes the gain modulated (R2: not before), refused; with
+/// --max-gain 4 it is allowed, and its unload (the modulation removed) too.
+#[test]
+fn a_slot_load_into_a_gain_s_fan_in_is_guarded() {
+    let text = format!(
+        "{HEAD}[instances]\nosc = {{ module = \"std.sine_osc\", freq = 440 }}\nm = {{ slot = {{ outputs = {{ out = \"control\" }} }} }}\nout = {{ module = \"std.audio_out\", gain = 0.2 }}\n\n[wiring]\nconnections = [\n  {{ from = \"osc.out\", to = \"out.l\" }},\n  {{ from = \"osc.out\", to = \"out.r\" }},\n  {{ from = \"m.out\", to = \"out.gain\" }},\n]\n"
+    );
+    let mut mcp = Mcp::started(&project(&text, "gain-slot"), &[]);
+    let message = refused(
+        &mut mcp,
+        "slot_load",
+        json!({"slot": "m", "load": "std.const"}),
+    );
+    assert!(message.contains("modulated"), "{message}");
+    // The same op through `patch` is refused alike.
+    refused(
+        &mut mcp,
+        "patch",
+        json!({"ops": [{"op": "slot.load", "slot": "m", "load": "std.const"}]}),
+    );
+    assert!(mcp.finish().success());
+
+    let mut mcp = Mcp::started(&project(&text, "gain-slot-wide"), &["--max-gain", "4"]);
+    mcp.ok("slot_load", json!({"slot": "m", "load": "std.const"}));
+    assert!(mcp.file("project.toml").contains("load = \"std.const\""));
+    assert!(mcp.finish().success());
+}

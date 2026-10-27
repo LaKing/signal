@@ -136,7 +136,7 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "read_file",
         group: Group::Inspect,
-        description: "A project text file and its SHA-256 (`base`): `project.toml`, `composites/<name>.toml`, `patterns/<name>.toml`, `ui/<name>.html` or `ui/schematic.toml`.",
+        description: "A project text file and its SHA-256 (`base`): `project.toml`, `composites/<name>.toml`, `interfaces/<name>.toml`, `patterns/<name>.toml`, `ui/<name>.html` or `ui/schematic.toml`.",
         schema: || object(json!({"file": {"type": "string"}}), &["file"]),
         run: read_file,
     },
@@ -300,7 +300,7 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "patch",
         group: Group::Patch,
-        description: "Edits one level's file as text, as the schematic does, applied live by the reload: ops `instance.add` {name, module, params?, x?, y?}, `instance.remove` {name}, `connection.add` {from, to, scale?} (\"inst.port\", no leading /), `connection.remove` {from, to}, `connection.scale` {from, to, scale}. `level`: \"\" (project.toml, default) or a composite. `base`: the file's SHA-256 from graph.files (default: the current one). The reply's `inverse` undoes it.",
+        description: "Edits one level's file as text, as the schematic does, applied live by the reload: ops `instance.add` {name, module, params?, x?, y?}, `instance.remove` {name}, `connection.add` {from, to, scale?} (\"inst.port\", no leading /), `connection.remove` {from, to}, `connection.scale` {from, to, scale}, and the slot ops `slot.add`, `slot.load`, `slot.unload`, `slot.map`, `slot.interface` (as the slot_* tools). `level`: \"\" (project.toml, default) or a composite. `base`: the file's SHA-256 from graph.files (default: the current one). The reply's `inverse` undoes it.",
         schema: || {
             object(
                 json!({"level": {"type": "string"}, "base": {"type": "string"}, "ops": {"type": "array", "minItems": 1, "items": {"type": "object"}}}),
@@ -333,6 +333,66 @@ const TOOLS: &[Tool] = &[
         },
         run: vendor_tool,
     },
+    Tool {
+        name: "slot_add",
+        group: Group::Patch,
+        description: "Adds a slot (ADR 0037): an instance whose ports are its own interface, `slot` a template name (\"lib.voice\", \"lib.instrument\", \"lib.deck\", or interfaces/<name>.toml's \"<name>\") or a table {inputs, outputs, parameters, from?, remove?} (absent: {}), `load` its content (a module, or a project path such as \"../studio\" inside a --load-root). `x`, `y`: its schematic position; `level` as patch.",
+        schema: || {
+            object(
+                json!({"name": {"type": "string"}, "slot": {"type": ["string", "object"]}, "load": {"type": "string"}, "x": {"type": "number"}, "y": {"type": "number"}, "level": {"type": "string"}, "base": {"type": "string"}}),
+                &["name"],
+            )
+        },
+        run: slot_add,
+    },
+    Tool {
+        name: "slot_load",
+        group: Group::Patch,
+        description: "Loads content into a slot, or replaces what it holds (ADR 0037 §6-7): `load` a module reference or a project path (inside the project's folder or a --load-root). Without `map`/`set` the slot keeps the entries the new content accepts and removes the rest (the reply's `notes` say which); with them they replace the slot's. Until ADR 0037 phase 2, a Load or Replace is one ordinary structural edit (the added instances fade in; no unload-then-load sequencing).",
+        schema: || {
+            object(
+                json!({"slot": {"type": "string"}, "load": {"type": "string"}, "map": {"type": "object"}, "set": {"type": "object"}, "level": {"type": "string"}, "base": {"type": "string"}}),
+                &["slot", "load"],
+            )
+        },
+        run: slot_load,
+    },
+    Tool {
+        name: "slot_unload",
+        group: Group::Patch,
+        description: "Empties a slot (removes its `load`, and a project's `seed`; `map` and `set` stay for the next load). The host's wires on it stay and read 0.",
+        schema: || {
+            object(
+                json!({"slot": {"type": "string"}, "level": {"type": "string"}, "base": {"type": "string"}}),
+                &["slot"],
+            )
+        },
+        run: slot_unload,
+    },
+    Tool {
+        name: "slot_map",
+        group: Group::Patch,
+        description: "Writes a slot's `map`: slot port or parameter -> the content's port or parameter name, or false (deliberately unmatched); {} removes it.",
+        schema: || {
+            object(
+                json!({"slot": {"type": "string"}, "map": {"type": "object"}, "level": {"type": "string"}, "base": {"type": "string"}}),
+                &["slot", "map"],
+            )
+        },
+        run: slot_map,
+    },
+    Tool {
+        name: "slot_interface",
+        group: Group::Patch,
+        description: "Edits a slot's interface: `add` [{name, role: input|output|parameter, shape?, rate?, kind?, unit?, range?, group?}], `remove` [names] (a wired port is refused unless `removeWires`), `rename` {old: new} (the level's wires, exports, `map` keys and panel bindings follow), `retype` [{name, ...fields}], or alone `detach` (write the template's ports inline) or `template` (set the interface to that template).",
+        schema: || {
+            object(
+                json!({"slot": {"type": "string"}, "add": {"type": "array", "items": {"type": "object"}}, "remove": {"type": "array", "items": {"type": "string"}}, "rename": {"type": "object"}, "retype": {"type": "array", "items": {"type": "object"}}, "removeWires": {"type": "boolean"}, "detach": {"type": "boolean"}, "template": {"type": "string"}, "level": {"type": "string"}, "base": {"type": "string"}}),
+                &["slot"],
+            )
+        },
+        run: slot_interface,
+    },
     // Edit text.
     Tool {
         name: "write_pattern",
@@ -361,7 +421,7 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "write_file",
         group: Group::Text,
-        description: "Replaces a project file with `text`: project.toml, composites/<name>.toml (null `base` creates one) or patterns/<name>.toml. Checked as a reload would load it, written atomically, applied live. `base`: the SHA-256 it was read with (read_file); a `conflict` returns the current text.",
+        description: "Replaces a project file with `text`: project.toml, composites/<name>.toml or interfaces/<name>.toml (a slot interface template; null `base` creates one) or patterns/<name>.toml. Checked as a reload would load it, written atomically, applied live. `base`: the SHA-256 it was read with (read_file); a `conflict` returns the current text.",
         schema: || {
             object(
                 json!({"file": {"type": "string"}, "text": {"type": "string"}, "base": {"type": ["string", "null"]}}),
@@ -1819,6 +1879,41 @@ fn snapshot_delete(context: &Context, arguments: &Value) -> Outcome {
 
 fn patch_tool(context: &Context, arguments: &Value) -> Outcome {
     let level = text_arg(arguments, "level").to_owned();
+    let base = arguments
+        .get("base")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    patch_ops(context, level, base, arguments["ops"].clone())
+}
+
+/// ADR 0037 §7 ("Safety"): every project a patch's slot ops would load
+/// (`slot.add`, `slot.load`, `slot.restore` writing `load`) lies inside a
+/// folder this server may load from (`--load-root`, the project's own).
+fn loads_allowed(context: &Context, ops: &[Op]) -> Result<(), Refused> {
+    let loads = patch::loads_of(ops);
+    for load in loads {
+        let is_project = load.contains('/') || load.ends_with(".signal");
+        if !is_project {
+            continue;
+        }
+        let Ok(path) = context.dir.join(&load).canonicalize() else {
+            return Err(refused(format!(
+                "not loaded: `{load}` is no project folder from {}",
+                context.dir.display()
+            )));
+        };
+        if !context.load_roots.iter().any(|root| path.starts_with(root)) {
+            return Err(refused(format!(
+                "not loaded: `{load}` lies outside the folders this server may load a project from (the project's own; add one with --load-root)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The `patch` of `ops` (a JSON list) at `level`, gain-guarded and its
+/// loads checked, as `patch` sends it.
+fn patch_ops(context: &Context, level: String, base: Option<String>, ops_json: Value) -> Outcome {
     let file = if level.is_empty() {
         "project.toml".to_owned()
     } else {
@@ -1833,12 +1928,10 @@ fn patch_tool(context: &Context, arguments: &Value) -> Outcome {
         return Err(refused(format!("the project has no composite `{level}`")));
     };
     let current = sha256_hex(before.as_bytes());
-    let base = match arguments.get("base").and_then(Value::as_str) {
-        Some(base) => base.to_owned(),
-        None => current.clone(),
-    };
-    let ops: Vec<Op> = serde_json::from_value(arguments["ops"].clone())
+    let base = base.unwrap_or_else(|| current.clone());
+    let ops: Vec<Op> = serde_json::from_value(ops_json.clone())
         .map_err(|e| refused(format!("invalid arguments: `ops`: {e}")))?;
+    loads_allowed(context, &ops)?;
     // Nothing is judged while the files do not load (fail closed).
     current_gains(context)?;
     // Only the version checked is ever sent: another `base` is a conflict
@@ -1876,9 +1969,15 @@ fn patch_tool(context: &Context, arguments: &Value) -> Outcome {
                         .collect()
                 })
         };
+        let templates = signal_project::interface_templates(&files);
+        let content = |load: &str| {
+            signal_project::content_names(project.as_ref(), &context.dir, load, context.registry)
+        };
         let ctx = patch::Context {
             level: &level,
             module: &order,
+            templates: &templates,
+            content: &content,
         };
         // A patch that cannot be simulated here is not sent (fail closed).
         let patched = patch::apply(&before, None, &ops, &ctx)
@@ -1887,15 +1986,55 @@ fn patch_tool(context: &Context, arguments: &Value) -> Outcome {
     }
     let reply = bare(ask(
         context,
-        json!({"type": "patch", "level": level, "base": base, "ops": arguments["ops"]}),
+        json!({"type": "patch", "level": level, "base": base, "ops": ops_json}),
     )?);
-    let summary = format!(
+    let mut summary = format!(
         "patched {} ({} ops); new base {}",
         reply["file"].as_str().unwrap_or(&file),
         ops.len(),
         reply["base"].as_str().unwrap_or("")
     );
+    for note in reply["notes"].as_array().into_iter().flatten() {
+        summary.push_str(&format!("; {}", note.as_str().unwrap_or_default()));
+    }
     Ok((reply, summary))
+}
+
+/// ADR 0037 §7: one slot op (`op` its JSON), at the arguments' `level`.
+fn slot_op(context: &Context, arguments: &Value, mut op: Value) -> Outcome {
+    let level = text_arg(arguments, "level").to_owned();
+    let base = arguments
+        .get("base")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if let (Some(fields), Some(given)) = (op.as_object_mut(), arguments.as_object()) {
+        for (key, value) in given {
+            if key != "level" && key != "base" {
+                fields.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    patch_ops(context, level, base, json!([op]))
+}
+
+fn slot_add(context: &Context, arguments: &Value) -> Outcome {
+    slot_op(context, arguments, json!({"op": "slot.add"}))
+}
+
+fn slot_load(context: &Context, arguments: &Value) -> Outcome {
+    slot_op(context, arguments, json!({"op": "slot.load"}))
+}
+
+fn slot_unload(context: &Context, arguments: &Value) -> Outcome {
+    slot_op(context, arguments, json!({"op": "slot.unload"}))
+}
+
+fn slot_map(context: &Context, arguments: &Value) -> Outcome {
+    slot_op(context, arguments, json!({"op": "slot.map"}))
+}
+
+fn slot_interface(context: &Context, arguments: &Value) -> Outcome {
+    slot_op(context, arguments, json!({"op": "slot.interface"}))
 }
 
 fn schematic_move(context: &Context, arguments: &Value) -> Outcome {

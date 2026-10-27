@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use mcp_common::{Mcp, copy_of, fixture, stale};
 use serde_json::{Value, json};
 
-const TOOLS: [&str; 36] = [
+const TOOLS: [&str; 41] = [
     "project_info",
     "graph",
     "modules",
@@ -43,6 +43,11 @@ const TOOLS: [&str; 36] = [
     "patch",
     "schematic_move",
     "vendor",
+    "slot_add",
+    "slot_load",
+    "slot_unload",
+    "slot_map",
+    "slot_interface",
     "write_pattern",
     "write_panel",
     "write_file",
@@ -1355,5 +1360,72 @@ fn an_observation_without_data_is_an_error() {
     assert!(meter.contains("no data arrived"), "{meter}");
     mcp.ok("transport", json!({"action": "start"}));
     mcp.ok("meter", json!({"window_ms": 100}));
+    assert!(mcp.finish().success());
+}
+
+// ---------------------------------------------------------------------------
+// Slots (ADR 0037 phase 3).
+
+/// The slot tools write the slot's entry as text, as the schematic's
+/// menus do: add, interface edits (a rename following the wires), map,
+/// unload, load; a project outside the folders this server may load from is
+/// refused until `--load-root` names one around it.
+#[test]
+fn the_slot_tools_add_edit_load_and_unload_a_slot() {
+    let text = "schema_version = 1\n\n[project]\nname = \"slots\"\nsample_rate = 48000\n\n[instances]\nosc = { module = \"std.sine_osc\" }\nout = { module = \"std.audio_out\", gain = 0.2 }\n\n[wiring]\nconnections = [\n  { from = \"osc.out\", to = \"out.l\" },\n]\n";
+    let dir = mcp_common::project(text, "mcp-slots");
+    let beside = dir.parent().unwrap().join("beside");
+    std::fs::create_dir_all(&beside).unwrap();
+    std::fs::write(
+        beside.join("project.toml"),
+        "schema_version = 1\n\n[project]\nname = \"beside\"\nsample_rate = 48000\n\n[instances]\nosc = { module = \"std.sine_osc\" }\nout = { module = \"std.audio_out\", gain = 0.1 }\n\n[wiring]\nconnections = [\n  { from = \"osc.out\", to = \"out.l\" },\n  { from = \"osc.out\", to = \"out.r\" },\n]\n",
+    )
+    .unwrap();
+    let mut mcp = Mcp::started(&dir, &[]);
+    let added = mcp.ok(
+        "slot_add",
+        json!({"name": "fx", "slot": {"inputs": {"x": "audio"}, "outputs": {"y": "audio"}}, "load": "std.gain"}),
+    );
+    assert!(added["inverse"].is_array(), "{added}");
+    assert!(
+        mcp.file("project.toml").contains(
+            "fx = { slot = { inputs = { x = \"audio\" }, outputs = { y = \"audio\" } }, load = \"std.gain\" }"
+        )
+    );
+    mcp.ok(
+        "slot_map",
+        json!({"slot": "fx", "map": {"x": "in", "y": "out"}}),
+    );
+    mcp.ok(
+        "patch",
+        json!({"ops": [{"op": "connection.add", "from": "osc.out", "to": "fx.x"}]}),
+    );
+    mcp.ok(
+        "slot_interface",
+        json!({"slot": "fx", "rename": {"x": "input"}}),
+    );
+    let file = mcp.file("project.toml");
+    assert!(
+        file.contains("{ from = \"osc.out\", to = \"fx.input\" }"),
+        "{file}"
+    );
+    assert!(file.contains("input = \"in\""), "{file}");
+    // Removing a wired port: refused, naming the wire.
+    let refusal = mcp.refused("slot_interface", json!({"slot": "fx", "remove": ["input"]}));
+    assert!(refusal.contains("osc.out → fx.input"), "{refusal}");
+    mcp.ok("slot_unload", json!({"slot": "fx"}));
+    assert!(!mcp.file("project.toml").contains("load = \"std.gain\""));
+    // A project beside this one: outside the project's folder.
+    let outside = mcp.refused("slot_load", json!({"slot": "fx", "load": "../beside"}));
+    assert!(outside.contains("--load-root"), "{outside}");
+    assert!(mcp.finish().success());
+
+    let root = dir.parent().unwrap().to_string_lossy().into_owned();
+    let mut mcp = Mcp::started(&dir, &["--load-root", &root]);
+    mcp.ok(
+        "slot_load",
+        json!({"slot": "fx", "load": "../beside", "map": {"y": "l"}}),
+    );
+    assert!(mcp.file("project.toml").contains("load = \"../beside\""));
     assert!(mcp.finish().success());
 }

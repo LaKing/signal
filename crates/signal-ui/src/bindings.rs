@@ -33,6 +33,9 @@ use crate::panel::Panel;
 /// The element that connects a panel and binds its controls.
 pub const PANEL_ELEMENT: &str = "signal-panel";
 
+/// ADR 0037 §7: the slot card, `<signal-slot bind="/deck_a">`.
+pub const SLOT_ELEMENT: &str = "signal-slot";
+
 /// The default panel's file in a project's `ui/`; without it a panel is
 /// generated from `describe`.
 pub const MAIN_PANEL: &str = "main.html";
@@ -155,7 +158,7 @@ fn playhead_attribute(name: &str) -> &'static str {
 
 const CONTROLS: &str = "signal-fader, signal-knob, signal-xy, signal-button, signal-toggle, \
                         signal-meter, signal-scope, signal-value, signal-canvas, \
-                        signal-piano-roll, signal-step-grid";
+                        signal-piano-roll, signal-step-grid, signal-slot";
 
 /// The pattern controls (ADR 0028 §7): the kind of pattern each edits. They
 /// take no `bind`; their `pattern` attribute names a project pattern
@@ -561,10 +564,25 @@ enum Found {
         shape: PortShape,
         sink: bool,
     },
+    /// ADR 0037 §7: a slot's port that reaches nothing now (the slot empty,
+    /// the port unmatched): the binding is inactive, and why.
+    Inactive(String),
 }
 
 impl Targets<'_> {
     fn find(&self, port: &PortAddress) -> Option<Found> {
+        // ADR 0037 §7: a slot's port is translated through its match.
+        match self.panel.slot_port(&port.to_string()) {
+            // The plan port behind, never translated again (it may be spelt
+            // as the slot port itself: a primitive matched by name).
+            Some(crate::panel::SlotPort::Port(behind)) => self.find_planned(behind),
+            Some(crate::panel::SlotPort::Inactive(why)) => Some(Found::Inactive(why.clone())),
+            None => self.find_planned(port),
+        }
+    }
+
+    /// What `port` names among the controls and the plan, as written.
+    fn find_planned(&self, port: &PortAddress) -> Option<Found> {
         let instance = port.instance();
         if let Some(name) = instance.as_str().strip_prefix('/')
             && !name.contains('/')
@@ -742,6 +760,13 @@ pub fn check(file: &str, text: &str, targets: &Targets<'_>) -> Checked {
                         ),
                         Ok(port) => match targets.find(&port) {
                             None => finding(value_at, Severity::Error, targets.unknown(&port)),
+                            Some(Found::Inactive(why)) => {
+                                finding(
+                                    value_at,
+                                    Severity::Warning,
+                                    format!("inactive: {port}: {why}"),
+                                );
+                            }
                             Some(Found::Port {
                                 direction: Direction::Out,
                                 shape: PortShape::Signal,
@@ -795,6 +820,13 @@ pub fn check(file: &str, text: &str, targets: &Targets<'_>) -> Checked {
                         ),
                         Ok(port) => match targets.find(&port) {
                             None => finding(value_at, Severity::Error, targets.unknown(&port)),
+                            Some(Found::Inactive(why)) => {
+                                finding(
+                                    value_at,
+                                    Severity::Warning,
+                                    format!("inactive: {port}: {why}"),
+                                );
+                            }
                             Some(Found::Port {
                                 direction: Direction::In,
                                 shape: PortShape::Events,
@@ -831,6 +863,33 @@ pub fn check(file: &str, text: &str, targets: &Targets<'_>) -> Checked {
                                 ),
                             ),
                         },
+                    }
+                }
+            }
+            continue;
+        }
+        // ADR 0037 §7: the slot card binds a top-level slot, loaded or not.
+        if element.name == SLOT_ELEMENT {
+            let bind = element.attribute("bind").and_then(|a| a.value.as_ref());
+            match bind {
+                None => finding(
+                    element.offset,
+                    Severity::Error,
+                    format!(
+                        "<{SLOT_ELEMENT}> has no bind: it needs a slot of the project, bind=\"/<slot>\""
+                    ),
+                ),
+                Some((value, at)) => {
+                    bindings += 1;
+                    let name = value.trim().strip_prefix('/').unwrap_or("");
+                    if !targets.panel.is_slot(name) {
+                        finding(
+                            *at,
+                            Severity::Error,
+                            format!(
+                                "<{SLOT_ELEMENT}> binds a slot of the project (/<slot>); `{value}` is none"
+                            ),
+                        );
                     }
                 }
             }
@@ -908,6 +967,13 @@ pub fn check(file: &str, text: &str, targets: &Targets<'_>) -> Checked {
             };
             match (targets.find(&port), wants) {
                 (None, _) => finding(offset, Severity::Error, targets.unknown(&port)),
+                (Some(Found::Inactive(why)), _) => {
+                    finding(
+                        offset,
+                        Severity::Warning,
+                        format!("inactive: {port}: {why}"),
+                    );
+                }
                 (
                     Some(Found::Parameter { min, max, control }),
                     Wants::Controls | Wants::Parameters,
@@ -1031,6 +1097,41 @@ pub fn panel_files(ui: &Path) -> std::io::Result<Vec<PathBuf>> {
     }
     files.sort();
     Ok(files)
+}
+
+/// ADR 0037 §2: `text` (a panel) with every `bind` address equal to an old
+/// address of `renames` (`/fx.x` → `/fx.input`, a slot port renamed)
+/// rewritten to its new one, where the source spells it as it reads (an
+/// address written with character references is left alone); `None` when
+/// nothing changes. Every other byte stays.
+pub fn rewrite_bindings(text: &str, renames: &[(String, String)]) -> Option<String> {
+    let mut edits: Vec<(usize, usize, &str)> = Vec::new();
+    for element in elements(text) {
+        for (address, offset) in element.addresses() {
+            let Some((_, new)) = renames.iter().find(|(old, _)| old == address) else {
+                continue;
+            };
+            if text.get(offset..offset + address.len()) == Some(address) {
+                edits.push((offset, offset + address.len(), new));
+            }
+        }
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    edits.sort_by_key(|(start, ..)| *start);
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for (start, end, new) in edits {
+        if start < at {
+            continue;
+        }
+        out.push_str(&text[at..start]);
+        out.push_str(new);
+        at = end;
+    }
+    out.push_str(&text[at..]);
+    Some(out)
 }
 
 /// The bindings of the panels in `ui` that name an instance at one of

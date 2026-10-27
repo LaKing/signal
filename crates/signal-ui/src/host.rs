@@ -76,6 +76,10 @@ use crate::setup::{
 use crate::snapshot;
 use signal_project::snapshot::{self as snapshots, SNAPSHOTS_FILE, SnapshotError};
 
+/// ADR 0037 §7: how many project folders `slot.projects` lists of each
+/// place (the project's subfolders, its siblings).
+const SLOT_PROJECTS: usize = 64;
+
 /// Client messages handled per step at most.
 const MESSAGES_PER_STEP: usize = 256;
 /// The event input a `note` goes to (ADR 0039): `std.note_seq`'s.
@@ -3430,6 +3434,7 @@ impl Host {
             "file.read" => self.file_read(&message).map(Some),
             "file.write" => self.file_write(&message).map(Some),
             "vendor" => self.vendor(&message).map(Some),
+            "slot.projects" => self.slot_projects().map(Some),
             "setup.get" => Ok(Some(self.setup_get())),
             "setup.devices" => self.setup_devices(&message).map(Some),
             "setup.check" => self.setup_check(&message).map(Some),
@@ -3793,7 +3798,44 @@ impl Host {
             "composites": composites,
             "layout": {"file": SCHEMATIC_FILE, "positions": positions, "error": error},
             "files": self.files_json(),
+            "interfaces": self.interfaces_json(),
         }))
+    }
+
+    /// `graph.interfaces` (ADR 0037 §3, phase 3, additive): the interface
+    /// templates a slot may start from, the library's (`lib.voice`, …) then
+    /// the project's `interfaces/<name>.toml` that read, each in name order:
+    /// `{name, library, description, ports, base}` (`ports` as `describe`'s
+    /// `content.slots` interface ports; `base`: the file's SHA-256, null for a
+    /// library template), read with every `graph`.
+    fn interfaces_json(&self) -> Value {
+        let mut list: Vec<Value> = signal_project::library_interfaces()
+            .into_iter()
+            .map(|t| {
+                json!({
+                    "name": t.name,
+                    "library": true,
+                    "description": t.interface.description,
+                    "ports": t.interface.ports,
+                    "base": null,
+                })
+            })
+            .collect();
+        let sources = signal_project::read_sources(&self.dir).unwrap_or_default();
+        for (name, interface) in signal_project::interface_templates(&sources) {
+            let base = sources
+                .iter()
+                .find(|s| s.path == format!("{}/{name}.toml", signal_project::INTERFACES))
+                .map(|s| sha256_hex(s.text.as_bytes()));
+            list.push(json!({
+                "name": name,
+                "library": false,
+                "description": interface.description,
+                "ports": interface.ports,
+                "base": base,
+            }));
+        }
+        Value::Array(list)
     }
 
     /// `graph.projectId` (M2.9-3): which project folder this is, opaque (the
@@ -4219,9 +4261,16 @@ impl Host {
                         .unwrap_or_default()
                 })
         };
+        // ADR 0037: the slot ops' templates, and what a content offers (a
+        // Replace keeps the `map` and `set` entries it accepts).
+        let templates = signal_project::interface_templates(&sources);
+        let dir = self.dir.clone();
+        let content = |load: &str| signal_project::content_names(loaded, &dir, load, registry);
         let ctx = patch::Context {
             level,
             module: &order,
+            templates: &templates,
+            content: &content,
         };
         let patched = patch::apply(&before, positions.as_deref(), &ops, &ctx)
             .map_err(|e| fail(e.code, e.message))?;
@@ -4248,6 +4297,18 @@ impl Host {
                 json!({"references": references}),
             ));
         }
+        // ADR 0037 §2: where a renamed slot port's bindings are: the level's
+        // instances' paths (the top level's is "").
+        let instance_paths: Vec<String> = if patched.renamed.is_empty() {
+            Vec::new()
+        } else if level.is_empty() {
+            vec![String::new()]
+        } else {
+            loaded
+                .or(new.as_ref().ok())
+                .map(|p| p.instances_of(level))
+                .unwrap_or_default()
+        };
         // The edited project, loaded and compiled as a reload would.
         let does_not_load = |diagnostics: Vec<Diagnostic>| {
             let lines: Vec<String> = located(&self.dir, diagnostics)
@@ -4419,17 +4480,81 @@ impl Host {
             }
             self.seen(Path::new(SCHEMATIC_FILE));
         }
+        // ADR 0037 §2: a slot port renamed, the panels' bindings on it follow.
+        let mut notes = patched.notes.clone();
+        let rebound = self.rebind(&instance_paths, &patched.renamed, &mut notes);
         // Playing, the watch reloads the level's file and pushes `graph`.
         if self.run.is_none() {
             self.push_graph(false);
         }
-        Ok(json!({
+        let mut reply = json!({
             "type": "patched",
             "level": level,
             "file": file,
             "base": sha256_hex(patched.text.as_bytes()),
             "inverse": patched.inverse,
-        }))
+        });
+        if !notes.is_empty() {
+            reply = with(reply, "notes", json!(notes));
+        }
+        if !rebound.is_empty() {
+            reply = with(reply, "panels", json!(rebound));
+        }
+        Ok(reply)
+    }
+
+    /// ADR 0037 §2: the bindings of the project's panels on the slot ports
+    /// `renamed` (`slot.old` → `slot.new`) under each instance path of
+    /// `paths` (the level's: `""` for the top level) rewritten, each panel compared once more just
+    /// before its rename (ADR 0040). Returns the panels written; one not
+    /// written is said in `notes` (the level's file holds the rename).
+    fn rebind(
+        &self,
+        paths: &[String],
+        renamed: &[(String, String)],
+        notes: &mut Vec<String>,
+    ) -> Vec<String> {
+        if renamed.is_empty() {
+            return Vec::new();
+        }
+        let renames: Vec<(String, String)> = paths
+            .iter()
+            .flat_map(|path| {
+                renamed
+                    .iter()
+                    .map(move |(old, new)| (format!("{path}/{old}"), format!("{path}/{new}")))
+            })
+            .collect();
+        let ui = project_ui(&self.dir);
+        if fs::symlink_metadata(&ui).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Vec::new();
+        }
+        let mut written = Vec::new();
+        for path in crate::bindings::panel_files(&ui).unwrap_or_default() {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Some(new) = crate::bindings::rewrite_bindings(&text, &renames) else {
+                continue;
+            };
+            match transaction::replace_unchanged(&path, Some(text.as_bytes()), new.as_bytes()) {
+                Ok(true) => written.push(format!("ui/{name}")),
+                Ok(false) => notes.push(format!(
+                    "ui/{name}: its bindings were not rewritten (another writer changed it meanwhile)"
+                )),
+                Err(error) => notes.push(format!(
+                    "ui/{name}: its bindings were not rewritten ({error})"
+                )),
+            }
+        }
+        written
     }
 
     /// Whether `file` (relative to the project) is reached through a link:
@@ -4441,6 +4566,7 @@ impl Host {
             |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
         link(&self.dir.join(file))
             || (file.starts_with("composites/") && link(&self.dir.join("composites")))
+            || (file.starts_with("interfaces/") && link(&self.dir.join("interfaces")))
     }
 
     /// The edited project `new` (its files as an edit would leave them),
@@ -4465,29 +4591,31 @@ impl Host {
         Ok(())
     }
 
-    /// The file a `file.read` or `file.write` names: `project.toml` or
-    /// `composites/<name>.toml`, never any other path (`bad-value`).
+    /// The file a `file.read` or `file.write` names: `project.toml`,
+    /// `composites/<name>.toml` or (ADR 0037 §3) `interfaces/<name>.toml`,
+    /// never any other path (`bad-value`).
     fn project_text_file(message: &Value) -> Result<String, Failure> {
         let file = message
             .get("file")
             .and_then(Value::as_str)
             .ok_or_else(|| fail("bad-message", "needs `file`"))?;
-        let composite = file
-            .strip_prefix("composites/")
-            .and_then(|f| f.strip_suffix(".toml"))
-            .is_some_and(|name| {
-                name.starts_with(|c: char| c.is_ascii_lowercase())
-                    && name
-                        .chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-            });
-        if file == PROJECT_FILE || composite {
+        let named = |folder: &str| {
+            file.strip_prefix(folder)
+                .and_then(|f| f.strip_suffix(".toml"))
+                .is_some_and(|name| {
+                    name.starts_with(|c: char| c.is_ascii_lowercase())
+                        && name
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                })
+        };
+        if file == PROJECT_FILE || named("composites/") || named("interfaces/") {
             Ok(file.to_owned())
         } else {
             Err(fail(
                 "bad-value",
                 format!(
-                    "`{file}` is not project.toml or composites/<name>.toml: patterns are pattern.*, panels panel.*, positions schematic.*"
+                    "`{file}` is not project.toml, composites/<name>.toml or interfaces/<name>.toml: patterns are pattern.*, panels panel.*, positions schematic.*"
                 ),
             ))
         }
@@ -4621,6 +4749,65 @@ impl Host {
             "base": sha256_hex(text.as_bytes()),
             "created": before.is_none(),
         }))
+    }
+
+    /// `slot.projects` (ADR 0037 §7, the Load dialog): the projects a slot
+    /// may load from beside this one: its subfolders (`./bass`) and its
+    /// sibling folders (`../studio`) that hold a `project.toml`, at most
+    /// [`SLOT_PROJECTS`] of each, in name order, each with its `[project]
+    /// name` and what it offers (`ports`: its exports, or its sinks'
+    /// channels; `settable`: the `set` keys it takes), or, when it does not
+    /// load, `error`. Hidden folders and the project's own are left out;
+    /// nothing is written.
+    fn slot_projects(&self) -> Result<Value, Failure> {
+        if self.app.as_ref().is_some_and(|m| !m.opened) {
+            return Err(fail("no-project", "open a project folder first"));
+        }
+        let own = fs::canonicalize(&self.dir).unwrap_or_else(|_| self.dir.clone());
+        let folders = |dir: &Path, prefix: &str| -> Vec<(String, PathBuf)> {
+            let mut found: Vec<(String, PathBuf)> = fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let path = entry.path();
+                    let plain = !name.starts_with('.')
+                        && !name.contains(['"', '\\', '\n'])
+                        && path.join(PROJECT_FILE).is_file();
+                    let other = fs::canonicalize(&path).is_ok_and(|p| p != own);
+                    (plain && other).then(|| (format!("{prefix}{name}"), path))
+                })
+                .collect();
+            found.sort();
+            found.truncate(SLOT_PROJECTS);
+            found
+        };
+        let mut candidates = folders(&self.dir, "./");
+        if let Some(parent) = own.parent() {
+            candidates.extend(folders(parent, "../"));
+        }
+        let projects: Vec<Value> = candidates
+            .into_iter()
+            .map(|(load, path)| match Project::load(&path) {
+                Ok(project) => {
+                    let names =
+                        signal_project::content_names(None, &self.dir, &load, &self.registry);
+                    json!({
+                        "load": load,
+                        "name": project.name,
+                        "ports": names.as_ref().map(|n| json!(n.ports)),
+                        "settable": names.as_ref().map(|n| json!(n.settable)),
+                    })
+                }
+                Err(error) => json!({
+                    "load": load,
+                    "name": null,
+                    "error": error.to_string().lines().next().unwrap_or("does not load").to_owned(),
+                }),
+            })
+            .collect();
+        Ok(json!({"type": "slot.projects", "projects": projects}))
     }
 
     /// `vendor` (M2.12-1, ADR 0027 §4, operator decision of 2026-10-18): the
@@ -4821,7 +5008,8 @@ impl Host {
             }
             "scope" => {
                 let address = message.get("port").and_then(Value::as_str).unwrap_or("");
-                let port: PortAddress = address
+                let port: PortAddress = self
+                    .through_slot(address)?
                     .parse()
                     .map_err(|e| fail("bad-address", format!("{address}: {e}")))?;
                 // A signal output, or a signal input (the sum of its sources).
@@ -4871,7 +5059,8 @@ impl Host {
             }
             "vector" => {
                 let address = message.get("port").and_then(Value::as_str).unwrap_or("");
-                let port: PortAddress = address
+                let port: PortAddress = self
+                    .through_slot(address)?
                     .parse()
                     .map_err(|e| fail("bad-address", format!("{address}: {e}")))?;
                 // A vector output: its rows and rate divisor.
@@ -7460,7 +7649,23 @@ impl Host {
     }
 
     /// `address` as an event input of the running plan (`trigger`, `note`).
+    /// ADR 0037 §7: `address` translated through a top-level slot's match
+    /// (`/fx.y` → the plan port behind the content's `out`); another
+    /// address as it is. A slot port that reaches nothing now (the slot
+    /// empty, the port unmatched) is `inactive`.
+    fn through_slot(&self, address: &str) -> Result<String, Failure> {
+        match self.panel.slot_port(address) {
+            Some(crate::panel::SlotPort::Port(port)) => Ok(port.to_string()),
+            Some(crate::panel::SlotPort::Inactive(why)) => Err(fail(
+                "inactive",
+                format!("{address} reaches nothing now: {why}"),
+            )),
+            None => Ok(address.to_owned()),
+        }
+    }
+
     fn event_input(&self, address: &str) -> Result<PortAddress, Failure> {
+        let address = &self.through_slot(address)?;
         let port: PortAddress = address
             .parse()
             .map_err(|e| fail("bad-address", format!("{address}: {e}")))?;

@@ -11,7 +11,8 @@ use serde_json::{Map, Value, json};
 use signal_core::{Direction, LIBRARY_PREFIX, ParameterDescriptor, PortDescriptor, Registry, Snap};
 use signal_graph::{CompositeDef, ExecutionPlan, GraphWarning, InstanceDef};
 
-use crate::locate::ExportKind;
+use crate::locate::{DefSpans, ExportKind};
+use crate::slot::{Role, SlotResolution};
 use crate::{Diagnostic, Library, PROJECT_FILE, Project, SourceFile};
 
 /// What a written endpoint (`instance.port`) finally reaches.
@@ -35,6 +36,16 @@ struct Walk<'a> {
     parameters: ByExport<'a, &'a [String]>,
     /// (flattened source port, flattened target) → the converter between.
     converters: BTreeMap<(String, String), Value>,
+    /// ADR 0037: what the plan build decided for each slot, by its address
+    /// as [`SlotResolution::slot`] writes it (`/fx`, `<composite>/fx`).
+    slots: BTreeMap<String, SlotResolution>,
+}
+
+/// An entry of a level in the order its file writes them: an instance of
+/// the plan, or an empty slot (which plans as nothing, ADR 0037 §5).
+enum Written<'a> {
+    Instance(&'a InstanceDef),
+    EmptySlot(&'a str),
 }
 
 impl Project {
@@ -76,7 +87,17 @@ impl Project {
                 );
             }
         }
-        let walk = self.walk(registry, converters);
+        let mut walk = self.walk(registry, converters);
+        // ADR 0037 §7: the slots' match tables, built only when there are slots.
+        if self.has_slots() {
+            walk.slots = self
+                .plan(registry)
+                .map(|p| p.slots)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| (r.slot.clone(), r))
+                .collect();
+        }
         // The first instance (in source order) of every composite reached.
         let mut first = BTreeMap::new();
         walk.reach(&self.root, "", &mut first);
@@ -258,7 +279,55 @@ impl Project {
             inputs,
             parameters,
             converters,
+            slots: BTreeMap::new(),
         }
+    }
+
+    /// Whether the project or one of its composites has a slot.
+    pub(crate) fn has_slots(&self) -> bool {
+        std::iter::once(&self.spans.root)
+            .chain(self.spans.composites.values())
+            .any(|d| d.contents.values().any(|c| c.slot.is_some()))
+    }
+
+    /// The spans of definition `def` (the root's or a composite's).
+    fn def_spans(&self, def: &CompositeDef) -> Option<&DefSpans> {
+        if def.name.is_empty() {
+            Some(&self.spans.root)
+        } else {
+            self.spans.composites.get(&def.name)
+        }
+    }
+
+    /// `def`'s entries in source order: its instances, and its empty slots
+    /// where the file writes them.
+    fn written_order<'a>(&'a self, def: &'a CompositeDef) -> Vec<Written<'a>> {
+        let mut entries: Vec<(usize, Written<'a>)> = self
+            .in_source_order(def)
+            .into_iter()
+            .enumerate()
+            .map(|(i, instance)| {
+                let at = self
+                    .def_spans(def)
+                    .and_then(|s| s.instances.get(&instance.name))
+                    .map_or(usize::MAX - 1_000_000 + i, |s| s.key.start);
+                (at, Written::Instance(instance))
+            })
+            .collect();
+        if let Some(spans) = self.def_spans(def) {
+            for (name, content) in &spans.contents {
+                let planned = def.instances.iter().any(|i| i.name == *name);
+                if content.slot.is_some() && !planned {
+                    let at = spans
+                        .instances
+                        .get(name)
+                        .map_or(usize::MAX, |s| s.key.start);
+                    entries.push((at, Written::EmptySlot(name.as_str())));
+                }
+            }
+        }
+        entries.sort_by_key(|(at, _)| *at);
+        entries.into_iter().map(|(_, w)| w).collect()
     }
 
     /// `def`'s instances in source order.
@@ -418,9 +487,20 @@ impl Walk<'_> {
         let lead = if relative { "" } else { "/" };
         let instances: Vec<Value> = self
             .project
-            .in_source_order(def)
+            .written_order(def)
             .into_iter()
-            .map(|instance| {
+            .map(|written| {
+                let instance = match written {
+                    Written::Instance(instance) => instance,
+                    Written::EmptySlot(name) => return self.slot_box(def, name, None, lead),
+                };
+                if self.project.def_spans(def).is_some_and(|s| {
+                    s.contents
+                        .get(&instance.name)
+                        .is_some_and(|c| c.slot.is_some())
+                }) {
+                    return self.slot_box(def, &instance.name, Some(instance), lead);
+                }
                 let name = &instance.name;
                 let at = |port: &str| format!("{lead}{name}.{port}");
                 let (composite, ports, parameters) =
@@ -488,6 +568,160 @@ impl Walk<'_> {
             })
             .collect();
         json!({"instances": instances, "connections": connections})
+    }
+
+    /// ADR 0037 §7: a slot's box as `graph` gives it. Its ports and
+    /// parameters are its interface's, loaded or not (a matched parameter
+    /// with the range and default of the content's), its `module` the
+    /// content as written (`""` when empty), and `slot` what the plan build
+    /// decided: `{interface, from, load, project, matches, unmatched,
+    /// unheard, dropped}`.
+    fn slot_box(
+        &self,
+        def: &CompositeDef,
+        name: &str,
+        instance: Option<&InstanceDef>,
+        lead: &str,
+    ) -> Value {
+        let spans = self.project.def_spans(def);
+        let written = spans
+            .and_then(|s| s.contents.get(name))
+            .and_then(|c| c.slot.as_ref());
+        let key = if def.name.is_empty() {
+            format!("/{name}")
+        } else {
+            format!("{}/{name}", def.name)
+        };
+        let resolution = self.slots.get(&key);
+        let interface = resolution
+            .map(|r| r.interface.clone())
+            .or_else(|| written.and_then(|w| w.interface.clone()))
+            .unwrap_or_default();
+        let load = written.and_then(|w| w.load.as_ref().map(|(l, _)| l.clone()));
+        let module = instance.map_or(String::new(), |i| i.module.clone());
+        let at = |port: &str| format!("{lead}{name}.{port}");
+        let matched = |port: &str| -> Option<&str> {
+            resolution?
+                .matches
+                .iter()
+                .find(|m| m.port == port)
+                .and_then(|m| m.content.as_deref())
+        };
+        // The content's own parameters, to give a matched one its range.
+        let content_parameters: Vec<Value> = match self.by_name.get(module.as_str()) {
+            Some(inner) => self.interface(inner, &|_| String::new()).1,
+            None => self
+                .registry
+                .get(&module)
+                .map(|m| {
+                    m.descriptor
+                        .parameters
+                        .iter()
+                        .map(|p| parameter_json(p, p.name, ""))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        let mut ports = Vec::new();
+        let mut parameters = Vec::new();
+        for port in &interface.ports {
+            let mut value = json!({
+                "name": port.name,
+                "address": at(&port.name),
+                "shape": serde_json::to_value(port).ok().and_then(|v| v.get("shape").cloned()),
+                "rate": port.rate,
+                "kind": port.kind,
+                "unit": port.unit,
+                "range": port.range.map(|(min, max)| json!({"min": min, "max": max})),
+            });
+            if let (Some(group), Value::Object(fields)) = (&port.group, &mut value) {
+                fields.insert("group".to_owned(), json!(group));
+            }
+            match port.role {
+                Role::Input | Role::Output => {
+                    if let Value::Object(fields) = &mut value {
+                        let direction = if port.role == Role::Output {
+                            "out"
+                        } else {
+                            "in"
+                        };
+                        fields.insert("direction".to_owned(), json!(direction));
+                    }
+                    ports.push(value);
+                }
+                Role::Parameter => {
+                    let found = matched(&port.name).and_then(|content| {
+                        content_parameters
+                            .iter()
+                            .find(|p| p["name"].as_str() == Some(content))
+                            .cloned()
+                    });
+                    let value = match found {
+                        Some(mut p) => {
+                            if let Value::Object(fields) = &mut p {
+                                fields.insert("name".to_owned(), json!(port.name));
+                                fields.insert("address".to_owned(), json!(at(&port.name)));
+                                if port.unit.is_some() {
+                                    fields.insert("unit".to_owned(), json!(port.unit));
+                                }
+                                if let Some(group) = &port.group {
+                                    fields.insert("group".to_owned(), json!(group));
+                                }
+                            }
+                            p
+                        }
+                        None => {
+                            if let Value::Object(fields) = &mut value {
+                                fields.remove("shape");
+                                fields.insert("default".to_owned(), Value::Null);
+                                fields.insert("combine".to_owned(), Value::Null);
+                            }
+                            value
+                        }
+                    };
+                    parameters.push(value);
+                }
+            }
+        }
+        let unmatched: Vec<Value> = resolution
+            .map(|r| {
+                r.matches
+                    .iter()
+                    .filter(|m| m.content.is_none())
+                    .map(|m| json!({"port": m.port, "reason": m.reason}))
+                    .collect()
+            })
+            .unwrap_or_default();
+        json!({
+            "name": name,
+            "address": format!("{lead}{name}"),
+            "module": load.clone().unwrap_or_default(),
+            "composite": instance.is_some() && self.by_name.contains_key(module.as_str()),
+            "ports": ports,
+            "parameters": parameters,
+            "slot": {
+                "interface": interface,
+                "from": interface.from,
+                "load": load,
+                "project": load.as_deref().is_some_and(crate::is_project_path),
+                "map": written.map(|w| {
+                    w.map
+                        .iter()
+                        .map(|(k, _, v, _)| {
+                            let value = match v {
+                                crate::model::MapValue::Name(name) => json!(name),
+                                crate::model::MapValue::Unmatched => json!(false),
+                            };
+                            (k.clone(), value)
+                        })
+                        .collect::<Map<String, Value>>()
+                }),
+                "matches": resolution.map(|r| r.matches.clone()).unwrap_or_default(),
+                "unmatched": unmatched,
+                "unheard": resolution.map(|r| r.unheard.clone()).unwrap_or_default(),
+                "dropped": resolution.map(|r| r.dropped.clone()).unwrap_or_default(),
+            },
+        })
     }
 
     /// A composite's ports and parameters as an instance of it shows them:

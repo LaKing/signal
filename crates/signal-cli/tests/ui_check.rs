@@ -114,7 +114,7 @@ fn a_broken_panel_fails_with_located_diagnostics() {
             at("<signal-fadr", 0),
             "error: unknown control <signal-fadr>; the controls are signal-fader, signal-knob, \
              signal-xy, signal-button, signal-toggle, signal-meter, signal-scope, signal-value, \
-             signal-canvas, signal-piano-roll, signal-step-grid"
+             signal-canvas, signal-piano-roll, signal-step-grid, signal-slot"
                 .to_owned(),
         ),
         (
