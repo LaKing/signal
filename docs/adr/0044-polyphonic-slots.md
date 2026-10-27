@@ -1,10 +1,11 @@
 # ADR 0044: Polyphonic slots
 
-- **Status:** Proposed (operator, 2026-10-27; revised the same day after an independent review). The owner's words (translated): "at slots we could perhaps introduce the concept of polyphony." The owner approved the operator's outline for an ADR: a slot gets a `voices = N` property; when the slot is resolved (before planning, as every slot is, ADR 0037 §5) its content is instantiated N times; a voice allocator, a library primitive and not a core concept, distributes the notes to the voices; the voices' outputs are summed; parameters are shared. The design below is the operator's (technical choices delegated). The taste and scope choices are left as **Questions for the owner**, each with a recommended answer.
+- **Status:** Accepted (2026-10-27). The owner's answers of 2026-10-27 and the operator's decisions on the rest are recorded under "Decisions on the questions" at the end, and the owner's follow-up on dynamic polyphony in §11. Drafted the same day and revised after an independent review. The owner's words (translated): "at slots we could perhaps introduce the concept of polyphony." The owner approved the operator's outline for an ADR: a slot gets a `voices = N` property; when the slot is resolved (before planning, as every slot is, ADR 0037 §5) its content is instantiated N times; a voice allocator, a library primitive and not a core concept, distributes the notes to the voices; the voices' outputs are summed; parameters are shared. The design below is the operator's (technical choices delegated). The taste and scope choices were put to the owner as questions, each with a recommended answer.
 - **Builds on:** ADR 0001 and hard rule 1 (no domain concepts in the core), ADR 0008 and 0016 (determinism, canonical order), ADR 0027 §4 (the library, pinning), ADR 0028 (patterns, `std.note_seq`), ADR 0029 (the MCP gain guard), ADR 0035 (projects as content), **ADR 0037 (slots)**, ADR 0039 (the `audition` note encoding), ADR 0041 (snapshots), ADR 0042 and 0043 (ranges and value sets), `semantics.md` §3, §4, §11, §12, §14 (sums, events, determinism, swaps and the added-instance fade, the panic exception).
-- **Amends** (on acceptance, explicitly):
+- **Amends** (explicitly, applied to the docs with the phase that builds each part):
   - ADR 0037: §2 (reserved keys; `load`: no project content in a poly slot), §3 (port fields, templates), §5 (what the plan is), §7 (the slot card);
   - ADR 0028 §6 (`std.note_seq` gains the outputs `notes` and `dropped`).
+  - `semantics.md` (a new §17 "Sleep groups"), `realtime-rules.md` and `module-contract.md`, proposed amendments for phase 5 (§11).
   - ADR 0039 is **not** changed: its encoding is reused as it is, and audition notes keep their rules (§3).
   - **Supersedes nothing.**
 - **Date:** 2026-10-27
@@ -40,7 +41,8 @@ connections = [
   - `count`: the integer;
   - `assign`: `"rotate"` (the only value in phase 1; `"lowest"` is deferred, §10);
   - `steal`: `"oldest"` (the only value in phase 1; `"none"` is deferred);
-  - `legato`: `false` (default) or `true` (§4).
+  - `legato`: `false` (default) or `true` (§4);
+  - `sleep`: `true` (default) or `false`, from phase 5 (§11). Before phase 5 the key is an error ("not yet").
   Any other key or value, or a count outside 1 to 64, is an error at the value.
 - **A slot without `voices` is exactly ADR 0037's slot.** Every `voice` field of its interface (§2) is ignored, its plan is byte-identical to today's, and every golden is unchanged.
 - **`voices = 1` is a polyphonic slot of one voice.** It is not the mono slot: it has an allocator and its voice is at `/synth/v0` (§5). With `legato = true` it plays the way `std.note_seq`'s mono outputs do, within the limits test 3 states.
@@ -129,7 +131,7 @@ A direct primitive in `signal-std`, category `event`, at divisor 1. It is **one 
   - The rule is the same for every partition (the state moves frame by frame), so the result is too.
 - **Retrigger and steal: one frame with the gate low.** A voice whose gate is high and that is given a new note is claimed. Its gate is 0 on that frame. From the next frame on its gate is 1 with the new note's `hz` and `velocity`.
   - The envelope therefore sees a new rising edge. It attacks **from its current level**, and the oscillators keep their phase (fact for `std.adsr` and `std.osc`).
-  - **This is not fully continuous.** `moog_voice` multiplies its loudness contour by `velocity`, so a steal (or a legato change) between notes of **different velocities steps the amplitude** by the ratio of the two velocities at the envelope's current level. With equal velocities the output is continuous. Test 9 measures the step, and Question 1 asks the owner about it.
+  - **This is not fully continuous.** `moog_voice` multiplies its loudness contour by `velocity`, so a steal (or a legato change) between notes of **different velocities steps the amplitude** by the ratio of the two velocities at the envelope's current level. With equal velocities the output is continuous. Test 9 measures the step, so the owner can listen (decision 1).
   - The cost is one frame of delay (10.4 µs at 96 kHz), on steals and retriggers only. A note given a free voice starts on its own frame.
   - With **`legato` on**, a voice whose gate is high takes the new note on that frame without the gap and without being claimed: gate stays high, and `hz` and `velocity` change, as `std.note_seq`'s last-note priority does. `legato` with `voices = 1` is the mono legato mode.
 - **When N falls** (the `voices` parameter, §8), the voices at or above the new N take gate 0 and are no longer assigned. Their `hz` and `velocity` **hold** (they are not reset), so a voice releases at its own pitch whichever frame its suspend lands on.
@@ -171,7 +173,7 @@ A direct primitive in `signal-std`, category `event`, at divisor 1. It is **one 
   - Every source inside the slot shares the prefix `/synth/`, so the slot's place among the host's other sources is the same as for a mono slot.
 - **Random streams:** each voice's primitives draw `derive(seed, /synth/v<e>/…)` (`semantics.md` §11), so every voice has its own noise. Voices are not scope roots. Adding voices does not change the streams of the voices that stay.
 - **The plan is byte-identical to the explicit form:** a project composite holding the same instances, wires and exports, instantiated as `synth = { module = … }`, up to the definition's name. So canonical order, fades, faults, converters, `is_connected` and the oracle need nothing new.
-  - **`signal-core`, `signal-graph` and `signal-engine` learn nothing.** No "voice", no "poly".
+  - **In phases 1 to 4, `signal-core`, `signal-graph` and `signal-engine` learn nothing.** No "voice", no "poly". Phase 5 adds the domain-free sleep group (§11).
   - `domain_scope.rs` gains the spellings `voice_alloc`, `VoiceAlloc`, the `poly:` definition prefix, and the resolution's type names phase 1 chooses (for example `SlotVoices`). It cannot check the plain word `voices`, which the engine already uses generically (`tasks.rs`, `fn voices` in its tests), just as ADR 0037's note could not check `slot`.
 - **An empty poly slot** contributes no instance and no connection, the allocator included (ADR 0037 §5).
 - **The side table** `SlotResolution` gains `voices` (count, `legato`, and the voice addresses) for `describe`, the schematic and the panels. The plan has no record of it.
@@ -179,7 +181,7 @@ A direct primitive in `signal-std`, category `event`, at divisor 1. It is **one 
 ### 6. Parameters, modulation, snapshots and ranges
 - **Shared by default, and only shared:** a panel control `/synth.cutoff`, a `set`, a ramp and a modulation wire into `synth.cutoff` reach every voice equally, through the export fan-out.
 - **Per-voice variation** comes from `each` inputs inside the content. The designed mechanism, deferred to when a sound needs it (§10), is an allocator output `spread`: −1 for voice 0 to 1 for voice N − 1, `(2e − (N − 1)) / (N − 1)` (0 for N = 1). A voice with a `spread` input could multiply it by a shared `detune_spread` parameter into its oscillators' cents, or pan by it. Per-voice velocity and key tracking already work inside the content, from `velocity` and `hz`.
-- **Glide is per voice.** Each voice glides from its own previous note (polyphonic portamento), and a voice's first note starts on pitch. With `legato` on and one voice it is the mono glide of today (Question 5).
+- **Glide is per voice.** Each voice glides from its own previous note (polyphonic portamento), and a voice's first note starts on pitch. With `legato` on and one voice it is the mono glide of today (decision 5: the owner chose per-voice glide).
 - **Not controls:** `voices` and `alloc`'s parameters. They are structure written in the slot entry, and `alloc`'s parameters are not exported (§5). So `/synth/alloc.voices` is not in `describe.controls`, cannot be set from the panel or by MCP's `set_parameter`, and is in no snapshot. Writing `voices` is the one way to change it.
 - **Snapshots (ADR 0041)** are unchanged: a poly slot's controls are `/synth.<name>`, one value each. A restore is still one parameter edit, never a swap, and it does not change N.
 - **Ranges and value sets (ADR 0042, 0043):** a shared export's targets are N copies of one content parameter, so its range or value set is the content's, unchanged. The allocator's parameters declare theirs (§4). `voices` outside 1 to 64 is an error in the file, not a correction, because it changes structure.
@@ -199,7 +201,7 @@ A direct primitive in `signal-std`, category `event`, at divisor 1. It is **one 
   - the `out` row's meter is `/synth.out`, the sum. Per-voice meters are `/synth/v<e>.out`, shown when the voice row is opened, and they use scope slots as other meters do.
   - The content's own cards fold under the slot card **once**: their controls are the shared `/synth.<name>`.
 - **Faults:** the guard mutes the **instance** that faulted, as always (`semantics.md` §7, §14). That is one primitive of one voice, never the slot.
-  - The faulted voice goes on being assigned notes, which it plays partly or not at all. The allocator cannot know, since a fault is not a signal (Question 4).
+  - The faulted voice goes on being assigned notes, which it plays partly or not at all. The allocator cannot know, since a fault is not a signal (decision 4).
   - The slot card marks the voice, and `describe` lists the fault under its voice's address.
   - A swap that replaces the voice clears it: a Replace, an unload and load, or an N that drops that voice.
 - **`describe`** lists, per poly slot, `voices` with its voice addresses, the roles of its ports, and its match table (once, since all voices share it).
@@ -241,6 +243,69 @@ Phase 1 builds what `projects/studio-poly` needs (hard rule 8): `voices` with `c
 - `std.gate_notes` (§3);
 - `voices` on plain instances (Alternatives).
 
+### 11. Sleeping voices: N is a maximum, and only sounding voices cost (phase 5)
+The owner asked (2026-10-27): "lehet a polifóniát dinamikusan kezelni?" ("can polyphony be handled dynamically?"). Of the options offered, the owner chose: "Felső korlát van, de csak a szóló hangok fogyasztanak. – ez jól hangzik" ("There is an upper limit, but only the sounding voices consume. That sounds good."). So `voices = N` stays the maximum, fixed per plan, and a voice that is not sounding is not computed. Growing N automatically was rejected (Alternatives). This section is the design of a later phase. Phases 1 to 4 compute every voice.
+
+**A generic mechanism: the sleep group** (domain-free, in `signal-graph` and `signal-engine`; hard rule 1).
+- **What it is:** a plan may declare **sleep groups**. Each has:
+  - **members:** every instance under one address prefix (an instance subtree);
+  - **a driver:** one signal output of an instance outside the group;
+  - **a rest length** *R* in frames.
+- It knows frames, ports, instances and exact zero, nothing else. The words are "group", "sleep", "wake", "driver" and "rest". There is no voice, no note and no gate.
+- **The poly slot resolution** declares one group per voice: members `/synth/v<e>`, driver element *e* of a new allocator output `active` (a vector of 64), and *R* = 1024 frames (10.7 ms at 96 kHz, 21.3 ms at 48 kHz).
+  - The driver needs a scalar port, so `active` goes through an `each_active` unpack like the other per-voice outputs.
+  - `active` is 1 while a voice is sounding or claimed (§4), and 0 once it is released or free.
+- **Validation** when the plan is built: the driver's instance is outside the group, so it is computed before the group in every frame. Groups do not overlap. Any other plan is refused with a named reason.
+- **The slot's text:** `voices = { count = 8, sleep = true }`. `sleep` defaults to **true** from the phase that delivers it, so the owner's choice is the default. `sleep = false` computes every voice, as phases 1 to 4 do.
+
+**Semantics, per frame** (proposed for `semantics.md`, as a new §17 "Sleep groups"):
+- A group is **awake** or **asleep**. It starts awake, and a group added by a swap starts awake.
+- **Waking.** An asleep group wakes on frame *n* when either:
+  - the driver's value at *n* is ≥ 0.5, or
+  - an event is delivered at *n* to an **event input** of a member. Events to parameters do not wake it (below).
+  It is awake from frame *n* on, and its members are called for *n*. The driver is computed before the group, so this is known in the same frame.
+- **Falling asleep.** An awake group falls asleep at a frame *g* that is a multiple of *R* (counted from frame 0 of the run, like the ticks of `semantics.md` §16) when, for every frame of [*g* − *R*, *g*):
+  - the driver's value was < 0.5;
+  - no event reached a member's event input;
+  - every **boundary output** was exactly zero (+0.0 or −0.0). A boundary output is a member's signal or vector output read by an instance outside the group.
+  It stays asleep from *g* until it wakes.
+- **While asleep, the members' time stops**, as under suspension (`semantics.md` §6):
+  - they are not called, and their primitive state is frozen;
+  - their boundary outputs read **exactly +0.0**. Readers cannot tell this from the ±0.0 the group was writing, because every input is a sum that starts from +0 (`semantics.md` §3);
+  - their inner outputs hold their values, and only frozen members read those;
+  - they emit no events;
+  - the fault guard has nothing to check.
+- **Parameters keep time while asleep**, unlike under suspension. Parameter events (`set`, `ramp`) apply to the members' bases without waking the group, and ramps advance with the frames, since a ramp's value is a closed-form function of its frame count (`semantics.md` §5). So a voice that wakes has exactly the shared parameter bases the awake voices have. Signal modulation is read when the voice is called, as always.
+- **Suspension and sleep compose.** An instance is called only if it is neither suspended nor asleep. A suspend, a resume or a removal (§8) acts on a sleeping member as on any instance. Its audio fade starts from its output as readers see it, which is +0.0.
+- **Swaps.** A group that is in both plans, with the same members prefix, driver and *R*, keeps its state (awake or asleep, and how long its outputs have been zero) at the swap frame. So an unrelated live edit does not wake the voices or change when they fall asleep. Other groups start awake.
+
+**Determinism.**
+- Whether a group sleeps on a frame depends only on signal values, events and frame numbers. There is no wall clock, no load measure and no thread timing.
+- The rule is stated frame by frame. The engine **splits a group's calls** at the frames where the state can change: at wake frames, and at multiples of *R* while the group is awake with its driver below 0.5. A split never changes an output (the module contract, *k*-partition invariance). So the output is identical for every *k*-partition and thread count, with the panic exception of `semantics.md` §14.
+- The semantic oracle implements the per-frame rule independently, and the determinism matrix covers it.
+- Renders are reproducible: `sleep` is in the text and the groups are in the plan, so the same files give the same audio, offline and in real time, and a session replays it.
+
+**Bit-identical to never sleeping? No, and that is the deliberate choice.**
+- While a voice sleeps its oscillators' phases do not advance. A voice that wakes therefore starts its next note from another phase than a voice that never slept. So `sleep = true` and `sleep = false` give different, equally reproducible renders.
+- **Bit identity was the preferred goal, and it is not achievable with a saving.** It would need every member to be at an exact fixed point (calling it would change neither its state nor its outputs). `moog_voice`'s oscillators run whenever `hz` is non-zero, so they are never at rest, and its ladder sits before the VCA and filters them all the time. A fixed-point rule (a primitive-level `at_rest` contract, Alternatives) would let such a voice sleep never, and would save nothing.
+- **Clicks are impossible from sleeping itself:**
+  - a group falls asleep only after its boundary outputs have been exactly zero for *R* frames, and it then outputs exactly zero;
+  - waking resumes the whole group from its frozen state at once, as if no time had passed for it, and that state is one whose outputs were exactly zero. So the first woken frame is exactly what an awake voice would compute from that state with the new inputs. For `moog_voice` that is an attack from the envelope's exact 0 (`std.adsr` flushes below 1e-9 to exactly 0).
+  - A content whose output never reaches exact zero (a DC offset, a never-ending feedback tail) simply never sleeps. It costs what it costs today, and the slot card shows its voices as never asleep.
+- **What a project author sees:** a sleeping voice sounds like a voice whose free-running oscillators were paused while it was silent. The voices' phases on a new note follow from the text and the notes alone, as any other state does.
+
+**Real-time rules** (proposed for `realtime-rules.md`):
+- **No allocation:** each group's state (awake flag, frames of zero output, the next check frame) is created in `prepare`.
+- **Bounded cost:** waking reads one driver value per frame. Falling asleep compares each boundary output with zero, per frame and only while the group is awake with its driver below 0.5, which is O(boundary outputs × frames). For a voice that is one output.
+- **No other change:** no locks, no I/O, and nothing on the audio thread depends on load.
+- **The worker budget** (`realtime-rules.md` "The worker budget", `docs/benchmarks.md`) sees a load that changes with the number of sounding voices. The budget's estimates are per unit, so a sleeping unit costs only its check. The schedule may change between blocks, and the output does not, as for any schedule (`semantics.md` §13).
+
+**The module contract** (proposed for `module-contract.md`): primitives need **nothing new**.
+- A sleeping member is simply not called for some frames, as a suspended one is already. A primitive may never assume that its calls cover every frame of the run.
+- The existing contract suite already checks that suspension frames are not seen. A new check gives a resting state and a gap of frames, and confirms the output after the gap equals the output with no gap.
+
+**Measurement and checks** (tests 13 to 15): 16 voices of `moog_voice` with 2 sounding cost about **2 voices plus the overhead** of 14 sleeping groups. The overhead target is under 10 % of one voice, measured with `signal bench` and recorded in `docs/benchmarks.md`. A device run confirms it.
+
 ## Alternatives considered
 - **A voice concept in the engine** (the engine clones an instance N times, or keeps voice-indexed state): a domain concept in the core, against hard rule 1, and a second runtime model next to the plan. Rejected. Resolution gives the same behaviour from ordinary instances.
 - **A dedicated poly container instance** (`poly = { module = …, voices = 8 }`): a second container concept beside slots. A slot already has what polyphony needs: an interface where each port can declare its role, and resolution before planning. Rejected.
@@ -259,13 +324,19 @@ Phase 1 builds what `projects/studio-poly` needs (hard rule 8): `voices` with `c
 - **Exact velocities in two events** (key, then velocity): ADR 0039 chose one event per note so that a note is atomic. 127ths are MIDI's resolution and inaudible as a difference. Rejected.
 - **A `Trigger` on seek and stop** (the first draft): it would end held audition notes, against ADR 0039 §2. Offs of the pattern's sounding keys only (§3).
 - **Voices made on demand at run time:** allocation on the audio thread, and a graph that changes without a plan swap. Both are forbidden. N is fixed per plan.
-- **Stealing with a short fade before the new note** (2 to 5 ms late): a classic choice, but it moves the note late. It stays open as a choice for the owner (Question 1).
+- **Stealing with a short fade before the new note** (2 to 5 ms late): a classic choice, but it moves the note late. It was offered to the owner. The operator chose the immediate retrigger, for now (decision 1).
 - **Per-voice parameter values** (a parameter role `each`): parameters are scalar, and a per-voice base would be N saved values under one control, which snapshots, panels and ranges would all have to learn. Per-voice variation through `each` inputs (`spread`) needs none of that.
-- **Loudness scaled by N** (1/N or 1/√N inside the slot): see Question 6.
+- **Loudness scaled by N** (1/N or 1/√N inside the slot): a single note would get quieter as N grows, and changing N live would change the level of what plays. Rejected; the owner chose the raw sum (decision 6).
+- **Growing N automatically when every voice is held** (one of the options for the owner's "dynamic" question): rejected, recorded with the owner's choice.
+  - A new voice is a plan rebuild and a swap, prepared on the control thread. That takes tens of milliseconds, so the note that needed the voice would sound late.
+  - And it would sound at a frame that depends on how fast the machine built the plan, which is wall-clock time in the semantics, against hard rule 3: the same session would not render the same way twice.
+  - A fixed maximum with sleeping voices (§11) gives the CPU saving without either problem.
+- **Bit-identical sleep through a primitive-level `at_rest` contract** (a primitive declares when calling it would change neither its state nor its outputs, the engine skips it then, and the contract suite checks that a resting `process` is a no-op): exact, but free-running oscillators are never at rest. A `moog_voice` would therefore never sleep, and nothing would be saved (§11). Kept as a possible later refinement for contents that do come to an exact rest, such as an effect whose input is silent. It composes with sleep groups.
+- **Sleep decided by load or by a timer:** it would depend on the machine and on wall-clock time. Rejected by hard rule 3.
 - **Addresses `/synth#3/…`:** `#` is outside the address grammar, whose byte order canonical sums rely on (`signal-core` `address.rs`). `/synth/v3/…` needs no change.
 
 ## Consequences
-- **`signal-core`, `signal-graph`, `signal-engine`, `signal-oracle`:** no change. `domain_scope.rs` gains the new spellings (§5).
+- **`signal-core`, `signal-graph`, `signal-engine`, `signal-oracle`:** no change in phases 1 to 4; `domain_scope.rs` gains the new spellings (§5). Phase 5: sleep groups in the plan (`signal-graph`: declaration and validation), their per-frame rule and call splitting in the engine, and the same rule in the oracle. All of it is domain-free.
 - **`signal-std`:**
   - `voice_alloc.rs` (`std.voice_alloc`);
   - `note_seq.rs`: the `notes` and `dropped` outputs;
@@ -283,7 +354,7 @@ Phase 1 builds what `projects/studio-poly` needs (hard rule 8): `voices` with `c
   - `module-contract.md` (the note event convention, `std.voice_alloc`, `note_seq.notes`, `lib.poly_voice` under "Interfaces");
   - `00-vision.md` §3a (the Slot row: "may be polyphonic, `voices = N`");
   - `ui-protocol.md`, `ui-controls.md`, `agent-interface.md`, `benchmarks.md`, `roadmap.md`.
-  - `semantics.md` needs no change: every behaviour is an existing rule.
+  - `semantics.md` needs no change in phases 1 to 4: every behaviour is an existing rule. Phase 5 adds §17 "Sleep groups", and also amends `realtime-rules.md` and `module-contract.md` (§11).
 - **Goldens:** none change. New: `projects/studio-poly`, a copy of studio-transport with `synth` as a `lib.poly_voice` slot of 8 voices playing a chord pattern from `melody.notes`, and its golden.
 
 ## Tests
@@ -330,6 +401,16 @@ Phase 1 builds what `projects/studio-poly` needs (hard rule 8): `voices` with `c
     - `signal ui check` passes on `studio-poly`.
 11. **Device:** 10 minutes of `studio-poly` at 16 voices with N changed every 30 s (8 ↔ 16) and a Replace every 2 minutes: 0 xruns. The CPU per voice is recorded in `docs/benchmarks.md`.
 12. **The owner's listening verdict** (hard rule 6).
+13. **Sleep semantics** (phase 5), on fixtures and against the oracle:
+    - a group falls asleep only at multiples of *R*, after *R* frames of exact zero with its driver low;
+    - it wakes on its driver and on an event to an event input, but not on parameter events, whose ramps keep advancing;
+    - boundary outputs are +0.0 while it sleeps;
+    - suspension, removal and swaps compose as in §11;
+    - the determinism matrix (*k* = 1, 64, 256 × threads 1, 2, 3, 4, 8) on `studio-poly` with `sleep = true`, and its own golden;
+    - the contract suite's new gap check on every `std` primitive;
+    - no allocation on the audio thread.
+14. **Sleep CPU** (measurement): 16 voices with 2 sounding cost about 2 voices plus less than 10 % of one voice, recorded in `docs/benchmarks.md`.
+15. **Sleep on the device:** 10 minutes of `studio-poly` at 16 voices with `sleep = true`, chords coming and going: 0 xruns, and the measured CPU following the sounding voices.
 
 ## Phases
 | Phase | Delivers | Exit criteria |
@@ -338,17 +419,16 @@ Phase 1 builds what `projects/studio-poly` needs (hard rule 8): `voices` with `c
 | 2. Live | N changes with the parameter sends to added voices, mono ↔ poly and Replace in a poly slot, sessions and replay | Tests 7 and 8 (real time) |
 | 3. UI | The ×N box and the generated level, the slot card's voices controls and voice row, `slot.voices` over MCP with the gain guard, `ui-protocol.md` fields | Test 10; the operator's visual check |
 | 4. Device and verdict | Device run and measurement | Tests 9 and 11; the owner's verdict (test 12) |
+| 5. Sleeping voices | §11: sleep groups (graph, engine, oracle), the allocator's `active` output, `sleep` in `voices` (default true), the amendments to `semantics.md`, `realtime-rules.md` and `module-contract.md`, the slot card's asleep dots | Tests 13–15; the owner's listening check of `sleep = true` |
 | Later | The deferred items of §10, each when a project needs it | Its own tests, named here |
 
-## Questions for the owner
-Each has the operator's recommended answer. With no answer, the recommendation is what phase 1 builds.
-1. **What a steal sounds like.** When every voice is held and a new note comes, the oldest note's voice is taken:
-   - (a) at once, its envelope retriggered from where it is. This is one frame late and continuous in pitch and envelope, but when the two notes' velocities differ, the level steps by their ratio, because the voice multiplies by velocity;
-   - (b) after a short fade of 2 to 5 ms, which is smoother but makes the new note that much late.
-   **Recommended: (a).** Test 9 measures the velocity step for you to listen to. (b), or a voice-side velocity glide, can be added later if you hear a problem.
-2. **Which free voice a note takes.** (a) `rotate`: the voice released longest ago, so the last notes' tails ring on; (b) `lowest`: always the lowest free voice, so a tail can be cut by the next note. **Recommended: (a)**, the only one in phase 1, with (b) when someone asks.
-3. **The demo.** Polyphony in a new project `projects/studio-poly` (a copy of studio-transport with a chord pattern and an 8-voice slot), or studio-transport itself made polyphonic, which changes its golden and its sound? **Recommended: the new project**; studio and studio-transport stay as they are.
-4. **A voice that faults.** In v1 a faulted voice stays in rotation and its notes are silent until the content is replaced or N changes. Skipping it would need the engine to report a fault as a signal into the graph, which is a new mechanism. **Recommended: accept v1's behaviour**; the slot card marks the voice.
-5. **Glide and per-voice character.** In a poly slot each voice glides from its own last note (polyphonic portamento), which sounds different from the mono glide of today; one voice with `legato` keeps today's glide. Per-voice detune and pan (`spread`) are designed but deferred. **Recommended: accept per-voice glide**, and add `spread` with a "spread" control on the voice when you want that sound.
-6. **How loud the voices are together.** (a) the raw sum: one note is exactly as loud as on the mono slot, a chord of three is louder, as on a hardware polysynth and in any mixer, and changing N never changes a single note's level; (b) 1/N, or (c) 1/√N, applied in the slot: a chord is closer to one note's level, but a single note gets quieter as N grows, so changing N live changes the level of what is playing, and N = 1 is no longer the mono level. **Recommended: (a) the raw sum.** Level is set by the content's own shared `volume` or a gain after the slot (`studio-poly` sets `volume` about 9 dB down for chords of up to 8), and the master bus's limiter and the output ceiling stay where they are.
-7. **Chords in the piano roll.** The pattern format and the roll already hold overlapping notes on different keys, so chords can be drawn note by note. Is a chord tool wanted (several keys at once, chord shapes)? **Recommended: not in this ADR**; ask for it when drawing chords note by note proves slow.
+## Decisions on the questions (2026-10-27)
+The owner's answers are quoted in Hungarian, with translations. The rest are the operator's decisions, delegated, on the recommendations offered.
+1. **What a steal sounds like:** the owner did not choose. **Operator decision:** the immediate retrigger (§4) is the default. Test 9's renders, with equal and differing velocities, are kept so the owner can listen later. A fade-before-steal can then be added as another `steal` value.
+2. **Which free voice a note takes:** **operator decision:** `rotate` is the default and the only value in phase 1; `lowest` is deferred (§10).
+3. **The demo:** the owner: "Új projects/studio-poly" ("a new projects/studio-poly"). Studio and studio-transport and their goldens stay as they are.
+4. **A voice that faults:** **operator decision:** in v1 it stays in rotation and the slot card marks it (§7).
+5. **Glide:** the owner: "Igen, hangonként" ("yes, per voice"). Each voice glides from its own last note (§6). `spread` stays deferred (§10).
+6. **Loudness:** the owner: "Nyers összeg" ("the raw sum"). No scaling by N (§5). `studio-poly` sets its voice's `volume` for chords.
+7. **A chord tool in the piano roll:** **operator decision:** not in this ADR.
+8. **Dynamic polyphony** (the owner's follow-up question): "Felső korlát van, de csak a szóló hangok fogyasztanak. – ez jól hangzik" ("there is an upper limit, but only the sounding voices consume. That sounds good."). `voices = N` is a maximum, and sleeping voices are designed in §11 as phase 5. Growing N automatically is rejected (Alternatives).
