@@ -31,7 +31,7 @@ export const EXPANDED = Object.freeze(['s:project', 's:std']);
 const NO_SOURCE = 'other';
 
 /**
- * The source of a `modules` entry (or a `paletteEntries` one): `project` for
+ * The source of a `modules` entry (or a `browserEntries` one): `project` for
  * a project composite, `library` for a library composite (`library`, or a
  * `lib.*` name), else the primitive's namespace (`std`), else `other`.
  */
@@ -203,9 +203,12 @@ export function moveCursor(view, key, delta) {
  * else `{cursor: its first row}`, ← `{toggle}` when it is open else
  * `{cursor: its parent}`; ← on an entry `{cursor: its branch}` while the
  * search field is empty (else it is the field's caret key); Enter on an
- * entry `add`; else null (the field's own).
+ * entry `add`; else null (the field's own, as is every key while an IME
+ * composes).
  */
 export function browserKey(event, view, key, { fieldEmpty = true } = {}) {
+  // A key composing text (an IME's Enter or arrows) is the field's.
+  if (event?.isComposing) return null;
   const row = view.rows.find((r) => r.key === key);
   const command = keyCommand('palette', event)?.id;
   const moves = { 'palette.down': 1, 'palette.up': -1, 'palette.page_down': 8, 'palette.page_up': -8, 'palette.first': -Infinity, 'palette.last': Infinity };
@@ -225,6 +228,20 @@ export function browserKey(event, view, key, { fieldEmpty = true } = {}) {
   if (row?.kind === 'entry' && command === 'palette.close_group' && fieldEmpty && !view.searching && row.parent) return { cursor: row.parent };
   if (command === 'palette.choose') return row?.kind === 'entry' || !row ? 'add' : null;
   return null;
+}
+
+/**
+ * Whether a key pressed in the browser goes on to the page (Signal.app's
+ * commands, ui/controls/keyboard.js): a ⌘ or Ctrl chord does, but for Edit
+ * patch's undo and redo (the patch behind a modal is not the browser's to
+ * change: there they are the field's own). Every other key is the
+ * browser's and its fields'; a key that composes text (an IME) is the field's.
+ */
+export function passesToPage(event) {
+  if (event?.isComposing) return false;
+  if (!event?.metaKey && !event?.ctrlKey) return false;
+  const edit = keyCommand('schematic_edit', event)?.id;
+  return edit !== 'schematic_edit.undo' && edit !== 'schematic_edit.redo';
 }
 
 /** `expanded` with `key` opened or closed (a new Set). */

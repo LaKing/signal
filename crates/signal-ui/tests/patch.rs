@@ -649,6 +649,36 @@ fn modules_is_deterministic(transport: Transport) {
         .find(|c| c["module"] == "lib.tape_echo")
         .unwrap();
     assert_eq!(echo["category"], "delay");
+    // A composite's `inside` only when asked for (the Add module browser).
+    assert!(echo.get("inside").is_none());
+    let inside = rig.request(
+        &mut ws,
+        4,
+        json!({"type": "modules", "inside": true}),
+        "modules",
+    );
+    let echo_inside = inside["composites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["module"] == "lib.tape_echo")
+        .unwrap();
+    assert!(
+        !echo_inside["inside"]["instances"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let mut without = echo_inside.clone();
+    without.as_object_mut().unwrap().remove("inside");
+    assert_eq!(&&without, echo, "the rest is the same reply");
+    let refused = rig.request(
+        &mut ws,
+        5,
+        json!({"type": "modules", "inside": "yes"}),
+        "error",
+    );
+    assert_eq!(refused["code"], "bad-message");
     assert!(echo["description"].as_str().unwrap().contains("feedback"));
     assert!(echo.get("reference_for").is_none());
     assert!(echo["ports"][0].get("address").is_none());

@@ -293,6 +293,15 @@ fn modules_give_each_composite_its_inside_description_and_category() {
     // `signal modules` (the catalogue) has no inside.
     let catalogue = signal_project::library_modules(&registry).unwrap();
     assert!(catalogue.iter().all(|c| c.get("inside").is_none()));
+    // `modules` without `inside: true`: the same entries, without it.
+    let plain = signal_project::modules_without_inside(modules.clone());
+    let plain = plain["composites"].as_array().unwrap();
+    assert_eq!(plain.len(), modules["composites"].as_array().unwrap().len());
+    assert!(
+        plain
+            .iter()
+            .all(|c| c.get("inside").is_none() && c.get("module").is_some())
+    );
 
     // A project composite that names a description and a category.
     let files = vec![

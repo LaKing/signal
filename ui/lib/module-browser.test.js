@@ -18,6 +18,7 @@ import {
   moveCursor,
   numberText,
   parameterRow,
+  passesToPage,
   pathTo,
   placeCursor,
   portRow,
@@ -200,6 +201,19 @@ test('the keys: ↑↓ move, Enter adds a type or opens and closes a branch, →
   const searched = treeRows(browserTree(ENTRIES, 'svf'), new Set());
   assert.equal(browserKey(press('ArrowLeft'), searched, 'm:std.svf'), null, 'searching: the arrows sideways are the field’s');
   assert.equal(browserKey(press('Enter'), searched, 'm:std.svf'), 'add');
+});
+
+test('an IME’s keys are the field’s; ⌘ and Ctrl chords go on to the page but for undo and redo', () => {
+  const view = treeRows(browserTree(ENTRIES), new Set(EXPANDED));
+  assert.equal(browserKey(press('Enter', { isComposing: true }), view, 'm:drums'), null);
+  assert.equal(browserKey(press('ArrowDown', { isComposing: true }), view, 'm:drums'), null);
+  assert.equal(passesToPage(press('s', { metaKey: true })), true, '⌘S: the app’s Save');
+  assert.equal(passesToPage(press('o', { ctrlKey: true })), true);
+  assert.equal(passesToPage(press('z', { metaKey: true })), false, '⌘Z: not the patch’s undo behind the modal');
+  assert.equal(passesToPage(press('z', { metaKey: true, shiftKey: true })), false);
+  assert.equal(passesToPage(press('a')), false);
+  assert.equal(passesToPage(press('Escape')), false);
+  assert.equal(passesToPage(press('s', { metaKey: true, isComposing: true })), false);
 });
 
 test('the open branches: toggled into a new set; a search’s choice revealed when it is cleared', () => {

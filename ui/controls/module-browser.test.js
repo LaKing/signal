@@ -2,7 +2,9 @@
 // patch") on the least of a DOM it needs: it opens as a modal, lists the
 // tree, moves with the keys, shows a type's detail and previews, adds by
 // Enter and by a double-click, and closes on Escape without its keys
-// reaching the schematic.
+// reaching the schematic (⌘ and Ctrl chords but undo and redo go on to the
+// app); and the editor that opens it (./schematic-editor.js): `modules`
+// asked with `inside` once per state of the files, a name refused or written.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,7 +21,7 @@ class Node {
     this.dataset = {};
     this.text = '';
     const classes = new Set();
-    this.classList = { add: (c) => classes.add(c), contains: (c) => classes.has(c) || String(this.className ?? '').split(' ').includes(c) };
+    this.classList = { add: (c) => classes.add(c), remove: (c) => classes.delete(c), toggle: (c, on = !classes.has(c)) => (on ? classes.add(c) : classes.delete(c), on), contains: (c) => classes.has(c) || String(this.className ?? '').split(' ').includes(c) };
   }
   set textContent(value) {
     this.children = [];
@@ -45,6 +47,14 @@ class Node {
       node.parent = this;
       this.children.push(node);
     }
+  }
+  prepend(...nodes) {
+    for (const node of nodes) node.parent = this;
+    this.children.unshift(...nodes);
+  }
+  toggleAttribute(name, on) {
+    if (on) this.attributes.set(name, '');
+    else this.attributes.delete(name);
   }
   replaceChildren(...nodes) {
     this.children = [];
@@ -250,4 +260,171 @@ test('the panel preview is the generated card, inert, its controls on a connecti
   assert.equal(b.previewConnection.sent, 0);
   const svgs = b.detailPane.all().filter((n) => n.localName === 'svg');
   assert.equal(svgs.length, 1, 'a primitive: its box only');
+}));
+
+test('⌘ and Ctrl chords go on to the app, but undo and redo; an IME’s Enter and Escape are the field’s', withDocument(() => {
+  const { b, added, schematicKeys } = browser();
+  b.open({ where: '', entries: browserEntries(MODULES) });
+  b.search.dispatch('keydown', key('s', { metaKey: true }));
+  b.search.dispatch('keydown', key('o', { ctrlKey: true }));
+  b.search.dispatch('keydown', key('z', { metaKey: true }));
+  b.search.dispatch('keydown', key('z', { metaKey: true, shiftKey: true }));
+  b.search.dispatch('keydown', key('a'));
+  assert.deepEqual(schematicKeys, ['s', 'o'], 'only the app’s chords leave the dialog');
+  const composing = b.search.dispatch('keydown', key('Enter', { isComposing: true }));
+  assert.equal(composing.prevented, false);
+  b.name.dispatch('keydown', key('Enter', { isComposing: true }));
+  b.search.dispatch('keydown', key('Escape', { isComposing: true }));
+  assert.deepEqual([added, b.isOpen], [[], true], 'nothing added, still open');
+}));
+
+test('a refused `modules` is said in the panes, not as Loading…', withDocument(() => {
+  const { b } = browser();
+  b.open({ where: '' });
+  b.failed('the project does not load');
+  assert.equal(b.count.textContent, 'Not loaded');
+  assert.match(b.list.textContent, /No module types: the project does not load/);
+  assert.match(b.detailPane.textContent, /could not be read: the project does not load/);
+  b.search.value = 'x';
+  b.search.dispatch('input');
+  assert.doesNotMatch(b.count.textContent + b.detailPane.textContent, /Loading/, 'a search keeps saying so');
+  b.setEntries(browserEntries(MODULES));
+  assert.equal(b.count.textContent, '0 matches');
+}));
+
+test('a click on a branch during a search keeps the type chosen; a double-click on a branch toggles it once', withDocument(() => {
+  const { b } = browser();
+  b.open({ where: '', entries: browserEntries(MODULES) });
+  b.search.value = 'osc';
+  b.search.dispatch('input');
+  assert.equal(b.chosen.module, 'std.osc');
+  const branch = b.list.children.find((li) => li.dataset.key === 's:std');
+  branch.dispatch('click', { detail: 1 });
+  assert.deepEqual([b.cursor, b.chosen.module], ['m:std.osc', 'std.osc']);
+  b.search.value = '';
+  b.search.dispatch('input');
+  const before = b.expanded.has('s:project');
+  const project = () => b.list.children.find((li) => li.dataset.key === 's:project');
+  project().dispatch('click', { detail: 1 });
+  project().dispatch('click', { detail: 2 });
+  project().dispatch('dblclick', { detail: 2 });
+  assert.equal(b.expanded.has('s:project'), !before, 'toggled once');
+}));
+
+test('the previews follow the name typed in the footer', withDocument(() => {
+  const { b } = browser();
+  b.open({ where: '', entries: browserEntries(MODULES) });
+  b.cursor = 'm:std.osc';
+  b.expanded = new Set([...b.expanded, 'c:std/generator']);
+  b.show();
+  const binds = () => b.detailPane.all().filter((n) => n.localName === 'signal-knob').map((n) => n.getAttribute('bind'));
+  assert.deepEqual(binds(), ['/osc.freq', '/osc.wave']);
+  b.name.value = 'lead';
+  b.name.dispatch('input');
+  assert.deepEqual(binds(), ['/lead.freq', '/lead.wave']);
+  assert.match(b.detailPane.all().find((n) => n.localName === 'svg').textContent, /^lead/);
+  b.name.value = 'Not a name';
+  b.name.dispatch('input');
+  assert.deepEqual(binds(), ['/osc.freq', '/osc.wave'], 'not a name: the type’s own');
+}));
+
+const { SchematicEditor } = await import('./schematic-editor.js');
+
+/** An editor on a stand-in schematic whose connection answers `modules` with MODULES (or refuses), counting what it asks. */
+function editor({ refuse = false } = {}) {
+  const asked = [];
+  const focused = [];
+  const graph = { project: 'p', projectId: 'id', files: { '': 'aa' }, top: { instances: [{ name: 'osc' }], connections: [] }, composites: {} };
+  const s = {
+    graph,
+    drawn: null,
+    connection: {
+      request(message) {
+        asked.push(message);
+        return refuse ? Promise.reject(new Error('the project does not load')) : Promise.resolve(MODULES);
+      },
+    },
+    focus: (options) => focused.push(options),
+    toggleAttribute() {},
+    showSide() {},
+    say() {},
+    modulesSeen() {},
+  };
+  const e = new SchematicEditor(s);
+  e.build(new Node('div'), new Node('div'));
+  e.setEditing(true);
+  focused.length = 0;
+  const written = [];
+  e.write = (step, level, ops) => written.push([step, level, ops]);
+  return { e, s, asked, focused, written };
+}
+
+const LEVEL = { level: '', transform: { k: 1, x: 0, y: 0 } };
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+/** An async test body with the stand-in as the page's document while it runs. */
+function withDocumentAsync(body) {
+  return async () => {
+    const before = Object.getOwnPropertyDescriptor(globalThis, 'document');
+    globalThis.document = FAKE;
+    try {
+      await body();
+    } finally {
+      if (before) Object.defineProperty(globalThis, 'document', before);
+      else delete globalThis.document;
+    }
+  };
+}
+
+test('the editor asks for `modules` with `inside` once per state of the files, and shows the last reply at once', withDocumentAsync(async () => {
+  const { e, s, asked } = editor();
+  e.openPalette({ x: 10, y: 20 }, LEVEL);
+  assert.deepEqual(asked, [{ type: 'modules', inside: true }]);
+  assert.equal(e.browser.entries, null, 'nothing known yet');
+  await settle();
+  assert.equal(e.browser.entries.length, 3);
+  e.closePalette();
+  e.openPalette({ x: 10, y: 20 }, LEVEL);
+  assert.equal(asked.length, 1, 'the same files: nothing asked');
+  assert.equal(e.browser.entries.length, 3, 'shown at once');
+  e.closePalette();
+  s.graph = { ...s.graph, files: { '': 'bb' } };
+  e.openPalette({ x: 10, y: 20 }, LEVEL);
+  assert.equal(asked.length, 2, 'a file changed: asked again');
+  assert.equal(e.browser.entries, null);
+  await settle();
+  assert.equal(e.browser.entries.length, 3);
+}));
+
+test('the editor refuses a taken name in the browser, writes a free one where it opened, and gives the focus back', withDocumentAsync(async () => {
+  const { e, focused, written } = editor();
+  e.openPalette({ x: 10, y: 20 }, LEVEL);
+  await settle();
+  const b = e.browser;
+  b.cursor = 'm:std.osc';
+  b.expanded = new Set([...b.expanded, 'c:std/generator']);
+  b.show();
+  assert.equal(b.name.value, 'osc_2', 'the lowest free name');
+  b.name.value = 'osc';
+  b.name.dispatch('keydown', key('Enter'));
+  assert.match(b.why.textContent, /osc/);
+  assert.deepEqual([written, b.isOpen, focused.length], [[], true, 0], 'refused: nothing written, still open');
+  b.name.value = 'lead';
+  b.name.dispatch('keydown', key('Enter'));
+  assert.deepEqual(written, [[0, '', [{ op: 'instance.add', name: 'lead', module: 'std.osc', x: 10, y: 20 }]]]);
+  assert.equal(b.isOpen, false);
+  assert.equal(e.placing, null);
+  assert.equal(focused.length, 1, 'the focus back on the schematic');
+  // Cancel: nothing written, the focus back too.
+  e.openPalette({ x: 0, y: 0 }, LEVEL);
+  b.dialog.dispatch('cancel');
+  assert.deepEqual([written.length, focused.length, b.isOpen], [1, 2, false]);
+}));
+
+test('a refused `modules` reaches the browser', withDocumentAsync(async () => {
+  const { e } = editor({ refuse: true });
+  e.openPalette({ x: 0, y: 0 }, LEVEL);
+  await settle();
+  assert.equal(e.browser.failure, 'the project does not load');
+  assert.equal(e.browser.count.textContent, 'Not loaded');
 }));

@@ -5,7 +5,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { paletteEntries } from './schematic-patch.js';
+import { browserEntries } from './module-browser.js';
 import { GROUPS, OTHER, REFERENCE, groupOf, groupOrder, moduleInfo, projectKey, words } from './schematic-palette.js';
 
 const MODULES = {
@@ -24,7 +24,7 @@ const MODULES = {
     { module: 'kick', composite: true, description: null },
   ],
 };
-const ENTRIES = paletteEntries(MODULES);
+const ENTRIES = browserEntries(MODULES);
 
 test('a type’s group: project for a composite, library for lib.*, else its category, else other', () => {
   assert.equal(groupOf({ module: 'kick', composite: true }), 'project');

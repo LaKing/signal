@@ -1558,7 +1558,7 @@ export class SignalSchematic extends HTMLElement {
       return;
     }
     const hit = hitTest(this.drawn, this.point(event));
-    // Edit patch: the add palette, where the background or an open
+    // Edit patch: the Add module browser, adding where the background or an open
     // composite's inside was double-clicked.
     const level = this.editor.editing ? paletteLevel(hit, this.drawn, this.point(event)) : null;
     if (level) {
@@ -1632,8 +1632,8 @@ export class SignalSchematic extends HTMLElement {
     const back = own && command === 'schematic.back' && !this.editor.placing;
     // Escape (`schematic.back`) ends a trace first (ADR 0030 §1), then
     // closes the innermost open composite in place (2026-10-22; a click
-    // that opens one also selects it), then lets the selection go (the add
-    // palette's Escape is the palette's), then leaves Edit patch.
+    // that opens one also selects it), then lets the selection go (the Add
+    // module browser's Escape is the browser's), then leaves Edit patch.
     if (back && this.tracing) {
       event.preventDefault();
       this.endTrace();
@@ -1976,7 +1976,7 @@ export class SignalSchematic extends HTMLElement {
   }
 
   /**
-   * A `modules` reply (the add palette's, or the sidebar's own request):
+   * A `modules` reply (the Add module browser's, or the sidebar's own request):
    * what each type is, for the sidebar's description and group.
    */
   modulesSeen(modules) {

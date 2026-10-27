@@ -48,9 +48,9 @@ svg.rubber path { fill: none; stroke: var(--signal-focus, #5aa9ff); stroke-width
 .side .reach { color: var(--signal-effective, #ffb74d); margin-top: 4px; }
 ${BROWSER_CSS}`;
 
-/** Which `modules` reply a graph's project would give: its project and the hashes of its files. */
+/** Which `modules` reply a graph's project would give: its project and the hashes of its files (null when they are not known). */
 function modulesKey(graph) {
-  return graph ? `${projectKey(graph)}\n${JSON.stringify(graph.files ?? null)}` : null;
+  return graph?.files ? `${projectKey(graph)}\n${JSON.stringify(graph.files)}` : null;
 }
 
 function html(name, properties = {}) {
@@ -277,18 +277,25 @@ export class SchematicEditor {
   openPalette(point, level) {
     if (!this.editing || !level) return;
     this.placing = { level: level.level, at: toLocal(level.transform, point), names: namesOf(this.levelGraph(level.level)) };
-    // The last reply's types show at once while the project's files are the same; the reply that follows replaces them.
+    // The types are asked for once per state of the project's files
+    // (`graph.files`): while they are the same, the last reply's show at
+    // once and nothing is asked. `inside`: each composite's, for the
+    // browser's schematic preview (docs/ui-protocol.md "modules").
     const key = modulesKey(this.s.graph);
-    const known = this.modulesKnown?.key === key ? this.modulesKnown.entries : null;
+    const known = key !== null && this.modulesKnown?.key === key ? this.modulesKnown.entries : null;
     this.browser.open({ where: level.level ? `inside ${level.level}` : 'at the top level', entries: known });
-    this.s.connection?.request?.({ type: 'modules' }).then(
+    if (known) return;
+    const placing = this.placing;
+    this.s.connection?.request?.({ type: 'modules', inside: true }).then(
       (modules) => {
         const entries = browserEntries(modules);
         this.modulesKnown = { key, entries };
-        if (this.placing) this.browser.setEntries(entries);
+        if (this.placing === placing) this.browser.setEntries(entries);
         this.s.modulesSeen?.(modules);
       },
-      (error) => this.browser.failed(error.message),
+      (error) => {
+        if (this.placing === placing) this.browser.failed(error.message);
+      },
     );
   }
 

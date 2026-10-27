@@ -1,14 +1,13 @@
 // Patching from the schematic (M2.9-3, ADR 0026 §6, docs/ui-controls.md
 // "Editing the patch"): the `patch` ops as the page builds them, the
 // default name of an added instance, the targets a dragged output may be
-// connected to, how many instances a composite level's edit reaches, and
-// the add palette's entries from `modules`. The server writes the text and
+// connected to, and how many instances a composite level's edit reaches
+// (the Add module browser's entries are ui/lib/module-browser.js's). The server writes the text and
 // is the judge (docs/ui-protocol.md "patch"); nothing here edits a file.
 // No DOM.
 
 import { shapeName } from './schematic-layout.js';
 import { levelRect } from './schematic-scene.js';
-import { groupOf } from './schematic-palette.js';
 
 /** An instance name: `[a-z][a-z0-9_]*`. */
 export const NAME = /^[a-z][a-z0-9_]*$/;
@@ -140,21 +139,4 @@ export function levelAt(drawn, point) {
     if (level.path === '' || (r && point.x >= r.x && point.x <= r.x + r.w && point.y >= r.y && point.y <= r.y + r.h)) return level;
   }
   return drawn.levels[0];
-}
-
-/**
- * The add palette's entries from a `modules` reply, as `searchPalette` and
- * `paletteRows` (ui/lib/schematic-palette.js) search them, each with its
- * palette `group` (`groupOf`) and `description`.
- */
-export function paletteEntries(modules) {
-  const entry = (m) => ({
-    address: m.module,
-    label: m.description ?? (m.composite ? 'composite' : ''),
-    module: m.module,
-    composite: Boolean(m.composite),
-    group: groupOf(m),
-    description: m.description ?? null,
-  });
-  return [...(modules?.primitives ?? []).map(entry), ...(modules?.composites ?? []).map(entry)];
 }

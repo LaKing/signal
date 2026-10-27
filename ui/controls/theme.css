@@ -19,6 +19,7 @@
   --signal-meter-rms: #3ecf8e;
   --signal-meter-peak: #3ecf8e;
   --signal-meter-hot: #e6c84f; /* RMS above −6 dBFS */
+  --signal-backdrop: rgba(0, 0, 0, 0.5); /* behind a modal dialog (the Add module browser) */
   --signal-radius: 6px;
   --signal-font: 11px/1.3 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
   /* Sizes */

@@ -697,26 +697,6 @@ fn ask(context: &Context, message: Value) -> Result<Value, Refused> {
 }
 
 /// The reply without its `type` and `id`.
-/// A `modules` entry without its `inside`: the add browser's schematic
-/// preview of a composite (`docs/ui-protocol.md` "modules"), not part of the
-/// catalogue an agent reads (`graph` gives the project's own levels).
-fn without_inside(mut entry: Value) -> Value {
-    if let Some(fields) = entry.as_object_mut() {
-        fields.remove("inside");
-    }
-    entry
-}
-
-/// A `modules` reply as the catalogue: every composite [`without_inside`].
-fn catalogue(mut reply: Value) -> Value {
-    if let Some(Value::Array(composites)) = reply.get_mut("composites") {
-        for entry in composites.iter_mut() {
-            *entry = without_inside(entry.take());
-        }
-    }
-    reply
-}
-
 fn bare(mut reply: Value) -> Value {
     if let Some(fields) = reply.as_object_mut() {
         fields.remove("type");
@@ -1156,7 +1136,6 @@ fn modules(context: &Context, arguments: &Value) -> Outcome {
             .flatten()
             .filter(keep)
             .cloned()
-            .map(without_inside)
             .collect()
     };
     let (primitives, composites) = (pick("primitives"), pick("composites"));
@@ -2751,7 +2730,7 @@ pub(crate) fn read_resource(context: &Context, uri: &str) -> Result<Value, Strin
             .request(json!({"type": "modules"}))
             .map_err(|e| e["message"].as_str().unwrap_or("").to_owned())?;
         return Ok(
-            json!({"uri": uri, "mimeType": "application/json", "text": bare(catalogue(reply)).to_string()}),
+            json!({"uri": uri, "mimeType": "application/json", "text": bare(reply).to_string()}),
         );
     }
     // Only one of the project's own text files, never another path, a link

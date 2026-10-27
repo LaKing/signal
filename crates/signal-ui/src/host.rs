@@ -3404,7 +3404,7 @@ impl Host {
             "graph" => self.graph().map(Some),
             "schematic.move" => self.schematic_move(&message).map(Some),
             "schematic.reset" => self.schematic_reset(&message).map(Some),
-            "modules" => self.modules().map(Some),
+            "modules" => self.modules(&message).map(Some),
             "patch" => self.patch(&message).map(Some),
             "subscribe" => self.subscribe(client, &message).map(Some),
             "unsubscribe" => self.unsubscribe(client, &message).map(Some),
@@ -3829,8 +3829,15 @@ impl Host {
 
     /// `modules` (M2.9-3): the module types an instance can be added from,
     /// of the project `graph` describes (playing, the running one; stopped,
-    /// the folder's, cached with its structure).
-    fn modules(&mut self) -> Result<Value, Failure> {
+    /// the folder's, cached with its structure). A composite's `inside`
+    /// only when the message asks for it (`inside: true`, the Add module
+    /// browser's schematic preview).
+    fn modules(&mut self, message: &Value) -> Result<Value, Failure> {
+        let inside = match message.get("inside") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(inside)) => *inside,
+            Some(_) => return Err(fail("bad-message", "`inside` must be true or false")),
+        };
         let modules = match &self.run {
             Some(run) => run.current.modules(&self.registry),
             None => {
@@ -3842,6 +3849,11 @@ impl Host {
                     }
                 }
             }
+        };
+        let modules = if inside {
+            modules
+        } else {
+            signal_project::modules_without_inside(modules)
         };
         Ok(with(modules, "type", json!("modules")))
     }

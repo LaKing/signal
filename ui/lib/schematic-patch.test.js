@@ -1,6 +1,6 @@
 // M2.9-3 (docs/ui-controls.md "Editing the patch"): the ops the page sends,
 // the default name of an added instance, the drag-to-connect target filter,
-// the count of instances a composite edit reaches, and the palette entries.
+// the count of instances a composite edit reaches, and adding a library composite.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,14 +12,13 @@ import {
   instanceCount,
   nameError,
   namesOf,
-  paletteEntries,
   paletteLevel,
   patchMessage,
   removeConnection,
   removeInstance,
   scaleConnection,
 } from './schematic-patch.js';
-import { searchPalette } from './panel-edit.js';
+import { browserEntries } from './module-browser.js';
 import { layout } from './schematic-layout.js';
 import { nodeRect, scene } from './schematic-scene.js';
 import { hitTest } from './schematic-hit.js';
@@ -161,19 +160,6 @@ test('a composite level’s edit reaches every instance of it, through the nesti
   assert.equal(instanceCount(graph, 'kick'), 3, 'one at the top, one in each drums');
 });
 
-test('the palette lists primitives then composites, searched by name and description', () => {
-  const entries = paletteEntries({
-    primitives: [{ module: 'std.svf', description: 'State-variable filter' }, { module: 'std.lfo', description: 'Low-frequency oscillator' }],
-    composites: [{ module: 'kick', description: null, composite: true }],
-  });
-  assert.deepEqual(entries.map((e) => e.module), ['std.svf', 'std.lfo', 'kick']);
-  assert.deepEqual(searchPalette(entries, 'filter').shown.map((e) => e.module), ['std.svf']);
-  assert.deepEqual(searchPalette(entries, 'composite').shown.map((e) => e.module), ['kick']);
-  // ADR 0027 §6: each with its palette group (a composite's the project's) and description.
-  const grouped = paletteEntries({ primitives: [{ module: 'std.svf', category: 'filter', description: 'State-variable filter' }], composites: [{ module: 'kick', description: null, composite: true }] });
-  assert.deepEqual(grouped.map((e) => [e.module, e.group, e.description]), [['std.svf', 'filter', 'State-variable filter'], ['kick', 'project', null]]);
-});
-
 test('a library composite from `modules` is added as any type: lib.<name>, named by its last segment', () => {
   const modules = {
     primitives: [],
@@ -183,9 +169,9 @@ test('a library composite from `modules` is added as any type: lib.<name>, named
       { module: 'lib.svf_core', composite: true, library: true, category: 'filter', description: 'std.svf rebuilt.', reference_for: 'std.svf' },
     ],
   };
-  const entries = paletteEntries(modules);
-  assert.deepEqual(entries.map((e) => [e.module, e.group]), [['drums', 'project'], ['lib.tape_echo', 'library'], ['lib.svf_core', 'reference']]);
-  assert.equal(entries[1].label, 'A tape echo.');
+  const entries = browserEntries(modules);
+  assert.deepEqual(entries.map((e) => [e.module, e.group, e.source]), [['drums', 'project', 'project'], ['lib.tape_echo', 'library', 'library'], ['lib.svf_core', 'reference', 'library']]);
+  assert.equal(entries[1].description, 'A tape echo.');
   const name = defaultName('lib.tape_echo', new Set(['tape_echo']));
   assert.equal(name, 'tape_echo_2');
   assert.deepEqual(addInstance(name, 'lib.tape_echo', { x: 1, y: 2 }), { op: 'instance.add', name: 'tape_echo_2', module: 'lib.tape_echo', x: 1, y: 2 });

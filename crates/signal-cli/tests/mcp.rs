@@ -333,7 +333,9 @@ fn modules() {
             .iter()
             .any(|m| m["module"] == "lib.tape_echo")
     );
-    // A composite's `inside` is the Add module browser's, not the catalogue's.
+    // A composite's `inside` is the Add module browser's (`modules` with
+    // `inside: true`), not the catalogue's: neither the tool nor the
+    // resource has it.
     assert!(
         all["composites"]
             .as_array()
@@ -341,6 +343,12 @@ fn modules() {
             .iter()
             .all(|m| m.get("inside").is_none())
     );
+    let read = mcp.rpc("resources/read", json!({"uri": "signal://modules"}));
+    let text = read["result"]["contents"][0]["text"].as_str().unwrap();
+    let resource: serde_json::Value = serde_json::from_str(text).unwrap();
+    let composites = resource["composites"].as_array().unwrap();
+    assert!(composites.iter().any(|m| m["module"] == "lib.tape_echo"));
+    assert!(composites.iter().all(|m| m.get("inside").is_none()));
     assert!(mcp.finish().success());
 }
 

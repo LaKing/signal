@@ -11,7 +11,7 @@
 // logic is ui/lib/module-browser.js and ui/lib/module-preview.js; adding is
 // the editor's (./schematic-editor.js).
 
-import { browserKey, browserTree, detail, moveCursor, placeCursor, revealed, summary, toggled, treeRows } from '../lib/module-browser.js';
+import { browserKey, browserTree, detail, moveCursor, passesToPage, placeCursor, revealed, summary, toggled, treeRows } from '../lib/module-browser.js';
 import { PreviewConnection, insideLevel, nodeLevel, previewDescribe, previewShapes, storedPositions } from '../lib/module-preview.js';
 import { defaultPanel } from '../lib/panel.js';
 import { exportFacts } from '../lib/schematic-groups.js';
@@ -27,7 +27,7 @@ dialog.browser { box-sizing: border-box; width: calc(100vw - 24px); height: calc
   color: var(--signal-fg, #d6dbe4); background: var(--signal-bg, #16181d); border: 1px solid var(--signal-focus, #5aa9ff); border-radius: var(--signal-radius, 6px);
   font: var(--signal-font, 11px/1.3 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif); overflow: hidden; }
 dialog.browser[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
-dialog.browser::backdrop { background: rgba(0, 0, 0, 0.5); }
+dialog.browser::backdrop { background: var(--signal-backdrop, rgba(0, 0, 0, 0.5)); }
 .browser input { font: inherit; color: inherit; background: var(--signal-bg, #16181d); border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 3px; padding: 3px 6px; box-sizing: border-box; min-width: 0; }
 .browser .head, .browser .foot { display: flex; gap: 8px; align-items: center; padding: 8px 12px; background: var(--signal-panel, #1f232b); min-width: 0; }
 .browser .head { border-bottom: 1px solid var(--signal-knob-edge, #3a414d); }
@@ -48,6 +48,7 @@ dialog.browser::backdrop { background: rgba(0, 0, 0, 0.5); }
 .browser .tree li[aria-selected="true"] { background: var(--signal-knob, #262b34); color: var(--signal-accent, #4fc3f7); outline: 1px solid var(--signal-focus, #5aa9ff); outline-offset: -1px; }
 .browser .tree li[aria-selected="true"] .label { color: var(--signal-accent, #4fc3f7); }
 .browser .tree .empty { color: var(--signal-muted, #8a93a3); padding: 8px; cursor: default; }
+.browser .failed { color: var(--signal-effective, #ffb74d); white-space: pre-wrap; overflow-wrap: anywhere; }
 .browser .detail { overflow: auto; min-height: 0; min-width: 0; padding: 12px 16px 16px; }
 .browser .detail h3 { margin: 0; font-size: 16px; overflow-wrap: anywhere; }
 .browser .detail h4 { margin: 16px 0 6px; font-size: 11px; color: var(--signal-muted, #8a93a3); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
@@ -184,12 +185,17 @@ export class ModuleBrowser {
     this.search.addEventListener('input', () => this.show());
     this.search.addEventListener('keydown', (event) => this.searchKey(event));
     this.name.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
+      // An IME's Enter ends its composition: it adds nothing.
+      if (event.key === 'Enter' && !event.isComposing) {
         event.preventDefault();
         this.add();
       }
     });
-    this.name.addEventListener('input', () => (this.why.textContent = ''));
+    // The previews show the instance by the name typed (its card's heading, its box).
+    this.name.addEventListener('input', () => {
+      this.why.textContent = '';
+      this.showDetail();
+    });
     this.addButton.addEventListener('click', () => this.add());
     cancel.addEventListener('click', () => this.close());
     // Escape (the dialog's cancel): closes it, the schematic keeps its Edit patch.
@@ -197,11 +203,14 @@ export class ModuleBrowser {
       event.preventDefault();
       this.close();
     });
-    // Its keys and pointer are its own, never the schematic's (a modal: ⌘Z here is the field's, Delete removes nothing).
+    // Its keys are its own, never the schematic's (a modal: ⌘Z here is the
+    // field's, Delete removes nothing), but for ⌘ and Ctrl chords, which go
+    // on to the app's commands (`passesToPage`).
     dialog.addEventListener('keydown', (event) => {
-      event.stopPropagation();
-      if (event.key === 'Escape') {
+      if (!passesToPage(event)) event.stopPropagation();
+      if (event.key === 'Escape' && !event.isComposing) {
         event.preventDefault();
+        event.stopPropagation();
         this.close();
       }
     });
@@ -225,6 +234,8 @@ export class ModuleBrowser {
    */
   open({ where, entries = null }) {
     this.entries = entries;
+    this.failure = null;
+    this.detailModule = null;
     this.cursor = null;
     this.tree = null;
     this.where.textContent = where ?? '';
@@ -244,13 +255,14 @@ export class ModuleBrowser {
   /** The types to browse (`browserEntries`), once `modules` answered. */
   setEntries(entries) {
     this.entries = entries;
+    this.failure = null;
     if (this.isOpen) this.show();
   }
 
-  /** `modules` was refused: says why. */
+  /** `modules` was refused: says why, in the panes, until the types come (no more "Loading…"). */
   failed(message) {
-    this.why.textContent = message;
-    this.count.textContent = '';
+    this.failure = message || 'the module types could not be read';
+    if (this.isOpen) this.show();
   }
 
   close() {
@@ -308,13 +320,14 @@ export class ModuleBrowser {
       if (on) selected = item;
       return item;
     });
-    if (this.entries !== null && !items.length) items.push(html('li', { className: 'empty', textContent: view.searching ? 'No module matches' : 'No module types' }));
+    if (this.entries === null && this.failure) items.push(html('li', { className: 'empty failed', textContent: `No module types: ${this.failure}` }));
+    else if (this.entries !== null && !items.length) items.push(html('li', { className: 'empty', textContent: view.searching ? 'No module matches' : 'No module types' }));
     this.list.replaceChildren(...items);
     if (selected) {
       this.search.setAttribute('aria-activedescendant', selected.id);
       selected.scrollIntoView?.({ block: 'nearest' });
     } else this.search.removeAttribute('aria-activedescendant');
-    this.count.textContent = this.entries === null ? 'Loading…' : view.searching ? `${view.matched} match${view.matched === 1 ? '' : 'es'}` : `${view.matched} types`;
+    this.count.textContent = this.entries === null ? (this.failure ? 'Not loaded' : 'Loading…') : view.searching ? `${view.matched} match${view.matched === 1 ? '' : 'es'}` : `${view.matched} types`;
     this.showDetail();
   }
 
@@ -344,12 +357,15 @@ export class ModuleBrowser {
   clicked(event) {
     const row = this.rowAt(event);
     if (!row) return;
-    if (row.kind === 'entry' || this.view.searching) {
+    if (row.kind === 'entry') {
       if (this.cursor !== row.key) {
         this.cursor = row.key;
         this.show();
       }
-    } else this.toggle(row.key);
+    } else if (!this.view.searching && !(event.detail > 1)) {
+      // A branch opens or closes on its first click: a double-click toggles it once. With a search every branch is open, and the cursor stays on its type.
+      this.toggle(row.key);
+    }
     this.search.focus({ preventScroll: true });
   }
 
@@ -381,12 +397,13 @@ export class ModuleBrowser {
 
   showDetail() {
     const entry = this.chosen;
-    const key = entry ? entry.module : '';
+    const key = entry ? `${entry.module}\n${this.instanceName(entry)}` : `\n${this.entries === null ? (this.failure ?? 'loading') : ''}`;
     if (key === this.previewKey) return;
     this.previewKey = key;
     this.clearPreviews();
     if (!entry) {
-      this.detailPane.replaceChildren(html('p', { className: 'none-row', textContent: this.entries === null ? 'Loading the module types…' : 'Choose a module type to see what it is.' }));
+      const text = this.entries !== null ? 'Choose a module type to see what it is.' : this.failure ? `The module types could not be read: ${this.failure}` : 'Loading the module types…';
+      this.detailPane.replaceChildren(html('p', { className: this.failure && this.entries === null ? 'failed' : 'none-row', textContent: text }));
       return;
     }
     const d = detail(entry);
@@ -399,13 +416,23 @@ export class ModuleBrowser {
     parts.push(...section('Outputs', d.outputs, portColumns));
     parts.push(...section('Parameters', d.parameters.map((p) => ({ ...p, domain: p.values ?? p.range })), [['name', 'Name'], ['kind', 'Kind'], ['domain', 'Range / values'], ['default', 'Default'], ['unit', 'Unit'], ['combine', 'Combine']]));
     parts.push(html('h4', { textContent: 'Previews' }), html('div', { className: 'previews' }, [this.panelPreview(entry), this.schematicPreview(entry)]));
+    const scroll = this.detailPane.scrollTop;
+    const same = this.detailModule === entry.module;
+    this.detailModule = entry.module;
     this.detailPane.replaceChildren(...parts);
-    this.detailPane.scrollTop = 0;
+    // A new type starts at its top; a rename keeps the place.
+    this.detailPane.scrollTop = same ? scroll : 0;
+  }
+
+  /** The name the previews show the instance by: the one typed when it is a name, else the type's last segment. */
+  instanceName(entry) {
+    const typed = this.name.value.trim();
+    return /^[a-z][a-z0-9_]*$/.test(typed) ? typed : entry.module.split('.').pop();
   }
 
   /** The instance's card as the generated panel would show it: the real controls, inert, over a connection that sends nothing. */
   panelPreview(entry) {
-    const name = this.name.value.trim() || entry.module.split('.').pop();
+    const name = this.instanceName(entry);
     const description = previewDescribe(entry, name);
     const spec = defaultPanel(description);
     const box = html('div', { className: 'frame-box' });
@@ -433,7 +460,7 @@ export class ModuleBrowser {
 
   /** The instance's box as the schematic draws it, and a composite's inside. */
   schematicPreview(entry) {
-    const name = this.name.value.trim() || entry.module.split('.').pop();
+    const name = this.instanceName(entry);
     const known = new Map((this.entries ?? []).filter((e) => e.inside).map((e) => [e.module, e.inside]));
     const factsOf = (module) => exportFacts(known.get(module) ?? this.graph?.()?.composites?.[module] ?? null);
     const box = html('div', { className: 'frame-box' }, [previewSvg(previewShapes(nodeLevel(entry, name), {}, factsOf), `${entry.module} as a box in the schematic`)]);

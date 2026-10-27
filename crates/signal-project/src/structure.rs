@@ -314,6 +314,20 @@ pub fn library_modules(registry: &Registry) -> Result<Vec<Value>, Vec<Diagnostic
     library_entries(registry, false)
 }
 
+/// A [`Project::modules`] reply without its composites' `inside`: what
+/// `modules` gives unless it is asked for `inside: true` (the Add module
+/// browser's schematic preview, `docs/ui-protocol.md` "modules").
+pub fn modules_without_inside(mut modules: Value) -> Value {
+    if let Some(Value::Array(composites)) = modules.get_mut("composites") {
+        for entry in composites.iter_mut() {
+            if let Some(fields) = entry.as_object_mut() {
+                fields.remove("inside");
+            }
+        }
+    }
+    modules
+}
+
 /// [`library_modules`], each entry with its `inside` (its level as `graph`
 /// gives a composite's) when `inside` is set: the UI protocol's `modules`.
 fn library_entries(registry: &Registry, inside: bool) -> Result<Vec<Value>, Vec<Diagnostic>> {
