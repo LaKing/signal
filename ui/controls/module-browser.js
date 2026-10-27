@@ -71,6 +71,8 @@ dialog.browser::backdrop { background: var(--signal-backdrop, rgba(0, 0, 0, 0.5)
 .browser .preview .frame-box { border: 1px dashed var(--signal-knob-edge, #3a414d); border-radius: var(--signal-radius, 6px); padding: 8px; overflow: hidden; background: var(--signal-bg, #16181d); }
 .browser .preview .preview-note { color: var(--signal-muted, #8a93a3); margin-top: 4px; }
 .browser .preview .generated section { border-radius: 10px; background: var(--signal-panel, #1f232b); }
+/* The card's rows are panel.js's \`.row\`, a class <signal-schematic>'s own rows use too (its sidebar's): what that rule sets and \`.generated .row\` does not is undone here. */
+.browser .generated .row { margin: 0; grid-template-columns: none; }
 .browser .preview .inert { pointer-events: none; user-select: none; -webkit-user-select: none; }
 .browser svg.preview-svg { position: static; inset: auto; display: block; width: 100%; height: auto; touch-action: auto; }
 .browser .browser-foot label { display: flex; gap: 6px; align-items: center; }

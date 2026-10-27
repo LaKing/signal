@@ -19,10 +19,10 @@ dialog.slot-dialog { box-sizing: border-box; width: min(56rem, calc(100vw - 24px
 dialog.slot-dialog[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
 dialog.slot-dialog::backdrop { background: var(--signal-backdrop, rgba(0, 0, 0, 0.5)); }
 .slot-dialog h2 { margin: 0; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
-.slot-dialog .head, .slot-dialog .foot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; background: var(--signal-panel, #1f232b); }
-.slot-dialog .head { border-bottom: 1px solid var(--signal-knob-edge, #3a414d); }
-.slot-dialog .foot { border-top: 1px solid var(--signal-knob-edge, #3a414d); }
-.slot-dialog .head .note { flex: 1 1 12rem; color: var(--signal-muted, #8a93a3); }
+.slot-dialog .dialog-head, .slot-dialog .dialog-foot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; background: var(--signal-panel, #1f232b); }
+.slot-dialog .dialog-head { border-bottom: 1px solid var(--signal-knob-edge, #3a414d); }
+.slot-dialog .dialog-foot { border-top: 1px solid var(--signal-knob-edge, #3a414d); }
+.slot-dialog .dialog-head .dialog-note { flex: 1 1 12rem; color: var(--signal-muted, #8a93a3); }
 .slot-dialog .body { overflow: auto; min-height: 0; padding: 8px 12px; }
 .slot-dialog input, .slot-dialog select { font: inherit; color: inherit; background: var(--signal-bg, #16181d); border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 3px; padding: 2px 4px; box-sizing: border-box; min-width: 0; }
 .slot-dialog input.bad { border-color: var(--signal-effective, #ffb74d); }
@@ -30,7 +30,7 @@ dialog.slot-dialog::backdrop { background: var(--signal-backdrop, rgba(0, 0, 0, 
 .slot-dialog table { border-collapse: collapse; width: 100%; }
 .slot-dialog th, .slot-dialog td { text-align: left; padding: 2px 6px 2px 0; border-bottom: 1px solid var(--signal-track, #2a2f38); vertical-align: middle; }
 .slot-dialog th { color: var(--signal-muted, #8a93a3); font-weight: 600; white-space: nowrap; }
-.slot-dialog td input.name { width: 10rem; }
+.slot-dialog td input.port-name { width: 10rem; }
 .slot-dialog td input.small { width: 4rem; }
 .slot-dialog td input.unit { width: 5rem; }
 .slot-dialog td.reason { color: var(--signal-muted, #8a93a3); }
@@ -38,12 +38,12 @@ dialog.slot-dialog::backdrop { background: var(--signal-backdrop, rgba(0, 0, 0, 
 .slot-dialog .field { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 10px; }
 .slot-dialog .field input, .slot-dialog .field select { width: min(24rem, 100%); }
 .slot-dialog .why { flex: 1 1 10rem; color: var(--signal-effective, #ffb74d); white-space: pre-wrap; overflow-wrap: anywhere; }
-.slot-dialog .buttons { display: flex; gap: 6px; margin-left: auto; }
+.slot-dialog .dialog-buttons { display: flex; gap: 6px; margin-left: auto; }
 .slot-dialog button.primary { border-color: var(--signal-focus, #5aa9ff); }
 .slot-dialog .adds { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
 .slot-dialog label.check { display: flex; gap: 6px; align-items: center; }
 @media (max-width: 720px) {
-  .slot-dialog td input.name { width: 7rem; }
+  .slot-dialog td input.port-name { width: 7rem; }
   .slot-dialog th.optional, .slot-dialog td.optional { display: none; }
 }`;
 
@@ -118,9 +118,9 @@ export class SlotDialogs {
     cancel.addEventListener('click', () => this.close());
     primary.classList.add('primary');
     this.dialog.replaceChildren(
-      html('div', { className: 'head' }, [html('h2', { textContent: title }), html('span', { className: 'note', textContent: note })]),
+      html('div', { className: 'dialog-head' }, [html('h2', { textContent: title }), html('span', { className: 'dialog-note', textContent: note })]),
       html('div', { className: 'body' }, body),
-      html('div', { className: 'foot' }, [...extra, why, html('span', { className: 'buttons' }, [cancel, primary])]),
+      html('div', { className: 'dialog-foot' }, [...extra, why, html('span', { className: 'dialog-buttons' }, [cancel, primary])]),
     );
     this.dialog.setAttribute('aria-label', title);
     if (!this.dialog.open) {
@@ -202,7 +202,7 @@ export class SlotDialogs {
     const render = () => {
       const head = html('tr', {}, ['Name', 'Role', 'Kind', 'Shape', 'Rate', 'Unit', 'Group', ''].map((t, i) => html('th', { textContent: t, className: i >= 4 && i <= 6 ? 'optional' : '' })));
       const body = rows.map((row, index) => {
-        const name = html('input', { type: 'text', className: 'name', value: row.name, spellcheck: false, autocomplete: 'off' });
+        const name = html('input', { type: 'text', className: 'port-name', value: row.name, spellcheck: false, autocomplete: 'off' });
         name.setAttribute('aria-label', `Name of ${row.original ?? 'the new port'}`);
         name.addEventListener('input', () => {
           row.name = name.value.trim();

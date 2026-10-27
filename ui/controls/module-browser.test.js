@@ -481,6 +481,7 @@ const { ENTRY_CSS } = await import('./entry-field.js');
 const { MENU_CSS } = await import('./context-menu.js');
 const { EDITOR_CSS } = await import('./schematic-editor.js');
 const { BROWSER_CSS } = await import('./module-browser.js');
+const { SLOT_DIALOG_CSS, SlotDialogs } = await import('./slot-dialogs.js');
 
 /** A CSS template literal of `file` (from `start`, the text before its backtick), its `${NAME}`s replaced by `known[NAME]`. */
 function cssIn(file, start, known) {
@@ -513,20 +514,47 @@ function hostCss() {
   const base = cssIn('./base.js', 'export const BASE_CSS', { ENTRY_CSS });
   const schematic = cssIn('./schematic.js', 'const CSS =', { ENTRY_CSS, EDITOR_CSS, MENU_CSS });
   const slot = cssIn('./slot.js', 'static css =', { BROWSER_CSS });
-  return { schematic: schematic.replace(BROWSER_CSS, ''), slot: base + slot.replace(BROWSER_CSS, '') };
+  const own = (text) => text.replace(BROWSER_CSS, '').replace(SLOT_DIALOG_CSS, '');
+  return { schematic: own(schematic), slot: base + own(slot) };
 }
 
-/** The dialog's HTML elements as `tag.class.class` → their classes; not the previews' SVG (the schematic's own `.box`, `.pin`… draw it) nor the generated card (panel.js's). */
+/**
+ * The dialog's HTML elements as `tag.class.class` → `{classes, card}`; not the
+ * previews' SVG (the schematic's own `.box`, `.pin`… draw it). `card`: in
+ * the generated panel card of a preview, whose classes are panel.js's.
+ */
 function htmlClasses(dialog, found = new Map()) {
-  const walk = (node) => {
+  const walk = (node, card) => {
     if (node.ns || node.nodeType !== 1) return;
     const classes = [...new Set([...String(node.className ?? '').split(/\s+/), ...node.classSet].filter(Boolean))];
-    if (classes.includes('generated')) return;
-    if (classes.length) found.set([node.localName, ...classes].join('.'), classes);
-    for (const child of node.children) walk(child);
+    const inCard = card || classes.includes('generated');
+    if (classes.length) found.set(`${inCard ? 'card ' : ''}${[node.localName, ...classes].join('.')}`, { classes, card: inCard && !classes.includes('generated') });
+    for (const child of node.children) walk(child, inCard);
   };
-  walk(dialog);
+  walk(dialog, false);
   return found;
+}
+
+/** The properties a declaration block sets. */
+function propertiesOf(body) {
+  return body.split(';').map((d) => d.split(':')[0].trim()).filter(Boolean);
+}
+
+/**
+ * The host rules of one compound that reach an element of `seen`, as
+ * `<selector> reaches <element>`: every one, but in a generated card (whose
+ * classes are panel.js's, `.row` among them) a rule each of whose
+ * properties a rule of `ownCss` scoped to `.generated` sets again for that
+ * class (a shorthand, `margin`, covering its longhands).
+ */
+function reaching(seen, hostText, ownCss) {
+  const rules = rulesOf(hostText).map(([s, body]) => [s, bareClasses(s), body]).filter(([, c]) => c.length);
+  const own = rulesOf(ownCss).filter(([s]) => s.includes('.generated '));
+  const undone = (need, body) =>
+    propertiesOf(body).every((p) => own.some(([s, b]) => need.some((c) => s.endsWith(`.${c}`)) && propertiesOf(b).some((q) => q === p || p.startsWith(`${q}-`))));
+  return [...seen].flatMap(([element, { classes, card }]) =>
+    rules.filter(([, need, body]) => need.every((c) => classes.includes(c)) && !(card && undone(need, body))).map(([s]) => `${s} reaches ${element}`),
+  );
 }
 
 const LIBRARY = {
@@ -590,12 +618,9 @@ test('no rule of the host roots’ own reaches an element of the browser (the va
   new Node('signal-slot').append(loader.build(EXPANDED));
   loader.open({ where: '', entries: browserEntries(LIBRARY) });
   htmlClasses(loader.dialog, seen);
-  const all = new Set([...seen.values()].flat());
-  for (const c of ['browser', 'tree-entry', 'tree-source', 'tree-category', 'tree-label', 'search', 'browser-head', 'browser-foot', 'col-name', 'preview-note', 'unmatched']) assert.ok(all.has(c), `the walk saw .${c}`);
-  for (const [host, rules] of Object.entries(bare)) {
-    const hit = [...seen].flatMap(([element, classes]) => rules.filter(([, need]) => need.every((c) => classes.includes(c))).map(([s]) => `${s} reaches ${element}`));
-    assert.deepEqual(hit, [], `no rule of one compound in <signal-${host}>’s root reaches an element of the browser`);
-  }
+  const all = new Set([...seen.values()].flatMap((e) => e.classes));
+  for (const c of ['browser', 'tree-entry', 'tree-source', 'tree-category', 'tree-label', 'search', 'browser-head', 'browser-foot', 'col-name', 'preview-note', 'unmatched', 'generated', 'row']) assert.ok(all.has(c), `the walk saw .${c}`);
+  for (const [host, text] of Object.entries(css)) assert.deepEqual(reaching(seen, text, BROWSER_CSS), [], `no rule of one compound in <signal-${host}>’s root reaches an element of the browser`);
 }));
 
 test('the frame holds the header: one column of minmax(0, 1fr), the search from a basis of 0, padding and border inside its width', () => {
@@ -626,3 +651,30 @@ test('the frame holds the header: one column of minmax(0, 1fr), the search from 
   // The narrow window: one column of panes, of minmax(0, 1fr) too.
   assert.match(BROWSER_CSS, /@media \(max-width: 720px\) \{\s*\.browser \.panes \{ grid-template-columns: minmax\(0, 1fr\);/);
 });
+
+test('no rule of the host roots’ own reaches an element of the slot dialogs (Add slot, Edit interface, Edit map, a template’s name), in either host', withDocument(() => {
+  const FX = {
+    interface: { ports: [{ name: 'x', role: 'input', shape: 'signal', rate: 1, kind: 'audio' }, { name: 'v', role: 'output', shape: { vector: 4 }, rate: 1, kind: 'audio' }, { name: 'gain', role: 'parameter', kind: 'control' }] },
+    from: 'lib.fx',
+    load: 'std.gain',
+  };
+  const seen = new Map();
+  for (const host of ['signal-schematic', 'signal-slot']) {
+    const d = new SlotDialogs({ closed() {} });
+    new Node(host).append(d.build());
+    const ok = () => Promise.resolve({ ok: true });
+    d.openAddSlot({ where: 'At the top level', choices: [{ value: '', label: 'none' }, { value: 'lib.voice', label: 'lib.voice' }], names: new Set(['osc']), defaultName: 'slot', add: ok });
+    htmlClasses(d.dialog, seen);
+    d.openInterface({ slotName: 'fx', slot: FX, focus: { add: 'out' }, apply: ok, saveTemplate() {}, detach() {} });
+    htmlClasses(d.dialog, seen);
+    d.openMap({ slotName: 'fx', load: 'std.gain', rows: [{ port: 'x', role: 'input', value: 'in', options: ['in'] }, { port: 'v', role: 'output', value: false, options: ['out'] }], apply: ok });
+    htmlClasses(d.dialog, seen);
+    d.openMap({ slotName: 'fx', load: null, rows: [], apply: ok });
+    htmlClasses(d.dialog, seen);
+    d.openTemplateName({ title: 'Save', note: 'A template.', defaultName: 'bus', taken: new Set(['bus']), save: ok });
+    htmlClasses(d.dialog, seen);
+  }
+  const all = new Set([...seen.values()].flatMap((e) => e.classes));
+  for (const c of ['slot-dialog', 'dialog-head', 'dialog-note', 'dialog-foot', 'dialog-buttons', 'why', 'field', 'slot-name', 'port-name', 'small', 'unit', 'optional', 'adds', 'check', 'primary']) assert.ok(all.has(c), `the walk saw .${c}`);
+  for (const [host, text] of Object.entries(hostCss())) assert.deepEqual(reaching(seen, text, SLOT_DIALOG_CSS), [], `no rule of one compound in <signal-${host}>’s root reaches an element of a slot dialog`);
+}));
