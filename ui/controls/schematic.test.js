@@ -12,6 +12,8 @@ import { CLOSE_MIN_PX, READ_K, closeBox } from '../lib/schematic-open.js';
 import { hitTest } from '../lib/schematic-hit.js';
 import { fit, toScreen } from '../lib/schematic-view.js';
 import { KICK } from '../lib/schematic-scene.test.js';
+import { bake } from '../lib/schematic-draw.js';
+import { DragFollow } from '../lib/schematic-drag.js';
 
 globalThis.HTMLElement ??= class {};
 globalThis.customElements ??= { get: () => undefined, define: () => {} };
@@ -261,4 +263,90 @@ test('the sidebar’s parameter selector and slider are named for a screen reade
   assert.ok(made > 0, 'the sidebar makes its selector or slider');
   const named = source.indexOf("input.setAttribute('aria-label', row.name);", made);
   assert.ok(named > made && named - made < 400, 'and names it at once');
+});
+
+/** An SVG element, as much of one as `buildLabels` writes. */
+class FakeSvg {
+  constructor(name) {
+    this.name = name;
+    this.attributes = {};
+    this.children = [];
+    this.text = '';
+  }
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+  }
+  getAttribute(name) {
+    return this.attributes[name] ?? null;
+  }
+  removeAttribute(name) {
+    delete this.attributes[name];
+  }
+  append(...children) {
+    this.children.push(...children);
+  }
+  replaceChildren(...children) {
+    this.children = children;
+  }
+  set textContent(value) {
+    this.text = value;
+  }
+  /** Its `text` elements' lines, itself and below. */
+  texts() {
+    return [...(this.name === 'text' ? [this.text] : []), ...this.children.flatMap((c) => c.texts())];
+  }
+}
+
+test('the level’s labels are drawn in a group per box and size, kept by its id in `labelCache`, which the drag moves with the box (the owner’s 2026-10-27)', () => {
+  const port = (name, direction) => ({ name, direction, shape: 'signal', kind: 'audio', rate: 1 });
+  const instance = (name, ins, outs, composite) => ({ name, module: composite ? `${name}_type` : `std.${name}`, composite, ports: [...ins.map((p) => port(p, 'in')), ...outs.map((p) => port(p, 'out'))], parameters: [] });
+  // A composite with pins, a freshly added empty composite, and a primitive (whose pins' labels are in its own box's group).
+  const drawnLayout = layout({ instances: [instance('voice', ['hz', 'gate'], ['out'], true), instance('e', [], [], true), instance('osc', ['in'], ['out'], false)], connections: [] });
+  const had = globalThis.document;
+  globalThis.document = { createElementNS: (_, name) => new FakeSvg(name) };
+  try {
+    const s = Object.create(SignalSchematic.prototype);
+    Object.assign(s, { drawn: { open: new Set() }, tracing: null, graph: {} });
+    const transform = { k: 1, x: 0, y: 0 };
+    const level = { path: '', level: '', layout: drawnLayout, transform, collapsed: false };
+    const label = (detail) => {
+      const drawn = { baked: bake(transform, viewport), labels: new FakeSvg('g') };
+      drawn.labelBoxes = s.labelBoxes(level, { detail, notes: false, hovered: null });
+      s.buildLabels(level, drawn, { detail, counts: null, viewport: { x: 0, y: 0, w: 1e6, h: 1e6 } });
+      return drawn;
+    };
+    for (const detail of ['pins', 'summary']) {
+      const drawn = label(detail);
+      const keys = [...drawn.labelCache.keys()].sort();
+      // At every pin's detail the empty composite has no label (no pins); its summary is its one label.
+      assert.deepEqual(keys, detail === 'pins' ? ['voice'] : ['e', 'voice'], `${detail}: one entry per labelled composite, none for the primitive`);
+      for (const [key, { ids, elements }] of drawn.labelCache) {
+        assert.deepEqual(ids, [key]);
+        for (const g of elements) {
+          assert.equal(g.getAttribute('data-box'), key);
+          assert.equal(drawn.labels.children.filter((sized) => sized.children.includes(g)).length, 1, `${detail}: ${key}’s group is in one size’s group`);
+        }
+      }
+      const texts = (key) => drawn.labelCache.get(key).elements.flatMap((g) => g.texts());
+      if (detail === 'pins') assert.deepEqual(texts('voice').sort(), ['gate', 'hz', 'out']);
+      else assert.ok(texts('voice').join(' ').startsWith('voice'), texts('voice').join(' '));
+      if (detail === 'summary') assert.equal(texts('e').join(' '), 'e: 0 in · 0 out', 'the empty composite’s summary');
+      // No label of a box is left outside its box's group.
+      const all = drawn.labels.children.flatMap((g) => g.texts());
+      const owned = [...drawn.labelCache.values()].flatMap(({ elements }) => elements.flatMap((g) => g.texts()));
+      assert.deepEqual(all.sort(), owned.sort(), detail);
+      if (detail === 'pins') continue;
+      // Dragged, the empty composite's summary goes with its box.
+      const nodeCache = new Map(drawnLayout.nodes.map((n) => [n.id, { el: new FakeSvg('g') }]));
+      const groups = new Map([['', { ...drawn, nodeCache, wireCache: new Map() }]]);
+      const node = drawnLayout.nodes.find((n) => n.name === 'e');
+      new DragFollow('', 'e').apply({ layout: drawnLayout, levels: [level], groups, to: { x: node.x + 20, y: node.y + 5 } });
+      const moved = nodeCache.get('e').el.getAttribute('transform');
+      assert.ok(moved);
+      for (const g of drawn.labelCache.get('e').elements) assert.equal(g.getAttribute('transform'), moved, `${detail}: e’s labels follow`);
+      for (const g of drawn.labelCache.get('voice').elements) assert.equal(g.getAttribute('transform'), null, `${detail}: voice’s stay`);
+    }
+  } finally {
+    globalThis.document = had;
+  }
 });

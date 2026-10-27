@@ -76,7 +76,7 @@ import { moduleInfo, projectKey } from '../lib/schematic-palette.js';
 import { allOf, deletePlan, dragGroup, has, hitKey, inside, moveMessages, reselectAll, toggled, traceTarget, union } from '../lib/schematic-select.js';
 import { formatFixed } from '../lib/format.js';
 import { HEADER, dragPosition, layout } from '../lib/schematic-layout.js';
-import { DragFollow } from '../lib/schematic-drag.js';
+import { DragFollow, ownedLabels } from '../lib/schematic-drag.js';
 import { aroundReason, closeBox, closeShown, closeText, crumbView, drawOrder, editable, editLevel, enterView, pinOne, unpin } from '../lib/schematic-open.js';
 import { boundaryLinks, breadcrumbs, chain, levelRect, nodeRect, openAnchor, rebase, reroot, scene } from '../lib/schematic-scene.js';
 import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
@@ -87,7 +87,7 @@ import { isDiscrete, selectOptions, selectValue, valueLabel } from '../lib/value
 import { IDENTITY, commandView, fit, focus, matrix, pan, toLocal, toScreen, wheelFactor, zoomAt } from '../lib/schematic-view.js';
 import { keyCommand, keymap, shownKeys, wheelCommand } from '../lib/keys.js';
 import { registerWheel, takesWheel, verticalDelta } from './keyboard.js';
-import { COUNT_UNITS, LABEL_PX, PITCH_PX, READ_PX, frameSides, insideNote, levelCounts, levelLabels, outsideNote, pinText, setMeasure } from '../lib/schematic-labels.js';
+import { COUNT_UNITS, LABEL_PX, PITCH_PX, READ_PX, frameSides, insideNote, labelOwners, levelCounts, levelLabels, outsideNote, pinText, setMeasure } from '../lib/schematic-labels.js';
 import { bundleClick, bundleText, bundleWires, countPlaces, countsShown, fanOf, nearestWire } from '../lib/schematic-bundle.js';
 import { collapsedAt, exportFacts, groupAnchors, labelDetail, notesAt, portGroups } from '../lib/schematic-groups.js';
 
@@ -1449,6 +1449,10 @@ export class SignalSchematic extends HTMLElement {
     const viewed = this.view.path ?? '';
     const within = path !== '' && (viewed === path || viewed.startsWith(`${path}/`));
     this.view = within ? reroot(this.view, before, path) : rebase(this.view, before, (l) => this.layoutOf(l));
+    // What the drag wrote put back (a cluster's label hidden shown again):
+    // the redraw at the next frame, before it is painted, draws the boxes
+    // and labels where they were let go.
+    gesture.follow.restore();
     this.schedule();
     // A group too large for one message goes as several (`moveMessages`).
     for (const message of moveMessages(level, moves)) {
@@ -2499,7 +2503,7 @@ export class SignalSchematic extends HTMLElement {
       const open = !frame && this.drawn.open.has(instance);
       if (open && detail === 'summary') continue;
       const at = (p) => ({ name: p.name, x: p.x, y: p.y });
-      const box = { kind: frame ? node.kind : 'instance', name: node.name, rect: { x: node.x, y: node.y, w: node.w, h: node.h }, ins: node.ins.map(at), outs: node.outs.map(at), texts: new Map(), header: HEADER, outward: open };
+      const box = { kind: frame ? node.kind : 'instance', id: node.id, name: node.name, rect: { x: node.x, y: node.y, w: node.w, h: node.h }, ins: node.ins.map(at), outs: node.outs.map(at), texts: new Map(), header: HEADER, outward: open };
       // Its port groups (M2.13-2): a box's collapse with the level; a frame's (the same groups) are named as runs.
       if (node.groups) {
         box.groups = node.groups;
@@ -2526,6 +2530,8 @@ export class SignalSchematic extends HTMLElement {
     }
     const pins = this.tracing?.result?.pins;
     const bySize = new Map();
+    // A box's labels in a group of their own (per size), by its node's id, so a drag moves them with it (ui/lib/schematic-drag.js).
+    const owned = ownedLabels();
     for (const label of labels) {
       const shown = label.shown ?? label.text;
       if (!shown) continue;
@@ -2533,11 +2539,12 @@ export class SignalSchematic extends HTMLElement {
       const size = LABEL_PX * f;
       const outward = Boolean(boxes[label.pins[0]?.box]?.outward);
       const group = `${size}${outward ? ' outward' : ''}`;
-      let g = bySize.get(group);
-      if (!g) {
-        g = el('g', { 'data-size': size, ...(outward ? { 'data-outward': '1' } : {}) });
-        bySize.set(group, g);
+      let sized = bySize.get(group);
+      if (!sized) {
+        sized = el('g', { 'data-size': size, ...(outward ? { 'data-outward': '1' } : {}) });
+        bySize.set(group, sized);
       }
+      const g = owned.group(sized, group, labelOwners(boxes, label), () => el('g'));
       const one = label.pins.length === 1 ? label.pins[0] : null;
       const traced = Boolean(pins && label.pins.some((p) => pins.has(addresses[p.box](p.name))));
       const noted = Boolean(one && label.text !== one.name);
@@ -2558,6 +2565,7 @@ export class SignalSchematic extends HTMLElement {
       });
     }
     drawn.sizes = [...bySize.values()];
+    drawn.labelCache = owned.cache;
     drawn.labels.replaceChildren(...drawn.sizes);
   }
 
