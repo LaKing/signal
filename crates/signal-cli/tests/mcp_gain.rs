@@ -478,5 +478,8 @@ fn a_slot_load_into_a_gain_s_fan_in_is_guarded() {
     let mut mcp = Mcp::started(&project(&text, "gain-slot-wide"), &["--max-gain", "4"]);
     mcp.ok("slot_load", json!({"slot": "m", "load": "std.const"}));
     assert!(mcp.file("project.toml").contains("load = \"std.const\""));
+    // The unload removes the modulation: allowed at 4, as R2 says.
+    mcp.ok("slot_unload", json!({"slot": "m"}));
+    assert!(!mcp.file("project.toml").contains("load = "));
     assert!(mcp.finish().success());
 }

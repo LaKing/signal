@@ -37,6 +37,12 @@ pub struct Change {
     /// Its place among its table's keys (`None`: appended).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<usize>,
+    /// In a section (`[instances.x]`), the key's line as written around
+    /// the key and the value: `[key prefix, key suffix, value prefix, value
+    /// suffix]` (the comment lines above it, its trailing comment), so an
+    /// undo puts them back; absent in an inline table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decor: Option<Vec<String>>,
 }
 
 /// A port or parameter as `slot.interface` names it (ADR 0037 §3).
@@ -85,8 +91,8 @@ impl<'de> Deserialize<'de> for Role {
 /// any other plain name (an interface parameter's value).
 fn writable(first: &str) -> bool {
     match first {
-        "slot" | "load" | "map" | "set" | "seed" => true,
-        "module" | "project" | "gpu" | "pattern" | "snapshot_exclude" => false,
+        "slot" | "load" | "map" | "set" | "seed" | "snapshot_exclude" => true,
+        "module" | "project" | "gpu" | "pattern" => false,
         name => super::valid_name(name),
     }
 }
@@ -159,9 +165,42 @@ impl Tab<'_> {
         (self.get(key).and_then(item_text), at)
     }
 
+    /// A section's key line as written around `key` and its value (see
+    /// [`Change::decor`]); `None` in an inline table, or for a section.
+    fn decor(&self, key: &str) -> Option<Vec<String>> {
+        let Tab::Std(t) = self else {
+            return None;
+        };
+        let value = t.get(key)?.as_value()?;
+        let text = |raw: Option<&toml_edit::RawString>| {
+            raw.and_then(toml_edit::RawString::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let leaf = t.key(key)?.leaf_decor();
+        Some(vec![
+            text(leaf.prefix()),
+            text(leaf.suffix()),
+            text(value.decor().prefix()),
+            text(value.decor().suffix()),
+        ])
+    }
+
     /// Sets (or removes, `None`) `key`; an existing value keeps its spacing
     /// and trailing comment, a new one goes at `at` (else at the end).
     fn write(&mut self, key: &str, value: Option<Value>, at: Option<usize>) {
+        self.write_decorated(key, value, at, None);
+    }
+
+    /// [`Self::write`], a new key in a section written with `decor` (its
+    /// line as it was, [`Change::decor`]).
+    fn write_decorated(
+        &mut self,
+        key: &str,
+        value: Option<Value>,
+        at: Option<usize>,
+        decor: Option<&[String]>,
+    ) {
         match (self, value) {
             (Tab::Std(t), None) => {
                 t.remove(key);
@@ -192,7 +231,17 @@ impl Tab<'_> {
                     .iter()
                     .filter_map(|k| t.remove_entry(k))
                     .collect();
-                t.insert(key, TomlItem::Value(value));
+                match decor {
+                    Some([kp, ks, vp, vs]) => {
+                        let value = value.decorated(vp.as_str(), vs.as_str());
+                        let new = toml_edit::Key::new(key)
+                            .with_leaf_decor(toml_edit::Decor::new(kp.as_str(), ks.as_str()));
+                        t.insert_formatted(&new, TomlItem::Value(value));
+                    }
+                    _ => {
+                        t.insert(key, TomlItem::Value(value));
+                    }
+                }
                 for (key, item) in tail {
                     t.insert_formatted(&key, item);
                 }
@@ -277,7 +326,14 @@ fn entry<'d>(doc: &'d mut DocumentMut, name: &str) -> Option<Tab<'d>> {
 }
 
 /// Applies `change` to slot `slot`'s entry in `doc`; returns its inverse.
-fn apply_change(doc: &mut DocumentMut, slot: &str, change: &Change) -> Result<Change, PatchError> {
+/// Applies `change` to slot `slot`'s entry in `doc`; returns its inverse,
+/// preceded by the removals of the tables it had to make (outermost first),
+/// so that the inverse list, applied in reverse, leaves none behind.
+fn apply_change(
+    doc: &mut DocumentMut,
+    slot: &str,
+    change: &Change,
+) -> Result<Vec<Change>, PatchError> {
     let (last, parents) = change
         .path
         .split_last()
@@ -291,22 +347,34 @@ fn apply_change(doc: &mut DocumentMut, slot: &str, change: &Change) -> Result<Ch
     })?;
     // Parents are made only for a value written; a removal under a missing
     // table is already done.
-    for key in parents {
+    let mut inverse = Vec::new();
+    for (depth, key) in parents.iter().enumerate() {
         let exists = tab.get(key).is_some_and(|i| i.as_str().is_none());
         if !exists && value.is_none() {
-            return Ok(change.clone());
+            return Ok(vec![change.clone()]);
+        }
+        if tab.get(key).is_none() {
+            inverse.push(Change {
+                path: change.path[..=depth].to_vec(),
+                value: None,
+                at: None,
+                decor: None,
+            });
         }
         tab = tab
             .into_child(key, value.is_some())
             .ok_or_else(|| bad(format!("`{}` is not a table", change.path.join("."))))?;
     }
     let (old, at) = tab.read(last);
-    tab.write(last, value, change.at);
-    Ok(Change {
+    let decor = tab.decor(last);
+    tab.write_decorated(last, value, change.at, change.decor.as_deref());
+    inverse.push(Change {
         path: change.path.clone(),
         value: old,
         at,
-    })
+        decor,
+    });
+    Ok(inverse)
 }
 
 /// Whether the entry of `name` in `text` is a slot (has a `slot` key).
@@ -330,6 +398,8 @@ struct Read {
     set: Vec<String>,
     seed: bool,
     values: Vec<String>,
+    /// `snapshot_exclude` (ADR 0041 §8), names of the interface's parameters.
+    exclude: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -422,8 +492,19 @@ fn read_slot(
     let values = tab
         .keys()
         .into_iter()
-        .filter(|k| !["slot", "load", "map", "set", "seed"].contains(&k.as_str()))
+        .filter(|k| {
+            !["slot", "load", "map", "set", "seed", "snapshot_exclude"].contains(&k.as_str())
+        })
         .collect();
+    let exclude = tab
+        .get("snapshot_exclude")
+        .and_then(TomlItem::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(Read {
         from,
         remove: spec.remove.iter().map(|r| r.get_ref().clone()).collect(),
@@ -435,6 +516,7 @@ fn read_slot(
         set,
         seed: tab.get("seed").is_some(),
         values,
+        exclude,
     })
 }
 
@@ -714,11 +796,12 @@ impl Patching<'_> {
                 path: vec!["slot".to_owned()],
                 value: Some(text),
                 at: None,
+                decor: None,
             };
-            inverse.push(apply_change(&mut doc, slot, &change)?);
+            inverse.extend(apply_change(&mut doc, slot, &change)?);
         }
         for change in changes {
-            inverse.push(apply_change(&mut doc, slot, change)?);
+            inverse.extend(apply_change(&mut doc, slot, change)?);
         }
         // A role table, `map` or `set` left empty goes, but `slot = {}` stays.
         for key in ["map", "set"] {
@@ -779,6 +862,7 @@ impl Patching<'_> {
             path: path.iter().map(|s| (*s).to_owned()).collect(),
             value,
             at: None,
+            decor: None,
         };
         match edit {
             SlotEdit::Load {
@@ -985,7 +1069,18 @@ impl Patching<'_> {
                         changes.push(set(&[name], None));
                     }
                     ports.retain(|p| p.name != *name);
+                    self.removed.push(format!("{slot}.{name}"));
                 }
+                // One op renames each port once: a new name that another
+                // rename of the op takes from or gives away would chain them.
+                for new in rename.values() {
+                    if rename.contains_key(new) {
+                        return Err(bad(format!(
+                            "`{new}` is renamed and renamed to in one op: chain renames as separate ops"
+                        )));
+                    }
+                }
+                let mut exclude = read.exclude.clone();
                 for (old, new) in rename {
                     let Some(port) = ports.iter().find(|p| p.name == *old).cloned() else {
                         return Err(bad(format!(
@@ -998,24 +1093,36 @@ impl Patching<'_> {
                     if ports.iter().any(|p| p.name == *new) {
                         return Err(bad(format!("`{slot}` already has `{new}`")));
                     }
+                    // The new name takes the old one's place in each table.
+                    let place = |path: &[&str]| key_index(&self.text, slot, path);
+                    let entry_at = place(&["slot", role_key(port.role), old]);
                     forget(old, &mut own, &mut removed, &mut changes);
                     let renamed = InterfacePort {
                         name: new.clone(),
                         ..port.clone()
                     };
                     removed.retain(|r| r != new);
-                    changes.push(set(
+                    let mut declared = set(
                         &["slot", role_key(port.role), new],
                         Some(port_text(&renamed)),
-                    ));
+                    );
+                    declared.at = entry_at;
+                    changes.push(declared);
                     own.insert(new.clone(), port.role);
                     if let Some((_, value)) = read.map.iter().find(|(k, _)| k == old) {
+                        let map_at = place(&["map", old]);
                         changes.push(set(&["map", old], None));
-                        let text = match value {
-                            Some(v) => json_text(&serde_json::json!(v))?,
-                            None => "false".to_owned(),
-                        };
-                        changes.push(set(&["map", new], Some(text)));
+                        // Renamed back to the content's own name: matched by
+                        // name again, no entry needed.
+                        if value.as_deref() != Some(new.as_str()) {
+                            let text = match value {
+                                Some(v) => json_text(&serde_json::json!(v))?,
+                                None => "false".to_owned(),
+                            };
+                            let mut moved = set(&["map", new], Some(text));
+                            moved.at = map_at;
+                            changes.push(moved);
+                        }
                     } else if let Some(load) = &read.load
                         && (self.ctx.content)(load).is_some_and(|c| {
                             c.ports
@@ -1034,14 +1141,20 @@ impl Patching<'_> {
                         ));
                     }
                     was.insert(new.clone(), old.clone());
+                    for name in exclude.iter_mut().filter(|n| *n == old) {
+                        name.clone_from(new);
+                    }
                     if read.values.iter().any(|k| k == old) {
                         let mut doc: DocumentMut = self
                             .text
                             .parse()
                             .map_err(|_| refused("does-not-load", "the file does not parse"))?;
                         let value = entry(&mut doc, slot).and_then(|t| t.read(old).0);
+                        let value_at = place(&[old]);
                         changes.push(set(&[old], None));
-                        changes.push(set(&[new], value));
+                        let mut moved = set(&[new], value);
+                        moved.at = value_at;
+                        changes.push(moved);
                     }
                     wires.insert(old.clone(), new.clone());
                     ports.retain(|p| p.name != *old);
@@ -1090,6 +1203,13 @@ impl Patching<'_> {
                     own.insert(declared.name.clone(), declared.role);
                     ports.retain(|p| p.name != declared.name);
                     ports.push(declared);
+                }
+                exclude.retain(|n| !remove.contains(n));
+                if exclude != read.exclude {
+                    let text = (!exclude.is_empty())
+                        .then(|| json_text(&serde_json::json!(exclude)))
+                        .transpose()?;
+                    changes.push(set(&["snapshot_exclude"], text));
                 }
                 if removed != read.remove {
                     let text = (!removed.is_empty())
@@ -1141,6 +1261,18 @@ impl Patching<'_> {
             before,
         })
     }
+}
+
+/// The place of the key at `path` of slot `slot`'s entry in `text` among
+/// its table's keys, if it is there.
+fn key_index(text: &str, slot: &str, path: &[&str]) -> Option<usize> {
+    let mut doc: DocumentMut = text.parse().ok()?;
+    let (last, parents) = path.split_last()?;
+    let mut tab = entry(&mut doc, slot)?;
+    for key in parents {
+        tab = tab.into_child(key, false)?;
+    }
+    tab.keys().iter().position(|k| k == last)
 }
 
 /// Every string of `text`'s `[exports]` equal to `end` (`slot.port`), by
@@ -1211,11 +1343,13 @@ fn prune(doc: &mut DocumentMut, slot: &str, path: &[&str], inverse: &mut Vec<Cha
     };
     if empty {
         let (old, at) = tab.read(last);
+        let decor = tab.decor(last);
         tab.write(last, None, None);
         inverse.push(Change {
             path: path.iter().map(|s| (*s).to_owned()).collect(),
             value: old,
             at,
+            decor,
         });
     }
 }

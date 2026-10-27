@@ -1394,7 +1394,7 @@ pub fn content_names(
 /// What the project `loaded` offers as a slot's content (ADR 0035 §2–3):
 /// its exports, its sinks planned as their taps and, without `[exports]
 /// outputs`, their channels exported.
-pub(crate) fn project_content(loaded: &Project, registry: &Registry) -> Option<ContentNames> {
+pub fn project_content(loaded: &Project, registry: &Registry) -> Option<ContentNames> {
     let mut defs = loaded.definitions();
     defs.extend(loaded.tapped(registry, &mut Vec::new()));
     let mut root = loaded.root.clone();

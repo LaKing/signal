@@ -4372,7 +4372,7 @@ impl Host {
         if let Some(hook) = self.before_lock.as_mut() {
             hook();
         }
-        let _lock = ProjectLock::acquire(&self.dir)
+        let lock = ProjectLock::acquire(&self.dir)
             .map_err(|e| fail("write-failed", format!("{file} was not written: {e}")))?;
         let now = fs::read(&path).ok().map(|bytes| sha256_hex(&bytes));
         if now.as_deref() != Some(base) {
@@ -4483,6 +4483,14 @@ impl Host {
         // ADR 0037 §2: a slot port renamed, the panels' bindings on it follow.
         let mut notes = patched.notes.clone();
         let rebound = self.rebind(&instance_paths, &patched.renamed, &mut notes);
+        // ADR 0041: the snapshots' values of a renamed or removed slot
+        // parameter follow it (top-level controls only), under the same lock.
+        let resnapped = if level.is_empty() {
+            self.resnap(&lock, &patched.renamed, &patched.removed, &mut notes)
+        } else {
+            false
+        };
+        drop(lock);
         // Playing, the watch reloads the level's file and pushes `graph`.
         if self.run.is_none() {
             self.push_graph(false);
@@ -4500,6 +4508,13 @@ impl Host {
         if !rebound.is_empty() {
             reply = with(reply, "panels", json!(rebound));
         }
+        if resnapped {
+            reply = with(
+                reply,
+                "snapshots",
+                json!(signal_project::snapshot::SNAPSHOTS_FILE),
+            );
+        }
         Ok(reply)
     }
 
@@ -4509,7 +4524,7 @@ impl Host {
     /// before its rename (ADR 0040). Returns the panels written; one not
     /// written is said in `notes` (the level's file holds the rename).
     fn rebind(
-        &self,
+        &mut self,
         paths: &[String],
         renamed: &[(String, String)],
         notes: &mut Vec<String>,
@@ -4527,6 +4542,9 @@ impl Host {
             .collect();
         let ui = project_ui(&self.dir);
         if fs::symlink_metadata(&ui).is_ok_and(|m| m.file_type().is_symlink()) {
+            notes.push(
+                "ui/: its bindings were not rewritten (it is reached through a link)".to_owned(),
+            );
             return Vec::new();
         }
         let mut written = Vec::new();
@@ -4536,16 +4554,42 @@ impl Host {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+                notes.push(format!(
+                    "ui/{name}: its bindings were not rewritten (it is reached through a link)"
+                ));
                 continue;
             }
-            let Ok(text) = fs::read_to_string(&path) else {
-                continue;
+            let text = match fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(error) => {
+                    notes.push(format!(
+                        "ui/{name}: its bindings were not rewritten ({error})"
+                    ));
+                    continue;
+                }
             };
             let Some(new) = crate::bindings::rewrite_bindings(&text, &renames) else {
                 continue;
             };
             match transaction::replace_unchanged(&path, Some(text.as_bytes()), new.as_bytes()) {
-                Ok(true) => written.push(format!("ui/{name}")),
+                Ok(true) => {
+                    // As `panel.write` writes a panel: taken as seen, and every
+                    // client gets it.
+                    self.seen(&Path::new("ui").join(&name));
+                    let html = crate::bindings::panel_content(&new)
+                        .ok()
+                        .and_then(|(start, end)| new.get(start..end))
+                        .map(str::to_owned);
+                    if let Some(html) = html {
+                        self.broadcast(&json!({
+                            "type": "panel.written",
+                            "file": name,
+                            "base": sha256_hex(new.as_bytes()),
+                            "html": html,
+                        }));
+                    }
+                    written.push(format!("ui/{name}"));
+                }
                 Ok(false) => notes.push(format!(
                     "ui/{name}: its bindings were not rewritten (another writer changed it meanwhile)"
                 )),
@@ -4555,6 +4599,63 @@ impl Host {
             }
         }
         written
+    }
+
+    /// ADR 0041 with ADR 0037 §2: in `snapshots.toml` (when the project has
+    /// one), every snapshot's value of a renamed top-level slot parameter
+    /// (`slot.old` → `slot.new`, in order) moves to its new address and a
+    /// removed one's goes, the undo snapshot's too, written under the held
+    /// `lock` in the file's canonical text. Whether it wrote; a failure is a
+    /// note (the level's file holds the edit).
+    fn resnap(
+        &self,
+        lock: &ProjectLock,
+        renamed: &[(String, String)],
+        removed: &[String],
+        notes: &mut Vec<String>,
+    ) -> bool {
+        if (renamed.is_empty() && removed.is_empty())
+            || !self
+                .dir
+                .join(signal_project::snapshot::SNAPSHOTS_FILE)
+                .exists()
+        {
+            return false;
+        }
+        let edited = snapshots::edit_locked(
+            &self.dir,
+            lock,
+            |_| Ok(()),
+            |all| {
+                let follow = |values: &mut snapshots::Values| {
+                    for (old, new) in renamed {
+                        if let Some(value) = values.remove(&format!("/{old}")) {
+                            values.insert(format!("/{new}"), value);
+                        }
+                    }
+                    for gone in removed {
+                        values.remove(&format!("/{gone}"));
+                    }
+                };
+                for values in all.snapshots.values_mut() {
+                    follow(values);
+                }
+                if let Some(undo) = &mut all.undo {
+                    follow(undo);
+                }
+                Ok(())
+            },
+        );
+        match edited {
+            Ok(edited) => edited.wrote,
+            Err(error) => {
+                notes.push(format!(
+                    "{}: its values were not renamed ({error})",
+                    signal_project::snapshot::SNAPSHOTS_FILE
+                ));
+                false
+            }
+        }
     }
 
     /// Whether `file` (relative to the project) is reached through a link:
@@ -4791,8 +4892,7 @@ impl Host {
             .into_iter()
             .map(|(load, path)| match Project::load(&path) {
                 Ok(project) => {
-                    let names =
-                        signal_project::content_names(None, &self.dir, &load, &self.registry);
+                    let names = signal_project::project_content(&project, &self.registry);
                     json!({
                         "load": load,
                         "name": project.name,

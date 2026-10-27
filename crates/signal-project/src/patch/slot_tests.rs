@@ -1,9 +1,13 @@
 //! ADR 0037 test 4 (the text half) and the slot ops of `patch`: add, load,
-//! Replace, unload, map and every interface edit write the expected text
-//! with comments kept; each undo puts the file back byte for byte and its
-//! redo writes the edit again; a rename rewrites the wires, `map` keys and
-//! values; removing a wired port is refused, naming the wires; untrusted
-//! restores touch nothing but the slot's own keys.
+//! Replace, unload, map and every interface edit write the expected text,
+//! every comment outside the keys they write kept; a key removed from a
+//! section takes its comment lines and trailing comment, which its undo
+//! puts back; each undo puts the file back byte for byte (the tables it
+//! made removed again) and its redo writes the edit again; a rename keeps
+//! each key in its place and rewrites the wires, `map` keys, values and
+//! `snapshot_exclude`; chained renames in one op are refused; removing a
+//! wired or exported port is refused, naming them; untrusted restores
+//! touch nothing but the slot's own keys.
 
 use super::*;
 use crate::slot::{ContentNames, ContentPort, Role};
@@ -333,7 +337,7 @@ fn interface_edits_add_remove_retype_and_rename() {
         "{text}"
     );
     assert!(
-        text.contains("map = { y = \"out\", input = \"in\" }"),
+        text.contains("map = { input = \"in\", y = \"out\" }"),
         "{text}"
     );
     assert!(text.contains("inputs = { input = \"audio\" }"), "{text}");
@@ -665,4 +669,158 @@ fn an_exported_slot_port_is_not_removed() {
         "{}",
         refused.message
     );
+}
+
+/// A rename whose new name another rename of the same op takes or gives
+/// is refused (chain them as separate ops); across ops, each op reads the
+/// file as the one before left it, so the map follows.
+#[test]
+fn chained_renames_are_separate_ops() {
+    for bad in [
+        serde_json::json!({"op": "slot.interface", "slot": "fx", "rename": {"x": "z", "z": "w"}}),
+        serde_json::json!({"op": "slot.interface", "slot": "fx", "rename": {"x": "y", "y": "x"}}),
+    ] {
+        let refused = apply(HOST, None, &[op(bad.clone())], &ctx()).unwrap_err();
+        assert!(
+            refused.message.contains("renamed and renamed to"),
+            "{bad}: {}",
+            refused.message
+        );
+    }
+    let (text, patched) = round_trip(
+        HOST,
+        &[
+            op(serde_json::json!({"op": "slot.interface", "slot": "fx", "rename": {"x": "z"}})),
+            op(serde_json::json!({"op": "slot.interface", "slot": "fx", "rename": {"z": "w"}})),
+        ],
+    );
+    assert!(text.contains("map = { w = \"in\", y = \"out\" }"), "{text}");
+    assert!(text.contains("to = \"fx.w\""), "{text}");
+    assert_eq!(
+        patched.renamed,
+        [
+            ("fx.x".to_owned(), "fx.z".to_owned()),
+            ("fx.z".to_owned(), "fx.w".to_owned())
+        ]
+    );
+    plans(&text).unwrap();
+}
+
+/// ADR 0041 §8: a renamed or removed interface parameter's
+/// `snapshot_exclude` entry follows it; the slot's names are checked
+/// against its interface.
+#[test]
+fn snapshot_exclude_follows_the_interface() {
+    let text = HOST.replace(
+        r#"outputs = { y = "audio" } }, load = "std.gain", map = { x = "in", y = "out" } }"#,
+        r#"outputs = { y = "audio" }, parameters = { volume = {} } }, load = "std.gain", map = { x = "in", y = "out", volume = "db" }, volume = -6, snapshot_exclude = ["volume"] }"#,
+    );
+    plans(&text).unwrap();
+    let (renamed, patched) = round_trip(
+        &text,
+        &[op(
+            serde_json::json!({"op": "slot.interface", "slot": "fx", "rename": {"volume": "amount"}}),
+        )],
+    );
+    assert!(
+        renamed.contains("snapshot_exclude = [\"amount\"]"),
+        "{renamed}"
+    );
+    assert!(renamed.contains("amount = -6"), "{renamed}");
+    assert!(patched.removed.is_empty());
+    plans(&renamed).unwrap();
+    let (removed, patched) = round_trip(
+        &text,
+        &[op(
+            serde_json::json!({"op": "slot.interface", "slot": "fx", "remove": ["volume"]}),
+        )],
+    );
+    assert!(!removed.contains("snapshot_exclude"), "{removed}");
+    assert_eq!(patched.removed, ["fx.volume"]);
+    plans(&removed).unwrap();
+    let wrong = text.replace(
+        r#"snapshot_exclude = ["volume"]"#,
+        r#"snapshot_exclude = ["db"]"#,
+    );
+    let error = plans(&wrong).unwrap_err();
+    assert!(
+        error.contains("no parameter of the slot's interface"),
+        "{error}"
+    );
+}
+
+const COMMENTED: &str = r#"schema_version = 1
+
+[project]
+name = "commented"
+sample_rate = 48000
+
+[instances]
+osc = { module = "std.sine_osc" }
+out = { module = "std.audio_out" }
+
+[instances.bus]
+# what it plays
+load = "std.gain"  # for now
+# how it maps
+map = { x = "in" }
+seed_note = 1
+
+[instances.bus.slot]
+inputs = { x = "audio" }
+outputs = { out = "audio" }
+
+[wiring]
+connections = [
+  { from = "osc.out", to = "bus.x" },
+]
+"#;
+
+/// A key removed from a section takes its comment lines and trailing
+/// comment with it, and its undo puts them back byte for byte.
+#[test]
+fn a_removed_key_s_comments_come_back_with_its_undo() {
+    let text = COMMENTED.replace("seed_note = 1\n", "");
+    plans(&text).unwrap();
+    let (unloaded, _) = round_trip(
+        &text,
+        &[op(serde_json::json!({"op": "slot.unload", "slot": "bus"}))],
+    );
+    assert!(
+        !unloaded.contains("what it plays") && !unloaded.contains("for now"),
+        "{unloaded}"
+    );
+    assert!(
+        unloaded.contains("# how it maps\nmap = { x = \"in\" }"),
+        "{unloaded}"
+    );
+    let (unmapped, _) = round_trip(
+        &text,
+        &[op(
+            serde_json::json!({"op": "slot.map", "slot": "bus", "map": {}}),
+        )],
+    );
+    assert!(
+        unmapped.contains("load = \"std.gain\"  # for now\n\n[instances.bus.slot]"),
+        "{unmapped}"
+    );
+}
+
+/// A restore that makes the tables it writes into removes them again on
+/// its undo: no empty table is left.
+#[test]
+fn a_restore_s_undo_removes_the_tables_it_made() {
+    let text = HOST.replace(r#", map = { x = "in", y = "out" }"#, "");
+    assert!(!text.contains("map ="));
+    let (written, _) = round_trip(
+        &text,
+        &[op(
+            serde_json::json!({"op": "slot.restore", "slot": "fx", "changes": [
+                {"path": ["map", "x"], "value": "\"in\""},
+                {"path": ["slot", "parameters", "gain"], "value": "{}"},
+            ]}),
+        )],
+    );
+    assert!(written.contains("map = { x = \"in\" }"), "{written}");
+    // The round trip checked the undo byte for byte: no `map = {}` stays.
 }

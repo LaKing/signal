@@ -401,3 +401,80 @@ both!(
     interface_edits_rewrite_wires_and_bindings,
     bindings_reach_through_the_match,
 );
+
+/// Two renames in one patch (`y` → `wet`, then `wet` → `y`) leave the
+/// panel's bindings as they were; the snapshots' values of a renamed slot
+/// parameter move to its new address and a removed one's go, the undo
+/// snapshot's too (ADR 0041), and a slot control can be left out of
+/// snapshots (`snapshot.exclude`).
+fn renames_chain_and_snapshots_follow(transport: Transport) {
+    let mut rig = slots("slot-chain", transport);
+    let (mut ws, _) = rig.client();
+    let panel = rig.dir.join("ui/main.html");
+    patch(
+        &mut rig,
+        &mut ws,
+        1,
+        json!([
+            {"op": "slot.interface", "slot": "fx", "rename": {"y": "wet"}},
+            {"op": "slot.interface", "slot": "fx", "rename": {"wet": "y"}}
+        ]),
+    );
+    assert_eq!(fs::read_to_string(&panel).unwrap(), PANEL);
+    assert_eq!(
+        fs::read_to_string(rig.dir.join("project.toml")).unwrap(),
+        HOST
+    );
+
+    let snapshots = rig.dir.join("snapshots.toml");
+    let mut all = signal_project::snapshot::Snapshots::default();
+    let values: signal_project::snapshot::Values = [
+        ("/fx.volume".to_owned(), -6.0),
+        ("/out.gain".to_owned(), 0.5),
+    ]
+    .into();
+    all.snapshots.insert("a".to_owned(), values.clone());
+    all.undo = Some(values);
+    fs::write(&snapshots, signal_project::snapshot::render(&all)).unwrap();
+    let renamed = patch(
+        &mut rig,
+        &mut ws,
+        3,
+        json!([{"op": "slot.interface", "slot": "fx", "rename": {"volume": "amount"}}]),
+    );
+    assert_eq!(renamed["snapshots"], "snapshots.toml", "{renamed}");
+    let text = fs::read_to_string(&snapshots).unwrap();
+    assert!(
+        !text.contains("/fx.volume") && text.matches("\"/fx.amount\" = -6").count() == 2,
+        "{text}"
+    );
+    rig.wait(&mut ws, "the reload", |got| got.of("reload").cloned());
+    // The slot's control is left out of snapshots, by its interface name.
+    rig.request(
+        &mut ws,
+        5,
+        json!({"type": "snapshot.exclude", "address": "/fx.amount", "exclude": true}),
+        "snapshot.excluded",
+    );
+    assert!(
+        fs::read_to_string(rig.dir.join("project.toml"))
+            .unwrap()
+            .contains("snapshot_exclude = [\"amount\"]")
+    );
+    patch(
+        &mut rig,
+        &mut ws,
+        6,
+        json!([{"op": "slot.interface", "slot": "fx", "remove": ["amount"]}]),
+    );
+    let text = fs::read_to_string(&snapshots).unwrap();
+    assert!(
+        !text.contains("/fx.") && text.contains("/out.gain"),
+        "{text}"
+    );
+    let project = fs::read_to_string(rig.dir.join("project.toml")).unwrap();
+    assert!(!project.contains("snapshot_exclude"), "{project}");
+    rig.finish();
+}
+
+both!(renames_chain_and_snapshots_follow);

@@ -1890,7 +1890,12 @@ fn patch_tool(context: &Context, arguments: &Value) -> Outcome {
 /// (`slot.add`, `slot.load`, `slot.restore` writing `load`) lies inside a
 /// folder this server may load from (`--load-root`, the project's own).
 fn loads_allowed(context: &Context, ops: &[Op]) -> Result<(), Refused> {
-    let loads = patch::loads_of(ops);
+    projects_allowed(context, patch::loads_of(ops))
+}
+
+/// Every project path of `loads` lies inside a folder this server may load
+/// a project from (`--load-root`, the project's own).
+fn projects_allowed(context: &Context, loads: Vec<String>) -> Result<(), Refused> {
     for load in loads {
         let is_project = load.contains('/') || load.ends_with(".signal");
         if !is_project {
@@ -2009,7 +2014,7 @@ fn slot_op(context: &Context, arguments: &Value, mut op: Value) -> Outcome {
         .map(str::to_owned);
     if let (Some(fields), Some(given)) = (op.as_object_mut(), arguments.as_object()) {
         for (key, value) in given {
-            if key != "level" && key != "base" {
+            if key != "level" && key != "base" && key != "op" {
                 fields.insert(key.clone(), value.clone());
             }
         }
@@ -2145,7 +2150,21 @@ fn write_file(context: &Context, arguments: &Value) -> Outcome {
             "ui/ files are written with write_panel (a panel's <signal-panel> content) or schematic_move (positions)",
         ));
     }
-    guard_files(context, replaced(sources(context)?, file, text))?;
+    let files = sources(context)?;
+    // ADR 0037 §7 ("Safety"): a project the text includes or loads into a
+    // slot lies inside the folders this server may load from, as for a slot
+    // op; one the file already names (the person's) is left as it is.
+    let before = files
+        .iter()
+        .find(|f| f.path == file)
+        .map(|f| patch::projects_in(&f.text))
+        .unwrap_or_default();
+    let new = patch::projects_in(text)
+        .into_iter()
+        .filter(|p| !before.contains(p))
+        .collect();
+    projects_allowed(context, new)?;
+    guard_files(context, replaced(files, file, text))?;
     let reply = ask(
         context,
         json!({"type": "file.write", "file": file, "text": text, "base": arguments["base"]}),

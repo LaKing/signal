@@ -391,6 +391,9 @@ pub struct Patched {
     /// ADR 0037 §2: the slot ports renamed, `slot.old` → `slot.new` at the
     /// level, in order: the caller rewrites the panel bindings on them.
     pub renamed: Vec<(String, String)>,
+    /// ADR 0037 §2: the slot ports and parameters removed, `slot.port` at
+    /// the level: the caller removes their snapshots' values (ADR 0041).
+    pub removed: Vec<String>,
 }
 
 /// Applies `ops` in order to `text` (the level file) and `positions`
@@ -409,6 +412,7 @@ pub fn apply(
         ctx,
         notes: Vec::new(),
         renamed: Vec::new(),
+        removed: Vec::new(),
     };
     map(&patch.text, &Scheme::LEVEL).map_err(|e| refused("does-not-load", e))?;
     let mut inverse = Vec::new();
@@ -423,6 +427,7 @@ pub fn apply(
         inverse,
         notes: patch.notes,
         renamed: patch.renamed,
+        removed: patch.removed,
     })
 }
 
@@ -1415,6 +1420,7 @@ struct Patching<'a> {
     ctx: &'a Context<'a>,
     notes: Vec<String>,
     renamed: Vec<(String, String)>,
+    removed: Vec<String>,
 }
 
 fn valid_name(name: &str) -> bool {
@@ -1990,6 +1996,32 @@ pub fn loads_of(ops: &[Op]) -> Vec<String> {
         }
     }
     loads
+}
+
+/// ADR 0037 §7: the projects the instances of `text` (a `project.toml` or a
+/// composite's file) include (`project = "…"`) or load into slots (`load`
+/// of an entry with `slot`, when it is a project path), as written.
+pub fn projects_in(text: &str) -> Vec<String> {
+    let Ok(table) = toml::from_str::<toml::Table>(text) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    let entries = table.get("instances").and_then(toml::Value::as_table);
+    for entry in entries.into_iter().flat_map(|t| t.values()) {
+        let Some(entry) = entry.as_table() else {
+            continue;
+        };
+        if let Some(project) = entry.get("project").and_then(toml::Value::as_str) {
+            found.push(project.to_owned());
+        }
+        if entry.get("slot").is_some()
+            && let Some(load) = entry.get("load").and_then(toml::Value::as_str)
+            && crate::is_project_path(load)
+        {
+            found.push(load.to_owned());
+        }
+    }
+    found
 }
 
 /// The instance names `ops` remove.

@@ -1105,24 +1105,36 @@ pub fn panel_files(ui: &Path) -> std::io::Result<Vec<PathBuf>> {
 /// address written with character references is left alone); `None` when
 /// nothing changes. Every other byte stays.
 pub fn rewrite_bindings(text: &str, renames: &[(String, String)]) -> Option<String> {
-    let mut edits: Vec<(usize, usize, &str)> = Vec::new();
+    // In order: a rename of a rename (`x` → `z`, then `z` → `w`, or back)
+    // takes the address where the one before left it.
+    let mut out = text.to_owned();
+    let mut changed = false;
+    for (old, new) in renames {
+        if let Some(next) = rewrite_one(&out, old, new) {
+            out = next;
+            changed = true;
+        }
+    }
+    changed.then_some(out)
+}
+
+/// `text` with every `bind` address equal to `old` spelt `new`.
+fn rewrite_one(text: &str, old: &str, new: &str) -> Option<String> {
+    let mut edits: Vec<(usize, usize)> = Vec::new();
     for element in elements(text) {
         for (address, offset) in element.addresses() {
-            let Some((_, new)) = renames.iter().find(|(old, _)| old == address) else {
-                continue;
-            };
-            if text.get(offset..offset + address.len()) == Some(address) {
-                edits.push((offset, offset + address.len(), new));
+            if address == old && text.get(offset..offset + address.len()) == Some(address) {
+                edits.push((offset, offset + address.len()));
             }
         }
     }
     if edits.is_empty() {
         return None;
     }
-    edits.sort_by_key(|(start, ..)| *start);
+    edits.sort_unstable();
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
-    for (start, end, new) in edits {
+    for (start, end) in edits {
         if start < at {
             continue;
         }

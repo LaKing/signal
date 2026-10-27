@@ -75,6 +75,7 @@ pub use schema::schema;
 pub use slot::{
     ContentNames, ContentPort, Interface, InterfacePort, LibraryInterface, Match, Role,
     SlotResolution, content_names, interface_templates, library_interfaces, library_template,
+    project_content,
 };
 pub use structure::{library_modules, library_parameters, modules_without_inside};
 pub use write::{
@@ -923,19 +924,57 @@ impl Project {
         registry: &Registry,
         errors: &mut Vec<Diagnostic>,
     ) {
-        for instance in &self.root.instances {
-            let Some(spans) = self.spans.root.instances.get(&instance.name) else {
-                continue;
-            };
+        for (instance_name, spans) in &self.spans.root.instances {
             if spans.snapshot_exclude.is_empty() {
                 continue;
             }
-            // A module that does not resolve is reported where it is written.
-            let Ok(ports) = signal_graph::ports_of(&instance.module, defs, registry) else {
-                continue;
+            // ADR 0037 §7: a slot's controls are its interface's parameters,
+            // by their names, loaded or not (an interface that does not
+            // resolve is reported where it is written).
+            let slot = self
+                .spans
+                .root
+                .contents
+                .get(instance_name)
+                .and_then(|c| c.slot.as_ref());
+            let names: Vec<String> = match slot {
+                Some(slot) => match &slot.interface {
+                    Some(interface) => interface
+                        .ports
+                        .iter()
+                        .filter(|p| p.role == slot::Role::Parameter)
+                        .map(|p| p.name.clone())
+                        .collect(),
+                    None => continue,
+                },
+                None => {
+                    let Some(instance) = self
+                        .root
+                        .instances
+                        .iter()
+                        .find(|i| i.name == *instance_name)
+                    else {
+                        continue;
+                    };
+                    // A module that does not resolve is reported where it is written.
+                    let Ok(ports) = signal_graph::ports_of(&instance.module, defs, registry) else {
+                        continue;
+                    };
+                    ports
+                        .into_iter()
+                        .filter(|p| p.parameter)
+                        .map(|p| p.name)
+                        .collect()
+                }
             };
+            let module = self
+                .root
+                .instances
+                .iter()
+                .find(|i| i.name == *instance_name)
+                .map_or("", |i| i.module.as_str());
             for (name, span) in &spans.snapshot_exclude {
-                if !ports.iter().any(|p| p.parameter && p.name == *name) {
+                if !names.contains(name) {
                     let location = locate::Location {
                         file: self.spans.root.file,
                         offset: span.start,
@@ -944,14 +983,15 @@ impl Project {
                         Severity::Error,
                         location,
                         format!(
-                            "{}: `snapshot_exclude` names `{name}`, which is no parameter of {}",
-                            instance.name,
-                            // An include's or a slot's content is planned under a
-                            // qualified name (`<project id>/<name>`), no name to show.
-                            if instance.module.is_empty() || instance.module.contains('/') {
-                                "its content (the project or slot it holds)".to_owned()
+                            "{instance_name}: `snapshot_exclude` names `{name}`, which is no parameter of {}",
+                            // An include's content is planned under a qualified
+                            // name (`<project id>/<name>`), no name to show.
+                            if slot.is_some() {
+                                "the slot's interface".to_owned()
+                            } else if module.is_empty() || module.contains('/') {
+                                "its content (the project it holds)".to_owned()
                             } else {
-                                format!("`{}`", instance.module)
+                                format!("`{module}`")
                             }
                         ),
                     );

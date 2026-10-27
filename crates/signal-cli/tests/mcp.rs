@@ -1415,6 +1415,34 @@ fn the_slot_tools_add_edit_load_and_unload_a_slot() {
     assert!(refusal.contains("osc.out → fx.input"), "{refusal}");
     mcp.ok("slot_unload", json!({"slot": "fx"}));
     assert!(!mcp.file("project.toml").contains("load = \"std.gain\""));
+    // The same project named in written text: refused alike, an `op` of the
+    // arguments never taken for the tool's own.
+    let text = mcp.file("project.toml");
+    let base = mcp.ok("read_file", json!({"file": "project.toml"}))["base"].clone();
+    for load in ["../beside", "/tmp"] {
+        let written = text.replace(
+            "fx = { slot",
+            &format!("other = {{ project = \"{load}\" }}\nfx = {{ slot"),
+        );
+        let refusal = mcp.refused(
+            "write_file",
+            json!({"file": "project.toml", "text": written, "base": base}),
+        );
+        assert!(
+            refusal.contains("--load-root") || refusal.contains("no project folder"),
+            "{refusal}"
+        );
+    }
+    let refusal = mcp.refused(
+        "slot_unload",
+        json!({"slot": "fx", "op": "instance.remove"}),
+    );
+    assert!(
+        refusal.contains("no field `op`"),
+        "an `op` argument is refused: {refusal}"
+    );
+    assert!(mcp.file("project.toml").contains("fx = "));
+
     // A project beside this one: outside the project's folder.
     let outside = mcp.refused("slot_load", json!({"slot": "fx", "load": "../beside"}));
     assert!(outside.contains("--load-root"), "{outside}");
