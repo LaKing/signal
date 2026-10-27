@@ -17,6 +17,7 @@ Options:
 - `--out <dir>`: where renders and sessions go. The default is a folder of its own under the system's temporary folder. It is never inside the project.
 - `--device`, `--buffer`, `--threads`: as for `signal ui`.
 - `--fast`: runs the null driver as fast as it goes, for tests.
+- `--load-root <dir>` (repeatable; ADR 0037 §7): a folder inside which a slot op may load a project. The project's own folder always is one; a project anywhere else (`../studio`) needs its folder, or one around it, named ("Safety").
 - `signal mcp --help` lists every option.
 
 The server ends when its stdin closes (the MCP shutdown). stdout carries protocol frames only, one JSON-RPC message per line; logs go to stderr.
@@ -93,7 +94,7 @@ Addresses are as in the UI protocol: `/instance` or `/composite/inner`, and port
 | `graph` | `level?` (`""`, a composite) | `graph` as written (instances, ports, parameters, connections with converters, composites, positions, `files`); with `level`, that level only |
 | `modules` | `category?`, `query?` | `primitives` and `composites` (the project's, then `lib.*`) as the schematic's Add module browser lists them, filtered, without a composite's `inside` (the browser's schematic preview; `graph` reads a level) |
 | `describe_instance` | `address` | the plan instances at or inside it, its controls, its `graph` entry |
-| `read_file` | `file` | `project.toml`, `composites/<name>.toml` (`file.read`), `patterns/<name>.toml` (`pattern.read`, with `kind`), `ui/<name>.html` (`panel.read`, with the `<signal-panel>` `html`), `ui/schematic.toml`: `{exists, base, text}` |
+| `read_file` | `file` | `project.toml`, `composites/<name>.toml`, `interfaces/<name>.toml` (`file.read`), `patterns/<name>.toml` (`pattern.read`, with `kind`), `ui/<name>.html` (`panel.read`, with the `<signal-panel>` `html`), `ui/schematic.toml`: `{exists, base, text}` |
 | `snapshot_list` | — | `snapshot.list`: `base` (the SHA-256 of `snapshots.toml`, null without one), `snapshots`, each `{name, count, values}`, and the undo snapshot apart: `undo` (whether there is one), `undoCount`, `undoValues` (ADR 0041) |
 | `stats` | — | `stats` (frame, clients, drops, overflows, clipped, `ceiling` and `ceilinged`: the output ceiling and the device samples it held, writes) |
 
@@ -121,7 +122,12 @@ Addresses are as in the UI protocol: `/instance` or `/composite/inner`, and port
 
 | Tool | Arguments | Does |
 |---|---|---|
-| `patch` | `ops`, `level?` (`""`), `base?` (default: the file's current one) | `patch` with the schematic's ops: `instance.add` {name, module, params?, x?, y?}, `instance.remove` {name}, `connection.add` {from, to, scale?}, `connection.remove` {from, to}, `connection.scale` {from, to, scale}; the reply's `inverse` undoes it |
+| `patch` | `ops`, `level?` (`""`), `base?` (default: the file's current one) | `patch` with the schematic's ops: `instance.add` {name, module, params?, x?, y?}, `instance.remove` {name}, `connection.add` {from, to, scale?}, `connection.remove` {from, to}, `connection.scale` {from, to, scale}, and the slot ops `slot.add`, `slot.load`, `slot.unload`, `slot.map`, `slot.interface` (as the tools below); the reply's `inverse` undoes it |
+| `slot_add` | `name`, `slot?`, `load?`, `x?`, `y?`, `level?`, `base?` | ADR 0037: a slot, `slot` a template's name (`"lib.voice"`, `"lib.instrument"`, `"lib.deck"`, or `"<name>"` of `interfaces/<name>.toml`) or an interface table `{inputs, outputs, parameters, from?, remove?}` (absent: `{}`), `load` its content (`patch` `slot.add`) |
+| `slot_load` | `slot`, `load`, `map?`, `set?`, `level?`, `base?` | Loads content into the slot, or replaces what it holds (`slot.load`): without `map`/`set` the slot keeps the entries the new content accepts and the rest are removed, which the reply's `notes` (and the summary) say. Until ADR 0037 phase 2 a Load or Replace is one structural edit (added instances fade in, removed ones out; no unload-then-load) |
+| `slot_unload` | `slot`, `level?`, `base?` | Empties the slot (`slot.unload`: `load` and a project's `seed` removed, `map` and `set` kept); its wires stay and read 0 |
+| `slot_map` | `slot`, `map`, `level?`, `base?` | Writes the slot's `map` (`slot.map`: port → content name or `false`; `{}` removes it) |
+| `slot_interface` | `slot`, `add?`, `remove?`, `rename?`, `retype?`, `removeWires?`, `detach?`, `template?`, `level?`, `base?` | Edits the slot's interface (`slot.interface`): `add` [{name, role, shape?, rate?, kind?, unit?, range?, group?}], `remove` (a wired port is refused, naming the wires, unless `removeWires`), `rename` {old: new} (the level's wires, exports, `map` keys and the panels' bindings follow; the reply's `panels` names the panels rewritten), `retype`; alone, `detach` or `template` |
 | `schematic_move` | `instance`, `x`, `y`, or `moves`; `level?` | `schematic.move` (positions only) |
 | `vendor` | `composite` (`lib.<name>`), `as?` | `vendor`: copies it, and the library composites it uses, into `composites/` (`signal vendor`) |
 
@@ -131,7 +137,7 @@ Addresses are as in the UI protocol: `/instance` or `/composite/inner`, and port
 |---|---|---|
 | `write_pattern` | `name`, `text`, `base` (null: a new pattern) | `pattern.write` |
 | `write_panel` | `html`, `base`, `file?` (`main.html`) | `panel.write`: the `<signal-panel>` content, within the panel whitelist |
-| `write_file` | `file`, `text`, `base` | `project.toml` and `composites/<name>.toml`: `file.write`; `patterns/<name>.toml`: `pattern.write`. Panels and positions have their own tools |
+| `write_file` | `file`, `text`, `base` | `project.toml`, `composites/<name>.toml` and `interfaces/<name>.toml` (a slot interface template, ADR 0037 §3): `file.write`; `patterns/<name>.toml`: `pattern.write`. Panels and positions have their own tools |
 
 Every write is checked the way a reload would load it, and is written atomically, never through a link, and only when the file is still the version `base` names, checked and written under the project's writer lock so that another Signal or `signal mcp` process on the same project cannot write in between (ADR 0040). Otherwise the refusal is a `conflict` carrying the current `base` and `text`. The watch then applies the file live.
 
@@ -217,6 +223,7 @@ The session tools are offered only without `--attach`: a recording covers one ru
 - **Attached** (`--attach`), the running server's output is its own: `signal mcp` sets no output ceiling there, and only the parameter guard applies. Every guard, `write_panel`, `schematic_move` and `transport` first check that the server still plays the folder named (`graph.projectId`; Signal.app can open another project meanwhile) and refuse otherwise.
 - **Changes outside `signal mcp`.** The guard covers what this server's tools do. An agent that also edits the project's files with tools of its own (a file editor) changes them as a person would: the watch applies those edits live and no guard sees them. The output ceiling of an in-process `signal mcp` still holds the device output.
 - **The person's files** change only through the UI protocol's write paths: `commit`, `patch`, `schematic.*`, `panel.write`, `pattern.write`, `file.write`, `vendor` and `snapshot.*` (ADR 0041: `snapshots.toml`, and a restore's `project.toml` as `commit` writes it). Each checks the base, writes atomically, never writes through a link and validates before writing. `file.write` and `vendor` were added for this interface by the operator's decision of 2026-10-18: `file.write` uses `patch`'s helpers, and `vendor` uses `signal vendor`'s writer with the host's checks. Renders, sessions and replays are written only under `--out`.
+- **Slot loads** (ADR 0037 §7). A project that a slot op (`slot_add`, `slot_load`, or `patch` with `slot.add`, `slot.load` or a `slot.restore` of `load`) would load must lie inside the project's own folder or a folder named by `--load-root`: anything else is refused before anything is sent, naming the option (the operator's choice: nothing outside the project by default). A module reference is not a path and is not checked here. The slot ops are patches, so the gain guard judges them as any patch (a content loaded into a slot wired to a gain is a new source of modulation, refused under R2 below `--max-gain 4`).
 - **`--read-only`** offers only the inspect, observe and render tools: `project_info`, `graph`, `modules`, `describe_instance`, `read_file`, `snapshot_list`, `stats`, `meter`, `scope`, `read_stream`, `render`.
 - **The engine's rules are unchanged**: real-time rules, the magnitude bound, determinism. The agent reaches the audio thread only through the messages a panel sends.
 
@@ -231,7 +238,8 @@ The session tools are offered only without `--attach`: a recording covers one ru
 ## Tests
 
 - `crates/signal-cli/tests/mcp.rs`: conformance in both eras, one test per tool (the eight snapshot tools in `snapshots`), read-only mode, `--help`, the AC11 session on a copy of `projects/studio`, and `attach_to_a_running_signal_ui` (loopback).
-- `crates/signal-cli/tests/mcp_gain.rs`: the gain guard, each path and each rule; failing closed when the files do not load; restarts; the device output held at the ceiling after a ×20 patch.
+- `crates/signal-cli/tests/mcp.rs` `the_slot_tools_add_edit_load_and_unload_a_slot` (ADR 0037 phase 3): the slot tools' text, a rename following the wire, a wired port's removal refused, a project outside the folder refused until `--load-root`.
+- `crates/signal-cli/tests/mcp_gain.rs`: the gain guard, each path and each rule (a slot load into a gain's fan-in, `a_slot_load_into_a_gain_s_fan_in_is_guarded`); failing closed when the files do not load; restarts; the device output held at the ceiling after a ×20 patch.
 - `crates/signal-cli/src/mcp/` unit tests: the rules, attach URLs, the result cap, the project identity.
 - `crates/signal-output/tests/ceiling.rs`: the output ceiling at the adapter (null driver), its meters and counts, renders never held; `crates/signal-audio/tests/no_allocation.rs`: the callback with a ceiling allocates nothing.
 - `crates/signal-cli/src/drive.rs`: `--seconds` after a client's stop.
