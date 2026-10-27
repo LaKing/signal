@@ -26,27 +26,30 @@ export const BROWSER_CSS = `
 dialog.browser { box-sizing: border-box; width: calc(100vw - 24px); height: calc(100vh - 24px); max-width: none; max-height: none; margin: 12px; padding: 0;
   color: var(--signal-fg, #d6dbe4); background: var(--signal-bg, #16181d); border: 1px solid var(--signal-focus, #5aa9ff); border-radius: var(--signal-radius, 6px);
   font: var(--signal-font, 11px/1.3 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif); overflow: hidden; }
-dialog.browser[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+/* One column no wider than the dialog: a row's min-content (a long name, a wide preview) never widens the header past the frame. */
+dialog.browser[open] { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; }
 dialog.browser::backdrop { background: var(--signal-backdrop, rgba(0, 0, 0, 0.5)); }
 .browser input { font: inherit; color: inherit; background: var(--signal-bg, #16181d); border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 3px; padding: 3px 6px; box-sizing: border-box; min-width: 0; }
-.browser .head, .browser .foot { display: flex; gap: 8px; align-items: center; padding: 8px 12px; background: var(--signal-panel, #1f232b); min-width: 0; }
-.browser .head { border-bottom: 1px solid var(--signal-knob-edge, #3a414d); }
-.browser .foot { border-top: 1px solid var(--signal-knob-edge, #3a414d); flex-wrap: wrap; }
-.browser .head h2 { flex: none; margin: 0; font-size: 13px; font-weight: 600; white-space: nowrap; }
-.browser .head .where { flex: none; max-width: 16rem; color: var(--signal-muted, #8a93a3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.browser .head .search { flex: 1; }
-.browser .head .count { flex: none; width: 14ch; text-align: right; color: var(--signal-muted, #8a93a3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.browser .browser-head, .browser .browser-foot { box-sizing: border-box; display: flex; gap: 8px; align-items: center; padding: 8px 12px; background: var(--signal-panel, #1f232b); min-width: 0; }
+.browser .browser-head { flex-wrap: nowrap; border-bottom: 1px solid var(--signal-knob-edge, #3a414d); }
+.browser .browser-foot { border-top: 1px solid var(--signal-knob-edge, #3a414d); flex-wrap: wrap; }
+.browser .browser-head h2 { flex: none; margin: 0; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.browser .browser-head .where { flex: none; max-width: 16rem; color: var(--signal-muted, #8a93a3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The search takes the room left, from a basis of 0: never its intrinsic width (an input's own size), so it never pushes past the frame; WebKit's searchfield look would ignore the padding and border. */
+.browser .browser-head .search { flex: 1 1 0; width: 0; min-width: 6rem; max-width: 100%; -webkit-appearance: none; appearance: none; }
+.browser .browser-head .count { flex: none; width: 14ch; text-align: right; color: var(--signal-muted, #8a93a3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .browser .panes { display: grid; grid-template-columns: minmax(14rem, 24rem) minmax(0, 1fr); min-height: 0; }
 .browser .tree { list-style: none; margin: 0; padding: 4px; overflow: auto; min-height: 0; border-right: 1px solid var(--signal-knob-edge, #3a414d); background: var(--signal-panel, #1f232b); }
-.browser .tree li { display: flex; gap: 0.5ch; align-items: baseline; height: 1.7em; line-height: 1.7em; padding-right: 6px; border-radius: 3px; cursor: pointer; white-space: nowrap; overflow: hidden; }
+/* The rows share the host's shadow root, whose classes (\`.entry\`, the value field's: absolute, inset 0) must never reach them: their classes are the browser's own (\`tree-*\`), and what places them is reset here. */
+.browser .tree li { position: static; inset: auto; box-sizing: border-box; width: auto; margin: 0; border: 0; background: none; display: flex; gap: 0.5ch; align-items: baseline; height: 1.7em; line-height: 1.7em; padding-right: 6px; border-radius: 3px; cursor: pointer; white-space: nowrap; overflow: hidden; }
 .browser .tree li .twisty { flex: none; width: 1.2em; text-align: center; color: var(--signal-muted, #8a93a3); }
-.browser .tree li .label { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.browser .tree li .tree-label { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .browser .tree li .what { flex: 1; min-width: 0; color: var(--signal-muted, #8a93a3); overflow: hidden; text-overflow: ellipsis; }
 .browser .tree li .n { flex: none; margin-left: auto; color: var(--signal-muted, #8a93a3); font-variant-numeric: tabular-nums; }
-.browser .tree li.source { font-weight: 600; }
-.browser .tree li.category .label { color: var(--signal-muted, #8a93a3); text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.92em; font-weight: 600; }
+.browser .tree li.tree-source { font-weight: 600; }
+.browser .tree li.tree-category .tree-label { color: var(--signal-muted, #8a93a3); text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.92em; font-weight: 600; }
 .browser .tree li[aria-selected="true"] { background: var(--signal-knob, #262b34); color: var(--signal-accent, #4fc3f7); outline: 1px solid var(--signal-focus, #5aa9ff); outline-offset: -1px; }
-.browser .tree li[aria-selected="true"] .label { color: var(--signal-accent, #4fc3f7); }
+.browser .tree li[aria-selected="true"] .tree-label { color: var(--signal-accent, #4fc3f7); }
 .browser .tree .empty { color: var(--signal-muted, #8a93a3); padding: 8px; cursor: default; }
 .browser .failed { color: var(--signal-effective, #ffb74d); white-space: pre-wrap; overflow-wrap: anywhere; }
 .browser .detail { overflow: auto; min-height: 0; min-width: 0; padding: 12px 16px 16px; }
@@ -60,26 +63,26 @@ dialog.browser::backdrop { background: var(--signal-backdrop, rgba(0, 0, 0, 0.5)
 .browser table { border-collapse: collapse; font-variant-numeric: tabular-nums; width: 100%; }
 .browser th, .browser td { text-align: left; vertical-align: top; padding: 3px 12px 3px 0; border-bottom: 1px solid var(--signal-track, #2a2f38); overflow-wrap: anywhere; }
 .browser th { color: var(--signal-muted, #8a93a3); font-weight: 600; }
-.browser td.name { font-weight: 600; }
+.browser td.col-name { font-weight: 600; }
 .browser td ul { list-style: none; margin: 0; padding: 0; }
 .browser td.muted, .browser .detail .none-row { color: var(--signal-muted, #8a93a3); }
 .browser .previews { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
 .browser .preview { flex: 1 1 22rem; min-width: 0; max-width: 100%; }
 .browser .preview .frame-box { border: 1px dashed var(--signal-knob-edge, #3a414d); border-radius: var(--signal-radius, 6px); padding: 8px; overflow: hidden; background: var(--signal-bg, #16181d); }
-.browser .preview .note { color: var(--signal-muted, #8a93a3); margin-top: 4px; }
+.browser .preview .preview-note { color: var(--signal-muted, #8a93a3); margin-top: 4px; }
 .browser .preview .generated section { border-radius: 10px; background: var(--signal-panel, #1f232b); }
 .browser .preview .inert { pointer-events: none; user-select: none; -webkit-user-select: none; }
 .browser svg.preview-svg { position: static; inset: auto; display: block; width: 100%; height: auto; touch-action: auto; }
-.browser .foot label { display: flex; gap: 6px; align-items: center; }
-.browser .foot label[hidden] { display: none; }
-.browser .foot .instance-name { width: 16rem; max-width: 50vw; }
-.browser .foot .why { flex: 1; min-width: 8rem; color: var(--signal-effective, #ffb74d); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.browser .foot .buttons { display: flex; gap: 6px; margin-left: auto; }
-.browser .foot button.add { border-color: var(--signal-focus, #5aa9ff); }
+.browser .browser-foot label { display: flex; gap: 6px; align-items: center; }
+.browser .browser-foot label[hidden] { display: none; }
+.browser .browser-foot .instance-name { width: 16rem; max-width: 50vw; }
+.browser .browser-foot .why { flex: 1; min-width: 8rem; color: var(--signal-effective, #ffb74d); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.browser .browser-foot .browser-buttons { display: flex; gap: 6px; margin-left: auto; }
+.browser .browser-foot button.add { border-color: var(--signal-focus, #5aa9ff); }
 @media (max-width: 720px) {
   .browser .panes { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(7rem, 38%) minmax(0, 1fr); }
   .browser .tree { border-right: none; border-bottom: 1px solid var(--signal-knob-edge, #3a414d); }
-  .browser .head .where, .browser .head .count { display: none; }
+  .browser .browser-head .where, .browser .browser-head .count { display: none; }
 }
 ${GENERATED_CSS}
 `;
@@ -120,7 +123,7 @@ function table(rows, columns) {
       {},
       columns.map(([key]) => {
         const value = row[key];
-        const cell = html('td', { className: key });
+        const cell = html('td', { className: `col-${key}` });
         if (Array.isArray(value)) cell.append(html('ul', {}, value.map((line) => html('li', { textContent: line }))));
         else cell.textContent = value;
         if (value === '—') cell.classList.add('muted');
@@ -171,7 +174,7 @@ export class ModuleBrowser {
     this.search.setAttribute('aria-label', 'Search modules');
     this.count = html('span', { className: 'count' });
     this.heading = html('h2', { textContent: loading ? 'Load into slot' : 'Add module' });
-    const head = html('div', { className: 'head' }, [this.heading, this.where, this.search, this.count]);
+    const head = html('div', { className: 'browser-head' }, [this.heading, this.where, this.search, this.count]);
     this.list = html('ul', { className: 'tree', id: 'module-tree' });
     this.list.setAttribute('role', 'tree');
     this.list.setAttribute('aria-label', 'Module types by source and category');
@@ -185,10 +188,10 @@ export class ModuleBrowser {
     this.addButton = html('button', { type: 'button', className: 'add', textContent: loading ? 'Load' : 'Add' });
     this.unmatchedBox = html('input', { type: 'checkbox', className: 'add-unmatched' });
     this.unmatchedLabel = html('label', { className: 'unmatched' }, [this.unmatchedBox, document.createTextNode('Add its unmatched ports to the slot')]);
-    const foot = html('div', { className: 'foot' }, [
+    const foot = html('div', { className: 'browser-foot' }, [
       loading ? this.unmatchedLabel : html('label', {}, [document.createTextNode('Name'), this.name]),
       this.why,
-      html('span', { className: 'buttons' }, [cancel, this.addButton]),
+      html('span', { className: 'browser-buttons' }, [cancel, this.addButton]),
     ]);
     dialog.append(head, panes, foot);
     this.list.addEventListener('click', (event) => this.clicked(event));
@@ -354,7 +357,7 @@ export class ModuleBrowser {
   }
 
   rowItem(r, index) {
-    const item = html('li', { className: r.kind, id: `module-row-${index}` });
+    const item = html('li', { className: `tree-${r.kind}`, id: `module-row-${index}` });
     item.setAttribute('role', 'treeitem');
     item.setAttribute('aria-level', String(r.depth + 1));
     item.style.paddingLeft = `${4 + r.depth * 16}px`;
@@ -363,10 +366,10 @@ export class ModuleBrowser {
       item.title = r.entry.description ?? r.entry.module;
       const match = this.mode === 'load' && this.matchOf ? this.matchOf(r.entry) : null;
       const what = match ? `${match.matched}/${match.total} match · ${summary(r.entry.description)}` : summary(r.entry.description);
-      item.append(html('span', { className: 'twisty' }), html('span', { className: 'label', textContent: r.entry.module }), html('span', { className: 'what', textContent: what }));
+      item.append(html('span', { className: 'twisty' }), html('span', { className: 'tree-label', textContent: r.entry.module }), html('span', { className: 'what', textContent: what }));
     } else {
       item.setAttribute('aria-expanded', String(r.expanded));
-      item.append(html('span', { className: 'twisty', textContent: r.expanded ? '▾' : '▸' }), html('span', { className: 'label', textContent: r.label }), html('span', { className: 'n', textContent: String(r.count) }));
+      item.append(html('span', { className: 'twisty', textContent: r.expanded ? '▾' : '▸' }), html('span', { className: 'tree-label', textContent: r.label }), html('span', { className: 'n', textContent: String(r.count) }));
     }
     return item;
   }
@@ -469,7 +472,7 @@ export class ModuleBrowser {
     const description = previewDescribe(entry, name);
     const spec = defaultPanel(description);
     const box = html('div', { className: 'frame-box' });
-    const note = html('div', { className: 'note' });
+    const note = html('div', { className: 'preview-note' });
     if (spec.groups.length) {
       const connection = new PreviewConnection(description);
       this.previewConnection = connection;
@@ -497,14 +500,14 @@ export class ModuleBrowser {
     const known = new Map((this.entries ?? []).filter((e) => e.inside).map((e) => [e.module, e.inside]));
     const factsOf = (module) => exportFacts(known.get(module) ?? this.graph?.()?.composites?.[module] ?? null);
     const box = html('div', { className: 'frame-box' }, [previewSvg(previewShapes(nodeLevel(entry, name), {}, factsOf), `${entry.module} as a box in the schematic`)]);
-    const parts = [html('h4', { textContent: 'Schematic' }), box, html('div', { className: 'note', textContent: 'Its box, as the schematic lays it out.' })];
+    const parts = [html('h4', { textContent: 'Schematic' }), box, html('div', { className: 'preview-note', textContent: 'Its box, as the schematic lays it out.' })];
     const inside = insideLevel(entry);
     if (inside) {
       const positions = storedPositions(this.graph?.(), entry);
       const shapes = previewShapes(inside, positions, factsOf);
       parts.push(
         html('div', { className: 'frame-box' }, [previewSvg(shapes, `the inside of ${entry.module}`)]),
-        html('div', { className: 'note', textContent: `Its inside: ${inside.instances.length} instance${inside.instances.length === 1 ? '' : 's'}, ${(inside.connections ?? []).length} connection${(inside.connections ?? []).length === 1 ? '' : 's'}, its exports at the frame’s inputs and outputs.` }),
+        html('div', { className: 'preview-note', textContent: `Its inside: ${inside.instances.length} instance${inside.instances.length === 1 ? '' : 's'}, ${(inside.connections ?? []).length} connection${(inside.connections ?? []).length === 1 ? '' : 's'}, its exports at the frame’s inputs and outputs.` }),
       );
     }
     return html('div', { className: 'preview' }, parts);
