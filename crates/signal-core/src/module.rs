@@ -139,9 +139,8 @@ impl<'a> Inputs<'a> {
     /// span a swap, so it does not depend on how frames are split into
     /// calls); false for an instance the swap added (it has its own first
     /// frame), for an index past the ports, and for an output. A module
-    /// uses it to tell a rewired input (another transport's position, say)
-    /// from motion on one source: `std.note_seq` and `std.step_seq8` take it
-    /// on `follow` as a seek.
+    /// uses it to tell an input that now comes from elsewhere from a change
+    /// of value on the same source.
     pub fn sources_changed(&self, port: usize) -> bool {
         self.sources_changed.get(port).copied().unwrap_or(false)
     }

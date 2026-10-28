@@ -205,6 +205,24 @@ fn a_rewired_input_is_seen_once_at_the_swap() {
             assert_eq!(case(&none, &c_in), expect(13, (1.0, 0.0)), "the first");
             assert_eq!(case(&c_in, &events), expect(13, (0.0, 1.0)), "events");
             assert_eq!(case(&c_in, &c_in), vec![(0.0, 0.0); 40], "the same");
+            // Duplicate connections from one source with other scales are
+            // allowed; their canonical order is by scale (total order),
+            // whatever order the file writes them in, so the same set
+            // written otherwise is no change, and another scale is.
+            let twice = plan(
+                &[("c.out", "w.in", Some(-2.0)), ("c.out", "w.in", Some(0.5))],
+                false,
+            );
+            let swapped = plan(
+                &[("c.out", "w.in", Some(0.5)), ("c.out", "w.in", Some(-2.0))],
+                false,
+            );
+            let other = plan(
+                &[("c.out", "w.in", Some(0.5)), ("c.out", "w.in", Some(-1.0))],
+                false,
+            );
+            assert_eq!(case(&twice, &swapped), vec![(0.0, 0.0); 40], "reordered");
+            assert_eq!(case(&twice, &other), expect(13, (1.0, 0.0)), "rescaled");
         }
     }
     // An added instance has its own first frame: it reads false.

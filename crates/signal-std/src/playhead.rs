@@ -50,7 +50,7 @@ const MAX_RATE: f64 = 16.0;
 
 const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
     type_name: "std.playhead",
-    doc: "Musical time as a signal: position in beats (exact from the last change of bpm, rate or run, never drifting), running gate and tempo; bpm, run (0/1) and rate (a multiplier of the tempo: 0 holds, negative plays backwards; unconnected 1) set its speed, and a seek event jumps it (Set(beat), or Trigger to 0), announced by a jump trigger on that frame for followers to take as a seek. With `follow` connected it copies that position (and follow_running, follow_tempo, follow_jump) while its own clock runs on unheard; when following stops, release 0 continues from the last followed position, 1 returns to its own clock; every start, stop or rewire of following is a jump.",
+    doc: "Musical time as a signal: position in beats (exact from the last change of bpm, rate or run, never drifting), running gate and tempo; bpm, run (0/1) and rate (a multiplier of the tempo: 0 holds, negative plays backwards; unconnected 1) set its speed, and a seek event jumps it (Set(beat), or Trigger to 0), announced by a jump trigger on that frame for followers to take as a seek. With `follow` connected it copies that position (and follow_running, follow_tempo, follow_jump) while its own clock runs on unheard; when following stops, release 0 continues from the last followed position, 1 returns to its own clock (a jump); every start or rewire of following is a jump.",
     ports: &[
         port_at(
             "seek",
@@ -214,18 +214,24 @@ const DESCRIPTOR: ModuleDescriptor = ModuleDescriptor {
 /// - `follow_jump` (event in): while following, its events are forwarded
 ///   to `jump` (the own clock's seeks are not: they move nothing heard).
 ///
-///   `jump` also carries one `Trigger` on the frame the playhead starts or
-///   stops following, and on the first frame of a swap that gave `follow`
-///   other sources (`Inputs::sources_changed`), unless a forwarded
-///   `Trigger` is already there: the sequencers on `reset` take every switch
-///   as a seek, so nothing fires retroactively and the next note is on time.
+///   `jump` carries at most one `Trigger` per frame: a seek heard (its own,
+///   when not following; a forwarded one), the frame the playhead starts
+///   following, the first frame of a swap that gave `follow` other sources
+///   (`Inputs::sources_changed`), and a stop with `release` at `return`.
+///   The sequencers on `reset` take it as a seek, so nothing fires
+///   retroactively and the next note is on time. A stop with `continue`
+///   is no seek: the position moves on as it did, and a sounding note
+///   keeps sounding.
 /// - `release` (gate, `[0, 1]`, default 0, combine **`replace`**, values
 ///   `continue` and `return`): read on the frame following stops, snapped
 ///   at 0.5 as a choice. Below (`continue`): the position goes on from the
-///   last followed position at its own tempo, `rate` and `run` (its own
-///   clock is re-anchored there, a segment start), so the position does not
-///   step. At or above (`return`): the position steps to its own clock's,
-///   which kept running underneath. Values between are not interpolated.
+///   last followed position at its own tempo, `rate` and `run`, one frame
+///   of its own motion on at the stop frame (its own clock re-anchored
+///   there, a segment that started a frame before), so it neither steps nor
+///   holds. At or above (`return`): the position steps to its own clock's,
+///   which kept running underneath, with a `jump`. A seek of the own clock
+///   on the stop frame wins either way: the position is its target. Values
+///   between are not interpolated.
 ///
 /// Unconnected, `follow` and its companions change nothing: the playhead is
 /// bit-identical to one without them.
@@ -433,31 +439,41 @@ impl DirectPrimitive for Playhead {
                 }
                 next += 1;
             }
+            // At most one `Trigger` on `jump` per frame: whatever marks the
+            // frame as a seek sets this, and it is pushed once, last.
+            let mut jump = false;
             if let Some(b) = seek {
                 self.base = (b, 0.0);
                 self.frames = 0;
                 self.segment = Some(segment);
                 // Heard only when not following: the own clock is unheard.
-                if !following {
-                    push_trigger(outputs, JUMP, n);
-                }
+                jump |= !following;
             } else if self.segment != Some(segment) {
                 self.rebase();
                 self.segment = Some(segment);
             }
             // Following stops: `release` says where the position goes.
-            let stops = !following && self.following;
-            if stops {
+            if !following && self.following {
                 let release = crate::chosen(
                     RELEASE_VALUES,
                     signal_core::Snap::Nearest,
                     at(inputs.parameter(RELEASE), n, 0.0),
                 ) >= 1.0;
-                if !release && let Some(last) = self.followed {
+                if release {
+                    // Return: the position steps to the own clock's, a
+                    // seek for the followers.
+                    jump = true;
+                } else if seek.is_none()
+                    && let Some(last) = self.followed
+                {
                     // Continue: the own clock goes on from the last
-                    // followed position (a segment start).
+                    // followed position, one frame of its own motion on
+                    // (a segment that started there a frame ago), so the
+                    // position neither steps nor holds, and nothing marks
+                    // the frame: a sounding note keeps sounding. A seek on
+                    // this frame wins: the position is its target.
                     self.base = (last, 0.0);
-                    self.frames = 0;
+                    self.frames = 1;
                 }
             }
             let mut position = self.position();
@@ -472,30 +488,30 @@ impl DirectPrimitive for Playhead {
                 f64::from(u8::from(segment.running)),
                 segment.tempo(),
             ];
-            let mut switched = stops;
             if following {
-                switched |= !self.following || (n == 0 && inputs.sources_changed(FOLLOW_PORT));
+                // Starting to follow, or a rewired `follow`, is a seek.
+                jump |= !self.following || (n == 0 && inputs.sources_changed(FOLLOW_PORT));
                 values = self.follow(inputs, n);
-                // The followed position's jumps are the playhead's.
-                let mut forwarded = false;
+                // The followed position's jumps are the playhead's: its
+                // other events as they are, its Triggers as this frame's.
                 while let Some(event) = follow_jumps.get(next_jump) {
                     if event.offset as usize > n {
                         break;
                     }
                     if event.offset as usize == n {
-                        forwarded |= event.payload == EventPayload::Trigger;
-                        if let Some(sink) = outputs.events(JUMP) {
+                        if event.payload == EventPayload::Trigger {
+                            jump = true;
+                        } else if let Some(sink) = outputs.events(JUMP) {
                             sink.push(*event);
                         }
                     }
                     next_jump += 1;
                 }
-                switched &= !forwarded;
             } else {
                 self.followed = None;
             }
             self.following = following;
-            if switched {
+            if jump {
                 push_trigger(outputs, JUMP, n);
             }
             for (port, value) in [POSITION, RUNNING, TEMPO].into_iter().zip(values) {
@@ -866,16 +882,19 @@ mod tests {
 
     /// ADR 0037 §6: while following, the position is the followed one bit
     /// for bit; the own clock runs on underneath (its seek unheard); a
-    /// start and a stop are each one jump; `release` 0 continues from the
-    /// last followed position with no step, 1 returns to the own clock,
-    /// which equals an unfollowed playhead's; whatever the partition.
+    /// start is one jump; `release` 0 continues from the last followed
+    /// position with no step, no hold and no jump, 1 returns to the own
+    /// clock, which equals an unfollowed playhead's, with one jump; whatever
+    /// the partition.
     #[test]
     fn following_copies_the_position_and_release_decides_the_stop() {
         let follow = |n: u64| 1000.0 + n as f64 * 0.37;
         let own = |n: u64| (n as f64 * 133.0) / 60_000.0;
         for release in [0.0, 0.4999, 0.5, 1.0] {
             let (reference, jumps) = followed(&[4096], (100, 500), &follow, release, 200, 800);
-            assert_eq!(jumps, [100, 500], "the seek at 200 moved nothing heard");
+            let returns = crate::chosen(RELEASE_VALUES, signal_core::Snap::Nearest, release) >= 1.0;
+            let expected: &[u64] = if returns { &[100, 500] } else { &[100] };
+            assert_eq!(jumps, expected, "the seek at 200 moved nothing heard");
             for n in 100..500 {
                 assert_eq!(reference[n as usize][0].to_bits(), follow(n).to_bits());
             }
@@ -886,7 +905,6 @@ mod tests {
             );
             assert_eq!(reference[101][1], 1.0);
             assert!((reference[101][2] - 0.37 * 60_000.0).abs() < 1e-6);
-            let returns = crate::chosen(RELEASE_VALUES, signal_core::Snap::Nearest, release) >= 1.0;
             assert_eq!(returns, release >= 0.5, "the snap is what process reads");
             if returns {
                 // The own clock: seeked to −5 at frame 200, never heard.
@@ -894,8 +912,9 @@ mod tests {
                 assert_eq!(reference[500][0], at(500));
                 assert_eq!(reference[799][0], at(799));
             } else {
-                assert_eq!(reference[500][0], follow(499), "no step");
-                assert_eq!(reference[501][0], follow(499) + 133.0 / 60_000.0);
+                // One frame of its own motion on: no step, no hold.
+                assert_eq!(reference[500][0], follow(499) + 133.0 / 60_000.0);
+                assert_eq!(reference[501][0], follow(499) + (2.0 * 133.0) / 60_000.0);
             }
             assert_eq!(reference[99][0], own(99));
             for blocks in [&[1][..], &[7], &[64], &[3, 300, 1, 17]] {
@@ -908,6 +927,15 @@ mod tests {
                         .all(|(a, b)| a.map(f64::to_bits) == b.map(f64::to_bits)),
                     "{blocks:?}"
                 );
+            }
+        }
+        // A seek of the own clock on the stop frame wins, with one jump.
+        for release in [0.0, 1.0] {
+            for blocks in [&[4096][..], &[1], &[7]] {
+                let (out, jumps) = followed(blocks, (100, 500), &follow, release, 500, 600);
+                assert_eq!(jumps, [100, 500], "release {release}, {blocks:?}");
+                assert_eq!(out[500][0], -5.0, "release {release}");
+                assert_eq!(out[501][0], -5.0 + 133.0 / 60_000.0);
             }
         }
         // Never connected: an unfollowed playhead, the seek heard.

@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use signal_core::Registry;
-use signal_engine::RealtimeConfig;
+use signal_engine::{RealtimeConfig, Stamp};
 use signal_output::{Controller, Driver, NullDriver, realtime};
 use signal_project::live::{Applied, send_edit};
 use signal_project::session::{self, LiveRecorder, Session, SessionRecorder, replay};
@@ -67,6 +67,8 @@ struct Run {
     driver: NullDriver,
     controller: Controller,
     live: LiveRecorder,
+    /// Commands may be late (a test that stamps them so).
+    late: bool,
 }
 
 impl Run {
@@ -87,6 +89,7 @@ impl Run {
             driver,
             controller,
             live: LiveRecorder::new(recorder, registry.clone()),
+            late: false,
         }
     }
 
@@ -109,7 +112,9 @@ impl Run {
         self.controller.poll(&mut self.live);
         self.live.finish(runner.next_frame()).unwrap();
         assert_eq!(self.live.refused(), &[] as &[String]);
-        assert_eq!(runner.status().late, 0, "nothing late");
+        if !self.late {
+            assert_eq!(runner.status().late, 0, "nothing late");
+        }
         let recorder = self.live.into_recorder();
         let edits = recorder.edits();
         let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("slot-live/{name}"));
@@ -300,6 +305,101 @@ fn a_load_fades_in_and_an_unload_fades_out() {
         );
         assert_eq!(played.left, tone[..played.left.len()]);
     }
+}
+
+/// A Replace's two swaps stamped for one frame already played (a lead too
+/// short for the runner): both are late, and they commit on two
+/// consecutive frames, never one (one swap per frame); the session records
+/// them where they applied and replays to what was played. (No suspend is
+/// sent: a suspend as late as its swap lands on the swap's frame, after the
+/// swap removed its instance, and is discarded, so the removal has no fade;
+/// `send_edit` stamps the swap F after the suspend from a fresh status, so
+/// only a control thread stalled for more than the latency gets there.)
+#[test]
+fn late_swaps_of_a_replace_commit_on_consecutive_frames_and_replay() {
+    let registry = registry();
+    let old = host(Some("voice_a"), "");
+    let mut run = Run::start(&old, &registry, 1, 41);
+    run.late = true;
+    run.play(5_000);
+    let mid = host(None, "");
+    let new = host(Some("voice_b"), "");
+    let unload = run.live.swap_plan(mid).unwrap();
+    let load = run.live.swap_plan(new).unwrap();
+    let ready = run.controller.prepare_swap(&unload).unwrap();
+    let after = run.controller.prepare_swap_after(&ready, &load).unwrap();
+    let past = signal_core::Frame(100);
+    run.controller.send_swap(ready, Stamp::At(past)).unwrap();
+    run.controller.send_swap(after, Stamp::At(past)).unwrap();
+    run.play(4_000);
+    let played = run.finish(&registry, "late");
+    let edits = played.edits();
+    assert_eq!(
+        edits.iter().map(|e| e.0).collect::<Vec<_>>(),
+        ["swap", "swap"]
+    );
+    assert!(
+        edits[0].1 >= 5_000,
+        "late: applied on the next frame to run"
+    );
+    assert_eq!(edits[1].1, edits[0].1 + 1, "the load on the next frame");
+}
+
+/// An own copy of the content under another name (`voice_a_inside`, what
+/// the editor's "edit the slot's insides" writes) plays alike: pointing
+/// `load` at it is no Replace and sends nothing, so making the copy is
+/// inaudible; a copy that differs (another frequency) is a Replace.
+#[test]
+fn loading_an_identical_copy_is_no_replace() {
+    let registry = registry();
+    let old = host(Some("voice_a"), "");
+    let with_copy = |freq: f64| {
+        let mut files = host(Some("voice_a"), "").files;
+        files[0].text = files[0]
+            .text
+            .replace("load = \"voice_a\"", "load = \"voice_a_inside\"");
+        files.push(voice("voice_a_inside", freq));
+        Project::from_sources(files).unwrap()
+    };
+    let mut run = Run::start(&old, &registry, 1, 51);
+    run.play(2_000);
+    let (now, applied) = send_edit(
+        &mut run.controller,
+        &mut run.live,
+        &old,
+        with_copy(220.0),
+        &registry,
+    )
+    .unwrap();
+    assert_eq!(applied, Applied::default(), "{applied}");
+    run.play(2_000);
+    let (_, applied) = send_edit(
+        &mut run.controller,
+        &mut run.live,
+        &now,
+        {
+            // Another copy that differs: a Replace.
+            let mut files = now.files.clone();
+            files.push(voice("voice_a_other", 330.0));
+            files[0].text = files[0]
+                .text
+                .replace("load = \"voice_a_inside\"", "load = \"voice_a_other\"");
+            Project::from_sources(files).unwrap()
+        },
+        &registry,
+    )
+    .unwrap();
+    assert_eq!(
+        (applied.replaced, applied.load_swap),
+        (1, Some(2)),
+        "{applied}"
+    );
+    let played = run.finish(&registry, "own-copy");
+    assert_eq!(
+        played.edits().iter().map(|e| e.0).collect::<Vec<_>>(),
+        ["edit", "swap", "swap"],
+        "only the real Replace swaps"
+    );
 }
 
 /// An interface edit that changes no match (an input nothing wires) plans

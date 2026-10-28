@@ -560,7 +560,12 @@ impl Plan {
                 .push((c.from.clone(), c.scale.to_bits()));
         }
         for list in plan.incoming.values_mut() {
-            list.sort();
+            // Canonical order (§3): by source address, then by scale in
+            // `total_cmp` order, as the connections are summed.
+            list.sort_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then_with(|| f64::from_bits(a.1).total_cmp(&f64::from_bits(b.1)))
+            });
         }
         if let Some(old) = &old {
             for (inst, survivor) in plan.instances.iter_mut().zip(&survivors) {

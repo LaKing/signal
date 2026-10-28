@@ -3,8 +3,8 @@
 #
 #   bpm, run, rate ─► playhead ─► position (beats), running (0/1), tempo (bpm)
 #   seek ──────────►    │       └► jump (a trigger on each frame a seek lands,
-#   follow, follow_jump,│          and on every start, stop or rewire of
-#   follow_running, ────┘          following)
+#   follow, follow_jump,│          and when following starts, is rewired, or
+#   follow_running, ────┘          stops with release 1)
 #   follow_tempo
 #
 # Unconnected, the follow inputs change nothing: the transport plays as

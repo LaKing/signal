@@ -28,7 +28,7 @@ A feedback loop must pass through a state-output instance (for example a unit de
 
 ## 3. Signals
 
-A signal input's value is the sum of its connections' values, in **canonical source order** (byte-wise order of the source port address), each multiplied by the connection's scale, starting from +0:
+A signal input's value is the sum of its connections' values, in **canonical source order** (byte-wise order of the source port address; several connections from one source, which are allowed, by their scale in IEEE 754 total order, `f64::total_cmp`), each multiplied by the connection's scale, starting from +0:
 
 `in = ((0 + s₁·x₁) + s₂·x₂) + …`
 

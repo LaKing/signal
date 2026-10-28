@@ -500,6 +500,34 @@ impl Project {
         found
     }
 
+    /// What a loaded slot's content plays, as text: the plan of its content
+    /// alone, instantiated under the slot's name with the values set on it
+    /// (the flattened instances, their types, parameters and wiring at their
+    /// addresses), whatever the definition it loads is called. Patterns are
+    /// left out: a changed table between two otherwise equal contents is an
+    /// ordinary edit, which swaps it in under the survivors. Two `load`s
+    /// with equal texts play the same: making an own copy of the content
+    /// under another name is no Replace (ADR 0037 Notes). `None` when the slot is not loaded or does not plan.
+    pub(crate) fn slot_content_plan(&self, key: &SlotKey, registry: &Registry) -> Option<String> {
+        let (def, slot) = key;
+        let level = if def.is_empty() {
+            &self.root
+        } else {
+            self.composites.iter().find(|c| c.name == *def)?
+        };
+        let instance = level.instances.iter().find(|i| i.name == *slot)?.clone();
+        let mut definitions = self.definitions();
+        let mut errors = Vec::new();
+        definitions.extend(self.tapped(registry, &mut errors));
+        let root = CompositeDef {
+            name: String::new(),
+            instances: vec![instance],
+            ..CompositeDef::default()
+        };
+        let plan = signal_graph::build_plan(&root, &definitions, registry, 0).ok()?;
+        serde_json::to_string(&plan).ok()
+    }
+
     /// This project with the slots `slots` unloaded: their content gone
     /// from the plan, and their files written as `slot.unload` writes
     /// them (`load` and `seed` removed), so the result is a project its

@@ -37,11 +37,14 @@ fn plan(follow: Option<&str>, release: f64, version: u64) -> ExecutionPlan {
          h2 = {{ module = \"std.playhead\", bpm = 120 }}\n\
          deck = {{ module = \"std.playhead\", bpm = 120, release = {release} }}\n\
          drums = {{ module = \"std.step_seq8\", pattern = \"beat\" }}\n\
+         melody = {{ module = \"std.note_seq\", pattern = \"tune\" }}\n\
          hits = {{ module = \"std.counter\" }}\n\
          out = {{ module = \"std.audio_out\" }}\n\
          [wiring]\nconnections = [\n{wires}\
            {{ from = \"deck.position\", to = \"drums.follow\" }},\n\
            {{ from = \"deck.jump\", to = \"drums.reset\" }},\n\
+           {{ from = \"deck.position\", to = \"melody.follow\" }},\n\
+           {{ from = \"deck.jump\", to = \"melody.reset\" }},\n\
            {{ from = \"drums.t1\", to = \"hits.trigger\" }},\n\
            {{ from = \"hits.count\", to = \"out.l\", scale = 0.0001 }},\n]\n"
     );
@@ -54,6 +57,11 @@ fn plan(follow: Option<&str>, release: f64, version: u64) -> ExecutionPlan {
         SourceFile {
             path: "patterns/beat.toml".to_owned(),
             text: beat.to_owned(),
+        },
+        // One long note a beat, from 0 to 0.9: a seek ends it.
+        SourceFile {
+            path: "patterns/tune.toml".to_owned(),
+            text: "schema_version = 1\nkind = \"notes\"\nlength = 1\nnotes = [\n  { key = 60, start = 0, length = 0.9, velocity = 1 },\n]\n".to_owned(),
         },
     ])
     .unwrap();
@@ -68,6 +76,7 @@ struct Trace {
     position: Vec<f64>,
     hits: Vec<f64>,
     own: Vec<f64>,
+    gate: Vec<f64>,
 }
 
 /// Runs `frames` frames from `first`, swapping to each `(frame, plan)`;
@@ -85,6 +94,7 @@ fn run(first: &ExecutionPlan, swaps: &[(u64, ExecutionPlan)], frames: u64, k: us
         position: Vec::new(),
         hits: Vec::new(),
         own: Vec::new(),
+        gate: Vec::new(),
     };
     while engine.next_frame().0 < frames {
         let now = engine.next_frame().0;
@@ -107,10 +117,12 @@ fn run(first: &ExecutionPlan, swaps: &[(u64, ExecutionPlan)], frames: u64, k: us
             index("/hits.count"),
             index("/h1.position"),
         );
+        let g = index("/melody.gate");
         for f in 0..len {
             trace.position.push(engine.signal_output_at(p, f).unwrap());
             trace.hits.push(engine.signal_output_at(h, f).unwrap());
             trace.own.push(engine.signal_output_at(o, f).unwrap());
+            trace.gate.push(engine.signal_output_at(g, f).unwrap());
         }
         engine.drain_log(&mut |_| {});
     }
@@ -176,6 +188,7 @@ fn rewiring_at_every_phase_of_a_beat_fires_nothing_retroactively() {
 
 #[test]
 fn letting_go_continues_or_returns_as_release_says() {
+    let mut sounding = 0;
     for release in [0.0, 1.0] {
         let following = plan(Some("h2"), release, 0);
         let free = plan(None, release, 1);
@@ -185,25 +198,37 @@ fn letting_go_continues_or_returns_as_release_says() {
             let what = format!("release {release} at phase {phase}");
             let at = at as usize;
             if release == 0.0 {
-                // Continue: no step, then the deck's own speed (the same
-                // 120 bpm here), so the next hit is on time with no seek
-                // but the switch jump on the frame itself, which moves
-                // nothing.
-                assert_eq!(trace.position[at], trace.position[at - 1], "{what}");
+                // Continue: no step and no hold, the deck's own speed (the
+                // same 120 bpm here) from the last followed position, and
+                // no seek: the next hit is on time, and the sounding note
+                // keeps sounding.
+                let v = 120.0 / 2_880_000.0;
+                assert_eq!(trace.position[at], trace.position[at - 1] + v, "{what}");
                 assert_eq!(
                     trace.position[at + 1],
-                    trace.position[at - 1] + 120.0 / 2_880_000.0,
+                    trace.position[at - 1] + 2.0 * v,
                     "{what}"
                 );
+                let place = trace.position[at] % 1.0;
+                if trace.gate[at - 1] == 1.0 && (0.01..0.89).contains(&place) {
+                    assert_eq!(trace.gate[at], 1.0, "{what}: the note is cut");
+                    sounding += 1;
+                }
             } else {
                 // Return: the own clock's position, which ran underneath
                 // from frame 0: an unfollowed playhead's (h1's).
                 assert_eq!(trace.position[at], trace.own[at], "{what}");
                 assert_eq!(trace.position[at + 100], trace.own[at + 100], "{what}");
             }
-            check(&trace, &[0, at as u64], &what);
+            let seeks: &[u64] = if release == 0.0 {
+                &[0]
+            } else {
+                &[0, at as u64]
+            };
+            check(&trace, seeks, &what);
         }
     }
+    assert!(sounding >= 3, "a note sounded at {sounding} let-gos");
 }
 
 /// Connecting a follower mid-run (a host wired into the deck) is a switch

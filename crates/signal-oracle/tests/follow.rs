@@ -236,13 +236,16 @@ fn the_deck_follows_switches_and_releases() {
     assert_eq!(trace[1200][deck], 40.0);
     assert_eq!((trace[1199][jumps], trace[1200][jumps]), (4.0, 5.0));
     // Let go at 1600 with release 0: the position goes on from h1's at 1599
-    // (no step on 1600), at the deck's own 133 bpm; one jump.
-    assert_eq!(trace[1600][deck], trace[1599][h1]);
+    // at the deck's own 133 bpm (no step, no hold on 1600), and no jump.
     assert_eq!(
-        trace[1601][deck],
+        trace[1600][deck],
         trace[1599][h1] + (1.0 * 133.0) / 60_000.0
     );
-    assert_eq!(trace[1600][jumps], 6.0);
+    assert_eq!(
+        trace[1601][deck],
+        trace[1599][h1] + (2.0 * 133.0) / 60_000.0
+    );
+    assert_eq!(trace[1600][jumps], 5.0);
     // pf.a disconnected at 1600: the deck's own position, one switch.
     assert_eq!(trace[1600][switches], 3.0);
     assert_eq!(trace[1600][5].to_bits(), trace[1600][deck].to_bits());
