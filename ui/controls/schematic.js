@@ -1229,7 +1229,8 @@ export class SignalSchematic extends HTMLElement {
 
   /** ADR 0037, editable insides: the note over a slot's inside shown as the innermost level (`insideBanner`). */
   drawInsideNote() {
-    const note = this.graph ? insideBanner(this.graph, this.currentLevel()) : null;
+    const shown = editLevel(this.drawn);
+    const note = this.graph && this.drawn ? insideBanner(this.graph, shown.level, shown.path || null) : null;
     const text = note?.text ?? '';
     if (this.insideNote.textContent !== text) this.insideNote.textContent = text;
     this.insideNote.classList.toggle('shown', Boolean(note));

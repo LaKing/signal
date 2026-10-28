@@ -890,9 +890,12 @@ fn an_own_inside_is_its_slots_only() {
     for (entry, what) in [
         (
             "thief = { slot = { outputs = { l = \"audio\" } }, load = \"pad_inside\" }\n",
-            "slot `pad`",
+            "set its `inside_of` to `\"thief\"`",
         ),
-        ("plain = { module = \"pad_inside\" }\n", "slot `pad`"),
+        (
+            "plain = { module = \"pad_inside\" }\n",
+            "remove its `inside_of`",
+        ),
     ] {
         let mut taken = own.clone();
         let text =
@@ -916,4 +919,121 @@ fn an_own_inside_is_its_slots_only() {
     )
     .unwrap();
     assert!(Project::from_sources(sources(&loaded)).is_err());
+}
+
+/// Re-review follow-up: with `map = { l = "r" }` on a slot holding its own
+/// inside, removing `l` keeps the export `r` (port `r` still matches it),
+/// and renaming `r` renames the export and the `map` value naming it; both
+/// plan as before (but for the port removed), undone byte for byte.
+#[test]
+fn a_map_onto_another_port_s_export_is_kept_in_step() {
+    let start = files(PAD, &[("composites/voice.toml", VOICE)]);
+    let (own, _) = run(
+        &start,
+        "",
+        &[op(serde_json::json!({"op": "slot.inside", "slot": "pad"}))],
+    )
+    .unwrap();
+    let (mapped, _) = run(
+        &own,
+        "",
+        &[op(
+            serde_json::json!({"op": "slot.map", "slot": "pad", "map": {"l": "r"}}),
+        )],
+    )
+    .unwrap();
+    let before = plan_dump(&mapped);
+    let (removed, _) = round_trip(
+        &mapped,
+        "",
+        &[op(
+            serde_json::json!({"op": "slot.interface", "slot": "pad", "remove": ["l"], "removeWires": true}),
+        )],
+    );
+    assert!(
+        inside::has_export(&removed["composites/pad_inside.toml"], "r"),
+        "{}",
+        removed["composites/pad_inside.toml"]
+    );
+    let planned = project(&removed).plan(&registry()).unwrap();
+    let pad = planned.slots.iter().find(|s| s.slot == "/pad").unwrap();
+    assert_eq!(
+        pad.matches
+            .iter()
+            .find(|m| m.port == "r")
+            .unwrap()
+            .content
+            .as_deref(),
+        Some("r"),
+        "r still matched"
+    );
+    let (renamed, _) = round_trip(
+        &mapped,
+        "",
+        &[op(
+            serde_json::json!({"op": "slot.interface", "slot": "pad", "rename": {"r": "rr"}}),
+        )],
+    );
+    assert!(inside::has_export(
+        &renamed["composites/pad_inside.toml"],
+        "rr"
+    ));
+    assert!(
+        renamed["project.toml"].contains("map = { l = \"rr\" }"),
+        "{}",
+        renamed["project.toml"]
+    );
+    assert_eq!(plan_dump(&renamed), before);
+}
+
+/// Re-review follow-up: a project composite that includes a project (ADR
+/// 0035) does not keep slots from opening: the previews are read in the
+/// project's folder, an empty slot's and a mapped composite's (whose frame
+/// is the copy's names) alike.
+#[test]
+fn previews_read_beside_a_composite_that_includes_a_project() {
+    let root = std::env::temp_dir().join(format!("signal-inside-include-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let host = root.join("host");
+    let sub = root.join("sub");
+    std::fs::create_dir_all(host.join("composites")).unwrap();
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(
+        sub.join("project.toml"),
+        "schema_version = 1\n\n[project]\nname = \"sub\"\nsample_rate = 48000\n\n[instances]\nosc = { module = \"std.sine_osc\" }\nout = { module = \"std.audio_out\", gain = 0.1 }\n\n[wiring]\nconnections = [{ from = \"osc.out\", to = \"out.l\" }]\n",
+    )
+    .unwrap();
+    let with_include = VOICE.replace(
+        "amp = { module = \"std.gain\", db = -6 }",
+        "amp = { module = \"std.gain\", db = -6 }\ninc = { project = \"../sub\" }",
+    );
+    std::fs::write(host.join("composites/voice.toml"), &with_include).unwrap();
+    let text = PAD.replace(
+        "out = { module = \"std.audio_out\" }",
+        "fx = { slot = { outputs = { y = \"audio\" } } }\nout = { module = \"std.audio_out\" }",
+    );
+    std::fs::write(host.join("project.toml"), text).unwrap();
+    let project = Project::load(&host).unwrap_or_else(|e| panic!("{e}"));
+    let planned = project
+        .plan(&registry())
+        .unwrap_or_else(|d| panic!("{d:#?}"));
+    let graph = project.structure(&planned.plan, &registry());
+    assert_eq!(
+        graph["insides"]["/fx"]["outputs"][0]["name"], "y",
+        "the empty slot opens"
+    );
+    let preview = &graph["insides"]["/pad"];
+    assert_eq!(preview["outputs"][0]["name"], "l");
+    assert!(
+        preview["outputs"][0].get("export").is_none(),
+        "the copy's names, not the content's: {preview}"
+    );
+    assert!(
+        preview["instances"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["name"] == "inc")
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }

@@ -586,7 +586,7 @@ export function frameOutputs(levelGraph, shape) {
  * read-only and the first edit makes the slot's own copy (an empty slot's:
  * its own inside), naming the file; the content it copies stays as it is.
  */
-export function insideBanner(graph, level) {
+export function insideBanner(graph, level, path = null) {
   const found = insideSlot(graph, levelData(graph, level));
   if (!found) return null;
   const { name, instance, inside } = found;
@@ -597,7 +597,9 @@ export function insideBanner(graph, level) {
   const what = inside?.make === 'wrap' ? `the module ${load}` : `${load}, shared`;
   // A wrapped module moves one level down (`/fx` → `/fx/gain`): live, it starts again once.
   const inner = levelData(graph, level)?.instances?.[0]?.name;
-  const restart = inside?.make === 'wrap' ? ` Editing restarts this module’s sound once (it moves into its own inside${inner ? `, as ${found.parent ? `${found.parent}/` : '/'}${name}/${inner}` : ''}).` : '';
+  // `path`: the slot instance's address shown (`/rack1/fx`), else the top level's `/fx`.
+  const at = path ?? (found.parent ? null : `/${name}`);
+  const restart = inside?.make === 'wrap' ? ` Editing restarts this module’s sound once (it moves into its own inside${inner && at ? `, as ${at}/${inner}` : ''}).` : '';
   return { own: false, text: `Read-only: ${name} holds ${what}. Editing makes this slot’s own copy (${file}); ${load} stays as it is.${restart}` };
 }
 

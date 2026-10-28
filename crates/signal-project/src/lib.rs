@@ -1328,7 +1328,8 @@ impl Builder<'_> {
                     def.file,
                     span.start,
                     format!(
-                        "{name}: `{load}` is the own inside of slot `{owner}` (its `inside_of`): only that slot loads it; make this slot's own inside instead, or copy the file"
+                        "{name}: `{load}` is the own inside of slot `{owner}` (its `inside_of`): only that slot loads it. To give it to this slot, set its `inside_of` to `\"{}\"`; a copy of the file needs its own name and that marker changed too",
+                        inside::owner(level, name)
                     ),
                 );
             }
@@ -1342,7 +1343,7 @@ impl Builder<'_> {
                     def.file,
                     instance.module_span.start,
                     format!(
-                        "{name}: `{}` is the own inside of slot `{owner}` (its `inside_of`): only that slot loads it",
+                        "{name}: `{}` is the own inside of slot `{owner}` (its `inside_of`): only that slot loads it. To use it here, remove its `inside_of` (it is then an ordinary composite) or copy the file under another name without it",
                         instance.module
                     ),
                 );

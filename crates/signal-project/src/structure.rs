@@ -1283,7 +1283,11 @@ impl Walk<'_> {
             text: host,
         });
         files.push(SourceFile { path, text });
-        let project = Project::from_sources(files).ok()?;
+        // In the project's folder, so a composite that includes a project reads.
+        let project = match &self.project.content.dir {
+            Some(dir) => Project::from_sources_in(files, dir).ok()?,
+            None => Project::from_sources(files).ok()?,
+        };
         let walk = project.walk(self.registry, BTreeMap::new());
         let def = project.composites.iter().find(|c| c.name == name)?;
         Some(project.composite_level(&walk, def, ""))

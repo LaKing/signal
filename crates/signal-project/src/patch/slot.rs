@@ -1146,7 +1146,20 @@ impl Patching<'_> {
                             .iter()
                             .find(|(k, _)| k == name)
                             .map_or_else(|| Some(name.clone()), |(_, v)| v.clone());
-                        if let Some(content) = content {
+                        // The export goes only when no port left matches it
+                        // (another may reach it through its `map`).
+                        let candidate =
+                            |p: &InterfacePort| match read.map.iter().find(|(k, _)| *k == p.name) {
+                                Some((_, value)) => value.clone(),
+                                None => Some(p.name.clone()),
+                            };
+                        let shared = ports
+                            .iter()
+                            .filter(|p| p.name != *name && !remove.contains(&p.name))
+                            .any(|p| candidate(p) == content);
+                        if let Some(content) = content
+                            && !shared
+                        {
                             synced.push((content, None));
                         }
                     }
@@ -1214,8 +1227,23 @@ impl Patching<'_> {
                             changes.push(moved);
                         }
                     } else if inside.is_some() {
-                        // Its own inside: the export is renamed with it.
+                        // Its own inside: the export is renamed with it, and the
+                        // `map` values naming it follow (other ports reaching it).
                         synced.push((old.clone(), Some(new.clone())));
+                        for (key, value) in &read.map {
+                            if value.as_deref() != Some(old.as_str()) || remove.contains(key) {
+                                continue;
+                            }
+                            if rename.contains_key(key) {
+                                return Err(bad(format!(
+                                    "`map.{key}` names `{old}`, renamed here: rename `{key}` in a separate op"
+                                )));
+                            }
+                            changes.push(set(
+                                &["map", key],
+                                Some(json_text(&serde_json::json!(new))?),
+                            ));
+                        }
                     } else if let Some(load) = &read.load
                         && (self.ctx.content)(load).is_some_and(|c| {
                             c.ports

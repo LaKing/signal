@@ -350,4 +350,6 @@ test('review follow-up: a slot’s own inside is listed only for its slot; a wra
   graph.insides['/fx'].instances = [{ name: 'gain', module: 'std.gain', composite: false, ports: [], parameters: [] }];
   assert.match(insideBanner(graph, '/fx').text, /Editing restarts this module’s sound once \(it moves into its own inside, as \/fx\/gain\)\.$/);
   assert.doesNotMatch(insideBanner(GRAPH, '/synth').text, /restarts/, 'a copied composite plans the same: no restart');
+  // A slot in a composite: the instance address shown.
+  assert.match(insideBanner(graph, '/fx', '/rack1/fx').text, /as \/rack1\/fx\/gain\)\.$/);
 });
