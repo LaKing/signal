@@ -496,12 +496,19 @@ impl Project {
         builder.check_reserved(&root_spans);
         builder.check_patterns(&root_spans, &names, &pattern_names);
         builder.check_shadowing(&root_spans, &names);
-        for (_, spans) in &composites {
+        // ADR 0037, editable insides: a slot's own inside is that slot's only.
+        let owners: BTreeMap<&str, &str> = composites
+            .iter()
+            .filter_map(|(c, s)| Some((c.name.as_str(), s.inside_of.as_deref()?)))
+            .collect();
+        builder.check_owners(&root_spans, "", &owners);
+        for (def, spans) in &composites {
             builder.check_pins(spans, &names);
             builder.check_reserved(spans);
             builder.check_snapshot_files(spans);
             builder.check_patterns(spans, &names, &pattern_names);
             builder.check_shadowing(spans, &names);
+            builder.check_owners(spans, &def.name, &owners);
         }
 
         // ADR 0035, 0037: the projects the files include or load, each
@@ -1304,6 +1311,45 @@ impl Builder<'_> {
         }
     }
 
+    /// ADR 0037, editable insides: a composite whose `inside_of` names a
+    /// slot is that slot's own inside, loaded by it alone: by another slot,
+    /// or as a plain instance's module, it is an error at the reference (so
+    /// an edit of it changes that slot only). `level` is `def`'s (`""`: the
+    /// top level).
+    fn check_owners(&mut self, def: &DefSpans, level: &str, owners: &BTreeMap<&str, &str>) {
+        for (name, content) in &def.contents {
+            let Some((load, span)) = content.slot.as_ref().and_then(|s| s.load.as_ref()) else {
+                continue;
+            };
+            if let Some(owner) = owners.get(load.as_str())
+                && *owner != inside::owner(level, name)
+            {
+                self.error(
+                    def.file,
+                    span.start,
+                    format!(
+                        "{name}: `{load}` is the own inside of slot `{owner}` (its `inside_of`): only that slot loads it; make this slot's own inside instead, or copy the file"
+                    ),
+                );
+            }
+        }
+        for (name, instance) in &def.instances {
+            if def.contents.get(name).is_some_and(|c| c.slot.is_some()) {
+                continue;
+            }
+            if let Some(owner) = owners.get(instance.module.as_str()) {
+                self.error(
+                    def.file,
+                    instance.module_span.start,
+                    format!(
+                        "{name}: `{}` is the own inside of slot `{owner}` (its `inside_of`): only that slot loads it",
+                        instance.module
+                    ),
+                );
+            }
+        }
+    }
+
     /// ADR 0027 §4: a library composite uses `std.*` and `lib.*` modules
     /// only, never a project composite, and takes no `gpu` pin or `pattern`
     /// (both name things of a project or a machine); it declares its
@@ -1531,6 +1577,11 @@ impl Builder<'_> {
         spans.description = parsed.composite.description;
         // ADR 0037, editable insides: the slot it is the own inside of,
         // checked for its form only (an Unload keeps the file).
+        spans.inside_of = parsed
+            .composite
+            .inside_of
+            .as_ref()
+            .map(|o| o.get_ref().clone());
         if let Some(owner) = parsed.composite.inside_of
             && (in_library || !inside::valid_owner(owner.get_ref()))
         {
@@ -1577,6 +1628,7 @@ fn definition(
         exports: Vec::new(),
         category: None,
         description: None,
+        inside_of: None,
         contents: BTreeMap::new(),
     };
     let mut def = CompositeDef {

@@ -707,10 +707,14 @@ fn graph_gives_each_slot_its_inside() {
     };
     assert_eq!(names(&preview["outputs"]), ["l", "r"]);
     assert_eq!(preview["outputs"][0]["from"], "amp.out");
-    assert_eq!(preview["outputs"][0]["export"], "out");
+    // What the copy will be: its exports by the slot's names (no `export`).
+    assert!(preview["outputs"][0].get("export").is_none());
     // `db`, which no port of the slot reaches, follows them, marked.
     assert_eq!(names(&preview["parameters"]), ["pitch", "db"]);
-    assert_eq!(preview["parameters"][0]["export"], "freq");
+    assert_eq!(
+        preview["parameters"][0]["to"],
+        serde_json::json!(["osc.freq"])
+    );
     assert_eq!(preview["parameters"][1]["extra"], true);
     // The shared composite's own level keeps its exports.
     assert_eq!(names(&before["composites"]["voice"]["outputs"]), ["out"]);
@@ -770,4 +774,146 @@ fn inside_of_is_checked_for_its_form() {
             "{owner}: {errors:#?}"
         );
     }
+}
+
+/// Review follow-up 1: renaming a slot port onto another export of its own
+/// inside (`pitch` → `db`, an export no port reaches) is refused, both files
+/// unchanged; `rename_export` never overwrites a key.
+#[test]
+fn a_rename_onto_an_existing_export_is_refused() {
+    let start = files(PAD, &[("composites/voice.toml", VOICE)]);
+    let (own, _) = run(
+        &start,
+        "",
+        &[op(serde_json::json!({"op": "slot.inside", "slot": "pad"}))],
+    )
+    .unwrap();
+    let refused = run(
+        &own,
+        "",
+        &[op(
+            serde_json::json!({"op": "slot.interface", "slot": "pad", "rename": {"pitch": "db"}}),
+        )],
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, "bad-value");
+    assert!(
+        refused.message.contains("`db` is an export"),
+        "{}",
+        refused.message
+    );
+    let inside = &own["composites/pad_inside.toml"];
+    assert!(inside::has_export(inside, "db"));
+    assert_eq!(inside::rename_export(inside, "pitch", "db"), None);
+    assert_eq!(
+        inside::rename_export(inside, "pitch", "l"),
+        None,
+        "across roles too"
+    );
+}
+
+/// Review follow-up 2: the read-only preview of a project composite loaded
+/// through a `map` is the copy (its frame names are the copy's exports), so
+/// the first edits the schematic derives from it (a frame wire disconnected;
+/// a module deleted with the frame wires on it) apply to the copy.
+#[test]
+fn first_edits_from_a_mapped_preview_apply_to_the_copy() {
+    let start = files(PAD, &[("composites/voice.toml", VOICE)]);
+    let preview = graph(&start)["insides"]["/pad"].clone();
+    let (own, _) = run(
+        &start,
+        "",
+        &[op(serde_json::json!({"op": "slot.inside", "slot": "pad"}))],
+    )
+    .unwrap();
+    // A frame wire: export name and port as the preview's frame gives them.
+    let l = &preview["outputs"][0];
+    let wire = serde_json::json!({"op": "export.disconnect", "role": "output",
+        "name": l["export"].as_str().or(l["name"].as_str()), "port": l["from"]});
+    let (cut, _) = round_trip(&own, "pad_inside", &[op(wire)]);
+    project(&cut).plan(&registry()).unwrap();
+    // A module deleted: every frame wire on it first, as `insideOps` writes them.
+    let mut ops = Vec::new();
+    for (list, role) in [("inputs", "input"), ("parameters", "parameter")] {
+        for e in preview[list].as_array().unwrap() {
+            for target in e["to"].as_array().unwrap() {
+                if target.as_str().unwrap().starts_with("amp.") {
+                    ops.push(op(
+                        serde_json::json!({"op": "export.disconnect", "role": role,
+                        "name": e["export"].as_str().or(e["name"].as_str()), "port": target}),
+                    ));
+                }
+            }
+        }
+    }
+    for e in preview["outputs"].as_array().unwrap() {
+        if e["from"].as_str().is_some_and(|f| f.starts_with("amp.")) {
+            ops.push(op(
+                serde_json::json!({"op": "export.disconnect", "role": "output",
+                "name": e["export"].as_str().or(e["name"].as_str()), "port": e["from"]}),
+            ));
+        }
+    }
+    assert_eq!(ops.len(), 3, "l, r and db reach amp");
+    ops.push(op(
+        serde_json::json!({"op": "instance.remove", "name": "amp"}),
+    ));
+    let (gone, _) = round_trip(&own, "pad_inside", &ops);
+    project(&gone).plan(&registry()).unwrap();
+}
+
+/// Review follow-up 3: a slot's own inside is loaded by that slot only:
+/// another slot loading it, or a plain instance of it, is an error at the
+/// reference; the owner loading it is fine.
+#[test]
+fn an_own_inside_is_its_slots_only() {
+    let start = files(PAD, &[("composites/voice.toml", VOICE)]);
+    let (own, _) = run(
+        &start,
+        "",
+        &[op(serde_json::json!({"op": "slot.inside", "slot": "pad"}))],
+    )
+    .unwrap();
+    // `modules` says whose it is, so the Load dialog lists it for its slot only.
+    let modules = project(&own).modules(&registry());
+    let entry = |name: &str| {
+        modules["composites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["module"] == name)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(entry("pad_inside")["inside_of"], "pad");
+    assert!(entry("voice").get("inside_of").is_none());
+    for (entry, what) in [
+        (
+            "thief = { slot = { outputs = { l = \"audio\" } }, load = \"pad_inside\" }\n",
+            "slot `pad`",
+        ),
+        ("plain = { module = \"pad_inside\" }\n", "slot `pad`"),
+    ] {
+        let mut taken = own.clone();
+        let text =
+            taken["project.toml"].replace("out = { module", &format!("{entry}out = {{ module"));
+        taken.insert("project.toml".to_owned(), text);
+        let errors = Project::from_sources(sources(&taken))
+            .err()
+            .unwrap_or_default();
+        assert!(
+            errors
+                .iter()
+                .any(|d| d.message.contains("is the own inside of") && d.message.contains(what)),
+            "{entry}: {errors:#?}"
+        );
+    }
+    // Through `slot.load` the edit is refused when the project is loaded.
+    let (loaded, _) = run(
+        &own,
+        "",
+        &[op(serde_json::json!({"op": "slot.add", "name": "thief", "slot": {"outputs": {"l": "audio"}}, "load": "pad_inside"}))],
+    )
+    .unwrap();
+    assert!(Project::from_sources(sources(&loaded)).is_err());
 }

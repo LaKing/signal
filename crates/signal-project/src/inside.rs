@@ -402,6 +402,10 @@ pub fn inner_name(type_name: &str) -> String {
 /// The export `old` (of any role) of composite file `text` renamed `new`,
 /// in its place, everything else kept; `None` when it has none.
 pub fn rename_export(text: &str, old: &str, new: &str) -> Option<String> {
+    // Exports share one namespace: never onto one that is there.
+    if has_export(text, new) {
+        return None;
+    }
     let mut doc: DocumentMut = text.parse().ok()?;
     let exports = doc.get_mut("exports")?.as_table_like_mut()?;
     for role in ROLES {
@@ -425,6 +429,20 @@ pub fn rename_export(text: &str, old: &str, new: &str) -> Option<String> {
         return Some(doc.to_string());
     }
     None
+}
+
+/// Whether composite file `text` exports `name` (of any role).
+pub fn has_export(text: &str, name: &str) -> bool {
+    let Ok(table) = toml::from_str::<toml::Table>(text) else {
+        return false;
+    };
+    let exports = table.get("exports").and_then(toml::Value::as_table);
+    ["inputs", "outputs", "parameters"].iter().any(|role| {
+        exports
+            .and_then(|e| e.get(*role))
+            .and_then(toml::Value::as_table)
+            .is_some_and(|t| t.contains_key(name))
+    })
 }
 
 /// The export `name` (of any role) of composite file `text` removed,

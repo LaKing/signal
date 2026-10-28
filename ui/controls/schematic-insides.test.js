@@ -336,3 +336,18 @@ test('Delete on several parts: a frame wire is an export op, left to the module�
     [['/synth', [{ op: 'instance.remove', name: 'amp' }]]],
   );
 });
+
+test('review follow-up: a slot’s own inside is listed only for its slot; a wrapped module’s note says it restarts once', async () => {
+  const { loadable, insideOwner } = await import('../lib/slot.js');
+  const { browserEntries } = await import('../lib/module-browser.js');
+  const entries = browserEntries({ primitives: [], composites: [{ module: 'voice', composite: true }, { module: 'fx_inside', composite: true, inside_of: 'fx' }, { module: 'rack_fx_inside', composite: true, inside_of: 'rack/fx' }] });
+  assert.equal(entries[1].insideOf, 'fx');
+  assert.deepEqual(loadable(entries).map((e) => e.module), ['voice'], 'Add module lists no slot’s inside');
+  assert.deepEqual(loadable(entries, insideOwner('', 'fx')).map((e) => e.module), ['voice', 'fx_inside']);
+  assert.deepEqual(loadable(entries, insideOwner('rack', 'fx')).map((e) => e.module), ['voice', 'rack_fx_inside']);
+  const graph = structuredClone(GRAPH);
+  graph.top.instances[1].slot = { ...graph.top.instances[1].slot, load: 'std.gain', inside: { level: '/fx', own: false, make: 'wrap', name: 'fx_inside' } };
+  graph.insides['/fx'].instances = [{ name: 'gain', module: 'std.gain', composite: false, ports: [], parameters: [] }];
+  assert.match(insideBanner(graph, '/fx').text, /Editing restarts this module’s sound once \(it moves into its own inside, as \/fx\/gain\)\.$/);
+  assert.doesNotMatch(insideBanner(GRAPH, '/synth').text, /restarts/, 'a copied composite plans the same: no restart');
+});

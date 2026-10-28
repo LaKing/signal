@@ -88,6 +88,8 @@ export function browserEntries(modules) {
     ports: Array.isArray(m.ports) ? m.ports : [],
     parameters: Array.isArray(m.parameters) ? m.parameters : [],
     inside: m.inside && typeof m.inside === 'object' ? m.inside : null,
+    // ADR 0037, editable insides: a slot's own inside, loaded by that slot only.
+    insideOf: typeof m.inside_of === 'string' ? m.inside_of : null,
   });
   return [...(modules?.primitives ?? []).map(entry), ...(modules?.composites ?? []).map(entry)];
 }

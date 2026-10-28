@@ -499,6 +499,20 @@ export function insideSlot(graph, levelGraph) {
   return instance ? { parent, name: slot, instance, inside: insideOf(slotOf(instance)) } : null;
 }
 
+/**
+ * The Add module browser's or the Load dialog's entries without the slots'
+ * own insides that are not `owner`'s (`inside_of`: only its slot loads one;
+ * `owner` null: none, as Add module adds no slot).
+ */
+export function loadable(entries, owner = null) {
+  return (entries ?? []).filter((e) => !e?.insideOf || e.insideOf === owner);
+}
+
+/** The `inside_of` of slot `name` at `level` (`""`: the top level): `fx`, `rack/fx`. */
+export function insideOwner(level, name) {
+  return level ? `${level}/${name}` : name;
+}
+
 /** `slot.inside`: slot `slotName`'s own inside made (`name`: the composite's, else the server's default). */
 export function insideOp(slotName, name = null) {
   const op = { op: 'slot.inside', slot: slotName };
@@ -581,7 +595,10 @@ export function insideBanner(graph, level) {
   const load = slotOf(instance)?.load ?? null;
   if (!load) return { own: false, text: `${name} is empty. Editing makes its own inside (${file}): add modules here and wire them to the frame’s pins.` };
   const what = inside?.make === 'wrap' ? `the module ${load}` : `${load}, shared`;
-  return { own: false, text: `Read-only: ${name} holds ${what}. Editing makes this slot’s own copy (${file}); ${load} stays as it is.` };
+  // A wrapped module moves one level down (`/fx` → `/fx/gain`): live, it starts again once.
+  const inner = levelData(graph, level)?.instances?.[0]?.name;
+  const restart = inside?.make === 'wrap' ? ` Editing restarts this module’s sound once (it moves into its own inside${inner ? `, as ${found.parent ? `${found.parent}/` : '/'}${name}/${inner}` : ''}).` : '';
+  return { own: false, text: `Read-only: ${name} holds ${what}. Editing makes this slot’s own copy (${file}); ${load} stays as it is.${restart}` };
 }
 
 /** Why a slot box does not open (a project as its content), or null when it does. */

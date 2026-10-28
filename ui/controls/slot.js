@@ -11,7 +11,7 @@
 // ui/lib/slot.js's.
 
 import { browserEntries } from '../lib/module-browser.js';
-import { cardTitle, contentMatch, dropLoad, loadOps, projectEntries, slotCard, unloadOp } from '../lib/slot.js';
+import { cardTitle, contentMatch, dropLoad, loadOps, loadable, projectEntries, slotCard, unloadOp } from '../lib/slot.js';
 import { SignalElement } from './base.js';
 import { BROWSER_CSS, ModuleBrowser } from './module-browser.js';
 import './knob.js';
@@ -228,7 +228,7 @@ ${BROWSER_CSS}`;
     if (!this.card || !connection?.request) return;
     this.loader.open({ where: 'at the top level', entries: null, title: this.card.empty ? `Load into ${this.card.name}` : `Replace ${this.card.content} in ${this.card.name}` });
     Promise.all([connection.request({ type: 'modules' }), connection.request({ type: 'slot.projects' }).catch(() => ({ projects: [] }))]).then(
-      ([types, folders]) => this.loader.setEntries([...projectEntries(folders), ...browserEntries(types)]),
+      ([types, folders]) => this.loader.setEntries(loadable([...projectEntries(folders), ...browserEntries(types)], this.card.name)),
       (error) => this.loader.failed(error?.message ?? String(error)),
     );
   }

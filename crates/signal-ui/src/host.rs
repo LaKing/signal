@@ -4484,14 +4484,19 @@ impl Host {
             match self.write_side(change, true) {
                 Ok(true) => sides_done.push(change),
                 outcome => {
-                    self.undo_sides(&sides_done);
+                    let left = self.undo_sides(&sides_done);
                     let why = match outcome {
                         Err(error) => error.to_string(),
                         _ => "another writer changed it meanwhile".to_owned(),
                     };
+                    let rest = if left.is_empty() {
+                        "; nothing changed".to_owned()
+                    } else {
+                        left
+                    };
                     return Err(fail(
                         "write-failed",
-                        format!("{} was not written ({why}); nothing changed", change.path),
+                        format!("{} was not written ({why}){rest}", change.path),
                     ));
                 }
             }
@@ -4501,15 +4506,15 @@ impl Host {
         let renamed =
             transaction::replace_unchanged(&path, Some(before.as_bytes()), patched.text.as_bytes())
                 .map_err(|e| {
-                    self.undo_sides(&sides_done);
-                    fail("write-failed", format!("{file} was not written: {e}"))
+                    let left = self.undo_sides(&sides_done);
+                    fail("write-failed", format!("{file} was not written: {e}{left}"))
                 })?;
         if !renamed {
-            self.undo_sides(&sides_done);
+            let left = self.undo_sides(&sides_done);
             let now = fs::read(&path).ok().map(|bytes| sha256_hex(&bytes));
             return Err(fail_with(
                 "conflict",
-                format!("{file} changed since the version the patch names"),
+                format!("{file} changed since the version the patch names{left}"),
                 json!({"level": level, "file": file, "base": now}),
             ));
         }
@@ -4549,12 +4554,17 @@ impl Host {
                     Some(patched.text.as_bytes()),
                     before.as_bytes(),
                 );
-                if matches!(put_back, Ok(true)) {
-                    self.undo_sides(&sides_done);
-                }
+                let left = if matches!(put_back, Ok(true)) {
+                    self.undo_sides(&sides_done)
+                } else {
+                    String::new()
+                };
                 let message = match put_back {
-                    Ok(true) => format!(
+                    Ok(true) if left.is_empty() => format!(
                         "{SCHEMATIC_FILE} was not written ({why}); {file} was put back: nothing changed"
+                    ),
+                    Ok(true) => format!(
+                        "{SCHEMATIC_FILE} was not written ({why}); {file} was put back{left}"
                     ),
                     Ok(false) => {
                         changed = true;
@@ -4696,11 +4706,15 @@ impl Host {
         }
     }
 
-    /// The patch's other files `done` put back (a later write failed).
-    fn undo_sides(&self, done: &[&patch::FileChange]) {
-        for change in done.iter().rev() {
-            let _ = self.write_side(change, false);
-        }
+    /// The patch's other files `done` put back (a later write failed);
+    /// what could not be put back, said (empty when all were).
+    fn undo_sides(&self, done: &[&patch::FileChange]) -> String {
+        let results: Vec<(String, std::io::Result<bool>)> = done
+            .iter()
+            .rev()
+            .map(|change| (change.path.clone(), self.write_side(change, false)))
+            .collect();
+        unrestored(&results)
     }
 
     /// ADR 0037 §2: the bindings of the project's panels on the slot ports
@@ -8073,9 +8087,47 @@ pub fn project_ui(dir: &Path) -> PathBuf {
     dir.join("ui")
 }
 
+/// ADR 0037, editable insides: what a patch's other files that could not be
+/// put back say (`"; composites/x.toml could not be put back (…): it holds
+/// the patch"`), empty when every one was.
+fn unrestored(results: &[(String, std::io::Result<bool>)]) -> String {
+    results
+        .iter()
+        .filter_map(|(path, result)| match result {
+            Ok(true) => None,
+            Ok(false) => Some(format!(
+                "; {path} could not be put back (another writer changed it meanwhile; its edit is kept)"
+            )),
+            Err(error) => Some(format!(
+                "; {path} could not be put back ({error}): it holds the patch"
+            )),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0037, editable insides: a failed put-back is said, never "nothing changed".
+    #[test]
+    fn a_side_file_not_put_back_is_said() {
+        assert_eq!(
+            unrestored(&[("composites/a.toml".to_owned(), Ok(true))]),
+            ""
+        );
+        let said = unrestored(&[
+            ("composites/a.toml".to_owned(), Ok(false)),
+            (
+                "composites/b.toml".to_owned(),
+                Err(std::io::Error::other("disk full")),
+            ),
+        ]);
+        assert_eq!(
+            said,
+            "; composites/a.toml could not be put back (another writer changed it meanwhile; its edit is kept); composites/b.toml could not be put back (disk full): it holds the patch"
+        );
+    }
 
     fn muted(address: &str, reason: FaultReason) -> Muted {
         Muted {

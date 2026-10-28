@@ -231,6 +231,15 @@ impl Project {
                     // The add browser's schematic preview: its inside as `graph` gives a composite's.
                     "inside": self.composite_level(&walk, def, ""),
                 });
+                // ADR 0037, editable insides: a slot's own inside says whose (only that slot loads it).
+                let owner = self
+                    .spans
+                    .composites
+                    .get(&def.name)
+                    .and_then(|s| s.inside_of.clone());
+                if let (Some(owner), Value::Object(fields)) = (owner, &mut entry) {
+                    fields.insert("inside_of".to_owned(), json!(owner));
+                }
                 // ADR 0027 §1: its category, only when the file names one.
                 if let (Some(category), Value::Object(fields)) =
                     (self.category(&def.name), &mut entry)
@@ -1140,7 +1149,7 @@ impl Walk<'_> {
                 key,
                 make: "copy",
                 name: name(),
-                source: None,
+                source: Some(Source::Composite(text)),
             };
         }
         match inside::source(files, load, self.registry) {
@@ -1191,34 +1200,33 @@ impl Walk<'_> {
                     source,
                     ..
                 } => {
-                    let inside = match &source {
-                        None => resolution
+                    // What `slot.inside` would write, so the preview is the copy:
+                    // its exports named after the slot's ports.
+                    let built = source
+                        .as_ref()
+                        .and_then(|source| self.preview(slot, &name, source, resolution))
+                        .map(|mut inside| {
+                            slot_frame(
+                                &mut inside,
+                                &resolution.interface,
+                                &|p: &str| Some(p.to_owned()),
+                                key,
+                            );
+                            inside
+                        });
+                    // A project composite that cannot be read alone (it includes a
+                    // project): its own level, framed through the match.
+                    let inside = built.or_else(|| {
+                        resolution
                             .load
                             .as_deref()
                             .and_then(|load| self.by_name.get(load))
                             .map(|def| {
-                                let prefix = if level.is_empty() {
-                                    format!("/{slot}")
-                                } else {
-                                    String::new()
-                                };
-                                let mut inside = self.project.composite_level(self, def, &prefix);
+                                let mut inside = self.project.composite_level(self, def, "");
                                 slot_frame(&mut inside, &resolution.interface, &matched, key);
                                 inside
-                            }),
-                        Some(source) => self.preview(level, slot, &name, source, resolution).map(
-                            |mut inside| {
-                                // Its exports are named after the slot's ports.
-                                slot_frame(
-                                    &mut inside,
-                                    &resolution.interface,
-                                    &|p: &str| Some(p.to_owned()),
-                                    key,
-                                );
-                                inside
-                            },
-                        ),
-                    };
+                            })
+                    });
                     if let Some(inside) = inside {
                         previews.insert(at, inside);
                     }
@@ -1233,7 +1241,6 @@ impl Walk<'_> {
     /// made from `source` as `slot.inside` makes it.
     fn preview(
         &self,
-        level: &str,
         slot: &str,
         name: &str,
         source: &crate::inside::Source,
@@ -1257,22 +1264,26 @@ impl Walk<'_> {
             .iter()
             .map(|p| p.name.clone())
             .collect();
-        let text =
-            inside::text(name, &inside::owner(level, slot), source, &matched, &names).ok()?;
+        // Read beside the project's other files (the composites and patterns
+        // a copy names), under a top-level slot of its name that loads it.
+        let text = inside::text(name, &inside::owner("", slot), source, &matched, &names).ok()?;
         let host = format!(
-            "schema_version = 1\n\n[project]\nname = \"inside\"\n\n[instances]\nx = {{ module = \"{name}\" }}\n"
+            "schema_version = 1\n\n[project]\nname = \"inside\"\n\n[instances]\n{slot} = {{ slot = {{}}, load = \"{name}\" }}\n"
         );
-        let project = Project::from_sources(vec![
-            SourceFile {
-                path: PROJECT_FILE.to_owned(),
-                text: host,
-            },
-            SourceFile {
-                path: format!("{}/{name}.toml", crate::COMPOSITES),
-                text,
-            },
-        ])
-        .ok()?;
+        let path = format!("{}/{name}.toml", crate::COMPOSITES);
+        let mut files: Vec<SourceFile> = self
+            .project
+            .files
+            .iter()
+            .filter(|f| f.path != PROJECT_FILE && f.path != path)
+            .cloned()
+            .collect();
+        files.push(SourceFile {
+            path: PROJECT_FILE.to_owned(),
+            text: host,
+        });
+        files.push(SourceFile { path, text });
+        let project = Project::from_sources(files).ok()?;
         let walk = project.walk(self.registry, BTreeMap::new());
         let def = project.composites.iter().find(|c| c.name == name)?;
         Some(project.composite_level(&walk, def, ""))

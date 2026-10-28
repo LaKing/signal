@@ -324,6 +324,14 @@ impl Patching<'_> {
         };
         let before = text.clone();
         for (old, new) in synced {
+            // A rename onto an export the inside has already would overwrite it.
+            if let Some(new) = new
+                && inside::has_export(&text, new)
+            {
+                return Err(bad(format!(
+                    "`{new}` is an export of composites/{name}.toml already: rename it, or remove it, first"
+                )));
+            }
             let edited = match new {
                 Some(new) => inside::rename_export(&text, old, new),
                 None => inside::remove_export(&text, old),

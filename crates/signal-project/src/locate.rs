@@ -36,6 +36,8 @@ pub(crate) struct DefSpans {
     pub(crate) category: Option<(String, Span)>,
     /// A composite's `description`.
     pub(crate) description: Option<String>,
+    /// ADR 0037, editable insides: the slot whose own inside it is.
+    pub(crate) inside_of: Option<String>,
     /// ADR 0035, 0037: the instances that include a project or are slots,
     /// by name, with what they say.
     pub(crate) contents: BTreeMap<String, ContentSpans>,

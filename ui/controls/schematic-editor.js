@@ -38,12 +38,14 @@ import {
   frameTargets,
   insideOp,
   insideOps,
+  insideOwner,
   insideSlot,
   instancePorts,
   isPreviewLevel,
   isProjectPath,
   isSlotInside,
   levelData,
+  loadable,
   loadOps,
   mapRows,
   previewSlot,
@@ -385,7 +387,8 @@ export class SchematicEditor {
     // once and nothing is asked. `inside`: each composite's, for the
     // browser's schematic preview (docs/ui-protocol.md "modules").
     const key = modulesKey(this.s.graph);
-    const known = key !== null && this.modulesKnown?.key === key ? this.modulesKnown.entries : null;
+    // ADR 0037, editable insides: a slot's own inside is not added as a module (only its slot loads it).
+    const known = key !== null && this.modulesKnown?.key === key ? loadable(this.modulesKnown.entries) : null;
     this.browser.open({ where: level.level ? `inside ${level.level}` : 'at the top level', entries: known });
     if (known) return;
     const placing = this.placing;
@@ -393,7 +396,7 @@ export class SchematicEditor {
       (modules) => {
         const entries = browserEntries(modules);
         this.modulesKnown = { key, entries };
-        if (this.placing === placing) this.browser.setEntries(entries);
+        if (this.placing === placing) this.browser.setEntries(loadable(entries));
         this.s.modulesSeen?.(modules);
       },
       (error) => {
@@ -475,7 +478,9 @@ export class SchematicEditor {
     this.loading = target;
     const title = target.slot.load ? `Replace ${target.slot.load} in ${target.name}` : `Load into ${target.name}`;
     const key = modulesKey(this.s.graph);
-    const known = key !== null && this.loadKnown?.key === key ? this.loadKnown.entries : null;
+    // ADR 0037, editable insides: of the slots' own insides, only this slot's is listed.
+    const owner = insideOwner(target.level, target.name);
+    const known = key !== null && this.loadKnown?.key === key ? loadable(this.loadKnown.entries, owner) : null;
     this.loader.open({ where: target.level ? `inside ${target.level}` : 'at the top level', entries: known, title });
     if (known) return;
     const loading = this.loading;
@@ -490,7 +495,7 @@ export class SchematicEditor {
       ([types, folders]) => {
         const entries = [...projectEntries(folders), ...browserEntries(types)];
         this.loadKnown = { key, entries };
-        if (this.loading === loading) this.loader.setEntries(entries);
+        if (this.loading === loading) this.loader.setEntries(loadable(entries, owner));
         this.s.modulesSeen?.(types);
       },
       (error) => {
