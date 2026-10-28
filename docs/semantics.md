@@ -363,6 +363,8 @@ A survivor takes the new plan's **table** (ADR 0028 §4, `module-contract.md` "T
 
 Connection changes between survivors take effect on the swap frame with no fade (crossfading changed connections is not done). This includes a disconnect that leaves a parameter with no signal sources: from the swap frame it uses its base (§5).
 
+**Changed sources** (ADR 0037 §6). A survivor's input port whose list of (source port, scale), in canonical order, differs from the old plan's is **marked**: the first call the instance makes after the swap sees `Inputs::sources_changed(port)` true (at that call's first frame; calls never span a swap, so it does not depend on the partition), and every later call false. An instance not called on the swap frame (suspended, or between its ticks, §16) sees the mark on its first call after, together with any later swap's. Added instances and unchanged ports read false; an unchanged plan marks nothing. Marking allocates nothing on the real-time thread. `std.note_seq` and `std.step_seq8` take a marked `follow` as a seek; `std.playhead` a marked `follow` as a switch (`jump`).
+
 A connection across rate divisors runs through a converter instance (§16), so changing one changes the instances, not only the connections: adding the first such connection from a source port to a divisor adds its converter, whose `audio` outputs fade in as any added instance's (below); removing the last one removes its converter, as any removal (a live edit suspends it first, so its `audio` output fades out to exactly +0.0 before the swap).
 
 ### Added instances
@@ -375,6 +377,10 @@ An added instance is created and prepared like any instance (its random stream i
 - A removal without the prior suspend drops the instance's contribution on the swap frame with no fade.
 - Outputs of other kinds hold their value while suspended (§6), so their terms step to absent at the swap.
 - **Held modulation.** A surviving parameter left with no signal sources, whose lost sources include removed instances, holds the canonical sum of `scale · output` over those removed sources, read at the commit from their outputs as readers last saw them. After the suspend-then-remove protocol that sum is exactly +0.0, so a Multiply or Replace parameter keeps the value it had under the suspension instead of returning to its base; skipping the protocol holds whatever the removed source's last output was. A surviving source that was disconnected in the same swap does not contribute. The hold lasts until a `set` (or `ramp` with *N* = 0) reaches the parameter or a later swap gives it a signal source. While it lasts, a live session differs from a fresh load of the same files.
+
+### A slot's Replace
+
+A save that changes what a slot loads (ADR 0037 §6) is sent as **two swaps**: the old content is suspended at *s*, the plan with the slot unloaded is swapped in at *s* + *F* (its audio reached exactly +0.0 at *s* + *F* − 1, the removal protocol above), and the plan with the new content at *s* + *F* + 1, whose instances are all added: they fade in from a fresh state, none survives, even where the two contents share an address and a type. Both swaps are prepared before either is sent (`Controller::prepare_swap_after`, which prepares the second against the plan the first swaps in), and a session records them as two versions, the middle one the project with the slot unloaded.
 
 ### Pushed input and effective frames
 
