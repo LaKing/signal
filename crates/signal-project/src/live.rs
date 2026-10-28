@@ -123,20 +123,45 @@ pub struct Applied {
     pub swap: Option<u64>,
     /// Instances suspended for removal before the swap.
     pub removed: usize,
+    /// Slots whose content was replaced (ADR 0037 §6): the swap above
+    /// unloaded them, and [`load_swap`](Applied::load_swap) loaded the new
+    /// content a frame later.
+    pub replaced: usize,
+    /// A Replace's second swap, which loads the new content.
+    pub load_swap: Option<u64>,
+    /// A Replace whose load could not be sent after its unload was: the
+    /// slots play empty, and the running project says so.
+    pub unfinished: bool,
 }
 
 /// What `--watch` reports: `applied a swap to version 3 (1 sets, 0 removed)`,
 /// `applied 2 sets`, or `no change to apply`.
 impl fmt::Display for Applied {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.swap {
-            Some(version) => write!(
+        match (self.swap, self.load_swap) {
+            (Some(version), Some(load)) => write!(
+                f,
+                "replaced {} slot content{}: unloaded by a swap to version {version}, loaded by a swap to version {load} ({} sets, {} removed)",
+                self.replaced,
+                if self.replaced == 1 { "" } else { "s" },
+                self.sets,
+                self.removed
+            ),
+            (Some(version), None) if self.unfinished => write!(
+                f,
+                "unloaded {} slot{} by a swap to version {version}, but the load could not be sent: the slot plays empty ({} sets, {} removed)",
+                self.replaced,
+                if self.replaced == 1 { "" } else { "s" },
+                self.sets,
+                self.removed
+            ),
+            (Some(version), _) => write!(
                 f,
                 "applied a swap to version {version} ({} sets, {} removed)",
                 self.sets, self.removed
             ),
-            None if self.sets == 0 => f.write_str("no change to apply"),
-            None => write!(f, "applied {} sets", self.sets),
+            (None, _) if self.sets == 0 => f.write_str("no change to apply"),
+            (None, _) => write!(f, "applied {} sets", self.sets),
         }
     }
 }
@@ -281,6 +306,17 @@ pub fn check_edit(
 
 /// [`send_edit`], with the Controller's polls during the edit also handed to
 /// `observer` (a UI's acknowledgements and values, M2.8-1).
+///
+/// **A Replace** (ADR 0037 §6): when a slot of the project's own files
+/// changes what it loads (another canonical `load`, both loaded), the edit is
+/// sent as an unload, then a load: the old content is suspended at *s*, the
+/// plan with those slots empty (as `slot.unload` writes them, the rest of
+/// the edit included) is swapped in at *s* + *F*, and the new project at
+/// *s* + *F* + 1, so the old content fades out to +0.0, the new one fades in,
+/// and no state carries over, even between instances whose address and type
+/// the two contents share. Both swaps are prepared before anything is sent
+/// ([`Controller::prepare_swap_after`]), and the Controller must take every
+/// command of both.
 pub fn send_edit_observed(
     controller: &mut Controller,
     live: &mut LiveRecorder,
@@ -292,8 +328,11 @@ pub fn send_edit_observed(
     let edit = diff(old, &new, registry).map_err(EditError::Invalid)?;
     let refused = |error: signal_engine::ControlError| EditError::Refused(error.to_string());
     let mut applied = Applied::default();
+    // A Replace is one even when the two contents plan alike but for their
+    // values (the same instances, other parameters): no state carries over.
+    let replaced = replaced_slots(old, &new);
     match edit {
-        ProjectEdit::Parameters(changes) => {
+        ProjectEdit::Parameters(changes) if replaced.is_empty() => {
             controller.poll(&mut Both(live, observer));
             room(controller, changes.len())?;
             for change in changes {
@@ -304,75 +343,202 @@ pub fn send_edit_observed(
             }
             Ok((new, applied))
         }
-        ProjectEdit::Structural {
-            plan,
-            removed,
-            sets,
-            ..
-        } => {
+        edit => {
             let before = old.plan(registry).map_err(EditError::Invalid)?.plan;
-            same_sink(old, &before, &new, &plan).map_err(EditError::Invalid)?;
-            // Nothing is sent unless the whole edit can complete: a removal
-            // stopped half-way would leave instances suspended in the plan
-            // that keeps playing. So the swap is prepared first (every
-            // refusal but a full queue happens there), and the batch
-            // (suspends, swap, sets) and the resumes that would undo the
-            // suspends must all fit in the queue.
-            let commands = 2 * removed.len() + 1 + sets.len();
-            controller.poll(&mut Both(live, observer));
-            room(controller, commands)?;
-            // The project that now plays, kept as planned: re-reading it from
-            // its files in memory would lose what it includes (ADR 0035).
-            let current = new.clone();
-            let plan = live
-                .swap_plan(new)
-                .map_err(|e| EditError::Refused(e.to_string()))?;
-            let ready = match controller.prepare_swap(&plan) {
-                Ok(ready) => ready,
-                Err(error) => {
-                    live.swap_not_sent();
-                    return Err(EditError::Refused(format!("{error}; nothing was sent")));
-                }
-            };
-            // Preparing can take long while the runner plays on: poll again
-            // so the frames below come from a fresh status, not one stale by
-            // the preparation (else the suspend and the swap could both be
-            // late and land on one frame, skipping the removal's fade).
-            controller.poll(&mut Both(live, observer));
-            if let Err(error) = room(controller, commands) {
-                live.swap_not_sent();
-                return Err(error);
-            }
-
-            let start = controller.default_frame();
-            for address in &removed {
-                if let Err(error) = controller.send_suspend(address.clone(), Stamp::At(start)) {
-                    live.swap_not_sent();
-                    resume(controller, &removed[..applied.removed], start);
-                    return Err(refused(error));
-                }
-                applied.removed += 1;
-            }
-            let frame = if removed.is_empty() {
-                start
+            let steps = if let ProjectEdit::Structural {
+                plan,
+                removed,
+                sets,
+                ..
+            } = edit
+                && replaced.is_empty()
+            {
+                same_sink(old, &before, &new, &plan).map_err(EditError::Invalid)?;
+                vec![Step {
+                    project: new,
+                    removed,
+                    sets,
+                }]
             } else {
-                controller.removal_swap_frame(start)
+                // Unload, then load: the slots emptied first, with the rest
+                // of the edit; then their new content, which only adds.
+                let empty = new.with_slots_emptied(&replaced);
+                let unload = diff(old, &empty, registry).map_err(EditError::Invalid)?;
+                let load = diff(&empty, &new, registry).map_err(EditError::Invalid)?;
+                let mut steps = Vec::new();
+                for (project, edit) in [(empty, unload), (new, load)] {
+                    match edit {
+                        ProjectEdit::Structural {
+                            plan,
+                            removed,
+                            sets,
+                            ..
+                        } => {
+                            same_sink(old, &before, &project, &plan).map_err(EditError::Invalid)?;
+                            steps.push(Step {
+                                project,
+                                removed,
+                                sets,
+                            });
+                        }
+                        // Nothing to swap (content without instances): its
+                        // sets, if any, go with the step before.
+                        ProjectEdit::Parameters(changes) => match steps.last_mut() {
+                            Some(last) => {
+                                last.project = project;
+                                last.sets.extend(changes);
+                            }
+                            None => steps.push(Step {
+                                project,
+                                removed: Vec::new(),
+                                sets: changes,
+                            }),
+                        },
+                    }
+                }
+                if steps.iter().skip(1).any(|s| !s.removed.is_empty()) {
+                    return Err(EditError::Refused(
+                        "a Replace's load would remove instances; nothing was sent".to_owned(),
+                    ));
+                }
+                applied.replaced = replaced.len();
+                steps
             };
-            if let Err(error) = controller.send_swap(ready, Stamp::At(frame)) {
-                live.swap_not_sent();
+            send_swaps(controller, live, observer, steps, &mut applied)
+        }
+    }
+}
+
+/// One swap of a structural edit: the project it plays, the instances it
+/// removes (suspended first) and the survivors' changed parameters.
+struct Step {
+    project: Project,
+    removed: Vec<signal_core::InstanceAddress>,
+    sets: Vec<crate::ParameterChange>,
+}
+
+/// The slots of `new`'s own files whose content differs from `old`'s, both
+/// loaded: a Replace each (ADR 0037 §6).
+fn replaced_slots(old: &Project, new: &Project) -> Vec<crate::slot::SlotKey> {
+    let before = old.slot_contents();
+    new.slot_contents()
+        .into_iter()
+        .filter(|(key, content)| before.get(key).is_some_and(|c| c != content))
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// Sends `steps` (one swap each; only the first may remove instances), the
+/// first at the default frame, after its removals' fade, each next one a
+/// frame after the one before. Nothing is sent unless every swap is
+/// prepared and the Controller can take every command, and the resumes
+/// that would undo the suspends, now.
+fn send_swaps(
+    controller: &mut Controller,
+    live: &mut LiveRecorder,
+    observer: &mut impl ControlSink,
+    steps: Vec<Step>,
+    applied: &mut Applied,
+) -> Result<(Project, Applied), EditError> {
+    let refused = |error: signal_engine::ControlError| EditError::Refused(error.to_string());
+    let removed = steps
+        .first()
+        .map_or(&[][..], |s| s.removed.as_slice())
+        .to_vec();
+    // Nothing is sent unless the whole edit can complete: a removal
+    // stopped half-way would leave instances suspended in the plan that
+    // keeps playing. So the swaps are prepared first (every refusal but a
+    // full queue happens there), and the batch (suspends, swaps, sets) and
+    // the resumes that would undo the suspends must all fit in the queue.
+    let commands = 2 * removed.len() + steps.iter().map(|s| 1 + s.sets.len()).sum::<usize>();
+    controller.poll(&mut Both(live, observer));
+    room(controller, commands)?;
+    let unsend = |live: &mut LiveRecorder, count: usize| {
+        for _ in 0..count {
+            live.swap_not_sent();
+        }
+    };
+    // The projects that play, kept as planned: re-reading one from its files
+    // in memory would lose what it includes (ADR 0035).
+    let mut planned = Vec::new();
+    let mut readies: Vec<signal_output::ReadySwap> = Vec::new();
+    for step in &steps {
+        let plan = match live.swap_plan(step.project.clone()) {
+            Ok(plan) => plan,
+            Err(error) => {
+                unsend(live, planned.len());
+                return Err(EditError::Refused(error.to_string()));
+            }
+        };
+        let ready = match readies.last() {
+            None => controller.prepare_swap(&plan),
+            Some(previous) => controller.prepare_swap_after(previous, &plan),
+        };
+        planned.push(plan.version);
+        match ready {
+            Ok(ready) => readies.push(ready),
+            Err(error) => {
+                unsend(live, planned.len());
+                return Err(EditError::Refused(format!("{error}; nothing was sent")));
+            }
+        }
+    }
+    // Preparing can take long while the runner plays on: poll again so the
+    // frames below come from a fresh status, not one stale by the
+    // preparation (else the suspend and the swap could both be late and
+    // land on one frame, skipping the removal's fade).
+    controller.poll(&mut Both(live, observer));
+    if let Err(error) = room(controller, commands) {
+        unsend(live, planned.len());
+        return Err(error);
+    }
+
+    let start = controller.default_frame();
+    for address in &removed {
+        if let Err(error) = controller.send_suspend(address.clone(), Stamp::At(start)) {
+            unsend(live, planned.len());
+            resume(controller, &removed[..applied.removed], start);
+            return Err(refused(error));
+        }
+        applied.removed += 1;
+    }
+    let mut frame = if removed.is_empty() {
+        start
+    } else {
+        controller.removal_swap_frame(start)
+    };
+    let count = steps.len();
+    let mut playing = None;
+    for (i, ((step, ready), version)) in steps.into_iter().zip(readies).zip(planned).enumerate() {
+        if let Err(error) = controller.send_swap(ready, Stamp::At(frame)) {
+            unsend(live, count - i);
+            if i == 0 {
                 resume(controller, &removed, start);
                 return Err(refused(error));
             }
-            applied.swap = Some(plan.version);
-            for change in sets {
-                controller
-                    .send_event(change.port, change.payload, Stamp::At(frame))
-                    .map_err(refused)?;
-                applied.sets += 1;
-            }
-            Ok((current, applied))
+            // A Replace whose unload went out and whose load did not (the
+            // queue was checked, so only a desynchronised Controller): the
+            // slot plays empty, which is what runs now.
+            let _ = error;
+            applied.unfinished = true;
+            break;
         }
+        if i == 0 {
+            applied.swap = Some(version);
+        } else {
+            applied.load_swap = Some(version);
+        }
+        for change in step.sets {
+            controller
+                .send_event(change.port, change.payload, Stamp::At(frame))
+                .map_err(refused)?;
+            applied.sets += 1;
+        }
+        playing = Some(step.project);
+        frame = Frame(frame.0.saturating_add(1));
     }
+    let playing = playing.ok_or_else(|| EditError::Refused("nothing was sent".to_owned()))?;
+    Ok((playing, *applied))
 }
 
 /// Why [`reload`] kept the running project.

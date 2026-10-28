@@ -1,0 +1,59 @@
+{
+  "audio_fnv1a64": "b06a1b70320c1059",
+  "frames": 768000,
+  "log_fnv1a64": "e6d65b70193e7ce8",
+  "provenance": {
+    "included_projects": [
+      {
+        "files_fnv1a64": "1e2a25074bd8e218",
+        "key": "deck_a",
+        "name": "deck",
+        "path": "./deck",
+        "seed": 11
+      },
+      {
+        "files_fnv1a64": "deed4ab9d355b204",
+        "key": "deck_b",
+        "name": "studio",
+        "path": "../studio",
+        "seed": 11
+      }
+    ],
+    "library_composite_hashes": {
+      "lib.transport": "743310655b13c16b"
+    },
+    "library_interface_hashes": {
+      "lib.deck": "c8fa72b11d0b70d4"
+    },
+    "project_file_hashes": {
+      "include:deck_a/composites/clap909.toml": "2f6e22d11586da8e",
+      "include:deck_a/composites/cymbal909.toml": "0ba56cff3a798efb",
+      "include:deck_a/composites/hat909.toml": "287b32ff5dba47b7",
+      "include:deck_a/composites/kick909.toml": "b928b88f8fb852ef",
+      "include:deck_a/composites/moog_voice.toml": "1fd0fe6fdcfdbf18",
+      "include:deck_a/composites/rim909.toml": "fcac79fa4056e542",
+      "include:deck_a/composites/snare909.toml": "b59c9f04b34cc358",
+      "include:deck_a/composites/tape_delay.toml": "b841812dc9545e83",
+      "include:deck_a/composites/tom909.toml": "9b41bb05c0ded590",
+      "include:deck_a/composites/transport.toml": "223cc5c09906ce9f",
+      "include:deck_a/patterns/drums.toml": "bc929ae84981ba3b",
+      "include:deck_a/patterns/melody.toml": "59a9561e0b85b3e2",
+      "include:deck_a/project.toml": "b12d3427ab860d6f",
+      "include:deck_b/composites/clap909.toml": "2f6e22d11586da8e",
+      "include:deck_b/composites/cymbal909.toml": "0ba56cff3a798efb",
+      "include:deck_b/composites/hat909.toml": "287b32ff5dba47b7",
+      "include:deck_b/composites/kick909.toml": "b928b88f8fb852ef",
+      "include:deck_b/composites/moog_voice.toml": "1fd0fe6fdcfdbf18",
+      "include:deck_b/composites/rim909.toml": "fcac79fa4056e542",
+      "include:deck_b/composites/snare909.toml": "b59c9f04b34cc358",
+      "include:deck_b/composites/tape_delay.toml": "b841812dc9545e83",
+      "include:deck_b/composites/tom909.toml": "9b41bb05c0ded590",
+      "include:deck_b/patterns/drums.toml": "bc929ae84981ba3b",
+      "include:deck_b/patterns/melody.toml": "59a9561e0b85b3e2",
+      "include:deck_b/project.toml": "8dc10070eec67261",
+      "project.toml": "7b69b28e58e4496c"
+    }
+  },
+  "sample_rate": 48000,
+  "seed": 7
+}

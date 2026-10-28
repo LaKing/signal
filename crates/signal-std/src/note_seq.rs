@@ -432,7 +432,10 @@ impl NoteSeq {
         for n in 0..inputs.frames() {
             let now = positions.get(n).copied().unwrap_or(0.0);
             let mut frame = Frame::default();
-            let motion = if triggered(inputs.events(RESET), &mut next_reset, n) {
+            // ADR 0037 §6: a swap that gave `follow` other sources (another
+            // transport) is a seek on its first frame, as a reset is.
+            let rewired = n == 0 && inputs.sources_changed(FOLLOW_PORT);
+            let motion = if triggered(inputs.events(RESET), &mut next_reset, n) || rewired {
                 Motion::Seek
             } else {
                 follow::motion(self.last, now, period)

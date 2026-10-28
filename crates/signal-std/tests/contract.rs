@@ -64,6 +64,10 @@ mod playhead {
     signal_contract::contract_tests!(super::std_type("std.playhead"));
 }
 
+mod prefer {
+    signal_contract::contract_tests!(super::std_type("std.prefer"));
+}
+
 mod audio_out {
     signal_contract::contract_tests!(super::std_type("std.audio_out"));
 }

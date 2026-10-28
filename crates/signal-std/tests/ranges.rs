@@ -118,6 +118,10 @@ fn the_value_sets_name_what_the_rustdoc_names() {
         labels("std.playhead", "run"),
         [(0.0, "stopped"), (1.0, "running")]
     );
+    assert_eq!(
+        labels("std.playhead", "release"),
+        [(0.0, "continue"), (1.0, "return")]
+    );
     assert_eq!(labels("std.biquad", "mode").len(), 8);
 }
 
@@ -130,6 +134,12 @@ fn the_value_sets_name_what_the_rustdoc_names() {
 /// snapped value ([`signal_core::ParameterDescriptor::snapped`]). A
 /// parameter whose values all render alike under the stimulus is listed,
 /// so the sweep cannot pass by not reaching it.
+/// Parameters read only when the plan's wiring changes, which a stimulus of
+/// one call cannot do: `std.playhead.release` is read on the frame
+/// following stops (a swap that disconnects `follow`, ADR 0037 §6); its
+/// snapping is checked against `process` in `playhead.rs`'s tests.
+const WIRING_ONLY: &[&str] = &["std.playhead.release"];
+
 #[test]
 fn a_value_set_snaps_as_process_reads_it() {
     const FRAMES: usize = 512;
@@ -172,7 +182,7 @@ fn a_value_set_snaps_as_process_reads_it() {
             }
             let renders: std::collections::BTreeSet<String> =
                 entries.iter().map(|v| render(*v)).collect();
-            if entries.len() > 1 && renders.len() < 2 {
+            if entries.len() > 1 && renders.len() < 2 && !WIRING_ONLY.contains(&at.as_str()) {
                 unreached.push(at);
             }
         }
@@ -204,6 +214,8 @@ fn the_reviewed_values_snap_as_they_played() {
     assert_eq!(snapped("std.osc", "shape", 0.49999999999999994), 1.0);
     assert_eq!(snapped("std.fm_op", "mode", 0.5), 1.0);
     assert_eq!(snapped("std.playhead", "run", 0.5), 1.0);
+    assert_eq!(snapped("std.playhead", "release", 0.5), 1.0);
+    assert_eq!(snapped("std.playhead", "release", 0.4999), 0.0);
     assert_eq!(snapped("std.to_events", "on_change", 0.3), 1.0);
     assert_eq!(snapped("std.to_events", "on_change", 0.0), 0.0);
     assert_eq!(snapped("std.table16", "wrap", 0.4), 1.0);

@@ -299,6 +299,9 @@ struct Inst {
     row_ports: Vec<PortAddress>,
     /// Per descriptor port: whether a connection reaches it (ADR 0033).
     connected: Vec<bool>,
+    /// Per descriptor port: whether a swap since its last call changed its
+    /// sources (ADR 0037 §6); handed to its next call, then cleared.
+    sources_changed: Vec<bool>,
 }
 
 impl Inst {
@@ -354,6 +357,9 @@ struct Plan {
     event_owner: Vec<usize>,
     sink: Option<usize>,
     fade: u64,
+    /// Each target's sources as (source port, scale bits), sorted: what the
+    /// next swap compares a survivor's inputs with (ADR 0037 §6).
+    incoming: BTreeMap<PortAddress, Vec<(PortAddress, u64)>>,
 }
 
 impl Plan {
@@ -384,6 +390,7 @@ impl Plan {
             event_owner: Vec::new(),
             sink: None,
             fade: fade_frames(script.sample_rate),
+            incoming: BTreeMap::new(),
         };
         // Old instance index of each survivor.
         let mut survivors: Vec<Option<usize>> = Vec::new();
@@ -451,6 +458,7 @@ impl Plan {
                 live: Vec::new(),
                 row_ports: Vec::new(),
                 connected: vec![false; descriptor.ports.len()],
+                sources_changed: vec![false; descriptor.ports.len()],
             };
             for port in descriptor.ports {
                 let address = port_address(&spec.address, port.name)?;
@@ -518,6 +526,8 @@ impl Plan {
                 inst.discards = before.discards;
                 inst.suspension_discards = before.suspension_discards;
                 inst.edited_at = before.edited_at;
+                // A change it has not seen yet stays to be seen (§12).
+                inst.sources_changed = before.sources_changed.clone();
                 inst.held = before.held.clone();
                 inst.live = before.live.clone();
                 for (&new, &was) in inst.outputs.iter().zip(&before.outputs) {
@@ -543,6 +553,31 @@ impl Plan {
         }
 
         plan.connect(graph)?;
+        for c in &graph.connections {
+            plan.incoming
+                .entry(c.to.clone())
+                .or_default()
+                .push((c.from.clone(), c.scale.to_bits()));
+        }
+        for list in plan.incoming.values_mut() {
+            list.sort();
+        }
+        if let Some(old) = &old {
+            for (inst, survivor) in plan.instances.iter_mut().zip(&survivors) {
+                if survivor.is_none() {
+                    continue;
+                }
+                for (i, port) in inst.descriptor.ports.iter().enumerate() {
+                    if port.direction != Direction::In {
+                        continue;
+                    }
+                    let address = port_address(&inst.address, port.name)?;
+                    if plan.incoming.get(&address) != old.incoming.get(&address) {
+                        inst.sources_changed[i] = true;
+                    }
+                }
+            }
+        }
         plan.order = plan.direct_order()?;
         if let Some(old) = &old {
             plan.hold_modulation(old, &survivors);
@@ -943,7 +978,8 @@ impl Plan {
                 }
                 let params: Vec<f64> = inst.params.iter().map(|p| p.effective).collect();
                 let inputs = Inputs::new(1, &inst.signal_in, &params, &inst.events, &inst.ends)
-                    .with_connected(&inst.connected);
+                    .with_connected(&inst.connected)
+                    .with_sources_changed(&inst.sources_changed);
                 let mut out = Outputs::new(1, &mut outputs, &mut inst.sinks);
                 let ok = match &mut inst.primitive {
                     Primitive::Direct(module) => {
@@ -951,6 +987,7 @@ impl Plan {
                     }
                     Primitive::StateOutput(_) => true,
                 };
+                inst.sources_changed.fill(false);
                 self.commit(i, n, ok, &outputs, records);
             }
             Mode::Suspended => self.fade_suspended(i),
@@ -1001,13 +1038,15 @@ impl Plan {
         let inst = &mut self.instances[i];
         let params: Vec<f64> = inst.params.iter().map(|p| p.effective).collect();
         let inputs = Inputs::new(1, &inst.signal_in, &params, &inst.events, &inst.ends)
-            .with_connected(&inst.connected);
+            .with_connected(&inst.connected)
+            .with_sources_changed(&inst.sources_changed);
         let ok = match &mut inst.primitive {
             Primitive::StateOutput(module) => {
                 catch_unwind(AssertUnwindSafe(|| module.absorb(&inputs))).is_ok()
             }
             Primitive::Direct(_) => true,
         };
+        inst.sources_changed.fill(false);
         if !ok {
             for (held, &o) in inst.held.iter_mut().zip(&inst.outputs) {
                 *held = self.outputs[o];

@@ -136,7 +136,8 @@ fn a_removal_suspends_then_swaps_and_replays() {
         Applied {
             sets: 0,
             swap: Some(1),
-            removed: 3
+            removed: 3,
+            ..Applied::default()
         }
     );
     run(&mut driver, &mut controller, &mut live, 8_192);

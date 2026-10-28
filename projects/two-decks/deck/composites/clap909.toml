@@ -1,0 +1,58 @@
+# The hand clap: noise through a band-pass, shaped by a retriggered burst
+# envelope and a tail. The bursts are a falling ramp at 95 Hz (1 − phasor,
+# the phasor reset by the trigger) inside a fast-decaying window: three or four
+# claps about 10 ms apart. The tail rises over 25 ms as they end and decays
+# with `decay`.
+#
+#   (1 − phasor) × window ─┐
+#   tail × 0.55 ──────────── add ─► × velocity ─► × noise band-pass (`tone`) ─► level
+#
+# The velocity scales the envelope (a control signal), not the audio.
+schema_version = 1
+
+[composite]
+name = "clap909"
+
+[instances]
+phasor = { module = "std.phasor", freq = 95 }
+ramp = { module = "std.scale", mul = -1, add = 1 }
+window = { module = "std.exp_env", attack_ms = 0, decay_ms = 13 }
+bursts = { module = "std.mul" }
+tail = { module = "std.exp_env", attack_ms = 25, decay_ms = 130 }
+tail_level = { module = "std.scale", mul = 0.55, add = 0 }
+env = { module = "std.add" }
+env_amp = { module = "std.mul" }
+noise = { module = "std.noise" }
+band = { module = "std.svf", cutoff_hz = 1100, q = 2.5 }
+clap = { module = "std.mul" }
+velocity = { module = "std.const", value = 1 }
+# The band-pass leaves about a third of the noise; this restores the level.
+level = { module = "std.gain", db = 6 }
+
+[wiring]
+connections = [
+  { from = "phasor.phase", to = "ramp.in" },
+  { from = "ramp.out", to = "bursts.a" },
+  { from = "window.out", to = "bursts.b" },
+  { from = "bursts.out", to = "env.a" },
+  { from = "tail.out", to = "tail_level.in" },
+  { from = "tail_level.out", to = "env.b" },
+  { from = "env.out", to = "env_amp.a" },
+  { from = "velocity.out", to = "env_amp.b" },
+  { from = "noise.out", to = "band.in" },
+  { from = "band.bp", to = "clap.a" },
+  { from = "env_amp.out", to = "clap.b" },
+  { from = "clap.out", to = "level.in" },
+]
+
+[exports]
+inputs = { trigger = ["phasor.reset", "window.trigger", "tail.trigger"] }
+outputs = { out = "level.out" }
+
+# The exported parameters, each with its own range where it has one (ADR
+# 0042): a control reaches no value outside it.
+[exports.parameters]
+tone = { to = "band.cutoff_hz", min = 200, max = 8000 }
+decay = { to = "tail.decay_ms", min = 10, max = 2000 }
+level = { to = "level.db", min = -120, max = 12 }
+velocity = { to = "velocity.value", min = 0, max = 2 }

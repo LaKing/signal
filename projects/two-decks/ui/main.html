@@ -1,0 +1,54 @@
+<!doctype html>
+<!-- The two-decks panel (ADR 0037): the host's transport, which deck A
+     follows; a card per deck slot (<signal-slot>: what it loads, Load…,
+     Replace…, Unload, its ports and its interface parameter `release`);
+     deck A's release as a switch (0 continue, 1 return: what its playhead
+     does when the host lets go of it); the decks' scopes, reached through
+     the slots' matched outputs, and the mix's meters. `signal ui check
+     projects/two-decks` checks the bindings. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>two-decks</title>
+<link rel="stylesheet" href="/ui/controls/theme.css">
+</head>
+<body>
+<signal-panel>
+  <div class="signal-cards">
+    <section class="signal-card wide title">
+      <h1>two-decks</h1>
+      <p>Two whole projects in two deck slots, mixed: deck A follows the host's transport, deck B keeps its own time. Replace what a deck loads while it plays: the old one fades out, the new one fades in.</p>
+    </section>
+    <section class="signal-card wide transport">
+      <h2>Transport</h2>
+      <div class="row">
+        <signal-toggle bind="/transport.run" min="0" max="1" label="play"></signal-toggle>
+        <signal-button bind="/transport/playhead.seek" label="rewind"></signal-button>
+        <signal-knob bind="/transport.bpm" min="60" max="180" label="tempo"></signal-knob>
+        <signal-fader bind="/transport.rate" min="-2" max="2" label="rate"></signal-fader>
+        <signal-toggle bind="/deck_a.release" min="0" max="1" label="A returns on release"></signal-toggle>
+      </div>
+    </section>
+    <section class="signal-card">
+      <signal-slot bind="/deck_a"></signal-slot>
+    </section>
+    <section class="signal-card">
+      <signal-slot bind="/deck_b"></signal-slot>
+    </section>
+    <section class="signal-card">
+      <h2>Mix</h2>
+      <div class="row">
+        <signal-meter bind="/out.l" label="L"></signal-meter>
+        <signal-meter bind="/out.r" label="R"></signal-meter>
+      </div>
+      <signal-scope bind="/deck_a.l" rate="24000" label="deck A"></signal-scope>
+      <signal-scope bind="/deck_b.l" rate="24000" label="deck B"></signal-scope>
+    </section>
+  </div>
+</signal-panel>
+<script type="module">
+import '/ui/controls/index.js';
+</script>
+</body>
+</html>

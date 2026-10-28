@@ -325,6 +325,18 @@ fn entry<'d>(doc: &'d mut DocumentMut, name: &str) -> Option<Tab<'d>> {
     }
 }
 
+/// `text` (a level's file) with slot `slot` unloaded as `slot.unload`
+/// writes it: its `load` and `seed` removed, every other byte kept. `None`
+/// when the file does not parse or has no such entry. What a Replace's
+/// first swap plays (ADR 0037 §6, `live.rs`).
+pub(crate) fn unloaded_text(text: &str, slot: &str) -> Option<String> {
+    let mut doc: DocumentMut = text.parse().ok()?;
+    let mut tab = entry(&mut doc, slot)?;
+    tab.write("load", None, None);
+    tab.write("seed", None, None);
+    Some(doc.to_string())
+}
+
 /// Applies `change` to slot `slot`'s entry in `doc`; returns its inverse.
 /// Applies `change` to slot `slot`'s entry in `doc`; returns its inverse,
 /// preceded by the removals of the tables it had to make (outermost first),

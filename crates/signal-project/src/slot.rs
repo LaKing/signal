@@ -466,7 +466,83 @@ struct Resolved {
 /// The exports each definition lost to an unmatched or empty slot.
 type Vanished = BTreeMap<String, BTreeSet<String>>;
 
+/// A slot of a project's own files: the definition naming it (`""`: the
+/// project root) and its instance name.
+pub(crate) type SlotKey = (String, String);
+
 impl Project {
+    /// ADR 0037 §6: every loaded slot of the project's own files (its root
+    /// and its composites) with what decides "the same content": the
+    /// canonical folder of a project it loads, else the module reference
+    /// its `load` resolves to. Two values that differ make a Replace.
+    pub(crate) fn slot_contents(&self) -> BTreeMap<SlotKey, String> {
+        let mut found = BTreeMap::new();
+        let defs = std::iter::once(("", &self.root, &self.spans.root)).chain(
+            self.composites
+                .iter()
+                .filter_map(|c| Some((c.name.as_str(), c, self.spans.composites.get(&c.name)?))),
+        );
+        for (name, def, spans) in defs {
+            for (slot, content) in &spans.contents {
+                if content.slot.as_ref().is_none_or(|s| s.load.is_none()) {
+                    continue;
+                }
+                let Some(instance) = def.instances.iter().find(|i| i.name == *slot) else {
+                    continue;
+                };
+                let canonical = match &content.included {
+                    Some(dir) => format!("project {}", dir.display()),
+                    None => format!("module {}", instance.module),
+                };
+                found.insert((name.to_owned(), slot.clone()), canonical);
+            }
+        }
+        found
+    }
+
+    /// This project with the slots `slots` unloaded: their content gone
+    /// from the plan, and their files written as `slot.unload` writes
+    /// them (`load` and `seed` removed), so the result is a project its
+    /// own files say. What a Replace plays between its unload and its load
+    /// (ADR 0037 §6). A key naming no slot is skipped.
+    pub(crate) fn with_slots_emptied(&self, slots: &[SlotKey]) -> Project {
+        let mut project = self.clone();
+        for (def, slot) in slots {
+            let found = if def.is_empty() {
+                Some((&mut project.root, &mut project.spans.root))
+            } else {
+                project
+                    .composites
+                    .iter_mut()
+                    .find(|c| c.name == *def)
+                    .zip(project.spans.composites.get_mut(def))
+            };
+            let Some((composite, spans)) = found else {
+                continue;
+            };
+            let Some(content) = spans.contents.get_mut(slot) else {
+                continue;
+            };
+            if let Some(written) = &mut content.slot {
+                written.load = None;
+            }
+            content.included = None;
+            content.seed = None;
+            composite.instances.retain(|i| i.name != *slot);
+            let file = spans.file;
+            project
+                .content
+                .entries
+                .retain(|e| !(e.def == *def && e.instance == *slot));
+            if let Some(source) = project.files.get_mut(file)
+                && let Some(text) = crate::patch::unloaded_text(&source.text, slot)
+            {
+                source.text = text;
+            }
+        }
+        project
+    }
+
     /// ADR 0037 §4–5: every slot of `root` and of `defs` resolved into an
     /// ordinary instance of its content, or into nothing for an empty
     /// slot, with the wires on matched ports renamed to the content's names
