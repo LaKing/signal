@@ -126,13 +126,25 @@ export class PatchSession {
     return result;
   }
 
-  /** The `patch` of `ops` (step 0: a new patch, -1 undo, +1 redo), or `{refused}` while one is written. */
-  request(level, ops, step = 0) {
+  /**
+   * The `patch` of `ops` (step 0: a new patch, -1 undo, +1 redo), or
+   * `{refused}` while one is written. `views`: the other levels shown from
+   * which it is written (ADR 0037, editable insides: a slot's inside, for
+   * its `slot.inside` and interface edits at the slot's level); its undo and
+   * redo are written from them too.
+   */
+  request(level, ops, step = 0, views = []) {
     if (this.pending) return { refused: 'Writing the last change: try again' };
     const base = this.bases.get(level);
     if (!base) return { refused: 'The level’s file is not known yet' };
-    this.pending = { level, ops, step, project: this.project };
+    this.pending = { level, ops, step, project: this.project, views: [...views] };
     return { message: patchMessage(level, base, ops), pending: this.pending };
+  }
+
+  /** The levels shown besides its own from which the undo (-1) or redo (+1) may be written. */
+  viewsOf(step) {
+    const entry = step < 0 ? this.history.undo() : step > 0 ? this.history.redo() : null;
+    return entry?.views ?? [];
   }
 
   /** The level a write of `step` (0: a new patch at `level`, -1 undo, +1 redo) would patch, or null when there is none to write. */
@@ -159,8 +171,18 @@ export class PatchSession {
     if (!pending || pending !== this.pending) return;
     this.pending = null;
     this.bases.set(reply.level ?? pending.level, reply.base);
-    if (pending.step === 0) this.history.push({ level: pending.level, forward: pending.ops, backward: reply.inverse });
-    else this.history.moved(pending.step, reply.inverse);
+    // ADR 0037, editable insides: the other files the patch wrote (a slot's own inside), by level; null: removed.
+    for (const file of reply.files ?? []) {
+      if (typeof file?.level !== 'string') continue;
+      if (file.base) this.bases.set(file.level, file.base);
+      else this.bases.delete(file.level);
+    }
+    if (pending.step === 0) {
+      const entry = { level: pending.level, forward: pending.ops, backward: reply.inverse };
+      const views = [...(pending.views ?? []), ...(reply.files ?? []).map((f) => f?.level).filter((l) => typeof l === 'string')];
+      if (views.length) entry.views = [...new Set(views)];
+      this.history.push(entry);
+    } else this.history.moved(pending.step, reply.inverse);
   }
 
   /**

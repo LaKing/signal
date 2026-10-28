@@ -7,6 +7,7 @@
 // apply is disabled, its title saying why. No DOM.
 
 import { removeConnection, written } from './schematic-patch.js';
+import { insideReason } from './slot.js';
 
 const SEPARATOR = { id: 'separator' };
 /** Trace signal (ADR 0030 §1): the part's path upstream and downstream, across composites; T on the selection. */
@@ -58,12 +59,12 @@ function partMenu(hit, state) {
   if (hit?.kind === 'instance') {
     const composite = Boolean(hit.node?.composite);
     const slot = hit.node?.slot ?? null;
-    const notComposite = composite ? null : slot ? (slot.load ? 'Its content is not a project composite' : 'An empty slot has no inside') : 'A primitive has no inside';
+    const notComposite = composite ? null : slot ? (insideReason(slot) ?? (slot.load ? 'Its content is not a project composite' : 'An empty slot has no inside')) : 'A primitive has no inside';
     const items = [unless({ id: 'inspect', label: 'Inspect' }, null), unless(TRACE, null)];
     if (composite && state.open) items.push(unless({ id: 'close', label: 'Close' }, null));
     else items.push(unless({ id: 'open', label: 'Open in place' }, notComposite ?? (state.opaque ? 'A library composite: its inside is not in the graph' : null)));
     items.push(unless({ id: 'enter', label: 'Enter' }, notComposite), SEPARATOR, unless({ id: 'copy-address', label: 'Copy address' }, null), SEPARATOR);
-    if (slot) items.push(...slotItems(slot, editOff), SEPARATOR);
+    if (slot) items.push(...slotItems(slot, editOff, notComposite), SEPARATOR);
     if (composite && state.open) items.push(unless({ id: 'add', label: 'Add module here…' }, inside ?? (state.addable ? null : 'Nothing can be added here')));
     if (composite && state.open) items.push(unless({ id: 'add-slot', label: 'Add slot here…' }, inside ?? (state.addable ? null : 'Nothing can be added here')));
     items.push(unless({ id: 'make-interface', label: 'Make interface from this instance…', title: 'Write its ports and parameters as interfaces/<name>.toml, a template slots may start from' }, editOff));
@@ -72,6 +73,8 @@ function partMenu(hit, state) {
   }
   if (hit?.kind === 'wire') {
     const exported = hit.wire?.kind === 'connection' ? null : 'An export is not edited here';
+    // ADR 0037, editable insides: a slot inside's frame wire (an export op) is deleted, not scaled.
+    const frame = hit.wire?.kind === 'export' && hit.wire.written?.role ? null : exported;
     return [
       unless({ id: 'inspect', label: 'Inspect' }, null),
       unless(TRACE, null),
@@ -81,7 +84,7 @@ function partMenu(hit, state) {
       unless({ id: 'target', label: 'Go to target' }, null),
       unless({ id: 'copy-address', label: 'Copy addresses' }, null),
       SEPARATOR,
-      unless({ id: 'delete', label: 'Delete connection' }, editOff ?? exported),
+      unless({ id: 'delete', label: 'Delete connection' }, editOff ?? frame),
     ];
   }
   if (hit?.kind === 'port') {
@@ -110,9 +113,12 @@ function partMenu(hit, state) {
     return items;
   }
   const level = state.level ? state.level : 'top level';
+  // ADR 0037, editable insides: inside a slot, its interface (the frame's pins) is edited from here too.
+  const insideItems = state.slotInside ? [unless({ id: 'slot-interface-inside', label: 'Edit the slot’s interface…', title: 'Add, remove, rename or retype the frame’s pins: the slot’s ports' }, editOff)] : [];
   return [
     unless({ id: 'add', label: 'Add module here…' }, editOff ?? (state.addable ? null : 'Nothing can be added here')),
     unless({ id: 'add-slot', label: 'Add slot here…', title: 'A slot: an instance whose ports are its own interface, and whose content is loaded into it (ADR 0037)' }, editOff ?? (state.addable ? null : 'Nothing can be added here')),
+    ...insideItems,
     SEPARATOR,
     unless({ id: 'fit', label: 'Fit' }, null),
     unless({ id: 'reset-layout', label: `Reset layout (${level})`, title: `Forget the moved positions of ${state.level ? state.level : 'the top level'}` }, null),
@@ -127,10 +133,12 @@ function partMenu(hit, state) {
  * template… and Detach from template (off without a template); each off
  * with `editOff`'s reason outside Edit patch.
  */
-function slotItems(slot, editOff) {
+function slotItems(slot, editOff, closed = null) {
   const loaded = typeof slot.load === 'string' && slot.load !== '';
   const template = slot.from ?? slot.interface?.from ?? null;
   return [
+    // ADR 0037, editable insides: open it to edit what is inside (read-only until the first edit makes its own copy).
+    unless({ id: 'slot-inside', label: 'Edit inside', title: 'Open the slot in place: what you change there becomes its own inside' }, closed),
     loaded ? unless({ id: 'slot-replace', label: 'Replace…', title: `Load other content in place of ${slot.load}` }, editOff) : unless({ id: 'slot-load', label: 'Load…' }, editOff),
     unless({ id: 'slot-unload', label: 'Unload' }, editOff ?? (loaded ? null : 'The slot is empty')),
     unless({ id: 'slot-map', label: 'Edit map…' }, editOff),

@@ -75,8 +75,8 @@ import { badgeText, behind, parentPath, resolver, splitAddress, startOf, trace, 
 import { moduleInfo, projectKey } from '../lib/schematic-palette.js';
 import { allOf, deletePlan, dragGroup, has, hitKey, inside, moveMessages, reselectAll, toggled, traceTarget, union } from '../lib/schematic-select.js';
 import { formatFixed } from '../lib/format.js';
-import { HEADER, addPinAt, dragPosition, layout } from '../lib/schematic-layout.js';
-import { unmatchedReason } from '../lib/slot.js';
+import { HEADER, addPinAt, dragPosition, insideKey, layout } from '../lib/schematic-layout.js';
+import { insideBanner, insideReason, isPreviewLevel, isSlotInside, levelData, unmatchedReason } from '../lib/slot.js';
 import { DragFollow, ownedLabels } from '../lib/schematic-drag.js';
 import { aroundReason, closeBox, closeShown, closeText, crumbView, drawOrder, editable, editLevel, enterView, pinOne, unpin } from '../lib/schematic-open.js';
 import { boundaryLinks, breadcrumbs, chain, levelRect, nodeRect, openAnchor, rebase, reroot, scene } from '../lib/schematic-scene.js';
@@ -158,6 +158,11 @@ svg.closing { cursor: pointer; }
 .slot-content { font-style: italic; }
 .node > .pin.unmatched { fill: var(--signal-bg, #16181d); stroke-dasharray: 2 2; }
 .add-pin { fill: var(--signal-accent, #4fc3f7); font-weight: 700; cursor: pointer; }
+/* ADR 0037, editable insides: what a slot's inside shown is (its own, or read-only until the first edit makes it). */
+.inside-note { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); max-width: 80%; padding: 4px 10px; font-size: 12px; pointer-events: none; visibility: hidden;
+  background: var(--signal-panel, #1f232b); border: 1px solid var(--signal-accent, #4fc3f7); border-radius: var(--signal-radius, 6px); }
+.inside-note.read-only { border-color: var(--signal-effective, #ffb74d); }
+.inside-note.shown { visibility: visible; }
 :host(:not([editing])) .add-pin { display: none; }
 .node > .pin.hover { stroke: var(--signal-fg, #d6dbe4); stroke-width: 2.5; }
 /* A selected pin: its stroke in the focus colour, and a ring twice its size around it, with a halo. */
@@ -463,7 +468,9 @@ export class SignalSchematic extends HTMLElement {
     this.staleBox = html('section', { className: 'diagnostics' });
     this.tip = html('div', { className: 'tip' });
     this.marquee = html('div', { className: 'marquee' });
-    this.stage.append(this.svg, this.message, this.staleBox, this.tip, this.marquee);
+    // ADR 0037, editable insides: a slot's inside shown says whose it is, or that an edit makes it the slot's own.
+    this.insideNote = html('div', { className: 'inside-note', role: 'status' });
+    this.stage.append(this.svg, this.message, this.staleBox, this.tip, this.marquee, this.insideNote);
     const main = html('div', { className: 'main' });
     main.append(this.bar, this.stage);
     root.append(style, this.buildSide(), main);
@@ -655,11 +662,12 @@ export class SignalSchematic extends HTMLElement {
   layoutOf(level) {
     if (!this.graph) return null;
     if (!this.layouts.has(level)) {
-      const source = level === '' ? this.graph.top : this.graph.composites?.[level];
+      // ADR 0037, editable insides: a slot's read-only inside (`graph.insides`) too.
+      const source = levelData(this.graph, level);
       if (!source) return null;
       const stored = { ...(this.graph.layout?.positions?.[level] ?? {}), ...Object.fromEntries(this.moved.get(level) ?? []) };
       // M2.13-2: a composite's box lays its pins out in groups (ui/lib/schematic-groups.js).
-      this.layouts.set(level, layout(source, stored, { factsOf: (module) => exportFacts(this.graph.composites?.[module] ?? null) }));
+      this.layouts.set(level, layout(source, stored, { factsOf: (module) => exportFacts(module === '' ? null : levelData(this.graph, module)) }));
     }
     return this.layouts.get(level);
   }
@@ -1022,8 +1030,11 @@ export class SignalSchematic extends HTMLElement {
       const portAddress = node.kind === 'instance' ? `${address}.${pin.name}` : `${level.path}.${pin.name}`;
       // ADR 0037 §7: an unmatched slot port's pin is hollow, the reason in its tooltip.
       const reason = slotted ? unmatchedReason(slotted, pin.name) : null;
-      const kind = ['pin', pin.shape, pin.parameter ? 'parameter' : '', pin.connected ? 'connected' : '', reason ? 'unmatched' : ''].filter(Boolean).join(' ');
-      const data = { class: kind, 'data-address': portAddress, 'data-direction': pin.direction, 'data-label': reason ? `${pin.name}: unmatched, ${reason}` : pin.name, 'data-part': 'schematic' };
+      // ADR 0037, editable insides: a slot inside's frame pin not wired inside yet is hollow too.
+      const loose = node.kind !== 'instance' && pin.unmatched;
+      const kind = ['pin', pin.shape, pin.parameter ? 'parameter' : '', pin.connected ? 'connected' : '', reason || loose ? 'unmatched' : ''].filter(Boolean).join(' ');
+      const label = reason ? `${pin.name}: unmatched, ${reason}` : loose ? `${pin.name}: not wired inside yet` : pin.name;
+      const data = { class: kind, 'data-address': portAddress, 'data-direction': pin.direction, 'data-label': label, 'data-part': 'schematic' };
       const shape = bakedPin(baked, level.transform, this.viewport, pin, radius);
       if (shape.circle) group.append(el('circle', { ...data, ...shape.circle }));
       else if (shape.polygon.length) group.append(el('polygon', { ...data, points: shape.polygon.map((p) => `${p.x},${p.y}`).join(' ') }));
@@ -1181,6 +1192,7 @@ export class SignalSchematic extends HTMLElement {
   }
 
   drawCrumbs() {
+    this.drawInsideNote();
     const crumbs = breadcrumbs(this.drawn);
     const key = `${this.graph.project}\n${crumbs.map((c) => c.path).join('\n')}`;
     if (key === this.crumbKey) return;
@@ -1215,6 +1227,15 @@ export class SignalSchematic extends HTMLElement {
     cut.title = buttons.filter((b) => b.hidden).map((b) => b.textContent).join(' / ');
   }
 
+  /** ADR 0037, editable insides: the note over a slot's inside shown as the innermost level (`insideBanner`). */
+  drawInsideNote() {
+    const note = this.graph ? insideBanner(this.graph, this.currentLevel()) : null;
+    const text = note?.text ?? '';
+    if (this.insideNote.textContent !== text) this.insideNote.textContent = text;
+    this.insideNote.classList.toggle('shown', Boolean(note));
+    this.insideNote.classList.toggle('read-only', Boolean(note && !note.own));
+  }
+
   /** The level shown: the deepest breadcrumb's (`""` the top level, else its composite). */
   currentLevel() {
     return this.drawn ? breadcrumbs(this.drawn).at(-1).level : '';
@@ -1243,7 +1264,7 @@ export class SignalSchematic extends HTMLElement {
    */
   openInPlace(hit, at) {
     if (hit?.kind !== 'instance' || hit.node.kind !== 'instance' || !hit.node.composite || this.drawn?.open.has(hit.address)) return false;
-    if (!this.layoutOf(hit.node.module) || !chain((level) => this.layoutOf(level), hit.address)) return false;
+    if (!this.layoutOf(insideKey(hit.node)) || !chain((level) => this.layoutOf(level), hit.address)) return false;
     this.pinned = pinOne(this.pinned, hit.address);
     this.openedAt = at;
     this.schedule();
@@ -1482,6 +1503,12 @@ export class SignalSchematic extends HTMLElement {
     // and labels where they were let go.
     gesture.follow.restore();
     this.schedule();
+    // ADR 0037, editable insides: a slot's read-only inside is not written; its boxes stay where they were let go for now.
+    if (isPreviewLevel(level)) {
+      for (const m of moves) kept.get(m.instance).pending = false;
+      this.say('Moved here only: a read-only inside is written when an edit makes it the slot’s own');
+      return;
+    }
     // A group too large for one message goes as several (`moveMessages`).
     for (const message of moveMessages(level, moves)) {
       const mine = (message.moves ?? [message]).map((m) => [m.instance, kept.get(m.instance)]);
@@ -1593,6 +1620,9 @@ export class SignalSchematic extends HTMLElement {
       this.editor.openPalette(this.point(event), level);
       return;
     }
+    // ADR 0037, editable insides: a slot whose content is a project does not open; it says why.
+    const closed = hit.kind === 'instance' && hit.node.slot ? insideReason(hit.node.slot) : null;
+    if (closed) this.say(`${hit.node.name}: ${closed}`);
     if (hit.kind !== 'instance' || !hit.node.composite) return;
     this.enter(hit);
   }
@@ -1607,7 +1637,7 @@ export class SignalSchematic extends HTMLElement {
    * (M2.13-3); a library composite (its inside unknown) is only focused.
    */
   enter(hit) {
-    const inner = hit.node?.composite ? this.layoutOf(hit.node.module) : null;
+    const inner = hit.node?.composite ? this.layoutOf(insideKey(hit.node)) : null;
     if (inner && chain((level) => this.layoutOf(level), hit.address)) {
       this.openShifts.delete(hit.address);
       this.pinned = pinOne(this.pinned, hit.address);
@@ -1820,7 +1850,7 @@ export class SignalSchematic extends HTMLElement {
       context.open = this.drawn.open.has(hit.address);
       context.addable = context.open && Boolean(paletteLevel(hit, this.drawn, point));
       // A library composite (its inside not in `graph`) is not opened in place.
-      context.opaque = !this.graph?.composites?.[hit.node.module];
+      context.opaque = !levelData(this.graph, insideKey(hit.node));
     }
     if (hit.kind === 'port') {
       context.connected = this.portOps(hit).length;
@@ -1828,8 +1858,10 @@ export class SignalSchematic extends HTMLElement {
       const ends = (w) => (hit.port.direction === 'out' ? w.from : w.to);
       context.exported = (this.levelOf(hit.path)?.layout.wires ?? []).filter((w) => w.kind === 'export' && ends(w).node === hit.node.id && ends(w).port === hit.port.name).length;
       // A library composite's box pin: its inside is not in `graph`, so Go inside is off.
-      context.opaque = hit.node.kind === 'instance' && Boolean(hit.node.composite) && !this.graph?.composites?.[hit.node.module];
+      context.opaque = hit.node.kind === 'instance' && Boolean(hit.node.composite) && !levelData(this.graph, insideKey(hit.node));
     }
+    // ADR 0037, editable insides: inside a slot, its interface is edited from its frame too; its frame's wires are export ops.
+    context.slotInside = isSlotInside(levelData(this.graph, this.currentLevel()));
     return context;
   }
 
@@ -1889,6 +1921,8 @@ export class SignalSchematic extends HTMLElement {
     else if (id === 'slot-interface') this.editor.openInterface(hit);
     else if (id === 'slot-save-template') this.editor.saveTemplate(hit);
     else if (id === 'slot-detach') this.editor.detach(hit);
+    else if (id === 'slot-inside') this.enter(hit);
+    else if (id === 'slot-interface-inside') this.editor.openInsideInterface();
     else if (id === 'make-interface') this.editor.makeInterface(hit);
     else if (id === 'port-edit') this.editor.openInterface(hit, { port: hit.port.name });
     else if (id === 'port-remove' || id === 'port-remove-wires') this.editor.removePort(hit, id === 'port-remove-wires');
@@ -1920,6 +1954,13 @@ export class SignalSchematic extends HTMLElement {
   }
 
   resetLayout(level) {
+    // ADR 0037, editable insides: a slot's read-only inside has no stored positions; only what was moved here goes.
+    if (isPreviewLevel(level)) {
+      this.moved.delete(level);
+      this.layouts.delete(level);
+      this.schedule();
+      return;
+    }
     const message = level === null ? { type: 'schematic.reset' } : { type: 'schematic.reset', level };
     this.connection?.request?.(message).catch((error) => this.say(`Not reset: ${error.message}`));
   }

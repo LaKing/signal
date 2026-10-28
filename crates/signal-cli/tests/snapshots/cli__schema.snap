@@ -59,6 +59,14 @@ expression: text
             "null"
           ]
         },
+        "inside_of": {
+          "default": null,
+          "description": "ADR 0037, editable insides (2026-10-27): the slot whose own inside\nthis composite is, `\"<slot>\"` at the top level or\n`\"<composite>/<slot>\"` in a composite. Presentation and ownership\nonly: the plan never reads it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "description": "The composite's name: its file name without `.toml`, used as the module\nreference of its instances.",
           "type": "string"

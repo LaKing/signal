@@ -300,7 +300,7 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "patch",
         group: Group::Patch,
-        description: "Edits one level's file as text, as the schematic does, applied live by the reload: ops `instance.add` {name, module, params?, x?, y?}, `instance.remove` {name}, `connection.add` {from, to, scale?} (\"inst.port\", no leading /), `connection.remove` {from, to}, `connection.scale` {from, to, scale}, and the slot ops `slot.add`, `slot.load`, `slot.unload`, `slot.map`, `slot.interface` (as the slot_* tools). `level`: \"\" (project.toml, default) or a composite. `base`: the file's SHA-256 from graph.files (default: the current one). The reply's `inverse` undoes it.",
+        description: "Edits one level's file as text, as the schematic does, applied live by the reload: ops `instance.add` {name, module, params?, x?, y?}, `instance.remove` {name}, `connection.add` {from, to, scale?} (\"inst.port\", no leading /), `connection.remove` {from, to}, `connection.scale` {from, to, scale}, the slot ops `slot.add`, `slot.load`, `slot.unload`, `slot.map`, `slot.interface`, `slot.inside` (as the slot_* tools), and, at a composite level, `export.connect` and `export.disconnect` {role: input|output|parameter, name, port: \"inst.port\"} (a frame pin wired to an inner port). `level`: \"\" (project.toml, default) or a composite. `base`: the file's SHA-256 from graph.files (default: the current one). The reply's `inverse` undoes it.",
         schema: || {
             object(
                 json!({"level": {"type": "string"}, "base": {"type": "string"}, "ops": {"type": "array", "minItems": 1, "items": {"type": "object"}}}),
@@ -392,6 +392,18 @@ const TOOLS: &[Tool] = &[
             )
         },
         run: slot_interface,
+    },
+    Tool {
+        name: "slot_inside",
+        group: Group::Patch,
+        description: "Makes a slot's own inside (ADR 0037, editable insides): composites/<name>.toml (default <slot>_inside, or <level>_<slot>_inside), `inside_of` naming the slot, made from what it holds (nothing: an empty inside; a project or library composite: a copy; a primitive: wrapped in a composite), its exports named after the slot's ports; the slot then loads it and its `map` goes. The plan does not change (a wrapped primitive moves one level down). A project in a slot is not copied. Then edit the inside with patch at `level` <name> (instance.*, connection.*, and export.connect/export.disconnect {role, name, port} to wire its frame).",
+        schema: || {
+            object(
+                json!({"slot": {"type": "string"}, "name": {"type": "string"}, "level": {"type": "string"}, "base": {"type": "string"}}),
+                &["slot"],
+            )
+        },
+        run: slot_inside,
     },
     // Edit text.
     Tool {
@@ -1980,11 +1992,20 @@ fn patch_ops(context: &Context, level: String, base: Option<String>, ops_json: V
         let content = |load: &str| {
             signal_project::content_names(project.as_ref(), &context.dir, load, context.registry)
         };
+        let file_of = |path: &str| {
+            files
+                .iter()
+                .find(|s| s.path == path)
+                .map(|s| s.text.clone())
+        };
+        let source = |load: &str| signal_project::inside::source(&files, load, context.registry);
         let ctx = patch::Context {
             level: &level,
             module: &order,
             templates: &templates,
             content: &content,
+            file: &file_of,
+            source: &source,
         };
         // A patch that cannot be simulated here is not sent (fail closed).
         let patched = patch::apply(&before, None, &ops, &ctx)
@@ -1998,7 +2019,27 @@ fn patch_ops(context: &Context, level: String, base: Option<String>, ops_json: V
             .filter(|p| !before_projects.contains(p))
             .collect();
         projects_allowed(context, new)?;
-        guard_files(context, replaced(files, &file, &patched.text))?;
+        // ADR 0037, editable insides: a slot's own inside the patch writes,
+        // judged as write_file would judge it.
+        let mut edited = replaced(files.clone(), &file, &patched.text);
+        for change in &patched.files {
+            let was = change
+                .before
+                .as_deref()
+                .map(patch::projects_in)
+                .unwrap_or_default();
+            if let Some(text) = &change.after {
+                let new = patch::projects_in(text)
+                    .into_iter()
+                    .filter(|p| !was.contains(p))
+                    .collect();
+                projects_allowed(context, new)?;
+                edited = replaced(edited, &change.path, text);
+            } else {
+                edited.retain(|s| s.path != change.path);
+            }
+        }
+        guard_files(context, edited)?;
     }
     let reply = bare(ask(
         context,
@@ -2051,6 +2092,10 @@ fn slot_map(context: &Context, arguments: &Value) -> Outcome {
 
 fn slot_interface(context: &Context, arguments: &Value) -> Outcome {
     slot_op(context, arguments, json!({"op": "slot.interface"}))
+}
+
+fn slot_inside(context: &Context, arguments: &Value) -> Outcome {
+    slot_op(context, arguments, json!({"op": "slot.inside"}))
 }
 
 fn schematic_move(context: &Context, arguments: &Value) -> Outcome {

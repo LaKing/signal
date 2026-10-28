@@ -3757,12 +3757,14 @@ impl Host {
     /// `ui/schematic.toml`, read now. Playing, of the running project (the
     /// last good version, as `describe`); stopped (app mode), of the folder.
     fn graph(&mut self) -> Result<Value, Failure> {
-        let (name, top, composites) = {
+        let (name, top, composites, insides) = {
             let (name, structure) = self.structure()?;
             (
                 name.to_owned(),
                 structure.get("top").cloned(),
                 structure.get("composites").cloned(),
+                // ADR 0037, editable insides (additive; absent without one).
+                structure.get("insides").cloned(),
             )
         };
         let (positions, error) = match fs::read_to_string(self.dir.join(SCHEMATIC_FILE)) {
@@ -3788,7 +3790,7 @@ impl Host {
                 (level, Value::Object(entries))
             })
             .collect();
-        Ok(json!({
+        let mut graph = json!({
             "type": "graph",
             "project": name,
             "folder": self.folder_name(),
@@ -3799,7 +3801,11 @@ impl Host {
             "layout": {"file": SCHEMATIC_FILE, "positions": positions, "error": error},
             "files": self.files_json(),
             "interfaces": self.interfaces_json(),
-        }))
+        });
+        if let (Some(insides), Value::Object(fields)) = (insides, &mut graph) {
+            fields.insert("insides".to_owned(), insides);
+        }
+        Ok(graph)
     }
 
     /// `graph.interfaces` (ADR 0037 §3, phase 3, additive): the interface
@@ -4266,11 +4272,21 @@ impl Host {
         let templates = signal_project::interface_templates(&sources);
         let dir = self.dir.clone();
         let content = |load: &str| signal_project::content_names(loaded, &dir, load, registry);
+        // ADR 0037, editable insides: a slot's own inside, the patch's other file.
+        let file_of = |path: &str| {
+            sources
+                .iter()
+                .find(|s| s.path == path)
+                .map(|s| s.text.clone())
+        };
+        let source = |load: &str| signal_project::inside::source(&sources, load, registry);
         let ctx = patch::Context {
             level,
             module: &order,
             templates: &templates,
             content: &content,
+            file: &file_of,
+            source: &source,
         };
         let patched = patch::apply(&before, positions.as_deref(), &ops, &ctx)
             .map_err(|e| fail(e.code, e.message))?;
@@ -4278,14 +4294,41 @@ impl Host {
         if let Some(source) = edited.get_mut(index) {
             source.text = patched.text.clone();
         }
-        let new = Project::from_sources_in(edited, &self.dir);
+        for change in &patched.files {
+            if self.linked_file(&change.path) {
+                return Err(fail(
+                    "write-failed",
+                    format!(
+                        "{} is reached through a link: a patch writes only the project's own files",
+                        change.path
+                    ),
+                ));
+            }
+            edited.retain(|s| s.path != change.path);
+            if let Some(text) = &change.after {
+                edited.push(signal_project::SourceFile {
+                    path: change.path.clone(),
+                    text: text.clone(),
+                });
+            }
+        }
+        let new = Project::from_sources_in(edited.clone(), &self.dir);
         // The edited project when the current one does not load: a level's
-        // edit leaves its exports and the paths of its instances as they were.
-        let references = self.references(
-            level,
-            &patch::removed_instances(&ops),
-            loaded.or(new.as_ref().ok()),
-        );
+        // edit leaves its exports and the paths of its instances as they were,
+        // unless it edits the exports too (ADR 0037, editable insides: an
+        // export op), when the edited one is judged if it loads.
+        let edits_exports = ops.iter().any(|op| {
+            matches!(
+                op,
+                Op::ExportConnect { .. } | Op::ExportDisconnect { .. } | Op::ExportRestore { .. }
+            )
+        });
+        let judged = if edits_exports {
+            new.as_ref().ok().or(loaded)
+        } else {
+            loaded.or(new.as_ref().ok())
+        };
+        let references = self.references(level, &patch::removed_instances(&ops), judged);
         if !references.is_empty() {
             let named: Vec<String> = references
                 .iter()
@@ -4339,11 +4382,22 @@ impl Host {
             let message = json!({"type": "patch", "id": u64::MAX, "level": level, "base": "0".repeat(64), "ops": ops});
             message.to_string().len() + margin
         };
+        // The undo is tried on the files as the patch leaves them.
+        let edited_file = |path: &str| {
+            edited
+                .iter()
+                .find(|s| s.path == path)
+                .map(|s| s.text.clone())
+        };
+        let undo_ctx = patch::Context {
+            file: &edited_file,
+            ..ctx
+        };
         let redo = patch::apply(
             &patched.text,
             patched.positions.as_deref(),
             &patched.inverse,
-            &ctx,
+            &undo_ctx,
         )
         .map_err(|e| {
             fail(
@@ -4405,12 +4459,53 @@ impl Host {
                 ));
             }
         }
+        // ADR 0037, editable insides: the other files are still as read;
+        // a new or changed one is written before the level's file (which
+        // may name it), a removed one after.
+        for change in &patched.files {
+            let now = transaction::current(&self.dir.join(&change.path))
+                .ok()
+                .flatten();
+            if now.as_deref() != change.before.as_deref().map(str::as_bytes) {
+                return Err(fail_with(
+                    "conflict",
+                    format!(
+                        "{} changed since the patch read it; nothing was written",
+                        change.path
+                    ),
+                    json!({"level": level, "file": file, "base": base}),
+                ));
+            }
+        }
+        let (early, late): (Vec<&patch::FileChange>, Vec<&patch::FileChange>) =
+            patched.files.iter().partition(|c| c.after.is_some());
+        let mut sides_done: Vec<&patch::FileChange> = Vec::new();
+        for change in &early {
+            match self.write_side(change, true) {
+                Ok(true) => sides_done.push(change),
+                outcome => {
+                    self.undo_sides(&sides_done);
+                    let why = match outcome {
+                        Err(error) => error.to_string(),
+                        _ => "another writer changed it meanwhile".to_owned(),
+                    };
+                    return Err(fail(
+                        "write-failed",
+                        format!("{} was not written ({why}); nothing changed", change.path),
+                    ));
+                }
+            }
+        }
         // Compared once more just before the rename (ADR 0040): the file
         // still holds `before`, the text `base` names.
         let renamed =
             transaction::replace_unchanged(&path, Some(before.as_bytes()), patched.text.as_bytes())
-                .map_err(|e| fail("write-failed", format!("{file} was not written: {e}")))?;
+                .map_err(|e| {
+                    self.undo_sides(&sides_done);
+                    fail("write-failed", format!("{file} was not written: {e}"))
+                })?;
         if !renamed {
+            self.undo_sides(&sides_done);
             let now = fs::read(&path).ok().map(|bytes| sha256_hex(&bytes));
             return Err(fail_with(
                 "conflict",
@@ -4454,6 +4549,9 @@ impl Host {
                     Some(patched.text.as_bytes()),
                     before.as_bytes(),
                 );
+                if matches!(put_back, Ok(true)) {
+                    self.undo_sides(&sides_done);
+                }
                 let message = match put_back {
                     Ok(true) => format!(
                         "{SCHEMATIC_FILE} was not written ({why}); {file} was put back: nothing changed"
@@ -4480,8 +4578,27 @@ impl Host {
             }
             self.seen(Path::new(SCHEMATIC_FILE));
         }
-        // ADR 0037 §2: a slot port renamed, the panels' bindings on it follow.
+        // ADR 0037, editable insides: a removed inside goes once the level
+        // no longer names it; one that cannot go is said, and kept.
         let mut notes = patched.notes.clone();
+        let mut kept: Vec<&str> = Vec::new();
+        for change in &late {
+            match self.write_side(change, true) {
+                Ok(true) => {}
+                Ok(false) => {
+                    kept.push(&change.path);
+                    notes.push(format!(
+                        "{} was kept: another writer changed it meanwhile",
+                        change.path
+                    ));
+                }
+                Err(error) => {
+                    kept.push(&change.path);
+                    notes.push(format!("{} was kept: {error}", change.path));
+                }
+            }
+        }
+        // ADR 0037 §2: a slot port renamed, the panels' bindings on it follow.
         let rebound = self.rebind(&instance_paths, &patched.renamed, &mut notes);
         // ADR 0041: the snapshots' values of a renamed or removed slot
         // parameter follow it (top-level controls only), under the same lock.
@@ -4505,6 +4622,30 @@ impl Host {
             "base": sha256_hex(patched.text.as_bytes()),
             "inverse": patched.inverse,
         });
+        // ADR 0037, editable insides: the other files written, each with
+        // its level and new base (`null`: removed).
+        if !patched.files.is_empty() {
+            let files: Vec<Value> = patched
+                .files
+                .iter()
+                .map(|c| {
+                    let level = c
+                        .path
+                        .strip_prefix("composites/")
+                        .and_then(|p| p.strip_suffix(".toml"));
+                    // A removal that was kept: its file as it is now.
+                    let base = if kept.contains(&c.path.as_str()) {
+                        fs::read(self.dir.join(&c.path))
+                            .ok()
+                            .map(|b| sha256_hex(&b))
+                    } else {
+                        c.after.as_ref().map(|t| sha256_hex(t.as_bytes()))
+                    };
+                    json!({"file": c.path, "level": level, "base": base})
+                })
+                .collect();
+            reply = with(reply, "files", json!(files));
+        }
         if !notes.is_empty() {
             reply = with(reply, "notes", json!(notes));
         }
@@ -4519,6 +4660,47 @@ impl Host {
             );
         }
         Ok(reply)
+    }
+
+    /// ADR 0037, editable insides: a patch's other file `change` written
+    /// (`forward`) or put back, only while it holds the text the other
+    /// side names (ADR 0040); `Ok(false)` when it does not.
+    fn write_side(&self, change: &patch::FileChange, forward: bool) -> std::io::Result<bool> {
+        let path = self.dir.join(&change.path);
+        let (expected, target) = if forward {
+            (&change.before, &change.after)
+        } else {
+            (&change.after, &change.before)
+        };
+        match target {
+            Some(text) => {
+                if let Some(folder) = path.parent() {
+                    fs::create_dir_all(folder)?;
+                }
+                transaction::replace_unchanged(
+                    &path,
+                    expected.as_deref().map(str::as_bytes),
+                    text.as_bytes(),
+                )
+            }
+            None => {
+                if transaction::current(&path)?.as_deref() != expected.as_deref().map(str::as_bytes)
+                {
+                    return Ok(false);
+                }
+                match fs::remove_file(&path) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+                    _ => Ok(true),
+                }
+            }
+        }
+    }
+
+    /// The patch's other files `done` put back (a later write failed).
+    fn undo_sides(&self, done: &[&patch::FileChange]) {
+        for change in done.iter().rev() {
+            let _ = self.write_side(change, false);
+        }
     }
 
     /// ADR 0037 §2: the bindings of the project's panels on the slot ports

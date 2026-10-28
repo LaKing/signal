@@ -26,6 +26,7 @@ export function messageBytes(message) {
 import { instanceHit, wireHit } from './schematic-hit.js';
 import { patchMessage, removeConnection, removeInstance, written } from './schematic-patch.js';
 import { screenRect } from './schematic-view.js';
+import { exportOp } from './slot.js';
 
 /** What tells two hits of the same part apart from others: its kind and address (a wire: its level's path and written ends). */
 export function hitKey(hit) {
@@ -227,6 +228,12 @@ export function deletePlan(selected, limit = MESSAGE_LIMIT) {
       const names = removed.get(s.level);
       if (names?.has(endInstance(from)) || names?.has(endInstance(to))) continue;
       add(s.level, `c ${written(from)} ${written(to)}`, removeConnection(from, to));
+    } else if (s.kind === 'wire' && s.wire.kind === 'export' && s.wire.written?.role) {
+      // ADR 0037, editable insides: a slot inside's frame wire, an export op (one whose module goes is taken with it).
+      const { role, from, to } = s.wire.written;
+      const port = role === 'output' ? from : to;
+      if (removed.get(s.level)?.has(endInstance(port))) continue;
+      add(s.level, `e ${role} ${port}`, exportOp(false, role, s.wire.written.export ?? (role === 'output' ? to : from), port));
     } else skipped++;
   }
   const list = [...patches].map(([level, ops]) => ({ level, ops, bytes: messageBytes(patchMessage(level, BASE, ops)) }));

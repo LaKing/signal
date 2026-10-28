@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use mcp_common::{Mcp, copy_of, fixture, stale};
 use serde_json::{Value, json};
 
-const TOOLS: [&str; 41] = [
+const TOOLS: [&str; 42] = [
     "project_info",
     "graph",
     "modules",
@@ -48,6 +48,7 @@ const TOOLS: [&str; 41] = [
     "slot_unload",
     "slot_map",
     "slot_interface",
+    "slot_inside",
     "write_pattern",
     "write_panel",
     "write_file",
@@ -1474,5 +1475,43 @@ fn the_slot_tools_add_edit_load_and_unload_a_slot() {
         json!({"slot": "fx", "load": "../beside", "map": {"y": "l"}}),
     );
     assert!(mcp.file("project.toml").contains("load = \"../beside\""));
+    assert!(mcp.finish().success());
+}
+
+/// ADR 0037, editable insides: `slot_inside` makes the slot's own inside
+/// (composites/<slot>_inside.toml, the slot loading it); `patch` at its
+/// level builds it and wires its frame (`export.connect`); a project in a
+/// slot is not copied.
+#[test]
+fn slot_inside_makes_an_own_inside_built_with_patch() {
+    let text = "schema_version = 1\n\n[project]\nname = \"insides\"\nsample_rate = 48000\n\n[instances]\nosc = { module = \"std.sine_osc\" }\nfx = { slot = { inputs = { x = \"audio\" }, outputs = { y = \"audio\" } } }\nout = { module = \"std.audio_out\", gain = 0.2 }\n\n[wiring]\nconnections = [\n  { from = \"osc.out\", to = \"fx.x\" },\n  { from = \"fx.y\", to = \"out.l\" },\n]\n";
+    let dir = mcp_common::project(text, "mcp-insides");
+    let mut mcp = Mcp::started(&dir, &[]);
+    let made = mcp.ok("slot_inside", json!({"slot": "fx"}));
+    assert_eq!(made["files"][0]["level"], "fx_inside", "{made}");
+    assert!(
+        mcp.file("project.toml")
+            .contains("fx = { slot = { inputs = { x = \"audio\" }, outputs = { y = \"audio\" } }, load = \"fx_inside\" }")
+    );
+    assert!(
+        mcp.file("composites/fx_inside.toml")
+            .contains("inside_of = \"fx\"")
+    );
+    mcp.ok(
+        "patch",
+        json!({"level": "fx_inside", "ops": [
+            {"op": "instance.add", "name": "amp", "module": "std.gain"},
+            {"op": "export.connect", "role": "input", "name": "x", "port": "amp.in"},
+            {"op": "export.connect", "role": "output", "name": "y", "port": "amp.out"}
+        ]}),
+    );
+    let inside = mcp.file("composites/fx_inside.toml");
+    assert!(
+        inside.contains("inputs = { x = \"amp.in\" }")
+            && inside.contains("outputs = { y = \"amp.out\" }"),
+        "{inside}"
+    );
+    let refusal = mcp.refused("slot_inside", json!({"slot": "fx"}));
+    assert!(refusal.contains("own inside already"), "{refusal}");
     assert!(mcp.finish().success());
 }

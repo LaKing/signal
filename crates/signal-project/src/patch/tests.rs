@@ -48,7 +48,17 @@ fn ctx(level: &str) -> Context<'_> {
         module: &modules,
         templates: &NO_TEMPLATES,
         content: &no_content,
+        file: &no_file,
+        source: &no_source,
     }
+}
+
+fn no_file(_: &str) -> Option<String> {
+    None
+}
+
+fn no_source(_: &str) -> Option<crate::inside::Source> {
+    None
 }
 
 /// `ops` on `text`, then the inverse (through JSON, as the page sends it

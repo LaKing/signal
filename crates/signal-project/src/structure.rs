@@ -114,7 +114,18 @@ impl Project {
             };
             composites.insert(name.clone(), self.composite_level(&walk, def, prefix));
         }
-        json!({"top": top, "composites": composites})
+        // ADR 0037, editable insides: a slot's own inside shows the slot's
+        // interface on its frame, and the inside a slot would get when it
+        // is first edited is given for the read-only view (`insides`,
+        // additive: absent without slots).
+        let insides = walk.insides(&mut composites);
+        let mut graph = json!({"top": top, "composites": composites});
+        if !insides.is_empty()
+            && let Value::Object(fields) = &mut graph
+        {
+            fields.insert("insides".to_owned(), Value::Object(insides));
+        }
+        graph
     }
 
     /// Composite `def`'s level as `graph` gives it in `composites`: its
@@ -720,6 +731,7 @@ impl Walk<'_> {
                 "unmatched": unmatched,
                 "unheard": resolution.map(|r| r.unheard.clone()).unwrap_or_default(),
                 "dropped": resolution.map(|r| r.dropped.clone()).unwrap_or_default(),
+                "inside": self.inside_of(&def.name, name, load.as_deref()).json(),
             },
         })
     }
@@ -1067,4 +1079,305 @@ fn with_targets(mut value: Value, key: &str, targets: Value) -> Value {
         fields.insert(key.to_owned(), targets);
     }
     value
+}
+
+/// ADR 0037, editable insides: what a slot's inside is in `graph`.
+enum InsideOf {
+    /// Its own inside, this composite (a level of `graph.composites`).
+    Own(String),
+    /// Not its own yet: shown read-only at `key` (`graph.insides`), made
+    /// on the first edit as `name` (`make`: `empty`, `copy` or `wrap`);
+    /// `source` is `None` for a project composite (its definition is
+    /// shown).
+    Preview {
+        key: String,
+        make: &'static str,
+        name: String,
+        source: Option<crate::inside::Source>,
+    },
+    /// No inside to show: why.
+    Closed(String),
+}
+
+impl InsideOf {
+    /// The `inside` field of a slot box: `{level, own, make?, name?, reason?}`.
+    fn json(&self) -> Value {
+        match self {
+            InsideOf::Own(name) => json!({"level": name, "own": true, "name": name}),
+            InsideOf::Preview {
+                key, make, name, ..
+            } => json!({"level": key, "own": false, "make": make, "name": name}),
+            InsideOf::Closed(reason) => json!({"level": null, "own": false, "reason": reason}),
+        }
+    }
+}
+
+impl Walk<'_> {
+    /// What slot `slot` at `level` (loading `load`) has as an inside.
+    fn inside_of(&self, level: &str, slot: &str, load: Option<&str>) -> InsideOf {
+        use crate::inside::{self, Source};
+        let files = &self.project.files;
+        let key = inside::preview_key(level, slot);
+        let name = || inside::default_name(level, slot, &|n| inside::taken(files, n));
+        let Some(load) = load else {
+            return InsideOf::Preview {
+                key,
+                make: "empty",
+                name: name(),
+                source: Some(Source::Empty),
+            };
+        };
+        if crate::is_project_path(load) {
+            return InsideOf::Closed(
+                "a project in a slot is edited in its own folder: a slot's own copy of a project is not made".to_owned(),
+            );
+        }
+        if let Some(text) = inside::composite_file(files, load) {
+            if inside::owner_of(&text).as_deref() == Some(inside::owner(level, slot).as_str()) {
+                return InsideOf::Own(load.to_owned());
+            }
+            return InsideOf::Preview {
+                key,
+                make: "copy",
+                name: name(),
+                source: None,
+            };
+        }
+        match inside::source(files, load, self.registry) {
+            Some(source @ Source::Composite(_)) => InsideOf::Preview {
+                key,
+                make: "copy",
+                name: name(),
+                source: Some(source),
+            },
+            Some(source @ Source::Primitive { .. }) => InsideOf::Preview {
+                key,
+                make: "wrap",
+                name: name(),
+                source: Some(source),
+            },
+            _ => InsideOf::Closed(format!("`{load}` names no module")),
+        }
+    }
+
+    /// The read-only insides of the slots that have none of their own yet,
+    /// by key (`graph.insides`), each with the slot's interface on its
+    /// frame; a slot's own inside in `composites` gets that frame too.
+    fn insides(&self, composites: &mut Map<String, Value>) -> Map<String, Value> {
+        let mut previews = Map::new();
+        for (key, resolution) in &self.slots {
+            let Some((level, slot)) = key.rsplit_once('/') else {
+                continue;
+            };
+            if !level.is_empty() && !composites.contains_key(level) {
+                continue;
+            }
+            let matched = |port: &str| {
+                resolution
+                    .matches
+                    .iter()
+                    .find(|m| m.port == port)
+                    .and_then(|m| m.content.clone())
+            };
+            match self.inside_of(level, slot, resolution.load.as_deref()) {
+                InsideOf::Own(name) => {
+                    if let Some(inside) = composites.get_mut(&name) {
+                        slot_frame(inside, &resolution.interface, &matched, key);
+                    }
+                }
+                InsideOf::Preview {
+                    key: at,
+                    name,
+                    source,
+                    ..
+                } => {
+                    let inside = match &source {
+                        None => resolution
+                            .load
+                            .as_deref()
+                            .and_then(|load| self.by_name.get(load))
+                            .map(|def| {
+                                let prefix = if level.is_empty() {
+                                    format!("/{slot}")
+                                } else {
+                                    String::new()
+                                };
+                                let mut inside = self.project.composite_level(self, def, &prefix);
+                                slot_frame(&mut inside, &resolution.interface, &matched, key);
+                                inside
+                            }),
+                        Some(source) => self.preview(level, slot, &name, source, resolution).map(
+                            |mut inside| {
+                                // Its exports are named after the slot's ports.
+                                slot_frame(
+                                    &mut inside,
+                                    &resolution.interface,
+                                    &|p: &str| Some(p.to_owned()),
+                                    key,
+                                );
+                                inside
+                            },
+                        ),
+                    };
+                    if let Some(inside) = inside {
+                        previews.insert(at, inside);
+                    }
+                }
+                InsideOf::Closed(_) => {}
+            }
+        }
+        previews
+    }
+
+    /// The level the own inside `name` of slot `slot` at `level` would be,
+    /// made from `source` as `slot.inside` makes it.
+    fn preview(
+        &self,
+        level: &str,
+        slot: &str,
+        name: &str,
+        source: &crate::inside::Source,
+        resolution: &SlotResolution,
+    ) -> Option<Value> {
+        use crate::inside;
+        let matched: Vec<inside::Matched> = resolution
+            .matches
+            .iter()
+            .filter_map(|m| {
+                Some(inside::Matched {
+                    port: m.port.clone(),
+                    role: m.role,
+                    content: m.content.clone()?,
+                })
+            })
+            .collect();
+        let names = resolution
+            .interface
+            .ports
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        let text =
+            inside::text(name, &inside::owner(level, slot), source, &matched, &names).ok()?;
+        let host = format!(
+            "schema_version = 1\n\n[project]\nname = \"inside\"\n\n[instances]\nx = {{ module = \"{name}\" }}\n"
+        );
+        let project = Project::from_sources(vec![
+            SourceFile {
+                path: PROJECT_FILE.to_owned(),
+                text: host,
+            },
+            SourceFile {
+                path: format!("{}/{name}.toml", crate::COMPOSITES),
+                text,
+            },
+        ])
+        .ok()?;
+        let walk = project.walk(self.registry, BTreeMap::new());
+        let def = project.composites.iter().find(|c| c.name == name)?;
+        Some(project.composite_level(&walk, def, ""))
+    }
+}
+
+/// `level` (a composite's, as `graph` gives it) with slot `key`'s interface
+/// on its frame (ADR 0037, editable insides): its `inputs`, `outputs` and
+/// `parameters` are the interface's ports in its order, each with the
+/// targets of the export it matches (`matched`: the content's name of a
+/// slot port; `export` when it differs), or none (`unmatched`); and
+/// `slot`, the slot's key.
+fn slot_frame(
+    level: &mut Value,
+    interface: &crate::slot::Interface,
+    matched: &dyn Fn(&str) -> Option<String>,
+    key: &str,
+) {
+    let Value::Object(fields) = level else {
+        return;
+    };
+    let take = |field: &str| {
+        fields
+            .get(field)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let lists = [take("inputs"), take("outputs"), take("parameters")];
+    let mut framed: [Vec<Value>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for port in &interface.ports {
+        let at = match port.role {
+            Role::Input => 0,
+            Role::Output => 1,
+            Role::Parameter => 2,
+        };
+        let content = matched(&port.name);
+        let found = content.as_deref().and_then(|c| {
+            lists[at]
+                .iter()
+                .find(|e| e["name"].as_str() == Some(c))
+                .cloned()
+        });
+        let mut value = found.unwrap_or_else(|| {
+            let shape = serde_json::to_value(port)
+                .ok()
+                .and_then(|v| v.get("shape").cloned());
+            match port.role {
+                Role::Parameter => json!({"name": port.name, "to": [], "unmatched": true}),
+                Role::Input => json!({
+                    "name": port.name, "address": port.name, "direction": "in", "shape": shape,
+                    "rate": port.rate, "kind": port.kind, "unit": port.unit, "range": null,
+                    "to": [], "unmatched": true,
+                }),
+                Role::Output => json!({
+                    "name": port.name, "address": port.name, "direction": "out", "shape": shape,
+                    "rate": port.rate, "kind": port.kind, "unit": port.unit, "range": null,
+                    "from": null, "unmatched": true,
+                }),
+            }
+        });
+        if let Value::Object(entry) = &mut value {
+            entry.insert("name".to_owned(), json!(port.name));
+            if let Some(content) = content.filter(|c| *c != port.name)
+                && !entry.contains_key("unmatched")
+            {
+                entry.insert("export".to_owned(), json!(content));
+            }
+            entry.insert("order".to_owned(), json!(framed[at].len()));
+            match &port.group {
+                Some(group) => {
+                    entry.insert("group".to_owned(), json!(group));
+                }
+                None => {
+                    entry.remove("group");
+                }
+            }
+        }
+        framed[at].push(value);
+    }
+    // The inside's exports no port of the slot reaches: shown after them
+    // (`extra`), so they can be seen, unwired and removed with what they name.
+    for (at, list) in lists.iter().enumerate() {
+        for entry in list {
+            let Some(name) = entry["name"].as_str() else {
+                continue;
+            };
+            let reached = interface
+                .ports
+                .iter()
+                .any(|p| matched(&p.name).as_deref() == Some(name));
+            if reached || interface.port(name).is_some() {
+                continue;
+            }
+            let mut value = entry.clone();
+            if let Value::Object(fields) = &mut value {
+                fields.insert("extra".to_owned(), json!(true));
+                fields.insert("order".to_owned(), json!(framed[at].len()));
+            }
+            framed[at].push(value);
+        }
+    }
+    let [inputs, outputs, parameters] = framed;
+    fields.insert("inputs".to_owned(), Value::Array(inputs));
+    fields.insert("outputs".to_owned(), Value::Array(outputs));
+    fields.insert("parameters".to_owned(), Value::Array(parameters));
+    fields.insert("slot".to_owned(), json!(key));
 }

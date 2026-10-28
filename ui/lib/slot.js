@@ -453,3 +453,140 @@ export function dropLoad(text) {
   if (isProjectPath(value)) return value;
   return /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$/.test(value) ? value : null;
 }
+
+// Editable insides (ADR 0037, 2026-10-27; the owner: "step into it with a
+// double-click and edit its inside", every slot's inside its own). A slot
+// opens like a composite into its inside: its own composite (`inside_of`
+// names the slot), or, until it has one, a read-only inside (`graph.insides`,
+// keyed `/slot` or `<composite>/slot`: what the first edit makes). The
+// first edit there writes `slot.inside` at the slot's level, then the edit
+// at the new composite's level. Its frame is the slot's interface, wired
+// by `export.connect` and `export.disconnect`.
+
+/** A slot's inside as `graph` gives it (`slot.inside`): `{level, own, make?, name?, reason?}`, or null (an older server). */
+export function insideOf(slot) {
+  const inside = slot?.inside;
+  return inside && typeof inside === 'object' ? inside : null;
+}
+
+/** Whether `level` is a slot's read-only inside (`/fx`, `rack/fx`): a composite's name never holds a `/`. */
+export function isPreviewLevel(level) {
+  return typeof level === 'string' && level.includes('/');
+}
+
+/** The slot whose inside key `key` is (`/fx`, `rack/fx`): `{parent, slot}`, its level (`""`: the top) and name. */
+export function previewSlot(key) {
+  const at = String(key).lastIndexOf('/');
+  return { parent: String(key).slice(0, Math.max(0, at)), slot: String(key).slice(at + 1) };
+}
+
+/** A level of `graph` by its key: `""` the top level, a composite's name, or a slot's read-only inside. */
+export function levelData(graph, level) {
+  if (level === '') return graph?.top ?? null;
+  return graph?.composites?.[level] ?? graph?.insides?.[level] ?? null;
+}
+
+/** Whether `levelGraph` is a slot's inside, own or read-only: its frame is the slot's interface (its `slot`, the slot's key). */
+export function isSlotInside(levelGraph) {
+  return typeof levelGraph?.slot === 'string';
+}
+
+/** The slot instance whose inside `levelGraph` is, in `graph`: `{parent, name, instance, inside}`, or null. */
+export function insideSlot(graph, levelGraph) {
+  if (!isSlotInside(levelGraph)) return null;
+  const { parent, slot } = previewSlot(levelGraph.slot);
+  const instance = (levelData(graph, parent)?.instances ?? []).find((i) => i.name === slot) ?? null;
+  return instance ? { parent, name: slot, instance, inside: insideOf(slotOf(instance)) } : null;
+}
+
+/** `slot.inside`: slot `slotName`'s own inside made (`name`: the composite's, else the server's default). */
+export function insideOp(slotName, name = null) {
+  const op = { op: 'slot.inside', slot: slotName };
+  if (name) op.name = name;
+  return op;
+}
+
+/** `export.connect` (or, `connect` false, `export.disconnect`) of export `name` of `role` and inner port `port` (`inst.port`). */
+export function exportOp(connect, role, name, port) {
+  return { op: connect ? 'export.connect' : 'export.disconnect', role, name, port };
+}
+
+/**
+ * `ops` at a slot's inside `levelGraph` as written there: each export that
+ * reaches an instance the ops remove is disconnected first (an export
+ * naming a removed instance is refused, `in-use`). Other levels' ops as
+ * they are.
+ */
+export function insideOps(levelGraph, ops) {
+  if (!isSlotInside(levelGraph)) return ops;
+  const removed = new Set(ops.filter((o) => o.op === 'instance.remove').map((o) => o.name));
+  if (!removed.size) return ops;
+  const reaches = (port) => removed.has(String(port ?? '').split('.')[0]);
+  const before = [];
+  const seen = new Set();
+  const disconnect = (role, name, port) => {
+    const key = `${role} ${name} ${port}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    before.push(exportOp(false, role, name, port));
+  };
+  for (const [list, role] of [[levelGraph.inputs, 'input'], [levelGraph.parameters, 'parameter']]) {
+    for (const e of list ?? []) for (const target of e.to ?? []) if (reaches(target)) disconnect(role, e.export ?? e.name, target);
+  }
+  for (const e of levelGraph.outputs ?? []) if (e.from && reaches(e.from)) disconnect('output', e.export ?? e.name, e.from);
+  return [...before, ...ops];
+}
+
+/**
+ * Where a frame pin of a slot's inside (`pin`: a layout's frame pin, with
+ * its `role`) may be wired in `levelGraph`: an input's to the inner inputs
+ * of its shape, a parameter's to the inner parameters, neither one it
+ * reaches already. `[{instance, port, parameter}]`.
+ */
+export function frameTargets(levelGraph, pin) {
+  const entry = [...(levelGraph?.inputs ?? []), ...(levelGraph?.parameters ?? [])].find((e) => e.name === pin.name);
+  const reached = new Set(entry?.to ?? []);
+  const targets = [];
+  for (const instance of levelGraph?.instances ?? []) {
+    if (pin.role === 'parameter') {
+      for (const p of instance.parameters ?? []) if (!reached.has(`${instance.name}.${p.name}`)) targets.push({ instance: instance.name, port: p.name, parameter: true });
+      continue;
+    }
+    for (const p of instance.ports ?? []) {
+      if (p.direction !== 'in' || shapeOf(p.shape).shape !== (pin.shape ?? 'signal') || reached.has(`${instance.name}.${p.name}`)) continue;
+      targets.push({ instance: instance.name, port: p.name, parameter: false });
+    }
+  }
+  return targets;
+}
+
+/** The output pins of a slot's inside's frame an inner output of `shape` may be wired to: those of its shape not wired yet. */
+export function frameOutputs(levelGraph, shape) {
+  return (levelGraph?.outputs ?? []).filter((e) => !e.from && shapeOf(e.shape).shape === (shape ?? 'signal')).map((e) => e.name);
+}
+
+/**
+ * What the schematic says over a slot's inside shown as the innermost
+ * level (`level`), or null: `{own, text}`. Its own: what file it is, and
+ * that an edit changes this slot only. Not its own yet: that it is shown
+ * read-only and the first edit makes the slot's own copy (an empty slot's:
+ * its own inside), naming the file; the content it copies stays as it is.
+ */
+export function insideBanner(graph, level) {
+  const found = insideSlot(graph, levelData(graph, level));
+  if (!found) return null;
+  const { name, instance, inside } = found;
+  const file = inside?.name ? `composites/${inside.name}.toml` : 'a composite of its own';
+  if (inside?.own) return { own: true, text: `${name}’s own inside (${file}): edits here change this slot only.` };
+  const load = slotOf(instance)?.load ?? null;
+  if (!load) return { own: false, text: `${name} is empty. Editing makes its own inside (${file}): add modules here and wire them to the frame’s pins.` };
+  const what = inside?.make === 'wrap' ? `the module ${load}` : `${load}, shared`;
+  return { own: false, text: `Read-only: ${name} holds ${what}. Editing makes this slot’s own copy (${file}); ${load} stays as it is.` };
+}
+
+/** Why a slot box does not open (a project as its content), or null when it does. */
+export function insideReason(slot) {
+  const inside = insideOf(slot);
+  if (!inside || inside.level) return null;
+  return inside.reason ?? 'Its inside is not shown';
+}

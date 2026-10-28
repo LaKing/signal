@@ -12,7 +12,7 @@
 // whole and parents far outside the screen are culled. Breadcrumbs are
 // the open levels, the innermost last. No DOM.
 
-import { HEADER, PAD } from './schematic-layout.js';
+import { HEADER, PAD, insideKey } from './schematic-layout.js';
 import { chooseOpen, grownNode, openedLayout } from './schematic-open.js';
 import { compose, screenRect, uncompose } from './schematic-view.js';
 /** Smaller than this on screen (px), a node or a wire is not drawn. */
@@ -71,12 +71,12 @@ export function chain(layoutOf, path = '') {
   for (const name of String(path).split('/').filter(Boolean)) {
     const parent = links.at(-1);
     const box = parent.layout.nodes.find((n) => n.kind === 'instance' && n.name === name);
-    const drawn = box?.composite ? layoutOf(box.module) : null;
+    const drawn = box?.composite ? layoutOf(insideKey(box)) : null;
     if (!drawn) return null;
     parent.layout = openedLayout(parent.layout, name, drawn.bounds);
     const node = grownNode(box, drawn.bounds);
     at = `${at}/${name}`;
-    links.push({ path: at, level: node.module, layout: drawn, node, inner: inside(node, drawn.bounds) });
+    links.push({ path: at, level: insideKey(node), layout: drawn, node, inner: inside(node, drawn.bounds) });
   }
   return links;
 }
@@ -136,7 +136,7 @@ export function scene({ layoutOf, view, viewport, pinned = new Set() }) {
     const frame = grownNode(pick.node, pick.inner.bounds);
     // A level on the view's chain has its transform from the view itself.
     const next = along.get(child) ?? compose(transform, inside(frame, pick.inner.bounds));
-    visit(child, pick.node.module, next, depth + 1, entry);
+    visit(child, insideKey(pick.node), next, depth + 1, entry);
   };
   visit('', '', along.get('') ?? view, 0, null);
   const drawn = { levels, open: new Set(levels.slice(1).map((l) => l.path)) };

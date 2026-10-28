@@ -31,8 +31,10 @@ use crate::schematic::{read_positions, set_position};
 use crate::slot::{ContentNames, Interface};
 use crate::write::{inline, number, standard};
 
+mod inside;
 mod slot;
 
+pub use inside::FileChange;
 pub use slot::{Change, PortJson};
 
 /// One patch op (`docs/ui-protocol.md` "patch"). `edits` and `layout` are
@@ -208,6 +210,68 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         wires: BTreeMap<String, String>,
     },
+    /// ADR 0037, editable insides: the slot's own inside made, a project
+    /// composite `composites/<name>.toml` copied from its content (empty,
+    /// a project or library composite, a primitive wrapped) with
+    /// `inside_of` naming the slot and its exports named after the slot's
+    /// ports; the slot then loads it (its `map` removed).
+    #[serde(rename = "slot.inside")]
+    SlotInside {
+        /// The slot's name at the level.
+        slot: String,
+        /// The new composite's name (absent: `<slot>_inside`, or
+        /// `<level>_<slot>_inside`, then `_2`, `_3`, … while taken).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// A slot's own inside's file (`composites/<name>.toml`, whose text
+    /// has `inside_of`) set to `text` (absent: removed) while it holds
+    /// `was` (absent: it does not exist): the inverse of `slot.inside` and
+    /// of an interface edit that keeps the inside's exports in step.
+    #[serde(rename = "composite.file")]
+    CompositeFile {
+        /// The composite's name.
+        name: String,
+        /// Its new text; absent removes the file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        /// Its text now; absent: it does not exist.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        was: Option<String>,
+    },
+    /// ADR 0037, editable insides: an inner port added to the composite
+    /// level's export `name` of `role` (a frame pin wired inside): an
+    /// input's or a parameter's targets gain `port`, an output is `port`.
+    #[serde(rename = "export.connect")]
+    ExportConnect {
+        /// `input`, `output` or `parameter`.
+        role: crate::slot::Role,
+        /// The export's name.
+        name: String,
+        /// `instance.port` at the level.
+        port: String,
+    },
+    /// The inner port `port` taken from the composite level's export
+    /// `name` of `role`; the export goes with its last port.
+    #[serde(rename = "export.disconnect")]
+    ExportDisconnect {
+        /// `input`, `output` or `parameter`.
+        role: crate::slot::Role,
+        /// The export's name.
+        name: String,
+        /// `instance.port` at the level.
+        port: String,
+    },
+    /// The inverse of an export op: keys of the level's `[exports]` set
+    /// back to what they said (`path` from the file's root:
+    /// `["exports", "<role table>", "<name>"]`, or `["exports"]`, the
+    /// table itself, made or removed empty).
+    #[serde(rename = "export.restore")]
+    ExportRestore {
+        /// The keys, in order.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changes: Vec<Change>,
+    },
 }
 
 /// `ui/schematic.toml`'s edits of an op; `created`: the file is removed when
@@ -371,6 +435,12 @@ pub struct Context<'a> {
     /// `None` when it does not resolve: a Replace then keeps every `map` and
     /// `set` entry, and the load check judges them.
     pub content: &'a dyn Fn(&str) -> Option<ContentNames>,
+    /// ADR 0037, editable insides: the project's file at `path`
+    /// (`composites/<name>.toml`) as it is now, `None` when absent.
+    pub file: &'a dyn Fn(&str) -> Option<String>,
+    /// What a slot's content (`load`, as written) is copied from
+    /// ([`crate::inside::source`]); `None` for a project or an unknown name.
+    pub source: &'a dyn Fn(&str) -> Option<crate::inside::Source>,
 }
 
 /// A patch applied: the level's new text, `ui/schematic.toml`'s (`None`:
@@ -396,6 +466,10 @@ pub struct Patched {
     /// the order the ops did them (an op's removals before its renames): the
     /// caller moves or drops their snapshots' values in that order.
     pub follow: Vec<(String, Option<String>)>,
+    /// ADR 0037, editable insides: the other files the patch writes (a
+    /// slot's own inside made, removed, or its exports kept in step with
+    /// the slot's interface), each with its text before and after.
+    pub files: Vec<FileChange>,
 }
 
 /// Applies `ops` in order to `text` (the level file) and `positions`
@@ -415,6 +489,7 @@ pub fn apply(
         notes: Vec::new(),
         renamed: Vec::new(),
         follow: Vec::new(),
+        files: BTreeMap::new(),
     };
     map(&patch.text, &Scheme::LEVEL).map_err(|e| refused("does-not-load", e))?;
     let mut inverse = Vec::new();
@@ -430,6 +505,7 @@ pub fn apply(
         notes: patch.notes,
         renamed: patch.renamed,
         follow: patch.follow,
+        files: inside::changed(patch.files),
     })
 }
 
@@ -1423,6 +1499,8 @@ struct Patching<'a> {
     notes: Vec<String>,
     renamed: Vec<(String, String)>,
     follow: Vec<(String, Option<String>)>,
+    /// The other files written, by path: (as read, as now).
+    files: BTreeMap<String, (Option<String>, Option<String>)>,
 }
 
 fn valid_name(name: &str) -> bool {
@@ -1969,6 +2047,11 @@ impl Patching<'_> {
                     wires,
                 })
             }
+            Op::SlotInside { slot, name } => return self.slot_inside(slot, name.as_deref()),
+            Op::CompositeFile { name, text, was } => self.composite_file(name, text, was),
+            Op::ExportConnect { role, name, port } => self.export_edit(true, *role, name, port),
+            Op::ExportDisconnect { role, name, port } => self.export_edit(false, *role, name, port),
+            Op::ExportRestore { changes } => self.export_restore(changes),
         };
         one.map(|op| vec![op])
     }
@@ -2041,3 +2124,6 @@ mod tests;
 
 #[cfg(test)]
 mod slot_tests;
+
+#[cfg(test)]
+mod inside_tests;

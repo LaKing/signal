@@ -34,6 +34,7 @@ pub mod archive;
 mod diagnostic;
 mod diff;
 mod include;
+pub mod inside;
 mod library;
 pub mod live;
 mod locate;
@@ -1528,6 +1529,22 @@ impl Builder<'_> {
             .category
             .map(|c| (c.get_ref().clone(), c.span()));
         spans.description = parsed.composite.description;
+        // ADR 0037, editable insides: the slot it is the own inside of,
+        // checked for its form only (an Unload keeps the file).
+        if let Some(owner) = parsed.composite.inside_of
+            && (in_library || !inside::valid_owner(owner.get_ref()))
+        {
+            let message = if in_library {
+                "a library composite is no slot's inside: `inside_of` is a project composite's"
+                    .to_owned()
+            } else {
+                format!(
+                    "invalid `inside_of` `{}`: a slot's name, `<slot>`, or `<composite>/<slot>`",
+                    owner.get_ref()
+                )
+            };
+            self.error(file, owner.span().start, message);
+        }
         Some((def, spans))
     }
 }

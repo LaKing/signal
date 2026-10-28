@@ -159,7 +159,8 @@ const LOADED_SLOT = { kind: 'instance', path: '', level: '', address: '/fx', nod
 
 test('ADR 0037 §7: a slot box: Load… when empty, Replace… and Unload when loaded, the map, the interface, templates', () => {
   const empty = schematicMenu(EMPTY_SLOT, { editing: true });
-  assert.deepEqual(ids(empty), ['inspect', 'trace', 'open', 'enter', 'separator', 'copy-address', 'separator', 'slot-load', 'slot-unload', 'slot-map', 'slot-interface', 'slot-save-template', 'slot-detach', 'separator', 'make-interface', 'delete']);
+  assert.deepEqual(ids(empty), ['inspect', 'trace', 'open', 'enter', 'separator', 'copy-address', 'separator', 'slot-inside', 'slot-load', 'slot-unload', 'slot-map', 'slot-interface', 'slot-save-template', 'slot-detach', 'separator', 'make-interface', 'delete']);
+  assert.equal(item(empty, 'slot-inside').title, 'An empty slot has no inside', 'an older server gives no inside');
   assert.equal(item(empty, 'slot-unload').title, 'The slot is empty');
   assert.equal(item(empty, 'slot-detach').disabled, false, 'it has a template');
   assert.equal(item(empty, 'open').title, 'An empty slot has no inside');

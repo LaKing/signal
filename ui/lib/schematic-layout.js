@@ -9,7 +9,7 @@
 // object's key order. Wires are smooth curves (ui/lib/schematic-wire.js);
 // `movedWires` gives them again for a box being dragged. No DOM.
 
-import { slotLabel, slotOf } from './slot.js';
+import { insideOf, slotLabel, slotOf } from './slot.js';
 import { wireGeometry } from './schematic-wire.js';
 import { exportFacts, orderedPins, portGroups } from './schematic-groups.js';
 
@@ -39,6 +39,15 @@ export const LANE = 6;
 export const INPUTS = '@inputs';
 export const OUTPUTS = '@outputs';
 
+/**
+ * The key of the level a box opens into: a slot's inside (ADR 0037,
+ * editable insides: its own composite, or `/slot`, its read-only inside in
+ * `graph.insides`), else its module (a composite's name).
+ */
+export function insideKey(node) {
+  return node?.level ?? node?.module;
+}
+
 /** `signal`, `events` or `vector`, from a port's `shape`. */
 export function shapeName(shape) {
   if (shape && typeof shape === 'object' && 'vector' in shape) return 'vector';
@@ -57,6 +66,16 @@ function pin(port, direction) {
 }
 
 /**
+ * A frame pin of a slot's inside (ADR 0037, editable insides): its role
+ * (`input`, `output`, `parameter`), the export it is wired by (`export`,
+ * when it differs from the slot's port name) and whether it is wired inside
+ * at all (`unmatched`), for the export ops that wire it.
+ */
+function slotFramePin(port, direction, role) {
+  return { ...pin(port, direction), role, export: port.export ?? null, unmatched: Boolean(port.unmatched) };
+}
+
+/**
  * The nodes of a level, before placement. `factsOf(module)` (M2.13-2) gives
  * a composite's export facts (ui/lib/schematic-groups.js `exportFacts`):
  * its box's pins are then ordered in groups, kept as `groups`.
@@ -66,20 +85,26 @@ function nodesOf(level, factsOf = null) {
   // A composite's own frame orders its pins as its box outside does (M2.13-2): by group, in export order.
   const own = factsOf ? exportFacts(level) : null;
   const framePins = (pins) => (own ? orderedPins(pins, own) : pins);
-  const inputs = [...(level.inputs ?? []), ...(level.parameters ?? []).map((p) => ({ ...p, shape: 'signal' }))];
+  // ADR 0037, editable insides: a slot's inside, its frame the slot's interface, carries each pin's role.
+  const slotInside = typeof level.slot === 'string';
+  const inputs = [...(level.inputs ?? []).map((p) => ({ ...p, role: 'input' })), ...(level.parameters ?? []).map((p) => ({ ...p, shape: 'signal', role: 'parameter' }))];
+  const framePin = (p, direction) => (slotInside ? slotFramePin(p, direction, p.role ?? 'output') : pin(p, direction));
   if (inputs.length) {
-    nodes.push({ id: INPUTS, name: 'inputs', module: '', kind: 'input', composite: false, ins: [], outs: framePins(inputs.map((p) => pin(p, 'out'))) });
+    nodes.push({ id: INPUTS, name: 'inputs', module: '', kind: 'input', composite: false, ins: [], outs: framePins(inputs.map((p) => framePin(p, 'out'))) });
   }
   for (const instance of level.instances ?? []) {
     const ports = instance.ports ?? [];
     // ADR 0037 §7: a slot's box shows its interface's pins, loaded or not, and what it holds under its name.
     const slot = slotOf(instance);
+    // ADR 0037, editable insides: a slot with an inside opens like a composite, into `level`.
+    const inside = insideOf(slot)?.level ?? null;
     nodes.push({
       id: instance.name,
       name: instance.name,
       module: instance.module,
       kind: 'instance',
-      composite: Boolean(instance.composite),
+      composite: Boolean(instance.composite) || Boolean(inside),
+      ...(inside ? { level: inside } : {}),
       slot,
       // What the box says under its name: the module, or a slot's content ("empty: lib.voice").
       subtitle: slot ? slotLabel(slot).subtitle : instance.module,
@@ -91,7 +116,7 @@ function nodesOf(level, factsOf = null) {
       ],
       outs: ports.filter((p) => p.direction === 'out').map((p) => pin(p, 'out')),
     });
-    const facts = instance.composite && factsOf ? factsOf(instance.module) : null;
+    const facts = (instance.composite || inside) && factsOf ? factsOf(inside ?? instance.module) : null;
     if (facts) {
       const node = nodes.at(-1);
       node.ins = orderedPins(node.ins, facts);
@@ -100,7 +125,7 @@ function nodesOf(level, factsOf = null) {
     }
   }
   if ((level.outputs ?? []).length) {
-    nodes.push({ id: OUTPUTS, name: 'outputs', module: '', kind: 'output', composite: false, ins: framePins(level.outputs.map((p) => pin(p, 'in'))), outs: [] });
+    nodes.push({ id: OUTPUTS, name: 'outputs', module: '', kind: 'output', composite: false, ins: framePins(level.outputs.map((p) => framePin({ ...p, role: 'output' }, 'in'))), outs: [] });
   }
   for (const node of nodes) {
     const longestIn = Math.max(0, ...node.ins.map((p) => p.name.length));
@@ -135,13 +160,19 @@ function edgesOf(level, byId) {
       written: { from: c.from, to: c.to },
     });
   }
-  for (const e of [...(level.inputs ?? []), ...(level.parameters ?? [])]) {
-    for (const target of e.to ?? []) {
-      add({ node: INPUTS, port: e.name }, endpoint(target), { kind: 'export', shape: shapeName(e.shape ?? 'signal'), converters: [], scale: null, label: `${e.name} → ${target}`, written: { from: e.name, to: target } });
+  // ADR 0037, editable insides: in a slot's inside an export wire says what an export op names (its role and export).
+  const slotInside = typeof level.slot === 'string';
+  const exportOf = (e, role) => (slotInside ? { role, export: e.export ?? e.name } : {});
+  for (const [list, role] of [[level.inputs, 'input'], [level.parameters, 'parameter']]) {
+    for (const e of list ?? []) {
+      for (const target of e.to ?? []) {
+        add({ node: INPUTS, port: e.name }, endpoint(target), { kind: 'export', shape: shapeName(e.shape ?? 'signal'), converters: [], scale: null, label: `${e.name} → ${target}`, written: { from: e.name, to: target, ...exportOf(e, role) } });
+      }
     }
   }
   for (const e of level.outputs ?? []) {
-    add(endpoint(e.from), { node: OUTPUTS, port: e.name }, { kind: 'export', shape: shapeName(e.shape), converters: [], scale: null, label: `${e.from} → ${e.name}`, written: { from: e.from, to: e.name } });
+    if (!e.from) continue;
+    add(endpoint(e.from), { node: OUTPUTS, port: e.name }, { kind: 'export', shape: shapeName(e.shape), converters: [], scale: null, label: `${e.from} → ${e.name}`, written: { from: e.from, to: e.name, ...exportOf(e, 'output') } });
   }
   return edges;
 }

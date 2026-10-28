@@ -108,13 +108,13 @@ fn role_key(role: Role) -> &'static str {
 
 // A table of either form, edited in place.
 
-enum Tab<'a> {
+pub(super) enum Tab<'a> {
     Std(&'a mut Table),
     Inl(&'a mut InlineTable),
 }
 
 /// The TOML text of `item` as a value (a section as an inline table).
-fn item_text(item: &TomlItem) -> Option<String> {
+pub(super) fn item_text(item: &TomlItem) -> Option<String> {
     match item {
         TomlItem::Value(value) => {
             let mut value = value.clone();
@@ -131,7 +131,7 @@ fn item_text(item: &TomlItem) -> Option<String> {
 }
 
 /// `text` read as one TOML value.
-fn parse_value(text: &str) -> Result<Value, PatchError> {
+pub(super) fn parse_value(text: &str) -> Result<Value, PatchError> {
     let doc: DocumentMut = format!("v = {text}\n")
         .parse()
         .map_err(|_| bad(format!("`{text}` is not a TOML value")))?;
@@ -145,14 +145,14 @@ fn parse_value(text: &str) -> Result<Value, PatchError> {
 }
 
 impl Tab<'_> {
-    fn keys(&self) -> Vec<String> {
+    pub(super) fn keys(&self) -> Vec<String> {
         match self {
             Tab::Std(t) => t.iter().map(|(k, _)| k.to_owned()).collect(),
             Tab::Inl(t) => t.iter().map(|(k, _)| k.to_owned()).collect(),
         }
     }
 
-    fn get(&self, key: &str) -> Option<&TomlItem> {
+    pub(super) fn get(&self, key: &str) -> Option<&TomlItem> {
         match self {
             Tab::Std(t) => t.get(key),
             Tab::Inl(t) => toml_edit::TableLike::get(&**t, key),
@@ -325,13 +325,27 @@ fn entry<'d>(doc: &'d mut DocumentMut, name: &str) -> Option<Tab<'d>> {
     }
 }
 
-/// Applies `change` to slot `slot`'s entry in `doc`; returns its inverse.
 /// Applies `change` to slot `slot`'s entry in `doc`; returns its inverse,
 /// preceded by the removals of the tables it had to make (outermost first),
 /// so that the inverse list, applied in reverse, leaves none behind.
 fn apply_change(
     doc: &mut DocumentMut,
     slot: &str,
+    change: &Change,
+) -> Result<Vec<Change>, PatchError> {
+    let tab = entry(doc, slot).ok_or_else(|| {
+        refused(
+            "unknown-instance",
+            format!("no instance `{slot}` at this level"),
+        )
+    })?;
+    apply_change_in(tab, change)
+}
+
+/// Applies `change` (its path relative to `tab`) in `tab`; returns its
+/// inverse as [`apply_change`] does.
+pub(super) fn apply_change_in(
+    mut tab: Tab<'_>,
     change: &Change,
 ) -> Result<Vec<Change>, PatchError> {
     let (last, parents) = change
@@ -346,12 +360,6 @@ fn apply_change(
             "a change's `decor` is spacing and comments only: [key prefix, key suffix, value prefix, value suffix]",
         ));
     }
-    let mut tab = entry(doc, slot).ok_or_else(|| {
-        refused(
-            "unknown-instance",
-            format!("no instance `{slot}` at this level"),
-        )
-    })?;
     // Parents are made only for a value written; a removal under a missing
     // table is already done.
     let mut inverse = Vec::new();
@@ -422,7 +430,7 @@ fn without_entry(mut doc: DocumentMut, name: &str) -> String {
 }
 
 /// Whether the entry of `name` in `text` is a slot (has a `slot` key).
-fn is_slot(text: &str, name: &str) -> bool {
+pub(super) fn is_slot(text: &str, name: &str) -> bool {
     let Ok(mut doc) = text.parse::<DocumentMut>() else {
         return false;
     };
@@ -431,14 +439,14 @@ fn is_slot(text: &str, name: &str) -> bool {
 
 /// A slot's `slot` key, read: the template it names, the names it removes,
 /// its own entries (name → role) and the interface it resolves to.
-struct Read {
+pub(super) struct Read {
     from: Option<String>,
     remove: Vec<String>,
     own: BTreeMap<String, Role>,
-    interface: Interface,
+    pub(super) interface: Interface,
     template: Option<Interface>,
-    load: Option<String>,
-    map: Vec<(String, Option<String>)>,
+    pub(super) load: Option<String>,
+    pub(super) map: Vec<(String, Option<String>)>,
     set: Vec<String>,
     seed: bool,
     values: Vec<String>,
@@ -451,7 +459,7 @@ struct SlotOnly {
     slot: toml::Spanned<crate::model::SlotSpec>,
 }
 
-fn read_slot(
+pub(super) fn read_slot(
     text: &str,
     name: &str,
     templates: &BTreeMap<String, Interface>,
@@ -780,7 +788,7 @@ pub(super) struct SlotDone {
 }
 
 impl Patching<'_> {
-    fn ensure_slot(&self, slot: &str) -> Result<(), PatchError> {
+    pub(super) fn ensure_slot(&self, slot: &str) -> Result<(), PatchError> {
         let m = map(&self.text, &Scheme::LEVEL).map_err(|e| refused("does-not-load", e))?;
         if !m.entries.iter().any(|e| e.name == slot) {
             return Err(refused(
@@ -1050,6 +1058,10 @@ impl Patching<'_> {
                 detach,
                 template,
             } => {
+                // ADR 0037, editable insides: the slot's own inside's exports
+                // follow a removal or a rename (content name → new or none).
+                let inside = self.own_inside(slot, read.load.as_deref());
+                let mut synced: Vec<(String, Option<String>)> = Vec::new();
                 let mut ports: Vec<InterfacePort> = read.interface.ports.clone();
                 let mut own = read.own.clone();
                 let mut removed = read.remove.clone();
@@ -1128,6 +1140,16 @@ impl Patching<'_> {
                         })?);
                     }
                     forget(name, &mut own, &mut removed, &mut changes);
+                    if inside.is_some() {
+                        let content = read
+                            .map
+                            .iter()
+                            .find(|(k, _)| k == name)
+                            .map_or_else(|| Some(name.clone()), |(_, v)| v.clone());
+                        if let Some(content) = content {
+                            synced.push((content, None));
+                        }
+                    }
                     if read.map.iter().any(|(k, _)| k == name) {
                         changes.push(set(&["map", name], None));
                     }
@@ -1191,6 +1213,9 @@ impl Patching<'_> {
                             moved.at = map_at;
                             changes.push(moved);
                         }
+                    } else if inside.is_some() {
+                        // Its own inside: the export is renamed with it.
+                        synced.push((old.clone(), Some(new.clone())));
                     } else if let Some(load) = &read.load
                         && (self.ctx.content)(load).is_some_and(|c| {
                             c.ports
@@ -1271,6 +1296,11 @@ impl Patching<'_> {
                     own.insert(declared.name.clone(), declared.role);
                     ports.retain(|p| p.name != declared.name);
                     ports.push(declared);
+                }
+                if let Some(name) = &inside
+                    && !synced.is_empty()
+                {
+                    before.extend(self.sync_inside(name, &synced)?);
                 }
                 if exclude != read.exclude {
                     let text = (!exclude.is_empty())
@@ -1390,10 +1420,15 @@ pub(crate) fn interface_text(interface: &Interface) -> String {
 /// Removes the table at `path` of `slot`'s entry when it is empty,
 /// recording the inverse.
 fn prune(doc: &mut DocumentMut, slot: &str, path: &[&str], inverse: &mut Vec<Change>) {
+    if let Some(tab) = entry(doc, slot) {
+        prune_in(tab, path, inverse);
+    }
+}
+
+/// Removes the table at `path` of `tab` when it is empty, recording the
+/// inverse (its path relative to `tab`).
+pub(super) fn prune_in(mut tab: Tab<'_>, path: &[&str], inverse: &mut Vec<Change>) {
     let Some((last, parents)) = path.split_last() else {
-        return;
-    };
-    let Some(mut tab) = entry(doc, slot) else {
         return;
     };
     for key in parents {

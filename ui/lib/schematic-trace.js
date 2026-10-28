@@ -99,7 +99,9 @@ export function resolver(graph) {
   const level = (path) => {
     if (levels.has(path)) return levels.get(path);
     const node = path ? instance(path) : null;
-    const data = node?.composite ? (graph?.composites?.[node.module] ?? null) : null;
+    // ADR 0037, editable insides: a slot's inside (its own composite, or its read-only one in `insides`), its frame the slot's interface.
+    const key = node?.slot?.inside?.level ?? (node?.composite ? node.module : null);
+    const data = key ? (graph?.composites?.[key] ?? graph?.insides?.[key] ?? null) : null;
     levels.set(path, data);
     return data;
   };
@@ -115,7 +117,7 @@ export function pinInfo(graph, address, r = resolver(graph)) {
   const port = (node.ports ?? []).find((p) => p.name === at.port);
   const parameter = port ? null : (node.parameters ?? []).find((p) => p.name === at.port);
   if (!port && !parameter) return null;
-  const composite = Boolean(node.composite);
+  const composite = Boolean(node.composite) || Boolean(node.slot?.inside?.level);
   return {
     address,
     instance: at.instance,

@@ -29,7 +29,31 @@ import { EXPANDED, browserEntries } from '../lib/module-browser.js';
 import { projectKey } from '../lib/schematic-palette.js';
 import { BROWSER_CSS, ModuleBrowser } from './module-browser.js';
 import { SLOT_DIALOG_CSS, SlotDialogs } from './slot-dialogs.js';
-import { addSlotOp, contentMatch, detachOp, instancePorts, isProjectPath, loadOps, mapRows, projectEntries, templateChoices, templateOp, templateText, templates, unloadOp } from '../lib/slot.js';
+import {
+  addSlotOp,
+  contentMatch,
+  detachOp,
+  exportOp,
+  frameOutputs,
+  frameTargets,
+  insideOp,
+  insideOps,
+  insideSlot,
+  instancePorts,
+  isPreviewLevel,
+  isProjectPath,
+  isSlotInside,
+  levelData,
+  loadOps,
+  mapRows,
+  previewSlot,
+  projectEntries,
+  templateChoices,
+  templateOp,
+  templateText,
+  templates,
+  unloadOp,
+} from '../lib/slot.js';
 import { toLocal, toScreen } from '../lib/schematic-view.js';
 import { editLevel } from '../lib/schematic-open.js';
 import { cordCurve, curveData } from '../lib/schematic-wire.js';
@@ -146,8 +170,8 @@ export class SchematicEditor {
   }
 
   levelGraph(level) {
-    const graph = this.s.graph;
-    return level === '' ? graph?.top : graph?.composites?.[level];
+    // ADR 0037, editable insides: a slot's read-only inside too.
+    return levelData(this.s.graph, level) ?? undefined;
   }
 
   /**
@@ -155,16 +179,48 @@ export class SchematicEditor {
    * (+1). Resolves to whether it was written (a group's per-level patches
    * go one after the other).
    */
-  write(step, level = '', ops = []) {
+  write(step, level = '', ops = [], { views = [] } = {}) {
     if (!this.editing) return Promise.resolve(false);
-    // Only the innermost open level is edited (M2.13-3), undo and redo included (the entry stays for when it is shown).
+    // Only the innermost open level is edited (M2.13-3), undo and redo included (the entry stays for when it is shown);
+    // ADR 0037, editable insides: a slot's edits written from inside it (`views`) too.
     const shown = editLevel(this.s.drawn);
     const target = this.session.levelOf(step, level);
-    if (target !== null && target !== shown.level) {
+    const from = step === 0 ? views : this.session.viewsOf(step);
+    if (target !== null && target !== shown.level && !from.includes(shown.level)) {
       this.s.say(`Not ${step < 0 ? 'undone' : step > 0 ? 'redone' : 'edited'}: ${target || 'the top level'} is around the open ${shown.path || 'level'}; ${step ? 'go out to it first' : 'edit it from there'}`);
       return Promise.resolve(false);
     }
-    const asked = step === 0 ? this.session.request(level, ops) : step < 0 ? this.session.undo() : this.session.redo();
+    // ADR 0037, editable insides: the first edit of a slot's read-only inside makes the slot's own copy first.
+    if (step === 0 && isPreviewLevel(level)) return this.writeOwnCopy(level, ops);
+    if (step === 0) ops = insideOps(this.levelGraph(level), ops);
+    const asked = step === 0 ? this.session.request(level, ops, 0, views) : step < 0 ? this.session.undo() : this.session.redo();
+    return this.send(asked);
+  }
+
+  /**
+   * ADR 0037, editable insides: `ops` meant for slot inside `key` (read-only,
+   * not the slot's own yet): `slot.inside` written at the slot's level
+   * first (an undo entry of its own, undone from inside too), then `ops`
+   * at the new composite's level, against the base its reply gave.
+   */
+  writeOwnCopy(key, ops) {
+    const { parent, slot } = previewSlot(key);
+    const found = insideSlot(this.s.graph, this.levelGraph(key));
+    const name = found?.inside?.name ?? null;
+    const shaped = insideOps(this.levelGraph(key), ops);
+    const asked = this.session.request(parent, [insideOp(slot)], 0, [key, ...(name ? [name] : [])]);
+    return this.send(asked).then((ok) => {
+      if (!ok) return false;
+      const made = this.lastReply?.files?.find((f) => typeof f?.level === 'string' && f.base);
+      if (!made) return false;
+      this.showNotice('Own inside made', `${slot} now has its own inside: ${made.file}. The content it held stays as it was; Undo takes the copy back.`);
+      const again = this.session.request(made.level, shaped, 0, [key]);
+      return this.send(again, { keepNotice: true });
+    });
+  }
+
+  /** Sends `asked` (a `request`'s), keeping the history; resolves to whether it was written. */
+  send(asked, { keepNotice = false } = {}) {
     if (!asked) return Promise.resolve(false);
     if (asked.refused) {
       this.s.say(asked.refused);
@@ -181,7 +237,8 @@ export class SchematicEditor {
     return request.then(
       (reply) => {
         this.session.written(reply, asked.pending);
-        this.hideNotice();
+        this.lastReply = reply;
+        if (!keepNotice) this.hideNotice();
         this.s.say('');
         // ADR 0037 §7: what a slot op says it did besides (a Replace's removed map and set entries, panels rebound).
         const said = [...(reply?.notes ?? []), ...((reply?.panels ?? []).length ? [`bindings rewritten in ${reply.panels.join(', ')}`] : [])];
@@ -235,6 +292,11 @@ export class SchematicEditor {
   remove(hit) {
     if (hit?.kind === 'instance' && hit.node.kind === 'instance') this.write(0, hit.level, [removeInstance(hit.node.name)]);
     else if (hit?.kind === 'wire' && hit.wire.kind === 'connection') this.write(0, hit.level, [removeConnection(hit.wire.written.from, hit.wire.written.to)]);
+    else if (hit?.kind === 'wire' && hit.wire.kind === 'export' && hit.wire.written?.role) {
+      // ADR 0037, editable insides: a wire of a slot's inside's frame.
+      const { role, from, to } = hit.wire.written;
+      this.write(0, hit.level, [exportOp(false, role, hit.wire.written.export ?? (role === 'output' ? to : from), role === 'output' ? from : to)]);
+    }
   }
 
   /** The sidebar's scale field opened (the context menu's Edit scale…, once the wire is selected). */
@@ -244,15 +306,25 @@ export class SchematicEditor {
 
   // Drag to connect.
 
-  /** Whether a press on `hit` starts a connection: an instance's output, in edit mode. */
+  /** Whether a press on `hit` starts a connection: an instance's output, or (a slot's inside) its frame's input pin, in edit mode. */
   starts(hit) {
-    return this.editing && hit.kind === 'port' && hit.node.kind === 'instance' && hit.port.direction === 'out';
+    if (!this.editing || hit.kind !== 'port' || hit.port.direction !== 'out') return false;
+    return hit.node.kind === 'instance' || (hit.node.kind === 'input' && isSlotInside(this.levelGraph(hit.level)));
   }
 
   connectStart(hit, at) {
-    const source = { instance: hit.node.name, port: hit.port.name, shape: hit.port.shape };
-    const targets = connectTargets(this.levelGraph(hit.level), source);
-    const keys = new Set(targets.map((t) => `${hit.path}/${t.instance}.${t.port}`));
+    const levelGraph = this.levelGraph(hit.level);
+    let keys;
+    if (hit.node.kind === 'input') {
+      // ADR 0037, editable insides: a frame pin wired to the inner ports it may reach.
+      keys = new Set(frameTargets(levelGraph, hit.port).map((t) => `${hit.path}/${t.instance}.${t.port}`));
+    } else {
+      const source = { instance: hit.node.name, port: hit.port.name, shape: hit.port.shape };
+      const targets = connectTargets(levelGraph, source);
+      keys = new Set(targets.map((t) => `${hit.path}/${t.instance}.${t.port}`));
+      // ADR 0037, editable insides: and the frame's outputs not wired yet.
+      if (isSlotInside(levelGraph)) for (const name of frameOutputs(levelGraph, hit.port.shape)) keys.add(`${hit.path}.${name}`);
+    }
     const pins = [...(this.s.groups.get(hit.path)?.g.querySelectorAll('.pin') ?? [])].filter((pin) => keys.has(pin.dataset.address));
     for (const pin of pins) pin.classList.add('target');
     // From the pin itself, as the wire will be drawn.
@@ -276,6 +348,16 @@ export class SchematicEditor {
     if (!c || hit.kind !== 'port') return;
     if (hit.path !== c.hit.path || !c.keys.has(hit.address)) {
       this.s.say(`${hit.address} cannot take ${c.hit.address}`);
+      return;
+    }
+    // ADR 0037, editable insides: a frame pin's wire is an export's.
+    if (c.hit.node.kind === 'input') {
+      const role = c.hit.port.role ?? 'input';
+      this.write(0, c.hit.level, [exportOp(true, role, c.hit.port.export ?? c.hit.port.name, `${hit.node.name}.${hit.port.name}`)]);
+      return;
+    }
+    if (hit.node.kind === 'output') {
+      this.write(0, c.hit.level, [exportOp(true, 'output', hit.port.export ?? hit.port.name, `${c.hit.node.name}.${c.hit.port.name}`)]);
       return;
     }
     this.write(0, c.hit.level, [addConnection(`${c.hit.node.name}.${c.hit.port.name}`, `${hit.node.name}.${hit.port.name}`)]);
@@ -476,6 +558,31 @@ export class SchematicEditor {
     });
   }
 
+  /**
+   * ADR 0037, editable insides: Edit the slot's interface… from inside it
+   * (the frame's background menu): the interface editor of the slot whose
+   * inside is shown, its edits written at the slot's level from here.
+   */
+  openInsideInterface() {
+    const shown = editLevel(this.s.drawn);
+    const found = insideSlot(this.s.graph, this.levelGraph(shown.level));
+    if (!this.editing || !found) return;
+    const at = shown.path.lastIndexOf('/');
+    const path = shown.path.slice(0, Math.max(0, at));
+    const level = this.s.levelOf?.(path);
+    const node = level?.layout.nodes.find((n) => n.kind === 'instance' && n.name === found.name);
+    if (!node?.slot) return;
+    const views = [shown.level];
+    this.dialogs.openInterface({
+      slotName: found.name,
+      slot: node.slot,
+      focus: null,
+      apply: (op) => this.write(0, found.parent, [op], { views }).then((ok) => ({ ok, error: ok ? null : (this.lastRefusal ?? 'Not written') })),
+      saveTemplate: () => this.saveTemplate({ kind: 'instance', path, level: found.parent, node, address: shown.path }),
+      detach: () => this.detach({ kind: 'instance', path, level: found.parent, node, address: shown.path }),
+    });
+  }
+
   /** A slot's "+" pin at `address` (`/fx`, `/drums/fx`): the interface editor with a port to add on `side`. */
   addPort(address, side) {
     const at = String(address ?? '').lastIndexOf('/');
@@ -555,7 +662,10 @@ export class SchematicEditor {
     this.scaleEntry = null;
     if (!this.editing || !selection) return [];
     const parts = [];
-    if (selection.level && selection.level !== '' && selection.kind !== 'background') {
+    if (isPreviewLevel(selection.level) && selection.kind !== 'background') {
+      // ADR 0037, editable insides: nothing is shared once edited: the first edit makes the slot's own copy.
+      parts.push(html('div', { className: 'reach', textContent: 'a slot’s read-only inside: an edit makes the slot’s own copy first' }));
+    } else if (selection.level && selection.level !== '' && selection.kind !== 'background') {
       const count = instanceCount(this.s.graph, selection.level);
       parts.push(html('div', { className: 'reach', textContent: `edits every instance of ${selection.level}: ${count}` }));
     }

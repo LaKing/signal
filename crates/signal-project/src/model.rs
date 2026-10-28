@@ -494,6 +494,13 @@ pub(crate) struct CompositeSection {
     /// library composite.
     #[serde(default)]
     pub(crate) description: Option<String>,
+    /// ADR 0037, editable insides (2026-10-27): the slot whose own inside
+    /// this composite is, `"<slot>"` at the top level or
+    /// `"<composite>/<slot>"` in a composite. Presentation and ownership
+    /// only: the plan never reads it.
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub(crate) inside_of: Option<Spanned<String>>,
 }
 
 /// `[wiring]`.

@@ -535,3 +535,93 @@ fn snapshots_follow_in_op_order(transport: Transport) {
 }
 
 both!(snapshots_follow_in_op_order);
+
+/// ADR 0037, editable insides: `slot.inside` writes the slot's own inside,
+/// a second file of the patch (the reply's `files`: its level and base),
+/// and the slot loads it; `graph` gives it as the slot's own, its frame the
+/// slot's interface; an edit at its level (a module, an export wired) and
+/// its undo; then the copy's undo gives `project.toml` back byte for byte
+/// and removes the file.
+fn an_own_inside_is_made_edited_and_undone(transport: Transport) {
+    let mut rig = slots("slot-inside", transport);
+    let (mut ws, _) = rig.client();
+    let path = rig.dir.join("project.toml");
+    let inside = rig.dir.join("composites/spare_inside.toml");
+    let before = graph(&mut rig, &mut ws, 1);
+    assert_eq!(
+        instance(&before, "spare")["slot"]["inside"],
+        json!({"level": "/spare", "own": false, "make": "empty", "name": "spare_inside"})
+    );
+    assert_eq!(before["insides"]["/spare"]["outputs"][0]["name"], "out");
+    let made = patch(
+        &mut rig,
+        &mut ws,
+        2,
+        json!([{"op": "slot.inside", "slot": "spare"}]),
+    );
+    assert_eq!(
+        made["files"][0]["file"], "composites/spare_inside.toml",
+        "{made}"
+    );
+    assert_eq!(made["files"][0]["level"], "spare_inside");
+    let text = fs::read_to_string(&inside).unwrap();
+    assert!(text.contains("inside_of = \"spare\""), "{text}");
+    assert_eq!(
+        made["files"][0]["base"].as_str().unwrap().len(),
+        64,
+        "the new file's SHA-256"
+    );
+    assert!(
+        fs::read_to_string(&path)
+            .unwrap()
+            .contains("spare = { slot = \"lib.voice\", load = \"spare_inside\" }")
+    );
+    rig.wait(&mut ws, "the reload", |got| got.of("reload").cloned());
+    let g = graph(&mut rig, &mut ws, 4);
+    assert_eq!(instance(&g, "spare")["slot"]["inside"]["own"], true);
+    assert_eq!(g["composites"]["spare_inside"]["slot"], "/spare");
+    assert_eq!(g["composites"]["spare_inside"]["inputs"][0]["name"], "gate");
+    // Built inside, at its level, against the base the reply gave.
+    let added = rig.request(
+        &mut ws,
+        5,
+        json!({"type": "patch", "level": "spare_inside", "base": made["files"][0]["base"], "ops": [
+            {"op": "instance.add", "name": "amp", "module": "std.gain"},
+            {"op": "export.connect", "role": "output", "name": "out", "port": "amp.out"}
+        ]}),
+        "patched",
+    );
+    let built = fs::read_to_string(&inside).unwrap();
+    assert!(built.contains("outputs = { out = \"amp.out\" }"), "{built}");
+    rig.wait(&mut ws, "the reload", |got| got.of("reload").cloned());
+    rig.request(
+        &mut ws,
+        6,
+        json!({"type": "patch", "level": "spare_inside", "base": added["base"], "ops": added["inverse"]}),
+        "patched",
+    );
+    assert_eq!(fs::read_to_string(&inside).unwrap(), text);
+    rig.wait(&mut ws, "the reload", |got| got.of("reload").cloned());
+    // The copy undone: project.toml as it was, the file gone.
+    let base = graph(&mut rig, &mut ws, 7)["files"][""].clone();
+    let undone = rig.request(
+        &mut ws,
+        8,
+        json!({"type": "patch", "level": "", "base": base, "ops": made["inverse"]}),
+        "patched",
+    );
+    assert_eq!(undone["files"][0]["base"], Value::Null, "{undone}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), HOST);
+    assert!(!inside.exists());
+    // A project in a slot is not copied.
+    let error = refused(
+        &mut rig,
+        &mut ws,
+        9,
+        json!([{"op": "slot.load", "slot": "spare", "load": "../beside"}, {"op": "slot.inside", "slot": "spare"}]),
+    );
+    assert_eq!(error["code"], "bad-value", "{error}");
+    rig.finish();
+}
+
+both!(an_own_inside_is_made_edited_and_undone);

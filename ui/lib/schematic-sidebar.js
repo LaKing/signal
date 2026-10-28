@@ -148,7 +148,9 @@ export function sidebar(selected, context = {}) {
   const base = card(hit, { graph, description });
   if (hit.kind === 'instance') {
     const node = hit.node;
-    const inside = node.composite ? (graph?.composites?.[node.module]?.instances ?? []).length : 0;
+    // ADR 0037, editable insides: a slot's inside, its own composite or its read-only one.
+    const insideLevel = node.composite ? (graph?.composites?.[node.level ?? node.module] ?? graph?.insides?.[node.level]) : null;
+    const inside = (insideLevel?.instances ?? []).length;
     const type = types?.get(node.module) ?? null;
     // A composite's group needs no reply; a primitive's is its type's category.
     const category = type?.group ?? (node.composite ? groupOf(node) : null);
@@ -159,7 +161,7 @@ export function sidebar(selected, context = {}) {
         ['address', hit.address],
         ['module', node.module],
         ['category', category ?? '—'],
-        ['composite', !node.composite ? 'no' : graph?.composites?.[node.module] ? `yes, ${inside} instance${inside === 1 ? '' : 's'} inside` : 'yes, a library composite (its inside is not in the graph)'],
+        ['composite', !node.composite ? 'no' : insideLevel ? `yes, ${inside} instance${inside === 1 ? '' : 's'} inside` : 'yes, a library composite (its inside is not in the graph)'],
         ['level', levelText(graph, hit.level)],
       ],
       pins: [...node.ins, ...node.outs].map((p) => pinRow(entry, node, p)),
@@ -257,7 +259,7 @@ export function acrossOf(graph, hit) {
 
 /** The project's library composites (`lib.*`) at the top level, by type: a row when there are any. */
 function libraryRow(graph, layoutOf) {
-  const types = new Set((layoutOf?.('')?.nodes ?? []).filter((n) => n.kind === 'instance' && n.composite && !graph.composites?.[n.module]).map((n) => n.module));
+  const types = new Set((layoutOf?.('')?.nodes ?? []).filter((n) => n.kind === 'instance' && n.composite && !n.slot && !graph.composites?.[n.module]).map((n) => n.module));
   return types.size ? [['library composites', String(types.size)]] : [];
 }
 

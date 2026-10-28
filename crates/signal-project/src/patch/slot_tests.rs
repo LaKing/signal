@@ -68,7 +68,18 @@ fn ctx() -> Context<'static> {
         module: &modules,
         templates: &NO_TEMPLATES,
         content: &content,
+        file: &no_file,
+        source: &source,
     }
+}
+
+fn no_file(_: &str) -> Option<String> {
+    None
+}
+
+/// What a `load` is copied from, as the host's closure gives it.
+fn source(load: &str) -> Option<crate::inside::Source> {
+    crate::inside::source(&[], load, &registry())
 }
 
 fn plans(text: &str) -> Result<(), String> {

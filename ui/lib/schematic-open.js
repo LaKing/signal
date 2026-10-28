@@ -15,7 +15,7 @@
 // (`openedLayout`) is drawn, its other boxes moved out of the frame's way
 // (`makeRoom`), the stored layout is what is moved. No DOM.
 
-import { CHAR, GAP_Y, HEADER, PAD, laneY, levelBottom } from './schematic-layout.js';
+import { CHAR, GAP_Y, HEADER, PAD, insideKey, laneY, levelBottom } from './schematic-layout.js';
 import { LABEL_PX, READ_PX, estimateWidth } from './schematic-labels.js';
 import { crosses, wireGeometry } from './schematic-wire.js';
 import { fit, focus, zoomAt } from './schematic-view.js';
@@ -304,7 +304,7 @@ export function chooseOpen({ path, layout, layoutOf, pinned = new Set() }) {
   if (!pinned.size) return null;
   for (const node of layout.nodes) {
     if (!node.composite || node.kind !== 'instance' || !pinned.has(`${path}/${node.name}`)) continue;
-    const inner = layoutOf(node.module);
+    const inner = layoutOf(insideKey(node));
     if (inner) return { node, inner };
   }
   return null;
