@@ -472,6 +472,12 @@ pub(crate) struct Slot {
     /// (ADR 0033), handed to every call. Built with the slot, so a swap that
     /// connects or disconnects an input changes it with the plan.
     connected: Vec<bool>,
+    /// ADR 0037 §6: per port of its descriptor, whether a swap since its
+    /// last call changed the port's sources; handed to its next call only
+    /// ([`fresh`](Slot::fresh)), then cleared.
+    sources_changed: Vec<bool>,
+    /// A swap changed some port's sources since its last call.
+    fresh: bool,
 }
 
 impl Slot {
@@ -695,6 +701,10 @@ pub(crate) struct PlanState {
     event_inputs: Vec<EventInput>,
     /// Effective values of the last frame.
     param_values: Vec<f64>,
+    /// Each input port's and parameter's sources as (source port, scale
+    /// bits), in canonical order: what the next swap compares a survivor's
+    /// inputs with (ADR 0037 §6, `Inputs::sources_changed`).
+    incoming: BTreeMap<PortAddress, Vec<(PortAddress, u64)>>,
     /// Every per-instance buffer the units write: slots, primitives,
     /// parameters, the block's outputs, inputs and events (ADR 0020).
     cells: PlanCells,
@@ -1004,6 +1014,9 @@ impl PlanState {
                 table: instance.table.clone(),
                 // Set below, once every connection is known.
                 connected: vec![false; descriptor.ports.len()],
+                // Set below for a survivor, against the old plan.
+                sources_changed: vec![false; descriptor.ports.len()],
+                fresh: false,
             });
             primitives.push(primitive);
             types.push(kind);
@@ -1074,6 +1087,41 @@ impl PlanState {
                     *flag = true;
                 }
                 edges.push((from, to));
+            }
+        }
+
+        // ADR 0037 §6: each port's sources as (source port, scale), and a
+        // survivor's ports whose sources differ from the old plan's.
+        let incoming: BTreeMap<PortAddress, Vec<(PortAddress, u64)>> = plan
+            .sources
+            .iter()
+            .map(|(target, sources)| {
+                let list = sources
+                    .iter()
+                    .map(|s| (s.from.clone(), s.scale.to_bits()))
+                    .collect();
+                (target.clone(), list)
+            })
+            .collect();
+        if let Some(old) = old {
+            for &(n, _) in &survivors {
+                let (Some(instance), Some(slot)) = (plan.instances.get(n), slots.get_mut(n)) else {
+                    continue;
+                };
+                for (p, port) in instance.descriptor.ports.iter().enumerate() {
+                    if port.direction != Direction::In {
+                        continue;
+                    }
+                    let address = port_address(&instance.address, port.name)?;
+                    let now = incoming.get(&address).map_or(&[][..], Vec::as_slice);
+                    let before = old.incoming.get(&address).map_or(&[][..], Vec::as_slice);
+                    if now != before
+                        && let Some(flag) = slot.sources_changed.get_mut(p)
+                    {
+                        *flag = true;
+                        slot.fresh = true;
+                    }
+                }
             }
         }
 
@@ -1316,6 +1364,7 @@ impl PlanState {
             sink_ports,
             event_inputs,
             param_values,
+            incoming,
             cells,
             out: Out {
                 log,
@@ -1536,6 +1585,14 @@ fn move_instance(new: &mut PlanState, old: &mut PlanState, n: usize, o: usize) {
     ns.discards = os.discards;
     ns.suspension_discards = os.suspension_discards;
     ns.edited_at = os.edited_at;
+    // A change its calls have not seen yet (it was suspended, or between
+    // ticks) stays to be seen with this swap's.
+    if os.fresh {
+        for (a, &b) in ns.sources_changed.iter_mut().zip(&os.sources_changed) {
+            *a |= b;
+        }
+        ns.fresh = true;
+    }
     for (a, &b) in ns.hold.iter_mut().zip(&os.hold) {
         *a = b;
     }
@@ -3323,7 +3380,7 @@ fn run_direct(fx: &Fixed<'_>, access: &mut Access<'_>, i: usize, a: usize, b: us
                 Some(Primitive::Direct(module)) => guarded(fx.hang, (lane, i), || {
                     process(
                         module.as_mut(),
-                        (&*v.slot, &mut *v.lane, &mut *v.sinks),
+                        (&mut *v.slot, &mut *v.lane, &mut *v.sinks),
                         len,
                     );
                 }),
@@ -3421,7 +3478,7 @@ fn divided_direct(
         Some(Primitive::Direct(module)) => guarded(fx.hang, (lane, i), || {
             process(
                 module.as_mut(),
-                (&*v.slot, &mut *v.lane, &mut *v.sinks),
+                (&mut *v.slot, &mut *v.lane, &mut *v.sinks),
                 ticks,
             );
         }),
@@ -3598,7 +3655,7 @@ fn absorb(fx: &Fixed<'_>, v: &mut CallView<'_>, (lane, i): (usize, usize), f: us
     if let Some(Primitive::StateOutput(module)) = v.primitive.as_mut() {
         let completed = guarded(fx.hang, (lane, i), || {
             settle(fx, module.as_mut(), v.slot);
-            absorb_call(module.as_mut(), (&*v.slot, &*v.lane));
+            absorb_call(module.as_mut(), (&mut *v.slot, &*v.lane));
         });
         count_frame(v.slot);
         if !completed {
@@ -3863,7 +3920,7 @@ fn running<'x, 't>(v: &'x mut CallView<'t>) -> Run<'x, &'x mut Window<'t>> {
 #[inline(always)]
 fn process(
     module: &mut dyn DirectPrimitive,
-    (slot, lane, sinks): (&Slot, &mut Lane, &mut [EventSink]),
+    (slot, lane, sinks): (&mut Slot, &mut Lane, &mut [EventSink]),
     len: usize,
 ) {
     let (signal_in, out, params) = (
@@ -3879,13 +3936,29 @@ fn process(
         &slot.ends,
     )
     .with_table(slot.table.as_ref())
-    .with_connected(&slot.connected);
+    .with_connected(&slot.connected)
+    .with_sources_changed(if slot.fresh {
+        &slot.sources_changed
+    } else {
+        &[]
+    });
     let mut outputs = Outputs::new(
         len,
         lane.call_outputs.get_mut(..out * len).unwrap_or(&mut []),
         sinks,
     );
     module.process(&inputs, &mut outputs);
+    seen(slot);
+}
+
+/// After an instance's call: the source changes it was handed are seen
+/// (ADR 0037 §6). Allocates nothing.
+#[inline(always)]
+fn seen(slot: &mut Slot) {
+    if slot.fresh {
+        slot.fresh = false;
+        slot.sources_changed.fill(false);
+    }
 }
 
 /// One `emit` call of a state-output instance (one frame), into its sinks
@@ -3907,7 +3980,7 @@ fn emit_call(
 /// One `absorb` call of a state-output instance (one frame), from its
 /// lane's call buffers and events.
 #[inline(always)]
-fn absorb_call(module: &mut dyn StateOutputPrimitive, (slot, lane): (&Slot, &Lane)) {
+fn absorb_call(module: &mut dyn StateOutputPrimitive, (slot, lane): (&mut Slot, &Lane)) {
     let (signal_in, params) = (slot.signal_in.len(), slot.params.len());
     let inputs = Inputs::new(
         1,
@@ -3917,8 +3990,14 @@ fn absorb_call(module: &mut dyn StateOutputPrimitive, (slot, lane): (&Slot, &Lan
         &slot.ends,
     )
     .with_table(slot.table.as_ref())
-    .with_connected(&slot.connected);
+    .with_connected(&slot.connected)
+    .with_sources_changed(if slot.fresh {
+        &slot.sources_changed
+    } else {
+        &[]
+    });
     module.absorb(&inputs);
+    seen(slot);
 }
 
 /// Copies the instance's summed signal inputs and effective parameter values
@@ -4169,7 +4248,7 @@ fn whole_direct(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, a: usize, b: usize)
     match mode {
         Mode::Running => {
             w.load_call(i, a, len);
-            let Some(slot) = w.slots.get(i) else {
+            let Some(slot) = w.slots.get_mut(i) else {
                 return;
             };
             let sinks = w.sinks.get_mut(slot.event_out.clone()).unwrap_or(&mut []);
@@ -4272,7 +4351,7 @@ fn whole_divided(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, a: usize, b: usize
     };
     let ticks = ticks_from(d, t1, b);
     w.load_ticks(i, (t1, d, ticks));
-    let completed = match (w.slots.get(i), w.primitives.get_mut(i)) {
+    let completed = match (w.slots.get_mut(i), w.primitives.get_mut(i)) {
         (Some(slot), Some(Some(Primitive::Direct(module)))) => {
             let sinks = w.sinks.get_mut(slot.event_out.clone()).unwrap_or(&mut []);
             let lane = &mut *w.lane;
@@ -4381,12 +4460,12 @@ fn whole_absorb(fx: &Fixed<'_>, w: &mut Whole<'_>, i: usize, f: usize) {
         return;
     }
     w.load_call(i, f, 1);
-    let completed = match (w.slots.get(i), w.primitives.get_mut(i)) {
+    let completed = match (w.slots.get_mut(i), w.primitives.get_mut(i)) {
         (Some(slot), Some(Some(Primitive::StateOutput(module)))) => {
             let lane = &*w.lane;
             guarded(fx.hang, (0, i), || {
                 settle(fx, module.as_mut(), slot);
-                absorb_call(module.as_mut(), (slot, lane));
+                absorb_call(module.as_mut(), (&mut *slot, lane));
             })
         }
         _ => true,

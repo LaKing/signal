@@ -412,6 +412,20 @@ impl Controller {
         })
     }
 
+    /// [`signal_engine::Controller::prepare_swap_after`], keeping `plan`
+    /// for the vector streams' verdicts: a swap to send right after
+    /// `previous` (ADR 0037 §6).
+    pub fn prepare_swap_after(
+        &self,
+        previous: &ReadySwap,
+        plan: &ExecutionPlan,
+    ) -> Result<ReadySwap, ControlError> {
+        Ok(ReadySwap {
+            ready: self.controller.prepare_swap_after(&previous.ready, plan)?,
+            plan: plan.clone(),
+        })
+    }
+
     /// [`signal_engine::Controller::send_swap`]: first, room permitting,
     /// every started vector slot's verdict for the plan version the swap
     /// makes, so it is there when the swap commits; withdrawn if the engine

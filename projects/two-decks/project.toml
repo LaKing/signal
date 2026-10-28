@@ -1,0 +1,60 @@
+# Two decks (ADR 0037, phase 2): two `lib.deck` slots, each loading a whole
+# project, mixed by the host, with the host's transport driving one of them.
+#
+# Signal flow:
+#
+#   transport (lib.transport, 120 bpm) ─ position, jump, running, tempo ─► deck_a
+#   deck_a (slot lib.deck ◂ ./deck: follows the host)  ─ l, r ─► mix_l.a, mix_r.a
+#   deck_b (slot lib.deck ◂ ../studio: its own clock)  ─ l, r ─► mix_l.b, mix_r.b
+#   mix_l, mix_r (std.mix, 0.5 each) ─► out (gain 1) ─► l, r
+#
+# A slot's ports are its interface's (lib.deck: inputs position, jump,
+# running, tempo; outputs l, r; parameter release), whatever it loads; the
+# host's wires name them, and loading connects them to the content's ports
+# of the same names. `./deck` exports its transport's follow inputs under
+# those names, so it plays the host's beats; `../studio` has no such
+# exports (its std.transport counts its own ticks), so only its `l` and `r`
+# match, and it keeps its own time. `release = 0` on deck_a: if the host
+# lets go of it (the wires removed, or the slot unloaded and loaded again),
+# it continues from the last beat it followed.
+#
+# Load, Replace and Unload are live edits (ADR 0037 §6): replacing what a
+# deck loads fades the old content out (5 ms), leaves the slot empty for a
+# frame, and fades the new one in, with no state carried over.
+#
+# `deck/` is a copy of projects/studio-transport as committed in M3.1 (with
+# its transport vendored to export the follow inputs), so this project's
+# golden render does not move when that one is edited. Mixing is `std.mix`,
+# as in projects/two-studios (`lib.mixer` comes with ADR 0035's phase 3).
+#
+# Safe gain: each deck plays at most 0.25 (−12 dBFS); halved and summed, the
+# host plays at most 0.25 too.
+schema_version = 1
+
+[project]
+name = "two-decks"
+sample_rate = 48000
+seed = 7
+
+[instances]
+# The host's transport: deck_a follows it.
+transport = { module = "lib.transport", bpm = 120, run = 1, rate = 1 }
+deck_a = { slot = "lib.deck", load = "./deck", release = 0 }
+deck_b = { slot = "lib.deck", load = "../studio" }
+mix_l = { module = "std.mix", gain_a = 0.5, gain_b = 0.5 }
+mix_r = { module = "std.mix", gain_a = 0.5, gain_b = 0.5 }
+out = { module = "std.audio_out" }
+
+[wiring]
+connections = [
+  { from = "transport.position", to = "deck_a.position" },
+  { from = "transport.jump", to = "deck_a.jump" },
+  { from = "transport.running", to = "deck_a.running" },
+  { from = "transport.tempo", to = "deck_a.tempo" },
+  { from = "deck_a.l", to = "mix_l.a" },
+  { from = "deck_a.r", to = "mix_r.a" },
+  { from = "deck_b.l", to = "mix_l.b" },
+  { from = "deck_b.r", to = "mix_r.b" },
+  { from = "mix_l.out", to = "out.l" },
+  { from = "mix_r.out", to = "out.r" },
+]

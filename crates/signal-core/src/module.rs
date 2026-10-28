@@ -60,6 +60,10 @@ pub struct PrepareContext {
 ///   whether the plan gives it at least one connection. It is a property of
 ///   the plan, not of the values: it changes only at a plan swap, between
 ///   two calls. An unconnected input still reads 0 (`docs/semantics.md` §3).
+/// - `sources_changed` (ADR 0037 §6): per port of the descriptor's `ports`,
+///   whether the plan swapped in since the instance's last call gives it
+///   another set of sources (source port, scale) than the plan before. Only
+///   the first call after such a swap sees it, at its first frame.
 #[derive(Clone, Copy, Debug)]
 pub struct Inputs<'a> {
     frames: usize,
@@ -69,6 +73,7 @@ pub struct Inputs<'a> {
     event_ends: &'a [usize],
     table: Option<&'a Table>,
     connected: &'a [bool],
+    sources_changed: &'a [bool],
 }
 
 impl<'a> Inputs<'a> {
@@ -88,6 +93,7 @@ impl<'a> Inputs<'a> {
             event_ends,
             table: None,
             connected: &[],
+            sources_changed: &[],
         }
     }
 
@@ -112,6 +118,31 @@ impl<'a> Inputs<'a> {
     /// ports, or an output, reads `false`.
     pub fn is_connected(&self, port: usize) -> bool {
         self.connected.get(port).copied().unwrap_or(false)
+    }
+
+    /// These views with which of the instance's ports had their sources
+    /// changed by a plan swap since its last call (ADR 0037 §6):
+    /// `changed[i]` for port *i* of the descriptor's `ports`. What the
+    /// engine hands a surviving instance's first call after such a swap;
+    /// without it every port reads unchanged.
+    pub fn with_sources_changed(self, changed: &'a [bool]) -> Inputs<'a> {
+        Inputs {
+            sources_changed: changed,
+            ..self
+        }
+    }
+
+    /// Whether a plan swap since this instance's last call changed the set
+    /// of sources (source port and scale) of input `port` (an index into
+    /// the descriptor's `ports`), ADR 0037 §6. True only in the first call
+    /// after that swap, and then of the call's first frame (calls never
+    /// span a swap, so it does not depend on how frames are split into
+    /// calls); false for an instance the swap added (it has its own first
+    /// frame), for an index past the ports, and for an output. A module
+    /// uses it to tell an input that now comes from elsewhere from a change
+    /// of value on the same source.
+    pub fn sources_changed(&self, port: usize) -> bool {
+        self.sources_changed.get(port).copied().unwrap_or(false)
     }
 
     /// The instance's table, if its plan gives it one. It changes only at a

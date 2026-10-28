@@ -3110,6 +3110,8 @@ impl Host {
                         "sets": applied.sets,
                         "swap": applied.swap,
                         "removed": applied.removed,
+                        "replaced": applied.replaced,
+                        "loadSwap": applied.load_swap,
                         "message": applied.to_string(),
                     }),
                     edited && applied.swap.is_none(),

@@ -317,3 +317,44 @@ test('a row’s short description: its first sentence', () => {
   assert.equal(summary('Two\nlines. More.'), 'Two lines.');
   assert.equal(summary(null), '');
 });
+
+test('every branch opens to its own rows down to its types: keys never collide, a category named as a source included', () => {
+  // A `modules` reply as the server gives it (crates/signal-project/src/structure.rs): a project
+  // composite with and without a category, a library one, and names that look like sources.
+  const entries = browserEntries({
+    primitives: [
+      { module: 'std.project', composite: false, category: 'library', description: 'A primitive named like a source, in a category named like one.' },
+      { module: 'std.osc', composite: false, category: 'generator' },
+    ],
+    composites: [
+      { module: 'project', composite: true, description: 'A composite named like a source.', inside: null },
+      { module: 'voice', composite: true, category: 'std', description: null },
+      { module: 'lib.verb', composite: true, library: true, category: 'effect' },
+    ],
+  });
+  const tree = browserTree(entries);
+  const all = [];
+  const walk = (node) => {
+    all.push(node.key);
+    for (const child of node.children ?? []) walk(child);
+  };
+  for (const source of tree.sources) walk(source);
+  assert.equal(new Set(all).size, all.length, `keys unique: ${all.join(' ')}`);
+  // Opening every branch, one click each from the first state, reaches every type.
+  let expanded = new Set(EXPANDED);
+  for (const key of all.filter((k) => !k.startsWith('m:'))) if (!expanded.has(key)) expanded = toggled(expanded, key);
+  const rows = treeRows(tree, expanded).rows;
+  assert.deepEqual(rows.filter((r) => r.kind === 'entry').map((r) => `${r.depth} ${r.key} < ${r.parent}`), [
+    '2 m:voice < c:project/std',
+    '2 m:project < c:project/other',
+    '2 m:lib.verb < c:library/effect',
+    '2 m:std.project < c:std/library',
+    '2 m:std.osc < c:std/generator',
+  ], 'in the palette’s category order (groupOrder)');
+  // Each row right after its branch's rows: the list is the tree in order.
+  for (const row of rows.filter((r) => r.parent)) assert.ok(rows.indexOf(rows.find((r) => r.key === row.parent)) < rows.indexOf(row));
+  // A project's composites without categories are the source's rows themselves.
+  const plain = browserTree(browserEntries({ composites: [{ module: 'drums', composite: true }, { module: 'bass', composite: true }] }));
+  assert.deepEqual(keys(treeRows(plain, new Set(EXPANDED)).rows), ['s:project', 'm:drums', 'm:bass']);
+  assert.deepEqual(keys(treeRows(plain, toggled(new Set(EXPANDED), 's:project')).rows), ['s:project'], 'and closed by its toggle');
+});

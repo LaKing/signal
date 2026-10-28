@@ -101,6 +101,7 @@
 //! | `std.fm_op` | [`FmOp`] | direct | `generator` |
 //! | `std.wavetable` | [`Wavetable`] | direct | `generator` |
 //! | `std.playhead` | [`Playhead`] | direct | `event` |
+//! | `std.prefer` | [`Prefer`] | direct | `core` |
 //! | `std.tanh_shaper_os8` | [`TanhShaperOs8`] | direct | `filter` |
 //!
 //! The seven `<N>` types are one type per width N of [`VECTOR_WIDTHS`] (2, 4, 8, 16,
@@ -204,6 +205,7 @@ mod pan;
 mod particles;
 pub mod pattern;
 mod playhead;
+mod prefer;
 mod random;
 mod sample_hold;
 mod sine_osc;
@@ -262,6 +264,7 @@ pub use osc::Osc;
 pub use pan::Pan;
 pub use particles::Particles;
 pub use playhead::Playhead;
+pub use prefer::Prefer;
 pub use random::Random;
 pub use sample_hold::SampleHold;
 pub use sine_osc::SineOsc;
@@ -492,6 +495,7 @@ pub fn register(registry: &mut Registry) -> Result<(), RegistryError> {
         direct::<Wavetable>(),
         direct::<Playhead>(),
         direct::<TanhShaperOs8>(),
+        direct::<Prefer>(),
     ] {
         registry.register(module_type)?;
     }
@@ -917,6 +921,9 @@ mod tests {
     /// ADR 0033: the position signal.
     const PLAYHEAD: [&str; 1] = ["std.playhead"];
 
+    /// ADR 0035 §5, ADR 0037 §6: the fallback input.
+    const PREFER: [&str; 1] = ["std.prefer"];
+
     /// M3: the oversampled shaper, promoted from the lab.
     const SHAPER_OS8: [&str; 1] = ["std.tanh_shaper_os8"];
 
@@ -1006,6 +1013,7 @@ mod tests {
                 + SEQUENCERS.len()
                 + LADDER.len()
                 + PLAYHEAD.len()
+                + PREFER.len()
                 + SHAPER_OS8.len()
                 + DSP.len()
                 + vector::types().len()
@@ -1016,6 +1024,7 @@ mod tests {
             .chain(SEQUENCERS)
             .chain(LADDER)
             .chain(PLAYHEAD)
+            .chain(PREFER)
             .chain(SHAPER_OS8)
             .chain(DSP.map(|(name, _)| name))
             .chain(vectors)
@@ -1044,6 +1053,7 @@ mod tests {
                 + SEQUENCERS.len()
                 + LADDER.len()
                 + PLAYHEAD.len()
+                + PREFER.len()
                 + SHAPER_OS8.len()
                 + DSP.len()
                 + vector::types().len()

@@ -21,6 +21,7 @@ class Node {
     this.dataset = {};
     this.text = '';
     const classes = new Set();
+    this.classSet = classes;
     this.classList = { add: (c) => classes.add(c), remove: (c) => classes.delete(c), toggle: (c, on = !classes.has(c)) => (on ? classes.add(c) : classes.delete(c), on), contains: (c) => classes.has(c) || String(this.className ?? '').split(' ').includes(c) };
   }
   set textContent(value) {
@@ -92,7 +93,7 @@ class Node {
 const FAKE = {
   activeElement: null,
   createElement: (tag) => new Node(tag),
-  createElementNS: (_, tag) => new Node(tag),
+  createElementNS: (ns, tag) => Object.assign(new Node(tag), { ns }),
   createTextNode: (text) => Object.assign(new Node('#text'), { text: String(text), nodeType: 3 }),
 };
 const document = FAKE;
@@ -462,4 +463,218 @@ test('ADR 0037 §7: the Load dialog: titled, no name, each row its match, the un
   b.addButton.dispatch('click');
   assert.deepEqual(loaded, [['voice', true, 'voice']]);
   assert.equal(b.isOpen, false);
+}));
+
+// 2026-10-27, the owner in Signal.app: the tree's types never showed (a
+// branch opened to nothing under it; This project opened to nothing) and
+// the search field stuck out of the frame, unusable. The rows were right;
+// the CSS of the shadow root the browser shares was not: its leaves were
+// `li.entry`, and `.entry` is the value field's (ENTRY_CSS: absolute,
+// inset 0, 100% wide), in <signal-schematic>'s root and in every control's
+// (BASE_CSS: the slot's, the Load dialog's other host). Each type's row was
+// taken out of the list and laid at the top of the modal dialog (its
+// containing block), over the search field. These check the rows the clicks
+// show and that no rule of a host's own reaches an element of the browser.
+
+const { readFileSync } = await import('node:fs');
+const { ENTRY_CSS } = await import('./entry-field.js');
+const { MENU_CSS } = await import('./context-menu.js');
+const { EDITOR_CSS } = await import('./schematic-editor.js');
+const { BROWSER_CSS } = await import('./module-browser.js');
+const { SLOT_DIALOG_CSS, SlotDialogs } = await import('./slot-dialogs.js');
+
+/** A CSS template literal of `file` (from `start`, the text before its backtick), its `${NAME}`s replaced by `known[NAME]`. */
+function cssIn(file, start, known) {
+  const text = readFileSync(new URL(file, import.meta.url), 'utf8');
+  const at = text.indexOf(start);
+  assert.ok(at >= 0, `${start} in ${file}`);
+  const open = text.indexOf('`', at) + 1;
+  const body = text.slice(open, text.indexOf('`;', open));
+  return body.replace(/\$\{(\w+)\}/g, (_, name) => {
+    assert.ok(name in known, `${name} known (in ${file})`);
+    return known[name];
+  });
+}
+
+/** The rules of `css` as `[selector, declarations]`, one per selector (comments and at-rules' heads dropped: a nested rule is its own). */
+function rulesOf(css) {
+  const flat = css.replace(/\/\*[\s\S]*?\*\//g, '').replace(/@[^{;]+\{/g, '');
+  return [...flat.matchAll(/([^{}]+)\{([^{}]*)\}/g)].flatMap((m) => m[1].split(',').map((s) => [s.trim(), m[2]])).filter(([s]) => s);
+}
+
+/** The classes a selector of one compound names (no combinator: it matches its element wherever it is). */
+function bareClasses(selector) {
+  const plain = selector.replace(/\([^)]*\)|\[[^\]]*\]/g, '');
+  if (/[\s>+~]/.test(plain)) return [];
+  return [...plain.matchAll(/\.([\w-]+)/g)].map((m) => m[1]);
+}
+
+/** The host roots' CSS but the browser's own: <signal-schematic>'s and a control's (<signal-slot>, the Load dialog's other host). */
+function hostCss() {
+  const base = cssIn('./base.js', 'export const BASE_CSS', { ENTRY_CSS });
+  const schematic = cssIn('./schematic.js', 'const CSS =', { ENTRY_CSS, EDITOR_CSS, MENU_CSS });
+  const slot = cssIn('./slot.js', 'static css =', { BROWSER_CSS });
+  const own = (text) => text.replace(BROWSER_CSS, '').replace(SLOT_DIALOG_CSS, '');
+  return { schematic: own(schematic), slot: base + own(slot) };
+}
+
+/**
+ * The dialog's HTML elements as `tag.class.class` → `{classes, card}`; not the
+ * previews' SVG (the schematic's own `.box`, `.pin`… draw it). `card`: in
+ * the generated panel card of a preview, whose classes are panel.js's.
+ */
+function htmlClasses(dialog, found = new Map()) {
+  const walk = (node, card) => {
+    if (node.ns || node.nodeType !== 1) return;
+    const classes = [...new Set([...String(node.className ?? '').split(/\s+/), ...node.classSet].filter(Boolean))];
+    const inCard = card || classes.includes('generated');
+    if (classes.length) found.set(`${inCard ? 'card ' : ''}${[node.localName, ...classes].join('.')}`, { classes, card: inCard && !classes.includes('generated') });
+    for (const child of node.children) walk(child, inCard);
+  };
+  walk(dialog, false);
+  return found;
+}
+
+/** The properties a declaration block sets. */
+function propertiesOf(body) {
+  return body.split(';').map((d) => d.split(':')[0].trim()).filter(Boolean);
+}
+
+/**
+ * The host rules of one compound that reach an element of `seen`, as
+ * `<selector> reaches <element>`: every one, but in a generated card (whose
+ * classes are panel.js's, `.row` among them) a rule each of whose
+ * properties a rule of `ownCss` scoped to `.generated` sets again for that
+ * class (a shorthand, `margin`, covering its longhands).
+ */
+function reaching(seen, hostText, ownCss) {
+  const rules = rulesOf(hostText).map(([s, body]) => [s, bareClasses(s), body]).filter(([, c]) => c.length);
+  const own = rulesOf(ownCss).filter(([s]) => s.includes('.generated '));
+  const undone = (need, body) =>
+    propertiesOf(body).every((p) => own.some(([s, b]) => need.some((c) => s.endsWith(`.${c}`)) && propertiesOf(b).some((q) => q === p || p.startsWith(`${q}-`))));
+  return [...seen].flatMap(([element, { classes, card }]) =>
+    rules.filter(([, need, body]) => need.every((c) => classes.includes(c)) && !(card && undone(need, body))).map(([s]) => `${s} reaches ${element}`),
+  );
+}
+
+const LIBRARY = {
+  primitives: MODULES.primitives,
+  composites: [
+    ...MODULES.composites,
+    { module: 'drums', composite: true, description: 'Drums.', ports: [], parameters: [], inside: { instances: [], connections: [], inputs: [], outputs: [], parameters: [] } },
+    { module: 'lib.verb', composite: true, library: true, category: 'effect', description: 'A reverb.', ports: [], parameters: [] },
+    { module: 'lib.echo', composite: true, library: true, category: 'effect', description: 'An echo.', ports: [], parameters: [] },
+  ],
+};
+
+/** The list's rows as `<aria-level> <label>`. */
+function shown(b) {
+  return b.list.children.map((li) => `${li.getAttribute('aria-level')} ${li.children[1]?.textContent ?? li.textContent}`);
+}
+
+function clickRow(b, key) {
+  b.list.children.find((li) => li.dataset.key === key).dispatch('click', { detail: 1 });
+}
+
+test('clicks open the branches down to their types: each a row of the list after its branch, nothing above it hidden', withDocument(() => {
+  const { b } = browser();
+  b.open({ where: '', entries: browserEntries(LIBRARY) });
+  assert.deepEqual(shown(b), ['1 This project', '2 voice', '2 drums', '1 Library', '1 Standard primitives', '2 core', '2 generator'], 'This project open, its composites listed directly');
+  for (const key of ['s:library', 'c:library/effect', 'c:std/generator', 'c:std/core']) clickRow(b, key);
+  assert.deepEqual(shown(b), ['1 This project', '2 voice', '2 drums', '1 Library', '2 effect', '3 lib.verb', '3 lib.echo', '1 Standard primitives', '2 core', '3 std.add', '2 generator', '3 std.osc']);
+  clickRow(b, 's:project');
+  assert.deepEqual(shown(b).slice(0, 2), ['1 This project', '1 Library'], 'closed');
+  clickRow(b, 's:project');
+  assert.deepEqual(shown(b).slice(0, 3), ['1 This project', '2 voice', '2 drums'], 'and open again');
+  const leaves = b.list.children.filter((n) => n.dataset.key?.startsWith('m:'));
+  assert.equal(leaves.length, 6);
+  for (const li of leaves) {
+    assert.equal(li.parent, b.list, `${li.dataset.key} is a row of the list`);
+    for (let at = li; at; at = at.parent) assert.ok(!at.hidden && at.getAttribute('hidden') === null && at.style.display !== 'none', `nothing hides ${li.dataset.key}`);
+    assert.equal(li.className, 'tree-entry', 'a class of the browser’s own');
+  }
+  const source = b.list.children.find((n) => n.dataset.key === 's:library');
+  assert.equal(source.className, 'tree-source');
+  assert.equal(source.getAttribute('aria-expanded'), 'true');
+}));
+
+test('no rule of the host roots’ own reaches an element of the browser (the value field’s `.entry` took the types out of the tree)', withDocument(() => {
+  const css = hostCss();
+  // Each host's rules of one compound, by the classes an element must have to match.
+  const bare = Object.fromEntries(Object.entries(css).map(([host, text]) => [host, rulesOf(text).map(([s]) => [s, bareClasses(s)]).filter(([, c]) => c.length)]));
+  const names = (host) => new Set(bare[host].map(([s]) => s));
+  assert.ok(names('schematic').has('.entry') && names('slot').has('.entry') && names('slot').has('.label') && names('slot').has('.head'), 'the parse finds the rules that collided');
+  // Every element the browser builds: the tree open to its types, a type's detail and previews, no match; then the Load dialog's.
+  const { b } = browser();
+  b.open({ where: '', entries: browserEntries(LIBRARY) });
+  for (const key of ['s:library', 'c:library/effect', 'c:std/generator']) clickRow(b, key);
+  const seen = htmlClasses(b.dialog);
+  clickRow(b, 'm:std.osc');
+  htmlClasses(b.dialog, seen);
+  b.search.value = 'nothing like it';
+  b.search.dispatch('input');
+  htmlClasses(b.dialog, seen);
+  const loader = new ModuleBrowser({ mode: 'load', add: () => null, closed() {}, graph: () => null, defaultName: () => '', matchOf: () => ({ matched: 0, total: 1, unmatched: [{ name: 'x', role: 'input' }] }) });
+  new Node('signal-slot').append(loader.build(EXPANDED));
+  loader.open({ where: '', entries: browserEntries(LIBRARY) });
+  htmlClasses(loader.dialog, seen);
+  const all = new Set([...seen.values()].flatMap((e) => e.classes));
+  for (const c of ['browser', 'tree-entry', 'tree-source', 'tree-category', 'tree-label', 'search', 'browser-head', 'browser-foot', 'col-name', 'preview-note', 'unmatched', 'generated', 'row']) assert.ok(all.has(c), `the walk saw .${c}`);
+  for (const [host, text] of Object.entries(css)) assert.deepEqual(reaching(seen, text, BROWSER_CSS), [], `no rule of one compound in <signal-${host}>’s root reaches an element of the browser`);
+}));
+
+test('the frame holds the header: one column of minmax(0, 1fr), the search from a basis of 0, padding and border inside its width', () => {
+  const rules = rulesOf(BROWSER_CSS);
+  const decl = (selector, property) => {
+    const bodies = rules.filter(([s]) => s === selector).map(([, body]) => body);
+    assert.ok(bodies.length, `a rule for ${selector}`);
+    const found = bodies.flatMap((body) => [...body.matchAll(new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+)`, 'g'))].map((m) => m[1].trim()));
+    return found.at(-1) ?? null;
+  };
+  // A grid's implicit column is `auto`: at least its widest row's min-content (a table, a card, an input's own size), so the header could grow past the frame.
+  assert.equal(decl('dialog.browser[open]', 'grid-template-columns'), 'minmax(0, 1fr)');
+  assert.equal(decl('dialog.browser', 'box-sizing'), 'border-box');
+  assert.equal(decl('dialog.browser', 'overflow'), 'hidden');
+  // A field's padding and border are within its width; none keeps its intrinsic size as a minimum.
+  assert.equal(decl('.browser input', 'box-sizing'), 'border-box');
+  assert.equal(decl('.browser input', 'min-width'), '0');
+  // The search takes the room left (flex from 0, not its intrinsic width), never wider than the header; WebKit's searchfield look off, so the padding and border hold.
+  assert.equal(decl('.browser .browser-head .search', 'flex'), '1 1 0');
+  assert.equal(decl('.browser .browser-head .search', 'width'), '0');
+  assert.equal(decl('.browser .browser-head .search', 'max-width'), '100%');
+  assert.equal(decl('.browser .browser-head .search', '-webkit-appearance'), 'none');
+  assert.equal(decl('.browser .browser-head', 'flex-wrap'), 'nowrap');
+  assert.equal(decl('.browser .browser-head', 'box-sizing'), 'border-box');
+  // A row is in the list's flow, whatever else the root says.
+  assert.equal(decl('.browser .tree li', 'position'), 'static');
+  assert.equal(decl('.browser .tree li', 'width'), 'auto');
+  // The narrow window: one column of panes, of minmax(0, 1fr) too.
+  assert.match(BROWSER_CSS, /@media \(max-width: 720px\) \{\s*\.browser \.panes \{ grid-template-columns: minmax\(0, 1fr\);/);
+});
+
+test('no rule of the host roots’ own reaches an element of the slot dialogs (Add slot, Edit interface, Edit map, a template’s name), in either host', withDocument(() => {
+  const FX = {
+    interface: { ports: [{ name: 'x', role: 'input', shape: 'signal', rate: 1, kind: 'audio' }, { name: 'v', role: 'output', shape: { vector: 4 }, rate: 1, kind: 'audio' }, { name: 'gain', role: 'parameter', kind: 'control' }] },
+    from: 'lib.fx',
+    load: 'std.gain',
+  };
+  const seen = new Map();
+  for (const host of ['signal-schematic', 'signal-slot']) {
+    const d = new SlotDialogs({ closed() {} });
+    new Node(host).append(d.build());
+    const ok = () => Promise.resolve({ ok: true });
+    d.openAddSlot({ where: 'At the top level', choices: [{ value: '', label: 'none' }, { value: 'lib.voice', label: 'lib.voice' }], names: new Set(['osc']), defaultName: 'slot', add: ok });
+    htmlClasses(d.dialog, seen);
+    d.openInterface({ slotName: 'fx', slot: FX, focus: { add: 'out' }, apply: ok, saveTemplate() {}, detach() {} });
+    htmlClasses(d.dialog, seen);
+    d.openMap({ slotName: 'fx', load: 'std.gain', rows: [{ port: 'x', role: 'input', value: 'in', options: ['in'] }, { port: 'v', role: 'output', value: false, options: ['out'] }], apply: ok });
+    htmlClasses(d.dialog, seen);
+    d.openMap({ slotName: 'fx', load: null, rows: [], apply: ok });
+    htmlClasses(d.dialog, seen);
+    d.openTemplateName({ title: 'Save', note: 'A template.', defaultName: 'bus', taken: new Set(['bus']), save: ok });
+    htmlClasses(d.dialog, seen);
+  }
+  const all = new Set([...seen.values()].flatMap((e) => e.classes));
+  for (const c of ['slot-dialog', 'dialog-head', 'dialog-note', 'dialog-foot', 'dialog-buttons', 'why', 'field', 'slot-name', 'port-name', 'small', 'unit', 'optional', 'adds', 'check', 'primary']) assert.ok(all.has(c), `the walk saw .${c}`);
+  for (const [host, text] of Object.entries(hostCss())) assert.deepEqual(reaching(seen, text, SLOT_DIALOG_CSS), [], `no rule of one compound in <signal-${host}>’s root reaches an element of a slot dialog`);
 }));

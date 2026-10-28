@@ -349,6 +349,7 @@ expression: text
             "std.phasor",
             "std.playhead",
             "std.pow",
+            "std.prefer",
             "std.random",
             "std.reduce1024",
             "std.reduce16",

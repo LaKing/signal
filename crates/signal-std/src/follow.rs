@@ -11,8 +11,10 @@
 //! marks every seek there (`lib.transport` exports it), a short forward
 //! one included, which the position alone cannot tell from motion. As a
 //! fallback, a move backward, further than [`MAX_JUMP`], across more than
-//! [`MAX_LOOPS`] loops, a non-finite value, and the first frame (after
-//! `prepare` or a swap that connected `follow`) are seeks too. On a seek
+//! [`MAX_LOOPS`] loops, a non-finite value, the first frame (after
+//! `prepare` or a swap that connected `follow`), and the first frame of a
+//! swap that gave `follow` other sources (`Inputs::sources_changed`, ADR
+//! 0037 §6: another transport) are seeks too. On a seek
 //! nothing fires retroactively, and the next frame resumes from the new
 //! place.
 
@@ -559,6 +561,91 @@ mod tests {
             notes.triggers(1).contains(&12_000),
             "the sounding note ends"
         );
+    }
+
+    /// ADR 0037 §6: a swap that gives `follow` another source
+    /// (`Inputs::sources_changed`, another transport 0.7 beats ahead) is a
+    /// seek on its first frame: nothing fires retroactively and the next
+    /// step is on time; unmarked, the steps it skips fire at once, merged.
+    #[test]
+    fn a_rewired_follow_is_a_seek() {
+        let beat = steps(0.25, &[(1.0, "xxxxxxxxxxxxxxxx")]);
+        let melody = notes(4.0, &[[60.0, 1.0, 0.25, 1.0], [62.0, 1.5, 0.25, 1.0]]);
+        let position = |n: u64| {
+            if n < 100 {
+                0.01 * n as f64
+            } else {
+                0.01 * n as f64 + 0.7
+            }
+        };
+        let run = |marked: bool, blocks: &[usize]| {
+            let mut drums = StepSeq8::default();
+            let mut seq = NoteSeq::default();
+            let most = blocks.iter().copied().max().unwrap();
+            drums.prepare(&context(RATE, most, 1));
+            seq.prepare(&context(RATE, most, 1));
+            let mut hits = Played::new(1, 9);
+            let mut played = Played::new(5, 2);
+            let mut sizes = blocks.iter().copied().cycle();
+            let mut start = 0u64;
+            while start < 200 {
+                let mut end = start + sizes.next().unwrap() as u64;
+                if start < 100 && end > 100 {
+                    end = 100;
+                }
+                let k = (end.min(200) - start) as usize;
+                let follow: Vec<f64> = (start..start + k as u64).map(position).collect();
+                let mut connected = [false; 12];
+                connected[2] = true;
+                let mut changed = [false; 12];
+                changed[2] = marked && start == 100;
+                let parameters = [vec![96.0; k], vec![1.5; k], vec![0.0; k]].concat();
+                let mut signals = vec![0.0; k];
+                let mut sinks = vec![EventSink::per_frame(16, k); 9];
+                for sink in &mut sinks {
+                    sink.start_call(k);
+                }
+                drums.process(
+                    &Inputs::new(k, &follow, &parameters, &[], &[0, 0])
+                        .with_table(Some(&beat))
+                        .with_connected(&connected)
+                        .with_sources_changed(&changed),
+                    &mut Outputs::new(k, &mut signals, &mut sinks),
+                );
+                hits.take(start, k, &signals, &mut sinks);
+                let mut signals = vec![0.0; 5 * k];
+                let mut sinks = vec![EventSink::per_frame(16, k); 2];
+                for sink in &mut sinks {
+                    sink.start_call(k);
+                }
+                seq.process(
+                    &Inputs::new(k, &follow, &[96.0].repeat(k), &[], &[0, 0, 0])
+                        .with_table(Some(&melody))
+                        .with_connected(&connected)
+                        .with_sources_changed(&changed),
+                    &mut Outputs::new(k, &mut signals, &mut sinks),
+                );
+                played.take(start, k, &signals, &mut sinks);
+                start += k as u64;
+            }
+            (hits.triggers(0), played.triggers(0))
+        };
+        let (unmarked, notes) = run(false, &[64]);
+        assert!(unmarked.contains(&100), "skipped steps fire merged");
+        assert!(notes.contains(&100), "a skipped note fires late");
+        for blocks in [&[64][..], &[1], &[7, 300, 2]] {
+            let (marked, notes) = run(true, blocks);
+            assert!(!marked.contains(&100), "{blocks:?}: {marked:?}");
+            assert!(!notes.contains(&100), "{blocks:?}: {notes:?}");
+            let next: Vec<&u64> = marked.iter().filter(|&&n| n > 100).collect();
+            // 1.75 is crossed between frames 105 and 106.
+            assert_eq!(next.first().copied(), Some(&106), "{blocks:?}: {marked:?}");
+            assert_eq!(
+                marked.iter().filter(|&&n| n < 100).count(),
+                4,
+                "0, .25, .5, .75"
+            );
+        }
     }
 
     /// A swap that connects `follow` to a counting sequencer makes its first

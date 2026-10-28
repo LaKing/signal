@@ -1,0 +1,75 @@
+# The kick, synthesised, no samples: a sine whose pitch falls exponentially
+# from about 230 Hz to `tune` (50 Hz), soft tanh drive on the steady sine,
+# then the amplitude envelope, a short noise click and a DC blocker.
+#
+#   sine (tune + 180·pitch_env) ─► shaper ─► × amp_env × velocity ─┐
+#   noise ─► hp 1.5 kHz ─► × click_env × velocity ─► × attack ───── add ─► dc ─► level
+#
+# The drive comes before the envelope, so the shaper sees a full-scale sine on
+# every hit and the decay is the envelope's alone (a drive after it would
+# lift the tail and stretch the decay). At the default decay (τ = 170 ms) the
+# body is about 25 dB down 500 ms after a hit, the next beat at 120 bpm.
+#
+# `velocity` takes the step sequencer's hit value (its lane level, ×accent_level
+# on an accented step): it adds to the shaper's drive and scales the
+# envelopes, so an accent saturates harder and is louder. It scales the
+# envelopes (control signals) rather than the audio, so the whole voice has one
+# audio-to-generic boundary per path.
+schema_version = 1
+
+[composite]
+name = "kick909"
+
+[instances]
+osc = { module = "std.sine_osc", freq = 50 }
+pitch_env = { module = "std.exp_env", attack_ms = 0, decay_ms = 28 }
+shaper = { module = "std.tanh_shaper", drive = 0.6 }
+amp_env = { module = "std.exp_env", attack_ms = 0.5, decay_ms = 170 }
+amp = { module = "std.mul" }
+body = { module = "std.mul" }
+click_noise = { module = "std.noise" }
+click_hp = { module = "std.onepole", cutoff_hz = 1500 }
+click_env = { module = "std.exp_env", attack_ms = 0, decay_ms = 3 }
+click_amp = { module = "std.mul" }
+click = { module = "std.mul" }
+click_level = { module = "std.scale", mul = 0.5, add = 0 }
+velocity = { module = "std.const", value = 1 }
+sum = { module = "std.add" }
+dc = { module = "std.dc_block" }
+level = { module = "std.gain", db = 0 }
+
+[wiring]
+connections = [
+  { from = "pitch_env.out", to = "osc.freq", scale = 180 },
+  # Drive 0.6 + velocity: 1.5 on a plain hit of 0.9, 1.95 on an accent.
+  { from = "osc.out", to = "shaper.in" },
+  { from = "velocity.out", to = "shaper.drive" },
+  { from = "amp_env.out", to = "amp.a" },
+  { from = "velocity.out", to = "amp.b" },
+  { from = "shaper.out", to = "body.a" },
+  { from = "amp.out", to = "body.b" },
+  { from = "click_noise.out", to = "click_hp.in" },
+  { from = "click_env.out", to = "click_amp.a" },
+  { from = "velocity.out", to = "click_amp.b" },
+  { from = "click_hp.hp", to = "click.a" },
+  { from = "click_amp.out", to = "click.b" },
+  { from = "click.out", to = "click_level.in" },
+  { from = "body.out", to = "sum.a" },
+  { from = "click_level.out", to = "sum.b" },
+  { from = "sum.out", to = "dc.in" },
+  { from = "dc.out", to = "level.in" },
+]
+
+[exports]
+inputs = { trigger = ["pitch_env.trigger", "amp_env.trigger", "click_env.trigger"] }
+outputs = { out = "level.out" }
+
+# The exported parameters, each with its own range where it has one (ADR
+# 0042): a control reaches no value outside it.
+[exports.parameters]
+tune = { to = "osc.freq", min = 20, max = 200 }
+decay = { to = "amp_env.decay_ms", min = 10, max = 2000 }
+attack = { to = "click_level.mul", min = 0, max = 2 }
+drive = { to = "shaper.drive", min = 0.1, max = 5 }
+level = { to = "level.db", min = -120, max = 12 }
+velocity = { to = "velocity.value", min = 0, max = 2 }

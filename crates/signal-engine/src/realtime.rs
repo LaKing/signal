@@ -1102,6 +1102,49 @@ impl Controller {
         })
     }
 
+    /// Prepares a swap to `plan` that follows `previous`, not yet sent:
+    /// against the plan `previous` swaps in and the plan version it makes,
+    /// so the two can be sent one after the other (`previous` first) and
+    /// nothing is sent unless both are ready (ADR 0037 §6, a slot's Replace:
+    /// an unload, then a load, one frame apart). Refused as
+    /// [`prepare_swap`](Controller::prepare_swap) is, and if another
+    /// Controller prepared `previous`. Sent without `previous` before it, it
+    /// is refused as stale ([`EngineError::StaleSwap`]).
+    pub fn prepare_swap_after(
+        &self,
+        previous: &ReadySwap,
+        plan: &ExecutionPlan,
+    ) -> Result<ReadySwap, ControlError> {
+        if self.desynchronised {
+            return Err(ControlError::Desynchronised);
+        }
+        if previous.controller != self.id {
+            return Err(ControlError::Engine(EngineError::StaleSwap));
+        }
+        let mirror = PlanState::mirror(plan, &self.registry, self.target.config)
+            .map_err(ControlError::Engine)?;
+        let after = mirror.sinks();
+        if after != self.sinks {
+            return Err(ControlError::Sink(Box::new(SinksChanged {
+                before: self.sinks.clone(),
+                after,
+            })));
+        }
+        let target = SwapTarget {
+            version: previous.target_version.saturating_add(1),
+            ..self.target
+        };
+        let swap = prepare_swap(&previous.mirror, target, &[], plan, &self.registry)
+            .map_err(ControlError::Engine)?;
+        Ok(ReadySwap {
+            swap: Box::new(swap),
+            mirror,
+            plan_version: plan.version,
+            target_version: target.version,
+            controller: self.id,
+        })
+    }
+
     /// Sends a swap from [`prepare_swap`](Controller::prepare_swap), stamped
     /// `stamp`. Refused, before anything is queued, if another Controller
     /// prepared it or another swap was sent since it was prepared

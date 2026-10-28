@@ -137,7 +137,7 @@ test('the interface editor: a rename, a new port and a removal make one op; a re
   const sent = [];
   let answer = { ok: false, error: 'in-use: wires name it' };
   d.openInterface({ slotName: 'fx', slot: FX, apply: (op) => (sent.push(op), Promise.resolve(answer)) });
-  const names = () => d.dialog.all().filter((n) => n.localName === 'input' && n.className === 'name');
+  const names = () => d.dialog.all().filter((n) => n.localName === 'input' && n.className === 'port-name');
   assert.deepEqual(names().map((n) => n.value), ['x', 'y']);
   const x = names()[0];
   x.value = 'input';
@@ -163,7 +163,7 @@ test('the interface editor opened by a "+" pin has a new output; a bad name is s
   const { d } = dialogs();
   const sent = [];
   d.openInterface({ slotName: 'fx', slot: FX, focus: { add: 'out' }, apply: (op) => (sent.push(op), Promise.resolve({ ok: true })) });
-  const names = d.dialog.all().filter((n) => n.localName === 'input' && n.className === 'name');
+  const names = d.dialog.all().filter((n) => n.localName === 'input' && n.className === 'port-name');
   assert.deepEqual(names.map((n) => n.value), ['x', 'y', 'out']);
   names[2].value = 'Bad';
   names[2].dispatch('input');

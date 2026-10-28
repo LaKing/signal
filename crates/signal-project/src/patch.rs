@@ -35,6 +35,7 @@ mod inside;
 mod slot;
 
 pub use inside::FileChange;
+pub(crate) use slot::unloaded_text;
 pub use slot::{Change, PortJson};
 
 /// One patch op (`docs/ui-protocol.md` "patch"). `edits` and `layout` are

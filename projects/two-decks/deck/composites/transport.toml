@@ -1,0 +1,35 @@
+# lib.transport (ADR 0033), vendored and extended with what a deck needs to
+# follow a host (ADR 0037 §6): the playhead's follow inputs and `release`.
+#
+#   bpm, run, rate ─► playhead ─► position (beats), running (0/1), tempo (bpm)
+#   seek ──────────►    │       └► jump (a trigger on each frame a seek lands,
+#   follow, follow_jump,│          and when following starts, is rewired, or
+#   follow_running, ────┘          stops with release 1)
+#   follow_tempo
+#
+# Unconnected, the follow inputs change nothing: the transport plays as
+# lib.transport does, bit for bit. With `follow` connected, `position` is a
+# copy of it (and `running`, `tempo` of their follow inputs, when those are
+# connected), while the playhead's own clock runs on underneath, unheard.
+# When following stops, `release` says what happens: 0 (continue) goes on
+# from the last followed position at the transport's own tempo; 1 (return)
+# steps to its own clock's position.
+schema_version = 1
+
+[composite]
+name = "transport"
+category = "event"
+description = "lib.transport with the playhead's follow inputs: follows a position (follow, follow_jump, follow_running, follow_tempo) when given one; release (0 continue, 1 return) says what it does when following stops."
+
+[instances]
+playhead = { module = "std.playhead", bpm = 120, run = 1, rate = 1 }
+
+[exports]
+inputs = { seek = "playhead.seek", follow = "playhead.follow", follow_jump = "playhead.follow_jump", follow_running = "playhead.follow_running", follow_tempo = "playhead.follow_tempo" }
+outputs = { position = "playhead.position", running = "playhead.running", tempo = "playhead.tempo", jump = "playhead.jump" }
+
+[exports.parameters]
+bpm = { to = "playhead.bpm", min = 20, max = 400 }
+run = { to = "playhead.run", values = [{ value = 0, label = "stopped" }, { value = 1, label = "running" }] }
+rate = { to = "playhead.rate", min = -16, max = 16 }
+release = { to = "playhead.release", values = [{ value = 0, label = "continue" }, { value = 1, label = "return" }] }
