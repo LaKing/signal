@@ -1033,8 +1033,9 @@ export class SignalSchematic extends HTMLElement {
       // ADR 0037, editable insides: a slot inside's frame pin not wired inside yet is hollow too.
       const loose = node.kind !== 'instance' && pin.unmatched;
       const kind = ['pin', pin.shape, pin.parameter ? 'parameter' : '', pin.connected ? 'connected' : '', reason || loose ? 'unmatched' : ''].filter(Boolean).join(' ');
-      const label = reason ? `${pin.name}: unmatched, ${reason}` : loose ? `${pin.name}: not wired inside yet` : pin.name;
-      const data = { class: kind, 'data-address': portAddress, 'data-direction': pin.direction, 'data-label': label, 'data-part': 'schematic' };
+      // Not `label`: that is the drawing helper above, which the pin labels below call.
+      const tip = reason ? `${pin.name}: unmatched, ${reason}` : loose ? `${pin.name}: not wired inside yet` : pin.name;
+      const data = { class: kind, 'data-address': portAddress, 'data-direction': pin.direction, 'data-label': tip, 'data-part': 'schematic' };
       const shape = bakedPin(baked, level.transform, this.viewport, pin, radius);
       if (shape.circle) group.append(el('circle', { ...data, ...shape.circle }));
       else if (shape.polygon.length) group.append(el('polygon', { ...data, points: shape.polygon.map((p) => `${p.x},${p.y}`).join(' ') }));

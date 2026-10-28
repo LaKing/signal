@@ -297,6 +297,26 @@ class FakeSvg {
   }
 }
 
+test('a primitive’s box is drawn with its pins’ labels (a pin’s tooltip once shadowed the drawing helper, 2026-10-28)', () => {
+  const port = (name, direction) => ({ name, direction, shape: 'signal', kind: 'audio', rate: 1 });
+  const drawnLayout = layout({ instances: [{ name: 'osc', module: 'std.osc', ports: [port('hz', 'in'), port('out', 'out')], parameters: [] }], connections: [] });
+  const had = globalThis.document;
+  globalThis.document = { createElementNS: (_, name) => Object.assign(new FakeSvg(name), { dataset: {} }) };
+  try {
+    const s = Object.create(SignalSchematic.prototype);
+    Object.assign(s, { drawn: { open: new Set() }, tracing: null, graph: {}, mutedSet: new Set(), selected: [], barsOf: new WeakMap() });
+    const transform = { k: 1, x: 0, y: 0 };
+    const level = { path: '', level: '', layout: drawnLayout, transform, collapsed: false };
+    const node = drawnLayout.nodes.find((n) => n.name === 'osc');
+    const drawn = s.nodeElement(level, node, bake(transform, viewport), () => true);
+    const group = drawn.el ?? drawn;
+    const texts = group.texts();
+    for (const name of ['osc', 'hz', 'out']) assert.ok(texts.includes(name), `${name} in ${JSON.stringify(texts)}`);
+  } finally {
+    globalThis.document = had;
+  }
+});
+
 test('the level’s labels are drawn in a group per box and size, kept by its id in `labelCache`, which the drag moves with the box (the owner’s 2026-10-27)', () => {
   const port = (name, direction) => ({ name, direction, shape: 'signal', kind: 'audio', rate: 1 });
   const instance = (name, ins, outs, composite) => ({ name, module: composite ? `${name}_type` : `std.${name}`, composite, ports: [...ins.map((p) => port(p, 'in')), ...outs.map((p) => port(p, 'out'))], parameters: [] });
