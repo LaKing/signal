@@ -58,6 +58,17 @@ function partMenu(hit, state) {
   const editOff = inside ?? state.around ?? null;
   // A collapsed port group (M2.13-2): its members inspected or traced together; zoom in to work on one.
   if (hit?.kind === 'group') return [unless({ id: 'inspect', label: 'Inspect' }, null), unless(TRACE, null)];
+  // A panel control (ui/lib/schematic-controls.js): inspected (its properties), traced from what it binds, its bound pin shown.
+  if (hit?.kind === 'control') {
+    const bound = (hit.node?.binds ?? []).some((b) => b.role) ? null : 'It binds a port inside a composite: open it to see the pin';
+    return [
+      unless({ id: 'inspect', label: 'Inspect' }, null),
+      unless(TRACE, null),
+      unless({ id: 'bound', label: 'Go to bound pin' }, bound),
+      SEPARATOR,
+      unless({ id: 'copy-address', label: 'Copy address' }, null),
+    ];
+  }
   if (hit?.kind === 'instance') {
     const composite = Boolean(hit.node?.composite);
     const slot = hit.node?.slot ?? null;

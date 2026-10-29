@@ -329,7 +329,8 @@ export class SchematicEditor {
       // ADR 0037, editable insides: and the frame's outputs not wired yet.
       if (isSlotInside(levelGraph)) for (const name of frameOutputs(levelGraph, hit.port.shape)) keys.add(`${hit.path}.${name}`);
     }
-    const pins = [...(this.s.groups.get(hit.path)?.g.querySelectorAll('.pin') ?? [])].filter((pin) => keys.has(pin.dataset.address));
+    // A panel control's input stands for the address it binds (ui/lib/schematic-controls.js); its output does not take a wire.
+    const pins = [...(this.s.groups.get(hit.path)?.g.querySelectorAll('.pin') ?? [])].filter((pin) => keys.has(pin.dataset.address) && pin.dataset.direction !== 'out');
     for (const pin of pins) pin.classList.add('target');
     // From the pin itself, as the wire will be drawn.
     const level = this.s.levelOf(hit.path);
@@ -349,6 +350,21 @@ export class SchematicEditor {
   connectEnd(hit) {
     const c = this.connecting;
     this.cancelConnect();
+    // Dropped on a panel control: the address it binds that takes the wire (the wire is drawn into its input).
+    if (c && hit.kind === 'control') {
+      const address = hit.path === c.hit.path ? hit.addresses.find((a) => c.keys.has(a)) : null;
+      if (!address) {
+        this.s.say(`${hit.node.name} binds nothing that can take ${c.hit.address}`);
+        return;
+      }
+      const plain = address.slice(hit.path.length + 1);
+      if (c.hit.node.kind === 'input') {
+        this.write(0, c.hit.level, [exportOp(true, c.hit.port.role ?? 'input', c.hit.port.export ?? c.hit.port.name, plain)]);
+        return;
+      }
+      this.write(0, c.hit.level, [addConnection(`${c.hit.node.name}.${c.hit.port.name}`, plain)]);
+      return;
+    }
     if (!c || hit.kind !== 'port') return;
     if (hit.path !== c.hit.path || !c.keys.has(hit.address)) {
       this.s.say(`${hit.address} cannot take ${c.hit.address}`);

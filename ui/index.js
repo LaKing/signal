@@ -80,3 +80,4 @@ import './lib/audition.test.js';
 import './lib/wheel.test.js';
 import './app/lib/keys-editor.test.js';
 import './controls/keyboard.test.js';
+import './lib/schematic-controls.test.js';

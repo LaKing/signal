@@ -91,21 +91,7 @@ export function card(selection, { graph, description } = {}) {
   let parameters;
   if (top) {
     const row = rows(description).find((r) => r.name === node.name);
-    parameters = (row?.parameters ?? []).map((p) => ({
-      name: p.name,
-      address: p.address,
-      stream: p.address,
-      unit: p.unit,
-      min: p.min,
-      max: p.max,
-      default: p.default,
-      taper: p.taper,
-      kind: p.kind,
-      values: p.values ?? null,
-      editable: true,
-      control: true,
-      fallback: p.base,
-    }));
+    parameters = (row?.parameters ?? []).map(controlRow);
   } else {
     parameters = [];
     for (const p of node.parameters ?? node.ins.filter((i) => i.parameter)) {
@@ -137,6 +123,44 @@ export function card(selection, { graph, description } = {}) {
     parameters,
     editable: top,
   };
+}
+
+/** A top-level parameter (a `rows` entry's) as a card row: set live, committed on release. */
+function controlRow(p) {
+  return {
+    name: p.name,
+    address: p.address,
+    stream: p.address,
+    unit: p.unit,
+    min: p.min,
+    max: p.max,
+    default: p.default,
+    taper: p.taper,
+    kind: p.kind,
+    values: p.values ?? null,
+    editable: true,
+    control: true,
+    fallback: p.base,
+  };
+}
+
+/**
+ * The card rows of the top-level parameters among `addresses` (a panel
+ * control's, ui/lib/schematic-controls.js), in `addresses`' order; an
+ * address that is no top-level parameter (a port, inside a composite) has
+ * none. Named by address, as a control may bind several instances'.
+ */
+export function parameterRows(description, addresses) {
+  const all = new Map(rows(description).flatMap((r) => r.parameters.map((p) => [p.address, p])));
+  const seen = new Set();
+  const list = [];
+  for (const address of addresses ?? []) {
+    const p = all.get(address);
+    if (!p || seen.has(address)) continue;
+    seen.add(address);
+    list.push({ ...controlRow(p), name: address.replace(/^\//, '') });
+  }
+  return list;
 }
 
 /** A converter as the card and the wire's hover label name it. */

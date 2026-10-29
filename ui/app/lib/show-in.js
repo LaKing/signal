@@ -51,7 +51,8 @@ export function within(address, instance) {
 
 /**
  * What a right click is about: of the schematic, its `hit` (an instance,
- * a pin or a collapsed group's box: `{kind: 'instance' | 'pin', address}`;
+ * a pin, a collapsed group's box or a panel control's node, its first bound
+ * address: `{kind: 'instance' | 'pin', address}`;
  * a wire: `{kind: 'wire', from, to}`); else a `control` (a panel control,
  * a parameter row, a schematic part): `{kind, address}`. Null for the
  * background or a bundle: nothing in particular.
@@ -60,6 +61,8 @@ export function subjectOf({ hit = null, control = null } = {}) {
   if (hit) {
     if (hit.kind === 'wire') return hit.from && hit.to ? { kind: 'wire', from: hit.from, to: hit.to } : null;
     if (['instance', 'port', 'group'].includes(hit.kind) && hit.address) return { kind: hit.kind === 'port' ? 'pin' : 'instance', address: hit.address };
+    // A panel control's node (ui/lib/schematic-controls.js): the address it binds first, as its control on the panel is.
+    if (hit.kind === 'control' && hit.address) return { kind: isInstance(hit.address) ? 'instance' : 'pin', address: hit.address };
     return null;
   }
   if (control?.address) return { kind: isInstance(control.address) ? 'instance' : 'pin', address: control.address };

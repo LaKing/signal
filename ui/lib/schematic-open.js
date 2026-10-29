@@ -177,10 +177,41 @@ export function openedLayout(layout, name, bounds) {
   const grown = node ? grownNode(node, bounds) : null;
   let opened = layout;
   if (grown) {
-    const room = grown === node ? new Map() : makeRoom(layout.nodes, node, grown, roomOf(grown));
+    // Panel controls (ui/lib/schematic-controls.js) ride with their hosts: a box's room is made for its controls too, and the open one's go out beside its frame's names.
+    const riders = layout.nodes.filter((n) => n.kind === 'control');
+    const pads = new Map();
+    for (const c of riders) {
+      const host = layout.nodes.find((n) => n.kind === 'instance' && n.name === c.host);
+      if (!host) continue;
+      const pad = pads.get(host) ?? { left: 0, right: 0, top: 0, bottom: 0 };
+      pad.left = Math.max(pad.left, host.x - c.x);
+      pad.right = Math.max(pad.right, c.x + c.w - host.x - host.w);
+      pad.top = Math.max(pad.top, host.y - c.y);
+      pad.bottom = Math.max(pad.bottom, c.y + c.h - host.y - host.h);
+      pads.set(host, pad);
+    }
+    const names = roomOf(grown);
+    const ownPad = pads.get(node) ?? { left: 0, right: 0 };
+    const footprints = layout.nodes.map((n) => {
+      const pad = pads.get(n);
+      return pad && n !== node ? { ...n, x: n.x - pad.left, y: n.y - pad.top, w: n.w + pad.left + pad.right, h: n.h + pad.top + pad.bottom, ref: n } : n;
+    });
+    const made = grown === node ? new Map() : makeRoom(footprints, node, grown, { left: names.left + ownPad.left, right: names.right + ownPad.right });
+    const room = new Map([...made].map(([n, m]) => [n.ref ?? n, m]));
     const shifts = new Map();
     const nodes = layout.nodes.map((n) => {
       if (n === node) return grown;
+      if (n.kind === 'control') {
+        const host = layout.nodes.find((h) => h.kind === 'instance' && h.name === n.host);
+        let m = host ? room.get(host) : null;
+        if (host === node && grown !== node) {
+          const left = n.x + n.w <= node.x;
+          m = { dx: left ? grown.x - names.left - node.x : grown.x + grown.w + names.right - node.x - node.w, dy: grown.y - node.y };
+        }
+        if (!m) return n;
+        shifts.set(n.id, m);
+        return shifted(n, m);
+      }
       const m = room.get(n);
       if (!m) return n;
       shifts.set(n.id, m);
@@ -215,8 +246,8 @@ export function openedLayout(layout, name, bounds) {
       const { curve, points, box } = wireGeometry(a, b, { feedback, under: under ?? 0, avoid: around ? avoid : null });
       return { ...wire, feedback, lane: feedback ? lane : 0, under, curve, points, box, crossing: out || into };
     });
-    const names = new Map(layout.nodes.map((n) => [n.id, n.name]));
-    opened = { ...layout, nodes, wires, bottom, opened: name, moved: new Map([...shifts].map(([id, m]) => [names.get(id), m])), avoid };
+    const named = new Map(layout.nodes.filter((n) => n.kind === 'instance').map((n) => [n.id, n.name]));
+    opened = { ...layout, nodes, wires, bottom, opened: name, moved: new Map([...shifts].filter(([id]) => named.has(id)).map(([id, m]) => [named.get(id), m])), avoid };
   }
   if (!byName) openedOf.set(layout, (byName = new Map()));
   byName.set(name, { bounds, opened });

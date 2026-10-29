@@ -12,6 +12,7 @@
 import { insideOf, slotLabel, slotOf } from './slot.js';
 import { wireGeometry } from './schematic-wire.js';
 import { exportFacts, orderedPins, portGroups } from './schematic-groups.js';
+import { controlAnchor, controlEdges, controlNodes, controlPads } from './schematic-controls.js';
 
 /**
  * Where a slot box's "+" pin of `side` (`in`, `out`) is: the row after its
@@ -290,7 +291,23 @@ function overlaps(a, b) {
   return a.x < b.x + b.w + PAD && b.x < a.x + a.w + PAD && a.y < b.y + b.h + PAD && b.y < a.y + a.h + PAD;
 }
 
+const NO_PAD = Object.freeze({ left: 0, right: 0, top: 0, bottom: 0 });
+
+/** A node's box with what its panel controls take around it (`pads`, `controlPads`'). */
+function footprint(node, pads) {
+  const p = pads.get(node.id) ?? NO_PAD;
+  return { x: node.x - p.left, y: node.y - p.top, w: node.w + p.left + p.right, h: node.h + p.top + p.bottom };
+}
+
+/** A pin's height in its box, from the box's top. */
+function pinOffset(node, name, out) {
+  const list = out ? node.outs : node.ins;
+  const i = Math.max(0, list.findIndex((p) => p.name === name));
+  return HEADER + ROW * (i + 0.5);
+}
+
 function anchor(node, name, out) {
+  if (node.kind === 'control') return controlAnchor(node, name, out);
   const list = out ? node.outs : node.ins;
   const i = Math.max(0, list.findIndex((p) => p.name === name));
   return { x: out ? node.x + node.w : node.x, y: node.y + HEADER + ROW * (i + 0.5) };
@@ -310,26 +327,32 @@ export function laneY(bottom, lane) {
  * converter changes the rate), `feedback` and, for a feedback wire, its
  * `lane` below `bottom` (the lowest box's bottom edge).
  */
-export function layout(level, positions = {}, { factsOf = null } = {}) {
+export function layout(level, positions = {}, { factsOf = null, controls = null } = {}) {
   const nodes = nodesOf(level ?? {}, factsOf);
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const edges = edgesOf(level ?? {}, byId);
   const back = backEdges(nodes, edges);
   const layer = layers(nodes, edges, back);
   const rows = order(nodes, edges, layer);
+  // A panel's controls (ui/lib/schematic-controls.js): placed beside their hosts, which keep room for them.
+  const panel = controls?.length ? controlNodes(controls, byId, pinOffset) : [];
+  const pads = controlPads(panel, byId);
   let x = 0;
   for (const row of rows) {
     let y = 0;
+    let left = 0;
+    for (const id of row) left = Math.max(left, (pads.get(id) ?? NO_PAD).left);
     let width = 0;
     for (const id of row) {
       const node = byId.get(id);
+      const pad = pads.get(id) ?? NO_PAD;
       node.layer = layer.get(id);
-      node.x = x;
-      node.y = y;
-      y += node.h + GAP_Y;
-      width = Math.max(width, node.w);
+      node.x = x + left;
+      node.y = y + pad.top;
+      y += node.h + pad.top + pad.bottom + GAP_Y;
+      width = Math.max(width, node.w + pad.right);
     }
-    x += width + GAP_X;
+    x += left + width + GAP_X;
   }
   // Stored positions first, then every other node, in layer order, moved
   // down past whatever it overlaps.
@@ -350,8 +373,10 @@ export function layout(level, positions = {}, { factsOf = null } = {}) {
       for (let moved = true; moved; ) {
         moved = false;
         for (const other of placed) {
-          if (overlaps(node, other)) {
-            node.y = other.y + other.h + GAP_Y;
+          const a = footprint(node, pads);
+          const b = footprint(other, pads);
+          if (overlaps(a, b)) {
+            node.y = b.y + b.h + GAP_Y + (node.y - a.y);
             moved = true;
           }
         }
@@ -359,13 +384,23 @@ export function layout(level, positions = {}, { factsOf = null } = {}) {
       placed.push(node);
     }
   }
+  for (const control of panel) {
+    const host = byId.get(control.host);
+    control.x = host.x + control.dx;
+    control.y = host.y + control.dy;
+    control.layer = host.layer;
+    control.pinned = host.pinned;
+    nodes.push(control);
+    byId.set(control.id, control);
+  }
   for (const node of nodes) {
     node.ins = node.ins.map((p) => ({ ...p, ...anchor(node, p.name, false) }));
     node.outs = node.outs.map((p) => ({ ...p, ...anchor(node, p.name, true) }));
   }
   const bottom = levelBottom(nodes);
   let lane = 0;
-  const wires = edges.map((e, i) => {
+  const all = panel.length ? controlEdges(edges, panel) : edges;
+  const wires = all.map((e, i) => {
     const a = anchor(byId.get(e.from.node), e.from.port, true);
     const b = anchor(byId.get(e.to.node), e.to.port, false);
     const feedback = back.has(i) || b.x <= a.x;
@@ -385,6 +420,8 @@ export function layout(level, positions = {}, { factsOf = null } = {}) {
       feedback,
       reversed: back.has(i),
       label: e.label,
+      // Drawn into a panel control's input (ui/lib/schematic-controls.js): the endpoint as written.
+      ...(e.target ? { target: e.target } : {}),
       lane: feedback ? lane : 0,
       under,
       curve,
@@ -393,9 +430,10 @@ export function layout(level, positions = {}, { factsOf = null } = {}) {
     };
   });
   // A pin knows whether a wire of this level reaches it (drawn filled).
-  const ends = new Set(edges.flatMap((e) => [`${e.from.node}\n${e.from.port}`, `${e.to.node}\n${e.to.port}`]));
+  // By side: a panel control's input and output have the same name.
+  const ends = { outs: new Set(all.map((e) => `${e.from.node}\n${e.from.port}`)), ins: new Set(all.map((e) => `${e.to.node}\n${e.to.port}`)) };
   for (const node of nodes) {
-    for (const side of ['ins', 'outs']) node[side] = node[side].map((p) => ({ ...p, connected: ends.has(`${node.id}\n${p.name}`) }));
+    for (const side of ['ins', 'outs']) node[side] = node[side].map((p) => ({ ...p, connected: ends[side].has(`${node.id}\n${p.name}`) }));
   }
   // A wire's extent is its curve's box (a short one swings out past its pins).
   const xs = [...nodes.flatMap((n) => [n.x, n.x + n.w]), ...wires.flatMap((w) => [w.box.x0, w.box.x1])];

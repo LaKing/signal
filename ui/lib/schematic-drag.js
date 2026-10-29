@@ -52,7 +52,10 @@ export class DragFollow {
     // The group's nodes, found once per layout (a group of thousands: no search per frame).
     if (this.group?.layout !== layout) {
       const byName = new Map((layout?.nodes ?? []).filter((n) => n.kind === 'instance').map((n) => [n.name, n]));
-      this.group = { layout, node: byName.get(this.name), nodes: this.names.map((name) => byName.get(name)).filter(Boolean), names: new Set(this.names) };
+      const names = new Set(this.names);
+      // A box's panel controls (ui/lib/schematic-controls.js) ride with it.
+      const riders = (layout?.nodes ?? []).filter((n) => n.kind === 'control' && names.has(n.host));
+      this.group = { layout, node: byName.get(this.name), nodes: [...this.names.map((name) => byName.get(name)).filter(Boolean), ...riders], names };
       this.ids = new Set(this.group.nodes.map((n) => n.id));
       this.labelMatches = new WeakMap();
     }

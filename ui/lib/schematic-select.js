@@ -33,6 +33,8 @@ export function hitKey(hit) {
   if (!hit || hit.kind === 'background') return '';
   if (hit.kind === 'wire') return `wire ${hit.path} ${hit.wire.written.from} ${hit.wire.written.to}`;
   if (hit.kind === 'port') return `port ${hit.address} ${hit.port.direction}`;
+  // A panel control (ui/lib/schematic-controls.js): by its place in the panel, not its address (several may bind one).
+  if (hit.kind === 'control') return `control ${hit.path} ${hit.node.id}`;
   return `instance ${hit.address}`;
 }
 
@@ -97,7 +99,7 @@ export function inside(drawn, rect) {
       taken.add(node.id);
     }
     for (const wire of entry.layout.wires) {
-      if (wire.kind === 'connection' && taken.has(wire.from.node) && taken.has(wire.to.node)) wires.push(wireHit(entry, wire));
+      if (wire.kind === 'connection' && taken.has(wire.from.node) && taken.has((wire.target ?? wire.to).node)) wires.push(wireHit(entry, wire));
     }
   }
   return [...boxes, ...wires];
@@ -160,6 +162,9 @@ export function reselectAll(selected, layoutOf) {
     const node = s.node.kind === 'instance' ? drawn.nodes.get(s.node.name) : drawn.frames.get(s.node.id);
     if (!node) continue;
     if (s.kind === 'instance') found.push({ ...s, node });
+    else if (s.kind === 'control') {
+      if (node.kind === 'control') found.push({ ...s, node, address: node.binds[0]?.address ?? '', addresses: node.binds.map((b) => b.address) });
+    }
     else {
       const port = [...node.ins, ...node.outs].find((p) => p.name === s.port.name && p.direction === s.port.direction);
       if (port) found.push({ ...s, node, port });

@@ -273,6 +273,8 @@ export function startOf(hit) {
   if (hit.kind === 'port') return { kind: 'pin', address: hit.address };
   if (hit.kind === 'instance') return { kind: 'instance', address: hit.address };
   if (hit.kind === 'wire') return { kind: 'wire', path: hit.path, written: { ...hit.wire.written } };
+  // A panel control (ui/lib/schematic-controls.js): what it binds, together.
+  if (hit.kind === 'control') return { kind: 'pins', addresses: [...(hit.addresses ?? [hit.address])], label: hit.node?.name ?? hit.address };
   // A collapsed port group (M2.13-2): its members together.
   if (hit.kind === 'group') return { kind: 'pins', addresses: hit.ports.map((p) => p.address), label: [hit.address, hit.label].filter(Boolean).join(' ') };
   return null;

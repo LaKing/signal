@@ -12,7 +12,8 @@
 // context menu's items for the same part (`schematicMenu`), so both say
 // the same, disabled with the same reasons. No DOM.
 
-import { card, converterText } from './schematic-inspector.js';
+import { card, converterText, parameterRows } from './schematic-inspector.js';
+import { TYPE_NAMES, controlFields } from './schematic-controls.js';
 import { EDIT_OFF, schematicMenu } from './schematic-menu.js';
 import { instanceCount } from './schematic-patch.js';
 import { groupOf } from './schematic-palette.js';
@@ -76,9 +77,12 @@ export function connectionsOf(entry, node, port) {
   const out = port.direction === 'out';
   const list = [];
   for (const wire of entry.layout?.wires ?? []) {
+    // A panel control's binding wire is no connection; a wire drawn into a control's input still reaches its pin (`target`).
+    if (wire.kind === 'binding') continue;
     const here = out ? wire.from : wire.to;
-    if (here.node !== node.id || here.port !== port.name) continue;
-    const there = out ? wire.to : wire.from;
+    const reaches = (end) => end && end.node === node.id && end.port === port.name;
+    if (!reaches(here) && !(!out && reaches(wire.target))) continue;
+    const there = out ? (wire.target ?? wire.to) : wire.from;
     const hit = wireHit(entry, wire);
     const other = entry.layout.nodes.find((n) => n.id === there.node);
     const pin = other ? (out ? other.ins : other.outs).find((p) => p.name === there.port) : null;
@@ -146,6 +150,7 @@ export function sidebar(selected, context = {}) {
   if (list.length > 1) return groupSidebar(list, editing, menu);
   const hit = list[0];
   const entry = entryOf(hit, layoutOf);
+  if (hit.kind === 'control') return controlSidebar(hit, entry, description, menu(hit));
   const base = card(hit, { graph, description });
   if (hit.kind === 'instance') {
     const node = hit.node;
@@ -180,7 +185,8 @@ export function sidebar(selected, context = {}) {
     const source = entry.layout?.nodes.find((n) => n.id === wire.from.node)?.outs.find((p) => p.name === wire.from.port);
     const converters = wire.converters ?? [];
     const endOf = (side) => {
-      const end = wire[side];
+      // A wire drawn into a panel control's input ends, as written, at what the control binds (`target`).
+      const end = side === 'to' ? (wire.target ?? wire.to) : wire.from;
       const node = entry.layout?.nodes.find((n) => n.id === end.node);
       const pin = (side === 'from' ? node?.outs : node?.ins)?.find((p) => p.name === end.port);
       return pin ? portHit(entry, node, pin) : null;
@@ -230,6 +236,35 @@ export function sidebar(selected, context = {}) {
     // 2026-10-25: every signal input, output and parameter of an instance (the selected instance's meters).
     meter: hit.node.kind === 'instance' && port.shape === 'signal',
     actions: actionsOf(hit, { ...menu(hit), opaque: across?.opaque ?? false }, ['trace', 'go-inside', 'go-outside', 'copy-address', 'disconnect']),
+  };
+}
+
+/**
+ * A panel control's sidebar (ui/lib/schematic-controls.js): what it is,
+ * its attributes (`fields`), what it binds (`binds`: links to the bound
+ * pins, `{label, role, hit}`), the wires drawn into its input
+ * (`connections`, as a pin's), its bound parameters' rows (the card's,
+ * live and editable at the top level) and `actions`.
+ */
+function controlSidebar(hit, entry, description, state) {
+  const node = hit.node;
+  const binds = node.binds.map((b) => {
+    const box = b.role ? entry.layout?.nodes.find((n) => n.kind === 'instance' && n.name === b.instance) : null;
+    const pin = (b.role === 'out' ? box?.outs : box?.ins)?.find((p) => p.name === b.port) ?? null;
+    return { label: b.address, role: b.writes ? 'sets' : 'reads', hit: pin ? portHit(entry, box, pin) : null };
+  });
+  const connections = node.ins.flatMap((p) => connectionsOf(entry, node, p));
+  const type = TYPE_NAMES[node.type] ?? node.type;
+  return {
+    kind: 'control',
+    title: node.name,
+    subtitle: `${type} of the panel (ui/main.html), beside /${node.host}`,
+    fields: controlFields(node),
+    binds,
+    connections,
+    parameters: parameterRows(description, node.binds.map((b) => b.address)),
+    editable: true,
+    actions: actionsOf(hit, state, ['trace', 'bound', 'copy-address']),
   };
 }
 

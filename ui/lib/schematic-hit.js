@@ -15,6 +15,7 @@ import { nearBundle } from './schematic-bundle.js';
 import { groupAnchors } from './schematic-groups.js';
 import { INPUTS, OUTPUTS } from './schematic-layout.js';
 import { closeBox, closeShown } from './schematic-open.js';
+import { controlHit } from './schematic-controls.js';
 import { toLocal } from './schematic-view.js';
 import { curveDistance, distanceToSegment } from './schematic-wire.js';
 
@@ -110,7 +111,8 @@ export function hitTest(drawn, point) {
     let best = null;
     for (const node of nodes) {
       // A composite's frame pins too (ADR 0030 §1: a trace starts there); its boxes are not hit.
-      if (node.kind !== 'instance' && !entry.path) continue;
+      // A panel control is hit whole, its pins with it (ui/lib/schematic-controls.js).
+      if (node.kind === 'control' || (node.kind !== 'instance' && !entry.path)) continue;
       // A box small on screen (zoomed out) keeps its body: its pins reach less.
       const reach = Math.min(PORT_PX, (node.h * scale) / 4);
       // M2.13-2: a collapsed box (`entry.collapsed`) is hit as drawn: a group of several by its one pin, its members' rows not at all.
@@ -131,6 +133,12 @@ export function hitTest(drawn, point) {
     }
     if (best?.anchor) return groupHit(entry, best.node, best.anchor.group);
     if (best) return portHit(entry, best.node, best.port);
+    // A panel control (its pins on its edges, within reach of them too).
+    for (const node of nodes) {
+      if (node.kind !== 'control') continue;
+      const reach = Math.min(PORT_PX, (node.h * scale) / 4) / scale;
+      if (local.x >= node.x - reach && local.x <= node.x + node.w + reach && local.y >= node.y && local.y <= node.y + node.h) return controlHit(entry, node);
+    }
     for (const node of nodes) {
       if (node.kind !== 'instance') continue;
       // An open composite's inside was tried first; its box still counts.
@@ -139,13 +147,15 @@ export function hitTest(drawn, point) {
     if (entry.bundles) {
       for (let j = entry.bundles.length - 1; j >= 0; j--) {
         const item = entry.bundles[j];
+        // A control's binding wire is drawn, never hit: it is no connection of the project.
+        if (item.kind === 'binding' || (item.kind === 'bundle' && item.wires.every((w) => w.kind === 'binding'))) continue;
         if (item.kind === 'bundle' ? nearBundle(item, local, WIRE_PX / scale) : nearWire(item, local, WIRE_PX / scale)) {
           return item.kind === 'bundle' ? bundleHit(entry, item) : wireHit(entry, item);
         }
       }
       continue;
     }
-    for (const wire of entry.wires) if (nearWire(wire, local, WIRE_PX / scale)) return wireHit(entry, wire);
+    for (const wire of entry.wires) if (wire.kind !== 'binding' && nearWire(wire, local, WIRE_PX / scale)) return wireHit(entry, wire);
   }
   return { kind: 'background', path: '', level: '' };
 }
@@ -194,6 +204,11 @@ export function reselect(selection, layoutOf) {
     const { from, to } = selection.wire.written;
     const wire = drawn.wires.find((w) => w.written.from === from && w.written.to === to);
     return wire ? { ...selection, wire } : null;
+  }
+  // A panel control by its id (its place in the panel).
+  if (selection.kind === 'control') {
+    const node = drawn.nodes.find((n) => n.kind === 'control' && n.id === selection.node.id);
+    return node ? { ...selection, node, address: node.binds[0]?.address ?? '', addresses: node.binds.map((b) => b.address) } : null;
   }
   // A frame's pin by its frame (`@inputs`, `@outputs`).
   const frame = selection.node.kind !== 'instance';

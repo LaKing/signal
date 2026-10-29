@@ -92,6 +92,8 @@ import { registerWheel, takesWheel } from './keyboard.js';
 import { COUNT_UNITS, LABEL_PX, PITCH_PX, READ_PX, frameSides, insideNote, labelOwners, levelCounts, levelLabels, outsideNote, pinText, setMeasure } from '../lib/schematic-labels.js';
 import { bundleClick, bundleText, bundleWires, countPlaces, countsShown, fanOf, nearestWire } from '../lib/schematic-bundle.js';
 import { collapsedAt, exportFacts, groupAnchors, labelDetail, notesAt, portGroups } from '../lib/schematic-groups.js';
+import { CONTROL_HEAD, TYPE_NAMES, controlFraction, controlHit, controlValue, controlValueText, fitText, glyphParts, panelControls } from '../lib/schematic-controls.js';
+import { ControlProperties } from './schematic-control-node.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 /** A press that moves less than this (px) is a click. */
@@ -140,6 +142,22 @@ svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; t
 .close-button:hover > text { fill: var(--signal-fg, #d6dbe4); }
 svg.closing { cursor: pointer; }
 .pins > .box { fill: none; stroke: var(--signal-track, #2a2f38); stroke-dasharray: 2 4; }
+/* A panel control (2026-10-29, ui/lib/schematic-controls.js): a compact box in the panel's tint, apart from the modules' boxes; one that writes amber, one that reads green. */
+.control > .box { fill: color-mix(in srgb, var(--signal-effective, #ffb74d) 9%, var(--signal-panel, #1f232b)); stroke: var(--signal-effective, #ffb74d); stroke-width: 1.5; }
+.control > .band { fill: color-mix(in srgb, var(--signal-effective, #ffb74d) 26%, transparent); stroke: none; }
+.control.reader > .box { fill: color-mix(in srgb, var(--signal-meter-rms, #3ecf8e) 9%, var(--signal-panel, #1f232b)); stroke: var(--signal-meter-rms, #3ecf8e); }
+.control.reader > .band { fill: color-mix(in srgb, var(--signal-meter-rms, #3ecf8e) 26%, transparent); }
+.control-label { fill: var(--signal-fg, #d6dbe4); font-weight: 600; }
+.control-value { fill: var(--signal-muted, #8a93a3); font-variant-numeric: tabular-nums; }
+.glyph-track { fill: none; stroke: var(--signal-muted, #8a93a3); stroke-width: 1.2; vector-effect: non-scaling-stroke; }
+.glyph-track.on { fill: color-mix(in srgb, var(--signal-effective, #ffb74d) 35%, transparent); }
+.glyph-mark { fill: var(--signal-effective, #ffb74d); stroke: var(--signal-effective, #ffb74d); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.reader .glyph-mark { fill: var(--signal-meter-rms, #3ecf8e); stroke: var(--signal-meter-rms, #3ecf8e); }
+.glyph-mark.unknown { opacity: 0.45; }
+.glyph-thin { stroke: var(--signal-track, #2a2f38); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.glyph-line { fill: none; stroke: var(--signal-meter-rms, #3ecf8e); stroke-width: 1.2; vector-effect: non-scaling-stroke; }
+/* A control's binding to what it sets or reads: a dotted line, not a connection of the project (never hit). */
+path.wire.binding { stroke: var(--signal-effective, #ffb74d); stroke-dasharray: 1 3; stroke-linecap: round; opacity: 0.85; pointer-events: none; }
 /* The target of an open context menu. */
 .hover > .box { stroke: var(--signal-fg, #d6dbe4); stroke-width: 2; }
 /* The selection (2026-10-17): strokes and a glow only, nothing moves. A box: a thick focus-coloured border with a halo. */
@@ -310,6 +328,9 @@ svg.tracing .pin.traced { stroke: var(--signal-fg, #d6dbe4); stroke-width: 2.5; 
 .row input { grid-column: 1 / 4; width: 100%; margin: 0; }
 .row .mark { visibility: hidden; color: var(--signal-effective, #ffb74d); }
 .row .mark.on { visibility: visible; }
+/* A panel control's property (its attribute in ui/main.html): the name, then its field. */
+.row.prop { grid-template-columns: 6em 1fr; }
+.row.prop input { grid-column: auto; box-sizing: border-box; min-width: 0; font: inherit; color: inherit; background: var(--signal-bg, #16181d); border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 3px; padding: 1px 4px; }
 ${ENTRY_CSS}
 ${EDITOR_CSS}
 ${MENU_CSS}`;
@@ -408,6 +429,13 @@ export class SignalSchematic extends HTMLElement {
     this.notes = new Map();
     /** The closed composite under the pointer (its address), whose pins show where they go inside. */
     this.hoveredBox = null;
+    /** The panel's controls (ui/lib/schematic-controls.js): the panel text read last, its controls, drawn as nodes of the top level. */
+    this.panelText = null;
+    this.panelControls = [];
+    /** Each drawn control's value text, by its node's id: `{text, node}`, written in place. */
+    this.controlTexts = new Map();
+    /** The sidebar's editor of a selected control's attributes (ui/controls/schematic-control-node.js). */
+    this.controlProperties = new ControlProperties(this);
   }
 
   /** The part selected last (the context menu's and the keyboard's), or null. */
@@ -530,6 +558,9 @@ export class SignalSchematic extends HTMLElement {
     on('scopes', (scopes) => this.scopesSeen(scopes, true));
     on('welcome', () => this.fetch());
     on('describe', () => this.described());
+    on('panel.written', (message) => {
+      if ((message?.file ?? 'main.html') === 'main.html' && typeof message.html === 'string') this.panelSeen(message.html);
+    });
     on('unsaved', () => this.refreshCard());
     on('app', (app) => {
       this.mutedSeen(app);
@@ -591,6 +622,12 @@ export class SignalSchematic extends HTMLElement {
       this.tracing = null;
       old.clear();
     }
+    // The panel's controls follow the project's panel file (read with every graph: a hand edit of it shows).
+    if (this.graph?.projectId !== graph.projectId || this.graph?.project !== graph.project) {
+      this.panelText = null;
+      this.panelControls = [];
+    }
+    this.readPanel();
     this.graph = graph;
     this.notes = new Map();
     this.noteResolver = resolver(graph);
@@ -617,6 +654,31 @@ export class SignalSchematic extends HTMLElement {
       if (again) target.hit = again;
       else this.closeMenu();
     }
+    this.showSide();
+    this.schedule();
+  }
+
+  /**
+   * The project's panel file read again (`panel.read` of `main.html`): its
+   * controls drawn as nodes of the top level. A project without one (the
+   * generated panel) has none; a refused read leaves what is drawn.
+   */
+  readPanel() {
+    const request = this.connection?.request?.({ type: 'panel.read', file: 'main.html' });
+    request?.then(
+      (read) => this.panelSeen(read?.exists ? (read.html ?? read.text ?? '') : ''),
+      () => {},
+    );
+  }
+
+  /** Panel text `text` (a file's `<signal-panel>` content): its controls, the top level laid out again when they changed. */
+  panelSeen(text) {
+    if (text === this.panelText) return;
+    this.panelText = text;
+    this.panelControls = panelControls(text);
+    if (!this.graph) return;
+    this.layouts.delete('');
+    this.selected = reselectAll(this.selected, (level) => this.layoutOf(level));
     this.showSide();
     this.schedule();
   }
@@ -679,7 +741,7 @@ export class SignalSchematic extends HTMLElement {
       if (!source) return null;
       const stored = { ...(this.graph.layout?.positions?.[level] ?? {}), ...Object.fromEntries(this.moved.get(level) ?? []) };
       // M2.13-2: a composite's box lays its pins out in groups (ui/lib/schematic-groups.js).
-      this.layouts.set(level, layout(source, stored, { factsOf: (module) => exportFacts(module === '' ? null : levelData(this.graph, module)) }));
+      this.layouts.set(level, layout(source, stored, { factsOf: (module) => exportFacts(module === '' ? null : levelData(this.graph, module)), controls: level === '' ? this.panelControls : null }));
     }
     return this.layouts.get(level);
   }
@@ -718,6 +780,7 @@ export class SignalSchematic extends HTMLElement {
 
   render() {
     if (!this.graph || this.viewport.w === 0) return;
+    this.renderCount = (this.renderCount ?? 0) + 1;
     if (!this.fitted) {
       this.view = this.fitAll();
       this.fitted = true;
@@ -912,7 +975,7 @@ export class SignalSchematic extends HTMLElement {
   wireElement(level, wire, baked) {
     const from = `${level.path}/${String(wire.written.from).replace(/^\//, '')}`;
     return el('path', {
-      class: ['wire', wire.shape, wire.dashed ? 'dashed' : '', wire.crossing ? 'crossing' : ''].filter(Boolean).join(' '),
+      class: ['wire', wire.shape, wire.dashed ? 'dashed' : '', wire.crossing ? 'crossing' : '', wire.kind === 'binding' ? 'binding' : ''].filter(Boolean).join(' '),
       d: bakedPath(baked, wire.points, wire.curve),
       'data-address': from,
       'data-label': wire.label,
@@ -925,11 +988,12 @@ export class SignalSchematic extends HTMLElement {
     const shape = bundle.wires[0].shape;
     const group = el('g', { class: 'bundle', 'data-label': bundle.wires.map((w) => w.label).join('\n'), 'data-part': 'schematic' });
     if (!bundle.members.length) {
-      const path = el('path', { class: `wire ${shape}`, d: bakedPath(baked, bundle.points, bundle.curve) });
+      const binding = bundle.wires.every((w) => w.kind === 'binding') ? ' binding' : '';
+      const path = el('path', { class: `wire ${shape}${binding}`, d: bakedPath(baked, bundle.points, bundle.curve) });
       path.style.strokeWidth = `${1.5 + Math.log2(bundle.count)}px`;
       group.append(path);
     }
-    for (const m of bundle.members) group.append(el('path', { class: ['wire', m.wire.shape, m.wire.dashed ? 'dashed' : ''].join(' ').trim(), d: bakedPath(baked, m.points, m.curve) }));
+    for (const m of bundle.members) group.append(el('path', { class: ['wire', m.wire.shape, m.wire.dashed ? 'dashed' : '', m.wire.kind === 'binding' ? 'binding' : ''].join(' ').trim(), d: bakedPath(baked, m.points, m.curve) }));
     return group;
   }
 
@@ -972,7 +1036,99 @@ export class SignalSchematic extends HTMLElement {
     return solo;
   }
 
+  /**
+   * A panel control's node (ui/lib/schematic-controls.js): a compact box
+   * tinted apart from the modules', its label, its type's glyph and its
+   * value (both written again in place as the value changes,
+   * `updateControls`), an input pin per address at its left and, for a
+   * control that writes, an output pin per address at its right.
+   */
+  controlElement(level, node, baked, text) {
+    const m = baked.m;
+    const writer = node.outs.length > 0;
+    const group = el('g', { class: `node control ${writer ? 'writer' : 'reader'} ${node.type}` });
+    group.dataset.address = node.binds[0]?.address ?? '';
+    group.dataset.label = node.name;
+    group.dataset.part = 'schematic';
+    group.dataset.control = node.id;
+    const box = bakedRect(baked, node);
+    if (box) group.append(el('rect', { class: 'box', rx: 7 * m, ...box }));
+    // The band its label sits in, the type's tint.
+    const band = bakedRect(baked, { x: node.x, y: node.y, w: node.w, h: CONTROL_HEAD });
+    if (band) group.append(el('rect', { class: 'band', rx: 7 * m, ...band }));
+    const write = (p, size, attributes, content) => {
+      const at = bakedPoint(baked, p);
+      const t = el('text', { ...attributes, x: at.x, y: at.y, 'font-size': size * m }, content);
+      group.append(t);
+      return t;
+    };
+    const several = Math.max(node.ins.length, node.outs.length) > 1;
+    if (text(9)) write({ x: node.x + node.w / 2, y: node.y + 10 }, 9, { class: 'control-label', 'text-anchor': 'middle' }, fitText(node.name, Math.floor((node.w - 6) / 5)));
+    const glyph = el('g', { class: 'glyph' });
+    group.append(glyph);
+    const value = text(8) ? write({ x: node.x + node.w / 2, y: node.y + node.h - 4 }, 8, { class: 'control-value', 'text-anchor': 'middle' }, '') : null;
+    // With several pins a side, each is named inside the box; the glyph moves out of their way to the middle.
+    const area = several ? { x: node.x + node.w / 2 - 8, y: node.y + CONTROL_HEAD + 2, w: 16, h: node.h - CONTROL_HEAD - 14 } : { x: node.x + 10, y: node.y + CONTROL_HEAD + 2, w: node.w - 20, h: node.h - CONTROL_HEAD - 14 };
+    this.controlTexts.set(node.id, { node, value, glyph, baked, area, fraction: undefined, text: undefined, built: this.renderCount });
+    for (const pin of [...node.ins, ...node.outs]) {
+      const out = pin.direction === 'out';
+      const kind = ['pin', pin.shape, 'control-pin', pin.connected ? 'connected' : '', pin.role ? '' : 'unmatched'].filter(Boolean).join(' ');
+      const tip = `${pin.address}${out ? ' (sets it)' : writer ? ' (what else drives it)' : ' (reads it)'}${pin.role ? '' : ': not wired here (inside a composite)'}`;
+      const data = { class: kind, 'data-address': pin.address, 'data-direction': pin.direction, 'data-label': tip, 'data-part': 'schematic' };
+      const shape = bakedPin(baked, level.transform, this.viewport, pin, 3);
+      if (shape.circle) group.append(el('circle', { ...data, ...shape.circle }));
+      else if (shape.polygon.length) group.append(el('polygon', { ...data, points: shape.polygon.map((p) => `${p.x},${p.y}`).join(' ') }));
+      if (several && text(7)) write({ x: pin.x + (out ? -4 : 4), y: pin.y + 2.5 }, 7, { class: 'pin-label', 'text-anchor': out ? 'end' : 'start' }, fitText(pin.label, 6));
+    }
+    this.updateControl(node.id);
+    return group;
+  }
+
+  /** Control `id`'s value and glyph, written again only when they changed. */
+  updateControl(id) {
+    const shown = this.controlTexts.get(id);
+    if (!shown) return;
+    const now = controlValue(shown.node, this.connection?.description, this.cardValues);
+    const fraction = controlFraction(shown.node, now);
+    // A control of no parameter (a meter, a scope, a button of an input) names what it binds; a value not known yet is a dash.
+    const text = now ? controlValueText(now) || '—' : shown.node.outs.length && shown.node.binds.some((b) => b.role === 'parameter') ? '—' : (shown.node.binds[0]?.name ?? '');
+    if (shown.value && text !== shown.text) shown.value.textContent = fitText(text, Math.floor((shown.node.w - 4) / 4.4));
+    shown.text = text;
+    // The glyph's mark moves by whole percent.
+    const step = Number.isFinite(fraction) ? Math.round(fraction * 100) : NaN;
+    if (Object.is(step, shown.fraction)) return;
+    shown.fraction = step;
+    const parts = [];
+    for (const part of glyphParts(shown.node.type, shown.area, fraction)) {
+      const { class: kind, ...a } = part.attributes;
+      if (part.tag === 'rect') {
+        const r = bakedRect(shown.baked, { x: a.x, y: a.y, w: a.w, h: a.h });
+        if (r) parts.push(el('rect', { class: kind, ...r, rx: (a.rx ?? 0) * shown.baked.m }));
+      } else if (part.tag === 'circle') {
+        const c = bakedPoint(shown.baked, { x: a.cx, y: a.cy });
+        parts.push(el('circle', { class: kind, cx: c.x, cy: c.y, r: a.r * shown.baked.m }));
+      } else if (part.tag === 'line') {
+        const p = bakedPoint(shown.baked, { x: a.x1, y: a.y1 });
+        const q = bakedPoint(shown.baked, { x: a.x2, y: a.y2 });
+        parts.push(el('line', { class: kind, x1: p.x, y1: p.y, x2: q.x, y2: q.y }));
+      } else if (part.tag === 'path') {
+        parts.push(el('path', { class: kind, d: bakedPath(shown.baked, a.points) }));
+      }
+    }
+    shown.glyph.replaceChildren(...parts);
+  }
+
+  /** Every drawn control's value (a `describe`, a stream frame). */
+  updateControls() {
+    for (const [id, shown] of this.controlTexts) {
+      // A control no longer drawn (its level built again without it) is let go.
+      if (!shown.glyph.isConnected && shown.built !== this.renderCount) this.controlTexts.delete(id);
+      else this.updateControl(id);
+    }
+  }
+
   nodeElement(level, node, baked, text, collapsed = false) {
+    if (node.kind === 'control') return this.controlElement(level, node, baked, text);
     const m = baked.m;
     const address = `${level.path}/${node.name}`;
     const isOpen = this.drawn.open.has(address);
@@ -1086,6 +1242,7 @@ export class SignalSchematic extends HTMLElement {
   /** The element drawn for `hit` (an instance's group, a wire, a pin), or null when it is not drawn. */
   partElement(hit) {
     if (hit?.kind === 'instance') return this.nodeGroup(hit.address);
+    if (hit?.kind === 'control') return this.groups.get(hit.path)?.nodeCache.get(hit.node.id)?.el ?? null;
     if (hit?.kind === 'wire') return this.groups.get(hit.path)?.wireCache.get(hit.wire.id)?.el ?? null;
     if (hit?.kind === 'port') {
       // A frame's pin: its frame's group, by the frame's id.
@@ -1355,15 +1512,25 @@ export class SignalSchematic extends HTMLElement {
     // The level's scale is kept from the start: a render during the drag
     // (a push, a zoom) may replace the group or close the level. A box of
     // a group selected moves the group's boxes of its level with it.
-    const k = hit.kind === 'instance' ? this.levelOf(hit.path)?.transform.k : undefined;
+    // A panel control has no position of its own: a drag of it moves its host, which it rides beside (ui/lib/schematic-controls.js).
+    const dragged = hit.kind === 'control' ? this.controlHost(hit) : hit;
+    const k = dragged?.kind === 'instance' ? this.levelOf(dragged.path)?.transform.k : undefined;
     // A drag moves a box of the level edited; in Edit patch a box around it
     // is held (not moved, said so); anything else pans: empty space, an open
     // frame's body, and outside Edit patch a box that does not move (`dragAction`).
-    const movable = Boolean(k && own && this.nodeGroup(hit.address));
-    const action = dragAction({ hit, own, movable, frame: openFrameHit(this.drawn, hit), editing: this.editor.editing, additive });
-    const follow = action === 'move' ? new DragFollow(hit.level, dragGroup(this.selected, hit)) : null;
+    const movable = Boolean(k && own && this.nodeGroup(dragged.address));
+    const action = dragged ? dragAction({ hit: dragged, own, movable, frame: openFrameHit(this.drawn, dragged), editing: this.editor.editing, additive }) : 'pan';
+    const follow = action === 'move' ? new DragFollow(dragged.level, dragGroup(this.selected, dragged)) : null;
     const held = action === 'hold';
-    this.gesture = { ...base, k, follow, held };
+    // The press's own part (`clicked`) is what a click selects; `hit` is what a drag moves.
+    this.gesture = { ...base, hit: follow || held ? dragged : hit, clicked: hit, k, follow, held };
+  }
+
+  /** The instance hit of control `hit`'s host box, at its level; null when it is not laid out. */
+  controlHost(hit) {
+    const level = this.levelOf(hit.path);
+    const node = level?.layout.nodes.find((n) => n.kind === 'instance' && n.name === hit.node.host);
+    return node ? instanceHit(level, node) : null;
   }
 
   nodeGroup(address) {
@@ -1450,7 +1617,8 @@ export class SignalSchematic extends HTMLElement {
     if (!gesture.moved) {
       // The second click of a double-click on what the first opened or closed: the double-click's alone (`doubleClick`).
       if (this.secondClick(at, event.timeStamp)) return;
-      const hit = gesture.hit.kind === 'background' ? null : gesture.hit;
+      const pressed = gesture.clicked ?? gesture.hit;
+      const hit = pressed.kind === 'background' ? null : pressed;
       // A bundle (M2.13-2): its wires, selected together; they are then drawn on their own, so a second click takes one.
       // A collapsed port group (M2.13-2): its members, never one picked for the user.
       if (hit?.kind === 'group') {
@@ -1581,6 +1749,12 @@ export class SignalSchematic extends HTMLElement {
     }
     if (hit.kind === 'bundle') {
       this.showTip(bundleText(hit.bundle), at);
+      return;
+    }
+    if (hit.kind === 'control') {
+      // A panel control: what it is and what it binds.
+      const node = hit.node;
+      this.showTip([`${TYPE_NAMES[node.type] ?? node.type} “${node.name}” (panel)`, ...node.binds.map((b) => `${b.writes ? 'sets' : 'reads'} ${b.address}`)].join('\n'), at);
       return;
     }
     if (hit.kind === 'group') {
@@ -1860,7 +2034,7 @@ export class SignalSchematic extends HTMLElement {
     const centre = { x: this.viewport.w / 2, y: this.viewport.h / 2 };
     if (!level) return { hit: { kind: 'background', path: '', level: '' }, point: centre };
     let at = centre;
-    if (s.kind === 'instance') at = toScreen(level.transform, { x: s.node.x + s.node.w / 2, y: s.node.y + s.node.h / 2 });
+    if (s.kind === 'instance' || s.kind === 'control') at = toScreen(level.transform, { x: s.node.x + s.node.w / 2, y: s.node.y + s.node.h / 2 });
     else if (s.kind === 'port') at = toScreen(level.transform, s.port);
     else if (s.kind === 'wire') at = toScreen(level.transform, s.wire.points[Math.floor(s.wire.points.length / 2)]);
     const point = { x: Math.max(0, Math.min(this.viewport.w, at.x)), y: Math.max(0, Math.min(this.viewport.h, at.y)) };
@@ -1936,6 +2110,7 @@ export class SignalSchematic extends HTMLElement {
       this.revealSide();
       this.editor.openScale();
     } else if (id === 'source' || id === 'target') this.goToEnd(hit, id === 'source' ? 'from' : 'to');
+    else if (id === 'bound') this.goToBound(hit);
     else if (id === 'disconnect') {
       // Its connections as now known: a push since the menu opened may have taken them.
       const ops = this.portOps(hit);
@@ -1974,9 +2149,21 @@ export class SignalSchematic extends HTMLElement {
    */
   goToEnd(hit, side) {
     const level = this.levelOf(hit.path);
-    const end = hit.wire[side];
+    const end = side === 'to' ? (hit.wire.target ?? hit.wire.to) : hit.wire[side];
     const node = level?.layout.nodes.find((n) => n.id === end.node);
     const port = (side === 'from' ? node?.outs : node?.ins)?.find((p) => p.name === end.port);
+    if (!port) return;
+    this.select([portHit(level, node, port)]);
+    const at = toScreen(level.transform, port);
+    this.setView(pan(this.view, this.viewport.w / 2 - at.x, this.viewport.h / 2 - at.y));
+  }
+
+  /** A panel control's first bound pin (of a top-level instance): selected and centred, at the same zoom. */
+  goToBound(hit) {
+    const level = this.levelOf(hit.path);
+    const pin = hit.node.binds.find((b) => b.role);
+    const node = pin ? level?.layout.nodes.find((n) => n.kind === 'instance' && n.name === pin.instance) : null;
+    const port = (pin?.role === 'out' ? node?.outs : node?.ins)?.find((p) => p.name === pin.port);
     if (!port) return;
     this.select([portHit(level, node, port)]);
     const at = toScreen(level.transform, port);
@@ -2166,7 +2353,7 @@ export class SignalSchematic extends HTMLElement {
     const scroll = key === this.sideKey || this.keepSideScroll ? this.sideBody.scrollTop : 0;
     this.keepSideScroll = false;
     this.sideKey = key;
-    this.sideTitle.textContent = model.kind === 'project' ? 'Project' : model.kind === 'group' ? (model.pinGroup ? 'Pin group' : 'Selection') : model.kind === 'port' ? 'Pin' : model.kind === 'wire' ? 'Connection' : 'Instance';
+    this.sideTitle.textContent = model.kind === 'project' ? 'Project' : model.kind === 'control' ? 'Panel control' : model.kind === 'group' ? (model.pinGroup ? 'Pin group' : 'Selection') : model.kind === 'port' ? 'Pin' : model.kind === 'wire' ? 'Connection' : 'Instance';
     const parts = [...this.traceParts(), html('h3', { textContent: model.title, title: model.title }), html('div', { className: 'subtitle', textContent: model.subtitle })];
     // What a primitive's type is: its rustdoc summary with its formula (ADR 0027 §6).
     if (model.about) parts.push(html('p', { className: 'about', textContent: model.about }));
@@ -2181,8 +2368,9 @@ export class SignalSchematic extends HTMLElement {
     if (model.kind === 'wire') parts.push(...this.wireParts(model));
     if (model.kind === 'port') parts.push(...this.portParts(model));
     if (model.kind === 'group') parts.push(...this.groupParts(model));
+    if (model.kind === 'control') parts.push(...this.controlParts(model));
     if (model.parameters?.length) {
-      parts.push(html('h4', { textContent: model.editable ? 'Parameters' : 'Parameters (set in the composite’s file)' }));
+      parts.push(html('h4', { textContent: model.kind === 'control' ? 'Value' : model.editable ? 'Parameters' : 'Parameters (set in the composite’s file)' }));
       for (const row of model.parameters) parts.push(this.parameterRow(row));
     }
     if (this.selected.length === 1) parts.push(...this.editor.cardParts(this.selected[0]));
@@ -2331,6 +2519,32 @@ export class SignalSchematic extends HTMLElement {
     return parts;
   }
 
+  /** A panel control's binds (links to the pins), the wires drawn into its input, and its properties' fields. */
+  controlParts(model) {
+    const parts = [html('h4', { textContent: 'Binds' })];
+    const list = html('ul', { className: 'wires' });
+    for (const bind of model.binds) {
+      const item = html('li');
+      const what = html('span');
+      what.append(`${bind.role} `, this.link(bind.label, bind.hit));
+      item.append(what, html('span'));
+      list.append(item);
+    }
+    parts.push(list);
+    // A control that sets something: what else drives it, drawn into its input (an automated fader's).
+    if (model.binds.some((b) => b.role === 'sets')) {
+      parts.push(html('h4', { textContent: `Into its input (${model.connections.length})` }));
+      if (model.connections.length) {
+        const wires = html('ul', { className: 'wires' });
+        for (const c of model.connections) wires.append(this.connectionItem(c, this.selected[0].level));
+        parts.push(wires);
+      } else parts.push(html('div', { className: 'subtitle', textContent: 'nothing: the control alone sets it' }));
+    }
+    const node = this.selected[0]?.node;
+    if (node?.kind === 'control') parts.push(...this.controlProperties.parts(node));
+    return parts;
+  }
+
   groupParts(model) {
     const parts = model.notes.map((text) => html('div', { className: 'note', textContent: text }));
     parts.push(html('h4', { textContent: 'Members' }));
@@ -2399,8 +2613,9 @@ export class SignalSchematic extends HTMLElement {
     this.connection?.request?.(message).catch((error) => this.say(error.message));
   }
 
-  /** The card's values, in place: same boxes, same widths. */
+  /** The card's values, in place: same boxes, same widths; the panel controls' with them. */
   refreshCard() {
+    this.updateControls();
     for (const shown of this.cardRows) {
       const values = rowValues(shown.row, this.cardValues, this.connection?.unsaved, this.connection?.description);
       shown.value = values.base;
@@ -2622,6 +2837,8 @@ export class SignalSchematic extends HTMLElement {
     const boxes = [];
     const addresses = [];
     for (const node of level.layout.nodes) {
+      // A panel control names its own pins (`controlElement`).
+      if (node.kind === 'control') continue;
       const frame = node.kind !== 'instance';
       const instance = `${level.path}/${node.name}`;
       if (frame ? !level.path : !node.composite) continue;
@@ -2930,7 +3147,9 @@ export class SignalSchematic extends HTMLElement {
           if (port) ends.push(portHit(entry, node, port));
         }
       }
-      if (wires.length) this.select(wire ? [...wires.slice(0, 1), ...ends] : [hit, ...wires]);
+      // The panel controls that bind the pin (ui/lib/schematic-controls.js) are shown with it.
+      const controls = wire ? [] : (layout?.nodes ?? []).filter((n) => n.kind === 'control' && n.binds.some((b) => b.address === hit.address)).map((n) => controlHit(entry, n));
+      if (wires.length || controls.length) this.select(wire ? [...wires.slice(0, 1), ...ends] : [hit, ...controls, ...wires]);
     }
     this.flashSelection();
     return true;
