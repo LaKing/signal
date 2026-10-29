@@ -465,6 +465,10 @@ pub enum QuitRoute {
     /// prompt cannot offer Cancel (operator decision operator-request:009,
     /// ADR 0025).
     Terminate,
+    /// A developer restart (`./start.sh`): a termination the app was asked
+    /// for through [`restart`](crate::restart). Nothing is asked: it closes
+    /// as an unanswered prompt does, keeping the edits in the working folder.
+    Restart,
 }
 
 /// A button of the "Save changes?" prompt.
@@ -501,12 +505,30 @@ pub fn prompt_text(name: &str) -> String {
 }
 
 /// The prompt's buttons, the default first: Save, Cancel and Don't Save,
-/// except when terminating, which cannot be cancelled.
+/// except when terminating, which cannot be cancelled, and none for a
+/// developer restart, which asks nothing.
 pub fn prompt_buttons(route: QuitRoute) -> &'static [Prompt] {
     match route {
         QuitRoute::Terminate => &[Prompt::Save, Prompt::DontSave],
+        QuitRoute::Restart => &[],
         _ => &[Prompt::Save, Prompt::Cancel, Prompt::DontSave],
     }
+}
+
+/// Whether `route` asks "Save changes?" about an edited project: all but a
+/// developer restart.
+pub fn asks(route: QuitRoute) -> bool {
+    !prompt_buttons(route).is_empty()
+}
+
+/// The prompt's answer on `route`: `ask` runs it (`None` when it cannot
+/// run), except on a route that asks nothing, which is left unanswered.
+pub fn answer(
+    route: QuitRoute,
+    edited: bool,
+    ask: impl FnOnce() -> Option<Prompt>,
+) -> Option<Prompt> {
+    if edited && asks(route) { ask() } else { None }
 }
 
 /// What happens next.
@@ -1026,6 +1048,41 @@ mod tests {
         assert_eq!(terminate(0), ExitPlan::Save);
         assert_eq!(terminate(1), ExitPlan::Discard);
         assert_eq!(terminate(2), ExitPlan::Keep, "no Cancel when terminating");
+    }
+
+    /// The owner's request of 2026-10-29: `./start.sh`'s restart asks
+    /// nothing and keeps an edited project's working folder (as an
+    /// unanswered prompt does); every other route still asks.
+    #[test]
+    fn a_developer_restart_asks_nothing_and_keeps_the_edits() {
+        assert!(prompt_buttons(QuitRoute::Restart).is_empty());
+        assert_eq!(Prompt::of(QuitRoute::Restart, 0), None);
+        assert!(!asks(QuitRoute::Restart));
+        let never = || -> Option<Prompt> { panic!("a restart runs no prompt") };
+        assert_eq!(answer(QuitRoute::Restart, true, never), None);
+        assert_eq!(
+            exit_plan(true, answer(QuitRoute::Restart, true, never)),
+            ExitPlan::Keep
+        );
+        assert_eq!(
+            exit_plan(false, answer(QuitRoute::Restart, false, never)),
+            ExitPlan::Go
+        );
+
+        for route in [
+            QuitRoute::Window,
+            QuitRoute::Menu,
+            QuitRoute::Open,
+            QuitRoute::Terminate,
+        ] {
+            assert!(asks(route), "{route:?}");
+            assert_eq!(
+                answer(route, true, || Some(Prompt::Save)),
+                Some(Prompt::Save),
+                "{route:?}"
+            );
+            assert_eq!(answer(route, false, never), None, "not edited: {route:?}");
+        }
     }
 
     /// The owner's request of 2026-10-25 ("jó lenne egy file revert is"):

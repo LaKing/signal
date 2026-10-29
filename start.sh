@@ -11,6 +11,8 @@
 #   ./start.sh --no-build ...       start the existing dist/Signal.app as it is
 #
 # A running Signal is asked to quit first, so the fresh build is what starts.
+# It asks nothing: an edited project's changes stay in its working folder,
+# as when the "Save changes?" prompt goes unanswered, and are not saved.
 # The build is signed with SIGNAL_SIGN_IDENTITY, else the keychain's first
 # "Apple Development" identity, else ad hoc: a stable identity keeps macOS's
 # microphone permission from one build to the next.
@@ -31,7 +33,7 @@ while [[ $# -gt 0 ]]; do
     --debug) PROFILE=debug ;;
     --no-build) BUILD=0 ;;
     --cli) CLI=1 ;;
-    -h|--help) sed -n '3,19p' "$0"; exit 0 ;;
+    -h|--help) sed -n '3,21p' "$0"; exit 0 ;;
     -*) die "unknown option: $1 (see ./start.sh --help)" ;;
     *) [[ -z $PROJECT ]] || die "give one project folder, not several"; PROJECT=$1 ;;
   esac
@@ -75,13 +77,22 @@ if [[ $CLI == 1 ]]; then
   exec "$APP/Contents/Helpers/signal" play "$PROJECT" --watch
 fi
 
-if pgrep -f "$APP/Contents/MacOS/Signal" >/dev/null; then
+if PIDS=$(pgrep -f "$APP/Contents/MacOS/Signal"); then
   say "asking the running Signal to quit"
+  # A developer restart: the app reads this request (its own process id,
+  # beside its Setup) when asked to quit, and then asks nothing, keeping an
+  # edited project's working folder (crates/signal-app/src/restart.rs).
+  REQUEST="$HOME/Library/Application Support/Signal/restart-quit"
+  if [[ -d $(dirname "$REQUEST") ]]; then
+    (umask 077 && printf '%s\n' $PIDS > "$REQUEST") || true
+  fi
   osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     pgrep -f "$APP/Contents/MacOS/Signal" >/dev/null || break
     sleep 0.5
   done
+  # Answered or not, the request goes: a later Dock Quit asks again.
+  rm -f "$REQUEST"
   ! pgrep -f "$APP/Contents/MacOS/Signal" >/dev/null || die "Signal is still running: quit it and run ./start.sh again"
 fi
 

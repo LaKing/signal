@@ -59,15 +59,16 @@ use signal_app::layout::{
     default_layout, fit_height, held, holder, labels, move_card, place, read_layout, record,
     reorder, screens_of, similar, write_layout,
 };
+use signal_app::restart;
 use signal_app::server::{AppConfig, AppServer, WindowsEdit};
 use signal_app::setup::{Setup, setup_path};
 use signal_app::state::Backend;
 use signal_app::window::{
     ExitPlan, HELP_MENU, MENU_BAR, MenuAction, MenuItem, NATIVE_MENU_SCRIPT, Prompt, QuitRoute,
     REVERT_BUTTONS, REVERT_INFORMATIVE, RevertPlan, RevertPrompt, SETTINGS_TITLE, WINDOW_MENU,
-    can_revert, default_save_name, dropped, exit_plan, may_navigate, menu_chords, origin_of,
-    page_url, prompt_buttons, prompt_text, revert_plan, revert_text, save_target, settings_path,
-    view_path, view_title, window_of, window_title,
+    answer, can_revert, default_save_name, dropped, exit_plan, may_navigate, menu_chords,
+    origin_of, page_url, prompt_buttons, prompt_text, revert_plan, revert_text, save_target,
+    settings_path, view_path, view_title, window_of, window_title,
 };
 use signal_ui::document::open_root;
 use signal_ui::keys::{Keys, keys_path};
@@ -1016,6 +1017,8 @@ fn main() -> ExitCode {
     let exe = std::env::current_exe().ok();
     let built = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui"));
 
+    // `./start.sh`'s request to quit without asking, beside the Setup.
+    let restart_request = restart::request_path(&path);
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let projects = event_loop.create_proxy();
     let keymaps = event_loop.create_proxy();
@@ -1159,6 +1162,17 @@ fn main() -> ExitCode {
             },
             Event::UserEvent(UserEvent::Menu(MenuAction::Quit)) => Some(QuitRoute::Menu),
             // The Dock's Quit or logout: termination is already decided.
+            // `./start.sh` asks the same way after writing its request:
+            // then nothing is asked (`signal_app::restart`).
+            Event::LoopDestroyed
+                if restart::requested(
+                    &restart_request,
+                    std::process::id(),
+                    std::time::SystemTime::now(),
+                ) =>
+            {
+                Some(QuitRoute::Restart)
+            }
             Event::LoopDestroyed => Some(QuitRoute::Terminate),
             Event::UserEvent(UserEvent::Menu(MenuAction::NewMain)) => {
                 windows.open_new(target, &proxy, WindowView::Main);
@@ -1290,8 +1304,8 @@ fn closing(
     let project = server.project();
     let edited = project.as_ref().is_some_and(|p| p.edited);
     let answer = match &project {
-        Some(project) if edited => ask(route, &project.name),
-        _ => None,
+        Some(project) => answer(route, edited, || ask(route, &project.name)),
+        None => None,
     };
     match exit_plan(edited, answer) {
         ExitPlan::Go | ExitPlan::Keep => Some(false),

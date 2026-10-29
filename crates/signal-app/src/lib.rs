@@ -16,6 +16,8 @@
 //!   by identity.
 //! - [`server`]: the server in the app: the control thread, which runs the
 //!   UI protocol's host in app mode; the window's page is its client.
+//! - [`restart`]: a developer restart's request (`./start.sh`), which
+//!   quits without the "Save changes?" prompt, keeping the edits.
 //! - [`window`]: what the window decides without a window (its native menu
 //!   bar and what each item does, where it may navigate, the size the Setup
 //!   records, what each view loads and is titled).
@@ -45,6 +47,7 @@ pub mod dialog;
 pub mod layout;
 pub mod meter;
 pub use signal_ui::{panel, setup};
+pub mod restart;
 pub mod server;
 pub mod state;
 pub mod window;
