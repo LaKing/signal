@@ -964,6 +964,19 @@ fn interface_edits_keep_auto_ports_auto() {
         "{retyped}"
     );
     assert_eq!(plan_dump(&retyped), before);
+    // §9: a retype that pins all five fields leaves nothing inferred, so
+    // the port is written typed; its undo is byte for byte (`round_trip`).
+    let (pinned, _) = round_trip(
+        AUTO,
+        &[op(
+            serde_json::json!({"op": "slot.interface", "slot": "fx", "retype": [{"name": "x", "shape": "signal", "rate": 1, "kind": "audio", "unit": "V", "range": [0, 1]}]}),
+        )],
+    );
+    assert!(
+        pinned.contains(r#"inputs = { x = { kind = "audio", unit = "V", range = [0, 1] } }"#),
+        "{pinned}"
+    );
+    assert_eq!(plan_dump(&pinned), before);
 
     // Detach writes a template's auto ports as auto, its typed ones typed.
     let bus = "schema_version = 1\n[interface]\nname = \"bus\"\n[inputs]\nx = {}\n[outputs]\ny = { group = \"o\" }\n";

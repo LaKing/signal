@@ -90,8 +90,9 @@ function shapeOf(shape) {
 /**
  * The interface editor's rows of a slot: one per port and parameter, in the
  * interface's order, `{original, name, role, shape, width, rate, kind,
- * unit, range, group}` (`original`: the name it has in the file; null for
- * a row added in the editor).
+ * unit, range, group, auto}` (`original`: the name it has in the file; null
+ * for a row added in the editor; `auto`: an auto port's `{inferred, from}`
+ * as `graph` gives it, ADR 0045, else null).
  */
 export function interfaceRows(slot) {
   return (slot?.interface?.ports ?? []).map((p) => {
@@ -107,6 +108,7 @@ export function interfaceRows(slot) {
       unit: p.unit ?? '',
       range: Array.isArray(p.range) ? [p.range[0], p.range[1]] : p.range && typeof p.range === 'object' ? [p.range.min, p.range.max] : null,
       group: p.group ?? '',
+      auto: p.auto ?? null,
     };
   });
 }
@@ -145,6 +147,28 @@ function sameDeclaration(a, b) {
 }
 
 /**
+ * ADR 0045: an auto port's retype, `row` against the row it started as
+ * (`was`): only the fields the person changed, so an inferred value is
+ * never sent (and so never pinned in the file); null when nothing changed.
+ */
+export function autoRetype(was, row) {
+  const json = { name: row.name };
+  const now = portJson(row);
+  const then = portJson(was);
+  if (row.role !== was.role) json.role = row.role;
+  if (row.role !== 'parameter') {
+    const shapeOfRow = (r) => (r.shape === 'vector' ? `v${Math.round(Number(r.width) || 1)}` : r.shape);
+    if (shapeOfRow(row) !== shapeOfRow(was)) json.shape = now.shape ?? 'signal';
+    if (Math.round(Number(row.rate) || 1) !== Math.round(Number(was.rate) || 1)) json.rate = now.rate ?? 1;
+    if ((row.kind || 'generic') !== (was.kind || 'generic')) json.kind = row.kind || 'generic';
+    if (JSON.stringify(now.range ?? null) !== JSON.stringify(then.range ?? null) && now.range) json.range = now.range;
+  }
+  if ((row.unit || '') !== (was.unit || '') && row.unit) json.unit = row.unit;
+  if ((row.group || '') !== (was.group || '') && row.group) json.group = row.group;
+  return Object.keys(json).length > 1 ? json : null;
+}
+
+/**
  * What the editor's rows mean against the slot's (`before`, from
  * `interfaceRows`): `{op, problems}`, the one `slot.interface` op (null
  * when nothing changed or a row is wrong) and what is wrong (a bad or
@@ -179,7 +203,10 @@ export function interfaceOp(slotName, before, after, { removeWires = false } = {
     }
     const was = before.find((r) => r.original === row.original);
     if (row.name !== row.original) rename[row.original] = row.name;
-    if (was && !sameDeclaration(was, row)) retype.push({ ...portJson(row), name: row.name });
+    if (was?.auto) {
+      const changed = autoRetype(was, row);
+      if (changed) retype.push(changed);
+    } else if (was && !sameDeclaration(was, row)) retype.push({ ...portJson(row), name: row.name });
   }
   if (remove.length) op.remove = remove;
   if (Object.keys(rename).length) op.rename = rename;
@@ -294,11 +321,25 @@ function quoted(text) {
 
 /**
  * A port's declaration as an interface file writes it (`project-format.md`
- * §14): a typed port, never `{}` (ADR 0045 §5, an auto port).
+ * §14): a typed port by its fields, never `{}`; an auto port (ADR 0045,
+ * `p.auto` with fields still inferred) as `{}`, or `{ auto = true, <its
+ * pinned fields>, group }`, so a saved template keeps it auto (§5, §9).
  */
 function declaration(p) {
   const fields = [];
   const { shape, width } = shapeOf(p.shape);
+  const range = Array.isArray(p.range) ? p.range : p.range && typeof p.range === 'object' ? [p.range.min, p.range.max] : null;
+  const inferred = p.role !== 'parameter' && Array.isArray(p.auto?.inferred) ? p.auto.inferred : [];
+  if (inferred.length) {
+    const pinned = (field) => !inferred.includes(field);
+    if (pinned('shape')) fields.push(shape === 'events' ? 'shape = "events"' : shape === 'vector' ? `shape = { vector = ${width} }` : 'shape = "signal"');
+    if (pinned('rate')) fields.push(`rate = ${p.rate ?? 1}`);
+    if (pinned('kind')) fields.push(`kind = ${quoted(p.kind || 'generic')}`);
+    if (pinned('unit')) fields.push(`unit = ${quoted(p.unit || '')}`);
+    if (pinned('range')) fields.push(range && range.every(Number.isFinite) ? `range = [${range[0]}, ${range[1]}]` : 'range = []');
+    if (p.group) fields.push(`group = ${quoted(p.group)}`);
+    return fields.length ? `{ auto = true, ${fields.join(', ')} }` : '{}';
+  }
   if (p.role === 'parameter') {
     if (p.unit) fields.push(`unit = ${quoted(p.unit)}`);
     if (p.group) fields.push(`group = ${quoted(p.group)}`);
@@ -309,7 +350,6 @@ function declaration(p) {
   if ((p.rate ?? 1) !== 1) fields.push(`rate = ${p.rate}`);
   if (p.kind && p.kind !== 'generic') fields.push(`kind = ${quoted(p.kind)}`);
   if (p.unit) fields.push(`unit = ${quoted(p.unit)}`);
-  const range = Array.isArray(p.range) ? p.range : p.range && typeof p.range === 'object' ? [p.range.min, p.range.max] : null;
   if (range && range.every(Number.isFinite)) fields.push(`range = [${range[0]}, ${range[1]}]`);
   if (p.group) fields.push(`group = ${quoted(p.group)}`);
   // ADR 0045 §5: `{}` is an auto port (typed by its connections), so a

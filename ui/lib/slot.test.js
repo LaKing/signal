@@ -249,3 +249,64 @@ test('a drop loads a module name or a project path, nothing else', () => {
   assert.equal(dropLoad('Hello world'), null);
   assert.equal(dropLoad(''), null);
 });
+
+/** A slot whose ports are auto (ADR 0045), as `graph` gives them: effective fields, `auto`. */
+const AUTO = {
+  interface: {
+    ports: [
+      { name: 'x', role: 'input', shape: 'signal', rate: 1, kind: 'audio', range: [-1, 1], auto: { inferred: ['shape', 'rate', 'kind', 'unit', 'range'], from: { end: 'host', port: '/osc.out' } } },
+      { name: 'y', role: 'output', shape: 'events', rate: 1, kind: 'trigger', group: 'g', auto: { inferred: ['rate', 'kind', 'unit', 'range'], from: { end: 'content', port: 'rise' } } },
+      { name: 'z', role: 'output', shape: 'signal', rate: 1, kind: 'audio', range: [0, 1] },
+    ],
+  },
+};
+
+test('an auto port’s edit sends only what the person changed, never an inferred value (ADR 0045)', () => {
+  const before = interfaceRows(AUTO);
+  assert.deepEqual(before[0].auto, AUTO.interface.ports[0].auto);
+  const rows = before.map((r) => ({ ...r }));
+  rows[0].group = 'in';
+  assert.deepEqual(interfaceOp('fx', before, rows).op, { op: 'slot.interface', slot: 'fx', retype: [{ name: 'x', group: 'in' }] });
+  rows[0].kind = 'gate';
+  assert.deepEqual(interfaceOp('fx', before, rows).op.retype, [{ name: 'x', kind: 'gate', group: 'in' }]);
+  // A rename alone retypes nothing; an untouched auto row sends nothing.
+  const renamed = before.map((r) => ({ ...r }));
+  renamed[1].name = 'out';
+  assert.deepEqual(interfaceOp('fx', before, renamed).op, { op: 'slot.interface', slot: 'fx', rename: { y: 'out' } });
+  assert.equal(interfaceOp('fx', before, before.map((r) => ({ ...r }))).op, null);
+  // A typed port is retyped by its fields as before.
+  const typed = before.map((r) => ({ ...r }));
+  typed[2].group = 'g';
+  assert.deepEqual(interfaceOp('fx', before, typed).op.retype, [{ name: 'z', role: 'output', kind: 'audio', range: [0, 1], group: 'g' }]);
+});
+
+test('a template keeps an auto port auto: {} or its pinned fields; a typed generic signal is "generic" (ADR 0045 §5)', () => {
+  const text = templateText('bus', [
+    ...AUTO.interface.ports,
+    { name: 'w', role: 'output', shape: 'signal', rate: 1, kind: 'gate', unit: null, range: null, auto: { inferred: ['shape', 'rate', 'range'] } },
+    { name: 'v', role: 'output', shape: 'signal', rate: 1, kind: 'generic', auto: { inferred: [] } },
+    { name: 'p', role: 'parameter', group: 'g' },
+  ]);
+  assert.equal(
+    text,
+    [
+      'schema_version = 1',
+      '',
+      '[interface]',
+      'name = "bus"',
+      '',
+      '[inputs]',
+      'x = {}',
+      '',
+      '[outputs]',
+      'y = { auto = true, shape = "events", group = "g" }',
+      'z = { kind = "audio", range = [0, 1] }',
+      'w = { auto = true, kind = "gate", unit = "" }',
+      'v = "generic"',
+      '',
+      '[parameters]',
+      'p = { group = "g" }',
+      '',
+    ].join('\n'),
+  );
+});

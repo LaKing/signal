@@ -1017,7 +1017,7 @@ pub(crate) fn ports_of(
                 rate: parameter.rate,
                 kind: parameter.kind,
                 unit: parameter.unit.map(str::to_owned),
-                // ADR 0042: its own range, else the one its targets share.
+                // ADR 0042: the export's range as flattening gives it (its own, else its targets' intersection); without one, the first target's range.
                 range: interface
                     .ranges
                     .get(name)

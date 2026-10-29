@@ -1245,6 +1245,12 @@ fn resolve_def(
         })
     };
 
+    // One error per wire when both its ends are slot ports: a shape or rate
+    // error found from an output's side is reported only when the input's
+    // side reported none on that wire (by its index).
+    let mut input_reported: BTreeSet<usize> = BTreeSet::new();
+    let mut output_side: Vec<(usize, (usize, usize, String))> = Vec::new();
+
     // Per slot: its matched names (slot port → content name), and whether
     // it is loaded.
     let mut renames: BTreeMap<&str, (bool, BTreeMap<String, String>)> = BTreeMap::new();
@@ -1290,7 +1296,7 @@ fn resolve_def(
         }
 
         // The host's wires on the slot, checked against its interface.
-        for connection in &spans.connections {
+        for (index, connection) in spans.connections.iter().enumerate() {
             for (side, (text, span)) in [(true, &connection.from), (false, &connection.to)] {
                 let Some((instance, port)) = split(text) else {
                     continue;
@@ -1342,30 +1348,30 @@ fn resolve_def(
                 // ADR 0045 §4: a pinned field (every field of a typed
                 // port) is checked against every end; an inferred one is
                 // judged at the wire by the graph, or among the ends.
+                let mut report = |message: String| {
+                    if side {
+                        output_side.push((index, (file, span.start, message)));
+                    } else {
+                        input_reported.insert(index);
+                        out.errors.push((file, span.start, message));
+                    }
+                };
                 if declared.pinned(Field::Shape)
                     && other_type.shape != declared.shape
                     && declared.role != Role::Parameter
                 {
-                    out.errors.push((
-                        file,
-                        span.start,
-                        format!(
-                            "{slot_text}: `{port}` is declared {} on the slot's interface; `{other}` is {}",
-                            shape_text(declared.shape),
-                            shape_text(other_type.shape)
-                        ),
+                    report(format!(
+                        "{slot_text}: `{port}` is declared {} on the slot's interface; `{other}` is {}",
+                        shape_text(declared.shape),
+                        shape_text(other_type.shape)
                     ));
                 } else if declared.pinned(Field::Rate)
                     && other_type.rate != declared.rate
                     && declared.role != Role::Parameter
                 {
-                    out.errors.push((
-                        file,
-                        span.start,
-                        format!(
-                            "{slot_text}: `{port}` is declared at rate divisor {} on the slot's interface; `{other}` runs at {}",
-                            declared.rate, other_type.rate
-                        ),
+                    report(format!(
+                        "{slot_text}: `{port}` is declared at rate divisor {} on the slot's interface; `{other}` runs at {}",
+                        declared.rate, other_type.rate
                     ));
                 } else if declared.pinned(Field::Kind) && !other_type.kind.matches(declared.kind) {
                     out.warnings.push((
@@ -1657,7 +1663,7 @@ fn resolve_def(
                 continue;
             };
             let input = port.role == Role::Input;
-            for connection in &spans.connections {
+            for (index, connection) in spans.connections.iter().enumerate() {
                 let (here, there) = if input {
                     (&connection.to, &connection.from)
                 } else {
@@ -1670,7 +1676,7 @@ fn resolve_def(
                     continue;
                 };
                 if other.shape != port.shape {
-                    out.errors.push((
+                    let error = (
                         file,
                         here.1.start,
                         format!(
@@ -1682,9 +1688,21 @@ fn resolve_def(
                             if input { "sends" } else { "takes" },
                             shape_text(other.shape)
                         ),
-                    ));
+                    );
+                    if input {
+                        input_reported.insert(index);
+                        out.errors.push(error);
+                    } else {
+                        output_side.push((index, error));
+                    }
                 }
             }
+        }
+    }
+
+    for (index, error) in output_side {
+        if !input_reported.contains(&index) {
+            out.errors.push(error);
         }
     }
 

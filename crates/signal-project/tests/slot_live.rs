@@ -737,65 +737,71 @@ fn a_rewire_into_a_shape_conflict_is_refused() {
     assert!(played.edits.is_empty());
 }
 
-/// A composite `name` whose input `in` reaches `target` (`osc.pm`, a
-/// phase, or `g.in`, audio) and whose `out` is a sine at `freq` (through a
-/// `std.gain` `g`).
-fn deck_content(name: &str, target: &str, freq: f64) -> SourceFile {
+/// A composite `name` whose events input `in` reaches `e.<port>` of a
+/// `module` (`std.counter`'s `trigger`, kind trigger; `std.latch`'s `in`,
+/// kind generic) and whose `out` is a sine at `freq` (through a `std.gain`
+/// `g`).
+fn deck_content(name: &str, module: &str, port: &str, freq: f64) -> SourceFile {
     SourceFile {
         path: format!("composites/{name}.toml"),
         text: format!(
-            "schema_version = 1\n\n[composite]\nname = \"{name}\"\n\n[instances]\nosc = {{ module = \"std.sine_osc\", freq = {freq} }}\ng = {{ module = \"std.gain\" }}\n\n[wiring]\nconnections = [ {{ from = \"osc.out\", to = \"g.in\" }} ]\n\n[exports]\ninputs = {{ in = \"{target}\" }}\noutputs = {{ out = \"g.out\" }}\n"
+            "schema_version = 1\n\n[composite]\nname = \"{name}\"\n\n[instances]\nosc = {{ module = \"std.sine_osc\", freq = {freq} }}\ng = {{ module = \"std.gain\" }}\ne = {{ module = \"{module}\" }}\n\n[wiring]\nconnections = [ {{ from = \"osc.out\", to = \"g.in\" }} ]\n\n[exports]\ninputs = {{ in = \"e.{port}\" }}\noutputs = {{ out = \"g.out\" }}\n"
         ),
     }
 }
 
 /// The host of a Replace: `deck` (auto `in`) loads `load`; the empty slot
-/// `spare`'s auto `out` feeds `deck.in`, so it is typed by the content's
-/// `in` (stage 4), and defaults while `deck` is empty (the Replace's middle
-/// version).
+/// `spare`'s auto `out` feeds `deck.in` and `seq.reset` (events). Loaded,
+/// `spare.out` is typed by `deck.in` (the content's `in`, its first
+/// consumer by `str::cmp`, stage 4); in the Replace's middle version
+/// (`deck` empty) `deck.in` is open, so no known end, and `spare.out` is
+/// typed by `seq.reset`. Were an open end known as the default (a
+/// signal), the middle version would fail the agreement check at
+/// `seq.reset`.
 fn retyping_host(load: &str) -> Project {
     let text = format!(
         "schema_version = 1\n\n[project]\nname = \"retype\"\nsample_rate = {RATE}\nseed = 5\n\n[instances]\n\
          tone = {{ module = \"std.sine_osc\", freq = 330 }}\n\
          spare = {{ slot = {{ outputs = {{ out = {{}} }} }} }}\n\
          deck = {{ slot = {{ inputs = {{ in = {{}} }}, outputs = {{ out = \"audio\" }} }}, load = \"{load}\" }}\n\
-         out = {{ module = \"std.audio_out\" }}\n\n[wiring]\nconnections = [\n  {{ from = \"tone.out\", to = \"out.l\" }},\n  {{ from = \"spare.out\", to = \"deck.in\" }},\n  {{ from = \"deck.out\", to = \"out.r\" }},\n]\n"
+         seq = {{ module = \"std.counter\" }}\n\
+         out = {{ module = \"std.audio_out\" }}\n\n[wiring]\nconnections = [\n  {{ from = \"tone.out\", to = \"out.l\" }},\n  {{ from = \"spare.out\", to = \"deck.in\" }},\n  {{ from = \"spare.out\", to = \"seq.reset\" }},\n  {{ from = \"deck.out\", to = \"out.r\" }},\n]\n"
     );
     Project::from_sources(vec![
         SourceFile {
             path: "project.toml".to_owned(),
             text,
         },
-        deck_content("phase_in", "osc.pm", 220.0),
-        deck_content("audio_in", "g.in", 440.0),
+        deck_content("trigger_in", "std.counter", "trigger", 220.0),
+        deck_content("generic_in", "std.latch", "in", 440.0),
     ])
     .unwrap()
 }
 
 /// A Replace that retypes another slot's empty auto output is still an
 /// unload, then a load; the retype adds no swap. Its middle version (the
-/// slot empty) leaves that output defaulted, and is not refused by the
-/// agreement check (ADR 0045 test 3).
+/// slot empty) leaves `deck.in` open, which is no known end, so it is not
+/// refused by the agreement check (ADR 0045 test 3).
 #[test]
 fn a_replace_that_retypes_an_empty_auto_output_is_still_unload_then_load() {
     let registry = registry();
     let tone = tone(60_000);
     let spare = |project: &Project| {
-        let planned = project.plan(&registry).unwrap();
+        let planned = project.plan(&registry).unwrap_or_else(|e| panic!("{e:#?}"));
         let port = planned.slots.iter().find(|s| s.slot == "/spare").unwrap();
         let out = port.interface.port("out").unwrap().clone();
-        (out.kind, out.auto.unwrap().from.end)
+        (out.kind, out.auto.unwrap().from.port)
     };
-    let old = retyping_host("phase_in");
-    let new = retyping_host("audio_in");
+    let old = retyping_host("trigger_in");
+    let new = retyping_host("generic_in");
     use signal_core::PortKind;
-    use signal_project::AutoEnd;
-    assert_eq!(spare(&old), (PortKind::Phase, AutoEnd::Host));
-    assert_eq!(spare(&new), (PortKind::Audio, AutoEnd::Host));
-    let mut emptied = retyping_host("phase_in").files;
-    emptied[0].text = emptied[0].text.replace(", load = \"phase_in\"", "");
+    let from = |p: &str| Some(p.to_owned());
+    assert_eq!(spare(&old), (PortKind::Trigger, from("/deck.in")));
+    assert_eq!(spare(&new), (PortKind::Generic, from("/deck.in")));
+    let mut emptied = retyping_host("trigger_in").files;
+    emptied[0].text = emptied[0].text.replace(", load = \"trigger_in\"", "");
     let middle = Project::from_sources(emptied).unwrap();
-    assert_eq!(spare(&middle), (PortKind::Generic, AutoEnd::Default));
+    assert_eq!(spare(&middle), (PortKind::Trigger, from("/seq.reset")));
     for (threads, seed) in [(1, 81), (4, 82)] {
         let mut run = Run::start(&old, &registry, threads, seed);
         run.play(3_000);
@@ -803,7 +809,7 @@ fn a_replace_that_retypes_an_empty_auto_output_is_still_unload_then_load() {
             &mut run.controller,
             &mut run.live,
             &old,
-            retyping_host("audio_in"),
+            retyping_host("generic_in"),
             &registry,
         )
         .unwrap();
@@ -815,13 +821,16 @@ fn a_replace_that_retypes_an_empty_auto_output_is_still_unload_then_load() {
         run.play(30_000);
         let played = run.finish(&registry, &format!("auto-replace-{threads}"));
         let edits = played.edits();
-        // The content's two instances suspended, then the two swaps.
+        // The content's three instances suspended, then the two swaps.
         assert_eq!(
             edits.iter().map(|e| e.0).collect::<Vec<_>>(),
-            ["edit", "edit", "swap", "swap"]
+            ["edit", "edit", "edit", "swap", "swap"]
         );
         let s = edits[0].1;
-        assert_eq!((edits[1].1, edits[2].1, edits[3].1), (s, s + F, s + F + 1));
+        assert_eq!(
+            (edits[1].1, edits[2].1, edits[3].1, edits[4].1),
+            (s, s, s + F, s + F + 1)
+        );
         assert_eq!(played.left, tone[..played.left.len()]);
     }
 }

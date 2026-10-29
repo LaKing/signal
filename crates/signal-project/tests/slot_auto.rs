@@ -691,6 +691,96 @@ fn conflicts_are_errors_at_the_wire() {
     );
 }
 
+/// Test 3, the `locate.rs` mapping: an error behind a slot nested in a
+/// composite is located at the composite's wire as written and names the
+/// slot by its level; one behind a project loaded into a slot is located at
+/// the host's wire and names the content as `load` writes it (as the other
+/// slot messages do).
+#[test]
+fn errors_behind_nested_and_project_content_are_located_at_the_wire() {
+    let rack = "schema_version = 1\n[composite]\nname = \"rack\"\n[instances]\ne = { module = \"std.edge\" }\ninner = { slot = { inputs = { x = {} } }, load = \"thru\" }\n[wiring]\nconnections = [\n  { from = \"e.rise\", to = \"inner.x\" },\n]\n";
+    let text = host("r = { module = \"rack\" }", &[]);
+    let found = errors(
+        &text,
+        &[
+            ("composites/rack.toml", rack),
+            ("composites/thru.toml", THRU),
+        ],
+    );
+    assert!(
+        has(
+            &found,
+            &[
+                &format!("composites/rack.toml:{}:3: error:", line(rack, "inner.x")),
+                "rack/inner.x (auto, from rack/e.rise) is events; it reaches thru's x, a signal"
+            ]
+        ),
+        "{found:#?}"
+    );
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("slot-auto-project");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("host")).unwrap();
+    fs::create_dir_all(dir.join("deck")).unwrap();
+    fs::write(
+        dir.join("deck/project.toml"),
+        "schema_version = 1\n[project]\nname = \"deck\"\n[instances]\ng = { module = \"std.gain\" }\nout = { module = \"std.audio_out\" }\n[wiring]\nconnections = [ { from = \"g.out\", to = \"out.l\" } ]\n[exports]\ninputs = { x = \"g.in\" }\n",
+    )
+    .unwrap();
+    let text = host(
+        "e = { module = \"std.edge\" }\ndeck = { slot = { inputs = { x = {} } }, load = \"../deck\" }",
+        &[("e.rise", "deck.x")],
+    );
+    fs::write(dir.join("host/project.toml"), &text).unwrap();
+    let found: Vec<String> = Project::load(&dir.join("host"))
+        .unwrap()
+        .plan(&registry())
+        .err()
+        .expect("refused")
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        found,
+        [format!(
+            "project.toml:{}:3: error: /deck.x (auto, from /e.rise) is events; it reaches ../deck's x, a signal",
+            line(&text, "deck.x")
+        )]
+    );
+}
+
+/// A wire between two slot ports that disagree is one error, reported from
+/// the input's side, whether the output is typed or auto.
+#[test]
+fn a_wire_between_two_slots_is_reported_once() {
+    let text = host(
+        "a = { slot = { outputs = { out = \"events\" } } }\nb = { slot = { inputs = { in = \"audio\" } } }",
+        &[("a.out", "b.in")],
+    );
+    assert_eq!(
+        errors(&text, &[]),
+        [format!(
+            "project.toml:{}:26: error: /b: `in` is declared a signal on the slot's interface; `a.out` is events",
+            line(&text, "b.in")
+        )]
+    );
+    // `a.out` is auto with its shape pinned: both its pinned check and
+    // `b.in`'s typed one find the wire wrong; one error, `b.in`'s.
+    let text = host(
+        "a = { slot = { outputs = { out = { auto = true, shape = \"events\" } } } }\nb = { slot = { inputs = { in = \"audio\" } } }",
+        &[("a.out", "b.in")],
+    );
+    let found = errors(&text, &[]);
+    assert_eq!(
+        found,
+        [format!(
+            "project.toml:{}:26: error: /b: `in` is declared a signal on the slot's interface; `a.out` is events",
+            line(&text, "b.in")
+        )],
+        "{found:#?}"
+    );
+}
+
 /// Test 3: the known host ends of an empty slot's auto port that disagree
 /// with its defining end are errors at their wires; open ones are not.
 #[test]
@@ -844,9 +934,11 @@ fn pinned_fields_are_checked_as_before() {
     assert!(!has(&warnings, &["`side`"]), "{warnings:#?}");
 }
 
-/// Test 3: `auto = false`, `auto` on a parameter, an auto port in a library
-/// template, and a `voice` field (ADR 0044, not built: an unknown field)
-/// are errors at the key.
+/// Test 3: `auto = false`, `auto` on a parameter, a `voice` field (ADR
+/// 0044, not built: an unknown field) and a range of one number are errors
+/// at the key. (An auto port in a library template is refused in
+/// `patch/slot_tests.rs`, `only_project_templates_may_hold_auto_ports`, and
+/// `crates/signal-lib/tests/library.rs`.)
 #[test]
 fn auto_is_refused_where_it_means_nothing() {
     let cases = [

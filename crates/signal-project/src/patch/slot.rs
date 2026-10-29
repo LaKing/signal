@@ -598,7 +598,8 @@ pub(crate) fn port_text(port: &InterfacePort) -> String {
         table.fmt();
         return Value::InlineTable(table).to_string().trim().to_owned();
     }
-    if let Some(auto) = &port.auto {
+    // ADR 0045 §9: a port with no inferred field is written typed.
+    if let Some(auto) = port.auto.as_ref().filter(|a| !a.inferred.is_empty()) {
         return auto_text(port, auto);
     }
     let plain =
