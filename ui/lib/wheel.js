@@ -93,3 +93,51 @@ export class WheelLatch {
 export function wheelHint(modifier) {
   return modifier ? `Click to use the wheel here, or hold ${modifier}` : 'Click to use the wheel here';
 }
+
+// ------------------------------------------- a mouse or a trackpad
+
+/** A pause longer than this between wheel events ends a gesture's kind (`WheelKinds`): a trackpad's events and its momentum come closer. */
+export const KIND_GAP_MS = 150;
+
+/**
+ * The least |deltaY| (px) of a mouse wheel's notch. WebKit gives a notch as
+ * 40 px times macOS's acceleration (fractional, so a fraction alone says
+ * nothing), Chromium 100 px; a trackpad's first event is a few px.
+ * An assumption to check on the device.
+ */
+export const NOTCH_MIN_PX = 32;
+
+/**
+ * What sent wheel event `event` (`{deltaX, deltaY, deltaMode, ctrlKey,
+ * shiftKey}`): `'pinch'` (ctrl+wheel: how browsers and WKWebView give a
+ * trackpad's pinch), `'mouse'` (lines or pages, or a large vertical step
+ * alone) or `'trackpad'` (pixels moving sideways too, or small steps). A
+ * Shift+wheel's sideways delta (a mouse's on a Mac) is not a trackpad's.
+ */
+export function wheelKind(event) {
+  if (event.ctrlKey) return 'pinch';
+  if ((event.deltaMode ?? 0) !== 0) return 'mouse';
+  if (event.deltaX && !event.shiftKey) return 'trackpad';
+  return Math.abs(event.deltaY || (event.shiftKey ? event.deltaX : 0) || 0) >= NOTCH_MIN_PX ? 'mouse' : 'trackpad';
+}
+
+/**
+ * A gesture's kind, kept: the first event of a gesture decides
+ * (`wheelKind`) and the rest of it (events less than `gap` ms apart) keeps
+ * that, so a trackpad's scroll never turns into a zoom when one event of it
+ * is large. A pinch is a pinch whenever ctrl is held.
+ */
+export class WheelKinds {
+  constructor(gap = KIND_GAP_MS) {
+    this.gap = gap;
+    this.last = -Infinity;
+    this.current = undefined;
+  }
+
+  kind(event, now) {
+    const fresh = wheelKind(event);
+    if (fresh === 'pinch' || this.current === undefined || this.current === 'pinch' || now - this.last > this.gap) this.current = fresh;
+    this.last = now;
+    return this.current;
+  }
+}

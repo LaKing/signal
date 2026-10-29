@@ -331,6 +331,32 @@ export function aroundReason(drawn, hit) {
   return `${where} is around the open ${editLevel(drawn).path}: close it (×) to edit ${hit.path ? 'there' : 'it'}`;
 }
 
+/**
+ * Whether part `hit` is an open frame's body: the instance its level has
+ * open, hit where none of its inside is (its inside's empty space, its
+ * header). A frame never moves.
+ */
+export function openFrameHit(drawn, hit) {
+  if (hit?.kind !== 'instance') return false;
+  const entry = drawn?.levels?.find((l) => l.path === (hit.path ?? ''));
+  return Boolean(entry?.layout?.opened) && entry.layout.opened === hit.node?.name;
+}
+
+/**
+ * What a drag from a press on `hit` does (2026-10-29, the owner: "on a
+ * composite you can't move the view"): `'move'` the box (`movable`: a box
+ * of the level edited, drawn), `'hold'` it (Edit patch, a box around the
+ * level edited: not moved, and said so), or `'pan'` the view: empty space
+ * (the background, an open frame's body: `frame`) always, and outside
+ * Edit patch (`editing` false) any box that does not move. `own`: the box
+ * is of the level edited; `additive`: Shift or ⌘ held (never held).
+ */
+export function dragAction({ hit, own = false, movable = false, frame = false, editing = false, additive = false }) {
+  if (hit?.kind !== 'instance' || frame) return 'pan';
+  if (movable) return 'move';
+  return editing && !own && !additive ? 'hold' : 'pan';
+}
+
 /** A level's nodes in drawing order: the open composite's frame (`opened`) last, over its neighbours. */
 export function drawOrder(nodes, opened) {
   if (!opened) return nodes;
