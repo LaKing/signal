@@ -7,11 +7,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { HEADER, PAD, ROW, layout } from './schematic-layout.js';
 import {
-  CLOSE_MIN_PX, CLOSE_TEXT, CLOSE_UNITS, FRAME_K, GROW_MAX, READ_K, aroundReason, chooseOpen, closeBox, closeShown, closeText, makeRoom, crumbView, drawOrder, editLevel, editable, enterView, grownNode, linkScale, openedLayout, pinOne, unpin,
+  CLOSE_MIN_PX, CLOSE_TEXT, CLOSE_UNITS, ENTER_MAX_K, FRAME_K, GROW_MAX, READ_K, aroundReason, chooseOpen, closeBox, closeShown, closeText, makeRoom, crumbView, drawOrder, editLevel, editable, enterView, frameRect, grownNode, linkScale, openedLayout, pinOne, unpin,
 } from './schematic-open.js';
 import { PatchSession } from './schematic-edit.js';
 import { SchematicEditor } from '../controls/schematic-editor.js';
-import { boundaryLinks, breadcrumbs, inside, levelRect, openAnchor, scene } from './schematic-scene.js';
+import { boundaryLinks, breadcrumbs, chain, inside, levelRect, openAnchor, scene } from './schematic-scene.js';
 import { closeHit, hitTest } from './schematic-hit.js';
 import { fit, focus, pan, toScreen, zoomAt } from './schematic-view.js';
 import { exportFacts } from './schematic-groups.js';
@@ -201,16 +201,65 @@ function synthOpen(factor = 1.2) {
 /** The studio's top level fitted, everything closed (Fit). */
 const fitted = () => scene({ layoutOf: studioOf, view: fit(studioOf('').bounds, viewport), viewport });
 
+/** The synth's open frame and its inside's link, as `chain` gives them. */
+function synthLink() {
+  const { node, inner } = chain(studioOf, '/synth').at(-1);
+  return { frame: node, inner, rect: frameRect(node, inner) };
+}
+
 test('Enter fits the synth readable at a 1000 px stage, overflowing rather than below READ_K (auditor-2-focus-below-close)', () => {
-  const bounds = studioOf('moog_voice').bounds;
-  const middle = { x: bounds.x + bounds.w / 2, y: bounds.y + bounds.h / 2 };
-  const plain = fit(bounds, viewport, 24, 40, 120);
+  const { frame, inner, rect } = synthLink();
+  const plain = fit(rect, viewport, 24, 40, 120);
   assert.ok(plain.k < READ_K, `a plain fit is ${plain.k}`);
-  const view = enterView(bounds, viewport, 24, 40, 120);
+  const view = enterView(frame, inner, viewport, 24, 40, 120);
   assert.ok(Math.abs(view.k - READ_K) < 1e-12);
-  near(toScreen(view, middle), toScreen(plain, middle), 'about the fit’s centre');
-  const wide = { w: 2400, h: 1200 };
-  assert.deepEqual(enterView(bounds, wide, 24, 40, 120), fit(bounds, wide, 24, 40, 120), 'readable already: the plain fit');
+  // About the frame's top edge: its header stays where the fit put it.
+  const top = { x: rect.x + rect.w / 2, y: rect.y };
+  near(toScreen(view, top), toScreen(plain, top), 'about the frame’s top');
+  const wide = { w: 1800, h: 900 };
+  assert.deepEqual(enterView(frame, inner, wide, 24, 40, 120), fit(rect, wide, 24, 40, 120), 'readable already: the plain fit');
+  // Wider still, the frame would be drawn larger than ENTER_MAX_K: capped there, about the frame's centre.
+  const wider = { w: 2400, h: 1200 };
+  const capped = enterView(frame, inner, wider, 24, 40, 120);
+  assert.ok(fit(rect, wider, 24, 40, 120).k / inner.k > ENTER_MAX_K && Math.abs(capped.k / inner.k - ENTER_MAX_K) < 1e-12, `the frame at ${capped.k / inner.k}`);
+});
+
+test('Enter and a breadcrumb frame the whole frame, title and × included, never larger than ENTER_MAX_K (2026-10-29, an empty slot)', () => {
+  const big = { w: 1600, h: 1000 };
+  const pin = (name, direction, address = name) => ({ name, address, direction, shape: 'signal', rate: 1 });
+  // A box at the top level whose inside is empty but for its frame's pins, or holds one small module.
+  const graphOf = (instances) => ({
+    top: { instances: [{ name: 'fx', module: 'fx_inside', composite: true, ports: [pin('in', 'in', '/fx.in'), pin('out', 'out', '/fx.out')], parameters: [] }], connections: [] },
+    composites: { fx_inside: { instances, connections: [], inputs: [{ ...pin('in', 'in'), to: [] }], outputs: [{ ...pin('out', 'out'), from: null }], parameters: [] } },
+  });
+  const sine = { name: 'osc', module: 'std.sine_osc', composite: false, ports: [pin('out', 'out', 'osc.out')], parameters: [] };
+  for (const instances of [[], [sine]]) {
+    const layoutOf = layoutsOf(graphOf(instances));
+    const link = chain(layoutOf, '/fx').at(-1);
+    const { node, inner } = link;
+    const pinned = new Set(['/fx']);
+    const framed = (view, what) => {
+      const drawn = scene({ layoutOf, view, viewport: big, pinned });
+      const [top, fx] = drawn.levels;
+      assert.ok(top.transform.k <= ENTER_MAX_K + 1e-9 && fx.transform.k <= ENTER_MAX_K + 1e-9, `${what}, ${instances.length} inside: the frame at ${top.transform.k}, its inside at ${fx.transform.k}`);
+      // The whole frame on the stage: its title (the header) and its ×.
+      const frame = top.layout.nodes.find((n) => n.name === 'fx');
+      const at = toScreen(top.transform, frame);
+      const r = { ...at, w: frame.w * top.transform.k, h: frame.h * top.transform.k };
+      assert.ok(r.x >= -1e-6 && r.y >= -1e-6 && r.x + r.w <= big.w + 1e-6 && r.y + r.h <= big.h + 1e-6, `${what}: on the stage: ${JSON.stringify(r)}`);
+      assert.ok(closeShown(frame, top.transform.k), `${what}: its × drawn`);
+      return drawn;
+    };
+    framed({ ...enterView(node, inner, big, 24, 24, 120), path: '/fx' }, 'Enter');
+    // Before, the inside's layout alone was fitted: the frame drawn far larger, its header above the stage.
+    const before = fit(layoutOf('fx_inside').bounds, big, 24, 24, 120);
+    assert.ok(before.k / inner.k > 4 * ENTER_MAX_K, `the inside alone fitted drew the frame at ${before.k / inner.k}`);
+    // Its breadcrumb, from that view and from one zoomed far out: the same framing.
+    for (const from of [{ ...before, path: '/fx' }, { ...zoomAt(before, 1e-3, { x: 800, y: 500 }), path: '/fx' }]) {
+      const drawn = scene({ layoutOf, view: from, viewport: big, pinned });
+      framed(crumbView(drawn.view, drawn.levels[1], link, big, 24, 24, 120), 'a breadcrumb');
+    }
+  }
 });
 
 test('a breadcrumb to the open synth keeps it open and readable (auditor-2-focus-below-close)', () => {
@@ -220,16 +269,16 @@ test('a breadcrumb to the open synth keeps it open and readable (auditor-2-focus
   const plain = focus(drawn.view, rect, viewport, 24, 40, 120);
   const plainK = drawn.levels[1].transform.k * (plain.k / drawn.view.k);
   assert.ok(plainK < READ_K, `a plain focus draws it at ${plainK}, less readable than READ_K`);
-  const view = crumbView(drawn.view, drawn.levels[1], rect, viewport, 24, 40, 120);
+  const view = crumbView(drawn.view, drawn.levels[1], chain(studioOf, '/synth').at(-1), viewport, 24, 40, 120);
   const after = scene({ layoutOf: studioOf, view, viewport, pinned: SYNTH });
   assert.deepEqual(breadcrumbs(after).map((c) => c.path), ['', '/synth'], 'still open');
   assert.ok(after.levels[1].transform.k >= READ_K - 1e-9, `at ${after.levels[1].transform.k}`);
 });
 
 test('a zoom never opens nor closes: Enter, then steps in and out, keeps it open; unpinned it stays closed (2026-10-22)', () => {
-  const bounds = studioOf('moog_voice').bounds;
+  const { frame, inner } = synthLink();
   const pinned = pinOne(new Set(), '/synth');
-  let drawn = scene({ layoutOf: studioOf, view: { ...enterView(bounds, viewport, 24, 40, 120), path: '/synth' }, viewport, pinned });
+  let drawn = scene({ layoutOf: studioOf, view: { ...enterView(frame, inner, viewport, 24, 40, 120), path: '/synth' }, viewport, pinned });
   assert.deepEqual(breadcrumbs(drawn).map((c) => c.path), ['', '/synth']);
   // Far out (its inside a few hundredths of a pixel per unit) and far in: open throughout.
   for (const factor of [...Array(20).fill(0.7), ...Array(40).fill(1.3)]) {

@@ -35,9 +35,11 @@ function unless(item, reason) {
  * counting what it would delete (`deleted`), off with `tooLarge`'s reason.
  * `around` (M2.13-3): why the part's level is not edited now, it being
  * around the innermost open composite; its edits are off with it (an open
- * composite's own Add module here… adds inside it and stays). A library
- * composite (`opaque`) is not opened in place. Items are
- * `{id, label, disabled, title?}` and separators, `{id: 'separator'}`.
+ * composite's own Add module here… adds inside it and stays; `shown`: the
+ * part is the open frame whose inside is edited, or a pin of its box, so
+ * a slot's own items, its pins' and Delete stay on too, 2026-10-29). A
+ * library composite (`opaque`) is not opened in place. Items are `{id,
+ * label, disabled, title?}` and separators, `{id: 'separator'}`.
  */
 export function schematicMenu(hit, state = {}) {
   const items = partMenu(hit, state);
@@ -64,11 +66,13 @@ function partMenu(hit, state) {
     if (composite && state.open) items.push(unless({ id: 'close', label: 'Close' }, null));
     else items.push(unless({ id: 'open', label: 'Open in place' }, notComposite ?? (state.opaque ? 'A library composite: its inside is not in the graph' : null)));
     items.push(unless({ id: 'enter', label: 'Enter' }, notComposite), SEPARATOR, unless({ id: 'copy-address', label: 'Copy address' }, null), SEPARATOR);
-    if (slot) items.push(...slotItems(slot, editOff, notComposite), SEPARATOR);
+    // The open frame whose inside is edited (`shown`, 2026-10-29): its own items and Delete act on it from there (Delete closes it).
+    const own = state.shown ? inside : editOff;
+    if (slot) items.push(...slotItems(slot, own, notComposite), SEPARATOR);
     if (composite && state.open) items.push(unless({ id: 'add', label: 'Add module here…' }, inside ?? (state.addable ? null : 'Nothing can be added here')));
     if (composite && state.open) items.push(unless({ id: 'add-slot', label: 'Add slot here…' }, inside ?? (state.addable ? null : 'Nothing can be added here')));
-    items.push(unless({ id: 'make-interface', label: 'Make interface from this instance…', title: 'Write its ports and parameters as interfaces/<name>.toml, a template slots may start from' }, editOff));
-    items.push(unless({ id: 'delete', label: slot ? 'Delete slot' : 'Delete instance' }, editOff));
+    items.push(unless({ id: 'make-interface', label: 'Make interface from this instance…', title: 'Write its ports and parameters as interfaces/<name>.toml, a template slots may start from' }, own));
+    items.push(unless({ id: 'delete', label: slot ? 'Delete slot' : 'Delete instance' }, own));
     return items;
   }
   if (hit?.kind === 'wire') {
@@ -103,11 +107,13 @@ function partMenu(hit, state) {
     // A slot's pin (ADR 0037 §7): its port renamed, retyped or removed.
     if (hit.node?.kind === 'instance' && hit.node.slot) {
       const wired = state.connected > 0;
+      // Its interface: edited from the slot's inside too (`shown`).
+      const off = state.shown ? inside : editOff;
       items.push(
         SEPARATOR,
-        unless({ id: 'port-edit', label: 'Rename or retype port…' }, editOff),
-        unless({ id: 'port-remove', label: 'Remove port' }, editOff ?? (wired ? 'Wires name it: remove it with its wires' : null)),
-        unless({ id: 'port-remove-wires', label: 'Remove port and its wires' }, editOff ?? (wired ? null : 'No wire names it')),
+        unless({ id: 'port-edit', label: 'Rename or retype port…' }, off),
+        unless({ id: 'port-remove', label: 'Remove port' }, off ?? (wired ? 'Wires name it: remove it with its wires' : null)),
+        unless({ id: 'port-remove-wires', label: 'Remove port and its wires' }, off ?? (wired ? null : 'No wire names it')),
       );
     }
     return items;

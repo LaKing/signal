@@ -18,7 +18,7 @@
 import { CHAR, GAP_Y, HEADER, PAD, insideKey, laneY, levelBottom } from './schematic-layout.js';
 import { LABEL_PX, READ_PX, estimateWidth } from './schematic-labels.js';
 import { crosses, wireGeometry } from './schematic-wire.js';
-import { fit, focus, zoomAt } from './schematic-view.js';
+import { fit, focus, screenRect, zoomAt } from './schematic-view.js';
 
 /**
  * Enter, a double-click and a breadcrumb show an inside at this scale at
@@ -228,22 +228,57 @@ export function readableView(view, k, at) {
   return k < READ_K ? zoomAt(view, READ_K / k, at) : view;
 }
 
-/** Enter's view of an inside of layout `bounds` (in its own coordinates): fitted (`fit`'s margins after), and readable (`readableView`). */
-export function enterView(bounds, viewport, ...margins) {
-  const view = fit(bounds, viewport, ...margins);
-  return readableView(view, view.k, { x: view.x, y: view.y });
+/**
+ * Enter and a double-click draw neither an open frame (its title, its ×,
+ * in its parent's units) nor its inside larger than this scale (2026-10-29,
+ * the operator's review: an empty slot's frame, fitted, drew its subtitle
+ * about 100 px tall and cut its title off; a box holding one small module
+ * filled the screen with it).
+ */
+export const ENTER_MAX_K = 2;
+
+/** `frame` (an open composite's grown box, in its parent's units) in the units of its inside (`inner`: inside → parent, `inside`'s). */
+export function frameRect(frame, inner) {
+  return { x: (frame.x - inner.x) / inner.k, y: (frame.y - inner.y) / inner.k, w: frame.w / inner.k, h: frame.h / inner.k };
+}
+
+/**
+ * Enter's view of an open composite, in its inside's coordinates: its
+ * whole frame (`frame`, the grown box, header and × included; `inner` its
+ * inside's link, as `chain` gives them) fitted (`fit`'s margins after),
+ * neither the frame nor the inside drawn larger than ENTER_MAX_K (a small
+ * or empty inside does not blow up), and readable (`readableView`: a wide
+ * inside overflows the view rather than drop below READ_K, zoomed about
+ * the frame's top edge, so its header stays where the fit put it).
+ */
+export function enterView(frame, inner, viewport, ...margins) {
+  const rect = frameRect(frame, inner);
+  const fitted = fit(rect, viewport, ...margins);
+  const most = ENTER_MAX_K * Math.min(1, inner.k);
+  const view = fitted.k > most ? { ...fitted, k: most } : fitted;
+  return readableView(view, view.k, { x: view.x, y: view.y - (rect.h / 2) * view.k });
 }
 
 /**
  * A breadcrumb's view of the open level `level` (a scene entry, drawn in
- * `view` now) whose layout is `rect` on screen: fitted as `focus` does,
- * and readable (`readableView`). What is open below it is closed by the
- * breadcrumb itself (`unpin`), not by the view.
+ * `view` now), framed as Enter frames it (`enterView`, 2026-10-29: an
+ * empty slot's breadcrumb blew it up as its double-click did): its whole
+ * frame (`link`: `{node, inner}`, its last `chain` link) fitted as `focus`
+ * does, neither the frame nor the inside larger than ENTER_MAX_K, and
+ * readable (`readableView`, about the frame's top edge). What is open
+ * below it is closed by the breadcrumb itself (`unpin`), not by the view.
  */
-export function crumbView(view, level, rect, viewport, ...margins) {
+export function crumbView(view, level, link, viewport, ...margins) {
+  const rect = screenRect(level.transform, frameRect(link.node, link.inner));
   const focused = focus(view, rect, viewport, ...margins);
   const target = fit(rect, viewport, ...margins);
-  return readableView(focused, level.transform.k * (focused.k / view.k), { x: target.x, y: target.y });
+  const centre = { x: target.x, y: target.y };
+  // The inside's scale once focused, and at most.
+  const k = level.transform.k * (focused.k / view.k);
+  const most = ENTER_MAX_K * Math.min(1, link.inner.k);
+  const capped = k > most ? zoomAt(focused, most / k, centre) : focused;
+  const shown = Math.min(k, most);
+  return readableView(capped, shown, { x: centre.x, y: centre.y - (rect.h * target.k * (shown / k)) / 2 });
 }
 
 /** `pinned` with `address` pinned instead of any sibling of it (and what is pinned inside those): one open per level. */
@@ -266,6 +301,17 @@ export function unpin(pinned, address) {
 export function editLevel(drawn) {
   const last = drawn?.levels?.at(-1);
   return last ? { path: last.path, level: last.level } : { path: '', level: '' };
+}
+
+/**
+ * Whether part `hit` (an instance, or a pin of its box) is the open frame
+ * whose inside is the level edited (`editLevel`): around it, yet what is
+ * edited from inside it (2026-10-29: an open slot's own items, Load…,
+ * Edit interface… and the like, act on the slot whose inside is shown).
+ */
+export function shownFrame(drawn, hit) {
+  const path = editLevel(drawn).path;
+  return Boolean(path) && hit?.node?.kind === 'instance' && (hit.kind === 'instance' || hit.kind === 'port') && `${hit.path ?? ''}/${hit.node.name}` === path;
 }
 
 /** Whether part `hit` (a hit or a selection) may be edited: it is of the innermost open level; the surroundings are only selected and inspected. */

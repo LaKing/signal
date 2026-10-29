@@ -50,6 +50,29 @@ export function slotLabel(slot) {
   return { empty: false, subtitle: project ? `${load} ↗` : load, template, project };
 }
 
+/**
+ * What a slot holds, as the sidebar's module field and the card's subtitle
+ * say it (2026-10-29, the operator's review: an empty slot's was blank and
+ * its category "project"): "empty" (with its template, as `slotLabel`), its
+ * own inside ("fx_inside, its own inside"), a project ("../studio ↗, a
+ * project"), else the content it loads.
+ */
+export function slotContent(slot) {
+  const label = slotLabel(slot);
+  if (label.empty) return label.subtitle;
+  if (insideOf(slot)?.own) return `${slot.load}, its own inside`;
+  return label.project ? `${label.subtitle}, a project` : slot.load;
+}
+
+/** What a slot's inside is, as the sidebar says it: its own or read-only (`count` instances in it), or why it does not open. */
+export function slotInsideText(slot, count) {
+  const inside = insideOf(slot);
+  const instances = `${count} instance${count === 1 ? '' : 's'}`;
+  if (inside?.level && inside.own) return `its own, ${instances}`;
+  if (inside?.level) return `read-only, ${instances} (the first edit makes its own copy)`;
+  return insideReason(slot) ?? 'none';
+}
+
 /** Why slot port `port` is unmatched (the reason a hollow pin's tooltip gives), or null when it is matched or the slot is empty. */
 export function unmatchedReason(slot, port) {
   if (!slot || !slot.load) return null;
@@ -556,6 +579,18 @@ export function loadable(entries, owner = null) {
 /** The `inside_of` of slot `name` at `level` (`""`: the top level): `fx`, `rack/fx`. */
 export function insideOwner(level, name) {
   return level ? `${level}/${name}` : name;
+}
+
+/**
+ * The levels slot `name` (at `level`, holding `slot`) may show as its inside,
+ * an op on it written from inside (`shown`, the one shown now): its read-only
+ * key (`/fx`, `rack/fx`, as `preview_key` writes it), its own inside's name and
+ * `more` (a module a Load makes its content), deduplicated. A Load, Unload or
+ * Replace changes which is shown; its undo is allowed from each (the review of
+ * 2026-10-29).
+ */
+export function slotViews(shown, level, name, slot, ...more) {
+  return [...new Set([shown, `${level}/${name}`, insideOf(slot)?.name, ...more].filter((v) => typeof v === 'string' && v !== ''))];
 }
 
 /** `slot.inside`: slot `slotName`'s own inside made (`name`: the composite's, else the server's default). */

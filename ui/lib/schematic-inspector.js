@@ -13,6 +13,7 @@
 import { rows } from '../app/lib/parameters.js';
 import { unsavedOf } from './unsaved.js';
 import { planPort } from './schematic-scene.js';
+import { slotContent } from './slot.js';
 
 export { dragMessage, releaseMessage, resetMessage } from '../app/lib/parameters.js';
 
@@ -130,7 +131,8 @@ export function card(selection, { graph, description } = {}) {
   return {
     kind: 'instance',
     title: address,
-    subtitle: `${node.module}${node.composite ? ' (composite)' : ''}`,
+    // ADR 0037 §7: a slot says what it holds, never " (composite)" for its inside.
+    subtitle: node.slot ? `slot: ${slotContent(node.slot)}` : `${node.module}${node.composite ? ' (composite)' : ''}`,
     fields: [],
     parameters,
     editable: top,

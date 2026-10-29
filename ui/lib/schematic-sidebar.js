@@ -19,6 +19,7 @@ import { groupOf } from './schematic-palette.js';
 import { portHit, wireHit } from './schematic-hit.js';
 import { deletePlan, hitKey } from './schematic-select.js';
 import { neighbours, traceTree } from './schematic-trace.js';
+import { slotContent, slotInsideText } from './slot.js';
 
 /** The most members the sidebar lists; the rest are counted ("and N more"). */
 export const MEMBERS_SHOWN = 200;
@@ -151,17 +152,21 @@ export function sidebar(selected, context = {}) {
     // ADR 0037, editable insides: a slot's inside, its own composite or its read-only one.
     const insideLevel = node.composite ? (graph?.composites?.[node.level ?? node.module] ?? graph?.insides?.[node.level]) : null;
     const inside = (insideLevel?.instances ?? []).length;
-    const type = types?.get(node.module) ?? null;
-    // A composite's group needs no reply; a primitive's is its type's category.
-    const category = type?.group ?? (node.composite ? groupOf(node) : null);
+    const slot = node.slot ?? null;
+    const type = slot ? null : (types?.get(node.module) ?? null);
+    // A composite's group needs no reply; a primitive's is its type's category; a slot is a slot, whatever it holds (2026-10-29).
+    const category = slot ? 'slot' : (type?.group ?? (node.composite ? groupOf(node) : null));
     return {
       ...base,
-      about: node.composite ? null : (type?.description ?? null),
+      about: node.composite || slot ? null : (type?.description ?? null),
       fields: [
         ['address', hit.address],
-        ['module', node.module],
+        // ADR 0037 §7: a slot's module is what it holds ("empty", its own inside, the content it loads).
+        ['module', slot ? slotContent(slot) : node.module],
         ['category', category ?? '—'],
-        ['composite', !node.composite ? 'no' : insideLevel ? `yes, ${inside} instance${inside === 1 ? '' : 's'} inside` : 'yes, a library composite (its inside is not in the graph)'],
+        slot
+          ? ['inside', slotInsideText(slot, inside)]
+          : ['composite', !node.composite ? 'no' : insideLevel ? `yes, ${inside} instance${inside === 1 ? '' : 's'} inside` : 'yes, a library composite (its inside is not in the graph)'],
         ['level', levelText(graph, hit.level)],
       ],
       pins: [...node.ins, ...node.outs].map((p) => pinRow(entry, node, p)),
