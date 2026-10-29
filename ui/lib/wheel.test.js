@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { GESTURE_GAP_MS, WheelLatch, fillsWindow, ownsWheel, wheelHint } from './wheel.js';
+import { GESTURE_GAP_MS, KIND_GAP_MS, NOTCH_MIN_PX, WheelKinds, WheelLatch, fillsWindow, ownsWheel, wheelHint, wheelKind } from './wheel.js';
 
 test('a control owns the wheel when it fills the window, has the focus or the modifier is held', () => {
   assert.equal(ownsWheel({}), false);
@@ -65,4 +65,40 @@ test('the hint shows once per gesture, only over the control the gesture started
   latch.claim(knob, false);
   assert.equal(latch.hint(knob), true, 'after a quiet moment');
   assert.equal(wheelHint('⌥'), 'Click to use the wheel here, or hold ⌥');
+});
+
+test('wheelKind: a pinch is ctrl+wheel; a mouse notches in lines or large steps; a trackpad moves sideways or in small steps', () => {
+  assert.equal(wheelKind({ deltaY: 3.5, ctrlKey: true }), 'pinch');
+  assert.equal(wheelKind({ deltaY: -120, ctrlKey: true }), 'pinch');
+  // Firefox's notch (lines), Chromium's (100 px), WebKit's (40 px × macOS's acceleration).
+  assert.equal(wheelKind({ deltaY: 3, deltaMode: 1 }), 'mouse');
+  assert.equal(wheelKind({ deltaY: 100, deltaMode: 0 }), 'mouse');
+  assert.equal(wheelKind({ deltaY: -40, deltaMode: 0 }), 'mouse');
+  assert.equal(wheelKind({ deltaY: 54.8, deltaX: 0, deltaMode: 0 }), 'mouse');
+  assert.equal(wheelKind({ deltaY: NOTCH_MIN_PX }), 'mouse');
+  // A trackpad: sideways travel, small or fractional steps.
+  assert.equal(wheelKind({ deltaY: 120, deltaX: 1, deltaMode: 0 }), 'trackpad');
+  assert.equal(wheelKind({ deltaY: 0, deltaX: -6 }), 'trackpad');
+  assert.equal(wheelKind({ deltaY: 2 }), 'trackpad');
+  assert.equal(wheelKind({ deltaY: -0.5 }), 'trackpad');
+  assert.equal(wheelKind({ deltaY: NOTCH_MIN_PX - 1 }), 'trackpad');
+  // A mouse's Shift+wheel arrives sideways on a Mac: its size decides, not its direction.
+  assert.equal(wheelKind({ deltaY: 0, deltaX: 40, shiftKey: true }), 'mouse');
+  assert.equal(wheelKind({ deltaY: 0, deltaX: 3, shiftKey: true }), 'trackpad');
+});
+
+test('WheelKinds: the first event decides the gesture; a pause of KIND_GAP_MS starts the next one', () => {
+  const kinds = new WheelKinds();
+  // A trackpad scroll whose momentum grows past a notch's size stays a trackpad's.
+  assert.equal(kinds.kind({ deltaY: 2 }, 0), 'trackpad');
+  assert.equal(kinds.kind({ deltaY: 60 }, 16), 'trackpad');
+  assert.equal(kinds.kind({ deltaY: 120 }, 16 + KIND_GAP_MS), 'trackpad');
+  // A pause: the mouse's notch is a new gesture.
+  assert.equal(kinds.kind({ deltaY: 100 }, 400), 'mouse');
+  assert.equal(kinds.kind({ deltaY: 1 }, 450), 'mouse', 'kept within the gesture');
+  // A pinch is a pinch whenever ctrl is held, and what follows it is decided afresh.
+  assert.equal(kinds.kind({ deltaY: 1, ctrlKey: true }, 460), 'pinch');
+  assert.equal(kinds.kind({ deltaY: 1 }, 470), 'trackpad');
+  assert.equal(kinds.kind({ deltaY: 100 }, 480), 'trackpad', 'kept');
+  assert.equal(new WheelKinds().kind({ deltaY: -3, deltaMode: 1 }, 0), 'mouse');
 });

@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { HEADER, PAD, ROW, layout } from './schematic-layout.js';
 import {
-  CLOSE_MIN_PX, CLOSE_TEXT, CLOSE_UNITS, ENTER_MAX_K, FRAME_K, GROW_MAX, READ_K, aroundReason, chooseOpen, closeBox, closeShown, closeText, makeRoom, crumbView, drawOrder, editLevel, editable, enterView, frameRect, grownNode, linkScale, openedLayout, pinOne, unpin,
+  CLOSE_MIN_PX, CLOSE_TEXT, CLOSE_UNITS, ENTER_MAX_K, FRAME_K, GROW_MAX, READ_K, aroundReason, chooseOpen, closeBox, closeShown, closeText, makeRoom, crumbView, dragAction, drawOrder, editLevel, editable, enterView, frameRect, grownNode, linkScale, openFrameHit, openedLayout, pinOne, unpin,
 } from './schematic-open.js';
 import { PatchSession } from './schematic-edit.js';
 import { SchematicEditor } from '../controls/schematic-editor.js';
@@ -329,6 +329,44 @@ test('one pin per level, the frame drawn last, editing at the innermost open lev
   assert.equal(editable(drawn, within), true);
   const closed = fitted();
   assert.equal(editable(closed, onFrame), true, 'nothing open: the top level is edited');
+});
+
+// 2026-10-29, the owner: "on a composite you can't move the view".
+test('a drag pans on empty space, an open frame’s body included; moves a box of the level edited; holds a box around it only in Edit patch', () => {
+  const drawn = synthOpen();
+  const [top, inner] = drawn.levels;
+  const frame = top.layout.nodes.find((n) => n.name === 'synth');
+  // The open frame's empty inside hits as the frame instance (its level's), which is not edited, yet is empty space.
+  const empty = { x: frame.x + 2, y: frame.y + frame.h - 2 };
+  const onEmpty = hitTest(drawn, toScreen(top.transform, empty));
+  assert.deepEqual([onEmpty.kind, onEmpty.address], ['instance', '/synth']);
+  assert.equal(openFrameHit(drawn, onEmpty), true);
+  // A box beside the frame, at the top level (around the level edited).
+  const onNeighbour = { kind: 'instance', path: '', level: top.level, node: { kind: 'instance', name: 'beside' }, address: '/beside' };
+  assert.equal(openFrameHit(drawn, onNeighbour), false);
+  assert.equal(editable(drawn, onNeighbour), false);
+  const box = inner.nodes.find((n) => n.kind === 'instance');
+  const onBox = hitTest(drawn, toScreen(inner.transform, { x: box.x + box.w / 2, y: box.y + box.h / 2 }));
+  assert.equal(openFrameHit(drawn, onBox), false);
+  const press = (hit, editing, extra = {}) => dragAction({ hit, own: editable(drawn, hit), movable: editable(drawn, hit), frame: openFrameHit(drawn, hit), editing, ...extra });
+  for (const editing of [false, true]) {
+    assert.equal(press({ kind: 'background', path: '', level: '' }, editing), 'pan', 'the background');
+    assert.equal(press(onEmpty, editing), 'pan', 'an open frame’s body');
+    assert.equal(press(onBox, editing), 'move', 'a box of the level edited');
+    assert.equal(press({ kind: 'wire', path: '/synth' }, editing), 'pan', 'a wire');
+  }
+  assert.equal(press(onNeighbour, false), 'pan', 'a box around, outside Edit patch');
+  assert.equal(press(onNeighbour, true), 'hold', 'a box around, in Edit patch: not moved, said so');
+  assert.equal(press(onNeighbour, true, { additive: true }), 'pan');
+  assert.equal(press(onBox, false, { movable: false }), 'pan', 'a box of the level edited not drawn as a group');
+  assert.equal(press(onBox, true, { movable: false }), 'pan');
+  // A closed composite's box at the top level, nothing open: moved.
+  const closed = fitted();
+  const synthBox = closed.levels[0].nodes.find((n) => n.name === 'synth');
+  const onSynth = hitTest(closed, toScreen(closed.levels[0].transform, { x: synthBox.x + synthBox.w / 2, y: synthBox.y + synthBox.h / 2 }));
+  assert.equal(onSynth.address, '/synth');
+  assert.equal(openFrameHit(closed, onSynth), false);
+  assert.equal(dragAction({ hit: onSynth, own: true, movable: true, frame: false, editing: false }), 'move');
 });
 
 // auditor-1-editing-level-ungated (round 2): undo and redo, and a drag whose level stops being the innermost.

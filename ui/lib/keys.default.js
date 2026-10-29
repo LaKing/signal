@@ -180,7 +180,8 @@ export default {
     { "id": "schematic.select_all", "scope": "schematic", "label": "Select every instance and connection of the level", "keys": ["Cmd+A"] },
     { "id": "schematic.back", "scope": "schematic", "label": "End a trace, else close the innermost composite, else select nothing", "keys": ["Escape"] },
     { "id": "schematic.context_menu", "scope": "schematic", "label": "The context menu of the selection", "keys": ["ContextMenu", "Shift+F10"] },
-    { "id": "schematic.zoom", "scope": "schematic", "label": "Zoom about the pointer (also a pinch)", "keys": ["Wheel", "Ctrl+Wheel"], "wheel": true },
+    { "id": "schematic.zoom", "scope": "schematic", "label": "Zoom about the pointer with a mouse wheel or a pinch; a trackpad's two-finger scroll pans", "keys": ["Wheel", "Ctrl+Wheel"], "wheel": true },
+    { "id": "schematic.scroll", "scope": "schematic", "label": "Pan sideways", "keys": ["Shift+Wheel"], "wheel": true },
 
     { "id": "schematic_edit.undo", "scope": "schematic_edit", "label": "Undo the last patch", "keys": ["Cmd+Z"] },
     { "id": "schematic_edit.redo", "scope": "schematic_edit", "label": "Redo", "keys": ["Shift+Cmd+Z"] },

@@ -78,16 +78,17 @@ import { formatFixed } from '../lib/format.js';
 import { HEADER, addPinAt, dragPosition, insideKey, layout } from '../lib/schematic-layout.js';
 import { insideBanner, insideReason, isPreviewLevel, isSlotInside, levelData, unmatchedReason } from '../lib/slot.js';
 import { DragFollow, ownedLabels } from '../lib/schematic-drag.js';
-import { aroundReason, closeBox, closeShown, closeText, crumbView, drawOrder, editable, editLevel, enterView, pinOne, shownFrame, unpin } from '../lib/schematic-open.js';
+import { aroundReason, closeBox, closeShown, closeText, crumbView, dragAction, drawOrder, editable, editLevel, enterView, openFrameHit, pinOne, shownFrame, unpin } from '../lib/schematic-open.js';
 import { boundaryLinks, breadcrumbs, chain, nodeRect, openAnchor, rebase, reroot, scene } from '../lib/schematic-scene.js';
 import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
 import { hitTest, instanceHit, portHit, reselect } from '../lib/schematic-hit.js';
 import { cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
 import { LEVEL_RATE, SLOTS, candidates, levelPlan, levelSpan, mutedOf, parameterSpan } from '../lib/schematic-levels.js';
 import { isDiscrete, selectOptions, selectValue, valueLabel } from '../lib/value-set.js';
-import { IDENTITY, commandView, fit, focus, matrix, pan, toLocal, toScreen, wheelFactor, zoomAt } from '../lib/schematic-view.js';
+import { IDENTITY, commandView, fit, focus, matrix, pan, toLocal, toScreen, wheelView, zoomAt } from '../lib/schematic-view.js';
+import { WheelKinds } from '../lib/wheel.js';
 import { keyCommand, keymap, shownKeys, wheelCommand } from '../lib/keys.js';
-import { registerWheel, takesWheel, verticalDelta } from './keyboard.js';
+import { registerWheel, takesWheel } from './keyboard.js';
 import { COUNT_UNITS, LABEL_PX, PITCH_PX, READ_PX, frameSides, insideNote, labelOwners, levelCounts, levelLabels, outsideNote, pinText, setMeasure } from '../lib/schematic-labels.js';
 import { bundleClick, bundleText, bundleWires, countPlaces, countsShown, fanOf, nearestWire } from '../lib/schematic-bundle.js';
 import { collapsedAt, exportFacts, groupAnchors, labelDetail, notesAt, portGroups } from '../lib/schematic-groups.js';
@@ -118,7 +119,7 @@ const DOUBLE_MS = 500;
 const DOUBLE_PX = 6;
 
 const CSS = `
-:host { display: block; position: relative; overflow: hidden; height: 100%; outline: none; --side-width: 300px;
+:host { display: block; position: relative; overflow: hidden; overscroll-behavior: none; height: 100%; outline: none; --side-width: 300px;
   color: var(--signal-fg, #d6dbe4); background: var(--signal-bg, #16181d);
   font: var(--signal-font, 11px/1.3 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif); }
 :host([side-collapsed]) { --side-width: 28px; }
@@ -365,6 +366,8 @@ export class SignalSchematic extends HTMLElement {
     /** The selection: hits, each part once, the last the one added last (ui/lib/schematic-select.js). */
     this.selected = [];
     this.gesture = null;
+    /** The wheel gesture's kind (a mouse, a trackpad, a pinch), kept for the gesture. */
+    this.wheelKinds = new WheelKinds();
     this.pending = false;
     this.barsPending = false;
     this.stops = [];
@@ -1344,9 +1347,13 @@ export class SignalSchematic extends HTMLElement {
     // (a push, a zoom) may replace the group or close the level. A box of
     // a group selected moves the group's boxes of its level with it.
     const k = hit.kind === 'instance' ? this.levelOf(hit.path)?.transform.k : undefined;
-    const follow = k && own && this.nodeGroup(hit.address) ? new DragFollow(hit.level, dragGroup(this.selected, hit)) : null;
-    // A box around the innermost open level is not moved (and the view not panned instead).
-    const held = hit.kind === 'instance' && !own && !additive;
+    // A drag moves a box of the level edited; in Edit patch a box around it
+    // is held (not moved, said so); anything else pans: empty space, an open
+    // frame's body, and outside Edit patch a box that does not move (`dragAction`).
+    const movable = Boolean(k && own && this.nodeGroup(hit.address));
+    const action = dragAction({ hit, own, movable, frame: openFrameHit(this.drawn, hit), editing: this.editor.editing, additive });
+    const follow = action === 'move' ? new DragFollow(hit.level, dragGroup(this.selected, hit)) : null;
+    const held = action === 'hold';
     this.gesture = { ...base, k, follow, held };
   }
 
@@ -1656,15 +1663,24 @@ export class SignalSchematic extends HTMLElement {
     this.setView(zoomAt(this.view, factor, at ?? { x: this.viewport.w / 2, y: this.viewport.h / 2 }));
   }
 
-  /** The wheel zooms (`schematic.zoom`): the schematic fills its window, so it owns the wheel (ADR 0034); smaller, in a page, it takes it once clicked. */
+  /**
+   * The wheel (`schematic.zoom`): a mouse's wheel and a pinch zoom about
+   * the pointer, a trackpad's two-finger scroll pans (the gesture's kind
+   * kept, `WheelKinds`); Shift+wheel pans sideways (`schematic.scroll`).
+   * The schematic fills its window, so it owns the wheel (ADR 0034);
+   * smaller, in a page, it takes it once clicked. A wheel event it takes
+   * never scrolls the page (a non-passive listener).
+   */
   wheel(event) {
     if (!takesWheel(this, event)) return;
     event.preventDefault();
-    if (wheelCommand('schematic', event)?.id !== 'schematic.zoom') return;
+    const id = wheelCommand('schematic', event)?.id;
+    if (id !== 'schematic.zoom' && id !== 'schematic.scroll') return;
+    const kind = id === 'schematic.scroll' ? 'sideways' : this.wheelKinds.kind(event, event.timeStamp);
+    const next = wheelView(this.view, event, kind, this.point(event));
+    if (next === this.view) return;
     this.closeMenu();
-    const delta = verticalDelta(event);
-    if (!delta) return;
-    this.zoomBy(wheelFactor(delta, { deltaMode: event.deltaMode, pinch: event.ctrlKey }), this.point(event));
+    this.setView(next);
   }
 
   pinch(event, start) {

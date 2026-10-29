@@ -1,8 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  IDENTITY, MAX_SCALE, MIN_SCALE, commandView, compose, fit, focus, pan, screenRect, toLocal, toScreen, uncompose, wheelFactor, zoomAt,
+  IDENTITY, MAX_SCALE, MIN_SCALE, commandView, compose, fit, focus, pan, screenRect, toLocal, toScreen, uncompose, wheelFactor, wheelView, zoomAt,
 } from './schematic-view.js';
+
+test('wheelView: a trackpad pans both ways, Shift+wheel sideways, a mouse and a pinch zoom about the pointer', () => {
+  const view = { k: 2, x: 30, y: -10 };
+  const at = { x: 100, y: 50 };
+  assert.deepEqual(wheelView(view, { deltaX: 4, deltaY: -6, deltaMode: 0 }, 'trackpad', at), pan(view, -4, 6));
+  assert.deepEqual(wheelView(view, { deltaX: 40, deltaY: 0, shiftKey: true }, 'sideways', at), pan(view, -40, 0));
+  assert.deepEqual(wheelView(view, { deltaX: 0, deltaY: 3, deltaMode: 1, shiftKey: true }, 'sideways', at), pan(view, -48, 0), 'lines; a delta that stayed vertical');
+  assert.deepEqual(wheelView(view, { deltaY: 100 }, 'mouse', at), zoomAt(view, wheelFactor(100), at));
+  assert.deepEqual(wheelView(view, { deltaY: 5, ctrlKey: true }, 'pinch', at), zoomAt(view, wheelFactor(5, { pinch: true }), at));
+  assert.equal(wheelView(view, { deltaX: 0, deltaY: 0 }, 'trackpad', at), view, 'nothing moved');
+  assert.equal(wheelView(view, { deltaX: 5, deltaY: 0 }, 'mouse', at), view, 'a sideways mouse step zooms nothing');
+});
 
 const close = (a, b, message) => assert.ok(Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b)), `${message}: ${a} vs ${b}`);
 

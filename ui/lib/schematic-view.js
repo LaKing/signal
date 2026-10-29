@@ -158,10 +158,35 @@ export function screenRect(view, rect) {
   return { x: at.x, y: at.y, w: rect.w * view.k, h: rect.h * view.k };
 }
 
+/** A wheel delta in pixels (`deltaMode` 1: lines, 2: pages). */
+export function wheelPixels(delta, deltaMode = 0) {
+  return delta * (deltaMode === 1 ? 16 : deltaMode === 2 ? 400 : 1);
+}
+
 /** The zoom factor of a wheel step (`deltaMode` 1: lines, 2: pages); a pinch (ctrl+wheel) is finer. */
 export function wheelFactor(deltaY, { deltaMode = 0, pinch = false } = {}) {
-  const pixels = deltaY * (deltaMode === 1 ? 16 : deltaMode === 2 ? 400 : 1);
-  return Math.exp(-pixels * (pinch ? 0.01 : 0.002));
+  return Math.exp(-wheelPixels(deltaY, deltaMode) * (pinch ? 0.01 : 0.002));
+}
+
+/**
+ * The view after a wheel event `event` the schematic takes, as `kind`
+ * (`ui/lib/wheel.js`): `'pan'` sideways (Shift+wheel), a trackpad's
+ * two-finger scroll pans both ways, a mouse's wheel and a pinch zoom
+ * about `at`. `view` itself when the event moves nothing.
+ */
+export function wheelView(view, event, kind, at) {
+  const mode = event.deltaMode ?? 0;
+  if (kind === 'sideways') {
+    const d = wheelPixels(event.deltaX || event.deltaY || 0, mode);
+    return d ? pan(view, -d, 0) : view;
+  }
+  if (kind === 'trackpad') {
+    const dx = wheelPixels(event.deltaX || 0, mode);
+    const dy = wheelPixels(event.deltaY || 0, mode);
+    return dx || dy ? pan(view, -dx, -dy) : view;
+  }
+  const d = event.deltaY || (event.shiftKey ? event.deltaX : 0);
+  return d ? zoomAt(view, wheelFactor(d, { deltaMode: mode, pinch: kind === 'pinch' }), at) : view;
 }
 
 /** The keys' step: zooming in and out from the keyboard is by this about the centre; the arrows pan a tenth of the viewport. */
