@@ -5,7 +5,7 @@
 // (ui/lib/schematic-menu.js, 2026-10-17): one menu, not two. Its keys and
 // its place are ui/lib/context-menu.js's. Plain ES module, no DOM.
 
-import { TABS } from './tabs.js';
+import { tabItems } from './show-in.js';
 
 export { placeMenu } from '../../lib/context-menu.js';
 
@@ -29,10 +29,12 @@ export function keepsSystemMenu(target) {
  * address; for a part of the schematic without its items (`control: {
  * address, part: true }`), Copy address; then Restart from Files (the
  * project again from frame 0, ADR 0033: no Play or Stop, the project runs
- * while the power is on); then the tabs other than the shown one.
+ * while the power is on); then the tabs other than the shown one: Show
+ * in Panel and so on when what was clicked has an address (`places`, its
+ * places in the views: ./show-in.js), else Show Panel and so on.
  * Each item is `{ id, label, disabled?, title? }`; `separator` items divide groups.
  */
-export function contextItems({ part = null, control = null, power = true, tab = null } = {}) {
+export function contextItems({ part = null, control = null, power = true, tab = null, places = null } = {}) {
   const items = [];
   if (part?.length) {
     for (const item of part) items.push(item.id === 'separator' ? item : { ...item, id: `part:${item.id}` });
@@ -48,6 +50,6 @@ export function contextItems({ part = null, control = null, power = true, tab = 
   }
   items.push({ id: 'restart', label: 'Restart from Files', disabled: !power });
   items.push({ id: 'separator' });
-  for (const t of TABS) if (t.id !== tab) items.push({ id: `tab:${t.id}`, label: `Show ${t.label}` });
+  items.push(...tabItems(tab, places));
   return items;
 }

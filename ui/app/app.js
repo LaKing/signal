@@ -26,6 +26,8 @@ import { ariaShortcuts, keyCommand, keymap, onKeys, shownKeys } from '../lib/key
 import { dragMessage, fileNote, planUpdate, releaseMessage, resetMessage, rows, shown, structureKey, valuesOf } from './lib/parameters.js';
 import { INITIAL, controls, powerRequest, reduce, restartRequest } from './lib/power.js';
 import { contextItems, keepsSystemMenu } from './lib/context.js';
+import { FLASH_CLASS, FLASH_CSS, FLASH_MS, placesOf, subjectAddresses, subjectOf } from './lib/show-in.js';
+import { bindAddresses } from '../controls/base.js';
 import { PROMPT, fieldValue, openRetry, projectLabel, windowTitle } from './lib/document.js';
 import { archiveSave, saveReport, saveRequests } from './lib/save.js';
 import {
@@ -598,7 +600,12 @@ export class SignalAppParameters extends AppElement {
         ? el('details', {}, el('summary', { textContent: 'Inside the composite' }), el('table', { className: 'parameters inner' }, columns(), ...instance.inner.map((p) => this.row(p))))
         : null;
       const title = `${instance.name} (${instance.module})`;
-      return el('section', { className: 'signal-card wide' }, el('h2', { textContent: title, title }), table, inner);
+      const card = el('section', { className: 'signal-card wide' }, el('h2', { textContent: title, title }), table, inner);
+      // The instance's group: Copy address and Show in from its heading, and what Show in Parameters shows of it.
+      card.dataset.address = `/${instance.name}`;
+      card.dataset.label = instance.name;
+      card.dataset.part = 'instance';
+      return card;
     });
     this.replaceChildren(
       ...(cards.length ? cards : [el('section', { className: 'signal-card' }, el('p', { className: 'muted', textContent: 'No parameters: open a project that loads.' }))]),
@@ -633,7 +640,12 @@ export class SignalAppParameters extends AppElement {
     const name = el('td', { className: 'name', textContent: p.name, title: p.name });
     if (!p.editable) {
       this.cells.set(p.address, { base, note, unit: p.unit, values: p.values ?? null, valueSnap: p.snap });
-      return el('tr', { className: 'read-only' }, name, el('td', {}, slider), base, note, effective, el('td', { className: 'muted', textContent: 'read-only' }), el('td'), el('td'));
+      const tr = el('tr', { className: 'read-only' }, name, el('td', {}, slider), base, note, effective, el('td', { className: 'muted', textContent: 'read-only' }), el('td'), el('td'));
+      // The context menu's Copy address and Show in items; nothing to reset.
+      tr.dataset.address = p.address;
+      tr.dataset.label = p.name;
+      tr.dataset.editable = 'false';
+      return tr;
     }
     const reset = el('button', { type: 'button', textContent: 'Reset', title: `Reset to default (${shown(p.default, p.unit)})` });
     reset.addEventListener('click', () => this.request(resetMessage(p.address)).catch(failed));
@@ -1137,7 +1149,10 @@ export class SignalAppContextMenu extends AppElement {
         return { address: node.binding.address, label: node.getAttribute?.('label') ?? '', editable: true };
       }
       // A schematic part (M2.9-1) has an address to copy, nothing to reset.
-      if (node?.dataset?.address) return { address: node.dataset.address, label: node.dataset.label ?? '', editable: true, part: node.dataset.part === 'schematic' };
+      // A parameter row (read-only inside a composite) or an instance's group of them.
+      if (node?.dataset?.address) {
+        return { address: node.dataset.address, label: node.dataset.label ?? '', editable: node.dataset.editable !== 'false', part: ['schematic', 'instance'].includes(node.dataset.part) };
+      }
     }
     return null;
   }
@@ -1160,18 +1175,20 @@ export class SignalAppContextMenu extends AppElement {
     this.close();
     const part = SignalAppContextMenu.part(event, () => this.close());
     const control = part ? null : SignalAppContextMenu.control(event);
+    const subject = subjectOf({ hit: part?.hit ?? null, control });
     const items = contextItems({
       part: part?.items,
       control,
       power: (toolbar?.power?.power ?? 'on') === 'on',
       tab: toolbar?.tab ?? null,
+      places: subject ? placesOf(subject, shownAddresses(subject)) : null,
     });
     // The focus goes back where the click was (duck-typed: the panel frame's nodes are of another realm).
     const back = event.composedPath?.().find(focusable) ?? null;
     this.menu.show(items, {
       x: event.clientX + offset.left,
       y: event.clientY + offset.top,
-      pick: (id) => this.run(id, control, toolbar, part),
+      pick: (id) => this.run(id, control, toolbar, part, subject),
       closed: () => part?.closed?.(),
       back,
     });
@@ -1181,13 +1198,80 @@ export class SignalAppContextMenu extends AppElement {
     this.menu?.close();
   }
 
-  run(id, control, toolbar, part) {
+  run(id, control, toolbar, part, subject = null) {
     if (id.startsWith('part:')) part?.act(id.slice(5));
     else if (id === 'reset' && control) this.request(resetMessage(control.address)).catch(failed);
     else if (id === 'copy-address' && control) navigator.clipboard?.writeText(control.address).catch(failed);
     else if (id === 'restart') this.request(restartRequest()).catch(failed);
     else if (id.startsWith('tab:')) toolbar?.select(id.slice(4));
+    else if (id.startsWith('show:') && subject) showIn(id.slice(5), subject, toolbar);
   }
+}
+
+// Show in Panel, Parameters, Schematic (the owner's, 2026-10-29; the
+// items, ./lib/show-in.js): the tab shown, what the subject is there
+// brought into view and flashed.
+
+/** The panel frame's document, the parameter list and the schematic. */
+function views() {
+  return {
+    panel: document.querySelector('signal-app-panel')?.frame?.contentDocument ?? null,
+    parameters: document.querySelector('signal-app-parameters'),
+    schematic: document.querySelector('signal-schematic'),
+  };
+}
+
+/** The addresses each view has, for `placesOf`: the panel's bound controls, the parameter rows and groups, what the schematic can reveal of `subject`. */
+function shownAddresses(subject) {
+  const { panel, parameters, schematic } = views();
+  return {
+    panel: [...(panel?.querySelectorAll('[bind]') ?? [])].flatMap(bindAddresses),
+    parameters: [...(parameters?.querySelectorAll('[data-address]') ?? [])].map((e) => e.dataset.address),
+    schematic: subjectAddresses(subject).filter((a) => schematic?.revealable?.(a)),
+  };
+}
+
+function showIn(tab, subject, toolbar) {
+  const place = placesOf(subject, shownAddresses(subject))[tab];
+  if (place.reason) return;
+  toolbar?.select(tab);
+  const { panel, parameters, schematic } = views();
+  const wanted = new Set(place.addresses);
+  if (tab === 'schematic') schematic?.revealAddress(subject);
+  else if (tab === 'panel') {
+    // A control of it; an instance's: the card holding its controls.
+    const controls = [...(panel?.querySelectorAll('[bind]') ?? [])].filter((e) => bindAddresses(e).some((a) => wanted.has(a)));
+    flash(controls.map((e) => (place.whole ? (e.closest('.signal-card') ?? e) : e)));
+  } else if (tab === 'parameters') {
+    const rows = [...(parameters?.querySelectorAll('[data-address]') ?? [])].filter((e) => wanted.has(e.dataset.address));
+    for (const row of rows) {
+      const details = row.closest('details');
+      if (details) details.open = true;
+    }
+    flash(rows);
+  }
+}
+
+/** `elements` scrolled to (the first) and marked for a moment (`FLASH_CSS`, put into their document once). */
+function flash(elements) {
+  const list = [...new Set(elements)];
+  if (!list.length) return;
+  for (const element of list) {
+    const doc = element.ownerDocument;
+    if (!doc.getElementById('signal-shown-flash-style')) {
+      const style = doc.createElement('style');
+      style.id = 'signal-shown-flash-style';
+      style.textContent = FLASH_CSS;
+      doc.head.append(style);
+    }
+    clearTimeout(element.signalShownTimer);
+    element.classList.remove(FLASH_CLASS);
+    void element.offsetWidth; // the animation again, if it was running
+    element.classList.add(FLASH_CLASS);
+    element.signalShownTimer = setTimeout(() => element.classList.remove(FLASH_CLASS), FLASH_MS);
+  }
+  const reduced = list[0].ownerDocument.defaultView?.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  list[0].scrollIntoView({ block: 'center', inline: 'nearest', behavior: reduced ? 'auto' : 'smooth' });
 }
 
 for (const [name, element] of [

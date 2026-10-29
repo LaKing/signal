@@ -81,7 +81,7 @@ import { DragFollow, ownedLabels } from '../lib/schematic-drag.js';
 import { aroundReason, closeBox, closeShown, closeText, crumbView, drawOrder, editable, editLevel, enterView, pinOne, shownFrame, unpin } from '../lib/schematic-open.js';
 import { boundaryLinks, breadcrumbs, chain, nodeRect, openAnchor, rebase, reroot, scene } from '../lib/schematic-scene.js';
 import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
-import { hitTest, instanceHit, portHit, reselect } from '../lib/schematic-hit.js';
+import { hitTest, instanceHit, portHit, reselect, wireHit } from '../lib/schematic-hit.js';
 import { cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
 import { LEVEL_RATE, SLOTS, candidates, levelPlan, levelSpan, mutedOf, parameterSpan } from '../lib/schematic-levels.js';
 import { isDiscrete, selectOptions, selectValue, valueLabel } from '../lib/value-set.js';
@@ -111,6 +111,8 @@ const SIDE_KEY = 'signal.schematic.sidebar';
 const OPEN_PIN_PX = 4;
 /** A view's margin (px) on its other edges. */
 const MARGIN_PX = 24;
+/** How long Show in Schematic flashes what it revealed (ms): two pulses, with a margin. */
+const SHOWN_FLASH_MS = 1300;
 /** A composite's inside fitted to the view keeps this far (px) from the left and right edges: room for its frame's labels, outside its pins. */
 const FRAME_SIDE_PX = 120;
 /** A second click within this long (ms) and DOUBLE_PX of a click that opened or closed a composite is the double-click's, not one of its own. */
@@ -184,6 +186,13 @@ svg.many .selected > .box { filter: none; }
 /* An open composite selected: its outline only; its glow would grow with the zoom over its inside. */
 .selected.open > .box { filter: none; }
 svg.many .wire.selected { stroke-width: 4; }
+/* Show in Schematic (2026-10-29): the selection revealed pulses twice; with reduced motion its glow fades once, nothing blinks. */
+svg.shown-flash .selected, svg.shown-flash .halo, svg.shown-flash .ring { animation: shown-pulse 0.3s ease-in-out 4 alternate; }
+@keyframes shown-pulse { from { opacity: 1; } to { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) {
+  svg.shown-flash .selected, svg.shown-flash .halo, svg.shown-flash .ring { animation: shown-fade 1.2s ease-in 1; }
+}
+@keyframes shown-fade { from { filter: drop-shadow(0 0 8px var(--signal-focus, #5aa9ff)); } to { filter: none; } }
 .level { fill: var(--signal-track, #2a2f38); }
 .level-fill { fill: var(--signal-meter-rms, #3ecf8e); }
 .level-mark { fill: var(--signal-muted, #8a93a3); visibility: hidden; }
@@ -1784,6 +1793,8 @@ export class SignalSchematic extends HTMLElement {
     this.menuState = { target, close };
     this.hoverWire(this.hovered);
     return {
+      // What was clicked, for Signal.app's Show in items (ui/app/lib/show-in.js).
+      hit: target.hit,
       items: schematicMenu(target.hit, this.menuContext(target.hit, point)),
       act: (id) => {
         if (this.menuState?.target === target) this.endMenu();
@@ -2857,6 +2868,65 @@ export class SignalSchematic extends HTMLElement {
     this.keepSideScroll = true;
     if (hit) this.select([hit]);
     else this.schedule();
+  }
+
+  /**
+   * Whether `address` (an instance's, a pin's or a parameter's) can be
+   * shown: its level reached through composites of `graph` (not inside a
+   * library composite), its box there, and its pin.
+   */
+  revealable(address) {
+    if (!this.graph || !address) return false;
+    const at = splitAddress(address);
+    const instance = at ? at.instance : address;
+    const links = chain((level) => this.layoutOf(level), parentPath(instance));
+    const node = links?.at(-1).layout.nodes.find((n) => n.kind === 'instance' && n.name === instance.slice(instance.lastIndexOf('/') + 1));
+    if (!node) return false;
+    return !at || [...node.ins, ...node.outs].some((p) => p.name === at.port);
+  }
+
+  /**
+   * Show in Schematic (Signal.app's context menu, 2026-10-29): `subject`
+   * (`{kind: 'instance' | 'pin', address}` or `{kind: 'wire', from, to}`)
+   * revealed (`reveal`) and selected with its wires (a pin's connections at
+   * its level; a wire's two ends), then flashed. Returns whether it was found.
+   */
+  revealAddress(subject) {
+    const wire = subject?.kind === 'wire';
+    const start = wire ? [subject.from, subject.to].find((a) => this.revealable(a)) : subject?.address;
+    if (!start || !this.revealable(start)) return false;
+    const pin = Boolean(splitAddress(start));
+    // Its tab just shown: the drawing area's size now, not the hidden tab's 0×0.
+    this.measure();
+    this.reveal({ kind: pin ? 'pin' : 'instance', address: start });
+    const hit = this.selected.length === 1 ? this.selected[0] : null;
+    if (!hit) return false;
+    if (hit.kind === 'port') {
+      const entry = { path: hit.path, level: hit.level };
+      const layout = this.layoutOf(hit.level);
+      const wires = (layout?.wires ?? []).map((w) => wireHit(entry, w)).filter((w) => (wire ? w.from === subject.from && w.to === subject.to : w.from === hit.address || w.to === hit.address));
+      const ends = [];
+      if (wire && wires.length) {
+        for (const side of ['from', 'to']) {
+          const end = wires[0].wire[side];
+          const node = layout.nodes.find((n) => n.id === end.node);
+          const port = (side === 'from' ? node?.outs : node?.ins)?.find((p) => p.name === end.port);
+          if (port) ends.push(portHit(entry, node, port));
+        }
+      }
+      if (wires.length) this.select(wire ? [...wires.slice(0, 1), ...ends] : [hit, ...wires]);
+    }
+    this.flashSelection();
+    return true;
+  }
+
+  /** The selection flashed for a moment (`shown-flash` on the drawing: the marks pulse, or fade with reduced motion). */
+  flashSelection() {
+    clearTimeout(this.flashTimer);
+    this.svg.classList.remove('shown-flash');
+    void this.svg.getBoundingClientRect?.();
+    this.svg.classList.add('shown-flash');
+    this.flashTimer = setTimeout(() => this.svg.classList.remove('shown-flash'), SHOWN_FLASH_MS);
   }
 
   // Level bars.
