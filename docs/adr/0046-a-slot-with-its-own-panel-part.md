@@ -1,6 +1,6 @@
 # ADR 0046: A slot with its own panel part
 
-- **Status:** Proposed (2026-10-29). The owner, looking at the schematic's panel controls drawn as nodes beside their instances (commit f9d2718, `ui/lib/schematic-controls.js`), said (translated): "the direction is good. I see these blocks move together — we could put each of them into a slot." Asked whether that means a visual frame or a real slot, the owner chose **a real slot in the project**: the module and its panel controls actually go into one slot, a self-contained, loadable unit with its own panel part. The design below is the operator's; the questions of taste are at the end.
+- **Status:** Accepted (2026-10-29; the owner: "mehet, nézzük meg így", taking every proposed answer below). Proposed 2026-10-29. The owner, looking at the schematic's panel controls drawn as nodes beside their instances (commit f9d2718, `ui/lib/schematic-controls.js`), said (translated): "the direction is good. I see these blocks move together — we could put each of them into a slot." Asked whether that means a visual frame or a real slot, the owner chose **a real slot in the project**: the module and its panel controls actually go into one slot, a self-contained, loadable unit with its own panel part. The design below is the operator's; the questions of taste are at the end.
 - **Builds on:** ADR 0009 (text is the truth), 0023 §4 (panels are HTML in `ui/`, bound by address), 0026 §3–5 (schematic positions, the panel editor and its whitelist), 0032 (cards across windows), 0035 §10 (an included project's panel rooted at its instance: `<signal-panel root>`, not built yet), **0037** (slots, the slot card, bindings through the match, "Editable insides"), 0040 (writer lock), 0041 (snapshots), 0044 (polyphonic slots), **0045** (auto ports; project templates may hold them, library templates may not).
 - **Amends, when accepted:** ADR 0037 §7 "Panels" (the content's own cards: a slot shows its part instead, §5), ADR 0035 §10 (the root mechanism is shared and defined here, §3), ADR 0026 §5 (the whitelist: `<signal-slot>` also as a card, §5). **Supersedes nothing.**
 - **Date:** 2026-10-29
@@ -172,10 +172,10 @@ A new patch op, **`slot.group {instance, controls?}`**: Edit patch's menu on any
 | 2. Editing across the boundary | dragging controls in and out of a slot card; own-inside inner parameters editable (§4); `slot.ungroup`; project-template parts | Test 5 and the rest of 7 |
 | 3. Units that travel | rooted project panels (with ADR 0035 §10), Make part own, Save slot as project…; library template parts and poly readers when a project needs them | The owner's verdict (test 8) |
 
-## Open questions for the owner (taste)
-1. **The closed slot in the schematic:** its controls inside one bigger box (proposed), or beside the box inside a shared outline?
-2. **The open slot card in the panel:** the part's cards open by default (proposed), or folded to the header?
-3. **What Group into slot loads:** the module as it is, shared, with the plan unchanged (proposed; the first edit inside then makes an own copy), or an own inside at once?
-4. **A composite with a panel:** should a plain composite instance ever show a part, or only slots (proposed: only slots)?
-5. **Grouping several instances into one slot** (synth with its echo): later, as an own inside holding them. Their addresses would move a level down (`/synth` → `/voice/synth`), so the panel's and snapshots' addresses would be rewritten. Is this wanted, and when?
-6. **The name "part"** (the owner's "panel part"), or "face" or "front panel"?
+## Decided questions of taste (owner, 2026-10-29)
+1. **The closed slot in the schematic:** its controls inside one bigger box.
+2. **The open slot card in the panel:** the part's cards open by default.
+3. **What Group into slot loads:** the module as it is, shared, with the plan unchanged; the first edit inside makes an own copy.
+4. **A composite with a panel:** only slots have a part.
+5. **Grouping several instances into one slot:** not in these phases; a later ADR when wanted (addresses would move a level down).
+6. **The name:** "part".
