@@ -50,6 +50,7 @@ fn ctx(level: &str) -> Context<'_> {
         content: &no_content,
         file: &no_file,
         source: &no_source,
+        bound: &super::no_bindings,
     }
 }
 

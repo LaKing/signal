@@ -87,6 +87,7 @@ fn run(files: &Files, level: &str, ops: &[Op]) -> Result<(Files, Patched), Patch
         content: &content,
         file: &file,
         source: &source,
+        bound: &super::no_bindings,
     };
     let path = level_path(level);
     let patched = apply(&files[&path], None, ops, &ctx)?;

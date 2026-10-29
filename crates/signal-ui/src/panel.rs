@@ -135,6 +135,12 @@ pub struct Panel {
     slot_ports: BTreeMap<String, SlotPort>,
     /// ADR 0037 §7: the top-level slots' names.
     slots: Vec<String>,
+    /// ADR 0046 §3: every slot's interface (its ports' and parameters'
+    /// names), by the slot as its resolution names it (`/synth`, `rack/fx`).
+    slot_interfaces: BTreeMap<String, Vec<String>>,
+    /// ADR 0046 §2–3: each slot's part key (`synth`, `rack.fx`) and the
+    /// roots it is rendered at (`/synth`; each instance of `rack`'s `/fx`).
+    part_roots: BTreeMap<String, Vec<String>>,
 }
 
 /// What a binding on a slot's port reaches (ADR 0037 §7).
@@ -421,6 +427,29 @@ impl Panel {
                 slot_ports.insert(format!("/{name}.{}", port.name), reached);
             }
         }
+        let mut slot_interfaces = BTreeMap::new();
+        let mut part_roots = BTreeMap::new();
+        for resolution in &planned.slots {
+            let names: Vec<String> = resolution
+                .interface
+                .ports
+                .iter()
+                .map(|p| p.name.clone())
+                .collect();
+            slot_interfaces.insert(resolution.slot.clone(), names);
+            if let Some(name) = resolution.slot.strip_prefix('/') {
+                if !name.contains('/') {
+                    part_roots.insert(name.to_owned(), vec![resolution.slot.clone()]);
+                }
+            } else if let Some((composite, slot)) = resolution.slot.split_once('/') {
+                let roots = project
+                    .instances_of(composite)
+                    .into_iter()
+                    .map(|path| format!("{path}/{slot}"))
+                    .collect();
+                part_roots.insert(format!("{composite}.{slot}"), roots);
+            }
+        }
         Panel {
             instances,
             patterns: project
@@ -431,7 +460,26 @@ impl Panel {
             corrected: planned.corrected.clone(),
             slot_ports,
             slots: slots.keys().map(|n| (*n).to_owned()).collect(),
+            slot_interfaces,
+            part_roots,
         }
+    }
+
+    /// ADR 0046 §3: the names of slot `slot`'s interface (`/synth`,
+    /// `rack/fx`); `None` for no such slot.
+    pub fn slot_interface(&self, slot: &str) -> Option<&[String]> {
+        self.slot_interfaces.get(slot).map(Vec::as_slice)
+    }
+
+    /// ADR 0046 §2: where the part `key` is rendered (`/synth`; each
+    /// instance of a composite's slot); `None` when no slot has that key.
+    pub fn part_roots(&self, key: &str) -> Option<&[String]> {
+        self.part_roots.get(key).map(Vec::as_slice)
+    }
+
+    /// ADR 0046 §2: the slots' part keys, in order.
+    pub fn part_keys(&self) -> impl Iterator<Item = &str> {
+        self.part_roots.keys().map(String::as_str)
     }
 
     /// ADR 0037 §7: whether `name` is a top-level slot, loaded or empty.
@@ -576,6 +624,10 @@ impl Panel {
         self.instances = other.instances;
         self.patterns = other.patterns;
         self.corrected = other.corrected;
+        self.slot_ports = other.slot_ports;
+        self.slots = other.slots;
+        self.slot_interfaces = other.slot_interfaces;
+        self.part_roots = other.part_roots;
     }
 
     /// The kind of the project's pattern `name` (`patterns/<name>.toml`), if

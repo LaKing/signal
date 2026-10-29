@@ -43,6 +43,7 @@ pub mod keys;
 mod local;
 pub mod panel;
 pub mod panel_write;
+pub mod parts;
 pub mod player;
 mod server;
 pub mod setup;

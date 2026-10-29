@@ -70,6 +70,7 @@ fn ctx() -> Context<'static> {
         content: &content,
         file: &no_file,
         source: &source,
+        bound: &super::no_bindings,
     }
 }
 

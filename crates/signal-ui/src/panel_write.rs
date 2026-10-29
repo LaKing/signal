@@ -15,10 +15,28 @@ const WHITELIST: &str = include_str!("../../../ui/lib/panel-whitelist.json");
 
 /// The containers, by key (`div.row`): the attributes they take and the
 /// keys of their children (`control`, `text`, or a container's).
-struct Whitelist {
-    containers: BTreeMap<String, (Vec<String>, Vec<String>)>,
-    controls: BTreeMap<String, Vec<String>>,
-    boolean: Vec<String>,
+pub(crate) struct Whitelist {
+    pub(crate) containers: BTreeMap<String, (Vec<String>, Vec<String>)>,
+    pub(crate) controls: BTreeMap<String, Vec<String>>,
+    pub(crate) boolean: Vec<String>,
+    /// The attributes' fixed order in the canonical text.
+    pub(crate) order: Vec<String>,
+}
+
+impl Whitelist {
+    /// Whether a child of key `key` (`control` for a control, whose tag is
+    /// `tag`) may stand in the container `parent`: its key in the
+    /// container's children, or, for a control, its tag (ADR 0046 §5:
+    /// `signal-slot` as a card).
+    pub(crate) fn fits(&self, parent: &str, key: &str, tag: &str) -> bool {
+        if parent == "panel" {
+            return key == "div.signal-cards";
+        }
+        self.containers.get(parent).is_some_and(|(_, children)| {
+            children.iter().any(|c| c == key)
+                || (key == "control" && children.iter().any(|c| c == tag))
+        })
+    }
 }
 
 fn strings(value: &Value) -> Vec<String> {
@@ -33,7 +51,7 @@ fn strings(value: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn whitelist() -> &'static Whitelist {
+pub(crate) fn whitelist() -> &'static Whitelist {
     static PARSED: OnceLock<Whitelist> = OnceLock::new();
     PARSED.get_or_init(|| {
         // A malformed file accepts nothing (the tests read it).
@@ -63,12 +81,13 @@ fn whitelist() -> &'static Whitelist {
             containers,
             controls,
             boolean: strings(&field("boolean")),
+            order: strings(&field("order")),
         }
     })
 }
 
 /// The containers' elements and required classes, by key.
-const CONTAINERS: [(&str, &str, &str); 4] = [
+pub(crate) const CONTAINERS: [(&str, &str, &str); 4] = [
     ("div.signal-cards", "div", "signal-cards"),
     ("section.signal-card", "section", "signal-card"),
     ("div.row", "div", "row"),
@@ -76,7 +95,7 @@ const CONTAINERS: [(&str, &str, &str); 4] = [
 ];
 
 /// A class token the whitelist's `classToken` allows: `[a-z][a-z0-9-]*`.
-fn class_token(token: &str) -> bool {
+pub(crate) fn class_token(token: &str) -> bool {
     let mut bytes = token.bytes();
     bytes.next().is_some_and(|b| b.is_ascii_lowercase())
         && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
@@ -84,7 +103,7 @@ fn class_token(token: &str) -> bool {
 
 /// `text` with its character references decoded; only `&amp; &lt; &gt;
 /// &quot; &#N; &#xN;`, as the page reads them.
-fn decode(text: &str) -> Result<String, String> {
+pub(crate) fn decode(text: &str) -> Result<String, String> {
     let mut out = String::new();
     let mut rest = text;
     while let Some(amp) = rest.find('&') {
@@ -300,13 +319,7 @@ pub fn check_content(html: &str) -> Result<(), String> {
             ));
         };
         let parent = stack.last().map(|(k, _)| k.clone()).unwrap_or_default();
-        let fits = if parent == "panel" {
-            key == "div.signal-cards"
-        } else {
-            list.containers
-                .get(&parent)
-                .is_some_and(|(_, children)| children.contains(&key))
-        };
+        let fits = list.fits(&parent, &key, &tag);
         if !fits {
             return Err(fail(begin, format!("<{tag}> is not allowed in {parent}")));
         }

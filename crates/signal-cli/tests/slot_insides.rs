@@ -71,6 +71,7 @@ fn patch_project(dir: &Path, ops: &[Op]) -> patch::Patched {
         content: &content,
         file: &file,
         source: &source,
+        bound: &patch::no_bindings,
     };
     let before = fs::read_to_string(dir.join("project.toml")).unwrap();
     let patched = patch::apply(&before, None, ops, &ctx).unwrap_or_else(|e| panic!("{e}"));

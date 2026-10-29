@@ -454,6 +454,7 @@ fn own_inside(project: &Project, slot: &str, registry: &Registry) -> Project {
         content: &content,
         file: &file,
         source: &source,
+        bound: &patch::no_bindings,
     };
     let op: patch::Op =
         serde_json::from_value(serde_json::json!({"op": "slot.inside", "slot": slot})).unwrap();

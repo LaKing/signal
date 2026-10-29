@@ -57,7 +57,7 @@ use signal_project::{Diagnostic, LoadError, PATTERNS, PROJECT_FILE, Project, loc
 
 use crate::PROTOCOL;
 use crate::app::{self, Status};
-use crate::bindings::{MAIN_PANEL, Targets, check, panel_content};
+use crate::bindings::{MAIN_PANEL, Targets, check_file, panel_content};
 use crate::document::{Document, Ticket, project_name};
 use crate::frames::{self, frame};
 use crate::keys::{self, Keys};
@@ -3675,6 +3675,8 @@ impl Host {
             // ADR 0035 §8, ADR 0037 §7: includes (with their rate notes)
             // and slots; null without either.
             "content": self.run.as_ref().map(|r| r.current.content_json(&self.registry, self.rate)),
+            // ADR 0046 §11 (additive): the slots' parts, their controls rooted.
+            "parts": self.parts_json(),
         });
         if restarted {
             describe = with(describe, "restarted", json!(true));
@@ -3807,7 +3809,90 @@ impl Host {
         if let (Some(insides), Value::Object(fields)) = (insides, &mut graph) {
             fields.insert("insides".to_owned(), insides);
         }
+        // ADR 0046 §6: each slot box's part, its controls rooted.
+        if let Some(top) = graph.get_mut("top") {
+            self.add_parts(top, "");
+        }
+        if let Some(Value::Object(levels)) = graph.get_mut("composites") {
+            for (name, level) in levels.iter_mut() {
+                self.add_parts(level, name);
+            }
+        }
         Ok(graph)
+    }
+
+    /// ADR 0046 §2: the part of slot `slot` at `level` rooted at `root`, as
+    /// `graph` and `describe` give it: `{file, base, controls, error}`,
+    /// `null` when the slot has none.
+    fn part_json(&self, level: &str, slot: &str, root: &str) -> Value {
+        let path = signal_project::patch::part_path(level, slot);
+        let Some(text) = self.ui_text(&path) else {
+            return Value::Null;
+        };
+        let key = signal_project::patch::part_key(level, slot);
+        let wanted = crate::parts::marker(&key);
+        let error = match crate::parts::marker_in(&text) {
+            Some((found, _)) if found == wanted => Value::Null,
+            Some((found, _)) => json!(format!(
+                "its <signal-panel> names `{found}`, not its slot `{wanted}` (part=\"{wanted}\")"
+            )),
+            None => json!(format!("no <signal-panel part=\"{wanted}\">")),
+        };
+        json!({
+            "file": path,
+            "base": sha256_hex(text.as_bytes()),
+            "root": root,
+            "controls": crate::parts::rooted_controls(&text, root),
+            "error": error,
+        })
+    }
+
+    /// `level`'s slot boxes (a `graph` level: the top level, or composite
+    /// `composite`'s) given their `slot.part`.
+    fn add_parts(&self, level: &mut Value, composite: &str) {
+        let Some(Value::Array(instances)) = level.get_mut("instances") else {
+            return;
+        };
+        for instance in instances {
+            let name = instance
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let root = instance
+                .get("address")
+                .and_then(Value::as_str)
+                .map_or_else(|| format!("/{name}"), str::to_owned);
+            let Some(Value::Object(slot)) = instance.get_mut("slot") else {
+                continue;
+            };
+            slot.insert("part".to_owned(), self.part_json(composite, &name, &root));
+        }
+    }
+
+    /// `describe.parts` (ADR 0046 §11): every slot's part that exists, its
+    /// file, the roots it is rendered at and its controls rooted at the
+    /// first, in key order.
+    fn parts_json(&self) -> Value {
+        let mut list = Vec::new();
+        for key in self.panel.part_keys() {
+            let (level, slot) = key.split_once('.').unwrap_or(("", key));
+            let roots = self.panel.part_roots(key).unwrap_or_default();
+            let root = roots
+                .first()
+                .cloned()
+                .unwrap_or_else(|| format!("/{}", crate::parts::marker(key)));
+            let part = self.part_json(level, slot, &root);
+            if part.is_null() {
+                continue;
+            }
+            list.push(with(
+                with(part, "slot", json!(crate::parts::slot_of(key))),
+                "roots",
+                json!(roots),
+            ));
+        }
+        Value::Array(list)
     }
 
     /// `graph.interfaces` (ADR 0037 §3, phase 3, additive): the interface
@@ -4184,6 +4269,17 @@ impl Host {
             }
             _ => return Err(fail("bad-message", "patch needs `ops`, a list of ops")),
         };
+        // ADR 0046 §8: what an untrusted `panel.restore` may write.
+        for op in &ops {
+            if let Op::PanelRestore {
+                file,
+                text: Some(text),
+                ..
+            } = op
+            {
+                self.panel_restore_allowed(file, text)?;
+            }
+        }
         let sources = signal_project::read_sources(&self.dir)
             .map_err(|e| fail("does-not-load", e.to_string()))?;
         // The level's file is one the project read: never a path from the client.
@@ -4274,14 +4370,26 @@ impl Host {
         let templates = signal_project::interface_templates(&sources);
         let dir = self.dir.clone();
         let content = |load: &str| signal_project::content_names(loaded, &dir, load, registry);
-        // ADR 0037, editable insides: a slot's own inside, the patch's other file.
+        // ADR 0037, editable insides: a slot's own inside, the patch's other
+        // file; ADR 0046: a slot's part and the panels (`ui/…`), read now.
         let file_of = |path: &str| {
+            if path.starts_with("ui/") {
+                return self.ui_text(path);
+            }
             sources
                 .iter()
                 .find(|s| s.path == path)
                 .map(|s| s.text.clone())
         };
         let source = |load: &str| signal_project::inside::source(&sources, load, registry);
+        // ADR 0046 §8: what the host's panels bind on an instance of the level.
+        let ui_dir = project_ui(&self.dir);
+        let level_paths: Vec<String> = if level.is_empty() {
+            vec![String::new()]
+        } else {
+            loaded.map(|p| p.instances_of(level)).unwrap_or_default()
+        };
+        let bound = |name: &str| crate::parts::bound_on(&ui_dir, &level_paths, name);
         let ctx = patch::Context {
             level,
             module: &order,
@@ -4289,9 +4397,13 @@ impl Host {
             content: &content,
             file: &file_of,
             source: &source,
+            bound: &bound,
         };
-        let patched = patch::apply(&before, positions.as_deref(), &ops, &ctx)
+        let mut patched = patch::apply(&before, positions.as_deref(), &ops, &ctx)
             .map_err(|e| fail(e.code, e.message))?;
+        // ADR 0046 §7–8: the panels' side (controls moved into a part, a
+        // part's controls on removed ports), more of the patch's files.
+        self.part_edits(level, &ops, &mut patched)?;
         let mut edited = sources.clone();
         if let Some(source) = edited.get_mut(index) {
             source.text = patched.text.clone();
@@ -4305,6 +4417,10 @@ impl Host {
                         change.path
                     ),
                 ));
+            }
+            // Presentation: no project source.
+            if change.path.starts_with("ui/") {
+                continue;
             }
             edited.retain(|s| s.path != change.path);
             if let Some(text) = &change.after {
@@ -4386,6 +4502,12 @@ impl Host {
         };
         // The undo is tried on the files as the patch leaves them.
         let edited_file = |path: &str| {
+            if path.starts_with("ui/") {
+                return match patched.files.iter().find(|c| c.path == path) {
+                    Some(change) => change.after.clone(),
+                    None => self.ui_text(path),
+                };
+            }
             edited
                 .iter()
                 .find(|s| s.path == path)
@@ -4611,7 +4733,34 @@ impl Host {
             }
         }
         // ADR 0037 §2: a slot port renamed, the panels' bindings on it follow.
-        let rebound = self.rebind(&instance_paths, &patched.renamed, &mut notes);
+        // ADR 0046: the panels the patch wrote (a part made or removed,
+        // controls moved) taken as seen and shown to every client.
+        for change in &patched.files {
+            let Some(name) = change.path.strip_prefix("ui/") else {
+                continue;
+            };
+            if kept.contains(&change.path.as_str()) {
+                continue;
+            }
+            self.seen(Path::new(&change.path));
+            if !name.ends_with(".html") {
+                continue;
+            }
+            let html = change.after.as_deref().and_then(|text| {
+                panel_content(text)
+                    .ok()
+                    .and_then(|(start, end)| text.get(start..end))
+            });
+            self.broadcast(&json!({
+                "type": "panel.written",
+                "file": name,
+                "base": change.after.as_ref().map(|t| sha256_hex(t.as_bytes())),
+                "html": html,
+            }));
+        }
+        let mut rebound = self.rebind(&instance_paths, &patched.renamed, &mut notes);
+        // ADR 0046 §7: a renamed interface port's part controls follow it.
+        rebound.extend(self.rebind_parts(level, &patched.renamed, &mut notes));
         // ADR 0041: the snapshots' values of a renamed or removed slot
         // parameter follow it (top-level controls only), under the same lock.
         let resnapped = if level.is_empty() {
@@ -4802,6 +4951,69 @@ impl Host {
         written
     }
 
+    /// ADR 0046 §7: the parts of the slots whose interface ports `renamed`
+    /// (`slot.old` → `slot.new` at `level`) rewritten, `.old` → `.new`, as
+    /// the host panels' bindings are ([`Host::rebind`]); the parts written.
+    fn rebind_parts(
+        &mut self,
+        level: &str,
+        renamed: &[(String, String)],
+        notes: &mut Vec<String>,
+    ) -> Vec<String> {
+        let mut by_part: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+        for (old, new) in renamed {
+            let (Some((slot, from)), Some((_, to))) = (old.split_once('.'), new.split_once('.'))
+            else {
+                continue;
+            };
+            by_part
+                .entry(signal_project::patch::part_path(level, slot))
+                .or_default()
+                .push((format!(".{from}"), format!(".{to}")));
+        }
+        let mut written = Vec::new();
+        for (path, renames) in by_part {
+            if self.linked_file(&path) {
+                if self.dir.join(&path).exists() {
+                    notes.push(format!(
+                        "{path}: its bindings were not rewritten (it is reached through a link)"
+                    ));
+                }
+                continue;
+            }
+            let full = self.dir.join(&path);
+            let Ok(text) = fs::read_to_string(&full) else {
+                continue;
+            };
+            let Some(new) = crate::bindings::rewrite_bindings(&text, &renames) else {
+                continue;
+            };
+            match transaction::replace_unchanged(&full, Some(text.as_bytes()), new.as_bytes()) {
+                Ok(true) => {
+                    self.seen(Path::new(&path));
+                    let html = panel_content(&new)
+                        .ok()
+                        .and_then(|(start, end)| new.get(start..end))
+                        .map(str::to_owned);
+                    self.broadcast(&json!({
+                        "type": "panel.written",
+                        "file": path.trim_start_matches("ui/"),
+                        "base": sha256_hex(new.as_bytes()),
+                        "html": html,
+                    }));
+                    written.push(path);
+                }
+                Ok(false) => notes.push(format!(
+                    "{path}: its bindings were not rewritten (another writer changed it meanwhile)"
+                )),
+                Err(error) => {
+                    notes.push(format!("{path}: its bindings were not rewritten ({error})"))
+                }
+            }
+        }
+        written
+    }
+
     /// ADR 0041 with ADR 0037 §2: in `snapshots.toml` (when the project has
     /// one), every snapshot's value (the undo snapshot's too) of a top-level
     /// slot port renamed or removed by the patch follows it, in the order of
@@ -4872,6 +5084,257 @@ impl Host {
         link(&self.dir.join(file))
             || (file.starts_with("composites/") && link(&self.dir.join("composites")))
             || (file.starts_with("interfaces/") && link(&self.dir.join("interfaces")))
+            || (file.starts_with("ui/") && link(&project_ui(&self.dir)))
+            || (file.starts_with("ui/parts/") && link(&self.dir.join("ui/parts")))
+    }
+
+    /// ADR 0046: a presentation file of the project (`ui/main.html`,
+    /// `ui/windows.toml`, `ui/parts/<key>.html`) as it is now; `None` when
+    /// it is absent, unreadable or reached through a link (never written).
+    fn ui_text(&self, file: &str) -> Option<String> {
+        if self.linked_file(file) {
+            return None;
+        }
+        fs::read_to_string(self.dir.join(file)).ok()
+    }
+
+    /// ADR 0046 §7–8: the panels' side of a patch, added to `patched` as
+    /// more of its files with their `panel.restore` inverses (the undo puts
+    /// them back first): Group into slot at the top level moves the main
+    /// panel's controls on the instance into its new part, the open slot
+    /// card in their place, and `ui/windows.toml` follows the moved cards;
+    /// an interface edit that removes a port a part binds is `in-use`,
+    /// unless `removeControls`, which removes those controls from the part.
+    fn part_edits(
+        &self,
+        level: &str,
+        ops: &[Op],
+        patched: &mut patch::Patched,
+    ) -> Result<(), Failure> {
+        // The presentation files as the patch leaves them: (read, now).
+        let mut files: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
+        let now = |files: &BTreeMap<String, (Option<String>, Option<String>)>,
+                   patched: &patch::Patched,
+                   path: &str| {
+            if let Some((_, now)) = files.get(path) {
+                return now.clone();
+            }
+            match patched.files.iter().find(|c| c.path == path) {
+                Some(change) => change.after.clone(),
+                None => self.ui_text(path),
+            }
+        };
+        let set = |files: &mut BTreeMap<String, (Option<String>, Option<String>)>,
+                   was: Option<String>,
+                   path: &str,
+                   text: Option<String>| {
+            files.entry(path.to_owned()).or_insert((was, None)).1 = text;
+        };
+        for op in ops {
+            match op {
+                Op::SlotGroup { instance, controls } if level.is_empty() => {
+                    let main = format!("ui/{MAIN_PANEL}");
+                    // Without a main panel the default one shows the slot's card.
+                    let Some(text) = now(&files, patched, &main) else {
+                        continue;
+                    };
+                    let grouped = panel_content(&text).and_then(|(start, end)| {
+                        crate::parts::group_content(
+                            text.get(start..end).unwrap_or(""),
+                            instance,
+                            controls.as_deref(),
+                        )
+                    });
+                    let grouped = match grouped {
+                        Ok(grouped) => grouped,
+                        Err(why) => {
+                            patched.notes.push(format!(
+                                "ui/{MAIN_PANEL} was not changed: its controls on {instance} still bind it from the host's panel ({why})"
+                            ));
+                            continue;
+                        }
+                    };
+                    let Some(new) = crate::parts::with_content(&text, &grouped.host) else {
+                        continue;
+                    };
+                    set(&mut files, Some(text.clone()), &main, Some(new));
+                    if let Some(content) = &grouped.part {
+                        let path = format!("ui/{}", crate::parts::file_of(instance));
+                        if let Some(was) = now(&files, patched, &path) {
+                            return Err(fail_with(
+                                "bad-value",
+                                format!(
+                                    "{path} exists already: move or remove it before grouping {instance} (ADR 0046)"
+                                ),
+                                json!({"file": path, "base": sha256_hex(was.as_bytes())}),
+                            ));
+                        }
+                        set(
+                            &mut files,
+                            None,
+                            &path,
+                            Some(crate::parts::part_text(instance, content)),
+                        );
+                        patched.notes.push(format!(
+                            "moved {} control{} on {instance} into {path}",
+                            grouped.moved,
+                            if grouped.moved == 1 { "" } else { "s" }
+                        ));
+                    }
+                    let windows = crate::WINDOWS_FILE;
+                    if let Some(text) = now(&files, patched, windows)
+                        && let Some(new) = crate::parts::rename_cards(&text, &grouped.cards)
+                    {
+                        set(&mut files, Some(text), windows, Some(new));
+                    }
+                }
+                Op::SlotGroup { instance, .. } => patched.notes.push(format!(
+                    "{instance} is in the composite {level}: no control moved (a part here would be every instance's; add one with Edit layout)"
+                )),
+                Op::SlotInterface {
+                    slot,
+                    remove,
+                    remove_controls,
+                    ..
+                } if !remove.is_empty() => {
+                    let path = signal_project::patch::part_path(level, slot);
+                    let Some(text) = now(&files, patched, &path) else {
+                        continue;
+                    };
+                    let on = crate::parts::controls_on(&text, remove);
+                    if on.is_empty() {
+                        continue;
+                    }
+                    if !remove_controls {
+                        let references: Vec<Value> = on
+                            .iter()
+                            .map(|c| json!({"file": path, "text": c}))
+                            .collect();
+                        return Err(fail_with(
+                            "in-use",
+                            format!(
+                                "not removed: {path} binds it ({}); remove its controls too with removeControls",
+                                on.join(", ")
+                            ),
+                            json!({"references": references}),
+                        ));
+                    }
+                    match crate::parts::without_controls(&text, remove) {
+                        Ok(Some(new)) => {
+                            set(&mut files, Some(text), &path, Some(new));
+                            patched.notes.push(format!(
+                                "removed {} from {path}",
+                                on.join(", ")
+                            ));
+                        }
+                        Ok(None) => {}
+                        Err(why) => {
+                            return Err(fail(
+                                "bad-value",
+                                format!(
+                                    "{path}'s controls were not removed: it is not a panel the editor writes ({why}); edit it by hand"
+                                ),
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut undo = Vec::new();
+        for (path, (before, after)) in files {
+            if before == after {
+                continue;
+            }
+            if patched.files.iter().any(|c| c.path == path) {
+                return Err(fail(
+                    "bad-value",
+                    format!(
+                        "{path}: a patch writes it once (a panel.restore and a slot op of the same patch)"
+                    ),
+                ));
+            }
+            undo.push(Op::PanelRestore {
+                file: path.trim_start_matches("ui/").to_owned(),
+                text: before.clone(),
+                was: after.clone(),
+            });
+            patched.files.push(patch::FileChange {
+                path,
+                before,
+                after,
+            });
+        }
+        if !undo.is_empty() {
+            undo.append(&mut patched.inverse);
+            patched.inverse = undo;
+        }
+        Ok(())
+    }
+
+    /// ADR 0046 §8: an untrusted `panel.restore` (an inverse a client sends
+    /// back) writes only what a panel may hold: in an HTML file, a
+    /// `<signal-panel>` whose content the panel editor reads (the
+    /// whitelist; comments allowed), and, outside it, what the file holds
+    /// now (a part that does not exist: comments and space only);
+    /// `ui/windows.toml` must read as TOML.
+    fn panel_restore_allowed(&self, file: &str, text: &str) -> Result<(), Failure> {
+        let refused = |why: String| fail("bad-value", format!("panel.restore of ui/{file}: {why}"));
+        if file == "windows.toml" {
+            return text
+                .parse::<toml_edit::DocumentMut>()
+                .map(|_| ())
+                .map_err(|e| refused(format!("not TOML ({})", e.to_string().trim())));
+        }
+        let (start, end) = panel_content(text).map_err(refused)?;
+        crate::parts::parse(text.get(start..end).unwrap_or(""))
+            .map_err(|why| refused(format!("its panel is not one the editor reads ({why})")))?;
+        let outside = |t: &str, s: usize, e: usize| {
+            format!("{}{}", t.get(..s).unwrap_or(""), t.get(e..).unwrap_or(""))
+        };
+        let mine = outside(text, start, end);
+        match self.ui_text(&format!("ui/{file}")) {
+            Some(now) => {
+                let (s, e) = panel_content(&now).map_err(refused)?;
+                if outside(&now, s, e) != mine {
+                    return Err(refused(
+                        "it changes the file outside its <signal-panel>".to_owned(),
+                    ));
+                }
+            }
+            None => {
+                // Outside the panel element: comments, space and the
+                // element's own start and end tags only.
+                let mut rest = mine.as_str();
+                loop {
+                    rest = rest.trim_start();
+                    if rest.is_empty() {
+                        break;
+                    }
+                    if let Some(after) = rest.strip_prefix("<!--") {
+                        let close = after
+                            .find("-->")
+                            .ok_or_else(|| refused("an unterminated comment".to_owned()))?;
+                        rest = after.get(close + 3..).unwrap_or("");
+                        continue;
+                    }
+                    let tag_end = rest.find('>').map_or(rest.len(), |i| i + 1);
+                    let tag = rest.get(..tag_end).unwrap_or("");
+                    let lower = tag.to_ascii_lowercase();
+                    let panel = lower.starts_with("<signal-panel")
+                        && !lower.contains(" on")
+                        && !lower.contains("javascript:");
+                    if !(panel || lower == "</signal-panel>") {
+                        return Err(refused(
+                            "a new part holds nothing outside its <signal-panel> but comments"
+                                .to_owned(),
+                        ));
+                    }
+                    rest = rest.get(tag_end..).unwrap_or("");
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The edited project `new` (its files as an edit would leave them),
@@ -6935,7 +7398,8 @@ impl Host {
             plan,
             panel: &self.panel,
         };
-        let checked = check(&format!("ui/{name}"), &text, &targets);
+        // ADR 0046: a slot's part is checked at its roots.
+        let checked = check_file(name, &text, &targets);
         let diagnostics: Vec<Value> = checked
             .findings
             .iter()
@@ -6974,7 +7438,11 @@ impl Host {
         // through a link (a linked `ui/` or file is served, not edited).
         let link =
             |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
-        if link(&ui) || link(&ui.join(name)) {
+        let part = crate::parts::key_of(name);
+        if link(&ui)
+            || link(&ui.join(name))
+            || (part.is_some() && link(&ui.join(crate::parts::PARTS_DIR)))
+        {
             return Err(fail(
                 "unknown-panel",
                 format!(
@@ -6989,6 +7457,13 @@ impl Host {
             } else {
                 Err(unknown())
             };
+        }
+        // ADR 0046 §5: a slot's part, made by its first write.
+        if let Some(key) = part
+            && self.panel.part_roots(key).is_some()
+            && fs::symlink_metadata(ui.join(name)).is_err()
+        {
+            return Ok((ui.join(name), false));
         }
         let main = ui.join(MAIN_PANEL);
         if name == MAIN_PANEL && fs::symlink_metadata(&main).is_err() {
@@ -7256,7 +7731,11 @@ impl Host {
                 let range = panel_content(text).map_err(|why| fail("not-editable", why))?;
                 replace(text, range, html)
             }
-            None => first_file(&self.project_name(), html),
+            // ADR 0046 §5: a slot's part, made by its first write.
+            None => match crate::parts::key_of(name) {
+                Some(key) => crate::parts::part_text(key, html),
+                None => first_file(&self.project_name(), html),
+            },
         };
         let plan = self.plan.as_ref().ok_or_else(|| {
             fail(
@@ -7268,7 +7747,7 @@ impl Host {
             plan,
             panel: &self.panel,
         };
-        let checked = check(&format!("ui/{name}"), &after, &targets);
+        let checked = check_file(name, &after, &targets);
         if checked.failed() {
             let diagnostics: Vec<Value> = checked
                 .findings

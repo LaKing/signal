@@ -405,6 +405,18 @@ const TOOLS: &[Tool] = &[
         },
         run: slot_inside,
     },
+    Tool {
+        name: "slot_group",
+        group: Group::Patch,
+        description: "Group into slot (ADR 0046): makes instance `instance` a slot that loads what it held, with the same names (`module = \"x\"` becomes `slot = { … }, load = \"x\"`; `project = \"…\"` becomes `load = \"…\"`, `seed` and `set` kept), its interface every port a wire, an export or a panel binding names (auto, `{}`) and every parameter it sets or a wire, export or binding names. The plan does not change. At the top level the main panel's controls on the instance (all, or those of `controls`, their indexes among ui/main.html's controls) move into the slot's part, ui/parts/<instance>.html, their binds made relative, and the open slot card takes their place. An instance with `pattern` or `gpu`, or a slot, is refused. The reply's `inverse` undoes it, files included.",
+        schema: || {
+            object(
+                json!({"instance": {"type": "string"}, "controls": {"type": "array", "items": {"type": "integer"}}, "level": {"type": "string"}, "base": {"type": "string"}}),
+                &["instance"],
+            )
+        },
+        run: slot_group,
+    },
     // Edit text.
     Tool {
         name: "write_pattern",
@@ -1993,12 +2005,27 @@ fn patch_ops(context: &Context, level: String, base: Option<String>, ops_json: V
             signal_project::content_names(project.as_ref(), &context.dir, load, context.registry)
         };
         let file_of = |path: &str| {
+            // ADR 0046: a panel file (a slot's part, the main panel), read now.
+            if path.starts_with("ui/") {
+                return std::fs::read_to_string(context.dir.join(path)).ok();
+            }
             files
                 .iter()
                 .find(|s| s.path == path)
                 .map(|s| s.text.clone())
         };
         let source = |load: &str| signal_project::inside::source(&files, load, context.registry);
+        // ADR 0046 §8: what the panels bind on an instance, as the host reads it.
+        let paths: Vec<String> = if level.is_empty() {
+            vec![String::new()]
+        } else {
+            project
+                .as_ref()
+                .map(|p| p.instances_of(&level))
+                .unwrap_or_default()
+        };
+        let ui = signal_ui::project_ui(&context.dir);
+        let bound = |name: &str| signal_ui::parts::bound_on(&ui, &paths, name);
         let ctx = patch::Context {
             level: &level,
             module: &order,
@@ -2006,6 +2033,7 @@ fn patch_ops(context: &Context, level: String, base: Option<String>, ops_json: V
             content: &content,
             file: &file_of,
             source: &source,
+            bound: &bound,
         };
         // A patch that cannot be simulated here is not sent (fail closed).
         let patched = patch::apply(&before, None, &ops, &ctx)
@@ -2023,6 +2051,10 @@ fn patch_ops(context: &Context, level: String, base: Option<String>, ops_json: V
         // judged as write_file would judge it.
         let mut edited = replaced(files.clone(), &file, &patched.text);
         for change in &patched.files {
+            // ADR 0046: a panel file plays nothing.
+            if change.path.starts_with("ui/") {
+                continue;
+            }
             let was = change
                 .before
                 .as_deref()
@@ -2096,6 +2128,10 @@ fn slot_interface(context: &Context, arguments: &Value) -> Outcome {
 
 fn slot_inside(context: &Context, arguments: &Value) -> Outcome {
     slot_op(context, arguments, json!({"op": "slot.inside"}))
+}
+
+fn slot_group(context: &Context, arguments: &Value) -> Outcome {
+    slot_op(context, arguments, json!({"op": "slot.group"}))
 }
 
 fn schematic_move(context: &Context, arguments: &Value) -> Outcome {

@@ -567,9 +567,77 @@ enum Found {
     /// ADR 0037 §7: a slot's port that reaches nothing now (the slot empty,
     /// the port unmatched): the binding is inactive, and why.
     Inactive(String),
+    /// ADR 0046 §3: an address a part may not bind, and why (an error).
+    Refused(String),
+}
+
+/// Where a panel's binds are read (ADR 0046 §3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope<'a> {
+    /// A host panel (`ui/main.html`, …): absolute addresses only.
+    Host,
+    /// The part `key` of a slot, rendered at `root` (`/synth`, `/rack1/fx`):
+    /// relative addresses only.
+    Part {
+        /// `synth`, `rack.fx`.
+        key: &'a str,
+        /// `/synth`, `/rack1/fx`.
+        root: &'a str,
+    },
+}
+
+impl Scope<'_> {
+    /// `address` as written in a panel of this scope, as the absolute
+    /// address it binds; else why not (an error).
+    fn parse(&self, address: &str) -> Result<PortAddress, String> {
+        let absolute = match self {
+            Scope::Host => {
+                if address.starts_with('.') {
+                    return Err(format!(
+                        "`{address}` is a relative bind, which only a slot's part (ui/parts/<slot>.html, ADR 0046) takes: here bind /<instance>.<port>"
+                    ));
+                }
+                address.to_owned()
+            }
+            Scope::Part { root, .. } => crate::parts::root_address(address, root)?,
+        };
+        absolute
+            .parse()
+            .map_err(|error| format!("'{address}' is not a port address: {error}"))
+    }
 }
 
 impl Targets<'_> {
+    /// What `port` (already rooted) names in `scope`: in a part, `.<name>`
+    /// must be of the slot's interface (an error otherwise), and an address
+    /// with nothing behind it now is inactive, never unknown (ADR 0046 §3).
+    fn find_scoped(&self, port: &PortAddress, scope: Scope<'_>) -> Option<Found> {
+        let Scope::Part { key, root } = scope else {
+            return self.find(port);
+        };
+        let found = self.find(port);
+        if port.instance().as_str() == root {
+            let slot = crate::parts::slot_of(key);
+            let name = port.port();
+            let listed = self
+                .panel
+                .slot_interface(&slot)
+                .is_some_and(|names| names.iter().any(|n| n == name));
+            if !listed {
+                return Some(Found::Refused(format!(
+                    "not in {}'s interface: `.{name}`; add it with Edit interface, or bind it inside the content (/<path>.<port>)",
+                    crate::parts::marker(key)
+                )));
+            }
+            return Some(found.unwrap_or_else(|| {
+                Found::Inactive(format!(
+                    "{root} is empty, or `{name}` reaches nothing in its content"
+                ))
+            }));
+        }
+        Some(found.unwrap_or_else(|| Found::Inactive(format!("not in {root}'s current content"))))
+    }
+
     fn find(&self, port: &PortAddress) -> Option<Found> {
         // ADR 0037 §7: a slot's port is translated through its match.
         match self.panel.slot_port(&port.to_string()) {
@@ -676,8 +744,14 @@ fn describe_port(direction: Direction, shape: PortShape, sink: bool) -> String {
 }
 
 /// Checks the panel `text` of `file` (relative to the project folder)
-/// against `targets`.
+/// against `targets`: a host panel, whose binds are absolute.
 pub fn check(file: &str, text: &str, targets: &Targets<'_>) -> Checked {
+    check_scoped(file, text, targets, Scope::Host)
+}
+
+/// Checks the panel `text` of `file` against `targets`, its binds read in
+/// `scope` (ADR 0046 §3: a part's are relative to its slot).
+pub fn check_scoped(file: &str, text: &str, targets: &Targets<'_>, scope: Scope<'_>) -> Checked {
     let mut findings = Vec::new();
     let mut controls = 0;
     let mut bindings = 0;
@@ -688,6 +762,38 @@ pub fn check(file: &str, text: &str, targets: &Targets<'_>) -> Checked {
     for element in elements(text) {
         if element.name == PANEL_ELEMENT {
             panel = true;
+            // ADR 0046 §2: a part names its slot; a host panel names none.
+            let part = element.attribute("part");
+            let value = part.and_then(|a| a.value.as_ref());
+            let place = value.map_or(element.offset, |(_, at)| *at);
+            match (scope, value) {
+                (Scope::Host, Some((value, _))) => findings.push(Finding {
+                    control: None,
+                    diagnostic: at(
+                        place,
+                        Severity::Error,
+                        format!(
+                            "part=\"{value}\" marks a slot's part, which lives in ui/parts/<slot>.html (ADR 0046); a host panel has none"
+                        ),
+                    ),
+                }),
+                (Scope::Part { key, .. }, found) => {
+                    let wanted = crate::parts::marker(key);
+                    if found.map(|(v, _)| v.as_str()) != Some(wanted.as_str()) {
+                        findings.push(Finding {
+                            control: None,
+                            diagnostic: at(
+                                place,
+                                Severity::Error,
+                                format!(
+                                    "the part's marker does not name its slot: ui/parts/{key}.html is the part of `{wanted}`, so its <{PANEL_ELEMENT}> needs part=\"{wanted}\""
+                                ),
+                            ),
+                        });
+                    }
+                }
+                _ => {}
+            }
             continue;
         }
         let index = controls;
@@ -752,14 +858,11 @@ pub fn check(file: &str, text: &str, targets: &Targets<'_>) -> Checked {
                     );
                 } else {
                     bindings += 1;
-                    match value.parse::<PortAddress>() {
-                        Err(error) => finding(
-                            value_at,
-                            Severity::Error,
-                            format!("'{value}' is not a port address: {error}"),
-                        ),
-                        Ok(port) => match targets.find(&port) {
+                    match scope.parse(value) {
+                        Err(error) => finding(value_at, Severity::Error, error),
+                        Ok(port) => match targets.find_scoped(&port, scope) {
                             None => finding(value_at, Severity::Error, targets.unknown(&port)),
+                            Some(Found::Refused(why)) => finding(value_at, Severity::Error, why),
                             Some(Found::Inactive(why)) => {
                                 finding(
                                     value_at,
@@ -812,14 +915,11 @@ pub fn check(file: &str, text: &str, targets: &Targets<'_>) -> Checked {
                         format!("<{name}> audition is empty: it needs {wants}"),
                     );
                 } else if value != "none" {
-                    match value.parse::<PortAddress>() {
-                        Err(error) => finding(
-                            value_at,
-                            Severity::Error,
-                            format!("'{value}' is not a port address: {error}"),
-                        ),
-                        Ok(port) => match targets.find(&port) {
+                    match scope.parse(value) {
+                        Err(error) => finding(value_at, Severity::Error, error),
+                        Ok(port) => match targets.find_scoped(&port, scope) {
                             None => finding(value_at, Severity::Error, targets.unknown(&port)),
+                            Some(Found::Refused(why)) => finding(value_at, Severity::Error, why),
                             Some(Found::Inactive(why)) => {
                                 finding(
                                     value_at,
@@ -871,6 +971,16 @@ pub fn check(file: &str, text: &str, targets: &Targets<'_>) -> Checked {
         // ADR 0037 §7: the slot card binds a top-level slot, loaded or not.
         if element.name == SLOT_ELEMENT {
             let bind = element.attribute("bind").and_then(|a| a.value.as_ref());
+            if let Scope::Part { .. } = scope {
+                finding(
+                    bind.map_or(element.offset, |(_, at)| *at),
+                    Severity::Error,
+                    format!(
+                        "<{SLOT_ELEMENT}> binds a top-level slot from the host's panel; a part holds no slot card"
+                    ),
+                );
+                continue;
+            }
             match bind {
                 None => finding(
                     element.offset,
@@ -948,14 +1058,10 @@ pub fn check(file: &str, text: &str, targets: &Targets<'_>) -> Checked {
         let mut ranges = Vec::new();
         for (address, offset) in addresses {
             bindings += 1;
-            let port: PortAddress = match address.parse() {
+            let port: PortAddress = match scope.parse(address) {
                 Ok(port) => port,
                 Err(error) => {
-                    finding(
-                        offset,
-                        Severity::Error,
-                        format!("'{address}' is not a port address: {error}"),
-                    );
+                    finding(offset, Severity::Error, error);
                     continue;
                 }
             };
@@ -965,8 +1071,9 @@ pub fn check(file: &str, text: &str, targets: &Targets<'_>) -> Checked {
                     wants.text()
                 )
             };
-            match (targets.find(&port), wants) {
+            match (targets.find_scoped(&port, scope), wants) {
                 (None, _) => finding(offset, Severity::Error, targets.unknown(&port)),
+                (Some(Found::Refused(why)), _) => finding(offset, Severity::Error, why),
                 (Some(Found::Inactive(why)), _) => {
                     finding(
                         offset,
@@ -1060,15 +1167,24 @@ pub fn check(file: &str, text: &str, targets: &Targets<'_>) -> Checked {
         }
     }
     if !panel {
-        findings.push(Finding {
-            control: None,
-            diagnostic: at(
-                0,
+        let (severity, message) = match scope {
+            Scope::Host => (
                 Severity::Warning,
                 format!(
                     "no <{PANEL_ELEMENT}>: nothing connects this page's controls to the project"
                 ),
             ),
+            Scope::Part { key, .. } => (
+                Severity::Error,
+                format!(
+                    "no <{PANEL_ELEMENT} part=\"{}\">: a slot's part is one panel element naming its slot",
+                    crate::parts::marker(key)
+                ),
+            ),
+        };
+        findings.push(Finding {
+            control: None,
+            diagnostic: at(0, severity, message),
         });
     }
     Checked {
@@ -1201,7 +1317,74 @@ pub fn check_project(
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         checked.push(check(&format!("ui/{name}"), &text, &targets));
     }
+    // ADR 0046: the slots' parts, each at its roots.
+    let parts = ui.join(crate::parts::PARTS_DIR);
+    for path in panel_files(&parts).map_err(|e| format!("{}: {e}", parts.display()))? {
+        let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        checked.push(check_file(
+            &format!("{}/{name}", crate::parts::PARTS_DIR),
+            &text,
+            &targets,
+        ));
+    }
     Ok(checked)
+}
+
+/// The panel file `name` of the project's `ui/` (`main.html`,
+/// `parts/synth.html`) checked as its place says (ADR 0046): a host panel's
+/// binds as written; a slot's part at each of its roots (one per instance
+/// of a composite whose slot it is), its findings merged.
+pub fn check_file(name: &str, text: &str, targets: &Targets<'_>) -> Checked {
+    let file = format!("ui/{name}");
+    if !name.starts_with("parts/") {
+        return check(&file, text, targets);
+    }
+    let whole = |message: String| Checked {
+        file: file.clone(),
+        controls: 0,
+        bindings: 0,
+        findings: vec![Finding {
+            control: None,
+            diagnostic: Diagnostic::at(Severity::Error, &file, text, 0, message),
+        }],
+    };
+    let Some(key) = crate::parts::key_of(name) else {
+        return whole(format!(
+            "{file} is no part's name: a slot's part is ui/parts/<slot>.html or ui/parts/<composite>.<slot>.html"
+        ));
+    };
+    let Some(roots) = targets.panel.part_roots(key) else {
+        return whole(format!(
+            "{file} is the part of `{}`, which is no slot of the project: rename or remove the file (ADR 0046)",
+            crate::parts::marker(key)
+        ));
+    };
+    if roots.is_empty() {
+        // A composite's slot with no instance: only what the text says is
+        // judged; nothing is rendered.
+        let root = format!("/{}", crate::parts::marker(key));
+        let mut checked = check_scoped(&file, text, targets, Scope::Part { key, root: &root });
+        checked
+            .findings
+            .retain(|f| f.diagnostic.severity == Severity::Error);
+        return checked;
+    }
+    let mut merged: Option<Checked> = None;
+    for root in roots {
+        let checked = check_scoped(&file, text, targets, Scope::Part { key, root });
+        match &mut merged {
+            None => merged = Some(checked),
+            Some(all) => {
+                for finding in checked.findings {
+                    if !all.findings.contains(&finding) {
+                        all.findings.push(finding);
+                    }
+                }
+            }
+        }
+    }
+    merged.unwrap_or_else(|| check(&file, text, targets))
 }
 
 #[cfg(test)]

@@ -160,14 +160,14 @@ impl Tab<'_> {
     }
 
     /// The key's value as written, and its place.
-    fn read(&self, key: &str) -> (Option<String>, Option<usize>) {
+    pub(super) fn read(&self, key: &str) -> (Option<String>, Option<usize>) {
         let at = self.keys().iter().position(|k| k == key);
         (self.get(key).and_then(item_text), at)
     }
 
     /// A section's key line as written around `key` and its value (see
     /// [`Change::decor`]); `None` in an inline table, or for a section.
-    fn decor(&self, key: &str) -> Option<Vec<String>> {
+    pub(super) fn decor(&self, key: &str) -> Option<Vec<String>> {
         let Tab::Std(t) = self else {
             return None;
         };
@@ -311,7 +311,7 @@ impl<'a> Tab<'a> {
 }
 
 /// The entry of instance `name` in `doc`'s `[instances]`.
-fn entry<'d>(doc: &'d mut DocumentMut, name: &str) -> Option<Tab<'d>> {
+pub(super) fn entry<'d>(doc: &'d mut DocumentMut, name: &str) -> Option<Tab<'d>> {
     let instances = doc.get_mut("instances")?;
     let item = match instances {
         TomlItem::Table(t) => t.get_mut(name)?,
@@ -898,9 +898,29 @@ impl Patching<'_> {
         changes: &[Change],
         wires: &BTreeMap<String, String>,
     ) -> Result<(Vec<Change>, BTreeMap<String, String>), PatchError> {
-        self.ensure_slot(slot)?;
+        // ADR 0046 §8: `slot.group`'s undo (and its redo) writes `module`
+        // or `project`, the key the slot replaced: the entry is a slot on
+        // one side, an instance of what it held on the other.
+        let grouping = changes
+            .iter()
+            .any(|c| c.path.len() == 1 && matches!(c.path[0].as_str(), "module" | "project"));
+        let was_slot = is_slot(&self.text, slot);
+        if grouping {
+            let m = map(&self.text, &Scheme::LEVEL).map_err(|e| refused("does-not-load", e))?;
+            if !m.entries.iter().any(|e| e.name == slot) {
+                return Err(refused(
+                    "unknown-instance",
+                    format!("no instance `{slot}` at this level"),
+                ));
+            }
+        } else {
+            self.ensure_slot(slot)?;
+        }
         for change in changes {
-            if change.path.is_empty() || !writable(&change.path[0]) {
+            let ungroup = grouping
+                && change.path.len() == 1
+                && matches!(change.path[0].as_str(), "module" | "project");
+            if change.path.is_empty() || !(ungroup || writable(&change.path[0])) {
                 return Err(bad(format!(
                     "a slot op writes only the slot's own keys, not `{}`",
                     change.path.join(".")
@@ -981,6 +1001,37 @@ impl Patching<'_> {
             return Err(bad(
                 "a slot op writes only the slot's own entry and the wires on its ports",
             ));
+        }
+        if grouping {
+            // A slot on one side, an instance of its content (one `module`
+            // or `project`, and no slot key) on the other.
+            let now_slot = is_slot(&text, slot);
+            let plain = |text: &str| {
+                let Ok(mut doc) = text.parse::<DocumentMut>() else {
+                    return false;
+                };
+                entry(&mut doc, slot).is_some_and(|t| {
+                    let module = t.get("module").and_then(TomlItem::as_str).is_some();
+                    let project = t.get("project").and_then(TomlItem::as_str).is_some();
+                    t.get("slot").is_none()
+                        && t.get("load").is_none()
+                        && t.get("map").is_none()
+                        && module != project
+                })
+            };
+            let fits = match (was_slot, now_slot) {
+                (true, false) => plain(&text),
+                (false, true) => plain(&self.text),
+                _ => false,
+            };
+            if !fits {
+                return Err(bad(
+                    "a slot.restore that writes `module` or `project` makes a slot the instance it held, or back",
+                ));
+            }
+            map(&text, &Scheme::LEVEL).map_err(|e| refused("does-not-load", e))?;
+            self.text = text;
+            return Ok((inverse, back));
         }
         self.text = text;
         // The slot is still a slot, and the file still parses as a level.

@@ -72,8 +72,12 @@ export function parseContent(html, whitelist, { mode = 'submit' } = {}) {
     const { line, column } = position(text, offset);
     throw new Refused(`line ${line}, column ${column}: ${message}`);
   };
-  const allowed = (parent, key) =>
-    parent === 'panel' ? key === 'div.signal-cards' : (whitelist.containers[parent]?.children ?? []).includes(key);
+  // A child is allowed by its key, or a control by its tag (ADR 0046 §5: `signal-slot` among the cards).
+  const allowed = (parent, key, tag) => {
+    if (parent === 'panel') return key === 'div.signal-cards';
+    const children = whitelist.containers[parent]?.children ?? [];
+    return children.includes(key) || (key === 'control' && children.includes(tag));
+  };
   try {
     while (at < text.length) {
       const lt = text.indexOf('<', at);
@@ -139,7 +143,7 @@ export function parseContent(html, whitelist, { mode = 'submit' } = {}) {
       const key = keyOf(tag, classes, whitelist);
       if (!key) fail(`<${tag}${classes.length ? ` class="${classes.join(' ')}"` : ''}> is not an element the editor writes`, begin);
       const parent = stack[stack.length - 1];
-      if (!allowed(parent.key, key)) fail(`<${tag}> is not allowed in ${parent.key === 'panel' ? '<signal-panel>' : parent.key}`, begin);
+      if (!allowed(parent.key, key, tag)) fail(`<${tag}> is not allowed in ${parent.key === 'panel' ? '<signal-panel>' : parent.key}`, begin);
       const permitted = key === 'control' ? whitelist.controls[tag] : whitelist.containers[key].attributes;
       const seen = new Set();
       for (const a of attributes) {

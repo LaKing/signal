@@ -31,9 +31,11 @@ use crate::schematic::{read_positions, set_position};
 use crate::slot::{ContentNames, Interface};
 use crate::write::{inline, number, standard};
 
+mod group;
 mod inside;
 mod slot;
 
+pub use group::{part_key, part_path};
 pub use inside::FileChange;
 pub(crate) use slot::unloaded_text;
 pub use slot::{Change, PortJson};
@@ -191,6 +193,15 @@ pub enum Op {
             skip_serializing_if = "std::ops::Not::not"
         )]
         remove_wires: bool,
+        /// ADR 0046 §7: remove the controls of the slot's part on removed
+        /// ports too (else refused, `in-use`). The host's: the part is a
+        /// panel file.
+        #[serde(
+            default,
+            rename = "removeControls",
+            skip_serializing_if = "std::ops::Not::not"
+        )]
+        remove_controls: bool,
         /// "Detach from template": the resolved interface written inline.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         detach: bool,
@@ -262,6 +273,40 @@ pub enum Op {
         name: String,
         /// `instance.port` at the level.
         port: String,
+    },
+    /// ADR 0046 §8: an instance made a slot holding what it was, with the
+    /// same names: `module = "x"` becomes `slot = { … }, load = "x"`
+    /// (`project = "…"` becomes `load = "…"`, `seed` and `set` kept), its
+    /// interface every port a wire, an export or a host binding at the
+    /// level names (auto, `{}`) and every parameter the entry sets, a wire
+    /// reaches, an export names or a binding names. The plan does not
+    /// change. The host also moves the panel controls on the instance into
+    /// the slot's part (`controls`: their indexes among `ui/main.html`'s
+    /// controls; absent: all).
+    #[serde(rename = "slot.group")]
+    SlotGroup {
+        /// The instance's name at the level.
+        instance: String,
+        /// The host's: which of the main panel's controls on the instance
+        /// move into the part.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controls: Option<Vec<usize>>,
+    },
+    /// ADR 0046 §8: a presentation file under `ui/` (`main.html`,
+    /// `windows.toml` or `parts/<key>.html`, named relative to `ui/`) set
+    /// to `text` (absent: removed) while it holds `was` (absent: it does
+    /// not exist): the inverse of `slot.group`'s panel move and of a
+    /// slot's part removed with it.
+    #[serde(rename = "panel.restore")]
+    PanelRestore {
+        /// The file, relative to `ui/`.
+        file: String,
+        /// Its new text; absent removes the file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        /// Its text now; absent: it does not exist.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        was: Option<String>,
     },
     /// The inverse of an export op: keys of the level's `[exports]` set
     /// back to what they said (`path` from the file's root:
@@ -442,6 +487,17 @@ pub struct Context<'a> {
     /// What a slot's content (`load`, as written) is copied from
     /// ([`crate::inside::source`]); `None` for a project or an unknown name.
     pub source: &'a dyn Fn(&str) -> Option<crate::inside::Source>,
+    /// ADR 0046 §8: the ports and parameters of the level's instance
+    /// `name` that the project's panels bind (`/name.<port>` at the top
+    /// level, through every instance path of a composite level), by name:
+    /// `slot.group` puts them into the interface. The caller's (the panels
+    /// are `ui/`'s); empty when it knows none.
+    pub bound: &'a dyn Fn(&str) -> Vec<String>,
+}
+
+/// A [`Context::bound`] that knows no panel binding.
+pub fn no_bindings(_: &str) -> Vec<String> {
+    Vec::new()
 }
 
 /// A patch applied: the level's new text, `ui/schematic.toml`'s (`None`:
@@ -1671,6 +1727,27 @@ impl Patching<'_> {
     }
 
     fn op(&mut self, op: &Op) -> Result<Vec<Op>, PatchError> {
+        // ADR 0046 §7: a slot deleted takes its part with it, in the same
+        // patch; the undo gives it back byte for byte. Only the forward op:
+        // an inverse (`edits`) carries its own `panel.restore` (the redo of
+        // a deletion's undo), or undoes a `slot.add`, whose slot had no
+        // part when it was added.
+        let slot_removed = match op {
+            Op::InstanceRemove {
+                name, edits: None, ..
+            } if slot::is_slot(&self.text, name) => Some(name.clone()),
+            _ => None,
+        };
+        let mut inverse = self.op_one(op)?;
+        if let Some(slot) = slot_removed
+            && let Some(restore) = self.remove_part(&slot)?
+        {
+            inverse.push(restore);
+        }
+        Ok(inverse)
+    }
+
+    fn op_one(&mut self, op: &Op) -> Result<Vec<Op>, PatchError> {
         let level = self.ctx.level;
         let one = match op {
             Op::InstanceAdd {
@@ -2024,6 +2101,7 @@ impl Patching<'_> {
                 remove_wires,
                 detach,
                 template,
+                ..
             } => {
                 let edit = slot::SlotEdit::Interface {
                     add,
@@ -2053,6 +2131,8 @@ impl Patching<'_> {
             Op::ExportConnect { role, name, port } => self.export_edit(true, *role, name, port),
             Op::ExportDisconnect { role, name, port } => self.export_edit(false, *role, name, port),
             Op::ExportRestore { changes } => self.export_restore(changes),
+            Op::SlotGroup { instance, .. } => return self.slot_group(instance),
+            Op::PanelRestore { file, text, was } => self.panel_restore(file, text, was),
         };
         one.map(|op| vec![op])
     }
@@ -2128,3 +2208,6 @@ mod slot_tests;
 
 #[cfg(test)]
 mod inside_tests;
+
+#[cfg(test)]
+mod group_tests;

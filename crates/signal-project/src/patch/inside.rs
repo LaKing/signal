@@ -114,7 +114,7 @@ fn with_targets(item: &TomlItem, role: Role, ports: &[String]) -> Option<String>
 
 impl Patching<'_> {
     /// The project's file at `path` as the patch leaves it so far.
-    fn file_now(&self, path: &str) -> Option<String> {
+    pub(super) fn file_now(&self, path: &str) -> Option<String> {
         match self.files.get(path) {
             Some((_, now)) => now.clone(),
             None => (self.ctx.file)(path),
