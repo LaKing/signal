@@ -81,7 +81,11 @@ pub(crate) struct InterfaceSection {
 }
 
 /// A port of an interface (ADR 0037 §3): `"<kind>"` (a signal of that kind
-/// at rate 1), `"events"` (an event port), or a table.
+/// at rate 1), `"events"` (an event port), or a table. ADR 0045 §1: the
+/// empty table `{}`, or a table with `auto = true`, is an **auto** port,
+/// whose unwritten `shape`, `rate`, `kind`, `unit` and `range` are inferred
+/// from what it is connected to; every other declaration is typed, its
+/// unwritten fields `signal`, 1, `generic` and none.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PortSpec {
     /// `"signal"`, `"events"` or a vector width.
@@ -96,6 +100,21 @@ pub(crate) struct PortSpec {
     pub(crate) range: Option<(f64, f64)>,
     /// Presentation only.
     pub(crate) group: Option<String>,
+    /// ADR 0045 §1: whether it is an auto port.
+    pub(crate) auto: bool,
+    /// Which of its fields are written (pinned, in an auto port).
+    pub(crate) written: Written,
+}
+
+/// Which fields of a port's table are written (ADR 0045 §1). `unit = ""`
+/// and `range = []` are written: in an auto port they pin "none".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Written {
+    pub(crate) shape: bool,
+    pub(crate) rate: bool,
+    pub(crate) kind: bool,
+    pub(crate) unit: bool,
+    pub(crate) range: bool,
 }
 
 /// A port's shape as written.
@@ -138,7 +157,7 @@ impl<'de> Deserialize<'de> for PortSpec {
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str(
-                    "a kind (`\"audio\"`), `\"events\"`, or a table `{ shape, rate, kind, unit, range, group }`",
+                    "a kind (`\"audio\"`), `\"events\"`, or a table `{ auto, shape, rate, kind, unit, range, group }`",
                 )
             }
 
@@ -155,6 +174,8 @@ impl<'de> Deserialize<'de> for PortSpec {
                     unit: None,
                     range: None,
                     group: None,
+                    auto: false,
+                    written: Written::default(),
                 })
             }
 
@@ -166,31 +187,66 @@ impl<'de> Deserialize<'de> for PortSpec {
                     unit: None,
                     range: None,
                     group: None,
+                    auto: false,
+                    written: Written::default(),
                 };
+                let mut keys = 0;
                 while let Some(key) = map.next_key::<String>()? {
+                    keys += 1;
                     match key.as_str() {
-                        "shape" => port.shape = map.next_value::<ShapeValue>()?.0,
+                        "auto" => {
+                            if !map.next_value::<bool>()? {
+                                return Err(de::Error::custom(
+                                    "`auto` takes only `true` (ADR 0045 §1); a port that writes its fields without `auto` is typed, so leave `auto` out",
+                                ));
+                            }
+                            port.auto = true;
+                        }
+                        "shape" => {
+                            port.shape = map.next_value::<ShapeValue>()?.0;
+                            port.written.shape = true;
+                        }
                         "rate" => {
                             let rate = map.next_value::<u32>()?;
                             if rate == 0 {
                                 return Err(de::Error::custom("`rate` is a divisor, at least 1"));
                             }
                             port.rate = rate;
+                            port.written.rate = true;
                         }
-                        "kind" => port.kind = kind(map.next_value::<String>()?)?,
-                        "unit" => port.unit = Some(map.next_value::<String>()?),
+                        "kind" => {
+                            port.kind = kind(map.next_value::<String>()?)?;
+                            port.written.kind = true;
+                        }
+                        "unit" => {
+                            port.unit = Some(map.next_value::<String>()?);
+                            port.written.unit = true;
+                        }
                         "range" => {
-                            let range = map.next_value::<[f64; 2]>()?;
-                            port.range = Some((range[0], range[1]));
+                            // `[]`: no range (ADR 0045 §1, pinned in an auto port).
+                            port.range = match map.next_value::<Vec<f64>>()?.as_slice() {
+                                [] => None,
+                                [min, max] => Some((*min, *max)),
+                                _ => {
+                                    return Err(de::Error::custom(
+                                        "`range` is `[min, max]`, or `[]` for none",
+                                    ));
+                                }
+                            };
+                            port.written.range = true;
                         }
                         "group" => port.group = Some(map.next_value::<String>()?),
                         other => {
                             return Err(de::Error::unknown_field(
                                 other,
-                                &["shape", "rate", "kind", "unit", "range", "group"],
+                                &["auto", "shape", "rate", "kind", "unit", "range", "group"],
                             ));
                         }
                     }
+                }
+                // ADR 0045 §1: the empty table is an auto port.
+                if keys == 0 {
+                    port.auto = true;
                 }
                 Ok(port)
             }
@@ -252,12 +308,13 @@ impl JsonSchema for PortSpec {
 
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
         json_schema!({
-            "description": "An interface port (ADR 0037 §3): a kind (a signal of that kind at rate 1), \"events\", or a table.",
+            "description": "An interface port (ADR 0037 §3): a kind (a signal of that kind at rate 1), \"events\", or a table. The empty table {}, or a table with auto = true, is an auto port (ADR 0045 §1): its unwritten shape, rate, kind, unit and range are inferred from its connections; unit = \"\" and range = [] pin none.",
             "anyOf": [
                 { "enum": ["audio", "control", "gate", "trigger", "frequency", "gain", "phase", "generic", "events"] },
                 {
                     "type": "object",
                     "properties": {
+                        "auto": { "const": true },
                         "shape": {
                             "anyOf": [
                                 { "enum": ["signal", "events"] },
@@ -272,7 +329,12 @@ impl JsonSchema for PortSpec {
                         "rate": { "type": "integer", "minimum": 1 },
                         "kind": { "enum": ["audio", "control", "gate", "trigger", "frequency", "gain", "phase", "generic"] },
                         "unit": { "type": "string" },
-                        "range": { "type": "array", "items": { "type": "number" }, "minItems": 2 },
+                        "range": {
+                            "anyOf": [
+                                { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+                                { "type": "array", "maxItems": 0 }
+                            ]
+                        },
                         "group": { "type": "string" }
                     },
                     "additionalProperties": false

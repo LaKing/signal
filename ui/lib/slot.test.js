@@ -168,7 +168,7 @@ test('the map editor: by name, false or a content name per port; by-name rows ar
   assert.deepEqual(mapOp('fx', mapRows(SPARE, null)), { op: 'slot.map', slot: 'fx', map: {} });
 });
 
-test('a template’s text: [interface], then inputs, outputs, parameters in their order', () => {
+test('a template’s text: [interface], then inputs, outputs, parameters in their order; a plain generic signal port is "generic", never {} (ADR 0045 §5)', () => {
   const text = templateText('bus', [
     { name: 'pos', role: 'input', shape: 'signal', rate: 1, kind: 'control', unit: 'beats', group: 'transport' },
     { name: 'jump', role: 'input', shape: 'events', rate: 1, kind: 'trigger' },
@@ -192,7 +192,7 @@ test('a template’s text: [interface], then inputs, outputs, parameters in thei
       '',
       '[outputs]',
       'v = { shape = { vector = 2 }, rate = 4, range = [0, 1] }',
-      'l = {}',
+      'l = "generic"',
       '',
       '[parameters]',
       'release = { group = "transport" }',

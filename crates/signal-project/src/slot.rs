@@ -13,6 +13,10 @@
 //!
 //! The matching rule is exact names plus `map` (ADR 0037 §4); everything
 //! about it is decided by the two texts alone.
+//!
+//! ADR 0045: an **auto** port (`{}`, or `auto = true`) takes the fields it
+//! does not pin from its defining end, resolved per level in five stages
+//! (`Level::infer`) before the checks; nothing of it reaches the plan.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
@@ -24,7 +28,7 @@ use toml::Spanned;
 
 use crate::Project;
 use crate::diagnostic::{Diagnostic, Severity};
-use crate::locate::{ContentSpans, DefSpans, Location, SourceMap};
+use crate::locate::{ContentSpans, DefSpans, Location, SlotEnd, SourceMap};
 use crate::model::{InterfaceFile, KINDS, MapValue, ParamSpec, PortSpec, ShapeSpec, SlotSpec};
 
 /// The prefix of a library template reference (`lib.deck`).
@@ -67,6 +71,80 @@ pub struct InterfacePort {
     /// Presentation only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// ADR 0045: present on an auto port, whose fields above are then its
+    /// effective type: the pinned ones as written, the others inferred.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto: Option<Auto>,
+}
+
+impl InterfacePort {
+    /// Whether `field` is pinned: written on an auto port, or any field of
+    /// a typed port or a parameter.
+    pub fn pinned(&self, field: Field) -> bool {
+        self.auto
+            .as_ref()
+            .is_none_or(|auto| !auto.inferred.contains(&field))
+    }
+}
+
+/// A field of a slot port that an auto port may infer (ADR 0045 §1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Field {
+    /// `shape`.
+    Shape,
+    /// `rate`.
+    Rate,
+    /// `kind`.
+    Kind,
+    /// `unit`.
+    Unit,
+    /// `range`.
+    Range,
+}
+
+/// The fields an auto port may infer, in their order.
+pub(crate) const FIELDS: [Field; 5] = [
+    Field::Shape,
+    Field::Rate,
+    Field::Kind,
+    Field::Unit,
+    Field::Range,
+];
+
+/// Which end typed an auto port (ADR 0045 §2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoEnd {
+    /// A wire at the slot's level: a source of an input, a consumer of an
+    /// output.
+    Host,
+    /// The content's matched port.
+    Content,
+    /// Nothing: a signal at rate 1 of kind `generic`, no unit, no range.
+    Default,
+}
+
+/// Where an auto port's inferred fields come from: `describe`'s and
+/// `graph`'s `auto.from` (ADR 0045 §9).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AutoFrom {
+    /// The defining end's side.
+    pub end: AutoEnd,
+    /// The defining end: a host endpoint qualified by the level as
+    /// [`SlotResolution::slot`] is (`/osc.out`, `rack/osc.out`), or the
+    /// content's port name; `None` for the default.
+    pub port: Option<String>,
+}
+
+/// What makes a port auto (ADR 0045 §1, §9).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Auto {
+    /// The fields not pinned, in the order shape, rate, kind, unit, range.
+    pub inferred: Vec<Field>,
+    /// Their defining end, once resolved (a template's or a written
+    /// interface's port: the default).
+    pub from: AutoFrom,
 }
 
 fn shape_json<S: serde::Serializer>(shape: &PortShape, serializer: S) -> Result<S::Ok, S::Error> {
@@ -131,6 +209,22 @@ pub(crate) fn kind_name(kind: PortKind) -> &'static str {
 }
 
 fn port(name: &str, role: Role, spec: &PortSpec) -> InterfacePort {
+    let auto = spec.auto.then(|| Auto {
+        inferred: FIELDS
+            .into_iter()
+            .filter(|field| !match field {
+                Field::Shape => spec.written.shape,
+                Field::Rate => spec.written.rate,
+                Field::Kind => spec.written.kind,
+                Field::Unit => spec.written.unit,
+                Field::Range => spec.written.range,
+            })
+            .collect(),
+        from: AutoFrom {
+            end: AutoEnd::Default,
+            port: None,
+        },
+    });
     InterfacePort {
         name: name.to_owned(),
         role,
@@ -141,9 +235,14 @@ fn port(name: &str, role: Role, spec: &PortSpec) -> InterfacePort {
         },
         rate: spec.rate,
         kind: kind_of(&spec.kind),
-        unit: spec.unit.clone(),
+        // ADR 0045 §1: in an auto port, `unit = ""` pins "no unit".
+        unit: spec
+            .unit
+            .clone()
+            .filter(|unit| !(spec.auto && unit.is_empty())),
         range: spec.range,
         group: spec.group.clone(),
+        auto,
     }
 }
 
@@ -157,6 +256,7 @@ fn parameter(name: &str, spec: &ParamSpec) -> InterfacePort {
         unit: spec.unit.clone(),
         range: None,
         group: spec.group.clone(),
+        auto: None,
     }
 }
 
@@ -196,8 +296,13 @@ fn port_name_problem(name: &str) -> Option<String> {
 }
 
 /// Reads an interface template, `interfaces/<stem>.toml` (or a library
-/// one), checking that its `name` is `stem`.
-pub(crate) fn parse_interface(text: &str, stem: &str) -> Result<Interface, Vec<Problem>> {
+/// one, `library`), checking that its `name` is `stem`, and that a library
+/// template's ports are all typed (ADR 0045 §5).
+pub(crate) fn parse_interface(
+    text: &str,
+    stem: &str,
+    library: bool,
+) -> Result<Interface, Vec<Problem>> {
     let file: InterfaceFile = toml::from_str(text).map_err(|error| {
         let offset = error.span().map_or(0, |s| s.start);
         vec![(offset, error.message().trim().to_owned())]
@@ -238,6 +343,14 @@ pub(crate) fn parse_interface(text: &str, stem: &str) -> Result<Interface, Vec<P
     for (offset, port) in entries(&file.inputs, &file.outputs, &file.parameters) {
         if let Some(problem) = port_name_problem(&port.name) {
             problems.push((offset, problem));
+        } else if library && port.auto.is_some() {
+            problems.push((
+                offset,
+                format!(
+                    "`{}` is an auto port; a library interface's ports are typed, a contract its contents fit (ADR 0045 §5)",
+                    port.name
+                ),
+            ));
         } else if interface.port(&port.name).is_some() {
             problems.push((
                 offset,
@@ -267,7 +380,7 @@ pub(crate) fn library_templates() -> &'static BTreeMap<String, Interface> {
             .filter_map(|file| {
                 // The library's own test reads every template; one that does
                 // not read is left out here and reported as unknown.
-                let interface = parse_interface(file.text, file.name).ok()?;
+                let interface = parse_interface(file.text, file.name, true).ok()?;
                 Some((format!("{LIBRARY_TEMPLATE}{}", file.name), interface))
             })
             .collect()
@@ -421,12 +534,7 @@ struct Typed {
 }
 
 fn shape_text(shape: PortShape) -> String {
-    match shape {
-        PortShape::Signal => "a signal".to_owned(),
-        PortShape::Events => "events".to_owned(),
-        PortShape::Vector(n) => format!("a vector of {n}"),
-        _ => "another shape".to_owned(),
-    }
+    crate::locate::shape_words(shape)
 }
 
 /// The written endpoint `instance.port`.
@@ -447,6 +555,375 @@ impl Ports<'_> {
             self.cache.insert(module.to_owned(), ports);
         }
         self.cache.get(module).and_then(Option::as_ref)
+    }
+}
+
+/// The type of a known end (ADR 0045 §2): what an auto port copies.
+#[derive(Clone, Debug, PartialEq)]
+struct EndType {
+    shape: PortShape,
+    rate: u32,
+    kind: PortKind,
+    unit: Option<String>,
+    range: Option<(f64, f64)>,
+}
+
+impl EndType {
+    /// The default: a signal at rate 1 of kind `generic`, no unit, no range.
+    const DEFAULT: EndType = EndType {
+        shape: PortShape::Signal,
+        rate: 1,
+        kind: PortKind::Generic,
+        unit: None,
+        range: None,
+    };
+
+    fn of_module(port: &ModulePort) -> EndType {
+        EndType {
+            shape: port.shape,
+            rate: port.rate.get(),
+            kind: port.kind,
+            unit: port.unit.clone(),
+            range: port.range.map(|r| (r.min, r.max)),
+        }
+    }
+
+    fn of_port(port: &InterfacePort) -> EndType {
+        EndType {
+            shape: port.shape,
+            rate: port.rate,
+            kind: port.kind,
+            unit: port.unit.clone(),
+            range: port.range,
+        }
+    }
+
+    /// The auto port `port`'s effective type with `end` its defining end
+    /// (`None`: the default): its pinned fields as written, the others
+    /// copied.
+    fn effective(port: &InterfacePort, end: Option<&EndType>) -> EndType {
+        let end = end.unwrap_or(&EndType::DEFAULT);
+        EndType {
+            shape: if port.pinned(Field::Shape) {
+                port.shape
+            } else {
+                end.shape
+            },
+            rate: if port.pinned(Field::Rate) {
+                port.rate
+            } else {
+                end.rate
+            },
+            kind: if port.pinned(Field::Kind) {
+                port.kind
+            } else {
+                end.kind
+            },
+            unit: if port.pinned(Field::Unit) {
+                port.unit.clone()
+            } else {
+                end.unit.clone()
+            },
+            range: if port.pinned(Field::Range) {
+                port.range
+            } else {
+                end.range
+            },
+        }
+    }
+}
+
+/// An auto port resolved from an end: its effective type, where it comes
+/// from, and the defining end as written (a host endpoint) if it is one.
+type Resolution = (EndType, AutoFrom, Option<String>);
+
+/// The auto ports of one level, by slot and port.
+type ResolvedPorts = BTreeMap<(String, String), Resolution>;
+
+/// One definition's level, as inference reads it (ADR 0045 §2–3).
+struct Level<'l> {
+    /// Each slot's interface as written.
+    declared: &'l BTreeMap<&'l str, &'l Interface>,
+    spans: &'l DefSpans,
+    modules: &'l BTreeMap<&'l str, &'l str>,
+    defs: &'l [CompositeDef],
+    /// The definition's name, `""` for the root.
+    name: &'l str,
+}
+
+/// What inference gives for one level.
+struct Inferred {
+    /// Every slot's effective interface: its auto ports' fields resolved.
+    interfaces: BTreeMap<String, Interface>,
+    /// The auto ports resolved from an end: the known ones.
+    resolved: ResolvedPorts,
+}
+
+impl Inferred {
+    /// Whether the auto port `slot.port` is a known end.
+    fn known(&self, slot: &str, port: &str) -> bool {
+        self.resolved
+            .contains_key(&(slot.to_owned(), port.to_owned()))
+    }
+
+    /// The host endpoint, as written, that defines the auto port `slot.port`.
+    fn defining(&self, slot: &str, port: &str) -> Option<&str> {
+        self.resolved
+            .get(&(slot.to_owned(), port.to_owned()))?
+            .2
+            .as_deref()
+    }
+}
+
+impl Level<'_> {
+    /// The slot `slot`'s address: `/fx`, `rack/fx`.
+    fn slot_text(&self, slot: &str) -> String {
+        self.qualified(slot)
+    }
+
+    /// A written endpoint or name qualified by the level: `/osc.out`,
+    /// `rack/osc.out`.
+    fn qualified(&self, text: &str) -> String {
+        if self.name.is_empty() {
+            format!("/{text}")
+        } else {
+            format!("{}/{text}", self.name)
+        }
+    }
+
+    /// The type of the written endpoint `endpoint` as a known end (ADR 0045
+    /// §2), as a wire's source (`source`) or consumer: a module's port, a
+    /// typed slot port, or an auto port in `resolved`. A parameter, an auto
+    /// port not resolved from an end, or a port on the wrong side is none.
+    fn known(
+        &self,
+        ports: &mut Ports<'_>,
+        resolved: &ResolvedPorts,
+        endpoint: &str,
+        source: bool,
+    ) -> Option<EndType> {
+        let (instance, port) = split(endpoint)?;
+        let wanted = if source { Role::Output } else { Role::Input };
+        if let Some(interface) = self.declared.get(instance) {
+            let p = interface.port(port)?;
+            if p.role != wanted {
+                return None;
+            }
+            return match p.auto {
+                None => Some(EndType::of_port(p)),
+                Some(_) => resolved
+                    .get(&(instance.to_owned(), port.to_owned()))
+                    .map(|(end, _, _)| end.clone()),
+            };
+        }
+        if self
+            .spans
+            .contents
+            .get(instance)
+            .is_some_and(|c| c.slot.is_some())
+        {
+            // A slot whose interface did not resolve (reported).
+            return None;
+        }
+        let module = self.modules.get(instance)?;
+        let p = ports
+            .of(module, self.defs)?
+            .iter()
+            .find(|p| p.name == port)?;
+        let direction = if source {
+            signal_core::Direction::Out
+        } else {
+            signal_core::Direction::In
+        };
+        (!p.parameter && p.direction == direction).then(|| EndType::of_module(p))
+    }
+
+    /// The other ends of the wires on `slot.port` at this level, as written:
+    /// the sources of an input, the consumers of an output, each once, in
+    /// `str::cmp` order (ADR 0045 §2).
+    fn ends(&self, slot: &str, port: &str, input: bool) -> BTreeSet<&str> {
+        self.spans
+            .connections
+            .iter()
+            .filter_map(|c| {
+                let (here, there) = if input {
+                    (&c.to.0, &c.from.0)
+                } else {
+                    (&c.from.0, &c.to.0)
+                };
+                (split(here) == Some((slot, port))).then_some(there.as_str())
+            })
+            .collect()
+    }
+
+    /// The content's port each slot port matches (ADR 0037 §4, by name and
+    /// `map`), with its type: a content end (ADR 0045 §2).
+    fn content_ends(&self, ports: &mut Ports<'_>) -> BTreeMap<(String, String), (EndType, String)> {
+        let mut found = BTreeMap::new();
+        for (slot, interface) in self.declared {
+            let Some(module) = self.modules.get(slot) else {
+                continue;
+            };
+            let Some(content) = ports.of(module, self.defs).cloned() else {
+                continue;
+            };
+            let map = self
+                .spans
+                .contents
+                .get(*slot)
+                .and_then(|c| c.slot.as_ref())
+                .map(|s| s.map.as_slice())
+                .unwrap_or_default();
+            for port in interface.ports.iter().filter(|p| p.role != Role::Parameter) {
+                let candidate = match map.iter().find(|(key, ..)| *key == port.name) {
+                    Some((_, _, MapValue::Unmatched, _)) => continue,
+                    Some((_, _, MapValue::Name(target), _)) => target.as_str(),
+                    None => port.name.as_str(),
+                };
+                let output = port.role == Role::Output;
+                let Some(matched) = content.iter().find(|c| {
+                    c.name == candidate
+                        && !c.parameter
+                        && (c.direction == signal_core::Direction::Out) == output
+                }) else {
+                    continue;
+                };
+                found.insert(
+                    ((*slot).to_owned(), port.name.clone()),
+                    (EndType::of_module(matched), candidate.to_owned()),
+                );
+            }
+        }
+        found
+    }
+
+    /// ADR 0045 §3: the auto ports of this level resolved in five stages,
+    /// each reading only the ports earlier stages resolved, so the result
+    /// is a pure function of the level's text and the content's types,
+    /// whatever the order of the entries.
+    fn infer(&self, ports: &mut Ports<'_>) -> Inferred {
+        let content = self.content_ends(ports);
+        let autos: Vec<(&str, &InterfacePort)> = self
+            .declared
+            .iter()
+            .flat_map(|(slot, interface)| {
+                interface
+                    .ports
+                    .iter()
+                    .filter(|p| p.auto.is_some() && p.role != Role::Parameter)
+                    .map(move |p| (*slot, p))
+            })
+            .collect();
+        let key = |slot: &str, port: &InterfacePort| (slot.to_owned(), port.name.clone());
+        let mut resolved = ResolvedPorts::new();
+        let from_content = |slot: &str, port: &InterfacePort| {
+            content.get(&key(slot, port)).map(|(end, name)| {
+                (
+                    EndType::effective(port, Some(end)),
+                    AutoFrom {
+                        end: AutoEnd::Content,
+                        port: Some(name.clone()),
+                    },
+                    None,
+                )
+            })
+        };
+        let from_host = |ports: &mut Ports<'_>,
+                         resolved: &ResolvedPorts,
+                         slot: &str,
+                         port: &InterfacePort|
+         -> Option<Resolution> {
+            let input = port.role == Role::Input;
+            self.ends(slot, &port.name, input)
+                .into_iter()
+                .find_map(|end| {
+                    let found = self.known(ports, resolved, end, input)?;
+                    Some((
+                        EndType::effective(port, Some(&found)),
+                        AutoFrom {
+                            end: AutoEnd::Host,
+                            port: Some(self.qualified(end)),
+                        },
+                        Some(end.to_owned()),
+                    ))
+                })
+        };
+        let inputs = || autos.iter().filter(|(_, p)| p.role == Role::Input);
+        let outputs = || autos.iter().filter(|(_, p)| p.role == Role::Output);
+        // 1: outputs of loaded slots whose port matched, from the content.
+        for (slot, port) in outputs() {
+            if let Some(found) = from_content(slot, port) {
+                resolved.insert(key(slot, port), found);
+            }
+        }
+        // 2: inputs from their first known host source (an output is known
+        // here only if typed or resolved in stage 1).
+        for (slot, port) in inputs() {
+            if let Some(found) = from_host(ports, &resolved, slot, port) {
+                resolved.insert(key(slot, port), found);
+            }
+        }
+        // 3: inputs still open, from the content.
+        for (slot, port) in inputs() {
+            if !resolved.contains_key(&key(slot, port))
+                && let Some(found) = from_content(slot, port)
+            {
+                resolved.insert(key(slot, port), found);
+            }
+        }
+        // 4: outputs still open, from their first known consumer (an input
+        // resolved in stage 2 or 3).
+        for (slot, port) in outputs() {
+            if !resolved.contains_key(&key(slot, port))
+                && let Some(found) = from_host(ports, &resolved, slot, port)
+            {
+                resolved.insert(key(slot, port), found);
+            }
+        }
+        // 5: inputs still open, from a source resolved in stage 4.
+        for (slot, port) in inputs() {
+            if !resolved.contains_key(&key(slot, port))
+                && let Some(found) = from_host(ports, &resolved, slot, port)
+            {
+                resolved.insert(key(slot, port), found);
+            }
+        }
+        // The rest: the default, which is no known end.
+        let interfaces = self
+            .declared
+            .iter()
+            .map(|(slot, interface)| {
+                let mut effective = (*interface).clone();
+                for port in &mut effective.ports {
+                    if port.auto.is_none() || port.role == Role::Parameter {
+                        continue;
+                    }
+                    let (end, from) = match resolved.get(&key(slot, port)) {
+                        Some((end, from, _)) => (end.clone(), from.clone()),
+                        None => (
+                            EndType::effective(port, None),
+                            AutoFrom {
+                                end: AutoEnd::Default,
+                                port: None,
+                            },
+                        ),
+                    };
+                    port.shape = end.shape;
+                    port.rate = end.rate;
+                    port.kind = end.kind;
+                    port.unit = end.unit;
+                    port.range = end.range;
+                    if let Some(auto) = &mut port.auto {
+                        auto.from = from;
+                    }
+                }
+                ((*slot).to_owned(), effective)
+            })
+            .collect();
+        Inferred {
+            interfaces,
+            resolved,
+        }
     }
 }
 
@@ -682,7 +1159,13 @@ impl Project {
             }
             resolutions.extend(resolved.resolutions.into_iter().map(|mut r| {
                 for id in &self.content.ids {
-                    r.slot = r.slot.replace(&format!("{id}/"), "");
+                    let id = format!("{id}/");
+                    r.slot = r.slot.replace(&id, "");
+                    for port in &mut r.interface.ports {
+                        if let Some(from) = port.auto.as_mut().and_then(|a| a.from.port.as_mut()) {
+                            *from = from.replace(&id, "");
+                        }
+                    }
                 }
                 r
             }));
@@ -710,7 +1193,7 @@ fn resolve_def(
         warnings: Vec::new(),
         vanished: Vec::new(),
     };
-    let interfaces: BTreeMap<&str, &Interface> = spans
+    let declared: BTreeMap<&str, &Interface> = spans
         .contents
         .iter()
         .filter_map(|(n, c)| Some((n.as_str(), c.slot.as_ref()?.interface.as_ref()?)))
@@ -720,11 +1203,31 @@ fn resolve_def(
         .iter()
         .map(|i| (i.name.as_str(), i.module.as_str()))
         .collect();
-    // The type of a written endpoint that is not on a slot: a module's port.
+    // ADR 0045 §2–3: the auto ports typed by their connections; from here
+    // on every slot's interface is its effective one.
+    let level = Level {
+        declared: &declared,
+        spans,
+        modules: &modules,
+        defs,
+        name,
+    };
+    let inferred = level.infer(ports);
+    let interfaces: BTreeMap<&str, &Interface> = inferred
+        .interfaces
+        .iter()
+        .map(|(n, i)| (n.as_str(), i))
+        .collect();
+    // The type of a written endpoint: a module's port, or a slot's port as
+    // its interface types it; `None` for an auto port that no end typed
+    // (ADR 0045 §2: no known end).
     let typed_of = |endpoint: &str, ports: &mut Ports<'_>| -> Option<Typed> {
         let (instance, port) = split(endpoint)?;
         if let Some(interface) = interfaces.get(instance) {
             let p = interface.port(port)?;
+            if p.auto.is_some() && !inferred.known(instance, port) {
+                return None;
+            }
             return Some(Typed {
                 output: p.role == Role::Output,
                 shape: p.shape,
@@ -749,7 +1252,7 @@ fn resolve_def(
         let Some(slot) = &content.slot else {
             continue;
         };
-        let Some(interface) = &slot.interface else {
+        let Some(interface) = interfaces.get(slot_name.as_str()).copied() else {
             // Its interface did not resolve (reported): nothing of it plans.
             renames.insert(slot_name, (false, BTreeMap::new()));
             continue;
@@ -836,7 +1339,13 @@ fn resolve_def(
                     // The graph reports an unknown other end.
                     continue;
                 };
-                if other_type.shape != declared.shape && declared.role != Role::Parameter {
+                // ADR 0045 §4: a pinned field (every field of a typed
+                // port) is checked against every end; an inferred one is
+                // judged at the wire by the graph, or among the ends.
+                if declared.pinned(Field::Shape)
+                    && other_type.shape != declared.shape
+                    && declared.role != Role::Parameter
+                {
                     out.errors.push((
                         file,
                         span.start,
@@ -846,7 +1355,10 @@ fn resolve_def(
                             shape_text(other_type.shape)
                         ),
                     ));
-                } else if other_type.rate != declared.rate && declared.role != Role::Parameter {
+                } else if declared.pinned(Field::Rate)
+                    && other_type.rate != declared.rate
+                    && declared.role != Role::Parameter
+                {
                     out.errors.push((
                         file,
                         span.start,
@@ -855,7 +1367,7 @@ fn resolve_def(
                             declared.rate, other_type.rate
                         ),
                     ));
-                } else if !other_type.kind.matches(declared.kind) {
+                } else if declared.pinned(Field::Kind) && !other_type.kind.matches(declared.kind) {
                     out.warnings.push((
                         file,
                         span.start,
@@ -959,7 +1471,10 @@ fn resolve_def(
                     port.name,
                     role_word(port.role)
                 ))
-            } else if port.role != Role::Parameter && found.shape != port.shape {
+            } else if port.role != Role::Parameter
+                && port.pinned(Field::Shape)
+                && found.shape != port.shape
+            {
                 Some(format!(
                     "`{load_text}` {} `{candidate}` is {}; the slot's interface declares `{}` {}",
                     if port.role == Role::Output {
@@ -971,7 +1486,10 @@ fn resolve_def(
                     port.name,
                     shape_text(port.shape)
                 ))
-            } else if port.role != Role::Parameter && found.rate.get() != port.rate {
+            } else if port.role != Role::Parameter
+                && port.pinned(Field::Rate)
+                && found.rate.get() != port.rate
+            {
                 Some(format!(
                     "`{load_text}` `{candidate}` runs at rate divisor {}; the slot's interface declares `{}` at {}",
                     found.rate.get(),
@@ -1006,7 +1524,7 @@ fn resolve_def(
                     continue;
                 }
             }
-            if !found.kind.matches(port.kind) {
+            if port.pinned(Field::Kind) && !found.kind.matches(port.kind) {
                 out.warnings.push((
                     file,
                     at,
@@ -1120,6 +1638,56 @@ fn resolve_def(
         out.resolutions.push(resolution);
     }
 
+    // ADR 0045 §4: the ends of an auto port that no renamed wire carries
+    // (an empty slot, an unmatched port) agree with its defining end in
+    // shape; the graph judges the others.
+    for (slot_name, interface) in &interfaces {
+        let slot_text = level.slot_text(slot_name);
+        for port in &interface.ports {
+            let Some(auto) = &port.auto else {
+                continue;
+            };
+            let carried = renames
+                .get(slot_name)
+                .is_some_and(|(loaded, matched)| *loaded && matched.contains_key(&port.name));
+            if carried || port.pinned(Field::Shape) || auto.from.end != AutoEnd::Host {
+                continue;
+            }
+            let Some(defining) = inferred.defining(slot_name, &port.name) else {
+                continue;
+            };
+            let input = port.role == Role::Input;
+            for connection in &spans.connections {
+                let (here, there) = if input {
+                    (&connection.to, &connection.from)
+                } else {
+                    (&connection.from, &connection.to)
+                };
+                if split(&here.0) != Some((slot_name, port.name.as_str())) || there.0 == defining {
+                    continue;
+                }
+                let Some(other) = level.known(ports, &inferred.resolved, &there.0, input) else {
+                    continue;
+                };
+                if other.shape != port.shape {
+                    out.errors.push((
+                        file,
+                        here.1.start,
+                        format!(
+                            "`{slot_text}.{}` (auto) is {}, from `{}`; `{}` {} {}",
+                            port.name,
+                            shape_text(port.shape),
+                            level.qualified(defining),
+                            level.qualified(&there.0),
+                            if input { "sends" } else { "takes" },
+                            shape_text(other.shape)
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
     // The wires: renamed through the matches, or left out.
     let mut connections = Vec::new();
     let mut connection_spans = Vec::new();
@@ -1167,6 +1735,15 @@ fn resolve_def(
         }
         let mut connection = connection.clone();
         let mut connection_span = connection_span.clone();
+        // ADR 0045 §4: what the graph's errors on the renamed wire name.
+        for (source, endpoint, other) in [
+            (true, &connection.from, &connection.to),
+            (false, &connection.to, &connection.from),
+        ] {
+            if let Some(end) = slot_end(&level, &interfaces, &renames, source, endpoint, other) {
+                connection_span.slot_ends.push(end);
+            }
+        }
         if let Some(Some(from)) = from {
             connection.from = from.clone();
             connection_span.from.0 = from;
@@ -1182,6 +1759,53 @@ fn resolve_def(
     out.spans.connections = connection_spans;
     exports(&mut out, &renames, &interfaces, name);
     out
+}
+
+/// ADR 0045 §4: the slot end `endpoint` of a host wire (its `from` when
+/// `source`; `other` its other end, as written), renamed to the content's
+/// port: what a graph error on the wire names.
+fn slot_end(
+    level: &Level<'_>,
+    interfaces: &BTreeMap<&str, &Interface>,
+    renames: &BTreeMap<&str, (bool, BTreeMap<String, String>)>,
+    source: bool,
+    endpoint: &str,
+    other: &str,
+) -> Option<SlotEnd> {
+    let (instance, port) = split(endpoint)?;
+    let (true, matched) = renames.get(instance)? else {
+        return None;
+    };
+    let target = matched.get(port)?;
+    let declared = interfaces.get(instance)?.port(port)?;
+    let load = level
+        .spans
+        .contents
+        .get(instance)
+        .and_then(|c| c.slot.as_ref())
+        .and_then(|s| s.load.as_ref())
+        .map_or(
+            level.modules.get(instance).copied().unwrap_or(""),
+            |(l, _)| l.as_str(),
+        );
+    let how = declared
+        .auto
+        .as_ref()
+        .map(|auto| match (&auto.from.end, &auto.from.port) {
+            (AutoEnd::Host, Some(port)) => format!("auto, from {port}"),
+            (AutoEnd::Content, Some(port)) => format!("auto, from the content's {port}"),
+            _ => "auto".to_owned(),
+        });
+    Some(SlotEnd {
+        source,
+        port: format!("{}.{port}", level.slot_text(instance)),
+        how,
+        reaches: if source {
+            level.qualified(other)
+        } else {
+            format!("{load}'s {target}")
+        },
+    })
 }
 
 /// ADR 0037 §2: a composite's exports that name a slot's port, checked
@@ -1557,7 +2181,7 @@ pub fn interface_templates(files: &[crate::SourceFile]) -> BTreeMap<String, Inte
         .iter()
         .filter_map(|file| {
             let stem = file.path.strip_prefix(&prefix)?.strip_suffix(".toml")?;
-            let interface = parse_interface(&file.text, stem).ok()?;
+            let interface = parse_interface(&file.text, stem, false).ok()?;
             Some((stem.to_owned(), interface))
         })
         .collect()

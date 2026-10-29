@@ -585,6 +585,9 @@ expression: text
         {
           "additionalProperties": false,
           "properties": {
+            "auto": {
+              "const": true
+            },
             "group": {
               "type": "string"
             },
@@ -601,11 +604,20 @@ expression: text
               ]
             },
             "range": {
-              "items": {
-                "type": "number"
-              },
-              "minItems": 2,
-              "type": "array"
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                {
+                  "maxItems": 0,
+                  "type": "array"
+                }
+              ]
             },
             "rate": {
               "minimum": 1,
@@ -641,7 +653,7 @@ expression: text
           "type": "object"
         }
       ],
-      "description": "An interface port (ADR 0037 §3): a kind (a signal of that kind at rate 1), \"events\", or a table."
+      "description": "An interface port (ADR 0037 §3): a kind (a signal of that kind at rate 1), \"events\", or a table. The empty table {}, or a table with auto = true, is an auto port (ADR 0045 §1): its unwritten shape, rate, kind, unit and range are inferred from its connections; unit = \"\" and range = [] pin none."
     },
     "ProjectFile": {
       "additionalProperties": false,

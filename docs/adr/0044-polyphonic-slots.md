@@ -51,7 +51,7 @@ connections = [
 - **`voices` is a reserved key**, added to ADR 0037 §2's list. It is an error on a plain instance (`module =`, `project =`). Extending it to plain instances later is the same resolution, if someone asks for it (Alternatives).
 
 ### 2. The interface declares each port's role: `voice = "shared" | "each" | "sum" | "alloc"`
-A new optional **port field `voice`**, in an inline interface and in a template alike (amends ADR 0037 §3 and `project-format.md` §14). It is read only when the slot has `voices`.
+A new optional **port field `voice`**, in an inline interface and in a template alike (amends ADR 0037 §3 and `project-format.md` §14). It is read only when the slot has `voices`. *Amended by ADR 0045 §6 (2026-10-29): a port with a `voice` field must be typed, not auto (an error at the field), until this ADR's phase 1 decides auto `shared` inputs and `sum` outputs with the generated composite in hand. Until then `voice` is no field the format reads, so a `voice` on any port is an unknown field.*
 
 | Role | On | Default for | Meaning in a slot with N voices |
 |---|---|---|---|

@@ -292,7 +292,10 @@ function quoted(text) {
   return JSON.stringify(String(text));
 }
 
-/** A port's declaration as an interface file writes it (`project-format.md` §14). */
+/**
+ * A port's declaration as an interface file writes it (`project-format.md`
+ * §14): a typed port, never `{}` (ADR 0045 §5, an auto port).
+ */
 function declaration(p) {
   const fields = [];
   const { shape, width } = shapeOf(p.shape);
@@ -309,7 +312,9 @@ function declaration(p) {
   const range = Array.isArray(p.range) ? p.range : p.range && typeof p.range === 'object' ? [p.range.min, p.range.max] : null;
   if (range && range.every(Number.isFinite)) fields.push(`range = [${range[0]}, ${range[1]}]`);
   if (p.group) fields.push(`group = ${quoted(p.group)}`);
-  return fields.length ? `{ ${fields.join(', ')} }` : '{}';
+  // ADR 0045 §5: `{}` is an auto port (typed by its connections), so a
+  // plain generic signal port is written by its kind.
+  return fields.length ? `{ ${fields.join(', ')} }` : '"generic"';
 }
 
 /** Why `name` cannot name an interface file, or null. */

@@ -106,6 +106,27 @@ pub(crate) struct ConnectionSpans {
     pub(crate) to: (String, Span),
     /// The scale's value and span, if given.
     pub(crate) scale: Option<(f64, Span)>,
+    /// ADR 0045 §4: the ends of a wire renamed through a slot (its `from`
+    /// and `to` above are the content's names), for the graph's errors on
+    /// it; empty for every other wire.
+    pub(crate) slot_ends: Vec<SlotEnd>,
+}
+
+/// One end of a host wire that a slot renamed to its content's port
+/// (ADR 0045 §4).
+#[derive(Clone, Debug)]
+pub(crate) struct SlotEnd {
+    /// Whether it is the wire's `from` (a slot output).
+    pub(crate) source: bool,
+    /// The slot's port as written, qualified: `/fx.in`, `rack/fx.in`.
+    pub(crate) port: String,
+    /// How the port is typed: `auto, from /seq.notes`, `auto, from the
+    /// content's hz`, `auto`; `None` for a typed port.
+    pub(crate) how: Option<String>,
+    /// What the port reaches across the slot: for an input, the content's
+    /// port (`moog_voice's hz`); for an output, the wire's consumer as
+    /// written, qualified (`/seq.reset`).
+    pub(crate) reaches: String,
 }
 
 /// What an export exposes.
@@ -418,12 +439,130 @@ impl<'a> Locator<'a> {
         Some((def, connection))
     }
 
-    /// The declared connection, else the target's or the source's instance.
+    /// The declared connection (or the host wire a slot renamed into it),
+    /// else the target's or the source's instance.
     fn connection_or_instance(&self, from: &PortAddress, to: &PortAddress) -> Option<Location> {
         self.connection(from, to)
+            .or_else(|| self.slot_wire(from, to))
             .map(|(def, connection)| at(def, connection.entry.start))
             .or_else(|| self.instance_key(&to.instance()))
             .or_else(|| self.instance_key(&from.instance()))
+    }
+
+    /// ADR 0045 §4: the host wire, renamed through a slot, whose ends reach
+    /// the flattened ports `from` and `to` (through the exports of the
+    /// slot's content, when it is a composite or a project).
+    fn slot_wire(
+        &self,
+        from: &PortAddress,
+        to: &PortAddress,
+    ) -> Option<(&'a DefSpans, &'a ConnectionSpans)> {
+        let target = segments(&to.instance());
+        for depth in 0..target.len() {
+            let scope = &target[..depth];
+            let Some(def) = self.def_at(scope) else {
+                continue;
+            };
+            let found = def.connections.iter().find(|c| {
+                !c.slot_ends.is_empty()
+                    && self.reaches(def, &c.to.0, scope, to)
+                    && self.reaches(def, &c.from.0, scope, from)
+            });
+            if let Some(connection) = found {
+                return Some((def, connection));
+            }
+        }
+        None
+    }
+
+    /// Whether the endpoint `text` of `def`, instantiated at the instance
+    /// path `scope`, is the flattened port `port`, directly or through
+    /// exports.
+    fn reaches(&self, def: &DefSpans, text: &str, scope: &[String], port: &PortAddress) -> bool {
+        let Some((instance, name)) = text.split_once('.') else {
+            return false;
+        };
+        let target = segments(&port.instance());
+        if target.len() <= scope.len()
+            || target[..scope.len()] != *scope
+            || target[scope.len()] != instance
+        {
+            return false;
+        }
+        if target.len() == scope.len() + 1 {
+            return name == port.port();
+        }
+        let Some(inner) = def
+            .instances
+            .get(instance)
+            .and_then(|i| self.map.composites.get(&i.module))
+        else {
+            return false;
+        };
+        let mut deeper = scope.to_vec();
+        deeper.push(instance.to_owned());
+        inner
+            .exports
+            .iter()
+            .filter(|e| e.name == name && e.kind != ExportKind::Parameter)
+            .any(|e| {
+                e.targets
+                    .iter()
+                    .any(|(t, _)| self.reaches(inner, t, &deeper, port))
+            })
+    }
+
+    /// ADR 0045 §4: the message of a shape or rate mismatch on a wire a
+    /// slot renamed, naming the slot's port as written, how it is typed,
+    /// and what it reaches (`/fx.in (auto, from /seq.notes) is events; it
+    /// reaches moog_voice's hz, a signal`); `None` for every other error.
+    pub(crate) fn slot_message(&self, error: &GraphError) -> Option<String> {
+        let (from, to) = match error {
+            GraphError::ShapeMismatch { from, to, .. }
+            | GraphError::RateMismatch { from, to, .. } => (from, to),
+            _ => return None,
+        };
+        if self
+            .connection(from, to)
+            .is_some_and(|(_, c)| c.slot_ends.is_empty())
+        {
+            return None;
+        }
+        let (_, connection) = self
+            .connection(from, to)
+            .filter(|(_, c)| !c.slot_ends.is_empty())
+            .or_else(|| self.slot_wire(from, to))?;
+        // An input names what it reaches inside the slot; else the output.
+        let end = connection
+            .slot_ends
+            .iter()
+            .find(|e| !e.source)
+            .or_else(|| connection.slot_ends.first())?;
+        let port = match &end.how {
+            Some(how) => format!("{} ({how})", end.port),
+            None => end.port.clone(),
+        };
+        Some(match error {
+            GraphError::ShapeMismatch {
+                from_shape,
+                to_shape,
+                ..
+            } => format!(
+                "{port} is {}; it reaches {}, {}",
+                shape_words(*from_shape),
+                end.reaches,
+                shape_words(*to_shape)
+            ),
+            GraphError::RateMismatch {
+                from_rate, to_rate, ..
+            } => format!(
+                "{port} runs at rate divisor {}; it reaches {}, at rate divisor {}: rate mismatch; only signals and vectors convert, where one divisor is a multiple of the other",
+                from_rate.get(),
+                end.reaches,
+                to_rate.get()
+            ),
+            _ => return None,
+        })
     }
 
     /// The value that set `parameter`: the outermost enclosing composite
@@ -497,6 +636,16 @@ impl<'a> Locator<'a> {
             })
             .map(|e| e.name.clone())
             .collect()
+    }
+}
+
+/// A shape in words: `a signal`, `events`, `a vector of 2`.
+pub(crate) fn shape_words(shape: signal_core::PortShape) -> String {
+    match shape {
+        signal_core::PortShape::Signal => "a signal".to_owned(),
+        signal_core::PortShape::Events => "events".to_owned(),
+        signal_core::PortShape::Vector(n) => format!("a vector of {n}"),
+        _ => "another shape".to_owned(),
     }
 }
 

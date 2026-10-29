@@ -22,7 +22,7 @@ use toml_edit::{DocumentMut, InlineTable, Item as TomlItem, Table, Value};
 
 use super::{PatchError, Patching, Scheme, bad, map, refused, written};
 use crate::model::KINDS;
-use crate::slot::{Interface, InterfacePort, Role};
+use crate::slot::{Field, Interface, InterfacePort, Role};
 
 /// One key a slot op changed, relative to the slot's entry: its `path`
 /// (`["slot", "inputs", "in"]`, `["load"]`), its value as written (TOML
@@ -598,6 +598,9 @@ pub(crate) fn port_text(port: &InterfacePort) -> String {
         table.fmt();
         return Value::InlineTable(table).to_string().trim().to_owned();
     }
+    if let Some(auto) = &port.auto {
+        return auto_text(port, auto);
+    }
     let plain =
         port.unit.is_none() && port.range.is_none() && port.group.is_none() && port.rate == 1;
     let kind = crate::slot::kind_name(port.kind);
@@ -629,6 +632,55 @@ pub(crate) fn port_text(port: &InterfacePort) -> String {
         let mut range = toml_edit::Array::new();
         range.push(crate::write::number(min));
         range.push(crate::write::number(max));
+        table.insert("range", Value::Array(range));
+    }
+    if let Some(group) = &port.group {
+        table.insert("group", Value::from(group.as_str()));
+    }
+    table.fmt();
+    Value::InlineTable(table).to_string().trim().to_owned()
+}
+
+/// An auto port's declaration (ADR 0045 §9): `{}` with nothing pinned and
+/// no group, else `{ auto = true, <pinned fields>, group = … }`, a pinned
+/// "none" written `unit = ""` or `range = []`.
+fn auto_text(port: &InterfacePort, auto: &crate::slot::Auto) -> String {
+    let pinned = |field: Field| !auto.inferred.contains(&field);
+    let mut table = InlineTable::new();
+    if crate::slot::FIELDS.iter().all(|f| !pinned(*f)) && port.group.is_none() {
+        return "{}".to_owned();
+    }
+    table.insert("auto", Value::from(true));
+    if pinned(Field::Shape) {
+        match port.shape {
+            signal_core::PortShape::Events => {
+                table.insert("shape", Value::from("events"));
+            }
+            signal_core::PortShape::Vector(n) => {
+                let mut shape = InlineTable::new();
+                shape.insert("vector", Value::from(i64::from(n)));
+                table.insert("shape", Value::InlineTable(shape));
+            }
+            _ => {
+                table.insert("shape", Value::from("signal"));
+            }
+        }
+    }
+    if pinned(Field::Rate) {
+        table.insert("rate", Value::from(i64::from(port.rate)));
+    }
+    if pinned(Field::Kind) {
+        table.insert("kind", Value::from(crate::slot::kind_name(port.kind)));
+    }
+    if pinned(Field::Unit) {
+        table.insert("unit", Value::from(port.unit.as_deref().unwrap_or("")));
+    }
+    if pinned(Field::Range) {
+        let mut range = toml_edit::Array::new();
+        if let Some((min, max)) = port.range {
+            range.push(crate::write::number(min));
+            range.push(crate::write::number(max));
+        }
         table.insert("range", Value::Array(range));
     }
     if let Some(group) = &port.group {
@@ -724,6 +776,26 @@ fn interface_port(
                 .or(base.and_then(|b| b.range))
         },
         group: keep(&port.group, base.map(|b| &b.group)),
+        // ADR 0045: a retype of an auto port keeps it auto, the fields it
+        // gives pinned (phase 2 adds `add.auto` and `retype.unpin`).
+        auto: base
+            .filter(|_| role != Role::Parameter)
+            .and_then(|b| b.auto.as_ref())
+            .map(|auto| crate::slot::Auto {
+                inferred: auto
+                    .inferred
+                    .iter()
+                    .copied()
+                    .filter(|field| match field {
+                        Field::Shape => port.shape.is_none(),
+                        Field::Rate => port.rate.is_none(),
+                        Field::Kind => port.kind.is_none(),
+                        Field::Unit => port.unit.is_none(),
+                        Field::Range => port.range.is_none(),
+                    })
+                    .collect(),
+                from: auto.from.clone(),
+            }),
     })
 }
 

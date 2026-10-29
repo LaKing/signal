@@ -915,3 +915,101 @@ fn a_rename_onto_a_removed_name_keeps_its_snapshot_state() {
     );
     plans(&edited).unwrap();
 }
+
+const AUTO: &str = r#"schema_version = 1
+
+[project]
+name = "auto"
+sample_rate = 48000
+
+[instances]
+osc = { module = "std.sine_osc" }
+fx = { slot = { inputs = { x = {} }, outputs = { y = { auto = true, kind = "audio", unit = "", range = [] } } }, load = "std.gain", map = { x = "in", y = "out" } }
+out = { module = "std.audio_out" }
+
+[wiring]
+connections = [
+  { from = "osc.out", to = "fx.x" },
+  { from = "fx.y", to = "out.l" },
+]
+"#;
+
+/// ADR 0045 (phase 1): today's interface edits keep an auto port auto: a
+/// rename writes it as it was (`{}`, or `{ auto = true, … }` with what it
+/// pins), a retype pins the fields it gives, and "Detach" writes a
+/// template's auto ports as auto; the plan is the same.
+#[test]
+fn interface_edits_keep_auto_ports_auto() {
+    let before = plan_dump(AUTO);
+    let (renamed, _) = round_trip(
+        AUTO,
+        &[op(
+            serde_json::json!({"op": "slot.interface", "slot": "fx", "rename": {"x": "a", "y": "b"}}),
+        )],
+    );
+    assert!(
+        renamed.contains("inputs = { a = {} }")
+            && renamed.contains(r#"b = { auto = true, kind = "audio", unit = "", range = [] }"#),
+        "{renamed}"
+    );
+    assert_eq!(plan_dump(&renamed), before);
+    let (retyped, _) = round_trip(
+        AUTO,
+        &[op(
+            serde_json::json!({"op": "slot.interface", "slot": "fx", "retype": [{"name": "x", "group": "g", "kind": "audio"}]}),
+        )],
+    );
+    assert!(
+        retyped.contains(r#"x = { auto = true, kind = "audio", group = "g" }"#),
+        "{retyped}"
+    );
+    assert_eq!(plan_dump(&retyped), before);
+
+    // Detach writes a template's auto ports as auto, its typed ones typed.
+    let bus = "schema_version = 1\n[interface]\nname = \"bus\"\n[inputs]\nx = {}\n[outputs]\ny = { group = \"o\" }\n";
+    let templates: BTreeMap<String, Interface> = BTreeMap::from([(
+        "bus".to_owned(),
+        crate::slot::parse_interface(bus, "bus", false).unwrap(),
+    )]);
+    let context = Context {
+        templates: &templates,
+        ..ctx()
+    };
+    let from = AUTO.replace(
+        r#"fx = { slot = { inputs = { x = {} }, outputs = { y = { auto = true, kind = "audio", unit = "", range = [] } } }, load = "std.gain", map = { x = "in", y = "out" } }"#,
+        r#"fx = { slot = "bus" }"#,
+    );
+    let detached = apply(
+        &from,
+        None,
+        &[op(
+            serde_json::json!({"op": "slot.interface", "slot": "fx", "detach": true}),
+        )],
+        &context,
+    )
+    .unwrap();
+    assert!(
+        detached.text.contains(
+            r#"fx = { slot = { inputs = { x = {} }, outputs = { y = { group = "o" } } } }"#
+        ),
+        "{}",
+        detached.text
+    );
+}
+
+/// ADR 0045 §5: a library template may hold no auto port; a project
+/// template may.
+#[test]
+fn only_project_templates_may_hold_auto_ports() {
+    let text = "schema_version = 1\n[interface]\nname = \"bus\"\n[inputs]\nx = {}\ny = { auto = true, kind = \"gate\" }\nz = { group = \"g\" }\n";
+    let interface = crate::slot::parse_interface(text, "bus", false).unwrap();
+    let auto = |name: &str| interface.port(name).unwrap().auto.is_some();
+    assert!(auto("x") && auto("y") && !auto("z"), "{interface:?}");
+    let problems = crate::slot::parse_interface(text, "bus", true).unwrap_err();
+    let messages: Vec<&str> = problems.iter().map(|(_, m)| m.as_str()).collect();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(
+        messages[0].starts_with("`x` is an auto port; a library interface's ports are typed"),
+        "{messages:?}"
+    );
+}

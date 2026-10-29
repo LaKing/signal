@@ -57,7 +57,9 @@ pub const MAX_PLAN_ROWS: usize = 1 << 19;
 /// The ports and parameters an instance of `module` has (ADR 0037 §4): a
 /// primitive type's declared ports and parameters (in descriptor order), or
 /// a composite's exports (in name order), each with the direction, shape,
-/// rate and kind of the inner port behind it, as flattening resolves it. A
+/// rate, kind, unit and range of the inner port behind it, as flattening
+/// resolves it (an exported parameter's range is its own where ADR 0042
+/// gives it one; ADR 0045 §11). A
 /// pure query over the definitions: nothing is planned. `Err` with the
 /// graph errors when `module` does not resolve, or its definition is
 /// broken.

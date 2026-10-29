@@ -74,9 +74,9 @@ pub use pattern::{
 };
 pub use schema::schema;
 pub use slot::{
-    ContentNames, ContentPort, Interface, InterfacePort, LibraryInterface, Match, Role,
-    SlotResolution, content_names, interface_templates, library_interfaces, library_template,
-    project_content,
+    Auto, AutoEnd, AutoFrom, ContentNames, ContentPort, Field, Interface, InterfacePort,
+    LibraryInterface, Match, Role, SlotResolution, content_names, interface_templates,
+    library_interfaces, library_template, project_content,
 };
 pub use structure::{library_modules, library_parameters, modules_without_inside};
 pub use write::{
@@ -709,9 +709,12 @@ impl Project {
             Err(graph_errors) => {
                 for error in &graph_errors {
                     let location = root.error(error);
+                    let message = root
+                        .slot_message(error)
+                        .unwrap_or_else(|| error.to_string());
                     push_unique(
                         &mut errors,
-                        self.diagnostic(Severity::Error, location, error.to_string()),
+                        self.diagnostic(Severity::Error, location, message),
                     );
                 }
                 None
@@ -745,9 +748,12 @@ impl Project {
                 };
                 for error in &graph_errors {
                     let location = locator.error(error);
+                    let message = locator
+                        .slot_message(error)
+                        .unwrap_or_else(|| error.to_string());
                     push_unique(
                         &mut errors,
-                        self.diagnostic(Severity::Error, location, error.to_string()),
+                        self.diagnostic(Severity::Error, location, message),
                     );
                 }
             }
@@ -1414,7 +1420,7 @@ impl Builder<'_> {
             .and_then(|p| p.strip_suffix(".toml"))
             .unwrap_or(&source.path)
             .to_owned();
-        match slot::parse_interface(&source.text, &stem) {
+        match slot::parse_interface(&source.text, &stem, false) {
             Ok(interface) => Some((stem, interface)),
             Err(problems) => {
                 for (offset, message) in problems {
@@ -1799,6 +1805,7 @@ fn definition(
             from,
             to,
             scale: connection.scale.as_ref().map(|s| (*s.get_ref(), s.span())),
+            slot_ends: Vec::new(),
         });
     }
 

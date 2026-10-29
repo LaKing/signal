@@ -868,6 +868,15 @@ pub struct ModulePort {
     pub rate: signal_core::RateDivisor,
     /// Its kind.
     pub kind: signal_core::PortKind,
+    /// Its unit, if it declares one: a primitive's port or parameter
+    /// descriptor's, or for an export the inner port's or parameter's
+    /// behind it (the first in address order). Presentation only.
+    pub unit: Option<String>,
+    /// Its expected range, if it declares one: a primitive's port's or
+    /// parameter's; for an export the inner port's or parameter's behind
+    /// it (the first in address order), and for an exported parameter its
+    /// own range where ADR 0042 gives it one. Presentation only.
+    pub range: Option<signal_core::Range>,
 }
 
 /// The ports of `descriptor`'s type, in descriptor order: ports, then
@@ -880,6 +889,8 @@ fn descriptor_ports(descriptor: &ModuleDescriptor) -> Vec<ModulePort> {
         shape: p.shape,
         rate: p.rate,
         kind: p.kind,
+        unit: p.unit.map(str::to_owned),
+        range: p.range,
     });
     let parameters = descriptor.parameters.iter().map(|p| ModulePort {
         name: p.name.to_owned(),
@@ -888,6 +899,8 @@ fn descriptor_ports(descriptor: &ModuleDescriptor) -> Vec<ModulePort> {
         shape: PortShape::Signal,
         rate: p.rate,
         kind: p.kind,
+        unit: p.unit.map(str::to_owned),
+        range: Some(p.range),
     });
     ports.chain(parameters).collect()
 }
@@ -963,6 +976,8 @@ pub(crate) fn ports_of(
                 shape: port.shape,
                 rate: port.rate,
                 kind: port.kind,
+                unit: port.unit.map(str::to_owned),
+                range: port.range,
             });
         } else if let Some(parameter) = targets.first().and_then(parameter_of) {
             // An exported input onto an inner parameter is still an input.
@@ -973,6 +988,8 @@ pub(crate) fn ports_of(
                 shape: PortShape::Signal,
                 rate: parameter.rate,
                 kind: parameter.kind,
+                unit: parameter.unit.map(str::to_owned),
+                range: Some(parameter.range),
             });
         }
     }
@@ -985,6 +1002,8 @@ pub(crate) fn ports_of(
                 shape: port.shape,
                 rate: port.rate,
                 kind: port.kind,
+                unit: port.unit.map(str::to_owned),
+                range: port.range,
             });
         }
     }
@@ -997,6 +1016,14 @@ pub(crate) fn ports_of(
                 shape: PortShape::Signal,
                 rate: parameter.rate,
                 kind: parameter.kind,
+                unit: parameter.unit.map(str::to_owned),
+                // ADR 0042: its own range, else the one its targets share.
+                range: interface
+                    .ranges
+                    .get(name)
+                    .copied()
+                    .flatten()
+                    .or(Some(parameter.range)),
             });
         }
     }

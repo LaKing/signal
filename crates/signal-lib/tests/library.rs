@@ -152,6 +152,43 @@ fn every_library_composite_declares_its_category_and_documents_its_exports() {
     }
 }
 
+/// ADR 0045 §5: a library interface template is a contract its contents
+/// fit, so it declares no auto port: no input or output written `{}` or
+/// with `auto`; and every template reads, its ports all typed.
+#[test]
+fn library_interfaces_have_no_auto_ports() {
+    for file in signal_lib::interfaces() {
+        let table: toml::Table = toml::from_str(file.text).unwrap();
+        for role in ["inputs", "outputs"] {
+            let Some(ports) = table.get(role).and_then(toml::Value::as_table) else {
+                continue;
+            };
+            for (name, port) in ports {
+                if let Some(fields) = port.as_table() {
+                    assert!(
+                        !fields.is_empty() && !fields.contains_key("auto"),
+                        "interfaces/{}.toml: `{name}` is an auto port",
+                        file.name
+                    );
+                }
+            }
+        }
+    }
+    let read = signal_project::library_interfaces();
+    assert_eq!(
+        read.len(),
+        signal_lib::interfaces().len(),
+        "every one reads"
+    );
+    for template in read {
+        assert!(
+            template.interface.ports.iter().all(|p| p.auto.is_none()),
+            "{}",
+            template.name
+        );
+    }
+}
+
 /// AC9 (reworded): at its defaults, on its stimulus, no composite faults and
 /// none exceeds ±1.
 #[test]

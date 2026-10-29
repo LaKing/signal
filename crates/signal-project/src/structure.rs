@@ -657,6 +657,10 @@ impl Walk<'_> {
             if let (Some(group), Value::Object(fields)) = (&port.group, &mut value) {
                 fields.insert("group".to_owned(), json!(group));
             }
+            // ADR 0045 §9: an auto port's inferred fields and their end.
+            if let (Some(auto), Value::Object(fields)) = (&port.auto, &mut value) {
+                fields.insert("auto".to_owned(), json!(auto));
+            }
             match port.role {
                 Role::Input | Role::Output => {
                     if let Value::Object(fields) = &mut value {

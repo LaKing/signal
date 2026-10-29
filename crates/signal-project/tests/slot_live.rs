@@ -7,7 +7,11 @@
 //! `/deck/osc`, a `std.sine_osc`, and the host's own sound is bit-continuous.
 //! Each session replays to what was played (the Replace's middle version is
 //! the slot unloaded, as `slot.unload` writes it). An interface edit that
-//! changes no match is no edit at all. The callbacks' allocations are
+//! changes no match is no edit at all. ADR 0045 test 5 (phase 1): a rewire
+//! that retypes an auto port is one ordinary swap (a converter, sources
+//! changed, survivors bit-continuous), one into a shape conflict is refused,
+//! and a Replace that retypes an empty slot's auto output is still an
+//! unload, then a load. The callbacks' allocations are
 //! counted in `signal-output`'s `chained_swaps.rs`, which drives the same two
 //! swaps.
 
@@ -531,4 +535,293 @@ fn an_own_inside_is_no_replace_and_its_edits_are_ordinary() {
         "{applied}"
     );
     run.finish(&registry, "own-inside-wrap");
+}
+
+// ADR 0045 test 5 (phase 1, without `retyped`): an inferred type never
+// reaches the plan, so it sends nothing of its own; what is sent is the
+// edit that caused it.
+
+/// `test.watch`: its `seen` is 1 on a call's first frame when its `in` had
+/// its sources changed by a swap (`Inputs::sources_changed`), else 0.
+const WATCH: signal_core::ModuleDescriptor = signal_core::ModuleDescriptor {
+    type_name: "test.watch",
+    doc: "fixture: shows when a swap changed its input's sources",
+    ports: &[
+        signal_core::PortDescriptor {
+            name: "in",
+            direction: signal_core::Direction::In,
+            shape: signal_core::PortShape::Signal,
+            rate: signal_core::RateDivisor::ONE,
+            kind: signal_core::PortKind::Control,
+            unit: None,
+            range: None,
+        },
+        signal_core::PortDescriptor {
+            name: "seen",
+            direction: signal_core::Direction::Out,
+            shape: signal_core::PortShape::Signal,
+            rate: signal_core::RateDivisor::ONE,
+            kind: signal_core::PortKind::Audio,
+            unit: None,
+            range: None,
+        },
+    ],
+    parameters: &[],
+    feedthrough: signal_core::Feedthrough::Direct,
+    sink: None,
+    latency: None,
+    reproducibility: signal_core::Reproducibility::BitExact,
+    category: None,
+};
+
+#[derive(Default)]
+struct Watch;
+
+impl signal_core::DirectPrimitive for Watch {
+    fn describe() -> signal_core::ModuleDescriptor {
+        WATCH
+    }
+    fn prepare(&mut self, _: &signal_core::PrepareContext) {}
+    fn reset(&mut self) {}
+    fn process(
+        &mut self,
+        inputs: &signal_core::Inputs<'_>,
+        outputs: &mut signal_core::Outputs<'_>,
+    ) {
+        let seen = inputs.sources_changed(0);
+        for (n, out) in outputs.signal(0).iter_mut().enumerate() {
+            *out = if n == 0 && seen { 1.0 } else { 0.0 };
+        }
+    }
+}
+
+/// The std library, `test.watch`, and `test.slow` (`std.const` at rate
+/// divisor 64).
+fn auto_registry() -> Registry {
+    let mut registry = registry();
+    registry
+        .register(signal_core::ModuleType {
+            descriptor: WATCH,
+            create: || signal_core::Primitive::Direct(Box::new(Watch)),
+        })
+        .unwrap();
+    let constant = *registry.get("std.const").unwrap();
+    let mut descriptor = constant.descriptor;
+    let slow = signal_core::RateDivisor::new(64).unwrap();
+    descriptor.type_name = "test.slow";
+    descriptor.ports = Box::leak(
+        descriptor
+            .ports
+            .iter()
+            .map(|p| signal_core::PortDescriptor { rate: slow, ..*p })
+            .collect(),
+    );
+    descriptor.parameters = Box::leak(
+        descriptor
+            .parameters
+            .iter()
+            .map(|p| signal_core::ParameterDescriptor { rate: slow, ..*p })
+            .collect(),
+    );
+    registry
+        .register(signal_core::ModuleType {
+            descriptor,
+            create: constant.create,
+        })
+        .unwrap();
+    registry
+}
+
+/// A host whose `deck` (auto `in` and `seen`) loads `test.watch`, fed by
+/// `source` (`c`, a `std.const`; `s`, a `test.slow`; `e`, a `std.edge`'s
+/// `rise`), its `seen` on the right, the tone on the left.
+fn watched(source: &str) -> Project {
+    let text = format!(
+        "schema_version = 1\n\n[project]\nname = \"auto\"\nsample_rate = {RATE}\nseed = 5\n\n[instances]\n\
+         tone = {{ module = \"std.sine_osc\", freq = 330 }}\n\
+         c = {{ module = \"std.const\", value = 0.25 }}\n\
+         s = {{ module = \"test.slow\", value = 0.25 }}\n\
+         e = {{ module = \"std.edge\" }}\n\
+         deck = {{ slot = {{ inputs = {{ in = {{}} }}, outputs = {{ seen = {{}} }} }}, load = \"test.watch\" }}\n\
+         out = {{ module = \"std.audio_out\" }}\n\n[wiring]\nconnections = [\n  {{ from = \"tone.out\", to = \"out.l\" }},\n  {{ from = \"{source}\", to = \"deck.in\" }},\n  {{ from = \"deck.seen\", to = \"out.r\" }},\n]\n"
+    );
+    Project::from_sources(vec![SourceFile {
+        path: "project.toml".to_owned(),
+        text,
+    }])
+    .unwrap()
+}
+
+/// A rewire that changes an auto input's inferred rate (a `std.const` at 1
+/// to a `test.slow` at 64) is one ordinary swap, which brings the hold
+/// converter; the content survives and sees its input's sources changed
+/// at the swap's frame; the host's tone is bit-continuous.
+#[test]
+fn a_rewire_that_retypes_an_auto_input_is_one_ordinary_swap() {
+    let registry = auto_registry();
+    let tone = tone(60_000);
+    for (threads, seed) in [(1, 71), (4, 72)] {
+        let old = watched("c.out");
+        let new = watched("s.out");
+        let planned = new.plan(&registry).unwrap();
+        let deck = &planned.slots[0];
+        assert_eq!(
+            deck.interface.port("in").unwrap().rate,
+            64,
+            "auto, from /s.out"
+        );
+        assert!(
+            planned
+                .plan
+                .instances
+                .iter()
+                .any(|i| i.address.as_str() == "/s/out_d1"),
+            "the hold converter"
+        );
+        let mut run = Run::start(&old, &registry, threads, seed);
+        run.play(3_000);
+        let (_, applied) =
+            send_edit(&mut run.controller, &mut run.live, &old, new, &registry).unwrap();
+        assert_eq!(
+            (
+                applied.swap,
+                applied.replaced,
+                applied.load_swap,
+                applied.removed
+            ),
+            (Some(1), 0, None, 0),
+            "{applied}"
+        );
+        run.play(6_000);
+        let played = run.finish(&registry, &format!("auto-rewire-{threads}"));
+        let edits = played.edits();
+        assert_eq!(edits.iter().map(|e| e.0).collect::<Vec<_>>(), ["swap"]);
+        let s = edits[0].1;
+        assert_eq!(played.left, tone[..played.left.len()], "bit-continuous");
+        assert_eq!(played.right[s], 1.0, "sources changed at the swap");
+        assert!(
+            played
+                .right
+                .iter()
+                .enumerate()
+                .all(|(n, &x)| n == s || x == 0.0),
+            "and nowhere else"
+        );
+    }
+}
+
+/// A rewire that makes a shape conflict (events into the content's signal
+/// input, through the auto port) is refused, and nothing is sent.
+#[test]
+fn a_rewire_into_a_shape_conflict_is_refused() {
+    let registry = auto_registry();
+    let old = watched("c.out");
+    let mut run = Run::start(&old, &registry, 1, 73);
+    run.play(1_000);
+    let refused = send_edit(
+        &mut run.controller,
+        &mut run.live,
+        &old,
+        watched("e.rise"),
+        &registry,
+    )
+    .err()
+    .expect("refused");
+    assert!(
+        refused.to_string().contains(
+            "/deck.in (auto, from /e.rise) is events; it reaches test.watch's in, a signal"
+        ),
+        "{refused}"
+    );
+    let played = run.finish(&registry, "auto-conflict");
+    assert!(played.edits.is_empty());
+}
+
+/// A composite `name` whose input `in` reaches `target` (`osc.pm`, a
+/// phase, or `g.in`, audio) and whose `out` is a sine at `freq` (through a
+/// `std.gain` `g`).
+fn deck_content(name: &str, target: &str, freq: f64) -> SourceFile {
+    SourceFile {
+        path: format!("composites/{name}.toml"),
+        text: format!(
+            "schema_version = 1\n\n[composite]\nname = \"{name}\"\n\n[instances]\nosc = {{ module = \"std.sine_osc\", freq = {freq} }}\ng = {{ module = \"std.gain\" }}\n\n[wiring]\nconnections = [ {{ from = \"osc.out\", to = \"g.in\" }} ]\n\n[exports]\ninputs = {{ in = \"{target}\" }}\noutputs = {{ out = \"g.out\" }}\n"
+        ),
+    }
+}
+
+/// The host of a Replace: `deck` (auto `in`) loads `load`; the empty slot
+/// `spare`'s auto `out` feeds `deck.in`, so it is typed by the content's
+/// `in` (stage 4), and defaults while `deck` is empty (the Replace's middle
+/// version).
+fn retyping_host(load: &str) -> Project {
+    let text = format!(
+        "schema_version = 1\n\n[project]\nname = \"retype\"\nsample_rate = {RATE}\nseed = 5\n\n[instances]\n\
+         tone = {{ module = \"std.sine_osc\", freq = 330 }}\n\
+         spare = {{ slot = {{ outputs = {{ out = {{}} }} }} }}\n\
+         deck = {{ slot = {{ inputs = {{ in = {{}} }}, outputs = {{ out = \"audio\" }} }}, load = \"{load}\" }}\n\
+         out = {{ module = \"std.audio_out\" }}\n\n[wiring]\nconnections = [\n  {{ from = \"tone.out\", to = \"out.l\" }},\n  {{ from = \"spare.out\", to = \"deck.in\" }},\n  {{ from = \"deck.out\", to = \"out.r\" }},\n]\n"
+    );
+    Project::from_sources(vec![
+        SourceFile {
+            path: "project.toml".to_owned(),
+            text,
+        },
+        deck_content("phase_in", "osc.pm", 220.0),
+        deck_content("audio_in", "g.in", 440.0),
+    ])
+    .unwrap()
+}
+
+/// A Replace that retypes another slot's empty auto output is still an
+/// unload, then a load; the retype adds no swap. Its middle version (the
+/// slot empty) leaves that output defaulted, and is not refused by the
+/// agreement check (ADR 0045 test 3).
+#[test]
+fn a_replace_that_retypes_an_empty_auto_output_is_still_unload_then_load() {
+    let registry = registry();
+    let tone = tone(60_000);
+    let spare = |project: &Project| {
+        let planned = project.plan(&registry).unwrap();
+        let port = planned.slots.iter().find(|s| s.slot == "/spare").unwrap();
+        let out = port.interface.port("out").unwrap().clone();
+        (out.kind, out.auto.unwrap().from.end)
+    };
+    let old = retyping_host("phase_in");
+    let new = retyping_host("audio_in");
+    use signal_core::PortKind;
+    use signal_project::AutoEnd;
+    assert_eq!(spare(&old), (PortKind::Phase, AutoEnd::Host));
+    assert_eq!(spare(&new), (PortKind::Audio, AutoEnd::Host));
+    let mut emptied = retyping_host("phase_in").files;
+    emptied[0].text = emptied[0].text.replace(", load = \"phase_in\"", "");
+    let middle = Project::from_sources(emptied).unwrap();
+    assert_eq!(spare(&middle), (PortKind::Generic, AutoEnd::Default));
+    for (threads, seed) in [(1, 81), (4, 82)] {
+        let mut run = Run::start(&old, &registry, threads, seed);
+        run.play(3_000);
+        let (_, applied) = send_edit(
+            &mut run.controller,
+            &mut run.live,
+            &old,
+            retyping_host("audio_in"),
+            &registry,
+        )
+        .unwrap();
+        assert_eq!(
+            (applied.replaced, applied.swap, applied.load_swap),
+            (1, Some(1), Some(2)),
+            "{applied}"
+        );
+        run.play(30_000);
+        let played = run.finish(&registry, &format!("auto-replace-{threads}"));
+        let edits = played.edits();
+        // The content's two instances suspended, then the two swaps.
+        assert_eq!(
+            edits.iter().map(|e| e.0).collect::<Vec<_>>(),
+            ["edit", "edit", "swap", "swap"]
+        );
+        let s = edits[0].1;
+        assert_eq!((edits[1].1, edits[2].1, edits[3].1), (s, s + F, s + F + 1));
+        assert_eq!(played.left, tone[..played.left.len()]);
+    }
 }

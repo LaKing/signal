@@ -353,6 +353,17 @@ The stages are the definition; §2's priority list reads them in order. Where th
 | 3. UI | The summary, Advanced with pins, auto new ports, tooltips, the card | Test 7; the operator's visual check |
 | 4. Verdict | — | The owner's verdict (test 8) |
 
+## Notes
+
+**2026-10-29, phase 1 built** (operator; decisions delegated). As the Phases table says, with these readings where the text left a choice:
+- **`from.port` of a host end** is qualified by the level as `SlotResolution.slot` is: `/osc.out` at the root, `rack/osc.out` in a composite (§9's example `"osc.out"` read as that rule's root case, which §8's `from /osc.out` also writes). A content end is the content's port name (`notes`); the default `null`.
+- **The agreement check** (§4) runs for an auto port whose shape is inferred, defined by a host end, and not carried by a renamed wire; each other known host end of another shape is an error at its wire, at the slot's endpoint as written. A pinned shape is checked as every pinned field is.
+- **A wire whose other end is an auto port no end typed** (open or defaulted) is not compared by a typed port's or a pinned field's check either: that end is no known end (§2). For every project that loads today nothing changes, since a `{}` other end was a generic signal at rate 1 and only such wires loaded.
+- **The `locate.rs` mapping** follows a renamed wire's ends through the content's exports to the flattened ports of `ShapeMismatch` and `RateMismatch`, so an error behind a composite or project content is located at the host's wire as written (it fell back to the inner instance's key before), and its message names the slot's port, how it is typed and what it reaches. Graph warnings on such wires (`ConverterInserted`, `KindMismatch`) are located there too; their text is the graph's.
+- **`voice` (§6):** ADR 0044 is not built, so no port reads a `voice` field; one is an unknown field, an error at the key, on an auto port as on any.
+- **Phase 2's writer, the minimum phase 1 needs:** today's interface edits must not turn an auto port typed, so `port_text` writes an auto port as §9's canonical text (`{}`, or `{ auto = true, <pinned>, group }`), a rename and "Detach" keep it auto, and a `retype` of an auto port keeps it auto with the fields it gives pinned. `add.auto`, `retype.unpin` and `retyped` are phase 2's.
+- **Test 5's `sources_changed`** is observed by a content primitive (`test.watch` in `slot_live.rs`) that outputs 1 on the first frame of its first call after the rewire's swap.
+
 ## Decided after the review (2026-10-29)
 - **New ports are auto** (§8): the owner's idea, confirmed by the coordinator. Today a "+" pin adds an `audio` port; after this ADR it adds `{}`, which shows "auto: nothing connected" until it is wired.
 - **`{}` changes meaning everywhere, with no special case for `interfaces/`** (§1, §5, §10), the coordinator's decision; `declaration()` stops writing it for typed ports.

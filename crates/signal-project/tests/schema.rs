@@ -101,6 +101,9 @@ impl Validator<'_> {
                     "minItems" => value
                         .as_array()
                         .is_none_or(|items| items.len() as u64 >= argument.as_u64().unwrap()),
+                    "maxItems" => value
+                        .as_array()
+                        .is_none_or(|items| items.len() as u64 <= argument.as_u64().unwrap()),
                     "minimum" => value
                         .as_f64()
                         .is_none_or(|x| x >= argument.as_f64().unwrap()),
@@ -204,6 +207,33 @@ fn the_schema_rejects_what_the_loader_rejects() {
         r#"drive = "shaper.drive""#,
         r#"drive = { to = "shaper.drive", min = 1, max = 2 }"#,
     )));
+}
+
+/// ADR 0045 §1, §9: `signal schema` takes an auto port (`{}`, `auto =
+/// true` with pinned fields, `unit = ""`, `range = []`) and refuses `auto =
+/// false` and a range of one number.
+#[test]
+fn the_schema_takes_auto_ports() {
+    let slot = |port: &str| {
+        format!(
+            "schema_version = 1\n[project]\nname = \"auto\"\n[instances]\nfx = {{ slot = {{ inputs = {{ in = {port} }} }} }}\n"
+        )
+    };
+    for port in [
+        "{}",
+        "{ auto = true }",
+        "{ auto = true, shape = \"events\", unit = \"\", range = [] }",
+        "{ kind = \"audio\", range = [0, 1] }",
+    ] {
+        assert!(validates(&slot(port)), "refused: {port}");
+    }
+    for port in [
+        "{ auto = false }",
+        "{ range = [1] }",
+        "{ range = [0, 1, 2] }",
+    ] {
+        assert!(!validates(&slot(port)), "accepted: {port}");
+    }
 }
 
 #[test]
