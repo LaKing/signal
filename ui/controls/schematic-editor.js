@@ -57,7 +57,7 @@ import {
   unloadOp,
 } from '../lib/slot.js';
 import { toLocal, toScreen } from '../lib/schematic-view.js';
-import { editLevel } from '../lib/schematic-open.js';
+import { editLevel, shownFrame } from '../lib/schematic-open.js';
 import { cordCurve, curveData } from '../lib/schematic-wire.js';
 import { formatFixed } from '../lib/format.js';
 
@@ -290,9 +290,9 @@ export class SchematicEditor {
     this.s.deleteSelection();
   }
 
-  /** Removes instance or connection `hit` (the selection, or a context menu's target). */
-  remove(hit) {
-    if (hit?.kind === 'instance' && hit.node.kind === 'instance') this.write(0, hit.level, [removeInstance(hit.node.name)]);
+  /** Removes instance or connection `hit` (the selection, or a context menu's target); `views` as `write`'s (an open frame deleted from inside it). */
+  remove(hit, { views = [] } = {}) {
+    if (hit?.kind === 'instance' && hit.node.kind === 'instance') this.write(0, hit.level, [removeInstance(hit.node.name)], { views });
     else if (hit?.kind === 'wire' && hit.wire.kind === 'connection') this.write(0, hit.level, [removeConnection(hit.wire.written.from, hit.wire.written.to)]);
     else if (hit?.kind === 'wire' && hit.wire.kind === 'export' && hit.wire.written?.role) {
       // ADR 0037, editable insides: a wire of a slot's inside's frame.
@@ -432,21 +432,28 @@ export class SchematicEditor {
   // edits do (undoable); a template is a `file.write` of interfaces/.
 
   /** Writes `ops` at `level`: a promise of `{ok, error}`, the refusal's text for a dialog to show. */
-  writeResult(level, ops) {
-    return this.write(0, level, ops).then((ok) => ({ ok, error: ok ? null : (this.lastRefusal ?? 'Not written') }));
+  writeResult(level, ops, views = []) {
+    return this.write(0, level, ops, { views }).then((ok) => ({ ok, error: ok ? null : (this.lastRefusal ?? 'Not written') }));
   }
 
-  /** A slot box (or one of its pins) as the slot ops name it: `{level, name, slot, path}`. */
+  /**
+   * A slot box (or one of its pins) as the slot ops name it: `{level, name,
+   * slot, path, views}`; `views` the level shown when it is that slot's
+   * inside (its open frame, 2026-10-29: its slot ops are written at the
+   * slot's level from there, as Edit the slot's interface… is).
+   */
   slotTarget(hit) {
     const node = hit?.node;
     if (!node?.slot) return null;
-    return { level: hit.level, name: node.name, slot: node.slot, path: hit.path };
+    const shown = editLevel(this.s.drawn);
+    const views = shownFrame(this.s.drawn, hit) ? [shown.level] : [];
+    return { level: hit.level, name: node.name, slot: node.slot, path: hit.path, views };
   }
 
-  /** Whether `level` is the one edited now (the innermost open, M2.13-3); says why not. */
-  editable(level) {
+  /** Whether `level` is the one edited now (the innermost open, M2.13-3), or written from it (`views`); says why not. */
+  editable(level, views = []) {
     const shown = editLevel(this.s.drawn);
-    if (level === shown.level) return true;
+    if (level === shown.level || views.includes(shown.level)) return true;
     this.s.say(`Not edited: ${level || 'the top level'} is around the open ${shown.path || 'level'}; edit it from there`);
     return false;
   }
@@ -474,7 +481,7 @@ export class SchematicEditor {
    */
   openLoad(hit) {
     const target = this.slotTarget(hit);
-    if (!this.editing || !target || !this.editable(target.level)) return;
+    if (!this.editing || !target || !this.editable(target.level, target.views)) return;
     this.loading = target;
     const title = target.slot.load ? `Replace ${target.slot.load} in ${target.name}` : `Load into ${target.name}`;
     const key = modulesKey(this.s.graph);
@@ -510,7 +517,7 @@ export class SchematicEditor {
     if (!target || !module) return null;
     const add = addUnmatched ? contentMatch(entry, target.slot).unmatched : [];
     this.closeLoader();
-    this.write(0, target.level, loadOps(target.name, module, { add }));
+    this.write(0, target.level, loadOps(target.name, module, { add }), { views: target.views });
     return null;
   }
 
@@ -527,7 +534,7 @@ export class SchematicEditor {
   /** Unload: the slot emptied (its wires stay). */
   unload(hit) {
     const target = this.slotTarget(hit);
-    if (target && this.editable(target.level)) this.write(0, target.level, [unloadOp(target.name)]);
+    if (target && this.editable(target.level, target.views)) this.write(0, target.level, [unloadOp(target.name)], { views: target.views });
   }
 
   /** What content `load` offers (a `modules` entry, or a project of `slot.projects`), or null. */
@@ -543,21 +550,21 @@ export class SchematicEditor {
   /** Edit map…: the map editor, its choices the content's names. */
   openMap(hit) {
     const target = this.slotTarget(hit);
-    if (!this.editing || !target || !this.editable(target.level)) return;
+    if (!this.editing || !target || !this.editable(target.level, target.views)) return;
     this.contentEntry(target.slot.load).then((entry) => {
-      this.dialogs.openMap({ slotName: target.name, load: target.slot.load, rows: mapRows(target.slot, entry), apply: (op) => this.writeResult(target.level, [op]) });
+      this.dialogs.openMap({ slotName: target.name, load: target.slot.load, rows: mapRows(target.slot, entry), apply: (op) => this.writeResult(target.level, [op], target.views) });
     });
   }
 
   /** Edit interface… (and a pin's Rename or retype port…: `focus` `{port}`; a "+" pin: `{add}`). */
   openInterface(hit, focus = null) {
     const target = this.slotTarget(hit);
-    if (!this.editing || !target || !this.editable(target.level)) return;
+    if (!this.editing || !target || !this.editable(target.level, target.views)) return;
     this.dialogs.openInterface({
       slotName: target.name,
       slot: target.slot,
       focus,
-      apply: (op) => this.writeResult(target.level, [op]),
+      apply: (op) => this.writeResult(target.level, [op], target.views),
       saveTemplate: () => this.saveTemplate(hit),
       detach: () => this.detach(hit),
     });
@@ -602,18 +609,18 @@ export class SchematicEditor {
   /** A slot pin's Remove port (with its wires: `wires`). */
   removePort(hit, wires = false) {
     const target = this.slotTarget(hit);
-    if (!target || !hit.port || !this.editable(target.level)) return;
+    if (!target || !hit.port || !this.editable(target.level, target.views)) return;
     const op = { op: 'slot.interface', slot: target.name, remove: [hit.port.name] };
     if (wires) op.removeWires = true;
-    this.write(0, target.level, [op]);
+    this.write(0, target.level, [op], { views: target.views });
   }
 
   /** Detach from template: the template's ports written into the slot. */
   detach(hit) {
     const target = this.slotTarget(hit);
-    if (!target || !this.editable(target.level)) return;
+    if (!target || !this.editable(target.level, target.views)) return;
     this.dialogs.close();
-    this.write(0, target.level, [detachOp(target.name)]);
+    this.write(0, target.level, [detachOp(target.name)], { views: target.views });
   }
 
   /** Writes `interfaces/<name>.toml` for `ports` (a new file): a promise of `{ok, error}`. */
@@ -634,14 +641,14 @@ export class SchematicEditor {
   /** Save interface as template…: the slot's interface written to interfaces/<name>.toml, then the slot set to it. */
   saveTemplate(hit) {
     const target = this.slotTarget(hit);
-    if (!this.editing || !target || !this.editable(target.level)) return;
+    if (!this.editing || !target || !this.editable(target.level, target.views)) return;
     this.dialogs.openTemplateName({
       title: `Save interface as template: ${target.name}`,
       note: 'Writes its ports and parameters to interfaces/<name>.toml and sets the slot’s interface to that template (an edit of the file then reaches every slot naming it).',
       defaultName: target.name,
       taken: this.templateNames(),
       save: (name, description) =>
-        this.writeTemplate(name, target.slot.interface?.ports ?? [], description).then((written) => (written.ok ? this.writeResult(target.level, [templateOp(target.name, name)]) : written)),
+        this.writeTemplate(name, target.slot.interface?.ports ?? [], description).then((written) => (written.ok ? this.writeResult(target.level, [templateOp(target.name, name)], target.views) : written)),
     });
   }
 

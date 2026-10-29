@@ -228,10 +228,35 @@ export function readableView(view, k, at) {
   return k < READ_K ? zoomAt(view, READ_K / k, at) : view;
 }
 
-/** Enter's view of an inside of layout `bounds` (in its own coordinates): fitted (`fit`'s margins after), and readable (`readableView`). */
-export function enterView(bounds, viewport, ...margins) {
-  const view = fit(bounds, viewport, ...margins);
-  return readableView(view, view.k, { x: view.x, y: view.y });
+/**
+ * Enter and a double-click draw neither an open frame (its title, its ×,
+ * in its parent's units) nor its inside larger than this scale (2026-10-29,
+ * the operator's review: an empty slot's frame, fitted, drew its subtitle
+ * about 100 px tall and cut its title off; a box holding one small module
+ * filled the screen with it).
+ */
+export const ENTER_MAX_K = 2;
+
+/** `frame` (an open composite's grown box, in its parent's units) in the units of its inside (`inner`: inside → parent, `inside`'s). */
+export function frameRect(frame, inner) {
+  return { x: (frame.x - inner.x) / inner.k, y: (frame.y - inner.y) / inner.k, w: frame.w / inner.k, h: frame.h / inner.k };
+}
+
+/**
+ * Enter's view of an open composite, in its inside's coordinates: its
+ * whole frame (`frame`, the grown box, header and × included; `inner` its
+ * inside's link, as `chain` gives them) fitted (`fit`'s margins after),
+ * neither the frame nor the inside drawn larger than ENTER_MAX_K (a small
+ * or empty inside does not blow up), and readable (`readableView`: a wide
+ * inside overflows the view rather than drop below READ_K, zoomed about
+ * the frame's top edge, so its header stays where the fit put it).
+ */
+export function enterView(frame, inner, viewport, ...margins) {
+  const rect = frameRect(frame, inner);
+  const fitted = fit(rect, viewport, ...margins);
+  const most = ENTER_MAX_K * Math.min(1, inner.k);
+  const view = fitted.k > most ? { ...fitted, k: most } : fitted;
+  return readableView(view, view.k, { x: view.x, y: view.y - (rect.h / 2) * view.k });
 }
 
 /**
@@ -266,6 +291,17 @@ export function unpin(pinned, address) {
 export function editLevel(drawn) {
   const last = drawn?.levels?.at(-1);
   return last ? { path: last.path, level: last.level } : { path: '', level: '' };
+}
+
+/**
+ * Whether part `hit` (an instance, or a pin of its box) is the open frame
+ * whose inside is the level edited (`editLevel`): around it, yet what is
+ * edited from inside it (2026-10-29: an open slot's own items, Load…,
+ * Edit interface… and the like, act on the slot whose inside is shown).
+ */
+export function shownFrame(drawn, hit) {
+  const path = editLevel(drawn).path;
+  return Boolean(path) && hit?.node?.kind === 'instance' && (hit.kind === 'instance' || hit.kind === 'port') && `${hit.path ?? ''}/${hit.node.name}` === path;
 }
 
 /** Whether part `hit` (a hit or a selection) may be edited: it is of the innermost open level; the surroundings are only selected and inspected. */

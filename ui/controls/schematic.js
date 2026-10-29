@@ -78,7 +78,7 @@ import { formatFixed } from '../lib/format.js';
 import { HEADER, addPinAt, dragPosition, insideKey, layout } from '../lib/schematic-layout.js';
 import { insideBanner, insideReason, isPreviewLevel, isSlotInside, levelData, unmatchedReason } from '../lib/slot.js';
 import { DragFollow, ownedLabels } from '../lib/schematic-drag.js';
-import { aroundReason, closeBox, closeShown, closeText, crumbView, drawOrder, editable, editLevel, enterView, pinOne, unpin } from '../lib/schematic-open.js';
+import { aroundReason, closeBox, closeShown, closeText, crumbView, drawOrder, editable, editLevel, enterView, pinOne, shownFrame, unpin } from '../lib/schematic-open.js';
 import { boundaryLinks, breadcrumbs, chain, levelRect, nodeRect, openAnchor, rebase, reroot, scene } from '../lib/schematic-scene.js';
 import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
 import { hitTest, instanceHit, portHit, reselect } from '../lib/schematic-hit.js';
@@ -1630,20 +1630,21 @@ export class SignalSchematic extends HTMLElement {
   }
 
   /**
-   * Composite instance `hit` opened and its inside filling the view (a
-   * double-click, the menu's Enter): the inside's own layout fitted, so it
-   * is drawn readable however tall and narrow its box (a box of many pins
-   * holds a wide inside small, centred in it), and never less readable
-   * than READ_K (`enterView`: a wide inside overflows the view); the box's
-   * frame reaches past the view's edges. One composite is pinned per level
-   * (M2.13-3); a library composite (its inside unknown) is only focused.
+   * Composite instance `hit` opened and its frame filling the view (a
+   * double-click, the menu's Enter): the whole frame fitted, its title and
+   * × included, never larger than ENTER_MAX_K (a small or empty inside does
+   * not blow up) and never less readable than READ_K (`enterView`: a wide
+   * inside overflows the view, the frame reaching past the view's edges).
+   * One composite is pinned per level (M2.13-3); a library composite (its
+   * inside unknown) is only focused.
    */
   enter(hit) {
     const inner = hit.node?.composite ? this.layoutOf(insideKey(hit.node)) : null;
-    if (inner && chain((level) => this.layoutOf(level), hit.address)) {
+    const link = inner ? chain((level) => this.layoutOf(level), hit.address)?.at(-1) : null;
+    if (link) {
       this.openShifts.delete(hit.address);
       this.pinned = pinOne(this.pinned, hit.address);
-      this.setView({ ...enterView(inner.bounds, this.viewport, MARGIN_PX, MARGIN_PX, FRAME_SIDE_PX), path: hit.address });
+      this.setView({ ...enterView(link.node, link.inner, this.viewport, MARGIN_PX, MARGIN_PX, FRAME_SIDE_PX), path: hit.address });
       return;
     }
     const rect = nodeRect(this.drawn, hit.address);
@@ -1841,7 +1842,7 @@ export class SignalSchematic extends HTMLElement {
 
   /** What `schematicMenu` needs of `hit`, opened at `point`. */
   menuContext(hit, point) {
-    const context = { editing: this.editor.editing, level: this.currentLevel(), around: aroundReason(this.drawn, hit) };
+    const context = { editing: this.editor.editing, level: this.currentLevel(), around: aroundReason(this.drawn, hit), shown: shownFrame(this.drawn, hit) };
     // One of several selected: the menu's Delete selected removes them all.
     if (this.selected.length > 1 && has(this.selected, hit)) {
       const plan = deletePlan(this.selected);
@@ -1902,7 +1903,7 @@ export class SignalSchematic extends HTMLElement {
     else if (id === 'go-inside') this.reveal({ kind: 'pin', address: hit.address, side: 'frame' });
     else if (id === 'go-outside') this.reveal({ kind: 'pin', address: hit.address, side: 'box' });
     else if (id === 'copy-address') this.copy(hit.kind === 'wire' ? `${hit.from} → ${hit.to}` : hit.address);
-    else if (id === 'delete') this.editor.remove(hit);
+    else if (id === 'delete') this.removePart(hit);
     else if (id === 'scale') {
       this.select([hit]);
       this.revealSide();
@@ -1984,13 +1985,28 @@ export class SignalSchematic extends HTMLElement {
   }
 
   /**
+   * Delete (Edit patch) of part `hit`. The open frame whose inside is
+   * edited (`shownFrame`, 2026-10-29) is deleted from there, written at its
+   * level (`views`), and closed, so the view leaves the inside that goes.
+   */
+  removePart(hit) {
+    if (!this.editor.editing || !shownFrame(this.drawn, hit)) {
+      this.editor.remove(hit);
+      return;
+    }
+    const views = [editLevel(this.drawn).level];
+    this.closeInPlace(hit.address);
+    this.editor.remove(hit, { views });
+  }
+
+  /**
    * Delete (Edit patch) of the selection, or of a group from the menu: one
    * `patch` per level (`deletePlan`), written one after the other, each
    * once the last is answered; a refused one stops the rest.
    */
   async deleteSelection() {
     if (this.selected.length === 1) {
-      this.editor.remove(this.selected[0]);
+      this.removePart(this.selected[0]);
       return;
     }
     const plan = deletePlan(this.selected);

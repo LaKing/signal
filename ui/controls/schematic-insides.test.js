@@ -13,10 +13,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { layout, insideKey } from '../lib/schematic-layout.js';
 import { fit, toScreen } from '../lib/schematic-view.js';
-import { editLevel } from '../lib/schematic-open.js';
+import { ENTER_MAX_K, closeShown, editLevel } from '../lib/schematic-open.js';
 import { PatchSession } from '../lib/schematic-edit.js';
-import { schematicMenu } from '../lib/schematic-menu.js';
-import { exportOp, frameOutputs, frameTargets, insideBanner, insideOps, insideReason, isPreviewLevel, levelData, previewSlot } from '../lib/slot.js';
+import { EDIT_OFF, schematicMenu } from '../lib/schematic-menu.js';
+import { hitTest } from '../lib/schematic-hit.js';
+import { sidebar } from '../lib/schematic-sidebar.js';
+import { exportOp, frameOutputs, frameTargets, insideBanner, insideOps, insideReason, isPreviewLevel, levelData, previewSlot, slotContent } from '../lib/slot.js';
 
 globalThis.HTMLElement ??= class {};
 globalThis.customElements ??= { get: () => undefined, define: () => {} };
@@ -352,4 +354,88 @@ test('review follow-up: a slot’s own inside is listed only for its slot; a wra
   assert.doesNotMatch(insideBanner(GRAPH, '/synth').text, /restarts/, 'a copied composite plans the same: no restart');
   // A slot in a composite: the instance address shown.
   assert.match(insideBanner(graph, '/fx', '/rack1/fx').text, /as \/rack1\/fx\/gain\)\.$/);
+});
+
+test('a double-click on an empty slot frames its whole frame, title and × on the stage, at a sane scale; one small module inside too (2026-10-29)', () => {
+  const big = { w: 1600, h: 1000 };
+  const withSine = structuredClone(GRAPH);
+  withSine.insides['/fx'].instances = [{ name: 'osc', module: 'std.sine_osc', composite: false, ports: [port('out', 'out', 'osc.out')], parameters: [] }];
+  for (const graph of [GRAPH, withSine]) {
+    const s = schematic(graph);
+    s.viewport = big;
+    s.view = fit(s.layoutOf('').bounds, big);
+    s.render();
+    doubleClick(s, middleOf(s, '', 'fx'));
+    assert.deepEqual(editLevel(s.drawn), { path: '/fx', level: '/fx' });
+    const [top, fx] = s.drawn.levels;
+    assert.ok(top.transform.k <= ENTER_MAX_K + 1e-9 && fx.transform.k <= ENTER_MAX_K + 1e-9, `the frame at ${top.transform.k}, its inside at ${fx.transform.k}`);
+    const frame = top.layout.nodes.find((n) => n.name === 'fx');
+    const at = toScreen(top.transform, frame);
+    assert.ok(at.x >= 0 && at.y >= 0 && at.x + frame.w * top.transform.k <= big.w && at.y + frame.h * top.transform.k <= big.h, 'the whole frame on the stage, its header (title) included');
+    assert.ok(closeShown(frame, top.transform.k), 'its × drawn');
+  }
+});
+
+test('the sidebar says what a slot is in each state: category slot, its module what it holds (2026-10-29)', () => {
+  const graph = structuredClone(GRAPH);
+  // A fourth state: its own inside (`slot.inside` made it), one module in it.
+  const own = structuredClone(graph.top.instances[1]);
+  Object.assign(own, { name: 'own', module: 'own_inside', composite: true });
+  own.slot = { ...own.slot, load: 'own_inside', inside: { level: 'own_inside', own: true, name: 'own_inside' } };
+  graph.top.instances.push(own);
+  graph.composites.own_inside = { ...structuredClone(graph.insides['/synth']), slot: '/own' };
+  const s = schematic(graph);
+  const model = (name) => {
+    const node = s.drawn.levels[0].stored.nodes.find((n) => n.name === name);
+    return sidebar([{ kind: 'instance', path: '', level: '', address: `/${name}`, node }], { graph, layoutOf: (level) => s.layoutOf(level), menu: (hit) => s.menuContext(hit, { x: 0, y: 0 }) });
+  };
+  const fields = (name) => Object.fromEntries(model(name).fields);
+  assert.deepEqual([fields('fx').category, fields('fx').module, fields('fx').inside], ['slot', 'empty', 'read-only, 0 instances (the first edit makes its own copy)']);
+  assert.equal(model('fx').subtitle, 'slot: empty');
+  assert.deepEqual([fields('synth').category, fields('synth').module, fields('synth').inside], ['slot', 'voice', 'read-only, 1 instance (the first edit makes its own copy)']);
+  assert.deepEqual([fields('own').category, fields('own').module, fields('own').inside], ['slot', 'own_inside, its own inside', 'its own, 1 instance']);
+  assert.deepEqual([fields('deck').category, fields('deck').module], ['slot', '../studio ↗, a project']);
+  assert.match(fields('deck').inside, /edited in its own folder/);
+  // Not a slot: as before.
+  assert.deepEqual([fields('osc').module, fields('osc').composite], ['std.sine_osc', 'no']);
+  assert.equal(slotContent({ from: 'lib.voice', interface: {} }), 'empty: lib.voice');
+});
+
+test('an open slot’s own items act on it from inside: the menu on its frame, the slot ops written at its level from there, Delete closing it (2026-10-29)', async () => {
+  const s = schematic();
+  doubleClick(s, middleOf(s, '', 'fx'));
+  s.editor.editing = true;
+  const item = (items, id) => items.find((i) => i.id === id);
+  // A right click on the empty inside hits the frame: the slot whose inside is shown.
+  const centre = { x: viewport.w / 2, y: viewport.h / 2 };
+  const frame = hitTest(s.drawn, centre);
+  assert.deepEqual([frame.kind, frame.address], ['instance', '/fx']);
+  const items = schematicMenu(frame, s.menuContext(frame, centre));
+  for (const id of ['slot-load', 'slot-map', 'slot-interface', 'slot-save-template', 'make-interface', 'delete']) assert.equal(item(items, id).disabled, false, id);
+  assert.equal(item(items, 'slot-unload').title, 'The slot is empty');
+  assert.equal(item(items, 'slot-detach').title, 'Its interface has no template');
+  // Another box around it stays as it was: around the open slot.
+  const osc = { kind: 'instance', path: '', level: '', address: '/osc', node: s.drawn.levels[0].layout.nodes.find((n) => n.name === 'osc') };
+  assert.match(item(schematicMenu(osc, s.menuContext(osc, centre)), 'delete').title, /^the top level is around the open \/fx/);
+  // Out of Edit patch, off as anywhere.
+  s.editor.editing = false;
+  assert.equal(item(schematicMenu(frame, s.menuContext(frame, centre)), 'slot-load').title, EDIT_OFF);
+  // Delete from inside: closed, and removed at its level, written from the inside shown.
+  const removed = [];
+  s.editor = { ...s.editor, editing: true, remove: (hit, options) => removed.push([hit.address, options]) };
+  s.removePart(frame);
+  assert.deepEqual(removed, [['/fx', { views: ['/fx'] }]]);
+  assert.deepEqual([...s.drawn.open], [], 'closed');
+
+  // The editor: Unload of the open synth written at the top level from its inside, undone from there; a sibling's not.
+  const { e, sent } = editor(GRAPH, { path: '/synth', level: '/synth' }, [{ type: 'patched', level: '', base: 'c'.repeat(64), inverse: [{ op: 'slot.load', slot: 'synth', load: 'voice' }] }]);
+  const top = layout(GRAPH.top);
+  const slotHit = (name) => ({ kind: 'instance', path: '', level: '', address: `/${name}`, node: top.nodes.find((n) => n.name === name) });
+  e.unload(slotHit('synth'));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(sent[0], { type: 'patch', level: '', base: 'a'.repeat(64), ops: [{ op: 'slot.unload', slot: 'synth' }] });
+  assert.deepEqual(e.session.history.entries[0]?.views, ['/synth'], 'undone from inside too');
+  e.detach(slotHit('fx'));
+  assert.equal(sent.length, 1, 'a sibling slot is around the open synth');
+  assert.match(e.said, /^Not edited: the top level is around the open \/synth/);
 });
