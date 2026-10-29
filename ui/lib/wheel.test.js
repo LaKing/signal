@@ -76,6 +76,7 @@ test('wheelKind: a pinch is ctrl+wheel; a mouse notches in lines or large steps;
   assert.equal(wheelKind({ deltaY: -40, deltaMode: 0 }), 'mouse');
   assert.equal(wheelKind({ deltaY: 54.8, deltaX: 0, deltaMode: 0 }), 'mouse');
   assert.equal(wheelKind({ deltaY: NOTCH_MIN_PX }), 'mouse');
+  assert.equal(wheelKind({ deltaY: 4.000244140625 }), 'mouse', "WebKit's slow notch");
   // A trackpad: sideways travel, small or fractional steps.
   assert.equal(wheelKind({ deltaY: 120, deltaX: 1, deltaMode: 0 }), 'trackpad');
   assert.equal(wheelKind({ deltaY: 0, deltaX: -6 }), 'trackpad');
@@ -85,6 +86,7 @@ test('wheelKind: a pinch is ctrl+wheel; a mouse notches in lines or large steps;
   // A mouse's Shift+wheel arrives sideways on a Mac: its size decides, not its direction.
   assert.equal(wheelKind({ deltaY: 0, deltaX: 40, shiftKey: true }), 'mouse');
   assert.equal(wheelKind({ deltaY: 0, deltaX: 3, shiftKey: true }), 'trackpad');
+  assert.equal(wheelKind({ deltaY: 0, deltaX: 4.000244140625, shiftKey: true }), 'mouse');
 });
 
 test('WheelKinds: the first event decides the gesture; a pause of KIND_GAP_MS starts the next one', () => {

@@ -101,11 +101,12 @@ export const KIND_GAP_MS = 150;
 
 /**
  * The least |deltaY| (px) of a mouse wheel's notch. WebKit gives a notch as
- * 40 px times macOS's acceleration (fractional, so a fraction alone says
- * nothing), Chromium 100 px; a trackpad's first event is a few px.
- * An assumption to check on the device.
+ * 40 px times macOS's acceleration, which a slow notch brings down to 0.1
+ * line (4.0002 px; 32 here zoomed nothing on the device, 2026-10-29),
+ * Chromium 100 px; a trackpad's first event (its gesture's start) is a px
+ * or two. An assumption to check on a trackpad.
  */
-export const NOTCH_MIN_PX = 32;
+export const NOTCH_MIN_PX = 4;
 
 /**
  * What sent wheel event `event` (`{deltaX, deltaY, deltaMode, ctrlKey,
