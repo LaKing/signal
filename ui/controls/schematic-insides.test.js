@@ -18,7 +18,7 @@ import { PatchSession } from '../lib/schematic-edit.js';
 import { EDIT_OFF, schematicMenu } from '../lib/schematic-menu.js';
 import { hitTest } from '../lib/schematic-hit.js';
 import { sidebar } from '../lib/schematic-sidebar.js';
-import { exportOp, frameOutputs, frameTargets, insideBanner, insideOps, insideReason, isPreviewLevel, levelData, previewSlot, slotContent } from '../lib/slot.js';
+import { exportOp, frameOutputs, frameTargets, insideBanner, insideOps, insideReason, isPreviewLevel, levelData, previewSlot, slotContent, slotViews } from '../lib/slot.js';
 
 globalThis.HTMLElement ??= class {};
 globalThis.customElements ??= { get: () => undefined, define: () => {} };
@@ -420,13 +420,6 @@ test('an open slot’s own items act on it from inside: the menu on its frame, t
   // Out of Edit patch, off as anywhere.
   s.editor.editing = false;
   assert.equal(item(schematicMenu(frame, s.menuContext(frame, centre)), 'slot-load').title, EDIT_OFF);
-  // Delete from inside: closed, and removed at its level, written from the inside shown.
-  const removed = [];
-  s.editor = { ...s.editor, editing: true, remove: (hit, options) => removed.push([hit.address, options]) };
-  s.removePart(frame);
-  assert.deepEqual(removed, [['/fx', { views: ['/fx'] }]]);
-  assert.deepEqual([...s.drawn.open], [], 'closed');
-
   // The editor: Unload of the open synth written at the top level from its inside, undone from there; a sibling's not.
   const { e, sent } = editor(GRAPH, { path: '/synth', level: '/synth' }, [{ type: 'patched', level: '', base: 'c'.repeat(64), inverse: [{ op: 'slot.load', slot: 'synth', load: 'voice' }] }]);
   const top = layout(GRAPH.top);
@@ -434,8 +427,83 @@ test('an open slot’s own items act on it from inside: the menu on its frame, t
   e.unload(slotHit('synth'));
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(sent[0], { type: 'patch', level: '', base: 'a'.repeat(64), ops: [{ op: 'slot.unload', slot: 'synth' }] });
-  assert.deepEqual(e.session.history.entries[0]?.views, ['/synth'], 'undone from inside too');
+  assert.deepEqual(e.session.history.entries[0]?.views, ['/synth', 'synth_inside'], 'undone from inside too, whichever inside it shows');
   e.detach(slotHit('fx'));
   assert.equal(sent.length, 1, 'a sibling slot is around the open synth');
   assert.match(e.said, /^Not edited: the top level is around the open \/synth/);
+});
+
+/** The schematic `s` with fx open (double-clicked) and a real editor over a fake connection answering `replies`: `{s, e, sent}`. */
+function openWithEditor(graph, replies) {
+  const s = schematic(graph);
+  doubleClick(s, middleOf(s, '', 'fx'));
+  const { e, sent } = editor(graph, null, replies);
+  s.connection = e.s.connection;
+  e.s = s;
+  s.editor = e;
+  return { s, e, sent };
+}
+
+test('Delete from an open frame: the menu’s goes through the write gate and closes it once written; the Delete key deletes nothing (2026-10-29)', async () => {
+  const frameOf = (s) => hitTest(s.drawn, { x: viewport.w / 2, y: viewport.h / 2 });
+  // Backspace with the frame selected from inside (a click on its empty inside selects it): refused, nothing sent, still open.
+  const keyed = openWithEditor(GRAPH, []);
+  keyed.s.selected = [frameOf(keyed.s)];
+  assert.equal(keyed.s.selected[0].address, '/fx');
+  await keyed.s.deleteSelection();
+  assert.equal(keyed.sent.length, 0);
+  assert.match(keyed.s.said.at(-1), /^Not edited: the top level is around the open \/fx/);
+  assert.deepEqual([...keyed.s.drawn.open], ['/fx']);
+  // The menu's Delete: written at the top level from the inside shown, then closed.
+  const { s, e, sent } = openWithEditor(GRAPH, [{ type: 'patched', level: '', base: 'c'.repeat(64), inverse: [{ op: 'instance.add', name: 'fx' }] }]);
+  const frame = frameOf(s);
+  const written = s.removePart(frame);
+  assert.deepEqual([...s.drawn.open], ['/fx'], 'open until written');
+  assert.equal(await written, true);
+  assert.deepEqual(sent, [{ type: 'patch', level: '', base: 'a'.repeat(64), ops: [{ op: 'instance.remove', name: 'fx' }] }]);
+  assert.deepEqual([...s.drawn.open], [], 'closed once written');
+  assert.ok(e.session.history.entries[0].views.includes('/fx'));
+  // A refused one leaves it open.
+  const refused = openWithEditor(GRAPH, [{ code: 'conflict', message: 'changed' }]);
+  assert.equal(await refused.s.removePart(frameOf(refused.s)), false);
+  assert.deepEqual([...refused.s.drawn.open], ['/fx']);
+});
+
+test('an own inside unloaded from inside is undone from the read-only inside then shown; an own inside loaded from the read-only one, likewise (review 2026-10-29)', async () => {
+  // fx holds its own inside, fx_inside, shown.
+  const own = structuredClone(GRAPH);
+  own.top.instances[1].module = 'fx_inside';
+  own.top.instances[1].slot = { ...own.top.instances[1].slot, load: 'fx_inside', inside: { level: 'fx_inside', own: true, name: 'fx_inside' } };
+  own.composites.fx_inside = { ...own.insides['/fx'] };
+  delete own.insides['/fx'];
+  own.files.fx_inside = 'd'.repeat(64);
+  const unloaded = openWithEditor(own, [
+    { type: 'patched', level: '', base: 'c'.repeat(64), inverse: [{ op: 'slot.load', slot: 'fx', load: 'fx_inside' }] },
+    { type: 'patched', level: '', base: 'a'.repeat(64), inverse: [{ op: 'slot.unload', slot: 'fx' }] },
+  ]);
+  assert.deepEqual(editLevel(unloaded.s.drawn), { path: '/fx', level: 'fx_inside' });
+  const fx = hitTest(unloaded.s.drawn, { x: viewport.w / 2, y: viewport.h / 2 });
+  unloaded.e.unload(fx);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(unloaded.sent[0].ops, [{ op: 'slot.unload', slot: 'fx' }]);
+  // The graph that follows shows the read-only inside, /fx: ⌘Z from there.
+  unloaded.s.drawn = { levels: [{ path: '', level: '' }, { path: '/fx', level: '/fx' }] };
+  assert.equal(await unloaded.e.write(-1), true, 'undone from the inside shown now');
+  assert.deepEqual(unloaded.sent[1], { type: 'patch', level: '', base: 'c'.repeat(64), ops: [{ op: 'slot.load', slot: 'fx', load: 'fx_inside' }] });
+
+  // fx empty, its read-only inside shown; Load of an own inside named otherwise than the one `slot.inside` would write.
+  const loaded = openWithEditor(GRAPH, [
+    { type: 'patched', level: '', base: 'c'.repeat(64), inverse: [{ op: 'slot.unload', slot: 'fx' }] },
+    { type: 'patched', level: '', base: 'a'.repeat(64), inverse: [{ op: 'slot.load', slot: 'fx', load: 'fx_inside_2' }] },
+  ]);
+  loaded.e.loader = { close() {} };
+  loaded.e.dialogs = { close() {} };
+  loaded.e.loading = loaded.e.slotTarget(hitTest(loaded.s.drawn, { x: viewport.w / 2, y: viewport.h / 2 }));
+  loaded.e.loadChosen('fx_inside_2', { entry: { module: 'fx_inside_2', insideOf: 'fx' } });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(loaded.sent[0].ops.at(-1), { op: 'slot.load', slot: 'fx', load: 'fx_inside_2' });
+  loaded.s.drawn = { levels: [{ path: '', level: '' }, { path: '/fx', level: 'fx_inside_2' }] };
+  assert.equal(await loaded.e.write(-1), true, 'undone from the own inside shown now');
+  assert.equal(loaded.sent[1].level, '');
+  assert.deepEqual(slotViews('/fx', '', 'fx', { inside: { level: '/fx', own: false, name: 'fx_inside' } }, 'x', '/fx'), ['/fx', 'fx_inside', 'x']);
 });

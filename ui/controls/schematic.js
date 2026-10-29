@@ -79,7 +79,7 @@ import { HEADER, addPinAt, dragPosition, insideKey, layout } from '../lib/schema
 import { insideBanner, insideReason, isPreviewLevel, isSlotInside, levelData, unmatchedReason } from '../lib/slot.js';
 import { DragFollow, ownedLabels } from '../lib/schematic-drag.js';
 import { aroundReason, closeBox, closeShown, closeText, crumbView, drawOrder, editable, editLevel, enterView, pinOne, shownFrame, unpin } from '../lib/schematic-open.js';
-import { boundaryLinks, breadcrumbs, chain, levelRect, nodeRect, openAnchor, rebase, reroot, scene } from '../lib/schematic-scene.js';
+import { boundaryLinks, breadcrumbs, chain, nodeRect, openAnchor, rebase, reroot, scene } from '../lib/schematic-scene.js';
 import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
 import { hitTest, instanceHit, portHit, reselect } from '../lib/schematic-hit.js';
 import { cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
@@ -1250,10 +1250,10 @@ export class SignalSchematic extends HTMLElement {
       return;
     }
     for (const open of [...this.pinned]) if (open !== path && open.startsWith(`${path}/`)) this.pinned.delete(open);
-    const rect = this.drawn && levelRect(this.drawn, path);
-    const level = rect && this.levelOf(path);
-    // Its inside filling the view, readable (M2.13-3, `crumbView`).
-    if (level) this.setView(crumbView(this.view, level, rect, this.viewport, MARGIN_PX, MARGIN_PX, FRAME_SIDE_PX));
+    const level = this.drawn && this.levelOf(path);
+    const link = level ? chain((key) => this.layoutOf(key), path)?.at(-1) : null;
+    // Its frame filling the view as Enter's does, readable (M2.13-3, `crumbView`).
+    if (link) this.setView(crumbView(this.view, level, link, this.viewport, MARGIN_PX, MARGIN_PX, FRAME_SIDE_PX));
     else this.schedule();
   }
 
@@ -1985,18 +1985,19 @@ export class SignalSchematic extends HTMLElement {
   }
 
   /**
-   * Delete (Edit patch) of part `hit`. The open frame whose inside is
-   * edited (`shownFrame`, 2026-10-29) is deleted from there, written at its
-   * level (`views`), and closed, so the view leaves the inside that goes.
+   * The menu's and the sidebar's Delete (Edit patch) of part `hit`. The
+   * open frame whose inside is edited (`shownFrame`, 2026-10-29) is deleted
+   * from there, written at its level (`views`), and closed once written,
+   * so the view leaves the inside that went. Never the Delete key's: a
+   * click on an open frame's empty inside selects the frame, so Backspace
+   * there would delete what is being edited (`deleteSelection` refuses it).
    */
   removePart(hit) {
-    if (!this.editor.editing || !shownFrame(this.drawn, hit)) {
-      this.editor.remove(hit);
-      return;
-    }
-    const views = [editLevel(this.drawn).level];
-    this.closeInPlace(hit.address);
-    this.editor.remove(hit, { views });
+    if (!this.editor.editing || hit?.kind !== 'instance' || !shownFrame(this.drawn, hit)) return this.editor.remove(hit);
+    return this.editor.remove(hit, { views: [editLevel(this.drawn).level] }).then((ok) => {
+      if (ok) this.closeInPlace(hit.address);
+      return ok;
+    });
   }
 
   /**
@@ -2006,7 +2007,7 @@ export class SignalSchematic extends HTMLElement {
    */
   async deleteSelection() {
     if (this.selected.length === 1) {
-      this.removePart(this.selected[0]);
+      this.editor.remove(this.selected[0]);
       return;
     }
     const plan = deletePlan(this.selected);

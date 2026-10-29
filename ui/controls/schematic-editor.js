@@ -54,6 +54,7 @@ import {
   templateOp,
   templateText,
   templates,
+  slotViews,
   unloadOp,
 } from '../lib/slot.js';
 import { toLocal, toScreen } from '../lib/schematic-view.js';
@@ -292,13 +293,14 @@ export class SchematicEditor {
 
   /** Removes instance or connection `hit` (the selection, or a context menu's target); `views` as `write`'s (an open frame deleted from inside it). */
   remove(hit, { views = [] } = {}) {
-    if (hit?.kind === 'instance' && hit.node.kind === 'instance') this.write(0, hit.level, [removeInstance(hit.node.name)], { views });
-    else if (hit?.kind === 'wire' && hit.wire.kind === 'connection') this.write(0, hit.level, [removeConnection(hit.wire.written.from, hit.wire.written.to)]);
-    else if (hit?.kind === 'wire' && hit.wire.kind === 'export' && hit.wire.written?.role) {
+    if (hit?.kind === 'instance' && hit.node.kind === 'instance') return this.write(0, hit.level, [removeInstance(hit.node.name)], { views });
+    if (hit?.kind === 'wire' && hit.wire.kind === 'connection') return this.write(0, hit.level, [removeConnection(hit.wire.written.from, hit.wire.written.to)]);
+    if (hit?.kind === 'wire' && hit.wire.kind === 'export' && hit.wire.written?.role) {
       // ADR 0037, editable insides: a wire of a slot's inside's frame.
       const { role, from, to } = hit.wire.written;
-      this.write(0, hit.level, [exportOp(false, role, hit.wire.written.export ?? (role === 'output' ? to : from), role === 'output' ? from : to)]);
+      return this.write(0, hit.level, [exportOp(false, role, hit.wire.written.export ?? (role === 'output' ? to : from), role === 'output' ? from : to)]);
     }
+    return Promise.resolve(false);
   }
 
   /** The sidebar's scale field opened (the context menu's Edit scale…, once the wire is selected). */
@@ -438,15 +440,16 @@ export class SchematicEditor {
 
   /**
    * A slot box (or one of its pins) as the slot ops name it: `{level, name,
-   * slot, path, views}`; `views` the level shown when it is that slot's
+   * slot, path, views}`; `views`, when the level shown is that slot's
    * inside (its open frame, 2026-10-29: its slot ops are written at the
-   * slot's level from there, as Edit the slot's interface… is).
+   * slot's level from there, as Edit the slot's interface… is), every key
+   * its inside may have once written (`slotViews`), so an undo from inside
+   * works whichever is shown then.
    */
   slotTarget(hit) {
     const node = hit?.node;
     if (!node?.slot) return null;
-    const shown = editLevel(this.s.drawn);
-    const views = shownFrame(this.s.drawn, hit) ? [shown.level] : [];
+    const views = shownFrame(this.s.drawn, hit) ? slotViews(editLevel(this.s.drawn).level, hit.level, node.name, node.slot) : [];
     return { level: hit.level, name: node.name, slot: node.slot, path: hit.path, views };
   }
 
@@ -517,7 +520,11 @@ export class SchematicEditor {
     if (!target || !module) return null;
     const add = addUnmatched ? contentMatch(entry, target.slot).unmatched : [];
     this.closeLoader();
-    this.write(0, target.level, loadOps(target.name, module, { add }), { views: target.views });
+    // Written from inside, a Load of the slot's own inside shows that next: its undo is let through from there too.
+    const known = entry ?? this.loadKnown?.entries?.find((e) => e.module === module);
+    const own = target.views.length && known?.insideOf === insideOwner(target.level, target.name);
+    const views = own ? [...new Set([...target.views, module])] : target.views;
+    this.write(0, target.level, loadOps(target.name, module, { add }), { views });
     return null;
   }
 

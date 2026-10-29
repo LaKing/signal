@@ -224,7 +224,7 @@ test('Enter fits the synth readable at a 1000 px stage, overflowing rather than 
   assert.ok(fit(rect, wider, 24, 40, 120).k / inner.k > ENTER_MAX_K && Math.abs(capped.k / inner.k - ENTER_MAX_K) < 1e-12, `the frame at ${capped.k / inner.k}`);
 });
 
-test('Enter frames the whole frame, title and × included, never larger than ENTER_MAX_K (2026-10-29, an empty slot)', () => {
+test('Enter and a breadcrumb frame the whole frame, title and × included, never larger than ENTER_MAX_K (2026-10-29, an empty slot)', () => {
   const big = { w: 1600, h: 1000 };
   const pin = (name, direction, address = name) => ({ name, address, direction, shape: 'signal', rate: 1 });
   // A box at the top level whose inside is empty but for its frame's pins, or holds one small module.
@@ -235,20 +235,30 @@ test('Enter frames the whole frame, title and × included, never larger than ENT
   const sine = { name: 'osc', module: 'std.sine_osc', composite: false, ports: [pin('out', 'out', 'osc.out')], parameters: [] };
   for (const instances of [[], [sine]]) {
     const layoutOf = layoutsOf(graphOf(instances));
-    const { node, inner } = chain(layoutOf, '/fx').at(-1);
-    const view = enterView(node, inner, big, 24, 24, 120);
-    const drawn = scene({ layoutOf, view: { ...view, path: '/fx' }, viewport: big, pinned: new Set(['/fx']) });
-    const [top, fx] = drawn.levels;
-    assert.ok(top.transform.k <= ENTER_MAX_K + 1e-9 && fx.transform.k <= ENTER_MAX_K + 1e-9, `${instances.length} inside: the frame at ${top.transform.k}, its inside at ${fx.transform.k}`);
-    // The whole frame on the stage: its title (the header) and its ×.
-    const frame = top.layout.nodes.find((n) => n.name === 'fx');
-    const at = toScreen(top.transform, frame);
-    const r = { ...at, w: frame.w * top.transform.k, h: frame.h * top.transform.k };
-    assert.ok(r.x >= 0 && r.y >= 0 && r.x + r.w <= big.w && r.y + r.h <= big.h, `on the stage: ${JSON.stringify(r)}`);
-    assert.ok(closeShown(frame, top.transform.k), 'its × drawn');
+    const link = chain(layoutOf, '/fx').at(-1);
+    const { node, inner } = link;
+    const pinned = new Set(['/fx']);
+    const framed = (view, what) => {
+      const drawn = scene({ layoutOf, view, viewport: big, pinned });
+      const [top, fx] = drawn.levels;
+      assert.ok(top.transform.k <= ENTER_MAX_K + 1e-9 && fx.transform.k <= ENTER_MAX_K + 1e-9, `${what}, ${instances.length} inside: the frame at ${top.transform.k}, its inside at ${fx.transform.k}`);
+      // The whole frame on the stage: its title (the header) and its ×.
+      const frame = top.layout.nodes.find((n) => n.name === 'fx');
+      const at = toScreen(top.transform, frame);
+      const r = { ...at, w: frame.w * top.transform.k, h: frame.h * top.transform.k };
+      assert.ok(r.x >= -1e-6 && r.y >= -1e-6 && r.x + r.w <= big.w + 1e-6 && r.y + r.h <= big.h + 1e-6, `${what}: on the stage: ${JSON.stringify(r)}`);
+      assert.ok(closeShown(frame, top.transform.k), `${what}: its × drawn`);
+      return drawn;
+    };
+    framed({ ...enterView(node, inner, big, 24, 24, 120), path: '/fx' }, 'Enter');
     // Before, the inside's layout alone was fitted: the frame drawn far larger, its header above the stage.
     const before = fit(layoutOf('fx_inside').bounds, big, 24, 24, 120);
     assert.ok(before.k / inner.k > 4 * ENTER_MAX_K, `the inside alone fitted drew the frame at ${before.k / inner.k}`);
+    // Its breadcrumb, from that view and from one zoomed far out: the same framing.
+    for (const from of [{ ...before, path: '/fx' }, { ...zoomAt(before, 1e-3, { x: 800, y: 500 }), path: '/fx' }]) {
+      const drawn = scene({ layoutOf, view: from, viewport: big, pinned });
+      framed(crumbView(drawn.view, drawn.levels[1], link, big, 24, 24, 120), 'a breadcrumb');
+    }
   }
 });
 
@@ -259,7 +269,7 @@ test('a breadcrumb to the open synth keeps it open and readable (auditor-2-focus
   const plain = focus(drawn.view, rect, viewport, 24, 40, 120);
   const plainK = drawn.levels[1].transform.k * (plain.k / drawn.view.k);
   assert.ok(plainK < READ_K, `a plain focus draws it at ${plainK}, less readable than READ_K`);
-  const view = crumbView(drawn.view, drawn.levels[1], rect, viewport, 24, 40, 120);
+  const view = crumbView(drawn.view, drawn.levels[1], chain(studioOf, '/synth').at(-1), viewport, 24, 40, 120);
   const after = scene({ layoutOf: studioOf, view, viewport, pinned: SYNTH });
   assert.deepEqual(breadcrumbs(after).map((c) => c.path), ['', '/synth'], 'still open');
   assert.ok(after.levels[1].transform.k >= READ_K - 1e-9, `at ${after.levels[1].transform.k}`);

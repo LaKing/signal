@@ -18,7 +18,7 @@
 import { CHAR, GAP_Y, HEADER, PAD, insideKey, laneY, levelBottom } from './schematic-layout.js';
 import { LABEL_PX, READ_PX, estimateWidth } from './schematic-labels.js';
 import { crosses, wireGeometry } from './schematic-wire.js';
-import { fit, focus, zoomAt } from './schematic-view.js';
+import { fit, focus, screenRect, zoomAt } from './schematic-view.js';
 
 /**
  * Enter, a double-click and a breadcrumb show an inside at this scale at
@@ -261,14 +261,24 @@ export function enterView(frame, inner, viewport, ...margins) {
 
 /**
  * A breadcrumb's view of the open level `level` (a scene entry, drawn in
- * `view` now) whose layout is `rect` on screen: fitted as `focus` does,
- * and readable (`readableView`). What is open below it is closed by the
- * breadcrumb itself (`unpin`), not by the view.
+ * `view` now), framed as Enter frames it (`enterView`, 2026-10-29: an
+ * empty slot's breadcrumb blew it up as its double-click did): its whole
+ * frame (`link`: `{node, inner}`, its last `chain` link) fitted as `focus`
+ * does, neither the frame nor the inside larger than ENTER_MAX_K, and
+ * readable (`readableView`, about the frame's top edge). What is open
+ * below it is closed by the breadcrumb itself (`unpin`), not by the view.
  */
-export function crumbView(view, level, rect, viewport, ...margins) {
+export function crumbView(view, level, link, viewport, ...margins) {
+  const rect = screenRect(level.transform, frameRect(link.node, link.inner));
   const focused = focus(view, rect, viewport, ...margins);
   const target = fit(rect, viewport, ...margins);
-  return readableView(focused, level.transform.k * (focused.k / view.k), { x: target.x, y: target.y });
+  const centre = { x: target.x, y: target.y };
+  // The inside's scale once focused, and at most.
+  const k = level.transform.k * (focused.k / view.k);
+  const most = ENTER_MAX_K * Math.min(1, link.inner.k);
+  const capped = k > most ? zoomAt(focused, most / k, centre) : focused;
+  const shown = Math.min(k, most);
+  return readableView(capped, shown, { x: centre.x, y: centre.y - (rect.h * target.k * (shown / k)) / 2 });
 }
 
 /** `pinned` with `address` pinned instead of any sibling of it (and what is pinned inside those): one open per level. */

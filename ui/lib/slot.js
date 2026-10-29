@@ -536,6 +536,18 @@ export function insideOwner(level, name) {
   return level ? `${level}/${name}` : name;
 }
 
+/**
+ * The levels slot `name` (at `level`, holding `slot`) may show as its inside,
+ * an op on it written from inside (`shown`, the one shown now): its read-only
+ * key (`/fx`, `rack/fx`, as `preview_key` writes it), its own inside's name and
+ * `more` (a module a Load makes its content), deduplicated. A Load, Unload or
+ * Replace changes which is shown; its undo is allowed from each (the review of
+ * 2026-10-29).
+ */
+export function slotViews(shown, level, name, slot, ...more) {
+  return [...new Set([shown, `${level}/${name}`, insideOf(slot)?.name, ...more].filter((v) => typeof v === 'string' && v !== ''))];
+}
+
 /** `slot.inside`: slot `slotName`'s own inside made (`name`: the composite's, else the server's default). */
 export function insideOp(slotName, name = null) {
   const op = { op: 'slot.inside', slot: slotName };
