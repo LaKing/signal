@@ -1,5 +1,5 @@
 // A window's view state in Signal.app (ADR 0047 §3, §5): the schematic's
-// device view (its layer, the board's arrangement, the hidden kinds) and
+// device view (its layer, the hidden kinds) and
 // the plate's scale (the panel's ⌘+, ⌘−, ⌘0), kept per window in the
 // project's `ui/windows.toml` by the app, as the window's place is. The page
 // says each change (`view.state`, its whole state); the app tells it back

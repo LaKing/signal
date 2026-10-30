@@ -123,7 +123,10 @@ export function scene({ layoutOf, view, viewport, pinned = new Set() }) {
       if (rect.w < MIN_PX || !intersects(rect, screen)) continue;
       entry.nodes.push(node);
     }
-    for (const wire of drawn.wires) {
+    // The board (ADR 0047) draws every wire at every zoom: zoom never decides which nets are drawn.
+    if (drawn.board) {
+      entry.wires.push(...drawn.wires);
+    } else for (const wire of drawn.wires) {
       const box = wireBox(wire);
       const w = (box.x1 - box.x0) * transform.k;
       const h = (box.y1 - box.y0) * transform.k;

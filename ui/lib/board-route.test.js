@@ -1,7 +1,7 @@
 // ADR 0047 §6 (phase 2): the board's orthogonal routing, net labels and measures (ui/lib/board-route.js).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CLEAR, LABEL_STUB, NET_DESTS, NET_SPAN, legCrossings, measure, orthGeometry, polylineMetrics, routeWires, simplify, trackPreferences, zCorners } from './board-route.js';
+import { CLEAR, LABEL_STUB, NET_DESTS, legCrossings, measure, orthGeometry, polylineMetrics, routeWires, simplify, trackPreferences, zCorners } from './board-route.js';
 import { STUB, TRACK } from './board-layout.js';
 
 /** The segments of a route's corners. */
@@ -82,7 +82,7 @@ test('a net’s wires from one pin share their first vertical (a trunk)', () => 
   assert.equal(routes[0].corners[1].x, routes[1].corners[1].x);
 });
 
-test('net labels at the thresholds: four destinations, a span over three layers, the plate’s area to free space (test 6)', () => {
+test('net labels only for a true fan-out (four destinations) and a global net (test 6; the owner’s verdict)', () => {
   const boxes = [{ id: 's', x: 0, y: 0, w: 80, h: 200 }];
   const dest = (i, extra = {}) => ({ id: i, net: 's.out', from: 's', to: `d${i}`, a: { x: 80, y: 40 }, b: { x: 400, y: 40 + 60 * i }, span: 1, ...extra });
   const three = routeWires(boxes, [0, 1, 2].map((i) => dest(i)));
@@ -95,10 +95,8 @@ test('net labels at the thresholds: four destinations, a span over three layers,
   assert.match(four.labels[0].text, /^◂ s\.out$/);
   assert.deepEqual(four.routes[0].corners, [{ x: 400 - LABEL_STUB, y: 40 }, { x: 400, y: 40 }], 'a stub into its pin');
   assert.ok(four.routes[0].whole.length >= 2, 'its whole route, for a trace');
-  const long = routeWires(boxes, [dest(0, { span: NET_SPAN + 1 })]);
-  assert.ok(long.routes[0].labelled, 'a span over three layers');
-  assert.ok(!routeWires(boxes, [dest(0, { span: NET_SPAN })]).routes[0].labelled);
-  assert.ok(routeWires(boxes, [dest(0, { crossesPlate: true })]).routes[0].labelled, 'from the plate’s area to free space');
+  assert.ok(!routeWires(boxes, [dest(0, { span: 9 })]).routes[0].labelled, 'a long wire is a wire');
+  assert.ok(routeWires(boxes, [dest(0, { global: true })]).routes[0].labelled, 'a global net (the transport’s clock)');
   assert.equal(four.metrics.labels, 1);
 });
 

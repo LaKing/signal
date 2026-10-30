@@ -33,6 +33,8 @@ const TRANSPOSE_PASSES = 4;
 const PASSES = 8;
 /** A dummy's pull, against a box's 1: long edges straight. */
 const DUMMY_WEIGHT = 4;
+/** A node's anchor (its vias' height) pulls this strongly, against a box's neighbours' 1. */
+const ANCHOR_WEIGHT = 3;
 /** An element with no neighbour on the side looked at stays where it is, this strongly. */
 const STAY_WEIGHT = 0.25;
 /** The spiral search for an anchored chip goes this many rings (plate units) out at most. */
@@ -109,7 +111,7 @@ export function inversions(values) {
  * at through that column), `crossings` of the order kept (between layers,
  * dummies counted).
  */
-export function sugiyama(nodes, edges, layer) {
+export function sugiyama(nodes, edges, layer, { anchors = null, extra = null } = {}) {
   const real = new Map(nodes.map((n) => [n.id, n]));
   const count = nodes.length ? Math.max(...nodes.map((n) => layer.get(n.id) ?? 0)) + 1 : 0;
   const rows = Array.from({ length: count }, () => []);
@@ -151,6 +153,23 @@ export function sugiyama(nodes, edges, layer) {
     for (const s of segs) {
       below.get(s.up).push({ other: s.lo, own: s.upFrac, frac: s.loFrac });
       above.get(s.lo).push({ other: s.up, own: s.loFrac, frac: s.upFrac });
+    }
+  }
+  // A node with an anchor (its vias' height, ADR 0047 §5) starts in its row's order by it.
+  if (anchors?.size) {
+    for (let r = 0; r < count; r++) {
+      const slots = [];
+      const held = [];
+      rows[r].forEach((id, i) => {
+        if (anchors.has(id)) {
+          slots.push(i);
+          held.push(id);
+        }
+      });
+      held.sort((p, q) => anchors.get(p) - anchors.get(q) || rows[r].indexOf(p) - rows[r].indexOf(q));
+      slots.forEach((slot, k) => {
+        rows[r][slot] = held[k];
+      });
     }
   }
   const index = new Map();
@@ -231,6 +250,23 @@ export function sugiyama(nodes, edges, layer) {
     if (c < best.crossings) best = { crossings: c, rows: rows.map((r) => [...r]) };
   }
   for (let r = 0; r < count; r++) rows[r] = best.rows[r];
+  // Anchored nodes keep their anchors' order in their row (a chip in the row of its controls).
+  if (anchors?.size) {
+    for (let r = 0; r < count; r++) {
+      const slots = [];
+      const held = [];
+      rows[r].forEach((id, i) => {
+        if (anchors.has(id)) {
+          slots.push(i);
+          held.push(id);
+        }
+      });
+      held.sort((p, q) => anchors.get(p) - anchors.get(q) || rows[r].indexOf(p) - rows[r].indexOf(q));
+      slots.forEach((slot, k) => {
+        rows[r][slot] = held[k];
+      });
+    }
+  }
   number();
 
   // Coordinates: y within each column (isotonic regression of the wanted
@@ -293,20 +329,24 @@ export function sugiyama(nodes, edges, layer) {
   };
   const want = (lists) => (id) => {
     const list = lists.get(id) ?? [];
-    if (!list.length) return { value: y.get(id), weight: STAY_WEIGHT };
+    const anchor = anchors?.get(id);
+    if (!list.length) return anchor === undefined ? { value: y.get(id), weight: STAY_WEIGHT } : { value: anchor, weight: ANCHOR_WEIGHT };
     const v = list.map((n) => y.get(n.other) + n.delta).sort((p, q) => p - q);
     const m = Math.floor(v.length / 2);
     const value = v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
-    return { value, weight: isDummy(id) ? DUMMY_WEIGHT : 1 };
+    const weight = isDummy(id) ? DUMMY_WEIGHT : 1;
+    // An anchored node is pulled to its vias' height as well as to its neighbours.
+    if (anchor !== undefined) return { value: (value * weight + anchor * ANCHOR_WEIGHT) / (weight + ANCHOR_WEIGHT), weight: weight + ANCHOR_WEIGHT };
+    return { value, weight };
   };
   for (let p = 0; p < PASSES; p++) {
     for (let r = 1; r < count; r++) place(r, want(offLo));
     for (let r = count - 2; r >= 0; r--) place(r, want(offUp));
   }
-  // Whole units, the topmost at 0.
+  // Whole units, the topmost at 0 (with anchors, where the anchors put it).
   let top = Infinity;
   for (const v of y.values()) top = Math.min(top, v);
-  if (!Number.isFinite(top)) top = 0;
+  if (!Number.isFinite(top) || anchors?.size) top = 0;
   for (const [id, v] of y) y.set(id, Math.round(v - top));
 
   // Columns: each as wide as its widest box; each channel as wide as the
@@ -322,7 +362,7 @@ export function sugiyama(nodes, edges, layer) {
       for (const s of gaps[r]) {
         if (y.get(s.up) + s.upOff !== y.get(s.lo) + s.loOff) tracks.add(`${s.net}\n${s.up}`);
       }
-      x += w + Math.max(MIN_CHANNEL, 2 * STUB + (tracks.size + 1) * TRACK);
+      x += w + Math.max(MIN_CHANNEL, 2 * STUB + (tracks.size + 1) * TRACK + (extra?.get(r) ?? 0));
     }
   }
   const xs = new Map();

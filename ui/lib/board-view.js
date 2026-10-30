@@ -1,17 +1,15 @@
 // The device view's state and the plate's measures (ADR 0047 §5, phase
-// 2): the layer shown (Plate, X-ray, Board), the board's arrangement (by
-// controls or by flow), the signal kinds whose wires are hidden, and the
-// vias, the plate's controls as rectangles in whole plate units. View
-// state only: it never changes the layout's input but for the
-// arrangement, and never what a project means (rule 4). Pure; no DOM.
+// 2): the layer shown (Plate, X-ray, Board), the signal kinds whose wires
+// are hidden, and the vias, the plate's controls as rectangles in whole
+// plate units. View state only: it never changes the layout's input, nor
+// what a project means (rule 4). The board has one arrangement (the owner's
+// verdict of 2026-10-30). Pure; no DOM.
 
 import { PU } from './board-layout.js';
 
 /** The layers, in the order one key steps through them. */
 export const LAYERS = Object.freeze(['plate', 'xray', 'board']);
 export const LAYER_NAMES = Object.freeze({ plate: 'Plate', xray: 'X-ray', board: 'Board' });
-/** The board's arrangements. */
-export const ARRANGEMENTS = Object.freeze(['controls', 'flow']);
 /** The signal kinds a wire is drawn as (`shapeName`), each a layer of its own. */
 export const KINDS = Object.freeze(['signal', 'events', 'vector']);
 /** The plate's opacity in X-ray (about a quarter). */
@@ -19,15 +17,14 @@ export const XRAY_OPACITY = 0.25;
 /** The plate lifts and fades in this long (none with reduced motion). */
 export const LIFT_MS = 200;
 
-/** The state a view opens with: the board, arranged by controls, every kind shown. */
-export const DEFAULT_VIEW = Object.freeze({ layer: 'board', arrange: 'controls', hidden: Object.freeze([]) });
+/** The state a view opens with: the board, every kind shown. */
+export const DEFAULT_VIEW = Object.freeze({ layer: 'board', hidden: Object.freeze([]) });
 
 /** `raw` (a page's, or `ui/windows.toml`'s) made a view state: anything unknown is the default's. */
 export function viewState(raw) {
   const layer = LAYERS.includes(raw?.layer) ? raw.layer : DEFAULT_VIEW.layer;
-  const arrange = ARRANGEMENTS.includes(raw?.arrange) ? raw.arrange : DEFAULT_VIEW.arrange;
   const hidden = KINDS.filter((k) => Array.isArray(raw?.hidden) && raw.hidden.includes(k));
-  return { layer, arrange, hidden };
+  return { layer, hidden };
 }
 
 /** The layer after `layer` (the key that steps through them). */

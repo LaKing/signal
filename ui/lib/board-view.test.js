@@ -4,9 +4,10 @@ import assert from 'node:assert/strict';
 import { DEFAULT_VIEW, LAYERS, metricsText, nextLayer, plateSize, plateVias, shownWires, toggleKind, viaRect, viewState } from './board-view.js';
 
 test('the view state: anything unknown is the default’s; kinds in their order', () => {
-  assert.deepEqual(viewState(null), { layer: 'board', arrange: 'controls', hidden: [] });
-  assert.deepEqual(viewState({ layer: 'xray', arrange: 'flow', hidden: ['vector', 'midi', 'signal'] }), { layer: 'xray', arrange: 'flow', hidden: ['signal', 'vector'] });
-  assert.deepEqual(viewState({ layer: 'top', arrange: 1, hidden: 'signal' }), { ...DEFAULT_VIEW, hidden: [] });
+  assert.deepEqual(viewState(null), { layer: 'board', hidden: [] });
+  // One arrangement (the owner's verdict): an old state's `arrange` is dropped.
+  assert.deepEqual(viewState({ layer: 'xray', arrange: 'flow', hidden: ['vector', 'midi', 'signal'] }), { layer: 'xray', hidden: ['signal', 'vector'] });
+  assert.deepEqual(viewState({ layer: 'top', hidden: 'signal' }), { ...DEFAULT_VIEW, hidden: [] });
 });
 
 test('one key steps through Plate, X-ray, Board and round again', () => {

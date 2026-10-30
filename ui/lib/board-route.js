@@ -1,27 +1,27 @@
-// The board's wiring (ADR 0047 §6, phase 2): orthogonal routes that never
-// pass under a box, net labels instead of long wires, and the measures
-// (crossings, bends, length) shown beside the drawing. A wire leaves its
-// output to the right and enters its input from the left, both straight
-// for at least STUB; between them it turns only on vertical segments, each
-// on a track of the channel it is in: a vertical of one net never comes
-// within a TRACK of another net's over a common height, and a net's wires
-// from one pin share their first vertical (a trunk). Long edges follow
-// their dummies (ui/lib/board-layout.js) through the columns they cross;
-// feedback runs in its own lane below everything, as before. A wire that
-// finds no free way, and every wire of a net with NET_DESTS destinations or
-// more or spanning more than NET_SPAN layers (or joining the plate's area
-// to free space), is drawn as labels: a stub at its source `▸ name` and at
-// each destination `◂ name`; traced, it is drawn whole. Corners are rounded
-// (`rounded`, ui/lib/schematic-wire.js). Deterministic: wires are routed
-// shortest first, ties by their order; candidates in a fixed order. No DOM.
+// The board's wiring between chips (ADR 0047 §6; the owner's verdict of
+// 2026-10-30): orthogonal routes that never pass under a box, and the
+// measures (crossings, bends, length) shown beside the drawing. A wire
+// leaves its output to the right and enters its input from the left, both
+// straight for at least STUB; between them it turns only on vertical
+// segments, each on a track of the channel it is in, ordered against
+// crossings (`trackPreferences`): a vertical of one net never comes within
+// a TRACK of another net's over a common height, and a net's wires from
+// one pin share their first vertical (a trunk). Long edges follow their
+// dummies (ui/lib/board-layout.js) through the columns they cross;
+// feedback runs in its own lane below everything. Only a net with
+// NET_DESTS destinations or more, a global net (the transport's clock) and
+// a wire that finds no way are drawn as labels: a stub at its source
+// `▸ name` and at each destination `◂ name`; traced, it is drawn whole.
+// The plate's legs are the maze's (ui/lib/board-maze.js). Corners are
+// rounded (`rounded`, ui/lib/schematic-wire.js). Deterministic: wires are
+// routed shortest first, ties by their order; candidates in a fixed order.
+// No DOM.
 
 import { curveBox, flatten, rounded } from './schematic-wire.js';
 import { STUB, TRACK } from './board-layout.js';
 
 /** A net with this many destinations or more is drawn as labels. */
 export const NET_DESTS = 4;
-/** …and one whose wire would cross more than this many layers. */
-export const NET_SPAN = 3;
 /** A label's stub, out of its pin. */
 export const LABEL_STUB = 28;
 /** A route keeps this far from a box it passes. */
@@ -250,7 +250,8 @@ export function routeWires(boxes, wires, { nameOf = (w) => w.net } = {}) {
     if (!nets.has(w.net)) nets.set(w.net, []);
     nets.get(w.net).push(w);
   }
-  const labelledNet = (list) => list.length >= NET_DESTS || list.some((w) => w.span > NET_SPAN || w.crossesPlate);
+  // Labels only for a true fan-out and a global net (the owner's verdict: fewer labels, more real wires).
+  const labelledNet = (list) => list.length >= NET_DESTS || list.some((w) => w.global);
   const result = wires.map(() => null);
   const order = wires.map((w, i) => ({ w, i, d: Math.abs(w.b.x - w.a.x) + Math.abs(w.b.y - w.a.y) + (w.feedback ? 1e6 : 0) }));
   order.sort((p, q) => p.d - q.d || p.i - q.i);
@@ -261,7 +262,7 @@ export function routeWires(boxes, wires, { nameOf = (w) => w.net } = {}) {
       result[i] = { corners: zCorners(w.a, w.b, { feedback: w.feedback, under: w.under }), labelled: false };
       continue;
     }
-    if (w.long || labelledNet(nets.get(w.net))) {
+    if (labelledNet(nets.get(w.net))) {
       result[i] = { labelled: true };
       continue;
     }
@@ -421,22 +422,28 @@ function segments(c) {
  * total drawn length, and the labelled nets.
  */
 export function measure(wires, routes, labels = []) {
+  // A segment drawn twice by one net (a bus's shared way) counts once; a crossing point of two nets once.
   const h = [];
   const v = [];
+  const seen = new Set();
   let bends = 0;
   let length = 0;
   routes.forEach((r, i) => {
     const c = r?.corners ?? [];
     bends += Math.max(0, c.length - 2);
+    const net = wires[i].net;
     for (const [p, q] of segments(c)) {
+      const key = `${net}\n${Math.min(p.x, q.x)},${Math.min(p.y, q.y)},${Math.max(p.x, q.x)},${Math.max(p.y, q.y)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       length += Math.abs(q.x - p.x) + Math.abs(q.y - p.y);
-      if (p.y === q.y) h.push({ y: p.y, x0: Math.min(p.x, q.x), x1: Math.max(p.x, q.x), net: wires[i].net });
-      else if (p.x === q.x) v.push({ x: p.x, y0: Math.min(p.y, q.y), y1: Math.max(p.y, q.y), net: wires[i].net });
+      if (p.y === q.y) h.push({ y: p.y, x0: Math.min(p.x, q.x), x1: Math.max(p.x, q.x), net });
+      else if (p.x === q.x) v.push({ x: p.x, y0: Math.min(p.y, q.y), y1: Math.max(p.y, q.y), net });
     }
   });
-  let crossings = 0;
-  for (const a of h) for (const b of v) if (a.net !== b.net && b.x > a.x0 && b.x < a.x1 && a.y > b.y0 && a.y < b.y1) crossings++;
-  return { crossings, bends, length: Math.round(length), labels: new Set(labels.map((l) => l.net)).size };
+  const points = new Set();
+  for (const a of h) for (const b of v) if (a.net !== b.net && b.x > a.x0 && b.x < a.x1 && a.y > b.y0 && a.y < b.y1) points.add(`${b.x},${a.y}\n${a.net < b.net ? `${a.net}\n${b.net}` : `${b.net}\n${a.net}`}`);
+  return { crossings: points.size, bends, length: Math.round(length), labels: new Set(labels.map((l) => l.net)).size };
 }
 
 /**

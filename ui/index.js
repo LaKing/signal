@@ -63,6 +63,7 @@ import './lib/schematic-open.test.js';
 import './lib/schematic-palette.test.js';
 import './lib/board-layout.test.js';
 import './lib/board-route.test.js';
+import './lib/board-maze.test.js';
 import './lib/board-view.test.js';
 import './lib/board.test.js';
 import './app/lib/view-state.test.js';

@@ -221,16 +221,13 @@ pub struct LayoutWindow {
 
 /// The layers of the device view (ADR 0047 §5), as `ui/lib/board-view.js` names them.
 pub const LAYERS: [&str; 3] = ["plate", "xray", "board"];
-/// The board's arrangements.
-pub const ARRANGEMENTS: [&str; 2] = ["controls", "flow"];
 /// The signal kinds whose wires may be hidden.
 pub const KINDS: [&str; 3] = ["signal", "events", "vector"];
 /// A plate's scale is kept within these (`ui/lib/plate.js` `ZOOM_MIN`, `ZOOM_MAX`).
 pub const SCALE_RANGE: (f64, f64) = (0.1, 8.0);
 
-/// A window's view state (ADR 0047 §3, §5): the device view's layer, the
-/// board's arrangement and the kinds whose wires are hidden (the
-/// schematic's), and the plate's scale (the panel's: `whole`, or a scale
+/// A window's view state (ADR 0047 §3, §5): the device view's layer and
+/// the kinds whose wires are hidden (the schematic's), and the plate's scale (the panel's: `whole`, or a scale
 /// set by ⌘+ / ⌘−; neither: fit the width). Presentation only, as the
 /// window's place is; each field absent is its default. What the page
 /// says is checked here: anything else is left out.
@@ -238,8 +235,6 @@ pub const SCALE_RANGE: (f64, f64) = (0.1, 8.0);
 pub struct ViewState {
     /// `plate`, `xray` or `board`.
     pub layer: Option<String>,
-    /// `controls` or `flow`.
-    pub arrange: Option<String>,
     /// Of `signal`, `events`, `vector`, in that order.
     pub hidden: Vec<String>,
     /// The plate shown whole (⌘0).
@@ -270,7 +265,6 @@ impl ViewState {
         // A default is no value: it is never written.
         ViewState {
             layer: one_of("layer", &LAYERS).filter(|l| l != LAYERS[2]),
-            arrange: one_of("arrange", &ARRANGEMENTS).filter(|a| a != ARRANGEMENTS[0]),
             hidden: KINDS
                 .iter()
                 .filter(|k| listed.contains(k))
@@ -286,9 +280,6 @@ impl ViewState {
         let mut out = serde_json::Map::new();
         if let Some(layer) = &self.layer {
             out.insert("layer".into(), Value::from(layer.as_str()));
-        }
-        if let Some(arrange) = &self.arrange {
-            out.insert("arrange".into(), Value::from(arrange.as_str()));
         }
         out.insert("hidden".into(), Value::from(self.hidden.clone()));
         if self.whole {
@@ -824,6 +815,7 @@ pub fn read_layout(text: &str, key: &str) -> Result<Option<Layout>, String> {
                     | "cards"
                     | "fullscreen"
                     | "layer"
+                    // Written before the board had one arrangement (2026-10-30): read, ignored.
                     | "arrange"
                     | "hidden"
                     | "zoom"
@@ -934,7 +926,6 @@ fn read_state(table: &Table) -> Result<ViewState, String> {
     };
     Ok(ViewState {
         layer: word("layer", &LAYERS)?.filter(|l| l != LAYERS[2]),
-        arrange: word("arrange", &ARRANGEMENTS)?.filter(|a| a != ARRANGEMENTS[0]),
         hidden,
         whole: whole && scale.is_none(),
         scale,
@@ -945,9 +936,6 @@ fn read_state(table: &Table) -> Result<ViewState, String> {
 fn write_state(table: &mut Table, state: &ViewState) {
     if let Some(layer) = &state.layer {
         table.insert("layer", value(layer.as_str()));
-    }
-    if let Some(arrange) = &state.arrange {
-        table.insert("arrange", value(arrange.as_str()));
     }
     if !state.hidden.is_empty() {
         let hidden: toml_edit::Array = state.hidden.iter().map(String::as_str).collect();
@@ -1563,7 +1551,16 @@ mod tests {
         assert!(text.contains("scale = 1.56"), "{text}");
         let read = read_layout(&text, &screens.key).unwrap().unwrap();
         assert_eq!(read.windows[0].state.scale, Some(1.56));
-        assert_eq!(read.windows[0].state.arrange.as_deref(), Some("flow"));
+        assert!(
+            !text.contains("arrange"),
+            "the board has one arrangement: {text}"
+        );
+        // A file from before (2026-10-30) with `arrange` still reads; the key is dropped when written again.
+        let old = text.replace("layer = \"xray\"", "layer = \"xray\"\narrange = \"flow\"");
+        assert_eq!(
+            read_layout(&old, &screens.key).unwrap().unwrap().windows[0].state,
+            read.windows[0].state
+        );
         assert_eq!(read.windows[0].state.to_json()["layer"], "xray");
         // The default writes nothing.
         let plain = write_layout("", &screens.key, Some(&default_layout(&screens, None))).unwrap();

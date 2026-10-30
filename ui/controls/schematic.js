@@ -928,9 +928,11 @@ export class SignalSchematic extends HTMLElement {
     const solo = this.soloWires(level);
     // A level a box of which is dragged: every wire on its own, as DragFollow moves them by id.
     const dragging = this.levelDragged(level);
-    const fan = dragging ? 1 : fanOf(transform.k);
+    // On the board (ADR 0047, the owner's verdict) zoom decides nothing drawn: every wire on its own, every pin.
+    const steady = Boolean(level.layout.board);
+    const fan = dragging || steady ? 1 : fanOf(transform.k);
     // Small, a composite's port groups are one pin each, its wires joining it (not while a box of the level is dragged).
-    const collapsed = !dragging && collapsedAt(transform.k);
+    const collapsed = !dragging && !steady && collapsedAt(transform.k);
     level.collapsed = collapsed;
     const soloKey = [...solo].join('\t');
     // ADR 0047 §6: a hidden kind's wires are not drawn; a labelled net traced or selected is drawn whole.
@@ -951,7 +953,7 @@ export class SignalSchematic extends HTMLElement {
     else {
       const baked = drawn.baked;
       const ends = collapsed ? this.groupEnds(level.layout) : null;
-      const items = bundleWires(levelWires, transform.k, { solo, bottom: level.layout.bottom, cache: drawn.bundleCache, fanned: dragging, ends, avoid: level.layout.avoid ?? null });
+      const items = bundleWires(levelWires, transform.k, { solo, bottom: level.layout.bottom, cache: drawn.bundleCache, fanned: dragging || steady, ends, avoid: level.layout.avoid ?? null });
       level.bundles = items;
       const wires = reconcile(
         drawn.wireCache,
@@ -1350,7 +1352,7 @@ export class SignalSchematic extends HTMLElement {
     return group;
   }
 
-  /** The plate measured again, or the arrangement switched (ADR 0047 §5): the board laid out again, what did not move kept on screen. */
+  /** The plate measured again (ADR 0047 §5): the board laid out again, what did not move kept on screen. */
   relayoutTop() {
     this.facesResized();
   }

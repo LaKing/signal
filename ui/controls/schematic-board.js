@@ -9,7 +9,7 @@
 // (the board, the plate's cards as ghosts at a quarter of its opacity, its
 // controls whole) and Board (the board and the plate's controls only).
 // The bar switches the layer (and the key `schematic.layer` steps through
-// them), the arrangement (by controls, by flow) and the signal kinds whose
+// them) and the signal kinds whose
 // wires are drawn, and shows the board's measures. All of it is view
 // state: told to the page's host (`signal-view-change`) to be kept per
 // window in `ui/windows.toml`, never in the project's files.
@@ -23,7 +23,7 @@ export const PLATE_FACE = '#plate';
 export const PLATE_FILE = 'main.html';
 
 export const BOARD_CSS = `
-/* ADR 0047 §5: the layer switch, the arrangement and the kinds on the bar. */
+/* ADR 0047 §5: the layer switch and the kinds on the bar. */
 .layers { display: inline-flex; flex: none; }
 .layers > button { border-radius: 0; margin-left: -1px; }
 .layers > button:first-child { border-radius: 4px 0 0 4px; margin-left: 0; }
@@ -128,9 +128,6 @@ export class SchematicBoard {
       layers.append(b);
       this.layerButtons.set(layer, b);
     }
-    this.arrangeButton = document.createElement('button');
-    this.arrangeButton.type = 'button';
-    this.arrangeButton.addEventListener('click', () => this.set({ arrange: this.state.arrange === 'flow' ? 'controls' : 'flow' }));
     const kinds = document.createElement('span');
     kinds.className = 'kinds';
     kinds.setAttribute('role', 'group');
@@ -149,7 +146,6 @@ export class SchematicBoard {
     this.measures.className = 'measures';
     this.measures.title = 'The board’s wiring as measured (ADR 0047 §6): shown, never deciding';
     bar.insertBefore(layers, before);
-    bar.insertBefore(this.arrangeButton, before);
     bar.insertBefore(kinds, before);
     bar.insertBefore(this.measures, before);
     this.showState();
@@ -157,11 +153,6 @@ export class SchematicBoard {
 
   showState() {
     for (const [layer, b] of this.layerButtons ?? []) b.setAttribute('aria-pressed', String(layer === this.state.layer));
-    if (this.arrangeButton) {
-      const flow = this.state.arrange === 'flow';
-      this.arrangeButton.textContent = flow ? 'Arrange by controls' : 'Arrange by flow';
-      this.arrangeButton.title = flow ? 'Place the chips near the plate’s controls that bind them' : 'Lay every chip out by its signal flow alone';
-    }
     for (const [kind, b] of this.kindButtons ?? []) b.setAttribute('aria-pressed', String(!this.state.hidden.includes(kind)));
     const svg = this.host.svg;
     if (svg) for (const layer of LAYERS) svg.classList.toggle(`layer-${layer}`, layer === this.state.layer);
@@ -172,10 +163,9 @@ export class SchematicBoard {
   set(change, { tell = true } = {}) {
     const next = viewState({ ...this.state, ...change });
     const was = this.state;
-    if (next.layer === was.layer && next.arrange === was.arrange && next.hidden.join() === was.hidden.join()) return;
+    if (next.layer === was.layer && next.hidden.join() === was.hidden.join()) return;
     this.state = next;
     if (next.layer !== was.layer) this.lift();
-    if (next.arrange !== was.arrange) this.host.relayoutTop?.();
     this.showState();
     this.host.redrawAll?.();
     if (tell) this.host.dispatchEvent(new CustomEvent('signal-view-change', { bubbles: true, composed: true, detail: { ...this.state } }));
@@ -207,7 +197,7 @@ export class SchematicBoard {
 
   /** What the top level's layout is asked with: `layout`'s `board`. */
   option() {
-    return { arrange: this.state.arrange, vias: this.plate.vias, obstacles: this.plate.obstacles, plate: this.plate.size };
+    return { vias: this.plate.vias, obstacles: this.plate.obstacles, plate: this.plate.size };
   }
 
   /** What every level's drawing depends on of this state (its cache key). */
@@ -356,7 +346,6 @@ export class SchematicBoard {
       const shape = shapeOf.get(label.wire) ?? 'signal';
       if (this.state.hidden.includes(shape)) continue;
       if (label.side === 'out') parts.push(el('path', { class: `net-stub ${shape}`, d: bakedPath(baked, label.corners) }));
-      if (!text(9)) continue;
       const at = bakedPoint(baked, { x: label.at.x + (label.side === 'out' ? 3 : -3), y: label.at.y + 3 });
       const t = el('text', { class: `net-label ${shape}`, x: at.x, y: at.y, 'font-size': 9 * baked.m, 'text-anchor': label.side === 'out' ? 'start' : 'end', 'data-net-wire': String(label.wire) }, label.text);
       t.append(el('title', {}, `${label.text.slice(2)}: click to trace the net`));

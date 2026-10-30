@@ -12,7 +12,7 @@ function host() {
   return h;
 }
 
-test('a layer, an arrangement or a kind switched: drawn, laid out only for the arrangement, told to the window', () => {
+test('a layer or a kind switched: drawn, laid out never, told to the window', () => {
   const h = host();
   const board = new SchematicBoard(h);
   assert.equal(board.state.layer, 'board');
@@ -22,13 +22,11 @@ test('a layer, an arrangement or a kind switched: drawn, laid out only for the a
   assert.equal(h.relaid, 0);
   assert.match(h.plateClass, / plate layer-plate lifting/);
   assert.equal(h.events.at(-1).type, 'signal-view-change');
-  assert.deepEqual(h.events.at(-1).detail, { layer: 'plate', arrange: 'controls', hidden: [] });
-  board.set({ arrange: 'flow' });
-  assert.equal(h.relaid, 1, 'the arrangement is the layout’s only view input');
-  assert.equal(board.option().arrange, 'flow');
+  assert.deepEqual(h.events.at(-1).detail, { layer: 'plate', hidden: [] });
+  assert.equal(board.option().arrange, undefined, 'one arrangement');
   const key = board.key;
   board.set({ hidden: ['events'] });
-  assert.equal(h.relaid, 1, 'a kind moves nothing');
+  assert.equal(h.relaid, 0, 'a kind moves nothing');
   assert.notEqual(board.key, key, 'but draws again');
   assert.ok(board.hiddenKind('events'));
   const told = h.events.length;
