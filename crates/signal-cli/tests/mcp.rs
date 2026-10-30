@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use mcp_common::{Mcp, copy_of, fixture, stale};
 use serde_json::{Value, json};
 
-const TOOLS: [&str; 42] = [
+const TOOLS: [&str; 43] = [
     "project_info",
     "graph",
     "modules",
@@ -49,6 +49,7 @@ const TOOLS: [&str; 42] = [
     "slot_map",
     "slot_interface",
     "slot_inside",
+    "slot_group",
     "write_pattern",
     "write_panel",
     "write_file",
@@ -1513,5 +1514,36 @@ fn slot_inside_makes_an_own_inside_built_with_patch() {
     );
     let refusal = mcp.refused("slot_inside", json!({"slot": "fx"}));
     assert!(refusal.contains("own inside already"), "{refusal}");
+    assert!(mcp.finish().success());
+}
+
+/// ADR 0046: `slot_group` groups an instance into a slot holding it, its
+/// panel's controls on it moved into the slot's part; `patch` with the
+/// reply's inverse undoes every file.
+#[test]
+fn slot_group_moves_the_controls_into_a_part_and_is_undone() {
+    let text = "schema_version = 1\n\n[project]\nname = \"group\"\nsample_rate = 48000\n\n[instances]\nosc = { module = \"std.sine_osc\", freq = 220 }\nout = { module = \"std.audio_out\", gain = 0.2 }\n\n[wiring]\nconnections = [\n  { from = \"osc.out\", to = \"out.l\" },\n]\n";
+    let dir = mcp_common::project(text, "mcp-group");
+    let panel = "<!doctype html>\n<signal-panel>\n  <div class=\"signal-cards\">\n    <section class=\"signal-card\">\n      <h2>osc</h2>\n      <signal-knob bind=\"/osc.freq\" label=\"freq\"></signal-knob>\n    </section>\n  </div>\n</signal-panel>\n";
+    std::fs::create_dir_all(dir.join("ui")).unwrap();
+    std::fs::write(dir.join("ui/main.html"), panel).unwrap();
+    let mut mcp = Mcp::started(&dir, &[]);
+    let grouped = mcp.ok("slot_group", json!({"instance": "osc"}));
+    assert!(
+        mcp.file("project.toml").contains(
+            "osc = { slot = { outputs = { out = {} }, parameters = { freq = {} } }, load = \"std.sine_osc\", freq = 220 }"
+        ),
+        "{grouped}"
+    );
+    let part = std::fs::read_to_string(dir.join("ui/parts/osc.html")).unwrap();
+    assert!(part.contains("bind=\".freq\""), "{part}");
+    assert!(
+        mcp.file("ui/main.html")
+            .contains("<signal-slot bind=\"/osc\">")
+    );
+    mcp.ok("patch", json!({"ops": grouped["inverse"]}));
+    assert_eq!(mcp.file("project.toml"), text);
+    assert_eq!(mcp.file("ui/main.html"), panel);
+    assert!(!dir.join("ui/parts/osc.html").exists());
     assert!(mcp.finish().success());
 }

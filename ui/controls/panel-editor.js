@@ -121,15 +121,16 @@ function classNameOf(required, classes) {
  * Draws `tree` into `panel`'s light DOM, reusing the elements of `elements`
  * (node id → element), so a control that stays keeps its streams; `ids`
  * gets each element's node id. Children are only re-ordered where they
- * changed.
+ * changed. `attribute(name, value)`, if given, is what an attribute shows
+ * (ADR 0046: a slot's part renders its binds rooted).
  */
-export function render(panel, tree, rules, elements, ids) {
+export function render(panel, tree, rules, elements, ids, attribute = null) {
   const build = (node) => {
     let el = elements.get(node.id);
     if (node.kind === 'control') {
       if (el?.localName !== node.tag) el = document.createElement(node.tag);
       for (const name of rules.controls[node.tag] ?? []) {
-        const value = node.attributes[name];
+        const value = attribute ? attribute(name, node.attributes[name]) : node.attributes[name];
         if (value === undefined) {
           if (el.hasAttribute(name)) el.removeAttribute(name);
         } else if (el.getAttribute(name) !== value) {
@@ -184,14 +185,63 @@ export function adopt(panel, tree, elements) {
 }
 
 /** Shows the written panel `html` (a `panel.written` push) in a panel not being edited. */
-export async function showWritten(panel, html) {
+export async function showWritten(panel, html, attribute = null) {
   const rules = await loadWhitelist();
   const parsed = parseContent(html, rules, { mode: 'read' });
   if (parsed.error) return parsed.error;
   const elements = new Map();
   adopt(panel, parsed.tree, elements);
-  render(panel, parsed.tree, rules, elements, new WeakMap());
+  render(panel, parsed.tree, rules, elements, new WeakMap(), attribute);
   return null;
+}
+
+/**
+ * One undo history over several panel files (ADR 0046 §5): the host
+ * panel's editor and the editors of its open slot cards' parts, each
+ * writing its own file. Undo steps back the editor that wrote last, redo
+ * the one undone last; with nothing written in this session, the host's
+ * own history.
+ */
+export class SharedHistory {
+  constructor(host) {
+    this.host = host;
+    this.done = [];
+    this.undone = [];
+    this.used = false;
+  }
+
+  /** `editor` wrote a new version. */
+  wrote(editor) {
+    this.done.push(editor);
+    this.undone = [];
+    this.used = true;
+  }
+
+  /** Undo (-1) or redo (+1) across the files. */
+  step(direction) {
+    const from = direction < 0 ? this.done : this.undone;
+    const to = direction < 0 ? this.undone : this.done;
+    while (from.length && !from[from.length - 1].editing) from.pop();
+    const editor = from.pop();
+    if (editor) {
+      to.push(editor);
+      editor.stepOwn(direction);
+      return;
+    }
+    // Nothing written across the files in this session: the host's own history.
+    if (!this.used) this.host.stepOwn(direction);
+  }
+}
+
+/** Whether `event` is about a slot's part (its content or its own tools): its own editor's, not the host's. */
+export function inPart(event, panel) {
+  for (const n of event.composedPath?.() ?? []) {
+    if (n === panel) return false;
+    if (n.nodeType !== 1) continue;
+    if (n.dataset?.partTools !== undefined) return true;
+    if (n.localName !== 'signal-slot' && n.parentElement?.closest?.('signal-slot')) return true;
+  }
+  return false;
 }
 
 export class PanelEditor {
@@ -234,7 +284,8 @@ export class PanelEditor {
       if (parsed.error) return `Not editable here (${parsed.error}); edit the file by hand`;
       tree = parsed.tree;
     } else {
-      tree = generatedTree(defaultPanel(this.connection.description));
+      // ADR 0046: a slot's part starts from its interface parameters.
+      tree = this.panel.emptyTree?.() ?? generatedTree(defaultPanel(this.connection.description));
     }
     this.rules = rules;
     this.file = file;
@@ -322,7 +373,7 @@ export class PanelEditor {
   // Drawing.
 
   draw() {
-    render(this.panel, this.tree, this.rules, this.elements, this.ids);
+    render(this.panel, this.tree, this.rules, this.elements, this.ids, this.panel.attributeValue?.bind(this.panel) ?? null);
     for (const [id, label] of editLabels(this.tree)) {
       const el = this.elements.get(id);
       if (!el) continue;
@@ -499,7 +550,9 @@ export class PanelEditor {
   /** The selected control's parameter, for its min and max (`parseValue`'s spec). */
   rangeSpec() {
     const control = this.selectedControl();
-    const address = (control?.attributes.bind ?? '').split(/[\s,]+/)[0];
+    const written = (control?.attributes.bind ?? '').split(/[\s,]+/)[0];
+    // ADR 0046: a part's relative address, rooted.
+    const address = this.panel.absoluteAddress?.(written) ?? written;
     const parameter = (this.connection.description?.controls ?? []).find((c) => c.address === address) ??
       paletteEntries(this.connection.description).find((e) => e.address === address) ?? {};
     return {
@@ -521,8 +574,14 @@ export class PanelEditor {
 
   // The palette.
 
-  showPalette() {
+  /** The palette's entries: a part's are its slot's addresses, relative (ADR 0046). */
+  palette() {
     const entries = paletteEntries(this.connection.description);
+    return this.panel.paletteEntries?.(entries) ?? entries;
+  }
+
+  showPalette() {
+    const entries = this.palette();
     const { shown, more } = searchPalette(entries, this.$('.search').value, RESULTS);
     for (const [i, item] of [...this.$('.results').children].entries()) {
       const button = item.firstChild;
@@ -597,8 +656,18 @@ export class PanelEditor {
     this.write(result.tree, 0);
   }
 
-  /** Undo (-1) or redo (+1): writes the version before or after. */
+  /** Undo (-1) or redo (+1): across the files when the history is shared (ADR 0046), else this file's. */
   step(direction) {
+    if (!this.editing) return;
+    if (this.shared) {
+      this.shared.step(direction);
+      return;
+    }
+    this.stepOwn(direction);
+  }
+
+  /** Undo (-1) or redo (+1) of this file: writes the version before or after. */
+  stepOwn(direction) {
     if (!this.editing) return;
     const history = this.session.history;
     const text = direction < 0 ? history.undo() : history.redo();
@@ -639,6 +708,7 @@ export class PanelEditor {
     try {
       const reply = await this.connection.request(request.message);
       this.session.written(reply, html, step);
+      if (step === 0) this.shared?.wrote(this);
       if (this.generated) {
         // ui/main.html exists now: this page shows it (left meanwhile: the
         // generated panel that leave() showed again goes; the written one
@@ -674,8 +744,9 @@ export class PanelEditor {
     return null;
   }
 
-  /** Whether an event comes from the panel's content (not its bar or tools). */
+  /** Whether an event comes from the panel's content (not its bar or tools, nor a slot's part, which its own editor takes). */
   inContent(event) {
+    if (!this.panel.isPart && inPart(event, this.panel)) return false;
     return event.composedPath().some((n) => n !== this.panel && n.nodeType === 1 && this.panel.contains(n));
   }
 
@@ -695,6 +766,8 @@ export class PanelEditor {
       if (this.inContent(event) && !editKey(event)) swallow(event);
     });
     add(this.panel, 'pointerdown', (event) => this.down(event));
+    // A part's editor shares the host's keys (one history, ADR 0046).
+    if (this.panel.isPart) return;
     add(this.panel.ownerDocument, 'keydown', (event) => {
       const action = editKey(event);
       if (!action) return;

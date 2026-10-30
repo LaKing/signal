@@ -259,12 +259,139 @@ export function controlNodes(controls, byId, pinY) {
 }
 
 /**
+ * ADR 0046 §6: the controls of slots' parts on their interfaces (`.p`,
+ * `partControls` of ui/lib/parts.js), placed by structure, as nodes:
+ * - `inside` (a closed slot box at its level, `control.part` its name): in
+ *   a column in the middle of the box, which grows to hold them (its pins
+ *   stay on its edges), each as near its pin's height as the one above it
+ *   allows, a short binding wire from its pin;
+ * - `frame` (the slot's inside, opened: `control.frame`): just inside the
+ *   frame beside the frame pin it binds, right of the inputs' pins
+ *   (`@inputs`), left of the outputs' (`@outputs`).
+ * A part's control on inner addresses (`/vcf.cutoff`) is not one of these:
+ * it is drawn beside its inner instance when the slot is open, as a host
+ * panel's control is (`controlNodes`). `byId`'s slot boxes grow in place.
+ */
+export function partNodes(controls, byId, pinY) {
+  const nodes = [];
+  for (const control of controls ?? []) {
+    if (!control.part || !control.relative?.every((r) => r.startsWith('.'))) continue;
+    const ins = [];
+    const outs = [];
+    const binds = [];
+    let host = null;
+    for (const [i, relative] of control.relative.entries()) {
+      const name = relative.slice(1);
+      let box = null;
+      let target = null;
+      let role = null;
+      if (control.frame) {
+        const inputs = byId.get('@inputs');
+        const outputs = byId.get('@outputs');
+        target = inputs?.outs.find((p) => p.name === name) ?? null;
+        if (target) {
+          box = inputs;
+          role = target.role === 'parameter' ? 'parameter' : 'in';
+        } else {
+          target = outputs?.ins.find((p) => p.name === name) ?? null;
+          box = target ? outputs : null;
+          role = target ? 'out' : null;
+        }
+      } else {
+        box = byId.get(control.part);
+        if (box?.kind !== 'instance') box = null;
+        target = box?.ins.find((p) => p.name === name && p.parameter) ?? null;
+        role = target ? 'parameter' : null;
+        if (box && !target) {
+          target = box.ins.find((p) => p.name === name && !p.parameter) ?? null;
+          role = target ? 'in' : null;
+        }
+        if (box && !target) {
+          target = box.outs.find((p) => p.name === name) ?? null;
+          role = target ? 'out' : null;
+        }
+      }
+      if (!box || !target) continue;
+      host ??= box.id;
+      if (box.id !== host) continue;
+      const address = control.binds[i] ?? `/${control.part}.${name}`;
+      const pin = {
+        name: address.replace(/^\//, ''),
+        label: name,
+        address,
+        instance: box.id,
+        port: name,
+        role,
+        writes: writes(control.type, role),
+        shape: target.shape ?? 'signal',
+        kind: target.kind ?? null,
+        rate: target.rate ?? null,
+        range: target.range ?? null,
+      };
+      binds.push(pin);
+      ins.push({ ...pin, direction: 'in' });
+    }
+    if (!host) continue;
+    const rows = Math.max(1, ins.length);
+    const w = rows > 1 ? CONTROL_WIDE : CONTROL_W;
+    const h = Math.max(CONTROL_MIN_H, CONTROL_HEAD + CONTROL_ROW * rows + 14);
+    const frameSide = host === '@outputs' ? 'left' : 'right';
+    nodes.push({
+      id: `${CONTROL_ID}part:${control.part}:${control.index}`,
+      kind: 'control',
+      name: controlName(control),
+      module: '',
+      type: control.type,
+      tag: control.tag,
+      control,
+      host,
+      side: control.frame ? frameSide : 'inside',
+      inside: !control.frame,
+      frame: Boolean(control.frame),
+      composite: false,
+      w,
+      h,
+      dx: 0,
+      dy: 0,
+      ins,
+      outs,
+      binds,
+    });
+  }
+  // Inside a box: one column in its middle, the box grown to hold it.
+  const inside = new Map();
+  for (const node of nodes) {
+    const key = `${node.host}\n${node.side}`;
+    if (!inside.has(key)) inside.set(key, []);
+    inside.get(key).push(node);
+  }
+  for (const column of inside.values()) {
+    const host = byId.get(column[0].host);
+    const width = Math.max(...column.map((n) => n.w));
+    if (column[0].inside) host.w += width + CONTROL_GAP;
+    let bottom = column[0].inside ? CONTROL_HEAD : -Infinity;
+    for (const node of column) {
+      const first = node.binds[0];
+      const y = pinY(host, first.port, first.role === 'out');
+      node.dy = Math.max(column[0].inside ? CONTROL_HEAD : 0, Math.round(y - node.h / 2), bottom === -Infinity ? 0 : bottom + CONTROL_STACK);
+      bottom = node.dy + node.h;
+      if (node.inside) node.dx = Math.round((host.w - node.w) / 2);
+      else node.dx = node.side === 'left' ? -(CONTROL_GAP + node.w) : host.w + CONTROL_GAP;
+    }
+    if (column[0].inside) host.h = Math.max(host.h, bottom + CONTROL_STACK);
+  }
+  return nodes;
+}
+
+/**
  * What each host's controls take around its box: host id → `{left, right,
- * top, bottom}`, how far past its box's edges (never negative).
+ * top, bottom}`, how far past its box's edges (never negative). A control
+ * inside its box takes nothing around it.
  */
 export function controlPads(nodes, byId) {
   const pads = new Map();
   for (const node of nodes) {
+    if (node.inside) continue;
     const host = byId.get(node.host);
     if (!host) continue;
     const pad = pads.get(node.host) ?? { left: 0, right: 0, top: 0, bottom: 0 };
@@ -311,6 +438,21 @@ export function controlEdges(edges, controls) {
   });
   const into = (pin) => (e) => e.kind === 'connection' && (e.target ?? e.to).node === pin.instance && (e.target ?? e.to).port === pin.port;
   for (const control of controls) {
+    // ADR 0046 §6: a part's control on its slot's interface: a short wire
+    // from its pin (the wires into the pin still reach the slot's box or
+    // frame), or to it for an output; inside a box (`inside`) from the
+    // box's own edge.
+    if (control.inside || control.frame) {
+      for (const pin of control.binds) {
+        const here = { node: control.id, port: pin.name };
+        const there = { node: pin.instance, port: pin.port };
+        const out = pin.role === 'out';
+        const wire = out ? binding(here, there, pin, control) : binding(there, here, pin, control);
+        if (control.inside) wire.inside = out ? 'out' : 'in';
+        added.push(wire);
+      }
+      continue;
+    }
     for (const pin of control.binds) {
       if (!pin.role) continue;
       const here = { node: control.id, port: pin.name };

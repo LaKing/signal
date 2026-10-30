@@ -63,6 +63,14 @@
    lines; the group wraps as a whole. */
 .signal-group { display: flex; flex: none; flex-wrap: nowrap; gap: 0.5rem; align-items: flex-end; }
 
+/* A slot's own part (ADR 0046 §5), drawn inside its <signal-slot>: as the
+   open slot card (a card of the grid) its cards are cards of the host's
+   grid; in a row (the compact card) they stand beneath it. Either way they
+   are framed in the accent colour, as the slot card is. */
+signal-slot[data-card] > .signal-cards { display: contents; }
+signal-slot:not([data-card]) > .signal-cards { margin-top: 0.6rem; }
+signal-slot > .signal-cards > .signal-card { box-shadow: inset 0 0 0 1px var(--signal-accent); }
+
 /* Edit layout (M2.9-2, docs/ui-controls.md "Editing a panel"): every card,
    row, group and control framed, with a handle and its address. Outlines
    and absolutely placed labels only, so nothing moves or resizes; an empty

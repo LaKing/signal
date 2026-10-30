@@ -480,6 +480,8 @@ const { readFileSync } = await import('node:fs');
 const { ENTRY_CSS } = await import('./entry-field.js');
 const { MENU_CSS } = await import('./context-menu.js');
 const { EDITOR_CSS } = await import('./schematic-editor.js');
+// ADR 0046 §5: the slot card edits its part with the panel editor, whose tools it styles.
+const { EDITOR_CSS: PANEL_EDITOR_CSS } = await import('./panel-editor.js');
 const { BROWSER_CSS } = await import('./module-browser.js');
 const { SLOT_DIALOG_CSS, SlotDialogs } = await import('./slot-dialogs.js');
 
@@ -513,7 +515,7 @@ function bareClasses(selector) {
 function hostCss() {
   const base = cssIn('./base.js', 'export const BASE_CSS', { ENTRY_CSS });
   const schematic = cssIn('./schematic.js', 'const CSS =', { ENTRY_CSS, EDITOR_CSS, MENU_CSS });
-  const slot = cssIn('./slot.js', 'static css =', { BROWSER_CSS });
+  const slot = cssIn('./slot.js', 'static css =', { BROWSER_CSS, EDITOR_CSS: PANEL_EDITOR_CSS });
   const own = (text) => text.replace(BROWSER_CSS, '').replace(SLOT_DIALOG_CSS, '');
   return { schematic: own(schematic), slot: base + own(slot) };
 }

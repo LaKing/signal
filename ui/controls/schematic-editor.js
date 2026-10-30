@@ -676,6 +676,17 @@ export class SchematicEditor {
   }
 
   /** Make interface from this instance… (ADR 0037 §3): any instance's ports and parameters as interfaces/<name>.toml. */
+  /**
+   * ADR 0046 §8: Group into slot: instance `hit` made a slot holding what
+   * it is, with the same names (the plan does not change); at the top
+   * level its controls of the main panel move into the slot's part. One
+   * undo entry gives every file back.
+   */
+  groupSlot(hit) {
+    if (hit?.kind !== 'instance' || hit.node.kind !== 'instance' || hit.node.slot) return Promise.resolve(false);
+    return this.write(0, hit.level, [{ op: 'slot.group', instance: hit.node.name }]);
+  }
+
   makeInterface(hit) {
     if (!this.editing || hit?.kind !== 'instance') return;
     const instance = (this.levelGraph(hit.level)?.instances ?? []).find((i) => i.name === hit.node.name);

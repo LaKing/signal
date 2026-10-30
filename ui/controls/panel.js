@@ -12,7 +12,7 @@
 import { connectFromPage, getDefaultConnection, setDefaultConnection } from '../signal-ui.js';
 import { BindingCheck, defaultPanel, formatDiagnostic, panelFile } from '../lib/panel.js';
 import { unsavedLine } from '../lib/unsaved.js';
-import { EDITOR_CSS, PanelEditor, showWritten } from './panel-editor.js';
+import { EDITOR_CSS, PanelEditor, SharedHistory, showWritten } from './panel-editor.js';
 
 /** The generated panel's grid of cards (`generatedSections`), also the Add module browser's panel preview. */
 export const GENERATED_CSS = `
@@ -24,7 +24,12 @@ export const GENERATED_CSS = `
 .generated h2 small { font-weight: 400; letter-spacing: 0; text-transform: none; margin-left: .5em; }
 .generated .row { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; align-items: flex-end; }
 .generated .signal-group { display: flex; flex: none; flex-wrap: nowrap; gap: .5rem; align-items: flex-end; }
-.generated signal-scope { flex: 1 1 20rem; min-width: 16rem; }`;
+.generated signal-scope { flex: 1 1 20rem; min-width: 16rem; }
+.generated signal-slot .signal-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(var(--signal-card-min, 16rem), 100%), 1fr)); gap: .75rem; margin-top: .6rem; }
+.generated signal-slot .signal-card { min-width: 0; padding: .75rem 1rem; display: flex; flex-direction: column; gap: .6rem; border-radius: 10px; border: 1px solid var(--signal-accent, #4fc3f7); }
+.generated signal-slot .signal-card > h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--signal-muted, #8a93a3); }
+.generated signal-slot .row { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; align-items: flex-end; }
+.generated signal-slot .signal-group { display: flex; flex: none; gap: .5rem; align-items: flex-end; }`;
 
 const CSS = `
 :host { display: block; color: var(--signal-fg, #d6dbe4); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
@@ -55,9 +60,12 @@ ${GENERATED_CSS}
 ${EDITOR_CSS}
 `;
 
-/** The controls of `root` in document order (the check's indexes). */
-function controlsOf(root) {
-  return [...root.querySelectorAll('*')].filter((e) => e.localName.startsWith('signal-') && e.localName !== 'signal-panel');
+/**
+ * The controls of `root` in document order (the check's indexes): a slot's
+ * part, drawn inside its `<signal-slot>`, is a file of its own (ADR 0046).
+ */
+export function controlsOf(root) {
+  return [...root.querySelectorAll('*')].filter((e) => e.localName.startsWith('signal-') && e.localName !== 'signal-panel' && !e.parentElement?.closest('signal-slot'));
 }
 
 export class SignalPanel extends HTMLElement {
@@ -147,6 +155,8 @@ export class SignalPanel extends HTMLElement {
     const edit = this.$('.edit');
     if (!on) {
       this.editor.leave();
+      // ADR 0046 §5: the open slot cards' parts with it.
+      for (const slot of this.querySelectorAll?.('signal-slot') ?? []) slot.editPart?.(false);
       edit.setAttribute('aria-checked', 'false');
       return;
     }
@@ -167,6 +177,9 @@ export class SignalPanel extends HTMLElement {
       return;
     }
     edit.setAttribute('aria-checked', 'true');
+    // ADR 0046 §5: Edit layout in an open slot card edits its part, one undo history with the host's.
+    this.editor.shared = new SharedHistory(this.editor);
+    for (const slot of this.querySelectorAll?.('signal-slot') ?? []) slot.editPart?.(true, this.editor.shared);
   }
 
   /** The switch is usable once there is a plan to check writes against. */

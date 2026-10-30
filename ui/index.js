@@ -82,3 +82,4 @@ import './app/lib/keys-editor.test.js';
 import './controls/keyboard.test.js';
 import './lib/schematic-controls.test.js';
 import './lib/parts.test.js';
+import './lib/schematic-parts.test.js';

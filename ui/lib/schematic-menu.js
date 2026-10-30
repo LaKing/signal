@@ -82,6 +82,8 @@ function partMenu(hit, state) {
     if (slot) items.push(...slotItems(slot, own, notComposite), SEPARATOR);
     if (composite && state.open) items.push(unless({ id: 'add', label: 'Add module here…' }, inside ?? (state.addable ? null : 'Nothing can be added here')));
     if (composite && state.open) items.push(unless({ id: 'add-slot', label: 'Add slot here…' }, inside ?? (state.addable ? null : 'Nothing can be added here')));
+    // ADR 0046 §8: an instance made a slot holding what it is, its panel controls moved into the slot's part.
+    if (!slot) items.push(unless({ id: 'group-slot', label: 'Group into slot', title: 'Make it a slot holding what it is, with the same names (the plan does not change); its panel controls move into the slot’s part, ui/parts/<name>.html' }, own));
     items.push(unless({ id: 'make-interface', label: 'Make interface from this instance…', title: 'Write its ports and parameters as interfaces/<name>.toml, a template slots may start from' }, own));
     items.push(unless({ id: 'delete', label: slot ? 'Delete slot' : 'Delete instance' }, own));
     return items;

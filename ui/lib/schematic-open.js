@@ -169,10 +169,13 @@ const openedOf = new WeakMap();
  * instance, `moved` the boxes moved (name → `{dx, dy}`). `layout` is not
  * changed.
  */
-export function openedLayout(layout, name, bounds) {
-  let byName = openedOf.get(layout);
+export function openedLayout(source, name, bounds) {
+  let byName = openedOf.get(source);
   const cached = byName?.get(name);
   if (cached?.bounds === bounds) return cached.opened;
+  // ADR 0046 §6: a slot's part's controls inside its closed box are drawn in its frame when it is open.
+  const inside = new Set(source.nodes.filter((n) => n.kind === 'control' && n.inside && n.host === name).map((n) => n.id));
+  const layout = inside.size ? { ...source, nodes: source.nodes.filter((n) => !inside.has(n.id)), wires: source.wires.filter((w) => !inside.has(w.from.node) && !inside.has(w.to.node)) } : source;
   const node = layout.nodes.find((n) => n.kind === 'instance' && n.name === name);
   const grown = node ? grownNode(node, bounds) : null;
   let opened = layout;
@@ -249,7 +252,7 @@ export function openedLayout(layout, name, bounds) {
     const named = new Map(layout.nodes.filter((n) => n.kind === 'instance').map((n) => [n.id, n.name]));
     opened = { ...layout, nodes, wires, bottom, opened: name, moved: new Map([...shifts].filter(([id]) => named.has(id)).map(([id, m]) => [named.get(id), m])), avoid };
   }
-  if (!byName) openedOf.set(layout, (byName = new Map()));
+  if (!byName) openedOf.set(source, (byName = new Map()));
   byName.set(name, { bounds, opened });
   return opened;
 }

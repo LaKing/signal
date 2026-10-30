@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EMPTY_PANEL, HELD_CSS, HELD_MARK, appChannel, applyCards, arrangement, cardClick, cardIds, cardMenu, isCardId, menuMessage, moved, slug } from './cards.js';
+import { EMPTY_PANEL, HELD_CSS, HELD_MARK, appChannel, applyCards, arrangement, cardClick, cardIds, cardMenu, cardsOf, isCardId, menuMessage, moved, slug } from './cards.js';
 import { contextItems } from './context.js';
 
 // ADR 0032: a card's id is its `id`, else its heading's slug, made unique.
@@ -104,7 +104,7 @@ function fakeCard(id, title) {
 
 test('cards are shown and ordered with CSS only', () => {
   const cards = [fakeCard('', 'kick'), fakeCard('', 'output'), fakeCard('scope', 'scope')];
-  const doc = { querySelectorAll: (q) => (q === '.signal-card' ? cards : []) };
+  const doc = { querySelectorAll: (q) => (q.startsWith('.signal-card') ? cards : []) };
   const [, placed] = applyCards(doc, { view: 'panel', cards: ['scope', 'kick'] });
   assert.deepEqual(placed.map((p) => p.shown), [true, false, true]);
   assert.deepEqual(cards.map((c) => c.style.display), ['', 'none', ''], 'a card not held here is not drawn at all');
@@ -117,7 +117,7 @@ test('cards are shown and ordered with CSS only', () => {
 // card keeps only its place, wholly hidden; its placeholder is drawn over it.
 test('a card held elsewhere is wholly hidden in the main window, its place kept for the placeholder', () => {
   const cards = [fakeCard('', 'kick'), fakeCard('', 'MONO SYNTH'), fakeCard('scope', 'scope')];
-  const doc = { querySelectorAll: (q) => (q === '.signal-card' ? cards : []) };
+  const doc = { querySelectorAll: (q) => (q.startsWith('.signal-card') ? cards : []) };
   applyCards(doc, { view: 'main', held: [{ card: 'mono-synth', where: 'Panel window 1 (screen 1)' }] });
   assert.deepEqual(cards.map((c) => c.style.display), ['', '', ''], 'its place stays');
   assert.deepEqual(cards[1].style.get('visibility'), ['hidden', 'important']);
@@ -142,4 +142,19 @@ test('the app channel is wry\'s window.ipc, absent in a browser', () => {
   const post = appChannel({ ipc: { postMessage: (text) => sent.push(text) } });
   post({ type: 'card.move', card: 'kick', to: 0 });
   assert.deepEqual(sent, ['{"type":"card.move","card":"kick","to":0}']);
+});
+
+// ADR 0046 §5: an open slot card is a card titled by its slot, laid out by
+// its own box; its part's cards are cards of their own, `<slot>:<id>`.
+test("an open slot card and its part's cards get their own ids", () => {
+  const slot = { localName: 'signal-slot', id: '', children: [], getAttribute: (a) => (a === 'bind' ? '/synth' : null), parentElement: { closest: () => null }, box: { style: {} } };
+  slot.cardBox = () => slot.box;
+  const inPart = (card) => ({ ...card, parentElement: { closest: (q) => (q === 'signal-slot' ? slot : null) } });
+  const elements = [fakeCard('', 'kick'), slot, inPart(fakeCard('', 'MONO SYNTH')), inPart(fakeCard('', 'MONO SYNTH')), fakeCard('', 'synth')];
+  const doc = { querySelectorAll: (q) => (q.includes('signal-slot') ? elements : []) };
+  const cards = cardsOf(doc);
+  assert.deepEqual(cards.map((c) => c.id), ['kick', 'synth', 'synth:mono-synth', 'synth:mono-synth-2', 'synth-2']);
+  assert.equal(cards[1].element, slot.box, 'laid out by its own box');
+  assert.equal(cards[1].title, 'synth');
+  assert.ok(cards.every((c) => isCardId(c.id)));
 });

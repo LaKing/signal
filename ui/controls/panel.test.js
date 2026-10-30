@@ -98,3 +98,43 @@ test('Edit layout is usable once described with a plan', () => {
   panel.described(description(0, 0.5));
   assert.equal(edit.getAttribute('aria-disabled'), 'false');
 });
+
+// ADR 0046 §5: the host's binding check counts the host panel's controls
+// only (a slot's part, drawn inside its <signal-slot>, is a file of its
+// own); one undo history across the host's and the parts' editors; a
+// part's events are its own editor's.
+test("the host's controls leave out a part's; one history across the files; a part's events are its own", async () => {
+  const { controlsOf } = await import('./panel.js');
+  const { SharedHistory, inPart } = await import('./panel-editor.js');
+  const slot = { nodeType: 1, localName: 'signal-slot', parentElement: { closest: () => null } };
+  const element = (name, inSlot) => ({ nodeType: 1, localName: name, parentElement: { closest: (q) => (q === 'signal-slot' && inSlot ? slot : null) } });
+  const knob = element('signal-knob', false);
+  const partKnob = element('signal-knob', true);
+  const root = { querySelectorAll: () => [element('div', false), knob, slot, partKnob, element('signal-panel', false)] };
+  assert.deepEqual(controlsOf(root), [knob, slot]);
+
+  const steps = [];
+  const editor = (name) => ({ name, editing: true, stepOwn: (d) => steps.push(`${name} ${d}`) });
+  const host = editor('host');
+  const part = editor('part');
+  const shared = new SharedHistory(host);
+  shared.step(-1);
+  assert.deepEqual(steps, ['host -1'], 'nothing written yet: the host’s own history');
+  shared.wrote(host);
+  shared.wrote(part);
+  shared.step(-1);
+  shared.step(-1);
+  shared.step(1);
+  assert.deepEqual(steps.slice(1), ['part -1', 'host -1', 'host 1'], 'the last written first, redone in turn');
+  shared.wrote(part);
+  const before = steps.length;
+  shared.step(1);
+  assert.equal(steps.length, before, 'a new write drops the redo');
+
+  const panel = { nodeType: 1 };
+  const tools = { nodeType: 1, dataset: { partTools: '' }, localName: 'div', parentElement: null };
+  assert.equal(inPart({ composedPath: () => [partKnob, slot, panel] }, panel), true);
+  assert.equal(inPart({ composedPath: () => [tools, slot, panel] }, panel), true);
+  assert.equal(inPart({ composedPath: () => [knob, panel] }, panel), false);
+  assert.equal(inPart({ composedPath: () => [slot, panel] }, panel), false, 'the slot card itself is the host’s');
+});

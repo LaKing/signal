@@ -12,7 +12,7 @@
 import { insideOf, slotLabel, slotOf } from './slot.js';
 import { wireGeometry } from './schematic-wire.js';
 import { exportFacts, orderedPins, portGroups } from './schematic-groups.js';
-import { controlAnchor, controlEdges, controlNodes, controlPads } from './schematic-controls.js';
+import { controlAnchor, controlEdges, controlNodes, controlPads, partNodes } from './schematic-controls.js';
 
 /**
  * Where a slot box's "+" pin of `side` (`in`, `out`) is: the row after its
@@ -334,8 +334,9 @@ export function layout(level, positions = {}, { factsOf = null, controls = null 
   const back = backEdges(nodes, edges);
   const layer = layers(nodes, edges, back);
   const rows = order(nodes, edges, layer);
-  // A panel's controls (ui/lib/schematic-controls.js): placed beside their hosts, which keep room for them.
-  const panel = controls?.length ? controlNodes(controls, byId, pinOffset) : [];
+  // A panel's controls (ui/lib/schematic-controls.js): placed beside their hosts, which keep room for them;
+  // ADR 0046 §6: a slot's part's controls on its interface inside its box (grown for them) or its frame.
+  const panel = controls?.length ? [...partNodes(controls, byId, pinOffset), ...controlNodes(controls.filter((c) => !c.part), byId, pinOffset)] : [];
   const pads = controlPads(panel, byId);
   let x = 0;
   for (const row of rows) {
@@ -400,9 +401,14 @@ export function layout(level, positions = {}, { factsOf = null, controls = null 
   const bottom = levelBottom(nodes);
   let lane = 0;
   const all = panel.length ? controlEdges(edges, panel) : edges;
+  // A binding wire inside a slot's box (ADR 0046 §6) runs from the box's own edge: an input's pin on its left, an output's on its right.
+  const edgePin = (node, port, out) => {
+    const p = (out ? node.outs : node.ins).find((q) => q.name === port);
+    return { x: out ? node.x + node.w : node.x, y: p?.y ?? node.y + HEADER };
+  };
   const wires = all.map((e, i) => {
-    const a = anchor(byId.get(e.from.node), e.from.port, true);
-    const b = anchor(byId.get(e.to.node), e.to.port, false);
+    const a = e.inside === 'in' ? edgePin(byId.get(e.from.node), e.from.port, false) : anchor(byId.get(e.from.node), e.from.port, true);
+    const b = e.inside === 'out' ? edgePin(byId.get(e.to.node), e.to.port, true) : anchor(byId.get(e.to.node), e.to.port, false);
     const feedback = back.has(i) || b.x <= a.x;
     if (feedback) lane += 1;
     const under = feedback ? laneY(bottom, lane) : null;

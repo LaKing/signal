@@ -7,10 +7,21 @@
 // part rooted; the panel editor writes it as written; the schematic draws
 // its controls inside the slot's box (ui/lib/schematic-controls.js). No DOM.
 
+import { insideOf, levelData, slotOf } from './slot.js';
+
 /** The attributes that name addresses, rooted with the part. */
 export const ADDRESS_ATTRIBUTES = Object.freeze(['bind', 'position-bind', 'step-bind', 'audition']);
 
 const NAME = /^[a-z][a-z0-9_]*$/;
+
+/**
+ * Whether a slot card (`<signal-slot>`) under `parent` is the open slot
+ * card (ADR 0046 §5): a card of the host's grid (`div.signal-cards`); else
+ * (in a row) the compact card.
+ */
+export function opensAsCard(parent) {
+  return Boolean(parent?.classList?.contains('signal-cards'));
+}
 
 /** The part's file of top-level slot `name`, relative to `ui/`. */
 export function partFile(name) {
@@ -111,6 +122,36 @@ export function emptyPartTree(card) {
   if (knobs.length) children.push({ id: id(), kind: 'row', classes: [], children: knobs });
   const grid = { id: id(), kind: 'cards', classes: [], children: [{ id: id(), kind: 'card', classes: [], children }] };
   return { kind: 'panel', next, children: [grid] };
+}
+
+/**
+ * The panel controls the schematic draws at `level` of `graph` (ADR 0046
+ * §6): at the top level the main panel's (`main`, `panelControls`'), then
+ * at any level each slot box's part's (its controls on the interface go
+ * inside the box); at a slot's inside, opened (its own composite or its
+ * read-only preview, `graph.insides`), the part's controls on the interface
+ * as the frame's (`frame`) and those on inner addresses beside their inner
+ * instances, their binds as written (`/vcf.cutoff`, `partOf` the slot).
+ * Null when there are none.
+ */
+export function levelControls(graph, level, main = []) {
+  const found = level === '' ? [...(main ?? [])] : [];
+  const levels = [graph?.top, ...Object.values(graph?.composites ?? {})];
+  for (const instance of levelData(graph, level)?.instances ?? []) {
+    const part = slotOf(instance)?.part;
+    if (part) found.push(...partControls(part, instance.name));
+  }
+  for (const data of levels) {
+    for (const instance of data?.instances ?? []) {
+      const slot = slotOf(instance);
+      if (!slot?.part || insideOf(slot)?.level !== level) continue;
+      for (const control of partControls(slot.part, instance.name)) {
+        if (control.relative.every((r) => r.startsWith('.'))) found.push({ ...control, frame: true });
+        else if (control.relative.every((r) => r.startsWith('/'))) found.push({ ...control, part: null, partOf: instance.name, binds: control.relative });
+      }
+    }
+  }
+  return found.length ? found : null;
 }
 
 /**

@@ -9,11 +9,26 @@
 // module name or a project path dropped on it loads it. What it shows comes
 // from `describe` (`content.slots`, `controls`); the rest is
 // ui/lib/slot.js's.
+//
+// ADR 0046 §5: the slot's own part (`ui/parts/<slot>.html`, read with
+// `panel.read`) is drawn under it, in its light DOM, its binds rooted at the
+// slot (ui/lib/parts.js), so the page's own CSS styles its cards. Placed as
+// a card (a direct child of `div.signal-cards`) it is the **open slot
+// card**: the header is a card of the host's grid and the part's cards are
+// cards of that grid too, framed in the accent colour; placed in a row it is
+// the compact card, its part's cards beneath it. Either folds (▾ / ▸; view
+// state, open by default, not written). With a part, the header shows no
+// interface knobs (the part has its controls); without one, as before. In
+// the host's Edit layout the part is edited here (a panel editor of its
+// own, the history shared with the host's).
 
 import { browserEntries } from '../lib/module-browser.js';
+import { BindingCheck, formatDiagnostic } from '../lib/panel.js';
+import { emptyPartTree, opensAsCard, partFile, partPalette, rootAddress, rootedAttribute } from '../lib/parts.js';
 import { cardTitle, contentMatch, dropLoad, loadOps, loadable, projectEntries, slotCard, unloadOp } from '../lib/slot.js';
 import { SignalElement } from './base.js';
 import { BROWSER_CSS, ModuleBrowser } from './module-browser.js';
+import { EDITOR_CSS, PanelEditor, showWritten } from './panel-editor.js';
 import './knob.js';
 
 /** At most this many ports show a level at once (each takes one of the run's scope slots). */
@@ -27,6 +42,9 @@ export class SignalSlot extends SignalElement {
   static observedAttributes = ['bind', 'skin'];
   static css = `
 :host { display: block; min-width: 0; }
+/* ADR 0046 §5: the open slot card: its header and its part's cards are cards of the host's grid. */
+:host([data-card]) { display: contents; }
+:host([data-card]) .card { box-sizing: border-box; min-width: 0; padding: .75rem 1rem; border-radius: 10px; background: var(--signal-panel, #1f232b); border: 1px solid var(--signal-accent, #4fc3f7); }
 .card { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .head { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; min-width: 0; }
 .title { flex: 1 1 12rem; min-width: 0; margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; color: var(--signal-muted, #8a93a3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -34,6 +52,7 @@ export class SignalSlot extends SignalElement {
 button { font: inherit; color: var(--signal-fg, #d6dbe4); background: var(--signal-track, #2a2f38); border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 3px; padding: 1px 6px; cursor: pointer; }
 button:disabled { opacity: 0.4; cursor: default; }
 button[aria-pressed="true"] { border-color: var(--signal-accent, #4fc3f7); color: var(--signal-accent, #4fc3f7); }
+.fold { flex: none; width: 2.2em; }
 .state { min-height: 1.3em; color: var(--signal-effective, #ffb74d); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ports { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr)); gap: 2px 8px; }
 .ports li { display: flex; gap: 6px; align-items: center; min-width: 0; white-space: nowrap; }
@@ -47,7 +66,12 @@ button[aria-pressed="true"] { border-color: var(--signal-accent, #4fc3f7); color
 .level > i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--signal-meter-rms, #3ecf8e); }
 .params { display: flex; flex-wrap: wrap; gap: 8px; }
 .empty-note, .note { color: var(--signal-muted, #8a93a3); }
+.problems { margin: 0; padding: 0 0 0 1.2em; font: 11px/1.5 ui-monospace, Menlo, monospace; }
+.problems .error { color: var(--signal-clip, #ff5252); }
+.problems .warning { color: var(--signal-effective, #ffb74d); }
+.card > .generated { display: none !important; }
 :host(.drop) .card { outline: 1px dashed var(--signal-focus, #5aa9ff); outline-offset: 4px; }
+${EDITOR_CSS}
 ${BROWSER_CSS}`;
 
   constructor() {
@@ -57,16 +81,28 @@ ${BROWSER_CSS}`;
     this.levels = false;
     this.levelStops = [];
     this.busy = null;
+    /** ADR 0046: the part as last read (`{exists, html, error}`), and whether it is folded. */
+    this.part = null;
+    this.folded = false;
+    this.partEditor = null;
+    this.partCheck = null;
+    this.marked = [];
+    /** For the panel editor (ui/controls/panel-editor.js): this element edits a part. */
+    this.isPart = true;
   }
 
   template() {
     return `<div class="card" part="card">
-  <div class="head"><h3 class="title"></h3><span class="buttons"><button type="button" class="load"></button><button type="button" class="unload">Unload</button><button type="button" class="levels" aria-pressed="false" title="Show the ports' levels (each takes one of the run's scope slots)">Levels</button></span></div>
+  <div class="head"><button type="button" class="fold" aria-expanded="true" title="Fold the slot's part">▾</button><h3 class="title"></h3><span class="buttons"><button type="button" class="load"></button><button type="button" class="unload">Unload</button><button type="button" class="levels" aria-pressed="false" title="Show the ports' levels (each takes one of the run's scope slots)">Levels</button></span></div>
   <div class="state" role="status"></div>
   <ul class="ports"></ul>
   <div class="params"></div>
   <div class="note"></div>
-</div>`;
+  <ol class="problems" hidden></ol>
+  <div class="tools" data-part-tools hidden></div>
+  <div class="message" hidden></div>
+  <div class="generated"></div>
+</div><slot></slot>`;
   }
 
   /** The slot's name, from `bind` (`/deck_a`). */
@@ -74,17 +110,56 @@ ${BROWSER_CSS}`;
     return /^\/([a-z][a-z0-9_]*)$/.exec(this.getAttribute('bind')?.trim() ?? '')?.[1] ?? null;
   }
 
+  /** ADR 0046: the slot's part, relative to the project's `ui/` (what the panel editor reads and writes). */
+  get file() {
+    return this.slotName ? partFile(this.slotName) : null;
+  }
+
+  /** The part's root: the slot's address. */
+  get root() {
+    return `/${this.slotName}`;
+  }
+
+  /** What a part's control attribute shows: its addresses rooted (the panel editor's hook). */
+  attributeValue(name, value) {
+    return rootedAttribute(name, value, this.root);
+  }
+
+  /** A part's address as the plan names it (the panel editor's range lookup). */
+  absoluteAddress(address) {
+    return rootAddress(address, this.root) ?? address;
+  }
+
+  /** The panel editor's palette in a part: the slot's addresses, relative. */
+  paletteEntries(entries) {
+    return partPalette(entries, this.root);
+  }
+
+  /** The tree a part starts from: the interface's parameters as knobs. */
+  emptyTree() {
+    return emptyPartTree(this.card);
+  }
+
+  /** The card box the app orders and hides (ui/app/lib/cards.js): the open slot card's own box. */
+  cardBox() {
+    return this.hasAttribute('data-card') ? this.$('.card') : this;
+  }
+
   setup() {
     this.$('.load').addEventListener('click', () => this.openLoad());
     this.$('.unload').addEventListener('click', () => this.write([unloadOp(this.slotName)], 'Unloading…'));
     this.$('.levels').addEventListener('click', () => this.setLevels(!this.levels));
-    // A module name or a project path dropped on the card loads it.
+    this.$('.fold').addEventListener('click', () => this.setFolded(!this.folded));
+    // A module name or a project path dropped on the card (its header, not its part) loads it.
+    const onCard = (event) => event.composedPath?.().includes(this.$('.card')) ?? true;
     this.addEventListener('dragover', (event) => {
+      if (!onCard(event)) return;
       event.preventDefault();
       this.classList.add('drop');
     });
     this.addEventListener('dragleave', () => this.classList.remove('drop'));
     this.addEventListener('drop', (event) => {
+      if (!onCard(event)) return;
       event.preventDefault();
       this.classList.remove('drop');
       const data = event.dataTransfer;
@@ -105,6 +180,12 @@ ${BROWSER_CSS}`;
     this.shadowRoot.append(this.loader.build(['s:project', 's:library', 's:folders', 's:std']));
   }
 
+  connectedCallback() {
+    super.connectedCallback();
+    // ADR 0046 §5: a card of the host's grid opens as a card; in a row, compact.
+    this.toggleAttribute('data-card', opensAsCard(this.parentElement));
+  }
+
   /** The card's slot as `contentMatch` reads it: its interface, its map. */
   slotShape() {
     const slot = (this.description?.content?.slots ?? []).find((s) => s.slot === `/${this.slotName}`);
@@ -115,15 +196,164 @@ ${BROWSER_CSS}`;
     this.description = description;
     this.card = slotCard(description, this.slotName);
     this.update();
+    if (this.part?.exists && this.partCheck && this.file) this.partCheck.described(description, this.file);
   }
 
   streams(connection) {
-    return [() => this.stopLevels(), ...(this.levels ? [this.startLevels(connection)] : [])];
+    const stops = [() => this.stopLevels(), ...(this.levels ? [this.startLevels(connection)] : [])];
+    // ADR 0046: the part, read now and again whenever it is written.
+    this.partCheck = new BindingCheck({
+      request: (message) => connection.request(message),
+      show: (reply, error) => this.partChecked(reply, error),
+    });
+    if (connection.on) stops.push(connection.on('panel.written', (message) => this.partWritten(message)));
+    if (!this.partEditor?.editing) this.readPart(connection);
+    return stops;
   }
 
   say(text) {
     const state = this.$('.state');
     if (state) state.textContent = text ?? '';
+  }
+
+  // ADR 0046 §5: the part.
+
+  /** Reads the part (`panel.read`) and shows it; none, the slot card as before. */
+  async readPart(connection = this.connection) {
+    const file = this.file;
+    if (!file || !connection?.request) return;
+    let read;
+    try {
+      read = await connection.request({ type: 'panel.read', file });
+    } catch (error) {
+      // No part (`unknown-panel` for a slot the server does not know yet): the card as before.
+      this.part = { exists: false, html: null, error: error?.code === 'unknown-panel' ? null : (error?.message ?? String(error)) };
+      this.showPart();
+      return;
+    }
+    if (file !== this.file) return;
+    this.part = { exists: Boolean(read?.exists), html: read?.html ?? null, error: read?.exists && !read?.editable ? read.reason : null };
+    await this.showPart();
+    if (this.part.exists && this.description) {
+      this.partCheck.checked = undefined;
+      this.partCheck.asking = undefined;
+      this.partCheck.described(this.description, file);
+    }
+  }
+
+  /** Draws the part as last read into the light DOM, rooted. */
+  async showPart() {
+    if (this.partEditor?.editing) return;
+    if (!this.part?.exists || this.part.html === null) {
+      this.replaceChildren();
+    } else {
+      const error = await showWritten(this, this.part.html, (name, value) => this.attributeValue(name, value));
+      if (error) this.part.error = error;
+    }
+    this.showProblems(this.part?.error ? [{ severity: 'error', text: `${this.file}: ${this.part.error}` }] : []);
+    this.shownKey = null;
+    this.update();
+  }
+
+  /** A `panel.written` push: the part another client (or a patch) wrote. */
+  partWritten(message) {
+    if (message?.file !== this.file) return;
+    if (this.partEditor?.editing) {
+      this.partEditor.written(message);
+      return;
+    }
+    this.part = message.html === null || message.html === undefined ? { exists: false, html: null, error: null } : { exists: true, html: message.html, error: null };
+    this.showPart().then(() => this.recheck());
+  }
+
+  /** The part's binding check again (the panel editor asks after a write). */
+  recheck() {
+    if (!this.partCheck || !this.connection?.description || !this.file || !this.part?.exists) return;
+    this.partCheck.checked = undefined;
+    this.partCheck.asking = undefined;
+    this.partCheck.described(this.connection.description, this.file);
+  }
+
+  /** The part's `panel.check`: its problems listed in the card, its controls marked. */
+  partChecked(reply, error) {
+    for (const element of this.marked.splice(0)) {
+      element.style.removeProperty('outline');
+      element.removeAttribute('aria-invalid');
+    }
+    if (error) {
+      this.showProblems([{ severity: 'error', text: `${this.file}: the binding check failed: ${error.message}` }]);
+      return;
+    }
+    const controls = [...this.querySelectorAll('*')].filter((e) => e.localName.startsWith('signal-'));
+    const problems = [];
+    for (const d of reply?.diagnostics ?? []) {
+      const text = formatDiagnostic(d);
+      problems.push({ severity: d.severity, text });
+      const element = d.control === null || d.control === undefined ? null : controls[d.control];
+      if (element) {
+        element.style.outline = `2px solid var(${d.severity === 'error' ? '--signal-clip, #ff5252' : '--signal-effective, #ffb74d'})`;
+        element.title = element.title ? `${element.title}\n${text}` : text;
+        if (d.severity === 'error') element.setAttribute('aria-invalid', 'true');
+        this.marked.push(element);
+      }
+    }
+    this.showProblems(problems);
+  }
+
+  showProblems(problems) {
+    const list = this.$('.problems');
+    if (!list) return;
+    list.replaceChildren(
+      ...problems.map(({ severity, text }) => {
+        const item = document.createElement('li');
+        item.className = severity;
+        item.textContent = text;
+        return item;
+      }),
+    );
+    list.hidden = problems.length === 0;
+  }
+
+  /** Folds the part away or opens it (view state). */
+  setFolded(folded) {
+    this.folded = folded;
+    const fold = this.$('.fold');
+    fold.textContent = folded ? '▸' : '▾';
+    fold.setAttribute('aria-expanded', String(!folded));
+    this.$('slot').hidden = folded;
+  }
+
+  /**
+   * The host's Edit layout entered (`on`) or left: the part edited here,
+   * its history `shared` with the host's (one undo across the files). A
+   * slot whose part cannot be edited says why.
+   */
+  async editPart(on, shared = null) {
+    if (!on) {
+      if (this.partEditor?.editing) {
+        this.partEditor.leave();
+        this.removeAttribute('editing');
+        this.removeAttribute('no-entry');
+        this.readPart();
+      }
+      return;
+    }
+    if (!this.slotName || !this.connection) return;
+    this.setFolded(false);
+    this.partEditor ??= new PanelEditor(this);
+    this.partEditor.shared = shared;
+    let refused;
+    try {
+      refused = await this.partEditor.enter();
+    } catch (error) {
+      refused = error?.message ?? String(error);
+    }
+    if (refused) this.say(`Edit layout of ${this.file}: ${refused}`);
+  }
+
+  /** The panel editor's Escape: the host's Edit layout ends. */
+  setEditing(on) {
+    this.closest?.('signal-panel')?.setEditing?.(on);
   }
 
   update() {
@@ -132,6 +362,8 @@ ${BROWSER_CSS}`;
     const title = this.$('.title');
     const load = this.$('.load');
     const unload = this.$('.unload');
+    const fold = this.$('.fold');
+    if (fold) fold.hidden = !this.part?.exists && !this.partEditor?.editing;
     if (!card) {
       title.textContent = this.slotName ? `${this.slotName.toUpperCase()}: no such slot` : 'no slot bound';
       load.textContent = 'Load…';
@@ -148,7 +380,9 @@ ${BROWSER_CSS}`;
     load.disabled = Boolean(this.busy);
     unload.disabled = card.empty || Boolean(this.busy);
     if (!this.hasAttribute('aria-label')) this.setAttribute('aria-label', `slot ${card.name}`);
-    const key = JSON.stringify(card);
+    // ADR 0046 §5: with a part, its controls are the part's; without, the interface's knobs.
+    const withPart = Boolean(this.part?.exists);
+    const key = JSON.stringify([card, withPart]);
     if (key === this.shownKey) return;
     this.shownKey = key;
     this.$('.ports').replaceChildren(
@@ -174,7 +408,7 @@ ${BROWSER_CSS}`;
     );
     const connection = this.connection;
     this.$('.params').replaceChildren(
-      ...card.parameters.map((p) => {
+      ...(withPart ? [] : card.parameters).map((p) => {
         if (!p.control) {
           const span = document.createElement('span');
           span.className = 'empty-note';

@@ -26,7 +26,11 @@
 // `panel.written` see the panel as written. A card's id is its `id`
 // attribute when it has one, else the slug of its first heading (`kick`,
 // `output`; a second card of the same heading `kick-2`), else `card`
-// (`card-2`, …), in the panel's order.
+// (`card-2`, …), in the panel's order. ADR 0046 §5: an open slot card
+// (`<signal-slot>` among the cards) is a card titled by its slot, and the
+// cards of its part are cards of their own, their ids counted in the part
+// and prefixed with the slot's name (`synth:mono-synth`), as the server
+// names them when Group into slot moves a card (`ui/windows.toml`).
 
 import { ContextMenu, menusClaimed } from '../../controls/context-menu.js';
 import { keepsSystemMenu } from './context.js';
@@ -150,9 +154,13 @@ export function menuMessage(id, card, placed, size) {
 /** A placeholder's height (the held card's place). */
 export const PLACEHOLDER_HEIGHT = '2.25rem';
 
-/** The cards of panel document `doc`: its `.signal-card`s, or a generated panel's groups. */
+/**
+ * The cards of panel document `doc`: its `.signal-card`s and its open slot
+ * cards (ADR 0046 §5, `div.signal-cards > signal-slot`) with their parts'
+ * cards, or a generated panel's groups.
+ */
 export function findCards(doc) {
-  const own = [...doc.querySelectorAll('.signal-card')].filter((c) => !c.parentElement?.closest('.signal-card'));
+  const own = [...doc.querySelectorAll('.signal-card, .signal-cards > signal-slot')].filter((c) => !c.parentElement?.closest('.signal-card'));
   if (own.length) return own;
   return [...doc.querySelectorAll('signal-panel')].flatMap((p) => [...(p.shadowRoot?.querySelectorAll('.generated > section') ?? [])]);
 }
@@ -161,12 +169,42 @@ function heading(card) {
   return [...card.children].find((c) => /^H[1-6]$/.test(c.tagName)) ?? null;
 }
 
-/** `[{ element, id, title }]` of `doc`'s cards. */
+/** The slot a `<signal-slot>` binds (`/synth` → `synth`), or null. */
+function slotName(element) {
+  return /^\/([a-z][a-z0-9_]*)$/.exec(element.getAttribute?.('bind')?.trim() ?? '')?.[1] ?? null;
+}
+
+/** The `<signal-slot>` whose part holds card `element` (ADR 0046), or null for a card of the host's panel. */
+export function slotOfCard(element) {
+  return element.parentElement?.closest?.('signal-slot') ?? null;
+}
+
+/** A card's title: its first heading's text, an open slot card's its slot. */
+function titleOf(element) {
+  if (element.localName === 'signal-slot') return slotName(element) ?? '';
+  return (heading(element)?.textContent ?? '').trim();
+}
+
+/** `[{ element, id, title }]` of `doc`'s cards; a part's ids `<slot>:<id>`. */
 export function cardsOf(doc) {
   const elements = findCards(doc);
-  const titles = elements.map((e) => (heading(e)?.textContent ?? '').trim());
-  const ids = cardIds(elements.map((e, i) => ({ id: e.id, title: titles[i] })));
-  return elements.map((element, i) => ({ element, id: ids[i], title: titles[i] || ids[i] }));
+  const titles = elements.map(titleOf);
+  const groups = new Map();
+  elements.forEach((element, i) => {
+    const slot = slotOfCard(element);
+    if (!groups.has(slot)) groups.set(slot, []);
+    groups.get(slot).push(i);
+  });
+  const ids = [];
+  for (const [slot, indexes] of groups) {
+    const own = cardIds(indexes.map((i) => ({ id: elements[i].id, title: titles[i] })));
+    const prefix = slot ? `${slotName(slot)}:` : '';
+    indexes.forEach((i, n) => {
+      ids[i] = `${prefix}${own[n]}`;
+    });
+  }
+  // An open slot card is laid out by its own box (ADR 0046 §5: its element takes no box of its own).
+  return elements.map((element, i) => ({ element: element.cardBox?.() ?? element, id: ids[i], title: titles[i] || ids[i] }));
 }
 
 /** The attribute of a card another window holds (HELD_CSS hides all of it). */

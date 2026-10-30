@@ -18,7 +18,7 @@ const PIN = { kind: 'port', path: '', level: '', address: '/lfo.out', node: PRIM
 
 test('an instance: Inspect, Open, Enter, Copy address, Delete; a primitive has no inside', () => {
   const items = schematicMenu(PRIMITIVE, { editing: true });
-  assert.deepEqual(ids(items), ['inspect', 'trace', 'open', 'enter', 'separator', 'copy-address', 'separator', 'make-interface', 'delete']);
+  assert.deepEqual(ids(items), ['inspect', 'trace', 'open', 'enter', 'separator', 'copy-address', 'separator', 'group-slot', 'make-interface', 'delete']);
   assert.equal(item(items, 'open').disabled, true);
   assert.equal(item(items, 'open').title, 'A primitive has no inside');
   assert.equal(item(items, 'enter').disabled, true);
@@ -32,7 +32,7 @@ test('an instance: Inspect, Open, Enter, Copy address, Delete; a primitive has n
 
 test('an open composite: Close (always: the zoom holds nothing open, 2026-10-22) and Add module here', () => {
   const open = schematicMenu(COMPOSITE, { editing: true, open: true, addable: true });
-  assert.deepEqual(ids(open), ['inspect', 'trace', 'close', 'enter', 'separator', 'copy-address', 'separator', 'add', 'add-slot', 'make-interface', 'delete']);
+  assert.deepEqual(ids(open), ['inspect', 'trace', 'close', 'enter', 'separator', 'copy-address', 'separator', 'add', 'add-slot', 'group-slot', 'make-interface', 'delete']);
   assert.equal(item(open, 'close').disabled, false);
   assert.equal(item(open, 'add').disabled, false);
   const viewing = schematicMenu(COMPOSITE, { editing: false, open: true, addable: true });

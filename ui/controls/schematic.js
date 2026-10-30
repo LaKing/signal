@@ -94,6 +94,7 @@ import { bundleClick, bundleText, bundleWires, countPlaces, countsShown, fanOf, 
 import { collapsedAt, exportFacts, groupAnchors, labelDetail, notesAt, portGroups } from '../lib/schematic-groups.js';
 import { CONTROL_HEAD, TYPE_NAMES, controlFraction, controlHit, controlValue, controlValueText, fitText, glyphParts, panelControls } from '../lib/schematic-controls.js';
 import { ControlProperties } from './schematic-control-node.js';
+import { levelControls } from '../lib/parts.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 /** A press that moves less than this (px) is a click. */
@@ -741,7 +742,8 @@ export class SignalSchematic extends HTMLElement {
       if (!source) return null;
       const stored = { ...(this.graph.layout?.positions?.[level] ?? {}), ...Object.fromEntries(this.moved.get(level) ?? []) };
       // M2.13-2: a composite's box lays its pins out in groups (ui/lib/schematic-groups.js).
-      this.layouts.set(level, layout(source, stored, { factsOf: (module) => exportFacts(module === '' ? null : levelData(this.graph, module)), controls: level === '' ? this.panelControls : null }));
+      // ADR 0046 §6: the main panel's controls at the top level, each slot's part's in its box or its frame.
+      this.layouts.set(level, layout(source, stored, { factsOf: (module) => exportFacts(module === '' ? null : levelData(this.graph, module)), controls: levelControls(this.graph, level, this.panelControls) }));
     }
     return this.layouts.get(level);
   }
@@ -2129,6 +2131,7 @@ export class SignalSchematic extends HTMLElement {
     else if (id === 'slot-inside') this.enter(hit);
     else if (id === 'slot-interface-inside') this.editor.openInsideInterface();
     else if (id === 'make-interface') this.editor.makeInterface(hit);
+    else if (id === 'group-slot') this.editor.groupSlot(hit);
     else if (id === 'port-edit') this.editor.openInterface(hit, { port: hit.port.name });
     else if (id === 'port-remove' || id === 'port-remove-wires') this.editor.removePort(hit, id === 'port-remove-wires');
     else if (id === 'fit') this.fitTop();

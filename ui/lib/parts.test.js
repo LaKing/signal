@@ -9,7 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parseContent, serialize } from './panel-tree.js';
-import { emptyPartTree, partControls, partFile, partPalette, partSlot, relativeAddress, rootAddress, rootTree, rootedAttribute } from './parts.js';
+import { emptyPartTree, opensAsCard, partControls, partFile, partPalette, partSlot, relativeAddress, rootAddress, rootTree, rootedAttribute } from './parts.js';
 
 const ui = new URL('../', import.meta.url);
 const read = (path) => readFileSync(new URL(path, ui), 'utf8');
@@ -96,4 +96,12 @@ test("the server's canonical panel text is the page's", () => {
   const card = '\n  <div class="signal-cards">\n    <signal-slot bind="/synth"></signal-slot>\n  </div>\n';
   assert.equal(serialize(parseContent(card, whitelist).tree, whitelist), card);
   assert.match(parseContent('<div class="signal-cards"><signal-knob bind="/a.b"></signal-knob></div>', whitelist).error, /not allowed/);
+});
+
+test('a slot card among the cards opens as a card; in a row it is compact', () => {
+  const classes = (...names) => ({ classList: { contains: (c) => names.includes(c) } });
+  assert.equal(opensAsCard(classes('signal-cards')), true);
+  assert.equal(opensAsCard(classes('row')), false);
+  assert.equal(opensAsCard(classes('signal-group')), false);
+  assert.equal(opensAsCard(null), false);
 });
