@@ -44,6 +44,10 @@ export const LEGEND = [
   { swatch: 'pin parameter', label: 'parameter left to its value' },
 ];
 
+/** The legend's help on opening and selecting (2026-10-30: the marquee by ⌘-drag too, as ⌘-click). */
+export const SELECT_HELP =
+  'A click on a composite opens it in place, the × in its corner (or Escape) closes it. Shift- or ⌘-click (Ctrl-click off a Mac) adds to the selection; Shift- or ⌘-drag (Ctrl-drag off a Mac) on the background selects the boxes and panel controls inside; ⌘A the level shown, Escape lets go. A slot with a part shows it as its face: its controls work as on the panel.';
+
 /** The context menu's items `ids` for `hit`, in `menu`'s state, in that order, as the sidebar's buttons. */
 function actionsOf(hit, state, ids) {
   const items = schematicMenu(hit, state);

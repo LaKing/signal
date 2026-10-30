@@ -679,12 +679,14 @@ export class SchematicEditor {
   /**
    * ADR 0046 §8: Group into slot: instance `hit` made a slot holding what
    * it is, with the same names (the plan does not change); at the top
-   * level its controls of the main panel move into the slot's part. One
+   * level its controls of the main panel move into the slot's part (those
+   * selected with it, `controls`, when some are). One
    * undo entry gives every file back.
    */
-  groupSlot(hit) {
+  groupSlot(hit, controls = null) {
     if (hit?.kind !== 'instance' || hit.node.kind !== 'instance' || hit.node.slot) return Promise.resolve(false);
-    return this.write(0, hit.level, [{ op: 'slot.group', instance: hit.node.name }]);
+    // `controls`: the main panel's controls selected with it (`groupControls`), by `panel.check`'s index; none, every one of its own.
+    return this.write(0, hit.level, [{ op: 'slot.group', instance: hit.node.name, ...(controls?.length ? { controls } : {}) }]);
   }
 
   makeInterface(hit) {

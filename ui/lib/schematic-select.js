@@ -26,6 +26,7 @@ export function messageBytes(message) {
 import { instanceHit, wireHit } from './schematic-hit.js';
 import { patchMessage, removeConnection, removeInstance, written } from './schematic-patch.js';
 import { screenRect } from './schematic-view.js';
+import { controlHit } from './schematic-controls.js';
 import { exportOp } from './slot.js';
 
 /** What tells two hits of the same part apart from others: its kind and address (a wire: its level's path and written ends). */
@@ -86,6 +87,7 @@ export function inside(drawn, rect) {
   const x1 = Math.max(rect.x, rect.x + rect.w);
   const y1 = Math.max(rect.y, rect.y + rect.h);
   const boxes = [];
+  const controls = [];
   const wires = [];
   for (const entry of drawn?.levels ?? []) {
     const taken = new Set();
@@ -98,11 +100,19 @@ export function inside(drawn, rect) {
       boxes.push(hit);
       taken.add(node.id);
     }
+    // A panel's control (its node, ui/lib/schematic-controls.js) wholly inside is taken too (the owner's, 2026-10-30).
+    for (const node of entry.nodes) {
+      if (node.kind !== 'control') continue;
+      const r = screenRect(entry.transform, node);
+      if (r.x < x0 || r.y < y0 || r.x + r.w > x1 || r.y + r.h > y1) continue;
+      if (boxes.some((b) => b.kind === 'instance' && under(`${entry.path}/${node.host}`, b.address))) continue;
+      controls.push(controlHit(entry, node));
+    }
     for (const wire of entry.layout.wires) {
       if (wire.kind === 'connection' && taken.has(wire.from.node) && taken.has((wire.target ?? wire.to).node)) wires.push(wireHit(entry, wire));
     }
   }
-  return [...boxes, ...wires];
+  return [...boxes, ...controls, ...wires];
 }
 
 /** Every instance and connection of level `entry` (a scene level, `{path, level, layout}`): ⌘A on the level shown. */
@@ -285,9 +295,43 @@ export function moveMessages(level, moves, limit = MESSAGE_LIMIT) {
  */
 export function dragGroup(selected, hit) {
   if (hit?.kind !== 'instance') return [];
-  if (!has(selected, hit)) return [hit.node.name];
-  const others = selected.filter((s) => s.kind === 'instance' && s.path === hit.path && s.node.name !== hit.node.name).map((s) => s.node.name);
+  // A selected panel control stands for its host box (it rides beside it): the box is the group's.
+  const hosts = selected.filter((s) => s.kind === 'control' && s.path === hit.path && s.node.host && !s.node.host.startsWith('@'));
+  const member = has(selected, hit) || hosts.some((s) => s.node.host === hit.node.name);
+  if (!member) return [hit.node.name];
+  const others = [
+    ...selected.filter((s) => s.kind === 'instance' && s.path === hit.path).map((s) => s.node.name),
+    ...hosts.map((s) => s.node.host),
+  ].filter((name) => name !== hit.node.name);
   return [hit.node.name, ...new Set(others)];
+}
+
+/**
+ * Whether a press on `hit` with `event`'s modifiers starts the marquee: a
+ * Shift- or ⌘-drag (Ctrl-drag off a Mac, `mac` false) on the background,
+ * as Shift- and ⌘-click add to the selection (2026-10-30). On a Mac
+ * Ctrl-press is the right click, never a marquee.
+ */
+export function marqueeStarts(hit, event, mac) {
+  if (hit?.kind !== 'background') return false;
+  return Boolean(event?.shiftKey || event?.metaKey || (!mac && event?.ctrlKey));
+}
+
+/**
+ * What Group into slot moves of `selected` for instance hit `hit` (ADR 0046
+ * §8, `slot.group`'s `controls`): with panel controls selected beside the
+ * instance (a marquee or ⌘-clicks over the box and some of its controls),
+ * those of them that bind it, as `panel.check` counts the main panel's
+ * controls (`check`, ui/lib/schematic-controls.js); with none selected,
+ * null (every control of the instance moves, the op's default).
+ */
+export function groupControls(selected, hit) {
+  if (hit?.kind !== 'instance') return null;
+  const picked = (selected ?? []).filter((s) => s.kind === 'control' && s.path === hit.path && !s.node.control?.part && Number.isInteger(s.node.control?.check));
+  if (!picked.length) return null;
+  const mine = picked.filter((s) => s.node.host === hit.node.name).map((s) => s.node.control.check);
+  // Controls of other boxes only: they say nothing of this one's.
+  return mine.length ? [...new Set(mine)].sort((a, b) => a - b) : null;
 }
 
 /**

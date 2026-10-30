@@ -4,8 +4,8 @@
 // a port inside its content. Rooted, they are the ordinary absolute
 // addresses (`/synth.cutoff`, `/synth/vcf.cutoff`) every control, stream
 // and check takes. The open slot card (ui/controls/slot.js) renders its
-// part rooted; the panel editor writes it as written; the schematic draws
-// its controls inside the slot's box (ui/lib/schematic-controls.js). No DOM.
+// part rooted; the panel editor writes it as written; the schematic shows
+// it as the slot box's face (`levelFaces`, ui/lib/schematic-face.js). No DOM.
 
 import { insideOf, levelData, slotOf } from './slot.js';
 
@@ -126,32 +126,58 @@ export function emptyPartTree(card) {
 
 /**
  * The panel controls the schematic draws at `level` of `graph` (ADR 0046
- * §6): at the top level the main panel's (`main`, `panelControls`'), then
- * at any level each slot box's part's (its controls on the interface go
- * inside the box); at a slot's inside, opened (its own composite or its
- * read-only preview, `graph.insides`), the part's controls on the interface
- * as the frame's (`frame`) and those on inner addresses beside their inner
- * instances, their binds as written (`/vcf.cutoff`, `partOf` the slot).
- * Null when there are none.
+ * §6): at the top level the main panel's (`main`, `panelControls`'); at a
+ * slot's inside, opened (its own composite or its read-only preview,
+ * `graph.insides`), its part's controls on inner addresses beside their
+ * inner instances, their binds as written (`/vcf.cutoff`, `partOf` the
+ * slot). A part's controls on the interface are no nodes: they are in the
+ * slot's face (`levelFaces`, 2026-10-30). Null when there are none.
  */
 export function levelControls(graph, level, main = []) {
   const found = level === '' ? [...(main ?? [])] : [];
-  const levels = [['', graph?.top], ...Object.entries(graph?.composites ?? {})];
-  for (const instance of levelData(graph, level)?.instances ?? []) {
-    const part = slotOf(instance)?.part;
-    if (part) found.push(...partControls(part, instance.name, 0, partKey(level, instance.name)));
+  // A part's controls on the slot's interface (`.p`) are in its face (`levelFaces`, 2026-10-30): no node of their own.
+  for (const { slot } of insideSlots(graph, level)) {
+    for (const control of partControls(slot.part, slot.name, 0, slot.key)) {
+      if (control.relative.every((r) => r.startsWith('/'))) found.push({ ...control, part: null, partOf: slot.name, binds: control.relative });
+    }
   }
+  return found.length ? found : null;
+}
+
+/** The slots with a part whose inside is `level` of `graph`: `[{slot: {name, key, part}}]`. */
+function insideSlots(graph, level) {
+  const found = [];
+  const levels = [['', graph?.top], ...Object.entries(graph?.composites ?? {})];
   for (const [name, data] of levels) {
     for (const instance of data?.instances ?? []) {
       const slot = slotOf(instance);
       if (!slot?.part || insideOf(slot)?.level !== level) continue;
-      for (const control of partControls(slot.part, instance.name, 0, partKey(name, instance.name))) {
-        if (control.relative.every((r) => r.startsWith('.'))) found.push({ ...control, frame: true });
-        else if (control.relative.every((r) => r.startsWith('/'))) found.push({ ...control, part: null, partOf: instance.name, binds: control.relative });
-      }
+      found.push({ slot: { name: instance.name, key: partKey(name, instance.name), part: slot.part } });
     }
   }
-  return found.length ? found : null;
+  return found;
+}
+
+/**
+ * The faces of `level` of `graph` (2026-10-30, the owner's "could a slot
+ * have a panel header with the same layout as on the panel itself?"): a
+ * slot box with a part shows the part, rendered as the panel renders it,
+ * in its box (`boxes`, by instance name: `{key, file, error, count}`); a
+ * slot's inside, opened, shows it at the frame's top (`frame`, or null).
+ * `count` (its controls) sizes it until it is measured.
+ */
+export function levelFaces(graph, level) {
+  const boxes = new Map();
+  for (const instance of levelData(graph, level)?.instances ?? []) {
+    const part = slotOf(instance)?.part;
+    if (part?.file) boxes.set(instance.name, faceOf(part, partKey(level, instance.name)));
+  }
+  const inside = insideSlots(graph, level).find(({ slot }) => slot.part?.file);
+  return { boxes, frame: inside ? faceOf(inside.slot.part, inside.slot.key) : null };
+}
+
+function faceOf(part, key) {
+  return { key, file: String(part.file).replace(/^ui\//, ''), error: part.error ?? null, count: (part.controls ?? []).length };
 }
 
 /** The key of the part of slot `slot` at `level`: `synth`, or `rack.fx` in composite `rack`'s file (ADR 0046 §2). */

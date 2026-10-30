@@ -12,7 +12,8 @@
 import { insideOf, slotLabel, slotOf } from './slot.js';
 import { wireGeometry } from './schematic-wire.js';
 import { exportFacts, orderedPins, portGroups } from './schematic-groups.js';
-import { controlAnchor, controlEdges, controlNodes, controlPads, partNodes } from './schematic-controls.js';
+import { controlAnchor, controlEdges, controlNodes, controlPads } from './schematic-controls.js';
+import { frameFace, placeFace } from './schematic-face.js';
 
 /**
  * Where a slot box's "+" pin of `side` (`in`, `out`) is: the row after its
@@ -327,16 +328,21 @@ export function laneY(bottom, lane) {
  * converter changes the rate), `feedback` and, for a feedback wire, its
  * `lane` below `bottom` (the lowest box's bottom edge).
  */
-export function layout(level, positions = {}, { factsOf = null, controls = null } = {}) {
+export function layout(level, positions = {}, { factsOf = null, controls = null, faces = null, faceSize = null } = {}) {
   const nodes = nodesOf(level ?? {}, factsOf);
   const byId = new Map(nodes.map((n) => [n.id, n]));
+  // A slot box with a part shows it, its face, under its title (ui/lib/schematic-face.js): the box grows to hold it.
+  for (const node of nodes) {
+    const face = node.kind === 'instance' ? faces?.boxes?.get(node.name) : null;
+    if (face) placeFace(node, face, faceSize?.(face) ?? null);
+  }
   const edges = edgesOf(level ?? {}, byId);
   const back = backEdges(nodes, edges);
   const layer = layers(nodes, edges, back);
   const rows = order(nodes, edges, layer);
-  // A panel's controls (ui/lib/schematic-controls.js): placed beside their hosts, which keep room for them;
-  // ADR 0046 §6: a slot's part's controls on its interface inside its box (grown for them) or its frame.
-  const panel = controls?.length ? [...partNodes(controls, byId, pinOffset), ...controlNodes(controls.filter((c) => !c.part), byId, pinOffset)] : [];
+  // A panel's controls (ui/lib/schematic-controls.js): placed beside their hosts, which keep room for them.
+  // A slot's part's controls on its interface are its face's, not nodes (2026-10-30).
+  const panel = controls?.length ? controlNodes(controls.filter((c) => !c.part), byId, pinOffset) : [];
   const pads = controlPads(panel, byId);
   let x = 0;
   for (const row of rows) {
@@ -401,14 +407,9 @@ export function layout(level, positions = {}, { factsOf = null, controls = null 
   const bottom = levelBottom(nodes);
   let lane = 0;
   const all = panel.length ? controlEdges(edges, panel) : edges;
-  // A binding wire inside a slot's box (ADR 0046 §6) runs from the box's own edge: an input's pin on its left, an output's on its right.
-  const edgePin = (node, port, out) => {
-    const p = (out ? node.outs : node.ins).find((q) => q.name === port);
-    return { x: out ? node.x + node.w : node.x, y: p?.y ?? node.y + HEADER };
-  };
   const wires = all.map((e, i) => {
-    const a = e.inside === 'in' ? edgePin(byId.get(e.from.node), e.from.port, false) : anchor(byId.get(e.from.node), e.from.port, true);
-    const b = e.inside === 'out' ? edgePin(byId.get(e.to.node), e.to.port, true) : anchor(byId.get(e.to.node), e.to.port, false);
+    const a = anchor(byId.get(e.from.node), e.from.port, true);
+    const b = anchor(byId.get(e.to.node), e.to.port, false);
     const feedback = back.has(i) || b.x <= a.x;
     if (feedback) lane += 1;
     const under = feedback ? laneY(bottom, lane) : null;
@@ -446,9 +447,15 @@ export function layout(level, positions = {}, { factsOf = null, controls = null 
   const ys = [...nodes.flatMap((n) => [n.y, n.y + n.h]), ...wires.flatMap((w) => [w.box.y0, w.box.y1])];
   // Loops, not Math.min(...xs): a large project's points exceed an
   // engine's argument limit.
+  // A slot's inside, opened, has the slot's face at its top, above its nodes (the frame's "panel header", 2026-10-30).
+  const face = faces?.frame ? frameFace(faces.frame, faceSize?.(faces.frame) ?? null, { x0: least(xs, Infinity), x1: most(xs, -Infinity), y0: least(ys, Infinity) }) : null;
+  if (face) {
+    xs.push(face.x, face.x + face.w);
+    ys.push(face.y, face.y + face.h);
+  }
   const [x0, x1, y0, y1] = [least(xs, Infinity), most(xs, -Infinity), least(ys, Infinity), most(ys, -Infinity)];
   const bounds = xs.length ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : { x: 0, y: 0, w: MIN_WIDTH, h: HEADER };
-  return { nodes, wires, bounds, bottom };
+  return { nodes, wires, bounds, bottom, face };
 }
 
 /**

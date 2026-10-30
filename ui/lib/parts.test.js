@@ -106,14 +106,20 @@ test('a slot card among the cards opens as a card; in a row it is compact', () =
   assert.equal(opensAsCard(null), false);
 });
 
-test("a part's controls name their part's file: a composite's slot's is <composite>.<slot>", async () => {
-  const { levelControls } = await import('./parts.js');
-  const part = { controls: [{ tag: 'signal-knob', label: 'x', bind: '.x', attributes: { bind: '.x' } }] };
-  const fx = { name: 'fx', address: '/rack1/fx', module: 'std.gain', ports: [], parameters: [{ name: 'x' }], slot: { part, inside: { level: 'rack/fx' } } };
+test("a slot's face names its part's file: a composite's slot's is <composite>.<slot>", async () => {
+  const { levelControls, levelFaces } = await import('./parts.js');
+  const controls = [{ tag: 'signal-knob', label: 'x', bind: '.x', attributes: { bind: '.x' } }];
+  const part = { file: 'ui/parts/fx.html', controls };
+  const inner = { file: 'ui/parts/rack.fx.html', controls };
+  const fx = { name: 'fx', address: '/rack1/fx', module: 'std.gain', ports: [], parameters: [{ name: 'x' }], slot: { part: inner, inside: { level: 'rack/fx' } } };
   const top = { name: 'fx', address: '/fx', module: 'std.gain', ports: [], parameters: [{ name: 'x' }], slot: { part, inside: { level: '/fx' } } };
   const graph = { top: { instances: [top] }, composites: { rack: { instances: [fx] } }, insides: { 'rack/fx': { instances: [] }, '/fx': { instances: [] } } };
-  assert.equal(levelControls(graph, '')[0].partKey, 'fx');
-  assert.equal(levelControls(graph, 'rack')[0].partKey, 'rack.fx');
-  assert.equal(levelControls(graph, 'rack/fx')[0].partKey, 'rack.fx', 'in its frame too');
-  assert.equal(partFile(levelControls(graph, 'rack')[0].partKey), 'parts/rack.fx.html');
+  assert.deepEqual(levelFaces(graph, '').boxes.get('fx'), { key: 'fx', file: 'parts/fx.html', error: null, count: 1 });
+  assert.equal(levelFaces(graph, 'rack').boxes.get('fx').key, 'rack.fx');
+  assert.equal(levelFaces(graph, 'rack/fx').frame.key, 'rack.fx', 'in its frame too');
+  assert.equal(levelFaces(graph, 'rack/fx').frame.file, partFile('rack.fx'));
+  assert.equal(levelFaces(graph, '').frame, null);
+  // Its interface controls are the face's: no control node of their own, at the box or in the frame.
+  assert.equal(levelControls(graph, ''), null);
+  assert.equal(levelControls(graph, 'rack/fx'), null);
 });

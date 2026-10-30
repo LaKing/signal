@@ -84,3 +84,6 @@ import './lib/schematic-controls.test.js';
 import './lib/parts.test.js';
 import './lib/schematic-parts.test.js';
 import './controls/slot.test.js';
+import './lib/schematic-face.test.js';
+import './lib/schematic-marquee.test.js';
+import './controls/schematic-faces.test.js';

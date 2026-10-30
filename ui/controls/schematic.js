@@ -70,10 +70,10 @@ import { EDITOR_CSS, SchematicEditor } from './schematic-editor.js';
 import { ContextMenu, MENU_CSS, menusClaimed } from './context-menu.js';
 import { paletteLevel, removeConnection } from '../lib/schematic-patch.js';
 import { disconnectOps, schematicMenu } from '../lib/schematic-menu.js';
-import { LEGEND, addressesText, sidebar, tooLargeText, traceSection } from '../lib/schematic-sidebar.js';
+import { LEGEND, SELECT_HELP, addressesText, sidebar, tooLargeText, traceSection } from '../lib/schematic-sidebar.js';
 import { badgeText, behind, parentPath, resolver, splitAddress, startOf, trace, wireKey } from '../lib/schematic-trace.js';
 import { moduleInfo, projectKey } from '../lib/schematic-palette.js';
-import { allOf, deletePlan, dragGroup, has, hitKey, inside, moveMessages, reselectAll, toggled, traceTarget, union } from '../lib/schematic-select.js';
+import { allOf, deletePlan, dragGroup, groupControls, has, hitKey, inside, marqueeStarts, moveMessages, reselectAll, toggled, traceTarget, union } from '../lib/schematic-select.js';
 import { formatFixed } from '../lib/format.js';
 import { HEADER, addPinAt, dragPosition, insideKey, layout } from '../lib/schematic-layout.js';
 import { insideBanner, insideReason, isPreviewLevel, isSlotInside, levelData, unmatchedReason } from '../lib/slot.js';
@@ -94,7 +94,9 @@ import { bundleClick, bundleText, bundleWires, countPlaces, countsShown, fanOf, 
 import { collapsedAt, exportFacts, groupAnchors, labelDetail, notesAt, portGroups } from '../lib/schematic-groups.js';
 import { CONTROL_HEAD, TYPE_NAMES, controlFraction, controlHit, controlValue, controlValueText, fitText, glyphParts, panelControls } from '../lib/schematic-controls.js';
 import { ControlProperties } from './schematic-control-node.js';
-import { levelControls } from '../lib/parts.js';
+import { levelControls, levelFaces } from '../lib/parts.js';
+import { FACE_LABEL_CHARS, hotAddresses } from '../lib/schematic-face.js';
+import { SchematicFaces } from './schematic-faces.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 /** A press that moves less than this (px) is a click. */
@@ -281,7 +283,11 @@ svg.stale { opacity: 0.4; filter: grayscale(1); }
 .side .meter-track { height: 4px; background: var(--signal-track, #2a2f38); position: relative; overflow: hidden; }
 .side .meter-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 100%; transform-origin: left; transform: scaleX(0); background: var(--signal-meter-rms, #3ecf8e); }
 .side .meter-state { color: var(--signal-muted, #8a93a3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-/* The marquee: a Shift-drag on the background. */
+/* A slot's face (2026-10-30, ui/controls/schematic-faces.js): its part as on the panel, in a layer over the drawing; its area tinted below it. */
+.faces { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.face-back { fill: color-mix(in srgb, var(--signal-accent, #4fc3f7) 7%, var(--signal-bg, #16181d)); stroke: var(--signal-knob-edge, #3a414d); stroke-dasharray: 2 3; vector-effect: non-scaling-stroke; pointer-events: none; }
+svg.tracing .face-area { opacity: 0.35; }
+/* The marquee: a Shift- or ⌘-drag (Ctrl-drag off a Mac) on the background. */
 .marquee { position: absolute; left: 0; top: 0; width: 0; height: 0; visibility: hidden; pointer-events: none; box-sizing: border-box;
   border: 1px dashed var(--signal-focus, #5aa9ff); background: rgba(90, 169, 255, 0.12); }
 /* A trace (ADR 0030 §1): its wires and pins stand out, the rest is dimmed; boundary pins carry badges. */
@@ -437,6 +443,10 @@ export class SignalSchematic extends HTMLElement {
     this.controlTexts = new Map();
     /** The sidebar's editor of a selected control's attributes (ui/controls/schematic-control-node.js). */
     this.controlProperties = new ControlProperties(this);
+    /** The slots' faces (2026-10-30, ui/controls/schematic-faces.js): their parts drawn as on the panel, over their boxes. */
+    this.faces = new SchematicFaces(this);
+    /** The pin under the pointer (a hit), which lights the face controls bound to it. */
+    this.hoveredPort = null;
   }
 
   /** The part selected last (the context menu's and the keyboard's), or null. */
@@ -511,7 +521,7 @@ export class SignalSchematic extends HTMLElement {
     this.marquee = html('div', { className: 'marquee' });
     // ADR 0037, editable insides: a slot's inside shown says whose it is, or that an edit makes it the slot's own.
     this.insideNote = html('div', { className: 'inside-note', role: 'status' });
-    this.stage.append(this.svg, this.message, this.staleBox, this.tip, this.marquee, this.insideNote);
+    this.stage.append(this.svg, this.faces.layer, this.message, this.staleBox, this.tip, this.marquee, this.insideNote);
     const main = html('div', { className: 'main' });
     main.append(this.bar, this.stage);
     root.append(style, this.buildSide(), main);
@@ -526,6 +536,7 @@ export class SignalSchematic extends HTMLElement {
       if (this.gesture && e.pointerId === this.gesture.pointer) this.cancelGesture();
     });
     this.svg.addEventListener('pointerleave', () => {
+      this.hoveredPort = null;
       this.hideTip();
       this.hoverWire(null);
       this.hoverBox(null);
@@ -561,6 +572,8 @@ export class SignalSchematic extends HTMLElement {
     on('describe', () => this.described());
     on('panel.written', (message) => {
       if ((message?.file ?? 'main.html') === 'main.html' && typeof message.html === 'string') this.panelSeen(message.html);
+      // A slot's part written (Edit layout, Group into slot): its faces show it at once.
+      else this.faces?.written(message);
     });
     on('unsaved', () => this.refreshCard());
     on('app', (app) => {
@@ -598,6 +611,7 @@ export class SignalSchematic extends HTMLElement {
       this.closeMenu();
       this.fitted = false;
       this.svg.replaceChildren();
+      this.faces?.clear();
       this.crumbs.replaceChildren();
       this.showSide();
     }
@@ -627,6 +641,7 @@ export class SignalSchematic extends HTMLElement {
     if (this.graph?.projectId !== graph.projectId || this.graph?.project !== graph.project) {
       this.panelText = null;
       this.panelControls = [];
+      this.faces?.clear();
     }
     this.readPanel();
     this.graph = graph;
@@ -667,7 +682,11 @@ export class SignalSchematic extends HTMLElement {
   readPanel() {
     const request = this.connection?.request?.({ type: 'panel.read', file: 'main.html' });
     request?.then(
-      (read) => this.panelSeen(read?.exists ? (read.html ?? read.text ?? '') : ''),
+      (read) => {
+        // Its style sheets style the slots' faces as they style the panel.
+        this.faces?.pageSeen(read?.exists ? (read.text ?? '') : '');
+        this.panelSeen(read?.exists ? (read.html ?? read.text ?? '') : '');
+      },
       () => {},
     );
   }
@@ -743,7 +762,16 @@ export class SignalSchematic extends HTMLElement {
       const stored = { ...(this.graph.layout?.positions?.[level] ?? {}), ...Object.fromEntries(this.moved.get(level) ?? []) };
       // M2.13-2: a composite's box lays its pins out in groups (ui/lib/schematic-groups.js).
       // ADR 0046 §6: the main panel's controls at the top level, each slot's part's in its box or its frame.
-      this.layouts.set(level, layout(source, stored, { factsOf: (module) => exportFacts(module === '' ? null : levelData(this.graph, module)), controls: levelControls(this.graph, level, this.panelControls) }));
+      // 2026-10-30: a slot with a part shows it as its face, in its box or at its open frame's top, at the size measured.
+      this.layouts.set(
+        level,
+        layout(source, stored, {
+          factsOf: (module) => exportFacts(module === '' ? null : levelData(this.graph, module)),
+          controls: levelControls(this.graph, level, this.panelControls),
+          faces: levelFaces(this.graph, level),
+          faceSize: this.faces ? (face) => this.faces.sizeOf(face) : null,
+        }),
+      );
     }
     return this.layouts.get(level);
   }
@@ -830,6 +858,7 @@ export class SignalSchematic extends HTMLElement {
     this.applyMarks();
     this.applyTrace();
     this.applyDrag();
+    this.faces?.sync(this.drawn);
     this.drawCrumbs();
     // A selected composite opened or closed (a click, its ×, the sidebar's
     // own Open in place or Close): its buttons follow.
@@ -856,8 +885,10 @@ export class SignalSchematic extends HTMLElement {
       const labels = el('g', { class: 'labels' });
       // An open frame's × (2026-10-22), over everything of its level.
       const close = el('g');
-      drawn = { g: el('g'), wires, links, overlay, nodes, labels, close, closeKey: null, baked: null, wireCache: new Map(), nodeCache: new Map(), bundleCache: new Map(), shown: null, labelKey: null, sizes: [] };
-      drawn.g.append(wires, links, overlay, nodes, labels, close);
+      // A slot's inside opened: the slot's face at its top (2026-10-30), its area drawn here.
+      const face = el('g');
+      drawn = { g: el('g'), wires, links, overlay, face, nodes, labels, close, closeKey: null, baked: null, wireCache: new Map(), nodeCache: new Map(), bundleCache: new Map(), shown: null, labelKey: null, sizes: [] };
+      drawn.g.append(wires, links, overlay, drawn.face, nodes, labels, close);
       this.groups.set(level.path, drawn);
     }
     const transform = level.transform;
@@ -926,6 +957,7 @@ export class SignalSchematic extends HTMLElement {
       );
       if (!sameItems([...drawn.wires.children], wires.elements)) drawn.wires.replaceChildren(...wires.elements);
       drawn.links.replaceChildren(...this.linkElements(level, baked));
+      drawn.face.replaceChildren(...(level.layout.face ? [this.faceArea(baked, level.layout.face, `${level.path}#frame`, { path: level.path, root: level.path })] : []));
       if (!sameItems([...drawn.nodes.children], nodes.elements)) drawn.nodes.replaceChildren(...nodes.elements);
       drawn.wireCache = wires.cache;
       drawn.nodeCache = nodes.cache;
@@ -1152,6 +1184,11 @@ export class SignalSchematic extends HTMLElement {
       group.append(el('text', { ...attributes, x: at.x, y: at.y, 'font-size': size * m }, content));
     };
     rect(node, { class: 'box', rx: 4 * m });
+    // 2026-10-30: a closed slot's face, its part as on the panel, over this area (ui/controls/schematic-faces.js).
+    if (node.face && !isOpen && node.kind === 'instance') {
+      const f = node.face;
+      group.append(this.faceArea(baked, { ...f, x: node.x + f.dx, y: node.y + f.dy }, address, { path: level.path, slot: node.name, root: address, base: slotted?.part?.base ?? '' }));
+    }
     if (node.composite) rect({ x: node.x + 3, y: node.y + 3, w: node.w - 6, h: node.h - 6 }, { class: 'frame', rx: 3 * m });
     if (text(12) && node.kind === 'instance') {
       label({ x: node.x + 8, y: node.y + 14 }, 12, { class: 'name' }, node.name);
@@ -1211,7 +1248,8 @@ export class SignalSchematic extends HTMLElement {
       else if (shape.polygon.length) group.append(el('polygon', { ...data, points: shape.polygon.map((p) => `${p.x},${p.y}`).join(' ') }));
       // A composite's and a frame's pins are labelled by the level's labels (drawLabels), in its units as well.
       if (text(9) && !isOpen && !node.composite && node.kind === 'instance') {
-        label({ x: pin.x + (out ? -6 : 6), y: pin.y + 3 }, 9, { class: 'pin-label', 'text-anchor': out ? 'end' : 'start' }, pin.name);
+        // Beside a face, cut to its column (its whole name in its tooltip).
+        label({ x: pin.x + (out ? -6 : 6), y: pin.y + 3 }, 9, { class: 'pin-label', 'text-anchor': out ? 'end' : 'start' }, node.face ? fitText(pin.name, FACE_LABEL_CHARS) : pin.name);
       }
       if (metered && pin.shape === 'signal') {
         // Fixed size whatever its state: only the fill's place and width change. An input's inside its box at the left, an output's at the right.
@@ -1231,6 +1269,43 @@ export class SignalSchematic extends HTMLElement {
     }
     this.barsOf.set(group, bars);
     return group;
+  }
+
+  /**
+   * The area of a slot's face (`face`: its rectangle in the level's units,
+   * its `file`, `error`), id `id`: a tinted rectangle (what shows where the
+   * face is too small to draw) and its corners, unclipped, for the face
+   * placed over it (`SchematicFaces.sync`, by the group's screen matrix, so
+   * it follows the view, a drag and an open frame alike).
+   */
+  faceArea(baked, face, id, { path, slot = '', root, base = '' }) {
+    const group = el('g', { class: 'face-area' });
+    const a = bakedPoint(baked, { x: face.x, y: face.y });
+    const b = bakedPoint(baked, { x: face.x + face.w, y: face.y + face.h });
+    Object.assign(group.dataset, { face: id, file: face.file, path, slot, root, base, error: face.error ?? '', x0: a.x, y0: a.y, x1: b.x, y1: b.y });
+    const at = bakedRect(baked, face);
+    if (at) group.append(el('rect', { class: 'face-back', rx: 6 * baked.m, ...at }));
+    return group;
+  }
+
+  /** The faces' content changed size (a part read, a skin loaded): laid out again at the measured sizes, what did not move kept on screen. */
+  facesResized() {
+    if (this.faceRelayout) return;
+    this.faceRelayout = true;
+    requestAnimationFrame(() => {
+      this.faceRelayout = false;
+      if (!this.graph) return;
+      const old = new Map(this.layouts);
+      this.layouts.clear();
+      this.view = rebase(this.view, (level) => old.get(level) ?? null, (level) => this.layoutOf(level));
+      this.selected = reselectAll(this.selected, (level) => this.layoutOf(level));
+      this.schedule();
+    });
+  }
+
+  /** The face controls bound to what the pointer is on, what is selected or a menu's target, lit. */
+  lightFaces() {
+    this.faces?.light(hotAddresses([...this.selected, this.menuState?.target.hit, this.hovered, this.hoveredPort]));
   }
 
   /** The level bars of every node drawn. */
@@ -1282,12 +1357,14 @@ export class SignalSchematic extends HTMLElement {
     this.markSelected(new Set(this.selected.map((s) => this.partElement(s)).filter(Boolean)));
     this.mark('hover', this.partElement(this.menuState?.target.hit ?? this.hovered));
     this.syncHalo();
+    this.lightFaces();
   }
 
   /** The wire under the pointer (a hit, or null), marked. */
   hoverWire(hit) {
     this.hovered = hit;
     this.mark('hover', this.partElement(this.menuState?.target.hit ?? hit));
+    this.lightFaces();
   }
 
   /**
@@ -1351,6 +1428,8 @@ export class SignalSchematic extends HTMLElement {
     if (!gesture?.follow || !gesture.moved || !this.drawn) return;
     gesture.follow.apply({ layout: this.layoutOf(gesture.hit.level), levels: this.drawn.levels, groups: this.groups, to: dragTo(gesture) });
     this.syncHalo();
+    // The faces of the boxes dragged ride with them.
+    this.faces?.sync(this.drawn);
   }
 
   /** The drag's next step at the next frame: one per frame, however many moves. */
@@ -1497,8 +1576,8 @@ export class SignalSchematic extends HTMLElement {
       this.gesture = { ...base, close: true };
       return;
     }
-    // Shift-drag on the background: the marquee (a plain drag pans).
-    if (hit.kind === 'background' && event.shiftKey) {
+    // Shift- or ⌘-drag (Ctrl-drag off a Mac) on the background: the marquee (a plain drag pans).
+    if (marqueeStarts(hit, event, MAC)) {
       this.gesture = { ...base, marquee: true };
       return;
     }
@@ -1612,7 +1691,7 @@ export class SignalSchematic extends HTMLElement {
       this.hideMarquee();
       if (!gesture.moved) return;
       gesture.last = at;
-      // Shift held throughout: what it takes is added to the selection.
+      // What it takes (boxes, panel controls, the wires between the boxes) is added to the selection.
       this.select(union(this.selected, inside(this.drawn, this.marqueeRect(gesture))));
       return;
     }
@@ -1635,8 +1714,9 @@ export class SignalSchematic extends HTMLElement {
         if (hit) this.select(toggled(this.selected, hit));
       } else {
         this.select(hit ? [hit] : []);
-        // A plain click on a closed composite's box opens it in place (2026-10-22: the zoom no longer does).
-        if (this.openInPlace(hit, at)) this.lastToggle = { at, time: event.timeStamp, hit };
+        // A plain click on a closed composite's box opens it in place (2026-10-22: the zoom no longer does);
+        // one on its face only selects it (a click beside a knob would open it all the time; a double-click enters).
+        if (!gesture.fromFace && this.openInPlace(hit, at)) this.lastToggle = { at, time: event.timeStamp, hit };
       }
       return;
     }
@@ -1740,6 +1820,7 @@ export class SignalSchematic extends HTMLElement {
     const hit = hitTest(this.drawn, at);
     // An open frame's × (2026-10-22): a pointer, and its title says what it closes.
     this.svg.classList.toggle('closing', hit.kind === 'close');
+    this.hoveredPort = hit.kind === 'port' ? hit : null;
     this.hoverWire(hit.kind === 'wire' ? hit : null);
     // A closed composite's box or pin under the pointer: its pins say where they go inside.
     const box = (hit.kind === 'instance' || hit.kind === 'port') && hit.node.kind === 'instance' && hit.node.composite ? `${hit.path}/${hit.node.name}` : null;
@@ -1881,6 +1962,8 @@ export class SignalSchematic extends HTMLElement {
   key(event) {
     // The menu's keys are its own (it stops them too): never the selection's Delete or ⌘Z.
     if (event.composedPath().includes(this.menu.list)) return;
+    // A key on a slot face's control (a knob's arrows) is the control's.
+    if (this.faces?.owns(event)) return;
     const own = event.composedPath()[0] === this;
     const command = keyCommand('schematic', event)?.id;
     // Edit patch is the child scope: its chords come first, but for the
@@ -2052,6 +2135,8 @@ export class SignalSchematic extends HTMLElement {
       Object.assign(context, { group: this.selected.length, deleted: plan.deleted, tooLarge: tooLargeText(plan) });
     }
     if (hit.kind === 'background') context.addable = Boolean(paletteLevel(hit, this.drawn, point));
+    // ADR 0046 §8: Group into slot moves the panel controls selected with the box (a marquee over both), else all of its own.
+    if (hit.kind === 'instance') context.groupControls = groupControls(this.selected, hit)?.length ?? null;
     if (hit.kind === 'instance' && hit.node.composite) {
       context.open = this.drawn.open.has(hit.address);
       context.addable = context.open && Boolean(paletteLevel(hit, this.drawn, point));
@@ -2131,7 +2216,7 @@ export class SignalSchematic extends HTMLElement {
     else if (id === 'slot-inside') this.enter(hit);
     else if (id === 'slot-interface-inside') this.editor.openInsideInterface();
     else if (id === 'make-interface') this.editor.makeInterface(hit);
-    else if (id === 'group-slot') this.editor.groupSlot(hit);
+    else if (id === 'group-slot') this.editor.groupSlot(hit, groupControls(this.selected, hit));
     else if (id === 'port-edit') this.editor.openInterface(hit, { port: hit.port.name });
     else if (id === 'port-remove' || id === 'port-remove-wires') this.editor.removePort(hit, id === 'port-remove-wires');
     else if (id === 'fit') this.fitTop();
@@ -2429,7 +2514,7 @@ export class SignalSchematic extends HTMLElement {
       else swatch.append(el('circle', { class: entry.swatch, cx: 14, cy: 5, r: 3.5 }));
       list.append(swatch, html('span', { textContent: entry.label }));
     }
-    return [html('h4', { textContent: 'Legend' }), list, html('div', { className: 'subtitle', textContent: 'A click on a composite opens it in place, the × in its corner (or Escape) closes it. Shift- or ⌘-click adds to the selection, Shift-drag on the background selects the boxes inside, ⌘A the level shown, Escape lets go.' })];
+    return [html('h4', { textContent: 'Legend' }), list, html('div', { className: 'subtitle', textContent: SELECT_HELP })];
   }
 
   /** A connection's line: the wire (a link), its other end (a link), and in Edit patch its removal. */

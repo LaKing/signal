@@ -173,9 +173,7 @@ export function openedLayout(source, name, bounds) {
   let byName = openedOf.get(source);
   const cached = byName?.get(name);
   if (cached?.bounds === bounds) return cached.opened;
-  // ADR 0046 §6: a slot's part's controls inside its closed box are drawn in its frame when it is open.
-  const inside = new Set(source.nodes.filter((n) => n.kind === 'control' && n.inside && n.host === name).map((n) => n.id));
-  const layout = inside.size ? { ...source, nodes: source.nodes.filter((n) => !inside.has(n.id)), wires: source.wires.filter((w) => !inside.has(w.from.node) && !inside.has(w.to.node)) } : source;
+  const layout = source;
   const node = layout.nodes.find((n) => n.kind === 'instance' && n.name === name);
   const grown = node ? grownNode(node, bounds) : null;
   let opened = layout;
