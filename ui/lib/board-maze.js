@@ -15,7 +15,7 @@ export const STEP = 16;
 /** A route turning costs as much as running this far. */
 export const BEND = 24;
 /** Crossing another net costs as much as running this far. */
-export const CROSS = 48;
+export const CROSS = 120;
 /** A bus's own way costs this much of its length again. */
 export const SHARED = 0.4;
 /** A route keeps this far from a box (its nodes do). */

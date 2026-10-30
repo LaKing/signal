@@ -16,7 +16,7 @@ import { VIA_ROW, VIA_W, controlAnchor, controlEdges, controlNodes, controlPads 
 import { frameFace, placeFace } from './schematic-face.js';
 import { CLEARANCE, PU, STUB, TRACK, balance, near, placeNear, sugiyama } from './board-layout.js';
 import { Maze } from './board-maze.js';
-import { LABEL_STUB, NET_DESTS, measure, orthGeometry, routeWires, zCorners } from './board-route.js';
+import { LABEL_STUB, NET_DESTS, measure, orthGeometry, routeWires, simplify, zCorners } from './board-route.js';
 
 /**
  * Where a slot box's "+" pin of `side` (`in`, `out`) is: the row after its
@@ -860,6 +860,113 @@ function topPins(nodes, legs) {
   }
 }
 
+/** Chips side by side at one height (within PU), three or more: rows, each left to right. */
+function rowsOf(chips) {
+  const rows = [];
+  for (const c of [...chips].sort((a, b) => a.y - b.y || a.x - b.x)) {
+    const row = rows.find((r) => Math.abs(r[0].y - c.y) <= PU);
+    if (row) row.push(c);
+    else rows.push([c]);
+  }
+  return rows.filter((r) => r.length >= 3).map((r) => r.sort((a, b) => a.x - b.x));
+}
+
+/**
+ * The ordered buses of the board's rows (the coordinator's polish of
+ * 2026-10-30), by construction never crossing themselves: a chip left of
+ * a row feeding several of its chips sends its wires along tracks under
+ * the row, the nearest chip's on top, each dropping from its pin farther
+ * right the nearer its chip and rising into its chip's left pins (the
+ * upper pin's riser farther left); the row's outputs into chips at its
+ * right end (its mixers) run on tracks below those, the leftmost deepest,
+ * rising into the mixer the nearer its edge the deeper. Each wire `i` →
+ * its corners; a wire whose way meets a box is left to the maze.
+ */
+function rowBuses(rows, edges, byId, boxes) {
+  const out = new Map();
+  const clear = (corners, ends) => {
+    for (let k = 1; k < corners.length; k++) {
+      const [p, q] = [corners[k - 1], corners[k]];
+      const seg = { x: Math.min(p.x, q.x), y: Math.min(p.y, q.y), w: Math.abs(q.x - p.x) || 0.01, h: Math.abs(q.y - p.y) || 0.01 };
+      for (const b of boxes) {
+        if (ends.has(b.id) && (k === 1 || k === corners.length - 1)) continue;
+        if (seg.x < b.x + b.w && b.x < seg.x + seg.w && seg.y < b.y + b.h && b.y < seg.y + seg.h) return false;
+      }
+    }
+    return true;
+  };
+  const pin = (id, port, out2) => anchor(byId.get(id), port, out2);
+  for (const row of rows) {
+    const inRow = new Set(row.map((n) => n.id));
+    const rowBottom = Math.max(...row.map((n) => n.y + n.h));
+    const left = Math.min(...row.map((n) => n.x));
+    // The sources left of the row feeding three or more of its chips.
+    const sources = new Map();
+    edges.forEach((e, i) => {
+      const s = byId.get(e.from.node);
+      if (!inRow.has(e.to.node) || inRow.has(e.from.node) || !s || s.x + s.w > left) return;
+      if (!sources.has(s.id)) sources.set(s.id, []);
+      sources.get(s.id).push(i);
+    });
+    let depth = rowBottom + 2 * TRACK;
+    for (const [sid, list] of sources) {
+      const targets = new Set(list.map((i) => edges[i].to.node));
+      if (targets.size < 3) continue;
+      const src = byId.get(sid);
+      // Nets (one source pin) into each chip, the nearest chip first, then the upper pin.
+      const nets = new Map();
+      for (const i of list) {
+        const e = edges[i];
+        const key = `${e.from.port}\n${e.to.node}`;
+        if (!nets.has(key)) nets.set(key, { port: e.from.port, chip: e.to.node, wires: [] });
+        nets.get(key).wires.push(i);
+      }
+      const ordered = [...nets.values()].map((n) => ({ ...n, x: byId.get(n.chip).x, y: Math.min(...n.wires.map((i) => pin(n.chip, edges[i].to.port, false).y)) }));
+      ordered.sort((a, b) => a.x - b.x || a.y - b.y);
+      const top = Math.max(depth, src.y + src.h + 2 * TRACK);
+      const perChip = new Map();
+      for (const n of ordered) perChip.set(n.chip, [...(perChip.get(n.chip) ?? []), n]);
+      ordered.forEach((n, k) => {
+        const trackY = top + k * TRACK;
+        const a = pin(sid, n.port, true);
+        const dropX = src.x + src.w + STUB + (ordered.length - 1 - k) * TRACK;
+        const mine = perChip.get(n.chip);
+        const riserX = byId.get(n.chip).x - STUB - (mine.length - 1 - mine.indexOf(n)) * TRACK;
+        for (const i of n.wires) {
+          const b = pin(n.chip, edges[i].to.port, false);
+          const corners = simplify([a, { x: dropX, y: a.y }, { x: dropX, y: trackY }, { x: riserX, y: trackY }, { x: riserX, y: b.y }, b]);
+          if (clear(corners, new Set([sid, n.chip]))) out.set(i, corners);
+        }
+      });
+      depth = top + ordered.length * TRACK + TRACK;
+    }
+    // The row's outputs into its mixers (chips right of it): the leftmost deepest.
+    const right = Math.max(...row.map((n) => n.x + n.w));
+    const outsByMixer = new Map();
+    edges.forEach((e, i) => {
+      const m = byId.get(e.to.node);
+      if (!inRow.has(e.from.node) || !m || m.x < right) return;
+      if (!outsByMixer.has(m.id)) outsByMixer.set(m.id, []);
+      outsByMixer.get(m.id).push(i);
+    });
+    const outs = [...outsByMixer.values()].flat().sort((p, q) => byId.get(edges[q].from.node).x - byId.get(edges[p].from.node).x || p - q);
+    // Shallow (right voices) first: k grows with depth.
+    outs.forEach((i, k) => {
+      const e = edges[i];
+      const a = pin(e.from.node, e.from.port, true);
+      const b = pin(e.to.node, e.to.port, false);
+      const trackY = depth + k * TRACK;
+      const dropX = a.x + STUB;
+      // The deeper, the nearer the mixer's edge it rises.
+      const sameMixer = outs.filter((j) => edges[j].to.node === e.to.node);
+      const riserX = b.x - STUB - (sameMixer.length - 1 - sameMixer.indexOf(i)) * TRACK;
+      const corners = simplify([a, { x: dropX, y: a.y }, { x: dropX, y: trackY }, { x: riserX, y: trackY }, { x: riserX, y: b.y }, b]);
+      if (clear(corners, new Set([e.from.node, e.to.node]))) out.set(i, corners);
+    });
+  }
+  return out;
+}
+
 /** The card (`{x, y, w, h}`) holding the middle of `box`, or null. */
 function cardOf(cards, box) {
   const cx = box.x + box.w / 2;
@@ -897,8 +1004,19 @@ function underVias(node, rects, cards, free, controlRects = rects) {
     // (a) In its card, below all its card's controls (the card's chips in one row), pushed sideways a little at most.
     let floor = y1;
     for (const r of controlRects) if (cardOf([card], r) && r.y + r.h > floor) floor = r.y + r.h;
-    const inside = scan(floor + COMB_GAP, card.y + card.h - CARD_PAD - node.h, card.x + CARD_PAD, card.x + card.w - CARD_PAD, 12);
-    if (inside) return inside;
+    // The nearest free spot to its place in the row (right under its vias), in a window: beside the row (past the plate's edge too) before a row lower.
+    const x0w = snap(cx - node.w / 2);
+    const y0w = snap(floor + COMB_GAP);
+    const cands = [];
+    for (let dy = 0; dy <= 40; dy++) {
+      if (y0w + dy * PU + node.h > card.y + card.h - CARD_PAD) break;
+      for (let dx = -40; dx <= 40; dx++) cands.push([dx * dx + 4 * dy * dy, dy, dx]);
+    }
+    cands.sort((p, q) => p[0] - q[0] || p[1] - q[1] || p[2] - q[2]);
+    for (const [, dy, dx] of cands) {
+      const at = { x: x0w + dx * PU, y: y0w + dy * PU };
+      if (free({ ...at, w: node.w, h: node.h })) return at;
+    }
     // (b) Just below its card.
     const below = scan(card.y + card.h + COMB_GAP / 2, card.y + card.h + 640, -Infinity, Infinity, 24);
     if (below) return below;
@@ -964,8 +1082,40 @@ function plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects
     neighbours.get(e.from.node)?.push({ id: e.to.node, after: true });
     neighbours.get(e.to.node)?.push({ id: e.from.node, after: false });
   }
+  // Rows: three or more chips of vias side by side (a drum machine's voices).
+  const rows = rowsOf(nodes.filter((n) => done.has(n.id) && rectsOf.has(n.id)));
+  const rowOf = new Map();
+  rows.forEach((row, k) => row.forEach((n) => rowOf.set(n.id, k)));
+  // A chip fed by two or more chips of a row (its mixer) goes at the row's right end, in flow order.
   const rest = nodes.filter((n) => !done.has(n.id));
   rest.sort((a, b) => ranks.get(a.id) - ranks.get(b.id) || nodes.indexOf(a) - nodes.indexOf(b));
+  const ends = new Map();
+  for (const node of rest) {
+    const fedBy = new Map();
+    for (const n of neighbours.get(node.id)) if (!n.after && rowOf.has(n.id)) fedBy.set(rowOf.get(n.id), (fedBy.get(rowOf.get(n.id)) ?? 0) + 1);
+    const best = [...fedBy].filter(([, c]) => c >= 2).sort((a, b) => b[1] - a[1] || a[0] - b[0])[0];
+    if (!best) continue;
+    const row = rows[best[0]];
+    const outs = edges.filter((e) => rowOf.get(e.from.node) === best[0] && byId.get(e.to.node) && !rowOf.has(e.to.node)).length;
+    let x = ends.get(best[0]) ?? Math.max(...row.map((n) => n.x + n.w)) + 2 * STUB + (outs + 2) * TRACK;
+    const at = placeNear(node, { x, y: Math.min(...row.map((n) => n.y)) }, roomy()) ?? { x, y: row[0].y };
+    Object.assign(node, at);
+    placed.push(rectOf(node));
+    done.add(node.id);
+    ends.set(best[0], node.x + node.w + CHIP_ROOM + 2 * STUB);
+  }
+  // Then, from the end of the flow back, a chip whose every sink is placed goes just left of them (a chain beside its end).
+  for (const node of [...rest].reverse()) {
+    if (done.has(node.id)) continue;
+    const sinks = neighbours.get(node.id).filter((n) => n.after);
+    if (!sinks.length || !sinks.every((n) => done.has(n.id))) continue;
+    const ns = sinks.map((n) => byId.get(n.id));
+    const x = Math.min(...ns.map((n) => n.x)) - 2 * STUB - CHIP_ROOM - node.w;
+    const y = ns.reduce((sum, n) => sum + n.y + n.h / 2, 0) / ns.length - node.h / 2;
+    Object.assign(node, placeNear(node, { x, y }, roomy()) ?? { x, y });
+    placed.push(rectOf(node));
+    done.add(node.id);
+  }
   for (let pass = 0; pass < 2; pass++) {
     for (const node of rest) {
       if (done.has(node.id)) continue;
@@ -992,6 +1142,38 @@ function plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects
       Object.assign(node, placeNear(node, at, roomy()) ?? at);
       placed.push(rectOf(node));
       done.add(node.id);
+    }
+  }
+  // The end of the flow (a chain of single links, out ← limiter ← dc ← bus) in one row, left to right, at its
+  // controls' height and from its leftmost control's chip: short links (the coordinator's polish).
+  const srcs = new Map(nodes.map((n) => [n.id, new Set()]));
+  const snks = new Map(nodes.map((n) => [n.id, new Set()]));
+  for (const e of edges) {
+    if (e.from.node === e.to.node) continue;
+    srcs.get(e.to.node)?.add(e.from.node);
+    snks.get(e.from.node)?.add(e.to.node);
+  }
+  for (const end of nodes) {
+    if (end.kind !== 'instance' || snks.get(end.id).size || !srcs.get(end.id).size || end.pinned) continue;
+    const chain = [end];
+    for (let cur = end; srcs.get(cur.id).size === 1; ) {
+      const prev = byId.get([...srcs.get(cur.id)][0]);
+      if (!prev || snks.get(prev.id).size !== 1 || chain.includes(prev) || prev.pinned) break;
+      chain.unshift(prev);
+      cur = prev;
+    }
+    const anchoredIn = chain.filter((n) => rectsOf.has(n.id));
+    if (chain.length < 3 || !anchoredIn.length) continue;
+    for (let k = placed.length - 1; k >= 0; k--) {
+      if (chain.some((n) => n.x === placed[k].x && n.y === placed[k].y && n.w === placed[k].w && n.h === placed[k].h)) placed.splice(k, 1);
+    }
+    let x = Math.min(...anchoredIn.map((n) => n.x));
+    const y = Math.max(...anchoredIn.map((n) => n.y));
+    for (const node of chain) {
+      const at = placeNear(node, { x, y }, roomy()) ?? { x, y };
+      Object.assign(node, at);
+      placed.push(rectOf(node));
+      x = node.x + node.w + CHIP_ROOM + 2 * STUB;
     }
   }
   for (const node of nodes) node.layer = ranks.get(node.id);
@@ -1059,6 +1241,13 @@ function plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects
     const share = l.writes ? edges.filter((e) => e.to.node === l.chip && e.to.port === l.pin.port).map((e) => `${e.from.node}\n${e.from.port}`) : [`${l.chip}\n${l.pin.port}`];
     routeOf.set(`leg${i}`, maze.route(a, b, `leg:${l.control.id}:${l.pin.name}`, { bus: `bus:${l.chip}`, own, share, from: a.side ?? 'right', into: b.side ?? 'left' }));
   }
+  // The rows' buses (ADR 0047, the coordinator's polish): a sequencer's triggers into a row, the row's outputs into its mixers, ordered so neither crosses itself.
+  for (const [i, corners] of rowBuses(rows, edges, byId, all)) {
+    routeOf.set(`edge${i}`, corners);
+    const e = edges[i];
+    const id = maze.netId(`${e.from.node}\n${e.from.port}`);
+    for (let k = 1; k < corners.length; k++) maze.takeSegment(corners[k - 1], corners[k], id);
+  }
   // Then the chips' wires, shortest first; a fan-out or global net as labels.
   const order = edges.map((e, i) => {
     const a = pinOf(byId.get(e.from.node), e.from.port, true);
@@ -1067,7 +1256,7 @@ function plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects
   });
   order.sort((p, q) => p.d - q.d || p.i - q.i);
   for (const { e, i, a, b } of order) {
-    if (labelled(e)) continue;
+    if (labelled(e) || routeOf.has(`edge${i}`)) continue;
     // The legs at its own pins (a meter reading its source, a control setting its target) it may join there.
     const share = legs.filter((l) => (!l.writes && l.chip === e.from.node && l.pin.port === e.from.port) || (l.writes && l.chip === e.to.node && l.pin.port === e.to.port)).map((l) => `leg:${l.control.id}:${l.pin.name}`);
     routeOf.set(`edge${i}`, maze.route(a, b, `${e.from.node}\n${e.from.port}`, { from: a.side ?? 'right', into: b.side ?? 'left', share }));

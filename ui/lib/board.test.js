@@ -35,20 +35,22 @@ const SNAPSHOTS = new URL('ui/lib/fixtures/board/snapshots.json', root);
 
 /**
  * The thresholds of the measures (rule 6: they fail a regression, they
- * choose nothing). Measured on 2026-10-30, about 15 % headroom. The studio
- * on its measured plate: 43 crossings, length 34 120, 6 labelled nets
- * (wires that found no way within the router's budget: the drum machine's
- * last three voices' triggers, the mixers into the bus). The coordinator's
- * targets for it, under 25 crossings and a length under 25 000, are NOT met
- * yet (ADR 0047's notes). The other projects on approximated plates
- * (studio-transport 122 crossings and 39 labels: its approximated cards
- * leave the router little room; physical-av 41, kick 4, library-demo 8).
+ * choose nothing). Measured on 2026-10-30, about 10 % headroom. The studio
+ * on its measured plate: 64 crossings, length 49 292, 1 labelled net (the
+ * synth's output across the plate into the echo, which finds no way within
+ * the router's budget). About 30 of the crossings are the drum machine's
+ * two ordered buses meeting: the sequencer's triggers under the voice row
+ * and each voice's output dropping to the mixers' bus below them; on that
+ * row no layout with the inputs left and the outputs right avoids them. The
+ * coordinator's targets for the studio (under 25 crossings, a length under
+ * 25 000) are NOT met (ADR 0047's notes). Kick at most 2 crossings, as
+ * before the plate design. The others on approximated plates.
  */
 const LIMITS = {
-  kick: { crossings: 5, length: 2600, labels: 1 },
-  studio: { crossings: 50, length: 39500, labels: 7 },
-  'studio-transport': { crossings: 140, length: 44000, labels: 45 },
-  'physical-av': { crossings: 48, length: 13500, labels: 1 },
+  kick: { crossings: 2, length: 2400, labels: 1 },
+  studio: { crossings: 70, length: 54000, labels: 1 },
+  'studio-transport': { crossings: 72, length: 25500, labels: 60 },
+  'physical-av': { crossings: 40, length: 13000, labels: 1 },
   'library-demo': { crossings: 10, length: 18600, labels: 0 },
 };
 
@@ -257,4 +259,34 @@ test('vias (§5): a small pad at its control’s middle, its legs real wires dro
   const legs = b.wires.filter((w) => w.kind === 'binding');
   assert.ok(legs.length > 40 && legs.every((w) => !w.labelled), 'every leg a wire');
   for (const w of legs.filter((x) => x.from.node.startsWith('@control:'))) assert.ok(w.corners[1].x === w.corners[0].x && w.corners[1].y > w.corners[0].y, `${w.label}: drops`);
+});
+
+test('the drum row (the coordinator’s polish): its mixers at its right end, the triggers one ordered bus, the end of the flow in one row', () => {
+  const b = boardOf('studio');
+  const chip = (id) => b.nodes.find((n) => n.id === id);
+  const voices = ['kick', 'snare', 'clap', 'hats', 'tom', 'rim', 'cymbal'].map(chip);
+  const right = Math.max(...voices.map((v) => v.x + v.w));
+  for (const id of ['drum_a', 'drum_b']) assert.ok(chip(id).x > right && Math.abs(chip(id).y - voices[0].y) <= 8, `${id} at the row's right end`);
+  // The sequencer's wires into the row cross one another only where one voice takes two of its nets (hats' closed and open).
+  const triggers = b.wires.filter((w) => w.from.node === 'drums' && voices.some((v) => v.id === w.to.node));
+  let crossings = 0;
+  for (const p of triggers) {
+    for (const q of triggers) {
+      if (p === q || p.from.port === q.from.port) continue;
+      for (let i = 1; i < p.corners.length; i++) {
+        for (let j = 1; j < q.corners.length; j++) {
+          const [a, c] = [p.corners[i - 1], p.corners[i]];
+          const [d, e] = [q.corners[j - 1], q.corners[j]];
+          if (a.y === c.y && d.x === e.x && d.x > Math.min(a.x, c.x) && d.x < Math.max(a.x, c.x) && a.y > Math.min(d.y, e.y) && a.y < Math.max(d.y, e.y)) crossings++;
+        }
+      }
+    }
+  }
+  assert.ok(crossings <= 2, `the triggers cross ${crossings} times`);
+  // bus → dc → limiter → out: one row, left to right.
+  const chain = ['bus', 'dc', 'limiter', 'out'].map(chip);
+  for (let i = 1; i < chain.length; i++) {
+    assert.equal(chain[i].y, chain[0].y, `${chain[i].id} in the row`);
+    assert.ok(chain[i].x > chain[i - 1].x + chain[i - 1].w, `${chain[i].id} right of ${chain[i - 1].id}`);
+  }
 });
