@@ -23,12 +23,14 @@ import {
   parsePlate,
   placeText,
   resized,
+  settle,
   snap,
+  tooLarge,
   union,
   zoomed,
 } from './plate.js';
 import { defaultPanel } from './panel.js';
-import { addCard, plateCards, setPlace, setPlaces } from './panel-edit.js';
+import { addCard, growCards, plateCards, setPlace, setPlaces } from './panel-edit.js';
 import { EditSession } from './panel-edit.js';
 import { generatedTree, parseContent, serialize, splitVersion, versionText } from './panel-tree.js';
 
@@ -227,4 +229,39 @@ test('places are written in the content, the plate beside it; Freeze, Add card a
   const undone = session.history.undo();
   assert.equal(undone, before);
   assert.deepEqual(session.request(undone).message.plate, null);
+});
+
+// Review of 6732ddc: a card grown by its content pushes the cards below it
+// down (never an overlap written), and no plate is larger than MAX_PLATE.
+test('a grown card pushes the cards below it down, deterministically; the plate grows with them', () => {
+  const three = `
+  <div class="signal-cards">
+    <section class="signal-card" place="0 0 80 20"></section>
+    <section class="signal-card" place="80 0 80 10"></section>
+    <section class="signal-card" place="0 20 160 10"></section>
+  </div>
+`;
+  const tree = { ...parseContent(three, whitelist).tree, plate: '160 30' };
+  const [a, b] = plateCards(tree).map((x) => x.node.id);
+  const grown = growCards(tree, [[b, 25]]).tree;
+  const places = plateCards(grown).map((x) => x.place);
+  assert.deepEqual(places, [{ x: 0, y: 0, w: 80, h: 20 }, { x: 80, y: 0, w: 80, h: 25 }, { x: 0, y: 25, w: 160, h: 10 }]);
+  assert.equal(grown.plate, '160 35');
+  places.forEach((p, i) => places.slice(i + 1).forEach((q) => assert.ok(!overlap(p, q))));
+  assert.deepEqual(growCards(tree, [[b, 25]]).tree, grown, 'a function of the tree');
+  assert.equal(growCards(tree, [[a, 5]]).tree, tree, 'never shorter: nothing changes');
+  assert.deepEqual(settle([{ x: 0, y: 0, w: 10, h: 30 }, { x: 0, y: 10, w: 10, h: 5 }, { x: 5, y: 12, w: 10, h: 5 }], new Set([0])).places.slice(1), [{ x: 0, y: 30, w: 10, h: 5 }, { x: 5, y: 35, w: 10, h: 5 }]);
+});
+
+test('a plate is at most MAX_PLATE units on a side: too large, the generated panel stays unplaced and Freeze says so', () => {
+  assert.equal(tooLarge({ w: 160, h: 1000 }), false);
+  assert.equal(tooLarge({ w: 160, h: 1001 }), true);
+  const boxes = Array.from({ length: 30 }, (_, i) => ({ x: GUTTER, y: GUTTER + i * 300, w: 600, h: 290 }));
+  assert.ok(tooLarge(freeze(boxes).plate));
+  const controls = Array.from({ length: 900 }, (_, i) => ({ instance: `i${i}`, module: 'std.x', address: `/i${i}.k`, parameter: 'k', unit: null, min: 0, max: 1, ports: [] }));
+  const spec = defaultPanel({ controls, instances: [], sinks: [] });
+  assert.ok(tooLarge(defaultPlate(spec).plate));
+  const tree = generatedTree(spec);
+  assert.equal(tree.plate, null);
+  assert.ok(plateCards(tree).every((c) => c.place === null));
 });

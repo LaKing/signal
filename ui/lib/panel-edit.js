@@ -6,7 +6,7 @@
 
 import { controlSpec } from './panel.js';
 import { keyCommand } from './keys.js';
-import { parsePlace, parsePlate, placeText, plateText } from './plate.js';
+import { parsePlace, parsePlate, placeText, plateText, settle } from './plate.js';
 import { splitVersion } from './panel-tree.js';
 
 /** Every node of `tree` with its parent and index, in document order. */
@@ -208,6 +208,34 @@ export function setPlace(tree, id, place) {
   } else if (text) found.node.attributes.place = text;
   else delete found.node.attributes.place;
   return { tree: copy };
+}
+
+/**
+ * Cards made taller (`needs`, `[[id, h]]`, pu; never shorter), the cards
+ * they would now cover pushed down below them (`settle`), and the plate
+ * as tall as it must be: what the editor writes when content grew. `{tree}`.
+ */
+export function growCards(tree, needs) {
+  const plate = parsePlate(tree.plate);
+  if (!plate) return { tree };
+  const cards = plateCards(tree);
+  const places = cards.map((c) => c.place);
+  const fixed = new Set();
+  for (const [id, h] of needs) {
+    const i = cards.findIndex((c) => c.node.id === id);
+    if (i < 0 || !places[i] || h <= places[i].h) continue;
+    places[i] = { ...places[i], h };
+    fixed.add(i);
+  }
+  if (!fixed.size) return { tree };
+  const settled = settle(places, fixed);
+  let result = { tree: edit(tree) };
+  cards.forEach((c, i) => {
+    if (!result.error && settled.places[i] && placeText(settled.places[i]) !== placeText(c.place)) result = setPlace(result.tree, c.node.id, settled.places[i]);
+  });
+  if (result.error) return result;
+  result.tree.plate = plateText({ w: plate.w, h: Math.max(plate.h, settled.bottom) });
+  return result;
 }
 
 /**

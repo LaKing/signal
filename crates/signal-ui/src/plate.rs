@@ -168,6 +168,41 @@ pub fn with_plate(text: &str, plate: Option<&str>) -> Result<String, String> {
     };
     let tag = &text[*start..*end];
     let spans = attribute_spans(tag);
+    // An existing plate: untouched when it says the same, else only its value replaced (its spacing kept).
+    if let (Some(value), Some((space, stop, _))) =
+        (plate, spans.iter().find(|(_, _, name)| name == "plate"))
+    {
+        let attribute = &tag[*space..*stop];
+        let current = attribute
+            .split_once('=')
+            .map(|(_, v)| v.trim().trim_matches(|c| c == '"' || c == '\''));
+        if current.and_then(parse_plate) == parse_plate(value) {
+            return Ok(text.to_owned());
+        }
+        let canonical = value.split_ascii_whitespace().collect::<Vec<_>>().join(" ");
+        if let Some(eq) = attribute.find('=') {
+            let rest = &attribute[eq + 1..];
+            let lead = rest.len() - rest.trim_start().len();
+            let body = rest.trim_start();
+            let quoted = body.starts_with('"') || body.starts_with('\'');
+            let at = start + space + eq + 1 + lead;
+            let (from, to) = if quoted {
+                (at + 1, at + body.len() - usize::from(body.len() >= 2))
+            } else {
+                (at, at + body.len())
+            };
+            let inner = if quoted {
+                canonical
+            } else {
+                format!("\"{canonical}\"")
+            };
+            let mut out = String::with_capacity(text.len() + 8);
+            out.push_str(&text[..from]);
+            out.push_str(&inner);
+            out.push_str(&text[to..]);
+            return Ok(out);
+        }
+    }
     let written = plate.map(|v| {
         format!(
             " plate=\"{}\"",
@@ -430,6 +465,18 @@ mod tests {
             "{set}"
         );
         assert_eq!(panel_plate(&set).as_deref(), Some("160 40"));
+        // A hand-written plate: the same value leaves every byte; another changes only the value.
+        let hand = "<signal-panel\n  plate=\"160  90\" >\n</signal-panel>";
+        assert_eq!(with_plate(hand, Some("160 90")).unwrap(), hand);
+        let other = with_plate(hand, Some("160 96")).unwrap();
+        assert_eq!(
+            other,
+            "<signal-panel\n  plate=\"160 96\" >\n</signal-panel>"
+        );
+        assert_eq!(
+            with_plate(&other, Some("160  90")).unwrap(),
+            "<signal-panel\n  plate=\"160 90\" >\n</signal-panel>"
+        );
         let changed = with_plate(&set, Some("160  48")).unwrap();
         assert!(
             changed.contains("<signal-panel part=\"synth\" plate=\"160 48\">"),

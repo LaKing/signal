@@ -26,6 +26,7 @@ import {
   editKey,
   editLabels,
   find,
+  growCards,
   insertionIndex,
   isPlateCard,
   makeGroup,
@@ -48,7 +49,7 @@ import {
   ungroup,
 } from '../lib/panel-edit.js';
 import { defaultPanel } from '../lib/panel.js';
-import { GUTTER, MAX_PLATE, PU, blocked, drawnBox, freeze, moved as movedPlace, parsePlate, placeText, plateText, resized, snap } from '../lib/plate.js';
+import { GUTTER, MAX_PLATE, PU, blocked, drawnBox, freeze, moved as movedPlace, parsePlate, placeText, plateText, resized, snap, tooLarge } from '../lib/plate.js';
 import { ENTRY_CSS, ValueEntry } from './entry-field.js';
 
 /** How many palette results show: the list keeps its height ("Stable layout"). */
@@ -518,6 +519,10 @@ export class PanelEditor {
     const gridWidth = this.grid()?.offsetWidth || Math.max(0, ...boxes.map((b) => b.x + b.w - GUTTER));
     const width = this.panel.localName === 'signal-panel' || !host_ ? undefined : Math.ceil((gridWidth + 2 * GUTTER) / PU);
     const { plate, places } = freeze(boxes, width ? { width } : undefined);
+    if (tooLarge(plate)) {
+      this.say(`Freeze layout: the panel is ${plate.w} × ${plate.h} units, more than a plate may be (${MAX_PLATE} on a side); nothing written`);
+      return;
+    }
     const result = setPlaces(this.tree, plate, cards.map((c, i) => [c.node.id, places[i]]));
     if (!result.error) this.say(`Frozen: ${cards.length} cards on a plate of ${plate.w} × ${plate.h} units`);
     this.apply(result);
@@ -537,20 +542,16 @@ export class PanelEditor {
     this.panel.setPlate?.(tree.plate);
     this.panel.layOutNow?.();
     this.tree = previous;
-    let out = tree;
-    let h = plate.h;
+    const needs = [];
     for (const { node, place } of plateCards(tree)) {
       const el = this.elements.get(node.id);
       if (!place || !el || !(el.clientHeight > 0)) continue;
       const need = Math.ceil((el.scrollHeight + 2 * GUTTER) / PU);
-      if (need <= place.h) continue;
-      const result = setPlace(out, node.id, { ...place, h: need });
-      if (result.error) continue;
-      out = result.tree;
-      h = Math.max(h, place.y + need);
+      if (need > place.h) needs.push([node.id, need]);
     }
-    if (out !== tree && h > plate.h) out.plate = plateText({ w: plate.w, h });
-    return out;
+    // Grown, the cards below pushed down (never overlapping).
+    const grown = growCards(tree, needs);
+    return grown.error ? tree : grown.tree;
   }
 
   /**
@@ -921,6 +922,12 @@ export class PanelEditor {
     if (!this.editing) return;
     // ADR 0047: a placed card is never shorter than its content.
     if (step === 0) tree = this.refitted(tree);
+    // ADR 0047: a plate is at most MAX_PLATE units on a side (the server refuses more).
+    if (tree.plate && !parsePlate(tree.plate)) {
+      this.say(`Not written: the plate would be ${tree.plate.replace(' ', ' × ')} units, more than ${MAX_PLATE} (${MAX_PLATE * PU} px) on a side`);
+      this.draw();
+      return;
+    }
     const checked = checkTree(tree, this.rules);
     if (checked.error) {
       this.say(`Not written: ${checked.error}`);

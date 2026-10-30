@@ -235,7 +235,8 @@ export function cropPanel(doc, cards, state) {
   const panel = doc.querySelector?.('signal-panel');
   if (!panel?.setCrop) return;
   const shown = state?.view === 'panel' ? cards.filter(shownCard).map((c) => panel.plateRect(c.element)) : null;
-  panel.setCrop(shown ? union(shown) : null);
+  // A panel window holding nothing (or nothing drawn yet) shows nothing, never the whole plate.
+  panel.setCrop(shown ? (union(shown) ?? { x: 0, y: 0, w: 0, h: 0 }) : null);
 }
 
 /**

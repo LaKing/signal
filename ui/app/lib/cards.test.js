@@ -108,6 +108,8 @@ test('a panel window hides the cards it does not hold, their places kept, and cr
   assert.deepEqual(cards.map((c) => c.style.order), ['', '', ''], 'never reordered');
   assert.equal(cards[0].props.size, 0);
   assert.deepEqual(doc.panel.crops.at(-1), { x: 8, y: 8, w: 1264, h: 312 }, 'the bounding box of its cards');
+  applyCards(doc, { view: 'panel', cards: [] });
+  assert.deepEqual(doc.panel.crops.at(-1), { x: 0, y: 0, w: 0, h: 0 }, 'holding nothing: nothing shown, never the whole plate');
   applyCards(doc, { view: 'main', held: [] });
   assert.equal(doc.panel.crops.at(-1), null, 'a main window: the whole plate');
   assert.ok(!cards[1].attrs.has(HIDDEN_MARK));

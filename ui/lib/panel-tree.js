@@ -15,7 +15,7 @@
 // on <signal-panel>, outside the content) is the tree's `plate` (`"W H"` or
 // null), written beside the content (`versionText`).
 
-import { defaultPlate, placeText, plateText } from './plate.js';
+import { defaultPlate, placeText, plateText, tooLarge } from './plate.js';
 
 /** A container's element and required class, by kind. */
 export const CONTAINERS = Object.freeze({
@@ -316,10 +316,14 @@ export function generatedTree(spec) {
   ];
   if (output.length) cards.push(card('output', null, output, ['wide']));
   // ADR 0047 §2: placed as the generated panel shows them (`defaultPlate`), written with the first write.
+  // A panel too large for a plate (over MAX_PLATE units) stays unplaced: laid out at 1280 px.
   const { plate, places } = defaultPlate(spec, { slots: false });
-  cards.forEach((c, i) => {
-    c.place = placeText(places[i]);
-  });
+  const placed = !tooLarge(plate);
+  if (placed) {
+    cards.forEach((c, i) => {
+      c.place = placeText(places[i]);
+    });
+  }
   const grid = { id: id(), kind: 'cards', classes: [], children: cards };
-  return { kind: 'panel', next, plate: plateText(plate), children: [grid] };
+  return { kind: 'panel', next, plate: placed ? plateText(plate) : null, children: [grid] };
 }

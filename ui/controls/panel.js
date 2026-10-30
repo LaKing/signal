@@ -21,7 +21,7 @@
 
 import { connectFromPage, getDefaultConnection, setDefaultConnection } from '../signal-ui.js';
 import { BindingCheck, defaultPanel, formatDiagnostic, panelFile } from '../lib/panel.js';
-import { GUTTER, PU, REFERENCE_PX, defaultPlate, fitScale, pack, plateText, zoomed } from '../lib/plate.js';
+import { GUTTER, PU, REFERENCE_PX, defaultPlate, fitScale, pack, plateText, tooLarge, zoomed } from '../lib/plate.js';
 import { PLATE_CSS, layOutCards, overflowing } from './plate.js';
 import { unsavedLine } from '../lib/unsaved.js';
 import { EDITOR_CSS, PanelEditor, SharedHistory, showWritten } from './panel-editor.js';
@@ -242,7 +242,7 @@ export class SignalPanel extends HTMLElement {
     let placed = null;
     if (this.generatedPlaces && !generated.hidden) {
       placed = layOutCards(generated, this.generatedPlate, this.generatedPlaces);
-      if (this.refitGenerated(generated)) placed = layOutCards(generated, this.generatedPlate, this.generatedPlaces);
+      if (this.refitGenerated(generated)) placed = this.generatedPlaces ? layOutCards(generated, this.generatedPlate, this.generatedPlaces) : layOutCards(generated, null);
     } else layOutCards(generated, null);
     const grid = this.querySelector(':scope > .signal-cards');
     const own = layOutCards(grid, this.getAttribute('plate'));
@@ -268,6 +268,11 @@ export class SignalPanel extends HTMLElement {
     const needs = sections.map((s) => Math.ceil((s.scrollHeight + 2 * GUTTER) / PU));
     if (!needs.some((n, i) => n > places[i].h)) return false;
     const { plate, places: packed } = pack(places.map((p, i) => ({ w: p.w, h: Math.max(p.h, needs[i]) })));
+    // Too large for a plate: the generated grid as it flows (at 1280 px).
+    if (tooLarge(plate)) {
+      this.generatedPlaces = null;
+      return true;
+    }
     this.generatedPlate = plateText(plate);
     this.generatedPlaces = new Map(sections.map((s, i) => [s, packed[i]]));
     return true;
@@ -525,7 +530,8 @@ export class SignalPanel extends HTMLElement {
     const sections = generatedSections(spec);
     const { plate, places } = defaultPlate(spec);
     this.generatedPlate = plateText(plate);
-    this.generatedPlaces = new Map(sections.map((s, i) => [s, places[i]]));
+    // Too large for a plate (over 1000 units): the grid as it flows, at the reference width.
+    this.generatedPlaces = tooLarge(plate) ? null : new Map(sections.map((s, i) => [s, places[i]]));
     this.$('.generated').replaceChildren(...sections);
     this.$('.summary').textContent = 'generated panel (the project has no ui/main.html)';
     this.layOut();

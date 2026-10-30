@@ -264,3 +264,29 @@ export function defaultPlate(spec, { slots = true } = {}) {
   if (output.length) sizes.push(cardSize(output, { wide: true }));
   return pack(sizes);
 }
+
+/** Whether a plate (`{w, h}`, pu) is larger than a plate may be (MAX_PLATE on a side). */
+export function tooLarge(plate) {
+  return !plate || plate.w > MAX_PLATE || plate.h > MAX_PLATE;
+}
+
+/**
+ * Places `places` (pu, in the panel's order) after the cards at the indexes
+ * `fixed` changed (grown): every other card that now overlaps a card
+ * settled before it is pushed down, just below it, in the order of its top
+ * then its left then its index, so the result is a function of the places.
+ * Returns the new places and the plate height they need.
+ */
+export function settle(places, fixed) {
+  const out = places.map((p) => (p ? { ...p } : p));
+  const settled = [...fixed].map((i) => out[i]).filter(Boolean);
+  const rest = out
+    .map((p, i) => ({ p, i }))
+    .filter(({ p, i }) => p && !fixed.has(i))
+    .sort((a, b) => a.p.y - b.p.y || a.p.x - b.p.x || a.i - b.i);
+  for (const { p } of rest) {
+    for (let hit = settled.find((s) => overlap(p, s)); hit; hit = settled.find((s) => overlap(p, s))) p.y = hit.y + hit.h;
+    settled.push(p);
+  }
+  return { places: out, bottom: Math.max(0, ...out.filter(Boolean).map((p) => p.y + p.h)) };
+}
