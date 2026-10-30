@@ -114,7 +114,8 @@ test('zoomed into the synth, its package’s pins and the die’s interface pins
       assert.equal(hit.kind, 'port', `${pin.name} at k ${k}`);
       // A connector's pins (ADR 0047 phase 5) closer than MIN_PORT_PX on screen: its neighbour in the connector is as good a hit.
       const packed = pin.side === 'top' && synth.connector;
-      const near = packed && hit.port.side === 'top' && Math.abs(hit.port.x - pin.x) * k < 2 * MIN_PORT_PX;
+      const tops = new Set(synth.ins.filter((p) => p.side === 'top').map((p) => `/synth.${p.name}`));
+      const near = packed && tops.has(hit.address);
       if (!near) assert.equal(hit.address, `/synth.${pin.name}`, `${pin.name} at k ${k}: the composite’s port, outside or inside`);
       const net = portNet(drawn.levels, hit);
       const paths = new Set(net.map((n) => n.path));
@@ -368,15 +369,29 @@ test('wires on every level: no net is a label on any board or die of the example
   }
 });
 
-test('the synth’s legs gather into ribbons (lanes, `params ×n`, one label), never drawn on top of each other', () => {
+test('the synth’s legs gather into ribbons (per row into the channel, down to its connector; one label, its connector’s), never drawn on top of each other', () => {
   const top = studio()('');
   const synthLegs = top.wires.filter((w) => w.kind === 'binding' && w.to.node === 'synth');
   assert.ok(synthLegs.length >= 20);
   const ribbons = top.board.ribbons.filter((r) => r.lanes && r.group === 'legs:synth');
   assert.ok(ribbons.length >= 1, 'in ribbons');
   assert.ok(Math.max(...ribbons.map((r) => r.members.length)) >= 6, 'a wide one');
-  assert.equal(ribbons.filter((r) => r.text).length, 1, 'labelled once');
-  assert.match(ribbons.find((r) => r.text).label, /^params ×\d+$/);
+  // One label, consistent: its connector's (`params ×n` on the package); its ribbons say nothing of their own.
+  assert.equal(ribbons.filter((r) => r.text).length, 0, 'labelled by its connector');
+  const synth = top.nodes.find((n) => n.id === 'synth');
+  assert.match(synth.connector.label, /^params ×\d+$/);
+  // Laid out as ribbons (ADR 0047 phase 5, the coordinator's check): each leg down from its via to its row's line, along it to the
+  // channel, down the channel, into the connector; the channel between the plate's controls, not through them.
+  const plan = synth.legPlan;
+  assert.ok(plan && plan.rows.length >= 2, 'rows of vias');
+  for (const w of synthLegs) {
+    const c = w.corners;
+    assert.ok(c.some((p) => p.x === plan.x), `${w.id}: down the channel`);
+    assert.ok(plan.rows.some((r) => c.some((p) => p.y === r.y)), `${w.id}: along its row's line`);
+  }
+  const { plate } = { plate: JSON.parse(readFileSync(new URL('ui/lib/fixtures/board/studio-plate.json', root), 'utf8')) };
+  const topRow = Math.min(...plan.rows.map((r) => r.y));
+  for (const r of plate.obstacles) assert.ok(!(r.x < plan.x && plan.x < r.x + r.w && r.y < plan.floor && r.y + r.h > topRow), 'the channel crosses no control');
   // Their drawn ways: no two of them on one line over a stretch (routes they share are drawn in lanes).
   const drawn = synthLegs.map((w) => ({ net: mazeNet(w).net, points: w.display ?? w.corners }));
   const shared = synthLegs.map((w) => ({ net: mazeNet(w).net, points: w.corners }));
@@ -409,9 +424,10 @@ test('a ribbon goes into its chip: the synth’s parameters are one connector on
   // Inside: the strip's wires are one bus, drawn in lanes as a ribbon labelled once.
   const inner = die.wires.filter((w) => w.from.node === PARAMS);
   assert.ok(inner.every((w) => w.bus === 'bus:params'));
+  // Drawn in lanes (they share their way), a band only where they run packed clear of every chip, never a label of its own.
+  assert.ok(inner.filter((w) => w.display).length >= inner.length / 2, 'in lanes');
   const ribbons = die.board.ribbons.filter((r) => r.lanes && r.group === 'params');
-  assert.ok(ribbons.length >= 1);
-  assert.equal(ribbons.filter((r) => r.text).length, 1);
+  assert.equal(ribbons.filter((r) => r.text).length, 0);
   assert.ok(overlaps(die.wires.map((w) => ({ net: mazeNet(w).net, points: w.display ?? w.corners }))) <= 1);
 });
 
@@ -454,4 +470,47 @@ test('lanes: three nets sharing a way each get a lane, keep it along the run, pe
   }
   assert.equal(a.ribbons.length >= 1, true);
   assert.match(a.ribbons[0].label, /^params ×3$/);
+});
+
+test('a ribbon looks like one (the coordinator’s check of ead3baa): its band only where its members run packed, as wide as their lanes, each member along it inside it, clear of every chip', () => {
+  const of = studio();
+  for (const level of ['', 'moog_voice']) {
+    const lay = of(level);
+    const chips = lay.nodes.filter((n) => n.w > 0 && n.h > 0);
+    for (const r of lay.board.ribbons.filter((x) => x.lanes)) {
+      const thick = r.axis === 'h' ? r.band.h : r.band.w;
+      const long = r.axis === 'h' ? r.band.w : r.band.h;
+      assert.ok(thick <= r.members.length * 3 + 6, `${level || 'top'} ${r.label}: ${thick} thick for ${r.members.length}`);
+      for (const c of chips) {
+        const g = { x: c.x - RIBBON_CLEAR, y: c.y - RIBBON_CLEAR, w: c.w + 2 * RIBBON_CLEAR, h: c.h + 2 * RIBBON_CLEAR };
+        assert.ok(!(r.band.x < g.x + g.w && g.x < r.band.x + r.band.w && r.band.y < g.y + g.h && g.y < r.band.y + r.band.h), `${level || 'top'} ${r.label}: clear of ${c.id}`);
+      }
+      // Each member runs along the band, inside it, over most of its length.
+      for (const id of r.wires) {
+        const w = lay.wires.find((x) => x.id === id);
+        const c = w.display ?? w.corners;
+        let along = 0;
+        for (let k = 1; k < c.length; k++) {
+          const [p, q] = [c[k - 1], c[k]];
+          const inside = (pt) => pt.x >= r.band.x - 0.01 && pt.x <= r.band.x + r.band.w + 0.01 && pt.y >= r.band.y - 0.01 && pt.y <= r.band.y + r.band.h + 0.01;
+          if (r.axis === 'h' && p.y === q.y && inside({ x: r.band.x + r.band.w / 2, y: p.y })) along = Math.max(along, Math.min(Math.max(p.x, q.x), r.band.x + r.band.w) - Math.max(Math.min(p.x, q.x), r.band.x));
+          if (r.axis === 'v' && p.x === q.x && inside({ x: p.x, y: r.band.y + r.band.h / 2 })) along = Math.max(along, Math.min(Math.max(p.y, q.y), r.band.y + r.band.h) - Math.max(Math.min(p.y, q.y), r.band.y));
+        }
+        // (but where it turns in or out at the band's ends, by as much as the band is thick)
+        if (r.members.some((m) => m.net === mazeNet(w).net)) assert.ok(along >= long - 2 * thick - 1, `${level || 'top'} ${r.label}: wire ${id} along it (${along} of ${long})`);
+      }
+    }
+  }
+});
+
+test('no chip lies across a card’s edge: inside its card, or beside it wholly (the coordinator’s check of ead3baa)', () => {
+  const top = studio()('');
+  const fx = JSON.parse(read('ui/lib/fixtures/board/studio-plate.json'));
+  for (const n of top.nodes.filter((x) => x.kind === 'instance')) {
+    for (const c of fx.cards) {
+      const meets = n.x < c.x + c.w && c.x < n.x + n.w && n.y < c.y + c.h && c.y < n.y + n.h;
+      const inside = n.x >= c.x && n.y >= c.y && n.x + n.w <= c.x + c.w && n.y + n.h <= c.y + c.h;
+      assert.ok(!meets || inside, `${n.id} across ${c.title}`);
+    }
+  }
 });

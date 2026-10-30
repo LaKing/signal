@@ -16,7 +16,7 @@ import { VIA_ROW, VIA_W, controlAnchor, controlEdges, controlNodes, controlPads 
 import { frameFace, placeFace } from './schematic-face.js';
 import { CLEARANCE, PU, STUB, TRACK, balance, near, placeNear, ring, sugiyama } from './board-layout.js';
 import { Maze, STEP } from './board-maze.js';
-import { formRibbons, placeRibbonLabels, ribbonName } from './board-ribbon.js';
+import { RIBBON_CLEAR, formRibbons, placeRibbonLabels, ribbonName } from './board-ribbon.js';
 import { LANE as LANE_PITCH, laneWires } from './board-lanes.js';
 import { stretchCorners } from './board-stretch.js';
 import { LABEL_STUB, NET_DESTS, measure, orthGeometry, routeWires, simplify, zCorners } from './board-route.js';
@@ -1177,21 +1177,26 @@ export function boardRibbons(nodes, wires, obstacles = [], labels = []) {
   // The group whose ribbons share one label: a chip's legs, a die's connector.
   const groupOf = (net) => (net.startsWith('leg:') ? `legs:${net.split(':').at(-2)}` : net.startsWith(`${PARAMS}\n`) ? 'params' : null);
   // ADR 0047 phase 5: nets sharing a way (a chip's legs, a die's parameters, a wire run along another) each in a lane, a ribbon where three or more share it.
-  const lanes = laneWires(all, { nameOf, isLeg: (net) => net.startsWith('leg:@control:'), ribbonName, groupOf });
+  const lanes = laneWires(all, { nameOf, isLeg: (net) => net.startsWith('leg:@control:'), ribbonName, groupOf, boxes });
   // Then side by side on their own tracks (phase 4), as the lanes draw them (a lane is never packed again: `RIBBON_NEAR`).
   const side = formRibbons(
     all.map((w) => ({ ...w, corners: lanes.display.get(w.id) ?? w.corners })),
     boxes,
     { nameOf, endsOf: (m) => [m.wire.from.node, m.wire.to.node] },
   );
-  // A lane's band never lies over a box (its lanes still do where they enter it).
+  // A lane's band keeps RIBBON_CLEAR from every chip and via (the plate's controls are the gutters' sides, not boxes on the board).
   const meets = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
   const chips = nodes.filter((n) => n.w > 0 && n.h > 0);
+  const grown = (b) => ({ x: b.x - RIBBON_CLEAR, y: b.y - RIBBON_CLEAR, w: b.w + 2 * RIBBON_CLEAR, h: b.h + 2 * RIBBON_CLEAR });
   for (const r of side.ribbons) {
     const groups = new Set(r.members.map((m) => groupOf(m.net)));
     r.group = groups.size === 1 ? [...groups][0] : null;
   }
-  const ribbons = [...lanes.ribbons.filter((r) => !chips.some((b) => meets(r.band, b))), ...side.ribbons];
+  const ribbons = [...lanes.ribbons.filter((r) => !chips.some((b) => meets(r.band, grown(b)))), ...side.ribbons];
+  // A connector's ribbon is labelled by its connector (`params ×n` on the package): one label, its count.
+  const connected = new Set(nodes.filter((n) => n.connector).map((n) => `legs:${n.id}`));
+  if (nodes.some((n) => n.id === PARAMS && n.connector)) connected.add('params');
+  for (const r of ribbons) if (connected.has(r.group)) r.label = null;
   const display = new Map([...lanes.display, ...side.display]);
   // Their labels off every box, a via's name and the net labels (`placeRibbonLabels`).
   const texts = [...boxes.map((b) => ({ x: b.x - 2, y: b.y - (b.via ? 10 : 2), w: b.w + 4, h: b.h + (b.via ? 12 : 4) })), ...labels.map((l) => ({ x: l.side === 'in' ? l.at.x - CHAR * l.text.length : l.at.x, y: l.at.y - 9, w: CHAR * l.text.length, h: 12 }))];
@@ -1340,7 +1345,7 @@ export const TOP_PAD = 16;
 /** Between a card's controls and a chip below them: room for the comb's collector. */
 export const COMB_GAP = 24;
 /** …and room for its connector's ribbon (ADR 0047 phase 5): its lanes and the comb's line, when it has one. */
-const combGap = (node) => (node.connector ? Math.max(COMB_GAP, Math.ceil((2 * combDepth(node.connector.count) + COMB) / PU) * PU) : COMB_GAP);
+const combGap = (node) => (node.connector && node.legPlan ? Math.max(COMB_GAP, Math.ceil((2 * combDepth(node.connector.count) + COMB) / PU) * PU) : COMB_GAP);
 /** A chip keeps this far from a control (a track or two around it)… */
 export const CONTROL_ROOM = 16;
 /** …and this far from another chip (a channel for the wires between them). */
@@ -1355,7 +1360,20 @@ const CARD_PAD = 8;
  * binds after them in its order; the chip as wide as they need at
  * TOP_PITCH, as tall as its ports need.
  */
-function topPins(nodes, legs, edges = []) {
+function topPins(nodes, legs, edges = [], controlRects = []) {
+  // A chip whose legs gather as ribbons (ADR 0047 phase 5): its top pins in its ribbons' order (`legPlan`), so none cross.
+  const planned = new Map();
+  for (const node of nodes) {
+    if (node.kind !== 'instance' || node.face || !node.composite) continue;
+    const plan = legPlan(legs.filter((l) => l.writes && l.chip === node.id), controlRects);
+    if (!plan) continue;
+    node.legPlan = plan;
+    const rank = new Map();
+    plan.order.forEach((l, i) => {
+      if (!rank.has(l.pin.port)) rank.set(l.pin.port, i);
+    });
+    planned.set(node.id, rank);
+  }
   const at = new Map();
   for (const l of legs) {
     if (!l.writes) continue;
@@ -1371,7 +1389,8 @@ function topPins(nodes, legs, edges = []) {
     const params = node.ins.filter((p) => p.parameter && (at.has(`${node.id}\n${p.name}`) || !driven.has(p.name)));
     if (!params.length || !params.some((p) => at.has(`${node.id}\n${p.name}`))) continue;
     const keyed = params.map((p, i) => ({ p, i, v: at.get(`${node.id}\n${p.name}`) ?? null }));
-    keyed.sort((a, b) => (a.v ? 0 : 1) - (b.v ? 0 : 1) || (a.v && b.v ? a.v.x - b.v.x || a.v.y - b.v.y : 0) || a.i - b.i);
+    const rank = planned.get(node.id);
+    keyed.sort((a, b) => (a.v ? 0 : 1) - (b.v ? 0 : 1) || (rank && a.v && b.v ? rank.get(a.p.name) - rank.get(b.p.name) : 0) || (a.v && b.v ? a.v.x - b.v.x || a.v.y - b.v.y : 0) || a.i - b.i);
     node.topOrder = new Map(keyed.map((k, i) => [k.p.name, i]));
     const sides = Math.max(1, node.ins.length - params.length, node.outs.length);
     // As wide as its title, its side pins' names and its top pins need (the parameters' names are no longer beside it).
@@ -1380,6 +1399,79 @@ function topPins(nodes, legs, edges = []) {
     node.w = Math.ceil(Math.max(MIN_WIDTH, CHAR * Math.max(node.name.length, node.module.length, under) + 2 * PAD, CHAR * (longest(node.ins.filter((p) => !params.includes(p))) + longest(node.outs)) + 4 * PAD, 2 * TOP_PAD + (params.length - 1) * TOP_PITCH));
     node.h = HEADER + ROW * (sides + (node.slot ? 1 : 0)) + PAD;
   }
+}
+
+/** A chip with this many legs or more (its die's connector's) gathers them as ribbons (ADR 0047 phase 5). */
+const RIBBON_LEGS = 4;
+
+/**
+ * The ribbons of a chip's legs (ADR 0047 phase 5, the owner: "bundle the
+ * synth's knobs' legs into ribbon cables"): its vias in rows (by their
+ * controls' tops), each row's legs dropping into one horizontal ribbon in
+ * the gutter below the row, the rows' ribbons joining one vertical ribbon
+ * in a channel through the plate's controls (a gap free of controls from
+ * the first row down past the last, nearest the vias' middle, wide enough
+ * for them all), which runs down to the chip's connector. `{rows: [{y,
+ * legs}], x, order}`: each row's ribbon's line, the channel's x, and the
+ * legs in the order their pins take on the chip's edge (so no two cross:
+ * per row west of the channel and east of it, each by its via's x, the
+ * lower rows outside the upper), or null where the plate gives no channel.
+ */
+function legPlan(chipLegs, controlRects) {
+  if (chipLegs.length < RIBBON_LEGS) return null;
+  const rectOfLeg = (l) => l.control.control.rect;
+  const sorted = [...chipLegs].sort((a, b) => rectOfLeg(a).y - rectOfLeg(b).y || rectOfLeg(a).x - rectOfLeg(b).x);
+  const rows = [];
+  for (const l of sorted) {
+    const r = rectOfLeg(l);
+    const row = rows.at(-1);
+    if (row && r.y - row.y0 <= 2 * PU) row.legs.push(l);
+    else rows.push({ y0: r.y, legs: [l] });
+  }
+  // Rows of one via each (a column: a drum voice's) need no ribbon: the maze's comb serves them.
+  if (!rows.some((r) => r.legs.length >= 2)) return null;
+  const x0 = Math.min(...chipLegs.map((l) => rectOfLeg(l).x));
+  const x1 = Math.max(...chipLegs.map((l) => rectOfLeg(l).x + rectOfLeg(l).w));
+  for (const row of rows) {
+    // The row's bottom: every control in its band; the gutter below it, to the next control under it.
+    const band = controlRects.filter((r) => Math.abs(r.y - row.y0) <= 2 * PU);
+    row.bottom = Math.max(...band.map((r) => r.y + r.h), ...row.legs.map((l) => rectOfLeg(l).y + rectOfLeg(l).h));
+    const below = controlRects.filter((r) => r.y >= row.bottom - 1 && r.x < x1 + 400 && r.x + r.w > x0 - 400).map((r) => r.y);
+    const next = below.length ? Math.min(...below) : row.bottom + 2 * COMB;
+    row.y = Math.round((row.bottom + Math.min(next, row.bottom + 2 * COMB)) / 2);
+  }
+  const top = rows[0].y;
+  const floor = rows.at(-1).bottom;
+  // The channel: a gap free of controls from the first row's ribbon down past the last row, wide enough for every lane.
+  // (its lanes pack as close as a unit apart in a narrow one, a ribbon cable's conductors: `laneWires` keeps them off the
+  // controls beside it; better there, beside the vias, than round the card's edge).
+  const need = Math.max(3 * PU, chipLegs.length);
+  const across = controlRects.filter((r) => r.y < floor && r.y + r.h > top).map((r) => [r.x, r.x + r.w]).sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const [a, b] of across) {
+    if (merged.length && a <= merged.at(-1)[1]) merged.at(-1)[1] = Math.max(merged.at(-1)[1], b);
+    else merged.push([a, b]);
+  }
+  const gaps = [];
+  let from = x0 - 400;
+  for (const [a, b] of merged) {
+    if (a - from >= need) gaps.push([from, a]);
+    from = Math.max(from, b);
+  }
+  if (x1 + 400 - from >= need) gaps.push([from, x1 + 400]);
+  const cx = chipLegs.reduce((sum, l) => sum + rectOfLeg(l).x + rectOfLeg(l).w / 2, 0) / chipLegs.length;
+  // The point of each gap nearest the vias' middle (kept `need / 2` from its sides).
+  const spots = gaps.map(([a, b]) => Math.round(Math.min(b - need / 2, Math.max(a + need / 2, cx))));
+  if (!spots.length) return null;
+  const x = spots.reduce((best, v) => (Math.abs(v - cx) < Math.abs(best - cx) ? v : best), spots[0]);
+  let order = [];
+  for (const row of rows) {
+    const mid = (l) => rectOfLeg(l).x + rectOfLeg(l).w / 2;
+    const west = row.legs.filter((l) => mid(l) < x).sort((a, b) => mid(a) - mid(b));
+    const east = row.legs.filter((l) => mid(l) >= x).sort((a, b) => mid(a) - mid(b));
+    order = [...west, ...order, ...east];
+  }
+  return { rows: rows.map((r) => ({ y: r.y, legs: r.legs })), x, order, floor };
 }
 
 /** Chips side by side at one height (within PU), three or more: rows, each left to right. */
@@ -1611,7 +1703,7 @@ function underVias(node, rects, cards, free, controlRects = rects) {
  * a global net or a wire with no way are labels.
  */
 function plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects, board, positions, factsOf, widen = () => {} }) {
-  topPins(nodes, legs, edges);
+  topPins(nodes, legs, edges, controlRects);
   widen();
   const cards = (board.cards ?? []).filter((c) => c.w > 0 && c.h > 0);
   const placed = [];
@@ -1622,16 +1714,17 @@ function plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects
   controlRects.forEach((o, i) => {
     for (let bx = Math.floor((o.x - CONTROL_ROOM) / BUCKET); bx <= Math.floor((o.x + o.w + CONTROL_ROOM) / BUCKET); bx++) {
       for (let by = Math.floor((o.y - CONTROL_ROOM) / BUCKET); by <= Math.floor((o.y + o.h + CONTROL_ROOM) / BUCKET); by++) {
-        const key = `${bx},${by}`;
+        const key = bx * 65536 + by;
         if (!buckets.has(key)) buckets.set(key, []);
         buckets.get(key).push(i);
       }
     }
   });
-  const nearControl = (box) => {
+  const nearControl = (box, room = CONTROL_ROOM) => {
     for (let bx = Math.floor(box.x / BUCKET); bx <= Math.floor((box.x + box.w) / BUCKET); bx++) {
       for (let by = Math.floor(box.y / BUCKET); by <= Math.floor((box.y + box.h) / BUCKET); by++) {
-        for (const i of buckets.get(`${bx},${by}`) ?? []) if (near(box, controlRects[i], CONTROL_ROOM)) return true;
+        const list = buckets.get(bx * 65536 + by);
+        if (list) for (const i of list) if (near(box, controlRects[i], room)) return true;
       }
     }
     return false;
@@ -1746,7 +1839,9 @@ function plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects
     const card = cards[cardIndex.get(node.id)];
     let floor = Math.max(...rects.map((r) => r.y + r.h));
     if (card) for (const r of controlRects) if (cardOf([card], r) && r.y + r.h > floor) floor = r.y + r.h;
-    put(node, { x: cx - node.w / 2, y: floor + combGap(node) });
+    // A chip whose legs gather as ribbons (ADR 0047 phase 5): its connector right under their channel, so the ribbon drops straight in.
+    const x = node.legPlan && node.connector ? node.legPlan.x - (node.connector.dx0 + node.connector.dx1) / 2 : cx - node.w / 2;
+    put(node, { x, y: floor + combGap(node) });
   }
   // A row's bus (a sequencer's triggers under its voices) keeps its way free: no other chip there.
   for (const row of rowsOf(nodes.filter((n) => done.has(n.id) && rectsOf.has(n.id) && n.kind === 'instance'), edges)) {
@@ -1891,15 +1986,55 @@ function plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects
   const xsAll = all.flatMap((b) => [b.x, b.x + b.w]);
   const ysAll = all.flatMap((b) => [b.y, b.y + b.h]);
   const bounds = { x0: least(xsAll, 0) - MAZE_MARGIN, x1: most(xsAll, 0) + MAZE_MARGIN, y0: least(ysAll, 0) - MAZE_MARGIN, y1: most(ysAll, 0) + MAZE_MARGIN };
-  const maze = new Maze(all, [], [], bounds, pinsAll);
   const pinOf = (node, port, out) => (out ? node.outs : node.ins).find((p) => p.name === port);
+  const routeOf = new Map();
+  // ADR 0047 phase 5: a chip's legs as ribbons (`legPlan`): down from each via to its row's ribbon, along it to the channel,
+  // down the channel to the chip's comb, along it to above the pin and in. Where a way would cross a control or a chip
+  // (the chip placed elsewhere), the chip's legs are the maze's as before.
+  const planned = [];
+  for (const chip of nodes) {
+    const plan = chip.legPlan;
+    if (!plan || !chip.connector) continue;
+    const yc = chip.y - combDepth(chip.connector.count);
+    if (yc <= plan.floor + PU) continue;
+    const mine = legs.map((l, i) => ({ l, i })).filter(({ l }) => l.writes && l.chip === chip.id);
+    const rowOf = new Map(plan.rows.flatMap((r) => r.legs.map((l) => [l, r.y])));
+    const routes = [];
+    let ok = true;
+    for (const { l, i } of mine) {
+      const a = pinOf(byId.get(l.from.node), l.from.port, true);
+      const b = pinOf(chip, l.to.port, false);
+      const yr = rowOf.get(l);
+      if (!a || !b || yr === undefined) {
+        ok = false;
+        break;
+      }
+      const corners = simplify([a, { x: a.x, y: yr }, { x: plan.x, y: yr }, { x: plan.x, y: yc }, { x: b.x, y: yc }, b]);
+      // Clear of every control but its own, every chip and pad but its ends.
+      const ownRect = l.control.control.rect;
+      const same = (r) => r.x === ownRect.x && r.y === ownRect.y && r.w === ownRect.w && r.h === ownRect.h;
+      const others = [...controlRects.filter((r) => !same(r)), ...nodes.filter((n) => n.w > 0 && n.h > 0 && n.id !== chip.id && n.id !== l.from.node)];
+      for (let k = 1; k < corners.length && ok; k++) {
+        const [p, q] = [corners[k - 1], corners[k]];
+        const seg = { x: Math.min(p.x, q.x) - 1, y: Math.min(p.y, q.y) - 1, w: Math.abs(q.x - p.x) + 2, h: Math.abs(q.y - p.y) + 2 };
+        if (others.some((o) => near(seg, o, 0))) ok = false;
+      }
+      routes.push({ i, l, corners });
+    }
+    if (!ok) continue;
+    for (const r of routes) {
+      routeOf.set(`leg${r.i}`, r.corners);
+      for (let k = 1; k < r.corners.length; k++) planned.push(Object.assign([r.corners[k - 1], r.corners[k]], { net: `leg:${r.l.control.id}:${r.l.pin.name}` }));
+    }
+  }
+  const maze = new Maze(all, [], planned, bounds, pinsAll);
   const labels = [];
   const wires = [];
-  const routeOf = new Map();
   // The legs first (the combs: short, under their own controls), chip by chip, each chip's in its pins' order.
   const legOrder = legs.map((l, i) => ({ l, i }));
   legOrder.sort((p, q) => nodes.indexOf(byId.get(p.l.chip)) - nodes.indexOf(byId.get(q.l.chip)) || (byId.get(p.l.chip).topOrder?.get(p.l.pin.port) ?? 0) - (byId.get(q.l.chip).topOrder?.get(q.l.pin.port) ?? 0) || p.i - q.i);
   for (const { l, i } of legOrder) {
+    if (routeOf.has(`leg${i}`)) continue;
     const a = pinOf(byId.get(l.from.node), l.from.port, true);
     const b = pinOf(byId.get(l.to.node), l.to.port, false);
     const own = [l.control.control.rect, rectOf(l.control)];

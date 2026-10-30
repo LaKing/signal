@@ -221,7 +221,16 @@ test('each chip under its own controls (the coordinator’s design): the synth b
     return leg ? b.nodes.find((n) => n.id === leg.from.node).control.rect.x : Infinity;
   };
   tops.sort((p, q) => p.x - q.x);
-  for (let i = 1; i < tops.length; i++) assert.ok(tops[i].y === synth.y && viaX(tops[i]) >= viaX(tops[i - 1]), `${tops[i].name} in its via's x order`);
+  // ADR 0047 phase 5: in its ribbons' order (`legPlan`: per row west of the channel and east of it, each by its via's x, the lower
+  // rows outside the upper), so the ribbon into its connector never crosses itself; without a plan, in its vias' x order.
+  if (synth.legPlan) {
+    const rank = new Map();
+    synth.legPlan.order.forEach((l, i) => {
+      if (!rank.has(l.pin.port)) rank.set(l.pin.port, i);
+    });
+    const ranked = tops.filter((p) => rank.has(p.name));
+    for (let i = 1; i < ranked.length; i++) assert.ok(rank.get(ranked[i].name) > rank.get(ranked[i - 1].name), `${ranked[i].name} in its ribbons' order`);
+  } else for (let i = 1; i < tops.length; i++) assert.ok(tops[i].y === synth.y && viaX(tops[i]) >= viaX(tops[i - 1]), `${tops[i].name} in its via's x order`);
   const pinned = boardOf('studio', { synth: { x: 4000, y: 40 } });
   assert.deepEqual(pinned.nodes.filter((n) => n.id === 'synth').map((n) => [n.x, n.y, n.pinned]), [[4000, 40, true]]);
   const over = plate.obstacles[0];

@@ -1318,7 +1318,8 @@ export class SignalSchematic extends HTMLElement {
     if (connector) {
       const r = node.kind === 'instance' ? 3 : 6;
       rect({ x: connector.x0, y: node.y - r, w: connector.x1 - connector.x0, h: 2 * r }, { class: 'connector', rx: r * m });
-      if (connector.label && text(7)) label({ x: (connector.x0 + connector.x1) / 2, y: node.y + 2 * r + 5 }, 6, { class: 'connector-label', 'text-anchor': 'middle' }, connector.label);
+      // Its label beside it, just above the edge (inside, it would lie on the chip's title).
+      if (connector.label && text(7)) label({ x: connector.x1 + 3, y: node.y - 3 }, 6, { class: 'connector-label', 'text-anchor': 'start' }, connector.label);
     }
     if (text(12) && node.kind === 'instance') {
       label({ x: node.x + 8, y: node.y + 14 }, 12, { class: 'name' }, node.name);

@@ -41,7 +41,7 @@ const dot = (a, b) => a.x * b.x + a.y * b.y;
  * ribbon's label; `isLeg(net)` says a plate control's leg; `groupOf(net)`
  * the group whose bands share one label (a chip's legs), or null.
  */
-export function laneWires(wires, { nameOf = () => '', isLeg = () => false, ribbonName = () => '', groupOf = () => null } = {}) {
+export function laneWires(wires, { nameOf = () => '', isLeg = () => false, ribbonName = () => '', groupOf = () => null, boxes = [] } = {}) {
   // Every corner splits every segment it lies on: a shared stretch is then a run of identical subsegments.
   const byY = new Map();
   const byX = new Map();
@@ -220,6 +220,18 @@ export function laneWires(wires, { nameOf = () => '', isLeg = () => false, ribbo
       }
     }
   }
+  // …and less where a box lies beside it (its outer lanes never reach into a box: a chip, a via, a control).
+  for (const run of runs) {
+    if (run.count < 2) continue;
+    for (const b of boxes) {
+      const [lo0, hi0, a0, a1] = run.horizontal ? [b.x, b.x + b.w, b.y, b.y + b.h] : [b.y, b.y + b.h, b.x, b.x + b.w];
+      if (hi0 <= run.lo || lo0 >= run.hi) continue;
+      // A line through a box (into its own pin) is not kept from it.
+      if (run.at > a0 && run.at < a1) continue;
+      const d = run.at <= a0 ? a0 - run.at : run.at - a1;
+      if (d < 64) run.pitch = Math.min(run.pitch, Math.max(0.5, d - 1) / ((run.count - 1) / 2 + 0.5));
+    }
+  }
   const offset = (s, net) => {
     const run = s.key ? runOf.get(s.key) : null;
     if (!run) return { x: 0, y: 0 };
@@ -281,24 +293,38 @@ export function laneWires(wires, { nameOf = () => '', isLeg = () => false, ribbo
     }
     display.set(w.id, clean);
   }
-  // The ribbons: a run where three nets or more lie side by side, its band over its shared stretch, long enough.
+  // The ribbons: where three nets or more truly run together, packed: a stretch of a run on which the same nets lie
+  // side by side, its band exactly as wide as their lanes (and a small margin), never wider than they are there.
   const ribbons = [];
   for (const run of runs) {
     if (run.count < LANE_RIBBON) continue;
-    const shared = run.spans.filter((sp) => (onKey.get(sp.key)?.size ?? 0) >= 2);
-    const lo = Math.min(...shared.map((sp) => sp.lo));
-    const hi = Math.max(...shared.map((sp) => sp.hi));
-    if (hi - lo < BAND_MIN) continue;
-    const half = ((run.count - 1) / 2) * run.pitch + BAND_PAD + 0.5;
-    const band = run.horizontal ? { x: lo, y: run.at - half, w: hi - lo, h: 2 * half } : { x: run.at - half, y: lo, w: 2 * half, h: hi - lo };
-    const nets = run.order;
-    const ids = wires.filter((x) => nets.includes(x.net)).map((x) => x.id);
-    const legs = nets.every((n) => isLeg(n));
-    const name = legs ? 'params' : ribbonName(nets.map((n) => nameOf(wires.find((x) => x.net === n))).filter(Boolean));
-    // Its group (a chip's legs): one label for all its bands.
-    const groups = new Set(nets.map((n) => groupOf(n)));
-    const group = groups.size === 1 ? [...groups][0] : null;
-    ribbons.push({ id: '', axis: run.horizontal ? 'h' : 'v', band, members: nets.map((net) => ({ net })), wires: ids, label: `${name ? `${name} ` : ''}×${nets.length}`, lanes: true, length: hi - lo, group });
+    const spans = [...run.spans].sort((p, q) => p.lo - q.lo);
+    let k = 0;
+    while (k < spans.length) {
+      const present = [...(onKey.get(spans[k].key)?.keys() ?? [])].sort();
+      let j = k;
+      while (j + 1 < spans.length && spans[j + 1].lo === spans[j].hi && [...(onKey.get(spans[j + 1].key)?.keys() ?? [])].sort().join('\t') === present.join('\t')) j++;
+      const lo = spans[k].lo;
+      const hi = spans[j].hi;
+      k = j + 1;
+      if (present.length < LANE_RIBBON || hi - lo < BAND_MIN) continue;
+      const lanes = present.map((n) => run.lanes.get(n));
+      const v0 = ((run.count - 1) / 2 - Math.max(...lanes)) * run.pitch;
+      const v1 = ((run.count - 1) / 2 - Math.min(...lanes)) * run.pitch;
+      // Packed: as many lanes as nets there (no gaps of nets gone).
+      if (Math.max(...lanes) - Math.min(...lanes) + 1 !== present.length) continue;
+      // Right of +x is +y; right of +y is −x.
+      const [c0, c1] = run.horizontal ? [run.at + v0, run.at + v1] : [run.at - v1, run.at - v0];
+      const band = run.horizontal ? { x: lo, y: c0 - BAND_PAD - 0.5, w: hi - lo, h: c1 - c0 + 2 * BAND_PAD + 1 } : { x: c0 - BAND_PAD - 0.5, y: lo, w: c1 - c0 + 2 * BAND_PAD + 1, h: hi - lo };
+      const nets = run.order.filter((n) => present.includes(n));
+      const ids = wires.filter((x) => nets.includes(x.net)).map((x) => x.id);
+      const legs = nets.every((n) => isLeg(n));
+      const name = legs ? 'params' : ribbonName(nets.map((n) => nameOf(wires.find((x) => x.net === n))).filter(Boolean));
+      // Its group (a chip's legs, a connector's wires): one label for all its bands.
+      const groups = new Set(nets.map((n) => groupOf(n)));
+      const group = groups.size === 1 ? [...groups][0] : null;
+      ribbons.push({ id: '', axis: run.horizontal ? 'h' : 'v', band, members: nets.map((net) => ({ net })), wires: ids, label: `${name ? `${name} ` : ''}×${nets.length}`, lanes: true, length: hi - lo, group });
+    }
   }
   ribbons.sort((a, b) => b.members.length - a.members.length || b.length - a.length || (a.band.x - b.band.x) || (a.band.y - b.band.y));
   ribbons.forEach((r, i) => {

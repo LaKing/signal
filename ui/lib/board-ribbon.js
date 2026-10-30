@@ -249,6 +249,8 @@ export function placeRibbonLabels(ribbons, texts = []) {
   const groups = new Set();
   for (const r of ribbons) {
     r.text = null;
+    // No label of its own (a connector's ribbon: its connector says it).
+    if (!r.label) continue;
     const members = new Set(r.members.map((m) => m.net));
     if (labelled.some((set) => [...members].every((n) => set.has(n)))) continue;
     // One label per group (ADR 0047 phase 5: a chip's legs, however many bands they gather in), on its widest band (the first).
