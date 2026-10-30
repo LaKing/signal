@@ -79,10 +79,13 @@ svg.layer-plate > g > :not(.plate-layer) { opacity: 0; pointer-events: none; }
 /** The plate face's own CSS (in its shadow root, beside the faces'): its layers. */
 export const PLATE_FACE_CSS = `
 /* ADR 0047 §5: X-ray keeps only the plate's controls (whole); the cards are the drawing's ghosts. Board shows none of the plate: its vias are the drawing's pads. */
-:host(.plate.layer-xray) .face-panel { visibility: hidden; }
+/* Board keeps X-ray's visibility (only the controls), so a step from X-ray to Board only fades what X-ray showed: the cards never
+   come back for the length of the fade (the owner, 2026-10-30: "from X-ray to Board a jump"). */
+:host(.plate.layer-xray) .face-panel, :host(.plate.layer-board) .face-panel { visibility: hidden; }
 :host(.plate.layer-xray) .face-panel .signal-cards > * { pointer-events: none; }
-:host(.plate.layer-xray) .face-panel [bind] { visibility: visible; pointer-events: auto; }
-:host(.plate.layer-xray) .face-panel signal-slot[bind] { visibility: hidden; pointer-events: none; }
+:host(.plate.layer-xray) .face-panel [bind], :host(.plate.layer-board) .face-panel [bind] { visibility: visible; }
+:host(.plate.layer-xray) .face-panel [bind] { pointer-events: auto; }
+:host(.plate.layer-xray) .face-panel signal-slot[bind], :host(.plate.layer-board) .face-panel signal-slot[bind] { visibility: hidden; pointer-events: none; }
 :host(.plate.layer-board) { opacity: 0; pointer-events: none; }
 :host(.plate.layer-board) .face-panel * { pointer-events: none !important; }
 /* A layer step fades from where it is to where it goes, never through another value (the owner's "it flashes"): a transition, no animation. */

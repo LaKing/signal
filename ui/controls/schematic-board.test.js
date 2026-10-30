@@ -52,7 +52,7 @@ test('a layer step fades monotonically (the owner: "from X-ray to Board the plat
   // Every step between layers, for every part: from the opacity shown to the target, never past either.
   for (const from of Object.keys(LAYER_OPACITY)) {
     for (const to of Object.keys(LAYER_OPACITY)) {
-      for (const part of ['controls', 'ghosts', 'board']) {
+      for (const part of ['controls', 'cards', 'ghosts', 'board']) {
         const steps = fadeSteps(from, to, part);
         const up = steps.at(-1) >= steps[0];
         for (let i = 1; i < steps.length; i++) assert.ok(up ? steps[i] >= steps[i - 1] : steps[i] <= steps[i - 1], `${from} → ${to}, ${part}`);
@@ -60,4 +60,29 @@ test('a layer step fades monotonically (the owner: "from X-ray to Board the plat
     }
   }
   assert.deepEqual(fadeSteps('xray', 'board', 'controls'), [1, 0.75, 0.5, 0.25, 0]);
+  assert.deepEqual(fadeSteps('xray', 'board', 'cards'), [0, 0, 0, 0, 0], 'the cards stay hidden from X-ray to Board');
+});
+
+test('from X-ray to Board nothing moves and nothing shows that X-ray hid (the owner, 2026-10-30: "a jump"): the cards hidden in both, no layout, no measure', () => {
+  // The CSS: the face panel's cards are hidden on X-ray and on Board alike, only the controls visible (they fade with the plate).
+  for (const layer of ['xray', 'board']) {
+    assert.match(PLATE_FACE_CSS, new RegExp(`:host\\(\\.plate\\.layer-${layer}\\) \\.face-panel[,{ ][^}]*visibility: hidden`), `${layer}: the cards hidden`);
+    assert.match(PLATE_FACE_CSS, new RegExp(`:host\\(\\.plate\\.layer-${layer}\\) \\.face-panel signal-slot\\[bind\\]`), `${layer}: a slot's card hidden`);
+  }
+  // The controller: a layer step draws again; it never lays out, measures the plate or moves the view.
+  const h = host();
+  let measured = 0;
+  h.faces.faces = new Map();
+  const board = new SchematicBoard(h);
+  board.measurePlate = () => measured++;
+  board.restore({ layer: 'xray' });
+  const option = JSON.stringify([...board.option().vias]);
+  const key = board.plate.key;
+  board.stepLayer();
+  assert.equal(board.state.layer, 'board');
+  assert.equal(h.relaid, 0, 'no layout');
+  assert.equal(measured, 0, 'no measure');
+  assert.equal(board.plate.key, key);
+  assert.equal(JSON.stringify([...board.option().vias]), option, 'the vias as they were');
+  assert.equal(h.redrawn, 2, 'drawn again (restore and the step), opacity only');
 });
