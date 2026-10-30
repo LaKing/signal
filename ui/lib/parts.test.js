@@ -105,3 +105,15 @@ test('a slot card among the cards opens as a card; in a row it is compact', () =
   assert.equal(opensAsCard(classes('signal-group')), false);
   assert.equal(opensAsCard(null), false);
 });
+
+test("a part's controls name their part's file: a composite's slot's is <composite>.<slot>", async () => {
+  const { levelControls } = await import('./parts.js');
+  const part = { controls: [{ tag: 'signal-knob', label: 'x', bind: '.x', attributes: { bind: '.x' } }] };
+  const fx = { name: 'fx', address: '/rack1/fx', module: 'std.gain', ports: [], parameters: [{ name: 'x' }], slot: { part, inside: { level: 'rack/fx' } } };
+  const top = { name: 'fx', address: '/fx', module: 'std.gain', ports: [], parameters: [{ name: 'x' }], slot: { part, inside: { level: '/fx' } } };
+  const graph = { top: { instances: [top] }, composites: { rack: { instances: [fx] } }, insides: { 'rack/fx': { instances: [] }, '/fx': { instances: [] } } };
+  assert.equal(levelControls(graph, '')[0].partKey, 'fx');
+  assert.equal(levelControls(graph, 'rack')[0].partKey, 'rack.fx');
+  assert.equal(levelControls(graph, 'rack/fx')[0].partKey, 'rack.fx', 'in its frame too');
+  assert.equal(partFile(levelControls(graph, 'rack')[0].partKey), 'parts/rack.fx.html');
+});

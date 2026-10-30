@@ -23,9 +23,9 @@ export function opensAsCard(parent) {
   return Boolean(parent?.classList?.contains('signal-cards'));
 }
 
-/** The part's file of top-level slot `name`, relative to `ui/`. */
-export function partFile(name) {
-  return `parts/${name}.html`;
+/** The part's file of the slot whose part's key is `key` (`synth`, `rack.fx`), relative to `ui/`. */
+export function partFile(key) {
+  return `parts/${key}.html`;
 }
 
 /** The slot of a part file (`parts/synth.html` → `synth`), or null. */
@@ -136,16 +136,16 @@ export function emptyPartTree(card) {
  */
 export function levelControls(graph, level, main = []) {
   const found = level === '' ? [...(main ?? [])] : [];
-  const levels = [graph?.top, ...Object.values(graph?.composites ?? {})];
+  const levels = [['', graph?.top], ...Object.entries(graph?.composites ?? {})];
   for (const instance of levelData(graph, level)?.instances ?? []) {
     const part = slotOf(instance)?.part;
-    if (part) found.push(...partControls(part, instance.name));
+    if (part) found.push(...partControls(part, instance.name, 0, partKey(level, instance.name)));
   }
-  for (const data of levels) {
+  for (const [name, data] of levels) {
     for (const instance of data?.instances ?? []) {
       const slot = slotOf(instance);
       if (!slot?.part || insideOf(slot)?.level !== level) continue;
-      for (const control of partControls(slot.part, instance.name)) {
+      for (const control of partControls(slot.part, instance.name, 0, partKey(name, instance.name))) {
         if (control.relative.every((r) => r.startsWith('.'))) found.push({ ...control, frame: true });
         else if (control.relative.every((r) => r.startsWith('/'))) found.push({ ...control, part: null, partOf: instance.name, binds: control.relative });
       }
@@ -154,13 +154,19 @@ export function levelControls(graph, level, main = []) {
   return found.length ? found : null;
 }
 
+/** The key of the part of slot `slot` at `level`: `synth`, or `rack.fx` in composite `rack`'s file (ADR 0046 §2). */
+export function partKey(level, slot) {
+  return level ? `${level}.${slot}` : slot;
+}
+
 /**
  * A part's controls as the schematic reads them (`graph`'s `slot.part`,
- * ADR 0046 §6, of slot `slot`): as `panelControls` gives a panel's
- * (ui/lib/schematic-controls.js), their binds rooted, each with `part`
- * (the slot) and `relative` (its binds as written).
+ * ADR 0046 §6, of slot `slot`, its part's key `key`): as `panelControls`
+ * gives a panel's (ui/lib/schematic-controls.js), their binds rooted, each
+ * with `part` (the slot), `partKey` (its file's key) and `relative` (its
+ * binds as written).
  */
-export function partControls(part, slot, start = 0) {
+export function partControls(part, slot, start = 0, key = slot) {
   const controls = [];
   const seen = new Map();
   for (const c of part?.controls ?? []) {
@@ -170,9 +176,9 @@ export function partControls(part, slot, start = 0) {
     if (!relative.length) continue;
     const binds = relative.map((a) => rootAddress(a, `/${slot}`)).filter(Boolean);
     if (!binds.length) continue;
-    const key = `${c.tag}\n${c.bind}`;
-    const occurrence = seen.get(key) ?? 0;
-    seen.set(key, occurrence + 1);
+    const same = `${c.tag}\n${c.bind}`;
+    const occurrence = seen.get(same) ?? 0;
+    seen.set(same, occurrence + 1);
     controls.push({
       index: start + controls.length,
       tag: c.tag,
@@ -182,6 +188,7 @@ export function partControls(part, slot, start = 0) {
       label: c.label || '',
       occurrence,
       part: slot,
+      partKey: key,
       relative,
     });
   }

@@ -191,14 +191,53 @@ fn windows_toml_follows_a_moved_card() {
     let renamed = rename_cards(
         text,
         &[("tape-echo".to_owned(), "echo:tape-echo".to_owned())],
+        None,
     )
     .unwrap();
     assert_eq!(renamed, text.replace("\"tape-echo\"", "\"echo:tape-echo\""));
-    assert_eq!(rename_cards(text, &[("x".into(), "y".into())]), None);
+    // With its slot named: the open slot card goes with its part's card.
+    let with = rename_cards(
+        text,
+        &[("tape-echo".to_owned(), "echo:tape-echo".to_owned())],
+        Some("echo"),
+    )
+    .unwrap();
+    assert!(
+        with.contains("\"slot.echo\", \"echo:tape-echo\", \"master\"]"),
+        "{with}"
+    );
+    assert_eq!(with.matches("\"slot.echo\"").count(), 2, "{with}");
+    assert_eq!(rename_cards(text, &[("x".into(), "y".into())], None), None);
     assert_eq!(
-        rename_cards("not toml [", &[("x".into(), "y".into())]),
+        rename_cards("not toml [", &[("x".into(), "y".into())], None),
         None
     );
+}
+
+/// The coordinator's review: a whole card titled like its slot, and a
+/// later card of the same heading, keep stable ids: the open slot card's
+/// id is `slot.<name>`, and a shifted `-N` id is renamed in the windows.
+#[test]
+fn card_ids_stay_stable_across_a_group() {
+    let content = "\n  <div class=\"signal-cards\">\n    <section class=\"signal-card\">\n      <h2>synth</h2>\n      <signal-knob bind=\"/synth.cutoff\"></signal-knob>\n    </section>\n    <section class=\"signal-card\">\n      <h2>synth</h2>\n      <signal-knob bind=\"/out.gain\"></signal-knob>\n    </section>\n  </div>\n";
+    let grouped = group_content(content, "synth", None).unwrap();
+    assert_eq!(
+        grouped.cards,
+        vec![
+            ("synth".to_owned(), "synth:synth".to_owned()),
+            ("synth-2".to_owned(), "synth".to_owned()),
+        ]
+    );
+    let host = parse(&grouped.host).unwrap();
+    assert_eq!(host_card_ids(&cards_of(&host)), vec!["slot.synth", "synth"]);
+    // Applied at once: the shifted card is not taken for the moved one.
+    let windows = "[[layout.\"k\".windows]]\nview = \"panel\"\nscreen = 0\nx = 0\ny = 0\nwidth = 10\nheight = 10\ncards = [\"synth\"]\n\n[[layout.\"k\".windows]]\nview = \"panel\"\nscreen = 0\nx = 0\ny = 0\nwidth = 10\nheight = 10\ncards = [\"synth-2\"]\n";
+    let renamed = rename_cards(windows, &grouped.cards, Some("synth")).unwrap();
+    assert!(
+        renamed.contains("[\"slot.synth\", \"synth:synth\"]"),
+        "{renamed}"
+    );
+    assert!(renamed.contains("cards = [\"synth\"]\n"), "{renamed}");
 }
 
 #[test]

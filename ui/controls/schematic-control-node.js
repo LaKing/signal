@@ -18,9 +18,10 @@ import { partFile } from '../lib/parts.js';
 const PANEL_FILE = 'main.html';
 
 /** The panel file control `node` is written in: its slot's part, else the main panel. */
-function fileOf(node) {
-  const slot = node.control?.part ?? node.control?.partOf ?? null;
-  return slot ? partFile(slot) : PANEL_FILE;
+export function fileOf(node) {
+  // A part's file is named by its key: `rack.fx` for a slot in composite `rack` (ADR 0046 §2).
+  const key = node.control?.partKey ?? node.control?.part ?? node.control?.partOf ?? null;
+  return key ? partFile(key) : PANEL_FILE;
 }
 
 function html(name, properties = {}) {

@@ -764,6 +764,11 @@ pub struct Host {
     keys_stamp: Option<(SystemTime, u64)>,
     keys_polled: Instant,
     keys_version: u64,
+    /// ADR 0046 §8: the SHA-256 of every presentation text a patch of this
+    /// host wrote or replaced (`ui/…`): a client's `panel.restore` of one
+    /// of them (an undo or redo the host made) is taken whole; any other
+    /// text is judged strictly ([`Host::panel_restore_allowed`]).
+    restorable: std::collections::HashSet<String>,
 }
 
 fn joined(diagnostics: Vec<Diagnostic>) -> String {
@@ -1182,6 +1187,7 @@ impl Host {
             keys_stamp,
             keys_polled: Instant::now(),
             keys_version: 0,
+            restorable: std::collections::HashSet::new(),
         };
         for problem in host.keys.report() {
             host.messages.push(format!("keys: {problem}"));
@@ -4403,7 +4409,7 @@ impl Host {
             .map_err(|e| fail(e.code, e.message))?;
         // ADR 0046 §7–8: the panels' side (controls moved into a part, a
         // part's controls on removed ports), more of the patch's files.
-        self.part_edits(level, &ops, &mut patched)?;
+        self.part_edits(level, &ops, &before, &templates, &mut patched)?;
         let mut edited = sources.clone();
         if let Some(source) = edited.get_mut(index) {
             source.text = patched.text.clone();
@@ -4742,6 +4748,10 @@ impl Host {
             if kept.contains(&change.path.as_str()) {
                 continue;
             }
+            // What this host wrote and replaced: its undo and redo restore it whole.
+            for text in [&change.before, &change.after].into_iter().flatten() {
+                self.restorable.insert(sha256_hex(text.as_bytes()));
+            }
             self.seen(Path::new(&change.path));
             if !name.ends_with(".html") {
                 continue;
@@ -4781,7 +4791,12 @@ impl Host {
             "level": level,
             "file": file,
             "base": sha256_hex(patched.text.as_bytes()),
-            "inverse": patched.inverse,
+            // ADR 0046: a part whose removal was kept (another writer
+            // changed it) is still there: the undo leaves it as it is.
+            "inverse": patched.inverse.iter().filter(|op| !matches!(
+                op,
+                Op::PanelRestore { file, was: None, .. } if kept.contains(&format!("ui/{file}").as_str())
+            )).collect::<Vec<_>>(),
         });
         // ADR 0037, editable insides: the other files written, each with
         // its level and new base (`null`: removed).
@@ -5109,6 +5124,8 @@ impl Host {
         &self,
         level: &str,
         ops: &[Op],
+        before: &str,
+        templates: &BTreeMap<String, signal_project::Interface>,
         patched: &mut patch::Patched,
     ) -> Result<(), Failure> {
         // The presentation files as the patch leaves them: (read, now).
@@ -5130,6 +5147,10 @@ impl Host {
                    text: Option<String>| {
             files.entry(path.to_owned()).or_insert((was, None)).1 = text;
         };
+        // The slots whose interface an op edits, and those whose part's
+        // controls on dropped names go with them (`removeControls`).
+        let mut touched: Vec<String> = Vec::new();
+        let mut strip: Vec<String> = Vec::new();
         for op in ops {
             match op {
                 Op::SlotGroup { instance, controls } if level.is_empty() => {
@@ -5183,7 +5204,7 @@ impl Host {
                     }
                     let windows = crate::WINDOWS_FILE;
                     if let Some(text) = now(&files, patched, windows)
-                        && let Some(new) = crate::parts::rename_cards(&text, &grouped.cards)
+                        && let Some(new) = crate::parts::rename_cards(&text, &grouped.cards, Some(instance))
                     {
                         set(&mut files, Some(text), windows, Some(new));
                     }
@@ -5193,52 +5214,94 @@ impl Host {
                 )),
                 Op::SlotInterface {
                     slot,
-                    remove,
+                    rename,
                     remove_controls,
                     ..
-                } if !remove.is_empty() => {
+                } => {
+                    if *remove_controls {
+                        strip.push(slot.clone());
+                    }
+                    touched.push(slot.clone());
+                    // A rename onto a name the part binds already would
+                    // merge two binds, and its undo could not part them.
                     let path = signal_project::patch::part_path(level, slot);
-                    let Some(text) = now(&files, patched, &path) else {
-                        continue;
-                    };
-                    let on = crate::parts::controls_on(&text, remove);
-                    if on.is_empty() {
-                        continue;
-                    }
-                    if !remove_controls {
-                        let references: Vec<Value> = on
-                            .iter()
-                            .map(|c| json!({"file": path, "text": c}))
-                            .collect();
-                        return Err(fail_with(
-                            "in-use",
-                            format!(
-                                "not removed: {path} binds it ({}); remove its controls too with removeControls",
-                                on.join(", ")
-                            ),
-                            json!({"references": references}),
-                        ));
-                    }
-                    match crate::parts::without_controls(&text, remove) {
-                        Ok(Some(new)) => {
-                            set(&mut files, Some(text), &path, Some(new));
-                            patched.notes.push(format!(
-                                "removed {} from {path}",
-                                on.join(", ")
-                            ));
-                        }
-                        Ok(None) => {}
-                        Err(why) => {
-                            return Err(fail(
-                                "bad-value",
-                                format!(
-                                    "{path}'s controls were not removed: it is not a panel the editor writes ({why}); edit it by hand"
-                                ),
-                            ));
+                    if let Some(text) = now(&files, patched, &path) {
+                        for new in rename.values() {
+                            let on = crate::parts::controls_on(&text, std::slice::from_ref(new));
+                            if !on.is_empty() {
+                                return Err(fail(
+                                    "bad-value",
+                                    format!(
+                                        "not renamed: {path} binds .{new} already ({}); rename or remove those controls first",
+                                        on.join(", ")
+                                    ),
+                                ));
+                            }
                         }
                     }
                 }
+                Op::SlotRestore { slot, .. } => touched.push(slot.clone()),
                 _ => {}
+            }
+        }
+        // Every interface edit that drops a name the part binds (a remove,
+        // a template set or detached, an undo's restore): `in-use`, unless
+        // its controls go too. A renamed name is not dropped: its binds follow.
+        touched.sort();
+        touched.dedup();
+        for slot in &touched {
+            let path = signal_project::patch::part_path(level, slot);
+            let Some(text) = now(&files, patched, &path) else {
+                continue;
+            };
+            let Some(was) = signal_project::patch::interface_names(before, slot, templates) else {
+                continue;
+            };
+            let is = signal_project::patch::interface_names(&patched.text, slot, templates)
+                .unwrap_or_default();
+            let renamed: Vec<&str> = patched
+                .renamed
+                .iter()
+                .filter_map(|(old, _)| old.strip_prefix(&format!("{slot}.")))
+                .collect();
+            let dropped: Vec<String> = was
+                .into_iter()
+                .filter(|n| !is.contains(n) && !renamed.contains(&n.as_str()))
+                .collect();
+            let on = crate::parts::controls_on(&text, &dropped);
+            if on.is_empty() {
+                continue;
+            }
+            if !strip.contains(slot) {
+                let references: Vec<Value> = on
+                    .iter()
+                    .map(|c| json!({"file": path, "text": c}))
+                    .collect();
+                return Err(fail_with(
+                    "in-use",
+                    format!(
+                        "not removed: {path} binds it ({}); remove its controls too with removeControls",
+                        on.join(", ")
+                    ),
+                    json!({"references": references}),
+                ));
+            }
+            match crate::parts::without_controls(&text, &dropped) {
+                Ok(Some(new)) => {
+                    set(&mut files, Some(text), &path, Some(new));
+                    patched
+                        .notes
+                        .push(format!("removed {} from {path}", on.join(", ")));
+                }
+                Ok(None) => {}
+                Err(why) => {
+                    return Err(fail(
+                        "bad-value",
+                        format!(
+                            "{path}'s controls were not removed: it is not a panel the editor writes ({why}); edit it by hand"
+                        ),
+                    ));
+                }
             }
         }
         let mut undo = Vec::new();
@@ -5273,13 +5336,20 @@ impl Host {
     }
 
     /// ADR 0046 §8: an untrusted `panel.restore` (an inverse a client sends
-    /// back) writes only what a panel may hold: in an HTML file, a
-    /// `<signal-panel>` whose content the panel editor reads (the
-    /// whitelist; comments allowed), and, outside it, what the file holds
-    /// now (a part that does not exist: comments and space only);
-    /// `ui/windows.toml` must read as TOML.
+    /// back). A text a patch of this host wrote or replaced (its SHA-256 in
+    /// `restorable`) is taken whole: the undo and redo of what the host
+    /// did, a hand-written part removed with its slot included. Any other
+    /// text holds only what the panel editor writes: an HTML file's
+    /// `<signal-panel>` content in its canonical form (the whitelist, no
+    /// comment) and, outside that element, what the file holds now; a part
+    /// that does not exist exactly as a new part is written
+    /// ([`crate::parts::part_text`]). `ui/windows.toml` must read as TOML.
     fn panel_restore_allowed(&self, file: &str, text: &str) -> Result<(), Failure> {
         let refused = |why: String| fail("bad-value", format!("panel.restore of ui/{file}: {why}"));
+        // What this host itself wrote or replaced (an undo, a redo): whole.
+        if self.restorable.contains(&sha256_hex(text.as_bytes())) {
+            return Ok(());
+        }
         if file == "windows.toml" {
             return text
                 .parse::<toml_edit::DocumentMut>()
@@ -5287,50 +5357,37 @@ impl Host {
                 .map_err(|e| refused(format!("not TOML ({})", e.to_string().trim())));
         }
         let (start, end) = panel_content(text).map_err(refused)?;
-        crate::parts::parse(text.get(start..end).unwrap_or(""))
+        let content = text.get(start..end).unwrap_or("");
+        let tree = crate::parts::parse(content)
             .map_err(|why| refused(format!("its panel is not one the editor reads ({why})")))?;
+        // The canonical text only: no comment can hide anything.
+        if crate::parts::serialize(&tree) != content {
+            return Err(refused(
+                "its panel is not in the form the editor writes (canonical, no comment)".to_owned(),
+            ));
+        }
         let outside = |t: &str, s: usize, e: usize| {
             format!("{}{}", t.get(..s).unwrap_or(""), t.get(e..).unwrap_or(""))
         };
-        let mine = outside(text, start, end);
         match self.ui_text(&format!("ui/{file}")) {
             Some(now) => {
                 let (s, e) = panel_content(&now).map_err(refused)?;
-                if outside(&now, s, e) != mine {
+                if outside(&now, s, e) != outside(text, start, end) {
                     return Err(refused(
                         "it changes the file outside its <signal-panel>".to_owned(),
                     ));
                 }
             }
             None => {
-                // Outside the panel element: comments, space and the
-                // element's own start and end tags only.
-                let mut rest = mine.as_str();
-                loop {
-                    rest = rest.trim_start();
-                    if rest.is_empty() {
-                        break;
-                    }
-                    if let Some(after) = rest.strip_prefix("<!--") {
-                        let close = after
-                            .find("-->")
-                            .ok_or_else(|| refused("an unterminated comment".to_owned()))?;
-                        rest = after.get(close + 3..).unwrap_or("");
-                        continue;
-                    }
-                    let tag_end = rest.find('>').map_or(rest.len(), |i| i + 1);
-                    let tag = rest.get(..tag_end).unwrap_or("");
-                    let lower = tag.to_ascii_lowercase();
-                    let panel = lower.starts_with("<signal-panel")
-                        && !lower.contains(" on")
-                        && !lower.contains("javascript:");
-                    if !(panel || lower == "</signal-panel>") {
-                        return Err(refused(
-                            "a new part holds nothing outside its <signal-panel> but comments"
-                                .to_owned(),
-                        ));
-                    }
-                    rest = rest.get(tag_end..).unwrap_or("");
+                // A new part exactly as one is written: its comment and its
+                // `<signal-panel part>`, nothing else.
+                let key = crate::parts::key_of(file)
+                    .ok_or_else(|| refused("only a slot's part is made by a restore".to_owned()))?;
+                if crate::parts::part_text(key, content) != text {
+                    return Err(refused(
+                        "a new part is written as the editor writes one: its comment and its <signal-panel part> alone"
+                            .to_owned(),
+                    ));
                 }
             }
         }

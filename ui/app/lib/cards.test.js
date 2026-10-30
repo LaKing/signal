@@ -153,7 +153,7 @@ test("an open slot card and its part's cards get their own ids", () => {
   const elements = [fakeCard('', 'kick'), slot, inPart(fakeCard('', 'MONO SYNTH')), inPart(fakeCard('', 'MONO SYNTH')), fakeCard('', 'synth')];
   const doc = { querySelectorAll: (q) => (q.includes('signal-slot') ? elements : []) };
   const cards = cardsOf(doc);
-  assert.deepEqual(cards.map((c) => c.id), ['kick', 'synth', 'synth:mono-synth', 'synth:mono-synth-2', 'synth-2']);
+  assert.deepEqual(cards.map((c) => c.id), ['kick', 'slot.synth', 'synth:mono-synth', 'synth:mono-synth-2', 'synth'], 'the slot card’s id shifts no heading’s');
   assert.equal(cards[1].element, slot.box, 'laid out by its own box');
   assert.equal(cards[1].title, 'synth');
   assert.ok(cards.every((c) => isCardId(c.id)));

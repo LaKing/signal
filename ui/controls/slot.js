@@ -81,8 +81,11 @@ ${BROWSER_CSS}`;
     this.levels = false;
     this.levelStops = [];
     this.busy = null;
-    /** ADR 0046: the part as last read (`{exists, html, error}`), and whether it is folded. */
-    this.part = null;
+    /**
+     * ADR 0046: the part as last read (`{exists, html, error}`), and whether it is folded.
+     * Never `this.part`: an element's `part` is the DOM's own (`::part()` names), and setting it writes the attribute.
+     */
+    this.partState = null;
     this.folded = false;
     this.partEditor = null;
     this.partCheck = null;
@@ -196,7 +199,7 @@ ${BROWSER_CSS}`;
     this.description = description;
     this.card = slotCard(description, this.slotName);
     this.update();
-    if (this.part?.exists && this.partCheck && this.file) this.partCheck.described(description, this.file);
+    if (this.partState?.exists && this.partCheck && this.file) this.partCheck.described(description, this.file);
   }
 
   streams(connection) {
@@ -227,14 +230,14 @@ ${BROWSER_CSS}`;
       read = await connection.request({ type: 'panel.read', file });
     } catch (error) {
       // No part (`unknown-panel` for a slot the server does not know yet): the card as before.
-      this.part = { exists: false, html: null, error: error?.code === 'unknown-panel' ? null : (error?.message ?? String(error)) };
+      this.partState = { exists: false, html: null, error: error?.code === 'unknown-panel' ? null : (error?.message ?? String(error)) };
       this.showPart();
       return;
     }
     if (file !== this.file) return;
-    this.part = { exists: Boolean(read?.exists), html: read?.html ?? null, error: read?.exists && !read?.editable ? read.reason : null };
+    this.partState = { exists: Boolean(read?.exists), html: read?.html ?? null, error: read?.exists && !read?.editable ? read.reason : null };
     await this.showPart();
-    if (this.part.exists && this.description) {
+    if (this.partState.exists && this.description) {
       this.partCheck.checked = undefined;
       this.partCheck.asking = undefined;
       this.partCheck.described(this.description, file);
@@ -244,13 +247,13 @@ ${BROWSER_CSS}`;
   /** Draws the part as last read into the light DOM, rooted. */
   async showPart() {
     if (this.partEditor?.editing) return;
-    if (!this.part?.exists || this.part.html === null) {
+    if (!this.partState?.exists || this.partState.html === null) {
       this.replaceChildren();
     } else {
-      const error = await showWritten(this, this.part.html, (name, value) => this.attributeValue(name, value));
-      if (error) this.part.error = error;
+      const error = await showWritten(this, this.partState.html, (name, value) => this.attributeValue(name, value));
+      if (error) this.partState.error = error;
     }
-    this.showProblems(this.part?.error ? [{ severity: 'error', text: `${this.file}: ${this.part.error}` }] : []);
+    this.showProblems(this.partState?.error ? [{ severity: 'error', text: `${this.file}: ${this.partState.error}` }] : []);
     this.shownKey = null;
     this.update();
   }
@@ -262,13 +265,13 @@ ${BROWSER_CSS}`;
       this.partEditor.written(message);
       return;
     }
-    this.part = message.html === null || message.html === undefined ? { exists: false, html: null, error: null } : { exists: true, html: message.html, error: null };
+    this.partState = message.html === null || message.html === undefined ? { exists: false, html: null, error: null } : { exists: true, html: message.html, error: null };
     this.showPart().then(() => this.recheck());
   }
 
   /** The part's binding check again (the panel editor asks after a write). */
   recheck() {
-    if (!this.partCheck || !this.connection?.description || !this.file || !this.part?.exists) return;
+    if (!this.partCheck || !this.connection?.description || !this.file || !this.partState?.exists) return;
     this.partCheck.checked = undefined;
     this.partCheck.asking = undefined;
     this.partCheck.described(this.connection.description, this.file);
@@ -363,7 +366,7 @@ ${BROWSER_CSS}`;
     const load = this.$('.load');
     const unload = this.$('.unload');
     const fold = this.$('.fold');
-    if (fold) fold.hidden = !this.part?.exists && !this.partEditor?.editing;
+    if (fold) fold.hidden = !this.partState?.exists && !this.partEditor?.editing;
     if (!card) {
       title.textContent = this.slotName ? `${this.slotName.toUpperCase()}: no such slot` : 'no slot bound';
       load.textContent = 'Load…';
@@ -381,7 +384,7 @@ ${BROWSER_CSS}`;
     unload.disabled = card.empty || Boolean(this.busy);
     if (!this.hasAttribute('aria-label')) this.setAttribute('aria-label', `slot ${card.name}`);
     // ADR 0046 §5: with a part, its controls are the part's; without, the interface's knobs.
-    const withPart = Boolean(this.part?.exists);
+    const withPart = Boolean(this.partState?.exists);
     const key = JSON.stringify([card, withPart]);
     if (key === this.shownKey) return;
     this.shownKey = key;

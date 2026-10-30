@@ -752,9 +752,9 @@ fn card_title(node: &Node) -> Option<String> {
     }
 }
 
-/// The cards of a panel's content in the page's order, with their titles.
-fn cards_of(nodes: &[Node]) -> Vec<String> {
-    let mut titles = Vec::new();
+/// The cards of a panel's content in the page's order.
+fn cards_of(nodes: &[Node]) -> Vec<&Node> {
+    let mut cards = Vec::new();
     for node in nodes {
         if let Node::Container {
             kind: Kind::Cards,
@@ -762,10 +762,36 @@ fn cards_of(nodes: &[Node]) -> Vec<String> {
             ..
         } = node
         {
-            titles.extend(children.iter().filter_map(card_title));
+            cards.extend(children.iter().filter(|c| card_title(c).is_some()));
         }
     }
-    titles
+    cards
+}
+
+/// The id of the open slot card of slot `name` (`ui/app/lib/cards.js`):
+/// `slot.<name>`, which no heading's slug (no `.`) nor a part's card id
+/// (`<slot>:<id>`) can be, so it never shifts another card's id.
+pub fn slot_card_id(name: &str) -> String {
+    format!("slot.{name}")
+}
+
+/// The ids of a host panel's cards, in order (`cardsOf` of the page): an
+/// open slot card's `slot.<name>`; every other card its heading's slug,
+/// made unique among those.
+pub fn host_card_ids(cards: &[&Node]) -> Vec<String> {
+    let headed: Vec<String> = cards
+        .iter()
+        .filter(|c| !matches!(c, Node::Control { .. }))
+        .filter_map(|c| card_title(c))
+        .collect();
+    let mut slugs = card_ids(&headed).into_iter();
+    cards
+        .iter()
+        .map(|c| match c {
+            Node::Control { .. } => slot_card_id(&card_title(c).unwrap_or_default()),
+            _ => slugs.next().unwrap_or_default(),
+        })
+        .collect()
 }
 
 // Group into slot: the host's controls on the instance moved into its part.
@@ -777,7 +803,9 @@ pub struct Grouped {
     pub host: String,
     /// The part's content, when a control moved.
     pub part: Option<String>,
-    /// Card ids that moved into the part: old → `<slot>:<id>`.
+    /// Card ids that changed: a card moved into the part, old →
+    /// `<slot>:<id>`; a card left whose id the move changed (a later card
+    /// of the same heading), old → new.
     pub cards: Vec<(String, String)>,
     /// How many controls moved.
     pub moved: usize,
@@ -911,8 +939,7 @@ pub fn group_content(
         .map(|(i, c)| movable(c, &root).is_some() && select.is_none_or(|s| s.contains(&i)))
         .collect();
     let moved = moving.iter().filter(|m| **m).count();
-    let old_titles = cards_of(&nodes);
-    let old_ids = card_ids(&old_titles);
+    let old_ids = host_card_ids(&cards_of(&nodes));
     let mut host: Vec<Node> = Vec::new();
     let mut part_cards: Vec<Node> = Vec::new();
     // Each host card: its old id, whether it went whole into the part.
@@ -920,6 +947,8 @@ pub fn group_content(
     let mut placed = false;
     let mut next = 0;
     let mut card_index = 0;
+    // The host's cards after the move, each with the card it was (none: the new slot card).
+    let mut origins: Vec<Option<usize>> = Vec::new();
     for node in &nodes {
         let Node::Container {
             kind: Kind::Cards,
@@ -934,13 +963,14 @@ pub fn group_content(
         let mut kept: Vec<Node> = Vec::new();
         for child in children {
             let is_card = card_title(child).is_some();
+            let index = card_index;
             let id = if is_card {
-                let id = old_ids.get(card_index).cloned().unwrap_or_default();
                 card_index += 1;
-                id
+                old_ids.get(index).cloned().unwrap_or_default()
             } else {
                 String::new()
             };
+            let origin = is_card.then_some(index);
             let start = next;
             let n = count(child);
             next += n;
@@ -957,6 +987,9 @@ pub fn group_content(
                 )
             {
                 kept.push(child.clone());
+                if is_card {
+                    origins.push(origin);
+                }
                 continue;
             }
             let mut from = start;
@@ -969,15 +1002,18 @@ pub fn group_content(
                 whole.push((id, part_cards.len() - 1));
                 if !placed {
                     kept.push(slot_card(instance));
+                    origins.push(None);
                     placed = true;
                 }
             } else {
                 let mut from = start;
                 if let Some(rest) = filtered(child, &|i| !ours.contains(&i), &mut from) {
                     kept.push(rest);
+                    origins.push(origin);
                 }
                 if !placed {
                     kept.push(slot_card(instance));
+                    origins.push(None);
                     placed = true;
                 }
             }
@@ -997,7 +1033,10 @@ pub fn group_content(
             } => Some(children),
             _ => None,
         }) {
-            Some(children) => children.push(slot_card(instance)),
+            Some(children) => {
+                children.push(slot_card(instance));
+                origins.push(None);
+            }
             None => host.push(Node::Container {
                 kind: Kind::Cards,
                 classes: Vec::new(),
@@ -1007,7 +1046,7 @@ pub fn group_content(
     }
     let part_titles: Vec<String> = part_cards.iter().filter_map(card_title).collect();
     let part_ids = card_ids(&part_titles);
-    let cards = whole
+    let mut cards: Vec<(String, String)> = whole
         .into_iter()
         .filter(|(id, _)| !id.is_empty())
         .filter_map(|(id, at)| {
@@ -1016,6 +1055,15 @@ pub fn group_content(
                 .map(|new| (id, format!("{instance}:{new}")))
         })
         .collect();
+    // A card left keeps its window: an id the move shifted is renamed too.
+    let new_ids = host_card_ids(&cards_of(&host));
+    for (new, origin) in new_ids.iter().zip(&origins) {
+        if let Some(old) = origin.and_then(|i| old_ids.get(i))
+            && old != new
+        {
+            cards.push((old.clone(), new.clone()));
+        }
+    }
     let part = (!part_cards.is_empty()).then(|| {
         serialize(&[Node::Container {
             kind: Kind::Cards,
@@ -1038,8 +1086,15 @@ pub fn with_content(text: &str, content: &str) -> Option<String> {
 }
 
 /// `ui/windows.toml`'s `text` with every card id of `renames` in a
-/// window's `cards` rewritten (old → new); `None` when nothing changes.
-pub fn rename_cards(text: &str, renames: &[(String, String)]) -> Option<String> {
+/// window's `cards` rewritten (old → new, all at once); a window that now
+/// holds a card of slot `slot`'s part (`<slot>:…`) holds its open slot card
+/// too, before it, so the header stays with its cards. `None` when nothing
+/// changes.
+pub fn rename_cards(
+    text: &str,
+    renames: &[(String, String)],
+    slot: Option<&str>,
+) -> Option<String> {
     if renames.is_empty() {
         return None;
     }
@@ -1058,16 +1113,36 @@ pub fn rename_cards(text: &str, renames: &[(String, String)]) -> Option<String> 
             let Some(cards) = window.get_mut("cards").and_then(Item::as_array_mut) else {
                 continue;
             };
-            for card in cards.iter_mut() {
+            let mut first_part = None;
+            for (i, card) in cards.iter_mut().enumerate() {
                 let Some(id) = card.as_str() else {
                     continue;
                 };
                 if let Some((_, new)) = renames.iter().find(|(old, _)| old == id) {
+                    if slot.is_some_and(|s| new.starts_with(&format!("{s}:"))) {
+                        first_part.get_or_insert(i);
+                    }
                     let decor = card.decor().clone();
                     let mut value = Value::from(new.as_str());
                     *value.decor_mut() = decor;
                     *card = value;
                     changed = true;
+                }
+            }
+            if let (Some(at), Some(slot)) = (first_part, slot) {
+                let header = slot_card_id(slot);
+                if !cards.iter().any(|c| c.as_str() == Some(header.as_str())) {
+                    // In the place of the card it goes before, with its spacing.
+                    let prefix = cards
+                        .get(at)
+                        .and_then(|c| c.decor().prefix().cloned())
+                        .unwrap_or_default();
+                    let mut value = Value::from(header.as_str());
+                    value.decor_mut().set_prefix(prefix);
+                    cards.insert_formatted(at, value);
+                    if let Some(next) = cards.get_mut(at + 1) {
+                        next.decor_mut().set_prefix(" ");
+                    }
                 }
             }
         }

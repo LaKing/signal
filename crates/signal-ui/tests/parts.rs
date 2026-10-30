@@ -192,7 +192,7 @@ fn grouping_moves_the_controls_and_is_undone_byte_for_byte(transport: Transport)
     );
     let windows = read(&dir, "ui/windows.toml").unwrap();
     assert!(
-        windows.contains("cards = [\"echo:tape-echo\", \"master\"]"),
+        windows.contains("cards = [\"slot.echo\", \"echo:tape-echo\", \"master\"]"),
         "{windows}"
     );
     let main = read(&dir, "ui/main.html").unwrap();
@@ -412,6 +412,15 @@ fn an_untrusted_panel_restore_writes_only_a_panel() {
             "<!doctype html><script>alert(1)</script>",
         ),
         main.replace("<h2>source</h2>", "<script>alert(1)</script>"),
+        // The review's: a comment the reader ends at its first `-->`.
+        main.replace(
+            "<h2>source</h2>",
+            "<h2>source</h2><!--><script>alert(1)</script>-->",
+        ),
+        main.replace(
+            "<h2>source</h2>",
+            "<h2>source</h2><!-- --!><img src=x onerror=alert(1)> -->",
+        ),
     ] {
         let refused = send_patch(
             &mut rig,
@@ -430,7 +439,141 @@ fn an_untrusted_panel_restore_writes_only_a_panel() {
         "error",
     );
     assert_eq!(refused["code"], "bad-value", "{refused}");
+    // A new part's start tag: only as a part is written (`on…` after a newline, a tab or `/`).
+    for tag in [
+        "<signal-panel\nonclick=\"alert(1)\" part=\"spare\">",
+        "<signal-panel\tonclick=\"alert(1)\" part=\"spare\">",
+        "<signal-panel/onclick=\"alert(1)\" part=\"spare\">",
+    ] {
+        let text = format!("{tag}\n  <div class=\"signal-cards\"></div>\n</signal-panel>\n");
+        let refused = send_patch(
+            &mut rig,
+            &mut ws,
+            5,
+            json!([{"op": "panel.restore", "file": "parts/spare.html", "text": text}]),
+            "error",
+        );
+        assert_eq!(refused["code"], "bad-value", "{refused}");
+    }
+    assert!(!dir.join("ui/parts/spare.html").exists());
     assert_eq!(read(&dir, "ui/main.html").unwrap(), main);
+    rig.finish();
+}
+
+/// The review's: a hand-written part (a page of its own around its
+/// `<signal-panel>`) removed with its slot comes back with the undo, byte
+/// for byte: the host restores what it removed itself.
+#[test]
+fn a_hand_written_part_deleted_with_its_slot_comes_back() {
+    let mut rig = bookkeeping_rig("parts-hand-written");
+    let (mut ws, _) = rig.client();
+    let dir = rig.dir.clone();
+    let part = format!(
+        "<!doctype html>\n<html><head><meta charset=\"utf-8\"><style>.x {{ color: red }}</style></head><body>\n<!-- by hand --><p>notes</p>\n{}</body></html>\n",
+        part("fx", "fx", FX_PART)
+    );
+    fs::write(dir.join("ui/parts/fx.html"), &part).unwrap();
+    let main = read(&dir, "ui/main.html").unwrap();
+    fs::write(
+        dir.join("ui/main.html"),
+        main.replace("    <signal-slot bind=\"/fx\"></signal-slot>\n", ""),
+    )
+    .unwrap();
+    let deleted = patch(
+        &mut rig,
+        &mut ws,
+        1,
+        json!([
+            {"op": "connection.remove", "from": "osc.out", "to": "fx.x"},
+            {"op": "connection.remove", "from": "fx.y", "to": "out.l"},
+            {"op": "connection.remove", "from": "fx.y", "to": "out.r"},
+            {"op": "instance.remove", "name": "fx"}
+        ]),
+    );
+    assert!(!dir.join("ui/parts/fx.html").exists());
+    let undone = patch(&mut rig, &mut ws, 3, deleted["inverse"].clone());
+    assert_eq!(read(&dir, "ui/parts/fx.html").unwrap(), part);
+    patch(&mut rig, &mut ws, 5, undone["inverse"].clone());
+    assert!(!dir.join("ui/parts/fx.html").exists());
+    rig.finish();
+}
+
+/// The review's: every interface edit that drops a name the part binds is
+/// `in-use` (a template set here), unless its controls go too; a rename
+/// onto a name the part binds already is refused (its undo could not part
+/// the two).
+#[test]
+fn every_edit_dropping_a_bound_name_is_in_use() {
+    let mut rig = bookkeeping_rig("parts-dropped");
+    let (mut ws, _) = rig.client();
+    let dir = rig.dir.clone();
+    let spare = part(
+        "spare",
+        "spare",
+        "      <signal-knob bind=\".level\" label=\"level\"></signal-knob>\n",
+    );
+    fs::write(dir.join("ui/parts/spare.html"), &spare).unwrap();
+    let refused = send_patch(
+        &mut rig,
+        &mut ws,
+        1,
+        json!([{"op": "slot.interface", "slot": "spare", "template": "lib.voice"}]),
+        "error",
+    );
+    assert_eq!(refused["code"], "in-use", "{refused}");
+    assert!(
+        refused["message"].as_str().unwrap().contains("level"),
+        "{refused}"
+    );
+    assert_eq!(read(&dir, "ui/parts/spare.html").unwrap(), spare);
+    let set = patch(
+        &mut rig,
+        &mut ws,
+        3,
+        json!([{"op": "slot.interface", "slot": "spare", "template": "lib.voice", "removeControls": true}]),
+    );
+    assert!(
+        !read(&dir, "ui/parts/spare.html")
+            .unwrap()
+            .contains(".level")
+    );
+    patch(&mut rig, &mut ws, 5, set["inverse"].clone());
+    assert_eq!(read(&dir, "ui/parts/spare.html").unwrap(), spare);
+
+    // A rename and its undo give the part back byte for byte; a rename onto
+    // a name the part already binds (`.gain`, not in the interface) is refused.
+    let fx = read(&dir, "ui/parts/fx.html").unwrap();
+    let renamed = patch(
+        &mut rig,
+        &mut ws,
+        7,
+        json!([{"op": "slot.interface", "slot": "fx", "rename": {"volume": "w"}}]),
+    );
+    patch(&mut rig, &mut ws, 9, renamed["inverse"].clone());
+    assert_eq!(read(&dir, "ui/parts/fx.html").unwrap(), fx);
+    fs::write(
+        dir.join("ui/parts/fx.html"),
+        fx.replace(
+            "bind=\".volume\"",
+            "bind=\".volume\"></signal-knob>\n      <signal-knob bind=\".gain\"",
+        ),
+    )
+    .unwrap();
+    let refused = send_patch(
+        &mut rig,
+        &mut ws,
+        11,
+        json!([{"op": "slot.interface", "slot": "fx", "rename": {"volume": "gain"}}]),
+        "error",
+    );
+    assert_eq!(refused["code"], "bad-value", "{refused}");
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains(".gain already"),
+        "{refused}"
+    );
     rig.finish();
 }
 

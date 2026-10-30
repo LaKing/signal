@@ -27,7 +27,8 @@
 // attribute when it has one, else the slug of its first heading (`kick`,
 // `output`; a second card of the same heading `kick-2`), else `card`
 // (`card-2`, …), in the panel's order. ADR 0046 §5: an open slot card
-// (`<signal-slot>` among the cards) is a card titled by its slot, and the
+// (`<signal-slot>` among the cards) is a card titled by its slot, its id
+// `slot.<name>` (crates/signal-ui/src/parts.rs `slot_card_id`), and the
 // cards of its part are cards of their own, their ids counted in the part
 // and prefixed with the slot's name (`synth:mono-synth`), as the server
 // names them when Group into slot moves a card (`ui/windows.toml`).
@@ -190,12 +191,17 @@ export function cardsOf(doc) {
   const elements = findCards(doc);
   const titles = elements.map(titleOf);
   const groups = new Map();
+  const ids = [];
   elements.forEach((element, i) => {
+    // An open slot card's id is `slot.<name>`: no slug (no `.`) nor part card id (`<slot>:…`) is one, so it shifts no other id.
+    if (element.localName === 'signal-slot') {
+      ids[i] = `slot.${slotName(element)}`;
+      return;
+    }
     const slot = slotOfCard(element);
     if (!groups.has(slot)) groups.set(slot, []);
     groups.get(slot).push(i);
   });
-  const ids = [];
   for (const [slot, indexes] of groups) {
     const own = cardIds(indexes.map((i) => ({ id: elements[i].id, title: titles[i] })));
     const prefix = slot ? `${slotName(slot)}:` : '';

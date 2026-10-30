@@ -495,6 +495,23 @@ pub struct Context<'a> {
     pub bound: &'a dyn Fn(&str) -> Vec<String>,
 }
 
+/// ADR 0046 §7: the names of slot `slot`'s resolved interface (its ports'
+/// and parameters') in a level's text, with the project's `templates`;
+/// `None` when the entry is no slot (or does not read).
+pub fn interface_names(
+    text: &str,
+    slot: &str,
+    templates: &BTreeMap<String, Interface>,
+) -> Option<Vec<String>> {
+    slot::read_slot(text, slot, templates).ok().map(|read| {
+        read.interface
+            .ports
+            .iter()
+            .map(|p| p.name.clone())
+            .collect()
+    })
+}
+
 /// A [`Context::bound`] that knows no panel binding.
 pub fn no_bindings(_: &str) -> Vec<String> {
     Vec::new()
