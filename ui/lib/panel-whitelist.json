@@ -1,9 +1,9 @@
 {
-  "about": "What the panel editor writes inside <signal-panel> (docs/ui-controls.md \"Editing a panel\", ADR 0026 §5): read by ui/lib/panel-tree.js and by the server (crates/signal-ui/src/panel_write.rs). A control's attributes are its observedAttributes, plus class. A child named by a control's tag (`signal-slot` among the cards: the open slot card, ADR 0046 §5) is that control only.",
+  "about": "What the panel editor writes inside <signal-panel> (docs/ui-controls.md \"Editing a panel\", ADR 0026 §5): read by ui/lib/panel-tree.js and by the server (crates/signal-ui/src/panel_write.rs). A control's attributes are its observedAttributes, plus class. ADR 0047 §2: `place` (x y w h in plate units) on a card, `section.signal-card` or the open slot card; the plate itself (`plate` on <signal-panel>) is outside the content, `panel.write`'s own field. A child named by a control's tag (`signal-slot` among the cards: the open slot card, ADR 0046 §5) is that control only.",
   "classToken": "^[a-z][a-z0-9-]*$",
   "containers": {
     "div.signal-cards": { "attributes": ["class"], "children": ["section.signal-card", "signal-slot"] },
-    "section.signal-card": { "attributes": ["class"], "children": ["h1", "h2", "p", "div.row", "control"] },
+    "section.signal-card": { "attributes": ["class", "place"], "children": ["h1", "h2", "p", "div.row", "control"] },
     "div.row": { "attributes": ["class"], "children": ["control", "div.signal-group"] },
     "div.signal-group": { "attributes": ["class"], "children": ["control"] },
     "h1": { "attributes": [], "children": ["text"] },
@@ -22,8 +22,8 @@
     "signal-canvas": ["bind", "skin", "label", "class", "renderer", "rate", "grid", "tilt", "height", "backend"],
     "signal-piano-roll": ["pattern", "label", "class", "wheel", "snap", "beats-per-bar", "position", "position-bind", "audition"],
     "signal-step-grid": ["pattern", "label", "class", "wheel", "step", "step-bind"],
-    "signal-slot": ["bind", "skin", "class"]
+    "signal-slot": ["bind", "skin", "class", "place"]
   },
   "boolean": ["bipolar"],
-  "order": ["renderer", "pattern", "bind", "source", "channel", "mode", "orientation", "taper", "floor", "min", "max", "default", "unit", "digits", "rate", "grid", "tilt", "height", "sweep", "bipolar", "drag", "spring", "trigger-level", "trigger-edge", "backend", "snap", "beats-per-bar", "position", "position-bind", "audition", "step", "step-bind", "wheel", "label", "skin", "class"]
+  "order": ["renderer", "pattern", "bind", "source", "channel", "mode", "orientation", "taper", "floor", "min", "max", "default", "unit", "digits", "rate", "grid", "tilt", "height", "sweep", "bipolar", "drag", "spring", "trigger-level", "trigger-edge", "backend", "snap", "beats-per-bar", "position", "position-bind", "audition", "step", "step-bind", "wheel", "label", "skin", "class", "place"]
 }

@@ -90,6 +90,13 @@ function reduced(doc) {
   return Boolean(doc.defaultView?.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
 }
 
+/** ADR 0047 §2: the plate's zoom commands (⌘+, ⌘−, ⌘0) for the page's panel; whether `id` was one it took. */
+export function plateCommand(doc, id) {
+  if (!id?.startsWith('view.plate_')) return false;
+  const panel = doc.querySelector?.('signal-panel');
+  return Boolean(panel?.plateCommand?.(id));
+}
+
 /** Scrolls `box` for view command `id`; whether it moved anything. */
 export function scrollView(box, id) {
   if (!box) return false;
@@ -165,7 +172,8 @@ function onKey(event) {
   const viewCommand = field ? null : keyCommand('view', event);
   const pressing = isPressable(target) && /(^|\+)(Space|Enter)$/.test(chord);
   if (viewCommand && !pressing) {
-    if (scrollView(scrollerFor(target, doc), viewCommand.id)) event.preventDefault();
+    // ADR 0047: the panel's plate zooms; the rest scrolls.
+    if (plateCommand(doc, viewCommand.id) || scrollView(scrollerFor(target, doc), viewCommand.id)) event.preventDefault();
     return;
   }
   // The project's commands: below the view, above the app's menu. A native

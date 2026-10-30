@@ -37,14 +37,26 @@
 }
 
 /* Cards (M2.8-11, docs/ui-controls.md "Panels"): a panel is a grid of
-   cards filling its width, and every text in it is inside a card. A card
-   is as tall as its row; its controls keep their own fixed sizes. */
+   cards, and every text in it is inside a card. A card is as tall as its
+   row; its controls keep their own fixed sizes. ADR 0047: the grid is laid
+   out once at the plate's reference width (1280 px) and scaled whole to
+   the window, so it never reflows; its gap is two plate units, so Freeze
+   layout rounds neighbouring cards to places that never overlap. */
 .signal-cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(var(--signal-card-min), 100%), 1fr));
-  gap: 0.75rem;
+  gap: 1rem;
   align-items: stretch;
 }
+
+/* The fixed plate (ADR 0047 §2, ui/controls/plate.js): a grid with a
+   plate (`plate="W H"` on <signal-panel>, in plate units of 8 px) is the
+   plate's size, each card at its `place`, drawn half a unit inside it. */
+[data-plate] { display: block !important; position: relative; box-sizing: border-box; width: calc(var(--signal-plate-w) * 8px); height: calc(var(--signal-plate-h) * 8px); }
+[data-plate] > [data-placed] { position: absolute; box-sizing: border-box; margin: 0; min-width: 0; min-height: 0; left: calc(var(--signal-place-x) * 8px + 4px); top: calc(var(--signal-place-y) * 8px + 4px); width: calc(var(--signal-place-w) * 8px - 8px); height: calc(var(--signal-place-h) * 8px - 8px); }
+/* The open slot card placed: one box, its header above its part. */
+signal-slot[data-card][data-placed] { display: flex; flex-direction: column; gap: 0.6rem; }
+signal-slot[data-card][data-placed] > .signal-cards { display: grid; }
 .signal-card {
   min-width: 0;
   box-sizing: border-box;
@@ -68,6 +80,7 @@
    grid; in a row (the compact card) they stand beneath it. Either way they
    are framed in the accent colour, as the slot card is. */
 signal-slot[data-card] > .signal-cards { display: contents; }
+signal-slot[data-card] > .signal-cards[data-plate] { grid-column: 1 / -1; }
 signal-slot:not([data-card]) > .signal-cards { margin-top: 0.6rem; }
 signal-slot > .signal-cards > .signal-card { box-shadow: inset 0 0 0 1px var(--signal-accent); }
 
@@ -76,7 +89,7 @@ signal-slot > .signal-cards > .signal-card { box-shadow: inset 0 0 0 1px var(--s
    and absolutely placed labels only, so nothing moves or resizes; an empty
    row keeps a height to drop into. */
 signal-panel[editing] [data-edit] { outline: 1px dashed var(--signal-focus); outline-offset: 2px; cursor: grab; }
-signal-panel[editing] .signal-card { position: relative; }
+signal-panel[editing] .signal-card:not([data-placed]) { position: relative; }
 signal-panel[editing] .signal-card[data-edit]::before,
 signal-panel[editing] [data-edit]:is(signal-fader, signal-knob, signal-xy, signal-button, signal-toggle, signal-meter, signal-scope, signal-value, signal-canvas)::before {
   content: "⠿"; position: absolute; top: -0.55rem; left: -0.35rem; z-index: 2; padding: 0 2px; border-radius: 3px;

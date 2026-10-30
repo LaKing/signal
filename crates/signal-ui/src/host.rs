@@ -3505,6 +3505,7 @@ impl Host {
                         "type": "panel.written",
                         "file": reply.get("file").cloned().unwrap_or(Value::Null),
                         "base": reply.get("base").cloned().unwrap_or(Value::Null),
+                        "plate": reply.get("plate").cloned().unwrap_or(Value::Null),
                         "html": message.get("html").cloned().unwrap_or(Value::Null),
                     });
                     self.broadcast(&pushed);
@@ -4765,6 +4766,7 @@ impl Host {
                 "type": "panel.written",
                 "file": name,
                 "base": change.after.as_ref().map(|t| sha256_hex(t.as_bytes())),
+                "plate": change.after.as_deref().and_then(crate::plate::panel_plate),
                 "html": html,
             }));
         }
@@ -4950,6 +4952,7 @@ impl Host {
                             "type": "panel.written",
                             "file": name,
                             "base": sha256_hex(new.as_bytes()),
+                            "plate": crate::plate::panel_plate(&new),
                             "html": html,
                         }));
                     }
@@ -5014,6 +5017,7 @@ impl Host {
                         "type": "panel.written",
                         "file": path.trim_start_matches("ui/"),
                         "base": sha256_hex(new.as_bytes()),
+                        "plate": crate::plate::panel_plate(&new),
                         "html": html,
                     }));
                     written.push(path);
@@ -7718,7 +7722,7 @@ impl Host {
         if !exists {
             return Ok(
                 json!({"type": "panel.read", "file": name, "exists": false, "base": null,
-                "text": null, "html": null, "editable": true, "reason": null, "planned": planned}),
+                "plate": null, "text": null, "html": null, "editable": true, "reason": null, "planned": planned}),
             );
         }
         let text = fs::read_to_string(&path)
@@ -7732,6 +7736,7 @@ impl Host {
             "file": name,
             "exists": true,
             "base": sha256_hex(text.as_bytes()),
+            "plate": crate::plate::panel_plate(&text),
             "text": text,
             "html": html,
             "editable": reason.is_null(),
@@ -7758,6 +7763,25 @@ impl Host {
             None | Some(Value::Null) => None,
             Some(_) => return Err(fail("bad-message", "`base` is a string or null")),
         };
+        // ADR 0047 §2: the plate on <signal-panel> itself, outside its
+        // content: a string sets it, null removes it, no field keeps it.
+        let plate = match message.get("plate") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::String(plate)) => Some(Some(plate.as_str())),
+            Some(_) => return Err(fail("bad-message", "`plate` is a string or null")),
+        };
+        if let Some(Some(value)) = plate
+            && crate::plate::parse_plate(value).is_none()
+        {
+            return Err(fail(
+                "bad-html",
+                format!(
+                    "not written: plate=\"{value}\" is not two whole numbers of plate units (1 to {})",
+                    crate::plate::MAX_PLATE
+                ),
+            ));
+        }
         let (path, _) = self.panel_path(name)?;
         check_content(html).map_err(|why| fail("bad-html", format!("not written: {why}")))?;
         // The version check and the write under the project's writer lock
@@ -7773,10 +7797,11 @@ impl Host {
         let conflict = |before: Option<&str>| {
             let current = before.map(|t| sha256_hex(t.as_bytes()));
             let html = before.and_then(|t| panel_content(t).ok().map(|(s, e)| t[s..e].to_owned()));
+            let plate = before.and_then(crate::plate::panel_plate);
             fail_with(
                 "conflict",
                 format!("ui/{name} changed since the version the editor started from"),
-                json!({"file": name, "base": current, "text": before, "html": html}),
+                json!({"file": name, "base": current, "text": before, "html": html, "plate": plate}),
             )
         };
         let current = before.as_deref().map(|t| sha256_hex(t.as_bytes()));
@@ -7793,6 +7818,11 @@ impl Host {
                 Some(key) => crate::parts::part_text(key, html),
                 None => first_file(&self.project_name(), html),
             },
+        };
+        let after = match plate {
+            Some(plate) => crate::plate::with_plate(&after, plate)
+                .map_err(|why| fail("not-editable", format!("not written: {why}")))?,
+            None => after,
         };
         let plan = self.plan.as_ref().ok_or_else(|| {
             fail(
@@ -7847,6 +7877,7 @@ impl Host {
             "type": "panel.written",
             "file": name,
             "base": sha256_hex(after.as_bytes()),
+            "plate": crate::plate::panel_plate(&after),
             "created": !exists,
         }))
     }

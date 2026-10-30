@@ -35,3 +35,6 @@ A project's signal path is only visible as text: `project.toml`'s instances and 
 
 ## Note of 2026-10-25: meters on the selected instance only
 The owner: "csak a kijelölt elem kapjon mérőket, de minden bemeneten és kimeneten - a tartományának megfelelően" (only the selected element gets meters, but on every input and output, each scaled to its range). The live levels of §1 ("only for what is on screen") are narrowed to the selected instance and widened to all its signal inputs, parameters and outputs, each scaled to its declared range (`ui-controls.md` "Level bars"); an instance the fault guard muted is marked. The 8 scope slots are kept.
+
+## Note of 2026-10-30: amended by ADR 0047 §2
+The panel's responsive card grid of §4, which reflowed with the window, is a fixed plate: `plate="W H"` on `<signal-panel>` and `place="x y w h"` on each card (plate units of 8 px), laid out once at its own size and scaled whole to the window; a panel without places is laid out once at 1280 px. The panel editor moves cards on the grid and resizes them by their corners, and Freeze layout writes the places it measures.

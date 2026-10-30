@@ -228,7 +228,7 @@ pub fn elements(text: &str) -> Vec<Element> {
 }
 
 /// A tag the scanner meets outside comments and raw text.
-enum Tag {
+pub(crate) enum Tag {
     /// A start tag: its name (lower case), the offset of its `<`, its
     /// attributes, and the offset after its `>`.
     Start {
@@ -243,7 +243,7 @@ enum Tag {
 
 /// Every start and end tag of an HTML text in source order, skipping
 /// comments and the content of `script`, `style`, `textarea` and `title`.
-fn scan(text: &str, mut on: impl FnMut(Tag)) {
+pub(crate) fn scan(text: &str, mut on: impl FnMut(Tag)) {
     let bytes = text.as_bytes();
     let mut at = 0;
     let name_at = |from: usize| {
@@ -1187,6 +1187,8 @@ pub fn check_scoped(file: &str, text: &str, targets: &Targets<'_>, scope: Scope<
             diagnostic: at(0, severity, message),
         });
     }
+    // ADR 0047 §2: the plate's geometry.
+    findings.extend(crate::plate::findings(file, text));
     Checked {
         file: file.to_owned(),
         controls,

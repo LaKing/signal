@@ -5,12 +5,24 @@
 // showing every diagnostic in the page and marking the controls they are
 // about. With `generated` it builds the default panel from `describe`
 // instead. Attributes: `file` (the panel file; by default the page's
-// `/project/<file>.html`), `generated`. Its bar's Edit layout switch is the
-// panel editor (./panel-editor.js, M2.9-2); a panel another client wrote
-// (`panel.written`) is shown as written, without reloading the page.
+// `/project/<file>.html`), `generated`, `plate` (ADR 0047 §2: the plate's
+// width and height in plate units, its cards at their `place`). Its bar's
+// Edit layout switch is the panel editor (./panel-editor.js, M2.9-2); a
+// panel another client wrote (`panel.written`) is shown as written, without
+// reloading the page.
+//
+// ADR 0047: the panel is a fixed plate. Its cards are laid out once at the
+// plate's own size (a panel without places at 1280 px, the reference width:
+// the implicit freeze) and the plate is scaled whole to the window by one
+// transform: fit the width and scroll down, never under a scale of 0.5
+// (then it pans sideways too); ⌘+ and ⌘− zoom, ⌘0 shows the whole plate (and
+// fits the width again). The window changes the scale, never the
+// arrangement. The scale is view state, never written.
 
 import { connectFromPage, getDefaultConnection, setDefaultConnection } from '../signal-ui.js';
 import { BindingCheck, defaultPanel, formatDiagnostic, panelFile } from '../lib/panel.js';
+import { GUTTER, PU, REFERENCE_PX, defaultPlate, fitScale, pack, plateText, zoomed } from '../lib/plate.js';
+import { PLATE_CSS, layOutCards, overflowing } from './plate.js';
 import { unsavedLine } from '../lib/unsaved.js';
 import { EDITOR_CSS, PanelEditor, SharedHistory, showWritten } from './panel-editor.js';
 
@@ -47,6 +59,22 @@ const CSS = `
 .problems .warning { color: var(--signal-effective, #ffb74d); }
 .problems .error { color: var(--signal-clip, #ff5252); }
 ${GENERATED_CSS}
+/* ADR 0047: the plate, laid out at its own size and scaled whole into the
+   viewport (one transform); the viewport takes the scaled size, so the page
+   scrolls as far as the plate reaches. Unplaced, the plate is 1280 px wide,
+   padded half a plate unit. */
+.viewport { position: relative; }
+.viewport.cropped { overflow: hidden; }
+.plate { position: absolute; left: 0; top: 0; box-sizing: border-box; width: ${REFERENCE_PX}px; padding: ${GUTTER}px; transform-origin: 0 0; }
+.plate.placed { padding: 0; }
+.plate.placed .generated { gap: 0; }
+/* The editor's marks on the plate (a card's corners, where a drag would put it), in plate px. */
+.plate-overlay { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 20; pointer-events: none; }
+.plate-overlay > * { position: absolute; box-sizing: border-box; }
+.plate-overlay .corner { width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 2px; background: var(--signal-accent, #4fc3f7); border: 1px solid var(--signal-bg, #16181d); }
+.plate-overlay .outline { border: 2px dashed var(--signal-accent, #4fc3f7); border-radius: 10px; }
+.plate-overlay .outline.refused { border-color: var(--signal-clip, #ff5252); background: color-mix(in srgb, var(--signal-clip, #ff5252) 12%, transparent); }
+${PLATE_CSS}
 /* The unsaved indicator is a box of fixed width at the bar's end, its text cut
    to its own fixed width: the count or the error changing moves nothing. */
 .unsaved { flex: none; width: 46ch; margin-left: auto; display: flex; align-items: center; color: var(--signal-unsaved, #ffb74d); }
@@ -76,14 +104,27 @@ export class SignalPanel extends HTMLElement {
 <div class="bar" part="bar"><button type="button" class="edit" role="switch" aria-checked="false" aria-disabled="true" title="Edit layout: arrange the cards and controls, written to the panel file">Edit layout</button><span class="status">starting…</span><span class="title"></span><span class="summary"></span><span class="unsaved" part="unsaved" role="status" style="visibility: hidden"><span class="unsaved-text"></span><button type="button" class="retry-all">Retry all</button><button type="button" class="revert-all">Revert all</button></span></div>
 <div class="tools" part="tools" hidden></div>
 <ol class="problems" part="problems" role="alert" hidden></ol>
-<div class="generated" part="generated"></div>
-<slot></slot>`;
+<div class="viewport" part="viewport"><div class="plate" part="plate"><div class="generated" part="generated"></div><slot></slot><div class="plate-overlay"></div></div></div>`;
     this.connection = null;
     this.stops = [];
     /** The structure of the generated panel shown (`defaultPanel`), with `generated`. */
     this.generated = undefined;
     this.marked = [];
     this.editor = new PanelEditor(this);
+    /** ADR 0047: the view's scale mode (`fitScale`'s), the scale shown, the crop (a panel window's cards, plate px) and the plate's size. */
+    this.zoom = { kind: 'width' };
+    this.scale = 1;
+    this.crop = null;
+    this.plateSize = { w: REFERENCE_PX, h: 0 };
+    this.checkProblems = [];
+    this.plateProblems = [];
+    this.laying = 0;
+  }
+
+  static observedAttributes = ['plate'];
+
+  attributeChangedCallback() {
+    this.scheduleLayOut();
   }
 
   $(selector) {
@@ -96,6 +137,7 @@ export class SignalPanel extends HTMLElement {
   }
 
   connectedCallback() {
+    this.watchPlate();
     if (this.connection) return;
     const connection = getDefaultConnection() ?? connectFromPage();
     if (!connection) {
@@ -145,6 +187,173 @@ export class SignalPanel extends HTMLElement {
   disconnectedCallback() {
     this.editor.leave();
     for (const stop of this.stops.splice(0)) stop();
+    this.observers?.forEach((o) => o.disconnect());
+    this.observers = null;
+  }
+
+  // ADR 0047: the plate.
+
+  /** Lays out the plate as its content changes, and scales it as the window does. */
+  watchPlate() {
+    if (this.observers) return;
+    this.observers = [];
+    const View = this.ownerDocument?.defaultView ?? globalThis;
+    if (View.ResizeObserver) {
+      const sizes = new View.ResizeObserver(() => this.fit());
+      sizes.observe(this);
+      sizes.observe(this.$('.plate'));
+      this.observers.push(sizes);
+      // Cards whose height is their content's (unplaced on a plate, the generated panel's): laid out again as they grow.
+      this.cardSizes = new View.ResizeObserver(() => this.scheduleLayOut());
+      this.observers.push(this.cardSizes);
+    }
+    if (View.MutationObserver) {
+      // The cards and their places (the editor's draws, a written panel); not the styles the layout sets.
+      const changes = new View.MutationObserver(() => this.scheduleLayOut());
+      changes.observe(this, { childList: true, subtree: true, attributes: true, attributeFilter: ['place', 'class', 'data-card'] });
+      this.observers.push(changes);
+    }
+    const resize = () => this.fit();
+    View.addEventListener?.('resize', resize);
+    this.observers.push({ disconnect: () => View.removeEventListener?.('resize', resize) });
+    this.layOut();
+  }
+
+  scheduleLayOut() {
+    if (this.laying) return;
+    this.laying = 1;
+    queueMicrotask(() => {
+      this.laying = 0;
+      this.layOut();
+    });
+  }
+
+  /**
+   * Lays the cards out on the plate: at their places with a plate, else as
+   * the grid flows at the reference width; then measures it and scales it.
+   */
+  layOut() {
+    this.laying = 0;
+    const plate = this.$('.plate');
+    if (!plate) return;
+    const generated = this.$('.generated');
+    // ADR 0047 §4: each slot's part on its own plate first (it sizes its card).
+    for (const slot of this.querySelectorAll('signal-slot')) slot.layOutPart?.();
+    let placed = null;
+    if (this.generatedPlaces && !generated.hidden) {
+      placed = layOutCards(generated, this.generatedPlate, this.generatedPlaces);
+      if (this.refitGenerated(generated)) placed = layOutCards(generated, this.generatedPlate, this.generatedPlaces);
+    } else layOutCards(generated, null);
+    const grid = this.querySelector(':scope > .signal-cards');
+    const own = layOutCards(grid, this.getAttribute('plate'));
+    placed ??= own;
+    this.cardSizes?.disconnect();
+    for (const card of [...(own?.unplaced ?? []), ...(placed && !own ? generated.children : [])]) this.cardSizes?.observe(card);
+    plate.classList.toggle('placed', Boolean(placed));
+    plate.style.width = placed ? `${placed.w}px` : '';
+    this.plateProblems = this.measureProblems(placed ? (own ? grid : generated) : null, placed?.unplaced ?? []);
+    this.renderProblems();
+    this.fit();
+  }
+
+  /**
+   * The generated panel's cards made as tall as their content where the
+   * packing's estimate was short (a slot's part, a skin), packed again in
+   * their order: never one over the next shelf. Whether anything changed.
+   */
+  refitGenerated(grid) {
+    const sections = [...grid.children];
+    const places = sections.map((s) => this.generatedPlaces.get(s));
+    if (!places.every(Boolean)) return false;
+    const needs = sections.map((s) => Math.ceil((s.scrollHeight + 2 * GUTTER) / PU));
+    if (!needs.some((n, i) => n > places[i].h)) return false;
+    const { plate, places: packed } = pack(places.map((p, i) => ({ w: p.w, h: Math.max(p.h, needs[i]) })));
+    this.generatedPlate = plateText(plate);
+    this.generatedPlaces = new Map(sections.map((s, i) => [s, packed[i]]));
+    return true;
+  }
+
+  /** The page's own findings about the plate (ADR 0047 §2): a card whose content is taller than its card. */
+  measureProblems(grid, unplaced) {
+    const problems = [];
+    for (const { card } of overflowing(grid)) {
+      const title = card.querySelector?.('h1, h2')?.textContent?.trim() || card.getAttribute?.('bind') || 'a card';
+      problems.push({ severity: 'warning', text: `${title}: its content is taller than its card (place="${card.getAttribute('place') ?? ''}"); Edit layout makes it taller` });
+    }
+    if (unplaced.length && grid === this.querySelector(':scope > .signal-cards')) {
+      problems.push({ severity: 'warning', text: `${unplaced.length} card${unplaced.length === 1 ? ' has' : 's have'} no place on the plate: shown below the placed ones` });
+    }
+    return problems;
+  }
+
+  /** The plate scaled to the view (`zoom`), cropped to `crop` in a panel window: one transform. */
+  fit() {
+    const plate = this.$('.plate');
+    const viewport = this.$('.viewport');
+    if (!plate || !viewport) return;
+    const size = { w: plate.offsetWidth || REFERENCE_PX, h: plate.offsetHeight || 0 };
+    this.plateSize = size;
+    const crop = this.crop ?? { x: 0, y: 0, ...size };
+    const width = this.clientWidth || size.w;
+    const top = (viewport.getBoundingClientRect?.().top ?? 0) + (this.ownerDocument?.defaultView?.scrollY ?? 0);
+    const height = Math.max(120, (this.ownerDocument?.defaultView?.innerHeight ?? 800) - Math.max(0, top) - 12);
+    const s = fitScale(this.zoom, { w: width, h: height }, crop);
+    this.scale = s;
+    const transform = `translate(${-crop.x * s}px, ${-crop.y * s}px) scale(${s})`;
+    if (plate.style.transform !== transform) plate.style.transform = transform;
+    viewport.style.width = `${Math.round(crop.w * s)}px`;
+    viewport.style.height = `${Math.ceil(crop.h * s)}px`;
+    viewport.classList.toggle('cropped', Boolean(this.crop));
+  }
+
+  /**
+   * The plate's view commands (ADR 0047 §2, ADR 0034's keymap): ⌘+ and ⌘−
+   * zoom; ⌘0 the whole plate, again the width. Whether `id` was one.
+   */
+  plateCommand(id) {
+    if (id === 'view.plate_zoom_in' || id === 'view.plate_zoom_out') this.zoom = zoomed(this.scale, id.endsWith('in') ? 1 : -1);
+    else if (id === 'view.plate_whole') this.zoom = this.zoom.kind === 'whole' ? { kind: 'width' } : { kind: 'whole' };
+    else return false;
+    this.fit();
+    return true;
+  }
+
+  /** Where the plate's origin is on screen and its scale: what turns a pointer into plate px. */
+  plateOrigin() {
+    const r = this.$('.plate').getBoundingClientRect();
+    return { left: r.left, top: r.top, scale: this.scale || 1 };
+  }
+
+  /** Element `element`'s box in plate px (`{x, y, w, h}`). */
+  plateRect(element) {
+    const o = this.plateOrigin();
+    const r = element.getBoundingClientRect();
+    return { x: (r.left - o.left) / o.scale, y: (r.top - o.top) / o.scale, w: r.width / o.scale, h: r.height / o.scale };
+  }
+
+  /** A panel window shows only its cards (ADR 0047 §3): the plate cropped to `rect` (plate px), or whole (null). */
+  setCrop(rect) {
+    const same = (a, b) => (a === null && b === null) || (a && b && a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h);
+    if (same(this.crop, rect ?? null)) return;
+    this.crop = rect ?? null;
+    this.fit();
+  }
+
+  /** The editor's plate (`"W H"` or null), shown at once. */
+  setPlate(plate) {
+    if ((plate ?? null) === this.getAttribute('plate')) return;
+    if (plate) this.setAttribute('plate', plate);
+    else this.removeAttribute('plate');
+  }
+
+  /** The layer over the plate the editor draws its marks in (plate px). */
+  overlay() {
+    return this.$('.plate-overlay');
+  }
+
+  /** The editor's draw: laid out now, so it can measure. */
+  layOutNow() {
+    this.layOut();
   }
 
   /**
@@ -206,7 +415,11 @@ export class SignalPanel extends HTMLElement {
     }
     showWritten(this, message.html ?? '').then((error) => {
       if (error) this.showProblems([{ severity: 'warning', text: `the written panel is not shown: ${error}` }]);
-      else this.recheck();
+      else {
+        // ADR 0047: the plate as written.
+        if (message.plate !== undefined) this.setPlate(message.plate);
+        this.recheck();
+      }
     });
   }
 
@@ -284,7 +497,17 @@ export class SignalPanel extends HTMLElement {
   }
 
   showProblems(problems) {
+    this.checkProblems = problems;
+    this.renderProblems();
+  }
+
+  /** The check's problems and the plate's own (measured here). */
+  renderProblems() {
+    const problems = [...(this.checkProblems ?? []), ...(this.plateProblems ?? [])];
     const list = this.$('.problems');
+    const key = JSON.stringify(problems);
+    if (key === this.problemsKey) return;
+    this.problemsKey = key;
     list.replaceChildren(
       ...problems.map(({ severity, text }) => {
         const item = document.createElement('li');
@@ -296,10 +519,16 @@ export class SignalPanel extends HTMLElement {
     list.hidden = problems.length === 0;
   }
 
-  /** Builds the default panel of `description`. */
+  /** Builds the default panel of `description`, its cards packed on the plate (ADR 0047 §2). */
   generate(description) {
-    this.$('.generated').replaceChildren(...generatedSections(defaultPanel(description)));
+    const spec = defaultPanel(description);
+    const sections = generatedSections(spec);
+    const { plate, places } = defaultPlate(spec);
+    this.generatedPlate = plateText(plate);
+    this.generatedPlaces = new Map(sections.map((s, i) => [s, places[i]]));
+    this.$('.generated').replaceChildren(...sections);
     this.$('.summary').textContent = 'generated panel (the project has no ui/main.html)';
+    this.layOut();
   }
 }
 

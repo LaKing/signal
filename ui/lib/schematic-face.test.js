@@ -5,7 +5,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FACE_LAYOUT_PX, FACE_MAX_W, FACE_MIN_PX, FACE_MIN_W, FACE_STEP, estimateFace, faceAttribute, faceFit, facePlacement, faceSkin, frameFace, hotAddresses, labelColumn, lit, measuredNatural, overlapping, placeFace, rootRules, stylesheets } from './schematic-face.js';
+import { FACE_LAYOUT_PX, FACE_MIN_PX, FACE_MIN_W, FACE_STEP, estimateFace, faceAttribute, faceFit, facePlacement, faceSkin, faceWidth, frameFace, hotAddresses, labelColumn, lit, measuredNatural, overlapping, placeFace, rootRules, stylesheets } from './schematic-face.js';
 import { HEADER } from './schematic-layout.js';
 
 const BASE = 'http://127.0.0.1:7000/project/main.html';
@@ -14,8 +14,9 @@ test("a face sits under the box's title between its pins' names; the box grows t
   const node = { name: 'synth', w: 120, h: 100, slot: {}, ins: [{ name: 'gate' }, { name: 'a_very_long_parameter_name' }], outs: [{ name: 'out' }] };
   placeFace(node, { key: 'synth', file: 'parts/synth.html', error: null, count: 3 }, faceFit({ w: FACE_LAYOUT_PX, h: 533 }));
   assert.equal(node.face.dy, HEADER);
-  assert.equal(node.face.w, FACE_MAX_W);
-  assert.equal(node.face.h, Math.ceil(533 * (FACE_MAX_W / FACE_LAYOUT_PX)));
+  // ADR 0047 §4: at its own size, one unit per CSS px.
+  assert.equal(node.face.w, FACE_LAYOUT_PX);
+  assert.equal(node.face.h, 533);
   assert.deepEqual(node.face.natural, { w: FACE_LAYOUT_PX, h: 533 });
   assert.ok(node.face.dx >= labelColumn(node.ins));
   assert.ok(node.face.dx + node.face.w <= node.w - labelColumn(node.outs));
@@ -32,16 +33,14 @@ test("a face sits under the box's title between its pins' names; the box grows t
   assert.equal(tall.face.dx, Math.round((tall.w - 200) / 2));
 });
 
-test("a face is a miniature of the panel: laid out at a panel window's width, scaled down whole to at most FACE_MAX_W, its aspect kept", () => {
+test('a face is its part\'s plate (ADR 0047 §4): at its own size, one layout unit per CSS px, scaled only with its box', () => {
   // The studio's mono synth: one wide card, its groups side by side, about 1280 x 420 on the panel.
-  const wide = faceFit({ w: 1280, h: 420 });
-  assert.equal(wide.w, FACE_MAX_W);
-  assert.equal(wide.scale, FACE_MAX_W / 1280);
-  assert.equal(wide.h, Math.ceil(420 * wide.scale));
-  assert.ok(Math.abs(wide.w / wide.h - 1280 / 420) < 0.02, 'its aspect kept');
-  assert.ok(wide.h < 300, 'not the tall column a reflow at 400 made (about 800)');
-  // A part narrower than the box: never scaled up.
+  assert.deepEqual(faceFit({ w: 1280, h: 420 }), { w: 1280, h: 420, scale: 1, natural: { w: 1280, h: 420 } });
   assert.deepEqual(faceFit({ w: 300, h: 160 }), { w: 300, h: 160, scale: 1, natural: { w: 300, h: 160 } });
+  // A placed part is laid out at its plate's width, one without places at the reference width.
+  assert.equal(faceWidth({ w: 60, h: 20 }), 480);
+  assert.equal(faceWidth(null), FACE_LAYOUT_PX);
+  assert.equal(measuredNatural(500, 10, 480).w, 480, 'never wider than its plate');
 });
 
 test('a face is estimated from its controls until measured; a measure is rounded up so a pixel lays nothing out again', () => {

@@ -5,10 +5,17 @@
 // once with `panel.write`, so undo and redo are the versions written. In
 // edit mode the controls take no pointer or key (nothing is sent; their
 // streams go on), and each card and control shows a frame, a handle and its
-// address. The layout stays the card grid: a drag changes the order, never
-// a position.
+// address. ADR 0047 §2: on a plate (`plate` and each card's `place`) a card
+// moves on the grid of plate units by dragging it and resizes by the
+// corners of the selected card; a drop over another card or beyond the
+// plate's sides is refused with a red outline, not pushed (a card moved or
+// grown below the plate makes the plate taller). A card whose content grows
+// is made taller, never shrunk under its content. A panel without places
+// keeps the card grid (a drag changes the order) until Freeze layout writes
+// the places it measures. Controls inside a card are ordered and grouped,
+// never placed.
 
-import { CONTAINERS, checkTree, generatedTree, parseContent, serialize } from '../lib/panel-tree.js';
+import { CONTAINERS, checkTree, generatedTree, parseContent, splitVersion, versionText } from '../lib/panel-tree.js';
 import {
   EditSession,
   KINDS,
@@ -20,22 +27,28 @@ import {
   editLabels,
   find,
   insertionIndex,
+  isPlateCard,
   makeGroup,
   moveCard,
   moveControl,
   newControl,
   paletteEntries,
+  placeOf,
+  plateCards,
   removeCard,
   removeCardStep,
   removeControl,
   renameCard,
   searchPalette,
   setAttributes,
+  setPlace,
+  setPlaces,
   setScopeWide,
   setWide,
   ungroup,
 } from '../lib/panel-edit.js';
 import { defaultPanel } from '../lib/panel.js';
+import { GUTTER, MAX_PLATE, PU, blocked, drawnBox, freeze, moved as movedPlace, parsePlate, placeText, plateText, resized, snap } from '../lib/plate.js';
 import { ENTRY_CSS, ValueEntry } from './entry-field.js';
 
 /** How many palette results show: the list keeps its height ("Stable layout"). */
@@ -73,6 +86,7 @@ const TOOLS = `
   <button type="button" class="add-card">Add card</button>
   <button type="button" class="remove-card">Remove card</button>
   <button type="button" class="wide">Wide</button>
+  <button type="button" class="freeze long" title="Freeze layout: write each card's place on the plate as it is laid out now (ADR 0047)">Freeze layout</button>
   <span class="sep"></span>
   <button type="button" class="group" title="Group the selected controls (Shift-click to select several)">Group</button>
   <button type="button" class="ungroup">Ungroup</button>
@@ -148,6 +162,10 @@ export function render(panel, tree, rules, elements, ids, attribute = null) {
       if (el?.localName !== tag) el = document.createElement(tag);
       const className = classNameOf(name, node.classes ?? []);
       if (el.className !== className) el.className = className;
+      // ADR 0047: a card's place on the plate.
+      if (node.place === undefined || node.place === null) {
+        if (el.hasAttribute('place')) el.removeAttribute('place');
+      } else if (el.getAttribute('place') !== node.place) el.setAttribute('place', node.place);
       place(el, node.children.map(build));
     }
     elements.set(node.id, el);
@@ -283,6 +301,8 @@ export class PanelEditor {
       // Never stripped: what the whitelist refuses stays, by hand.
       if (parsed.error) return `Not editable here (${parsed.error}); edit the file by hand`;
       tree = parsed.tree;
+      // ADR 0047: the plate, on <signal-panel> itself.
+      tree.plate = read.plate ?? null;
     } else {
       // ADR 0046: a slot's part starts from its interface parameters.
       tree = this.panel.emptyTree?.() ?? generatedTree(defaultPanel(this.connection.description));
@@ -290,10 +310,14 @@ export class PanelEditor {
     this.rules = rules;
     this.file = file;
     this.generated = !read.exists;
-    this.session ??= new EditSession((html) => this.readContent(html));
+    this.shownPlate = this.panel.getAttribute?.('plate') ?? null;
+    this.session ??= new EditSession((html, plate) => this.readContent(html, plate));
     // The session's history goes on while the file is the version it last
-    // wrote (AC7): the tree shown is then that version's, with its ids.
-    const text = serialize(tree, rules);
+    // wrote (AC7): the tree shown is then that version's, with its ids. It
+    // starts at the content as written when that may be written back as it
+    // is (ADR 0047: so an undo gives the file back byte for byte), else at
+    // its canonical text.
+    const text = read.exists && !parseContent(read.html, rules).error ? `${tree.plate ? `plate="${tree.plate}"` : ''}${read.html}` : versionText(tree, rules);
     if (this.session.enter({ ...read, file }, text) && this.trees.has(this.session.history.current)) {
       tree = this.trees.get(this.session.history.current);
     } else {
@@ -330,17 +354,20 @@ export class PanelEditor {
       el.removeAttribute('data-edit-selected');
     }
     this.$('.tools').hidden = true;
+    this.overlay()?.replaceChildren();
     if (this.generated) {
       // Never written: the generated panel again.
       this.panel.replaceChildren();
+      this.panel.setPlate?.(this.shownPlate);
       this.$('.generated').hidden = false;
+      this.panel.layOutNow?.();
     }
     this.elements = new Map();
   }
 
-  /** A canonical text, remembering its tree (undo draws it with the same elements). */
+  /** A version's text (its content and plate, `versionText`), remembering its tree (undo draws it with the same elements). */
   remember(tree) {
-    const text = serialize(tree, this.rules);
+    const text = versionText(tree, this.rules);
     this.trees.set(text, tree);
     return text;
   }
@@ -352,10 +379,12 @@ export class PanelEditor {
     this.changed(this.session.changed(message), 'Written elsewhere: shown as written');
   }
 
-  /** A panel's content as the session reads it: `{tree, text}` or `{error}`. */
-  readContent(html) {
+  /** A panel's content (and its plate) as the session reads it: `{tree, text}` or `{error}`. */
+  readContent(html, plate = null) {
     const parsed = parseContent(html, this.rules, { mode: 'read' });
-    return parsed.error ? { error: parsed.error } : { tree: parsed.tree, text: this.remember(parsed.tree) };
+    if (parsed.error) return { error: parsed.error };
+    parsed.tree.plate = plate ?? null;
+    return { tree: parsed.tree, text: this.remember(parsed.tree) };
   }
 
   /** Another version is the file (`EditSession.changed`): shown, or writing stopped with why. */
@@ -381,7 +410,207 @@ export class PanelEditor {
       if (this.selected.includes(id)) el.dataset.editSelected = '';
       else delete el.dataset.editSelected;
     }
+    // ADR 0047: the plate as the tree has it, laid out at once.
+    this.panel.setPlate?.(this.tree.plate ?? null);
+    this.panel.layOutNow?.();
+    this.drawCorners();
     this.update();
+  }
+
+  // The plate (ADR 0047 §2).
+
+  /** The <signal-panel> whose plate this panel is drawn on (a part's: its host's). */
+  host() {
+    return this.panel.localName === 'signal-panel' ? this.panel : (this.panel.closest?.('signal-panel') ?? null);
+  }
+
+  /** The layer the marks are drawn in, over the host's plate (plate px). */
+  overlay() {
+    return this.host()?.overlay?.() ?? null;
+  }
+
+  /** The grid the plate is laid out in: this panel's own (`div.signal-cards`). */
+  grid() {
+    return this.panel.querySelector?.(':scope > .signal-cards') ?? null;
+  }
+
+  /** Where this panel's plate lies on the host's (plate px): its grid's corner. */
+  plateOffset() {
+    const host = this.host();
+    const grid = this.grid();
+    if (!host?.plateRect || !grid) return { x: 0, y: 0 };
+    const r = host.plateRect(grid);
+    if (r.w > 0 || r.h > 0) return { x: r.x, y: r.y };
+    // A grid without a box of its own (an open slot card's part, `display: contents`): its cards' corner.
+    const cards = [...grid.children].map((c) => host.plateRect(c)).filter((c) => c.w > 0);
+    return cards.length ? { x: Math.min(...cards.map((c) => c.x)), y: Math.min(...cards.map((c) => c.y)) } : { x: 0, y: 0 };
+  }
+
+  /** A box on this panel's plate (plate px) on the host's plate. */
+  onHost(box) {
+    const o = this.plateOffset();
+    return { x: o.x + box.x, y: o.y + box.y, w: box.w, h: box.h };
+  }
+
+  /** The selected card's corners, its resize handles. */
+  drawCorners() {
+    const layer = this.overlay();
+    if (!layer) return;
+    for (const c of layer.querySelectorAll(`.corner[data-of="${this.file}"]`)) c.remove();
+    const plate = parsePlate(this.tree.plate);
+    const id = this.selected.length === 1 ? this.selected[0] : null;
+    const found = id ? find(this.tree, id) : null;
+    const place = plate && found && isPlateCard(found.node, found.parent) ? placeOf(found.node) : null;
+    if (!place) return;
+    const box = this.onHost(drawnBox(place));
+    for (const [x, y] of [[box.x, box.y], [box.x + box.w, box.y], [box.x, box.y + box.h], [box.x + box.w, box.y + box.h]]) {
+      const corner = document.createElement('div');
+      corner.className = 'corner';
+      corner.dataset.of = this.file;
+      Object.assign(corner.style, { left: `${x}px`, top: `${y}px` });
+      layer.append(corner);
+    }
+  }
+
+  /** Where a drag would put a card (`place`), red when refused. */
+  showOutline(place, refused) {
+    const layer = this.overlay();
+    if (!layer) return;
+    this.outline ??= Object.assign(document.createElement('div'), { className: 'outline' });
+    const box = this.onHost(drawnBox(place));
+    Object.assign(this.outline.style, { left: `${box.x}px`, top: `${box.y}px`, width: `${box.w}px`, height: `${box.h}px` });
+    this.outline.classList.toggle('refused', Boolean(refused));
+    this.outline.title = refused ?? '';
+    if (!this.outline.isConnected) layer.append(this.outline);
+  }
+
+  /**
+   * Freeze layout (ADR 0047 §2): every card's box as laid out now, rounded
+   * outward to whole plate units, written as its place, and the plate
+   * around them. One undo gives the file back.
+   */
+  freeze() {
+    if (this.tree.plate) return;
+    const grids = this.tree.children.filter((c) => c.kind === 'cards');
+    if (grids.length !== 1) {
+      this.say('Freeze layout places the cards of one grid; this panel has ' + grids.length);
+      return;
+    }
+    const host = this.host();
+    const cards = plateCards(this.tree);
+    const origin = this.plateOffset();
+    const boxes = [];
+    for (const { node } of cards) {
+      const el = this.elements.get(node.id);
+      const box = el?.cardBox?.() ?? el;
+      if (!box || !host?.plateRect) {
+        this.say('Freeze layout: a card is not drawn; nothing written');
+        return;
+      }
+      // An open slot card: its header and its part's cards (ADR 0046 §5).
+      const rects = [box, ...(el.localName === 'signal-slot' ? [...el.querySelectorAll(':scope > .signal-cards > *')] : [])].map((e) => host.plateRect(e)).filter((r) => r.w > 0 && r.h > 0);
+      const x = Math.min(...rects.map((r) => r.x));
+      const y = Math.min(...rects.map((r) => r.y));
+      // Relative to this panel's plate, which an unplaced plate pads by the gutter.
+      boxes.push({ x: x - origin.x + GUTTER, y: y - origin.y + GUTTER, w: Math.max(...rects.map((r) => r.x + r.w)) - x, h: Math.max(...rects.map((r) => r.y + r.h)) - y });
+    }
+    const host_ = this.host();
+    const gridWidth = this.grid()?.offsetWidth || Math.max(0, ...boxes.map((b) => b.x + b.w - GUTTER));
+    const width = this.panel.localName === 'signal-panel' || !host_ ? undefined : Math.ceil((gridWidth + 2 * GUTTER) / PU);
+    const { plate, places } = freeze(boxes, width ? { width } : undefined);
+    const result = setPlaces(this.tree, plate, cards.map((c, i) => [c.node.id, places[i]]));
+    if (!result.error) this.say(`Frozen: ${cards.length} cards on a plate of ${plate.w} × ${plate.h} units`);
+    this.apply(result);
+  }
+
+  /**
+   * `tree` with every placed card whose content is taller than its card
+   * made taller (and the plate with it), measured as drawn: never shrunk
+   * under its content.
+   */
+  refitted(tree) {
+    const plate = parsePlate(tree.plate);
+    if (!plate) return tree;
+    const previous = this.tree;
+    this.tree = tree;
+    render(this.panel, tree, this.rules, this.elements, this.ids, this.panel.attributeValue?.bind(this.panel) ?? null);
+    this.panel.setPlate?.(tree.plate);
+    this.panel.layOutNow?.();
+    this.tree = previous;
+    let out = tree;
+    let h = plate.h;
+    for (const { node, place } of plateCards(tree)) {
+      const el = this.elements.get(node.id);
+      if (!place || !el || !(el.clientHeight > 0)) continue;
+      const need = Math.ceil((el.scrollHeight + 2 * GUTTER) / PU);
+      if (need <= place.h) continue;
+      const result = setPlace(out, node.id, { ...place, h: need });
+      if (result.error) continue;
+      out = result.tree;
+      h = Math.max(h, place.y + need);
+    }
+    if (out !== tree && h > plate.h) out.plate = plateText({ w: plate.w, h });
+    return out;
+  }
+
+  /**
+   * A press on card `subject` on a plate: a drag moves it on the grid, or,
+   * from a corner of the selected card, resizes it. Refused drops are
+   * outlined red and written never. Whether the press was the plate's.
+   */
+  plateDown(event, subject) {
+    const plate = parsePlate(this.tree.plate);
+    const found = plate ? find(this.tree, subject.id) : null;
+    const place = found && isPlateCard(subject, found.parent) ? placeOf(subject) : null;
+    if (!place) return false;
+    const host = this.host();
+    const scale = host?.scale || 1;
+    const el = this.elements.get(subject.id);
+    const r = el?.getBoundingClientRect();
+    const near = 12;
+    let corner = null;
+    if (r && this.selected.length === 1 && this.selected[0] === subject.id) {
+      const v = Math.abs(event.clientY - r.top) <= near ? 'n' : Math.abs(event.clientY - r.bottom) <= near ? 's' : '';
+      const h = Math.abs(event.clientX - r.left) <= near ? 'w' : Math.abs(event.clientX - r.right) <= near ? 'e' : '';
+      if (v && h) corner = v + h;
+    }
+    const others = plateCards(this.tree).filter((c) => c.node.id !== subject.id).map((c) => c.place);
+    // A card goes below the plate's bottom: the plate grows (never past its largest size).
+    const room = { w: plate.w, h: MAX_PLATE };
+    const start = { x: event.clientX, y: event.clientY };
+    let dragging = false;
+    let candidate = place;
+    let refusal = null;
+    const move = (e) => {
+      if (!dragging && Math.hypot(e.clientX - start.x, e.clientY - start.y) < 4) return;
+      dragging = true;
+      const dx = snap(e.clientX - start.x, scale);
+      const dy = snap(e.clientY - start.y, scale);
+      candidate = corner ? resized(place, corner, dx, dy, room) : movedPlace(place, dx, dy, room);
+      refusal = blocked(candidate, others, room);
+      this.showOutline(candidate, refusal);
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move, true);
+      window.removeEventListener('pointerup', up, true);
+      this.outline?.remove();
+      if (!dragging) {
+        this.select(subject.id, event.shiftKey);
+        return;
+      }
+      if (refusal) {
+        this.say(`Not moved: ${refusal}`);
+        return;
+      }
+      if (placeText(candidate) === placeText(place)) return;
+      this.selected = [subject.id];
+      const result = setPlace(this.tree, subject.id, candidate);
+      if (!result.error && candidate.y + candidate.h > plate.h) result.tree.plate = plateText({ w: plate.w, h: candidate.y + candidate.h });
+      this.apply(result);
+    };
+    window.addEventListener('pointermove', move, true);
+    window.addEventListener('pointerup', up, true);
+    return true;
   }
 
   /** The tools' state from the selection. */
@@ -397,8 +626,10 @@ export class PanelEditor {
     const remove = this.$('.remove-card');
     remove.disabled = !card;
     remove.textContent = this.pending && this.pending === card?.id ? 'Remove card? Click again' : 'Remove card';
-    this.$('.wide').disabled = !card;
+    // ADR 0047: on a plate a card's width is its place; Freeze only once.
+    this.$('.wide').disabled = !card || Boolean(t.plate);
     this.$('.wide').setAttribute('aria-pressed', String(Boolean(card?.classes.includes('wide'))));
+    this.$('.freeze').disabled = busy || Boolean(blocked) || Boolean(t.plate);
     this.$('.group').disabled = !(nodes.length > 1 && nodes.every((n) => n.kind === 'control'));
     this.$('.ungroup').disabled = !group && !(control && find(t, control.id).parent.kind === 'group');
     this.$('.remove-control').disabled = !control;
@@ -468,6 +699,7 @@ export class PanelEditor {
       const card = this.selectedCard();
       if (card) this.apply(setWide(this.tree, card.id, !card.classes.includes('wide')));
     });
+    on('.freeze', 'click', () => this.freeze());
     on('.group', 'click', () => {
       const result = makeGroup(this.tree, this.selected);
       if (!result.error) this.selected = [result.id];
@@ -672,9 +904,11 @@ export class PanelEditor {
     const history = this.session.history;
     const text = direction < 0 ? history.undo() : history.redo();
     if (text === null) return;
-    const tree = this.trees.get(text) ?? parseContent(text, this.rules).tree;
+    const { plate, html } = splitVersion(text);
+    const tree = this.trees.get(text) ?? { ...parseContent(html, this.rules).tree, plate };
     this.pending = null;
-    this.write(tree, direction);
+    // The version as it was written (ADR 0047: the first one as the file had it).
+    this.write(tree, direction, text);
   }
 
   /**
@@ -683,14 +917,18 @@ export class PanelEditor {
    * written version again when the server refuses it. Nothing is sent while
    * the session's writing is stopped (`EditSession.blocked`).
    */
-  async write(tree, step) {
+  async write(tree, step, version = null) {
     if (!this.editing) return;
+    // ADR 0047: a placed card is never shorter than its content.
+    if (step === 0) tree = this.refitted(tree);
     const checked = checkTree(tree, this.rules);
     if (checked.error) {
       this.say(`Not written: ${checked.error}`);
+      // The refit drew it: the version shown again.
+      this.draw();
       return;
     }
-    const html = this.remember(tree);
+    const html = version ?? this.remember(tree);
     if (html === this.session.history.current && step === 0) {
       this.tree = tree;
       this.draw();
@@ -787,6 +1025,8 @@ export class PanelEditor {
     // Text, rows and grids select their card; a control or group is itself.
     const subject = !node ? null : node.kind === 'control' || node.kind === 'group' || node.kind === 'card' ? node : cardOf(this.tree, id);
     if (!subject) return;
+    // ADR 0047: on a plate a card moves and resizes on the grid.
+    if (this.plateDown(event, subject)) return;
     const start = { x: event.clientX, y: event.clientY };
     let dragging = false;
     const move = (e) => {
@@ -871,7 +1111,8 @@ export class PanelEditor {
     const last = children.length ? this.elements.get(children[children.length - 1].id)?.getBoundingClientRect() : null;
     const caret = box ? { left: box.left - 4, top: box.top, height: box.height } : last ? { left: last.right + 2, top: last.top, height: last.height } : { left: r.left + 4, top: r.top + 4, height: r.height - 8 };
     Object.assign(this.caret.style, { left: `${caret.left}px`, top: `${caret.top}px`, height: `${caret.height}px` });
-    this.panel.shadowRoot.append(this.marker, this.caret);
+    // Fixed, so outside the scaled plate (ADR 0047): in the host's shadow root, a part's editor too.
+    (this.host() ?? this.panel).shadowRoot.append(this.marker, this.caret);
   }
 }
 

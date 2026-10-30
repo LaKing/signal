@@ -138,7 +138,7 @@ Addresses are as in the UI protocol: `/instance` or `/composite/inner`, and port
 | Tool | Arguments | Does |
 |---|---|---|
 | `write_pattern` | `name`, `text`, `base` (null: a new pattern) | `pattern.write` |
-| `write_panel` | `html`, `base`, `file?` (`main.html`) | `panel.write`: the `<signal-panel>` content, within the panel whitelist |
+| `write_panel` | `html`, `base`, `file?` (`main.html`), `plate?` | `panel.write`: the `<signal-panel>` content, within the panel whitelist (a card's `place` included); `plate` ("W H", ADR 0047) sets the plate on `<signal-panel>`, null removes it, absent keeps it |
 | `write_file` | `file`, `text`, `base` | `project.toml`, `composites/<name>.toml` and `interfaces/<name>.toml` (a slot interface template, ADR 0037 §3): `file.write`; `patterns/<name>.toml`: `pattern.write`. Panels and positions have their own tools |
 
 Every write is checked the way a reload would load it, and is written atomically, never through a link, and only when the file is still the version `base` names, checked and written under the project's writer lock so that another Signal or `signal mcp` process on the same project cannot write in between (ADR 0040). Otherwise the refusal is a `conflict` carrying the current `base` and `text`. The watch then applies the file live.

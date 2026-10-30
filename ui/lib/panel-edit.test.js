@@ -327,7 +327,7 @@ test('the session history survives leaving and re-entering edit mode (auditor-1-
   const s = session();
   assert.equal(s.enter({ file: 'main.html', base: 'b0' }, 'v0'), false, 'a first entry starts the history');
   const write = s.request('v1');
-  assert.deepEqual(write.message, { type: 'panel.write', file: 'main.html', html: 'v1', base: 'b0' });
+  assert.deepEqual(write.message, { type: 'panel.write', file: 'main.html', html: 'v1', plate: null, base: 'b0' });
   s.written({ base: 'b1' }, 'v1', 0);
   assert.ok(s.history.canUndo);
   // Left and entered again on the file it wrote: the history goes on.

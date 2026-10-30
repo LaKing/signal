@@ -433,10 +433,10 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "write_panel",
         group: Group::Text,
-        description: "Replaces the content of the one <signal-panel> element of ui/<file> (default main.html) with `html` (the panel whitelist: controls, cards, rows, headings, text); every byte outside it is kept. `base`: the file's SHA-256, or null for a main.html that does not exist yet.",
+        description: "Replaces the content of the one <signal-panel> element of ui/<file> (default main.html) with `html` (the panel whitelist: controls, cards, rows, headings, text; a card's place=\"x y w h\" on the plate); every byte outside it is kept. `base`: the file's SHA-256, or null for a main.html that does not exist yet. `plate` (ADR 0047): \"W H\" sets the plate's size in plate units (8 px) on <signal-panel>, null removes it, absent keeps it.",
         schema: || {
             object(
-                json!({"file": {"type": "string"}, "html": {"type": "string"}, "base": {"type": ["string", "null"]}}),
+                json!({"file": {"type": "string"}, "html": {"type": "string"}, "base": {"type": ["string", "null"]}, "plate": {"type": ["string", "null"]}}),
                 &["html", "base"],
             )
         },
@@ -2216,10 +2216,12 @@ fn write_panel(context: &Context, arguments: &Value) -> Outcome {
         "" => MAIN_PANEL,
         file => file.strip_prefix("ui/").unwrap_or(file),
     };
-    let reply = ask(
-        context,
-        json!({"type": "panel.write", "file": file, "html": arguments["html"], "base": arguments["base"]}),
-    )?;
+    let mut message = json!({"type": "panel.write", "file": file, "html": arguments["html"], "base": arguments["base"]});
+    // ADR 0047: the plate, only when given (absent keeps the file's).
+    if let Some(plate) = arguments.get("plate") {
+        message["plate"] = plate.clone();
+    }
+    let reply = ask(context, message)?;
     written(reply, &format!("ui/{file}"))
 }
 

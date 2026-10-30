@@ -21,12 +21,18 @@
 // interface knobs (the part has its controls); without one, as before. In
 // the host's Edit layout the part is edited here (a panel editor of its
 // own, the history shared with the host's).
+//
+// ADR 0047 §4: a part is a small plate (`<signal-panel part="synth"
+// plate="160 40">`, its cards at their `place`), laid out at its own size;
+// on a placed host the open slot card is one box at its `place`, its header
+// above its part's plate.
 
 import { browserEntries } from '../lib/module-browser.js';
 import { BindingCheck, formatDiagnostic } from '../lib/panel.js';
 import { emptyPartTree, opensAsCard, partFile, partPalette, rootAddress, rootedAttribute } from '../lib/parts.js';
 import { cardTitle, contentMatch, dropLoad, loadOps, loadable, projectEntries, slotCard, unloadOp } from '../lib/slot.js';
 import { SignalElement } from './base.js';
+import { layOutCards } from './plate.js';
 import { BROWSER_CSS, ModuleBrowser } from './module-browser.js';
 import { EDITOR_CSS, PanelEditor, showWritten } from './panel-editor.js';
 import './knob.js';
@@ -39,7 +45,7 @@ const LEVEL_RATE = 480;
 
 export class SignalSlot extends SignalElement {
   static role = 'group';
-  static observedAttributes = ['bind', 'skin'];
+  static observedAttributes = ['bind', 'skin', 'place'];
   static css = `
 :host { display: block; min-width: 0; }
 /* ADR 0046 §5: the open slot card: its header and its part's cards are cards of the host's grid. */
@@ -137,6 +143,28 @@ ${BROWSER_CSS}`;
   /** The panel editor's palette in a part: the slot's addresses, relative. */
   paletteEntries(entries) {
     return partPalette(entries, this.root);
+  }
+
+  /** ADR 0047 §4: the part's plate (`"W H"`) as read, or as its editor has it while edited. */
+  get partPlate() {
+    return this.partEditor?.editing ? (this.editedPlate ?? null) : (this.partState?.plate ?? null);
+  }
+
+  /** The part's cards laid out on its plate (or flowing without one). */
+  layOutPart() {
+    layOutCards(this.querySelector(':scope > .signal-cards'), this.partPlate);
+  }
+
+  /** The part editor's plate, shown at once. */
+  setPlate(plate) {
+    this.editedPlate = plate ?? null;
+  }
+
+  /** The part editor's draw: the host lays out its plate, this part's with it. */
+  layOutNow() {
+    const host = this.closest?.('signal-panel');
+    if (host?.layOutNow) host.layOutNow();
+    else this.layOutPart();
   }
 
   /** The tree a part starts from: the interface's parameters as knobs. */
@@ -261,7 +289,7 @@ ${BROWSER_CSS}`;
       this.partReading = false;
     }
     if (file !== this.file) return;
-    this.partState = { exists: Boolean(read?.exists), html: read?.html ?? null, error: read?.exists && !read?.editable ? read.reason : null };
+    this.partState = { exists: Boolean(read?.exists), html: read?.html ?? null, plate: read?.plate ?? null, error: read?.exists && !read?.editable ? read.reason : null };
     await this.showPart();
     if (this.partState.exists && this.description) {
       this.partCheck.checked = undefined;
@@ -279,6 +307,7 @@ ${BROWSER_CSS}`;
       const error = await showWritten(this, this.partState.html, (name, value) => this.attributeValue(name, value));
       if (error) this.partState.error = error;
     }
+    this.layOutNow();
     this.showProblems(this.partState?.error ? [{ severity: 'error', text: `${this.file}: ${this.partState.error}` }] : []);
     this.shownKey = null;
     this.update();
@@ -291,7 +320,7 @@ ${BROWSER_CSS}`;
       this.partEditor.written(message);
       return;
     }
-    this.partState = message.html === null || message.html === undefined ? { exists: false, html: null, error: null } : { exists: true, html: message.html, error: null };
+    this.partState = message.html === null || message.html === undefined ? { exists: false, html: null, error: null } : { exists: true, html: message.html, plate: message.plate ?? null, error: null };
     this.showPart().then(() => this.recheck());
   }
 

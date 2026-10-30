@@ -36,7 +36,7 @@
 //! resizing, opening or closing a window, or moving a card, writes the
 //! key's entry a second after the last change (through the control
 //! thread, which takes the write as seen). A panel card is moved from its
-//! context menu: the page tells the app (`card.move`, `card.order`, wry's
+//! context menu: the page tells the app (`card.move`, wry's
 //! IPC), which moves it and tells every window what it shows
 //! (`signal-window`).
 
@@ -57,7 +57,7 @@ use serde_json::{Value, json};
 use signal_app::layout::{
     CardMove, Change, Layout, LayoutWindow, Monitor, Screens, Seen, Tracker, WindowView, centred,
     default_layout, fit_height, held, holder, labels, move_card, place, read_layout, record,
-    reorder, screens_of, similar, write_layout,
+    screens_of, similar, write_layout,
 };
 use signal_app::restart;
 use signal_app::server::{AppConfig, AppServer, WindowsEdit};
@@ -103,7 +103,7 @@ enum UserEvent {
     /// The open project or its edited state changed (the titles).
     Project(Option<ProjectStatus>),
     /// A window's page said something (wry's IPC: `window.ready`,
-    /// `card.move`, `card.order`, `window.show`, `window.fit`, `menu.run`).
+    /// `card.move`, `window.show`, `window.fit`, `menu.run`).
     Page(WindowId, String),
     /// The keymap changed (ADR 0034): each menu action's chord.
     Keys(Vec<(MenuAction, Option<String>)>),
@@ -263,7 +263,7 @@ fn event_script(event: &str, detail: &Value) -> String {
 /// One open window.
 struct Shown {
     view: WindowView,
-    /// A panel window's cards; a main window's card order.
+    /// A panel window's cards (membership: they show at their plate places).
     cards: Vec<String>,
     // Before `window`: fields drop in order, so the WebView goes first.
     webview: wry::WebView,
@@ -621,7 +621,7 @@ impl Windows {
                         json!({"card": card, "where": at})
                     })
                     .collect();
-                json!({"view": "main", "held": held, "order": window.cards, "targets": targets})
+                json!({"view": "main", "held": held, "targets": targets})
             }
         };
         Some(event_script("signal-window", &detail))
@@ -826,22 +826,6 @@ impl Windows {
                 }
                 for script in std::mem::take(&mut shown.pending) {
                     shown.run(&script);
-                }
-            }
-            (Some("card.order"), _) => {
-                let order: Vec<String> = message
-                    .get("cards")
-                    .and_then(Value::as_array)
-                    .map(|list| {
-                        list.iter()
-                            .filter_map(Value::as_str)
-                            .map(str::to_owned)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let mut layout = self.layout();
-                if reorder(&mut layout, index, &order) {
-                    self.cards_from(&layout);
                 }
             }
             (Some("card.move"), Some(card)) => {

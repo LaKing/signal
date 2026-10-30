@@ -210,6 +210,8 @@ pub enum Node {
         kind: Kind,
         /// Its classes but the required one.
         classes: Vec<String>,
+        /// A card's place on the plate (ADR 0047 §2), as written.
+        place: Option<String>,
         /// What it holds.
         children: Vec<Node>,
     },
@@ -505,9 +507,14 @@ pub fn parse(html: &str) -> Result<Vec<Node>, String> {
         } else {
             let kind = Kind::of_key(&key).ok_or_else(|| fail(begin, format!("<{tag}>")))?;
             let required = kind.element().1;
+            let place = attributes
+                .iter()
+                .find(|(name, _, _)| name == "place")
+                .and_then(|(_, value, _)| value.clone());
             Node::Container {
                 kind,
                 classes: classes.into_iter().filter(|c| c != required).collect(),
+                place,
                 children: Vec::new(),
             }
         };
@@ -606,10 +613,15 @@ pub fn serialize(nodes: &[Node]) -> String {
             Node::Container {
                 kind,
                 classes,
+                place,
                 children,
             } => {
                 let (tag, name) = kind.element();
-                let open = format!("{pad}<{tag}{}>", class_text(Some(name), classes));
+                let place = place
+                    .as_deref()
+                    .map(|p| format!(" place=\"{}\"", escape_value(p)))
+                    .unwrap_or_default();
+                let open = format!("{pad}<{tag}{}{place}>", class_text(Some(name), classes));
                 if children.is_empty() {
                     lines.push(format!("{open}</{tag}>"));
                     return;
@@ -845,6 +857,7 @@ fn filtered(node: &Node, keep: &dyn Fn(usize) -> bool, next: &mut usize) -> Opti
         Node::Container {
             kind,
             classes,
+            place,
             children,
         } => {
             let kept: Vec<Node> = children
@@ -856,6 +869,7 @@ fn filtered(node: &Node, keep: &dyn Fn(usize) -> bool, next: &mut usize) -> Opti
             (!gone).then(|| Node::Container {
                 kind: *kind,
                 classes: classes.clone(),
+                place: place.clone(),
                 children: kept,
             })
         }
@@ -894,13 +908,16 @@ fn rebound(node: Node, root: &str) -> Node {
                 .collect(),
             tag,
         },
+        // ADR 0047: a place is the host plate's; in the part the card has none.
         Node::Container {
             kind,
             classes,
             children,
+            ..
         } => Node::Container {
             kind,
             classes,
+            place: None,
             children: children.into_iter().map(|c| rebound(c, root)).collect(),
         },
         text => text,
@@ -909,9 +926,19 @@ fn rebound(node: Node, root: &str) -> Node {
 
 /// The open slot card of slot `name`.
 pub fn slot_card(name: &str) -> Node {
+    placed_slot_card(name, None)
+}
+
+/// The open slot card of slot `name` at `place` on the plate (ADR 0047:
+/// the place of the card it replaces), or with none.
+fn placed_slot_card(name: &str, place: Option<&str>) -> Node {
+    let mut attributes = vec![("bind".to_owned(), Some(format!("/{name}")))];
+    if let Some(place) = place {
+        attributes.push(("place".to_owned(), Some(place.to_owned())));
+    }
     Node::Control {
         tag: SLOT_ELEMENT.to_owned(),
-        attributes: vec![("bind".to_owned(), Some(format!("/{name}")))],
+        attributes,
     }
 }
 
@@ -953,6 +980,7 @@ pub fn group_content(
         let Node::Container {
             kind: Kind::Cards,
             classes,
+            place: grid_place,
             children,
         } = node
         else {
@@ -1001,7 +1029,12 @@ pub fn group_content(
                 // Nothing but moved controls: the part keeps it.
                 whole.push((id, part_cards.len() - 1));
                 if !placed {
-                    kept.push(slot_card(instance));
+                    // In its place on the plate (ADR 0047).
+                    let place = match child {
+                        Node::Container { place, .. } => place.as_deref(),
+                        _ => None,
+                    };
+                    kept.push(placed_slot_card(instance, place));
                     origins.push(None);
                     placed = true;
                 }
@@ -1021,6 +1054,7 @@ pub fn group_content(
         host.push(Node::Container {
             kind: Kind::Cards,
             classes: classes.clone(),
+            place: grid_place.clone(),
             children: kept,
         });
     }
@@ -1040,6 +1074,7 @@ pub fn group_content(
             None => host.push(Node::Container {
                 kind: Kind::Cards,
                 classes: Vec::new(),
+                place: None,
                 children: vec![slot_card(instance)],
             }),
         }
@@ -1068,6 +1103,7 @@ pub fn group_content(
         serialize(&[Node::Container {
             kind: Kind::Cards,
             classes: Vec::new(),
+            place: None,
             children: part_cards,
         }])
     });

@@ -303,9 +303,10 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
   }
 
   resized() {
-    const box = this.canvases?.grid.getBoundingClientRect();
-    if (!box || box.width === 0) return;
-    this.view = clampScroll({ ...this.view, width: box.width, height: box.height }, this.totalBeats());
+    // Layout px, not screen px: the panel's plate may be scaled (ADR 0047).
+    const grid = this.canvases?.grid;
+    if (!grid || grid.clientWidth === 0) return;
+    this.view = clampScroll({ ...this.view, width: grid.clientWidth, height: grid.clientHeight }, this.totalBeats());
     if (!this.placed) this.place();
     this.redraw();
   }
@@ -342,7 +343,10 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
   /** Viewport coordinates of a pointer over `canvas`. */
   local(event, canvas) {
     const box = canvas.getBoundingClientRect();
-    return { x: event.clientX - box.left, y: event.clientY - box.top };
+    // In layout px: the panel's plate may be scaled by a transform (ADR 0047).
+    const sx = box.width > 0 && canvas.clientWidth > 0 ? canvas.clientWidth / box.width : 1;
+    const sy = box.height > 0 && canvas.clientHeight > 0 ? canvas.clientHeight / box.height : 1;
+    return { x: (event.clientX - box.left) * sx, y: (event.clientY - box.top) * sy };
   }
 
   /** Captures the pointer on the part pressed, so its own listeners follow the drag; focuses the control. */
@@ -657,13 +661,13 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
     const dy = event.deltaY * scale;
     // Shift on a Mac with a mouse turns the wheel's delta into deltaX; a sideways swipe never zooms.
     const delta = verticalDelta(event) * scale;
-    const box = this.canvases.grid.getBoundingClientRect();
+    const at = this.local(event, this.canvases.grid);
     const total = this.totalBeats();
     const command = wheelCommand('piano_roll', event)?.id;
     if (command === 'piano_roll.zoom_time') {
-      this.view = zoomX(this.view, Math.exp(-delta * 0.0025), clamp(event.clientX - box.left, 0, this.view.width), total);
+      this.view = zoomX(this.view, Math.exp(-delta * 0.0025), clamp(at.x, 0, this.view.width), total);
     } else if (command === 'piano_roll.zoom_keys') {
-      this.view = zoomY(this.view, Math.exp(-delta * 0.0025), clamp(event.clientY - box.top, 0, this.view.height), total);
+      this.view = zoomY(this.view, Math.exp(-delta * 0.0025), clamp(at.y, 0, this.view.height), total);
     } else if (command === 'piano_roll.scroll_time' || (command === 'piano_roll.scroll' && (where === 'ruler' || where === 'velocity'))) {
       this.view = clampScroll({ ...this.view, scrollX: this.view.scrollX + (dx || dy) }, total);
     } else if (command === 'piano_roll.scroll') {

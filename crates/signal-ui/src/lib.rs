@@ -44,6 +44,7 @@ mod local;
 pub mod panel;
 pub mod panel_write;
 pub mod parts;
+pub mod plate;
 pub mod player;
 mod server;
 pub mod setup;

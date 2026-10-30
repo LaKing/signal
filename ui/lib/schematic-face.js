@@ -10,22 +10,25 @@
 // inside opened in place shows the face at the frame's top, the inner
 // structure below it. The geometry here, the address and URL rules, and
 // what a hover or a selection lights in a face. No DOM.
+//
+// ADR 0047 §4: a face is its part's plate, at its own size, one layout unit
+// per CSS px, scaled with its box as the drawing zooms: a placed part
+// (`plate="W H"`) is W × H plate units; a part without places is laid out
+// once at 1280 px (the implicit freeze) and measured. No scaling down to a
+// fixed width any more (ADR 0046's face note is replaced).
 
 // The layout's units (a cycle with it: used only when called).
 import { CHAR, GAP_Y, HEADER, PAD, ROW } from './schematic-layout.js';
 import { rootedAttribute } from './parts.js';
 
 /**
- * The width (CSS px) a face's part is laid out at: a panel window's, so its
- * cards take the layout they have on the panel (a `wide` card one wide row,
- * its groups side by side; the coordinator's check, 2026-10-30: at 400 the
- * studio's mono synth wrapped into a tall column). The face is then scaled
- * down whole to its box, a miniature of the panel, never a reflow.
+ * The width (CSS px) a part without places is laid out at: the plate's
+ * reference width (ADR 0047 §2, 160 plate units), as a panel without places
+ * is, so its cards take the layout they have on the panel, never a reflow.
  */
 export const FACE_LAYOUT_PX = 1280;
-/** A face's width in its box (layout units): at most FACE_MAX_W; the box's face column at least FACE_MIN_W. */
+/** The box's face column is at least FACE_MIN_W layout units wide. */
 export const FACE_MIN_W = 400;
-export const FACE_MAX_W = 720;
 /** A pin label beside a face is cut to this many characters (its column's width). */
 export const FACE_LABEL_CHARS = 14;
 /** Under this width on screen (px) a face is not shown: its area alone is drawn. */
@@ -43,21 +46,25 @@ export function estimateFace(count) {
 }
 
 /** A face's measured natural size (its cards' extent, CSS px) as the layout takes it, rounded up; null for nothing measured (hidden). */
-export function measuredNatural(w, h) {
+export function measuredNatural(w, h, width = FACE_LAYOUT_PX) {
   if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
   const up = (v) => Math.ceil(v / FACE_STEP) * FACE_STEP;
-  return { w: Math.min(FACE_LAYOUT_PX, up(w)), h: up(h) };
+  return { w: Math.min(width, up(w)), h: up(h) };
+}
+
+/** The width (CSS px) part of plate `plate` (`{w, h}` plate units, or null) is laid out at. */
+export function faceWidth(plate) {
+  return plate ? plate.w * 8 : FACE_LAYOUT_PX;
 }
 
 /**
- * A face of natural size `natural` (CSS px) in its box: scaled down whole
- * (never up) to at most FACE_MAX_W units wide, keeping its aspect: `{w, h,
- * scale, natural}` (`w`, `h` layout units).
+ * A face of natural size `natural` (CSS px) in its box (ADR 0047 §4): at
+ * its own size, one layout unit per CSS px: `{w, h, scale, natural}` (`w`,
+ * `h` layout units, `scale` 1).
  */
 export function faceFit(natural) {
   const n = natural ?? estimateFace(0);
-  const scale = Math.min(1, FACE_MAX_W / Math.max(1, n.w));
-  return { w: Math.round(n.w * scale), h: Math.ceil(n.h * scale), scale, natural: { w: n.w, h: n.h } };
+  return { w: Math.round(n.w), h: Math.ceil(n.h), scale: 1, natural: { w: n.w, h: n.h } };
 }
 
 /**
@@ -212,8 +219,9 @@ export function lit(bind, hot) {
 /**
  * Where a face goes on the stage: its area's screen rectangle `rect`
  * (`{x, y, w, h}`, from the drawn area) as a CSS transform of the face
- * (laid out at FACE_LAYOUT_PX, its cards `w` px wide: its natural width),
- * or null when it is too small to show.
+ * (its plate, or a part without places laid out at FACE_LAYOUT_PX, its
+ * cards `w` px wide: its natural width), or null when it is too small to
+ * show.
  */
 export function facePlacement(rect, w) {
   if (!rect || !(rect.w > 0) || rect.w < FACE_MIN_PX) return null;

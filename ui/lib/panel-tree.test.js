@@ -149,6 +149,9 @@ test('the example panels round-trip, h1 and their classes kept', () => {
     const text = serialize(tree, whitelist);
     assert.deepEqual(shape(parse(text)), shape(tree), `${file}: the written text reads back to the same tree`);
     assert.equal(serialize(parse(text), whitelist), text, `${file}: canonical`);
+    // ADR 0047 test 2: the editor's history starts at the content as written when it may be written back
+    // (`firstVersion`), so Freeze's undo gives the file back byte for byte.
+    assert.ok(parse(original, 'submit'), `${file}: its content is written back as it is`);
     assert.deepEqual(bindings(text), bindings(original), `${file}: every control and binding, in order`);
     assert.deepEqual(textOutsideCards(`<body><signal-panel>${text}</signal-panel></body>`), [], file);
     assert.match(text, /<h1>[^<]+<\/h1>/, `${file}: the title card's h1`);
@@ -182,12 +185,16 @@ test('the generated default panel round-trips: a card per instance, the output c
   const tree = generatedTree(defaultPanel(DESCRIBE));
   const text = serialize(tree, whitelist);
   assert.ok(checkTree(tree, whitelist).ok, checkTree(tree, whitelist).error);
-  assert.deepEqual(shape(parse(text)), shape(tree));
+  // ADR 0047: the plate is beside the content, its places in it.
+  const { plate, ...content } = shape(tree);
+  assert.match(plate, /^160 \d+$/);
+  assert.deepEqual(shape(parse(text)), content);
+  assert.match(text, /<section class="signal-card" place="0 0 \d+ \d+">/);
   assert.equal(serialize(parse(text), whitelist), text);
   assert.deepEqual(textOutsideCards(`<body><signal-panel>${text}</signal-panel></body>`), []);
   assert.match(text, /<h2>osc<\/h2>\n\s+<p>std\.sine_osc<\/p>/, 'the module is the description, not a <small>');
   assert.match(text, /<signal-knob bind="\/osc\.freq" taper="log" label="freq"><\/signal-knob>/);
   assert.match(text, /<signal-fader bind="\/out\.gain" taper="db" label="gain"><\/signal-fader>/);
-  assert.match(text, /<section class="signal-card wide">\n\s+<h2>output<\/h2>\n\s+<div class="row">\n\s+<div class="signal-group">\n\s+<signal-meter bind="\/out\.l" label="l"><\/signal-meter>\n\s+<signal-meter bind="\/out\.r" label="r"><\/signal-meter>/);
+  assert.match(text, /<section class="signal-card wide" place="0 \d+ 160 \d+">\n\s+<h2>output<\/h2>\n\s+<div class="row">\n\s+<div class="signal-group">\n\s+<signal-meter bind="\/out\.l" label="l"><\/signal-meter>\n\s+<signal-meter bind="\/out\.r" label="r"><\/signal-meter>/);
   assert.match(text, /<signal-scope bind="\/out\.l" label="\/out\.l"><\/signal-scope>/);
 });

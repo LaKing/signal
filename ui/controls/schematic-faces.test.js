@@ -89,7 +89,7 @@ globalThis.DOMPoint ??= class {
 };
 
 const { SchematicFaces } = await import('./schematic-faces.js');
-const { FACE_LAYOUT_PX, FACE_MAX_W } = await import('../lib/schematic-face.js');
+const { FACE_LAYOUT_PX } = await import('../lib/schematic-face.js');
 
 /** A face area as the drawing marks it: its corners in its group's units, the group's screen matrix `ctm`. */
 function area({ id = '/synth', file = 'parts/synth.html', root = '/synth', path = '', slot = 'synth', base = 'b1', w = 640, h = 200, nw = FACE_LAYOUT_PX, ctm = { a: 1, d: 1, e: 0, f: 0 } } = {}) {
@@ -198,10 +198,10 @@ test("a part written shows at once in its faces; a measured height lays out agai
   faces.resized([{ target: face.panel }]);
   assert.equal(host.resized, 1);
   assert.deepEqual(faces.sizes.get('parts/synth.html'), { w: 1200, h: 336 }, 'its natural size, rounded up to its step');
-  // In its box: scaled down whole, its aspect kept.
+  // In its box: at its own size (ADR 0047 §4).
   const fit = faces.sizeOf({ file: 'parts/synth.html', count: 3 });
-  assert.equal(fit.w, FACE_MAX_W);
-  assert.equal(fit.h, Math.ceil(336 * (FACE_MAX_W / 1200)));
+  assert.equal(fit.w, 1200);
+  assert.equal(fit.h, 336);
   // Laid out at that size: the same measure again changes nothing.
   faces.resized([{ target: face.panel }]);
   assert.equal(host.resized, 1);

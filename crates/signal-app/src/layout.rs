@@ -205,9 +205,10 @@ pub struct LayoutWindow {
     pub width: f64,
     /// Its content's height, in points.
     pub height: f64,
-    /// A panel window's cards, in order (card ids, `ui-controls.md`
-    /// "Cards"); a main window's are the order of the cards it shows first
-    /// (the rest follow in the panel's order).
+    /// The cards a panel window holds (card ids, `ui-controls.md`
+    /// "Cards"), membership only: it shows them at their places on the
+    /// plate (ADR 0047 §3). A main window shows every card; its list is
+    /// kept as read and means nothing.
     pub cards: Vec<String>,
     /// Whether it is full screen (on its screen); its place and size are
     /// then what it returns to.
@@ -678,43 +679,6 @@ pub fn move_card(layout: &mut Layout, card: &str, to: CardMove) -> bool {
     *layout != before
 }
 
-/// Window `window`'s cards in the order `order` (Move up, Move down): a
-/// panel window keeps the cards it holds, those `order` names first; a
-/// main window's order becomes `order`, less the cards panel windows hold.
-/// Whether anything changed.
-pub fn reorder(layout: &mut Layout, window: usize, order: &[String]) -> bool {
-    let held = held(layout);
-    let Some(target) = layout.windows.get_mut(window) else {
-        return false;
-    };
-    let mut cards: Vec<String> = match target.view {
-        WindowView::Schematic => return false,
-        WindowView::Panel => order
-            .iter()
-            .filter(|c| target.cards.contains(c))
-            .cloned()
-            .collect(),
-        WindowView::Main => order
-            .iter()
-            .filter(|c| is_card_id(c) && !held.contains(c))
-            .cloned()
-            .collect(),
-    };
-    cards.dedup();
-    if target.view == WindowView::Panel {
-        for card in &target.cards {
-            if !cards.contains(card) {
-                cards.push(card.clone());
-            }
-        }
-    }
-    if cards == target.cards {
-        return false;
-    }
-    target.cards = cards;
-    true
-}
-
 /// Whether `id` may be a card's id: the ids `ui/app/lib/cards.js` gives
 /// (an `id` attribute, or a heading's slug), letters, digits, `-`, `_`,
 /// `.` and `:`, at most 128 bytes.
@@ -1066,7 +1030,7 @@ mod tests {
 
     /// ADR 0032: a card moves between windows: a panel window holds it, the
     /// main window shows the rest, a new panel window holds the card moved
-    /// into it, a schematic takes none; Move up and down reorder.
+    /// into it, a schematic takes none.
     #[test]
     fn cards_move_between_windows() {
         let screens = screens_of(&desk(), Some(0));
@@ -1086,33 +1050,9 @@ mod tests {
             !move_card(&mut layout, "scope", CardMove::Into(2)),
             "already there"
         );
-        // Move up and down: the window's order.
-        assert!(reorder(
-            &mut layout,
-            2,
-            &cards(&["output", "kick", "scope"])
-        ));
-        assert_eq!(layout.windows[2].cards, cards(&["output", "kick", "scope"]));
-        assert!(!reorder(
-            &mut layout,
-            2,
-            &cards(&["output", "kick", "scope"])
-        ));
-        assert!(
-            reorder(&mut layout, 2, &cards(&["scope", "intro"])),
-            "only its own"
-        );
-        assert_eq!(layout.windows[2].cards, cards(&["scope", "output", "kick"]));
-        // Back to the main window: shown there, last; its order.
+        // Back to the main window.
         assert!(move_card(&mut layout, "kick", CardMove::Into(0)));
-        assert_eq!(held(&layout), ["scope", "output"]);
-        assert_eq!(layout.windows[0].cards, ["kick"]);
-        assert!(reorder(&mut layout, 0, &cards(&["intro", "kick", "scope"])));
-        assert_eq!(
-            layout.windows[0].cards,
-            cards(&["intro", "kick"]),
-            "not the held"
-        );
+        assert_eq!(held(&layout), ["output", "scope"]);
         let unchanged = layout.clone();
         assert!(
             !move_card(&mut layout, "scope", CardMove::Into(1)),
@@ -1120,8 +1060,6 @@ mod tests {
         );
         assert!(!move_card(&mut layout, "scope", CardMove::Into(9)));
         assert!(!move_card(&mut layout, "a b", CardMove::Into(2)));
-        assert!(!reorder(&mut layout, 1, &cards(&["scope"])));
-        assert!(!reorder(&mut layout, 9, &cards(&["scope"])));
         assert_eq!(layout, unchanged);
     }
 

@@ -436,6 +436,79 @@ fn a_panel_reached_through_a_link_is_not_written(transport: Transport) {
     rig.finish();
 }
 
+/// ADR 0047 §2 (test 2's undo): a write may set the plate on
+/// `<signal-panel>` itself (`plate`), the cards' places in the content; a
+/// card beyond the plate is refused as `panel.check` judges it; writing the
+/// version before (its content, `plate: null`) gives the file back byte for
+/// byte; without `plate` the attribute is kept.
+fn a_write_sets_the_plate_and_undo_restores_the_file(transport: Transport) {
+    let mut rig = kick("panel-write-plate", transport);
+    let (mut ws, _) = rig.client();
+    let (mut other, _) = rig.client();
+    let file = rig.dir.join("ui/main.html");
+    let before = fs::read_to_string(&file).unwrap();
+    let first = read(&mut rig, &mut ws, 1, "main.html");
+    assert_eq!(first["plate"], Value::Null);
+    let original = first["html"].as_str().unwrap().to_owned();
+    let placed = EDITED
+        .replace(
+            "<section class=\"signal-card\">",
+            "<section class=\"signal-card\" place=\"0 0 80 12\">",
+        )
+        .replace(
+            "<section class=\"signal-card wide\">",
+            "<section class=\"signal-card wide\" place=\"0 12 160 40\">",
+        );
+    let mut frozen = write("main.html", &placed, &first["base"]);
+    frozen["plate"] = json!("160 52");
+    let written = rig.request(&mut ws, 2, frozen, "panel.written");
+    assert_eq!(written["plate"], "160 52");
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(text.contains("<signal-panel plate=\"160 52\">"), "{text}");
+    let pushed = rig.wait(&mut other, "panel.written", |got| {
+        got.of("panel.written").cloned()
+    });
+    assert_eq!(pushed["plate"], "160 52");
+    assert_eq!(read(&mut rig, &mut ws, 3, "main.html")["plate"], "160 52");
+    let check = rig.request(
+        &mut ws,
+        4,
+        json!({"type": "panel.check", "file": "main.html"}),
+        "panel.check",
+    );
+    assert_eq!(check["ok"], true, "{check}");
+
+    // Beyond the plate: refused, nothing written.
+    let mut beyond = write(
+        "main.html",
+        &placed.replace("0 12 160 40", "8 12 160 40"),
+        &written["base"],
+    );
+    beyond["plate"] = json!("160 52");
+    let error = refused(&mut rig, &mut ws, 5, beyond);
+    assert_eq!(error["code"], "bad-binding", "{error}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), text);
+    let mut malformed = write("main.html", &placed, &written["base"]);
+    malformed["plate"] = json!("160");
+    assert_eq!(refused(&mut rig, &mut ws, 6, malformed)["code"], "bad-html");
+
+    // Without `plate`: kept.
+    let kept = rig.request(
+        &mut ws,
+        7,
+        write("main.html", &placed, &written["base"]),
+        "panel.written",
+    );
+    assert_eq!(kept["plate"], "160 52");
+    // Undo: the version before, its plate none.
+    let mut undo = write("main.html", &original, &kept["base"]);
+    undo["plate"] = Value::Null;
+    let undone = rig.request(&mut ws, 8, undo, "panel.written");
+    assert_eq!(undone["plate"], Value::Null);
+    assert_eq!(fs::read_to_string(&file).unwrap(), before, "byte for byte");
+    rig.finish();
+}
+
 both!(
     a_write_replaces_the_panel_and_is_pushed,
     a_refused_element_or_attribute_writes_nothing,
@@ -446,4 +519,5 @@ both!(
     the_generated_panel_s_first_write_creates_main_html,
     only_the_served_project_s_panels_are_written,
     a_panel_reached_through_a_link_is_not_written,
+    a_write_sets_the_plate_and_undo_restores_the_file,
 );

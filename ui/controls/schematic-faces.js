@@ -17,7 +17,9 @@
 // and pans the box as on its title); on a control it is the control's.
 
 import { showWritten } from './panel-editor.js';
-import { FACE_LAYOUT_PX, estimateFace, faceAttribute, faceFit, facePlacement, lit, measuredNatural, overlapping, rootRules, stylesheets } from '../lib/schematic-face.js';
+import { layOutCards } from './plate.js';
+import { parsePlate } from '../lib/plate.js';
+import { FACE_LAYOUT_PX, estimateFace, faceAttribute, faceFit, facePlacement, faceWidth, lit, measuredNatural, overlapping, rootRules, stylesheets } from '../lib/schematic-face.js';
 import { screenRect } from '../lib/schematic-view.js';
 
 /** The theme every panel links (ui/controls/theme.css). */
@@ -34,7 +36,7 @@ function pageBase() {
 }
 
 const FACE_CSS = `
-/* Laid out as wide as a panel window, then scaled down whole to its box: a miniature of the panel, never a reflow. Only its cards take the pointer: between them it is the drawing's. */
+/* ADR 0047 §4: laid out at its plate's own width (a part without places at 1280 px), then scaled with its box: the part's plate, never a reflow. Only its cards take the pointer: between them it is the drawing's. */
 :host { position: absolute; left: 0; top: 0; width: ${FACE_LAYOUT_PX}px; box-sizing: border-box; transform-origin: 0 0; pointer-events: none; visibility: hidden; contain: layout style; }
 .face-panel .signal-cards > *, .face-note { pointer-events: auto; }
 :host(.shown) { visibility: visible; }
@@ -123,7 +125,7 @@ export class SchematicFaces {
   written(message) {
     const file = message?.file;
     if (typeof file !== 'string' || !file.startsWith('parts/')) return;
-    this.parts.set(file, { html: message.html ?? null, base: message.base ?? null, error: null, reading: false });
+    this.parts.set(file, { html: message.html ?? null, base: message.base ?? null, plate: message.plate ?? null, error: null, reading: false });
     for (const face of this.faces.values()) if (face.file === file) this.render(face);
   }
 
@@ -139,7 +141,7 @@ export class SchematicFaces {
     this.parts.set(file, { ...(known ?? { html: null, base: null, error: null }), reading: true });
     request.then(
       (read) => {
-        this.parts.set(file, { html: read?.exists ? (read.html ?? '') : null, base: read?.base ?? null, error: read?.exists ? null : 'no such part file', reading: false });
+        this.parts.set(file, { html: read?.exists ? (read.html ?? '') : null, base: read?.base ?? null, plate: read?.plate ?? null, error: read?.exists ? null : 'no such part file', reading: false });
         for (const face of this.faces.values()) if (face.file === file) this.render(face);
       },
       (error) => {
@@ -169,7 +171,7 @@ export class SchematicFaces {
     const panel = document.createElement('div');
     panel.className = 'face-panel';
     shadow.append(links, style, roots, note, panel);
-    const face = { id, file, root, error, element, shadow, links, roots, note, panel, shownHtml: undefined, placed: '', classes: '' };
+    const face = { id, file, root, error, element, shadow, links, roots, note, panel, shownHtml: undefined, placed: '', classes: '', layoutWidth: FACE_LAYOUT_PX };
     this.style(face);
     // On a control the control's; elsewhere the drawing's, as on the box under it.
     element.addEventListener('pointerdown', (event) => {
@@ -221,7 +223,8 @@ export class SchematicFaces {
     const html = part?.html ?? null;
     const note = part?.error ? `${face.file}: ${part.error}` : face.error ? `${face.file}: ${face.error}` : '';
     if (face.note.textContent !== note) face.note.textContent = note;
-    const key = `${face.root}\n${html}`;
+    const plate = part?.plate ?? null;
+    const key = `${face.root}\n${plate}\n${html}`;
     if (face.shownHtml === key) return;
     face.shownHtml = key;
     if (html === null) {
@@ -230,6 +233,10 @@ export class SchematicFaces {
     }
     const error = await showWritten(face.panel, html, (name, value) => faceAttribute(name, value, face.root, this.base));
     if (error && face.note.textContent === '') face.note.textContent = `${face.file}: ${error}`;
+    // ADR 0047 §4: the part's plate, at its own size.
+    face.layoutWidth = faceWidth(parsePlate(plate));
+    face.element.style.width = `${face.layoutWidth}px`;
+    layOutCards(face.panel.querySelector(':scope > .signal-cards'), plate);
     this.lightFace(face);
     // Its cards' width as drawn now (a card's width changes no height the observer sees).
     this.measure([face]);
@@ -246,7 +253,7 @@ export class SchematicFaces {
   }
 
   /**
-   * The natural size of `faces`' parts (CSS px, at FACE_LAYOUT_PX): its
+   * The natural size of `faces`' parts (CSS px, at their plate's width): its
    * height, and its cards' extent across (screen rectangles over the
    * face's own scale, so any transform holds); the drawing laid out again
    * when one differs from what the layout used.
@@ -255,7 +262,7 @@ export class SchematicFaces {
     let changed = false;
     for (const face of faces) {
       const box = face.panel.getBoundingClientRect?.();
-      const scale = box?.width > 0 ? box.width / FACE_LAYOUT_PX : 0;
+      const scale = box?.width > 0 ? box.width / (face.layoutWidth || FACE_LAYOUT_PX) : 0;
       if (!scale) continue;
       let right = 0;
       for (const grid of face.panel.children ?? []) {
@@ -264,7 +271,7 @@ export class SchematicFaces {
           if (r?.width > 0) right = Math.max(right, (r.right - box.left) / scale);
         }
       }
-      const natural = measuredNatural(right, face.panel.offsetHeight + face.note.offsetHeight);
+      const natural = measuredNatural(right, face.panel.offsetHeight + face.note.offsetHeight, face.layoutWidth || FACE_LAYOUT_PX);
       if (!natural) continue;
       const old = this.sizes.get(face.file);
       if (old?.w === natural.w && old?.h === natural.h) continue;

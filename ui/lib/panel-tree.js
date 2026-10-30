@@ -10,6 +10,12 @@
 // `scope` among them); headings and descriptions `{id, kind: 'h1' | 'h2' |
 // 'p', classes, text}`; controls `{id, kind: 'control', tag, attributes}`.
 // Ids are given when a tree is read or a node added; they are never written.
+// ADR 0047 §2: a card's `place` (`"x y w h"`, or absent) is its node's
+// `place`, an open slot card's its control's attribute; the plate (`plate`
+// on <signal-panel>, outside the content) is the tree's `plate` (`"W H"` or
+// null), written beside the content (`versionText`).
+
+import { defaultPlate, placeText, plateText } from './plate.js';
 
 /** A container's element and required class, by kind. */
 export const CONTAINERS = Object.freeze({
@@ -175,6 +181,8 @@ export function parseContent(html, whitelist, { mode = 'submit' } = {}) {
       } else {
         const kind = KIND_OF_KEY[key];
         node = { id, kind, classes: classes.filter((c) => c !== CONTAINERS[kind].name), children: [] };
+        const place = attributes.find((a) => a.name === 'place');
+        if (place) node.place = place.value;
       }
       parent.node.children.push(node);
       stack.push({ node, key, tag });
@@ -231,7 +239,8 @@ export function serialize(tree, whitelist) {
       lines.push(`${pad}<${node.kind}${classText(null, node.classes ?? [])}>${escapeText(node.text)}</${node.kind}>`);
     } else {
       const { tag, name } = CONTAINERS[node.kind];
-      const open = `${pad}<${tag}${classText(name, node.classes ?? [])}>`;
+      const place = node.place ? ` place="${escapeValue(String(node.place))}"` : '';
+      const open = `${pad}<${tag}${classText(name, node.classes ?? [])}${place}>`;
       if (!node.children.length) {
         lines.push(`${open}</${tag}>`);
         return;
@@ -243,6 +252,23 @@ export function serialize(tree, whitelist) {
   };
   for (const child of tree.children) write(child, 1);
   return `\n${lines.map((l) => `${l}\n`).join('')}`;
+}
+
+/**
+ * A tree's version as the editor's history keeps it (ADR 0047 §2): its
+ * canonical content, preceded by its plate when it has one
+ * (`plate="160 90"`; the content starts with a line break, so the two never
+ * mix). `splitVersion` reads it back.
+ */
+export function versionText(tree, whitelist) {
+  const html = serialize(tree, whitelist);
+  return tree.plate ? `plate="${tree.plate}"${html}` : html;
+}
+
+/** A version (`versionText`'s) as `{plate, html}`: the plate or null, the content. */
+export function splitVersion(text) {
+  const m = /^plate="([^"]*)"/.exec(String(text ?? ''));
+  return m ? { plate: m[1], html: text.slice(m[0].length) } : { plate: null, html: String(text ?? '') };
 }
 
 /**
@@ -289,6 +315,11 @@ export function generatedTree(spec) {
     ...(spec.scope ? [control('signal-scope', { bind: spec.scope.bind, label: spec.scope.label })] : []),
   ];
   if (output.length) cards.push(card('output', null, output, ['wide']));
+  // ADR 0047 §2: placed as the generated panel shows them (`defaultPlate`), written with the first write.
+  const { plate, places } = defaultPlate(spec, { slots: false });
+  cards.forEach((c, i) => {
+    c.place = placeText(places[i]);
+  });
   const grid = { id: id(), kind: 'cards', classes: [], children: cards };
-  return { kind: 'panel', next, children: [grid] };
+  return { kind: 'panel', next, plate: plateText(plate), children: [grid] };
 }

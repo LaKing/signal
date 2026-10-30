@@ -6,6 +6,8 @@
 
 import { controlSpec } from './panel.js';
 import { keyCommand } from './keys.js';
+import { parsePlace, parsePlate, placeText, plateText } from './plate.js';
+import { splitVersion } from './panel-tree.js';
 
 /** Every node of `tree` with its parent and index, in document order. */
 function* walk(node, parent = null) {
@@ -162,7 +164,64 @@ export function addCard(tree, { cards = null, index = Infinity, title = 'card' }
     ],
   };
   grid.children.splice(Math.min(index, grid.children.length), 0, card);
+  // ADR 0047: on a plate, a new card's place is below every other, the plate grown to hold it.
+  const plate = parsePlate(copy.plate);
+  if (plate) {
+    const bottom = Math.max(0, ...plateCards(copy).map((c) => (c.place ? c.place.y + c.place.h : 0)));
+    const place = { x: 0, y: bottom, w: Math.min(plate.w, NEW_CARD.w), h: NEW_CARD.h };
+    card.place = placeText(place);
+    copy.plate = plateText({ w: plate.w, h: Math.max(plate.h, place.y + place.h) });
+  }
   return { tree: copy, id };
+}
+
+// The plate (ADR 0047 §2).
+
+/** A new card's size on a plate, in pu. */
+export const NEW_CARD = Object.freeze({ w: 40, h: 12 });
+
+/** Whether node `node` (under `parent`) is a card of the plate: a section, or an open slot card. */
+export function isPlateCard(node, parent) {
+  return node?.kind === 'card' || (node?.kind === 'control' && node.tag === 'signal-slot' && parent?.kind === 'cards');
+}
+
+/** A card node's place as written (`{x, y, w, h}`), or null. */
+export function placeOf(node) {
+  return parsePlace(node?.kind === 'card' ? node.place : node?.attributes?.place);
+}
+
+/** The first grid's cards of `tree`: `[{node, place}]`, `place` null where none is written. */
+export function plateCards(tree) {
+  const grid = tree.children.find((c) => c.kind === 'cards');
+  return (grid?.children ?? []).filter((c) => isPlateCard(c, grid)).map((node) => ({ node, place: placeOf(node) }));
+}
+
+/** Card `id` at `place` (`{x, y, w, h}`; null: no place). `{tree}`. */
+export function setPlace(tree, id, place) {
+  const copy = edit(tree);
+  const found = find(copy, id);
+  if (!found || !isPlateCard(found.node, found.parent)) return missing(id);
+  const text = place ? placeText(place) : undefined;
+  if (found.node.kind === 'card') {
+    if (text) found.node.place = text;
+    else delete found.node.place;
+  } else if (text) found.node.attributes.place = text;
+  else delete found.node.attributes.place;
+  return { tree: copy };
+}
+
+/**
+ * Freeze layout's result written into the tree: the plate `plate` (`{w,
+ * h}`) and each card's place (`places`, `[[id, {x, y, w, h}]]`). `{tree}`.
+ */
+export function setPlaces(tree, plate, places) {
+  let result = { tree: edit(tree) };
+  result.tree.plate = plate ? plateText(plate) : null;
+  for (const [id, place] of places) {
+    result = setPlace(result.tree, id, place);
+    if (result.error) return result;
+  }
+  return result;
 }
 
 /** Whether card `card` holds no control (so it is removed without asking). */
@@ -225,6 +284,8 @@ export function moveControl(tree, id, { into, index = Infinity }) {
   const anchor = container.children[index] === from.node ? container.children[index + 1] : container.children[index];
   const at = anchor ? container.children.indexOf(anchor) : -1;
   take(copy, id);
+  // A place is a card's (ADR 0047): an open slot card moved into a row leaves its place.
+  if (from.node.kind === 'control') delete from.node.attributes.place;
   // The anchor was the group of one the control left, removed with it: the
   // control takes the group's place.
   if (anchor && !container.children.includes(anchor)) container.children.splice(Math.min(at, container.children.length), 0, from.node);
@@ -502,12 +563,17 @@ export class EditSession {
     return kept;
   }
 
-  /** The `panel.write` of `text`, or `{refused}` (writing stopped, or a write pending). */
+  /**
+   * The `panel.write` of version `text` (`versionText`'s: its content and
+   * its plate, ADR 0047 §2, which is always sent, null removing it), or
+   * `{refused}` (writing stopped, or a write pending).
+   */
   request(text) {
     if (this.blocked) return { refused: this.blocked };
     if (this.busy) return { refused: 'Writing the last change: try again' };
     this.busy = true;
-    return { message: { type: 'panel.write', file: this.file, html: text, base: this.base } };
+    const { plate, html } = splitVersion(text);
+    return { message: { type: 'panel.write', file: this.file, html, plate, base: this.base } };
   }
 
   /** The write of `text` (`step` 0: a new version; -1, +1: undo, redo) was taken. */
@@ -526,8 +592,8 @@ export class EditSession {
    * the base not taken, so nothing the page holds overwrites what it
    * cannot show.
    */
-  changed({ base, html }) {
-    const read = typeof html === 'string' ? this.read(html) : { error: 'the file has no one <signal-panel> to edit' };
+  changed({ base, html, plate = null }) {
+    const read = typeof html === 'string' ? this.read(html, plate) : { error: 'the file has no one <signal-panel> to edit' };
     if (read.error) {
       this.blocked = `The file changed elsewhere and is not editable here (${read.error}): nothing more is written; edit it by hand`;
       return { blocked: this.blocked };

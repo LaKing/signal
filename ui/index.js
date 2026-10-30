@@ -87,3 +87,5 @@ import './controls/slot.test.js';
 import './lib/schematic-face.test.js';
 import './lib/schematic-marquee.test.js';
 import './controls/schematic-faces.test.js';
+import './lib/plate.test.js';
+import './controls/plate.test.js';

@@ -1,29 +1,33 @@
 // The project panel's cards across Signal.app's windows (ADR 0032,
 // docs/ui-controls.md "Cards across windows"). The project's main panel
 // (`ui/main.html`) stays the one source of its cards; each window shows a
-// subset: a panel window the cards it holds, in its order (none until told,
-// so a new panel window is empty), and a main window's Panel tab every card,
-// those another window holds as a compact placeholder in their place ("—
-// in Panel window 2 (screen 1)", Show, Bring back). Which window holds which
-// card is the project's `ui/windows.toml`, kept by the app (the native
-// side); a page only shows what it is told (`signal-window`) and says what
-// the person chose (`card.move`, `card.order`, `window.show`, `window.fit`).
+// subset: a panel window the cards it holds (none until told, so a new
+// panel window is empty), and a main window's Panel tab every card, those
+// another window holds as a placeholder over their place ("— in Panel
+// window 2 (screen 1)", Show, Bring back). ADR 0047 §3: the cards keep their
+// places on the plate; a panel window shows the plate cropped to its cards'
+// bounding box and scaled to fit, so their arrangement is the plate's.
+// Which window holds which card is the project's `ui/windows.toml`, kept by
+// the app (the native side), membership only; a page only shows what it is
+// told (`signal-window`) and says what the person chose (`card.move`,
+// `window.show`, `window.fit`).
 //
 // A card is moved from its context menu (owner's decision, 2026-10-22: "not
 // drag and drop — the panel elements should be movable from the context
 // menu"): a right click on a card (its background or heading; a control
 // bound to a parameter keeps its own menu, a text field the system's) shows
-// Move to each other window, Move to new panel window, in a panel window
-// Bring back to main window, and Move up / Move down where it has
-// neighbours. In a main window these items come first in the app's own
+// Move to each other window, Move to new panel window, and in a panel
+// window Bring back to main window (ADR 0047 §3: no Move up / Move down;
+// order on the plate is place, edited in Edit layout). In a main window
+// these items come first in the app's own
 // menu (the card is a `part` of it, as the schematic is); in a panel window
 // the same menu element (ui/controls/context-menu.js) opens in the page.
 // Not while the panel's layout is edited.
 //
 // Nothing is added to the panel's own DOM: the placeholders are an overlay
-// in the frame's body, outside `<signal-panel>`, and cards are only hidden,
-// ordered and collapsed with inline CSS, so the panel file, its editor and
-// `panel.written` see the panel as written. A card's id is its `id`
+// in the frame's body, outside `<signal-panel>`, and cards are only hidden
+// with inline CSS (their boxes kept, so nothing on the plate moves), so the
+// panel file, its editor and `panel.written` see the panel as written. A card's id is its `id`
 // attribute when it has one, else the slug of its first heading (`kick`,
 // `output`; a second card of the same heading `kick-2`), else `card`
 // (`card-2`, …), in the panel's order. ADR 0046 §5: an open slot card
@@ -34,6 +38,7 @@
 // names them when Group into slot moves a card (`ui/windows.toml`).
 
 import { ContextMenu, menusClaimed } from '../../controls/context-menu.js';
+import { union } from '../../lib/plate.js';
 import { keepsSystemMenu } from './context.js';
 
 /** A heading's slug: lowercase letters and digits, the rest as single `-`. */
@@ -78,60 +83,34 @@ export const EMPTY_PANEL = Object.freeze({ view: 'panel', cards: [] });
 
 /**
  * What a window shows of the cards `ids` (in the panel's order), told by
- * the app as `state`: a panel window (`{ view: 'panel', cards }`) its cards
- * in its order, none without them; a main window (`{ view: 'main', held,
- * order }`) every card, those in `order` first, a `held` one (`{ card,
- * where }`, `where` the window holding it) as a placeholder. `null` (a
- * browser, or a main window not told yet): every card. Returns `[{ id,
- * shown, order, held }]`, `held` the placeholder's text or null.
+ * the app as `state`: a panel window (`{ view: 'panel', cards }`) the cards
+ * it holds, none without them; a main window (`{ view: 'main', held }`)
+ * every card, a `held` one (`{ card, where }`, `where` the window holding
+ * it) as a placeholder. `null` (a browser, or a main window not told yet):
+ * every card. Every card stays at its place on the plate (ADR 0047 §3).
+ * Returns `[{ id, shown, held }]`, `held` the placeholder's text or null.
  */
 export function arrangement(ids, state) {
   const panel = state?.view === 'panel';
-  const listed = panel ? (state.cards ?? []) : (state?.order ?? []);
+  const listed = new Set(panel ? (state.cards ?? []) : []);
   const held = new Map(panel ? [] : (state?.held ?? []).map((h) => (typeof h === 'string' ? [h, ''] : [h.card, h.where ?? ''])));
-  const rank = new Map(listed.map((id, i) => [id, i]));
-  return ids.map((id, i) => ({
+  return ids.map((id) => ({
     id,
-    shown: panel ? rank.has(id) : true,
-    order: rank.has(id) ? rank.get(id) : listed.length + i,
+    shown: panel ? listed.has(id) : true,
     held: held.has(id) ? held.get(id) : null,
   }));
 }
 
 /**
- * The order of a window's own cards (`placed`, `arrangement`'s, without
- * the hidden and held ones) with `card` moved one place by `step` (-1 up,
- * +1 down); null when it cannot move that way.
- */
-export function moved(placed, card, step) {
-  const order = placed
-    .filter((c) => c.shown && c.held === null)
-    .sort((a, b) => a.order - b.order)
-    .map((c) => c.id);
-  const at = order.indexOf(card);
-  const to = at + step;
-  if (at < 0 || to < 0 || to >= order.length) return null;
-  [order[at], order[to]] = [order[to], order[at]];
-  return order;
-}
-
-/**
  * The card menu's items for `card` in a window told `state` (`placed` its
  * arrangement): Move to each other window (`state.targets`, `{ index,
- * label }`), Move to new panel window, in a panel window Bring back to main
- * window, and Move up / Move down when the window has other cards. Items
- * are ui/lib/context-menu.js's (`{ id, label, disabled? }`).
+ * label }`), Move to new panel window, and in a panel window Bring back to
+ * main window. Items are ui/lib/context-menu.js's (`{ id, label, disabled? }`).
  */
 export function cardMenu(state, placed, card) {
   const items = (state?.targets ?? []).map((t) => ({ id: `move:${t.index}`, label: `Move to ${t.label}` }));
   items.push({ id: 'new', label: 'Move to new panel window' });
   if (state?.view === 'panel') items.push({ id: 'main', label: 'Bring back to main window' });
-  const own = placed.filter((c) => c.shown && c.held === null).length;
-  if (own > 1) {
-    items.push({ id: 'separator' });
-    items.push({ id: 'up', label: 'Move up', disabled: !moved(placed, card, -1) });
-    items.push({ id: 'down', label: 'Move down', disabled: !moved(placed, card, 1) });
-  }
   return items;
 }
 
@@ -140,10 +119,6 @@ export function cardMenu(state, placed, card) {
  * the window a new one needs), or null.
  */
 export function menuMessage(id, card, placed, size) {
-  if (id === 'up' || id === 'down') {
-    const cards = moved(placed, card, id === 'up' ? -1 : 1);
-    return cards ? { type: 'card.order', cards } : null;
-  }
   if (id === 'new' || id === 'main') return { type: 'card.move', card, to: id, size };
   if (id.startsWith('move:')) {
     const to = Number(id.slice(5));
@@ -151,9 +126,6 @@ export function menuMessage(id, card, placed, size) {
   }
   return null;
 }
-
-/** A placeholder's height (the held card's place). */
-export const PLACEHOLDER_HEIGHT = '2.25rem';
 
 /**
  * The cards of panel document `doc`: its `.signal-card`s and its open slot
@@ -216,13 +188,26 @@ export function cardsOf(doc) {
 /** The attribute of a card another window holds (HELD_CSS hides all of it). */
 export const HELD_MARK = 'data-signal-app-held';
 
-/** A held card's inline style: its place kept as one line, nothing of it drawn. */
-export const HELD = Object.freeze({ visibility: 'hidden', height: PLACEHOLDER_HEIGHT, 'min-height': '0', 'max-height': PLACEHOLDER_HEIGHT, overflow: 'hidden', padding: '0' });
+/** A held card's inline style: its whole place kept (ADR 0047: nothing on the plate moves), nothing of it drawn. */
+export const HELD = Object.freeze({ visibility: 'hidden' });
+
+/** The attribute of a card a panel window does not hold: hidden, its place kept. */
+export const HIDDEN_MARK = 'data-signal-app-hidden';
+
+/** Whether `card` (`cardsOf`'s) is shown in this window. */
+export function shownCard(card) {
+  return !card.element.hasAttribute?.(HIDDEN_MARK);
+}
 
 /** In the panel's document: no part of a held card shows, whatever its own CSS makes visible. */
 export const HELD_CSS = `[${HELD_MARK}], [${HELD_MARK}] *, [${HELD_MARK}] *::before, [${HELD_MARK}] *::after, [${HELD_MARK}]::before, [${HELD_MARK}]::after { visibility: hidden !important; }`;
 
-/** Shows `doc`'s cards as `state` says (hidden, ordered and collapsed with CSS only); returns `[cards, placed]`. */
+/**
+ * Shows `doc`'s cards as `state` says (hidden with CSS only, every card
+ * keeping its place on the plate); returns `[cards, placed]`. ADR 0047 §3:
+ * a panel window's plate is cropped to the bounding box of its cards
+ * (`setCrop` of its <signal-panel>), a main window's is whole.
+ */
 export function applyCards(doc, state) {
   const cards = cardsOf(doc);
   const placed = arrangement(cards.map((c) => c.id), state);
@@ -230,16 +215,27 @@ export function applyCards(doc, state) {
     const { element } = card;
     const p = placed[i];
     card.held = p.held;
-    element.style.display = p.shown ? '' : 'none';
-    element.style.order = state ? String(p.order) : '';
-    // A card another window holds keeps only its place (one line), wholly
-    // hidden, its placeholder drawn over it; nothing of the card shows.
+    // Not held here: hidden, its box kept (a display of none would move the cards after it).
+    for (const [name, value] of Object.entries({ visibility: 'hidden', 'pointer-events': 'none' })) element.style.setProperty(name, p.shown ? '' : value, p.shown ? '' : 'important');
+    if (p.shown) element.removeAttribute?.(HIDDEN_MARK);
+    else element.setAttribute?.(HIDDEN_MARK, '');
+    // A card another window holds keeps its place, wholly hidden, its
+    // placeholder drawn over it; nothing of the card shows.
     const held = p.held !== null;
-    for (const [name, value] of Object.entries(HELD)) element.style.setProperty(name, held ? value : '', held ? 'important' : '');
+    if (p.shown) for (const [name, value] of Object.entries(HELD)) element.style.setProperty(name, held ? value : '', held ? 'important' : '');
     if (held) element.setAttribute?.(HELD_MARK, '');
     else element.removeAttribute?.(HELD_MARK);
   });
+  cropPanel(doc, cards, state);
   return [cards, placed];
+}
+
+/** ADR 0047 §3: a panel window's plate cropped to its cards' bounding box (plate px); a main window's whole. */
+export function cropPanel(doc, cards, state) {
+  const panel = doc.querySelector?.('signal-panel');
+  if (!panel?.setCrop) return;
+  const shown = state?.view === 'panel' ? cards.filter(shownCard).map((c) => panel.plateRect(c.element)) : null;
+  panel.setCrop(shown ? union(shown) : null);
 }
 
 /**
@@ -327,11 +323,13 @@ export function connectCards(frame, { target = globalThis, initial = null, shown
     frameId = 0;
     const d = doc();
     if (!d || !layer) return;
+    // The cards' sizes changed (a part read, a font loaded): the crop follows them.
+    if (state) cropPanel(d, cards, state);
     layer.replaceChildren();
     const sx = d.defaultView?.scrollX ?? 0;
     const sy = d.defaultView?.scrollY ?? 0;
     for (const card of cards) {
-      if (card.held == null || card.element.style.display === 'none') continue;
+      if (card.held == null || !shownCard(card)) continue;
       const r = card.element.getBoundingClientRect();
       if (!r.width) continue;
       const box = make(d, 'div', `${STYLE.placeholder}left:${r.left + sx}px;top:${r.top + sy}px;width:${r.width}px;height:${r.height}px;`);
@@ -360,12 +358,12 @@ export function connectCards(frame, { target = globalThis, initial = null, shown
       card.element.contextMenu = partOf(card);
       sizes?.observe(card.element);
     }
-    shownCount(cards.filter((c) => c.element.style.display !== 'none').length);
+    shownCount(cards.filter(shownCard).length);
     redraw();
     if (state?.view === 'panel') {
       // The content's height, for a window that fits it.
       const view = d.defaultView;
-      const shown = cards.filter((c) => c.element.style.display !== 'none');
+      const shown = cards.filter(shownCard);
       const bottom = Math.max(0, ...shown.map((c) => c.element.getBoundingClientRect().bottom + (view?.scrollY ?? 0)));
       if (shown.length) post({ type: 'window.fit', height: Math.ceil(bottom + 12) });
     }

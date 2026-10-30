@@ -61,6 +61,9 @@ export default {
     { "id": "view.line_up", "scope": "view", "label": "Scroll up a little", "keys": ["ArrowUp"] },
     { "id": "view.top", "scope": "view", "label": "Scroll to the top", "keys": ["Home", "Cmd+ArrowUp"] },
     { "id": "view.bottom", "scope": "view", "label": "Scroll to the bottom", "keys": ["End", "Cmd+ArrowDown"] },
+    { "id": "view.plate_zoom_in", "scope": "view", "label": "Zoom the panel in (its plate scaled, nothing rearranged)", "keys": ["Cmd+=", "Cmd++"] },
+    { "id": "view.plate_zoom_out", "scope": "view", "label": "Zoom the panel out", "keys": ["Cmd+-"] },
+    { "id": "view.plate_whole", "scope": "view", "label": "Show the whole panel; again: fit its width", "keys": ["Cmd+0"] },
     { "id": "view.wheel_inside", "scope": "view", "label": "Hold to use the wheel inside a control without clicking it", "keys": ["Alt+Wheel"], "wheel": true },
     { "id": "view.release_wheel", "scope": "view", "label": "Give the wheel back to the page (after a click on a control)", "keys": ["Escape"], "fixed": true },
 

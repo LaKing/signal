@@ -263,3 +263,32 @@ fn a_parts_controls_on_removed_ports() {
     assert_eq!(rooted[0]["binds"], serde_json::json!(["/synth.cutoff"]));
     assert_eq!(rooted[0]["bind"], ".cutoff");
 }
+
+/// ADR 0047: Group into slot on a plate: the card moved whole leaves its
+/// place to the open slot card; the part's cards have none (the part is a
+/// plate of its own, frozen when the person freezes it); the other cards
+/// keep theirs.
+#[test]
+fn group_into_slot_keeps_the_plate_s_places() {
+    let placed = "\n  <div class=\"signal-cards\">\n    <section class=\"signal-card\" place=\"0 0 160 10\">\n      <h1>title</h1>\n    </section>\n    <section class=\"signal-card\" place=\"0 10 80 20\">\n      <h2>synth</h2>\n      <div class=\"row\">\n        <signal-knob bind=\"/synth.cutoff\" label=\"cutoff\"></signal-knob>\n      </div>\n    </section>\n  </div>\n";
+    let nodes = parse(placed).unwrap();
+    assert_eq!(serialize(&nodes), placed, "a place read and written back");
+    let grouped = group_content(placed, "synth", None).unwrap();
+    assert!(
+        grouped
+            .host
+            .contains("<section class=\"signal-card\" place=\"0 0 160 10\">"),
+        "{}",
+        grouped.host
+    );
+    assert!(
+        grouped
+            .host
+            .contains("<signal-slot bind=\"/synth\" place=\"0 10 80 20\"></signal-slot>"),
+        "{}",
+        grouped.host
+    );
+    let part = grouped.part.unwrap();
+    assert!(!part.contains("place="), "{part}");
+    assert!(part.contains("<signal-knob bind=\".cutoff\""), "{part}");
+}
