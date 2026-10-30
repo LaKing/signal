@@ -177,14 +177,19 @@ fn a_file_that_does_not_read_falls_back_to_the_built_in_keys() {
 #[test]
 fn writing_keeps_comments_and_holds_only_overrides() {
     let text = "# mine\nversion = 1\n\n# the page\n[view]\n# Space too\npage_down = [\"PageDown\", \"Space\", \"F20\"]\n";
-    let next = with_override(text, "schematic.fit", Some(&["Cmd+0".to_owned()])).unwrap();
+    let next = with_override(text, "schematic.fit", Some(&["F12".to_owned()])).unwrap();
     assert!(
         next.starts_with("# mine\nversion = 1\n\n# the page\n[view]\n# Space too\n"),
         "{next}"
     );
-    assert!(next.contains("[schematic]\nfit = [\"Cmd+0\"]\n"), "{next}");
+    assert!(next.contains("[schematic]\nfit = [\"F12\"]\n"), "{next}");
     // Equal to the built-in keys: the override goes, and its empty group.
-    let next = with_override(&next, "schematic.fit", Some(&["home".to_owned()])).unwrap();
+    let next = with_override(
+        &next,
+        "schematic.fit",
+        Some(&["cmd+0".to_owned(), "home".to_owned()]),
+    )
+    .unwrap();
     assert!(!next.contains("schematic"), "{next}");
     // Back to the built-in keys (None), canonical chords written.
     let next = with_override(&next, "view.page_down", None).unwrap();

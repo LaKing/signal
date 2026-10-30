@@ -169,10 +169,10 @@ export default {
     { "id": "step_grid.redo", "scope": "step_grid", "label": "Redo", "keys": ["Shift+Cmd+Z"] },
     { "id": "step_grid.wheel", "scope": "step_grid", "label": "A level knob's level (when it has the wheel)", "keys": ["Wheel"], "wheel": true, "fine": true },
 
-    { "id": "schematic.zoom_in", "scope": "schematic", "label": "Zoom in about the centre", "keys": ["=", "+"] },
-    { "id": "schematic.zoom_out", "scope": "schematic", "label": "Zoom out about the centre", "keys": ["-", "_"] },
+    { "id": "schematic.zoom_in", "scope": "schematic", "label": "Zoom in about the centre", "keys": ["Cmd+=", "Cmd++", "=", "+"] },
+    { "id": "schematic.zoom_out", "scope": "schematic", "label": "Zoom out about the centre", "keys": ["Cmd+-", "-", "_"] },
     { "id": "schematic.top_level", "scope": "schematic", "label": "Out to the top level, every composite closed", "keys": ["0"] },
-    { "id": "schematic.fit", "scope": "schematic", "label": "Fit the drawing in the window", "keys": ["Home"] },
+    { "id": "schematic.fit", "scope": "schematic", "label": "Fit the drawing in the window", "keys": ["Cmd+0", "Home"] },
     { "id": "schematic.pan_left", "scope": "schematic", "label": "Pan left", "keys": ["ArrowLeft"] },
     { "id": "schematic.pan_right", "scope": "schematic", "label": "Pan right", "keys": ["ArrowRight"] },
     { "id": "schematic.pan_up", "scope": "schematic", "label": "Pan up", "keys": ["ArrowUp"] },
