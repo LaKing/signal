@@ -35,33 +35,39 @@ const SNAPSHOTS = new URL('ui/lib/fixtures/board/snapshots.json', root);
 
 /**
  * The thresholds of the measures (rule 6: they fail a regression, they
- * choose nothing). Measured on 2026-10-30 with the approximated plates,
- * with about 20 % headroom: the studio 120 crossings (39 between the
- * chips' own wires, the rest where the 61 legs of 13 buses meet them and
- * each other), studio-transport 116, physical-av 30, kick 2 and
- * library-demo (no panel) 8; labelled nets only the true fan-outs and the
- * global ones: none in the studio (82fc1a2's board had 80), one in kick
- * (its transport's beat, 4 destinations).
+ * choose nothing). Measured on 2026-10-30, about 15 % headroom. The studio
+ * on its measured plate: 43 crossings, length 34 120, 6 labelled nets
+ * (wires that found no way within the router's budget: the drum machine's
+ * last three voices' triggers, the mixers into the bus). The coordinator's
+ * targets for it, under 25 crossings and a length under 25 000, are NOT met
+ * yet (ADR 0047's notes). The other projects on approximated plates
+ * (studio-transport 122 crossings and 39 labels: its approximated cards
+ * leave the router little room; physical-av 41, kick 4, library-demo 8).
  */
 const LIMITS = {
-  kick: { crossings: 4, labels: 1 },
-  studio: { crossings: 144, labels: 2 },
-  'studio-transport': { crossings: 140, labels: 2 },
-  'physical-av': { crossings: 36, labels: 1 },
-  'library-demo': { crossings: 10, labels: 0 },
+  kick: { crossings: 5, length: 2600, labels: 1 },
+  studio: { crossings: 50, length: 39500, labels: 7 },
+  'studio-transport': { crossings: 140, length: 44000, labels: 45 },
+  'physical-av': { crossings: 48, length: 13500, labels: 1 },
+  'library-demo': { crossings: 10, length: 18600, labels: 0 },
 };
 
 function project(name) {
   const graph = JSON.parse(read(PROJECTS[name]));
   const panel = new URL(`projects/${name}/ui/main.html`, root);
-  const plate = existsSync(panel) ? approximatePlate(readFileSync(panel, 'utf8')) : { vias: new Map(), obstacles: [], plate: null, controls: [] };
+  let plate = existsSync(panel) ? approximatePlate(readFileSync(panel, 'utf8')) : { vias: new Map(), obstacles: [], cards: [], plate: null, controls: [] };
+  // The studio's plate as the page measured it (2026-10-30, ui/lib/fixtures/board/studio-plate.json).
+  if (name === 'studio') {
+    const fx = JSON.parse(read('ui/lib/fixtures/board/studio-plate.json'));
+    plate = { controls: plate.controls, vias: new Map(fx.vias), obstacles: fx.obstacles, cards: fx.cards, plate: fx.size };
+  }
   return { graph, plate, factsOf: (m) => exportFacts(graph.composites?.[m] ?? null) };
 }
 
 function boardOf(name, positions = {}, graphOf = (g) => g) {
   const { graph, plate } = project(name);
   const g = graphOf(graph);
-  return layout(g.top, positions, { factsOf: (m) => exportFacts(g.composites?.[m] ?? null), controls: plate.controls, board: { vias: plate.vias, obstacles: plate.obstacles, plate: plate.plate } });
+  return layout(g.top, positions, { factsOf: (m) => exportFacts(g.composites?.[m] ?? null), controls: plate.controls, board: { vias: plate.vias, obstacles: plate.obstacles, plate: plate.plate, cards: plate.cards } });
 }
 
 /** What a snapshot keeps of a board: boxes, routes' corners, labels. */
@@ -153,33 +159,46 @@ test('every connection and every leg is drawn, at every zoom: none vanishes, the
   }
 });
 
-test('measures under their thresholds: crossings, and labels only for a true fan-out or a global net', () => {
+test('measures under their thresholds: crossings, length, and labels only for a fan-out, a global net or no way', () => {
   const report = [];
   for (const name of Object.keys(PROJECTS)) {
     const b = boardOf(name);
     const m = b.board.metrics;
-    report.push(`${name}: ${m.crossings} crossings, ${m.bends} bends, length ${m.length}, ${m.labels} labelled nets, ${b.wires.filter((w) => w.kind === 'binding').length} legs`);
+    report.push([name, m, `${name}: ${m.crossings} crossings, ${m.bends} bends, length ${m.length}, ${m.labels} labelled nets, ${b.wires.filter((w) => w.kind === 'binding').length} legs`]);
+  }
+  console.log(report.map((r) => r[2]).join('\n'));
+  for (const [name, m] of report) {
     assert.ok(m.crossings <= LIMITS[name].crossings, `${name}: ${m.crossings} crossings`);
+    assert.ok(m.length <= LIMITS[name].length, `${name}: length ${m.length}`);
     assert.ok(m.labels <= LIMITS[name].labels, `${name}: ${m.labels} labelled nets`);
   }
-  console.log(report.join('\n'));
 });
 
-test('one arrangement: chips in flow order right of the plate, each chip of vias in the row of its controls; a stored position wins, moved off a control', () => {
+test('each chip under its own controls (the coordinator’s design): the synth below MONO SYNTH’s knobs, each drum voice under its column; a stored position wins, moved off a control', () => {
   const b = boardOf('studio');
   const { plate } = project('studio');
-  const chips = b.nodes.filter((n) => n.kind === 'instance');
-  for (const chip of chips) assert.ok(chip.x >= plate.plate.w, `${chip.id} right of the plate`);
-  // Flow: a connection's source column is left of its target's, but for feedback.
-  for (const w of b.wires.filter((x) => x.kind !== 'binding' && !x.feedback)) {
-    const a = b.nodes.find((n) => n.id === w.from.node);
-    const c = b.nodes.find((n) => n.id === w.to.node);
-    assert.ok(a.layer < c.layer, `${w.label}: left to right`);
+  const chip = (id) => b.nodes.find((n) => n.id === id);
+  const vias = (id) => b.wires.filter((w) => w.kind === 'binding' && w.to.node === id).map((w) => b.nodes.find((n) => n.id === w.from.node).control.rect);
+  const synthKnobs = vias('synth');
+  const synth = chip('synth');
+  assert.ok(synth.y >= Math.max(...synthKnobs.map((r) => r.y + r.h)), 'below its knobs');
+  assert.ok(synth.y < 1150, 'inside MONO SYNTH (the piano roll’s area is free: the pattern editors are no vias)');
+  for (const voice of ['kick', 'snare', 'clap', 'hats', 'tom', 'rim', 'cymbal']) {
+    const rects = vias(voice);
+    const cx = rects.reduce((s, r) => s + r.x + r.w / 2, 0) / rects.length;
+    const c = chip(voice);
+    assert.ok(Math.abs(c.x + c.w / 2 - cx) <= 40, `${voice} under its column (${Math.round(c.x + c.w / 2)} against ${Math.round(cx)})`);
+    assert.ok(c.y >= Math.max(...rects.map((r) => r.y + r.h)), `${voice} below its knobs`);
   }
-  // The synth's controls are the plate's top card: it lies above the drums, whose controls are lower.
-  const synth = chips.find((n) => n.id === 'synth');
-  const kick = chips.find((n) => n.id === 'kick');
-  assert.ok(synth.y < kick.y);
+  // Its parameters on its top edge, in its vias' x order: a comb that never crosses itself.
+  const tops = synth.ins.filter((p) => p.side === 'top');
+  assert.equal(tops.length, synth.ins.filter((p) => p.parameter).length);
+  const viaX = (pin) => {
+    const leg = b.wires.find((w) => w.kind === 'binding' && w.to.node === 'synth' && w.to.port === pin.name);
+    return leg ? b.nodes.find((n) => n.id === leg.from.node).control.rect.x : Infinity;
+  };
+  tops.sort((p, q) => p.x - q.x);
+  for (let i = 1; i < tops.length; i++) assert.ok(tops[i].y === synth.y && viaX(tops[i]) >= viaX(tops[i - 1]), `${tops[i].name} in its via's x order`);
   const pinned = boardOf('studio', { synth: { x: 4000, y: 40 } });
   assert.deepEqual(pinned.nodes.filter((n) => n.id === 'synth').map((n) => [n.x, n.y, n.pinned]), [[4000, 40, true]]);
   const over = plate.obstacles[0];
@@ -226,18 +245,16 @@ test('budgets (test 9): each board laid out in under 50 ms, at most 5 000 elemen
   console.log(report.join('\n'));
 });
 
-test('vias (§5): a small pad at its control’s middle, its legs real wires; a chip’s pins ordered as its neighbours lie', () => {
+test('vias (§5): a small pad at its control’s middle, its legs real wires dropping from its bottom', () => {
   const b = boardOf('studio');
   const vias = b.nodes.filter((n) => n.kind === 'control');
   assert.ok(vias.length > 40);
   for (const v of vias) {
     const r = v.control.rect;
-    assert.ok(v.w <= 16 && v.h < r.h, 'a pad, not the control');
-    assert.ok(Math.abs(v.x + v.w / 2 - (r.x + r.w / 2)) <= 1 && Math.abs(v.y + v.h / 2 - (r.y + r.h / 2)) <= 1, 'at its middle');
+    assert.ok(v.w <= 24 && v.h < r.h, 'a pad, not the control');
+    assert.ok(Math.abs(v.x + v.w / 2 - (r.x + r.w / 2)) <= 4 && Math.abs(v.y + v.h / 2 - (r.y + r.h / 2)) <= 1, 'at its middle');
   }
   const legs = b.wires.filter((w) => w.kind === 'binding');
   assert.ok(legs.length > 40 && legs.every((w) => !w.labelled), 'every leg a wire');
-  // The synth's legs come from above (its controls are the plate's top card): its parameters are on top of its ports.
-  const synth = b.nodes.find((n) => n.id === 'synth');
-  assert.ok(synth.ins[0].parameter, 'parameters first');
+  for (const w of legs.filter((x) => x.from.node.startsWith('@control:'))) assert.ok(w.corners[1].x === w.corners[0].x && w.corners[1].y > w.corners[0].y, `${w.label}: drops`);
 });

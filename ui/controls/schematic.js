@@ -1303,7 +1303,8 @@ export class SignalSchematic extends HTMLElement {
       const loose = node.kind !== 'instance' && pin.unmatched;
       const kind = ['pin', pin.shape, pin.parameter ? 'parameter' : '', pin.connected ? 'connected' : '', reason || loose ? 'unmatched' : '', this.board?.hiddenKind(pin.shape) ? 'kind-hidden' : ''].filter(Boolean).join(' ');
       // ADR 0047 §7: a package's leg, outside its edge.
-      if (node.kind === 'instance' && !isOpen && !anchors && text(9)) rect({ x: out ? pin.x : pin.x - 5, y: pin.y - 1.5, w: 5, h: 3 }, { class: 'leg' });
+      // A top pin's leg stands up from the chip's top edge (ADR 0047 §7), its name in its tooltip.
+      if (node.kind === 'instance' && !isOpen && !anchors && text(9)) rect(pin.side === 'top' ? { x: pin.x - 1.5, y: pin.y - 5, w: 3, h: 5 } : { x: out ? pin.x : pin.x - 5, y: pin.y - 1.5, w: 5, h: 3 }, { class: 'leg' });
       // Not `label`: that is the drawing helper above, which the pin labels below call.
       const tip = reason ? `${pin.name}: unmatched, ${reason}` : loose ? `${pin.name}: not wired inside yet` : pin.name;
       const data = { class: kind, 'data-address': portAddress, 'data-direction': pin.direction, 'data-label': tip, 'data-part': 'schematic' };
@@ -1311,7 +1312,7 @@ export class SignalSchematic extends HTMLElement {
       if (shape.circle) group.append(el('circle', { ...data, ...shape.circle }));
       else if (shape.polygon.length) group.append(el('polygon', { ...data, points: shape.polygon.map((p) => `${p.x},${p.y}`).join(' ') }));
       // A composite's and a frame's pins are labelled by the level's labels (drawLabels), in its units as well.
-      if (text(9) && !isOpen && !node.composite && node.kind === 'instance') {
+      if (text(9) && !isOpen && !node.composite && node.kind === 'instance' && pin.side !== 'top') {
         // Beside a face, cut to its column (its whole name in its tooltip).
         label({ x: pin.x + (out ? -6 : 6), y: pin.y + 3 }, 9, { class: 'pin-label', 'text-anchor': out ? 'end' : 'start' }, node.face ? fitText(pin.name, FACE_LABEL_CHARS) : pin.name);
       }
@@ -3036,9 +3037,11 @@ export class SignalSchematic extends HTMLElement {
       const open = !frame && this.drawn.open.has(instance);
       if (open && detail === 'summary') continue;
       const at = (p) => ({ name: p.name, x: p.x, y: p.y });
-      const box = { kind: frame ? node.kind : 'instance', id: node.id, name: node.name, rect: { x: node.x, y: node.y, w: node.w, h: node.h }, ins: node.ins.map(at), outs: node.outs.map(at), texts: new Map(), header: HEADER, outward: open };
+      // A chip's top pins (ADR 0047 §7) are named in their tooltips, not beside them: the labels lay out side pins.
+      const side = (p) => p.side !== 'top';
+      const box = { kind: frame ? node.kind : 'instance', id: node.id, name: node.name, rect: { x: node.x, y: node.y, w: node.w, h: node.h }, ins: node.ins.filter(side).map(at), outs: node.outs.map(at), texts: new Map(), header: HEADER, outward: open };
       // Its port groups (M2.13-2): a box's collapse with the level; a frame's (the same groups) are named as runs.
-      if (node.groups) {
+      if (node.groups && !node.topOrder) {
         box.groups = node.groups;
         box.collapsed = level.collapsed;
       } else if (frame) box.groups = this.frameGroups(level.level, node);

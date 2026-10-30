@@ -334,7 +334,11 @@ export function controlAnchor(node, name, out) {
   const list = out ? node.outs : node.ins;
   const i = Math.max(0, list.findIndex((p) => p.name === name));
   // A via (ADR 0047 §5): its rows VIA_ROW apart about its middle.
-  if (node.via) return { x: out ? node.x + node.w : node.x, y: node.y + node.h / 2 + (i - (list.length - 1) / 2) * VIA_ROW };
+  // Its pins on its bottom edge, VIA_ROW apart: a writer's outputs (its legs drop from there), a reader's inputs; a writer's inputs on its top.
+  if (node.via) {
+    const bottom = out || node.outs.length === 0;
+    return { x: node.x + 8 + i * VIA_ROW, y: bottom ? node.y + node.h : node.y, side: bottom ? 'bottom' : 'top' };
+  }
   const band = node.h - CONTROL_HEAD;
   const y = node.y + CONTROL_HEAD + band / 2 + (i - (list.length - 1) / 2) * CONTROL_ROW;
   return { x: out ? node.x + node.w : node.x, y };

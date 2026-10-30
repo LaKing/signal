@@ -23,10 +23,14 @@ export const KEEP = 2;
 /** The search keeps to the box around its ends grown by this (layout units), then to the whole grid. */
 export const REACH = 480;
 /** The search leans towards its goal by this much (a weighted A*: much faster, a route at most this much costlier). */
-export const GREED = 1.2;
+export const GREED = 2;
 
 /** A pin's approach is this far out of it: a box's edge line (KEEP + 2). */
 const APPROACH = KEEP + 2;
+/** A search gives up after this many states (a route that finds no way within them is a label): the layout's budget. */
+export const MAX_STATES = 4000;
+/** A route may cross blocked nodes this close to its own pins (its box's keep). */
+const PIN_REACH = KEEP + 6;
 const DX = [1, -1, 0, 0];
 const DY = [0, 0, 1, -1];
 
@@ -48,54 +52,64 @@ function lines(required, uniform, near) {
   return out.sort((a, b) => a - b);
 }
 
-/** A binary heap of `[key, seq, value]` by key then seq. */
+/** A binary heap of (key, seq, value) by key then seq: the pairs packed in typed arrays, grown as needed. */
 class Heap {
   constructor() {
-    this.k = [];
-    this.s = [];
-    this.v = [];
+    this.k = new Float64Array(1024);
+    this.v = new Int32Array(1024);
+    this.n = 0;
   }
   get size() {
-    return this.v.length;
-  }
-  less(i, j) {
-    return this.k[i] < this.k[j] || (this.k[i] === this.k[j] && this.s[i] < this.s[j]);
-  }
-  swap(i, j) {
-    [this.k[i], this.k[j]] = [this.k[j], this.k[i]];
-    [this.s[i], this.s[j]] = [this.s[j], this.s[i]];
-    [this.v[i], this.v[j]] = [this.v[j], this.v[i]];
+    return this.n;
   }
   push(key, seq, value) {
-    this.k.push(key);
-    this.s.push(seq);
-    this.v.push(value);
-    let i = this.v.length - 1;
+    if (this.n === this.k.length) {
+      const k = new Float64Array(this.n * 2);
+      k.set(this.k);
+      this.k = k;
+      const v = new Int32Array(this.n * 2);
+      v.set(this.v);
+      this.v = v;
+    }
+    // A key's ties are broken by the push order: the seq folded into the key's last bits would round; kept apart instead.
+    this.s ??= [];
+    const { k, v } = this;
+    let i = this.n++;
+    this.s[i] = seq;
     while (i > 0) {
       const p = (i - 1) >> 1;
-      if (!this.less(i, p)) break;
-      this.swap(i, p);
+      if (k[p] < key || (k[p] === key && this.s[p] < seq)) break;
+      k[i] = k[p];
+      v[i] = v[p];
+      this.s[i] = this.s[p];
       i = p;
     }
+    k[i] = key;
+    v[i] = value;
+    this.s[i] = seq;
   }
   pop() {
-    const top = this.v[0];
-    const last = this.v.length - 1;
-    this.swap(0, last);
-    this.k.pop();
-    this.s.pop();
-    this.v.pop();
+    const { k, v, s } = this;
+    const top = v[0];
+    const n = --this.n;
+    const key = k[n];
+    const val = v[n];
+    const seq = s[n];
     let i = 0;
     for (;;) {
       const l = 2 * i + 1;
+      if (l >= n) break;
       const r = l + 1;
-      let m = i;
-      if (l < this.v.length && this.less(l, m)) m = l;
-      if (r < this.v.length && this.less(r, m)) m = r;
-      if (m === i) break;
-      this.swap(i, m);
+      const m = r < n && (k[r] < k[l] || (k[r] === k[l] && s[r] < s[l])) ? r : l;
+      if (key < k[m] || (key === k[m] && seq < s[m])) break;
+      k[i] = k[m];
+      v[i] = v[m];
+      s[i] = s[m];
       i = m;
     }
+    k[i] = key;
+    v[i] = val;
+    s[i] = seq;
     return top;
   }
 }
@@ -144,7 +158,11 @@ export class Maze {
     this.boxes = boxes;
     for (const b of boxes) this.mark(b, 1);
     // Each pin's approach (the node just outside it) is its own: no other route runs through it.
-    this.approach = (p) => this.node({ x: p.x + (p.out ? APPROACH : -APPROACH), y: p.y });
+    this.approach = (p) => {
+      const side = p.side ?? (p.out ? 'right' : 'left');
+      const [dx, dy] = { right: [APPROACH, 0], left: [-APPROACH, 0], top: [0, -APPROACH], bottom: [0, APPROACH] }[side];
+      return this.node({ x: p.x + dx, y: p.y + dy });
+    };
     for (const p of pins) {
       const a = this.approach(p);
       if (a >= 0) this.blocked[a] += 1;
@@ -196,14 +214,20 @@ export class Maze {
 
   /** Box `b`'s nodes blocked (`d` 1) or freed again (`d` −1): those within KEEP of it. */
   mark(b, d) {
-    for (let i = 0; i < this.nx; i++) {
-      const x = this.xs[i];
-      if (x < b.x - KEEP || x > b.x + b.w + KEEP) continue;
-      for (let j = 0; j < this.ny; j++) {
-        const y = this.ys[j];
-        if (y < b.y - KEEP || y > b.y + b.h + KEEP) continue;
-        this.blocked[j * this.nx + i] += d;
+    const first = (list, v) => {
+      let lo = 0;
+      let hi = list.length;
+      while (lo < hi) {
+        const m = (lo + hi) >> 1;
+        if (list[m] < v) lo = m + 1;
+        else hi = m;
       }
+      return lo;
+    };
+    const i1 = b.x + b.w + KEEP;
+    const j1 = b.y + b.h + KEEP;
+    for (let i = first(this.xs, b.x - KEEP); i < this.nx && this.xs[i] <= i1; i++) {
+      for (let j = first(this.ys, b.y - KEEP); j < this.ny && this.ys[j] <= j1; j++) this.blocked[j * this.nx + i] += d;
     }
   }
 
@@ -239,7 +263,7 @@ export class Maze {
    * leaving along +x to `goal` arriving along +x, the boxes `own` (its own
    * control and pad) passable; its corners, taken, or null.
    */
-  route(start, goal, net, { bus = null, own = [], share = [] } = {}) {
+  route(start, goal, net, { bus = null, own = [], share = [], from = 'right', into = 'left' } = {}) {
     const s = this.node(start);
     const t = this.node(goal);
     if (s < 0 || t < 0) return null;
@@ -247,11 +271,15 @@ export class Maze {
     // The nets at its own pins (a wire into the parameter it sets as well): it may join them there.
     this.alsoShare = new Set(share.filter((n) => this.nets.has(n)).map((n) => this.nets.get(n)));
     for (const b of own) this.mark(b, -1);
-    const ways = [this.approach({ ...start, out: true }), this.approach({ ...goal, out: false })].filter((a) => a >= 0);
+    const ways = [this.approach({ ...start, side: from }), this.approach({ ...goal, side: into })].filter((a) => a >= 0);
     for (const a of ways) this.blocked[a] -= 1;
     const reach = { x0: Math.min(start.x, goal.x) - REACH, x1: Math.max(start.x, goal.x) + REACH, y0: Math.min(start.y, goal.y) - REACH, y1: Math.max(start.y, goal.y) + REACH };
-    let found = this.search(s, t, id, reach);
-    if (found === null) found = this.search(s, t, id, null);
+    // Leaving a pin on its side outward; arriving at one from outside it.
+    const leave = { right: 0, left: 1, bottom: 2, top: 3 }[from];
+    const arrive = { left: 0, right: 1, top: 2, bottom: 3 }[into];
+    let found = this.search(s, t, id, reach, leave, arrive);
+    // The whole board only when the box around its ends has no way at all (not when the search ran out).
+    if (found === null && !this.exhausted) found = this.search(s, t, id, null, leave, arrive);
     for (const b of own) this.mark(b, 1);
     for (const a of ways) this.blocked[a] += 1;
     this.alsoShare = null;
@@ -271,7 +299,7 @@ export class Maze {
     return clean;
   }
 
-  search(s, t, id, reach) {
+  search(s, t, id, reach, leave = 0, arrive = 0) {
     const { nx, xs, ys } = this;
     this.stamp++;
     const stamp = this.stamp;
@@ -279,19 +307,21 @@ export class Maze {
     const ty = ys[Math.floor(t / nx)];
     const heap = new Heap();
     let seq = 0;
-    const start = s * 4;
+    const start = s * 4 + leave;
     this.g[start] = 0;
     this.seen[start] = stamp;
     this.from[start] = -1;
     const h = (n) => Math.abs(xs[n % nx] - tx) + Math.abs(ys[Math.floor(n / nx)] - ty);
     heap.push(GREED * h(s), seq++, start);
-    while (heap.size) {
+    let budget = MAX_STATES;
+    this.exhausted = false;
+    while (heap.size && budget-- > 0) {
       const state = heap.pop();
       if (this.done[state] === stamp) continue;
       this.done[state] = stamp;
       const n = state >> 2;
       const d = state & 3;
-      if (n === t && d === 0) {
+      if (n === t && d === arrive) {
         const path = [];
         for (let st = state; st !== -1; st = this.from[st]) path.push({ n: st >> 2, d: st & 3 });
         return path.reverse();
@@ -302,13 +332,20 @@ export class Maze {
       for (let nd = 0; nd < 4; nd++) {
         if ((d ^ 1) === nd && d < 4) continue;
         // It leaves its start along +x.
-        if (n === s && nd !== 0) continue;
+        if (n === s && nd !== leave) continue;
         const ni = i + DX[nd];
         const nj = j + DY[nd];
         if (ni < 0 || nj < 0 || ni >= nx || nj >= this.ny) continue;
         const m = nj * nx + ni;
         if (reach && (xs[ni] < reach.x0 || xs[ni] > reach.x1 || ys[nj] < reach.y0 || ys[nj] > reach.y1)) continue;
-        if (this.blocked[m] > 0 && m !== t) continue;
+        // Blocked, but for the first steps straight out of its start pin and the last straight into its goal (its own box's edge).
+        if (this.blocked[m] > 0 && m !== t) {
+          const sx = xs[s % nx];
+          const sy = ys[Math.floor(s / nx)];
+          const outOfStart = nd === leave && d === leave && Math.abs(xs[ni] - sx) + Math.abs(ys[nj] - sy) <= PIN_REACH;
+          const intoGoal = nd === arrive && Math.abs(xs[ni] - tx) + Math.abs(ys[nj] - ty) <= PIN_REACH;
+          if (!outOfStart && !intoGoal) continue;
+        }
         // Along another net's segment: never (its bus's: cheaper).
         const edge = nd < 2 ? this.edgeH[j * nx + Math.min(i, ni)] : this.edgeV[Math.min(j, nj) * nx + i];
         if (!this.shares(id, edge)) continue;
@@ -329,6 +366,7 @@ export class Maze {
         heap.push(g + GREED * h(m), seq++, next);
       }
     }
+    this.exhausted = budget <= 0;
     return null;
   }
 }

@@ -197,7 +197,7 @@ export class SchematicBoard {
 
   /** What the top level's layout is asked with: `layout`'s `board`. */
   option() {
-    return { vias: this.plate.vias, obstacles: this.plate.obstacles, plate: this.plate.size };
+    return { vias: this.plate.vias, obstacles: this.plate.obstacles, plate: this.plate.size, cards: this.plate.cards };
   }
 
   /** What every level's drawing depends on of this state (its cache key). */

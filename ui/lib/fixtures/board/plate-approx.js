@@ -33,7 +33,7 @@ const BLOCKS = { 'piano-roll': 320, 'step-grid': 200 };
 
 const snap = (r) => ({ x: Math.round(r.x / PU) * PU, y: Math.round(r.y / PU) * PU, w: Math.max(PU, Math.round(r.w / PU) * PU), h: Math.max(PU, Math.round(r.h / PU) * PU) });
 
-/** `{plate, vias, obstacles}` of panel text `html`: `vias` a Map of `panelControls`' index → rectangle. */
+/** `{plate, vias, obstacles, cards}` of panel text `html`: `vias` a Map of `panelControls`' index → rectangle. */
 export function approximatePlate(html) {
   const text = String(html).replace(/<!--[\s\S]*?-->/g, '');
   const controls = panelControls(text);
@@ -44,6 +44,8 @@ export function approximatePlate(html) {
   let rowH = 0;
   let inCard = false;
   let bound = 0;
+  const cards = [];
+  let cardTop = 0;
   const newline = () => {
     if (rowH) y += rowH + GAP;
     x = PAD + PAD;
@@ -55,11 +57,13 @@ export function approximatePlate(html) {
       if (!close) {
         inCard = true;
         y += GAP;
+        cardTop = y;
         x = 2 * PAD;
         rowH = 0;
       } else {
         newline();
         y += PAD;
+        cards.push({ x: 0, y: cardTop, w: WIDTH, h: y - cardTop });
         inCard = false;
       }
       continue;
@@ -103,5 +107,5 @@ export function approximatePlate(html) {
     x += cell[0];
     rowH = Math.max(rowH, cell[1]);
   }
-  return { vias, obstacles, plate: { w: WIDTH, h: Math.ceil(y / PU) * PU }, controls };
+  return { vias, obstacles, cards, plate: { w: WIDTH, h: Math.ceil(y / PU) * PU }, controls };
 }
