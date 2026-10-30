@@ -17,6 +17,17 @@
 // and pans the box as on its title); on a control it is the control's.
 
 import { showWritten } from './panel-editor.js';
+// ADR 0047 §5: the plate (and a part) may hold any control: each is defined in this page, as on the panel's.
+import './fader.js';
+import './knob.js';
+import './xy.js';
+import './button.js';
+import './meter.js';
+import './scope.js';
+import './value.js';
+import './canvas.js';
+import './piano-roll.js';
+import './step-grid.js';
 import { layOutCards } from './plate.js';
 import { parsePlate } from '../lib/plate.js';
 import { FACE_LAYOUT_PX, estimateFace, faceAttribute, faceFit, facePlacement, faceWidth, lit, measuredNatural, overlapping, rootRules, stylesheets } from '../lib/schematic-face.js';

@@ -37,17 +37,43 @@ function project(name) {
   return { graph, controls, factsOf: (m) => exportFacts(graph.composites?.[m] ?? null) };
 }
 
-/** The stand-in plate: the panel's controls in rows of 12 knob cells (88 × 136 px), whole plate units. */
+/**
+ * The stand-in plate, as dense as a real one: the panel's controls in cards
+ * by the instance they bind (in the panel's order), each card rows of up to
+ * 7 knob cells of 88 × 128 px (the default panel's `CELLS`) under a 40 px
+ * heading, the cards packed on shelves 1280 px wide, 16 px apart; every
+ * rectangle in whole plate units.
+ */
 function standIn(controls) {
   const vias = new Map();
   const obstacles = [];
-  controls.forEach((c, i) => {
-    const r = { x: 16 + (i % 12) * 104, y: 48 + Math.floor(i / 12) * 160, w: 72, h: 112 };
-    vias.set(c.index, r);
-    obstacles.push(r);
-  });
-  const rows = Math.ceil(controls.length / 12);
-  return { vias, obstacles, plate: controls.length ? { w: 1280, h: 48 + rows * 160 } : null };
+  const cards = new Map();
+  for (const c of controls) {
+    const host = String(c.binds[0] ?? '').replace(/^\//, '').split(/[./]/)[0];
+    if (!cards.has(host)) cards.set(host, []);
+    cards.get(host).push(c);
+  }
+  let x = 0;
+  let y = 0;
+  let shelf = 0;
+  for (const list of cards.values()) {
+    const across = Math.min(7, list.length);
+    const w = across * 88 + 32;
+    const h = 40 + Math.ceil(list.length / 7) * 128 + 16;
+    if (x + w > 1280) {
+      x = 0;
+      y += shelf + 16;
+      shelf = 0;
+    }
+    list.forEach((c, i) => {
+      const r = { x: x + 16 + (i % 7) * 88 + 8, y: y + 40 + Math.floor(i / 7) * 128, w: 72, h: 112 };
+      vias.set(c.index, r);
+      obstacles.push(r);
+    });
+    x += w + 16;
+    shelf = Math.max(shelf, h);
+  }
+  return { vias, obstacles, plate: controls.length ? { w: 1280, h: y + shelf } : null };
 }
 
 function boardOf(name, arrange, positions = {}) {
@@ -130,8 +156,8 @@ test('anchoring (test 7): an anchored chip covers no via and lies near its vias;
   assert.ok(b.board.anchored.length >= 5, `anchored: ${b.board.anchored}`);
   for (const id of b.board.anchored) {
     const chip = b.nodes.find((n) => n.id === id);
-    for (const v of vias) assert.ok(!near(chip, v, CLEARANCE - 1), `${id} over a via`);
-    const own = vias.filter((v) => v.host === id);
+    for (const v of vias) assert.ok(!near(chip, v.control.rect, CLEARANCE - 1), `${id} over a control of the plate`);
+    const own = vias.filter((v) => v.host === id).map((v) => v.control.rect);
     const c = centroid(own);
     const d = Math.hypot(chip.x + chip.w / 2 - c.x, chip.y + chip.h / 2 - c.y);
     assert.ok(d < 1000, `${id} ${Math.round(d)} from its vias`);
@@ -199,4 +225,28 @@ test('buses (§6.4): zoomed out, a board’s pair of wires is one bus with its c
     assert.ok(turns <= 4, 'straight runs and a few rounded turns: no patch-cord curve');
   }
   for (const w of b.wires.filter((x) => x.labelled)) assert.ok(items.includes(w), 'a labelled wire on its own');
+});
+
+test('vias (§5): a small pad at its control’s middle; a chip’s legs drawn all or none; the stand-in plate’s board crosses little', () => {
+  const b = boardOf('studio', 'controls');
+  const vias = b.nodes.filter((n) => n.kind === 'control');
+  for (const v of vias) {
+    const r = v.control.rect;
+    assert.ok(v.w <= 16 && v.h < r.h, 'a pad, not the control');
+    assert.ok(Math.abs(v.x + v.w / 2 - (r.x + r.w / 2)) <= 1 && Math.abs(v.y + v.h / 2 - (r.y + r.h / 2)) <= 1, 'at its middle');
+  }
+  const legs = new Map();
+  for (const w of b.wires.filter((x) => x.kind === 'binding')) {
+    const chip = w.from.node.startsWith('@control:') ? w.to.node : w.from.node;
+    if (!legs.has(chip)) legs.set(chip, new Set());
+    legs.get(chip).add(w.labelled);
+  }
+  for (const [chip, kinds] of legs) assert.equal(kinds.size, 1, `${chip}: all or none`);
+  // A long leg is labelled at its chip only: its via names it on the plate.
+  const viaIds = new Set(vias.map((v) => v.id));
+  for (const l of b.board.labels) {
+    const w = b.wires.find((x) => x.id === l.wire);
+    if (w.kind === 'binding') assert.ok(!viaIds.has(l.side === 'out' ? w.from.node : w.to.node), 'no label at a via');
+  }
+  assert.ok(b.board.metrics.crossings <= 12, `few crossings: ${b.board.metrics.crossings}`);
 });

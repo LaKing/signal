@@ -897,11 +897,12 @@ export class SignalSchematic extends HTMLElement {
       const close = el('g');
       // A slot's inside opened: the slot's face at its top (2026-10-30), its area drawn here.
       const face = el('g');
-      // ADR 0047 §5–6: the plate's area and its cards' ghosts under the board, the nets drawn as labels over it.
+      // ADR 0047 §5–6: the plate's area under the board, its cards' ghosts over it (X-ray), the nets drawn as labels.
       const plate = el('g', { class: 'plate-layer' });
+      const ghosts = el('g', { class: 'plate-layer plate-ghosts' });
       const nets = el('g', { class: 'net-labels' });
-      drawn = { g: el('g'), plate, wires, links, overlay, face, nodes, labels, nets, close, closeKey: null, baked: null, wireCache: new Map(), nodeCache: new Map(), bundleCache: new Map(), shown: null, labelKey: null, sizes: [] };
-      drawn.g.append(plate, wires, links, overlay, drawn.face, nodes, labels, nets, close);
+      drawn = { g: el('g'), plate, ghosts, wires, links, overlay, face, nodes, labels, nets, close, closeKey: null, baked: null, wireCache: new Map(), nodeCache: new Map(), bundleCache: new Map(), shown: null, labelKey: null, sizes: [] };
+      drawn.g.append(plate, wires, links, overlay, drawn.face, nodes, ghosts, labels, nets, close);
       this.groups.set(level.path, drawn);
     }
     const transform = level.transform;
@@ -974,10 +975,11 @@ export class SignalSchematic extends HTMLElement {
       drawn.links.replaceChildren(...this.linkElements(level, baked));
       drawn.face.replaceChildren(...(level.layout.face ? [this.faceArea(baked, level.layout.face, `${level.path}#frame`, { path: level.path, root: level.path })] : []));
       if (level.layout.board && level.path === '') {
-        this.board?.drawPlate(drawn.plate, baked, bakedRect, bakedPoint, (...a) => this.faceArea(...a), text);
+        this.board?.drawPlate(drawn.plate, drawn.ghosts, baked, bakedRect, bakedPoint, (...a) => this.faceArea(...a), text);
         this.board?.drawLabels(drawn.nets, level.layout, baked, bakedPath, bakedPoint, text);
       } else {
         drawn.plate.replaceChildren();
+        drawn.ghosts.replaceChildren();
         drawn.nets.replaceChildren();
       }
       if (!sameItems([...drawn.nodes.children], nodes.elements)) drawn.nodes.replaceChildren(...nodes.elements);
@@ -1100,6 +1102,7 @@ export class SignalSchematic extends HTMLElement {
    * control that writes, an output pin per address at its right.
    */
   controlElement(level, node, baked, text) {
+    if (node.via) return this.viaElement(level, node, baked, text);
     const m = baked.m;
     const writer = node.outs.length > 0;
     const group = el('g', { class: `node control ${writer ? 'writer' : 'reader'} ${node.type}${node.via ? ' via' : ''}` });
@@ -1137,6 +1140,36 @@ export class SignalSchematic extends HTMLElement {
       if (several && text(7)) write({ x: pin.x + (out ? -4 : 4), y: pin.y + 2.5 }, 7, { class: 'pin-label', 'text-anchor': out ? 'end' : 'start' }, fitText(pin.label, 6));
     }
     this.updateControl(node.id);
+    return group;
+  }
+
+  /**
+   * A via (ADR 0047 §5): a plate control on the board, a small pad at its
+   * place under the live control, its pins on its sides and its name small
+   * above it. The control itself is the plate's (Plate and X-ray layers).
+   */
+  viaElement(level, node, baked, text) {
+    const m = baked.m;
+    const writer = node.outs.length > 0;
+    const group = el('g', { class: `node control via ${writer ? 'writer' : 'reader'} ${node.type}` });
+    group.dataset.address = node.binds[0]?.address ?? '';
+    group.dataset.label = node.name;
+    group.dataset.part = 'schematic';
+    group.dataset.control = node.id;
+    const box = bakedRect(baked, node);
+    if (box) group.append(el('rect', { class: 'box', rx: 3 * m, ...box }));
+    if (text(7)) {
+      const at = bakedPoint(baked, { x: node.x + node.w / 2, y: node.y - 2 });
+      group.append(el('text', { class: 'via-label', x: at.x, y: at.y, 'font-size': 6 * m, 'text-anchor': 'middle' }, fitText(node.name, 14)));
+    }
+    for (const pin of [...node.ins, ...node.outs]) {
+      const out = pin.direction === 'out';
+      const kind = ['pin', pin.shape, 'control-pin', pin.connected ? 'connected' : '', pin.role ? '' : 'unmatched'].filter(Boolean).join(' ');
+      const data = { class: kind, 'data-address': pin.address, 'data-direction': pin.direction, 'data-label': `${pin.address}${out ? ' (sets it)' : ' (reads it)'}`, 'data-part': 'schematic' };
+      const shape = bakedPin(baked, level.transform, this.viewport, pin, 2);
+      if (shape.circle) group.append(el('circle', { ...data, ...shape.circle }));
+      else if (shape.polygon.length) group.append(el('polygon', { ...data, points: shape.polygon.map((p) => `${p.x},${p.y}`).join(' ') }));
+    }
     return group;
   }
 

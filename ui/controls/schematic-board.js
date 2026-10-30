@@ -32,18 +32,21 @@ export const BOARD_CSS = `
 .kinds { display: inline-flex; gap: 2px; flex: none; }
 .kinds > button[aria-pressed="false"] { opacity: 0.45; text-decoration: line-through; }
 .measures { flex: none; color: var(--signal-muted, #8a93a3); font-variant-numeric: tabular-nums; white-space: nowrap; }
-/* The plate's cards as ghosts under the board (X-ray), and the plate's area. */
-.plate-ghosts { transition: opacity ${LIFT_MS}ms ease-out; }
-.plate-card { fill: var(--signal-panel, #1f232b); stroke: var(--signal-knob-edge, #3a414d); vector-effect: non-scaling-stroke; }
+/* The plate's cards as ghosts over the board (X-ray: the plate at a quarter of its opacity), and the plate's area under it. */
+.plate-ghosts { transition: opacity ${LIFT_MS}ms ease-out; pointer-events: none; }
+.plate-card { fill: color-mix(in srgb, var(--signal-fg, #d6dbe4) 30%, var(--signal-panel, #1f232b)); stroke: var(--signal-fg, #d6dbe4); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .plate-title { fill: var(--signal-fg, #d6dbe4); font-weight: 600; }
 svg.layer-xray .plate-ghosts { opacity: ${XRAY_OPACITY}; }
+.plate-layer .face-back { display: none; }
 svg.layer-board .plate-ghosts, svg.layer-plate .plate-ghosts { opacity: 0; }
 /* The plate: the board hidden under it. */
 svg > g > * { transition: opacity ${LIFT_MS}ms ease-out; }
 svg.layer-plate > g > :not(.plate-layer) { opacity: 0; pointer-events: none; }
 @media (prefers-reduced-motion: reduce) { .plate-ghosts, svg > g > * { transition: none; } }
-/* A via: the plate's control on the board, a pad under the control drawn over it. */
-.control.via > .box { fill: color-mix(in srgb, var(--signal-effective, #ffb74d) 6%, transparent); stroke-dasharray: 3 2; }
+/* A via: the plate's control on the board, a small pad at its place (the control itself is the plate's). */
+.control.via > .box { fill: color-mix(in srgb, var(--signal-effective, #ffb74d) 35%, var(--signal-bg, #16181d)); stroke-width: 1; }
+.control.via.reader > .box { fill: color-mix(in srgb, var(--signal-meter-rms, #3ecf8e) 35%, var(--signal-bg, #16181d)); }
+.via-label { fill: var(--signal-muted, #8a93a3); }
 /* §6.3: a net drawn as labels. */
 .net-label { fill: var(--signal-fg, #d6dbe4); cursor: pointer; }
 .net-label:hover { text-decoration: underline; }
@@ -268,13 +271,11 @@ export class SchematicBoard {
     const { vias, obstacles, key } = plateVias(controls, (c) => found.get(c.index) ?? null, others);
     const size = plateSize(face.layoutWidth || box.width / scale, face.panel.offsetHeight || box.height / scale);
     const cards = [];
-    for (const grid of face.panel.children ?? []) {
-      for (const card of grid.children ?? []) {
-        const r = rel(card);
-        if (!(r.w > 0 && r.h > 0)) continue;
-        const title = card.querySelector?.('h1, h2, h3')?.textContent?.trim() ?? '';
-        cards.push({ ...r, title });
-      }
+    for (const card of face.panel.querySelectorAll?.('.signal-cards > *') ?? []) {
+      const r = rel(card);
+      if (!(r.w > 0 && r.h > 0)) continue;
+      const title = card.querySelector?.('h1, h2, h3')?.textContent?.trim() ?? '';
+      cards.push({ ...r, title });
     }
     // The cards' ghosts are drawn with the board: a card moved or renamed draws it again.
     const ghosts = cards.map((c) => `${Math.round(c.x)},${Math.round(c.y)},${Math.round(c.w)},${Math.round(c.h)},${c.title}`).join(';');
@@ -291,10 +292,15 @@ export class SchematicBoard {
   }
 
   /** The plate's area and its cards' ghosts for the top level's group `group` (in the drawing's baked units). */
-  drawPlate(group, baked, bakedRect, bakedPoint, faceArea, text) {
+  drawPlate(group, ghosts, baked, bakedRect, bakedPoint, faceArea, text) {
     const size = this.plate.size;
     const parts = [];
-    const ghosts = el('g', { class: 'plate-ghosts' });
+    ghosts.replaceChildren();
+    // A project without a panel file has no plate (nothing read, nothing said).
+    if (!this.host.panelText) {
+      group.replaceChildren();
+      return;
+    }
     for (const card of this.plate.cards) {
       const r = bakedRect(baked, card);
       if (r) ghosts.append(el('rect', { class: 'plate-card', rx: 8 * baked.m, ...r }));
@@ -303,7 +309,6 @@ export class SchematicBoard {
         ghosts.append(el('text', { class: 'plate-title', x: at.x, y: at.y, 'font-size': 13 * baked.m }, card.title));
       }
     }
-    parts.push(ghosts);
     parts.push(faceArea(baked, { x: 0, y: 0, w: size?.w ?? 1280, h: size?.h ?? 800, file: PLATE_FILE, natural: { w: size?.w ?? 1280 } }, PLATE_FACE, { path: '', root: '' }));
     group.replaceChildren(...parts);
   }

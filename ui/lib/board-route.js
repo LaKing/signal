@@ -261,7 +261,7 @@ export function routeWires(boxes, wires, { nameOf = (w) => w.net } = {}) {
       result[i] = { corners: zCorners(w.a, w.b, { feedback: w.feedback, under: w.under }), labelled: false };
       continue;
     }
-    if (labelledNet(nets.get(w.net))) {
+    if (w.long || labelledNet(nets.get(w.net))) {
       result[i] = { labelled: true };
       continue;
     }
@@ -287,8 +287,10 @@ export function routeWires(boxes, wires, { nameOf = (w) => w.net } = {}) {
     r.whole = simplify(zCorners(w.a, w.b, { feedback: w.feedback, under: w.under }));
     r.corners = [{ x: w.b.x - LABEL_STUB, y: w.b.y }, w.b];
     const text = nameOf(w);
-    labels.push({ net: w.net, text: `◂ ${text}`, side: 'in', at: { x: w.b.x - LABEL_STUB, y: w.b.y }, corners: r.corners, wire: w.id });
-    if (!sourced.has(w.net)) {
+    const at = w.labelAt ?? 'both';
+    if (at !== 'out') labels.push({ net: w.net, text: `◂ ${text}`, side: 'in', at: { x: w.b.x - LABEL_STUB, y: w.b.y }, corners: r.corners, wire: w.id });
+    else r.corners = [w.a, { x: w.a.x + LABEL_STUB, y: w.a.y }];
+    if (at !== 'in' && !sourced.has(w.net)) {
       sourced.add(w.net);
       const end = { x: w.a.x + LABEL_STUB, y: w.a.y };
       labels.push({ net: w.net, text: `▸ ${text}`, side: 'out', at: end, corners: [w.a, end], wire: w.id });

@@ -36,6 +36,9 @@ export const CONTROL_MIN_H = 48;
 /** Its label's band at the top, before the pins' first row. */
 export const CONTROL_HEAD = 14;
 export const CONTROL_ROW = 16;
+/** A via (ADR 0047 §5) is this wide, its pins this far apart. */
+export const VIA_W = 16;
+export const VIA_ROW = 8;
 /** Between a control column and its host. */
 export const CONTROL_GAP = 28;
 /** Between two controls of a column. */
@@ -330,6 +333,8 @@ export function controlPads(nodes, byId) {
 export function controlAnchor(node, name, out) {
   const list = out ? node.outs : node.ins;
   const i = Math.max(0, list.findIndex((p) => p.name === name));
+  // A via (ADR 0047 §5): its rows VIA_ROW apart about its middle.
+  if (node.via) return { x: out ? node.x + node.w : node.x, y: node.y + node.h / 2 + (i - (list.length - 1) / 2) * VIA_ROW };
   const band = node.h - CONTROL_HEAD;
   const y = node.y + CONTROL_HEAD + band / 2 + (i - (list.length - 1) / 2) * CONTROL_ROW;
   return { x: out ? node.x + node.w : node.x, y };

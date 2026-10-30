@@ -54,7 +54,8 @@ export class DragFollow {
       const byName = new Map((layout?.nodes ?? []).filter((n) => n.kind === 'instance').map((n) => [n.name, n]));
       const names = new Set(this.names);
       // A box's panel controls (ui/lib/schematic-controls.js) ride with it.
-      const riders = (layout?.nodes ?? []).filter((n) => n.kind === 'control' && names.has(n.host));
+      // A via (ADR 0047 §5) stays where its control is on the plate.
+      const riders = (layout?.nodes ?? []).filter((n) => n.kind === 'control' && !n.via && names.has(n.host));
       this.group = { layout, node: byName.get(this.name), nodes: [...this.names.map((name) => byName.get(name)).filter(Boolean), ...riders], names };
       this.ids = new Set(this.group.nodes.map((n) => n.id));
       this.labelMatches = new WeakMap();

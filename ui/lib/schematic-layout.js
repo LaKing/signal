@@ -12,7 +12,7 @@
 import { insideOf, slotLabel, slotOf } from './slot.js';
 import { wireGeometry } from './schematic-wire.js';
 import { exportFacts, orderedPins, portGroups } from './schematic-groups.js';
-import { CONTROL_HEAD, CONTROL_ROW, controlAnchor, controlEdges, controlNodes, controlPads } from './schematic-controls.js';
+import { VIA_ROW, VIA_W, controlAnchor, controlEdges, controlNodes, controlPads } from './schematic-controls.js';
 import { frameFace, placeFace } from './schematic-face.js';
 import { balance, placeAnchored, sugiyama } from './board-layout.js';
 import { orthGeometry, routeWires, zCorners } from './board-route.js';
@@ -477,8 +477,10 @@ function pinFraction(node, name, out) {
 
 const rectOf = (n) => ({ x: n.x, y: n.y, w: n.w, h: n.h });
 
-/** A via is at least this wide (layout units): three plate units. */
-const VIA_MIN_W = 24;
+/** A control's leg (ADR 0047 §5) is drawn as a wire up to this long (layout units, across plus down), else as a label. */
+export const LEG_MAX = 240;
+/** A wire between two chips of the plate's area (anchored, ADR 0047 §5) is drawn up to this long, else as labels: across the plate's controls it would cross them all. */
+export const PLATE_WIRE_MAX = 400;
 /** Free chips start this far below the plate's area. */
 export const BOARD_GAP = 4 * GAP_Y;
 
@@ -511,18 +513,20 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
   const vias = board.vias instanceof Map ? board.vias : new Map();
   // The vias: each control of the plate where it is, as tall as its pins need.
   const panel = (controls?.length ? controlNodes(controls.filter((c) => !c.part), byId, pinOffset) : []).filter((c) => vias.has(c.control.index));
+  // A via is a small pad at its control's middle; the control's whole rectangle stays an obstacle.
   for (const c of panel) {
     const v = vias.get(c.control.index);
     const rows = Math.max(1, c.ins.length, c.outs.length);
-    c.x = v.x;
-    c.y = v.y;
-    c.w = Math.max(v.w, VIA_MIN_W);
-    c.h = Math.max(v.h, CONTROL_HEAD + CONTROL_ROW * rows);
+    c.w = VIA_W;
+    c.h = VIA_ROW * rows + 4;
+    c.x = Math.round(v.x + v.w / 2 - c.w / 2);
+    c.y = Math.round(v.y + v.h / 2 - c.h / 2);
+    c.control = { ...c.control, rect: v };
     c.via = true;
     c.pinned = true;
     c.layer = null;
   }
-  const taken = [...(board.obstacles ?? []), ...panel.map(rectOf)];
+  const taken = [...(board.obstacles ?? []), ...panel.map((c) => c.control.rect)];
   for (const node of nodes) {
     const stored = storedAt(node, positions);
     node.pinned = Boolean(stored);
@@ -546,7 +550,7 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
         anchored.add(node.id);
         continue;
       }
-      const at = placeAnchored(node, hosts.get(node.id).map(rectOf), taken);
+      const at = placeAnchored(node, hosts.get(node.id).map((c) => c.control.rect), taken);
       if (!at) continue;
       node.x = at.x;
       node.y = at.y;
@@ -596,7 +600,7 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
   for (const node of nodes) if (anchored.has(node.id)) node.layer = null;
   // What does not fit where the layout put it (a stored box there) moves down past it, as `layout` does.
   const placed = nodes.filter((n) => n.pinned || anchored.has(n.id)).map(rectOf);
-  placed.push(...panel.map(rectOf));
+  placed.push(...panel.map((c) => c.control.rect));
   const moved = new Set();
   for (const row of lay.rows) {
     for (const id of row) {
@@ -647,12 +651,19 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
       under: feedback ? laneY(bottom, lane) : null,
       lane: feedback ? lane : 0,
       span,
-      crossesPlate: plateArea && inPlate(e.from.node) !== inPlate(e.to.node),
+      crossesPlate: e.kind !== 'binding' && plateArea && inPlate(e.from.node) !== inPlate(e.to.node),
+      // A control's leg longer than LEG_MAX is a label at its chip's pin (its via names it on the plate).
+      long: Math.abs(b.x - a.x) + Math.abs(b.y - a.y) > (e.kind === 'binding' ? LEG_MAX : inPlate(e.from.node) && inPlate(e.to.node) ? PLATE_WIRE_MAX : Infinity),
+      labelAt: e.kind !== 'binding' ? 'both' : byId.get(e.from.node)?.kind === 'control' ? 'in' : 'out',
       stations: straight ? chain.map((d) => ({ x0: lay.columns[d.layer].x, x1: lay.columns[d.layer].x + lay.columns[d.layer].w, y: top + d.y })) : null,
       overVias: e.kind === 'binding',
       edge: e,
     };
   });
+  // A chip's legs are drawn all or none: one long leg makes them all labels (a mix crosses itself).
+  const chipOf = (w) => (byId.get(w.from)?.kind === 'control' ? w.to : w.from);
+  const longChips = new Set(asked.filter((w) => w.edge.kind === 'binding' && w.long).map(chipOf));
+  for (const w of asked) if (w.edge.kind === 'binding' && longChips.has(chipOf(w))) w.long = true;
   const boxes = nodes.map(({ id, x, y, w, h, via }) => ({ id, x, y, w, h, via: Boolean(via) }));
   // A label says the net's source as written; a control's leg, the control.
   const nameOf = (w) => {
