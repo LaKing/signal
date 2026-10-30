@@ -378,10 +378,10 @@ export class SchematicBoard {
       const tone = tones.size === 1 ? [...tones][0] : 'mixed';
       const rect = bakedRect(baked, r.band);
       if (rect) parts.push(el('rect', { class: `ribbon ${tone}`, rx: 2 * baked.m, 'data-ribbon': String(r.id), ...rect }));
-      if (text(8)) {
-        const vertical = r.axis === 'v';
-        const at = bakedPoint(baked, vertical ? { x: r.at.x - 3, y: r.at.y + 3 } : { x: r.at.x, y: r.at.y - 3 });
-        const t = el('text', { class: `ribbon-label ${tone}`, x: at.x, y: at.y, 'font-size': 8 * baked.m, 'text-anchor': vertical ? 'end' : 'middle', 'data-ribbon': String(r.id) }, r.label);
+      // Its label where the layout placed it, off every box and label (`placeRibbonLabels`); none where no place was free.
+      if (r.text && text(8)) {
+        const at = bakedPoint(baked, r.text);
+        const t = el('text', { class: `ribbon-label ${tone}`, x: at.x, y: at.y, 'font-size': 8 * baked.m, 'text-anchor': r.text.anchor, 'data-ribbon': String(r.id) }, r.label);
         t.append(el('title', {}, `A ribbon of ${r.members.length} wires: click one where it leaves the ribbon, or in it zoomed in, to trace it through`));
         labels.append(t);
       }

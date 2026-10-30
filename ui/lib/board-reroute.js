@@ -106,7 +106,7 @@ export function rerouteMoved(old, moves) {
   });
   // A kept wire keeps its route; its drawn geometry follows its ribbon, made again (`boardRibbons`).
   const labels = (old.board?.labels ?? []).filter((l) => !redo.has(l.wire)).map((l) => ({ ...l }));
-  const ribbons = boardRibbons(nodes, wires, obstacles);
+  const ribbons = boardRibbons(nodes, wires, obstacles, labels);
   spreadLabels(labels);
   const metrics = boardMeasures(wires, labels, ribbons);
   let bounds2 = old.bounds;

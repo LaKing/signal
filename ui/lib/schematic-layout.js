@@ -16,7 +16,7 @@ import { VIA_ROW, VIA_W, controlAnchor, controlEdges, controlNodes, controlPads 
 import { frameFace, placeFace } from './schematic-face.js';
 import { CLEARANCE, PU, STUB, TRACK, balance, near, placeNear, ring, sugiyama } from './board-layout.js';
 import { Maze, STEP } from './board-maze.js';
-import { formRibbons } from './board-ribbon.js';
+import { formRibbons, placeRibbonLabels } from './board-ribbon.js';
 import { stretchCorners } from './board-stretch.js';
 import { LABEL_STUB, NET_DESTS, measure, orthGeometry, routeWires, simplify, spreadLabels, zCorners } from './board-route.js';
 
@@ -1116,7 +1116,7 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
 function finishBoard(nodes, wires, labels, bottom, board, crossings, { obstacles = [], area = null } = {}) {
   // ADR 0047 phase 4: a wire that found no way within the layout's budget is searched for again, around everything drawn; a net label only where none exists.
   if (board.die ? WIRES_NOT_LABELS.die : WIRES_NOT_LABELS.board) rescueLabelled(nodes, wires, labels, obstacles, area);
-  const ribbons = boardRibbons(nodes, wires, obstacles);
+  const ribbons = boardRibbons(nodes, wires, obstacles, labels);
   spreadLabels(labels);
   const metrics = boardMeasures(wires, labels, ribbons);
   const ends = { outs: new Set(wires.map((w) => `${w.from.node}\n${w.from.port}`)), ins: new Set(wires.map((w) => `${w.to.node}\n${w.to.port}`)) };
@@ -1141,13 +1141,16 @@ function finishBoard(nodes, wires, labels, bottom, board, crossings, { obstacles
  * drawn geometry set (`display`, `curve`, `points`, `box`), its route
  * (`corners`) unchanged. Returns the ribbons.
  */
-export function boardRibbons(nodes, wires, obstacles = []) {
+export function boardRibbons(nodes, wires, obstacles = [], labels = []) {
   const boxes = [...nodes.filter((n) => n.w > 0 && n.h > 0), ...obstacles];
   const { ribbons, display } = formRibbons(
     wires.filter((w) => !w.labelled).map((w) => ({ id: w.id, corners: w.corners, net: mazeNet(w).net, wire: w })),
     boxes,
     { nameOf: (m) => (m.wire.kind === 'binding' ? String(m.wire.label).split(' ⇢ ')[0] : m.wire.from.port), endsOf: (m) => [m.wire.from.node, m.wire.to.node] },
   );
+  // Their labels off every box, a via's name and the net labels (`placeRibbonLabels`).
+  const texts = [...boxes.map((b) => ({ x: b.x - 2, y: b.y - (b.via ? 10 : 2), w: b.w + 4, h: b.h + (b.via ? 12 : 4) })), ...labels.map((l) => ({ x: l.side === 'in' ? l.at.x - CHAR * l.text.length : l.at.x, y: l.at.y - 9, w: CHAR * l.text.length, h: 12 }))];
+  placeRibbonLabels(ribbons, texts);
   for (const w of wires) {
     const shown = display.get(w.id);
     if (shown) {

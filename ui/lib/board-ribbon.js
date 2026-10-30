@@ -22,6 +22,8 @@ export const RIBBON_GAP = 16;
 export const RIBBON_RUN = 48;
 /** Its members are packed this far apart inside it. */
 export const RIBBON_PITCH = 3;
+/** A ribbon's stretch (its band and breakouts) keeps this far from every box (ADR 0047 phase 4: no band at a box's pins). */
+export const RIBBON_CLEAR = 32;
 /** Its band reaches this far past its outer members. */
 export const RIBBON_PAD = 2;
 
@@ -137,8 +139,9 @@ export function formRibbons(wires, boxes = [], { nameOf = () => '', endsOf = nul
       const clear =
         !ms.some((m) => m.segs.some((s) => used.has(`${s.w.id}:${s.k}`))) &&
         !boxes.some((b) => {
+          // Its whole stretch, breakouts included, keeps RIBBON_CLEAR from every box: a band starts only once its members have left a box's edge.
           const r = axis === 'h' ? { u0: b.x, u1: b.x + b.w, v0: b.y, v1: b.y + b.h } : { u0: b.y, u1: b.y + b.h, v0: b.x, v1: b.x + b.w };
-          return r.u0 < hi && r.u1 > lo && r.v0 <= v1 + RIBBON_PAD && r.v1 >= v0 - RIBBON_PAD;
+          return r.u0 - RIBBON_CLEAR < hi && r.u1 + RIBBON_CLEAR > lo && r.v0 - RIBBON_CLEAR <= v1 && r.v1 + RIBBON_CLEAR >= v0;
         }) &&
         !segs.some((s) => !ms.some((m) => m.segs.includes(s)) && s.at >= v0 && s.at <= v1 && s.lo < hi && s.hi > lo) &&
         !across.some((a) => nets.has(a.net) && a.u > lo && a.u < hi && a.ends.some((e) => e >= v0 && e <= v1));
@@ -209,4 +212,56 @@ function dedupe(points) {
     out.push({ x: p.x, y: p.y });
   }
   return out;
+}
+
+/** A ribbon's label: its font size (layout units), about this wide per character, this tall. */
+export const RIBBON_TEXT = 8;
+const RIBBON_CHAR = 4.8;
+const RIBBON_LINE = 9;
+
+/** The rectangle of a label `text` at `at` (`{x, y, anchor}`, its baseline's start, middle or end). */
+export function ribbonLabelRect(text, at) {
+  const w = text.length * RIBBON_CHAR;
+  const x = at.anchor === 'end' ? at.x - w : at.anchor === 'middle' ? at.x - w / 2 : at.x;
+  return { x, y: at.y - RIBBON_LINE + 2, w, h: RIBBON_LINE };
+}
+
+/**
+ * The ribbons' labels placed (ADR 0047 phase 4; the coordinator's check of
+ * 3f32ab2: "t ×7" over a pin's name): one per set of members (a ribbon
+ * whose members an earlier labelled one holds has none), at the first of
+ * a few places along its band (above or beside its middle, then its
+ * quarters) whose text overlaps no rectangle of `texts` (boxes, a via's
+ * name, net labels) nor a label placed before; else none. Sets each
+ * ribbon's `text` (`{x, y, anchor}` or null). Deterministic: the ribbons'
+ * order.
+ */
+export function placeRibbonLabels(ribbons, texts = []) {
+  const placed = [];
+  const hit = (r) => [...texts, ...placed].some((o) => r.x < o.x + o.w && o.x < r.x + r.w && r.y < o.y + o.h && o.y < r.y + r.h);
+  const labelled = [];
+  for (const r of ribbons) {
+    r.text = null;
+    const members = new Set(r.members.map((m) => m.net));
+    if (labelled.some((set) => [...members].every((n) => set.has(n)))) continue;
+    const b = r.band;
+    const spots = [];
+    if (r.axis === 'h') {
+      for (const f of [0.5, 0.25, 0.75]) {
+        const x = b.x + b.w * f;
+        spots.push({ x, y: b.y - 3, anchor: 'middle' }, { x, y: b.y + b.h + RIBBON_LINE - 1, anchor: 'middle' });
+      }
+    } else {
+      for (const f of [0.5, 0.25, 0.75]) {
+        const y = b.y + b.h * f + 3;
+        spots.push({ x: b.x + b.w + 3, y, anchor: 'start' }, { x: b.x - 3, y, anchor: 'end' });
+      }
+    }
+    const at = spots.find((s) => !hit(ribbonLabelRect(r.label, s)));
+    if (!at) continue;
+    r.text = at;
+    placed.push(ribbonLabelRect(r.label, at));
+    labelled.push(members);
+  }
+  return ribbons;
 }

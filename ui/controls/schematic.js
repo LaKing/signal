@@ -162,7 +162,7 @@ svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; t
 .glyph-thin { stroke: var(--signal-track, #2a2f38); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .glyph-line { fill: none; stroke: var(--signal-meter-rms, #3ecf8e); stroke-width: 1.2; vector-effect: non-scaling-stroke; }
 /* A control's binding to what it sets or reads: a dotted line, not a connection of the project (never hit). */
-path.wire.binding, path.wire.leg { stroke: var(--signal-effective, #ffb74d); stroke-dasharray: 1 3; stroke-linecap: round; opacity: 0.85; pointer-events: none; }
+path.wire.binding, path.wire.tone-leg { stroke: var(--signal-effective, #ffb74d); stroke-dasharray: 1 3; stroke-linecap: round; opacity: 0.85; pointer-events: none; }
 /* The target of an open context menu. */
 .hover > .box { stroke: var(--signal-fg, #d6dbe4); stroke-width: 2; }
 /* The selection (2026-10-17): strokes and a glow only, nothing moves. A box: a thick focus-coloured border with a halo. */
@@ -179,8 +179,8 @@ path.wire.binding, path.wire.leg { stroke: var(--signal-effective, #ffb74d); str
 .pin.vector.connected { fill: var(--signal-effective, #ffb74d); }
 .pin.events.connected { fill: var(--signal-meter-rms, #3ecf8e); }
 /* ADR 0047 phase 4: a pin a plate control's leg reaches, and a die's interface pin it carries on to, in the leg's colour. */
-.pin.leg { stroke: var(--signal-effective, #ffb74d); }
-.pin.leg.connected { fill: var(--signal-effective, #ffb74d); }
+.pin.tone-leg { stroke: var(--signal-effective, #ffb74d); }
+.pin.tone-leg.connected { fill: var(--signal-effective, #ffb74d); }
 /* ADR 0037 §7: a slot's box (its interface's pins, loaded or not); an empty one hollow, its outline dashed; an unmatched port's pin hollow. */
 .slot > .box { stroke: var(--signal-accent, #4fc3f7); stroke-width: 1.5; }
 .slot.empty > .box { fill: none; stroke: var(--signal-muted, #8a93a3); stroke-dasharray: 5 3; }
@@ -1077,7 +1077,7 @@ export class SignalSchematic extends HTMLElement {
   /** The class of `wire`'s tone at `level` (ADR 0047 phase 4): its net's colour, a die's interface wire its package pin's. */
   toneClass(level, wire) {
     const tone = level.tones?.get(wire.id) ?? (wire.kind === 'binding' ? 'binding' : wire.shape);
-    return tone === 'binding' && wire.kind !== 'binding' ? 'leg' : tone;
+    return tone === 'binding' && wire.kind !== 'binding' ? 'tone-leg' : tone;
   }
 
   /** `wire`'s geometry at `level`: a board's with its corners rounded to CORNER_PX on screen (`level.corner`). */
@@ -1226,7 +1226,7 @@ export class SignalSchematic extends HTMLElement {
       const out = pin.direction === 'out';
       // ADR 0047 phase 4: in its leg's tone.
       const tone = level.pinTones?.get(pinKey(node.id, out, pin.name));
-      const kind = ['pin', tone === 'binding' ? 'leg' : (tone ?? pin.shape), 'control-pin', pin.connected ? 'connected' : '', pin.role ? '' : 'unmatched'].filter(Boolean).join(' ');
+      const kind = ['pin', tone === 'binding' ? 'tone-leg' : (tone ?? pin.shape), 'control-pin', pin.connected ? 'connected' : '', pin.role ? '' : 'unmatched'].filter(Boolean).join(' ');
       const data = { class: kind, 'data-address': pin.address, 'data-direction': pin.direction, 'data-label': `${pin.address}${out ? ' (sets it)' : ' (reads it)'}`, 'data-part': 'schematic' };
       const shape = bakedPin(baked, level.transform, this.viewport, pin, 2);
       if (shape.circle) group.append(el('circle', { ...data, ...shape.circle }));
@@ -1360,7 +1360,7 @@ export class SignalSchematic extends HTMLElement {
       const loose = node.kind !== 'instance' && pin.unmatched;
       // ADR 0047 phase 4: a pin in its net's tone (a parameter a knob's leg sets amber, outside and inside its die alike).
       const tone = level.pinTones?.get(pinKey(node.id, out, pin.name));
-      const toneClass = tone === 'binding' ? 'leg' : (tone ?? pin.shape);
+      const toneClass = tone === 'binding' ? 'tone-leg' : (tone ?? pin.shape);
       const kind = ['pin', toneClass, pin.parameter ? 'parameter' : '', pin.connected ? 'connected' : '', reason || loose ? 'unmatched' : '', this.board?.hiddenKind(pin.shape) ? 'kind-hidden' : ''].filter(Boolean).join(' ');
       // ADR 0047 §7: a package's leg, outside its edge.
       // A top pin's leg stands up from the chip's top edge (ADR 0047 §7), its name in its tooltip.

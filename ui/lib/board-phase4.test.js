@@ -16,7 +16,7 @@ import { toScreen } from './schematic-view.js';
 import { MIN_PORT_PX, hitTest } from './schematic-hit.js';
 import { CORNER } from './board-route.js';
 import { CORNER_PX, cornerAt, viaRect } from './board-view.js';
-import { RIBBON_MIN, formRibbons, ribbonName } from './board-ribbon.js';
+import { RIBBON_CLEAR, RIBBON_MIN, formRibbons, ribbonLabelRect, ribbonName } from './board-ribbon.js';
 import { rerouteMoved } from './board-reroute.js';
 import { stretchCorners } from './board-stretch.js';
 import { relayout, structureKey } from './board-memo.js';
@@ -290,4 +290,57 @@ test('the same structure laid out again (a parameter’s value, the selection) k
 
 test('a via measured a fraction off a half unit snaps the same way (a plate measured again gives the same board)', () => {
   assert.deepEqual(viaRect({ x: 3.99999, y: 12.00001, w: 88.00002, h: 119.99998 }), viaRect({ x: 4.00001, y: 11.99999, w: 87.99998, h: 120.00002 }));
+});
+
+test('nothing a wire is drawn with fills it: no rule of the schematic’s or the board’s CSS fills a class a wire’s path carries (the coordinator’s check of 3f32ab2: a `leg` tone took the pins’ legs’ fill)', () => {
+  const css = `${read('ui/controls/schematic.js')}\n${read('ui/controls/schematic-board.js')}`;
+  const wireClasses = new Set(['wire', 'signal', 'events', 'vector', 'binding', 'tone-leg', 'dashed', 'crossing', 'raised', 'hover', 'selected', 'traced', 'link']);
+  // Every class a wire's tone can give, at every level of a scene zoomed into the synth.
+  const of = studio();
+  const synth = of('').nodes.find((n) => n.name === 'synth');
+  const drawn = scene({ layoutOf: of, view: viewAt({ x: synth.x + synth.w / 2, y: synth.y + synth.h / 2 }, 2), viewport, pinned: new Set(['/synth']) });
+  sceneTones(drawn.levels);
+  for (const entry of drawn.levels) {
+    for (const w of entry.layout.wires) {
+      const tone = entry.tones.get(w.id);
+      const cls = tone === 'binding' && w.kind !== 'binding' ? 'tone-leg' : tone;
+      assert.ok(wireClasses.has(cls), `${entry.path} ${w.id}: ${cls}`);
+    }
+  }
+  for (const m of css.matchAll(/(^|\n)([^{}\n]+)\{([^{}]*)\}/g)) {
+    const fill = /(^|;)\s*fill:\s*([^;]+)/.exec(m[3])?.[2]?.trim();
+    if (!fill || fill === 'none') continue;
+    for (const sel of m[2].split(',').map((x) => x.trim())) {
+      const bare = /^(?:path)?\.([a-z-]+)$/.exec(sel);
+      assert.ok(!bare || !wireClasses.has(bare[1]), `“${sel} { fill: ${fill} }” would fill a wire`);
+    }
+  }
+});
+
+test('a ribbon’s label overlaps no box, no via’s name, no net label and no other ribbon’s label; one label per set of members; no band within RIBBON_CLEAR of a box (the coordinator’s check of 3f32ab2)', () => {
+  const of = studio();
+  const levels = ['', ...Object.keys(STUDIO.composites)].map((l) => [l, of(l)]);
+  let labelled = 0;
+  for (const [name, lay] of levels) {
+    const boxes = lay.nodes.filter((n) => n.w > 0 && n.h > 0).map((b) => ({ x: b.x, y: b.y - (b.via ? 8 : 0), w: b.w, h: b.h + (b.via ? 8 : 0) }));
+    const texts = lay.board.labels.map((l) => ({ x: l.side === 'in' ? l.at.x - 5.4 * l.text.length : l.at.x, y: l.at.y - 9, w: 5.4 * l.text.length, h: 11 }));
+    const placed = [];
+    const sets = [];
+    const meets = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+    for (const r of lay.board.ribbons) {
+      for (const b of boxes) {
+        const grown = { x: b.x - RIBBON_CLEAR + 1, y: b.y - RIBBON_CLEAR + 1, w: b.w + 2 * RIBBON_CLEAR - 2, h: b.h + 2 * RIBBON_CLEAR - 2 };
+        assert.ok(!meets(r.band, grown), `${name} ${r.label}: its band near a box`);
+      }
+      if (!r.text) continue;
+      labelled++;
+      const rect = ribbonLabelRect(r.label, r.text);
+      for (const o of [...boxes, ...texts, ...placed]) assert.ok(!meets(rect, o), `${name} ${r.label}: over ${JSON.stringify(o)}`);
+      const members = new Set(r.members.map((m) => m.net));
+      assert.ok(!sets.some((s) => [...members].every((n) => s.has(n))), `${name} ${r.label}: labelled twice`);
+      sets.push(members);
+      placed.push(rect);
+    }
+  }
+  assert.ok(labelled >= 1);
 });
