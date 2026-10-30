@@ -1924,22 +1924,34 @@ fn loads_allowed(context: &Context, ops: &[Op]) -> Result<(), Refused> {
 /// Every project path of `loads` lies inside a folder this server may load
 /// a project from (`--load-root`, the project's own).
 fn projects_allowed(context: &Context, loads: Vec<String>) -> Result<(), Refused> {
-    // Each resolved and checked whatever its form (`..`, a bare name, a link):
-    // as include.rs reads it, from the project's folder.
-    for load in loads {
-        let Ok(path) = context.dir.join(&load).canonicalize() else {
-            return Err(refused(format!(
-                "not loaded: `{load}` is no project folder from {}",
-                context.dir.display()
-            )));
-        };
-        if !context.load_roots.iter().any(|root| path.starts_with(root)) {
-            return Err(refused(format!(
-                "not loaded: `{load}` lies outside the folders this server may load a project from (the project's own; add one with --load-root)"
-            )));
-        }
+    match loads
+        .into_iter()
+        .find(|load| !project_allowed(context, load))
+    {
+        Some(load) => Err(not_loadable(&load)),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+/// Whether the project path `load` resolves inside a folder this server may
+/// load a project from: resolved and checked whatever its form (`..`, a bare
+/// name, a link), as include.rs reads it, from the project's folder. Nothing
+/// is read; the path is only resolved (canonical, so no link escapes).
+fn project_allowed(context: &Context, load: &str) -> bool {
+    context
+        .dir
+        .join(load)
+        .canonicalize()
+        .is_ok_and(|path| context.load_roots.iter().any(|root| path.starts_with(root)))
+}
+
+/// The refusal of a project path not loadable here: one message whether the
+/// path does not exist or lies outside the allowed folders, so a refusal
+/// tells nothing about what exists outside them.
+fn not_loadable(load: &str) -> Refused {
+    refused(format!(
+        "not loaded: `{load}` is no project folder inside the folders this server may load a project from (the project's own; add one with --load-root)"
+    ))
 }
 
 /// The `patch` of `ops` (a JSON list) at `level`, gain-guarded and its
@@ -2001,7 +2013,16 @@ fn patch_ops(context: &Context, level: String, base: Option<String>, ops_json: V
                 })
         };
         let templates = signal_project::interface_templates(&files);
+        // A project path is read only once it resolves inside the allowed
+        // folders: any other is never read, and the patch is refused alike
+        // whether it exists or not (no port name of it reaches a reply).
+        let denied = std::cell::RefCell::new(None::<String>);
         let content = |load: &str| {
+            let project_path = load.contains('/') || load.ends_with(".signal");
+            if project_path && !project_allowed(context, load) {
+                denied.borrow_mut().get_or_insert_with(|| load.to_owned());
+                return None;
+            }
             signal_project::content_names(project.as_ref(), &context.dir, load, context.registry)
         };
         let file_of = |path: &str| {
@@ -2036,8 +2057,11 @@ fn patch_ops(context: &Context, level: String, base: Option<String>, ops_json: V
             bound: &bound,
         };
         // A patch that cannot be simulated here is not sent (fail closed).
-        let patched = patch::apply(&before, None, &ops, &ctx)
-            .map_err(|e| refused(format!("{}: {}", e.code, e.message)))?;
+        let patched = patch::apply(&before, None, &ops, &ctx);
+        if let Some(load) = denied.take() {
+            return Err(not_loadable(&load));
+        }
+        let patched = patched.map_err(|e| refused(format!("{}: {}", e.code, e.message)))?;
         // ADR 0037 §7: whatever the ops (a slot op, an instance.add with
         // edits), a project the edited file newly includes or loads lies
         // inside the folders this server may load from, as for write_file.

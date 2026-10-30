@@ -1479,6 +1479,96 @@ fn the_slot_tools_add_edit_load_and_unload_a_slot() {
     assert!(mcp.finish().success());
 }
 
+/// Deferred review item: a slot's project outside the folders this server
+/// may load from is refused before anything of it is read, whatever op
+/// names it (a slot op's `load`, or a slot written by an op's edits and then
+/// edited, which the simulation resolves): the refusal is the same whether
+/// the path exists or not, and no port name of it reaches the reply. A link
+/// inside the project's folder to a project outside is refused alike.
+#[test]
+fn a_project_outside_the_load_roots_is_refused_unread() {
+    let text = "schema_version = 1\n\n[project]\nname = \"slots\"\nsample_rate = 48000\n\n[instances]\nosc = { module = \"std.sine_osc\" }\nfx = { slot = { inputs = { x = \"audio\" }, outputs = { y = \"audio\" } } }\nout = { module = \"std.audio_out\", gain = 0.2 }\n\n[wiring]\nconnections = [\n  { from = \"osc.out\", to = \"out.l\" },\n]\n";
+    let dir = mcp_common::project(text, "mcp-load-leak");
+    let secret = dir.parent().unwrap().join("secret");
+    let secret_project = "schema_version = 1\n\n[project]\nname = \"secret\"\nsample_rate = 48000\n\n[instances]\nzebra_osc = { module = \"std.sine_osc\" }\nzebra_out = { module = \"std.audio_out\", gain = 0.1 }\n\n[wiring]\nconnections = [\n  { from = \"zebra_osc.out\", to = \"zebra_out.l\" },\n]\n\n[exports]\noutputs = { zebra_port = \"zebra_osc.out\" }\n";
+    let mut mcp = Mcp::started(&dir, &[]);
+    // Each probe: a slot op's load, and a slot written by an instance.add's
+    // edits and renamed in the same patch (its content resolved by the
+    // simulation, never seen by the look at the ops' loads).
+    let probes = |load: &str| {
+        let insert =
+            format!("spy = {{ slot = {{ outputs = {{ y = \"audio\" }} }}, load = \"{load}\" }}\n");
+        vec![
+            (
+                "slot_load",
+                json!({"slot": "fx", "load": load, "map": {"y": "zebra_port"}}),
+            ),
+            ("slot_load", json!({"slot": "fx", "load": load})),
+            (
+                "patch",
+                json!({"ops": [
+                    {"op": "instance.add", "name": "spy", "module": "", "edits": [
+                        {"edit": "insert", "at": {"item": "instance:osc", "offset": 1}, "text": insert}
+                    ]},
+                    {"op": "slot.interface", "slot": "spy", "rename": {"y": "zebra_port"}}
+                ]}),
+            ),
+            (
+                "patch",
+                json!({"ops": [
+                    {"op": "instance.add", "name": "inc", "module": "", "edits": [
+                        {"edit": "insert", "at": {"item": "instance:osc", "offset": 1},
+                         "text": format!("inc = {{ project = \"{load}\" }}\n")}
+                    ]},
+                    {"op": "slot.group", "instance": "inc"}
+                ]}),
+            ),
+        ]
+    };
+    let ask = |mcp: &mut Mcp, load: &str| -> Vec<Value> {
+        probes(load)
+            .into_iter()
+            .map(|(tool, arguments)| {
+                let result = mcp.call(tool, arguments);
+                assert_eq!(result["isError"], true, "{tool}: {result}");
+                result
+            })
+            .collect()
+    };
+    let unread = |results: &[Value]| {
+        for result in results {
+            let text = result.to_string();
+            assert!(text.contains("--load-root"), "{text}");
+            assert!(
+                !text.contains("zebra_osc") && !text.contains("zebra_out"),
+                "{text}"
+            );
+        }
+    };
+    let missing = ask(&mut mcp, "../secret");
+    fs::create_dir_all(&secret).unwrap();
+    fs::write(secret.join("project.toml"), secret_project).unwrap();
+    let existing = ask(&mut mcp, "../secret");
+    assert_eq!(
+        missing, existing,
+        "the same refusal, whether it exists or not"
+    );
+    unread(&existing);
+    // A link inside the project's folder to the project outside: resolved,
+    // refused as the path itself.
+    std::os::unix::fs::symlink(&secret, dir.join("link")).unwrap();
+    unread(&ask(&mut mcp, "./link"));
+    let file = mcp.file("project.toml");
+    assert!(
+        !file.contains("secret")
+            && !file.contains("link")
+            && !file.contains("spy")
+            && !file.contains("inc "),
+        "{file}"
+    );
+    assert!(mcp.finish().success());
+}
+
 /// ADR 0037, editable insides: `slot_inside` makes the slot's own inside
 /// (composites/<slot>_inside.toml, the slot loading it); `patch` at its
 /// level builds it and wires its frame (`export.connect`); a project in a
