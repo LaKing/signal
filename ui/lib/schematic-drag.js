@@ -112,8 +112,12 @@ export class DragFollow {
         wires.add(element);
         const had = this.wires.get(element);
         if (had?.key === route.key) continue;
-        if (!geometry.has(route)) geometry.set(route, routed(route));
-        const { points, curve } = geometry.get(route);
+        // ADR 0047 phase 4: a board's corners as drawn, CORNER_PX on screen (`entry.corner`).
+        const gkey = `${entry.corner ?? ''}`;
+        if (!geometry.has(route)) geometry.set(route, new Map());
+        const shapes = geometry.get(route);
+        if (!shapes.has(gkey)) shapes.set(gkey, routed(route, entry.corner ?? undefined));
+        const { points, curve } = shapes.get(gkey);
         this.wires.set(element, { was: had ? had.was : element.getAttribute('d'), key: route.key });
         element.setAttribute('d', bakedPath(group.baked, points, curve));
         writes++;

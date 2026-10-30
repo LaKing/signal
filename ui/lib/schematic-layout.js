@@ -16,6 +16,8 @@ import { VIA_ROW, VIA_W, controlAnchor, controlEdges, controlNodes, controlPads 
 import { frameFace, placeFace } from './schematic-face.js';
 import { CLEARANCE, PU, STUB, TRACK, balance, near, placeNear, ring, sugiyama } from './board-layout.js';
 import { Maze, STEP } from './board-maze.js';
+import { formRibbons } from './board-ribbon.js';
+import { stretchCorners } from './board-stretch.js';
 import { LABEL_STUB, NET_DESTS, measure, orthGeometry, routeWires, simplify, spreadLabels, zCorners } from './board-route.js';
 
 /**
@@ -891,7 +893,7 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
   // Over a plate: the chips under their controls (the coordinator's design after the owner's verdict).
   if (panel.length) {
     const { wires, labels, bottom, sections } = plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects, board, positions, factsOf, widen });
-    const done = finishBoard(nodes, wires, labels, bottom, board, 0);
+    const done = finishBoard(nodes, wires, labels, bottom, board, 0, { obstacles: controlRects });
     done.board.sections = sections;
     return done;
   }
@@ -1041,7 +1043,7 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
         };
       }
     : null;
-  const { routes, labels } = routeWires(boxes, asked, { nameOf, fanout: !board.die, fallback });
+  const { routes, labels } = routeWires(boxes, asked, { nameOf, fanout: !board.die && !WIRES_NOT_LABELS.board, fallback });
   // The legs, through the plate's gutters and the channels, around everything already drawn.
   const drawnSegments = [];
   routes.forEach((r, i) => {
@@ -1076,7 +1078,7 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
   });
   if (die) {
     const done = dieWires({ die, nodes, byId, edges, boxes, routes, labels, wires, order: board.paramOrder ?? null });
-    const finished = finishBoard(nodes, wires, labels, bottom, board, lay.crossings);
+    const finished = finishBoard(nodes, wires, labels, bottom, board, lay.crossings, { obstacles: controlRects, area: { x0: done.rect.x, x1: done.rect.x + done.rect.w, y0: done.rect.y, y1: done.rect.y + done.rect.h } });
     finished.bounds = done.rect;
     finished.board.die = done.rect;
     return finished;
@@ -1107,17 +1109,16 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
     }
     wires.push(boardWire(id, e, { feedback: false, lane: 0, under: null, a: ends.a, b: ends.b }, r));
   });
-  return finishBoard(nodes, wires, labels, bottom, board, lay.crossings);
+  return finishBoard(nodes, wires, labels, bottom, board, lay.crossings, { obstacles: controlRects });
 }
 
 /** A board's measures, its pins' `connected`, its bounds: what `layout` returns. */
-function finishBoard(nodes, wires, labels, bottom, board, crossings) {
+function finishBoard(nodes, wires, labels, bottom, board, crossings, { obstacles = [], area = null } = {}) {
+  // ADR 0047 phase 4: a wire that found no way within the layout's budget is searched for again, around everything drawn; a net label only where none exists.
+  if (board.die ? WIRES_NOT_LABELS.die : WIRES_NOT_LABELS.board) rescueLabelled(nodes, wires, labels, obstacles, area);
+  const ribbons = boardRibbons(nodes, wires, obstacles);
   spreadLabels(labels);
-  const metrics = measure(
-    wires.map((w) => ({ net: w.kind === 'binding' ? `bus:${w.from.node.startsWith('@control:') ? w.to.node : w.from.node}` : `${w.from.node}\n${w.from.port}` })),
-    wires.map((w) => ({ corners: w.corners })),
-    labels,
-  );
+  const metrics = boardMeasures(wires, labels, ribbons);
   const ends = { outs: new Set(wires.map((w) => `${w.from.node}\n${w.from.port}`)), ins: new Set(wires.map((w) => `${w.to.node}\n${w.to.port}`)) };
   for (const node of nodes) {
     for (const side of ['ins', 'outs']) node[side] = node[side].map((p) => ({ ...p, connected: ends[side].has(`${node.id}\n${p.name}`) }));
@@ -1131,9 +1132,124 @@ function finishBoard(nodes, wires, labels, bottom, board, crossings) {
   }
   const [bx0, bx1, by0, by1] = [least(xs, Infinity), most(xs, -Infinity), least(ys, Infinity), most(ys, -Infinity)];
   const bounds = xs.length ? { x: bx0, y: by0, w: bx1 - bx0, h: by1 - by0 } : { x: 0, y: 0, w: MIN_WIDTH, h: HEADER };
-  return { nodes, wires, bounds, bottom, face: null, board: { labels, metrics, plate: board.plate ?? null, crossings } };
+  return { nodes, wires, bounds, bottom, face: null, board: { labels, metrics, ribbons, plate: board.plate ?? null, crossings, obstacles, area } };
 }
 
+/**
+ * The ribbons of a board's `wires` among `nodes` and the plate's
+ * `obstacles` (ADR 0047 phase 4, ui/lib/board-ribbon.js): each member's
+ * drawn geometry set (`display`, `curve`, `points`, `box`), its route
+ * (`corners`) unchanged. Returns the ribbons.
+ */
+export function boardRibbons(nodes, wires, obstacles = []) {
+  const boxes = [...nodes.filter((n) => n.w > 0 && n.h > 0), ...obstacles];
+  const { ribbons, display } = formRibbons(
+    wires.filter((w) => !w.labelled).map((w) => ({ id: w.id, corners: w.corners, net: mazeNet(w).net, wire: w })),
+    boxes,
+    { nameOf: (m) => (m.wire.kind === 'binding' ? String(m.wire.label).split(' ⇢ ')[0] : m.wire.from.port), endsOf: (m) => [m.wire.from.node, m.wire.to.node] },
+  );
+  for (const w of wires) {
+    const shown = display.get(w.id);
+    if (shown) {
+      w.display = shown;
+      Object.assign(w, orthGeometry(shown));
+    } else if (w.display) {
+      delete w.display;
+      Object.assign(w, orthGeometry(w.corners));
+    }
+  }
+  return ribbons;
+}
+
+/** A board's measures (ADR 0047 §6.6): of its routes, a leg's bus one net (its ribbons, `board.ribbons`, are counted apart). */
+export function boardMeasures(wires, labels, ribbons = []) {
+  const m = measure(
+    wires.map((w) => ({ net: w.kind === 'binding' ? `bus:${w.from.node.startsWith('@control:') ? w.to.node : w.from.node}` : `${w.from.node}\n${w.from.port}` })),
+    wires.map((w) => ({ corners: w.corners })),
+    labels,
+  );
+  return m;
+}
+
+
+/**
+ * Where a net is drawn as wires rather than labels (ADR 0047 phase 4): a
+ * fan-out, a global net and a wire the layout's search found no way for
+ * (searched for again over the whole level: `rescueLabelled`). In dies now; on the top
+ * board once its snapshots (ui/lib/fixtures/board/snapshots.json, test 5)
+ * are written again for this reason, an owner's step (the studio's board,
+ * which has no label, does not change).
+ */
+export const WIRES_NOT_LABELS = Object.freeze({ die: true, board: false });
+
+/** A labelled wire's second search (ADR 0047 phase 4) may visit this many states. */
+const RESCUE_STATES = 9000;
+
+/** The net a board's wire belongs to for the maze: a leg's own, in its chip's bus; else its source pin's. */
+export function mazeNet(w) {
+  if (w.kind === 'binding') {
+    const chip = String(w.from.node).startsWith('@control:') ? w.to.node : w.from.node;
+    return { net: `leg:${w.from.node}:${w.from.port}:${w.to.node}:${w.to.port}`, bus: `bus:${chip}` };
+  }
+  return { net: `${w.from.node}\n${w.from.port}`, bus: null };
+}
+
+/**
+ * The labelled wires of a board searched for again (ADR 0047 phase 4, the
+ * owner's "no labels where a wire can go"): the maze over every box, the
+ * plate's `obstacles` and every wire already drawn, with RESCUE_STATES, the
+ * shortest first (ties by id); within `area` (a die's rectangle) when given.
+ * A wire found is drawn whole and its labels go. Deterministic.
+ */
+function rescueLabelled(nodes, wires, labels, obstacles, area) {
+  const lost = wires.filter((w) => w.labelled && w.ends);
+  if (!lost.length) return;
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const boxes = [...nodes.filter((n) => n.w > 0 && n.h > 0).map(({ id, x, y, w, h }) => ({ id, x, y, w, h })), ...obstacles];
+  const segments = [];
+  for (const w of wires) {
+    if (w.labelled) continue;
+    const { net } = mazeNet(w);
+    for (let k = 1; k < w.corners.length; k++) segments.push(Object.assign([w.corners[k - 1], w.corners[k]], { net }));
+  }
+  for (const l of labels) if (!lost.some((w) => w.id === l.wire)) segments.push(Object.assign([l.corners[0], l.corners[1]], { net: l.net }));
+  const pins = nodes.flatMap((n) => [...n.ins.map((p) => ({ x: p.x, y: p.y, side: p.side ?? 'left' })), ...n.outs.map((p) => ({ x: p.x, y: p.y, side: p.side ?? 'right' }))]);
+  const xs = boxes.flatMap((b) => [b.x, b.x + b.w]);
+  const ys = boxes.flatMap((b) => [b.y, b.y + b.h]);
+  const bounds = area ?? { x0: least(xs, 0) - MAZE_MARGIN, x1: most(xs, 0) + MAZE_MARGIN, y0: least(ys, 0) - MAZE_MARGIN, y1: most(ys, 0) + MAZE_MARGIN };
+  const pinOf = (w, out) => {
+    const node = byId.get(out ? w.from.node : w.to.node);
+    const port = out ? w.from.port : w.to.port;
+    return (out ? node?.outs : node?.ins)?.find((p) => p.name === port) ?? (out ? w.ends.a : w.ends.b);
+  };
+  const ends = lost.map((w) => ({ w, a: pinOf(w, true), b: pinOf(w, false) }));
+  const maze = new Maze(boxes, ends.flatMap((e) => [e.a, e.b]), segments, bounds, pins);
+  ends.sort((p, q) => Math.abs(p.a.x - p.b.x) + Math.abs(p.a.y - p.b.y) - (Math.abs(q.a.x - q.b.x) + Math.abs(q.a.y - q.b.y)) || p.w.id - q.w.id);
+  const found = new Set();
+  for (const { w, a, b } of ends) {
+    const { net, bus } = mazeNet(w);
+    const own = [byId.get(w.from.node), byId.get(w.to.node)].filter((n) => n?.kind === 'control').flatMap((n) => [n.control?.rect, rectOf(n)].filter(Boolean));
+    const share = wires.filter((o) => o !== w && !o.labelled && o.to.node === w.to.node && o.to.port === w.to.port).map((o) => mazeNet(o).net);
+    // The layout's own search found no way within its budget: a second one over the whole level, with every wire drawn in it (never along another net, never turning where one passes: no false junction).
+    const corners = maze.route(a, b, net, { bus, own, share, from: a.side ?? 'right', into: b.side ?? 'left', budget: RESCUE_STATES });
+    if (!corners) continue;
+    const clean = simplify(corners);
+    const vertical = clean.find((p, k) => k > 0 && clean[k - 1].x === p.x && clean[k - 1].y !== p.y);
+    Object.assign(w, { corners: clean, labelled: false, trunkX: vertical?.x ?? null, ...orthGeometry(clean) });
+    delete w.whole;
+    found.add(w.id);
+  }
+  if (!found.size) return;
+  const kept = labels.filter((l) => !found.has(l.wire));
+  // A source's stub stays while one of its net's wires is still a label: it moves to that wire.
+  for (const l of labels) {
+    if (l.side !== 'out' || !found.has(l.wire)) continue;
+    const other = kept.find((k) => k.net === l.net && k.side === 'in');
+    if (other) kept.push({ ...l, wire: other.wire });
+  }
+  labels.length = 0;
+  labels.push(...kept);
+}
 
 /** A chip's top pins (its parameters, ADR 0047 §7) are this far apart… */
 export const TOP_PITCH = 12;
@@ -1656,7 +1772,9 @@ function plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects
   }
   const nets = new Map();
   for (const e of edges) nets.set(`${e.from.node}\n${e.from.port}`, (nets.get(`${e.from.node}\n${e.from.port}`) ?? 0) + 1);
-  const labelled = (e) => {
+  // ADR 0047 phase 4: a fan-out and a global net are wires as any other (routed last, the longest), drawn as ribbons where they run together
+  // (`WIRES_NOT_LABELS.board`; until then labels, as phase 2 recorded them).
+  const late = (e) => {
     const net = `${e.from.node}\n${e.from.port}`;
     return nets.get(net) >= NET_DESTS || (!hasInput.has(e.from.node) && (fed.get(e.from.node)?.size ?? 0) >= GLOBAL_FANOUT);
   };
@@ -1698,7 +1816,8 @@ function plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects
     const b = pinOf(byId.get(e.to.node), e.to.port, false);
     return { e, i, a, b, d: Math.abs(a.x - b.x) + Math.abs(a.y - b.y) };
   });
-  order.sort((p, q) => p.d - q.d || p.i - q.i);
+  const labelled = (e) => !WIRES_NOT_LABELS.board && late(e);
+  order.sort((p, q) => (WIRES_NOT_LABELS.board ? late(p.e) - late(q.e) : 0) || p.d - q.d || p.i - q.i);
   for (const { e, i, a, b } of order) {
     if (labelled(e) || routeOf.has(`edge${i}`)) continue;
     // The legs at its own pins (a meter reading its source, a control setting its target) it may join there.
@@ -1823,6 +1942,18 @@ export function movedWires(drawn, id, to) {
   let lane = 0;
   for (const wire of drawn.wires) {
     const attached = moves.has(wire.from.node) || moves.has(wire.to.node);
+    // ADR 0047 phase 4: a board's wire is no feedback loop of the curved layout's lanes: one not attached stays as it is
+    // (the owner: "only the moved element's own wires may change"); one attached keeps its route, stretched at its moved end.
+    if (wire.orth) {
+      if (!attached) continue;
+      const da = moves.get(wire.from.node) ?? null;
+      const db = moves.get(wire.to.node) ?? null;
+      const corners = stretchCorners(wire.corners, da, db);
+      const a = corners[0];
+      const b = corners.at(-1);
+      changed.push({ wire, a, b, feedback: false, under: null, orth: true, corners, key: `${a.x},${a.y},${b.x},${b.y}` });
+      continue;
+    }
     const a = shift(wire.ends?.a ?? wire.curve.start, wire.from.node);
     const b = shift(wire.ends?.b ?? wire.curve.segs.at(-1).to, wire.to.node);
     const feedback = wire.reversed || b.x <= a.x;
@@ -1835,8 +1966,8 @@ export function movedWires(drawn, id, to) {
 }
 
 /** The geometry of a route `movedWires` gives: `{curve, points, box}`. */
-export function routed(route) {
-  // A board's wire (ADR 0047 §6) follows a dragged box as a plain orthogonal route; the next layout routes it in its channel.
-  if (route.orth) return orthGeometry(zCorners(route.a, route.b, { feedback: route.feedback, under: route.under ?? 0 }));
+export function routed(route, corner = undefined) {
+  // A board's wire (ADR 0047 §6, phase 4) follows a dragged box with its route stretched (`stretchCorners`); the release reroutes only it.
+  if (route.orth) return orthGeometry(route.corners ?? zCorners(route.a, route.b, { feedback: route.feedback, under: route.under ?? 0 }), corner);
   return wireGeometry(route.a, route.b, { feedback: route.feedback, under: route.under ?? 0 });
 }

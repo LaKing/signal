@@ -354,3 +354,54 @@ test('the level’s labels are drawn in a group per box and size, kept by its id
     globalThis.document = had;
   }
 });
+
+test('ADR 0047 phase 4: a graph with the same structure (a value changed) keeps the very layout of every level; a moved instance reroutes only its own wires', () => {
+  const s = Object.create(SignalSchematic.prototype);
+  const graph = JSON.parse(JSON.stringify({ project: 'kick', projectId: 'k', top: KICK.top, composites: KICK.composites, layout: { positions: {} } }));
+  Object.assign(s, { graph, layouts: new Map(), moved: new Map(), panelControls: [], board: null, faces: null });
+  const top = s.layoutOf('');
+  const inner = Object.keys(KICK.composites)[0];
+  const die = s.layoutOf(inner);
+  assert.ok(top.board && die.board);
+  // A new graph (as `setGraph` clears the cache) whose only change is a parameter's value: the same objects, no layout.
+  const valued = JSON.parse(JSON.stringify(graph));
+  for (const i of valued.top.instances) for (const p of i.parameters ?? []) p.default = 0.123;
+  s.graph = valued;
+  s.layouts.clear();
+  assert.equal(s.layoutOf(''), top, 'the top level: the very object');
+  assert.equal(s.layoutsHow, 'kept');
+  assert.equal(s.layoutOf(inner), die, 'its die too');
+  // An instance moved (its stored position written): only its wires are routed again.
+  const chip = top.nodes.find((n) => n.kind === 'instance');
+  const movedGraph = JSON.parse(JSON.stringify(valued));
+  movedGraph.layout = { positions: { '': { [chip.name]: { x: chip.x + 16, y: chip.y + 32 } } } };
+  s.graph = movedGraph;
+  s.layouts.clear();
+  const after = s.layoutOf('');
+  assert.equal(s.layoutsHow, 'rerouted');
+  for (const w of top.wires) {
+    if (w.from.node === chip.id || w.to.node === chip.id || after.rerouted.includes(w.id)) continue;
+    assert.deepEqual(after.wires.find((x) => x.id === w.id).corners, w.corners, `${w.id} as it was`);
+  }
+  for (const n of after.nodes) if (n.id !== chip.id) assert.deepEqual([n.x, n.y], [top.nodes.find((m) => m.id === n.id).x, top.nodes.find((m) => m.id === n.id).y]);
+});
+
+test('ADR 0047 phase 4: the studio on its plate, a new graph with the same structure keeps its board and its synth’s die (laid in its package’s order)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { approximatePlate } = await import('../lib/fixtures/board/plate-approx.js');
+  const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
+  const studio = JSON.parse(read('ui/lib/fixtures/studio-graph.json'));
+  const fx = JSON.parse(read('ui/lib/fixtures/board/studio-plate.json'));
+  const approx = approximatePlate(read('projects/studio/ui/main.html'));
+  const s = Object.create(SignalSchematic.prototype);
+  const board = { plate: { key: 'measured' }, option: () => ({ vias: new Map(fx.vias), obstacles: fx.obstacles, plate: fx.size, cards: fx.cards }) };
+  Object.assign(s, { graph: { project: 'studio', projectId: 's', ...studio, layout: { positions: {} } }, layouts: new Map(), moved: new Map(), panelControls: approx.controls, board, faces: null });
+  const top = s.layoutOf('');
+  const die = s.layoutOf('moog_voice');
+  assert.ok(top.nodes.find((n) => n.name === 'synth').topOrder, 'the synth has top pins (its vias)');
+  s.graph = { ...s.graph, top: JSON.parse(JSON.stringify(studio.top)) };
+  s.layouts.clear();
+  s.dieOrders.clear();
+  assert.equal(s.layoutOf(''), top);
+  assert.equal(s.layoutOf('moog_voice'), die, 'the die as it was, in its package’s order');
+});

@@ -60,15 +60,20 @@ svg.layer-plate > g > :not(.plate-layer) { opacity: 0; pointer-events: none; }
 .net-label.events { fill: var(--signal-meter-rms, #3ecf8e); }
 .net-label.vector { fill: var(--signal-effective, #ffb74d); }
 .net-stub { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+/* ADR 0047 phase 4: a ribbon cable: a band under its members, in their colour when they share one, its label once. */
+.ribbon { fill: color-mix(in srgb, var(--ribbon-tone, var(--signal-muted, #8a93a3)) 16%, var(--signal-board-bg, #0e1014)); stroke: color-mix(in srgb, var(--ribbon-tone, var(--signal-muted, #8a93a3)) 55%, transparent); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
+.ribbon.signal, .ribbon-label.signal { --ribbon-tone: var(--signal-accent, #4fc3f7); }
+.ribbon.events, .ribbon-label.events { --ribbon-tone: var(--signal-meter-rms, #3ecf8e); }
+.ribbon.vector, .ribbon.binding, .ribbon-label.vector, .ribbon-label.binding { --ribbon-tone: var(--signal-effective, #ffb74d); }
+.ribbon-label { fill: var(--ribbon-tone, var(--signal-muted, #8a93a3)); font-weight: 600; paint-order: stroke; stroke: var(--signal-board-bg, #0e1014); stroke-width: 3px; stroke-linejoin: round; pointer-events: none; }
 .net-stub.signal { stroke: var(--signal-accent, #4fc3f7); }
 .net-stub.events { stroke: var(--signal-meter-rms, #3ecf8e); }
 .net-stub.vector { stroke: var(--signal-effective, #ffb74d); }
 /* §6.5: a pin whose kind's wires are hidden. */
 .pin.kind-hidden { stroke-dasharray: 1 2; fill: none; opacity: 0.6; }
-/* §7: chips as packages: a dark body, pins as short legs, a notch. */
+/* §7: chips as packages: a dark body, pins as short legs (phase 4: no notch, nothing on a chip looks like a pin unless it is one). */
 .node:not(.pins):not(.control) > .box { fill: color-mix(in srgb, var(--signal-panel, #1f232b) 55%, #000); }
 .leg { fill: var(--signal-muted, #8a93a3); opacity: 0.8; }
-.notch { fill: var(--signal-bg, #16181d); stroke: var(--signal-knob-edge, #3a414d); vector-effect: non-scaling-stroke; }
 `;
 
 /** The plate face's own CSS (in its shadow root, beside the faces'): its layers. */
@@ -212,7 +217,7 @@ export class SchematicBoard {
 
   /** The bar's measures of the top level's board. */
   showMeasures(layout) {
-    if (this.measures) this.measures.textContent = metricsText(layout?.board?.metrics ?? null);
+    if (this.measures) this.measures.textContent = metricsText(layout?.board?.metrics ?? null, layout?.board?.ribbons ?? null);
   }
 
   // The plate.
@@ -354,6 +359,34 @@ export class SchematicBoard {
       parts.push(t);
     }
     group.replaceChildren(...parts);
+  }
+
+  /**
+   * The ribbons of a board level (ADR 0047 phase 4, `layout.board.ribbons`):
+   * each a band under its members (in their tone when they share one), and
+   * its label once ("t ×7"), in `bands` and `labels` (appended after the
+   * net labels). A ribbon whose members are all of a hidden kind is not drawn.
+   */
+  drawRibbons(bands, labels, level, baked, bakedRect, bakedPoint, text) {
+    const layout = level.layout;
+    const parts = [];
+    const byId = new Map(layout.wires.map((w) => [w.id, w]));
+    for (const r of layout.board?.ribbons ?? []) {
+      const members = r.wires.map((id) => byId.get(id)).filter(Boolean);
+      if (!members.length || members.every((w) => this.state.hidden.includes(w.shape))) continue;
+      const tones = new Set(members.map((w) => level.tones?.get(w.id) ?? (w.kind === 'binding' ? 'binding' : w.shape)));
+      const tone = tones.size === 1 ? [...tones][0] : 'mixed';
+      const rect = bakedRect(baked, r.band);
+      if (rect) parts.push(el('rect', { class: `ribbon ${tone}`, rx: 2 * baked.m, 'data-ribbon': String(r.id), ...rect }));
+      if (text(8)) {
+        const vertical = r.axis === 'v';
+        const at = bakedPoint(baked, vertical ? { x: r.at.x - 3, y: r.at.y + 3 } : { x: r.at.x, y: r.at.y - 3 });
+        const t = el('text', { class: `ribbon-label ${tone}`, x: at.x, y: at.y, 'font-size': 8 * baked.m, 'text-anchor': vertical ? 'end' : 'middle', 'data-ribbon': String(r.id) }, r.label);
+        t.append(el('title', {}, `A ribbon of ${r.members.length} wires: click one where it leaves the ribbon, or in it zoomed in, to trace it through`));
+        labels.append(t);
+      }
+    }
+    bands.replaceChildren(...parts);
   }
 
   /** The window's kept view state (`ui/windows.toml`, from the page's host): shown, not told back. */

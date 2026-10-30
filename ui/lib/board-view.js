@@ -6,6 +6,22 @@
 // verdict of 2026-10-30). Pure; no DOM.
 
 import { PU } from './board-layout.js';
+import { CORNER } from './board-route.js';
+
+/** A board wire's turns are rounded to this radius on screen (px) at every zoom (ADR 0047 phase 4: no fat arcs zoomed in). */
+export const CORNER_PX = 6;
+
+/**
+ * The corner radius (layout units) of a board level drawn at scale `k`:
+ * CORNER_PX on screen, in half-octave steps of the scale (so a zoom
+ * rebuilds the paths only at a step), never more than the layout's CORNER
+ * (zoomed out, a turn is never rounder than the route).
+ */
+export function cornerAt(k) {
+  if (!(k > 0)) return CORNER;
+  const step = 2 ** (Math.round(Math.log2(k) * 2) / 2);
+  return Math.min(CORNER, CORNER_PX / step);
+}
 
 /** The layers, in the order one key steps through them. */
 export const LAYERS = Object.freeze(['plate', 'xray', 'board']);
@@ -65,7 +81,9 @@ export function toggleKind(hidden, kind) {
  * engines that differ by a fraction of a pixel give the same board.
  */
 export function viaRect(rect) {
-  const snap = (v) => Math.round(v / PU) * PU;
+  // First to 1/64 px (ADR 0047 phase 4): a fraction an engine's transform adds or takes (a control at 4.0001 or 3.9999 px,
+  // a plate unit's half) never flips the unit it snaps to, so a plate measured again gives the same vias and the board stays.
+  const snap = (v) => Math.round(Math.round(v * 64) / 64 / PU) * PU;
   return { x: snap(rect.x), y: snap(rect.y), w: Math.max(PU, snap(rect.w)), h: Math.max(PU, snap(rect.h)) };
 }
 
@@ -100,10 +118,12 @@ export function plateSize(w, h) {
 }
 
 /** The measures of a board (`routeWires`' `metrics`) as the bar says them; never a judgement (hard rule 6). */
-export function metricsText(metrics) {
+export function metricsText(metrics, ribbons = null) {
   if (!metrics) return '';
   const n = (v) => (v >= 10000 ? `${(v / 1000).toFixed(1)}k` : String(v));
-  return `${n(metrics.crossings)} crossings · ${n(metrics.bends)} bends · length ${n(metrics.length)} · ${n(metrics.labels)} labelled nets`;
+  // ADR 0047 phase 4: the ribbons drawn, when there are any.
+  const more = ribbons?.length ? ` · ${n(ribbons.length)} ribbons` : '';
+  return `${n(metrics.crossings)} crossings · ${n(metrics.bends)} bends · length ${n(metrics.length)} · ${n(metrics.labels)} labelled nets${more}`;
 }
 
 /**

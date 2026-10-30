@@ -135,7 +135,9 @@ export function scene({ layoutOf, view, viewport, pinned = new Set() }) {
     levels.push(entry);
     for (const node of drawn.nodes) {
       const rect = screenRect(transform, node);
-      if (rect.w < MIN_PX || !intersects(rect, screen)) continue;
+      // A die's interface (ADR 0047 phase 4): its zero-wide columns and zero-high strip are drawn and hit for their pins
+      // (the owner: "the crossings at the chip boundary do not get the click"), never culled for their size.
+      if (node.edge ? !intersects({ x: rect.x - STROKE_PX, y: rect.y - STROKE_PX, w: rect.w + 2 * STROKE_PX, h: rect.h + 2 * STROKE_PX }, screen) : rect.w < MIN_PX || !intersects(rect, screen)) continue;
       entry.nodes.push(node);
     }
     // The board (ADR 0047) draws every wire at every zoom: zoom never decides which nets are drawn.

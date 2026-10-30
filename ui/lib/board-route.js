@@ -33,9 +33,9 @@ const TRIES = 48;
 /** Lanes tried by a detour. */
 const LANES = 12;
 
-/** The geometry of an orthogonal polyline `corners`: `{curve, points, box}` (as `wireGeometry` gives). */
-export function orthGeometry(corners) {
-  const curve = rounded(corners, CORNER);
+/** The geometry of an orthogonal polyline `corners`, its turns rounded to `corner`: `{curve, points, box}` (as `wireGeometry` gives). */
+export function orthGeometry(corners, corner = CORNER) {
+  const curve = rounded(corners, corner);
   return { curve, points: flatten(curve), box: curveBox(curve) };
 }
 

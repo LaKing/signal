@@ -77,6 +77,11 @@ import { moduleInfo, projectKey } from '../lib/schematic-palette.js';
 import { allOf, deletePlan, dragGroup, groupControls, has, hitKey, inside, marqueeStarts, moveMessages, reselectAll, toggled, traceTarget, union } from '../lib/schematic-select.js';
 import { formatFixed } from '../lib/format.js';
 import { HEADER, addPinAt, dragPosition, insideKey, layout } from '../lib/schematic-layout.js';
+import { dieSignature, relayout, structureKey } from '../lib/board-memo.js';
+import { pinKey, sceneTones } from '../lib/board-tone.js';
+import { portNet } from '../lib/board-net.js';
+import { orthGeometry } from '../lib/board-route.js';
+import { cornerAt } from '../lib/board-view.js';
 import { insideBanner, insideReason, isPreviewLevel, isSlotInside, levelData, unmatchedReason } from '../lib/slot.js';
 import { DragFollow, ownedLabels } from '../lib/schematic-drag.js';
 import { aroundReason, dragAction, drawOrder, editable, editLevel, openFrameHit, pinOne, shownFrame, unpin } from '../lib/schematic-open.js';
@@ -157,7 +162,7 @@ svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; t
 .glyph-thin { stroke: var(--signal-track, #2a2f38); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .glyph-line { fill: none; stroke: var(--signal-meter-rms, #3ecf8e); stroke-width: 1.2; vector-effect: non-scaling-stroke; }
 /* A control's binding to what it sets or reads: a dotted line, not a connection of the project (never hit). */
-path.wire.binding { stroke: var(--signal-effective, #ffb74d); stroke-dasharray: 1 3; stroke-linecap: round; opacity: 0.85; pointer-events: none; }
+path.wire.binding, path.wire.leg { stroke: var(--signal-effective, #ffb74d); stroke-dasharray: 1 3; stroke-linecap: round; opacity: 0.85; pointer-events: none; }
 /* The target of an open context menu. */
 .hover > .box { stroke: var(--signal-fg, #d6dbe4); stroke-width: 2; }
 /* The selection (2026-10-17): strokes and a glow only, nothing moves. A box: a thick focus-coloured border with a halo. */
@@ -173,6 +178,9 @@ path.wire.binding { stroke: var(--signal-effective, #ffb74d); stroke-dasharray: 
 .pin.signal.connected { fill: var(--signal-accent, #4fc3f7); }
 .pin.vector.connected { fill: var(--signal-effective, #ffb74d); }
 .pin.events.connected { fill: var(--signal-meter-rms, #3ecf8e); }
+/* ADR 0047 phase 4: a pin a plate control's leg reaches, and a die's interface pin it carries on to, in the leg's colour. */
+.pin.leg { stroke: var(--signal-effective, #ffb74d); }
+.pin.leg.connected { fill: var(--signal-effective, #ffb74d); }
 /* ADR 0037 §7: a slot's box (its interface's pins, loaded or not); an empty one hollow, its outline dashed; an unmatched port's pin hollow. */
 .slot > .box { stroke: var(--signal-accent, #4fc3f7); stroke-width: 1.5; }
 .slot.empty > .box { fill: none; stroke: var(--signal-muted, #8a93a3); stroke-dasharray: 5 3; }
@@ -638,6 +646,7 @@ export class SignalSchematic extends HTMLElement {
       this.view = IDENTITY;
       this.tracing = null;
       old.clear();
+      this.lastLaid?.clear();
     }
     // The panel's controls follow the project's panel file (read with every graph: a hand edit of it shows).
     if (this.graph?.projectId !== graph.projectId || this.graph?.project !== graph.project) {
@@ -773,29 +782,59 @@ export class SignalSchematic extends HTMLElement {
     return this.layouts.get(level) ?? null;
   }
 
-  /** Level `level` laid out into the cache (`layoutOf`). */
+  /**
+   * Level `level` laid out into the cache (`layoutOf`). ADR 0047 phase 4:
+   * a board level whose structure, options and dies are as when it was last
+   * laid out keeps that very layout (a value, the selection, a meter change
+   * nothing), and one in which only some instances moved reroutes only
+   * their wires (`relayout`, ui/lib/board-memo.js); else a full layout.
+   */
   layLevel(level) {
     {
       // ADR 0037, editable insides: a slot's read-only inside (`graph.insides`) too.
       const source = levelData(this.graph, level);
       if (!source) return null;
-      const stored = { ...(this.graph.layout?.positions?.[level] ?? {}), ...Object.fromEntries(this.moved.get(level) ?? []) };
-      // M2.13-2: a composite's box lays its pins out in groups (ui/lib/schematic-groups.js).
-      // ADR 0046 §6: the main panel's controls at the top level, each slot's part's in its box or its frame.
-      // 2026-10-30: a slot with a part shows it as its face, in its box or at its open frame's top, at the size measured.
-      this.layouts.set(
-        level,
-        layout(source, stored, {
-          factsOf: (module) => exportFacts(module === '' ? null : levelData(this.graph, module)),
-          controls: levelControls(this.graph, level, this.panelControls),
-          faces: levelFaces(this.graph, level),
-          faceSize: this.faces ? (face) => this.faces.sizeOf(face) : null,
-          // ADR 0047 §5–6: the top level is the board under the plate; §7–8 (phase 3): every inside is a die, a board
-          // of its own at its natural size, scaled into its package, which takes its shape and pins (`dieFor`).
-          board: { ...(level === '' ? (this.board?.option() ?? {}) : { die: true, paramOrder: this.dieOrders?.get(level) ?? null }), dieOf: (node) => this.dieFor(node) },
-        }),
-      );
+      const stored = { ...(this.graph.layout?.positions?.[level] ?? {}), ...Object.fromEntries([...(this.moved.get(level) ?? [])].map(([name, at]) => [name, { x: at.x, y: at.y }])) };
+      const order = level === '' ? null : (this.dieOrders?.get(level) ?? null);
+      const key = `${this.layoutEpoch ?? 0}\n${level === '' ? (this.board?.plate?.key ?? '') : JSON.stringify(order ? [...order] : null)}\n${this.panelText ?? ''}\n${structureKey(source)}`;
+      this.lastLaid ??= new Map();
+      const prev = this.lastLaid.get(level) ?? null;
+      // Kept as it was, the top level's packages still order their dies' parameters (`dieFor` asks only on a full layout).
+      if (level === '' && prev?.key === key && prev.orders) {
+        this.dieOrders ??= new Map();
+        for (const [l, order] of prev.orders) if (!this.dieOrders.has(l)) this.dieOrders.set(l, order);
+      }
+      // The dies this level is laid around, recorded as it asks for them (`dieFor`).
+      const outer = this.diesAsked;
+      const dies = new Map();
+      this.diesAsked = dies;
+      let result;
+      try {
+        result = relayout(prev, key, stored, () => this.fullLayout(level, source, stored), (was) => [...(was ?? [])].every(([l, sig]) => dieSignature(this.layoutOf(l)) === sig));
+      } finally {
+        this.diesAsked = outer;
+      }
+      this.layoutsHow = result.how;
+      const orders = level === '' ? (result.how === 'full' ? new Map(this.dieOrders ?? []) : prev.orders) : null;
+      this.lastLaid.set(level, { key, stored, layout: result.layout, dies: result.how === 'full' ? dies : prev.dies, orders });
+      this.layouts.set(level, result.layout);
     }
+  }
+
+  /** Level `level`'s full layout from `source` and its `stored` positions. */
+  fullLayout(level, source, stored) {
+    // M2.13-2: a composite's box lays its pins out in groups (ui/lib/schematic-groups.js).
+    // ADR 0046 §6: the main panel's controls at the top level, each slot's part's in its box or its frame.
+    // 2026-10-30: a slot with a part shows it as its face, in its box or at its open frame's top, at the size measured.
+    return layout(source, stored, {
+      factsOf: (module) => exportFacts(module === '' ? null : levelData(this.graph, module)),
+      controls: levelControls(this.graph, level, this.panelControls),
+      faces: levelFaces(this.graph, level),
+      faceSize: this.faces ? (face) => this.faces.sizeOf(face) : null,
+      // ADR 0047 §5–6: the top level is the board under the plate; §7–8 (phase 3): every inside is a die, a board
+      // of its own at its natural size, scaled into its package, which takes its shape and pins (`dieFor`).
+      board: { ...(level === '' ? (this.board?.option() ?? {}) : { die: true, paramOrder: this.dieOrders?.get(level) ?? null }), dieOf: (node) => this.dieFor(node) },
+    });
   }
 
   /**
@@ -808,7 +847,9 @@ export class SignalSchematic extends HTMLElement {
     if (!levelData(this.graph, level)) return null;
     this.dieOrders ??= new Map();
     if (!this.layouts.has(level) && node.topOrder && !this.dieOrders.has(level)) this.dieOrders.set(level, node.topOrder);
-    return this.layoutOf(level);
+    const die = this.layoutOf(level);
+    this.diesAsked?.set(level, dieSignature(die));
+    return die;
   }
 
   rootBounds() {
@@ -857,6 +898,8 @@ export class SignalSchematic extends HTMLElement {
     this.drawn = scene({ layoutOf, view: this.view, viewport: this.viewport, pinned: this.pinned });
     // Zoomed out past a die's threshold (ADR 0047 §8): its level is left, as Escape leaves it.
     if (this.leaveFaded()) this.drawn = scene({ layoutOf, view: this.view, viewport: this.viewport, pinned: this.pinned });
+    // ADR 0047 phase 4: one colour per net, carried into each die through its package's pins.
+    sceneTones(this.drawn.levels);
     // Kept in the coordinates of the deepest level under the centre.
     this.view = this.drawn.view;
     this.open = this.drawn.open;
@@ -920,8 +963,10 @@ export class SignalSchematic extends HTMLElement {
       const plate = el('g', { class: 'plate-layer' });
       const ghosts = el('g', { class: 'plate-layer plate-ghosts' });
       const nets = el('g', { class: 'net-labels' });
-      drawn = { g: el('g'), plate, ghosts, wires, links, overlay, face, nodes, labels, nets, baked: null, wireCache: new Map(), nodeCache: new Map(), bundleCache: new Map(), shown: null, labelKey: null, sizes: [] };
-      drawn.g.append(plate, wires, links, overlay, drawn.face, nodes, ghosts, labels, nets);
+      // ADR 0047 phase 4: the ribbons' bands, under the wires (each member drawn over its band, its way through it visible).
+      const ribbons = el('g', { class: 'ribbons' });
+      drawn = { g: el('g'), plate, ghosts, ribbons, wires, links, overlay, face, nodes, labels, nets, baked: null, wireCache: new Map(), nodeCache: new Map(), bundleCache: new Map(), shown: null, labelKey: null, sizes: [] };
+      drawn.g.append(plate, ribbons, wires, links, overlay, drawn.face, nodes, ghosts, labels, nets);
       this.groups.set(level.path, drawn);
     }
     const transform = level.transform;
@@ -942,7 +987,9 @@ export class SignalSchematic extends HTMLElement {
     level.openKey = open;
     // The box around this level's inside, when it is open in place: its pins are joined to the frame's (its groups collapsed or not).
     const parentCollapsed = Boolean(level.parent?.collapsed);
-    const sizes = `${text(12)} ${text(9)}${open ? ` ${level.pinK}` : ''} ${parentCollapsed} ${this.board?.key ?? ''}`;
+    // ADR 0047 phase 4: a board's corners are rounded to CORNER_PX on screen (in half-octave steps of the scale), its tones its nets'.
+    level.corner = level.layout.board ? cornerAt(transform.k) : null;
+    const sizes = `${text(12)} ${text(9)}${open ? ` ${level.pinK}` : ''} ${parentCollapsed} ${this.board?.key ?? ''} ${level.corner ?? ''} ${level.toneKey ?? ''}`;
     // M2.13-2: a pair's wires bundled at small scale (ui/lib/schematic-bundle.js), the traced and selected ones on their own above.
     const solo = this.soloWires(level);
     // A level a box of which is dragged: every wire on its own, as DragFollow moves them by id.
@@ -998,12 +1045,18 @@ export class SignalSchematic extends HTMLElement {
       if (level.layout.board && level.path === '') {
         this.board?.drawPlate(drawn.plate, drawn.ghosts, baked, bakedRect, bakedPoint, (...a) => this.faceArea(...a), text, level.layout);
         this.board?.drawLabels(drawn.nets, level.layout, baked, bakedPath, bakedPoint, text);
+        this.board?.drawRibbons(drawn.ribbons, drawn.nets, level, baked, bakedRect, bakedPoint, text);
       } else {
         drawn.plate.replaceChildren();
         drawn.ghosts.replaceChildren();
         // A die's own net labels, and the stubs at its edge pins naming what enters and leaves there (ADR 0047 §8).
-        if (level.layout.board) this.board?.drawLabels(drawn.nets, level.layout, baked, bakedPath, bakedPoint, text);
-        else drawn.nets.replaceChildren();
+        if (level.layout.board) {
+          this.board?.drawLabels(drawn.nets, level.layout, baked, bakedPath, bakedPoint, text);
+          this.board?.drawRibbons(drawn.ribbons, drawn.nets, level, baked, bakedRect, bakedPoint, text);
+        } else {
+          drawn.nets.replaceChildren();
+          drawn.ribbons.replaceChildren();
+        }
       }
       if (!sameItems([...drawn.nodes.children], nodes.elements)) drawn.nodes.replaceChildren(...nodes.elements);
       drawn.wireCache = wires.cache;
@@ -1021,11 +1074,24 @@ export class SignalSchematic extends HTMLElement {
     return !same;
   }
 
+  /** The class of `wire`'s tone at `level` (ADR 0047 phase 4): its net's colour, a die's interface wire its package pin's. */
+  toneClass(level, wire) {
+    const tone = level.tones?.get(wire.id) ?? (wire.kind === 'binding' ? 'binding' : wire.shape);
+    return tone === 'binding' && wire.kind !== 'binding' ? 'leg' : tone;
+  }
+
+  /** `wire`'s geometry at `level`: a board's with its corners rounded to CORNER_PX on screen (`level.corner`). */
+  wireShape(level, wire) {
+    if (!wire.orth || !level.corner) return wire;
+    return orthGeometry(wire.display ?? wire.corners, level.corner);
+  }
+
   wireElement(level, wire, baked) {
     const from = `${level.path}/${String(wire.written.from).replace(/^\//, '')}`;
+    const shape = this.wireShape(level, wire);
     return el('path', {
-      class: ['wire', wire.shape, wire.dashed ? 'dashed' : '', wire.crossing ? 'crossing' : '', wire.kind === 'binding' ? 'binding' : ''].filter(Boolean).join(' '),
-      d: bakedPath(baked, wire.points, wire.curve),
+      class: ['wire', this.toneClass(level, wire), wire.dashed ? 'dashed' : '', wire.crossing ? 'crossing' : '', wire.kind === 'binding' ? 'binding' : ''].filter(Boolean).join(' '),
+      d: bakedPath(baked, shape.points, shape.curve),
       'data-address': from,
       'data-label': wire.label,
       'data-part': 'schematic',
@@ -1042,7 +1108,10 @@ export class SignalSchematic extends HTMLElement {
       path.style.strokeWidth = `${1.5 + Math.log2(bundle.count)}px`;
       group.append(path);
     }
-    for (const m of bundle.members) group.append(el('path', { class: ['wire', m.wire.shape, m.wire.dashed ? 'dashed' : '', m.wire.kind === 'binding' ? 'binding' : ''].join(' ').trim(), d: bakedPath(baked, m.points, m.curve) }));
+    for (const m of bundle.members) {
+      const shape = m.wire.orth && level.corner ? this.wireShape(level, m.wire) : m;
+      group.append(el('path', { class: ['wire', this.toneClass(level, m.wire), m.wire.dashed ? 'dashed' : '', m.wire.kind === 'binding' ? 'binding' : ''].join(' ').trim(), d: bakedPath(baked, shape.points, shape.curve) }));
+    }
     return group;
   }
 
@@ -1155,7 +1224,9 @@ export class SignalSchematic extends HTMLElement {
     }
     for (const pin of [...node.ins, ...node.outs]) {
       const out = pin.direction === 'out';
-      const kind = ['pin', pin.shape, 'control-pin', pin.connected ? 'connected' : '', pin.role ? '' : 'unmatched'].filter(Boolean).join(' ');
+      // ADR 0047 phase 4: in its leg's tone.
+      const tone = level.pinTones?.get(pinKey(node.id, out, pin.name));
+      const kind = ['pin', tone === 'binding' ? 'leg' : (tone ?? pin.shape), 'control-pin', pin.connected ? 'connected' : '', pin.role ? '' : 'unmatched'].filter(Boolean).join(' ');
       const data = { class: kind, 'data-address': pin.address, 'data-direction': pin.direction, 'data-label': `${pin.address}${out ? ' (sets it)' : ' (reads it)'}`, 'data-part': 'schematic' };
       const shape = bakedPin(baked, level.transform, this.viewport, pin, 2);
       if (shape.circle) group.append(el('circle', { ...data, ...shape.circle }));
@@ -1229,12 +1300,9 @@ export class SignalSchematic extends HTMLElement {
       const at = bakedPoint(baked, p);
       group.append(el('text', { ...attributes, x: at.x, y: at.y, 'font-size': size * m }, content));
     };
+    // ADR 0047 §7 (phase 4): a chip is a package, a body with its pins as short legs on its edges; nothing else on it
+    // looks like a pin (the notch at its top, read as one, is gone).
     rect(node, { class: 'box', rx: 4 * m });
-    // ADR 0047 §7: a chip is a package: a notch at its top, its pins short legs on its edges.
-    if (node.kind === 'instance' && !isOpen && text(9)) {
-      const c = bakedPoint(baked, { x: node.x + node.w / 2, y: node.y });
-      group.append(el('circle', { class: 'notch', cx: c.x, cy: c.y, r: 4 * m }));
-    }
     // 2026-10-30: a closed slot's face, its part as on the panel, over this area (ui/controls/schematic-faces.js).
     if (node.face && !isOpen && node.kind === 'instance') {
       const f = node.face;
@@ -1290,7 +1358,10 @@ export class SignalSchematic extends HTMLElement {
       const reason = slotted ? unmatchedReason(slotted, pin.name) : null;
       // ADR 0037, editable insides: a slot inside's frame pin not wired inside yet is hollow too.
       const loose = node.kind !== 'instance' && pin.unmatched;
-      const kind = ['pin', pin.shape, pin.parameter ? 'parameter' : '', pin.connected ? 'connected' : '', reason || loose ? 'unmatched' : '', this.board?.hiddenKind(pin.shape) ? 'kind-hidden' : ''].filter(Boolean).join(' ');
+      // ADR 0047 phase 4: a pin in its net's tone (a parameter a knob's leg sets amber, outside and inside its die alike).
+      const tone = level.pinTones?.get(pinKey(node.id, out, pin.name));
+      const toneClass = tone === 'binding' ? 'leg' : (tone ?? pin.shape);
+      const kind = ['pin', toneClass, pin.parameter ? 'parameter' : '', pin.connected ? 'connected' : '', reason || loose ? 'unmatched' : '', this.board?.hiddenKind(pin.shape) ? 'kind-hidden' : ''].filter(Boolean).join(' ');
       // ADR 0047 §7: a package's leg, outside its edge.
       // A top pin's leg stands up from the chip's top edge (ADR 0047 §7), its name in its tooltip.
       if (node.kind === 'instance' && !isOpen && !anchors && text(9)) rect(pin.side === 'top' ? { x: pin.x - 1.5, y: pin.y - 5, w: 3, h: 5 } : { x: out ? pin.x : pin.x - 5, y: pin.y - 1.5, w: 5, h: 3 }, { class: 'leg' });
@@ -1362,6 +1433,8 @@ export class SignalSchematic extends HTMLElement {
       const old = new Map(this.layouts);
       this.layouts.clear();
       this.dieOrders?.clear();
+      // Laid out again at the measured sizes: no layout before is kept.
+      this.layoutEpoch = (this.layoutEpoch ?? 0) + 1;
       this.view = rebase(this.view, (level) => old.get(level) ?? null, (level) => this.layoutOf(level));
       this.selected = reselectAll(this.selected, (level) => this.layoutOf(level));
       this.schedule();
@@ -1445,8 +1518,32 @@ export class SignalSchematic extends HTMLElement {
   syncHalo() {
     const rings = new Map();
     const halos = new Map();
+    // A wire raised over the others of its level (in `path`), in its tone.
+    const raise = (path, wire, element) => {
+      const overlay = this.groups.get(path)?.overlay;
+      if (!overlay || !element || halos.has(element)) return;
+      const halo = this.halos.get(element) ?? { under: el('path', { class: 'halo' }), over: el('path') };
+      const { under, over } = halo;
+      if (under.parentNode !== overlay) overlay.append(under, over);
+      const d = element.getAttribute('d');
+      if (over.getAttribute('d') !== d) {
+        under.setAttribute('d', d);
+        over.setAttribute('d', d);
+      }
+      const entry = this.drawn?.levels.find((l) => l.path === path);
+      const classes = ['wire', entry ? this.toneClass(entry, wire) : wire.shape, wire.dashed ? 'dashed' : '', 'raised'].filter(Boolean).join(' ');
+      if (over.getAttribute('class') !== classes) over.setAttribute('class', classes);
+      halos.set(element, halo);
+    };
     for (const s of this.selected.length > MANY_MARKS ? [] : this.selected) {
       const element = this.partElement(s);
+      // ADR 0047 phase 4: a pin selected on a board shows its net, outside its package and inside its die together.
+      if (s.kind === 'port' && this.drawn) {
+        for (const { path, wire } of portNet(this.drawn.levels, s)) {
+          if (!this.drawn.levels.find((l) => l.path === path)?.layout.board) continue;
+          raise(path, wire, this.groups.get(path)?.wireCache.get(wire.id)?.el ?? null);
+        }
+      }
       if (!element) continue;
       if (s.kind === 'port' && element.localName === 'circle') {
         const ring = this.rings.get(element) ?? el('circle', { class: 'ring' });
@@ -1455,21 +1552,7 @@ export class SignalSchematic extends HTMLElement {
           if (ring.getAttribute(name) !== value) ring.setAttribute(name, value);
         }
         rings.set(element, ring);
-      } else if (s.kind === 'wire') {
-        const overlay = this.groups.get(s.path)?.overlay;
-        if (!overlay) continue;
-        const halo = this.halos.get(element) ?? { under: el('path', { class: 'halo' }), over: el('path') };
-        const { under, over } = halo;
-        if (under.parentNode !== overlay) overlay.append(under, over);
-        const d = element.getAttribute('d');
-        if (over.getAttribute('d') !== d) {
-          under.setAttribute('d', d);
-          over.setAttribute('d', d);
-        }
-        const classes = ['wire', s.wire.shape, s.wire.dashed ? 'dashed' : '', 'raised'].filter(Boolean).join(' ');
-        if (over.getAttribute('class') !== classes) over.setAttribute('class', classes);
-        halos.set(element, halo);
-      }
+      } else if (s.kind === 'wire') raise(s.path, s.wire, element);
     }
     for (const [element, ring] of this.rings) if (rings.get(element) !== ring) ring.remove();
     for (const [element, halo] of this.halos) {

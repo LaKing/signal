@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { layout } from './schematic-layout.js';
 import { scene } from './schematic-scene.js';
 import { READ_K, linkScale } from './schematic-open.js';
-import { hitTest, instanceHit, portHit, reselect, wireHit } from './schematic-hit.js';
+import { MIN_PORT_PX, hitTest, instanceHit, portHit, reselect, wireHit } from './schematic-hit.js';
 import { MESSAGE_LIMIT, allOf, deletePlan, dragGroup, has, hitKey, inside, messageBytes, moveMessages, reselectAll, toggled, union, unique } from './schematic-select.js';
 import { fit, screenRect, toScreen } from './schematic-view.js';
 import { KICK } from './schematic-scene.test.js';
@@ -208,14 +208,14 @@ test('pins are hit within 9 px, the nearest of those in reach', () => {
   assert.equal(hitTest(drawn, { x: l.x, y: l.y + spacing * 0.6 }).address, '/out.r');
 });
 
-test('zoomed out, a box keeps its body: a pin reaches no more than a quarter of its box’s height', () => {
-  const k = 0.1;
+test('zoomed out, a box keeps its body: a pin reaches no more than a quarter of its box’s height, and never less than MIN_PORT_PX (ADR 0047 phase 4)', () => {
+  const k = 0.2;
   const view = { k, x: 20, y: 20 };
   const drawn = scene({ layoutOf, view, viewport: { w: 2000, h: 2000 } });
   const top = drawn.levels[0];
   const lfo = nodeOf('', 'lfo');
   const pin = toScreen(top.transform, lfo.outs[0]);
-  const reach = (lfo.h * k) / 4;
+  const reach = Math.max(MIN_PORT_PX, (lfo.h * k) / 4);
   assert.ok(reach < 9);
   assert.equal(hitTest(drawn, { x: pin.x - reach * 0.9, y: pin.y }).kind, 'port');
   const body = hitTest(drawn, { x: pin.x - reach * 1.2, y: pin.y });

@@ -27,12 +27,51 @@ import { curveDistance, distanceToSegment } from './schematic-wire.js';
 export const PORT_PX = 9;
 /** A wire is hit within this distance (px). */
 export const WIRE_PX = 4;
+/**
+ * ADR 0047 phase 4 (the owner: "not every element is selectable"): a pin is
+ * hit within at least this (px) however small its box on screen, and a pin
+ * of a box with no height (a die's parameters' strip) or no width (its
+ * interface's columns) within PORT_PX.
+ */
+export const MIN_PORT_PX = 4;
 
-/** Whether `wire` passes within `limit` (level units) of `p`: its curve when it has one, else its polyline. */
+/** How far (level units) `wire` passes from `p`: a board's on its drawn corners (its turns are rounded to a few px on screen), else its curve, else its polyline; Infinity beyond `limit`. */
+function wireDistance(wire, p, limit) {
+  const corners = wire.orth ? (wire.display ?? wire.corners) : null;
+  if (corners) {
+    let d = Infinity;
+    for (let s = 1; s < corners.length; s++) d = Math.min(d, distanceToSegment(p, corners[s - 1], corners[s]));
+    return d <= limit ? d : Infinity;
+  }
+  if (wire.curve) {
+    const d = curveDistance(wire.curve, p, limit);
+    return d <= limit ? d : Infinity;
+  }
+  let d = Infinity;
+  for (let s = 1; s < wire.points.length; s++) d = Math.min(d, distanceToSegment(p, wire.points[s - 1], wire.points[s]));
+  return d <= limit ? d : Infinity;
+}
+
 function nearWire(wire, p, limit) {
-  if (wire.curve) return curveDistance(wire.curve, p, limit) <= limit;
-  for (let s = 1; s < wire.points.length; s++) if (distanceToSegment(p, wire.points[s - 1], wire.points[s]) <= limit) return true;
-  return false;
+  return wireDistance(wire, p, limit) <= limit;
+}
+
+/** A pin's reach (px) on box `node` drawn at scale `scale`. */
+export function portReach(node, scale) {
+  if (!(node.h > 0) || !(node.w > 0)) return PORT_PX;
+  return Math.min(PORT_PX, Math.max(MIN_PORT_PX, (node.h * scale) / 4));
+}
+
+/**
+ * The hit of a board's leg (a plate control's binding, ADR 0047 §5): no
+ * connection of the project, so the pin it reaches on its chip (what it
+ * sets, or reads), whose net it is.
+ */
+function legHit(entry, wire) {
+  const chipEnd = String(wire.from.node).startsWith('@control:') ? { id: wire.to.node, port: wire.to.port, out: false } : { id: wire.from.node, port: wire.from.port, out: true };
+  const node = entry.layout.nodes.find((n) => n.id === chipEnd.id);
+  const port = (chipEnd.out ? node?.outs : node?.ins)?.find((p) => p.name === chipEnd.port);
+  return node && port ? portHit(entry, node, port) : null;
 }
 
 /** The address of a written endpoint (`kick.out`, `/a.out`) at level `path`. */
@@ -112,8 +151,8 @@ export function hitTest(drawn, point) {
       // A composite's frame pins too (ADR 0030 §1: a trace starts there); its boxes are not hit.
       // A panel control is hit whole, its pins with it (ui/lib/schematic-controls.js).
       if (node.kind === 'control' || (node.kind !== 'instance' && !entry.path)) continue;
-      // A box small on screen (zoomed out) keeps its body: its pins reach less.
-      const reach = Math.min(PORT_PX, (node.h * scale) / 4);
+      // A box small on screen (zoomed out) keeps its body: its pins reach less, never under MIN_PORT_PX (`portReach`).
+      const reach = portReach(node, scale);
       // M2.13-2: a collapsed box (`entry.collapsed`) is hit as drawn: a group of several by its one pin, its members' rows not at all.
       const anchors = entry.collapsed && node.groups ? groupAnchors(node) : null;
       const seen = new Set();
@@ -132,16 +171,36 @@ export function hitTest(drawn, point) {
     }
     if (best?.anchor) return groupHit(entry, best.node, best.anchor.group);
     if (best) return portHit(entry, best.node, best.port);
-    // A panel control (its pins on its edges, within reach of them too).
+    // A panel control (its pins on its edges, within reach of them too: a via's on its bottom edge as well, ADR 0047 phase 4).
     for (const node of nodes) {
       if (node.kind !== 'control') continue;
-      const reach = Math.min(PORT_PX, (node.h * scale) / 4) / scale;
-      if (local.x >= node.x - reach && local.x <= node.x + node.w + reach && local.y >= node.y && local.y <= node.y + node.h) return controlHit(entry, node);
+      const reach = portReach(node, scale) / scale;
+      if (local.x >= node.x - reach && local.x <= node.x + node.w + reach && local.y >= node.y - reach && local.y <= node.y + node.h + reach) return controlHit(entry, node);
     }
     for (const node of nodes) {
       if (node.kind !== 'instance') continue;
       // An open composite's inside was tried first; its box still counts.
       if (local.x >= node.x && local.x <= node.x + node.w && local.y >= node.y && local.y <= node.y + node.h) return instanceHit(entry, node);
+    }
+    // A board (ADR 0047 phase 4): every wire drawn is hit, the nearest within reach (a ribbon's members a few units apart), a leg as its chip's pin.
+    if (entry.layout?.board) {
+      let near = null;
+      const list = entry.bundles ?? entry.wires;
+      for (let j = list.length - 1; j >= 0; j--) {
+        const item = list[j];
+        const wires = item.kind === 'bundle' ? item.wires : [item];
+        for (const wire of wires) {
+          const d = wireDistance(wire, local, WIRE_PX / scale);
+          if (d < (near?.d ?? Infinity)) near = { d, wire };
+        }
+      }
+      if (near) {
+        if (near.wire.kind === 'binding') {
+          const leg = legHit(entry, near.wire);
+          if (leg) return leg;
+        } else return wireHit(entry, near.wire);
+      }
+      continue;
     }
     if (entry.bundles) {
       for (let j = entry.bundles.length - 1; j >= 0; j--) {
