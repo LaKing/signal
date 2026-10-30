@@ -15,6 +15,7 @@
 import { HEADER, PAD, dieArea, insideKey } from './schematic-layout.js';
 import { chooseOpen, grownNode, openedLayout } from './schematic-open.js';
 import { compose, screenRect, uncompose } from './schematic-view.js';
+import { fitDie } from './board-die.js';
 /** Smaller than this on screen (px), a node or a wire is not drawn. */
 export const MIN_PX = 2;
 /** Nested deeper than this, nothing more opens (a guard; projects are shallower). */
@@ -34,6 +35,18 @@ export function inside(node, bounds) {
     x: area.x + (area.w - bounds.w * k) / 2 - bounds.x * k,
     y: area.y + (area.h - bounds.h * k) / 2 - bounds.y * k,
   };
+}
+
+/**
+ * What `node` (an open composite's box) draws inside it: `{layout, link}`,
+ * its inside's layout `inner` as drawn there and the transform inside →
+ * parent. A package (ADR 0047 §8, `node.die`) draws its die fitted into its
+ * body, its interface on its own edges (`fitDie`); any other box its
+ * inside as laid out, in its frame (`inside`).
+ */
+export function drawnInside(node, inner) {
+  if (node.die) return fitDie(node, inner);
+  return { layout: inner, link: inside(grownNode(node, inner.bounds), inner.bounds) };
 }
 
 /**
@@ -77,7 +90,8 @@ export function chain(layoutOf, path = '') {
     parent.layout = openedLayout(parent.layout, name, drawn.bounds);
     const node = grownNode(box, drawn.bounds);
     at = `${at}/${name}`;
-    links.push({ path: at, level: insideKey(node), layout: drawn, node, inner: inside(node, drawn.bounds) });
+    const shown = drawnInside(node, drawn);
+    links.push({ path: at, level: insideKey(node), layout: shown.layout, node, inner: shown.link });
   }
   return links;
 }
@@ -112,8 +126,9 @@ export function scene({ layoutOf, view, viewport, pinned = new Set() }) {
     links.forEach((link, i) => along.set(link.path, transforms[i]));
   }
   const levels = [];
-  const visit = (path, level, transform, depth, parent) => {
-    const stored = layoutOf(level);
+  const visit = (path, level, transform, depth, parent, given = null) => {
+    // A die is drawn fitted into its package (`drawnInside`); its chips are the stored layout's.
+    const stored = given ?? layoutOf(level);
     if (!stored) return;
     const pick = depth < MAX_DEPTH ? chooseOpen({ path, layout: stored, layoutOf, pinned }) : null;
     const drawn = pick ? openedLayout(stored, pick.node.name, pick.inner.bounds) : stored;
@@ -137,10 +152,10 @@ export function scene({ layoutOf, view, viewport, pinned = new Set() }) {
     }
     if (!pick) return;
     const child = `${path}/${pick.node.name}`;
-    const frame = grownNode(pick.node, pick.inner.bounds);
+    const shown = drawnInside(pick.node, pick.inner);
     // A level on the view's chain has its transform from the view itself.
-    const next = along.get(child) ?? compose(transform, inside(frame, pick.inner.bounds));
-    visit(child, insideKey(pick.node), next, depth + 1, entry);
+    const next = along.get(child) ?? compose(transform, shown.link);
+    visit(child, insideKey(pick.node), next, depth + 1, entry, shown.layout);
   };
   visit('', '', along.get('') ?? view, 0, null);
   const drawn = { levels, open: new Set(levels.slice(1).map((l) => l.path)) };
@@ -308,7 +323,8 @@ export function planPort(graph, address, { parameter = false, input = false } = 
  * grouped box pin to its group's pin.
  */
 export function boundaryLinks(node, inner, anchors = null) {
-  if (!node || !inner) return [];
+  // A package's die has its interface on the package's own edges (ADR 0047 §8): no link to draw.
+  if (!node || !inner || node.die) return [];
   const t = inside(node, inner.bounds);
   const local = (p) => ({ x: (p.x - t.x) / t.k, y: (p.y - t.y) / t.k });
   const boxPin = (p) => local(anchors?.get(p.name) ?? p);

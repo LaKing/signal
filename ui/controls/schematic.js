@@ -80,7 +80,7 @@ import { HEADER, addPinAt, dragPosition, insideKey, layout } from '../lib/schema
 import { insideBanner, insideReason, isPreviewLevel, isSlotInside, levelData, unmatchedReason } from '../lib/slot.js';
 import { DragFollow, ownedLabels } from '../lib/schematic-drag.js';
 import { aroundReason, dragAction, drawOrder, editable, editLevel, openFrameHit, pinOne, shownFrame, unpin } from '../lib/schematic-open.js';
-import { boundaryLinks, breadcrumbs, chain, inside as insideLink, nodeRect, rebase, reroot, scene } from '../lib/schematic-scene.js';
+import { boundaryLinks, breadcrumbs, chain, drawnInside, nodeRect, rebase, reroot, scene } from '../lib/schematic-scene.js';
 import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
 import { hitTest, instanceHit, portHit, reselect, wireHit } from '../lib/schematic-hit.js';
 import { cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
@@ -298,6 +298,9 @@ svg.tracing .pin.traced { stroke: var(--signal-fg, #d6dbe4); stroke-width: 2.5; 
 .surround .node:not(.open):not(.traced) { opacity: var(--surround, 0.4); }
 .surround .wire:not(.crossing):not(.link):not(.traced) { opacity: var(--surround, 0.3); }
 .surround > .net-labels, .surround .board-section, .surround .board-section-edge { opacity: var(--surround, 0.4); }
+/* A die's interface lies on its package's edges (ADR 0047 §8): no column of its own; and the package's title fades out as its die comes in. */
+.node.edge > .box, .node.edge > .frame { display: none; }
+.open > .name, .open > .module { opacity: var(--title, 1); }
 /* A composite's or a frame's port label, a summary, a bundle's count (M2.13-2; 2026-10-20: in the level's units, scaling with the drawing, ui/lib/schematic-labels.js). */
 .labels { pointer-events: none; }
 .lbl { fill: var(--signal-muted, #8a93a3); white-space: pre; paint-order: stroke; stroke: var(--signal-bg, #16181d); stroke-linejoin: round; }
@@ -1180,7 +1183,7 @@ export class SignalSchematic extends HTMLElement {
     const isOpen = this.drawn.open.has(address);
     const muted = node.kind === 'instance' ? mutedOf(this.mutedSet, address) : null;
     const slotted = node.kind === 'instance' ? node.slot : null;
-    const classes = ['node', node.kind === 'instance' ? '' : 'pins', node.composite ? 'composite' : '', isOpen ? 'open' : '', muted ? 'muted' : '', slotted ? 'slot' : '', slotted && !slotted.load ? 'empty' : ''];
+    const classes = ['node', node.kind === 'instance' ? '' : 'pins', node.edge ? 'edge' : '', node.composite ? 'composite' : '', isOpen ? 'open' : '', muted ? 'muted' : '', slotted ? 'slot' : '', slotted && !slotted.load ? 'empty' : ''];
     const group = el('g', { class: classes.join(' ').replace(/\s+/g, ' ').trim() });
     if (node.kind === 'instance') {
       group.dataset.address = address;
@@ -1566,7 +1569,7 @@ export class SignalSchematic extends HTMLElement {
     const inner = node?.composite ? this.layoutOf(insideKey(node)) : null;
     const rect = nodeRect(this.drawn, path);
     if (!node || !inner || !rect) return null;
-    const dieK = parent.transform.k * insideLink(node, inner.bounds).k;
+    const dieK = parent.transform.k * drawnInside(node, inner).link.k;
     // In the parent level's own coordinates as drawn (the view's level may be shallower than it).
     const from = { ...parent.transform, path: parentPath };
     const to = { ...zoomInView(from, rect, this.viewport, dieK, MARGIN_PX), path: parentPath };
@@ -1701,6 +1704,8 @@ export class SignalSchematic extends HTMLElement {
       if (parent?.g?.style) {
         const around = String(Math.round(surroundOpacity(opacity) * 1000) / 1000);
         if (parent.g.style.getPropertyValue('--surround') !== around) parent.g.style.setProperty('--surround', around);
+        const title = String(Math.round((1 - opacity) * 1000) / 1000);
+        if (parent.g.style.getPropertyValue('--title') !== title) parent.g.style.setProperty('--title', title);
         if (level.parent.path === '') top = surroundOpacity(opacity);
       }
     }
@@ -1891,7 +1896,7 @@ export class SignalSchematic extends HTMLElement {
         if (hit) this.select(toggled(this.selected, hit));
       } else {
         this.select(hit ? [hit] : []);
-        // A plain click on a closed composite's box opens it in place (2026-10-22: the zoom no longer does);
+        // A plain click on a closed composite's chip zooms into it (ADR 0047 §8);
         // one on its face only selects it (a click beside a knob would open it all the time; a double-click enters).
         if (!gesture.fromFace && this.openInPlace(hit)) this.lastToggle = { at, time: event.timeStamp, hit };
       }

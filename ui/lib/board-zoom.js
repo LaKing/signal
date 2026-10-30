@@ -50,8 +50,9 @@ export const DIE_MAX_K = 2;
  * screen rectangle `rect` (as drawn in `view` now) fills `viewport` less
  * `margin` (`focus`'s fit), and its die, drawn at screen scale `dieK` now,
  * is drawn whole (FULL_K) when the fit leaves it smaller: then zoomed on
- * about the package's centre, which overflows the screen (a large inside,
- * such as moog_voice, is read by panning); never larger than DIE_MAX_K
+ * about the package's centre; when it is then wider than the stage, its
+ * left edge (its inputs) is put at the stage's left margin and the rest
+ * read by panning (a large inside, such as moog_voice); never larger than DIE_MAX_K
  * (a small inside then lies in the middle, its package smaller than the
  * stage).
  */
@@ -65,7 +66,10 @@ export function zoomInView(view, rect, viewport, dieK, margin = 24) {
   const centre = { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
   // Zoomed about the package's centre, then its centre moved to the viewport's.
   const zoomed = zoomAt(view, factor, centre);
-  return pan(zoomed, viewport.w / 2 - centre.x, viewport.h / 2 - centre.y);
+  // Wider than the stage at that scale: its left edge (the inputs, where the flow starts) at the stage's left margin.
+  const wide = rect.w * factor > w + 1e-9;
+  const dx = wide ? margin + (rect.w * factor) / 2 - centre.x : viewport.w / 2 - centre.x;
+  return pan(zoomed, dx, viewport.h / 2 - centre.y);
 }
 
 /** The ease of a zoom's travel: slow, fast, slow (cubic). */

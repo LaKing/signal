@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { INPUTS, OUTPUTS, WIDEN_MAX, dieArea, layout, widenPackage } from './schematic-layout.js';
 import { exportFacts } from './schematic-groups.js';
-import { boundaryLinks, inside, scene } from './schematic-scene.js';
+import { boundaryLinks, drawnInside, scene } from './schematic-scene.js';
 import { DIE_TEXT, FADE_FROM_PX } from './board-zoom.js';
 
 const read = (path) => JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8'));
@@ -122,32 +122,68 @@ test('a package is widened towards its die, at most WIDEN_MAX, in whole plate un
   assert.deepEqual(dieArea({ x: 10, y: 20, w: 104, h: 154 }), { x: 18, y: 54, w: 88, h: 112 });
 });
 
-test('the studio’s synth zoomed into: its die in its package, every package pin bonded to its die pin, nothing moved (test 8)', () => {
+test('the studio’s synth and drum voices zoomed into: the die fills its package, its interface on the package’s own pins, no bond wire, its edge wires orthogonal and under no chip; nothing moved (test 8)', () => {
   const of = levels(STUDIO);
   const top = of('');
-  const synth = top.nodes.find((n) => n.name === 'synth');
-  assert.ok(synth.die, 'a package');
-  const die = of('moog_voice');
-  // The bond wires: each package pin that the inside exports joins its frame pin.
-  const links = boundaryLinks(synth, die);
-  const framed = new Set([...(die.nodes.find((n) => n.id === INPUTS)?.outs ?? []), ...(die.nodes.find((n) => n.id === OUTPUTS)?.ins ?? [])].map((p) => p.name));
-  const pins = [...synth.ins, ...synth.outs].filter((p) => framed.has(p.name));
-  assert.equal(links.length, pins.length, 'one bond wire per pin');
-  assert.ok(links.length >= 3, `${links.length} bond wires`);
-  // The die lies in its package's body.
-  const t = inside(synth, die.bounds);
-  const area = dieArea(synth);
-  assert.ok(die.bounds.x * t.k + t.x >= area.x - 1e-6 && (die.bounds.x + die.bounds.w) * t.k + t.x <= area.x + area.w + 1e-6);
-  assert.ok(die.bounds.y * t.k + t.y >= area.y - 1e-6 && (die.bounds.y + die.bounds.h) * t.k + t.y <= area.y + area.h + 1e-6);
+  for (const name of ['synth', 'kick', 'snare', 'hats', 'tom']) {
+    const pkg = top.nodes.find((n) => n.name === name);
+    assert.ok(pkg.die, `${name}: a package`);
+    const die = of(pkg.module);
+    assert.deepEqual(boundaryLinks(pkg, die), [], `${name}: no bond wire`);
+    const { layout: shown, link } = drawnInside(pkg, die);
+    assert.equal(drawnInside(pkg, die).layout, shown, 'cached');
+    // The chips are the stored layout's; the interface pins are the package's pins, on its edges.
+    for (const n of shown.nodes.filter((n) => n.kind === 'instance')) assert.equal(n, die.nodes.find((m) => m.id === n.id));
+    const toParent = (p) => ({ x: p.x * link.k + link.x, y: p.y * link.k + link.y });
+    const outer = [...pkg.ins.map((p) => ['in', p]), ...pkg.outs.map((p) => ['out', p])];
+    let matched = 0;
+    for (const frame of shown.nodes.filter((n) => n.edge)) {
+      for (const p of [...frame.ins, ...frame.outs]) {
+        const q = outer.find(([side, o]) => o.name === p.name && (side === 'out') === (frame.id === OUTPUTS))?.[1];
+        if (!q) continue;
+        const at = toParent(p);
+        assert.ok(Math.abs(at.x - q.x) < 1e-6 && Math.abs(at.y - q.y) < 1e-6, `${name}: ${p.name} at its package pin`);
+        matched++;
+      }
+    }
+    assert.ok(matched >= 1, `${name}: ${matched} interface pins on the package`);
+    // The chips fill the body: the extent's larger share of it at least 80 %.
+    const chips = shown.nodes.filter((n) => n.kind === 'instance');
+    const lo = toParent({ x: Math.min(...chips.map((n) => n.x)), y: Math.min(...chips.map((n) => n.y)) });
+    const hi = toParent({ x: Math.max(...chips.map((n) => n.x + n.w)), y: Math.max(...chips.map((n) => n.y + n.h)) });
+    const area = dieArea(pkg);
+    assert.ok(Math.max((hi.x - lo.x) / area.w, (hi.y - lo.y) / area.h) >= 0.8, `${name}: fills its body`);
+    assert.ok(lo.x >= area.x - 1e-6 && hi.x <= area.x + area.w + 1e-6 && lo.y >= area.y - 1e-6 && hi.y <= area.y + area.h + 1e-6, `${name}: inside its body`);
+    // Every wire drawn, those from and to the edge orthogonal and under no chip.
+    assert.equal(shown.wires.length, die.wires.length);
+    for (const w of shown.wires) {
+      if (w.labelled) {
+        assert.ok(shown.board.labels.some((l) => l.wire === w.id), `${name}: ${w.label} labelled`);
+        continue;
+      }
+      for (let k = 1; k < w.corners.length; k++) {
+        const [p, q] = [w.corners[k - 1], w.corners[k]];
+        assert.ok(p.x === q.x || p.y === q.y, `${name}: ${w.label} orthogonal`);
+        const seg = { x: Math.min(p.x, q.x), y: Math.min(p.y, q.y), w: Math.abs(q.x - p.x) || 0.001, h: Math.abs(q.y - p.y) || 0.001 };
+        for (const n of chips) {
+          if ((k === 1 && n.id === w.from.node) || (k === w.corners.length - 1 && n.id === w.to.node)) continue;
+          assert.ok(!intersects(seg, n), `${name}: ${w.label} under ${n.id}`);
+        }
+      }
+    }
+  }
   // Zoomed into, at the scale its die's text is drawn: the top level's boxes are the stored ones, box for box.
+  const synth = top.nodes.find((n) => n.name === 'synth');
+  const { link } = drawnInside(synth, of('moog_voice'));
   const viewport = { w: 1600, h: 1000 };
-  const k = (FADE_FROM_PX + 1) / DIE_TEXT / t.k;
+  const k = (FADE_FROM_PX + 1) / DIE_TEXT / link.k;
   const view = { k, ox: synth.x + synth.w / 2, oy: synth.y + synth.h / 2, x: 800, y: 500 };
   const closed = scene({ layoutOf: of, view, viewport });
   const open = scene({ layoutOf: of, view, viewport, pinned: new Set(['/synth']) });
   assert.deepEqual([...open.open], ['/synth']);
   assert.deepEqual(open.levels[0].layout.nodes.map((n) => [n.id, n.x, n.y, n.w, n.h]), closed.levels[0].layout.nodes.map((n) => [n.id, n.x, n.y, n.w, n.h]));
   assert.equal(open.levels[0].layout.opened, 'synth');
+  assert.equal(open.levels[1].layout, drawnInside(synth, of('moog_voice')).layout, 'the fitted die is drawn');
   // Every inner wire is in the scene at every zoom (a board culls none).
-  assert.equal(open.levels[1].wires.length, die.wires.length);
+  assert.equal(open.levels[1].wires.length, of('moog_voice').wires.length);
 });
