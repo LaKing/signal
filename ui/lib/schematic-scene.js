@@ -12,7 +12,7 @@
 // whole and parents far outside the screen are culled. Breadcrumbs are
 // the open levels, the innermost last. No DOM.
 
-import { HEADER, PAD, insideKey } from './schematic-layout.js';
+import { HEADER, PAD, dieArea, insideKey } from './schematic-layout.js';
 import { chooseOpen, grownNode, openedLayout } from './schematic-open.js';
 import { compose, screenRect, uncompose } from './schematic-view.js';
 /** Smaller than this on screen (px), a node or a wire is not drawn. */
@@ -26,7 +26,8 @@ function intersects(a, b) {
 
 /** The transform that puts a level whose layout has `bounds` inside `node`'s box, below its header. */
 export function inside(node, bounds) {
-  const area = { x: node.x + PAD, y: node.y + HEADER, w: Math.max(1, node.w - 2 * PAD), h: Math.max(1, node.h - HEADER - PAD) };
+  // Its body below its header (ADR 0047 §8, a package's die area).
+  const area = dieArea(node);
   const k = Math.min(area.w / Math.max(bounds.w, 1e-9), area.h / Math.max(bounds.h, 1e-9));
   return {
     k,
@@ -149,39 +150,6 @@ export function scene({ layoutOf, view, viewport, pinned = new Set() }) {
   const root = levels.find((l) => l.path === deepest) ?? levels[0];
   drawn.view = root ? { ...root.transform, path: root.path } : view;
   return drawn;
-}
-
-/**
- * The pan (screen px, `{dx, dy, path, k}`: the composite opened, its
- * parent's scale on screen) that keeps a composite opened by a click
- * where the click was (M2.13-3, the operator's review; a zoom opened it
- * before 2026-10-22), or null when none opened: the first level of `drawn`
- * (a scene) whose open composite was not open `before` (a set of paths).
- * The point of the box under `at` (the click), as a fraction of its width
- * and height, is under `at` again in its frame (clamped to the box), so
- * the view does not jump: what was under the pointer is the same part of
- * the frame; then, when the frame fits on the stage, its header (and its
- * ×) is kept on it.
- */
-export function openAnchor(drawn, before, at, viewport) {
-  for (let i = 0; i + 1 < drawn.levels.length; i++) {
-    const level = drawn.levels[i];
-    const child = drawn.levels[i + 1];
-    const name = level.layout?.opened;
-    if (!name || before.has(child.path) || child.path !== `${level.path}/${name}`) continue;
-    const frame = level.layout.nodes.find((n) => n.kind === 'instance' && n.name === name);
-    const node = level.stored?.nodes.find((n) => n.kind === 'instance' && n.name === name);
-    if (!frame?.grown || !node) return null;
-    const box = screenRect(level.transform, node);
-    const r = screenRect(level.transform, frame);
-    const fx = Math.min(1, Math.max(0, (at.x - box.x) / box.w));
-    const fy = Math.min(1, Math.max(0, (at.y - box.y) / box.h));
-    const dx = box.x + fx * box.w - (r.x + fx * r.w);
-    let dy = box.y + fy * box.h - (r.y + fy * r.h);
-    if (r.h <= viewport.h && r.y + dy < 0) dy = -r.y;
-    return { dx, dy, path: child.path, k: level.transform.k };
-  }
-  return null;
 }
 
 /** How far past the screen (px) a stroke may reach. */

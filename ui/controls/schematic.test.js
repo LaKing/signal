@@ -1,15 +1,17 @@
-// <signal-schematic>'s opening and closing (2026-10-22, the owner: "when I
-// zoom in, a composite opens automatically. It would be better if it
-// opened on a click, and there were an × in the top-right corner to close
-// it"), driven through its real pointer, key, zoom and render code with the
-// least of a DOM it needs: the drawing itself (`drawLevel` and the marks)
-// is left out, the scene is the real one.
+// <signal-schematic>'s deep zoom (ADR 0047 §8, phase 3; the owner: "a
+// click should zoom into the chip … the structure around it fades … the
+// chip's inner schematic appears", replacing 2026-10-22's opening in place
+// and its ×), driven through its real pointer, key, zoom and render code
+// with the least of a DOM it needs: the drawing itself (`drawLevel` and the
+// marks) is left out, the scene is the real one. Every level is a board
+// (the top level's, each inside a die drawn in its package), as the page
+// lays them out. Without `requestAnimationFrame` (node) a travel arrives at
+// once, as with reduced motion.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { layout } from '../lib/schematic-layout.js';
-import { CLOSE_MIN_PX, READ_K, closeBox } from '../lib/schematic-open.js';
-import { hitTest } from '../lib/schematic-hit.js';
+import { DIE_MAX_K, FULL_K, belowThreshold, dieOpacity } from '../lib/board-zoom.js';
 import { fit, toScreen } from '../lib/schematic-view.js';
 import { KICK } from '../lib/schematic-scene.test.js';
 import { bake } from '../lib/schematic-draw.js';
@@ -22,14 +24,18 @@ const { SignalSchematic } = await import('./schematic.js');
 
 const viewport = { w: 1000, h: 600 };
 
-/** KICK's levels, and a library composite `/lib` (its inside not in the graph) beside them. */
+/** KICK's levels as boards (each inside a die, its package widened towards it), and a library composite `/lib` (its inside not in the graph) beside them. */
 function kickLayouts() {
   const top = { ...KICK.top, instances: [...KICK.top.instances, { name: 'lib', module: 'lib.voice', composite: true, ports: [], parameters: [] }] };
   const layouts = new Map();
-  return (level) => {
-    if (!layouts.has(level)) layouts.set(level, level === '' ? layout(top) : KICK.composites[level] ? layout(KICK.composites[level]) : null);
+  const of = (level) => {
+    if (!layouts.has(level)) {
+      const dieOf = (node) => of(node.module)?.bounds ?? null;
+      layouts.set(level, level === '' ? layout(top, {}, { board: { dieOf } }) : KICK.composites[level] ? layout(KICK.composites[level], {}, { board: { die: true, dieOf } }) : null);
+    }
     return layouts.get(level);
   };
+  return of;
 }
 
 /** A schematic showing KICK fitted (as on loading), every redraw its real `render` without the drawing. */
@@ -43,7 +49,8 @@ function schematic() {
     fitted: true,
     open: new Set(),
     pinned: new Set(),
-    openShifts: new Map(),
+    zooming: null,
+    zoomedOut: false,
     selected: [],
     gesture: null,
     tracing: null,
@@ -85,71 +92,68 @@ function key(s, name) {
   s.key({ key: name, composedPath: () => [s], preventDefault() {}, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false });
 }
 
-/** The middle of instance `name`'s box at level `path` on screen. */
-function middleOf(s, path, name) {
+/** Instance `name`'s box at level `path` on screen. */
+function rectOf(s, path, name) {
   const level = s.drawn.levels.find((l) => l.path === path);
   const node = level.stored.nodes.find((n) => n.name === name);
-  return toScreen(level.transform, { x: node.x + node.w / 2, y: node.y + node.h / 2 });
+  const at = toScreen(level.transform, node);
+  return { ...at, w: node.w * level.transform.k, h: node.h * level.transform.k };
 }
 
-/** The middle of the × of the open composite at `path` on screen. */
-function closeOf(s, path) {
-  const cut = path.lastIndexOf('/');
-  const level = s.drawn.levels.find((l) => l.path === path.slice(0, cut));
-  const r = closeBox(level.layout.nodes.find((n) => n.name === path.slice(cut + 1)), level.transform.k);
-  return toScreen(level.transform, { x: r.x + r.w / 2, y: r.y + r.h / 2 });
+/** The middle of instance `name`'s box at level `path` on screen. */
+function middleOf(s, path, name) {
+  const r = rectOf(s, path, name);
+  return { x: r.x + r.w / 2, y: r.y + r.h / 2 };
 }
 
 /** The scale of the top level on screen. */
 const topK = (s) => s.drawn.levels[0].transform.k;
 
-test('a zoom never opens nor closes: in a thousandfold about a closed composite, out a thousandfold from an open one', () => {
-  const s = schematic();
-  const at = middleOf(s, '', 'drums');
-  for (let i = 0; i < 40; i++) s.zoomBy(1.2, at);
-  assert.deepEqual([...s.drawn.open], [], 'zoomed in on drums: still closed');
-  assert.ok(topK(s) > 1000 * fit(s.layoutOf('').bounds, viewport).k);
-  s.fitTop();
-  click(s, middleOf(s, '', 'drums'));
-  assert.deepEqual([...s.drawn.open], ['/drums']);
-  for (let i = 0; i < 40; i++) s.zoomBy(1 / 1.2, { x: 500, y: 300 });
-  assert.deepEqual([...s.drawn.open], ['/drums'], 'zoomed far out: still open');
-  for (let i = 0; i < 80; i++) s.zoomBy(1.2, { x: 500, y: 300 });
-  assert.deepEqual([...s.drawn.open], ['/drums'], 'and far in again');
-});
+/** The boxes of a level as stored: what must never move. */
+const boxes = (s, path) => s.layoutOf(path === '' ? '' : s.drawn.levels.find((l) => l.path === path).level).nodes.map((n) => [n.id, n.x, n.y, n.w, n.h]);
 
-test('a click on a closed composite’s box opens it where it is and selects it; the view is not zoomed', () => {
+test('a click on a chip zooms into it: its package fills the stage, its die drawn whole in it, nothing moved, the surroundings faded', () => {
   const s = schematic();
-  const k = topK(s);
-  const at = middleOf(s, '', 'drums');
-  const box = s.drawn.levels[0].stored.nodes.find((n) => n.name === 'drums');
-  const fx = (at.x - toScreen(s.drawn.levels[0].transform, box).x) / (box.w * k);
-  click(s, at);
+  const before = boxes(s, '');
+  click(s, middleOf(s, '', 'drums'));
   assert.deepEqual([...s.pinned], ['/drums']);
   assert.deepEqual([...s.drawn.open], ['/drums']);
-  assert.deepEqual(s.selected.map((p) => p.address), ['/drums']);
-  assert.equal(topK(s), k, 'the same scale');
-  // The box's point under the pointer is the same point of its frame (across; down, its header may be kept on the stage).
+  assert.deepEqual(s.selected.map((p) => p.address), ['/drums'], 'selected too');
   const top = s.drawn.levels[0];
-  const frame = top.layout.nodes.find((n) => n.name === 'drums');
-  const p = toScreen(top.transform, { x: frame.x + fx * frame.w, y: frame.y });
-  assert.ok(Math.abs(p.x - at.x) < 1e-6, `${p.x} vs ${at.x}`);
-  // Inside it, a click on kick opens kick too; on a primitive nothing opens.
+  // Nothing grows and nothing moves: the drawn level is the stored one, box for box.
+  assert.deepEqual(top.layout.nodes.map((n) => [n.id, n.x, n.y, n.w, n.h]), before);
+  assert.deepEqual(boxes(s, ''), before);
+  // The package fills the stage (its margins), centred; its die is drawn whole (FULL_K or more).
+  const r = rectOf(s, '', 'drums');
+  assert.ok(Math.abs(r.x + r.w / 2 - viewport.w / 2) < 1e-6 && Math.abs(r.y + r.h / 2 - viewport.h / 2) < 1e-6, `centred: ${JSON.stringify(r)}`);
+  const die = s.drawn.levels[1];
+  assert.equal(die.path, '/drums');
+  assert.ok(r.w >= viewport.w - 48 - 1e-6 || r.h >= viewport.h - 48 - 1e-6 || Math.abs(die.transform.k - DIE_MAX_K) < 1e-9, `fills the stage: ${JSON.stringify(r)}`);
+  assert.ok(die.transform.k >= FULL_K - 1e-9 && die.transform.k <= DIE_MAX_K + 1e-9, `the die at ${die.transform.k}`);
+  assert.equal(dieOpacity(die.transform.k), 1);
+  // The die lies in its package's body.
+  const inner = s.layoutOf('drums').bounds;
+  const at = toScreen(die.transform, inner);
+  assert.ok(at.x >= r.x - 1e-6 && at.y >= r.y - 1e-6 && at.x + inner.w * die.transform.k <= r.x + r.w + 1e-6 && at.y + inner.h * die.transform.k <= r.y + r.h + 1e-6, 'inside the package');
+  // Recursion: a click on kick in the die zooms into kick the same way, drums staying open.
   click(s, middleOf(s, '/drums', 'kick'));
   assert.deepEqual([...s.drawn.open].sort(), ['/drums', '/drums/kick']);
+  assert.ok(s.drawn.levels[2].transform.k >= FULL_K - 1e-9);
+  assert.deepEqual(boxes(s, '/drums'), s.layoutOf('drums').nodes.map((n) => [n.id, n.x, n.y, n.w, n.h]));
+  // A primitive in it is only selected.
   click(s, middleOf(s, '/drums/kick', 'osc'));
   assert.deepEqual([...s.drawn.open].sort(), ['/drums', '/drums/kick']);
   assert.deepEqual(s.selected.map((p) => p.address), ['/drums/kick/osc']);
 });
 
-test('a library composite only selects; a Shift-click and a drag do not open', () => {
+test('a library composite only selects; a Shift-click and a drag do not zoom', () => {
   const s = schematic();
   click(s, middleOf(s, '', 'lib'));
   assert.deepEqual([...s.pinned], []);
   assert.deepEqual(s.selected.map((p) => p.address), ['/lib']);
   const at = middleOf(s, '', 'drums');
   click(s, at, { x: at.x + 40, y: at.y + 10 });
-  assert.deepEqual([...s.pinned], [], 'dragged: not opened');
+  assert.deepEqual([...s.pinned], [], 'dragged: not zoomed into');
   assert.deepEqual([...s.drawn.open], []);
   time += 1000;
   s.pointerDown({ button: 0, pointerId: 1, clientX: at.x, clientY: at.y, shiftKey: true, metaKey: false, ctrlKey: false, timeStamp: time });
@@ -157,97 +161,76 @@ test('a library composite only selects; a Shift-click and a drag do not open', (
   assert.deepEqual([...s.pinned], [], 'Shift-click: added to the selection only');
 });
 
-test('the × closes its composite and what is open inside it, selecting nothing, the view not zoomed', () => {
+test('Escape ends a trace, then zooms out of the innermost chip, one level at a time, then lets the selection go', () => {
   const s = schematic();
+  const fitted = topK(s);
   click(s, middleOf(s, '', 'drums'));
-  click(s, middleOf(s, '/drums', 'kick'));
-  assert.deepEqual([...s.drawn.open].sort(), ['/drums', '/drums/kick']);
-  s.select([]);
-  const k = topK(s);
-  // kick's own × closes kick alone.
-  click(s, closeOf(s, '/drums/kick'));
-  assert.deepEqual([...s.drawn.open], ['/drums']);
-  click(s, middleOf(s, '/drums', 'kick'));
-  s.select([]);
-  const at = closeOf(s, '/drums');
-  click(s, at);
-  assert.deepEqual([...s.pinned], [], 'drums and kick inside it');
-  assert.deepEqual([...s.drawn.open], []);
-  assert.deepEqual(s.selected, [], 'nothing selected');
-  assert.equal(topK(s), k, 'the same scale');
-  // A press on the × dragged away does not pan.
-  click(s, middleOf(s, '', 'drums'));
-  const view = s.view;
-  const x = closeOf(s, '/drums');
-  click(s, x, { x: x.x - 200, y: x.y + 200 });
-  assert.deepEqual([...s.drawn.open], ['/drums'], 'let go elsewhere: still open');
-  assert.equal(s.view, view, 'not panned');
-  // Slid onto its frame's header beside it: not closed either.
-  const side = closeBox(s.drawn.levels[0].layout.nodes.find((n) => n.name === 'drums'), topK(s)).w * topK(s);
-  assert.ok(side >= CLOSE_MIN_PX - 1e-9, `the × ${side} px on screen at least`);
-  click(s, x, { x: x.x - 2 * side, y: x.y });
-  assert.equal(hitTest(s.drawn, { x: x.x - 2 * side, y: x.y }).kind, 'instance');
-  assert.deepEqual([...s.drawn.open], ['/drums'], 'let go on the frame: still open');
-});
-
-test('Escape ends a trace, then closes the innermost open composite, one at a time, then lets the selection go', () => {
-  const s = schematic();
-  click(s, middleOf(s, '', 'drums'));
+  const drumsK = topK(s);
   click(s, middleOf(s, '/drums', 'kick'));
   s.tracing = { result: null };
   key(s, 'Escape');
   assert.equal(s.ended, 1, 'the trace ended first');
   assert.deepEqual([...s.drawn.open].sort(), ['/drums', '/drums/kick']);
-  const k = topK(s);
   key(s, 'Escape');
-  assert.deepEqual([...s.drawn.open], ['/drums'], 'kick, the innermost');
+  assert.deepEqual([...s.drawn.open], ['/drums'], 'out of kick, the innermost');
+  assert.ok(Math.abs(topK(s) - drumsK) < 1e-9 * drumsK, `back to drums framed: ${topK(s)} vs ${drumsK}`);
   assert.deepEqual(s.selected.map((p) => p.address), ['/drums/kick'], 'the selection kept');
   key(s, 'Escape');
   assert.deepEqual([...s.drawn.open], []);
-  assert.equal(topK(s), k, 'the view not zoomed');
+  assert.ok(Math.abs(topK(s) - fitted) < 1e-9 * fitted, 'back to the whole board');
   key(s, 'Escape');
   assert.deepEqual(s.selected, [], 'then the selection');
 });
 
-test('closed by its ×, a composite’s box is back where it was before it opened, and a click there opens it again', () => {
+test('zooming out past a die’s threshold leaves it; zooming in never opens one, nor does a pan', () => {
   const s = schematic();
   const at = middleOf(s, '', 'drums');
-  click(s, at);
+  for (let i = 0; i < 40; i++) s.zoomBy(1.2, at);
+  assert.deepEqual([...s.drawn.open], [], 'zoomed in on drums: no die without a click');
+  s.fitTop();
+  click(s, middleOf(s, '', 'drums'));
+  click(s, middleOf(s, '/drums', 'kick'));
+  assert.deepEqual([...s.drawn.open].sort(), ['/drums', '/drums/kick']);
+  // Out step by step: kick goes when its text falls under the threshold, then drums when its does.
+  const seen = [];
+  for (let i = 0; i < 60 && s.drawn.open.size; i++) {
+    s.zoomBy(1 / 1.2, { x: 500, y: 300 });
+    const last = s.drawn.levels.at(-1);
+    if (last.parent) assert.ok(!belowThreshold(last.transform.k), `a die drawn below its threshold at ${last.transform.k}`);
+    seen.push([...s.drawn.open].sort().join(' '));
+  }
+  assert.deepEqual([...new Set(seen)], ['/drums /drums/kick', '/drums', ''], 'one level at a time');
+  // A pan changes nothing open.
+  click(s, middleOf(s, '', 'drums'));
+  s.setView({ ...s.view, x: s.view.x + 300 });
   assert.deepEqual([...s.drawn.open], ['/drums']);
-  click(s, closeOf(s, '/drums'));
-  assert.deepEqual([...s.drawn.open], []);
-  const back = middleOf(s, '', 'drums');
-  assert.ok(Math.hypot(back.x - at.x, back.y - at.y) < 1e-6, `${back.x},${back.y} vs ${at.x},${at.y}`);
-  click(s, at);
-  assert.deepEqual([...s.drawn.open], ['/drums'], 'opened again');
-  // Zoomed in after opening, closing still puts the box under the frame's region it grew from, at the scale now.
-  for (let i = 0; i < 3; i++) s.zoomBy(1.2, closeOf(s, '/drums'));
-  const k = topK(s);
-  click(s, closeOf(s, '/drums'));
-  assert.deepEqual([...s.drawn.open], []);
-  assert.equal(topK(s), k, 'not zoomed');
 });
 
-test('a double-click opens and enters, readable; its second click opens nothing inside', () => {
+test('a double-click zooms in as a click does; its second click opens nothing inside', () => {
   const s = schematic();
   const at = middleOf(s, '', 'drums');
   click(s, at);
-  // The second click of the double-click lands in the frame now there.
+  // The second click of the double-click lands in the die now there.
   click(s, at, null, 100);
   assert.deepEqual([...s.pinned], ['/drums'], 'nothing more opened');
   assert.deepEqual(s.selected.map((p) => p.address), ['/drums'], 'nor selected');
   s.doubleClick({ clientX: at.x, clientY: at.y, timeStamp: time });
   assert.deepEqual([...s.drawn.open], ['/drums']);
-  assert.ok(Math.abs(s.drawn.levels[1].transform.k - READ_K) < 1e-9 || s.drawn.levels[1].transform.k > READ_K, 'Enter’s view: readable');
+  assert.ok(s.drawn.levels[1].transform.k >= FULL_K - 1e-9, 'readable');
 });
 
-test('Fit and a breadcrumb close what is below them', () => {
+test('Fit and a breadcrumb zoom out to their level and leave what is below them', () => {
   const s = schematic();
   click(s, middleOf(s, '', 'drums'));
+  const drumsK = topK(s);
   click(s, middleOf(s, '/drums', 'kick'));
   s.goTo('/drums');
-  s.render();
-  assert.deepEqual([...s.drawn.open], ['/drums']);
+  assert.deepEqual([...s.drawn.open], ['/drums'], 'the breadcrumb’s level stays');
+  assert.ok(Math.abs(topK(s) - drumsK) < 1e-9 * drumsK, 'framed as its click framed it');
+  s.goTo('');
+  assert.deepEqual([...s.pinned], []);
+  assert.deepEqual([...s.drawn.open], []);
+  click(s, middleOf(s, '', 'drums'));
   s.fitTop();
   assert.deepEqual([...s.pinned], []);
   assert.deepEqual([...s.drawn.open], []);

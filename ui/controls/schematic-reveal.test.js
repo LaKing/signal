@@ -32,7 +32,6 @@ function schematic() {
     fitted: true,
     open: new Set(),
     pinned: new Set(),
-    openShifts: new Map(),
     selected: [],
     gesture: null,
     tracing: null,

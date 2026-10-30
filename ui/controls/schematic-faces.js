@@ -53,7 +53,7 @@ const FACE_CSS = `
 .face-panel .signal-cards > *, .face-note { pointer-events: auto; }
 :host(.shown) { visibility: visible; }
 /* Around an open frame its level is dimmed (as its boxes are). */
-:host(.around) { opacity: 0.4; }
+:host(.around) { opacity: var(--signal-surround, 0.4); }
 .face-panel { font: var(--signal-font, 11px/1.3 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif); color: var(--signal-fg, #d6dbe4); }
 .face-note { margin: 0 0 6px; padding: 4px 6px; font: 11px/1.4 ui-monospace, Menlo, monospace; color: var(--signal-clip, #ff5252); background: var(--signal-panel, #1f232b); border-radius: 4px; }
 .face-note:empty { display: none; }
@@ -214,14 +214,9 @@ export class SchematicFaces {
     element.addEventListener('dblclick', (event) => {
       if (!onControl(event)) this.host.doubleClick(event);
     });
-    // A control that took the wheel (it owns it: focused, clicked) prevented its default; else the drawing zooms or pans.
-    element.addEventListener(
-      'wheel',
-      (event) => {
-        if (!event.defaultPrevented) this.host.wheel(event);
-      },
-      { passive: false },
-    );
+    // A control that owns the wheel (focused, clicked) takes it; else the drawing zooms or pans (ADR 0047 phase 3: the
+    // gesture's latch gives it to the schematic, `takesWheel` decides in `wheel`; the latch has prevented the page's scroll).
+    element.addEventListener('wheel', (event) => this.host.wheel(event), { passive: false });
     this.layer.append(element);
     this.resize?.observe?.(panel);
     this.faces.set(id, face);
@@ -356,7 +351,9 @@ export class SchematicFaces {
       const covered = Boolean(!plate && frame && slot !== frame.name && overlapping(rect, frame.rect));
       // Under the opaque plate the board's faces are hidden with it.
       const shown = Boolean(place) && !covered && overlapping(rect, view) && (plate || !this.host.board?.covered);
-      const classes = `face${shown ? ' shown' : ''}${!plate && frame && !covered && slot !== frame.name ? ' around' : ''}${plate ? this.plateClass : ''}`;
+      // The plate fades with the top level around a chip zoomed into (ADR 0047 §8).
+      const around = plate ? frames.has('') : frame && !covered && slot !== frame.name;
+      const classes = `face${shown ? ' shown' : ''}${around ? ' around' : ''}${plate ? this.plateClass : ''}`;
       if (face.classes !== classes) {
         face.element.className = classes;
         face.classes = classes;

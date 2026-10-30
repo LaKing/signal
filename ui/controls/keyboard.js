@@ -24,7 +24,7 @@
 
 import { getDefaultConnection, onDefaultConnection } from '../signal-ui.js';
 import { applyKeys, eventChord, formatChord, isMac, keyCommand, keymap, splitChord, wheelModifierHeld } from '../lib/keys.js';
-import { WheelLatch, fillsWindow, ownsWheel, wheelHint } from '../lib/wheel.js';
+import { WheelLatch, fillsWindow, ownsWheel, wheelHint, wheelOwner } from '../lib/wheel.js';
 import { toggleTransport, transportTargets } from '../lib/transport-toggle.js';
 
 /** How far the arrows scroll the page, in CSS pixels. */
@@ -329,8 +329,21 @@ function onWheelFirst(event) {
   const latch = latchOf(event.currentTarget);
   latch.seen(event.timeStamp || performance.now());
   if (latch.owner === undefined) {
-    const control = event.composedPath().find((n) => wheelControls.has(n));
-    if (control) decide(latch, control, event);
+    // Every control under the pointer, innermost first: the first that owns the wheel takes it (a knob not
+    // focused on a schematic's plate leaves it to the schematic, which fills the window), `wheelOwner`.
+    const controls = event.composedPath().filter((n) => wheelControls.has(n));
+    if (controls.length) {
+      const asked = controls.map((element) => {
+        const uses = usesWheelAt(element, event);
+        return { element, uses, owns: uses && ownsFor(element, event) };
+      });
+      const { owner, decider } = wheelOwner(asked);
+      if (owner) latch.claim(owner, true);
+      else if (decider) {
+        latch.claim(decider, false);
+        if (asked.find((c) => c.element === decider)?.uses && latch.hint(decider)) showHint(decider.ownerDocument, event);
+      }
+    }
   }
   // The gesture is a control's: the page never scrolls, wherever the pointer
   // is (outside it, or over a part of it without a wheel use of its own).

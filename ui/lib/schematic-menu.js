@@ -74,8 +74,8 @@ function partMenu(hit, state) {
     const slot = hit.node?.slot ?? null;
     const notComposite = composite ? null : slot ? (insideReason(slot) ?? (slot.load ? 'Its content is not a project composite' : 'An empty slot has no inside')) : 'A primitive has no inside';
     const items = [unless({ id: 'inspect', label: 'Inspect' }, null), unless(TRACE, null)];
-    if (composite && state.open) items.push(unless({ id: 'close', label: 'Close' }, null));
-    else items.push(unless({ id: 'open', label: 'Open in place' }, notComposite ?? (state.opaque ? 'A library composite: its inside is not in the graph' : null)));
+    if (composite && state.open) items.push(unless({ id: 'close', label: 'Zoom out' }, null));
+    else items.push(unless({ id: 'open', label: 'Zoom into' }, notComposite ?? (state.opaque ? 'A library composite: its inside is not in the graph' : null)));
     items.push(unless({ id: 'enter', label: 'Enter' }, notComposite), SEPARATOR, unless({ id: 'copy-address', label: 'Copy address' }, null), SEPARATOR);
     // The open frame whose inside is edited (`shown`, 2026-10-29): its own items and Delete act on it from there (Delete closes it).
     const own = state.shown ? inside : editOff;

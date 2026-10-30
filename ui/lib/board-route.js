@@ -239,9 +239,12 @@ export function simplify(corners) {
  * wire, drawn when traced) and the level's `labels` (`[{net, text, side,
  * at, corners, wire}]`, one at the source of each labelled net, one per
  * labelled destination) and `metrics` (`{crossings, bends, length,
- * labels}`).
+ * labels}`). `fanout` false (a die, ADR 0047 phase 3) labels no net for
+ * its fan-out or as global; `fallback(taken)`, called at the first wire
+ * that finds no way with the segments drawn so far, gives `{route(w),
+ * take(corners, net)}` (the maze): a second search before a label.
  */
-export function routeWires(boxes, wires, { nameOf = (w) => w.net } = {}) {
+export function routeWires(boxes, wires, { nameOf = (w) => w.net, fanout = true, fallback = null } = {}) {
   const router = new Router(boxes);
   router.prefs = trackPreferences(wires);
   // Nets: the wires from one pin.
@@ -251,11 +254,15 @@ export function routeWires(boxes, wires, { nameOf = (w) => w.net } = {}) {
     nets.get(w.net).push(w);
   }
   // Labels only for a true fan-out and a global net (the owner's verdict: fewer labels, more real wires).
-  const labelledNet = (list) => list.length >= NET_DESTS || list.some((w) => w.global);
+  // A die (ADR 0047 phase 3, `fanout` false) draws every net as wires: only a wire with no way is a label.
+  const labelledNet = (list) => fanout && (list.length >= NET_DESTS || list.some((w) => w.global));
   const result = wires.map(() => null);
   const order = wires.map((w, i) => ({ w, i, d: Math.abs(w.b.x - w.a.x) + Math.abs(w.b.y - w.a.y) + (w.feedback ? 1e6 : 0) }));
   order.sort((p, q) => p.d - q.d || p.i - q.i);
   const skip = (id) => new Set(id === undefined || id === null ? [] : [id]);
+  // The segments drawn so far (with their nets), for a fallback made at the first wire with no way.
+  const taken = [];
+  let maze = null;
   for (const { w, i } of order) {
     router.overVias = Boolean(w.overVias);
     if (w.never) {
@@ -272,9 +279,18 @@ export function routeWires(boxes, wires, { nameOf = (w) => w.net } = {}) {
       if (w.stations?.length) corners = through(router, w);
       corners ??= router.leg(w.a, w.b, w.net, skip(w.from), skip(w.to));
     }
+    // No way in the channels: the maze's search around everything drawn so far (`fallback`, a die's), else a label.
+    if (!corners && fallback) {
+      if (!maze) {
+        maze = fallback(taken);
+      }
+      corners = maze?.route(w) ?? null;
+    }
     if (corners) {
       corners = simplify(corners);
       router.take(corners, w.net);
+      for (let k = 1; k < corners.length; k++) taken.push(Object.assign([corners[k - 1], corners[k]], { net: w.net }));
+      if (maze) maze.take(corners, w.net);
       result[i] = { corners, labelled: false };
     } else result[i] = { labelled: true, failed: true };
   }
@@ -484,3 +500,44 @@ export function polylineMetrics(wires) {
   }
   return { crossings, length: Math.round(length) };
 }
+
+/** A net label's text: its font size (layout units), */
+export const LABEL_TEXT = 9;
+/** about this wide per character, */
+export const LABEL_CHAR = 5.4;
+/** a line this tall; a label moved off another goes this many lines up or down at most. */
+export const LABEL_LINE = 11;
+const LABEL_TRIES = 4;
+
+/** The rectangle of `label`'s text with its baseline moved by `dy`. */
+function labelRect(label, dy) {
+  const w = label.text.length * LABEL_CHAR;
+  const x = label.side === 'out' ? label.at.x + 3 : label.at.x - 3 - w;
+  return { x, y: label.at.y + dy - LABEL_TEXT + 3, w, h: LABEL_LINE - 1 };
+}
+
+/**
+ * The labels' texts kept off one another (ADR 0047 phase 3, the owner's
+ * "labels overlap"): in order, each label's text stays at its stub when it
+ * overlaps no text placed before it, else moves the fewest lines up or down
+ * (up first) to where it overlaps none, at most LABEL_TRIES lines; its stub
+ * stays at its pin. Sets each label's `text` point (`{x, y}`, the
+ * baseline's start or end by its side). Deterministic: the labels' order.
+ */
+export function spreadLabels(labels) {
+  const placed = [];
+  const hit = (r) => placed.some((o) => r.x < o.x + o.w && o.x < r.x + r.w && r.y < o.y + o.h && o.y < r.y + r.h);
+  for (const label of labels) {
+    let dy = 0;
+    for (let k = 1; k <= LABEL_TRIES && hit(labelRect(label, dy)); k++) {
+      dy = -k * LABEL_LINE;
+      if (!hit(labelRect(label, dy))) break;
+      dy = k * LABEL_LINE;
+    }
+    if (hit(labelRect(label, dy))) dy = 0;
+    placed.push(labelRect(label, dy));
+    label.textAt = { x: label.at.x + (label.side === 'out' ? 3 : -3), y: label.at.y + 3 + dy };
+  }
+  return labels;
+}
+

@@ -13,7 +13,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { layout, insideKey } from '../lib/schematic-layout.js';
 import { fit, toScreen } from '../lib/schematic-view.js';
-import { ENTER_MAX_K, closeShown, editLevel } from '../lib/schematic-open.js';
+import { editLevel } from '../lib/schematic-open.js';
+import { DIE_MAX_K, FULL_K } from '../lib/board-zoom.js';
 import { PatchSession } from '../lib/schematic-edit.js';
 import { EDIT_OFF, schematicMenu } from '../lib/schematic-menu.js';
 import { hitTest } from '../lib/schematic-hit.js';
@@ -94,7 +95,6 @@ function schematic(graph = GRAPH) {
     fitted: true,
     open: new Set(),
     pinned: new Set(),
-    openShifts: new Map(),
     layouts: new Map(),
     moved: new Map(),
     selected: [],
@@ -356,7 +356,7 @@ test('review follow-up: a slot’s own inside is listed only for its slot; a wra
   assert.match(insideBanner(graph, '/fx', '/rack1/fx').text, /as \/rack1\/fx\/gain\)\.$/);
 });
 
-test('a double-click on an empty slot frames its whole frame, title and × on the stage, at a sane scale; one small module inside too (2026-10-29)', () => {
+test('a double-click on an empty slot zooms into it: its whole package on the stage, its die at a sane scale; one small module inside too (2026-10-29, ADR 0047 §8)', () => {
   const big = { w: 1600, h: 1000 };
   const withSine = structuredClone(GRAPH);
   withSine.insides['/fx'].instances = [{ name: 'osc', module: 'std.sine_osc', composite: false, ports: [port('out', 'out', 'osc.out')], parameters: [] }];
@@ -368,11 +368,11 @@ test('a double-click on an empty slot frames its whole frame, title and × on th
     doubleClick(s, middleOf(s, '', 'fx'));
     assert.deepEqual(editLevel(s.drawn), { path: '/fx', level: '/fx' });
     const [top, fx] = s.drawn.levels;
-    assert.ok(top.transform.k <= ENTER_MAX_K + 1e-9 && fx.transform.k <= ENTER_MAX_K + 1e-9, `the frame at ${top.transform.k}, its inside at ${fx.transform.k}`);
+    assert.ok(fx.transform.k <= DIE_MAX_K + 1e-9 && fx.transform.k >= FULL_K - 1e-9, `its die at ${fx.transform.k}`);
     const frame = top.layout.nodes.find((n) => n.name === 'fx');
+    assert.equal(frame, top.stored.nodes.find((n) => n.name === 'fx'), 'the package as laid out: nothing grows');
     const at = toScreen(top.transform, frame);
-    assert.ok(at.x >= 0 && at.y >= 0 && at.x + frame.w * top.transform.k <= big.w && at.y + frame.h * top.transform.k <= big.h, 'the whole frame on the stage, its header (title) included');
-    assert.ok(closeShown(frame, top.transform.k), 'its × drawn');
+    assert.ok(at.x >= 0 && at.y >= 0 && at.x + frame.w * top.transform.k <= big.w && at.y + frame.h * top.transform.k <= big.h, 'the whole package on the stage, its title included');
   }
 });
 

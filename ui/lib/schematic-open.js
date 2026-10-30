@@ -1,3 +1,7 @@
+// ADR 0047 §8 (phase 3): a package (`node.die`, every chip with an inside on
+// a board) never grows: its die is drawn in its body (`grownNode` returns it,
+// `openedLayout` moves nothing). What follows, the grown frame, serves the
+// curved levels the tests still lay out; no view of the schematic uses it.
 // A composite opened in place (M2.13-3, ADR 0030 §2): its box grows into
 // a frame that draws its inside at a readable scale where the box is, and
 // the outer wires attached to it are routed to the frame's edge, where the
@@ -7,7 +11,7 @@
 // affine link (`compose`, `uncompose`). A composite opens when the person
 // opens it (2026-10-22, the owner: a click on its box, a double-click,
 // Enter, Open in place, a reveal: it is pinned, `pinOne`) and closes when
-// they close it (the × in its frame's header, `closeBox`; Escape, Close, a
+// they close it (formerly the × in its frame's header; Escape, Close, a
 // breadcrumb, Fit: unpinned, `unpin`), never because of the view's scale:
 // a zoom or a pan only moves the view. At most one is open per level
 // (`chooseOpen`, `pinOne`), as grown frames would cover each other.
@@ -16,9 +20,7 @@
 // (`makeRoom`), the stored layout is what is moved. No DOM.
 
 import { CHAR, GAP_Y, HEADER, PAD, insideKey, laneY, levelBottom } from './schematic-layout.js';
-import { LABEL_PX, READ_PX, estimateWidth } from './schematic-labels.js';
 import { crosses, wireGeometry } from './schematic-wire.js';
-import { fit, focus, screenRect, zoomAt } from './schematic-view.js';
 
 /**
  * Enter, a double-click and a breadcrumb show an inside at this scale at
@@ -50,7 +52,8 @@ const grownOf = new WeakMap();
  * is returned as it is.
  */
 export function grownNode(node, bounds) {
-  if (node.grown) return node;
+  // A package (ADR 0047 §8, phase 3): its die is drawn in its body; it never grows.
+  if (node.grown || node.die) return node;
   const cached = grownOf.get(node);
   if (cached?.bounds === bounds) return cached.grown;
   const natural = fitScale(node, bounds);
@@ -177,7 +180,12 @@ export function openedLayout(source, name, bounds) {
   const node = layout.nodes.find((n) => n.kind === 'instance' && n.name === name);
   const grown = node ? grownNode(node, bounds) : null;
   let opened = layout;
-  if (grown) {
+  if (node?.die) {
+    // A package with its die drawn in it (ADR 0047 §8, phase 3): nothing moves, no wire is routed again;
+    // the wires at its pins stand out of the faded surroundings (`crossing`).
+    const wires = layout.wires.map((w) => (w.from.node === node.id || w.to.node === node.id ? { ...w, crossing: true } : w));
+    opened = { ...layout, wires, opened: name, moved: new Map() };
+  } else if (grown) {
     // Panel controls (ui/lib/schematic-controls.js) ride with their hosts: a box's room is made for its controls too, and the open one's go out beside its frame's names.
     const riders = layout.nodes.filter((n) => n.kind === 'control');
     const pads = new Map();
@@ -253,64 +261,6 @@ export function openedLayout(source, name, bounds) {
   if (!byName) openedOf.set(source, (byName = new Map()));
   byName.set(name, { bounds, opened });
   return opened;
-}
-
-/** `view` zoomed in about the screen point `at` until its level, drawn at scale `k` now, is at least READ_K: what Enter and a breadcrumb show, readable, the inside overflowing the view if need be. */
-export function readableView(view, k, at) {
-  return k < READ_K ? zoomAt(view, READ_K / k, at) : view;
-}
-
-/**
- * Enter and a double-click draw neither an open frame (its title, its ×,
- * in its parent's units) nor its inside larger than this scale (2026-10-29,
- * the operator's review: an empty slot's frame, fitted, drew its subtitle
- * about 100 px tall and cut its title off; a box holding one small module
- * filled the screen with it).
- */
-export const ENTER_MAX_K = 2;
-
-/** `frame` (an open composite's grown box, in its parent's units) in the units of its inside (`inner`: inside → parent, `inside`'s). */
-export function frameRect(frame, inner) {
-  return { x: (frame.x - inner.x) / inner.k, y: (frame.y - inner.y) / inner.k, w: frame.w / inner.k, h: frame.h / inner.k };
-}
-
-/**
- * Enter's view of an open composite, in its inside's coordinates: its
- * whole frame (`frame`, the grown box, header and × included; `inner` its
- * inside's link, as `chain` gives them) fitted (`fit`'s margins after),
- * neither the frame nor the inside drawn larger than ENTER_MAX_K (a small
- * or empty inside does not blow up), and readable (`readableView`: a wide
- * inside overflows the view rather than drop below READ_K, zoomed about
- * the frame's top edge, so its header stays where the fit put it).
- */
-export function enterView(frame, inner, viewport, ...margins) {
-  const rect = frameRect(frame, inner);
-  const fitted = fit(rect, viewport, ...margins);
-  const most = ENTER_MAX_K * Math.min(1, inner.k);
-  const view = fitted.k > most ? { ...fitted, k: most } : fitted;
-  return readableView(view, view.k, { x: view.x, y: view.y - (rect.h / 2) * view.k });
-}
-
-/**
- * A breadcrumb's view of the open level `level` (a scene entry, drawn in
- * `view` now), framed as Enter frames it (`enterView`, 2026-10-29: an
- * empty slot's breadcrumb blew it up as its double-click did): its whole
- * frame (`link`: `{node, inner}`, its last `chain` link) fitted as `focus`
- * does, neither the frame nor the inside larger than ENTER_MAX_K, and
- * readable (`readableView`, about the frame's top edge). What is open
- * below it is closed by the breadcrumb itself (`unpin`), not by the view.
- */
-export function crumbView(view, level, link, viewport, ...margins) {
-  const rect = screenRect(level.transform, frameRect(link.node, link.inner));
-  const focused = focus(view, rect, viewport, ...margins);
-  const target = fit(rect, viewport, ...margins);
-  const centre = { x: target.x, y: target.y };
-  // The inside's scale once focused, and at most.
-  const k = level.transform.k * (focused.k / view.k);
-  const most = ENTER_MAX_K * Math.min(1, link.inner.k);
-  const capped = k > most ? zoomAt(focused, most / k, centre) : focused;
-  const shown = Math.min(k, most);
-  return readableView(capped, shown, { x: centre.x, y: centre.y - (rect.h * target.k * (shown / k)) / 2 });
 }
 
 /** `pinned` with `address` pinned instead of any sibling of it (and what is pinned inside those): one open per level. */
@@ -412,52 +362,4 @@ export function chooseOpen({ path, layout, layoutOf, pinned = new Set() }) {
     if (inner) return { node, inner };
   }
   return null;
-}
-
-/** The close button's square (the × in an open frame's header, top right; 2026-10-22), in its level's units, */
-export const CLOSE_UNITS = 22;
-/** its letter's size in those units (scaling with the view as every text does, ADR 0030's 2026-10-20 refinement), */
-export const CLOSE_TEXT = 16;
-/** and its distance from the frame's right edge. */
-export const CLOSE_INSET = 6;
-/**
- * Its square is never smaller than this on screen (px; 2026-10-22, the
- * operator's review: about 12 px at Fit, too small to hit): zoomed out it
- * keeps this size, its letter CLOSE_TEXT / CLOSE_UNITS of it (14.5 px).
- */
-export const CLOSE_MIN_PX = 20;
-/** Where a frame's title starts (layout units from its left edge) and its sizes (`nodeElement`'s name and module). */
-const TITLE_X = 8;
-const TITLE_TEXT = 12;
-const MODULE_TEXT = 10;
-
-/**
- * The square of the × that closes `frame` (an open composite's grown box)
- * in its level drawn at scale `k`, in its level's units: inside the frame
- * at its top right, CLOSE_UNITS (in its header) or CLOSE_MIN_PX on screen,
- * whichever is larger; larger than the header, it reaches below it.
- */
-export function closeBox(frame, k = Infinity) {
-  const side = Math.max(CLOSE_UNITS, CLOSE_MIN_PX / k);
-  const inset = Math.max(3, (HEADER - side) / 2);
-  // In the header (CLOSE_INSET from its edges at CLOSE_UNITS), larger nearer the corner.
-  return { x: frame.x + frame.w - inset - side, y: frame.y + inset, w: side, h: side };
-}
-
-/** The × letter's size (units) in `closeBox`'s square `r`. */
-export function closeText(r) {
-  return (r.w * CLOSE_TEXT) / CLOSE_UNITS;
-}
-
-/**
- * Whether the × of `frame` is drawn (and hit) in its level drawn at scale
- * `k`: its square (`closeBox`) inside the frame and clear of its title
- * (the name and module, while drawn: 12 units on screen READ_PX or more),
- * so it never covers it; else hidden (Escape still closes).
- */
-export function closeShown(frame, k) {
-  const r = closeBox(frame, k);
-  const titled = TITLE_TEXT * k >= READ_PX;
-  const title = titled ? TITLE_X + Math.max(estimateWidth(frame.name ?? '') * (TITLE_TEXT / LABEL_PX), estimateWidth(frame.module ?? '') * (MODULE_TEXT / LABEL_PX)) : 0;
-  return r.x >= frame.x + Math.max(3, title + 2) && r.y + r.h <= frame.y + frame.h - 3;
 }

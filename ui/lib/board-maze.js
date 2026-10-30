@@ -12,8 +12,8 @@
 
 /** The grid's spacing (layout units). */
 export const STEP = 16;
-/** A route turning costs as much as running this far. */
-export const BEND = 24;
+/** A route turning costs as much as running this far (24 before ADR 0047 phase 3). */
+export const BEND = 32;
 /** Crossing another net costs as much as running this far. */
 export const CROSS = 120;
 /** A bus's own way costs this much of its length again. */
@@ -24,6 +24,12 @@ export const KEEP = 2;
 export const REACH = 480;
 /** The search leans towards its goal by this much (a weighted A*: much faster, a route at most this much costlier). */
 export const GREED = 2;
+/**
+ * The bends a route still needs (`minTurns`) count in its estimate at this
+ * share of BEND (ADR 0047 phase 3, the owner's "needless bends": of routes
+ * of about one length the search reaches the one with fewer bends first).
+ */
+export const TURNS_AHEAD = 0.5;
 
 /** A pin's approach is this far out of it: a box's edge line (KEEP + 2). */
 const APPROACH = KEEP + 2;
@@ -33,6 +39,24 @@ export const MAX_STATES = 4000;
 const PIN_REACH = KEEP + 6;
 const DX = [1, -1, 0, 0];
 const DY = [0, 0, 1, -1];
+
+/**
+ * The fewest turns a route heading `d` (0 +x, 1 −x, 2 +y, 3 −y) at offset
+ * (`dx`, `dy`) from its goal (goal − here) still needs to arrive heading
+ * `a`: a lower bound, so the search's estimate counts the bends to come as
+ * well as the length (ADR 0047 phase 3: among routes of equal length the
+ * one with the fewest bends, no staircase towards the goal).
+ */
+export function minTurns(dx, dy, d, a) {
+  if (dx === 0 && dy === 0) return d === a ? 0 : (d ^ 1) === a ? 2 : 1;
+  // Along the axis of heading h: how far the goal lies ahead, and how far aside.
+  const ahead = (h) => (h === 0 ? dx : h === 1 ? -dx : h === 2 ? dy : -dy);
+  const aside = (h) => (h < 2 ? dy : dx);
+  if (d === a) return ahead(d) > 0 && aside(d) === 0 ? 0 : ahead(d) > 0 || aside(d) !== 0 ? 2 : 4;
+  if ((d ^ 1) === a) return aside(d) !== 0 ? 2 : 4;
+  // Perpendicular: one turn when the goal lies ahead on both headings, else three.
+  return ahead(d) >= 0 && ahead(a) > 0 ? 1 : 3;
+}
 
 /** Sorted, distinct `values`, each `required` one kept and the others dropped within `near` of a kept one. */
 function lines(required, uniform, near) {
@@ -261,9 +285,10 @@ export class Maze {
   /**
    * The cheapest route of `net` (in bus `bus`, or null) from `start`
    * leaving along +x to `goal` arriving along +x, the boxes `own` (its own
-   * control and pad) passable; its corners, taken, or null.
+   * control and pad) passable, searching at most `budget` states; its
+ * corners, taken, or null.
    */
-  route(start, goal, net, { bus = null, own = [], share = [], from = 'right', into = 'left', within = null } = {}) {
+  route(start, goal, net, { bus = null, own = [], share = [], from = 'right', into = 'left', within = null, budget = MAX_STATES } = {}) {
     const s = this.node(start);
     const t = this.node(goal);
     if (s < 0 || t < 0) return null;
@@ -278,10 +303,10 @@ export class Maze {
     const leave = { right: 0, left: 1, bottom: 2, top: 3 }[from];
     const arrive = { left: 0, right: 1, top: 2, bottom: 3 }[into];
     // Within a section first (a wire inside one card), then the box around its ends, then the whole board.
-    let found = within ? this.search(s, t, id, { x0: within.x, x1: within.x + within.w, y0: within.y, y1: within.y + within.h }, leave, arrive) : null;
-    if (found === null) found = this.search(s, t, id, reach, leave, arrive);
+    let found = within ? this.search(s, t, id, { x0: within.x, x1: within.x + within.w, y0: within.y, y1: within.y + within.h }, leave, arrive, budget) : null;
+    if (found === null) found = this.search(s, t, id, reach, leave, arrive, budget);
     // The whole board only when the box around its ends has no way at all (not when the search ran out).
-    if (found === null && !this.exhausted) found = this.search(s, t, id, null, leave, arrive);
+    if (found === null && !this.exhausted) found = this.search(s, t, id, null, leave, arrive, budget);
     for (const b of own) this.mark(b, 1);
     for (const a of ways) this.blocked[a] += 1;
     this.alsoShare = null;
@@ -301,7 +326,7 @@ export class Maze {
     return clean;
   }
 
-  search(s, t, id, reach, leave = 0, arrive = 0) {
+  search(s, t, id, reach, leave = 0, arrive = 0, states = MAX_STATES) {
     const { nx, xs, ys } = this;
     this.stamp++;
     const stamp = this.stamp;
@@ -313,9 +338,14 @@ export class Maze {
     this.g[start] = 0;
     this.seen[start] = stamp;
     this.from[start] = -1;
-    const h = (n) => Math.abs(xs[n % nx] - tx) + Math.abs(ys[Math.floor(n / nx)] - ty);
-    heap.push(GREED * h(s), seq++, start);
-    let budget = MAX_STATES;
+    // The estimate: the length left and the bends left (`minTurns`), so a staircase towards the goal costs what its bends cost.
+    const h = (n, d) => {
+      const dx = tx - xs[n % nx];
+      const dy = ty - ys[Math.floor(n / nx)];
+      return GREED * (Math.abs(dx) + Math.abs(dy)) + TURNS_AHEAD * BEND * minTurns(dx, dy, d, arrive);
+    };
+    heap.push(h(s, leave), seq++, start);
+    let budget = states;
     this.exhausted = false;
     while (heap.size && budget-- > 0) {
       const state = heap.pop();
@@ -365,7 +395,7 @@ export class Maze {
         this.seen[next] = stamp;
         this.g[next] = g;
         this.from[next] = state;
-        heap.push(g + GREED * h(m), seq++, next);
+        heap.push(g + h(m, nd), seq++, next);
       }
     }
     this.exhausted = budget <= 0;

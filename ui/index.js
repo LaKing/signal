@@ -66,6 +66,8 @@ import './lib/board-route.test.js';
 import './lib/board-maze.test.js';
 import './lib/board-view.test.js';
 import './lib/board.test.js';
+import './lib/board-dies.test.js';
+import './lib/board-zoom.test.js';
 import './app/lib/view-state.test.js';
 import './lib/module-browser.test.js';
 import './lib/module-preview.test.js';

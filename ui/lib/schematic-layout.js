@@ -16,7 +16,7 @@ import { VIA_ROW, VIA_W, controlAnchor, controlEdges, controlNodes, controlPads 
 import { frameFace, placeFace } from './schematic-face.js';
 import { CLEARANCE, PU, STUB, TRACK, balance, near, placeNear, ring, sugiyama } from './board-layout.js';
 import { Maze } from './board-maze.js';
-import { LABEL_STUB, NET_DESTS, measure, orthGeometry, routeWires, simplify, zCorners } from './board-route.js';
+import { LABEL_STUB, NET_DESTS, measure, orthGeometry, routeWires, simplify, spreadLabels, zCorners } from './board-route.js';
 
 /**
  * Where a slot box's "+" pin of `side` (`in`, `out`) is: the row after its
@@ -466,6 +466,35 @@ export function layout(level, positions = {}, { factsOf = null, controls = null,
   return { nodes, wires, bounds, bottom, face };
 }
 
+/** A package is widened towards its die's aspect by at most this factor of its own width (ADR 0047 §7), */
+export const WIDEN_MAX = 1.25;
+
+/**
+ * The area of package `node` its die is drawn in (ADR 0047 §8): its body
+ * below its header, inside its edges. A slot's face is not drawn while its
+ * die is (it lifts), so the die has the whole body.
+ */
+export function dieArea(node) {
+  return { x: node.x + PAD, y: node.y + HEADER, w: Math.max(1, node.w - 2 * PAD), h: Math.max(1, node.h - HEADER - PAD) };
+}
+
+/**
+ * Package `node` widened towards the aspect of its die (`bounds`, the
+ * inside's layout's): its body as wide as the die's aspect asks at its
+ * height, at most WIDEN_MAX times its width, in whole plate units; never
+ * narrower, never taller (its pins set its height). A function of the
+ * layouts only, never of the view: nothing moves when a die is shown.
+ */
+export function widenPackage(node, bounds) {
+  if (!(bounds?.w > 0) || !(bounds?.h > 0)) return node;
+  const area = dieArea({ ...node, x: 0, y: 0 });
+  const want = area.h * (bounds.w / bounds.h) + 2 * PAD;
+  const w = Math.min(Math.ceil((node.w * WIDEN_MAX) / PU) * PU, Math.ceil(want / PU) * PU);
+  if (w > node.w) node.w = w;
+  node.die = true;
+  return node;
+}
+
 /** A node's stored position (`ui/schematic.toml`), or null. */
 function storedAt(node, positions) {
   const stored = node.kind === 'instance' ? positions?.[node.name] : undefined;
@@ -487,6 +516,8 @@ export const PLATE_GAP = 64;
 export const GLOBAL_FANOUT = 3;
 /** The maze's margin around everything drawn. */
 const MAZE_MARGIN = 64;
+/** A die's maze searches this many states for a wire the channels found no way for (ADR 0047 phase 3: every inner net drawn). */
+const DIE_STATES = 12000;
 
 /**
  * The legs of the plate's vias (`panel`, placed): `[{id, control, pin,
@@ -605,9 +636,17 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
   }
   const controlRects = [...(board.obstacles ?? []), ...panel.map((c) => c.control.rect)];
   const legs = legsOf(panel, byId);
+  // ADR 0047 §7–8: a chip with an inside is a package its die is drawn in, widened towards the die's aspect
+  // (after its top pins set its size: `topPins`, over a plate).
+  const widen = () => {
+    for (const node of nodes) {
+      const die = node.composite && node.kind === 'instance' ? (board.dieOf?.(node) ?? null) : null;
+      if (die) widenPackage(node, die);
+    }
+  };
   // Over a plate: the chips under their controls (the coordinator's design after the owner's verdict).
   if (panel.length) {
-    const { wires, labels, bottom, sections } = plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects, board, positions, factsOf });
+    const { wires, labels, bottom, sections } = plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects, board, positions, factsOf, widen });
     const done = finishBoard(nodes, wires, labels, bottom, board, 0);
     done.board.sections = sections;
     return done;
@@ -615,6 +654,7 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
   // The plate's right edge: the board's columns start past it and the legs' tracks.
   let plateRight = board.plate?.w ?? 0;
   for (const r of controlRects) plateRight = Math.max(plateRight, r.x + r.w);
+  widen();
   const buses = new Set(legs.map((l) => l.chip));
   const plateArea = Boolean(board.plate || controlRects.length);
   const x0 = plateArea ? plateRight + Math.max(PLATE_GAP, 2 * STUB + 2 * TRACK * (buses.size + 1)) : 0;
@@ -645,6 +685,13 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
   const kept = [...new Set(layer.values())].sort((a, b) => a - b);
   const renumber = new Map(kept.map((l, i) => [l, i]));
   for (const [id, l] of layer) layer.set(id, renumber.get(l));
+  // A die's interface (ADR 0047 phase 3): its outputs' frame pins in the last column, at the package's right edge.
+  if (board.die && layer.has(OUTPUTS)) {
+    const last = Math.max(...layer.values());
+    const fed = sEdges.some((e) => e.from === OUTPUTS);
+    // A column of its own when another chip lies in the last one.
+    if (!fed) layer.set(OUTPUTS, [...layer].some(([id, l]) => l === last && id !== OUTPUTS) ? last + 1 : last);
+  }
   // Each channel keeps room for the legs' buses entering the column after it.
   const extra = new Map();
   for (const chip of buses) {
@@ -731,7 +778,24 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
   const chips = nodes.filter((n) => n.kind !== 'control');
   const boxes = [...chips.map(({ id, x, y, w, h }) => ({ id, x, y, w, h })), ...controlRects.map((r, k) => ({ id: `@plate:${k}`, ...r }))];
   const nameOf = (w) => String(w.edge.written?.from ?? `${w.edge.from.node}.${w.edge.from.port}`).replace(/^\//, '');
-  const { routes, labels } = routeWires(boxes, asked, { nameOf });
+  // A die (ADR 0047 phase 3) draws every net: a wire with no way in the channels is searched for by the maze, around everything drawn.
+  const fallback = board.die
+    ? (taken) => {
+        const xsB = boxes.flatMap((b) => [b.x, b.x + b.w]);
+        const ysB = boxes.flatMap((b) => [b.y, b.y + b.h, laneY(bottom, lane + 1)]);
+        const area = { x0: least(xsB, 0) - MAZE_MARGIN, x1: most(xsB, 0) + MAZE_MARGIN, y0: least(ysB, 0) - MAZE_MARGIN, y1: most(ysB, 0) + MAZE_MARGIN };
+        const pins = nodes.flatMap((n) => [...n.ins.map((p) => ({ x: p.x, y: p.y, out: false })), ...n.outs.map((p) => ({ x: p.x, y: p.y, out: true }))]);
+        const maze = new Maze(boxes, asked.flatMap((w) => [w.a, w.b]), taken, area, pins);
+        return {
+          route: (w) => maze.route(w.a, w.b, w.net, { budget: DIE_STATES }),
+          take: (corners, net) => {
+            const id = maze.netId(net);
+            for (let k = 1; k < corners.length; k++) maze.takeSegment(corners[k - 1], corners[k], id);
+          },
+        };
+      }
+    : null;
+  const { routes, labels } = routeWires(boxes, asked, { nameOf, fanout: !board.die, fallback });
   // The legs, through the plate's gutters and the channels, around everything already drawn.
   const drawnSegments = [];
   routes.forEach((r, i) => {
@@ -795,6 +859,7 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
 
 /** A board's measures, its pins' `connected`, its bounds: what `layout` returns. */
 function finishBoard(nodes, wires, labels, bottom, board, crossings) {
+  spreadLabels(labels);
   const metrics = measure(
     wires.map((w) => ({ net: w.kind === 'binding' ? `bus:${w.from.node.startsWith('@control:') ? w.to.node : w.from.node}` : `${w.from.node}\n${w.from.port}` })),
     wires.map((w) => ({ corners: w.corners })),
@@ -1090,8 +1155,9 @@ function underVias(node, rects, cards, free, controlRects = rects) {
  * nothing under a control or a chip. Only a fan-out of NET_DESTS or more,
  * a global net or a wire with no way are labels.
  */
-function plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects, board, positions, factsOf }) {
+function plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects, board, positions, factsOf, widen = () => {} }) {
   topPins(nodes, legs, edges);
+  widen();
   const cards = (board.cards ?? []).filter((c) => c.w > 0 && c.h > 0);
   const placed = [];
   // A chip keeps room around it for the wires: from a control CONTROL_ROOM, from another chip CHIP_ROOM.

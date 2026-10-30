@@ -347,7 +347,8 @@ export class SchematicBoard {
       const shape = shapeOf.get(label.wire) ?? 'signal';
       if (this.state.hidden.includes(shape)) continue;
       if (label.side === 'out') parts.push(el('path', { class: `net-stub ${shape}`, d: bakedPath(baked, label.corners) }));
-      const at = bakedPoint(baked, { x: label.at.x + (label.side === 'out' ? 3 : -3), y: label.at.y + 3 });
+      // Its text where the layout kept it off the others (`spreadLabels`), else beside its stub.
+      const at = bakedPoint(baked, label.textAt ?? { x: label.at.x + (label.side === 'out' ? 3 : -3), y: label.at.y + 3 });
       const t = el('text', { class: `net-label ${shape}`, x: at.x, y: at.y, 'font-size': 9 * baked.m, 'text-anchor': label.side === 'out' ? 'start' : 'end', 'data-net-wire': String(label.wire) }, label.text);
       t.append(el('title', {}, `${label.text.slice(2)}: click to trace the net`));
       parts.push(t);

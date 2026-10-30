@@ -8,13 +8,13 @@
 // DOM. M2.13-2: a level drawn with bundles (`entry.bundles`, ui/lib/
 // schematic-bundle.js) is hit on what is drawn, the topmost first: a solo
 // wire above its bundle, a bundle as a `bundle` hit carrying its wires'.
-// 2026-10-22: an open frame's × (`closeBox`, ui/lib/schematic-open.js) is
-// hit before anything else, the innermost frame's first, as a `close` hit.
+// ADR 0047 §8 (phase 3): a die is hit once it is drawn (its text at its
+// threshold on screen); there is no frame and no × (Escape zooms out).
 
 import { nearBundle } from './schematic-bundle.js';
 import { groupAnchors } from './schematic-groups.js';
 import { INPUTS, OUTPUTS } from './schematic-layout.js';
-import { closeBox, closeShown } from './schematic-open.js';
+import { belowThreshold } from './board-zoom.js';
 import { controlHit } from './schematic-controls.js';
 import { toLocal } from './schematic-view.js';
 import { curveDistance, distanceToSegment } from './schematic-wire.js';
@@ -91,17 +91,16 @@ export function bundleHit(entry, bundle) {
 
 /**
  * What screen point `point` is over: `{kind: 'port' | 'instance' | 'wire' |
- * 'bundle' | 'group' | 'close' | 'background', path, level, node?, port?,
- * wire?, bundle?, address?}` (a collapsed port group: `groupHit`; an open
- * frame's ×: `closeHit`). A port's and an instance's `address` is the concrete one
+ * 'bundle' | 'group' | 'background', path, level, node?, port?,
+ * wire?, bundle?, address?}` (a collapsed port group: `groupHit`). A port's and an instance's `address` is the concrete one
  * (`/drums/kick.out`); a wire gives `from` and `to`; a bundle its wires'
  * hits as `wires`.
  */
 export function hitTest(drawn, point) {
-  const close = closeHit(drawn, point);
-  if (close) return close;
   for (let i = drawn.levels.length - 1; i >= 0; i--) {
     const entry = drawn.levels[i];
+    // A die not drawn yet (ADR 0047 §8: its text under its threshold on screen) is not hit: its package is.
+    if (entry.parent && belowThreshold(entry.transform.k)) continue;
     const local = toLocal(entry.transform, point);
     const scale = entry.transform.k;
     // An open composite's frame (M2.13-3) lies over its neighbours: inside it, only its own pins and box are hit.
@@ -158,26 +157,6 @@ export function hitTest(drawn, point) {
     for (const wire of entry.wires) if (wire.kind !== 'binding' && nearWire(wire, local, WIRE_PX / scale)) return wireHit(entry, wire);
   }
   return { kind: 'background', path: '', level: '' };
-}
-
-/**
- * The × of an open frame under screen point `point` (2026-10-22), the
- * innermost first: `{kind: 'close', path, level, node, address}` (`node`
- * the frame, `address` the composite instance it closes), or null. Only
- * where it is drawn (`closeShown`).
- */
-export function closeHit(drawn, point) {
-  for (let i = drawn.levels.length - 1; i >= 0; i--) {
-    const entry = drawn.levels[i];
-    const name = entry.layout?.opened;
-    if (!name) continue;
-    const frame = entry.layout.nodes.find((n) => n.kind === 'instance' && n.name === name);
-    if (!frame || !closeShown(frame, entry.transform.k)) continue;
-    const local = toLocal(entry.transform, point);
-    const r = closeBox(frame, entry.transform.k);
-    if (local.x >= r.x && local.x <= r.x + r.w && local.y >= r.y && local.y <= r.y + r.h) return { kind: 'close', path: entry.path, level: entry.level, node: frame, address: `${entry.path}/${name}` };
-  }
-  return null;
 }
 
 /**

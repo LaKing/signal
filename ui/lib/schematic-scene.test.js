@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { layout } from './schematic-layout.js';
 import { MIN_PX, boundaryLinks, breadcrumbs, inside, levelRect, nodeRect, planPort, rebase, scene } from './schematic-scene.js';
 import { READ_K, grownNode, linkScale, pinOne } from './schematic-open.js';
+import { belowThreshold } from './board-zoom.js';
 import { bake, bakeHolds, bakedMatrix, bakedRect, SVG_MAX_SCALE, SVG_MAX_TRANSLATE, SVG_MIN_SCALE } from './schematic-draw.js';
 import { hitTest, reselect } from './schematic-hit.js';
 import { fit, focus, pan, screenRect, toScreen, zoomAt } from './schematic-view.js';
@@ -344,8 +345,15 @@ test('ten nested composites of ordinary size are reached by zooming and clicking
   assert.equal(drawn.levels.length, 11, `ten levels open after ${steps} steps`);
   assert.deepEqual(breadcrumbs(drawn).map((c) => c.name), ['', 'c', 'c', 'c', 'c', 'c', 'c', 'c', 'c', 'c', 'c']);
   assert.equal(view.path, '/c/c/c/c/c/c/c/c/c/c');
-  const leaf = drawn.levels[10];
-  const at = toScreen(leaf.transform, centreOf(leaf.layout.nodes.find((n) => n.name === 'p')));
+  // The innermost die is hit once it is drawn (ADR 0047 §8: its text at its threshold): zoomed on until it is.
+  let leaf = drawn.levels[10];
+  const p = leaf.layout.nodes.find((n) => n.name === 'p');
+  for (let i = 0; i < 100 && belowThreshold(leaf.transform.k); i++) {
+    drawn = scene({ layoutOf, view: zoomAt(view, 1.25, toScreen(leaf.transform, centreOf(p))), viewport, pinned });
+    view = drawn.view;
+    leaf = drawn.levels[10];
+  }
+  const at = toScreen(leaf.transform, centreOf(p));
   assert.equal(hitTest(drawn, at).address, '/c/c/c/c/c/c/c/c/c/c/p');
 });
 

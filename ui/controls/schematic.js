@@ -2,10 +2,11 @@
 // schematic with clickable parts (M2.9-1, ADR 0026 §2–3,
 // docs/ui-controls.md "Schematic"). It draws the `graph` message: the top
 // level's instances and connections, laid out (ui/lib/schematic-layout.js)
-// with the positions stored in ui/schematic.toml; a composite opens in place
-// when clicked or double-clicked and closes by the × in its frame's header
-// or Escape, never by the zoom (2026-10-22; ui/lib/schematic-scene.js,
-// ui/lib/schematic-open.js). One view
+// with the positions stored in ui/schematic.toml; a click or a double-click
+// on a composite chip zooms into it, its inside (its die) drawn in its
+// package, and Escape, a breadcrumb or zooming out past its threshold
+// leaves it (ADR 0047 §8, phase 3; ui/lib/board-zoom.js,
+// ui/lib/schematic-scene.js, ui/lib/schematic-open.js). One view
 // transform, wheel and pinch zoom about the pointer, the background drags to
 // pan, keys + − 0 and the arrows. Clicking selects an instance, a port or a
 // wire and shows it in the sidebar; dragging a box moves it, its wires
@@ -78,8 +79,8 @@ import { formatFixed } from '../lib/format.js';
 import { HEADER, addPinAt, dragPosition, insideKey, layout } from '../lib/schematic-layout.js';
 import { insideBanner, insideReason, isPreviewLevel, isSlotInside, levelData, unmatchedReason } from '../lib/slot.js';
 import { DragFollow, ownedLabels } from '../lib/schematic-drag.js';
-import { aroundReason, closeBox, closeShown, closeText, crumbView, dragAction, drawOrder, editable, editLevel, enterView, openFrameHit, pinOne, shownFrame, unpin } from '../lib/schematic-open.js';
-import { boundaryLinks, breadcrumbs, chain, nodeRect, openAnchor, rebase, reroot, scene } from '../lib/schematic-scene.js';
+import { aroundReason, dragAction, drawOrder, editable, editLevel, openFrameHit, pinOne, shownFrame, unpin } from '../lib/schematic-open.js';
+import { boundaryLinks, breadcrumbs, chain, inside as insideLink, nodeRect, rebase, reroot, scene } from '../lib/schematic-scene.js';
 import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
 import { hitTest, instanceHit, portHit, reselect, wireHit } from '../lib/schematic-hit.js';
 import { cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
@@ -98,6 +99,7 @@ import { levelControls, levelFaces } from '../lib/parts.js';
 import { FACE_LABEL_CHARS, hotAddresses } from '../lib/schematic-face.js';
 import { SchematicFaces } from './schematic-faces.js';
 import { BOARD_CSS, SchematicBoard } from './schematic-board.js';
+import { ZOOM_MS, belowThreshold, dieOpacity, ease, surroundOpacity, tween, zoomInView } from '../lib/board-zoom.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 /** A press that moves less than this (px) is a click. */
@@ -121,7 +123,6 @@ const MARGIN_PX = 24;
 /** How long Show in Schematic flashes what it revealed (ms): two pulses, with a margin. */
 const SHOWN_FLASH_MS = 1300;
 /** A composite's inside fitted to the view keeps this far (px) from the left and right edges: room for its frame's labels, outside its pins. */
-const FRAME_SIDE_PX = 120;
 /** A second click within this long (ms) and DOUBLE_PX of a click that opened or closed a composite is the double-click's, not one of its own. */
 const DOUBLE_MS = 500;
 const DOUBLE_PX = 6;
@@ -140,11 +141,6 @@ svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; t
 .composite > .box { stroke: var(--signal-muted, #8a93a3); stroke-width: 2; }
 .composite > .frame { fill: none; stroke: var(--signal-muted, #8a93a3); stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
 .open > .box { fill: var(--signal-bg, #16181d); }
-.close-button { cursor: pointer; }
-.close-button > rect { fill: transparent; }
-.close-button > text { fill: var(--signal-muted, #8a93a3); }
-.close-button:hover > text { fill: var(--signal-fg, #d6dbe4); }
-svg.closing { cursor: pointer; }
 .pins > .box { fill: none; stroke: var(--signal-track, #2a2f38); stroke-dasharray: 2 4; }
 /* A panel control (2026-10-29, ui/lib/schematic-controls.js): a compact box in the panel's tint, apart from the modules' boxes; one that writes amber, one that reads green. */
 .control > .box { fill: color-mix(in srgb, var(--signal-effective, #ffb74d) 9%, var(--signal-panel, #1f232b)); stroke: var(--signal-effective, #ffb74d); stroke-width: 1.5; }
@@ -298,9 +294,10 @@ svg.tracing .node:not(.traced) > :not(.frame) { opacity: 0.35; }
 svg.tracing .node.traced > .box { stroke: var(--signal-fg, #d6dbe4); }
 svg.tracing .pin:not(.traced) { opacity: 0.4; }
 svg.tracing .pin.traced { stroke: var(--signal-fg, #d6dbe4); stroke-width: 2.5; }
-/* Around a composite open in place (M2.13-3): its level dimmed, all but its frame, the wires crossing into it, its edge links and what is traced. */
-.surround .node:not(.open):not(.traced) { opacity: 0.4; }
-.surround .wire:not(.crossing):not(.link):not(.traced) { opacity: 0.3; }
+/* Around a chip zoomed into (ADR 0047 §8): its level fades as its die comes in (--surround, down to about a fifth), all but its package, the wires at its pins, its bond wires and what is traced. */
+.surround .node:not(.open):not(.traced) { opacity: var(--surround, 0.4); }
+.surround .wire:not(.crossing):not(.link):not(.traced) { opacity: var(--surround, 0.3); }
+.surround > .net-labels, .surround .board-section, .surround .board-section-edge { opacity: var(--surround, 0.4); }
 /* A composite's or a frame's port label, a summary, a bundle's count (M2.13-2; 2026-10-20: in the level's units, scaling with the drawing, ui/lib/schematic-labels.js). */
 .labels { pointer-events: none; }
 .lbl { fill: var(--signal-muted, #8a93a3); white-space: pre; paint-order: stroke; stroke: var(--signal-bg, #16181d); stroke-linejoin: round; }
@@ -355,13 +352,6 @@ function html(name, properties = {}) {
   return Object.assign(document.createElement(name), properties);
 }
 
-/** `hit` as the part it stands for: an open frame's × (2026-10-22) as its composite's box, for a menu; any other as it is. */
-function partHit(drawn, hit) {
-  if (hit.kind !== 'close') return hit;
-  const entry = drawn.levels.find((l) => l.path === hit.path);
-  return entry ? instanceHit(entry, hit.node) : hit;
-}
-
 /** Where the box a gesture drags goes (`dragPosition`). */
 function dragTo(gesture) {
   return dragPosition(gesture.hit.node, { x: gesture.last.x - gesture.start.x, y: gesture.last.y - gesture.start.y }, gesture.k);
@@ -380,8 +370,10 @@ export class SignalSchematic extends HTMLElement {
     this.moved = new Map();
     this.open = new Set();
     this.pinned = new Set();
-    /** How far opening each composite by a click panned the view (its parent's units, by path): undone when it closes. */
-    this.openShifts = new Map();
+    /** ADR 0047 §8: the view's travel into a chip or out of one (`{from, to, start, done}`), or null. */
+    this.zooming = null;
+    /** The person zoomed out since the last frame: a die gone below its threshold is left (`leaveFaded`). */
+    this.zoomedOut = false;
     this.drawn = null;
     /** Each drawn level's group and its elements, by path. */
     this.groups = new Map();
@@ -549,7 +541,7 @@ export class SignalSchematic extends HTMLElement {
     this.svg.addEventListener('dblclick', (e) => this.doubleClick(e));
     this.svg.addEventListener('wheel', (e) => this.wheel(e), { passive: false });
     // The Add module browser's panes scroll with the wheel: they are not the drawing's.
-    registerWheel(this, (event) => !this.editor.holds(event));
+    registerWheel(this, (event) => event.composedPath().includes(this.stage) && !this.editor.holds(event));
     // Safari's pinch.
     this.svg.addEventListener('gesturestart', (e) => this.pinch(e, true));
     this.svg.addEventListener('gesturechange', (e) => this.pinch(e, false));
@@ -638,6 +630,7 @@ export class SignalSchematic extends HTMLElement {
       this.pinned = new Set();
       this.fitted = false;
       this.selected = [];
+      this.stopZoom();
       this.view = IDENTITY;
       this.tracing = null;
       old.clear();
@@ -777,8 +770,9 @@ export class SignalSchematic extends HTMLElement {
           controls: levelControls(this.graph, level, this.panelControls),
           faces: levelFaces(this.graph, level),
           faceSize: this.faces ? (face) => this.faces.sizeOf(face) : null,
-          // ADR 0047 §5–6: the top level is the board under the plate.
-          board: level === '' ? (this.board?.option() ?? null) : null,
+          // ADR 0047 §5–6: the top level is the board under the plate; §8 (phase 3): every inside is a die, a board
+          // of its own drawn in its package, which is widened towards it (`dieOf`, each inside laid out once).
+          board: { ...(level === '' ? (this.board?.option() ?? {}) : { die: true }), dieOf: (node) => this.layoutOf(insideKey(node))?.bounds ?? null },
         }),
       );
     }
@@ -796,13 +790,15 @@ export class SignalSchematic extends HTMLElement {
 
   /** Fit, 0 and the top breadcrumb: every composite closed, the whole top level in view (M2.13-3). */
   fitTop() {
+    this.stopZoom();
     this.pinned = new Set();
-    this.openedAt = null;
     this.setView(this.fitAll());
   }
 
   /** The view set (a zoom, a pan, Enter, a breadcrumb, Fit): it only moves the view, opening and closing nothing (2026-10-22). */
   setView(view) {
+    // The person's (or a command's) view stops a travel where it is.
+    this.stopZoom();
     this.view = view;
     this.schedule();
   }
@@ -825,21 +821,13 @@ export class SignalSchematic extends HTMLElement {
       this.fitted = true;
     }
     const layoutOf = (level) => this.layoutOf(level);
-    // Only what the person opened is open (`pinned`, 2026-10-22).
-    const openedAt = this.openedAt;
-    this.openedAt = null;
+    // Only what the person zoomed into is open (`pinned`; ADR 0047 §8: its die drawn in its package, nothing moved).
     this.drawn = scene({ layoutOf, view: this.view, viewport: this.viewport, pinned: this.pinned });
-    // A composite a click opened keeps what was under the pointer there, its header on the stage (the operator's review).
-    const anchor = openedAt ? openAnchor(this.drawn, this.open, openedAt, this.viewport) : null;
-    if (anchor && (anchor.dx || anchor.dy)) {
-      // Kept, in its parent's units, so that closing it puts the view back (`closeInPlace`).
-      this.openShifts.set(anchor.path, { dx: anchor.dx / anchor.k, dy: anchor.dy / anchor.k });
-      this.drawn = scene({ layoutOf, view: pan(this.drawn.view, anchor.dx, anchor.dy), viewport: this.viewport, pinned: this.pinned });
-    }
+    // Zoomed out past a die's threshold (ADR 0047 §8): its level is left, as Escape leaves it.
+    if (this.leaveFaded()) this.drawn = scene({ layoutOf, view: this.view, viewport: this.viewport, pinned: this.pinned });
     // Kept in the coordinates of the deepest level under the centre.
     this.view = this.drawn.view;
     this.open = this.drawn.open;
-    for (const path of this.openShifts.keys()) if (!this.open.has(path)) this.openShifts.delete(path);
     // A level with nothing on screen is not drawn, nor a parent of which
     // only open boxes' insides show (the background's colour).
     // An open composite's inside is drawn even with nothing of it on screen: the links across its edge lead into it (2026-10-20).
@@ -864,6 +852,7 @@ export class SignalSchematic extends HTMLElement {
       this.order = paths;
     }
     if (changed) this.collectBars();
+    this.applyDepth();
     this.applyMarks();
     this.applyTrace();
     this.applyDrag();
@@ -893,16 +882,14 @@ export class SignalSchematic extends HTMLElement {
       // An open composite's edge crossed (its box's pins to its frame's), and the level's labels in its own units (2026-10-20).
       const links = el('g');
       const labels = el('g', { class: 'labels' });
-      // An open frame's × (2026-10-22), over everything of its level.
-      const close = el('g');
       // A slot's inside opened: the slot's face at its top (2026-10-30), its area drawn here.
       const face = el('g');
       // ADR 0047 §5–6: the plate's area under the board, its cards' ghosts over it (X-ray), the nets drawn as labels.
       const plate = el('g', { class: 'plate-layer' });
       const ghosts = el('g', { class: 'plate-layer plate-ghosts' });
       const nets = el('g', { class: 'net-labels' });
-      drawn = { g: el('g'), plate, ghosts, wires, links, overlay, face, nodes, labels, nets, close, closeKey: null, baked: null, wireCache: new Map(), nodeCache: new Map(), bundleCache: new Map(), shown: null, labelKey: null, sizes: [] };
-      drawn.g.append(plate, wires, links, overlay, drawn.face, nodes, ghosts, labels, nets, close);
+      drawn = { g: el('g'), plate, ghosts, wires, links, overlay, face, nodes, labels, nets, baked: null, wireCache: new Map(), nodeCache: new Map(), bundleCache: new Map(), shown: null, labelKey: null, sizes: [] };
+      drawn.g.append(plate, wires, links, overlay, drawn.face, nodes, ghosts, labels, nets);
       this.groups.set(level.path, drawn);
     }
     const transform = level.transform;
@@ -991,7 +978,6 @@ export class SignalSchematic extends HTMLElement {
     }
     drawn.placed = placed;
     drawn.g.setAttribute('transform', matrix(placed));
-    this.drawClose(level, drawn);
     // Around an open composite's frame the level is dimmed (M2.13-3): its other boxes and wires, not the frame or the wires crossing into it.
     const surround = Boolean(level.layout.opened);
     if (drawn.surround !== surround) {
@@ -999,37 +985,6 @@ export class SignalSchematic extends HTMLElement {
       drawn.g.setAttribute('class', surround ? 'surround' : '');
     }
     return !same;
-  }
-
-  /**
-   * The × of the frame open in `level` (a scene entry), in its group
-   * `drawn` (2026-10-22): in the frame's top right, at least CLOSE_MIN_PX
-   * on screen (`closeBox`), hidden where it would cover the frame's title
-   * or leave the frame (`closeShown`; Escape closes it then). Built again
-   * only when its square changes: never on a pan.
-   */
-  drawClose(level, drawn) {
-    const name = level.layout.opened;
-    const frame = name ? level.layout.nodes.find((n) => n.kind === 'instance' && n.name === name) : null;
-    const k = level.transform.k;
-    const r = frame && closeShown(frame, k) ? closeBox(frame, k) : null;
-    const key = r ? `${r.x} ${r.y} ${r.w}` : '';
-    if (drawn.closeKey === key && drawn.closeBaked === drawn.baked) return;
-    drawn.closeKey = key;
-    drawn.closeBaked = drawn.baked;
-    if (!r) {
-      drawn.close.replaceChildren();
-      return;
-    }
-    const baked = drawn.baked;
-    const address = `${level.path}/${name}`;
-    const button = el('g', { class: 'close-button', 'data-address': address });
-    const at = bakedRect(baked, r);
-    if (at) button.append(el('rect', at));
-    const size = closeText(r);
-    const c = bakedPoint(baked, { x: r.x + r.w / 2, y: r.y + r.h / 2 + size * 0.35 });
-    button.append(el('text', { x: c.x, y: c.y, 'font-size': size * baked.m, 'text-anchor': 'middle' }, '×'), el('title', {}, `Close ${address}`));
-    drawn.close.replaceChildren(button);
   }
 
   wireElement(level, wire, baked) {
@@ -1568,51 +1523,189 @@ export class SignalSchematic extends HTMLElement {
     return this.drawn ? breadcrumbs(this.drawn).at(-1).level : '';
   }
 
-  /** Back out to the level at `path` (a breadcrumb), its inside filling the view, what is open below it closed. */
+  /**
+   * Back out to the level at `path` (a breadcrumb; ADR 0047 §8): the view
+   * travels until that level's chip fills it (the whole top level for the
+   * top's), and what is open below it is left when it arrives.
+   */
   goTo(path) {
     if (path === '') {
-      this.fitTop();
+      if (!this.drawn || !this.pinned.size) {
+        this.fitTop();
+        return;
+      }
+      const from = reroot(this.view, (l) => this.layoutOf(l), '');
+      this.travel({ ...from, path: '' }, { ...this.fitAll(), path: '' }, () => {
+        this.pinned = new Set();
+      });
       return;
     }
-    for (const open of [...this.pinned]) if (open !== path && open.startsWith(`${path}/`)) this.pinned.delete(open);
-    const level = this.drawn && this.levelOf(path);
-    const link = level ? chain((key) => this.layoutOf(key), path)?.at(-1) : null;
-    // Its frame filling the view as Enter's does, readable (M2.13-3, `crumbView`).
-    if (link) this.setView(crumbView(this.view, level, link, this.viewport, MARGIN_PX, MARGIN_PX, FRAME_SIDE_PX));
-    else this.schedule();
+    const framed = this.frameView(path);
+    const below = () => {
+      for (const open of [...this.pinned]) if (open !== path && open.startsWith(`${path}/`)) this.pinned.delete(open);
+    };
+    if (framed) this.travel(framed.from, framed.to, below);
+    else {
+      below();
+      this.schedule();
+    }
   }
 
   /**
-   * Composite instance `hit` (a closed one's box, clicked at screen point
-   * `at`) opened in place (2026-10-22): pinned, one per level (`pinOne`),
-   * its frame growing where its box is, the box's point under `at` kept as
-   * the same point of the frame (`openAnchor`), so the view does not jump.
-   * Whether it opened: a library composite (its inside unknown) does not.
+   * The views (both in the coordinates of its parent level) from the view
+   * now to the one that zooms into the chip at instance `path` (ADR 0047
+   * §8, `zoomInView`): its package filling the stage, its die readable; null
+   * when it is not drawn or has no inside.
    */
-  openInPlace(hit, at) {
+  frameView(path) {
+    if (!this.drawn) return null;
+    const cut = path.lastIndexOf('/');
+    const parentPath = path.slice(0, cut);
+    const parent = this.levelOf(parentPath);
+    const node = parent?.layout.nodes.find((n) => n.kind === 'instance' && n.name === path.slice(cut + 1));
+    const inner = node?.composite ? this.layoutOf(insideKey(node)) : null;
+    const rect = nodeRect(this.drawn, path);
+    if (!node || !inner || !rect) return null;
+    const dieK = parent.transform.k * insideLink(node, inner.bounds).k;
+    // In the parent level's own coordinates as drawn (the view's level may be shallower than it).
+    const from = { ...parent.transform, path: parentPath };
+    const to = { ...zoomInView(from, rect, this.viewport, dieK, MARGIN_PX), path: parentPath };
+    return { from, to };
+  }
+
+  /**
+   * The view's travel from `from` to `to` (two views of one level's
+   * coordinates) in ZOOM_MS (ADR 0047 §8; at once with reduced motion), and
+   * `done` when it arrives. A press, the wheel or a key stops it where it is.
+   */
+  travel(from, to, done = null) {
+    this.stopZoom();
+    this.zoomedOut = false;
+    const reduced = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+    if (reduced || typeof requestAnimationFrame !== 'function') {
+      this.setView(to);
+      done?.();
+      this.schedule();
+      return;
+    }
+    const zoom = { from, to, start: null, done };
+    this.zooming = zoom;
+    const step = (now) => {
+      if (this.zooming !== zoom) return;
+      zoom.start ??= now;
+      const t = Math.min(1, (now - zoom.start) / ZOOM_MS);
+      this.view = { ...tween(from, to, ease(t)), path: from.path };
+      if (t >= 1) {
+        this.zooming = null;
+        zoom.done?.();
+      } else requestAnimationFrame(step);
+      this.render();
+    };
+    requestAnimationFrame(step);
+  }
+
+  /** The travel stopped where it is (a press, the wheel, a key, Fit); what it would do on arriving is not done. */
+  stopZoom() {
+    this.zooming = null;
+  }
+
+  /**
+   * Composite instance `hit` (a chip on the board) zoomed into (ADR 0047
+   * §8, phase 3; formerly opened in place): its die is drawn in its package
+   * (pinned, one per level, `pinOne`), and the view travels until the
+   * package fills the stage and the die is readable, everything around
+   * fading. Nothing moves. Whether it zooms: a library composite (its
+   * inside unknown) does not.
+   */
+  openInPlace(hit) {
+    // A package zoomed into already (a click on its die's empty space): selected only, the view where the person put it.
     if (hit?.kind !== 'instance' || hit.node.kind !== 'instance' || !hit.node.composite || this.drawn?.open.has(hit.address)) return false;
     if (!this.layoutOf(insideKey(hit.node)) || !chain((level) => this.layoutOf(level), hit.address)) return false;
     this.pinned = pinOne(this.pinned, hit.address);
-    this.openedAt = at;
-    this.schedule();
+    const framed = this.frameView(hit.address);
+    if (framed) this.travel(framed.from, framed.to);
+    else this.schedule();
     return true;
   }
 
   /**
-   * The open composite at `address` closed (its ×, Escape, Close;
-   * 2026-10-22), and what is open inside it: the view is not zoomed, and
-   * the pan its opening by a click made (`openAnchor`, kept in its
-   * parent's units) is undone, so its box comes back where it was before
-   * it opened, at the scale shown now (opened otherwise, the levels around
-   * stay still and the box lies where its frame grew from).
+   * Out of the chip at `address` (Escape, Close; ADR 0047 §8): the view
+   * travels back until its parent fills the stage (its parent's chip
+   * framed, or the whole top level), and its die, faded as it shrinks, is
+   * left when it arrives.
    */
   closeInPlace(address) {
-    const shift = this.openShifts.get(address);
-    const parent = this.drawn?.levels.find((l) => l.path === address.slice(0, address.lastIndexOf('/')));
-    this.pinned = unpin(this.pinned, address);
-    if (this.revealPinned) this.revealPinned = unpin(this.revealPinned, address);
-    if (shift && parent) this.setView(pan(this.view, -shift.dx * parent.transform.k, -shift.dy * parent.transform.k));
-    else this.schedule();
+    const parent = address.slice(0, address.lastIndexOf('/'));
+    // Asked again while travelling out of it (a second Escape): it is left now, and the travel goes on up a level.
+    if (this.zooming?.leaving === address) {
+      this.pinned = unpin(this.pinned, address);
+      if (this.revealPinned) this.revealPinned = unpin(this.revealPinned, address);
+      if (parent) this.closeInPlace(parent);
+      return;
+    }
+    const leave = () => {
+      this.pinned = unpin(this.pinned, address);
+      if (this.revealPinned) this.revealPinned = unpin(this.revealPinned, address);
+    };
+    if (!parent) {
+      const from = reroot(this.view, (l) => this.layoutOf(l), '');
+      this.travel({ ...from, path: '' }, { ...this.fitAll(), path: '' }, leave);
+      if (this.zooming) this.zooming.leaving = address;
+      return;
+    }
+    const framed = this.frameView(parent);
+    if (framed) {
+      this.travel(framed.from, framed.to, leave);
+      if (this.zooming) this.zooming.leaving = address;
+    }
+    else {
+      leave();
+      this.schedule();
+    }
+  }
+
+  /**
+   * Zoomed out past the innermost die's threshold (ADR 0047 §8: its text
+   * under FADE_FROM_PX on screen) by the person (the wheel, a pinch, a key):
+   * that level is left, as Escape leaves it. Whether one was.
+   */
+  leaveFaded() {
+    if (!this.zoomedOut || this.zooming) return false;
+    this.zoomedOut = false;
+    // Innermost first, as far out as the zoom went (several thresholds at once).
+    let left = false;
+    for (const level of [...(this.drawn?.levels ?? [])].reverse()) {
+      if (!level.parent || !belowThreshold(level.transform.k)) break;
+      this.pinned = unpin(this.pinned, level.path);
+      if (this.revealPinned) this.revealPinned = unpin(this.revealPinned, level.path);
+      left = true;
+    }
+    return left;
+  }
+
+  /**
+   * Each die drawn as far as its scale shows it (ADR 0047 §8: its text
+   * fading in from 4 px to 7 px on screen), and what is around it in its
+   * parent at `surroundOpacity` (down to about a fifth), the plate's face
+   * with the top level's.
+   */
+  applyDepth() {
+    let top = 1;
+    for (const level of this.drawn?.levels ?? []) {
+      const group = this.groups.get(level.path);
+      if (!group?.g?.style) continue;
+      const opacity = level.parent ? dieOpacity(level.transform.k) : 1;
+      const text = opacity < 1 ? String(Math.round(opacity * 1000) / 1000) : '';
+      if (group.g.style.opacity !== text) group.g.style.opacity = text;
+      const parent = level.parent && this.groups.get(level.parent.path);
+      if (parent?.g?.style) {
+        const around = String(Math.round(surroundOpacity(opacity) * 1000) / 1000);
+        if (parent.g.style.getPropertyValue('--surround') !== around) parent.g.style.setProperty('--surround', around);
+        if (level.parent.path === '') top = surroundOpacity(opacity);
+      }
+    }
+    const plate = String(Math.round(top * 1000) / 1000);
+    if (this.style && this.style.getPropertyValue('--signal-surround') !== plate) this.style.setProperty('--signal-surround', plate);
   }
 
   /** Whether a click at `at` (screen px, at `time`) is the second of a double-click whose first opened or closed a composite (`last`, else `lastToggle`). */
@@ -1628,6 +1721,7 @@ export class SignalSchematic extends HTMLElement {
   }
 
   pointerDown(event) {
+    this.stopZoom();
     // A control-click is the Mac's right click: the context menu's, not a press.
     if (event.button !== 0 || (MAC && event.ctrlKey) || !this.drawn) return;
     // A slot's "+" pin (ADR 0037 §7): its interface editor, with a port to add on that side.
@@ -1653,11 +1747,6 @@ export class SignalSchematic extends HTMLElement {
     // Shift or ⌘ adds to the selection or takes out of it.
     const additive = event.shiftKey || event.metaKey || (!MAC && event.ctrlKey);
     const base = { start: at, last: at, hit, moved: false, additive, pointer: event.pointerId };
-    // An open frame's × (2026-10-22): closes on release, never selects, drags or pans.
-    if (hit.kind === 'close') {
-      this.gesture = { ...base, close: true };
-      return;
-    }
     // Shift- or ⌘-drag (Ctrl-drag off a Mac) on the background: the marquee (a plain drag pans).
     if (marqueeStarts(hit, event, MAC)) {
       this.gesture = { ...base, marquee: true };
@@ -1733,7 +1822,7 @@ export class SignalSchematic extends HTMLElement {
       this.editor.connectMove(at);
       return;
     }
-    if (!gesture.moved || gesture.close) return;
+    if (!gesture.moved) return;
     const last = gesture.last;
     gesture.last = at;
     if (gesture.marquee) this.showMarquee(gesture);
@@ -1775,15 +1864,6 @@ export class SignalSchematic extends HTMLElement {
       return;
     }
     if (gesture.connect) this.editor.cancelConnect();
-    if (gesture.close) {
-      // Let go on its × still (a press slid off it does nothing).
-      const over = gesture.moved ? this.hitAt(at) : gesture.hit;
-      if (over.kind === 'close' && over.address === gesture.hit.address) {
-        this.closeInPlace(gesture.hit.address);
-        this.lastToggle = { at, time: event.timeStamp };
-      }
-      return;
-    }
     if (gesture.marquee) {
       this.hideMarquee();
       if (!gesture.moved) return;
@@ -1813,7 +1893,7 @@ export class SignalSchematic extends HTMLElement {
         this.select(hit ? [hit] : []);
         // A plain click on a closed composite's box opens it in place (2026-10-22: the zoom no longer does);
         // one on its face only selects it (a click beside a knob would open it all the time; a double-click enters).
-        if (!gesture.fromFace && this.openInPlace(hit, at)) this.lastToggle = { at, time: event.timeStamp, hit };
+        if (!gesture.fromFace && this.openInPlace(hit)) this.lastToggle = { at, time: event.timeStamp, hit };
       }
       return;
     }
@@ -1915,8 +1995,6 @@ export class SignalSchematic extends HTMLElement {
   hover(at) {
     if (!this.drawn) return;
     const hit = this.hitAt(at);
-    // An open frame's × (2026-10-22): a pointer, and its title says what it closes.
-    this.svg.classList.toggle('closing', hit.kind === 'close');
     this.hoveredPort = hit.kind === 'port' ? hit : null;
     this.hoverWire(hit.kind === 'wire' ? hit : null);
     // A closed composite's box or pin under the pointer: its pins say where they go inside.
@@ -2000,29 +2078,28 @@ export class SignalSchematic extends HTMLElement {
   }
 
   /**
-   * Composite instance `hit` opened and its frame filling the view (a
-   * double-click, the menu's Enter): the whole frame fitted, its title and
-   * × included, never larger than ENTER_MAX_K (a small or empty inside does
-   * not blow up) and never less readable than READ_K (`enterView`: a wide
-   * inside overflows the view, the frame reaching past the view's edges).
-   * One composite is pinned per level (M2.13-3); a library composite (its
-   * inside unknown) is only focused.
+   * Composite instance `hit` zoomed into (a double-click, Enter, the
+   * menu's Zoom into; ADR 0047 §8): as a click zooms (`openInPlace`). A
+   * library composite (its inside unknown) is only focused.
    */
   enter(hit) {
-    const inner = hit.node?.composite ? this.layoutOf(insideKey(hit.node)) : null;
-    const link = inner ? chain((level) => this.layoutOf(level), hit.address)?.at(-1) : null;
-    if (link) {
-      this.openShifts.delete(hit.address);
-      this.pinned = pinOne(this.pinned, hit.address);
-      this.setView({ ...enterView(link.node, link.inner, this.viewport, MARGIN_PX, MARGIN_PX, FRAME_SIDE_PX), path: hit.address });
-      return;
+    // Enter on a package zoomed into already frames it again.
+    if (this.drawn?.open.has(hit.address)) {
+      const framed = this.frameView(hit.address);
+      if (framed) {
+        this.travel(framed.from, framed.to);
+        return;
+      }
     }
+    if (this.openInPlace(hit)) return;
     const rect = nodeRect(this.drawn, hit.address);
     if (rect) this.setView(focus(this.view, rect, this.viewport, MARGIN_PX));
   }
 
   /** The person's zoom by `factor` about screen point `at` (null: the centre): the view only, opening and closing nothing (2026-10-22). */
   zoomBy(factor, at = null) {
+    this.stopZoom();
+    if (factor < 1) this.zoomedOut = true;
     this.setView(zoomAt(this.view, factor, at ?? { x: this.viewport.w / 2, y: this.viewport.h / 2 }));
   }
 
@@ -2043,6 +2120,8 @@ export class SignalSchematic extends HTMLElement {
     const next = wheelView(this.view, event, kind, this.point(event));
     if (next === this.view) return;
     this.closeMenu();
+    this.stopZoom();
+    if (next.k < this.view.k) this.zoomedOut = true;
     this.setView(next);
   }
 
@@ -2166,7 +2245,7 @@ export class SignalSchematic extends HTMLElement {
     const anchored = this.keyMenu ?? (origin === this ? this.menuAnchor() : null);
     if (!anchored && origin !== this.svg && !this.svg.contains(origin)) return null;
     const point = anchored ? anchored.point : this.point(event);
-    const target = { hit: anchored ? anchored.hit : this.singleHit(partHit(this.drawn, this.hitAt(point)), point), point };
+    const target = { hit: anchored ? anchored.hit : this.singleHit(this.hitAt(point), point), point };
     this.endMenu();
     this.menuState = { target, close };
     this.hoverWire(this.hovered);
@@ -2287,7 +2366,7 @@ export class SignalSchematic extends HTMLElement {
       this.revealSide();
     } else if (id === 'trace') this.startTrace(hit);
     else if (id === 'delete-selected') this.deleteSelection();
-    else if (id === 'open') this.openInPlace(hit, point);
+    else if (id === 'open') this.openInPlace(hit);
     else if (id === 'close') this.closeInPlace(hit.address);
     else if (id === 'enter') this.enter(hit);
     // A boundary pin's other side (2026-10-20): the frame's pin inside its composite, or its box's pin around it.
@@ -3270,10 +3349,7 @@ export class SignalSchematic extends HTMLElement {
     const way = new Set(links.slice(1).map((link) => link.path));
     for (const path of this.revealPinned ?? []) if (!way.has(path)) this.pinned.delete(path);
     this.revealPinned = new Set([...way].filter((path) => !this.pinned.has(path) || this.revealPinned?.has(path)));
-    for (const path of way) {
-      if (!this.pinned.has(path)) this.openShifts.delete(path);
-      this.pinned = pinOne(this.pinned, path);
-    }
+    for (const path of way) this.pinned = pinOne(this.pinned, path);
     let rect = entry.layout.bounds;
     let hit = null;
     if (pick) {

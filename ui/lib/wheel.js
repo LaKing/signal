@@ -27,6 +27,23 @@ export function ownsWheel({ fills = false, focused = false, released = false, mo
   return fills || modifier || (focused && !released);
 }
 
+/**
+ * Who decides a wheel gesture among the controls under the pointer
+ * (`candidates`, innermost first: `{element, uses, owns}`; ADR 0047 phase
+ * 3, the owner: a knob on the plate took the schematic's wheel though it
+ * was neither selected nor focused): the innermost one that uses the wheel
+ * there and owns it takes it; when none owns it, the innermost that uses
+ * it decides for the page (and may show the hint). `{owner, decider}`:
+ * `owner` the element or null (the page), `decider` the element that
+ * decided, or null when none uses the wheel there.
+ */
+export function wheelOwner(candidates) {
+  const using = candidates.filter((c) => c.uses);
+  const owner = using.find((c) => c.owns);
+  if (owner) return { owner: owner.element, decider: owner.element };
+  return { owner: null, decider: using[0]?.element ?? candidates[0]?.element ?? null };
+}
+
 /** Whether a control's box `rect` fills a `viewport` (`{width, height}`). */
 export function fillsWindow(rect, viewport) {
   if (!rect || !viewport?.width || !viewport?.height) return false;
