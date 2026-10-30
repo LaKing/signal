@@ -95,7 +95,6 @@ function schematic(graph = GRAPH) {
     fitted: true,
     open: new Set(),
     pinned: new Set(),
-    opening: new Map(),
     layouts: new Map(),
     moved: new Map(),
     selected: [],

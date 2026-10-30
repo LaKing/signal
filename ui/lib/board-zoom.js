@@ -1,11 +1,12 @@
-// Deep zoom into a chip (ADR 0047 §8, phase 3): what a die shows at a
-// scale and how the view travels to it. A composite's inside (its die) is
-// laid out at its natural size and opens over its package (ui/lib/
-// board-die.js); nothing around it moves. Its text fades in from 4 px on
+// Deep zoom into a chip (ADR 0047 §8, phase 3; the owner's verdict on
+// 9e81dc8: a microscope): what a die shows at a scale and how the view
+// travels to it. A composite's inside (its die) is laid out at its natural
+// size and drawn scaled into its package, which has its shape and its pins
+// (`shapePackage`, `dieLink`); nothing grows, nothing moves. Its text fades in from 4 px on
 // screen and is whole from 7 px (ADR 0030's level of detail), and
 // everything around the package fades as the die comes in, to SURROUND. A
-// click, a double-click or Enter zooms the view in ZOOM_MS until the die
-// fills the stage, readable; Escape and a breadcrumb zoom back out;
+// click, a double-click or Enter zooms the view in ZOOM_MS until the package
+// fills the stage; Escape and a breadcrumb zoom back out;
 // zooming out until the die is small or unreadable leaves it. All of it
 // is view state (rule 4). Pure; no DOM.
 
@@ -54,30 +55,22 @@ export const FULL_K = FADE_FULL_PX / DIE_TEXT;
 export const DIE_MAX_K = 2;
 
 /**
- * The view (in `view`'s coordinates) that zooms into a chip: its package's
- * screen rectangle `rect` (as drawn in `view` now) fills `viewport` less
- * `margin` (`focus`'s fit), and its die, drawn at screen scale `dieK` now,
- * is drawn whole (FULL_K) when the fit leaves it smaller: then zoomed on
- * about the package's centre; when it is then wider than the stage, its
- * left edge (its inputs) is put at the stage's left margin and the rest
- * read by panning (a large inside, such as moog_voice); never larger than DIE_MAX_K
- * (a small inside then lies in the middle, its package smaller than the
- * stage).
+ * The view (in `view`'s coordinates) that zooms into a chip (ADR 0047 §8,
+ * the owner's verdict on 9e81dc8: a microscope): its package's screen
+ * rectangle `rect` (as drawn in `view` now) fills `viewport` less `margin`,
+ * centred; its die, drawn at screen scale `dieK` now, never larger than
+ * DIE_MAX_K (a small or empty inside does not blow up). The person zooms
+ * on from there to read details.
  */
 export function zoomInView(view, rect, viewport, dieK, margin = 24) {
   const w = Math.max(1, viewport.w - 2 * margin);
   const h = Math.max(1, viewport.h - 2 * margin);
-  const f = Math.min(w / Math.max(rect.w, 1e-9), h / Math.max(rect.h, 1e-9));
-  let factor = f;
-  if (dieK > 0 && dieK * factor < FULL_K) factor = FULL_K / dieK;
+  let factor = Math.min(w / Math.max(rect.w, 1e-9), h / Math.max(rect.h, 1e-9));
   if (dieK > 0 && dieK * factor > DIE_MAX_K) factor = DIE_MAX_K / dieK;
   const centre = { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
   // Zoomed about the package's centre, then its centre moved to the viewport's.
   const zoomed = zoomAt(view, factor, centre);
-  // Wider than the stage at that scale: its left edge (the inputs, where the flow starts) at the stage's left margin.
-  const wide = rect.w * factor > w + 1e-9;
-  const dx = wide ? margin + (rect.w * factor) / 2 - centre.x : viewport.w / 2 - centre.x;
-  return pan(zoomed, dx, viewport.h / 2 - centre.y);
+  return pan(zoomed, viewport.w / 2 - centre.x, viewport.h / 2 - centre.y);
 }
 
 /** The ease of a zoom's travel: slow, fast, slow (cubic). */

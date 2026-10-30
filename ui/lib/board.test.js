@@ -47,10 +47,11 @@ const SNAPSHOTS = new URL('ui/lib/fixtures/board/snapshots.json', root);
  * before the plate design. The others on approximated plates.
  */
 const LIMITS = {
-  kick: { crossings: 8, length: 2800, labels: 1 },
+  // ADR 0047 phase 3: the packages take their dies' shapes (the owner's verdict on 9e81dc8): kick's drums is longer to wire.
+  kick: { crossings: 8, length: 3800, labels: 1 },
   studio: { crossings: 66, length: 52000, labels: 1 },
   // ADR 0047 phase 3: the maze's bend estimate (fewer needless bends) leaves 8 wires of its approximated plate without a way (was 5).
-  'studio-transport': { crossings: 105, length: 80000, labels: 9 },
+  'studio-transport': { crossings: 105, length: 80000, labels: 11 },
   'physical-av': { crossings: 33, length: 13500, labels: 3 },
   'library-demo': { crossings: 10, length: 18600, labels: 0 },
 };
@@ -74,8 +75,9 @@ function dieOf(g) {
   if (dies.has(g)) return dies.get(g);
   const factsOf = (m) => exportFacts(g.composites?.[m] ?? null);
   const cache = new Map();
+  // Its parameters in the order of its package's top pins (the vias'), as the page's `dieFor`.
   const of = (node) => {
-    if (!cache.has(node.module)) cache.set(node.module, g.composites?.[node.module] ? layout(g.composites[node.module], {}, { factsOf, board: { die: true, dieOf: of } }).bounds : null);
+    if (!cache.has(node.module)) cache.set(node.module, g.composites?.[node.module] ? layout(g.composites[node.module], {}, { factsOf, board: { die: true, dieOf: of, paramOrder: node.topOrder ?? null } }) : null);
     return cache.get(node.module);
   };
   dies.set(g, of);
@@ -315,7 +317,11 @@ test('each card’s schematic stays in its card (the owner’s verdict on 7a6259
   // Bound to the card's controls, or fed and feeding mostly within it (the melody feeds the synth).
   for (const id of ['synth', 'melody']) assert.ok(inside(chip(id), cards['MONO SYNTH']), `${id} in MONO SYNTH`);
   for (const id of ['drums', 'transport', 'kick', 'snare', 'clap', 'hats', 'tom', 'rim', 'cymbal', 'drum_a', 'drum_b']) assert.ok(inside(chip(id), cards['RHYTHM COMPOSER']), `${id} in RHYTHM COMPOSER`);
-  assert.ok(inside(chip('echo'), cards['TAPE ECHO']), 'echo in TAPE ECHO');
+  // The echo's package has its die's shape since ADR 0047 phase 3 (the owner's verdict on 9e81dc8): in its card when
+  // it fits between the knobs, else in its card's margin beside the plate (left or right) at its card's height.
+  const echo = chip('echo');
+  const tape = cards['TAPE ECHO'];
+  assert.ok(inside(echo, tape) || ((echo.x >= plate.plate.w || echo.x + echo.w <= 0) && echo.y >= tape.y && echo.y + echo.h <= tape.y + tape.h), 'echo in TAPE ECHO or beside it');
   // The master card has no room for a chip: its chain lies beside the plate, at its height.
   const master = cards.master;
   for (const id of ['bus', 'dc', 'limiter', 'out']) {

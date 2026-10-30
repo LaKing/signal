@@ -41,9 +41,9 @@ test('the travel into a chip: from the view to the chip framed, a zoom about the
   const r = screenRect(to, chip);
   assert.ok(Math.abs(r.x + r.w / 2 - 500) < 1e-6 && Math.abs(r.y + r.h / 2 - 300) < 1e-6, 'centred');
   assert.ok(Math.abs(r.h - 552) < 1e-6, `fitted to the stage's height less its margins: ${r.h}`);
-  // A die that would be drawn smaller than whole is zoomed on to FULL_K; never past DIE_MAX_K.
+  // The package framed whatever its die's scale (the person zooms on to read); never past DIE_MAX_K.
   const small = zoomInView(view, rect, viewport, 0.5 * 0.01, 24);
-  assert.ok(Math.abs((small.k / view.k) * 0.5 * 0.01 - FULL_K) < 1e-9);
+  assert.ok(Math.abs(screenRect(small, chip).h - 552) < 1e-6);
   const big = zoomInView(view, rect, viewport, 0.5 * 2, 24);
   assert.ok(Math.abs((big.k / view.k) * 0.5 * 2 - DIE_MAX_K) < 1e-9);
   // The travel: its ends, the scale geometric between, one screen point kept throughout.

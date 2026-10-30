@@ -30,7 +30,7 @@ function kickLayouts() {
   const layouts = new Map();
   const of = (level) => {
     if (!layouts.has(level)) {
-      const dieOf = (node) => of(node.module)?.bounds ?? null;
+      const dieOf = (node) => of(node.module);
       layouts.set(level, level === '' ? layout(top, {}, { board: { dieOf } }) : KICK.composites[level] ? layout(KICK.composites[level], {}, { board: { die: true, dieOf } }) : null);
     }
     return layouts.get(level);
@@ -49,7 +49,6 @@ function schematic() {
     fitted: true,
     open: new Set(),
     pinned: new Set(),
-    opening: new Map(),
     zooming: null,
     zoomedOut: false,
     selected: [],
@@ -124,19 +123,17 @@ test('a click on a chip zooms into it: its package fills the stage, its die draw
   // Nothing grows and nothing moves: the drawn level is the stored one, box for box.
   assert.deepEqual(top.layout.nodes.map((n) => [n.id, n.x, n.y, n.w, n.h]), before);
   assert.deepEqual(boxes(s, ''), before);
-  // The die opens over the board at its natural size (the level's scale) and fills the stage, centred, its text
-  // drawn whole (FULL_K to DIE_MAX_K); one too wide for the stage at FULL_K has its inputs' edge at the margin.
+  // The camera frames the package (the owner's verdict on 9e81dc8: a microscope): centred, filling the stage less its
+  // margins (or its die at DIE_MAX_K, a small inside); its die scaled into it, uniformly, within it.
   const die = s.drawn.levels[1];
   assert.equal(die.path, '/drums');
-  assert.ok(Math.abs(die.transform.k - topK(s)) < 1e-9, 'its natural size');
-  assert.ok(die.transform.k >= FULL_K - 1e-9 && die.transform.k <= DIE_MAX_K + 1e-9, `the die at ${die.transform.k}`);
-  assert.equal(dieOpacity(die.transform.k), 1);
+  const r = rectOf(s, '', 'drums');
+  assert.ok(Math.abs(r.x + r.w / 2 - viewport.w / 2) < 1e-6 && Math.abs(r.y + r.h / 2 - viewport.h / 2) < 1e-6, `centred: ${JSON.stringify(r)}`);
+  assert.ok(Math.abs(r.w - (viewport.w - 48)) < 1e-6 || Math.abs(r.h - (viewport.h - 48)) < 1e-6 || Math.abs(die.transform.k - DIE_MAX_K) < 1e-9, `fills the stage: ${JSON.stringify(r)}`);
   const b = die.layout.bounds;
   const at = toScreen(die.transform, b);
-  const r = { ...at, w: b.w * die.transform.k, h: b.h * die.transform.k };
-  const inStage = r.x >= -1e-6 && r.y >= -1e-6 && r.x + r.w <= viewport.w + 1e-6 && r.y + r.h <= viewport.h + 1e-6;
-  assert.ok(inStage || Math.abs(r.x - 24) < 1e-6, `framed: ${JSON.stringify(r)}`);
-  if (inStage) assert.ok(Math.abs(r.x + r.w / 2 - viewport.w / 2) < 1e-6 || Math.abs(r.y + r.h / 2 - viewport.h / 2) < 1e-6, 'centred');
+  assert.ok(at.x >= r.x - 1e-6 && at.y >= r.y - 1e-6 && at.x + b.w * die.transform.k <= r.x + r.w + 1e-6 && at.y + b.h * die.transform.k <= r.y + r.h + 1e-6, 'its die within its package');
+  assert.ok(dieOpacity(die.transform.k) > 0, 'its die drawn');
   // Recursion: a click on kick in the die zooms into kick the same way, drums staying open.
   click(s, middleOf(s, '/drums', 'kick'));
   assert.deepEqual([...s.drawn.open].sort(), ['/drums', '/drums/kick']);
