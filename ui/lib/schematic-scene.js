@@ -15,7 +15,7 @@
 import { HEADER, PAD, dieArea, insideKey } from './schematic-layout.js';
 import { chooseOpen, grownNode, openedLayout } from './schematic-open.js';
 import { compose, screenRect, uncompose } from './schematic-view.js';
-import { fitDie } from './board-die.js';
+import { dieView } from './board-die.js';
 /** Smaller than this on screen (px), a node or a wire is not drawn. */
 export const MIN_PX = 2;
 /** Nested deeper than this, nothing more opens (a guard; projects are shallower). */
@@ -38,14 +38,14 @@ export function inside(node, bounds) {
 }
 
 /**
- * What `node` (an open composite's box) draws inside it: `{layout, link}`,
- * its inside's layout `inner` as drawn there and the transform inside →
- * parent. A package (ADR 0047 §8, `node.die`) draws its die fitted into its
- * body, its interface on its own edges (`fitDie`); any other box its
- * inside as laid out, in its frame (`inside`).
+ * What `node` (an open composite's box) shows of its inside `inner`:
+ * `{layout, link}`, the transform inside → parent. A package (ADR 0047 §8,
+ * `node.die`) opens its die over itself, `t` of the way (0 to 1) from its
+ * own rectangle to the die's natural size, within `room` (its level's
+ * bounds: `dieView`); any other box draws its inside in its frame.
  */
-export function drawnInside(node, inner) {
-  if (node.die) return fitDie(node, inner);
+export function drawnInside(node, inner, t = 1, room = null) {
+  if (node.die) return dieView(node, inner, t, room);
   return { layout: inner, link: inside(grownNode(node, inner.bounds), inner.bounds) };
 }
 
@@ -77,7 +77,7 @@ function wireBox(wire) {
  * its inside's transform), the top level first with no node; null when
  * `path` is not a chain of composites in these layouts.
  */
-export function chain(layoutOf, path = '') {
+export function chain(layoutOf, path = '', opening = null) {
   const top = layoutOf('');
   if (!top) return null;
   const links = [{ path: '', level: '', layout: top, node: null, inner: null }];
@@ -90,7 +90,7 @@ export function chain(layoutOf, path = '') {
     parent.layout = openedLayout(parent.layout, name, drawn.bounds);
     const node = grownNode(box, drawn.bounds);
     at = `${at}/${name}`;
-    const shown = drawnInside(node, drawn);
+    const shown = drawnInside(node, drawn, opening?.get(at) ?? 1, parent.layout.bounds);
     links.push({ path: at, level: insideKey(node), layout: shown.layout, node, inner: shown.link });
   }
   return links;
@@ -117,9 +117,9 @@ function upward(links, view) {
  * returned, those of them drawn). `view` comes back re-rooted at the
  * deepest level drawn under the screen's centre.
  */
-export function scene({ layoutOf, view, viewport, pinned = new Set() }) {
+export function scene({ layoutOf, view, viewport, pinned = new Set(), opening = null }) {
   const screen = { x: 0, y: 0, w: viewport.w, h: viewport.h };
-  const links = chain(layoutOf, view.path ?? '') ?? chain(layoutOf, '');
+  const links = chain(layoutOf, view.path ?? '', opening) ?? chain(layoutOf, '', opening);
   const along = new Map();
   if (links) {
     const transforms = upward(links, view);
@@ -152,7 +152,7 @@ export function scene({ layoutOf, view, viewport, pinned = new Set() }) {
     }
     if (!pick) return;
     const child = `${path}/${pick.node.name}`;
-    const shown = drawnInside(pick.node, pick.inner);
+    const shown = drawnInside(pick.node, pick.inner, opening?.get(child) ?? 1, drawn.bounds);
     // A level on the view's chain has its transform from the view itself.
     const next = along.get(child) ?? compose(transform, shown.link);
     visit(child, insideKey(pick.node), next, depth + 1, entry, shown.layout);

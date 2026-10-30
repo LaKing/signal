@@ -152,9 +152,15 @@ export function hitTest(drawn, point) {
           return item.kind === 'bundle' ? bundleHit(entry, item) : wireHit(entry, item);
         }
       }
-      continue;
+    } else for (const wire of entry.wires) if (wire.kind !== 'binding' && nearWire(wire, local, WIRE_PX / scale)) return wireHit(entry, wire);
+    // A die (ADR 0047 §8) lies over its surroundings, opaque: its empty ground is its package's (as an open
+    // frame's body was: selected, a drag pans), never what lies under it.
+    const die = entry.parent ? entry.layout?.board?.die : null;
+    if (die && local.x >= die.x && local.x <= die.x + die.w && local.y >= die.y && local.y <= die.y + die.h) {
+      const name = entry.path.slice(entry.path.lastIndexOf('/') + 1);
+      const pkg = entry.parent.layout.nodes.find((n) => n.kind === 'instance' && n.name === name);
+      if (pkg) return instanceHit(entry.parent, pkg);
     }
-    for (const wire of entry.wires) if (wire.kind !== 'binding' && nearWire(wire, local, WIRE_PX / scale)) return wireHit(entry, wire);
   }
   return { kind: 'background', path: '', level: '' };
 }

@@ -81,12 +81,13 @@ import { insideBanner, insideReason, isPreviewLevel, isSlotInside, levelData, un
 import { DragFollow, ownedLabels } from '../lib/schematic-drag.js';
 import { aroundReason, dragAction, drawOrder, editable, editLevel, openFrameHit, pinOne, shownFrame, unpin } from '../lib/schematic-open.js';
 import { boundaryLinks, breadcrumbs, chain, drawnInside, nodeRect, rebase, reroot, scene } from '../lib/schematic-scene.js';
+import { edgeStubs } from '../lib/board-die.js';
 import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
 import { hitTest, instanceHit, portHit, reselect, wireHit } from '../lib/schematic-hit.js';
 import { cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
 import { LEVEL_RATE, SLOTS, candidates, levelPlan, levelSpan, mutedOf, parameterSpan } from '../lib/schematic-levels.js';
 import { isDiscrete, selectOptions, selectValue, valueLabel } from '../lib/value-set.js';
-import { IDENTITY, commandView, fit, focus, matrix, pan, toLocal, toScreen, wheelView, zoomAt } from '../lib/schematic-view.js';
+import { IDENTITY, commandView, fit, focus, matrix, pan, screenRect, toLocal, toScreen, wheelView, zoomAt } from '../lib/schematic-view.js';
 import { WheelKinds } from '../lib/wheel.js';
 import { keyCommand, keymap, shownKeys, wheelCommand } from '../lib/keys.js';
 import { registerWheel, takesWheel } from './keyboard.js';
@@ -99,7 +100,7 @@ import { levelControls, levelFaces } from '../lib/parts.js';
 import { FACE_LABEL_CHARS, hotAddresses } from '../lib/schematic-face.js';
 import { SchematicFaces } from './schematic-faces.js';
 import { BOARD_CSS, SchematicBoard } from './schematic-board.js';
-import { ZOOM_MS, belowThreshold, dieOpacity, ease, surroundOpacity, tween, zoomInView } from '../lib/board-zoom.js';
+import { ZOOM_MS, dieOpacity, ease, surroundOpacity, tween, zoomInView, zoomedOutOf } from '../lib/board-zoom.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 /** A press that moves less than this (px) is a click. */
@@ -300,6 +301,8 @@ svg.tracing .pin.traced { stroke: var(--signal-fg, #d6dbe4); stroke-width: 2.5; 
 .surround > .net-labels, .surround .board-section, .surround .board-section-edge { opacity: var(--surround, 0.4); }
 /* A die's interface lies on its package's edges (ADR 0047 §8): no column of its own; and the package's title fades out as its die comes in. */
 .node.edge > .box, .node.edge > .frame { display: none; }
+.die-ground { fill: var(--signal-board-section, #151820); stroke: var(--signal-board-section-edge, #343b47); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.die-stub { pointer-events: none; }
 .open > .name, .open > .module { opacity: var(--title, 1); }
 /* A composite's or a frame's port label, a summary, a bundle's count (M2.13-2; 2026-10-20: in the level's units, scaling with the drawing, ui/lib/schematic-labels.js). */
 .labels { pointer-events: none; }
@@ -375,6 +378,8 @@ export class SignalSchematic extends HTMLElement {
     this.pinned = new Set();
     /** ADR 0047 §8: the view's travel into a chip or out of one (`{from, to, start, done}`), or null. */
     this.zooming = null;
+    /** How far each die is open over its package while it opens or closes (path → 0…1; 1 when absent). */
+    this.opening = new Map();
     /** The person zoomed out since the last frame: a die gone below its threshold is left (`leaveFaded`). */
     this.zoomedOut = false;
     this.drawn = null;
@@ -774,8 +779,8 @@ export class SignalSchematic extends HTMLElement {
           faces: levelFaces(this.graph, level),
           faceSize: this.faces ? (face) => this.faces.sizeOf(face) : null,
           // ADR 0047 §5–6: the top level is the board under the plate; §8 (phase 3): every inside is a die, a board
-          // of its own drawn in its package, which is widened towards it (`dieOf`, each inside laid out once).
-          board: { ...(level === '' ? (this.board?.option() ?? {}) : { die: true }), dieOf: (node) => this.layoutOf(insideKey(node))?.bounds ?? null },
+          // of its own at its natural size, opened over its package (`dieOf`: a chip has one; laid out when drawn).
+          board: { ...(level === '' ? (this.board?.option() ?? {}) : { die: true }), dieOf: (node) => Boolean(levelData(this.graph, insideKey(node))) },
         }),
       );
     }
@@ -795,6 +800,7 @@ export class SignalSchematic extends HTMLElement {
   fitTop() {
     this.stopZoom();
     this.pinned = new Set();
+    this.opening?.clear();
     this.setView(this.fitAll());
   }
 
@@ -825,9 +831,10 @@ export class SignalSchematic extends HTMLElement {
     }
     const layoutOf = (level) => this.layoutOf(level);
     // Only what the person zoomed into is open (`pinned`; ADR 0047 §8: its die drawn in its package, nothing moved).
-    this.drawn = scene({ layoutOf, view: this.view, viewport: this.viewport, pinned: this.pinned });
+    const opening = this.opening;
+    this.drawn = scene({ layoutOf, view: this.view, viewport: this.viewport, pinned: this.pinned, opening });
     // Zoomed out past a die's threshold (ADR 0047 §8): its level is left, as Escape leaves it.
-    if (this.leaveFaded()) this.drawn = scene({ layoutOf, view: this.view, viewport: this.viewport, pinned: this.pinned });
+    if (this.leaveFaded()) this.drawn = scene({ layoutOf, view: this.view, viewport: this.viewport, pinned: this.pinned, opening });
     // Kept in the coordinates of the deepest level under the centre.
     this.view = this.drawn.view;
     this.open = this.drawn.open;
@@ -891,8 +898,10 @@ export class SignalSchematic extends HTMLElement {
       const plate = el('g', { class: 'plate-layer' });
       const ghosts = el('g', { class: 'plate-layer plate-ghosts' });
       const nets = el('g', { class: 'net-labels' });
-      drawn = { g: el('g'), plate, ghosts, wires, links, overlay, face, nodes, labels, nets, baked: null, wireCache: new Map(), nodeCache: new Map(), bundleCache: new Map(), shown: null, labelKey: null, sizes: [] };
-      drawn.g.append(plate, wires, links, overlay, drawn.face, nodes, ghosts, labels, nets);
+      // ADR 0047 §8: a die's opaque ground and outline, under everything of its level.
+      const ground = el('g');
+      drawn = { g: el('g'), ground, plate, ghosts, wires, links, overlay, face, nodes, labels, nets, baked: null, wireCache: new Map(), nodeCache: new Map(), bundleCache: new Map(), shown: null, labelKey: null, sizes: [] };
+      drawn.g.append(ground, plate, wires, links, overlay, drawn.face, nodes, ghosts, labels, nets);
       this.groups.set(level.path, drawn);
     }
     const transform = level.transform;
@@ -972,8 +981,14 @@ export class SignalSchematic extends HTMLElement {
       } else {
         drawn.plate.replaceChildren();
         drawn.ghosts.replaceChildren();
-        drawn.nets.replaceChildren();
+        // A die's own net labels, and the stubs at its edge pins naming what enters and leaves there (ADR 0047 §8).
+        if (level.layout.board) this.board?.drawLabels(drawn.nets, level.layout, baked, bakedPath, bakedPoint, text);
+        else drawn.nets.replaceChildren();
+        if (level.parent && level.layout.board?.die) drawn.nets.append(...this.dieStubs(level, baked));
       }
+      const die = level.parent ? level.layout.board?.die : null;
+      const ground = die ? bakedRect(baked, die) : null;
+      drawn.ground.replaceChildren(...(ground ? [el('rect', { class: 'die-ground', rx: 10 * baked.m, ...ground })] : []));
       if (!sameItems([...drawn.nodes.children], nodes.elements)) drawn.nodes.replaceChildren(...nodes.elements);
       drawn.wireCache = wires.cache;
       drawn.nodeCache = nodes.cache;
@@ -1538,16 +1553,28 @@ export class SignalSchematic extends HTMLElement {
         return;
       }
       const from = reroot(this.view, (l) => this.layoutOf(l), '');
-      this.travel({ ...from, path: '' }, { ...this.fitAll(), path: '' }, () => {
-        this.pinned = new Set();
-      });
+      const all = [...this.pinned];
+      this.travel(
+        { ...from, path: '' },
+        { ...this.fitAll(), path: '' },
+        () => {
+          this.pinned = new Set();
+          this.opening.clear();
+        },
+        (t) => all.forEach((p) => this.opening.set(p, 1 - t)),
+      );
       return;
     }
     const framed = this.frameView(path);
+    const deeper = [...this.pinned].filter((open) => open !== path && open.startsWith(`${path}/`));
     const below = () => {
-      for (const open of [...this.pinned]) if (open !== path && open.startsWith(`${path}/`)) this.pinned.delete(open);
+      for (const open of deeper) {
+        this.pinned.delete(open);
+        this.opening.delete(open);
+      }
     };
-    if (framed) this.travel(framed.from, framed.to, below);
+    // What is open below it shrinks back as the view travels (ADR 0047 §8).
+    if (framed) this.travel(framed.from, framed.to, below, (t) => deeper.forEach((p) => this.opening.set(p, 1 - t)));
     else {
       below();
       this.schedule();
@@ -1569,10 +1596,13 @@ export class SignalSchematic extends HTMLElement {
     const inner = node?.composite ? this.layoutOf(insideKey(node)) : null;
     const rect = nodeRect(this.drawn, path);
     if (!node || !inner || !rect) return null;
-    const dieK = parent.transform.k * drawnInside(node, inner).link.k;
+    // The die opened whole (ADR 0047 §8): its rectangle at its natural size over the package.
+    const open = drawnInside(node, inner, 1, parent.layout.bounds);
+    const dieK = parent.transform.k * open.link.k;
+    const target = node.die ? screenRect(parent.transform, open.rect) : rect;
     // In the parent level's own coordinates as drawn (the view's level may be shallower than it).
     const from = { ...parent.transform, path: parentPath };
-    const to = { ...zoomInView(from, rect, this.viewport, dieK, MARGIN_PX), path: parentPath };
+    const to = { ...zoomInView(from, target, this.viewport, dieK, MARGIN_PX), path: parentPath };
     return { from, to };
   }
 
@@ -1581,22 +1611,24 @@ export class SignalSchematic extends HTMLElement {
    * coordinates) in ZOOM_MS (ADR 0047 §8; at once with reduced motion), and
    * `done` when it arrives. A press, the wheel or a key stops it where it is.
    */
-  travel(from, to, done = null) {
+  travel(from, to, done = null, progress = null) {
     this.stopZoom();
     this.zoomedOut = false;
     const reduced = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
     if (reduced || typeof requestAnimationFrame !== 'function') {
+      progress?.(1);
       this.setView(to);
       done?.();
       this.schedule();
       return;
     }
-    const zoom = { from, to, start: null, done };
+    const zoom = { from, to, start: null, done, progress };
     this.zooming = zoom;
     const step = (now) => {
       if (this.zooming !== zoom) return;
       zoom.start ??= now;
       const t = Math.min(1, (now - zoom.start) / ZOOM_MS);
+      zoom.progress?.(ease(t));
       this.view = { ...tween(from, to, ease(t)), path: from.path };
       if (t >= 1) {
         this.zooming = null;
@@ -1607,9 +1639,15 @@ export class SignalSchematic extends HTMLElement {
     requestAnimationFrame(step);
   }
 
-  /** The travel stopped where it is (a press, the wheel, a key, Fit); what it would do on arriving is not done. */
+  /** The travel stopped where it is (a press, the wheel, a key, Fit). */
   stopZoom() {
+    // Its state arrives at once (a die opening is open, one closing is left); the view stays where it is.
+    const zoom = this.zooming;
     this.zooming = null;
+    if (zoom) {
+      zoom.progress?.(1);
+      zoom.done?.();
+    }
   }
 
   /**
@@ -1626,8 +1664,14 @@ export class SignalSchematic extends HTMLElement {
     if (!this.layoutOf(insideKey(hit.node)) || !chain((level) => this.layoutOf(level), hit.address)) return false;
     this.pinned = pinOne(this.pinned, hit.address);
     const framed = this.frameView(hit.address);
-    if (framed) this.travel(framed.from, framed.to);
-    else this.schedule();
+    const address = hit.address;
+    // The die grows from its package to its own size as the view travels (ADR 0047 §8).
+    this.opening.set(address, 0);
+    if (framed) this.travel(framed.from, framed.to, () => this.opening.delete(address), (t) => this.opening.set(address, t));
+    else {
+      this.opening.delete(address);
+      this.schedule();
+    }
     return true;
   }
 
@@ -1641,6 +1685,7 @@ export class SignalSchematic extends HTMLElement {
     const parent = address.slice(0, address.lastIndexOf('/'));
     // Asked again while travelling out of it (a second Escape): it is left now, and the travel goes on up a level.
     if (this.zooming?.leaving === address) {
+      this.opening.delete(address);
       this.pinned = unpin(this.pinned, address);
       if (this.revealPinned) this.revealPinned = unpin(this.revealPinned, address);
       if (parent) this.closeInPlace(parent);
@@ -1649,16 +1694,19 @@ export class SignalSchematic extends HTMLElement {
     const leave = () => {
       this.pinned = unpin(this.pinned, address);
       if (this.revealPinned) this.revealPinned = unpin(this.revealPinned, address);
+      this.opening.delete(address);
     };
+    // The die shrinks back onto its package as the view travels out (ADR 0047 §8).
+    const shrink = (t) => this.opening.set(address, 1 - t);
     if (!parent) {
       const from = reroot(this.view, (l) => this.layoutOf(l), '');
-      this.travel({ ...from, path: '' }, { ...this.fitAll(), path: '' }, leave);
+      this.travel({ ...from, path: '' }, { ...this.fitAll(), path: '' }, leave, shrink);
       if (this.zooming) this.zooming.leaving = address;
       return;
     }
     const framed = this.frameView(parent);
     if (framed) {
-      this.travel(framed.from, framed.to, leave);
+      this.travel(framed.from, framed.to, leave, shrink);
       if (this.zooming) this.zooming.leaving = address;
     }
     else {
@@ -1678,7 +1726,8 @@ export class SignalSchematic extends HTMLElement {
     // Innermost first, as far out as the zoom went (several thresholds at once).
     let left = false;
     for (const level of [...(this.drawn?.levels ?? [])].reverse()) {
-      if (!level.parent || !belowThreshold(level.transform.k)) break;
+      if (!level.parent || !zoomedOutOf(level.transform.k, screenRect(level.transform, level.layout.bounds), this.viewport)) break;
+      this.opening.delete(level.path);
       this.pinned = unpin(this.pinned, level.path);
       if (this.revealPinned) this.revealPinned = unpin(this.revealPinned, level.path);
       left = true;
@@ -3199,6 +3248,22 @@ export class SignalSchematic extends HTMLElement {
       this.frameGroupsOf.set(node, groups);
     }
     return groups;
+  }
+
+  /** The stubs at die `level`'s edge pins (ADR 0047 §8, `edgeStubs`): what the level around connects there, named. */
+  dieStubs(level, baked) {
+    const name = level.path.slice(level.path.lastIndexOf('/') + 1);
+    const node = level.parent.layout.nodes.find((n) => n.kind === 'instance' && n.name === name);
+    if (!node) return [];
+    const parts = [];
+    for (const stub of edgeStubs(node, level.parent.layout, level.layout)) {
+      if (this.board?.hiddenKind(stub.shape)) continue;
+      parts.push(el('path', { class: `net-stub ${stub.shape}`, d: bakedPath(baked, stub.corners) }));
+      const off = { left: [-3, 3, 'end'], right: [3, 3, 'start'], top: [0, -3, 'middle'] }[stub.side];
+      const at = bakedPoint(baked, { x: stub.at.x + off[0], y: stub.at.y + off[1] });
+      parts.push(el('text', { class: `net-label die-stub ${stub.shape}`, x: at.x, y: at.y, 'font-size': 9 * baked.m, 'text-anchor': off[2] }, stub.text));
+    }
+    return parts;
   }
 
   /**

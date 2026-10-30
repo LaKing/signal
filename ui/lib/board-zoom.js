@@ -1,13 +1,13 @@
 // Deep zoom into a chip (ADR 0047 §8, phase 3): what a die shows at a
 // scale and how the view travels to it. A composite's inside (its die) is
-// drawn in its package's body (`dieArea`, ui/lib/schematic-layout.js) at
-// the scale that fits it there; nothing grows, nothing moves. Its text
-// fades in from 4 px on screen and is whole from 7 px (ADR 0030's level of
-// detail), and everything around the package fades as the die comes in,
-// to SURROUND at most. A click, a double-click or Enter zooms the view in
-// ZOOM_MS until the chip fills it and its die is readable; Escape and a
-// breadcrumb zoom back out; zooming out past the threshold leaves the die.
-// All of it is view state (rule 4). Pure; no DOM.
+// laid out at its natural size and opens over its package (ui/lib/
+// board-die.js); nothing around it moves. Its text fades in from 4 px on
+// screen and is whole from 7 px (ADR 0030's level of detail), and
+// everything around the package fades as the die comes in, to SURROUND. A
+// click, a double-click or Enter zooms the view in ZOOM_MS until the die
+// fills the stage, readable; Escape and a breadcrumb zoom back out;
+// zooming out until the die is small or unreadable leaves it. All of it
+// is view state (rule 4). Pure; no DOM.
 
 import { zoomAt, pan } from './schematic-view.js';
 
@@ -38,6 +38,14 @@ export function surroundOpacity(opacity) {
 /** Whether a die drawn at scale `k` is gone (zoomed out past its threshold): its level is left. */
 export function belowThreshold(k) {
   return dieOpacity(k) === 0;
+}
+
+/** A die zoomed out until its rectangle is smaller than this share of the stage both ways is left (it opens at its natural size, so its text alone would keep it until the whole board's is unreadable). */
+export const LEAVE_SHARE = 0.25;
+
+/** Whether a die drawn at scale `k`, its rectangle `rect` on screen, is zoomed out of: under its text's threshold, or small on the stage. */
+export function zoomedOutOf(k, rect, viewport) {
+  return belowThreshold(k) || (rect.w < viewport.w * LEAVE_SHARE && rect.h < viewport.h * LEAVE_SHARE);
 }
 
 /** The scale (on screen) at which a die is drawn whole. */

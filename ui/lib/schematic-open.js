@@ -181,10 +181,9 @@ export function openedLayout(source, name, bounds) {
   const grown = node ? grownNode(node, bounds) : null;
   let opened = layout;
   if (node?.die) {
-    // A package with its die drawn in it (ADR 0047 §8, phase 3): nothing moves, no wire is routed again;
-    // the wires at its pins stand out of the faded surroundings (`crossing`).
-    const wires = layout.wires.map((w) => (w.from.node === node.id || w.to.node === node.id ? { ...w, crossing: true } : w));
-    opened = { ...layout, wires, opened: name, moved: new Map() };
+    // A package its die opens over (ADR 0047 §8, phase 3): nothing moves, no wire is routed again; the wires
+    // at its pins stay there, faded with the rest (the die's edge stubs name them).
+    opened = { ...layout, opened: name, moved: new Map() };
   } else if (grown) {
     // Panel controls (ui/lib/schematic-controls.js) ride with their hosts: a box's room is made for its controls too, and the open one's go out beside its frame's names.
     const riders = layout.nodes.filter((n) => n.kind === 'control');

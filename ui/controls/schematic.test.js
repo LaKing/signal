@@ -49,6 +49,7 @@ function schematic() {
     fitted: true,
     open: new Set(),
     pinned: new Set(),
+    opening: new Map(),
     zooming: null,
     zoomedOut: false,
     selected: [],
@@ -123,18 +124,19 @@ test('a click on a chip zooms into it: its package fills the stage, its die draw
   // Nothing grows and nothing moves: the drawn level is the stored one, box for box.
   assert.deepEqual(top.layout.nodes.map((n) => [n.id, n.x, n.y, n.w, n.h]), before);
   assert.deepEqual(boxes(s, ''), before);
-  // The package fills the stage (its margins), centred; its die is drawn whole (FULL_K or more).
-  const r = rectOf(s, '', 'drums');
-  assert.ok(Math.abs(r.x + r.w / 2 - viewport.w / 2) < 1e-6 && Math.abs(r.y + r.h / 2 - viewport.h / 2) < 1e-6, `centred: ${JSON.stringify(r)}`);
+  // The die opens over the board at its natural size (the level's scale) and fills the stage, centred, its text
+  // drawn whole (FULL_K to DIE_MAX_K); one too wide for the stage at FULL_K has its inputs' edge at the margin.
   const die = s.drawn.levels[1];
   assert.equal(die.path, '/drums');
-  assert.ok(r.w >= viewport.w - 48 - 1e-6 || r.h >= viewport.h - 48 - 1e-6 || Math.abs(die.transform.k - DIE_MAX_K) < 1e-9, `fills the stage: ${JSON.stringify(r)}`);
+  assert.ok(Math.abs(die.transform.k - topK(s)) < 1e-9, 'its natural size');
   assert.ok(die.transform.k >= FULL_K - 1e-9 && die.transform.k <= DIE_MAX_K + 1e-9, `the die at ${die.transform.k}`);
   assert.equal(dieOpacity(die.transform.k), 1);
-  // The die lies in its package's body.
-  const inner = s.layoutOf('drums').bounds;
-  const at = toScreen(die.transform, inner);
-  assert.ok(at.x >= r.x - 1e-6 && at.y >= r.y - 1e-6 && at.x + inner.w * die.transform.k <= r.x + r.w + 1e-6 && at.y + inner.h * die.transform.k <= r.y + r.h + 1e-6, 'inside the package');
+  const b = die.layout.bounds;
+  const at = toScreen(die.transform, b);
+  const r = { ...at, w: b.w * die.transform.k, h: b.h * die.transform.k };
+  const inStage = r.x >= -1e-6 && r.y >= -1e-6 && r.x + r.w <= viewport.w + 1e-6 && r.y + r.h <= viewport.h + 1e-6;
+  assert.ok(inStage || Math.abs(r.x - 24) < 1e-6, `framed: ${JSON.stringify(r)}`);
+  if (inStage) assert.ok(Math.abs(r.x + r.w / 2 - viewport.w / 2) < 1e-6 || Math.abs(r.y + r.h / 2 - viewport.h / 2) < 1e-6, 'centred');
   // Recursion: a click on kick in the die zooms into kick the same way, drums staying open.
   click(s, middleOf(s, '/drums', 'kick'));
   assert.deepEqual([...s.drawn.open].sort(), ['/drums', '/drums/kick']);
@@ -191,15 +193,17 @@ test('zooming out past a die’s threshold leaves it; zooming in never opens one
   click(s, middleOf(s, '', 'drums'));
   click(s, middleOf(s, '/drums', 'kick'));
   assert.deepEqual([...s.drawn.open].sort(), ['/drums', '/drums/kick']);
-  // Out step by step: kick goes when its text falls under the threshold, then drums when its does.
+  // Out step by step: a die goes when its text falls under its threshold or it is small on the stage.
   const seen = [];
   for (let i = 0; i < 60 && s.drawn.open.size; i++) {
     s.zoomBy(1 / 1.2, { x: 500, y: 300 });
     const last = s.drawn.levels.at(-1);
-    if (last.parent) assert.ok(!belowThreshold(last.transform.k), `a die drawn below its threshold at ${last.transform.k}`);
     seen.push([...s.drawn.open].sort().join(' '));
   }
-  assert.deepEqual([...new Set(seen)], ['/drums /drums/kick', '/drums', ''], 'one level at a time');
+  // Innermost first (a die opens at its natural size, so kick's, larger than drums', may take drums with it).
+  const steps = [...new Set(seen)];
+  assert.equal(steps.at(-1), '', 'every die left');
+  assert.ok(!steps.includes('/drums/kick'), 'never the outer one first');
   // A pan changes nothing open.
   click(s, middleOf(s, '', 'drums'));
   s.setView({ ...s.view, x: s.view.x + 300 });
