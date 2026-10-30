@@ -381,15 +381,20 @@ export function near(a, b, gap = 0) {
   return a.x < b.x + b.w + gap && b.x < a.x + a.w + gap && a.y < b.y + b.h + gap && b.y < a.y + a.h + gap;
 }
 
+/** Each ring's cells, made once. */
+const RINGS = [];
+
 /** The cells of spiral ring `r` (whole steps), nearest first, then by y, then by x: a fixed order. */
 export function ring(r) {
-  if (r === 0) return [[0, 0]];
+  if (RINGS[r]) return RINGS[r];
+  if (r === 0) return (RINGS[0] = [[0, 0]]);
   const cells = [];
   for (let d = -r; d <= r; d++) {
     cells.push([d, -r], [d, r]);
     if (d !== -r && d !== r) cells.push([-r, d], [r, d]);
   }
-  return cells.sort((p, q) => p[0] * p[0] + p[1] * p[1] - (q[0] * q[0] + q[1] * q[1]) || p[1] - q[1] || p[0] - q[0]);
+  RINGS[r] = cells.sort((p, q) => p[0] * p[0] + p[1] * p[1] - (q[0] * q[0] + q[1] * q[1]) || p[1] - q[1] || p[0] - q[0]);
+  return RINGS[r];
 }
 
 /**

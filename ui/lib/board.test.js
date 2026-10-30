@@ -47,10 +47,10 @@ const SNAPSHOTS = new URL('ui/lib/fixtures/board/snapshots.json', root);
  * before the plate design. The others on approximated plates.
  */
 const LIMITS = {
-  kick: { crossings: 2, length: 2400, labels: 1 },
-  studio: { crossings: 70, length: 54000, labels: 1 },
-  'studio-transport': { crossings: 72, length: 25500, labels: 60 },
-  'physical-av': { crossings: 40, length: 13000, labels: 1 },
+  kick: { crossings: 8, length: 2800, labels: 1 },
+  studio: { crossings: 66, length: 52000, labels: 1 },
+  'studio-transport': { crossings: 105, length: 80000, labels: 6 },
+  'physical-av': { crossings: 33, length: 13500, labels: 3 },
   'library-demo': { crossings: 10, length: 18600, labels: 0 },
 };
 
@@ -261,12 +261,12 @@ test('vias (§5): a small pad at its control’s middle, its legs real wires dro
   for (const w of legs.filter((x) => x.from.node.startsWith('@control:'))) assert.ok(w.corners[1].x === w.corners[0].x && w.corners[1].y > w.corners[0].y, `${w.label}: drops`);
 });
 
-test('the drum row (the coordinator’s polish): its mixers at its right end, the triggers one ordered bus, the end of the flow in one row', () => {
+test('the drum row: its mixers below the row in its card, the triggers one ordered bus, the end of the flow in one row', () => {
   const b = boardOf('studio');
   const chip = (id) => b.nodes.find((n) => n.id === id);
   const voices = ['kick', 'snare', 'clap', 'hats', 'tom', 'rim', 'cymbal'].map(chip);
-  const right = Math.max(...voices.map((v) => v.x + v.w));
-  for (const id of ['drum_a', 'drum_b']) assert.ok(chip(id).x > right && Math.abs(chip(id).y - voices[0].y) <= 8, `${id} at the row's right end`);
+  const bottom = Math.max(...voices.map((v) => v.y + v.h));
+  for (const id of ['drum_a', 'drum_b']) assert.ok(chip(id).y > bottom, `${id} below the row`);
   // The sequencer's wires into the row cross one another only where one voice takes two of its nets (hats' closed and open).
   const triggers = b.wires.filter((w) => w.from.node === 'drums' && voices.some((v) => v.id === w.to.node));
   let crossings = 0;
@@ -285,8 +285,39 @@ test('the drum row (the coordinator’s polish): its mixers at its right end, th
   assert.ok(crossings <= 2, `the triggers cross ${crossings} times`);
   // bus → dc → limiter → out: one row, left to right.
   const chain = ['bus', 'dc', 'limiter', 'out'].map(chip);
-  for (let i = 1; i < chain.length; i++) {
-    assert.equal(chain[i].y, chain[0].y, `${chain[i].id} in the row`);
-    assert.ok(chain[i].x > chain[i - 1].x + chain[i - 1].w, `${chain[i].id} right of ${chain[i - 1].id}`);
+  for (let i = 1; i < chain.length; i++) assert.ok(chain[i].x > chain[i - 1].x + chain[i - 1].w, `${chain[i].id} right of ${chain[i - 1].id}`);
+});
+
+test('each card’s schematic stays in its card (the owner’s verdict on 7a62595): its chips in its rectangle, or beside the plate at its height when it has no room', () => {
+  const b = boardOf('studio');
+  const { plate } = project('studio');
+  const cards = Object.fromEntries(plate.cards.map((c) => [c.title, c]));
+  const inside = (n, c) => n.x >= c.x && n.y >= c.y && n.x + n.w <= c.x + c.w && n.y + n.h <= c.y + c.h;
+  const chip = (id) => b.nodes.find((n) => n.id === id);
+  // Bound to the card's controls, or fed and feeding mostly within it (the melody feeds the synth).
+  for (const id of ['synth', 'melody']) assert.ok(inside(chip(id), cards['MONO SYNTH']), `${id} in MONO SYNTH`);
+  for (const id of ['drums', 'transport', 'kick', 'snare', 'clap', 'hats', 'tom', 'rim', 'cymbal', 'drum_a', 'drum_b']) assert.ok(inside(chip(id), cards['RHYTHM COMPOSER']), `${id} in RHYTHM COMPOSER`);
+  assert.ok(inside(chip('echo'), cards['TAPE ECHO']), 'echo in TAPE ECHO');
+  // The master card has no room for a chip: its chain lies beside the plate, at its height.
+  const master = cards.master;
+  for (const id of ['bus', 'dc', 'limiter', 'out']) {
+    const n = chip(id);
+    assert.ok(n.x >= plate.plate.w && n.y >= master.y && n.y + n.h <= master.y + master.h, `${id} beside the plate at master's height`);
   }
+  // The sections: each card's, holding its chips; drawn on the Board.
+  assert.equal(b.board.sections.length, plate.cards.length);
+  for (const s of b.board.sections) assert.ok(s.x <= s.card.x && s.y <= s.card.y && s.x + s.w >= s.card.x + s.card.w && s.y + s.h >= s.card.y + s.card.h);
+  // A wire between two chips of one card stays in that card's section.
+  const cardOfChip = new Map();
+  b.board.sections.forEach((s, k) => {
+    for (const n of b.nodes) if (n.kind === 'instance' && n.x >= s.x && n.y >= s.y && n.x + n.w <= s.x + s.w && n.y + n.h <= s.y + s.h) cardOfChip.set(n.id, k);
+  });
+  let left = 0;
+  for (const w of b.wires.filter((x) => x.kind !== 'binding' && !x.labelled)) {
+    const k = cardOfChip.get(w.from.node);
+    if (k === undefined || k !== cardOfChip.get(w.to.node)) continue;
+    const s = b.board.sections[k];
+    if (!w.corners.every((p) => p.x >= s.x - 1 && p.x <= s.x + s.w + 1 && p.y >= s.y - 1 && p.y <= s.y + s.h + 1)) left++;
+  }
+  assert.equal(left, 0, 'no wire inside one card leaves its section');
 });

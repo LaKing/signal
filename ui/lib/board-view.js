@@ -17,6 +17,26 @@ export const XRAY_OPACITY = 0.25;
 /** The plate lifts and fades in this long (none with reduced motion). */
 export const LIFT_MS = 200;
 
+/**
+ * What each layer shows, as the opacities the CSS (ui/controls/schematic-
+ * board.js) fades to: the plate's live controls (`controls`), the cards'
+ * ghosts over the board (`ghosts`), the board itself (`board`). A step
+ * between layers is a transition from the opacity shown to the target,
+ * never through another value (`fadeSteps`).
+ */
+export const LAYER_OPACITY = Object.freeze({
+  plate: Object.freeze({ controls: 1, ghosts: 0, board: 0 }),
+  xray: Object.freeze({ controls: 1, ghosts: XRAY_OPACITY, board: 1 }),
+  board: Object.freeze({ controls: 0, ghosts: 0, board: 1 }),
+});
+
+/** The opacities a step from layer `from` to `to` passes through, sampled at `n` + 1 instants (linear, as the transition is). */
+export function fadeSteps(from, to, part, n = 4) {
+  const a = LAYER_OPACITY[from][part];
+  const b = LAYER_OPACITY[to][part];
+  return Array.from({ length: n + 1 }, (_, i) => a + ((b - a) * i) / n);
+}
+
 /** The state a view opens with: the board, every kind shown. */
 export const DEFAULT_VIEW = Object.freeze({ layer: 'board', hidden: Object.freeze([]) });
 

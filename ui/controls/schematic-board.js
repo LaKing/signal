@@ -39,10 +39,16 @@ export const BOARD_CSS = `
 svg.layer-xray .plate-ghosts { opacity: ${XRAY_OPACITY}; }
 .plate-layer .face-back { display: none; }
 svg.layer-board .plate-ghosts, svg.layer-plate .plate-ghosts { opacity: 0; }
+/* The board's ground and its sections (cards): tokens, so a later colour coding sits on top. */
+svg { transition: background-color ${LIFT_MS}ms ease-out; }
+svg.layer-xray, svg.layer-board { background: var(--signal-board-bg, #0e1014); }
+.board-section { fill: var(--signal-board-section, #151820); stroke: none; transition: opacity ${LIFT_MS}ms ease-out; }
+.board-section-edge { fill: none; stroke: var(--signal-board-section-edge, #343b47); stroke-width: 1.5; vector-effect: non-scaling-stroke; transition: opacity ${LIFT_MS}ms ease-out; }
+svg.layer-plate .board-section, svg.layer-plate .board-section-edge { opacity: 0; }
 /* The plate: the board hidden under it. */
 svg > g > * { transition: opacity ${LIFT_MS}ms ease-out; }
 svg.layer-plate > g > :not(.plate-layer) { opacity: 0; pointer-events: none; }
-@media (prefers-reduced-motion: reduce) { .plate-ghosts, svg > g > * { transition: none; } }
+@media (prefers-reduced-motion: reduce) { svg, .plate-ghosts, svg > g > *, .board-section, .board-section-edge { transition: none; } }
 /* A via: the plate's control on the board, a small pad at its place (the control itself is the plate's). */
 .control.via > .box { fill: color-mix(in srgb, var(--signal-effective, #ffb74d) 35%, var(--signal-bg, #16181d)); stroke-width: 1; }
 .control.via.reader > .box { fill: color-mix(in srgb, var(--signal-meter-rms, #3ecf8e) 35%, var(--signal-bg, #16181d)); }
@@ -74,9 +80,9 @@ export const PLATE_FACE_CSS = `
 :host(.plate.layer-xray) .face-panel signal-slot[bind] { visibility: hidden; pointer-events: none; }
 :host(.plate.layer-board) { opacity: 0; pointer-events: none; }
 :host(.plate.layer-board) .face-panel * { pointer-events: none !important; }
-:host(.plate.lifting) { animation: plate-lift ${LIFT_MS}ms ease-out; }
-@keyframes plate-lift { from { opacity: 0.4; translate: 0 -6px; } to { opacity: 1; translate: 0 0; } }
-@media (prefers-reduced-motion: reduce) { :host(.plate.lifting) { animation: none; } }
+/* A layer step fades from where it is to where it goes, never through another value (the owner's "it flashes"): a transition, no animation. */
+:host(.plate) { transition: opacity ${LIFT_MS}ms ease-out; }
+@media (prefers-reduced-motion: reduce) { :host(.plate) { transition: none; } }
 `;
 
 const SVG = 'http://www.w3.org/2000/svg';
@@ -109,7 +115,6 @@ export class SchematicBoard {
     this.state = viewState(null);
     /** The plate as measured: `{size, vias, obstacles, cards, key}`. */
     this.plate = { size: null, vias: new Map(), obstacles: [], cards: [], key: '' };
-    this.liftTimer = null;
   }
 
   /** The bar's switches, after the breadcrumbs. */
@@ -165,7 +170,6 @@ export class SchematicBoard {
     const was = this.state;
     if (next.layer === was.layer && next.hidden.join() === was.hidden.join()) return;
     this.state = next;
-    if (next.layer !== was.layer) this.lift();
     this.showState();
     this.host.redrawAll?.();
     if (tell) this.host.dispatchEvent(new CustomEvent('signal-view-change', { bubbles: true, composed: true, detail: { ...this.state } }));
@@ -176,18 +180,8 @@ export class SchematicBoard {
     this.set({ layer: nextLayer(this.state.layer) });
   }
 
-  /** The plate lifts (an animation; none with reduced motion, by the CSS). */
-  lift() {
-    this.lifting = true;
-    clearTimeout(this.liftTimer);
-    this.liftTimer = setTimeout(() => {
-      this.lifting = false;
-      this.host.faces?.setPlateClass?.(this.plateClass);
-    }, LIFT_MS);
-  }
-
   get plateClass() {
-    return ` plate layer-${this.state.layer}${this.lifting ? ' lifting' : ''}`;
+    return ` plate layer-${this.state.layer}`;
   }
 
   /** The Plate layer covers the board: a press there is the background's. */
@@ -316,9 +310,16 @@ export class SchematicBoard {
   }
 
   /** The plate's area and its cards' ghosts for the top level's group `group` (in the drawing's baked units). */
-  drawPlate(group, ghosts, baked, bakedRect, bakedPoint, faceArea, text) {
+  drawPlate(group, ghosts, baked, bakedRect, bakedPoint, faceArea, text, layout = null) {
     const size = this.plate.size;
     const parts = [];
+    // The board's sections (the owner's verdict on 7a62595): each card a darker base with its card's outline, what lies in it within.
+    for (const section of layout?.board?.sections ?? []) {
+      const r = bakedRect(baked, section);
+      if (r) parts.push(el('rect', { class: 'board-section', rx: 10 * baked.m, ...r }));
+      const c = bakedRect(baked, section.card);
+      if (c) parts.push(el('rect', { class: 'board-section-edge', rx: 8 * baked.m, ...c }));
+    }
     ghosts.replaceChildren();
     // A project without a panel file has no plate (nothing read, nothing said).
     if (!this.host.panelText) {

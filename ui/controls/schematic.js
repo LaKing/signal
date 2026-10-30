@@ -977,7 +977,7 @@ export class SignalSchematic extends HTMLElement {
       drawn.links.replaceChildren(...this.linkElements(level, baked));
       drawn.face.replaceChildren(...(level.layout.face ? [this.faceArea(baked, level.layout.face, `${level.path}#frame`, { path: level.path, root: level.path })] : []));
       if (level.layout.board && level.path === '') {
-        this.board?.drawPlate(drawn.plate, drawn.ghosts, baked, bakedRect, bakedPoint, (...a) => this.faceArea(...a), text);
+        this.board?.drawPlate(drawn.plate, drawn.ghosts, baked, bakedRect, bakedPoint, (...a) => this.faceArea(...a), text, level.layout);
         this.board?.drawLabels(drawn.nets, level.layout, baked, bakedPath, bakedPoint, text);
       } else {
         drawn.plate.replaceChildren();

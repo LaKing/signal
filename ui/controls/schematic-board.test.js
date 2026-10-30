@@ -1,7 +1,8 @@
 // ADR 0047 §5 (phase 2): the device view's controller in <signal-schematic> (ui/controls/schematic-board.js), without a DOM.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PLATE_FACE_CSS, SchematicBoard } from './schematic-board.js';
+import { BOARD_CSS, PLATE_FACE_CSS, SchematicBoard } from './schematic-board.js';
+import { LAYER_OPACITY, fadeSteps } from '../lib/board-view.js';
 
 function host() {
   const h = { events: [], relaid: 0, redrawn: 0, plateClass: null };
@@ -20,7 +21,7 @@ test('a layer or a kind switched: drawn, laid out never, told to the window', ()
   board.set({ layer: 'plate' });
   assert.equal(board.covered, true, 'the plate covers the board: a press pans');
   assert.equal(h.relaid, 0);
-  assert.match(h.plateClass, / plate layer-plate lifting/);
+  assert.equal(h.plateClass, ' plate layer-plate', 'no animation class: the layer fades by a transition');
   assert.equal(h.events.at(-1).type, 'signal-view-change');
   assert.deepEqual(h.events.at(-1).detail, { layer: 'plate', hidden: [] });
   assert.equal(board.option().arrange, undefined, 'one arrangement');
@@ -42,4 +43,21 @@ test('a layer or a kind switched: drawn, laid out never, told to the window', ()
 test('the plate face keeps only its controls in X-ray and Board; its slot cards go with the cards', () => {
   assert.match(PLATE_FACE_CSS, /:host\(\.plate\.layer-xray\) \.face-panel \[bind\]/);
   assert.match(PLATE_FACE_CSS, /prefers-reduced-motion/);
+});
+
+test('a layer step fades monotonically (the owner: "from X-ray to Board the plate flashes in, then vanishes"): transitions only, no keyframes', () => {
+  assert.doesNotMatch(PLATE_FACE_CSS + BOARD_CSS, /@keyframes|animation:/);
+  assert.match(PLATE_FACE_CSS, /:host\(\.plate\) \{ transition: opacity/);
+  assert.match(PLATE_FACE_CSS, /:host\(\.plate\.layer-board\) \{ opacity: 0;/);
+  // Every step between layers, for every part: from the opacity shown to the target, never past either.
+  for (const from of Object.keys(LAYER_OPACITY)) {
+    for (const to of Object.keys(LAYER_OPACITY)) {
+      for (const part of ['controls', 'ghosts', 'board']) {
+        const steps = fadeSteps(from, to, part);
+        const up = steps.at(-1) >= steps[0];
+        for (let i = 1; i < steps.length; i++) assert.ok(up ? steps[i] >= steps[i - 1] : steps[i] <= steps[i - 1], `${from} → ${to}, ${part}`);
+      }
+    }
+  }
+  assert.deepEqual(fadeSteps('xray', 'board', 'controls'), [1, 0.75, 0.5, 0.25, 0]);
 });

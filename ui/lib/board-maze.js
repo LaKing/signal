@@ -263,7 +263,7 @@ export class Maze {
    * leaving along +x to `goal` arriving along +x, the boxes `own` (its own
    * control and pad) passable; its corners, taken, or null.
    */
-  route(start, goal, net, { bus = null, own = [], share = [], from = 'right', into = 'left' } = {}) {
+  route(start, goal, net, { bus = null, own = [], share = [], from = 'right', into = 'left', within = null } = {}) {
     const s = this.node(start);
     const t = this.node(goal);
     if (s < 0 || t < 0) return null;
@@ -277,7 +277,9 @@ export class Maze {
     // Leaving a pin on its side outward; arriving at one from outside it.
     const leave = { right: 0, left: 1, bottom: 2, top: 3 }[from];
     const arrive = { left: 0, right: 1, top: 2, bottom: 3 }[into];
-    let found = this.search(s, t, id, reach, leave, arrive);
+    // Within a section first (a wire inside one card), then the box around its ends, then the whole board.
+    let found = within ? this.search(s, t, id, { x0: within.x, x1: within.x + within.w, y0: within.y, y1: within.y + within.h }, leave, arrive) : null;
+    if (found === null) found = this.search(s, t, id, reach, leave, arrive);
     // The whole board only when the box around its ends has no way at all (not when the search ran out).
     if (found === null && !this.exhausted) found = this.search(s, t, id, null, leave, arrive);
     for (const b of own) this.mark(b, 1);
