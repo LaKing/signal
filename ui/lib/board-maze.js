@@ -16,6 +16,15 @@ export const STEP = 16;
 export const BEND = 32;
 /** Crossing another net costs as much as running this far. */
 export const CROSS = 120;
+/**
+ * A relaxed search (ADR 0047 phase 5, the last resort before a wire would
+ * be left out) may run along another net, at this many times its length,
+ * and turn where one passes, at CROSS: drawn, the two get lanes apart
+ * (ui/lib/board-lanes.js), so they never lie on top of each other.
+ */
+export const ALONG = 12;
+/** …and leans towards its goal this much more (it is a last resort: found fast, a route at most this much costlier). */
+export const RELAXED_GREED = 6;
 /** A bus's own way costs this much of its length again. */
 export const SHARED = 0.4;
 /** A route keeps this far from a box (its nodes do). */
@@ -288,7 +297,8 @@ export class Maze {
    * control and pad) passable, searching at most `budget` states; its
  * corners, taken, or null.
    */
-  route(start, goal, net, { bus = null, own = [], share = [], from = 'right', into = 'left', within = null, budget = MAX_STATES } = {}) {
+  route(start, goal, net, { bus = null, own = [], share = [], from = 'right', into = 'left', within = null, budget = MAX_STATES, relaxed = false } = {}) {
+    this.relaxed = relaxed;
     const s = this.node(start);
     const t = this.node(goal);
     if (s < 0 || t < 0) return null;
@@ -310,6 +320,7 @@ export class Maze {
     for (const b of own) this.mark(b, 1);
     for (const a of ways) this.blocked[a] += 1;
     this.alsoShare = null;
+    this.relaxed = false;
     if (found === null) return null;
     const corners = found.map(({ n }) => ({ x: this.xs[n % this.nx], y: this.ys[Math.floor(n / this.nx)] }));
     const clean = [];
@@ -342,7 +353,7 @@ export class Maze {
     const h = (n, d) => {
       const dx = tx - xs[n % nx];
       const dy = ty - ys[Math.floor(n / nx)];
-      return GREED * (Math.abs(dx) + Math.abs(dy)) + TURNS_AHEAD * BEND * minTurns(dx, dy, d, arrive);
+      return (this.relaxed ? RELAXED_GREED : GREED) * (Math.abs(dx) + Math.abs(dy)) + TURNS_AHEAD * BEND * minTurns(dx, dy, d, arrive);
     };
     heap.push(h(s, leave), seq++, start);
     let budget = states;
@@ -378,13 +389,17 @@ export class Maze {
           const intoGoal = nd === arrive && Math.abs(xs[ni] - tx) + Math.abs(ys[nj] - ty) <= PIN_REACH;
           if (!outOfStart && !intoGoal) continue;
         }
-        // Along another net's segment: never (its bus's: cheaper).
+        // Along another net's segment: never (its bus's: cheaper); relaxed, at ALONG times its length.
         const edge = nd < 2 ? this.edgeH[j * nx + Math.min(i, ni)] : this.edgeV[Math.min(j, nj) * nx + i];
-        if (!this.shares(id, edge)) continue;
-        // Turning where another net passes or turns: never.
-        if (turning(nd) && n !== s && (!this.shares(id, this.passH[n]) || !this.shares(id, this.passV[n]) || !this.shares(id, this.turn[n]))) continue;
+        const along = !this.shares(id, edge);
+        if (along && !this.relaxed) continue;
+        // Turning where another net passes or turns: never; relaxed, at CROSS.
+        const over = turning(nd) && n !== s && (!this.shares(id, this.passH[n]) || !this.shares(id, this.passV[n]) || !this.shares(id, this.turn[n]));
+        if (over && !this.relaxed) continue;
         let cost = Math.abs(xs[ni] - xs[i]) + Math.abs(ys[nj] - ys[j]);
-        if (edge && edge !== id) cost *= SHARED;
+        if (along) cost *= ALONG;
+        else if (edge && edge !== id) cost *= SHARED;
+        if (over) cost += CROSS;
         if (turning(nd) && n !== s) cost += BEND;
         // Crossing another net that runs across.
         const across = nd < 2 ? this.passV[m] : this.passH[m];

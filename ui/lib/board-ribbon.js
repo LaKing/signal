@@ -18,6 +18,8 @@
 export const RIBBON_MIN = 3;
 /** Neighbouring members' tracks are at most this far apart (the maze's grid step). */
 export const RIBBON_GAP = 16;
+/** Neighbouring tracks closer than this are lanes of one way, not tracks of their own (ADR 0047 phase 5). */
+export const RIBBON_NEAR = 6;
 /** A ribbon's band (between its breakouts) is at least this long. */
 export const RIBBON_RUN = 48;
 /** Its members are packed this far apart inside it. */
@@ -112,6 +114,8 @@ export function formRibbons(wires, boxes = [], { nameOf = () => '', endsOf = nul
       for (let j = i + 1; j < members.length; j++) {
         const m = members[j];
         if (m.at - last > RIBBON_GAP) break;
+        // Closer than RIBBON_NEAR: lanes already (ui/lib/board-lanes.js), never packed again.
+        if (m.at - last < RIBBON_NEAR) continue;
         if (taken.has(j) || m.at === last || window.some((x) => members[x].net === m.net)) continue;
         const nlo = Math.max(lo, m.lo);
         const nhi = Math.min(hi, m.hi);
@@ -149,7 +153,9 @@ export function formRibbons(wires, boxes = [], { nameOf = () => '', endsOf = nul
       for (const x of window) taken.add(x);
       const n = ms.length;
       const centre = Math.round((v0 + v1) / 2);
-      const slots = ms.map((_, k) => centre + (k - (n - 1) / 2) * RIBBON_PITCH);
+      // Tracks already this close (a connector's pins, ADR 0047 phase 5) keep their places: a band over them, no breakout.
+      const close = ms.every((m, k) => k === 0 || m.at - ms[k - 1].at <= 2 * RIBBON_PITCH);
+      const slots = close ? ms.map((m) => m.at) : ms.map((_, k) => centre + (k - (n - 1) / 2) * RIBBON_PITCH);
       const shift = Math.max(...ms.map((m, k) => Math.abs(slots[k] - m.at)));
       const id = ribbons.length;
       for (const [k, m] of ms.entries()) {
@@ -240,10 +246,13 @@ export function placeRibbonLabels(ribbons, texts = []) {
   const placed = [];
   const hit = (r) => [...texts, ...placed].some((o) => r.x < o.x + o.w && o.x < r.x + r.w && r.y < o.y + o.h && o.y < r.y + r.h);
   const labelled = [];
+  const groups = new Set();
   for (const r of ribbons) {
     r.text = null;
     const members = new Set(r.members.map((m) => m.net));
     if (labelled.some((set) => [...members].every((n) => set.has(n)))) continue;
+    // One label per group (ADR 0047 phase 5: a chip's legs, however many bands they gather in), on its widest band (the first).
+    if (r.group && groups.has(r.group)) continue;
     const b = r.band;
     const spots = [];
     if (r.axis === 'h') {
@@ -262,6 +271,7 @@ export function placeRibbonLabels(ribbons, texts = []) {
     r.text = at;
     placed.push(ribbonLabelRect(r.label, at));
     labelled.push(members);
+    if (r.group) groups.add(r.group);
   }
   return ribbons;
 }

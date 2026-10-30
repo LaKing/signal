@@ -8,7 +8,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
-import { INPUTS, PARAMS, layout, movedWires, routed } from './schematic-layout.js';
+import { CONNECTOR_PITCH, INPUTS, PARAMS, layout, mazeNet, movedWires, routed } from './schematic-layout.js';
+import { laneWires, overlaps } from './board-lanes.js';
 import { exportFacts } from './schematic-groups.js';
 import { approximatePlate } from './fixtures/board/plate-approx.js';
 import { scene } from './schematic-scene.js';
@@ -74,9 +75,11 @@ test('every drawn element is hit at every zoom: a chip’s side and top pins, a 
     ]) {
       const drawn = scene({ layoutOf: of, view: viewAt(p, k), viewport });
       const at = toScreen(drawn.levels[0].transform, p);
-      // Just off the pin, by less than MIN_PORT_PX on screen, at any zoom.
+      // Just off the pin, by less than MIN_PORT_PX on screen, at any zoom; a pin of a connector (ADR 0047 phase 5) packed closer
+      // than that on screen may give its neighbour in the connector.
       const hit = hitTest(drawn, { x: at.x + (MIN_PORT_PX - 1) * 0.7, y: at.y + (MIN_PORT_PX - 1) * 0.7 });
-      assert.ok(expect(hit), `${what} at k ${k}: ${hit.kind} ${hit.address ?? ''}`);
+      const neighbour = what === 'a top pin' && synth.connector && hit.kind === 'port' && hit.port.side === 'top' && Math.abs(hit.port.x - p.x) * k < 2 * MIN_PORT_PX;
+      assert.ok(expect(hit) || neighbour, `${what} at k ${k}: ${hit.kind} ${hit.address ?? ''}`);
     }
     // A wire 3 px off its middle, at any zoom (its tolerance is screen px).
     const mid = { x: (wire.corners[0].x + wire.corners[1].x) / 2, y: (wire.corners[0].y + wire.corners[1].y) / 2 };
@@ -87,7 +90,8 @@ test('every drawn element is hit at every zoom: a chip’s side and top pins, a 
     assert.ok(hit.kind === 'wire' || hit.kind === 'port', `a wire at k ${k}: ${hit.kind}`);
     if (hit.kind === 'wire') assert.equal(hit.wire.id, wire.id);
     // A leg is hit as the pin it sets on its chip (whose net it is).
-    const lm = leg.corners[Math.floor(leg.corners.length / 2)];
+    const lc = leg.display ?? leg.corners;
+    const lm = lc[Math.floor(lc.length / 2)];
     const ld = scene({ layoutOf: of, view: viewAt(lm, k), viewport });
     const lh = hitTest(ld, toScreen(ld.levels[0].transform, lm));
     if (k >= 1) assert.ok(lh.kind === 'port' || lh.kind === 'control', `a leg at k ${k}: ${lh.kind}`);
@@ -108,7 +112,10 @@ test('zoomed into the synth, its package’s pins and the die’s interface pins
       const at = toScreen(drawn.levels[0].transform, pin);
       const hit = hitTest(drawn, { x: at.x + 2, y: at.y + 2 });
       assert.equal(hit.kind, 'port', `${pin.name} at k ${k}`);
-      assert.equal(hit.address, `/synth.${pin.name}`, `${pin.name} at k ${k}: the composite’s port, outside or inside`);
+      // A connector's pins (ADR 0047 phase 5) closer than MIN_PORT_PX on screen: its neighbour in the connector is as good a hit.
+      const packed = pin.side === 'top' && synth.connector;
+      const near = packed && hit.port.side === 'top' && Math.abs(hit.port.x - pin.x) * k < 2 * MIN_PORT_PX;
+      if (!near) assert.equal(hit.address, `/synth.${pin.name}`, `${pin.name} at k ${k}: the composite’s port, outside or inside`);
       const net = portNet(drawn.levels, hit);
       const paths = new Set(net.map((n) => n.path));
       assert.ok(paths.has('') && paths.has('/synth'), `${pin.name}: the outer wire and its continuation (${[...paths]})`);
@@ -187,7 +194,8 @@ test('ribbons: deterministic, every member continuous from its pins, packed in i
     for (let k = 1; k < w.display.length; k++) {
       const dx = Math.abs(w.display[k].x - w.display[k - 1].x);
       const dy = Math.abs(w.display[k].y - w.display[k - 1].y);
-      assert.ok(dx === 0 || dy === 0 || Math.abs(dx - dy) < 1e-9, `${w.id}: orthogonal or 45°`);
+      // A lane's short step across (ADR 0047 phase 5) may be steeper than 45° where its stretches are short.
+      assert.ok(dx === 0 || dy === 0 || Math.abs(dx - dy) < 1e-9 || Math.min(dx, dy) <= 16, `${w.id}: orthogonal, 45° or a short step`);
     }
   }
   // The same wires twice, in reverse order, with every object's keys reversed: the same ribbons.
@@ -328,8 +336,10 @@ test('a ribbon’s label overlaps no box, no via’s name, no net label and no o
     const sets = [];
     const meets = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
     for (const r of lay.board.ribbons) {
-      for (const b of boxes) {
-        const grown = { x: b.x - RIBBON_CLEAR + 1, y: b.y - RIBBON_CLEAR + 1, w: b.w + 2 * RIBBON_CLEAR - 2, h: b.h + 2 * RIBBON_CLEAR - 2 };
+      // Side by side (phase 4) a band keeps RIBBON_CLEAR from every box; in lanes (phase 5: a chip's legs, a connector's ribbon) it lies over none.
+      const clear = r.lanes ? 0 : RIBBON_CLEAR - 1;
+      for (const b of r.lanes ? boxes.filter((b) => !b.plate) : boxes) {
+        const grown = { x: b.x - clear, y: b.y - clear, w: b.w + 2 * clear, h: b.h + 2 * clear };
         assert.ok(!meets(r.band, grown), `${name} ${r.label}: its band near a box`);
       }
       if (!r.text) continue;
@@ -343,4 +353,105 @@ test('a ribbon’s label overlaps no box, no via’s name, no net label and no o
     }
   }
   assert.ok(labelled >= 1);
+});
+
+// ADR 0047 phase 5 (the owner, 2026-10-30): wires on every level, the synth's legs in ribbons, ribbons into the chips.
+
+test('wires on every level: no net is a label on any board or die of the example projects, and the board draws no label', async () => {
+  const { SchematicBoard } = await import('../controls/schematic-board.js');
+  assert.equal(SchematicBoard.prototype.drawLabels, undefined, 'no label drawing mode');
+  const of = studio();
+  for (const level of ['', ...Object.keys(STUDIO.composites)]) {
+    const lay = of(level);
+    assert.equal(lay.board.labels.length, 0, `${level || 'top'}: no label`);
+    assert.ok(lay.wires.every((w) => !w.labelled), `${level || 'top'}: every wire drawn`);
+  }
+});
+
+test('the synth’s legs gather into ribbons (lanes, `params ×n`, one label), never drawn on top of each other', () => {
+  const top = studio()('');
+  const synthLegs = top.wires.filter((w) => w.kind === 'binding' && w.to.node === 'synth');
+  assert.ok(synthLegs.length >= 20);
+  const ribbons = top.board.ribbons.filter((r) => r.lanes && r.group === 'legs:synth');
+  assert.ok(ribbons.length >= 1, 'in ribbons');
+  assert.ok(Math.max(...ribbons.map((r) => r.members.length)) >= 6, 'a wide one');
+  assert.equal(ribbons.filter((r) => r.text).length, 1, 'labelled once');
+  assert.match(ribbons.find((r) => r.text).label, /^params ×\d+$/);
+  // Their drawn ways: no two of them on one line over a stretch (routes they share are drawn in lanes).
+  const drawn = synthLegs.map((w) => ({ net: mazeNet(w).net, points: w.display ?? w.corners }));
+  const shared = synthLegs.map((w) => ({ net: mazeNet(w).net, points: w.corners }));
+  assert.ok(overlaps(shared) > 20, 'their routes share their way (a bus)');
+  // A lane's corner may still touch the next stretch's lane by a unit or two (measured: one such place on the studio).
+  assert.ok(overlaps(drawn) <= 1, `drawn apart (${overlaps(drawn)})`);
+  for (const w of synthLegs) {
+    const c = w.display ?? w.corners;
+    assert.deepEqual(c[0], w.corners[0], 'from its via');
+    assert.deepEqual(c.at(-1), w.corners.at(-1), 'to its pin');
+  }
+});
+
+test('a ribbon goes into its chip: the synth’s parameters are one connector on its package, in its vias’ order, continued inside the die as one ribbon', () => {
+  const of = studio();
+  const top = of('');
+  const synth = top.nodes.find((n) => n.name === 'synth');
+  const die = of('moog_voice');
+  const strip = die.nodes.find((n) => n.id === PARAMS);
+  assert.ok(strip.connector && synth.connector, 'a connector on the strip and on the package');
+  const tops = synth.ins.filter((p) => p.side === 'top').sort((a, b) => a.x - b.x);
+  assert.equal(synth.connector.count, tops.length);
+  assert.equal(synth.connector.label, `params ×${tops.length}`);
+  // Compact: its pins within the connector, CONNECTOR_PITCH apart in the die (a few units on the package), in the package's order.
+  for (const p of tops) assert.ok(p.x >= synth.x + synth.connector.dx0 && p.x <= synth.x + synth.connector.dx1);
+  assert.ok(synth.connector.dx1 - synth.connector.dx0 < synth.w / 2, 'a compact group, not spread over the edge');
+  assert.deepEqual(tops.map((p) => p.name), [...synth.topOrder.keys()].sort((a, b) => synth.topOrder.get(a) - synth.topOrder.get(b)), 'the vias’ order');
+  const xs = strip.outs.map((p) => p.x).sort((a, b) => a - b);
+  for (let i = 1; i < xs.length; i++) assert.equal(xs[i] - xs[i - 1], CONNECTOR_PITCH);
+  // Inside: the strip's wires are one bus, drawn in lanes as a ribbon labelled once.
+  const inner = die.wires.filter((w) => w.from.node === PARAMS);
+  assert.ok(inner.every((w) => w.bus === 'bus:params'));
+  const ribbons = die.board.ribbons.filter((r) => r.lanes && r.group === 'params');
+  assert.ok(ribbons.length >= 1);
+  assert.equal(ribbons.filter((r) => r.text).length, 1);
+  assert.ok(overlaps(die.wires.map((w) => ({ net: mazeNet(w).net, points: w.display ?? w.corners }))) <= 1);
+});
+
+test('one member traced through: a leg hit at the plate, its connector pin, and its continuation inside the die, in one colour', () => {
+  const of = studio();
+  const top = of('');
+  const synth = top.nodes.find((n) => n.name === 'synth');
+  const leg = top.wires.find((w) => w.kind === 'binding' && w.to.node === 'synth');
+  const pin = synth.ins.find((p) => p.name === leg.to.port);
+  const drawn = scene({ layoutOf: of, view: viewAt(pin, 6), viewport, pinned: new Set(['/synth']) });
+  sceneTones(drawn.levels);
+  const at = toScreen(drawn.levels[0].transform, pin);
+  const hit = hitTest(drawn, at);
+  assert.equal(hit.kind, 'port');
+  assert.equal(hit.port.name, leg.to.port, 'its own pin in the connector');
+  const net = portNet(drawn.levels, hit);
+  const outer = net.filter((n) => n.path === '');
+  const inner = net.filter((n) => n.path === '/synth');
+  assert.ok(outer.some((n) => n.wire.id === leg.id), 'the leg outside');
+  assert.ok(inner.length >= 1 && inner.every((n) => n.wire.from.port === leg.to.port), 'its continuation inside');
+  for (const n of inner) assert.equal(drawn.levels.at(-1).tones.get(n.wire.id), 'binding', 'the leg’s colour inside');
+});
+
+test('lanes: three nets sharing a way each get a lane, keep it along the run, peel off where they turn without crossing, deterministic', () => {
+  // A bus coming down x = 0 and turning right along y = 100, each member dropping into its own pin further right.
+  const wires = [0, 1, 2].map((i) => ({ id: i, net: `n${i}`, corners: [{ x: 0, y: 0 }, { x: 0, y: 100 }, { x: 100 + 40 * i, y: 100 }, { x: 100 + 40 * i, y: 140 }] }));
+  const a = laneWires(wires, { isLeg: () => true });
+  const b = laneWires([...wires].reverse(), { isLeg: () => true });
+  assert.deepEqual([...b.display].sort(), [...a.display].sort(), 'deterministic');
+  assert.equal(a.laned.size, 3);
+  const shown = wires.map((w) => ({ net: w.net, points: a.display.get(w.id) }));
+  assert.equal(overlaps(shown), 0, 'never on top of each other');
+  assert.ok(overlaps(wires.map((w) => ({ net: w.net, points: w.corners }))) > 0, 'their routes share');
+  // Along the horizontal run each keeps one y; the first to leave (n0, at x 100) runs nearest its drop (the bottom).
+  const yAt = (id) => a.display.get(id).find((p, k, c) => k > 0 && c[k - 1].y === p.y && p.x > 50)?.y;
+  assert.ok(yAt(0) > yAt(1) && yAt(1) > yAt(2), `peeling off without crossing (${[0, 1, 2].map(yAt)})`);
+  for (const w of wires) {
+    assert.deepEqual(a.display.get(w.id)[0], w.corners[0]);
+    assert.deepEqual(a.display.get(w.id).at(-1), w.corners.at(-1));
+  }
+  assert.equal(a.ribbons.length >= 1, true);
+  assert.match(a.ribbons[0].label, /^params ×3$/);
 });

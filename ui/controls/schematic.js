@@ -76,7 +76,7 @@ import { badgeText, behind, parentPath, resolver, splitAddress, startOf, trace, 
 import { moduleInfo, projectKey } from '../lib/schematic-palette.js';
 import { allOf, deletePlan, dragGroup, groupControls, has, hitKey, inside, marqueeStarts, moveMessages, reselectAll, toggled, traceTarget, union } from '../lib/schematic-select.js';
 import { formatFixed } from '../lib/format.js';
-import { HEADER, addPinAt, dragPosition, insideKey, layout } from '../lib/schematic-layout.js';
+import { HEADER, PARAMS, addPinAt, dragPosition, insideKey, layout } from '../lib/schematic-layout.js';
 import { dieSignature, relayout, structureKey } from '../lib/board-memo.js';
 import { pinKey, sceneTones } from '../lib/board-tone.js';
 import { portNet } from '../lib/board-net.js';
@@ -180,6 +180,9 @@ path.wire.binding, path.wire.tone-leg { stroke: var(--signal-effective, #ffb74d)
 .pin.events.connected { fill: var(--signal-meter-rms, #3ecf8e); }
 /* ADR 0047 phase 4: a pin a plate control's leg reaches, and a die's interface pin it carries on to, in the leg's colour. */
 .pin.tone-leg { stroke: var(--signal-effective, #ffb74d); }
+/* ADR 0047 phase 5: a connector, a die's parameters' pins in one group on its package's top edge: an outline only (not a pin). */
+.connector { fill: none; stroke: var(--signal-effective, #ffb74d); stroke-width: 1; stroke-dasharray: 3 2; vector-effect: non-scaling-stroke; pointer-events: none; }
+.connector-label { fill: var(--signal-effective, #ffb74d); font-weight: 600; pointer-events: none; }
 .pin.tone-leg.connected { fill: var(--signal-effective, #ffb74d); }
 /* ADR 0037 §7: a slot's box (its interface's pins, loaded or not); an empty one hollow, its outline dashed; an unmatched port's pin hollow. */
 .slot > .box { stroke: var(--signal-accent, #4fc3f7); stroke-width: 1.5; }
@@ -1044,14 +1047,14 @@ export class SignalSchematic extends HTMLElement {
       drawn.face.replaceChildren(...(level.layout.face ? [this.faceArea(baked, level.layout.face, `${level.path}#frame`, { path: level.path, root: level.path })] : []));
       if (level.layout.board && level.path === '') {
         this.board?.drawPlate(drawn.plate, drawn.ghosts, baked, bakedRect, bakedPoint, (...a) => this.faceArea(...a), text, level.layout);
-        this.board?.drawLabels(drawn.nets, level.layout, baked, bakedPath, bakedPoint, text);
+        drawn.nets.replaceChildren();
         this.board?.drawRibbons(drawn.ribbons, drawn.nets, level, baked, bakedRect, bakedPoint, text);
       } else {
         drawn.plate.replaceChildren();
         drawn.ghosts.replaceChildren();
         // A die's own net labels, and the stubs at its edge pins naming what enters and leaves there (ADR 0047 §8).
         if (level.layout.board) {
-          this.board?.drawLabels(drawn.nets, level.layout, baked, bakedPath, bakedPoint, text);
+          drawn.nets.replaceChildren();
           this.board?.drawRibbons(drawn.ribbons, drawn.nets, level, baked, bakedRect, bakedPoint, text);
         } else {
           drawn.nets.replaceChildren();
@@ -1309,6 +1312,14 @@ export class SignalSchematic extends HTMLElement {
       group.append(this.faceArea(baked, { ...f, x: node.x + f.dx, y: node.y + f.dy }, address, { path: level.path, slot: node.name, root: address, base: slotted?.part?.base ?? '' }));
     }
     if (node.composite) rect({ x: node.x + 3, y: node.y + 3, w: node.w - 6, h: node.h - 6 }, { class: 'frame', rx: 3 * m });
+    // ADR 0047 phase 5: a die's connector on its package's top edge (its parameters' pins in one group, the ribbon from the plate
+    // entering there), outlined and labelled with its count; on the die's own strip, the same outline.
+    const connector = node.connector ? { x0: node.x + node.connector.dx0, x1: node.x + node.connector.dx1, label: node.connector.label } : node.id === PARAMS && node.connector ? { x0: node.connector.x0, x1: node.connector.x1, label: null } : null;
+    if (connector) {
+      const r = node.kind === 'instance' ? 3 : 6;
+      rect({ x: connector.x0, y: node.y - r, w: connector.x1 - connector.x0, h: 2 * r }, { class: 'connector', rx: r * m });
+      if (connector.label && text(7)) label({ x: (connector.x0 + connector.x1) / 2, y: node.y + 2 * r + 5 }, 6, { class: 'connector-label', 'text-anchor': 'middle' }, connector.label);
+    }
     if (text(12) && node.kind === 'instance') {
       label({ x: node.x + 8, y: node.y + 14 }, 12, { class: 'name' }, node.name);
       label({ x: node.x + 8, y: node.y + 27 }, 10, { class: slotted ? 'module slot-content' : 'module' }, node.subtitle ?? node.module);
@@ -1862,12 +1873,6 @@ export class SignalSchematic extends HTMLElement {
       this.editor.addPort(plus.dataset.address, plus.dataset.addPin);
       return;
     }
-    // ADR 0047 §6.3: a net's label traces the net.
-    const net = event.target?.closest?.('[data-net-wire]');
-    if (net && this.traceNet(Number(net.dataset.netWire))) {
-      event.preventDefault();
-      return;
-    }
     // Another press while one is held: the first is let go, as cancelled.
     if (this.gesture) this.cancelGesture();
     this.focus({ preventScroll: true });
@@ -1913,15 +1918,6 @@ export class SignalSchematic extends HTMLElement {
   /** What is at screen point `at`: under the opaque plate (ADR 0047 §5) the background, else the drawing's hit. */
   hitAt(at) {
     return this.board?.covered ? { kind: 'background', path: '', level: '' } : hitTest(this.drawn, at);
-  }
-
-  /** A labelled net's wire `id` of the top level traced (ADR 0047 §6.3): whether there was one. */
-  traceNet(id) {
-    const entry = this.levelOf('');
-    const wire = entry?.layout.wires.find((w) => w.id === id);
-    if (!wire) return false;
-    this.startTrace(wireHit(entry, wire));
-    return true;
   }
 
   /** The instance hit of control `hit`'s host box, at its level; null when it is not laid out. */

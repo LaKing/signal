@@ -1,14 +1,12 @@
 // ADR 0047 phase 3: deep zoom's pure parts (ui/lib/board-zoom.js): a die's
 // fade by its text on screen, the surroundings' fade, the view's travel into
 // a chip; and the open items fixed with it: the maze's bend estimate
-// (`minTurns`), the labels kept off one another (`spreadLabels`), the wheel
-// left to the schematic by a control that does not own it (`wheelOwner`).
+// (`minTurns`), the wheel left to the schematic by a control that does not own it (`wheelOwner`).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DIE_MAX_K, DIE_TEXT, FADE_FROM_PX, FADE_FULL_PX, FULL_K, SURROUND, belowThreshold, dieOpacity, ease, surroundOpacity, tween, zoomInView } from './board-zoom.js';
 import { screenRect, toScreen } from './schematic-view.js';
 import { minTurns } from './board-maze.js';
-import { LABEL_CHAR, spreadLabels } from './board-route.js';
 import { wheelOwner } from './wheel.js';
 
 test('a die fades in from 4 px of text on screen, whole from 7 px; around it the level fades to SURROUND', () => {
@@ -87,30 +85,6 @@ test('the maze’s bend estimate: the fewest turns left to arrive heading the go
   // Already on the goal's line heading across it: the one last turn.
   assert.equal(minTurns(100, 0, 2, 0), 1);
   assert.equal(minTurns(0, 50, 0, 2), 1);
-});
-
-test('net labels are kept off one another: each text moved the fewest lines, its stub at its pin', () => {
-  const at = (x, y, side = 'in', text = '◂ transport.position') => ({ net: 'n', text, side, at: { x, y }, corners: [], wire: 0 });
-  const labels = [at(500, 100), at(500, 104), at(500, 108), at(900, 100, 'out')];
-  spreadLabels(labels);
-  const rects = labels.map((l) => {
-    const w = l.text.length * LABEL_CHAR;
-    const x = l.side === 'out' ? l.textAt.x : l.textAt.x - w;
-    return { x, y: l.textAt.y - 9, w, h: 10 };
-  });
-  for (let i = 0; i < rects.length; i++) {
-    for (let j = i + 1; j < rects.length; j++) {
-      const [a, b] = [rects[i], rects[j]];
-      assert.ok(!(a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h), `labels ${i} and ${j} overlap`);
-    }
-  }
-  assert.equal(labels[0].textAt.y, 103, 'the first stays');
-  assert.equal(labels[3].textAt.y, 103, 'one apart from the others stays');
-  assert.deepEqual(labels.map((l) => l.at.y), [100, 104, 108, 100], 'the stubs stay');
-  // Deterministic.
-  const again = [at(500, 100), at(500, 104), at(500, 108), at(900, 100, 'out')];
-  spreadLabels(again);
-  assert.deepEqual(again.map((l) => l.textAt), labels.map((l) => l.textAt));
 });
 
 test('the wheel goes to the innermost control that owns it: a knob not focused on the plate leaves it to the schematic', () => {

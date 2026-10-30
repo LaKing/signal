@@ -47,12 +47,15 @@ const SNAPSHOTS = new URL('ui/lib/fixtures/board/snapshots.json', root);
  * before the plate design. The others on approximated plates.
  */
 const LIMITS = {
-  // ADR 0047 phase 3: the packages take their dies' shapes (the owner's verdict on 9e81dc8): kick's drums is longer to wire.
-  kick: { crossings: 8, length: 3800, labels: 1 },
-  studio: { crossings: 66, length: 52000, labels: 1 },
-  // ADR 0047 phase 3: the maze's bend estimate (fewer needless bends) leaves 8 wires of its approximated plate without a way (was 5).
-  'studio-transport': { crossings: 105, length: 80000, labels: 11 },
-  'physical-av': { crossings: 33, length: 13500, labels: 3 },
+  // ADR 0047 phase 5 (the owner, 2026-10-30: "wires on every level, no labelled invisible nets"): no label anywhere; the nets
+  // that were labels are wires now, so the boards with labels before cross and run more (measured, then about 10 % headroom):
+  // kick 5 → 6 crossings, length 3 372 → 4 157 (its drums' clock); studio 57 → 61, 51 689 → 53 403 (its synth's connector and
+  // the room for its ribbon); studio-transport 64 → 163, 59 230 → 93 424 (its ten labelled nets, the transport's clock among
+  // them, across its approximated plate); physical-av 29 → 41, 11 573 → 13 247; library-demo as it was.
+  kick: { crossings: 8, length: 4600, labels: 0 },
+  studio: { crossings: 68, length: 58700, labels: 0 },
+  'studio-transport': { crossings: 180, length: 103000, labels: 0 },
+  'physical-av': { crossings: 46, length: 14600, labels: 0 },
   'library-demo': { crossings: 10, length: 18600, labels: 0 },
 };
 

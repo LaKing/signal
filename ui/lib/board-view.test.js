@@ -38,7 +38,8 @@ test('vias in whole plate units: a fraction of a pixel never moves the board (§
 });
 
 test('the measures as the bar says them, never a verdict', () => {
-  assert.equal(metricsText({ crossings: 3, bends: 40, length: 10324, labels: 1 }), '3 crossings · 40 bends · length 10.3k · 1 labelled nets');
+  assert.equal(metricsText({ crossings: 3, bends: 40, length: 10324, labels: 0 }), '3 crossings · 40 bends · length 10.3k');
+  assert.equal(metricsText({ crossings: 3, bends: 40, length: 10324, labels: 0 }, [{}, {}]), '3 crossings · 40 bends · length 10.3k · 2 ribbons');
   assert.equal(metricsText(null), '');
 });
 

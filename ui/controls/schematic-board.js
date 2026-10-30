@@ -53,22 +53,12 @@ svg.layer-plate > g > :not(.plate-layer) { opacity: 0; pointer-events: none; }
 .control.via > .box { fill: color-mix(in srgb, var(--signal-effective, #ffb74d) 35%, var(--signal-bg, #16181d)); stroke-width: 1; }
 .control.via.reader > .box { fill: color-mix(in srgb, var(--signal-meter-rms, #3ecf8e) 35%, var(--signal-bg, #16181d)); }
 .via-label { fill: var(--signal-muted, #8a93a3); }
-/* §6.3: a net drawn as labels. */
-.net-label { fill: var(--signal-fg, #d6dbe4); cursor: pointer; }
-.net-label:hover { text-decoration: underline; }
-.net-label.signal { fill: var(--signal-accent, #4fc3f7); }
-.net-label.events { fill: var(--signal-meter-rms, #3ecf8e); }
-.net-label.vector { fill: var(--signal-effective, #ffb74d); }
-.net-stub { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 /* ADR 0047 phase 4: a ribbon cable: a band under its members, in their colour when they share one, its label once. */
 .ribbon { fill: color-mix(in srgb, var(--ribbon-tone, var(--signal-muted, #8a93a3)) 16%, var(--signal-board-bg, #0e1014)); stroke: color-mix(in srgb, var(--ribbon-tone, var(--signal-muted, #8a93a3)) 55%, transparent); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
 .ribbon.signal, .ribbon-label.signal { --ribbon-tone: var(--signal-accent, #4fc3f7); }
 .ribbon.events, .ribbon-label.events { --ribbon-tone: var(--signal-meter-rms, #3ecf8e); }
 .ribbon.vector, .ribbon.binding, .ribbon-label.vector, .ribbon-label.binding { --ribbon-tone: var(--signal-effective, #ffb74d); }
 .ribbon-label { fill: var(--ribbon-tone, var(--signal-muted, #8a93a3)); font-weight: 600; paint-order: stroke; stroke: var(--signal-board-bg, #0e1014); stroke-width: 3px; stroke-linejoin: round; pointer-events: none; }
-.net-stub.signal { stroke: var(--signal-accent, #4fc3f7); }
-.net-stub.events { stroke: var(--signal-meter-rms, #3ecf8e); }
-.net-stub.vector { stroke: var(--signal-effective, #ffb74d); }
 /* §6.5: a pin whose kind's wires are hidden. */
 .pin.kind-hidden { stroke-dasharray: 1 2; fill: none; opacity: 0.6; }
 /* §7: chips as packages: a dark body, pins as short legs (phase 4: no notch, nothing on a chip looks like a pin unless it is one). */
@@ -343,24 +333,6 @@ export class SchematicBoard {
       }
     }
     parts.push(faceArea(baked, { x: 0, y: 0, w: size?.w ?? 1280, h: size?.h ?? 800, file: PLATE_FILE, natural: { w: size?.w ?? 1280 } }, PLATE_FACE, { path: '', root: '' }));
-    group.replaceChildren(...parts);
-  }
-
-  /** The net labels of a board level (`layout.board.labels`): a source's stub and every label's text, clickable (it traces the net). */
-  drawLabels(group, layout, baked, bakedPath, bakedPoint, text) {
-    const labels = layout.board?.labels ?? [];
-    const parts = [];
-    const shapeOf = new Map(layout.wires.map((w) => [w.id, w.shape]));
-    for (const label of labels) {
-      const shape = shapeOf.get(label.wire) ?? 'signal';
-      if (this.state.hidden.includes(shape)) continue;
-      if (label.side === 'out') parts.push(el('path', { class: `net-stub ${shape}`, d: bakedPath(baked, label.corners) }));
-      // Its text where the layout kept it off the others (`spreadLabels`), else beside its stub.
-      const at = bakedPoint(baked, label.textAt ?? { x: label.at.x + (label.side === 'out' ? 3 : -3), y: label.at.y + 3 });
-      const t = el('text', { class: `net-label ${shape}`, x: at.x, y: at.y, 'font-size': 9 * baked.m, 'text-anchor': label.side === 'out' ? 'start' : 'end', 'data-net-wire': String(label.wire) }, label.text);
-      t.append(el('title', {}, `${label.text.slice(2)}: click to trace the net`));
-      parts.push(t);
-    }
     group.replaceChildren(...parts);
   }
 

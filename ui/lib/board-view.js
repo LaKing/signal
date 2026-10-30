@@ -125,7 +125,8 @@ export function metricsText(metrics, ribbons = null) {
   const n = (v) => (v >= 10000 ? `${(v / 1000).toFixed(1)}k` : String(v));
   // ADR 0047 phase 4: the ribbons drawn, when there are any.
   const more = ribbons?.length ? ` · ${n(ribbons.length)} ribbons` : '';
-  return `${n(metrics.crossings)} crossings · ${n(metrics.bends)} bends · length ${n(metrics.length)} · ${n(metrics.labels)} labelled nets${more}`;
+  // ADR 0047 phase 5: no net is a label any more; the bar says the wiring.
+  return `${n(metrics.crossings)} crossings · ${n(metrics.bends)} bends · length ${n(metrics.length)}${more}`;
 }
 
 /**

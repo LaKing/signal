@@ -12,7 +12,7 @@
 
 import { Maze } from './board-maze.js';
 import { stretchCorners } from './board-stretch.js';
-import { orthGeometry, simplify, spreadLabels } from './board-route.js';
+import { orthGeometry, simplify } from './board-route.js';
 export { stretchCorners };
 import { boardMeasures, boardRibbons, mazeNet } from './schematic-layout.js';
 
@@ -105,9 +105,8 @@ export function rerouteMoved(old, moves) {
     return copy;
   });
   // A kept wire keeps its route; its drawn geometry follows its ribbon, made again (`boardRibbons`).
-  const labels = (old.board?.labels ?? []).filter((l) => !redo.has(l.wire)).map((l) => ({ ...l }));
+  const labels = [];
   const ribbons = boardRibbons(nodes, wires, obstacles, labels);
-  spreadLabels(labels);
   const metrics = boardMeasures(wires, labels, ribbons);
   let bounds2 = old.bounds;
   if (!rect) {

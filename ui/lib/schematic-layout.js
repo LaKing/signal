@@ -16,9 +16,10 @@ import { VIA_ROW, VIA_W, controlAnchor, controlEdges, controlNodes, controlPads 
 import { frameFace, placeFace } from './schematic-face.js';
 import { CLEARANCE, PU, STUB, TRACK, balance, near, placeNear, ring, sugiyama } from './board-layout.js';
 import { Maze, STEP } from './board-maze.js';
-import { formRibbons, placeRibbonLabels } from './board-ribbon.js';
+import { formRibbons, placeRibbonLabels, ribbonName } from './board-ribbon.js';
+import { LANE as LANE_PITCH, laneWires } from './board-lanes.js';
 import { stretchCorners } from './board-stretch.js';
-import { LABEL_STUB, NET_DESTS, measure, orthGeometry, routeWires, simplify, spreadLabels, zCorners } from './board-route.js';
+import { LABEL_STUB, NET_DESTS, measure, orthGeometry, routeWires, simplify, zCorners } from './board-route.js';
 
 /**
  * Where a slot box's "+" pin of `side` (`in`, `out`) is: the row after its
@@ -527,7 +528,8 @@ export function shapePackage(node, die) {
   node.w = w;
   node.h = h;
   const t = dieLink({ x: 0, y: 0, w, h }, die);
-  const map = (p) => ({ x: Math.round(p.x * t.k + t.x), y: Math.round(p.y * t.k + t.y) });
+  // On eighths of a unit: a connector's pins (ADR 0047 phase 5) lie closer than a unit on a small package.
+  const map = (p) => ({ x: Math.round((p.x * t.k + t.x) * 8) / 8, y: Math.round((p.y * t.k + t.y) * 8) / 8 });
   const at = new Map();
   for (const p of lefts) at.set(`in
 ${p.name}`, { dx: 0, dy: map(p).y });
@@ -536,10 +538,21 @@ ${p.name}`, { dx: w, dy: map(p).y });
   for (const p of tops) at.set(`in
 ${p.name}`, { dx: map(p).x, dy: 0, side: 'top' });
   node.pinAt = at;
+  // Its die's connector (ADR 0047 phase 5): the same pin group on the package's top edge, labelled with its count.
+  const strip = frame(PARAMS);
+  if (strip?.connector) {
+    const xs = tops.map((p) => map(p).x);
+    node.connector = { dx0: Math.min(...xs) - 3, dx1: Math.max(...xs) + 3, count: tops.length, label: `params ×${tops.length}` };
+  }
   const top = [...tops].sort((p, q) => p.x - q.x).map((p) => p.name);
   if (top.length) node.topOrder = new Map(top.map((name, i) => [name, i]));
   return node;
 }
+
+/** A die's parameters this many or more are one connector (ADR 0047 phase 5), their pins this far apart (die units), its outline this far past them. */
+export const CONNECTOR_MIN = 4;
+export const CONNECTOR_PITCH = 6;
+const CONNECTOR_PAD = 12;
 
 /** A die's parameters' strip (ADR 0047 §8): the node on its top edge. */
 export const PARAMS = '@params';
@@ -647,7 +660,9 @@ function dieWires({ die, nodes, byId, edges, boxes, routes, labels, wires, order
   const side = (n) => Math.max(DIE_MARGIN, 2 * STUB + TRACK * (n + 1));
   const left = snap(x0 - side(inputs?.outs.length ?? 0), false);
   const right = snap(x1 + side(outputs?.ins.length ?? 0), true);
-  const top = snap(y0 - (params ? PARAM_GAP + TRACK * pEdges.length : DIE_MARGIN), false);
+  // A connector's wires leave it as one ribbon (ADR 0047 phase 5): room for its comb, not a track per drop.
+  const connected = params && params.outs.length >= CONNECTOR_MIN;
+  const top = snap(y0 - (params ? PARAM_GAP + (connected ? 2 * combDepth(params.outs.length) : TRACK * pEdges.length) : DIE_MARGIN), false);
   const bottom = snap(y1 + DIE_MARGIN, true);
   const rect = { x: left, y: top, w: right - left, h: bottom - top };
   // The interface along the edges, each pin as near where its wires want it as order and room allow: in order,
@@ -672,7 +687,16 @@ function dieWires({ die, nodes, byId, edges, boxes, routes, labels, wires, order
     });
     // The package's order wins (its top pins follow its vias); else over what they set.
     want.sort((a, b) => (a.o !== undefined && b.o !== undefined ? a.o - b.o : 0) || (a.o === undefined) - (b.o === undefined) || a.x - b.x || a.i - b.i);
-    const xs = spread(want.map((w) => w.x), left, right);
+    // ADR 0047 phase 5 (the owner: "ribbons can go into the chips"): CONNECTOR_MIN parameters or more are one connector, packed
+    // CONNECTOR_PITCH apart in their order over the middle of what they set, the ribbon from the plate entering there as one.
+    let xs;
+    if (want.length >= CONNECTOR_MIN) {
+      const span = (want.length - 1) * CONNECTOR_PITCH;
+      const mid = want.reduce((s, w) => s + w.x, 0) / want.length;
+      const first = Math.round(Math.min(right - STEP - span, Math.max(left + STEP, mid - span / 2)) / STEP) * STEP;
+      xs = want.map((_, i) => first + i * CONNECTOR_PITCH);
+      params.connector = { x0: xs[0] - CONNECTOR_PAD, x1: xs.at(-1) + CONNECTOR_PAD, count: want.length };
+    } else xs = spread(want.map((w) => w.x), left, right);
     const at = new Map(want.map((w, i) => [w.p.name, xs[i]]));
     params.outs = params.outs.map((p) => ({ ...p, x: at.get(p.name), y: top, side: 'bottom' }));
     Object.assign(params, { x: left, y: top, w: right - left, h: 0, layer: null, pinned: false });
@@ -706,7 +730,9 @@ function dieWires({ die, nodes, byId, edges, boxes, routes, labels, wires, order
     const net = `${q.e.from.node}\n${q.e.from.port}`;
     // The wires into the same pin (a parameter also driven from the flow) it may join there.
     const share = edges.filter((o) => o.to.node === q.e.to.node && o.to.port === q.e.to.port).map((o) => `${o.from.node}\n${o.from.port}`);
-    found.set(q.id, maze.route(q.a, q.b, net, { from: q.a.side ?? 'right', into: q.b.side ?? 'left', share, budget: 2 * DIE_STATES }));
+    // A connector's wires are one bus (ADR 0047 phase 5): they share their way out of it, drawn as one ribbon in lanes (ui/lib/board-lanes.js).
+    const bus = q.e.from.node === PARAMS && params?.connector ? 'bus:params' : null;
+    found.set(q.id, maze.route(q.a, q.b, net, { bus, from: q.a.side ?? 'right', into: q.b.side ?? 'left', share, budget: 2 * DIE_STATES }));
   }
   const kept = labels.filter((l) => !asked.some((q) => q.id === l.wire));
   labels.length = 0;
@@ -730,6 +756,7 @@ function dieWires({ die, nodes, byId, edges, boxes, routes, labels, wires, order
       r = { corners: [into, b], labelled: true, whole: zCorners(a, b) };
     }
     const wire = boardWire(id, e, { feedback: false, lane: 0, under: null, a, b }, r);
+    if (e.from.node === PARAMS && params?.connector) wire.bus = 'bus:params';
     if (id < edges.length) wires[id] = wire;
     else wires.push(wire);
   }
@@ -1043,7 +1070,7 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
         };
       }
     : null;
-  const { routes, labels } = routeWires(boxes, asked, { nameOf, fanout: !board.die && !WIRES_NOT_LABELS.board, fallback });
+  const { routes, labels } = routeWires(boxes, asked, { nameOf, fanout: false, fallback });
   // The legs, through the plate's gutters and the channels, around everything already drawn.
   const drawnSegments = [];
   routes.forEach((r, i) => {
@@ -1115,9 +1142,11 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
 /** A board's measures, its pins' `connected`, its bounds: what `layout` returns. */
 function finishBoard(nodes, wires, labels, bottom, board, crossings, { obstacles = [], area = null } = {}) {
   // ADR 0047 phase 4: a wire that found no way within the layout's budget is searched for again, around everything drawn; a net label only where none exists.
-  if (board.die ? WIRES_NOT_LABELS.die : WIRES_NOT_LABELS.board) rescueLabelled(nodes, wires, labels, obstacles, area);
+  // ADR 0047 phase 5 (the owner: "wires on every level, no labelled invisible nets"): a wire the layout left as a label is routed now.
+  rescueLabelled(nodes, wires, labels, obstacles, area);
+  // ADR 0047 phase 5: the wires into (or out of) a connector meet it as one comb.
+  combConnectors(nodes, wires, obstacles);
   const ribbons = boardRibbons(nodes, wires, obstacles, labels);
-  spreadLabels(labels);
   const metrics = boardMeasures(wires, labels, ribbons);
   const ends = { outs: new Set(wires.map((w) => `${w.from.node}\n${w.from.port}`)), ins: new Set(wires.map((w) => `${w.to.node}\n${w.to.port}`)) };
   for (const node of nodes) {
@@ -1143,11 +1172,27 @@ function finishBoard(nodes, wires, labels, bottom, board, crossings, { obstacles
  */
 export function boardRibbons(nodes, wires, obstacles = [], labels = []) {
   const boxes = [...nodes.filter((n) => n.w > 0 && n.h > 0), ...obstacles];
-  const { ribbons, display } = formRibbons(
-    wires.filter((w) => !w.labelled).map((w) => ({ id: w.id, corners: w.corners, net: mazeNet(w).net, wire: w })),
+  const all = wires.filter((w) => !w.labelled).map((w) => ({ id: w.id, corners: w.corners, net: mazeNet(w).net, wire: w }));
+  const nameOf = (m) => (m.wire.kind === 'binding' ? String(m.wire.label).split(' ⇢ ')[0] : m.wire.from.node === PARAMS ? 'params' : m.wire.from.port);
+  // The group whose ribbons share one label: a chip's legs, a die's connector.
+  const groupOf = (net) => (net.startsWith('leg:') ? `legs:${net.split(':').at(-2)}` : net.startsWith(`${PARAMS}\n`) ? 'params' : null);
+  // ADR 0047 phase 5: nets sharing a way (a chip's legs, a die's parameters, a wire run along another) each in a lane, a ribbon where three or more share it.
+  const lanes = laneWires(all, { nameOf, isLeg: (net) => net.startsWith('leg:@control:'), ribbonName, groupOf });
+  // Then side by side on their own tracks (phase 4), as the lanes draw them (a lane is never packed again: `RIBBON_NEAR`).
+  const side = formRibbons(
+    all.map((w) => ({ ...w, corners: lanes.display.get(w.id) ?? w.corners })),
     boxes,
-    { nameOf: (m) => (m.wire.kind === 'binding' ? String(m.wire.label).split(' ⇢ ')[0] : m.wire.from.port), endsOf: (m) => [m.wire.from.node, m.wire.to.node] },
+    { nameOf, endsOf: (m) => [m.wire.from.node, m.wire.to.node] },
   );
+  // A lane's band never lies over a box (its lanes still do where they enter it).
+  const meets = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+  const chips = nodes.filter((n) => n.w > 0 && n.h > 0);
+  for (const r of side.ribbons) {
+    const groups = new Set(r.members.map((m) => groupOf(m.net)));
+    r.group = groups.size === 1 ? [...groups][0] : null;
+  }
+  const ribbons = [...lanes.ribbons.filter((r) => !chips.some((b) => meets(r.band, b))), ...side.ribbons];
+  const display = new Map([...lanes.display, ...side.display]);
   // Their labels off every box, a via's name and the net labels (`placeRibbonLabels`).
   const texts = [...boxes.map((b) => ({ x: b.x - 2, y: b.y - (b.via ? 10 : 2), w: b.w + 4, h: b.h + (b.via ? 12 : 4) })), ...labels.map((l) => ({ x: l.side === 'in' ? l.at.x - CHAR * l.text.length : l.at.x, y: l.at.y - 9, w: CHAR * l.text.length, h: 12 }))];
   placeRibbonLabels(ribbons, texts);
@@ -1167,7 +1212,8 @@ export function boardRibbons(nodes, wires, obstacles = [], labels = []) {
 /** A board's measures (ADR 0047 §6.6): of its routes, a leg's bus one net (its ribbons, `board.ribbons`, are counted apart). */
 export function boardMeasures(wires, labels, ribbons = []) {
   const m = measure(
-    wires.map((w) => ({ net: w.kind === 'binding' ? `bus:${w.from.node.startsWith('@control:') ? w.to.node : w.from.node}` : `${w.from.node}\n${w.from.port}` })),
+    // A connector's ribbon (ADR 0047 phase 5) is one net, as a chip's legs are: its lanes keep its members apart.
+    wires.map((w) => ({ net: w.kind === 'binding' ? `bus:${w.from.node.startsWith('@control:') ? w.to.node : w.from.node}` : w.from.node === PARAMS && w.bus ? 'bus:params' : `${w.from.node}\n${w.from.port}` })),
     wires.map((w) => ({ corners: w.corners })),
     labels,
   );
@@ -1175,18 +1221,56 @@ export function boardMeasures(wires, labels, ribbons = []) {
 }
 
 
+/** A connector's comb runs this far from its edge (layout units) past half its ribbon's width (its lanes LANE apart). */
+export const COMB = 16;
+/** How far from its edge the comb of a connector of `count` pins runs. */
+export const combDepth = (count) => COMB + (count * LANE_PITCH) / 2;
+
 /**
- * Where a net is drawn as wires rather than labels (ADR 0047 phase 4): a
- * fan-out, a global net and a wire the layout's search found no way for
- * (searched for again over the whole level: `rescueLabelled`). In dies now; on the top
- * board once its snapshots (ui/lib/fixtures/board/snapshots.json, test 5)
- * are written again for this reason, an owner's step (the studio's board,
- * which has no label, does not change).
+ * The wires of a connector combed (ADR 0047 phase 5, the owner: "ribbons
+ * can go into the chips"): each wire into a package's connector pin (out
+ * of a die's strip's) runs, from where its route last meets the comb's line
+ * COMB outside the edge, along that line to above its pin and straight in,
+ * so all of them reach the connector as one ribbon, each peeling off at its
+ * pin (lanes, ui/lib/board-lanes.js). Kept as routed where the comb's line
+ * would pass over a box or the route never meets it. Deterministic.
  */
-export const WIRES_NOT_LABELS = Object.freeze({ die: true, board: false });
+function combConnectors(nodes, wires, obstacles) {
+  const boxes = [...nodes.filter((n) => n.w > 0 && n.h > 0), ...obstacles];
+  const clearH = (y, x0, x1, own) => !boxes.some((b) => b !== own && y > b.y - 2 && y < b.y + b.h + 2 && Math.max(x0, x1) > b.x - 2 && Math.min(x0, x1) < b.x + b.w + 2);
+  // Where corners `c` last meet the horizontal line y (scanning from its end), as an index and point, or null.
+  const lastMeet = (c, y) => {
+    for (let k = c.length - 1; k > 0; k--) {
+      const p = c[k - 1];
+      const q = c[k];
+      if (p.x === q.x && Math.min(p.y, q.y) <= y && Math.max(p.y, q.y) >= y) return { k, at: { x: p.x, y } };
+      if (p.y === q.y && p.y === y) return { k, at: { x: q.x, y } };
+    }
+    return null;
+  };
+  for (const node of nodes) {
+    const strip = node.id === PARAMS && node.connector;
+    if (!node.connector || (node.kind !== 'instance' && !strip)) continue;
+    const count = node.connector.count;
+    const y = strip ? node.y + combDepth(count) : node.y - combDepth(count);
+    for (const w of wires) {
+      if (w.labelled) continue;
+      const into = !strip && w.to.node === node.id && node.ins.some((p) => p.name === w.to.port && p.side === 'top');
+      const outOf = strip && w.from.node === PARAMS;
+      if (!into && !outOf) continue;
+      const c = outOf ? [...w.corners].reverse() : w.corners;
+      const pin = c.at(-1);
+      const meet = lastMeet(c.slice(0, -1).concat([{ x: c.at(-2)?.x ?? pin.x, y: pin.y }]), y);
+      if (!meet || !clearH(y, meet.at.x, pin.x, strip ? null : node)) continue;
+      const combed = simplify([...c.slice(0, meet.k), meet.at, { x: pin.x, y }, pin]);
+      const corners = outOf ? combed.reverse() : combed;
+      Object.assign(w, { corners, ...orthGeometry(corners) });
+    }
+  }
+}
 
 /** A labelled wire's second search (ADR 0047 phase 4) may visit this many states. */
-const RESCUE_STATES = 9000;
+const RESCUE_STATES = 8000;
 
 /** The net a board's wire belongs to for the maze: a leg's own, in its chip's bus; else its source pin's. */
 export function mazeNet(w) {
@@ -1194,7 +1278,7 @@ export function mazeNet(w) {
     const chip = String(w.from.node).startsWith('@control:') ? w.to.node : w.from.node;
     return { net: `leg:${w.from.node}:${w.from.port}:${w.to.node}:${w.to.port}`, bus: `bus:${chip}` };
   }
-  return { net: `${w.from.node}\n${w.from.port}`, bus: null };
+  return { net: `${w.from.node}\n${w.from.port}`, bus: w.bus ?? null };
 }
 
 /**
@@ -1234,24 +1318,19 @@ function rescueLabelled(nodes, wires, labels, obstacles, area) {
     const own = [byId.get(w.from.node), byId.get(w.to.node)].filter((n) => n?.kind === 'control').flatMap((n) => [n.control?.rect, rectOf(n)].filter(Boolean));
     const share = wires.filter((o) => o !== w && !o.labelled && o.to.node === w.to.node && o.to.port === w.to.port).map((o) => mazeNet(o).net);
     // The layout's own search found no way within its budget: a second one over the whole level, with every wire drawn in it (never along another net, never turning where one passes: no false junction).
-    const corners = maze.route(a, b, net, { bus, own, share, from: a.side ?? 'right', into: b.side ?? 'left', budget: RESCUE_STATES });
-    if (!corners) continue;
+    // ADR 0047 phase 5 (wires on every level, no label): a relaxed search, which may run along another net (drawn in a lane beside
+    // it, ui/lib/board-lanes.js) at a high cost; a far one with a larger budget.
+    const ask = { bus, own, share, from: a.side ?? 'right', into: b.side ?? 'left', relaxed: true };
+    // Past every budget, the plain orthogonal way (never seen on the example projects): a wire still, never a label.
+    const corners = maze.route(a, b, net, { ...ask, budget: RESCUE_STATES }) ?? maze.route(a, b, net, { ...ask, budget: 8 * RESCUE_STATES }) ?? zCorners(a, b);
     const clean = simplify(corners);
     const vertical = clean.find((p, k) => k > 0 && clean[k - 1].x === p.x && clean[k - 1].y !== p.y);
     Object.assign(w, { corners: clean, labelled: false, trunkX: vertical?.x ?? null, ...orthGeometry(clean) });
     delete w.whole;
     found.add(w.id);
   }
-  if (!found.size) return;
-  const kept = labels.filter((l) => !found.has(l.wire));
-  // A source's stub stays while one of its net's wires is still a label: it moves to that wire.
-  for (const l of labels) {
-    if (l.side !== 'out' || !found.has(l.wire)) continue;
-    const other = kept.find((k) => k.net === l.net && k.side === 'in');
-    if (other) kept.push({ ...l, wire: other.wire });
-  }
+  // No net is drawn as a label (ADR 0047 phase 5: "wires on every level, no labelled invisible nets").
   labels.length = 0;
-  labels.push(...kept);
 }
 
 /** A chip's top pins (its parameters, ADR 0047 §7) are this far apart… */
@@ -1260,6 +1339,8 @@ export const TOP_PITCH = 12;
 export const TOP_PAD = 16;
 /** Between a card's controls and a chip below them: room for the comb's collector. */
 export const COMB_GAP = 24;
+/** …and room for its connector's ribbon (ADR 0047 phase 5): its lanes and the comb's line, when it has one. */
+const combGap = (node) => (node.connector ? Math.max(COMB_GAP, Math.ceil((2 * combDepth(node.connector.count) + COMB) / PU) * PU) : COMB_GAP);
 /** A chip keeps this far from a control (a track or two around it)… */
 export const CONTROL_ROOM = 16;
 /** …and this far from another chip (a channel for the wires between them). */
@@ -1443,6 +1524,8 @@ function placeIn(node, target, windows, free) {
   const step = 2 * PU;
   last = Math.min(80, Math.ceil(last / step));
   for (let r = 0; r <= last; r++) {
+    // A ring's cheapest cell costs r² (along x): past the best found, nothing nearer is left (the result is the same, sooner).
+    if (best && r * r >= best.cost) break;
     for (const [dx, dy] of ring(r)) {
       const cost = dx * dx + 4 * dy * dy;
       if (best && cost >= best.cost) continue;
@@ -1494,7 +1577,7 @@ function underVias(node, rects, cards, free, controlRects = rects) {
     for (const r of controlRects) if (cardOf([card], r) && r.y + r.h > floor) floor = r.y + r.h;
     // The nearest free spot to its place in the row (right under its vias), in a window: beside the row (past the plate's edge too) before a row lower.
     const x0w = snap(cx - node.w / 2);
-    const y0w = snap(floor + COMB_GAP);
+    const y0w = snap(floor + combGap(node));
     const cands = [];
     for (let dy = 0; dy <= 40; dy++) {
       if (y0w + dy * PU + node.h > card.y + card.h - CARD_PAD) break;
@@ -1506,10 +1589,10 @@ function underVias(node, rects, cards, free, controlRects = rects) {
       if (free({ ...at, w: node.w, h: node.h })) return at;
     }
     // (b) Just below its card.
-    const below = scan(card.y + card.h + COMB_GAP / 2, card.y + card.h + 640, -Infinity, Infinity, 24);
+    const below = scan(card.y + card.h + combGap(node) / 2, card.y + card.h + 640, -Infinity, Infinity, 24);
     if (below) return below;
   } else {
-    const below = scan(y1 + COMB_GAP, y1 + 640, -Infinity, Infinity, 24);
+    const below = scan(y1 + combGap(node), y1 + 640, -Infinity, Infinity, 24);
     if (below) return below;
   }
   return null;
@@ -1533,7 +1616,27 @@ function plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects
   const cards = (board.cards ?? []).filter((c) => c.w > 0 && c.h > 0);
   const placed = [];
   // A chip keeps room around it for the wires: from a control CONTROL_ROOM, from another chip CHIP_ROOM.
-  const free = (box) => !controlRects.some((o) => near(box, o, CONTROL_ROOM)) && !placed.some((o) => near(box, o, CHIP_ROOM));
+  // The controls in buckets of BUCKET units, so a spot asks only those near it (the same answer, sooner: the spiral asks thousands).
+  const BUCKET = 128;
+  const buckets = new Map();
+  controlRects.forEach((o, i) => {
+    for (let bx = Math.floor((o.x - CONTROL_ROOM) / BUCKET); bx <= Math.floor((o.x + o.w + CONTROL_ROOM) / BUCKET); bx++) {
+      for (let by = Math.floor((o.y - CONTROL_ROOM) / BUCKET); by <= Math.floor((o.y + o.h + CONTROL_ROOM) / BUCKET); by++) {
+        const key = `${bx},${by}`;
+        if (!buckets.has(key)) buckets.set(key, []);
+        buckets.get(key).push(i);
+      }
+    }
+  });
+  const nearControl = (box) => {
+    for (let bx = Math.floor(box.x / BUCKET); bx <= Math.floor((box.x + box.w) / BUCKET); bx++) {
+      for (let by = Math.floor(box.y / BUCKET); by <= Math.floor((box.y + box.h) / BUCKET); by++) {
+        for (const i of buckets.get(`${bx},${by}`) ?? []) if (near(box, controlRects[i], CONTROL_ROOM)) return true;
+      }
+    }
+    return false;
+  };
+  const free = (box) => !nearControl(box) && !placed.some((o) => near(box, o, CHIP_ROOM));
   // The same rooms for the spiral (which keeps CLEARANCE): the obstacles grown by the difference.
   const grow = (r, d) => ({ x: r.x - d, y: r.y - d, w: r.w + 2 * d, h: r.h + 2 * d });
   const roomy = () => [...controlRects.map((r) => grow(r, CONTROL_ROOM - CLEARANCE)), ...placed.map((r) => grow(r, CHIP_ROOM - CLEARANCE))];
@@ -1643,7 +1746,7 @@ function plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects
     const card = cards[cardIndex.get(node.id)];
     let floor = Math.max(...rects.map((r) => r.y + r.h));
     if (card) for (const r of controlRects) if (cardOf([card], r) && r.y + r.h > floor) floor = r.y + r.h;
-    put(node, { x: cx - node.w / 2, y: floor + COMB_GAP });
+    put(node, { x: cx - node.w / 2, y: floor + combGap(node) });
   }
   // A row's bus (a sequencer's triggers under its voices) keeps its way free: no other chip there.
   for (const row of rowsOf(nodes.filter((n) => done.has(n.id) && rectsOf.has(n.id) && n.kind === 'instance'), edges)) {
@@ -1775,8 +1878,7 @@ function plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects
   }
   const nets = new Map();
   for (const e of edges) nets.set(`${e.from.node}\n${e.from.port}`, (nets.get(`${e.from.node}\n${e.from.port}`) ?? 0) + 1);
-  // ADR 0047 phase 4: a fan-out and a global net are wires as any other (routed last, the longest), drawn as ribbons where they run together
-  // (`WIRES_NOT_LABELS.board`; until then labels, as phase 2 recorded them).
+  // ADR 0047 phase 4–5: a fan-out and a global net are wires as any other (routed last, the longest), drawn as ribbons where they run together.
   const late = (e) => {
     const net = `${e.from.node}\n${e.from.port}`;
     return nets.get(net) >= NET_DESTS || (!hasInput.has(e.from.node) && (fed.get(e.from.node)?.size ?? 0) >= GLOBAL_FANOUT);
@@ -1819,8 +1921,8 @@ function plateBoard({ nodes, byId, edges, back, ranks, panel, legs, controlRects
     const b = pinOf(byId.get(e.to.node), e.to.port, false);
     return { e, i, a, b, d: Math.abs(a.x - b.x) + Math.abs(a.y - b.y) };
   });
-  const labelled = (e) => !WIRES_NOT_LABELS.board && late(e);
-  order.sort((p, q) => (WIRES_NOT_LABELS.board ? late(p.e) - late(q.e) : 0) || p.d - q.d || p.i - q.i);
+  const labelled = () => false;
+  order.sort((p, q) => late(p.e) - late(q.e) || p.d - q.d || p.i - q.i);
   for (const { e, i, a, b } of order) {
     if (labelled(e) || routeOf.has(`edge${i}`)) continue;
     // The legs at its own pins (a meter reading its source, a control setting its target) it may join there.
