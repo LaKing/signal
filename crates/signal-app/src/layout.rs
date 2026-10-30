@@ -14,6 +14,7 @@
 
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
 /// What a window shows.
@@ -213,6 +214,96 @@ pub struct LayoutWindow {
     /// Whether it is full screen (on its screen); its place and size are
     /// then what it returns to.
     pub fullscreen: bool,
+    /// What its page shows of the device (ADR 0047 §3, §5): view state,
+    /// kept per window.
+    pub state: ViewState,
+}
+
+/// The layers of the device view (ADR 0047 §5), as `ui/lib/board-view.js` names them.
+pub const LAYERS: [&str; 3] = ["plate", "xray", "board"];
+/// The board's arrangements.
+pub const ARRANGEMENTS: [&str; 2] = ["controls", "flow"];
+/// The signal kinds whose wires may be hidden.
+pub const KINDS: [&str; 3] = ["signal", "events", "vector"];
+/// A plate's scale is kept within these (`ui/lib/plate.js` `ZOOM_MIN`, `ZOOM_MAX`).
+pub const SCALE_RANGE: (f64, f64) = (0.1, 8.0);
+
+/// A window's view state (ADR 0047 §3, §5): the device view's layer, the
+/// board's arrangement and the kinds whose wires are hidden (the
+/// schematic's), and the plate's scale (the panel's: `whole`, or a scale
+/// set by ⌘+ / ⌘−; neither: fit the width). Presentation only, as the
+/// window's place is; each field absent is its default. What the page
+/// says is checked here: anything else is left out.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ViewState {
+    /// `plate`, `xray` or `board`.
+    pub layer: Option<String>,
+    /// `controls` or `flow`.
+    pub arrange: Option<String>,
+    /// Of `signal`, `events`, `vector`, in that order.
+    pub hidden: Vec<String>,
+    /// The plate shown whole (⌘0).
+    pub whole: bool,
+    /// The plate at this scale (⌘+, ⌘−), within SCALE_RANGE.
+    pub scale: Option<f64>,
+}
+
+impl ViewState {
+    /// The state a page says (`view.state`'s `state`): checked, the rest dropped.
+    pub fn from_json(state: &Value) -> ViewState {
+        let one_of = |name: &str, allowed: &[&str]| {
+            state
+                .get(name)
+                .and_then(Value::as_str)
+                .filter(|v| allowed.contains(v))
+                .map(str::to_owned)
+        };
+        let listed: Vec<&str> = state
+            .get("hidden")
+            .and_then(Value::as_array)
+            .map(|list| list.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let scale = state
+            .get("scale")
+            .and_then(Value::as_f64)
+            .filter(|s| s.is_finite() && *s >= SCALE_RANGE.0 && *s <= SCALE_RANGE.1);
+        // A default is no value: it is never written.
+        ViewState {
+            layer: one_of("layer", &LAYERS).filter(|l| l != LAYERS[2]),
+            arrange: one_of("arrange", &ARRANGEMENTS).filter(|a| a != ARRANGEMENTS[0]),
+            hidden: KINDS
+                .iter()
+                .filter(|k| listed.contains(k))
+                .map(|k| (*k).to_owned())
+                .collect(),
+            whole: scale.is_none() && state.get("zoom").and_then(Value::as_str) == Some("whole"),
+            scale,
+        }
+    }
+
+    /// As the page is told it (`signal-view`'s detail).
+    pub fn to_json(&self) -> Value {
+        let mut out = serde_json::Map::new();
+        if let Some(layer) = &self.layer {
+            out.insert("layer".into(), Value::from(layer.as_str()));
+        }
+        if let Some(arrange) = &self.arrange {
+            out.insert("arrange".into(), Value::from(arrange.as_str()));
+        }
+        out.insert("hidden".into(), Value::from(self.hidden.clone()));
+        if self.whole {
+            out.insert("zoom".into(), Value::from("whole"));
+        }
+        if let Some(scale) = self.scale {
+            out.insert("scale".into(), Value::from(scale));
+        }
+        Value::Object(out)
+    }
+
+    /// Whether it is the default state (nothing to write).
+    pub fn is_default(&self) -> bool {
+        self == &ViewState::default()
+    }
 }
 
 /// One screen configuration's windows, in the order they were opened.
@@ -251,6 +342,7 @@ pub fn default_layout(screens: &Screens, size: Option<(f64, f64)>) -> Layout {
             height,
             cards: Vec::new(),
             fullscreen: false,
+            state: ViewState::default(),
         }],
     }
 }
@@ -315,6 +407,7 @@ pub fn record(
         height: size.1.round().max(1.0),
         cards,
         fullscreen: false,
+        state: ViewState::default(),
     }
 }
 
@@ -329,6 +422,7 @@ pub fn similar(a: &Layout, b: &Layout) -> bool {
                 && a.fullscreen == b.fullscreen
                 && a.screen == b.screen
                 && a.cards == b.cards
+                && a.state == b.state
                 && near(a.x, b.x)
                 && near(a.y, b.y)
                 && near(a.width, b.width)
@@ -526,6 +620,7 @@ pub fn at_point(
             height,
             cards: Vec::new(),
             fullscreen: false,
+            state: ViewState::default(),
         };
     };
     let wanted = LayoutWindow {
@@ -537,6 +632,7 @@ pub fn at_point(
         height,
         cards: Vec::new(),
         fullscreen: false,
+        state: ViewState::default(),
     };
     let placed = place(&wanted, screens);
     LayoutWindow {
@@ -719,7 +815,19 @@ pub fn read_layout(text: &str, key: &str) -> Result<Option<Layout>, String> {
         for (name, _) in table.iter() {
             if !matches!(
                 name,
-                "view" | "screen" | "x" | "y" | "width" | "height" | "cards" | "fullscreen"
+                "view"
+                    | "screen"
+                    | "x"
+                    | "y"
+                    | "width"
+                    | "height"
+                    | "cards"
+                    | "fullscreen"
+                    | "layer"
+                    | "arrange"
+                    | "hidden"
+                    | "zoom"
+                    | "scale"
             ) {
                 return Err(bad(&format!("unknown key '{name}'")));
             }
@@ -762,6 +870,7 @@ pub fn read_layout(text: &str, key: &str) -> Result<Option<Layout>, String> {
                 .as_bool()
                 .ok_or_else(|| bad("`fullscreen` must be true or false"))?,
         };
+        let state = read_state(table).map_err(|reason| bad(&reason))?;
         layout.windows.push(LayoutWindow {
             view,
             screen,
@@ -771,9 +880,86 @@ pub fn read_layout(text: &str, key: &str) -> Result<Option<Layout>, String> {
             height,
             cards,
             fullscreen,
+            state,
         });
     }
     Ok(Some(layout))
+}
+
+/// A window table's view state (ADR 0047 §3, §5): each key absent is its
+/// default; a value outside its set is an error, as any bad key is.
+fn read_state(table: &Table) -> Result<ViewState, String> {
+    let word = |name: &str, allowed: &[&str]| -> Result<Option<String>, String> {
+        match table.get(name) {
+            None => Ok(None),
+            Some(item) => item
+                .as_str()
+                .filter(|v| allowed.contains(v))
+                .map(|v| Some(v.to_owned()))
+                .ok_or_else(|| format!("`{name}` must be one of {}", allowed.join(", "))),
+        }
+    };
+    let hidden = match table.get("hidden") {
+        None => Vec::new(),
+        Some(item) => {
+            let list = item
+                .as_array()
+                .and_then(|list| {
+                    list.iter()
+                        .map(|k| k.as_str().filter(|k| KINDS.contains(k)))
+                        .collect::<Option<Vec<&str>>>()
+                })
+                .ok_or_else(|| format!("`hidden` must be a list of {}", KINDS.join(", ")))?;
+            KINDS
+                .iter()
+                .filter(|k| list.contains(k))
+                .map(|k| (*k).to_owned())
+                .collect()
+        }
+    };
+    let whole = word("zoom", &["whole"])?.is_some();
+    let scale = match table.get("scale") {
+        None => None,
+        Some(item) => Some(
+            item.as_float()
+                .or_else(|| item.as_integer().map(|i| i as f64))
+                .filter(|s| s.is_finite() && *s >= SCALE_RANGE.0 && *s <= SCALE_RANGE.1)
+                .ok_or_else(|| {
+                    format!(
+                        "`scale` must be a number from {} to {}",
+                        SCALE_RANGE.0, SCALE_RANGE.1
+                    )
+                })?,
+        ),
+    };
+    Ok(ViewState {
+        layer: word("layer", &LAYERS)?.filter(|l| l != LAYERS[2]),
+        arrange: word("arrange", &ARRANGEMENTS)?.filter(|a| a != ARRANGEMENTS[0]),
+        hidden,
+        whole: whole && scale.is_none(),
+        scale,
+    })
+}
+
+/// `state`'s keys in a window table, only those not at their default.
+fn write_state(table: &mut Table, state: &ViewState) {
+    if let Some(layer) = &state.layer {
+        table.insert("layer", value(layer.as_str()));
+    }
+    if let Some(arrange) = &state.arrange {
+        table.insert("arrange", value(arrange.as_str()));
+    }
+    if !state.hidden.is_empty() {
+        let hidden: toml_edit::Array = state.hidden.iter().map(String::as_str).collect();
+        table.insert("hidden", value(hidden));
+    }
+    if state.whole {
+        table.insert("zoom", value("whole"));
+    }
+    if let Some(scale) = state.scale {
+        // Two decimals: a scale is a view, not a measure.
+        table.insert("scale", value((scale * 100.0).round() / 100.0));
+    }
 }
 
 /// `ui/windows.toml`'s `text` with screen configuration `key`'s layout set
@@ -826,6 +1012,7 @@ pub fn write_layout(text: &str, key: &str, layout: Option<&Layout>) -> Result<St
                 if window.fullscreen {
                     table.insert("fullscreen", value(true));
                 }
+                write_state(&mut table, &window.state);
                 windows.push(table);
             }
             let mut entry = Table::new();
@@ -951,6 +1138,7 @@ mod tests {
             height: size.1,
             cards: Vec::new(),
             fullscreen: false,
+            state: ViewState::default(),
         }
     }
 
@@ -1348,6 +1536,61 @@ mod tests {
         carded.windows[0].cards.push("kick".to_owned());
         assert!(!similar(&layout, &carded));
         assert!(!similar(&layout, &Layout::default()));
+    }
+
+    /// ADR 0047 §3, §5: a window's view state (the device view's layer,
+    /// arrangement and hidden kinds, the plate's scale) is kept with it, its
+    /// defaults unwritten; what a page says is checked, a bad value in the
+    /// file is an error as any bad key is.
+    #[test]
+    fn a_window_keeps_its_view_state() {
+        let screens = screens_of(&desk(), Some(0));
+        let mut layout = default_layout(&screens, None);
+        let said = ViewState::from_json(&serde_json::json!({
+            "layer": "xray", "arrange": "flow", "hidden": ["vector", "events", "colour"], "scale": 1.5625, "zoom": "whole"
+        }));
+        assert_eq!(said.layer.as_deref(), Some("xray"));
+        assert_eq!(
+            said.hidden,
+            ["events", "vector"],
+            "known kinds, in their order"
+        );
+        assert!(!said.whole, "a scale wins over whole");
+        layout.windows[0].state = said.clone();
+        let text = write_layout("", &screens.key, Some(&layout)).unwrap();
+        assert!(text.contains("layer = \"xray\""), "{text}");
+        assert!(text.contains("hidden = [\"events\", \"vector\"]"), "{text}");
+        assert!(text.contains("scale = 1.56"), "{text}");
+        let read = read_layout(&text, &screens.key).unwrap().unwrap();
+        assert_eq!(read.windows[0].state.scale, Some(1.56));
+        assert_eq!(read.windows[0].state.arrange.as_deref(), Some("flow"));
+        assert_eq!(read.windows[0].state.to_json()["layer"], "xray");
+        // The default writes nothing.
+        let plain = write_layout("", &screens.key, Some(&default_layout(&screens, None))).unwrap();
+        assert!(
+            !plain.contains("layer") && !plain.contains("scale"),
+            "{plain}"
+        );
+        assert!(ViewState::from_json(&serde_json::json!({"layer": "x", "scale": 99})).is_default());
+        assert!(
+            ViewState::from_json(
+                &serde_json::json!({"layer": "board", "arrange": "controls", "hidden": []})
+            )
+            .is_default(),
+            "the defaults, said whole, are no state"
+        );
+        let whole = ViewState::from_json(&serde_json::json!({"zoom": "whole"}));
+        assert!(whole.whole);
+        let base = "[[layout.k.windows]]\nview = \"main\"\nscreen = 0\nx = 0\ny = 0\nwidth = 1\nheight = 1\n";
+        for (bad, reason) in [
+            ("layer = \"top\"\n", "`layer`"),
+            ("hidden = [\"midi\"]\n", "`hidden`"),
+            ("scale = 0\n", "`scale`"),
+            ("zoom = \"fit\"\n", "`zoom`"),
+        ] {
+            let error = read_layout(&format!("{base}{bad}"), "k").unwrap_err();
+            assert!(error.contains(reason), "{bad}: {error}");
+        }
     }
 
     /// ADR 0032: `ui/windows.toml` keeps one entry per key; writing one

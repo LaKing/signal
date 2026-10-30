@@ -144,7 +144,7 @@ export function detour(a, b, avoid) {
  * at most `radius`, within its two legs (an end leg whole, a middle leg
  * shared half and half with the next turn).
  */
-function rounded(corners, radius) {
+export function rounded(corners, radius) {
   const p = corners.filter((c, i) => i === 0 || c.x !== corners[i - 1].x || c.y !== corners[i - 1].y);
   const segs = [];
   let from = p[0];

@@ -180,6 +180,7 @@ export default {
     { "id": "schematic.page_up", "scope": "schematic", "label": "Pan up a window", "keys": ["PageUp"] },
     { "id": "schematic.page_down", "scope": "schematic", "label": "Pan down a window", "keys": ["PageDown"] },
     { "id": "schematic.trace", "scope": "schematic", "label": "Trace the selection", "keys": ["T"] },
+    { "id": "schematic.layer", "scope": "schematic", "label": "The next layer of the device view: Plate, X-ray, Board", "keys": ["L"] },
     { "id": "schematic.select_all", "scope": "schematic", "label": "Select every instance and connection of the level", "keys": ["Cmd+A"] },
     { "id": "schematic.back", "scope": "schematic", "label": "End a trace, else close the innermost composite, else select nothing", "keys": ["Escape"] },
     { "id": "schematic.context_menu", "scope": "schematic", "label": "The context menu of the selection", "keys": ["ContextMenu", "Shift+F10"] },

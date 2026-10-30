@@ -12,8 +12,10 @@
 import { insideOf, slotLabel, slotOf } from './slot.js';
 import { wireGeometry } from './schematic-wire.js';
 import { exportFacts, orderedPins, portGroups } from './schematic-groups.js';
-import { controlAnchor, controlEdges, controlNodes, controlPads } from './schematic-controls.js';
+import { CONTROL_HEAD, CONTROL_ROW, controlAnchor, controlEdges, controlNodes, controlPads } from './schematic-controls.js';
 import { frameFace, placeFace } from './schematic-face.js';
+import { balance, placeAnchored, sugiyama } from './board-layout.js';
+import { orthGeometry, routeWires, zCorners } from './board-route.js';
 
 /**
  * Where a slot box's "+" pin of `side` (`in`, `out`) is: the row after its
@@ -328,7 +330,9 @@ export function laneY(bottom, lane) {
  * converter changes the rate), `feedback` and, for a feedback wire, its
  * `lane` below `bottom` (the lowest box's bottom edge).
  */
-export function layout(level, positions = {}, { factsOf = null, controls = null, faces = null, faceSize = null } = {}) {
+export function layout(level, positions = {}, { factsOf = null, controls = null, faces = null, faceSize = null, board = null } = {}) {
+  // ADR 0047 §5–6: the board (the top level under the plate): vias, anchored and layered chips, orthogonal wiring.
+  if (board) return boardLevel(level, positions, { factsOf, controls, faces, faceSize, board });
   const nodes = nodesOf(level ?? {}, factsOf);
   const byId = new Map(nodes.map((n) => [n.id, n]));
   // A slot box with a part shows it, its face, under its title (ui/lib/schematic-face.js): the box grows to hold it.
@@ -365,8 +369,8 @@ export function layout(level, positions = {}, { factsOf = null, controls = null,
   // down past whatever it overlaps.
   const placed = [];
   for (const node of nodes) {
-    const stored = node.kind === 'instance' ? positions?.[node.name] : undefined;
-    node.pinned = Boolean(stored && Number.isFinite(stored.x) && Number.isFinite(stored.y));
+    const stored = storedAt(node, positions);
+    node.pinned = Boolean(stored);
     if (node.pinned) {
       node.x = stored.x;
       node.y = stored.y;
@@ -458,6 +462,252 @@ export function layout(level, positions = {}, { factsOf = null, controls = null,
   return { nodes, wires, bounds, bottom, face };
 }
 
+/** A node's stored position (`ui/schematic.toml`), or null. */
+function storedAt(node, positions) {
+  const stored = node.kind === 'instance' ? positions?.[node.name] : undefined;
+  return stored && Number.isFinite(stored.x) && Number.isFinite(stored.y) ? stored : null;
+}
+
+/** A pin's row on its side of `node` as a fraction in [0, 1): what crossing minimisation orders by. */
+function pinFraction(node, name, out) {
+  const list = out ? node.outs : node.ins;
+  const i = Math.max(0, list.findIndex((p) => p.name === name));
+  return (i + 0.5) / Math.max(1, list.length);
+}
+
+const rectOf = (n) => ({ x: n.x, y: n.y, w: n.w, h: n.h });
+
+/** A via is at least this wide (layout units): three plate units. */
+const VIA_MIN_W = 24;
+/** Free chips start this far below the plate's area. */
+export const BOARD_GAP = 4 * GAP_Y;
+
+/**
+ * The board (ADR 0047 §5–6, phase 2): level `level` (the top level) with
+ * `board` (`{vias, obstacles, arrange, plate}`: `vias` a Map of a panel
+ * control's index → its rectangle on the plate in layout units, whole
+ * plate units; `obstacles` every control's rectangle; `arrange` `controls`
+ * or `flow`; `plate` the plate's `{w, h}` or null). Every panel control
+ * with a via is drawn there, fixed. Arranged by controls, a chip such a
+ * control binds is anchored near its vias (`placeAnchored`); every other
+ * chip (every chip, by flow) is laid out by the layered layout
+ * (`sugiyama`) in the free space below the plate and the anchored chips.
+ * A stored position wins in both. Wires are routed orthogonally
+ * (`routeWires`), long and wide nets drawn as labels. The result has the
+ * shape `layout` gives, each wire `orth` with its `ends`, and `board`:
+ * `{arrange, labels, metrics, plate, anchored, crossings}`.
+ */
+function boardLevel(level, positions, { factsOf, controls, faces, faceSize, board }) {
+  const nodes = nodesOf(level ?? {}, factsOf);
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  for (const node of nodes) {
+    const face = node.kind === 'instance' ? faces?.boxes?.get(node.name) : null;
+    if (face) placeFace(node, face, faceSize?.(face) ?? null);
+  }
+  const edges = edgesOf(level ?? {}, byId);
+  const back = backEdges(nodes, edges);
+  const ranks = layers(nodes, edges, back);
+  const arrange = board.arrange === 'flow' ? 'flow' : 'controls';
+  const vias = board.vias instanceof Map ? board.vias : new Map();
+  // The vias: each control of the plate where it is, as tall as its pins need.
+  const panel = (controls?.length ? controlNodes(controls.filter((c) => !c.part), byId, pinOffset) : []).filter((c) => vias.has(c.control.index));
+  for (const c of panel) {
+    const v = vias.get(c.control.index);
+    const rows = Math.max(1, c.ins.length, c.outs.length);
+    c.x = v.x;
+    c.y = v.y;
+    c.w = Math.max(v.w, VIA_MIN_W);
+    c.h = Math.max(v.h, CONTROL_HEAD + CONTROL_ROW * rows);
+    c.via = true;
+    c.pinned = true;
+    c.layer = null;
+  }
+  const taken = [...(board.obstacles ?? []), ...panel.map(rectOf)];
+  for (const node of nodes) {
+    const stored = storedAt(node, positions);
+    node.pinned = Boolean(stored);
+    if (stored) {
+      node.x = stored.x;
+      node.y = stored.y;
+      taken.push(rectOf(node));
+    }
+  }
+  // Anchored chips, in source order: near their vias.
+  const hosts = new Map();
+  for (const c of panel) {
+    if (!hosts.has(c.host)) hosts.set(c.host, []);
+    hosts.get(c.host).push(c);
+  }
+  const anchored = new Set();
+  if (arrange === 'controls') {
+    for (const node of nodes) {
+      if (node.kind !== 'instance' || !hosts.has(node.id)) continue;
+      if (node.pinned) {
+        anchored.add(node.id);
+        continue;
+      }
+      const at = placeAnchored(node, hosts.get(node.id).map(rectOf), taken);
+      if (!at) continue;
+      node.x = at.x;
+      node.y = at.y;
+      anchored.add(node.id);
+      taken.push(rectOf(node));
+    }
+  }
+  // The free chips: layered, below the plate's area.
+  const free = nodes.filter((n) => !anchored.has(n.id));
+  const freeIds = new Set(free.map((n) => n.id));
+  const used = [...new Set(free.map((n) => ranks.get(n.id)))].sort((a, b) => a - b);
+  const compact = new Map(used.map((l, i) => [l, i]));
+  const sEdges = [];
+  edges.forEach((e, i) => {
+    if (!freeIds.has(e.from.node) || !freeIds.has(e.to.node) || e.from.node === e.to.node) return;
+    const reversed = back.has(i);
+    const [u, uPort, uOut, v, vPort, vOut] = reversed ? [e.to.node, e.to.port, false, e.from.node, e.from.port, true] : [e.from.node, e.from.port, true, e.to.node, e.to.port, false];
+    const un = byId.get(u);
+    const vn = byId.get(v);
+    sEdges.push({ key: i, from: u, to: v, net: `${e.from.node}\n${e.from.port}`, fromFrac: pinFraction(un, uPort, uOut), toFrac: pinFraction(vn, vPort, vOut), fromOff: pinOffset(un, uPort, uOut), toOff: pinOffset(vn, vPort, vOut) });
+  });
+  let layer = new Map(free.map((n) => [n.id, compact.get(ranks.get(n.id))]));
+  layer = balance(
+    free.map((n) => n.id),
+    sEdges,
+    layer,
+    (id) => byId.get(id).kind !== 'instance',
+  );
+  // Balancing may leave a column empty: numbered again, in order.
+  const kept = [...new Set(layer.values())].sort((a, b) => a - b);
+  const renumber = new Map(kept.map((l, i) => [l, i]));
+  for (const [id, l] of layer) layer.set(id, renumber.get(l));
+  const lay = sugiyama(free, sEdges, layer);
+  const plateArea = Boolean(board.plate || panel.length || anchored.size);
+  let top = 0;
+  if (plateArea) {
+    top = board.plate?.h ?? 0;
+    for (const r of taken) top = Math.max(top, r.y + r.h);
+    top += BOARD_GAP;
+  }
+  for (const node of free) {
+    node.layer = layer.get(node.id);
+    if (node.pinned) continue;
+    node.x = lay.x.get(node.id);
+    node.y = top + lay.y.get(node.id);
+  }
+  for (const node of nodes) if (anchored.has(node.id)) node.layer = null;
+  // What does not fit where the layout put it (a stored box there) moves down past it, as `layout` does.
+  const placed = nodes.filter((n) => n.pinned || anchored.has(n.id)).map(rectOf);
+  placed.push(...panel.map(rectOf));
+  const moved = new Set();
+  for (const row of lay.rows) {
+    for (const id of row) {
+      const node = byId.get(id);
+      if (!node || node.pinned || !freeIds.has(id)) continue;
+      for (let again = true; again; ) {
+        again = false;
+        for (const other of placed) {
+          if (overlaps(node, other)) {
+            node.y = other.y + other.h + GAP_Y;
+            moved.add(id);
+            again = true;
+          }
+        }
+      }
+      placed.push(rectOf(node));
+    }
+  }
+  for (const c of panel) {
+    nodes.push(c);
+    byId.set(c.id, c);
+  }
+  for (const node of nodes) {
+    node.ins = node.ins.map((p) => ({ ...p, ...anchor(node, p.name, false) }));
+    node.outs = node.outs.map((p) => ({ ...p, ...anchor(node, p.name, true) }));
+  }
+  const bottom = levelBottom(nodes);
+  const all = panel.length ? controlEdges(edges, panel) : edges;
+  const inPlate = (id) => anchored.has(id) || byId.get(id)?.kind === 'control';
+  let lane = 0;
+  const asked = all.map((e, i) => {
+    const a = anchor(byId.get(e.from.node), e.from.port, true);
+    const b = anchor(byId.get(e.to.node), e.to.port, false);
+    const feedback = i < edges.length && back.has(i);
+    if (feedback) lane += 1;
+    const chain = i < edges.length ? lay.chains.get(i) : null;
+    const still = (id) => !moved.has(id) && !byId.get(id).pinned;
+    const straight = Boolean(chain?.length) && !feedback && still(e.from.node) && still(e.to.node);
+    const span = freeIds.has(e.from.node) && freeIds.has(e.to.node) ? Math.abs(layer.get(e.to.node) - layer.get(e.from.node)) : 0;
+    return {
+      id: i,
+      net: `${e.from.node}\n${e.from.port}`,
+      from: e.from.node,
+      to: e.to.node,
+      a,
+      b,
+      feedback,
+      under: feedback ? laneY(bottom, lane) : null,
+      lane: feedback ? lane : 0,
+      span,
+      crossesPlate: plateArea && inPlate(e.from.node) !== inPlate(e.to.node),
+      stations: straight ? chain.map((d) => ({ x0: lay.columns[d.layer].x, x1: lay.columns[d.layer].x + lay.columns[d.layer].w, y: top + d.y })) : null,
+      overVias: e.kind === 'binding',
+      edge: e,
+    };
+  });
+  const boxes = nodes.map(({ id, x, y, w, h, via }) => ({ id, x, y, w, h, via: Boolean(via) }));
+  // A label says the net's source as written; a control's leg, the control.
+  const nameOf = (w) => {
+    const source = byId.get(w.edge.from.node);
+    if (source?.kind === 'control') return source.name;
+    return String(w.edge.written?.from ?? `${w.edge.from.node}.${w.edge.from.port}`).replace(/^\//, '');
+  };
+  const { routes, labels, metrics } = routeWires(boxes, asked, { nameOf });
+  const wires = asked.map((w, i) => {
+    const e = w.edge;
+    const r = routes[i];
+    const vertical = r.corners.find((p, k) => k > 0 && r.corners[k - 1].x === p.x && r.corners[k - 1].y !== p.y);
+    const wire = {
+      id: i,
+      from: e.from,
+      to: e.to,
+      written: e.written,
+      kind: e.kind,
+      shape: e.shape,
+      converters: e.converters,
+      scale: e.scale,
+      dashed: e.converters.length > 0,
+      feedback: w.feedback,
+      reversed: w.feedback,
+      label: e.label,
+      ...(e.target ? { target: e.target } : {}),
+      lane: w.lane,
+      under: w.under,
+      orth: true,
+      ends: { a: { x: w.a.x, y: w.a.y }, b: { x: w.b.x, y: w.b.y } },
+      trunkX: vertical?.x ?? null,
+      labelled: Boolean(r.labelled),
+      corners: r.corners,
+      ...orthGeometry(r.corners),
+    };
+    // Drawn whole while traced or selected (the same id: its element is built again).
+    if (r.labelled) wire.whole = { ...wire, labelled: false, whole: true, corners: r.whole, ...orthGeometry(r.whole) };
+    return wire;
+  });
+  const ends = { outs: new Set(all.map((e) => `${e.from.node}\n${e.from.port}`)), ins: new Set(all.map((e) => `${e.to.node}\n${e.to.port}`)) };
+  for (const node of nodes) {
+    for (const side of ['ins', 'outs']) node[side] = node[side].map((p) => ({ ...p, connected: ends[side].has(`${node.id}\n${p.name}`) }));
+  }
+  // A label's text reaches about CHAR per character from its stub.
+  const xs = [...nodes.flatMap((n) => [n.x, n.x + n.w]), ...wires.flatMap((w) => [w.box.x0, w.box.x1]), ...labels.map((l) => (l.side === 'in' ? l.at.x - CHAR * l.text.length : l.at.x + CHAR * l.text.length))];
+  const ys = [...nodes.flatMap((n) => [n.y, n.y + n.h]), ...wires.flatMap((w) => [w.box.y0, w.box.y1])];
+  if (board.plate) {
+    xs.push(0, board.plate.w);
+    ys.push(0, board.plate.h);
+  }
+  const [x0, x1, y0, y1] = [least(xs, Infinity), most(xs, -Infinity), least(ys, Infinity), most(ys, -Infinity)];
+  const bounds = xs.length ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : { x: 0, y: 0, w: MIN_WIDTH, h: HEADER };
+  return { nodes, wires, bounds, bottom, face: null, board: { arrange, labels, metrics, plate: board.plate ?? null, anchored: [...anchored], crossings: lay.crossings } };
+}
+
 /**
  * Where a box at `node` (`{x, y}`) goes when dragged by `travel` screen
  * pixels at scale `k`: in whole layout units, as `schematic.move` stores it.
@@ -511,18 +761,20 @@ export function movedWires(drawn, id, to) {
   let lane = 0;
   for (const wire of drawn.wires) {
     const attached = moves.has(wire.from.node) || moves.has(wire.to.node);
-    const a = shift(wire.curve.start, wire.from.node);
-    const b = shift(wire.curve.segs.at(-1).to, wire.to.node);
+    const a = shift(wire.ends?.a ?? wire.curve.start, wire.from.node);
+    const b = shift(wire.ends?.b ?? wire.curve.segs.at(-1).to, wire.to.node);
     const feedback = wire.reversed || b.x <= a.x;
     if (feedback) lane += 1;
     const under = feedback ? laneY(bottom, lane) : null;
     if (!attached && under === wire.under) continue;
-    changed.push({ wire, a, b, feedback, under, key: `${a.x},${a.y},${b.x},${b.y},${under}` });
+    changed.push({ wire, a, b, feedback, under, orth: Boolean(wire.orth), key: `${a.x},${a.y},${b.x},${b.y},${under}` });
   }
   return changed;
 }
 
 /** The geometry of a route `movedWires` gives: `{curve, points, box}`. */
 export function routed(route) {
+  // A board's wire (ADR 0047 §6) follows a dragged box as a plain orthogonal route; the next layout routes it in its channel.
+  if (route.orth) return orthGeometry(zCorners(route.a, route.b, { feedback: route.feedback, under: route.under ?? 0 }));
   return wireGeometry(route.a, route.b, { feedback: route.feedback, under: route.under ?? 0 });
 }

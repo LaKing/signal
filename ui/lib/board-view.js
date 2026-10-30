@@ -1,0 +1,103 @@
+// The device view's state and the plate's measures (ADR 0047 §5, phase
+// 2): the layer shown (Plate, X-ray, Board), the board's arrangement (by
+// controls or by flow), the signal kinds whose wires are hidden, and the
+// vias, the plate's controls as rectangles in whole plate units. View
+// state only: it never changes the layout's input but for the
+// arrangement, and never what a project means (rule 4). Pure; no DOM.
+
+import { PU } from './board-layout.js';
+
+/** The layers, in the order one key steps through them. */
+export const LAYERS = Object.freeze(['plate', 'xray', 'board']);
+export const LAYER_NAMES = Object.freeze({ plate: 'Plate', xray: 'X-ray', board: 'Board' });
+/** The board's arrangements. */
+export const ARRANGEMENTS = Object.freeze(['controls', 'flow']);
+/** The signal kinds a wire is drawn as (`shapeName`), each a layer of its own. */
+export const KINDS = Object.freeze(['signal', 'events', 'vector']);
+/** The plate's opacity in X-ray (about a quarter). */
+export const XRAY_OPACITY = 0.25;
+/** The plate lifts and fades in this long (none with reduced motion). */
+export const LIFT_MS = 200;
+
+/** The state a view opens with: the board, arranged by controls, every kind shown. */
+export const DEFAULT_VIEW = Object.freeze({ layer: 'board', arrange: 'controls', hidden: Object.freeze([]) });
+
+/** `raw` (a page's, or `ui/windows.toml`'s) made a view state: anything unknown is the default's. */
+export function viewState(raw) {
+  const layer = LAYERS.includes(raw?.layer) ? raw.layer : DEFAULT_VIEW.layer;
+  const arrange = ARRANGEMENTS.includes(raw?.arrange) ? raw.arrange : DEFAULT_VIEW.arrange;
+  const hidden = KINDS.filter((k) => Array.isArray(raw?.hidden) && raw.hidden.includes(k));
+  return { layer, arrange, hidden };
+}
+
+/** The layer after `layer` (the key that steps through them). */
+export function nextLayer(layer) {
+  const i = LAYERS.indexOf(layer);
+  return LAYERS[(i + 1) % LAYERS.length];
+}
+
+/** `hidden` with `kind` switched. */
+export function toggleKind(hidden, kind) {
+  return KINDS.filter((k) => (k === kind ? !hidden.includes(k) : hidden.includes(k)));
+}
+
+/**
+ * A control's rectangle as measured on the plate (CSS px at the plate's own
+ * size) in whole plate units (ADR 0047 §5, determinism of vias): its
+ * corner and its size each rounded to the nearest unit, at least one, so
+ * engines that differ by a fraction of a pixel give the same board.
+ */
+export function viaRect(rect) {
+  const snap = (v) => Math.round(v / PU) * PU;
+  return { x: snap(rect.x), y: snap(rect.y), w: Math.max(PU, snap(rect.w)), h: Math.max(PU, snap(rect.h)) };
+}
+
+/**
+ * The vias of a plate measured: `controls` (`panelControls`') and
+ * `measured(control)`, its rectangle (CSS px, plate origin) or null when
+ * it is not drawn; `others`, the rectangles of the plate's other controls
+ * (unbound ones). `{vias, obstacles, key}`: `vias` a Map of a control's
+ * index → its rectangle in whole units; `obstacles` every control's;
+ * `key` the same text for the same vias.
+ */
+export function plateVias(controls, measured, others = []) {
+  const vias = new Map();
+  const obstacles = [];
+  for (const control of controls) {
+    const r = measured(control);
+    if (!r || !(r.w > 0) || !(r.h > 0)) continue;
+    const via = viaRect(r);
+    vias.set(control.index, via);
+    obstacles.push(via);
+  }
+  for (const r of others) if (r?.w > 0 && r?.h > 0) obstacles.push(viaRect(r));
+  const rect = (v) => `${v.x},${v.y},${v.w},${v.h}`;
+  const key = `${[...vias].map(([i, v]) => `${i}:${rect(v)}`).join(' ')}|${obstacles.map(rect).join(' ')}`;
+  return { vias, obstacles, key };
+}
+
+/** A plate's measured size (CSS px) in whole units, rounded up: `{w, h}` in layout units. */
+export function plateSize(w, h) {
+  const up = (v) => Math.max(PU, Math.ceil(v / PU - 1e-9) * PU);
+  return { w: up(w), h: up(h) };
+}
+
+/** The measures of a board (`routeWires`' `metrics`) as the bar says them; never a judgement (hard rule 6). */
+export function metricsText(metrics) {
+  if (!metrics) return '';
+  const n = (v) => (v >= 10000 ? `${(v / 1000).toFixed(1)}k` : String(v));
+  return `${n(metrics.crossings)} crossings · ${n(metrics.bends)} bends · length ${n(metrics.length)} · ${n(metrics.labels)} labelled nets`;
+}
+
+/**
+ * The wires of a board level to draw: those of a hidden kind left out;
+ * a labelled wire in `solo` (traced, selected) drawn whole.
+ */
+export function shownWires(wires, hidden, solo, keyOf) {
+  const out = [];
+  for (const w of wires) {
+    if (hidden.includes(w.shape)) continue;
+    out.push(w.labelled && w.whole && solo.has(keyOf(w)) ? w.whole : w);
+  }
+  return out;
+}

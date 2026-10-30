@@ -22,7 +22,10 @@
 <script type="module">
 import { connectFromPage, setDefaultConnection } from './signal-ui.js';
 import './controls/schematic.js';
+import { connectViewState } from './app/lib/view-state.js';
 
+// ADR 0047 §5: in Signal.app, this window's layer, arrangement and kinds, kept in ui/windows.toml.
+connectViewState({ schematic: document.querySelector('signal-schematic'), ready: true });
 const connection = connectFromPage();
 if (connection) setDefaultConnection(connection);
 else document.body.prepend(Object.assign(document.createElement('p'), { textContent: 'This page needs the URL `signal ui` prints (#ws=…&token=…).' }));

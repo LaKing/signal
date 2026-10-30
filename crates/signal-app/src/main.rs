@@ -55,9 +55,9 @@ use objc2_app_kit::{
 use objc2_foundation::NSString;
 use serde_json::{Value, json};
 use signal_app::layout::{
-    CardMove, Change, Layout, LayoutWindow, Monitor, Screens, Seen, Tracker, WindowView, centred,
-    default_layout, fit_height, held, holder, labels, move_card, place, read_layout, record,
-    screens_of, similar, write_layout,
+    CardMove, Change, Layout, LayoutWindow, Monitor, Screens, Seen, Tracker, ViewState, WindowView,
+    centred, default_layout, fit_height, held, holder, labels, move_card, place, read_layout,
+    record, screens_of, similar, write_layout,
 };
 use signal_app::restart;
 use signal_app::server::{AppConfig, AppServer, WindowsEdit};
@@ -260,6 +260,11 @@ fn event_script(event: &str, detail: &Value) -> String {
     format!("window.dispatchEvent(new CustomEvent('{event}', {{ detail: {detail} }}))")
 }
 
+/// The script that tells a page its window's view state (`signal-view`, ADR 0047 §3, §5).
+fn view_script(state: &ViewState) -> String {
+    event_script("signal-view", &state.to_json())
+}
+
 /// One open window.
 struct Shown {
     view: WindowView,
@@ -279,6 +284,9 @@ struct Shown {
     fit: bool,
     /// Until then, its resizes are the app's own (a fit).
     own_until: Instant,
+    /// What its page shows of the device (ADR 0047 §3, §5): the page's
+    /// `view.state`, told back to it (`signal-view`) when it is ready.
+    state: ViewState,
 }
 
 impl Shown {
@@ -395,6 +403,7 @@ impl Windows {
             sized: false,
             fit: false,
             own_until: Instant::now(),
+            state: at.state.clone(),
         });
         self.front.insert(0, id);
         if at.fullscreen
@@ -505,6 +514,7 @@ impl Windows {
                     };
                     LayoutWindow {
                         fullscreen: shown.fullscreen(),
+                        state: shown.state.clone(),
                         ..record(shown.view, cards, at, size, &self.screens)
                     }
                 })
@@ -555,6 +565,12 @@ impl Windows {
                         .window
                         .set_inner_size(LogicalSize::new(placed.width, placed.height));
                     shown.cards = want.cards.clone();
+                    if shown.state != want.state {
+                        shown.state = want.state.clone();
+                        if shown.ready {
+                            shown.run(&view_script(&shown.state));
+                        }
+                    }
                     if want.fullscreen {
                         shown.set_fullscreen(true);
                     }
@@ -824,6 +840,10 @@ impl Windows {
                 if let Some(script) = script {
                     shown.run(&script);
                 }
+                // ADR 0047 §3, §5: the window's kept view state (its layer, the plate's scale).
+                if !shown.state.is_default() {
+                    shown.run(&view_script(&shown.state));
+                }
                 for script in std::mem::take(&mut shown.pending) {
                     shown.run(&script);
                 }
@@ -867,6 +887,14 @@ impl Windows {
             (Some("window.fit"), _) => {
                 let height = message.get("height").and_then(Value::as_f64);
                 self.fit(index, height);
+            }
+            // ADR 0047 §3, §5: the page's view state, kept in `ui/windows.toml` as the window's place is.
+            (Some("view.state"), _) => {
+                let state = ViewState::from_json(message.get("state").unwrap_or(&Value::Null));
+                if self.list[index].state != state {
+                    self.list[index].state = state;
+                    self.tracker.change(Instant::now(), Change::Structure);
+                }
             }
             _ => {}
         }

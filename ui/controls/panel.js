@@ -320,7 +320,17 @@ export class SignalPanel extends HTMLElement {
     else if (id === 'view.plate_whole') this.zoom = this.zoom.kind === 'whole' ? { kind: 'width' } : { kind: 'whole' };
     else return false;
     this.fit();
+    // ADR 0047 §3: the window keeps its scale (ui/app/lib/view-state.js, ui/windows.toml).
+    const View = this.ownerDocument?.defaultView;
+    if (View?.CustomEvent) View.dispatchEvent(new View.CustomEvent('signal-plate-zoom', { detail: { ...this.zoom } }));
     return true;
+  }
+
+  /** The window's kept zoom mode (`fitScale`'s), shown at once. */
+  setZoom(zoom) {
+    const kind = ['width', 'whole', 'manual'].includes(zoom?.kind) ? zoom.kind : 'width';
+    this.zoom = kind === 'manual' ? { kind, scale: Number(zoom.scale) || 1 } : { kind };
+    this.fit();
   }
 
   /** Where the plate's origin is on screen and its scale: what turns a pointer into plate px. */

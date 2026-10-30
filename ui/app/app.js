@@ -20,6 +20,7 @@ import { ContextMenu, claimMenus, focusable } from '../controls/context-menu.js'
 import { formatFixed } from '../lib/format.js';
 import { applyProps } from './lib/dom.js';
 import { connectCards } from './lib/cards.js';
+import { connectViewState } from './lib/view-state.js';
 import { menuAction, pageHandlesShortcuts, panelReloads, panelSource } from './lib/menu.js';
 import { setViewScroller } from '../controls/keyboard.js';
 import { ariaShortcuts, keyCommand, keymap, onKeys, shownKeys } from '../lib/keys.js';
@@ -1047,6 +1048,8 @@ export class SignalAppPanel extends AppElement {
       });
       this.append(this.frame);
       connectCards(this.frame);
+      // ADR 0047 §3, §5: this window's layer, arrangement, kinds and plate scale, kept in ui/windows.toml.
+      connectViewState({ schematic: document.querySelector('signal-schematic'), frame: this.frame });
     }
     super.connectedCallback();
   }

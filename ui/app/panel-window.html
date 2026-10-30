@@ -29,6 +29,7 @@
 <script type="module">
 import { connectFromPage, setDefaultConnection } from '../signal-ui.js';
 import { EMPTY_PANEL, connectCards } from './lib/cards.js';
+import { connectViewState } from './lib/view-state.js';
 import { MENU_CSS } from '../controls/context-menu.js';
 import { panelReloads, panelSource } from './lib/menu.js';
 
@@ -40,6 +41,8 @@ frame.style.visibility = 'hidden';
 // The card menu: the app's menu element and look (ui/controls/context-menu.js).
 document.head.append(Object.assign(document.createElement('style'), { textContent: MENU_CSS }));
 connectCards(frame, { initial: EMPTY_PANEL, menuHost: document.body, shownCount: (count) => { frame.style.visibility = ''; empty.hidden = count > 0; } });
+// ADR 0047 §3: this window's plate scale, kept in ui/windows.toml.
+connectViewState({ frame });
 
 // Another project opened: its panel.
 const connection = connectFromPage();

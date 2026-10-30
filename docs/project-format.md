@@ -435,7 +435,21 @@ width = 480
 height = 360
 cards = ["kick", "output"]       # the cards this window holds (membership: shown at their places on the plate)
 fullscreen = true                # optional: it opens full screen (x, y, width, height: its normal frame)
+scale = 1.25                     # optional: the plate's scale (⌘+, ⌘−); zoom = "whole" (⌘0); neither: fit the width
+
+[[layout."Monitor #41234 3024x1964@2 +0+0 | Monitor #16711 2560x1440@1 +3024+0".windows]]
+view = "schematic"
+screen = 1
+x = 600
+y = 80
+width = 1600
+height = 1000
+layer = "xray"                   # optional (ADR 0047 §5): "plate", "xray" or "board" (the default)
+arrange = "flow"                 # optional: "controls" (the default) or "flow"
+hidden = ["events"]              # optional: the signal kinds whose wires are not drawn ("signal", "events", "vector")
 ```
+
+A window's **view state** (ADR 0047 §3, §5) is its last five keys: what its page shows of the device and the plate's scale. Each is optional, written only when not at its default, and checked as every key is (a value outside its set is an error). The page tells the app each change; the app keeps it with the window's place.
 
 One entry per **screen configuration**, under its key: for each connected monitor, left to right then top to bottom, its name (its type), size in pixels, scale factor and top-left corner in pixels, joined by ` | `. Signal.app applies the entry of the screens connected now, at start, when the project opens and when the screens change; without one it opens the default state (one main window on the main screen, every card in it). It writes only that entry, with `toml_edit`, atomically, a second after the last change, keeping the other entries and comments; Window ▸ Reset Layout removes it. A card id is a card's `id`, else its first heading's slug (`ui-controls.md` "Cards across windows"). A panel window's cards are hidden from the main windows' Panel tab. An entry that does not read is reported and the default state is used; unknown keys in a window are errors there.
 

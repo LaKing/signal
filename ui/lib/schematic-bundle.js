@@ -11,6 +11,16 @@
 
 import { ROW, laneY } from './schematic-layout.js';
 import { curveDistance, flatten, wireGeometry } from './schematic-wire.js';
+import { orthGeometry, zCorners } from './board-route.js';
+
+/**
+ * A wire's geometry between `a` and `b`: a board's wires (ADR 0047 §6.4,
+ * `orth`) as orthogonal routes over `x` (their trunk), a bus's members
+ * fanning out from it; every other as `wireGeometry`.
+ */
+function geometry(a, b, options, orth, x = null) {
+  return orth ? orthGeometry(zCorners(a, b, { feedback: options.feedback, under: options.under, x })) : wireGeometry(a, b, options);
+}
 
 /** At most this many px per wire on screen, a pair's wires are one bundle… */
 export const BUNDLE_PX = 4;
@@ -32,7 +42,8 @@ export function fanOf(k) {
   return Math.max(0, Math.min(1, Math.floor(t * FAN_STEPS) / FAN_STEPS));
 }
 
-const end = (wire) => wire.curve.segs.at(-1).to;
+const end = (wire) => wire.ends?.b ?? wire.curve.segs.at(-1).to;
+const start = (wire) => wire.ends?.a ?? wire.curve.start;
 const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
 const mean = (ps) => ({ x: ps.reduce((s, p) => s + p.x, 0) / ps.length, y: ps.reduce((s, p) => s + p.y, 0) / ps.length });
 
@@ -48,7 +59,7 @@ export function pairKey(wire) {
  * its ends `t` of the way from the bundle's to its own, the count, a `mid`
  * point for it, and the `box` of everything drawn.
  */
-function bundleOf(key, wires, t, bottom, startOf = (w) => w.curve.start, endOf = end, avoid = null) {
+function bundleOf(key, wires, t, bottom, startOf = start, endOf = end, avoid = null) {
   const a = mean(wires.map(startOf));
   const b = mean(wires.map(endOf));
   const feedback = wires.some((w) => w.feedback);
@@ -56,12 +67,16 @@ function bundleOf(key, wires, t, bottom, startOf = (w) => w.curve.start, endOf =
   const under = lanes.length ? Math.min(...lanes) : laneY(bottom, 1);
   // Around an open composite's frame, as its wires go (none of them crossing into it).
   const around = feedback || wires.some((w) => w.crossing) ? null : avoid;
-  const main = wireGeometry(a, b, { feedback, under, avoid: around });
+  // ADR 0047 §6.4: a board's pair is a bus along its first wire's trunk.
+  const orth = wires.every((w) => w.orth);
+  const trunk = orth ? (wires[0].trunkX ?? null) : null;
+  const main = geometry(a, b, { feedback, under, avoid: around }, orth, trunk);
   const members =
     t > 0
       ? wires.map((w) => {
           const own = w.feedback ? w.under : under;
-          return { wire: w, ...wireGeometry(lerp(a, startOf(w), t), lerp(b, endOf(w), t), { feedback, under: under + ((own ?? under) - under) * t, avoid: around }) };
+          const x = orth && trunk !== null && w.trunkX !== null ? trunk + (w.trunkX - trunk) * t : null;
+          return { wire: w, ...geometry(lerp(a, startOf(w), t), lerp(b, endOf(w), t), { feedback, under: under + ((own ?? under) - under) * t, avoid: around }, orth, x) };
         })
       : [];
   const boxes = [main.box, ...members.map((m) => m.box)];
@@ -95,13 +110,14 @@ export function bundleWires(wires, k, { solo = new Set(), bottom = 0, cache = nu
   }
   // Fanned out, a collapsed group's wires still end at its pin: the others are drawn as they are.
   if (t >= 1 && !moved.size) return [...wires];
-  const startOf = (w) => moved.get(w)?.a ?? w.curve.start;
+  const startOf = (w) => moved.get(w)?.a ?? start(w);
   const endOf = (w) => moved.get(w)?.b ?? end(w);
   const keyOf = (w) => (moved.get(w)?.key ? `${pairKey(w)}\n${moved.get(w).key}` : pairKey(w));
   // A wire alone, its ends moved to a group's pin: drawn there (its id kept).
-  const single = (w) => (moved.has(w) ? { ...w, ...wireGeometry(startOf(w), endOf(w), { feedback: w.feedback, under: w.under ?? laneY(bottom, 1), avoid: w.feedback || w.crossing ? null : avoid }) } : w);
+  const single = (w) => (moved.has(w) ? { ...w, ...geometry(startOf(w), endOf(w), { feedback: w.feedback, under: w.under ?? laneY(bottom, 1), avoid: w.feedback || w.crossing ? null : avoid }, Boolean(w.orth), w.trunkX ?? null) } : w);
   const pairs = new Map();
   for (const w of wires) {
+    if (w.labelled || w.whole) continue;
     const key = keyOf(w);
     if (!pairs.has(key)) pairs.set(key, []);
     pairs.get(key).push(w);
@@ -110,7 +126,8 @@ export function bundleWires(wires, k, { solo = new Set(), bottom = 0, cache = nu
   const above = [];
   for (const w of wires) {
     const pair = pairs.get(keyOf(w));
-    if (pair.length < 2 || (t >= 1 && !moved.has(w))) {
+    // A net drawn as labels (ADR 0047 §6.3) is never in a bus: its stubs are drawn as they are.
+    if (!pair || pair.length < 2 || (t >= 1 && !moved.has(w)) || w.labelled || w.whole) {
       items.push(single(w));
       continue;
     }

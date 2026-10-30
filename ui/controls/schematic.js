@@ -97,6 +97,7 @@ import { ControlProperties } from './schematic-control-node.js';
 import { levelControls, levelFaces } from '../lib/parts.js';
 import { FACE_LABEL_CHARS, hotAddresses } from '../lib/schematic-face.js';
 import { SchematicFaces } from './schematic-faces.js';
+import { BOARD_CSS, SchematicBoard } from './schematic-board.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 /** A press that moves less than this (px) is a click. */
@@ -339,6 +340,7 @@ svg.tracing .pin.traced { stroke: var(--signal-fg, #d6dbe4); stroke-width: 2.5; 
 .row.prop { grid-template-columns: 6em 1fr; }
 .row.prop input { grid-column: auto; box-sizing: border-box; min-width: 0; font: inherit; color: inherit; background: var(--signal-bg, #16181d); border: 1px solid var(--signal-knob-edge, #3a414d); border-radius: 3px; padding: 1px 4px; }
 ${ENTRY_CSS}
+${BOARD_CSS}
 ${EDITOR_CSS}
 ${MENU_CSS}`;
 
@@ -447,6 +449,8 @@ export class SignalSchematic extends HTMLElement {
     this.faces = new SchematicFaces(this);
     /** The pin under the pointer (a hit), which lights the face controls bound to it. */
     this.hoveredPort = null;
+    /** ADR 0047 §5–7: the device view, the plate over the board (ui/controls/schematic-board.js). */
+    this.board = new SchematicBoard(this);
   }
 
   /** The part selected last (the context menu's and the keyboard's), or null. */
@@ -515,6 +519,7 @@ export class SignalSchematic extends HTMLElement {
     const resetAll = html('button', { type: 'button', textContent: 'Reset all', title: 'Forget every moved position (removes ui/schematic.toml)' });
     resetAll.addEventListener('click', () => this.resetLayout(null));
     this.bar.append(this.crumbs, fitButton, reset, resetAll);
+    this.board.build(this.bar, fitButton);
     this.message = html('div', { className: 'message' });
     this.staleBox = html('section', { className: 'diagnostics' });
     this.tip = html('div', { className: 'tip' });
@@ -572,8 +577,8 @@ export class SignalSchematic extends HTMLElement {
     on('describe', () => this.described());
     on('panel.written', (message) => {
       if ((message?.file ?? 'main.html') === 'main.html' && typeof message.html === 'string') this.panelSeen(message.html);
-      // A slot's part written (Edit layout, Group into slot): its faces show it at once.
-      else this.faces?.written(message);
+      // A slot's part written (Edit layout, Group into slot): its faces show it at once; the main panel, the plate (ADR 0047 §5).
+      this.faces?.written(message);
     });
     on('unsaved', () => this.refreshCard());
     on('app', (app) => {
@@ -696,6 +701,8 @@ export class SignalSchematic extends HTMLElement {
     if (text === this.panelText) return;
     this.panelText = text;
     this.panelControls = panelControls(text);
+    // ADR 0047 §5: the vias are these controls on the plate drawn.
+    this.board?.remeasure();
     if (!this.graph) return;
     this.layouts.delete('');
     this.selected = reselectAll(this.selected, (level) => this.layoutOf(level));
@@ -770,6 +777,8 @@ export class SignalSchematic extends HTMLElement {
           controls: levelControls(this.graph, level, this.panelControls),
           faces: levelFaces(this.graph, level),
           faceSize: this.faces ? (face) => this.faces.sizeOf(face) : null,
+          // ADR 0047 §5–6: the top level is the board under the plate.
+          board: level === '' ? (this.board?.option() ?? null) : null,
         }),
       );
     }
@@ -859,6 +868,7 @@ export class SignalSchematic extends HTMLElement {
     this.applyTrace();
     this.applyDrag();
     this.faces?.sync(this.drawn);
+    this.board?.showMeasures(this.layoutOf(''));
     this.drawCrumbs();
     // A selected composite opened or closed (a click, its ×, the sidebar's
     // own Open in place or Close): its buttons follow.
@@ -887,8 +897,11 @@ export class SignalSchematic extends HTMLElement {
       const close = el('g');
       // A slot's inside opened: the slot's face at its top (2026-10-30), its area drawn here.
       const face = el('g');
-      drawn = { g: el('g'), wires, links, overlay, face, nodes, labels, close, closeKey: null, baked: null, wireCache: new Map(), nodeCache: new Map(), bundleCache: new Map(), shown: null, labelKey: null, sizes: [] };
-      drawn.g.append(wires, links, overlay, drawn.face, nodes, labels, close);
+      // ADR 0047 §5–6: the plate's area and its cards' ghosts under the board, the nets drawn as labels over it.
+      const plate = el('g', { class: 'plate-layer' });
+      const nets = el('g', { class: 'net-labels' });
+      drawn = { g: el('g'), plate, wires, links, overlay, face, nodes, labels, nets, close, closeKey: null, baked: null, wireCache: new Map(), nodeCache: new Map(), bundleCache: new Map(), shown: null, labelKey: null, sizes: [] };
+      drawn.g.append(plate, wires, links, overlay, drawn.face, nodes, labels, nets, close);
       this.groups.set(level.path, drawn);
     }
     const transform = level.transform;
@@ -909,7 +922,7 @@ export class SignalSchematic extends HTMLElement {
     level.openKey = open;
     // The box around this level's inside, when it is open in place: its pins are joined to the frame's (its groups collapsed or not).
     const parentCollapsed = Boolean(level.parent?.collapsed);
-    const sizes = `${text(12)} ${text(9)}${open ? ` ${level.pinK}` : ''} ${parentCollapsed}`;
+    const sizes = `${text(12)} ${text(9)}${open ? ` ${level.pinK}` : ''} ${parentCollapsed} ${this.board?.key ?? ''}`;
     // M2.13-2: a pair's wires bundled at small scale (ui/lib/schematic-bundle.js), the traced and selected ones on their own above.
     const solo = this.soloWires(level);
     // A level a box of which is dragged: every wire on its own, as DragFollow moves them by id.
@@ -919,6 +932,8 @@ export class SignalSchematic extends HTMLElement {
     const collapsed = !dragging && collapsedAt(transform.k);
     level.collapsed = collapsed;
     const soloKey = [...solo].join('\t');
+    // ADR 0047 §6: a hidden kind's wires are not drawn; a labelled net traced or selected is drawn whole.
+    const levelWires = this.board?.wires(level, solo, (w) => wireKey(w.written)) ?? level.wires;
     const shown = drawn.shown;
     const same =
       shown &&
@@ -930,12 +945,12 @@ export class SignalSchematic extends HTMLElement {
       shown.metered === this.metered &&
       shown.mutedKey === this.mutedKey &&
       sameItems(shown.nodes, level.nodes) &&
-      sameItems(shown.wires, level.wires);
+      sameItems(shown.wires, levelWires);
     if (same) level.bundles = shown.items;
     else {
       const baked = drawn.baked;
       const ends = collapsed ? this.groupEnds(level.layout) : null;
-      const items = bundleWires(level.wires, transform.k, { solo, bottom: level.layout.bottom, cache: drawn.bundleCache, fanned: dragging, ends, avoid: level.layout.avoid ?? null });
+      const items = bundleWires(levelWires, transform.k, { solo, bottom: level.layout.bottom, cache: drawn.bundleCache, fanned: dragging, ends, avoid: level.layout.avoid ?? null });
       level.bundles = items;
       const wires = reconcile(
         drawn.wireCache,
@@ -958,10 +973,17 @@ export class SignalSchematic extends HTMLElement {
       if (!sameItems([...drawn.wires.children], wires.elements)) drawn.wires.replaceChildren(...wires.elements);
       drawn.links.replaceChildren(...this.linkElements(level, baked));
       drawn.face.replaceChildren(...(level.layout.face ? [this.faceArea(baked, level.layout.face, `${level.path}#frame`, { path: level.path, root: level.path })] : []));
+      if (level.layout.board && level.path === '') {
+        this.board?.drawPlate(drawn.plate, baked, bakedRect, bakedPoint, (...a) => this.faceArea(...a), text);
+        this.board?.drawLabels(drawn.nets, level.layout, baked, bakedPath, bakedPoint, text);
+      } else {
+        drawn.plate.replaceChildren();
+        drawn.nets.replaceChildren();
+      }
       if (!sameItems([...drawn.nodes.children], nodes.elements)) drawn.nodes.replaceChildren(...nodes.elements);
       drawn.wireCache = wires.cache;
       drawn.nodeCache = nodes.cache;
-      drawn.shown = { sizes, open, fan, collapsed, solo: soloKey, metered: this.metered, mutedKey: this.mutedKey, items, nodes: level.nodes, wires: level.wires };
+      drawn.shown = { sizes, open, fan, collapsed, solo: soloKey, metered: this.metered, mutedKey: this.mutedKey, items, nodes: level.nodes, wires: levelWires };
     }
     drawn.placed = placed;
     drawn.g.setAttribute('transform', matrix(placed));
@@ -1049,7 +1071,7 @@ export class SignalSchematic extends HTMLElement {
       const a = anchors.get(w.from.node)?.get(w.from.port);
       const b = anchors.get(w.to.node)?.get(w.to.port);
       if (!a && !b) return null;
-      return { a: a ? { x: a.x, y: a.y } : w.curve.start, b: b ? { x: b.x, y: b.y } : w.curve.segs.at(-1).to, key: `${a?.group.key ?? ''}|${b?.group.key ?? ''}` };
+      return { a: a ? { x: a.x, y: a.y } : (w.ends?.a ?? w.curve.start), b: b ? { x: b.x, y: b.y } : (w.ends?.b ?? w.curve.segs.at(-1).to), key: `${a?.group.key ?? ''}|${b?.group.key ?? ''}` };
     };
     this.groupEndsOf ??= new WeakMap();
     this.groupEndsOf.set(layout, ends);
@@ -1080,7 +1102,7 @@ export class SignalSchematic extends HTMLElement {
   controlElement(level, node, baked, text) {
     const m = baked.m;
     const writer = node.outs.length > 0;
-    const group = el('g', { class: `node control ${writer ? 'writer' : 'reader'} ${node.type}` });
+    const group = el('g', { class: `node control ${writer ? 'writer' : 'reader'} ${node.type}${node.via ? ' via' : ''}` });
     group.dataset.address = node.binds[0]?.address ?? '';
     group.dataset.label = node.name;
     group.dataset.part = 'schematic';
@@ -1184,6 +1206,11 @@ export class SignalSchematic extends HTMLElement {
       group.append(el('text', { ...attributes, x: at.x, y: at.y, 'font-size': size * m }, content));
     };
     rect(node, { class: 'box', rx: 4 * m });
+    // ADR 0047 §7: a chip is a package: a notch at its top, its pins short legs on its edges.
+    if (node.kind === 'instance' && !isOpen && text(9)) {
+      const c = bakedPoint(baked, { x: node.x + node.w / 2, y: node.y });
+      group.append(el('circle', { class: 'notch', cx: c.x, cy: c.y, r: 4 * m }));
+    }
     // 2026-10-30: a closed slot's face, its part as on the panel, over this area (ui/controls/schematic-faces.js).
     if (node.face && !isOpen && node.kind === 'instance') {
       const f = node.face;
@@ -1239,7 +1266,9 @@ export class SignalSchematic extends HTMLElement {
       const reason = slotted ? unmatchedReason(slotted, pin.name) : null;
       // ADR 0037, editable insides: a slot inside's frame pin not wired inside yet is hollow too.
       const loose = node.kind !== 'instance' && pin.unmatched;
-      const kind = ['pin', pin.shape, pin.parameter ? 'parameter' : '', pin.connected ? 'connected' : '', reason || loose ? 'unmatched' : ''].filter(Boolean).join(' ');
+      const kind = ['pin', pin.shape, pin.parameter ? 'parameter' : '', pin.connected ? 'connected' : '', reason || loose ? 'unmatched' : '', this.board?.hiddenKind(pin.shape) ? 'kind-hidden' : ''].filter(Boolean).join(' ');
+      // ADR 0047 §7: a package's leg, outside its edge.
+      if (node.kind === 'instance' && !isOpen && !anchors && text(9)) rect({ x: out ? pin.x : pin.x - 5, y: pin.y - 1.5, w: 5, h: 3 }, { class: 'leg' });
       // Not `label`: that is the drawing helper above, which the pin labels below call.
       const tip = reason ? `${pin.name}: unmatched, ${reason}` : loose ? `${pin.name}: not wired inside yet` : pin.name;
       const data = { class: kind, 'data-address': portAddress, 'data-direction': pin.direction, 'data-label': tip, 'data-part': 'schematic' };
@@ -1286,6 +1315,16 @@ export class SignalSchematic extends HTMLElement {
     const at = bakedRect(baked, face);
     if (at) group.append(el('rect', { class: 'face-back', rx: 6 * baked.m, ...at }));
     return group;
+  }
+
+  /** The plate measured again, or the arrangement switched (ADR 0047 §5): the board laid out again, what did not move kept on screen. */
+  relayoutTop() {
+    this.facesResized();
+  }
+
+  /** The device view's state changed (a layer, a kind): drawn again. */
+  redrawAll() {
+    this.schedule();
   }
 
   /** The faces' content changed size (a part read, a skin loaded): laid out again at the measured sizes, what did not move kept on screen. */
@@ -1562,11 +1601,18 @@ export class SignalSchematic extends HTMLElement {
       this.editor.addPort(plus.dataset.address, plus.dataset.addPin);
       return;
     }
+    // ADR 0047 §6.3: a net's label traces the net.
+    const net = event.target?.closest?.('[data-net-wire]');
+    if (net && this.traceNet(Number(net.dataset.netWire))) {
+      event.preventDefault();
+      return;
+    }
     // Another press while one is held: the first is let go, as cancelled.
     if (this.gesture) this.cancelGesture();
     this.focus({ preventScroll: true });
     const at = this.point(event);
-    const hit = hitTest(this.drawn, at);
+    // ADR 0047 §5: under the opaque plate the board is not hit (a press there pans).
+    const hit = this.hitAt(at);
     this.svg.setPointerCapture?.(event.pointerId);
     // Shift or ⌘ adds to the selection or takes out of it.
     const additive = event.shiftKey || event.metaKey || (!MAC && event.ctrlKey);
@@ -1594,7 +1640,8 @@ export class SignalSchematic extends HTMLElement {
     // (a push, a zoom) may replace the group or close the level. A box of
     // a group selected moves the group's boxes of its level with it.
     // A panel control has no position of its own: a drag of it moves its host, which it rides beside (ui/lib/schematic-controls.js).
-    const dragged = hit.kind === 'control' ? this.controlHost(hit) : hit;
+    // ADR 0047 §5: a via is where its control is on the plate: it does not move, a drag of it pans.
+    const dragged = hit.kind === 'control' ? (hit.node.via ? null : this.controlHost(hit)) : hit;
     const k = dragged?.kind === 'instance' ? this.levelOf(dragged.path)?.transform.k : undefined;
     // A drag moves a box of the level edited; in Edit patch a box around it
     // is held (not moved, said so); anything else pans: empty space, an open
@@ -1605,6 +1652,20 @@ export class SignalSchematic extends HTMLElement {
     const held = action === 'hold';
     // The press's own part (`clicked`) is what a click selects; `hit` is what a drag moves.
     this.gesture = { ...base, hit: follow || held ? dragged : hit, clicked: hit, k, follow, held };
+  }
+
+  /** What is at screen point `at`: under the opaque plate (ADR 0047 §5) the background, else the drawing's hit. */
+  hitAt(at) {
+    return this.board?.covered ? { kind: 'background', path: '', level: '' } : hitTest(this.drawn, at);
+  }
+
+  /** A labelled net's wire `id` of the top level traced (ADR 0047 §6.3): whether there was one. */
+  traceNet(id) {
+    const entry = this.levelOf('');
+    const wire = entry?.layout.wires.find((w) => w.id === id);
+    if (!wire) return false;
+    this.startTrace(wireHit(entry, wire));
+    return true;
   }
 
   /** The instance hit of control `hit`'s host box, at its level; null when it is not laid out. */
@@ -1674,13 +1735,13 @@ export class SignalSchematic extends HTMLElement {
     this.gesture = null;
     const at = this.point(event);
     if (gesture.connect && gesture.moved) {
-      this.editor.connectEnd(hitTest(this.drawn, at));
+      this.editor.connectEnd(this.hitAt(at));
       return;
     }
     if (gesture.connect) this.editor.cancelConnect();
     if (gesture.close) {
       // Let go on its × still (a press slid off it does nothing).
-      const over = gesture.moved ? hitTest(this.drawn, at) : gesture.hit;
+      const over = gesture.moved ? this.hitAt(at) : gesture.hit;
       if (over.kind === 'close' && over.address === gesture.hit.address) {
         this.closeInPlace(gesture.hit.address);
         this.lastToggle = { at, time: event.timeStamp };
@@ -1817,7 +1878,7 @@ export class SignalSchematic extends HTMLElement {
 
   hover(at) {
     if (!this.drawn) return;
-    const hit = hitTest(this.drawn, at);
+    const hit = this.hitAt(at);
     // An open frame's × (2026-10-22): a pointer, and its title says what it closes.
     this.svg.classList.toggle('closing', hit.kind === 'close');
     this.hoveredPort = hit.kind === 'port' ? hit : null;
@@ -1887,7 +1948,7 @@ export class SignalSchematic extends HTMLElement {
       if (last.hit) this.enter(last.hit);
       return;
     }
-    const hit = hitTest(this.drawn, this.point(event));
+    const hit = this.hitAt(this.point(event));
     // Edit patch: the Add module browser, adding where the background or an open
     // composite's inside was double-clicked.
     const level = this.editor.editing ? paletteLevel(hit, this.drawn, this.point(event)) : null;
@@ -2023,6 +2084,12 @@ export class SignalSchematic extends HTMLElement {
       event.preventDefault();
       return;
     }
+    // ADR 0047 §5: Plate, X-ray, Board in turn.
+    if (command === 'schematic.layer') {
+      event.preventDefault();
+      this.board.stepLayer();
+      return;
+    }
     // Out to the top level as its breadcrumb does, every composite closed.
     if (command === 'schematic.top_level') {
       event.preventDefault();
@@ -2063,7 +2130,7 @@ export class SignalSchematic extends HTMLElement {
     const anchored = this.keyMenu ?? (origin === this ? this.menuAnchor() : null);
     if (!anchored && origin !== this.svg && !this.svg.contains(origin)) return null;
     const point = anchored ? anchored.point : this.point(event);
-    const target = { hit: anchored ? anchored.hit : this.singleHit(partHit(this.drawn, hitTest(this.drawn, point)), point), point };
+    const target = { hit: anchored ? anchored.hit : this.singleHit(partHit(this.drawn, this.hitAt(point)), point), point };
     this.endMenu();
     this.menuState = { target, close };
     this.hoverWire(this.hovered);

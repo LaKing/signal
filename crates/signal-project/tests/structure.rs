@@ -202,6 +202,32 @@ fn studio_structure_matches_the_ui_fixture() {
     );
 }
 
+/// ADR 0047 §6 (test 5): the board's layout snapshots and budget
+/// (`ui/lib/board.test.js`) read these projects' structures as `graph`
+/// gives them (`ui/lib/fixtures/board/<project>.json`; the studio's is
+/// `studio-graph.json` above): copies that cannot drift. Written again with
+/// `SIGNAL_WRITE_UI_FIXTURE=1`, as that one is.
+#[test]
+fn board_structures_match_the_ui_fixtures() {
+    for project in ["kick", "studio-transport", "physical-av", "library-demo"] {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../ui/lib/fixtures/board")
+            .join(format!("{project}.json"));
+        let s = structure(project);
+        if std::env::var_os("SIGNAL_WRITE_UI_FIXTURE").is_some() {
+            std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
+            std::fs::write(&fixture, serde_json::to_string(&s).unwrap() + "\n").unwrap();
+        }
+        let text = std::fs::read_to_string(&fixture).unwrap_or_default();
+        let written: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        assert!(
+            written == s,
+            "{} differs from {project}'s structure; write it again with SIGNAL_WRITE_UI_FIXTURE=1",
+            fixture.display()
+        );
+    }
+}
+
 /// M2.13-2 (`docs/ui-protocol.md` "graph"): a composite's exports carry
 /// `order`, their place in the file among their kind (`graph` lists them by
 /// name), for the schematic's port groups.

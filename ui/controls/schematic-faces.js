@@ -21,6 +21,7 @@ import { layOutCards } from './plate.js';
 import { parsePlate } from '../lib/plate.js';
 import { FACE_LAYOUT_PX, estimateFace, faceAttribute, faceFit, facePlacement, faceWidth, lit, measuredNatural, overlapping, rootRules, stylesheets } from '../lib/schematic-face.js';
 import { screenRect } from '../lib/schematic-view.js';
+import { PLATE_FACE, PLATE_FACE_CSS, PLATE_FILE } from './schematic-board.js';
 
 /** The theme every panel links (ui/controls/theme.css). */
 const THEME = new URL('./theme.css', import.meta.url).href;
@@ -47,7 +48,7 @@ const FACE_CSS = `
 .face-note:empty { display: none; }
 /* A face control bound to the wire or pin under the pointer or selected. */
 [data-face-hot] { outline: 2px solid var(--signal-focus, #5aa9ff); outline-offset: 3px; border-radius: 6px; }
-`;
+${PLATE_FACE_CSS}`;
 
 /** Whether `event` is on one of a face's controls (a signal-* element other than the face's own). */
 function onControl(event) {
@@ -79,6 +80,19 @@ export class SchematicFaces {
     this.hot = new Set();
     this.base = pageBase();
     this.resize = typeof ResizeObserver === 'function' ? new ResizeObserver((entries) => this.resized(entries)) : null;
+    /** ADR 0047 §5: the plate face's own classes (its layer). */
+    this.plateClass = '';
+  }
+
+  /** The plate face's layer classes (ui/controls/schematic-board.js), applied at once. */
+  setPlateClass(classes) {
+    if (classes === this.plateClass) return;
+    this.plateClass = classes;
+    const face = this.faces.get(PLATE_FACE);
+    if (!face) return;
+    const base = face.classes.replace(/ plate.*$/, '');
+    face.classes = `${base}${classes}`;
+    face.element.className = face.classes;
   }
 
   /** Another project: every face and part let go. */
@@ -124,7 +138,9 @@ export class SchematicFaces {
   /** A `panel.written` push: a part written (or removed: `html` null) shows at once in its faces. */
   written(message) {
     const file = message?.file;
-    if (typeof file !== 'string' || !file.startsWith('parts/')) return;
+    if (typeof file !== 'string' || !(file.startsWith('parts/') || file === PLATE_FILE)) return;
+    // The main panel's push carries its content (`html`) as a part's does; its plate too.
+    if (file === PLATE_FILE && typeof message.html !== 'string') return;
     this.parts.set(file, { html: message.html ?? null, base: message.base ?? null, plate: message.plate ?? null, error: null, reading: false });
     for (const face of this.faces.values()) if (face.file === file) this.render(face);
   }
@@ -261,6 +277,11 @@ export class SchematicFaces {
   measure(faces) {
     let changed = false;
     for (const face of faces) {
+      // ADR 0047 §5: the plate is measured for its vias, not sized as a slot's face.
+      if (face.id === PLATE_FACE) {
+        this.host.board?.measurePlate(face);
+        continue;
+      }
       const box = face.panel.getBoundingClientRect?.();
       const scale = box?.width > 0 ? box.width / (face.layoutWidth || FACE_LAYOUT_PX) : 0;
       if (!scale) continue;
@@ -319,9 +340,12 @@ export class SchematicFaces {
       }
       const place = facePlacement(rect, Number(area.dataset.nw) || FACE_LAYOUT_PX);
       const frame = frames.get(path);
-      const covered = Boolean(frame && slot !== frame.name && overlapping(rect, frame.rect));
-      const shown = Boolean(place) && !covered && overlapping(rect, view);
-      const classes = `face${shown ? ' shown' : ''}${frame && !covered && slot !== frame.name ? ' around' : ''}`;
+      // The plate (ADR 0047 §5) lies over the whole board: an open frame neither covers nor dims it.
+      const plate = id === PLATE_FACE;
+      const covered = Boolean(!plate && frame && slot !== frame.name && overlapping(rect, frame.rect));
+      // Under the opaque plate the board's faces are hidden with it.
+      const shown = Boolean(place) && !covered && overlapping(rect, view) && (plate || !this.host.board?.covered);
+      const classes = `face${shown ? ' shown' : ''}${!plate && frame && !covered && slot !== frame.name ? ' around' : ''}${plate ? this.plateClass : ''}`;
       if (face.classes !== classes) {
         face.element.className = classes;
         face.classes = classes;
