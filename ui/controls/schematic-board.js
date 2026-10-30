@@ -67,11 +67,13 @@ svg.layer-plate > g > :not(.plate-layer) { opacity: 0; pointer-events: none; }
 
 /** The plate face's own CSS (in its shadow root, beside the faces'): its layers. */
 export const PLATE_FACE_CSS = `
-/* ADR 0047 §5: X-ray and Board keep only the plate's controls (whole); the cards are the drawing's ghosts. */
-:host(.plate.layer-xray) .face-panel, :host(.plate.layer-board) .face-panel { visibility: hidden; }
-:host(.plate.layer-xray) .face-panel .signal-cards > *, :host(.plate.layer-board) .face-panel .signal-cards > * { pointer-events: none; }
-:host(.plate.layer-xray) .face-panel [bind], :host(.plate.layer-board) .face-panel [bind] { visibility: visible; pointer-events: auto; }
-:host(.plate.layer-xray) .face-panel signal-slot[bind], :host(.plate.layer-board) .face-panel signal-slot[bind] { visibility: hidden; pointer-events: none; }
+/* ADR 0047 §5: X-ray keeps only the plate's controls (whole); the cards are the drawing's ghosts. Board shows none of the plate: its vias are the drawing's pads. */
+:host(.plate.layer-xray) .face-panel { visibility: hidden; }
+:host(.plate.layer-xray) .face-panel .signal-cards > * { pointer-events: none; }
+:host(.plate.layer-xray) .face-panel [bind] { visibility: visible; pointer-events: auto; }
+:host(.plate.layer-xray) .face-panel signal-slot[bind] { visibility: hidden; pointer-events: none; }
+:host(.plate.layer-board) { opacity: 0; pointer-events: none; }
+:host(.plate.layer-board) .face-panel * { pointer-events: none !important; }
 :host(.plate.lifting) { animation: plate-lift ${LIFT_MS}ms ease-out; }
 @keyframes plate-lift { from { opacity: 0.4; translate: 0 -6px; } to { opacity: 1; translate: 0 0; } }
 @media (prefers-reduced-motion: reduce) { :host(.plate.lifting) { animation: none; } }
@@ -255,6 +257,7 @@ export class SchematicBoard {
       byKey.set(`${key}\n${n}`, c);
     }
     const elements = controlElements(face.panel);
+    this.watchPlate(face, elements);
     // Each control of the text finds its element: the `occurrence`-th of its tag and bind.
     const seen = new Map();
     const found = new Map();
@@ -283,6 +286,37 @@ export class SchematicBoard {
     if (whole === this.plate.key) return;
     this.plate = { size, vias, obstacles, cards, key: whole };
     this.host.relayoutTop?.();
+  }
+
+  /**
+   * The plate measured again whenever one of its controls or cards changes
+   * size or a style sheet of its face loads (a piano roll laid out late, the
+   * project's CSS): the vias are the controls as the page draws them now.
+   */
+  watchPlate(face, elements) {
+    const View = face.panel.ownerDocument?.defaultView ?? globalThis;
+    if (!this.sizes && View.ResizeObserver) this.sizes = new View.ResizeObserver(() => this.scheduleMeasure(face));
+    if (this.sizes && this.watched !== face.panel) {
+      this.watched = face.panel;
+      for (const link of face.shadow?.querySelectorAll?.('link') ?? []) link.addEventListener('load', () => this.scheduleMeasure(face));
+    }
+    if (!this.sizes) return;
+    const all = [...elements, ...(face.panel.querySelectorAll?.('.signal-cards > *') ?? [])];
+    const key = all.length;
+    if (this.watchedCount === key && this.watchedPanel === face.panel) return;
+    this.watchedCount = key;
+    this.watchedPanel = face.panel;
+    this.sizes.disconnect();
+    for (const element of all) this.sizes.observe(element);
+  }
+
+  scheduleMeasure(face) {
+    if (this.measuring) return;
+    this.measuring = true;
+    requestAnimationFrame(() => {
+      this.measuring = false;
+      this.measurePlate(face);
+    });
   }
 
   /** The panel's controls read again (`panelSeen`): the plate drawn now is measured for them. */

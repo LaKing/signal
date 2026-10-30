@@ -227,6 +227,56 @@ test('buses (§6.4): zoomed out, a board’s pair of wires is one bus with its c
   for (const w of b.wires.filter((x) => x.labelled)) assert.ok(items.includes(w), 'a labelled wire on its own');
 });
 
+/**
+ * A plate as tall as the studio's measured one: MONO SYNTH's knobs in rows,
+ * its piano roll (a control of no instance: an obstacle, no via) under
+ * them, the whole width; RHYTHM COMPOSER and the rest below it, densely.
+ */
+function tallPlate(controls) {
+  const vias = new Map();
+  const obstacles = [];
+  const synth = controls.filter((c) => /^\/synth[./]/.test(c.binds[0] ?? ''));
+  const rest = controls.filter((c) => !synth.includes(c));
+  synth.forEach((c, i) => {
+    const r = { x: 24 + (i % 14) * 88, y: 48 + Math.floor(i / 14) * 112, w: 64, h: 104 };
+    vias.set(c.index, r);
+    obstacles.push(r);
+  });
+  const roll = { x: 24, y: 48 + Math.ceil(synth.length / 14) * 112 + 8, w: 1232, h: 320 };
+  obstacles.push(roll);
+  const top = roll.y + roll.h + 56;
+  rest.forEach((c, i) => {
+    const r = { x: 24 + (i % 13) * 96, y: top + Math.floor(i / 13) * 120, w: 72, h: 104 };
+    vias.set(c.index, r);
+    obstacles.push(r);
+  });
+  return { vias, obstacles, plate: { w: 1280, h: top + Math.ceil(rest.length / 13) * 120 + 24 } };
+}
+
+test('no chip lies over a control as measured (§5), on a plate as tall as the studio’s, a stored position from before the board included', () => {
+  const { graph, controls, factsOf } = project('studio');
+  const plate = tallPlate(controls);
+  // A stored position over the drum knobs (written by the curved layout) is moved off them on the board.
+  const over = plate.vias.get(controls.find((c) => /^\/kick\./.test(c.binds[0] ?? '')).index);
+  for (const positions of [{}, { kick: { x: over.x, y: over.y } }]) {
+    for (const arrange of ['controls', 'flow']) {
+      const b = layout(graph.top, positions, { factsOf, controls, board: { arrange, ...plate } });
+      const chips = b.nodes.filter((n) => n.kind !== 'control');
+      for (const chip of chips) {
+        for (const o of plate.obstacles) {
+          const hit = chip.x < o.x + o.w && o.x < chip.x + chip.w && chip.y < o.y + o.h && o.y < chip.y + chip.h;
+          assert.ok(!hit, `${arrange}: ${chip.id} at ${chip.x},${chip.y} over a control at ${o.x},${o.y}`);
+        }
+        for (const other of chips) {
+          if (other === chip) continue;
+          const hit = chip.x < other.x + other.w && other.x < chip.x + chip.w && chip.y < other.y + other.h && other.y < chip.y + chip.h;
+          assert.ok(!hit, `${arrange}: ${chip.id} over ${other.id}`);
+        }
+      }
+    }
+  }
+});
+
 test('vias (§5): a small pad at its control’s middle; a chip’s legs drawn all or none; the stand-in plate’s board crosses little', () => {
   const b = boardOf('studio', 'controls');
   const vias = b.nodes.filter((n) => n.kind === 'control');

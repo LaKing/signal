@@ -14,7 +14,7 @@ import { wireGeometry } from './schematic-wire.js';
 import { exportFacts, orderedPins, portGroups } from './schematic-groups.js';
 import { VIA_ROW, VIA_W, controlAnchor, controlEdges, controlNodes, controlPads } from './schematic-controls.js';
 import { frameFace, placeFace } from './schematic-face.js';
-import { balance, placeAnchored, sugiyama } from './board-layout.js';
+import { CLEARANCE, balance, near, placeAnchored, placeNear, sugiyama } from './board-layout.js';
 import { orthGeometry, routeWires, zCorners } from './board-route.js';
 
 /**
@@ -617,6 +617,26 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
         }
       }
       placed.push(rectOf(node));
+    }
+  }
+  // Last, no chip lies over a control of the plate (ADR 0047 §5), whatever placed it (a stored position
+  // from before the board, a column of the layered layout): it moves to the nearest free spot of the
+  // spiral from where it is; a stored position stays in the file as written.
+  const controlsRects = [...(board.obstacles ?? []), ...panel.map((c) => c.control.rect)];
+  if (controlsRects.length) {
+    const kept = [];
+    for (const node of nodes) {
+      const over = (o) => near(node, o, CLEARANCE - 1);
+      if (controlsRects.some(over) || kept.some(over)) {
+        const at = placeNear(node, node, [...controlsRects, ...kept]);
+        if (at) {
+          node.x = at.x;
+          node.y = at.y;
+          moved.add(node.id);
+          node.cleared = true;
+        }
+      }
+      kept.push(rectOf(node));
     }
   }
   for (const c of panel) {

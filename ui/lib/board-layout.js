@@ -369,8 +369,17 @@ export function placeAnchored(chip, vias, obstacles) {
   }
   cx /= vias.length;
   cy /= vias.length;
-  const x0 = Math.round((cx - chip.w / 2) / PU) * PU;
-  const y0 = Math.round((cy - chip.h / 2) / PU) * PU;
+  return placeNear(chip, { x: cx - chip.w / 2, y: cy - chip.h / 2 }, obstacles);
+}
+
+/**
+ * Chip `chip` (`{w, h}`) at the first spot of the fixed spiral from `at`
+ * (its top-left, snapped to whole plate units) that comes within
+ * CLEARANCE of none of `obstacles`: `{x, y}`, or null within SPIRAL_RINGS.
+ */
+export function placeNear(chip, at0, obstacles) {
+  const x0 = Math.round(at0.x / PU) * PU;
+  const y0 = Math.round(at0.y / PU) * PU;
   for (let r = 0; r <= SPIRAL_RINGS; r++) {
     for (const [dx, dy] of ring(r)) {
       const at = { x: x0 + dx * PU, y: y0 + dy * PU, w: chip.w, h: chip.h };
