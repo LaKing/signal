@@ -70,3 +70,39 @@ test("no control assigns an element's own `part` or `slot`", () => {
     assert.doesNotMatch(source, /\bthis\.(part|slot)\s*=[^=]/, file);
   }
 });
+
+// The operator's second check (2026-10-30): the card was attached while its
+// connection was connecting, its read refused (`closed`) and shown as the
+// part's error, the generic knobs drawn. A read refused so is made again
+// once the connection opens; any other failure is said, never hidden.
+test('the part is read once the connection opens; a failure is said, not hidden by the knobs', async () => {
+  const listeners = new Map();
+  const connection = {
+    status: 'connecting',
+    description: null,
+    on: (event, fn) => {
+      listeners.set(event, fn);
+      return () => {};
+    },
+    request: async (message) => {
+      if (connection.status !== 'open') throw Object.assign(new Error('connection closed'), { code: 'closed' });
+      if (connection.fail) throw Object.assign(new Error('the disk is gone'), { code: 'unknown' });
+      return { type: 'panel.read', file: message.file, exists: true, editable: true, html: '\n  <div class="signal-cards"></div>\n' };
+    },
+  };
+  const slot = new SignalSlot();
+  const attributes = new Map([['bind', '/echo']]);
+  Object.assign(slot, { getAttribute: (n) => attributes.get(n) ?? null, setAttribute: (n, v) => attributes.set(n, String(v)) });
+  slot.showPart = async () => {};
+  slot.attach(connection);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(slot.partState, null, 'not read while connecting');
+  connection.status = 'open';
+  listeners.get('status')('open');
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(slot.partState.exists, true, 'read once open');
+  connection.fail = true;
+  slot.partState = null;
+  await slot.readPart(connection);
+  assert.match(slot.partState.error, /the disk is gone/);
+});

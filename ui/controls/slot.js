@@ -88,6 +88,7 @@ ${BROWSER_CSS}`;
     this.partState = null;
     this.folded = false;
     this.partEditor = null;
+    this.partReading = false;
     this.partCheck = null;
     this.marked = [];
     /** For the panel editor (ui/controls/panel-editor.js): this element edits a part. */
@@ -199,6 +200,8 @@ ${BROWSER_CSS}`;
     this.description = description;
     this.card = slotCard(description, this.slotName);
     this.update();
+    // Described means open: a part not read yet (or whose read the connection dropped) is read now.
+    if (this.partState === null && !this.partReading) this.readPart();
     if (this.partState?.exists && this.partCheck && this.file) this.partCheck.described(description, this.file);
   }
 
@@ -209,8 +212,18 @@ ${BROWSER_CSS}`;
       request: (message) => connection.request(message),
       show: (reply, error) => this.partChecked(reply, error),
     });
-    if (connection.on) stops.push(connection.on('panel.written', (message) => this.partWritten(message)));
-    if (!this.partEditor?.editing) this.readPart(connection);
+    if (connection.on) {
+      stops.push(connection.on('panel.written', (message) => this.partWritten(message)));
+      // A request before the connection is open is refused (`closed`): the
+      // part is read once it opens (the operator's check, 2026-10-30: a page
+      // attached its controls while connecting, and its read failed).
+      stops.push(
+        connection.on('status', (status) => {
+          if (status === 'open' && !this.partEditor?.editing) this.readPart(connection);
+        }),
+      );
+    }
+    if (connection.status === undefined || connection.status === 'open') this.readPart(connection);
     return stops;
   }
 
@@ -224,15 +237,28 @@ ${BROWSER_CSS}`;
   /** Reads the part (`panel.read`) and shows it; none, the slot card as before. */
   async readPart(connection = this.connection) {
     const file = this.file;
-    if (!file || !connection?.request) return;
+    if (this.partEditor?.editing || !file) return;
+    // A connection that reads no file (the gallery's): no part, the card as before.
+    if (!connection?.request) {
+      this.partState = { exists: false, html: null, error: null };
+      this.update();
+      return;
+    }
     let read;
+    this.partReading = true;
     try {
       read = await connection.request({ type: 'panel.read', file });
     } catch (error) {
-      // No part (`unknown-panel` for a slot the server does not know yet): the card as before.
+      // The connection dropped (or was not open yet): not read; again when it opens.
+      if (error?.code === 'closed') return;
+      // No part (`unknown-panel` for a slot the server does not know yet):
+      // the card as before; any other failure is said, not hidden by the
+      // interface's knobs.
       this.partState = { exists: false, html: null, error: error?.code === 'unknown-panel' ? null : (error?.message ?? String(error)) };
       this.showPart();
       return;
+    } finally {
+      this.partReading = false;
     }
     if (file !== this.file) return;
     this.partState = { exists: Boolean(read?.exists), html: read?.html ?? null, error: read?.exists && !read?.editable ? read.reason : null };
@@ -384,7 +410,9 @@ ${BROWSER_CSS}`;
     unload.disabled = card.empty || Boolean(this.busy);
     if (!this.hasAttribute('aria-label')) this.setAttribute('aria-label', `slot ${card.name}`);
     // ADR 0046 §5: with a part, its controls are the part's; without, the interface's knobs.
-    const withPart = Boolean(this.partState?.exists);
+    // The interface's knobs only once it is known that the slot has no part:
+    // not while its part is read, nor when reading it failed (said above).
+    const withPart = this.partState === null || Boolean(this.partState.exists) || Boolean(this.partState.error);
     const key = JSON.stringify([card, withPart]);
     if (key === this.shownKey) return;
     this.shownKey = key;

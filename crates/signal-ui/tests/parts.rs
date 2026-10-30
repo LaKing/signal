@@ -686,3 +686,87 @@ fn a_parts_binds_are_checked_inside_its_slot() {
     assert!(main[0].1.contains("only a slot's part"), "{main:?}");
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// The page's script: the panel's own modules (`ui/signal-ui.js`, the slot
+/// card) against the server at `url`, the card attached while the
+/// connection is still connecting, as `<signal-panel>` makes it the
+/// default connection at once; what the card read of its part, as JSON.
+const PAGE: &str = r#"
+globalThis.HTMLElement = class {
+  constructor() { this.attributesMap = new Map(); }
+  attachShadow() { this.shadowRoot = { querySelector: () => null, append() {}, firstChild: null }; return this.shadowRoot; }
+  getAttribute(n) { return this.attributesMap.get(n) ?? null; }
+  setAttribute(n, v) { this.attributesMap.set(n, String(v)); }
+  hasAttribute(n) { return this.attributesMap.has(n); }
+  addEventListener() {}
+};
+globalThis.customElements = { get: () => undefined, define: () => {} };
+const [ui, url, token] = process.argv.slice(2);
+const { connect } = await import(`${ui}/signal-ui.js`);
+const { SignalSlot } = await import(`${ui}/controls/slot.js`);
+const connection = connect({ url, token, backoff: [100] });
+const slot = new SignalSlot();
+slot.setAttribute('bind', '/echo');
+let html = null;
+slot.showPart = async () => { html = slot.partState?.html ?? null; };
+slot.attach(connection);
+const status = connection.status;
+const until = Date.now() + 15000;
+while (Date.now() < until && !slot.partState) await new Promise((r) => setTimeout(r, 50));
+console.log(JSON.stringify({ attachedWhile: status, part: slot.partState, html }));
+process.exit(0);
+"#;
+
+/// The operator's visual check (2026-10-30): the open slot card of a slot
+/// grouped through `patch` reads its part over a real server with the
+/// page's own modules, though it is attached before the connection opens
+/// (the read is made once it is open, never refused as `closed`).
+#[test]
+fn the_page_reads_its_part_from_a_real_server() {
+    let mut rig = studio("parts-page", Transport::Tcp);
+    let (mut ws, _) = rig.client();
+    patch(
+        &mut rig,
+        &mut ws,
+        1,
+        json!([{"op": "slot.group", "instance": "echo"}]),
+    );
+    let script = rig.dir.parent().unwrap().join("page.mjs");
+    fs::write(&script, PAGE).unwrap();
+    let url = format!("ws://{}/", rig.host().ws_addr());
+    let token = rig.host().token().to_owned();
+    let ui = format!(
+        "file://{}",
+        root().join("ui").canonicalize().unwrap().display()
+    );
+    let mut child = match std::process::Command::new("node")
+        .arg(&script)
+        .args([&ui, &url, &token])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipping: node is not on PATH");
+            rig.finish();
+            return;
+        }
+        Err(error) => panic!("node did not run: {error}"),
+    };
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while child.try_wait().unwrap().is_none() && std::time::Instant::now() < until {
+        rig.pump();
+    }
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let read: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|_| panic!("{stdout}\n{}", String::from_utf8_lossy(&output.stderr)));
+    assert_eq!(read["attachedWhile"], "connecting", "{read}");
+    assert_eq!(read["part"]["exists"], true, "{read}");
+    assert_eq!(read["part"]["error"], Value::Null, "{read}");
+    let html = read["html"].as_str().unwrap();
+    assert!(html.contains("bind=\".time_ms\""), "{html}");
+    assert!(html.contains("<h2>TAPE ECHO</h2>"), "{html}");
+    rig.finish();
+}
