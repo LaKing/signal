@@ -1282,7 +1282,7 @@ export class SignalSchematic extends HTMLElement {
     const group = el('g', { class: 'face-area' });
     const a = bakedPoint(baked, { x: face.x, y: face.y });
     const b = bakedPoint(baked, { x: face.x + face.w, y: face.y + face.h });
-    Object.assign(group.dataset, { face: id, file: face.file, path, slot, root, base, error: face.error ?? '', x0: a.x, y0: a.y, x1: b.x, y1: b.y });
+    Object.assign(group.dataset, { face: id, file: face.file, path, slot, root, base, error: face.error ?? '', x0: a.x, y0: a.y, x1: b.x, y1: b.y, nw: face.natural?.w ?? '' });
     const at = bakedRect(baked, face);
     if (at) group.append(el('rect', { class: 'face-back', rx: 6 * baked.m, ...at }));
     return group;

@@ -17,7 +17,7 @@
 // and pans the box as on its title); on a control it is the control's.
 
 import { showWritten } from './panel-editor.js';
-import { FACE_W, estimateFace, faceAttribute, facePlacement, lit, measuredHeight, overlapping, stylesheets } from '../lib/schematic-face.js';
+import { FACE_LAYOUT_PX, estimateFace, faceAttribute, faceFit, facePlacement, lit, measuredNatural, overlapping, rootRules, stylesheets } from '../lib/schematic-face.js';
 import { screenRect } from '../lib/schematic-view.js';
 
 /** The theme every panel links (ui/controls/theme.css). */
@@ -34,7 +34,9 @@ function pageBase() {
 }
 
 const FACE_CSS = `
-:host { position: absolute; left: 0; top: 0; width: ${FACE_W}px; box-sizing: border-box; transform-origin: 0 0; pointer-events: auto; visibility: hidden; contain: layout style; }
+/* Laid out as wide as a panel window, then scaled down whole to its box: a miniature of the panel, never a reflow. Only its cards take the pointer: between them it is the drawing's. */
+:host { position: absolute; left: 0; top: 0; width: ${FACE_LAYOUT_PX}px; box-sizing: border-box; transform-origin: 0 0; pointer-events: none; visibility: hidden; contain: layout style; }
+.face-panel .signal-cards > *, .face-note { pointer-events: auto; }
 :host(.shown) { visibility: visible; }
 /* Around an open frame its level is dimmed (as its boxes are). */
 :host(.around) { opacity: 0.4; }
@@ -65,11 +67,13 @@ export class SchematicFaces {
     this.faces = new Map();
     /** Each part's text as read: file → `{html, base, error, reading}`. */
     this.parts = new Map();
-    /** Each part's measured size, by file (`{w, h}`, layout units), and the sizes the layout used. */
+    /** Each part's measured natural size, by file (`{w, h}`, CSS px at FACE_LAYOUT_PX), and the sizes the layout used (`w×h`). */
     this.sizes = new Map();
     this.used = new Map();
     /** The project panel's style sheets (`stylesheets`), and the addresses lit. */
     this.sheets = [THEME];
+    /** The project sheets' page-wide rules made the faces' own (`rootRules`). */
+    this.rootCss = '';
     this.hot = new Set();
     this.base = pageBase();
     this.resize = typeof ResizeObserver === 'function' ? new ResizeObserver((entries) => this.resized(entries)) : null;
@@ -90,13 +94,29 @@ export class SchematicFaces {
     if (sheets.join('\n') === this.sheets.join('\n')) return;
     this.sheets = sheets;
     for (const face of this.faces.values()) this.style(face);
+    this.readRoots(sheets.filter((s) => s !== THEME));
+  }
+
+  /** The project sheets' `:root` and `body` rules (its card width, its font), fetched once per list, as every face's. */
+  readRoots(sheets) {
+    if (typeof fetch !== 'function' || !sheets.length) return;
+    const asked = (this.rootsAsked = sheets.join('\n'));
+    Promise.all(sheets.map((href) => fetch(href).then((r) => (r.ok ? r.text() : ''), () => '')))
+      .then((texts) => {
+        if (asked !== this.rootsAsked) return;
+        const css = texts.map(rootRules).filter(Boolean).join('\n');
+        if (css === this.rootCss) return;
+        this.rootCss = css;
+        for (const face of this.faces.values()) face.roots.textContent = css;
+      })
+      .catch(() => {});
   }
 
   /** The size the layout gives face `face` (`levelFaces`'): measured, else estimated. */
   sizeOf(face) {
-    const size = this.sizes.get(face.file) ?? estimateFace(face.count);
-    this.used.set(face.file, size.h);
-    return size;
+    const natural = this.sizes.get(face.file) ?? estimateFace(face.count);
+    this.used.set(face.file, `${natural.w}x${natural.h}`);
+    return faceFit(natural);
   }
 
   /** A `panel.written` push: a part written (or removed: `html` null) shows at once in its faces. */
@@ -139,6 +159,8 @@ export class SchematicFaces {
     const shadow = element.attachShadow({ mode: 'open' });
     const style = document.createElement('style');
     style.textContent = FACE_CSS;
+    const roots = document.createElement('style');
+    roots.textContent = this.rootCss;
     const links = document.createElement('div');
     links.className = 'face-sheets';
     links.hidden = true;
@@ -146,8 +168,8 @@ export class SchematicFaces {
     note.className = 'face-note';
     const panel = document.createElement('div');
     panel.className = 'face-panel';
-    shadow.append(links, style, note, panel);
-    const face = { id, file, root, error, element, shadow, links, note, panel, shownHtml: undefined, placed: '', classes: '' };
+    shadow.append(links, style, roots, note, panel);
+    const face = { id, file, root, error, element, shadow, links, roots, note, panel, shownHtml: undefined, placed: '', classes: '' };
     this.style(face);
     // On a control the control's; elsewhere the drawing's, as on the box under it.
     element.addEventListener('pointerdown', (event) => {
@@ -209,6 +231,8 @@ export class SchematicFaces {
     const error = await showWritten(face.panel, html, (name, value) => faceAttribute(name, value, face.root, this.base));
     if (error && face.note.textContent === '') face.note.textContent = `${face.file}: ${error}`;
     this.lightFace(face);
+    // Its cards' width as drawn now (a card's width changes no height the observer sees).
+    this.measure([face]);
   }
 
   drop(face) {
@@ -216,18 +240,36 @@ export class SchematicFaces {
     face.element.remove();
   }
 
-  /** A face's content changed size: its part's height measured again, the drawing laid out again when it differs from what the layout used. */
+  /** A face's content changed size: its part measured again. */
   resized(entries) {
+    this.measure([...this.faces.values()].filter((f) => entries.some((e) => e.target === f.panel)));
+  }
+
+  /**
+   * The natural size of `faces`' parts (CSS px, at FACE_LAYOUT_PX): its
+   * height, and its cards' extent across (screen rectangles over the
+   * face's own scale, so any transform holds); the drawing laid out again
+   * when one differs from what the layout used.
+   */
+  measure(faces) {
     let changed = false;
-    for (const entry of entries) {
-      const face = [...this.faces.values()].find((f) => f.panel === entry.target);
-      if (!face) continue;
-      const h = measuredHeight(face.panel.offsetHeight + face.note.offsetHeight);
-      if (h === null) continue;
+    for (const face of faces) {
+      const box = face.panel.getBoundingClientRect?.();
+      const scale = box?.width > 0 ? box.width / FACE_LAYOUT_PX : 0;
+      if (!scale) continue;
+      let right = 0;
+      for (const grid of face.panel.children ?? []) {
+        for (const card of grid.children ?? []) {
+          const r = card.getBoundingClientRect?.();
+          if (r?.width > 0) right = Math.max(right, (r.right - box.left) / scale);
+        }
+      }
+      const natural = measuredNatural(right, face.panel.offsetHeight + face.note.offsetHeight);
+      if (!natural) continue;
       const old = this.sizes.get(face.file);
-      if (old?.h === h) continue;
-      this.sizes.set(face.file, { w: FACE_W, h });
-      if (this.used.get(face.file) !== h) changed = true;
+      if (old?.w === natural.w && old?.h === natural.h) continue;
+      this.sizes.set(face.file, natural);
+      if (this.used.get(face.file) !== `${natural.w}x${natural.h}`) changed = true;
     }
     if (changed) this.host.facesResized();
   }
@@ -268,7 +310,7 @@ export class SchematicFaces {
         const b = new DOMPoint(Number(area.dataset.x1), Number(area.dataset.y1)).matrixTransform(ctm);
         rect = { x: a.x - stage.left, y: a.y - stage.top, w: b.x - a.x, h: b.y - a.y };
       }
-      const place = facePlacement(rect);
+      const place = facePlacement(rect, Number(area.dataset.nw) || FACE_LAYOUT_PX);
       const frame = frames.get(path);
       const covered = Boolean(frame && slot !== frame.name && overlapping(rect, frame.rect));
       const shown = Boolean(place) && !covered && overlapping(rect, view);

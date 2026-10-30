@@ -15,26 +15,49 @@
 import { CHAR, GAP_Y, HEADER, PAD, ROW } from './schematic-layout.js';
 import { rootedAttribute } from './parts.js';
 
-/** A face's width in layout units, and in CSS px before the view scales it: the panel's cards are laid out at this width. */
-export const FACE_W = 400;
+/**
+ * The width (CSS px) a face's part is laid out at: a panel window's, so its
+ * cards take the layout they have on the panel (a `wide` card one wide row,
+ * its groups side by side; the coordinator's check, 2026-10-30: at 400 the
+ * studio's mono synth wrapped into a tall column). The face is then scaled
+ * down whole to its box, a miniature of the panel, never a reflow.
+ */
+export const FACE_LAYOUT_PX = 1280;
+/** A face's width in its box (layout units): at most FACE_MAX_W; the box's face column at least FACE_MIN_W. */
+export const FACE_MIN_W = 400;
+export const FACE_MAX_W = 720;
 /** A pin label beside a face is cut to this many characters (its column's width). */
 export const FACE_LABEL_CHARS = 14;
 /** Under this width on screen (px) a face is not shown: its area alone is drawn. */
 export const FACE_MIN_PX = 60;
-/** Measured heights are rounded up to this step (layout units), so a pixel's change lays nothing out again. */
+/** Measured sizes are rounded up to this step (CSS px), so a pixel's change lays nothing out again. */
 export const FACE_STEP = 8;
 
-/** A face's size before it is measured: its controls in rows of knobs (`count`, the part's controls). */
+/** A face's natural size (CSS px at FACE_LAYOUT_PX) before it is measured: its controls (`count`) in rows of knobs. */
 export function estimateFace(count) {
-  const perRow = Math.max(1, Math.floor((FACE_W - 32) / 80));
-  const rows = Math.max(1, Math.ceil((count ?? 0) / perRow));
-  return { w: FACE_W, h: 48 + rows * 96 };
+  const knobs = Math.max(1, count ?? 0);
+  const row = knobs * 88 + 64;
+  if (row <= FACE_LAYOUT_PX) return { w: row, h: 168 };
+  const rows = Math.ceil((knobs * 88) / (FACE_LAYOUT_PX - 64));
+  return { w: FACE_LAYOUT_PX, h: 72 + rows * 110 };
 }
 
-/** A measured face height (CSS px at FACE_W) as the layout takes it; null for nothing measured (0, hidden). */
-export function measuredHeight(px) {
-  if (!Number.isFinite(px) || px <= 0) return null;
-  return Math.ceil(px / FACE_STEP) * FACE_STEP;
+/** A face's measured natural size (its cards' extent, CSS px) as the layout takes it, rounded up; null for nothing measured (hidden). */
+export function measuredNatural(w, h) {
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
+  const up = (v) => Math.ceil(v / FACE_STEP) * FACE_STEP;
+  return { w: Math.min(FACE_LAYOUT_PX, up(w)), h: up(h) };
+}
+
+/**
+ * A face of natural size `natural` (CSS px) in its box: scaled down whole
+ * (never up) to at most FACE_MAX_W units wide, keeping its aspect: `{w, h,
+ * scale, natural}` (`w`, `h` layout units).
+ */
+export function faceFit(natural) {
+  const n = natural ?? estimateFace(0);
+  const scale = Math.min(1, FACE_MAX_W / Math.max(1, n.w));
+  return { w: Math.round(n.w * scale), h: Math.ceil(n.h * scale), scale, natural: { w: n.w, h: n.h } };
 }
 
 /**
@@ -57,29 +80,30 @@ export function labelColumn(pins) {
 export function placeFace(node, face, size) {
   const left = labelColumn(node.ins);
   const right = labelColumn(node.outs);
-  const w = size?.w ?? FACE_W;
-  const h = size?.h ?? estimateFace(face.count).h;
-  node.face = { ...face, dx: left, dy: HEADER, w, h };
-  node.w = Math.max(node.w, left + w + right);
+  const fit = size ?? faceFit(estimateFace(face.count));
+  const { w, h } = fit;
+  node.face = { ...face, dx: left, dy: HEADER, w, h, natural: fit.natural };
+  node.w = Math.max(node.w, left + Math.max(w, FACE_MIN_W) + right);
   node.h = Math.max(node.h, HEADER + h + PAD + (node.slot ? ROW : 0));
-  // Centred when the pins' names make the box wider than the face needs.
+  // Centred when the face is narrower than the box (a small part, long pin names).
   node.face.dx = Math.max(left, Math.round((node.w - w) / 2));
   return node;
 }
 
 /**
- * A slot's inside's face (`face`, of `size`): its area above the inside's
- * nodes (their extent `extent`, `{x0, y0, x1, y1}`), centred on them, a
- * row's gap between: `{...face, x, y, w, h}` in the inside's units.
+ * A slot's inside's face (`face`, of `size`, `faceFit`'s): its area above
+ * the inside's nodes (their extent `extent`, `{x0, y0, x1, y1}`), centred
+ * on them, a row's gap between: `{...face, x, y, w, h, natural}` in the
+ * inside's units.
  */
 export function frameFace(face, size, extent) {
-  const w = size?.w ?? FACE_W;
-  const h = size?.h ?? estimateFace(face.count).h;
+  const fit = size ?? faceFit(estimateFace(face.count));
+  const { w, h } = fit;
   const has = Number.isFinite(extent?.x0) && Number.isFinite(extent?.x1);
   const x0 = has ? extent.x0 : 0;
   const x1 = has ? extent.x1 : w;
   const y0 = Number.isFinite(extent?.y0) ? extent.y0 : 0;
-  return { ...face, x: Math.round((x0 + x1) / 2 - w / 2), y: y0 - GAP_Y - h, w, h };
+  return { ...face, x: Math.round((x0 + x1) / 2 - w / 2), y: y0 - GAP_Y - h, w, h, natural: fit.natural };
 }
 
 /** Whether URL text `url` is relative to its page (not `/…`, not `scheme:`, not `//…`). */
@@ -188,9 +212,10 @@ export function lit(bind, hot) {
 /**
  * Where a face goes on the stage: its area's screen rectangle `rect`
  * (`{x, y, w, h}`, from the drawn area) as a CSS transform of the face
- * (laid out FACE_W px wide), or null when it is too small to show.
+ * (laid out at FACE_LAYOUT_PX, its cards `w` px wide: its natural width),
+ * or null when it is too small to show.
  */
-export function facePlacement(rect, w = FACE_W) {
+export function facePlacement(rect, w) {
   if (!rect || !(rect.w > 0) || rect.w < FACE_MIN_PX) return null;
   const scale = rect.w / w;
   return { x: rect.x, y: rect.y, scale, transform: `translate(${rect.x}px, ${rect.y}px) scale(${scale})` };
@@ -199,4 +224,34 @@ export function facePlacement(rect, w = FACE_W) {
 /** Whether screen rectangles `a` and `b` overlap. */
 export function overlapping(a, b) {
   return Boolean(a && b) && a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+/** The declarations of a page's `:root`, `html` and `body` that a face takes (custom properties, its font and colour). */
+const TAKEN = /^(--[\w-]+|font(-[a-z-]+)?|line-height|color|letter-spacing)$/;
+
+/**
+ * The page-wide rules of a project panel's style sheet `css` (its `:root`,
+ * `html` and `body` rules, which reach nothing inside a face's shadow
+ * root) as a face's own: `:host` takes their custom properties
+ * (`--signal-card-min`), `.face-panel` the body's font and colour, so a
+ * face is laid out and lettered as the panel is. Margins, padding and the
+ * page's background stay the page's. Text, empty when there are none.
+ */
+export function rootRules(css) {
+  const text = String(css ?? '').replace(/\/\*[\s\S]*?(?:\*\/|$)/g, '');
+  const host = [];
+  const panel = [];
+  for (const m of text.matchAll(/(?<=^|\})()\s*([^{}@]+?)\s*\{([^{}]*)\}/g)) {
+    const selectors = m[2].split(',').map((x) => x.trim());
+    if (!selectors.length || !selectors.every((x) => x === ':root' || x === 'html' || x === 'body')) continue;
+    for (const declaration of m[3].split(';')) {
+      const colon = declaration.indexOf(':');
+      if (colon <= 0) continue;
+      const name = declaration.slice(0, colon).trim().toLowerCase();
+      const value = declaration.slice(colon + 1).trim();
+      if (!value || !TAKEN.test(name)) continue;
+      (name.startsWith('--') ? host : panel).push(`${name}: ${value};`);
+    }
+  }
+  return [host.length ? `:host { ${host.join(' ')} }` : '', panel.length ? `.face-panel { ${panel.join(' ')} }` : ''].filter(Boolean).join('\n');
 }

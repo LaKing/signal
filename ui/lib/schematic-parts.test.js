@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { HEADER, layout, movedWires } from './schematic-layout.js';
 import { openedLayout } from './schematic-open.js';
 import { levelControls, levelFaces } from './parts.js';
-import { FACE_W, estimateFace, labelColumn } from './schematic-face.js';
+import { FACE_LAYOUT_PX, FACE_MIN_W, estimateFace, faceFit, labelColumn } from './schematic-face.js';
 import { panelControls } from './schematic-controls.js';
 import { hitTest } from './schematic-hit.js';
 import { DragFollow } from './schematic-drag.js';
@@ -93,7 +93,7 @@ test('a closed slot shows its part as a face inside its box, under its title, it
   const box = drawn.nodes.find((n) => n.kind === 'instance' && n.name === 'synth');
   assert.ok(box.face, 'the box has its face');
   assert.equal(box.face.file, 'parts/synth.html');
-  assert.ok(box.w >= FACE_W && box.w > node(bare, 'synth').w, 'the box grows for its face');
+  assert.ok(box.w >= FACE_MIN_W && box.w > node(bare, 'synth').w, 'the box grows for its face');
   assert.equal(box.face.dy, HEADER, 'under the title row');
   assert.ok(box.face.dx >= labelColumn(box.ins), 'clear of the left pins’ names');
   assert.ok(box.face.dx + box.face.w <= box.w - labelColumn(box.outs) + 1, 'clear of the right pins’ names');
@@ -125,23 +125,23 @@ test('the face is laid out at its measured size: boxes grow with it and never ov
   // A second slot in the same layer: both have faces.
   g.top.instances.push({ ...synth(PART), name: 'synth2', address: '/synth2' });
   g.top.connections.push({ from: 'lfo.out', to: 'synth2.cutoff' });
-  const tall = layout(g.top, {}, faced(g, '', { w: FACE_W, h: 640 }));
+  const tall = layout(g.top, {}, faced(g, '', faceFit({ w: FACE_LAYOUT_PX, h: 1138 })));
   const a = tall.nodes.find((n) => n.name === 'synth');
   const b = tall.nodes.find((n) => n.name === 'synth2');
-  assert.equal(a.face.h, 640);
-  assert.ok(a.h >= HEADER + 640);
+  assert.equal(a.face.h, Math.ceil(1138 * (a.face.w / FACE_LAYOUT_PX)));
+  assert.ok(a.h >= HEADER + a.face.h);
   assert.ok(a.y + a.h <= b.y || b.y + b.h <= a.y || a.x + a.w <= b.x || b.x + b.w <= a.x, 'the two faced boxes do not overlap');
-  const short = layout(g.top, {}, faced(g, '', { w: FACE_W, h: 96 }));
+  const short = layout(g.top, {}, faced(g, '', faceFit({ w: FACE_LAYOUT_PX, h: 160 })));
   assert.ok(short.nodes.find((n) => n.name === 'synth').h < a.h, 'a shorter face, a shorter box');
   // Not measured yet: an estimate from its controls.
   const guessed = layout(g.top, {}, faced(g, ''));
-  assert.equal(guessed.nodes.find((n) => n.name === 'synth').face.h, estimateFace(PART.controls.length).h);
+  assert.equal(guessed.nodes.find((n) => n.name === 'synth').face.h, faceFit(estimateFace(PART.controls.length)).h);
 });
 
 test('opened in place, the frame shows the face at its top, the inner structure below it; inner controls beside their instance', () => {
   const g = graph();
   const drawn = layout(g.top, {}, faced(g, ''));
-  const inside = layout(g.insides['/synth'], {}, faced(g, '/synth', { w: FACE_W, h: 200 }));
+  const inside = layout(g.insides['/synth'], {}, faced(g, '/synth', { w: 600, h: 200, scale: 0.5, natural: { w: 1200, h: 400 } }));
   assert.ok(inside.face, 'the inside has the face');
   assert.equal(inside.face.file, 'parts/synth.html');
   assert.equal(inside.face.h, 200);

@@ -89,13 +89,13 @@ globalThis.DOMPoint ??= class {
 };
 
 const { SchematicFaces } = await import('./schematic-faces.js');
-const { FACE_W } = await import('../lib/schematic-face.js');
+const { FACE_LAYOUT_PX, FACE_MAX_W } = await import('../lib/schematic-face.js');
 
 /** A face area as the drawing marks it: its corners in its group's units, the group's screen matrix `ctm`. */
-function area({ id = '/synth', file = 'parts/synth.html', root = '/synth', path = '', slot = 'synth', base = 'b1', w = FACE_W, h = 200, ctm = { a: 1, d: 1, e: 0, f: 0 } } = {}) {
+function area({ id = '/synth', file = 'parts/synth.html', root = '/synth', path = '', slot = 'synth', base = 'b1', w = 640, h = 200, nw = FACE_LAYOUT_PX, ctm = { a: 1, d: 1, e: 0, f: 0 } } = {}) {
   const g = new Node('g');
   g.className = 'face-area';
-  Object.assign(g.dataset, { face: id, file, root, path, slot, base, error: '', x0: '100', y0: '50', x1: String(100 + w), y1: String(50 + h) });
+  Object.assign(g.dataset, { face: id, file, root, path, slot, base, error: '', nw: String(nw), x0: '100', y0: '50', x1: String(100 + w), y1: String(50 + h) });
   g.getScreenCTM = () => ctm;
   return g;
 }
@@ -133,7 +133,8 @@ test('a face is made for each area drawn, placed by its screen matrix, its part 
   const face = faces.faces.get('/synth');
   assert.ok(face, 'made');
   assert.equal(face.element.className, 'face shown');
-  assert.equal(face.element.style.transform, 'translate(100px, 50px) scale(1)');
+  // Its cards are 1280 px across on the panel, its area 640 px on screen: half the panel's size, a miniature.
+  assert.equal(face.element.style.transform, 'translate(100px, 50px) scale(0.5)');
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual(requests, [{ type: 'panel.read', file: 'parts/synth.html' }]);
   assert.ok(rendered.length >= 2, 'drawn, then drawn again with the part read');
@@ -141,7 +142,7 @@ test('a face is made for each area drawn, placed by its screen matrix, its part 
   svg.children[0].getScreenCTM = () => ({ a: 0.5, d: 0.5, e: 10, f: 20 });
   const before = rendered.length;
   faces.sync({ levels: [] });
-  assert.equal(face.element.style.transform, 'translate(60px, 45px) scale(0.5)');
+  assert.equal(face.element.style.transform, 'translate(60px, 45px) scale(0.25)');
   assert.equal(requests.length, 1);
   assert.equal(rendered.length, before, 'not drawn again for a move');
   // Its text changed (the graph's base): read again.
@@ -154,7 +155,7 @@ test('a face is made for each area drawn, placed by its screen matrix, its part 
 
 test('too small, off the stage or under an open frame a face is hidden; around the frame dimmed; its area gone, the face goes', () => {
   const { svg, faces } = setup();
-  svg.append(area({ ctm: { a: 0.1, d: 0.1, e: 0, f: 0 } }));
+  svg.append(area({ ctm: { a: 0.05, d: 0.05, e: 0, f: 0 } }));
   faces.sync({ levels: [] });
   const face = faces.faces.get('/synth');
   assert.equal(face.element.className, 'face', 'too small: hidden');
@@ -185,14 +186,23 @@ test("a part written shows at once in its faces; a measured height lays out agai
   faces.written({ type: 'panel.written', file: 'main.html', html: '' });
   assert.equal(rendered.length, count + 1, 'the main panel is not a face');
   const face = faces.faces.get('/synth');
-  // The layout asked its size (an estimate), then it is measured.
+  // The layout asked its size (an estimate), then it is measured: drawn at half size, its card 600 px across on screen is 1200 on the panel.
   faces.sizeOf({ file: 'parts/synth.html', count: 3 });
+  face.panel.getBoundingClientRect = () => ({ left: 0, top: 0, width: FACE_LAYOUT_PX / 2, right: FACE_LAYOUT_PX / 2 });
+  const grid = new Node('div');
+  const card = new Node('section');
+  card.getBoundingClientRect = () => ({ left: 0, width: 600, right: 600 });
+  grid.append(card);
+  face.panel.append(grid);
   face.panel.offsetHeight = 333;
   faces.resized([{ target: face.panel }]);
   assert.equal(host.resized, 1);
-  assert.equal(faces.sizes.get('parts/synth.html').h, 336, 'rounded up to its step');
+  assert.deepEqual(faces.sizes.get('parts/synth.html'), { w: 1200, h: 336 }, 'its natural size, rounded up to its step');
+  // In its box: scaled down whole, its aspect kept.
+  const fit = faces.sizeOf({ file: 'parts/synth.html', count: 3 });
+  assert.equal(fit.w, FACE_MAX_W);
+  assert.equal(fit.h, Math.ceil(336 * (FACE_MAX_W / 1200)));
   // Laid out at that size: the same measure again changes nothing.
-  assert.equal(faces.sizeOf({ file: 'parts/synth.html', count: 3 }).h, 336);
   faces.resized([{ target: face.panel }]);
   assert.equal(host.resized, 1);
   face.panel.offsetHeight = 0;
