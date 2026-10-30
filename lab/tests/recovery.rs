@@ -14,7 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use signal_core::{Due, Inputs, Outputs, PrepareContext, StateOutputPrimitive};
-use signal_lab::gpu_partials::{BLOCK_FRAMES, GpuPartials, Params};
+use signal_lab::gpu_partials::{BLOCK_FRAMES, GpuPartials, JOBS, Params};
 
 /// One block as the real-time engine runs it: `due` once per frame (it
 /// decides at the block's first frame), `miss` when not ready, then `emit`
@@ -38,6 +38,51 @@ fn real_time_block(module: &mut GpuPartials) -> Due {
     first
 }
 
+/// How long a wait below may take before the test fails: far beyond
+/// anything the job path needs, so a loaded machine only makes it slower.
+const BOUND: Duration = Duration::from_secs(60);
+
+/// Waits (bounded by [`BOUND`]) until `done` holds, saying `what` if never.
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let started = Instant::now();
+    while !done() {
+        assert!(started.elapsed() < BOUND, "{what} within {BOUND:?}");
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// One block as an exact replay runs it, the GPU given the time a device
+/// would give whatever the machine's load: at the block's first frame `due`
+/// is asked again while its result is pending, and before the last
+/// `absorb`, `settle` while a job given up on still holds the pool (the
+/// engine yields and asks again). Neither wait passes a lost result or a
+/// pool that never refills: a block never submitted is still reported, and
+/// a stale job never returned fails at the bound. Returns what `due` said
+/// at the block's first frame.
+fn block_given_time(module: &mut GpuPartials) -> Due {
+    let p = Params::default();
+    let values = [p.freq, p.stretch, p.tilt, p.gain];
+    let mut first = Due::Pending;
+    wait_until("the due result ready or lost", || {
+        first = module.due();
+        first != Due::Pending
+    });
+    for t in 0..BLOCK_FRAMES {
+        if module.due() != Due::Ready {
+            module.miss();
+        }
+        let mut out = [f64::NAN];
+        module.emit(&mut Outputs::new(1, &mut out, &mut []));
+        if t + 1 == BLOCK_FRAMES {
+            wait_until("a free job for the block", || {
+                module.settle() != Due::Pending
+            });
+        }
+        module.absorb(&Inputs::new(1, &[], &values, &[], &[]));
+    }
+    first
+}
+
 #[test]
 fn after_late_results_the_bank_recovers() {
     let gpu = common::device();
@@ -50,31 +95,30 @@ fn after_late_results_the_bank_recovers() {
         generation: 0,
     });
 
-    // Every result 200 ms late; 80 blocks run in far less: the pool of
-    // JOBS (6) jobs fills, and the blocks after it are never submitted.
-    gpu.set_completion_delay(Duration::from_millis(200));
+    // Every result DELAY late; 80 real-time blocks run in far less (a few
+    // ms, even loaded): the pool of JOBS (6) jobs fills, and the blocks
+    // after it are never submitted. The precondition, that no result
+    // arrives while they run (the slow GPU is slower than the blocks), is
+    // checked.
+    const DELAY: Duration = Duration::from_secs(2);
+    gpu.set_completion_delay(DELAY);
     let started = Instant::now();
     let late: Vec<Due> = (0..80).map(|_| real_time_block(&mut module)).collect();
-    assert!(
-        started.elapsed() < Duration::from_millis(200),
-        "nothing waited"
-    );
+    assert!(started.elapsed() < DELAY, "nothing waited");
     assert!(late[2..].iter().all(|&d| d != Due::Ready), "{late:?}");
+    // Exactly the pool's jobs were submitted (each starts once the one
+    // before it completed: the GPU thread's pace, not the test's).
+    wait_until("the pool's jobs started", || gpu.jobs_run() >= JOBS as u64);
     let ran = gpu.jobs_run();
+    assert_eq!(ran, JOBS as u64, "only the pool's jobs were submitted");
 
-    // The delay ends; the held results arrive (all late, so discarded).
+    // The delay ends; the held results arrive (all late, so discarded, and
+    // their jobs reused) once their delay has passed. Blocks are submitted
+    // again, and each one's result is delivered when due: the first two
+    // blocks' due ones were never submitted (L = 2), then every block is
+    // Ready.
     gpu.set_completion_delay(Duration::ZERO);
-    thread::sleep(Duration::from_millis(400));
-
-    // Blocks are submitted again, and each one's result is delivered when
-    // due: one more block than L for the first submission to come due, then
-    // every block is Ready (the GPU is given the time a device would give).
-    let mut seen = Vec::new();
-    for _ in 0..40 {
-        let due = real_time_block(&mut module);
-        seen.push(due);
-        thread::sleep(Duration::from_millis(5));
-    }
+    let seen: Vec<Due> = (0..40).map(|_| block_given_time(&mut module)).collect();
     eprintln!(
         "during the delay: {} of 78 due blocks missed; after it: {:?}; jobs run {} -> {}",
         late[2..].iter().filter(|&&d| d != Due::Ready).count(),
@@ -83,8 +127,14 @@ fn after_late_results_the_bank_recovers() {
         gpu.jobs_run()
     );
     assert!(
-        seen[3..].iter().all(|&d| d == Due::Ready),
+        seen[..2].iter().all(|&d| d != Due::Ready),
+        "never submitted during the delay: {seen:?}"
+    );
+    assert!(
+        seen[2..].iter().all(|&d| d == Due::Ready),
         "results are delivered again after the delay: {seen:?}"
     );
-    assert!(gpu.jobs_run() >= ran + 30, "jobs keep running");
+    // Every block's job ran: the last one delivered (block 39's, due seq
+    // of block 37) means 38 of them at least.
+    assert!(gpu.jobs_run() >= ran + 38, "jobs keep running");
 }
