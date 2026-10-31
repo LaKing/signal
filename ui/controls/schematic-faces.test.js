@@ -245,3 +245,38 @@ test("a face links the theme and the project panel's style sheets", () => {
   assert.ok(links.length >= 1);
   globalThis.document = realDocument;
 });
+
+test('a hidden face, and the plate faded out on Board, is inert: no key reaches its controls; the plate on Plate and X-ray is operable; focus in it goes to the drawing (review 2026-10-31)', () => {
+  const { svg, faces, host } = setup();
+  let focused = 0;
+  host.focus = () => focused++;
+  host.board = { covered: false };
+  svg.append(area({ id: '#plate', file: 'main.html', root: '', slot: '' }));
+  faces.setPlateClass(' plate layer-plate');
+  faces.sync({ levels: [] });
+  const plate = faces.faces.get('#plate');
+  assert.equal(plate.element.className, 'face shown plate layer-plate');
+  assert.equal(plate.element.inert, false, 'Plate: operable');
+  faces.setPlateClass(' plate layer-xray');
+  assert.equal(plate.element.inert, false, 'X-ray: its controls shown whole, operable (its hidden cards are visibility: hidden, unfocusable)');
+  // A control of the plate has the focus when the layer goes to Board: the drawing takes it, then the plate is inert.
+  const knob = new Node('signal-knob');
+  plate.shadow.activeElement = knob;
+  faces.setPlateClass(' plate layer-board');
+  assert.equal(plate.element.inert, true, 'Board: the plate at opacity 0 is inert');
+  assert.equal(focused, 1, 'the focus moved to the schematic');
+  plate.shadow.activeElement = null;
+  faces.sync({ levels: [] });
+  assert.equal(plate.element.inert, true, 'a sync keeps it inert on Board');
+  faces.setPlateClass(' plate layer-plate');
+  assert.equal(plate.element.inert, false, 'back to Plate: operable again');
+  // A slot's face: inert while hidden (too small, off the stage, under the plate), operable when shown.
+  svg.append(area());
+  faces.sync({ levels: [] });
+  const face = faces.faces.get('/synth');
+  assert.equal(face.element.inert, false);
+  svg.children[1].getScreenCTM = () => ({ a: 1, d: 1, e: 5000, f: 0 });
+  faces.sync({ levels: [] });
+  assert.equal(face.element.inert, true, 'off the stage: inert');
+  globalThis.document = realDocument;
+});

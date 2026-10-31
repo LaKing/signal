@@ -104,6 +104,26 @@ export class SchematicFaces {
     const base = face.classes.replace(/ plate.*$/, '');
     face.classes = `${base}${classes}`;
     face.element.className = face.classes;
+    this.guard(face);
+  }
+
+  /**
+   * Whether face `face` takes keys and the pointer (review 2026-10-31: an
+   * invisible plate's knob took the focus and Arrow Up changed it). A face
+   * hidden (too small, off the stage, under the plate or an open frame) and
+   * the plate faded out on Board (opacity 0) are `inert`: nothing in them is
+   * focusable or operable; their layout stays, so they are measured and fade
+   * as before. On X-ray the plate is operable: its controls are shown whole,
+   * and what X-ray hides of it (its cards, its slots, the unbound controls in
+   * them) is `visibility: hidden`, which no focus or pointer reaches either.
+   * A focus inside a face that goes inert, or on a part of it that went
+   * hidden, moves to the drawing.
+   */
+  guard(face) {
+    const inert = !/(^| )shown( |$)/.test(face.classes) || (face.id === PLATE_FACE && /(^| )layer-board( |$)/.test(face.classes));
+    const active = face.shadow?.activeElement ?? null;
+    if (active && (inert || active.checkVisibility?.({ visibilityProperty: true }) === false)) this.host.focus?.({ preventScroll: true });
+    if (face.element.inert !== inert) face.element.inert = inert;
   }
 
   /** Another project: every face and part let go. */
@@ -220,6 +240,7 @@ export class SchematicFaces {
     this.layer.append(element);
     this.resize?.observe?.(panel);
     this.faces.set(id, face);
+    this.guard(face);
     this.render(face);
     return face;
   }
@@ -357,6 +378,7 @@ export class SchematicFaces {
       if (face.classes !== classes) {
         face.element.className = classes;
         face.classes = classes;
+        this.guard(face);
       }
       const transform = shown ? place.transform : '';
       if (shown && face.placed !== transform) {
