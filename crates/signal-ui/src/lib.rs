@@ -83,6 +83,42 @@ pub fn own_file(dir: &Path, file: &str) -> bool {
     named
 }
 
+/// A presentation file the project owns ([`own_file`]), read: `Ok(None)`
+/// when it does not exist, `Err(())` when it is not the project's own and
+/// was not read. Checked again after it is opened, so a link swapped in
+/// between the check and the open is refused: the opened file must be the
+/// one the path names now (same device and inode), the path still free of
+/// links, a regular file, and no hard link to another name (`nlink` 1),
+/// which could be a file outside the project. What stays possible is a
+/// swap and its undoing both within the open, which needs a local process
+/// racing the read (accepted risk, ADR 0048).
+#[allow(clippy::result_unit_err)]
+pub fn read_own_file(dir: &Path, file: &str) -> Result<Option<String>, ()> {
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
+    if !own_file(dir, file) {
+        return Err(());
+    }
+    let path = dir.join(file);
+    let mut opened = match std::fs::File::open(&path) {
+        Ok(opened) => opened,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    let held = opened.metadata().map_err(|_| ())?;
+    let named = std::fs::symlink_metadata(&path).map_err(|_| ())?;
+    if !own_file(dir, file)
+        || !held.is_file()
+        || held.nlink() != 1
+        || (held.dev(), held.ino()) != (named.dev(), named.ino())
+    {
+        return Err(());
+    }
+    let mut text = String::new();
+    opened.read_to_string(&mut text).map_err(|_| ())?;
+    Ok(Some(text))
+}
+
 /// The protocol version (`hello`, `welcome`, byte 1 of every binary frame).
 pub const PROTOCOL: u32 = 1;
 

@@ -2032,11 +2032,13 @@ fn patch_ops(context: &Context, level: String, base: Option<String>, ops_json: V
         let file_of = |path: &str| {
             // ADR 0046: a panel file (a slot's part, the main panel), read now.
             if path.starts_with("ui/") {
-                if !signal_ui::own_file(&context.dir, path) {
-                    foreign.borrow_mut().get_or_insert_with(|| path.to_owned());
-                    return None;
-                }
-                return std::fs::read_to_string(context.dir.join(path)).ok();
+                return match signal_ui::read_own_file(&context.dir, path) {
+                    Ok(text) => text,
+                    Err(()) => {
+                        foreign.borrow_mut().get_or_insert_with(|| path.to_owned());
+                        None
+                    }
+                };
             }
             files
                 .iter()
@@ -2068,7 +2070,7 @@ fn patch_ops(context: &Context, level: String, base: Option<String>, ops_json: V
         let patched = patch::apply(&before, None, &ops, &ctx);
         if let Some(path) = foreign.take() {
             return Err(refused(format!(
-                "not patched: {path} is not the project's own file (it is reached through a link, or leaves the project's folder); a patch reads and writes only the project's own presentation files"
+                "not patched: {path} is not the project's own file (it is reached through a link, is a hard link, is no regular file, or leaves the project's folder); a patch reads and writes only the project's own presentation files"
             )));
         }
         if let Some(load) = denied.take() {

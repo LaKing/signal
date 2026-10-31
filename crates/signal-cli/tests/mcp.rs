@@ -1605,6 +1605,16 @@ fn a_panel_file_outside_the_project_is_refused_unread() {
         right.to_string().contains("not the project's own"),
         "{right}"
     );
+    // A hard link to the outside file (second review, ADR 0048): another
+    // name of a file that may lie outside the project, refused alike.
+    fs::remove_file(dir.join("ui/main.html")).unwrap();
+    fs::hard_link(outside.join("main.html"), dir.join("ui/main.html")).unwrap();
+    let (right, wrong) = ask(&mut mcp);
+    assert_eq!(right, wrong, "the same refusal, whatever the file holds");
+    assert!(
+        right.to_string().contains("not the project's own"),
+        "{right}"
+    );
     // `ui/` itself a link out of the project.
     fs::remove_dir_all(dir.join("ui")).unwrap();
     std::os::unix::fs::symlink(&outside, dir.join("ui")).unwrap();

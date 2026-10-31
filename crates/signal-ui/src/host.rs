@@ -5568,7 +5568,7 @@ impl Host {
         if self.linked_file(file) {
             return None;
         }
-        fs::read_to_string(self.dir.join(file)).ok()
+        crate::read_own_file(&self.dir, file).ok().flatten()
     }
 
     /// ADR 0046 §7–8: the panels' side of a patch, added to `patched` as
