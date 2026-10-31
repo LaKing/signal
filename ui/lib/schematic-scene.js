@@ -15,6 +15,7 @@
 import { HEADER, PAD, dieArea, dieLink, insideKey } from './schematic-layout.js';
 import { chooseOpen, grownNode, openedLayout } from './schematic-open.js';
 import { compose, screenRect, toScreen, uncompose } from './schematic-view.js';
+import { shownOpacity } from './board-zoom.js';
 
 /** Smaller than this on screen (px), a node or a wire is not drawn. */
 export const MIN_PX = 2;
@@ -131,7 +132,9 @@ export function scene({ layoutOf, view, viewport, pinned = new Set() }) {
     if (!stored) return;
     const pick = depth < MAX_DEPTH ? chooseOpen({ path, layout: stored, layoutOf, pinned }) : null;
     const drawn = pick ? openedLayout(stored, pick.node.name, pick.inner.bounds) : stored;
-    const entry = { path, level, layout: drawn, stored, transform, nodes: [], wires: [], parent };
+    // How much of it is shown (2026-10-31): a die by its text and size on screen (`shownOpacity`), the top level whole.
+    const opacity = parent ? shownOpacity(transform.k, screenRect(transform, drawn.bounds), viewport) : 1;
+    const entry = { path, level, layout: drawn, stored, transform, opacity, nodes: [], wires: [], parent };
     levels.push(entry);
     for (const node of drawn.nodes) {
       const rect = screenRect(transform, node);
@@ -167,6 +170,43 @@ export function scene({ layoutOf, view, viewport, pinned = new Set() }) {
   const root = levels.find((l) => l.path === deepest) ?? levels[0];
   drawn.view = root ? { ...root.transform, path: root.path } : view;
   return drawn;
+}
+
+/**
+ * The chip the person's zoom opens (2026-10-31, the owner: "the microscope
+ * view should appear by itself while zooming in"), as its address, or null:
+ * in the outermost level of the scene `drawn` that has none open on screen,
+ * of its chips on screen with an inside (`layoutOf`) whose die would be
+ * shown (`shownOpacity` over 0, the very point where zooming out leaves
+ * it), the one under the zoom's `anchor` (screen px), else the nearest to
+ * it. One per level, as a click pins (`pinOne`); called again after it
+ * opens, it finds the chips inside its die (recursion).
+ */
+export function risen({ drawn, layoutOf, viewport, anchor }) {
+  const screen = { x: 0, y: 0, w: viewport.w, h: viewport.h };
+  for (const entry of drawn?.levels ?? []) {
+    const child = drawn.levels.find((l) => l.parent === entry);
+    if (child) {
+      const name = child.path.slice(entry.path.length + 1);
+      const box = entry.layout.nodes.find((n) => n.kind === 'instance' && n.name === name);
+      if (box && intersects(screenRect(entry.transform, box), screen)) continue;
+    }
+    let best = null;
+    for (const node of entry.nodes) {
+      if (node.kind !== 'instance' || !node.composite) continue;
+      const inner = layoutOf(insideKey(node));
+      if (!inner) continue;
+      const t = compose(entry.transform, drawnInside(node, inner).link);
+      if (!(shownOpacity(t.k, screenRect(t, inner.bounds), viewport) > 0)) continue;
+      const r = screenRect(entry.transform, node);
+      const dx = Math.max(r.x - anchor.x, 0, anchor.x - (r.x + r.w));
+      const dy = Math.max(r.y - anchor.y, 0, anchor.y - (r.y + r.h));
+      const d = Math.hypot(dx, dy);
+      if (!best || d < best.d) best = { d, path: `${entry.path}/${node.name}` };
+    }
+    if (best) return best.path;
+  }
+  return null;
 }
 
 /** How far past the screen (px) a stroke may reach. */

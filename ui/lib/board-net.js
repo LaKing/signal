@@ -43,3 +43,36 @@ export function portNet(levels, hit) {
   }
   return out;
 }
+
+/**
+ * A selected wire (a wire hit, `{path, wire}`) followed into the dies drawn
+ * (2026-10-31, the owner: "follow a signal all the way into the chip"):
+ * `[{path, wire}]`, the wires inside each open package at its ends that
+ * carry it on from its interface pin of that name (an input or a
+ * parameter at its far end, an output at its near end), and so on into
+ * the dies drawn inside those, recursively. The wire itself is not listed.
+ */
+export function wireNet(levels, hit) {
+  const out = [];
+  const seen = new Set();
+  const follow = (entry, wire) => {
+    for (const [end, into] of [
+      [wire.to, true],
+      [wire.from, false],
+    ]) {
+      const node = entry.layout.nodes.find((n) => n.kind === 'instance' && n.id === end?.node);
+      const inner = node && levels.find((l) => l.parent === entry && l.path === `${entry.path}/${node.name}`);
+      if (!inner) continue;
+      for (const w of inner.layout.wires) {
+        const on = into ? (w.from.node === INPUTS || w.from.node === PARAMS) && w.from.port === end.port : w.to.node === OUTPUTS && w.to.port === end.port;
+        if (!on || seen.has(w)) continue;
+        seen.add(w);
+        out.push({ path: inner.path, wire: w });
+        follow(inner, w);
+      }
+    }
+  };
+  const entry = hit?.kind === 'wire' ? levels.find((l) => l.path === (hit.path ?? '')) : null;
+  if (entry && hit.wire) follow(entry, hit.wire);
+  return out;
+}

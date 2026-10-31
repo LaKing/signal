@@ -11,9 +11,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { layout } from '../lib/schematic-layout.js';
-import { DIE_MAX_K, FULL_K, belowThreshold, dieOpacity } from '../lib/board-zoom.js';
-import { fit, toScreen } from '../lib/schematic-view.js';
+import { DIE_MAX_K, FULL_K, HIT_OPACITY, belowThreshold, dieOpacity } from '../lib/board-zoom.js';
+import { fit, toScreen, zoomAt } from '../lib/schematic-view.js';
 import { KICK } from '../lib/schematic-scene.test.js';
+import { hitTest } from '../lib/schematic-hit.js';
+import { wireNet } from '../lib/board-net.js';
 import { bake } from '../lib/schematic-draw.js';
 import { DragFollow } from '../lib/schematic-drag.js';
 
@@ -25,11 +27,12 @@ const { SignalSchematic } = await import('./schematic.js');
 const viewport = { w: 1000, h: 600 };
 
 /** KICK's levels as boards (each inside a die, its package widened towards it), and a library composite `/lib` (its inside not in the graph) beside them. */
-function kickLayouts() {
+function kickLayouts(counter = null) {
   const top = { ...KICK.top, instances: [...KICK.top.instances, { name: 'lib', module: 'lib.voice', composite: true, ports: [], parameters: [] }] };
   const layouts = new Map();
   const of = (level) => {
     if (!layouts.has(level)) {
+      if (counter) counter.laid++;
       const dieOf = (node) => of(node.module);
       layouts.set(level, level === '' ? layout(top, {}, { board: { dieOf } }) : KICK.composites[level] ? layout(KICK.composites[level], {}, { board: { die: true, dieOf } }) : null);
     }
@@ -39,9 +42,9 @@ function kickLayouts() {
 }
 
 /** A schematic showing KICK fitted (as on loading), every redraw its real `render` without the drawing. */
-function schematic() {
+function schematic(counter = null) {
   const s = Object.create(SignalSchematic.prototype);
-  const layoutOf = kickLayouts();
+  const layoutOf = kickLayouts(counter);
   Object.assign(s, {
     graph: { project: 'kick' },
     viewport,
@@ -181,11 +184,13 @@ test('Escape ends a trace, then zooms out of the innermost chip, one level at a 
   assert.deepEqual(s.selected, [], 'then the selection');
 });
 
-test('zooming out past a die’s threshold leaves it; zooming in never opens one, nor does a pan', () => {
+test('zooming out past a die’s threshold leaves it; zooming in opens it by itself (2026-10-31), a pan opens and closes nothing', () => {
   const s = schematic();
   const at = middleOf(s, '', 'drums');
-  for (let i = 0; i < 40; i++) s.zoomBy(1.2, at);
-  assert.deepEqual([...s.drawn.open], [], 'zoomed in on drums: no die without a click');
+  for (let i = 0; i < 40 && !s.drawn.open.has('/drums/kick'); i++) s.zoomBy(1.2, at);
+  assert.ok(s.drawn.open.has('/drums'), 'zoomed in on drums: its die opened without a click');
+  assert.ok(s.drawn.open.has('/drums/kick'), 'and kick’s inside it, recursively');
+  assert.deepEqual(s.selected, [], 'nothing selected');
   s.fitTop();
   click(s, middleOf(s, '', 'drums'));
   click(s, middleOf(s, '/drums', 'kick'));
@@ -194,7 +199,6 @@ test('zooming out past a die’s threshold leaves it; zooming in never opens one
   const seen = [];
   for (let i = 0; i < 60 && s.drawn.open.size; i++) {
     s.zoomBy(1 / 1.2, { x: 500, y: 300 });
-    const last = s.drawn.levels.at(-1);
     seen.push([...s.drawn.open].sort().join(' '));
   }
   // Innermost first (a die opens at its natural size, so kick's, larger than drums', may take drums with it).
@@ -207,17 +211,118 @@ test('zooming out past a die’s threshold leaves it; zooming in never opens one
   assert.deepEqual([...s.drawn.open], ['/drums']);
 });
 
-test('a double-click zooms in as a click does; its second click opens nothing inside', () => {
+test('a double-click zooms in as a click does, and leaves the selection as it was (2026-10-31); its second click opens nothing inside', () => {
   const s = schematic();
+  const wire = s.drawn.levels[0].layout.wires.find((w) => w.written.from === '/drums.out');
+  s.selected = [{ kind: 'wire', path: '', level: '', wire, from: '/drums.out', to: '/out.l' }];
   const at = middleOf(s, '', 'drums');
   click(s, at);
   // The second click of the double-click lands in the die now there.
   click(s, at, null, 100);
   assert.deepEqual([...s.pinned], ['/drums'], 'nothing more opened');
-  assert.deepEqual(s.selected.map((p) => p.address), ['/drums'], 'nor selected');
   s.doubleClick({ clientX: at.x, clientY: at.y, timeStamp: time });
   assert.deepEqual([...s.drawn.open], ['/drums']);
   assert.ok(s.drawn.levels[1].transform.k >= FULL_K - 1e-9, 'readable');
+  assert.deepEqual(s.selected.map((p) => [p.kind, p.from, p.to]), [['wire', '/drums.out', '/out.l']], 'the wire still selected');
+  // A single click still selects.
+  click(s, middleOf(s, '/drums', 'kick'));
+  assert.deepEqual(s.selected.map((p) => p.address), ['/drums/kick']);
+});
+
+// 2026-10-31 (the owner: "double-clicking a chip also changes the selection, so you cannot follow a signal all the way
+// into the chip; the microscope view should appear by itself while zooming in, its inside fading in, the inverse of the
+// fade-out"): semantic zoom, through the element's real wheel and pinch path (`zoomBy`) and render.
+
+/** /drums' die's shown opacity as drawn (0 when it is not open). */
+const drumsShown = (s) => s.drawn.levels.find((l) => l.path === '/drums')?.opacity ?? 0;
+
+test('semantic zoom: zooming never changes the selection, in or out, through every die it opens and leaves', () => {
+  const s = schematic();
+  const wire = s.drawn.levels[0].layout.wires.find((w) => w.written.from === '/drums.out');
+  const selected = [{ kind: 'wire', path: '', level: '', wire, from: '/drums.out', to: '/out.l' }];
+  s.selected = selected;
+  const at = middleOf(s, '', 'drums');
+  const opened = new Set();
+  for (let i = 0; i < 40; i++) {
+    s.zoomBy(1.15, at);
+    for (const p of s.drawn.open) opened.add(p);
+    assert.equal(s.selected, selected, `zoom step ${i}: the selection untouched`);
+  }
+  assert.ok(opened.has('/drums') && opened.has('/drums/kick'), 'the zoom opened drums and kick');
+  // The selected wire followed into the dies drawn (raised there): drums' kick.out → out, then kick's dc.out → out.
+  const followed = wireNet(s.drawn.levels, selected[0]).map(({ path, wire: w }) => `${path}: ${w.from.port} → ${w.to.port}`);
+  assert.deepEqual(followed, ['/drums: out → out', '/drums/kick: out → out']);
+  for (let i = 0; i < 60 && s.drawn.open.size; i++) {
+    s.zoomBy(1 / 1.15, at);
+    assert.equal(s.selected, selected, `zoom out step ${i}: the selection untouched`);
+  }
+  assert.equal(s.drawn.open.size, 0, 'every die left');
+  assert.equal(s.selected, selected);
+});
+
+/** KICK's stub board is small: fitted, drums' die would already be whole. Zoomed out to a quarter, it is under its band. */
+function below(s) {
+  s.setView(zoomAt(s.view, 1 / 4, middleOf(s, '', 'drums')));
+  assert.equal(s.drawn.open.size, 0);
+}
+
+test('semantic zoom: the die fades in monotonically across the band, from nothing, and out along the same curve (symmetric)', () => {
+  const s = schematic();
+  below(s);
+  const at = middleOf(s, '', 'drums');
+  const steps = 30;
+  const into = [drumsShown(s)];
+  for (let i = 0; i < steps; i++) {
+    s.zoomBy(1.1, at);
+    into.push(drumsShown(s));
+  }
+  const out = [drumsShown(s)];
+  for (let i = 0; i < steps; i++) {
+    s.zoomBy(1 / 1.1, at);
+    out.push(drumsShown(s));
+  }
+  out.reverse();
+  for (let i = 1; i < into.length; i++) {
+    assert.ok(into[i] >= into[i - 1] - 1e-9, `monotonic in: ${into[i - 1]} → ${into[i]}`);
+    assert.ok(into[i] - into[i - 1] <= 0.3, `no jump in: ${into[i - 1]} → ${into[i]}`);
+  }
+  assert.equal(into[0], 0, 'closed when fitted');
+  assert.equal(into.at(-1), 1, 'whole at the end');
+  assert.ok(into.some((o) => o > 0 && o < 1), 'through the band, not a step');
+  // The way out is the way in, step for step.
+  for (let i = 0; i < into.length; i++) assert.ok(Math.abs(into[i] - out[i]) < 1e-6, `symmetric at step ${i}: in ${into[i]}, out ${out[i]}`);
+});
+
+test('semantic zoom: while its die is mostly transparent a click hits the chip (and travels into it); shown, the die’s parts are hit', () => {
+  const s = schematic();
+  below(s);
+  const at = middleOf(s, '', 'drums');
+  for (let i = 0; i < 80 && !(drumsShown(s) > 0); i++) s.zoomBy(1.03, at);
+  const faint = drumsShown(s);
+  assert.ok(faint > 0 && faint < HIT_OPACITY, `faint: ${faint}`);
+  const centre = middleOf(s, '', 'drums');
+  assert.equal(hitTest(s.drawn, centre).address, '/drums', 'the chip is hit');
+  click(s, centre);
+  assert.ok(drumsShown(s) === 1, 'the click travelled in');
+  const kick = middleOf(s, '/drums', 'kick');
+  const hit = hitTest(s.drawn, kick);
+  assert.deepEqual([hit.path, hit.address], ['/drums', '/drums/kick'], 'the die’s chip is hit');
+});
+
+test('semantic zoom: no layout per frame; each level is laid out once, however long the zoom goes on', () => {
+  const counter = { laid: 0 };
+  const s = schematic(counter);
+  const at = middleOf(s, '', 'drums');
+  const round = () => {
+    for (let i = 0; i < 40; i++) s.zoomBy(1.15, at);
+    for (let i = 0; i < 40; i++) s.zoomBy(1 / 1.15, at);
+  };
+  round();
+  const once = counter.laid;
+  assert.ok(once <= 4, `the top level, drums, kick and the library composite at most: ${once}`);
+  round();
+  round();
+  assert.equal(counter.laid, once, 'none laid out again');
 });
 
 test('Fit and a breadcrumb zoom out to their level and leave what is below them', () => {

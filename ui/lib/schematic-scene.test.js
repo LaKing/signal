@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { layout } from './schematic-layout.js';
 import { MIN_PX, boundaryLinks, breadcrumbs, inside, levelRect, nodeRect, planPort, rebase, scene } from './schematic-scene.js';
 import { READ_K, grownNode, linkScale, pinOne } from './schematic-open.js';
-import { belowThreshold } from './board-zoom.js';
+import { HIT_OPACITY } from './board-zoom.js';
 import { bake, bakeHolds, bakedMatrix, bakedRect, SVG_MAX_SCALE, SVG_MAX_TRANSLATE, SVG_MIN_SCALE } from './schematic-draw.js';
 import { hitTest, reselect } from './schematic-hit.js';
 import { fit, focus, pan, screenRect, toScreen, zoomAt } from './schematic-view.js';
@@ -167,8 +167,11 @@ test('hit testing finds ports, boxes, wires and the background, innermost first'
   assert.equal(hitTest(drawn, { x: onWire.x, y: onWire.y + 20 }).kind, 'background');
   assert.equal(hitTest(drawn, { x: -50, y: -50 }).kind, 'background');
 
-  // Opened, a box inside drums wins over drums itself.
-  const deep = scene({ layoutOf, view: drumsAt(1.01), viewport, pinned: DRUMS });
+  // Opened and shown enough to be hit (2026-10-31: HIT_OPACITY), a box inside drums wins over drums itself.
+  let f = 1.01;
+  let deep = scene({ layoutOf, view: drumsAt(f), viewport, pinned: DRUMS });
+  for (; deep.levels[1].opacity < HIT_OPACITY && f < 1e3; f *= 1.25) deep = scene({ layoutOf, view: drumsAt(f), viewport, pinned: DRUMS });
+  assert.ok(deep.levels[1].opacity >= HIT_OPACITY);
   const inner = deep.levels[1];
   const kick = inner.layout.nodes.find((n) => n.name === 'kick');
   const at = toScreen(inner.transform, { x: kick.x + kick.w / 2, y: kick.y + kick.h / 2 });
@@ -345,10 +348,10 @@ test('ten nested composites of ordinary size are reached by zooming and clicking
   assert.equal(drawn.levels.length, 11, `ten levels open after ${steps} steps`);
   assert.deepEqual(breadcrumbs(drawn).map((c) => c.name), ['', 'c', 'c', 'c', 'c', 'c', 'c', 'c', 'c', 'c', 'c']);
   assert.equal(view.path, '/c/c/c/c/c/c/c/c/c/c');
-  // The innermost die is hit once it is drawn (ADR 0047 §8: its text at its threshold): zoomed on until it is.
+  // The innermost die is hit once it is shown enough (ADR 0047 §8; 2026-10-31: HIT_OPACITY): zoomed on until it is.
   let leaf = drawn.levels[10];
   const p = leaf.layout.nodes.find((n) => n.name === 'p');
-  for (let i = 0; i < 100 && belowThreshold(leaf.transform.k); i++) {
+  for (let i = 0; i < 100 && leaf.opacity < HIT_OPACITY; i++) {
     drawn = scene({ layoutOf, view: zoomAt(view, 1.25, toScreen(leaf.transform, centreOf(p))), viewport, pinned });
     view = drawn.view;
     leaf = drawn.levels[10];

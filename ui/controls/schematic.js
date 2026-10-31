@@ -2,10 +2,11 @@
 // schematic with clickable parts (M2.9-1, ADR 0026 §2–3,
 // docs/ui-controls.md "Schematic"). It draws the `graph` message: the top
 // level's instances and connections, laid out (ui/lib/schematic-layout.js)
-// with the positions stored in ui/schematic.toml; a click or a double-click
-// on a composite chip zooms into it, its inside (its die) drawn in its
-// package, and Escape, a breadcrumb or zooming out past its threshold
-// leaves it (ADR 0047 §8, phase 3; ui/lib/board-zoom.js,
+// with the positions stored in ui/schematic.toml; zooming in on a composite
+// chip fades its inside (its die) in, drawn in its package, and zooming out
+// fades it out along the same curve (2026-10-31, semantic zoom); a click or a
+// double-click travels into it, and Escape or a breadcrumb back out
+// (ADR 0047 §8, phase 3; ui/lib/board-zoom.js,
 // ui/lib/schematic-scene.js, ui/lib/schematic-open.js). One view
 // transform, wheel and pinch zoom about the pointer, the background drags to
 // pan, keys + − 0 and the arrows. Clicking selects an instance, a port or a
@@ -79,19 +80,19 @@ import { formatFixed } from '../lib/format.js';
 import { HEADER, PARAMS, addPinAt, dragPosition, insideKey, layout } from '../lib/schematic-layout.js';
 import { dieSignature, relayout, structureKey } from '../lib/board-memo.js';
 import { pinKey, sceneTones } from '../lib/board-tone.js';
-import { portNet } from '../lib/board-net.js';
+import { portNet, wireNet } from '../lib/board-net.js';
 import { orthGeometry } from '../lib/board-route.js';
 import { cornerAt } from '../lib/board-view.js';
 import { insideBanner, insideReason, isPreviewLevel, isSlotInside, levelData, unmatchedReason } from '../lib/slot.js';
 import { DragFollow, ownedLabels } from '../lib/schematic-drag.js';
 import { aroundReason, dragAction, drawOrder, editable, editLevel, openFrameHit, pinOne, shownFrame, unpin } from '../lib/schematic-open.js';
-import { boundaryLinks, breadcrumbs, chain, drawnInside, nodeRect, rebase, reroot, scene } from '../lib/schematic-scene.js';
+import { MAX_DEPTH, boundaryLinks, breadcrumbs, chain, drawnInside, nodeRect, rebase, reroot, risen, scene } from '../lib/schematic-scene.js';
 import { bake, bakeHolds, bakedMatrix, bakedPath, bakedPin, bakedPoint, bakedRect, inBounds, reconcile, sameItems } from '../lib/schematic-draw.js';
 import { hitTest, instanceHit, portHit, reselect, wireHit } from '../lib/schematic-hit.js';
 import { cardStream, converterText, dragMessage, releaseMessage, resetMessage, rowValues, staleNotice } from '../lib/schematic-inspector.js';
 import { LEVEL_RATE, SLOTS, candidates, levelPlan, levelSpan, mutedOf, parameterSpan } from '../lib/schematic-levels.js';
 import { isDiscrete, selectOptions, selectValue, valueLabel } from '../lib/value-set.js';
-import { IDENTITY, commandView, fit, focus, matrix, pan, screenRect, toLocal, toScreen, wheelView, zoomAt } from '../lib/schematic-view.js';
+import { IDENTITY, commandView, fit, focus, matrix, pan, toLocal, toScreen, wheelView, zoomAt } from '../lib/schematic-view.js';
 import { WheelKinds } from '../lib/wheel.js';
 import { keyCommand, keymap, shownKeys, wheelCommand } from '../lib/keys.js';
 import { registerWheel, takesWheel } from './keyboard.js';
@@ -104,7 +105,7 @@ import { levelControls, levelFaces } from '../lib/parts.js';
 import { FACE_LABEL_CHARS, hotAddresses } from '../lib/schematic-face.js';
 import { SchematicFaces } from './schematic-faces.js';
 import { BOARD_CSS, SchematicBoard } from './schematic-board.js';
-import { ZOOM_MS, dieOpacity, ease, surroundOpacity, tween, zoomInView, zoomedOutOf } from '../lib/board-zoom.js';
+import { HIT_OPACITY, ZOOM_MS, ease, surroundOpacity, tween, zoomInView } from '../lib/board-zoom.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 /** A press that moves less than this (px) is a click. */
@@ -131,6 +132,8 @@ const SHOWN_FLASH_MS = 1300;
 /** A second click within this long (ms) and DOUBLE_PX of a click that opened or closed a composite is the double-click's, not one of its own. */
 const DOUBLE_MS = 500;
 const DOUBLE_PX = 6;
+/** A die the zoom opens fades in over at least this long (ms), however far past its band's start it opened (2026-10-31). */
+const RISE_MS = 200;
 
 const CSS = `
 :host { display: block; position: relative; overflow: hidden; overscroll-behavior: none; height: 100%; outline: none; --side-width: 300px;
@@ -388,6 +391,8 @@ export class SignalSchematic extends HTMLElement {
     this.zooming = null;
     /** The person zoomed out since the last frame: a die gone below its threshold is left (`leaveFaded`). */
     this.zoomedOut = false;
+    /** The person zoomed in since the last frame, about this screen point: a die come over its threshold opens (`openRisen`). */
+    this.zoomedIn = null;
     this.drawn = null;
     /** Each drawn level's group and its elements, by path. */
     this.groups = new Map();
@@ -919,6 +924,9 @@ export class SignalSchematic extends HTMLElement {
     this.drawn = scene({ layoutOf, view: this.view, viewport: this.viewport, pinned: this.pinned });
     // Zoomed out past a die's threshold (ADR 0047 §8): its level is left, as Escape leaves it.
     if (this.leaveFaded()) this.drawn = scene({ layoutOf, view: this.view, viewport: this.viewport, pinned: this.pinned });
+    // Zoomed in over one (2026-10-31, semantic zoom): it opens, fading in from where zooming out leaves it.
+    this.openRisen();
+    this.applyRise();
     // ADR 0047 phase 4: one colour per net, carried into each die through its package's pins.
     sceneTones(this.drawn.levels);
     // Kept in the coordinates of the deepest level under the centre.
@@ -1575,6 +1583,10 @@ export class SignalSchematic extends HTMLElement {
           raise(path, wire, this.groups.get(path)?.wireCache.get(wire.id)?.el ?? null);
         }
       }
+      // 2026-10-31: a selected wire followed into a die drawn at its end (the zoom opened it) is raised there too.
+      if (s.kind === 'wire' && this.drawn) {
+        for (const { path, wire } of wireNet(this.drawn.levels, s)) raise(path, wire, this.groups.get(path)?.wireCache.get(wire.id)?.el ?? null);
+      }
       if (!element) continue;
       if (s.kind === 'port' && element.localName === 'circle') {
         const ring = this.rings.get(element) ?? el('circle', { class: 'ring' });
@@ -1778,8 +1790,10 @@ export class SignalSchematic extends HTMLElement {
    * inside unknown) does not.
    */
   openInPlace(hit) {
-    // A package zoomed into already (a click on its die's empty space): selected only, the view where the person put it.
-    if (hit?.kind !== 'instance' || hit.node.kind !== 'instance' || !hit.node.composite || this.drawn?.open.has(hit.address)) return false;
+    if (hit?.kind !== 'instance' || hit.node.kind !== 'instance' || !hit.node.composite) return false;
+    // A package zoomed into already (a click on its die's empty space): selected only, the view where the person put it;
+    // one whose die is still mostly transparent (2026-10-31: opened by the zoom, the click hitting its package) travels in.
+    if (this.drawn?.open.has(hit.address) && !(this.levelOf(hit.address)?.opacity < HIT_OPACITY)) return false;
     if (!this.layoutOf(insideKey(hit.node)) || !chain((level) => this.layoutOf(level), hit.address)) return false;
     this.pinned = pinOne(this.pinned, hit.address);
     const framed = this.frameView(hit.address);
@@ -1832,15 +1846,63 @@ export class SignalSchematic extends HTMLElement {
   leaveFaded() {
     if (!this.zoomedOut || this.zooming) return false;
     this.zoomedOut = false;
-    // Innermost first, as far out as the zoom went (several thresholds at once).
+    // Innermost first, as far out as the zoom went (several thresholds at once): a die no longer shown at all (`shownOpacity` 0).
     let left = false;
     for (const level of [...(this.drawn?.levels ?? [])].reverse()) {
-      if (!level.parent || !zoomedOutOf(level.transform.k, screenRect(level.transform, level.layout.bounds), this.viewport)) break;
+      if (!level.parent || level.opacity > 0) break;
       this.pinned = unpin(this.pinned, level.path);
       if (this.revealPinned) this.revealPinned = unpin(this.revealPinned, level.path);
       left = true;
     }
     return left;
+  }
+
+  /**
+   * Zoomed in by the person (the wheel, a pinch, a key; 2026-10-31, the
+   * owner: "the microscope view should appear by itself while zooming in"):
+   * the chip whose die comes over its threshold about the zoom's point
+   * opens (`risen`, pinned as a click pins it), and the chips in its die
+   * the same way, recursively. Its die fades in by `shownOpacity`, the
+   * curve zooming out fades it out by, from 0 where `leaveFaded` leaves it.
+   * The selection is never touched. Whether one opened.
+   */
+  openRisen() {
+    const anchor = this.zoomedIn;
+    this.zoomedIn = null;
+    if (!anchor || this.zooming || !this.drawn) return false;
+    const layoutOf = (level) => this.layoutOf(level);
+    let opened = false;
+    for (let i = 0; i < MAX_DEPTH; i++) {
+      const path = risen({ drawn: this.drawn, layoutOf, viewport: this.viewport, anchor });
+      if (!path || this.pinned.has(path)) break;
+      this.pinned = pinOne(this.pinned, path);
+      this.drawn = scene({ layoutOf, view: this.view, viewport: this.viewport, pinned: this.pinned });
+      opened = true;
+      // One opened already past its band's start (a small project whose dies are readable fitted, a step of a mouse's
+      // wheel across the whole band) does not pop in: it fades in over RISE_MS too (`applyRise`).
+      const reduced = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+      if (!reduced && typeof requestAnimationFrame === 'function') (this.rising ??= new Map()).set(path, { start: null });
+    }
+    return opened;
+  }
+
+  /** Each die the zoom just opened shown at most as far as RISE_MS since it opened lets it (`openRisen`): the next frame asked for until it is whole. */
+  applyRise() {
+    if (!this.rising?.size || !this.drawn) return;
+    const now = globalThis.performance?.now?.() ?? Date.now();
+    let more = false;
+    for (const [path, rise] of this.rising) {
+      const level = this.drawn.levels.find((l) => l.path === path);
+      rise.start ??= now;
+      const ramp = Math.min(1, (now - rise.start) / RISE_MS);
+      if (!level || ramp >= 1) {
+        this.rising.delete(path);
+        continue;
+      }
+      level.opacity = Math.min(level.opacity, ramp);
+      more = true;
+    }
+    if (more) this.schedule();
   }
 
   /**
@@ -1854,7 +1916,7 @@ export class SignalSchematic extends HTMLElement {
     for (const level of this.drawn?.levels ?? []) {
       const group = this.groups.get(level.path);
       if (!group?.g?.style) continue;
-      const opacity = level.parent ? dieOpacity(level.transform.k) : 1;
+      const opacity = level.parent ? level.opacity : 1;
       const text = opacity < 1 ? String(Math.round(opacity * 1000) / 1000) : '';
       if (group.g.style.opacity !== text) group.g.style.opacity = text;
       const parent = level.parent && this.groups.get(level.parent.path);
@@ -2020,6 +2082,8 @@ export class SignalSchematic extends HTMLElement {
       return;
     }
     if (!gesture.moved) {
+      // The selection before a click, unless it is a double-click's second: a double-click gives it back (`doubleClick`).
+      if (!this.secondClick(at, event.timeStamp, this.lastClick)) this.lastClick = { at, time: event.timeStamp, selected: this.selected };
       // The second click of a double-click on what the first opened or closed: the double-click's alone (`doubleClick`).
       if (this.secondClick(at, event.timeStamp)) return;
       const pressed = gesture.clicked ?? gesture.hit;
@@ -2205,6 +2269,11 @@ export class SignalSchematic extends HTMLElement {
 
   doubleClick(event) {
     if (!this.drawn) return;
+    // 2026-10-31 (the owner: "double-clicking a chip also changes the selection, so you cannot follow a signal into it"):
+    // a double-click never changes the selection; what its first click selected is given back.
+    const before = this.lastClick;
+    this.lastClick = null;
+    if (before && this.secondClick(this.point(event), event.timeStamp, before)) this.select(before.selected);
     // Its first click opened the composite (or closed it, by its ×): what it opened is entered, nothing else happens.
     const last = this.lastToggle;
     this.lastToggle = null;
@@ -2249,8 +2318,20 @@ export class SignalSchematic extends HTMLElement {
   /** The person's zoom by `factor` about screen point `at` (null: the centre): the view only, opening and closing nothing (2026-10-22). */
   zoomBy(factor, at = null) {
     this.stopZoom();
-    if (factor < 1) this.zoomedOut = true;
-    this.setView(zoomAt(this.view, factor, at ?? { x: this.viewport.w / 2, y: this.viewport.h / 2 }));
+    const about = at ?? { x: this.viewport.w / 2, y: this.viewport.h / 2 };
+    this.zoomed(factor, about);
+    this.setView(zoomAt(this.view, factor, about));
+  }
+
+  /** The person zoomed by `factor` about screen point `at`: zooming out leaves the dies it fades out (`leaveFaded`), zooming in opens those it fades in (`openRisen`), at the next frame. */
+  zoomed(factor, at) {
+    if (factor < 1) {
+      this.zoomedOut = true;
+      this.zoomedIn = null;
+    } else if (factor > 1) {
+      this.zoomedIn = at;
+      this.zoomedOut = false;
+    }
   }
 
   /**
@@ -2271,7 +2352,7 @@ export class SignalSchematic extends HTMLElement {
     if (next === this.view) return;
     this.closeMenu();
     this.stopZoom();
-    if (next.k < this.view.k) this.zoomedOut = true;
+    this.zoomed(next.k / this.view.k, this.point(event));
     this.setView(next);
   }
 

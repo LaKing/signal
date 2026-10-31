@@ -13,7 +13,11 @@
 // Enter, Open in place, a reveal: it is pinned, `pinOne`) and closes when
 // they close it (formerly the × in its frame's header; Escape, Close, a
 // breadcrumb, Fit: unpinned, `unpin`), never because of the view's scale:
-// a zoom or a pan only moves the view. At most one is open per level
+// a zoom or a pan only moves the view. (2026-10-31, semantic zoom on the
+// board: the person's zoom in pins the chip whose die it fades in, and the
+// zoom out unpins the one it fades out, `risen` in ui/lib/schematic-scene.js
+// and `openRisen`, `leaveFaded` in <signal-schematic>; a pan still opens and
+// closes nothing.) At most one is open per level
 // (`chooseOpen`, `pinOne`), as grown frames would cover each other.
 // Positions are never changed: the opened copy of a level
 // (`openedLayout`) is drawn, its other boxes moved out of the frame's way

@@ -7,8 +7,10 @@
 // everything around the package fades as the die comes in, to SURROUND. A
 // click, a double-click or Enter zooms the view in ZOOM_MS until the package
 // fills the stage; Escape and a breadcrumb zoom back out;
-// zooming out until the die is small or unreadable leaves it. All of it
-// is view state (rule 4). Pure; no DOM.
+// zooming out until the die is small or unreadable leaves it, and
+// (2026-10-31, semantic zoom) zooming in until it shows opens it, along the
+// same fade (`shownOpacity`, `risen`). All of it is view state (rule 4).
+// Pure; no DOM.
 
 import { zoomAt, pan } from './schematic-view.js';
 
@@ -43,11 +45,37 @@ export function belowThreshold(k) {
 
 /** A die zoomed out until its rectangle is smaller than this share of the stage both ways is left (it opens at its natural size, so its text alone would keep it until the whole board's is unreadable). */
 export const LEAVE_SHARE = 0.25;
+/** A die's rectangle this large a share of the stage (its larger way) or more no longer holds its fade back (the size's own band, LEAVE_SHARE to this). */
+export const SHARE_FULL = 0.4;
 
-/** Whether a die drawn at scale `k`, its rectangle `rect` on screen, is zoomed out of: under its text's threshold, or small on the stage. */
-export function zoomedOutOf(k, rect, viewport) {
-  return belowThreshold(k) || (rect.w < viewport.w * LEAVE_SHARE && rect.h < viewport.h * LEAVE_SHARE);
+/** How much the size on the stage of a die's rectangle `rect` lets it show: 0 under LEAVE_SHARE of the stage both ways, 1 from SHARE_FULL either way, linear between. */
+export function shareOpacity(rect, viewport) {
+  if (!(viewport?.w > 0) || !(viewport?.h > 0)) return 1;
+  const share = Math.max(rect.w / viewport.w, rect.h / viewport.h);
+  if (!(share > LEAVE_SHARE)) return 0;
+  if (share >= SHARE_FULL) return 1;
+  return (share - LEAVE_SHARE) / (SHARE_FULL - LEAVE_SHARE);
 }
+
+/**
+ * How much of a die is shown (2026-10-31, semantic zoom): drawn at scale
+ * `k` on screen, its rectangle `rect` on screen in `viewport`, the lesser
+ * of its text's fade (`dieOpacity`) and its size's (`shareOpacity`). One
+ * function of the view alone, so a die fades in as it is zoomed into and
+ * out as it is zoomed out of along the same curve; 0 is where it is left
+ * (`zoomedOutOf`) and where the zoom opens it.
+ */
+export function shownOpacity(k, rect, viewport) {
+  return Math.min(dieOpacity(k), shareOpacity(rect, viewport));
+}
+
+/** Whether a die drawn at scale `k`, its rectangle `rect` on screen, is zoomed out of: under its text's threshold, or small on the stage (`shownOpacity` 0). */
+export function zoomedOutOf(k, rect, viewport) {
+  return shownOpacity(k, rect, viewport) === 0;
+}
+
+/** A die shown less than this (`shownOpacity`) is not hit: its package is, as when it is not drawn. */
+export const HIT_OPACITY = 0.5;
 
 /** The scale (on screen) at which a die is drawn whole. */
 export const FULL_K = FADE_FULL_PX / DIE_TEXT;

@@ -4,7 +4,7 @@
 // (`minTurns`), the wheel left to the schematic by a control that does not own it (`wheelOwner`).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DIE_MAX_K, DIE_TEXT, FADE_FROM_PX, FADE_FULL_PX, FULL_K, SURROUND, belowThreshold, dieOpacity, ease, surroundOpacity, tween, zoomInView } from './board-zoom.js';
+import { DIE_MAX_K, DIE_TEXT, FADE_FROM_PX, FADE_FULL_PX, FULL_K, LEAVE_SHARE, SHARE_FULL, SURROUND, belowThreshold, dieOpacity, ease, shareOpacity, shownOpacity, surroundOpacity, tween, zoomInView, zoomedOutOf } from './board-zoom.js';
 import { screenRect, toScreen } from './schematic-view.js';
 import { minTurns } from './board-maze.js';
 import { wheelOwner } from './wheel.js';
@@ -28,6 +28,34 @@ test('a die fades in from 4 px of text on screen, whole from 7 px; around it the
   assert.equal(surroundOpacity(0), 1);
   assert.ok(Math.abs(surroundOpacity(1) - SURROUND) < 1e-12);
   assert.ok(SURROUND >= 0.15 && SURROUND <= 0.25, 'the owner: about 15–25 %');
+});
+
+// 2026-10-31 (semantic zoom): one fade, of the view alone, opens a die zooming in and leaves it zooming out.
+test('a die’s shown opacity is monotonic across the zoom band, 0 exactly where it is left, and the lesser of its text’s and its size’s fades', () => {
+  const viewport = { w: 1000, h: 600 };
+  const die = { x: 0, y: 0, w: 2000, h: 1000 };
+  // Two dies: one whose text leads (large, scaled down into its package), one whose size on the stage leads (small).
+  for (const link of [0.1, 3]) {
+    let last = -1;
+    let first = null;
+    for (let k = 0.001; k < 50; k *= 1.01) {
+      const t = { k: k * link, x: 0, y: 0 };
+      const rect = screenRect(t, die);
+      const o = shownOpacity(t.k, rect, viewport);
+      assert.ok(o >= last - 1e-12, `monotonic at ${k}: ${o} after ${last}`);
+      assert.ok(o >= 0 && o <= 1);
+      assert.equal(o, Math.min(dieOpacity(t.k), shareOpacity(rect, viewport)));
+      assert.equal(zoomedOutOf(t.k, rect, viewport), o === 0, 'left exactly where it is not shown');
+      if (first === null && o > 0) first = o;
+      last = o;
+    }
+    assert.equal(last, 1, 'whole at the end');
+    assert.ok(first < 0.02, `it starts from nothing (no jump): ${first}`);
+  }
+  // The size's band.
+  assert.equal(shareOpacity({ w: 1000 * LEAVE_SHARE * 0.99, h: 10 }, viewport), 0);
+  assert.equal(shareOpacity({ w: 10, h: 600 * SHARE_FULL }, viewport), 1);
+  assert.ok(Math.abs(shareOpacity({ w: 1000 * (LEAVE_SHARE + SHARE_FULL) / 2, h: 10 }, viewport) - 0.5) < 1e-9);
 });
 
 test('the travel into a chip: from the view to the chip framed, a zoom about the point both keep, eased', () => {

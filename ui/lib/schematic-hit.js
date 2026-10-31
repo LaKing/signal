@@ -14,7 +14,7 @@
 import { nearBundle } from './schematic-bundle.js';
 import { groupAnchors } from './schematic-groups.js';
 import { INPUTS, OUTPUTS } from './schematic-layout.js';
-import { belowThreshold } from './board-zoom.js';
+import { HIT_OPACITY, belowThreshold } from './board-zoom.js';
 import { controlHit } from './schematic-controls.js';
 import { toLocal } from './schematic-view.js';
 import { curveDistance, distanceToSegment } from './schematic-wire.js';
@@ -145,8 +145,9 @@ export function bundleHit(entry, bundle) {
 export function hitTest(drawn, point) {
   for (let i = drawn.levels.length - 1; i >= 0; i--) {
     const entry = drawn.levels[i];
-    // A die not drawn yet (ADR 0047 §8: its text under its threshold on screen) is not hit: its package is.
-    if (entry.parent && belowThreshold(entry.transform.k)) continue;
+    // A die not drawn yet (ADR 0047 §8: its text under its threshold on screen), or still mostly transparent
+    // (2026-10-31: under HIT_OPACITY as it fades in), is not hit: its package is.
+    if (entry.parent && (entry.opacity === undefined ? belowThreshold(entry.transform.k) : entry.opacity < HIT_OPACITY)) continue;
     const local = toLocal(entry.transform, point);
     const scale = entry.transform.k;
     // An open composite's frame (M2.13-3) lies over its neighbours: inside it, only its own pins and box are hit.
