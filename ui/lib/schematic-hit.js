@@ -28,12 +28,19 @@ export const PORT_PX = 9;
 /** A wire is hit within this distance (px). */
 export const WIRE_PX = 4;
 /**
- * ADR 0047 phase 4 (the owner: "not every element is selectable"): a pin is
- * hit within at least this (px) however small its box on screen, and a pin
+ * ADR 0047 phase 4 (the owner: "not every element is selectable"; phase 5:
+ * "only if I hit exactly the middle"): a pin is hit within at least this
+ * (px) however small its box on screen, and a pin
  * of a box with no height (a die's parameters' strip) or no width (its
  * interface's columns) within PORT_PX.
  */
-export const MIN_PORT_PX = 4;
+export const MIN_PORT_PX = 8;
+
+/** A side pin's name runs this far into its box (layout units: its gap, its 9-unit text per character), its leg this far out, its row this high each way. */
+const PIN_LABEL_GAP = 6;
+const PIN_LABEL_CHAR = 5.4;
+const PIN_LEG = 5;
+const PIN_ROW_HALF = 7;
 
 /** How far (level units) `wire` passes from `p`: a board's on its drawn corners (its turns are rounded to a few px on screen), else its curve, else its polyline; Infinity beyond `limit`. */
 function wireDistance(wire, p, limit) {
@@ -167,6 +174,34 @@ export function hitTest(drawn, point) {
         }
         const d = Math.hypot(port.x - local.x, port.y - local.y) * scale;
         if (d <= reach && (!best || d < best.d)) best = { d, node, port };
+      }
+    }
+    // ADR 0047 phase 5 (the owner: "a click selects the composite; the whole solid area should be the pin's"): on a package's
+    // edge its pins win over its box: anywhere on its connector's pill the nearest of its pins (by x), anywhere on a side pin's
+    // leg and name the pin.
+    if (!best && entry.layout?.board) {
+      const pad = MIN_PORT_PX / scale;
+      for (const node of nodes) {
+        if (node.kind !== 'instance' || best) continue;
+        if (node.connector && local.x >= node.x + node.connector.dx0 - pad && local.x <= node.x + node.connector.dx1 + pad && Math.abs(local.y - node.y) <= 3 + pad) {
+          for (const port of node.ins) {
+            if (port.side !== 'top') continue;
+            const d = Math.abs(port.x - local.x);
+            if (!best || d < best.d) best = { d, node, port };
+          }
+          continue;
+        }
+        if (entry.collapsed && node.groups) continue;
+        for (const port of [...node.ins, ...node.outs]) {
+          if (port.side === 'top') continue;
+          const out = port.direction === 'out';
+          const name = PIN_LABEL_GAP + String(port.name ?? '').length * PIN_LABEL_CHAR;
+          const [x0, x1] = out ? [port.x - name, port.x + PIN_LEG + pad] : [port.x - PIN_LEG - pad, port.x + name];
+          if (local.x >= x0 && local.x <= x1 && Math.abs(local.y - port.y) <= PIN_ROW_HALF) {
+            best = { d: 0, node, port };
+            break;
+          }
+        }
       }
     }
     if (best?.anchor) return groupHit(entry, best.node, best.anchor.group);

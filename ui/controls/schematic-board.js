@@ -369,7 +369,8 @@ export class SchematicBoard {
       const tones = new Set(members.map((w) => level.tones?.get(w.id) ?? (w.kind === 'binding' ? 'binding' : w.shape)));
       const tone = tones.size === 1 ? [...tones][0] : 'mixed';
       const rect = bakedRect(baked, r.band);
-      if (rect) parts.push(el('rect', { class: `ribbon ${tone}`, rx: 2 * baked.m, 'data-ribbon': String(r.id), ...rect }));
+      // Square ends (ADR 0047 phase 5: a rounded end read as a twist).
+      if (rect) parts.push(el('rect', { class: `ribbon ${tone}`, 'data-ribbon': String(r.id), ...rect }));
       // Its label where the layout placed it, off every box and label (`placeRibbonLabels`); none where no place was free.
       if (r.text && text(8)) {
         const at = bakedPoint(baked, r.text);

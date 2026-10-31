@@ -1104,7 +1104,8 @@ export class SignalSchematic extends HTMLElement {
   /** `wire`'s geometry at `level`: a board's with its corners rounded to CORNER_PX on screen (`level.corner`). */
   wireShape(level, wire) {
     if (!wire.orth || !level.corner) return wire;
-    return orthGeometry(wire.display ?? wire.corners, level.corner);
+    // A wire drawn in a lane or a ribbon turns square: lanes a unit or three apart would cross each other's rounded turns.
+    return orthGeometry(wire.display ?? wire.corners, wire.display ? 0 : level.corner);
   }
 
   wireElement(level, wire, baked) {

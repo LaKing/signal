@@ -514,3 +514,93 @@ test('no chip lies across a card’s edge: inside its card, or beside it wholly 
     }
   }
 });
+
+// The owner's feedback on 0.3.29 (translated): "no twisting at a ribbon's end … a wire leaves from the ribbon's side before its
+// end"; "the pins on the composites' edge are too dense … a click selects the composite".
+
+test('a ribbon ends square and every member runs straight in its lane from one end of its band to the other (none leaves from its side)', async () => {
+  const src = readFileSync(new URL('ui/controls/schematic-board.js', root), 'utf8');
+  const line = src.split('\n').find((l) => l.includes("class: `ribbon ${tone}`"));
+  assert.ok(line && !/\brx\b/.test(line), 'no rounded band');
+  const of = studio();
+  for (const level of ['', 'moog_voice']) {
+    const lay = of(level);
+    for (const r of lay.board.ribbons.filter((x) => x.lanes)) {
+      const h = r.axis === 'h';
+      const [b0, b1] = h ? [r.band.x, r.band.x + r.band.w] : [r.band.y, r.band.y + r.band.h];
+      const [c0, c1] = h ? [r.band.y, r.band.y + r.band.h] : [r.band.x, r.band.x + r.band.w];
+      const nets = new Set(r.members.map((m) => m.net));
+      for (const w of lay.wires.filter((x) => nets.has(mazeNet(x).net))) {
+        const c = w.display ?? w.corners;
+        const through = c.some((p, k) => {
+          if (k === 0) return false;
+          const q = c[k - 1];
+          const at = h ? p.y : p.x;
+          if ((h ? p.y !== q.y : p.x !== q.x) || at < c0 || at > c1) return false;
+          return Math.min(h ? p.x : p.y, h ? q.x : q.y) <= b0 + 1e-6 && Math.max(h ? p.x : p.y, h ? q.x : q.y) >= b1 - 1e-6;
+        });
+        assert.ok(through, `${level || 'top'} ${w.id}: straight through its band, end to end`);
+      }
+    }
+  }
+});
+
+test('the synth’s legs never cross one another: rows join the channel outer rows outside, one clean turn each, and fan into the connector in order', () => {
+  const top = studio()('');
+  const legs = top.wires.filter((w) => w.kind === 'binding' && w.to.node === 'synth');
+  const segs = legs.flatMap((w) => {
+    const c = w.display ?? w.corners;
+    return c.slice(1).map((q, k) => ({ p: c[k], q, id: w.id }));
+  });
+  let crossings = 0;
+  for (const a of segs) {
+    if (a.p.y !== a.q.y) continue;
+    for (const b of segs) {
+      if (b.id === a.id || b.p.x !== b.q.x) continue;
+      if (b.p.x > Math.min(a.p.x, a.q.x) && b.p.x < Math.max(a.p.x, a.q.x) && a.p.y > Math.min(b.p.y, b.q.y) && a.p.y < Math.max(b.p.y, b.q.y)) crossings++;
+    }
+  }
+  assert.equal(crossings, 0, `${crossings} crossings among the synth's legs`);
+  // Each leg turns as few times as its way needs: down, along its row, down the channel, along the comb, down into its pin.
+  for (const w of legs) assert.ok((w.display ?? w.corners).length <= 7, `${w.id}: ${(w.display ?? w.corners).length - 2} turns`);
+});
+
+test('a connector’s pill is all pins: a click on its left end, middle, right end or between two pins selects a pin, never the composite, at every zoom; its pins stand apart for a click', () => {
+  const of = studio();
+  const top = of('');
+  const synth = top.nodes.find((n) => n.name === 'synth');
+  const tops = synth.ins.filter((p) => p.side === 'top').sort((a, b) => a.x - b.x);
+  // Fitting the chip (as a click zooms into it) its pins are a comfortable click apart.
+  const kChip = (viewport.w - 48) / synth.w;
+  const pitch = Math.min(...tops.slice(1).map((p, i) => p.x - tops[i].x));
+  assert.ok(pitch * kChip >= 10, `${(pitch * kChip).toFixed(1)} px apart fitting the chip`);
+  const kBoard = Math.min(viewport.w / top.bounds.w, viewport.h / top.bounds.h);
+  for (const k of [kBoard, kChip, 4 * kChip]) {
+    const x0 = synth.x + synth.connector.dx0;
+    const x1 = synth.x + synth.connector.dx1;
+    for (const x of [x0 + 0.5, (x0 + x1) / 2, x1 - 0.5, (tops[3].x + tops[4].x) / 2]) {
+      for (const dy of [0, 2, -2]) {
+        const p = { x, y: synth.y + dy };
+        const drawn = scene({ layoutOf: of, view: viewAt(p, k), viewport });
+        const hit = hitTest(drawn, toScreen(drawn.levels[0].transform, p));
+        assert.equal(hit.kind, 'port', `k ${k.toFixed(2)} at x ${x.toFixed(1)} dy ${dy}: ${hit.kind} ${hit.address ?? ''}`);
+        assert.ok(tops.some((t) => `/synth.${t.name}` === hit.address), `a pin of the connector (${hit.address})`);
+      }
+    }
+  }
+});
+
+test('a side pin’s whole drawn area is the pin: its dot, its leg and its name (min 8 px), never the box', () => {
+  const of = studio();
+  const top = of('');
+  const chip = top.nodes.find((n) => n.name === 'bus');
+  const pin = chip.ins[0];
+  for (const k of [0.6, 1, 3]) {
+    for (const p of [{ x: pin.x - 4, y: pin.y }, { x: pin.x + 3, y: pin.y + 2 }, { x: pin.x + 6 + pin.name.length * 3, y: pin.y - 2 }]) {
+      const drawn = scene({ layoutOf: of, view: viewAt(p, k), viewport });
+      const hit = hitTest(drawn, toScreen(drawn.levels[0].transform, p));
+      assert.equal(hit.kind, 'port', `k ${k} at ${JSON.stringify(p)}: ${hit.kind}`);
+      assert.equal(hit.port.name, pin.name);
+    }
+  }
+});

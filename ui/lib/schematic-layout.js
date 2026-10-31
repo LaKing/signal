@@ -551,7 +551,7 @@ ${p.name}`, { dx: map(p).x, dy: 0, side: 'top' });
 
 /** A die's parameters this many or more are one connector (ADR 0047 phase 5), their pins this far apart (die units), its outline this far past them. */
 export const CONNECTOR_MIN = 4;
-export const CONNECTOR_PITCH = 6;
+export const CONNECTOR_PITCH = 18;
 const CONNECTOR_PAD = 12;
 
 /** A die's parameters' strip (ADR 0047 §8): the node on its top edge. */
@@ -1179,8 +1179,9 @@ export function boardRibbons(nodes, wires, obstacles = [], labels = []) {
   // ADR 0047 phase 5: nets sharing a way (a chip's legs, a die's parameters, a wire run along another) each in a lane, a ribbon where three or more share it.
   const lanes = laneWires(all, { nameOf, isLeg: (net) => net.startsWith('leg:@control:'), ribbonName, groupOf, boxes });
   // Then side by side on their own tracks (phase 4), as the lanes draw them (a lane is never packed again: `RIBBON_NEAR`).
+  // (never a connector's bus: its pins stand apart for the click, its wires leave them as a curtain, not packed again).
   const side = formRibbons(
-    all.map((w) => ({ ...w, corners: lanes.display.get(w.id) ?? w.corners })),
+    all.filter((w) => !w.wire.bus).map((w) => ({ ...w, corners: lanes.display.get(w.id) ?? w.corners })),
     boxes,
     { nameOf, endsOf: (m) => [m.wire.from.node, m.wire.to.node] },
   );
@@ -1192,7 +1193,10 @@ export function boardRibbons(nodes, wires, obstacles = [], labels = []) {
     const groups = new Set(r.members.map((m) => groupOf(m.net)));
     r.group = groups.size === 1 ? [...groups][0] : null;
   }
-  const ribbons = [...lanes.ribbons.filter((r) => !chips.some((b) => meets(r.band, grown(b)))), ...side.ribbons];
+  // A lane's band ends square where its first member leaves it (the owner: "a wire leaves from the ribbon's side before its
+  // end — not right"): along its axis, only where every member runs straight in its lane (`trimBand`).
+  const kept = lanes.ribbons.map((r) => trimBand(r, lanes.display, all)).filter(Boolean);
+  const ribbons = [...kept.filter((r) => !chips.some((b) => meets(r.band, grown(b)))), ...side.ribbons];
   // A connector's ribbon is labelled by its connector (`params ×n` on the package): one label, its count.
   const connected = new Set(nodes.filter((n) => n.connector).map((n) => `legs:${n.id}`));
   if (nodes.some((n) => n.id === PARAMS && n.connector)) connected.add('params');
@@ -1204,14 +1208,49 @@ export function boardRibbons(nodes, wires, obstacles = [], labels = []) {
   for (const w of wires) {
     const shown = display.get(w.id);
     if (shown) {
+      // Square corners (ADR 0047 phase 5: lanes a unit or three apart would cross one another's rounded turns: a twist).
       w.display = shown;
-      Object.assign(w, orthGeometry(shown));
+      Object.assign(w, orthGeometry(shown, 0));
     } else if (w.display) {
       delete w.display;
       Object.assign(w, orthGeometry(w.corners));
     }
   }
   return ribbons;
+}
+
+/**
+ * Lane ribbon `r` (ui/lib/board-lanes.js) cut to where all its members run
+ * straight along it inside its band (each member's longest drawn segment
+ * on the band's axis within it; their common stretch), so none leaves it
+ * from its side before its end; null when that is shorter than a band.
+ */
+function trimBand(r, display, all) {
+  const h = r.axis === 'h';
+  const [b0, b1] = h ? [r.band.x, r.band.x + r.band.w] : [r.band.y, r.band.y + r.band.h];
+  const [c0, c1] = h ? [r.band.y, r.band.y + r.band.h] : [r.band.x, r.band.x + r.band.w];
+  let lo = b0;
+  let hi = b1;
+  const nets = new Set(r.members.map((m) => m.net));
+  for (const w of all) {
+    if (!nets.has(w.net)) continue;
+    const c = display.get(w.id) ?? w.corners;
+    let best = null;
+    for (let k = 1; k < c.length; k++) {
+      const [p, q] = [c[k - 1], c[k]];
+      const along = h ? p.y === q.y : p.x === q.x;
+      const at = h ? p.y : p.x;
+      if (!along || at < c0 || at > c1) continue;
+      const s0 = Math.max(b0, Math.min(h ? p.x : p.y, h ? q.x : q.y));
+      const s1 = Math.min(b1, Math.max(h ? p.x : p.y, h ? q.x : q.y));
+      if (s1 > s0 && (!best || s1 - s0 > best[1] - best[0])) best = [s0, s1];
+    }
+    if (!best) return null;
+    lo = Math.max(lo, best[0]);
+    hi = Math.min(hi, best[1]);
+  }
+  if (hi - lo < 24) return null;
+  return { ...r, band: h ? { ...r.band, x: lo, w: hi - lo } : { ...r.band, y: lo, h: hi - lo }, length: hi - lo };
 }
 
 /** A board's measures (ADR 0047 §6.6): of its routes, a leg's bus one net (its ribbons, `board.ribbons`, are counted apart). */
