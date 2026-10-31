@@ -9582,4 +9582,226 @@ mod tests {
             Some(10)
         );
     }
+
+    /// A host with no project open (app mode, the null driver), for the
+    /// request-ordering checks below; its folder and generation are set by
+    /// the test.
+    fn idle_host(name: &str) -> Host {
+        let base =
+            std::env::temp_dir().join(format!("signal-ui-host-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("project")).unwrap();
+        let config = AppHostConfig {
+            setup_path: base.join("setup.toml"),
+            project: None,
+            open_root: base.join("open"),
+            registry: Registry::new(),
+            backend: Backend::Null(Vec::new()),
+            compute: Vec::new(),
+            server: ServerOptions {
+                port: 0,
+                remote: false,
+                ui_dir: base.join("ui"),
+                project_ui: base.join("project").join("ui"),
+                client_queue: 16,
+            },
+            plays: false,
+        };
+        let mut host = Host::new_app(config).unwrap();
+        host.dir = base.join("project");
+        host.generation = 7;
+        host
+    }
+
+    fn order_name(order: Order) -> String {
+        match order {
+            Order::Write => "write".to_owned(),
+            Order::Save => "save".to_owned(),
+            Order::Ordered => "ordered".to_owned(),
+            Order::Live(address) => format!("live {address}"),
+            Order::Free => "free".to_owned(),
+        }
+    }
+
+    const MUTATIONS: [&str; 24] = [
+        "schematic.move",
+        "schematic.reset",
+        "patch",
+        "commit",
+        "retry",
+        "snapshot.save",
+        "snapshot.restore",
+        "snapshot.delete",
+        "snapshot.undo",
+        "snapshot.move",
+        "snapshot.transition",
+        "snapshot.exclude",
+        "panel.write",
+        "pattern.write",
+        "file.write",
+        "vendor",
+        "set",
+        "ramp",
+        "trigger",
+        "note",
+        "revert",
+        "project.save",
+        "project.revert",
+        "project.open",
+    ];
+
+    /// ADR 0048: how each message kind is ordered against the requests
+    /// waiting for the writer lock.
+    #[test]
+    fn each_kind_has_its_order() {
+        let message = json!({"address": "/a/freq"});
+        let order = |kind: &str, message: &Value| order_name(Host::order_of(kind, message));
+        for kind in &MUTATIONS[..16] {
+            assert_eq!(order(kind, &message), "write", "{kind}");
+        }
+        for kind in ["set", "ramp", "trigger", "note", "revert"] {
+            assert_eq!(order(kind, &message), "live /a/freq", "{kind}");
+            assert_eq!(order(kind, &json!({})), "live ", "{kind}");
+        }
+        assert_eq!(order("project.save", &message), "save");
+        for kind in ["project.open", "project.revert"] {
+            assert_eq!(order(kind, &message), "ordered", "{kind}");
+        }
+        for kind in [
+            "ping",
+            "describe",
+            "stats",
+            "subscribe",
+            "unsubscribe",
+            "file.read",
+            "panel.read",
+            "pattern.read",
+            "snapshot.list",
+            "setup.get",
+            "app.get",
+            "",
+            "no.such",
+        ] {
+            assert_eq!(order(kind, &message), "free", "{kind}");
+        }
+    }
+
+    fn code_of(result: Result<(), Failure>) -> &'static str {
+        match result {
+            Ok(()) => "ok",
+            Err(failure) => failure.code,
+        }
+    }
+
+    /// ADR 0049: a mutation naming another opening is refused; the
+    /// generation decides before the id; nothing else is checked.
+    #[test]
+    fn a_mutation_names_the_open_project() {
+        let host = idle_host("same-project");
+        let id = host.project_id();
+        for kind in MUTATIONS {
+            let check = |message: Value| code_of(host.same_project(kind, &message));
+            assert_eq!(check(json!({})), "ok", "{kind}");
+            assert_eq!(check(json!({"generation": null, "projectId": null})), "ok");
+            assert_eq!(check(json!({"generation": 7})), "ok", "{kind}");
+            assert_eq!(check(json!({"generation": 8})), "project-changed");
+            assert_eq!(check(json!({"generation": -1})), "bad-value");
+            assert_eq!(check(json!({"generation": 7.5})), "bad-value");
+            assert_eq!(check(json!({"generation": "7"})), "bad-value");
+            assert_eq!(check(json!({"projectId": id})), "ok", "{kind}");
+            assert_eq!(check(json!({"projectId": "other"})), "project-changed");
+            assert_eq!(check(json!({"projectId": 7})), "bad-value");
+            // The generation decides; the id is then not looked at.
+            assert_eq!(check(json!({"generation": 7, "projectId": "x"})), "ok");
+            assert_eq!(
+                check(json!({"generation": 8, "projectId": id})),
+                "project-changed"
+            );
+            assert_eq!(
+                check(json!({"generation": null, "projectId": "x"})),
+                "project-changed"
+            );
+        }
+        for kind in ["ping", "describe", "subscribe", "file.read", "app.get", ""] {
+            let message = json!({"generation": 8, "projectId": 3});
+            assert_eq!(code_of(host.same_project(kind, &message)), "ok", "{kind}");
+        }
+        let changed = host.same_project("commit", &json!({"generation": 8}));
+        assert_eq!(
+            changed.err().map(|failure| failure.message),
+            Some("not done: the request names the generation of a project no longer open (another project, or a new opening of it, is open now)".to_owned())
+        );
+        let changed = host.same_project("commit", &json!({"projectId": "x"}));
+        assert_eq!(
+            changed.err().map(|failure| failure.message),
+            Some("not done: the request names the id of a project no longer open (another project, or a new opening of it, is open now)".to_owned())
+        );
+    }
+
+    fn queued(kind: &str, address: Option<&str>) -> Waiting {
+        Waiting {
+            generation: Some(7),
+            since: Instant::now(),
+            job: Job::Message {
+                client: 1,
+                id: Value::Null,
+                text: String::new(),
+                kind: kind.to_owned(),
+                address: address.map(str::to_owned),
+                lock: true,
+                named: false,
+                permit: None,
+            },
+        }
+    }
+
+    /// ADR 0048: a live edit waits only behind a queued request that can
+    /// change its value.
+    #[test]
+    fn a_live_edit_waits_behind_what_changes_its_value() {
+        let mut host = idle_host("queued-for");
+        assert!(!host.queued_for("/a/freq"));
+        // The queued request's kind and address; whether a live edit of
+        // `/a/freq`, and of `/b/freq`, waits behind it.
+        let cases: [(&str, Option<&str>, bool, bool); 16] = [
+            ("commit", None, true, true),
+            ("commit", Some("/a/freq"), true, false),
+            ("retry", Some("/a/freq"), true, false),
+            ("retry", None, false, false),
+            ("set", Some("/a/freq"), true, false),
+            ("ramp", Some("/a/freq"), true, false),
+            ("trigger", Some("/a/freq"), true, false),
+            ("note", Some("/a/freq"), true, false),
+            ("revert", Some("/a/freq"), true, false),
+            ("snapshot.restore", None, true, true),
+            ("snapshot.undo", None, true, true),
+            ("project.open", None, true, true),
+            ("project.revert", None, true, true),
+            ("project.save", None, false, false),
+            ("patch", Some("/a/freq"), false, false),
+            ("snapshot.save", None, false, false),
+        ];
+        for (kind, address, a, b) in cases {
+            host.waiting.clear();
+            host.waiting.push_back(queued(kind, address));
+            assert_eq!(host.queued_for("/a/freq"), a, "{kind} {address:?}");
+            assert_eq!(host.queued_for("/b/freq"), b, "{kind} {address:?}");
+        }
+        // A queued Save changes no live value.
+        host.waiting.clear();
+        host.waiting.push_back(Waiting {
+            generation: Some(7),
+            since: Instant::now(),
+            job: Job::Save {
+                save_as: None,
+                done: Box::new(|_| {}),
+            },
+        });
+        assert!(!host.queued_for("/a/freq"));
+        // Any one queued request that can change it is enough.
+        host.waiting.push_back(queued("patch", None));
+        host.waiting.push_back(queued("set", Some("/b/freq")));
+        assert!(!host.queued_for("/a/freq"));
+        assert!(host.queued_for("/b/freq"));
+    }
 }
