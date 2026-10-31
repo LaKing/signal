@@ -778,3 +778,30 @@ test('shortNotice: the conflict notices fit the toolbar; others are kept', async
   assert.equal(shortNotice('not written: disk full'), 'not written: disk full');
   assert.equal(shortNotice(null), '');
 });
+
+// Second review of batch 2, item 6: a change pushed while the control's
+// own write is in flight (another writer, after ours) is not lost: looked
+// at once the write settles, it is shown (idle), as any push.
+test('a push that comes while a write is in flight is shown once it settles', async () => {
+  const c = new StatusConnection(NOTES());
+  c.status = 'open';
+  let release;
+  const { s, shown } = sync(c, { delay: 0 });
+  s.start();
+  await settle();
+  c.gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  s.edited(NOTES(0.3));
+  const writing = s.flush();
+  await settle();
+  // Another writer's change lands after ours; its push comes while our
+  // write's reply is still on the way.
+  c.emit('pattern.written', { type: 'pattern.written', name: 'melody', base: 'sha-external', text: NOTES(0.8) });
+  release();
+  c.gate = null;
+  await writing;
+  await settle();
+  assert.equal(shown.at(-1), NOTES(0.8), 'the push held during the write is shown after it');
+  assert.equal(s.base, 'sha-external');
+});

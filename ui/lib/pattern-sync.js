@@ -22,8 +22,8 @@
 // editor, another program; `origin: "file"`), seen by the server's watch.
 // An idle control (loaded, nothing pending, no write in flight) whose
 // pattern it names and whose base differs shows that text at once. Its own
-// write's push is ignored (the write is still in flight, or its base is
-// already ours). With an edit pending, both changed: the user's draft is
+// write's push is ignored (its base is already ours once the write settles;
+// a push that comes while a write is in flight is looked at then). With an edit pending, both changed: the user's draft is
 // kept (shown, not written) and `onNotice` says so (`BOTH_CHANGED`); the
 // next edit, or `retry()`, writes the draft over the file's new version,
 // as the user then chose.
@@ -104,6 +104,7 @@ export class PatternSync {
     this.stalled = false; // stopped after MAX_CONFLICTS until the next edit
     this.offline = false; // a write was refused because the connection dropped
     this.closed = false;
+    this.deferred = null; // a push that came while a write was in flight
   }
 
   /** Tells the control; a failure there never changes what was written. */
@@ -158,8 +159,13 @@ export class PatternSync {
   pushed(message) {
     if (this.closed || !this.loaded || message?.name !== this.name) return;
     if (!message.base || message.base === this.base) return;
-    // A write in flight: the push may be its own; its reply or conflict decides.
-    if (this.writing) return;
+    // A write in flight: the push may be its own, or another's that landed
+    // after it; kept, and looked at again once the write settles (then a
+    // push of its own base is ignored as ours).
+    if (this.writing) {
+      this.deferred = message;
+      return;
+    }
     if (this.pending !== null) {
       const pattern = typeof message.text === 'string' ? this.parse(message.text, ' written elsewhere') : null;
       if (pattern) this.adopt({ text: message.text, base: message.base }, pattern);
@@ -268,6 +274,9 @@ export class PatternSync {
     if (this.pending === null || this.stalled) return Promise.resolve();
     this.writing = this.writeOnce().finally(() => {
       this.writing = null;
+      const deferred = this.deferred;
+      this.deferred = null;
+      if (deferred) this.pushed(deferred);
     });
     return this.writing.then(() => {
       if (this.pending === null || this.stalled) return undefined;
