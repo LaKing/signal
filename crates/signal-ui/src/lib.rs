@@ -61,6 +61,28 @@ pub use local::LocalStream;
 pub use server::LocalConnector;
 pub use server::{MAX_CLIENTS, ServerOptions};
 
+/// Whether `file` (a path relative to the project folder `dir`, such as
+/// `ui/main.html`) is the project's own: plain names only (no `..`, `.`,
+/// root or prefix), and neither the file nor any folder on its way is a
+/// link. Only such a presentation file is read or written for a patch: one
+/// reached through a link, or leaving the folder, is never read (the host
+/// takes it as absent, `signal mcp` refuses the patch), whatever it holds.
+pub fn own_file(dir: &Path, file: &str) -> bool {
+    let mut at = dir.to_owned();
+    let mut named = false;
+    for component in Path::new(file).components() {
+        let std::path::Component::Normal(name) = component else {
+            return false;
+        };
+        at.push(name);
+        named = true;
+        if std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) {
+            return false;
+        }
+    }
+    named
+}
+
 /// The protocol version (`hello`, `welcome`, byte 1 of every binary frame).
 pub const PROTOCOL: u32 = 1;
 

@@ -2025,9 +2025,17 @@ fn patch_ops(context: &Context, level: String, base: Option<String>, ops_json: V
             }
             signal_project::content_names(project.as_ref(), &context.dir, load, context.registry)
         };
+        // A panel file is read only when it is the project's own: one reached
+        // through a link or leaving the folder is never read, and the patch
+        // is refused alike whatever it holds.
+        let foreign = std::cell::RefCell::new(None::<String>);
         let file_of = |path: &str| {
             // ADR 0046: a panel file (a slot's part, the main panel), read now.
             if path.starts_with("ui/") {
+                if !signal_ui::own_file(&context.dir, path) {
+                    foreign.borrow_mut().get_or_insert_with(|| path.to_owned());
+                    return None;
+                }
                 return std::fs::read_to_string(context.dir.join(path)).ok();
             }
             files
@@ -2058,6 +2066,11 @@ fn patch_ops(context: &Context, level: String, base: Option<String>, ops_json: V
         };
         // A patch that cannot be simulated here is not sent (fail closed).
         let patched = patch::apply(&before, None, &ops, &ctx);
+        if let Some(path) = foreign.take() {
+            return Err(refused(format!(
+                "not patched: {path} is not the project's own file (it is reached through a link, or leaves the project's folder); a patch reads and writes only the project's own presentation files"
+            )));
+        }
         if let Some(load) = denied.take() {
             return Err(not_loadable(&load));
         }

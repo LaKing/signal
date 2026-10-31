@@ -1569,6 +1569,58 @@ fn a_project_outside_the_load_roots_is_refused_unread() {
     assert!(mcp.finish().success());
 }
 
+/// External review (Codex): the patch simulation reads a panel file
+/// (`ui/…`) only when it is the project's own. A `ui/` folder or panel file
+/// reached through a link (to a file outside the project) is refused before
+/// it is read: the refusal is the same whether the outside file holds what
+/// the op names or not, so no op can tell what it holds; the outside file
+/// is never written.
+#[test]
+fn a_panel_file_outside_the_project_is_refused_unread() {
+    let text = "schema_version = 1\n\n[project]\nname = \"panels\"\nsample_rate = 48000\n\n[instances]\nosc = { module = \"std.sine_osc\" }\nout = { module = \"std.audio_out\", gain = 0.2 }\n\n[wiring]\nconnections = [\n  { from = \"osc.out\", to = \"out.l\" },\n]\n";
+    let dir = mcp_common::project(text, "mcp-ui-leak");
+    let outside = dir.parent().unwrap().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let secret = "<signal-panel><p>zebra secret</p></signal-panel>\n";
+    fs::write(outside.join("main.html"), secret).unwrap();
+    let mut mcp = Mcp::started(&dir, &[]);
+    // `was` is what the op says the file holds now: a guess at the outside
+    // file's text, right or wrong.
+    let probe = |was: &str| {
+        json!({"ops": [{"op": "panel.restore", "file": "main.html",
+            "text": "<signal-panel></signal-panel>\n", "was": was}]})
+    };
+    let ask = |mcp: &mut Mcp| -> (Value, Value) {
+        let right = mcp.call("patch", probe(secret));
+        let wrong = mcp.call("patch", probe("<p>a guess</p>\n"));
+        assert_eq!(right["isError"], true, "{right}");
+        (right, wrong)
+    };
+    // The panel file a link out of the project.
+    fs::create_dir_all(dir.join("ui")).unwrap();
+    std::os::unix::fs::symlink(outside.join("main.html"), dir.join("ui/main.html")).unwrap();
+    let (right, wrong) = ask(&mut mcp);
+    assert_eq!(right, wrong, "the same refusal, whatever the file holds");
+    assert!(
+        right.to_string().contains("not the project's own"),
+        "{right}"
+    );
+    // `ui/` itself a link out of the project.
+    fs::remove_dir_all(dir.join("ui")).unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("ui")).unwrap();
+    let (right, wrong) = ask(&mut mcp);
+    assert_eq!(right, wrong, "the same refusal, whatever the file holds");
+    assert!(
+        right.to_string().contains("not the project's own"),
+        "{right}"
+    );
+    assert_eq!(
+        fs::read_to_string(outside.join("main.html")).unwrap(),
+        secret
+    );
+    assert!(mcp.finish().success());
+}
+
 /// ADR 0037, editable insides: `slot_inside` makes the slot's own inside
 /// (composites/<slot>_inside.toml, the slot loading it); `patch` at its
 /// level builds it and wires its frame (`export.connect`); a project in a

@@ -5105,6 +5105,7 @@ impl Host {
             || (file.starts_with("interfaces/") && link(&self.dir.join("interfaces")))
             || (file.starts_with("ui/") && link(&project_ui(&self.dir)))
             || (file.starts_with("ui/parts/") && link(&self.dir.join("ui/parts")))
+            || (file.starts_with("ui/") && !crate::own_file(&self.dir, file))
     }
 
     /// ADR 0046: a presentation file of the project (`ui/main.html`,
