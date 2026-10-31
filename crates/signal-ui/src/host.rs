@@ -819,6 +819,11 @@ pub struct Host {
     /// Live notes each client holds (`note`, ADR 0039): the port and key,
     /// ended when the client goes so that no note is left sounding.
     auditions: BTreeMap<u64, BTreeSet<(PortAddress, u8)>>,
+    /// The note-offs of notes whose client went (or was evicted) that the
+    /// Controller has not taken yet (a full command queue): sent again
+    /// each step until it takes them. At most one per port and key, so
+    /// bounded by the plan's audition inputs times 128 keys.
+    releases: BTreeSet<(PortAddress, u8)>,
     next_failure: u64,
     /// The `unsaved` message last pushed.
     unsaved_pushed: Option<Value>,
@@ -1275,6 +1280,7 @@ impl Host {
             resend: BTreeSet::new(),
             port_edits: BTreeMap::new(),
             auditions: BTreeMap::new(),
+            releases: BTreeSet::new(),
             next_failure: 1,
             unsaved_pushed: None,
             graph_pushed: None,
@@ -1462,6 +1468,8 @@ impl Host {
         let _no_wait = transaction::NoWait::enter(Duration::ZERO);
         self.run_waiting();
         self.poll();
+        // Before any client's message: a waiting note-off goes first.
+        self.send_releases();
         self.check_output();
         self.retry_device();
         self.watch();
@@ -2036,6 +2044,7 @@ impl Host {
         self.resend.clear();
         self.port_edits.clear();
         self.auditions.clear();
+        self.releases.clear();
         self.abandon();
     }
 
@@ -3151,6 +3160,7 @@ impl Host {
         self.resend.clear();
         self.port_edits.clear();
         self.auditions.clear();
+        self.releases.clear();
         // Mutes a last poll left are the last run's, never this one's.
         self.muted.clear();
         self.run = Some(run);
@@ -6688,6 +6698,9 @@ impl Host {
         }
         // The notes this client holds, ended for it if it goes.
         if let Some((port, key, on)) = note {
+            // A note of this key taken now supersedes a release still
+            // waiting for it (that note was ended; this one is held).
+            self.releases.remove(&(port.clone(), key));
             let held = self.auditions.entry(client).or_default();
             if on {
                 // One held note per port and client: a new one takes over,
@@ -9013,21 +9026,49 @@ impl Host {
             self.evicted += 1;
         }
         self.release(client);
+        self.end_notes(client);
     }
 
     fn remove(&mut self, client: u64) {
         self.clients.remove(&client);
         self.release(client);
-        // A client gone with a key held (a closed page, a lost connection):
-        // its notes end, unacknowledged, so none is left sounding.
-        if let Some(held) = self.auditions.remove(&client)
-            && let Some(run) = self.run.as_mut()
-        {
-            for (port, key) in held {
-                let off = EventPayload::Set(signal_std::audition_value(key, 0.0, false));
-                let _ = run.controller.send_event(port, off, Stamp::Default);
-            }
+        self.end_notes(client);
+    }
+
+    /// A client gone or evicted with a key held (a closed page, a lost
+    /// connection, a stalled socket): its notes end, unacknowledged, so
+    /// none is left sounding. A note-off the Controller refuses (its
+    /// command queue full) waits in `releases` and is sent again by every
+    /// step until it is taken ([`Host::send_releases`]).
+    fn end_notes(&mut self, client: u64) {
+        if let Some(held) = self.auditions.remove(&client) {
+            self.releases.extend(held);
         }
+        self.send_releases();
+    }
+
+    /// Sends the waiting note-offs; keeps those the Controller refuses.
+    fn send_releases(&mut self) {
+        if self.releases.is_empty() {
+            return;
+        }
+        let Some(run) = self.run.as_mut() else {
+            // No run: nothing sounds.
+            self.releases.clear();
+            return;
+        };
+        self.releases.retain(|(port, key)| {
+            let off = EventPayload::Set(signal_std::audition_value(*key, 0.0, false));
+            run.controller
+                .send_event(port.clone(), off, Stamp::Default)
+                .is_err()
+        });
+    }
+
+    /// Test hooks: the note-offs still waiting for the Controller.
+    #[cfg(feature = "test-hooks")]
+    pub fn releases_waiting(&self) -> usize {
+        self.releases.len()
     }
 
     /// `address` as an event input of the running plan (`trigger`, `note`).
