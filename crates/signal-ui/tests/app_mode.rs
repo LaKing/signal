@@ -2480,6 +2480,7 @@ both!(
     a_save_whose_corrections_meet_a_held_lock_waits_or_fails,
     a_delayed_commit_is_never_written_into_another_project,
     save_then_open_waits_for_the_queued_writes,
+    a_stale_revert_or_open_is_refused,
 );
 
 /// External review (A, ADR 0049): a delayed edit is never written into
@@ -2603,6 +2604,58 @@ fn save_then_open_waits_for_the_queued_writes(transport: Transport) {
     rig.reply(&mut ws, 2, "committed");
     rig.host().open_project(&other, Edits::Save).unwrap();
     assert!(gain_of(&file).contains("gain = 0.3"), "{}", gain_of(&file));
+    rig.finish();
+    let _ = fs::remove_dir_all(&other);
+}
+
+/// Second review of batch 2, item 3 (ADR 0049): `project.revert` and
+/// `project.open` carrying a generation of an earlier opening are refused
+/// (`project-changed`): a stale page neither reverts the new opening's
+/// edits away nor switches it; without one they mean the open project.
+fn a_stale_revert_or_open_is_refused(transport: Transport) {
+    let mut rig = app_rig("stale-revert", transport, None);
+    let file = packed(&rig, "tone");
+    let other = rig.dir.parent().unwrap().join("other");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("project.toml"), common::TONE).unwrap();
+    let (mut ws, _) = rig.client();
+    let stale = rig.request(&mut ws, 1, json!({"type": "graph"}), "graph")["generation"].clone();
+    let opened = rig.request(
+        &mut ws,
+        2,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    let working = PathBuf::from(opened["dir"].as_str().unwrap());
+    commit(&mut rig, &mut ws, 3, 0.3);
+    wait_edited(&mut rig, &mut ws);
+    let refused = rig.request(
+        &mut ws,
+        4,
+        json!({"type": "project.revert", "generation": stale}),
+        "error",
+    );
+    assert_eq!(refused["code"], "project-changed", "{refused}");
+    assert!(gain_in(&working).contains("gain = 0.3"), "not reverted");
+    let refused = rig.request(
+        &mut ws,
+        5,
+        json!({"type": "project.open", "path": other.display().to_string(), "unsaved": "discard", "generation": stale}),
+        "error",
+    );
+    assert_eq!(refused["code"], "project-changed", "{refused}");
+    let app = rig.request(&mut ws, 6, json!({"type": "app.get"}), "app");
+    assert_eq!(app["project"]["dir"], working.display().to_string());
+    let now = app["generation"].clone();
+    rig.request(
+        &mut ws,
+        7,
+        json!({"type": "project.revert", "generation": now}),
+        "project",
+    );
+    let app = rig.request(&mut ws, 8, json!({"type": "app.get"}), "app");
+    let reverted = PathBuf::from(app["project"]["dir"].as_str().unwrap());
+    assert!(gain_in(&reverted).contains("gain = 0.5"), "reverted");
     rig.finish();
     let _ = fs::remove_dir_all(&other);
 }

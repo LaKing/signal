@@ -114,6 +114,12 @@ const LIVE_EDITS: [&str; 5] = ["set", "ramp", "trigger", "note", "revert"];
 /// project, so what was asked before them is done first).
 const ORDERED: [&str; 2] = ["project.open", "project.revert"];
 
+/// Messages that save, revert or replace the open project: a stale
+/// `generation` or `projectId` on one is refused as on any mutation (ADR
+/// 0049), so a page of an earlier opening can neither discard the new
+/// opening's edits nor save or switch it away.
+const PROJECT_CHANGES: [&str; 3] = ["project.save", "project.revert", "project.open"];
+
 /// What the host does with a message while requests wait for the lock.
 enum Order {
     /// It writes the project's files: run holding the lock, or queued.
@@ -3785,7 +3791,8 @@ impl Host {
         }
     }
 
-    /// A mutation (a file write, a live edit, `project.save`) names the
+    /// A mutation (a file write, a live edit, `project.save`, and the open
+    /// project's `project.revert` or another `project.open`) names the
     /// project it means, or is taken to mean the open one (ADR 0049): a
     /// `generation` (the open project's, as `welcome`, `describe`, `graph`
     /// and `app` give it) must be the open project's generation, else a
@@ -3794,8 +3801,9 @@ impl Host {
     /// without either is taken to mean the open project (MCP, the CLI and
     /// pages that send none).
     fn same_project(&self, kind: &str, message: &Value) -> Result<(), Failure> {
-        let mutation =
-            WRITES_FILES.contains(&kind) || LIVE_EDITS.contains(&kind) || kind == "project.save";
+        let mutation = WRITES_FILES.contains(&kind)
+            || LIVE_EDITS.contains(&kind)
+            || PROJECT_CHANGES.contains(&kind);
         if !mutation {
             return Ok(());
         }
