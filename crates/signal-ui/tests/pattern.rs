@@ -3,8 +3,10 @@
 //! as `panel.write` and `patch` write: a write and its push, applied live by
 //! the watch (a swap); a conflict; text the project would not load with,
 //! refused with the problem named; a wrong kind; names, not paths, and never
-//! through a link; a first write creating the file; and a message over the
-//! 64 KiB limit, which closes the connection and writes nothing. On a
+//! through a link; a first write creating the file; a pattern at the
+//! format's capacity (16,384 notes) read, edited and written; and messages
+//! over their limits (4 MiB for a `pattern.write`, 64 KiB for others and
+//! before `hello`), which close the connection and write nothing. On a
 //! fixture project; no committed project is written. (A `.signal` project
 //! marked edited: `app_mode.rs`.)
 
@@ -13,7 +15,7 @@ mod common;
 use std::fs;
 use std::path::PathBuf;
 
-use common::{Got, Options, Rig, Transport, Ws, receive, rig, send};
+use common::{Got, Options, Rig, Transport, Ws, receive, rig};
 use serde_json::{Value, json};
 use signal_ui::panel_write::sha256_hex;
 
@@ -278,40 +280,115 @@ fn names_links_and_a_first_write(transport: Transport) {
     rig.finish();
 }
 
-/// A message over the 64 KiB limit closes the client's connection (as every
-/// message does); the file is not written.
-fn a_write_over_the_message_limit_closes_the_connection(transport: Transport) {
-    let mut rig = melody("pattern-limit", transport);
-    let (mut ws, _) = rig.client();
-    let file = rig.dir.join("patterns/melody.toml");
-    let base = json!(sha256_hex(MELODY.as_bytes()));
-    let padding = format!("# {}\n", "x".repeat(70 * 1024));
-    let mut message = write("melody", &format!("{MELODY}{padding}"), &base);
-    message["id"] = json!(1);
-    assert!(message.to_string().len() > 64 * 1024);
-    send(&mut ws, message);
-    let mut closed = false;
+/// Sends `message` (a send the server cuts short is fine) and steps until
+/// the server closes the connection, which answers nothing meanwhile.
+fn closed_by(rig: &mut Rig, ws: &mut Ws, message: &Value) {
+    let _ = ws.send(tungstenite::Message::text(message.to_string()));
     for _ in 0..500 {
         rig.pump();
-        match receive(&mut ws) {
-            Some(Got::Closed) => {
-                closed = true;
-                break;
-            }
+        match receive(ws) {
+            Some(Got::Closed) => return,
             Some(got) => assert!(
-                got.of("pattern.written").is_none(),
-                "answered a message over the limit"
+                got.json().is_none_or(|v| v.get("id").is_none()),
+                "answered a message over the limit: {:?}",
+                got.json()
             ),
             None => {}
         }
     }
-    assert!(closed, "the connection is closed");
-    assert_eq!(fs::read_to_string(&file).unwrap(), MELODY);
-    // A write that fits is taken.
+    panic!("the connection is not closed");
+}
+
+/// The limits (external review, finding 1): a `pattern.write` may be up to
+/// 4 MiB, any other message up to 64 KiB, and before `hello` every message
+/// is held to 64 KiB. A message over its limit closes the client's
+/// connection and nothing is written; a write that fits is taken.
+fn a_write_over_the_message_limit_closes_the_connection(transport: Transport) {
+    let mut rig = melody("pattern-limit", transport);
+    let file = rig.dir.join("patterns/melody.toml");
+    let base = json!(sha256_hex(MELODY.as_bytes()));
+    // A pattern write over 4 MiB.
     let (mut ws, _) = rig.client();
-    let fits = format!("{MELODY}# {}\n", "x".repeat(60 * 1024));
-    rig.request(&mut ws, 2, write("melody", &fits, &base), "pattern.written");
+    let padding = format!("# {}\n", "x".repeat(4 << 20));
+    let mut message = write("melody", &format!("{MELODY}{padding}"), &base);
+    message["id"] = json!(1);
+    closed_by(&mut rig, &mut ws, &message);
+    assert_eq!(fs::read_to_string(&file).unwrap(), MELODY);
+    // Another message over 64 KiB: a file.write of project.toml.
+    let (mut ws, _) = rig.client();
+    let project = fs::read_to_string(rig.dir.join("project.toml")).unwrap();
+    let padded = format!("{project}# {}\n", "x".repeat(70 * 1024));
+    let message = json!({"type": "file.write", "id": 2, "file": "project.toml", "text": padded, "base": sha256_hex(project.as_bytes())});
+    closed_by(&mut rig, &mut ws, &message);
+    assert_eq!(
+        fs::read_to_string(rig.dir.join("project.toml")).unwrap(),
+        project
+    );
+    // Before `hello`: a hello over 64 KiB.
+    let mut ws = common::connect(rig.host());
+    let token = rig.host().token().to_owned();
+    let hello =
+        json!({"type": "hello", "protocol": 1, "token": token, "pad": "x".repeat(70 * 1024)});
+    let _ = ws.send(tungstenite::Message::text(hello.to_string()));
+    let mut welcomed = false;
+    for _ in 0..500 {
+        rig.pump();
+        match receive(&mut ws) {
+            Some(Got::Closed) => break,
+            Some(got) => welcomed |= got.of("welcome").is_some(),
+            None => {}
+        }
+    }
+    assert!(!welcomed, "a hello over 64 KiB is refused");
+    // A pattern write over 64 KiB that fits 4 MiB is taken.
+    let (mut ws, _) = rig.client();
+    let fits = format!("{MELODY}# {}\n", "x".repeat(70 * 1024));
+    rig.request(&mut ws, 3, write("melody", &fits, &base), "pattern.written");
     assert_eq!(fs::read_to_string(&file).unwrap(), fits);
+    rig.finish();
+}
+
+/// The editor's text of a note pattern with `notes` notes, each written
+/// as the JS serializer writes one (`ui/lib/pattern-text.js`), with numbers
+/// of 17 significant digits: about the longest a note line gets.
+fn long_notes(notes: usize, velocity: &str) -> String {
+    let mut text =
+        String::from("schema_version = 1\nkind = \"notes\"\nlength = 512\n\nnotes = [\n");
+    for i in 0..notes {
+        let v = if i == 0 {
+            velocity
+        } else {
+            "0.12345678901234567"
+        };
+        text.push_str(&format!(
+            "  {{ key = {}, start = {}.123456789012345, length = 0.4123456789012345, velocity = {v} }},\n",
+            i % 128,
+            (i / 128) * 2 + 100,
+        ));
+    }
+    text.push_str("]\n");
+    text
+}
+
+/// External review, finding 1: a pattern at the format's capacity (16,384
+/// notes) is read, edited (one velocity) and written over the protocol: a
+/// `pattern.write` may be up to 4 MiB, beyond the 64 KiB of other messages.
+fn a_pattern_at_capacity_is_read_edited_and_written(transport: Transport) {
+    let mut rig = melody("pattern-capacity", transport);
+    let file = rig.dir.join("patterns/melody.toml");
+    let full = long_notes(16_384, "0.12345678901234567");
+    fs::write(&file, &full).unwrap();
+    let (mut ws, _) = rig.client();
+    let got = read(&mut rig, &mut ws, 1, "melody");
+    assert_eq!(got["text"], full);
+    let edited = long_notes(16_384, "0.5");
+    let mut message = write("melody", &edited, &got["base"]);
+    message["id"] = json!(2);
+    let size = message.to_string().len();
+    assert!(size > 1 << 20, "a message of {size} bytes, past 1 MiB");
+    let written = rig.request(&mut ws, 2, message, "pattern.written");
+    assert_eq!(written["base"], sha256_hex(edited.as_bytes()));
+    assert_eq!(fs::read_to_string(&file).unwrap(), edited);
     rig.finish();
 }
 
@@ -459,4 +536,5 @@ both!(
     a_pattern_that_does_not_load_is_not_written,
     names_links_and_a_first_write,
     a_write_over_the_message_limit_closes_the_connection,
+    a_pattern_at_capacity_is_read_edited_and_written,
 );

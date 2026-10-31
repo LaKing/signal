@@ -231,7 +231,7 @@ The session tools are offered only without `--attach`: a recording covers one ru
 
 ## Limits
 
-- A UI-protocol client message is at most 64 KiB, so a write of a larger text is refused before it is sent.
+- A UI-protocol client message is at most 64 KiB, a `pattern.write` (`write_pattern`, or `write_file` of a pattern) at most 4 MiB, so a write of a larger text is refused before it is sent (`too-large`).
 - A tool's `structuredContent` is at most 256 KiB of JSON. A larger result (the `graph` of a project with thousands of voices, say) keeps its smallest fields whole and replaces each larger one with `{"omitted": true, "bytes", "items"}`, and says `truncated: true`, its full size (`bytes`), the `limit` and `guidance` (`graph`: ask for one `level`; `modules`: `category` or `query`; `describe_instance`: a narrower address). The JSON is repeated as text in `content` only up to 32 KiB; above that the text is the summary alone.
 - No reconnect: if the connection to the UI server closes (attached, the server stopped or restarted, or evicted this client), every tool answers "the connection to the server is closed". Restart `signal mcp`.
 - After an engine failure (`semantics.md` §14; only an internal error stops the engine, a module's panic is contained), the run plays nothing until `transport` start plays the project again; the control loop then plays the new run. This recovery has no automated test: no module of a production registry can make the engine itself fail.

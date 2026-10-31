@@ -29,6 +29,17 @@ const KEPT_FRAMES: usize = 8192;
 /// A client message is at most 64 KiB (`ui-protocol.md` "Limits"): a larger
 /// one would close the connection, so it is refused before it is sent.
 pub(crate) const MAX_MESSAGE: usize = 64 << 10;
+/// A `pattern.write` is at most 4 MiB (a pattern at the format's capacity).
+pub(crate) const MAX_PATTERN_MESSAGE: usize = 4 << 20;
+
+/// The most bytes `message` may have as sent.
+fn limit_of(message: &Value) -> usize {
+    if message["type"] == "pattern.write" {
+        MAX_PATTERN_MESSAGE
+    } else {
+        MAX_MESSAGE
+    }
+}
 
 /// A byte stream the socket thread can poll.
 trait Duplex: Read + Write + Send + 'static {
@@ -190,13 +201,14 @@ impl Client {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         message["id"] = json!(id);
         let text = message.to_string();
-        if text.len() > MAX_MESSAGE {
+        let limit = limit_of(&message);
+        if text.len() > limit {
             return Err(local_error(
                 "too-large",
                 format!(
                     "not sent: the message is {} bytes, over the UI protocol's {} KiB limit for a client message",
                     text.len(),
-                    MAX_MESSAGE >> 10
+                    limit >> 10
                 ),
             ));
         }
@@ -351,7 +363,17 @@ fn parse_url(url: &str) -> Result<(SocketAddr, String), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_url;
+    use super::{MAX_MESSAGE, MAX_PATTERN_MESSAGE, limit_of, parse_url};
+    use serde_json::json;
+
+    /// A `pattern.write` may be up to 4 MiB, any other message 64 KiB, as
+    /// the host takes them (`ui-protocol.md` "Limits").
+    #[test]
+    fn a_pattern_write_has_the_larger_limit() {
+        let pattern = json!({"type": "pattern.write", "name": "m", "text": "", "base": null});
+        assert_eq!(limit_of(&pattern), MAX_PATTERN_MESSAGE);
+        assert_eq!(limit_of(&json!({"type": "file.write"})), MAX_MESSAGE);
+    }
 
     #[test]
     fn attach_urls_are_loopback_only() {

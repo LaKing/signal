@@ -3727,7 +3727,12 @@ impl Host {
                 }
                 self.send_text(client, &welcome);
             }
-            Inbound::Text { client, text } => self.handle(client, &text),
+            // A large message's permit is given back once it is handled.
+            Inbound::Text {
+                client,
+                text,
+                permit: _permit,
+            } => self.handle(client, &text),
             Inbound::Gone { client } => self.remove(client),
         }
     }

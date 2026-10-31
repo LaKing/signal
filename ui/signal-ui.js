@@ -20,6 +20,30 @@ export function powerOf(message) {
   return power === 'on' || power === 'off' ? power : null;
 }
 
+/**
+ * The largest message the host takes (`docs/ui-protocol.md` "Limits"):
+ * 64 KiB, and 4 MiB for a `pattern.write` (a pattern at the format's
+ * capacity of 16,384 notes). A larger one would close the connection, so
+ * it is refused before it is sent (`too-large`).
+ */
+export const MAX_MESSAGE = 64 << 10;
+export const MAX_PATTERN_MESSAGE = 4 << 20;
+
+/** The most bytes `message` may have as sent. */
+export function messageLimit(message) {
+  return message?.type === 'pattern.write' ? MAX_PATTERN_MESSAGE : MAX_MESSAGE;
+}
+
+const encoder = new TextEncoder();
+
+/** `text`'s size in UTF-8 bytes, counted only when it might be over `limit`. */
+function overLimit(text, limit) {
+  // A UTF-16 unit is at most 3 bytes of UTF-8.
+  if (text.length * 3 <= limit) return 0;
+  const bytes = encoder.encode(text).length;
+  return bytes > limit ? bytes : 0;
+}
+
 /** The error a request gets when its connection is or goes down. */
 function closedError() {
   const error = new Error('connection closed');
@@ -271,8 +295,19 @@ export class Connection {
       return;
     }
     const id = this.nextId++;
+    const text = JSON.stringify({ ...message, id });
+    const limit = messageLimit(message);
+    const bytes = overLimit(text, limit);
+    if (bytes) {
+      // Never sent: the host would close the connection over it, and a
+      // control that sends again after a reconnect would loop.
+      const error = new Error(`too large: the message is ${bytes} bytes, over the ${limit >> 10} KiB limit`);
+      error.code = 'too-large';
+      reject(error);
+      return;
+    }
     this.pending.set(id, { resolve, reject });
-    this.socket.send(JSON.stringify({ ...message, id }));
+    this.socket.send(text);
   }
 
   /** The running project (also emitted as `describe`). */

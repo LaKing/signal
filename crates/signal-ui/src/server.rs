@@ -68,9 +68,21 @@ const WRITE_POLL: Duration = Duration::from_millis(100);
 /// The most a client's WebSocket holds unwritten: one message beyond what
 /// the socket took (`drain`), and never more than this.
 const MAX_WRITE_BUFFER: usize = 4 << 20;
-/// The largest message a client may send; a larger one closes the
-/// connection.
+/// The largest message a client may send (but a `pattern.write`); a larger
+/// one closes the connection. Before `hello` every message is held to it.
 pub(crate) const MAX_MESSAGE: usize = 64 << 10;
+/// The largest `pattern.write` a client may send once it said `hello`
+/// (external review, 2026-10-31): a pattern at the format's capacity,
+/// 16,384 notes (`signal_project::pattern::MAX_NOTES`), as the editor writes
+/// them (at most about 110 bytes each, JSON-escaped), with room to spare.
+/// A larger message, or a message over [`MAX_MESSAGE`] that is not a
+/// `pattern.write`, closes the connection.
+pub(crate) const MAX_PATTERN_MESSAGE: usize = 4 << 20;
+/// The bytes of messages over [`MAX_MESSAGE`] from all clients that may
+/// wait for the control thread at once; a client thread with another holds
+/// it (reading nothing more from its client) until there is room. So the
+/// inbound queue holds at most [`INBOUND`] × [`MAX_MESSAGE`] plus this.
+const LARGE_INBOUND: usize = 4 * MAX_PATTERN_MESSAGE;
 /// Messages from all clients waiting for the control thread.
 const INBOUND: usize = 1024;
 /// WebSocket connections with a thread, those before `hello` included.
@@ -107,10 +119,52 @@ pub(crate) enum Inbound {
         evicted: Arc<AtomicBool>,
         gate: Arc<AtomicBool>,
     },
-    /// A text message from a connected client.
-    Text { client: u64, text: String },
+    /// A text message from a connected client; one over [`MAX_MESSAGE`]
+    /// holds its share of [`LARGE_INBOUND`] until it is dropped.
+    Text {
+        client: u64,
+        text: String,
+        permit: Option<Permit>,
+    },
     /// The client is gone.
     Gone { client: u64 },
+}
+
+/// A large message's share of [`LARGE_INBOUND`], given back when dropped
+/// (the control thread has handled the message).
+pub(crate) struct Permit {
+    held: Arc<AtomicUsize>,
+    bytes: usize,
+}
+
+impl Permit {
+    /// `bytes` of `held`, when they fit in [`LARGE_INBOUND`].
+    fn take(held: &Arc<AtomicUsize>, bytes: usize) -> Option<Permit> {
+        held.try_update(Ordering::SeqCst, Ordering::SeqCst, |now| {
+            (now + bytes <= LARGE_INBOUND).then_some(now + bytes)
+        })
+        .ok()
+        .map(|_| Permit {
+            held: Arc::clone(held),
+            bytes,
+        })
+    }
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        self.held.fetch_sub(self.bytes, Ordering::SeqCst);
+    }
+}
+
+/// Whether a client's message is a `pattern.write` (only its `type` is read).
+fn is_pattern_write(text: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Kind<'a> {
+        #[serde(rename = "type", borrow)]
+        kind: std::borrow::Cow<'a, str>,
+    }
+    serde_json::from_str::<Kind>(text).is_ok_and(|k| k.kind == "pattern.write")
 }
 
 /// A message to a client.
@@ -174,6 +228,7 @@ impl Server {
             stop: Arc::clone(&stop),
             next: Arc::new(AtomicU64::new(1)),
             clients: Arc::new(AtomicUsize::new(0)),
+            large: Arc::new(AtomicUsize::new(0)),
             admission: AtomicU64::new(micros(ADMISSION_DEADLINE)),
             refusals: refusers(http_addr.port(), options.remote, &stop)?,
         });
@@ -224,6 +279,7 @@ impl Server {
             stop: Arc::clone(&stop),
             next: Arc::new(AtomicU64::new(1)),
             clients: Arc::new(AtomicUsize::new(0)),
+            large: Arc::new(AtomicUsize::new(0)),
             admission: AtomicU64::new(micros(ADMISSION_DEADLINE)),
             refusals: refusers(0, false, &stop)?,
         });
@@ -384,6 +440,8 @@ struct Accept {
     next: Arc<AtomicU64>,
     /// Connections with a thread ([`MAX_CLIENTS`]).
     clients: Arc<AtomicUsize>,
+    /// The bytes of large messages waiting ([`LARGE_INBOUND`]).
+    large: Arc<AtomicUsize>,
     /// The admission deadline in microseconds ([`ADMISSION_DEADLINE`]).
     admission: AtomicU64,
     /// Connections past the limit, for the refusal threads.
@@ -551,6 +609,7 @@ impl Accept {
             client,
             token: self.token.clone(),
             inbound: self.inbound.clone(),
+            large: Arc::clone(&self.large),
             queue: self.queue,
             http_port: self.http_port,
             remote: self.remote,
@@ -594,6 +653,7 @@ struct Connection {
     client: u64,
     token: String,
     inbound: SyncSender<Inbound>,
+    large: Arc<AtomicUsize>,
     queue: usize,
     http_port: u16,
     remote: bool,
@@ -640,6 +700,11 @@ impl Connection {
         if ws.get_mut().stream.read_timeout(Some(CLIENT_POLL)).is_err() {
             return;
         }
+        // Said `hello`: a `pattern.write` may be larger (checked in `serve`).
+        ws.set_config(|c| {
+            c.max_message_size = Some(MAX_PATTERN_MESSAGE);
+            c.max_frame_size = Some(MAX_PATTERN_MESSAGE);
+        });
         let (queue, outgoing) = sync_channel(self.queue);
         let evicted = Arc::new(AtomicBool::new(false));
         let gate = Arc::new(AtomicBool::new(false));
@@ -706,9 +771,21 @@ impl Connection {
             }
             match ws.read() {
                 Ok(Message::Text(text)) => {
+                    let permit = if text.len() > MAX_MESSAGE {
+                        if !is_pattern_write(&text) {
+                            return;
+                        }
+                        match self.room(ws, outgoing, &mut stalled, evicted, gate, text.len()) {
+                            Some(permit) => Some(permit),
+                            None => return,
+                        }
+                    } else {
+                        None
+                    };
                     let message = Inbound::Text {
                         client: self.client,
                         text: text.to_string(),
+                        permit,
                     };
                     if self.inbound.send(message).is_err() {
                         return;
@@ -719,6 +796,34 @@ impl Connection {
                 Err(WsError::Io(e)) if would_block(&e) => {}
                 Err(_) => return,
             }
+        }
+    }
+}
+
+impl Connection {
+    /// Waits for room for a large message of `bytes` ([`LARGE_INBOUND`]),
+    /// writing what is queued for the client meanwhile; None when the
+    /// client is to go (stop, eviction, a stalled socket).
+    fn room<S: Read + Write>(
+        &self,
+        ws: &mut WebSocket<S>,
+        outgoing: &Receiver<Outbound>,
+        stalled: &mut Option<Instant>,
+        evicted: &AtomicBool,
+        gate: &AtomicBool,
+        bytes: usize,
+    ) -> Option<Permit> {
+        loop {
+            if let Some(permit) = Permit::take(&self.large, bytes) {
+                return Some(permit);
+            }
+            if self.stop.load(Ordering::Relaxed) || evicted.load(Ordering::Relaxed) {
+                return None;
+            }
+            if !gate.load(Ordering::Relaxed) && !drain(ws, outgoing, stalled, Instant::now()) {
+                return None;
+            }
+            thread::sleep(CLIENT_POLL);
         }
     }
 }
@@ -844,6 +949,29 @@ pub(crate) fn origin_allowed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Large messages waiting hold at most LARGE_INBOUND, given back as
+    /// each is dropped; only a `pattern.write` may be large.
+    #[test]
+    fn large_messages_share_a_bounded_budget() {
+        let held = Arc::new(AtomicUsize::new(0));
+        let permits: Vec<Permit> = (0..4)
+            .map(|_| Permit::take(&held, MAX_PATTERN_MESSAGE).unwrap())
+            .collect();
+        assert!(Permit::take(&held, MAX_MESSAGE + 1).is_none());
+        drop(permits);
+        assert_eq!(held.load(Ordering::SeqCst), 0);
+        assert!(Permit::take(&held, LARGE_INBOUND).is_some());
+        assert_eq!(held.load(Ordering::SeqCst), 0);
+        assert!(is_pattern_write(
+            r#"{"type": "pattern.write", "text": "x"}"#
+        ));
+        assert!(is_pattern_write(
+            r#"{"text": "\"type\"", "type": "pattern.write"}"#
+        ));
+        assert!(!is_pattern_write(r#"{"type": "file.write", "text": "x"}"#));
+        assert!(!is_pattern_write("not json"));
+    }
     use std::sync::mpsc::TrySendError;
     use tungstenite::protocol::Role;
 

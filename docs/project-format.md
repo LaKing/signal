@@ -410,7 +410,7 @@ The loader reads a pattern into its kind's canonical **source**, a header and ro
 
 ### Editing over the UI protocol
 
-`pattern.read` and `pattern.write` (`ui-protocol.md`) read and write these files whole, with the checks of a reload. A client message is at most 64 KiB, so a pattern editable over the protocol is one whose text, JSON-escaped, fits that with its envelope: about 63 KiB of TOML, some 1200 notes written one per line, or any steps pattern up to 64 lanes of 256 steps. Larger files load from disk and are edited as text.
+`pattern.read` and `pattern.write` (`ui-protocol.md`) read and write these files whole, with the checks of a reload. A `pattern.write` may be up to 4 MiB (other client messages 64 KiB), so every valid pattern, up to 16,384 notes or 64 lanes of 256 steps, is editable over the protocol as the editor writes it (`ui-protocol.md`, "Size").
 
 ## 13. Window layout (`ui/windows.toml`)
 

@@ -4,7 +4,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { HEADER, KIND, PROTOCOL } from './lib/protocol.js';
-import { Connection, connectFromPage, findMeter, findParameter } from './signal-ui.js';
+import { Connection, MAX_MESSAGE, MAX_PATTERN_MESSAGE, connectFromPage, findMeter, findParameter, messageLimit } from './signal-ui.js';
+import { PatternSync } from './lib/pattern-sync.js';
+import { serializePattern } from './lib/pattern-text.js';
+
+const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 class FakeSocket {
   static all = [];
@@ -336,4 +340,109 @@ test('readPattern and writePattern wrap pattern.read and pattern.write', async (
   const bad = connection.readPattern('../x');
   socket.receive({ type: 'error', id: socket.last('pattern.read').id, code: 'bad-value', message: 'not a pattern name' });
   await assert.rejects(bad, { code: 'bad-value' });
+});
+
+// External review, finding 1: a message over its limit (64 KiB; 4 MiB for a
+// `pattern.write`) is refused before it is sent, `too-large`, so the server
+// never closes the connection over it and nothing sends it again.
+
+/** A socket that, as the server does, closes on a message over its limit. */
+class LimitedSocket extends FakeSocket {
+  send(text) {
+    const bytes = new TextEncoder().encode(text).length;
+    const limit = JSON.parse(text).type === 'pattern.write' ? 4 << 20 : 64 << 10;
+    super.send(text);
+    if (bytes > limit) this.drop(1009);
+  }
+}
+
+function notesText(count, velocity = 0.12345678901234567) {
+  const notes = Array.from({ length: count }, (_, i) => ({ key: i % 128, start: Math.floor(i / 128) * 2 + 100.123456789012345, length: 0.4123456789012345, velocity: i === 0 ? velocity : 0.12345678901234567 }));
+  return serializePattern({ schema_version: 1, kind: 'notes', length: 512, notes });
+}
+
+function limitedConnection() {
+  FakeSocket.all = [];
+  const timers = fakeTimers();
+  const connection = new Connection({ url: 'ws://127.0.0.1:9/', token: 'tok', WebSocketImpl: LimitedSocket, timers });
+  const socket = FakeSocket.all[0];
+  socket.open();
+  socket.receive({ type: 'welcome', protocol: 1, client: 1, project: 'p', sampleRate: 48000, frame: 0, planVersion: 0 });
+  return { connection, socket, timers };
+}
+
+test('the limits match the host’s', () => {
+  assert.equal(MAX_MESSAGE, 64 << 10);
+  assert.equal(MAX_PATTERN_MESSAGE, 4 << 20);
+  assert.equal(messageLimit({ type: 'pattern.write' }), MAX_PATTERN_MESSAGE);
+  assert.equal(messageLimit({ type: 'commit' }), MAX_MESSAGE);
+});
+
+test('a message over its limit is refused before it is sent, too-large', async () => {
+  const { connection, socket } = limitedConnection();
+  const before = socket.sent.length;
+  await assert.rejects(connection.commit('/a.gain', 'x'.repeat(70 * 1024)), (error) => {
+    assert.equal(error.code, 'too-large');
+    assert.match(error.message, /over the 64 KiB limit/);
+    return true;
+  });
+  // Multi-byte text counts in UTF-8 bytes.
+  await assert.rejects(connection.commit('/a.gain', 'é'.repeat(33 * 1024)), { code: 'too-large' });
+  await assert.rejects(connection.writePattern('melody', 'x'.repeat(4 << 20), 'abc'), { code: 'too-large' });
+  assert.equal(socket.sent.length, before, 'nothing sent');
+  assert.equal(connection.status, 'open', 'the connection stays');
+});
+
+test('a 16,384-note pattern loads, an edited velocity is written, the connection stays', async () => {
+  const { connection, socket } = limitedConnection();
+  const text = notesText(16384);
+  const shown = [];
+  const notices = [];
+  const s = new PatternSync({ name: 'melody', connection, kind: 'notes', onLoad: (p) => shown.push(p), onNotice: (n) => notices.push(n) });
+  s.start();
+  const r = socket.last('pattern.read');
+  socket.receive({ type: 'pattern.read', id: r.id, name: 'melody', exists: true, base: 'b1', text, kind: 'notes' });
+  await settle();
+  assert.equal(shown.length, 1);
+  assert.equal(shown[0].notes.length, 16384);
+  const edited = notesText(16384, 0.5);
+  s.edited(edited);
+  const flushed = s.flush();
+  await settle();
+  const w = socket.last('pattern.write');
+  assert.ok(w, 'the write is sent');
+  assert.ok(JSON.stringify(w).length > 1 << 20);
+  assert.equal(w.text, edited);
+  socket.receive({ type: 'pattern.written', id: w.id, name: 'melody', file: 'patterns/melody.toml', base: 'b2', created: false });
+  await flushed;
+  assert.equal(s.base, 'b2');
+  assert.equal(FakeSocket.all.length, 1, 'never reconnected');
+  assert.deepEqual(notices.filter(Boolean), []);
+});
+
+test('a pattern too large to send is a lasting notice, never a reconnect loop', async () => {
+  const { connection, socket, timers } = limitedConnection();
+  const notices = [];
+  const s = new PatternSync({ name: 'melody', connection, kind: 'notes', onNotice: (n) => notices.push(n), timers });
+  s.start();
+  const r = socket.last('pattern.read');
+  const small = notesText(2);
+  socket.receive({ type: 'pattern.read', id: r.id, name: 'melody', exists: true, base: 'b1', text: small, kind: 'notes' });
+  await settle();
+  // A text over 4 MiB (a comment pads it: the editor never writes one so
+  // large, but a write must never loop whatever its size).
+  s.edited(`${small}# ${'x'.repeat(4 << 20)}\n`);
+  await s.flush();
+  assert.equal(socket.sent.filter((m) => m.type === 'pattern.write').length, 0, 'not sent');
+  assert.equal(FakeSocket.all.length, 1, 'the connection stays');
+  assert.match(notices.at(-1), /^not written: .*too large/);
+  assert.ok(s.stalled && !s.offline);
+  // A reconnect for another reason does not send it again.
+  socket.drop();
+  timers.runAll();
+  const again = FakeSocket.all.at(-1);
+  again.open();
+  again.receive({ type: 'welcome', protocol: 1, client: 2, project: 'p', sampleRate: 48000, frame: 0, planVersion: 0 });
+  await settle();
+  assert.equal(again.sent.filter((m) => m.type === 'pattern.write').length, 0);
 });
