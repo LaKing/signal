@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use common::{Options, Rig, Transport, Ws, receive, rig, send};
 use serde_json::{Value, json};
+use signal_engine::ControlSink;
 use signal_ui::frames::SCOPE;
 
 const PROJECT: &str = r#"schema_version = 1
@@ -208,8 +209,56 @@ fn a_bad_batch_writes_nothing(transport: Transport) {
     rig.finish();
 }
 
+/// Second review, item 4: every entry of a batch is sent stamped its frame,
+/// also one whose value is the one last sent live (here `/a.run` set to 1
+/// before, applied): no entry is left out with its earlier stamp. The
+/// recorded session's commands show a ramp of both runs at the frame.
+fn a_batch_sends_every_value_at_its_frame(transport: Transport) {
+    let mut rig = rig(
+        &format!("batch-resend-{transport:?}"),
+        Options {
+            transport,
+            recording: true,
+            project: Some(fixture(&format!("batch-resend-{transport:?}"))),
+            ..Options::default()
+        },
+    );
+    let (mut ws, _) = rig.client();
+    rig.request(
+        &mut ws,
+        1,
+        json!({"type": "set", "address": "/a.run", "value": 1}),
+        "ack",
+    );
+    let at = 48_000;
+    let reply = rig.request(&mut ws, 2, run_both(Some(at)), "committed");
+    assert_eq!(reply["frame"], at);
+    // Past the frame, every report in.
+    for _ in 0..(at / 256 + 16) {
+        rig.pump();
+    }
+    let finished = rig.host.take().unwrap().finish().unwrap();
+    let mut live = finished.live;
+    live.status(&finished.status);
+    live.finish(finished.status.next_frame).unwrap();
+    let dir = rig.dir.parent().unwrap().join("session");
+    let _ = fs::remove_dir_all(&dir);
+    live.into_recorder().write(&dir).unwrap();
+    let edits = fs::read_to_string(dir.join("edits.jsonl")).unwrap();
+    for port in ["/a.run", "/b.run"] {
+        let at_frame = edits
+            .lines()
+            .filter(|l| l.contains(&format!("\"target\":\"{port}\"")))
+            .filter(|l| l.contains("\"kind\":\"ramp\""))
+            .filter(|l| l.starts_with(&format!("{{\"frame\":{at},")))
+            .count();
+        assert_eq!(at_frame, 1, "{port} ramped at {at}:\n{edits}");
+    }
+}
+
 both!(
     separate_commits_a_callback_apart_drift,
     a_batch_commit_starts_both_on_one_frame,
     a_bad_batch_writes_nothing,
+    a_batch_sends_every_value_at_its_frame,
 );

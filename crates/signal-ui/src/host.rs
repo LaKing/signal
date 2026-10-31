@@ -7114,11 +7114,18 @@ impl Host {
 
     /// Sends each value of `edits` live (a 5 ms ramp to every port; `None`:
     /// each port to its own default), unless every port already took
-    /// exactly that value: whether the Controller took each.
+    /// exactly that value: whether the Controller took each. With an
+    /// explicit stamp (a batch `commit`'s shared frame) every value is
+    /// sent, so none keeps the earlier stamp of a value sent before
+    /// (second review, item 4).
     fn send_controls(&mut self, edits: &[ControlWrite], stamp: Stamp) -> Vec<bool> {
         let mut sent = Vec::with_capacity(edits.len());
+        let shared = matches!(stamp, Stamp::At(_));
         for edit in edits {
-            let last = self.panel.dragged(&edit.instance, &edit.parameter);
+            let last = self
+                .panel
+                .dragged(&edit.instance, &edit.parameter)
+                .filter(|_| !shared);
             let ports = &edit.target.ports;
             sent.push(match edit.value {
                 Some(v) => match last {
