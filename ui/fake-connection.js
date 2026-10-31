@@ -280,6 +280,22 @@ export class FakeConnection {
     return this.edit(address, value ?? c.default).then(() => ({ type: 'committed', address, value, file: 'project.toml', writes: 1, sent: true, note: null }));
   }
 
+  /** The batch `commit` (`values`): each written as `commit` writes it, one frame for all. */
+  commitValues(values) {
+    if (!Array.isArray(values) || values.length === 0) return failure('bad-message', '`values` must be a non-empty list of {address, value}');
+    const missing = values.find((v) => !this.control(v?.address));
+    if (missing) return failure('not-editable', `no control ${missing?.address}`);
+    const frame = this.frameNumber;
+    return Promise.all(values.map(({ address, value }) => this.edit(address, value ?? this.control(address).default))).then(() => ({
+      type: 'committed',
+      values: values.map(({ address, value }) => ({ address, value, sent: true })),
+      frame,
+      file: 'project.toml',
+      writes: 1,
+      note: null,
+    }));
+  }
+
   /** Every commit is written here: nothing is ever unsaved. */
   retry(address) {
     return failure('not-unsaved', `${address} is not unsaved`);

@@ -357,6 +357,16 @@ export class Connection {
     return this.request({ type: 'commit', address, value, ...generationField(generation) });
   }
 
+  /**
+   * The batch `commit` (external review, 2026-10-31): `values`, `[{address,
+   * value}]`, sent live all stamped one frame (`at`, else the host's
+   * default stamp, resolved once) and written into project.toml in one
+   * write. Resolves `{values: [{address, value, sent}], frame, …}`.
+   */
+  commitValues(values, { at, generation } = {}) {
+    return this.request({ type: 'commit', values, ...(at === undefined ? {} : { at }), ...generationField(generation) });
+  }
+
   /** Writes an unsaved control's live value into project.toml again. */
   retry(address, { generation } = {}) {
     return this.request({ type: 'retry', address, ...generationField(generation) });

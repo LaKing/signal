@@ -551,3 +551,15 @@ test('shared scope views over a connection hold one stream across power off and 
   stopB();
   assert.deepEqual(serverStreams(socket, [7, 8]), []);
 });
+
+test('commitValues sends one batch commit, with at and generation when given', async () => {
+  const { connection, socket } = connected();
+  const values = [{ address: '/a.run', value: 1 }, { address: '/b.run', value: 1 }];
+  const done = connection.commitValues(values);
+  const sent = socket.last('commit');
+  assert.deepEqual([sent.values, sent.at, sent.address], [values, undefined, undefined]);
+  socket.receive({ type: 'committed', id: sent.id, values: values.map((v) => ({ ...v, sent: true })), frame: 4096, file: 'project.toml', writes: 1, note: null });
+  assert.equal((await done).frame, 4096);
+  connection.commitValues(values, { at: 9000, generation: 3 }).catch(() => {});
+  assert.deepEqual([socket.last('commit').at, socket.last('commit').generation], [9000, 3]);
+});

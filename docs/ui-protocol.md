@@ -275,6 +275,14 @@ Writes a control's value into the project's `project.toml` (`value: null` remove
 
 Only controls are committed (`not-editable` otherwise): a parameter inside a composite is set in the composite's file, and writing it there would change every instance of the composite.
 
+**The batch form** (external review, 2026-10-31; additive) commits several controls as one: `values` in place of `address` and `value`, and an optional `at`:
+
+```json
+{"type": "commit", "id": 7, "values": [{"address": "/a.run", "value": 1}, {"address": "/b.run", "value": 1}]}
+```
+
+Every entry is checked first, as a single `commit` checks it (an entry refused refuses the message and nothing is sent or written; a control named twice is `bad-value`; `address` or `value` beside `values`, or an empty list, is `bad-message`). Each value is then sent live as `commit` sends it, **every one stamped the same frame**: `at` when given, else the default stamp (the current frame plus the latency) resolved once for all; and all are written into `project.toml` in **one write** (one read, edit and rename under the writer lock, as a snapshot's restore writes its values). So controls changed together take effect on the same frame however the message reaches the host, where separate commits handled a callback apart would act 256 frames apart (for two transports, a lasting phase offset). Reply `{"type": "committed", "id": 7, "values": [{"address": "/a.run", "value": 1, "sent": true}, …], "frame": <the stamp>, "file": "project.toml", "writes", "note"}` (`frame` null while nothing plays). A failed write keeps every value live and unsaved, as a single commit's. Queued behind the writer lock (ADR 0048), a batch counts as able to change any value. Space's `transport.toggle` sends its targets so (`ui/controls/keyboard.js`, `Connection.commitValues`). Tests: `crates/signal-ui/tests/transport_sync.rs` (two playheads on the null driver: separate commits a callback apart start 256 frames apart; a batch starts both on one frame whatever the frames run before it is handled, and at an explicit `at`; written once; refusals write nothing; both transports), `ui/controls/keyboard.test.js`, `ui/signal-ui.test.js`.
+
 A write that fails (a read-only folder, a full disk) answers `{"type": "error", "code": "write-failed", "message": …}`, and the value the commit sent live **stays live and unsaved** (below): it is never quietly taken as saved. So does a `conflict`: the commit's edit is based on `project.toml` as it reads it, under the project's writer lock (ADR 0040), and the file is read once more just before the rename; one that no longer holds that text (a writer that takes no lock, such as an editor, or any writer on a volume without locks) writes nothing, and the next `commit` or `retry` reads it again.
 
 ### Unsaved: `unsaved`, `retry`, `revert`

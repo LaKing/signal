@@ -124,7 +124,10 @@ const toggled = new WeakMap();
  * plays, or when the project has no transport to toggle. `transport.toggle`
  * writes each target's new `run` as a click on its toggle does (`commit`:
  * live, then the file; ADR 0039), so the unsaved marks and every other
- * client see the same.
+ * client see the same: all of them in one batch `commit` (`values`, external
+ * review 2026-10-31), which the host stamps one frame and writes once, so
+ * several transports start together whenever it is delivered. A connection
+ * without `commitValues` commits each.
  */
 export function runProjectCommand(id, connection) {
   if (id !== 'transport.toggle') return false;
@@ -136,7 +139,15 @@ export function runProjectCommand(id, connection) {
     toggled.set(connection, memo);
   }
   const plan = toggleTransport(transportTargets(description), memo.values);
-  for (const { address, value } of plan?.sets ?? []) {
+  const sets = plan?.sets ?? [];
+  if (sets.length && typeof connection.commitValues === 'function') {
+    for (const { address, value } of sets) memo.values.set(address, value);
+    Promise.resolve(connection.commitValues(sets)).catch(() => {
+      for (const { address, value } of sets) if (memo.values.get(address) === value) memo.values.delete(address);
+    });
+    return true;
+  }
+  for (const { address, value } of sets) {
     // Counted at once (a second press before the reply sees it), forgotten
     // if the write is refused: the description's base is the truth again.
     memo.values.set(address, value);

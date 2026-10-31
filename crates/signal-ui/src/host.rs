@@ -3879,6 +3879,8 @@ impl Host {
             Job::Message {
                 kind, address: a, ..
             } => match kind.as_str() {
+                // A batch `commit` (`values`, no `address`) can change any.
+                "commit" if a.is_none() => true,
                 "commit" | "retry" => a.as_deref() == Some(address),
                 k if LIVE_EDITS.contains(&k) => a.as_deref() == Some(address),
                 "snapshot.restore" | "snapshot.undo" => true,
@@ -6846,6 +6848,11 @@ impl Host {
     /// Moves each port to its value over the panel's ramp; whether the
     /// Controller took every one (true when nothing plays).
     fn send_ramps(&mut self, sends: Vec<(PortAddress, f64)>) -> bool {
+        self.send_ramps_at(sends, Stamp::Default)
+    }
+
+    /// [`Host::send_ramps`], every ramp stamped `stamp`.
+    fn send_ramps_at(&mut self, sends: Vec<(PortAddress, f64)>, stamp: Stamp) -> bool {
         let Some(run) = self.run.as_mut() else {
             return true;
         };
@@ -6856,11 +6863,7 @@ impl Host {
                 frames,
                 curve: Curve::Linear,
             };
-            if run
-                .controller
-                .send_event(port, payload, Stamp::Default)
-                .is_err()
-            {
+            if run.controller.send_event(port, payload, stamp).is_err() {
                 return false;
             }
         }
@@ -6872,6 +6875,86 @@ impl Host {
     /// running project takes the same edit, so the file watch's reload of
     /// the written file applies nothing.
     fn commit(&mut self, message: &Value) -> Result<Value, Failure> {
+        if message.get("values").is_some() {
+            return self.commit_values(message);
+        }
+        let (instance, parameter, target, value) = self.commit_target(message)?;
+        let address = message.get("address").and_then(Value::as_str).unwrap_or("");
+        self.commit_control(address, &instance, &parameter, &target, value, false)
+    }
+
+    /// The batch form of `commit` (external review, 2026-10-31: Space
+    /// starting several transports): `values`, `[{address, value}]`, every
+    /// value sent live stamped one frame (`at`, else the default stamp
+    /// resolved once) and written into `project.toml` in one write, so
+    /// controls started together start on the same frame whenever the
+    /// message is delivered.
+    fn commit_values(&mut self, message: &Value) -> Result<Value, Failure> {
+        if message.get("address").is_some() || message.get("value").is_some() {
+            return Err(fail(
+                "bad-message",
+                "commit takes `address` and `value`, or `values`, not both",
+            ));
+        }
+        let values = message
+            .get("values")
+            .and_then(Value::as_array)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                fail(
+                    "bad-message",
+                    "`values` must be a non-empty list of {address, value}",
+                )
+            })?;
+        let mut edits: Vec<ControlWrite> = Vec::with_capacity(values.len());
+        for entry in values {
+            let (instance, parameter, target, value) = self.commit_target(entry)?;
+            let address = entry["address"].as_str().unwrap_or("").to_owned();
+            if edits
+                .iter()
+                .any(|e| e.instance == instance && e.parameter == parameter)
+            {
+                return Err(fail(
+                    "bad-value",
+                    format!("{address} is named twice in `values`"),
+                ));
+            }
+            edits.push(ControlWrite {
+                address,
+                instance,
+                parameter,
+                target,
+                value,
+            });
+        }
+        let frame = match message.get("at") {
+            None | Some(Value::Null) => self.run.as_ref().map(|r| r.controller.default_frame()),
+            Some(at) => Some(Frame(at.as_u64().ok_or_else(|| {
+                fail("bad-value", "`at` must be a frame (a whole number)")
+            })?)),
+        };
+        let stamp = frame.map_or(Stamp::Default, Stamp::At);
+        let written = self.write_controls_at(&edits, false, stamp)?;
+        let values: Vec<Value> = edits
+            .iter()
+            .zip(&written.sent)
+            .map(|(e, sent)| json!({"address": e.address, "value": e.value, "sent": sent}))
+            .collect();
+        Ok(json!({
+            "type": "committed",
+            "values": values,
+            "frame": frame.map(|f| f.0),
+            "file": signal_project::PROJECT_FILE,
+            "writes": self.writes,
+            "note": written.note,
+        }))
+    }
+
+    /// A `commit`'s (or a `values` entry's) control and value, checked.
+    fn commit_target(
+        &self,
+        message: &Value,
+    ) -> Result<(String, String, Target, Option<f64>), Failure> {
         let address = message.get("address").and_then(Value::as_str).unwrap_or("");
         let port: PortAddress = address
             .parse()
@@ -6903,7 +6986,7 @@ impl Host {
                     || fail("bad-value", "`value` must be a finite number or null"),
                 )?)),
             };
-        self.commit_control(address, &instance, &parameter, &target, value, false)
+        Ok((instance, parameter, target, value))
     }
 
     /// Writes `value` for a control (sent live first unless every port
@@ -6954,7 +7037,17 @@ impl Host {
         edits: &[ControlWrite],
         retrying: bool,
     ) -> Result<ControlsWritten, Failure> {
-        let sent = self.send_controls(edits);
+        self.write_controls_at(edits, retrying, Stamp::Default)
+    }
+
+    /// [`Host::write_controls`], every live send stamped `stamp`.
+    fn write_controls_at(
+        &mut self,
+        edits: &[ControlWrite],
+        retrying: bool,
+        stamp: Stamp,
+    ) -> Result<ControlsWritten, Failure> {
+        let sent = self.send_controls(edits, stamp);
         if retrying && sent.iter().any(|s| !s) {
             let addresses: Vec<&str> = edits.iter().map(|e| e.address.as_str()).collect();
             let error = format!(
@@ -6998,7 +7091,7 @@ impl Host {
     /// Sends each value of `edits` live (a 5 ms ramp to every port; `None`:
     /// each port to its own default), unless every port already took
     /// exactly that value: whether the Controller took each.
-    fn send_controls(&mut self, edits: &[ControlWrite]) -> Vec<bool> {
+    fn send_controls(&mut self, edits: &[ControlWrite], stamp: Stamp) -> Vec<bool> {
         let mut sent = Vec::with_capacity(edits.len());
         for edit in edits {
             let last = self.panel.dragged(&edit.instance, &edit.parameter);
@@ -7006,15 +7099,16 @@ impl Host {
             sent.push(match edit.value {
                 Some(v) => match last {
                     Some(d) if d.sent && d.value.to_bits() == v.to_bits() => true,
-                    _ => self.send_ramps(ports.iter().cloned().map(|p| (p, v)).collect()),
+                    _ => self.send_ramps_at(ports.iter().cloned().map(|p| (p, v)).collect(), stamp),
                 },
                 // Each port back to its own default, as the panel's Reset.
-                None => self.send_ramps(
+                None => self.send_ramps_at(
                     ports
                         .iter()
                         .cloned()
                         .zip(edit.target.defaults.iter().copied())
                         .collect(),
+                    stamp,
                 ),
             });
         }

@@ -167,3 +167,37 @@ test('a refused transport write is not counted: the next press goes by the descr
   runProjectCommand('transport.toggle', refusing);
   assert.deepEqual(refusing.commits, [['/transport.run', 0], ['/transport.run', 0]], 'still running as described: stop again');
 });
+
+// External review, finding 4: several transports start on one frame. Space
+// sends one batch `commit` (`values`) of every target, which the host stamps
+// one frame and writes once, never a commit per transport.
+function twoTransports(base = 0) {
+  const connection = transportConnection(base);
+  connection.description = {
+    playing: true,
+    instances: ['a', 'b'].map((n) => ({ address: `/${n}`, module: 'std.playhead', parameters: [{ name: 'run', address: `/${n}.run` }] })),
+    controls: ['a', 'b'].map((n) => ({ address: `/${n}.run`, ports: [`/${n}.run`], base, min: 0, max: 1, default: 1, modulated: false })),
+  };
+  connection.batches = [];
+  connection.commitValues = function (values) {
+    this.batches.push(values);
+    return this.refuseBatch ? Promise.reject(Object.assign(new Error('write-failed'), { code: 'write-failed' })) : Promise.resolve({ type: 'committed', values, frame: 4096 });
+  };
+  return connection;
+}
+
+test('Space starts several transports with one batch commit, never one commit each', async () => {
+  const connection = twoTransports(0);
+  runProjectCommand('transport.toggle', connection);
+  assert.deepEqual(connection.batches, [[{ address: '/a.run', value: 1 }, { address: '/b.run', value: 1 }]]);
+  assert.deepEqual(connection.commits, [], 'no separate commit');
+  runProjectCommand('transport.toggle', connection);
+  assert.deepEqual(connection.batches.at(-1), [{ address: '/a.run', value: 0 }, { address: '/b.run', value: 0 }], 'what was sent counts');
+  // Refused: neither value is counted, the next press goes by the description.
+  const refusing = twoTransports(0);
+  refusing.refuseBatch = true;
+  runProjectCommand('transport.toggle', refusing);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  runProjectCommand('transport.toggle', refusing);
+  assert.deepEqual(refusing.batches.map((b) => b.map((s) => s.value)), [[1, 1], [1, 1]]);
+});
