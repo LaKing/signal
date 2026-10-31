@@ -144,6 +144,8 @@ The real-time `Controller` (`signal-engine`) knows nothing of sessions. `LiveRec
 
 A command the recorder refuses is one the engine discarded; it is listed in `LiveRecorder::refused` and not recorded.
 
+**A run that records nothing** (external review, 2026-10-31): the same bookkeeping runs on a `SessionRecorder::without_history()`, which numbers versions and seqs, applies the effective-frame rule and checks commands against the version running exactly as a recording one does, but keeps no version's files or plan, no command and no boundary record, and only the last `REFUSED_KEPT` (64) refusals; plan versions stay monotonic (`next_version`) without the old plans resident. What it holds (`LiveRecorder::retained`) is bounded by what is in flight, however long the run and however many edits. It cannot be written (`write` refuses). The UI host (`signal ui`, Signal.app, `signal mcp`) uses it whenever it records no session; a recording run keeps everything, unbounded, as before (a session is the whole run). Tested by `crates/signal-ui/tests/history.rs`.
+
 ## 4a. Boundary records
 
 M2.7-4 (audit finding 2). A latent module (`module-contract.md` "Declared latency") may miss a due result in real time and play silence for that block, where an offline render would wait for it. So that `signal replay` reproduces what was played, a session of a project with a latent module records each due block's outcome. `boundaries.jsonl` has one line per due block that ran, ordered by (`frame`, `instance`):

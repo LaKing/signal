@@ -876,6 +876,13 @@ pub struct PendingEdit {
 /// back is not recorded (its seq stays unused). Record a swap
 /// ([`applied_swap`](SessionRecorder::applied_swap)) before input meant for
 /// the instances it adds.
+///
+/// A run that is not recorded keeps the same bookkeeping without the
+/// history ([`without_history`](SessionRecorder::without_history)): the
+/// seqs, the frames the effective-frame rule needs, the version running and
+/// the next version number, but no version's files or plan and no command,
+/// so its memory stays bounded however long it plays and however often it
+/// is edited.
 pub struct SessionRecorder {
     sample_rate: u32,
     seed: u64,
@@ -883,8 +890,13 @@ pub struct SessionRecorder {
     /// The machine (M2.7-8): this one, with the devices the driver sets
     /// ([`set_devices`](SessionRecorder::set_devices)).
     machine: Machine,
-    /// The files and plan of every version.
+    /// The files and plan of every version (none without history).
     versions: Vec<(Vec<SourceFile>, ExecutionPlan)>,
+    /// How many versions there have been: the next version's number.
+    version_count: u64,
+    /// Whether versions and commands are kept, to be written as a session.
+    history: bool,
+    /// The recorded commands (none without history).
     edits: Vec<Edit>,
     next_seq: u64,
     last_event: Frame,
@@ -932,6 +944,8 @@ impl SessionRecorder {
             machine: Machine::here(Vec::new()),
             state: State::new(&plan, 0),
             versions: vec![(initial.files.clone(), plan)],
+            version_count: 1,
+            history: true,
             edits: Vec::new(),
             next_seq: 1,
             last_event: Frame::ZERO,
@@ -940,6 +954,30 @@ impl SessionRecorder {
             end: None,
             boundaries: None,
         })
+    }
+
+    /// The same recorder keeping no history: for a run that is not recorded.
+    /// It numbers versions and seqs and checks commands as a recording one
+    /// does, but keeps no version's files or plan and no command, so what it
+    /// holds does not grow with the run. Such a recorder cannot be written
+    /// ([`write`](SessionRecorder::write) refuses).
+    pub fn without_history(mut self) -> SessionRecorder {
+        self.history = false;
+        self.versions = Vec::new();
+        self.edits = Vec::new();
+        self
+    }
+
+    /// Whether it keeps the run's history (it was not made
+    /// [`without_history`](SessionRecorder::without_history)).
+    pub fn keeps_history(&self) -> bool {
+        self.history
+    }
+
+    /// How many versions and commands it holds: grows with the run when it
+    /// keeps history, at most 0 without.
+    pub fn retained(&self) -> usize {
+        self.versions.len() + self.edits.len()
     }
 
     /// The external event to push for `payload` to `target`, stamped `stamp`,
@@ -990,11 +1028,13 @@ impl SessionRecorder {
             .map_err(SessionError::Refused)?;
         self.last_event = event.frame;
         self.next_seq = self.next_seq.max(event.sequence.saturating_add(1));
-        self.edits.push(Edit {
-            frame: event.frame,
-            seq: event.sequence,
-            command,
-        });
+        if self.history {
+            self.edits.push(Edit {
+                frame: event.frame,
+                seq: event.sequence,
+                command,
+            });
+        }
         Ok(())
     }
 
@@ -1044,11 +1084,13 @@ impl SessionRecorder {
         self.state.apply(edit.frame, &command);
         self.last_edit = edit.frame;
         self.next_seq = self.next_seq.max(edit.seq.saturating_add(1));
-        self.edits.push(Edit {
-            frame: edit.frame,
-            seq: edit.seq,
-            command,
-        });
+        if self.history {
+            self.edits.push(Edit {
+                frame: edit.frame,
+                seq: edit.seq,
+                command,
+            });
+        }
         Ok(())
     }
 
@@ -1056,7 +1098,7 @@ impl SessionRecorder {
     /// `version` before `Engine::prepare_swap`, so the log's `plan_version`
     /// names it.
     pub fn next_version(&self) -> u64 {
-        self.versions.len() as u64
+        self.version_count
     }
 
     /// Records a swap to `project`, committed for `frame` (the engine's next
@@ -1091,14 +1133,18 @@ impl SessionRecorder {
         let mut plan = project.plan(registry).map_err(SessionError::Invalid)?.plan;
         plan.version = version;
         self.state.swap(&plan, version);
+        self.version_count += 1;
+        self.last_swap = Some(frame);
+        self.next_seq = self.next_seq.max(seq.saturating_add(1));
+        if !self.history {
+            return Ok(version);
+        }
         self.versions.push((project.files.clone(), plan));
         // ADR 0027 §4: the library composites of every version, so a swap
         // that brings one in is recorded too (`Session::library_hashes`).
         self.provenance
             .library_composite_hashes
             .extend(project.library_hashes());
-        self.last_swap = Some(frame);
-        self.next_seq = self.next_seq.max(seq.saturating_add(1));
         self.edits.push(Edit {
             frame,
             seq,
@@ -1176,6 +1222,11 @@ impl SessionRecorder {
     /// The session is validated first, as [`Session::load`] would; an invalid
     /// one is not written.
     pub fn write(&self, dir: &Path) -> Result<(), SessionError> {
+        if !self.history {
+            return Err(SessionError::Refused(
+                "the run was not recorded: its recorder kept no history".to_owned(),
+            ));
+        }
         let edits = self.edits();
         let numbered: Vec<(usize, Edit)> = edits
             .iter()
@@ -1288,6 +1339,9 @@ impl SessionRecorder {
     }
 }
 
+/// How many refusals a [`LiveRecorder`] without history keeps (the last).
+pub const REFUSED_KEPT: usize = 64;
+
 /// A reported command waiting for the frontier.
 #[derive(Debug)]
 enum Applied {
@@ -1376,9 +1430,30 @@ impl LiveRecorder {
     }
 
     /// Commands the recorder refused, with the reason: the engine discarded
-    /// them, or a swap was refused at its commit.
+    /// them, or a swap was refused at its commit. Without history, only the
+    /// last [`REFUSED_KEPT`] are kept.
     pub fn refused(&self) -> &[String] {
         &self.refused
+    }
+
+    /// How many entries it holds (versions, commands, boundary records,
+    /// refusals, swaps and reports waiting): with a recorder
+    /// [`without_history`](SessionRecorder::without_history) it stays
+    /// bounded by what is in flight, however long the run.
+    pub fn retained(&self) -> usize {
+        self.recorder.retained()
+            + self.records.len()
+            + self.refused.len()
+            + self.swaps.len()
+            + self.pending.len()
+    }
+
+    /// A refusal noted ([`refused`](LiveRecorder::refused)).
+    fn refuse(&mut self, reason: String) {
+        if !self.recorder.keeps_history() && self.refused.len() >= REFUSED_KEPT {
+            self.refused.remove(0);
+        }
+        self.refused.push(reason);
     }
 
     /// Reports not yet recorded: their frame has not been passed.
@@ -1485,8 +1560,7 @@ impl LiveRecorder {
             Applied::Event(event) => self.recorder.applied_event(&event),
         };
         if let Err(error) = result {
-            self.refused
-                .push(format!("command {id} at frame {}: {error}", frame.0));
+            self.refuse(format!("command {id} at frame {}: {error}", frame.0));
         }
     }
 }
@@ -1498,7 +1572,7 @@ impl ControlSink for LiveRecorder {
             if let SentCommand::Swap { plan_version } = command {
                 self.swaps.remove(plan_version);
             }
-            self.refused.push(format!(
+            self.refuse(format!(
                 "command {} was refused by the engine at frame {}",
                 report.id, frame.0
             ));
@@ -1561,11 +1635,14 @@ impl ControlSink for LiveRecorder {
                 }
             }
         };
-        self.records.push(BoundaryRecord {
-            frame: line.frame,
-            instance: line.address.clone(),
-            outcome,
-        });
+        // Recorded for the session only: a run without history keeps none.
+        if self.recorder.keeps_history() {
+            self.records.push(BoundaryRecord {
+                frame: line.frame,
+                instance: line.address.clone(),
+                outcome,
+            });
+        }
     }
 
     fn frontier(&mut self, next_frame: Frame) {

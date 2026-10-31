@@ -1832,7 +1832,7 @@ impl Host {
             output: started.output,
             input,
             controller: started.controller,
-            live: LiveRecorder::new(started.recorder, self.registry.clone()),
+            live: LiveRecorder::new(self.history(started.recorder), self.registry.clone()),
             current: project,
             watcher,
             watched: Instant::now(),
@@ -2876,7 +2876,7 @@ impl Host {
             self.provenance.clone(),
         )
         .map_err(|e| e.to_string())?;
-        let live = LiveRecorder::new(recorder, self.registry.clone());
+        let live = LiveRecorder::new(self.history(recorder), self.registry.clone());
         let live = if self.boundary_data {
             live.with_boundary_data()
         } else {
@@ -2926,6 +2926,17 @@ impl Host {
             scheduling: None,
         };
         Ok((run, notes))
+    }
+
+    /// The run's recorder: keeping the run's history (versions, commands,
+    /// boundary records) only when the host records a session; otherwise
+    /// the bookkeeping alone, which stays bounded however long it plays.
+    fn history(&self, recorder: SessionRecorder) -> SessionRecorder {
+        if self.recording {
+            recorder
+        } else {
+            recorder.without_history()
+        }
     }
 
     /// A new run plays the file: no live edit is left in it (the unsaved
