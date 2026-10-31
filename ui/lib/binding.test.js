@@ -205,3 +205,60 @@ test('a drag released after another project opened names the opening it began un
   connection.last('retry').resolve({ type: 'committed' });
   await settled();
 });
+
+/** A knob on `[0, 2]` bound to a parameter whose own range is ±100000 (moog_voice's key_track before its range). */
+function keyTrack(base) {
+  const connection = fakeConnection();
+  const attributes = { min: '0', max: '2' };
+  const element = { connection, dragging: false, getAttribute: (name) => attributes[name] ?? null };
+  const binding = new Binding(element, '/synth.key_track');
+  binding.described = { min: -100000, max: 100000, default: 1 };
+  binding.base = base;
+  return { binding, connection };
+}
+
+test('a value outside the control’s range is shown as it is, and marked', () => {
+  const { binding } = keyTrack(132642.663043478);
+  assert.equal(binding.value, 132642.663043478);
+  assert.equal(binding.position, 1);
+  assert.equal(binding.outOfRange, 'above');
+  assert.match(binding.outOfRangeText(), /132642\.7 is outside this control.s range \(0\.000 … 2\.000\)/);
+  assert.equal(keyTrack(-3).binding.outOfRange, 'below');
+  assert.equal(keyTrack(2).binding.outOfRange, null);
+  assert.equal(keyTrack(2).binding.outOfRangeText(), null);
+  // Only the effective value outside: still noted.
+  const { binding: modulated } = keyTrack(1);
+  modulated.effective = 7;
+  assert.equal(modulated.outOfRange, null);
+  assert.equal(modulated.effectiveOutOfRange, 'above');
+  assert.match(modulated.outOfRangeText(), /plays at/);
+});
+
+test('the first drag, wheel or key step from an out-of-range value moves from the shown end, within the range', () => {
+  // A drag down a little from the pinned end: just below the maximum, no jump.
+  const drag = keyTrack(132642.663043478);
+  drag.binding.moveTo(drag.binding.position - 0.01, 'ramp');
+  assert.equal(drag.connection.last('ramp').value, 1.98);
+  assert.equal(drag.binding.outOfRange, null);
+  // Upwards past the end: the maximum.
+  const up = keyTrack(132642.663043478);
+  up.binding.moveTo(up.binding.position + 0.05, 'nudge');
+  assert.equal(up.connection.last('set').value, 2);
+  const below = keyTrack(-40);
+  below.binding.moveTo(below.binding.position + 0.25, 'ramp');
+  assert.equal(below.connection.last('ramp').value, 0.5);
+});
+
+test('a control never writes a value outside its own range', () => {
+  const { binding, connection } = keyTrack(132642.663043478);
+  binding.setValue(binding.value, 'commit');
+  assert.equal(connection.last('commit').value, 2);
+  binding.enter(100000);
+  assert.equal(connection.last('ramp').value, 2);
+  assert.equal(connection.last('commit').value, 2);
+  binding.setValue(-5, 'nudge');
+  assert.equal(connection.last('set').value, 0);
+  binding.cancel();
+  binding.reset();
+  assert.equal(connection.last('commit').value, 1);
+});

@@ -119,6 +119,10 @@ A value can be typed (M2.9-4) on `<signal-fader>`, `<signal-knob>`, `<signal-val
 - `-inf` or `-∞` (with or without `dB`) is the minimum of a dB taper, of a parameter in dB, and of a linear gain whose range starts at 0.
 - Refused, each with its reason: nothing typed (`empty`), no number (`not-a-number`), a unit or anything else after the number that does not fit the parameter (`unit`: `"ms" does not fit a parameter in Hz`), and a value that is not finite (`not-finite`: `1e400`, `inf`, `-inf` where it is none of those).
 
+## Out of range
+
+A control's range is its `min` and `max` (else the parameter's). The project may hold a value outside it, within the parameter's own range (a value written by the Parameters tab, the inspector, `signal mcp` or by hand, which follow the parameter's declared range). The control then shows it as it is and marks it (`ui/lib/binding.js` `outOfRange`, `markOutOfRange` in `ui/controls/base.js`): the readout shows the real value in `--signal-out-of-range`, the pointer, thumb or puck stays pinned at its end in that colour, an SVG skin gets a faint halo and its root `data-out-of-range`, and the element has the `out-of-range` attribute (`below`, `above`, or `effective` when only the effective value lies outside) and a tooltip saying so. A control never writes a value outside its own range: every edit (drag, wheel, keys, a typed value, a reset) is clamped to it, so the first one moves from the end shown, never jumps. Nothing else is clamped: the host keeps the parameter's declared range.
+
 ## Tapers
 
 A position is 0..1 along the travel (`ui/lib/taper.js`):
@@ -169,7 +173,7 @@ The pure parts (`ui/lib/canvas.js`: projection, scaling, sprite frame choice, th
 
 ## Theming
 
-Every color and size is a CSS custom property with a dark default (`ui/controls/theme.css` lists them): `--signal-bg`, `--signal-panel`, `--signal-fg`, `--signal-muted`, `--signal-track`, `--signal-accent`, `--signal-effective`, `--signal-thumb`, `--signal-knob`, `--signal-focus`, `--signal-clip`, the meter colours, `--signal-font`, `--signal-radius`, and the sizes (`--signal-fader-length`, `--signal-knob-size`, …, `--signal-readout-width`, `--signal-value-width`, `--signal-card-min`). Set them on the page, a container or one control.
+Every color and size is a CSS custom property with a dark default (`ui/controls/theme.css` lists them): `--signal-bg`, `--signal-panel`, `--signal-fg`, `--signal-muted`, `--signal-track`, `--signal-accent`, `--signal-effective`, `--signal-out-of-range`, `--signal-thumb`, `--signal-knob`, `--signal-focus`, `--signal-clip`, the meter colours, `--signal-font`, `--signal-radius`, and the sizes (`--signal-fader-length`, `--signal-knob-size`, …, `--signal-readout-width`, `--signal-value-width`, `--signal-card-min`). Set them on the page, a container or one control.
 
 ## Stable layout
 

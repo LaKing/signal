@@ -10,6 +10,7 @@
   --signal-track: #2a2f38;     /* tracks, rings, unlit lamps */
   --signal-accent: #4fc3f7;    /* the value: fills, arcs, traces */
   --signal-effective: #ffb74d; /* the effective value when modulated; the trigger level */
+  --signal-out-of-range: #ff8a65; /* a value outside the control's own range */
   --signal-thumb: #e8ecf2;     /* thumbs, pointers, the held peak */
   --signal-knob: #262b34;      /* knob bodies and button caps */
   --signal-knob-edge: #3a414d;

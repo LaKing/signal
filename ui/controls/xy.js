@@ -6,7 +6,7 @@ import { formatValue } from '../lib/format.js';
 import { FINE, KEY_STEP, PAGE_STEP } from '../lib/gesture.js';
 import { ariaShortcuts, keyCommand } from '../lib/keys.js';
 import { clamp } from '../lib/taper.js';
-import { Binding, SignalElement, bindAddresses, bindingEntry, quietly, unsavedMark, unsavedStream } from './base.js';
+import { Binding, SignalElement, bindAddresses, bindingEntry, markOutOfRange, quietly, unsavedMark, unsavedStream } from './base.js';
 
 const SIZE = 160;
 const INSET = 8;
@@ -232,11 +232,12 @@ export class SignalXY extends SignalElement {
       element.setAttribute('aria-valuenow', String(binding.value));
       element.setAttribute('aria-valuetext', binding.ariaText());
     }
+    markOutOfRange(this, [x, y]);
     this.$('.label').textContent = label;
     const [xEntry, yEntry] = this.entries ?? [];
     if (!xEntry?.isOpen) this.$('.readout-x').textContent = formatValue(x.value, x.range.unit);
     if (!yEntry?.isOpen) this.$('.readout-y').textContent = formatValue(y.value, y.range.unit);
-    if (this.showSkin({ position: x.position, x: x.position, y: y.position })) return;
+    if (this.showSkin({ position: x.position, x: x.position, y: y.position, outOfRange: this.getAttribute('out-of-range') })) return;
     const px = INSET + x.position * SPAN;
     const py = INSET + (1 - y.position) * SPAN;
     const puck = this.$('.puck');

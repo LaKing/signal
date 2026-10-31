@@ -87,9 +87,11 @@ function number(element, name, fallback) {
  * `data-cx`/`data-cy` (default: the view box's centre); `thumb` moves
  * `data-travel` units along `data-axis` (y, upwards, by default); `puck`
  * moves `data-travel-x` right by `x` and `data-travel-y` up by `y`; `on` and
- * `off` show by `position` ≥ 0.5; `value` shows `text`.
+ * `off` show by `position` ≥ 0.5; `value` shows `text`. `outOfRange`
+ * (`below`, `above`, `effective` or null) is set as the SVG's
+ * `data-out-of-range`, so a skin's own style can show it.
  */
-export function showSkin(container, skin, { position = 0, angle = 0, x = 0, y = 0, text = '' } = {}) {
+export function showSkin(container, skin, { position = 0, angle = 0, x = 0, y = 0, text = '', outOfRange = null } = {}) {
   if (skin.kind === 'strip') {
     const frame = stripFrame({ position, frames: skin.spec.frames, orientation: skin.spec.orientation, columns: skin.spec.columns, imageWidth: skin.width, imageHeight: skin.height, scale: skin.spec.scale });
     const element = container.firstElementChild;
@@ -100,6 +102,8 @@ export function showSkin(container, skin, { position = 0, angle = 0, x = 0, y = 
     return;
   }
   const svg = skin.svg;
+  if (outOfRange) svg.setAttribute('data-out-of-range', outOfRange);
+  else svg.removeAttribute('data-out-of-range');
   const box = svg.viewBox?.baseVal;
   const pointer = part(svg, 'pointer');
   if (pointer) {

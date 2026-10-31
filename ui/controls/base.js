@@ -66,6 +66,13 @@ svg { display: block; overflow: visible; }
 .fill { fill: var(--signal-accent, #4fc3f7); }
 .effective { fill: var(--signal-effective, #ffb74d); stroke: var(--signal-effective, #ffb74d); }
 .thumb { fill: var(--signal-thumb, #e8ecf2); stroke: var(--signal-bg, #16181d); stroke-width: 1; }
+/* A value outside the control's own range (the file's, or the effective
+   one): the readout shows it as it is, the pointer, thumb or puck stays
+   pinned at its end in the out-of-range colour; a skin gets a faint halo. */
+:host([out-of-range]) .readout { color: var(--signal-out-of-range, #ff8a65); }
+:host([out-of-range]) .pointer { stroke: var(--signal-out-of-range, #ff8a65); }
+:host([out-of-range]) .thumb, :host([out-of-range]) .puck { fill: var(--signal-out-of-range, #ff8a65); }
+:host([out-of-range]) .skin > * { filter: drop-shadow(0 0 2px var(--signal-out-of-range, #ff8a65)); }
 :host([unsaved]) { outline: 1px dashed var(--signal-unsaved, #ffb74d); outline-offset: 2px; }
 /* Over what is below the control, never in its flow: showing it moves nothing. */
 .unsaved-mark {
@@ -95,6 +102,32 @@ svg { display: block; overflow: visible; }
   cursor: pointer;
 }
 ${ENTRY_CSS}`;
+
+/**
+ * Marks `element` while a binding's value lies outside the control's own
+ * range (docs/ui-controls.md "Out of range"): the `out-of-range` attribute
+ * (`below`, `above`, or `effective` when only the effective value does) and
+ * a tooltip saying so. A `title` the page set is left alone. Returns the
+ * attribute's value, or null.
+ */
+export function markOutOfRange(element, bindings) {
+  const base = bindings.find((b) => b.outOfRange);
+  const effective = base ? null : bindings.find((b) => b.effectiveOutOfRange);
+  const which = base ?? effective;
+  const state = base ? base.outOfRange : effective ? 'effective' : null;
+  if (state) element.setAttribute('out-of-range', state);
+  else element.removeAttribute('out-of-range');
+  const text = which?.outOfRangeText() ?? null;
+  const ours = element.hasAttribute('title') && element.getAttribute('title') === element.outOfRangeTitle;
+  if (text && (!element.hasAttribute('title') || ours)) {
+    element.setAttribute('title', text);
+    element.outOfRangeTitle = text;
+  } else if (!text && ours) {
+    element.removeAttribute('title');
+    element.outOfRangeTitle = null;
+  }
+  return state;
+}
 
 /** The addresses in a `bind` attribute (space or comma separated). */
 export function bindAddresses(element) {
@@ -550,5 +583,6 @@ export class SignalValueElement extends SignalElement {
     this.setAttribute('aria-valuetext', this.binding.ariaText());
     const label = this.getAttribute('label') ?? this.binding.address;
     if (label && !this.hasAttribute('aria-label')) this.setAttribute('aria-label', label);
+    markOutOfRange(this, [this.binding]);
   }
 }

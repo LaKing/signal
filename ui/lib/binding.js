@@ -6,7 +6,7 @@
 import { findParameter } from '../signal-ui.js';
 import { formatValue } from './format.js';
 import { resetValue } from './gesture.js';
-import { toPosition, toValue } from './taper.js';
+import { clamp, toPosition, toValue } from './taper.js';
 import { unsavedOf } from './unsaved.js';
 
 /** Keyboard and wheel edits are committed once this long after the last one. */
@@ -143,7 +143,59 @@ export class Binding {
     this.setValue(value, how);
   }
 
-  setValue(value, how) {
+  /**
+   * `value` within the control's own range (its `min` and `max`, else the
+   * parameter's): what any edit from the control writes. The project may
+   * hold a value outside it (`outOfRange`); the control never writes one.
+   */
+  clampToRange(value) {
+    const { min, max } = this.range;
+    return max >= min && Number.isFinite(value) ? clamp(value, min, max) : value;
+  }
+
+  /**
+   * Where `value` lies against the control's range: 'below', 'above', or
+   * null (inside it, or not known). A tolerance of a billionth of the span
+   * keeps a value written at the end from counting as past it.
+   */
+  side(value) {
+    const { min, max } = this.range;
+    if (!Number.isFinite(value) || !(max >= min)) return null;
+    const slack = (max - min) * 1e-9;
+    if (value < min - slack) return 'below';
+    if (value > max + slack) return 'above';
+    return null;
+  }
+
+  /** Whether the value shown (the base) lies outside the control's range: 'below', 'above' or null. */
+  get outOfRange() {
+    return Number.isFinite(this.base) ? this.side(this.base) : null;
+  }
+
+  /** Whether the effective value lies outside the control's range: 'below', 'above' or null. */
+  get effectiveOutOfRange() {
+    return this.side(this.effective);
+  }
+
+  /**
+   * The out-of-range note (a control's tooltip), or null when the base and
+   * the effective value lie within the control's range.
+   */
+  outOfRangeText() {
+    const { min, max, unit } = this.range;
+    const span = `${formatValue(min, unit)} … ${formatValue(max, unit)}`;
+    if (this.outOfRange) {
+      return `Out of range: ${formatValue(this.value, unit)} is outside this control's range (${span}). The next edit here brings it back within it.`;
+    }
+    if (this.effectiveOutOfRange) {
+      return `Out of range: plays at ${formatValue(this.effective, unit)}, outside this control's range (${span}).`;
+    }
+    return null;
+  }
+
+  setValue(raw, how) {
+    // A control writes within its own range (`clampToRange`).
+    const value = this.clampToRange(raw);
     this.base = value;
     const connection = this.element.connection;
     if (how === 'local') this.cancel();

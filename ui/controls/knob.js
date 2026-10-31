@@ -92,7 +92,7 @@ export class SignalKnob extends SignalValueElement {
     // modulated: the readout never changes size. A value field over it keeps it.
     const effectiveText = b.modulated ? `→ ${formatValue(b.effective, b.range.unit)}` : '';
     if (!this.entry?.isOpen) this.$('.readout').textContent = `${formatValue(b.value, b.range.unit)}\n${effectiveText}`;
-    if (this.showSkin({ position, angle, text: formatValue(b.value, b.range.unit) })) return;
+    if (this.showSkin({ position, angle, text: formatValue(b.value, b.range.unit), outOfRange: this.getAttribute('out-of-range') })) return;
     const origin = this.hasAttribute('bipolar') ? knobAngle(bipolarOrigin(b.range), sweep) : -sweep / 2;
     this.$('.ring').setAttribute('d', arc(-sweep / 2, sweep / 2));
     this.$('.arc').setAttribute('d', arc(origin, angle));

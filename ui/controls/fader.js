@@ -70,7 +70,7 @@ export class SignalFader extends SignalValueElement {
     // modulated: the readout never changes size. A value field over it keeps it.
     const effectiveText = b.modulated ? `→ ${formatValue(b.effective, b.range.unit)}` : '';
     if (!this.entry?.isOpen) this.$('.readout').textContent = `${formatValue(b.value, b.range.unit)}\n${effectiveText}`;
-    if (this.showSkin({ position, text: formatValue(b.value, b.range.unit) })) return;
+    if (this.showSkin({ position, text: formatValue(b.value, b.range.unit), outOfRange: this.getAttribute('out-of-range') })) return;
     const svg = this.$('.art');
     svg.setAttribute('viewBox', this.horizontal ? `0 0 ${LENGTH} ${THICK}` : `0 0 ${THICK} ${LENGTH}`);
     const mid = THICK / 2;

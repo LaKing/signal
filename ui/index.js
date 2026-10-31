@@ -37,6 +37,7 @@ import './lib/value-set.test.js';
 import './lib/cards.test.js';
 import './controls/panel.test.js';
 import './controls/entry-field.test.js';
+import './controls/out-of-range.test.js';
 import './controls/scope.test.js';
 import './lib/schematic-view.test.js';
 import './lib/schematic-layout.test.js';
