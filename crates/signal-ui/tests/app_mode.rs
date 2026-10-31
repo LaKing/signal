@@ -2427,10 +2427,12 @@ fn the_4096_voice_graph_reaches_the_client_and_it_stays_open(transport: Transpor
     let _ = fs::remove_dir_all(source);
 }
 
-/// External review (Codex), item 1 (ADR 0040, amendment of 2026-10-31): a
-/// commit waiting for another writer's lock is not run on a project opened
-/// meanwhile: it is refused (`project-changed`) once the lock is free, and
-/// neither project's file is written.
+/// External review (Codex), item 1 (ADR 0048): a
+/// commit waiting for another writer's lock is not run on a project the
+/// window opened meanwhile (the menu's Open, which comes to the host
+/// directly): it is refused (`project-changed`) once the lock is free, and
+/// neither project's file is written. A client's `project.open` sent after
+/// the commit waits behind it instead (ADR 0048).
 fn a_request_waiting_for_the_lock_is_not_run_on_another_project(transport: Transport) {
     let mut rig = app_rig("stale-lock", transport, None);
     let other = rig.dir.parent().unwrap().join("other");
@@ -2442,16 +2444,19 @@ fn a_request_waiting_for_the_lock_is_not_run_on_another_project(transport: Trans
         &mut ws,
         json!({"type": "commit", "address": "/out.gain", "value": 0.25, "id": 1}),
     );
-    rig.request(&mut ws, 2, json!({"type": "ping"}), "pong");
-    let opened = rig.request(
+    common::send(
         &mut ws,
-        3,
-        json!({"type": "project.open", "path": other.display().to_string()}),
-        "project",
+        json!({"type": "project.open", "path": other.display().to_string(), "id": 3}),
     );
-    assert_eq!(opened["loads"], true);
+    no_reply(&mut rig, &mut ws, 200, &[1, 3]);
+    rig.request(&mut ws, 2, json!({"type": "ping"}), "pong");
+    rig.host()
+        .open_project(&other, signal_ui::Edits::Discard)
+        .unwrap();
     drop(lock);
     let refused = rig.reply(&mut ws, 1, "error");
+    assert_eq!(refused["code"], "project-changed", "{refused}");
+    let refused = rig.reply(&mut ws, 3, "error");
     assert_eq!(refused["code"], "project-changed", "{refused}");
     assert_eq!(
         fs::read_to_string(rig.dir.join("project.toml")).unwrap(),
@@ -2471,7 +2476,100 @@ both!(
     the_stopped_graph_is_cached_until_the_folder_changes,
     a_project_that_stops_loading_pushes_graph_error,
     a_request_waiting_for_the_lock_is_not_run_on_another_project,
+    a_save_waits_for_the_writes_queued_before_it,
+    a_save_whose_corrections_meet_a_held_lock_waits_or_fails,
 );
+
+/// Steps for `ms`, asserting that `ws` receives no reply to `ids`.
+fn no_reply(rig: &mut Rig, ws: &mut common::Ws, ms: u64, ids: &[u64]) {
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+    while std::time::Instant::now() < until {
+        rig.pump();
+        while let Some(got) = common::receive(ws) {
+            if let Some(v) = got.json() {
+                assert!(
+                    !ids.iter().any(|id| v.get("id") == Some(&json!(id))),
+                    "answered while the lock is held: {v}"
+                );
+            }
+        }
+    }
+}
+
+/// Second review of the lock queue, item 2 (ADR 0048): a Save asked after a
+/// commit that waits for another writer's lock waits behind it, so the
+/// saved `.signal` file holds the commit.
+fn a_save_waits_for_the_writes_queued_before_it(transport: Transport) {
+    let mut rig = app_rig("save-behind", transport, None);
+    let file = packed(&rig, "tone");
+    let (mut ws, _) = rig.client();
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    let working = PathBuf::from(opened["dir"].as_str().unwrap());
+    let lock = signal_project::transaction::ProjectLock::acquire(&working).unwrap();
+    common::send(
+        &mut ws,
+        json!({"type": "commit", "address": "/out.gain", "value": 0.3, "id": 2}),
+    );
+    common::send(&mut ws, json!({"type": "project.save", "id": 3}));
+    no_reply(&mut rig, &mut ws, 200, &[2, 3]);
+    rig.request(&mut ws, 4, json!({"type": "ping"}), "pong");
+    drop(lock);
+    rig.reply(&mut ws, 2, "committed");
+    rig.reply(&mut ws, 3, "saved");
+    assert!(gain_of(&file).contains("gain = 0.3"), "{}", gain_of(&file));
+    rig.finish();
+}
+
+/// Second review of the lock queue, item 2 (ADR 0048): a Save whose
+/// corrections meet another writer's lock is not made without them: the
+/// waiting Save (`save_document`) fails and writes nothing; the window's
+/// Save waits in the queue and, once the lock is free, writes the
+/// corrections and saves.
+fn a_save_whose_corrections_meet_a_held_lock_waits_or_fails(transport: Transport) {
+    let mut rig = app_rig("save-corrections-lock", transport, None);
+    fs::write(rig.dir.join("project.toml"), corrected_tone()).unwrap();
+    let file = packed(&rig, "tone");
+    let original = a_line_of(&file);
+    let (mut ws, _) = rig.client();
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    let working = PathBuf::from(opened["dir"].as_str().unwrap());
+    let lock = signal_project::transaction::ProjectLock::acquire(&working).unwrap();
+    let refused = rig.host().save_document().unwrap_err();
+    assert!(refused.contains("another writer holds"), "{refused}");
+    assert_eq!(a_line_of(&file), original, "nothing saved");
+    let (answer, answered) = std::sync::mpsc::channel();
+    rig.host().save_document_then(Box::new(move |result| {
+        let _ = answer.send(result);
+    }));
+    no_reply(&mut rig, &mut ws, 200, &[]);
+    assert!(answered.try_recv().is_err(), "waits for the lock");
+    drop(lock);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let result = loop {
+        rig.pump();
+        if let Ok(result) = answered.try_recv() {
+            break result;
+        }
+        assert!(std::time::Instant::now() < until, "no answer");
+    };
+    result.unwrap();
+    assert!(
+        a_line_of(&file).contains("freq = 100000"),
+        "{}",
+        a_line_of(&file)
+    );
+    rig.finish();
+}
 
 /// ADR 0033: Signal.app (`plays`) has no Play or Stop. Switched on, the
 /// open project plays: at start, after `project.open`, and when switched on

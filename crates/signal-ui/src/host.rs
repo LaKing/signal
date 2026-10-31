@@ -86,7 +86,7 @@ const MESSAGES_PER_STEP: usize = 256;
 
 /// The messages that write the project's files under its writer lock (ADR
 /// 0040): each runs holding it, or waits in the host's queue while another
-/// writer holds it (amendment of 2026-10-31), never on the control thread.
+/// writer holds it (ADR 0048), never on the control thread.
 const WRITES_FILES: [&str; 16] = [
     "schematic.move",
     "schematic.reset",
@@ -106,6 +106,30 @@ const WRITES_FILES: [&str; 16] = [
     "vendor",
 ];
 
+/// The live edits that change a parameter's value at once: kept behind a
+/// queued request that can change the same value, in the client's order.
+const LIVE_EDITS: [&str; 5] = ["set", "ramp", "trigger", "note", "revert"];
+
+/// Messages kept behind every queued request (they save, open or revert the
+/// project, so what was asked before them is done first).
+const ORDERED: [&str; 2] = ["project.open", "project.revert"];
+
+/// What the host does with a message while requests wait for the lock.
+enum Order {
+    /// It writes the project's files: run holding the lock, or queued.
+    Write,
+    /// `project.save`: run at once unless it would have to wait (its
+    /// corrections need the lock) or requests wait; queued then.
+    Save,
+    /// Queued behind any waiting request ([`ORDERED`]).
+    Ordered,
+    /// A live edit of `address`: queued only behind a request that can
+    /// change that value.
+    Live(String),
+    /// Never queued (`ping`, `describe`, `stats`, subscriptions, reads).
+    Free,
+}
+
 /// How many file requests may wait for the writer lock at once; another is
 /// refused (`busy`).
 const WAITING_MAX: usize = 64;
@@ -122,11 +146,24 @@ struct Waiting {
 }
 
 enum Job {
-    /// A client's message ([`WRITES_FILES`]), answered when it runs.
+    /// A client's message, answered when it runs: one that writes files
+    /// (`lock`: it runs holding the writer lock), or one kept behind them
+    /// in the client's order ([`Host::order_of`]). `kind` and `address` say
+    /// which values it can change ([`Host::queued_for`]).
     Message {
         client: u64,
         id: Value,
         text: String,
+        kind: String,
+        address: Option<String>,
+        lock: bool,
+    },
+    /// A Save or Save As of the open project ([`Host::save_document_then`],
+    /// [`Host::save_as_then`]): run holding the lock, so its corrections
+    /// are written first, after every file request queued before it.
+    Save {
+        save_as: Option<PathBuf>,
+        done: SaveDone,
     },
     /// The window layout's write (app mode).
     Windows {
@@ -827,7 +864,7 @@ pub struct Host {
     /// of them (an undo or redo the host made) is taken whole; any other
     /// text is judged strictly ([`Host::panel_restore_allowed`]).
     restorable: std::collections::HashSet<String>,
-    /// ADR 0040, amendment of 2026-10-31: the file requests waiting for
+    /// ADR 0048: the file requests waiting for
     /// another writer to release the project's lock, in order.
     waiting: VecDeque<Waiting>,
     /// The open project's generation: a new one each time another project
@@ -1417,8 +1454,7 @@ impl Host {
     /// changes every 100 ms, the clients' messages and the streams due.
     /// Returns what to tell the operator.
     pub fn step(&mut self) -> Vec<String> {
-        // The control thread never waits for the writer lock (ADR 0040,
-        // amendment of 2026-10-31).
+        // The control thread never waits for the writer lock (ADR 0048).
         let _no_wait = transaction::NoWait::enter(Duration::ZERO);
         self.run_waiting();
         self.poll();
@@ -1727,32 +1763,40 @@ impl Host {
     /// that plays, as one change, so the saved file holds what played. A
     /// folder project is never written by a Save (its files are the user's
     /// own; Save As opens the new file, whose own next Save writes them).
-    /// A failure does not stop the Save: it is kept and said once the file
-    /// is saved, and the corrections stay pending.
-    fn correct_before_save(&mut self) {
+    /// A failure to write them (a read-only file, say) does not stop the
+    /// Save: it is kept and said once the file is saved, and the
+    /// corrections stay pending. But another writer holding the project's
+    /// lock fails the Save (`Err`), unsaved: the corrections could not be
+    /// written first, and a Save without them would lose them (ADR 0048).
+    /// The queued Saves come here holding the lock; it never waits.
+    fn correct_before_save(&mut self) -> Result<(), String> {
         if self.document.is_none() {
-            return;
+            return Ok(());
         }
-        // Never waits for the writer lock (the window's Save comes here
-        // outside a step too): another writer holding it fails the
-        // corrections at once, said as their error, and the next Save
-        // writes them (ADR 0040, amendment of 2026-10-31).
         let _no_wait = transaction::NoWait::enter(Duration::ZERO);
+        let holding = match ProjectLock::try_hold(&self.dir) {
+            Ok(Some(holding)) => Some(holding),
+            Ok(None) if !self.pending_corrections().is_empty() => {
+                return Err(
+                    "another writer holds the project's lock, so the corrected values could not be written first; nothing was saved, try again"
+                        .to_owned(),
+                );
+            }
+            // Nothing to write, or the writer's own `acquire` says why.
+            Ok(None) | Err(_) => None,
+        };
         let error = self.write_corrections().err();
+        drop(holding);
         if let Some(mode) = self.app.as_mut() {
             mode.correction_error = error;
         }
+        Ok(())
     }
 
-    /// Writes the pending corrections ([`Host::correct_before_save`]),
-    /// each only where the file read under the writer lock still holds the
-    /// value it was corrected from (another writer's value is kept, as a
-    /// snapshot's restore keeps a value the file already has). A control
-    /// with a live value of its own (a drag, unsaved) is left to it.
-    /// Nothing to write is `Ok`.
-    fn write_corrections(&mut self) -> Result<(), String> {
-        let pending: Vec<(ControlWrite, f64)> = self
-            .panel
+    /// The corrections a Save would write ([`Host::write_corrections`]),
+    /// each with the value it was corrected from.
+    fn pending_corrections(&self) -> Vec<(ControlWrite, f64)> {
+        self.panel
             .corrections()
             .into_iter()
             .filter(|c| self.panel.dragged(&c.instance, &c.parameter).is_none())
@@ -1769,7 +1813,17 @@ impl Host {
                     c.from,
                 ))
             })
-            .collect();
+            .collect()
+    }
+
+    /// Writes the pending corrections ([`Host::correct_before_save`]),
+    /// each only where the file read under the writer lock still holds the
+    /// value it was corrected from (another writer's value is kept, as a
+    /// snapshot's restore keeps a value the file already has). A control
+    /// with a live value of its own (a drag, unsaved) is left to it.
+    /// Nothing to write is `Ok`.
+    fn write_corrections(&mut self) -> Result<(), String> {
+        let pending = self.pending_corrections();
         if pending.is_empty() {
             return Ok(());
         }
@@ -2544,7 +2598,7 @@ impl Host {
     /// project's own files are written); nothing is written then. Written
     /// at once when the project's writer lock is free; otherwise it waits
     /// in the host's queue (a later step calls `done`), never on the control
-    /// thread (ADR 0040, amendment of 2026-10-31).
+    /// thread (ADR 0048).
     pub fn write_windows_then(&mut self, dir: &Path, edit: WindowsEdit, done: SaveDone) {
         let _no_wait = transaction::NoWait::enter(Duration::ZERO);
         if self.waiting.is_empty() {
@@ -2606,7 +2660,10 @@ impl Host {
     /// write here (its parameters are written by `retry`). The control
     /// thread's Save is [`Host::save_document_then`].
     pub fn save_document(&mut self) -> Result<(), String> {
-        self.correct_before_save();
+        if let Err(error) = self.correct_before_save() {
+            self.answer_saves();
+            return Err(error);
+        }
         let result = match self.document.as_mut() {
             Some(document) => document.save(),
             None => Ok(()),
@@ -2619,8 +2676,26 @@ impl Host {
     /// Save): `done` is called with its result by a later step, when it is
     /// written; the control thread goes on meanwhile. A folder project's
     /// is called at once.
+    ///
+    /// Requests waiting for the writer lock are done first (ADR 0048): the
+    /// Save waits behind them, as it does when its corrections need the
+    /// lock another writer holds; `done` is then called by a later step.
     pub fn save_document_then(&mut self, done: SaveDone) {
-        self.correct_before_save();
+        let _no_wait = transaction::NoWait::enter(Duration::ZERO);
+        if !self.waiting.is_empty() || self.save_must_wait() {
+            return self.wait_for_lock(Job::Save {
+                save_as: None,
+                done,
+            });
+        }
+        self.save_document_now(done);
+    }
+
+    /// [`Host::save_document_then`], now.
+    fn save_document_now(&mut self, done: SaveDone) {
+        if let Err(error) = self.correct_before_save() {
+            return done(Err(error));
+        }
         match self.document.as_mut() {
             Some(document) => {
                 let ticket = document.start_save();
@@ -2662,11 +2737,27 @@ impl Host {
     /// [`Host::save_document_then`]; the Setup records the new file when it
     /// is written. A folder project is packed and opened again from the new
     /// file at once (opening stops the run anyway), and `done` called.
+    /// Requests waiting for the writer lock are done first, as for
+    /// [`Host::save_document_then`].
     pub fn save_as_then(&mut self, file: &Path, done: SaveDone) {
         if self.app.is_none() {
             return done(Err(app_only().message));
         }
-        self.correct_before_save();
+        let _no_wait = transaction::NoWait::enter(Duration::ZERO);
+        if !self.waiting.is_empty() || self.save_must_wait() {
+            return self.wait_for_lock(Job::Save {
+                save_as: Some(file.to_owned()),
+                done,
+            });
+        }
+        self.save_as_now(file, done);
+    }
+
+    /// [`Host::save_as_then`], now.
+    fn save_as_now(&mut self, file: &Path, done: SaveDone) {
+        if let Err(error) = self.correct_before_save() {
+            return done(Err(error));
+        }
         match self.document.as_mut() {
             Some(document) => {
                 let ticket = document.start_save_as(file);
@@ -2765,7 +2856,8 @@ impl Host {
             self.noted(Ok::<(), Failure>(()))?;
             return Ok(Some(json!({"type": "saved", "file": null})));
         }
-        self.correct_before_save();
+        self.correct_before_save()
+            .map_err(|error| fail("not-saved", error))?;
         let Some(document) = self.document.as_mut() else {
             return Ok(Some(json!({"type": "saved", "file": null})));
         };
@@ -3218,6 +3310,9 @@ impl Host {
                 files.join(", ")
             );
             self.messages.push(format!("watch: {message}"));
+            if let Some(mode) = self.app.as_mut() {
+                mode.reload = Some((message.clone(), false));
+            }
             self.broadcast(&json!({
                 "type": "reload",
                 "sets": 0,
@@ -3567,30 +3662,99 @@ impl Host {
         };
         let id = message.get("id").cloned().unwrap_or(Value::Null);
         let kind = message.get("type").and_then(Value::as_str).unwrap_or("");
-        // ADR 0040, amendment of 2026-10-31: a request that writes the
+        // ADR 0048: a request that writes the
         // project's files runs holding the writer lock, taken without
         // waiting; when another writer holds it (or requests wait already,
         // to keep their order) it waits in the queue, not on this thread.
-        if WRITES_FILES.contains(&kind) {
-            if self.waiting.is_empty() {
-                match ProjectLock::try_hold(&self.dir) {
-                    Ok(Some(holding)) => {
-                        self.respond(client, id, kind, &message);
-                        drop(holding);
-                        return;
+        let address = message
+            .get("address")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let queue = |lock: bool| Job::Message {
+            client,
+            id: id.clone(),
+            text: text.to_owned(),
+            kind: kind.to_owned(),
+            address: address.clone(),
+            lock,
+        };
+        match Host::order_of(kind, &message) {
+            Order::Write => {
+                if self.waiting.is_empty() {
+                    match ProjectLock::try_hold(&self.dir) {
+                        Ok(Some(holding)) => {
+                            self.respond(client, id, kind, &message);
+                            drop(holding);
+                            return;
+                        }
+                        Ok(None) => {}
+                        // The writer's own `acquire` says why, at once.
+                        Err(_) => return self.respond(client, id, kind, &message),
                     }
-                    Ok(None) => {}
-                    // The writer's own `acquire` says why, at once.
-                    Err(_) => return self.respond(client, id, kind, &message),
                 }
+                self.wait_for_lock(queue(true));
             }
-            return self.wait_for_lock(Job::Message {
-                client,
-                id,
-                text: text.to_owned(),
-            });
+            Order::Save => {
+                if self.waiting.is_empty() && !self.save_must_wait() {
+                    return self.respond(client, id, kind, &message);
+                }
+                self.wait_for_lock(queue(true));
+            }
+            Order::Ordered if !self.waiting.is_empty() => self.wait_for_lock(queue(false)),
+            Order::Live(address) if self.queued_for(&address) => {
+                self.wait_for_lock(queue(false));
+            }
+            _ => self.respond(client, id, kind, &message),
         }
-        self.respond(client, id, kind, &message);
+    }
+
+    /// How the message `kind` is ordered against the requests waiting for
+    /// the writer lock (ADR 0048): file writes wait for the lock; a Save,
+    /// an open or a revert of the project waits behind every queued
+    /// request; a live edit waits only behind a queued request that can
+    /// change the same value; everything else (`ping`, `describe`, `stats`,
+    /// subscriptions, reads) never waits.
+    fn order_of(kind: &str, message: &Value) -> Order {
+        if WRITES_FILES.contains(&kind) {
+            return Order::Write;
+        }
+        if kind == "project.save" {
+            return Order::Save;
+        }
+        if ORDERED.contains(&kind) {
+            return Order::Ordered;
+        }
+        if LIVE_EDITS.contains(&kind) {
+            let address = message.get("address").and_then(Value::as_str);
+            return Order::Live(address.unwrap_or_default().to_owned());
+        }
+        Order::Free
+    }
+
+    /// Whether a queued request can change the value at `address`: a
+    /// `commit`, `retry` or live edit of it, or a snapshot restore or undo,
+    /// an open or a revert of the project (any value). A live edit of it
+    /// then waits behind them, so the client's order holds for that value.
+    fn queued_for(&self, address: &str) -> bool {
+        self.waiting.iter().any(|w| match &w.job {
+            Job::Message {
+                kind, address: a, ..
+            } => match kind.as_str() {
+                "commit" | "retry" => a.as_deref() == Some(address),
+                k if LIVE_EDITS.contains(&k) => a.as_deref() == Some(address),
+                "snapshot.restore" | "snapshot.undo" => true,
+                k => ORDERED.contains(&k),
+            },
+            _ => false,
+        })
+    }
+
+    /// Whether a Save now would have to wait for the writer lock: its
+    /// corrections are pending and another writer holds the lock.
+    fn save_must_wait(&self) -> bool {
+        self.document.is_some()
+            && !self.pending_corrections().is_empty()
+            && matches!(ProjectLock::try_hold(&self.dir), Ok(None))
     }
 
     /// Queues `job` until the project's writer lock is free
@@ -3627,6 +3791,7 @@ impl Host {
                 crate::WINDOWS_FILE,
                 failure.message
             ))),
+            Job::Save { done, .. } => done(Err(format!("not saved: {}", failure.message))),
         }
     }
 
@@ -3648,10 +3813,13 @@ impl Host {
                 }
                 continue;
             }
-            let holding = match ProjectLock::try_hold(&self.dir) {
-                Ok(Some(holding)) => Some(holding),
-                Ok(None) if front.since.elapsed() < self.lock_wait => break,
-                Ok(None) | Err(_) => None,
+            // A live edit or an open kept in order needs no lock.
+            let lock = !matches!(front.job, Job::Message { lock: false, .. });
+            let holding = match lock.then(|| ProjectLock::try_hold(&self.dir)) {
+                None => None,
+                Some(Ok(Some(holding))) => Some(holding),
+                Some(Ok(None)) if front.since.elapsed() < self.lock_wait => break,
+                Some(Ok(None) | Err(_)) => None,
             };
             let Some(waiting) = self.waiting.pop_front() else {
                 break;
@@ -3659,13 +3827,22 @@ impl Host {
             // Without the lock, the writer's `acquire` fails at once.
             let _no_wait = transaction::NoWait::enter(waiting.since.elapsed());
             match waiting.job {
-                Job::Message { client, id, text } => {
+                Job::Message {
+                    client,
+                    id,
+                    text,
+                    kind,
+                    ..
+                } => {
                     if let Ok(message) = serde_json::from_str::<Value>(&text) {
-                        let kind = message.get("type").and_then(Value::as_str).unwrap_or("");
-                        self.respond(client, id, kind, &message);
+                        self.respond(client, id, &kind, &message);
                     }
                 }
                 Job::Windows { dir, edit, done } => done(self.write_windows_now(&dir, edit)),
+                Job::Save { save_as, done } => match save_as {
+                    Some(file) => self.save_as_now(&file, done),
+                    None => self.save_document_now(done),
+                },
             }
             drop(holding);
         }

@@ -1,4 +1,4 @@
-//! External review (Codex), item 1 (ADR 0040, amendment of 2026-10-31):
+//! External review (Codex), item 1 (ADR 0048):
 //! another writer holding the project's lock never stalls the control
 //! thread. A file request (`commit`) that finds the lock held waits in the
 //! host's queue; meanwhile every step stays short, and a client pings,
@@ -141,6 +141,45 @@ fn another_writer_s_lock_never_stalls_the_control_thread(transport: Transport) {
     assert_eq!(second["value"], 0.35);
     let text = fs::read_to_string(&path).unwrap();
     assert!(text.contains("gain = 0.35"), "{text}");
+
+    // Second review (ADR 0048): a live edit of the value a queued commit
+    // writes waits behind it, so the client's order holds (the later 0.7
+    // stays live, not the older 0.5); one of another value goes on at once.
+    let gain = rig.watch_parameter(&mut ws, 20, "/out.gain");
+    let lock = ProjectLock::acquire(&rig.dir).unwrap();
+    let mut c = commit(0.5);
+    c["id"] = json!(21);
+    send(&mut ws, c);
+    send(
+        &mut ws,
+        json!({"type": "set", "address": "/out.gain", "value": 0.7, "id": 22}),
+    );
+    send(
+        &mut ws,
+        json!({"type": "set", "address": "/a.freq", "value": 220, "id": 23}),
+    );
+    let ack = timed.reply(&mut rig, &mut ws, 23);
+    assert_eq!(ack["type"], "ack", "another value's edit goes on: {ack}");
+    timed.quiet(&mut rig, &mut ws, 200, &[21, 22]);
+    drop(lock);
+    let committed = timed.reply(&mut rig, &mut ws, 21);
+    assert_eq!(committed["type"], "committed", "{committed}");
+    let ack = timed.reply(&mut rig, &mut ws, 22);
+    assert_eq!(ack["type"], "ack", "{ack}");
+    // Settled: the newest value plays.
+    let mut last = None;
+    let settle = Instant::now() + Duration::from_millis(400);
+    while Instant::now() < settle {
+        timed.pump(&mut rig);
+        while let Some(got) = receive(&mut ws) {
+            if let Some(f) = got.frame(3, gain) {
+                last = Some(f.f64s()[0]);
+            }
+        }
+    }
+    assert_eq!(last, Some(0.7), "the client's last value plays");
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("gain = 0.5"), "{text}");
 
     // One that waits longer than the host's wait fails, written nowhere,
     // and the value stays live and unsaved.

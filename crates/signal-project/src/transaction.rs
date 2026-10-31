@@ -29,7 +29,7 @@
 //!   and it runs every other step under a [`NoWait`], under which
 //!   [`ProjectLock::acquire`] tries once and fails at once rather than
 //!   sleep. A request that finds the lock held waits in the host's queue,
-//!   not on the thread (ADR 0040, amendment of 2026-10-31).
+//!   not on the thread (ADR 0048).
 //!
 //! The temporary names are not semantics (`AGENTS.md` rule 3): they never
 //! reach a project's files, renders or logs.
@@ -341,9 +341,17 @@ impl ProjectLock {
     }
 
     /// The lock of `dir` taken now for this thread's writers (a
-    /// [`Holding`]), `None` when another writer holds it. Never waits.
+    /// [`Holding`]), `None` when another writer holds it. Never waits. On a
+    /// thread that holds it already (an outer `Holding` of the same
+    /// folder) it is a `Holding` that releases nothing.
     pub fn try_hold(dir: &Path) -> io::Result<Option<Holding>> {
         let id = folder_id(dir)?;
+        if HELD.get() == Some(id) {
+            return Ok(Some(Holding {
+                previous: Some(id),
+                _lock: ProjectLock { folder: None },
+            }));
+        }
         Ok(ProjectLock::try_acquire(dir)?.map(|lock| Holding {
             previous: HELD.replace(Some(id)),
             _lock: lock,
@@ -518,7 +526,7 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// ADR 0040, amendment of 2026-10-31: a thread holding the lock through
+    /// ADR 0048: a thread holding the lock through
     /// a `Holding` lets its own writers take it at once; under a `NoWait`
     /// a held lock fails `acquire` at once instead of waiting; both scopes
     /// end with their guards.
@@ -534,6 +542,11 @@ mod tests {
             ProjectLock::try_acquire(&dir).unwrap().is_none(),
             "the inner guard released nothing"
         );
+        // A nested hold on the holding thread: given, and releasing nothing.
+        let nested = ProjectLock::try_hold(&dir).unwrap().expect("nested hold");
+        drop(nested);
+        assert!(ProjectLock::try_acquire(&dir).unwrap().is_none());
+        assert!(ProjectLock::acquire(&dir).is_ok(), "still re-entered");
         // Another thread is another writer: it finds the lock held.
         let other = dir.clone();
         let refused = std::thread::spawn(move || {

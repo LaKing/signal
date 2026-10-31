@@ -594,10 +594,10 @@ fn the_layout_is_written_into_the_project_as_seen(transport: Transport) {
         "# one\n# two\n# three\n"
     );
 
-    // Another writer holds the project's lock (external review, ADR 0040
-    // amendment of 2026-10-31): the write waits in the host's queue, the
-    // control thread goes on (a page's ping is answered at once), and the
-    // write is answered once the lock is released.
+    // Another writer holds the project's lock (external review, ADR 0048):
+    // the write waits in the host's queue, the control thread goes on (a
+    // page's ping is answered at once), and the write is answered once the
+    // lock is released.
     let lock = signal_project::transaction::ProjectLock::acquire(&dir).unwrap();
     let answer = server.write_windows_later(&dir, Box::new(|text| Ok(format!("{text}# four\n"))));
     assert!(

@@ -2,6 +2,7 @@
 
 - **Status:** Accepted (operator decision, 2026-10-24, a technical call the owner delegates). It answers two data-loss defects an external audit reproduced on 2026-10-23. It builds on ADR 0009 (text is the truth), ADR 0025 (project files), ADR 0027 §4 (`signal vendor`) and ADR 0029 (`signal mcp`, the write paths and their `base` checks). It supersedes nothing: the file formats and the UI protocol's messages are unchanged; `commit` and `retry` gain a `conflict` refusal (item 5).
 - **Date:** 2026-10-24
+- **Partly superseded by [ADR 0048](0048-the-control-thread-never-waits-for-the-lock.md)** (2026-10-31): on the UI host's control thread a writer no longer waits for the lock (item 2's "Waiting"), and a thread holding it lets its own writers re-enter it (item 2's "Re-entry"). Everything else stands.
 
 ## Context
 Several writers can write one project folder at once:
@@ -52,17 +53,6 @@ The host's other write paths compared the file with `base` just before writing. 
   - `crates/signal-project/tests/transaction.rs`: the two-writer interleaving, a foreign staging file, vendoring's conflict on an edited and on an added file, and the lock released;
   - `crates/signal-ui/tests/patch.rs` `a_position_written_meanwhile_is_a_conflict` (a test hook writes the positions just before the patch takes the lock);
   - unit tests in `transaction.rs` (staging apart, lock exclusion, `create` never replacing, a planted link at the next staging name skipped, the copy without hard links, which errors mean "unsupported", `replace_unchanged` and `edit_text` with a change before the rename), `vendor.rs` (rollback keeps an edit) and `panel.rs` (the auditor's interleaving through `write_file`; a commit refused when `project.toml` changes before its rename).
-
-## Amendment (2026-10-31): the control thread never waits for the lock
-
-An external review (Codex) reproduced that holding the project lock for 300 ms made `Host::write_windows` block its caller for 311.5 ms: every writer on the UI host's control thread slept in `ProjectLock::acquire` (item 2, "Waiting", up to 10 s), and that thread also drains the runner's reports, detects hangs (`realtime-rules.md`) and answers every client. Operator decision (a technical call the owner delegates), amending item 2's "Waiting" and "Re-entry" for the control thread only; other writers (`signal vendor`, the CLI) still wait up to 10 s:
-
-- **Requests that write files wait in a queue, not on the thread.** The host takes the lock with `ProjectLock::try_hold` (never waits) before it runs a file request (the protocol's write messages, `docs/ui-protocol.md` "Messages", and the window layout's `write_windows_then`). Held by another writer, the request goes into a bounded queue (64; one more is `busy`) with the project's generation and the time it was queued; each step runs the queue's head, in order, as soon as the lock is free. Later file requests queue behind it, so file requests keep their order; other messages do not wait. The `Controller` stays on the control thread: a queued request runs there, with its conflict checks made then.
-- **Re-entry through a `Holding`.** While the host holds the lock for a request, the writers it calls (`write_project`, `snapshots`, `vendor::write`, …) call `ProjectLock::acquire` as before; on the holding thread, for the same folder (device and inode), it goes on at once with a guard that releases nothing. Any other acquire is unchanged.
-- **Nothing on the control thread sleeps.** `Host::step` and `Host::wait` run under a `NoWait`: an `acquire` not covered by a `Holding` tries once and fails at once (`WouldBlock`). The Save's corrections (`correct_before_save`) do too: a held lock fails them at once, as their error, and the next Save writes them.
-- **Timeout and stale requests.** A request that has waited 10 s runs without the lock, so its writer fails at once with `write-failed` ("another writer has held the project's lock for over 10 s"), as before. A request queued for a project that is no longer open (the generation changed: Signal.app opened another) is refused unrun with `project-changed`.
-- Tests: `crates/signal-ui/tests/writer_lock.rs` (while another writer holds the lock, every step stays under 100 ms, a client pings, changes a live parameter and reads `stats`; two queued commits run in order once it is released; one that outwaits the host's wait fails and stays unsaved), `crates/signal-ui/tests/app_mode.rs` `a_request_waiting_for_the_lock_is_not_run_on_another_project`, `crates/signal-app/tests/server.rs` `the_layout_is_written_into_the_project_as_seen` (the layout write waits, a ping does not), and the unit test `a_held_lock_is_reentered_and_no_wait_never_waits` in `transaction.rs`.
-- Not done: Signal.app's GUI thread still writes a previous project's layout (`flush_to`, on opening another project) with a waiting `acquire`; it is not the control thread, but the window waits meanwhile.
 
 ## Alternatives considered
 - **A lock file (`.signal.lock`).** It works on any file system, but it leaves a file in the person's folder. Locking the folder itself needs no file.
