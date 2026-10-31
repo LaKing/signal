@@ -45,8 +45,27 @@ impl ProjectWatcher {
 
     /// Whether a file was added, removed or changed since the last poll.
     pub fn poll(&mut self) -> io::Result<bool> {
+        Ok(!self.changes()?.is_empty())
+    }
+
+    /// The files (relative to the folder, in path order) added, removed or
+    /// changed since the last poll: empty when nothing changed. A caller
+    /// tells a change that can alter what plays from one that cannot with
+    /// [`is_presentation`].
+    pub fn changes(&mut self) -> io::Result<Vec<PathBuf>> {
         let now = snapshot(&self.dir)?;
-        let changed = now != self.last;
+        let mut changed: Vec<PathBuf> = now
+            .iter()
+            .filter(|(path, state)| self.last.get(*path) != Some(*state))
+            .map(|(path, _)| path.clone())
+            .chain(
+                self.last
+                    .keys()
+                    .filter(|path| !now.contains_key(*path))
+                    .cloned(),
+            )
+            .collect();
+        changed.sort();
         self.last = now;
         Ok(changed)
     }
@@ -73,17 +92,27 @@ impl ProjectWatcher {
     }
 }
 
+/// Whether `file` (relative to the project folder) is presentation only: a
+/// file under `ui/` (the panels, their styles and scripts, the schematic's
+/// positions, the window layout). No load reads one, so a change to it
+/// cannot change what plays: the live reload is not run for it (the UI is
+/// still told). Every other file counts as one a load may read.
+pub fn is_presentation(file: &Path) -> bool {
+    file.starts_with("ui")
+}
+
 /// A project folder's files as [`ProjectWatcher`] sees them (each one's
-/// modification time and length), less one ignored file: equal states mean
-/// nothing a load reads changed in between. For caching what a load gives.
+/// modification time and length), less the presentation files
+/// ([`is_presentation`]): equal states mean nothing a load reads changed in
+/// between. For caching what a load gives.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FolderState(Snapshot);
 
 impl FolderState {
-    /// `dir` as it is now, without `ignore` (relative to the folder).
-    pub fn read(dir: &Path, ignore: &Path) -> io::Result<FolderState> {
+    /// `dir` as it is now, without its presentation files.
+    pub fn read(dir: &Path) -> io::Result<FolderState> {
         let mut files = snapshot(dir)?;
-        files.remove(ignore);
+        files.retain(|path, _| !is_presentation(path));
         Ok(FolderState(files))
     }
 }
@@ -866,7 +895,7 @@ mod sending {
 
 #[cfg(test)]
 mod tests {
-    use super::ProjectWatcher;
+    use super::{FolderState, ProjectWatcher, is_presentation};
     use std::fs;
     use std::path::Path;
 
@@ -885,6 +914,45 @@ mod tests {
         assert!(watcher.poll().unwrap(), "an added file");
         fs::write(dir.join(".hidden"), "x").unwrap();
         assert!(!watcher.poll().unwrap(), "hidden files are ignored");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// External review (Codex), item 3: the watch says which files changed
+    /// (added, changed, removed), so a presentation-only change is told
+    /// from one a load reads.
+    #[test]
+    fn the_watcher_names_the_changed_files() {
+        let dir = std::env::temp_dir().join(format!("signal-changes-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("ui")).unwrap();
+        fs::write(dir.join("project.toml"), "a").unwrap();
+        fs::write(dir.join("ui/old.css"), "a").unwrap();
+        let mut watcher = ProjectWatcher::new(&dir).unwrap();
+        assert!(watcher.changes().unwrap().is_empty());
+        fs::write(dir.join("ui/app.css"), "x").unwrap();
+        fs::write(dir.join("ui/main.html"), "x").unwrap();
+        fs::remove_file(dir.join("ui/old.css")).unwrap();
+        let changed = watcher.changes().unwrap();
+        assert_eq!(
+            changed,
+            [
+                Path::new("ui/app.css"),
+                Path::new("ui/main.html"),
+                Path::new("ui/old.css")
+            ]
+        );
+        assert!(changed.iter().all(|f| is_presentation(f)));
+        fs::write(dir.join("project.toml"), "ab").unwrap();
+        assert_eq!(watcher.changes().unwrap(), [Path::new("project.toml")]);
+        assert!(!is_presentation(Path::new("project.toml")));
+        assert!(!is_presentation(Path::new("composites/ui.toml")));
+        assert!(!is_presentation(Path::new("uix/a.css")));
+        // The presentation files are no part of the folder's state.
+        let state = FolderState::read(&dir).unwrap();
+        fs::write(dir.join("ui/app.css"), "changed").unwrap();
+        assert_eq!(FolderState::read(&dir).unwrap(), state);
+        fs::write(dir.join("project.toml"), "abc").unwrap();
+        assert_ne!(FolderState::read(&dir).unwrap(), state);
         fs::remove_dir_all(&dir).unwrap();
     }
 

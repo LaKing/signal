@@ -46,7 +46,8 @@ use signal_output::{
 };
 use signal_project::archive::{self, TempProject};
 use signal_project::live::{
-    Both, FolderState, ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload_observed,
+    Both, FolderState, ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, is_presentation,
+    reload_observed,
 };
 use signal_project::patch::{self, Op};
 use signal_project::schematic::{self, SCHEMATIC_FILE};
@@ -735,7 +736,7 @@ pub struct Host {
     /// (`docs/ui-protocol.md` "graph").
     graph_pushed: Option<u64>,
     /// Stopped: `graph`'s project name and structure, and `modules`, by the
-    /// folder (and its state, `ui/schematic.toml` aside) it was loaded from.
+    /// folder (and its state, its presentation files aside) it was loaded from.
     /// Kept across a run, so stopping again loads nothing when the folder is
     /// unchanged.
     graph_stopped: Option<(PathBuf, Option<FolderState>, String, Value, Value)>,
@@ -745,6 +746,10 @@ pub struct Host {
     /// Test hooks: projects loaded, structures built and schematic writes.
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     counts: (u64, u64, u64),
+    /// Live reloads of the running project's files run (the watch's load,
+    /// plan and diff; none for a presentation-only change).
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+    reloads: u64,
     /// Test hooks: run by `patch` just before it takes the project's writer
     /// lock, as another process's write landing then would.
     #[cfg(feature = "test-hooks")]
@@ -1177,6 +1182,7 @@ impl Host {
             graph_stopped: None,
             graph_playing: None,
             counts: (0, 0, 0),
+            reloads: 0,
             #[cfg(feature = "test-hooks")]
             before_lock: None,
             scopes_pushed: None,
@@ -1370,6 +1376,13 @@ impl Host {
     #[cfg(feature = "test-hooks")]
     pub fn graph_counts(&self) -> (u64, u64, u64) {
         self.counts
+    }
+
+    /// Test hooks: the live reloads of the running project's files run so
+    /// far (each loads, plans and diffs the project).
+    #[cfg(feature = "test-hooks")]
+    pub fn reloads(&self) -> u64 {
+        self.reloads
     }
 
     /// Test hook: the null backend's device list from now on (a device
@@ -1583,7 +1596,7 @@ impl Host {
         self.dir = dir.to_owned();
         self.idle_watch = None;
         self.server.set_project_ui(project_ui(dir));
-        let state = FolderState::read(dir, Path::new(SCHEMATIC_FILE)).ok();
+        let state = FolderState::read(dir).ok();
         let loaded = self.load(dir);
         if let Ok((project, plan, _)) = &loaded {
             self.remember_stopped(state, project, plan);
@@ -1754,7 +1767,7 @@ impl Host {
         }
         // Read before the load: a later edit makes it differ from the file.
         let file = fs::read_to_string(self.dir.join(signal_project::PROJECT_FILE)).ok();
-        let state = FolderState::read(&self.dir, Path::new(SCHEMATIC_FILE)).ok();
+        let state = FolderState::read(&self.dir).ok();
         let dir = self.dir.clone();
         let (project, plan, width) = match self.load(&dir) {
             Ok(loaded) => {
@@ -3068,18 +3081,46 @@ impl Host {
             return;
         }
         run.watched = Instant::now();
-        let changed = match run.watcher.as_mut().map(ProjectWatcher::poll) {
+        let changed = match run.watcher.as_mut().map(ProjectWatcher::changes) {
             Some(Ok(changed)) => changed,
             Some(Err(error)) => {
                 self.messages.push(format!("watch: {error}"));
-                false
+                Vec::new()
             }
-            None => false,
+            None => Vec::new(),
         };
-        if !(changed || run.retry) {
+        if changed.is_empty() && !run.retry {
+            return;
+        }
+        let files: Vec<String> = changed
+            .iter()
+            .map(|f| f.to_string_lossy().into_owned())
+            .collect();
+        // Presentation only (`ui/…`): no load reads it, so nothing is
+        // reloaded or planned; the clients are told, and `graph` (the
+        // schematic's positions) is pushed.
+        if !run.retry && changed.iter().all(|f| is_presentation(f)) {
+            let message = format!(
+                "presentation files changed ({}): nothing to apply",
+                files.join(", ")
+            );
+            self.messages.push(format!("watch: {message}"));
+            self.broadcast(&json!({
+                "type": "reload",
+                "sets": 0,
+                "swap": null,
+                "removed": 0,
+                "replaced": 0,
+                "loadSwap": null,
+                "message": message,
+                "files": files,
+                "presentation": true,
+            }));
+            self.push_graph(false);
             return;
         }
         run.retry = false;
+        self.reloads += 1;
         // Read before the reload: a later edit makes it differ from the file.
         let file = fs::read_to_string(self.dir.join(signal_project::PROJECT_FILE)).ok();
         run.file = None;
@@ -3119,6 +3160,8 @@ impl Host {
                         "replaced": applied.replaced,
                         "loadSwap": applied.load_swap,
                         "message": applied.to_string(),
+                        "files": files,
+                        "presentation": false,
                     }),
                     edited && applied.swap.is_none(),
                 )
@@ -3742,7 +3785,7 @@ impl Host {
         if self.app.as_ref().is_some_and(|m| !m.opened) {
             return Err(fail("no-project", "open a project folder first"));
         }
-        let state = FolderState::read(&self.dir, Path::new(SCHEMATIC_FILE)).ok();
+        let state = FolderState::read(&self.dir).ok();
         let cached = self
             .graph_stopped
             .as_ref()

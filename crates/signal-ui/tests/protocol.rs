@@ -864,6 +864,72 @@ fn a_note_sounds_while_held_and_ends_when_its_client_goes(transport: Transport) 
     let _ = fs::remove_dir_all(&source);
 }
 
+/// External review (Codex), item 3: a change to presentation files only
+/// (`ui/…`: a style sheet, a panel) runs no reload (no load, plan or diff)
+/// and is pushed as a `reload` that names the files and applies nothing;
+/// an edit of `project.toml` is reloaded and applied; one that does not
+/// load keeps the last good version, which a later presentation change
+/// leaves as it is.
+fn a_presentation_change_is_not_reloaded(transport: Transport) {
+    let mut rig = rig(
+        "presentation",
+        Options {
+            transport,
+            ..Options::default()
+        },
+    );
+    let path = rig.dir.join("project.toml");
+    let before = fs::read_to_string(&path).unwrap();
+    let (mut ws, _) = rig.client();
+    rig.request(&mut ws, 1, json!({"type": "describe"}), "describe");
+    let freq = |rig: &mut Rig, ws: &mut common::Ws, id: u64| {
+        let d = rig.request(ws, id, json!({"type": "describe"}), "describe");
+        let osc = find(&d["instances"], "/a");
+        find(&osc["parameters"], "/a.freq")["base"].clone()
+    };
+    let reload = |rig: &mut Rig, ws: &mut common::Ws, what: &str| {
+        rig.wait(ws, what, |got| {
+            got.of("reload").or_else(|| got.of("reload.error")).cloned()
+        })
+    };
+    fs::create_dir_all(rig.dir.join("ui")).unwrap();
+    fs::write(rig.dir.join("ui/app.css"), "body { color: red }\n").unwrap();
+    let pushed = reload(&mut rig, &mut ws, "the style sheet's push");
+    assert_eq!(pushed["type"], "reload", "{pushed}");
+    assert_eq!(pushed["presentation"], true, "{pushed}");
+    assert_eq!(pushed["files"], json!(["ui/app.css"]));
+    assert_eq!(pushed["sets"], 0);
+    assert_eq!(pushed["swap"], Value::Null);
+    assert_eq!(rig.host().reloads(), 0, "no reload for a style sheet");
+    // The project's file: reloaded and applied.
+    fs::write(&path, before.replace("freq = 440", "freq = 330")).unwrap();
+    let pushed = reload(&mut rig, &mut ws, "the project file's reload");
+    assert_eq!(pushed["type"], "reload", "{pushed}");
+    assert_eq!(pushed["presentation"], false, "{pushed}");
+    assert_eq!(pushed["files"], json!(["project.toml"]));
+    assert_eq!(pushed["sets"], 1, "{pushed}");
+    assert_eq!(rig.host().reloads(), 1);
+    assert_eq!(freq(&mut rig, &mut ws, 2), 330.0);
+    // A file that does not load: the last good version plays on.
+    fs::write(&path, "schema_version = 1\n[project\n").unwrap();
+    let pushed = reload(&mut rig, &mut ws, "the reload error");
+    assert_eq!(pushed["type"], "reload.error", "{pushed}");
+    assert_eq!(rig.host().reloads(), 2);
+    assert_eq!(freq(&mut rig, &mut ws, 3), 330.0);
+    // A panel changed meanwhile: told, not reloaded; still the last good one.
+    fs::write(
+        rig.dir.join("ui/main.html"),
+        "<signal-panel></signal-panel>\n",
+    )
+    .unwrap();
+    let pushed = reload(&mut rig, &mut ws, "the panel's push");
+    assert_eq!(pushed["presentation"], true, "{pushed}");
+    assert_eq!(pushed["files"], json!(["ui/main.html"]));
+    assert_eq!(rig.host().reloads(), 2);
+    assert_eq!(freq(&mut rig, &mut ws, 4), 330.0);
+    rig.finish();
+}
+
 fn with_id(message: &Value, id: u64) -> Value {
     let mut message = message.clone();
     message["id"] = json!(id);
@@ -882,6 +948,7 @@ both!(
     a_note_sounds_while_held_and_ends_when_its_client_goes,
     commit_writes_the_file_once_and_the_watch_does_not_reload_it,
     an_edit_the_watch_cannot_see_is_applied_by_the_next_commit,
+    a_presentation_change_is_not_reloaded,
     a_plan_swap_updates_describe,
     a_bad_token_a_missing_hello_and_another_version_are_refused,
     unknown_messages_are_answered_with_an_error,
