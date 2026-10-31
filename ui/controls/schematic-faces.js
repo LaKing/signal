@@ -126,8 +126,10 @@ export class SchematicFaces {
     if (face.element.inert !== inert) face.element.inert = inert;
   }
 
-  /** Another project: every face and part let go. */
+  /** Another project: every face and part let go, and every read still in flight for the last one ignored when it answers. */
   clear() {
+    this.generation = (this.generation ?? 0) + 1;
+    this.rootsAsked = null;
     for (const face of this.faces.values()) this.drop(face);
     this.faces.clear();
     this.parts.clear();
@@ -186,12 +188,15 @@ export class SchematicFaces {
       return;
     }
     this.parts.set(file, { ...(known ?? { html: null, base: null, error: null }), reading: true });
+    const gen = this.generation ?? 0;
     request.then(
       (read) => {
+        if (gen !== (this.generation ?? 0)) return;
         this.parts.set(file, { html: read?.exists ? (read.html ?? '') : null, base: read?.base ?? null, plate: read?.plate ?? null, error: read?.exists ? null : 'no such part file', reading: false });
         for (const face of this.faces.values()) if (face.file === file) this.render(face);
       },
       (error) => {
+        if (gen !== (this.generation ?? 0)) return;
         // Not open yet: read again at the next sync.
         if (error?.code === 'closed') this.parts.delete(file);
         else this.parts.set(file, { html: null, base: null, error: error?.message ?? String(error), reading: false });

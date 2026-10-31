@@ -115,6 +115,18 @@ export class SchematicBoard {
     this.plate = { size: null, vias: new Map(), obstacles: [], cards: [], key: '' };
   }
 
+  /**
+   * No plate measured (another project, or a project without a panel file):
+   * no size, vias, obstacles or cards, and nothing of the last plate
+   * observed (review 2026-10-31).
+   */
+  resetPlate() {
+    this.plate = { size: null, vias: new Map(), obstacles: [], cards: [], key: '' };
+    this.sizes?.disconnect();
+    this.observed = new Set();
+    this.watched = null;
+  }
+
   /** The bar's switches, after the breadcrumbs. */
   build(bar, before) {
     this.layerButtons = new Map();

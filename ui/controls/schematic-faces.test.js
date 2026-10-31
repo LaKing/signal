@@ -246,6 +246,17 @@ test("a face links the theme and the project panel's style sheets", () => {
   globalThis.document = realDocument;
 });
 
+test('another project: a part read of the last one that answers late is ignored (review 2026-10-31)', async () => {
+  const { svg, faces } = setup();
+  svg.append(area());
+  faces.sync({ levels: [] });
+  assert.equal(faces.parts.get('parts/synth.html')?.reading, true, 'being read');
+  faces.clear();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(faces.parts.size, 0, 'the late answer is not kept');
+  globalThis.document = realDocument;
+});
+
 test('a hidden face, and the plate faded out on Board, is inert: no key reaches its controls; the plate on Plate and X-ray is operable; focus in it goes to the drawing (review 2026-10-31)', () => {
   const { svg, faces, host } = setup();
   let focused = 0;

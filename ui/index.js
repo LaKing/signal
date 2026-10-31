@@ -79,6 +79,7 @@ import './controls/slot-dialogs.test.js';
 import './controls/schematic-insides.test.js';
 import './controls/schematic-reveal.test.js';
 import './controls/schematic-board.test.js';
+import './controls/schematic-project.test.js';
 import './lib/pattern-text.test.js';
 import './lib/piano-roll-model.test.js';
 import './lib/step-grid-model.test.js';

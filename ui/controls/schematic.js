@@ -615,15 +615,9 @@ export class SignalSchematic extends HTMLElement {
   stale(error) {
     // Another project's error: its drawing is not this one's, so it goes.
     if (this.graph && 'folder' in error && error.folder !== this.graph.folder) {
+      this.resetProject();
       this.graph = null;
-      this.layouts.clear();
-      this.dieOrders?.clear();
-      this.selected = [];
-      this.tracing = null;
-      this.closeMenu();
-      this.fitted = false;
       this.svg.replaceChildren();
-      this.faces?.clear();
       this.crumbs.replaceChildren();
       this.showSide();
     }
@@ -637,26 +631,10 @@ export class SignalSchematic extends HTMLElement {
   setGraph(graph) {
     this.staleBox.style.visibility = 'hidden';
     this.svg.classList.remove('stale');
+    // Another project (its `projectId`, never its name: two projects may share one): nothing of the last one's view is kept.
+    if (this.graph && projectKey(graph) !== projectKey(this.graph)) this.resetProject();
     const old = new Map(this.layouts);
-    // Another project: its own view, fitted again, nothing open or selected.
-    if (this.graph && graph.project !== this.graph.project) {
-      this.moved.clear();
-      this.open = new Set();
-      this.pinned = new Set();
-      this.fitted = false;
-      this.selected = [];
-      this.stopZoom();
-      this.view = IDENTITY;
-      this.tracing = null;
-      old.clear();
-      this.lastLaid?.clear();
-    }
     // The panel's controls follow the project's panel file (read with every graph: a hand edit of it shows).
-    if (this.graph?.projectId !== graph.projectId || this.graph?.project !== graph.project) {
-      this.panelText = null;
-      this.panelControls = [];
-      this.faces?.clear();
-    }
     this.readPanel();
     this.graph = graph;
     this.notes = new Map();
@@ -690,14 +668,49 @@ export class SignalSchematic extends HTMLElement {
   }
 
   /**
+   * Another project shown (review 2026-10-31: keyed by `graph.projectId`,
+   * `projectKey`): its own view, fitted again, nothing open, selected,
+   * traced or being moved; no layout, board memo, face or plate geometry of
+   * the last project kept; and a reply the last project's requests get
+   * late (a panel read, a part read, a move written) is ignored
+   * (`projectGen`).
+   */
+  resetProject() {
+    this.projectGen = (this.projectGen ?? 0) + 1;
+    this.stopZoom();
+    this.moved.clear();
+    this.open = new Set();
+    this.pinned = new Set();
+    this.fitted = false;
+    this.selected = [];
+    this.view = IDENTITY;
+    this.tracing = null;
+    this.closeMenu();
+    this.hovered = null;
+    this.hoveredBox = null;
+    this.hoveredPort = null;
+    this.layouts.clear();
+    this.lastLaid?.clear();
+    this.dieOrders?.clear();
+    this.crumbKey = null;
+    this.panelText = null;
+    this.panelControls = [];
+    this.faces?.clear();
+    this.board?.resetPlate();
+  }
+
+  /**
    * The project's panel file read again (`panel.read` of `main.html`): its
    * controls drawn as nodes of the top level. A project without one (the
-   * generated panel) has none; a refused read leaves what is drawn.
+   * generated panel) has none; a refused read leaves what is drawn; a read
+   * of a project no longer shown is ignored.
    */
   readPanel() {
     const request = this.connection?.request?.({ type: 'panel.read', file: 'main.html' });
+    const gen = this.projectGen ?? 0;
     request?.then(
       (read) => {
+        if (gen !== (this.projectGen ?? 0)) return;
         // Its style sheets style the slots' faces as they style the panel.
         this.faces?.pageSeen(read?.exists ? (read.text ?? '') : '');
         this.panelSeen(read?.exists ? (read.html ?? read.text ?? '') : '');
@@ -711,6 +724,8 @@ export class SignalSchematic extends HTMLElement {
     if (text === this.panelText) return;
     this.panelText = text;
     this.panelControls = panelControls(text);
+    // No panel file: no plate, nothing of one measured before.
+    if (!text) this.board?.resetPlate();
     // ADR 0047 §5: the vias are these controls on the plate drawn.
     this.board?.remeasure();
     if (!this.graph) return;
@@ -2083,9 +2098,12 @@ export class SignalSchematic extends HTMLElement {
       return;
     }
     // A group too large for one message goes as several (`moveMessages`).
+    const gen = this.projectGen ?? 0;
     for (const message of moveMessages(level, moves)) {
       const mine = (message.moves ?? [message]).map((m) => [m.instance, kept.get(m.instance)]);
       const settle = (failed) => {
+        // Written for a project no longer shown: its moves went with it.
+        if (gen !== (this.projectGen ?? 0)) return;
         let changed = false;
         for (const [name, at] of mine) {
           if (kept.get(name) !== at) continue;
