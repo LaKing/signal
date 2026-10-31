@@ -2392,7 +2392,11 @@ impl Host {
         }
         // A save still running decides what is edited: finished first.
         self.finish_saves();
-        let edited = self.document.as_mut().is_some_and(Document::check);
+        // Writes waiting for the writer lock are edits not made yet (ADR
+        // 0048 item 5): asked about as edits, a Save refused until they are
+        // written, a Discard lets them go (each answered `project-changed`).
+        let queued = self.document.is_some() && !self.waiting.is_empty();
+        let edited = self.document.as_mut().is_some_and(Document::check) || queued;
         if edited && edits == Edits::Ask {
             return Err(fail(
                 "edited",
@@ -2672,8 +2676,18 @@ impl Host {
     /// Save of a `.signal` project, waiting for it: the working folder
     /// written back to the file atomically. A folder project has nothing to
     /// write here (its parameters are written by `retry`). The control
-    /// thread's Save is [`Host::save_document_then`].
+    /// thread's Save is [`Host::save_document_then`]. Refused, nothing
+    /// saved, while requests wait for the writer lock (ADR 0048 item 5): a
+    /// Save made now would leave out writes asked before it, and an Open
+    /// after it would then refuse them as another project's.
     pub fn save_document(&mut self) -> Result<(), String> {
+        if self.document.is_some() && !self.waiting.is_empty() {
+            self.answer_saves();
+            return Err(format!(
+                "not saved: {} request(s) wait for another writer to release the project's lock; try again once they are written",
+                self.waiting.len()
+            ));
+        }
         if let Err(error) = self.correct_before_save() {
             self.answer_saves();
             return Err(error);

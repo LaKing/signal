@@ -2479,6 +2479,7 @@ both!(
     a_save_waits_for_the_writes_queued_before_it,
     a_save_whose_corrections_meet_a_held_lock_waits_or_fails,
     a_delayed_commit_is_never_written_into_another_project,
+    save_then_open_waits_for_the_queued_writes,
 );
 
 /// External review (A, ADR 0049): a delayed edit is never written into
@@ -2565,6 +2566,45 @@ fn a_delayed_commit_is_never_written_into_another_project(transport: Transport) 
     );
     rig.finish();
     let _ = fs::remove_dir_all(&b);
+}
+
+/// Second review of batch 2, item 2 (ADR 0048 item 5): the window's
+/// Save-then-Open while a commit waits for another writer's lock saves
+/// nothing and opens nothing (the queued commit would be left out of the
+/// saved file, then refused as another project's); asked, the waiting
+/// write counts as an edit. Once the lock is free the commit is written,
+/// and the Save-then-Open saves it.
+fn save_then_open_waits_for_the_queued_writes(transport: Transport) {
+    let mut rig = app_rig("save-open-queued", transport, None);
+    let file = packed(&rig, "tone");
+    let other = rig.dir.parent().unwrap().join("other");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("project.toml"), common::TONE).unwrap();
+    let (mut ws, _) = rig.client();
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    let working = PathBuf::from(opened["dir"].as_str().unwrap());
+    let lock = signal_project::transaction::ProjectLock::acquire(&working).unwrap();
+    common::send(
+        &mut ws,
+        json!({"type": "commit", "address": "/out.gain", "value": 0.3, "id": 2}),
+    );
+    no_reply(&mut rig, &mut ws, 100, &[2]);
+    let asked = rig.host().open_project(&other, Edits::Ask).unwrap_err();
+    assert!(asked.contains("Save changes"), "{asked}");
+    let refused = rig.host().open_project(&other, Edits::Save).unwrap_err();
+    assert!(refused.contains("not saved"), "{refused}");
+    assert!(gain_of(&file).contains("gain = 0.5"), "nothing saved");
+    drop(lock);
+    rig.reply(&mut ws, 2, "committed");
+    rig.host().open_project(&other, Edits::Save).unwrap();
+    assert!(gain_of(&file).contains("gain = 0.3"), "{}", gain_of(&file));
+    rig.finish();
+    let _ = fs::remove_dir_all(&other);
 }
 
 /// Steps for `ms`, asserting that `ws` receives no reply to `ids`.
