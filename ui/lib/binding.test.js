@@ -13,12 +13,14 @@ import { Binding } from './binding.js';
 /** A connection whose requests settle as the test says. */
 function fakeConnection() {
   const sent = [];
-  const answer = (type) => (address, value) => {
+  const answer = (type) => (address, value, options) => {
     let settle;
     const promise = new Promise((resolve, reject) => {
       settle = { resolve, reject };
     });
-    sent.push({ type, address, value, promise, ...settle });
+    // retry(address, options) and revert(address, options) take no value.
+    const opts = typeof value === 'object' && value !== null ? value : options;
+    sent.push({ type, address, value, options: opts, promise, ...settle });
     return promise;
   };
   return {
@@ -159,4 +161,47 @@ test('no commit is swallowed by quietly', () => {
     }
   }
   assert.deepEqual(swallowed, []);
+});
+
+// External review (A, ADR 0049): a delayed edit is written only into the
+// opening of the project it began under. The commit names the generation
+// the edit began with, so the host refuses it once another project (or a
+// new opening of this one) is open, instead of writing it there.
+test('a debounced commit names the generation its edit began under', async () => {
+  const { binding, connection } = bound();
+  connection.generation = 7;
+  binding.setValue(0.3, 'nudge');
+  // Another project opens before the debounce ends.
+  connection.generation = 8;
+  binding.flush();
+  const commit = connection.last('commit');
+  assert.equal(commit.value, 0.3);
+  assert.deepEqual(commit.options, { generation: 7 });
+  commit.resolve({ type: 'committed' });
+  await settled();
+  // A new edit begins under the new opening.
+  binding.setValue(0.4, 'nudge');
+  binding.flush();
+  assert.deepEqual(connection.last('commit').options, { generation: 8 });
+  connection.last('commit').resolve({ type: 'committed' });
+  await settled();
+});
+
+test('a drag released after another project opened names the opening it began under', async () => {
+  const { binding, connection } = bound();
+  connection.generation = 3;
+  binding.setValue(0.2, 'ramp');
+  connection.generation = 4;
+  binding.setValue(0.25, 'commit');
+  assert.deepEqual(connection.last('commit').options, { generation: 3 });
+  connection.last('commit').resolve({ type: 'committed' });
+  await settled();
+  // A commit with no edit before it: the opening now.
+  binding.setValue(0.5, 'commit');
+  assert.deepEqual(connection.last('commit').options, { generation: 4 });
+  binding.retry();
+  assert.deepEqual(connection.last('retry').options, { generation: 4 });
+  connection.last('commit').resolve({ type: 'committed' });
+  connection.last('retry').resolve({ type: 'committed' });
+  await settled();
 });

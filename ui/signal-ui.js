@@ -100,6 +100,11 @@ export function findMeter(description, address) {
  * with `describe`'s), `scope.bound`, `scope.unbound`, `error`
  * (errors that answer no request) and `message` (every message).
  */
+/** `{generation}` when one is known, else nothing (the host takes the open project). */
+function generationField(generation) {
+  return Number.isSafeInteger(generation) ? { generation } : {};
+}
+
 export class Connection {
   constructor({ url, token, WebSocketImpl = globalThis.WebSocket, timers = globalThis, backoff = BACKOFF_MS } = {}) {
     this.url = url;
@@ -110,6 +115,12 @@ export class Connection {
     this.status = 'connecting';
     this.welcome = null;
     this.description = null;
+    /**
+     * The open project's generation, as the host last gave it (`welcome`,
+     * `describe`, `graph`, `app`; ADR 0049): a delayed edit sends the one
+     * it began under, so the host refuses it once another project opened.
+     */
+    this.generation = null;
     /** The host's unsaved parameters, as last described or pushed. */
     this.unsaved = null;
     this.socket = null;
@@ -189,6 +200,7 @@ export class Connection {
 
   received(message) {
     this.emit('message', message);
+    if (Number.isSafeInteger(message.generation)) this.generation = message.generation;
     if (message.type === 'welcome') {
       this.welcome = message;
       this.attempt = 0;
@@ -292,19 +304,23 @@ export class Connection {
     return this.request({ type: 'note', address, key, on, ...(velocity === undefined ? {} : { velocity }), ...(at === undefined ? {} : { at }) });
   }
 
-  /** Writes a control's value into project.toml (null removes the key). */
-  commit(address, value) {
-    return this.request({ type: 'commit', address, value });
+  /**
+   * Writes a control's value into project.toml (null removes the key);
+   * `generation`: the opening of the project it is meant for (ADR 0049),
+   * refused (`project-changed`) once another is open.
+   */
+  commit(address, value, { generation } = {}) {
+    return this.request({ type: 'commit', address, value, ...generationField(generation) });
   }
 
   /** Writes an unsaved control's live value into project.toml again. */
-  retry(address) {
-    return this.request({ type: 'retry', address });
+  retry(address, { generation } = {}) {
+    return this.request({ type: 'retry', address, ...generationField(generation) });
   }
 
   /** Sets an unsaved parameter's live value back to the file's. */
-  revert(address) {
-    return this.request({ type: 'revert', address });
+  revert(address, { generation } = {}) {
+    return this.request({ type: 'revert', address, ...generationField(generation) });
   }
 
   /**

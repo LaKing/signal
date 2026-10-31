@@ -2478,7 +2478,94 @@ both!(
     a_request_waiting_for_the_lock_is_not_run_on_another_project,
     a_save_waits_for_the_writes_queued_before_it,
     a_save_whose_corrections_meet_a_held_lock_waits_or_fails,
+    a_delayed_commit_is_never_written_into_another_project,
 );
+
+/// External review (A, ADR 0049): a delayed edit is never written into
+/// another project. A commit naming the generation (or the `projectId`) of
+/// the project open when its edit began is refused (`project-changed`)
+/// once another project is open (A then B), and once the same project is
+/// opened again (A, B, A: a new generation); nothing is written. A commit
+/// naming the generation open now, or naming none (MCP, the CLI), writes
+/// the open project.
+fn a_delayed_commit_is_never_written_into_another_project(transport: Transport) {
+    let mut rig = app_rig("delayed-commit", transport, None);
+    let a = rig.dir.clone();
+    let b = rig.dir.parent().unwrap().join("b");
+    fs::create_dir_all(&b).unwrap();
+    fs::write(b.join("project.toml"), common::TONE).unwrap();
+    let (mut ws, _) = rig.client();
+    let first = rig.request(&mut ws, 1, json!({"type": "graph"}), "graph");
+    let first_generation = first["generation"].as_u64().unwrap();
+    let first_id = first["projectId"].clone();
+    let described = rig.request(&mut ws, 2, json!({"type": "describe"}), "describe");
+    assert_eq!(described["generation"], first_generation);
+    let open = |rig: &mut Rig, ws: &mut common::Ws, id: u64, dir: &Path| {
+        rig.request(
+            ws,
+            id,
+            json!({"type": "project.open", "path": dir.display().to_string()}),
+            "project",
+        );
+        let graph = rig.request(ws, id + 1, json!({"type": "graph"}), "graph");
+        graph["generation"].as_u64().unwrap()
+    };
+    let commit = |value: f64, extra: Value| {
+        let mut message = json!({"type": "commit", "address": "/out.gain", "value": value});
+        for (key, value) in extra.as_object().unwrap() {
+            message[key] = value.clone();
+        }
+        message
+    };
+    // A, then B: A's pending commit, by generation or by id.
+    let b_generation = open(&mut rig, &mut ws, 3, &b);
+    assert_ne!(b_generation, first_generation);
+    for (id, extra) in [
+        (5, json!({"generation": first_generation})),
+        (6, json!({"projectId": first_id})),
+    ] {
+        let refused = rig.request(&mut ws, id, commit(0.25, extra), "error");
+        assert_eq!(refused["code"], "project-changed", "{refused}");
+    }
+    assert_eq!(
+        fs::read_to_string(b.join("project.toml")).unwrap(),
+        common::TONE
+    );
+    assert_eq!(
+        fs::read_to_string(a.join("project.toml")).unwrap(),
+        common::TONE
+    );
+    // A again: the first opening's commit is still refused.
+    let again = open(&mut rig, &mut ws, 7, &a);
+    assert_ne!(again, first_generation);
+    let refused = rig.request(
+        &mut ws,
+        9,
+        commit(0.25, json!({"generation": first_generation})),
+        "error",
+    );
+    assert_eq!(refused["code"], "project-changed", "{refused}");
+    assert_eq!(
+        fs::read_to_string(a.join("project.toml")).unwrap(),
+        common::TONE
+    );
+    // Now's generation, or none: the open project is written.
+    rig.request(
+        &mut ws,
+        10,
+        commit(0.25, json!({"generation": again})),
+        "committed",
+    );
+    assert!(gain_in(&a).contains("gain = 0.25"), "{}", gain_in(&a));
+    rig.request(&mut ws, 11, commit(0.3, json!({})), "committed");
+    assert!(gain_in(&a).contains("gain = 0.3"), "{}", gain_in(&a));
+    assert_eq!(
+        fs::read_to_string(b.join("project.toml")).unwrap(),
+        common::TONE
+    );
+    rig.finish();
+    let _ = fs::remove_dir_all(&b);
+}
 
 /// Steps for `ms`, asserting that `ws` receives no reply to `ids`.
 fn no_reply(rig: &mut Rig, ws: &mut common::Ws, ms: u64, ids: &[u64]) {

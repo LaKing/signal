@@ -23,6 +23,12 @@ export function quietly(promise) {
   promise?.catch?.(() => {});
 }
 
+/** The open project's generation a connection last heard of (ADR 0049), or null. */
+export function generationOf(connection) {
+  const generation = connection?.generation ?? connection?.description?.generation;
+  return Number.isSafeInteger(generation) ? generation : null;
+}
+
 /** A numeric attribute, or undefined when absent or not a number. */
 export function numberAttribute(element, name) {
   const text = element.getAttribute(name);
@@ -55,6 +61,13 @@ export class Binding {
     this.pending = false;
     this.unsaved = null;
     this.onChange = null;
+    /**
+     * The opening of the project the edit in progress began under (ADR
+     * 0049): its commit names it, so a commit flushed after another project
+     * opened (a debounced key edit, a release, a flush on unload) is refused
+     * by the host instead of written into the new one.
+     */
+    this.editGeneration = undefined;
   }
 
   get range() {
@@ -136,16 +149,24 @@ export class Binding {
     if (how === 'local') this.cancel();
     if (!connection || !this.address || how === 'local') return;
     if (how === 'ramp') {
+      this.begin(connection);
       quietly(connection.ramp(this.address, value, { ms: RAMP_MS }));
     } else if (how === 'nudge') {
+      this.begin(connection);
       quietly(connection.set(this.address, value));
       this.pending = true;
       clearTimeout(this.timer);
       this.timer = setTimeout(() => this.flush(), COMMIT_DELAY_MS);
     } else {
+      const generation = this.editGeneration;
       this.cancel();
-      this.commit(value);
+      this.commit(value, generation);
     }
+  }
+
+  /** An edit begins: the project's opening it is meant for is kept. */
+  begin(connection) {
+    if (this.editGeneration === undefined) this.editGeneration = generationOf(connection);
   }
 
   /** A typed value (docs/ui-controls.md "Value entry"): sent as a drag's release is, a short ramp, then committed. */
@@ -157,39 +178,45 @@ export class Binding {
   /** Commits now what a debounced edit left pending. */
   flush() {
     if (!this.pending) return;
+    const generation = this.editGeneration;
     this.cancel();
-    this.commit(this.base);
+    this.commit(this.base, generation);
   }
 
   cancel() {
     clearTimeout(this.timer);
     this.timer = null;
     this.pending = false;
+    this.editGeneration = undefined;
   }
 
   reset() {
     this.setValue(resetValue(this.range), 'commit');
   }
 
-  /** Writes `value` into project.toml; a refusal is kept and shown. */
-  commit(value) {
+  /**
+   * Writes `value` into project.toml; a refusal is kept and shown.
+   * `generation`: the opening the edit began under (now's by default).
+   */
+  commit(value, generation = undefined) {
     const connection = this.element.connection;
     if (!connection || !this.address) return Promise.resolve(null);
-    return this.settle(connection.commit(this.address, value));
+    const meant = generation === undefined ? generationOf(connection) : generation;
+    return this.settle(connection.commit(this.address, value, { generation: meant }));
   }
 
   /** Writes the host's live value again (`retry`). */
   retry() {
     const connection = this.element.connection;
     if (!connection || !this.address) return Promise.resolve(null);
-    return this.settle(connection.retry(this.address));
+    return this.settle(connection.retry(this.address, { generation: generationOf(connection) }));
   }
 
   /** Sets the live value back to the file's (`revert`). */
   revert() {
     const connection = this.element.connection;
     if (!connection || !this.address) return Promise.resolve(null);
-    return this.settle(connection.revert(this.address));
+    return this.settle(connection.revert(this.address, { generation: generationOf(connection) }));
   }
 
   /**

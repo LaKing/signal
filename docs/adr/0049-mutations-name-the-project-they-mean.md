@@ -1,0 +1,19 @@
+# ADR 0049: Mutations name the project they mean
+
+- **Status:** Accepted (operator decision, 2026-10-31, a technical call the owner delegates). It answers an external review (P1, reproduced: a page connected to project A, the app opened B, and A's pending `/out.gain` commit then returned `committed` and changed B's file, even when it carried A's `projectId`). It builds on ADR 0023 (the UI protocol), ADR 0032 (Signal.app opens projects) and ADR 0048 (the queue's generation tag). It supersedes nothing.
+- **Date:** 2026-10-31
+
+## Context
+The panel's controls commit a key or wheel edit 500 ms after the last step and flush what is pending when the page hides or unloads (`ui/lib/binding.js`, `ui/controls/base.js`). Signal.app can open another project meanwhile, on the same connection or just before the page reloads. The host answered every `commit` with the project open when the message arrived, so a delayed commit landed in whatever project was open by then.
+
+## Decision
+1. **A generation per opening.** The host numbers each opening of a project (`generation`): a new one on every `project.open`, every reopen of `signal ui`'s project from a new copy, and (from the wall clock at start) a new run of the app, so no opening repeats one of an earlier run. It is not semantics: nothing rendered or recorded depends on it. `welcome`, `describe`, `graph` and `app` carry it.
+2. **Mutations may name the project.** A mutation (every message that writes files, ADR 0048's list; the live edits `set`, `ramp`, `trigger`, `note`, `revert`; `project.save`) may carry `generation` (the opening it is meant for) or `projectId` (`graph.projectId`, the project folder). One that does not match the open project is refused, `project-changed`, and nothing is done: with `generation`, a new opening of the same project is another opening (A, B, A: the first A's edit is refused); with `projectId` alone, only another folder is.
+3. **A mutation naming neither is taken to mean the open project.** `signal mcp` (which checks `graph.projectId` itself before its guarded writes when attached), the CLI and pages written before this keep working. Refusing them when their connection began under an older opening was considered and not taken: Signal.app's shell page keeps one connection across openings and sends snapshot, panel and schematic writes without a generation, so it would be refused after every Open.
+4. **The UI names the opening an edit began under.** A control's binding keeps the generation at the start of a drag or key edit and its commit sends it, so a release, a debounced commit or a flush on unload after another opening is refused; a commit with no edit before it, `retry` and `revert` send the generation the connection last heard of (`Connection.generation`).
+5. **Queued requests** keep ADR 0048's rule: one queued under another opening is refused unrun (`project-changed`).
+
+## Consequences
+- No delayed edit is written into a project other than the opening it began under.
+- A pending edit at an Open is not written: with "discard" that is what was asked; with "save", the edit's live value was sent and is one of the unsaved edits the Open reports as not written. Flushing pending edits before a save-then-open needs the shell to ask the panel page to flush first (`ui/app/`), which is not done here.
+- Tests: `crates/signal-ui/tests/app_mode.rs` `a_delayed_commit_is_never_written_into_another_project` (A then B, by generation and by `projectId`; A, B, A by generation; now's generation and none write the open project), `ui/lib/binding.test.js` (a debounced commit and a drag's release name the opening they began under).

@@ -1294,7 +1294,11 @@ impl Host {
             keys_version: 0,
             restorable: std::collections::HashSet::new(),
             waiting: VecDeque::new(),
-            generation: 0,
+            // Unique across runs of the app (a page reconnecting to a new
+            // run never matches an old opening); no semantics depend on it.
+            generation: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(1, |d| u64::try_from(d.as_millis()).unwrap_or(1)),
             lock_wait: transaction::LOCK_WAIT,
         };
         for problem in host.keys.report() {
@@ -1668,6 +1672,7 @@ impl Host {
         };
         json!({
             "type": "app",
+            "generation": self.generation,
             "project": mode.opened.then(|| json!({
                 "dir": self.dir.display().to_string(),
                 "file": self.document.as_ref().map(|d| d.file().display().to_string()),
@@ -3639,6 +3644,7 @@ impl Host {
                     "sampleRate": self.rate,
                     "frame": self.run.as_ref().map(|r| r.controller.status().next_frame.0),
                     "planVersion": self.run.as_ref().map(|r| r.version),
+                    "generation": self.generation,
                 });
                 // Before the client can subscribe: one that connects while
                 // the app is off streams nothing (M2.8-11).
@@ -3666,6 +3672,15 @@ impl Host {
         // project's files runs holding the writer lock, taken without
         // waiting; when another writer holds it (or requests wait already,
         // to keep their order) it waits in the queue, not on this thread.
+        if let Err(failure) = self.same_project(kind, &message) {
+            let error = json!({
+                "type": "error",
+                "id": id,
+                "code": failure.code,
+                "message": failure.message,
+            });
+            return self.send_text(client, &error);
+        }
         let address = message
             .get("address")
             .and_then(Value::as_str)
@@ -3705,6 +3720,46 @@ impl Host {
                 self.wait_for_lock(queue(false));
             }
             _ => self.respond(client, id, kind, &message),
+        }
+    }
+
+    /// A mutation (a file write, a live edit, `project.save`) names the
+    /// project it means, or is taken to mean the open one (ADR 0049): a
+    /// `generation` (the open project's, as `welcome`, `describe`, `graph`
+    /// and `app` give it) must be the open project's generation, else a
+    /// `projectId` (`graph.projectId`) must be its id; either one not
+    /// matching is `project-changed`, and nothing is done. A message
+    /// without either is taken to mean the open project (MCP, the CLI and
+    /// pages that send none).
+    fn same_project(&self, kind: &str, message: &Value) -> Result<(), Failure> {
+        let mutation =
+            WRITES_FILES.contains(&kind) || LIVE_EDITS.contains(&kind) || kind == "project.save";
+        if !mutation {
+            return Ok(());
+        }
+        let changed = |what: &str| {
+            Err(fail(
+                "project-changed",
+                format!(
+                    "not done: the request names {what} of a project no longer open (another project, or a new opening of it, is open now)"
+                ),
+            ))
+        };
+        match message.get("generation") {
+            None | Some(Value::Null) => {}
+            Some(given) => {
+                return match given.as_u64() {
+                    Some(g) if g == self.generation => Ok(()),
+                    Some(_) => changed("the generation"),
+                    None => Err(fail("bad-value", "`generation` must be a whole number")),
+                };
+            }
+        }
+        match message.get("projectId") {
+            None | Some(Value::Null) => Ok(()),
+            Some(Value::String(id)) if *id == self.project_id() => Ok(()),
+            Some(Value::String(_)) => changed("the id"),
+            Some(_) => Err(fail("bad-value", "`projectId` must be a string")),
         }
     }
 
@@ -4118,6 +4173,7 @@ impl Host {
         let mut describe = json!({
             "type": "describe",
             "planVersion": self.run.as_ref().map(|r| r.version),
+            "generation": self.generation,
             "sampleRate": self.rate,
             "project": self.run.as_ref().map(|r| r.current.name.clone()),
             "playing": self.run.is_some(),
@@ -4259,6 +4315,7 @@ impl Host {
             "project": name,
             "folder": self.folder_name(),
             "projectId": self.project_id(),
+            "generation": self.generation,
             "planVersion": self.run.as_ref().map(|r| r.version),
             "top": top,
             "composites": composites,
