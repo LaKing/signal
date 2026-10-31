@@ -2481,6 +2481,7 @@ both!(
     a_delayed_commit_is_never_written_into_another_project,
     save_then_open_waits_for_the_queued_writes,
     a_stale_revert_or_open_is_refused,
+    a_request_after_a_queued_open_means_the_project_then_open,
 );
 
 /// External review (A, ADR 0049): a delayed edit is never written into
@@ -2658,6 +2659,40 @@ fn a_stale_revert_or_open_is_refused(transport: Transport) {
     assert!(gain_in(&reverted).contains("gain = 0.5"), "reverted");
     rig.finish();
     let _ = fs::remove_dir_all(&other);
+}
+
+/// Second review of batch 2, item 5: a request naming no project, sent
+/// after a `project.open` that waits behind the writer lock, means the
+/// project open when it runs (the new one), not the one open when it was
+/// queued; one naming the old opening is refused.
+fn a_request_after_a_queued_open_means_the_project_then_open(transport: Transport) {
+    let mut rig = app_rig("after-queued-open", transport, None);
+    let a = rig.dir.clone();
+    let b = rig.dir.parent().unwrap().join("b");
+    fs::create_dir_all(&b).unwrap();
+    fs::write(b.join("project.toml"), common::TONE).unwrap();
+    let (mut ws, _) = rig.client();
+    let old = rig.request(&mut ws, 1, json!({"type": "graph"}), "graph")["generation"].clone();
+    let lock = signal_project::transaction::ProjectLock::acquire(&a).unwrap();
+    for message in [
+        json!({"type": "commit", "address": "/out.gain", "value": 0.2, "id": 2}),
+        json!({"type": "project.open", "path": b.display().to_string(), "id": 3}),
+        json!({"type": "commit", "address": "/out.gain", "value": 0.25, "id": 4}),
+        json!({"type": "commit", "address": "/out.gain", "value": 0.35, "id": 5, "generation": old}),
+    ] {
+        common::send(&mut ws, message);
+    }
+    no_reply(&mut rig, &mut ws, 100, &[2, 3, 4, 5]);
+    drop(lock);
+    rig.reply(&mut ws, 2, "committed");
+    rig.reply(&mut ws, 3, "project");
+    rig.reply(&mut ws, 4, "committed");
+    let refused = rig.reply(&mut ws, 5, "error");
+    assert_eq!(refused["code"], "project-changed", "{refused}");
+    assert!(gain_in(&a).contains("gain = 0.2"), "{}", gain_in(&a));
+    assert!(gain_in(&b).contains("gain = 0.25"), "{}", gain_in(&b));
+    rig.finish();
+    let _ = fs::remove_dir_all(&b);
 }
 
 /// Steps for `ms`, asserting that `ws` receives no reply to `ids`.

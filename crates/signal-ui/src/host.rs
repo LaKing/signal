@@ -143,10 +143,13 @@ const WAITING_MAX: usize = 64;
 /// An edit of `ui/windows.toml`'s text ([`Host::write_windows_then`]).
 pub type WindowsEdit = Box<dyn Fn(&str) -> Result<String, String> + Send>;
 
-/// A file request waiting for the project's writer lock: the project it was
-/// of (the host's generation then), when it was queued, and what it does.
+/// A file request waiting for the project's writer lock: the opening it is
+/// of, when it was queued, and what it does. `generation` is the opening
+/// open when it was queued, or `None` for a request that names no project
+/// queued behind an open or revert: it means the project open when it runs
+/// (second review of batch 2, item 5).
 struct Waiting {
-    generation: u64,
+    generation: Option<u64>,
     since: Instant,
     job: Job,
 }
@@ -163,6 +166,9 @@ enum Job {
         kind: String,
         address: Option<String>,
         lock: bool,
+        /// It carries a `generation` or `projectId` (ADR 0049): checked
+        /// again when it runs.
+        named: bool,
     },
     /// A Save or Save As of the open project ([`Host::save_document_then`],
     /// [`Host::save_as_then`]): run holding the lock, so its corrections
@@ -3760,6 +3766,9 @@ impl Host {
             kind: kind.to_owned(),
             address: address.clone(),
             lock,
+            named: ["generation", "projectId"]
+                .iter()
+                .any(|key| message.get(*key).is_some_and(|v| !v.is_null())),
         };
         match Host::order_of(kind, &message) {
             Order::Write => {
@@ -3892,8 +3901,14 @@ impl Host {
             );
             return self.answer_job(job, fail("busy", message));
         }
+        // A request naming no project, queued behind an open or revert,
+        // means the project open when it runs, not the one open now.
+        let named = matches!(job, Job::Message { named: true, .. });
+        let behind_an_open = self.waiting.iter().any(
+            |w| matches!(&w.job, Job::Message { kind, .. } if ORDERED.contains(&kind.as_str())),
+        );
         self.waiting.push_back(Waiting {
-            generation: self.generation,
+            generation: (named || !behind_an_open).then_some(self.generation),
             since: Instant::now(),
             job,
         });
@@ -3928,7 +3943,7 @@ impl Host {
     /// (another was opened since it was queued) is refused unrun.
     fn run_waiting(&mut self) {
         while let Some(front) = self.waiting.front() {
-            if front.generation != self.generation {
+            if front.generation.is_some_and(|g| g != self.generation) {
                 if let Some(stale) = self.waiting.pop_front() {
                     let failure = fail(
                         "project-changed",
@@ -3960,7 +3975,22 @@ impl Host {
                     ..
                 } => {
                     if let Ok(message) = serde_json::from_str::<Value>(&text) {
-                        self.respond(client, id, &kind, &message);
+                        // The project it names, against the opening now.
+                        match self.same_project(&kind, &message) {
+                            Ok(()) => self.respond(client, id, &kind, &message),
+                            Err(failure) => {
+                                let job = Job::Message {
+                                    client,
+                                    id,
+                                    text: String::new(),
+                                    kind,
+                                    address: None,
+                                    lock: false,
+                                    named: true,
+                                };
+                                self.answer_job(job, failure);
+                            }
+                        }
                     }
                 }
                 Job::Windows { dir, edit, done } => done(self.write_windows_now(&dir, edit)),
