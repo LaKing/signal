@@ -61,6 +61,13 @@ const FACE_CSS = `
 [data-face-hot] { outline: 2px solid var(--signal-focus, #5aa9ff); outline-offset: 3px; border-radius: 6px; }
 ${PLATE_FACE_CSS}`;
 
+/** A short revision of `text` (FNV-1a, hex): which content a sheet had. */
+function contentRev(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
+  return (h >>> 0).toString(16);
+}
+
 /** Whether `event` is on one of a face's controls (a signal-* element other than the face's own). */
 function onControl(event) {
   for (const node of event.composedPath?.() ?? []) {
@@ -128,10 +135,17 @@ export class SchematicFaces {
     if (typeof Event === 'function') document.dispatchEvent?.(new Event('signal-visibility'));
   }
 
-  /** Another project: every face and part let go, and every read still in flight for the last one ignored when it answers. */
+  /**
+   * Another project: every face and part let go, the project's styling with
+   * them (its sheets, their revision and the rules taken from them), and
+   * every read still in flight for the last one ignored when it answers.
+   */
   clear() {
     this.generation = (this.generation ?? 0) + 1;
     this.rootsAsked = null;
+    this.sheets = [THEME];
+    this.sheetsRev = '';
+    this.rootCss = '';
     for (const face of this.faces.values()) this.drop(face);
     this.faces.clear();
     this.parts.clear();
@@ -139,27 +153,61 @@ export class SchematicFaces {
     this.used.clear();
   }
 
-  /** The project panel's whole text (`panel.read` of main.html): its style sheets style the faces too. */
+  /**
+   * The project panel's whole text (`panel.read` of main.html, with every
+   * graph): its style sheets style the faces too. They are fetched again
+   * each time (review 2026-10-31: a sheet is known by its content, not its
+   * URL: another project's sheet of the same URL, or the sheet edited, is
+   * another sheet), and a sheet removed takes its rules with it.
+   */
   pageSeen(text) {
     const sheets = [THEME, ...stylesheets(text, this.base).filter((s) => s !== THEME)];
-    if (sheets.join('\n') === this.sheets.join('\n')) return;
-    this.sheets = sheets;
-    for (const face of this.faces.values()) this.style(face);
+    if (sheets.join('\n') !== this.sheets.join('\n')) {
+      this.sheets = sheets;
+      this.sheetsRev = '';
+      for (const face of this.faces.values()) this.style(face);
+    }
     this.readRoots(sheets.filter((s) => s !== THEME));
   }
 
-  /** The project sheets' `:root` and `body` rules (its card width, its font), fetched once per list, as every face's. */
+  /** The sheets each face links: the project's marked with their content's revision once fetched, so a face never shows another content's cached sheet. */
+  linked() {
+    return this.sheets.map((href) => {
+      if (href === THEME || !this.sheetsRev) return href;
+      try {
+        const url = new URL(href);
+        url.searchParams.set('signal-rev', this.sheetsRev);
+        return url.href;
+      } catch {
+        return href;
+      }
+    });
+  }
+
+  /**
+   * The project sheets' `:root` and `body` rules (its card width, its font),
+   * as every face's, and their content's revision: fetched without the
+   * cache; an answer for another list or project is ignored; no sheet, no rules.
+   */
   readRoots(sheets) {
-    if (typeof fetch !== 'function' || !sheets.length) return;
     const asked = (this.rootsAsked = sheets.join('\n'));
-    Promise.all(sheets.map((href) => fetch(href).then((r) => (r.ok ? r.text() : ''), () => '')))
-      .then((texts) => {
-        if (asked !== this.rootsAsked) return;
-        const css = texts.map(rootRules).filter(Boolean).join('\n');
-        if (css === this.rootCss) return;
-        this.rootCss = css;
-        for (const face of this.faces.values()) face.roots.textContent = css;
-      })
+    const gen = this.generation ?? 0;
+    const take = (texts) => {
+      if (asked !== this.rootsAsked || gen !== (this.generation ?? 0)) return;
+      const css = texts.map(rootRules).filter(Boolean).join('\n');
+      const rev = texts.length ? contentRev(texts.join('\u0000')) : '';
+      if (rev !== this.sheetsRev) {
+        this.sheetsRev = rev;
+        for (const face of this.faces.values()) this.style(face);
+      }
+      if (css === this.rootCss) return;
+      this.rootCss = css;
+      for (const face of this.faces.values()) face.roots.textContent = css;
+    };
+    if (!sheets.length) return take([]);
+    if (typeof fetch !== 'function') return;
+    Promise.all(sheets.map((href) => fetch(href, { cache: 'no-store' }).then((r) => (r.ok ? r.text() : ''), () => '')))
+      .then(take)
       .catch(() => {});
   }
 
@@ -266,11 +314,12 @@ export class SchematicFaces {
 
   /** Its style sheets: the theme and the project panel's, linked in its own shadow root. */
   style(face) {
+    const sheets = this.linked();
     const have = [...face.links.parentNode.querySelectorAll('link')].map((l) => l.href);
-    if (have.join('\n') === this.sheets.join('\n')) return;
+    if (have.join('\n') === sheets.join('\n')) return;
     for (const link of face.links.parentNode.querySelectorAll('link')) link.remove();
     face.links.after(
-      ...this.sheets.map((href) => {
+      ...sheets.map((href) => {
         const link = document.createElement('link');
         link.rel = 'stylesheet';
         link.href = href;

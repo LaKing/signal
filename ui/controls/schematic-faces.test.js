@@ -299,6 +299,66 @@ test('a face shown or hidden, or the plate’s layer changed, tells its controls
   globalThis.document = realDocument;
 });
 
+test('the project’s styling follows its content, not its URL: another project with the same sheet URL, a sheet edited, a sheet removed; a late fetch of the last project ignored (review 2026-10-31)', async () => {
+  const { svg, faces } = setup();
+  const realFetch = globalThis.fetch;
+  const served = { 'http://x/studio.css': ':root { --signal-card-width: 111px; }' };
+  const gates = [];
+  let gated = false;
+  globalThis.fetch = (href) => {
+    const answer = { ok: true, text: async () => served[href] ?? '' };
+    if (!gated) return Promise.resolve(answer);
+    return new Promise((resolve) => gates.push(() => resolve(answer)));
+  };
+  try {
+    faces.base = 'http://x/project/main.html';
+    const page = '<link rel="stylesheet" href="http://x/studio.css">';
+    svg.append(area());
+    faces.pageSeen(page);
+    faces.sync({ levels: [] });
+    await settle();
+    const face = () => faces.faces.get('/synth');
+    assert.match(faces.rootCss, /111px/);
+    assert.equal(face().roots.textContent, faces.rootCss);
+    const linkOf = () => face().shadow.querySelectorAll('link').map((l) => l.href).find((h) => h.includes('studio.css'));
+    const first = linkOf();
+    // Project B: the same URL, other content.
+    faces.clear();
+    assert.equal(faces.rootCss, '', 'the style cache let go with the project');
+    served['http://x/studio.css'] = ':root { --signal-card-width: 222px; }';
+    faces.pageSeen(page);
+    await settle();
+    faces.sync({ levels: [] });
+    assert.match(faces.rootCss, /222px/, 'fetched again: B’s content');
+    assert.equal(face().roots.textContent, faces.rootCss);
+    assert.notEqual(linkOf(), first, 'the face links B’s content, not the cached sheet of A');
+    // The same URL edited within the project: the next read sees it.
+    served['http://x/studio.css'] = ':root { --signal-card-width: 333px; }';
+    faces.pageSeen(page);
+    await settle();
+    assert.match(faces.rootCss, /333px/);
+    assert.match(face().roots.textContent, /333px/);
+    // The sheet removed from the page: its rules go.
+    faces.pageSeen('');
+    await settle();
+    assert.equal(faces.rootCss, '');
+    assert.equal(face().roots.textContent, '');
+    assert.equal(linkOf(), undefined);
+    // A fetch of the last project answering after the switch: ignored.
+    gated = true;
+    faces.pageSeen(page);
+    faces.clear();
+    gates.splice(0).forEach((open) => open());
+    await settle();
+    assert.equal(faces.rootCss, '', 'the last project’s late sheet is not taken');
+  } finally {
+    globalThis.fetch = realFetch;
+    globalThis.document = realDocument;
+  }
+});
+
+const settle = () => new Promise((r) => setTimeout(r, 0));
+
 test('another project: a part read of the last one that answers late is ignored (review 2026-10-31)', async () => {
   const { svg, faces } = setup();
   svg.append(area());
