@@ -20,6 +20,7 @@ import { polylineMetrics } from './board-route.js';
 import { shownWires } from './board-view.js';
 import { bundleWires } from './schematic-bundle.js';
 import { scene } from './schematic-scene.js';
+import { fit, toScreen } from './schematic-view.js';
 import { approximatePlate } from './fixtures/board/plate-approx.js';
 
 const root = new URL('../../', import.meta.url);
@@ -169,16 +170,30 @@ test('every connection and every leg is drawn, at every zoom: none vanishes, the
       assert.ok(w.corners.length >= 2, `${name}: ${w.label} drawn`);
       if (w.labelled) assert.ok(b.board.labels.some((l) => l.wire === w.id), `${name}: ${w.label} labelled`);
     }
-    // At any scale the scene keeps every wire of the board, and the drawing bundles none away.
+    // At any scale the scene keeps every wire of the board that crosses the view (review 2026-10-31: only the view culls,
+    // never the zoom), and the drawing bundles none away. A wire is checked here by points sampled along it.
+    const viewport = { w: 1600, h: 1000 };
+    const crosses = (w, view) =>
+      w.points.some((p, i) => {
+        const q = w.points[i + 1] ?? p;
+        for (let t = 0; t <= 1; t += 1 / 64) {
+          const s = toScreen(view, { x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t });
+          if (s.x >= 0 && s.x <= viewport.w && s.y >= 0 && s.y <= viewport.h) return true;
+        }
+        return false;
+      });
     for (const k of [0.01, 0.05, 0.2, 1, 4, 40]) {
-      const viewport = { w: 1600, h: 1000 };
       const view = { x: -b.bounds.x * k, y: -b.bounds.y * k, k };
       const drawn = scene({ layoutOf: (level) => (level === '' ? b : null), view, viewport, pinned: new Set() });
       const top = drawn.levels.find((l) => l.path === '');
-      assert.equal(top.wires.length, b.wires.length, `${name} at ${k}: every wire`);
+      const kept = new Set(top.wires);
+      for (const w of b.wires) if (crosses(w, view)) assert.ok(kept.has(w), `${name} at ${k}: ${w.label} crosses the view, drawn`);
       const items = bundleWires(top.wires, k, { fanned: true });
-      assert.equal(items.length, b.wires.length, `${name} at ${k}: none folded`);
+      assert.equal(items.length, top.wires.length, `${name} at ${k}: none folded`);
     }
+    // The whole board in view: every wire.
+    const whole = scene({ layoutOf: (level) => (level === '' ? b : null), view: fit(b.bounds, viewport), viewport, pinned: new Set() });
+    assert.equal(whole.levels[0].wires.length, b.wires.length, `${name} fitted: every wire`);
   }
 });
 

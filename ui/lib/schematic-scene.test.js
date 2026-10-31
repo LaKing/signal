@@ -428,6 +428,22 @@ test('wires shorter than MIN_PX on screen are culled', () => {
   assert.equal(shown(0.3), 1, '3 px: drawn');
 });
 
+// Review 2026-10-31 (P2): the board drew every wire, even with the board wholly off screen. Its wires are culled by their
+// segments against the view (every wire crossing the view is drawn, whatever its length and the zoom); none off it.
+test('a board culls its wires by their segments against the view: off screen none, a wire crossing the view with both ends off it drawn', () => {
+  const across = { id: 'across', shape: 'signal', points: [{ x: -500, y: 300 }, { x: 1500, y: 300 }] };
+  const away = { id: 'away', shape: 'signal', points: [{ x: 2000, y: 2000 }, { x: 2500, y: 2000 }] };
+  // Its box covers the view, its segments pass outside it (above, then right of it).
+  const around = { id: 'around', shape: 'events', points: [{ x: -100, y: -100 }, { x: 1200, y: -100 }, { x: 1200, y: 900 }] };
+  const tiny = { id: 'tiny', shape: 'signal', points: [{ x: 500, y: 500 }, { x: 500.5, y: 500 }] };
+  const board = { board: {}, nodes: [], wires: [across, away, around, tiny], bounds: { x: -500, y: -100, w: 3000, h: 2100 } };
+  const viewport = { w: 1000, h: 600 };
+  const ids = (view) => scene({ layoutOf: (level) => (level === '' ? board : null), view, viewport }).levels[0].wires.map((w) => w.id);
+  assert.deepEqual(ids({ k: 1, x: 0, y: 0 }), ['across', 'tiny'], 'the wire across the view drawn, its ends off it; a short one drawn at any zoom');
+  assert.deepEqual(ids({ k: 1, x: 10000, y: 10000 }), [], 'the board off screen: no wire');
+  assert.deepEqual(ids({ k: 0.01, x: 500, y: 300 }), ['across', 'away', 'around', 'tiny'], 'zoomed out over the whole board: every wire');
+});
+
 // A new layout keeps the view in the deepest level whose chain did not change.
 test('a new layout rebases the view on what did not move', () => {
   const view = scene({ layoutOf, view: kickFocused(), viewport, pinned: KICK_OPEN }).view;

@@ -14,7 +14,7 @@
 
 import { HEADER, PAD, dieArea, dieLink, insideKey } from './schematic-layout.js';
 import { chooseOpen, grownNode, openedLayout } from './schematic-open.js';
-import { compose, screenRect, uncompose } from './schematic-view.js';
+import { compose, screenRect, toScreen, uncompose } from './schematic-view.js';
 
 /** Smaller than this on screen (px), a node or a wire is not drawn. */
 export const MIN_PX = 2;
@@ -140,9 +140,10 @@ export function scene({ layoutOf, view, viewport, pinned = new Set() }) {
       if (node.edge ? !intersects({ x: rect.x - STROKE_PX, y: rect.y - STROKE_PX, w: rect.w + 2 * STROKE_PX, h: rect.h + 2 * STROKE_PX }, screen) : rect.w < MIN_PX || !intersects(rect, screen)) continue;
       entry.nodes.push(node);
     }
-    // The board (ADR 0047) draws every wire at every zoom: zoom never decides which nets are drawn.
+    // The board (ADR 0047) draws every wire at every zoom: zoom never decides which nets are drawn, only the view does
+    // (review 2026-10-31): a wire none of whose segments crosses the screen is not drawn, however long it is.
     if (drawn.board) {
-      entry.wires.push(...drawn.wires);
+      for (const wire of drawn.wires) if (wireOnScreen(wire, transform, screen)) entry.wires.push(wire);
     } else for (const wire of drawn.wires) {
       const box = wireBox(wire);
       const w = (box.x1 - box.x0) * transform.k;
@@ -170,6 +171,53 @@ export function scene({ layoutOf, view, viewport, pinned = new Set() }) {
 
 /** How far past the screen (px) a stroke may reach. */
 const STROKE_PX = 16;
+
+/** Whether the segment `a`–`b` (screen px) meets rectangle `r` (Liang–Barsky). */
+function segmentMeets(a, b, r) {
+  let t0 = 0;
+  let t1 = 1;
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  for (const [p, q] of [
+    [-dx, a.x - r.x],
+    [dx, r.x + r.w - a.x],
+    [-dy, a.y - r.y],
+    [dy, r.y + r.h - a.y],
+  ]) {
+    if (p === 0) {
+      if (q < 0) return false;
+      continue;
+    }
+    const t = q / p;
+    if (p < 0) t0 = Math.max(t0, t);
+    else t1 = Math.min(t1, t);
+    if (t0 > t1) return false;
+  }
+  return true;
+}
+
+/**
+ * Whether a board wire is on screen under `transform`: one of its segments
+ * (its points', else its corners') meets the screen grown by STROKE_PX. Its
+ * box is tried first; a wire crossing the screen with both ends off it is
+ * on screen, one whose box only covers the screen is not.
+ */
+function wireOnScreen(wire, transform, screen) {
+  const grown = { x: screen.x - STROKE_PX, y: screen.y - STROKE_PX, w: screen.w + 2 * STROKE_PX, h: screen.h + 2 * STROKE_PX };
+  const points = wire.points?.length ? wire.points : (wire.corners ?? []);
+  if (!points.length) return true;
+  const box = wireBox(wire);
+  const at = screenRect(transform, { x: box.x0, y: box.y0, w: box.x1 - box.x0, h: box.y1 - box.y0 });
+  if (!(at.x <= grown.x + grown.w && grown.x <= at.x + at.w && at.y <= grown.y + grown.h && grown.y <= at.y + at.h)) return false;
+  if (points.length === 1) return true;
+  let a = toScreen(transform, points[0]);
+  for (let i = 1; i < points.length; i++) {
+    const b = toScreen(transform, points[i]);
+    if (segmentMeets(a, b, grown)) return true;
+    a = b;
+  }
+  return false;
+}
 
 /**
  * Whether all that level `entry` shows on screen is the inside of open
