@@ -71,6 +71,7 @@ import './lib/board-dies.test.js';
 import './lib/board-zoom.test.js';
 import './lib/board-phase4.test.js';
 import './lib/board-channels.test.js';
+import './lib/board-metrics.test.js';
 import './app/lib/view-state.test.js';
 import './lib/module-browser.test.js';
 import './lib/module-preview.test.js';
