@@ -76,3 +76,49 @@ export function wireNet(levels, hit) {
   if (entry && hit.wire) follow(entry, hit.wire);
   return out;
 }
+
+/**
+ * The junctions of a board's `wires` (the note "Layered placement and
+ * channel routing", 2026-10-31: a fan-out is a tree, its branches marked):
+ * where the drawn wires of one net (the wires from one output pin, not a
+ * plate's legs) meet from three ways or more, `[{x, y, wire}]` (`wire` one
+ * of its wires, for its tone), each point once, in the wires' order. A
+ * wire drawn in a lane (`display`) is drawn apart from its route: its net
+ * has none. Pure.
+ */
+export function junctions(wires) {
+  const nets = new Map();
+  for (const w of wires) {
+    if (w.kind === 'binding' || w.labelled || !w.corners) continue;
+    const key = `${w.from.node}\n${w.from.port}`;
+    if (!nets.has(key)) nets.set(key, []);
+    nets.get(key).push(w);
+  }
+  const out = [];
+  for (const list of nets.values()) {
+    if (list.length < 2 || list.some((w) => w.display)) continue;
+    const segs = [];
+    for (const w of list) for (let i = 1; i < w.corners.length; i++) segs.push([w.corners[i - 1], w.corners[i]]);
+    const seen = new Set();
+    for (const w of list) {
+      for (let i = 1; i < w.corners.length - 1; i++) {
+        const p = w.corners[i];
+        const key = `${p.x},${p.y}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        // The ways out of p along the net's segments: a segment through it two, one ending at it one.
+        const ways = new Set();
+        for (const [a, b] of segs) {
+          const h = a.y === b.y;
+          if (h ? a.y !== p.y || p.x < Math.min(a.x, b.x) || p.x > Math.max(a.x, b.x) : a.x !== p.x || p.y < Math.min(a.y, b.y) || p.y > Math.max(a.y, b.y)) continue;
+          for (const q of [a, b]) {
+            if (q.x === p.x && q.y === p.y) continue;
+            ways.add(h ? (q.x > p.x ? 'E' : 'W') : q.y > p.y ? 'S' : 'N');
+          }
+        }
+        if (ways.size >= 3) out.push({ x: p.x, y: p.y, wire: w });
+      }
+    }
+  }
+  return out;
+}

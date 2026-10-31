@@ -16,6 +16,10 @@
 
 import { LAYERS, LAYER_NAMES, KINDS, LIFT_MS, XRAY_OPACITY, metricsText, nextLayer, plateSize, plateVias, shownWires, toggleKind, viewState } from '../lib/board-view.js';
 import { NOT_CONTROLS, bindList } from '../lib/schematic-controls.js';
+import { junctions } from '../lib/board-net.js';
+
+/** A junction dot's diameter on screen (CSS px). */
+const JUNCTION_PX = 5;
 
 /** The plate's face id (`SchematicFaces`). */
 export const PLATE_FACE = '#plate';
@@ -54,6 +58,11 @@ svg.layer-plate > g > :not(.plate-layer) { opacity: 0; pointer-events: none; }
 .control.via.reader > .box { fill: color-mix(in srgb, var(--signal-meter-rms, #3ecf8e) 35%, var(--signal-bg, #16181d)); }
 .via-label { fill: var(--signal-muted, #8a93a3); }
 /* ADR 0047 phase 4: a ribbon cable: a band under its members, in their colour when they share one, its label once. */
+.junction { fill: var(--signal-muted, #8a93a3); stroke: none; pointer-events: none; }
+.junction.signal { fill: var(--signal-accent, #4fc3f7); }
+.junction.events { fill: var(--signal-meter-rms, #3ecf8e); }
+.junction.vector, .junction.tone-leg { fill: var(--signal-effective, #ffb74d); }
+svg.tracing .junction { opacity: 0.12; }
 .ribbon { fill: color-mix(in srgb, var(--ribbon-tone, var(--signal-muted, #8a93a3)) 16%, var(--signal-board-bg, #0e1014)); stroke: color-mix(in srgb, var(--ribbon-tone, var(--signal-muted, #8a93a3)) 55%, transparent); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
 .ribbon.signal, .ribbon-label.signal { --ribbon-tone: var(--signal-accent, #4fc3f7); }
 .ribbon.events, .ribbon-label.events { --ribbon-tone: var(--signal-meter-rms, #3ecf8e); }
@@ -359,8 +368,19 @@ export class SchematicBoard {
    * 2026-10-31: a band behind the wires read as clutter): only the members
    * show, in their lanes; no band and no label is drawn.
    */
-  drawRibbons(bands) {
+  drawRibbons(bands, nets, level, baked, bakedRect, bakedPoint) {
     bands.replaceChildren();
+    // A fan-out is a tree (the note "Layered placement and channel routing", 2026-10-31): a dot where its branches meet,
+    // JUNCTION_PX across on screen, in its net's tone. Drawn, not hit: a click there takes the wire under it.
+    const k = level.transform?.k ?? 1;
+    const r = (JUNCTION_PX / 2) * (baked.m / k);
+    const dots = [];
+    for (const j of junctions(level.layout.wires)) {
+      const at = bakedPoint(baked, j);
+      const tone = level.tones?.get(j.wire.id) ?? j.wire.shape;
+      dots.push(el('circle', { class: `junction ${tone === 'binding' ? 'tone-leg' : tone}`, cx: at.x, cy: at.y, r }));
+    }
+    nets.replaceChildren(...dots);
   }
 
   /** The window's kept view state (`ui/windows.toml`, from the page's host): shown, not told back. */

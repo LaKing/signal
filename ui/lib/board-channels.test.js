@@ -1,8 +1,8 @@
 // ADR 0047's note "Layered placement and channel routing" (2026-10-31): a
 // level laid out by flow (a die, a board without vias) is placed in layered
 // columns and routed in channels: a forward wire between neighbouring
-// columns at most two bends, feedback round the outside, a fan-out a tree,
-// a stored chip exactly where it is with the others clear
+// columns at most two bends, feedback round the outside, a fan-out a tree
+// with junctions, a stored chip exactly where it is with the others clear
 // of it; a staircase left by the search straightened where a simpler shape
 // fits. Deterministic.
 import { test } from 'node:test';
@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { orderTracks, planChannels } from './board-channels.js';
 import { straighten } from './board-straighten.js';
+import { junctions } from './board-net.js';
 import { PARAMS, layout } from './schematic-layout.js';
 import { exportFacts } from './schematic-groups.js';
 
@@ -80,6 +81,13 @@ test('a chip moved by hand stays exactly where it was put; the others keep clear
   assert.ok(ladder);
   // Every wire still drawn, none under a chip but its own.
   for (const w of d.wires) assert.ok(w.corners.length >= 2 && !w.labelled, w.label);
+});
+
+test('junctions: where one net’s wires part, a dot; a corner of one wire is none', () => {
+  const w = (id, corners) => ({ id, kind: 'connection', from: { node: 'a', port: 'out' }, to: { node: `t${id}`, port: 'in' }, corners });
+  const wires = [w(0, [{ x: 0, y: 0 }, { x: 50, y: 0 }, { x: 50, y: 40 }, { x: 100, y: 40 }]), w(1, [{ x: 0, y: 0 }, { x: 50, y: 0 }, { x: 50, y: 80 }, { x: 100, y: 80 }])];
+  assert.deepEqual(junctions(wires).map(({ x, y }) => [x, y]), [[50, 40]]);
+  assert.deepEqual(junctions([wires[0]]), []);
 });
 
 test('straighten: a staircase between two pins becomes a Z where it is clear, and stays where a box is in the way', () => {
