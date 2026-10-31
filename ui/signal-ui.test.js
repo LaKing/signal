@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { HEADER, KIND, PROTOCOL } from './lib/protocol.js';
 import { Connection, MAX_MESSAGE, MAX_PATTERN_MESSAGE, connectFromPage, findMeter, findParameter, messageLimit } from './signal-ui.js';
 import { PatternSync } from './lib/pattern-sync.js';
+import { shareSubscription } from './lib/scope-share.js';
 import { serializePattern } from './lib/pattern-text.js';
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -445,4 +446,108 @@ test('a pattern too large to send is a lasting notice, never a reconnect loop', 
   again.receive({ type: 'welcome', protocol: 1, client: 2, project: 'p', sampleRate: 48000, frame: 0, planVersion: 0 });
   await settle();
   assert.equal(again.sent.filter((m) => m.type === 'pattern.write').length, 0);
+});
+
+// External review, finding 3: one logical subscription holds at most one
+// stream. A subscribe is sent once while one is pending or subscribed, and
+// a reply from an earlier lifecycle (before a drop or power off) is let go
+// at once.
+
+/** The streams the server holds: every `subscribed` reply less every `unsubscribe`. */
+function serverStreams(socket, replies) {
+  const unsubscribed = new Set(socket.sent.filter((m) => m.type === 'unsubscribe').map((m) => m.sub));
+  return replies.filter((sub) => !unsubscribed.has(sub));
+}
+
+test('a subscription made in a status open handler is sent once and released whole', () => {
+  FakeSocket.all = [];
+  const connection = new Connection({ url: 'ws://127.0.0.1:9/', token: 'tok', WebSocketImpl: FakeSocket, timers: fakeTimers() });
+  let stop = null;
+  connection.on('status', (status) => {
+    if (status === 'open' && !stop) stop = connection.subscribe({ stream: 'scope', address: '/a.out' }, () => {});
+  });
+  const socket = FakeSocket.all[0];
+  socket.open();
+  socket.receive({ type: 'welcome', protocol: 1, client: 1, project: 'p', sampleRate: 48000, frame: 0, planVersion: 0 });
+  const subscribes = socket.sent.filter((m) => m.type === 'subscribe');
+  assert.equal(subscribes.length, 1, 'one subscribe');
+  const replies = [];
+  let next = 40;
+  for (const s of subscribes) {
+    replies.push(next);
+    socket.receive({ type: 'subscribed', id: s.id, sub: next++ });
+  }
+  stop();
+  assert.deepEqual(serverStreams(socket, replies), [], 'every stream released');
+});
+
+test('a subscribe reply delayed across power off and on is let go; the new one is kept and released', () => {
+  const { connection, socket } = connected();
+  const frames = [];
+  const stop = connection.subscribe({ stream: 'scope', address: '/a.out' }, (f) => frames.push(f));
+  const first = socket.last('subscribe');
+  connection.setStreaming(false);
+  connection.setStreaming(true);
+  const subscribes = socket.sent.filter((m) => m.type === 'subscribe');
+  assert.equal(subscribes.length, 2, 'sent again after power on');
+  const second = subscribes[1];
+  // The new reply first, then the old one, late.
+  socket.receive({ type: 'subscribed', id: second.id, sub: 8 });
+  socket.receive({ type: 'subscribed', id: first.id, sub: 7 });
+  assert.ok(socket.sent.some((m) => m.type === 'unsubscribe' && m.sub === 7), 'the stale stream is let go at once');
+  assert.equal(connection.bySub.get(8)?.stream.address, '/a.out');
+  assert.equal(connection.bySub.has(7), false);
+  stop();
+  assert.deepEqual(serverStreams(socket, [7, 8]), []);
+});
+
+test('a subscribe reply delayed across power off and on, arriving first, is let go too', () => {
+  const { connection, socket } = connected();
+  const stop = connection.subscribe({ stream: 'scope', address: '/a.out' }, () => {});
+  const first = socket.last('subscribe');
+  connection.setStreaming(false);
+  connection.setStreaming(true);
+  const second = socket.sent.filter((m) => m.type === 'subscribe')[1];
+  socket.receive({ type: 'subscribed', id: first.id, sub: 7 });
+  socket.receive({ type: 'subscribed', id: second.id, sub: 8 });
+  assert.equal(connection.bySub.has(7), false);
+  assert.equal(connection.bySub.has(8), true);
+  stop();
+  assert.deepEqual(serverStreams(socket, [7, 8]), []);
+});
+
+test('sendSubscribe is idempotent while pending or subscribed', () => {
+  const { connection, socket } = connected();
+  connection.subscribe({ stream: 'scope', address: '/a.out' }, () => {});
+  const [subscription] = connection.subscriptions;
+  connection.sendSubscribe(subscription);
+  assert.equal(socket.sent.filter((m) => m.type === 'subscribe').length, 1, 'pending: not sent again');
+  socket.receive({ type: 'subscribed', id: socket.last('subscribe').id, sub: 3 });
+  connection.sendSubscribe(subscription);
+  assert.equal(socket.sent.filter((m) => m.type === 'subscribe').length, 1, 'subscribed: not sent again');
+  // A refusal ends the pending request: a retry may send it again.
+  connection.subscribe({ stream: 'scope', address: '/b.out' }, () => {}, { onError: () => {} });
+  const b = [...connection.subscriptions][1];
+  socket.receive({ type: 'error', id: socket.last('subscribe').id, code: 'no-slot', message: 'no free scope slot' });
+  connection.sendSubscribe(b);
+  assert.equal(socket.sent.filter((m) => m.type === 'subscribe').length, 3);
+});
+
+test('shared scope views over a connection hold one stream across power off and on, released by the last view', async () => {
+  const { connection, socket } = connected();
+  const request = { stream: 'scope', address: '/a.out' };
+  const stopA = shareSubscription(connection, request, () => {});
+  const stopB = shareSubscription(connection, request, () => {});
+  const first = socket.last('subscribe');
+  connection.setStreaming(false);
+  connection.setStreaming(true);
+  const subscribes = socket.sent.filter((m) => m.type === 'subscribe');
+  assert.equal(subscribes.length, 2, 'one per lifecycle, not one per view');
+  socket.receive({ type: 'subscribed', id: subscribes[1].id, sub: 8 });
+  socket.receive({ type: 'subscribed', id: first.id, sub: 7 });
+  assert.deepEqual(serverStreams(socket, [7, 8]), [8]);
+  stopA();
+  assert.deepEqual(serverStreams(socket, [7, 8]), [8], 'kept while a view remains');
+  stopB();
+  assert.deepEqual(serverStreams(socket, [7, 8]), []);
 });

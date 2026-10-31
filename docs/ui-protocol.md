@@ -590,6 +590,6 @@ signal ui projects/kick --port 8800        # a fixed HTTP port
 
 `signal ui` also prints the schematic's page, `http://127.0.0.1:<http port>/schematic#ws=…&token=…` (`--json`: `schematic`).
 
-Pages and controls use the client in `ui/signal-ui.js` (reconnect included) and the web components in `ui/controls/`; `/ui/gallery.html` shows them all (`docs/ui-controls.md`).
+Pages and controls use the client in `ui/signal-ui.js` (reconnect included) and the web components in `ui/controls/`; `/ui/gallery.html` shows them all (`docs/ui-controls.md`). One subscription of the client holds at most one stream (external review, 2026-10-31): its `subscribe` is sent once while one is in flight or it is subscribed (a subscription made in a `status` handler, which `welcome` then subscribes again, included), and a `subscribed` reply to a request made before the connection dropped or the power went off, or for a subscription already stopped or subscribed, is unsubscribed at once, so a scope slot is never held that nothing releases (`ui/signal-ui.test.js`; `ui/lib/scope-share.js` builds on it).
 
 The page at `/` is the raw protocol test page: the connection and protocol, the output meters, a scope of a chosen signal output, a slider per control (a ramp while moving, a commit on release) with its effective value, the unsaved indicator ("N unsaved parameters — last error", Retry all, Revert all; "Unsaved" above), and the `describe` reply.

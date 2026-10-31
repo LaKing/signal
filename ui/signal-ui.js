@@ -157,6 +157,13 @@ export class Connection {
     this.listeners = new Map();
     /** False while Signal.app's power is off: no subscription is sent. */
     this.streaming = true;
+    /**
+     * The streams' lifecycle: counted up whenever every stream the server
+     * held is gone (the connection dropped, the power went off). A
+     * `subscribed` reply to a request of an earlier lifecycle is let go at
+     * once (external review, finding 3).
+     */
+    this.lifecycle = 0;
     this.open();
   }
 
@@ -188,6 +195,7 @@ export class Connection {
   setStreaming(on) {
     if (this.streaming === on) return;
     this.streaming = on;
+    if (!on) this.lifecycle += 1;
     for (const subscription of this.subscriptions) {
       if (on) {
         if (this.status === 'open') this.sendSubscribe(subscription);
@@ -268,6 +276,7 @@ export class Connection {
 
   closed(code) {
     this.socket = null;
+    this.lifecycle += 1;
     for (const { reject } of this.pending.values()) reject(closedError());
     this.pending.clear();
     this.bySub.clear();
@@ -393,7 +402,8 @@ export class Connection {
    * Returns a function that unsubscribes.
    */
   subscribe(stream, onFrame, { onSubscribed = () => {}, onError = () => {} } = {}) {
-    const subscription = { stream, onFrame, onSubscribed, onError, sub: null, active: true };
+    // `asked`: the lifecycle of the subscribe in flight, null when none is.
+    const subscription = { stream, onFrame, onSubscribed, onError, sub: null, active: true, asked: null };
     this.subscriptions.add(subscription);
     if (this.status === 'open' && this.streaming) this.sendSubscribe(subscription);
     return () => {
@@ -407,13 +417,28 @@ export class Connection {
     };
   }
 
+  /**
+   * Asks the server for `subscription`'s stream, unless it has one or a
+   * request for one is in flight in this lifecycle: so a subscription made
+   * in a `status` handler (which `welcome` then sends again) is asked for
+   * once. A reply for one no longer wanted (stopped, already subscribed, or
+   * asked for before the connection dropped or the power went off) is
+   * unsubscribed at once, so no stream is held that nothing releases.
+   */
   sendSubscribe(subscription) {
+    const lifecycle = this.lifecycle;
+    if (subscription.sub !== null || subscription.asked === lifecycle) return;
+    subscription.asked = lifecycle;
+    const settled = () => {
+      if (subscription.asked === lifecycle) subscription.asked = null;
+    };
     // Callbacks rather than a promise: the subscription must be known before
     // the next message, which may be its first frame.
     this.send(
       { type: 'subscribe', ...subscription.stream },
       (reply) => {
-        if (!subscription.active) {
+        settled();
+        if (!subscription.active || lifecycle !== this.lifecycle || subscription.sub !== null) {
           this.request({ type: 'unsubscribe', sub: reply.sub }).catch(() => {});
           return;
         }
@@ -422,6 +447,7 @@ export class Connection {
         subscription.onSubscribed(reply);
       },
       (error) => {
+        settled();
         // `powered-off`: kept, and sent again when the power is back on.
         if (error.code !== 'closed' && error.code !== 'powered-off') subscription.onError(error);
       },
