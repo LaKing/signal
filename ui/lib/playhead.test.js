@@ -165,3 +165,67 @@ test('<signal-piano-roll position-bind> and <signal-step-grid step-bind> follow 
     globalThis.requestAnimationFrame = raf;
   }
 });
+
+// Review 2026-10-31: a playhead claims one of the engine's 8 scope slots; it holds it only while its control is shown.
+test('a playhead holds its slot only while its control is shown: the plate on Board (inert) lets it go, back on Plate it subscribes again; two views of one output share one', () => {
+  const c = new FakeStreams();
+  const k = clock();
+  const listeners = new Map();
+  const doc = {
+    visibilityState: 'visible',
+    addEventListener: (type, fn) => listeners.set(type, [...(listeners.get(type) ?? []), fn]),
+    removeEventListener: (type, fn) => listeners.set(type, (listeners.get(type) ?? []).filter((f) => f !== fn)),
+    dispatch: (type) => (listeners.get(type) ?? []).forEach((fn) => fn()),
+  };
+  const face = { inert: false, parentNode: null };
+  const shadow = { parentNode: null, host: face };
+  const control = (name) => ({ name, ownerDocument: doc, parentNode: shadow, getBoundingClientRect: () => ({ width: 300, height: 120 }) });
+  const shown = [];
+  const roll = control('roll');
+  const stop = playheadStream(c, '/melody.position', (v) => shown.push(v), { schedule: k.schedule, timers: k.timers, element: roll });
+  assert.equal(c.live.length, 1, 'shown: subscribed');
+  // The plate goes to Board: its face inert, the faces say so.
+  face.inert = true;
+  doc.dispatch('signal-visibility');
+  assert.equal(c.live.length, 0, 'Board: the slot let go');
+  c.frame([1]);
+  k.tick();
+  assert.deepEqual(shown, [], 'nothing shown while hidden');
+  face.inert = false;
+  doc.dispatch('signal-visibility');
+  assert.equal(c.live.length, 1, 'Plate again: subscribed again');
+  assert.equal(c.subscriptions.length, 2);
+  // The page hidden.
+  doc.visibilityState = 'hidden';
+  doc.dispatch('visibilitychange');
+  assert.equal(c.live.length, 0, 'page hidden: let go');
+  doc.visibilityState = 'visible';
+  doc.dispatch('visibilitychange');
+  assert.equal(c.live.length, 1);
+  // A second view of the same output (the panel's and the plate's): one subscription.
+  const other = playheadStream(c, '/melody.position', () => {}, { schedule: k.schedule, timers: k.timers, element: control('panel') });
+  assert.equal(c.live.length, 1, 'shared');
+  stop();
+  assert.equal(c.live.length, 1, 'the other view keeps it');
+  other();
+  assert.equal(c.live.length, 0);
+  assert.equal((listeners.get('signal-visibility') ?? []).length, 0, 'stopped: no listener left');
+});
+
+test('a playhead hidden while its refused slot waits does not ask until it is shown', () => {
+  const c = new FakeStreams();
+  const k = clock();
+  const listeners = new Map();
+  const doc = { addEventListener: (t, fn) => listeners.set(t, fn), removeEventListener: () => {} };
+  const element = { ownerDocument: doc, parentNode: null, inert: false, getBoundingClientRect: () => ({ width: 10, height: 10 }) };
+  const stop = playheadStream(c, '/drums.step', () => {}, { schedule: k.schedule, timers: k.timers, element });
+  c.subscriptions[0].callbacks.onError({ code: 'no-scope-slot' });
+  element.inert = true;
+  listeners.get('signal-visibility')();
+  k.fire();
+  assert.equal(c.subscriptions.length, 1, 'hidden: not asked');
+  element.inert = false;
+  listeners.get('signal-visibility')();
+  assert.equal(c.subscriptions.length, 2, 'shown: asked at once');
+  stop();
+});

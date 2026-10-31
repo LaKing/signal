@@ -771,6 +771,7 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
     const port = playheadAddress(this.getAttribute('position-bind'));
     if (!port) return [];
     const stop = playheadStream(connection, port, (beats) => (this.position = beats), {
+      element: this,
       onProblem: (text) => {
         this.playheadProblem = text;
         this.redraw();

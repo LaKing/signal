@@ -413,6 +413,7 @@ svg.grid { width: 100%; height: auto; display: block; overflow: visible; touch-a
     const port = playheadAddress(this.getAttribute('step-bind'));
     if (!port) return [];
     const stop = playheadStream(connection, port, (step) => (this.step = step), {
+      element: this,
       onProblem: (text) => {
         this.playheadProblem = text;
         this.update();
