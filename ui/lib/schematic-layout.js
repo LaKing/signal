@@ -15,6 +15,8 @@ import { exportFacts, orderedPins, portGroups } from './schematic-groups.js';
 import { VIA_ROW, VIA_W, controlAnchor, controlEdges, controlNodes, controlPads } from './schematic-controls.js';
 import { frameFace, placeFace } from './schematic-face.js';
 import { CLEARANCE, PU, STUB, TRACK, balance, near, placeNear, ring, sugiyama } from './board-layout.js';
+import { bandOrder, channelWidth, planChannels, resolve, trackX } from './board-channels.js';
+import { straighten } from './board-straighten.js';
 import { Maze, STEP } from './board-maze.js';
 import { RIBBON_CLEAR, formRibbons, placeRibbonLabels, ribbonName } from './board-ribbon.js';
 import { LANE as LANE_PITCH, laneWires } from './board-lanes.js';
@@ -216,18 +218,22 @@ function backEdges(nodes, edges) {
 }
 
 /** Longest-path layers over the edges with back edges reversed. */
-function layers(nodes, edges, back) {
+function layers(nodes, edges, back, floor = false) {
   const preds = new Map(nodes.map((n) => [n.id, new Set()]));
   edges.forEach((e, i) => {
     const [a, b] = back.has(i) ? [e.to.node, e.from.node] : [e.from.node, e.to.node];
     if (a !== b) preds.get(b).add(a);
   });
   const layer = new Map();
+  // `floor` (a board's flow columns): with a frame's inputs in column 0 every instance starts at 1 and what it feeds after it,
+  // so no wire joins two chips of one column (a die's constant feeding its clamp was drawn as a loop back).
+  const kinds = new Map(nodes.map((n) => [n.id, n.kind]));
+  const base = floor && nodes.some((n) => n.kind === 'input') ? (id) => (kinds.get(id) === 'instance' ? 1 : 0) : () => 0;
   const visit = (id, seen) => {
     if (layer.has(id)) return layer.get(id);
     if (seen.has(id)) return 0;
     seen.add(id);
-    let l = 0;
+    let l = base(id);
     for (const p of preds.get(id)) l = Math.max(l, visit(p, seen) + 1);
     layer.set(id, l);
     return l;
@@ -495,6 +501,12 @@ export function dieLink(node, die) {
   return { k, x: node.x + (node.w - R.w * k) / 2 - R.x * k, y: node.y + (node.h - R.h * k) / 2 - R.y * k };
 }
 
+/**
+ * A package's share of its plain box's area (ADR 0047 §7; the note "Layered placement and channel routing", 2026-10-31):
+ * dies laid out by flow are flatter than before, so a package of its die's shape at its whole area grew wider than its
+ * place in a row of chips under the plate (the drum voices under the RHYTHM COMPOSER's columns); at 0.8 they keep it.
+ */
+export const PACKAGE_AREA = 0.8;
 /** A package's pins keep at least this far apart (layout units; its die spreads them at least half an even share of an edge apart). */
 export const PACKAGE_PITCH = 8;
 
@@ -516,7 +528,7 @@ export function shapePackage(node, die) {
   const lefts = (frame(INPUTS)?.outs ?? []).filter((p) => node.ins.some((q) => q.name === p.name));
   const tops = (frame(PARAMS)?.outs ?? []).filter((p) => node.ins.some((q) => q.name === p.name));
   const rights = (frame(OUTPUTS)?.ins ?? []).filter((p) => node.outs.some((q) => q.name === p.name));
-  const area = node.w * node.h;
+  const area = node.w * node.h * PACKAGE_AREA;
   let w = Math.sqrt(area * a);
   let h = w / a;
   const title = CHAR * Math.max(node.name.length, (node.subtitle ?? node.module).length) + 2 * PAD;
@@ -612,19 +624,6 @@ function dieFrame(level, nodes, byId, edges) {
   return { params, edges: taken };
 }
 
-/**
- * A die's rectangle and its interface (ADR 0047 §8, the owner's verdict on
- * 9e81dc8: a microscope, the die scaled into its package): the rectangle
- * holds its chips and their wires with DIE_MARGIN round (more above for
- * the parameters' drops), on whole grid steps; its inputs' pins spread
- * evenly down its left edge in their layout's order, its outputs' down its
- * right, its parameters' along its top edge in `order` (the package's pin
- * order, where the level around gives one) else over the pins they set.
- * Every wire from or to them is then routed by the maze within the
- * rectangle, around the chips and every wire drawn; one with no way is
- * drawn as labels. Replaces those wires in `wires`, appends the
- * parameters' wires and the strip. `{rect}`.
- */
 /** Values near `want` (in its order), kept in order at least `gap` apart and within (`lo`, `hi`): pushed right, then back left from `hi`; whole units. */
 function settle(want, lo, hi, gap) {
   const n = want.length;
@@ -632,135 +631,6 @@ function settle(want, lo, hi, gap) {
   for (let i = 0; i < n; i++) out.push(Math.max(want[i], lo + gap * (i + 1), i ? out[i - 1] + gap : -Infinity));
   for (let i = n - 1; i >= 0; i--) out[i] = Math.min(out[i], hi - gap * (n - i), i + 1 < n ? out[i + 1] - gap : Infinity);
   return out.map((v) => Math.round(v));
-}
-
-function dieWires({ die, nodes, byId, edges, boxes, routes, labels, wires, order = null }) {
-  const chips = nodes.filter((n) => n.kind === 'instance');
-  const frameEdge = (e) => e.from.node === INPUTS || e.to.node === OUTPUTS;
-  let [x0, y0, x1, y1] = [Infinity, Infinity, -Infinity, -Infinity];
-  for (const n of chips) {
-    x0 = Math.min(x0, n.x);
-    y0 = Math.min(y0, n.y);
-    x1 = Math.max(x1, n.x + n.w);
-    y1 = Math.max(y1, n.y + n.h);
-  }
-  wires.forEach((w, i) => {
-    if (frameEdge(edges[i]) || routes[i]?.labelled) return;
-    x0 = Math.min(x0, w.box.x0);
-    y0 = Math.min(y0, w.box.y0);
-    x1 = Math.max(x1, w.box.x1);
-    y1 = Math.max(y1, w.box.y1);
-  });
-  if (!Number.isFinite(x0)) [x0, y0, x1, y1] = [0, 0, MIN_WIDTH, HEADER];
-  const { params } = die;
-  const pEdges = die.edges;
-  const inputs = byId.get(INPUTS);
-  const outputs = byId.get(OUTPUTS);
-  const snap = (v, up) => (up ? Math.ceil(v / STEP) : Math.floor(v / STEP)) * STEP;
-  const side = (n) => Math.max(DIE_MARGIN, 2 * STUB + TRACK * (n + 1));
-  const left = snap(x0 - side(inputs?.outs.length ?? 0), false);
-  const right = snap(x1 + side(outputs?.ins.length ?? 0), true);
-  // A connector's wires leave it as one ribbon (ADR 0047 phase 5): room for its comb, not a track per drop.
-  const connected = params && params.outs.length >= CONNECTOR_MIN;
-  const top = snap(y0 - (params ? PARAM_GAP + (connected ? 2 * combDepth(params.outs.length) : TRACK * pEdges.length) : DIE_MARGIN), false);
-  const bottom = snap(y1 + DIE_MARGIN, true);
-  const rect = { x: left, y: top, w: right - left, h: bottom - top };
-  // The interface along the edges, each pin as near where its wires want it as order and room allow: in order,
-  // at least half an even share of the edge apart (`settle`), on whole units.
-  const spread = (want, a, b) => settle(want, a, b, (b - a) / (2 * (want.length + 1)));
-  if (inputs) {
-    const sorted = [...inputs.outs].sort((p, q) => p.y - q.y);
-    const ys = spread(sorted.map((p) => p.y), top, bottom);
-    const at = new Map(sorted.map((p, i) => [p.name, ys[i]]));
-    Object.assign(inputs, { x: left, y: top, w: 0, h: bottom - top, outs: inputs.outs.map((p) => ({ ...p, x: left, y: at.get(p.name), side: 'right' })) });
-  }
-  if (outputs) {
-    const sorted = [...outputs.ins].sort((p, q) => p.y - q.y);
-    const ys = spread(sorted.map((p) => p.y), top, bottom);
-    const at = new Map(sorted.map((p, i) => [p.name, ys[i]]));
-    Object.assign(outputs, { x: right, y: top, w: 0, h: bottom - top, ins: outputs.ins.map((p) => ({ ...p, x: right, y: at.get(p.name), side: 'left' })) });
-  }
-  if (params) {
-    const want = params.outs.map((p, i) => {
-      const xs = pEdges.filter((e) => e.from.port === p.name).map((e) => anchor(byId.get(e.to.node), e.to.port, false).x);
-      return { p, i, x: xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : x0, o: order?.get(p.name) };
-    });
-    // The package's order wins (its top pins follow its vias); else over what they set.
-    want.sort((a, b) => (a.o !== undefined && b.o !== undefined ? a.o - b.o : 0) || (a.o === undefined) - (b.o === undefined) || a.x - b.x || a.i - b.i);
-    // ADR 0047 phase 5 (the owner: "ribbons can go into the chips"): CONNECTOR_MIN parameters or more are one connector, packed
-    // CONNECTOR_PITCH apart in their order over the middle of what they set, the ribbon from the plate entering there as one.
-    let xs;
-    if (want.length >= CONNECTOR_MIN) {
-      const span = (want.length - 1) * CONNECTOR_PITCH;
-      const mid = want.reduce((s, w) => s + w.x, 0) / want.length;
-      const first = Math.round(Math.min(right - STEP - span, Math.max(left + STEP, mid - span / 2)) / STEP) * STEP;
-      xs = want.map((_, i) => first + i * CONNECTOR_PITCH);
-      params.connector = { x0: xs[0] - CONNECTOR_PAD, x1: xs.at(-1) + CONNECTOR_PAD, count: want.length };
-    } else xs = spread(want.map((w) => w.x), left, right);
-    const at = new Map(want.map((w, i) => [w.p.name, xs[i]]));
-    params.outs = params.outs.map((p) => ({ ...p, x: at.get(p.name), y: top, side: 'bottom' }));
-    Object.assign(params, { x: left, y: top, w: right - left, h: 0, layer: null, pinned: false });
-    nodes.push(params);
-  }
-  // Every wire of the interface: the maze within the rectangle, around the chips and the wires drawn.
-  const asked = [];
-  edges.forEach((e, i) => {
-    if (frameEdge(e)) asked.push({ e, id: i });
-  });
-  pEdges.forEach((e, k) => asked.push({ e, id: edges.length + k }));
-  const pinOf = (id, port, out) => (out ? byId.get(id)?.outs : byId.get(id)?.ins)?.find((p) => p.name === port) ?? anchor(byId.get(id), port, out);
-  for (const q of asked) {
-    q.a = q.e.from.node === PARAMS ? params.outs.find((p) => p.name === q.e.from.port) : pinOf(q.e.from.node, q.e.from.port, true);
-    q.b = pinOf(q.e.to.node, q.e.to.port, false);
-    if (q.e.to.node !== OUTPUTS) q.b = { ...q.b, ...anchor(byId.get(q.e.to.node), q.e.to.port, false) };
-    if (q.e.from.node !== INPUTS && q.e.from.node !== PARAMS) q.a = { ...q.a, ...anchor(byId.get(q.e.from.node), q.e.from.port, true) };
-  }
-  const segments = [];
-  wires.forEach((w, i) => {
-    if (frameEdge(edges[i]) || routes[i]?.labelled) return;
-    for (let k = 1; k < w.corners.length; k++) segments.push(Object.assign([w.corners[k - 1], w.corners[k]], { net: `${w.from.node}\n${w.from.port}` }));
-  });
-  const pins = nodes.flatMap((n) => [...n.ins.map((p) => ({ x: p.x, y: p.y, side: p.side ?? 'left' })), ...n.outs.map((p) => ({ x: p.x, y: p.y, side: p.side ?? 'right' }))]);
-  const area = { x0: rect.x, x1: rect.x + rect.w, y0: rect.y, y1: rect.y + rect.h };
-  const maze = new Maze(boxes, asked.flatMap((q) => [q.a, q.b]), segments, area, pins);
-  const order2 = asked.map((q, j) => ({ q, j, d: Math.abs(q.a.x - q.b.x) + Math.abs(q.a.y - q.b.y) }));
-  order2.sort((p, q) => p.d - q.d || p.j - q.j);
-  const found = new Map();
-  for (const { q } of order2) {
-    const net = `${q.e.from.node}\n${q.e.from.port}`;
-    // The wires into the same pin (a parameter also driven from the flow) it may join there.
-    const share = edges.filter((o) => o.to.node === q.e.to.node && o.to.port === q.e.to.port).map((o) => `${o.from.node}\n${o.from.port}`);
-    // A connector's wires are one bus (ADR 0047 phase 5): they share their way out of it, drawn as one ribbon in lanes (ui/lib/board-lanes.js).
-    const bus = q.e.from.node === PARAMS && params?.connector ? 'bus:params' : null;
-    found.set(q.id, maze.route(q.a, q.b, net, { bus, from: q.a.side ?? 'right', into: q.b.side ?? 'left', share, budget: 2 * DIE_STATES }));
-  }
-  const kept = labels.filter((l) => !asked.some((q) => q.id === l.wire));
-  labels.length = 0;
-  labels.push(...kept);
-  const sourced = new Set(labels.filter((l) => l.side === 'out').map((l) => l.net));
-  for (const q of asked) {
-    const { a, b, e, id } = q;
-    const corners = found.get(id);
-    let r;
-    if (corners) r = { corners: simplify(corners), labelled: false };
-    else {
-      const net = `${e.from.node}\n${e.from.port}`;
-      const text = String(e.written?.from ?? e.from.port).replace(/^\//, '');
-      const into = b.side === 'top' ? { x: b.x, y: b.y - LABEL_STUB } : b.side === 'left' ? { x: b.x - LABEL_STUB, y: b.y } : { x: b.x - LABEL_STUB, y: b.y };
-      labels.push({ net, text: `◂ ${text}`, side: 'in', at: into, corners: [into, b], wire: id });
-      if (!sourced.has(net)) {
-        sourced.add(net);
-        const end = a.side === 'bottom' ? { x: a.x, y: a.y + LABEL_STUB } : { x: a.x + LABEL_STUB, y: a.y };
-        labels.push({ net, text: `▸ ${text}`, side: 'out', at: end, corners: [a, end], wire: id });
-      }
-      r = { corners: [into, b], labelled: true, whole: zCorners(a, b) };
-    }
-    const wire = boardWire(id, e, { feedback: false, lane: 0, under: null, a, b }, r);
-    if (e.from.node === PARAMS && params?.connector) wire.bus = 'bus:params';
-    if (id < edges.length) wires[id] = wire;
-    else wires.push(wire);
-  }
-  return { rect };
 }
 
 /** A node's stored position (`ui/schematic.toml`), or null. */
@@ -924,21 +794,32 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
     done.board.sections = sections;
     return done;
   }
-  // The plate's right edge: the board's columns start past it and the legs' tracks.
+  return flowBoard({ nodes, byId, edges, back, die, controlRects, board, positions, factsOf, widen });
+}
+
+/**
+ * A board laid out by flow (ADR 0047 §6; the note "Layered placement and
+ * channel routing", 2026-10-31): a die, or a top level without vias. Its
+ * chips in flow columns (`sugiyama`: longest path with a frame's inputs in
+ * column 0, feedback reversed for the layering only, median sweeps with
+ * transposes, coordinates keeping long edges straight); a chip stored in
+ * `ui/schematic.toml` stays exactly where it is and the others keep clear
+ * of it, pushed down their column (or, past it, to the nearest free spot);
+ * every wire planned in the columns' terms (`planChannels`,
+ * ui/lib/board-channels.js) and each channel as wide as its tracks need; a
+ * plan that meets a box or another wire is routed as before (the channel
+ * router, then the maze). A die's frame: its inputs on its left edge, each
+ * as near the height of the pin it feeds first as order and room allow,
+ * its outputs on its right, its parameters on a strip along its top edge
+ * (a connector of four or more), dropping along a band under the strip.
+ */
+function flowBoard({ nodes, byId, edges, back, die, controlRects, board, positions, factsOf, widen }) {
   let plateRight = board.plate?.w ?? 0;
   for (const r of controlRects) plateRight = Math.max(plateRight, r.x + r.w);
   widen();
-  const buses = new Set(legs.map((l) => l.chip));
   const plateArea = Boolean(board.plate || controlRects.length);
-  const x0 = plateArea ? plateRight + Math.max(PLATE_GAP, 2 * STUB + 2 * TRACK * (buses.size + 1)) : 0;
-  // A chip with vias wants the height of their middle.
-  const anchors = new Map();
-  for (const chip of buses) {
-    const own = legs.filter((l) => l.chip === chip).map((l) => l.control.control.rect);
-    const node = byId.get(chip);
-    const mid = own.reduce((s, r) => s + r.y + r.h / 2, 0) / own.length;
-    anchors.set(chip, Math.round(mid - node.h / 2));
-  }
+  const x0 = plateArea ? plateRight + PLATE_GAP : 0;
+  const ranks = layers(nodes, edges, back, true);
   const sEdges = [];
   edges.forEach((e, i) => {
     if (e.from.node === e.to.node) return;
@@ -958,20 +839,17 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
   const kept = [...new Set(layer.values())].sort((a, b) => a - b);
   const renumber = new Map(kept.map((l, i) => [l, i]));
   for (const [id, l] of layer) layer.set(id, renumber.get(l));
-  // A die's interface (ADR 0047 phase 3): its outputs' frame pins in the last column, at the package's right edge.
-  if (board.die && layer.has(OUTPUTS)) {
+  if (die && layer.has(OUTPUTS)) {
     const last = Math.max(...layer.values());
-    const fed = sEdges.some((e) => e.from === OUTPUTS);
-    // A column of its own when another chip lies in the last one.
-    if (!fed) layer.set(OUTPUTS, [...layer].some(([id, l]) => l === last && id !== OUTPUTS) ? last + 1 : last);
+    if (!sEdges.some((e) => e.from === OUTPUTS)) layer.set(OUTPUTS, [...layer].some(([id, l]) => l === last && id !== OUTPUTS) ? last + 1 : last);
   }
-  // Each channel keeps room for the legs' buses entering the column after it.
-  const extra = new Map();
-  for (const chip of buses) {
-    const l = layer.get(chip);
-    extra.set(l - 1, (extra.get(l - 1) ?? 0) + 2 * TRACK);
-  }
-  const lay = sugiyama(nodes, sEdges, layer, { anchors, extra });
+  // A chip whose top pins the strip sets keeps room above it for their horizontals (used when it is not the top of its column).
+  const above = new Map();
+  for (const n of nodes) if (n.topOrder?.size) above.set(n.id, n.topOrder.size * TRACK);
+  const pull = new Map([...above].map(([id, room]) => [id, room / TRACK]));
+  const lay = sugiyama(nodes, sEdges, layer, { above, pull });
+  const count = lay.rows.length;
+  // Stored chips stay exactly where they are; the others at their columns' places.
   for (const node of nodes) {
     node.layer = layer.get(node.id);
     const stored = storedAt(node, positions);
@@ -984,54 +862,245 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
       node.y = lay.y.get(node.id);
     }
   }
-  // No chip lies over a control of the plate or another chip, whatever placed it (a stored position
-  // from before the board): it moves to the nearest free spot of the spiral from where it is.
-  const moved = new Set();
-  const placed = [];
-  for (const row of lay.rows) {
-    for (const id of row) {
-      const node = byId.get(id);
-      if (!node) continue;
-      const over = (o) => near(node, o, CLEARANCE - 1);
-      if (controlRects.some(over) || placed.some(over)) {
-        const at = placeNear(node, node, [...controlRects, ...placed]);
-        if (at) {
-          node.x = at.x;
-          node.y = at.y;
-          moved.add(node.id);
+  const real = (n) => n && !n.edge && n.w > 0;
+  const fixed = [...controlRects, ...nodes.filter((n) => n.pinned).map(rectOf)];
+  // Down its column past a stored chip or a control it would cover, the column's order kept (x as laid out so far).
+  const pushDown = () => {
+    if (!fixed.length) return;
+    for (const row of lay.rows) {
+      let floor = -Infinity;
+      for (const id of row) {
+        const node = byId.get(id);
+        if (!node || node.pinned || !real(node)) continue;
+        let y = Math.max(node.y, floor);
+        for (let guard = 0; guard < 64; guard++) {
+          const at = { x: node.x, y, w: Math.max(node.w, 1), h: Math.max(node.h, 1) };
+          const hit = fixed.find((o) => near(at, o, CLEARANCE));
+          if (!hit) break;
+          y = hit.y + hit.h + CLEARANCE + GAP_Y;
         }
+        node.y = y;
+        floor = y + node.h + GAP_Y;
       }
-      placed.push(rectOf(node));
+    }
+  };
+  pushDown();
+  orderPins(nodes, byId, edges, [], factsOf);
+  // Everything the columns hold, dummies' corridors included: the top and bottom of the drawing.
+  let yTop = Infinity;
+  let yBot = -Infinity;
+  for (const n of nodes) {
+    if (!real(n)) continue;
+    yTop = Math.min(yTop, n.y);
+    yBot = Math.max(yBot, n.y + n.h);
+  }
+  for (const chain of lay.chains.values()) {
+    for (const d of chain) {
+      yTop = Math.min(yTop, d.y);
+      yBot = Math.max(yBot, d.y);
     }
   }
-  orderPins(nodes, byId, edges, legs, factsOf);
-  for (const c of panel) {
-    nodes.push(c);
-    byId.set(c.id, c);
+  if (!Number.isFinite(yTop)) [yTop, yBot] = [0, HEADER];
+  const snap = (v, up) => (up ? Math.ceil(v / STEP) : Math.floor(v / STEP)) * STEP;
+  const pinY = (id, port, out) => {
+    const n = byId.get(id);
+    return n.y + pinOffset(n, port, out);
+  };
+  // A die's parameters (the strip) and its band under the strip.
+  const params = die?.params ?? null;
+  const pEdges = die?.edges ?? [];
+  const connected = Boolean(params && params.outs.length >= CONNECTOR_MIN);
+  const bandNets = params ? [...new Set(pEdges.map((e) => `${PARAMS}\n${e.from.port}`))] : [];
+  const feedbackCount = edges.filter((e, i) => back.has(i)).length;
+  const side = (w) => (params ? 'below' : (w.ya + w.yb) / 2 < (yTop + yBot) / 2 ? 'above' : 'below');
+  const sides = { above: 0, below: 0 };
+  // The die's top and bottom, its frame's pins on its edges (as near the pin each feeds first as order and room allow).
+  let top = null;
+  let bottom = null;
+  const inputs = byId.get(INPUTS);
+  const outputs = byId.get(OUTPUTS);
+  if (die) {
+    for (const e of edges) {
+      if (back.has(edges.indexOf(e))) {
+        const ya = pinY(e.from.node, e.from.port, true);
+        const yb = pinY(e.to.node, e.to.port, false);
+        sides[side({ ya, yb })] += 1;
+      }
+    }
+    top = params ? snap(yTop - PARAM_GAP / 2 - (bandNets.length + 1) * TRACK - (connected ? combDepth(params.outs.length) : 0), false) : snap(yTop - DIE_MARGIN - sides.above * TRACK - (sides.above ? GAP_Y : 0), false);
+    bottom = snap(yBot + DIE_MARGIN + sides.below * TRACK + (sides.below ? GAP_Y : 0), true);
+    const spread = (want, a, b) => settle(want, a, b, (b - a) / (2 * (want.length + 1)));
+    if (inputs) {
+      const want = inputs.outs.map((p, i) => {
+        const sinks = edges.filter((e) => e.from.node === INPUTS && e.from.port === p.name).map((e) => ({ l: layer.get(e.to.node) ?? 0, y: pinY(e.to.node, e.to.port, false) }));
+        sinks.sort((a, b) => a.l - b.l || a.y - b.y);
+        return { p, i, y: sinks.length ? sinks[0].y : inputs.y + pinOffset(inputs, p.name, true) };
+      });
+      // In the interface's order (the package's pins keep it), each as near the height it wants as that allows.
+      want.sort((a, b) => a.i - b.i);
+      const ys = spread(want.map((w) => w.y), top, bottom);
+      inputs.pinAt = new Map(want.map((w, k) => [`out\n${w.p.name}`, { dx: 0, dy: ys[k] - top, side: 'right' }]));
+      Object.assign(inputs, { y: top, h: bottom - top, w: 0 });
+    }
+    if (outputs) {
+      const want = outputs.ins.map((p, i) => {
+        const from = edges.find((e) => e.to.node === OUTPUTS && e.to.port === p.name);
+        return { p, i, y: from ? pinY(from.from.node, from.from.port, true) : outputs.y + pinOffset(outputs, p.name, false) };
+      });
+      // In the interface's order (the package's pins keep it), each as near the height it wants as that allows.
+      want.sort((a, b) => a.i - b.i);
+      const ys = spread(want.map((w) => w.y), top, bottom);
+      outputs.pinAt = new Map(want.map((w, k) => [`in\n${w.p.name}`, { dx: 0, dy: ys[k] - top, side: 'left' }]));
+      Object.assign(outputs, { y: top, h: bottom - top, w: 0 });
+    }
+  }
+  // The plan, in the columns' terms.
+  const moved = new Set();
+  const colOf = (id) => {
+    const n = byId.get(id);
+    if (!n || n.pinned || moved.has(id)) return null;
+    return layer.get(id) ?? null;
+  };
+  const spans = Array.from({ length: count }, () => []);
+  for (const n of nodes) if (real(n) && !n.pinned && layer.has(n.id)) spans[layer.get(n.id)].push({ y0: n.y, y1: n.y + n.h });
+  const planWires = edges.map((e, i) => ({ id: i, net: `${e.from.node}\n${e.from.port}`, from: e.from.node, to: e.to.node, into: `${e.to.node}\n${e.to.port}`, ya: pinY(e.from.node, e.from.port, true), yb: pinY(e.to.node, e.to.port, false), feedback: back.has(i), chain: lay.chains.get(i) ?? [] }));
+  // Parameters: straight down into a chip at the top of its column, else from a gap kept above it (its pins right to left, top down).
+  const topOf = new Map();
+  for (const row of lay.rows) {
+    const first = row.map((id) => byId.get(id)).find((n) => real(n) && !n.pinned);
+    if (first) topOf.set(first.id, true);
+  }
+  const pinDx = (n, port) => {
+    const at = n.pinAt?.get(`in\n${port}`);
+    if (at) return at.dx;
+    return n.topOrder?.has(port) ? TOP_PAD + n.topOrder.get(port) * TOP_PITCH : 0;
+  };
+  const stripMid = (() => {
+    const xs = pEdges.map((e) => byId.get(e.to.node)).filter(Boolean).map((n) => n.x + n.w / 2);
+    return xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : 0;
+  })();
+  const chX = (ch) => (lay.columns[Math.max(0, Math.min(count - 1, ch))]?.x ?? 0) + x0 + (lay.columns[Math.max(0, Math.min(count - 1, ch))]?.w ?? 0);
+  const planParams = pEdges.map((e, k) => {
+    const n = byId.get(e.to.node);
+    const isTop = Boolean(n?.topOrder?.has(e.to.port));
+    return {
+      id: edges.length + k,
+      net: `${PARAMS}\n${e.from.port}`,
+      to: e.to.node,
+      top: isTop && Boolean(topOf.get(e.to.node)),
+      side: isTop ? 'top' : 'left',
+      chipY: n?.y ?? 0,
+      pinDx: n ? pinDx(n, e.to.port) : 0,
+      yIn: n && !isTop ? pinY(e.to.node, e.to.port, false) : 0,
+      fromLeft: (ch) => stripMid < chX(ch),
+    };
+  });
+  const plan = planChannels({ count, colOf, spans, wires: planWires, params: params ? planParams.filter((p) => n0(p)) : [], side, yMin: params ? yTop : -Infinity });
+  function n0(p) {
+    return byId.has(p.to) && byId.get(p.to).kind === 'instance';
+  }
+  // The columns' x: each as wide as its widest box, each channel as its tracks need; a die's right edge on the grid.
+  // A die's frame columns are zero wide: the channel beside one only as wide as its tracks need (its margin, as before).
+  const frameSide = (ch) => Boolean(die) && ((ch === 0 && layer.get(INPUTS) === 0) || (ch === count - 2 && layer.get(OUTPUTS) === count - 1));
+  const widthOf = (ch) => {
+    const n = plan.channels.get(ch)?.n ?? 0;
+    return frameSide(ch) ? Math.max(DIE_MARGIN, 2 * STUB + (n + 1) * TRACK) : channelWidth(n, ch < 0 || ch >= count - 1);
+  };
+  const columns = [];
+  let x = x0 + widthOf(-1);
+  for (let c = 0; c < count; c++) {
+    let w = 0;
+    for (const id of lay.rows[c]) w = Math.max(w, byId.get(id)?.w ?? 0);
+    columns.push({ x, w });
+    if (c + 1 < count) x += w + widthOf(c);
+  }
+  if (die && outputs && count > 1 && layer.get(OUTPUTS) === count - 1) {
+    const extra = snap(columns[count - 1].x, true) - columns[count - 1].x;
+    columns[count - 1].x += extra;
+  }
+  const widths = new Map([...plan.channels.keys()].map((ch) => [ch, ch >= 0 && ch < count - 1 ? columns[ch + 1].x - columns[ch].x - columns[ch].w : widthOf(ch)]));
+  for (const node of nodes) {
+    if (node.pinned || !layer.has(node.id)) continue;
+    node.x = columns[layer.get(node.id)].x;
+  }
+  // A chip that, at its final x, would cover a stored chip or a control: down its column, else to the nearest free spot.
+  pushDown();
+  if (fixed.length) {
+    const placed = [...fixed];
+    for (const row of lay.rows) {
+      for (const id of row) {
+        const node = byId.get(id);
+        if (!node || node.pinned || !real(node)) continue;
+        if (placed.some((o) => near(node, o, CLEARANCE - 1))) {
+          const at = placeNear(node, node, placed);
+          if (at) {
+            node.x = at.x;
+            node.y = at.y;
+            moved.add(node.id);
+          }
+        }
+        placed.push(rectOf(node));
+      }
+    }
   }
   for (const node of nodes) {
     node.ins = node.ins.map((p) => ({ ...p, ...anchor(node, p.name, false) }));
     node.outs = node.outs.map((p) => ({ ...p, ...anchor(node, p.name, true) }));
   }
-  const bottom = levelBottom(nodes);
-  // A source feeding GLOBAL_FANOUT chips or more (the transport's clock): its nets are global, drawn as labels.
-  const fed = new Map();
-  const hasInput = new Set(edges.map((e) => e.to.node));
-  for (const e of edges) {
-    if (!fed.has(e.from.node)) fed.set(e.from.node, new Set());
-    fed.get(e.from.node).add(e.to.node);
+  const bottomLine = levelBottom(nodes);
+  // The die's rectangle and its strip.
+  let rect = null;
+  if (die) {
+    const left = inputs ? columns[0].x : snap(columns[0].x - widthOf(-1) - DIE_MARGIN, false);
+    const right = outputs && layer.get(OUTPUTS) === count - 1 ? columns[count - 1].x : snap(columns[count - 1].x + columns[count - 1].w + widthOf(count - 1) + DIE_MARGIN, true);
+    rect = { x: left, y: top, w: right - left, h: bottom - top };
+    if (inputs) {
+      inputs.x = left;
+      inputs.outs = inputs.outs.map((p) => ({ ...p, ...anchor(inputs, p.name, true) }));
+    }
+    if (outputs) {
+      outputs.x = right;
+      outputs.ins = outputs.ins.map((p) => ({ ...p, ...anchor(outputs, p.name, false) }));
+    }
+    if (params) placeStrip({ params, pEdges, byId, rect, order: board.paramOrder ?? null, nodes });
   }
-  const global = new Set();
-  for (const e of edges) if (!hasInput.has(e.from.node) && (fed.get(e.from.node)?.size ?? 0) >= GLOBAL_FANOUT) global.add(`${e.from.node}\n${e.from.port}`);
+  const outerY = (o) => (o.side === 'above' ? yTop - GAP_Y / 2 - (o.track + 1) * TRACK : yBot + GAP_Y / 2 + (o.track + 1) * TRACK);
+  const xOf = (v) => trackX(columns, v.ch, v.track, plan.channels.get(v.ch).n, widths.get(v.ch) ?? widthOf(v.ch));
+  // The band's order (top down) against crossings among the parameters' runs.
+  const bandAt = new Map();
+  if (params) {
+    const items = new Map();
+    pEdges.forEach((e, k) => {
+      const net = `${PARAMS}\n${e.from.port}`;
+      const p = plan.plans.get(edges.length + k);
+      const s = params.outs.find((q) => q.name === e.from.port);
+      const b = anchor(byId.get(e.to.node), e.to.port, false);
+      if (!items.has(net)) items.set(net, { net, xs: s.x, xe: [] });
+      const v = p?.corners.find((c) => c.x?.v)?.x.v;
+      items.get(net).xe.push(v ? xOf(v) : b.x);
+    });
+    const order = bandOrder([...items.values()]);
+    const start = top + (connected ? combDepth(params.outs.length) : 0) + TRACK;
+    order.forEach((net, k) => bandAt.set(net, start + k * TRACK));
+  }
+  const planned = new Map();
+  const ends = (e) => ({ a: e.from.node === PARAMS ? params.outs.find((p) => p.name === e.from.port) : anchor(byId.get(e.from.node), e.from.port, true), b: anchor(byId.get(e.to.node), e.to.port, false) });
+  const touched = (e) => moved.has(e.from.node) || moved.has(e.to.node);
+  [...edges, ...pEdges].forEach((e, i) => {
+    const p = plan.plans.get(i);
+    if (!p || touched(e)) return;
+    const { a, b } = ends(e);
+    planned.set(i, resolve(p.corners, { a, b, xOf, outerY, bandY: (net) => bandAt.get(net) }));
+  });
+  // Every wire: the planned route where it is clear, else the channel router's, else (a die) the maze's.
   let lane = 0;
-  const asked = edges.map((e, i) => {
-    const a = anchor(byId.get(e.from.node), e.from.port, true);
-    const b = anchor(byId.get(e.to.node), e.to.port, false);
-    const feedback = back.has(i);
+  const asked = [...edges, ...pEdges].map((e, i) => {
+    const { a, b } = ends(e);
+    const feedback = back.has(i) && i < edges.length;
     if (feedback) lane += 1;
     const chain = lay.chains.get(i);
-    const still = (id) => !moved.has(id) && !byId.get(id).pinned;
-    const straight = Boolean(chain?.length) && !feedback && still(e.from.node) && still(e.to.node);
+    const still = (id) => !moved.has(id) && !byId.get(id)?.pinned;
+    const straight = i < edges.length && Boolean(chain?.length) && !feedback && still(e.from.node) && still(e.to.node);
     return {
       id: i,
       net: `${e.from.node}\n${e.from.port}`,
@@ -1040,103 +1109,111 @@ function boardLevel(level, positions, { factsOf, controls, faces, faceSize, boar
       a,
       b,
       feedback,
-      under: feedback ? laneY(bottom, lane) : null,
+      under: feedback ? laneY(bottomLine, lane) : null,
       lane: feedback ? lane : 0,
-      span: Math.abs(layer.get(e.to.node) - layer.get(e.from.node)),
-      global: global.has(`${e.from.node}\n${e.from.port}`),
-      // A die's interface wires are the maze's, from its edges (`dieWires`): the channels leave them.
-      never: Boolean(die) && (e.from.node === INPUTS || e.to.node === OUTPUTS),
-      stations: straight ? chain.map((d) => ({ x0: x0 + lay.columns[d.layer].x, x1: x0 + lay.columns[d.layer].x + lay.columns[d.layer].w, y: d.y })) : null,
+      span: Math.abs((layer.get(e.to.node) ?? 0) - (layer.get(e.from.node) ?? 0)),
+      planOnly: i >= edges.length,
+      stations: straight ? chain.map((d) => ({ x0: columns[d.layer].x, x1: columns[d.layer].x + columns[d.layer].w, y: d.y })) : null,
       edge: e,
     };
   });
-  const chips = nodes.filter((n) => n.kind !== 'control');
-  const boxes = [...chips.map(({ id, x, y, w, h }) => ({ id, x, y, w, h })), ...controlRects.map((r, k) => ({ id: `@plate:${k}`, ...r }))];
+  const boxes = nodes.filter((n) => real(n)).map(({ id, x, y, w, h }) => ({ id, x, y, w, h }));
+  boxes.push(...controlRects.map((r, k) => ({ id: `@plate:${k}`, ...r })));
   const nameOf = (w) => String(w.edge.written?.from ?? `${w.edge.from.node}.${w.edge.from.port}`).replace(/^\//, '');
-  // A die (ADR 0047 phase 3) draws every net: a wire with no way in the channels is searched for by the maze, around everything drawn.
-  const fallback = board.die
+  const area = rect ? { x0: rect.x, x1: rect.x + rect.w, y0: rect.y, y1: rect.y + rect.h } : null;
+  const fallback = die
     ? (taken) => {
-        const xsB = boxes.flatMap((b) => [b.x, b.x + b.w]);
-        const ysB = boxes.flatMap((b) => [b.y, b.y + b.h, laneY(bottom, lane + 1)]);
-        const area = { x0: least(xsB, 0) - MAZE_MARGIN, x1: most(xsB, 0) + MAZE_MARGIN, y0: least(ysB, 0) - MAZE_MARGIN, y1: most(ysB, 0) + MAZE_MARGIN };
-        const pins = nodes.flatMap((n) => [...n.ins.map((p) => ({ x: p.x, y: p.y, out: false })), ...n.outs.map((p) => ({ x: p.x, y: p.y, out: true }))]);
+        const pins = nodes.flatMap((n) => [...n.ins.map((p) => ({ x: p.x, y: p.y, side: p.side ?? 'left' })), ...n.outs.map((p) => ({ x: p.x, y: p.y, side: p.side ?? 'right' }))]);
+        if (params) pins.push(...params.outs.map((p) => ({ x: p.x, y: p.y, side: 'bottom' })));
         const maze = new Maze(boxes, asked.flatMap((w) => [w.a, w.b]), taken, area, pins);
         return {
-          route: (w) => maze.route(w.a, w.b, w.net, { budget: DIE_STATES }),
+          route: (w) => maze.route(w.a, w.b, w.net, { budget: DIE_STATES, from: w.a.side ?? 'right', into: w.b.side ?? 'left' }),
           take: (corners, net) => {
             const id = maze.netId(net);
             for (let k = 1; k < corners.length; k++) maze.takeSegment(corners[k - 1], corners[k], id);
           },
+          maze,
         };
       }
     : null;
-  const { routes, labels } = routeWires(boxes, asked, { nameOf, fanout: false, fallback });
-  // The legs, through the plate's gutters and the channels, around everything already drawn.
-  const drawnSegments = [];
-  routes.forEach((r, i) => {
-    for (let k = 1; k < r.corners.length; k++) drawnSegments.push(Object.assign([r.corners[k - 1], r.corners[k]], { net: asked[i].net }));
+  let mazeOf = null;
+  const { routes, labels } = routeWires(boxes, asked, {
+    nameOf,
+    fanout: false,
+    planned,
+    fallback: fallback
+      ? (taken) => {
+          mazeOf = fallback(taken);
+          return mazeOf;
+        }
+      : null,
   });
-  for (const l of labels) drawnSegments.push(Object.assign([l.corners[0], l.corners[1]], { net: l.net }));
-  const legEnds = legs.map((l) => ({ a: anchor(byId.get(l.from.node), l.from.port, true), b: anchor(byId.get(l.to.node), l.to.port, false) }));
-  const legRoutes = [];
-  if (legs.length) {
-    const all = [...boxes, ...panel.map(({ id, x, y, w, h }) => ({ id, x, y, w, h }))];
-    const xsAll = all.flatMap((b) => [b.x, b.x + b.w]);
-    const ysAll = all.flatMap((b) => [b.y, b.y + b.h]);
-    const bounds = { x0: least(xsAll, 0) - MAZE_MARGIN, x1: most(xsAll, 0) + MAZE_MARGIN, y0: least(ysAll, 0) - MAZE_MARGIN, y1: most(ysAll, 0) + MAZE_MARGIN };
-    // Every pin of a chip or a pad keeps its approach for its own wires.
-    const pins = nodes.flatMap((n) => [...n.ins.map((p) => ({ x: p.x, y: p.y, out: false })), ...n.outs.map((p) => ({ x: p.x, y: p.y, out: true }))]);
-    const maze = new Maze(all, legEnds.flatMap((e) => [e.a, e.b]), drawnSegments, bounds, pins);
-    // Chip by chip in source order, each chip's legs nearest first: a bus forms from the first.
-    const order = legs.map((l, i) => ({ l, i, d: Math.abs(legEnds[i].a.x - legEnds[i].b.x) + Math.abs(legEnds[i].a.y - legEnds[i].b.y) }));
-    const chipIndex = new Map(nodes.map((n, i) => [n.id, i]));
-    order.sort((p, q) => chipIndex.get(p.l.chip) - chipIndex.get(q.l.chip) || p.d - q.d || p.i - q.i);
-    for (const { l, i } of order) {
-      const own = [l.control.control.rect, rectOf(l.control)];
-      // The wires at its chip's pin (into the parameter it sets, out of the output it reads) it may join.
-      const share = l.writes ? edges.filter((e) => e.to.node === l.chip && e.to.port === l.pin.port).map((e) => `${e.from.node}\n${e.from.port}`) : [`${l.chip}\n${l.pin.port}`];
-      legRoutes[i] = maze.route(legEnds[i].a, legEnds[i].b, `leg:${l.control.id}:${l.pin.name}`, { bus: `bus:${l.chip}`, own, share });
+  // What only the planner routes (a parameter into a top pin, a die's frame wire it found no way for): the maze, around everything drawn.
+  const leftover = asked.filter((w, i) => routes[i]?.planOnly);
+  if (leftover.length) {
+    if (!mazeOf) {
+      const taken = [];
+      routes.forEach((r, i) => {
+        if (r?.planOnly || r?.labelled) return;
+        for (let k = 1; k < r.corners.length; k++) taken.push(Object.assign([r.corners[k - 1], r.corners[k]], { net: asked[i].net }));
+      });
+      mazeOf = fallback ? fallback(taken) : null;
+    }
+    const order = leftover.map((w) => ({ w, d: Math.abs(w.a.x - w.b.x) + Math.abs(w.a.y - w.b.y) })).sort((p, q) => p.d - q.d || p.w.id - q.w.id);
+    for (const { w } of order) {
+      const e = w.edge;
+      const share = [...edges, ...pEdges].filter((o) => o.to.node === e.to.node && o.to.port === e.to.port).map((o) => `${o.from.node}\n${o.from.port}`);
+      const bus = e.from.node === PARAMS && params?.connector ? 'bus:params' : null;
+      const corners = mazeOf?.maze.route(w.a, w.b, w.net, { bus, from: w.a.side ?? 'right', into: w.b.side ?? 'left', share, budget: 2 * DIE_STATES }) ?? null;
+      if (corners) {
+        const clean = simplify(corners);
+        mazeOf.take(clean, w.net);
+        routes[w.id] = { corners: clean, labelled: false };
+      } else routes[w.id] = { corners: [w.a, w.b], labelled: true, whole: zCorners(w.a, w.b) };
     }
   }
   const wires = asked.map((w, i) => {
-    const e = w.edge;
-    const r = routes[i];
-    return boardWire(i, e, w, r);
+    const wire = boardWire(i, w.edge, w, routes[i]);
+    if (w.edge.from.node === PARAMS && params?.connector) wire.bus = 'bus:params';
+    return wire;
   });
-  if (die) {
-    const done = dieWires({ die, nodes, byId, edges, boxes, routes, labels, wires, order: board.paramOrder ?? null });
-    const finished = finishBoard(nodes, wires, labels, bottom, board, lay.crossings, { obstacles: controlRects, area: { x0: done.rect.x, x1: done.rect.x + done.rect.w, y0: done.rect.y, y1: done.rect.y + done.rect.h } });
-    finished.bounds = done.rect;
-    finished.board.die = done.rect;
-    return finished;
+  if (params) nodes.push(params);
+  const finished = finishBoard(nodes, wires, labels, bottomLine, board, lay.crossings, { obstacles: controlRects, area });
+  if (rect) {
+    finished.bounds = rect;
+    finished.board.die = rect;
   }
-  legs.forEach((l, k) => {
-    const id = edges.length + k;
-    const corners = legRoutes[k];
-    const label = `${l.control.name} ⇢ ${l.pin.address}`;
-    const e = {
-      from: l.from,
-      to: l.to,
-      kind: 'binding',
-      shape: l.pin.shape,
-      converters: [],
-      scale: null,
-      label,
-      written: { from: `${l.control.id}.${l.pin.name}`, to: l.pin.address, binding: true },
-    };
-    const ends = legEnds[k];
-    let r;
-    if (corners) r = { corners, labelled: false };
-    else {
-      // No way through the plate: a label at its chip's pin (its via names it on the plate).
-      const at = l.writes ? { x: ends.b.x - LABEL_STUB, y: ends.b.y } : { x: ends.a.x + LABEL_STUB, y: ends.a.y };
-      const stub = l.writes ? [at, ends.b] : [ends.a, at];
-      r = { corners: stub, labelled: true, whole: zCorners(ends.a, ends.b) };
-      labels.push({ net: `leg:${l.control.id}:${l.pin.name}`, text: `${l.writes ? '◂' : '▸'} ${l.control.name}`, side: l.writes ? 'in' : 'out', at, corners: stub, wire: id });
-    }
-    wires.push(boardWire(id, e, { feedback: false, lane: 0, under: null, a: ends.a, b: ends.b }, r));
+  return finished;
+}
+
+/**
+ * A die's parameters' strip on its top edge (ADR 0047 §8, phase 5): in the
+ * package's order where the level around gives one, else over the pins they
+ * set; four or more are one connector, packed CONNECTOR_PITCH apart over
+ * the middle of what they set.
+ */
+function placeStrip({ params, pEdges, byId, rect, order, nodes }) {
+  const { x: left, y: top } = rect;
+  const right = rect.x + rect.w;
+  let x0 = Infinity;
+  for (const n of nodes) if (n.kind === 'instance') x0 = Math.min(x0, n.x);
+  if (!Number.isFinite(x0)) x0 = left;
+  const want = params.outs.map((p, i) => {
+    const xs = pEdges.filter((e) => e.from.port === p.name).map((e) => anchor(byId.get(e.to.node), e.to.port, false).x);
+    return { p, i, x: xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : x0, o: order?.get(p.name) };
   });
-  return finishBoard(nodes, wires, labels, bottom, board, lay.crossings, { obstacles: controlRects });
+  want.sort((a, b) => (a.o !== undefined && b.o !== undefined ? a.o - b.o : 0) || (a.o === undefined) - (b.o === undefined) || a.x - b.x || a.i - b.i);
+  let xs;
+  if (want.length >= CONNECTOR_MIN) {
+    const span = (want.length - 1) * CONNECTOR_PITCH;
+    const mid = want.reduce((s, w) => s + w.x, 0) / want.length;
+    const first = Math.round(Math.min(right - STEP - span, Math.max(left + STEP, mid - span / 2)) / STEP) * STEP;
+    xs = want.map((_, i) => first + i * CONNECTOR_PITCH);
+    params.connector = { x0: xs[0] - CONNECTOR_PAD, x1: xs.at(-1) + CONNECTOR_PAD, count: want.length };
+  } else xs = settle(want.map((w) => w.x), left, right, (right - left) / (2 * (want.length + 1)));
+  const at = new Map(want.map((w, i) => [w.p.name, xs[i]]));
+  params.outs = params.outs.map((p) => ({ ...p, x: at.get(p.name), y: top, side: 'bottom' }));
+  Object.assign(params, { x: left, y: top, w: right - left, h: 0, layer: null, pinned: false });
 }
 
 /** A board's measures, its pins' `connected`, its bounds: what `layout` returns. */
@@ -1144,6 +1221,17 @@ function finishBoard(nodes, wires, labels, bottom, board, crossings, { obstacles
   // ADR 0047 phase 4: a wire that found no way within the layout's budget is searched for again, around everything drawn; a net label only where none exists.
   // ADR 0047 phase 5 (the owner: "wires on every level, no labelled invisible nets"): a wire the layout left as a label is routed now.
   rescueLabelled(nodes, wires, labels, obstacles, area);
+  // The note "Layered placement and channel routing" (2026-10-31): a chip's wire left as a staircase gets the simplest shape that fits.
+  const net = (w) => (w.kind === 'binding' ? `bus:${w.from.node.startsWith('@control:') ? w.to.node : w.from.node}` : w.from.node === PARAMS && w.bus ? 'bus:params' : `${w.from.node}\n${w.from.port}`);
+  const items = wires.filter((w) => !w.labelled).map((w) => ({ id: w.id, corners: w.corners, net: net(w), wire: w }));
+  const solid = [...nodes.filter((n) => n.w > 0 && n.h > 0).map(({ id, x, y, w, h }) => ({ id, x, y, w, h })), ...obstacles.map((r, k) => ({ id: `@plate:${k}`, ...r }))];
+  const straightened = straighten(items, solid, { eligible: (it) => it.wire.kind !== 'binding' && it.wire.from.node !== PARAMS, ends: (it) => [it.wire.from.node, it.wire.to.node] });
+  for (const it of items) {
+    const corners = straightened.get(it.id);
+    if (!corners) continue;
+    const vertical = corners.find((p, k) => k > 0 && corners[k - 1].x === p.x && corners[k - 1].y !== p.y);
+    Object.assign(it.wire, { corners, trunkX: vertical?.x ?? null, ...orthGeometry(corners) });
+  }
   // ADR 0047 phase 5: the wires into (or out of) a connector meet it as one comb.
   combConnectors(nodes, wires, obstacles);
   const ribbons = boardRibbons(nodes, wires, obstacles, labels);

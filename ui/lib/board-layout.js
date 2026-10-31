@@ -111,7 +111,7 @@ export function inversions(values) {
  * at through that column), `crossings` of the order kept (between layers,
  * dummies counted).
  */
-export function sugiyama(nodes, edges, layer, { anchors = null, extra = null } = {}) {
+export function sugiyama(nodes, edges, layer, { anchors = null, extra = null, above: room = null, pull = null } = {}) {
   const real = new Map(nodes.map((n) => [n.id, n]));
   const count = nodes.length ? Math.max(...nodes.map((n) => layer.get(n.id) ?? 0)) + 1 : 0;
   const rows = Array.from({ length: count }, () => []);
@@ -181,8 +181,23 @@ export function sugiyama(nodes, edges, layer, { anchors = null, extra = null } =
     segs.sort((p, q) => p[0] - q[0] || p[1] - q[1]);
     return inversions(segs.map((s) => s[1]));
   };
-  const total = () => {
+  // `pull(id)`: wires reaching a node from above its column (a die's parameters into its top pins, ui/lib/board-channels.js);
+  // each crosses the wires attached to the left of every element above it in its column, so the order counts them.
+  const pulled = (id) => pull?.get(id) ?? 0;
+  const pullCost = () => {
+    if (!pull?.size) return 0;
     let c = 0;
+    for (const row of rows) {
+      let left = 0;
+      for (const id of row) {
+        c += pulled(id) * left;
+        left += above.get(id).length;
+      }
+    }
+    return c;
+  };
+  const total = () => {
+    let c = pullCost();
     for (let g = 0; g < gaps.length; g++) c += gapCrossings(g);
     return c;
   };
@@ -200,7 +215,8 @@ export function sugiyama(nodes, edges, layer, { anchors = null, extra = null } =
     row.forEach((id, i) => {
       const list = near.get(id);
       if (list.length) {
-        moving.push({ id, key: median(list), i });
+        const p = pulled(id);
+        moving.push({ id, key: p ? (median(list) * list.length - p) / (list.length + p) : median(list), i });
         slots.push(i);
       }
     });
@@ -214,7 +230,7 @@ export function sugiyama(nodes, edges, layer, { anchors = null, extra = null } =
   };
   // Crossings between u's and w's segments (to both neighbouring layers), u before w.
   const pairCrossings = (u, w) => {
-    let c = 0;
+    let c = pulled(w) * above.get(u).length;
     for (const near of [above, below]) {
       const pu = near.get(u).map(at);
       const pw = near.get(w).map(at);
@@ -272,7 +288,8 @@ export function sugiyama(nodes, edges, layer, { anchors = null, extra = null } =
   // Coordinates: y within each column (isotonic regression of the wanted
   // tops under the order and the gaps), then the columns' x.
   const height = (id) => real.get(id)?.h ?? 0;
-  const separation = (p, q) => (isDummy(p) && isDummy(q) ? TRACK : isDummy(p) || isDummy(q) ? GAP_Y / 2 : GAP_Y);
+  // `above(id)`: room kept over a box beside the gap (a die's chip whose top pins are reached from the side, ui/lib/board-channels.js).
+  const separation = (p, q) => (isDummy(p) && isDummy(q) ? TRACK : isDummy(p) || isDummy(q) ? GAP_Y / 2 : GAP_Y) + (room && !isDummy(q) ? (room.get(q) ?? 0) : 0);
   const y = new Map();
   for (const row of rows) {
     let top = 0;
@@ -373,7 +390,7 @@ export function sugiyama(nodes, edges, layer, { anchors = null, extra = null } =
   }
   const dummyAt = new Map();
   for (const [key, chain] of chains) dummyAt.set(key, chain.map((id) => ({ layer: lay.get(id), y: y.get(id) })));
-  return { rows, x: xs, y: ys, columns, chains: dummyAt, crossings: best.crossings };
+  return { rows, x: xs, y: ys, columns, chains: dummyAt, crossings: best.crossings - pullCost() };
 }
 
 /** Whether rectangles `a` and `b` (`{x, y, w, h}`) come closer than `gap`. */

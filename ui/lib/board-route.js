@@ -98,7 +98,7 @@ class Router {
     const lo = Math.min(y0, y1) - TRACK / 2;
     const hi = Math.max(y0, y1) + TRACK / 2;
     for (const o of this.vertical) {
-      if (o.net === net) continue;
+      if (o.net === net || this.share?.has(o.net)) continue;
       if (Math.abs(o.x - x) < TRACK - 0.01 && o.lo < hi && o.hi > lo) return false;
     }
     return true;
@@ -108,7 +108,7 @@ class Router {
     const lo = Math.min(x0, x1);
     const hi = Math.max(x0, x1);
     for (const o of this.horizontal) {
-      if (o.net === net) continue;
+      if (o.net === net || this.share?.has(o.net)) continue;
       if (Math.abs(o.y - y) < TRACK / 2 - 0.01 && o.lo < hi - 0.01 && o.hi > lo + 0.01) return false;
     }
     return true;
@@ -244,7 +244,7 @@ export function simplify(corners) {
  * that finds no way with the segments drawn so far, gives `{route(w),
  * take(corners, net)}` (the maze): a second search before a label.
  */
-export function routeWires(boxes, wires, { nameOf = (w) => w.net, fanout = true, fallback = null } = {}) {
+export function routeWires(boxes, wires, { nameOf = (w) => w.net, fanout = true, fallback = null, planned = null } = {}) {
   const router = new Router(boxes);
   router.prefs = trackPreferences(wires);
   // Nets: the wires from one pin.
@@ -263,7 +263,41 @@ export function routeWires(boxes, wires, { nameOf = (w) => w.net, fanout = true,
   // The segments drawn so far (with their nets), for a fallback made at the first wire with no way.
   const taken = [];
   let maze = null;
+  // The channel planner's routes first (ui/lib/board-channels.js), each kept when it is clear of every box and every wire taken.
+  const done = new Set();
+  if (planned) {
+    // The wires into one input pin (a sum) may share their way into it.
+    const into = new Map();
+    for (const w of wires) {
+      const key = `${w.b.x},${w.b.y}`;
+      if (!into.has(key)) into.set(key, new Set());
+      into.get(key).add(w.net);
+    }
+    for (const { w, i } of order) {
+      const corners = planned.get(w.id);
+      if (!corners) continue;
+      const clean = simplify(corners);
+      router.overVias = Boolean(w.overVias);
+      router.share = into.get(`${w.b.x},${w.b.y}`);
+      if (!router.clear(clean, w.net, skip(w.from), skip(w.to))) continue;
+      router.take(clean, w.net);
+      if (clean.length > 2) {
+        const v = clean.find((p, k) => k > 0 && clean[k - 1].x === p.x && clean[k - 1].y !== p.y);
+        if (v && clean[0].x !== v.x) router.trunks.set(`${w.net}\n${clean[0].x}\n${clean[0].y}`, v.x);
+      }
+      for (let k = 1; k < clean.length; k++) taken.push(Object.assign([clean[k - 1], clean[k]], { net: w.net }));
+      result[i] = { corners: clean, labelled: false, planned: true };
+      done.add(i);
+    }
+    router.share = null;
+  }
   for (const { w, i } of order) {
+    if (done.has(i)) continue;
+    // Only the planner routes it (a die's parameter into a top pin): left to the caller's maze.
+    if (w.planOnly) {
+      result[i] = { labelled: true, failed: true, planOnly: true };
+      continue;
+    }
     router.overVias = Boolean(w.overVias);
     if (w.never) {
       result[i] = { corners: zCorners(w.a, w.b, { feedback: w.feedback, under: w.under }), labelled: false };
@@ -299,7 +333,7 @@ export function routeWires(boxes, wires, { nameOf = (w) => w.net, fanout = true,
   const sourced = new Set();
   wires.forEach((w, i) => {
     const r = result[i];
-    if (!r.labelled) return;
+    if (!r.labelled || r.planOnly) return;
     // Its whole route, drawn only while traced: the plain one, taking no track.
     r.whole = simplify(zCorners(w.a, w.b, { feedback: w.feedback, under: w.under }));
     r.corners = [{ x: w.b.x - LABEL_STUB, y: w.b.y }, w.b];

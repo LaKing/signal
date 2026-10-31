@@ -12,8 +12,8 @@
 
 /** The grid's spacing (layout units). */
 export const STEP = 16;
-/** A route turning costs as much as running this far (24 before ADR 0047 phase 3). */
-export const BEND = 32;
+/** A route turning costs as much as running this far (24 before ADR 0047 phase 3, 32 before its note "Layered placement and channel routing": fewer steps). */
+export const BEND = 96;
 /** Crossing another net costs as much as running this far. */
 export const CROSS = 120;
 /**

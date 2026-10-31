@@ -424,8 +424,10 @@ test('a ribbon goes into its chip: the synth’s parameters are one connector on
   // Inside: the strip's wires are one bus, drawn in lanes as a ribbon labelled once.
   const inner = die.wires.filter((w) => w.from.node === PARAMS);
   assert.ok(inner.every((w) => w.bus === 'bus:params'));
-  // Drawn in lanes (they share their way), a band only where they run packed clear of every chip, never a label of its own.
-  assert.ok(inner.filter((w) => w.display).length >= inner.length / 2, 'in lanes');
+  // The note "Layered placement and channel routing" (2026-10-31): each on a band track and a channel track of its own (a
+  // curtain), so none shares another's way and none needs a lane; never on top of one another, never a label of its own.
+  const solo = inner.filter((w) => !w.display);
+  assert.ok(solo.length >= inner.length / 2, 'on tracks of their own');
   const ribbons = die.board.ribbons.filter((r) => r.lanes && r.group === 'params');
   assert.equal(ribbons.filter((r) => r.text).length, 0);
   assert.ok(overlaps(die.wires.map((w) => ({ net: mazeNet(w).net, points: w.display ?? w.corners }))) <= 1);
