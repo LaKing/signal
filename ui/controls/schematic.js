@@ -579,7 +579,10 @@ export class SignalSchematic extends HTMLElement {
     on('graph', (graph) => this.setGraph(graph));
     on('graph.error', (error) => this.stale(error));
     on('scopes', (scopes) => this.scopesSeen(scopes, true));
-    on('welcome', () => this.fetch());
+    on('welcome', () => {
+      this.faces?.reconnected();
+      this.fetch();
+    });
     on('describe', () => this.described());
     on('panel.written', (message) => {
       if ((message?.file ?? 'main.html') === 'main.html' && typeof message.html === 'string') this.panelSeen(message.html);

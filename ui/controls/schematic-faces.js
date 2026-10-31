@@ -178,13 +178,20 @@ export class SchematicFaces {
     for (const face of this.faces.values()) if (face.file === file) this.render(face);
   }
 
-  /** Reads part `file` (`panel.read`) when it is not read yet or its text changed (`base`, the graph's). */
+  /**
+   * Reads part `file` (`panel.read`) when it is not read yet or its text
+   * changed (`base`, the graph's). A read that failed is kept for the
+   * revision it was asked at (`asked`; review 2026-10-31: a missing part
+   * stayed missing after a newer revision): read again for another
+   * revision, or after a reconnect (`reconnected`), never per frame.
+   */
   read(file, base) {
     const known = this.parts.get(file);
-    if (known?.reading || (known && (base === undefined || known.base === base || known.error))) return;
+    if (known?.reading) return;
+    if (known?.error ? known.asked === base : known && (base === undefined || known.base === base)) return;
     const request = this.host.connection?.request?.({ type: 'panel.read', file });
     if (!request) {
-      this.parts.set(file, { html: null, base: null, error: 'no connection to read the part', reading: false });
+      this.parts.set(file, { html: null, base: null, asked: base, error: 'no connection to read the part', reading: false });
       return;
     }
     this.parts.set(file, { ...(known ?? { html: null, base: null, error: null }), reading: true });
@@ -192,17 +199,22 @@ export class SchematicFaces {
     request.then(
       (read) => {
         if (gen !== (this.generation ?? 0)) return;
-        this.parts.set(file, { html: read?.exists ? (read.html ?? '') : null, base: read?.base ?? null, plate: read?.plate ?? null, error: read?.exists ? null : 'no such part file', reading: false });
+        this.parts.set(file, { html: read?.exists ? (read.html ?? '') : null, base: read?.base ?? null, asked: base, plate: read?.plate ?? null, error: read?.exists ? null : 'no such part file', reading: false });
         for (const face of this.faces.values()) if (face.file === file) this.render(face);
       },
       (error) => {
         if (gen !== (this.generation ?? 0)) return;
         // Not open yet: read again at the next sync.
         if (error?.code === 'closed') this.parts.delete(file);
-        else this.parts.set(file, { html: null, base: null, error: error?.message ?? String(error), reading: false });
+        else this.parts.set(file, { html: null, base: null, asked: base, error: error?.message ?? String(error), reading: false });
         for (const face of this.faces.values()) if (face.file === file) this.render(face);
       },
     );
+  }
+
+  /** The connection opened again (`welcome`): every part that failed to read is read again at the next sync. */
+  reconnected() {
+    for (const [file, part] of this.parts) if (part.error && !part.reading) this.parts.delete(file);
   }
 
   /** A new face element for the slot at `root`, part `file`. */

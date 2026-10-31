@@ -246,6 +246,40 @@ test("a face links the theme and the project panel's style sheets", () => {
   globalThis.document = realDocument;
 });
 
+test('a part that failed to read is read again for a newer revision or after a reconnect, never per frame (review 2026-10-31)', async () => {
+  const { svg, faces, host, requests } = setup();
+  let exists = false;
+  host.connection.request = async (message) => {
+    requests.push(message);
+    return { type: 'panel.read', file: message.file, exists, base: exists ? 'b2' : null, html: exists ? '<div class="signal-cards"></div>' : undefined };
+  };
+  svg.append(area({ base: 'b1' }));
+  faces.sync({ levels: [] });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(faces.parts.get('parts/synth.html').error, 'no such part file');
+  faces.sync({ levels: [] });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(requests.length, 1, 'the same revision: not read again');
+  // A newer revision of the graph: read again, and now it is there.
+  exists = true;
+  svg.children[0].dataset.base = 'b2';
+  faces.sync({ levels: [] });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(requests.length, 2, 'read again for the newer revision');
+  assert.equal(faces.parts.get('parts/synth.html').error, null);
+  assert.equal(faces.parts.get('parts/synth.html').base, 'b2');
+  // Missing again at that revision; a reconnect reads it again.
+  exists = false;
+  faces.parts.set('parts/synth.html', { html: null, base: null, asked: 'b2', error: 'no such part file', reading: false });
+  faces.sync({ levels: [] });
+  assert.equal(requests.length, 2);
+  faces.reconnected();
+  faces.sync({ levels: [] });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(requests.length, 3, 'read again after a reconnect');
+  globalThis.document = realDocument;
+});
+
 test('another project: a part read of the last one that answers late is ignored (review 2026-10-31)', async () => {
   const { svg, faces } = setup();
   svg.append(area());
