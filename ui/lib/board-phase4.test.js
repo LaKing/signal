@@ -519,9 +519,9 @@ test('no chip lies across a card’s edge: inside its card, or beside it wholly 
 // end"; "the pins on the composites' edge are too dense … a click selects the composite".
 
 test('a ribbon ends square and every member runs straight in its lane from one end of its band to the other (none leaves from its side)', async () => {
+  // No band is drawn at all (the owner's decision of 2026-10-31): only the members show.
   const src = readFileSync(new URL('ui/controls/schematic-board.js', root), 'utf8');
-  const line = src.split('\n').find((l) => l.includes("class: `ribbon ${tone}`"));
-  assert.ok(line && !/\brx\b/.test(line), 'no rounded band');
+  assert.ok(!src.includes("class: `ribbon ${tone}`"), 'no band drawn');
   const of = studio();
   for (const level of ['', 'moog_voice']) {
     const lay = of(level);

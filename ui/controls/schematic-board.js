@@ -354,32 +354,13 @@ export class SchematicBoard {
   }
 
   /**
-   * The ribbons of a board level (ADR 0047 phase 4, `layout.board.ribbons`):
-   * each a band under its members (in their tone when they share one), and
-   * its label once ("t ×7"), in `bands` and `labels` (appended after the
-   * net labels). A ribbon whose members are all of a hidden kind is not drawn.
+   * The ribbons of a board level (ADR 0047 phase 4, `layout.board.ribbons`)
+   * are a way of laying wires out, not a drawing (the owner's decision of
+   * 2026-10-31: a band behind the wires read as clutter): only the members
+   * show, in their lanes; no band and no label is drawn.
    */
-  drawRibbons(bands, labels, level, baked, bakedRect, bakedPoint, text) {
-    const layout = level.layout;
-    const parts = [];
-    const byId = new Map(layout.wires.map((w) => [w.id, w]));
-    for (const r of layout.board?.ribbons ?? []) {
-      const members = r.wires.map((id) => byId.get(id)).filter(Boolean);
-      if (!members.length || members.every((w) => this.state.hidden.includes(w.shape))) continue;
-      const tones = new Set(members.map((w) => level.tones?.get(w.id) ?? (w.kind === 'binding' ? 'binding' : w.shape)));
-      const tone = tones.size === 1 ? [...tones][0] : 'mixed';
-      const rect = bakedRect(baked, r.band);
-      // Square ends (ADR 0047 phase 5: a rounded end read as a twist).
-      if (rect) parts.push(el('rect', { class: `ribbon ${tone}`, 'data-ribbon': String(r.id), ...rect }));
-      // Its label where the layout placed it, off every box and label (`placeRibbonLabels`); none where no place was free.
-      if (r.text && text(8)) {
-        const at = bakedPoint(baked, r.text);
-        const t = el('text', { class: `ribbon-label ${tone}`, x: at.x, y: at.y, 'font-size': 8 * baked.m, 'text-anchor': r.text.anchor, 'data-ribbon': String(r.id) }, r.label);
-        t.append(el('title', {}, `A ribbon of ${r.members.length} wires: click one where it leaves the ribbon, or in it zoomed in, to trace it through`));
-        labels.append(t);
-      }
-    }
-    bands.replaceChildren(...parts);
+  drawRibbons(bands) {
+    bands.replaceChildren();
   }
 
   /** The window's kept view state (`ui/windows.toml`, from the page's host): shown, not told back. */
