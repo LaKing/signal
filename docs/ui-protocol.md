@@ -38,6 +38,8 @@ Only `GET` and `HEAD` (else 405); a response to `HEAD`, a refusal (403, 404) inc
 
 Control messages are JSON text frames, each an object with a `type`. A request may carry an `id` (any JSON value); its reply carries the same `id`. Data streams are binary frames (below). Messages without an `id` are pushed by the server.
 
+**Requests that write the project's files** (`commit`, `retry`, `patch`, `schematic.move`, `schematic.reset`, `snapshot.save`, `snapshot.restore`, `snapshot.delete`, `snapshot.undo`, `snapshot.move`, `snapshot.transition`, `snapshot.exclude`, `panel.write`, `pattern.write`, `file.write`, `vendor`) run holding the project's writer lock (ADR 0040), which the host takes **without waiting** (ADR 0040, amendment of 2026-10-31). When another writer (another Signal process, `signal mcp`, `signal vendor`) holds it, the request waits in the host's queue, not on the control thread: other messages (`ping`, `set`, `describe`, `stats`, subscriptions) are answered meanwhile and streams go on, so the reply to a waiting request can come after replies to later messages. The waiting requests run in the order they came (a later file request waits behind them even when the lock is free), each when the lock is free, with its checks (`base`, conflicts) made then. One that has waited 10 s fails as before (`write-failed`, "another writer holds the project's lock"; a commit's value stays live and unsaved); one waiting when 64 already wait is refused at once (`busy`); one queued for a project that is no longer open (Signal.app opened another meanwhile) is refused unrun (`project-changed`). A commit's live send is made when it runs.
+
 ### `hello` (the first message)
 
 ```json

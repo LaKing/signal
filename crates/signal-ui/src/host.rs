@@ -18,7 +18,7 @@
 //! does. A `.signal` project (M2.8-12) plays from its working folder
 //! ([`crate::document`]); `signal ui` reopens only the project it serves.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -83,6 +83,59 @@ const SLOT_PROJECTS: usize = 64;
 
 /// Client messages handled per step at most.
 const MESSAGES_PER_STEP: usize = 256;
+
+/// The messages that write the project's files under its writer lock (ADR
+/// 0040): each runs holding it, or waits in the host's queue while another
+/// writer holds it (amendment of 2026-10-31), never on the control thread.
+const WRITES_FILES: [&str; 16] = [
+    "schematic.move",
+    "schematic.reset",
+    "patch",
+    "commit",
+    "retry",
+    "snapshot.save",
+    "snapshot.restore",
+    "snapshot.delete",
+    "snapshot.undo",
+    "snapshot.move",
+    "snapshot.transition",
+    "snapshot.exclude",
+    "panel.write",
+    "pattern.write",
+    "file.write",
+    "vendor",
+];
+
+/// How many file requests may wait for the writer lock at once; another is
+/// refused (`busy`).
+const WAITING_MAX: usize = 64;
+
+/// An edit of `ui/windows.toml`'s text ([`Host::write_windows_then`]).
+pub type WindowsEdit = Box<dyn Fn(&str) -> Result<String, String> + Send>;
+
+/// A file request waiting for the project's writer lock: the project it was
+/// of (the host's generation then), when it was queued, and what it does.
+struct Waiting {
+    generation: u64,
+    since: Instant,
+    job: Job,
+}
+
+enum Job {
+    /// A client's message ([`WRITES_FILES`]), answered when it runs.
+    Message {
+        client: u64,
+        id: Value,
+        text: String,
+    },
+    /// The window layout's write (app mode).
+    Windows {
+        dir: PathBuf,
+        edit: WindowsEdit,
+        done: SaveDone,
+    },
+}
+
 /// The event input a `note` goes to (ADR 0039): `std.note_seq`'s.
 pub const AUDITION_INPUT: &str = "audition";
 /// A `note` without a `velocity` (ADR 0039): the piano roll's default note's.
@@ -774,6 +827,15 @@ pub struct Host {
     /// of them (an undo or redo the host made) is taken whole; any other
     /// text is judged strictly ([`Host::panel_restore_allowed`]).
     restorable: std::collections::HashSet<String>,
+    /// ADR 0040, amendment of 2026-10-31: the file requests waiting for
+    /// another writer to release the project's lock, in order.
+    waiting: VecDeque<Waiting>,
+    /// The open project's generation: a new one each time another project
+    /// (or a new copy of it) is opened, so a request queued for the old one
+    /// is never run on the new one.
+    generation: u64,
+    /// How long a request waits for the lock before it fails.
+    lock_wait: Duration,
 }
 
 fn joined(diagnostics: Vec<Diagnostic>) -> String {
@@ -1194,6 +1256,9 @@ impl Host {
             keys_polled: Instant::now(),
             keys_version: 0,
             restorable: std::collections::HashSet::new(),
+            waiting: VecDeque::new(),
+            generation: 0,
+            lock_wait: transaction::LOCK_WAIT,
         };
         for problem in host.keys.report() {
             host.messages.push(format!("keys: {problem}"));
@@ -1352,6 +1417,10 @@ impl Host {
     /// changes every 100 ms, the clients' messages and the streams due.
     /// Returns what to tell the operator.
     pub fn step(&mut self) -> Vec<String> {
+        // The control thread never waits for the writer lock (ADR 0040,
+        // amendment of 2026-10-31).
+        let _no_wait = transaction::NoWait::enter(Duration::ZERO);
+        self.run_waiting();
         self.poll();
         self.check_output();
         self.retry_device();
@@ -1594,6 +1663,7 @@ impl Host {
     /// panel and diagnostics, and serves its `ui/`.
     fn open(&mut self, dir: &Path) {
         self.dir = dir.to_owned();
+        self.generation += 1;
         self.idle_watch = None;
         self.server.set_project_ui(project_ui(dir));
         let state = FolderState::read(dir).ok();
@@ -1663,6 +1733,11 @@ impl Host {
         if self.document.is_none() {
             return;
         }
+        // Never waits for the writer lock (the window's Save comes here
+        // outside a step too): another writer holding it fails the
+        // corrections at once, said as their error, and the next Save
+        // writes them (ADR 0040, amendment of 2026-10-31).
+        let _no_wait = transaction::NoWait::enter(Duration::ZERO);
         let error = self.write_corrections().err();
         if let Some(mode) = self.app.as_mut() {
             mode.correction_error = error;
@@ -2162,6 +2237,8 @@ impl Host {
     /// control thread's loop while the app is switched off, which then has
     /// nothing to poll.
     pub fn wait(&mut self, timeout: Duration) {
+        let _no_wait = transaction::NoWait::enter(Duration::ZERO);
+        self.run_waiting();
         if let Ok(message) = self.server.inbound.recv_timeout(timeout) {
             self.inbound(message);
         }
@@ -2461,11 +2538,35 @@ impl Host {
     /// App mode (ADR 0032): `ui/windows.toml` of the project folder `dir`
     /// edited by `edit` (given the file's text, empty when it is missing),
     /// written atomically through a hidden temporary file, and taken as
-    /// seen by the watch, so it reloads nothing. Refused when `dir` is no
-    /// longer the open project (the layout was of another one), and when
-    /// `ui/` or the file is a link (only the project's own files are
-    /// written); nothing is written then.
-    pub fn write_windows(
+    /// seen by the watch, so it reloads nothing; `done` is called with the
+    /// outcome. Refused when `dir` is no longer the open project (the layout
+    /// was of another one), and when `ui/` or the file is a link (only the
+    /// project's own files are written); nothing is written then. Written
+    /// at once when the project's writer lock is free; otherwise it waits
+    /// in the host's queue (a later step calls `done`), never on the control
+    /// thread (ADR 0040, amendment of 2026-10-31).
+    pub fn write_windows_then(&mut self, dir: &Path, edit: WindowsEdit, done: SaveDone) {
+        let _no_wait = transaction::NoWait::enter(Duration::ZERO);
+        if self.waiting.is_empty() {
+            match ProjectLock::try_hold(&self.dir) {
+                Ok(Some(holding)) => {
+                    done(self.write_windows_now(dir, edit));
+                    drop(holding);
+                    return;
+                }
+                Ok(None) => {}
+                Err(_) => return done(self.write_windows_now(dir, edit)),
+            }
+        }
+        self.wait_for_lock(Job::Windows {
+            dir: dir.to_owned(),
+            edit,
+            done,
+        });
+    }
+
+    /// [`Host::write_windows_then`]'s write, now.
+    fn write_windows_now(
         &mut self,
         dir: &Path,
         edit: impl Fn(&str) -> Result<String, String>,
@@ -2717,6 +2818,7 @@ impl Host {
         self.failed.clear();
         if let Some(temporary) = temporary {
             self.dir = temporary.dir().to_owned();
+            self.generation += 1;
             // The previous copy is removed once its run is stopped.
             self.temporary = Some(temporary);
             self.server.set_project_ui(project_ui(&self.dir));
@@ -3465,53 +3567,173 @@ impl Host {
         };
         let id = message.get("id").cloned().unwrap_or(Value::Null);
         let kind = message.get("type").and_then(Value::as_str).unwrap_or("");
+        // ADR 0040, amendment of 2026-10-31: a request that writes the
+        // project's files runs holding the writer lock, taken without
+        // waiting; when another writer holds it (or requests wait already,
+        // to keep their order) it waits in the queue, not on this thread.
+        if WRITES_FILES.contains(&kind) {
+            if self.waiting.is_empty() {
+                match ProjectLock::try_hold(&self.dir) {
+                    Ok(Some(holding)) => {
+                        self.respond(client, id, kind, &message);
+                        drop(holding);
+                        return;
+                    }
+                    Ok(None) => {}
+                    // The writer's own `acquire` says why, at once.
+                    Err(_) => return self.respond(client, id, kind, &message),
+                }
+            }
+            return self.wait_for_lock(Job::Message {
+                client,
+                id,
+                text: text.to_owned(),
+            });
+        }
+        self.respond(client, id, kind, &message);
+    }
+
+    /// Queues `job` until the project's writer lock is free
+    /// ([`Host::run_waiting`]); refused at once (`busy`) when
+    /// [`WAITING_MAX`] requests wait already.
+    fn wait_for_lock(&mut self, job: Job) {
+        if self.waiting.len() >= WAITING_MAX {
+            let message = format!(
+                "not done: {WAITING_MAX} requests already wait for another writer to release the project's lock; try again"
+            );
+            return self.answer_job(job, fail("busy", message));
+        }
+        self.waiting.push_back(Waiting {
+            generation: self.generation,
+            since: Instant::now(),
+            job,
+        });
+    }
+
+    /// Answers `job` with `failure`, unrun.
+    fn answer_job(&mut self, job: Job, failure: Failure) {
+        match job {
+            Job::Message { client, id, .. } => {
+                let error = json!({
+                    "type": "error",
+                    "id": id,
+                    "code": failure.code,
+                    "message": failure.message,
+                });
+                self.send_text(client, &error);
+            }
+            Job::Windows { done, .. } => done(Err(format!(
+                "{} was not written: {}",
+                crate::WINDOWS_FILE,
+                failure.message
+            ))),
+        }
+    }
+
+    /// Runs the requests waiting for the writer lock, in order, while it is
+    /// free: each holding it, as [`Host::handle`] runs one. One that has
+    /// waited the host's `lock_wait` runs without it, so its writer fails at
+    /// once and says so (`write-failed`, as a writer that waited
+    /// [`transaction::LOCK_WAIT`] did); one of a project no longer open
+    /// (another was opened since it was queued) is refused unrun.
+    fn run_waiting(&mut self) {
+        while let Some(front) = self.waiting.front() {
+            if front.generation != self.generation {
+                if let Some(stale) = self.waiting.pop_front() {
+                    let failure = fail(
+                        "project-changed",
+                        "not done: another project was opened while it waited for the writer lock",
+                    );
+                    self.answer_job(stale.job, failure);
+                }
+                continue;
+            }
+            let holding = match ProjectLock::try_hold(&self.dir) {
+                Ok(Some(holding)) => Some(holding),
+                Ok(None) if front.since.elapsed() < self.lock_wait => break,
+                Ok(None) | Err(_) => None,
+            };
+            let Some(waiting) = self.waiting.pop_front() else {
+                break;
+            };
+            // Without the lock, the writer's `acquire` fails at once.
+            let _no_wait = transaction::NoWait::enter(waiting.since.elapsed());
+            match waiting.job {
+                Job::Message { client, id, text } => {
+                    if let Ok(message) = serde_json::from_str::<Value>(&text) {
+                        let kind = message.get("type").and_then(Value::as_str).unwrap_or("");
+                        self.respond(client, id, kind, &message);
+                    }
+                }
+                Job::Windows { dir, edit, done } => done(self.write_windows_now(&dir, edit)),
+            }
+            drop(holding);
+        }
+    }
+
+    /// Whether requests wait for the project's writer lock (the control
+    /// loop then steps rather than sleeping in a wait).
+    pub fn waiting(&self) -> bool {
+        !self.waiting.is_empty()
+    }
+
+    /// Test hooks: how long a request waits for the writer lock before it
+    /// fails ([`transaction::LOCK_WAIT`] by default).
+    #[cfg(feature = "test-hooks")]
+    pub fn set_lock_wait(&mut self, wait: Duration) {
+        self.lock_wait = wait;
+    }
+
+    /// A client's message of type `kind`, run, and its reply (with `id`)
+    /// and pushes sent.
+    fn respond(&mut self, client: u64, id: Value, kind: &str, message: &Value) {
         let result = match kind {
             "describe" => Ok(Some(self.describe(false))),
             "graph" => self.graph().map(Some),
-            "schematic.move" => self.schematic_move(&message).map(Some),
-            "schematic.reset" => self.schematic_reset(&message).map(Some),
-            "modules" => self.modules(&message).map(Some),
-            "patch" => self.patch(&message).map(Some),
-            "subscribe" => self.subscribe(client, &message).map(Some),
-            "unsubscribe" => self.unsubscribe(client, &message).map(Some),
+            "schematic.move" => self.schematic_move(message).map(Some),
+            "schematic.reset" => self.schematic_reset(message).map(Some),
+            "modules" => self.modules(message).map(Some),
+            "patch" => self.patch(message).map(Some),
+            "subscribe" => self.subscribe(client, message).map(Some),
+            "unsubscribe" => self.unsubscribe(client, message).map(Some),
             "set" | "ramp" | "trigger" | "note" => {
-                self.edit(client, &id, kind, &message).map(|()| None)
+                self.edit(client, &id, kind, message).map(|()| None)
             }
-            "commit" => self.commit(&message).map(Some),
+            "commit" => self.commit(message).map(Some),
             "snapshot.list" => self.snapshot_list().map(Some),
-            "snapshot.save" => self.snapshot_save(&message).map(Some),
-            "snapshot.restore" => self.snapshot_restore(&message).map(Some),
-            "snapshot.delete" => self.snapshot_delete(&message).map(Some),
-            "snapshot.undo" => self.snapshot_undo(&message).map(Some),
-            "snapshot.move" => self.snapshot_move(&message).map(Some),
-            "snapshot.transition" => self.snapshot_transition(&message).map(Some),
-            "snapshot.exclude" => self.snapshot_exclude(&message).map(Some),
-            "retry" => self.retry(&message).map(Some),
-            "revert" => self.revert(&message).map(Some),
-            "panel.check" => self.panel_check(&message).map(Some),
-            "panel.read" => self.panel_read(&message).map(Some),
-            "panel.write" => self.panel_write(&message).map(Some),
-            "pattern.read" => self.pattern_read(&message).map(Some),
-            "pattern.write" => self.pattern_write(&message).map(Some),
-            "file.read" => self.file_read(&message).map(Some),
-            "file.write" => self.file_write(&message).map(Some),
-            "vendor" => self.vendor(&message).map(Some),
+            "snapshot.save" => self.snapshot_save(message).map(Some),
+            "snapshot.restore" => self.snapshot_restore(message).map(Some),
+            "snapshot.delete" => self.snapshot_delete(message).map(Some),
+            "snapshot.undo" => self.snapshot_undo(message).map(Some),
+            "snapshot.move" => self.snapshot_move(message).map(Some),
+            "snapshot.transition" => self.snapshot_transition(message).map(Some),
+            "snapshot.exclude" => self.snapshot_exclude(message).map(Some),
+            "retry" => self.retry(message).map(Some),
+            "revert" => self.revert(message).map(Some),
+            "panel.check" => self.panel_check(message).map(Some),
+            "panel.read" => self.panel_read(message).map(Some),
+            "panel.write" => self.panel_write(message).map(Some),
+            "pattern.read" => self.pattern_read(message).map(Some),
+            "pattern.write" => self.pattern_write(message).map(Some),
+            "file.read" => self.file_read(message).map(Some),
+            "file.write" => self.file_write(message).map(Some),
+            "vendor" => self.vendor(message).map(Some),
             "slot.projects" => self.slot_projects().map(Some),
             "setup.get" => Ok(Some(self.setup_get())),
-            "setup.devices" => self.setup_devices(&message).map(Some),
-            "setup.check" => self.setup_check(&message).map(Some),
-            "setup.apply" => self.setup_apply(&message).map(Some),
+            "setup.devices" => self.setup_devices(message).map(Some),
+            "setup.check" => self.setup_check(message).map(Some),
+            "setup.apply" => self.setup_apply(message).map(Some),
             "keys.get" => Ok(Some(self.keys.message())),
-            "keys.set" => self.keys_set(&message).map(Some),
-            "keys.reset" => self.keys_reset(&message).map(Some),
+            "keys.set" => self.keys_set(message).map(Some),
+            "keys.reset" => self.keys_reset(message).map(Some),
             "app.get" => match self.app {
                 Some(_) => Ok(Some(self.app_json())),
                 None => Err(app_only()),
             },
-            "app.power" => self.power(&message).map(Some),
+            "app.power" => self.power(message).map(Some),
             "transport.play" => self.transport(true).map(Some),
             "transport.stop" => self.transport(false).map(Some),
-            "project.open" => self.project_open(&message).map(Some),
+            "project.open" => self.project_open(message).map(Some),
             "project.save" => self.project_save(client, &id),
             "project.revert" => self.project_revert().map(Some),
             "stats" => Ok(Some(self.stats())),

@@ -594,6 +594,34 @@ fn the_layout_is_written_into_the_project_as_seen(transport: Transport) {
         "# one\n# two\n# three\n"
     );
 
+    // Another writer holds the project's lock (external review, ADR 0040
+    // amendment of 2026-10-31): the write waits in the host's queue, the
+    // control thread goes on (a page's ping is answered at once), and the
+    // write is answered once the lock is released.
+    let lock = signal_project::transaction::ProjectLock::acquire(&dir).unwrap();
+    let answer = server.write_windows_later(&dir, Box::new(|text| Ok(format!("{text}# four\n"))));
+    assert!(
+        answer.recv_timeout(Duration::from_millis(300)).is_err(),
+        "not written while the lock is held"
+    );
+    let asked = std::time::Instant::now();
+    let pong = request(&mut page, json!({"type": "ping", "id": 2}), "pong");
+    assert_eq!(pong["type"], "pong");
+    assert!(
+        asked.elapsed() < Duration::from_millis(500),
+        "{:?}",
+        asked.elapsed()
+    );
+    drop(lock);
+    answer
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "# one\n# two\n# three\n# four\n"
+    );
+
     // A linked ui/ is served, never written.
     let elsewhere = base.join("elsewhere");
     fs::create_dir_all(&elsewhere).unwrap();

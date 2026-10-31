@@ -2427,11 +2427,50 @@ fn the_4096_voice_graph_reaches_the_client_and_it_stays_open(transport: Transpor
     let _ = fs::remove_dir_all(source);
 }
 
+/// External review (Codex), item 1 (ADR 0040, amendment of 2026-10-31): a
+/// commit waiting for another writer's lock is not run on a project opened
+/// meanwhile: it is refused (`project-changed`) once the lock is free, and
+/// neither project's file is written.
+fn a_request_waiting_for_the_lock_is_not_run_on_another_project(transport: Transport) {
+    let mut rig = app_rig("stale-lock", transport, None);
+    let other = rig.dir.parent().unwrap().join("other");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("project.toml"), common::TONE).unwrap();
+    let (mut ws, _) = rig.client();
+    let lock = signal_project::transaction::ProjectLock::acquire(&rig.dir).unwrap();
+    common::send(
+        &mut ws,
+        json!({"type": "commit", "address": "/out.gain", "value": 0.25, "id": 1}),
+    );
+    rig.request(&mut ws, 2, json!({"type": "ping"}), "pong");
+    let opened = rig.request(
+        &mut ws,
+        3,
+        json!({"type": "project.open", "path": other.display().to_string()}),
+        "project",
+    );
+    assert_eq!(opened["loads"], true);
+    drop(lock);
+    let refused = rig.reply(&mut ws, 1, "error");
+    assert_eq!(refused["code"], "project-changed", "{refused}");
+    assert_eq!(
+        fs::read_to_string(rig.dir.join("project.toml")).unwrap(),
+        common::TONE
+    );
+    assert_eq!(
+        fs::read_to_string(other.join("project.toml")).unwrap(),
+        common::TONE
+    );
+    rig.finish();
+    let _ = fs::remove_dir_all(&other);
+}
+
 both!(
     the_4096_voice_graph_reaches_the_client_and_it_stays_open,
     a_stopped_move_on_4096_voices_writes_once_and_loads_nothing,
     the_stopped_graph_is_cached_until_the_folder_changes,
     a_project_that_stops_loading_pushes_graph_error,
+    a_request_waiting_for_the_lock_is_not_run_on_another_project,
 );
 
 /// ADR 0033: Signal.app (`plays`) has no Play or Stop. Switched on, the

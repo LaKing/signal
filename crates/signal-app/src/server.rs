@@ -82,7 +82,7 @@ enum Request {
     WriteWindows(PathBuf, WindowsEdit, Sender<Result<(), String>>),
 }
 
-/// An edit of `ui/windows.toml`'s text (`signal_ui::Host::write_windows`).
+/// An edit of `ui/windows.toml`'s text (`signal_ui::Host::write_windows_then`).
 pub type WindowsEdit = Box<dyn Fn(&str) -> Result<String, String> + Send>;
 
 /// What the control thread hands back once its host runs.
@@ -364,8 +364,16 @@ fn run(
             Ok(Request::Revert(answer)) => {
                 let _ = answer.send(host.revert_project());
             }
+            // Answered at once, or by a later step while another writer
+            // holds the project's lock: the control thread never waits.
             Ok(Request::WriteWindows(dir, edit, answer)) => {
-                let _ = answer.send(host.write_windows(&dir, edit));
+                host.write_windows_then(
+                    &dir,
+                    edit,
+                    Box::new(move |result| {
+                        let _ = answer.send(result);
+                    }),
+                );
             }
             Err(TryRecvError::Empty) => {}
         }
@@ -385,8 +393,9 @@ fn run(
             keys = host.keys_version();
             on_keys(host.keys());
         }
-        // A save running is answered by the step after it is written.
-        if host.powered() || host.saving() {
+        // A save running is answered by the step after it is written; a
+        // request waiting for the writer lock, by the step that takes it.
+        if host.powered() || host.saving() || host.waiting() {
             thread::sleep(Duration::from_millis(1));
         } else {
             // Switched off: nothing runs or streams, so the thread sleeps

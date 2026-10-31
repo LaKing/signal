@@ -22,11 +22,22 @@
 //!   ends. A person's editor does not take it: what it changes is caught by
 //!   the conflict checks, which compare the files' bytes as they are now.
 //!
+//! - A thread that must never wait (the UI host's control thread, which
+//!   owns the `Controller`) asks for the lock without waiting: it takes it
+//!   with [`ProjectLock::try_hold`] before it runs a file request, so the
+//!   writers it calls find it held by their own thread and go on at once,
+//!   and it runs every other step under a [`NoWait`], under which
+//!   [`ProjectLock::acquire`] tries once and fails at once rather than
+//!   sleep. A request that finds the lock held waits in the host's queue,
+//!   not on the thread (ADR 0040, amendment of 2026-10-31).
+//!
 //! The temporary names are not semantics (`AGENTS.md` rule 3): they never
 //! reach a project's files, renders or logs.
 
+use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -216,6 +227,63 @@ pub fn edit_text(
     ))
 }
 
+thread_local! {
+    /// The folder (device and inode) whose lock this thread holds through a
+    /// [`Holding`]: [`ProjectLock::acquire`] of it on this thread goes on at
+    /// once, without taking it again.
+    static HELD: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
+    /// Inside a [`NoWait`]: how long the request has waited already.
+    static NO_WAIT: Cell<Option<Duration>> = const { Cell::new(None) };
+}
+
+/// A folder's identity, for [`HELD`].
+fn folder_id(dir: &Path) -> io::Result<(u64, u64)> {
+    let metadata = fs::metadata(dir)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+/// While it lives, [`ProjectLock::acquire`] on this thread never waits: it
+/// tries once and, when another writer holds the lock, fails at once
+/// ([`io::ErrorKind::WouldBlock`]). For a thread that must not block (the
+/// UI host's control thread); `waited` is how long the request it runs has
+/// waited for the lock already, which the failure states.
+#[derive(Debug)]
+pub struct NoWait {
+    previous: Option<Duration>,
+}
+
+impl NoWait {
+    /// Enters a scope without waiting, for a request that has waited
+    /// `waited` so far.
+    pub fn enter(waited: Duration) -> NoWait {
+        NoWait {
+            previous: NO_WAIT.replace(Some(waited)),
+        }
+    }
+}
+
+impl Drop for NoWait {
+    fn drop(&mut self) {
+        NO_WAIT.set(self.previous);
+    }
+}
+
+/// A project folder's lock held by this thread for the writers it calls
+/// ([`ProjectLock::try_hold`]): their [`ProjectLock::acquire`] of the same
+/// folder, on this thread, goes on at once. Released when dropped.
+#[derive(Debug)]
+pub struct Holding {
+    previous: Option<(u64, u64)>,
+    _lock: ProjectLock,
+}
+
+impl Drop for Holding {
+    fn drop(&mut self) {
+        // Then the lock itself, as a field.
+        HELD.set(self.previous);
+    }
+}
+
 /// The project folder's writer lock (see the module's notes), held while
 /// the guard lives.
 #[derive(Debug)]
@@ -227,8 +295,30 @@ pub struct ProjectLock {
 impl ProjectLock {
     /// Takes the lock of the project folder `dir`, waiting at most
     /// [`LOCK_WAIT`] for another writer to finish. A writer that already
-    /// holds it must not take it again (it would wait for itself).
+    /// holds it must not take it again (it would wait for itself), unless
+    /// its thread holds it through a [`Holding`]: then this goes on at once
+    /// with a guard that releases nothing. Inside a [`NoWait`] it never
+    /// waits: another writer holding the lock fails it at once.
     pub fn acquire(dir: &Path) -> io::Result<ProjectLock> {
+        if let Some(held) = HELD.get()
+            && folder_id(dir).ok() == Some(held)
+        {
+            return Ok(ProjectLock { folder: None });
+        }
+        if let Some(waited) = NO_WAIT.get() {
+            return ProjectLock::try_acquire(dir)?.ok_or_else(|| {
+                let message = if waited >= LOCK_WAIT {
+                    format!(
+                        "{}: another writer has held the project's lock for over {} s",
+                        dir.display(),
+                        LOCK_WAIT.as_secs()
+                    )
+                } else {
+                    format!("{}: another writer holds the project's lock", dir.display())
+                };
+                io::Error::new(io::ErrorKind::WouldBlock, message)
+            });
+        }
         let deadline = Instant::now() + LOCK_WAIT;
         loop {
             match ProjectLock::try_acquire(dir)? {
@@ -248,6 +338,16 @@ impl ProjectLock {
                 }
             }
         }
+    }
+
+    /// The lock of `dir` taken now for this thread's writers (a
+    /// [`Holding`]), `None` when another writer holds it. Never waits.
+    pub fn try_hold(dir: &Path) -> io::Result<Option<Holding>> {
+        let id = folder_id(dir)?;
+        Ok(ProjectLock::try_acquire(dir)?.map(|lock| Holding {
+            previous: HELD.replace(Some(id)),
+            _lock: lock,
+        }))
     }
 
     /// The lock of `dir` if no other writer holds it now, `None` otherwise.
@@ -415,6 +515,63 @@ mod tests {
         assert!(locks_work(&dir).unwrap());
         assert!(ProjectLock::try_acquire(&dir).unwrap().is_some());
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "no lock file");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// ADR 0040, amendment of 2026-10-31: a thread holding the lock through
+    /// a `Holding` lets its own writers take it at once; under a `NoWait`
+    /// a held lock fails `acquire` at once instead of waiting; both scopes
+    /// end with their guards.
+    #[test]
+    fn a_held_lock_is_reentered_and_no_wait_never_waits() {
+        let dir = folder("hold");
+        let holding = ProjectLock::try_hold(&dir).unwrap().unwrap();
+        let started = Instant::now();
+        let inner = ProjectLock::acquire(&dir).unwrap();
+        assert!(started.elapsed() < Duration::from_millis(100));
+        drop(inner);
+        assert!(
+            ProjectLock::try_acquire(&dir).unwrap().is_none(),
+            "the inner guard released nothing"
+        );
+        // Another thread is another writer: it finds the lock held.
+        let other = dir.clone();
+        let refused = std::thread::spawn(move || {
+            let _no_wait = NoWait::enter(Duration::ZERO);
+            ProjectLock::acquire(&other).map(|_| ())
+        })
+        .join()
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::WouldBlock);
+        assert!(refused.to_string().contains("holds the project's lock"));
+        assert!(
+            ProjectLock::try_hold(&folder("hold-other"))
+                .unwrap()
+                .is_some()
+        );
+        drop(holding);
+        // Held by another thread now; this one, without waiting.
+        let (release, taken) = std::sync::mpsc::channel::<()>();
+        let (held, wait) = std::sync::mpsc::channel::<()>();
+        let other = dir.clone();
+        let writer = std::thread::spawn(move || {
+            let _lock = ProjectLock::acquire(&other).unwrap();
+            held.send(()).unwrap();
+            let _ = taken.recv();
+        });
+        wait.recv().unwrap();
+        {
+            let _no_wait = NoWait::enter(LOCK_WAIT);
+            let started = Instant::now();
+            let refused = ProjectLock::acquire(&dir).unwrap_err();
+            assert!(started.elapsed() < Duration::from_millis(100));
+            assert!(refused.to_string().contains("for over 10 s"), "{refused}");
+            assert!(ProjectLock::try_hold(&dir).unwrap().is_none());
+        }
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        assert!(ProjectLock::acquire(&dir).is_ok());
         fs::remove_dir_all(&dir).unwrap();
     }
 
