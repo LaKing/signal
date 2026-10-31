@@ -2,7 +2,7 @@
 // trigger level and edge, or X–Y from two outputs (docs/ui-controls.md).
 // Refused a slot (`no-scope-slot`, `busy`), it asks again every 2 s while
 // shown (the page and the scope itself, its tab included) and switched on
-// (M2.9-1b).
+// (M2.9-1b). It holds its capture only while shown (`streams`).
 
 import { formatValue } from '../lib/format.js';
 import { clamp } from '../lib/taper.js';
@@ -10,6 +10,13 @@ import { ariaShortcuts, keyCommand } from '../lib/keys.js';
 import { SLOT_RETRY_MS, alignXY, slotRetry, triggerStart } from '../lib/trigger.js';
 import { SignalElement, bindAddresses, numberAttribute } from './base.js';
 import { ValueEntry, entryDisabled } from './entry-field.js';
+import { shareSubscription } from '../lib/scope-share.js';
+
+/** Whether `node` is in an `inert` subtree, through shadow roots (a schematic face's). */
+function inertAround(node) {
+  for (let n = node; n; n = n.parentNode ?? n.host ?? null) if (n.inert) return true;
+  return false;
+}
 
 /** Points shown in time mode, at most: half of what arrived, so a trigger has room. */
 const SHOWN = 256;
@@ -78,6 +85,19 @@ canvas { width: var(--signal-scope-width, 100%); height: var(--signal-scope-heig
     });
   }
 
+  /**
+   * The scope's captures, held only while it is shown (review 2026-10-31:
+   * the engine has 8 scope slots, a hidden scope kept one). Shown is the
+   * page visible, the scope not 0×0 (a tab not shown, display: none), in
+   * the viewport (an IntersectionObserver), not `visibility: hidden` nor
+   * hidden by `display` (`checkVisibility`; not by opacity, which a layer
+   * fades in after it is shown) and in no `inert` subtree (a schematic
+   * face hidden, the plate on Board; `signal-visibility` says when one
+   * changes). Hidden, it unsubscribes and draws nothing; shown again, it
+   * subscribes again, its trigger, freeze and entry as they were. A
+   * source shown in several views is one capture (`shareSubscription`).
+   * Refused a slot, it asks again every 2 s while shown.
+   */
   streams(connection) {
     this.blocks = [];
     this.latest = {};
@@ -85,11 +105,14 @@ canvas { width: var(--signal-scope-width, 100%); height: var(--signal-scope-heig
     const ports = this.xy ? this.ports.slice(0, 2) : this.ports.slice(0, 1);
     let timer = null;
     let parked = false;
-    // Hidden: the page, or the scope itself (a tab not shown, display: none: 0×0).
+    let intersecting = true;
+    let subscriptions = null;
     const hidden = () => {
-      if (document.visibilityState === 'hidden') return true;
+      if (document.visibilityState === 'hidden' || !intersecting) return true;
       const box = this.getBoundingClientRect();
-      return !(box.width > 0 || box.height > 0);
+      if (!(box.width > 0 || box.height > 0)) return true;
+      if (this.checkVisibility?.({ visibilityProperty: true }) === false) return true;
+      return inertAround(this);
     };
     const state = () => ({ hidden: hidden(), streaming: connection.streaming !== false });
     // Asked again by subscribing anew (attach), unless hidden or off by then.
@@ -106,44 +129,71 @@ canvas { width: var(--signal-scope-width, 100%); height: var(--signal-scope-heig
       parked = action === 'park';
       if (action === 'wait') timer = setTimeout(again, SLOT_RETRY_MS);
     };
-    // Shown again (the page, or the scope's tab): a parked refusal asks at
-    // once (switching on re-sends it).
-    const shown = () => {
-      if (parked && !hidden() && connection.streaming !== false) again();
-    };
-    document.addEventListener('visibilitychange', shown);
-    const resize = new ResizeObserver(shown);
-    resize.observe(this);
-    const stops = ports.map((port) =>
-      connection.subscribe(
-        { stream: 'scope', port, rate },
-        (frame) => {
-          if (this.frozen) return;
-          const block = { firstFrame: frame.firstFrame, decimation: frame.extra, values: frame.values };
-          this.latest[port] = block;
-          if (port === ports[0]) {
-            // Two consecutive blocks for the time display; a gap starts over.
-            const previous = this.blocks.at(-1);
-            const follows = previous && previous.firstFrame + previous.values.length * previous.decimation === block.firstFrame;
-            this.blocks = follows ? [previous, block] : [block];
-          }
-          this.schedule();
-        },
-        {
-          onSubscribed: () => this.problem(null),
-          onError: (error) => {
-            this.problem(`${port}: ${error.code ?? error.message}`);
-            refused(error.code);
+    const subscribe = () => {
+      subscriptions = ports.map((port) =>
+        shareSubscription(
+          connection,
+          { stream: 'scope', port, rate },
+          (frame) => {
+            if (this.frozen || !subscriptions) return;
+            const block = { firstFrame: frame.firstFrame, decimation: frame.extra, values: frame.values };
+            this.latest[port] = block;
+            if (port === ports[0]) {
+              // Two consecutive blocks for the time display; a gap starts over.
+              const previous = this.blocks.at(-1);
+              const follows = previous && previous.firstFrame + previous.values.length * previous.decimation === block.firstFrame;
+              this.blocks = follows ? [previous, block] : [block];
+            }
+            this.schedule();
           },
-        },
-      ),
-    );
-    return [
-      ...stops,
-      () => {
+          {
+            onSubscribed: () => this.problem(null),
+            onError: (error) => {
+              this.problem(`${port}: ${error.code ?? error.message}`);
+              refused(error.code);
+            },
+          },
+        ),
+      );
+    };
+    const unsubscribe = () => {
+      for (const stop of subscriptions ?? []) stop();
+      subscriptions = null;
+    };
+    // Shown or hidden (the page, the scope's tab, its face): the captures follow; a parked refusal asks at once.
+    const check = () => {
+      if (hidden()) {
+        unsubscribe();
         clearTimeout(timer);
-        document.removeEventListener('visibilitychange', shown);
+        if (timer !== null) parked = true;
+        timer = null;
+        return;
+      }
+      if (connection.streaming === false) return;
+      if (parked) again();
+      else if (!subscriptions) subscribe();
+    };
+    document.addEventListener('visibilitychange', check);
+    document.addEventListener('signal-visibility', check);
+    const resize = new ResizeObserver(check);
+    resize.observe(this);
+    const View = this.ownerDocument?.defaultView ?? globalThis;
+    const sight = typeof View.IntersectionObserver === 'function'
+      ? new View.IntersectionObserver((entries) => {
+          intersecting = entries.at(-1)?.isIntersecting !== false;
+          check();
+        })
+      : null;
+    sight?.observe(this);
+    if (!hidden()) subscribe();
+    return [
+      () => {
+        unsubscribe();
+        clearTimeout(timer);
+        document.removeEventListener('visibilitychange', check);
+        document.removeEventListener('signal-visibility', check);
         resize.disconnect();
+        sight?.disconnect();
       },
     ];
   }

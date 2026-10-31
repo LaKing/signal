@@ -124,6 +124,8 @@ export class SchematicFaces {
     const active = face.shadow?.activeElement ?? null;
     if (active && (inert || active.checkVisibility?.({ visibilityProperty: true }) === false)) this.host.focus?.({ preventScroll: true });
     if (face.element.inert !== inert) face.element.inert = inert;
+    // Its controls that hold a stream while shown (a scope) look again: shown, hidden, inert or a card hidden by X-ray.
+    if (typeof Event === 'function') document.dispatchEvent?.(new Event('signal-visibility'));
   }
 
   /** Another project: every face and part let go, and every read still in flight for the last one ignored when it answers. */

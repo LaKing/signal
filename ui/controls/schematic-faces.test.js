@@ -280,6 +280,25 @@ test('a part that failed to read is read again for a newer revision or after a r
   globalThis.document = realDocument;
 });
 
+test('a face shown or hidden, or the plate’s layer changed, tells its controls (`signal-visibility`): a scope in it lets its capture go or takes it (review 2026-10-31)', () => {
+  const { svg, faces, host } = setup();
+  const told = [];
+  document.dispatchEvent = (event) => told.push(event.type);
+  host.board = { covered: false };
+  svg.append(area({ id: '#plate', file: 'main.html', root: '', slot: '' }));
+  faces.sync({ levels: [] });
+  const count = told.length;
+  assert.ok(count >= 1, 'shown: told');
+  faces.sync({ levels: [] });
+  assert.equal(told.length, count, 'nothing changed: nothing told');
+  faces.setPlateClass(' plate layer-xray');
+  assert.equal(told.length, count + 1, 'X-ray hides its cards: told');
+  faces.setPlateClass(' plate layer-board');
+  assert.equal(told.length, count + 2, 'Board: told');
+  assert.ok(told.every((t) => t === 'signal-visibility'));
+  globalThis.document = realDocument;
+});
+
 test('another project: a part read of the last one that answers late is ignored (review 2026-10-31)', async () => {
   const { svg, faces } = setup();
   svg.append(area());
