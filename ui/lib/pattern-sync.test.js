@@ -712,7 +712,11 @@ test('a pattern.written push from another client is shown at once when idle', as
   assert.equal(shown.length, 3, 'stopped: not listening');
 });
 
-test('a pattern.written push while an edit is pending is left to that edit (a conflict)', async () => {
+// External review, C: both changed (an edit pending here, the file changed
+// elsewhere and pushed): the draft is kept, not written, and the conflict
+// is said; the next edit writes it over the other version knowingly.
+test('a pattern.written push while an edit is pending keeps the draft and says both changed', async () => {
+  const { BOTH_CHANGED } = await import('./pattern-sync.js');
   const c = new StatusConnection(NOTES());
   c.status = 'open';
   const { s, shown, notices } = sync(c, { delay: 0 });
@@ -720,11 +724,31 @@ test('a pattern.written push while an edit is pending is left to that edit (a co
   await settle();
   s.edited(NOTES(0.9));
   c.otherClientWrites(NOTES(0.2));
-  assert.equal(shown.length, 1, 'the pending edit is not replaced by the push');
+  assert.equal(shown.length, 1, 'the draft is not replaced by the push');
+  assert.equal(notices.at(-1), BOTH_CHANGED);
   await s.flush();
-  assert.equal(c.text, NOTES(0.2), 'the other client’s version wins the conflict');
-  assert.equal(shown.at(-1), NOTES(0.2));
-  assert.match(notices.at(-1), /changed elsewhere/);
+  assert.equal(c.text, NOTES(0.2), 'nothing written over the other version unasked');
+  assert.equal(c.writes.length, 0);
+  assert.equal(s.pending, NOTES(0.9), 'the draft is kept');
+  // The user edits again: the draft is written over the other version.
+  s.edited(NOTES(0.95));
+  await s.flush();
+  assert.equal(c.text, NOTES(0.95));
+  assert.equal(notices.at(-1), null);
+});
+
+// External review, C: an external edit of the file (an editor, the server's
+// reload) is pushed as any write; an idle control shows it at once.
+test('a file changed on disk is shown at once by an idle control', async () => {
+  const c = new StatusConnection(NOTES(1));
+  c.status = 'open';
+  const { s, shown } = sync(c);
+  s.start();
+  await settle();
+  c.external(NOTES(0.25));
+  c.emit('pattern.written', { type: 'pattern.written', name: 'melody', base: c.base, text: c.text, origin: 'file' });
+  assert.deepEqual(shown, [NOTES(1), NOTES(0.25)]);
+  assert.equal(s.base, c.base, 'the next write names the file now');
 });
 
 test('the control’s own write and its push: the push changes nothing', async () => {

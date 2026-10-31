@@ -3429,6 +3429,44 @@ impl Host {
         if !swapping {
             self.push_graph(false);
         }
+        self.push_patterns(&changed);
+    }
+
+    /// Every pattern file among `changed` (`patterns/<name>.toml`, the
+    /// project's own) pushed as `pattern.written` with its text and base
+    /// (`origin: "file"`): a pattern changed on disk (an editor, another
+    /// program, an agent writing files) reaches the open pattern editors
+    /// at once, as another client's `pattern.write` does (external review,
+    /// C). A removed file, or one reached through a link, is not pushed.
+    fn push_patterns(&mut self, changed: &[PathBuf]) {
+        for file in changed {
+            let in_patterns = file.parent() == Some(Path::new(PATTERNS))
+                && file.extension().is_some_and(|e| e == "toml");
+            let Some(name) = file
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .filter(|_| in_patterns)
+            else {
+                continue;
+            };
+            let message = json!({"name": name});
+            let Ok((name, path, linked)) = self.pattern_path(&message) else {
+                continue;
+            };
+            if linked {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            self.broadcast(&json!({
+                "type": "pattern.written",
+                "name": name,
+                "base": sha256_hex(text.as_bytes()),
+                "text": text,
+                "origin": "file",
+            }));
+        }
     }
 
     /// The plan now running: a live port edit whose plan base changed (or
@@ -4591,13 +4629,15 @@ impl Host {
             return;
         }
         *polled = Instant::now();
-        if watcher.poll().unwrap_or(false) {
+        let changed = watcher.changes().unwrap_or_default();
+        if !changed.is_empty() {
             // Waiting for the device: the project's files changed (its
             // `sample_rate`, say), so it is tried again.
             if let Some(wait) = self.app.as_mut().and_then(|m| m.device_wait.as_mut()) {
                 wait.once = true;
             }
             self.push_graph(false);
+            self.push_patterns(&changed);
         }
     }
 

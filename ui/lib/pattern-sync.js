@@ -17,14 +17,16 @@
 //       validated the text before an atomic write (ADR 0028 §7).
 //
 // The server pushes `{"type": "pattern.written", "name", "base", "text"}`
-// to every client after each `pattern.write`. An idle control (loaded,
-// nothing pending, no write in flight) whose pattern it names and whose
-// base differs shows that text at once: another client's edit appears
-// without waiting for a conflict. Its own write's push is ignored (the
-// write is still in flight, or its base is already ours); with an edit
-// pending, the push is left to that edit's write, which meets it as a
-// conflict. A file changed on disk by another program is not pushed: it
-// shows on the next write's `conflict` or the next connect.
+// to every client whenever the pattern's file changes, whatever changed it:
+// a `pattern.write` (any client, an agent), or the file changed on disk (an
+// editor, another program; `origin: "file"`), seen by the server's watch.
+// An idle control (loaded, nothing pending, no write in flight) whose
+// pattern it names and whose base differs shows that text at once. Its own
+// write's push is ignored (the write is still in flight, or its base is
+// already ours). With an edit pending, both changed: the user's draft is
+// kept (shown, not written) and `onNotice` says so (`BOTH_CHANGED`); the
+// next edit, or `retry()`, writes the draft over the file's new version,
+// as the user then chose.
 //
 // `start()` reads the file when the connection is open (`status`
 // 'open', after the server's `welcome`: a request sent earlier is refused
@@ -49,6 +51,9 @@ import { parsePattern, samePattern } from './pattern-text.js';
 
 export const WRITE_DELAY_MS = 300;
 
+/** The notice of a push that met a pending edit: the draft is kept, not written. */
+export const BOTH_CHANGED = 'the pattern file changed elsewhere while you were editing: your edit is kept but not written; edit again to write it over the other version';
+
 /** The notice of a conflict the file's version won. */
 export const CHANGED_ELSEWHERE = 'the pattern file changed elsewhere: its version is shown, your last edit was not written';
 
@@ -61,6 +66,7 @@ export const CHANGED_ELSEWHERE = 'the pattern file changed elsewhere: its versio
 export function shortNotice(text) {
   if (!text) return '';
   if (text === CHANGED_ELSEWHERE) return 'changed elsewhere — reloaded';
+  if (text === BOTH_CHANGED) return 'changed elsewhere — your edit kept, not written';
   if (text.startsWith('not written: ') && text.endsWith('your next edit tries again')) return 'not written — edit again to retry';
   return text;
 }
@@ -142,14 +148,29 @@ export class PatternSync {
   }
 
   /**
-   * A `pattern.written` push: another client wrote this pattern. Shown at
-   * once when the control is idle and the base is not its own (the pushed
-   * text, or the file read again when the push carries none).
+   * A `pattern.written` push: the pattern's file changed (another client,
+   * an agent, an editor). Shown at once when the control is idle and the
+   * base is not its own (the pushed text, or the file read again when the
+   * push carries none). With an edit pending, the draft is kept and the
+   * conflict said; the file's version becomes the base the next write
+   * names, so a later edit writes the draft over it knowingly.
    */
   pushed(message) {
     if (this.closed || !this.loaded || message?.name !== this.name) return;
     if (!message.base || message.base === this.base) return;
-    if (this.pending !== null || this.writing) return;
+    // A write in flight: the push may be its own; its reply or conflict decides.
+    if (this.writing) return;
+    if (this.pending !== null) {
+      const pattern = typeof message.text === 'string' ? this.parse(message.text, ' written elsewhere') : null;
+      if (pattern) this.adopt({ text: message.text, base: message.base }, pattern);
+      else this.base = message.base;
+      this.pendingBase = this.base;
+      this.timers.clearTimeout(this.timer);
+      this.timer = null;
+      this.stalled = true;
+      this.notify(BOTH_CHANGED);
+      return;
+    }
     if (typeof message.text !== 'string') {
       this.load();
       return;

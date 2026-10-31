@@ -139,6 +139,27 @@ fn a_write_is_pushed_and_applied_live(transport: Transport) {
     rig.finish();
 }
 
+/// External review, C: a pattern file changed on disk (an editor) is
+/// pushed to every client as `pattern.written` with its text and base
+/// (`origin: "file"`), as another client's write is, so an open editor
+/// shows it at once instead of keeping the old text until it reconnects.
+fn a_pattern_changed_on_disk_is_pushed(transport: Transport) {
+    let mut rig = melody("pattern-disk", transport);
+    let (mut ws, _) = rig.client();
+    let got = read(&mut rig, &mut ws, 1, "melody");
+    assert_eq!(got["text"], MELODY);
+    let edited = MELODY.replace("key = 64", "key = 67");
+    fs::write(rig.dir.join("patterns/melody.toml"), &edited).unwrap();
+    let pushed = rig.wait(&mut ws, "pattern.written", |got| {
+        got.of("pattern.written").cloned()
+    });
+    assert_eq!(pushed["name"], "melody");
+    assert_eq!(pushed["text"], edited);
+    assert_eq!(pushed["base"], sha256_hex(edited.as_bytes()));
+    assert_eq!(pushed["origin"], "file");
+    rig.finish();
+}
+
 /// A file changed since `base` (or present when `base` is null) is a
 /// conflict carrying its current text and base; nothing is written.
 fn a_changed_file_is_a_conflict(transport: Transport) {
@@ -434,6 +455,7 @@ both!(
     a_link_at_the_temporary_path_is_not_followed,
     a_write_is_pushed_and_applied_live,
     a_changed_file_is_a_conflict,
+    a_pattern_changed_on_disk_is_pushed,
     a_pattern_that_does_not_load_is_not_written,
     names_links_and_a_first_write,
     a_write_over_the_message_limit_closes_the_connection,
