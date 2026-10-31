@@ -1083,8 +1083,34 @@ fn run_checked(
     scheme: &Scheme<'_>,
     edits: &[Edit],
 ) -> Result<Vec<Edit>, PatchError> {
-    let mut inverse = Vec::new();
+    run_relocated(t, scheme, edits, false)
+}
+
+/// [`run_checked`]; `relocated` (a cut [`relocate`] moved): the insert
+/// right after that cut goes where the cut took its entry, as the inverse
+/// of a cut and put back (`connection.scale`) always does, since its own
+/// anchor (the wire before, by index) may have moved or gone.
+fn run_relocated(
+    t: &mut String,
+    scheme: &Scheme<'_>,
+    edits: &[Edit],
+    relocated: bool,
+) -> Result<Vec<Edit>, PatchError> {
+    let mut inverse: Vec<Edit> = Vec::new();
+    let mut put_back: Option<Pos> = None;
     for edit in edits {
+        let moved;
+        let edit = match (put_back.take(), edit) {
+            (Some(at), Edit::Insert { text, .. }) => {
+                moved = Edit::Insert {
+                    at,
+                    text: text.clone(),
+                };
+                &moved
+            }
+            _ => edit,
+        };
+        let cut = matches!(edit, Edit::Cut { entry: Some(_), .. });
         if let Edit::Cut {
             item,
             entry: Some(expected),
@@ -1093,10 +1119,66 @@ fn run_checked(
         {
             still(t, scheme, item, expected)?;
         }
-        inverse.push(apply_edit(t, scheme, edit, true).map_err(bad)?);
+        let undo = apply_edit(t, scheme, edit, true).map_err(bad)?;
+        if relocated
+            && cut
+            && let Edit::Insert { at, .. } = &undo
+        {
+            put_back = Some(at.clone());
+        }
+        inverse.push(undo);
     }
     inverse.reverse();
     Ok(inverse)
+}
+
+/// Connection anchors are indexes, so a wire removed elsewhere before the
+/// one an inverse cuts shifts it (second review, item 2). When the
+/// connection at the cut's index is not its `entry` but exactly one
+/// connection is, the cut names that one instead (and `true`: the insert
+/// after it is put where it cuts, [`run_relocated`]); otherwise `edits` as
+/// they are, which the precondition then refuses if the wire is gone.
+fn relocate(t: &str, edits: &[Edit]) -> (Vec<Edit>, bool) {
+    let unmoved = || (edits.to_vec(), false);
+    let cut = edits.iter().find_map(|e| match e {
+        Edit::Cut {
+            item: Item::Connection(k),
+            entry: Some(entry),
+            ..
+        } => Some((*k, entry)),
+        _ => None,
+    });
+    let (Some((k, entry)), Ok(m)) = (cut, map(t, &Scheme::LEVEL)) else {
+        return unmoved();
+    };
+    let text = |c: &Conn| &t[c.range.clone()];
+    if m.conns.get(k).is_some_and(|c| text(c) == entry.as_str()) {
+        return unmoved();
+    }
+    let found: Vec<usize> = (0..m.conns.len())
+        .filter(|&j| text(&m.conns[j]) == entry.as_str())
+        .collect();
+    let [j] = found[..] else {
+        return unmoved();
+    };
+    let moved = edits
+        .iter()
+        .map(|e| match e {
+            Edit::Cut {
+                item: Item::Connection(i),
+                before,
+                after,
+                entry: Some(entry),
+            } if *i == k => Edit::Cut {
+                item: Item::Connection(j),
+                before: before.clone(),
+                after: after.clone(),
+                entry: Some(entry.clone()),
+            },
+            other => other.clone(),
+        })
+        .collect();
+    (moved, true)
 }
 
 /// A cut's precondition ([`Edit::Cut`]'s `entry`): the entry `item` of `t`
@@ -1116,17 +1198,17 @@ fn still(t: &str, scheme: &Scheme<'_>, item: &Item, expected: &str) -> Result<()
     if same {
         return Ok(());
     }
-    let what = match item {
-        Item::Instance(name, _) => format!("instance `{name}`"),
-        _ => format!("`{}`", now.trim()),
-    };
-    Err(refused(
-        "changed",
-        format!(
-            "not undone: {what} changed elsewhere since this change was made (it was `{}`); the newer edit is kept",
+    let message = match item {
+        Item::Instance(name, _) => format!(
+            "not undone: instance `{name}` changed elsewhere since this change was made (it was `{}`); the newer edit is kept",
             expected.trim()
         ),
-    ))
+        _ => format!(
+            "not undone: `{}` changed elsewhere since this change was made (it is no longer in the file as the change left it, changed or removed); the newer edit is kept",
+            expected.trim()
+        ),
+    };
+    Err(refused("changed", message))
 }
 
 /// Whether two instance entries (or pieces of one) say the same but for
@@ -2083,9 +2165,11 @@ impl Patching<'_> {
                 to,
                 edits: Some(edits),
             } => {
+                let (edits, relocated) = relocate(&self.text, edits);
+                let edits = &edits;
                 let before = self.text.clone();
                 let m = self.level_map()?;
-                let inv = run_checked(&mut self.text, &Scheme::LEVEL, edits)?;
+                let inv = run_relocated(&mut self.text, &Scheme::LEVEL, edits, relocated)?;
                 let k = cut_connection_of(edits)
                     .filter(|k| {
                         m.conns
@@ -2112,9 +2196,11 @@ impl Patching<'_> {
                 scale,
                 edits: Some(edits),
             } => {
+                let (edits, relocated) = relocate(&self.text, edits);
+                let edits = &edits;
                 let before = self.text.clone();
                 let m = self.level_map()?;
-                let inv = run_checked(&mut self.text, &Scheme::LEVEL, edits)?;
+                let inv = run_relocated(&mut self.text, &Scheme::LEVEL, edits, relocated)?;
                 let k = cut_connection_of(edits)
                     .filter(|k| {
                         m.conns

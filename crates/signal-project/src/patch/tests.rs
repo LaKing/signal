@@ -595,6 +595,45 @@ fn theirs_of(text: &str) -> String {
         .text
 }
 
+/// Second review, item 2: connection cuts are anchored by index, so an
+/// earlier wire removed elsewhere shifts the wire an undo restores. The
+/// undo finds its wire by the text it left (the one connection that says
+/// it) and still undoes, keeping the removal; a wire really gone or changed
+/// is refused as `changed`, naming the wire the undo expected, never the
+/// unrelated one now at its old index.
+#[test]
+fn an_undo_finds_its_wire_after_an_earlier_one_was_removed() {
+    let text = format!("{HEAD}{INST}{MULTI}");
+    let without_first = |t: &str| {
+        apply(t, None, &[disconnect("a.out", "b.in")], &ctx(""))
+            .unwrap()
+            .text
+    };
+    // A scale of the second wire; the first removed elsewhere.
+    let mine = apply(&text, None, &[scale("b.out", "c.in", 2.0)], &ctx("")).unwrap();
+    let theirs = without_first(&mine.text);
+    let undone = apply(&theirs, None, &mine.inverse, &ctx("")).unwrap();
+    assert_eq!(undone.text, without_first(&text));
+    let redone = apply(&undone.text, None, &undone.inverse, &ctx("")).unwrap();
+    assert_eq!(redone.text, theirs);
+    // A wire added at the end; an earlier one removed elsewhere.
+    let mine = apply(&text, None, &[connect("a.out", "c.in")], &ctx("")).unwrap();
+    let theirs = without_first(&mine.text);
+    let undone = apply(&theirs, None, &mine.inverse, &ctx("")).unwrap();
+    assert_eq!(undone.text, without_first(&text));
+    // The wire itself removed elsewhere: refused, naming it.
+    let mine = apply(&text, None, &[scale("b.out", "c.in", 2.0)], &ctx("")).unwrap();
+    let gone = apply(&mine.text, None, &[disconnect("b.out", "c.in")], &ctx(""))
+        .unwrap()
+        .text;
+    let error = apply(&gone, None, &mine.inverse, &ctx("")).unwrap_err();
+    assert_eq!(error.code, "changed", "{error}");
+    assert!(error.message.contains("b.out"), "{error}");
+    assert!(
+        !error.message.contains("c.out"),
+        "names the wire it expected: {error}"
+    );
+}
 /// A hand-written file with a same-endpoint duplicate: removing either
 /// one and its undo and redo are exact (the entry is the edit's index).
 #[test]
