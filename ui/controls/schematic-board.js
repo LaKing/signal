@@ -124,7 +124,6 @@ export class SchematicBoard {
     this.plate = { size: null, vias: new Map(), obstacles: [], cards: [], key: '' };
     this.sizes?.disconnect();
     this.observed = new Set();
-    this.watched = null;
   }
 
   /** The bar's switches, after the breadcrumbs. */
@@ -286,30 +285,36 @@ export class SchematicBoard {
    * The plate measured again whenever one of its controls or cards changes
    * size or a style sheet of its face loads (a piano roll laid out late, the
    * project's CSS): the vias are the controls as the page draws them now.
+   * The observer measures the plate face shown when it fires (review
+   * 2026-10-31: a replaced face, never the one it was made for), and
+   * observes exactly the elements measured, by identity (a control replaced
+   * by another, their count the same, is let go of).
    */
   watchPlate(face, elements) {
     const View = face.panel.ownerDocument?.defaultView ?? globalThis;
-    if (!this.sizes && View.ResizeObserver) this.sizes = new View.ResizeObserver(() => this.scheduleMeasure(face));
-    if (this.sizes && this.watched !== face.panel) {
-      this.watched = face.panel;
-      for (const link of face.shadow?.querySelectorAll?.('link') ?? []) link.addEventListener('load', () => this.scheduleMeasure(face));
-    }
+    if (!this.sizes && View.ResizeObserver) this.sizes = new View.ResizeObserver(() => this.scheduleMeasure());
     if (!this.sizes) return;
+    this.linked ??= new WeakSet();
+    for (const link of face.shadow?.querySelectorAll?.('link') ?? []) {
+      if (this.linked.has(link)) continue;
+      this.linked.add(link);
+      link.addEventListener('load', () => this.scheduleMeasure());
+    }
     const all = [...elements, ...(face.panel.querySelectorAll?.('.signal-cards > *') ?? [])];
-    const key = all.length;
-    if (this.watchedCount === key && this.watchedPanel === face.panel) return;
-    this.watchedCount = key;
-    this.watchedPanel = face.panel;
+    const observed = this.observed ?? new Set();
+    if (observed.size === all.length && all.every((element) => observed.has(element))) return;
     this.sizes.disconnect();
+    this.observed = new Set(all);
     for (const element of all) this.sizes.observe(element);
   }
 
-  scheduleMeasure(face) {
+  /** The plate measured at the next frame: the plate face shown then, if any. */
+  scheduleMeasure() {
     if (this.measuring) return;
     this.measuring = true;
     requestAnimationFrame(() => {
       this.measuring = false;
-      this.measurePlate(face);
+      this.remeasure();
     });
   }
 

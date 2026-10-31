@@ -86,3 +86,58 @@ test('from X-ray to Board nothing moves and nothing shows that X-ray hid (the ow
   assert.equal(JSON.stringify([...board.option().vias]), option, 'the vias as they were');
   assert.equal(h.redrawn, 2, 'drawn again (restore and the step), opacity only');
 });
+
+test('the plate observed (review 2026-10-31): a resize measures the plate face shown now, a replaced control is observed by identity, a reset lets go', () => {
+  const observers = [];
+  class FakeObserver {
+    constructor(callback) {
+      this.callback = callback;
+      this.observed = new Set();
+      this.disconnects = 0;
+      observers.push(this);
+    }
+    observe(element) {
+      this.observed.add(element);
+    }
+    disconnect() {
+      this.observed.clear();
+      this.disconnects++;
+    }
+  }
+  const view = { ResizeObserver: FakeObserver };
+  const panel = () => ({ ownerDocument: { defaultView: view }, querySelectorAll: () => [] });
+  const first = { panel: panel(), shadow: { querySelectorAll: () => [] } };
+  const second = { panel: panel(), shadow: { querySelectorAll: () => [] } };
+  const h = host();
+  h.faces.faces = new Map([['#plate', first]]);
+  const board = new SchematicBoard(h);
+  const measured = [];
+  board.measurePlate = (face) => measured.push(face);
+  const raf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (fn) => fn();
+  try {
+    const [a, b, c, d] = [{ n: 'a' }, { n: 'b' }, { n: 'c' }, { n: 'd' }];
+    board.watchPlate(first, [a, b]);
+    const sizes = observers[0];
+    assert.deepEqual([...sizes.observed], [a, b]);
+    // The plate face replaced (a project's panel drawn anew): a resize measures the face shown now, not the first.
+    h.faces.faces.set('#plate', second);
+    sizes.callback([]);
+    assert.deepEqual(measured, [second], 'the current face measured');
+    // As many controls, other elements: those are observed, the detached ones let go.
+    board.watchPlate(first, [c, d]);
+    assert.deepEqual([...sizes.observed], [c, d], 'observed by identity, not by count');
+    const disconnects = sizes.disconnects;
+    board.watchPlate(first, [c, d]);
+    assert.equal(sizes.disconnects, disconnects, 'the same elements: observed as they are');
+    // Another project: nothing of the plate observed.
+    board.resetPlate();
+    assert.equal(sizes.observed.size, 0);
+    // No plate face any more: a late resize measures nothing.
+    h.faces.faces.clear();
+    sizes.callback([]);
+    assert.equal(measured.length, 1);
+  } finally {
+    globalThis.requestAnimationFrame = raf;
+  }
+});
