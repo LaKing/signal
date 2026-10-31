@@ -6736,8 +6736,17 @@ impl Host {
         if let Some(error) = refused {
             return Err(fail("refused", error));
         }
+        // A note sent for a client already gone (a live edit queued behind
+        // the writer lock, run after it left): ended at once, never held
+        // for a client that cannot end it.
+        if let Some((port, key, true)) = &note
+            && !self.clients.contains_key(&client)
+        {
+            self.releases.insert((port.clone(), *key));
+            self.send_releases();
+        }
         // The notes this client holds, ended for it if it goes.
-        if let Some((port, key, on)) = note {
+        if let Some((port, key, on)) = note.filter(|_| self.clients.contains_key(&client)) {
             // A note of this key taken now supersedes a release still
             // waiting for it (that note was ended; this one is held).
             self.releases.remove(&(port.clone(), key));
@@ -9081,6 +9090,18 @@ impl Host {
     /// command queue full) waits in `releases` and is sent again by every
     /// step until it is taken ([`Host::send_releases`]).
     fn end_notes(&mut self, client: u64) {
+        // Its live edits still waiting behind the writer lock are dropped:
+        // a note it can no longer end, or a value it can no longer see,
+        // is never played for it (its file writes still run, as asked).
+        self.waiting.retain(|w| match &w.job {
+            Job::Message {
+                client: c,
+                lock: false,
+                kind,
+                ..
+            } => *c != client || !LIVE_EDITS.contains(&kind.as_str()),
+            _ => true,
+        });
         if let Some(held) = self.auditions.remove(&client) {
             self.releases.extend(held);
         }

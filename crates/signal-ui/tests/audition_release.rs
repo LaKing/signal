@@ -187,7 +187,59 @@ fn a_client_evicted_with_a_note_held_ends_it_once_the_queue_has_room(transport: 
     rig.finish();
 }
 
+/// Second review of batch 2, item 1: a note-on queued behind the writer
+/// lock (behind a snapshot restore, which can change any value) from a
+/// client that leaves while it waits is never played for it: once the lock
+/// is free and the restore has run, the gate is silent.
+fn a_queued_note_of_a_client_gone_is_not_left_sounding(transport: Transport) {
+    let mut rig = audition_rig("release-queued", transport, 256);
+    let (mut watcher, _) = rig.client();
+    let scope = rig.request(
+        &mut watcher,
+        1,
+        json!({"type": "subscribe", "stream": "scope", "port": "/melody.gate", "rate": 4800}),
+        "subscribed",
+    );
+    let sub = scope["sub"].as_u64().unwrap();
+    let (mut holder, _) = rig.client();
+    let lock = signal_project::transaction::ProjectLock::acquire(&rig.dir).unwrap();
+    send(
+        &mut watcher,
+        json!({"type": "snapshot.restore", "name": "verse", "id": 2}),
+    );
+    rig.pump();
+    send(
+        &mut holder,
+        json!({"type": "note", "address": "/melody.audition", "key": 72, "velocity": 0.5, "on": true, "id": 1}),
+    );
+    for _ in 0..10 {
+        rig.pump();
+    }
+    drop(holder);
+    for _ in 0..10 {
+        rig.pump();
+    }
+    drop(lock);
+    // The restore runs (and is refused: there is no snapshot), then
+    // whatever waited behind it.
+    rig.reply(&mut watcher, 2, "error");
+    let mut last = None;
+    let until = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < until {
+        rig.pump();
+        while let Some(got) = receive(&mut watcher) {
+            if let Some(f) = got.frame(SCOPE, sub) {
+                last = Some(f.f32s().iter().all(|&g| g == 0.0));
+            }
+        }
+    }
+    assert_eq!(last, Some(true), "the gate is silent");
+    assert_eq!(rig.host().releases_waiting(), 0);
+    rig.finish();
+}
+
 both!(
     a_client_gone_with_a_note_held_ends_it_once_the_queue_has_room,
     a_client_evicted_with_a_note_held_ends_it_once_the_queue_has_room,
+    a_queued_note_of_a_client_gone_is_not_left_sounding,
 );
