@@ -99,8 +99,22 @@ pub fn read_own_file(dir: &Path, file: &str) -> Result<Option<String>, ()> {
     if !own_file(dir, file) {
         return Err(());
     }
+    use std::os::unix::fs::OpenOptionsExt;
     let path = dir.join(file);
-    let mut opened = match std::fs::File::open(&path) {
+    // Only a regular file is opened: a FIFO or a device would block the
+    // control thread in the open itself. Opened without following a link
+    // and without blocking, should one be swapped in after this look.
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Err(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(()),
+    }
+    let opening = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path);
+    let mut opened = match opening {
         Ok(opened) => opened,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(()),

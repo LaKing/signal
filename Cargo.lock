@@ -3235,6 +3235,7 @@ dependencies = [
 name = "signal-ui"
 version = "0.3.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "signal-audio",
