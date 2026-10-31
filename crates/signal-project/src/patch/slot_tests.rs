@@ -1027,3 +1027,36 @@ fn only_project_templates_may_hold_auto_ports() {
         "{messages:?}"
     );
 }
+
+/// External review, finding 2: a slot op's undo names the values it
+/// replaces (`was`). Loaded here, unloaded or replaced there since: the
+/// undo is refused as `changed`, nothing written. Across an unrelated edit
+/// (a wire scaled) it undoes and redoes.
+#[test]
+fn a_slot_undo_over_a_newer_edit_of_its_keys_is_refused() {
+    let load = |what: &str| op(serde_json::json!({"op": "slot.load", "slot": "fx", "load": what}));
+    let mine = apply(HOST, None, &[load("std.mix")], &ctx()).unwrap();
+    let json = serde_json::to_string(&mine.inverse).unwrap();
+    assert!(json.contains("\"was\":"), "{json}");
+    let inverse: Vec<Op> = serde_json::from_str(&json).unwrap();
+    for theirs in [
+        op(serde_json::json!({"op": "slot.unload", "slot": "fx"})),
+        load("std.gain"),
+    ] {
+        let theirs = apply(&mine.text, None, &[theirs], &ctx()).unwrap();
+        let error = apply(&theirs.text, None, &inverse, &ctx()).unwrap_err();
+        assert_eq!(error.code, "changed", "{error}");
+        assert!(error.message.contains("`load`"), "{error}");
+    }
+    let wire = op(
+        serde_json::json!({"op": "connection.scale", "from": "fx.y", "to": "out.r", "scale": 0.5}),
+    );
+    let unrelated = apply(&mine.text, None, std::slice::from_ref(&wire), &ctx()).unwrap();
+    let undone = apply(&unrelated.text, None, &inverse, &ctx()).unwrap();
+    assert_eq!(
+        undone.text,
+        apply(HOST, None, &[wire], &ctx()).unwrap().text
+    );
+    let redone = apply(&undone.text, None, &undone.inverse, &ctx()).unwrap();
+    assert_eq!(redone.text, unrelated.text);
+}

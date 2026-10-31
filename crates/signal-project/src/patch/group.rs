@@ -219,18 +219,21 @@ impl Patching<'_> {
                 value: None,
                 at: None,
                 decor: None,
+                was: None,
             },
             Change {
                 path: vec!["slot".to_owned()],
                 value: Some(interface),
                 at: Some(at),
                 decor,
+                was: None,
             },
             Change {
                 path: vec!["load".to_owned()],
                 value: Some(json_text(&serde_json::json!(load))?),
                 at: Some(at + 1),
                 decor: None,
+                was: None,
             },
         ];
         let (changes, wires) = self.restore(instance, &changes, &BTreeMap::new())?;

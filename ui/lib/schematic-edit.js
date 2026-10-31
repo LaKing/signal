@@ -188,7 +188,11 @@ export class PatchSession {
   /**
    * The pending patch was refused (`error`): a conflict, or an undo or redo
    * the server cannot apply any more, empties the history with a notice
-   * (`{cleared}`); otherwise `{reason, references}`, the history kept.
+   * (`{cleared}`); otherwise `{reason, references}`, the history kept. An
+   * undo or redo refused as `changed` (external review, 2026-10-31: what it
+   * restores was edited elsewhere since, say another client's newer scale
+   * of the wire) says so, the server's message as `detail`: nothing was
+   * written, the newer edit stands.
    */
   refused(error, pending = this.pending) {
     if (pending !== this.pending) return { reason: error?.message ?? String(error), references: [] };
@@ -196,6 +200,11 @@ export class PatchSession {
     const reply = error?.reply ?? {};
     if (reply.code === 'conflict' && reply.level !== undefined && reply.base) this.bases.set(reply.level, reply.base);
     const undoing = pending && pending.step !== 0;
+    if (undoing && error?.code === 'changed') {
+      this.history.clear();
+      this.notice = `Not ${pending.step < 0 ? 'undone' : 'redone'}: it was changed elsewhere since, and the newer edit is kept; the undo history was emptied`;
+      return { cleared: this.notice, detail: error?.message ?? '' };
+    }
     if (error?.code === 'conflict' || (undoing && error?.code === 'bad-value')) {
       this.history.clear();
       this.notice = `${error.code === 'conflict' ? 'The file changed elsewhere' : 'That change can no longer be undone'}: the undo history was emptied`;

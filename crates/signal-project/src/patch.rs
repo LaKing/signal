@@ -349,8 +349,8 @@ pub enum Edit {
         /// What.
         text: String,
     },
-    /// Removes the entry `item` as it is now, with exactly `before` and
-    /// `after` around it.
+    /// Removes the entry `item`, with exactly `before` and `after` around
+    /// it; with `entry`, only while the entry is still what it says.
     Cut {
         /// The entry.
         item: Item,
@@ -358,6 +358,15 @@ pub enum Edit {
         before: String,
         /// The bytes just after it.
         after: String,
+        /// The precondition (external review, 2026-10-31): the entry as the
+        /// change that wrote it left it, which the server puts in every cut
+        /// of an inverse. A connection must still be exactly this text; an
+        /// instance must still say the same but for its numbers (a
+        /// parameter committed meanwhile is kept, never a conflict). An
+        /// entry changed otherwise is refused as `changed`: an undo never
+        /// overwrites another client's newer edit of what it restores.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<String>,
     },
 }
 
@@ -1012,6 +1021,7 @@ fn apply_edit(
                     item: item.clone(),
                     before: t[p..r.start].to_owned(),
                     after: t[r.end..end].to_owned(),
+                    entry: Some(t[r.clone()].to_owned()),
                 },
                 _ => return Err("an insert holds one entry at most, whole".into()),
             }
@@ -1035,6 +1045,7 @@ fn apply_edit(
             item,
             before,
             after,
+            ..
         } => {
             if !matches!(item, Item::Instance(..) | Item::Connection(_)) {
                 return Err("only an entry is cut".into());
@@ -1074,10 +1085,79 @@ fn run_checked(
 ) -> Result<Vec<Edit>, PatchError> {
     let mut inverse = Vec::new();
     for edit in edits {
+        if let Edit::Cut {
+            item,
+            entry: Some(expected),
+            ..
+        } = edit
+        {
+            still(t, scheme, item, expected)?;
+        }
         inverse.push(apply_edit(t, scheme, edit, true).map_err(bad)?);
     }
     inverse.reverse();
     Ok(inverse)
+}
+
+/// A cut's precondition ([`Edit::Cut`]'s `entry`): the entry `item` of `t`
+/// still says `expected` (a connection byte for byte; an instance but for
+/// its numbers), else `changed`.
+fn still(t: &str, scheme: &Scheme<'_>, item: &Item, expected: &str) -> Result<(), PatchError> {
+    let m = map(t, scheme).map_err(bad)?;
+    // A missing entry is the cut's own refusal (`bad-value`), as before.
+    let Ok(r) = extent(&m, item) else {
+        return Ok(());
+    };
+    let now = &t[r];
+    let same = match item {
+        Item::Instance(..) => now == expected || same_but_numbers(now, expected),
+        _ => now == expected,
+    };
+    if same {
+        return Ok(());
+    }
+    let what = match item {
+        Item::Instance(name, _) => format!("instance `{name}`"),
+        _ => format!("`{}`", now.trim()),
+    };
+    Err(refused(
+        "changed",
+        format!(
+            "not undone: {what} changed elsewhere since this change was made (it was `{}`); the newer edit is kept",
+            expected.trim()
+        ),
+    ))
+}
+
+/// Whether two instance entries (or pieces of one) say the same but for
+/// their numbers (parameters a `commit` writes, positions): their other
+/// values, by key path, are equal. Text that does not read as TOML on its
+/// own is compared byte for byte.
+fn same_but_numbers(a: &str, b: &str) -> bool {
+    fn leaves(path: String, value: &toml::Value, out: &mut Vec<(String, String)>) {
+        match value {
+            toml::Value::Integer(_) | toml::Value::Float(_) => {}
+            toml::Value::Table(t) => {
+                for (k, v) in t {
+                    leaves(format!("{path}.{k}"), v, out);
+                }
+            }
+            toml::Value::Array(items) => {
+                for (i, v) in items.iter().enumerate() {
+                    leaves(format!("{path}[{i}]"), v, out);
+                }
+            }
+            other => out.push((path, other.to_string())),
+        }
+    }
+    let read = |text: &str| {
+        let table = text.parse::<toml::Table>().ok()?;
+        let mut out = Vec::new();
+        leaves(String::new(), &toml::Value::Table(table), &mut out);
+        out.sort();
+        Some(out)
+    };
+    matches!((read(a), read(b)), (Some(x), Some(y)) if x == y)
 }
 
 // Forward rules: these alone choose formatting, and define what an edit may
@@ -1208,6 +1288,7 @@ fn cut_instance(
             item: Item::Instance(name.to_owned(), entry.piece),
             before,
             after,
+            entry: None,
         };
         inv.push(apply_edit(t, scheme, &cut, false)?);
     }
@@ -1236,6 +1317,7 @@ fn cut_connection(t: &mut String, k: usize, inv: &mut Edits) -> Result<(), Strin
         item: Item::Connection(k),
         before,
         after,
+        entry: None,
     };
     inv.push(apply_edit(t, &Scheme::LEVEL, &cut, false)?);
     Ok(())
@@ -1438,6 +1520,7 @@ fn scale_connection(
         item: Item::Connection(k),
         before,
         after,
+        entry: None,
     };
     inv.push(apply_edit(t, &Scheme::LEVEL, &cut, false)?);
     insert_at(t, &Scheme::LEVEL, start, &text, inv)

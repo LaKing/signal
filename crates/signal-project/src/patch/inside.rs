@@ -230,6 +230,7 @@ impl Patching<'_> {
             value: Some(json_text(&serde_json::json!(name))?),
             at: None,
             decor: None,
+            was: None,
         }];
         if !read.map.is_empty() {
             // Its exports are named after the slot's ports: matched by name.
@@ -238,6 +239,7 @@ impl Patching<'_> {
                 value: None,
                 at: None,
                 decor: None,
+                was: None,
             });
         }
         let (changes, wires) = self.restore(slot, &changes, &BTreeMap::new())?;
@@ -420,6 +422,7 @@ impl Patching<'_> {
             value,
             at: None,
             decor: None,
+            was: None,
         };
         let changes = self.exports_restore(&[change])?;
         Ok(Op::ExportRestore { changes })
@@ -462,6 +465,7 @@ impl Patching<'_> {
                                 value: None,
                                 at: None,
                                 decor: None,
+                                was: None,
                             });
                         }
                         None if exists => {
@@ -478,6 +482,7 @@ impl Patching<'_> {
                                 value: Some("{}".to_owned()),
                                 at: None,
                                 decor: None,
+                                was: None,
                             });
                         }
                         _ => {}
@@ -500,6 +505,7 @@ impl Patching<'_> {
                             value: None,
                             at: None,
                             decor: None,
+                            was: None,
                         });
                     }
                     let tab = match doc.get_mut("exports") {

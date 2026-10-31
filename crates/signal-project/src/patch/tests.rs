@@ -522,6 +522,79 @@ fn undo_holds_across_a_commit() {
     assert_eq!(redone.text, committed);
 }
 
+/// External review, finding 2: an inverse carries what it expects to
+/// replace. A scale changed elsewhere since (1 → 2 here, 3 there), a wire
+/// added here and scaled there, an instance added here whose module was
+/// changed there: each undo is refused as `changed`, and nothing is
+/// written. Across unrelated edits (another wire, a new instance, a commit
+/// of the added instance's parameter) the undo still undoes, keeping them;
+/// so does the redo.
+#[test]
+fn an_undo_over_a_newer_edit_of_what_it_restores_is_refused() {
+    let text = format!("{HEAD}{INST}{MULTI}");
+    let changed = |base: &str, ops: &[Op]| {
+        let error = apply(base, None, ops, &ctx("")).unwrap_err();
+        assert_eq!(error.code, "changed", "{error}");
+        assert!(error.message.contains("changed elsewhere"), "{error}");
+    };
+    // A scale, then another client's scale of the same wire.
+    let mine = apply(&text, None, &[scale("a.out", "b.in", 2.0)], &ctx("")).unwrap();
+    let theirs = apply(&mine.text, None, &[scale("a.out", "b.in", 3.0)], &ctx("")).unwrap();
+    changed(&theirs.text, &mine.inverse);
+    // An unrelated edit between: the undo puts back this wire alone.
+    let unrelated = apply(
+        &mine.text,
+        None,
+        &[scale("b.out", "c.in", 4.0), add("svf", "std.svf")],
+        &ctx(""),
+    )
+    .unwrap();
+    let undone = apply(&unrelated.text, None, &mine.inverse, &ctx("")).unwrap();
+    let expected = apply(
+        &text,
+        None,
+        &[scale("b.out", "c.in", 4.0), add("svf", "std.svf")],
+        &ctx(""),
+    )
+    .unwrap();
+    assert_eq!(undone.text, expected.text);
+    let redone = apply(&undone.text, None, &undone.inverse, &ctx("")).unwrap();
+    assert_eq!(redone.text, unrelated.text);
+    // A wire added here, scaled there: its undo would remove their scale.
+    let mine = apply(&text, None, &[connect("a.out", "c.in")], &ctx("")).unwrap();
+    let theirs = apply(&mine.text, None, &[scale("a.out", "c.in", 2.0)], &ctx("")).unwrap();
+    changed(&theirs.text, &mine.inverse);
+    // An instance added here, its module changed there (by hand): refused;
+    // a parameter committed there: undone (`undo_holds_across_a_commit`).
+    let mine = apply(&text, None, &[add("svf", "std.svf")], &ctx("")).unwrap();
+    let theirs = mine
+        .text
+        .replace("module = \"std.svf\"", "module = \"std.lag\"");
+    assert_ne!(theirs, mine.text);
+    changed(&theirs, &mine.inverse);
+    let committed =
+        crate::write_parameter(&mine.text, "svf", "q", Some(2.0), &["cutoff_hz", "q"]).unwrap();
+    assert_eq!(
+        apply(&committed, None, &mine.inverse, &ctx(""))
+            .unwrap()
+            .text,
+        text
+    );
+    // The precondition is in the inverse as sent over the protocol.
+    let mine = apply(&text, None, &[scale("a.out", "b.in", 2.0)], &ctx("")).unwrap();
+    let json = serde_json::to_string(&mine.inverse).unwrap();
+    assert!(json.contains("\"entry\":"), "{json}");
+    let back: Vec<Op> = serde_json::from_str(&json).unwrap();
+    changed(&theirs_of(&mine.text), &back);
+}
+
+/// The text with `a.out → b.in` scaled to 3 by another client.
+fn theirs_of(text: &str) -> String {
+    apply(text, None, &[scale("a.out", "b.in", 3.0)], &ctx(""))
+        .unwrap()
+        .text
+}
+
 /// A hand-written file with a same-endpoint duplicate: removing either
 /// one and its undo and redo are exact (the entry is the edit's index).
 #[test]
@@ -636,6 +709,7 @@ fn forged_edits_are_refused() {
         item: Item::Instance("lfo".into(), 0),
         before: String::new(),
         after: kick[lfo_end..accent + 3].to_owned(),
+        entry: None,
     };
     let op = Op::InstanceRemove {
         name: "lfo".into(),
@@ -843,6 +917,7 @@ fn malformed_offsets_are_refused_never_a_panic() {
             item: lfo(),
             before: "x".repeat(text.len() + 1),
             after: String::new(),
+            entry: None,
         }]),
         layout: None,
     });
@@ -852,6 +927,7 @@ fn malformed_offsets_are_refused_never_a_panic() {
             item: lfo(),
             before: String::new(),
             after: "x".repeat(text.len()),
+            entry: None,
         }]),
         layout: None,
     });

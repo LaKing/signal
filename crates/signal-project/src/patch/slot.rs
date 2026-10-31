@@ -43,6 +43,58 @@ pub struct Change {
     /// undo puts them back; absent in an inline table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decor: Option<Vec<String>>,
+    /// The precondition (external review, 2026-10-31): the value the key
+    /// must hold for the change to apply, as TOML text (`null`: the key
+    /// must be absent; not given: none). The server puts it in every change
+    /// of an inverse it writes (the value the change it undoes left), so an
+    /// undo of a slot or export op whose key another client changed since
+    /// is refused as `changed`, never overwriting the newer edit.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub was: Option<Option<String>>,
+}
+
+/// A field that may be `null` (`Some(None)`) or absent (`None`, the default).
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(d).map(Some)
+}
+
+/// Whether two values as TOML text (`None`: absent) are the same value.
+fn same_value(a: Option<&str>, b: Option<&str>) -> bool {
+    let read = |text: &str| {
+        format!("v = {text}\n")
+            .parse::<toml::Table>()
+            .ok()
+            .and_then(|mut t| t.remove("v"))
+    };
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a == b || matches!((read(a), read(b)), (Some(x), Some(y)) if x == y),
+        _ => false,
+    }
+}
+
+/// `change`'s precondition against `now`, the key's value as it is.
+fn expected(change: &Change, now: Option<&str>) -> Result<(), PatchError> {
+    let Some(was) = &change.was else {
+        return Ok(());
+    };
+    if same_value(was.as_deref(), now) {
+        return Ok(());
+    }
+    let say = |v: Option<&str>| v.map_or_else(|| "absent".to_owned(), |v| format!("`{v}`"));
+    Err(refused(
+        "changed",
+        format!(
+            "not undone: `{}` changed elsewhere since this change was made (it is {} now, not {}); the newer edit is kept",
+            change.path.join("."),
+            say(now),
+            say(was.as_deref())
+        ),
+    ))
 }
 
 /// A port or parameter as `slot.interface` names it (ADR 0037 §3).
@@ -378,7 +430,11 @@ pub(super) fn apply_change_in(
     for (depth, key) in parents.iter().enumerate() {
         let exists = tab.get(key).is_some_and(|i| i.as_str().is_none());
         if !exists && value.is_none() {
-            return Ok(vec![change.clone()]);
+            expected(change, None)?;
+            return Ok(vec![Change {
+                was: None,
+                ..change.clone()
+            }]);
         }
         if tab.get(key).is_none() {
             inverse.push(Change {
@@ -386,6 +442,7 @@ pub(super) fn apply_change_in(
                 value: None,
                 at: None,
                 decor: None,
+                was: None,
             });
         }
         tab = tab
@@ -393,13 +450,16 @@ pub(super) fn apply_change_in(
             .ok_or_else(|| bad(format!("`{}` is not a table", change.path.join("."))))?;
     }
     let (old, at) = tab.read(last);
+    expected(change, old.as_deref())?;
     let decor = tab.decor(last);
     tab.write_decorated(last, value, change.at, change.decor.as_deref());
+    let (now, _) = tab.read(last);
     inverse.push(Change {
         path: change.path.clone(),
         value: old,
         at,
         decor,
+        was: Some(now),
     });
     Ok(inverse)
 }
@@ -955,10 +1015,13 @@ impl Patching<'_> {
         // table form first, so the undo gives the name back.
         let named = entry(&mut doc, slot)
             .and_then(|t| t.get("slot").and_then(TomlItem::as_str).map(str::to_owned));
+        // Not when the changes write `slot` whole before any key in it (a
+        // redo, which sets the table form itself, its precondition the name).
         if let Some(from) = named
             && changes
                 .iter()
-                .any(|c| c.path.len() > 1 && c.path[0] == "slot")
+                .find(|c| c.path.first().is_some_and(|k| k == "slot"))
+                .is_some_and(|c| c.path.len() > 1)
         {
             let text = format!("{{ from = {} }}", json_text(&serde_json::json!(from))?);
             let change = Change {
@@ -966,6 +1029,7 @@ impl Patching<'_> {
                 value: Some(text),
                 at: None,
                 decor: None,
+                was: None,
             };
             inverse.extend(apply_change(&mut doc, slot, &change)?);
         }
@@ -1073,6 +1137,7 @@ impl Patching<'_> {
             value,
             at: None,
             decor: None,
+            was: None,
         };
         match edit {
             SlotEdit::Load {
@@ -1616,6 +1681,7 @@ pub(super) fn prune_in(mut tab: Tab<'_>, path: &[&str], inverse: &mut Vec<Change
             value: old,
             at,
             decor,
+            was: None,
         });
     }
 }

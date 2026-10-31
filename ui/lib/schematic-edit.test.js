@@ -157,3 +157,28 @@ test('the history alone: undo and redo positions', () => {
   history.clear();
   assert.equal(history.canUndo || history.canRedo, false);
 });
+
+test('an undo the server refuses as changed (another client edited it since) says so and empties the history', () => {
+  const session = new PatchSession();
+  session.graphSeen({ files: { '': 'b0' } });
+  session.request('', [{ op: 'connection.scale', from: 'a.out', to: 'b.in', scale: 2 }]);
+  session.written({ level: '', base: 'b1', inverse: [{ op: 'connection.scale', from: 'a.out', to: 'b.in', scale: 1 }] });
+  // Another client's scale: the page adopts the newest base.
+  session.graphSeen({ files: { '': 'b2' } });
+  const undo = session.undo();
+  assert.equal(undo.message.base, 'b2');
+  const message = 'not undone: `{ from = "a.out", to = "b.in", scale = 3 }` changed elsewhere since this change was made (it was `{ from = "a.out", to = "b.in", scale = 2 }`); the newer edit is kept';
+  const result = session.refused(Object.assign(new Error(message), { code: 'changed', reply: { code: 'changed', message } }));
+  assert.match(result.cleared, /^Not undone: it was changed elsewhere since, and the newer edit is kept/);
+  assert.match(result.cleared, /the undo history was emptied/);
+  assert.equal(result.detail, message);
+  assert.equal(session.history.canUndo, false);
+  assert.equal(session.bases.get(''), 'b2', 'the base is kept: nothing was written');
+  // A redo refused so says it too.
+  session.request('', [removeInstance('a')]);
+  session.written({ level: '', base: 'b3', inverse: [{ op: 'instance.add' }] });
+  session.undo();
+  session.written({ level: '', base: 'b4', inverse: [{ op: 'instance.remove' }] });
+  session.redo();
+  assert.match(session.refused(Object.assign(new Error('x'), { code: 'changed' })).cleared, /^Not redone/);
+});

@@ -932,6 +932,87 @@ fn a_library_composite_is_added_by_a_patch(transport: Transport) {
     rig.finish();
 }
 
+/// External review, finding 2: client A scales a wire 1 → 2, client B then
+/// scales it to 3, and A's undo (its inverse, sent with the newest base) is
+/// refused as `changed`: B's newer edit is kept, nothing is written. An
+/// undo across an unrelated edit of B's (another wire, a new instance)
+/// still undoes A's own change and keeps B's.
+fn an_undo_over_another_clients_newer_edit_is_refused(transport: Transport) {
+    let mut rig = project_rig("patch-two-clients", transport, "kick");
+    let (mut a, _) = rig.client();
+    let (mut b, _) = rig.client();
+    let file = rig.dir.join("project.toml");
+    let original = fs::read_to_string(&file).unwrap();
+    let scale = |wire: (&str, &str), scale: f64| json!([{"op": "connection.scale", "from": wire.0, "to": wire.1, "scale": scale}]);
+    let decay = ("lfo.out", "drums.kick_decay");
+    let drive = ("accent.out", "drums.kick_drive");
+
+    let first = base(&mut rig, &mut a, 1, "");
+    let mine = rig.request(&mut a, 2, patch("", &first, scale(decay, 2.0)), "patched");
+    let theirs_base = base(&mut rig, &mut b, 3, "");
+    rig.request(
+        &mut b,
+        4,
+        patch("", &theirs_base, scale(decay, 3.0)),
+        "patched",
+    );
+    let with_theirs = fs::read_to_string(&file).unwrap();
+    // A's undo, on the newest base (as the page adopts it from `graph`).
+    let newest = base(&mut rig, &mut a, 5, "");
+    assert_eq!(newest, sha256_hex(with_theirs.as_bytes()));
+    let refused = answer(
+        &mut rig,
+        &mut a,
+        6,
+        patch("", &newest, mine["inverse"].clone()),
+    );
+    assert_eq!(refused["type"], "error", "{refused}");
+    assert_eq!(refused["code"], "changed", "{refused}");
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("changed elsewhere"),
+        "{refused}"
+    );
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        with_theirs,
+        "B's edit kept"
+    );
+
+    // Unrelated edits: A scales one wire, B another and adds an instance;
+    // A's undo puts back its own wire alone.
+    let start = fs::read_to_string(&file).unwrap();
+    let mine = rig.request(&mut a, 7, patch("", &newest, scale(drive, 5.0)), "patched");
+    let theirs_base = base(&mut rig, &mut b, 8, "");
+    let theirs = json!([{"op": "connection.scale", "from": decay.0, "to": decay.1, "scale": 4},
+        {"op": "instance.add", "name": "svf", "module": "std.svf"}]);
+    rig.request(&mut b, 9, patch("", &theirs_base, theirs), "patched");
+    let newest = base(&mut rig, &mut a, 10, "");
+    rig.request(
+        &mut a,
+        11,
+        patch("", &newest, mine["inverse"].clone()),
+        "patched",
+    );
+    let undone = fs::read_to_string(&file).unwrap();
+    let expected = |text: &str| {
+        let wires = |t: &str| {
+            t.lines()
+                .filter(|l| l.contains("accent.out"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        wires(text)
+    };
+    assert_eq!(expected(&undone), expected(&start), "A's wire undone");
+    assert!(undone.contains("scale = 4"), "B's wire kept");
+    assert!(undone.contains("svf = "), "B's instance kept");
+    assert_ne!(undone, original);
+    rig.finish();
+}
+
 both!(
     a_library_composite_is_added_by_a_patch,
     same_named_copies_have_different_project_ids,
@@ -944,4 +1025,5 @@ both!(
     positions_are_never_written_through_a_link,
     a_position_written_meanwhile_is_a_conflict,
     in_use_holds_when_the_project_does_not_load,
+    an_undo_over_another_clients_newer_edit_is_refused,
 );
