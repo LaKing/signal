@@ -70,7 +70,7 @@ use crate::panel_write::{check_content, first_file, replace, sha256_hex};
 use crate::player::{
     Backend, Input, Interface, Output, Selection, live_rate, open_input, open_output, output_state,
 };
-use crate::server::{Inbound, MAX_MESSAGE, Outbound, Server, ServerOptions};
+use crate::server::{Inbound, MAX_MESSAGE, Outbound, Permit, Server, ServerOptions};
 use crate::setup::{
     Choice, DEFAULT_BUFFER, Setup, Window, capabilities, channels, found, rate_check,
 };
@@ -169,6 +169,12 @@ enum Job {
         /// It carries a `generation` or `projectId` (ADR 0049): checked
         /// again when it runs.
         named: bool,
+        /// A message over `MAX_MESSAGE` (a large `pattern.write`) keeps its
+        /// share of the server's large-message budget while it waits, so
+        /// the budget bounds what waits here too (second review, item 1).
+        /// Held, never read: its drop gives the share back.
+        #[allow(dead_code)]
+        permit: Option<Permit>,
     },
     /// A Save or Save As of the open project ([`Host::save_document_then`],
     /// [`Host::save_as_then`]): run holding the lock, so its corrections
@@ -1436,6 +1442,13 @@ impl Host {
             }
             None => false,
         }
+    }
+
+    /// Test hooks: the bytes of large messages (over 64 KiB) the host holds
+    /// now, in its inbound queue or as jobs waiting for the writer lock.
+    #[cfg(feature = "test-hooks")]
+    pub fn large_held(&self) -> usize {
+        self.server.large_held()
     }
 
     /// Test hooks: `hook` runs in `patch` just before it takes the
@@ -3727,17 +3740,19 @@ impl Host {
                 }
                 self.send_text(client, &welcome);
             }
-            // A large message's permit is given back once it is handled.
+            // A large message's permit is given back once it is handled,
+            // or, queued behind the writer lock, once its job has run.
             Inbound::Text {
                 client,
                 text,
-                permit: _permit,
-            } => self.handle(client, &text),
+                permit,
+            } => self.handle(client, &text, permit),
             Inbound::Gone { client } => self.remove(client),
         }
     }
 
-    fn handle(&mut self, client: u64, text: &str) {
+    fn handle(&mut self, client: u64, text: &str, permit: Option<Permit>) {
+        let permit = std::cell::Cell::new(permit);
         let message: Value = match serde_json::from_str(text) {
             Ok(message) => message,
             Err(_) => {
@@ -3774,6 +3789,7 @@ impl Host {
             named: ["generation", "projectId"]
                 .iter()
                 .any(|key| message.get(*key).is_some_and(|v| !v.is_null())),
+            permit: permit.take(),
         };
         match Host::order_of(kind, &message) {
             Order::Write => {
@@ -3994,6 +4010,7 @@ impl Host {
                                     address: None,
                                     lock: false,
                                     named: true,
+                                    permit: None,
                                 };
                                 self.answer_job(job, failure);
                             }

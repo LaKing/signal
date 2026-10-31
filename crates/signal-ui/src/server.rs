@@ -78,10 +78,15 @@ pub(crate) const MAX_MESSAGE: usize = 64 << 10;
 /// A larger message, or a message over [`MAX_MESSAGE`] that is not a
 /// `pattern.write`, closes the connection.
 pub(crate) const MAX_PATTERN_MESSAGE: usize = 4 << 20;
-/// The bytes of messages over [`MAX_MESSAGE`] from all clients that may
-/// wait for the control thread at once; a client thread with another holds
-/// it (reading nothing more from its client) until there is room. So the
-/// inbound queue holds at most [`INBOUND`] × [`MAX_MESSAGE`] plus this.
+/// The bytes of messages over [`MAX_MESSAGE`] from all clients that the
+/// host holds at once, from the client thread's read until the message has
+/// been handled: in the inbound queue, or waiting behind the writer lock as
+/// a queued job (the job keeps its [`Permit`]). A client thread with another waits
+/// (reading nothing more from its client, still writing to it) until there
+/// is room. So large messages take at most this much in the host, plus,
+/// per client, the one its thread has read and holds while it waits:
+/// [`MAX_CLIENTS`] × [`MAX_PATTERN_MESSAGE`] (the WebSocket's own limit
+/// bounds what it reads).
 const LARGE_INBOUND: usize = 4 * MAX_PATTERN_MESSAGE;
 /// Messages from all clients waiting for the control thread.
 const INBOUND: usize = 1024;
@@ -131,7 +136,8 @@ pub(crate) enum Inbound {
 }
 
 /// A large message's share of [`LARGE_INBOUND`], given back when dropped
-/// (the control thread has handled the message).
+/// (the control thread has handled the message, at once or as a job queued
+/// behind the writer lock).
 pub(crate) struct Permit {
     held: Arc<AtomicUsize>,
     bytes: usize,
@@ -320,6 +326,13 @@ impl Server {
         self.accept
             .admission
             .store(micros(deadline), Ordering::Relaxed);
+    }
+
+    /// Test hooks: the bytes of large messages the host holds now
+    /// ([`LARGE_INBOUND`]).
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn large_held(&self) -> usize {
+        self.accept.large.load(Ordering::SeqCst)
     }
 
     /// Serves `dir` (a project's `ui/` folder) under `/project/` from now on.

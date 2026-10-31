@@ -15,8 +15,9 @@ mod common;
 use std::fs;
 use std::path::PathBuf;
 
-use common::{Got, Options, Rig, Transport, Ws, receive, rig};
+use common::{Got, Options, Rig, Transport, Ws, receive, rig, send};
 use serde_json::{Value, json};
+use signal_project::transaction::ProjectLock;
 use signal_ui::panel_write::sha256_hex;
 
 const PROJECT: &str = r#"schema_version = 1
@@ -527,6 +528,53 @@ fn a_panel_with_pattern_controls(transport: Transport) {
     rig.finish();
 }
 
+/// A pattern write of `kib` KiB of padding over `MELODY`, as a message with `id`.
+fn large_write(id: u64, kib: usize, base: &Value) -> Value {
+    let text = format!("{MELODY}# {}\n", "x".repeat(kib * 1024));
+    let mut message = write("melody", &text, base);
+    message["id"] = json!(id);
+    message
+}
+
+/// Steps `n` times, collecting what reaches `ws`.
+fn pump_collect(rig: &mut Rig, ws: &mut Ws, n: usize) -> Vec<Value> {
+    let mut got = Vec::new();
+    for _ in 0..n {
+        rig.pump();
+        while let Some(message) = receive(ws) {
+            if let Some(value) = message.json() {
+                got.push(value.clone());
+            }
+        }
+    }
+    got
+}
+
+/// Second review, item 1: a large `pattern.write` queued behind another
+/// writer's lock keeps its share of the large-message budget while it
+/// waits, and gives it back once it has run.
+fn a_queued_large_write_keeps_its_budget_share(transport: Transport) {
+    let mut rig = melody("pattern-queued-budget", transport);
+    let (mut ws, _) = rig.client();
+    let base = json!(sha256_hex(MELODY.as_bytes()));
+    let lock = ProjectLock::acquire(&rig.dir).unwrap();
+    send(&mut ws, large_write(1, 200, &base));
+    let got = pump_collect(&mut rig, &mut ws, 20);
+    assert!(
+        got.iter().all(|v| v.get("id").is_none()),
+        "it waits: {got:?}"
+    );
+    assert!(
+        rig.host().large_held() > 200 * 1024,
+        "the queued write holds its share: {}",
+        rig.host().large_held()
+    );
+    drop(lock);
+    rig.reply(&mut ws, 1, "pattern.written");
+    assert_eq!(rig.host().large_held(), 0, "given back once it ran");
+    rig.finish();
+}
+
 both!(
     a_panel_with_pattern_controls,
     a_link_at_the_temporary_path_is_not_followed,
@@ -537,4 +585,5 @@ both!(
     names_links_and_a_first_write,
     a_write_over_the_message_limit_closes_the_connection,
     a_pattern_at_capacity_is_read_edited_and_written,
+    a_queued_large_write_keeps_its_budget_share,
 );
