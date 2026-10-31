@@ -81,7 +81,8 @@ pub(crate) const MAX_PATTERN_MESSAGE: usize = 4 << 20;
 /// The bytes of messages over [`MAX_MESSAGE`] from all clients that the
 /// host holds at once, from the client thread's read until the message has
 /// been handled: in the inbound queue, or waiting behind the writer lock as
-/// a queued job (the job keeps its [`Permit`]). A client thread with another waits
+/// a queued job (the job keeps its [`Permit`]). Each client has at most one
+/// of them held ([`Permit`]'s `own`); a client thread with another waits
 /// (reading nothing more from its client, still writing to it) until there
 /// is room. So large messages take at most this much in the host, plus,
 /// per client, the one its thread has read and holds while it waits:
@@ -141,9 +142,28 @@ pub(crate) enum Inbound {
 pub(crate) struct Permit {
     held: Arc<AtomicUsize>,
     bytes: usize,
+    /// Its client's flag: one large message held per client.
+    own: Option<Arc<AtomicBool>>,
 }
 
 impl Permit {
+    /// [`Permit::take`] for a client whose `own` flag says it holds none.
+    fn take_own(held: &Arc<AtomicUsize>, own: &Arc<AtomicBool>, bytes: usize) -> Option<Permit> {
+        if own.swap(true, Ordering::SeqCst) {
+            return None;
+        }
+        match Permit::take(held, bytes) {
+            Some(mut permit) => {
+                permit.own = Some(Arc::clone(own));
+                Some(permit)
+            }
+            None => {
+                own.store(false, Ordering::SeqCst);
+                None
+            }
+        }
+    }
+
     /// `bytes` of `held`, when they fit in [`LARGE_INBOUND`].
     fn take(held: &Arc<AtomicUsize>, bytes: usize) -> Option<Permit> {
         held.try_update(Ordering::SeqCst, Ordering::SeqCst, |now| {
@@ -153,6 +173,7 @@ impl Permit {
         .map(|_| Permit {
             held: Arc::clone(held),
             bytes,
+            own: None,
         })
     }
 }
@@ -160,8 +181,15 @@ impl Permit {
 impl Drop for Permit {
     fn drop(&mut self) {
         self.held.fetch_sub(self.bytes, Ordering::SeqCst);
+        if let Some(own) = &self.own {
+            own.store(false, Ordering::SeqCst);
+        }
     }
 }
+
+/// Test hooks: the whole large-message budget held ([`Server::hold_large`]).
+#[cfg(feature = "test-hooks")]
+pub(crate) struct LargeHold(#[allow(dead_code)] Permit);
 
 /// Whether a client's message is a `pattern.write` (only its `type` is read).
 fn is_pattern_write(text: &str) -> bool {
@@ -333,6 +361,13 @@ impl Server {
     #[cfg(feature = "test-hooks")]
     pub(crate) fn large_held(&self) -> usize {
         self.accept.large.load(Ordering::SeqCst)
+    }
+
+    /// Test hooks: holds the whole large-message budget until the hold is
+    /// dropped, so a large message waits for room; None when some is held.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn hold_large(&self) -> Option<LargeHold> {
+        Permit::take(&self.accept.large, LARGE_INBOUND).map(LargeHold)
     }
 
     /// Serves `dir` (a project's `ui/` folder) under `/project/` from now on.
@@ -623,6 +658,7 @@ impl Accept {
             token: self.token.clone(),
             inbound: self.inbound.clone(),
             large: Arc::clone(&self.large),
+            own: Arc::new(AtomicBool::new(false)),
             queue: self.queue,
             http_port: self.http_port,
             remote: self.remote,
@@ -667,6 +703,8 @@ struct Connection {
     token: String,
     inbound: SyncSender<Inbound>,
     large: Arc<AtomicUsize>,
+    /// Whether this client holds a large message ([`Permit`]).
+    own: Arc<AtomicBool>,
     queue: usize,
     http_port: u16,
     remote: bool,
@@ -827,7 +865,7 @@ impl Connection {
         bytes: usize,
     ) -> Option<Permit> {
         loop {
-            if let Some(permit) = Permit::take(&self.large, bytes) {
+            if let Some(permit) = Permit::take_own(&self.large, &self.own, bytes) {
                 return Some(permit);
             }
             if self.stop.load(Ordering::Relaxed) || evicted.load(Ordering::Relaxed) {

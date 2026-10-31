@@ -1451,6 +1451,13 @@ impl Host {
         self.server.large_held()
     }
 
+    /// Test hooks: holds the whole large-message budget until the returned
+    /// hold is dropped (None when some of it is held already).
+    #[cfg(feature = "test-hooks")]
+    pub fn hold_large_budget(&self) -> Option<impl Send + use<>> {
+        self.server.hold_large()
+    }
+
     /// Test hooks: `hook` runs in `patch` just before it takes the
     /// project's writer lock (ADR 0040), once per patch.
     #[cfg(feature = "test-hooks")]

@@ -575,6 +575,59 @@ fn a_queued_large_write_keeps_its_budget_share(transport: Transport) {
     rig.finish();
 }
 
+/// Second review, item 3: with the budget full, a client's large message
+/// waits in its thread, which goes on writing to the client meanwhile (a
+/// push reaches it); once there is room the write is taken. One client
+/// holds at most one large message: a second waits until the first has run.
+fn a_large_write_waits_for_room_while_its_client_is_written_to(transport: Transport) {
+    let mut rig = melody("pattern-room", transport);
+    let (mut ws, _) = rig.client();
+    let (mut other, _) = rig.client();
+    let base = json!(sha256_hex(MELODY.as_bytes()));
+    let hold = rig.host().hold_large_budget().expect("the budget is free");
+    send(&mut ws, large_write(1, 100, &base));
+    let got = pump_collect(&mut rig, &mut ws, 20);
+    assert!(
+        got.iter().all(|v| v.get("id").is_none()),
+        "no room yet: {got:?}"
+    );
+    // Another client's write is pushed to it while its thread waits.
+    rig.request(
+        &mut other,
+        1,
+        write("beat", STEPS, &Value::Null),
+        "pattern.written",
+    );
+    rig.wait(&mut ws, "the push while waiting", |got| {
+        got.of("pattern.written")
+            .filter(|p| p["name"] == "beat")
+            .cloned()
+    });
+    drop(hold);
+    let written = rig.reply(&mut ws, 1, "pattern.written");
+    // One large message per client: with the lock held, its second write
+    // waits in its thread, not in the host.
+    let lock = ProjectLock::acquire(&rig.dir).unwrap();
+    send(&mut ws, large_write(2, 100, &written["base"]));
+    send(&mut ws, large_write(3, 120, &written["base"]));
+    pump_collect(&mut rig, &mut ws, 20);
+    let held = rig.host().large_held();
+    assert!(
+        held > 100 * 1024 && held < 120 * 1024,
+        "only the first is held: {held}"
+    );
+    drop(lock);
+    rig.reply(&mut ws, 2, "pattern.written");
+    let third = rig.wait(&mut ws, "the second write's reply", |got| {
+        got.json()
+            .filter(|v| v.get("id") == Some(&json!(3)))
+            .cloned()
+    });
+    // The second carried the same text as the first: the base still holds.
+    assert_eq!(third["type"], "pattern.written", "{third}");
+    assert_eq!(rig.host().large_held(), 0);
+    rig.finish();
+}
 both!(
     a_panel_with_pattern_controls,
     a_link_at_the_temporary_path_is_not_followed,
@@ -586,4 +639,5 @@ both!(
     a_write_over_the_message_limit_closes_the_connection,
     a_pattern_at_capacity_is_read_edited_and_written,
     a_queued_large_write_keeps_its_budget_share,
+    a_large_write_waits_for_room_while_its_client_is_written_to,
 );
