@@ -139,7 +139,7 @@ export function automations({ entry, binds = [], owner, graph }) {
         const inner = target.level !== '';
         const source = inner || owner.get(instanceOf(from)) === entry ? 'engine' : 'external';
         const fromPort = inner ? null : index.get(from)?.port;
-        out.push({ id: `auto ${out.length} ${from} ${toAbs}`, bind, from, to: toAbs, written: { from: c.from, to: c.to }, level: target.level, inner, source, kind: fromPort ? portKind(fromPort) : 'control' });
+        out.push({ id: `auto ${out.length} ${from} ${toAbs}`, bind, from, to: toAbs, written: { from: c.from, to: c.to }, level: target.level, inner, source, kind: fromPort && portKind(fromPort) !== 'audio' ? portKind(fromPort) : 'control' });
       }
     }
   }

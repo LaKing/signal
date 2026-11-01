@@ -203,7 +203,7 @@ const PANEL_CSS = `
 .face-note { margin: 0; padding: 4px 6px; font: 11px/1.4 ui-monospace, Menlo, monospace; color: var(--signal-clip, #ff5252); }
 .face-note:empty { display: none; }
 /* ADR 0051 phase 2: at Control the opened instrument's panel is x-rayed: its controls live and whole, its decoration gone, the sheet under it showing. */
-.face-panel > .signal-cards > [data-xray] { background: transparent !important; border-color: transparent !important; box-shadow: none !important; }
+.face-panel > .signal-cards > [data-xray] { background: transparent !important; border-color: transparent !important; border-image: none !important; box-shadow: none !important; }
 .face-panel > .signal-cards > [data-xray]::before, .face-panel > .signal-cards > [data-xray]::after { display: none !important; }
 [data-xray] .signal-group { background: transparent !important; border-color: transparent !important; box-shadow: none !important; }
 [data-xray] signal-piano-roll, [data-xray] signal-step-grid, [data-xray] p { opacity: 0.08; pointer-events: none; }
