@@ -18,6 +18,8 @@
 //! does. A `.signal` project (M2.8-12) plays from its working folder
 //! ([`crate::document`]); `signal ui` reopens only the project it serves.
 
+mod failure;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -76,6 +78,8 @@ use crate::setup::{
 };
 use crate::snapshot;
 use signal_project::snapshot::{self as snapshots, SNAPSHOTS_FILE, SnapshotError};
+
+use failure::{Failure, fail, fail_with};
 
 /// ADR 0037 §7: how many project folders `slot.projects` lists of each
 /// place (the project's subfolders, its siblings).
@@ -539,30 +543,6 @@ struct Unsaved {
     /// The live value is known to be the one last sent.
     applied: bool,
     error: Option<(u64, String)>,
-}
-
-/// A refused message: its code and why, and what else the error carries
-/// (`panel.write`'s `conflict`: the current text and base).
-struct Failure {
-    code: &'static str,
-    message: String,
-    detail: Option<Value>,
-}
-
-fn fail(code: &'static str, message: impl Into<String>) -> Failure {
-    Failure {
-        code,
-        message: message.into(),
-        detail: None,
-    }
-}
-
-/// [`fail`], with `detail`'s fields in the error.
-fn fail_with(code: &'static str, message: impl Into<String>, detail: Value) -> Failure {
-    Failure {
-        detail: Some(detail),
-        ..fail(code, message)
-    }
 }
 
 /// Where an edit goes: a control's ports or one plan parameter.
