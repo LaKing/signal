@@ -16,6 +16,7 @@ const FLOORS = [-96, -24];
 
 export class SignalMeter extends SignalElement {
   static role = 'meter';
+  static pausesOffStage = true;
   static observedAttributes = ['bind', 'skin', 'source', 'channel', 'floor', 'label'];
   static resubscribe = ['source', 'channel'];
   static css = `

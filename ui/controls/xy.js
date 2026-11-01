@@ -16,6 +16,7 @@ const SPRING_MS = 80;
 
 export class SignalXY extends SignalElement {
   static role = 'group';
+  static pausesOffStage = true;
   static observedAttributes = ['bind', 'skin', 'min', 'max', 'default', 'taper', 'floor', 'spring', 'label'];
   static css = `
 .control { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 4px; }

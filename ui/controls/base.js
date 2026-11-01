@@ -183,6 +183,30 @@ export function unsavedStream(connection, bindings, redraw) {
   return connection.on('unsaved', show);
 }
 
+/** The one observer of every control that pauses off the stage ([`SignalElement.pausesOffStage`]). */
+let stageObserver = null;
+
+/**
+ * Watches whether `element` is on the stage (the viewport, clipped by its
+ * scrolling and overflow-hidden ancestors, with a margin of a quarter of it;
+ * an element under `display: none` is off it): `element.onStage(shown)` is
+ * called once soon and on every change. Returns the stop, or null where the
+ * browser has no `IntersectionObserver` (the element is then always on it).
+ */
+export function watchStage(element) {
+  const Observer = globalThis.IntersectionObserver;
+  if (typeof Observer !== 'function') return null;
+  stageObserver ??= new Observer(
+    (entries) => {
+      for (const entry of entries) entry.target.onStage?.(entry.isIntersecting);
+    },
+    { rootMargin: '25%' },
+  );
+  const observer = stageObserver;
+  observer.observe(element);
+  return () => observer.unobserve(element);
+}
+
 /**
  * A custom element with a shadow root, the page's (or a given) connection,
  * a skin and key handling. Subclasses give `template()`, `update()`, and
@@ -195,6 +219,14 @@ export class SignalElement extends HTMLElement {
   static observedAttributes = ['bind', 'skin'];
   /** Observed attributes that change a subscription; the others only redraw. */
   static resubscribe = [];
+  /**
+   * Whether its `streams` only show values (a parameter's, a meter's), so
+   * they stop while it is off the stage ([`watchStage`]: scrolled away, in
+   * a Stack off screen, under a hidden board) and start again when it comes
+   * back (ADR 0051 test 9, `docs/benchmarks.md`). Streams that keep state
+   * (a pattern's sync, a held note, a slot's part) never pause.
+   */
+  static pausesOffStage = false;
 
   constructor() {
     super();
@@ -202,6 +234,10 @@ export class SignalElement extends HTMLElement {
     this.connection = null;
     this.ownConnection = null;
     this.stops = [];
+    /** The running `streams`' stops, or null while they do not run. */
+    this.streamStops = null;
+    /** Off the stage (a pausing control, [`watchStage`]): its streams wait. */
+    this.offStage = false;
     this.skin = null;
     this.skinToken = null;
   }
@@ -271,11 +307,39 @@ export class SignalElement extends HTMLElement {
     if (!connection) return;
     this.stops.push(connection.on('describe', (description) => this.described(description)));
     if (connection.description) this.described(connection.description);
-    this.stops.push(...this.streams(connection));
+    const watching = this.constructor.pausesOffStage ? watchStage(this) : null;
+    if (watching) {
+      this.stops.push(watching);
+      // The observer says at once whether it is on the stage; it starts then.
+      if (this.stageKnown) this.startStreams();
+    } else {
+      this.offStage = false;
+      this.startStreams();
+    }
     this.update();
   }
 
+  /** The observer's word ([`watchStage`]): on the stage its streams run, off it they stop. */
+  onStage(shown) {
+    this.stageKnown = true;
+    this.offStage = !shown;
+    if (shown) this.startStreams();
+    else this.stopStreams();
+  }
+
+  startStreams() {
+    if (!this.connection || this.offStage || this.streamStops) return;
+    this.streamStops = this.streams(this.connection);
+  }
+
+  stopStreams() {
+    const stops = this.streamStops ?? [];
+    this.streamStops = null;
+    for (const stop of stops) stop();
+  }
+
   detach() {
+    this.stopStreams();
     for (const stop of this.stops.splice(0)) stop();
     this.connection = null;
   }
@@ -387,6 +451,7 @@ export function bindingEntry(element, readout, binding, options = {}) {
  */
 export class SignalValueElement extends SignalElement {
   static role = 'slider';
+  static pausesOffStage = true;
   static observedAttributes = ['bind', 'skin', 'min', 'max', 'default', 'unit', 'taper', 'floor', 'label'];
   /** Whether it commits, and so shows the unsaved mark. */
   static commits = true;
