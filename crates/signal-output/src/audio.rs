@@ -142,6 +142,78 @@ impl AudioSink {
             .and_then(|port| engine.parameter_index(port));
     }
 
+    /// The audio sink at `address` (ADR 0038: one of a run's several play
+    /// sides), with `1..=most` signal inputs.
+    pub(crate) fn at(
+        engine: &Engine,
+        address: &InstanceAddress,
+        most: usize,
+    ) -> Result<AudioSink, RenderError> {
+        let Some(sink) = audio_sinks(engine).find(|s| s.address == address) else {
+            return Err(RenderError::NoAudioSinkAt {
+                instance: address.clone(),
+            });
+        };
+        if sink.inputs == 0 || sink.inputs > most {
+            return Err(RenderError::AudioChannels {
+                instance: sink.address.clone(),
+                channels: sink.inputs,
+            });
+        }
+        let mut selected = AudioSink {
+            id: sink.id,
+            address: sink.address.clone(),
+            width: sink.inputs,
+            gain_port: PortAddress::new(sink.address, GAIN).ok(),
+            gain: None,
+        };
+        selected.rebind(engine);
+        Ok(selected)
+    }
+
+    /// The sinks at `addresses`, in that order; the plan's one audio sink
+    /// when `addresses` is empty ([`select`](AudioSink::select)).
+    pub(crate) fn select_all(
+        engine: &Engine,
+        addresses: &[InstanceAddress],
+        most: usize,
+    ) -> Result<Vec<AudioSink>, RenderError> {
+        if addresses.is_empty() {
+            return AudioSink::select(engine, most).map(|sink| vec![sink]);
+        }
+        addresses
+            .iter()
+            .map(|address| AudioSink::at(engine, address, most))
+            .collect()
+    }
+
+    /// After a swap offline, for one of several sinks: the plan must keep it
+    /// at its address, as wide.
+    pub(crate) fn same_at(&mut self, engine: &Engine) -> Result<(), RenderError> {
+        match audio_sinks(engine).find(|s| *s.address == self.address) {
+            Some(sink) if sink.inputs == self.width => {
+                self.id = sink.id;
+                self.rebind(engine);
+                Ok(())
+            }
+            _ => Err(RenderError::SinkChanged {
+                before: self.address.clone(),
+                after: audio_sinks(engine).map(|s| s.address.clone()).collect(),
+                channels: self.width,
+            }),
+        }
+    }
+
+    /// After a swap in real time, for one of several sinks (the Controller
+    /// refused a plan without the run's sinks): the sink at its address and
+    /// its gain. Allocates nothing.
+    pub(crate) fn follow_at(&mut self, engine: &Engine) {
+        if let Some(sink) = audio_sinks(engine).find(|s| *s.address == self.address) {
+            self.id = sink.id;
+        }
+        self.rebind(engine);
+    }
+
     /// After a swap offline: the plan must keep the sink, the only one, at
     /// its address, as wide; otherwise the error.
     pub(crate) fn same(&mut self, engine: &Engine) -> Result<(), RenderError> {
@@ -184,6 +256,11 @@ pub enum RenderError {
     AlreadyStarted,
     /// The plan has no audio sink instance.
     NoAudioSink,
+    /// A run's play side names no audio sink of the plan (ADR 0038).
+    NoAudioSinkAt {
+        /// The address given.
+        instance: InstanceAddress,
+    },
     /// The plan has more than one audio sink instance (M1 supports one).
     SeveralAudioSinks {
         /// The sinks, in address order.
@@ -225,6 +302,9 @@ impl fmt::Display for RenderError {
         match self {
             RenderError::AlreadyStarted => f.write_str("a render must start at frame 0"),
             RenderError::NoAudioSink => f.write_str("the plan has no audio sink"),
+            RenderError::NoAudioSinkAt { instance } => {
+                write!(f, "the plan has no audio sink at {instance}")
+            }
             RenderError::SeveralAudioSinks { instances } => {
                 f.write_str("the plan has several audio sinks:")?;
                 for instance in instances {

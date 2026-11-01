@@ -46,17 +46,40 @@ pub fn realtime_with(
     config: RealtimeConfig,
     make: Option<MakeWaiter>,
 ) -> Result<(Runner, Controller), ControlError> {
+    realtime_routed(plan, registry, config, make, &[])
+}
+
+/// [`realtime_with`] playing several audio sinks (ADR 0038: a project's play
+/// sides): the sinks at `sinks`, in that order, each with its own `gain`.
+/// The Runner's audio frame is their channels concatenated in that order
+/// (a [`Routing`](crate::Routing)'s canonical order), so
+/// [`Runner::process`] takes the sum of their widths as `channels`, and a
+/// driver's channel map (`signal-audio`'s, from
+/// [`Routing::targets`](crate::Routing::targets)) puts each on its
+/// device channels. An empty `sinks` is the plan's one audio sink, as
+/// [`realtime_with`].
+pub fn realtime_routed(
+    plan: &ExecutionPlan,
+    registry: &Registry,
+    config: RealtimeConfig,
+    make: Option<MakeWaiter>,
+    sinks: &[InstanceAddress],
+) -> Result<(Runner, Controller), ControlError> {
     let (runner, controller) = signal_engine::realtime_with(plan, registry, config, make)?;
-    let sink = AudioSink::select(runner.engine(), usize::MAX)
+    let routed = !sinks.is_empty();
+    let sinks = AudioSink::select_all(runner.engine(), sinks, usize::MAX)
         .map_err(|error| ControlError::Sink(Box::new(error)))?;
+    let width = sinks.iter().map(|s| s.width).sum();
     let (meter_tx, meter_rx) = RingBuffer::new(config.meters.max(1));
     let counts = Arc::new(Counts::default());
     let (scopes, scope_control) = scopes();
     let (vectors, vector_control) = vectors(plan);
     let runner = Runner {
         runner,
-        levels: vec![(0.0, 0.0); sink.width],
-        sink,
+        levels: vec![(0.0, 0.0); width],
+        sinks,
+        routed,
+        width,
         meters: meter_tx,
         clipped: 0,
         ceiling: None,
@@ -93,7 +116,14 @@ struct Counts {
 /// callback calls [`process`](Runner::process).
 pub struct Runner {
     runner: signal_engine::Runner,
-    sink: AudioSink,
+    /// The audio sinks played, in the audio frame's order (one without a
+    /// routing).
+    sinks: Vec<AudioSink>,
+    /// The sinks were named ([`realtime_routed`]): each follows its own
+    /// address across swaps.
+    routed: bool,
+    /// The audio frame's channels: every sink's, concatenated.
+    width: usize,
     /// Per sink channel: (peak, sum of squares) of the current callback.
     levels: Vec<(f32, f64)>,
     meters: Producer<Meter>,
@@ -136,7 +166,8 @@ impl Runner {
         self.vectors.commands(self.runner.engine());
         let done = {
             let mut device = Device {
-                sink: &mut self.sink,
+                sinks: &mut self.sinks,
+                routed: self.routed,
                 out: &mut *out,
                 channels,
                 at: 0,
@@ -184,6 +215,12 @@ impl Runner {
     /// start.
     pub fn clipped(&self) -> u64 {
         self.clipped
+    }
+
+    /// The channels of the audio frame [`process`](Runner::process) writes:
+    /// every played sink's, concatenated.
+    pub fn width(&self) -> usize {
+        self.width
     }
 
     /// Meters dropped because the meter queue was full.
@@ -280,7 +317,8 @@ impl DerefMut for Runner {
 
 /// One callback's device buffer, as the engine's output.
 struct Device<'a> {
-    sink: &'a mut AudioSink,
+    sinks: &'a mut [AudioSink],
+    routed: bool,
     out: &'a mut [f32],
     channels: usize,
     /// The next frame of `out`.
@@ -297,7 +335,13 @@ struct Device<'a> {
 
 impl SinkOutput for Device<'_> {
     fn bind(&mut self, engine: &Engine) -> bool {
-        self.sink.follow(engine);
+        for sink in self.sinks.iter_mut() {
+            if self.routed {
+                sink.follow_at(engine);
+            } else {
+                sink.follow(engine);
+            }
+        }
         self.scopes.bind(engine);
         self.vectors.bind(engine);
         true
@@ -308,7 +352,6 @@ impl SinkOutput for Device<'_> {
             .block(engine, self.first + self.at as u64, frames);
         self.vectors
             .block(engine, self.first + self.at as u64, frames);
-        let gain = self.sink.gain_index();
         for f in 0..frames {
             let start = self.at.saturating_mul(self.channels);
             let Some(row) = self.out.get_mut(start..start + self.channels) else {
@@ -316,22 +359,27 @@ impl SinkOutput for Device<'_> {
             };
             self.at += 1;
             row.fill(0.0);
-            let gain = gain.and_then(|j| engine.parameter_at_frame(j, f));
-            for channel in 0..self.sink.width {
-                let x = engine
-                    .sink_input_at(self.sink.id, channel, f)
-                    .unwrap_or(0.0);
-                let sample = hold(
-                    to_device(gain.map_or(x, |g| g * x), self.clipped),
-                    self.ceiling,
-                    self.ceilinged,
-                );
-                if let Some(level) = self.levels.get_mut(channel) {
-                    level.0 = level.0.max(sample.abs());
-                    level.1 += f64::from(sample) * f64::from(sample);
-                }
-                if let Some(out) = row.get_mut(channel) {
-                    *out = sample;
+            // The sinks' channels, concatenated in their order.
+            let mut channel = 0;
+            for sink in self.sinks.iter() {
+                let gain = sink
+                    .gain_index()
+                    .and_then(|j| engine.parameter_at_frame(j, f));
+                for input in 0..sink.width {
+                    let x = engine.sink_input_at(sink.id, input, f).unwrap_or(0.0);
+                    let sample = hold(
+                        to_device(gain.map_or(x, |g| g * x), self.clipped),
+                        self.ceiling,
+                        self.ceilinged,
+                    );
+                    if let Some(level) = self.levels.get_mut(channel) {
+                        level.0 = level.0.max(sample.abs());
+                        level.1 += f64::from(sample) * f64::from(sample);
+                    }
+                    if let Some(out) = row.get_mut(channel) {
+                        *out = sample;
+                    }
+                    channel += 1;
                 }
             }
         }

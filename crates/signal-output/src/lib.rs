@@ -10,6 +10,13 @@
 //!   again in every plan a swap brings, since a swap may keep the sink's
 //!   address and width but change its type;
 //! - maps sink input *i* to device channel *i* (extra device channels 0);
+//! - with several play sides (ADR 0038, M4.1: a project's `main` and, say,
+//!   `cue`), plays every audio sink a [`Routing`] names, each with its own
+//!   `gain`, their channels concatenated in canonical order
+//!   ([`realtime_routed`]); [`route`] decides on the control thread which
+//!   device channel each plays on from the machine's [`SoundSystem`] (two
+//!   roles on one channel are never summed, an unknown role is not heard,
+//!   one clock device in v1), and [`render_sides`] records them offline;
 //! - converts to the device's `f32` ([`device_sample`]: clamped to [−1, 1],
 //!   non-finite as 0, counted as clipped) and meters each channel per
 //!   callback;
@@ -47,14 +54,22 @@ mod audio;
 mod driver;
 pub mod fade;
 mod render;
+pub mod routing;
 mod runner;
 mod scope;
 mod vectors;
 
 pub use audio::{Conversion, Meter, RenderError, device_sample};
 pub use driver::{CallbackSizes, Driver, DriverError, MAX_CALLBACK_FRAMES, NullDriver};
-pub use render::{Render, render, render_blocks, render_blocks_tapped, render_with};
-pub use runner::{Controller, ReadySwap, Runner, ceiling_level, hold, realtime, realtime_with};
+pub use render::{
+    Render, SideRender, render, render_blocks, render_blocks_tapped, render_sides, render_with,
+};
+pub use routing::{
+    Heard, MAIN, Placement, PlaySide, RoleBinding, RoutedSide, Routing, SoundSystem, route,
+};
+pub use runner::{
+    Controller, ReadySwap, Runner, ceiling_level, hold, realtime, realtime_routed, realtime_with,
+};
 pub use scope::{SCOPE_POINTS, SCOPE_SLOTS, ScopeBlock, ScopeError};
 pub use vectors::{
     VECTOR_MAX_ROWS, VECTOR_SLOTS, VectorError, VectorSnapshot, VectorTap, VectorTrack,

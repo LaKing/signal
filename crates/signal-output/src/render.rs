@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::Path;
 
-use signal_core::{Fnv1a64, Frame, fnv1a64};
+use signal_core::{Fnv1a64, Frame, InstanceAddress, fnv1a64};
 use signal_engine::{
     ComputeDevice, Engine, EngineError, Manifest, OfflineError, Placement, Provenance, SameMachine,
     SinkOutput, run_offline,
@@ -120,13 +120,112 @@ pub fn render_blocks_tapped(
     taps: &[VectorTap],
     plans: &[ExecutionPlan],
 ) -> Result<(Render, Vec<VectorTrack>), RenderError> {
+    render_inner(engine, frames, block, before, taps, plans, None)
+        .map(|(render, tracks, _)| (render, tracks))
+}
+
+/// One more play side of a render (ADR 0038 §9): a device slot's sink other
+/// than the main one, its inputs times its `gain`, written as
+/// `devices/<slot>.wav` beside `audio.wav`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SideRender {
+    /// The sink.
+    pub address: InstanceAddress,
+    /// Its channels.
+    pub channels: u16,
+    /// The samples, interleaved by frame.
+    pub samples: Vec<f64>,
+}
+
+impl SideRender {
+    /// Writes the side as a 32-bit float WAV at `path` (each sample rounded
+    /// to `f32`, as `audio.wav` under [`Conversion::Plain`]).
+    pub fn write(&self, path: &Path, sample_rate: u32) -> Result<(), RenderError> {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let spec = hound::WavSpec {
+            channels: self.channels,
+            sample_rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut wav = hound::WavWriter::create(path, spec)?;
+        for &sample in &self.samples {
+            wav.write_sample(sample as f32)?;
+        }
+        wav.finalize()?;
+        Ok(())
+    }
+
+    /// FNV-1a 64 of the samples as its WAV stores them.
+    pub fn audio_fnv1a64(&self) -> u64 {
+        let mut hasher = Fnv1a64::new();
+        for &sample in &self.samples {
+            hasher.update(&(sample as f32).to_le_bytes());
+        }
+        hasher.finish()
+    }
+}
+
+/// [`render`] of a project with several play sides (ADR 0038 §9): `main`
+/// is the sink `audio.wav` records (the [`Render`]), and each of `others`
+/// is recorded beside it, in that order. The engine runs as for
+/// [`render`]; the sides only read, so `main`'s samples are exactly
+/// [`render`]'s for the same plan.
+pub fn render_sides(
+    engine: &mut Engine,
+    frames: u64,
+    main: &InstanceAddress,
+    others: &[InstanceAddress],
+) -> Result<(Render, Vec<SideRender>), RenderError> {
+    let block = engine.config().block_capacity;
+    render_inner(
+        engine,
+        frames,
+        block,
+        |_| Ok(None),
+        &[],
+        &[],
+        Some((main, others)),
+    )
+    .map(|(render, _, sides)| (render, sides))
+}
+
+/// The main sink and the other play sides of a routed render.
+type Sides<'a> = Option<(&'a InstanceAddress, &'a [InstanceAddress])>;
+
+/// The renders' one body: the plan's one audio sink, or `sides` (the main
+/// sink and the others).
+fn render_inner(
+    engine: &mut Engine,
+    frames: u64,
+    block: usize,
+    before: impl FnMut(&mut Engine) -> Result<Option<Frame>, EngineError>,
+    taps: &[VectorTap],
+    plans: &[ExecutionPlan],
+    sides: Sides<'_>,
+) -> Result<(Render, Vec<VectorTrack>, Vec<SideRender>), RenderError> {
     if engine.next_frame() != Frame::ZERO {
         return Err(RenderError::AlreadyStarted);
     }
-    let sink = AudioSink::select(engine, usize::from(u16::MAX))?;
+    let most = usize::from(u16::MAX);
+    let (sink, others) = match sides {
+        None => (AudioSink::select(engine, most)?, Vec::new()),
+        Some((main, others)) => (
+            AudioSink::at(engine, main, most)?,
+            others
+                .iter()
+                .map(|a| AudioSink::at(engine, a, most).map(|s| (s, Vec::new())))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+    };
+    let routed = sides.is_some();
     let channels = u16::try_from(sink.width).unwrap_or(u16::MAX);
     let mut file = File {
         sink,
+        others,
+        routed,
         started: false,
         samples: Vec::new(),
         changed: None,
@@ -159,13 +258,26 @@ pub fn render_blocks_tapped(
         compute_devices: Vec::new(),
         placement: Vec::new(),
     };
-    Ok((render, file.taps.tracks))
+    let sides = file
+        .others
+        .into_iter()
+        .map(|(sink, samples)| SideRender {
+            channels: u16::try_from(sink.width).unwrap_or(u16::MAX),
+            address: sink.address,
+            samples,
+        })
+        .collect();
+    Ok((render, file.taps.tracks, sides))
 }
 
 /// The render's output: the audio sink's inputs times its `gain`, frame by
 /// frame, interleaved.
 struct File {
     sink: AudioSink,
+    /// ADR 0038 §9: the other play sides, each with its samples.
+    others: Vec<(AudioSink, Vec<f64>)>,
+    /// The sinks were named: each must stay at its address across swaps.
+    routed: bool,
     started: bool,
     samples: Vec<f64>,
     /// Why a swap lost the sink.
@@ -184,7 +296,16 @@ impl SinkOutput for File {
             self.started = true;
             return true;
         }
-        match self.sink.same(engine) {
+        let kept = if self.routed {
+            self.sink.same_at(engine).and_then(|()| {
+                self.others
+                    .iter_mut()
+                    .try_for_each(|(sink, _)| sink.same_at(engine))
+            })
+        } else {
+            self.sink.same(engine)
+        };
+        match kept {
             Ok(()) => true,
             Err(error) => {
                 self.changed = Some(error);
@@ -196,6 +317,18 @@ impl SinkOutput for File {
     fn block(&mut self, engine: &Engine, frames: usize) {
         self.taps.block(engine, self.at, frames);
         self.at += frames as u64;
+        for (sink, samples) in &mut self.others {
+            let gain = sink.gain_index();
+            for f in 0..frames {
+                for channel in 0..sink.width {
+                    let x = engine.sink_input_at(sink.id, channel, f).unwrap_or(0.0);
+                    samples.push(match gain.and_then(|j| engine.parameter_at_frame(j, f)) {
+                        Some(gain) => gain * x,
+                        None => x,
+                    });
+                }
+            }
+        }
         let gain = self.sink.gain_index();
         for f in 0..frames {
             for channel in 0..self.sink.width {
