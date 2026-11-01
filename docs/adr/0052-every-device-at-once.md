@@ -112,8 +112,8 @@ M4.1b follows ADR 0038's phases 2 and 3 (roles, the input ring, hot-plug polling
 - cpal on several devices at once is assumed to give independent callbacks; phase 2 measures it.
 - The loop constants are a design, not measurements; phase 1 fixes them from tests 3–4.
 
-## Open questions (for the owner)
-1. **Latency against safety:** a 1 ms jitter margin (about 7 ms per secondary role at 128 frames), or 3 ms for fewer slips on a busy machine?
-2. **Alignment:** delay the clock device (and faster secondaries) so every device sounds at the same moment, at a latency cost everywhere, or are reported latencies enough for now?
-3. **A clock-suspect device:** faded out (proposed), or left playing out of tune?
-4. **"Make this the clock device"** on a secondary box at the Setup level, restarting the run on it?
+## Answered questions (operator, 2026-11-01, under the owner's delegation of technical decisions)
+1. **Jitter margin:** 1 ms to start; the adapter widens it by 1 ms (up to 3 ms) after a slip and records it in the device's status. Measured in phase 2.
+2. **Alignment:** reported latencies only for now; a per-role alignment delay is a later option, if the owner asks.
+3. **A clock-suspect device:** faded out.
+4. **"Make this the clock device":** offered at the Setup level in phase 4 (it restarts the run on that device).
