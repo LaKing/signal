@@ -814,16 +814,16 @@ impl Host {
             "set" | "ramp" | "trigger" | "note" => {
                 self.edit(client, &id, kind, message).map(|()| None)
             }
-            "commit" => self.commit(message).map(Some),
+            "commit" => self.commit(ctx, message).map(Some),
             "snapshot.list" => self.snapshot_list().map(Some),
             "snapshot.save" => self.snapshot_save(message).map(Some),
-            "snapshot.restore" => self.snapshot_restore(message).map(Some),
+            "snapshot.restore" => self.snapshot_restore(ctx, message).map(Some),
             "snapshot.delete" => self.snapshot_delete(message).map(Some),
-            "snapshot.undo" => self.snapshot_undo(message).map(Some),
+            "snapshot.undo" => self.snapshot_undo(ctx, message).map(Some),
             "snapshot.move" => self.snapshot_move(message).map(Some),
             "snapshot.transition" => self.snapshot_transition(message).map(Some),
-            "snapshot.exclude" => self.snapshot_exclude(message).map(Some),
-            "retry" => self.retry(message).map(Some),
+            "snapshot.exclude" => self.snapshot_exclude(ctx, message).map(Some),
+            "retry" => self.retry(ctx, message).map(Some),
             "revert" => self.revert(message).map(Some),
             "panel.check" => self.panel_check(message).map(Some),
             "panel.read" => self.panel_read(message).map(Some),
@@ -852,7 +852,7 @@ impl Host {
             "transport.play" => self.transport(true).map(Some),
             "transport.stop" => self.transport(false).map(Some),
             "project.open" => self.project_open(message).map(Some),
-            "project.save" => self.project_save(client, &id),
+            "project.save" => self.project_save(ctx, client, &id),
             "project.revert" => self.project_revert().map(Some),
             "stats" => Ok(Some(self.stats())),
             "ping" => Ok(Some(json!({

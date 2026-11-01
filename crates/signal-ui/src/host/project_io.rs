@@ -109,7 +109,8 @@ impl Host {
                 self.queue.waiting.len()
             ));
         }
-        if let Err(error) = self.correct_before_save() {
+        let ctx = self.write_ctx();
+        if let Err(error) = self.correct_before_save(&ctx) {
             self.answer_saves();
             return Err(error);
         }
@@ -137,8 +138,8 @@ impl Host {
     }
 
     /// [`Host::save_document_then`], now.
-    pub(super) fn save_document_now(&mut self, done: SaveDone) {
-        if let Err(error) = self.correct_before_save() {
+    pub(super) fn save_document_now(&mut self, ctx: &WriteCtx, done: SaveDone) {
+        if let Err(error) = self.correct_before_save(ctx) {
             return done(Err(error));
         }
         match self.opening.document.as_mut() {
@@ -195,8 +196,8 @@ impl Host {
     }
 
     /// [`Host::save_as_then`], now.
-    pub(super) fn save_as_now(&mut self, file: &Path, done: SaveDone) {
-        if let Err(error) = self.correct_before_save() {
+    pub(super) fn save_as_now(&mut self, ctx: &WriteCtx, file: &Path, done: SaveDone) {
+        if let Err(error) = self.correct_before_save(ctx) {
             return done(Err(error));
         }
         match self.opening.document.as_mut() {
@@ -291,6 +292,7 @@ impl Host {
     /// meanwhile. A folder project's is answered at once.
     pub(super) fn project_save(
         &mut self,
+        ctx: &WriteCtx,
         client: u64,
         id: &Value,
     ) -> Result<Option<Value>, Failure> {
@@ -301,7 +303,7 @@ impl Host {
             self.noted(Ok::<(), Failure>(()))?;
             return Ok(Some(json!({"type": "saved", "file": null})));
         }
-        self.correct_before_save()
+        self.correct_before_save(ctx)
             .map_err(|error| fail("not-saved", error))?;
         let Some(document) = self.opening.document.as_mut() else {
             return Ok(Some(json!({"type": "saved", "file": null})));

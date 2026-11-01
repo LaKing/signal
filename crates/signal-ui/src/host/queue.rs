@@ -362,10 +362,13 @@ impl Host {
                 let ctx = self.write_ctx();
                 done(self.write_windows_now(&ctx, &dir, edit));
             }
-            Request::Save { save_as, done } => match save_as {
-                Some(file) => self.save_as_now(&file, done),
-                None => self.save_document_now(done),
-            },
+            Request::Save { save_as, done } => {
+                let ctx = self.write_ctx();
+                match save_as {
+                    Some(file) => self.save_as_now(&ctx, &file, done),
+                    None => self.save_document_now(&ctx, done),
+                }
+            }
         }
     }
 
@@ -493,10 +496,13 @@ impl Host {
                     let ctx = self.write_ctx();
                     done(self.write_windows_now(&ctx, &dir, edit));
                 }
-                Job::Save { save_as, done } => match save_as {
-                    Some(file) => self.save_as_now(&file, done),
-                    None => self.save_document_now(done),
-                },
+                Job::Save { save_as, done } => {
+                    let ctx = self.write_ctx();
+                    match save_as {
+                        Some(file) => self.save_as_now(&ctx, &file, done),
+                        None => self.save_document_now(&ctx, done),
+                    }
+                }
             }
             drop(holding);
         }

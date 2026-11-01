@@ -12,13 +12,13 @@ use signal_graph::ExecutionPlan;
 use signal_project::transaction::{self, ProjectLock};
 
 use crate::panel::{
-    ParameterView, Target, WriteEdit, Written, after_write_all, write_project_all,
-    write_project_chosen,
+    ParameterView, Target, WriteEdit, Written, after_write_all, write_project_chosen_under,
 };
 
 use super::Host;
 use super::failure::{Failure, fail};
 use super::live::Failed;
+use super::writer::WriteCtx;
 
 /// The top-level instance and parameter of a control address `/<instance>.<parameter>`.
 pub(super) fn control_of(port: &PortAddress) -> Option<(String, String)> {
@@ -109,7 +109,7 @@ impl Host {
     /// lock fails the Save (`Err`), unsaved: the corrections could not be
     /// written first, and a Save without them would lose them (ADR 0048).
     /// The queued Saves come here holding the lock; it never waits.
-    pub(super) fn correct_before_save(&mut self) -> Result<(), String> {
+    pub(super) fn correct_before_save(&mut self, ctx: &WriteCtx) -> Result<(), String> {
         if self.opening.document.is_none() {
             return Ok(());
         }
@@ -125,7 +125,7 @@ impl Host {
             // Nothing to write, or the writer's own `acquire` says why.
             Ok(None) | Err(_) => None,
         };
-        let error = self.write_corrections().err();
+        let error = self.write_corrections(ctx).err();
         drop(holding);
         if let Some(mode) = self.app.as_mut() {
             mode.correction_error = error;
@@ -162,7 +162,7 @@ impl Host {
     /// snapshot's restore keeps a value the file already has). A control
     /// with a live value of its own (a drag, unsaved) is left to it.
     /// Nothing to write is `Ok`.
-    fn write_corrections(&mut self) -> Result<(), String> {
+    fn write_corrections(&mut self, ctx: &WriteCtx) -> Result<(), String> {
         let pending = self.pending_corrections();
         if pending.is_empty() {
             return Ok(());
@@ -183,12 +183,13 @@ impl Host {
                 )
             })
             .collect();
-        let chosen = write_project_chosen(&self.opening.dir, &texts, &|text, i| {
-            pending.get(i).is_some_and(|(e, from)| {
-                signal_project::read_parameter(text, &e.instance, &e.parameter)
-                    .is_some_and(|v| v.to_bits() == from.to_bits())
-            })
-        });
+        let chosen =
+            write_project_chosen_under(&self.opening.dir, ctx.lock(), &texts, &|text, i| {
+                pending.get(i).is_some_and(|(e, from)| {
+                    signal_project::read_parameter(text, &e.instance, &e.parameter)
+                        .is_some_and(|v| v.to_bits() == from.to_bits())
+                })
+            });
         let (before, after, kept) =
             chosen.map_err(|error| format!("the corrected values were not written: {error}"))?;
         if kept.is_empty() {
@@ -218,13 +219,20 @@ impl Host {
     /// with toml_edit), live too if it was not the last value sent; the
     /// running project takes the same edit, so the file watch's reload of
     /// the written file applies nothing.
-    pub(super) fn commit(&mut self, message: &Value) -> Result<Value, Failure> {
+    pub(super) fn commit(&mut self, ctx: &WriteCtx, message: &Value) -> Result<Value, Failure> {
         if message.get("values").is_some() {
-            return self.commit_values(message);
+            return self.commit_values(ctx, message);
         }
         let (instance, parameter, target, value) = self.commit_target(message)?;
         let address = message.get("address").and_then(Value::as_str).unwrap_or("");
-        self.commit_control(address, &instance, &parameter, &target, value, false)
+        let edit = ControlWrite {
+            address: address.to_owned(),
+            instance,
+            parameter,
+            target,
+            value,
+        };
+        self.commit_control(ctx, edit, false)
     }
 
     /// The batch form of `commit` (external review, 2026-10-31: Space
@@ -233,7 +241,7 @@ impl Host {
     /// resolved once) and written into `project.toml` in one write, so
     /// controls started together start on the same frame whenever the
     /// message is delivered.
-    fn commit_values(&mut self, message: &Value) -> Result<Value, Failure> {
+    fn commit_values(&mut self, ctx: &WriteCtx, message: &Value) -> Result<Value, Failure> {
         if message.get("address").is_some() || message.get("value").is_some() {
             return Err(fail(
                 "bad-message",
@@ -278,7 +286,7 @@ impl Host {
             })?)),
         };
         let stamp = frame.map_or(Stamp::Default, Stamp::At);
-        let written = self.write_controls_at(&edits, false, stamp)?;
+        let written = self.write_controls_at(ctx, &edits, false, stamp)?;
         let values: Vec<Value> = edits
             .iter()
             .zip(&written.sent)
@@ -342,25 +350,15 @@ impl Host {
     /// refused.
     fn commit_control(
         &mut self,
-        address: &str,
-        instance: &str,
-        parameter: &str,
-        target: &Target,
-        value: Option<f64>,
+        ctx: &WriteCtx,
+        edit: ControlWrite,
         retrying: bool,
     ) -> Result<Value, Failure> {
-        let edit = ControlWrite {
-            address: address.to_owned(),
-            instance: instance.to_owned(),
-            parameter: parameter.to_owned(),
-            target: target.clone(),
-            value,
-        };
-        let written = self.write_controls(std::slice::from_ref(&edit), retrying)?;
+        let written = self.write_controls(ctx, std::slice::from_ref(&edit), retrying)?;
         Ok(json!({
             "type": "committed",
-            "address": address,
-            "value": value,
+            "address": edit.address,
+            "value": edit.value,
             "file": signal_project::PROJECT_FILE,
             "writes": self.writes,
             "sent": written.sent.first().copied().unwrap_or(true),
@@ -378,15 +376,17 @@ impl Host {
     /// written file sends it, when its live send was refused.
     fn write_controls(
         &mut self,
+        ctx: &WriteCtx,
         edits: &[ControlWrite],
         retrying: bool,
     ) -> Result<ControlsWritten, Failure> {
-        self.write_controls_at(edits, retrying, Stamp::Default)
+        self.write_controls_at(ctx, edits, retrying, Stamp::Default)
     }
 
     /// [`Host::write_controls`], every live send stamped `stamp`.
     fn write_controls_at(
         &mut self,
+        ctx: &WriteCtx,
         edits: &[ControlWrite],
         retrying: bool,
         stamp: Stamp,
@@ -417,7 +417,9 @@ impl Host {
                 )
             })
             .collect();
-        let (before, after) = match write_project_all(&self.opening.dir, &texts) {
+        let written =
+            write_project_chosen_under(&self.opening.dir, ctx.lock(), &texts, &|_, _| true);
+        let (before, after) = match written.map(|(b, a, _)| (b, a)) {
             Ok(texts) => texts,
             Err(error) => {
                 self.controls_unwritten(edits, &sent, &error.to_string());
@@ -624,7 +626,7 @@ impl Host {
     /// `retry`: commits an unsaved control's live value again (the latest
     /// one sent; the file's when only its live send is in doubt, the default
     /// after a failed reset).
-    pub(super) fn retry(&mut self, message: &Value) -> Result<Value, Failure> {
+    pub(super) fn retry(&mut self, ctx: &WriteCtx, message: &Value) -> Result<Value, Failure> {
         let address = message.get("address").and_then(Value::as_str).unwrap_or("");
         let port: PortAddress = address
             .parse()
@@ -652,6 +654,13 @@ impl Host {
             None if reset => None,
             None => unsaved.in_file.then_some(unsaved.file),
         };
-        self.commit_control(address, &instance, &parameter, &target, value, true)
+        let edit = ControlWrite {
+            address: address.to_owned(),
+            instance,
+            parameter,
+            target,
+            value,
+        };
+        self.commit_control(ctx, edit, true)
     }
 }

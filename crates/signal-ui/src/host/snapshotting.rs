@@ -16,6 +16,7 @@ use crate::{app, snapshot};
 
 use super::controls::{ControlWrite, control_of};
 use super::failure::{Failure, fail, fail_with};
+use super::writer::WriteCtx;
 use super::{Host, lines, with};
 
 /// The `snapshots` message of `all` read from `text` (ADR 0041): the base,
@@ -235,13 +236,18 @@ impl Host {
     /// as one change and sent live, as `commit` writes and sends one value;
     /// entries that are gone are skipped, values out of range clamped, and
     /// both reported.
-    pub(super) fn snapshot_restore(&mut self, message: &Value) -> Result<Value, Failure> {
+    pub(super) fn snapshot_restore(
+        &mut self,
+        ctx: &WriteCtx,
+        message: &Value,
+    ) -> Result<Value, Failure> {
         self.snapshot_project(true)?;
         let name = snapshot_name(message)?;
         let check = base_check(message)?;
         let transition = transition_of(message, "transitionMs")?;
         let wanted = name.clone();
         self.restore_from(
+            ctx,
             check,
             move |all| {
                 all.snapshots
@@ -257,11 +263,16 @@ impl Host {
 
     /// `snapshot.undo` (ADR 0041 §7): the undo snapshot restored, after the
     /// values playing now take its place, so a second undo redoes.
-    pub(super) fn snapshot_undo(&mut self, message: &Value) -> Result<Value, Failure> {
+    pub(super) fn snapshot_undo(
+        &mut self,
+        ctx: &WriteCtx,
+        message: &Value,
+    ) -> Result<Value, Failure> {
         self.snapshot_project(true)?;
         let check = base_check(message)?;
         let transition = transition_of(message, "transitionMs")?;
         self.restore_from(
+            ctx,
             check,
             |all| all.undo.take().ok_or(SnapshotError::NoUndo),
             "undo",
@@ -322,13 +333,14 @@ impl Host {
     /// (compared), so the undo snapshot from before is kept.
     fn restore_from(
         &mut self,
+        ctx: &WriteCtx,
         check: BaseCheck,
         take: impl FnOnce(&mut snapshots::Snapshots) -> Result<snapshots::Values, SnapshotError>,
         name: &str,
         kind: &str,
         transition: Option<u32>,
     ) -> Result<Value, Failure> {
-        let lock = ProjectLock::acquire(&self.opening.dir).map_err(|e| {
+        let lock = ctx.lock().map_err(|e| {
             fail(
                 "write-failed",
                 format!(
@@ -635,7 +647,11 @@ impl Host {
     /// instance's `snapshot_exclude` in `project.toml` (under the writer
     /// lock, compared just before the rename: ADR 0040). Not a parameter
     /// value: nothing is sent and nothing plays differently.
-    pub(super) fn snapshot_exclude(&mut self, message: &Value) -> Result<Value, Failure> {
+    pub(super) fn snapshot_exclude(
+        &mut self,
+        ctx: &WriteCtx,
+        message: &Value,
+    ) -> Result<Value, Failure> {
         use signal_project::transaction::replace_unchanged;
         self.snapshot_project(false)?;
         let address = message.get("address").and_then(Value::as_str).unwrap_or("");
@@ -663,7 +679,7 @@ impl Host {
                 format!("{address} was not written to {}: {error}", path.display()),
             )
         };
-        let lock = ProjectLock::acquire(&self.opening.dir).map_err(|e| failed(e.to_string()))?;
+        let lock = ctx.lock().map_err(|e| failed(e.to_string()))?;
         let before = fs::read_to_string(&path).map_err(|e| failed(e.to_string()))?;
         let after = signal_project::write_snapshot_exclude(&before, &instance, &parameter, exclude)
             .map_err(|e| failed(e.to_string()))?;

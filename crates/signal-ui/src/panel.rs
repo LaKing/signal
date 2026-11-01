@@ -1067,14 +1067,35 @@ fn write_project_between(
     keep: &dyn Fn(&str, usize) -> bool,
     between: &mut dyn FnMut(),
 ) -> Result<(String, String, Vec<usize>), ProjectWriteError> {
-    let lock = ProjectLock::acquire(dir).map_err(|e| {
-        ProjectWriteError::Failed(format!(
-            "{} not written to {}: {e}",
-            what_of(edits),
-            dir.join(signal_project::PROJECT_FILE).display()
-        ))
-    })?;
+    let lock = ProjectLock::acquire(dir).map_err(|e| lock_failed(dir, edits, &e))?;
     write_project_locked(dir, &lock, edits, keep, between)
+}
+
+/// [`write_project_chosen`] by a writer that takes the project's writer
+/// lock itself (the host's, through its writer context): `lock` is what
+/// taking it gave, and a failure to take it is reported as
+/// [`write_project_chosen`] reports it.
+pub fn write_project_chosen_under(
+    dir: &Path,
+    lock: io::Result<ProjectLock>,
+    edits: &[(&str, &str, Option<f64>, &[&str])],
+    keep: &dyn Fn(&str, usize) -> bool,
+) -> Result<(String, String, Vec<usize>), ProjectWriteError> {
+    let lock = lock.map_err(|e| lock_failed(dir, edits, &e))?;
+    write_project_locked(dir, &lock, edits, keep, &mut || {})
+}
+
+/// The project's writer lock was not taken for `edits`: nothing written.
+fn lock_failed(
+    dir: &Path,
+    edits: &[(&str, &str, Option<f64>, &[&str])],
+    error: &io::Error,
+) -> ProjectWriteError {
+    ProjectWriteError::Failed(format!(
+        "{} not written to {}: {error}",
+        what_of(edits),
+        dir.join(signal_project::PROJECT_FILE).display()
+    ))
 }
 
 /// "out.gain was", or "3 parameters were", for an error.
