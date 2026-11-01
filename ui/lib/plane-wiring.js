@@ -28,6 +28,15 @@ export const CHANNEL_MAX_SHARE = 0.2;
 /** A box's title band, and its ports' pitch, in pu. */
 export const TITLE_PU = 5;
 export const PORT_PITCH_PU = 3;
+/**
+ * The Wiring level's text, under the Setup level's rule (`textSize`,
+ * ui/lib/plane-layout.js): a size in plane units, never below `min` px on
+ * screen, never past `cap` (the room the box gives it).
+ */
+export const WIRING_TEXT = Object.freeze({
+  title: Object.freeze({ base: 16, min: 12, cap: 30 }),
+  port: Object.freeze({ base: 12, min: 10, cap: 20 }),
+});
 /** The kinds of cable, in the order a legend lists them. */
 export const CABLE_KINDS = Object.freeze(['audio', 'control', 'events', 'vector']);
 
@@ -116,7 +125,10 @@ export function wiringModel(stack, owner, stackOf, instances = [], connections =
   });
   // Two ports of one instrument and side sharing a name: both say their instance.
   for (const { ins, outs } of ports.values()) {
-    for (const list of [ins, outs]) for (const p of list) if (list.some((q) => q !== p && q.label === p.label)) p.label = String(p.address).replace(/^\//, '');
+    for (const list of [ins, outs]) {
+      const shared = list.filter((p) => list.some((q) => q !== p && q.label === p.label));
+      for (const p of shared) p.label = String(p.address).replace(/^\//, '');
+    }
   }
   return { ports, cables };
 }

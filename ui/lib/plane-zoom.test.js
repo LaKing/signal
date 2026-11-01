@@ -7,7 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CONTROL_BAND, ENGINE_BAND, ENGINE_GAP, FOCUS_BAND, MARGIN_PX, MAX_R, MIN_R, SURROUND, WIRING_BAND, bandShare, clampScroll, engineBand, fitAll, fitScale, fitWidth, frameOnto, instrumentAt, levelOf, opensAt, planeFades, planeFromFrame, reachesFit, screenRect, scrollStack, toPlane, toScreen, zoomAbout, zoomStep } from './plane-zoom.js';
+import { CONTROL_BAND, ENGINE_BAND, ENGINE_GAP, FOCUS_BAND, LIFT, MARGIN_PX, depthOf, splitDepth, MAX_R, MIN_R, SURROUND, WIRING_BAND, bandShare, clampScroll, engineBand, fitAll, fitScale, fitWidth, frameOnto, instrumentAt, levelOf, opensAt, planeFades, planeFromFrame, reachesFit, screenRect, scrollStack, toPlane, toScreen, zoomAbout, zoomStep } from './plane-zoom.js';
 
 const close = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) <= eps, `${a} ≈ ${b}`);
 
@@ -100,7 +100,7 @@ test('the level follows the ratio to the fit', () => {
   assert.equal(levelOf(0.9999), 'setup');
   assert.equal(levelOf(1), 'stack');
   assert.equal(levelOf(1 - 1e-9), 'stack');
-  assert.equal(levelOf(1.6), 'stack');
+  assert.equal(levelOf(1.04), 'stack');
   assert.equal(levelOf(WIRING_BAND[1]), 'wiring');
   assert.equal(levelOf(CONTROL_BAND[0] + 0.1), 'wiring');
   assert.equal(levelOf(CONTROL_BAND[1]), 'control');
@@ -162,7 +162,8 @@ test('zooming about a point keeps it; the ratio stays within its limits', () => 
   close(q.x, at.x);
   close(q.y, at.y);
   const capped = zoomAbout(view, 1e9, at, 1);
-  close(capped.k, MAX_R);
+  // The limit is a depth: its scale is the depth less the lift.
+  close(capped.k, MAX_R - LIFT);
   assert.equal(zoomAbout(view, Number.NaN, at), view);
 });
 
@@ -239,11 +240,13 @@ test('zoom never changes the selection: through every band and back, only the vi
     state = zoomStep(state, 1.05, at, { fit, rects, maxR: engine[1] });
     assert.equal(state.selection, selection, 'the selection is the very same object');
     assert.equal(state.extra, extra);
-    if (!opensAt(before.view.k / fit)) assert.equal(state.opened, before.opened, 'inside the control band the opened instrument stays');
-    seen.push(state.view.k / fit);
+    if (!opensAt(depthOf(before.view.k / fit, before.lift))) assert.equal(state.opened, before.opened, 'inside the control band the opened instrument stays');
+    seen.push({ z: depthOf(state.view.k / fit, state.lift), k: state.view.k });
   }
   assert.equal(state.opened, 'card:mono-synth');
-  assert.ok(Math.abs(state.view.k / fit - engine[1]) < 1e-9, 'the zoom stops at the engine band’s end');
+  assert.ok(Math.abs(depthOf(state.view.k / fit, state.lift) - engine[1]) < 1e-9, 'the zoom stops at the engine band’s end');
+  // Through the wiring band the scale stays the fit: the whole Stack's width stays on stage.
+  for (const { z, k } of seen) if (z >= 1 && z <= 1 + LIFT) assert.ok(Math.abs(k - fit) < 1e-9, `at depth ${z} the scale is the fit`);
   // And out again: the selection never moves, whatever the zoom.
   for (let i = 0; i < 80; i++) {
     state = zoomStep(state, 1 / 1.05, at, { fit, rects, maxR: engine[1] });
@@ -252,5 +255,21 @@ test('zoom never changes the selection: through every band and back, only the vi
   // The zoom point stays put through the bands (the nested footprints: nothing slides).
   const p = toPlane(state.view, at);
   assert.ok(Math.abs(p.x - 600) < 1e-6 && Math.abs(p.y - 400) < 1e-6);
-  assert.ok(seen.some((r) => r > CONTROL_BAND[1]) && seen.some((r) => r > WIRING_BAND[0] && r < WIRING_BAND[1]));
+  assert.ok(seen.some(({ z }) => z > CONTROL_BAND[1]) && seen.some(({ z }) => z > WIRING_BAND[0] && z < WIRING_BAND[1]));
+  assert.equal(state.lift, 0, 'zoomed back out of the fit: no lift left');
+});
+
+test('the depth: the lift at the fit, then the scale; continuous and monotonic both ways', () => {
+  assert.deepEqual(splitDepth(0.5), { r: 0.5, lift: 0 });
+  assert.deepEqual(splitDepth(1.2), { r: 1, lift: 0.19999999999999996 });
+  close(splitDepth(2).r, 2 - LIFT);
+  let prev = -Infinity;
+  for (let z = 0.5; z < 4; z += 0.001) {
+    const { r, lift } = splitDepth(z);
+    const back = depthOf(r, lift);
+    close(back, z, 1e-9);
+    assert.ok(back > prev);
+    prev = back;
+  }
+  assert.equal(depthOf(0.8, LIFT), 0.8, 'no lift below the fit');
 });

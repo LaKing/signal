@@ -54,6 +54,8 @@ test('the studio’s Wiring: each instrument’s ports derived from the connecti
     'card:tape-echo': { ins: ['/echo.in audio'], outs: ['/echo.out audio'] },
     'card:master': { ins: ['/bus.c audio', '/bus.a audio', '/bus.b audio'], outs: ['/limiter.out audio'] },
   });
+  // Two outputs of one instrument named alike both say their instance.
+  assert.deepEqual(model.ports.get('card:rhythm-composer').outs.map((p) => p.label), ['drum_a.out', 'drum_b.out']);
   // One cable per connection between instruments, of every kind; the edge cable once for the Setup's pin (its fan-out to l and r is the Setup's).
   assert.deepEqual(
     model.cables.map((c) => `${c.from} → ${c.b.edge ? `edge ${c.b.pin}` : c.to} ${c.kind}`),

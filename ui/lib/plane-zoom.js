@@ -30,10 +30,19 @@ export { SURROUND };
 
 /** The focus band, in `r`: Setup things fade from its start to SURROUND at its end (the fit). */
 export const FOCUS_BAND = Object.freeze([0.6, 1]);
-/** The wiring band, in `r` (ADR 0051 §8: 1.5× to 2×, tunable). */
-export const WIRING_BAND = Object.freeze([1.5, 2]);
-/** The control band, in `r` (tunable): the instrument under the zoom point opens into its Control plane, the others fade to SURROUND. */
-export const CONTROL_BAND = Object.freeze([2.2, 2.6]);
+/**
+ * The wiring band, in depth `z` (ADR 0051 §8, tunable; tuned 2026-11-01 by
+ * the coordinator's review of phase 2: at 2× only half the Stack was on
+ * stage). It lies at the Stack's width fit: zooming on past the fit first
+ * deepens the view by LIFT without changing its scale (`depthOf`), so the
+ * front panels cross-fade to the back of the rack with the whole Stack's
+ * width on stage; only past the band does the scale grow again.
+ */
+export const WIRING_BAND = Object.freeze([1.05, 1.3]);
+/** The control band, in `z` (tunable): one instrument dominates the stage; it opens into its Control plane, the others fade to SURROUND. */
+export const CONTROL_BAND = Object.freeze([1.6, 2]);
+/** How far the depth goes at the fit, its scale unchanged: through the whole wiring band. */
+export const LIFT = WIRING_BAND[1] - 1;
 /** The engine band starts at this share of the ratio at which the cube fills the stage, and never before CONTROL_BAND's end plus ENGINE_GAP. */
 export const ENGINE_FROM = 0.6;
 export const ENGINE_GAP = 0.5;
@@ -44,6 +53,24 @@ export const MIN_R = 0.01;
 export const MAX_R = CONTROL_BAND[1] + 2 * ENGINE_GAP;
 /** A ratio within this of 1 is the fit (rounding of a fitted view). */
 const FIT_EPSILON = 1e-6;
+
+/**
+ * The depth `z` of a view at scale ratio `r` (its scale over the Stack's
+ * fit) with `lift` (0 to LIFT): `r` below the fit; at and above it, `r`
+ * plus the lift. Every band and level is a function of `z`, so the levels
+ * stay one continuous, monotonic curve of the zoom.
+ */
+export function depthOf(r, lift = 0) {
+  if (!(r >= 1 - FIT_EPSILON)) return r;
+  return r + Math.min(LIFT, Math.max(0, lift));
+}
+
+/** The scale ratio and the lift of depth `z` (`depthOf`'s inverse): below the fit no lift; at the fit the lift first; then the scale. */
+export function splitDepth(z) {
+  if (z < 1) return { r: z, lift: 0 };
+  if (z <= 1 + LIFT) return { r: 1, lift: z - 1 };
+  return { r: z - LIFT, lift: LIFT };
+}
 
 /** The identity view. */
 export const IDENTITY = Object.freeze({ k: 1, x: 0, y: 0 });
@@ -209,10 +236,10 @@ export function fitAll(bounds, viewport, margin = MARGIN_PX) {
   return { k, x: viewport.w / 2 - (bounds.x + bounds.w / 2) * k, y: viewport.h / 2 - (bounds.y + bounds.h / 2) * k };
 }
 
-/** `view` zoomed by `factor` about screen point `at` (which stays where it is), its ratio to `fit` kept within MIN_R and `maxR` (MAX_R by default). */
+/** `view` zoomed by `factor` about screen point `at` (which stays where it is), its ratio to `fit` kept within MIN_R and the scale of depth `maxR` (MAX_R by default). */
 export function zoomAbout(view, factor, at, fit = null, maxR = MAX_R) {
   let k = view.k * factor;
-  if (fit > 0) k = Math.min(fit * maxR, Math.max(fit * MIN_R, k));
+  if (fit > 0) k = Math.min(fit * splitDepth(maxR).r, Math.max(fit * MIN_R, k));
   if (!Number.isFinite(k) || k <= 0) return view;
   const f = k / view.k;
   return { k, x: at.x - (at.x - view.x) * f, y: at.y - (at.y - view.y) * f };
@@ -269,7 +296,13 @@ export function planeFromFrame(board, frame, cube, offset = { x: 0, y: 0 }) {
  * limit (the engine band's end).
  */
 export function zoomStep(state, factor, at, { fit = null, rects = [], maxR = MAX_R } = {}) {
-  const r0 = fit ? state.view.k / fit : 0;
-  const opened = opensAt(r0) && rects.length ? (instrumentAt(rects, toPlane(state.view, at)) ?? state.opened) : state.opened;
-  return { ...state, view: zoomAbout(state.view, factor, at, fit, maxR), opened };
+  if (!fit) return { ...state, view: zoomAbout(state.view, factor, at) };
+  const r0 = state.view.k / fit;
+  const z0 = depthOf(r0, state.lift ?? 0);
+  const opened = opensAt(z0) && rects.length ? (instrumentAt(rects, toPlane(state.view, at)) ?? state.opened) : state.opened;
+  const z1 = Math.min(maxR, Math.max(MIN_R, z0 * factor));
+  const { r, lift } = splitDepth(z1);
+  // In the lift the scale stays: nothing on stage moves while the levels cross-fade.
+  const view = Math.abs(r - r0) < 1e-12 ? state.view : zoomAbout(state.view, (r * fit) / state.view.k, at, fit, maxR);
+  return { ...state, view, opened, lift };
 }

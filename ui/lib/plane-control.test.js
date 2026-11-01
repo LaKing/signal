@@ -154,3 +154,36 @@ test('the cube’s place: the free spot nearest its controls, ties by y then x; 
   const full = placeCube({ w: 64, h: 48 }, area, [{ x: -10, y: -10, w: 500, h: 500 }], { x: 0, y: 0 });
   assert.deepEqual(full, { x: 336, y: 152, w: 64, h: 48 });
 });
+
+test('automation and external cables never run over a control: corridors between the columns, the left edge, lanes in the row gaps', () => {
+  const cards = studioCards();
+  const graph = structuredClone(STUDIO);
+  graph.top.instances.push({ name: 'lfo', module: 'std.osc', ports: [{ name: 'out', address: '/lfo.out', direction: 'out', shape: 'signal', kind: 'control', rate: 1 }], parameters: [] });
+  graph.top.connections.push({ from: '/lfo.out', to: '/synth.cutoff', converters: [] });
+  const owner = assignInstruments({ instances: graph.top.instances, connections: graph.top.connections, cards });
+  owner.set('lfo', 'card:tape-echo');
+  const binds = cards.find((c) => c.id === 'mono-synth').binds.filter((b) => b !== '/melody.position');
+  // Three rows of knobs, as MONO SYNTH lays them out, the gap between rows its group headings'.
+  const rect = { x: 0, y: 100, w: 1280, h: 700 };
+  const controls = binds.map((address, i) => ({ id: `c${i}`, tag: 'signal-knob', binds: [address], writes: true, rect: { x: 40 + (i % 10) * 70, y: rect.y + 40 + Math.floor(i / 10) * 140, w: 56, h: 100 } }));
+  const autos = automations({ entry: SYNTH, binds, owner, graph });
+  const c = controlLayout({ rect, controls, engine: engineOf(SYNTH, owner), autos, edgeYs: new Map([['/synth.cutoff', 160]]), inner: new Map() });
+  assert.ok(c.wires.length >= 5);
+  const through = (a, b, r) => {
+    const lo = { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y) };
+    const hi = { x: Math.max(a.x, b.x), y: Math.max(a.y, b.y) };
+    return lo.x < r.x + r.w - 1e-6 && hi.x > r.x + 1e-6 && lo.y < r.y + r.h - 1e-6 && hi.y > r.y + 1e-6;
+  };
+  for (const w of c.wires) {
+    for (let i = 1; i < w.points.length; i++) {
+      for (const k of controls) {
+        // Its last segment ends on its own control's top edge, from above: that is landing, not crossing.
+        assert.ok(!through(w.points[i - 1], w.points[i], k.rect), `${w.id} runs over ${k.binds[0]}`);
+      }
+      assert.ok(!through(w.points[i - 1], w.points[i], c.cube) || i === 1, `${w.id} runs over the cube`);
+    }
+  }
+  const external = c.wires.find((w) => w.auto.source === 'external');
+  assert.equal(external.points[0].x, rect.x);
+  assert.ok(external.points[1].x < Math.min(...controls.map((k) => k.rect.x)), 'along the left edge, in the margin');
+});

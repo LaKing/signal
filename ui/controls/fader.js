@@ -16,6 +16,8 @@ export class SignalFader extends SignalValueElement {
 .art { width: var(--signal-fader-thickness, 40px); height: var(--signal-fader-length, 200px); cursor: ns-resize; }
 :host([orientation="horizontal"]) .art { width: var(--signal-fader-length, 200px); height: var(--signal-fader-thickness, 40px); cursor: ew-resize; }
 .readout { height: 2.6em; }
+/* A modulated fader (ADR 0051 §6, ADR 0050 §11): a band beside the track from the setting to the effective value; the thumb stays the setting. */
+.effective-band { fill: var(--signal-effective, #ffb74d); }
 `;
 
   get horizontal() {
@@ -24,7 +26,7 @@ export class SignalFader extends SignalValueElement {
 
   template() {
     return `<div class="control">
-  <div class="face"><svg class="art" part="art"><rect class="track"/><rect class="fill"/><rect class="effective"/><rect class="thumb" rx="2"/></svg></div>
+  <div class="face"><svg class="art" part="art"><rect class="track"/><rect class="fill"/><rect class="effective-band"/><rect class="effective"/><rect class="thumb" rx="2"/></svg></div>
   <div class="skin" hidden></div>
   <div class="label"></div>
   <div class="readout"></div>
@@ -77,10 +79,13 @@ export class SignalFader extends SignalValueElement {
     this.place(this.$('.track'), this.along(0), this.along(1), mid - 2, mid + 2);
     this.place(this.$('.fill'), this.along(0), this.along(position), mid - 2, mid + 2);
     const effective = this.$('.effective');
+    const band = this.$('.effective-band');
     effective.style.display = b.modulated ? '' : 'none';
+    band.style.display = b.modulated ? '' : 'none';
     if (b.modulated) {
       const at = this.along(b.effectivePosition);
       this.place(effective, at - 1.5, at + 1.5, 2, THICK - 2);
+      this.place(band, this.along(position), at, mid + 5, mid + 8);
     }
     const at = this.along(position);
     this.place(this.$('.thumb'), at - 6, at + 6, mid - 14, mid + 14);

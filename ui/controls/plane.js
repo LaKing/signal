@@ -53,10 +53,10 @@ import { GUTTER, PU, parsePlace, parsePlate } from '../lib/plate.js';
 import { CARD_PREFIX, PLANE_FILE, panelCards, planeOf } from '../lib/plane-file.js';
 import { assignInstruments, edgePins, hasPart, instrumentTitle, roleEndpoints, stackMembers } from '../lib/plane-instruments.js';
 import { channelSummary, endpointLabel, peripherals, playbackPortOf, setupCables, splitBoxes } from '../lib/plane-peripherals.js';
-import { BOX_PU, OTHERS_PU, TEXT, TRAY_LINE_PU, capChars, boxPorts, cablePath, othersBoxes, pinPlaces, planeLayout, stackLayout, textSizes } from '../lib/plane-layout.js';
+import { BOX_PU, OTHERS_PU, TEXT, TRAY_LINE_PU, capChars, boxPorts, cablePath, othersBoxes, pinPlaces, planeLayout, stackLayout, textSize, textSizes } from '../lib/plane-layout.js';
 import { NOT_CONTROLS, READERS, bindList, fitText } from '../lib/schematic-controls.js';
-import { CONTROL_BAND, ENGINE_BAND, FOCUS_BAND, MARGIN_PX, WIRING_BAND, engineBand, fitAll, fitScale, fitWidth, frameOnto, instrumentAt, levelOf, panBy, planeFades, planeFromFrame, reachesFit, screenRect, scrollStack, toPlane, zoomAbout, zoomStep } from '../lib/plane-zoom.js';
-import { polylinePath, portIndex, wiringLayout, wiringModel } from '../lib/plane-wiring.js';
+import { CONTROL_BAND, ENGINE_BAND, FOCUS_BAND, LIFT, MARGIN_PX, WIRING_BAND, depthOf, engineBand, fitAll, fitScale, fitWidth, frameOnto, instrumentAt, levelOf, panBy, planeFades, planeFromFrame, reachesFit, screenRect, scrollStack, splitDepth, toPlane, zoomAbout, zoomStep } from '../lib/plane-zoom.js';
+import { WIRING_TEXT, polylinePath, portIndex, wiringLayout, wiringModel } from '../lib/plane-wiring.js';
 import { automations, controlLayout, engineOf, innerAddress } from '../lib/plane-control.js';
 import { hitItem, visibleIds } from '../lib/plane-hit.js';
 import { PatchSession } from '../lib/schematic-edit.js';
@@ -150,10 +150,10 @@ svg.wiring, svg.control, svg.drag { position: absolute; left: 0; top: 0; width: 
 svg.wiring text, svg.control text { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
 .w-box { fill: #161a20; stroke: #3d4552; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .w-box.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 2.5; }
-.w-title { fill: var(--signal-muted, #8a93a3); font-size: 15px; letter-spacing: 0.16em; font-weight: 600; }
+.w-title { fill: var(--signal-muted, #8a93a3); font-size: var(--w-title, 16px); letter-spacing: 0.16em; font-weight: 600; }
 .w-port { fill: var(--signal-board-bg, #0e1014); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .w-port.selected { stroke-width: 4; }
-.w-port-label { fill: var(--signal-fg, #d6dbe4); font-size: 11px; }
+.w-port-label { fill: var(--signal-fg, #d6dbe4); font-size: var(--w-port, 12px); }
 .w-cable { fill: none; stroke-width: 2.5; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
 .w-cable.selected, .c-auto.selected, .c-leg.selected { stroke-width: 5; filter: drop-shadow(0 0 3px currentColor); }
 .w-junction { stroke: none; }
@@ -167,9 +167,9 @@ svg.wiring text, svg.control text { font-family: -apple-system, BlinkMacSystemFo
 .c-sheet { fill: #0f1d17; stroke: #24412f; stroke-width: 1; vector-effect: non-scaling-stroke; }
 .c-ribbon { fill: color-mix(in srgb, var(--signal-effective, #ffb74d) 12%, transparent); stroke: color-mix(in srgb, var(--signal-effective, #ffb74d) 45%, transparent); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .c-ribbon-label { fill: var(--signal-effective, #ffb74d); font-size: 9px; font-weight: 600; }
-.c-leg { fill: none; stroke: var(--signal-effective, #ffb74d); stroke-width: 1.5; vector-effect: non-scaling-stroke; opacity: 0.9; color: var(--signal-effective, #ffb74d); }
+.c-leg { fill: none; stroke: var(--signal-effective, #ffb74d); stroke-width: 1; vector-effect: non-scaling-stroke; opacity: 0.45; color: var(--signal-effective, #ffb74d); }
 .c-leg.reads { stroke: var(--signal-meter-rms, #3ecf8e); stroke-dasharray: 3 3; }
-.c-via { fill: var(--signal-effective, #ffb74d); }
+.c-via { fill: var(--signal-effective, #ffb74d); opacity: 0.6; }
 .c-via.selected, .c-pin.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .c-auto { fill: none; stroke-width: 2.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
 .c-auto.inner { stroke-dasharray: 7 4; }
@@ -263,6 +263,8 @@ export class SignalPlane extends HTMLElement {
     this.textKey = '';
     /** The instrument that opens into its Control plane (view state: follows the zoom point below the control band). */
     this.opened = null;
+    /** The depth past the Stack's fit at its scale (`depthOf`: the wiring band, view state). */
+    this.lift = 0;
     /** What is selected at Wiring and Control (view state, by connection or address; zoom never changes it). */
     this.selection = null;
     /** The patches written from Wiring and Control, for undo and redo (the schematic's session model). */
@@ -377,6 +379,7 @@ export class SignalPlane extends HTMLElement {
     this.deepOwned = false;
     this.handoff = undefined;
     this.opened = null;
+    this.lift = 0;
     this.selection = null;
     this.graphKey = '';
     this.closeChooser();
@@ -850,7 +853,7 @@ export class SignalPlane extends HTMLElement {
     if (!this.fitted || !this.touched) {
       this.fitted = true;
       this.view = fitAll(this.layout.bounds, this.viewport);
-    } else if (this.level() === 'stack') {
+    } else if (Math.abs(this.scaleRatio() - 1) < 1e-6 || this.level() === 'stack') {
       const rect = this.focusRect();
       if (rect) this.view = fitWidth(rect, this.viewport, this.view);
     }
@@ -893,7 +896,14 @@ export class SignalPlane extends HTMLElement {
     return rect && this.viewport.w ? fitScale(rect, this.viewport) : null;
   }
 
-  ratio(view = this.view) {
+  /** The view's depth (`depthOf`): its scale over the focused Stack's fit, plus the lift at the fit. Every level and fade is a function of it. */
+  ratio(view = this.view, lift = this.lift) {
+    const fit = this.fitK();
+    return fit ? depthOf(view.k / fit, lift) : 0;
+  }
+
+  /** The view's scale over the focused Stack's fit alone. */
+  scaleRatio(view = this.view) {
     const fit = this.fitK();
     return fit ? view.k / fit : 0;
   }
@@ -906,7 +916,7 @@ export class SignalPlane extends HTMLElement {
     const fit = this.fitK();
     if (!cube || !fit || !this.viewport.w) return ENGINE_BAND;
     const cubeFit = Math.min((this.viewport.w - 2 * MARGIN_PX) / cube.w, (this.viewport.h - 2 * MARGIN_PX) / cube.h);
-    return engineBand(cubeFit / fit);
+    return engineBand(depthOf(cubeFit / fit, LIFT));
   }
 
   level(view = this.view) {
@@ -964,6 +974,8 @@ export class SignalPlane extends HTMLElement {
     if (key === this.textKey) return;
     this.textKey = key;
     for (const [name, size] of Object.entries(sizes)) this.world.style.setProperty(`--t-${name}`, `${size.toFixed(2)}px`);
+    // The Wiring level's text under the same rule: never below its least size on screen.
+    for (const [name, rule] of Object.entries(WIRING_TEXT)) this.world.style.setProperty(`--w-${name}`, `${textSize(rule, k).toFixed(2)}px`);
   }
 
   // The Wiring level: the focused Stack from behind (ui/lib/plane-wiring.js), laid out when it first shows, kept per graph and layout.
@@ -1150,7 +1162,7 @@ export class SignalPlane extends HTMLElement {
       root.append(path);
       elements.set(l.id, path);
       items.push({ kind: 'leg', id: l.id, leg: l, points: l.points });
-      const via = svg('circle', { class: 'c-via', cx: l.via.x, cy: l.via.y, r: 3.5 });
+      const via = svg('circle', { class: 'c-via', cx: l.via.x, cy: l.via.y, r: 2.5 });
       root.append(via);
       const viaId = `via ${l.control}`;
       elements.set(viaId, via);
@@ -1381,20 +1393,24 @@ export class SignalPlane extends HTMLElement {
 
   // Travel: a focus, Fit, Escape and Enter animate the view (ADR 0047 §8's curve), at once with reduced motion.
 
-  travel(to) {
+  travel(to, lift = this.lift) {
     this.stopTravel();
     this.touched = true;
     const from = this.view;
+    const fromLift = this.lift;
     const reduced = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
     if (reduced) {
       this.view = to;
+      this.lift = lift;
       this.render();
       return;
     }
     const start = performance.now();
     this.travelTarget = to;
+    this.travelLift = lift;
     const step = (now) => {
       const t = Math.min(1, (now - start) / ZOOM_MS);
+      this.lift = t >= 1 ? lift : fromLift + (lift - fromLift) * ease(t);
       this.view = t >= 1 ? to : plain(tween(from, to, ease(t)));
       this.render();
       this.traveling = t < 1 ? requestAnimationFrame(step) : null;
@@ -1412,6 +1428,7 @@ export class SignalPlane extends HTMLElement {
     if (!this.traveling) return;
     this.stopTravel();
     this.view = this.travelTarget;
+    this.lift = this.travelLift ?? this.lift;
   }
 
   /** Setup → Stack (ADR 0051 §8): the Stack's width fills the stage, its top in view. */
@@ -1421,22 +1438,23 @@ export class SignalPlane extends HTMLElement {
     this.barKey = null;
     const rect = this.layout.stacks.get(name);
     const keep = this.level() !== 'setup' ? this.view : null;
-    this.travel(fitWidth(rect, this.viewport, keep));
+    this.travel(fitWidth(rect, this.viewport, keep), 0);
   }
 
   /** The whole plane in view: the Setup level. */
   fitSetup() {
-    if (this.layout) this.travel(fitAll(this.layout.bounds, this.viewport));
+    if (this.layout) this.travel(fitAll(this.layout.bounds, this.viewport), 0);
   }
 
-  /** The view zoomed about `at` (the stage's centre) to ratio `r` of the focused Stack's fit; the selection is untouched. */
-  travelTo(r, at = { x: this.viewport.w / 2, y: this.viewport.h / 2 }) {
+  /** The view zoomed about `at` (the stage's centre) to depth `z` (`depthOf`); the selection is untouched. */
+  travelTo(z, at = { x: this.viewport.w / 2, y: this.viewport.h / 2 }) {
     const fit = this.fitK();
     if (!fit) return;
     if (this.level() === 'engine') this.leaveEngine();
+    const { r, lift } = splitDepth(z);
     let to = zoomAbout(this.view, (fit * r) / this.view.k, at, fit, this.engineBandNow()[1]);
     to = { ...to, ...clampTop(to, this.focusRect(), this.viewport) };
-    this.travel(to);
+    this.travel(to, lift);
   }
 
   /** Wiring → Control: the instrument at the stage's centre opens, the view zoomed about its centre to the control band's end. */
@@ -1455,8 +1473,8 @@ export class SignalPlane extends HTMLElement {
     if (!map || !fit) return;
     const engine = this.engineBandNow();
     const c = { x: map.onto.x + map.onto.w / 2, y: map.onto.y + map.onto.h / 2 };
-    const zoomed = zoomAbout(this.view, (fit * engine[1]) / this.view.k, c, fit, engine[1]);
-    this.travel(panBy(zoomed, this.viewport.w / 2 - c.x, this.viewport.h / 2 - c.y));
+    const zoomed = zoomAbout(this.view, (fit * splitDepth(engine[1]).r) / this.view.k, c, fit, engine[1]);
+    this.travel(panBy(zoomed, this.viewport.w / 2 - c.x, this.viewport.h / 2 - c.y), LIFT);
   }
 
   // The pointer, the wheel, the keys.
@@ -1833,7 +1851,7 @@ export class SignalPlane extends HTMLElement {
     if (!fit || !map) return;
     const root = reroot(this.schematic.view, (l) => this.schematic.layoutOf(l), '');
     const back = planeFromFrame(root, map.frame, map.cube, map.offset);
-    if (back.k / fit > this.engineBandNow()[1] * 1.0001) return;
+    if (depthOf(back.k / fit, LIFT) > this.engineBandNow()[1] * 1.0001) return;
     event.stopPropagation();
     event.preventDefault();
     this.leaveEngine();
@@ -1874,7 +1892,7 @@ export class SignalPlane extends HTMLElement {
       const dy = wheelPixels(event.deltaY || 0, mode);
       const dx = kind === 'trackpad' ? wheelPixels(event.deltaX || 0, mode) : 0;
       this.settleTravel();
-      this.setView(scrollStack(panBy(this.view, this.ratio() > 1.0001 ? -dx : 0, 0), dy, rect, this.viewport));
+      this.setView(scrollStack(panBy(this.view, this.scaleRatio() > 1.0001 ? -dx : 0, 0), dy, rect, this.viewport));
       return;
     }
     if (kind === 'trackpad' && !forced) {
@@ -1893,14 +1911,15 @@ export class SignalPlane extends HTMLElement {
     // The focus follows the pointer only before the focus band: inside it the other Stacks are fading, and another focus would jump their opacity and the ratio.
     if (this.ratio() < FOCUS_BAND[0]) this.focusUnder(at);
     const fit = this.fitK();
-    const r0 = this.ratio();
-    const step = zoomStep({ view: this.view, opened: this.opened }, factor, at, { fit, rects: this.instrumentRects(), maxR: this.engineBandNow()[1] });
+    const r0 = this.scaleRatio();
+    const step = zoomStep({ view: this.view, opened: this.opened, lift: this.lift }, factor, at, { fit, rects: this.instrumentRects(), maxR: this.engineBandNow()[1] });
     if (step.opened !== this.opened) {
       this.opened = step.opened;
       this.barKey = null;
     }
     let next = step.view;
     if (fit && reachesFit(r0, next.k / fit)) {
+      this.lift = 0;
       // The zoom stops at the fit about the pointer (no jump in scale), and the Stack glides to fill the width.
       const rect = this.focusRect();
       const stop = zoomAbout(this.view, fit / this.view.k, at, fit);
@@ -1912,6 +1931,7 @@ export class SignalPlane extends HTMLElement {
       // Zoomed past the fit: the Stack stays in view vertically.
       next = { ...next, ...clampTop(next, this.focusRect(), this.viewport) };
     }
+    this.lift = step.lift ?? this.lift;
     this.setView(next);
   }
 
@@ -2020,7 +2040,7 @@ export class SignalPlane extends HTMLElement {
         const scale = host.width > 0 ? s.host.offsetWidth / host.width || 1 / this.view.k : 1 / this.view.k;
         const y = rect.y + (top.top - host.top) * scale;
         const view = scrollStack(fitted, y * fitted.k + fitted.y - this.viewport.h / 3, rect, this.viewport);
-        this.travel(view);
+        this.travel(view, 0);
       }
       return whole ? controls.map((c) => c.closest('.signal-card') ?? c) : controls;
     }

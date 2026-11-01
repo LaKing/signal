@@ -146,6 +146,28 @@ export function automations({ entry, binds = [], owner, graph }) {
   return out;
 }
 
+/** An automation lane's and track's pitch, in plane units. */
+export const LANE_GAP = 4;
+
+/**
+ * The free vertical corridors of `rect` between heights `y0` and `y1`:
+ * the x-ranges no obstacle spans there (`[{x0, x1}]`, left to right), the
+ * ways a cable climbs between the control columns without crossing one.
+ */
+export function corridors(obstacles, rect, y0, y1) {
+  const lo = Math.min(y0, y1);
+  const hi = Math.max(y0, y1);
+  const spans = obstacles.filter((o) => o.y < hi && o.y + o.h > lo).map((o) => [o.x - 2, o.x + o.w + 2]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const out = [];
+  let x = rect.x;
+  for (const [a, b] of spans) {
+    if (a > x) out.push({ x0: x, x1: a });
+    x = Math.max(x, b);
+  }
+  if (x < rect.x + rect.w) out.push({ x0: x, x1: rect.x + rect.w });
+  return out;
+}
+
 /** Whether two rectangles overlap (with `gap`). */
 export function overlaps(a, b, gap = 0) {
   return a.x < b.x + b.w + gap && b.x < a.x + a.w + gap && a.y < b.y + b.h + gap && b.y < a.y + a.h + gap;
@@ -251,37 +273,56 @@ export function controlLayout({ rect, controls = [], blocked = [], engine = [], 
     l.points = simplify(points);
     l.lane = lanes[i];
   });
-  // Automation and external cables land on the control's top, over a lane just above its row.
+  // Automation and external cables never run over a control (the coordinator's review of phase 2): each lands on its
+  // control's top from a lane in the gap just above its row, reached by a free vertical corridor between the control
+  // columns (from the cube) or along the instrument's left edge (from outside), so it crosses no control.
   const controlOf = (bind) => bound.find((c) => c.binds.includes(bind));
   const autoPins = [];
   const externalPins = [];
-  const landings = [];
-  let engineIndex = 0;
+  const landings = new Map();
+  const rowLanes = new Map();
+  const corridorUse = new Map();
   let externalIndex = 0;
-  autos.forEach((a, k) => {
+  const walls = [...controls.map((c) => c.rect), ...blocked, cube];
+  autos.forEach((a) => {
     const c = controlOf(a.bind);
     if (!c) return;
-    const land = { x: c.rect.x + c.rect.w / 2 + (landings.filter((l) => l === c.id).length * PU) / 2, y: c.rect.y };
-    landings.push(c.id);
-    const lane = Math.max(rect.y + PU / 2, c.rect.y - (k + 1) * (LANE + 2));
+    const n = landings.get(c.id) ?? 0;
+    landings.set(c.id, n + 1);
+    const land = { x: c.rect.x + c.rect.w / 2 + (n * PU) / 2, y: c.rect.y };
+    const row = Math.round(c.rect.y);
+    const j = rowLanes.get(row) ?? 0;
+    rowLanes.set(row, j + 1);
+    const lane = Math.max(rect.y + 2, c.rect.y - LANE_GAP * (j + 1));
     let start;
     let pts;
     if (a.source === 'engine') {
-      // One pin per source on the cube's edge; each of its connections its own wire, on its own track.
+      // One pin per source on the cube's edge; each of its connections its own wire.
       let pin = autoPins.find((q) => q.address === a.from);
       if (!pin) {
         pin = { id: `auto-pin ${a.from}`, kind: 'auto', auto: a.id, address: a.from, x: cube.x + cube.w, y: cube.y + (CUBE_PU.title + CUBE_PU.pad + (autoPins.length + 0.5) * CUBE_PU.auto) * PU };
         autoPins.push(pin);
       }
-      const x = pin.x + (engineIndex + 1) * PU;
-      engineIndex++;
+      const gaps = corridors(walls, rect, lane, pin.y).filter((g) => g.x1 - g.x0 >= 2 * LANE_GAP);
+      const right = gaps.filter((g) => g.x1 > pin.x);
+      const choice = (right.length ? right : gaps).sort((g, h) => Math.abs((g.x0 + g.x1) / 2 - land.x) - Math.abs((h.x0 + h.x1) / 2 - land.x) || g.x0 - h.x0)[0];
+      let x;
+      if (choice) {
+        const key = `${Math.round(choice.x0)}`;
+        const used = corridorUse.get(key) ?? 0;
+        corridorUse.set(key, used + 1);
+        x = Math.min(choice.x1 - LANE_GAP, Math.max(choice.x0, pin.x) + LANE_GAP * (used + 1));
+      } else x = rect.x + rect.w - LANE_GAP * (autoPins.length + 1);
       start = pin;
-      pts = [pin, { x, y: pin.y }, { x, y: lane }, { x: land.x, y: lane }, land];
+      // Out of the pin to the corridor, below everything else; a corridor left of the pin is reached under the cube.
+      const under = cube.y + cube.h + LANE_GAP * (corridorUse.size + 1);
+      pts = x >= pin.x ? [pin, { x, y: pin.y }, { x, y: lane }, { x: land.x, y: lane }, land] : [pin, { x: pin.x + LANE_GAP, y: pin.y }, { x: pin.x + LANE_GAP, y: under }, { x, y: under }, { x, y: lane }, { x: land.x, y: lane }, land];
     } else {
       const y = edgeYs.get(a.to) ?? edgeYs.get(a.bind) ?? rect.y + (CUBE_PU.title + externalIndex * 3) * PU;
       const pin = { id: `ext-pin ${a.id}`, kind: 'external', auto: a.id, address: a.to, from: a.from, x: rect.x, y };
       externalPins.push(pin);
-      const x = rect.x + (externalIndex + 1) * PU;
+      // Along the instrument's left edge, in its margin, then along the row's lane.
+      const x = rect.x + LANE_GAP * (externalIndex + 1);
       externalIndex++;
       start = pin;
       pts = [pin, { x, y }, { x, y: lane }, { x: land.x, y: lane }, land];
