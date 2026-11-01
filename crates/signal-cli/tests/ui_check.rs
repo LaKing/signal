@@ -1,4 +1,5 @@
-//! `signal ui check` (M2.8-3 AC1): the example panels pass; a broken copy
+//! `signal ui check` (M2.8-3 AC1): the example panels pass, and every
+//! project under `projects/` passes the check; a broken copy
 //! of the kick's panel fails with `file:line:column` diagnostics for an
 //! unknown port, wrong kinds, a parameter that `commit` cannot write and an
 //! unknown control, reading binds with character references decoded; a
@@ -58,6 +59,51 @@ fn the_example_panels_pass() {
         );
         assert!(!stderr.contains("warning"), "{name}: {stderr}");
     }
+}
+
+/// Projects whose modules only a lab build registers (ADR 0015): checked in
+/// a lab build; in the default build their check must fail on the lab module
+/// alone, and the skip is said on the terminal.
+const LAB_PROJECTS: [&str; 1] = ["gpu-partials"];
+
+/// Every project under `projects/` passes `signal ui check` with no warning:
+/// its panels (or the generated one) and its plane file, when it has one.
+#[test]
+fn every_project_passes_the_check() {
+    let mut names: Vec<String> = fs::read_dir(root().join("projects"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.join("project.toml").is_file())
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert!(names.len() >= 10, "{names:?}");
+    let mut checked = 0;
+    for name in &names {
+        let output = check(&root().join("projects").join(name), false);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if LAB_PROJECTS.contains(&name.as_str()) && !cfg!(feature = "lab") {
+            assert_eq!(output.status.code(), Some(1), "{name}: {stderr}");
+            assert!(
+                stderr.contains("unknown module `lab.") && stderr.lines().count() == 1,
+                "{name} fails on its lab module alone: {stderr}"
+            );
+            // Written to stderr itself, past the harness's capture.
+            let _ = std::io::Write::write_fmt(
+                &mut std::io::stderr(),
+                format_args!("SKIPPED `signal ui check projects/{name}`: a lab build checks it\n"),
+            );
+            continue;
+        }
+        assert!(output.status.success(), "{name}: {stderr}");
+        assert!(!stderr.contains("warning"), "{name}: {stderr}");
+        assert!(
+            stderr.contains(": ok") || stderr.contains("the main panel is generated"),
+            "{name}: {stderr}"
+        );
+        checked += 1;
+    }
+    assert!(checked >= names.len() - LAB_PROJECTS.len(), "{names:?}");
 }
 
 #[test]
