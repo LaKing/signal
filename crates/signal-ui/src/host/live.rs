@@ -406,13 +406,13 @@ impl Host {
         // the writer lock, run after it left): ended at once, never held
         // for a client that cannot end it.
         if let Some((port, key, true)) = &note
-            && !self.clients.contains_key(&client)
+            && !self.clients.contains(client)
         {
             self.releases.insert((port.clone(), *key));
             self.send_releases();
         }
         // The notes this client holds, ended for it if it goes.
-        if let Some((port, key, on)) = note.filter(|_| self.clients.contains_key(&client)) {
+        if let Some((port, key, on)) = note.filter(|_| self.clients.contains(client)) {
             // A note of this key taken now supersedes a release still
             // waiting for it (that note was ended; this one is held).
             self.releases.remove(&(port.clone(), key));

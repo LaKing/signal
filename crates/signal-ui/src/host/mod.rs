@@ -64,7 +64,7 @@ use crate::server::{Inbound, Server, ServerOptions};
 use crate::setup::{DEFAULT_BUFFER, Setup, Window};
 
 use app_mode::{AppMode, app_only, power_json};
-use clients::Client;
+use clients::{Client, Clients};
 use failure::fail;
 use live::{Failed, Pending};
 use project_io::SaveWait;
@@ -223,8 +223,7 @@ pub struct Host {
     panel: Panel,
     plan: Option<ExecutionPlan>,
     rate: u32,
-    clients: BTreeMap<u64, Client>,
-    evicted: u64,
+    clients: Clients,
     subs: BTreeMap<u32, Sub>,
     next_sub: u32,
     scope_slots: [Option<u32>; SCOPE_SLOTS],
@@ -494,8 +493,7 @@ impl Host {
             panel: Panel::default(),
             plan: None,
             rate: 0,
-            clients: BTreeMap::new(),
-            evicted: 0,
+            clients: Clients::default(),
             subs: BTreeMap::new(),
             next_sub: 1,
             scope_slots: [None; SCOPE_SLOTS],
@@ -659,7 +657,7 @@ impl Host {
     /// queue fills as if its socket took nothing.
     #[cfg(feature = "test-hooks")]
     pub fn hold_writer(&self, client: u64, held: bool) -> bool {
-        match self.clients.get(&client) {
+        match self.clients.get(client) {
             Some(c) => {
                 c.gate.store(held, Ordering::Relaxed);
                 true
@@ -801,7 +799,7 @@ impl Host {
                 evicted,
                 gate,
             } => {
-                self.clients.insert(
+                self.clients.connect(
                     client,
                     Client {
                         queue,
@@ -972,17 +970,13 @@ impl Host {
     }
 
     fn stats(&self) -> Value {
-        let clients: Vec<Value> = self
-            .clients
-            .iter()
-            .map(|(id, c)| json!({"client": id, "dropped": c.dropped}))
-            .collect();
+        let (clients, evicted) = self.clients.stats();
         let controller = self.run.as_ref().map(|r| &r.controller);
         json!({
             "type": "stats",
             "frame": controller.map(|c| c.status().next_frame.0),
             "clients": clients,
-            "evicted": self.evicted,
+            "evicted": evicted,
             "meterOverflows": controller.map(Controller::meter_overflows),
             "scopeOverflows": controller.map(Controller::scope_overflows),
             "vectorOverflows": controller.map(Controller::vector_overflows),
