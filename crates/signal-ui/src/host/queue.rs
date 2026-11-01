@@ -14,62 +14,80 @@ use super::Host;
 use super::failure::{Failure, fail};
 use super::project_io::{SaveDone, WindowsEdit};
 
-/// The messages that write the project's files under its writer lock (ADR
-/// 0040): each runs holding it, or waits in the host's queue while another
-/// writer holds it (ADR 0048), never on the control thread.
-const WRITES_FILES: [&str; 16] = [
-    "schematic.move",
-    "schematic.reset",
-    "patch",
-    "commit",
-    "retry",
-    "snapshot.save",
-    "snapshot.restore",
-    "snapshot.delete",
-    "snapshot.undo",
-    "snapshot.move",
-    "snapshot.transition",
-    "snapshot.exclude",
-    "panel.write",
-    "pattern.write",
-    "file.write",
-    "vendor",
-];
-
-/// The live edits that change a parameter's value at once: kept behind a
-/// queued request that can change the same value, in the client's order.
-pub(super) const LIVE_EDITS: [&str; 5] = ["set", "ramp", "trigger", "note", "revert"];
-
-/// Messages kept behind every queued request (they save, open or revert the
-/// project, so what was asked before them is done first).
-const ORDERED: [&str; 2] = ["project.open", "project.revert"];
-
-/// Messages that save, revert or replace the open project: a stale
-/// `generation` or `projectId` on one is refused as on any mutation (ADR
-/// 0049), so a page of an earlier opening can neither discard the new
-/// opening's edits nor save or switch it away.
-const PROJECT_CHANGES: [&str; 3] = ["project.save", "project.revert", "project.open"];
-
-/// Whether the message `kind` is a mutation, which names the project it
-/// means ([`Opening::admit`](super::opening::Opening::admit)).
-fn mutates(kind: &str) -> bool {
-    WRITES_FILES.contains(&kind) || LIVE_EDITS.contains(&kind) || PROJECT_CHANGES.contains(&kind)
+/// What the host does with a message ([`class_of`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Class {
+    /// It changes the open project: it names the project it means, and a
+    /// stale `generation` or `projectId` on it is refused (ADR 0049,
+    /// [`Opening::admit`](super::opening::Opening::admit)).
+    pub(super) mutation: bool,
+    /// How it is ordered against the requests waiting for the lock.
+    pub(super) order: Order,
 }
 
 /// What the host does with a message while requests wait for the lock.
-enum Order {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Order {
     /// It writes the project's files: run holding the lock, or queued.
     Write,
     /// `project.save`: run at once unless it would have to wait (its
     /// corrections need the lock) or requests wait; queued then.
     Save,
-    /// Queued behind any waiting request ([`ORDERED`]).
+    /// Queued behind any waiting request.
     Ordered,
     /// A live edit of `address`: queued only behind a request that can
     /// change that value.
     Live(String),
     /// Never queued (`ping`, `describe`, `stats`, subscriptions, reads).
     Free,
+}
+
+/// The class of the message `kind` (ADR 0048, 0049); a live edit's
+/// address is read from `message` (none is `""`). File writes wait for
+/// the lock; a Save, an open or a revert of the project waits behind every
+/// queued request; a live edit waits only behind a queued request that can
+/// change the same value; everything else (`ping`, `describe`, `stats`,
+/// subscriptions, reads) never waits and changes nothing.
+pub(super) fn class_of(kind: &str, message: &Value) -> Class {
+    let (mutation, order) = match kind {
+        // The messages that write the project's files under its writer lock
+        // (ADR 0040): each runs holding it, or waits in the host's queue
+        // while another writer holds it (ADR 0048), never on the control
+        // thread.
+        "schematic.move"
+        | "schematic.reset"
+        | "patch"
+        | "commit"
+        | "retry"
+        | "snapshot.save"
+        | "snapshot.restore"
+        | "snapshot.delete"
+        | "snapshot.undo"
+        | "snapshot.move"
+        | "snapshot.transition"
+        | "snapshot.exclude"
+        | "panel.write"
+        | "pattern.write"
+        | "file.write"
+        | "vendor" => (true, Order::Write),
+        // Messages that save, revert or replace the open project: a stale
+        // `generation` or `projectId` on one is refused as on any mutation
+        // (ADR 0049), so a page of an earlier opening can neither discard
+        // the new opening's edits nor save or switch it away.
+        "project.save" => (true, Order::Save),
+        // Kept behind every queued request (they save, open or revert the
+        // project, so what was asked before them is done first).
+        "project.open" | "project.revert" => (true, Order::Ordered),
+        // The live edits that change a parameter's value at once: kept
+        // behind a queued request that can change the same value, in the
+        // client's order.
+        "set" | "ramp" | "trigger" | "note" | "revert" => {
+            let address = message.get("address").and_then(Value::as_str);
+            (true, Order::Live(address.unwrap_or_default().to_owned()))
+        }
+        _ => (false, Order::Free),
+    };
+    Class { mutation, order }
 }
 
 /// How many file requests may wait for the writer lock at once; another is
@@ -90,7 +108,7 @@ pub(super) struct Waiting {
 pub(super) enum Job {
     /// A client's message, answered when it runs: one that writes files
     /// (`lock`: it runs holding the writer lock), or one kept behind them
-    /// in the client's order ([`Host::order_of`]). `kind` and `address` say
+    /// in the client's order ([`class_of`]). `kind` and `address` say
     /// which values it can change ([`Host::queued_for`]).
     Message {
         client: u64,
@@ -136,11 +154,12 @@ impl Host {
         };
         let id = message.get("id").cloned().unwrap_or(Value::Null);
         let kind = message.get("type").and_then(Value::as_str).unwrap_or("");
+        let class = class_of(kind, &message);
         // ADR 0048: a request that writes the
         // project's files runs holding the writer lock, taken without
         // waiting; when another writer holds it (or requests wait already,
         // to keep their order) it waits in the queue, not on this thread.
-        if let Err(failure) = self.opening.admit(mutates(kind), &message) {
+        if let Err(failure) = self.opening.admit(class.mutation, &message) {
             let error = json!({
                 "type": "error",
                 "id": id,
@@ -165,7 +184,7 @@ impl Host {
                 .any(|key| message.get(*key).is_some_and(|v| !v.is_null())),
             permit: permit.take(),
         };
-        match Host::order_of(kind, &message) {
+        match class.order {
             Order::Write => {
                 if self.waiting.is_empty() {
                     match ProjectLock::try_hold(&self.opening.dir) {
@@ -195,29 +214,6 @@ impl Host {
         }
     }
 
-    /// How the message `kind` is ordered against the requests waiting for
-    /// the writer lock (ADR 0048): file writes wait for the lock; a Save,
-    /// an open or a revert of the project waits behind every queued
-    /// request; a live edit waits only behind a queued request that can
-    /// change the same value; everything else (`ping`, `describe`, `stats`,
-    /// subscriptions, reads) never waits.
-    fn order_of(kind: &str, message: &Value) -> Order {
-        if WRITES_FILES.contains(&kind) {
-            return Order::Write;
-        }
-        if kind == "project.save" {
-            return Order::Save;
-        }
-        if ORDERED.contains(&kind) {
-            return Order::Ordered;
-        }
-        if LIVE_EDITS.contains(&kind) {
-            let address = message.get("address").and_then(Value::as_str);
-            return Order::Live(address.unwrap_or_default().to_owned());
-        }
-        Order::Free
-    }
-
     /// Whether a queued request can change the value at `address`: a
     /// `commit`, `retry` or live edit of it, or a snapshot restore or undo,
     /// an open or a revert of the project (any value). A live edit of it
@@ -230,9 +226,11 @@ impl Host {
                 // A batch `commit` (`values`, no `address`) can change any.
                 "commit" if a.is_none() => true,
                 "commit" | "retry" => a.as_deref() == Some(address),
-                k if LIVE_EDITS.contains(&k) => a.as_deref() == Some(address),
+                k if matches!(class_of(k, &Value::Null).order, Order::Live(_)) => {
+                    a.as_deref() == Some(address)
+                }
                 "snapshot.restore" | "snapshot.undo" => true,
-                k => ORDERED.contains(&k),
+                k => class_of(k, &Value::Null).order == Order::Ordered,
             },
             _ => false,
         })
@@ -259,9 +257,9 @@ impl Host {
         // A request naming no project, queued behind an open or revert,
         // means the project open when it runs, not the one open now.
         let named = matches!(job, Job::Message { named: true, .. });
-        let behind_an_open = self.waiting.iter().any(
-            |w| matches!(&w.job, Job::Message { kind, .. } if ORDERED.contains(&kind.as_str())),
-        );
+        let behind_an_open = self.waiting.iter().any(|w| {
+            matches!(&w.job, Job::Message { kind, .. } if class_of(kind, &Value::Null).order == Order::Ordered)
+        });
         self.waiting.push_back(Waiting {
             generation: (named || !behind_an_open).then_some(self.opening.generation),
             since: Instant::now(),
@@ -334,7 +332,10 @@ impl Host {
                 } => {
                     if let Ok(message) = serde_json::from_str::<Value>(&text) {
                         // The project it names, against the opening now.
-                        match self.opening.admit(mutates(&kind), &message) {
+                        match self
+                            .opening
+                            .admit(class_of(&kind, &message).mutation, &message)
+                        {
                             Ok(()) => self.respond(client, id, &kind, &message),
                             Err(failure) => {
                                 let job = Job::Message {
@@ -459,7 +460,7 @@ mod tests {
     #[test]
     fn each_kind_has_its_order() {
         let message = json!({"address": "/a/freq"});
-        let order = |kind: &str, message: &Value| order_name(Host::order_of(kind, message));
+        let order = |kind: &str, message: &Value| order_name(class_of(kind, message).order);
         for kind in &MUTATIONS[..16] {
             assert_eq!(order(kind, &message), "write", "{kind}");
         }
@@ -504,7 +505,12 @@ mod tests {
         let host = idle_host("same-project");
         let id = host.opening.project_id();
         for kind in MUTATIONS {
-            let check = |message: Value| code_of(host.opening.admit(mutates(kind), &message));
+            let check = |message: Value| {
+                code_of(
+                    host.opening
+                        .admit(class_of(kind, &message).mutation, &message),
+                )
+            };
             assert_eq!(check(json!({})), "ok", "{kind}");
             assert_eq!(check(json!({"generation": null, "projectId": null})), "ok");
             assert_eq!(check(json!({"generation": 7})), "ok", "{kind}");
@@ -529,21 +535,26 @@ mod tests {
         for kind in ["ping", "describe", "subscribe", "file.read", "app.get", ""] {
             let message = json!({"generation": 8, "projectId": 3});
             assert_eq!(
-                code_of(host.opening.admit(mutates(kind), &message)),
+                code_of(
+                    host.opening
+                        .admit(class_of(kind, &message).mutation, &message)
+                ),
                 "ok",
                 "{kind}"
             );
         }
-        let changed = host
-            .opening
-            .admit(mutates("commit"), &json!({"generation": 8}));
+        let changed = host.opening.admit(
+            class_of("commit", &Value::Null).mutation,
+            &json!({"generation": 8}),
+        );
         assert_eq!(
             changed.err().map(|failure| failure.message),
             Some("not done: the request names the generation of a project no longer open (another project, or a new opening of it, is open now)".to_owned())
         );
-        let changed = host
-            .opening
-            .admit(mutates("commit"), &json!({"projectId": "x"}));
+        let changed = host.opening.admit(
+            class_of("commit", &Value::Null).mutation,
+            &json!({"projectId": "x"}),
+        );
         assert_eq!(
             changed.err().map(|failure| failure.message),
             Some("not done: the request names the id of a project no longer open (another project, or a new opening of it, is open now)".to_owned())

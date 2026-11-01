@@ -3,12 +3,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde_json::Value;
 use signal_core::{EventPayload, PortAddress};
 use signal_engine::Stamp;
 use signal_output::Controller;
 
 use super::Host;
-use super::queue::{Job, LIVE_EDITS};
+use super::queue::{Job, Order, class_of};
 
 /// The event input a `note` goes to (ADR 0039): `std.note_seq`'s.
 pub const AUDITION_INPUT: &str = "audition";
@@ -106,7 +107,7 @@ impl Host {
                 lock: false,
                 kind,
                 ..
-            } => *c != client || !LIVE_EDITS.contains(&kind.as_str()),
+            } => *c != client || !matches!(class_of(kind, &Value::Null).order, Order::Live(_)),
             _ => true,
         });
         self.auditions.end(client);
