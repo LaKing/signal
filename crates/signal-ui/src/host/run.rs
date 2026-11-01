@@ -23,7 +23,8 @@ use crate::player::{Backend, Input, Output, live_rate, open_input, open_output, 
 
 use super::controls::plan_base;
 use super::setup_keys::device_name;
-use super::{Host, Stream, joined, with};
+use super::subs::Stream;
+use super::{Host, joined, with};
 
 /// The values, reports and mutes of one poll, beside the session recorder.
 pub(super) struct Observed<'a> {
