@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use signal_project::transaction::{self, ProjectLock};
+use signal_project::transaction;
 use signal_project::vendor::{self, VendorError};
 use signal_project::{Diagnostic, PATTERNS, PROJECT_FILE, Project, located};
 
@@ -13,6 +13,7 @@ use crate::bindings::{MAIN_PANEL, Targets, check_file, panel_content};
 use crate::panel_write::{check_content, first_file, replace, sha256_hex};
 
 use super::failure::{Failure, fail, fail_with};
+use super::writer::WriteCtx;
 use super::{Host, project_ui, with};
 
 /// ADR 0037 §7: how many project folders `slot.projects` lists of each
@@ -83,7 +84,7 @@ impl Host {
     /// does not exist yet; `conflict` otherwise, with its text), only when the
     /// project with it loads and plans as a reload would (`does-not-load`),
     /// written atomically, and not taken as seen, so the watch applies it live.
-    pub(super) fn file_write(&mut self, message: &Value) -> Result<Value, Failure> {
+    pub(super) fn file_write(&mut self, ctx: &WriteCtx, message: &Value) -> Result<Value, Failure> {
         let file = Self::project_text_file(message)?;
         let text = message
             .get("text")
@@ -146,7 +147,8 @@ impl Host {
         // The file as it is now, not as it was read: an edit from elsewhere
         // since then is a conflict, never overwritten. Checked and written
         // under the project's writer lock (ADR 0040).
-        let _lock = ProjectLock::acquire(&self.opening.dir)
+        let _lock = ctx
+            .lock()
             .map_err(|e| fail("write-failed", format!("{file} was not written: {e}")))?;
         let now = current()?;
         if now != before {
@@ -515,7 +517,11 @@ impl Host {
     /// never through a link, and not taken as seen, so the watch applies it
     /// live (a swap at an edit frame). Nothing is written when a step
     /// refuses.
-    pub(super) fn pattern_write(&mut self, message: &Value) -> Result<Value, Failure> {
+    pub(super) fn pattern_write(
+        &mut self,
+        ctx: &WriteCtx,
+        message: &Value,
+    ) -> Result<Value, Failure> {
         let (name, path, linked) = self.pattern_path(message)?;
         let file = format!("{PATTERNS}/{name}.toml");
         let text = message
@@ -584,7 +590,8 @@ impl Host {
         // The file as it is now, not as it was read: an edit from elsewhere
         // since then is a conflict, never overwritten. Checked and written
         // under the project's writer lock (ADR 0040).
-        let _lock = ProjectLock::acquire(&self.opening.dir)
+        let _lock = ctx
+            .lock()
             .map_err(|e| fail("write-failed", format!("{file} was not written: {e}")))?;
         let now = current(&path)?;
         if now != before {
@@ -657,7 +664,11 @@ impl Host {
     /// the bindings as `panel.check` does; written atomically as `commit`
     /// writes, and taken as seen by the watch. A missing `ui/main.html`
     /// (`base: null`) is created with the standard head.
-    pub(super) fn panel_write(&mut self, message: &Value) -> Result<Value, Failure> {
+    pub(super) fn panel_write(
+        &mut self,
+        ctx: &WriteCtx,
+        message: &Value,
+    ) -> Result<Value, Failure> {
         let name = message.get("file").and_then(Value::as_str).unwrap_or("");
         let html = message
             .get("html")
@@ -691,7 +702,8 @@ impl Host {
         check_content(html).map_err(|why| fail("bad-html", format!("not written: {why}")))?;
         // The version check and the write under the project's writer lock
         // (ADR 0040), on the file as it is now.
-        let _lock = ProjectLock::acquire(&self.opening.dir)
+        let _lock = ctx
+            .lock()
             .map_err(|e| fail("write-failed", format!("ui/{name} was not written: {e}")))?;
         let before = match fs::read_to_string(&path) {
             Ok(text) => Some(text),

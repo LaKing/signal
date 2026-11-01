@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use signal_project::archive;
-use signal_project::transaction::{self, ProjectLock};
+use signal_project::transaction;
 
 use crate::app;
 use crate::document::{Document, Ticket};
@@ -14,6 +14,7 @@ use crate::document::{Document, Ticket};
 use super::app_mode::app_only;
 use super::failure::{Failure, fail};
 use super::queue::Request;
+use super::writer::WriteCtx;
 use super::{Edits, Host, project_ui};
 
 /// An edit of `ui/windows.toml`'s text ([`Host::write_windows_then`]).
@@ -59,6 +60,7 @@ impl Host {
     /// [`Host::write_windows_then`]'s write, now.
     pub(super) fn write_windows_now(
         &mut self,
+        ctx: &WriteCtx,
         dir: &Path,
         edit: impl Fn(&str) -> Result<String, String>,
     ) -> Result<(), String> {
@@ -80,7 +82,7 @@ impl Host {
             ));
         }
         let failed = |error: String| format!("{} was not written: {error}", path.display());
-        let _lock = ProjectLock::acquire(&self.opening.dir).map_err(|e| failed(e.to_string()))?;
+        let _lock = ctx.lock().map_err(|e| failed(e.to_string()))?;
         // Edited again if it changes before the rename (ADR 0040).
         let written = transaction::edit_text(&path, |before| {
             edit(before).map(|after| (after != before).then_some(after))

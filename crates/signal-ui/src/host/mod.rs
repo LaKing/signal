@@ -36,6 +36,7 @@ mod setup_keys;
 mod snapshotting;
 mod subs;
 mod watch;
+mod writer;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -72,6 +73,7 @@ use project_io::SaveWait;
 use queue::LockQueue;
 use run::{Muted, Run};
 use subs::Subscriptions;
+use writer::WriteCtx;
 
 /// Client messages handled per step at most.
 const MESSAGES_PER_STEP: usize = 256;
@@ -798,14 +800,15 @@ impl Host {
 
     /// A client's message of type `kind`, run, and its reply (with `id`)
     /// and pushes sent.
-    fn respond(&mut self, client: u64, id: Value, kind: &str, message: &Value) {
+    /// A writer of the project's files writes them through `ctx`.
+    fn respond(&mut self, ctx: &WriteCtx, client: u64, id: Value, kind: &str, message: &Value) {
         let result = match kind {
             "describe" => Ok(Some(self.describe(false))),
             "graph" => self.graph().map(Some),
-            "schematic.move" => self.schematic_move(message).map(Some),
-            "schematic.reset" => self.schematic_reset(message).map(Some),
+            "schematic.move" => self.schematic_move(ctx, message).map(Some),
+            "schematic.reset" => self.schematic_reset(ctx, message).map(Some),
             "modules" => self.modules(message).map(Some),
-            "patch" => self.patch(message).map(Some),
+            "patch" => self.patch(ctx, message).map(Some),
             "subscribe" => self.subscribe(client, message).map(Some),
             "unsubscribe" => self.unsubscribe(client, message).map(Some),
             "set" | "ramp" | "trigger" | "note" => {
@@ -824,11 +827,11 @@ impl Host {
             "revert" => self.revert(message).map(Some),
             "panel.check" => self.panel_check(message).map(Some),
             "panel.read" => self.panel_read(message).map(Some),
-            "panel.write" => self.panel_write(message).map(Some),
+            "panel.write" => self.panel_write(ctx, message).map(Some),
             "pattern.read" => self.pattern_read(message).map(Some),
-            "pattern.write" => self.pattern_write(message).map(Some),
+            "pattern.write" => self.pattern_write(ctx, message).map(Some),
             "file.read" => self.file_read(message).map(Some),
-            "file.write" => self.file_write(message).map(Some),
+            "file.write" => self.file_write(ctx, message).map(Some),
             "vendor" => self.vendor(message).map(Some),
             "slot.projects" => self.slot_projects().map(Some),
             "setup.get" => Ok(Some(self.setup_get())),

@@ -18,6 +18,7 @@ use crate::panel_write::sha256_hex;
 use crate::server::MAX_MESSAGE;
 
 use super::failure::{Failure, fail, fail_with};
+use super::writer::WriteCtx;
 use super::{Host, project_ui, with};
 
 /// ADR 0037, editable insides: what a patch's other files that could not be
@@ -44,7 +45,7 @@ impl Host {
     /// `ui/schematic.toml`) as text, after the same load and compile as a
     /// reload, atomically; the watch's reload then applies it live (stopped,
     /// `graph` is pushed at once). Nothing is written when any step refuses.
-    pub(super) fn patch(&mut self, message: &Value) -> Result<Value, Failure> {
+    pub(super) fn patch(&mut self, writer: &WriteCtx, message: &Value) -> Result<Value, Failure> {
         if self.app.as_ref().is_some_and(|m| !m.opened) {
             return Err(fail("no-project", "open a project folder first"));
         }
@@ -343,7 +344,8 @@ impl Host {
         if let Some(hook) = self.before_lock.as_mut() {
             hook();
         }
-        let lock = ProjectLock::acquire(&self.opening.dir)
+        let lock = writer
+            .lock()
             .map_err(|e| fail("write-failed", format!("{file} was not written: {e}")))?;
         let now = fs::read(&path).ok().map(|bytes| sha256_hex(&bytes));
         if now.as_deref() != Some(base) {

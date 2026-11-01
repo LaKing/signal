@@ -354,8 +354,14 @@ impl Host {
                 kind,
                 message,
                 ..
-            } => self.respond(client, id, &kind, &message),
-            Request::Windows { dir, edit, done } => done(self.write_windows_now(&dir, edit)),
+            } => {
+                let ctx = self.write_ctx();
+                self.respond(&ctx, client, id, &kind, &message);
+            }
+            Request::Windows { dir, edit, done } => {
+                let ctx = self.write_ctx();
+                done(self.write_windows_now(&ctx, &dir, edit));
+            }
             Request::Save { save_as, done } => match save_as {
                 Some(file) => self.save_as_now(&file, done),
                 None => self.save_document_now(done),
@@ -463,7 +469,10 @@ impl Host {
                             .opening
                             .admit(class_of(&kind, &message).mutation, &message)
                         {
-                            Ok(()) => self.respond(client, id, &kind, &message),
+                            Ok(()) => {
+                                let ctx = self.write_ctx();
+                                self.respond(&ctx, client, id, &kind, &message);
+                            }
                             Err(failure) => {
                                 let job = Job::Message {
                                     client,
@@ -480,7 +489,10 @@ impl Host {
                         }
                     }
                 }
-                Job::Windows { dir, edit, done } => done(self.write_windows_now(&dir, edit)),
+                Job::Windows { dir, edit, done } => {
+                    let ctx = self.write_ctx();
+                    done(self.write_windows_now(&ctx, &dir, edit));
+                }
                 Job::Save { save_as, done } => match save_as {
                     Some(file) => self.save_as_now(&file, done),
                     None => self.save_document_now(done),

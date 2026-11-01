@@ -5,10 +5,11 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use signal_project::schematic::{self, SCHEMATIC_FILE};
-use signal_project::transaction::{self, ProjectLock};
+use signal_project::transaction;
 
 use super::failure::{Failure, fail};
 use super::graph::level_of;
+use super::writer::WriteCtx;
 use super::{Host, project_ui};
 
 impl Host {
@@ -18,7 +19,11 @@ impl Host {
     /// batch form, `moves: [{instance, x, y}]` in place of the three, writes
     /// several instances of the level at once (a group dragged together):
     /// all are checked first, and one write holds them all, or none.
-    pub(super) fn schematic_move(&mut self, message: &Value) -> Result<Value, Failure> {
+    pub(super) fn schematic_move(
+        &mut self,
+        ctx: &WriteCtx,
+        message: &Value,
+    ) -> Result<Value, Failure> {
         let level = message
             .get("level")
             .and_then(Value::as_str)
@@ -89,7 +94,7 @@ impl Host {
             .iter()
             .map(|(instance, x, y)| (instance.as_str(), *x, *y))
             .collect();
-        self.write_schematic(|text| schematic::set_positions(text, level, &entries))?;
+        self.write_schematic(ctx, |text| schematic::set_positions(text, level, &entries))?;
         if let (None, [(instance, x, y)]) = (batch, moves.as_slice()) {
             return Ok(json!({
                 "type": "schematic.moved",
@@ -114,12 +119,17 @@ impl Host {
 
     /// `schematic.reset`: removes the table of `level`, or without one the
     /// whole `ui/schematic.toml`.
-    pub(super) fn schematic_reset(&mut self, message: &Value) -> Result<Value, Failure> {
+    pub(super) fn schematic_reset(
+        &mut self,
+        ctx: &WriteCtx,
+        message: &Value,
+    ) -> Result<Value, Failure> {
         let path = self.opening.dir.join(SCHEMATIC_FILE);
         match message.get("level") {
             None | Some(Value::Null) => {
                 self.schematic_unlinked()?;
-                let _lock = ProjectLock::acquire(&self.opening.dir)
+                let _lock = ctx
+                    .lock()
                     .map_err(|e| fail("write-failed", format!("{}: {e}", path.display())))?;
                 match fs::remove_file(&path) {
                     Ok(()) => {}
@@ -135,7 +145,7 @@ impl Host {
                 let graph = self.graph()?;
                 level_of(&graph, level)?;
                 if path.exists() {
-                    self.write_schematic(|text| schematic::remove_level(text, level))?;
+                    self.write_schematic(ctx, |text| schematic::remove_level(text, level))?;
                 }
                 Ok(json!({"type": "schematic.reset", "level": level, "file": SCHEMATIC_FILE}))
             }
@@ -148,6 +158,7 @@ impl Host {
     /// `graph` is pushed at once instead).
     fn write_schematic(
         &mut self,
+        ctx: &WriteCtx,
         edit: impl Fn(&str) -> Result<String, String>,
     ) -> Result<(), Failure> {
         self.schematic_unlinked()?;
@@ -158,7 +169,7 @@ impl Host {
                 format!("{} was not written: {error}", path.display()),
             )
         };
-        let _lock = ProjectLock::acquire(&self.opening.dir).map_err(|e| failed(e.to_string()))?;
+        let _lock = ctx.lock().map_err(|e| failed(e.to_string()))?;
         // Edited again if it changes before the rename (ADR 0040).
         transaction::edit_text(&path, |before| edit(before).map(Some)).map_err(failed)?;
         self.counts.2 += 1;
