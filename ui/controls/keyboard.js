@@ -62,7 +62,7 @@ export function isTextField(target) {
 }
 
 /** Whether `target` is a native button or link, whose Space and Enter are its own. */
-function isPressable(target) {
+export function isPressable(target) {
   if (!target || target.nodeType !== 1) return false;
   return ['button', 'a', 'summary'].includes(target.localName) || (target.localName === 'input' && !isTextField(target));
 }

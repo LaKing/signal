@@ -75,7 +75,8 @@ import { HIT_OPACITY, ZOOM_MS, ease, tween } from '../lib/board-zoom.js';
 import { reroot } from '../lib/schematic-scene.js';
 import { GESTURE_GAP_MS, WheelKinds } from '../lib/wheel.js';
 import { wheelFactor, wheelPixels } from '../lib/schematic-view.js';
-import { registerWheel, takesWheel } from './keyboard.js';
+import { isPressable, isTextField, registerWheel, takesWheel } from './keyboard.js';
+import { keyCommand } from '../lib/keys.js';
 import { bindAddresses } from './base.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
@@ -2085,30 +2086,48 @@ export class SignalPlane extends HTMLElement {
     this.setView(next);
   }
 
-  /** The keys: Enter goes in a level, Escape out; 0 fits the whole plane; + and − zoom about the centre; the arrows and the page keys scroll; at Wiring and Control, Delete removes the selected cable and ⌘Z, ⇧⌘Z undo and redo the patches written here. */
+  /**
+   * The keys, commands of the shared keymap (scope `plane`, ui/lib/keys.default.js;
+   * rebindable in keys.toml): `plane.in` goes in a level, `plane.out` out;
+   * `plane.whole` shows the whole plane; `plane.zoom_in` and `plane.zoom_out`
+   * zoom about the centre; the line and page commands scroll the focused
+   * Stack; at Wiring and Control `plane.delete` removes the selected cable
+   * and `plane.undo`, `plane.redo` undo and redo the patches written there.
+   * Captured before the plane's parts see them, but nothing else is taken:
+   * Space reaches the page's keys (ui/controls/keyboard.js), where it plays
+   * and stops the transport (ADR 0039); a field being typed in keeps every
+   * key, a button or link its Space and Enter.
+   */
   key(event) {
-    if (event.defaultPrevented || event.altKey) return;
+    if (event.defaultPrevented) return;
+    const path = event.composedPath?.() ?? [];
+    const target = path[0] ?? event.target;
+    if (isTextField(target)) return;
     if (event.key === 'Escape' && this.chooser) {
       event.preventDefault();
       this.closeChooser();
       return;
     }
-    if (event.metaKey) {
-      const level = this.level();
-      if ((level === 'wiring' || level === 'control') && (event.key === 'z' || event.key === 'Z') && !event.composedPath().includes(this.deep)) {
-        event.preventDefault();
-        this.writePatch([], '', event.shiftKey ? +1 : -1);
-      }
-      return;
-    }
-    if ((event.key === 'Enter' || event.key === ' ') && event.composedPath().some((n) => n?.dataset?.othersToggle !== undefined)) {
+    // The list of other devices' head is a button of the drawing.
+    if ((event.key === 'Enter' || event.key === ' ') && path.some((n) => n?.dataset?.othersToggle !== undefined)) {
       event.preventDefault();
       this.toggleOthers();
       return;
     }
+    if (isPressable(target) && (event.key === 'Enter' || event.key === ' ')) return;
+    const command = keyCommand('plane', event)?.id ?? null;
+    if (!command) return;
     const level = this.level();
-    const inBoard = level === 'engine' && event.composedPath().includes(this.deep);
-    if (event.key === 'Escape') {
+    const inDeep = path.includes(this.deep);
+    const inBoard = level === 'engine' && inDeep;
+    if (command === 'plane.undo' || command === 'plane.redo') {
+      if ((level === 'wiring' || level === 'control') && !inDeep) {
+        event.preventDefault();
+        this.writePatch([], '', command === 'plane.redo' ? +1 : -1);
+      }
+      return;
+    }
+    if (command === 'plane.out') {
       if (inBoard) {
         if (!this.boardAtTop() || this.schematic.selected?.length || this.schematic.tracing) return;
         event.preventDefault();
@@ -2132,32 +2151,29 @@ export class SignalPlane extends HTMLElement {
       return;
     }
     if (inBoard || level === 'engine' || this.onControl(event)) return;
-    if ((event.key === 'Delete' || event.key === 'Backspace') && (level === 'wiring' || level === 'control')) {
-      if (this.deleteSelection()) event.preventDefault();
+    if (command === 'plane.delete') {
+      if ((level === 'wiring' || level === 'control') && this.deleteSelection()) event.preventDefault();
       return;
     }
     const centre = { x: this.viewport.w / 2, y: this.viewport.h / 2 };
     const rect = this.focusRect();
-    if (event.key === 'Enter') {
+    const page = this.viewport.h * 0.875;
+    const scroll = { 'plane.line_down': 80, 'plane.line_up': -80, 'plane.page_down': page, 'plane.page_up': -page }[command];
+    if (command === 'plane.in') {
       event.preventDefault();
       if (level === 'setup' && this.focused) this.focusStack(this.focused);
       else if (level === 'stack') this.travelTo(WIRING_BAND[1]);
       else if (level === 'wiring') this.openAtCentre();
       else if (level === 'control') this.enterEngine();
-    } else if (event.key === '0' && !event.ctrlKey) {
+    } else if (command === 'plane.whole') {
       event.preventDefault();
       this.fitSetup();
-    } else if ((event.key === '+' || event.key === '=') && !event.ctrlKey) {
+    } else if (command === 'plane.zoom_in' || command === 'plane.zoom_out') {
       event.preventDefault();
-      this.zoomBy(KEY_ZOOM, centre);
-    } else if ((event.key === '-' || event.key === '_') && !event.ctrlKey) {
+      this.zoomBy(command === 'plane.zoom_in' ? KEY_ZOOM : 1 / KEY_ZOOM, centre);
+    } else if (scroll !== undefined && rect && level !== 'setup') {
       event.preventDefault();
-      this.zoomBy(1 / KEY_ZOOM, centre);
-    } else if (rect && level !== 'setup' && ['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', ' '].includes(event.key)) {
-      event.preventDefault();
-      const page = this.viewport.h * 0.875;
-      const dy = { ArrowDown: 80, ArrowUp: -80, PageDown: page, PageUp: -page, ' ': event.shiftKey ? -page : page }[event.key];
-      this.setView(scrollStack(this.view, dy, rect, this.viewport));
+      this.setView(scrollStack(this.view, scroll, rect, this.viewport));
     }
   }
 

@@ -25,6 +25,7 @@ export default {
     { "id": "schematic", "label": "Schematic", "parent": "view", "about": "A focused schematic (it fills its window or tab, so it always takes the wheel)." },
     { "id": "schematic_edit", "label": "Schematic: Edit patch", "parent": "schematic", "about": "The schematic in Edit patch." },
     { "id": "palette", "label": "Schematic: Add module", "parent": "schematic_edit", "about": "The Add module browser's search field (Edit patch, double-click the background)." },
+    { "id": "plane", "label": "Signal Project", "parent": "view", "about": "A focused Signal Project plane (ADR 0051; it fills its tab, so it always takes the wheel). Space is not the plane's: it plays and stops the transport there too." },
     { "id": "panel_edit", "label": "Panel: Edit layout", "parent": "view", "about": "A panel in Edit layout." },
     { "id": "snapshot_list", "label": "Snapshots list", "parent": "view", "about": "A focused row of the Snapshots card (ADR 0041 §9): the snapshot moves in the list's order, and keeps the focus." }
   ],
@@ -186,6 +187,19 @@ export default {
     { "id": "schematic.context_menu", "scope": "schematic", "label": "The context menu of the selection", "keys": ["ContextMenu", "Shift+F10"] },
     { "id": "schematic.zoom", "scope": "schematic", "label": "Zoom about the pointer with a mouse wheel or a pinch; a trackpad's two-finger scroll pans", "keys": ["Wheel", "Ctrl+Wheel"], "wheel": true },
     { "id": "schematic.scroll", "scope": "schematic", "label": "Pan sideways", "keys": ["Shift+Wheel"], "wheel": true },
+
+    { "id": "plane.in", "scope": "plane", "label": "In a level: focus the Stack, then its Wiring, an instrument's Control plane, its Engine", "keys": ["Enter"] },
+    { "id": "plane.out", "scope": "plane", "label": "Out a level (a selection at Wiring or Control is let go first)", "keys": ["Escape"] },
+    { "id": "plane.whole", "scope": "plane", "label": "Show the whole Signal Project (the Setup level)", "keys": ["0"] },
+    { "id": "plane.zoom_in", "scope": "plane", "label": "Zoom in about the centre", "keys": ["=", "+"] },
+    { "id": "plane.zoom_out", "scope": "plane", "label": "Zoom out about the centre", "keys": ["-", "_"] },
+    { "id": "plane.line_down", "scope": "plane", "label": "Scroll the focused Stack down a little", "keys": ["ArrowDown"] },
+    { "id": "plane.line_up", "scope": "plane", "label": "Scroll the focused Stack up a little", "keys": ["ArrowUp"] },
+    { "id": "plane.page_down", "scope": "plane", "label": "Scroll the focused Stack down a page", "keys": ["PageDown"] },
+    { "id": "plane.page_up", "scope": "plane", "label": "Scroll the focused Stack up a page", "keys": ["PageUp"] },
+    { "id": "plane.delete", "scope": "plane", "label": "At Wiring and Control: remove the selected cable", "keys": ["Delete", "Backspace"] },
+    { "id": "plane.undo", "scope": "plane", "label": "At Wiring and Control: undo the last patch written there", "keys": ["Cmd+Z"] },
+    { "id": "plane.redo", "scope": "plane", "label": "At Wiring and Control: redo", "keys": ["Shift+Cmd+Z"] },
 
     { "id": "schematic_edit.undo", "scope": "schematic_edit", "label": "Undo the last patch", "keys": ["Cmd+Z"] },
     { "id": "schematic_edit.redo", "scope": "schematic_edit", "label": "Redo", "keys": ["Shift+Cmd+Z"] },

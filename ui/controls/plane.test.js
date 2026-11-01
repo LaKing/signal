@@ -16,7 +16,9 @@ globalThis.HTMLElement ??= class {};
 globalThis.customElements ??= { get: () => undefined, define: () => {} };
 
 const { SignalPlane } = await import('./plane.js');
-
+const { install } = await import('./keyboard.js');
+const { applyKeys } = await import('../lib/keys.js');
+const { setDefaultConnection } = await import('../signal-ui.js');
 
 const whitelist = JSON.parse(readFileSync(new URL('../lib/panel-whitelist.json', import.meta.url), 'utf8'));
 
@@ -242,5 +244,117 @@ test('the slot listed in both forms is one instrument listed twice: an error, th
   assert.equal(p.model.derived, true);
   assert.deepEqual(p.model.problems.map((x) => x.message), ['plane.toml: "synth" is listed twice (in "primary")']);
   assert.deepEqual([...p.stacks.get('primary').cards.keys()], ['card:melody', 'synth', 'card:echo']);
+});
+
+// The keys (ADR 0039, ADR 0034): the plane's capture listener, then the page's.
+
+/** A transport to toggle, as ui/controls/keyboard.test.js's. */
+function transportConnection(base = 1) {
+  return {
+    status: 'open',
+    commits: [],
+    description: {
+      playing: true,
+      instances: [{ address: '/transport/playhead', module: 'std.playhead', parameters: [{ name: 'run', address: '/transport/playhead.run' }] }],
+      controls: [{ address: '/transport.run', ports: ['/transport/playhead.run'], base, min: 0, max: 1, default: 1, modulated: false }],
+    },
+    commit(address, value) {
+      this.commits.push([address, value]);
+      return Promise.resolve({ type: 'committed' });
+    },
+  };
+}
+
+/** The page's keys on a stub document (ui/controls/keyboard.js `install`): its bubbling keydown listener. */
+function pageKeys() {
+  const listeners = [];
+  const doc = {
+    addEventListener: (type, fn, options) => listeners.push({ type, fn, capture: options === true || options?.capture }),
+    defaultView: { innerWidth: 1000, innerHeight: 800, getComputedStyle: () => ({ overflowY: 'visible' }), matchMedia: () => ({ matches: true }), dispatchEvent: () => true },
+    scrollingElement: null,
+  };
+  doc.defaultView.top = doc.defaultView;
+  doc.defaultView.document = doc;
+  install(doc);
+  return { doc, onKey: listeners.find((l) => l.type === 'keydown' && !l.capture).fn };
+}
+
+/** A keydown at `path[0]`, dispatched as the browser does: the plane's capture listener first, then the page's as it bubbles. */
+function press(p, page, key, path, more = {}) {
+  const event = {
+    key,
+    code: key === ' ' ? 'Space' : key,
+    currentTarget: page.doc,
+    target: path[0],
+    composedPath: () => path,
+    defaultPrevented: false,
+    preventDefault() {
+      this.defaultPrevented = true;
+    },
+    stopPropagation() {},
+    ...more,
+  };
+  p.key(event);
+  page.onKey(event);
+  return event;
+}
+
+function focusedPlane() {
+  const p = new SignalPlane();
+  p.deep = new Node('div');
+  p.stage = new Node('div');
+  p.viewport = { w: 800, h: 600 };
+  p.view = { k: 1, x: 0, y: 0 };
+  p.views = [];
+  p.setView = (view) => p.views.push(view);
+  p.focusRect = () => ({ x: 0, y: 0, w: 800, h: 4000 });
+  return p;
+}
+
+test('Space with the focus on the plane plays and stops the transport at Stack, Wiring and Control; fields, buttons and controls keep it', () => {
+  const page = pageKeys();
+  const connection = transportConnection(1);
+  setDefaultConnection(connection);
+  const p = focusedPlane();
+  for (const level of ['stack', 'wiring', 'control']) {
+    p.level = () => level;
+    const event = press(p, page, ' ', [p]);
+    assert.equal(event.defaultPrevented, true, `${level}: taken by the page's transport command`);
+  }
+  assert.deepEqual(connection.commits, [['/transport.run', 0], ['/transport.run', 1], ['/transport.run', 0]], 'each press toggled it, as a click on its toggle writes');
+  assert.deepEqual(p.views, [], 'Space no longer scrolls the Stack');
+  // A text field, a native button, and a focused control that takes Space keep it.
+  p.level = () => 'stack';
+  press(p, page, ' ', [{ nodeType: 1, localName: 'input', type: 'text' }, p]);
+  press(p, page, ' ', [{ nodeType: 1, localName: 'button' }, p]);
+  press(p, page, ' ', [{ nodeType: 1, localName: 'signal-toggle' }, p], { defaultPrevented: true });
+  assert.equal(connection.commits.length, 3);
+  setDefaultConnection(null);
+});
+
+test('the plane’s keys are commands of the shared keymap, rebindable through keys.toml', () => {
+  const page = pageKeys();
+  const p = focusedPlane();
+  p.level = () => 'stack';
+  const travelled = [];
+  p.travelTo = (z) => travelled.push(z);
+  p.fitSetup = () => travelled.push('setup');
+  assert.equal(press(p, page, 'ArrowDown', [p]).defaultPrevented, true);
+  assert.equal(press(p, page, 'PageDown', [p]).defaultPrevented, true);
+  assert.equal(p.views.length, 2, 'the Stack scrolled a little, then a page');
+  press(p, page, 'Enter', [p]);
+  press(p, page, 'Escape', [p]);
+  assert.equal(travelled.length, 2, 'in to Wiring, out to the Setup');
+  assert.equal(travelled.at(-1), 'setup');
+  // keys.toml moves plane.out to Q: Escape is no plane command there any more.
+  applyKeys({ overrides: { 'plane.out': ['Q'] } });
+  try {
+    press(p, page, 'Escape', [p]);
+    assert.equal(travelled.length, 2);
+    press(p, page, 'q', [p]);
+    assert.equal(travelled.length, 3);
+  } finally {
+    applyKeys({ overrides: {} });
+  }
 });
 
