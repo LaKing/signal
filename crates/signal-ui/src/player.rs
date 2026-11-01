@@ -407,7 +407,32 @@ pub fn open_routed(
             .max()
             .unwrap_or(0)
     });
-    let system = crate::devices::sound_system(setup, devices);
+    let mut system = crate::devices::sound_system(setup, devices);
+    // As one sink plays (`open_output`): a map of `main` the device cannot
+    // take plays on the identity map, with a note.
+    // The side that plays as main: `main`'s, else the first role when it
+    // has no binding of its own (`signal_output::route`'s exception).
+    let main_width = signal_project::device::main_side(sides)
+        .filter(|s| s.role == signal_output::MAIN || !system.roles.contains_key(&s.role))
+        .map(|s| s.width);
+    if let (Some(width), Some(binding)) = (main_width, system.roles.get_mut(signal_output::MAIN))
+        && binding.placement == signal_output::Placement::Clock
+    {
+        let limit = clock_channels.unwrap_or(usize::MAX);
+        let fits = binding.channels.len() == width
+            && binding.channels.iter().enumerate().all(|(i, &c)| {
+                c >= 1
+                    && usize::from(c) <= limit
+                    && !binding.channels.iter().take(i).any(|&x| x == c)
+            });
+        if !fits {
+            notes.push(format!(
+                "output channel map {:?}: the device cannot take it for main's {width} channels; playing on the identity map",
+                binding.channels
+            ));
+            binding.channels = (1..=width).filter_map(|c| u16::try_from(c).ok()).collect();
+        }
+    }
     let routing = signal_output::route(sides, &system, clock_channels);
     notes.extend(routing.notices.iter().cloned());
     let routes = routing.targets();

@@ -25,7 +25,7 @@ use signal_engine::{
 };
 use signal_graph::ExecutionPlan;
 use signal_output::{
-    Conversion, Render, RenderError, VectorTap, VectorTrack, render_blocks_tapped,
+    Conversion, Render, RenderError, VectorTap, VectorTrack, render_blocks_tapped_main,
 };
 
 use crate::{Diagnostic, LoadError, Project, Severity, SourceFile};
@@ -2532,7 +2532,18 @@ pub fn replay_with(
     let mut refused = None;
     let mut mismatch = None;
     let block = config.block_capacity;
-    let rendered = render_blocks_tapped(
+    // ADR 0038: a plan of several play sides replays its main side, which
+    // the live run's session recorded; one sink replays as it always did.
+    let sinks = first
+        .instances
+        .iter()
+        .filter(|i| matches!(i.descriptor.sink, Some(signal_core::SinkKind::Audio)))
+        .count();
+    let main = match (sinks > 1, session.versions.first()) {
+        (true, Some(project)) => sink_of(project, first).ok().map(|(address, _)| address),
+        _ => None,
+    };
+    let rendered = render_blocks_tapped_main(
         &mut engine,
         frames,
         block,
@@ -2615,6 +2626,7 @@ pub fn replay_with(
         &options.vectors,
         // The engine runs plan version v as its version v (checked below).
         &session.plans,
+        main.as_ref(),
     );
     // The first result that differs from the performance's is the cause of
     // whatever else went wrong after it (M2.7-8): it is reported first.

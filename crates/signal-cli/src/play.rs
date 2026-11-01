@@ -398,7 +398,28 @@ pub(crate) fn run(
                 .map(|(role, channels)| (role.clone(), RoleBinding::clock(channels.clone())))
                 .collect(),
         };
-        let routing = route(&sides, &system, None);
+        // The output device's channels, so that a route past them is
+        // refused for that channel, not for the run (listing is read-only).
+        let channels = if null {
+            None
+        } else {
+            signal_audio::devices().ok().and_then(|list| {
+                list.iter()
+                    .filter(|d| d.direction == signal_audio::Direction::Output)
+                    .find(|d| match &args.device {
+                        Some(name) => &d.name == name,
+                        None => d.default,
+                    })
+                    .map(|d| {
+                        d.configs
+                            .iter()
+                            .map(|c| usize::from(c.channels))
+                            .max()
+                            .unwrap_or(0)
+                    })
+            })
+        };
+        let routing = route(&sides, &system, channels);
         for notice in &routing.notices {
             eprintln!("signal: {notice}");
         }

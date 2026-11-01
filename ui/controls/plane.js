@@ -883,17 +883,17 @@ export class SignalPlane extends HTMLElement {
   async writeSetupCable({ ops, route }) {
     const patch = () => this.request({ type: 'patch', level: '', base: this.graph?.files?.[''] ?? null, ops });
     let restart = false;
-    if (ops.length) {
-      try {
-        await patch();
-      } catch (error) {
-        if (!/outputs must stay/.test(error?.message ?? '')) throw error;
-        await this.request({ type: 'transport.stop' });
-        restart = true;
-        await patch();
-      }
-    }
     try {
+      if (ops.length) {
+        try {
+          await patch();
+        } catch (error) {
+          if (!/outputs must stay/.test(error?.message ?? '')) throw error;
+          await this.request({ type: 'transport.stop' });
+          restart = true;
+          await patch();
+        }
+      }
       if (route) await this.request(route);
     } finally {
       if (route) this.readSetup();

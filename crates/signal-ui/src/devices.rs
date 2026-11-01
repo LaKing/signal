@@ -148,14 +148,27 @@ pub fn effective(setup: &Setup, local: &BTreeMap<String, LocalPlay>) -> Setup {
         }
         merged.play.insert(role.clone(), entry);
     }
+    // `main` plays on the clock device: a device named for it is the clock
+    // (ADR 0038 §8, one clocked device), here as for the machine's routes.
+    if let Some(device) = merged.play.get_mut(MAIN).and_then(|e| e.device.take()) {
+        merged.output = Some(device);
+    }
     merged
 }
 
 /// The Setup merged with the project folder `dir`'s `devices.local.toml`,
 /// and what did not read in it.
 pub fn effective_setup(setup: &Setup, dir: &Path) -> (Setup, Vec<String>) {
-    let (local, problems) = read_local(dir);
-    (effective(setup, &local), problems)
+    let (local, mut problems) = read_local(dir);
+    let merged = effective(setup, &local);
+    for role in local.keys() {
+        if !merged.play.contains_key(role) && !(role == MAIN && merged.output_channels.is_some()) {
+            problems.push(format!(
+                "{LOCAL_FILE}: play.{role} has no channels here or in the Setup; ignored"
+            ));
+        }
+    }
+    (merged, problems)
 }
 
 /// Whether the run must route several play sides (or a role the Setup
@@ -194,6 +207,9 @@ pub fn sound_system(setup: &Setup, devices: &[DeviceInfo]) -> SoundSystem {
     }
     for (role, entry) in &setup.play {
         let placement = match &entry.device {
+            // `main` is on the clock device by definition ([`effective`]
+            // makes a device named for it the clock).
+            _ if role == MAIN => Placement::Clock,
             None => Placement::Clock,
             Some(device) => match resolve(devices, Direction::Output, &device.to_ref()) {
                 Resolution::Found(index) => {
@@ -784,6 +800,25 @@ mod tests {
         let merged = effective(&setup, &local);
         let system = sound_system(&merged, &[]);
         assert_eq!(system.roles["main"].channels, vec![3, 4]);
+        // A device named for main is the clock (one clocked device).
+        let (local, _) =
+            parse_local("[play.main]\ndevice = { name = \"Speakers\", id = \"coreaudio:spk\" }\n");
+        let merged = effective(&setup, &local);
+        assert_eq!(
+            merged.output.as_ref().map(|d| d.name.as_str()),
+            Some("Speakers")
+        );
+        assert_eq!(
+            merged.play["main"],
+            PlayEntry {
+                channels: vec![1, 2],
+                device: None
+            }
+        );
+        assert_eq!(
+            sound_system(&merged, &[]).roles["main"].placement,
+            Placement::Clock
+        );
     }
 
     #[test]

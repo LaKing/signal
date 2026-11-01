@@ -128,7 +128,13 @@ export function mainBinding(setup, devices) {
  */
 export function peripherals({ setup = null, devices = null, endpoints = [] } = {}) {
   const boxes = deviceBoxes(devices?.devices ?? []);
-  const main = mainBinding(setup, devices);
+  let main = mainBinding(setup, devices);
+  // A device named for `main` (devices.local.toml, or the Setup's [play.main]) is the clock, as the player takes it.
+  const mainDevice = setup?.local?.play?.main?.device ?? setup?.setup?.play?.main?.device ?? null;
+  if (mainDevice) {
+    const box = boxes.find((b) => b.key === (mainDevice.id ? `id:${mainDevice.id}` : `name:${mainDevice.name}`));
+    main = box ? { key: box.key, present: true, name: box.name, reason: null } : { key: `absent:${mainDevice.name ?? ''}`, present: false, name: mainDevice.name ?? 'the Setup’s output', reason: 'not present' };
+  }
   if (main && !main.present) {
     const width = Math.max(2, ...endpoints.filter((e) => e.role === 'main').map((e) => e.ports.length));
     boxes.push({ key: main.key, name: main.name, present: false, indexes: [], note: `not present${main.reason && main.reason !== 'not present' ? `: ${main.reason}` : ''}`, inputs: playbackPorts(width), outputs: [], side: 'right' });

@@ -204,6 +204,8 @@ fn what_a_project_never_reads_stays_out() {
         ("ui/.DS_Store", "x"),
         ("ui/assets/.hidden.png", "x"),
         ("kick.signal", "x"),
+        // ADR 0038 §6: this machine's routing for the project, never packed.
+        ("devices.local.toml", "[play.cue]\nchannels = [3, 4]\n"),
     ] {
         let file = dir.join(path);
         fs::create_dir_all(file.parent().unwrap()).unwrap();

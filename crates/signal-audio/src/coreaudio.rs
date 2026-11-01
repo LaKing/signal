@@ -437,7 +437,16 @@ impl CoreAudioDriver {
         let map = match mapping {
             Mapping::Targets(sink, targets) => ChannelMap::with_targets(sink, channels, targets)?,
             Mapping::Identity(sink) => ChannelMap::new(sink, channels),
-            Mapping::Routes(routes) => ChannelMap::with_routes(channels, routes)?,
+            // A route past the configuration chosen (the routing knew the
+            // device's widest one) is not heard, as the routing refuses
+            // channels the device lacks.
+            Mapping::Routes(routes) => ChannelMap::with_routes(
+                channels,
+                routes
+                    .into_iter()
+                    .map(|r| r.filter(|&t| t < channels))
+                    .collect(),
+            )?,
         };
         Ok(CoreAudioDriver {
             device,

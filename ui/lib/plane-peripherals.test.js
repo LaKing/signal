@@ -203,6 +203,13 @@ test('a role on another device is another clock: drawn there, dashed, not heard'
   assert.equal(setupCables(pins, bindings)[0].dashed, true);
 });
 
+test('a device named for main is the clock: main is drawn and heard there', () => {
+  const devices = { devices: [ssl(0, 'output'), speakers(1)], output: { found: 0 } };
+  const setup = { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID } }, local: { play: { main: { device: { name: 'MacBook Pro Speakers', id: 'coreaudio:BuiltInSpeakerDevice' } } } } };
+  const { bindings } = peripherals({ setup, devices, endpoints: MAIN });
+  assert.deepEqual([bindings[0].device, bindings[0].heard, bindings[0].channels], ['id:coreaudio:BuiltInSpeakerDevice', true, [1, 2]]);
+});
+
 test('devices.local.toml overrides the Setup key by key', () => {
   const roles = playRoles({ setup: { outputChannels: [1, 2], play: { cue: { channels: [3, 4], device: null } } }, local: { play: { cue: { channels: [4, 3] }, main: { channels: [3, 4] } } } });
   assert.deepEqual(roles, { cue: { channels: [4, 3], device: null }, main: { channels: [3, 4], device: null } });

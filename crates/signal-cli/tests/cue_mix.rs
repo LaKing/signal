@@ -248,15 +248,27 @@ fn main_and_cue_play_on_out_1_2_and_out_3_4_of_one_device() {
     map.scatter(&frame, &mut device);
     let peak = |c: usize| {
         device
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .fold(0.0f32, |p, f| p.max(f[c].abs()))
     };
     assert!(peak(0) > 0.01 && peak(1) > 0.01, "main on Out 1–2");
     assert!(peak(2) > 0.01 && peak(3) > 0.01, "cue on Out 3–4");
     // Main on 1–2 is the main sink alone; cue (with its click) differs.
     assert_ne!(
-        device.chunks_exact(4).map(|f| f[0]).collect::<Vec<_>>(),
-        device.chunks_exact(4).map(|f| f[2]).collect::<Vec<_>>()
+        device
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|f| f[0])
+            .collect::<Vec<_>>(),
+        device
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|f| f[2])
+            .collect::<Vec<_>>()
     );
     drop(Output::stop(&mut output));
 
@@ -278,6 +290,48 @@ fn main_and_cue_play_on_out_1_2_and_out_3_4_of_one_device() {
         [None, None, Some(0), Some(1)]
     );
     assert_eq!(notes.len(), 1, "{notes:?}");
+}
+
+/// A session of a run with two play sides records `main`, and replays it
+/// (the review of 2026-11-01: replay used to refuse several audio sinks).
+#[test]
+fn a_session_of_two_sides_replays_its_main_side() {
+    let base = scratch("cue-mix-session");
+    let session = base.join("session");
+    let out = base.join("replayed");
+    let dir = project_dir();
+    let run = signal(&[
+        "play",
+        dir.to_str().unwrap(),
+        "--driver",
+        "null",
+        "--fast",
+        "--seconds",
+        "0.25",
+        "--route",
+        "cue=3,4",
+        "--record-session",
+        session.to_str().unwrap(),
+    ]);
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let replay = signal(&[
+        "--json",
+        "replay",
+        session.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    let report: Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(report["channels"], 2, "{report}");
 }
 
 #[test]

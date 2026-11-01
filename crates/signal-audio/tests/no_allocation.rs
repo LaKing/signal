@@ -187,7 +187,7 @@ fn the_routed_callback_allocates_and_frees_nothing() {
         drop(guard);
         total.allocations += counts.allocations;
         total.deallocations += counts.deallocations;
-        for frame in buffer.chunks_exact(4) {
+        for frame in buffer.as_chunks::<4>().0 {
             for (h, x) in heard.iter_mut().zip(frame) {
                 *h = h.max(x.abs());
             }

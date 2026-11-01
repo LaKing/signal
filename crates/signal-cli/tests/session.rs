@@ -971,7 +971,7 @@ fn malformed_sessions_fail_with_located_errors() {
     assert_fails(
         result,
         "projects/v0/project.toml:",
-        "the project has 2 audio sinks",
+        "another output already plays role `main`",
     );
     let result = broken(&dir, "sink-renamed", |d| {
         rewrite(d, "projects/v1/project.toml", |t| {

@@ -192,6 +192,24 @@ pub fn render_sides(
     .map(|(render, _, sides)| (render, sides))
 }
 
+/// [`render_blocks_tapped`] of a plan of several play sides (ADR 0038):
+/// `audio.wav` records the sink at `main` (a session's replay records the
+/// main side, as the live run's session did); the others are not recorded.
+/// `None` is [`render_blocks_tapped`] exactly.
+pub fn render_blocks_tapped_main(
+    engine: &mut Engine,
+    frames: u64,
+    block: usize,
+    before: impl FnMut(&mut Engine) -> Result<Option<Frame>, EngineError>,
+    taps: &[VectorTap],
+    plans: &[ExecutionPlan],
+    main: Option<&InstanceAddress>,
+) -> Result<(Render, Vec<VectorTrack>), RenderError> {
+    let sides = main.map(|m| (m, &[][..]));
+    render_inner(engine, frames, block, before, taps, plans, sides)
+        .map(|(render, tracks, _)| (render, tracks))
+}
+
 /// The main sink and the other play sides of a routed render.
 type Sides<'a> = Option<(&'a InstanceAddress, &'a [InstanceAddress])>;
 
