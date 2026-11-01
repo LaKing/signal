@@ -314,6 +314,9 @@ pub struct Document {
     asked: VecDeque<Asked>,
     /// Finished saves' results, until taken.
     saved_results: Vec<(Ticket, Saved)>,
+    /// Each Save As written since last taken, in order: the new file and
+    /// its id ([`Document::take_identities`]).
+    identities: Vec<(PathBuf, String)>,
     next_ticket: Ticket,
     save_hold: SaveHold,
     #[cfg(feature = "test-hooks")]
@@ -357,6 +360,7 @@ impl Document {
             saving: None,
             asked: VecDeque::new(),
             saved_results: Vec::new(),
+            identities: Vec::new(),
             next_ticket: 1,
             save_hold: no_hold(),
             #[cfg(feature = "test-hooks")]
@@ -367,6 +371,12 @@ impl Document {
     /// The `.signal` file.
     pub fn file(&self) -> &Path {
         &self.file
+    }
+
+    /// The Save As written since last taken, in order: each new file and
+    /// its fresh id (the host copies the machine-local state along them).
+    pub fn take_identities(&mut self) -> Vec<(PathBuf, String)> {
+        std::mem::take(&mut self.identities)
     }
 
     /// The project id: the file's, or the one given ([`Document::set_id`]);
@@ -667,6 +677,9 @@ impl Document {
             Ok(Ok((bytes, settled))) => {
                 if job.rename {
                     self.file = job.file.clone();
+                }
+                if job.rename {
+                    self.identities.push((job.file.clone(), job.id.clone()));
                 }
                 self.id = Some(job.id.clone());
                 self.on_disk = sha256_hex(&bytes);

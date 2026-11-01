@@ -102,7 +102,7 @@ impl Clients {
             Ok(()) => Sent::Done,
             Err(TrySendError::Full(_)) => {
                 c.dropped += 1;
-                Sent::Done
+                Sent::Full
             }
             Err(TrySendError::Disconnected(_)) => Sent::Gone,
         }
@@ -159,10 +159,16 @@ impl Host {
         }
     }
 
-    pub(super) fn send_binary(&mut self, client: u64, bytes: Vec<u8>) {
+    /// A data frame to `client`; whether its queue took it (one it cannot
+    /// take is dropped and counted).
+    pub(super) fn send_binary(&mut self, client: u64, bytes: Vec<u8>) -> bool {
         match self.clients.send_binary(client, bytes) {
-            Sent::Done | Sent::Full => {}
-            Sent::Gone => self.remove(client),
+            Sent::Done => true,
+            Sent::Full => false,
+            Sent::Gone => {
+                self.remove(client);
+                false
+            }
         }
     }
 

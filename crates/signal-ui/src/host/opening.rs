@@ -181,33 +181,34 @@ impl Host {
     /// file's), so this project's machine-local state is copied to it
     /// (ADR 0038 §6, amendment of 2026-11-01).
     pub(super) fn follow_saved_id(&mut self) {
-        let Some(document) = &self.opening.document else {
+        let Some(document) = self.opening.document.as_mut() else {
             return;
         };
-        let Some(id) = document.id().map(str::to_owned) else {
-            return;
-        };
-        if self.opening.local_id.as_deref() == Some(id.as_str()) {
-            return;
-        }
-        let file = document.file().to_owned();
+        // Every Save As written, in order: each new file's state a copy of
+        // the one before it (two finished between looks each get theirs).
+        let written = document.take_identities();
         let root = local_state::root(&self.setup_path);
-        let Some(old) = self.opening.local_id.replace(id.clone()) else {
-            return;
-        };
-        let (from, to) = (local_state::dir(&root, &old), local_state::dir(&root, &id));
-        let copied = local_state::copy_state(&from, &to).and_then(|()| {
-            if to.is_dir() {
-                local_state::prepare(&root, &id, &file).map(|_| ())
-            } else {
-                Ok(())
+        for (file, id) in written {
+            if self.opening.local_id.as_deref() == Some(id.as_str()) {
+                continue;
             }
-        });
-        if let Err(error) = copied {
-            self.messages.push(format!(
-                "this machine's routing was not copied to {}: {error}",
-                file.display()
-            ));
+            let Some(old) = self.opening.local_id.replace(id.clone()) else {
+                continue;
+            };
+            let (from, to) = (local_state::dir(&root, &old), local_state::dir(&root, &id));
+            let copied = local_state::copy_state(&from, &to).and_then(|()| {
+                if to.is_dir() {
+                    local_state::prepare(&root, &id, &file).map(|_| ())
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(error) = copied {
+                self.messages.push(format!(
+                    "this machine's routing was not copied to {}: {error}",
+                    file.display()
+                ));
+            }
         }
     }
 

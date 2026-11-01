@@ -191,7 +191,8 @@ impl Host {
             ));
         }
         // A `.signal` project's state folder is made only for a write to it.
-        let dir = if message.get("scope").and_then(Value::as_str) == Some("project") {
+        // An unroute writes only where a file is (`write_local` makes none).
+        let dir = if route && message.get("scope").and_then(Value::as_str) == Some("project") {
             self.local_dir_for_write().map_err(|e| {
                 fail(
                     "write-failed",

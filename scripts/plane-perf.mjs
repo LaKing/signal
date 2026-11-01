@@ -16,7 +16,8 @@
 //   signal ui --driver null --setup /tmp/x/setup.toml /tmp/x/studio 2> /tmp/x/studio.log
 //   node scripts/plane-perf.mjs /tmp/x/studio.log studio [--stopped]
 //
-// Prints JSON; CHROME names another browser binary.
+// Prints JSON; CHROME names another browser binary, CDP_PORT the DevTools
+// port (default: a random one from 9300).
 
 import { spawn } from 'node:child_process';
 import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
@@ -26,9 +27,14 @@ import { join } from 'node:path';
 const [logFile, label, ...flags] = process.argv.slice(2);
 const stopped = flags.includes('--stopped');
 const log = readFileSync(logFile, 'utf8');
-const ui = log.match(/ui at (http:\/\/\S+)/)[1];
+const found = log.match(/ui at (http:\/\/\S+)/);
+if (!found) {
+  console.error(`${logFile}: no "ui at" URL yet (start signal ui first, its stderr in this file)`);
+  process.exit(2);
+}
+const ui = found[1];
 const url = ui.replace('/#', '/ui/app/index.html#');
-const port = 9300 + Math.floor(Math.random() * 500);
+const port = Number(process.env.CDP_PORT ?? 9300 + Math.floor(Math.random() * 500));
 const profile = mkdtempSync(join(tmpdir(), 'signal-plane-perf-'));
 const chrome = spawn(process.env.CHROME ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', [
   '--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, '--window-size=1440,900',
@@ -193,7 +199,6 @@ const results = [];
 await evaluate(`(() => { const p = document.querySelector('signal-plane'); p.fitSetup?.(); return true; })()`);
 await sleep(1500);
 results.push(await phase('idle at Setup, 5 s', async (s) => { await s(); await sleep(5000); await s(); }));
-// Pan at Setup: a mouse's wheel zooms there, so pan by a trackpad-like horizontal-less... use pinch out/in pairs instead.
 results.push(await phase('pinch zoom in, Setup -> Stack -> Wiring -> Control', async (s) => {
   const stack = await evaluate(`(() => { const p = document.querySelector('signal-plane'); const r = p.focusRect?.() ?? [...p.layout.stacks.values()][0]; const v = p.view; return { x: v.x + (r.x + r.w / 2) * v.k, y: v.y + (r.y + r.h * 0.3) * v.k }; })()`);
   const at = { x: Math.round(Math.max(10, Math.min(1430, stack.x))), y: Math.round(Math.max(10, Math.min(890, stack.y))) };

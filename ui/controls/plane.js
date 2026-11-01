@@ -1126,7 +1126,9 @@ export class SignalPlane extends HTMLElement {
    * `visibility: hidden`, under no zero opacity); both per layer (`setup`, each Stack by name,
    * `deep` the Engine's board, `chrome` the bar and notes). `renders` and `renderMs`: the
    * view's renders since the plane was made, and their script time. Reads computed styles,
-   * so it is called by a measurement, never per frame. Never writes anything.
+   * so it is called by a measurement, never per frame. Never writes anything. An order of
+   * magnitude, not an exact count: light-DOM children of a shadow host count whether slotted
+   * or not, and overlays on the stage (the chooser, Edit layout) are in no layer.
    */
   metrics() {
     const walk = (node, shown, out) => {
@@ -1508,7 +1510,8 @@ export class SignalPlane extends HTMLElement {
   updateInner(readouts) {
     const addresses = [...new Set(readouts.map((r) => r.address))].slice(0, 64);
     const key = addresses.join('\t');
-    if (this.innerStream?.key === key) return;
+    // The same addresses: readouts drawn anew show the values already in (frames come only on change).
+    if (this.innerStream?.key === key) return this.scheduleInner();
     this.innerStream?.stop?.();
     this.innerStream = null;
     if (!addresses.length || !this.connection?.subscribe) return;

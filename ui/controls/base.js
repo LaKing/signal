@@ -196,13 +196,17 @@ let stageObserver = null;
 export function watchStage(element) {
   const Observer = globalThis.IntersectionObserver;
   if (typeof Observer !== 'function') return null;
-  stageObserver ??= new Observer(
-    (entries) => {
-      for (const entry of entries) entry.target.onStage?.(entry.isIntersecting);
-    },
-    { rootMargin: '25%' },
-  );
-  const observer = stageObserver;
+  // One per observer class (a test's stub replaces the browser's).
+  if (stageObserver?.made !== Observer) {
+    const observer = new Observer(
+      (entries) => {
+        for (const entry of entries) entry.target.onStage?.(entry.isIntersecting);
+      },
+      { rootMargin: '25%' },
+    );
+    stageObserver = { made: Observer, observer };
+  }
+  const { observer } = stageObserver;
   observer.observe(element);
   return () => observer.unobserve(element);
 }
@@ -329,7 +333,15 @@ export class SignalElement extends HTMLElement {
 
   startStreams() {
     if (!this.connection || this.offStage || this.streamStops) return;
-    this.streamStops = this.streams(this.connection);
+    const connection = this.connection;
+    const stops = this.streams(connection);
+    // `streams` attached again meanwhile (a synchronous re-attach): keep the
+    // newer streams, stop these.
+    if (this.streamStops || this.connection !== connection) {
+      for (const stop of stops) stop();
+      return;
+    }
+    this.streamStops = stops;
   }
 
   stopStreams() {

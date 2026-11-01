@@ -12,17 +12,26 @@ globalThis.customElements ??= { get: () => undefined, define: () => {} };
 
 const observed = new Set();
 let notify = null;
-globalThis.IntersectionObserver = class {
-  constructor(callback) {
-    notify = (target, shown) => callback([{ target, isIntersecting: shown }]);
+/** The browser's observer, stubbed while `fn` runs (every test file shares one process: ui/index.js). */
+function stubbed(fn) {
+  const before = globalThis.IntersectionObserver;
+  globalThis.IntersectionObserver = class {
+    constructor(callback) {
+      notify = (target, shown) => callback([{ target, isIntersecting: shown }]);
+    }
+    observe(element) {
+      observed.add(element);
+    }
+    unobserve(element) {
+      observed.delete(element);
+    }
+  };
+  try {
+    fn();
+  } finally {
+    globalThis.IntersectionObserver = before;
   }
-  observe(element) {
-    observed.add(element);
-  }
-  unobserve(element) {
-    observed.delete(element);
-  }
-};
+}
 
 const { SignalElement, SignalValueElement } = await import('./base.js');
 
@@ -50,7 +59,7 @@ function control(Class) {
   return element;
 }
 
-test('a knob subscribes once on the stage, stops off it, starts again on it, stops when detached', () => {
+test('a knob subscribes once on the stage, stops off it, starts again on it, stops when detached', () => stubbed(() => {
   const knob = control(SignalValueElement);
   const c = connection();
   knob.attach(c);
@@ -69,9 +78,9 @@ test('a knob subscribes once on the stage, stops off it, starts again on it, sto
   assert.ok(!observed.has(knob), 'no longer watched');
   notify(knob, true);
   assert.equal(c.subscribed, 2, 'a late word after detaching starts nothing');
-});
+}));
 
-test('attached again while known on the stage: subscribed at once', () => {
+test('attached again while known on the stage: subscribed at once', () => stubbed(() => {
   const knob = control(SignalValueElement);
   const c = connection();
   knob.attach(c);
@@ -79,9 +88,9 @@ test('attached again while known on the stage: subscribed at once', () => {
   knob.attach(c);
   assert.equal(c.subscribed, 2);
   assert.equal(c.stopped, 1);
-});
+}));
 
-test('a control whose streams keep state never pauses', () => {
+test('a control whose streams keep state never pauses', () => stubbed(() => {
   class Keeper extends SignalElement {
     streams(connection) {
       return [connection.subscribe({ stream: 'parameters', addresses: ['/a.freq'] }, () => {})];
@@ -94,18 +103,12 @@ test('a control whose streams keep state never pauses', () => {
   assert.ok(!observed.has(keeper), 'not watched');
   keeper.detach();
   assert.equal(c.stopped, 1);
-});
+}));
 
 test('without IntersectionObserver every control is on the stage', () => {
-  const saved = globalThis.IntersectionObserver;
-  // A new module instance would keep its observer; the check is made per attach.
-  globalThis.IntersectionObserver = undefined;
-  try {
-    const knob = control(SignalValueElement);
-    const c = connection();
-    knob.attach(c);
-    assert.equal(c.subscribed, 1);
-  } finally {
-    globalThis.IntersectionObserver = saved;
-  }
+  assert.equal(typeof globalThis.IntersectionObserver, 'undefined', 'node has none');
+  const knob = control(SignalValueElement);
+  const c = connection();
+  knob.attach(c);
+  assert.equal(c.subscribed, 1);
 });

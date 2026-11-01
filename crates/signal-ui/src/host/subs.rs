@@ -315,7 +315,7 @@ impl Host {
                     );
                     bytes.extend_from_slice(&values);
                     sub.sent = Some((values, now));
-                    out.push((sub.client, bytes));
+                    out.push((sub.client, bytes, Some(id)));
                 }
                 Stream::Meters { levels, first, .. } => {
                     let Some(start) = first.take() else {
@@ -341,13 +341,19 @@ impl Host {
                         bytes.extend_from_slice(&rms.to_le_bytes());
                         *level = Level::default();
                     }
-                    out.push((sub.client, bytes));
+                    out.push((sub.client, bytes, None));
                 }
                 Stream::Scope { .. } | Stream::Vector { .. } => {}
             }
         }
-        for (client, bytes) in out {
-            self.send_binary(client, bytes);
+        for (client, bytes, parameters) in out {
+            // A parameters frame the client's queue dropped is sent again at
+            // the next interval, not only with the next change.
+            if !self.send_binary(client, bytes)
+                && let Some(sub) = parameters.and_then(|id| self.subs.by_id.get_mut(&id))
+            {
+                sub.sent = None;
+            }
         }
     }
 
