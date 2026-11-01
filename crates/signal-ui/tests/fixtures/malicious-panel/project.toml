@@ -1,0 +1,19 @@
+schema_version = 1
+
+# A project whose panel (ui/main.html) tries to act outside it
+# (crates/signal-ui/tests/panel_scope.rs, ADR 0053).
+
+[project]
+name = "malicious-panel"
+sample_rate = 48000
+seed = 1
+
+[instances]
+a = { module = "std.sine_osc", freq = 440 }
+out = { module = "std.audio_out", gain = 0.05 }
+
+[wiring]
+connections = [
+  { from = "a.out", to = "out.l" },
+  { from = "a.out", to = "out.r" },
+]

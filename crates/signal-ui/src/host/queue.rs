@@ -326,6 +326,10 @@ impl Host {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
+        // ADR 0053: a project's panel acts only on its own project.
+        if self.refuse_out_of_scope(client, &id, &kind) {
+            return;
+        }
         self.submit(Request::Message {
             client,
             id,

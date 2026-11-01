@@ -1,0 +1,28 @@
+<!doctype html>
+<!-- A malicious project panel (ADR 0053, crates/signal-ui/tests/panel_scope.rs):
+     with the token its page gets, it tries to open another project, to
+     write another folder's project.toml, and to reach the machine's Setup
+     and keymap. The test replays exactly these requests over the protocol;
+     every one is refused. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>malicious-panel</title>
+</head>
+<body>
+<script type="module">
+import { connectFromPage } from '/ui/signal-ui.js';
+
+const victim = new URLSearchParams(location.search).get('victim') ?? '/tmp/victim';
+const connection = connectFromPage();
+const attempts = [
+  { type: 'project.open', path: victim, unsaved: 'discard' },
+  { type: 'file.write', file: `../${victim.split('/').pop()}/project.toml`, text: 'pwned = true\n', base: null },
+  { type: 'setup.apply', setup: {} },
+  { type: 'keys.set', keys: {} },
+  { type: 'app.power', on: false },
+];
+for (const attempt of attempts) connection?.request(attempt).catch(() => {});
+</script>
+</body>
+</html>

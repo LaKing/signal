@@ -64,6 +64,9 @@ pub(crate) struct Files {
     pub(crate) ui: PathBuf,
     pub(crate) project: Arc<RwLock<PathBuf>>,
     pub(crate) port: u16,
+    /// The WebSocket's port, the one place a page may connect to besides
+    /// this server ([`Files::policy`]).
+    pub(crate) ws_port: u16,
     pub(crate) remote: bool,
 }
 
@@ -188,6 +191,9 @@ struct Request {
     method: String,
     path: String,
     host: Option<String>,
+    /// A browser's fetch of a service worker's script (`Service-Worker:
+    /// script`): never served, so no page can install one (ADR 0053).
+    service_worker: bool,
 }
 
 fn parse(head: &[u8]) -> Option<Request> {
@@ -199,16 +205,20 @@ fn parse(head: &[u8]) -> Option<Request> {
         return None;
     }
     let mut host = None;
+    let mut service_worker = false;
     for line in lines {
         let (name, value) = line.split_once(':')?;
         if name.trim().eq_ignore_ascii_case("host") {
             host = Some(value.trim().to_owned());
+        } else if name.trim().eq_ignore_ascii_case("service-worker") {
+            service_worker = true;
         }
     }
     Some(Request {
         method: method.to_owned(),
         path: target.split(['?', '#']).next().unwrap_or("").to_owned(),
         host,
+        service_worker,
     })
 }
 
@@ -219,6 +229,8 @@ struct Response {
     body: Body,
     /// HEAD: the head only.
     head_only: bool,
+    /// The `Content-Security-Policy` of a page served (empty: none).
+    policy: String,
 }
 
 enum Body {
@@ -233,6 +245,7 @@ impl Response {
             content_type: "text/plain; charset=utf-8",
             body: Body::Text(text),
             head_only: false,
+            policy: String::new(),
         }
     }
 
@@ -258,6 +271,35 @@ fn reason(status: u16) -> &'static str {
 }
 
 impl Files {
+    /// The `Content-Security-Policy` of every file served (ADR 0053,
+    /// SECURITY.md): scripts, styles, images, fonts and frames only from
+    /// this server (inline ones allowed: the pages and panels have them),
+    /// connections only to it and to its WebSocket (by the name the page
+    /// was asked by, else by any name on that port), no plugins, no
+    /// workers (so no service worker), no form posts. A project's page
+    /// can then load nothing from, nor send anything to, another host.
+    fn policy(&self, host: Option<&str>) -> String {
+        let name = host
+            .and_then(crate::server::host_port)
+            .map(|(name, _)| name)
+            .filter(|name| {
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+            })
+            .unwrap_or("*");
+        let ws = self.ws_port;
+        format!(
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; \
+             style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; \
+             font-src 'self' data:; media-src 'self' data: blob:; \
+             connect-src 'self' ws://{name}:{ws} ws://127.0.0.1:{ws} ws://localhost:{ws}; \
+             frame-src 'self'; worker-src 'none'; object-src 'none'; \
+             base-uri 'self'; form-action 'none'"
+        )
+    }
+
     fn respond(&self, request: &Request) -> Response {
         let head_only = match request.method.as_str() {
             "GET" => false,
@@ -280,6 +322,9 @@ impl Files {
         };
         if !allowed {
             return refused(403, "forbidden host");
+        }
+        if request.service_worker {
+            return refused(403, "no service workers");
         }
         let path = request.path.as_str();
         let found = match path {
@@ -322,6 +367,7 @@ impl Files {
                 content_type: mime(&path),
                 body: Body::File(file, length),
                 head_only,
+                policy: self.policy(request.host.as_deref()),
             },
             None => refused(404, "not found"),
         }
@@ -339,10 +385,15 @@ fn write_response<W: Write + ?Sized>(
         Body::Text(text) => text.len() as u64,
         Body::File(_, length) => *length,
     };
+    let policy = if response.policy.is_empty() {
+        String::new()
+    } else {
+        format!("Content-Security-Policy: {}\r\n", response.policy)
+    };
     let head = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {length}\r\n\
          X-Content-Type-Options: nosniff\r\nCache-Control: no-cache\r\n\
-         Referrer-Policy: no-referrer\r\nConnection: close\r\n\r\n",
+         Referrer-Policy: no-referrer\r\n{policy}Connection: close\r\n\r\n",
         response.status,
         reason(response.status),
         response.content_type,
@@ -457,6 +508,7 @@ mod tests {
                 method: "GET".to_owned(),
                 path: "/ui/a.js".to_owned(),
                 host: Some("127.0.0.1:80".to_owned()),
+                service_worker: false,
             }
         );
         assert_eq!(parse(b"GET / HTTP/1.0").unwrap().host, None);
@@ -561,6 +613,7 @@ mod tests {
             ui: base.join("ui"),
             project: Arc::new(RwLock::new(base.join("project-ui"))),
             port: 8,
+            ws_port: 9,
             remote: false,
         };
         let request = parse(b"GET /ui/big.bin HTTP/1.1\r\nHost: localhost:8").unwrap();
@@ -584,6 +637,52 @@ mod tests {
         let other = parse(b"GET / HTTP/1.1\r\nHost: example.com:8").unwrap();
         assert_eq!(files.respond(&other).status, 403);
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// ADR 0053: every file served carries the policy that keeps a page on
+    /// this server (its WebSocket the only other place it connects to, no
+    /// workers), and a service worker's script is never served.
+    #[test]
+    fn a_page_is_kept_on_its_server_and_installs_no_service_worker() {
+        let files = Files {
+            ui: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui"),
+            project: Arc::new(RwLock::new(PathBuf::from("/nonexistent"))),
+            port: 8,
+            ws_port: 9,
+            remote: false,
+        };
+        let stop = AtomicBool::new(false);
+        let head = |request: &[u8]| {
+            let response = files.respond(&parse(request).unwrap());
+            let status = response.status;
+            let mut out = Vec::new();
+            write_response(&mut out, response, &stop, DEADLINES.write).unwrap();
+            let out = String::from_utf8_lossy(&out).to_string();
+            (
+                status,
+                out.split("\r\n\r\n").next().unwrap_or("").to_owned(),
+            )
+        };
+        let (status, page) = head(b"GET /ui/app/index.html HTTP/1.1\r\nHost: localhost:8");
+        assert_eq!(status, 200);
+        let policy = page
+            .lines()
+            .find_map(|l| l.strip_prefix("Content-Security-Policy: "))
+            .expect("a policy");
+        for part in [
+            "default-src 'self'",
+            "connect-src 'self' ws://localhost:9 ws://127.0.0.1:9 ws://localhost:9;",
+            "worker-src 'none'",
+            "object-src 'none'",
+        ] {
+            assert!(policy.contains(part), "{part} in {policy}");
+        }
+        // A name the policy cannot hold safely: any name, on the port only.
+        let odd = files.policy(Some("[::1]:8"));
+        assert!(odd.contains("ws://*:9"), "{odd}");
+        let (status, _) =
+            head(b"GET /ui/signal-ui.js HTTP/1.1\r\nHost: localhost:8\r\nService-Worker: script");
+        assert_eq!(status, 403);
     }
 
     /// Review 2026-11-01 (linked-ui-serves-any-file): a project whose `ui/`
@@ -611,6 +710,7 @@ mod tests {
             ui: ui.clone(),
             project: Arc::new(RwLock::new(base.join(project).join("ui"))),
             port: 8,
+            ws_port: 9,
             remote: false,
         };
         let get = |files: &Files, path: &str| {
@@ -639,6 +739,7 @@ mod tests {
             ui: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui"),
             project: Arc::new(RwLock::new(PathBuf::from("/nonexistent"))),
             port: 8,
+            ws_port: 9,
             remote: false,
         };
         let stop = AtomicBool::new(false);
@@ -675,6 +776,7 @@ mod tests {
             ui: base.join("ui"),
             project: Arc::new(RwLock::new(base.join("project-ui"))),
             port: 8,
+            ws_port: 9,
             remote: false,
         };
         let stop = AtomicBool::new(false);

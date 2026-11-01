@@ -328,6 +328,22 @@ pub fn page_url(app_url: &str, path: &str) -> String {
     format!("{}{path}{fragment}", origin_of(app_url))
 }
 
+/// The URL of `path` for a panel window (ADR 0053): [`page_url`]'s, with
+/// the project's panel token in place of the session token, since the
+/// window runs the project's own page; without a token, only the
+/// WebSocket's port (the page then connects to nothing).
+pub fn panel_page_url(app_url: &str, path: &str, token: Option<&str>) -> String {
+    let ws = app_url
+        .find('#')
+        .and_then(|i| app_url.get(i + 1..))
+        .and_then(|fragment| fragment.split('&').find_map(|kv| kv.strip_prefix("ws=")))
+        .unwrap_or("");
+    match token {
+        Some(token) => format!("{}{path}#ws={ws}&token={token}", origin_of(app_url)),
+        None => format!("{}{path}#ws={ws}", origin_of(app_url)),
+    }
+}
+
 /// The title of a window of `view`: a main window's is [`title`]; the
 /// others say what they show, then the project's title.
 pub fn view_title(view: WindowView, project: Option<&ProjectStatus>) -> String {
@@ -849,6 +865,16 @@ mod tests {
         for view in [WindowView::Main, WindowView::Schematic, WindowView::Panel] {
             assert!(may_navigate(&url(view), origin_of(app)));
         }
+        // ADR 0053: a panel window holds the project's panel token, never
+        // the session's.
+        assert_eq!(
+            panel_page_url(app, PANEL_WINDOW_PAGE, Some("cd")),
+            "http://127.0.0.1:5123/ui/app/panel-window.html#ws=5124&token=cd"
+        );
+        assert_eq!(
+            panel_page_url(app, PANEL_WINDOW_PAGE, None),
+            "http://127.0.0.1:5123/ui/app/panel-window.html#ws=5124"
+        );
         let kick = status(Some("/p/kick.signal"), "kick", true);
         assert_eq!(
             view_title(WindowView::Main, Some(&kick)),

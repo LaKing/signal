@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use signal_core::Registry;
 use signal_ui::keys::Keys;
-use signal_ui::{APP_PAGE, AppHostConfig, Edits, Host, ProjectStatus, ServerOptions};
+use signal_ui::{APP_PAGE, AppHostConfig, Edits, Host, PanelTokens, ProjectStatus, ServerOptions};
 
 use crate::setup::{Setup, Window};
 use crate::state::{Backend, compute_lines};
@@ -89,6 +89,7 @@ pub type WindowsEdit = Box<dyn Fn(&str) -> Result<String, String> + Send>;
 struct Ready {
     url: String,
     token: String,
+    panel: PanelTokens,
     #[cfg(feature = "test-hooks")]
     connector: signal_ui::LocalConnector,
 }
@@ -97,6 +98,7 @@ struct Ready {
 pub struct AppServer {
     url: String,
     token: String,
+    panel: PanelTokens,
     requests: Option<Sender<Request>>,
     thread: Option<JoinHandle<()>>,
     #[cfg(feature = "test-hooks")]
@@ -142,6 +144,7 @@ impl AppServer {
                 let _ = ready_tx.send(Ok(Ready {
                     url: host.page_url(APP_PAGE),
                     token: host.token().to_owned(),
+                    panel: host.panel_tokens(),
                     #[cfg(feature = "test-hooks")]
                     connector: host.local_connector(),
                 }));
@@ -162,6 +165,7 @@ impl AppServer {
         Ok(AppServer {
             url: ready.url,
             token: ready.token,
+            panel: ready.panel,
             requests: Some(requests),
             thread: Some(thread),
             #[cfg(feature = "test-hooks")]
@@ -178,6 +182,13 @@ impl AppServer {
     /// The session token.
     pub fn token(&self) -> &str {
         &self.token
+    }
+
+    /// The open project's panel tokens (ADR 0053): a panel window, which
+    /// runs the project's own page, gets the current one, never the
+    /// session token.
+    pub fn panel_tokens(&self) -> &PanelTokens {
+        &self.panel
     }
 
     /// Sends `request` (made with its answer's sender) and waits for the

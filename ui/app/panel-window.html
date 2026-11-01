@@ -8,7 +8,7 @@
      window (ADR 0047: the cards at their places on the plate, cropped to
      them). The project's ui/windows.toml says which window holds
      which card. The URL's fragment carries the WebSocket's port and the
-     session token. -->
+     project's panel token (ADR 0053), never the session token. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -24,7 +24,7 @@
 </style>
 </head>
 <body>
-<iframe class="project-panel" title="Project panel"></iframe>
+<iframe class="project-panel" title="Project panel" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads"></iframe>
 <p class="empty">Right-click an instrument (in the main window's Panel tab or another panel window) and choose Move to.</p>
 <script type="module">
 import { connectFromPage, setDefaultConnection } from '../signal-ui.js';

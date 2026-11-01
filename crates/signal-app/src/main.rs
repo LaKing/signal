@@ -67,12 +67,12 @@ use signal_app::window::{
     ExitPlan, HELP_MENU, MENU_BAR, MenuAction, MenuItem, NATIVE_MENU_SCRIPT, Prompt, QuitRoute,
     REVERT_BUTTONS, REVERT_INFORMATIVE, RevertPlan, RevertPrompt, SETTINGS_TITLE, WINDOW_MENU,
     answer, can_revert, default_save_name, dropped, exit_plan, may_navigate, menu_chords,
-    origin_of, page_url, prompt_buttons, prompt_text, revert_plan, revert_text, save_target,
-    settings_path, view_path, view_title, window_of, window_title,
+    origin_of, page_url, panel_page_url, prompt_buttons, prompt_text, revert_plan, revert_text,
+    save_target, settings_path, view_path, view_title, window_of, window_title,
 };
 use signal_ui::document::open_root;
 use signal_ui::keys::{Keys, keys_path};
-use signal_ui::{Edits, ProjectStatus, WINDOWS_FILE};
+use signal_ui::{Edits, PanelTokens, ProjectStatus, WINDOWS_FILE};
 use tao::dpi::{LogicalPosition, LogicalSize};
 use tao::event::{Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget};
@@ -287,6 +287,9 @@ struct Shown {
     /// What its page shows of the device (ADR 0047 §3, §5): the page's
     /// `view.state`, told back to it (`signal-view`) when it is ready.
     state: ViewState,
+    /// A panel window's: the project's panel token its page was loaded
+    /// with (ADR 0053), loaded again with the next project's.
+    token: Option<String>,
 }
 
 impl Shown {
@@ -332,6 +335,8 @@ struct Windows {
     dir: Option<PathBuf>,
     project: Option<ProjectStatus>,
     app_url: String,
+    /// The open project's panel tokens, for panel windows (ADR 0053).
+    panel: PanelTokens,
     origin: String,
     /// The Setup's `[window]`: the default main window's size.
     size: Option<(f64, f64)>,
@@ -374,8 +379,17 @@ impl Windows {
         let origin = self.origin.clone();
         let drops = proxy.clone();
         let pages = proxy.clone();
+        // ADR 0053: a panel window runs the project's own page, so it holds
+        // the project's panel token, never the session token.
+        let token = (view == WindowView::Panel)
+            .then(|| self.panel.token())
+            .flatten();
+        let url = match view {
+            WindowView::Panel => panel_page_url(&self.app_url, view_path(view), token.as_deref()),
+            _ => page_url(&self.app_url, view_path(view)),
+        };
         let webview = WebViewBuilder::new()
-            .with_url(page_url(&self.app_url, view_path(view)))
+            .with_url(url)
             // The page leaves the menu's shortcuts to the native menu.
             .with_initialization_script(NATIVE_MENU_SCRIPT)
             .with_navigation_handler(move |to| may_navigate(&to, &origin))
@@ -404,6 +418,7 @@ impl Windows {
             fit: false,
             own_until: Instant::now(),
             state: at.state.clone(),
+            token,
         });
         self.front.insert(0, id);
         if at.fullscreen
@@ -592,6 +607,26 @@ impl Windows {
         self.written = Some(layout.clone());
         self.tracker.applied(Instant::now());
         self.tell_cards();
+    }
+
+    /// ADR 0053: every panel window whose page holds another project's panel
+    /// token (or none) loads again with the open project's; it says
+    /// `window.ready` again and is told its cards then.
+    fn rescope(&mut self) {
+        let now = self.panel.token();
+        for shown in &mut self.list {
+            if shown.view != WindowView::Panel || shown.token == now {
+                continue;
+            }
+            let url = panel_page_url(&self.app_url, view_path(shown.view), now.as_deref());
+            match shown.webview.load_url(&url) {
+                Ok(()) => {
+                    shown.token.clone_from(&now);
+                    shown.ready = false;
+                }
+                Err(error) => eprintln!("signal-app: {error}"),
+            }
+        }
     }
 
     /// Tells every ready page which cards it shows.
@@ -1085,6 +1120,7 @@ fn main() -> ExitCode {
         project,
         origin: origin_of(&url).to_owned(),
         app_url: url,
+        panel: server.panel_tokens().clone(),
         size: setup
             .window
             .map(|w| (f64::from(w.width), f64::from(w.height))),
@@ -1269,6 +1305,7 @@ fn main() -> ExitCode {
                 let dir = status.as_ref().map(|s| s.dir.clone());
                 let old = std::mem::replace(&mut windows.project, status);
                 windows.titles();
+                windows.rescope();
                 // Another project: its layout for these screens.
                 if dir.is_some() && dir != windows.dir {
                     windows.flush_to(old.as_ref());

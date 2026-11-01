@@ -35,6 +35,7 @@ mod project_io;
 mod queue;
 mod run;
 mod schematic_edits;
+mod scope;
 mod setup_keys;
 mod snapshotting;
 mod subs;
@@ -427,6 +428,7 @@ impl Host {
                 host.autoplay();
             }
         }
+        host.sync_scope();
         host
     }
 
@@ -435,6 +437,7 @@ impl Host {
         let (run, notes) = host.build(true)?;
         host.messages.extend(notes);
         host.install(run);
+        host.sync_scope();
         Ok(host)
     }
 
@@ -520,9 +523,16 @@ impl Host {
         self.server.url()
     }
 
-    /// The URL of the project's main panel, with the same fragment.
+    /// The URL of the project's main panel, with the WebSocket's port and
+    /// the project's panel token (ADR 0053), never the session token.
     pub fn panel_url(&self) -> String {
         self.server.panel_url()
+    }
+
+    /// The project panel tokens (ADR 0053): what Signal.app hands its panel
+    /// windows, the current project's token at any time.
+    pub fn panel_tokens(&self) -> crate::PanelTokens {
+        self.server.panel.clone()
     }
 
     /// The URL of the page at `path` (from `/`, e.g. [`crate::APP_PAGE`]),
@@ -698,6 +708,8 @@ impl Host {
     pub fn step(&mut self) -> Vec<String> {
         // The control thread never waits for the writer lock (ADR 0048).
         let _no_wait = transaction::NoWait::enter(Duration::ZERO);
+        // The window's Open, Save As or Revert since the last step (ADR 0053).
+        self.sync_scope();
         self.run_waiting();
         self.poll();
         // Before any client's message: a waiting note-off goes first.
@@ -763,6 +775,7 @@ impl Host {
     /// nothing to poll.
     pub fn wait(&mut self, timeout: Duration) {
         let _no_wait = transaction::NoWait::enter(Duration::ZERO);
+        self.sync_scope();
         self.run_waiting();
         if let Ok(message) = self.server.inbound.recv_timeout(timeout) {
             self.inbound(message);
@@ -776,7 +789,9 @@ impl Host {
                 queue,
                 evicted,
                 gate,
+                scope,
             } => {
+                let panel = matches!(scope, crate::server::Scope::Project(_));
                 self.clients.connect(
                     client,
                     Client {
@@ -784,8 +799,15 @@ impl Host {
                         evicted,
                         gate,
                         dropped: 0,
+                        scope,
                     },
                 );
+                // ADR 0053: a panel token of a project no longer open (made
+                // just before another opened) is let go at once.
+                self.sync_scope();
+                if panel && self.scope_refuses(client, "hello").is_some() {
+                    return self.evict(client);
+                }
                 let mut welcome = json!({
                     "type": "welcome",
                     "protocol": PROTOCOL,
@@ -796,6 +818,9 @@ impl Host {
                     "planVersion": self.run.as_ref().map(|r| r.version),
                     "generation": self.opening.generation,
                 });
+                if panel {
+                    welcome = with(welcome, "scope", json!("project"));
+                }
                 // Before the client can subscribe: one that connects while
                 // the app is off streams nothing (M2.8-11).
                 if let Some(mode) = &self.app {
@@ -809,7 +834,12 @@ impl Host {
                 client,
                 text,
                 permit,
-            } => self.handle(client, &text, permit),
+            } => {
+                self.handle(client, &text, permit);
+                // A `project.open` (or Save As) just handled: the panels of
+                // the project closed go now.
+                self.sync_scope();
+            }
             Inbound::Gone { client } => self.remove(client),
         }
     }

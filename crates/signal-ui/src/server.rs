@@ -116,14 +116,72 @@ pub struct ServerOptions {
     pub client_queue: usize,
 }
 
+/// What a client's token lets it do (ADR 0053).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Scope {
+    /// The session token: Signal's own pages, `signal mcp`, the CLI.
+    App,
+    /// A project's panel token: a page served from a project (its
+    /// `ui/main.html` in a panel window, `signal ui`'s panel URL) acts only
+    /// on that project, named by its identity ([`PanelTokens`]).
+    Project(PathBuf),
+}
+
+/// The panel token (ADR 0053): one per project identity, made anew
+/// whenever another project is open, so a token handed to a project's panel
+/// admits nothing once its project is closed. Shared by the servers (which
+/// admit it), the host (which makes it) and the app's windows (which hand it
+/// to panel windows).
+#[derive(Clone, Default)]
+pub struct PanelTokens(Arc<Mutex<Option<(PathBuf, String)>>>);
+
+impl std::fmt::Debug for PanelTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PanelTokens(…)")
+    }
+}
+
+impl PanelTokens {
+    /// The current project's panel token (none before a project's identity
+    /// is known, or when the system's random source failed).
+    pub fn token(&self) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|(_, token)| token.clone())
+    }
+
+    /// A new token for `identity` unless the current one is for it; true
+    /// when it changed (every client of the old one must go).
+    pub(crate) fn serve(&self, identity: &std::path::Path) -> bool {
+        let mut current = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if current.as_ref().is_some_and(|(id, _)| id == identity) {
+            return false;
+        }
+        *current = token().ok().map(|token| (identity.to_owned(), token));
+        true
+    }
+
+    /// The identity `token` is the panel token of, compared in constant time.
+    fn admits(&self, token: &str) -> Option<PathBuf> {
+        let current = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        current
+            .as_ref()
+            .filter(|(_, own)| same(token, own))
+            .map(|(identity, _)| identity.clone())
+    }
+}
+
 /// What a client thread tells the control thread.
 pub(crate) enum Inbound {
-    /// A client said `hello` with the token.
+    /// A client said `hello` with a token: the session's or a panel's.
     Connected {
         client: u64,
         queue: SyncSender<Outbound>,
         evicted: Arc<AtomicBool>,
         gate: Arc<AtomicBool>,
+        scope: Scope,
     },
     /// A text message from a connected client; one over [`MAX_MESSAGE`]
     /// holds its share of [`LARGE_INBOUND`] until it is dropped.
@@ -213,6 +271,8 @@ pub(crate) struct Server {
     http: SocketAddr,
     ws: SocketAddr,
     token: String,
+    /// The current project's panel token (ADR 0053).
+    pub(crate) panel: PanelTokens,
     pub(crate) inbound: Receiver<Inbound>,
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
@@ -235,6 +295,7 @@ impl Server {
             IpAddr::V4(Ipv4Addr::LOCALHOST)
         };
         let token = token()?;
+        let panel = PanelTokens::default();
         let stop = Arc::new(AtomicBool::new(false));
         let http = TcpListener::bind(SocketAddr::new(ip, options.port))?;
         let http_addr = http.local_addr()?;
@@ -248,6 +309,7 @@ impl Server {
             ui: options.ui_dir.clone(),
             project: Arc::clone(&project),
             port: http_addr.port(),
+            ws_port: ws_addr.port(),
             remote: options.remote,
         };
         let (http_queue, mut threads) = http::workers(files, &stop)?;
@@ -255,6 +317,7 @@ impl Server {
 
         let accept = Arc::new(Accept {
             token: token.clone(),
+            panel: panel.clone(),
             inbound: inbound_tx,
             queue: options.client_queue.max(1),
             http_port: http_addr.port(),
@@ -276,6 +339,7 @@ impl Server {
             http: http_addr,
             ws: ws_addr,
             token,
+            panel,
             inbound,
             stop,
             threads,
@@ -292,6 +356,7 @@ impl Server {
     #[cfg(feature = "in-process")]
     pub(crate) fn start_local(options: &ServerOptions) -> io::Result<Server> {
         let token = token()?;
+        let panel = PanelTokens::default();
         let stop = Arc::new(AtomicBool::new(false));
         let (inbound_tx, inbound) = sync_channel(INBOUND);
         let none = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
@@ -301,11 +366,13 @@ impl Server {
             ui: options.ui_dir.clone(),
             project: Arc::clone(&project),
             port: 0,
+            ws_port: 0,
             remote: false,
         };
         let (http_queue, threads) = http::workers(files, &stop)?;
         let accept = Arc::new(Accept {
             token: token.clone(),
+            panel: panel.clone(),
             inbound: inbound_tx,
             queue: options.client_queue.max(1),
             http_port: 0,
@@ -321,6 +388,7 @@ impl Server {
             http: none,
             ws: none,
             token,
+            panel,
             inbound,
             stop,
             threads,
@@ -394,18 +462,31 @@ impl Server {
     }
 
     /// The project's main panel (`ui/main.html`, else the generated one),
-    /// with the same fragment.
+    /// with the WebSocket's port and the project's panel token (ADR 0053:
+    /// project content never holds the session token), or no token before
+    /// one is made.
     pub(crate) fn panel_url(&self) -> String {
-        self.url_of(&format!("/project/{MAIN_PANEL}"))
+        let path = format!("/project/{MAIN_PANEL}");
+        match self.panel.token() {
+            Some(token) => self.url_with(&path, &token),
+            None => format!(
+                "http://127.0.0.1:{}{path}#ws={}",
+                self.http.port(),
+                self.ws.port()
+            ),
+        }
     }
 
     /// The page at `path` (from `/`), with the same fragment.
     pub(crate) fn url_of(&self, path: &str) -> String {
+        self.url_with(path, &self.token)
+    }
+
+    fn url_with(&self, path: &str, token: &str) -> String {
         format!(
-            "http://127.0.0.1:{}{path}#ws={}&token={}",
+            "http://127.0.0.1:{}{path}#ws={}&token={token}",
             self.http.port(),
             self.ws.port(),
-            self.token
         )
     }
 }
@@ -480,6 +561,7 @@ impl LocalConnector {
 /// The WebSocket's accept loop.
 struct Accept {
     token: String,
+    panel: PanelTokens,
     inbound: SyncSender<Inbound>,
     queue: usize,
     http_port: u16,
@@ -656,6 +738,7 @@ impl Accept {
         let connection = Connection {
             client,
             token: self.token.clone(),
+            panel: self.panel.clone(),
             inbound: self.inbound.clone(),
             large: Arc::clone(&self.large),
             own: Arc::new(AtomicBool::new(false)),
@@ -701,6 +784,7 @@ impl Transport for TcpStream {
 struct Connection {
     client: u64,
     token: String,
+    panel: PanelTokens,
     inbound: SyncSender<Inbound>,
     large: Arc<AtomicUsize>,
     /// Whether this client holds a large message ([`Permit`]).
@@ -737,17 +821,10 @@ impl Connection {
         // Said or not, `hello` is over: the refusal below has its own bound,
         // and the client's reads from now on are the polls of `serve`.
         ws.get_mut().until = None;
-        if let Err((code, close, message)) = hello {
-            let _ = ws.send(Message::text(error_text(code, &message)));
-            let _ = ws.close(Some(CloseFrame {
-                code: close,
-                reason: code.to_owned().into(),
-            }));
-            // Let the close go out.
-            let until = Instant::now() + Duration::from_millis(500);
-            while Instant::now() < until && ws.flush().is_err() {}
-            return;
-        }
+        let scope = match hello {
+            Ok(scope) => scope,
+            Err(refused) => return Self::refuse(ws, refused),
+        };
         if ws.get_mut().stream.read_timeout(Some(CLIENT_POLL)).is_err() {
             return;
         }
@@ -764,6 +841,7 @@ impl Connection {
             queue,
             evicted: Arc::clone(&evicted),
             gate: Arc::clone(&gate),
+            scope,
         };
         if self.inbound.send(connected).is_ok() {
             self.serve(&mut ws, &outgoing, &evicted, &gate);
@@ -775,11 +853,28 @@ impl Connection {
         });
     }
 
-    /// The first message: `hello` with the protocol version and the token.
+    /// A refused `hello`: its error, then the close with its code.
+    fn refuse<S: Read + Write>(
+        mut ws: WebSocket<S>,
+        (code, close, message): (&'static str, CloseCode, String),
+    ) {
+        let _ = ws.send(Message::text(error_text(code, &message)));
+        let _ = ws.close(Some(CloseFrame {
+            code: close,
+            reason: code.to_owned().into(),
+        }));
+        // Let the close go out.
+        let until = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < until && ws.flush().is_err() {}
+    }
+
+    /// The first message: `hello` with the protocol version and a token,
+    /// the session's ([`Scope::App`]) or the current project's panel token
+    /// ([`Scope::Project`], ADR 0053).
     fn hello<S: Read + Write>(
         &self,
         ws: &mut WebSocket<S>,
-    ) -> Result<(), (&'static str, CloseCode, String)> {
+    ) -> Result<Scope, (&'static str, CloseCode, String)> {
         let unauthorized = |message: &str| ("unauthorized", CloseCode::Policy, message.to_owned());
         let text = match ws.read() {
             Ok(Message::Text(text)) => text.to_string(),
@@ -791,9 +886,13 @@ impl Connection {
             return Err(unauthorized("the first message must be hello"));
         }
         let token = hello.get("token").and_then(Value::as_str).unwrap_or("");
-        if !same(token, &self.token) {
+        let scope = if same(token, &self.token) {
+            Scope::App
+        } else if let Some(identity) = self.panel.admits(token) {
+            Scope::Project(identity)
+        } else {
             return Err(unauthorized("bad token"));
-        }
+        };
         if hello.get("protocol").and_then(Value::as_u64) != Some(u64::from(PROTOCOL)) {
             return Err((
                 "protocol",
@@ -801,7 +900,7 @@ impl Connection {
                 format!("this server speaks protocol {PROTOCOL}"),
             ));
         }
-        Ok(())
+        Ok(scope)
     }
 
     fn serve<S: Read + Write>(

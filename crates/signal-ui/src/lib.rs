@@ -61,7 +61,7 @@ pub use host::{
 pub use local::LocalStream;
 #[cfg(feature = "in-process")]
 pub use server::LocalConnector;
-pub use server::{MAX_CLIENTS, ServerOptions};
+pub use server::{MAX_CLIENTS, PanelTokens, ServerOptions};
 
 /// Whether `file` (a path relative to the project folder `dir`, such as
 /// `ui/main.html`) is the project's own: plain names only (no `..`, `.`,

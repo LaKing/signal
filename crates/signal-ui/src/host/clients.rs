@@ -8,7 +8,7 @@ use std::sync::mpsc::{SyncSender, TrySendError};
 
 use serde_json::{Value, json};
 
-use crate::server::Outbound;
+use crate::server::{Outbound, Scope};
 
 use super::Host;
 
@@ -18,6 +18,8 @@ pub(super) struct Client {
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     pub(super) gate: Arc<AtomicBool>,
     pub(super) dropped: u64,
+    /// What its token lets it do (ADR 0053).
+    pub(super) scope: Scope,
 }
 
 /// The connected clients by id, and how many were evicted. What a send
@@ -52,6 +54,19 @@ impl Clients {
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     pub(super) fn get(&self, client: u64) -> Option<&Client> {
         self.by_id.get(&client)
+    }
+
+    /// What client `client`'s token lets it do.
+    pub(super) fn scope(&self, client: u64) -> Option<&Scope> {
+        self.by_id.get(&client).map(|c| &c.scope)
+    }
+
+    /// The clients of a project's panel token, with their scope.
+    pub(super) fn scoped(&self) -> impl Iterator<Item = (u64, &Scope)> {
+        self.by_id
+            .iter()
+            .filter(|(_, c)| matches!(c.scope, Scope::Project(_)))
+            .map(|(id, c)| (*id, &c.scope))
     }
 
     /// The clients' ids, in order.
@@ -133,6 +148,8 @@ impl Host {
     }
 
     pub(super) fn broadcast(&mut self, value: &Value) {
+        // A panel of a project no longer open hears nothing of the new one.
+        self.sync_scope();
         for client in self.clients.ids() {
             self.send_text(client, value);
         }
@@ -140,6 +157,7 @@ impl Host {
 
     /// A message already serialised, to every client.
     pub(super) fn broadcast_text(&mut self, text: &str) {
+        self.sync_scope();
         for client in self.clients.ids() {
             self.send_serialised(client, text.to_owned());
         }
@@ -147,7 +165,7 @@ impl Host {
 
     /// Flags the client and drops its queue: its thread sees either and
     /// ends on its own; nothing here waits for it.
-    fn evict(&mut self, client: u64) {
+    pub(super) fn evict(&mut self, client: u64) {
         self.clients.evict(client);
         self.release(client);
         self.end_notes(client);
