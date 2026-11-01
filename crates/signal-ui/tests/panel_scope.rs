@@ -21,9 +21,9 @@ use signal_ui::{AppHostConfig, Host, ServerOptions};
 
 /// Signal.app's host on the null driver with a copy of the malicious
 /// panel's project open, and a victim project beside it.
-fn app(transport: Transport) -> (Rig, PathBuf) {
+fn app(name: &str, transport: Transport) -> (Rig, PathBuf) {
     let base = std::env::temp_dir().join(format!(
-        "signal-ui-panel-scope-{transport:?}-{}",
+        "signal-ui-panel-scope-{name}-{transport:?}-{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&base);
@@ -109,7 +109,7 @@ fn closed(rig: &mut Rig, ws: &mut Ws) {
 }
 
 fn a_project_s_panel_acts_only_on_its_project(transport: Transport) {
-    let (mut rig, victim) = app(transport);
+    let (mut rig, victim) = app("acts", transport);
     let session = rig.host().token().to_owned();
     let panel = rig.host().panel_tokens().token().expect("a panel token");
     assert_ne!(panel, session);
@@ -203,4 +203,47 @@ fn a_project_s_panel_acts_only_on_its_project(transport: Transport) {
     rig.finish();
 }
 
-both!(a_project_s_panel_acts_only_on_its_project);
+/// Review of ADR 0053's change: a panel's messages read after it was
+/// evicted (the app opened another project while they were in flight) or
+/// waiting for the writer lock never run, and never with the session's
+/// authority: its `project.open` of a third folder and its `keys.set`
+/// arriving just after the app's open are dropped.
+fn a_gone_panel_s_messages_never_run(transport: Transport) {
+    let (mut rig, victim) = app("gone", transport);
+    let third = victim.parent().unwrap().join("third");
+    fs::create_dir_all(&third).unwrap();
+    fs::write(third.join("project.toml"), common::TONE).unwrap();
+    let keys = rig.setup.with_file_name("keys.toml");
+    let panel = rig.host().panel_tokens().token().unwrap();
+    let (mut app_ws, _) = rig.client();
+    let (mut ws, welcome) = hello(&mut rig, &panel);
+    welcome.expect("admitted");
+    // The app's open first, then (without a step between) the panel's.
+    send(
+        &mut app_ws,
+        json!({"type": "project.open", "id": 1, "path": victim.display().to_string()}),
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    send(
+        &mut ws,
+        json!({"type": "project.open", "id": 2, "path": third.display().to_string()}),
+    );
+    send(
+        &mut ws,
+        json!({"type": "keys.set", "id": 3, "keys": {"window": {"new_main": []}}}),
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    rig.reply(&mut app_ws, 1, "project");
+    for _ in 0..50 {
+        rig.pump();
+    }
+    let state = rig.request(&mut app_ws, 4, json!({"type": "app.get"}), "app");
+    assert_eq!(state["project"]["dir"], victim.display().to_string());
+    assert!(!keys.exists(), "the gone panel's keys.set ran");
+    rig.finish();
+}
+
+both!(
+    a_project_s_panel_acts_only_on_its_project,
+    a_gone_panel_s_messages_never_run
+);

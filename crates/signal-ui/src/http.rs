@@ -275,7 +275,7 @@ impl Files {
     /// SECURITY.md): scripts, styles, images, fonts and frames only from
     /// this server (inline ones allowed: the pages and panels have them),
     /// connections only to it and to its WebSocket (by the name the page
-    /// was asked by, else by any name on that port), no plugins, no
+    /// was asked by when it is a plain name, and the loopback names), no plugins, no
     /// workers (so no service worker), no form posts. A project's page
     /// can then load nothing from, nor send anything to, another host.
     fn policy(&self, host: Option<&str>) -> String {
@@ -288,7 +288,7 @@ impl Files {
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
             })
-            .unwrap_or("*");
+            .unwrap_or("127.0.0.1");
         let ws = self.ws_port;
         // CSP's inline keyword, spelt in two parts so the workspace's scan for
         // the Rust keyword (signal-engine tests/unsafe_scope.rs) passes it by.
@@ -680,9 +680,12 @@ mod tests {
         ] {
             assert!(policy.contains(part), "{part} in {policy}");
         }
-        // A name the policy cannot hold safely: any name, on the port only.
+        // A name the policy cannot hold safely: the loopback names only (never a wildcard).
         let odd = files.policy(Some("[::1]:8"));
-        assert!(odd.contains("ws://*:9"), "{odd}");
+        assert!(
+            !odd.contains("*:") && odd.contains("ws://127.0.0.1:9"),
+            "{odd}"
+        );
         let (status, _) =
             head(b"GET /ui/signal-ui.js HTTP/1.1\r\nHost: localhost:8\r\nService-Worker: script");
         assert_eq!(status, 403);

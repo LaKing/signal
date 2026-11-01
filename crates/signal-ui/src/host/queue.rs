@@ -572,11 +572,16 @@ impl Host {
                     ..
                 } => {
                     if let Ok(message) = serde_json::from_str::<Value>(&text) {
-                        // The project it names, against the opening now.
-                        match self
-                            .opening
-                            .admit(class_of(&kind, &message).mutation, &message)
-                        {
+                        // The project it names, against the opening now;
+                        // a panel's only while it is connected to its own
+                        // project (ADR 0053).
+                        let admitted = match self.scope_refuses(client, &kind) {
+                            Some(failure) => Err(failure),
+                            None => self
+                                .opening
+                                .admit(class_of(&kind, &message).mutation, &message),
+                        };
+                        match admitted {
                             Ok(()) => {
                                 let ctx = self.write_ctx();
                                 self.respond(&ctx, client, id, &kind, &message);

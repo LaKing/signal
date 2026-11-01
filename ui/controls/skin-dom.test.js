@@ -89,6 +89,18 @@ test('attributes are judged by namespace and local name: srcdoc, handlers and pr
   assert.deepEqual(local.attributes.map((a) => [a.name, a.value]), [['q:href', '#grad'], ['href', '#grad']]);
 });
 
+test('only an image may name another file; every other reference is a fragment of the skin', () => {
+  const use = element(SVG_NS, 'use', [[XLINK_NS, 'xlink:href', '/project/payload.svg#x'], [null, 'href', 'payload.svg#x']]);
+  const fill = element(SVG_NS, 'rect', [[null, 'fill', 'url(other.svg#g)']]);
+  const image = element(SVG_NS, 'image', [[null, 'href', 'assets/face.png']]);
+  const fe = element(SVG_NS, 'feImage', [[XLINK_NS, 'xlink:href', 'assets/noise.png']]);
+  const svg = element(SVG_NS, 'svg', [], [use, fill, image, fe]);
+  sanitizeSvg(svg);
+  assert.deepEqual(use.attributes, []);
+  assert.equal(attribute(image, 'href'), 'assets/face.png');
+  assert.equal(attribute(fe, 'xlink:href'), 'assets/noise.png');
+});
+
 test("a skin's style element keeps only same-host CSS", () => {
   const style = element(SVG_NS, 'style');
   style.textContent = '@import url(https://example.com/a.css); .k { fill: url(https://example.com/x.svg#g) }';

@@ -157,6 +157,8 @@ export const SVG_SANITIZE = Object.freeze({
   ]),
   /** Attributes that keep a reference only when `isSameOriginRef` allows it. */
   references: Object.freeze(['href', 'xlink:href', 'src']),
+  /** The elements whose reference may name a same-host file (an image); every other reference must be a `#fragment`. */
+  images: Object.freeze(['image', 'feImage']),
   /** Attributes removed outright: they change how references resolve, or hold a document. */
   removed: Object.freeze(['xml:base', 'base', 'srcdoc']),
   /** Attributes whose names start with this are removed (event handlers). */
@@ -175,8 +177,13 @@ export function keepsSvgElement(namespace, localName) {
  * reference; of XML only `space` and `lang`; namespace declarations stay;
  * an attribute of any other namespace goes.
  */
-export function sanitizeSvgAttribute(namespace, localName, value) {
+export function sanitizeSvgAttribute(namespace, localName, value, element = '') {
   const name = String(localName);
+  // A reference of any element but an image is a fragment of the skin
+  // itself: `use` or a gradient pointing into another document would bring
+  // in content this sanitizer never saw.
+  const reference = name === 'href' || (name === 'src' && !namespace);
+  if (reference && (namespace === XLINK_NS || !namespace) && !SVG_SANITIZE.images.includes(element) && !String(value ?? '').trim().startsWith('#')) return null;
   if (namespace === null || namespace === undefined || namespace === '') return sanitizeAttribute(name, value);
   if (namespace === XLINK_NS) return name === 'href' ? sanitizeAttribute('xlink:href', value) : null;
   if (namespace === XML_NS) return name === 'space' || name === 'lang' ? value : null;

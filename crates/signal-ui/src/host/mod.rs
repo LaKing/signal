@@ -711,6 +711,9 @@ impl Host {
         // The window's Open, Save As or Revert since the last step (ADR 0053).
         self.sync_scope();
         self.run_waiting();
+        // An open that waited for the lock: no stream of the new project
+        // reaches an old panel.
+        self.sync_scope();
         self.poll();
         // Before any client's message: a waiting note-off goes first.
         self.send_releases();
@@ -729,6 +732,9 @@ impl Host {
         self.push_app();
         self.push_unsaved();
         self.push_scopes();
+        // A save finished in this step (a Save As names another file): the
+        // token Signal.app reads next is the new project's (ADR 0053).
+        self.sync_scope();
         std::mem::take(&mut self.messages)
     }
 
@@ -777,6 +783,7 @@ impl Host {
         let _no_wait = transaction::NoWait::enter(Duration::ZERO);
         self.sync_scope();
         self.run_waiting();
+        self.sync_scope();
         if let Ok(message) = self.server.inbound.recv_timeout(timeout) {
             self.inbound(message);
         }

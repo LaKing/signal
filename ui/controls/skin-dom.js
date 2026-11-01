@@ -17,7 +17,7 @@ export function sanitizeSvg(root) {
   const walk = (element) => {
     // Every attribute, so a presentation attribute (fill="url(…)") is checked too.
     for (const attribute of [...element.attributes]) {
-      const value = sanitizeSvgAttribute(attribute.namespaceURI, attribute.localName, attribute.value);
+      const value = sanitizeSvgAttribute(attribute.namespaceURI, attribute.localName, attribute.value, element.localName);
       if (value === null) element.removeAttributeNode(attribute);
       else if (value !== attribute.value) attribute.value = value;
     }

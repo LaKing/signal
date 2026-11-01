@@ -1293,7 +1293,7 @@ fn read_file(context: &Context, arguments: &Value) -> Outcome {
         if linked(&context.dir.join("ui")) || linked(&path) {
             return Err(refused(format!("{file} is reached through a link")));
         }
-        match fs::read_to_string(&path) {
+        match signal_project::read_regular_to_string(&path) {
             Ok(text) => {
                 json!({"file": file, "exists": true, "base": sha256_hex(text.as_bytes()), "text": text})
             }
@@ -2808,10 +2808,15 @@ fn session_stop(context: &Context, _: &Value) -> Outcome {
     // unsaved value back to the file's: checked as `session_start` and a
     // revert are (review 2026-11-01), so a lowered gain is never raised.
     // Refused, the recording goes on and nothing is lost: commit the
-    // lowered value, then stop.
+    // lowered value, then stop. Only where there is a session to stop.
+    if lock(context).control.is_none() {
+        return Err(refused(
+            "sessions need `signal mcp <project>` (not --attach)",
+        ));
+    }
     guard_restart(context).map_err(|refusal| Refused {
         message: format!(
-            "{}; the session goes on recording: commit the lowered value (its file then holds it), then session_stop",
+            "{}; nothing was stopped (a session goes on recording): commit the lowered value (its file then holds it), then session_stop",
             refusal.message
         ),
         detail: refusal.detail,
@@ -3044,7 +3049,7 @@ pub(crate) fn read_resource(context: &Context, uri: &str) -> Result<Value, Strin
     if !project_text_files(&context.dir).iter().any(|p| p == path) {
         return Err(format!("Resource not found: {uri}"));
     }
-    let text = fs::read_to_string(context.dir.join(path))
+    let text = signal_project::read_regular_to_string(context.dir.join(path))
         .map_err(|_| format!("Resource not found: {uri}"))?;
     Ok(json!({"uri": uri, "mimeType": mime(path), "text": text}))
 }

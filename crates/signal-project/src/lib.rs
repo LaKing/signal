@@ -293,7 +293,7 @@ pub fn read_regular(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     if !fs::metadata(path)?.is_file() {
         return Err(refused());
     }
-    let mut opened = fs::OpenOptions::new()
+    let opened = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
         .open(path)?;
@@ -301,9 +301,24 @@ pub fn read_regular(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
         return Err(refused());
     }
     let mut bytes = Vec::new();
-    opened.read_to_end(&mut bytes)?;
+    opened.take(MAX_FILE + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_FILE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is larger than {} MiB, more than any project file",
+                path.display(),
+                MAX_FILE >> 20
+            ),
+        ));
+    }
     Ok(bytes)
 }
+
+/// The largest file [`read_regular`] reads: far above any project's text
+/// file (a pattern at capacity is under 2 MB), so a sparse or huge file
+/// cannot take the memory.
+pub const MAX_FILE: u64 = 64 << 20;
 
 /// [`read_regular`] as UTF-8 text ([`io::ErrorKind::InvalidData`] if it is
 /// not).

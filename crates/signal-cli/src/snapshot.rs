@@ -7,7 +7,6 @@
 //! watch. The work is `signal_project::snapshot` (the file) and
 //! `signal_ui::snapshot` (which parameters).
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
@@ -303,7 +302,8 @@ pub(crate) fn run(args: &SnapshotArgs, registry: &Registry, json: bool) -> Resul
             let path = project.join(signal_project::PROJECT_FILE);
             let io = |e: String| Failure::Io(format!("{}: {e}", path.display()));
             let _lock = ProjectLock::acquire(project).map_err(|e| io(e.to_string()))?;
-            let before = fs::read_to_string(&path).map_err(|e| io(e.to_string()))?;
+            let before =
+                signal_project::read_regular_to_string(&path).map_err(|e| io(e.to_string()))?;
             let after =
                 signal_project::write_snapshot_exclude(&before, instance, parameter, !include)
                     .map_err(|e| io(e.to_string()))?;

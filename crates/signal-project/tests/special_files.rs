@@ -67,6 +67,17 @@ fn a_special_file_is_refused_at_once() {
         read_regular(&dir).unwrap_err().kind(),
         ErrorKind::InvalidInput
     );
+    // A huge (sparse) file is refused, not read whole.
+    let huge = dir.join("huge.toml");
+    fs::File::create(&huge)
+        .unwrap()
+        .set_len(signal_project::MAX_FILE + 1)
+        .unwrap();
+    assert_eq!(
+        read_regular(&huge).unwrap_err().kind(),
+        ErrorKind::InvalidData
+    );
+    fs::remove_file(&huge).unwrap();
     std::os::unix::fs::symlink("/dev/zero", dir.join("zero.toml")).unwrap();
     let zero = dir.join("zero.toml");
     let error = bounded("a read of /dev/zero", move || read_regular(zero)).unwrap_err();

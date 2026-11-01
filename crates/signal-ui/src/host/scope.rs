@@ -102,6 +102,14 @@ impl Host {
     /// (`not-allowed`) for a project's panel outside [`PANEL_REQUESTS`],
     /// and (`project-changed`) once its project is no longer the open one.
     pub(super) fn scope_refuses(&self, client: u64, kind: &str) -> Option<Failure> {
+        // A panel's messages read before it was evicted or closed, or
+        // waiting for the writer lock, never run once it is gone.
+        if self.clients.panel_gone(client) {
+            return Some(fail(
+                "project-changed",
+                "not done: this panel's connection was closed",
+            ));
+        }
         let Some(Scope::Project(identity)) = self.clients.scope(client) else {
             return None;
         };

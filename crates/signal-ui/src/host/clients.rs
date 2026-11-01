@@ -29,6 +29,11 @@ pub(super) struct Client {
 pub(super) struct Clients {
     by_id: BTreeMap<u64, Client>,
     evicted: u64,
+    /// The panel-token clients gone (evicted or closed), whose messages
+    /// still in the inbound queue or waiting for the writer lock must never
+    /// run (ADR 0053: an unknown client is not given the session's
+    /// authority). Ids are never reused.
+    gone_panels: std::collections::BTreeSet<u64>,
 }
 
 /// What a send to a client did.
@@ -108,11 +113,25 @@ impl Clients {
         if let Some(c) = self.by_id.remove(&client) {
             c.evicted.store(true, Ordering::Relaxed);
             self.evicted += 1;
+            self.forget_panel(client, &c.scope);
         }
     }
 
     pub(super) fn remove(&mut self, client: u64) {
-        self.by_id.remove(&client);
+        if let Some(c) = self.by_id.remove(&client) {
+            self.forget_panel(client, &c.scope);
+        }
+    }
+
+    fn forget_panel(&mut self, client: u64, scope: &Scope) {
+        if matches!(scope, Scope::Project(_)) {
+            self.gone_panels.insert(client);
+        }
+    }
+
+    /// Whether `client` was a panel-token client that is gone.
+    pub(super) fn panel_gone(&self, client: u64) -> bool {
+        self.gone_panels.contains(&client)
     }
 
     /// `stats`' `clients` (each one's dropped data frames) and `evicted`.

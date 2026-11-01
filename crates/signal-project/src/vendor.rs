@@ -248,7 +248,7 @@ pub fn prepare(
         let text = document.to_string();
         let full = dir.join(&path);
         if full.exists() {
-            let same = fs::read(&full).is_ok_and(|bytes| bytes == text.as_bytes());
+            let same = crate::read_regular(&full).is_ok_and(|bytes| bytes == text.as_bytes());
             if old != reference && same {
                 reused.push(path);
                 continue;
