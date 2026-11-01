@@ -40,7 +40,11 @@ test('nothing inside a tab or a panel scrolls on its own', () => {
   // A third (the operator's, 2026-10-27, ADR 0037 phase 3): a slot dialog
   // (Add slot, the interface and map editors) is a modal dialog too, whose
   // body scrolls inside it when a long interface does not fit the window.
-  const allowed = { 'schematic.js': ['.side-body'], 'module-browser.js': ['.browser .tree', '.browser .detail'], 'slot-dialogs.js': ['.slot-dialog .body'] };
+  // A fourth (the operator's, 2026-11-01, ADR 0053): the plane's Edit
+  // layout is the panel editor in place over the whole plane (no frame of
+  // the panel's page, which would hold the session token), and the panel
+  // it edits scrolls inside it as the panel's own page would.
+  const allowed = { 'schematic.js': ['.side-body'], 'module-browser.js': ['.browser .tree', '.browser .detail'], 'slot-dialogs.js': ['.slot-dialog .body'], 'plane.js': ['.editor-body'] };
   for (const file of controls) {
     const text = read(`controls/${file}`);
     if (!allowed[file]) assert.deepEqual([...text.matchAll(SCROLLS)], [], file);

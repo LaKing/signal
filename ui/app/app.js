@@ -1244,6 +1244,4 @@ for (const [name, element] of [
 if (globalThis.document?.querySelector) {
   const plane = document.querySelector('signal-plane');
   connectPlaneCards(plane);
-  // The plane's Edit layout frame: its right clicks open this page's menu.
-  if (plane) plane.listenFrame = (doc, frame) => SignalAppContextMenu.listen(doc, frame);
 }

@@ -496,7 +496,7 @@ domTest('the plane’s keys are commands of the shared keymap, rebindable throug
 
 // Edit layout and card moves from the main window (review of 2026-11-01; ADR 0051 §6, ADR 0032).
 
-domTest('at the Stack level the bar has Edit layout: it opens the project’s panel in its editor over the plane, Done closes it', async () => {
+domTest('at the Stack level the bar has Edit layout: it opens the panel editor over the plane, Done closes it', async () => {
   const p = await shown(plane());
   p.bar = new Node('nav');
   p.stage = new Node('div');
@@ -508,7 +508,15 @@ domTest('at the Stack level the bar has Edit layout: it opens the project’s pa
   edit.listeners.find(([type]) => type === 'click')[1]();
   const overlay = p.stage.querySelector('.editor');
   assert.ok(overlay, 'the editor over the stage');
-  assert.equal(overlay.querySelector('iframe').src, '/project/main.html', 'the project’s panel page (with the page’s fragment, when it has one)');
+  // ADR 0053: the editor of ui/main.html in this page, in a shadow root with the panel's style sheets; never a frame of the panel's page.
+  const body = overlay.querySelector('.editor-body');
+  const panel = body.shadowRoot.querySelector('signal-panel');
+  assert.equal(panel.getAttribute('file'), 'main.html');
+  assert.equal(typeof panel.attributeValue, 'function', 'its relative URLs resolved from the panel’s page');
+  assert.ok(body.shadowRoot.querySelectorAll('link').length >= 1, 'the panel’s style sheets');
+  const everything = [p.stage, ...p.stage.all(), ...p.stage.all().flatMap((n) => (n.shadowRoot ? [n.shadowRoot, ...n.shadowRoot.all()] : []))];
+  assert.deepEqual(everything.filter((n) => ['iframe', 'frame', 'object', 'embed'].includes(n.localName)), [], 'no frame');
+  assert.ok(!everything.some((n) => /\/project\//.test(String(n.src ?? n.getAttribute?.('src') ?? ''))), 'no project page loaded');
   p.editLayout();
   assert.equal(p.stage.querySelectorAll('.editor').length, 1, 'one at a time');
   overlay.querySelector('button').listeners.find(([type]) => type === 'click')[1]();

@@ -87,7 +87,6 @@ import { isPressable, isTextField, registerWheel, takesWheel } from './keyboard.
 import { keyCommand } from '../lib/keys.js';
 import { bindAddresses } from './base.js';
 import { cardMenu, cardsOf, menuMessage } from '../app/lib/cards.js';
-import { panelSource } from '../app/lib/menu.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 /** The theme every panel links. */
@@ -169,7 +168,7 @@ svg.setup text { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue
 .editor-head { flex: none; display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; box-sizing: border-box; border-bottom: 1px solid #343b47; color: var(--signal-muted, #8a93a3); white-space: nowrap; }
 .editor-head b { color: var(--signal-fg, #d6dbe4); font-weight: 600; }
 .editor-head button { margin-left: auto; }
-.editor iframe { flex: 1; display: block; width: 100%; min-height: 0; border: 0; background: var(--signal-bg, #15181d); }
+.editor-body { flex: 1; display: block; min-height: 0; overflow: auto; background: var(--signal-bg, #15181d); }
 .notes { position: absolute; left: 8px; bottom: 8px; max-width: 60%; display: grid; gap: 2px; pointer-events: none; }
 .notes p { margin: 0; padding: 3px 6px; border-radius: 4px; background: color-mix(in srgb, var(--signal-panel, #1f232b) 90%, transparent); font: 11px/1.4 ui-monospace, Menlo, monospace; }
 .notes p.error { color: var(--signal-clip, #ff5252); }
@@ -316,8 +315,6 @@ export class SignalPlane extends HTMLElement {
     this.windowTold = null;
     /** The Edit layout over the plane (`editLayout`), or null. */
     this.editing = null;
-    /** `(doc, frame) → remover`: the app's context menu on the Edit layout frame (set by ui/app/app.js), or null. */
-    this.listenFrame = null;
   }
 
   connectedCallback() {
@@ -1691,53 +1688,55 @@ export class SignalPlane extends HTMLElement {
   // Edit layout (ADR 0051 §6, §9: the front panels' layout is edited at the Stack level).
 
   /**
-   * Opens Edit layout over the plane: the project's panel page
-   * (`/project/main.html`, its own connection from this page's fragment, as
-   * a panel window's) in a frame filling the stage, its editor entered once
-   * the panel can be edited. Everything it writes is written at once
+   * Opens Edit layout over the plane: the panel editor of `ui/main.html`
+   * (a `<signal-panel file="main.html">` entered) filling the stage, in a
+   * shadow root with the panel's style sheets. ADR 0053: this page holds
+   * the session token, so the panel is never loaded here as a page or a
+   * frame; the editor draws its written content within the whitelist
+   * (`panel.read`, `parseContent`), as the front panels are drawn, and the
+   * panel's scripts never run. Everything it writes is written at once
    * (`panel.write`) and comes back to the front panels as `panel.written`.
-   * Done, the panel's own switch or its Escape closes it.
+   * Done, the editor's own switch or Escape closes it.
    */
   editLayout() {
     if (this.editing || !this.stage) return;
-    // The project's panel page with this page's fragment (the WebSocket's port and token), as a panel window opens it.
-    const src = panelSource(globalThis.location?.hash);
     const overlay = html('div', { className: 'editor' });
     const head = html('div', { className: 'editor-head' });
     const title = html('span');
     title.append(html('b', { textContent: 'Edit layout' }), ` · ui/main.html${this.focused ? ` · front panels of Stack ${this.focused}` : ''}`);
     const done = html('button', { type: 'button', textContent: 'Done', title: 'Leave Edit layout (everything is written already)' });
     head.append(title, done);
-    const frame = html('iframe', { title: 'Edit layout', src });
-    overlay.append(head, frame);
+    const body = html('div', { className: 'editor-body' });
+    const shadow = body.attachShadow({ mode: 'open' });
+    const links = this.sheets.map((href) => Object.assign(document.createElement('link'), { rel: 'stylesheet', href }));
+    const panel = document.createElement('signal-panel');
+    panel.setAttribute('file', 'main.html');
+    // Its relative URLs (skins) from the panel's page, as the front panels resolve them.
+    panel.attributeValue = (name, value) => faceAttribute(name, value, '', this.base);
+    shadow.append(...links, html('style', { textContent: `signal-panel { display: block; min-height: 100%; }\n${this.rootCss ?? ''}` }), panel);
+    overlay.append(head, body);
     this.stage.append(overlay);
-    const editing = { overlay, frame, entered: false, stop: null };
+    const editing = { overlay, panel, entered: false, stop: null };
     this.editing = editing;
     done.addEventListener('click', () => this.closeEditLayout());
-    frame.addEventListener('load', () => this.enterEditLayout(editing));
+    this.enterEditLayout(editing);
     done.focus?.();
   }
 
-  /** The frame's panel into its Edit layout as soon as it has a plan to check against; its leaving closes the overlay. */
+  /** The editor entered as soon as it has a plan to check against; its leaving closes the overlay. */
   enterEditLayout(editing) {
-    // The frame's right clicks open the page's own menu, as a panel frame's always did (`listenFrame`: ui/app/app.js).
-    editing.unlisten?.();
-    const doc = editing.frame.contentDocument;
-    editing.unlisten = doc && this.listenFrame ? this.listenFrame(doc, editing.frame) : null;
+    const { panel } = editing;
     const started = Date.now();
     const attempt = () => {
       if (this.editing !== editing) return;
-      const doc = editing.frame.contentDocument;
-      const panel = doc?.querySelector('signal-panel');
-      const edit = panel?.shadowRoot?.querySelector('.edit');
-      if (!panel || edit?.getAttribute('aria-disabled') !== 'false') {
+      const edit = panel.shadowRoot?.querySelector?.('.edit');
+      if (edit?.getAttribute('aria-disabled') !== 'false') {
         if (Date.now() - started < 10000) requestAnimationFrame(attempt);
         else this.say('Edit layout: the panel could not be edited (no plan yet?)');
         return;
       }
-      const View = editing.frame.contentWindow;
-      if (View?.MutationObserver) {
-        const observer = new View.MutationObserver(() => {
+      if (typeof MutationObserver === 'function') {
+        const observer = new MutationObserver(() => {
           if (panel.hasAttribute('editing')) editing.entered = true;
           else if (editing.entered) this.closeEditLayout();
         });
@@ -1760,12 +1759,7 @@ export class SignalPlane extends HTMLElement {
     if (!editing) return;
     this.editing = null;
     editing.stop?.();
-    editing.unlisten?.();
-    try {
-      editing.frame.contentDocument?.querySelector('signal-panel')?.setEditing?.(false);
-    } catch {
-      // Its document is gone: nothing to leave.
-    }
+    editing.panel.setEditing?.(false);
     editing.overlay.remove();
     this.focus?.();
   }

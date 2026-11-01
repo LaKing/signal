@@ -1079,7 +1079,9 @@ export class PanelEditor {
   /** Where `subject` dropped at the pointer of `event` goes: `{into, index}`, or null. */
   dropFor(subject, event) {
     const point = { x: event.clientX, y: event.clientY };
-    const under = this.panel.ownerDocument.elementsFromPoint(point.x, point.y);
+    // From the panel's own root: in a shadow root (the plane's Edit layout) the document's hit test sees only its host.
+    const root = this.panel.getRootNode?.();
+    const under = (typeof root?.elementsFromPoint === 'function' ? root : this.panel.ownerDocument).elementsFromPoint(point.x, point.y);
     const nodes = under
       .map((el) => this.ids.get(el))
       .filter(Boolean)

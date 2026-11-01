@@ -47,7 +47,7 @@ export function panelReloads(shown, next) {
   return shown !== undefined && Boolean(next) && next !== shown;
 }
 
-/** The project's main panel (M2.8-3) for a panel window's frame or the plane's Edit layout, with the page's fragment. */
+/** The project's main panel (M2.8-3) for a panel window's frame, with the page's fragment (that window's panel token, ADR 0053). */
 export function panelSource(hash) {
   const fragment = String(hash ?? '');
   return fragment.startsWith('#') ? `/project/main.html${fragment}` : '/project/main.html';

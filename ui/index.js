@@ -19,6 +19,7 @@ import './lib/canvas.test.js';
 import './signal-ui.test.js';
 import './fake-connection.test.js';
 import './app/lib/menu.test.js';
+import './app/lib/main-page-frames.test.js';
 import './app/lib/draft.test.js';
 import './app/lib/parameters.test.js';
 import './app/lib/dom.test.js';
