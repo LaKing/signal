@@ -10,6 +10,7 @@
 //! the UI protocol's `setup.*`, M2.8-1): [`channels`], [`capabilities`],
 //! [`rate_check`] and [`found`], which finds a chosen device by identity.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -61,6 +62,62 @@ impl DeviceEntry {
             signature: self.signature.clone(),
         }
     }
+}
+
+/// ADR 0038 §4 (M4.1): where a role plays on this machine, `[play.<role>]`:
+/// its device (the clock device, the Setup's `output`, without one) and
+/// its device channels from 1, in the play side's port order. `main`'s
+/// short form stays `output_channels`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayEntry {
+    /// Its device channels, from 1.
+    pub channels: Vec<u16>,
+    /// Its device; the clock device without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<DeviceEntry>,
+}
+
+/// The keys of a `[play.<role>]` table this version reads; ADR 0038's
+/// `layout`, `adapter` and `prefer` are not built yet.
+const PLAY_KEYS: [&str; 2] = ["channels", "device"];
+
+/// A `[play.<role>]` table, or why it does not read.
+fn play_entry(value: toml::Value) -> Result<PlayEntry, String> {
+    let toml::Value::Table(table) = value else {
+        return Err("must be a table (`channels = [3, 4]`, optional `device`)".to_owned());
+    };
+    let mut entry = PlayEntry::default();
+    for (key, value) in table {
+        match key.as_str() {
+            "channels" => match value.try_into::<Vec<u16>>() {
+                Ok(channels) if channels.is_empty() => {
+                    return Err("channels is empty".to_owned());
+                }
+                Ok(channels) if channels.contains(&0) => {
+                    return Err("device channels count from 1".to_owned());
+                }
+                Ok(channels) => entry.channels = channels,
+                Err(error) => return Err(format!("channels: {error}")),
+            },
+            "device" => match value.try_into::<DeviceEntry>() {
+                Ok(device) if device.name.is_empty() => {
+                    return Err("the device's name is empty".to_owned());
+                }
+                Ok(device) => entry.device = Some(device),
+                Err(error) => return Err(format!("device: {error}")),
+            },
+            other => {
+                return Err(format!(
+                    "unknown key '{other}' (this version reads {}; layout adapters are not built yet)",
+                    PLAY_KEYS.join(", ")
+                ));
+            }
+        }
+    }
+    if entry.channels.is_empty() {
+        return Err("channels is missing".to_owned());
+    }
+    Ok(entry)
 }
 
 /// The GPU adapters GPU-backed modules may use (`gpu_devices`), as the Setup
@@ -117,8 +174,13 @@ pub struct Setup {
     /// auto, one per performance core. A machine setting, never a project's.
     pub cpu_workers: Option<u32>,
     /// The device channel (from 1) of each sink channel; sink channel *i* on
-    /// device channel *i* without it.
+    /// device channel *i* without it. The short form of `[play.main]`'s
+    /// channels (ADR 0038 §4).
     pub output_channels: Option<Vec<u16>>,
+    /// ADR 0038 §4 (M4.1): the roles this machine plays, by role
+    /// (`[play.<role>]`); a role not here is not heard (`main` plays on
+    /// `output_channels`, else channels 1 to its width).
+    pub play: BTreeMap<String, PlayEntry>,
     /// The last project folder opened.
     pub last_project: Option<PathBuf>,
     /// The window's size when last closed.
@@ -145,6 +207,7 @@ impl Default for Setup {
             buffer_device: false,
             cpu_workers: None,
             output_channels: None,
+            play: BTreeMap::new(),
             last_project: None,
             window: None,
             rt_policy: RtPolicy::default(),
@@ -180,6 +243,9 @@ struct File<'a> {
     rt_computation: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gpu_devices: Option<&'a [String]>,
+    /// Last: TOML writes tables after the plain keys.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    play: &'a BTreeMap<String, PlayEntry>,
 }
 
 /// `gpu_devices`: `"all"`, or a list of adapter ids (strings) or indices.
@@ -340,6 +406,26 @@ impl Setup {
                         bad("must be a fraction of the period above 0 and at most 1".to_owned())
                     }
                 },
+                "play" => match value {
+                    toml::Value::Table(roles) => {
+                        for (role, entry) in roles {
+                            if !signal_project::device::valid_role(&role) {
+                                problems.push(format!(
+                                    "{file}: play.{role}: a role is [a-z][a-z0-9_]*; ignored"
+                                ));
+                                continue;
+                            }
+                            match play_entry(entry) {
+                                Ok(entry) => {
+                                    setup.play.insert(role, entry);
+                                }
+                                Err(reason) => problems
+                                    .push(format!("{file}: play.{role}: {reason}; ignored")),
+                            }
+                        }
+                    }
+                    _ => bad("must be tables [play.<role>]".to_owned()),
+                },
                 "gpu_devices" => match gpu_devices(&value) {
                     Some(selection) => setup.gpu_devices = selection,
                     None => bad(
@@ -378,6 +464,7 @@ impl Setup {
                 GpuDevices::All => None,
                 GpuDevices::Only(entries) => Some(entries),
             },
+            play: &self.play,
         };
         toml::to_string(&file).unwrap_or_default()
     }

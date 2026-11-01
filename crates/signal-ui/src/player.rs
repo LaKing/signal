@@ -380,6 +380,81 @@ pub fn open_output(
     opened.map_err(|error| error.to_string())
 }
 
+/// The output of a run of several play sides (ADR 0038, M4.1), and how they
+/// are routed: [`open_output`] for the routing of `sides` on the Setup's
+/// sound system ([`crate::devices::sound_system`], the Setup as
+/// [`crate::devices::effective`] merged it), the clock device being the
+/// Setup's output. The routing's notices (a role not heard, a channel
+/// refused) go to `notes`; the Runner is built for
+/// [`Routing::addresses`](signal_output::Routing::addresses)
+/// ([`signal_output::realtime_routed`]), whose frame is
+/// [`Routing::width`](signal_output::Routing::width) channels.
+#[allow(clippy::too_many_arguments)]
+pub fn open_routed(
+    backend: &Backend,
+    devices: &[DeviceInfo],
+    setup: &Setup,
+    rate: u32,
+    sides: &[signal_output::PlaySide],
+    seed: u64,
+    notes: &mut Vec<String>,
+) -> Result<(Output, signal_output::Routing), String> {
+    let clock = crate::devices::clock_device(devices, setup);
+    let clock_channels = clock.map(|d| {
+        d.configs
+            .iter()
+            .map(|c| usize::from(c.channels))
+            .max()
+            .unwrap_or(0)
+    });
+    let system = crate::devices::sound_system(setup, devices);
+    let routing = signal_output::route(sides, &system, clock_channels);
+    notes.extend(routing.notices.iter().cloned());
+    let routes = routing.targets();
+    let wanted = routing.device_width();
+    let output = match &setup.output {
+        Some(entry) => {
+            let (selector, device) = selector(devices, entry, Direction::Output)?;
+            Some((selector, device.clone()))
+        }
+        None => None,
+    };
+    let opened = match backend {
+        Backend::CoreAudio => {
+            let selector = output.map_or(DeviceSelector::Default, |(s, _)| s);
+            CoreAudioDriver::open_routed(&selector, rate, setup.buffer_request(), routes)
+                .map(|driver| Output::Device(Box::new(driver)))
+        }
+        Backend::Null(_) => {
+            let played = output.as_ref().map(|(_, d)| d).or(clock);
+            if let Some(device) = played
+                && let Some(now) = device.rate
+                && now != rate
+            {
+                return Err(rate_moved(&device.name, rate, now));
+            }
+            // The null driver plays the Runner's frame as it is: as wide
+            // as the frame, the map telling where a device would play it.
+            let width = routing.width().max(1);
+            let channels = match &output {
+                Some((_, device)) => choose_output(device, rate, setup.buffer, wanted)
+                    .map(|c| usize::from(c.channels).max(width)),
+                None => Ok(wanted.max(width)),
+            };
+            channels.and_then(|channels| {
+                let map = ChannelMap::with_routes(channels, routes)?;
+                Ok(Output::Null(
+                    Box::new(NullDriver::new(rate, channels, seed)),
+                    map,
+                ))
+            })
+        }
+    };
+    opened
+        .map(|output| (output, routing))
+        .map_err(|error| error.to_string())
+}
+
 /// The Setup's input, metered only, and its channels; a note when it cannot
 /// be used (playing goes on without it).
 pub fn open_input(

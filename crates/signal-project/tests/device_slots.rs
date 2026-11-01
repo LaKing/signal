@@ -64,9 +64,10 @@ fn main_and_cue(cue: &str) -> String {
 #[test]
 fn a_cue_device_slot_is_a_stereo_play_side_of_its_role() {
     let registry = registry();
-    let project =
-        load(&main_and_cue("{ device = { play = \"stereo\", role = \"cue\" }, gain = 0.5 }"))
-            .unwrap();
+    let project = load(&main_and_cue(
+        "{ device = { play = \"stereo\", role = \"cue\" }, gain = 0.5 }",
+    ))
+    .unwrap();
     let slot = project.device_slots().get("cue").unwrap();
     assert_eq!((slot.role.as_str(), slot.play.as_str()), ("cue", "stereo"));
     let plan = project.plan(&registry).unwrap().plan;
@@ -111,7 +112,10 @@ fn the_role_defaults_to_main_so_two_mains_are_refused() {
     );
     // Two `std.audio_out` are two mains as well.
     let found = problems(&main_and_cue("{ module = \"std.audio_out\" }"));
-    assert!(found.contains("another output already plays role `main`"), "{found}");
+    assert!(
+        found.contains("another output already plays role `main`"),
+        "{found}"
+    );
 }
 
 #[test]
@@ -147,7 +151,10 @@ fn what_is_not_built_or_not_valid_is_refused_with_its_reason() {
             "{ device = { play = \"stereo\", kind = \"midi\" } }",
             "cue: device kind `midi` is not built",
         ),
-        ("{ device = { role = \"cue\" } }", "cue: a device slot needs `play`"),
+        (
+            "{ device = { role = \"cue\" } }",
+            "cue: a device slot needs `play`",
+        ),
         (
             "{ device = { play = \"stereo\", role = \"cue\", channels = [3, 4] } }",
             "unknown field `channels`",
@@ -172,7 +179,9 @@ fn a_composite_names_no_device_slot() {
     let found = match Project::from_sources(sources(&[
         (
             "project.toml",
-            &format!("{HEAD}[instances]\nvoice = {{ module = \"voice\" }}\nout = {{ module = \"std.audio_out\" }}\n"),
+            &format!(
+                "{HEAD}[instances]\nvoice = {{ module = \"voice\" }}\nout = {{ module = \"std.audio_out\" }}\n"
+            ),
         ),
         (
             "composites/voice.toml",

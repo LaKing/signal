@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use signal_engine::{Computation, RtPolicy};
-use signal_ui::setup::{DeviceEntry, GpuDevices, Setup, Window, setup_path};
+use signal_ui::setup::{DeviceEntry, GpuDevices, PlayEntry, Setup, Window, setup_path};
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("signal-setup-{name}-{}", std::process::id()));
@@ -40,6 +40,14 @@ fn full() -> Setup {
         rt_policy: RtPolicy::Semaphore,
         rt_computation: Computation::from_fraction(0.75).unwrap(),
         gpu_devices: GpuDevices::Only(vec!["metal-apple-m5-max".to_owned(), "1".to_owned()]),
+        play: [(
+            "cue".to_owned(),
+            PlayEntry {
+                channels: vec![3, 4],
+                device: None,
+            },
+        )]
+        .into(),
     }
 }
 
@@ -265,4 +273,37 @@ fn the_flag_then_the_environment_then_application_support() {
         ))
     );
     assert!(setup_path(None, None, None).is_err());
+}
+
+/// ADR 0038 §4 (M4.1): `[play.<role>]` binds a role to device channels
+/// (and a device); a table that does not read is reported and ignored
+/// alone, and the keys of layout adapters (not built yet) are named.
+#[test]
+fn play_tables_bind_roles_to_device_channels() {
+    let (setup, problems) = parse(
+        "version = 1\n[play.cue]\nchannels = [3, 4]\n\
+         [play.alt]\nchannels = [1, 2]\ndevice = { name = \"Speakers\", id = \"coreaudio:spk\" }\n\
+         [play.zero]\nchannels = [0]\n[play.Wide]\nchannels = [1]\n\
+         [play.surround]\nchannels = [1, 2]\nlayout = \"5.1\"\n[play.none]\n",
+    );
+    assert_eq!(
+        setup.play.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["alt", "cue"]
+    );
+    assert_eq!(setup.play["cue"].channels, vec![3, 4]);
+    assert_eq!(
+        setup.play["alt"].device.as_ref().map(|d| d.name.as_str()),
+        Some("Speakers")
+    );
+    let mut problems = problems;
+    problems.sort();
+    assert_eq!(
+        problems,
+        [
+            "setup.toml: play.Wide: a role is [a-z][a-z0-9_]*; ignored",
+            "setup.toml: play.none: channels is missing; ignored",
+            "setup.toml: play.surround: unknown key 'layout' (this version reads channels, device; layout adapters are not built yet); ignored",
+            "setup.toml: play.zero: device channels count from 1; ignored",
+        ]
+    );
 }

@@ -10,11 +10,11 @@ use signal_audio::{DeviceInfo, Scheduling, rt_thread};
 use signal_core::Registry;
 use signal_engine::{Provenance, RealtimeConfig};
 use signal_graph::ExecutionPlan;
-use signal_output::{Controller, realtime_with};
+use signal_output::{Controller, realtime_routed};
 use signal_project::session::{SessionRecorder, sink_of};
 use signal_project::{LoadError, Project, located};
 
-use crate::player::{Backend, Input, Output, live_rate, open_input, open_output};
+use crate::player::{Backend, Input, Output, live_rate, open_input, open_output, open_routed};
 use crate::setup::{Setup, Window};
 
 /// Why the devices are not listed again while playing.
@@ -97,8 +97,9 @@ pub fn status(
     }
 }
 
-/// The project at `dir`, its plan and its sink's width; or its diagnostics,
-/// located in the folder.
+/// The project at `dir`, its plan and the width of a run's audio frame (its
+/// one sink's, or every play side's together, ADR 0038); or its
+/// diagnostics, located in the folder.
 pub fn load(
     dir: &Path,
     registry: &Registry,
@@ -110,7 +111,11 @@ pub fn load(
     let planned = project
         .plan(registry)
         .map_err(|diagnostics| strings(located(dir, diagnostics)))?;
-    let (_, width) = sink_of(&project, &planned.plan).map_err(|d| strings(located(dir, d)))?;
+    sink_of(&project, &planned.plan).map_err(|d| strings(located(dir, d)))?;
+    let width = signal_project::device::play_sides(&project, &planned.plan)
+        .iter()
+        .map(|s| s.width)
+        .sum();
     Ok((project, planned.plan, width))
 }
 
@@ -185,15 +190,29 @@ pub fn start(
     let (rate, notice) = live_rate(backend, devices, setup, project.sample_rate, &project.name);
     notes.extend(notice);
     let seed = project.seed;
-    let mut output = open_output(backend, devices, setup, rate, width, seed, notes)?;
+    // ADR 0038 (M4.1): several play sides, or roles the Setup binds, are
+    // routed; one sink alone plays as before.
+    let sides = signal_project::device::play_sides(project, &plan);
+    let (mut output, sinks) = if crate::devices::routed(setup, sides.len()) {
+        let (output, routing) = open_routed(backend, devices, setup, rate, &sides, seed, notes)?;
+        (output, routing.addresses())
+    } else {
+        let output = open_output(backend, devices, setup, rate, width, seed, notes)?;
+        (output, Vec::new())
+    };
     // ADR 0036: the engine is sized for the period the device runs at (its
     // own while it runs for another app).
     let buffer = output.period().unwrap_or(setup.buffer);
     plan.version = 0;
     let config = sized(realtime_config(setup, rate, seed), rate, seed, buffer);
-    let (runner, controller) =
-        realtime_with(&plan, registry, config, Some(rt_thread::mach_semaphores))
-            .map_err(|error| error.to_string())?;
+    let (runner, controller) = realtime_routed(
+        &plan,
+        registry,
+        config,
+        Some(rt_thread::mach_semaphores),
+        &sinks,
+    )
+    .map_err(|error| error.to_string())?;
     let recorder = SessionRecorder::new(project, registry, rate, seed, Provenance::default())
         .map_err(|error| error.to_string())?;
     let workers = runner.workers();
