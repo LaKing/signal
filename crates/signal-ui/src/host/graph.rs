@@ -204,6 +204,10 @@ impl Host {
     /// `signal ui`: a run did not start from the folder; whether it loads
     /// is told by `describe` from now on (a device's failure is no load's).
     pub(super) fn build_failed(&mut self) {
+        // App mode keeps them in the window's diagnostics.
+        if self.app.is_some() {
+            return;
+        }
         let dir = self.opening.dir.clone();
         self.unloaded = self.load(&dir).err();
     }

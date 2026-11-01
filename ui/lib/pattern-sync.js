@@ -105,6 +105,7 @@ export class PatternSync {
     this.pendingPattern = null; // its pattern, when the control gave it
     this.pendingBase = null; // the base the pending edit started from
     this.pendingGeneration = null; // the opening it began in (ADR 0049)
+    this.loadedGeneration = null; // the opening the text shown was read in
     this.writing = null; // the write in flight (a promise)
     this.timer = null;
     this.conflicts = 0;
@@ -191,6 +192,7 @@ export class PatternSync {
     const pattern = this.parse(message.text, ' written elsewhere');
     if (!pattern) return;
     this.adopt({ text: message.text, base: message.base }, pattern);
+    this.loadedGeneration = generationOf(this.connection);
     this.conflicts = 0;
     this.stalled = false;
     this.onLoad(pattern, message.text);
@@ -217,6 +219,8 @@ export class PatternSync {
    * until its write meets the file (a conflict).
    */
   async load() {
+    // ADR 0049: the opening the text shown is read in; an edit of it names it.
+    const generation = generationOf(this.connection);
     let reply;
     try {
       reply = await this.connection.readPattern(this.name);
@@ -230,6 +234,7 @@ export class PatternSync {
     if (!pattern) return null;
     const same = this.loaded && reply.text === this.text;
     this.adopt(reply, pattern);
+    this.loadedGeneration = generation;
     this.loaded = true;
     if (!same) this.onLoad(pattern, reply.text);
     this.notify(null);
@@ -247,7 +252,8 @@ export class PatternSync {
     if (this.closed || !this.loaded) return;
     if (this.pending === null) {
       this.pendingBase = this.base;
-      this.pendingGeneration = generationOf(this.connection);
+      // The opening of the text the control shows (read, or pushed).
+      this.pendingGeneration = this.loadedGeneration ?? generationOf(this.connection);
     }
     this.pending = text;
     this.pendingPattern = pattern;

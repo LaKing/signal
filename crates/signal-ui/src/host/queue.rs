@@ -12,7 +12,6 @@ use signal_project::transaction;
 use crate::server::Permit;
 
 use super::Host;
-use super::app_mode::app_only;
 use super::failure::{Failure, fail};
 use super::project_io::{SaveDone, WindowsEdit};
 
@@ -102,6 +101,14 @@ pub(super) fn class_of(kind: &str, message: &Value) -> Class {
 /// How many file requests may wait for the writer lock at once; another is
 /// refused (`busy`).
 const WAITING_MAX: usize = 64;
+
+/// The answer of a request still waiting at exit.
+fn shutting_down() -> Failure {
+    fail(
+        "shutting-down",
+        "not done: Signal is shutting down and another writer still holds the project's lock",
+    )
+}
 
 /// How long an exit waits at most for another writer to release the
 /// project's lock, so the requests queued behind it are written
@@ -340,7 +347,7 @@ impl Host {
         // written straight to its files).
         let request = match request {
             Request::Save { done, .. } if self.app.is_none() => {
-                return done(Err(app_only().message));
+                return done(Err("not saved: only Signal.app saves a project (`signal ui` writes a project straight to its files)".to_owned()));
             }
             request => request,
         };
@@ -416,7 +423,14 @@ impl Host {
                 ..
             }
         );
-        if (self.opening.document.is_some() || save_as) && self.queue.writes_queued() > 0 {
+        // A queued Save waits for the lock too: this one does not overtake it.
+        let saves = self.queue.waiting.iter().any(|w| match &w.job {
+            Job::Save { .. } => true,
+            Job::Message { kind, .. } => kind == "project.save",
+            Job::Windows { .. } => false,
+        });
+        if (self.opening.document.is_some() || save_as) && (self.queue.writes_queued() > 0 || saves)
+        {
             if let Request::Save { done, .. } = request {
                 self.save_document_refused(done);
             }
@@ -602,6 +616,20 @@ impl Host {
     /// error, the window's layout write and Save their `Err`), and how many
     /// is reported. Nothing waits silently past the exit.
     pub(super) fn drain_for_exit(&mut self) {
+        // Only writes are drained: a queued open, revert or live edit is
+        // answered unrun (an open at exit would replace the project being
+        // closed; a live edit has nothing left to play).
+        let mut answered = 0;
+        let mut kept = VecDeque::new();
+        for waiting in std::mem::take(&mut self.queue.waiting) {
+            if matches!(waiting.job, Job::Message { lock: false, .. }) {
+                answered += 1;
+                self.answer_job(waiting.job, shutting_down());
+            } else {
+                kept.push_back(waiting);
+            }
+        }
+        self.queue.waiting = kept;
         let until = Instant::now() + EXIT_WAIT.min(self.queue.lock_wait);
         loop {
             {
@@ -614,16 +642,12 @@ impl Host {
             std::thread::sleep(Duration::from_millis(5));
         }
         let left: Vec<Waiting> = self.queue.waiting.drain(..).collect();
-        if left.is_empty() {
+        let count = left.len() + answered;
+        if count == 0 {
             return;
         }
-        let count = left.len();
         for waiting in left {
-            let failure = fail(
-                "shutting-down",
-                "not written: Signal is shutting down and another writer still holds the project's lock",
-            );
-            self.answer_job(waiting.job, failure);
+            self.answer_job(waiting.job, shutting_down());
         }
         self.messages.push(format!(
             "{count} request(s) waiting for another writer to release the project's lock were not done: shutting down"

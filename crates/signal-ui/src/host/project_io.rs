@@ -121,8 +121,8 @@ impl Host {
     pub(super) fn save_document_refused(&mut self, done: SaveDone) {
         self.answer_saves();
         done(Err(format!(
-            "not saved: {} file write(s) wait for another writer to release the project's lock; try again once they are written",
-            self.queue.writes_queued()
+            "not saved: {} request(s) (file writes or Saves) wait for another writer to release the project's lock; try again once they are done",
+            self.queue.waiting.len()
         )));
     }
 

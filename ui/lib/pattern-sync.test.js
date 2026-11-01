@@ -868,6 +868,19 @@ test('ADR 0049: an edit names the opening it began in, through the debounce, a r
   assert.equal(c.text, NOTES(), 'the drain writes nothing into another opening');
 });
 
+test('ADR 0049: an edit of a text read in an earlier opening names that opening, though the connection heard a newer one', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const c = new OpeningConnection(NOTES(), 5);
+  const { s } = sync(c);
+  await s.load();
+  c.reopen(); // the connection hears 6; the control still shows 5's text
+  s.edited(NOTES(0.5));
+  t.mock.timers.tick(WRITE_DELAY_MS);
+  await settle();
+  assert.deepEqual(c.writes.map((w) => w.generation), [5]);
+  assert.equal(c.text, NOTES());
+});
+
 test('ADR 0049: an edit begun in the opening open now is written', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const c = new OpeningConnection(NOTES(), 3);

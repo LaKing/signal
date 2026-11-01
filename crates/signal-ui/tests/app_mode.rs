@@ -2905,7 +2905,13 @@ fn queued_writes_get_an_outcome_at_exit(transport: Transport) {
         &mut ws,
         json!({"type": "commit", "address": "/out.gain", "value": 0.05, "id": 2}),
     );
-    no_reply(&mut rig, &mut ws, 100, &[2]);
+    // Queued behind it: an open, never run at exit (it would replace the
+    // project being closed).
+    common::send(
+        &mut ws,
+        json!({"type": "project.open", "path": rig.dir.display().to_string(), "id": 3}),
+    );
+    no_reply(&mut rig, &mut ws, 100, &[2, 3]);
     let (told, outcomes) = std::sync::mpsc::channel();
     let windows = told.clone();
     rig.host().write_windows_then(
@@ -2930,11 +2936,14 @@ fn queued_writes_get_an_outcome_at_exit(transport: Transport) {
         let error = result.as_ref().unwrap_err();
         assert!(error.contains("shutting down"), "{what}: {error}");
     }
+    // The open is answered first (before the writes are waited for).
+    let refused = rig.reply(&mut ws, 3, "error");
+    assert_eq!(refused["code"], "shutting-down", "{refused}");
     let refused = rig.reply(&mut ws, 2, "error");
     assert_eq!(refused["code"], "shutting-down", "{refused}");
     assert!(
         said.iter()
-            .any(|m| m.contains("3 request(s)") && m.contains("shutting down")),
+            .any(|m| m.contains("4 request(s)") && m.contains("shutting down")),
         "{said:?}"
     );
     assert!(gain_of(&file).contains("gain = 0.5"), "{}", gain_of(&file));

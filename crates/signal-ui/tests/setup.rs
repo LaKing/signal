@@ -272,6 +272,18 @@ fn a_save_keeps_what_did_not_read() {
     assert_eq!(table["future"].as_integer(), Some(3), "{text}");
     assert_eq!(table["later"]["x"].as_str(), Some("y"), "{text}");
     assert_eq!(Setup::load(&path).0.buffer, 256);
+    // A plain key sorting after the Setup's own tables stays top-level.
+    fs::write(&path, "version = 1\nzeta = 1\n").unwrap();
+    let (mut setup, _, mut file) = SetupFile::load(&path);
+    setup.window = Some(Window {
+        width: 800.0,
+        height: 600.0,
+    });
+    file.save(&setup).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    let table: toml::Table = text.parse().unwrap();
+    assert_eq!(table["zeta"].as_integer(), Some(1), "{text}");
+    assert_eq!(Setup::load(&path).0.window, setup.window, "{text}");
 
     // Unreadable: refused, the file unchanged.
     fs::write(&path, "version = 1\nbuffer = 512\n").unwrap();

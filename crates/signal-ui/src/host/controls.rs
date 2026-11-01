@@ -279,7 +279,7 @@ impl Host {
                 value,
             });
         }
-        let frame = match self.at_of(message)? {
+        let frame = match self.at_of(message, false)? {
             None => self.run.as_ref().map(|r| r.controller.default_frame()),
             Some(at) => Some(at),
         };

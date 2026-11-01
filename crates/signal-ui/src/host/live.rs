@@ -340,8 +340,10 @@ impl Host {
     /// runner never applies a command before an earlier one of its kind
     /// (`semantics.md` "Pushed input and effective frames"), so an `at` far
     /// ahead would hold back every live edit sent after it, a note off
-    /// included; bounded, it holds them back at most that long.
-    pub(super) fn at_of(&self, message: &Value) -> Result<Option<Frame>, Failure> {
+    /// included; bounded, it holds them back at most that long. With
+    /// `clamp` (a note off) an `at` past the horizon is taken at the
+    /// horizon instead: refusing it would leave its note sounding.
+    pub(super) fn at_of(&self, message: &Value, clamp: bool) -> Result<Option<Frame>, Failure> {
         let at = match message.get("at") {
             None | Some(Value::Null) => return Ok(None),
             Some(at) => at
@@ -350,8 +352,12 @@ impl Host {
         };
         if let Some(run) = &self.run {
             let default = run.controller.default_frame().0;
-            let horizon = u64::from(self.rate.max(1)) * AT_HORIZON_SECONDS;
-            if at > default.saturating_add(horizon) {
+            let horizon = u64::from(run.rate.max(1)) * AT_HORIZON_SECONDS;
+            let limit = default.saturating_add(horizon);
+            if at > limit && clamp {
+                return Ok(Some(Frame(limit)));
+            }
+            if at > limit {
                 return Err(fail(
                     "bad-value",
                     format!(
@@ -373,7 +379,10 @@ impl Host {
         message: &Value,
     ) -> Result<(), Failure> {
         let address = message.get("address").and_then(Value::as_str).unwrap_or("");
-        let stamp = self.at_of(message)?.map_or(Stamp::Default, Stamp::At);
+        let note_off = kind == "note" && message.get("on") == Some(&Value::Bool(false));
+        let stamp = self
+            .at_of(message, note_off)?
+            .map_or(Stamp::Default, Stamp::At);
         let number = |key: &str| {
             message
                 .get(key)

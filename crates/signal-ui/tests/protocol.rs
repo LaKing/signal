@@ -1025,6 +1025,36 @@ fn a_far_future_at_is_refused_and_holds_back_nothing(transport: Transport) {
     );
     gate(&mut rig, &mut ws, off, 0.0, "released");
 
+    // A note off stamped far ahead is taken at the horizon, never
+    // refused: its note ends.
+    let ack = rig.request(
+        &mut ws,
+        11,
+        json!({"type": "note", "address": "/melody.audition", "key": 72, "on": true}),
+        "ack",
+    );
+    gate(
+        &mut rig,
+        &mut ws,
+        ack["frame"].as_u64().unwrap(),
+        1.0,
+        "held again",
+    );
+    let pong = rig.request(&mut ws, 12, json!({"type": "ping"}), "pong");
+    let default = pong["frame"].as_u64().unwrap() + pong["latency"].as_u64().unwrap();
+    let ack = rig.request(
+        &mut ws,
+        13,
+        json!({"type": "note", "address": "/melody.audition", "key": 72, "on": false, "at": 1_000_000_000_000u64}),
+        "ack",
+    );
+    let off = ack["frame"].as_u64().unwrap();
+    assert!(
+        off <= default + 2 * 48_000,
+        "clamped: {off}, default {default}"
+    );
+    gate(&mut rig, &mut ws, off, 0.0, "released at the horizon");
+
     // Within the horizon: taken at the frame given.
     let pong = rig.request(&mut ws, 9, json!({"type": "ping"}), "pong");
     let at = pong["frame"].as_u64().unwrap() + pong["latency"].as_u64().unwrap() + 4_800;

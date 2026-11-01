@@ -25,6 +25,10 @@ use signal_engine::{Computation, RtPolicy};
 /// The file's format version.
 pub const VERSION: i64 = 1;
 
+/// How the problem of a key kept as written ends ([`SetupFile`]): a problem
+/// that does not drops something the file held.
+const KEPT: &str = "; kept in the file, not used";
+
 /// The buffer requested without a Setup, in frames.
 pub const DEFAULT_BUFFER: u32 = 128;
 
@@ -445,7 +449,7 @@ impl Setup {
                 // ([`SetupFile`]): a newer build's key survives this one.
                 _ => {
                     problems.push(format!(
-                        "{file}: unknown key '{key}'; kept in the file, not used"
+                        "{file}: unknown key '{key}'{KEPT}"
                     ));
                     unknown.insert(key.clone(), value);
                 }
@@ -536,9 +540,10 @@ impl SetupFile {
         };
         let text = String::from_utf8_lossy(&bytes);
         let (setup, problems, unknown) = Setup::read_text(&text, path);
-        // Each unknown key is one problem, and is kept: any other problem
-        // dropped something the file held.
-        if problems.len() > unknown.len() || matches!(text, std::borrow::Cow::Owned(_)) {
+        // An unknown key is kept (its problem ends with KEPT): any other
+        // problem dropped something the file held.
+        if problems.iter().any(|p| !p.ends_with(KEPT)) || matches!(text, std::borrow::Cow::Owned(_))
+        {
             file.original = Some(bytes);
         }
         file.unknown = unknown;
@@ -611,8 +616,11 @@ fn keep_copy(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
         {
             Ok(mut out) => {
                 use std::io::Write;
-                out.write_all(bytes)?;
-                out.sync_all()?;
+                let written = out.write_all(bytes).and_then(|()| out.sync_all());
+                if let Err(error) = written {
+                    let _ = fs::remove_file(&candidate);
+                    return Err(error);
+                }
                 return Ok(candidate);
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
