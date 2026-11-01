@@ -104,8 +104,8 @@ fn run_both(at: Option<u64>) -> Value {
     message
 }
 
-/// The flaw: one `commit` per transport, handled a callback apart, starts
-/// them 256 frames apart.
+/// The flaw: one `commit` per transport, the second handled after the first
+/// has started, starts them apart, by whole callbacks of 256 frames.
 fn separate_commits_a_callback_apart_drift(transport: Transport) {
     let mut rig = two("separate", transport);
     let (mut ws, _) = rig.client();
@@ -115,14 +115,33 @@ fn separate_commits_a_callback_apart_drift(transport: Transport) {
         &mut ws,
         json!({"type": "commit", "id": 1, "address": "/a.run", "value": 1}),
     );
-    rig.pump();
+    let a = first_start(&mut rig, &mut ws, subs[0]);
     send(
         &mut ws,
         json!({"type": "commit", "id": 2, "address": "/b.run", "value": 1}),
     );
-    let [a, b] = started(&mut rig, &mut ws, subs);
-    assert_eq!(b - a, 256, "a callback apart");
+    let b = first_start(&mut rig, &mut ws, subs[1]);
+    assert!(
+        b > a && (b - a).is_multiple_of(256),
+        "whole callbacks apart: {}",
+        b - a
+    );
     rig.finish();
+}
+
+/// The first frame at which `sub`'s playhead runs.
+fn first_start(rig: &mut Rig, ws: &mut Ws, sub: u64) -> u64 {
+    for _ in 0..400 {
+        rig.pump();
+        while let Some(got) = receive(ws) {
+            if let Some(frame) = got.frame(SCOPE, sub)
+                && let Some(k) = frame.f32s().iter().position(|&v| v >= 0.5)
+            {
+                return frame.first + k as u64;
+            }
+        }
+    }
+    panic!("the playhead {sub} did not start");
 }
 
 /// The batch: whatever the frames run before the host handles it (none,
