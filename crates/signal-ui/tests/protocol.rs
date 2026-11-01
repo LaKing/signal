@@ -1116,7 +1116,63 @@ both!(
     a_release_masked_by_a_claim_still_restarts_the_release_age,
 );
 
+/// ADR 0051 test 9 (docs/benchmarks.md): a `parameters` stream sends its
+/// first frame, then a frame only when a value changed, and at least once
+/// a second when none did (it no longer repeats unchanged values 60 times a
+/// second); a change is sent at the next interval.
+fn a_parameters_stream_sends_only_changes_and_a_keep_alive(transport: Transport) {
+    let mut rig = rig(
+        "params-changes",
+        Options {
+            transport,
+            ..Options::default()
+        },
+    );
+    let (mut ws, _) = rig.client();
+    let sub = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "subscribe", "stream": "parameters", "addresses": ["/out.gain"], "rate": 60}),
+        "subscribed",
+    )["sub"]
+        .as_u64()
+        .unwrap();
+    rig.wait_base(&mut ws, sub, 0.5);
+    // 1.5 s of an unchanged value: one or two keep-alive frames, never 90.
+    let mut frames = Vec::new();
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+    while std::time::Instant::now() < until {
+        rig.pump();
+        while let Some(got) = receive(&mut ws) {
+            if let Some(frame) = got.frame(PARAMETERS, sub) {
+                frames.push(frame.f64s());
+            }
+        }
+    }
+    assert!(
+        (1..=2).contains(&frames.len()),
+        "keep-alive frames only: {frames:?}"
+    );
+    assert!(frames.iter().all(|f| f[0] == 0.5));
+    // A change is sent at once (within the next intervals).
+    let asked = std::time::Instant::now();
+    rig.request(
+        &mut ws,
+        2,
+        json!({"type": "set", "address": "/out.gain", "value": 0.25}),
+        "ack",
+    );
+    rig.wait_base(&mut ws, sub, 0.25);
+    assert!(
+        asked.elapsed() < std::time::Duration::from_millis(900),
+        "sent with the change, not with the keep-alive: {:?}",
+        asked.elapsed()
+    );
+    rig.finish();
+}
+
 both!(
+    a_parameters_stream_sends_only_changes_and_a_keep_alive,
     describe_gives_the_plan_its_controls_sinks_and_meters,
     meters_and_a_scope_stream_arrive,
     set_ramp_and_trigger_are_acknowledged_with_their_frame,

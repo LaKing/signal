@@ -18,6 +18,12 @@ use super::{Host, with};
 /// The fastest parameter and meter streams.
 const MAX_RATE_HZ: f64 = 60.0;
 
+/// A `parameters` stream sends a frame when a value changed since its last
+/// frame, and at least this often when none did (ADR 0051 test 9,
+/// `docs/benchmarks.md`: of the studio's 30 Hz control streams about 93 %
+/// of the frames repeated the last one).
+pub(super) const PARAMETERS_KEEP_ALIVE: Duration = Duration::from_secs(1);
+
 /// A message's `rate`, `default` without one: a number of at least 1.
 pub(super) fn rate_of(message: &Value, default: f64) -> Result<f64, Failure> {
     let rate = match message.get("rate") {
@@ -104,6 +110,9 @@ pub(super) struct Sub {
     every: Duration,
     last: Instant,
     pub(super) stream: Stream,
+    /// A `parameters` stream's last values sent, and when
+    /// ([`PARAMETERS_KEEP_ALIVE`]).
+    sent: Option<(Vec<u8>, Instant)>,
 }
 
 /// The clients' subscriptions by id, the id the next one gets, the scope
@@ -280,21 +289,32 @@ impl Host {
             match &mut sub.stream {
                 Stream::Parameters { ports } => {
                     sub.last = now;
+                    let mut values = Vec::with_capacity(ports.len() * 16);
+                    for port in ports.iter() {
+                        let value = port.as_ref().and_then(|p| self.live.values.get(p));
+                        let (base, effective) =
+                            value.map_or((f64::NAN, f64::NAN), |v| (v.base, v.effective));
+                        values.extend_from_slice(&base.to_le_bytes());
+                        values.extend_from_slice(&effective.to_le_bytes());
+                    }
+                    // The same values as the last frame (bit for bit, NaN
+                    // included), sent less than a second ago: not again.
+                    if let Some((before, at)) = &sub.sent
+                        && *before == values
+                        && now.duration_since(*at) < PARAMETERS_KEEP_ALIVE
+                    {
+                        continue;
+                    }
                     let mut bytes = frame(
                         frames::PARAMETERS,
                         id,
                         next_frame,
                         ports.len() as u32,
                         0,
-                        ports.len() * 16,
+                        values.len(),
                     );
-                    for port in ports.iter() {
-                        let value = port.as_ref().and_then(|p| self.live.values.get(p));
-                        let (base, effective) =
-                            value.map_or((f64::NAN, f64::NAN), |v| (v.base, v.effective));
-                        bytes.extend_from_slice(&base.to_le_bytes());
-                        bytes.extend_from_slice(&effective.to_le_bytes());
-                    }
+                    bytes.extend_from_slice(&values);
+                    sub.sent = Some((values, now));
                     out.push((sub.client, bytes));
                 }
                 Stream::Meters { levels, first, .. } => {
@@ -512,6 +532,7 @@ impl Host {
                 every,
                 last: Instant::now(),
                 stream,
+                sent: None,
             },
         );
         let reply = json!({"type": "subscribed", "sub": id, "stream": kind});
