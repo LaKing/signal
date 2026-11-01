@@ -505,6 +505,7 @@ domTest('with Edit layout over the plane its Escape closes it and the plane unde
 domTest('the plane’s keys are commands of the shared keymap, rebindable through keys.toml', () => {
   const page = pageKeys();
   const p = focusedPlane();
+  p.layer = null; // the zoom picks the layer (signal.plane.coupled)
   p.level = () => 'stack';
   const travelled = [];
   p.travelTo = (z) => travelled.push(z);
@@ -530,18 +531,22 @@ domTest('the plane’s keys are commands of the shared keymap, rebindable throug
 
 // Edit layout and card moves from the main window (review of 2026-11-01; ADR 0051 §6, ADR 0032).
 
-domTest('at the Stack level the bar has Edit layout: it opens the panel editor over the plane, Done closes it', async () => {
+domTest('the bar has every layer and one Edit: at the Stack it toggles the panel editor over the plane', async () => {
   const p = await shown(plane());
   p.bar = new Node('nav');
   p.stage = new Node('div');
   p.renderBar('setup', 0.5);
-  assert.equal(p.bar.querySelector('.edit-layout'), null, 'not at the Setup level');
+  assert.equal(p.bar.querySelector('.edit-layout').disabled, true, 'not built at the Project layer');
+  assert.deepEqual(p.bar.querySelectorAll('.layer').map((b) => b.textContent), ['Project', 'Stack', 'Wiring', 'Control', 'Engine'], 'every layer has its button');
   p.renderBar('stack', 1);
   const edit = p.bar.querySelector('.edit-layout');
-  assert.equal(edit.textContent, 'Edit layout');
+  assert.equal(edit.textContent, 'Edit');
+  assert.equal(edit.disabled, false);
   edit.listeners.find(([type]) => type === 'click')[1]();
   const overlay = p.stage.querySelector('.editor');
   assert.ok(overlay, 'the editor over the stage');
+  assert.equal(edit.getAttribute('aria-pressed'), 'true', 'the button shows it is on');
+  assert.equal(overlay.querySelector('button'), null, 'no head of its own, no Done');
   // ADR 0053: the editor of ui/main.html in this page, in a shadow root with the panel's style sheets; never a frame of the panel's page.
   const body = overlay.querySelector('.editor-body');
   const panel = body.shadowRoot.querySelector('signal-panel');
@@ -553,9 +558,10 @@ domTest('at the Stack level the bar has Edit layout: it opens the panel editor o
   assert.ok(!everything.some((n) => /\/project\//.test(String(n.src ?? n.getAttribute?.('src') ?? ''))), 'no project page loaded');
   p.editLayout();
   assert.equal(p.stage.querySelectorAll('.editor').length, 1, 'one at a time');
-  overlay.querySelector('button').listeners.find(([type]) => type === 'click')[1]();
-  assert.equal(p.stage.querySelector('.editor'), null, 'Done closes it');
+  edit.listeners.find(([type]) => type === 'click')[1]();
+  assert.equal(p.stage.querySelector('.editor'), null, 'the same button closes it');
   assert.equal(p.editing, null);
+  assert.equal(edit.getAttribute('aria-pressed'), 'false');
 });
 
 domTest('a front panel’s context menu moves its card to a new panel window; a card another window holds is a placeholder with Show and Bring back', async () => {
@@ -595,4 +601,19 @@ domTest('a front panel’s context menu moves its card to a new panel window; a 
   p.windowState({ view: 'main', held: [], targets: [] });
   assert.equal(echo.hasAttribute('data-held'), false);
   assert.equal(echo.querySelector('.held-note'), null);
+});
+
+domTest('the layer chosen alone: Enter and Escape step through the layers, the view stays', () => {
+  const page = pageKeys();
+  const p = focusedPlane();
+  p.focused = 'primary';
+  p.layer = 'stack';
+  const chosen = [];
+  p.chooseLayer = (level) => chosen.push(level);
+  p.travelTo = () => assert.fail('no travel');
+  p.fitSetup = () => assert.fail('no travel');
+  press(p, page, 'Enter', [p]);
+  p.layer = 'wiring';
+  press(p, page, 'Escape', [p]);
+  assert.deepEqual(chosen, ['wiring', 'stack']);
 });

@@ -100,7 +100,7 @@ export class Binding {
 
   describe(description) {
     this.described = findParameter(description, this.address);
-    if (this.described && !this.pending && !this.element.dragging) {
+    if (this.described && !this.pending && !this.element.dragging && !this.element.grabbed) {
       const base = this.described.base ?? this.described.default;
       if (Number.isFinite(base)) this.base = base;
     }
@@ -109,7 +109,7 @@ export class Binding {
 
   /** A parameter frame's `{base, effective}` (NaN until the runner reported it). */
   frame({ base, effective }) {
-    if (!this.pending && !this.element.dragging && Number.isFinite(base)) this.base = base;
+    if (!this.pending && !this.element.dragging && !this.element.grabbed && Number.isFinite(base)) this.base = base;
     this.effective = effective;
   }
 

@@ -230,7 +230,7 @@ pub const MENU_BAR: [(&str, &[MenuItem]); 6] = [
             MenuItem::Own(MenuAction::SaveAs, "Save As…"),
             MenuItem::Own(MenuAction::Revert, "Revert to Saved…"),
             MenuItem::Separator,
-            MenuItem::Own(MenuAction::Setup, "Interface Setup…"),
+            MenuItem::Own(MenuAction::Setup, "Interfaces Config…"),
             MenuItem::Separator,
             MenuItem::Own(MenuAction::Quit, "Quit"),
         ],
@@ -722,7 +722,7 @@ mod tests {
                 ("Save", chord("Cmd+S")),
                 ("Save As…", chord("Shift+Cmd+S")),
                 ("Revert to Saved…", None),
-                ("Interface Setup…", chord("Alt+Cmd+,")),
+                ("Interfaces Config…", chord("Alt+Cmd+,")),
                 ("Quit", chord("Cmd+Q"))
             ]
         );

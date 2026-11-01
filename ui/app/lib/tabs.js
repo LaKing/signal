@@ -5,9 +5,9 @@
 
 /** The tabs, in the toolbar's order. */
 export const TABS = Object.freeze([
-  Object.freeze({ id: 'plane', label: 'Signal Project' }),
+  Object.freeze({ id: 'plane', label: 'Deck' }),
   Object.freeze({ id: 'parameters', label: 'Parameters' }),
-  Object.freeze({ id: 'setup', label: 'Setup' }),
+  Object.freeze({ id: 'setup', label: 'Config' }),
 ]);
 
 /** The tab the window opens on. */

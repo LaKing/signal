@@ -387,6 +387,9 @@ impl Windows {
             .with_title(view_title(view, self.project.as_ref()))
             .with_inner_size(LogicalSize::new(placed.width, placed.height))
             .with_position(LogicalPosition::new(placed.x, placed.y))
+            // The main window opens maximized (the owner's, 2026-11-01); its
+            // laid-out size is what it returns to when un-maximized.
+            .with_maximized(view == WindowView::Main)
             .build(target)
             .map_err(|error| format!("the window did not open: {error}"))?;
         let id = window.id();

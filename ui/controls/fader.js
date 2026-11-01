@@ -9,6 +9,8 @@ const END = 10; // track inset from each end
 const TRAVEL = LENGTH - 2 * END;
 
 export class SignalFader extends SignalValueElement {
+  /** A click grabs it: it follows the pointer, no button held, until the next click (`grab`). */
+  static stickyDrag = true;
   static observedAttributes = [...SignalValueElement.observedAttributes, 'orientation', 'wheel'];
   static css = `
 .control { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 4px; }

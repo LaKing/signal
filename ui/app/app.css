@@ -24,6 +24,8 @@ signal-app-toolbar { display: flex; gap: 0.75rem; align-items: center; height: 2
 .compact-status .line { width: 25ch; white-space: pre; overflow: hidden; }
 .compact-status .note { width: 32ch; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
 /* The project's name and its "Edited" mark (M2.8-12): fixed boxes, the mark's space kept. */
+.plane-bar { margin-left: auto; }
+.plane-bar[hidden] { display: none; }
 .project-name { display: flex; gap: 0.4rem; align-items: baseline; }
 .project-name .name { width: 18ch; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
 .project-name .edited { width: 6ch; color: var(--signal-muted); font-size: 0.85em; }

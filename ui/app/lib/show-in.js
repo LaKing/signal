@@ -37,7 +37,7 @@ export const FLASH_CSS = `
   to { outline-color: transparent; }
 }`;
 
-const PLACES = { plane: 'the Signal Project', parameters: 'the Parameters tab' };
+const PLACES = { plane: 'the Deck', parameters: 'the Parameters tab' };
 
 /** Whether `address` is an instance's (`/drums/kick`), not a port's or a parameter's (`/drums/kick.out`). */
 export function isInstance(address) {

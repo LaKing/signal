@@ -145,6 +145,8 @@ export class SignalAppToolbar extends AppElement {
         el('div', { className: 'tabs', role: 'tablist' }, ...this.tabs.values()),
         el('span', { className: 'project-name' }, this.name, this.edited),
         el('output', { className: 'compact-status' }, this.line, this.note),
+        // The Deck's level bar (breadcrumb and zoom), docked here by the plane (`dockBar`).
+        (this.planeBar = el('div', { className: 'plane-bar' })),
       );
       this.menu = (event) => this.run(event.detail);
       this.noticed = (event) => this.notice(event.detail, false);
@@ -198,6 +200,7 @@ export class SignalAppToolbar extends AppElement {
     this.tab = select(this.tab, id);
     for (const [tab, button] of this.tabs) button.setAttribute('aria-selected', String(tab === this.tab));
     for (const panel of document.querySelectorAll('[role="tabpanel"][data-tab]')) panel.hidden = panel.dataset.tab !== this.tab;
+    if (this.planeBar) this.planeBar.hidden = this.tab !== 'plane';
   }
 
   /** A menu action: Open…, Save, Interface Setup…, Restart from Files; in a browser also Settings… and Keyboard Shortcuts. */
@@ -278,8 +281,12 @@ export class SignalAppToolbar extends AppElement {
     this.project = app.project ?? null;
     // A newly muted instance: said here too, so it is seen from every tab.
     const muted = mutedNotice(this.muted ?? null, app.muted ?? null);
+    const unmuted = this.muted && !app.muted;
     this.muted = app.muted ?? null;
     if (muted) this.notice(muted, true);
+    // The mute ended (a new run): its notice goes with it, unless another one replaced it.
+    else if (unmuted && this.note.textContent === this.mutedText) this.notice('', false);
+    if (muted) this.mutedText = muted;
     // ADR 0042, 0043: values corrected on load, said where every tab sees it.
     const corrected = warningsNotice(this.corrected ?? [], app.project?.warnings ?? []);
     this.corrected = app.project?.warnings ?? [];
@@ -1244,4 +1251,6 @@ for (const [name, element] of [
 if (globalThis.document?.querySelector) {
   const plane = document.querySelector('signal-plane');
   connectPlaneCards(plane);
+  const planeBar = document.querySelector('signal-app-toolbar')?.planeBar;
+  if (planeBar) plane.dockBar(planeBar);
 }

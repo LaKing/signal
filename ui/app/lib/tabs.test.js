@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { INITIAL_TAB, TABS, select, tabForAction } from './tabs.js';
 
 // ADR 0051 §11: one plane, the Signal Project tab, in place of the Panel and Schematic tabs.
-test('the tabs are Signal Project, Parameters and Setup, opening on the Signal Project', () => {
-  assert.deepEqual(TABS.map((t) => t.label), ['Signal Project', 'Parameters', 'Setup']);
+test('the tabs are Deck, Parameters and Config, opening on the Deck', () => {
+  assert.deepEqual(TABS.map((t) => t.label), ['Deck', 'Parameters', 'Config']);
   assert.equal(INITIAL_TAB, 'plane');
 });
 

@@ -91,6 +91,26 @@ import { cardMenu, cardsOf, menuMessage } from '../app/lib/cards.js';
 const SVG = 'http://www.w3.org/2000/svg';
 /** The theme every panel links. */
 const THEME = new URL('./theme.css', import.meta.url).href;
+/**
+ * Whether the zoom decides the layer (ADR 0051 §8, the levels as nested
+ * fades of one zoom) or the layer is chosen alone and the zoom only scales
+ * (the owner's trial, 2026-11-01; the default). localStorage
+ * `signal.plane.coupled` = "1" brings the coupled zoom back.
+ */
+function zoomPicksLayer() {
+  try {
+    return globalThis.localStorage?.getItem('signal.plane.coupled') === '1';
+  } catch {
+    return false;
+  }
+}
+
+/** The layers in the bar, top to bottom (ADR 0051; the owner's names, 2026-11-01). */
+const LAYERS = [['setup', 'Project'], ['stack', 'Stack'], ['wiring', 'Wiring'], ['control', 'Control'], ['engine', 'Engine']];
+const LAYER_NAME = Object.fromEntries(LAYERS);
+/** The chosen layer's zoom limit out, relative to the focused Stack's fit. */
+const MIN_SCALE = 0.02;
+
 /** The factor of one zoom key (`plane.zoom_in`, `plane.zoom_out`), about the stage's centre. */
 const KEY_ZOOM = 1.25;
 /** Where the list of other devices' expanded state is kept, per viewer (localStorage; view state, never the project's). */
@@ -104,11 +124,36 @@ function othersExpanded() {
   }
 }
 
+/** The level bar's styles: in the plane, or docked in another element (`dockBar`). */
+const BAR_CSS = `
+.bar { position: absolute; left: 8px; top: 8px; display: flex; gap: 6px; align-items: center; padding: 4px 8px; border-radius: 6px;
+  background: color-mix(in srgb, var(--signal-panel, #1f232b) 88%, transparent); border: 1px solid #343b47; user-select: none; }
+.bar[hidden] { display: none; }
+.bar .layers { display: flex; border: 1px solid #4a5260; border-radius: 4px; overflow: hidden; }
+.bar .layer { background: none; border: none; border-left: 1px solid #343b47; color: var(--signal-fg, #d6dbe4); padding: 1px 9px; font: inherit; cursor: pointer; }
+.bar .layer:first-child { border-left: none; }
+.bar .layer:hover:not(:disabled), .bar .layer:focus-visible { color: var(--signal-accent, #4fc3f7); outline: none; }
+.bar .layer[aria-current="true"] { background: var(--signal-accent, #4fc3f7); color: #10141a; cursor: default; }
+.bar .layer:disabled { color: var(--signal-muted, #8a93a3); opacity: 0.5; cursor: default; }
+.bar .zoom { display: flex; align-items: center; gap: 2px; margin-left: 6px; }
+.bar .zoom button { background: none; border: 1px solid #4a5260; border-radius: 4px; color: var(--signal-fg, #d6dbe4); width: 22px; padding: 0; font: inherit; line-height: 18px; cursor: pointer; }
+.bar .zoom button:hover, .bar .zoom button:focus-visible { border-color: var(--signal-accent, #4fc3f7); color: var(--signal-accent, #4fc3f7); outline: none; }
+.bar .level { color: var(--signal-muted, #8a93a3); min-width: 5ch; text-align: center; font-variant-numeric: tabular-nums; }
+.bar .edit-layout { margin-left: 6px; background: none; border: 1px solid #4a5260; border-radius: 4px; color: var(--signal-fg, #d6dbe4); padding: 1px 9px; font: inherit; cursor: pointer; }
+.bar .edit-layout:hover:not(:disabled), .bar .edit-layout:focus-visible { border-color: var(--signal-accent, #4fc3f7); color: var(--signal-accent, #4fc3f7); outline: none; }
+.bar .edit-layout[aria-pressed="true"] { background: var(--signal-accent, #4fc3f7); border-color: var(--signal-accent, #4fc3f7); color: #10141a; }
+.bar .edit-layout:disabled { color: var(--signal-muted, #8a93a3); opacity: 0.5; cursor: default; }
+.bar.docked { position: static; padding: 2px 8px; }
+`;
+
 const CSS = `
+${BAR_CSS}
 :host { display: block; position: relative; overflow: hidden; height: 100%; outline: none; overscroll-behavior: none;
   color: var(--signal-fg, #d6dbe4); background: var(--signal-board-bg, #0e1014); font: var(--signal-font, 11px/1.3 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif); }
 .stage { position: absolute; inset: 0; overflow: hidden; touch-action: none; }
-.world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+.world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+:host([data-panning]) .stage { cursor: move; }
+.world.moving { will-change: transform; }
 .stack { position: absolute; box-sizing: border-box; background: #20242c; border: 2px solid #3a414d; border-radius: 6px; }
 .stack.other { transition: none; }
 .stack-head { position: absolute; left: 0; right: 0; top: 0; display: flex; align-items: center; gap: 0.6em; padding: 0 16px; box-sizing: border-box; white-space: nowrap; overflow: hidden;
@@ -154,20 +199,8 @@ svg.setup text { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue
 .deep { position: absolute; inset: 0; }
 .deep[hidden] { display: none; }
 .deep signal-schematic { height: 100%; }
-.bar { position: absolute; left: 8px; top: 8px; display: flex; gap: 6px; align-items: center; padding: 4px 8px; border-radius: 6px;
-  background: color-mix(in srgb, var(--signal-panel, #1f232b) 88%, transparent); border: 1px solid #343b47; user-select: none; }
-.bar[hidden] { display: none; }
-.bar .crumb { background: none; border: none; color: var(--signal-accent, #4fc3f7); padding: 0 2px; font: inherit; cursor: pointer; }
-.bar .crumb[aria-current="true"] { color: var(--signal-fg, #d6dbe4); cursor: default; }
-.bar .sep { color: var(--signal-muted, #8a93a3); }
-.bar .level { color: var(--signal-muted, #8a93a3); margin-left: 6px; font-variant-numeric: tabular-nums; }
-.bar .edit-layout, .editor-head button { margin-left: 8px; background: none; border: 1px solid #4a5260; border-radius: 4px; color: var(--signal-fg, #d6dbe4); padding: 1px 8px; font: inherit; cursor: pointer; }
-.bar .edit-layout:hover, .bar .edit-layout:focus-visible, .editor-head button:hover, .editor-head button:focus-visible { border-color: var(--signal-accent, #4fc3f7); color: var(--signal-accent, #4fc3f7); outline: none; }
 /* Edit layout (ADR 0051 §6): the project's panel page in its editor, over the plane. */
 .editor { position: absolute; inset: 0; z-index: 6; display: flex; flex-direction: column; background: var(--signal-bg, #15181d); }
-.editor-head { flex: none; display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; box-sizing: border-box; border-bottom: 1px solid #343b47; color: var(--signal-muted, #8a93a3); white-space: nowrap; }
-.editor-head b { color: var(--signal-fg, #d6dbe4); font-weight: 600; }
-.editor-head button { margin-left: auto; }
 .editor-body { flex: 1; display: block; min-height: 0; overflow: auto; background: var(--signal-bg, #15181d); }
 .notes { position: absolute; left: 8px; bottom: 8px; max-width: 60%; display: grid; gap: 2px; pointer-events: none; }
 .notes p { margin: 0; padding: 3px 6px; border-radius: 4px; background: color-mix(in srgb, var(--signal-panel, #1f232b) 90%, transparent); font: 11px/1.4 ui-monospace, Menlo, monospace; }
@@ -196,11 +229,11 @@ svg.wiring text, svg.control text { font-family: -apple-system, BlinkMacSystemFo
 .c-ribbon { fill: color-mix(in srgb, var(--signal-effective, #ffb74d) 12%, transparent); stroke: color-mix(in srgb, var(--signal-effective, #ffb74d) 45%, transparent); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .c-ribbon-label { fill: var(--signal-effective, #ffb74d); font-size: 9px; font-weight: 600; }
 .c-leg { fill: none; stroke: var(--signal-effective, #ffb74d); stroke-width: 1; vector-effect: non-scaling-stroke; opacity: 0.45; color: var(--signal-effective, #ffb74d); }
-.c-leg.reads { stroke: var(--signal-meter-rms, #3ecf8e); stroke-dasharray: 3 3; }
+.c-leg.reads { stroke: var(--signal-meter-rms, #3ecf8e); }
 .c-via { fill: var(--signal-effective, #ffb74d); opacity: 0.6; }
 .c-via.selected, .c-pin.selected { stroke: var(--signal-focus, #5aa9ff); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .c-auto { fill: none; stroke-width: 2.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
-.c-auto.inner { stroke-dasharray: 7 4; }
+.c-auto.inner { stroke-width: 1.75; opacity: 0.85; }
 .c-arrow { fill: context-stroke; }
 .c-cube-body { fill: #232832; stroke: #7a8496; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .c-cube-top { fill: #2d3440; }
@@ -302,6 +335,8 @@ export class SignalPlane extends HTMLElement {
     this.textKey = '';
     /** The instrument that opens into its Control plane (view state: follows the zoom point below the control band). */
     this.opened = null;
+    /** The layer chosen in the bar when the zoom does not pick it (`zoomPicksLayer`). */
+    this.layer = zoomPicksLayer() ? null : 'setup';
     /** The depth past the Stack's fit at its scale (`depthOf`: the wiring band, view state). */
     this.lift = 0;
     /** What is selected at Wiring and Control (view state, by connection or address; zoom never changes it). */
@@ -348,6 +383,7 @@ export class SignalPlane extends HTMLElement {
     this.bar = html('nav', { className: 'bar' });
     this.notes = html('div', { className: 'notes', role: 'status' });
     this.stage.append(this.world, this.deep, this.bar, this.notes);
+    if (this.barDock) this.dockBar(this.barDock);
     root.append(html('style', { textContent: CSS }), this.stage);
     // The wheel: the plane's own, but the board's in the Engine (it zooms into dies there); zooming back
     // out of the board's top level comes back to the plane (captured before the board sees it).
@@ -356,6 +392,11 @@ export class SignalPlane extends HTMLElement {
     registerWheel(this, (event) => !event.composedPath().includes(this.deep) || this.deep.hidden);
     this.stage.addEventListener('pointerdown', (e) => this.pointerDownCapture(e), true);
     this.stage.addEventListener('pointerdown', (e) => this.pointerDown(e));
+    // The right or the middle button dragged pans (a right click that does not move keeps its menu).
+    this.stage.addEventListener('pointerdown', (e) => this.buttonPanDown(e), true);
+    this.stage.addEventListener('pointermove', (e) => this.buttonPanMove(e), true);
+    this.stage.addEventListener('pointerup', (e) => this.buttonPanUp(e), true);
+    this.stage.addEventListener('pointercancel', (e) => this.buttonPanUp(e), true);
     this.stage.addEventListener('pointermove', (e) => this.pointerMove(e));
     this.stage.addEventListener('pointerup', (e) => this.pointerUp(e));
     this.stage.addEventListener('pointercancel', () => this.cancelPointer());
@@ -589,8 +630,10 @@ export class SignalPlane extends HTMLElement {
     const endpoints = roleEndpoints(instances);
     const { boxes: all, bindings, main } = peripherals({ setup: this.setup, devices: this.devices, endpoints });
     const cables = setupCables(pins, bindings);
-    // Whole boxes for the devices the project and the Setup use; the rest in one list (the operator's review of phase 1).
-    const { full: boxes, others } = splitBoxes(all, { bindings, cables, main });
+    // A whole box for every device (the owner's, 2026-11-01): the ones the project and the Setup use first, then the rest.
+    const split = splitBoxes(all, { bindings, cables, main });
+    const boxes = [...split.full, ...split.others];
+    const others = [];
     this.model = { plane: shown.plane, derived: shown.derived, problems: shown.problems, cards, owner, stackOf, pins, endpoints, boxes, others, bindings, cables, unstacked, main };
     if (!this.focused || !shown.plane.stacks.some((s) => s.name === this.focused)) this.focused = shown.plane.stacks[0]?.name ?? null;
     const focusedStack = shown.plane.stacks.find((s) => s.name === this.focused);
@@ -1099,7 +1142,8 @@ export class SignalPlane extends HTMLElement {
   /** The opened instrument's engine band (`engineBand`, from its cube as laid out; the default until it is). */
   engineBandNow() {
     // Below the control band the default band does: no Control plane is laid out before it first shows.
-    if (this.ratio() < CONTROL_BAND[0]) return ENGINE_BAND;
+    if (!this.layer && this.ratio() < CONTROL_BAND[0]) return ENGINE_BAND;
+    if (this.layer && this.layer !== 'control' && this.layer !== 'engine') return ENGINE_BAND;
     const cube = this.controlNow()?.layout?.cube;
     const fit = this.fitK();
     if (!cube || !fit || !this.viewport.w) return ENGINE_BAND;
@@ -1108,7 +1152,18 @@ export class SignalPlane extends HTMLElement {
   }
 
   level(view = this.view) {
+    if (this.layer) return this.layer;
     return levelOf(this.ratio(view), this.engineBandNow());
+  }
+
+  /** The depth the fades are drawn at: the zoom's, or the chosen layer's own (each drawing wholly in or out). */
+  fadeDepth() {
+    if (!this.layer) return this.ratio();
+    if (this.layer === 'setup') return 0;
+    if (this.layer === 'stack') return 1;
+    if (this.layer === 'wiring') return WIRING_BAND[1];
+    if (this.layer === 'control') return CONTROL_BAND[1];
+    return this.engineBandNow()[1];
   }
 
   /** The person (or a command) moved the view: from now on it is theirs, never fitted again by itself. */
@@ -1187,15 +1242,31 @@ export class SignalPlane extends HTMLElement {
     this.renderMs = (this.renderMs ?? 0) + performance.now() - t0;
   }
 
+  /**
+   * The world is a compositor layer only while the view moves: a layer is
+   * rastered once and its bitmap scaled, which blurs a zoomed-in Stack. Once
+   * the view has rested for a moment the hint is dropped, so the browser
+   * draws the vectors and text again at the scale they are seen.
+   */
+  settleLater() {
+    this.world.classList.add('moving');
+    clearTimeout(this.settleTimer);
+    this.settleTimer = setTimeout(() => this.world?.classList.remove('moving'), 150);
+  }
+
   drawView() {
     if (!this.world || !this.viewport.w) return;
     const v = this.view;
-    this.world.style.transform = `translate(${v.x}px, ${v.y}px) scale(${v.k})`;
+    const transform = `translate(${v.x}px, ${v.y}px) scale(${v.k})`;
+    if (this.world.style.transform !== transform) {
+      this.world.style.transform = transform;
+      this.settleLater();
+    }
     this.renderText(v.k);
-    const r = this.ratio();
+    const r = this.fadeDepth();
     const engine = this.engineBandNow();
     const fades = planeFades(r, engine);
-    const level = levelOf(r, engine);
+    const level = this.layer ?? levelOf(r, engine);
     this.dataset.level = level;
     opacity(this.setupSvg, fades.setup);
     for (const [name, s] of this.stacks) {
@@ -1222,7 +1293,7 @@ export class SignalPlane extends HTMLElement {
     this.renderWiring(fades);
     this.renderControl(fades);
     this.renderDeep(fades, level);
-    this.renderBar(level, r, fades);
+    this.renderBar(level, this.layer ? this.scaleRatio() : r, fades);
   }
 
   /** The Setup level's text sizes at scale `k` (`textSizes`: readable at the Setup's fit, never past the room the layout gives them), as custom properties every level's text reads. */
@@ -1586,12 +1657,19 @@ export class SignalPlane extends HTMLElement {
     }
     opacity(this.deep, fades.deep);
     this.deep.style.pointerEvents = level === 'engine' ? '' : 'none';
-    if (level === 'engine' && this.deepOwned) return;
+    // The board's layout can land after it was first laid (its instrument's frame moves): a chosen Engine layer lays it again.
+    const frame = this.layer === 'engine' ? this.engineFrame() : null;
+    const frameKey = frame ? `${frame.x},${frame.y},${frame.w},${frame.h}` : '';
+    if (level === 'engine' && this.deepOwned && frameKey === this.deepFrameKey) return;
+    this.deepFrameKey = frameKey;
     this.deepOwned = level === 'engine';
+    if (this.layer === 'engine') this.watchBoardFrame();
     const map = this.engineMap();
     if (map) {
       this.schematic.fitted = true;
-      this.schematic.setView?.(frameOnto(map.frame, map.onto, map.offset));
+      // The layer chosen alone: the instrument's board fills the board's stage, wherever the cube is on the plane.
+      const onto = this.layer === 'engine' ? this.boardStage(map) : map.onto;
+      this.schematic.setView?.(frameOnto(map.frame, onto, map.offset));
     }
     // Just un-hidden, the board has no stage or layout yet: laid on the cube again once it has.
     if ((!this.schematic.viewport?.w || !map) && !this.deepPending) {
@@ -1606,8 +1684,37 @@ export class SignalPlane extends HTMLElement {
     }
   }
 
+  /** For a moment after the Engine layer is chosen: when the board's layout lands and its instrument's frame moves, the board is laid again. */
+  watchBoardFrame() {
+    if (this.boardWatch) return;
+    const until = performance.now() + 2000;
+    const step = () => {
+      if (this.layer !== 'engine' || performance.now() > until) {
+        this.boardWatch = null;
+        return;
+      }
+      const f = this.engineFrame();
+      if (f && `${f.x},${f.y},${f.w},${f.h}` !== this.deepFrameKey) this.render();
+      this.boardWatch = requestAnimationFrame(step);
+    };
+    this.boardWatch = requestAnimationFrame(step);
+  }
+
+  /** The board's stage in the plane's stage pixels, inside a margin (where a chosen Engine layer lays the instrument's board). */
+  boardStage(map) {
+    const box = this.schematic.stage?.getBoundingClientRect?.();
+    const w = box?.width || this.viewport.w;
+    const h = box?.height || this.viewport.h;
+    return { x: map.offset.x + MARGIN_PX, y: map.offset.y + MARGIN_PX, w: Math.max(1, w - 2 * MARGIN_PX), h: Math.max(1, h - 2 * MARGIN_PX) };
+  }
+
   /** The board's top-level view mapped back to the plane, the board given up (zooming out of it, Escape at its top). */
   leaveEngine() {
+    // The layer chosen alone: the plane's view stays where it was left.
+    if (this.layer) {
+      this.deepOwned = false;
+      return;
+    }
     const map = this.engineMap();
     const view = this.schematic.view;
     if (map && view) {
@@ -1622,38 +1729,124 @@ export class SignalPlane extends HTMLElement {
     return !(this.schematic.pinned?.size > 0) && (this.schematic.view?.path ?? '') === '';
   }
 
+  /** Docks the level bar (the breadcrumb, the zoom, Edit layout) in `host`, such as the app's toolbar, with its styles. */
+  dockBar(host) {
+    this.barDock = host;
+    if (!this.bar) return;
+    const root = host.shadowRoot ?? host.attachShadow({ mode: 'open' });
+    root.replaceChildren(html('style', { textContent: BAR_CSS }), this.bar);
+    this.bar.classList.add('docked');
+  }
+
   renderBar(level, r, fades = planeFades(r)) {
-    const key = `${level}|${this.focused}|${this.opened}`;
+    const instruments = this.instrumentRects().length > 0;
+    const key = `${level}|${this.focused}|${this.opened}|${instruments}|${Boolean(this.editing)}`;
     if (key !== this.barKey) {
       this.barKey = key;
-      const crumb = (text, current, act) => {
-        const b = html('button', { type: 'button', className: 'crumb', textContent: text });
-        b.setAttribute('aria-current', String(current));
-        if (!current) b.addEventListener('click', act);
+      // Every layer is a button, the shown one marked: a click goes there (the owner's, 2026-11-01).
+      const layers = html('div', { className: 'layers', role: 'group', ariaLabel: 'Layers' });
+      for (const [id, label] of LAYERS) {
+        const b = html('button', { type: 'button', className: 'layer', textContent: label, title: this.layerTitle(id) });
+        b.setAttribute('aria-current', String(id === level));
+        b.disabled = id !== 'setup' && (!this.focused || ((id === 'control' || id === 'engine') && !instruments));
+        if (id !== level) b.addEventListener('click', () => this.goTo(id));
+        layers.append(b);
+      }
+      this.levelText = html('span', { className: 'level' });
+      const zoom = html('span', { className: 'zoom' });
+      const step = (text, factor, title) => {
+        const b = html('button', { type: 'button', textContent: text, title });
+        b.addEventListener('click', () => this.zoomBy(factor, { x: this.viewport.w / 2, y: this.viewport.h / 2 }));
         return b;
       };
-      const sep = () => html('span', { className: 'sep', textContent: '›' });
-      const deep = ['wiring', 'control', 'engine'];
-      const items = [crumb('Signal Project', level === 'setup', () => this.fitSetup())];
-      if (level !== 'setup' && this.focused) items.push(sep(), crumb(`Stack ${this.focused}`, level === 'stack', () => this.focusStack(this.focused)));
-      if (deep.includes(level)) items.push(sep(), crumb('Wiring', level === 'wiring', () => this.travelTo(WIRING_BAND[1])));
-      if ((level === 'control' || level === 'engine') && this.opened) items.push(sep(), crumb(instrumentTitle(this.opened, this.cards), level === 'control', () => this.travelTo(CONTROL_BAND[1])));
-      if (level === 'engine') items.push(sep(), crumb('Engine', true, () => {}));
-      this.levelText = html('span', { className: 'level' });
-      const tools = [];
-      if (level === 'stack') {
-        const edit = html('button', { type: 'button', className: 'edit-layout', textContent: 'Edit layout', title: 'Edit layout: arrange the front panels, written to ui/main.html' });
-        edit.addEventListener('click', () => this.editLayout());
-        tools.push(edit);
-      }
-      this.bar.replaceChildren(...items, this.levelText, ...tools);
+      zoom.append(step('−', 1 / KEY_ZOOM, 'Zoom out'), this.levelText, step('+', KEY_ZOOM, 'Zoom in'));
+      // One Edit switch: it edits the shown layer's arrangement (built for the Stack: its front panels' layout).
+      const edit = html('button', { type: 'button', className: 'edit-layout', textContent: 'Edit' });
+      const editable = level === 'stack';
+      edit.disabled = !editable;
+      edit.title = editable ? 'Edit: arrange the front panels, written to ui/main.html (again to leave it)' : `Edit at the ${LAYER_NAME[level]} layer: not built yet`;
+      edit.setAttribute('aria-pressed', String(Boolean(this.editing)));
+      edit.addEventListener('click', () => (this.editing ? this.closeEditLayout() : this.editLayout()));
+      this.editButton = edit;
+      this.bar.replaceChildren(layers, zoom, edit);
     }
-    // The board has its own bar in the Engine: the plane's fades out as the board's comes in, so neither pops.
-    this.bar.hidden = level === 'engine';
-    opacity(this.bar, 1 - fades.deep);
-    const name = { setup: 'Setup', stack: 'Stack', wiring: 'Wiring', control: 'Control', engine: 'Engine' }[level];
-    const text = `${name} · ${r ? r.toFixed(2) : '0'}× fit`;
+    // In the plane the bar fades out in the Engine, whose board has its own; docked (the toolbar), it stays.
+    const docked = this.bar.classList.contains('docked');
+    this.bar.hidden = !docked && level === 'engine';
+    opacity(this.bar, docked ? 1 : 1 - fades.deep);
+    const text = `${r ? r.toFixed(2) : '0'}×`;
     if (this.levelText.textContent !== text) this.levelText.textContent = text;
+  }
+
+  /** A layer button's title: what it shows. */
+  layerTitle(id) {
+    if (id === 'setup') return 'Project: the whole project, its Stacks and devices';
+    if (id === 'stack') return this.focused ? `Stack ${this.focused}: its instruments' front panels` : 'No Stack';
+    if (id === 'wiring') return 'Wiring: the cables between the instruments';
+    const name = this.opened ? instrumentTitle(this.opened, this.cards) : 'the instrument in the middle';
+    return id === 'control' ? `Control: ${name}'s bindings and automation` : `Engine: ${name}'s inside`;
+  }
+
+  /** Goes to a layer from wherever the view is (a layer button). */
+  goTo(level) {
+    if (this.layer) return this.chooseLayer(level);
+    const rect = this.focusRect();
+    const here = this.level();
+    if (here === 'engine' && level !== 'engine') this.leaveEngine();
+    if (level === 'setup') return this.fitSetup();
+    if (!rect) return;
+    if (level === 'stack') return this.focusStack(this.focused);
+    // Wiring, Control and Engine are depths of the focused Stack: from its fit (keeping its scroll when already in it).
+    this.settleTravel();
+    const base = here === 'setup' ? fitWidth(rect, this.viewport, null) : fitWidth(rect, this.viewport, this.view);
+    const centre = { x: this.viewport.w / 2, y: this.viewport.h / 2 };
+    if (level === 'wiring') {
+      const { to, lift } = this.depthView(WIRING_BAND[1], base, centre);
+      return this.travel(to, lift);
+    }
+    const rects = this.instrumentRects();
+    const atCentre = instrumentAt(rects, toPlane(base, centre));
+    const opened = rects.find((r) => r.entry === this.opened) ?? rects.find((r) => r.entry === atCentre) ?? rects[0];
+    if (!opened) return;
+    this.opened = opened.entry;
+    this.barKey = null;
+    const at = { x: base.x + (opened.x + opened.w / 2) * base.k, y: base.y + (opened.y + opened.h / 2) * base.k };
+    const control = this.depthView(CONTROL_BAND[1], base, at);
+    if (level === 'control') return this.travel(control.to, control.lift);
+    // The Engine: from the instrument's Control plane, into its cube.
+    this.stopTravel();
+    this.view = control.to;
+    this.lift = control.lift;
+    this.render();
+    this.enterEngine();
+  }
+
+  /** The layer chosen alone (`zoomPicksLayer` false): the view stays where it is; Control and the Engine open the instrument in the middle (or the last opened). */
+  chooseLayer(level) {
+    if (level === this.layer) return;
+    if (this.layer === 'engine') this.leaveEngine();
+    // Into Control or the Engine from above: the instrument in the middle of the stage opens (else the one opened, else the first).
+    const above = this.layer !== 'control' && this.layer !== 'engine';
+    if ((level === 'control' || level === 'engine') && (above || !this.instrumentRects().some((r) => r.entry === this.opened))) {
+      const rects = this.instrumentRects();
+      const centre = toPlane(this.view, { x: this.viewport.w / 2, y: this.viewport.h / 2 });
+      const known = rects.some((r) => r.entry === this.opened) ? this.opened : null;
+      this.opened = instrumentAt(rects, centre) ?? known ?? rects[0]?.entry ?? null;
+    }
+    if (this.editing && level !== 'stack') this.closeEditLayout();
+    this.layer = level;
+    this.deepOwned = false;
+    this.barKey = null;
+    this.render();
+  }
+
+  /** The view at depth `z` (`depthOf`) zoomed from `base` about `at` (stage pixels), its top kept in the Stack. */
+  depthView(z, base, at) {
+    const fit = this.fitK();
+    const { r, lift } = splitDepth(z);
+    let to = zoomAbout(base, (fit * r) / base.k, at, fit, this.engineBandNow()[1]);
+    to = { ...to, ...clampTop(to, this.focusRect(), this.viewport) };
+    return { to, lift };
   }
 
   // Travel: a focus, Fit, Escape and Enter animate the view (ADR 0047 §8's curve), at once with reduced motion.
@@ -1703,11 +1896,13 @@ export class SignalPlane extends HTMLElement {
     this.barKey = null;
     const rect = this.layout.stacks.get(name);
     const keep = this.level() !== 'setup' ? this.view : null;
+    if (this.layer === 'setup') this.layer = 'stack';
     this.travel(fitWidth(rect, this.viewport, keep), 0);
   }
 
   /** The whole plane in view: the Setup level. */
   fitSetup() {
+    if (this.layer && this.layer !== 'setup') this.chooseLayer('setup');
     if (this.layout) this.travel(fitAll(this.layout.bounds, this.viewport), 0);
   }
 
@@ -1775,11 +1970,6 @@ export class SignalPlane extends HTMLElement {
   editLayout() {
     if (this.editing || !this.stage) return;
     const overlay = html('div', { className: 'editor' });
-    const head = html('div', { className: 'editor-head' });
-    const title = html('span');
-    title.append(html('b', { textContent: 'Edit layout' }), ` · ui/main.html${this.focused ? ` · front panels of Stack ${this.focused}` : ''}`);
-    const done = html('button', { type: 'button', textContent: 'Done', title: 'Leave Edit layout (everything is written already)' });
-    head.append(title, done);
     const body = html('div', { className: 'editor-body' });
     const shadow = body.attachShadow({ mode: 'open' });
     const links = this.sheets.map((href) => Object.assign(document.createElement('link'), { rel: 'stylesheet', href }));
@@ -1787,14 +1977,16 @@ export class SignalPlane extends HTMLElement {
     panel.setAttribute('file', 'main.html');
     // Its relative URLs (skins) from the panel's page, as the front panels resolve them.
     panel.attributeValue = (name, value) => faceAttribute(name, value, '', this.base);
-    shadow.append(...links, html('style', { textContent: `signal-panel { display: block; min-height: 100%; }\n${this.rootCss ?? ''}` }), panel);
-    overlay.append(head, body);
+    // The bar's Edit layout button is the one switch: the panel's own bar shows only while a write failed (its Retry all, Revert all).
+    const css = `signal-panel { display: block; min-height: 100%; }\nsignal-panel::part(bar) { display: none; }\n:host(.unsaved) signal-panel::part(bar) { display: flex; }\n${this.rootCss ?? ''}`;
+    shadow.append(...links, html('style', { textContent: css }), panel);
+    overlay.append(body);
     this.stage.append(overlay);
-    const editing = { overlay, panel, entered: false, stop: null };
+    const editing = { overlay, body, panel, entered: false, stop: null };
     this.editing = editing;
-    done.addEventListener('click', () => this.closeEditLayout());
+    this.editButton?.setAttribute('aria-pressed', 'true');
+    this.barKey = null;
     this.enterEditLayout(editing);
-    done.focus?.();
   }
 
   /** The editor entered as soon as it has a plan to check against; its leaving closes the overlay. */
@@ -1815,7 +2007,16 @@ export class SignalPlane extends HTMLElement {
           else if (editing.entered) this.closeEditLayout();
         });
         observer.observe(panel, { attributes: true, attributeFilter: ['editing'] });
-        editing.stop = () => observer.disconnect();
+        // A failed write shows the panel's bar (its unsaved note and Retry all) until it is settled.
+        const unsaved = panel.shadowRoot?.querySelector?.('.unsaved');
+        const shown = () => editing.body.classList.toggle('unsaved', unsaved?.style.visibility === 'visible');
+        const watch = new MutationObserver(shown);
+        if (unsaved) watch.observe(unsaved, { attributes: true, attributeFilter: ['style'] });
+        shown();
+        editing.stop = () => {
+          observer.disconnect();
+          watch.disconnect();
+        };
       }
       panel.setEditing?.(true);
     };
@@ -1835,6 +2036,8 @@ export class SignalPlane extends HTMLElement {
     editing.stop?.();
     editing.panel.setEditing?.(false);
     editing.overlay.remove();
+    this.editButton?.setAttribute('aria-pressed', 'false');
+    this.barKey = null;
     this.focus?.();
   }
 
@@ -1940,7 +2143,7 @@ export class SignalPlane extends HTMLElement {
 
   /** The drawing the pointer edits at this zoom: `wiring`, `control`, or null (the more opaque one takes the press, ADR 0050 §6). */
   editedLevel() {
-    const fades = planeFades(this.ratio(), this.engineBandNow());
+    const fades = planeFades(this.fadeDepth(), this.engineBandNow());
     if (fades.deep >= HIT_OPACITY) return null;
     if (fades.sheet >= HIT_OPACITY && this.opened) return 'control';
     if (fades.board >= HIT_OPACITY) return 'wiring';
@@ -2036,6 +2239,8 @@ export class SignalPlane extends HTMLElement {
     // Captured only once it drags: a press that does not move stays a click (a Stack's header focuses it).
     if (!this.drag.moved) this.stage.setPointerCapture?.(event.pointerId);
     this.drag.moved = true;
+    // The layer chosen alone: the left button is each element's own action, never a pan (the owner's, 2026-11-02; the right or the middle button pans).
+    if (this.layer) return;
     const level = this.level();
     const rect = this.focusRect();
     if (level === 'stack' && rect) this.setView(scrollStack(this.view, -dy, rect, this.viewport));
@@ -2280,6 +2485,60 @@ export class SignalPlane extends HTMLElement {
     }
   }
 
+  /**
+   * The right or the middle button held pans the view at once (the cursor
+   * changes on the press). A right click that does not move opens its menu on
+   * the release (the owner's, 2026-11-02): the system's own right click,
+   * which macOS sends on the press, is held back and sent again then. Not on
+   * the Engine's board, which has its own.
+   */
+  buttonPanDown(event) {
+    if (event.button !== 1 && event.button !== 2) return;
+    if (event.composedPath?.().includes(this.deep) && this.level() === 'engine') return;
+    if (this.overEditor(event)) return;
+    event.preventDefault();
+    this.stage.setPointerCapture?.(event.pointerId);
+    this.dataset.panning = '';
+    const at = { x: event.clientX, y: event.clientY };
+    const pan = { id: event.pointerId, button: event.button, target: event.composedPath?.()[0] ?? event.target, start: at, last: at, moved: false };
+    // The system's right click while the button is down (macOS: on the press; others: on the release) is held back.
+    pan.swallow = (e) => {
+      if (e.signalReplayed) return;
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    document.addEventListener('contextmenu', pan.swallow, true);
+    this.buttonPan = pan;
+  }
+
+  buttonPanMove(event) {
+    const pan = this.buttonPan;
+    if (!pan || event.pointerId !== pan.id) return;
+    event.stopPropagation();
+    if (!pan.moved && Math.hypot(event.clientX - pan.start.x, event.clientY - pan.start.y) >= 4) pan.moved = true;
+    const dx = event.clientX - pan.last.x;
+    const dy = event.clientY - pan.last.y;
+    pan.last = { x: event.clientX, y: event.clientY };
+    if (!dx && !dy) return;
+    this.settleTravel();
+    this.setView(panBy(this.view, dx, dy));
+  }
+
+  buttonPanUp(event) {
+    const pan = this.buttonPan;
+    if (!pan || event.pointerId !== pan.id) return;
+    this.buttonPan = null;
+    delete this.dataset.panning;
+    event.stopPropagation();
+    // A release on other platforms brings its contextmenu after pointerup: still held back for a moment.
+    setTimeout(() => document.removeEventListener('contextmenu', pan.swallow, true), 0);
+    if (pan.moved || pan.button !== 2) return;
+    // A right click without a move: its menu, where it was pressed.
+    const replay = new MouseEvent('contextmenu', { bubbles: true, composed: true, cancelable: true, clientX: pan.start.x, clientY: pan.start.y, button: 2 });
+    replay.signalReplayed = true;
+    pan.target.dispatchEvent(replay);
+  }
+
   /** A pointer cancelled or its capture lost: no cable is left half drawn, no pan left running. */
   cancelPointer() {
     this.gesture = null;
@@ -2314,6 +2573,13 @@ export class SignalPlane extends HTMLElement {
 
   /** In the Engine the board zooms by itself; a zoom out of its top level comes back to the plane's Control. */
   wheelCapture(event) {
+    // The layer chosen alone: the wheel is the plane's everywhere on it, over a knob or a fader too (the owner's, 2026-11-02).
+    if (this.layer && !this.overEditor(event) && !(this.level() === 'engine' && event.composedPath().includes(this.deep))) {
+      event.stopPropagation();
+      event.preventDefault();
+      this.wheelZoom(event, false);
+      return;
+    }
     if (this.deep.hidden || this.level() !== 'engine' || !event.composedPath().includes(this.deep)) return;
     const out = (event.ctrlKey || this.kindOf(event) !== 'trackpad') && event.deltaY > 0;
     if (!out || !this.boardAtTop()) return;
@@ -2359,7 +2625,12 @@ export class SignalPlane extends HTMLElement {
     const level = this.level();
     const rect = this.focusRect();
     const mode = event.deltaMode ?? 0;
-    if (level !== 'setup' && rect && kind !== 'pinch' && !forced) {
+    if (this.layer && !forced) {
+      // The layer chosen alone: the wheel does the same on every layer (the owner's, 2026-11-02). A mouse's wheel and a
+      // pinch zoom about the pointer; a trackpad's two fingers pan; Shift with a mouse's wheel pans up and down.
+      if (kind === 'trackpad') return this.setView(panBy(this.view, -wheelPixels(event.deltaX || 0, mode), -wheelPixels(event.deltaY || 0, mode)));
+      if (kind === 'mouse' && event.shiftKey) return this.setView(panBy(this.view, 0, -wheelPixels(event.deltaY || event.deltaX || 0, mode)));
+    } else if (level !== 'setup' && rect && kind !== 'pinch' && !forced) {
       // The Stack and below: the wheel scrolls (a trackpad's sideways travel pans, when zoomed past the width).
       const dy = wheelPixels(event.deltaY || 0, mode);
       const dx = kind === 'trackpad' ? wheelPixels(event.deltaX || 0, mode) : 0;
@@ -2380,6 +2651,14 @@ export class SignalPlane extends HTMLElement {
 
   /** A zoom by `factor` about screen point `at`: coming to a Stack's fit from below focuses it (its width fitted); below the control band the instrument under `at` is the one that opens. Never the selection. */
   zoomBy(factor, at) {
+    if (this.layer) {
+      // The layer is chosen alone: the zoom only scales, about `at` (no focus, no instrument opens, no fit stop).
+      const fit = this.fitK() ?? fitScale(this.layout?.bounds ?? { w: 1, h: 1 }, this.viewport);
+      const k = Math.min(fit * 64, Math.max(fit * MIN_SCALE, this.view.k * factor));
+      this.lift = 0;
+      this.setView(zoomAbout(this.view, k / this.view.k, at));
+      return;
+    }
     // The focus follows the pointer only before the focus band: inside it the other Stacks are fading, and another focus would jump their opacity and the ratio.
     if (this.ratio() < FOCUS_BAND[0]) this.focusUnder(at);
     const fit = this.fitK();
@@ -2454,6 +2733,20 @@ export class SignalPlane extends HTMLElement {
         event.preventDefault();
         this.writePatch([], '', command === 'plane.redo' ? +1 : -1);
       }
+      return;
+    }
+    if (this.layer && (command === 'plane.out' || command === 'plane.in')) {
+      if (inBoard && command === 'plane.out' && (!this.boardAtTop() || this.schematic.selected?.length || this.schematic.tracing)) return;
+      if (command === 'plane.out' && this.selection && (level === 'wiring' || level === 'control')) {
+        event.preventDefault();
+        this.select(null);
+        return;
+      }
+      const ids = LAYERS.map(([id]) => id);
+      const next = ids[ids.indexOf(level) + (command === 'plane.in' ? 1 : -1)];
+      event.preventDefault();
+      event.stopPropagation?.();
+      if (next && (next === 'setup' || this.focused)) this.chooseLayer(next);
       return;
     }
     if (command === 'plane.out') {

@@ -62,6 +62,8 @@ svg { display: block; overflow: visible; }
   text-overflow: ellipsis;
 }
 .skin { display: flex; justify-content: center; }
+/* Grabbed by a click (\`stickyDrag\`): it follows the pointer, no button held, until the next click or Escape. */
+:host([grabbed]) { outline: 2px solid var(--signal-accent, #4fc3f7); outline-offset: 2px; border-radius: 6px; }
 .track { fill: var(--signal-track, #2a2f38); }
 .fill { fill: var(--signal-accent, #4fc3f7); }
 .effective { fill: var(--signal-effective, #ffb74d); stroke: var(--signal-effective, #ffb74d); }
@@ -549,11 +551,15 @@ export class SignalValueElement extends SignalElement {
       this.dragEnd();
       this.update();
     };
-    this.addEventListener('pointerup', () => {
+    this.addEventListener('pointerup', (event) => {
       const second = this.second;
       this.second = null;
       const moved = this.dragging && this.moved;
+      const grab = this.constructor.stickyDrag && this.dragging && !moved && !second && !this.released;
+      this.released = false;
       end();
+      // A click without a move grabs the control (the owner's, 2026-11-02): it follows the pointer until the next click.
+      if (grab) this.grab(event);
       if (second === 'entry') this.typeOrReset();
       else if (second === 'reset' && !moved) this.resetValue();
     });
@@ -576,6 +582,71 @@ export class SignalValueElement extends SignalElement {
     });
     this.addEventListener('wheel', (event) => this.onWheel(event), { passive: false });
     registerWheel(this);
+  }
+
+  /**
+   * Grabbed by a click (\`static stickyDrag\`): the value follows the pointer with
+   * no button held. The next press anywhere lets go (a press elsewhere does
+   * only that; on this control it goes on, so a double-click still resets or
+   * types), as does Escape; what it set is committed.
+   */
+  grab(event) {
+    if (this.grabbed) return;
+    try {
+      this.releasePointerCapture?.(event.pointerId);
+    } catch {
+      // Not captured: nothing to release.
+    }
+    this.moved = false;
+    this.dragStart(event);
+    this.setAttribute('grabbed', '');
+    const move = (e) => {
+      const position = this.dragMove(e);
+      if (position !== null && position !== undefined) {
+        this.moved = true;
+        this.clicks.reset();
+        this.binding.moveTo(position, 'ramp');
+        this.update();
+      }
+    };
+    const press = (e) => {
+      const here = e.composedPath?.().includes(this);
+      this.letGo();
+      if (here) this.released = true;
+      else {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+    };
+    const key = (e) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      e.preventDefault();
+      this.letGo();
+    };
+    document.addEventListener('pointermove', move, true);
+    document.addEventListener('pointerdown', press, true);
+    document.addEventListener('keydown', key, true);
+    this.grabbed = () => {
+      document.removeEventListener('pointermove', move, true);
+      document.removeEventListener('pointerdown', press, true);
+      document.removeEventListener('keydown', key, true);
+    };
+  }
+
+  /** Lets a grabbed control go, committing what it set. */
+  letGo() {
+    if (!this.grabbed) return;
+    this.grabbed();
+    this.grabbed = null;
+    this.removeAttribute('grabbed');
+    this.dragEnd();
+    this.update();
+  }
+
+  disconnectedCallback() {
+    this.letGo?.();
+    super.disconnectedCallback?.();
   }
 
   /** A double-click on the readout: a typed value, or (entry off) a reset. */

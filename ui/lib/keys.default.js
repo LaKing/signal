@@ -38,7 +38,7 @@ export default {
     { "id": "file.save", "scope": "app", "label": "Save", "keys": ["Cmd+S"], "menu": true },
     { "id": "file.save_as", "scope": "app", "label": "Save As…", "keys": ["Shift+Cmd+S"], "menu": true },
     { "id": "file.revert", "scope": "app", "label": "Revert to Saved…", "keys": [], "menu": true },
-    { "id": "file.interface_setup", "scope": "app", "label": "Interface Setup…", "keys": ["Alt+Cmd+,"], "menu": true },
+    { "id": "file.interface_setup", "scope": "app", "label": "Interfaces Config…", "keys": ["Alt+Cmd+,"], "menu": true },
     { "id": "edit.undo", "scope": "app", "label": "Undo (text fields)", "keys": ["Cmd+Z"], "fixed": true },
     { "id": "edit.redo", "scope": "app", "label": "Redo (text fields)", "keys": ["Shift+Cmd+Z"], "fixed": true },
     { "id": "edit.cut", "scope": "app", "label": "Cut", "keys": ["Cmd+X"], "fixed": true },
@@ -190,7 +190,7 @@ export default {
 
     { "id": "plane.in", "scope": "plane", "label": "In a level: focus the Stack, then its Wiring, an instrument's Control plane, its Engine", "keys": ["Enter"] },
     { "id": "plane.out", "scope": "plane", "label": "Out a level (a selection at Wiring or Control is let go first)", "keys": ["Escape"] },
-    { "id": "plane.whole", "scope": "plane", "label": "Show the whole Signal Project (the Setup level)", "keys": ["0"] },
+    { "id": "plane.whole", "scope": "plane", "label": "Show the whole project (the Project layer)", "keys": ["0"] },
     { "id": "plane.zoom_in", "scope": "plane", "label": "Zoom in about the centre", "keys": ["=", "+"] },
     { "id": "plane.zoom_out", "scope": "plane", "label": "Zoom out about the centre", "keys": ["-", "_"] },
     { "id": "plane.line_down", "scope": "plane", "label": "Scroll the focused Stack down a little", "keys": ["ArrowDown"] },

@@ -115,3 +115,4 @@ import './lib/plane-wiring.test.js';
 import './lib/plane-control.test.js';
 import './lib/plane-hit.test.js';
 import './controls/off-stage.test.js';
+import './controls/sticky-drag.test.js';

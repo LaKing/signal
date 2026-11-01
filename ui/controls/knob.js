@@ -24,6 +24,8 @@ function arc(from, to, radius = R) {
 const EFFECTIVE_R = R + 6;
 
 export class SignalKnob extends SignalValueElement {
+  /** A click grabs it: it follows the pointer, no button held, until the next click (`grab`). */
+  static stickyDrag = true;
   static observedAttributes = [...SignalValueElement.observedAttributes, 'sweep', 'bipolar', 'drag', 'wheel'];
   static css = `
 .control { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 4px; }
@@ -61,6 +63,25 @@ export class SignalKnob extends SignalValueElement {
   <div class="label"></div>
   <div class="readout"></div>
 </div>`;
+  }
+
+  /** The moving arc laid over what shows, the skin's drawing or the built-in knob (their sizes and places differ). */
+  alignMod() {
+    const skin = this.$('.face').hidden ? this.$('.skin') : null;
+    const shown = (skin && (skin.querySelector('svg, img') ?? skin)) || this.$('.art');
+    const dial = this.$('.dial');
+    const mod = this.$('.mod');
+    const d = dial.getBoundingClientRect();
+    const r = shown.getBoundingClientRect();
+    // Screen boxes back to layout pixels: the plane's zoom scales the dial and the drawing alike.
+    const k = dial.offsetWidth ? d.width / dial.offsetWidth : 1;
+    if (!r.width || !k) return;
+    const box = [(r.left - d.left) / k, (r.top - d.top) / k, r.width / k, r.height / k].map((n) => Math.round(n * 10) / 10);
+    const key = box.join('|');
+    if (key === this.modBox) return;
+    this.modBox = key;
+    const [left, top, width, height] = box;
+    Object.assign(mod.style, { left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px`, transform: 'none' });
   }
 
   /** The circular position under the pointer. */
@@ -114,7 +135,9 @@ export class SignalKnob extends SignalValueElement {
       dot.setAttribute('cx', x);
       dot.setAttribute('cy', y);
     }
-    if (this.showSkin({ position, angle, text: formatValue(b.value, b.range.unit), outOfRange: this.getAttribute('out-of-range') })) return;
+    const skinned = this.showSkin({ position, angle, text: formatValue(b.value, b.range.unit), outOfRange: this.getAttribute('out-of-range') });
+    if (b.modulated) this.alignMod();
+    if (skinned) return;
     const origin = this.hasAttribute('bipolar') ? knobAngle(bipolarOrigin(b.range), sweep) : -sweep / 2;
     this.$('.ring').setAttribute('d', arc(-sweep / 2, sweep / 2));
     this.$('.arc').setAttribute('d', arc(origin, angle));
