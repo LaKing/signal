@@ -2483,6 +2483,7 @@ both!(
     save_then_open_waits_for_the_queued_writes,
     a_stale_revert_or_open_is_refused,
     a_request_after_a_queued_open_means_the_project_then_open,
+    a_queued_live_edit_is_no_edit_at_an_open,
 );
 
 /// External review (A, ADR 0049): a delayed edit is never written into
@@ -2692,6 +2693,46 @@ fn a_request_after_a_queued_open_means_the_project_then_open(transport: Transpor
     assert_eq!(refused["code"], "project-changed", "{refused}");
     assert!(gain_in(&a).contains("gain = 0.2"), "{}", gain_in(&a));
     assert!(gain_in(&b).contains("gain = 0.25"), "{}", gain_in(&b));
+    rig.finish();
+    let _ = fs::remove_dir_all(&b);
+}
+
+/// Review 2026-11-01 (host-queue-and-restart-edges): only queued file
+/// writes are edits at an Open. A `.signal` project whose commit failed
+/// (the lock held past the wait) is not edited; a live edit queued behind
+/// the `project.open` does not make the open refuse with `edited`.
+fn a_queued_live_edit_is_no_edit_at_an_open(transport: Transport) {
+    let mut rig = app_rig("live-behind-open", transport, None);
+    let file = packed(&rig, "tone");
+    let b = rig.dir.parent().unwrap().join("b");
+    fs::create_dir_all(&b).unwrap();
+    fs::write(b.join("project.toml"), common::TONE).unwrap();
+    let (mut ws, _) = rig.client();
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    let working = PathBuf::from(opened["dir"].as_str().unwrap());
+    rig.host()
+        .set_lock_wait(std::time::Duration::from_millis(200));
+    let lock = signal_project::transaction::ProjectLock::acquire(&working).unwrap();
+    for message in [
+        json!({"type": "commit", "address": "/out.gain", "value": 0.05, "id": 2}),
+        json!({"type": "project.open", "path": b.display().to_string(), "id": 3}),
+        json!({"type": "set", "address": "/out.gain", "value": 0.05, "id": 4}),
+    ] {
+        common::send(&mut ws, message);
+    }
+    let failed = rig.reply(&mut ws, 2, "error");
+    assert_eq!(failed["code"], "write-failed", "{failed}");
+    let project = rig.reply(&mut ws, 3, "project");
+    assert_eq!(project["dir"], b.display().to_string(), "{project}");
+    // Run on the project open then (stopped: nothing plays).
+    let set = rig.reply(&mut ws, 4, "error");
+    assert_eq!(set["code"], "not-playing", "{set}");
+    drop(lock);
     rig.finish();
     let _ = fs::remove_dir_all(&b);
 }

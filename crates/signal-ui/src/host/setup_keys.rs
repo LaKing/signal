@@ -494,6 +494,7 @@ impl Host {
                 }))
             }
             Err(error) => {
+                self.build_failed();
                 self.messages
                     .push(format!("setup: applied, not playing: {error}"));
                 Ok(json!({

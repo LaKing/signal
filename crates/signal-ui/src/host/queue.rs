@@ -40,7 +40,8 @@ pub(super) enum Order {
     /// A live edit of `address`: queued only behind a request that can
     /// change that value.
     Live(String),
-    /// Never queued (`ping`, `describe`, `stats`, subscriptions, reads).
+    /// Never queued (`ping`, `describe`, `stats`, subscriptions, reads, and
+    /// a `note` or `trigger`, which no queued request can change).
     Free,
 }
 
@@ -83,7 +84,13 @@ pub(super) fn class_of(kind: &str, message: &Value) -> Class {
         // The live edits that change a parameter's value at once: kept
         // behind a queued request that can change the same value, in the
         // client's order.
-        "set" | "ramp" | "trigger" | "note" | "revert" => {
+        // A `note` or `trigger` goes to an event input, whose value no
+        // queued request changes (a commit, retry, restore or undo changes
+        // parameters; an open or revert stops the run, ending its notes):
+        // never held behind one, so a note off is never kept waiting while
+        // its note sounds (review 2026-11-01).
+        "trigger" | "note" => (true, Order::Free),
+        "set" | "ramp" | "revert" => {
             let address = message.get("address").and_then(Value::as_str);
             (true, Order::Live(address.unwrap_or_default().to_owned()))
         }
@@ -164,6 +171,21 @@ impl Default for LockQueue {
 }
 
 impl LockQueue {
+    /// How many queued requests write the project's files (a file write, or
+    /// the layout's): the edits not made yet, which an Open asks about and a
+    /// Save made now would leave out. A queued live edit, Save, open or
+    /// revert writes none.
+    pub(super) fn writes_queued(&self) -> usize {
+        self.waiting
+            .iter()
+            .filter(|w| match &w.job {
+                Job::Message { kind, .. } => class_of(kind, &Value::Null).order == Order::Write,
+                Job::Windows { .. } => true,
+                Job::Save { .. } => false,
+            })
+            .count()
+    }
+
     /// Whether a queued request can change the value at `address`: a
     /// `commit`, `retry` or live edit of it, or a snapshot restore or undo,
     /// an open or a revert of the project (any value). A live edit of it
@@ -389,7 +411,7 @@ impl Host {
                 ..
             }
         );
-        if (self.opening.document.is_some() || save_as) && !self.queue.waiting.is_empty() {
+        if (self.opening.document.is_some() || save_as) && self.queue.writes_queued() > 0 {
             if let Request::Save { done, .. } = request {
                 self.save_document_refused(done);
             }
@@ -669,9 +691,14 @@ mod tests {
         for kind in &MUTATIONS[..16] {
             assert_eq!(order(kind, &message), "write", "{kind}");
         }
-        for kind in ["set", "ramp", "trigger", "note", "revert"] {
+        for kind in ["set", "ramp", "revert"] {
             assert_eq!(order(kind, &message), "live /a/freq", "{kind}");
             assert_eq!(order(kind, &json!({})), "live ", "{kind}");
+        }
+        // An event input's: no queued request changes it.
+        for kind in ["trigger", "note"] {
+            assert_eq!(order(kind, &message), "free", "{kind}");
+            assert!(class_of(kind, &message).mutation, "{kind}");
         }
         assert_eq!(order("project.save", &message), "save");
         for kind in ["project.open", "project.revert"] {
@@ -798,8 +825,9 @@ mod tests {
             ("retry", None, false, false),
             ("set", Some("/a/freq"), true, false),
             ("ramp", Some("/a/freq"), true, false),
-            ("trigger", Some("/a/freq"), true, false),
-            ("note", Some("/a/freq"), true, false),
+            // Never queued; were one, it would change no parameter.
+            ("trigger", Some("/a/freq"), false, false),
+            ("note", Some("/a/freq"), false, false),
             ("revert", Some("/a/freq"), true, false),
             ("snapshot.restore", None, true, true),
             ("snapshot.undo", None, true, true),

@@ -225,4 +225,48 @@ fn another_writer_s_lock_never_stalls_the_control_thread(transport: Transport) {
     rig.finish();
 }
 
-both!(another_writer_s_lock_never_stalls_the_control_thread);
+/// Review 2026-11-01 (host-queue-and-restart-edges): a live edit of an
+/// event input (`trigger`, `note`) never waits behind a queued request,
+/// since none can change its value: behind a batch `commit` (which can
+/// change any parameter) waiting for another writer's lock, a trigger is
+/// acknowledged at once while a `set` waits.
+fn an_event_edit_never_waits_behind_a_queued_write(transport: Transport) {
+    let mut rig = rig(
+        "event-edit-queue",
+        Options {
+            transport,
+            ..Options::default()
+        },
+    );
+    let (mut ws, _) = rig.client();
+    let mut timed = Timed {
+        slowest: Duration::ZERO,
+    };
+    let lock = ProjectLock::acquire(&rig.dir).unwrap();
+    send(
+        &mut ws,
+        json!({"type": "commit", "id": 1, "values": [{"address": "/out.gain", "value": 0.05}]}),
+    );
+    send(
+        &mut ws,
+        json!({"type": "set", "id": 2, "address": "/a.freq", "value": 330}),
+    );
+    send(
+        &mut ws,
+        json!({"type": "trigger", "id": 3, "address": "/env.trigger"}),
+    );
+    let ack = timed.reply(&mut rig, &mut ws, 3);
+    assert_eq!(ack["type"], "ack", "the trigger goes on: {ack}");
+    timed.quiet(&mut rig, &mut ws, 200, &[1, 2]);
+    drop(lock);
+    let committed = timed.reply(&mut rig, &mut ws, 1);
+    assert_eq!(committed["type"], "committed", "{committed}");
+    let ack = timed.reply(&mut rig, &mut ws, 2);
+    assert_eq!(ack["type"], "ack", "{ack}");
+    rig.finish();
+}
+
+both!(
+    another_writer_s_lock_never_stalls_the_control_thread,
+    an_event_edit_never_waits_behind_a_queued_write
+);

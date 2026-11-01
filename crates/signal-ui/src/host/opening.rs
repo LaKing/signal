@@ -229,7 +229,9 @@ impl Host {
         // Writes waiting for the writer lock are edits not made yet (ADR
         // 0048 item 5): asked about as edits, a Save refused until they are
         // written, a Discard lets them go (each answered `project-changed`).
-        let queued = self.opening.document.is_some() && !self.queue.waiting.is_empty();
+        // Only file writes count: a live edit, Save or open queued (behind
+        // a queued `project.open`, say) is no edit of the files.
+        let queued = self.opening.document.is_some() && self.queue.writes_queued() > 0;
         let edited = self.opening.document.as_mut().is_some_and(Document::check) || queued;
         if edited && edits == Edits::Ask {
             return Err(fail(
@@ -476,10 +478,13 @@ impl Host {
         }
         let built = self.build(true);
         let error = built.as_ref().err().cloned();
-        if let Ok((run, notes)) = built {
-            self.install(run);
-            self.rearm();
-            self.messages.extend(notes);
+        match built {
+            Ok((run, notes)) => {
+                self.install(run);
+                self.rearm();
+                self.messages.extend(notes);
+            }
+            Err(_) => self.build_failed(),
         }
         Ok(json!({
             "type": "project",

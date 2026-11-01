@@ -155,6 +155,7 @@ impl Host {
             ),
             None => (Vec::new(), Vec::new()),
         };
+        let problems = self.load_problems();
         let mut describe = json!({
             "type": "describe",
             "planVersion": self.run.as_ref().map(|r| r.version),
@@ -162,6 +163,11 @@ impl Host {
             "sampleRate": self.rate,
             "project": self.run.as_ref().map(|r| r.current.name.clone()),
             "playing": self.run.is_some(),
+            // Review 2026-11-01 (additive): whether the folder loaded when
+            // it was last opened or played, and why not; while it does not,
+            // `instances` and `controls` are the last plan that loaded.
+            "loads": problems.is_none(),
+            "diagnostics": problems.unwrap_or_default(),
             "instances": described,
             "controls": controls,
             "sinks": sinks,
@@ -183,6 +189,23 @@ impl Host {
             describe = with(describe, "restarted", json!(true));
         }
         describe
+    }
+
+    /// Why the open folder does not load, when it did not as last opened,
+    /// played or restarted (app mode: the window's diagnostics); `None`
+    /// when it loaded.
+    fn load_problems(&self) -> Option<Vec<String>> {
+        match &self.app {
+            Some(mode) => (!mode.diagnostics.is_empty()).then(|| mode.diagnostics.clone()),
+            None => self.unloaded.clone(),
+        }
+    }
+
+    /// `signal ui`: a run did not start from the folder; whether it loads
+    /// is told by `describe` from now on (a device's failure is no load's).
+    pub(super) fn build_failed(&mut self) {
+        let dir = self.opening.dir.clone();
+        self.unloaded = self.load(&dir).err();
     }
 
     /// A project folder loaded and planned ([`app::load`]), counted for the

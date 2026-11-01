@@ -288,6 +288,10 @@ pub struct Host {
     /// ADR 0048: the file requests waiting for another writer to release
     /// the project's lock, in order, and how long one waits.
     queue: LockQueue,
+    /// `signal ui`: the folder's diagnostics when the last run built from
+    /// it did not start because it does not load (`describe`'s `loads`);
+    /// app mode keeps them in [`AppMode`]'s `diagnostics`.
+    unloaded: Option<Vec<String>>,
 }
 
 fn joined(diagnostics: Vec<Diagnostic>) -> String {
@@ -498,6 +502,7 @@ impl Host {
             keys_polled: Instant::now(),
             keys_version: 0,
             queue: LockQueue::default(),
+            unloaded: None,
         };
         for problem in host.keys.report() {
             host.messages.push(format!("keys: {problem}"));

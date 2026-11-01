@@ -1039,6 +1039,42 @@ fn a_far_future_at_is_refused_and_holds_back_nothing(transport: Transport) {
     let _ = fs::remove_dir_all(&source);
 }
 
+/// Review 2026-11-01 (host-queue-and-restart-edges): after a failed
+/// restart (`transport.play` on a folder that no longer loads) `describe`
+/// says the folder does not load and why; once it loads again and plays,
+/// it says so.
+fn describe_says_when_the_folder_does_not_load(transport: Transport) {
+    let mut rig = rig(
+        "unloaded",
+        Options {
+            transport,
+            ..Options::default()
+        },
+    );
+    let (mut ws, _) = rig.client();
+    let described = rig.request(&mut ws, 1, json!({"type": "describe"}), "describe");
+    assert_eq!(described["loads"], true, "{described}");
+    assert_eq!(described["diagnostics"], json!([]));
+    let path = rig.dir.join("project.toml");
+    let good = fs::read_to_string(&path).unwrap();
+    fs::write(&path, "schema_version = 1\n[instances\n").unwrap();
+    let refused = rig.request(&mut ws, 2, json!({"type": "transport.play"}), "error");
+    assert_eq!(refused["code"], "does-not-load", "{refused}");
+    let described = rig.request(&mut ws, 3, json!({"type": "describe"}), "describe");
+    assert_eq!(described["playing"], false, "{described}");
+    assert_eq!(described["loads"], false, "{described}");
+    assert!(
+        !described["diagnostics"].as_array().unwrap().is_empty(),
+        "{described}"
+    );
+    fs::write(&path, good).unwrap();
+    rig.request(&mut ws, 4, json!({"type": "transport.play"}), "transport");
+    let described = rig.request(&mut ws, 5, json!({"type": "describe"}), "describe");
+    assert_eq!(described["playing"], true, "{described}");
+    assert_eq!(described["loads"], true, "{described}");
+    rig.finish();
+}
+
 fn with_id(message: &Value, id: u64) -> Value {
     let mut message = message.clone();
     message["id"] = json!(id);
@@ -1056,6 +1092,7 @@ both!(
     set_ramp_and_trigger_are_acknowledged_with_their_frame,
     a_note_sounds_while_held_and_ends_when_its_client_goes,
     a_far_future_at_is_refused_and_holds_back_nothing,
+    describe_says_when_the_folder_does_not_load,
     commit_writes_the_file_once_and_the_watch_does_not_reload_it,
     an_edit_the_watch_cannot_see_is_applied_by_the_next_commit,
     a_presentation_change_is_not_reloaded,

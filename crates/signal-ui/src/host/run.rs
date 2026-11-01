@@ -628,6 +628,7 @@ impl Host {
     /// A new run plays the file: no live edit is left in it (the unsaved
     /// controls' values are played again by [`Host::play_carried`]).
     pub(super) fn install(&mut self, mut run: Run) {
+        self.unloaded = None;
         self.graph_playing = None;
         self.panel = Panel::new(&run.current, &self.registry);
         self.refresh_warnings();

@@ -420,7 +420,13 @@ impl Host {
         self.stop_app();
         if play {
             self.live.failed.clear();
-            let (run, notes) = self.build(true).map_err(|e| fail("does-not-load", e))?;
+            let (run, notes) = match self.build(true) {
+                Ok(built) => built,
+                Err(error) => {
+                    self.build_failed();
+                    return Err(fail("does-not-load", error));
+                }
+            };
             self.install(run);
             self.rearm();
             self.messages.extend(notes);
