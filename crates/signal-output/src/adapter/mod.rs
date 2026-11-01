@@ -1,0 +1,771 @@
+//! The clock adapter (ADR 0052 §2–4, phase 1: offline, no device): carries
+//! a stream of frames from one clock to another.
+//!
+//! - **Ring.** [`AdapterInput::push`] puts frames into a lock-free `rtrb`
+//!   ring at the source's rate; a full ring drops and counts them, never
+//!   blocks. Each push also leaves a **mark**: the frames pushed so far and
+//!   the push's host time, if the caller has one.
+//! - **Converter.** [`AdapterOutput::pull`] makes exactly the frames its
+//!   caller must deliver, reading the ring through a polyphase
+//!   Kaiser-windowed sinc ([`sinc`], [`Resampler`]) at a 32.32 fixed-point
+//!   position that advances by nominal × (1 + correction) source frames per
+//!   output frame. It runs on the side whose frame count demand fixes: the
+//!   secondary device's callback for an output, the clock callback for an
+//!   input (ADR 0052 §2).
+//! - **Drift loop.** Once per pull, the fill (ring plus the converter's
+//!   unread history, in source frames) is compared with the target F* and a
+//!   PI loop ([`DriftLoop`]) sets the correction. With host times on both
+//!   sides the fill's producer staircase is linearised from the last mark
+//!   (below); without them the raw fill is used, as ADR 0052 §2 wrote it.
+//! - **Splices.** Startup waits for F* in the ring, then fades in over
+//!   10 ms. A pull that would run out jumps back into the history by
+//!   F* − fill (a repeat), a fill beyond 3 × F* jumps forward to F* (a
+//!   skip), both with an equal-power crossfade of 5 ms, counted in `slips`;
+//!   an empty ring fades out over 5 ms into silence and waits for F*
+//!   again.
+//!
+//! **The linearised fill** (phase 1's change to ADR 0052 §2, measured in
+//! `docs/benchmarks.md` "Clock adapter"). The raw fill sampled at the
+//! consumer's callbacks carries the producer's staircase: up to one
+//! producer period, depending on where the two callbacks fall. With
+//! jittered callbacks that is noise the low-pass cannot remove inside the
+//! track loop's band; with steady ones whose periods beat, a slow sawtooth
+//! the loop follows. With the host time of each push (its callback's time,
+//! cpal's `StreamInstant`) and of the pull, the fill is estimated as
+//! `pushed at the last mark + rate × (pull time − mark time) − push / 2 −
+//! read position`: the producer as if it delivered continuously, centred on
+//! its staircase. A mark further than [`MARK_REACH`] periods from the pull,
+//! or a pull or push without a time, falls back to the raw fill.
+//!
+//! **Real time** (ADR 0052 §4): every buffer (ring, marks, history,
+//! tables, crossfade gains) is allocated by [`clock_adapter`] on the
+//! control thread; [`AdapterInput::push`] and [`AdapterOutput::pull`]
+//! allocate, lock and block nowhere, and their work is bounded:
+//! `push` copies at most the ring's free space; `pull` makes at most
+//! `max_pull` frames per piece (a longer buffer runs in pieces), each frame
+//! from at most two read heads (one, but two during a crossfade), each head
+//! `taps` multiply-adds for its coefficients plus `taps × channels` for the
+//! channels; a restart clears the history once (`channels × 2 × capacity`
+//! stores). [`AdapterOutput::worst_case_multiply_adds`] gives the bound.
+
+mod drift;
+mod resampler;
+pub mod sinc;
+
+pub use drift::{DriftLoop, LoopMode, LoopParams, PPM};
+pub use resampler::{ONE, Resampler, frame_of, frames_between};
+pub use sinc::{FilterSpec, MAX_TAPS, PHASES, SincTable};
+
+use std::f64::consts::FRAC_PI_2;
+
+use crate::fade::{Fade, fade_frames};
+
+/// The splice crossfade: 5 ms (ADR 0052 §3).
+pub const SPLICE_SECONDS: f64 = 0.005;
+
+/// The jitter margin J to start with: 1 ms (ADR 0052 §3).
+pub const JITTER_SECONDS: f64 = 0.001;
+
+/// Each slip widens J by this, up to [`MAX_JITTER_SECONDS`] (ADR 0052,
+/// answered question 1).
+pub const JITTER_STEP_SECONDS: f64 = 0.001;
+
+/// The widest J: 3 ms.
+pub const MAX_JITTER_SECONDS: f64 = 0.003;
+
+/// A fill above this many targets is an overrun (ADR 0052 §3).
+pub const OVERRUN_TARGETS: f64 = 3.0;
+
+/// The converter keeps at least this much history (ADR 0052 §3).
+pub const HISTORY_FRAMES: usize = 1024;
+
+/// A mark is used for the linearised fill while its time is within this
+/// many of the longer period of the pull's.
+pub const MARK_REACH: f64 = 8.0;
+
+/// The most channels an adapter carries.
+pub const MAX_CHANNELS: usize = 64;
+
+/// What a clock adapter carries and between which clocks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AdapterConfig {
+    /// Interleaved channels per frame, 1 to [`MAX_CHANNELS`].
+    pub channels: usize,
+    /// The pushing side's nominal rate, frames per second.
+    pub source_rate: u32,
+    /// The pulling side's nominal rate.
+    pub dest_rate: u32,
+    /// The pushing side's period (frames per push, the largest expected).
+    pub source_period: usize,
+    /// The pulling side's period.
+    pub dest_period: usize,
+    /// The most frames one pull piece makes; longer pulls run in pieces
+    /// (the device's largest buffer, checked when the route is made).
+    pub max_pull: usize,
+    /// The jitter margin J to start with, seconds.
+    pub jitter_seconds: f64,
+    /// The drift loop's constants.
+    pub loop_params: LoopParams,
+}
+
+impl AdapterConfig {
+    /// A configuration with ADR 0052's defaults: J = 1 ms, the default
+    /// loop, pieces up to four destination periods.
+    pub fn new(
+        channels: usize,
+        source_rate: u32,
+        dest_rate: u32,
+        source_period: usize,
+        dest_period: usize,
+    ) -> AdapterConfig {
+        AdapterConfig {
+            channels,
+            source_rate,
+            dest_rate,
+            source_period,
+            dest_period,
+            max_pull: 4 * dest_period.max(1),
+            jitter_seconds: JITTER_SECONDS,
+            loop_params: LoopParams::default(),
+        }
+    }
+
+    /// The nominal step: source frames per output frame.
+    pub fn nominal_step(&self) -> f64 {
+        f64::from(self.source_rate) / f64::from(self.dest_rate)
+    }
+
+    /// The target fill F* in source frames for a jitter margin of `jitter`
+    /// seconds: source period + destination period (in source frames) +
+    /// J + the converter's half length (ADR 0052 §3).
+    pub fn target_for(&self, jitter: f64) -> f64 {
+        let spec = FilterSpec::for_rates(self.source_rate, self.dest_rate);
+        self.source_period as f64
+            + self.dest_period as f64 * self.nominal_step()
+            + jitter * f64::from(self.source_rate)
+            + spec.half() as f64
+    }
+}
+
+/// Why an adapter could not be made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdapterError {
+    /// Channels outside 1 to [`MAX_CHANNELS`].
+    Channels,
+    /// A rate, period or piece of 0, or a ratio beyond 8.
+    Shape,
+}
+
+impl std::fmt::Display for AdapterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AdapterError::Channels => {
+                write!(f, "a clock adapter carries 1 to {MAX_CHANNELS} channels")
+            }
+            AdapterError::Shape => write!(
+                f,
+                "a clock adapter needs nonzero rates and periods, at a ratio of at most 8"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AdapterError {}
+
+/// A push's record for the linearised fill.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Mark {
+    /// Frames pushed so far, this push included (wrapping).
+    pushed: u32,
+    /// This push's frames.
+    frames: u32,
+    /// The push's host time, nanoseconds; `None` without one.
+    time_ns: Option<u64>,
+}
+
+/// The pushing end of a clock adapter: the engine side of an output, the
+/// device side of an input.
+#[derive(Debug)]
+pub struct AdapterInput {
+    ring: rtrb::Producer<f32>,
+    marks: rtrb::Producer<Mark>,
+    channels: usize,
+    pushed: u32,
+    dropped_frames: u64,
+    dropped_marks: u64,
+}
+
+impl AdapterInput {
+    /// Pushes interleaved frames (a partial last frame is ignored), stamped
+    /// with the push's host time in nanoseconds if there is one. What does
+    /// not fit is dropped and counted; returns the frames taken.
+    /// Real-time safe: copies, never blocks.
+    pub fn push(&mut self, interleaved: &[f32], time_ns: Option<u64>) -> usize {
+        let channels = self.channels;
+        let frames = interleaved.len() / channels;
+        let room = self.ring.slots() / channels;
+        let taken = frames.min(room);
+        let samples = interleaved.get(..taken * channels).unwrap_or(&[]);
+        if self.ring.push_entire_slice(samples).is_err() {
+            self.dropped_frames += frames as u64;
+            return 0;
+        }
+        self.dropped_frames += (frames - taken) as u64;
+        self.pushed = self.pushed.wrapping_add(taken as u32);
+        let mark = Mark {
+            pushed: self.pushed,
+            frames: taken as u32,
+            time_ns,
+        };
+        if taken > 0 && self.marks.push(mark).is_err() {
+            self.dropped_marks += 1;
+        }
+        taken
+    }
+
+    /// Frames dropped because the ring was full.
+    pub fn dropped_frames(&self) -> u64 {
+        self.dropped_frames
+    }
+
+    /// Marks dropped because their queue was full (the fill falls back to
+    /// the older mark).
+    pub fn dropped_marks(&self) -> u64 {
+        self.dropped_marks
+    }
+}
+
+/// What the pulling end is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdapterState {
+    /// Silence until the ring holds F*.
+    Filling,
+    /// Converting, the loop in acquire.
+    Locking,
+    /// Converting, the loop in track.
+    Locked,
+}
+
+/// The pulling end's counters and loop state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AdapterStatus {
+    /// Filling, locking or locked.
+    pub state: AdapterState,
+    /// The correction in use, ppm.
+    pub correction_ppm: f64,
+    /// The low-passed fill error, source frames.
+    pub fill_error: f64,
+    /// The last fill estimate, source frames.
+    pub fill: f64,
+    /// The target F*, source frames.
+    pub target: f64,
+    /// The jitter margin J in use, seconds.
+    pub jitter_seconds: f64,
+    /// Repeats and skips (ADR 0052 §3's `slips`).
+    pub slips: u64,
+    /// Of those, repeats (underruns).
+    pub repeats: u64,
+    /// Of those, skips (overruns).
+    pub skips: u64,
+    /// Fades to silence on an empty ring.
+    pub stops: u64,
+    /// Starts after a fill (the first included).
+    pub starts: u64,
+    /// Pulls that used the linearised fill.
+    pub linearised: u64,
+    /// Pulls that used the raw fill (while converting).
+    pub raw: u64,
+}
+
+/// A crossfade in progress: the old head fading out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Crossfade {
+    /// The old head's position.
+    old: u64,
+    /// Frames done.
+    at: usize,
+    /// Frames in all.
+    len: usize,
+    /// No new head: fade to silence, then fill again.
+    to_silence: bool,
+}
+
+/// The pulling end of a clock adapter, where the converter runs.
+#[derive(Debug)]
+pub struct AdapterOutput {
+    config: AdapterConfig,
+    ring: rtrb::Consumer<f32>,
+    marks: rtrb::Consumer<Mark>,
+    last_mark: Option<Mark>,
+    converter: Resampler,
+    drift: DriftLoop,
+    state: AdapterState,
+    /// The read position, 32.32 source frames.
+    position: u64,
+    /// The step in use, 32.32.
+    step: u64,
+    nominal_step: f64,
+    jitter: f64,
+    target: f64,
+    fill: f64,
+    crossfade: Option<Crossfade>,
+    /// cos(π/2 · x) over the crossfade, `splice_frames + 1` values.
+    fall: Vec<f32>,
+    splice_frames: usize,
+    /// The furthest a repeat may jump back: the history the heads of a
+    /// piece leave.
+    most_back: f64,
+    fade: Fade,
+    /// One frame's accumulator.
+    frame: Vec<f32>,
+    /// Seconds per destination frame.
+    frame_seconds: f64,
+    /// The longer period, seconds (the mark reach's unit).
+    period_seconds: f64,
+    slips: u64,
+    repeats: u64,
+    skips: u64,
+    stops: u64,
+    starts: u64,
+    linearised: u64,
+    raw: u64,
+}
+
+/// Makes a clock adapter's two ends (control thread: allocates the ring,
+/// the marks, the converter's table and history and the crossfade gains).
+pub fn clock_adapter(config: AdapterConfig) -> Result<(AdapterInput, AdapterOutput), AdapterError> {
+    if config.channels == 0 || config.channels > MAX_CHANNELS {
+        return Err(AdapterError::Channels);
+    }
+    let step = config.nominal_step();
+    if config.source_rate == 0
+        || config.dest_rate == 0
+        || config.source_period == 0
+        || config.dest_period == 0
+        || config.max_pull == 0
+        || !(1.0 / 8.0..=8.0).contains(&step)
+    {
+        return Err(AdapterError::Shape);
+    }
+    let channels = config.channels;
+    let spec = FilterSpec::for_rates(config.source_rate, config.dest_rate);
+    let jitter = config.jitter_seconds.clamp(0.0, MAX_JITTER_SECONDS);
+    let widest = config.target_for(MAX_JITTER_SECONDS.max(jitter));
+    let ring_frames = ((4.0 * widest).ceil() as usize).next_power_of_two();
+    let splice_frames = ((SPLICE_SECONDS * f64::from(config.dest_rate)).round() as usize).max(1);
+    // Most a pull piece's heads reach: the piece and a crossfade, at the
+    // clamped step, plus a skip over the whole ring.
+    let most_step = step * (1.0 + config.loop_params.clamp) + 1.0;
+    let reach = ((config.max_pull + splice_frames) as f64 * most_step).ceil() as usize;
+    let history = (ring_frames + reach + 2 * spec.taps).max(HISTORY_FRAMES + reach + 2 * spec.taps);
+    let converter = Resampler::new(spec, channels, history);
+    let most_back = converter.capacity().saturating_sub(reach + 2 * spec.taps) as f64;
+    let (ring_in, ring_out) = rtrb::RingBuffer::new(ring_frames * channels);
+    let marks = (ring_frames / config.source_period.max(1)).clamp(16, 4096);
+    let (marks_in, marks_out) = rtrb::RingBuffer::new(marks);
+    let fall = (0..=splice_frames)
+        .map(|n| (FRAC_PI_2 * n as f64 / splice_frames as f64).cos() as f32)
+        .collect();
+    let target = config.target_for(jitter);
+    let period_seconds = (config.source_period as f64 / f64::from(config.source_rate))
+        .max(config.dest_period as f64 / f64::from(config.dest_rate));
+    let input = AdapterInput {
+        ring: ring_in,
+        marks: marks_in,
+        channels,
+        pushed: 0,
+        dropped_frames: 0,
+        dropped_marks: 0,
+    };
+    let output = AdapterOutput {
+        config,
+        ring: ring_out,
+        marks: marks_out,
+        last_mark: None,
+        converter,
+        drift: DriftLoop::new(config.loop_params, f64::from(config.source_rate)),
+        state: AdapterState::Filling,
+        position: 0,
+        step: to_fixed(step),
+        nominal_step: step,
+        jitter,
+        target,
+        fill: 0.0,
+        crossfade: None,
+        fall,
+        splice_frames,
+        most_back,
+        fade: Fade::default(),
+        frame: vec![0.0; channels],
+        frame_seconds: 1.0 / f64::from(config.dest_rate),
+        period_seconds,
+        slips: 0,
+        repeats: 0,
+        skips: 0,
+        stops: 0,
+        starts: 0,
+        linearised: 0,
+        raw: 0,
+    };
+    Ok((input, output))
+}
+
+/// A step in 32.32 fixed point.
+fn to_fixed(step: f64) -> u64 {
+    (step * ONE as f64).round().max(1.0) as u64
+}
+
+impl AdapterOutput {
+    /// Fills `out` (interleaved, `channels` per frame) with exactly its
+    /// frames, converted from the ring; `time_ns` is this callback's host
+    /// time, if there is one. Real-time safe (module docs).
+    pub fn pull(&mut self, out: &mut [f32], time_ns: Option<u64>) {
+        let channels = self.config.channels;
+        out.fill(0.0);
+        let piece = self.config.max_pull * channels;
+        let mut offset_frames = 0u64;
+        for chunk in out.chunks_mut(piece) {
+            let time = time_ns.map(|t| {
+                t.saturating_add((offset_frames as f64 * self.frame_seconds * 1e9) as u64)
+            });
+            let frames = chunk.len() / channels;
+            if let Some(whole) = chunk.get_mut(..frames * channels) {
+                self.pull_piece(whole, frames, time);
+            }
+            offset_frames += frames as u64;
+        }
+    }
+
+    /// The configuration.
+    pub fn config(&self) -> &AdapterConfig {
+        &self.config
+    }
+
+    /// The converter's filter.
+    pub fn filter(&self) -> &FilterSpec {
+        self.converter.spec()
+    }
+
+    /// The latency this adapter adds, in source frames, from a frame's time
+    /// on the source clock (where it falls in its push's period) to its
+    /// read: F* − source period / 2. A frame waits F* on average from its
+    /// push to its read, and is pushed on average half a period after its
+    /// own time. F* includes the converter's half length, its group delay;
+    /// the device's own latency comes on top (ADR 0052 §3). Verified by the
+    /// marker delays of `tests/adapter_clocks.rs`.
+    pub fn latency_frames(&self) -> f64 {
+        self.target - self.config.source_period as f64 / 2.0
+    }
+
+    /// The most multiply-adds one pull piece can take: two heads (a
+    /// crossfade) over `max_pull` frames, each `taps × (1 + channels)`.
+    pub fn worst_case_multiply_adds(&self) -> usize {
+        2 * self.config.max_pull * self.converter.taps() * (1 + self.config.channels)
+    }
+
+    /// The counters and the loop's state.
+    pub fn status(&self) -> AdapterStatus {
+        AdapterStatus {
+            state: self.state,
+            correction_ppm: self.drift.correction() / PPM,
+            fill_error: self.drift.filtered_error(),
+            fill: self.fill,
+            target: self.target,
+            jitter_seconds: self.jitter,
+            slips: self.slips,
+            repeats: self.repeats,
+            skips: self.skips,
+            stops: self.stops,
+            starts: self.starts,
+            linearised: self.linearised,
+            raw: self.raw,
+        }
+    }
+
+    /// The source frame the read position is at, with its fraction
+    /// (tests: where an output frame came from).
+    pub fn position(&self) -> u64 {
+        self.position
+    }
+
+    /// Takes every waiting mark, keeping the latest.
+    fn drain_marks(&mut self) {
+        while let Ok(mark) = self.marks.pop() {
+            self.last_mark = Some(mark);
+        }
+    }
+
+    /// Frames waiting in the ring.
+    fn ring_frames(&self) -> usize {
+        self.ring.slots() / self.config.channels
+    }
+
+    /// The index one past the last frame available (history and ring).
+    fn available(&self) -> u32 {
+        self.converter
+            .written()
+            .wrapping_add(self.ring_frames() as u32)
+    }
+
+    /// Frames from the read position to the end of what is available.
+    fn raw_fill(&self) -> f64 {
+        let whole = frames_between(self.available(), frame_of(self.position));
+        whole as f64 - (self.position as u32) as f64 / ONE as f64
+    }
+
+    /// The linearised fill at `time_ns`, if a mark and the time allow it.
+    fn linear_fill(&self, time_ns: Option<u64>) -> Option<f64> {
+        let mark = self.last_mark?;
+        let now = time_ns? as f64 * 1e-9;
+        let then = mark.time_ns? as f64 * 1e-9;
+        let since = now - then;
+        if since.abs() > MARK_REACH * self.period_seconds {
+            return None;
+        }
+        let pushed = frames_between(mark.pushed, frame_of(self.position)) as f64
+            - (self.position as u32) as f64 / ONE as f64;
+        Some(pushed + f64::from(self.config.source_rate) * since - f64::from(mark.frames) / 2.0)
+    }
+
+    /// Moves ring frames into the history up to index `until` (or as many
+    /// as there are).
+    fn take_until(&mut self, until: u32) {
+        let wanted = frames_between(until, self.converter.written());
+        if wanted <= 0 {
+            return;
+        }
+        let frames = (wanted as usize).min(self.ring_frames());
+        let samples = frames * self.config.channels;
+        if let Ok(chunk) = self.ring.read_chunk(samples) {
+            let (first, second) = chunk.as_slices();
+            self.converter.write_split(first, second);
+            chunk.commit_all();
+        }
+    }
+
+    /// Discards up to `frames` ring frames; returns how many went.
+    fn discard(&mut self, frames: usize) -> usize {
+        let frames = frames.min(self.ring_frames());
+        match self.ring.read_chunk(frames * self.config.channels) {
+            Ok(chunk) => {
+                chunk.commit_all();
+                frames
+            }
+            Err(_) => 0,
+        }
+    }
+
+    /// Starts converting once the ring holds F*: drops what is beyond F*,
+    /// clears the history, puts the read position at the first ring frame,
+    /// the loop in acquire at the nominal ratio, and fades in. With a
+    /// linearised fill, the read position then moves so that fill is F*
+    /// (the raw fill at one instant is up to a period off the mean), as far
+    /// as this pull of `frames` still has its frames.
+    fn try_start(&mut self, frames: usize, time_ns: Option<u64>) -> bool {
+        let need = self.target.ceil() as usize;
+        let have = self.ring_frames();
+        if have < need {
+            return false;
+        }
+        // The dropped frames keep their indices: the position counts every
+        // frame pushed, as the marks do.
+        let dropped = self.discard(have - need);
+        let first = self.converter.written().wrapping_add(dropped as u32);
+        self.converter.reset(first);
+        self.position = u64::from(first) << 32;
+        if let Some(fill) = self.linear_fill(time_ns) {
+            let half = self.converter.spec().half() as f64;
+            let most = need as f64 - frames as f64 * self.nominal_step - half - 2.0;
+            // Back into the cleared history (silence) as far as two
+            // targets; the history holds more than four.
+            let ahead = (fill - self.target).clamp(-2.0 * self.target, most.max(0.0));
+            let fixed = (ahead.abs() * ONE as f64).round() as u64;
+            self.position = if ahead >= 0.0 {
+                self.position.wrapping_add(fixed)
+            } else {
+                self.position.wrapping_sub(fixed)
+            };
+        }
+        self.step = to_fixed(self.nominal_step);
+        let fill = self.linear_fill(time_ns).unwrap_or_else(|| self.raw_fill());
+        self.drift.restart(fill - self.target, false);
+        self.crossfade = None;
+        self.fade.start_in(fade_frames(self.config.dest_rate));
+        self.state = AdapterState::Locking;
+        self.starts += 1;
+        true
+    }
+
+    /// The crossfade length for an old head at `old`: 5 ms, or as many
+    /// frames as the available frames serve.
+    fn crossfade_len(&self, old: u64) -> usize {
+        let serves = self
+            .converter
+            .reads_before(old, self.step, self.available());
+        (serves as usize).min(self.splice_frames)
+    }
+
+    /// Widens J by a step (up to 3 ms) after a slip; F* follows.
+    fn widen(&mut self) {
+        let wider = (self.jitter + JITTER_STEP_SECONDS).min(MAX_JITTER_SECONDS);
+        if wider > self.jitter {
+            self.jitter = wider;
+            let target = self.config.target_for(wider);
+            self.drift.shift(self.target - target);
+            self.target = target;
+        }
+    }
+
+    fn pull_piece(&mut self, out: &mut [f32], frames: usize, time_ns: Option<u64>) {
+        self.drain_marks();
+        if self.state == AdapterState::Filling && !self.try_start(frames, time_ns) {
+            return;
+        }
+        let dt = frames as f64 * self.frame_seconds;
+        let fill = match self.linear_fill(time_ns) {
+            Some(fill) => {
+                self.linearised += 1;
+                fill
+            }
+            None => {
+                self.raw += 1;
+                self.raw_fill()
+            }
+        };
+        self.fill = fill;
+        let correction = self.drift.update(fill - self.target, dt);
+        self.step = to_fixed(self.nominal_step * (1.0 + correction));
+
+        let step = self.step;
+        let available = self.available();
+        let serves = self.converter.reads_before(self.position, step, available);
+        let silent = self.crossfade.is_some_and(|x| x.to_silence);
+        if !silent && serves < frames as u64 {
+            if self.ring_frames() == 0 {
+                // The producer stopped: fade out what is left.
+                let len = self.crossfade_len(self.position);
+                self.crossfade = Some(Crossfade {
+                    old: self.position,
+                    at: 0,
+                    len,
+                    to_silence: true,
+                });
+                self.stops += 1;
+            } else {
+                // A repeat: back into the history to F* (the loop's fill),
+                // and at least as far as this pull lacks.
+                self.widen();
+                let short = (frames as u64 - serves) as f64 * step as f64 / ONE as f64 + 1.0;
+                let back = (self.target - self.fill)
+                    .max(short)
+                    .min(self.most_back)
+                    .ceil();
+                let old = self.position;
+                self.position = self.position.wrapping_sub((back as u64) << 32);
+                let len = self.crossfade_len(old);
+                self.crossfade = Some(Crossfade {
+                    old,
+                    at: 0,
+                    len,
+                    to_silence: false,
+                });
+                self.drift.shift(back);
+                self.slips += 1;
+                self.repeats += 1;
+            }
+        } else if !silent && self.raw_fill() > OVERRUN_TARGETS * self.target {
+            // A skip: forward to F*, as far as the fill leaves this pull
+            // its frames.
+            let raw = self.raw_fill();
+            let half = self.converter.spec().half() as f64;
+            let most = raw - frames as f64 * step as f64 / ONE as f64 - half - 2.0;
+            let ahead = (raw - self.target).min(most).floor().max(0.0);
+            let old = self.position;
+            self.position = self.position.wrapping_add((ahead as u64) << 32);
+            let len = self.crossfade_len(old);
+            self.crossfade = Some(Crossfade {
+                old,
+                at: 0,
+                len,
+                to_silence: false,
+            });
+            self.drift.shift(-ahead);
+            self.slips += 1;
+            self.skips += 1;
+        }
+
+        // Bring in the frames every head needs for this piece.
+        let mut until = self.converter.written();
+        let mut furthest = |position: u64, reads: usize| {
+            if reads > 0 {
+                let last = position.wrapping_add(step.wrapping_mul(reads as u64 - 1));
+                let need = self.converter.needs_until(last);
+                if frames_between(need, until) > 0 {
+                    until = need;
+                }
+            }
+        };
+        if !silent {
+            furthest(self.position, frames);
+        }
+        if let Some(x) = self.crossfade {
+            furthest(x.old, (x.len - x.at).min(frames));
+        }
+        self.take_until(until);
+        let written = self.converter.written();
+
+        let channels = self.config.channels;
+        for frame_out in out.chunks_exact_mut(channels) {
+            if self.state == AdapterState::Filling {
+                // Faded to silence earlier in this piece.
+                frame_out.fill(0.0);
+                continue;
+            }
+            self.frame.iter_mut().for_each(|s| *s = 0.0);
+            let mut main_gain = 1.0f32;
+            let mut done = false;
+            if let Some(x) = self.crossfade.as_mut() {
+                if x.at < x.len {
+                    let fall = self.fall.get(x.at * self.splice_frames / x.len.max(1));
+                    let fall = fall.copied().unwrap_or(0.0);
+                    let rise_at = self.splice_frames - x.at * self.splice_frames / x.len.max(1);
+                    let rise = self.fall.get(rise_at).copied().unwrap_or(1.0);
+                    if frames_between(written, self.converter.needs_until(x.old)) >= 0 {
+                        self.converter.read_add(x.old, fall, &mut self.frame);
+                    }
+                    x.old = x.old.wrapping_add(step);
+                    x.at += 1;
+                    main_gain = if x.to_silence { 0.0 } else { rise };
+                } else {
+                    main_gain = if x.to_silence { 0.0 } else { 1.0 };
+                }
+                done = x.at >= x.len;
+            }
+            let to_silence = self.crossfade.is_some_and(|x| x.to_silence);
+            if !to_silence {
+                if frames_between(written, self.converter.needs_until(self.position)) >= 0 {
+                    self.converter
+                        .read_add(self.position, main_gain, &mut self.frame);
+                }
+                self.position = self.position.wrapping_add(step);
+            }
+            if done {
+                self.crossfade = None;
+                if to_silence {
+                    self.state = AdapterState::Filling;
+                    self.fade = Fade::default();
+                }
+            }
+            for (o, &s) in frame_out.iter_mut().zip(&self.frame) {
+                *o = s;
+            }
+        }
+        self.fade.apply(out, channels);
+        if self.state != AdapterState::Filling {
+            self.state = match self.drift.mode() {
+                LoopMode::Acquire => AdapterState::Locking,
+                LoopMode::Track => AdapterState::Locked,
+            };
+        }
+    }
+}

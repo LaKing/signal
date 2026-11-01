@@ -42,6 +42,7 @@
     )
 )]
 
+pub mod adapter;
 mod audio;
 mod driver;
 pub mod fade;
