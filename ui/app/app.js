@@ -1241,4 +1241,9 @@ for (const [name, element] of [
 // ADR 0032, 0051 §11: the main window's cards are its plane's front panels;
 // it says it is ready, is told which cards other windows hold, and moves a
 // card from a front panel's menu (./lib/cards.js).
-if (globalThis.document?.querySelector) connectPlaneCards(document.querySelector('signal-plane'));
+if (globalThis.document?.querySelector) {
+  const plane = document.querySelector('signal-plane');
+  connectPlaneCards(plane);
+  // The plane's Edit layout frame: its right clicks open this page's menu.
+  if (plane) plane.listenFrame = (doc, frame) => SignalAppContextMenu.listen(doc, frame);
+}

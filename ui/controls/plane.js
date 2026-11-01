@@ -57,6 +57,8 @@
 
 import { onDefaultConnection } from '../signal-ui.js';
 import './schematic.js';
+// Every control a front panel may hold is defined on the plane's page too (the open slot card among them).
+import './index.js';
 import { loadWhitelist, showWritten } from './panel-editor.js';
 import { generatedTree, parseContent, serialize } from '../lib/panel-tree.js';
 import { setAttributes } from '../lib/panel-edit.js';
@@ -234,12 +236,16 @@ const PANEL_CSS = `
 .face-panel > .signal-cards > [data-xray]::before, .face-panel > .signal-cards > [data-xray]::after { display: none !important; }
 [data-xray] .signal-group { background: transparent !important; border-color: transparent !important; box-shadow: none !important; }
 [data-xray] signal-piano-roll, [data-xray] signal-step-grid, [data-xray] p { opacity: 0.08; pointer-events: none; }
+/* ADR 0046 §5: the open slot card is one box here (its own CSS makes it display: contents in a grid): its header above its part, as theme.css places it on a plate. */
+.face-panel > .signal-cards > signal-slot[data-card] { display: flex !important; flex-direction: column; gap: 0.6rem; }
+.face-panel > .signal-cards > signal-slot[data-card] > .signal-cards { display: grid; }
 /* ADR 0032: a card another window holds keeps its place, nothing of it drawn but its placeholder. */
 [data-held] { position: relative; background: transparent !important; border-color: transparent !important; box-shadow: none !important; }
 [data-held]::before, [data-held]::after { visibility: hidden !important; }
 [data-held] :not(.held-note, .held-note *) { visibility: hidden !important; }
 .held-note { position: absolute; inset: 0; z-index: 1; display: flex; gap: .6rem; align-items: center; padding: 0 .75rem; box-sizing: border-box; border: 1px dashed var(--signal-track, #2a2f38); border-radius: 8px; background: var(--signal-bg, #15181d); color: var(--signal-muted, #8a93a3); font: 12px/1.3 -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; white-space: nowrap; visibility: visible !important; }
 .held-note span { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.face-panel > .signal-cards > [data-faded] .held-note { visibility: hidden !important; pointer-events: none; }
 .held-note button { font: inherit; color: var(--signal-fg, #d6dbe4); background: var(--signal-track, #2a2f38); border: 1px solid var(--signal-muted, #8a93a3); border-radius: 3px; padding: .1rem .6rem; cursor: pointer; }
 `;
 
@@ -310,6 +316,8 @@ export class SignalPlane extends HTMLElement {
     this.windowTold = null;
     /** The Edit layout over the plane (`editLayout`), or null. */
     this.editing = null;
+    /** `(doc, frame) → remover`: the app's context menu on the Edit layout frame (set by ui/app/app.js), or null. */
+    this.listenFrame = null;
   }
 
   connectedCallback() {
@@ -728,6 +736,8 @@ export class SignalPlane extends HTMLElement {
       for (const stack of this.model?.plane.stacks ?? []) {
         const s = this.stacks.get(stack.name);
         if (s && this.measureCards(s, stack)) changed = true;
+        // A part's cards are drawn after the panel: one another window holds gets its placeholder then.
+        if (s && this.heldCards().size) this.applyHeld(s);
       }
       if (changed) this.relayout();
     });
@@ -962,9 +972,14 @@ export class SignalPlane extends HTMLElement {
           await patch();
         }
       }
-      if (route) await this.request(route);
+      if (route) {
+        await this.request(route).catch((error) => {
+          // Refused: what the Setup holds now is read again (a saved one is read on its `applied` reply).
+          this.readSetup();
+          throw error;
+        });
+      }
     } finally {
-      if (route) this.readSetup();
       if (restart) await this.request({ type: 'transport.play' }).catch((error) => this.say(error?.message ?? String(error)));
     }
   }
@@ -1122,7 +1137,10 @@ export class SignalPlane extends HTMLElement {
         const o = !focused ? 1 : opened ? fades.controls : fades.panels;
         opacity(card, o);
         const hidden = o < 0.002 ? 'hidden' : '';
-        if (card.style.visibility !== hidden) card.style.visibility = hidden;
+        if (card.style.visibility !== hidden) {
+          card.style.visibility = hidden;
+          card.toggleAttribute('data-faded', Boolean(hidden));
+        }
         const xray = opened && fades.control > 0;
         if (card.hasAttribute('data-xray') !== xray) card.toggleAttribute('data-xray', xray);
       }
@@ -1702,6 +1720,10 @@ export class SignalPlane extends HTMLElement {
 
   /** The frame's panel into its Edit layout as soon as it has a plan to check against; its leaving closes the overlay. */
   enterEditLayout(editing) {
+    // The frame's right clicks open the page's own menu, as a panel frame's always did (`listenFrame`: ui/app/app.js).
+    editing.unlisten?.();
+    const doc = editing.frame.contentDocument;
+    editing.unlisten = doc && this.listenFrame ? this.listenFrame(doc, editing.frame) : null;
     const started = Date.now();
     const attempt = () => {
       if (this.editing !== editing) return;
@@ -1727,12 +1749,18 @@ export class SignalPlane extends HTMLElement {
     attempt();
   }
 
+  /** Whether `event` is on the Edit layout over the plane (the plane underneath takes nothing of it). */
+  overEditor(event) {
+    return Boolean(this.editing && event.composedPath?.().includes(this.editing.overlay));
+  }
+
   /** Closes Edit layout (its editor left first; what it wrote is written). */
   closeEditLayout() {
     const editing = this.editing;
     if (!editing) return;
     this.editing = null;
     editing.stop?.();
+    editing.unlisten?.();
     try {
       editing.frame.contentDocument?.querySelector('signal-panel')?.setEditing?.(false);
     } catch {
@@ -1798,7 +1826,7 @@ export class SignalPlane extends HTMLElement {
     if (!s) return null;
     const cards = this.namedCards(s);
     for (const node of path) {
-      if (node?.binding?.address) return null;
+      if (node?.binding?.address || node?.dataset?.address) return null;
       const card = cards.find((c) => c.raw === node);
       if (card) return card;
     }
@@ -1814,8 +1842,8 @@ export class SignalPlane extends HTMLElement {
   contextMenu(event) {
     const path = event.composedPath?.() ?? [];
     if (path.includes(this.deep) || (this.editing && path.includes(this.editing.overlay))) return null;
-    // A control bound to a parameter keeps its own items (Reset to default, Copy address).
-    if (path.some((node) => node?.binding?.address)) return null;
+    // A control bound to a parameter, or anything with an address (a slot card's port), keeps the app's items (Reset to default, Copy address, Show in).
+    if (path.some((node) => node?.binding?.address || node?.dataset?.address)) return null;
     const level = this.level();
     if (level !== 'stack' && level !== 'setup') return null;
     const card = this.cardAt(event);
@@ -1876,6 +1904,7 @@ export class SignalPlane extends HTMLElement {
 
   /** Before a control sees a press: a pin, a via or a port under it starts a cable (ADR 0051 §9: patch cables at Wiring, automation and binds at Control). */
   pointerDownCapture(event) {
+    if (this.overEditor(event)) return;
     if (event.button !== 0 || event.composedPath().includes(this.deep) || event.composedPath().includes(this.bar) || event.composedPath().includes(this.chooser)) return;
     this.closeChooser();
     const at = this.point(event);
@@ -1889,6 +1918,7 @@ export class SignalPlane extends HTMLElement {
   }
 
   pointerDown(event) {
+    if (this.overEditor(event)) return;
     if (this.gesture || event.button !== 0 || event.composedPath().includes(this.deep) || event.composedPath().includes(this.bar) || event.composedPath().includes(this.chooser) || this.onControl(event)) return;
     // At the Setup level a press on a cable's device end or a Stack's out pin drags a Setup cable (ADR 0038, 0051 §3).
     if (event.button === 0 && this.level() === 'setup' && this.model && !this.onControl(event)) {
@@ -2208,6 +2238,7 @@ export class SignalPlane extends HTMLElement {
   }
 
   doubleClick(event) {
+    if (this.overEditor(event)) return;
     if (event.composedPath().includes(this.deep) || this.onControl(event)) return;
     const name = this.stackAt(event);
     if (name && this.level() === 'setup') this.focusStack(name);
@@ -2239,6 +2270,7 @@ export class SignalPlane extends HTMLElement {
    * Zooming in until the Stack fills the stage snaps to its fit (focus).
    */
   wheel(event) {
+    if (this.overEditor(event)) return;
     if (event.composedPath().includes(this.deep) && !this.deep.hidden && this.level() === 'engine') return;
     // A gesture handed back by the board (`wheelCapture`) goes on zooming here until it pauses.
     const handed = this.handoff !== undefined && event.timeStamp - this.handoff < GESTURE_GAP_MS;
@@ -2321,6 +2353,14 @@ export class SignalPlane extends HTMLElement {
    */
   key(event) {
     if (event.defaultPrevented) return;
+    // Edit layout over the plane: its Escape closes it; the plane underneath takes no key.
+    if (this.editing) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        this.closeEditLayout();
+      }
+      return;
+    }
     const path = event.composedPath?.() ?? [];
     const target = path[0] ?? event.target;
     if (isTextField(target)) return;

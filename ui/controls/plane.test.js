@@ -388,8 +388,12 @@ function pageKeys() {
   return { doc, onKey: listeners.find((l) => l.type === 'keydown' && !l.capture).fn };
 }
 
-/** A keydown at `path[0]`, dispatched as the browser does: the plane's capture listener first, then the page's as it bubbles. */
-function press(p, page, key, path, more = {}) {
+/**
+ * A keydown at `path[0]`, dispatched as the browser does: the plane's
+ * capture listener first, then the target's own (`atTarget`, a focused
+ * control's keydown), then the page's as it bubbles.
+ */
+function press(p, page, key, path, more = {}, atTarget = () => {}) {
   const event = {
     key,
     code: key === ' ' ? 'Space' : key,
@@ -404,6 +408,7 @@ function press(p, page, key, path, more = {}) {
     ...more,
   };
   p.key(event);
+  atTarget(event);
   page.onKey(event);
   return event;
 }
@@ -424,21 +429,43 @@ domTest('Space with the focus on the plane plays and stops the transport at Stac
   const page = pageKeys();
   const connection = transportConnection(1);
   setDefaultConnection(connection);
-  const p = focusedPlane();
-  for (const level of ['stack', 'wiring', 'control']) {
-    p.level = () => level;
-    const event = press(p, page, ' ', [p]);
-    assert.equal(event.defaultPrevented, true, `${level}: taken by the page's transport command`);
+  try {
+    const p = focusedPlane();
+    for (const level of ['stack', 'wiring', 'control']) {
+      p.level = () => level;
+      const event = press(p, page, ' ', [p]);
+      assert.equal(event.defaultPrevented, true, `${level}: taken by the page's transport command`);
+    }
+    assert.deepEqual(connection.commits, [['/transport.run', 0], ['/transport.run', 1], ['/transport.run', 0]], 'each press toggled it, as a click on its toggle writes');
+    assert.deepEqual(p.views, [], 'Space no longer scrolls the Stack');
+    // A text field and a native button keep it.
+    p.level = () => 'stack';
+    press(p, page, ' ', [{ nodeType: 1, localName: 'input', type: 'text' }, p]);
+    press(p, page, ' ', [{ nodeType: 1, localName: 'button' }, p]);
+    // A toggle in a front panel: the plane's capture leaves Space alone, the toggle's own keydown takes it, the page then does not.
+    let flipped = 0;
+    press(p, page, ' ', [{ nodeType: 1, localName: 'signal-toggle' }, p], {}, (event) => {
+      flipped++;
+      event.preventDefault();
+    });
+    assert.equal(flipped, 1);
+    assert.equal(connection.commits.length, 3);
+  } finally {
+    setDefaultConnection(null);
   }
-  assert.deepEqual(connection.commits, [['/transport.run', 0], ['/transport.run', 1], ['/transport.run', 0]], 'each press toggled it, as a click on its toggle writes');
-  assert.deepEqual(p.views, [], 'Space no longer scrolls the Stack');
-  // A text field, a native button, and a focused control that takes Space keep it.
+});
+
+domTest('with Edit layout over the plane its Escape closes it and the plane underneath takes no key', () => {
+  const page = pageKeys();
+  const p = focusedPlane();
   p.level = () => 'stack';
-  press(p, page, ' ', [{ nodeType: 1, localName: 'input', type: 'text' }, p]);
-  press(p, page, ' ', [{ nodeType: 1, localName: 'button' }, p]);
-  press(p, page, ' ', [{ nodeType: 1, localName: 'signal-toggle' }, p], { defaultPrevented: true });
-  assert.equal(connection.commits.length, 3);
-  setDefaultConnection(null);
+  p.fitSetup = () => p.views.push('setup');
+  p.editLayout();
+  assert.ok(p.editing);
+  assert.equal(press(p, page, 'ArrowDown', [p]).defaultPrevented, false);
+  press(p, page, 'Escape', [p]);
+  assert.equal(p.editing, null, 'closed');
+  assert.deepEqual(p.views, [], 'nothing scrolled, the Setup not shown');
 });
 
 domTest('the plane’s keys are commands of the shared keymap, rebindable through keys.toml', () => {
