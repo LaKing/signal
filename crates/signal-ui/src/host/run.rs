@@ -23,7 +23,7 @@ use crate::player::{Backend, Input, Output, live_rate, open_input, open_output, 
 use super::controls::plan_base;
 use super::setup_keys::device_name;
 use super::subs::Stream;
-use super::{Host, joined, with};
+use super::{Host, lines, with};
 
 /// The values, reports and mutes of one poll, beside the session recorder.
 pub(super) struct Observed<'a> {
@@ -418,15 +418,15 @@ impl Host {
         let file =
             signal_project::read_regular_to_string(dir.join(signal_project::PROJECT_FILE)).ok();
         let project = Project::load(dir).map_err(|error| match error {
-            LoadError::Invalid(diagnostics) => joined(located(dir, diagnostics)),
+            LoadError::Invalid(diagnostics) => lines(&located(dir, diagnostics)),
             error => error.to_string(),
         })?;
         let mut plan = project
             .plan(&self.registry)
-            .map_err(|d| joined(located(dir, d)))?
+            .map_err(|d| lines(&located(dir, d)))?
             .plan;
         plan.version = 0;
-        let (_, width) = sink_of(&project, &plan).map_err(|d| joined(located(dir, d)))?;
+        let (_, width) = sink_of(&project, &plan).map_err(|d| lines(&located(dir, d)))?;
         let seed = project.seed;
         // ADR 0038 (M4.1): several play sides, or roles the Setup binds
         // (devices.local.toml over it), are routed by `crate::devices`.

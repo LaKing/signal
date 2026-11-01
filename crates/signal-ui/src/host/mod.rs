@@ -297,14 +297,6 @@ pub struct Host {
     unloaded: Option<Vec<String>>,
 }
 
-fn joined(diagnostics: Vec<Diagnostic>) -> String {
-    diagnostics
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// `object` with `key` set.
 fn with(mut object: Value, key: &str, value: Value) -> Value {
     if let Some(map) = object.as_object_mut() {

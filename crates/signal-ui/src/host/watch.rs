@@ -14,7 +14,7 @@ use crate::panel::Panel;
 use crate::panel_write::sha256_hex;
 
 use super::run::{Observed, take_muted};
-use super::{Host, joined};
+use super::{Host, lines};
 
 impl Host {
     /// Every 100 ms: a changed project folder is applied live.
@@ -118,7 +118,7 @@ impl Host {
                 )
             }
             Err(ReloadError::Invalid(diagnostics)) => {
-                let message = format!("{}; keeping the last good version", joined(diagnostics));
+                let message = format!("{}; keeping the last good version", lines(&diagnostics));
                 self.messages.push(format!("watch: {message}"));
                 (json!({"type": "reload.error", "message": message}), false)
             }
