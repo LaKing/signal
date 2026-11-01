@@ -1,5 +1,8 @@
 //! The clock adapter (ADR 0052 §2–4, phase 1: offline, no device): carries
-//! a stream of frames from one clock to another.
+//! a stream of frames from one clock to another. It has **no caller yet**:
+//! phase 2 (M4.1b) connects it to secondary devices' streams. It stays as
+//! M4.1b's first phase on the roadmap (the operator's decision against
+//! hard rule 8, 2026-11-01), tested offline by its own tests.
 //!
 //! - **Ring.** [`AdapterInput::push`] puts frames into a lock-free `rtrb`
 //!   ring at the source's rate; a full ring drops and counts them, never

@@ -1,8 +1,8 @@
 # ADR 0051: The Signal Project plane: Setup, Stack, Wiring, Control, Engine
 
-- **Status:** Accepted (2026-11-01; the owner accepted it and answered the open questions the same day). Proposed 2026-11-01. The owner's vision is quoted in the Context. Agreed with the owner: the levels, the peripherals, the Stack and the studio example. Marked *(operator)*: the operator's decisions, not objected to by the owner, open until acceptance. **Replaces ADR 0050** (proposed, never accepted, now withdrawn).
+- **Status:** Accepted (2026-11-01; the owner accepted it and answered the open questions the same day). Proposed 2026-11-01. The owner's vision is quoted in the Context. Agreed with the owner: the levels, the peripherals, the Stack and the studio example. Marked *(operator)*: the operator's decisions, not objected to by the owner, and accepted with the rest. **Replaces ADR 0050** (proposed, never accepted, now withdrawn).
 - **Builds on:** ADR 0009 (text is the truth), 0022 (output adapters), 0025 (`.signal` files), 0032 (windows), 0035 (a project as content, `lib.mixer`), 0037 and 0045 (slots, interfaces), **0038** (devices: roles and layouts, never hardware), **0046** (a slot's part), **0047** (plate, routing, packages, dies, deep zoom).
-- **Supersedes, when accepted, part of ADR 0047:** §1's three layers, §5's Plate / X-ray / Board switch and the single top-level board. **Amends:** ADR 0026 §2 (one view replaces the Panel and Schematic pages), 0032 (window kinds), 0038 §10 (its Devices level becomes the Setup level), 0046 §8 and its decided question 5 (grouping several instances), and vision §3a.
+- **Supersedes part of ADR 0047:** §1's three layers, §5's Plate / X-ray / Board switch and the single top-level board. **Amends:** ADR 0026 §2 (one view replaces the Panel and Schematic pages), 0032 (window kinds), 0038 §10 (its Devices level becomes the Setup level), 0046 §8 and its decided question 5 (grouping several instances), and vision §3a.
 - **Date:** 2026-11-01
 
 ## Context
@@ -86,6 +86,23 @@ An instrument is **a top-level slot with a part**. ADR 0037's and 0046's model f
 | Engine | the slot's content (`load`, or its own inside) |
 | Export / import | "Save slot as project…" (ADR 0046 §9); `vendor --slot` or `load` (ADR 0035 §11) |
 
+**Built and to be built** (amended 2026-11-01 after the review: the table and the list below cite concepts as if they all existed; they do not):
+
+| Concept cited | State | Milestone |
+|---|---|---|
+| A top-level slot, its content (`load`, its own inside) | built (ADR 0037 phases 1–3) | M3.2 |
+| The slot's interface | built (ADR 0037; ADR 0045 phase 1, the format and checks; its editing is phases 2–4) | M3.2; editing M3.4 |
+| The slot's part, a small plate | built (ADR 0046 phase 1; ADR 0047 §4) | M3.2 |
+| The migration form (a card as an instrument, ADR 0050 §2's assignment, blank panels) | built (`ui/lib/plane-instruments.js`) | M0.4 phase 1 |
+| `slot.group` of **one** instance (Group into slot) | built (ADR 0046 phase 1) | M3.2 |
+| `slot.group` of **several** instances (Make instrument) | to be built; needs a written, round-trippable form of the grouping and of the inherited seed first | M0.4 phase 3 |
+| A scope root inheriting the run's seed (ADR 0035 §4, extended) | to be built: `ScopeDef.seed` (`crates/signal-graph/src/def.rs`) is a mandatory `u64` today, and an inherited seed has no text form yet | M0.4 phase 3 |
+| "Save slot as project…" (ADR 0046 §9) | to be built (ADR 0046 phase 3) | M3.4 |
+| `vendor --slot` (ADR 0037 phase 4) | to be built; `signal vendor` copies library composites only | M3.3 |
+| The role endpoint's card for `out.gain` and the output meters (ADR 0038 §10) | to be built; the plane draws the endpoint as a pill on its device's channels | M0.4 phase 3 |
+
+So phase 3's order is: the inherited seed's text form and several-instance grouping (Make instrument), then export through M3.4's "Save slot as project…" and import through M3.3's `vendor --slot`; `load` (Link) is there now.
+
 - **The migration form:** a panel card listed in a Stack is drawn as an instrument. The card is its front panel. Its engine is the instances its controls bind, assigned by ADR 0050 §2's rules (a leftover becomes an instrument with a generated panel). Its interface is derived from the connections crossing it. A card with no instances (the studio's title) is a **blank panel**. It cannot be exported until it is made an instrument.
 - **Make instrument** turns a card into a slot instrument. It is ADR 0046's `slot.group` **extended to several instances**, which answers ADR 0046's question 5:
   - the instances move into the slot's own inside (`/kick` becomes `/rhythm/kick`), and the card becomes the part;
@@ -124,8 +141,8 @@ The pins derive from the one connection in `project.toml`; nothing is stored. Tr
 | Wiring, Control | patch cables, binds, automation, external control cables | `patch`; `panel.write` |
 | Engine and below | inner wiring, positions | `patch` at the level; `schematic.move` |
 
-- **Protocol additions:** `plane.read` and `plane.write` (checked as `panel.write` is), the MCP tool `write_plane`, and ADR 0038's `devices` message.
-- **View state** (focused Stack, zoom, scroll) is per window in `ui/windows.toml`; all else derives from §3's files.
+- **Protocol additions:** `plane.read` and `plane.write` (checked as `panel.write` is), the MCP tool `write_plane`, and ADR 0038's `devices` message. *Amended 2026-11-01: none of the four is built.* Phases 1 and 2 need no plane writer: the plane reads `ui/plane.toml` as a served file (`/project/plane.toml`), its edits are `patch`, `panel.write`, `device.route` and `device.unroute`, and only `slot.group` (and its undo, `panel.restore`) writes `ui/plane.toml`. Stack places, new Stacks and instrument order (the Setup and Stack rows' `plane.write`) wait for phase 3, with the writer; the Setup's changes reach every window by the `setup` push (`ui-protocol.md`), not by a `devices` message.
+- **View state** (focused Stack, zoom, scroll) is per window in `ui/windows.toml`; all else derives from §3's files. *Amended 2026-11-01:* **built:** the focused Stack, the opened instrument and the zoom are not kept (a window opens on the Setup level, the whole plane fitted); the one piece of view state kept is the expansion of "Other devices", per viewer in the browser's `localStorage` (`signal.plane.otherDevices`, as the schematic's sidebar collapse), never in the project's files. **Planned:** focused Stack, zoom and scroll per window in `ui/windows.toml` (ADR 0032), with phase 3 (M0.4); `localStorage` stays for the per-viewer conveniences.
 
 ### 10. Import and export
 **No new format: an exported Instrument or Stack is a project** (ADR 0025, 0035).
@@ -160,7 +177,7 @@ The owner suggested a **Mixer** instrument for the studio Stack, which has only 
 - **Rule 4:** §3, §9. **Rule 6:** measures are shown, never choose; every phase ends with the owner's verdict. **Rule 7:** no dependency.
 
 ### 15. Terminology
-Vision §3a gains Setup level, Stack, Instrument (replacing the proposed role tag), Front panel, Control plane and Peripheral, marked proposed. Plate and Board become drawings: the front panels, and the Wiring and Control drawings.
+Vision §3a gains Setup level, Stack, Instrument (replacing the proposed role tag), Front panel, Control plane and Peripheral, marked accepted (2026-11-01). Plate and Board become drawings: the front panels, and the Wiring and Control drawings.
 
 ## Alternatives considered
 - **ADR 0050:** no place for the machine, several Stacks or exportable units.

@@ -86,7 +86,7 @@ An aggregate is one device to Signal, clock or secondary, its own drift correcti
 ## Phases
 | Phase | Delivers | Exit |
 |---|---|---|
-| 1. The adapter, offline | `signal-output`: converter, loop, splices, fake-clock harness | Tests 1–7; figures in `docs/benchmarks.md`; goldens unchanged; the operator's checkpoint |
+| 1. The adapter, offline | `signal-output`: converter, loop, splices, fake-clock harness. **Built** (2026-11-01, `crates/signal-output/src/adapter/`), **no caller until phase 2**: kept as M4.1b's first phase (the operator, against hard rule 8) | Tests 1–7; figures in `docs/benchmarks.md`; goldens unchanged; the operator's checkpoint |
 | 2. Secondary outputs live | `signal-audio` secondary streams; any device in `[play.<role>]`; failures; status in `signal play` and `devices` | Fault tests on the device; two devices for 30 min without a slip (operator) |
 | 3. Secondary inputs | The mirror path; recording after the converter | A mic on a secondary device recorded and replayed bit-exactly |
 | 4. Setup level | ADR 0051's badges and states; `devices.list` fields | **The owner's verdict** on test 8 |
