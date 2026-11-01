@@ -12,9 +12,10 @@ use crate::app::{self, Status};
 use crate::document::Document;
 use crate::panel::Panel;
 
+use super::Host;
 use super::failure::{Failure, fail};
+use super::run::{DeviceWait, Run};
 use super::setup_keys::device_name;
-use super::{DeviceWait, Host, Run};
 
 /// The refusal of an app message outside app mode.
 pub(super) fn app_only() -> Failure {
