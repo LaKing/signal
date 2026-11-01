@@ -20,7 +20,6 @@ test('the window has one scroll container: the shown tab', () => {
   const scrolls = [...css.matchAll(/([^{}]+)\{[^}]*overflow(-x|-y)?\s*:\s*(auto|scroll)/g)].map((m) => m[1].trim());
   assert.deepEqual(scrolls, ['.tab-scroll'], 'only the Parameters and Setup tabs scroll');
   assert.match(css, /\.tab-fill \{[^}]*overflow: hidden/, 'the Signal Project tab does not: the plane scrolls its Stack itself (ADR 0051)');
-  assert.match(css, /\.project-panel \{[^}]*height: 100%/, 'a panel window’s frame fills it');
   assert.match(css, /signal-plane[^{]*\{[^}]*height: 100%/, 'the plane fills the tab');
   assert.doesNotMatch(css, /100vh|100vw/);
   const page = read('app/index.html');

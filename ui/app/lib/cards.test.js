@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EMPTY_PANEL, HELD_CSS, HELD_MARK, HIDDEN_MARK, appChannel, applyCards, arrangement, cardClick, cardIds, cardMenu, cardsOf, isCardId, menuMessage, slug } from './cards.js';
+import { EMPTY_PANEL, HELD_CSS, HELD_MARK, HIDDEN_MARK, appChannel, applyCards, arrangement, cardClick, cardIds, cardMenu, cardsOf, connectPlaneCards, isCardId, menuMessage, slug } from './cards.js';
 import { contextItems } from './context.js';
 
 // ADR 0032: a card's id is its `id`, else its heading's slug, made unique.
@@ -157,6 +157,33 @@ test("an open slot card and its part's cards get their own ids", () => {
   const cards = cardsOf(doc);
   assert.deepEqual(cards.map((c) => c.id), ['kick', 'slot.synth', 'synth:mono-synth', 'synth:mono-synth-2', 'synth'], 'the slot card’s id shifts no heading’s');
   assert.equal(cards[1].element, slot.box, 'laid out by its own box');
+  assert.equal(cards[1].raw, slot, 'its own element');
   assert.equal(cards[1].title, 'synth');
   assert.ok(cards.every((c) => isCardId(c.id)));
+});
+
+// ADR 0051 §11: the main window has no panel frame; its cards are its plane's front panels.
+test('the main window’s plane is connected as a main window: ready, told what other windows hold, given the channel', () => {
+  const sent = [];
+  const listeners = new Map();
+  const target = {
+    ipc: { postMessage: (text) => sent.push(JSON.parse(text)) },
+    addEventListener: (type, fn) => listeners.set(type, fn),
+    removeEventListener: (type) => listeners.delete(type),
+  };
+  const told = [];
+  const plane = { windowState: (state) => told.push(state) };
+  const stop = connectPlaneCards(plane, { target });
+  assert.deepEqual(sent, [{ type: 'window.ready' }], 'so the app tells it which cards it holds and runs the menu actions kept for it');
+  plane.cardChannel({ type: 'card.move', card: 'melody', to: 'new' });
+  assert.deepEqual(sent.at(-1), { type: 'card.move', card: 'melody', to: 'new' });
+  listeners.get('signal-window')({ detail: { view: 'main', held: [{ card: 'echo', where: 'Panel window 1' }], targets: [] } });
+  assert.deepEqual(told, [{ view: 'main', held: [{ card: 'echo', where: 'Panel window 1' }], targets: [] }]);
+  stop();
+  assert.equal(plane.cardChannel, null);
+  assert.equal(listeners.size, 0);
+  // In a browser: nothing.
+  const browser = {};
+  connectPlaneCards(browser, { target: {} });
+  assert.equal(browser.cardChannel, undefined);
 });

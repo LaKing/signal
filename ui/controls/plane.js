@@ -13,7 +13,13 @@
 //     devices.local.toml); dropped on the empty plane, its connection goes;
 //   - **Stack**: a click on a Stack's header, Enter, or zooming until it
 //     fills the stage fits its width; the wheel then scrolls it vertically,
-//     and the Setup's cables, peripherals and other Stacks fade to SURROUND;
+//     and the Setup's cables, peripherals and other Stacks fade to SURROUND.
+//     Here the bar's Edit layout (and a front panel's context menu) opens
+//     the project's panel page in Edit layout over the plane (ADR 0051 §6,
+//     §9), and in Signal.app a front panel's card menu moves its card to
+//     another window or a new panel window (ADR 0032; ui/app/lib/cards.js
+//     `connectPlaneCards`), a card another window holds drawn as a
+//     placeholder;
 //   - **Wiring** (phase 2): zooming on at the Stack's fit, in the wiring
 //     band (WIRING_BAND, in depth: the view deepens by LIFT at the fit's
 //     scale, so the whole width stays on stage), a cross-fade in place to
@@ -78,6 +84,8 @@ import { wheelFactor, wheelPixels } from '../lib/schematic-view.js';
 import { isPressable, isTextField, registerWheel, takesWheel } from './keyboard.js';
 import { keyCommand } from '../lib/keys.js';
 import { bindAddresses } from './base.js';
+import { cardMenu, cardsOf, menuMessage } from '../app/lib/cards.js';
+import { panelSource } from '../app/lib/menu.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 /** The theme every panel links. */
@@ -152,6 +160,14 @@ svg.setup text { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue
 .bar .crumb[aria-current="true"] { color: var(--signal-fg, #d6dbe4); cursor: default; }
 .bar .sep { color: var(--signal-muted, #8a93a3); }
 .bar .level { color: var(--signal-muted, #8a93a3); margin-left: 6px; font-variant-numeric: tabular-nums; }
+.bar .edit-layout, .editor-head button { margin-left: 8px; background: none; border: 1px solid #4a5260; border-radius: 4px; color: var(--signal-fg, #d6dbe4); padding: 1px 8px; font: inherit; cursor: pointer; }
+.bar .edit-layout:hover, .bar .edit-layout:focus-visible, .editor-head button:hover, .editor-head button:focus-visible { border-color: var(--signal-accent, #4fc3f7); color: var(--signal-accent, #4fc3f7); outline: none; }
+/* Edit layout (ADR 0051 §6): the project's panel page in its editor, over the plane. */
+.editor { position: absolute; inset: 0; z-index: 6; display: flex; flex-direction: column; background: var(--signal-bg, #15181d); }
+.editor-head { flex: none; display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; box-sizing: border-box; border-bottom: 1px solid #343b47; color: var(--signal-muted, #8a93a3); white-space: nowrap; }
+.editor-head b { color: var(--signal-fg, #d6dbe4); font-weight: 600; }
+.editor-head button { margin-left: auto; }
+.editor iframe { flex: 1; display: block; width: 100%; min-height: 0; border: 0; background: var(--signal-bg, #15181d); }
 .notes { position: absolute; left: 8px; bottom: 8px; max-width: 60%; display: grid; gap: 2px; pointer-events: none; }
 .notes p { margin: 0; padding: 3px 6px; border-radius: 4px; background: color-mix(in srgb, var(--signal-panel, #1f232b) 90%, transparent); font: 11px/1.4 ui-monospace, Menlo, monospace; }
 .notes p.error { color: var(--signal-clip, #ff5252); }
@@ -218,6 +234,13 @@ const PANEL_CSS = `
 .face-panel > .signal-cards > [data-xray]::before, .face-panel > .signal-cards > [data-xray]::after { display: none !important; }
 [data-xray] .signal-group { background: transparent !important; border-color: transparent !important; box-shadow: none !important; }
 [data-xray] signal-piano-roll, [data-xray] signal-step-grid, [data-xray] p { opacity: 0.08; pointer-events: none; }
+/* ADR 0032: a card another window holds keeps its place, nothing of it drawn but its placeholder. */
+[data-held] { position: relative; background: transparent !important; border-color: transparent !important; box-shadow: none !important; }
+[data-held]::before, [data-held]::after { visibility: hidden !important; }
+[data-held] :not(.held-note, .held-note *) { visibility: hidden !important; }
+.held-note { position: absolute; inset: 0; z-index: 1; display: flex; gap: .6rem; align-items: center; padding: 0 .75rem; box-sizing: border-box; border: 1px dashed var(--signal-track, #2a2f38); border-radius: 8px; background: var(--signal-bg, #15181d); color: var(--signal-muted, #8a93a3); font: 12px/1.3 -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; white-space: nowrap; visibility: visible !important; }
+.held-note span { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.held-note button { font: inherit; color: var(--signal-fg, #d6dbe4); background: var(--signal-track, #2a2f38); border: 1px solid var(--signal-muted, #8a93a3); border-radius: 3px; padding: .1rem .6rem; cursor: pointer; }
 `;
 
 function svg(name, attributes = {}, text = null) {
@@ -281,6 +304,12 @@ export class SignalPlane extends HTMLElement {
     /** The patches written from Wiring and Control, for undo and redo (the schematic's session model). */
     this.session = new PatchSession();
     this.graphKey = '';
+    /** Signal.app's channel for the card menu (ui/app/lib/cards.js `connectPlaneCards`), or null (a browser). */
+    this.cardChannel = null;
+    /** What the app told this window (`signal-window`: `{view: 'main', held, targets}`), or null. */
+    this.windowTold = null;
+    /** The Edit layout over the plane (`editLayout`), or null. */
+    this.editing = null;
   }
 
   connectedCallback() {
@@ -403,6 +432,7 @@ export class SignalPlane extends HTMLElement {
     this.selection = null;
     this.graphKey = '';
     this.closeChooser();
+    this.closeEditLayout();
     this.updateInner([]);
     for (const s of this.stacks.values()) s.element.remove();
     this.stacks.clear();
@@ -646,6 +676,8 @@ export class SignalPlane extends HTMLElement {
     const elements = [...(grid?.children ?? [])];
     const byId = new Map();
     (this.cards ?? []).forEach((card, i) => elements[card.index ?? i] && byId.set(entryOf(card), { element: elements[card.index ?? i], card }));
+    // The cards as the app names them across windows (ADR 0032, `cardsOf`: in the whole panel's order, so before the Stack keeps its own).
+    s.named = new Map(cardsOf(container).map((c) => [c.raw, c]));
     for (const element of elements) element.remove();
     for (const entry of stack.instruments) {
       const found = byId.get(entry);
@@ -654,6 +686,7 @@ export class SignalPlane extends HTMLElement {
       s.cards.set(entry, found.element);
       this.cardResize.observe(found.element);
     }
+    this.applyHeld(s);
     this.measureCards(s, stack);
     this.relayout();
   }
@@ -1518,7 +1551,13 @@ export class SignalPlane extends HTMLElement {
       if ((level === 'control' || level === 'engine') && this.opened) items.push(sep(), crumb(instrumentTitle(this.opened, this.cards), level === 'control', () => this.travelTo(CONTROL_BAND[1])));
       if (level === 'engine') items.push(sep(), crumb('Engine', true, () => {}));
       this.levelText = html('span', { className: 'level' });
-      this.bar.replaceChildren(...items, this.levelText);
+      const tools = [];
+      if (level === 'stack') {
+        const edit = html('button', { type: 'button', className: 'edit-layout', textContent: 'Edit layout', title: 'Edit layout: arrange the front panels, written to ui/main.html' });
+        edit.addEventListener('click', () => this.editLayout());
+        tools.push(edit);
+      }
+      this.bar.replaceChildren(...items, this.levelText, ...tools);
     }
     // The board has its own bar in the Engine: the plane's fades out as the board's comes in, so neither pops.
     this.bar.hidden = level === 'engine';
@@ -1629,6 +1668,173 @@ export class SignalPlane extends HTMLElement {
       if (typeof node?.localName === 'string' && node.localName.startsWith('signal-') && node.localName !== 'signal-plane') return true;
     }
     return false;
+  }
+
+  // Edit layout (ADR 0051 §6, §9: the front panels' layout is edited at the Stack level).
+
+  /**
+   * Opens Edit layout over the plane: the project's panel page
+   * (`/project/main.html`, its own connection from this page's fragment, as
+   * a panel window's) in a frame filling the stage, its editor entered once
+   * the panel can be edited. Everything it writes is written at once
+   * (`panel.write`) and comes back to the front panels as `panel.written`.
+   * Done, the panel's own switch or its Escape closes it.
+   */
+  editLayout() {
+    if (this.editing || !this.stage) return;
+    // The project's panel page with this page's fragment (the WebSocket's port and token), as a panel window opens it.
+    const src = panelSource(globalThis.location?.hash);
+    const overlay = html('div', { className: 'editor' });
+    const head = html('div', { className: 'editor-head' });
+    const title = html('span');
+    title.append(html('b', { textContent: 'Edit layout' }), ` · ui/main.html${this.focused ? ` · front panels of Stack ${this.focused}` : ''}`);
+    const done = html('button', { type: 'button', textContent: 'Done', title: 'Leave Edit layout (everything is written already)' });
+    head.append(title, done);
+    const frame = html('iframe', { title: 'Edit layout', src });
+    overlay.append(head, frame);
+    this.stage.append(overlay);
+    const editing = { overlay, frame, entered: false, stop: null };
+    this.editing = editing;
+    done.addEventListener('click', () => this.closeEditLayout());
+    frame.addEventListener('load', () => this.enterEditLayout(editing));
+    done.focus?.();
+  }
+
+  /** The frame's panel into its Edit layout as soon as it has a plan to check against; its leaving closes the overlay. */
+  enterEditLayout(editing) {
+    const started = Date.now();
+    const attempt = () => {
+      if (this.editing !== editing) return;
+      const doc = editing.frame.contentDocument;
+      const panel = doc?.querySelector('signal-panel');
+      const edit = panel?.shadowRoot?.querySelector('.edit');
+      if (!panel || edit?.getAttribute('aria-disabled') !== 'false') {
+        if (Date.now() - started < 10000) requestAnimationFrame(attempt);
+        else this.say('Edit layout: the panel could not be edited (no plan yet?)');
+        return;
+      }
+      const View = editing.frame.contentWindow;
+      if (View?.MutationObserver) {
+        const observer = new View.MutationObserver(() => {
+          if (panel.hasAttribute('editing')) editing.entered = true;
+          else if (editing.entered) this.closeEditLayout();
+        });
+        observer.observe(panel, { attributes: true, attributeFilter: ['editing'] });
+        editing.stop = () => observer.disconnect();
+      }
+      panel.setEditing?.(true);
+    };
+    attempt();
+  }
+
+  /** Closes Edit layout (its editor left first; what it wrote is written). */
+  closeEditLayout() {
+    const editing = this.editing;
+    if (!editing) return;
+    this.editing = null;
+    editing.stop?.();
+    try {
+      editing.frame.contentDocument?.querySelector('signal-panel')?.setEditing?.(false);
+    } catch {
+      // Its document is gone: nothing to leave.
+    }
+    editing.overlay.remove();
+    this.focus?.();
+  }
+
+  // Cards across windows (ADR 0032), and the front panels' context menu.
+
+  /** What the app told this window (`signal-window`): a card another window holds drawn as a placeholder, the card menu's targets. */
+  windowState(state) {
+    this.windowTold = state;
+    for (const s of this.stacks.values()) this.applyHeld(s);
+  }
+
+  /** The cards another window holds, by the app's card id: where. */
+  heldCards() {
+    const told = this.windowTold;
+    if (told?.view !== 'main') return new Map();
+    return new Map((told.held ?? []).map((h) => (typeof h === 'string' ? [h, ''] : [h.card, h.where ?? ''])));
+  }
+
+  /** Stack `s`'s cards as the app names them: its front panels (named when drawn) and the cards of its open slot cards' parts (named now: a part draws its cards later). */
+  namedCards(s) {
+    const out = [...(s.named?.values() ?? [])].filter((c) => [...s.cards.values()].some((e) => e === c.raw || e.contains?.(c.raw)));
+    for (const element of s.cards.values()) {
+      if (element.localName !== 'signal-slot') continue;
+      for (const c of cardsOf(element)) if (!out.some((o) => o.raw === c.raw)) out.push(c);
+    }
+    return out;
+  }
+
+  /** Stack `s`'s held cards marked (`data-held`, PANEL_CSS), each with its placeholder: where it is, Show and Bring back. */
+  applyHeld(s) {
+    for (const note of s.shadow?.querySelectorAll?.('.held-note') ?? []) note.remove();
+    const held = this.heldCards();
+    for (const card of this.namedCards(s)) {
+      const where = held.get(card.id);
+      if (where === undefined) {
+        card.raw.removeAttribute?.('data-held');
+        continue;
+      }
+      card.raw.setAttribute('data-held', '');
+      const note = html('div', { className: 'held-note' });
+      // Its buttons are pressed, never a drag of the Stack.
+      note.addEventListener('pointerdown', (event) => event.stopPropagation());
+      const show = html('button', { type: 'button', textContent: 'Show' });
+      const back = html('button', { type: 'button', textContent: 'Bring back' });
+      show.addEventListener('click', () => this.cardChannel?.({ type: 'window.show', card: card.id }));
+      back.addEventListener('click', () => this.cardChannel?.({ type: 'card.move', card: card.id, to: 'here' }));
+      note.append(html('span', { textContent: `${card.title} — in ${where || 'another window'}` }), show, back);
+      card.raw.append(note);
+    }
+  }
+
+  /** The card a right click at `event` is on (`{raw, id, title}`), or null: not on a control bound to a parameter (it keeps its own menu). */
+  cardAt(event) {
+    const path = event.composedPath?.() ?? [];
+    const name = this.stackAt(event);
+    const s = name ? this.stacks.get(name) : null;
+    if (!s) return null;
+    const cards = this.namedCards(s);
+    for (const node of path) {
+      if (node?.binding?.address) return null;
+      const card = cards.find((c) => c.raw === node);
+      if (card) return card;
+    }
+    return null;
+  }
+
+  /**
+   * The plane's items in the app's context menu (`contextMenu`, as
+   * ui/app/app.js asks every element on the click's path): on a front
+   * panel's card at the Stack level, Edit layout, and in Signal.app the
+   * card's Move to items; the board's own menu in the Engine; else none.
+   */
+  contextMenu(event) {
+    const path = event.composedPath?.() ?? [];
+    if (path.includes(this.deep) || (this.editing && path.includes(this.editing.overlay))) return null;
+    // A control bound to a parameter keeps its own items (Reset to default, Copy address).
+    if (path.some((node) => node?.binding?.address)) return null;
+    const level = this.level();
+    if (level !== 'stack' && level !== 'setup') return null;
+    const card = this.cardAt(event);
+    if (!card && !(level === 'stack' && this.stackAt(event))) return null;
+    const items = [];
+    if (card && this.cardChannel) items.push(...cardMenu(this.windowTold, null, card.id));
+    if (level === 'stack') items.push({ id: 'edit-layout', label: 'Edit layout…' });
+    if (!items.length) return null;
+    return {
+      items,
+      act: (id) => {
+        if (id === 'edit-layout') return this.editLayout();
+        const element = card?.element ?? card?.raw;
+        // The window a card needs: its own size (plate px, unscaled) with the panel page's bar and margins.
+        const size = { width: Math.ceil((element?.offsetWidth || 320) + 24), height: Math.ceil((element?.offsetHeight || 200) + 72) };
+        const message = card ? menuMessage(id, card.id, null, size) : null;
+        if (message) this.cardChannel?.(message);
+      },
+    };
   }
 
   stackAt(event) {

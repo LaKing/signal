@@ -35,7 +35,7 @@ export function pageHandlesShortcuts(target = globalThis) {
 }
 
 /**
- * Whether the Panel tab's frame loads again for the project `next` (the
+ * Whether a panel window's frame loads again for the project `next` (the
  * `app` message's `project.dir`) after `shown`, the folder whose panel it
  * shows (null: none; undefined: the first message, while the frame loads):
  * only for another project. A moment without a project (null, while
@@ -47,7 +47,7 @@ export function panelReloads(shown, next) {
   return shown !== undefined && Boolean(next) && next !== shown;
 }
 
-/** The project's main panel (M2.8-3) in the Panel tab, with the page's fragment. */
+/** The project's main panel (M2.8-3) for a panel window's frame or the plane's Edit layout, with the page's fragment. */
 export function panelSource(hash) {
   const fragment = String(hash ?? '');
   return fragment.startsWith('#') ? `/project/main.html${fragment}` : '/project/main.html';

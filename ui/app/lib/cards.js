@@ -2,9 +2,10 @@
 // docs/ui-controls.md "Cards across windows"). The project's main panel
 // (`ui/main.html`) stays the one source of its cards; each window shows a
 // subset: a panel window the cards it holds (none until told, so a new
-// panel window is empty), and a main window's Panel tab every card, those
-// another window holds as a placeholder over their place ("— in Panel
-// window 2 (screen 1)", Show, Bring back). ADR 0047 §3: the cards keep their
+// panel window is empty), and a main window every card, its plane's front
+// panels (ADR 0051 §11, `connectPlaneCards`), those another window holds as
+// a placeholder over their place ("— in Panel window 2 (screen 1)", Show,
+// Bring back). ADR 0047 §3: the cards keep their
 // places on the plate; a panel window shows the plate cropped to its cards'
 // bounding box and scaled to fit, so their arrangement is the plate's.
 // Which window holds which card is the project's `ui/windows.toml`, kept by
@@ -158,7 +159,7 @@ function titleOf(element) {
   return (heading(element)?.textContent ?? '').trim();
 }
 
-/** `[{ element, id, title }]` of `doc`'s cards; a part's ids `<slot>:<id>`. */
+/** `[{ element, raw, id, title }]` of `doc`'s cards; a part's ids `<slot>:<id>`. */
 export function cardsOf(doc) {
   const elements = findCards(doc);
   const titles = elements.map(titleOf);
@@ -181,8 +182,8 @@ export function cardsOf(doc) {
       ids[i] = `${prefix}${own[n]}`;
     });
   }
-  // An open slot card is laid out by its own box (ADR 0046 §5: its element takes no box of its own).
-  return elements.map((element, i) => ({ element: element.cardBox?.() ?? element, id: ids[i], title: titles[i] || ids[i] }));
+  // An open slot card is laid out by its own box (ADR 0046 §5: its element takes no box of its own); `raw` is the card's own element.
+  return elements.map((element, i) => ({ element: element.cardBox?.() ?? element, raw: element, id: ids[i], title: titles[i] || ids[i] }));
 }
 
 /** The attribute of a card another window holds (HELD_CSS hides all of it). */
@@ -462,5 +463,29 @@ export function connectCards(frame, { target = globalThis, initial = null, shown
     target.removeEventListener('signal-window', told);
     target.removeEventListener('pointerdown', outside, true);
     target.removeEventListener('blur', blur);
+  };
+}
+
+/**
+ * Connects the main window's Signal Project plane (`<signal-plane>`, ADR
+ * 0051 §11: the main window has no panel frame) to the app as a main
+ * window holding cards (ADR 0032): says the window is ready (so the app
+ * tells it which cards other windows hold, and runs the menu actions it
+ * kept for it), hands each `signal-window` to the plane (`plane.windowState`:
+ * a held card drawn as a placeholder with Show and Bring back), and gives the
+ * plane the app's channel, which its front panels' card menu (Move to …,
+ * Move to new panel window) posts on. Outside Signal.app it does nothing.
+ * Returns the remover.
+ */
+export function connectPlaneCards(plane, { target = globalThis } = {}) {
+  const post = appChannel(target);
+  if (!post || !plane) return () => {};
+  plane.cardChannel = post;
+  const told = (event) => plane.windowState?.(event.detail ?? null);
+  target.addEventListener('signal-window', told);
+  post({ type: 'window.ready' });
+  return () => {
+    target.removeEventListener('signal-window', told);
+    if (plane.cardChannel === post) plane.cardChannel = null;
   };
 }

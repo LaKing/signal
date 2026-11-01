@@ -35,7 +35,7 @@ test('the panel frame loads again only for another project', () => {
   assert.equal(panelReloads(null, null), false);
 });
 
-test('the Panel tab shows the project’s panel with the page’s fragment', () => {
+test('a panel window’s frame and the plane’s Edit layout show the project’s panel with the page’s fragment', () => {
   assert.equal(panelSource('#ws=5&token=ab'), '/project/main.html#ws=5&token=ab');
   assert.equal(panelSource(''), '/project/main.html');
 });

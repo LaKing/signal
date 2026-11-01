@@ -19,16 +19,14 @@ import { ValueEntry } from '../controls/entry-field.js';
 import { ContextMenu, claimMenus, focusable } from '../controls/context-menu.js';
 import { formatFixed } from '../lib/format.js';
 import { applyProps } from './lib/dom.js';
-import { connectCards } from './lib/cards.js';
-import { connectViewState } from './lib/view-state.js';
-import { menuAction, pageHandlesShortcuts, panelReloads, panelSource } from './lib/menu.js';
+import { connectPlaneCards } from './lib/cards.js';
+import { menuAction, pageHandlesShortcuts } from './lib/menu.js';
 import { setViewScroller } from '../controls/keyboard.js';
 import { ariaShortcuts, keyCommand, keymap, onKeys, shownKeys } from '../lib/keys.js';
 import { dragMessage, fileNote, planUpdate, releaseMessage, resetMessage, rows, shown, structureKey, valuesOf } from './lib/parameters.js';
 import { INITIAL, controls, powerRequest, reduce, restartRequest } from './lib/power.js';
 import { contextItems, keepsSystemMenu } from './lib/context.js';
 import { FLASH_CLASS, FLASH_CSS, FLASH_MS, placesOf, subjectOf } from './lib/show-in.js';
-import { bindAddresses } from '../controls/base.js';
 import { PROMPT, fieldValue, openRetry, projectLabel, windowTitle } from './lib/document.js';
 import { archiveSave, saveReport, saveRequests } from './lib/save.js';
 import {
@@ -165,11 +163,9 @@ export class SignalAppToolbar extends AppElement {
       this.unkeys = onKeys((map, info) => {
         if (info.problems.length) this.notice(`Keyboard shortcuts: ${info.problems.length === 1 ? 'a problem' : `${info.problems.length} problems`} in ${info.path ?? 'keys.toml'}${info.fallback ? ' (the built-in keys are used)' : ''}; see Settings`, true);
       });
-      // The view the page's keys scroll (Page Down, Space, …): the shown tab, or the panel frame's page.
+      // The view the page's keys scroll (Page Down, …): the shown tab when it scrolls (the plane scrolls its Stack itself).
       setViewScroller(() => {
         const tab = document.querySelector('[role="tabpanel"][data-tab]:not([hidden])');
-        const frame = tab?.querySelector('iframe');
-        if (frame) return frame.contentDocument?.scrollingElement ?? null;
         return tab?.classList.contains('tab-scroll') ? tab : null;
       });
       this.select(INITIAL_TAB);
@@ -1028,64 +1024,13 @@ export class SignalAppSnapshots extends AppElement {
 }
 
 /**
- * The project's panel (M2.8-3, `/project/main.html`) in the Panel tab: a
- * same-origin frame filling the tab, kept while other tabs show, whose
- * keys are its own page's (ui/controls/keyboard.js: the app commands'
- * chords reach this page as `signal-command`). Opening another project shows its panel. In Signal.app it shows
- * every card, one another window holds as a placeholder, and a right click
- * on a card puts its Move items first in this page's menu (ADR 0032,
- * ./lib/cards.js).
- */
-export class SignalAppPanel extends AppElement {
-  connectedCallback() {
-    if (!this.firstChild) {
-      this.frame = el('iframe', { className: 'project-panel', title: 'Project panel', src: panelSource(location.hash) });
-      this.frame.addEventListener('load', () => {
-        this.unlisten?.();
-        const doc = this.frame.contentDocument;
-        const menu = doc ? SignalAppContextMenu.listen(doc, this.frame) : null;
-        this.unlisten = () => menu?.();
-      });
-      this.append(this.frame);
-      connectCards(this.frame);
-      // ADR 0047 §3, §5: this window's layer, arrangement, kinds and plate scale, kept in ui/windows.toml.
-      connectViewState({ schematic: document.querySelector('signal-schematic'), frame: this.frame });
-    }
-    super.connectedCallback();
-  }
-
-  disconnectedCallback() {
-    this.unlisten?.();
-    super.disconnectedCallback();
-  }
-
-  attach(connection) {
-    super.attach(connection);
-    this.stops.push(connection.on('app', (app) => this.app(app)));
-  }
-
-  opened() {
-    this.request({ type: 'app.get' }).then((app) => this.app(app), failed);
-  }
-
-  app(app) {
-    const dir = app.project?.dir ?? null;
-    // Not `this.dir`: that is HTMLElement's text direction, which reads
-    // back "" for a folder, so every `app` message (a restart, the power, a written
-    // parameter) reloaded the panel in sight.
-    if (panelReloads(this.shownDir, dir)) this.frame.contentWindow?.location.reload();
-    // A moment without a project keeps the folder shown.
-    if (dir || this.shownDir === undefined) this.shownDir = dir;
-  }
-}
-
-/**
  * The context menu (owner's request, 2026-10-16), in place of the WebView's
  * own: on the schematic, the schematic's items for what was clicked (its
- * `contextMenu`, 2026-10-17); on a control bound to a parameter, Reset to
- * default and Copy address; then Restart from Files and the other tabs. A text
- * field keeps the system's menu (Cut, Copy, Paste). One per page; the
- * panel frame's right clicks come here too. The element is
+ * `contextMenu`, 2026-10-17); on a front panel of the plane, its card's
+ * (Edit layout at the Stack level, Move to another window: the plane's
+ * `contextMenu`, ADR 0032, 0051); on a control bound to a parameter, Reset
+ * to default and Copy address; then Restart from Files and the other tabs. A
+ * text field keeps the system's menu (Cut, Copy, Paste). One per page. The element is
  * ui/controls/context-menu.js's, as the schematic's own in a browser.
  */
 export class SignalAppContextMenu extends AppElement {
@@ -1215,11 +1160,10 @@ export class SignalAppContextMenu extends AppElement {
 // items, ./lib/show-in.js): the tab shown, what the subject is there
 // brought into view and flashed.
 
-/** The plane (ADR 0051), a panel frame's document where a page has one, and the parameter list. */
+/** The plane (ADR 0051) and the parameter list. */
 function views() {
   return {
     plane: document.querySelector('signal-plane'),
-    panel: document.querySelector('signal-app-panel')?.frame?.contentDocument ?? null,
     parameters: document.querySelector('signal-app-parameters'),
   };
 }
@@ -1237,15 +1181,11 @@ function showIn(tab, subject, toolbar) {
   const place = placesOf(subject, shownAddresses(subject))[tab];
   if (place.reason) return;
   toolbar?.select(tab);
-  const { plane, panel, parameters } = views();
+  const { plane, parameters } = views();
   const wanted = new Set(place.addresses);
   if (tab === 'plane') {
     // ADR 0051: the Stack holding it focused and scrolled to it, the control (an instance's: its card) marked.
     flash(plane?.reveal?.(place.addresses, place.whole) ?? [], false);
-  } else if (tab === 'panel') {
-    // A control of it; an instance's: the card holding its controls.
-    const controls = [...(panel?.querySelectorAll('[bind]') ?? [])].filter((e) => bindAddresses(e).some((a) => wanted.has(a)));
-    flash(controls.map((e) => (place.whole ? (e.closest('.signal-card') ?? e) : e)));
   } else if (tab === 'parameters') {
     const rows = [...(parameters?.querySelectorAll('[data-address]') ?? [])].filter((e) => wanted.has(e.dataset.address));
     for (const row of rows) {
@@ -1289,7 +1229,6 @@ for (const [name, element] of [
   ['signal-app-toolbar', SignalAppToolbar],
   ['signal-app-project', SignalAppProject],
   ['signal-app-status', SignalAppStatus],
-  ['signal-app-panel', SignalAppPanel],
   ['signal-app-context-menu', SignalAppContextMenu],
   ['signal-app-meters', SignalAppMeters],
   ['signal-app-messages', SignalAppMessages],
@@ -1298,3 +1237,8 @@ for (const [name, element] of [
 ]) {
   customElements.get(name) ?? customElements.define(name, element);
 }
+
+// ADR 0032, 0051 §11: the main window's cards are its plane's front panels;
+// it says it is ready, is told which cards other windows hold, and moves a
+// card from a front panel's menu (./lib/cards.js).
+if (globalThis.document?.querySelector) connectPlaneCards(document.querySelector('signal-plane'));

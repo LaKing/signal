@@ -118,10 +118,24 @@ class Node {
     this.shadowRoot = new Node('#shadow');
     return this.shadowRoot;
   }
+  get tagName() {
+    return this.localName.toUpperCase();
+  }
+  get id() {
+    return this.attributes.get('id') ?? '';
+  }
   matches(selector) {
+    const list = selector.split(',').map((x) => x.trim());
+    if (list.length > 1) return list.some((x) => this.matches(x));
+    const child = /^(.*\S)\s*>\s*(\S+)$/.exec(selector);
+    if (child) return this.matches(child[2]) && Boolean(this.parentElement?.matches(child[1]));
     if (selector.startsWith('.')) return this.classList.contains(selector.slice(1));
     if (selector === '[bind]') return this.hasAttribute('bind');
     return this.localName === selector;
+  }
+  contains(node) {
+    for (let at = node; at; at = at.parentElement) if (at === this) return true;
+    return false;
   }
   all() {
     return this.children.flatMap((c) => [c, ...c.all()]);
@@ -143,11 +157,26 @@ class Node {
   }
 }
 
-globalThis.document = {
-  createElement: (name) => new Node(name),
-  createElementNS: (_ns, name) => new Node(name),
-};
-globalThis.requestAnimationFrame ??= (fn) => setTimeout(fn, 0);
+/**
+ * A test with the stub DOM as `document` for its length only: `node --test
+ * ui/` runs every test file in this one process (ui/index.js), and the
+ * others run without a document.
+ */
+function domTest(name, fn) {
+  test(name, async () => {
+    const saved = { document: globalThis.document, frame: globalThis.requestAnimationFrame };
+    globalThis.document = { createElement: (tag) => new Node(tag), createElementNS: (_ns, tag) => new Node(tag) };
+    globalThis.requestAnimationFrame = (callback) => setTimeout(callback, 0);
+    try {
+      await fn();
+    } finally {
+      for (const [key, value] of [['document', saved.document], ['requestAnimationFrame', saved.frame]]) {
+        if (value === undefined) delete globalThis[key];
+        else globalThis[key] = value;
+      }
+    }
+  });
+}
 
 // After Group into slot: `synth` is a slot with a part, its open slot card among the panel's cards.
 const PANEL = [
@@ -195,6 +224,16 @@ function plane({ planeText = null } = {}) {
     for (const card of p.panelCards) {
       const element = new Node(card.slot ? 'signal-slot' : 'section');
       element.dataset.card = card.id;
+      if (card.slot) element.setAttribute('bind', `/${card.slot}`);
+      else {
+        element.className = 'signal-card';
+        const heading = new Node('h2');
+        heading.textContent = card.heading;
+        const knob = new Node('signal-knob');
+        knob.setAttribute('bind', card.binds[0]);
+        knob.binding = { address: card.binds[0] };
+        element.append(heading, knob);
+      }
       grid.append(element);
     }
     container.append(grid);
@@ -214,7 +253,7 @@ for (const [form, planeText] of [
   ['the full form', 'schema_version = 1\n[[stack]]\nname = "primary"\ninstruments = ["card:melody", "synth", "card:echo"]\n'],
   ['the slot card’s migration form', 'schema_version = 1\n[[stack]]\nname = "primary"\ninstruments = ["card:melody", "card:synth", "card:echo"]\n'],
 ]) {
-  test(`a slot instrument (${form}): drawn in its Stack, owned there, no unstacked instance, no false edge pin`, async () => {
+  domTest(`a slot instrument (${form}): drawn in its Stack, owned there, no unstacked instance, no false edge pin`, async () => {
     const p = await shown(plane({ planeText }));
     const { model } = p;
     assert.equal(model.derived, planeText === null, model.problems.map((x) => x.message).join('; '));
@@ -239,7 +278,7 @@ for (const [form, planeText] of [
   });
 }
 
-test('the slot listed in both forms is one instrument listed twice: an error, the derived Stack drawn', async () => {
+domTest('the slot listed in both forms is one instrument listed twice: an error, the derived Stack drawn', async () => {
   const p = await shown(plane({ planeText: 'schema_version = 1\n[[stack]]\nname = "primary"\ninstruments = ["card:melody", "card:synth", "synth", "card:echo"]\n' }));
   assert.equal(p.model.derived, true);
   assert.deepEqual(p.model.problems.map((x) => x.message), ['plane.toml: "synth" is listed twice (in "primary")']);
@@ -284,7 +323,7 @@ function setupConnection(state) {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
 
-test('after a Setup change on the same generation the Setup level’s cable agrees with the active Setup: output device, then output channels', async () => {
+domTest('after a Setup change on the same generation the Setup level’s cable agrees with the active Setup: output device, then output channels', async () => {
   const state = { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID }, outputChannels: null }, found: 1 };
   const connection = setupConnection(state);
   const p = plane();
@@ -381,7 +420,7 @@ function focusedPlane() {
   return p;
 }
 
-test('Space with the focus on the plane plays and stops the transport at Stack, Wiring and Control; fields, buttons and controls keep it', () => {
+domTest('Space with the focus on the plane plays and stops the transport at Stack, Wiring and Control; fields, buttons and controls keep it', () => {
   const page = pageKeys();
   const connection = transportConnection(1);
   setDefaultConnection(connection);
@@ -402,7 +441,7 @@ test('Space with the focus on the plane plays and stops the transport at Stack, 
   setDefaultConnection(null);
 });
 
-test('the plane’s keys are commands of the shared keymap, rebindable through keys.toml', () => {
+domTest('the plane’s keys are commands of the shared keymap, rebindable through keys.toml', () => {
   const page = pageKeys();
   const p = focusedPlane();
   p.level = () => 'stack';
@@ -428,3 +467,63 @@ test('the plane’s keys are commands of the shared keymap, rebindable through k
   }
 });
 
+// Edit layout and card moves from the main window (review of 2026-11-01; ADR 0051 §6, ADR 0032).
+
+domTest('at the Stack level the bar has Edit layout: it opens the project’s panel in its editor over the plane, Done closes it', async () => {
+  const p = await shown(plane());
+  p.bar = new Node('nav');
+  p.stage = new Node('div');
+  p.renderBar('setup', 0.5);
+  assert.equal(p.bar.querySelector('.edit-layout'), null, 'not at the Setup level');
+  p.renderBar('stack', 1);
+  const edit = p.bar.querySelector('.edit-layout');
+  assert.equal(edit.textContent, 'Edit layout');
+  edit.listeners.find(([type]) => type === 'click')[1]();
+  const overlay = p.stage.querySelector('.editor');
+  assert.ok(overlay, 'the editor over the stage');
+  assert.equal(overlay.querySelector('iframe').src, '/project/main.html', 'the project’s panel page (with the page’s fragment, when it has one)');
+  p.editLayout();
+  assert.equal(p.stage.querySelectorAll('.editor').length, 1, 'one at a time');
+  overlay.querySelector('button').listeners.find(([type]) => type === 'click')[1]();
+  assert.equal(p.stage.querySelector('.editor'), null, 'Done closes it');
+  assert.equal(p.editing, null);
+});
+
+domTest('a front panel’s context menu moves its card to a new panel window; a card another window holds is a placeholder with Show and Bring back', async () => {
+  const p = await shown(plane());
+  p.stage = new Node('div');
+  p.level = () => 'stack';
+  const posted = [];
+  const s = p.stacks.get('primary');
+  const melody = s.cards.get('card:melody');
+  const echo = s.cards.get('card:echo');
+  const at = (...path) => ({ composedPath: () => [...path, s.element, p] });
+  // In a browser: Edit layout only.
+  assert.deepEqual(p.contextMenu(at(melody)).items.map((i) => i.id), ['edit-layout']);
+  // In Signal.app's main window (`connectPlaneCards` gave the channel).
+  p.cardChannel = (message) => posted.push(message);
+  const menu = p.contextMenu(at(melody));
+  assert.deepEqual(menu.items.map((i) => i.id), ['new', 'edit-layout']);
+  menu.act('new');
+  assert.deepEqual(posted, [{ type: 'card.move', card: 'melody', to: 'new', size: { width: 184, height: 192 } }], 'the card by the app’s id, the window its size');
+  // A control bound to a parameter keeps its own menu.
+  assert.equal(p.contextMenu(at(melody.querySelector('signal-knob'), melody)), null);
+  // The app says the echo card is held by a panel window, which is a target now.
+  p.windowState({ view: 'main', held: [{ card: 'echo', where: 'Panel window 1' }], targets: [{ index: 1, label: 'Panel window 1' }] });
+  assert.equal(echo.hasAttribute('data-held'), true);
+  assert.equal(melody.hasAttribute('data-held'), false);
+  const note = echo.querySelector('.held-note');
+  assert.equal(note.querySelector('span').textContent, 'Echo — in Panel window 1');
+  const [show, back] = note.querySelectorAll('button');
+  show.listeners.find(([type]) => type === 'click')[1]();
+  back.listeners.find(([type]) => type === 'click')[1]();
+  assert.deepEqual(posted.slice(1), [{ type: 'window.show', card: 'echo' }, { type: 'card.move', card: 'echo', to: 'here' }]);
+  assert.deepEqual(p.contextMenu(at(melody)).items.map((i) => i.label), ['Move to Panel window 1', 'Move to new panel window', 'Edit layout…']);
+  // The open slot card is a card of its own (`slot.<name>`, as the app names it).
+  p.contextMenu(at(s.cards.get('synth'))).act('new');
+  assert.equal(posted.at(-1).card, 'slot.synth');
+  // Brought back: no placeholder.
+  p.windowState({ view: 'main', held: [], targets: [] });
+  assert.equal(echo.hasAttribute('data-held'), false);
+  assert.equal(echo.querySelector('.held-note'), null);
+});
