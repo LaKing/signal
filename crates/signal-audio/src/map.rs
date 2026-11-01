@@ -1,4 +1,4 @@
-//! The audio sink's channels on the device's channels.
+//! The audio sinks' channels on the device's channels.
 
 use std::ops::Range;
 
@@ -7,14 +7,17 @@ use crate::config::AudioError;
 /// Maps each sink channel to one device channel: sink channel *i* to device
 /// channel *i* by default (1 and 2 for a stereo sink), or to explicit targets
 /// ([`with_targets`](ChannelMap::with_targets), the Setup's output channel
-/// map). Device channels no sink channel maps to are 0; sink channels beyond
-/// the device's are not played ([`dropped`](ChannelMap::dropped)).
+/// map), or to the routes of several play sides
+/// ([`with_routes`](ChannelMap::with_routes), ADR 0038: a channel of the run's
+/// audio frame with no route is not played). Device channels no sink channel
+/// maps to are 0; sink channels beyond the device's are not played
+/// ([`dropped`](ChannelMap::dropped)).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelMap {
     sink: usize,
     device: usize,
-    /// The device channel (from 0) of each sink channel that is played.
-    targets: Vec<usize>,
+    /// The device channel (from 0) of each sink channel; `None`: not played.
+    targets: Vec<Option<usize>>,
 }
 
 impl ChannelMap {
@@ -23,7 +26,7 @@ impl ChannelMap {
         ChannelMap {
             sink,
             device,
-            targets: (0..sink.min(device)).collect(),
+            targets: (0..sink.min(device)).map(Some).collect(),
         }
     }
 
@@ -66,7 +69,48 @@ impl ChannelMap {
         Ok(ChannelMap {
             sink,
             device,
-            targets,
+            targets: targets.into_iter().map(Some).collect(),
+        })
+    }
+
+    /// The device channels a routing needs (ADR 0038): its highest target,
+    /// at least `least`.
+    pub fn width_for_routes(least: usize, routes: &[Option<usize>]) -> usize {
+        routes
+            .iter()
+            .flatten()
+            .map(|&t| t + 1)
+            .fold(least, usize::max)
+    }
+
+    /// The map of a run's audio frame of `routes.len()` channels (several
+    /// play sides, ADR 0038) on a device with `device`: channel *i* on device
+    /// channel `routes[i]` (from 0), or not played. The routing
+    /// (`signal_output::route`) has refused a channel used twice; refused
+    /// here too, with a target the device lacks.
+    pub fn with_routes(
+        device: usize,
+        routes: Vec<Option<usize>>,
+    ) -> Result<ChannelMap, AudioError> {
+        for (i, target) in routes.iter().enumerate() {
+            let Some(target) = *target else { continue };
+            if target >= device {
+                return Err(AudioError::ChannelMap(format!(
+                    "device channel {} does not exist; the device has {device}",
+                    target + 1
+                )));
+            }
+            if routes.iter().take(i).any(|&t| t == Some(target)) {
+                return Err(AudioError::ChannelMap(format!(
+                    "device channel {} is used twice",
+                    target + 1
+                )));
+            }
+        }
+        Ok(ChannelMap {
+            sink: routes.len(),
+            device,
+            targets: routes,
         })
     }
 
@@ -82,7 +126,7 @@ impl ChannelMap {
 
     /// The device channel (from 0) of sink channel `channel`, if it is played.
     pub fn target(&self, channel: usize) -> Option<usize> {
-        self.targets.get(channel).copied()
+        self.targets.get(channel).copied().flatten()
     }
 
     /// The sink channels (from 0) that have no device channel.
@@ -104,7 +148,7 @@ impl ChannelMap {
         {
             to.fill(0.0);
             for (&target, &sample) in self.targets.iter().zip(from) {
-                if let Some(out) = to.get_mut(target) {
+                if let Some(out) = target.and_then(|t| to.get_mut(t)) {
                     *out = sample;
                 }
             }
@@ -183,6 +227,25 @@ mod tests {
             refused(2, 4, vec![1, 1]),
             "the channel map: device channel 2 is used twice"
         );
+    }
+
+    /// ADR 0038: `cue` then `main` (canonical order) on a 4-channel device,
+    /// cue on 3–4 and main on 1–2; a channel with no route is silent.
+    #[test]
+    fn routes_put_each_play_side_on_its_device_channels() {
+        let map = ChannelMap::with_routes(4, vec![Some(2), Some(3), Some(0), Some(1)]).unwrap();
+        let mut out = [9.0; 4];
+        map.scatter(&[0.3, 0.4, 0.1, 0.2], &mut out);
+        assert_eq!(out, [0.1, 0.2, 0.3, 0.4]);
+        let map = ChannelMap::with_routes(4, vec![None, Some(3), Some(0), Some(1)]).unwrap();
+        let mut out = [9.0; 4];
+        map.scatter(&[0.3, 0.4, 0.1, 0.2], &mut out);
+        assert_eq!(out, [0.1, 0.2, 0.0, 0.4]);
+        assert_eq!(map.target(0), None);
+        assert!(map.dropped().is_empty());
+        assert_eq!(ChannelMap::width_for_routes(2, &[None, Some(3)]), 4);
+        assert!(ChannelMap::with_routes(4, vec![Some(4)]).is_err());
+        assert!(ChannelMap::with_routes(4, vec![Some(1), Some(1)]).is_err());
     }
 
     /// A stereo sink mapped to device channels 3 and 4 of a device offering

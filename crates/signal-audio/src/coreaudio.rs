@@ -301,6 +301,16 @@ struct Running {
     workers: Workers,
 }
 
+/// How a driver maps the Runner's audio frame to the device's channels.
+enum Mapping {
+    /// One sink of this many channels, on device channels 1 to its width.
+    Identity(usize),
+    /// One sink of this many channels, on these device channels (from 0).
+    Targets(usize, Vec<usize>),
+    /// Several play sides (ADR 0038): each channel's device channel, if any.
+    Routes(Vec<Option<usize>>),
+}
+
 /// A [`Driver`] on a CoreAudio output device, through cpal.
 /// [`start`](Driver::start) puts the Runner's worker threads into real-time
 /// scheduling, then builds and plays the output stream, whose callback is an
@@ -377,11 +387,40 @@ impl CoreAudioDriver {
         sink_channels: usize,
         targets: Option<Vec<usize>>,
     ) -> Result<CoreAudioDriver, AudioError> {
+        let mapping = match targets {
+            Some(targets) => Mapping::Targets(sink_channels, targets),
+            None => Mapping::Identity(sink_channels),
+        };
+        CoreAudioDriver::open_mapped(selector, sample_rate, request, mapping)
+    }
+
+    /// [`open_with`](CoreAudioDriver::open_with) for a run of several play
+    /// sides (ADR 0038): channel *i* of the run's audio frame on device
+    /// channel `routes[i]` (from 0), or not played
+    /// ([`ChannelMap::with_routes`]); the device's configuration is chosen
+    /// wide enough for the highest route.
+    pub fn open_routed(
+        selector: &DeviceSelector,
+        sample_rate: u32,
+        request: BufferRequest,
+        routes: Vec<Option<usize>>,
+    ) -> Result<CoreAudioDriver, AudioError> {
+        CoreAudioDriver::open_mapped(selector, sample_rate, request, Mapping::Routes(routes))
+    }
+
+    fn open_mapped(
+        selector: &DeviceSelector,
+        sample_rate: u32,
+        request: BufferRequest,
+        mapping: Mapping,
+    ) -> Result<CoreAudioDriver, AudioError> {
         let device = find(Direction::Output, selector)?;
         let info = info(&device, Direction::Output, None)?;
-        let width = targets
-            .as_deref()
-            .map_or(sink_channels, |t| ChannelMap::width_for(sink_channels, t));
+        let width = match &mapping {
+            Mapping::Identity(sink) => *sink,
+            Mapping::Targets(sink, targets) => ChannelMap::width_for(*sink, targets),
+            Mapping::Routes(routes) => ChannelMap::width_for_routes(1, routes),
+        };
         let plan = plan_join(request, &state_of(&device));
         // A buffer that is not set is not checked against the range: it is
         // the device's own (as for the input).
@@ -395,9 +434,10 @@ impl CoreAudioDriver {
             other => other?,
         };
         let channels = usize::from(choice.channels);
-        let map = match targets {
-            Some(targets) => ChannelMap::with_targets(sink_channels, channels, targets)?,
-            None => ChannelMap::new(sink_channels, channels),
+        let map = match mapping {
+            Mapping::Targets(sink, targets) => ChannelMap::with_targets(sink, channels, targets)?,
+            Mapping::Identity(sink) => ChannelMap::new(sink, channels),
+            Mapping::Routes(routes) => ChannelMap::with_routes(channels, routes)?,
         };
         Ok(CoreAudioDriver {
             device,
