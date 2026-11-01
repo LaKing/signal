@@ -690,7 +690,10 @@ fn a_parts_binds_are_checked_inside_its_slot() {
 /// The page's script: the panel's own modules (`ui/signal-ui.js`, the slot
 /// card) against the server at `url`, the card attached while the
 /// connection is still connecting, as `<signal-panel>` makes it the
-/// default connection at once; what the card read of its part, as JSON.
+/// default connection at once; what the card read of its part, as JSON,
+/// once both the part and its binding check are in (they race: the check's
+/// reply can come first or last, so the script waits for both and the
+/// element stub has what `partChecked` reads, CI flake of 2026-10-31).
 const PAGE: &str = r#"
 globalThis.HTMLElement = class {
   constructor() { this.attributesMap = new Map(); }
@@ -698,6 +701,7 @@ globalThis.HTMLElement = class {
   getAttribute(n) { return this.attributesMap.get(n) ?? null; }
   setAttribute(n, v) { this.attributesMap.set(n, String(v)); }
   hasAttribute(n) { return this.attributesMap.has(n); }
+  querySelectorAll() { return []; }
   addEventListener() {}
 };
 globalThis.customElements = { get: () => undefined, define: () => {} };
@@ -712,8 +716,8 @@ slot.showPart = async () => { html = slot.partState?.html ?? null; };
 slot.attach(connection);
 const status = connection.status;
 const until = Date.now() + 15000;
-while (Date.now() < until && !slot.partState) await new Promise((r) => setTimeout(r, 50));
-console.log(JSON.stringify({ attachedWhile: status, part: slot.partState, html }));
+while (Date.now() < until && !(slot.partState && slot.partCheck?.checked !== undefined)) await new Promise((r) => setTimeout(r, 50));
+console.log(JSON.stringify({ attachedWhile: status, part: slot.partState, html, checked: slot.partCheck?.checked ?? null }));
 process.exit(0);
 "#;
 
@@ -765,6 +769,11 @@ fn the_page_reads_its_part_from_a_real_server() {
     assert_eq!(read["attachedWhile"], "connecting", "{read}");
     assert_eq!(read["part"]["exists"], true, "{read}");
     assert_eq!(read["part"]["error"], Value::Null, "{read}");
+    assert_ne!(
+        read["checked"],
+        Value::Null,
+        "the part's binding check: {read}"
+    );
     let html = read["html"].as_str().unwrap();
     assert!(html.contains("bind=\".time_ms\""), "{html}");
     assert!(html.contains("<h2>TAPE ECHO</h2>"), "{html}");
