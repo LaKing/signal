@@ -36,10 +36,13 @@ fn push_and_pull_allocate_nothing_on_any_path() {
     assert!(alloc_counter::is_installed());
     for (source_rate, dest_rate) in [(48_000, 48_000), (48_000, 44_100), (44_100, 48_000)] {
         let channels = 2;
-        let config = AdapterConfig::new(channels, source_rate, dest_rate, 128, 128);
+        // The source period that matches a 128-frame pull at these rates,
+        // so one push per pull is the steady state.
+        let period = (128 * source_rate as usize).div_ceil(dest_rate as usize);
+        let config = AdapterConfig::new(channels, source_rate, dest_rate, period, 128);
         let (mut input, mut output) = clock_adapter(config).unwrap();
         let mut total = Counts::default();
-        let block: Vec<f32> = (0..128 * channels)
+        let block: Vec<f32> = (0..period * channels)
             .map(|n| ((n as f32) * 0.01).sin() * 0.5)
             .collect();
         let mut out = vec![0.0f32; 1024 * channels];
@@ -54,7 +57,7 @@ fn push_and_pull_allocate_nothing_on_any_path() {
                         total: &mut Counts| {
             for _ in 0..pushes {
                 push(input, &block, stamps.then_some(t_in), total);
-                t_in += period_ns(128, source_rate);
+                t_in += period_ns(period, source_rate);
             }
             pull(
                 output,

@@ -18,11 +18,18 @@
 //!   sides the fill's producer staircase is linearised from the last mark
 //!   (below); without them the raw fill is used, as ADR 0052 §2 wrote it.
 //! - **Splices.** Startup waits for F* in the ring, then fades in over
-//!   10 ms. A pull that would run out jumps back into the history by
-//!   F* − fill (a repeat), a fill beyond 3 × F* jumps forward to F* (a
-//!   skip), both with an equal-power crossfade of 5 ms, counted in `slips`;
-//!   an empty ring fades out over 5 ms into silence and waits for F*
-//!   again.
+//!   10 ms from where the signal starts. A pull that would leave fewer
+//!   than J of frames beyond it jumps back into the history by F* − fill
+//!   (a repeat); a fill beyond 3 × F* jumps forward to F* (a skip); both
+//!   are counted in `slips`. Each jump is aligned: up to 5 ms further back
+//!   (or shorter ahead), to where the material best correlates with what
+//!   the old head still plays (WSOLA's rule, phase 1's addition), and
+//!   crossfaded over 5 ms or the frames the old head has left (at least
+//!   J): gains summing to 1 when the material correlates, equal power
+//!   otherwise. A producer that stopped (empty ring, or no push for
+//!   [`STOP_PERIODS`] periods by the host times) gets the same aligned
+//!   jump back, far enough for a 5 ms fade-out from the history, then
+//!   silence until the ring holds F* again.
 //!
 //! **The linearised fill** (phase 1's change to ADR 0052 §2, measured in
 //! `docs/benchmarks.md` "Clock adapter"). The raw fill sampled at the
@@ -45,8 +52,10 @@
 //! `max_pull` frames per piece (a longer buffer runs in pieces), each frame
 //! from at most two read heads (one, but two during a crossfade), each head
 //! `taps` multiply-adds for its coefficients plus `taps × channels` for the
-//! channels; a restart clears the history once (`channels × 2 × capacity`
-//! stores). [`AdapterOutput::worst_case_multiply_adds`] gives the bound.
+//! channels; a splice's alignment at most `splice + 1` correlations of
+//! `2 × splice × channels`; a restart clears the history once
+//! (`channels × 2 × capacity` stores).
+//! [`AdapterOutput::worst_case_multiply_adds`] gives the bound.
 
 mod drift;
 mod resampler;
@@ -82,6 +91,13 @@ pub const HISTORY_FRAMES: usize = 1024;
 /// A mark is used for the linearised fill while its time is within this
 /// many of the longer period of the pull's.
 pub const MARK_REACH: f64 = 8.0;
+
+/// An aligned jump whose material correlates at least this much is
+/// crossfaded with gains summing to 1 (equal power otherwise).
+pub const MATCHED: f64 = 0.5;
+
+/// A producer silent this many source periods (plus J) has stopped.
+pub const STOP_PERIODS: f64 = 2.0;
 
 /// The most channels an adapter carries.
 pub const MAX_CHANNELS: usize = 64;
@@ -154,6 +170,8 @@ pub enum AdapterError {
     Channels,
     /// A rate, period or piece of 0, or a ratio beyond 8.
     Shape,
+    /// A jitter margin or loop constant negative or not finite.
+    Loop,
 }
 
 impl std::fmt::Display for AdapterError {
@@ -162,6 +180,10 @@ impl std::fmt::Display for AdapterError {
             AdapterError::Channels => {
                 write!(f, "a clock adapter carries 1 to {MAX_CHANNELS} channels")
             }
+            AdapterError::Loop => write!(
+                f,
+                "a clock adapter's jitter margin and loop constants must be finite and non-negative"
+            ),
             AdapterError::Shape => write!(
                 f,
                 "a clock adapter needs nonzero rates and periods, at a ratio of at most 8"
@@ -286,8 +308,13 @@ struct Crossfade {
     at: usize,
     /// Frames in all.
     len: usize,
-    /// No new head: fade to silence, then fill again.
-    to_silence: bool,
+    /// Reads the old head still makes forward; after them it reads
+    /// backwards (reflected about its last read), so it fades over the
+    /// whole 5 ms however few frames were left ahead of it.
+    forward: usize,
+    /// The heads' material correlates: gains summing to 1, not their
+    /// squares.
+    matched: bool,
 }
 
 /// The pulling end of a clock adapter, where the converter runs.
@@ -316,6 +343,10 @@ pub struct AdapterOutput {
     /// piece leave.
     most_back: f64,
     fade: Fade,
+    /// Output frames of silence before the fade-in starts.
+    fade_wait: usize,
+    /// Fading out after the producer stopped.
+    stopping: bool,
     /// One frame's accumulator.
     frame: Vec<f32>,
     /// Seconds per destination frame.
@@ -346,6 +377,26 @@ pub fn clock_adapter(config: AdapterConfig) -> Result<(AdapterInput, AdapterOutp
         || !(1.0 / 8.0..=8.0).contains(&step)
     {
         return Err(AdapterError::Shape);
+    }
+    // Every constant the callbacks clamp with must be finite and
+    // non-negative (`f64::clamp` panics on NaN or reversed bounds).
+    let p = &config.loop_params;
+    let constants = [
+        config.jitter_seconds,
+        p.tau,
+        p.acquire_tau,
+        p.zeta,
+        p.acquire_hz,
+        p.track_hz,
+        p.lock_frames,
+        p.lock_seconds,
+        p.lock_rate,
+        p.clamp,
+        p.acquire_slew,
+        p.track_slew,
+    ];
+    if constants.iter().any(|c| !c.is_finite() || *c < 0.0) {
+        return Err(AdapterError::Loop);
     }
     let channels = config.channels;
     let spec = FilterSpec::for_rates(config.source_rate, config.dest_rate);
@@ -396,6 +447,8 @@ pub fn clock_adapter(config: AdapterConfig) -> Result<(AdapterInput, AdapterOutp
         splice_frames,
         most_back,
         fade: Fade::default(),
+        fade_wait: 0,
+        stopping: false,
         frame: vec![0.0; channels],
         frame_seconds: 1.0 / f64::from(config.dest_rate),
         period_seconds,
@@ -458,9 +511,13 @@ impl AdapterOutput {
     }
 
     /// The most multiply-adds one pull piece can take: two heads (a
-    /// crossfade) over `max_pull` frames, each `taps × (1 + channels)`.
+    /// crossfade) over `max_pull` frames, each `taps × (1 + channels)`,
+    /// plus a splice's alignment, `(splice + 1) × 2 × splice × channels`.
     pub fn worst_case_multiply_adds(&self) -> usize {
-        2 * self.config.max_pull * self.converter.taps() * (1 + self.config.channels)
+        let channels = self.config.channels;
+        let splice = self.splice_frames;
+        2 * self.config.max_pull * self.converter.taps() * (1 + channels)
+            + (splice + 1) * 2 * splice * channels
     }
 
     /// The counters and the loop's state.
@@ -516,9 +573,9 @@ impl AdapterOutput {
     /// The linearised fill at `time_ns`, if a mark and the time allow it.
     fn linear_fill(&self, time_ns: Option<u64>) -> Option<f64> {
         let mark = self.last_mark?;
-        let now = time_ns? as f64 * 1e-9;
-        let then = mark.time_ns? as f64 * 1e-9;
-        let since = now - then;
+        let now = i128::from(time_ns?);
+        let then = i128::from(mark.time_ns?);
+        let since = (now - then) as f64 * 1e-9;
         if since.abs() > MARK_REACH * self.period_seconds {
             return None;
         }
@@ -590,19 +647,122 @@ impl AdapterOutput {
         let fill = self.linear_fill(time_ns).unwrap_or_else(|| self.raw_fill());
         self.drift.restart(fill - self.target, false);
         self.crossfade = None;
-        self.fade.start_in(fade_frames(self.config.dest_rate));
+        // The fade-in starts where the signal does: a read position moved
+        // back into the cleared history reads silence until it reaches the
+        // first frame (the filter's ringing ahead of it stays faded out).
+        let before = frames_between(first, frame_of(self.position)) as f64;
+        self.fade_wait = (before / self.nominal_step).floor().max(0.0) as usize;
+        if self.fade_wait > 0 {
+            self.fade.start_out(0);
+        } else {
+            self.fade.start_in(fade_frames(self.config.dest_rate));
+        }
         self.state = AdapterState::Locking;
         self.starts += 1;
         true
     }
 
-    /// The crossfade length for an old head at `old`: 5 ms, or as many
-    /// frames as the available frames serve.
-    fn crossfade_len(&self, old: u64) -> usize {
-        let serves = self
-            .converter
-            .reads_before(old, self.step, self.available());
-        (serves as usize).min(self.splice_frames)
+    /// A crossfade from an old head at `old`: 5 ms, or as long as the
+    /// available frames serve the old head (a splice starts while at least
+    /// J of them are left beyond the pull, so at least that). If not even
+    /// `old` is served, the head first moves back to the last position that
+    /// is (at most half the taps plus 2 frames), and past its last served
+    /// read it reads backwards. `matched`: the heads' material correlates
+    /// (an aligned repeat), so the gains sum to 1 rather than their
+    /// squares.
+    fn crossfade_from(&self, old: u64, matched: bool) -> Crossfade {
+        let available = self.available();
+        let mut old = old;
+        let mut serves = self.converter.reads_before(old, self.step, available);
+        let mut tries = self.converter.spec().half() + 2;
+        while serves == 0 && tries > 0 {
+            old = old.wrapping_sub(ONE);
+            serves = self.converter.reads_before(old, self.step, available);
+            tries -= 1;
+        }
+        let len = (serves as usize).clamp(1, self.splice_frames);
+        Crossfade {
+            old,
+            at: 0,
+            len,
+            forward: len,
+            matched,
+        }
+    }
+
+    /// A jump back, aligned: from `back` frames to up to 5 ms further, the
+    /// one whose frames best match (normalised correlation) the frames the
+    /// old head still plays over the crossfade, so a short crossfade joins
+    /// like material (WSOLA's rule). Returns the jump and its correlation.
+    /// Bounded: at most `splice + 1` lags of `2 × len × channels`
+    /// multiply-adds, `len` at most 5 ms.
+    fn align_back(&mut self, old: u64, back: f64, serves: u64) -> (f64, f64) {
+        let len = (serves as usize).min(self.splice_frames);
+        let room = (self.most_back - back).max(0.0) as usize;
+        let search = self.splice_frames.min(room);
+        if len < 2 || search == 0 {
+            return (back, 0.0);
+        }
+        let a = frame_of(old);
+        // The old head's frames over the crossfade, into the history.
+        self.take_until(
+            a.wrapping_add(len as u32)
+                .wrapping_add(self.converter.spec().half() as u32 + 1),
+        );
+        let len = len.min(frames_between(self.converter.written(), a).max(0) as usize);
+        let base = back as u32;
+        let mut best = (0usize, f64::MIN);
+        for d in 0..=search {
+            let b = a.wrapping_sub(base).wrapping_sub(d as u32);
+            let score = self.converter.correlation(a, b, len);
+            if score > best.1 {
+                best = (d, score);
+            }
+        }
+        (back + best.0 as f64, best.1)
+    }
+
+    /// A skip's jump, aligned the same way: from `ahead` frames to up to
+    /// 5 ms shorter (never below 0). Returns the jump and its correlation.
+    fn align_ahead(&mut self, old: u64, ahead: f64, serves: u64) -> (f64, f64) {
+        let len = (serves as usize).min(self.splice_frames);
+        let search = self.splice_frames.min(ahead as usize);
+        if len < 2 || search == 0 {
+            return (ahead, 0.0);
+        }
+        let a = frame_of(old);
+        let jump = ahead as u32;
+        self.take_until(
+            a.wrapping_add(jump)
+                .wrapping_add(len as u32)
+                .wrapping_add(self.converter.spec().half() as u32 + 1),
+        );
+        let len =
+            len.min(frames_between(self.converter.written(), a.wrapping_add(jump)).max(0) as usize);
+        let mut best = (0usize, f64::MIN);
+        for d in 0..=search {
+            let b = a.wrapping_add(jump).wrapping_sub(d as u32);
+            let score = self.converter.correlation(a, b, len);
+            if score > best.1 {
+                best = (d, score);
+            }
+        }
+        (ahead - best.0 as f64, best.1)
+    }
+
+    /// Whether the producer has missed [`STOP_PERIODS`] source periods
+    /// (plus J) since its last push, by the host times: it stopped, so a
+    /// pull short of frames fades out rather than repeating.
+    fn producer_overdue(&self, time_ns: Option<u64>) -> bool {
+        let (Some(now), Some(mark)) = (time_ns, self.last_mark) else {
+            return false;
+        };
+        let Some(then) = mark.time_ns else {
+            return false;
+        };
+        let since = (i128::from(now) - i128::from(then)) as f64 * 1e-9;
+        let period = self.config.source_period as f64 / f64::from(self.config.source_rate);
+        since > STOP_PERIODS * period + self.jitter
     }
 
     /// Widens J by a step (up to 3 ms) after a slip; F* follows.
@@ -614,6 +774,16 @@ impl AdapterOutput {
             self.drift.shift(self.target - target);
             self.target = target;
         }
+    }
+
+    /// A jump back into the history by `back` frames (aligned), with a
+    /// crossfade from the old head. Returns the jump.
+    fn jump_back(&mut self, back: f64, serves: u64) -> f64 {
+        let old = self.position;
+        let (back, score) = self.align_back(old, back, serves);
+        self.position = self.position.wrapping_sub((back as u64) << 32);
+        self.crossfade = Some(self.crossfade_from(old, score >= MATCHED));
+        back
     }
 
     fn pull_piece(&mut self, out: &mut [f32], frames: usize, time_ns: Option<u64>) {
@@ -637,58 +807,52 @@ impl AdapterOutput {
         self.step = to_fixed(self.nominal_step * (1.0 + correction));
 
         let step = self.step;
+        let step_frames = step as f64 / ONE as f64;
         let available = self.available();
         let serves = self.converter.reads_before(self.position, step, available);
-        let silent = self.crossfade.is_some_and(|x| x.to_silence);
-        if !silent && serves < frames as u64 {
-            if self.ring_frames() == 0 {
-                // The producer stopped: fade out what is left.
-                let len = self.crossfade_len(self.position);
-                self.crossfade = Some(Crossfade {
-                    old: self.position,
-                    at: 0,
-                    len,
-                    to_silence: true,
-                });
-                self.stops += 1;
-            } else {
-                // A repeat: back into the history to F* (the loop's fill),
-                // and at least as far as this pull lacks.
-                self.widen();
-                let short = (frames as u64 - serves) as f64 * step as f64 / ONE as f64 + 1.0;
-                let back = (self.target - self.fill)
-                    .max(short)
-                    .min(self.most_back)
-                    .ceil();
-                let old = self.position;
-                self.position = self.position.wrapping_sub((back as u64) << 32);
-                let len = self.crossfade_len(old);
-                self.crossfade = Some(Crossfade {
-                    old,
-                    at: 0,
-                    len,
-                    to_silence: false,
-                });
-                self.drift.shift(back);
-                self.slips += 1;
-                self.repeats += 1;
-            }
-        } else if !silent && self.raw_fill() > OVERRUN_TARGETS * self.target {
+        // A splice starts while J's worth of frames is still left beyond
+        // this pull, so the old head has them for its crossfade; in the
+        // steady state the margin is half a source period more than J.
+        let margin = (self.jitter * f64::from(self.config.dest_rate)).ceil() as u64;
+        let lacking = (frames as u64 + margin).saturating_sub(serves);
+        let short = lacking as f64 * step_frames + 1.0;
+        // A crossfade under way finishes first, unless this pull would run
+        // out of frames.
+        let busy = self.crossfade.is_some() && serves >= frames as u64;
+        if self.stopping || busy {
+            // Fading out, or a crossfade under way: no splice.
+        } else if lacking > 0 && (self.ring_frames() == 0 || self.producer_overdue(time_ns)) {
+            // The producer stopped: back into the history far enough for
+            // the 5 ms fade-out, then silence and the startup fill.
+            let fade = (self.splice_frames as u64).saturating_sub(serves) as f64 * step_frames;
+            let back = short.max(fade + 1.0).min(self.most_back).ceil();
+            self.jump_back(back, serves);
+            self.fade.start_out(self.splice_frames as u32);
+            self.stopping = true;
+            self.stops += 1;
+        } else if lacking > 0 {
+            // A repeat: back into the history to F* (the loop's fill), and
+            // at least as far as this pull lacks.
+            self.widen();
+            let back = (self.target - self.fill)
+                .max(short)
+                .min(self.most_back)
+                .ceil();
+            let back = self.jump_back(back, serves);
+            self.drift.shift(back);
+            self.slips += 1;
+            self.repeats += 1;
+        } else if self.raw_fill() > OVERRUN_TARGETS * self.target {
             // A skip: forward to F*, as far as the fill leaves this pull
             // its frames.
             let raw = self.raw_fill();
             let half = self.converter.spec().half() as f64;
-            let most = raw - frames as f64 * step as f64 / ONE as f64 - half - 2.0;
+            let most = raw - frames as f64 * step_frames - half - 2.0;
             let ahead = (raw - self.target).min(most).floor().max(0.0);
             let old = self.position;
+            let (ahead, score) = self.align_ahead(old, ahead, serves);
             self.position = self.position.wrapping_add((ahead as u64) << 32);
-            let len = self.crossfade_len(old);
-            self.crossfade = Some(Crossfade {
-                old,
-                at: 0,
-                len,
-                to_silence: false,
-            });
+            self.crossfade = Some(self.crossfade_from(old, score >= MATCHED));
             self.drift.shift(-ahead);
             self.slips += 1;
             self.skips += 1;
@@ -705,63 +869,78 @@ impl AdapterOutput {
                 }
             }
         };
-        if !silent {
-            furthest(self.position, frames);
-        }
+        furthest(self.position, frames);
         if let Some(x) = self.crossfade {
-            furthest(x.old, (x.len - x.at).min(frames));
+            furthest(x.old, x.forward.min(frames));
         }
         self.take_until(until);
         let written = self.converter.written();
 
         let channels = self.config.channels;
         for frame_out in out.chunks_exact_mut(channels) {
-            if self.state == AdapterState::Filling {
-                // Faded to silence earlier in this piece.
-                frame_out.fill(0.0);
-                continue;
-            }
             self.frame.iter_mut().for_each(|s| *s = 0.0);
             let mut main_gain = 1.0f32;
-            let mut done = false;
             if let Some(x) = self.crossfade.as_mut() {
-                if x.at < x.len {
-                    let fall = self.fall.get(x.at * self.splice_frames / x.len.max(1));
-                    let fall = fall.copied().unwrap_or(0.0);
-                    let rise_at = self.splice_frames - x.at * self.splice_frames / x.len.max(1);
-                    let rise = self.fall.get(rise_at).copied().unwrap_or(1.0);
-                    if frames_between(written, self.converter.needs_until(x.old)) >= 0 {
-                        self.converter.read_add(x.old, fall, &mut self.frame);
-                    }
+                // Gains at the end of each frame's step: the last is fall
+                // 0, rise 1.
+                let done_at =
+                    ((x.at + 1) * self.splice_frames / x.len.max(1)).min(self.splice_frames);
+                let mut fall = self.fall.get(done_at).copied().unwrap_or(0.0);
+                let mut rise = self
+                    .fall
+                    .get(self.splice_frames - done_at)
+                    .copied()
+                    .unwrap_or(1.0);
+                if x.matched {
+                    // Like material adds in amplitude: gains summing to 1.
+                    fall *= fall;
+                    rise *= rise;
+                }
+                if frames_between(written, self.converter.needs_until(x.old)) >= 0 {
+                    self.converter.read_add(x.old, fall, &mut self.frame);
+                }
+                if x.forward > 1 {
+                    x.forward -= 1;
                     x.old = x.old.wrapping_add(step);
-                    x.at += 1;
-                    main_gain = if x.to_silence { 0.0 } else { rise };
                 } else {
-                    main_gain = if x.to_silence { 0.0 } else { 1.0 };
+                    // Past the last served read: reflect about it.
+                    x.forward = 0;
+                    x.old = x.old.wrapping_sub(step);
                 }
-                done = x.at >= x.len;
-            }
-            let to_silence = self.crossfade.is_some_and(|x| x.to_silence);
-            if !to_silence {
-                if frames_between(written, self.converter.needs_until(self.position)) >= 0 {
-                    self.converter
-                        .read_add(self.position, main_gain, &mut self.frame);
-                }
-                self.position = self.position.wrapping_add(step);
-            }
-            if done {
-                self.crossfade = None;
-                if to_silence {
-                    self.state = AdapterState::Filling;
-                    self.fade = Fade::default();
+                x.at += 1;
+                main_gain = rise;
+                if x.at >= x.len {
+                    self.crossfade = None;
                 }
             }
+            if frames_between(written, self.converter.needs_until(self.position)) >= 0 {
+                self.converter
+                    .read_add(self.position, main_gain, &mut self.frame);
+            }
+            self.position = self.position.wrapping_add(step);
             for (o, &s) in frame_out.iter_mut().zip(&self.frame) {
                 *o = s;
             }
         }
-        self.fade.apply(out, channels);
-        if self.state != AdapterState::Filling {
+        if self.fade_wait > 0 {
+            let wait = self.fade_wait.min(frames);
+            self.fade_wait -= wait;
+            let (silent, rest) = out.split_at_mut((wait * channels).min(out.len()));
+            silent.fill(0.0);
+            if self.fade_wait == 0 {
+                self.fade.start_in(fade_frames(self.config.dest_rate));
+            }
+            self.fade.apply(rest, channels);
+        } else {
+            self.fade.apply(out, channels);
+        }
+        if self.stopping && self.fade.is_silent() {
+            // Faded out: silence until the ring holds F* again.
+            self.stopping = false;
+            self.crossfade = None;
+            self.fade = Fade::default();
+            self.state = AdapterState::Filling;
+        } else if self.state != AdapterState::Filling {
             self.state = match self.drift.mode() {
                 LoopMode::Acquire => AdapterState::Locking,
                 LoopMode::Track => AdapterState::Locked,

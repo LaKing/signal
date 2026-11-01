@@ -157,6 +157,32 @@ impl Resampler {
         (room_fixed as u64).div_ceil(step)
     }
 
+    /// The normalised correlation of the `len` stored frames from index `a`
+    /// with those from index `b`, every channel summed: Σ a·b / √(Σa²·Σb²),
+    /// 0 when either is silent. `len` must not exceed the capacity.
+    /// Real-time safe: `2 × len × channels` multiply-adds.
+    pub fn correlation(&self, a: u32, b: u32, len: usize) -> f64 {
+        let len = len.min(self.capacity);
+        let (sa, sb) = ((a & self.mask) as usize, (b & self.mask) as usize);
+        let (mut ab, mut aa, mut bb) = (0.0f32, 0.0f32, 0.0f32);
+        for plane in self.history.chunks_exact(2 * self.capacity) {
+            let (Some(x), Some(y)) = (plane.get(sa..sa + len), plane.get(sb..sb + len)) else {
+                continue;
+            };
+            for (&p, &q) in x.iter().zip(y) {
+                ab += p * q;
+                aa += p * p;
+                bb += q * q;
+            }
+        }
+        let norm = f64::from(aa) * f64::from(bb);
+        if norm > 0.0 {
+            f64::from(ab) / norm.sqrt()
+        } else {
+            0.0
+        }
+    }
+
     /// Adds `gain` times the interpolated value of every channel at
     /// `position` into `frame` (`channels` samples). The frames under the
     /// filter must be in the history ([`Resampler::needs_until`] ≤

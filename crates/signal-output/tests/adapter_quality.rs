@@ -284,9 +284,72 @@ fn converter_quality_full() {
         ),
     ] {
         let (sum, rss) = interpolation_error(spec, 200_000);
+        let (ripple, stopband) = prototype(spec);
         println!(
-            "phase interpolation at {PHASES} phases, {name}: worst Σ|error| {sum:.1} dB, worst rss {rss:.1} dB; predicted stopband {:.1} dB (β {:.2})",
+            "{name}: phase interpolation at {PHASES} phases: worst Σ|error| {sum:.1} dB, worst rss {rss:.1} dB; prototype: passband ripple {ripple:.6} dB, stopband {stopband:.1} dB (Kaiser's formula predicted {:.1} dB, β {:.2})",
             spec.predicted_attenuation_db, spec.beta
+        );
+    }
+}
+
+/// The continuous prototype's response (the filter the table samples):
+/// its impulse response at 1/`PHASES` frame steps, zero-padded and
+/// transformed. Returns (worst |gain| in dB to the passband edge, the
+/// stopband's highest level in dB, from the stopband edge up).
+fn prototype(spec: FilterSpec) -> (f64, f64) {
+    let half = spec.taps as f64 / 2.0;
+    let points = spec.taps * PHASES;
+    let n = (points * 8).next_power_of_two();
+    let mut x = vec![0.0f64; n];
+    for (i, slot) in x.iter_mut().take(points + 1).enumerate() {
+        *slot = spec.response(i as f64 / PHASES as f64 - half) / PHASES as f64;
+    }
+    let fft = realfft::RealFftPlanner::<f64>::new().plan_fft_forward(n);
+    let mut out = fft.make_output_vec();
+    fft.process(&mut x, &mut out).unwrap();
+    let dc = out[0].norm();
+    let (mut ripple, mut stop) = (0.0f64, 0.0f64);
+    for (b, c) in out.iter().enumerate() {
+        let f = b as f64 * PHASES as f64 / n as f64;
+        let level = c.norm() / dc;
+        if f <= spec.passband {
+            ripple = ripple.max(db(level).abs());
+        } else if f >= spec.stopband {
+            stop = stop.max(level);
+        }
+    }
+    (ripple, db(stop))
+}
+
+/// The converter's cost, ns per output frame, stereo (verification 6).
+/// Timing on the host it runs on; a measurement, not a target.
+#[test]
+#[ignore = "a benchmark; run with --release"]
+fn converter_cost() {
+    use signal_output::adapter::{ONE, Resampler};
+    for (name, source, dest) in [("96 taps", 48_000, 48_000), ("160 taps", 48_000, 44_100)] {
+        let spec = FilterSpec::for_rates(source, dest);
+        let mut r = Resampler::new(spec, 2, 8192);
+        let frames: Vec<f32> = (0..8192).map(|n| (n as f32 * 0.001).sin()).collect();
+        r.write(&frames);
+        let step = (f64::from(source) / f64::from(dest) * 1.0001 * ONE as f64) as u64;
+        let mut out = [0.0f32; 2];
+        let reads = 2_000_000u64;
+        let start = std::time::Instant::now();
+        let mut position = (spec.taps as u64) << 32;
+        for _ in 0..reads {
+            r.read_add(position, 1.0, &mut out);
+            position += step;
+            if (position >> 32) > 3000 {
+                position = (spec.taps as u64) << 32;
+            }
+        }
+        let ns = start.elapsed().as_nanos() as f64 / reads as f64;
+        println!(
+            "{name}, 2 channels: {ns:.1} ns per output frame ({:.1} µs for a 128-frame callback, {:.1} µs with a crossfade's second head); {}",
+            ns * 128.0 / 1000.0,
+            2.0 * ns * 128.0 / 1000.0,
+            std::hint::black_box(out[0])
         );
     }
 }

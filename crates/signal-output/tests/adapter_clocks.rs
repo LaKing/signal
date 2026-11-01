@@ -38,7 +38,9 @@ fn track(r: &Run, settle: f64) -> (f64, f64) {
 
 /// One scenario against verification 3: zero slips and stops, lock within
 /// 5 s for |ε| ≤ 100 ppm, then mean |e| and the ratio's jitter in bound.
-fn converges(s: &Scenario, settle: f64) -> (Option<f64>, f64, f64) {
+/// Returns (lock, track entry from the start of conversion, peak |e|
+/// before track, mean |e| and ratio jitter in track).
+fn converges(s: &Scenario, settle: f64) -> (Option<f64>, f64, f64, f64, f64) {
     let r = run(s);
     let name = format!(
         "{}/{} {}→{} at {:+} ppm",
@@ -59,7 +61,20 @@ fn converges(s: &Scenario, settle: f64) -> (Option<f64>, f64, f64) {
         jitter <= RATIO_JITTER_PPM,
         "{name}: ratio jitter {jitter} ppm"
     );
-    (lock, mean_e, jitter)
+    let track_at = r.track_at.unwrap_or(0.0);
+    let peak = r
+        .samples
+        .iter()
+        .filter(|x| x.t < track_at)
+        .map(|x| x.error.abs())
+        .fold(0.0, f64::max);
+    (
+        lock,
+        track_at - r.started_at.unwrap_or(0.0),
+        peak,
+        mean_e,
+        jitter,
+    )
 }
 
 /// Verification 1 and 3, short: every period pair at 0, +100 and −300 ppm,
@@ -82,17 +97,17 @@ fn every_pair_locks_and_tracks() {
 #[ignore = "long: 28 runs of 300 simulated seconds; run with --release"]
 fn every_pair_locks_and_tracks_full() {
     println!(
-        "| periods | rates | ε (ppm) | lock (s) | mean abs e (frames) | ratio jitter (ppm rms) | slips |"
+        "| periods | rates | ε (ppm) | lock (s) | track from (s) | peak abs e before track (frames) | mean abs e in track (frames) | ratio jitter in track (ppm rms) | slips |"
     );
-    println!("|---|---|---:|---:|---:|---:|---:|");
+    println!("|---|---|---:|---:|---:|---:|---:|---:|---:|");
     for (sp, dp, sr, dr) in PAIRS {
         for epsilon in EPSILONS {
             let mut s = Scenario::new(sr, dr, sp, dp);
             s.epsilon_ppm = epsilon;
             s.seconds = 300.0;
-            let (lock, mean_e, jitter) = converges(&s, 60.0);
+            let (lock, track, peak, mean_e, jitter) = converges(&s, 60.0);
             println!(
-                "| {sp}/{dp} | {sr}→{dr} | {epsilon:+} | {} | {mean_e:.4} | {jitter:.4} | 0 |",
+                "| {sp}/{dp} | {sr}→{dr} | {epsilon:+} | {} | {track:.2} | {peak:.2} | {mean_e:.4} | {jitter:.4} | 0 |",
                 lock.map_or("–".into(), |l| format!("{l:.2}"))
             );
         }
