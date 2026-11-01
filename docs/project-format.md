@@ -16,6 +16,7 @@ Terms are those of `00-vision.md` §3a: Project, Module, Primitive, Composite, I
   ui/parts/<slot>.html    a slot's own panel part, bound relative to the slot (optional; §14, ADR 0046)
   ui/assets/              their SVG and PNG files
   ui/schematic.toml       the schematic's positions (optional, presentation only; §11)
+  ui/plane.toml           the Signal Project plane's Stacks (optional, presentation only; §17)
   ui/windows.toml         Signal.app's windows per screen configuration (optional, presentation only; §13)
   snapshots.toml          parameter values stored under names (optional, never played; §16)
 ```
@@ -576,3 +577,32 @@ Unknown keys, a bad name, an address that is not `/<instance>.<parameter>` and a
 - **Undo.** Before every restore Signal writes the values playing now of the controls the restore can change (the snapshot's entries that exist and go into snapshots) as `[undo]`, in the write that reads the snapshot, under the same writer lock as the `project.toml` write that follows; a restore that cannot write it does not happen, a restore that changes nothing leaves it as it was, and if the `project.toml` write fails the new undo snapshot is kept when a value of the restore reached the engine (it holds what played before) and put back to the one from before when none did (ADR 0041 §7). Undo restores `[undo]` the same way, after the values playing now take its place, so a second undo redoes. One level: each restore replaces it.
 - **Order.** A new snapshot goes to the end of the list, an overwrite keeps its place, a delete takes it out, and a move (`snapshot.move`, a drag in the Snapshots card, Alt+ArrowUp/Down on a row) puts it at a place (past the end: the last). The undo snapshot is in no order.
 - **Writers.** Every write is under the project's writer lock and compared just before its rename (ADR 0040); a change by another writer meanwhile is refused (`conflict`), never lost.
+
+## 17. The plane (`ui/plane.toml`, ADR 0051)
+
+The Signal Project tab draws a project as one plane (`ui-controls.md` "The Signal Project plane"): its **Stacks**, each a vertical column of instruments of equal width, and this machine's peripherals. This optional file names the Stacks. It is **presentation only**, like `ui/schematic.toml` (§11): no address contains a Stack's name, `signal render` never reads it, and moving an instrument between Stacks changes no plan, render or log.
+
+```toml
+schema_version = 1
+
+[[stack]]
+name = "primary"                 # [a-z][a-z0-9_]*, unique
+at = [0, 0]                      # top-left on the plane, in plate units; absent: laid out
+width = 160                      # plate units; every front panel is this wide (default 160)
+instruments = [
+  "card:transport",
+  "card:mono-synth",
+]
+```
+
+| Key | Meaning |
+|---|---|
+| `schema_version` | `1`, required |
+| `stack.name` | the Stack's name, `[a-z][a-z0-9_]*`, unique |
+| `stack.at` | `[x, y]`, whole plate units within ±1000; absent: the Stacks without one stand left to right |
+| `stack.width` | whole plate units, 1 to 1000; default 160 |
+| `stack.instruments` | the instruments top to bottom: `card:<id>`, a card of `ui/main.html` (the migration form; the card's id is its first heading as a slug: lower case, every run of characters other than `a-z` and `0-9` one `-`; else its slot's name; else `card-<n>`; a repeated id gets `-2`, `-3`, …), or the name of a top-level slot with a part (§14) |
+
+The first Stack is the **primary** Stack. An entry naming nothing, an entry listed twice (in one Stack or two), a Stack named twice, an unknown key or a value of the wrong form is an error of `signal ui check` (and of the page, which then draws the derived Stack below and shows the problem). A top-level instance in no instrument of any Stack is drawn in an "unstacked" tray (the page assigns instances to cards: those their controls bind, then by the flow; ADR 0050 §2). **Without the file** one primary Stack is derived from the panel's cards in their order, at the plate's width. The file is written by hand in phase 1 of ADR 0051; `plane.write` comes with the plane's editing.
+
+The Setup (§9) holds where a role plays on this machine (`[output]` and `output_channels` for role `main`); the plane draws that binding and never writes it into the project.
