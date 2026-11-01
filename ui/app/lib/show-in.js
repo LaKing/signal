@@ -10,7 +10,8 @@
 import { TABS } from './tabs.js';
 
 /** The tabs that can show a subject; the others (Setup) are switched to plainly. */
-export const SHOWN_IN = Object.freeze(['panel', 'parameters', 'schematic']);
+// ADR 0051 §11: the Signal Project tab shows what the panel showed (its front panels' controls).
+export const SHOWN_IN = Object.freeze(['plane', 'parameters']);
 
 /** How long a shown element is marked (ms): the flash's length, with a margin. */
 export const FLASH_MS = 1300;
@@ -36,7 +37,7 @@ export const FLASH_CSS = `
   to { outline-color: transparent; }
 }`;
 
-const PLACES = { panel: 'the panel', parameters: 'the Parameters tab', schematic: 'the schematic' };
+const PLACES = { plane: 'the Signal Project', parameters: 'the Parameters tab' };
 
 /** Whether `address` is an instance's (`/drums/kick`), not a port's or a parameter's (`/drums/kick.out`). */
 export function isInstance(address) {
@@ -97,7 +98,7 @@ export function missingReason(subject, tab) {
 }
 
 /**
- * Where each view has `subject`: `{panel, parameters, schematic}`, each
+ * Where each view has `subject`: `{plane, parameters}`, each
  * `{addresses, whole, reason}` (`reason` when it has nothing). `views` are
  * the addresses each has.
  */

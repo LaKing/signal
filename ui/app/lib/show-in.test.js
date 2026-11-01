@@ -50,31 +50,33 @@ test('a wire: each end the view has', () => {
   assert.deepEqual(matchIn(wire, PANEL).addresses, [], 'neither end in the panel');
   assert.deepEqual(matchIn({ kind: 'wire', from: '/synth/osc.freq', to: '/out.l' }, PANEL).addresses, ['/synth/osc.freq', '/out.l'], 'both ends');
   assert.deepEqual(matchIn({ kind: 'wire', from: '/drums.out', to: '/drums.x' }, ['/drums']), { addresses: [], whole: false }, 'a wire is its ends, not their instance');
-  assert.equal(missingReason(wire, 'panel'), 'Neither end of /lfo.out → /synth.level is in the panel');
+  assert.equal(missingReason(wire, 'plane'), 'Neither end of /lfo.out → /synth.level is in the Signal Project');
   assert.equal(missingReason({ kind: 'pin', address: '/osc.out' }, 'parameters'), '/osc.out is not in the Parameters tab');
 });
 
 test('places: each view’s matches, or why it has none', () => {
-  const places = placesOf({ kind: 'pin', address: '/synth.level' }, { panel: PANEL, parameters: PARAMETERS, schematic: ['/synth.level'] });
-  assert.equal(places.panel.reason, '/synth.level is not in the panel');
+  const places = placesOf({ kind: 'pin', address: '/synth.level' }, { plane: PANEL, parameters: PARAMETERS });
+  assert.equal(places.plane.reason, '/synth.level is not in the Signal Project');
   assert.deepEqual(places.parameters, { addresses: ['/synth.level'], whole: false });
-  assert.deepEqual(places.schematic.addresses, ['/synth.level']);
-  assert.equal(placesOf({ kind: 'pin', address: '/a.b' }).schematic.reason, '/a.b is not in the schematic', 'a view not known has nothing');
+  assert.deepEqual(Object.keys(places), ['plane', 'parameters'], 'ADR 0051: the Signal Project and Parameters show a subject');
+  assert.equal(placesOf({ kind: 'pin', address: '/a.b' }).plane.reason, '/a.b is not in the Signal Project', 'a view not known has nothing');
 });
 
 test('with a subject: Show in each other view, off with its reason where it is not; Setup switched to plainly', () => {
-  const places = placesOf({ kind: 'pin', address: '/synth.level' }, { panel: PANEL, parameters: PARAMETERS, schematic: ['/synth.level'] });
+  const places = placesOf({ kind: 'pin', address: '/synth.level' }, { plane: PANEL, parameters: PARAMETERS });
   assert.deepEqual(tabItems('parameters', places), [
-    { id: 'show:panel', label: 'Show in Panel', disabled: true, title: '/synth.level is not in the panel' },
-    { id: 'show:schematic', label: 'Show in Schematic' },
+    { id: 'show:plane', label: 'Show in Signal Project', disabled: true, title: '/synth.level is not in the Signal Project' },
     { id: 'tab:setup', label: 'Show Setup' },
   ]);
-  assert.deepEqual(tabItems('setup', places).map((i) => i.id), ['show:panel', 'show:schematic', 'show:parameters']);
+  assert.deepEqual(tabItems('setup', places).map((i) => i.id), ['show:plane', 'show:parameters']);
 });
 
 test('without a subject: plain tab switching, Show Panel and so on', () => {
-  assert.deepEqual(tabItems('schematic'), [
-    { id: 'tab:panel', label: 'Show Panel' },
+  assert.deepEqual(tabItems('setup'), [
+    { id: 'tab:plane', label: 'Show Signal Project' },
+    { id: 'tab:parameters', label: 'Show Parameters' },
+  ]);
+  assert.deepEqual(tabItems('plane'), [
     { id: 'tab:parameters', label: 'Show Parameters' },
     { id: 'tab:setup', label: 'Show Setup' },
   ]);
@@ -82,17 +84,16 @@ test('without a subject: plain tab switching, Show Panel and so on', () => {
 
 test('the context menu: a control’s Show in items; the background’s plain tabs', () => {
   const control = { address: '/drums.kick_decay', label: 'decay', editable: true };
-  const places = placesOf(subjectOf({ control }), { panel: PANEL, parameters: PARAMETERS, schematic: ['/drums.kick_decay'] });
-  const items = contextItems({ control, tab: 'panel', places });
-  assert.deepEqual(items.map((i) => i.label ?? i.id), ['Reset decay to default', 'Copy address', 'separator', 'Restart from Files', 'separator', 'Show in Schematic', 'Show in Parameters', 'Show Setup']);
+  const places = placesOf(subjectOf({ control }), { plane: PANEL, parameters: PARAMETERS });
+  const items = contextItems({ control, tab: 'plane', places });
+  assert.deepEqual(items.map((i) => i.label ?? i.id), ['Reset decay to default', 'Copy address', 'separator', 'Restart from Files', 'separator', 'Show in Parameters', 'Show Setup']);
   const wire = { kind: 'wire', path: '', level: '', from: '/lfo.out', to: '/synth.level' };
-  const wired = contextItems({ part: [{ id: 'inspect', label: 'Inspect' }], tab: 'schematic', places: placesOf(subjectOf({ hit: wire }), { panel: PANEL, parameters: PARAMETERS }) });
-  assert.deepEqual(wired.slice(-3), [
-    { id: 'show:panel', label: 'Show in Panel', disabled: true, title: 'Neither end of /lfo.out → /synth.level is in the panel' },
+  const wired = contextItems({ part: [{ id: 'inspect', label: 'Inspect' }], tab: 'setup', places: placesOf(subjectOf({ hit: wire }), { plane: PANEL, parameters: PARAMETERS }) });
+  assert.deepEqual(wired.slice(-2), [
+    { id: 'show:plane', label: 'Show in Signal Project', disabled: true, title: 'Neither end of /lfo.out → /synth.level is in the Signal Project' },
     { id: 'show:parameters', label: 'Show in Parameters' },
-    { id: 'tab:setup', label: 'Show Setup' },
   ]);
-  assert.deepEqual(contextItems({ tab: 'schematic' }).slice(-3).map((i) => i.label), ['Show Panel', 'Show Parameters', 'Show Setup']);
+  assert.deepEqual(contextItems({ tab: 'parameters' }).slice(-2).map((i) => i.label), ['Show Signal Project', 'Show Setup']);
 });
 
 test('the flash: a class of its own, a pulse, and a still outline that fades with reduced motion', () => {

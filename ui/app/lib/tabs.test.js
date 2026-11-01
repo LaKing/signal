@@ -2,16 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { INITIAL_TAB, TABS, select, tabForAction } from './tabs.js';
 
-test('the tabs are Panel, Schematic, Parameters and Setup, opening on the panel', () => {
-  assert.deepEqual(TABS.map((t) => t.label), ['Panel', 'Schematic', 'Parameters', 'Setup']);
-  assert.equal(INITIAL_TAB, 'panel');
+// ADR 0051 §11: one plane, the Signal Project tab, in place of the Panel and Schematic tabs.
+test('the tabs are Signal Project, Parameters and Setup, opening on the Signal Project', () => {
+  assert.deepEqual(TABS.map((t) => t.label), ['Signal Project', 'Parameters', 'Setup']);
+  assert.equal(INITIAL_TAB, 'plane');
 });
 
 test('a tab is shown only if there is one', () => {
-  assert.equal(select('panel', 'setup'), 'setup');
+  assert.equal(select('plane', 'setup'), 'setup');
   assert.equal(select('setup', 'parameters'), 'parameters');
   assert.equal(select('parameters', 'transport'), 'parameters', 'the old page is no tab');
-  assert.equal(select('panel', undefined), 'panel');
+  assert.equal(select('plane', undefined), 'plane');
+  assert.equal(select('plane', 'schematic'), 'plane', 'the Schematic tab is gone');
 });
 
 // AC13: no native folder chooser; Open Project… focuses the Setup tab's field.

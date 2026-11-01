@@ -19,12 +19,14 @@ test('the window has one scroll container: the shown tab', () => {
   assert.match(css, /html, body \{[^}]*overflow: hidden/, 'the page never scrolls');
   const scrolls = [...css.matchAll(/([^{}]+)\{[^}]*overflow(-x|-y)?\s*:\s*(auto|scroll)/g)].map((m) => m[1].trim());
   assert.deepEqual(scrolls, ['.tab-scroll'], 'only the Parameters and Setup tabs scroll');
-  assert.match(css, /\.tab-panel \{[^}]*overflow: hidden/, 'the Panel tab does not: its frame scrolls its own document');
-  assert.match(css, /\.project-panel \{[^}]*height: 100%/, 'the frame fills the tab');
+  assert.match(css, /\.tab-fill \{[^}]*overflow: hidden/, 'the Signal Project tab does not: the plane scrolls its Stack itself (ADR 0051)');
+  assert.match(css, /\.project-panel \{[^}]*height: 100%/, 'a panel window’s frame fills it');
+  assert.match(css, /signal-plane[^{]*\{[^}]*height: 100%/, 'the plane fills the tab');
   assert.doesNotMatch(css, /100vh|100vw/);
   const page = read('app/index.html');
   assert.equal([...page.matchAll(/class="tab tab-scroll"/g)].length, 2);
-  assert.equal([...page.matchAll(/class="tab tab-panel"/g)].length, 1);
+  assert.equal([...page.matchAll(/class="tab tab-fill"/g)].length, 1);
+  assert.match(page, /<signal-plane><\/signal-plane>/);
 });
 
 test('nothing inside a tab or a panel scrolls on its own', () => {

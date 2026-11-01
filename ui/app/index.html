@@ -1,10 +1,11 @@
 <!doctype html>
 <!-- Signal.app's window (ADR 0023 §2, M2.8-4, M2.8-11): one page. The
-     toolbar (power switch, the tabs Panel | Schematic | Parameters | Setup,
-     Play and Stop, the status), then the tabs, switched without a reload or
-     a new connection: the project's panel (/project/main.html in a
-     same-origin frame filling the tab), the schematic (<signal-schematic>
-     filling the tab, M2.9-1), the parameters (status, meters, messages, the
+     toolbar (power switch, the tabs Signal Project | Parameters | Setup,
+     the status), then the tabs, switched without a reload or
+     a new connection: the Signal Project (ADR 0051: one plane,
+     <signal-plane>, filling the tab: the Setup level with the project's
+     Stacks and this machine's peripherals, a Stack's live front panels,
+     the board below them), the parameters (status, meters, messages, the
      snapshots and the parameter list, as cards) and the setup (the project folder and the
      interface setup). Only the shown tab scrolls, as one container. The
      page URL's fragment carries the WebSocket's port and the session token
@@ -20,11 +21,8 @@
 <body>
 <signal-app-toolbar></signal-app-toolbar>
 <main>
-<section class="tab tab-panel" data-tab="panel" role="tabpanel" aria-label="Panel">
-  <signal-app-panel></signal-app-panel>
-</section>
-<section class="tab tab-fill" data-tab="schematic" role="tabpanel" aria-label="Schematic" hidden>
-  <signal-schematic></signal-schematic>
+<section class="tab tab-fill" data-tab="plane" role="tabpanel" aria-label="Signal Project">
+  <signal-plane></signal-plane>
 </section>
 <section class="tab tab-scroll" data-tab="parameters" role="tabpanel" aria-label="Parameters" hidden>
   <div class="signal-cards">

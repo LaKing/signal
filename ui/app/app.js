@@ -14,7 +14,7 @@
 
 import { getDefaultConnection, onDefaultConnection } from '../signal-ui.js';
 import '../controls/meter.js';
-import '../controls/schematic.js';
+import '../controls/plane.js';
 import { ValueEntry } from '../controls/entry-field.js';
 import { ContextMenu, claimMenus, focusable } from '../controls/context-menu.js';
 import { formatFixed } from '../lib/format.js';
@@ -27,7 +27,7 @@ import { ariaShortcuts, keyCommand, keymap, onKeys, shownKeys } from '../lib/key
 import { dragMessage, fileNote, planUpdate, releaseMessage, resetMessage, rows, shown, structureKey, valuesOf } from './lib/parameters.js';
 import { INITIAL, controls, powerRequest, reduce, restartRequest } from './lib/power.js';
 import { contextItems, keepsSystemMenu } from './lib/context.js';
-import { FLASH_CLASS, FLASH_CSS, FLASH_MS, placesOf, subjectAddresses, subjectOf } from './lib/show-in.js';
+import { FLASH_CLASS, FLASH_CSS, FLASH_MS, placesOf, subjectOf } from './lib/show-in.js';
 import { bindAddresses } from '../controls/base.js';
 import { PROMPT, fieldValue, openRetry, projectLabel, windowTitle } from './lib/document.js';
 import { archiveSave, saveReport, saveRequests } from './lib/save.js';
@@ -112,7 +112,7 @@ class AppElement extends HTMLElement {
 }
 
 /**
- * The toolbar: the power switch, the tabs (Panel | Parameters | Setup), the
+ * The toolbar: the power switch, the tabs (Signal Project | Parameters | Setup), the
  * project's name (with "Edited" while a .signal project's working folder
  * differs from its file), and the compact status with the last notice. No
  * Play or Stop (ADR 0033): the project runs while the power is on, and its
@@ -1215,22 +1215,21 @@ export class SignalAppContextMenu extends AppElement {
 // items, ./lib/show-in.js): the tab shown, what the subject is there
 // brought into view and flashed.
 
-/** The panel frame's document, the parameter list and the schematic. */
+/** The plane (ADR 0051), a panel frame's document where a page has one, and the parameter list. */
 function views() {
   return {
+    plane: document.querySelector('signal-plane'),
     panel: document.querySelector('signal-app-panel')?.frame?.contentDocument ?? null,
     parameters: document.querySelector('signal-app-parameters'),
-    schematic: document.querySelector('signal-schematic'),
   };
 }
 
-/** The addresses each view has, for `placesOf`: the panel's bound controls, the parameter rows and groups, what the schematic can reveal of `subject`. */
-function shownAddresses(subject) {
-  const { panel, parameters, schematic } = views();
+/** The addresses each view has, for `placesOf`: the plane's front panels' bound controls, the parameter rows and groups. */
+function shownAddresses() {
+  const { plane, parameters } = views();
   return {
-    panel: [...(panel?.querySelectorAll('[bind]') ?? [])].flatMap(bindAddresses),
+    plane: plane?.shownAddresses?.() ?? [],
     parameters: [...(parameters?.querySelectorAll('[data-address]') ?? [])].map((e) => e.dataset.address),
-    schematic: subjectAddresses(subject).filter((a) => schematic?.revealable?.(a)),
   };
 }
 
@@ -1238,10 +1237,12 @@ function showIn(tab, subject, toolbar) {
   const place = placesOf(subject, shownAddresses(subject))[tab];
   if (place.reason) return;
   toolbar?.select(tab);
-  const { panel, parameters, schematic } = views();
+  const { plane, panel, parameters } = views();
   const wanted = new Set(place.addresses);
-  if (tab === 'schematic') schematic?.revealAddress(subject);
-  else if (tab === 'panel') {
+  if (tab === 'plane') {
+    // ADR 0051: the Stack holding it focused and scrolled to it, the control (an instance's: its card) marked.
+    flash(plane?.reveal?.(place.addresses, place.whole) ?? [], false);
+  } else if (tab === 'panel') {
     // A control of it; an instance's: the card holding its controls.
     const controls = [...(panel?.querySelectorAll('[bind]') ?? [])].filter((e) => bindAddresses(e).some((a) => wanted.has(a)));
     flash(controls.map((e) => (place.whole ? (e.closest('.signal-card') ?? e) : e)));
@@ -1255,17 +1256,23 @@ function showIn(tab, subject, toolbar) {
   }
 }
 
-/** `elements` scrolled to (the first) and marked for a moment (`FLASH_CSS`, put into their document once). */
-function flash(elements) {
+/**
+ * `elements` scrolled to (the first; not with `scroll` false: the plane
+ * brings them into view itself) and marked for a moment (`FLASH_CSS`, put
+ * once into their document, or the shadow root that holds them).
+ */
+function flash(elements, scroll = true) {
   const list = [...new Set(elements)];
   if (!list.length) return;
   for (const element of list) {
     const doc = element.ownerDocument;
-    if (!doc.getElementById('signal-shown-flash-style')) {
+    const root = element.getRootNode?.() ?? doc;
+    const holder = root === doc ? doc.head : root;
+    if (!holder.querySelector?.('#signal-shown-flash-style')) {
       const style = doc.createElement('style');
       style.id = 'signal-shown-flash-style';
       style.textContent = FLASH_CSS;
-      doc.head.append(style);
+      holder.append(style);
     }
     clearTimeout(element.signalShownTimer);
     element.classList.remove(FLASH_CLASS);
@@ -1273,6 +1280,7 @@ function flash(elements) {
     element.classList.add(FLASH_CLASS);
     element.signalShownTimer = setTimeout(() => element.classList.remove(FLASH_CLASS), FLASH_MS);
   }
+  if (!scroll) return;
   const reduced = list[0].ownerDocument.defaultView?.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
   list[0].scrollIntoView({ block: 'center', inline: 'nearest', behavior: reduced ? 'auto' : 'smooth' });
 }

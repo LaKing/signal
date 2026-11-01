@@ -41,13 +41,13 @@ test('the Panel tab shows the project’s panel with the page’s fragment', () 
 });
 
 // AC3, AC4, AC16: one page; the toolbar first; no in-page menu bar, no other page.
-test('one page: the toolbar, then the four tabs', () => {
+test('one page: the toolbar, then the three tabs (ADR 0051: the Signal Project in place of Panel and Schematic)', () => {
   assert.doesNotMatch(page, /signal-app-menu/, 'the in-page menu bar is gone');
   const toolbar = page.indexOf('<signal-app-toolbar>');
   const main = page.indexOf('<main>');
   assert.ok(toolbar > 0 && toolbar < main, 'the toolbar is at the top');
   const tabs = [...page.matchAll(/data-tab="(\w+)" role="tabpanel"/g)].map((m) => m[1]);
-  assert.deepEqual(tabs, ['panel', 'schematic', 'parameters', 'setup']);
+  assert.deepEqual(tabs, ['plane', 'parameters', 'setup']);
   assert.doesNotMatch(app, /location\.(assign|href)|href:/, 'switching tabs never navigates');
   for (const gone of ['panel.html', 'setup.html']) {
     assert.throws(() => readFileSync(new URL(`../${gone}`, import.meta.url)), { code: 'ENOENT' }, `${gone} is gone`);
