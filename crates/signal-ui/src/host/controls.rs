@@ -16,8 +16,9 @@ use crate::panel::{
     write_project_chosen,
 };
 
+use super::Host;
 use super::failure::{Failure, fail};
-use super::{Failed, Host};
+use super::live::Failed;
 
 /// The top-level instance and parameter of a control address `/<instance>.<parameter>`.
 pub(super) fn control_of(port: &PortAddress) -> Option<(String, String)> {
