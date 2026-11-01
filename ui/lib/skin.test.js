@@ -33,6 +33,14 @@ test('URLs stay as written: @2x is never percent-encoded', () => {
   assert.equal(resolveSkinUrl('assets/knob@2x.png', 'file:///Users/me/signal/ui/gallery.html'), 'file:///Users/me/signal/ui/assets/knob@2x.png');
 });
 
+test('a skin on another host is refused (review 2026-11-01)', () => {
+  const page = 'http://127.0.0.1:8800/project/main.html';
+  assert.equal(resolveSkinUrl('/ui/assets/knob.svg', page), 'http://127.0.0.1:8800/ui/assets/knob.svg');
+  for (const bad of ['https://example.com/k.svg', '//example.com/k.svg', 'http://127.0.0.1:9999/k.svg', 'data:image/svg+xml,<svg/>', 'javascript:alert(1)']) {
+    assert.throws(() => resolveSkinUrl(bad, page), /not on the page's host/, bad);
+  }
+});
+
 test('filmstrip frame selection: vertical and horizontal', () => {
   // 64 frames of 48 × 48, top to bottom.
   const vertical = { frames: 64, imageWidth: 48, imageHeight: 48 * 64 };

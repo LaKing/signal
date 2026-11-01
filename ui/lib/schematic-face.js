@@ -151,7 +151,8 @@ export function faceAttribute(name, value, root, base) {
  * The style sheets of the project's panel page (`text`, `ui/main.html`'s
  * whole text) resolved against `base`, in order: what styles its cards
  * (the studio's `studio.css`), so a face looks as the part does on the
- * panel. Comments are skipped; only `<link rel="stylesheet" href>`.
+ * panel. Comments are skipped; only `<link rel="stylesheet" href>`, and
+ * only on the page's host (a sheet of another host is left out).
  */
 export function stylesheets(text, base) {
   const found = [];
@@ -164,8 +165,10 @@ export function stylesheets(text, base) {
     const url = href && (href[1] ?? href[2] ?? href[3]);
     if (!url) continue;
     try {
-      const resolved = new URL(url, base).href;
-      if (!found.includes(resolved)) found.push(resolved);
+      const resolved = new URL(url, base);
+      // A sheet of another host is left out: nothing loads off-host (SECURITY.md).
+      if (resolved.origin !== new URL(base).origin) continue;
+      if (!found.includes(resolved.href)) found.push(resolved.href);
     } catch {
       // Not a URL: left out.
     }

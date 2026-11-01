@@ -97,6 +97,9 @@ test("the project panel's style sheets style its faces, in order, comments skipp
   </head>`;
   assert.deepEqual(stylesheets(page, BASE), ['http://127.0.0.1:7000/ui/controls/theme.css', 'http://127.0.0.1:7000/project/studio.css']);
   assert.deepEqual(stylesheets('', BASE), []);
+  // Review 2026-11-01: a sheet of another host is left out.
+  const offHost = '<link rel="stylesheet" href="https://example.com/x.css"><link rel="stylesheet" href="//evil.test/y.css"><link rel="stylesheet" href="studio.css">';
+  assert.deepEqual(stylesheets(offHost, BASE), ['http://127.0.0.1:7000/project/studio.css']);
 });
 
 test("a wire into a parameter, or its pin, lights the face control bound to it", () => {

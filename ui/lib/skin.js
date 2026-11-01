@@ -52,9 +52,15 @@ export function parseSkin(attribute) {
   return skin;
 }
 
-/** A skin URL against the page's base, without encoding the name. */
+/**
+ * A skin URL against the page's base, without encoding the name. A URL on
+ * another origin than the page's is refused (throws): a skin never loads
+ * from another host (SECURITY.md, review 2026-11-01).
+ */
 export function resolveSkinUrl(url, base) {
-  return new URL(url, base).href;
+  const resolved = new URL(url, base);
+  if (resolved.origin !== new URL(base).origin) throw new Error(`skin ${url} is not on the page's host`);
+  return resolved.href;
 }
 
 /**
@@ -122,17 +128,61 @@ export function cleanCss(css) {
     .replace(/url\(\s*(['"]?)(.*?)\1\s*\)/gi, (whole, _quote, ref) => (isSameOriginRef(ref) ? whole : 'none'));
 }
 
-/** What controls/skin-dom.js removes from an SVG skin before using it. */
+/** The namespaces an SVG skin's elements and attributes are judged by. */
+export const SVG_NS = 'http://www.w3.org/2000/svg';
+export const XLINK_NS = 'http://www.w3.org/1999/xlink';
+export const XML_NS = 'http://www.w3.org/XML/1998/namespace';
+export const XMLNS_NS = 'http://www.w3.org/2000/xmlns/';
+
+/**
+ * What controls/skin-dom.js keeps of an SVG skin. Elements are judged by
+ * namespace and local name, never by their qualified name, so a prefix
+ * (`<s:script xmlns:s="…svg">`, `<h:iframe xmlns:h="…xhtml">`) changes
+ * nothing (review 2026-11-01): only the SVG drawing elements listed here
+ * stay; anything else (script, foreignObject, a, animation, an element of
+ * any other namespace) is removed with everything inside it.
+ */
 export const SVG_SANITIZE = Object.freeze({
-  /** Elements removed with everything inside them. */
-  elements: Object.freeze(['script', 'foreignObject', 'iframe', 'object', 'embed', 'audio', 'video', 'animate', 'animateMotion', 'animateTransform', 'set']),
+  /** The SVG elements a skin may hold (in the SVG namespace). */
+  allowed: Object.freeze([
+    'svg', 'g', 'defs', 'symbol', 'use', 'title', 'desc', 'metadata', 'style',
+    'path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon',
+    'text', 'tspan', 'textPath', 'image', 'marker', 'pattern', 'clipPath', 'mask',
+    'linearGradient', 'radialGradient', 'stop', 'filter',
+    'feBlend', 'feColorMatrix', 'feComponentTransfer', 'feComposite', 'feConvolveMatrix',
+    'feDiffuseLighting', 'feDisplacementMap', 'feDistantLight', 'feDropShadow', 'feFlood',
+    'feFuncA', 'feFuncB', 'feFuncG', 'feFuncR', 'feGaussianBlur', 'feImage', 'feMerge',
+    'feMergeNode', 'feMorphology', 'feOffset', 'fePointLight', 'feSpecularLighting',
+    'feSpotLight', 'feTile', 'feTurbulence',
+  ]),
   /** Attributes that keep a reference only when `isSameOriginRef` allows it. */
   references: Object.freeze(['href', 'xlink:href', 'src']),
-  /** Attributes removed outright: they change how references resolve. */
-  removed: Object.freeze(['xml:base', 'base']),
+  /** Attributes removed outright: they change how references resolve, or hold a document. */
+  removed: Object.freeze(['xml:base', 'base', 'srcdoc']),
   /** Attributes whose names start with this are removed (event handlers). */
   handlerPrefix: 'on',
 });
+
+/** Whether an SVG skin keeps an element of namespace `namespace` named `localName`. */
+export function keepsSvgElement(namespace, localName) {
+  return namespace === SVG_NS && SVG_SANITIZE.allowed.includes(localName);
+}
+
+/**
+ * An SVG skin attribute's value once sanitized, judged by its namespace and
+ * local name (any prefix ignored), or null to remove it: an attribute of
+ * no namespace by `sanitizeAttribute`; of XLink only `href`, as a
+ * reference; of XML only `space` and `lang`; namespace declarations stay;
+ * an attribute of any other namespace goes.
+ */
+export function sanitizeSvgAttribute(namespace, localName, value) {
+  const name = String(localName);
+  if (namespace === null || namespace === undefined || namespace === '') return sanitizeAttribute(name, value);
+  if (namespace === XLINK_NS) return name === 'href' ? sanitizeAttribute('xlink:href', value) : null;
+  if (namespace === XML_NS) return name === 'space' || name === 'lang' ? value : null;
+  if (namespace === XMLNS_NS) return value;
+  return null;
+}
 
 /**
  * An SVG skin attribute's value once sanitized, or null to remove it:

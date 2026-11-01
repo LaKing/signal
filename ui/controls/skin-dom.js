@@ -2,24 +2,32 @@
 // (sanitized) or a filmstrip image, and showing a position with them. The
 // string rules are lib/skin.js's.
 
-import { SVG_SANITIZE, cleanCss, resolveSkinUrl, sanitizeAttribute, stripFrame } from '../lib/skin.js';
+import { SVG_NS, cleanCss, keepsSvgElement, resolveSkinUrl, sanitizeSvgAttribute, stripFrame } from '../lib/skin.js';
 
-const SVG_NS = 'http://www.w3.org/2000/svg';
-
-/** Removes what an SVG skin may not carry: scripts, handlers, off-host references. */
+/**
+ * Removes what an SVG skin may not carry: every element but the SVG
+ * drawing elements of lib/skin.js's allow-list, judged by namespace and
+ * local name so a prefix hides nothing (review 2026-11-01), with
+ * everything inside it; event handlers, documents (`srcdoc`), attributes
+ * of other namespaces and off-host references. Works on any tree of
+ * `children`, `attributes` (each with `namespaceURI`, `localName` and
+ * `value`), `remove()` and `removeAttributeNode()`.
+ */
 export function sanitizeSvg(root) {
-  for (const name of SVG_SANITIZE.elements) {
-    for (const element of [...root.getElementsByTagName(name)]) element.remove();
-  }
-  for (const element of [root, ...root.querySelectorAll('*')]) {
+  const walk = (element) => {
     // Every attribute, so a presentation attribute (fill="url(…)") is checked too.
     for (const attribute of [...element.attributes]) {
-      const value = sanitizeAttribute(attribute.name, attribute.value);
+      const value = sanitizeSvgAttribute(attribute.namespaceURI, attribute.localName, attribute.value);
       if (value === null) element.removeAttributeNode(attribute);
       else if (value !== attribute.value) attribute.value = value;
     }
-    if (element.localName === 'style') element.textContent = cleanCss(element.textContent);
-  }
+    if (element.namespaceURI === SVG_NS && element.localName === 'style') element.textContent = cleanCss(element.textContent);
+    for (const child of [...element.children]) {
+      if (keepsSvgElement(child.namespaceURI, child.localName)) walk(child);
+      else child.remove();
+    }
+  };
+  walk(root);
   return root;
 }
 

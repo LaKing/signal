@@ -68,19 +68,22 @@ canvas { width: var(--signal-canvas-width, 100%); height: var(--signal-canvas-he
   async loadSkin() {
     const attribute = this.getAttribute('skin');
     let spec = null;
+    let src = null;
     try {
       spec = parseSkin(attribute);
+      // An off-host URL throws: drawn by default (resolveSkinUrl).
+      if (spec) src = resolveSkinUrl(spec.hidpi && (globalThis.devicePixelRatio || 1) > 1 ? spec.hidpi : spec.url, document.baseURI);
     } catch (error) {
+      spec = null;
       console.info(`<signal-canvas> skin="${attribute}": ${error.message}; drawing the default`);
     }
     if (!spec) {
       this.sprite = null;
     } else {
       const image = new Image();
-      const url = spec.hidpi && (globalThis.devicePixelRatio || 1) > 1 ? spec.hidpi : spec.url;
       image.onload = () => this.schedule();
       image.onerror = () => console.info(`<signal-canvas> skin "${attribute}" did not load; drawing the default`);
-      image.src = resolveSkinUrl(url, document.baseURI);
+      image.src = src;
       this.sprite = { image, spec };
     }
     this.update();

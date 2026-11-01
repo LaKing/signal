@@ -143,8 +143,9 @@ A position is 0..1 along the travel (`ui/lib/taper.js`):
 | `value` | fader, knob | its text is the formatted value |
 
 Before it is used the SVG is sanitized (`ui/lib/skin.js`, conservatively: what it cannot read as local is dropped):
-- `script`, `foreignObject`, `iframe`, `object`, `embed`, `audio`, `video` and the animation elements are removed;
-- every `on…` attribute and `xml:base` are removed;
+- elements and attributes are judged by namespace and local name, never by their written name, so a prefix (`<s:script xmlns:s="http://www.w3.org/2000/svg">`, `<h:iframe xmlns:h="http://www.w3.org/1999/xhtml">`) hides nothing (review 2026-11-01);
+- only the SVG drawing elements of an allow-list stay (`SVG_SANITIZE.allowed`: `svg`, `g`, `defs`, `symbol`, `use`, the shapes, `text`, `image`, gradients, patterns, masks, clip paths, markers, filters and their primitives, `style`, `title`, `desc`, `metadata`); anything else, `script`, `foreignObject`, `a`, `iframe`, the animation elements and every element of another namespace included, is removed with what it holds;
+- every `on…` attribute, `srcdoc`, `xml:base` and every attribute of a namespace other than none, XLink (`href` only), XML (`space`, `lang`) and namespace declarations are removed;
 - `href`, `xlink:href` and `src` stay only when they are a fragment (`#id`) or a path on the same host: a reference with a control character (a URL parser drops tabs and newlines, so `java⇥script:` is `javascript:`), a backslash, a scheme or a host is removed;
 - `<style>`, `style` and any other attribute holding `url(` (`fill`, `filter`, `mask`, `clip-path` …): comments go, CSS with an escape or control character (`u\72l(` spells `url(`) or with `image-set(`/`src(` is dropped whole, `@import` rules go, and `url()`s other than same-host ones become `none`.
 
@@ -155,7 +156,7 @@ So a skin cannot run code or load anything from another host.
 - `columns=C`: a sprite sheet, frames row by row.
 - Retina: a name ending in `@2x` is a double-resolution image (shown at half its pixel size; `scale=S` for another scale), and `2x=<url>` names a double-resolution copy of a 1x image (CSS `image-set`). URLs are used as written: the server refuses `%`, so names are never percent-encoded (`knob@2x.png` stays `knob@2x.png`).
 
-URLs are relative to the page. A skin that does not load falls back to the built-in drawing with a `console.info` line.
+URLs are relative to the page, and a skin URL on another host than the page's is refused (`resolveSkinUrl`). A skin that does not load falls back to the built-in drawing with a `console.info` line.
 
 ## Canvas
 
