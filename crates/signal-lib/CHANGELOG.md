@@ -37,6 +37,7 @@ The library of Signal 0.4.0. No composite changed its output from 0.3.
 
 - `lib.mixer` (new, ADR 0035 §9): four stereo channels `a`…`d` (inputs `a_l`, `a_r` … `d_l`, `d_r`), each with `<c>_level` (dB, exactly silent at −120), `<c>_mute` (smoothed over 5 ms, reaching its target exactly) and `<c>_balance`, summed in channel order, then a master `level`; outputs `l`, `r`. A channel at −120 dB or muted is bit-neutral. Pinned render hash `b608f416505c7717`
 - `lib.poly_voice` (interface template, ADR 0044 §2): a polyphonic voice, inputs `notes` (events, trigger, `voice = "alloc"`), `hz` (frequency, Hz), `gate` (gate) and `velocity` (control, 0 to 1), the last three `voice = "each"`, output `out` (audio, `voice = "sum"`); text hash `bdc391924b112a10`
+- `lib.transport` exports `std.playhead`'s follow inputs (`follow`, `follow_jump`, `follow_running`, `follow_tempo`) and its `release` parameter (0 continue, 1 return), ADR 0037 §6, so a deck project can follow its host with the library transport instead of a vendored copy. Ports and a parameter added, outputs unchanged: unconnected, it plays as before, and its pinned hash `7f20f2bbed23372b` holds. Its content hash in a render manifest (`library_composite_hashes`) moved, `743310655b13c16b` to `8f2723aed59154de`, in the studio-transport, two-studios and two-decks goldens; their audio and log hashes did not.
 
 ## 0.3
 

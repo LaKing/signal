@@ -4,7 +4,10 @@
 # position on a wire.
 #
 #   bpm, run, rate ─► playhead ─► position (beats), running (0/1), tempo (bpm)
-#   seek ──────────►    │       └► jump (a trigger on each frame a seek lands)
+#   seek ──────────►    │       └► jump (a trigger on each frame a seek lands,
+#   follow, follow_jump,│          and when following starts, is rewired, or
+#   follow_running, ────┘          stops with release 1)
+#   follow_tempo
 #
 # Wire `position` into the `follow` input of std.note_seq and std.step_seq8
 # (instead of a std.transport's `tick`): a note fires on the first frame
@@ -20,6 +23,15 @@
 # would be exact only while it plays forward. Sequencers follow the position
 # directly; std.transport keeps the tick clock for the counted path.
 #
+# Following (ADR 0037 §6): unconnected, the follow inputs change nothing.
+# With `follow` connected, `position` is a copy of it (and `running`, `tempo`
+# of their follow inputs, when those are connected), while the playhead's own
+# clock runs on underneath, unheard. When following stops, `release` says
+# what happens: 0 (continue) goes on from the last followed position at the
+# transport's own tempo; 1 (return) steps to its own clock's position. A deck
+# project exports these as `position`, `jump`, `running`, `tempo` and
+# `release` to follow its host in a `lib.deck` slot.
+#
 # Vendor it (`signal vendor <project> lib.transport`) to embellish it: a
 # turntable's spin-up on `rate`, a scrub wheel, an external clock smoothed
 # into `rate`, song-mode jumps into `seek`.
@@ -28,13 +40,13 @@ schema_version = 1
 [composite]
 name = "transport"
 category = "event"
-description = "The transport as a signal: a position in beats on a wire for sequencers to follow (std.note_seq.follow, std.step_seq8.follow), from a std.playhead. Parameters: bpm (20 to 400, default 120), run (0 or 1, default 1: playing at 1, stopped at 0, keeping its place; a connected gate replaces it), rate (a factor of the tempo, -16 to 16, default 1: 0 holds the place, negative plays backwards; a connected signal replaces it). Input: seek (events: Set(beat) jumps to that beat, a Trigger rewinds to 0). Outputs: jump (a trigger on each frame a seek lands, for the sequencers' reset), position (beats, exact from the last change of bpm, rate or run, never drifting; within ±1e6), running (0 or 1), tempo (bpm·rate while running, else 0)."
+description = "The transport as a signal: a position in beats on a wire for sequencers to follow (std.note_seq.follow, std.step_seq8.follow), from a std.playhead. Parameters: bpm (20 to 400, default 120), run (0 or 1, default 1: playing at 1, stopped at 0, keeping its place; a connected gate replaces it), rate (a factor of the tempo, -16 to 16, default 1: 0 holds the place, negative plays backwards; a connected signal replaces it). release (0 continue, 1 return: what it does when following stops, default 0). Inputs: seek (events: Set(beat) jumps to that beat, a Trigger rewinds to 0); follow (beats), follow_jump (events), follow_running (gate), follow_tempo (bpm): when follow is connected, position copies it and running and tempo their follow inputs. Outputs: jump (a trigger on each frame a seek lands, and when following starts, is rewired, or stops with release 1, for the sequencers' reset), position (beats, exact from the last change of bpm, rate or run, never drifting; within ±1e6), running (0 or 1), tempo (bpm·rate while running, else 0)."
 
 [instances]
 playhead = { module = "std.playhead", bpm = 120, run = 1, rate = 1 }
 
 [exports]
-inputs = { seek = "playhead.seek" }
+inputs = { seek = "playhead.seek", follow = "playhead.follow", follow_jump = "playhead.follow_jump", follow_running = "playhead.follow_running", follow_tempo = "playhead.follow_tempo" }
 outputs = { position = "playhead.position", running = "playhead.running", tempo = "playhead.tempo", jump = "playhead.jump" }
 
 # Each exported parameter with its own range (ADR 0042).
@@ -42,3 +54,4 @@ outputs = { position = "playhead.position", running = "playhead.running", tempo 
 bpm = { to = "playhead.bpm", min = 20, max = 400 }
 run = { to = "playhead.run", values = [{ value = 0, label = "stopped" }, { value = 1, label = "running" }] }
 rate = { to = "playhead.rate", min = -16, max = 16 }
+release = { to = "playhead.release", values = [{ value = 0, label = "continue" }, { value = 1, label = "return" }] }
