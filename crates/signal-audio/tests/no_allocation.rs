@@ -144,3 +144,61 @@ fn the_callback_allocates_and_frees_nothing() {
         total.deallocations
     );
 }
+
+/// ADR 0038 (M4.1): two play sides (`projects/cue-mix`: cue, then main) routed
+/// onto device channels 3–4 and 1–2 of four, each with its gain: the
+/// callback allocates and frees nothing either.
+#[test]
+fn the_routed_callback_allocates_and_frees_nothing() {
+    assert!(alloc_counter::is_installed());
+    let mut registry = Registry::new();
+    signal_std::register(&mut registry).unwrap();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/cue-mix");
+    let project = Project::load(&dir).unwrap();
+    let plan = project.plan(&registry).unwrap().plan;
+    let rate = project.sample_rate;
+    let sides = signal_project::device::play_sides(&project, &plan);
+    let system = signal_output::SoundSystem {
+        roles: [(
+            "cue".to_owned(),
+            signal_output::RoleBinding::clock(vec![3, 4]),
+        )]
+        .into(),
+    };
+    let routing = signal_output::route(&sides, &system, Some(4));
+    assert_eq!(routing.targets(), [Some(2), Some(3), Some(0), Some(1)]);
+    let config = RealtimeConfig::new(rate, project.seed);
+    let (runner, mut controller) =
+        signal_output::realtime_routed(&plan, &registry, config, None, &routing.addresses())
+            .unwrap();
+    let stats = Arc::new(CallbackStats::default());
+    let map = ChannelMap::with_routes(4, routing.targets()).unwrap();
+    let (mut callback, _control) = OutputCallback::new(runner, map, 256, rate, Arc::clone(&stats));
+    let mut out = vec![0.0f32; 1_024 * 4];
+    let mut sizes = CallbackSizes::new(9);
+    let mut total = Counts::default();
+    let mut heard = [0.0f32; 4];
+    for n in 0..2_000 {
+        let frames = sizes.next_size().min(1_024);
+        let buffer = &mut out[..frames * 4];
+        let guard = Guard::start();
+        callback.fill(buffer);
+        let counts = guard.counts();
+        drop(guard);
+        total.allocations += counts.allocations;
+        total.deallocations += counts.deallocations;
+        for frame in buffer.chunks_exact(4) {
+            for (h, x) in heard.iter_mut().zip(frame) {
+                *h = h.max(x.abs());
+            }
+        }
+        if n % 16 == 0 {
+            controller.poll(&mut ());
+        }
+    }
+    assert!(total.is_zero(), "{total:?}");
+    assert!(
+        heard.iter().all(|&h| h > 0.0),
+        "every channel heard: {heard:?}"
+    );
+}

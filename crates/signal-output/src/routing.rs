@@ -206,7 +206,7 @@ pub fn route(sides: &[PlaySide], system: &SoundSystem, device_channels: Option<u
             ),
             None => {
                 notices.push(format!(
-                    "{who}: not heard on this machine (the Setup has no [play.{}])",
+                    "{who}: not heard on this machine (nothing binds it: [play.{}] in the Setup)",
                     side.role
                 ));
                 routed.push(unheard(side, Heard::Unrouted));
@@ -355,7 +355,9 @@ mod tests {
         assert_eq!(routing.sides[0].heard, Heard::Unrouted);
         assert_eq!(
             routing.notices,
-            ["click (/click): not heard on this machine (the Setup has no [play.click])"]
+            [
+                "click (/click): not heard on this machine (nothing binds it: [play.click] in the Setup)"
+            ]
         );
     }
 

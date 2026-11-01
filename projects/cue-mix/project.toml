@@ -1,0 +1,57 @@
+# ADR 0038 (M4.1): two outputs at once. `main` is the mix the room hears;
+# `cue` is a headphone mix with a click, for whoever plays along. The
+# project names the roles and their layout, never the hardware: this
+# machine's Setup says where each role plays, e.g. on an SSL 2+:
+#
+#   [play.cue]
+#   channels = [3, 4]          # main stays on 1–2 (output_channels)
+#
+# A machine whose Setup has no [play.cue] plays only `main`, and says that
+# `cue` is not heard there (ADR 0038 §4: an unknown role never falls back
+# to main). Renders write `audio.wav` (main) and `devices/cue.wav`.
+#
+# Signal flow:
+#
+#   transport.beat ─► pluck (envelope) ─► vca.b
+#   tone (saw, 110 Hz) ─► filter ─► vca.a
+#   vca ─► out.l, out.r                          (main)
+#   vca ×0.5 ─► cue.l, cue.r                     (cue: the mix, quieter)
+#   transport.beat ─► tick (short envelope) ─► click.b
+#   beep (1.5 kHz sine) ─► click.a ─► cue.l, cue.r   (cue: the click)
+schema_version = 1
+
+[project]
+name = "cue-mix"
+sample_rate = 48000
+seed = 1
+
+[instances]
+transport = { module = "std.transport", bpm = 100 }
+tone = { module = "std.osc", shape = 1, freq = 110 }
+filter = { module = "std.svf", cutoff_hz = 900, q = 1.2 }
+pluck = { module = "std.exp_env", attack_ms = 2, decay_ms = 300 }
+vca = { module = "std.mul" }
+beep = { module = "std.sine_osc", freq = 1500 }
+tick = { module = "std.exp_env", attack_ms = 0, decay_ms = 25 }
+click = { module = "std.mul" }
+# The room's mix: role `main`, stereo (std.audio_out is the main device slot).
+out = { module = "std.audio_out", gain = 0.4 }
+# The headphone mix: a device slot of role `cue`, stereo.
+cue = { device = { play = "stereo", role = "cue" }, gain = 0.5 }
+
+[wiring]
+connections = [
+  { from = "transport.beat", to = "pluck.trigger" },
+  { from = "tone.out", to = "filter.in" },
+  { from = "filter.lp", to = "vca.a" },
+  { from = "pluck.out", to = "vca.b" },
+  { from = "vca.out", to = "out.l" },
+  { from = "vca.out", to = "out.r" },
+  { from = "vca.out", to = "cue.l", scale = 0.5 },
+  { from = "vca.out", to = "cue.r", scale = 0.5 },
+  { from = "transport.beat", to = "tick.trigger" },
+  { from = "beep.out", to = "click.a" },
+  { from = "tick.out", to = "click.b" },
+  { from = "click.out", to = "cue.l" },
+  { from = "click.out", to = "cue.r" },
+]

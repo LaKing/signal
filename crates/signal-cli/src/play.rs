@@ -23,7 +23,9 @@ use signal_engine::{
     BoundaryLine, Computation, ControlSink, HangLine, RealtimeConfig, Report, RtOptions, RtPolicy,
     RunnerStatus, SentCommand, Spread, WakeStats,
 };
-use signal_output::{Controller, Driver, NullDriver, Runner, realtime_with};
+use signal_output::{
+    Controller, Driver, NullDriver, RoleBinding, Runner, SoundSystem, realtime_routed, route,
+};
 use signal_project::live::{ProjectWatcher, ReloadError, WATCH_INTERVAL_MS, reload};
 use signal_project::session::{LiveRecorder, SessionError, SessionRecorder, sink_of};
 use signal_project::{LoadError, Project, provenance};
@@ -98,6 +100,30 @@ pub(crate) struct PlayArgs {
     /// last worker joining, the slowest task, per callback) and report it.
     #[arg(long)]
     pub(crate) rt_trace: bool,
+    /// Plays role ROLE on these device channels of the output device, for
+    /// this run only (ADR 0038 §6, M4.1): `--route cue=3,4`. Repeatable;
+    /// `main` plays on channels 1 to its width without one, and a role
+    /// with none is not heard.
+    #[arg(long, value_name = "ROLE=CHANNELS", value_parser = parse_route)]
+    pub(crate) route: Vec<(String, Vec<u16>)>,
+}
+
+/// `--route`'s value: `role=3,4`.
+pub(crate) fn parse_route(text: &str) -> Result<(String, Vec<u16>), String> {
+    let (role, channels) = text
+        .split_once('=')
+        .ok_or_else(|| format!("`{text}` is not ROLE=CHANNELS (cue=3,4)"))?;
+    if !signal_project::device::valid_role(role) {
+        return Err(format!("`{role}` is not a role: [a-z][a-z0-9_]*"));
+    }
+    let channels = channels
+        .split(',')
+        .map(|c| match c.trim().parse::<u16>() {
+            Ok(n) if n > 0 => Ok(n),
+            _ => Err(format!("'{}' is not a device channel (1, 2, …)", c.trim())),
+        })
+        .collect::<Result<Vec<u16>, String>>()?;
+    Ok((role.to_owned(), channels))
 }
 
 /// `--rt-policy`'s value.
@@ -361,6 +387,29 @@ pub(crate) fn run(
     }
     let registry = gpu.registry();
     let (_, width) = sink_of(&project, &plan).map_err(|d| Failure::Invalid(located(shown, d)))?;
+    // ADR 0038 (M4.1): every play side, routed with `--route` on the output
+    // device; one sink without a route plays as before.
+    let sides = signal_project::device::play_sides(&project, &plan);
+    let (width, sinks, routes) = if sides.len() > 1 || !args.route.is_empty() {
+        let system = SoundSystem {
+            roles: args
+                .route
+                .iter()
+                .map(|(role, channels)| (role.clone(), RoleBinding::clock(channels.clone())))
+                .collect(),
+        };
+        let routing = route(&sides, &system, None);
+        for notice in &routing.notices {
+            eprintln!("signal: {notice}");
+        }
+        (
+            routing.width(),
+            routing.addresses(),
+            Some(routing.targets()),
+        )
+    } else {
+        (width, Vec::new(), None)
+    };
     let seed = project.seed;
     let selector = args
         .device
@@ -408,9 +457,14 @@ pub(crate) fn run(
         computation: args.rt_computation,
         trace: args.rt_trace,
     };
-    let (runner, controller) =
-        realtime_with(&plan, registry, config, Some(rt_thread::mach_semaphores))
-            .map_err(|e| Failure::Internal(e.to_string()))?;
+    let (runner, controller) = realtime_routed(
+        &plan,
+        registry,
+        config,
+        Some(rt_thread::mach_semaphores),
+        &sinks,
+    )
+    .map_err(|e| Failure::Internal(e.to_string()))?;
     if let Some(error) = runner.waiter_error() {
         eprintln!("signal: warning: no semaphores ({error}); the semaphore workers park");
     }
@@ -459,7 +513,7 @@ pub(crate) fn run(
     let ended = if null {
         play_null(args, &mut control, runner, width, limit, &stop)?
     } else {
-        play_device(args, &mut control, runner, width, limit, &stop)?
+        play_device(args, &mut control, runner, width, routes, limit, &stop)?
     };
 
     let mut live = control.live;
@@ -726,13 +780,28 @@ fn play_device(
     control: &mut Control<'_>,
     runner: Runner,
     width: usize,
+    routes: Option<Vec<Option<usize>>>,
     limit: Option<u64>,
     stop: &AtomicBool,
 ) -> Result<Ended, Failure> {
     let rate = control.rate;
     let device = |e: &dyn std::fmt::Display| Failure::Device(e.to_string());
-    let mut driver = CoreAudioDriver::open(args.device.as_deref(), rate, args.buffer, width)
-        .map_err(|e| device(&e))?;
+    let mut driver = match routes {
+        None => CoreAudioDriver::open(args.device.as_deref(), rate, args.buffer, width),
+        Some(routes) => {
+            let selector = args
+                .device
+                .clone()
+                .map_or(DeviceSelector::Default, DeviceSelector::Name);
+            CoreAudioDriver::open_routed(
+                &selector,
+                rate,
+                BufferRequest::Frames(args.buffer),
+                routes,
+            )
+        }
+    }
+    .map_err(|e| device(&e))?;
     let map = driver.map();
     if !map.dropped().is_empty() {
         eprintln!(
