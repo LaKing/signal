@@ -7,7 +7,10 @@
 //! value of the wrong form, a Stack named twice, an entry naming no card of
 //! `ui/main.html` (`card:<id>`) and no top-level slot with a part, and an
 //! entry listed twice are errors. A card's id is its heading made a slug
-//! (`panel_cards`), the page's rule. The warning for a top-level instance in
+//! (`panel_cards`), the page's rule. **One identity** (`entries`,
+//! `canonical`; the page's `withEntries`, `canonicalEntry`): a card that
+//! shows a top-level slot with a part is that slot's instrument, named by
+//! the slot, so `card:<id>` of it and the slot's name are one entry. The warning for a top-level instance in
 //! no instrument needs the page's assignment of instances to cards and is
 //! the page's own (its "unstacked" tray).
 
@@ -190,6 +193,35 @@ pub fn panel_cards(text: &str) -> Vec<Card> {
         .collect()
 }
 
+/// The one identity rule (ADR 0051 §4–5): each card's instrument entry. A
+/// card that shows a top-level slot with a part (`slots`) is that slot's
+/// instrument, its entry the slot's name; only the first card showing a
+/// slot is. Every other card's entry is `card:<id>`.
+pub fn entries(cards: &[Card], slots: &[String]) -> Vec<String> {
+    let mut taken = BTreeSet::new();
+    cards
+        .iter()
+        .map(|card| match &card.slot {
+            Some(slot) if slots.contains(slot) && taken.insert(slot.clone()) => slot.clone(),
+            _ => format!("{CARD_PREFIX}{}", card.id),
+        })
+        .collect()
+}
+
+/// Entry `entry` under the one identity rule: `card:<id>` of a card that is
+/// a slot's instrument is the slot's name; any other as written.
+pub fn canonical(entry: &str, cards: &[Card], entries: &[String]) -> String {
+    if let Some(id) = entry.strip_prefix(CARD_PREFIX)
+        && let Some(full) = cards
+            .iter()
+            .position(|c| c.id == id)
+            .and_then(|i| entries.get(i))
+    {
+        return full.clone();
+    }
+    entry.to_owned()
+}
+
 /// Whether `name` is a Stack's name: `[a-z][a-z0-9_]*`.
 fn stack_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -198,9 +230,12 @@ fn stack_name(name: &str) -> bool {
 }
 
 /// The findings of `ui/plane.toml`'s `text` (`file` as shown) against the
-/// project: `cards` (the panel's card ids) and `slots` (its top-level
-/// slots with a part). Errors only; in file order of the checks.
-pub fn check(file: &str, text: &str, cards: &[String], slots: &[String]) -> Vec<Finding> {
+/// project: `cards` (the panel's cards) and `slots` (its top-level slots
+/// with a part). Each entry is read canonically (`canonical`) first.
+/// Errors only; in file order of the checks.
+pub fn check(file: &str, text: &str, panel: &[Card], slots: &[String]) -> Vec<Finding> {
+    let known = entries(panel, slots);
+    let cards: Vec<String> = panel.iter().map(|c| c.id.clone()).collect();
     let mut found = Vec::new();
     let mut say = |offset: usize, message: String| {
         found.push(Finding {
@@ -259,7 +294,12 @@ pub fn check(file: &str, text: &str, cards: &[String], slots: &[String]) -> Vec<
     let headers: Vec<usize> = text
         .match_indices("[[stack]]")
         .map(|(i, _)| i)
-        .filter(|&i| text[..i].rsplit('\n').next().is_some_and(|before| before.trim().is_empty()))
+        .filter(|&i| {
+            text[..i]
+                .rsplit('\n')
+                .next()
+                .is_some_and(|before| before.trim().is_empty())
+        })
         .collect();
     for (i, stack) in stacks.iter().enumerate() {
         let Some(stack) = stack.as_table() else {
@@ -332,8 +372,9 @@ pub fn check(file: &str, text: &str, cards: &[String], slots: &[String]) -> Vec<
                 Vec::new()
             }
         };
-        for entry in entries {
-            let offset = text.find(&format!("\"{entry}\"")).unwrap_or(here);
+        for written in entries {
+            let offset = text.find(&format!("\"{written}\"")).unwrap_or(here);
+            let entry = canonical(&written, panel, &known);
             match seen.get(&entry) {
                 Some(first) if *first == name => say(
                     offset,
@@ -410,7 +451,8 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/studio/ui");
         let panel = signal_project::read_regular_to_string(root.join("main.html")).unwrap();
         let plane = signal_project::read_regular_to_string(root.join(PLANE_FILE)).unwrap();
-        let cards: Vec<String> = panel_cards(&panel).into_iter().map(|c| c.id).collect();
+        let found = panel_cards(&panel);
+        let cards: Vec<String> = found.iter().map(|c| c.id.clone()).collect();
         assert_eq!(
             cards,
             [
@@ -422,12 +464,63 @@ mod tests {
                 "master"
             ]
         );
-        assert_eq!(check("ui/plane.toml", &plane, &cards, &[]), Vec::new());
+        assert_eq!(check("ui/plane.toml", &plane, &found, &[]), Vec::new());
+    }
+
+    fn card(id: &str, slot: Option<&str>) -> Card {
+        Card {
+            id: id.to_owned(),
+            heading: String::new(),
+            slot: slot.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_slot_with_a_part_is_one_entry_whichever_form_names_it() {
+        let cards = [
+            card("melody", None),
+            card("synth", Some("synth")),
+            card("deck-a", Some("deck_a")),
+        ];
+        let slots = ["synth".to_owned()];
+        assert_eq!(
+            entries(&cards, &slots),
+            ["card:melody", "synth", "card:deck-a"]
+        );
+        let messages = |instruments: &str| -> Vec<String> {
+            let text = format!(
+                "schema_version = 1\n[[stack]]\nname = \"a\"\ninstruments = [{instruments}]\n"
+            );
+            check("ui/plane.toml", &text, &cards, &slots)
+                .into_iter()
+                .map(|f| f.diagnostic.message)
+                .collect()
+        };
+        assert_eq!(
+            messages("\"card:melody\", \"synth\", \"card:deck-a\""),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            messages("\"card:synth\""),
+            Vec::<String>::new(),
+            "the slot card's migration form names the slot"
+        );
+        assert_eq!(
+            messages("\"card:synth\", \"synth\""),
+            ["plane.toml: \"synth\" is listed twice (in \"a\")"]
+        );
+        assert_eq!(
+            messages("\"deck_a\""),
+            [
+                "plane.toml: \"deck_a\" names no top-level slot with a part (a card is \"card:<id>\")"
+            ],
+            "a slot without a part is drawn by its card"
+        );
     }
 
     #[test]
     fn what_the_file_gets_wrong_is_an_error() {
-        let cards = ["x".to_owned()];
+        let cards = [card("x", None)];
         let slots = ["deck".to_owned()];
         let messages = |text: &str| -> Vec<String> {
             check("ui/plane.toml", text, &cards, &slots)

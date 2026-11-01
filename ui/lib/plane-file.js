@@ -15,9 +15,15 @@
 // An instrument entry names a card of `ui/main.html` (`card:<id>`, the
 // migration form; a card's id is its heading's text made a slug, `cardIds`)
 // or a top-level slot with a part (`mono_synth`, the full form, ADR 0051
-// §5). Here: parsing (the TOML subset of ./pattern-text.js), the check
-// (`plane.check`'s rules), the canonical text, card ids and the derived
-// default. Pure; no DOM.
+// §5). **One identity** (`withEntries`, `canonicalEntry`): a card showing a
+// top-level slot with a part (its open slot card) is that slot's
+// instrument, named by the slot; `card:<id>` of such a card is read as the
+// slot's name. The check, the derived Stack, the instances' assignment
+// (./plane-instruments.js), the rendering and the boundaries all key an
+// instrument so (crates/signal-ui/src/plane.rs has the same rule). Here:
+// parsing (the TOML subset of ./pattern-text.js), the check (`plane.check`'s
+// rules), the canonical text, card ids and the derived default. Pure; no
+// DOM.
 
 import { parseToml, isIntegerArray, isIntegerToken } from './pattern-text.js';
 
@@ -102,6 +108,41 @@ export function panelCards(tree) {
     cards.push({ id, index, heading, place: node.place ?? node.attributes?.place ?? null, slot, binds: bindsUnder(node) });
   });
   return cards;
+}
+
+/**
+ * The one identity rule (ADR 0051 §4–5): `cards` (`panelCards`') each with
+ * its instrument `entry`. A card that shows a top-level slot with a part
+ * (`slots`: their names; the card's `slot`, an open slot card's or one in
+ * it) is that slot's instrument, its entry the slot's name (the full form);
+ * only the first card showing a slot is, a later one is a card of its own.
+ * Every other card's entry is `card:<id>`.
+ */
+export function withEntries(cards = [], slots = []) {
+  const parts = new Set(slots);
+  const taken = new Set();
+  return cards.map((card) => {
+    const slot = card.slot && parts.has(card.slot) && !taken.has(card.slot) ? card.slot : null;
+    if (slot) taken.add(slot);
+    return { ...card, entry: slot ?? `${CARD_PREFIX}${card.id}` };
+  });
+}
+
+/** A card's instrument entry (`withEntries`'), `card:<id>` for a card without one. */
+export function entryOf(card) {
+  return card?.entry ?? `${CARD_PREFIX}${card?.id}`;
+}
+
+/** The card an instrument entry is drawn with (its front panel): the card whose entry it is, or null. */
+export function cardOfEntry(entry, cards = []) {
+  return cards.find((c) => entryOf(c) === entry) ?? null;
+}
+
+/** Entry `entry` of a file under the one identity rule: `card:<id>` of a card that is a slot's instrument is the slot's name; any other as written. */
+export function canonicalEntry(entry, cards = []) {
+  if (!isCardEntry(entry)) return entry;
+  const card = cards.find((c) => c.id === entry.slice(CARD_PREFIX.length));
+  return card ? entryOf(card) : entry;
 }
 
 /** A problem of the file: `{severity: 'error' | 'warning', message, line}`. */
@@ -222,25 +263,31 @@ export function writePlane(plane) {
 
 /**
  * The plane derived without a file (ADR 0051 §4): one primary Stack of the
- * panel's cards (`panelCards`) in panel order, at the plate's width
- * (`plateWidth` in pu, else STACK_PU), laid out (no `at`).
+ * panel's cards (`panelCards`, with their `entry`: `withEntries`) in panel
+ * order, at the plate's width (`plateWidth` in pu, else STACK_PU), laid
+ * out (no `at`).
  */
 export function derivePlane(cards, plateWidth = null) {
   const width = Number.isInteger(plateWidth) && plateWidth >= 1 && plateWidth <= MAX_PU ? plateWidth : STACK_PU;
-  return { schema_version: PLANE_SCHEMA, stacks: [{ name: PRIMARY, at: null, width, instruments: cards.map((c) => `${CARD_PREFIX}${c.id}`) }] };
+  return { schema_version: PLANE_SCHEMA, stacks: [{ name: PRIMARY, at: null, width, instruments: cards.map(entryOf) }] };
 }
 
 /**
  * The plane shown: the file's when it reads without errors, else the
  * derived one (`{plane, derived, problems}`; a file with errors is reported
  * and the derived Stack drawn, so a project never stops opening, ADR 0051
- * §12). `text` null: no file.
+ * §12). `text` null: no file. Either way its entries are canonical
+ * (`canonicalEntry`, `withEntries` with `context.slots`).
  */
 export function planeOf(text, cards, plateWidth = null, context = {}) {
-  if (text === null || text === undefined) return { plane: derivePlane(cards, plateWidth), derived: true, problems: [] };
+  const known = withEntries(cards, context.slots ?? []);
+  if (text === null || text === undefined) return { plane: derivePlane(known, plateWidth), derived: true, problems: [] };
   const read = parsePlane(text);
   const problems = [...read.problems];
-  if (read.plane) problems.push(...checkPlane(read.plane, { cards: cards.map((c) => c.id), ...context }));
-  if (!read.plane || problems.some((p) => p.severity === 'error')) return { plane: derivePlane(cards, plateWidth), derived: true, problems };
+  if (read.plane) {
+    for (const stack of read.plane.stacks) stack.instruments = stack.instruments.map((e) => canonicalEntry(e, known));
+    problems.push(...checkPlane(read.plane, { cards: cards.map((c) => c.id), ...context }));
+  }
+  if (!read.plane || problems.some((p) => p.severity === 'error')) return { plane: derivePlane(known, plateWidth), derived: true, problems };
   return { plane: read.plane, derived: false, problems };
 }

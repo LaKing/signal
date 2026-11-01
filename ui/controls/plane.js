@@ -58,7 +58,7 @@ import { graphGeneration, named } from '../lib/opening.js';
 import { defaultPanel } from '../lib/panel.js';
 import { faceAttribute, rootRules, stylesheets } from '../lib/schematic-face.js';
 import { GUTTER, PU, parsePlace, parsePlate } from '../lib/plate.js';
-import { CARD_PREFIX, PLANE_FILE, panelCards, planeOf } from '../lib/plane-file.js';
+import { PLANE_FILE, cardOfEntry, entryOf, panelCards, planeOf, withEntries } from '../lib/plane-file.js';
 import { assignInstruments, edgePins, hasPart, instrumentTitle, roleEndpoints, stackMembers } from '../lib/plane-instruments.js';
 import { cableDrop, channelSummary, endpointLabel, peripherals, playbackPortOf, setupCables, splitBoxes } from '../lib/plane-peripherals.js';
 import { BOX_PU, OTHERS_PU, TEXT, TRAY_LINE_PU, capChars, boxPorts, cablePath, othersBoxes, pinPlaces, planeLayout, stackLayout, textSize, textSizes } from '../lib/plane-layout.js';
@@ -383,6 +383,7 @@ export class SignalPlane extends HTMLElement {
     this.stopTravel();
     this.sheets = [THEME];
     this.rootCss = '';
+    this.panelCards = [];
     this.cards = [];
     this.layout = null;
     this.panelPending = false;
@@ -503,7 +504,9 @@ export class SignalPlane extends HTMLElement {
     if (gen !== this.generation) return;
     this.panel = panel;
     const parsed = parseContent(panel.html, this.rules, { mode: 'read' });
-    this.cards = parsed.tree ? panelCards(parsed.tree) : [];
+    /** The panel's cards in its order (`panelCards`); `this.cards` are they with their instrument entries (`withEntries`, once the slots are known). */
+    this.panelCards = parsed.tree ? panelCards(parsed.tree) : [];
+    this.cards = withEntries(this.panelCards, this.slotsWithParts());
     for (const s of this.stacks.values()) s.key = null;
     this.recompute();
   }
@@ -514,9 +517,11 @@ export class SignalPlane extends HTMLElement {
     if (!this.panel || !this.rules) return;
     const instances = this.graph?.top?.instances ?? [];
     const connections = this.graph?.top?.connections ?? [];
-    const slots = instances.filter(hasPart).map((i) => i.name);
+    const slots = this.slotsWithParts();
     const plateWidth = parsePlate(this.panel.plate)?.w ?? null;
-    const cards = this.cards ?? [];
+    // The one identity rule (ui/lib/plane-file.js): a card showing a slot with a part is that slot's instrument.
+    const cards = withEntries(this.panelCards ?? [], slots);
+    this.cards = cards;
     const owner = assignInstruments({ instances, connections, cards });
     // The unstacked warning needs the plane: computed on the plane read (or derived), then checked with it.
     let shown = planeOf(this.planeText, cards, plateWidth, { slots });
@@ -536,6 +541,11 @@ export class SignalPlane extends HTMLElement {
     this.renderStacks();
     this.relayout();
     this.showNotes();
+  }
+
+  /** The top-level slots with a part (ADR 0046), whose cards are their instruments. */
+  slotsWithParts() {
+    return (this.graph?.top?.instances ?? []).filter(hasPart).map((i) => i.name);
   }
 
   showNotes() {
@@ -613,13 +623,13 @@ export class SignalPlane extends HTMLElement {
     s.cards = new Map();
     s.sizes = new Map();
     const key = s.key;
-    const error = await showWritten(container, this.panel.html, (name, value) => faceAttribute(name, value, '', this.base));
+    const error = await this.showPanel(container, this.panel.html);
     if (s.key !== key) return;
     s.note.textContent = error ? `ui/main.html: ${error}` : '';
     const grid = container.querySelector(':scope > .signal-cards');
     const elements = [...(grid?.children ?? [])];
     const byId = new Map();
-    (this.cards ?? []).forEach((card, i) => elements[i] && byId.set(`${CARD_PREFIX}${card.id}`, { element: elements[i], card }));
+    (this.cards ?? []).forEach((card, i) => elements[card.index ?? i] && byId.set(entryOf(card), { element: elements[card.index ?? i], card }));
     for (const element of elements) element.remove();
     for (const entry of stack.instruments) {
       const found = byId.get(entry);
@@ -632,12 +642,17 @@ export class SignalPlane extends HTMLElement {
     this.relayout();
   }
 
+  /** The panel's text drawn into `container` by the panel's own code (`showWritten`); its error, or null. */
+  showPanel(container, text) {
+    return showWritten(container, text, (name, value) => faceAttribute(name, value, '', this.base));
+  }
+
   /** Each card's natural size at its width (a placed card: its place's; else the Stack's), measured once per text and when it changes. */
   measureCards(s, stack) {
     const width = stack.width * PU;
     let changed = false;
     for (const [entry, element] of s.cards) {
-      const card = (this.cards ?? []).find((c) => `${CARD_PREFIX}${c.id}` === entry);
+      const card = cardOfEntry(entry, this.cards ?? []);
       const place = parsePlace(card?.place ?? null);
       const w = place ? place.w * PU - 2 * GUTTER : width;
       element.style.width = `${w}px`;
@@ -2246,7 +2261,7 @@ function show(element) {
  * place among the card's elements of that tag and bind.
  */
 function controlNode(tree, cards, entry, control) {
-  const card = cards.find((c) => `${CARD_PREFIX}${c.id}` === entry);
+  const card = cardOfEntry(entry, cards);
   const grid = (tree?.children ?? []).find((c) => c.kind === 'cards');
   const node = grid?.children?.[card?.index ?? -1];
   if (!node) return null;

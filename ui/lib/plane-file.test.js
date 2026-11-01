@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { generatedTree, parseContent } from './panel-tree.js';
 import { defaultPanel } from './panel.js';
-import { CARD_PREFIX, PRIMARY, STACK_PU, cardSlug, checkPlane, derivePlane, panelCards, parsePlane, planeOf, writePlane } from './plane-file.js';
+import { CARD_PREFIX, PRIMARY, STACK_PU, canonicalEntry, cardSlug, checkPlane, derivePlane, panelCards, parsePlane, planeOf, withEntries, writePlane } from './plane-file.js';
 
 const root = new URL('../../', import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), 'utf8');
@@ -146,4 +146,25 @@ test('a file with errors is reported and the derived Stack drawn: a project neve
   assert.equal(shown.plane.stacks[0].name, PRIMARY);
   assert.equal(shown.problems[0].severity, 'error');
   assert.deepEqual(planeOf(null, cards), { plane: derivePlane(cards), derived: true, problems: [] });
+});
+
+test('one identity: a card showing a slot with a part is the slot’s instrument, in the derived Stack, the file and the check alike', () => {
+  const cards = [
+    { id: 'melody', index: 0, heading: 'Melody', slot: null, binds: [] },
+    { id: 'synth', index: 1, heading: '', slot: 'synth', binds: [] },
+    { id: 'deck-a', index: 2, heading: '', slot: 'deck_a', binds: [] },
+    { id: 'synth-2', index: 3, heading: '', slot: 'synth', binds: [] },
+  ];
+  const slots = ['synth'];
+  // Only the first card showing a slot is its instrument; a slot without a part is drawn by its card.
+  assert.deepEqual(withEntries(cards, slots).map((c) => c.entry), ['card:melody', 'synth', 'card:deck-a', 'card:synth-2']);
+  assert.equal(canonicalEntry('card:synth', withEntries(cards, slots)), 'synth');
+  assert.equal(canonicalEntry('card:melody', withEntries(cards, slots)), 'card:melody');
+  assert.equal(canonicalEntry('synth', withEntries(cards, slots)), 'synth');
+  assert.deepEqual(planeOf(null, cards, null, { slots }).plane.stacks[0].instruments, ['card:melody', 'synth', 'card:deck-a', 'card:synth-2']);
+  const written = planeOf('schema_version = 1\n[[stack]]\nname = "a"\ninstruments = ["card:synth", "card:melody"]\n', cards, null, { slots });
+  assert.deepEqual(written.problems, []);
+  assert.deepEqual(written.plane.stacks[0].instruments, ['synth', 'card:melody']);
+  // Without the part, the slot's card is a card like any other.
+  assert.deepEqual(planeOf(null, cards).plane.stacks[0].instruments, ['card:melody', 'card:synth', 'card:deck-a', 'card:synth-2']);
 });

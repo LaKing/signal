@@ -1347,23 +1347,26 @@ fn check_plane(ui: &Path, panel: &Panel, plan: &ExecutionPlan) -> Option<Checked
     let path = ui.join(crate::plane::PLANE_FILE);
     let text = signal_project::read_regular_to_string(&path).ok()?;
     let main = ui.join(MAIN_PANEL);
-    let cards: Vec<String> = match signal_project::read_regular_to_string(&main) {
-        Ok(html) => crate::plane::panel_cards(&html)
-            .into_iter()
-            .map(|c| c.id)
-            .collect(),
+    let card = |id: String, slot: Option<&str>| crate::plane::Card {
+        id,
+        heading: String::new(),
+        slot: slot.map(str::to_owned),
+    };
+    let cards: Vec<crate::plane::Card> = match signal_project::read_regular_to_string(&main) {
+        Ok(html) => crate::plane::panel_cards(&html),
         Err(_) => {
-            let mut ids: Vec<String> = panel
+            let mut ids: Vec<crate::plane::Card> = panel
                 .view(&std::collections::BTreeMap::new())
                 .into_iter()
                 .filter(|i| !panel.is_slot(&i.name))
-                .map(|i| crate::plane::card_slug(&i.name))
+                .map(|i| card(crate::plane::card_slug(&i.name), None))
                 .collect();
+            // The generated panel's slot cards show their slots.
             ids.extend(
                 panel
                     .part_keys()
                     .filter(|k| panel.is_slot(k))
-                    .map(crate::plane::card_slug),
+                    .map(|k| card(crate::plane::card_slug(k), Some(k))),
             );
             // The output card, as the page generates it: only for an audio sink with signal inputs.
             let sink = plan.instances.iter().any(|i| {
@@ -1374,7 +1377,7 @@ fn check_plane(ui: &Path, panel: &Panel, plan: &ExecutionPlan) -> Option<Checked
                         .any(|p| p.direction == Direction::In && p.shape == PortShape::Signal)
             });
             if sink {
-                ids.push("output".to_owned());
+                ids.push(card("output".to_owned(), None));
             }
             ids
         }

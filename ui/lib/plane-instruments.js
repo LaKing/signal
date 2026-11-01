@@ -12,7 +12,7 @@
 // arrays in source order, ties broken by source order, a fixed iteration
 // bound (ADR 0047 §6's determinism). No DOM.
 
-import { CARD_PREFIX, isCardEntry } from './plane-file.js';
+import { CARD_PREFIX, cardOfEntry, entryOf, isCardEntry } from './plane-file.js';
 
 /** The module types that are device slots (role endpoints), with their role (ADR 0038 §3: `std.audio_out` is `main`). */
 export const DEVICE_SLOTS = Object.freeze({ 'std.audio_out': 'main' });
@@ -48,7 +48,8 @@ export function hasPart(instance) {
 /**
  * Every top-level instance assigned to an instrument key (`card:<id>` or a
  * slot's name), or to none: `Map(name → key | null)`, in source order.
- * `instances`, `connections`: `graph.top`'s; `cards`: `panelCards`'.
+ * `instances`, `connections`: `graph.top`'s; `cards`: `panelCards`', keyed
+ * by their `entry` (`withEntries`: a slot's card is the slot's).
  * The rules, in order (ADR 0050 §2): a device slot is no instrument's; a
  * slot with a part is its own; by controls, the card most of its bound
  * controls sit in (a tie: the earlier card); by flow, a chain of single
@@ -74,7 +75,7 @@ export function assignInstruments({ instances = [], connections = [], cards = []
       if (!owner.has(name) || fixed.has(name)) continue;
       if (!counts.has(name)) counts.set(name, new Map());
       const tally = counts.get(name);
-      const key = `${CARD_PREFIX}${card.id}`;
+      const key = entryOf(card);
       tally.set(key, { n: (tally.get(key)?.n ?? 0) + 1, order });
     }
   });
@@ -197,12 +198,10 @@ export function edgePins(stack, owner, stackOf, connections = []) {
   return list.map(({ seq: _seq, ...p }) => p);
 }
 
-/** The instrument entry's shown name: a card's heading, else its id; a slot's name. */
+/** The instrument entry's shown name: its card's heading, else a card's id or a slot's name. */
 export function instrumentTitle(entry, cards = []) {
-  if (!isCardEntry(entry)) return entry;
-  const id = entry.slice(CARD_PREFIX.length);
-  const card = cards.find((c) => c.id === id);
-  return card?.heading || id;
+  const card = cardOfEntry(entry, cards);
+  return card?.heading || (isCardEntry(entry) ? entry.slice(CARD_PREFIX.length) : entry);
 }
 
 /**
