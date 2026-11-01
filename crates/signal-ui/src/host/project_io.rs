@@ -3,7 +3,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde_json::{Value, json};
 use signal_project::archive;
@@ -14,7 +13,7 @@ use crate::document::{Document, Ticket};
 
 use super::app_mode::app_only;
 use super::failure::{Failure, fail};
-use super::queue::Job;
+use super::queue::Request;
 use super::{Edits, Host, project_ui};
 
 /// An edit of `ui/windows.toml`'s text ([`Host::write_windows_then`]).
@@ -50,19 +49,7 @@ impl Host {
     /// in the host's queue (a later step calls `done`), never on the control
     /// thread (ADR 0048).
     pub fn write_windows_then(&mut self, dir: &Path, edit: WindowsEdit, done: SaveDone) {
-        let _no_wait = transaction::NoWait::enter(Duration::ZERO);
-        if self.queue.waiting.is_empty() {
-            match ProjectLock::try_hold(&self.opening.dir) {
-                Ok(Some(holding)) => {
-                    done(self.write_windows_now(dir, edit));
-                    drop(holding);
-                    return;
-                }
-                Ok(None) => {}
-                Err(_) => return done(self.write_windows_now(dir, edit)),
-            }
-        }
-        self.wait_for_lock(Job::Windows {
+        self.submit(Request::Windows {
             dir: dir.to_owned(),
             edit,
             done,
@@ -141,14 +128,10 @@ impl Host {
     /// Save waits behind them, as it does when its corrections need the
     /// lock another writer holds; `done` is then called by a later step.
     pub fn save_document_then(&mut self, done: SaveDone) {
-        let _no_wait = transaction::NoWait::enter(Duration::ZERO);
-        if !self.queue.waiting.is_empty() || self.save_must_wait() {
-            return self.wait_for_lock(Job::Save {
-                save_as: None,
-                done,
-            });
-        }
-        self.save_document_now(done);
+        self.submit(Request::Save {
+            save_as: None,
+            done,
+        });
     }
 
     /// [`Host::save_document_then`], now.
@@ -203,14 +186,10 @@ impl Host {
         if self.app.is_none() {
             return done(Err(app_only().message));
         }
-        let _no_wait = transaction::NoWait::enter(Duration::ZERO);
-        if !self.queue.waiting.is_empty() || self.save_must_wait() {
-            return self.wait_for_lock(Job::Save {
-                save_as: Some(file.to_owned()),
-                done,
-            });
-        }
-        self.save_as_now(file, done);
+        self.submit(Request::Save {
+            save_as: Some(file.to_owned()),
+            done,
+        });
     }
 
     /// [`Host::save_as_then`], now.

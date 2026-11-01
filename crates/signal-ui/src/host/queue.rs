@@ -186,9 +186,80 @@ impl LockQueue {
     }
 }
 
+/// A request to the host, from any of its four entry paths: a client's
+/// message ([`Host::handle`]), the window layout's write
+/// ([`Host::write_windows_then`]), and the window's Save and Save As
+/// ([`Host::save_document_then`], [`Host::save_as_then`]). Each goes
+/// through [`Host::submit`]: run at once, or queued behind the writer lock.
+pub(super) enum Request {
+    /// A client's message, parsed.
+    Message {
+        client: u64,
+        id: Value,
+        text: String,
+        kind: String,
+        message: Value,
+        permit: Option<Permit>,
+    },
+    /// The window layout's write (app mode).
+    Windows {
+        dir: PathBuf,
+        edit: WindowsEdit,
+        done: SaveDone,
+    },
+    /// The window's Save or Save As of the open project.
+    Save {
+        save_as: Option<PathBuf>,
+        done: SaveDone,
+    },
+}
+
+impl Request {
+    /// How it is ordered against the requests waiting for the lock: a
+    /// client's message by its class; the layout's write as a file write;
+    /// the window's Save and Save As as `project.save`.
+    fn order(&self) -> Order {
+        match self {
+            Request::Message { kind, message, .. } => class_of(kind, message).order,
+            Request::Windows { .. } => Order::Write,
+            Request::Save { .. } => Order::Save,
+        }
+    }
+
+    /// The request as it waits in the queue (`lock`: a client's message
+    /// runs holding the writer lock).
+    fn into_job(self, lock: bool) -> Job {
+        match self {
+            Request::Message {
+                client,
+                id,
+                text,
+                kind,
+                message,
+                permit,
+            } => Job::Message {
+                client,
+                id,
+                text,
+                kind,
+                address: message
+                    .get("address")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                lock,
+                named: ["generation", "projectId"]
+                    .iter()
+                    .any(|key| message.get(*key).is_some_and(|v| !v.is_null())),
+                permit,
+            },
+            Request::Windows { dir, edit, done } => Job::Windows { dir, edit, done },
+            Request::Save { save_as, done } => Job::Save { save_as, done },
+        }
+    }
+}
+
 impl Host {
     pub(super) fn handle(&mut self, client: u64, text: &str, permit: Option<Permit>) {
-        let permit = std::cell::Cell::new(permit);
         let message: Value = match serde_json::from_str(text) {
             Ok(message) => message,
             Err(_) => {
@@ -197,64 +268,98 @@ impl Host {
             }
         };
         let id = message.get("id").cloned().unwrap_or(Value::Null);
-        let kind = message.get("type").and_then(Value::as_str).unwrap_or("");
-        let class = class_of(kind, &message);
-        // ADR 0048: a request that writes the
-        // project's files runs holding the writer lock, taken without
-        // waiting; when another writer holds it (or requests wait already,
-        // to keep their order) it waits in the queue, not on this thread.
-        if let Err(failure) = self.opening.admit(class.mutation, &message) {
+        let kind = message
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        self.submit(Request::Message {
+            client,
+            id,
+            text: text.to_owned(),
+            kind,
+            message,
+            permit,
+        });
+    }
+
+    /// Runs `request` now, or queues it behind the writer lock (ADR 0048):
+    /// a request that writes the project's files runs holding the writer
+    /// lock, taken without waiting; when another writer holds it (or
+    /// requests wait already, to keep their order) it waits in the queue,
+    /// not on this thread. A client's message naming another opening is
+    /// refused first (ADR 0049).
+    pub(super) fn submit(&mut self, request: Request) {
+        // The window's requests never wait for the lock on this thread.
+        let _no_wait = matches!(request, Request::Windows { .. } | Request::Save { .. })
+            .then(|| transaction::NoWait::enter(Duration::ZERO));
+        if let Request::Message {
+            client,
+            id,
+            kind,
+            message,
+            ..
+        } = &request
+            && let Err(failure) = self
+                .opening
+                .admit(class_of(kind, message).mutation, message)
+        {
             let error = json!({
                 "type": "error",
                 "id": id,
                 "code": failure.code,
                 "message": failure.message,
             });
-            return self.send_text(client, &error);
+            return self.send_text(*client, &error);
         }
-        let address = message
-            .get("address")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let queue = |lock: bool| Job::Message {
-            client,
-            id: id.clone(),
-            text: text.to_owned(),
-            kind: kind.to_owned(),
-            address: address.clone(),
-            lock,
-            named: ["generation", "projectId"]
-                .iter()
-                .any(|key| message.get(*key).is_some_and(|v| !v.is_null())),
-            permit: permit.take(),
-        };
-        match class.order {
+        match request.order() {
             Order::Write => {
                 if self.queue.waiting.is_empty() {
                     match ProjectLock::try_hold(&self.opening.dir) {
                         Ok(Some(holding)) => {
-                            self.respond(client, id, kind, &message);
+                            self.execute(request);
                             drop(holding);
                             return;
                         }
                         Ok(None) => {}
                         // The writer's own `acquire` says why, at once.
-                        Err(_) => return self.respond(client, id, kind, &message),
+                        Err(_) => return self.execute(request),
                     }
                 }
-                self.wait_for_lock(queue(true));
+                self.wait_for_lock(request.into_job(true));
             }
             Order::Save => {
                 if self.queue.waiting.is_empty() && !self.save_must_wait() {
-                    return self.respond(client, id, kind, &message);
+                    return self.execute(request);
                 }
-                self.wait_for_lock(queue(true));
+                self.wait_for_lock(request.into_job(true));
             }
-            Order::Ordered if !self.queue.waiting.is_empty() => self.wait_for_lock(queue(false)),
+            Order::Ordered if !self.queue.waiting.is_empty() => {
+                self.wait_for_lock(request.into_job(false));
+            }
             Order::Live(address) if self.queue.queued_for(&address) => {
-                self.wait_for_lock(queue(false));
+                self.wait_for_lock(request.into_job(false));
             }
-            _ => self.respond(client, id, kind, &message),
+            _ => self.execute(request),
+        }
+    }
+
+    /// Runs `request` now: a client's message answered, the layout written,
+    /// the Save or Save As started.
+    fn execute(&mut self, request: Request) {
+        match request {
+            Request::Message {
+                client,
+                id,
+                kind,
+                message,
+                ..
+            } => self.respond(client, id, &kind, &message),
+            Request::Windows { dir, edit, done } => done(self.write_windows_now(&dir, edit)),
+            Request::Save { save_as, done } => match save_as {
+                Some(file) => self.save_as_now(&file, done),
+                None => self.save_document_now(done),
+            },
         }
     }
 
