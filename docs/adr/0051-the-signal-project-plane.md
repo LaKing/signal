@@ -1,6 +1,6 @@
 # ADR 0051: The Signal Project plane: Setup, Stack, Wiring, Control, Engine
 
-- **Status:** Proposed (2026-11-01). The owner's vision is quoted in the Context. Agreed with the owner: the levels, the peripherals, the Stack and the studio example. Marked *(operator)*: the operator's decisions, not objected to by the owner, open until acceptance. **Replaces ADR 0050** (proposed, never accepted, now withdrawn).
+- **Status:** Accepted (2026-11-01; the owner accepted it and answered the open questions the same day). Proposed 2026-11-01. The owner's vision is quoted in the Context. Agreed with the owner: the levels, the peripherals, the Stack and the studio example. Marked *(operator)*: the operator's decisions, not objected to by the owner, open until acceptance. **Replaces ADR 0050** (proposed, never accepted, now withdrawn).
 - **Builds on:** ADR 0009 (text is the truth), 0022 (output adapters), 0025 (`.signal` files), 0032 (windows), 0035 (a project as content, `lib.mixer`), 0037 and 0045 (slots, interfaces), **0038** (devices: roles and layouts, never hardware), **0046** (a slot's part), **0047** (plate, routing, packages, dies, deep zoom).
 - **Supersedes, when accepted, part of ADR 0047:** §1's three layers, §5's Plate / X-ray / Board switch and the single top-level board. **Amends:** ADR 0026 §2 (one view replaces the Panel and Schematic pages), 0032 (window kinds), 0038 §10 (its Devices level becomes the Setup level), 0046 §8 and its decided question 5 (grouping several instances), and vision §3a.
 - **Date:** 2026-11-01
@@ -198,11 +198,11 @@ Vision §3a gains Setup level, Stack, Instrument (replacing the proposed role ta
 
 A new `MAJOR.MINOR` (0.4) is the owner's decision, proposed when phases 1–3 pass.
 
-## Open questions (taste or scope)
-1. **The tab's name:** "Plane", "Project" or "Signal Project".
-2. **Stack width:** 160 pu by default (today's plate); half-width instruments side by side, ever?
-3. **Front panels at the Setup level:** live, or a still picture until a Stack is focused.
-4. **Wiring:** only the back of the rack, or also a flow arrangement one click away.
-5. **Logos** (ADR 0050 §5) as a way into the engine: dropped or kept.
-6. **The mixer:** replacing `bus` or before Master; its channels; the golden.
-7. **Make instrument on the studio:** accept the moved log and manifest, or keep the migration form.
+## Answered questions (2026-11-01)
+1. **The tab's name** (owner): **Signal Project**.
+2. **Stack width** (operator): 160 pu; no half-width instruments for now.
+3. **Front panels at the Setup level** (operator): live.
+4. **Wiring** (operator): the back of the rack only; a flow arrangement may come later.
+5. **Logos** (operator): an identifier only, not a way into the engine.
+6. **The mixer** (owner): it replaces `bus`, with four channels: synth, drums, echo return and a spare. The golden decision is still taken when it is built (phase 4).
+7. **Make instrument on the studio:** still open; decided at phase 3.
