@@ -61,16 +61,4 @@ impl Host {
     pub fn releases_waiting(&self) -> usize {
         self.releases.len()
     }
-
-    pub(super) fn release(&mut self, client: u64) {
-        let subs: Vec<u32> = self
-            .subs
-            .iter()
-            .filter(|(_, s)| s.client == client)
-            .map(|(&id, _)| id)
-            .collect();
-        for sub in subs {
-            self.drop_sub(sub);
-        }
-    }
 }
