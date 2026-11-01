@@ -103,3 +103,8 @@ import './lib/schematic-marquee.test.js';
 import './controls/schematic-faces.test.js';
 import './lib/plate.test.js';
 import './controls/plate.test.js';
+import './lib/plane-file.test.js';
+import './lib/plane-instruments.test.js';
+import './lib/plane-peripherals.test.js';
+import './lib/plane-zoom.test.js';
+import './lib/plane-layout.test.js';
