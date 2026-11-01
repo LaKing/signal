@@ -2,6 +2,7 @@
 //! message is ordered against them, the project it names (ADR 0049), and
 //! their run once the lock is free.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -109,7 +110,7 @@ pub(super) enum Job {
     /// A client's message, answered when it runs: one that writes files
     /// (`lock`: it runs holding the writer lock), or one kept behind them
     /// in the client's order ([`class_of`]). `kind` and `address` say
-    /// which values it can change ([`Host::queued_for`]).
+    /// which values it can change ([`LockQueue::queued_for`]).
     Message {
         client: u64,
         id: Value,
@@ -140,6 +141,49 @@ pub(super) enum Job {
         edit: WindowsEdit,
         done: SaveDone,
     },
+}
+
+/// The requests waiting for the project's writer lock (ADR 0048), and how
+/// long one waits for it before it fails.
+pub(super) struct LockQueue {
+    /// ADR 0048: the file requests waiting for
+    /// another writer to release the project's lock, in order.
+    pub(super) waiting: VecDeque<Waiting>,
+    /// How long a request waits for the lock before it fails.
+    pub(super) lock_wait: Duration,
+}
+
+impl Default for LockQueue {
+    fn default() -> LockQueue {
+        LockQueue {
+            waiting: VecDeque::new(),
+            lock_wait: transaction::LOCK_WAIT,
+        }
+    }
+}
+
+impl LockQueue {
+    /// Whether a queued request can change the value at `address`: a
+    /// `commit`, `retry` or live edit of it, or a snapshot restore or undo,
+    /// an open or a revert of the project (any value). A live edit of it
+    /// then waits behind them, so the client's order holds for that value.
+    pub(super) fn queued_for(&self, address: &str) -> bool {
+        self.waiting.iter().any(|w| match &w.job {
+            Job::Message {
+                kind, address: a, ..
+            } => match kind.as_str() {
+                // A batch `commit` (`values`, no `address`) can change any.
+                "commit" if a.is_none() => true,
+                "commit" | "retry" => a.as_deref() == Some(address),
+                k if matches!(class_of(k, &Value::Null).order, Order::Live(_)) => {
+                    a.as_deref() == Some(address)
+                }
+                "snapshot.restore" | "snapshot.undo" => true,
+                k => class_of(k, &Value::Null).order == Order::Ordered,
+            },
+            _ => false,
+        })
+    }
 }
 
 impl Host {
@@ -186,7 +230,7 @@ impl Host {
         };
         match class.order {
             Order::Write => {
-                if self.waiting.is_empty() {
+                if self.queue.waiting.is_empty() {
                     match ProjectLock::try_hold(&self.opening.dir) {
                         Ok(Some(holding)) => {
                             self.respond(client, id, kind, &message);
@@ -201,39 +245,17 @@ impl Host {
                 self.wait_for_lock(queue(true));
             }
             Order::Save => {
-                if self.waiting.is_empty() && !self.save_must_wait() {
+                if self.queue.waiting.is_empty() && !self.save_must_wait() {
                     return self.respond(client, id, kind, &message);
                 }
                 self.wait_for_lock(queue(true));
             }
-            Order::Ordered if !self.waiting.is_empty() => self.wait_for_lock(queue(false)),
-            Order::Live(address) if self.queued_for(&address) => {
+            Order::Ordered if !self.queue.waiting.is_empty() => self.wait_for_lock(queue(false)),
+            Order::Live(address) if self.queue.queued_for(&address) => {
                 self.wait_for_lock(queue(false));
             }
             _ => self.respond(client, id, kind, &message),
         }
-    }
-
-    /// Whether a queued request can change the value at `address`: a
-    /// `commit`, `retry` or live edit of it, or a snapshot restore or undo,
-    /// an open or a revert of the project (any value). A live edit of it
-    /// then waits behind them, so the client's order holds for that value.
-    fn queued_for(&self, address: &str) -> bool {
-        self.waiting.iter().any(|w| match &w.job {
-            Job::Message {
-                kind, address: a, ..
-            } => match kind.as_str() {
-                // A batch `commit` (`values`, no `address`) can change any.
-                "commit" if a.is_none() => true,
-                "commit" | "retry" => a.as_deref() == Some(address),
-                k if matches!(class_of(k, &Value::Null).order, Order::Live(_)) => {
-                    a.as_deref() == Some(address)
-                }
-                "snapshot.restore" | "snapshot.undo" => true,
-                k => class_of(k, &Value::Null).order == Order::Ordered,
-            },
-            _ => false,
-        })
     }
 
     /// Whether a Save now would have to wait for the writer lock: its
@@ -248,7 +270,7 @@ impl Host {
     /// ([`Host::run_waiting`]); refused at once (`busy`) when
     /// [`WAITING_MAX`] requests wait already.
     pub(super) fn wait_for_lock(&mut self, job: Job) {
-        if self.waiting.len() >= WAITING_MAX {
+        if self.queue.waiting.len() >= WAITING_MAX {
             let message = format!(
                 "not done: {WAITING_MAX} requests already wait for another writer to release the project's lock; try again"
             );
@@ -257,10 +279,10 @@ impl Host {
         // A request naming no project, queued behind an open or revert,
         // means the project open when it runs, not the one open now.
         let named = matches!(job, Job::Message { named: true, .. });
-        let behind_an_open = self.waiting.iter().any(|w| {
+        let behind_an_open = self.queue.waiting.iter().any(|w| {
             matches!(&w.job, Job::Message { kind, .. } if class_of(kind, &Value::Null).order == Order::Ordered)
         });
-        self.waiting.push_back(Waiting {
+        self.queue.waiting.push_back(Waiting {
             generation: (named || !behind_an_open).then_some(self.opening.generation),
             since: Instant::now(),
             job,
@@ -295,12 +317,12 @@ impl Host {
     /// [`transaction::LOCK_WAIT`] did); one of a project no longer open
     /// (another was opened since it was queued) is refused unrun.
     pub(super) fn run_waiting(&mut self) {
-        while let Some(front) = self.waiting.front() {
+        while let Some(front) = self.queue.waiting.front() {
             if front
                 .generation
                 .is_some_and(|g| g != self.opening.generation)
             {
-                if let Some(stale) = self.waiting.pop_front() {
+                if let Some(stale) = self.queue.waiting.pop_front() {
                     let failure = fail(
                         "project-changed",
                         "not done: another project was opened while it waited for the writer lock",
@@ -314,10 +336,10 @@ impl Host {
             let holding = match lock.then(|| ProjectLock::try_hold(&self.opening.dir)) {
                 None => None,
                 Some(Ok(Some(holding))) => Some(holding),
-                Some(Ok(None)) if front.since.elapsed() < self.lock_wait => break,
+                Some(Ok(None)) if front.since.elapsed() < self.queue.lock_wait => break,
                 Some(Ok(None) | Err(_)) => None,
             };
-            let Some(waiting) = self.waiting.pop_front() else {
+            let Some(waiting) = self.queue.waiting.pop_front() else {
                 break;
             };
             // Without the lock, the writer's `acquire` fails at once.
@@ -366,14 +388,14 @@ impl Host {
     /// Whether requests wait for the project's writer lock (the control
     /// loop then steps rather than sleeping in a wait).
     pub fn waiting(&self) -> bool {
-        !self.waiting.is_empty()
+        !self.queue.waiting.is_empty()
     }
 
     /// Test hooks: how long a request waits for the writer lock before it
     /// fails ([`transaction::LOCK_WAIT`] by default).
     #[cfg(feature = "test-hooks")]
     pub fn set_lock_wait(&mut self, wait: Duration) {
-        self.lock_wait = wait;
+        self.queue.lock_wait = wait;
     }
 }
 
@@ -583,7 +605,7 @@ mod tests {
     #[test]
     fn a_live_edit_waits_behind_what_changes_its_value() {
         let mut host = idle_host("queued-for");
-        assert!(!host.queued_for("/a/freq"));
+        assert!(!host.queue.queued_for("/a/freq"));
         // The queued request's kind and address; whether a live edit of
         // `/a/freq`, and of `/b/freq`, waits behind it.
         let cases: [(&str, Option<&str>, bool, bool); 16] = [
@@ -605,14 +627,14 @@ mod tests {
             ("snapshot.save", None, false, false),
         ];
         for (kind, address, a, b) in cases {
-            host.waiting.clear();
-            host.waiting.push_back(queued(kind, address));
-            assert_eq!(host.queued_for("/a/freq"), a, "{kind} {address:?}");
-            assert_eq!(host.queued_for("/b/freq"), b, "{kind} {address:?}");
+            host.queue.waiting.clear();
+            host.queue.waiting.push_back(queued(kind, address));
+            assert_eq!(host.queue.queued_for("/a/freq"), a, "{kind} {address:?}");
+            assert_eq!(host.queue.queued_for("/b/freq"), b, "{kind} {address:?}");
         }
         // A queued Save changes no live value.
-        host.waiting.clear();
-        host.waiting.push_back(Waiting {
+        host.queue.waiting.clear();
+        host.queue.waiting.push_back(Waiting {
             generation: Some(7),
             since: Instant::now(),
             job: Job::Save {
@@ -620,11 +642,11 @@ mod tests {
                 done: Box::new(|_| {}),
             },
         });
-        assert!(!host.queued_for("/a/freq"));
+        assert!(!host.queue.queued_for("/a/freq"));
         // Any one queued request that can change it is enough.
-        host.waiting.push_back(queued("patch", None));
-        host.waiting.push_back(queued("set", Some("/b/freq")));
-        assert!(!host.queued_for("/a/freq"));
-        assert!(host.queued_for("/b/freq"));
+        host.queue.waiting.push_back(queued("patch", None));
+        host.queue.waiting.push_back(queued("set", Some("/b/freq")));
+        assert!(!host.queue.queued_for("/a/freq"));
+        assert!(host.queue.queued_for("/b/freq"));
     }
 }

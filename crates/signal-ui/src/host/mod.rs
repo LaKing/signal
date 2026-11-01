@@ -37,7 +37,6 @@ mod snapshotting;
 mod subs;
 mod watch;
 
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
@@ -70,7 +69,7 @@ use failure::fail;
 use live::LiveState;
 use opening::Opening;
 use project_io::SaveWait;
-use queue::Waiting;
+use queue::LockQueue;
 use run::{Muted, Run};
 use subs::Subscriptions;
 
@@ -283,11 +282,9 @@ pub struct Host {
     keys_stamp: Option<(SystemTime, u64)>,
     keys_polled: Instant,
     keys_version: u64,
-    /// ADR 0048: the file requests waiting for
-    /// another writer to release the project's lock, in order.
-    waiting: VecDeque<Waiting>,
-    /// How long a request waits for the lock before it fails.
-    lock_wait: Duration,
+    /// ADR 0048: the file requests waiting for another writer to release
+    /// the project's lock, in order, and how long one waits.
+    queue: LockQueue,
 }
 
 fn joined(diagnostics: Vec<Diagnostic>) -> String {
@@ -497,8 +494,7 @@ impl Host {
             keys_stamp,
             keys_polled: Instant::now(),
             keys_version: 0,
-            waiting: VecDeque::new(),
-            lock_wait: transaction::LOCK_WAIT,
+            queue: LockQueue::default(),
         };
         for problem in host.keys.report() {
             host.messages.push(format!("keys: {problem}"));

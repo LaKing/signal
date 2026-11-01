@@ -101,7 +101,7 @@ impl Host {
         // Its live edits still waiting behind the writer lock are dropped:
         // a note it can no longer end, or a value it can no longer see,
         // is never played for it (its file writes still run, as asked).
-        self.waiting.retain(|w| match &w.job {
+        self.queue.waiting.retain(|w| match &w.job {
             Job::Message {
                 client: c,
                 lock: false,

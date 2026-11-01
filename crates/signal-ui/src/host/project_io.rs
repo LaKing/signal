@@ -51,7 +51,7 @@ impl Host {
     /// thread (ADR 0048).
     pub fn write_windows_then(&mut self, dir: &Path, edit: WindowsEdit, done: SaveDone) {
         let _no_wait = transaction::NoWait::enter(Duration::ZERO);
-        if self.waiting.is_empty() {
+        if self.queue.waiting.is_empty() {
             match ProjectLock::try_hold(&self.opening.dir) {
                 Ok(Some(holding)) => {
                     done(self.write_windows_now(dir, edit));
@@ -113,11 +113,11 @@ impl Host {
     /// Save made now would leave out writes asked before it, and an Open
     /// after it would then refuse them as another project's.
     pub fn save_document(&mut self) -> Result<(), String> {
-        if self.opening.document.is_some() && !self.waiting.is_empty() {
+        if self.opening.document.is_some() && !self.queue.waiting.is_empty() {
             self.answer_saves();
             return Err(format!(
                 "not saved: {} request(s) wait for another writer to release the project's lock; try again once they are written",
-                self.waiting.len()
+                self.queue.waiting.len()
             ));
         }
         if let Err(error) = self.correct_before_save() {
@@ -142,7 +142,7 @@ impl Host {
     /// lock another writer holds; `done` is then called by a later step.
     pub fn save_document_then(&mut self, done: SaveDone) {
         let _no_wait = transaction::NoWait::enter(Duration::ZERO);
-        if !self.waiting.is_empty() || self.save_must_wait() {
+        if !self.queue.waiting.is_empty() || self.save_must_wait() {
             return self.wait_for_lock(Job::Save {
                 save_as: None,
                 done,
@@ -204,7 +204,7 @@ impl Host {
             return done(Err(app_only().message));
         }
         let _no_wait = transaction::NoWait::enter(Duration::ZERO);
-        if !self.waiting.is_empty() || self.save_must_wait() {
+        if !self.queue.waiting.is_empty() || self.save_must_wait() {
             return self.wait_for_lock(Job::Save {
                 save_as: Some(file.to_owned()),
                 done,

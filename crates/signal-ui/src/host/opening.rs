@@ -229,7 +229,7 @@ impl Host {
         // Writes waiting for the writer lock are edits not made yet (ADR
         // 0048 item 5): asked about as edits, a Save refused until they are
         // written, a Discard lets them go (each answered `project-changed`).
-        let queued = self.opening.document.is_some() && !self.waiting.is_empty();
+        let queued = self.opening.document.is_some() && !self.queue.waiting.is_empty();
         let edited = self.opening.document.as_mut().is_some_and(Document::check) || queued;
         if edited && edits == Edits::Ask {
             return Err(fail(
