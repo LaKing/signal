@@ -207,11 +207,27 @@ pub(super) enum Request {
         edit: WindowsEdit,
         done: SaveDone,
     },
-    /// The window's Save or Save As of the open project.
+    /// The window's Save or Save As of the open project: one op, which
+    /// waits behind the requests waiting for the writer lock or is refused
+    /// while they wait (`when_waiting`).
     Save {
         save_as: Option<PathBuf>,
+        when_waiting: WhenWaiting,
         done: SaveDone,
     },
+}
+
+/// What a Save does while requests wait for the writer lock (ADR 0048).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WhenWaiting {
+    /// Refused, nothing saved ([`Host::save_document`]): a Save made now
+    /// would leave out writes asked before it. Otherwise it is written
+    /// before [`Host::submit`] returns, without the queue.
+    Refuse,
+    /// Queued behind them, as `project.save` is, and also while its
+    /// corrections need the lock another writer holds
+    /// ([`Host::save_document_then`], [`Host::save_as_then`]).
+    Queue,
 }
 
 impl Request {
@@ -253,7 +269,7 @@ impl Request {
                 permit,
             },
             Request::Windows { dir, edit, done } => Job::Windows { dir, edit, done },
-            Request::Save { save_as, done } => Job::Save { save_as, done },
+            Request::Save { save_as, done, .. } => Job::Save { save_as, done },
         }
     }
 }
@@ -290,6 +306,13 @@ impl Host {
     /// not on this thread. A client's message naming another opening is
     /// refused first (ADR 0049).
     pub(super) fn submit(&mut self, request: Request) {
+        if let Request::Save {
+            when_waiting: WhenWaiting::Refuse,
+            ..
+        } = request
+        {
+            return self.save_or_refuse(request);
+        }
         // The window's requests never wait for the lock on this thread.
         let _no_wait = matches!(request, Request::Windows { .. } | Request::Save { .. })
             .then(|| transaction::NoWait::enter(Duration::ZERO));
@@ -344,8 +367,21 @@ impl Host {
         }
     }
 
+    /// A Save that is refused while requests wait for the writer lock
+    /// ([`WhenWaiting::Refuse`]), else run now.
+    fn save_or_refuse(&mut self, request: Request) {
+        if self.opening.document.is_some() && !self.queue.waiting.is_empty() {
+            if let Request::Save { done, .. } = request {
+                self.save_document_refused(done);
+            }
+            return;
+        }
+        self.execute(request);
+    }
+
     /// Runs `request` now: a client's message answered, the layout written,
-    /// the Save or Save As started.
+    /// the Save or Save As started (or, one refused while requests wait,
+    /// written).
     fn execute(&mut self, request: Request) {
         match request {
             Request::Message {
@@ -362,11 +398,16 @@ impl Host {
                 let ctx = self.write_ctx();
                 done(self.write_windows_now(&ctx, &dir, edit));
             }
-            Request::Save { save_as, done } => {
+            Request::Save {
+                save_as,
+                when_waiting,
+                done,
+            } => {
                 let ctx = self.write_ctx();
-                match save_as {
-                    Some(file) => self.save_as_now(&ctx, &file, done),
-                    None => self.save_document_now(&ctx, done),
+                match (save_as, when_waiting) {
+                    (Some(file), _) => self.save_as_now(&ctx, &file, done),
+                    (None, WhenWaiting::Queue) => self.save_document_now(&ctx, done),
+                    (None, WhenWaiting::Refuse) => self.save_document_here(&ctx, done),
                 }
             }
         }

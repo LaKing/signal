@@ -13,7 +13,7 @@ use crate::document::{Document, Ticket};
 
 use super::app_mode::app_only;
 use super::failure::{Failure, fail};
-use super::queue::Request;
+use super::queue::{Request, WhenWaiting};
 use super::writer::WriteCtx;
 use super::{Edits, Host, project_ui};
 
@@ -102,24 +102,42 @@ impl Host {
     /// Save made now would leave out writes asked before it, and an Open
     /// after it would then refuse them as another project's.
     pub fn save_document(&mut self) -> Result<(), String> {
-        if self.opening.document.is_some() && !self.queue.waiting.is_empty() {
+        let (answer, answered) = std::sync::mpsc::channel();
+        self.submit(Request::Save {
+            save_as: None,
+            when_waiting: WhenWaiting::Refuse,
+            done: Box::new(move |result| {
+                let _ = answer.send(result);
+            }),
+        });
+        // Refused or written before `submit` returns.
+        answered
+            .try_recv()
+            .unwrap_or_else(|_| Err("not saved".to_owned()))
+    }
+
+    /// [`Host::save_document`], refused while requests wait for the writer
+    /// lock: nothing saved, `done` told why.
+    pub(super) fn save_document_refused(&mut self, done: SaveDone) {
+        self.answer_saves();
+        done(Err(format!(
+            "not saved: {} request(s) wait for another writer to release the project's lock; try again once they are written",
+            self.queue.waiting.len()
+        )));
+    }
+
+    /// [`Host::save_document`], now, waiting for the write.
+    pub(super) fn save_document_here(&mut self, ctx: &WriteCtx, done: SaveDone) {
+        if let Err(error) = self.correct_before_save(ctx) {
             self.answer_saves();
-            return Err(format!(
-                "not saved: {} request(s) wait for another writer to release the project's lock; try again once they are written",
-                self.queue.waiting.len()
-            ));
-        }
-        let ctx = self.write_ctx();
-        if let Err(error) = self.correct_before_save(&ctx) {
-            self.answer_saves();
-            return Err(error);
+            return done(Err(error));
         }
         let result = match self.opening.document.as_mut() {
             Some(document) => document.save(),
             None => Ok(()),
         };
         self.answer_saves();
-        result
+        done(result);
     }
 
     /// Save of a `.signal` project on a thread of its own (the window's
@@ -133,6 +151,7 @@ impl Host {
     pub fn save_document_then(&mut self, done: SaveDone) {
         self.submit(Request::Save {
             save_as: None,
+            when_waiting: WhenWaiting::Queue,
             done,
         });
     }
@@ -191,6 +210,7 @@ impl Host {
         }
         self.submit(Request::Save {
             save_as: Some(file.to_owned()),
+            when_waiting: WhenWaiting::Queue,
             done,
         });
     }
