@@ -6,6 +6,7 @@
 // is the judge (docs/ui-protocol.md "patch"); nothing here edits a file.
 // No DOM.
 
+import { named } from './opening.js';
 import { shapeName } from './schematic-layout.js';
 import { levelRect } from './schematic-scene.js';
 
@@ -40,9 +41,13 @@ export function scaleConnection(from, to, scale) {
   return { op: 'connection.scale', from: written(from), to: written(to), scale };
 }
 
-/** The `patch` message of `ops` at `level` (`""` the top level), against `base` (the file's SHA-256). */
-export function patchMessage(level, base, ops) {
-  return { type: 'patch', level, base, ops };
+/**
+ * The `patch` message of `ops` at `level` (`""` the top level), against
+ * `base` (the file's SHA-256), naming `generation` (ADR 0049: the opening
+ * its edit began in) when one is known.
+ */
+export function patchMessage(level, base, ops, generation = null) {
+  return named({ type: 'patch', level, base, ops }, generation);
 }
 
 /** The instance names of a level as `graph` gives it. */

@@ -805,3 +805,77 @@ test('a push that comes while a write is in flight is shown once it settles', as
   assert.equal(shown.at(-1), NOTES(0.8), 'the push held during the write is shown after it');
   assert.equal(s.base, 'sha-external');
 });
+
+/** A server that also knows its opening (ADR 0049): a write naming another generation is `project-changed`. */
+class OpeningConnection extends FakePatternConnection {
+  constructor(text, generation) {
+    super(text);
+    this.generation = generation;
+  }
+
+  /** Another opening of an identical copy: the same text and base, a new generation. */
+  reopen() {
+    this.generation++;
+  }
+
+  async writePattern(name, text, base, { generation } = {}) {
+    if (Number.isSafeInteger(generation) && generation !== this.generation) {
+      this.writes.push({ name, text, base, generation });
+      throw Object.assign(new Error('not done: the request names the generation of a project no longer open'), { code: 'project-changed' });
+    }
+    const reply = super.writePattern(name, text, base);
+    this.writes.at(-1).generation = generation;
+    return reply;
+  }
+}
+
+test('ADR 0049: an edit names the opening it began in, through the debounce, a retry and the drain', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const c = new OpeningConnection(NOTES(), 7);
+  const { s, shown, notices } = sync(c);
+  await s.load();
+  // Debounced: begun in 7, sent after another opening (identical file): refused, the file read again.
+  s.edited(NOTES(0.5));
+  c.reopen();
+  t.mock.timers.tick(WRITE_DELAY_MS);
+  await settle();
+  await settle();
+  assert.deepEqual(c.writes.map((w) => w.generation), [7]);
+  assert.equal(c.text, NOTES(), 'nothing written into the new opening');
+  assert.equal(s.pending, null, 'the draft is let go');
+  assert.ok(notices.some((n) => /^not written: .*no longer open/.test(n ?? '')), notices.join('\n'));
+  assert.equal(c.reads, 2, 'read again');
+  assert.equal(shown.at(-1), NOTES());
+
+  // A retry keeps the generation the edit began in.
+  c.refuse = 'busy';
+  s.edited(NOTES(0.25)); // begun in 8
+  t.mock.timers.tick(WRITE_DELAY_MS);
+  await settle();
+  c.refuse = null;
+  c.reopen(); // 9
+  await s.retry();
+  await settle();
+  assert.deepEqual(c.writes.map((w) => w.generation), [7, 8, 8]);
+  assert.equal(c.text, NOTES());
+
+  // The drain too.
+  await settle();
+  s.edited(NOTES(0.75)); // begun in 9
+  c.reopen(); // 10
+  await s.close();
+  assert.deepEqual(c.writes.map((w) => w.generation), [7, 8, 8, 9]);
+  assert.equal(c.text, NOTES(), 'the drain writes nothing into another opening');
+});
+
+test('ADR 0049: an edit begun in the opening open now is written', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const c = new OpeningConnection(NOTES(), 3);
+  const { s } = sync(c);
+  await s.load();
+  s.edited(NOTES(0.5));
+  t.mock.timers.tick(WRITE_DELAY_MS);
+  await settle();
+  assert.deepEqual(c.writes.map((w) => w.generation), [3]);
+  assert.equal(c.text, NOTES(0.5));
+});

@@ -67,6 +67,7 @@
 // kept still; zooming and panning open and close nothing.
 
 import { onDefaultConnection } from '../signal-ui.js';
+import { graphGeneration, named } from '../lib/opening.js';
 import { ENTRY_CSS, ValueEntry } from './entry-field.js';
 import { EDITOR_CSS, SchematicEditor } from './schematic-editor.js';
 import { ContextMenu, MENU_CSS, menusClaimed } from './context-menu.js';
@@ -2184,7 +2185,8 @@ export class SignalSchematic extends HTMLElement {
           this.schedule();
         }
       };
-      const request = this.connection?.request?.(message);
+      // ADR 0049: of the opening the graph shown is of.
+      const request = this.connection?.request?.(named(message, graphGeneration(this.graph)));
       if (!request) settle(true);
       else
         request.then(
@@ -2679,7 +2681,7 @@ export class SignalSchematic extends HTMLElement {
       this.schedule();
       return;
     }
-    const message = level === null ? { type: 'schematic.reset' } : { type: 'schematic.reset', level };
+    const message = named(level === null ? { type: 'schematic.reset' } : { type: 'schematic.reset', level }, graphGeneration(this.graph));
     this.connection?.request?.(message).catch((error) => this.say(`Not reset: ${error.message}`));
   }
 

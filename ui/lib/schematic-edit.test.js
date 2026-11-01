@@ -182,3 +182,21 @@ test('an undo the server refuses as changed (another client edited it since) say
   session.redo();
   assert.match(session.refused(Object.assign(new Error('x'), { code: 'changed' })).cleared, /^Not redone/);
 });
+
+test('ADR 0049: a patch names the opening of the graph shown; a new opening of the same project is another project', () => {
+  const session = new PatchSession();
+  session.graphSeen({ projectId: 'p', generation: 4, files: { '': 'b0' } });
+  const asked = session.request('', [removeInstance('a')]);
+  assert.deepEqual(asked.message, { type: 'patch', level: '', base: 'b0', ops: [removeInstance('a')], generation: 4 });
+  session.written({ level: '', base: 'b1', inverse: [addInstance('a', 'std.sine_osc')] });
+  assert.equal(session.history.entries.length, 1);
+  // Opened again (identical files, same id): nothing of the last opening is sent to it.
+  const cleared = session.graphSeen({ projectId: 'p', generation: 5, files: { '': 'b1' } });
+  assert.match(cleared.cleared, /undo history was emptied/);
+  assert.equal(session.undo(), null);
+  assert.equal(session.request('', [removeInstance('b')]).message.generation, 5);
+  // A graph without a generation (an older host): none is named.
+  const old = new PatchSession();
+  old.graphSeen({ projectId: 'p', files: { '': 'b0' } });
+  assert.equal('generation' in old.request('', [removeInstance('a')]).message, false);
+});

@@ -8,6 +8,7 @@
 
 import { editKey } from './panel-edit.js';
 import { keyCommand } from './keys.js';
+import { graphGeneration } from './opening.js';
 import { patchMessage } from './schematic-patch.js';
 
 /**
@@ -92,6 +93,8 @@ export class PatchSession {
     this.history = new PatchHistory();
     this.pending = null;
     this.notice = null;
+    /** The opening the graph shown is of (ADR 0049), named by every patch. */
+    this.generation = null;
   }
 
   /** Edit mode on or off (`toggle` when `on` is not given); whether it changed. */
@@ -106,12 +109,17 @@ export class PatchSession {
    * write included). Another project (`graph.projectId`, which tells apart
    * folders of the same name and projects of the same name): the history,
    * the bases and a write in flight are let go with a notice (`{cleared}`),
-   * so no inverse is ever sent to a project it was not written in.
+   * so no inverse is ever sent to a project it was not written in. A new
+   * opening of the same project (`graph.generation`, ADR 0049) is another
+   * project here too; every patch names the generation it began in.
    */
   graphSeen(graph) {
     const project = graph?.projectId ?? `${graph?.folder ?? ''}\n${graph?.project ?? ''}`;
+    const generation = graphGeneration(graph);
     let result = null;
-    if (this.project !== undefined && project !== this.project) {
+    const reopened = generation !== null && (this.generation ?? null) !== null && generation !== this.generation;
+    if (generation !== null) this.generation = generation;
+    if (this.project !== undefined && (project !== this.project || reopened)) {
       const had = this.history.entries.length > 0;
       this.history.clear();
       this.bases.clear();
@@ -138,7 +146,7 @@ export class PatchSession {
     const base = this.bases.get(level);
     if (!base) return { refused: 'The level’s file is not known yet' };
     this.pending = { level, ops, step, project: this.project, views: [...views] };
-    return { message: patchMessage(level, base, ops), pending: this.pending };
+    return { message: patchMessage(level, base, ops, this.generation ?? null), pending: this.pending };
   }
 
   /** The levels shown besides its own from which the undo (-1) or redo (+1) may be written. */

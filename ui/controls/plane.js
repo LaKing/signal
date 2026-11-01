@@ -52,6 +52,7 @@ import './schematic.js';
 import { loadWhitelist, showWritten } from './panel-editor.js';
 import { generatedTree, parseContent, serialize } from '../lib/panel-tree.js';
 import { setAttributes } from '../lib/panel-edit.js';
+import { graphGeneration, named } from '../lib/opening.js';
 import { defaultPanel } from '../lib/panel.js';
 import { faceAttribute, rootRules, stylesheets } from '../lib/schematic-face.js';
 import { GUTTER, PU, parsePlace, parsePlate } from '../lib/plate.js';
@@ -881,7 +882,8 @@ export class SignalPlane extends HTMLElement {
    * written stopped and played again.
    */
   async writeSetupCable({ ops, route }) {
-    const patch = () => this.request({ type: 'patch', level: '', base: this.graph?.files?.[''] ?? null, ops });
+    // ADR 0049: of the opening the graph shown is of.
+    const patch = () => this.request(named({ type: 'patch', level: '', base: this.graph?.files?.[''] ?? null, ops }, graphGeneration(this.graph)));
     let restart = false;
     try {
       if (ops.length) {
@@ -1880,6 +1882,7 @@ export class SignalPlane extends HTMLElement {
   async rebind(control, address) {
     if (control.binds.length === 1 && control.binds[0] === address) return;
     try {
+      const generation = graphGeneration(this.graph);
       const rules = this.rules ?? (await loadWhitelist());
       const read = await this.request({ type: 'panel.read', file: 'main.html' });
       if (!read.exists) return this.say('Not bound: the project has no panel file');
@@ -1890,7 +1893,7 @@ export class SignalPlane extends HTMLElement {
       if (!node) return this.say('Not bound: the control is no longer in the panel');
       const changed = setAttributes(parsed.tree, node.id, { bind: address });
       if (changed.error) return this.say(`Not bound: ${changed.error}`);
-      await this.request({ type: 'panel.write', file: 'main.html', html: serialize(changed.tree, rules), plate: read.plate ?? null, base: read.base });
+      await this.request(named({ type: 'panel.write', file: 'main.html', html: serialize(changed.tree, rules), plate: read.plate ?? null, base: read.base }, generation));
       this.say(`${control.label || control.tag} now binds ${address} (ui/main.html)`);
       this.readPanel();
     } catch (error) {

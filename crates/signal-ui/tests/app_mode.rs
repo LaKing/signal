@@ -2552,6 +2552,7 @@ both!(
     a_stale_revert_or_open_is_refused,
     a_request_after_a_queued_open_means_the_project_then_open,
     a_queued_live_edit_is_no_edit_at_an_open,
+    delayed_writes_of_another_opening_are_refused_with_identical_files,
 );
 
 /// External review (A, ADR 0049): a delayed edit is never written into
@@ -2803,6 +2804,87 @@ fn a_queued_live_edit_is_no_edit_at_an_open(transport: Transport) {
     drop(lock);
     rig.finish();
     let _ = fs::remove_dir_all(&b);
+}
+
+/// Review 2026-11-01 (adr-0049-unnamed-writes): the page's delayed writes
+/// name the opening their edit began in, and the host refuses them after
+/// another opening even when every file is byte for byte the same (the
+/// `base` hashes match): a pattern, a panel, a patch and a move of project A
+/// sent once B, an identical copy, is open write nothing; named with B's
+/// generation they write.
+fn delayed_writes_of_another_opening_are_refused_with_identical_files(transport: Transport) {
+    const PROJECT: &str = "schema_version = 1\n\n[project]\nname = \"melody\"\nsample_rate = 48000\nseed = 1\n\n[instances]\nclock = { module = \"std.transport\", bpm = 120 }\nseq = { module = \"std.note_seq\", pattern = \"melody\" }\nosc = { module = \"std.sine_osc\" }\nout = { module = \"std.audio_out\", gain = 0.05 }\n\n[wiring]\nconnections = [\n  { from = \"clock.tick\", to = \"seq.tick\" },\n  { from = \"seq.hz\", to = \"osc.freq\" },\n  { from = \"osc.out\", to = \"out.l\" },\n  { from = \"osc.out\", to = \"out.r\" },\n]\n";
+    const MELODY: &str = "schema_version = 1\nkind = \"notes\"\nlength = 4\nnotes = [\n  { key = 60, start = 0, length = 1, velocity = 1 },\n]\n";
+    let mut rig = app_rig("stale-writes", transport, None);
+    let root_dir = rig.dir.parent().unwrap().to_owned();
+    let (a, b) = (root_dir.join("a"), root_dir.join("b"));
+    for dir in [&a, &b] {
+        fs::create_dir_all(dir.join("patterns")).unwrap();
+        fs::write(dir.join("project.toml"), PROJECT).unwrap();
+        fs::write(dir.join("patterns/melody.toml"), MELODY).unwrap();
+    }
+    let (mut ws, _) = rig.client();
+    let open = |rig: &mut Rig, ws: &mut common::Ws, id: u64, dir: &Path| {
+        rig.request(
+            ws,
+            id,
+            json!({"type": "project.open", "path": dir.display().to_string()}),
+            "project",
+        );
+        rig.request(ws, id + 1, json!({"type": "graph"}), "graph")
+    };
+    let graph_a = open(&mut rig, &mut ws, 1, &a);
+    let stale = graph_a["generation"].clone();
+    let base = graph_a["files"][""].clone();
+    let melody_base = signal_ui::panel_write::sha256_hex(MELODY.as_bytes());
+    let graph_b = open(&mut rig, &mut ws, 3, &b);
+    let now = graph_b["generation"].clone();
+    assert_ne!(stale, now);
+    assert_eq!(graph_b["files"][""], base, "identical files");
+    let edited = MELODY.replace("key = 60", "key = 62");
+    let html = "\n  <div class=\"signal-cards\"></div>\n";
+    let messages = |generation: &Value| {
+        [
+            json!({"type": "pattern.write", "name": "melody", "text": edited, "base": melody_base, "generation": generation}),
+            json!({"type": "panel.write", "file": "main.html", "html": html, "base": null, "generation": generation}),
+            json!({"type": "patch", "level": "", "base": base, "ops": [{"op": "instance.add", "name": "lfo", "module": "std.sine_osc"}], "generation": generation}),
+            json!({"type": "schematic.move", "level": "", "instance": "osc", "x": 10, "y": 20, "generation": generation}),
+        ]
+    };
+    for (n, message) in messages(&stale).into_iter().enumerate() {
+        let refused = rig.request(&mut ws, 10 + n as u64, message.clone(), "error");
+        assert_eq!(refused["code"], "project-changed", "{message}");
+    }
+    assert_eq!(fs::read_to_string(b.join("project.toml")).unwrap(), PROJECT);
+    assert_eq!(
+        fs::read_to_string(b.join("patterns/melody.toml")).unwrap(),
+        MELODY
+    );
+    assert!(!b.join("ui").exists(), "no panel, no positions written");
+    for (n, message) in messages(&now).into_iter().enumerate() {
+        let id = 20 + n as u64;
+        common::send(&mut ws, with_id(&message, id));
+        let reply = rig.wait(&mut ws, "the reply", |got| {
+            got.json()
+                .filter(|v| v.get("id") == Some(&json!(id)))
+                .cloned()
+        });
+        assert_ne!(reply["type"], "error", "{message}: {reply}");
+    }
+    assert!(
+        fs::read_to_string(b.join("patterns/melody.toml"))
+            .unwrap()
+            .contains("key = 62")
+    );
+    rig.finish();
+    let _ = fs::remove_dir_all(&a);
+    let _ = fs::remove_dir_all(&b);
+}
+
+fn with_id(message: &Value, id: u64) -> Value {
+    let mut message = message.clone();
+    message["id"] = json!(id);
+    message
 }
 
 /// Steps for `ms`, asserting that `ws` receives no reply to `ids`.

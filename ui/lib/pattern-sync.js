@@ -46,7 +46,13 @@
 // other refusal is reported and the edit stays pending until the next edit
 // or `retry()`. `close()` drains: what is pending (also an edit made while
 // a write was in flight) is still written, stopping only at a refusal.
+//
+// ADR 0049: an edit names the opening (`connection.generation`) it began
+// in, kept through the debounce, retries, conflicts and the drain; once
+// another project (or a new opening of it) is open, the server refuses it
+// (`project-changed`): the draft is let go, said, and the file read again.
 
+import { generationOf } from './opening.js';
 import { parsePattern, samePattern } from './pattern-text.js';
 
 export const WRITE_DELAY_MS = 300;
@@ -98,6 +104,7 @@ export class PatternSync {
     this.pending = null; // text waiting to be written
     this.pendingPattern = null; // its pattern, when the control gave it
     this.pendingBase = null; // the base the pending edit started from
+    this.pendingGeneration = null; // the opening it began in (ADR 0049)
     this.writing = null; // the write in flight (a promise)
     this.timer = null;
     this.conflicts = 0;
@@ -238,7 +245,10 @@ export class PatternSync {
   /** The control changed the pattern to `text` (`pattern` its object): written after the delay. */
   edited(text, pattern = null) {
     if (this.closed || !this.loaded) return;
-    if (this.pending === null) this.pendingBase = this.base;
+    if (this.pending === null) {
+      this.pendingBase = this.base;
+      this.pendingGeneration = generationOf(this.connection);
+    }
     this.pending = text;
     this.pendingPattern = pattern;
     this.conflicts = 0;
@@ -291,20 +301,29 @@ export class PatternSync {
     const text = this.pending;
     const editBase = this.pendingBase;
     const given = this.pendingPattern;
+    const generation = this.pendingGeneration;
     this.pending = null;
     this.pendingPattern = null;
     if (text === this.text) return; // the file already says this
     let reply;
     try {
-      reply = await this.connection.writePattern(this.name, text, this.base);
+      reply = await this.connection.writePattern(this.name, text, this.base, { generation });
     } catch (error) {
-      if (error?.code === 'conflict') await this.conflict(text, editBase, given);
-      else {
+      if (error?.code === 'conflict') await this.conflict(text, editBase, given, generation);
+      else if (error?.code === 'project-changed') {
+        // Of an opening no longer open: never written into this one.
+        this.notify(`not written: ${error?.message ?? error}`);
+        if (!this.closed && this.pending === null) {
+          this.loaded = false;
+          this.load();
+        }
+      } else {
         // Kept: the next edit or a retry writes it; a drain stops here.
         if (this.pending === null) {
           this.pending = text;
           this.pendingPattern = given;
           this.pendingBase = editBase;
+          this.pendingGeneration = generation;
         }
         this.stalled = true;
         // The connection dropped: written again when it opens (`opened`).
@@ -331,12 +350,13 @@ export class PatternSync {
   }
 
   /** Counts a conflict; after MAX_CONFLICTS in a row, stops until the next edit. */
-  giveUp(text, given, why) {
+  giveUp(text, given, why, generation) {
     this.conflicts++;
     if (this.conflicts < MAX_CONFLICTS) return false;
     if (this.pending === null) {
       this.pending = text;
       this.pendingPattern = given;
+      this.pendingGeneration = generation;
     }
     this.stalled = true;
     this.notify(`not written: ${why} ${MAX_CONFLICTS} times; your next edit tries again`);
@@ -344,16 +364,17 @@ export class PatternSync {
   }
 
   /** A write was refused as `conflict`: read again, keep the edit only on the same base or meaning. */
-  async conflict(text, editBase, given) {
+  async conflict(text, editBase, given, generation) {
     const startedFrom = this.pattern;
     let current;
     try {
       current = await this.connection.readPattern(this.name);
     } catch (error) {
-      if (!this.giveUp(text, given, 'the file changed elsewhere and could not be read again')) {
+      if (!this.giveUp(text, given, 'the file changed elsewhere and could not be read again', generation)) {
         if (this.pending === null) {
           this.pending = text;
           this.pendingPattern = given;
+          this.pendingGeneration = generation;
         }
         this.notify(`the pattern changed elsewhere and could not be read again: ${error?.message ?? error}`);
       }
@@ -370,12 +391,13 @@ export class PatternSync {
     const sameMeaning = startedFrom !== null && samePattern(pattern, startedFrom);
     this.adopt(current, pattern);
     if (sameBase || sameMeaning) {
-      if (this.giveUp(text, given, 'the server answered conflict')) return;
+      if (this.giveUp(text, given, 'the server answered conflict', generation)) return;
       // Nothing the user saw was changed: the edit goes on the new base.
       if (this.pending === null) {
         this.pending = text;
         this.pendingPattern = given;
         this.pendingBase = current.base;
+        this.pendingGeneration = generation;
       }
       return;
     }

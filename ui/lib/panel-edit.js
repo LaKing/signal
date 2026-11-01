@@ -6,6 +6,7 @@
 
 import { controlSpec } from './panel.js';
 import { keyCommand } from './keys.js';
+import { named } from './opening.js';
 import { parsePlace, parsePlate, placeText, plateText, settle } from './plate.js';
 import { splitVersion } from './panel-tree.js';
 
@@ -570,6 +571,8 @@ export class EditSession {
     this.read = read;
     this.file = null;
     this.base = null;
+    /** The opening the panel was read in (ADR 0049): every write names it. */
+    this.generation = null;
     this.history = null;
     this.blocked = null;
     this.busy = false;
@@ -582,10 +585,14 @@ export class EditSession {
    * otherwise it starts again at `text`. Whether it went on.
    */
   enter(reply, text) {
-    const kept = this.history !== null && !this.blocked && this.file === reply.file && this.base === reply.base;
+    // ADR 0049: the opening the panel was read in (`reply.generation`, the
+    // page's, given with the reply); a history of another opening starts again.
+    const generation = Number.isSafeInteger(reply.generation) ? reply.generation : null;
+    const kept = this.history !== null && !this.blocked && this.file === reply.file && this.base === reply.base && this.generation === generation;
     if (!kept) this.history = new History(text);
     this.file = reply.file;
     this.base = reply.base;
+    this.generation = generation;
     this.blocked = null;
     this.busy = false;
     return kept;
@@ -601,7 +608,7 @@ export class EditSession {
     if (this.busy) return { refused: 'Writing the last change: try again' };
     this.busy = true;
     const { plate, html } = splitVersion(text);
-    return { message: { type: 'panel.write', file: this.file, html, plate, base: this.base } };
+    return { message: named({ type: 'panel.write', file: this.file, html, plate, base: this.base }, this.generation) };
   }
 
   /** The write of `text` (`step` 0: a new version; -1, +1: undo, redo) was taken. */

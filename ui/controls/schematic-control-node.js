@@ -14,6 +14,7 @@ import { setAttributes } from '../lib/panel-edit.js';
 import { attributeValue, editableAttributes, findInTree } from '../lib/schematic-controls.js';
 import { loadWhitelist } from './panel-editor.js';
 import { partFile } from '../lib/parts.js';
+import { generationOf, named } from '../lib/opening.js';
 
 const PANEL_FILE = 'main.html';
 
@@ -85,6 +86,8 @@ export class ControlProperties {
     try {
       const rules = this.rules ?? (await loadWhitelist());
       const file = fileOf(node);
+      // ADR 0049: of the opening the edit began in.
+      const generation = generationOf(connection);
       const read = await connection.request({ type: 'panel.read', file });
       if (!read.exists) return this.s.say('Not written: the project has no panel file');
       if (!read.editable) return this.s.say(`Not written: ${read.reason ?? 'the panel is not editable'}`);
@@ -96,7 +99,7 @@ export class ControlProperties {
       const changed = setAttributes(parsed.tree, found.id, { [name]: checked.value });
       if (changed.error) return this.s.say(`Not written: ${changed.error}`);
       const content = serialize(changed.tree, rules);
-      await connection.request({ type: 'panel.write', file, html: content, base: read.base });
+      await connection.request(named({ type: 'panel.write', file, html: content, base: read.base }, generation));
       this.s.say(`${node.name}: ${name} ${checked.value === null ? 'removed' : `= ${checked.value}`} (ui/${file})`);
       // A part is `graph`'s (`slot.part`): read again with it.
       if (file === PANEL_FILE) this.s.panelSeen(content);

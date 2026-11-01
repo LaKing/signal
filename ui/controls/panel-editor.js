@@ -49,6 +49,7 @@ import {
   ungroup,
 } from '../lib/panel-edit.js';
 import { defaultPanel } from '../lib/panel.js';
+import { generationOf } from '../lib/opening.js';
 import { GUTTER, MAX_PLATE, PU, blocked, drawnBox, freeze, moved as movedPlace, parsePlate, placeText, plateText, resized, snap, tooLarge } from '../lib/plate.js';
 import { ENTRY_CSS, ValueEntry } from './entry-field.js';
 
@@ -293,6 +294,8 @@ export class PanelEditor {
     if (!this.connection) return 'No connection to the server';
     const rules = await loadWhitelist();
     const file = this.panel.file ?? 'main.html';
+    // ADR 0049: the opening this edit begins in, named by every write of it.
+    const generation = generationOf(this.connection);
     const read = await this.connection.request({ type: 'panel.read', file });
     if (!read.planned) return 'The project has no plan: Edit layout writes only what the binding check accepts';
     let tree;
@@ -319,7 +322,7 @@ export class PanelEditor {
     // is (ADR 0047: so an undo gives the file back byte for byte), else at
     // its canonical text.
     const text = read.exists && !parseContent(read.html, rules).error ? `${tree.plate ? `plate="${tree.plate}"` : ''}${read.html}` : versionText(tree, rules);
-    if (this.session.enter({ ...read, file }, text) && this.trees.has(this.session.history.current)) {
+    if (this.session.enter({ ...read, file, generation }, text) && this.trees.has(this.session.history.current)) {
       tree = this.trees.get(this.session.history.current);
     } else {
       this.trees.set(text, tree);

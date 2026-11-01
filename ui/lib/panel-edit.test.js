@@ -348,6 +348,17 @@ test('the session history survives leaving and re-entering edit mode (auditor-1-
   assert.match(s.request('v11').refused, /last change/);
 });
 
+test('ADR 0049: every write names the opening the panel was read in; another opening starts the history again', () => {
+  const s = session();
+  s.enter({ file: 'main.html', base: 'b0', generation: 3 }, 'v0');
+  assert.deepEqual(s.request('v1').message, { type: 'panel.write', file: 'main.html', html: 'v1', plate: null, base: 'b0', generation: 3 });
+  s.written({ base: 'b1' }, 'v1', 0);
+  // Entered again in a new opening of identical files (same file, same base): its history is not this one's.
+  assert.equal(s.enter({ file: 'main.html', base: 'b1', generation: 4 }, 'v1'), false);
+  assert.ok(!s.history.canUndo);
+  assert.equal(s.request('v2').message.generation, 4);
+});
+
 test('a conflict that is not editable stops writing and keeps the base (auditor-1-004)', () => {
   const s = session();
   s.enter({ file: 'main.html', base: 'b0' }, 'v0');

@@ -323,6 +323,10 @@ test('readPattern and writePattern wrap pattern.read and pattern.write', async (
   // A first write names no base: null on the wire.
   connection.writePattern('fresh', 'x').catch(() => {});
   assert.equal(socket.last('pattern.write').base, null);
+  assert.equal('generation' in socket.last('pattern.write'), false, 'no opening named: none sent');
+  // ADR 0049: the opening the edit began in.
+  connection.writePattern('fresh', 'x', null, { generation: 12 }).catch(() => {});
+  assert.equal(socket.last('pattern.write').generation, 12);
 
   const conflict = connection.writePattern('melody', 'mine', 'abc');
   const c = socket.last('pattern.write');

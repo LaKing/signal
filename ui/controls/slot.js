@@ -28,6 +28,7 @@
 // above its part's plate.
 
 import { browserEntries } from '../lib/module-browser.js';
+import { generationOf, named } from '../lib/opening.js';
 import { BindingCheck, formatDiagnostic } from '../lib/panel.js';
 import { emptyPartTree, opensAsCard, partFile, partPalette, rootAddress, rootedAttribute } from '../lib/parts.js';
 import { cardTitle, contentMatch, dropLoad, loadOps, loadable, projectEntries, slotCard, unloadOp } from '../lib/slot.js';
@@ -502,8 +503,10 @@ ${BROWSER_CSS}`;
     this.say(doing);
     this.update();
     try {
+      // ADR 0049: of the opening the edit began in.
+      const generation = generationOf(connection);
       const read = await connection.request({ type: 'file.read', file: 'project.toml' });
-      const reply = await connection.request({ type: 'patch', level: '', base: read.base, ops });
+      const reply = await connection.request(named({ type: 'patch', level: '', base: read.base, ops }, generation));
       // Until ADR 0037 phase 2, a Load or Replace is one structural edit: the reload applies it.
       this.say(reply?.notes?.length ? reply.notes.join('; ') : '');
       return true;

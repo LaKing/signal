@@ -5,6 +5,7 @@
 
 import { findParameter } from '../signal-ui.js';
 import { formatValue } from './format.js';
+import { generationOf } from './opening.js';
 import { resetValue } from './gesture.js';
 import { clamp, toPosition, toValue } from './taper.js';
 import { unsavedOf } from './unsaved.js';
@@ -23,11 +24,7 @@ export function quietly(promise) {
   promise?.catch?.(() => {});
 }
 
-/** The open project's generation a connection last heard of (ADR 0049), or null. */
-export function generationOf(connection) {
-  const generation = connection?.generation ?? connection?.description?.generation;
-  return Number.isSafeInteger(generation) ? generation : null;
-}
+export { generationOf };
 
 /** A numeric attribute, or undefined when absent or not a number. */
 export function numberAttribute(element, name) {

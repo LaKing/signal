@@ -396,9 +396,11 @@ export class Connection {
    * rejects with an Error whose `code` and message are the server's
    * (`conflict`: the file changed since `base`; `does-not-load`: the text
    * was refused, the message names the problem), its `reply` the error.
+   * `generation`: the opening the edit began in (ADR 0049), refused
+   * (`project-changed`) once another is open.
    */
-  writePattern(name, text, base) {
-    return this.request({ type: 'pattern.write', name, text, base: base ?? null }).then((reply) => ({
+  writePattern(name, text, base, { generation } = {}) {
+    return this.request({ type: 'pattern.write', name, text, base: base ?? null, ...generationField(generation) }).then((reply) => ({
       sha: reply.base,
       base: reply.base,
       created: Boolean(reply.created),
