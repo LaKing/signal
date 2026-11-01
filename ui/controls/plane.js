@@ -1119,8 +1119,73 @@ export class SignalPlane extends HTMLElement {
     this.render();
   }
 
+  /**
+   * Dev-only, for measuring (ADR 0051 test 9: at most 5 000 drawn elements; docs/benchmarks.md):
+   * what the plane holds and draws now. `elements`: every element under it, the front panels'
+   * and controls' shadow roots included; `drawn`: those shown (not `display: none`, `[hidden]` or
+   * `visibility: hidden`, under no zero opacity); both per layer (`setup`, each Stack by name,
+   * `deep` the Engine's board, `chrome` the bar and notes). `renders` and `renderMs`: the
+   * view's renders since the plane was made, and their script time. Reads computed styles,
+   * so it is called by a measurement, never per frame. Never writes anything.
+   */
+  metrics() {
+    const walk = (node, shown, out) => {
+      for (const child of node.children ?? []) {
+        let on = shown;
+        if (on) {
+          const style = getComputedStyle(child);
+          on = style.display !== 'none' && !child.hidden && Number(style.opacity) > 0;
+          if (on && style.visibility === 'hidden') {
+            out.elements++;
+            if (child.shadowRoot) walk(child.shadowRoot, on, out);
+            walk(child, on, out);
+            continue;
+          }
+        }
+        out.elements++;
+        if (on) out.drawn++;
+        if (child.shadowRoot) walk(child.shadowRoot, on, out);
+        walk(child, on, out);
+      }
+      return out;
+    };
+    const layer = (element) => {
+      if (!element) return { elements: 0, drawn: 0 };
+      const style = getComputedStyle(element);
+      const on = style.display !== 'none' && !element.hidden && Number(style.opacity) > 0 && style.visibility !== 'hidden';
+      return walk(element, on, { elements: 1, drawn: on ? 1 : 0 });
+    };
+    const layers = { setup: layer(this.setupSvg), deep: layer(this.deep), chrome: { elements: 0, drawn: 0 } };
+    for (const part of [this.bar, this.notes]) {
+      const counted = layer(part);
+      layers.chrome.elements += counted.elements;
+      layers.chrome.drawn += counted.drawn;
+    }
+    const stacks = {};
+    for (const [name, s] of this.stacks) stacks[name] = layer(s.element);
+    const all = [layers.setup, layers.deep, layers.chrome, ...Object.values(stacks)];
+    return {
+      level: this.level(),
+      view: { ...this.view },
+      focused: this.focused,
+      opened: this.opened,
+      elements: all.reduce((n, c) => n + c.elements, 0),
+      drawn: all.reduce((n, c) => n + c.drawn, 0),
+      layers: { ...layers, stacks },
+      renders: this.renders ?? 0,
+      renderMs: Math.round((this.renderMs ?? 0) * 1000) / 1000,
+    };
+  }
+
   /** The view drawn: one transform, the fades of its ratio; each level's drawing laid out once, when it first shows. */
   render() {
+    const t0 = performance.now();
+    this.drawView();
+    this.renders = (this.renders ?? 0) + 1;
+    this.renderMs = (this.renderMs ?? 0) + performance.now() - t0;
+  }
+
+  drawView() {
     if (!this.world || !this.viewport.w) return;
     const v = this.view;
     this.world.style.transform = `translate(${v.x}px, ${v.y}px) scale(${v.k})`;
