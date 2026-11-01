@@ -14,7 +14,8 @@ use crate::document::{Document, Ticket};
 
 use super::app_mode::app_only;
 use super::failure::{Failure, fail};
-use super::{Edits, Host, Job, project_ui};
+use super::queue::Job;
+use super::{Edits, Host, project_ui};
 
 /// An edit of `ui/windows.toml`'s text ([`Host::write_windows_then`]).
 pub type WindowsEdit = Box<dyn Fn(&str) -> Result<String, String> + Send>;
