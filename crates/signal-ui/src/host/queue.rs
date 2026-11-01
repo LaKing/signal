@@ -12,6 +12,7 @@ use signal_project::transaction;
 use crate::server::Permit;
 
 use super::Host;
+use super::app_mode::app_only;
 use super::failure::{Failure, fail};
 use super::project_io::{SaveDone, WindowsEdit};
 
@@ -222,7 +223,7 @@ pub(super) enum Request {
 /// What a Save does while requests wait for the writer lock (ADR 0048).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum WhenWaiting {
-    /// Refused, nothing saved ([`Host::save_document`]): a Save made now
+    /// Refused, nothing saved ([`Host::save_document`], [`Host::save_as`]): a Save made now
     /// would leave out writes asked before it. Otherwise it is written
     /// before [`Host::submit`] returns, without the queue.
     Refuse,
@@ -308,6 +309,14 @@ impl Host {
     /// not on this thread. A client's message naming another opening is
     /// refused first (ADR 0049).
     pub(super) fn submit(&mut self, request: Request) {
+        // Every Save and Save As is the app's (a project of `signal ui` is
+        // written straight to its files).
+        let request = match request {
+            Request::Save { done, .. } if self.app.is_none() => {
+                return done(Err(app_only().message));
+            }
+            request => request,
+        };
         if let Request::Save {
             when_waiting: WhenWaiting::Refuse,
             ..
@@ -370,9 +379,17 @@ impl Host {
     }
 
     /// A Save that is refused while requests wait for the writer lock
-    /// ([`WhenWaiting::Refuse`]), else run now.
+    /// ([`WhenWaiting::Refuse`]), else run now: a `.signal` project's Save,
+    /// and any Save As (a folder project's packs its files too).
     fn save_or_refuse(&mut self, request: Request) {
-        if self.opening.document.is_some() && !self.queue.waiting.is_empty() {
+        let save_as = matches!(
+            request,
+            Request::Save {
+                save_as: Some(_),
+                ..
+            }
+        );
+        if (self.opening.document.is_some() || save_as) && !self.queue.waiting.is_empty() {
             if let Request::Save { done, .. } = request {
                 self.save_document_refused(done);
             }

@@ -972,7 +972,13 @@ fn a_far_future_at_is_refused_and_holds_back_nothing(transport: Transport) {
         json!({"type": "note", "address": "/melody.audition", "key": 72, "on": true}),
         "ack",
     );
-    gate(&mut rig, &mut ws, ack["frame"].as_u64().unwrap(), 1.0, "held");
+    gate(
+        &mut rig,
+        &mut ws,
+        ack["frame"].as_u64().unwrap(),
+        1.0,
+        "held",
+    );
 
     // Far ahead, or a second and more past the default stamp: refused.
     let pong = rig.request(&mut ws, 3, json!({"type": "ping"}), "pong");
@@ -1013,7 +1019,10 @@ fn a_far_future_at_is_refused_and_holds_back_nothing(transport: Transport) {
     );
     assert_eq!(ack["late"], false, "{ack}");
     let off = ack["frame"].as_u64().unwrap();
-    assert!(off < default + 48_000, "the note off at {off}, default {default}");
+    assert!(
+        off < default + 48_000,
+        "the note off at {off}, default {default}"
+    );
     gate(&mut rig, &mut ws, off, 0.0, "released");
 
     // Within the horizon: taken at the frame given.

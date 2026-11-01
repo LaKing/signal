@@ -183,15 +183,21 @@ impl Host {
     /// Save As (app mode), waiting for it: the project written to the
     /// `.signal` file `file`, which it is from then on (the Setup's last
     /// project). A folder project's folder is left as it is: the project is
-    /// opened again, from the new file, stopped.
+    /// opened again, from the new file, stopped. Refused, nothing saved,
+    /// while requests wait for the writer lock, as [`Host::save_document`]
+    /// is: the answer is always this Save As's own outcome, never a job
+    /// still to run.
     pub fn save_as(&mut self, file: &Path) -> Result<(), String> {
         let (answer, answered) = std::sync::mpsc::channel();
-        self.save_as_then(
-            file,
-            Box::new(move |result| {
+        self.submit(Request::Save {
+            save_as: Some(file.to_owned()),
+            when_waiting: WhenWaiting::Refuse,
+            done: Box::new(move |result| {
                 let _ = answer.send(result);
             }),
-        );
+        });
+        // Refused or written before `submit` returns, or started then and
+        // finished here.
         self.finish_saves();
         answered
             .try_recv()
@@ -205,9 +211,6 @@ impl Host {
     /// Requests waiting for the writer lock are done first, as for
     /// [`Host::save_document_then`].
     pub fn save_as_then(&mut self, file: &Path, done: SaveDone) {
-        if self.app.is_none() {
-            return done(Err(app_only().message));
-        }
         self.submit(Request::Save {
             save_as: Some(file.to_owned()),
             when_waiting: WhenWaiting::Queue,

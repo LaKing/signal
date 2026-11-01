@@ -2477,6 +2477,7 @@ both!(
     a_project_that_stops_loading_pushes_graph_error,
     a_request_waiting_for_the_lock_is_not_run_on_another_project,
     a_save_waits_for_the_writes_queued_before_it,
+    a_waiting_save_as_is_refused_while_writes_wait,
     a_save_whose_corrections_meet_a_held_lock_waits_or_fails,
     a_delayed_commit_is_never_written_into_another_project,
     save_then_open_waits_for_the_queued_writes,
@@ -2737,6 +2738,43 @@ fn a_save_waits_for_the_writes_queued_before_it(transport: Transport) {
     rig.reply(&mut ws, 2, "committed");
     rig.reply(&mut ws, 3, "saved");
     assert!(gain_of(&file).contains("gain = 0.3"), "{}", gain_of(&file));
+    rig.finish();
+}
+
+/// Host refactor, inconsistency 1: the waiting Save As (`save_as`) is
+/// refused while requests wait for the writer lock, as `save_document` is,
+/// and writes nothing later; once they are written it saves. Outside app
+/// mode every Save is refused alike (inconsistency 3).
+fn a_waiting_save_as_is_refused_while_writes_wait(transport: Transport) {
+    let mut rig = app_rig("save-as-behind", transport, None);
+    let file = packed(&rig, "tone");
+    let copy = rig.setup.with_file_name("copy.signal");
+    let _ = fs::remove_file(&copy);
+    let (mut ws, _) = rig.client();
+    let opened = rig.request(
+        &mut ws,
+        1,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    let working = PathBuf::from(opened["dir"].as_str().unwrap());
+    let lock = signal_project::transaction::ProjectLock::acquire(&working).unwrap();
+    common::send(
+        &mut ws,
+        json!({"type": "commit", "address": "/out.gain", "value": 0.05, "id": 2}),
+    );
+    no_reply(&mut rig, &mut ws, 200, &[2]);
+    let refused = rig.host().save_as(&copy).unwrap_err();
+    assert!(refused.contains("wait for another writer"), "{refused}");
+    no_reply(&mut rig, &mut ws, 200, &[2]);
+    assert!(!copy.exists(), "nothing saved, now or later");
+    drop(lock);
+    rig.reply(&mut ws, 2, "committed");
+    rig.pump();
+    assert!(!copy.exists(), "the refused Save As never runs");
+    rig.host().save_as(&copy).unwrap();
+    assert!(gain_of(&copy).contains("gain = 0.05"), "{}", gain_of(&copy));
+    let _ = fs::remove_file(&copy);
     rig.finish();
 }
 
