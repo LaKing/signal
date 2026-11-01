@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use signal_core::{Frame, PortAddress};
 use signal_engine::Stamp;
 use signal_graph::ExecutionPlan;
-use signal_project::transaction::{self, ProjectLock};
+use signal_project::transaction;
 
 use crate::panel::{
     ParameterView, Target, WriteEdit, Written, after_write_all, write_project_chosen_under,
@@ -114,7 +114,7 @@ impl Host {
             return Ok(());
         }
         let _no_wait = transaction::NoWait::enter(Duration::ZERO);
-        let holding = match ProjectLock::try_hold(&self.opening.dir) {
+        let holding = match ctx.try_hold() {
             Ok(Some(holding)) => Some(holding),
             Ok(None) if !self.pending_corrections().is_empty() => {
                 return Err(

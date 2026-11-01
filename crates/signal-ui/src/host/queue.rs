@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use signal_project::transaction::{self, ProjectLock};
+use signal_project::transaction;
 
 use crate::server::Permit;
 
@@ -315,7 +315,7 @@ impl Host {
         match request.order() {
             Order::Write => {
                 if self.queue.waiting.is_empty() {
-                    match ProjectLock::try_hold(&self.opening.dir) {
+                    match self.try_hold() {
                         Ok(Some(holding)) => {
                             self.execute(request);
                             drop(holding);
@@ -377,7 +377,7 @@ impl Host {
     pub(super) fn save_must_wait(&self) -> bool {
         self.opening.document.is_some()
             && !self.pending_corrections().is_empty()
-            && matches!(ProjectLock::try_hold(&self.opening.dir), Ok(None))
+            && matches!(self.try_hold(), Ok(None))
     }
 
     /// Queues `job` until the project's writer lock is free
@@ -447,7 +447,7 @@ impl Host {
             }
             // A live edit or an open kept in order needs no lock.
             let lock = !matches!(front.job, Job::Message { lock: false, .. });
-            let holding = match lock.then(|| ProjectLock::try_hold(&self.opening.dir)) {
+            let holding = match lock.then(|| self.try_hold()) {
                 None => None,
                 Some(Ok(Some(holding))) => Some(holding),
                 Some(Ok(None)) if front.since.elapsed() < self.queue.lock_wait => break,
