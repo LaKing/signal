@@ -7,7 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_PORT_ROWS, boundChannels, capturePorts, channelSummary, deviceBoxes, endpointLabel, mainBinding, peripherals, playbackPortOf, playbackPorts, setupCables, splitBoxes } from './plane-peripherals.js';
+import { MAX_PORT_ROWS, boundChannels, cableDrop, capturePorts, channelSummary, deviceBoxes, deviceEntry, endpointLabel, landingChannels, landingPorts, mainBinding, newRoleName, peripherals, playRoles, playbackPortOf, playbackPorts, setupCables, splitBoxes } from './plane-peripherals.js';
 
 const config = (channels) => ({ channels, min_rate: 44100, max_rate: 192000, buffer: [15, 4096], sample_format: 'f32' });
 const SSL_ID = 'coreaudio:AppleUSBAudioEngine:Solid State Logic:SSL 2+ MKII';
@@ -150,4 +150,121 @@ test('the Setup’s output device is whole even when the project plays nothing; 
   assert.deepEqual(both.others.map((b) => b.name), ['MacBook Pro Speakers']);
   // No device at all: nothing whole, nothing listed.
   assert.deepEqual(splitBoxes([], {}), { full: [], others: [] });
+});
+
+// ADR 0038 (M4.1): several roles at once on the clock device.
+const MAIN_AND_CUE = [...MAIN, { name: 'cue', role: 'cue', layout: 'stereo', ports: ['/cue.l', '/cue.r'] }];
+
+test('the owner’s case: main on the SSL 2+’s Out 1–2 and cue on Out 3–4, each cabled from the Stack', () => {
+  const setup = { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID }, outputChannels: [1, 2], play: { cue: { channels: [3, 4], device: null } } } };
+  const devices = { devices: [ssl(0, 'output'), ssl(1, 'input')], output: { found: 0 } };
+  const { boxes, bindings } = peripherals({ setup, devices, endpoints: MAIN_AND_CUE });
+  assert.deepEqual(
+    bindings.map((b) => [b.role, b.channels, b.heard, b.device]),
+    [
+      ['main', [1, 2], true, `id:${SSL_ID}`],
+      ['cue', [3, 4], true, `id:${SSL_ID}`],
+    ],
+  );
+  assert.equal(playbackPortOf(boxes[0], bindings[1].channels[0]).name, 'Out 3–4');
+  const pins = new Map([['primary', [{ side: 'out', instrument: 'card:master', address: '/master.out', label: 'out', outside: ['/out.l', '/out.r', '/cue.l', '/cue.r'] }]]]);
+  assert.deepEqual(
+    setupCables(pins, bindings).map((c) => [c.port, c.channel]),
+    [
+      ['/out.l', 1],
+      ['/out.r', 2],
+      ['/cue.l', 3],
+      ['/cue.r', 4],
+    ],
+  );
+});
+
+test('a role the machine does not bind is not heard; two roles on one channel are never summed', () => {
+  const devices = { devices: [ssl(0, 'output')], output: { found: 0 } };
+  const unbound = peripherals({ setup: { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID } } }, devices, endpoints: MAIN_AND_CUE });
+  assert.deepEqual(unbound.bindings[1], { endpoint: 'cue', role: 'cue', layout: 'stereo', ports: ['/cue.l', '/cue.r'], device: null, channels: [], heard: false, note: 'not heard on this machine' });
+  // cue on 2–3: `cue` < `main` in canonical order, so cue takes 2 and main loses it there (ADR 0038 §4).
+  const setup = { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID }, play: { cue: { channels: [2, 3] } } } };
+  const { bindings } = peripherals({ setup, devices, endpoints: MAIN_AND_CUE });
+  assert.deepEqual(bindings[0].channels, [1, null]);
+  assert.deepEqual(bindings[1].channels, [2, 3]);
+  const pins = new Map([['primary', [{ side: 'out', address: '/m.out', outside: ['/out.l', '/out.r'] }]]]);
+  assert.deepEqual(setupCables(pins, bindings).map((c) => c.channel), [1], 'a refused channel has no cable');
+});
+
+test('a role on another device is another clock: drawn there, dashed, not heard', () => {
+  const devices = { devices: [ssl(0, 'output'), speakers(1)], output: { found: 0 } };
+  const setup = { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID }, play: { cue: { channels: [1, 2], device: { name: 'MacBook Pro Speakers', id: 'coreaudio:BuiltInSpeakerDevice' } } } } };
+  const { bindings } = peripherals({ setup, devices, endpoints: MAIN_AND_CUE });
+  assert.equal(bindings[1].device, 'id:coreaudio:BuiltInSpeakerDevice');
+  assert.equal(bindings[1].heard, false);
+  assert.match(bindings[1].note, /another clock/);
+  const pins = new Map([['primary', [{ side: 'out', address: '/m.out', outside: ['/cue.l'] }]]]);
+  assert.equal(setupCables(pins, bindings)[0].dashed, true);
+});
+
+test('devices.local.toml overrides the Setup key by key', () => {
+  const roles = playRoles({ setup: { outputChannels: [1, 2], play: { cue: { channels: [3, 4], device: null } } }, local: { play: { cue: { channels: [4, 3] }, main: { channels: [3, 4] } } } });
+  assert.deepEqual(roles, { cue: { channels: [4, 3], device: null }, main: { channels: [3, 4], device: null } });
+});
+
+test('a cable landing: its channels, its ports, a new role’s name, the device as the Setup names it', () => {
+  const out34 = { channels: [3, 4] };
+  assert.deepEqual(landingChannels(out34, 2), [3, 4]);
+  assert.deepEqual(landingChannels(out34, 2, 4), [4, 5]);
+  assert.deepEqual(landingChannels({ channels: [5] }, 1), [5]);
+  assert.deepEqual(landingPorts('l', ['/cue.l', '/cue.r'], 1), ['/cue.l']);
+  assert.deepEqual(landingPorts('out_r', ['/cue.l', '/cue.r'], 0), ['/cue.r']);
+  assert.deepEqual(landingPorts('out', ['/cue.l', '/cue.r'], 1), ['/cue.r']);
+  assert.equal(newRoleName([]), 'cue');
+  assert.equal(newRoleName(['main', 'cue', 'cue_2']), 'cue_3');
+  assert.deepEqual(deviceEntry({ devices: [ssl(0, 'output')] }, `id:${SSL_ID}`), { name: 'SSL 2+ MKII', id: SSL_ID, signature: '' });
+  assert.equal(deviceEntry({ devices: [] }, 'id:x'), null);
+});
+
+test('cable drags: create a new output on free channels, join a bound role, move a binding, remove a connection', () => {
+  const devices = { devices: [ssl(0, 'output'), speakers(1)], output: { found: 0 } };
+  const setup = { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID }, outputChannels: null } };
+  const { boxes, bindings, main } = peripherals({ setup, devices, endpoints: MAIN });
+  const box = boxes.find((b) => b.key === `id:${SSL_ID}`);
+  const out34 = { ...playbackPortOf(box, 3), channels: [3, 4] };
+  const pin = { side: 'out', address: '/limiter.out', label: 'out', outside: ['/out.l', '/out.r'] };
+  const context = { bindings, instances: ['limiter', 'out'], main, devices };
+
+  // The master's pin on the SSL's free Out 3–4: a cue device slot, fed on both channels, bound to 3–4 of the clock device.
+  const created = cableDrop({ kind: 'create', pin }, { box: box.key, port: out34, channel: 3 }, context);
+  assert.deepEqual(created.ops, [
+    { op: 'device.add', name: 'cue', play: 'stereo', role: 'cue' },
+    { op: 'connection.add', from: 'limiter.out', to: 'cue.l' },
+    { op: 'connection.add', from: 'limiter.out', to: 'cue.r' },
+  ]);
+  assert.deepEqual(created.route, { type: 'device.route', role: 'cue', channels: [3, 4], device: null, scope: 'machine' });
+
+  // A paired pin (l) feeds its side, and its sibling (r) the other.
+  const left = { address: '/master.l', label: 'l', outside: [] };
+  const right = { address: '/master.r', label: 'r', outside: [] };
+  const paired = cableDrop({ kind: 'create', pin: left, siblings: [right] }, { box: box.key, port: out34, channel: 4 }, { ...context, scope: 'project' });
+  assert.deepEqual(paired.ops.slice(1), [
+    { op: 'connection.add', from: 'master.l', to: 'cue.l' },
+    { op: 'connection.add', from: 'master.r', to: 'cue.r' },
+  ]);
+  assert.equal(paired.route.scope, 'project');
+
+  // On a port a role plays on: only the connections, never a binding.
+  const out12 = playbackPortOf(box, 1);
+  const joined = cableDrop({ kind: 'create', pin: { address: '/echo.out', label: 'out', outside: [] } }, { box: box.key, port: out12, channel: 2 }, context);
+  assert.deepEqual(joined, { ops: [{ op: 'connection.add', from: 'echo.out', to: 'out.r' }], route: null, note: null });
+  assert.match(cableDrop({ kind: 'create', pin }, { box: box.key, port: out12, channel: 1 }, context).note, /already plays main/);
+
+  // A cable's device end moved: only the binding; on another device, that device is named.
+  const cable = setupCables(new Map([['primary', [pin]]]), bindings)[0];
+  const moved = cableDrop({ kind: 'move', cable }, { box: box.key, port: out34, channel: 3 }, context);
+  assert.deepEqual(moved, { ops: [], route: { type: 'device.route', role: 'main', channels: [3, 4], device: null, scope: 'machine' }, note: 'main on Out 3–4' });
+  const away = cableDrop({ kind: 'move', cable }, { box: 'id:coreaudio:BuiltInSpeakerDevice', port: { name: 'Out 1–2', channels: [1, 2] }, channel: 1 }, context);
+  assert.deepEqual(away.route.device, { name: 'MacBook Pro Speakers', id: 'coreaudio:BuiltInSpeakerDevice', signature: '' });
+  assert.deepEqual(cableDrop({ kind: 'move', cable }, { box: box.key, port: out12, channel: 1 }, context), { ops: [], route: null, note: null }, 'where it is: nothing');
+
+  // Dropped on the empty plane: the connection goes, the binding stays.
+  assert.deepEqual(cableDrop({ kind: 'move', cable }, null, context).ops, [{ op: 'connection.remove', from: 'limiter.out', to: 'out.l' }]);
+  assert.deepEqual(cableDrop({ kind: 'create', pin }, null, context), { ops: [], route: null, note: null });
 });

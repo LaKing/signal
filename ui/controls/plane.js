@@ -3,9 +3,14 @@
 //   - **Setup**: every Stack as its column of live front panels, in
 //     miniature; this machine's audio peripherals from the Setup and the
 //     device inventory (`setup.get`, `setup.devices`), in our signal
-//     direction; the role endpoints on the channels their role is bound to,
-//     and the cable from the primary Stack's edge pin to them
-//     (ui/lib/plane-peripherals.js);
+//     direction; the role endpoints (`main`, and every device slot's role,
+//     ADR 0038) on the channels their role is bound to, and the cables from
+//     the Stacks' edge pins to them (ui/lib/plane-peripherals.js). A cable
+//     is dragged (ADR 0051 §3, §9): from a Stack's out pin onto a device
+//     port it creates the connection (and, on free channels, a new device
+//     slot and its role's binding); its device end onto another port moves
+//     only the binding (`device.route`; Shift: this project only,
+//     devices.local.toml); dropped on the empty plane, its connection goes;
 //   - **Stack**: a click on a Stack's header, Enter, or zooming until it
 //     fills the stage fits its width; the wheel then scrolls it vertically,
 //     and the Setup's cables, peripherals and other Stacks fade to SURROUND;
@@ -52,7 +57,7 @@ import { faceAttribute, rootRules, stylesheets } from '../lib/schematic-face.js'
 import { GUTTER, PU, parsePlace, parsePlate } from '../lib/plate.js';
 import { CARD_PREFIX, PLANE_FILE, panelCards, planeOf } from '../lib/plane-file.js';
 import { assignInstruments, edgePins, hasPart, instrumentTitle, roleEndpoints, stackMembers } from '../lib/plane-instruments.js';
-import { channelSummary, endpointLabel, peripherals, playbackPortOf, setupCables, splitBoxes } from '../lib/plane-peripherals.js';
+import { cableDrop, channelSummary, endpointLabel, peripherals, playbackPortOf, setupCables, splitBoxes } from '../lib/plane-peripherals.js';
 import { BOX_PU, OTHERS_PU, TEXT, TRAY_LINE_PU, capChars, boxPorts, cablePath, othersBoxes, pinPlaces, planeLayout, stackLayout, textSize, textSizes } from '../lib/plane-layout.js';
 import { NOT_CONTROLS, READERS, bindList, fitText } from '../lib/schematic-controls.js';
 import { CONTROL_BAND, ENGINE_BAND, FOCUS_BAND, LIFT, MARGIN_PX, WIRING_BAND, depthOf, engineBand, fitAll, fitScale, fitWidth, frameOnto, instrumentAt, levelOf, panBy, planeFades, planeFromFrame, reachesFit, screenRect, scrollStack, splitDepth, toPlane, zoomAbout, zoomStep } from '../lib/plane-zoom.js';
@@ -105,6 +110,8 @@ svg.setup { position: absolute; overflow: visible; pointer-events: none; }
 svg.setup text { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
 .cable { fill: none; stroke: var(--signal-accent, #4fc3f7); stroke-width: 2.5; vector-effect: non-scaling-stroke; stroke-linecap: round; }
 .cable.dashed { stroke-dasharray: 6 5; }
+.cable.ghost { stroke: var(--signal-effective, #ffb74d); stroke-dasharray: 3 4; }
+.port.target { stroke: var(--signal-effective, #ffb74d); stroke-width: 2.5; }
 .pin { fill: var(--signal-accent, #4fc3f7); stroke: var(--signal-board-bg, #0e1014); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .pin.in { fill: var(--signal-meter-rms, #3ecf8e); }
 .pin-label { fill: var(--signal-fg, #d6dbe4); font-size: var(--t-port, 28px); }
@@ -519,7 +526,7 @@ export class SignalPlane extends HTMLElement {
     const cables = setupCables(pins, bindings);
     // Whole boxes for the devices the project and the Setup use; the rest in one list (the operator's review of phase 1).
     const { full: boxes, others } = splitBoxes(all, { bindings, cables, main });
-    this.model = { plane: shown.plane, derived: shown.derived, problems: shown.problems, cards, owner, stackOf, pins, endpoints, boxes, others, bindings, cables, unstacked };
+    this.model = { plane: shown.plane, derived: shown.derived, problems: shown.problems, cards, owner, stackOf, pins, endpoints, boxes, others, bindings, cables, unstacked, main };
     if (!this.focused || !shown.plane.stacks.some((s) => s.name === this.focused)) this.focused = shown.plane.stacks[0]?.name ?? null;
     const focusedStack = shown.plane.stacks.find((s) => s.name === this.focused);
     if (!focusedStack?.instruments.includes(this.opened)) this.opened = focusedStack?.instruments[0] ?? null;
@@ -711,6 +718,8 @@ export class SignalPlane extends HTMLElement {
     this.setupSvg.setAttribute('viewBox', `${box.x} ${box.y} ${box.w} ${box.h}`);
     const groups = { cables: svg('g'), boxes: svg('g'), pins: svg('g') };
     const pinAt = new Map();
+    // What a cable drag can start from or land on (plane units).
+    this.hits = { pins: [], ports: [], ends: [] };
     for (const stack of this.model.plane.stacks) {
       const s = this.stacks.get(stack.name);
       const rect = this.layout.stacks.get(stack.name);
@@ -719,6 +728,7 @@ export class SignalPlane extends HTMLElement {
         const x = rect.x + (pin.side === 'out' ? rect.w : 0);
         const y = rect.y + pin.y;
         pinAt.set(`${stack.name} ${pin.side} ${pin.address}`, { x, y });
+        if (pin.side === 'out') this.hits.pins.push({ stack: stack.name, pin, x, y });
         const g = svg('g', { 'data-pin': pin.address });
         g.append(svg('circle', { class: `pin ${pin.side}`, cx: x, cy: y, r: 10 }));
         const label = `${instrumentTitle(pin.instrument, this.cards)} · ${pin.label}`;
@@ -745,7 +755,9 @@ export class SignalPlane extends HTMLElement {
       const bound = this.model.bindings.filter((x) => x.device === b.key);
       for (const p of ports.inputs) {
         const roles = bound.filter((x) => x.channels.some((c) => p.channels.includes(c)));
-        g.append(svg('rect', { class: `port${roles.length ? ' bound' : ''}`, x: r.x + 6, y: r.y + p.y + 3, width: half, height: p.h - 6, rx: 4 }));
+        const rect = svg('rect', { class: `port${roles.length ? ' bound' : ''}`, x: r.x + 6, y: r.y + p.y + 3, width: half, height: p.h - 6, rx: 4, 'data-port': `${b.key} ${p.key}` });
+        g.append(rect);
+        if (b.present) this.hits.ports.push({ box: b.key, port: p, rect, x: r.x - 24, y: r.y + p.y, w: half + 30, h: p.h, jacks: p.pins.map((pin) => ({ channel: pin.channel, y: r.y + pin.y })) });
         g.append(svg('text', { class: 'port-name', x: r.x + 24, y: r.y + p.y + 44 }, p.name));
         if (roles.length) g.append(svg('text', { class: 'port-role', x: r.x + 24, y: r.y + p.y + 84 }, fitText(roles.map(endpointLabel).join(', '), capChars(TEXT.role, half - 24))));
         for (const pin of p.pins) {
@@ -778,7 +790,11 @@ export class SignalPlane extends HTMLElement {
         for (const pin of this.model.pins.get(stack.name) ?? []) {
           if (pin.side !== 'out' || !b.ports.some((p) => pin.outside.includes(p))) continue;
           const a = pinAt.get(`${stack.name} out ${pin.address}`);
-          if (a) groups.cables.append(svg('path', { class: 'cable dashed', d: cablePath(a, { x, y: y + 56 }) }));
+          if (!a) continue;
+          groups.cables.append(svg('path', { class: 'cable dashed', d: cablePath(a, { x, y: y + 56 }) }));
+          // Its end dragged onto a device port binds the role there ("Play on …").
+          const port = b.ports.find((q) => pin.outside.includes(q));
+          this.hits.ends.push({ cable: { stack: stack.name, pin: pin.address, endpoint: b.endpoint, port, device: null, channel: null }, x, y: y + 56, from: a });
         }
       }
     }
@@ -786,6 +802,7 @@ export class SignalPlane extends HTMLElement {
       const a = pinAt.get(`${c.stack} out ${c.pin}`);
       const b = portAt.get(`${c.device} ${c.channel}`);
       if (!a || !b) return;
+      this.hits.ends.push({ cable: c, x: b.x, y: b.y, from: a });
       const path = svg('path', { class: `cable${c.dashed ? ' dashed' : ''}`, d: cablePath(a, b, i) });
       path.append(svg('title', {}, `${c.pin} → ${c.port} (${c.endpoint}) → channel ${c.channel}`));
       groups.cables.append(path);
@@ -796,7 +813,92 @@ export class SignalPlane extends HTMLElement {
       groups.boxes.append(svg('text', { class: 'box-kind', x: t.x + 24, y: t.y + 42 }, 'UNSTACKED'));
       this.model.unstacked.forEach((name, i) => groups.boxes.append(svg('text', { class: 'tray-text', x: t.x + 24, y: t.y + BOX_PU.title * PU + (i + 0.75) * TRAY_LINE_PU * PU }, fitText(name, capChars(TEXT.port, t.w - 48)))));
     }
-    this.setupSvg.replaceChildren(groups.cables, groups.boxes, groups.pins);
+    this.ghost = svg('path', { class: 'cable ghost', d: '' });
+    this.setupSvg.replaceChildren(groups.cables, groups.boxes, groups.pins, this.ghost);
+  }
+
+  // Setup-level cables, dragged (ADR 0051 §3, §9).
+
+  /** What a press at plane point `p` grabs: a cable's device end (move), or a Stack's out pin (create); null for neither. */
+  setupCableAt(p) {
+    const reach = 18 / this.view.k;
+    const near = (h) => Math.hypot(h.x - p.x, h.y - p.y) <= reach;
+    const end = this.hits?.ends.find(near);
+    if (end) return { kind: 'move', cable: end.cable, from: end.from };
+    const hit = this.hits?.pins.find(near);
+    if (!hit) return null;
+    const siblings = (this.model.pins.get(hit.stack) ?? []).filter((q) => q.side === 'out' && q !== hit.pin && q.instrument === hit.pin.instrument);
+    return { kind: 'create', pin: hit.pin, siblings, from: { x: hit.x, y: hit.y } };
+  }
+
+  /** The playback port under plane point `p` and the jack nearest it: `{box, port, channel, rect}`, or null. */
+  setupPortAt(p) {
+    const hit = this.hits?.ports.find((h) => p.x >= h.x && p.x <= h.x + h.w && p.y >= h.y && p.y <= h.y + h.h);
+    if (!hit) return null;
+    const jack = hit.jacks.reduce((best, j) => (!best || Math.abs(j.y - p.y) < Math.abs(best.y - p.y) ? j : best), null);
+    return { box: hit.box, port: hit.port, channel: jack?.channel ?? hit.port.channels[0], rect: hit.rect };
+  }
+
+  /** The dragged cable drawn to plane point `p`, the port under it marked. */
+  dragSetupCable(p) {
+    const d = this.cableDrag;
+    d.to = p;
+    this.ghost?.setAttribute('d', cablePath(d.from, p));
+    const target = this.setupPortAt(p);
+    if (d.target?.rect !== target?.rect) {
+      d.target?.rect?.classList.remove('target');
+      target?.rect?.classList.add('target');
+    }
+    d.target = target;
+  }
+
+  /** The drag let go: what it writes (`cableDrop`), then written: the project's text by `patch`, the binding by `device.route`. */
+  async dropSetupCable(event) {
+    const d = this.cableDrag;
+    this.cableDrag = null;
+    d.target?.rect?.classList.remove('target');
+    this.ghost?.setAttribute('d', '');
+    if (!d.moved) return;
+    const drop = d.target ? { box: d.target.box, port: d.target.port, channel: d.target.channel } : null;
+    const instances = (this.graph?.top?.instances ?? []).map((i) => i.name);
+    const result = cableDrop(d, drop, { bindings: this.model.bindings, instances, main: this.model.main, devices: this.devices, scope: event.shiftKey ? 'project' : 'machine' });
+    if (!result.ops.length && !result.route) {
+      if (result.note) this.say(result.note);
+      return;
+    }
+    try {
+      await this.writeSetupCable(result);
+      if (result.note) this.say(result.note);
+    } catch (error) {
+      this.say(error?.message ?? String(error));
+    }
+  }
+
+  /**
+   * Writes a cable: its project text (one patch of project.toml), then its
+   * binding. A new output needs the run to start again (ADR 0038 v1: a run
+   * keeps the outputs it started with): refused while playing, it is
+   * written stopped and played again.
+   */
+  async writeSetupCable({ ops, route }) {
+    const patch = () => this.request({ type: 'patch', level: '', base: this.graph?.files?.[''] ?? null, ops });
+    let restart = false;
+    if (ops.length) {
+      try {
+        await patch();
+      } catch (error) {
+        if (!/outputs must stay/.test(error?.message ?? '')) throw error;
+        await this.request({ type: 'transport.stop' });
+        restart = true;
+        await patch();
+      }
+    }
+    try {
+      if (route) await this.request(route);
+    } finally {
+      if (route) this.readSetup();
+      if (restart) await this.request({ type: 'transport.play' }).catch((error) => this.say(error?.message ?? String(error)));
+    }
   }
 
   /** The list of other devices (plane units): its head ("Other devices (N)", a click or Enter toggles it), and, expanded, a small box per device. */
@@ -1547,6 +1649,17 @@ export class SignalPlane extends HTMLElement {
 
   pointerDown(event) {
     if (this.gesture || event.button !== 0 || event.composedPath().includes(this.deep) || event.composedPath().includes(this.bar) || event.composedPath().includes(this.chooser) || this.onControl(event)) return;
+    // At the Setup level a press on a cable's device end or a Stack's out pin drags a Setup cable (ADR 0038, 0051 §3).
+    if (event.button === 0 && this.level() === 'setup' && this.model && !this.onControl(event)) {
+      const grabbed = this.setupCableAt(toPlane(this.view, this.point(event)));
+      if (grabbed) {
+        this.settleTravel();
+        this.cableDrag = { ...grabbed, id: event.pointerId, start: this.point(event), moved: false, target: null };
+        this.stage.setPointerCapture?.(event.pointerId);
+        event.preventDefault();
+        return;
+      }
+    }
     this.settleTravel();
     const at = this.point(event);
     // A wire, a cable or a box of the edited drawing: selected (by its connection or port, kept at every zoom); the empty sheet clears it.
@@ -1560,6 +1673,13 @@ export class SignalPlane extends HTMLElement {
   }
 
   pointerMove(event) {
+    if (this.cableDrag && event.pointerId === this.cableDrag.id) {
+      const at = this.point(event);
+      if (!this.cableDrag.moved && Math.hypot(at.x - this.cableDrag.start.x, at.y - this.cableDrag.start.y) < 3) return;
+      this.cableDrag.moved = true;
+      this.dragSetupCable(toPlane(this.view, at));
+      return;
+    }
     if (this.gesture && event.pointerId === this.gesture.id) {
       const at = this.point(event);
       if (!this.gesture.moved && Math.hypot(at.x - this.gesture.start.x, at.y - this.gesture.start.y) < 3) return;
@@ -1584,6 +1704,11 @@ export class SignalPlane extends HTMLElement {
   }
 
   pointerUp(event) {
+    if (this.cableDrag && event.pointerId === this.cableDrag.id) {
+      this.stage.releasePointerCapture?.(event.pointerId);
+      this.dropSetupCable(event);
+      return;
+    }
     if (this.gesture && event.pointerId === this.gesture.id) {
       const gesture = this.gesture;
       this.gesture = null;
@@ -1820,6 +1945,11 @@ export class SignalPlane extends HTMLElement {
     this.gesture = null;
     this.drag = null;
     this.clearRubber();
+    if (this.cableDrag) {
+      this.cableDrag.target?.rect?.classList.remove('target');
+      this.ghost?.setAttribute('d', '');
+      this.cableDrag = null;
+    }
   }
 
   say(text) {

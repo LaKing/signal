@@ -35,9 +35,9 @@ export function portOf(address) {
   return text.slice(text.lastIndexOf('.') + 1);
 }
 
-/** Whether a top-level instance (`graph.top.instances[i]`) is a device slot, and its role. */
+/** Whether a top-level instance (`graph.top.instances[i]`) is a device slot, and its role: `graph`'s `device.role` (ADR 0038 §3, a `device = { play, role }` slot), else `std.audio_out`'s `main`. */
 export function roleOf(instance) {
-  return DEVICE_SLOTS[instance?.module] ?? null;
+  return instance?.device?.role ?? DEVICE_SLOTS[instance?.module] ?? null;
 }
 
 /** Whether a top-level instance is a slot with a part (ADR 0046: `slot.part.file`). */
@@ -217,7 +217,7 @@ export function roleEndpoints(instances = []) {
     const role = roleOf(i);
     if (!role) continue;
     const ports = (i.ports ?? []).filter((p) => p.direction === 'in' && (p.shape ?? 'signal') === 'signal').map((p) => p.address);
-    const layout = ports.length === 2 ? 'stereo' : ports.length === 1 ? 'mono' : `${ports.length} ch`;
+    const layout = i.device?.play ?? (ports.length === 2 ? 'stereo' : ports.length === 1 ? 'mono' : `${ports.length} ch`);
     out.push({ name: i.name, role, layout, ports });
   }
   return out;

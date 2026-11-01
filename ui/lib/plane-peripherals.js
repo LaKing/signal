@@ -133,14 +133,160 @@ export function peripherals({ setup = null, devices = null, endpoints = [] } = {
     const width = Math.max(2, ...endpoints.filter((e) => e.role === 'main').map((e) => e.ports.length));
     boxes.push({ key: main.key, name: main.name, present: false, indexes: [], note: `not present${main.reason && main.reason !== 'not present' ? `: ${main.reason}` : ''}`, inputs: playbackPorts(width), outputs: [], side: 'right' });
   }
-  const bindings = endpoints.map((e) => {
-    if (e.role !== 'main' || !main) return { endpoint: e.name, role: e.role, layout: e.layout, ports: e.ports, device: null, channels: [], heard: false, note: 'not heard on this machine' };
-    const box = boxes.find((b) => b.key === main.key);
-    const deviceChannels = box ? box.inputs.reduce((n, p) => Math.max(n, ...p.channels), 0) : Infinity;
-    const channels = boundChannels(setup?.setup?.outputChannels ?? null, e.ports.length, main.present ? deviceChannels : Infinity);
-    return { endpoint: e.name, role: e.role, layout: e.layout, ports: e.ports, device: main.key, channels, heard: main.present, note: main.present ? null : 'not present' };
+  const roles = playRoles(setup);
+  const channelsOfBox = (box) => (box ? box.inputs.reduce((n, p) => Math.max(n, ...p.channels), 0) : Infinity);
+  // ADR 0038 §4: canonical order (role, then the endpoint's address); the later of two roles on one channel is refused there.
+  const ordered = [...endpoints].sort((a, b) => (a.role < b.role ? -1 : a.role > b.role ? 1 : 0) || String(a.ports[0] ?? a.name).localeCompare(String(b.ports[0] ?? b.name)));
+  const hasMain = ordered.some((e) => e.role === 'main');
+  const used = new Map();
+  const seen = new Set();
+  const bound = new Map();
+  ordered.forEach((e, k) => {
+    const unheard = (note) => bound.set(e, { endpoint: e.name, role: e.role, layout: e.layout, ports: e.ports, device: null, channels: [], heard: false, note });
+    if (seen.has(e.role) || !main) return unheard('not heard on this machine');
+    seen.add(e.role);
+    // A project without `main` plays its first role as main (unless that role is bound itself).
+    const as = e.role === 'main' || (!hasMain && k === 0 && !roles[e.role]) ? 'main' : e.role;
+    const entry = roles[as] ?? null;
+    if (as !== 'main' && !entry) return unheard('not heard on this machine');
+    let key = main.key;
+    let heard = main.present;
+    let note = main.present ? null : 'not present';
+    if (entry?.device && as !== 'main') {
+      const box = boxes.find((b) => b.key === (entry.device.id ? `id:${entry.device.id}` : `name:${entry.device.name}`));
+      if (!box) return unheard(`${entry.device.name}: not present`);
+      if (box.key !== main.key) {
+        key = box.key;
+        heard = false;
+        note = 'another clock: not heard (an aggregate device plays several cards)';
+      }
+    }
+    const box = boxes.find((b) => b.key === key);
+    const width = e.ports.length;
+    const limit = box?.present ? channelsOfBox(box) : Infinity;
+    const wanted = as === 'main' ? boundChannels(entry?.channels ?? null, width, limit) : (entry?.channels ?? []).slice(0, width);
+    const channels = [];
+    for (let i = 0; i < width; i++) {
+      const c = wanted[i];
+      const refused = !Number.isInteger(c) || c < 1 || c > limit || channels.includes(c) || (heard && used.has(c));
+      channels.push(refused ? null : c);
+      if (!refused && heard) used.set(c, e.role);
+    }
+    bound.set(e, { endpoint: e.name, role: e.role, layout: e.layout, ports: e.ports, device: key, channels, heard, note });
   });
+  const bindings = endpoints.map((e) => bound.get(e));
   return { boxes, bindings, main };
+}
+
+/**
+ * The roles this machine binds (ADR 0038 §4, §6): `setup.get`'s
+ * `setup.play` (`main`'s short form `outputChannels` when it has no
+ * `[play.main]`), then `devices.local.toml`'s overrides (`local.play`),
+ * merged key by key. `{role: {channels, device}}`.
+ */
+export function playRoles(setup) {
+  const roles = {};
+  for (const [role, e] of Object.entries(setup?.setup?.play ?? {})) roles[role] = { channels: e?.channels ?? [], device: e?.device ?? null };
+  if (!roles.main && Array.isArray(setup?.setup?.outputChannels)) roles.main = { channels: setup.setup.outputChannels, device: null };
+  for (const [role, e] of Object.entries(setup?.local?.play ?? {})) {
+    const base = roles[role] ?? { channels: [], device: null };
+    const channels = Array.isArray(e?.channels) ? e.channels : base.channels;
+    if (channels.length) roles[role] = { channels, device: e?.device ?? base.device };
+  }
+  return roles;
+}
+
+/** The device channels a role of `width` channels takes when its cable lands on `port` at channel `channel` (from there on, as many as it is wide). */
+export function landingChannels(port, width, channel = port?.channels?.[0]) {
+  const first = Number.isInteger(channel) ? channel : (port?.channels?.[0] ?? 1);
+  return Array.from({ length: Math.max(1, width) }, (_, i) => first + i);
+}
+
+/** A new role's name for a cable landing on free channels (ADR 0038 §1: what it is for; the person renames it in the text): `cue`, then `cue_2`, `cue_3`, … */
+export function newRoleName(taken = []) {
+  const names = new Set(taken);
+  if (!names.has('cue')) return 'cue';
+  for (let n = 2; ; n++) if (!names.has(`cue_${n}`)) return `cue_${n}`;
+}
+
+/** The inventory's entry of box `key` as the Setup names a device (`{name, id, signature}`), or null. */
+export function deviceEntry(devices, key) {
+  const d = (devices?.devices ?? []).find((x) => deviceKey(x) === key && x.direction === 'output');
+  return d ? { name: d.name, id: d.id ?? undefined, signature: '' } : null;
+}
+
+const strip = (address) => String(address).replace(/^\//, '');
+const sideOf = (label) => (/(^|_)(l|left)$/.test(label) ? 'l' : /(^|_)(r|right)$/.test(label) ? 'r' : null);
+
+/**
+ * What a Setup-level cable drag writes (ADR 0051 §3, §9: a cable is the
+ * project's connection and the machine's binding, drawn as one). `drag`:
+ * `{kind: 'create', pin, siblings}` from a Stack's out edge pin (`pin`:
+ * `edgePins`' `{address, label, outside}`; `siblings`: the same
+ * instrument's other out pins), or `{kind: 'move', cable}` by a cable's
+ * device end (`setupCables`'). `drop`: the playback port it lands on,
+ * `{box, port, channel}` (`channel` the jack nearest the pointer), or null
+ * (the empty plane). Returns `{ops, route, note}`:
+ * - a cable moved to another port: `route`, the `device.route` that binds
+ *   its role there (`device` null on the clock device); no project text;
+ * - a cable dropped on the empty plane: `ops`, its connection removed;
+ * - a pin dropped on a port a role plays on: `ops`, the connections into
+ *   that role's ports (paired by name, `landingPorts`);
+ * - a pin dropped on free channels: a new device slot of a new role
+ *   (`device.add`, stereo), the connections into it, and its `route`.
+ * `scope`: `machine` (the Setup) or `project` (`devices.local.toml`).
+ */
+export function cableDrop(drag, drop, { bindings = [], instances = [], main = null, devices = null, scope = 'machine' } = {}) {
+  const none = { ops: [], route: null, note: null };
+  const deviceOf = (box) => (box === main?.key ? null : deviceEntry(devices, box));
+  if (drag?.kind === 'move') {
+    const cable = drag.cable;
+    if (!drop) return { ...none, ops: [{ op: 'connection.remove', from: strip(cable.pin), to: strip(cable.port) }], note: `${strip(cable.pin)} → ${strip(cable.port)} removed` };
+    const binding = bindings.find((b) => b.endpoint === cable.endpoint);
+    if (!binding) return none;
+    const index = Math.max(0, binding.ports.indexOf(cable.port));
+    const first = Math.max(1, drop.channel - index);
+    const channels = Array.from({ length: binding.ports.length }, (_, i) => first + i);
+    const same = drop.box === binding.device && channels.every((c, i) => c === binding.channels[i]);
+    if (same) return none;
+    return { ...none, route: { type: 'device.route', role: binding.role, channels, device: deviceOf(drop.box), scope }, note: `${binding.role} on ${drop.port.name}` };
+  }
+  if (drag?.kind !== 'create' || !drop) return none;
+  const pin = drag.pin;
+  const candidates = [pin, ...(drag.siblings ?? [])];
+  /** The pins feeding role ports `ports`: a paired pin (l, r) its side's port and its sibling the other; an unpaired one every port. */
+  const feeds = (ports) => {
+    const side = sideOf(pin.label);
+    if (!side) return ports.map((port) => [pin, port]);
+    return ports
+      .map((port) => [candidates.find((c) => sideOf(c.label) === String(port).slice(String(port).lastIndexOf('.') + 1)), port])
+      .filter(([c]) => c);
+  };
+  const occupant = bindings.find((b) => b.device === drop.box && b.channels.includes(drop.channel));
+  if (occupant) {
+    const index = occupant.channels.indexOf(drop.channel);
+    const ports = sideOf(pin.label) ? occupant.ports : landingPorts(pin.label, occupant.ports, index);
+    const ops = feeds(ports)
+      .filter(([c, port]) => !c.outside?.includes(port))
+      .map(([c, port]) => ({ op: 'connection.add', from: strip(c.address), to: strip(port) }));
+    return { ...none, ops, note: ops.length ? null : `${strip(pin.address)} already plays ${occupant.role}` };
+  }
+  const role = newRoleName([...bindings.map((b) => b.role), ...instances]);
+  const ports = [`/${role}.l`, `/${role}.r`];
+  const ops = [{ op: 'device.add', name: role, play: 'stereo', role }, ...feeds(ports).map(([c, port]) => ({ op: 'connection.add', from: strip(c.address), to: strip(port) }))];
+  const channels = landingChannels(drop.port, 2, drop.port.channels[0]);
+  return { ops, route: { type: 'device.route', role, channels, device: deviceOf(drop.box), scope }, note: `${role} · stereo on ${drop.port.name}: a new output (rename its role in project.toml)` };
+}
+
+/**
+ * Which endpoint ports a Stack pin's cable feeds when it lands on a role
+ * of ports `ports` at port index `index`: the pin's own name pairs it
+ * (`l` → `l`, `r` → `r`, `out_l` → `l`); otherwise the port it landed on.
+ */
+export function landingPorts(pinLabel, ports, index) {
+  const side = /(^|_)(l|left)$/.test(pinLabel) ? 'l' : /(^|_)(r|right)$/.test(pinLabel) ? 'r' : null;
+  const named = side ? ports.find((p) => String(p).endsWith(`.${side}`)) : null;
+  return [named ?? ports[Math.min(Math.max(index, 0), ports.length - 1)]].filter(Boolean);
 }
 
 /**
@@ -191,6 +337,8 @@ export function setupCables(pins, bindings) {
   for (const b of bindings) {
     if (!b.device) continue;
     b.ports.forEach((port, i) => {
+      // A channel refused (two roles on it, or none the device has) carries no cable.
+      if (!Number.isInteger(b.channels[i])) return;
       for (const [stack, list] of pins) {
         for (const pin of list) {
           if (pin.side !== 'out' || !pin.outside.includes(port)) continue;
