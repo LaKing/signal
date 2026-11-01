@@ -31,6 +31,7 @@
 //!   composite copied into a project.
 
 pub mod archive;
+pub mod device;
 mod diagnostic;
 mod diff;
 mod include;
@@ -759,6 +760,17 @@ impl Project {
             }
         }
 
+        // ADR 0038 §5.4: versions of a role (several sinks of one role) are
+        // not built; two of one layout are always an error.
+        if let Some(planned) = &planned {
+            let sides = device::play_sides(self, &planned.plan);
+            for (address, role) in device::repeated_roles(&sides) {
+                let message = format!(
+                    "{address}: another output already plays role `{role}`; give it its own role (`device = {{ play = \"stereo\", role = \"…\" }}`)"
+                );
+                push_unique(&mut errors, self.instance_error(&address, message));
+            }
+        }
         self.check_categories(registry, &mut errors);
         let tables = self.tables(registry, &mut errors);
         match planned {
@@ -798,6 +810,13 @@ impl Project {
     fn definitions(&self) -> Vec<CompositeDef> {
         let library = self.library.iter().map(|l| &l.def);
         self.composites.iter().chain(library).cloned().collect()
+    }
+
+    /// ADR 0038 §3: the project's device slots, by top-level instance name,
+    /// with their role and layout. A `std.audio_out` written as a module is
+    /// none of them (it is the `main` stereo play side).
+    pub fn device_slots(&self) -> &BTreeMap<String, device::DeviceSlot> {
+        &self.spans.root.devices
     }
 
     /// The library composites the plan instantiates, transitively, with
@@ -1607,6 +1626,86 @@ impl Builder<'_> {
     }
 }
 
+/// ADR 0038 §3: the device slot `instance` writes, and the module its play
+/// side plans as; `None` with the problems pushed. Only at the top of
+/// `project.toml` (`root`).
+fn device_slot(
+    instance: &str,
+    device: &Spanned<model::DeviceSpec>,
+    root: bool,
+    problems: &mut Vec<slot::Problem>,
+) -> Option<(device::DeviceSlot, &'static str)> {
+    let at = device.span().start;
+    let spec = device.get_ref();
+    let mut fine = true;
+    if !root {
+        problems.push((
+            at,
+            format!(
+                "{instance}: a device slot is a top-level instance of project.toml (ADR 0038 §3); a composite names none"
+            ),
+        ));
+        fine = false;
+    }
+    if let Some(kind) = &spec.kind
+        && kind.get_ref() != "audio"
+    {
+        problems.push((
+            kind.span().start,
+            format!(
+                "{instance}: device kind `{}` is not built; this version supplies `audio`",
+                kind.get_ref()
+            ),
+        ));
+        fine = false;
+    }
+    if let Some(capture) = &spec.capture {
+        problems.push((
+            capture.span().start,
+            format!(
+                "{instance}: a device slot's `capture` (audio input) is not built yet (ADR 0038, M4.1)"
+            ),
+        ));
+        fine = false;
+    }
+    let role = match &spec.role {
+        Some(role) if !device::valid_role(role.get_ref()) => {
+            problems.push((
+                role.span().start,
+                format!(
+                    "{instance}: invalid role `{}`; a role is [a-z][a-z0-9_]*",
+                    role.get_ref()
+                ),
+            ));
+            fine = false;
+            String::new()
+        }
+        Some(role) => role.get_ref().clone(),
+        None => signal_output::MAIN.to_owned(),
+    };
+    let module = match &spec.play {
+        Some(play) => match device::planned_module(play.get_ref()) {
+            Ok(module) => Some(module),
+            Err(reason) => {
+                problems.push((play.span().start, format!("{instance}: {reason}")));
+                None
+            }
+        },
+        None => {
+            if spec.capture.is_none() {
+                problems.push((
+                    at,
+                    format!("{instance}: a device slot needs `play` (or `capture`)"),
+                ));
+            }
+            None
+        }
+    };
+    let module = module.filter(|_| fine)?;
+    let play = spec.play.as_ref().map(|p| p.get_ref().clone())?;
+    Some((device::DeviceSlot { role, play }, module))
+}
+
 /// Whether a `load` value names a project (ADR 0037 §2): it contains `/` or
 /// ends in `.signal`; every other value is a module reference.
 pub(crate) fn is_project_path(load: &str) -> bool {
@@ -1626,8 +1725,10 @@ fn definition(
     templates: &BTreeMap<String, slot::Interface>,
 ) -> (CompositeDef, DefSpans, Vec<slot::Problem>) {
     let mut problems = Vec::new();
+    let root = name.is_empty();
     let mut spans = DefSpans {
         file,
+        devices: BTreeMap::new(),
         name: name_span,
         instances_table: instances.as_ref().map(Spanned::span),
         instances: BTreeMap::new(),
@@ -1686,9 +1787,31 @@ fn definition(
                 Some(load) => (load.get_ref().clone(), load.span(), true),
                 None => (String::new(), slot.span(), false),
             },
-            (None, None, None) => (String::new(), entry_span.clone(), false),
+            (None, None, None) => match &entry.device {
+                // ADR 0038 §3: a device slot plans as its play side's sink.
+                Some(device) => match device_slot(&instance, device, root, &mut problems) {
+                    Some((slot, module)) => {
+                        spans.devices.insert(instance.clone(), slot);
+                        (module.to_owned(), device.span(), true)
+                    }
+                    None => (String::new(), device.span(), false),
+                },
+                None => (String::new(), entry_span.clone(), false),
+            },
         };
-        if entry.module.is_none() {
+        if entry.device.is_some() {
+            for (key, given) in [("gpu", &gpu), ("pattern", &pattern)] {
+                if let Some((_, span)) = given {
+                    problems.push((
+                        span.start,
+                        format!(
+                            "{instance}: `{key}` belongs on a primitive module instance, not on a device slot"
+                        ),
+                    ));
+                }
+            }
+        }
+        if entry.module.is_none() && entry.device.is_none() {
             for (key, given) in [("gpu", &gpu), ("pattern", &pattern)] {
                 if let Some((_, span)) = given {
                     problems.push((

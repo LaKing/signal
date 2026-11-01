@@ -1197,7 +1197,7 @@ fn slot_and_project_keys_are_checked() {
     let cases: [(&str, &str); 5] = [
         (
             r#"{ module = "voice", slot = "lib.voice" }"#,
-            "exactly one of `module`, `project` and `slot`",
+            "exactly one of `module`, `project`, `slot` and `device`",
         ),
         (
             r#"{ module = "voice", load = "voice" }"#,

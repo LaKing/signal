@@ -5,8 +5,8 @@
 //! Every table refuses unknown keys. Instance tables are open (their keys are
 //! parameter names), so the graph checks those keys against the module;
 //! `module`, `gpu` (M2.7-2), `pattern` (ADR 0028 §3), `project`, `seed`,
-//! `set` (ADR 0035 §1), `slot`, `load` and `map` (ADR 0037 §2) are reserved
-//! there.
+//! `set` (ADR 0035 §1), `slot`, `load` and `map` (ADR 0037 §2) and `device`
+//! (ADR 0038 §3) are reserved there.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -624,6 +624,8 @@ pub(crate) struct InstanceEntry {
     pub(crate) project: Option<Spanned<String>>,
     /// ADR 0037 §2: the slot's own interface.
     pub(crate) slot: Option<Spanned<SlotSpec>>,
+    /// ADR 0038 §3: a device slot's layout and role.
+    pub(crate) device: Option<Spanned<DeviceSpec>>,
     /// ADR 0037 §2: the slot's content, a module reference or a project path.
     pub(crate) load: Option<Spanned<String>>,
     /// ADR 0037 §4: overrides of the match, by slot port or parameter.
@@ -668,6 +670,7 @@ impl<'de> Deserialize<'de> for InstanceEntry {
                     module: None,
                     project: None,
                     slot: None,
+                    device: None,
                     load: None,
                     map: None,
                     seed: None,
@@ -682,6 +685,7 @@ impl<'de> Deserialize<'de> for InstanceEntry {
                         "module" => entry.module = Some(map.next_value()?),
                         "project" => entry.project = Some(map.next_value()?),
                         "slot" => entry.slot = Some(map.next_value()?),
+                        "device" => entry.device = Some(map.next_value()?),
                         "load" => entry.load = Some(map.next_value()?),
                         "map" => entry.map = Some(map.next_value()?),
                         "seed" => entry.seed = Some(map.next_value()?),
@@ -700,13 +704,14 @@ impl<'de> Deserialize<'de> for InstanceEntry {
                     entry.module.is_some(),
                     entry.project.is_some(),
                     entry.slot.is_some(),
+                    entry.device.is_some(),
                 ];
                 match kinds.iter().filter(|k| **k).count() {
                     0 => return Err(de::Error::missing_field("module")),
                     1 => {}
                     _ => {
                         return Err(de::Error::custom(
-                            "an instance has exactly one of `module`, `project` and `slot`",
+                            "an instance has exactly one of `module`, `project`, `slot` and `device`",
                         ));
                     }
                 }
@@ -721,13 +726,13 @@ impl<'de> Deserialize<'de> for InstanceEntry {
                         }
                     }
                 }
-                if entry.module.is_some() {
+                if entry.module.is_some() || entry.device.is_some() {
                     for (key, given) in
                         [("seed", entry.seed.is_some()), ("set", entry.set.is_some())]
                     {
                         if given {
                             return Err(de::Error::custom(format!(
-                                "`{key}` applies to an included project or a slot, not to a module instance"
+                                "`{key}` applies to an included project or a slot, not to a module instance or a device slot"
                             )));
                         }
                     }
@@ -748,13 +753,15 @@ impl JsonSchema for InstanceEntry {
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         let module = generator.subschema_for::<ModuleRef>();
         let slot = generator.subschema_for::<SlotSpec>();
+        let device = generator.subschema_for::<DeviceSpec>();
         json_schema!({
-            "description": "An instance: its module (`module`), or an included project (`project`, a folder path, ADR 0035), or a slot (`slot`, its interface, with optional `load` and `map`, ADR 0037); exactly one of the three. A module instance may take a GPU device pin (`gpu`) and a pattern (`pattern`); a project or a slot a `seed` and `set` overrides. Every other key is a parameter value.",
+            "description": "An instance: its module (`module`), or an included project (`project`, a folder path, ADR 0035), or a slot (`slot`, its interface, with optional `load` and `map`, ADR 0037), or a device slot (`device`, its layout and role, ADR 0038; only at the top of project.toml); exactly one of the four. A module instance may take a GPU device pin (`gpu`) and a pattern (`pattern`); a project or a slot a `seed` and `set` overrides. Every other key is a parameter value.",
             "type": "object",
             "properties": {
                 "module": module,
                 "project": { "type": "string" },
                 "slot": slot,
+                "device": device,
                 "load": { "type": "string" },
                 "map": {
                     "type": "object",
@@ -774,11 +781,38 @@ impl JsonSchema for InstanceEntry {
             "oneOf": [
                 { "required": ["module"] },
                 { "required": ["project"] },
-                { "required": ["slot"] }
+                { "required": ["slot"] },
+                { "required": ["device"] }
             ],
             "additionalProperties": { "type": "number" }
         })
     }
+}
+
+/// ADR 0038 §3: a device slot, `device = { play = "stereo", role = "cue" }`:
+/// the layout of what the project plays to the machine, and the role it
+/// plays as. The project names no device and no channel.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeviceSpec {
+    /// The play side's layout: `mono`, `stereo`, `quad`, `5.1` or `7.1`
+    /// (this version plans `stereo`).
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub(crate) play: Option<Spanned<String>>,
+    /// The capture side's layout (not built yet).
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub(crate) capture: Option<Spanned<String>>,
+    /// What it is for, `[a-z][a-z0-9_]*`; `main` when absent.
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub(crate) role: Option<Spanned<String>>,
+    /// Which machine family supplies it: `audio`, the default and the only
+    /// kind built.
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub(crate) kind: Option<Spanned<String>>,
 }
 
 /// A module reference. Its schema is replaced by the registry's type names

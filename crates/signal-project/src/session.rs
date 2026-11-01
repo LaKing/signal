@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use signal_core::{
     Curve, Direction, EventPayload, Frame, InstanceAddress, LossCause, ModuleDescriptor,
-    PortAddress, PortShape, Registry, SinkKind, fnv1a64, fnv1a64_words,
+    PortAddress, PortShape, Registry, fnv1a64, fnv1a64_words,
 };
 use signal_engine::{
     BoundaryLine, BoundaryOutcome, ControlSink, Engine, EngineConfig, EngineError, ExternalEvent,
@@ -772,44 +772,23 @@ fn validate(edits: &[(usize, Edit)], plans: &[ExecutionPlan]) -> Vec<Diagnostic>
     diagnostics
 }
 
-/// The audio sink of `project`'s `plan`: its address and number of signal inputs, or the
-/// diagnostics that say why there is not exactly one.
+/// The main audio sink of `project`'s `plan` (ADR 0038 §4: the play side of
+/// role `main`, else the first in canonical order): its address and number
+/// of signal inputs, or the diagnostics that say why there is none. A plan
+/// of one audio sink gives that sink, whatever its role. What a session
+/// records and a replay renders (`audio.wav`); a live run plays every play
+/// side ([`crate::device::play_sides`]).
 pub fn sink_of(
     project: &Project,
     plan: &ExecutionPlan,
 ) -> Result<(InstanceAddress, usize), Vec<Diagnostic>> {
-    let sinks: Vec<_> = plan
-        .instances
-        .iter()
-        .filter(|i| matches!(i.descriptor.sink, Some(SinkKind::Audio)))
-        .collect();
-    match sinks.as_slice() {
-        [sink] => {
-            let inputs = sink
-                .descriptor
-                .ports
-                .iter()
-                .filter(|p| p.direction == Direction::In && p.shape == PortShape::Signal)
-                .count();
-            Ok((sink.address.clone(), inputs))
-        }
-        [] => Err(vec![project.instances_error(
-            "the project has no audio sink (an instance of `std.audio_out`); a session needs exactly one"
+    let sides = crate::device::play_sides(project, plan);
+    match crate::device::main_side(&sides) {
+        Some(side) => Ok((side.address.clone(), side.width)),
+        None => Err(vec![project.instances_error(
+            "the project has no audio sink (an instance of `std.audio_out`, or a device slot); it needs one"
                 .to_owned(),
         )]),
-        several => Err(several
-            .iter()
-            .map(|sink| {
-                project.instance_error(
-                    &sink.address,
-                    format!(
-                        "{}: the project has {} audio sinks; a session needs exactly one",
-                        sink.address,
-                        several.len()
-                    ),
-                )
-            })
-            .collect()),
     }
 }
 

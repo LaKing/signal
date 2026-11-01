@@ -13684,6 +13684,11 @@
       {
         "address": "/out",
         "composite": false,
+        "device": {
+          "play": "stereo",
+          "role": "main",
+          "written": false
+        },
         "module": "std.audio_out",
         "name": "out",
         "parameters": [

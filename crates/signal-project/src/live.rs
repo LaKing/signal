@@ -309,6 +309,32 @@ fn same_sink(
             ),
         )]);
     }
+    // ADR 0038: the run routes its play sides when it starts (and the engine
+    // keeps a run's sinks): adding, removing or re-roling one needs a
+    // restart.
+    let sides = |project: &Project, plan: &signal_graph::ExecutionPlan| {
+        let mut sides: Vec<(String, String, usize)> = crate::device::play_sides(project, plan)
+            .into_iter()
+            .map(|s| (s.address.to_string(), s.role, s.width))
+            .collect();
+        sides.sort();
+        sides
+    };
+    let (was, now) = (sides(old, before), sides(new, plan));
+    if was != now {
+        let list = |sides: &[(String, String, usize)]| {
+            sides
+                .iter()
+                .map(|(address, role, _)| format!("{address} ({role})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        return Err(vec![new.instances_error(format!(
+            "the outputs must stay {} while the project plays (now {}); restart to change them",
+            list(&was),
+            list(&now)
+        ))]);
+    }
     Ok(())
 }
 

@@ -555,14 +555,29 @@ impl Walk<'_> {
                             None => (false, Vec::new(), Vec::new()),
                         },
                     };
-                json!({
+                let mut box_json = json!({
                     "name": name,
                     "address": format!("{lead}{name}"),
                     "module": instance.module,
                     "composite": composite,
                     "ports": ports,
                     "parameters": parameters,
-                })
+                });
+                // ADR 0038 §3 (additive): a top-level play side's role and
+                // layout; `std.audio_out` is `main`, stereo.
+                if def.name.is_empty() {
+                    let device = match self.project.device_slots().get(name) {
+                        Some(slot) => Some(json!({"role": slot.role, "play": slot.play, "written": true})),
+                        None if instance.module == crate::device::STEREO_SINK => Some(
+                            json!({"role": signal_output::MAIN, "play": "stereo", "written": false}),
+                        ),
+                        None => None,
+                    };
+                    if let (Some(device), Value::Object(fields)) = (device, &mut box_json) {
+                        fields.insert("device".to_owned(), device);
+                    }
+                }
+                box_json
             })
             .collect();
         let connections: Vec<Value> = def

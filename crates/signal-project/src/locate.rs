@@ -25,6 +25,9 @@ pub(crate) struct Location {
 #[derive(Clone)]
 pub(crate) struct DefSpans {
     pub(crate) file: usize,
+    /// ADR 0038 §3: the device slots, by instance name (only the project
+    /// root has any).
+    pub(crate) devices: BTreeMap<String, crate::device::DeviceSlot>,
     /// The composite's `name` value; `0..0` for the project root.
     pub(crate) name: Span,
     /// The `[instances]` table, if present.

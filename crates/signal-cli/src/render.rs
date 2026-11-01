@@ -7,10 +7,10 @@ use crate::gpu::{Gpu, uses_gpu};
 
 use clap::{ArgGroup, Args};
 use serde_json::{Value, json};
-use signal_core::{Registry, SinkKind};
+use signal_core::Registry;
 use signal_engine::{Engine, EngineConfig, Manifest, Provenance};
 use signal_eval::Metrics;
-use signal_output::{Render, RenderError, render};
+use signal_output::{Render, RenderError, render, render_sides};
 pub(crate) use signal_project::located;
 use signal_project::provenance;
 use signal_project::{LoadError, Project};
@@ -97,33 +97,21 @@ pub(crate) fn render_project(
         .map_err(|diagnostics| Failure::Invalid(located(dir, diagnostics)))?;
     let plan = &planned.plan;
 
-    let sinks: Vec<_> = plan
-        .instances
+    // ADR 0038 §9: `audio.wav` records the main play side; each other
+    // (a device slot of another role) is written as `devices/<slot>.wav`.
+    // The plan refuses two sinks of one role.
+    let sides = signal_project::device::play_sides(&project, plan);
+    let Some(main) = signal_project::device::main_side(&sides).map(|s| s.address.clone()) else {
+        let message = "the project has no audio sink (an instance of `std.audio_out`)";
+        let diagnostic = project.instances_error(message.to_owned());
+        return Err(Failure::Invalid(located(dir, vec![diagnostic])));
+    };
+    let mut others: Vec<_> = sides
         .iter()
-        .filter(|i| matches!(i.descriptor.sink, Some(SinkKind::Audio)))
+        .filter(|s| s.address != main)
+        .map(|s| s.address.clone())
         .collect();
-    match sinks.as_slice() {
-        [_] => {}
-        [] => {
-            let message = "the project has no audio sink (an instance of `std.audio_out`)";
-            let diagnostic = project.instances_error(message.to_owned());
-            return Err(Failure::Invalid(located(dir, vec![diagnostic])));
-        }
-        several => {
-            let diagnostics = several
-                .iter()
-                .map(|sink| {
-                    let message = format!(
-                        "{}: the project has {} audio sinks; a render needs exactly one",
-                        sink.address,
-                        several.len()
-                    );
-                    project.instance_error(&sink.address, message)
-                })
-                .collect();
-            return Err(Failure::Invalid(located(dir, diagnostics)));
-        }
-    }
+    others.sort();
 
     let sample_rate = args.sample_rate.unwrap_or(project.sample_rate);
     let seed = args.seed.unwrap_or(project.seed);
@@ -143,7 +131,13 @@ pub(crate) fn render_project(
     let mut gpu = Gpu::new(registry, uses_gpu(plan), project.gpu_pins(plan), setup);
     let mut engine = Engine::new(plan, gpu.registry(), config, Vec::new())
         .map_err(|e| Failure::Internal(e.to_string()))?;
-    let mut rendered = render(&mut engine, frames).map_err(|e| render_failure(&project, dir, e))?;
+    let (mut rendered, side_renders) = if others.is_empty() {
+        let rendered = render(&mut engine, frames).map_err(|e| render_failure(&project, dir, e))?;
+        (rendered, Vec::new())
+    } else {
+        render_sides(&mut engine, frames, &main, &others)
+            .map_err(|e| render_failure(&project, dir, e))?
+    };
     (rendered.compute_devices, rendered.placement) = gpu.record();
     let gpu_warnings = gpu.warnings();
     let mut provenance = provenance::collect(&provenance::source_dir(), &project.files);
@@ -157,6 +151,18 @@ pub(crate) fn render_project(
     provenance.library_interface_hashes = project.library_interface_hashes();
     let (manifest, metrics) = write_artifacts(&rendered, &args.out, provenance)
         .map_err(|e| e.into_failure(|e| render_failure(&project, dir, e)))?;
+    // ADR 0038 §9: the other play sides, each in its own WAV.
+    let mut devices = serde_json::Map::new();
+    for side in &side_renders {
+        let name = side.address.as_str().trim_start_matches('/');
+        let file = format!("devices/{name}.wav");
+        side.write(&args.out.join(&file), rendered.sample_rate)
+            .map_err(|e| render_failure(&project, dir, e))?;
+        devices.insert(
+            name.to_owned(),
+            json!({"file": file, "channels": side.channels, "audio_fnv1a64": format!("{:016x}", side.audio_fnv1a64())}),
+        );
+    }
 
     let warnings = located(dir, planned.warnings.clone());
     // ADR 0019 §3: offline the engine waits for a due result, so any late
@@ -181,6 +187,9 @@ pub(crate) fn render_project(
     }
     if late > 0 {
         output["late_results"] = json!(late);
+    }
+    if !devices.is_empty() {
+        output["devices"] = serde_json::Value::Object(devices);
     }
     if !gpu_warnings.is_empty() {
         output["gpu_warnings"] = json!(gpu_warnings);
