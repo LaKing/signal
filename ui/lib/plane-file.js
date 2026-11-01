@@ -139,7 +139,9 @@ export function parsePlane(text) {
     let at = null;
     if (table.has('at')) {
       const v = table.get('at');
-      if (Array.isArray(v) && v.length === 2 && v.every((n) => Number.isInteger(n) && Math.abs(n) <= MAX_PU)) at = [v[0], v[1]];
+      // Whole numbers as TOML writes them: `1.0` is a float, refused as the server refuses it.
+      const whole = Array.isArray(v) && v.length === 2 && v.every((n) => Number.isInteger(n) && Math.abs(n) <= MAX_PU) && !/(^|\n)\s*at\s*=\s*\[[^\]]*\./.test(String(text).split('[[stack]]')[i + 1] ?? '');
+      if (whole) at = [v[0], v[1]];
       else problems.push(problem('error', `${where}: at must be two whole numbers of pu, [x, y], each within ±${MAX_PU}`));
     }
     let width = STACK_PU;

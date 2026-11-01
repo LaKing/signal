@@ -41,6 +41,7 @@ import { reroot } from '../lib/schematic-scene.js';
 import { GESTURE_GAP_MS, WheelKinds } from '../lib/wheel.js';
 import { wheelFactor, wheelPixels } from '../lib/schematic-view.js';
 import { registerWheel, takesWheel } from './keyboard.js';
+import { bindAddresses } from './base.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 /** The theme every panel links. */
@@ -220,6 +221,7 @@ export class SignalPlane extends HTMLElement {
     };
     on('graph', (graph) => this.graphSeen(graph));
     on('welcome', () => this.fetchAll());
+    on('reload', () => this.readPlane());
     on('describe', (description) => this.described(description));
     on('panel.written', (message) => {
       if ((message?.file ?? 'main.html') === 'main.html') this.readPanel();
@@ -254,6 +256,14 @@ export class SignalPlane extends HTMLElement {
     this.fitted = false;
     this.touched = false;
     this.focused = null;
+    this.stopTravel();
+    this.sheets = [THEME];
+    this.rootCss = '';
+    this.cards = [];
+    this.layout = null;
+    this.panelPending = false;
+    this.deepOwned = false;
+    this.handoff = undefined;
     for (const s of this.stacks.values()) s.element.remove();
     this.stacks.clear();
     this.fetchAll();
@@ -262,8 +272,9 @@ export class SignalPlane extends HTMLElement {
   fetchAll() {
     this.readPanel();
     this.readSetup();
+    const gen = this.generation;
     this.request({ type: 'graph' }).then(
-      (graph) => this.graphSeen(graph),
+      (graph) => gen === this.generation && this.graphSeen(graph),
       () => {},
     );
   }
@@ -278,6 +289,7 @@ export class SignalPlane extends HTMLElement {
           this.pageSeen(read.text ?? '');
           this.panelSeen({ html: read.html, plate: read.plate ?? null, generated: false });
         } else {
+          this.pageSeen('');
           this.generatedFrom(this.connection?.description ?? null);
         }
       },
@@ -341,7 +353,9 @@ export class SignalPlane extends HTMLElement {
       this.rootCss = '';
       return;
     }
+    const gen = this.generation;
     Promise.all(own.map((href) => fetch(href, { cache: 'no-store' }).then((r) => (r.ok ? r.text() : ''), () => ''))).then((texts) => {
+      if (gen !== this.generation) return;
       this.rootCss = texts.map(rootRules).filter(Boolean).join('\n');
       for (const s of this.stacks.values()) if (s.roots) s.roots.textContent = this.rootCss;
     });
@@ -670,6 +684,23 @@ export class SignalPlane extends HTMLElement {
     this.render();
   }
 
+  /** At the Setup level the focus follows the pointer: the Stack under screen point `at`, else the nearest. */
+  focusUnder(at) {
+    if (!this.layout?.stacks.size) return;
+    const p = { x: (at.x - this.view.x) / this.view.k, y: (at.y - this.view.y) / this.view.k };
+    let best = null;
+    for (const [name, r] of this.layout.stacks) {
+      const dx = Math.max(r.x - p.x, 0, p.x - (r.x + r.w));
+      const dy = Math.max(r.y - p.y, 0, p.y - (r.y + r.h));
+      const d = Math.hypot(dx, dy);
+      if (!best || d < best.d) best = { name, d };
+    }
+    if (best && best.name !== this.focused) {
+      this.focused = best.name;
+      this.barKey = null;
+    }
+  }
+
   /** The focused Stack's rectangle (plane units), or null. */
   focusRect() {
     return (this.focused && this.layout?.stacks.get(this.focused)) || null;
@@ -732,6 +763,8 @@ export class SignalPlane extends HTMLElement {
     if (!map) return;
     this.schematic.fitted = true;
     this.schematic.setView?.(boardView(this.view, map.origin, map.offset));
+    // Just un-hidden, the board has no stage yet: once measured (its resize), it is laid on the Stack again.
+    if (!this.schematic.viewport?.w) requestAnimationFrame(() => this.render());
   }
 
   /** Where the board's plate origin lies on the plane (the focused Stack's first panel) and its stage on the plane's. */
@@ -894,7 +927,7 @@ export class SignalPlane extends HTMLElement {
   /** Past the wiring band the board zooms by itself; a zoom out of its top level comes back to the plane. */
   wheelCapture(event) {
     if (this.deep.hidden || this.level() !== 'wiring' || !event.composedPath().includes(this.deep)) return;
-    const out = (event.ctrlKey || this.wheelKinds.kind(event, event.timeStamp) !== 'trackpad') && event.deltaY > 0;
+    const out = (event.ctrlKey || this.kindOf(event) !== 'trackpad') && event.deltaY > 0;
     if (!out || !this.boardAtTop()) return;
     const fit = this.fitK();
     const root = reroot(this.schematic.view, (l) => this.schematic.layoutOf(l), '');
@@ -923,9 +956,15 @@ export class SignalPlane extends HTMLElement {
     this.wheelZoom(event, handed);
   }
 
+  /** The wheel gesture's kind (`WheelKinds`), classified once per event. */
+  kindOf(event) {
+    if (event.signalPlaneKind === undefined) event.signalPlaneKind = this.wheelKinds.kind(event, event.timeStamp);
+    return event.signalPlaneKind;
+  }
+
   wheelZoom(event, forced) {
     this.stopTravel();
-    const kind = event.ctrlKey ? 'pinch' : this.wheelKinds.kind(event, event.timeStamp);
+    const kind = event.ctrlKey ? 'pinch' : this.kindOf(event);
     const level = this.level();
     const rect = this.focusRect();
     const mode = event.deltaMode ?? 0;
@@ -949,6 +988,7 @@ export class SignalPlane extends HTMLElement {
 
   /** A zoom by `factor` about screen point `at`: coming to a Stack's fit from below focuses it (its width fitted). */
   zoomBy(factor, at) {
+    if (this.level() === 'setup') this.focusUnder(at);
     const fit = this.fitK();
     const r0 = this.ratio();
     let next = zoomAbout(this.view, factor, at, fit);
@@ -976,13 +1016,17 @@ export class SignalPlane extends HTMLElement {
         this.focusStack(this.focused);
         return;
       }
-      if (level === 'stack' || level === 'wiring') {
+      if (level === 'wiring') {
+        event.preventDefault();
+        this.leaveBoard();
+        this.focusStack(this.focused);
+      } else if (level === 'stack') {
         event.preventDefault();
         this.fitSetup();
       }
       return;
     }
-    if (inBoard || this.onControl(event)) return;
+    if (inBoard || level === 'wiring' || this.onControl(event)) return;
     const centre = { x: this.viewport.w / 2, y: this.viewport.h / 2 };
     const rect = this.focusRect();
     if (event.key === 'Enter') {
@@ -1011,15 +1055,17 @@ export class SignalPlane extends HTMLElement {
   /** The addresses the front panels bind or read. */
   shownAddresses() {
     const out = [];
-    for (const s of this.stacks.values()) for (const card of s.cards.values()) for (const e of card.querySelectorAll('[bind]')) out.push(...String(e.getAttribute('bind')).split(/\s+/));
+    for (const s of this.stacks.values()) for (const card of s.cards.values()) for (const e of card.querySelectorAll('[bind]')) out.push(...bindAddresses(e));
     return out;
   }
 
   /** Focuses the Stack holding a control bound to one of `addresses` and scrolls it into view; returns the controls found. */
   reveal(addresses, whole = false) {
+    // Shown just now (another tab): measured first, so the view is not computed for an empty stage.
+    this.measure();
     const wanted = new Set(addresses);
     for (const [name, s] of this.stacks) {
-      const controls = [...s.cards.values()].flatMap((card) => [...card.querySelectorAll('[bind]')]).filter((e) => String(e.getAttribute('bind')).split(/\s+/).some((a) => wanted.has(a)));
+      const controls = [...s.cards.values()].flatMap((card) => [...card.querySelectorAll('[bind]')]).filter((e) => bindAddresses(e).some((a) => wanted.has(a)));
       if (!controls.length) continue;
       const element = whole ? (controls[0].closest('.signal-card') ?? controls[0]) : controls[0];
       const rect = this.layout?.stacks.get(name);

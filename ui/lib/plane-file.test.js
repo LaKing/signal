@@ -113,6 +113,8 @@ test('what the file gets wrong is an error naming it', () => {
   assert.match(errors('schema_version = 1\n[[stack]]\nname = "Primary"\ninstruments = []\n')[0], /name must be a name/);
   assert.match(errors('schema_version = 1\n[[stack]]\nname = "a"\nwidth = 80.0\ninstruments = []\n')[0], /width must be a whole number/);
   assert.match(errors('schema_version = 1\n[[stack]]\nname = "a"\nat = [1]\ninstruments = []\n')[0], /at must be two whole numbers/);
+  assert.match(errors('schema_version = 1\n[[stack]]\nname = "a"\nat = [1.0, 2]\ninstruments = []\n')[0], /at must be two whole numbers/, 'a float, as the server reads it');
+  assert.deepEqual(errors('schema_version = 1\n[[stack]]\nname = "a"\nat = [1, 2]\ninstruments = []\n[[stack]]\nname = "b"\ninstruments = []\n'), [], 'another Stack is not judged by this one');
   assert.match(errors('schema_version = 1\n[[stack]]\nname = "a"\n')[0], /instruments is missing/);
   assert.match(errors('schema_version = 1\n[[stack]]\nname = "a"\ninstruments = [1]\n')[0], /instruments must be an array of names/);
   assert.match(errors('schema_version = 1\n[[stack]\n')[0], /^plane\.toml: line \d+: "\]\]" expected/);

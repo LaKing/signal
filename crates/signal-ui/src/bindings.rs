@@ -1331,7 +1331,7 @@ pub fn check_project(
         ));
     }
     // ADR 0051 §4: the plane's Stacks, against the panel's cards and the top-level slots with a part.
-    if let Some(plane) = check_plane(&ui, &panel) {
+    if let Some(plane) = check_plane(&ui, &panel, &plan) {
         checked.push(plane);
     }
     Ok(checked)
@@ -1340,8 +1340,8 @@ pub fn check_project(
 /// `ui/plane.toml` checked (ADR 0051 §4), when the project has one: its
 /// entries against the cards of `ui/main.html` (without one, the generated
 /// panel's: a card per instance with parameters, one per top-level slot,
-/// and `output`) and the top-level slots with a part.
-fn check_plane(ui: &Path, panel: &Panel) -> Option<Checked> {
+/// and `output` when an audio sink has signal inputs) and the top-level slots with a part.
+fn check_plane(ui: &Path, panel: &Panel, plan: &ExecutionPlan) -> Option<Checked> {
     let path = ui.join(crate::plane::PLANE_FILE);
     let text = fs::read_to_string(&path).ok()?;
     let main = ui.join(MAIN_PANEL);
@@ -1363,7 +1363,17 @@ fn check_plane(ui: &Path, panel: &Panel) -> Option<Checked> {
                     .filter(|k| panel.is_slot(k))
                     .map(crate::plane::card_slug),
             );
-            ids.push("output".to_owned());
+            // The output card, as the page generates it: only for an audio sink with signal inputs.
+            let sink = plan.instances.iter().any(|i| {
+                i.descriptor.sink == Some(SinkKind::Audio)
+                    && i.descriptor
+                        .ports
+                        .iter()
+                        .any(|p| p.direction == Direction::In && p.shape == PortShape::Signal)
+            });
+            if sink {
+                ids.push("output".to_owned());
+            }
             ids
         }
     };
