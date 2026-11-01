@@ -238,6 +238,41 @@ impl Host {
         })
     }
 
+    /// The pushed `setup` (`ui-protocol.md` "Setup"), to every client after
+    /// a saved `setup.apply`, `device.route` or `device.unroute`: what
+    /// `setup.get` answers, the run in force included, and where the Setup's
+    /// devices are in the list held now (`setup.devices`' `output` and
+    /// `input`), so a page needs no read of its own to follow the change.
+    pub(super) fn setup_push(&self) -> Value {
+        let mut push = self.setup_get();
+        let (output, input) = self.resolutions();
+        if let Some(map) = push.as_object_mut() {
+            map.insert(
+                "resolution".to_owned(),
+                json!({"output": output, "input": input}),
+            );
+        }
+        push
+    }
+
+    /// Where the Setup's output and input are in the device list held now:
+    /// `{"found": index}`, `{"unresolved": reason}`, or null for none.
+    fn resolutions(&self) -> (Value, Value) {
+        let resolution = |entry: &Option<crate::setup::DeviceEntry>, direction| match entry {
+            None => Value::Null,
+            Some(entry) => match resolve(&self.devices, direction, &entry.to_ref()) {
+                Resolution::Found(index) => json!({"found": index}),
+                Resolution::Missing { reason, .. } | Resolution::Ambiguous { reason, .. } => {
+                    json!({"unresolved": reason})
+                }
+            },
+        };
+        (
+            resolution(&self.setup.output, Direction::Output),
+            resolution(&self.setup.input, Direction::Input),
+        )
+    }
+
     /// `setup.devices`: the device list (refreshed when asked, refused while
     /// playing, as the dialog does), each output's capabilities, where the
     /// Setup's devices are in it, and the compute devices.
@@ -268,15 +303,7 @@ impl Host {
                 with(value, "capabilities", json!(capabilities(d)))
             })
             .collect();
-        let resolution = |entry: &Option<crate::setup::DeviceEntry>, direction| match entry {
-            None => Value::Null,
-            Some(entry) => match resolve(&self.devices, direction, &entry.to_ref()) {
-                Resolution::Found(index) => json!({"found": index}),
-                Resolution::Missing { reason, .. } | Resolution::Ambiguous { reason, .. } => {
-                    json!({"unresolved": reason})
-                }
-            },
-        };
+        let (output, input) = self.resolutions();
         // A page's chosen devices, found again by identity after a refresh
         // (`Choice` and `found`, the dialog's draft).
         let chosen = |key: &str, direction| {
@@ -308,8 +335,8 @@ impl Host {
             "type": "setup.devices",
             "devices": devices,
             "error": self.devices_error,
-            "output": resolution(&self.setup.output, Direction::Output),
-            "input": resolution(&self.setup.input, Direction::Input),
+            "output": output,
+            "input": input,
             "choices": choices,
             "compute": self.compute,
         }))

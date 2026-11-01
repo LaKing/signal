@@ -2,7 +2,9 @@
 //! list with labels and capabilities, refresh refused while playing, the
 //! rate check, and Apply: the Setup saved, and the run played again from
 //! frame 0 with its output, channel map, buffer, CPU workers and metered
-//! input; a recording run is not restarted.
+//! input; a recording run is not restarted. Every saved Setup change
+//! (`setup.apply`, `device.route`, `device.unroute`) is pushed to every
+//! client as `setup`, with the run in force.
 
 mod common;
 
@@ -222,7 +224,119 @@ fn a_recording_run_saves_the_setup_but_is_not_restarted(transport: Transport) {
     rig.finish();
 }
 
+/// The next `setup` push (no `id`) on `ws`.
+fn setup_push(rig: &mut common::Rig, ws: &mut common::Ws, what: &str) -> Value {
+    rig.wait(ws, what, |got| {
+        got.of("setup").filter(|v| v.get("id").is_none()).cloned()
+    })
+}
+
+fn a_saved_setup_change_is_pushed_to_every_client(transport: Transport) {
+    let mut rig = rig(
+        "setup-push",
+        Options {
+            transport,
+            ..Options::default()
+        },
+    );
+    let (mut a, _) = rig.client();
+    let (mut b, _) = rig.client();
+    let listed = rig.request(&mut a, 1, json!({"type": "setup.devices"}), "setup.devices");
+    let four = index(&listed["devices"], "Null Four");
+
+    // A refused Apply saves nothing and pushes nothing: the first push the
+    // other client sees is the next saved change's.
+    let bad = rig.request(
+        &mut a,
+        2,
+        json!({"type": "setup.apply", "outputChannels": "0"}),
+        "error",
+    );
+    assert_eq!(bad["code"], "bad-value");
+    let applied = rig.request(
+        &mut a,
+        3,
+        json!({"type": "setup.apply", "output": {"index": four}, "buffer": 256}),
+        "applied",
+    );
+    assert_eq!(applied["restarted"], true, "{applied}");
+    for ws in [&mut b, &mut a] {
+        let push = setup_push(&mut rig, ws, "the setup push after Apply");
+        assert_eq!(push["setup"]["buffer"], 256, "{push}");
+        assert_eq!(push["setup"]["output"]["name"], "Null Four", "{push}");
+        assert_eq!(push["run"]["buffer"], 256, "the run in force: {push}");
+        assert_eq!(push["playing"], true);
+        assert_eq!(
+            push["resolution"]["output"],
+            json!({"found": four}),
+            "{push}"
+        );
+        assert_eq!(push["resolution"]["input"], Value::Null);
+        // What `setup.get` answers, keys and all.
+        let get = rig.request(ws, 4, json!({"type": "setup.get"}), "setup");
+        for key in [
+            "path",
+            "setup",
+            "local",
+            "problems",
+            "playing",
+            "run",
+            "rtPolicies",
+        ] {
+            assert_eq!(push[key], get[key], "{key}");
+        }
+    }
+
+    // A cable from the other window: `device.route`, then `device.unroute`.
+    let routed = rig.request(
+        &mut b,
+        5,
+        json!({"type": "device.route", "role": "main", "channels": [3, 4]}),
+        "applied",
+    );
+    assert_eq!(routed["saved"], true, "{routed}");
+    // Played again from frame 0, as after Apply: `describe` with
+    // `restarted`, then the push.
+    let restarted = rig.wait(&mut a, "describe after device.route", |got| {
+        got.of("describe")
+            .filter(|d| d["restarted"] == true)
+            .cloned()
+    });
+    assert_eq!(restarted["playing"], true);
+    let push = setup_push(&mut rig, &mut a, "the setup push after device.route");
+    assert_eq!(push["setup"]["outputChannels"], json!([3, 4]), "{push}");
+    assert_eq!(push["run"]["map"], json!([2, 3]), "{push}");
+    setup_push(&mut rig, &mut b, "the router's own push");
+
+    rig.request(
+        &mut b,
+        6,
+        json!({"type": "device.unroute", "role": "main"}),
+        "applied",
+    );
+    let push = setup_push(&mut rig, &mut a, "the setup push after device.unroute");
+    assert_eq!(push["setup"]["outputChannels"], Value::Null, "{push}");
+    assert_eq!(push["run"]["map"], json!([0, 1]), "{push}");
+    setup_push(&mut rig, &mut b, "the unrouter's own push");
+
+    // This project's binding (`devices.local.toml`) is in `local`.
+    rig.request(
+        &mut a,
+        7,
+        json!({"type": "device.route", "role": "main", "channels": [2, 1], "scope": "project"}),
+        "applied",
+    );
+    let push = setup_push(&mut rig, &mut b, "the setup push after a project route");
+    assert_eq!(
+        push["local"]["play"]["main"]["channels"],
+        json!([2, 1]),
+        "{push}"
+    );
+    rig.finish();
+}
+
 both!(
     the_dialog_functions_and_apply_play_again_with_the_setup,
-    a_recording_run_saves_the_setup_but_is_not_restarted
+    a_recording_run_saves_the_setup_but_is_not_restarted,
+    a_saved_setup_change_is_pushed_to_every_client
 );

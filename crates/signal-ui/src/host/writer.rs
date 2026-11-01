@@ -72,7 +72,13 @@ enum Push {
     Graph { force: bool },
     /// A message as it is.
     Message(Value),
+    /// The Setup and the run in force (`setup`), after the Setup was saved.
+    Setup,
 }
+
+/// The messages that change the Setup (and save it when their reply says
+/// `saved`): each saved one is followed by the `setup` push.
+const SETUP_CHANGES: [&str; 3] = ["setup.apply", "device.route", "device.unroute"];
 
 impl Outcome {
     /// The outcome of the message `kind` (`message`, with `id`) that gave
@@ -87,8 +93,8 @@ impl Outcome {
         match result {
             Ok(Some(reply)) => {
                 let mut pushes = Vec::new();
-                let restarted =
-                    kind == "setup.apply" && reply.get("restarted") == Some(&json!(true));
+                let setup = SETUP_CHANGES.contains(&kind);
+                let restarted = setup && reply.get("restarted") == Some(&json!(true));
                 // The plan or what plays changed: every client is told.
                 let changed = matches!(
                     kind,
@@ -101,6 +107,11 @@ impl Outcome {
                 let reply = with(reply, "id", id);
                 if restarted || changed {
                     pushes.push(Push::Describe { restarted });
+                }
+                // Every client sees the Setup saved (a window's Setup tab,
+                // another window's cable, `signal mcp --attach`).
+                if setup && reply.get("saved") == Some(&json!(true)) {
+                    pushes.push(Push::Setup);
                 }
                 // Every client sees the positions written.
                 if kind.starts_with("schematic.") {
@@ -135,6 +146,12 @@ impl Outcome {
                 pushes: Vec::new(),
             },
             Err(failure) => {
+                // The Setup was saved, but a recording run was not restarted.
+                let pushes = if kind == "setup.apply" && failure.code == "recording" {
+                    vec![Push::Setup]
+                } else {
+                    Vec::new()
+                };
                 let mut error = json!({
                     "type": "error",
                     "id": id,
@@ -150,7 +167,7 @@ impl Outcome {
                 }
                 Outcome {
                     reply: Some(error),
-                    pushes: Vec::new(),
+                    pushes,
                 }
             }
         }
@@ -174,6 +191,10 @@ impl Host {
                 }
                 Push::Graph { force } => self.push_graph(force),
                 Push::Message(pushed) => self.broadcast(&pushed),
+                Push::Setup => {
+                    let setup = self.setup_push();
+                    self.broadcast_session(&setup);
+                }
             }
         }
     }

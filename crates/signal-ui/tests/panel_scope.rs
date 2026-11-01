@@ -170,6 +170,26 @@ fn a_project_s_panel_acts_only_on_its_project(transport: Transport) {
     assert!(read["text"].as_str().unwrap().contains("malicious-panel"));
     rig.request(&mut ws, 11, json!({"type": "describe"}), "describe");
 
+    // The Setup saved by the app's page is pushed to the app's pages only:
+    // the panel may not read the Setup, so it is not sent it.
+    let applied = rig.request(&mut app_ws, 51, json!({"type": "setup.apply"}), "applied");
+    assert_eq!(applied["saved"], true, "{applied}");
+    rig.wait(&mut app_ws, "the app's setup push", |got| {
+        got.of("setup").filter(|v| v.get("id").is_none()).cloned()
+    });
+    send(&mut ws, json!({"type": "ping", "id": 12}));
+    let until = Instant::now() + Duration::from_secs(20);
+    'pong: loop {
+        assert!(Instant::now() < until, "no pong");
+        rig.pump();
+        while let Some(got) = receive(&mut ws) {
+            assert!(got.of("setup").is_none(), "the panel was sent the Setup");
+            if got.of("pong").is_some() {
+                break 'pong;
+            }
+        }
+    }
+
     // The app opens the victim: the panel's connection goes, its token
     // admits nothing, and a new one is made for the project now open.
     rig.request(

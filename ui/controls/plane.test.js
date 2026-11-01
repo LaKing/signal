@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs';
 globalThis.HTMLElement ??= class {};
 globalThis.customElements ??= { get: () => undefined, define: () => {} };
 
-const { SignalPlane } = await import('./plane.js');
+const { SignalPlane, withSetupPush } = await import('./plane.js');
 const { install } = await import('./keyboard.js');
 const { applyKeys } = await import('../lib/keys.js');
 const { setDefaultConnection } = await import('../signal-ui.js');
@@ -323,6 +323,9 @@ function setupConnection(state) {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
 
+/** The host's `setup` push (no `id`) for `state`: the Setup, the run, and where its devices are. */
+const setupPush = (state) => ({ type: 'setup', setup: state.setup, local: null, playing: true, run: null, resolution: { output: { found: state.found }, input: null } });
+
 domTest('after a Setup change on the same generation the Setup level’s cable agrees with the active Setup: output device, then output channels', async () => {
   const state = { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID }, outputChannels: null }, found: 1 };
   const connection = setupConnection(state);
@@ -331,28 +334,54 @@ domTest('after a Setup change on the same generation the Setup level’s cable a
   p.attach(connection);
   await settle();
   const cable = () => p.model.bindings.map((b) => [b.device, b.channels]);
+  const reads = () => connection.requests.filter((m) => m.type === 'setup.get' || m.type === 'setup.devices').length;
   assert.deepEqual(cable(), [[`id:${SSL_ID}`, [1, 2]]], 'main on the SSL 2+’s Out 1–2');
-  // The Setup tab applies another output device (`setup.apply`'s reply, on this connection); no `app` generation comes.
+  const opened = reads();
+  // Another window's Setup tab applies another output device: the host pushes `setup` to every client; no `app` generation comes.
   state.setup = { output: { name: 'MacBook Pro Speakers', id: SPEAKERS_ID }, outputChannels: null };
   state.found = 0;
-  connection.emit('message', { type: 'applied', saved: true, restarted: false, setup: state.setup, id: 7 });
+  connection.emit('setup', setupPush(state));
   await settle();
   assert.deepEqual(cable(), [[`id:${SPEAKERS_ID}`, [1, 2]]], 'the cable moved to the speakers');
-  // A cable dragged to Out 3–4 (`device.route`'s reply is `applied` too).
+  // A cable dragged to Out 3–4 elsewhere (`device.route`, then its push).
   state.setup = { output: { name: 'SSL 2+ MKII', id: SSL_ID }, outputChannels: [3, 4] };
   state.found = 1;
-  connection.emit('message', { type: 'applied', saved: true, restarted: false, setup: state.setup, routed: { role: 'main', scope: 'machine', notes: [] }, id: 8 });
+  connection.emit('setup', setupPush(state));
   await settle();
   assert.deepEqual(cable(), [[`id:${SSL_ID}`, [3, 4]]], 'on Out 3–4');
-  // A refused apply changes nothing and reads nothing.
-  const reads = connection.requests.filter((m) => m.type === 'setup.get').length;
-  connection.emit('message', { type: 'applied', saved: false, restarted: false, error: 'disk full', id: 9 });
+  // The push carries everything: nothing is read again for it, and a reply on this connection reads nothing either.
+  connection.emit('message', { type: 'applied', saved: true, restarted: false, setup: state.setup, id: 8 });
+  connection.emit('describe', { type: 'describe', restarted: true, instances: [], controls: [] });
   await settle();
-  assert.equal(connection.requests.filter((m) => m.type === 'setup.get').length, reads);
+  assert.equal(reads(), opened, 'no read after the pushes');
+  assert.deepEqual(cable(), [[`id:${SSL_ID}`, [3, 4]]]);
   // The hardware is never enumerated again for it: no `refresh`.
-  assert.equal(connection.requests.filter((m) => m.type === 'setup.devices').length, 3);
   assert.ok(connection.requests.every((m) => !m.refresh));
   p.detach();
+});
+
+domTest('a setup push that comes while the Setup is read wins over the read, and the read keeps the inventory', async () => {
+  const state = { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID }, outputChannels: null }, found: 1 };
+  const connection = setupConnection(state);
+  const p = plane();
+  p.graph = null;
+  p.attach(connection);
+  // The opening read is in flight; the push comes before its replies are taken.
+  connection.emit('setup', setupPush({ setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID }, outputChannels: [3, 4] }, found: 1 }));
+  await settle();
+  assert.equal(p.devices.devices.length, INVENTORY.length, 'the inventory read is kept');
+  assert.deepEqual(p.model.bindings.map((b) => [b.device, b.channels]), [[`id:${SSL_ID}`, [3, 4]]], 'the pushed Setup, not the older read');
+  p.detach();
+});
+
+test('withSetupPush moves only where the Setup’s devices are found', () => {
+  const devices = { type: 'setup.devices', devices: INVENTORY, output: { found: 1 }, input: null, compute: [] };
+  const moved = withSetupPush(devices, { resolution: { output: { found: 0 }, input: { unresolved: 'gone' } } });
+  assert.equal(moved.devices, INVENTORY);
+  assert.deepEqual(moved.output, { found: 0 });
+  assert.deepEqual(moved.input, { unresolved: 'gone' });
+  assert.equal(withSetupPush(null, { resolution: {} }), null, 'no inventory read yet: none made up');
+  assert.deepEqual(withSetupPush(devices, {}).output, null);
 });
 
 // The keys (ADR 0039, ADR 0034): the plane's capture listener, then the page's.

@@ -378,16 +378,11 @@ export class SignalPlane extends HTMLElement {
     };
     on('graph', (graph) => this.graphSeen(graph));
     on('welcome', () => this.fetchAll());
-    // A Setup change on this connection (the Setup tab's `setup.apply`, a cable's `device.route`): the Setup level follows it.
-    on('message', (message) => {
-      if (setupChanged(message)) this.readSetup();
-    });
+    // A saved Setup change, from any window or `signal mcp --attach` (`setup.apply`, a cable's `device.route` or
+    // `device.unroute`): the host pushes `setup` with all the Setup level needs, so nothing is read again.
+    on('setup', (push) => this.setupPushed(push));
     on('reload', () => this.readPlane());
-    on('describe', (description) => {
-      // The Setup applied while playing: the run played again with it.
-      if (description?.restarted) this.readSetup();
-      this.described(description);
-    });
+    on('describe', (description) => this.described(description));
     on('panel.written', (message) => {
       if ((message?.file ?? 'main.html') === 'main.html') this.readPanel();
     });
@@ -504,20 +499,30 @@ export class SignalPlane extends HTMLElement {
 
   /**
    * The Setup and the device inventory as listed: read when the project
-   * opens, and again after every Setup change (`setupChanged`). Never
-   * refreshed here (`setup.devices` without `refresh`: the list the host
-   * holds, no enumeration of the hardware, which pauses the control thread);
-   * its `output` resolution follows the Setup. Only the latest read is drawn.
+   * opens (and after a refused cable). Never refreshed here (`setup.devices`
+   * without `refresh`: the list the host holds, no enumeration of the
+   * hardware, which pauses the control thread). Only the latest read is
+   * drawn, and a `setup` push that came while it ran wins over its Setup.
    */
   readSetup() {
     const gen = this.generation;
     const read = (this.setupReads = (this.setupReads ?? 0) + 1);
+    const pushes = this.setupPushes;
     return Promise.all([this.request({ type: 'setup.get' }).catch(() => null), this.request({ type: 'setup.devices' }).catch(() => null)]).then(([setup, devices]) => {
       if (gen !== this.generation || read !== this.setupReads) return;
-      this.setup = setup;
-      this.devices = devices;
+      const pushed = pushes !== this.setupPushes && this.setup;
+      this.setup = pushed ? this.setup : setup;
+      this.devices = pushed ? withSetupPush(devices, this.setup) : devices;
       this.recompute();
     });
+  }
+
+  /** The host's `setup` push after a saved Setup change: the Setup, the run, and where its devices are in the list held. */
+  setupPushed(push) {
+    this.setupPushes = (this.setupPushes ?? 0) + 1;
+    this.setup = push;
+    this.devices = withSetupPush(this.devices, push);
+    this.recompute();
   }
 
   graphSeen(graph) {
@@ -971,7 +976,7 @@ export class SignalPlane extends HTMLElement {
       }
       if (route) {
         await this.request(route).catch((error) => {
-          // Refused: what the Setup holds now is read again (a saved one is read on its `applied` reply).
+          // Refused: what the Setup holds now is read again (a saved one comes as the `setup` push).
           this.readSetup();
           throw error;
         });
@@ -2470,12 +2475,14 @@ export class SignalPlane extends HTMLElement {
 }
 
 /**
- * Whether `message` (any message of the connection, a reply included) says
- * the Setup changed: `setup.apply`'s reply, also `device.route`'s and
- * `device.unroute`'s (`applied`, saved). The generation does not change.
+ * The device inventory `devices` (`setup.devices`' reply, or null: none
+ * read yet) with the Setup's output and input found where a `setup` push
+ * says (its `resolution`): the list is the host's, unchanged by a Setup
+ * change; only where the Setup's devices are in it follows.
  */
-export function setupChanged(message) {
-  return message?.type === 'applied' && message.saved === true;
+export function withSetupPush(devices, push) {
+  if (!devices) return devices;
+  return { ...devices, output: push?.resolution?.output ?? null, input: push?.resolution?.input ?? null };
 }
 
 /** The kinds of item a press drags a cable from, and those a click selects. */

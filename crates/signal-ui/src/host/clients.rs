@@ -174,6 +174,21 @@ impl Host {
         }
     }
 
+    /// `value` to every client of the session token: a project's panel
+    /// (ADR 0053) is not sent what it may not ask for (the Setup).
+    pub(super) fn broadcast_session(&mut self, value: &Value) {
+        self.sync_scope();
+        let session: Vec<u64> = self
+            .clients
+            .ids()
+            .into_iter()
+            .filter(|&id| !matches!(self.clients.scope(id), Some(Scope::Project(_))))
+            .collect();
+        for client in session {
+            self.send_text(client, value);
+        }
+    }
+
     /// A message already serialised, to every client.
     pub(super) fn broadcast_text(&mut self, text: &str) {
         self.sync_scope();
