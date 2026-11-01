@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs';
 globalThis.HTMLElement ??= class {};
 globalThis.customElements ??= { get: () => undefined, define: () => {} };
 
-const { SignalPlane, withSetupPush } = await import('./plane.js');
+const { SignalPlane } = await import('./plane.js');
 const { install } = await import('./keyboard.js');
 const { applyKeys } = await import('../lib/keys.js');
 const { setDefaultConnection } = await import('../signal-ui.js');
@@ -323,8 +323,8 @@ function setupConnection(state) {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
 
-/** The host's `setup` push (no `id`) for `state`: the Setup, the run, and where its devices are. */
-const setupPush = (state) => ({ type: 'setup', setup: state.setup, local: null, playing: true, run: null, resolution: { output: { found: state.found }, input: null } });
+/** The host's `setup` push (no `id`) for `state`: the Setup, the run, and the device list held with where its devices are. */
+const setupPush = (state, inventory = INVENTORY) => ({ type: 'setup', setup: state.setup, local: null, playing: true, run: null, devices: { type: 'setup.devices', devices: inventory, output: { found: state.found }, input: null } });
 
 domTest('after a Setup change on the same generation the Setup level’s cable agrees with the active Setup: output device, then output channels', async () => {
   const state = { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID }, outputChannels: null }, found: 1 };
@@ -360,7 +360,7 @@ domTest('after a Setup change on the same generation the Setup level’s cable a
   p.detach();
 });
 
-domTest('a setup push that comes while the Setup is read wins over the read, and the read keeps the inventory', async () => {
+domTest('a setup push that comes while the Setup is read wins over the read', async () => {
   const state = { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID }, outputChannels: null }, found: 1 };
   const connection = setupConnection(state);
   const p = plane();
@@ -369,19 +369,24 @@ domTest('a setup push that comes while the Setup is read wins over the read, and
   // The opening read is in flight; the push comes before its replies are taken.
   connection.emit('setup', setupPush({ setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID }, outputChannels: [3, 4] }, found: 1 }));
   await settle();
-  assert.equal(p.devices.devices.length, INVENTORY.length, 'the inventory read is kept');
+  assert.equal(p.devices.devices.length, INVENTORY.length);
   assert.deepEqual(p.model.bindings.map((b) => [b.device, b.channels]), [[`id:${SSL_ID}`, [3, 4]]], 'the pushed Setup, not the older read');
   p.detach();
 });
 
-test('withSetupPush moves only where the Setup’s devices are found', () => {
-  const devices = { type: 'setup.devices', devices: INVENTORY, output: { found: 1 }, input: null, compute: [] };
-  const moved = withSetupPush(devices, { resolution: { output: { found: 0 }, input: { unresolved: 'gone' } } });
-  assert.equal(moved.devices, INVENTORY);
-  assert.deepEqual(moved.output, { found: 0 });
-  assert.deepEqual(moved.input, { unresolved: 'gone' });
-  assert.equal(withSetupPush(null, { resolution: {} }), null, 'no inventory read yet: none made up');
-  assert.deepEqual(withSetupPush(devices, {}).output, null);
+domTest('a setup push after the host listed the devices again resolves against its own list, not the one read at open', async () => {
+  const state = { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID }, outputChannels: null }, found: 1 };
+  const connection = setupConnection(state);
+  const p = plane();
+  p.graph = null;
+  p.attach(connection);
+  await settle();
+  // A device plugged in and listed (a Refresh): the SSL 2+ moved to index 2.
+  const relisted = [INVENTORY[0], { index: 1, name: 'Loopback', id: 'coreaudio:loop', direction: 'output', default: false, rate: 48000, configs: [config(2)] }, { ...INVENTORY[1], index: 2 }];
+  connection.emit('setup', setupPush({ setup: state.setup, found: 2 }, relisted));
+  await settle();
+  assert.deepEqual(p.model.bindings.map((b) => [b.device, b.channels]), [[`id:${SSL_ID}`, [1, 2]]], 'still the SSL 2+');
+  p.detach();
 });
 
 // The keys (ADR 0039, ADR 0034): the plane's capture listener, then the page's.

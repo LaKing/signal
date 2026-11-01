@@ -21,7 +21,8 @@ env:
   # opt-level 1). Output is identical at every opt-level (the release job).
   CARGO_PROFILE_DEV_OPT_LEVEL: "1"
   # The nextest profile of .config/nextest.toml: every failure reported, and
-  # the two tests that need the device's real-time scheduling left to it.
+  # the three tests that time the device more closely than a hosted runner
+  # can left to it.
   NEXTEST_PROFILE: ci
 
 jobs:

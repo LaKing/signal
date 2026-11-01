@@ -240,17 +240,18 @@ impl Host {
 
     /// The pushed `setup` (`ui-protocol.md` "Setup"), to every client after
     /// a saved `setup.apply`, `device.route` or `device.unroute`: what
-    /// `setup.get` answers, the run in force included, and where the Setup's
-    /// devices are in the list held now (`setup.devices`' `output` and
-    /// `input`), so a page needs no read of its own to follow the change.
+    /// `setup.get` answers, the run in force included, and `devices`: what
+    /// `setup.devices` (without `refresh`) answers now, the list the host
+    /// holds and where the Setup's devices are in it. The list is sent whole
+    /// because it may have been listed again since a page read it (a
+    /// Refresh, a stop in app mode, a run waiting for its device), so an
+    /// index is only meaningful with its list. A page needs no read of its
+    /// own to follow the change.
     pub(super) fn setup_push(&self) -> Value {
         let mut push = self.setup_get();
-        let (output, input) = self.resolutions();
+        let devices = self.devices_listed(&Value::Null);
         if let Some(map) = push.as_object_mut() {
-            map.insert(
-                "resolution".to_owned(),
-                json!({"output": output, "input": input}),
-            );
+            map.insert("devices".to_owned(), devices);
         }
         push
     }
@@ -283,6 +284,12 @@ impl Host {
             }
             self.list_devices();
         }
+        Ok(self.devices_listed(message))
+    }
+
+    /// `setup.devices`' reply for the list held now (`message`'s `choices`
+    /// found in it).
+    fn devices_listed(&self, message: &Value) -> Value {
         let label = |direction, index| {
             labels(&self.devices, direction)
                 .into_iter()
@@ -331,7 +338,7 @@ impl Host {
             "output": chosen("output", Direction::Output),
             "input": chosen("input", Direction::Input),
         });
-        Ok(json!({
+        json!({
             "type": "setup.devices",
             "devices": devices,
             "error": self.devices_error,
@@ -339,7 +346,7 @@ impl Host {
             "input": input,
             "choices": choices,
             "compute": self.compute,
-        }))
+        })
     }
 
     /// The listed device at `index` of `direction`.

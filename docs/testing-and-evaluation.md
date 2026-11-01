@@ -31,6 +31,8 @@ Declared latency and the GPU (M2.6-4, ADR 0019 §3): `crates/signal-engine/tests
 
 Benchmarks (V13) and the soak (V12): `signal bench` and `scripts/soak.sh`, with the method, the recorded measurements and the operator's soak command in `docs/benchmarks.md`. `crates/signal-cli/tests/bench.rs` checks the fields and shape of `signal --json bench --seconds 0.1`, never its timings. `signal bench --only <prefix> [--param name=value]` measures only the named primitives (lab ones in a lab build), as the M3 tanh experiment does; `bench.rs` checks its shape. Later: comparison and listening packages (M3; the first, hand-made, is `experiments/m3-tanh-aliasing/`).
 
+**Tools a test needs, and skips.** The tests that run Node (`crates/signal-ui/tests/js.rs`, which runs `node --test ui/`; `parts.rs`'s page read; `crates/signal-app/tests/third_party_notices.rs`, the licence check) and those that need `codesign` or a GPU skip where the tool is missing, with a `SKIPPED …` line written to stderr itself (past libtest's capture, so `cargo test` shows it); a skip is not a pass. **Where `CI` is set** (not empty, `0` or `false`) a missing `node` fails those tests instead: CI provisions Node (`actions/setup-node`, a pinned major, checked by `crates/signal-cli/tests/ci_lab_job.rs`), so any environment that sets `CI`, a local check fence included, must put `node` on PATH.
+
 Run everything with `cargo test --workspace --locked --offline`. The acceptance suite renders about 18 million frames in the debug profile; its longest test, V5, renders 64 bars at 96 kHz. V9 adds about 23 million (one offline render and three null-driver runs of 60 s at 96 kHz, the runs in parallel). The model tests run apart, with `--cfg loom` (below).
 
 ## Synchronisation model tests (M2.7-6)

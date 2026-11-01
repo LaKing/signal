@@ -502,7 +502,7 @@ export class SignalPlane extends HTMLElement {
    * opens (and after a refused cable). Never refreshed here (`setup.devices`
    * without `refresh`: the list the host holds, no enumeration of the
    * hardware, which pauses the control thread). Only the latest read is
-   * drawn, and a `setup` push that came while it ran wins over its Setup.
+   * drawn, and a `setup` push that came while it ran wins over it.
    */
   readSetup() {
     const gen = this.generation;
@@ -510,18 +510,19 @@ export class SignalPlane extends HTMLElement {
     const pushes = this.setupPushes;
     return Promise.all([this.request({ type: 'setup.get' }).catch(() => null), this.request({ type: 'setup.devices' }).catch(() => null)]).then(([setup, devices]) => {
       if (gen !== this.generation || read !== this.setupReads) return;
-      const pushed = pushes !== this.setupPushes && this.setup;
-      this.setup = pushed ? this.setup : setup;
-      this.devices = pushed ? withSetupPush(devices, this.setup) : devices;
+      // A push that came meanwhile holds a Setup and a list at least as new.
+      if (pushes !== this.setupPushes) return;
+      this.setup = setup;
+      this.devices = devices;
       this.recompute();
     });
   }
 
-  /** The host's `setup` push after a saved Setup change: the Setup, the run, and where its devices are in the list held. */
+  /** The host's `setup` push after a saved Setup change: the Setup, the run, and the device list held with where the Setup's devices are in it. */
   setupPushed(push) {
     this.setupPushes = (this.setupPushes ?? 0) + 1;
     this.setup = push;
-    this.devices = withSetupPush(this.devices, push);
+    this.devices = push?.devices ?? this.devices;
     this.recompute();
   }
 
@@ -2474,16 +2475,6 @@ export class SignalPlane extends HTMLElement {
   }
 }
 
-/**
- * The device inventory `devices` (`setup.devices`' reply, or null: none
- * read yet) with the Setup's output and input found where a `setup` push
- * says (its `resolution`): the list is the host's, unchanged by a Setup
- * change; only where the Setup's devices are in it follows.
- */
-export function withSetupPush(devices, push) {
-  if (!devices) return devices;
-  return { ...devices, output: push?.resolution?.output ?? null, input: push?.resolution?.input ?? null };
-}
 
 /** The kinds of item a press drags a cable from, and those a click selects. */
 const DRAG_FROM = new Set(['port', 'via', 'auto-pin', 'external']);

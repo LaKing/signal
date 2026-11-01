@@ -108,8 +108,8 @@ impl Outcome {
                 if restarted || changed {
                     pushes.push(Push::Describe { restarted });
                 }
-                // Every client sees the Setup saved (a window's Setup tab,
-                // another window's cable, `signal mcp --attach`).
+                // Every client of the session token sees the Setup saved,
+                // whoever saved it (another window, `signal mcp --attach`).
                 if setup && reply.get("saved") == Some(&json!(true)) {
                     pushes.push(Push::Setup);
                 }

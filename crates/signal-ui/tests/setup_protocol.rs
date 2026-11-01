@@ -266,12 +266,13 @@ fn a_saved_setup_change_is_pushed_to_every_client(transport: Transport) {
         assert_eq!(push["setup"]["output"]["name"], "Null Four", "{push}");
         assert_eq!(push["run"]["buffer"], 256, "the run in force: {push}");
         assert_eq!(push["playing"], true);
-        assert_eq!(
-            push["resolution"]["output"],
-            json!({"found": four}),
-            "{push}"
-        );
-        assert_eq!(push["resolution"]["input"], Value::Null);
+        assert_eq!(push["devices"]["output"], json!({"found": four}), "{push}");
+        assert_eq!(push["devices"]["input"], Value::Null);
+        // The list held, whole: as `setup.devices` without `refresh` answers.
+        let listed = rig.request(ws, 40, json!({"type": "setup.devices"}), "setup.devices");
+        let mut listed = listed;
+        listed.as_object_mut().unwrap().remove("id");
+        assert_eq!(push["devices"], listed, "{push}");
         // What `setup.get` answers, keys and all.
         let get = rig.request(ws, 4, json!({"type": "setup.get"}), "setup");
         for key in [
