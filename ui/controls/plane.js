@@ -206,7 +206,7 @@ const PANEL_CSS = `
 .face-panel > .signal-cards > [data-xray] { background: transparent !important; border-color: transparent !important; box-shadow: none !important; }
 .face-panel > .signal-cards > [data-xray]::before, .face-panel > .signal-cards > [data-xray]::after { display: none !important; }
 [data-xray] .signal-group { background: transparent !important; border-color: transparent !important; box-shadow: none !important; }
-[data-xray] signal-piano-roll, [data-xray] signal-step-grid, [data-xray] p { opacity: 0.08; }
+[data-xray] signal-piano-roll, [data-xray] signal-step-grid, [data-xray] p { opacity: 0.08; pointer-events: none; }
 `;
 
 function svg(name, attributes = {}, text = null) {
@@ -522,7 +522,7 @@ export class SignalPlane extends HTMLElement {
 
   showNotes() {
     const problems = this.model?.problems ?? [];
-    this.notes.replaceChildren(...problems.map((p) => html('p', { className: p.severity, textContent: p.message })));
+    this.notes.replaceChildren(...problems.map((p) => html('p', { className: p.severity, textContent: p.message })), ...(this.said ? [this.said] : []));
   }
 
   // The Stacks' front panels.
@@ -1648,9 +1648,12 @@ export class SignalPlane extends HTMLElement {
   chooseOutput(entry, at, pick, into = '') {
     const names = new Set(engineOf(entry, this.model.owner));
     const outs = [];
+    // Only outputs of the target's shape (a parameter takes a signal).
+    const wanted = portIndex(this.graph?.top?.instances ?? []).get(into)?.port?.shape ?? 'signal';
+    const shapeOf = (shape) => (shape && typeof shape === 'object' ? 'vector' : shape);
     for (const i of this.graph?.top?.instances ?? []) {
       if (!names.has(i.name)) continue;
-      for (const p of i.ports ?? []) if (p.direction === 'out' && p.address !== into) outs.push(p.address);
+      for (const p of i.ports ?? []) if (p.direction === 'out' && p.address !== into && (!into || shapeOf(p.shape) === shapeOf(wanted))) outs.push(p.address);
     }
     this.openChooser(`From ${instrumentTitle(entry, this.cards)}’s outputs${into ? ` into ${into}` : ''}:`, outs.map((a) => ({ text: a.replace(/^\//, ''), act: () => pick(a) })), at);
   }
@@ -1782,10 +1785,14 @@ export class SignalPlane extends HTMLElement {
   say(text) {
     clearTimeout(this.sayTimer);
     this.said?.remove();
+    this.said = null;
     if (!text) return;
     this.said = html('p', { className: 'said', textContent: text });
     this.notes.append(this.said);
-    this.sayTimer = setTimeout(() => this.said?.remove(), 6000);
+    this.sayTimer = setTimeout(() => {
+      this.said?.remove();
+      this.said = null;
+    }, 6000);
   }
 
   doubleClick(event) {
