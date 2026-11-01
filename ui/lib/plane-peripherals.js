@@ -140,7 +140,32 @@ export function peripherals({ setup = null, devices = null, endpoints = [] } = {
     const channels = boundChannels(setup?.setup?.outputChannels ?? null, e.ports.length, main.present ? deviceChannels : Infinity);
     return { endpoint: e.name, role: e.role, layout: e.layout, ports: e.ports, device: main.key, channels, heard: main.present, note: main.present ? null : 'not present' };
   });
-  return { boxes, bindings };
+  return { boxes, bindings, main };
+}
+
+/**
+ * The device boxes drawn whole and the rest (the operator's review of
+ * phase 1: a machine lists monitors, loopbacks, aggregates and meeting
+ * apps' devices beside the one the project plays on). Whole: a device a
+ * role the project uses is bound to, the Setup's output device (`main`:
+ * `mainBinding`'s, its key or null), a device a Setup cable reaches, and a
+ * bound device that is absent. The rest are `others`, one compact list in
+ * inventory order. `{full, others}`, each in `boxes`' order.
+ */
+export function splitBoxes(boxes, { bindings = [], cables = [], main = null } = {}) {
+  const keys = new Set([...bindings.map((b) => b.device), ...cables.map((c) => c.device), main?.key ?? null].filter(Boolean));
+  const full = [];
+  const others = [];
+  for (const box of boxes) (keys.has(box.key) || !box.present ? full : others).push(box);
+  return { full, others };
+}
+
+/** A device's channels in each direction, for its line in the list of other devices ("2 out · 2 in"; one direction alone, "2 out"). */
+export function channelSummary(box) {
+  const count = (ports) => ports.reduce((n, p) => n + p.channels.length, 0);
+  const out = count(box.inputs);
+  const into = count(box.outputs);
+  return [out ? `${out} out` : null, into ? `${into} in` : null].filter(Boolean).join(' · ') || 'no channels';
 }
 
 /** The label of a role endpoint as drawn on its device's port ("main · stereo"). */

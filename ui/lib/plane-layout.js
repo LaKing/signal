@@ -11,20 +11,66 @@
 import { PU } from './plate.js';
 import { RAIL_PU } from './plane-file.js';
 
-/** The Stack's header (its name, a click focuses it), in pu. */
-export const HEADER_PU = 5;
+/** The Stack's header (its name, a click focuses it), in pu: room for its text at TEXT.head's cap. */
+export const HEADER_PU = 8;
 /** Between Stacks laid out side by side, in pu. */
 export const STACK_GAP_PU = 24;
 /** Between the Stacks and the peripherals: room for the Setup cables, in pu. */
 export const CABLE_GAP_PU = 56;
-/** A peripheral box: its width, its title's height, a port's pitch and a channel's, in pu. */
-export const BOX_PU = Object.freeze({ w: 56, title: 11, port: 10, channel: 3, pad: 3 });
+/** A peripheral box: its width, its title's height, a port's pitch and a channel's, in pu (room for the text at its caps, TEXT). */
+export const BOX_PU = Object.freeze({ w: 80, title: 14, port: 12, channel: 3, pad: 3 });
+/** The list of other devices (`splitBoxes`' `others`): its head, each small box, the gap between them and the inner pad, in pu. */
+export const OTHERS_PU = Object.freeze({ head: 9, box: 12, gap: 2, pad: 2 });
 /** Between peripheral boxes, in pu. */
 export const BOX_GAP_PU = 6;
 /** An edge pin's pitch within its instrument, in pu. */
 export const PIN_PITCH_PU = 3;
-/** The tray of unstacked instances: its width, in pu. */
+/** The tray of unstacked instances: its width, and a line's pitch, in pu. */
 export const TRAY_PU = 56;
+export const TRAY_LINE_PU = 6;
+
+/**
+ * The Setup level's text (the operator's review of phase 1: readable at the
+ * default Setup fit). Each kind of text has a size in plane units at the
+ * Stack level and above (`base`: it scales with the zoom there, as the
+ * schematic's text does), a smallest size on screen (`min`, CSS px) it
+ * keeps while zooming out, and the most it may grow to in plane units
+ * (`cap`: the room the layout gives it, so nothing overlaps), past which it
+ * scales down with the zoom again. The layout never moves with the zoom:
+ * only these sizes do, continuously (`textSize`).
+ */
+export const TEXT = Object.freeze({
+  /** A device's name, the list's head. */
+  title: Object.freeze({ base: 34, min: 11, cap: 46 }),
+  /** "AUDIO DEVICE", a note. */
+  kind: Object.freeze({ base: 20, min: 9, cap: 36 }),
+  /** A port's name, an edge pin's label, a line of the tray. */
+  port: Object.freeze({ base: 28, min: 9.5, cap: 40 }),
+  /** A role on its port ("main · stereo"). */
+  role: Object.freeze({ base: 24, min: 9.5, cap: 38 }),
+  /** A small box's name in the list of other devices. */
+  small: Object.freeze({ base: 26, min: 11, cap: 44 }),
+  /** The Stack's header: its name. */
+  head: Object.freeze({ base: 18, min: 11, cap: 44 }),
+  /** The Stack's header: its instrument count. */
+  count: Object.freeze({ base: 13, min: 9.5, cap: 38 }),
+});
+
+/** A text of kind `rule` (TEXT's) at view scale `k`: its size in plane units, `min / k` clamped to `[base, cap]`; continuous and never rising as `k` grows. */
+export function textSize(rule, k) {
+  const wanted = k > 0 ? rule.min / k : rule.cap;
+  return Math.min(rule.cap, Math.max(rule.base, wanted));
+}
+
+/** Every TEXT kind's size at scale `k`, in plane units: `{title, kind, …}`. */
+export function textSizes(k) {
+  return Object.fromEntries(Object.entries(TEXT).map(([name, rule]) => [name, textSize(rule, k)]));
+}
+
+/** How many characters of a text of kind `rule` fit `width` plane units at its cap (an average glyph of 0.58 em): a name cut to it never outgrows its box, whatever the zoom. */
+export function capChars(rule, width) {
+  return Math.max(1, Math.floor(width / (rule.cap * 0.58)));
+}
 
 /**
  * One Stack's instruments laid out (ADR 0051 §4, "Equal width"): `stack`
@@ -104,10 +150,12 @@ export function boxPorts(box) {
  * the placed ones' right edge). Receiving devices stand CABLE_GAP_PU to the
  * right of the Stacks, sending-only ones as far to their left, each column
  * from the Stacks' top, BOX_GAP_PU apart. The tray stands below the
- * sending column, left of the Stacks. `{stacks: Map(name → rect), boxes:
- * Map(key → rect), tray: rect | null, bounds}`.
+ * sending column, left of the Stacks; the list of other devices (`others`:
+ * `{count, expanded}`) below the receiving column. `{stacks: Map(name →
+ * rect), boxes: Map(key → rect), tray: rect | null, others: rect | null,
+ * bounds}`.
  */
-export function planeLayout({ stacks = [], boxes = [], tray = 0 } = {}) {
+export function planeLayout({ stacks = [], boxes = [], tray = 0, others = { count: 0, expanded: false } } = {}) {
   const placed = new Map();
   let right = 0;
   for (const s of stacks) {
@@ -139,8 +187,10 @@ export function planeLayout({ stacks = [], boxes = [], tray = 0 } = {}) {
       ly += size.h + BOX_GAP_PU * PU;
     }
   }
-  const trayRect = tray > 0 ? { x: minX - CABLE_GAP_PU * PU - TRAY_PU * PU, y: ly, w: TRAY_PU * PU, h: (BOX_PU.title + tray * 4 + BOX_PU.pad) * PU } : null;
-  const all = [...rects, ...boxRects.values(), ...(trayRect ? [trayRect] : [])];
+  const trayRect = tray > 0 ? { x: minX - CABLE_GAP_PU * PU - TRAY_PU * PU, y: ly, w: TRAY_PU * PU, h: (BOX_PU.title + tray * TRAY_LINE_PU + BOX_PU.pad) * PU } : null;
+  // The other devices: one list below the receiving devices (where most of them would stand).
+  const othersRect = others.count > 0 ? { x: maxX + CABLE_GAP_PU * PU, y: ry, ...othersSize(others) } : null;
+  const all = [...rects, ...boxRects.values(), ...(trayRect ? [trayRect] : []), ...(othersRect ? [othersRect] : [])];
   const bounds = all.length
     ? (() => {
         const x0 = Math.min(...all.map((r) => r.x));
@@ -150,7 +200,21 @@ export function planeLayout({ stacks = [], boxes = [], tray = 0 } = {}) {
         return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
       })()
     : { x: 0, y: 0, w: STACK_GAP_PU * PU, h: STACK_GAP_PU * PU };
-  return { stacks: placed, boxes: boxRects, tray: trayRect, bounds };
+  return { stacks: placed, boxes: boxRects, tray: trayRect, others: othersRect, bounds };
+}
+
+/** The list of other devices' size (plane units): its head alone, collapsed; expanded, a small box per device below it. */
+export function othersSize({ count = 0, expanded = false } = {}) {
+  const rows = expanded ? count : 0;
+  const h = OTHERS_PU.head + (rows ? rows * OTHERS_PU.box + (rows - 1) * OTHERS_PU.gap + OTHERS_PU.pad : 0);
+  return { w: BOX_PU.w * PU, h: h * PU };
+}
+
+/** The small boxes of the expanded list (plane units, list-relative): `[{x, y, w, h}]`, one per device, in order. */
+export function othersBoxes({ count = 0, expanded = false } = {}) {
+  if (!expanded) return [];
+  const w = (BOX_PU.w - 2 * OTHERS_PU.pad) * PU;
+  return Array.from({ length: count }, (_, i) => ({ x: OTHERS_PU.pad * PU, y: (OTHERS_PU.head + i * (OTHERS_PU.box + OTHERS_PU.gap)) * PU, w, h: OTHERS_PU.box * PU }));
 }
 
 /**

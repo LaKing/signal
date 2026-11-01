@@ -5,7 +5,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FOCUS_BAND, MARGIN_PX, MAX_R, SURROUND, WIRING_BAND, bandShare, boardView, clampScroll, fitAll, fitScale, fitWidth, fromBoardView, levelOf, planeFades, reachesFit, screenRect, scrollStack, toPlane, toScreen, zoomAbout } from './plane-zoom.js';
+import { FOCUS_BAND, MARGIN_PX, MAX_R, MIN_R, SURROUND, WIRING_BAND, bandShare, boardOriginY, boardView, clampScroll, fitAll, fitScale, fitWidth, fromBoardView, levelOf, planeFades, reachesFit, screenRect, scrollStack, toPlane, toScreen, zoomAbout } from './plane-zoom.js';
 
 const close = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) <= eps, `${a} ≈ ${b}`);
 
@@ -128,4 +128,43 @@ test('the board’s view lays its plate origin on the Stack’s panels, and maps
   const again = fromBoardView(moved, origin, offset);
   close(again.x, view.x, 1e-9);
   close(again.y, view.y, 1e-9);
+});
+
+test('the fades are continuous across both bands: no step anywhere, the steepest change the smoothstep’s', () => {
+  // A smoothstep over [a, b] changes by at most 1.5 / (b − a) per unit of r; sampled finely, no step exceeds that slope.
+  const slope = Math.max(1.5 / (FOCUS_BAND[1] - FOCUS_BAND[0]), 1.5 / (WIRING_BAND[1] - WIRING_BAND[0]));
+  const dr = 1e-4;
+  let prev = planeFades(MIN_R);
+  for (let r = MIN_R + dr; r <= MAX_R + 0.5; r += dr) {
+    const f = planeFades(r);
+    for (const key of ['setup', 'panels', 'deep']) assert.ok(Math.abs(f[key] - prev[key]) <= slope * dr * 1.0001 + 1e-12, `${key} steps at r ${r}`);
+    prev = f;
+  }
+  // The band ends meet their neighbours exactly: the level's change at the fit and at the band's end shows nothing new.
+  assert.equal(planeFades(FOCUS_BAND[0]).setup, 1);
+  assert.equal(planeFades(1 - 1e-12).setup, planeFades(1).setup);
+  assert.equal(planeFades(WIRING_BAND[0]).deep, 0);
+  assert.equal(planeFades(WIRING_BAND[1] - 1e-12).panels, planeFades(WIRING_BAND[1]).panels);
+  assert.equal(planeFades(WIRING_BAND[1]).panels, 0);
+});
+
+test('the board’s origin follows the card at the view’s centre, continuously between cards', () => {
+  const anchors = [
+    { y: 200, origin: -4 },
+    { y: 900, origin: -2 },
+    { y: 2600, origin: 4 },
+  ];
+  assert.equal(boardOriginY([], 500, 76), 76);
+  assert.equal(boardOriginY(anchors, 0, 76), -4);
+  assert.equal(boardOriginY(anchors, 200, 76), -4);
+  assert.equal(boardOriginY(anchors, 900, 76), -2);
+  close(boardOriginY(anchors, 550, 76), -3);
+  assert.equal(boardOriginY(anchors, 9000, 76), 4);
+  // Continuous and monotonic between anchors that rise: a scroll never moves the board by a jump.
+  let prev = boardOriginY(anchors, -100, 76);
+  for (let y = -100; y <= 3000; y += 0.5) {
+    const o = boardOriginY(anchors, y, 76);
+    assert.ok(o >= prev - 1e-12 && o - prev <= (6 / 1700) * 0.5 + 1e-9, `at ${y}`);
+    prev = o;
+  }
 });

@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PU } from './plate.js';
 import { RAIL_PU } from './plane-file.js';
-import { BOX_PU, CABLE_GAP_PU, HEADER_PU, STACK_GAP_PU, boxPorts, boxSize, cablePath, pinPlaces, planeLayout, stackLayout } from './plane-layout.js';
+import { BOX_PU, CABLE_GAP_PU, HEADER_PU, OTHERS_PU, STACK_GAP_PU, TEXT, boxPorts, boxSize, cablePath, capChars, othersBoxes, othersSize, pinPlaces, planeLayout, stackLayout, textSize, textSizes } from './plane-layout.js';
 import { deviceBoxes } from './plane-peripherals.js';
 
 test('every instrument is the Stack’s width; a narrower panel is centred, a wider one scaled down whole; rails between', () => {
@@ -103,4 +103,65 @@ test('a box’s ports: playback on its left edge, capture on its right, a pin pe
 
 test('a cable leaves the Stack and arrives at the device horizontally', () => {
   assert.equal(cablePath({ x: 0, y: 10 }, { x: 400, y: 50 }), 'M0 10 C200 10 200 50 400 50');
+});
+
+test('the list of other devices: below the receiving devices, its head alone collapsed, a small box per device expanded', () => {
+  const boxes = deviceBoxes([{ index: 0, name: 'SSL', id: 's', direction: 'output', configs: [{ channels: 4 }] }]);
+  const stacks = [{ name: 'primary', at: null, size: { w: 1280, h: 3000 } }];
+  const collapsed = planeLayout({ stacks, boxes, others: { count: 9, expanded: false } });
+  const ssl = collapsed.boxes.get('id:s');
+  assert.equal(collapsed.others.x, ssl.x);
+  assert.ok(collapsed.others.y >= ssl.y + ssl.h);
+  assert.deepEqual(othersSize({ count: 9, expanded: false }), { w: BOX_PU.w * PU, h: OTHERS_PU.head * PU });
+  assert.deepEqual(othersBoxes({ count: 9, expanded: false }), []);
+  const expanded = planeLayout({ stacks, boxes, others: { count: 9, expanded: true } });
+  const small = othersBoxes({ count: 9, expanded: true });
+  assert.equal(small.length, 9);
+  // Inside the list, below its head, none overlapping.
+  for (const [i, b] of small.entries()) {
+    assert.ok(b.x >= 0 && b.x + b.w <= expanded.others.w && b.y >= OTHERS_PU.head * PU && b.y + b.h <= expanded.others.h, `box ${i} inside`);
+    if (i) assert.ok(b.y >= small[i - 1].y + small[i - 1].h, `box ${i} below the last`);
+  }
+  // Nothing else moves when the list opens: the Stacks and the whole boxes stand where they stood.
+  assert.deepEqual(expanded.stacks, collapsed.stacks);
+  assert.deepEqual(expanded.boxes, collapsed.boxes);
+  assert.equal(planeLayout({ stacks, boxes }).others, null);
+});
+
+test('text sizes: readable at the Setup’s fit, scaling with the zoom above, never past their room, continuous', () => {
+  // The studio's default Setup fit on a 1400 × 860 stage is about k 0.25 (measured): names at 11 px, port labels at 9.5 px or more.
+  const k = 0.25;
+  for (const [name, rule] of Object.entries(TEXT)) assert.ok(textSize(rule, k) * k >= rule.min - 1e-9, `${name} at the fit`);
+  assert.ok(textSize(TEXT.title, k) * k >= 11 && textSize(TEXT.port, k) * k >= 9.5);
+  // At the Stack level and above the text is its base size in plane units: it scales with the zoom.
+  assert.deepEqual(textSizes(1.05), Object.fromEntries(Object.entries(TEXT).map(([n, r]) => [n, r.base])));
+  // On screen, a text never shrinks as the view zooms in, and its plane size never grows: no pop, no jump.
+  for (const rule of Object.values(TEXT)) {
+    let prev = null;
+    for (let kk = 0.01; kk <= 4; kk *= 1.001) {
+      const size = textSize(rule, kk);
+      assert.ok(size >= rule.base && size <= rule.cap);
+      if (prev) {
+        assert.ok(size <= prev.size + 1e-9 && size * kk >= prev.size * prev.k - 1e-9);
+        assert.ok(Math.abs(size - prev.size) <= prev.size * 0.0011, 'continuous');
+      }
+      prev = { size, k: kk };
+    }
+  }
+});
+
+test('the layout holds every text at its cap: rows, title, header and names cut to fit', () => {
+  // A port row holds its name and its role at their caps, one above the other.
+  assert.ok(BOX_PU.port * PU >= TEXT.port.cap + TEXT.role.cap + 8);
+  // The title area holds the kind line and the name.
+  assert.ok(BOX_PU.title * PU >= TEXT.kind.cap + TEXT.title.cap + 16);
+  // The Stack's header holds its name.
+  assert.ok(HEADER_PU * PU >= TEXT.head.cap * 1.2);
+  // A small box holds its name and its channels.
+  assert.ok(OTHERS_PU.box * PU >= TEXT.small.cap + TEXT.kind.cap + 8);
+  assert.ok(OTHERS_PU.head * PU >= TEXT.title.cap * 1.3);
+  // "main · stereo" fits a port's half of a box at its cap; names are cut to what fits at theirs.
+  const half = (BOX_PU.w * PU) / 2 - 9 - 24;
+  assert.ok(capChars(TEXT.role, half) >= 'main · stereo'.length);
+  assert.ok(capChars(TEXT.title, BOX_PU.w * PU - 48) >= 'Mac Studio Speakers'.length);
 });

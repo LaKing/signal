@@ -7,7 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_PORT_ROWS, boundChannels, capturePorts, deviceBoxes, endpointLabel, mainBinding, peripherals, playbackPortOf, playbackPorts, setupCables } from './plane-peripherals.js';
+import { MAX_PORT_ROWS, boundChannels, capturePorts, channelSummary, deviceBoxes, endpointLabel, mainBinding, peripherals, playbackPortOf, playbackPorts, setupCables, splitBoxes } from './plane-peripherals.js';
 
 const config = (channels) => ({ channels, min_rate: 44100, max_rate: 192000, buffer: [15, 4096], sample_format: 'f32' });
 const SSL_ID = 'coreaudio:AppleUSBAudioEngine:Solid State Logic:SSL 2+ MKII';
@@ -106,4 +106,48 @@ test('a device of many channels stays a box: past MAX_PORT_ROWS one row holds th
   assert.equal(playbackPorts(12).length, MAX_PORT_ROWS, 'six pairs fit');
   const [box] = deviceBoxes([{ index: 0, name: 'Loopback', id: 'l', direction: 'output', configs: [config(64)] }]);
   assert.equal(playbackPortOf(box, 33).name, 'Out 11–64');
+});
+
+// The operator's review of phase 1: whole boxes only for what is bound or cabled, the rest in one list.
+const device = (index, name, id, direction, channels, isDefault = false) => ({ index, name, id, direction, default: isDefault, rate: 48000, configs: [config(channels)] });
+const STUDIO_MAC = [
+  device(0, 'DELL U3219Q', 'dell-1', 'output', 2),
+  device(1, 'DELL U3219Q', 'dell-2', 'output', 2),
+  ssl(2, 'output'),
+  ssl(3, 'input'),
+  device(4, 'BlackHole 64ch', 'blackhole', 'output', 64),
+  device(5, 'BlackHole 64ch', 'blackhole', 'input', 64),
+  device(6, 'Mac Studio Speakers', 'speakers', 'output', 2),
+  device(7, 'Microsoft Teams Audio', 'teams', 'output', 1),
+  device(8, 'AT2020USB+', 'mic', 'input', 2),
+];
+
+test('whole boxes only for the devices bound or cabled; the rest in one list, in inventory order', () => {
+  const setup = { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID }, outputChannels: null } };
+  const devices = { devices: STUDIO_MAC, output: { found: 2 } };
+  const { boxes, bindings, main } = peripherals({ setup, devices, endpoints: MAIN });
+  const pins = new Map([['primary', [{ side: 'out', instrument: 'card:master', address: '/limiter.out', label: 'out', outside: ['/out.l', '/out.r'] }]]]);
+  const cables = setupCables(pins, bindings);
+  const { full, others } = splitBoxes(boxes, { bindings, cables, main });
+  assert.deepEqual(full.map((b) => b.name), ['SSL 2+ MKII']);
+  assert.deepEqual(others.map((b) => b.name), ['DELL U3219Q', 'DELL U3219Q', 'BlackHole 64ch', 'Mac Studio Speakers', 'Microsoft Teams Audio', 'AT2020USB+']);
+  assert.equal(full.length + others.length, boxes.length, 'every device drawn once');
+  assert.deepEqual(others.map(channelSummary), ['2 out', '2 out', '64 out · 64 in', '2 out', '1 out', '2 in']);
+});
+
+test('the Setup’s output device is whole even when the project plays nothing; an absent bound device is whole', () => {
+  // No role in the project: the Setup's output (here the system default) still stands whole.
+  const setup = { setup: { output: null, outputChannels: null } };
+  const devices = { devices: [device(0, 'DELL U3219Q', 'dell', 'output', 2), speakers(1, true), mic(2)], output: null };
+  const { boxes, bindings, main } = peripherals({ setup, devices, endpoints: [] });
+  const split = splitBoxes(boxes, { bindings, cables: [], main });
+  assert.deepEqual(split.full.map((b) => b.name), ['MacBook Pro Speakers']);
+  assert.deepEqual(split.others.map((b) => b.name), ['DELL U3219Q', 'MacBook Pro Microphone']);
+  // Bound but absent: its hollow box is whole, the present ones listed.
+  const gone = peripherals({ setup: { setup: { output: { name: 'SSL 2+ MKII', id: SSL_ID } } }, devices: { devices: [speakers(0, true)], output: { unresolved: 'not present' } }, endpoints: MAIN });
+  const both = splitBoxes(gone.boxes, { bindings: gone.bindings, cables: [], main: gone.main });
+  assert.deepEqual(both.full.map((b) => [b.name, b.present]), [['SSL 2+ MKII', false]]);
+  assert.deepEqual(both.others.map((b) => b.name), ['MacBook Pro Speakers']);
+  // No device at all: nothing whole, nothing listed.
+  assert.deepEqual(splitBoxes([], {}), { full: [], others: [] });
 });

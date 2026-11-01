@@ -167,6 +167,28 @@ export function boardView(view, origin, offset = { x: 0, y: 0 }) {
   return { k: view.k, ox: 0, oy: 0, x: origin.x * view.k + view.x - offset.x, y: origin.y * view.k + view.y - offset.y };
 }
 
+/**
+ * Where the board's plate origin lies on the plane (its y; plane units)
+ * when the view's centre is at plane y `y`. The board lays the panel's
+ * cards as the plate flows them (a title card, its gutters), the Stack at
+ * its own pitch (its header, its rails), so one origin lines up one card
+ * only. `anchors` (`[{y, origin}]`, by `y`): for each card in both, the
+ * plane y of its middle and the origin that lays the board's card on the
+ * Stack's. The origin is the anchor's at its middle and linear between
+ * anchors (held past the ends): the card in view lines up, and scrolling
+ * moves the board continuously, never by a jump. No anchors: `fallback`.
+ */
+export function boardOriginY(anchors, y, fallback) {
+  if (!anchors?.length) return fallback;
+  if (!(y > anchors[0].y)) return anchors[0].origin;
+  for (let i = 1; i < anchors.length; i++) {
+    const a = anchors[i - 1];
+    const b = anchors[i];
+    if (y <= b.y) return b.y > a.y ? a.origin + ((b.origin - a.origin) * (y - a.y)) / (b.y - a.y) : b.origin;
+  }
+  return anchors[anchors.length - 1].origin;
+}
+
 /** The plane view that `boardView` came from: the board's root view `board` mapped back (its scale is the plane's). */
 export function fromBoardView(board, origin, offset = { x: 0, y: 0 }) {
   const k = board.k;

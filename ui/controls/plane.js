@@ -33,9 +33,10 @@ import { faceAttribute, rootRules, stylesheets } from '../lib/schematic-face.js'
 import { GUTTER, PU, parsePlace, parsePlate } from '../lib/plate.js';
 import { CARD_PREFIX, PLANE_FILE, RAIL_PU, panelCards, planeOf } from '../lib/plane-file.js';
 import { assignInstruments, edgePins, hasPart, instrumentTitle, roleEndpoints, stackMembers } from '../lib/plane-instruments.js';
-import { endpointLabel, peripherals, playbackPortOf, setupCables } from '../lib/plane-peripherals.js';
-import { boxPorts, cablePath, pinPlaces, planeLayout, stackLayout } from '../lib/plane-layout.js';
-import { MARGIN_PX, WIRING_BAND, boardView, fitAll, fitScale, fitWidth, fromBoardView, levelOf, panBy, planeFades, reachesFit, scrollStack, zoomAbout } from '../lib/plane-zoom.js';
+import { channelSummary, endpointLabel, peripherals, playbackPortOf, setupCables, splitBoxes } from '../lib/plane-peripherals.js';
+import { BOX_PU, OTHERS_PU, TEXT, TRAY_LINE_PU, capChars, boxPorts, cablePath, othersBoxes, pinPlaces, planeLayout, stackLayout, textSizes } from '../lib/plane-layout.js';
+import { fitText } from '../lib/schematic-controls.js';
+import { FOCUS_BAND, MARGIN_PX, WIRING_BAND, boardOriginY, boardView, toPlane, fitAll, fitScale, fitWidth, fromBoardView, levelOf, panBy, planeFades, reachesFit, scrollStack, zoomAbout } from '../lib/plane-zoom.js';
 import { ZOOM_MS, ease, tween } from '../lib/board-zoom.js';
 import { reroot } from '../lib/schematic-scene.js';
 import { GESTURE_GAP_MS, WheelKinds } from '../lib/wheel.js';
@@ -48,6 +49,16 @@ const SVG = 'http://www.w3.org/2000/svg';
 const THEME = new URL('./theme.css', import.meta.url).href;
 /** Keys that zoom and scroll, about the centre. */
 const KEY_ZOOM = 1.25;
+/** Where the list of other devices' expanded state is kept, per viewer (localStorage; view state, never the project's). */
+const OTHERS_KEY = 'signal.plane.otherDevices';
+
+function othersExpanded() {
+  try {
+    return globalThis.localStorage?.getItem(OTHERS_KEY) === 'open';
+  } catch {
+    return false;
+  }
+}
 
 const CSS = `
 :host { display: block; position: relative; overflow: hidden; height: 100%; outline: none; overscroll-behavior: none;
@@ -56,10 +67,10 @@ const CSS = `
 .world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
 .stack { position: absolute; box-sizing: border-box; background: #20242c; border: 2px solid #3a414d; border-radius: 6px; }
 .stack.other { transition: none; }
-.stack-head { position: absolute; left: 0; right: 0; top: 0; display: flex; align-items: center; gap: 12px; padding: 0 16px; box-sizing: border-box;
-  font-size: 18px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--signal-muted, #8a93a3); cursor: zoom-in; user-select: none; border-bottom: 1px solid #3a414d; }
+.stack-head { position: absolute; left: 0; right: 0; top: 0; display: flex; align-items: center; gap: 0.6em; padding: 0 16px; box-sizing: border-box; white-space: nowrap; overflow: hidden;
+  font-size: var(--t-head, 18px); line-height: 1; letter-spacing: 0.18em; text-transform: uppercase; color: var(--signal-muted, #8a93a3); cursor: zoom-in; user-select: none; border-bottom: 1px solid #3a414d; }
 .stack-head b { color: var(--signal-fg, #d6dbe4); font-weight: 600; }
-.stack-head .count { margin-left: auto; font-size: 13px; letter-spacing: 0.08em; }
+.stack-head .count { margin-left: auto; font-size: var(--t-count, 13px); letter-spacing: 0.08em; }
 .rack { position: absolute; left: 0; top: 0; pointer-events: none; }
 .plate-blank { position: absolute; box-sizing: border-box; background: repeating-linear-gradient(135deg, #262a32 0 6px, #22262d 6px 12px); border-top: 1px solid #343a45; border-bottom: 1px solid #14161b; }
 .plate-blank.wide { outline: 2px dashed var(--signal-effective, #ffb74d); outline-offset: -2px; }
@@ -70,22 +81,30 @@ svg.setup text { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue
 .cable.dashed { stroke-dasharray: 6 5; }
 .pin { fill: var(--signal-accent, #4fc3f7); stroke: var(--signal-board-bg, #0e1014); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .pin.in { fill: var(--signal-meter-rms, #3ecf8e); }
-.pin-label { fill: var(--signal-fg, #d6dbe4); font-size: 28px; }
+.pin-label { fill: var(--signal-fg, #d6dbe4); font-size: var(--t-port, 28px); }
 .box { fill: #1b1f26; stroke: #4a5260; stroke-width: 2; vector-effect: non-scaling-stroke; }
 .box.absent { fill: none; stroke-dasharray: 8 6; }
-.box-title { fill: var(--signal-fg, #d6dbe4); font-size: 34px; font-weight: 600; }
-.box-note { fill: var(--signal-clip, #ff5252); font-size: 24px; }
-.box-kind { fill: var(--signal-muted, #8a93a3); font-size: 20px; letter-spacing: 0.12em; }
+.box-title { fill: var(--signal-fg, #d6dbe4); font-size: var(--t-title, 34px); font-weight: 600; }
+.box-note { fill: var(--signal-clip, #ff5252); font-size: var(--t-kind, 20px); }
+.box-kind { fill: var(--signal-muted, #8a93a3); font-size: var(--t-kind, 20px); letter-spacing: 0.12em; }
 .port { fill: #232832; stroke: #39404c; stroke-width: 1; vector-effect: non-scaling-stroke; }
 .port.bound { stroke: var(--signal-accent, #4fc3f7); stroke-width: 1.5; }
-.port-name { fill: var(--signal-fg, #d6dbe4); font-size: 28px; }
-.port-role { fill: var(--signal-accent, #4fc3f7); font-size: 24px; font-weight: 600; }
+.port-name { fill: var(--signal-fg, #d6dbe4); font-size: var(--t-port, 28px); }
+.port-role { fill: var(--signal-accent, #4fc3f7); font-size: var(--t-role, 24px); font-weight: 600; }
 .jack { fill: #0e1014; stroke: var(--signal-muted, #8a93a3); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .jack.bound { stroke: var(--signal-accent, #4fc3f7); fill: var(--signal-accent, #4fc3f7); }
 .endpoint { fill: none; stroke: var(--signal-muted, #8a93a3); stroke-width: 1.5; stroke-dasharray: 5 4; vector-effect: non-scaling-stroke; }
-.endpoint-text { fill: var(--signal-muted, #8a93a3); font-size: 26px; }
+.endpoint-text { fill: var(--signal-muted, #8a93a3); font-size: var(--t-port, 28px); }
 .tray { fill: #181b21; stroke: #4a5260; stroke-dasharray: 6 4; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
-.tray-text { fill: var(--signal-muted, #8a93a3); font-size: 26px; }
+.tray-text { fill: var(--signal-muted, #8a93a3); font-size: var(--t-port, 28px); }
+.others { fill: #181b21; stroke: #4a5260; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.others-head { pointer-events: all; cursor: pointer; outline: none; }
+.others-head rect { fill: transparent; }
+.others-head:hover .box-title, .others-head:focus-visible .box-title { fill: var(--signal-accent, #4fc3f7); }
+.others-head:focus-visible rect { stroke: var(--signal-accent, #4fc3f7); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.small { fill: #1b1f26; stroke: #39404c; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.small-name { fill: var(--signal-fg, #d6dbe4); font-size: var(--t-small, 26px); }
+.small-kind { fill: var(--signal-muted, #8a93a3); font-size: var(--t-kind, 20px); }
 .deep { position: absolute; inset: 0; }
 .deep[hidden] { display: none; }
 .deep signal-schematic { height: 100%; }
@@ -162,6 +181,9 @@ export class SignalPlane extends HTMLElement {
     this.sheets = [THEME];
     this.rootCss = '';
     this.generation = 0;
+    /** Whether the list of other devices is expanded: per viewer (`OTHERS_KEY`), never in the project's text (rule 4). */
+    this.othersOpen = othersExpanded();
+    this.textKey = '';
   }
 
   connectedCallback() {
@@ -391,9 +413,11 @@ export class SignalPlane extends HTMLElement {
     const { stackOf, unstacked } = stackMembers(shown.plane, owner, instances);
     const pins = new Map(shown.plane.stacks.map((s) => [s.name, edgePins(s, owner, stackOf, connections)]));
     const endpoints = roleEndpoints(instances);
-    const { boxes, bindings } = peripherals({ setup: this.setup, devices: this.devices, endpoints });
+    const { boxes: all, bindings, main } = peripherals({ setup: this.setup, devices: this.devices, endpoints });
     const cables = setupCables(pins, bindings);
-    this.model = { plane: shown.plane, derived: shown.derived, problems: shown.problems, cards, owner, pins, endpoints, boxes, bindings, cables, unstacked };
+    // Whole boxes for the devices the project and the Setup use; the rest in one list (the operator's review of phase 1).
+    const { full: boxes, others } = splitBoxes(all, { bindings, cables, main });
+    this.model = { plane: shown.plane, derived: shown.derived, problems: shown.problems, cards, owner, pins, endpoints, boxes, others, bindings, cables, unstacked };
     if (!this.focused || !shown.plane.stacks.some((s) => s.name === this.focused)) this.focused = shown.plane.stacks[0]?.name ?? null;
     this.renderStacks();
     this.relayout();
@@ -537,7 +561,7 @@ export class SignalPlane extends HTMLElement {
       s.layout = stackLayout(stack, sizes);
       stacks.push({ name: stack.name, at: stack.at, size: { w: s.layout.w, h: s.layout.h } });
     }
-    this.layout = planeLayout({ stacks, boxes: this.model.boxes, tray: this.model.unstacked.length });
+    this.layout = planeLayout({ stacks, boxes: this.model.boxes, tray: this.model.unstacked.length, others: { count: this.model.others.length, expanded: this.othersOpen } });
     for (const stack of this.model.plane.stacks) {
       const s = this.stacks.get(stack.name);
       const rect = this.layout.stacks.get(stack.name);
@@ -588,7 +612,7 @@ export class SignalPlane extends HTMLElement {
         const g = svg('g', { 'data-pin': pin.address });
         g.append(svg('circle', { class: `pin ${pin.side}`, cx: x, cy: y, r: 10 }));
         const label = `${instrumentTitle(pin.instrument, this.cards)} · ${pin.label}`;
-        g.append(svg('text', { class: 'pin-label', x: pin.side === 'out' ? x + 18 : x - 18, y: y + 40, 'text-anchor': pin.side === 'out' ? 'start' : 'end' }, label));
+        g.append(svg('text', { class: 'pin-label', x: pin.side === 'out' ? x + 18 : x - 18, y: y + 48, 'text-anchor': pin.side === 'out' ? 'start' : 'end' }, label));
         groups.pins.append(g);
       }
     }
@@ -598,9 +622,13 @@ export class SignalPlane extends HTMLElement {
       if (!r) continue;
       const g = svg('g', { 'data-device': b.key });
       g.append(svg('rect', { class: `box${b.present ? '' : ' absent'}`, x: r.x, y: r.y, width: r.w, height: r.h, rx: 10 }));
-      g.append(svg('text', { class: 'box-kind', x: r.x + 20, y: r.y + 32 }, 'AUDIO DEVICE'));
-      g.append(svg('text', { class: 'box-title', x: r.x + 20, y: r.y + 72 }, b.name));
-      if (b.note) g.append(svg('text', { class: 'box-note', x: r.x + r.w - 20, y: r.y + 32, 'text-anchor': 'end' }, b.note));
+      // The texts stand where their caps (TEXT) fit: a note takes the kind's line.
+      const inner = r.w - 48;
+      if (b.note) g.append(svg('text', { class: 'box-note', x: r.x + 24, y: r.y + 42 }, fitText(b.note, capChars(TEXT.kind, inner))));
+      else g.append(svg('text', { class: 'box-kind', x: r.x + 24, y: r.y + 42 }, 'AUDIO DEVICE'));
+      const title = svg('text', { class: 'box-title', x: r.x + 24, y: r.y + 96 }, fitText(b.name, capChars(TEXT.title, inner)));
+      title.append(svg('title', {}, b.name));
+      g.append(title);
       const ports = boxPorts(b);
       // Each edge's ports in its own half: playback (our inputs) on the left, capture (our outputs) on the right.
       const half = (ports.inputs.length && ports.outputs.length ? r.w / 2 : r.w) - 9;
@@ -608,8 +636,8 @@ export class SignalPlane extends HTMLElement {
       for (const p of ports.inputs) {
         const roles = bound.filter((x) => x.channels.some((c) => p.channels.includes(c)));
         g.append(svg('rect', { class: `port${roles.length ? ' bound' : ''}`, x: r.x + 6, y: r.y + p.y + 3, width: half, height: p.h - 6, rx: 4 }));
-        g.append(svg('text', { class: 'port-name', x: r.x + 28, y: r.y + p.y + 36 }, p.name));
-        if (roles.length) g.append(svg('text', { class: 'port-role', x: r.x + 28, y: r.y + p.y + 66 }, roles.map(endpointLabel).join(', ')));
+        g.append(svg('text', { class: 'port-name', x: r.x + 24, y: r.y + p.y + 44 }, p.name));
+        if (roles.length) g.append(svg('text', { class: 'port-role', x: r.x + 24, y: r.y + p.y + 84 }, fitText(roles.map(endpointLabel).join(', '), capChars(TEXT.role, half - 24))));
         for (const pin of p.pins) {
           portAt.set(`${b.key} ${pin.channel}`, { x: r.x, y: r.y + pin.y });
           const on = roles.some((x) => x.channels.includes(pin.channel));
@@ -619,11 +647,12 @@ export class SignalPlane extends HTMLElement {
       }
       for (const p of ports.outputs) {
         g.append(svg('rect', { class: 'port', x: r.x + r.w - 6 - half, y: r.y + p.y + 3, width: half, height: p.h - 6, rx: 4 }));
-        g.append(svg('text', { class: 'port-name', x: r.x + r.w - 28, y: r.y + p.y + 36, 'text-anchor': 'end' }, p.name));
+        g.append(svg('text', { class: 'port-name', x: r.x + r.w - 24, y: r.y + p.y + 44, 'text-anchor': 'end' }, p.name));
         if (!p.rest) for (const pin of p.pins) g.append(svg('circle', { class: 'jack', cx: r.x + r.w, cy: r.y + pin.y, r: 8 }));
       }
       groups.boxes.append(g);
     }
+    if (this.layout.others) groups.boxes.append(this.drawOthers(this.layout.others));
     // A role not heard on this machine: a hollow endpoint beside the Stack (ADR 0051 §3).
     const primary = this.model.plane.stacks[0];
     const primaryRect = primary ? this.layout.stacks.get(primary.name) : null;
@@ -632,14 +661,14 @@ export class SignalPlane extends HTMLElement {
       if (b.device || !primaryRect) continue;
       const x = primaryRect.x + primaryRect.w + 120;
       const y = primaryRect.y + primaryRect.h - 240 + unheard++ * 120;
-      groups.boxes.append(svg('rect', { class: 'endpoint', x, y, width: 560, height: 96, rx: 48 }));
-      groups.boxes.append(svg('text', { class: 'endpoint-text', x: x + 36, y: y + 40 }, `${endpointLabel(b)} (${b.endpoint})`));
-      groups.boxes.append(svg('text', { class: 'endpoint-text', x: x + 36, y: y + 76 }, b.note));
+      groups.boxes.append(svg('rect', { class: 'endpoint', x, y, width: 640, height: 112, rx: 56 }));
+      groups.boxes.append(svg('text', { class: 'endpoint-text', x: x + 40, y: y + 48 }, fitText(`${endpointLabel(b)} (${b.endpoint})`, capChars(TEXT.port, 560))));
+      groups.boxes.append(svg('text', { class: 'endpoint-text', x: x + 40, y: y + 92 }, b.note));
       for (const stack of this.model.plane.stacks) {
         for (const pin of this.model.pins.get(stack.name) ?? []) {
           if (pin.side !== 'out' || !b.ports.some((p) => pin.outside.includes(p))) continue;
           const a = pinAt.get(`${stack.name} out ${pin.address}`);
-          if (a) groups.cables.append(svg('path', { class: 'cable dashed', d: cablePath(a, { x, y: y + 48 }) }));
+          if (a) groups.cables.append(svg('path', { class: 'cable dashed', d: cablePath(a, { x, y: y + 56 }) }));
         }
       }
     }
@@ -654,10 +683,47 @@ export class SignalPlane extends HTMLElement {
     if (this.layout.tray) {
       const t = this.layout.tray;
       groups.boxes.append(svg('rect', { class: 'tray', x: t.x, y: t.y, width: t.w, height: t.h, rx: 8 }));
-      groups.boxes.append(svg('text', { class: 'box-kind', x: t.x + 20, y: t.y + 32 }, 'UNSTACKED'));
-      this.model.unstacked.forEach((name, i) => groups.boxes.append(svg('text', { class: 'tray-text', x: t.x + 20, y: t.y + 100 + i * 32 }, name)));
+      groups.boxes.append(svg('text', { class: 'box-kind', x: t.x + 24, y: t.y + 42 }, 'UNSTACKED'));
+      this.model.unstacked.forEach((name, i) => groups.boxes.append(svg('text', { class: 'tray-text', x: t.x + 24, y: t.y + BOX_PU.title * PU + (i + 0.75) * TRAY_LINE_PU * PU }, fitText(name, capChars(TEXT.port, t.w - 48)))));
     }
     this.setupSvg.replaceChildren(groups.cables, groups.boxes, groups.pins);
+  }
+
+  /** The list of other devices (plane units): its head ("Other devices (N)", a click or Enter toggles it), and, expanded, a small box per device. */
+  drawOthers(r) {
+    const others = this.model.others;
+    const g = svg('g', { 'data-others': '' });
+    g.append(svg('rect', { class: 'others', x: r.x, y: r.y, width: r.w, height: r.h, rx: 10 }));
+    const head = svg('g', { class: 'others-head', tabindex: 0, role: 'button', 'aria-expanded': String(this.othersOpen), 'data-others-toggle': '' });
+    head.append(svg('rect', { x: r.x, y: r.y, width: r.w, height: OTHERS_PU.head * PU, rx: 10 }));
+    head.append(svg('text', { class: 'box-title', x: r.x + 24, y: r.y + 52 }, `${this.othersOpen ? '▾' : '▸'} Other devices (${others.length})`));
+    head.append(svg('title', {}, `${this.othersOpen ? 'Collapse' : 'Expand'} the devices nothing in this project uses: ${others.map((b) => b.name).join(', ')}`));
+    head.addEventListener('click', () => this.toggleOthers());
+    g.append(head);
+    othersBoxes({ count: others.length, expanded: this.othersOpen }).forEach((s, i) => {
+      const b = others[i];
+      const x = r.x + s.x;
+      const y = r.y + s.y;
+      const box = svg('g', { 'data-device': b.key });
+      box.append(svg('rect', { class: 'small', x, y, width: s.w, height: s.h, rx: 6 }));
+      const name = svg('text', { class: 'small-name', x: x + 20, y: y + 46 }, fitText(b.name, capChars(TEXT.small, s.w - 40)));
+      name.append(svg('title', {}, b.name));
+      box.append(name, svg('text', { class: 'small-kind', x: x + 20, y: y + 82 }, channelSummary(b)));
+      g.append(box);
+    });
+    return g;
+  }
+
+  /** The list of other devices expanded or collapsed, kept per viewer (try/catch: storage may be refused). */
+  toggleOthers() {
+    this.othersOpen = !this.othersOpen;
+    try {
+      globalThis.localStorage?.setItem(OTHERS_KEY, this.othersOpen ? 'open' : 'closed');
+    } catch {
+      // Not kept: this page's view only.
+    }
+    this.relayout();
+    this.shadowRoot?.querySelector?.('[data-others-toggle]')?.focus?.();
   }
 
   // The view.
@@ -734,6 +800,7 @@ export class SignalPlane extends HTMLElement {
     if (!this.world || !this.viewport.w) return;
     const v = this.view;
     this.world.style.transform = `translate(${v.x}px, ${v.y}px) scale(${v.k})`;
+    this.renderText(v.k);
     const r = this.ratio();
     const fades = planeFades(r);
     const level = levelOf(r);
@@ -747,7 +814,16 @@ export class SignalPlane extends HTMLElement {
       s.element.style.pointerEvents = focused && level === 'wiring' ? 'none' : '';
     }
     this.renderDeep(fades, level);
-    this.renderBar(level, r);
+    this.renderBar(level, r, fades);
+  }
+
+  /** The Setup level's text sizes at scale `k` (`textSizes`: readable at the Setup's fit, never past the room the layout gives them), as custom properties every level's text reads. */
+  renderText(k) {
+    const sizes = textSizes(k);
+    const key = Object.values(sizes).map((n) => n.toFixed(2)).join(' ');
+    if (key === this.textKey) return;
+    this.textKey = key;
+    for (const [name, size] of Object.entries(sizes)) this.world.style.setProperty(`--t-${name}`, `${size.toFixed(2)}px`);
   }
 
   /** The board (ADR 0047) in the wiring band: faded in over the panels, its plate origin on the Stack's; past it, its own. */
@@ -763,23 +839,47 @@ export class SignalPlane extends HTMLElement {
     if (!map) return;
     this.schematic.fitted = true;
     this.schematic.setView?.(boardView(this.view, map.origin, map.offset));
-    // Just un-hidden, the board has no stage yet: once measured (its resize), it is laid on the Stack again.
-    if (!this.schematic.viewport?.w) requestAnimationFrame(() => this.render());
+    // Just un-hidden, the board has no stage or measured plate yet: once it has (its resize, its plate's measure), it is laid on the Stack again.
+    if ((!this.schematic.viewport?.w || !map.measured) && !this.deepPending) {
+      this.deepPending = true;
+      requestAnimationFrame(() => {
+        this.deepPending = false;
+        if (!this.deep.hidden) this.render();
+      });
+    }
   }
 
-  /** Where the board's plate origin lies on the plane (the focused Stack's first panel) and its stage on the plane's. */
-  boardMap() {
+  /**
+   * Where the board's plate origin lies on the plane under `view` and its
+   * stage on the plane's: the card at the stage's centre laid on its front
+   * panel in the Stack (`boardOriginY`, from the board's measured plate
+   * cards), else the first panel's top.
+   */
+  boardMap(view = this.view) {
     const rect = this.focusRect();
     const s = this.stacks.get(this.focused);
     if (!rect || !s?.layout) return null;
-    const origin = { x: rect.x, y: rect.y + s.layout.top + RAIL_PU * PU - GUTTER };
+    const fallback = rect.y + s.layout.top + RAIL_PU * PU - GUTTER;
+    const plate = this.schematic.board?.plate?.cards ?? [];
+    const cards = this.cards ?? [];
+    const anchors = [];
+    // The board measures every card it shows, in the panel's order: matched by index when it shows them all.
+    if (plate.length === cards.length) {
+      for (const r of s.layout.rects) {
+        const i = cards.findIndex((c) => `${CARD_PREFIX}${c.id}` === r.entry);
+        if (i < 0 || r.panel.scale !== 1) continue;
+        anchors.push({ y: rect.y + r.panel.y + r.panel.h / 2, origin: rect.y + r.panel.y - plate[i].y });
+      }
+    }
+    const centre = toPlane(view, { x: this.viewport.w / 2, y: this.viewport.h / 2 }).y;
+    const origin = { x: rect.x, y: boardOriginY(anchors, centre, fallback) };
     const stage = this.schematic.stage?.getBoundingClientRect?.();
     const own = this.stage.getBoundingClientRect();
     const offset = stage ? { x: stage.left - own.left, y: stage.top - own.top } : { x: 0, y: 0 };
-    return { origin, offset };
+    return { origin, offset, measured: plate.length > 0 };
   }
 
-  renderBar(level, r) {
+  renderBar(level, r, fades = planeFades(r)) {
     const key = `${level}|${this.focused}`;
     if (key !== this.barKey) {
       this.barKey = key;
@@ -795,8 +895,10 @@ export class SignalPlane extends HTMLElement {
       this.levelText = html('span', { className: 'level' });
       this.bar.replaceChildren(...items, this.levelText);
     }
-    // The board has its own bar past the band.
+    // The board has its own bar past the band: the plane's cross-fades out with the front panels as the board's comes in, so neither pops.
     this.bar.hidden = level === 'wiring';
+    const opacity = String(fades.panels);
+    if (this.bar.style.opacity !== opacity) this.bar.style.opacity = opacity;
     const name = { setup: 'Setup', stack: 'Stack', wiring: 'Board' }[level];
     const text = `${name} · ${r ? r.toFixed(2) : '0'}× fit`;
     if (this.levelText.textContent !== text) this.levelText.textContent = text;
@@ -815,6 +917,7 @@ export class SignalPlane extends HTMLElement {
       return;
     }
     const start = performance.now();
+    this.travelTarget = to;
     const step = (now) => {
       const t = Math.min(1, (now - start) / ZOOM_MS);
       this.view = t >= 1 ? to : plain(tween(from, to, ease(t)));
@@ -827,6 +930,13 @@ export class SignalPlane extends HTMLElement {
   stopTravel() {
     if (this.traveling) cancelAnimationFrame(this.traveling);
     this.traveling = null;
+  }
+
+  /** A travel under way ends where it was going (a scroll during a focus scrolls the fitted Stack, never one half-way there). */
+  settleTravel() {
+    if (!this.traveling) return;
+    this.stopTravel();
+    this.view = this.travelTarget;
   }
 
   /** Setup → Stack (ADR 0051 §8): the Stack's width fills the stage, its top in view. */
@@ -858,7 +968,9 @@ export class SignalPlane extends HTMLElement {
     const view = this.schematic.view;
     if (map && view) {
       const root = reroot(view, (l) => this.schematic.layoutOf(l), '');
-      this.view = fromBoardView(root, map.origin, map.offset);
+      // The origin follows the view's centre: mapped once with the last, then with the one of the view it gave.
+      const first = fromBoardView(root, map.origin, map.offset);
+      this.view = fromBoardView(root, this.boardMap(first).origin, map.offset);
     }
     this.deepOwned = false;
   }
@@ -892,7 +1004,7 @@ export class SignalPlane extends HTMLElement {
 
   pointerDown(event) {
     if (event.button !== 0 || event.composedPath().includes(this.deep) || event.composedPath().includes(this.bar) || this.onControl(event)) return;
-    this.stopTravel();
+    this.settleTravel();
     this.drag = { start: this.point(event), last: this.point(event), id: event.pointerId, moved: false };
   }
 
@@ -963,7 +1075,6 @@ export class SignalPlane extends HTMLElement {
   }
 
   wheelZoom(event, forced) {
-    this.stopTravel();
     const kind = event.ctrlKey ? 'pinch' : this.kindOf(event);
     const level = this.level();
     const rect = this.focusRect();
@@ -972,6 +1083,7 @@ export class SignalPlane extends HTMLElement {
       // The Stack: the wheel scrolls (a trackpad's sideways travel pans, when zoomed past the width).
       const dy = wheelPixels(event.deltaY || 0, mode);
       const dx = kind === 'trackpad' ? wheelPixels(event.deltaX || 0, mode) : 0;
+      this.settleTravel();
       this.setView(scrollStack(panBy(this.view, level === 'stack' && this.ratio() > 1.0001 ? -dx : 0, 0), dy, rect, this.viewport));
       return;
     }
@@ -988,13 +1100,19 @@ export class SignalPlane extends HTMLElement {
 
   /** A zoom by `factor` about screen point `at`: coming to a Stack's fit from below focuses it (its width fitted). */
   zoomBy(factor, at) {
-    if (this.level() === 'setup') this.focusUnder(at);
+    // The focus follows the pointer only before the focus band: inside it the other Stacks are fading, and another focus would jump their opacity and the ratio.
+    if (this.ratio() < FOCUS_BAND[0]) this.focusUnder(at);
     const fit = this.fitK();
     const r0 = this.ratio();
     let next = zoomAbout(this.view, factor, at, fit);
     if (fit && reachesFit(r0, next.k / fit)) {
+      // The zoom stops at the fit about the pointer (no jump in scale), and the Stack glides to fill the width.
       const rect = this.focusRect();
-      next = fitWidth(rect, this.viewport, next);
+      const stop = zoomAbout(this.view, fit / this.view.k, at, fit);
+      this.view = stop;
+      this.touched = true;
+      this.travel(fitWidth(rect, this.viewport, stop));
+      return;
     } else if (fit && next.k / fit >= 1) {
       // Zoomed past the fit: the Stack stays in view vertically.
       next = { ...next, ...clampTop(next, this.focusRect(), this.viewport) };
@@ -1005,6 +1123,11 @@ export class SignalPlane extends HTMLElement {
   /** The keys: Enter goes in a level, Escape out; 0 fits the whole plane; + and − zoom about the centre; the arrows and the page keys scroll. */
   key(event) {
     if (event.defaultPrevented || event.metaKey || event.altKey) return;
+    if ((event.key === 'Enter' || event.key === ' ') && event.composedPath().some((n) => n?.dataset?.othersToggle !== undefined)) {
+      event.preventDefault();
+      this.toggleOthers();
+      return;
+    }
     const level = this.level();
     const inBoard = level === 'wiring' && event.composedPath().includes(this.deep);
     if (event.key === 'Escape') {
