@@ -311,7 +311,10 @@ export class SignalPlane extends HTMLElement {
     this.stage.addEventListener('pointerdown', (e) => this.pointerDown(e));
     this.stage.addEventListener('pointermove', (e) => this.pointerMove(e));
     this.stage.addEventListener('pointerup', (e) => this.pointerUp(e));
-    this.stage.addEventListener('pointercancel', () => (this.drag = null));
+    this.stage.addEventListener('pointercancel', () => this.cancelPointer());
+    this.stage.addEventListener('lostpointercapture', (e) => {
+      if (this.gesture?.id === e.pointerId) this.cancelPointer();
+    });
     this.stage.addEventListener('dblclick', (e) => this.doubleClick(e));
     this.addEventListener('keydown', (e) => this.key(e), true);
   }
@@ -345,6 +348,8 @@ export class SignalPlane extends HTMLElement {
   }
 
   detach() {
+    this.innerStream?.stop?.();
+    this.innerStream = null;
     for (const stop of this.stops.splice(0)) stop();
     this.connection = null;
   }
@@ -453,7 +458,7 @@ export class SignalPlane extends HTMLElement {
   graphSeen(graph) {
     this.graph = graph;
     // What the Wiring and Control layouts depend on: the structure, never a value.
-    this.graphKey = JSON.stringify([graph?.top?.instances?.map((i) => [i.name, i.module, i.ports?.length, i.parameters?.length]), graph?.top?.connections?.map((c) => [c.from, c.to]), Object.keys(graph?.composites ?? {}).map((k) => [k, graph.composites[k].connections?.length])]);
+    this.graphKey = JSON.stringify([graph?.top?.instances?.map((i) => [i.name, i.module, i.ports?.length, i.parameters?.length]), graph?.top?.connections?.map((c) => [c.from, c.to]), Object.entries(graph?.composites ?? {}).map(([k, c]) => [k, c.connections?.map((x) => [x.from, x.to]), c.parameters?.map((x) => [x.name, x.to]), c.instances?.map((x) => [x.name, x.module, x.composite])])]);
     const cleared = this.session.graphSeen(graph);
     if (cleared?.cleared) this.say(cleared.cleared);
     this.readPlane().then(() => this.recompute());
@@ -895,6 +900,8 @@ export class SignalPlane extends HTMLElement {
 
   /** The opened instrument's engine band (`engineBand`, from its cube as laid out; the default until it is). */
   engineBandNow() {
+    // Below the control band the default band does: no Control plane is laid out before it first shows.
+    if (this.ratio() < CONTROL_BAND[0]) return ENGINE_BAND;
     const cube = this.controlNow()?.layout?.cube;
     const fit = this.fitK();
     if (!cube || !fit || !this.viewport.w) return ENGINE_BAND;
@@ -966,13 +973,16 @@ export class SignalPlane extends HTMLElement {
     const stack = this.model?.plane.stacks.find((x) => x.name === this.focused);
     const s = this.stacks.get(this.focused);
     if (!stack || !s?.layout || !this.graph) return null;
-    const key = `${this.graphKey}\n${layoutKey(s.layout)}`;
+    const pins = this.model.pins.get(stack.name) ?? [];
+    // What the Wiring depends on: the structure, the Stack's layout, and who holds what (the panel's binds, the Stacks).
+    const key = `${this.graphKey}\n${layoutKey(s.layout)}\n${s.key}\n${JSON.stringify([[...this.model.owner], [...this.model.stackOf], pins])}`;
     if (s.wiring?.key === key) return s.wiring;
     const t0 = performance.now();
     const instances = this.graph?.top?.instances ?? [];
     const connections = this.graph?.top?.connections ?? [];
-    const pins = this.model.pins.get(stack.name) ?? [];
-    const model = wiringModel(stack, this.model.owner, this.model.stackOf, instances, connections, pins);
+    // Only the instruments laid out (measured): an entry without a rectangle has no ports to draw.
+    const laid = { ...stack, instruments: s.layout.rects.map((r) => r.entry) };
+    const model = wiringModel(laid, this.model.owner, this.model.stackOf, instances, connections, pins);
     const pinYs = new Map(pinPlaces(pins, s.layout.rects).map((p) => [`${p.side} ${p.address}`, p.y]));
     const layout = wiringLayout(model, s.layout, pinYs);
     s.wiring = { key, layout, pins: pinPlaces(pins, s.layout.rects), ms: performance.now() - t0 };
@@ -1217,6 +1227,7 @@ export class SignalPlane extends HTMLElement {
     const control = this.controlNow();
     if (!control) {
       hide(s.controlSvg);
+      this.updateInner([]);
       return;
     }
     show(s.controlSvg);
@@ -1517,7 +1528,7 @@ export class SignalPlane extends HTMLElement {
   }
 
   pointerDown(event) {
-    if (event.button !== 0 || event.composedPath().includes(this.deep) || event.composedPath().includes(this.bar) || event.composedPath().includes(this.chooser) || this.onControl(event)) return;
+    if (this.gesture || event.button !== 0 || event.composedPath().includes(this.deep) || event.composedPath().includes(this.bar) || event.composedPath().includes(this.chooser) || this.onControl(event)) return;
     this.settleTravel();
     const at = this.point(event);
     // A wire, a cable or a box of the edited drawing: selected (by its connection or port, kept at every zoom); the empty sheet clears it.
@@ -1757,6 +1768,10 @@ export class SignalPlane extends HTMLElement {
       return true;
     }
     if (sel.kind === 'auto') {
+      if (!sel.to) {
+        this.say('Select an automation wire to remove it');
+        return true;
+      }
       if (sel.inner) {
         this.say(`${sel.from} → ${sel.to} is inside ${sel.level}: edit it in its Engine`);
         return true;
@@ -1780,6 +1795,13 @@ export class SignalPlane extends HTMLElement {
         for (const [id, element] of elements) element.classList?.toggle('selected', selectedId(this.selection, id, s));
       }
     }
+  }
+
+  /** A pointer cancelled or its capture lost: no cable is left half drawn, no pan left running. */
+  cancelPointer() {
+    this.gesture = null;
+    this.drag = null;
+    this.clearRubber();
   }
 
   say(text) {
@@ -2073,7 +2095,9 @@ function controlNode(tree, cards, entry, control) {
   const grid = (tree?.children ?? []).find((c) => c.kind === 'cards');
   const node = grid?.children?.[card?.index ?? -1];
   if (!node) return null;
-  const same = [...control.element.closest('.signal-card, section, signal-slot')?.querySelectorAll(control.tag) ?? []].filter((e) => e.getAttribute('bind') === control.element.getAttribute('bind'));
+  // Counted over the whole card, as the walk below counts its node.
+  const cardElement = control.element.closest('.face-panel > .signal-cards > *') ?? control.element.closest('.signal-card, section, signal-slot');
+  const same = [...(cardElement?.querySelectorAll(control.tag) ?? [])].filter((e) => e.getAttribute('bind') === control.element.getAttribute('bind'));
   const nth = Math.max(0, same.indexOf(control.element));
   let n = 0;
   const walk = (x) => {

@@ -108,10 +108,10 @@ export function wiringModel(stack, owner, stackOf, instances = [], connections =
     } else if (a && !b && edgeOut.has(c.from)) {
       port(a, 'out', c.from, kind);
       // One cable per edge pin: the Setup draws the pin's fan-out outside.
-      if (!cables.some((x) => x.b.edge === 'out' && x.b.pin === c.from)) cables.push({ id: `edge out ${c.from}`, index: i, from: c.from, to: c.to, kind, a: { entry: a, address: c.from }, b: { edge: 'out', pin: c.from } });
+      if (!cables.some((x) => x.b.edge === 'out' && x.b.pin === c.from)) cables.push({ id: `cable edge out ${c.from}`, index: i, from: c.from, to: c.to, kind, a: { entry: a, address: c.from }, b: { edge: 'out', pin: c.from } });
     } else if (b && !a && edgeIn.has(c.to)) {
       port(b, 'in', c.to, kind);
-      if (!cables.some((x) => x.a.edge === 'in' && x.a.pin === c.to)) cables.push({ id: `edge in ${c.to}`, index: i, from: c.from, to: c.to, kind, a: { edge: 'in', pin: c.to }, b: { entry: b, address: c.to } });
+      if (!cables.some((x) => x.a.edge === 'in' && x.a.pin === c.to)) cables.push({ id: `cable edge in ${c.to}`, index: i, from: c.from, to: c.to, kind, a: { edge: 'in', pin: c.to }, b: { entry: b, address: c.to } });
     }
   });
   // Two ports of one instrument and side sharing a name: both say their instance.
@@ -188,7 +188,7 @@ export function wiringLayout(model, layout, pinYs = new Map()) {
   };
   // A rail's crossings spread over its height, in cable order.
   const byRail = new Map();
-  for (const c of model.cables) {
+  for (const c of model.cables.filter((x) => (x.a.edge || placed.has(`port out ${x.a.address}`)) && (x.b.edge || placed.has(`port in ${x.b.address}`)))) {
     const r = railOf(c);
     if (r === null) continue;
     if (!byRail.has(r)) byRail.set(r, []);
@@ -203,6 +203,7 @@ export function wiringLayout(model, layout, pinYs = new Map()) {
   const right = new Map();
   const left = new Map();
   for (const c of model.cables) {
+    if ((!c.a.edge && !portAt('out', c.a.address)) || (!c.b.edge && !portAt('in', c.b.address))) continue;
     if (!c.a.edge) {
       const from = portAt('out', c.a.address);
       const to = c.b.edge ? pinYs.get(`out ${c.b.pin}`) ?? from.y : crossY.get(c.id);
@@ -235,7 +236,9 @@ export function wiringLayout(model, layout, pinYs = new Map()) {
   const boxes = rects.map((r) => ({ entry: r.entry, x: channel, y: r.y, w: w - 2 * channel, h: r.h }));
   const ports = [...placed.values()].map((p) => ({ ...p, x: p.side === 'in' ? channel : w - channel }));
   const portXY = new Map(ports.map((p) => [p.id, p]));
-  const cables = model.cables.map((c) => {
+  // A cable whose instrument has no rectangle (not measured yet) is not drawn.
+  const placedCable = (c) => (c.a.edge || placed.has(`port out ${c.a.address}`)) && (c.b.edge || placed.has(`port in ${c.b.address}`));
+  const cables = model.cables.filter(placedCable).map((c) => {
     const pts = [];
     if (c.a.edge) {
       const y = pinYs.get(`in ${c.a.pin}`) ?? portXY.get(`port in ${c.b.address}`).y;

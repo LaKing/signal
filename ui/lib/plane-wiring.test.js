@@ -172,3 +172,15 @@ test('every port and cable of the studio’s Wiring is hit at its own place, at 
     assert.ok(hit === c.id || w.cables.find((x) => x.id === hit)?.from === c.from, `${c.id} hit (got ${hit})`);
   }
 });
+
+test('an instrument not measured yet has no rectangle: its cables are left out, nothing throws (the independent review)', () => {
+  const s = studio();
+  const full = studioLayout(s.stack);
+  const layout = { ...full, rects: full.rects.filter((r) => r.entry !== 'card:tape-echo') };
+  const model = wiringModel(s.stack, s.owner, s.stackOf, s.instances, s.connections, s.pins);
+  const w = wiringLayout(model, layout, new Map());
+  assert.ok(!w.cables.some((c) => c.from === '/echo.out' || c.to === '/echo.in'));
+  assert.equal(w.cables.length, 5);
+  // Edge cables and the Stack's edge pins never share an id.
+  assert.ok(w.cables.filter((c) => c.a.edge || c.b.edge).every((c) => c.id.startsWith('cable ')));
+});
