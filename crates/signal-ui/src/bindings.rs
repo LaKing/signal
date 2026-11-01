@@ -1330,7 +1330,62 @@ pub fn check_project(
             &targets,
         ));
     }
+    // ADR 0051 §4: the plane's Stacks, against the panel's cards and the top-level slots with a part.
+    if let Some(plane) = check_plane(&ui, &panel) {
+        checked.push(plane);
+    }
     Ok(checked)
+}
+
+/// `ui/plane.toml` checked (ADR 0051 §4), when the project has one: its
+/// entries against the cards of `ui/main.html` (without one, the generated
+/// panel's: a card per instance with parameters, one per top-level slot,
+/// and `output`) and the top-level slots with a part.
+fn check_plane(ui: &Path, panel: &Panel) -> Option<Checked> {
+    let path = ui.join(crate::plane::PLANE_FILE);
+    let text = fs::read_to_string(&path).ok()?;
+    let main = ui.join(MAIN_PANEL);
+    let cards: Vec<String> = match fs::read_to_string(&main) {
+        Ok(html) => crate::plane::panel_cards(&html)
+            .into_iter()
+            .map(|c| c.id)
+            .collect(),
+        Err(_) => {
+            let mut ids: Vec<String> = panel
+                .view(&std::collections::BTreeMap::new())
+                .into_iter()
+                .filter(|i| !panel.is_slot(&i.name))
+                .map(|i| crate::plane::card_slug(&i.name))
+                .collect();
+            ids.extend(
+                panel
+                    .part_keys()
+                    .filter(|k| panel.is_slot(k))
+                    .map(crate::plane::card_slug),
+            );
+            ids.push("output".to_owned());
+            ids
+        }
+    };
+    let slots: Vec<String> = panel
+        .part_keys()
+        .filter(|k| {
+            !k.contains('.')
+                && ui
+                    .join(crate::parts::PARTS_DIR)
+                    .join(format!("{k}.html"))
+                    .is_file()
+        })
+        .map(str::to_owned)
+        .collect();
+    let file = format!("ui/{}", crate::plane::PLANE_FILE);
+    let findings = crate::plane::check(&file, &text, &cards, &slots);
+    Some(Checked {
+        file,
+        controls: 0,
+        bindings: 0,
+        findings,
+    })
 }
 
 /// The panel file `name` of the project's `ui/` (`main.html`,

@@ -378,6 +378,11 @@ fn check_panels(path: &Path, registry: &Registry, json: bool) -> Result<(), Fail
         eprintln!("{diagnostic}");
     }
     for c in &checked {
+        // ADR 0051: the plane's file has Stacks, not controls.
+        if c.file.ends_with(".toml") {
+            eprintln!("signal: {}: ok", shown.join(&c.file).display());
+            continue;
+        }
         eprintln!(
             "signal: {}: {} controls, {} bindings: ok",
             shown.join(&c.file).display(),
