@@ -23,6 +23,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use signal_project::archive::{self, ArchiveError};
 
+use crate::panel_write::sha256_hex;
+
 /// How often a refresh looks at the working folder's files.
 const LOOK_EVERY: Duration = Duration::from_millis(250);
 
@@ -145,7 +147,7 @@ struct Saving {
 /// say whether that packing settled. Packed without the project's writer
 /// lock (ADR 0040 §2): the working folder is this process's own, and
 /// holding the lock for a whole pack would stall every writer.
-fn pack_and_write(working: &Path, file: &Path, hold: &SaveHold) -> Packed {
+fn pack_and_write(working: &Path, file: &Path, expect: Option<&str>, hold: &SaveHold) -> Packed {
     let failed = |e: ArchiveError| format!("{} was not saved: {e}", file.display());
     let (bytes, settled) = settle(
         || archive::pack(working),
@@ -153,8 +155,29 @@ fn pack_and_write(working: &Path, file: &Path, hold: &SaveHold) -> Packed {
     )
     .map_err(failed)?;
     held(hold);
+    if let Some(expect) = expect {
+        conflict(file, expect)?;
+    }
     archive::write_atomic(file, &bytes).map_err(failed)?;
     Ok((bytes, settled))
+}
+
+/// A Save's check (review 2026-11-01): the file still holds what this
+/// document opened or last wrote (`expect`, its SHA-256), else another
+/// writer changed it and nothing is written: both the file and the
+/// working folder keep what they hold. A file removed meanwhile is written
+/// again (nothing is lost). Checked just before the write: a writer that
+/// lands between the check and the rename is not seen.
+fn conflict(file: &Path, expect: &str) -> Result<(), String> {
+    match fs::read(file) {
+        Ok(bytes) if sha256_hex(&bytes) != expect => Err(format!(
+            "{} was not saved: it changed since it was opened or last saved here (another Signal or tool wrote it); the file keeps that version and the working folder keeps these edits (Save As writes them to another file, Revert to Saved opens the file's version)",
+            file.display()
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{} was not saved: {error}", file.display())),
+    }
 }
 
 /// A packing of a folder that may change while it is packed: `pack` is
@@ -251,6 +274,10 @@ pub struct Document {
     /// What the working folder packed to when opened or last saved; shared
     /// with a comparison's thread.
     saved: Arc<Vec<u8>>,
+    /// The SHA-256 of the file's bytes as opened or last written here: a
+    /// Save to the file is refused when it holds other bytes
+    /// ([`conflict`]).
+    on_disk: String,
     look: Look,
     looked: Option<Instant>,
     /// When the content was last compared, and how long that took.
@@ -298,6 +325,7 @@ impl Document {
         };
         Ok(Document {
             file: file.to_owned(),
+            on_disk: sha256_hex(&bytes),
             look: look(&working),
             working,
             saved: Arc::new(saved),
@@ -607,6 +635,7 @@ impl Document {
                 if job.rename {
                     self.file = job.file.clone();
                 }
+                self.on_disk = sha256_hex(&bytes);
                 self.saved = Arc::new(bytes);
                 // A comparison still running compared with the old content.
                 self.version += 1;
@@ -645,13 +674,18 @@ impl Document {
             let working = self.working.clone();
             let target = file.clone();
             let hold = self.save_hold.clone();
+            // A Save to the document's file checks that nobody else wrote
+            // it since; a Save As writes the file the person chose.
+            let expect = (!rename).then(|| self.on_disk.clone());
+            let checked = expect.clone();
             let spawned = thread::Builder::new()
                 .name("signal-save".to_owned())
                 .spawn(move || {
-                    let _ = send.send(pack_and_write(&working, &target, &hold));
+                    let _ = send.send(pack_and_write(&working, &target, checked.as_deref(), &hold));
                 });
             let made = spawned.is_ok();
-            let packed = (!made).then(|| pack_and_write(&self.working, &file, &no_hold()));
+            let packed = (!made)
+                .then(|| pack_and_write(&self.working, &file, expect.as_deref(), &no_hold()));
             self.saving = Some(Saving {
                 ticket: asked.ticket,
                 file,

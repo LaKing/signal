@@ -388,3 +388,63 @@ fn close_finishes_a_pending_save() {
     }
     fs::remove_dir_all(&base).unwrap();
 }
+
+/// Review 2026-11-01 (signal-save-no-conflict-check): a Save refuses to
+/// write over a `.signal` file another writer changed since this document
+/// opened or last saved it, and keeps both: the file holds the other
+/// version, the working folder its edits, still edited. Two documents of
+/// one file: the first Save wins, the second is a conflict; a Save As
+/// writes the edits elsewhere. A cooperating writer (each saves after it
+/// opened the other's last version) never conflicts.
+#[test]
+fn a_save_never_writes_over_a_file_changed_elsewhere() {
+    let base = base("conflict");
+    let pulse = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/pulse");
+    let file = base.join("pulse.signal");
+    archive::write_atomic(&file, &archive::pack(&pulse).unwrap()).unwrap();
+
+    let mut a = Document::open(&file, &base.join("Open")).unwrap();
+    let mut b = Document::open(&file, &base.join("Open")).unwrap();
+    hidden_edit_of(a.working(), "gain = 0.33", "gain = 0.11");
+    hidden_edit_of(b.working(), "gain = 0.33", "gain = 0.22");
+    a.save().unwrap();
+    assert!(saved_toml(&file).contains("gain = 0.11"));
+    let refused = b.save().unwrap_err();
+    assert!(refused.contains("changed since it was opened"), "{refused}");
+    assert!(
+        saved_toml(&file).contains("gain = 0.11"),
+        "the other's kept"
+    );
+    assert!(b.check(), "the working folder keeps its edits");
+    let copy = base.join("pulse-b.signal");
+    b.save_as(&copy).unwrap();
+    assert!(saved_toml(&copy).contains("gain = 0.22"));
+    assert!(saved_toml(&file).contains("gain = 0.11"));
+
+    // A's later save still works: the file holds what A wrote.
+    hidden_edit_of(a.working(), "gain = 0.11", "gain = 0.12");
+    a.save().unwrap();
+    // Cooperating: B now edits the copy it saved as, and A's file again
+    // after reopening it: no conflict.
+    hidden_edit_of(b.working(), "gain = 0.22", "gain = 0.23");
+    b.save().unwrap();
+    assert!(saved_toml(&copy).contains("gain = 0.23"));
+    let mut c = Document::open(&file, &base.join("Open")).unwrap();
+    hidden_edit_of(c.working(), "gain = 0.12", "gain = 0.13");
+    c.save().unwrap();
+    assert!(saved_toml(&file).contains("gain = 0.13"));
+    // Now A's view is stale: refused, the file keeps C's.
+    hidden_edit_of(a.working(), "gain = 0.12", "gain = 0.14");
+    assert!(a.save().is_err());
+    assert!(saved_toml(&file).contains("gain = 0.13"));
+
+    // The file removed meanwhile: written again, nothing lost.
+    fs::remove_file(&copy).unwrap();
+    hidden_edit_of(b.working(), "gain = 0.23", "gain = 0.24");
+    b.save().unwrap();
+    assert!(saved_toml(&copy).contains("gain = 0.24"));
+    for document in [a, b, c] {
+        document.close(true);
+    }
+    fs::remove_dir_all(&base).unwrap();
+}

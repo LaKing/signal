@@ -498,6 +498,73 @@ fn a_hand_written_part_deleted_with_its_slot_comes_back() {
     rig.finish();
 }
 
+/// Review 2026-11-01 (signal-save-no-conflict-check, `restorable`): the
+/// texts a patch of the host wrote or replaced are restored whole only in
+/// the opening they were written in. After a new opening (`signal ui`
+/// reopening its `.signal` file into a new folder), a `panel.restore` of
+/// such a text is judged strictly, as any other text: a hand-written page
+/// is no new part, refused.
+#[test]
+fn a_restorable_text_is_of_its_opening_only() {
+    let name = "parts-restorable";
+    let source = scratch(&format!("source-{name}"));
+    let hand = format!(
+        "<!doctype html>\n<html><head><meta charset=\"utf-8\"></head><body>\n<!-- by hand --><p>notes</p>\n{}</body></html>\n",
+        part("fx", "fx", FX_PART)
+    );
+    fs::write(source.join("ui/parts/fx.html"), &hand).unwrap();
+    let main = fs::read_to_string(source.join("ui/main.html")).unwrap();
+    fs::write(
+        source.join("ui/main.html"),
+        main.replace("    <signal-slot bind=\"/fx\"></signal-slot>\n", ""),
+    )
+    .unwrap();
+    let mut rig = rig(
+        name,
+        Options {
+            project: Some(source.clone()),
+            packed: true,
+            ..Options::default()
+        },
+    );
+    let _ = fs::remove_dir_all(&source);
+    let file = std::env::temp_dir()
+        .join(format!("signal-ui-{name}-Tcp-{}", std::process::id()))
+        .join("project.signal");
+    let (mut ws, _) = rig.client();
+    // The host removes the hand-written part with its slot: its text is
+    // restorable in this opening.
+    patch(
+        &mut rig,
+        &mut ws,
+        1,
+        json!([
+            {"op": "connection.remove", "from": "osc.out", "to": "fx.x"},
+            {"op": "connection.remove", "from": "fx.y", "to": "out.l"},
+            {"op": "connection.remove", "from": "fx.y", "to": "out.r"},
+            {"op": "instance.remove", "name": "fx"}
+        ]),
+    );
+    let reopened = rig.request(
+        &mut ws,
+        3,
+        json!({"type": "project.open", "path": file.display().to_string()}),
+        "project",
+    );
+    let dir = PathBuf::from(reopened["dir"].as_str().unwrap());
+    assert_ne!(dir, rig.dir, "a new opening, in a new folder");
+    let refused = send_patch(
+        &mut rig,
+        &mut ws,
+        5,
+        json!([{"op": "panel.restore", "file": "parts/spare.html", "text": hand}]),
+        "error",
+    );
+    assert_eq!(refused["code"], "bad-value", "{refused}");
+    assert!(!dir.join("ui/parts/spare.html").exists());
+    rig.finish();
+}
+
 /// The review's: every interface edit that drops a name the part binds is
 /// `in-use` (a template set here), unless its controls go too; a rename
 /// onto a name the part binds already is refused (its undo could not part

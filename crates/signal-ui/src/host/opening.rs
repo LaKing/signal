@@ -66,10 +66,13 @@ pub(super) struct Opening {
 
 impl Opening {
     /// A new opening of the folder `dir`: the only place the generation
-    /// changes.
+    /// changes. The texts the last opening's patches wrote are no longer
+    /// restored whole (review 2026-11-01: a text of another project, or of
+    /// an earlier opening, is judged strictly).
     pub(super) fn begin(&mut self, dir: &Path) {
         self.dir = dir.to_owned();
         self.generation += 1;
+        self.restorable.clear();
     }
 
     /// A mutation (a file write, a live edit, `project.save`, and the open
