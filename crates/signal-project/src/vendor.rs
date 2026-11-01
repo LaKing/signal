@@ -289,6 +289,19 @@ pub fn prepare(
     Ok(prepared)
 }
 
+/// The first of `dir`'s `relative` path and its folders (below `dir`) that
+/// is a symbolic link, if any.
+fn linked_on_the_way(dir: &Path, relative: &str) -> Option<PathBuf> {
+    let mut at = dir.to_owned();
+    for part in Path::new(relative).components() {
+        at.push(part);
+        if fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Some(at);
+        }
+    }
+    None
+}
+
 /// Writes what [`prepare`] checked, all or nothing (see the module's notes),
 /// holding the project's writer lock ([`ProjectLock`], ADR 0040) from the
 /// conflict check to the last check of what was written. The project's files
@@ -308,6 +321,20 @@ pub fn write(dir: &Path, prepared: Prepared, library: &Library) -> Result<Vendor
         error,
     })?;
     unchanged(dir, &files)?;
+    // Only the project's own files are written (review 2026-11-01): never
+    // through a link, a linked `composites/` included. `signal ui`'s
+    // `vendor` checks the same first; `signal vendor` relies on this.
+    for (path, _) in copies.iter().chain(edits.iter()) {
+        if let Some(linked) = linked_on_the_way(dir, path) {
+            return Err(VendorError::Io {
+                path: linked,
+                error: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "reached through a symbolic link: vendoring writes only the project's own files, and nothing was written",
+                ),
+            });
+        }
+    }
     let mut vendored = Vendored {
         copied: Vec::new(),
         reused,

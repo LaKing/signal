@@ -542,6 +542,36 @@ fn modules_lists_library_composites_by_category() {
     }
 }
 
+#[test]
+fn vendor_refuses_a_linked_composites_folder() {
+    // Review 2026-11-01 (security-minor): `signal vendor` writes only the
+    // project's own files: a `composites/` that links elsewhere is refused
+    // and nothing is written there or to project.toml.
+    let dir = out_dir("vendor-linked");
+    let outside = out_dir("vendor-linked-outside");
+    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    let text = "schema_version = 1\n\n[project]\nname = \"v\"\nsample_rate = 8000\nseed = 3\n\n\
+         [instances]\nnoise = { module = \"std.noise\" }\n\
+         echo = { module = \"lib.tape_echo\", mix = 0.5 }\n\
+         out = { module = \"std.audio_out\", gain = 0.05 }\n\n\
+         [wiring]\nconnections = [\n  { from = \"noise.out\", to = \"echo.in\" },\n\
+         { from = \"echo.out\", to = \"out.l\" },\n]\n";
+    fs::write(dir.join("project.toml"), text).unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("composites")).unwrap();
+    let project = dir.display().to_string();
+    let output = signal(&["vendor", &project, "lib.tape_echo"]);
+    assert_ne!(output.status.code(), Some(0), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("symbolic link"), "{stderr}");
+    assert_eq!(
+        fs::read_dir(&outside).unwrap().count(),
+        0,
+        "nothing written outside"
+    );
+    assert_eq!(fs::read_to_string(dir.join("project.toml")).unwrap(), text);
+}
+
 /// M2.10-3 AC6: `signal vendor` copies a library composite into a project,
 /// points the project at the copy, and refuses to overwrite it; the project
 /// renders the same audio as before.
