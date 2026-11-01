@@ -458,7 +458,7 @@ impl Host {
             // The device is released, the workers joined (the Runner is
             // dropped here) and the file watch ends with the run.
             self.stop_app();
-            let subs: Vec<u32> = self.subs.keys().copied().collect();
+            let subs: Vec<u32> = self.subs.by_id.keys().copied().collect();
             for sub in subs {
                 self.drop_sub(sub);
             }

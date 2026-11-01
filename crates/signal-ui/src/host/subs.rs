@@ -1,12 +1,13 @@
 //! Subscriptions: the parameter, meter, scope and vector streams and their
 //! rates.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use signal_core::{PortAddress, PortShape};
 use signal_graph::ExecutionPlan;
-use signal_output::{SCOPE_SLOTS, VECTOR_MAX_ROWS};
+use signal_output::{SCOPE_SLOTS, VECTOR_MAX_ROWS, VECTOR_SLOTS};
 
 use crate::frames::{self, frame};
 
@@ -105,6 +106,92 @@ pub(super) struct Sub {
     pub(super) stream: Stream,
 }
 
+/// The clients' subscriptions by id, the id the next one gets, the scope
+/// and vector slots they hold, and what the last `scopes` push said.
+pub(super) struct Subscriptions {
+    pub(super) by_id: BTreeMap<u32, Sub>,
+    pub(super) next: u32,
+    pub(super) scope_slots: [Option<u32>; SCOPE_SLOTS],
+    pub(super) vector_slots: [Option<u32>; VECTOR_SLOTS],
+    /// The free scope slots last pushed (`scopes`), and when they last rose.
+    pub(super) scopes_pushed: Option<usize>,
+    pub(super) scopes_freed: Option<Instant>,
+    /// A scope slot was released since the last `scopes` push.
+    pub(super) scopes_released: bool,
+}
+
+impl Default for Subscriptions {
+    fn default() -> Subscriptions {
+        Subscriptions {
+            by_id: BTreeMap::new(),
+            next: 1,
+            scope_slots: [None; SCOPE_SLOTS],
+            vector_slots: [None; VECTOR_SLOTS],
+            scopes_pushed: None,
+            scopes_freed: None,
+            scopes_released: false,
+        }
+    }
+}
+
+impl Subscriptions {
+    /// The subscription holding scope slot `slot`, and its client.
+    fn of_scope_slot(&self, slot: usize) -> Option<(u32, u64)> {
+        let sub = self.scope_slots.get(slot).copied().flatten()?;
+        self.by_id.get(&sub).map(|s| (sub, s.client))
+    }
+
+    /// The subscription holding vector slot `slot`, and its client.
+    fn of_vector_slot(&self, slot: usize) -> Option<(u32, u64)> {
+        let sub = self.vector_slots.get(slot).copied().flatten()?;
+        self.by_id.get(&sub).map(|s| (sub, s.client))
+    }
+
+    /// How many scope slots are free.
+    fn free_scopes(&self) -> usize {
+        self.scope_slots.iter().filter(|s| s.is_none()).count()
+    }
+
+    /// Client `client`'s subscriptions.
+    fn of_client(&self, client: u64) -> Vec<u32> {
+        self.by_id
+            .iter()
+            .filter(|(_, s)| s.client == client)
+            .map(|(&id, _)| id)
+            .collect()
+    }
+
+    /// Removes subscription `sub` and frees its slot (a scope slot's
+    /// release restarts `sinceFreedMs`); the slot is stopped by the caller.
+    fn remove(&mut self, sub: u32) -> Option<Sub> {
+        let removed = self.by_id.remove(&sub);
+        match &removed {
+            Some(Sub {
+                stream: Stream::Scope { slot, .. },
+                ..
+            }) => {
+                if let Some(s) = self.scope_slots.get_mut(*slot) {
+                    *s = None;
+                }
+                // Every release restarts the age, even if another client
+                // takes the slot before the next push.
+                self.scopes_freed = Some(Instant::now());
+                self.scopes_released = true;
+            }
+            Some(Sub {
+                stream: Stream::Vector { slot, .. },
+                ..
+            }) => {
+                if let Some(s) = self.vector_slots.get_mut(*slot) {
+                    *s = None;
+                }
+            }
+            _ => {}
+        }
+        removed
+    }
+}
+
 impl Host {
     pub(super) fn take_meters(&mut self) {
         for (meters, input) in [
@@ -112,7 +199,7 @@ impl Host {
             (std::mem::take(&mut self.inputs), true),
         ] {
             for m in &meters {
-                for sub in self.subs.values_mut() {
+                for sub in self.subs.by_id.values_mut() {
                     if let Stream::Meters {
                         input: wants,
                         levels,
@@ -137,10 +224,7 @@ impl Host {
 
     pub(super) fn take_blocks(&mut self) {
         for block in std::mem::take(&mut self.blocks) {
-            let Some(sub) = self.scope_slots.get(block.slot).copied().flatten() else {
-                continue;
-            };
-            let Some(client) = self.subs.get(&sub).map(|s| s.client) else {
+            let Some((sub, client)) = self.subs.of_scope_slot(block.slot) else {
                 continue;
             };
             let values = block.values();
@@ -162,10 +246,7 @@ impl Host {
     /// Vector frames (kind 4, M2.8-7): one per snapshot, its rows as `f32`.
     pub(super) fn take_snapshots(&mut self) {
         for snapshot in std::mem::take(&mut self.snapshots) {
-            let Some(sub) = self.vector_slots.get(snapshot.slot).copied().flatten() else {
-                continue;
-            };
-            let Some(client) = self.subs.get(&sub).map(|s| s.client) else {
+            let Some((sub, client)) = self.subs.of_vector_slot(snapshot.slot) else {
                 continue;
             };
             let values = snapshot.values();
@@ -192,7 +273,7 @@ impl Host {
             .as_ref()
             .map_or(0, |r| r.controller.status().next_frame.0);
         let mut out = Vec::new();
-        for (&id, sub) in &mut self.subs {
+        for (&id, sub) in &mut self.subs.by_id {
             if now.duration_since(sub.last) < sub.every {
                 continue;
             }
@@ -255,8 +336,8 @@ impl Host {
     pub(super) fn scopes_json(&self) -> Value {
         json!({
             "slots": SCOPE_SLOTS,
-            "free": self.scope_slots.iter().filter(|s| s.is_none()).count(),
-            "sinceFreedMs": self.scopes_freed.map(|at| at.elapsed().as_millis()),
+            "free": self.subs.free_scopes(),
+            "sinceFreedMs": self.subs.scopes_freed.map(|at| at.elapsed().as_millis()),
         })
     }
 
@@ -264,12 +345,12 @@ impl Host {
     /// changed since the last push, or a slot was released (`sinceFreedMs`
     /// restarted) though another was taken in the same step.
     pub(super) fn push_scopes(&mut self) {
-        let free = self.scope_slots.iter().filter(|s| s.is_none()).count();
-        let released = std::mem::take(&mut self.scopes_released);
-        if self.scopes_pushed == Some(free) && !released {
+        let free = self.subs.free_scopes();
+        let released = std::mem::take(&mut self.subs.scopes_released);
+        if self.subs.scopes_pushed == Some(free) && !released {
             return;
         }
-        self.scopes_pushed = Some(free);
+        self.subs.scopes_pushed = Some(free);
         let message = with(self.scopes_json(), "type", json!("scopes"));
         self.broadcast(&message);
     }
@@ -279,7 +360,7 @@ impl Host {
             return Err(powered_off());
         }
         let stream = message.get("stream").and_then(Value::as_str).unwrap_or("");
-        let id = self.next_sub;
+        let id = self.subs.next;
         let (stream, every, extra) = match stream {
             "parameters" => {
                 let addresses: Vec<String> = message
@@ -344,6 +425,7 @@ impl Host {
                 }
                 let decimation = scope_decimation(message, self.rate)?;
                 let slot = self
+                    .subs
                     .scope_slots
                     .iter()
                     .position(Option::is_none)
@@ -355,7 +437,7 @@ impl Host {
                 run.controller
                     .scope_start(slot, port.clone(), decimation)
                     .map_err(|e| fail("busy", e.to_string()))?;
-                if let Some(s) = self.scope_slots.get_mut(slot) {
+                if let Some(s) = self.subs.scope_slots.get_mut(slot) {
                     *s = Some(id);
                 }
                 (
@@ -387,6 +469,7 @@ impl Host {
                 let rate = rate_of(message, 60.0)?;
                 let decimation = vector_decimation(rate, self.rate, divisor);
                 let slot = self
+                    .subs
                     .vector_slots
                     .iter()
                     .position(Option::is_none)
@@ -397,7 +480,7 @@ impl Host {
                 run.controller
                     .vector_start(plan, slot, port.clone(), rows, decimation)
                     .map_err(|e| fail("busy", e.to_string()))?;
-                if let Some(s) = self.vector_slots.get_mut(slot) {
+                if let Some(s) = self.subs.vector_slots.get_mut(slot) {
                     *s = Some(id);
                 }
                 (
@@ -415,14 +498,14 @@ impl Host {
             }
             other => return Err(fail("bad-message", format!("no stream '{other}'"))),
         };
-        self.next_sub = self.next_sub.wrapping_add(1).max(1);
+        self.subs.next = self.subs.next.wrapping_add(1).max(1);
         let kind = match &stream {
             Stream::Parameters { .. } => "parameters",
             Stream::Meters { .. } => "meters",
             Stream::Scope { .. } => "scope",
             Stream::Vector { .. } => "vector",
         };
-        self.subs.insert(
+        self.subs.by_id.insert(
             id,
             Sub {
                 client,
@@ -448,7 +531,7 @@ impl Host {
             .and_then(Value::as_u64)
             .and_then(|s| u32::try_from(s).ok())
             .ok_or_else(|| fail("bad-message", "unsubscribe needs `sub`"))?;
-        match self.subs.get(&sub) {
+        match self.subs.by_id.get(&sub) {
             Some(s) if s.client == client => {}
             _ => return Err(fail("unknown-sub", format!("no subscription {sub}"))),
         }
@@ -457,18 +540,11 @@ impl Host {
     }
 
     pub(super) fn drop_sub(&mut self, sub: u32) {
-        match self.subs.remove(&sub) {
+        match self.subs.remove(sub) {
             Some(Sub {
                 stream: Stream::Scope { slot, .. },
                 ..
             }) => {
-                if let Some(s) = self.scope_slots.get_mut(slot) {
-                    *s = None;
-                }
-                // Every release restarts the age, even if another client
-                // takes the slot before the next push.
-                self.scopes_freed = Some(Instant::now());
-                self.scopes_released = true;
                 if let Some(run) = self.run.as_mut() {
                     let _ = run.controller.scope_stop(slot);
                 }
@@ -477,9 +553,6 @@ impl Host {
                 stream: Stream::Vector { slot, .. },
                 ..
             }) => {
-                if let Some(s) = self.vector_slots.get_mut(slot) {
-                    *s = None;
-                }
                 if let Some(run) = self.run.as_mut() {
                     let _ = run.controller.vector_stop(slot);
                 }
@@ -497,7 +570,7 @@ impl Host {
     pub(super) fn reshape_vectors(&mut self, restart: bool) {
         let plan = self.plan.as_ref();
         let mut told = Vec::new();
-        for (&sub, s) in &mut self.subs {
+        for (&sub, s) in &mut self.subs.by_id {
             let Stream::Vector {
                 slot,
                 port,
@@ -536,7 +609,7 @@ impl Host {
         let (Some(plan), Some(run)) = (self.plan.as_ref(), self.run.as_mut()) else {
             return;
         };
-        for sub in self.subs.values_mut() {
+        for sub in self.subs.by_id.values_mut() {
             if let Stream::Scope {
                 slot,
                 port,
@@ -565,13 +638,7 @@ impl Host {
     }
 
     pub(super) fn release(&mut self, client: u64) {
-        let subs: Vec<u32> = self
-            .subs
-            .iter()
-            .filter(|(_, s)| s.client == client)
-            .map(|(&id, _)| id)
-            .collect();
-        for sub in subs {
+        for sub in self.subs.of_client(client) {
             self.drop_sub(sub);
         }
     }

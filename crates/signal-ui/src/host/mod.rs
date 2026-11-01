@@ -47,7 +47,7 @@ use signal_audio::DeviceInfo;
 use signal_core::{PortAddress, Registry};
 use signal_engine::{CommandId, ParameterValue, Provenance, Report, RtOptions, RunnerStatus};
 use signal_graph::ExecutionPlan;
-use signal_output::{Controller, Meter, SCOPE_SLOTS, ScopeBlock, VECTOR_SLOTS, VectorSnapshot};
+use signal_output::{Controller, Meter, ScopeBlock, VectorSnapshot};
 use signal_project::Diagnostic;
 use signal_project::archive::TempProject;
 use signal_project::live::{FolderState, ProjectWatcher};
@@ -70,7 +70,7 @@ use live::{Failed, Pending};
 use project_io::SaveWait;
 use queue::Waiting;
 use run::{Muted, Run};
-use subs::Sub;
+use subs::Subscriptions;
 
 /// Client messages handled per step at most.
 const MESSAGES_PER_STEP: usize = 256;
@@ -224,10 +224,7 @@ pub struct Host {
     plan: Option<ExecutionPlan>,
     rate: u32,
     clients: Clients,
-    subs: BTreeMap<u32, Sub>,
-    next_sub: u32,
-    scope_slots: [Option<u32>; SCOPE_SLOTS],
-    vector_slots: [Option<u32>; VECTOR_SLOTS],
+    subs: Subscriptions,
     values: BTreeMap<PortAddress, ParameterValue>,
     reports: Vec<Report>,
     /// Instances muted since the last poll ([`Observed`]).
@@ -294,11 +291,6 @@ pub struct Host {
     /// lock, as another process's write landing then would.
     #[cfg(feature = "test-hooks")]
     before_lock: Option<Box<dyn FnMut() + Send>>,
-    /// The free scope slots last pushed (`scopes`), and when they last rose.
-    scopes_pushed: Option<usize>,
-    scopes_freed: Option<Instant>,
-    /// A scope slot was released since the last `scopes` push.
-    scopes_released: bool,
     /// App mode, stopped and switched on: the project folder's watch, for
     /// the `graph` push (a run has its own), and when it was last polled.
     idle_watch: Option<(ProjectWatcher, Instant)>,
@@ -494,10 +486,7 @@ impl Host {
             plan: None,
             rate: 0,
             clients: Clients::default(),
-            subs: BTreeMap::new(),
-            next_sub: 1,
-            scope_slots: [None; SCOPE_SLOTS],
-            vector_slots: [None; VECTOR_SLOTS],
+            subs: Subscriptions::default(),
             values: BTreeMap::new(),
             reports: Vec::new(),
             muted: Vec::new(),
@@ -530,9 +519,6 @@ impl Host {
             reloads: 0,
             #[cfg(feature = "test-hooks")]
             before_lock: None,
-            scopes_pushed: None,
-            scopes_freed: None,
-            scopes_released: false,
             idle_watch: None,
             keys,
             keys_stamp,

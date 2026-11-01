@@ -667,7 +667,7 @@ impl Host {
             }
         }
         let mut bound = Vec::new();
-        for (&sub, s) in &mut self.subs {
+        for (&sub, s) in &mut self.subs.by_id {
             if let Stream::Scope {
                 slot, bound: was, ..
             } = &mut s.stream
@@ -700,7 +700,7 @@ impl Host {
             // Why a vector stream is unbound (M2.8-9): its port's width, or
             // its decimation off the port's ticks in the running plan.
             if vector && !now {
-                let slot = self.subs.get(&sub).and_then(|s| match &s.stream {
+                let slot = self.subs.by_id.get(&sub).and_then(|s| match &s.stream {
                     Stream::Vector { slot, .. } => Some(*slot),
                     _ => None,
                 });
