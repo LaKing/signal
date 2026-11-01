@@ -257,11 +257,12 @@ impl Host {
         self.panel = Panel::new(&project, &self.registry);
         self.refresh_warnings();
         self.play_carried(carried.clone());
-        let mut notes = Vec::new();
+        // ADR 0038 §6 (M4.1): this project's devices.local.toml over the Setup.
+        let (setup, mut notes) = crate::devices::effective_setup(&self.setup, &self.dir);
         let started = app::start(
             &self.backend,
             &self.devices,
-            &self.setup,
+            &setup,
             &self.registry,
             &project,
             plan,

@@ -13,7 +13,7 @@ use signal_engine::{
     SentCommand,
 };
 use signal_graph::ExecutionPlan;
-use signal_output::{Controller, Meter, NullDriver, VectorUnbound, realtime_with};
+use signal_output::{Controller, Meter, NullDriver, VectorUnbound, realtime_routed};
 use signal_project::live::{Both, ProjectWatcher};
 use signal_project::session::{LiveRecorder, SessionRecorder, sink_of};
 use signal_project::{LoadError, Project, located};
@@ -428,7 +428,11 @@ impl Host {
         plan.version = 0;
         let (_, width) = sink_of(&project, &plan).map_err(|d| joined(located(dir, d)))?;
         let seed = project.seed;
-        let mut notes = Vec::new();
+        // ADR 0038 (M4.1): several play sides, or roles the Setup binds
+        // (devices.local.toml over it), are routed by `crate::devices`.
+        let (setup, mut notes) = crate::devices::effective_setup(&self.setup, dir);
+        let sides = signal_project::device::play_sides(&project, &plan);
+        let routed = crate::devices::routed(&setup, sides.len());
         // ADR 0036: the run plays at the rate the output runs at, never
         // switching it (the owner's decision of 2026-10-23).
         let (rate, notice) = match (&self.backend, first) {
@@ -460,7 +464,40 @@ impl Host {
             ),
         };
         notes.extend(notice);
-        let (mut output, buffer, threads) = if first {
+        let mut sinks = Vec::new();
+        let mut width = width;
+        let (mut output, buffer, threads) = if routed {
+            let mut setup = setup.clone();
+            if first {
+                setup.output = self
+                    .first
+                    .device
+                    .clone()
+                    .map(|name| crate::setup::DeviceEntry {
+                        name,
+                        id: None,
+                        signature: String::new(),
+                    });
+                setup.buffer = self.first.buffer;
+            }
+            let (output, routing) = crate::player::open_routed(
+                &self.backend,
+                &self.devices,
+                &setup,
+                rate,
+                &sides,
+                seed,
+                &mut notes,
+            )?;
+            sinks = routing.addresses();
+            width = routing.width();
+            let threads = if first {
+                self.first.threads
+            } else {
+                self.setup.cpu_workers.unwrap_or(0)
+            };
+            (output, setup.buffer, threads)
+        } else if first {
             let output = match &self.backend {
                 Backend::CoreAudio => Output::Device(Box::new(
                     CoreAudioDriver::open(
@@ -508,11 +545,12 @@ impl Host {
             config.engine.record_boundary_data = true;
             config.boundary_data = (rate as usize).saturating_mul(latent.max(1));
         }
-        let (mut runner, controller) = realtime_with(
+        let (mut runner, controller) = realtime_routed(
             &plan,
             &self.registry,
             config,
             Some(rt_thread::mach_semaphores),
+            &sinks,
         )
         .map_err(|e| e.to_string())?;
         runner.set_ceiling(self.ceiling);

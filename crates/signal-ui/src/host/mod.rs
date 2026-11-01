@@ -603,6 +603,17 @@ impl Host {
         }
     }
 
+    /// The null driver's channels per frame (what `run_null` captures), if
+    /// the run plays on it: a routed run's (ADR 0038) may be wider than its
+    /// main sink.
+    pub fn null_channels(&mut self) -> Option<usize> {
+        use signal_output::Driver;
+        self.run
+            .as_mut()
+            .and_then(|r| r.output.null())
+            .map(|d| d.channels())
+    }
+
     /// Null input only: one input callback of `data`.
     pub fn push_input(&mut self, data: &[f32]) -> Result<(), String> {
         match self.run.as_mut().and_then(|r| r.input.as_mut()) {
@@ -840,6 +851,9 @@ impl Host {
             "setup.devices" => self.setup_devices(message).map(Some),
             "setup.check" => self.setup_check(message).map(Some),
             "setup.apply" => self.setup_apply(message).map(Some),
+            // ADR 0038 (M4.1): the binding is written by `crate::devices`.
+            "device.route" => self.device_route(message, true).map(Some),
+            "device.unroute" => self.device_route(message, false).map(Some),
             "keys.get" => Ok(Some(self.keys.message())),
             "keys.set" => self.keys_set(message).map(Some),
             "keys.reset" => self.keys_reset(message).map(Some),

@@ -157,7 +157,39 @@ impl Host {
             "cpuWorkers": self.setup.cpu_workers,
             "outputChannels": self.setup.output_channels,
             "rtPolicy": self.setup.rt_policy.name(),
+            // ADR 0038 (M4.1, additive): every role the Setup binds.
+            "play": crate::devices::play_json(&self.setup),
         })
+    }
+
+    /// `device.route`, `device.unroute` (ADR 0038, M4.1): `crate::devices`
+    /// writes the binding (the Setup in memory, or `devices.local.toml`);
+    /// then as `setup.apply` with nothing else changed: the Setup saved and,
+    /// while playing, the run played again from frame 0 with it.
+    pub(super) fn device_route(&mut self, message: &Value, route: bool) -> Result<Value, Failure> {
+        if self.recording && self.run.is_some() {
+            return Err(fail(
+                "recording",
+                "a run that records a session or its audio is not rebound (a recording covers one run from frame 0)",
+            ));
+        }
+        let dir = self.dir.clone();
+        let routed = if route {
+            crate::devices::route(message, &mut self.setup, Some(&dir))
+        } else {
+            crate::devices::unroute(message, &mut self.setup, Some(&dir))
+        }
+        .map_err(|refused| fail(refused.code, refused.message))?;
+        let reply = self.setup_apply(&json!({}))?;
+        let scope = match routed.scope {
+            crate::devices::Scope::Machine => "machine",
+            crate::devices::Scope::Project => "project",
+        };
+        Ok(with(
+            reply,
+            "routed",
+            json!({"role": routed.role, "scope": scope, "notes": routed.notes}),
+        ))
     }
 
     fn run_json(&self) -> Value {
@@ -180,6 +212,8 @@ impl Host {
             "type": "setup",
             "path": self.setup_path.display().to_string(),
             "setup": self.setup_json(),
+            // ADR 0038 §6 (M4.1, additive): this project's devices.local.toml.
+            "local": crate::devices::local_json(&self.dir),
             "problems": self.setup_problems,
             "playing": self.run.is_some(),
             "run": self.run_json(),

@@ -89,6 +89,12 @@ pub(crate) fn run(
         }
     };
     check(play)?;
+    if !play.route.is_empty() {
+        return Err(Failure::Usage(
+            "signal ui routes roles with the Setup's [play.<role>] (--setup, docs/project-format.md §9); --route is signal play's"
+                .to_owned(),
+        ));
+    }
     let null = play.driver == DriverKind::Null;
     let played = Played {
         project: &play.project,
@@ -188,6 +194,8 @@ pub(crate) fn run(
     // An output the audio system stopped ends the run: what it recorded is
     // still written, and the command then fails with the reason.
     let fault = host.output_fault().map(str::to_owned);
+    // ADR 0038: a routed run's frame may be wider than its main sink.
+    let width = host.null_channels().unwrap_or(width);
     let Some(finished) = host.finish() else {
         return Ok(());
     };
