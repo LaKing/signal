@@ -294,7 +294,12 @@ impl Files {
                         .read()
                         .unwrap_or_else(PoisonError::into_inner)
                         .clone();
-                    file(&project, rest).or_else(|| {
+                    // A linked `ui/` would make its target the trusted
+                    // root: it is not served (the generated panel stands in
+                    // for its main.html), as the host never writes it.
+                    let linked = fs::symlink_metadata(&project)
+                        .is_ok_and(|m| m.file_type().is_symlink());
+                    (!linked).then(|| file(&project, rest)).flatten().or_else(|| {
                         (rest == MAIN_PANEL)
                             .then(|| file(&self.ui, DEFAULT_PANEL))
                             .flatten()
@@ -575,6 +580,48 @@ mod tests {
         assert_eq!(files.respond(&post).status, 405);
         let other = parse(b"GET / HTTP/1.1\r\nHost: example.com:8").unwrap();
         assert_eq!(files.respond(&other).status, 403);
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Review 2026-11-01 (linked-ui-serves-any-file): a project whose `ui/`
+    /// is a link to a folder outside it serves nothing from there (404), its
+    /// main.html the generated panel; a link inside `ui/` that leaves it is
+    /// refused too, as before.
+    #[test]
+    fn a_linked_ui_folder_is_not_served() {
+        let base = std::env::temp_dir().join(format!("signal-ui-http-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("outside")).unwrap();
+        fs::create_dir_all(base.join("project")).unwrap();
+        fs::create_dir_all(base.join("own/ui")).unwrap();
+        fs::write(base.join("outside/secret.txt"), "private").unwrap();
+        fs::write(base.join("outside/main.html"), "<p>outside</p>").unwrap();
+        std::os::unix::fs::symlink(base.join("outside"), base.join("project/ui")).unwrap();
+        std::os::unix::fs::symlink(base.join("outside/secret.txt"), base.join("own/ui/leak.txt"))
+            .unwrap();
+        fs::write(base.join("own/ui/fine.txt"), "fine").unwrap();
+        let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui");
+        let files = |project: &str| Files {
+            ui: ui.clone(),
+            project: Arc::new(RwLock::new(base.join(project).join("ui"))),
+            port: 8,
+            remote: false,
+        };
+        let get = |files: &Files, path: &str| {
+            let head = format!("GET {path} HTTP/1.1\r\nHost: localhost:8");
+            files.respond(&parse(head.as_bytes()).unwrap())
+        };
+        let linked = files("project");
+        assert_eq!(get(&linked, "/project/secret.txt").status, 404);
+        let main = get(&linked, "/project/main.html");
+        assert_eq!(main.status, 200);
+        match main.body {
+            Body::File(_, length) => assert_ne!(length, "<p>outside</p>".len() as u64),
+            Body::Text(_) => panic!("a file"),
+        }
+        let own = files("own");
+        assert_eq!(get(&own, "/project/fine.txt").status, 200);
+        assert_eq!(get(&own, "/project/leak.txt").status, 404);
         fs::remove_dir_all(&base).unwrap();
     }
 
