@@ -10,18 +10,21 @@
 //     and other Stacks fade to SURROUND as the Stack comes to fill the stage;
 //   - Stack, from the fit: the Stack fills the stage's width and the wheel
 //     scrolls it vertically;
-//   - the wiring band (WIRING_BAND, 1.5× to 2× the fit, tunable): a
-//     cross-fade in place from the front panels to the Wiring level, the
-//     back of the rack (ui/lib/plane-wiring.js);
-//   - the control band (CONTROL_BAND): the instrument under the zoom point
-//     opens into its Control plane (ui/lib/plane-control.js), the others
-//     fade to SURROUND;
+//   - the wiring band (WIRING_BAND, in depth `z`, tunable): at the fit,
+//     zooming on first deepens the view by LIFT without changing its scale
+//     (`depthOf`), a cross-fade in place from the front panels to the
+//     Wiring level, the back of the rack (ui/lib/plane-wiring.js), with the
+//     Stack's whole width on stage;
+//   - the control band (CONTROL_BAND, in `z`, past the lift, where the
+//     scale grows again): the instrument under the zoom point opens into
+//     its Control plane (ui/lib/plane-control.js), the others fade to
+//     SURROUND;
 //   - the engine band (`engineBand`, from the cube's size): the cube's
 //     Engine, ADR 0047's board and its die zoom, fades in laid on the cube
 //     (`frameOnto`), past which the board has the input.
 // The rectangles never move: the levels are nested footprints.
-// One curve in and out, no timer: the opacities are functions of `r` only,
-// monotonic, exactly 0 and 1 at a band's ends. View state only (rule 4).
+// One curve in and out, no timer: the opacities are functions of the depth
+// `z` only (`r` below the fit), monotonic, exactly 0 and 1 at a band's ends. View state only (rule 4).
 // Pure; no DOM.
 
 import { SURROUND } from './board-zoom.js';

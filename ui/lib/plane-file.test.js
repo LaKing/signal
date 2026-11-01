@@ -115,6 +115,9 @@ test('what the file gets wrong is an error naming it', () => {
   assert.match(errors('schema_version = 1\n[[stack]]\nname = "a"\nat = [1]\ninstruments = []\n')[0], /at must be two whole numbers/);
   assert.match(errors('schema_version = 1\n[[stack]]\nname = "a"\nat = [1.0, 2]\ninstruments = []\n')[0], /at must be two whole numbers/, 'a float, as the server reads it');
   assert.deepEqual(errors('schema_version = 1\n[[stack]]\nname = "a"\nat = [1, 2]\ninstruments = []\n[[stack]]\nname = "b"\ninstruments = []\n'), [], 'another Stack is not judged by this one');
+  // A comment naming [[stack]] shifts no Stack: each `at` is judged by its own tokens, never by a split of the text.
+  assert.deepEqual(errors('# one [[stack]] per Stack\nschema_version = 1\n[[stack]] # the first [[stack]]\nname = "a"\nat = [1, 2]\ninstruments = []\n[[stack]]\nname = "b"\nat = [3, 4] # [[stack]]\ninstruments = []\n'), []);
+  assert.deepEqual(errors('# [[stack]]\nschema_version = 1\n[[stack]]\nname = "a"\nat = [1, 2]\ninstruments = []\n[[stack]]\nname = "b"\nat = [3.0, 4]\ninstruments = []\n'), ['plane.toml: stack 2: at must be two whole numbers of pu, [x, y], each within ±1000']);
   assert.match(errors('schema_version = 1\n[[stack]]\nname = "a"\n')[0], /instruments is missing/);
   assert.match(errors('schema_version = 1\n[[stack]]\nname = "a"\ninstruments = [1]\n')[0], /instruments must be an array of names/);
   assert.match(errors('schema_version = 1\n[[stack]\n')[0], /^plane\.toml: line \d+: "\]\]" expected/);

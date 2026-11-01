@@ -254,8 +254,13 @@ pub fn check(file: &str, text: &str, cards: &[String], slots: &[String]) -> Vec<
     let slot_names: BTreeSet<&str> = slots.iter().map(String::as_str).collect();
     let mut names = BTreeSet::new();
     let mut seen: BTreeMap<String, String> = BTreeMap::new();
-    // Each [[stack]] header's offset, in order, so a Stack's findings point at it.
-    let headers: Vec<usize> = text.match_indices("[[stack]]").map(|(i, _)| i).collect();
+    // Each [[stack]] header's offset, in order, so a Stack's findings point
+    // at it: a header begins its line, so a comment naming one is none.
+    let headers: Vec<usize> = text
+        .match_indices("[[stack]]")
+        .map(|(i, _)| i)
+        .filter(|&i| text[..i].rsplit('\n').next().is_some_and(|before| before.trim().is_empty()))
+        .collect();
     for (i, stack) in stacks.iter().enumerate() {
         let Some(stack) = stack.as_table() else {
             continue;
@@ -467,5 +472,13 @@ mod tests {
             check("ui/plane.toml", "[[stack]\n", &cards, &slots).len(),
             1
         );
+    }
+
+    #[test]
+    fn a_comment_naming_a_stack_header_shifts_no_finding() {
+        let text = "# one [[stack]] per Stack\nschema_version = 1\n[[stack]] # [[stack]]\nname = \"a\"\ninstruments = []\n[[stack]]\nname = \"b\"\nwidth = 0\ninstruments = []\n";
+        let found = check("ui/plane.toml", text, &[], &[]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].diagnostic.line, 6, "at the second Stack's header");
     }
 }

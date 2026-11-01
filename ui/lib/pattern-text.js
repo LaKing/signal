@@ -44,9 +44,17 @@ const I64_MAX = 2n ** 63n - 1n;
 /** The keys of each parsed table whose value was written as an integer (`60`, not `60.0`). */
 const INTEGER_KEYS = new WeakMap();
 
+/** The parsed arrays every item of which was an integer token. */
+const INTEGER_ARRAYS = new WeakSet();
+
 /** Whether `map`'s `key` was an integer token in the text (TOML tells integers from floats). */
 export function isIntegerToken(map, key) {
   return INTEGER_KEYS.get(map)?.has(key) ?? false;
+}
+
+/** Whether parsed array `value` was written with integer tokens only (`[1, 2]`, not `[1.0, 2]`); an empty one is. */
+export function isIntegerArray(value) {
+  return Array.isArray(value) && INTEGER_ARRAYS.has(value);
 }
 
 /** Sets `key` in `table` from the reader's next value, remembering an integer token. */
@@ -232,16 +240,23 @@ class Reader {
   array() {
     this.next();
     const items = [];
+    let integers = true;
+    const done = () => {
+      if (integers) INTEGER_ARRAYS.add(items);
+      return items;
+    };
     for (;;) {
       this.skipAll();
       if (this.peek() === ']') {
         this.next();
-        return items;
+        return done();
       }
+      this.lastInteger = false;
       items.push(this.value());
+      integers &&= this.lastInteger;
       this.skipAll();
       const c = this.next();
-      if (c === ']') return items;
+      if (c === ']') return done();
       if (c !== ',') this.fail('"," or "]" expected in an array');
     }
   }

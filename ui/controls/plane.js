@@ -14,8 +14,10 @@
 //   - **Stack**: a click on a Stack's header, Enter, or zooming until it
 //     fills the stage fits its width; the wheel then scrolls it vertically,
 //     and the Setup's cables, peripherals and other Stacks fade to SURROUND;
-//   - **Wiring** (phase 2): past the Stack, in the wiring band (1.5× to 2×
-//     its fit), a cross-fade in place to the back of the rack: each
+//   - **Wiring** (phase 2): zooming on at the Stack's fit, in the wiring
+//     band (WIRING_BAND, in depth: the view deepens by LIFT at the fit's
+//     scale, so the whole width stays on stage), a cross-fade in place to
+//     the back of the rack: each
 //     instrument a box in its own rectangle, its ports derived from the
 //     connections that cross it, the cables between instruments in channels
 //     and rails (ui/lib/plane-wiring.js). Patch cables are edited here
@@ -79,7 +81,7 @@ import { bindAddresses } from './base.js';
 const SVG = 'http://www.w3.org/2000/svg';
 /** The theme every panel links. */
 const THEME = new URL('./theme.css', import.meta.url).href;
-/** Keys that zoom and scroll, about the centre. */
+/** The factor of one zoom key (`plane.zoom_in`, `plane.zoom_out`), about the stage's centre. */
 const KEY_ZOOM = 1.25;
 /** Where the list of other devices' expanded state is kept, per viewer (localStorage; view state, never the project's). */
 const OTHERS_KEY = 'signal.plane.otherDevices';
