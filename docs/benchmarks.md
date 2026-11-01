@@ -1068,3 +1068,97 @@ After the review fix that visits only the modes whose inputs changed (a `gain` c
 | every parameter and row modulated (probe) | 1527 | 4906 |
 
 The worst case is about 77 ns per mode and frame: 64 fully modulated modes take about 4.6–5.1 µs per frame, a quarter of the frame at 48 kHz and about nine tenths of it at 192 kHz (5.2 µs) on one core. `COST_NS` (956) is per type, the bench's 16 modes with modulated rows; a 64-mode bank with every parameter modulated costs about five times it, so the schedule's estimate is low for such a bank. The fix of that review caches `r_k^law` (keyed on `r_k` and `law`) and `k^b` (keyed on `brightness`) apart from the rest of `ρ_k` and `a_k`, so `decay_s`, `damping_tilt` or `mode_decay` alone costs one `pow` per mode instead of two, and `position` alone a `sin` instead of a `sin` and a `pow`: bit-identical, since the same expressions are evaluated. **Decided against:** a control-rate recompute (every N frames, interpolating the coefficients in between) changes the output of any bank whose parameters move, which the bank's per-frame formula and the existing renders fix, and per-frame interpolation of `ρ·cos θ` is not the coefficient of the interpolated frequency, so it is neither simple nor exact; and `exp(x·ln 10)` for `pow(10, x)` rounds differently, so it would change the radius of static settings and the goldens. The per-frame recompute stays.
+
+## Clock adapter (ADR 0052 phase 1)
+
+The clock adapter (`crates/signal-output/src/adapter/`, ADR 0052 §2–4) measured offline, no device: the converter's quality by sine fits and FFT (`tests/adapter_quality.rs`), the drift loop in the fake-clock harness (`tests/adapter_clocks.rs`, `tests/adapter_support/harness.rs`), and its allocations (`tests/adapter_no_allocation.rs`). The DSP and loop figures are **deterministic** (computed, seeded virtual time): any machine gives the same. Only the cost row is a timing. Reproduce:
+
+```sh
+cargo test -p signal-output --release --offline --test adapter_quality -- --ignored --nocapture
+cargo test -p signal-output --release --offline --test adapter_clocks -- --ignored --nocapture --skip trace
+```
+
+The normal suite (`cargo test --workspace`) runs a short version of each and asserts the targets; the `#[ignore]`d runs print the tables below.
+
+**The harness** (verification 1). Virtual time; the engine producer pushes its period at exactly *f*ₛ; the fake device pulls its period at *f*_d × (1 + ε). **Jitter ±0.5 device period:** each device callback runs between its time stamp and one period after it, uniformly (seeded); a callback carries its ideal time as its host time stamp, as a CoreAudio I/O cycle's time stamp is the device clock's, and never runs before it. The stamps are exact unless noted. Period pairs 128/128, 128/512, 64/441 (48 → 44.1 kHz) and 512/64; ε ∈ {0, ±20, ±100, ±300} ppm.
+
+Run 2026-11-01 in a devpanel worktree on the operator's Mac Studio (M5 Max), at commit "clock adapter fixes from the second-opinion review"; the load average was about 14 (other sessions, a workspace test run), which affects only the cost row.
+
+### The converter (verification 2)
+
+Sine fits at the exact fixed-point output frequency (the residual is everything but the tone) and a flat-top FFT of the residual, 61 log-spaced tones 20 Hz–20 kHz at −1 dBFS, 32 768 output frames each:
+
+| Ratio | Taps | Worst gain deviation to 20 kHz (dB) | Worst residual, any tone (dB) | Worst spur (dB), at tone → spur | THD+N, 1 kHz −1 dBFS (dB) | Impulse vs group delay (frames) |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 (fraction 0.37) | 96 | 0.00002 | −135.7 | −138.2, 20 000 → 12 000 Hz | −135.3 | +0.09 |
+| 1 + 100 ppm | 96 | 0.00002 | −119.9 | −123.6, 20 000 → 17 544 Hz | −136.0 | −0.07 |
+| 1 − 100 ppm | 96 | 0.00002 | −119.9 | −123.6, 20 000 → 22 456 Hz | −136.0 | +0.07 |
+| 48 → 44.1 kHz | 160 | 0.00003 | −117.5 | −121.0, 20 000 → 16 100 Hz | −129.4 | −0.07 |
+| 44.1 → 48 kHz | 160 | 0.00003 | −118.4 | −121.9, 20 000 → 800 Hz | −131.9 | −0.03 |
+| **Target (§4)** | | ≤ ±0.01 | | ≤ −100 | ≤ −100 | ±1 |
+
+- **Rejection beyond the lower Nyquist frequency** (48 → 44.1 kHz, input tones beyond 22.05 kHz, all output against the input): 105.9 dB at 22.1 kHz, 123.9 at 22.5, 115.7 at 23, 115.4 at 23.5, 114.3 at 23.95 kHz (target ≥ 100). 44.1 → 48 kHz images of tones in the transition band: largest other component −116.5 dB (22 kHz tone, image at 22.1 kHz) to −126.6 dB.
+- **The prototypes** (the continuous Kaiser-windowed sinc, transformed at 1/512-frame steps): passband ripple 0.000008 dB (96 taps), 0.000051 dB (160 taps, 48 → 44.1), 0.000018 dB (160 taps, 44.1 → 48); stopband −121.0, −105.7 and −114.6 dB, Kaiser's formula having predicted 121.7, 105.5 and 114.1 dB (β 12.45, 10.67, 11.62).
+- **Phase interpolation at 512 phases** (interpolated coefficients against the exact normalised response, 200 000 fractions): worst root-sum-square error −115.5 dB (96 taps), −116.3 and −114.5 dB (160 taps); worst sum of absolute errors −104.4, −104.1, −102.2 dB. **Against the ADR's assumption** ("below the stopband"): below the 48 → 44.1 kHz stopband (−105.7), level with the 44.1 → 48 kHz one (−114.6), and about 5 dB **above** the 96-tap one (−121.0). Every end-to-end figure above still meets its target; 1024 phases would buy about 12 dB.
+- **Group delay.** The filter is symmetric about the read position: an impulse comes out where the read position passes it (±0.1 frame). Its lookahead, half the taps (48 or 80 source frames), is part of F*.
+- Equal nominal rates at 44.1 kHz keep the 20 kHz passband, so their transition (20–22.05 kHz) and taps (160) are the 44.1 ↔ 48 kHz ones; at 48 kHz and above, 96.
+
+### The drift loop (verifications 1 and 3)
+
+All 28 runs (4 period pairs × 7 clock errors, 300 simulated seconds each, track statistics from 60 s after the switch to track): **zero slips, zero drops.**
+
+| Clock error | Lock, \|e\| ≤ 2 (s) | Track from (s) | Peak \|e\| before track (frames) | Mean \|e\| in track (frames) | Ratio jitter in track (ppm rms) |
+|---|---:|---:|---:|---:|---:|
+| 0 | 0.00 | 2.0 | 0.00 | 0.0000 | ≤ 0.0001 |
+| ±20 ppm | 0.00 | 6.0 | 0.39 | 0.0000 | 0.0001 |
+| ±100 ppm | 0.00 | 6.0 | 1.93 | 0.0000 | 0.0003 |
+| ±300 ppm | 2.40 | 8.8 | 6.63 | 0.0000 | 0.0001 |
+| **Target** | ≤ 5 (\|ε\| ≤ 100) | | | ≤ 0.5 | ≤ 0.5 |
+
+The four period pairs agree to within 0.03 s and 0.02 frames (`every_pair_locks_and_tracks_full` prints every row). "Lock" is the ADR's criterion, the last time \|e\| left ±2 frames: within ±100 ppm it never does (the ADR estimated an excursion of about 4 frames; measured 1.93). Track starts 2 s after the fill has also settled (phase 1's lock-rate rule).
+
+- **The ramp** 0 → 50 ppm over 10 minutes, every pair: zero slips, mean \|e\| 0.23 frames, correction minus the needed one 0.058 ppm rms, 0.32 ppm at most.
+- **Exact stamps make these figures ideal.** With noise on every host time stamp (uniform), ratio jitter in track: ±50 µs: 0.37–0.43 ppm (128/128), 0.59–0.79 ppm (the others); ±200 µs: 1.4–3.0 ppm, lock after 7–60 s; never a slip. The stamps' real noise is phase 2's measurement; above about ±30 µs the 0.5 ppm target needs a longer track τ.
+
+**The fill estimate and the slew limit compared** (`fill_estimates_compared`, 300 s per run):
+
+| Variant | Result |
+|---|---|
+| Linearised fill (phase 1) | All pairs at 0, +100, +300 ppm lock; mean \|e\| 0.000; ratio jitter 0.000 ppm; 0 slips |
+| Raw fill, τ = 0.5 s (ADR §2 as written) | Only 128/128 at 0 ppm reaches track. Otherwise never: mean \|e\| 1.7–212 frames, ratio jitter up to 453 ppm rms, and with device periods of 441 or 512 frames 110–243 slips in 300 s |
+| Acquire slew limited to 20 ppm/s (ADR §2 as written) | Lock after 15.3–15.4 s at 100 ppm, 24–184 s at 300 ppm, 1–2 slips at 300 ppm |
+
+**Stress beyond the ADR's harness** (`jitter_stress`, asserting nothing): callbacks that may run up to half a period **before** their stamp (the stamp at the centre of the jitter) slip thousands of times in 300 s with device periods of 441 or 512 frames (their early half period, 220–256 frames, exceeds J + half a source period), J widening to its 3 ms limit; and a jittered producer (±0.5 of its period too, so up to a whole period late) slips 0–1 429 times, worst with the 512-frame producer. **J = 1–3 ms holds only while a callback's lateness relative to its stamp stays within J plus half the source period.** Phase 2 measures the devices' real lateness and stamp noise.
+
+### No drift accumulates (verification 4)
+
+One simulated hour (172.8 M frames, 1 350 136 pulls) at +100 ppm, jitter on, a marker impulse every minute: **zero slips**; the 59 markers after the first arrive between 287.986 and 287.988 frames (spread 0.002 frames, target ±1), and the reported latency is 288.0 frames. The final correction is −99.990 ppm (needed: 1/(1 + 10⁻⁴) − 1 = −99.990 ppm).
+
+**Latency.** F* is the mean fill, ring plus unread history (352 frames, 7.33 ms at 48 kHz with 128/128 periods). A frame waits F* from its push to its read, and is pushed half a source period after its own time on average, so the adapter's latency from a frame's time is **F* − source period / 2: 288 frames, 6.0 ms** (`AdapterOutput::latency_frames`). The ADR's "F* + the converter's group delay" counted the group delay twice: F* already includes the filter's half length.
+
+### Splices (verification 5, the splices only)
+
+A 440 Hz sine at 128/128 periods, splatter (energy above 2 kHz in a Hann-windowed 4096-frame window centred on the splice) against a hard cut to silence at the same frame: **repeat −72.0 dB, skip −93.4 dB, stop (the producer gone) −61.2 dB** (target ≥ 40 dB below). A sine is the aligned splices' best case; material that does not correlate gets an equal-power crossfade over the frames the old head has left, at least J. Without alignment, and with the splice taken only when the frames ran out (the first implementation), the review measured fade-outs of 1–32 frames. Unplugging, time skips, the ε step to 2000 ppm, sleep and the resync and clock-suspect states (§6) are not in phase 1.
+
+### Allocation and cost (verification 6)
+
+- `adapter_no_allocation.rs`: no heap call in `push` or `pull` on any path (startup, steady, repeats, skips, an empty ring and its refill, a full ring dropping frames, pulls longer than a piece; at 48/48, 48 → 44.1 and 44.1 → 48 kHz, stereo; and on two threads). The adapter's sources name no lock, sleep, park, clock or print.
+- **Worst case per pull piece** (`worst_case_multiply_adds`): two heads × `max_pull` × taps × (1 + channels), plus an alignment's (splice + 1) × 2 × splice × channels. At 2 channels, 128 frames and 160 taps one head is 61 440 (the ADR's 41 000 left out the coefficient interpolation); an alignment at 48 kHz (240 frames) is 231 360.
+- **Cost** (a timing, under load 14): 47.9 ns per stereo output frame at 96 taps (6.1 µs per 128-frame callback, 12.3 µs during a crossfade), 103.6 ns at 160 taps (13.3 and 26.5 µs). An earlier run under less load measured 53.2 and 112.6 ns. The ADR estimated "tens of microseconds per callback".
+
+### ADR 0052's numbers: assumption or measurement
+
+| ADR number | Was | Now |
+|---|---|---|
+| Crystals differ by up to ±100 ppm | Assumption | Still an assumption (devices, phase 2); the loop is tested to ±300 ppm and clamps at ±1000 |
+| Loop: ζ 0.7, ω 0.2 / 0.02 Hz, Kp, Ki | Design | Measured as above; kept |
+| τ = 0.5 s | Design | Kept in track; acquire 0.1 s (damping about 0.24 → 0.7) |
+| Slew 20 ppm/s | Design | Kept in track; acquire 400 ppm/s (20 ppm/s locks a 100 ppm device after 15 s) |
+| Lock: \|e\| ≤ 2 frames for 2 s | Design | Kept, plus the fill steady over the 2 s (0.05 frames/s) |
+| Acquire excursion about 4 frames at 100 ppm | Estimate | 1.93 frames |
+| Fill as the controlled quantity, raw | Design | Linearised from the host stamps; the raw fill fails the harness |
+| 96 / 160 taps, 512 phases, targets of §4 | Design | Every target met; the phase interpolation error is above the 96-tap stopband (the ADR assumed below) |
+| F* = 352 frames, about 7.3 ms (48 kHz, 128/128) | Computed | Mean fill as computed; latency from a frame's time 288 frames, 6.0 ms |
+| J = 1 ms, widened to 3 ms after slips | Assumption | Enough for the harness (lateness up to one device period after the stamp); not for callbacks running before their stamp or a jittered producer; phase 2 measures |
+| About 41 000 multiply-adds per callback (2 ch, 128 frames, 160 taps) | Estimate | 61 440 per head; 6–27 µs per callback measured |
+| Splice crossfades of 5 ms | Design | 5 ms when the old head has the frames, else at least J, aligned by correlation |
