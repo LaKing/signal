@@ -113,7 +113,7 @@ impl Host {
             ));
         }
         let positions_path = self.opening.dir.join(SCHEMATIC_FILE);
-        let positions = match fs::read_to_string(&positions_path) {
+        let positions = match signal_project::read_regular_to_string(&positions_path) {
             Ok(text) => Some(text),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(fail("write-failed", format!("{SCHEMATIC_FILE}: {error}"))),
@@ -347,7 +347,9 @@ impl Host {
         let lock = writer
             .lock()
             .map_err(|e| fail("write-failed", format!("{file} was not written: {e}")))?;
-        let now = fs::read(&path).ok().map(|bytes| sha256_hex(&bytes));
+        let now = signal_project::read_regular(&path)
+            .ok()
+            .map(|bytes| sha256_hex(&bytes));
         if now.as_deref() != Some(base) {
             return Err(fail_with(
                 "conflict",
@@ -358,7 +360,7 @@ impl Host {
         // The positions the patch was built on are still the file's: a
         // `schematic.move` from elsewhere meanwhile is a conflict, never lost.
         if patched.positions_changed {
-            let now = match fs::read_to_string(&positions_path) {
+            let now = match signal_project::read_regular_to_string(&positions_path) {
                 Ok(text) => Some(text),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => {
@@ -430,7 +432,9 @@ impl Host {
                 })?;
         if !renamed {
             let left = self.undo_sides(&sides_done);
-            let now = fs::read(&path).ok().map(|bytes| sha256_hex(&bytes));
+            let now = signal_project::read_regular(&path)
+                .ok()
+                .map(|bytes| sha256_hex(&bytes));
             return Err(fail_with(
                 "conflict",
                 format!("{file} changed since the version the patch names{left}"),
@@ -496,7 +500,9 @@ impl Host {
                     ),
                 };
                 if changed {
-                    let now = fs::read(&path).ok().map(|bytes| sha256_hex(&bytes));
+                    let now = signal_project::read_regular(&path)
+                        .ok()
+                        .map(|bytes| sha256_hex(&bytes));
                     return Err(fail_with(
                         "conflict",
                         message,
@@ -601,7 +607,7 @@ impl Host {
                         .and_then(|p| p.strip_suffix(".toml"));
                     // A removal that was kept: its file as it is now.
                     let base = if kept.contains(&c.path.as_str()) {
-                        fs::read(self.opening.dir.join(&c.path))
+                        signal_project::read_regular(self.opening.dir.join(&c.path))
                             .ok()
                             .map(|b| sha256_hex(&b))
                     } else {
@@ -714,7 +720,7 @@ impl Host {
                 ));
                 continue;
             }
-            let text = match fs::read_to_string(&path) {
+            let text = match signal_project::read_regular_to_string(&path) {
                 Ok(text) => text,
                 Err(error) => {
                     notes.push(format!(
@@ -788,7 +794,7 @@ impl Host {
                 continue;
             }
             let full = self.opening.dir.join(&path);
-            let Ok(text) = fs::read_to_string(&full) else {
+            let Ok(text) = signal_project::read_regular_to_string(&full) else {
                 continue;
             };
             let Some(new) = crate::bindings::rewrite_bindings(&text, &renames) else {

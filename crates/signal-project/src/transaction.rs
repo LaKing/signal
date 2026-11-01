@@ -417,9 +417,11 @@ impl Drop for ProjectLock {
     }
 }
 
-/// The bytes of `path` now, `None` when it does not exist.
+/// The bytes of `path` now, `None` when it does not exist; a file that is
+/// not a regular one (a FIFO, a device) is an error, read without blocking
+/// ([`crate::read_regular`]).
 pub fn current(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    match fs::read(path) {
+    match crate::read_regular(path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),

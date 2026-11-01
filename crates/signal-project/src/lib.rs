@@ -271,6 +271,52 @@ pub struct Planned {
     pub slots: Vec<slot::SlotResolution>,
 }
 
+/// The bytes of the file at `path`, read only when it is a regular file (a
+/// link to one is followed): a FIFO, a device (a link to `/dev/zero`), a
+/// socket or a folder is refused with [`io::ErrorKind::InvalidInput`]
+/// before it is opened, and opened without blocking should one be swapped
+/// in meanwhile (then refused once open), so a project's file can neither
+/// block its reader nor be read without end (review 2026-11-01,
+/// special-file-project-toml). Every read of a project's own text files
+/// (`project.toml`, its other sources and its presentation files) goes
+/// through it or [`read_regular_to_string`].
+pub fn read_regular(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = path.as_ref();
+    let refused = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        )
+    };
+    if !fs::metadata(path)?.is_file() {
+        return Err(refused());
+    }
+    let mut opened = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)?;
+    if !opened.metadata()?.is_file() {
+        return Err(refused());
+    }
+    let mut bytes = Vec::new();
+    opened.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// [`read_regular`] as UTF-8 text ([`io::ErrorKind::InvalidData`] if it is
+/// not).
+pub fn read_regular_to_string(path: impl AsRef<Path>) -> io::Result<String> {
+    let path = path.as_ref();
+    String::from_utf8(read_regular(path)?).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is not UTF-8", path.display()),
+        )
+    })
+}
+
 /// A project folder's files as read: `project.toml`, every
 /// `composites/*.toml`, every `patterns/*.toml` and every
 /// `interfaces/*.toml`, each folder in name order, without checking what
@@ -304,7 +350,7 @@ pub fn read_sources(dir: &Path) -> Result<Vec<SourceFile>, LoadError> {
     let mut diagnostics = Vec::new();
     for path in paths {
         let full = dir.join(&path);
-        let bytes = fs::read(&full).map_err(|error| LoadError::Io { path: full, error })?;
+        let bytes = read_regular(&full).map_err(|error| LoadError::Io { path: full, error })?;
         match String::from_utf8(bytes) {
             Ok(text) => files.push(SourceFile { path, text }),
             Err(_) => diagnostics.push(Diagnostic {

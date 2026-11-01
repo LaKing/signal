@@ -25,6 +25,8 @@ toml = { workspace = true }
 # Project files (`.signal`): the project folder as one zip (M2.8-12).
 zip = { workspace = true }
 toml_edit = { workspace = true }
+# Reading a project's files without blocking on a FIFO (`read_regular`).
+libc = { workspace = true }
 schemars = { workspace = true }
 
 [dev-dependencies]

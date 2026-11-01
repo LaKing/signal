@@ -297,13 +297,16 @@ impl Files {
                     // A linked `ui/` would make its target the trusted
                     // root: it is not served (the generated panel stands in
                     // for its main.html), as the host never writes it.
-                    let linked = fs::symlink_metadata(&project)
-                        .is_ok_and(|m| m.file_type().is_symlink());
-                    (!linked).then(|| file(&project, rest)).flatten().or_else(|| {
-                        (rest == MAIN_PANEL)
-                            .then(|| file(&self.ui, DEFAULT_PANEL))
-                            .flatten()
-                    })
+                    let linked =
+                        fs::symlink_metadata(&project).is_ok_and(|m| m.file_type().is_symlink());
+                    (!linked)
+                        .then(|| file(&project, rest))
+                        .flatten()
+                        .or_else(|| {
+                            (rest == MAIN_PANEL)
+                                .then(|| file(&self.ui, DEFAULT_PANEL))
+                                .flatten()
+                        })
                 }
                 _ => None,
             },
@@ -597,8 +600,11 @@ mod tests {
         fs::write(base.join("outside/secret.txt"), "private").unwrap();
         fs::write(base.join("outside/main.html"), "<p>outside</p>").unwrap();
         std::os::unix::fs::symlink(base.join("outside"), base.join("project/ui")).unwrap();
-        std::os::unix::fs::symlink(base.join("outside/secret.txt"), base.join("own/ui/leak.txt"))
-            .unwrap();
+        std::os::unix::fs::symlink(
+            base.join("outside/secret.txt"),
+            base.join("own/ui/leak.txt"),
+        )
+        .unwrap();
         fs::write(base.join("own/ui/fine.txt"), "fine").unwrap();
         let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui");
         let files = |project: &str| Files {

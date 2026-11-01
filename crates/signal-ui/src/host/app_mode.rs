@@ -1,7 +1,6 @@
 //! Signal.app's state (app mode): power, transport, and the `status` and
 //! `app` messages.
 
-use std::fs;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -233,7 +232,10 @@ impl Host {
             return Err(fail("no-project", "open a project folder first"));
         }
         // Read before the load: a later edit makes it differ from the file.
-        let file = fs::read_to_string(self.opening.dir.join(signal_project::PROJECT_FILE)).ok();
+        let file = signal_project::read_regular_to_string(
+            self.opening.dir.join(signal_project::PROJECT_FILE),
+        )
+        .ok();
         let state = FolderState::read(&self.opening.dir).ok();
         let dir = self.opening.dir.clone();
         let (project, plan, width) = match self.load(&dir) {

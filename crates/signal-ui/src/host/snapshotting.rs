@@ -680,7 +680,8 @@ impl Host {
             )
         };
         let lock = ctx.lock().map_err(|e| failed(e.to_string()))?;
-        let before = fs::read_to_string(&path).map_err(|e| failed(e.to_string()))?;
+        let before =
+            signal_project::read_regular_to_string(&path).map_err(|e| failed(e.to_string()))?;
         let after = signal_project::write_snapshot_exclude(&before, &instance, &parameter, exclude)
             .map_err(|e| failed(e.to_string()))?;
         // Checked on the text read under the lock, as it would be left: a

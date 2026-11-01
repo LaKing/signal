@@ -3206,6 +3206,7 @@ name = "signal-project"
 version = "0.3.0"
 dependencies = [
  "insta",
+ "libc",
  "schemars",
  "serde",
  "serde_json",

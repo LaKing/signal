@@ -2,7 +2,6 @@
 //! mutes, and the device wait.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -416,7 +415,8 @@ impl Host {
     pub(super) fn build(&self, first: bool) -> Result<(Run, Vec<String>), String> {
         let dir = &self.opening.dir;
         // Read before the load: a later edit makes it differ from the file.
-        let file = fs::read_to_string(dir.join(signal_project::PROJECT_FILE)).ok();
+        let file =
+            signal_project::read_regular_to_string(dir.join(signal_project::PROJECT_FILE)).ok();
         let project = Project::load(dir).map_err(|error| match error {
             LoadError::Invalid(diagnostics) => joined(located(dir, diagnostics)),
             error => error.to_string(),

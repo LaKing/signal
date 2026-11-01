@@ -10,7 +10,6 @@
 //! of that composite, not just this one.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::io;
 use std::path::Path;
 
@@ -1131,7 +1130,8 @@ fn write_project_locked(
     let failed = |error: String| {
         ProjectWriteError::Failed(format!("{what} not written to {}: {error}", path.display()))
     };
-    let before = fs::read_to_string(&path).map_err(|e| failed(e.to_string()))?;
+    let before =
+        signal_project::read_regular_to_string(&path).map_err(|e| failed(e.to_string()))?;
     let kept: Vec<usize> = (0..edits.len()).filter(|&i| keep(&before, i)).collect();
     if kept.is_empty() {
         return Ok((before.clone(), before, kept));
@@ -1202,6 +1202,7 @@ pub fn write_file(path: &Path, text: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     /// ADR 0041 §10, ADR 0043: over the whole registry, a parameter is
     /// stepped exactly when it has a value set; no continuous one (a generic
@@ -1266,8 +1267,8 @@ mod tests {
         io::Write::write_all(&mut second, b"B").unwrap();
         let a = "A".repeat(1 << 20);
         write_file(&path, &a).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), a);
-        assert_eq!(fs::read(&theirs).unwrap(), b"B");
+        assert_eq!(signal_project::read_regular_to_string(&path).unwrap(), a);
+        assert_eq!(signal_project::read_regular(&theirs).unwrap(), b"B");
         drop(second);
         assert_eq!(
             fs::read_dir(&dir).unwrap().count(),
@@ -1316,7 +1317,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(refused.code(), "conflict", "{refused}");
-        assert_eq!(fs::read_to_string(&path).unwrap(), theirs);
+        assert_eq!(
+            signal_project::read_regular_to_string(&path).unwrap(),
+            theirs
+        );
         assert_eq!(
             fs::read_dir(&dir).unwrap().count(),
             1,
@@ -1366,7 +1370,7 @@ mod tests {
             .unwrap();
         // The included studio's bus, edited on disk and not reloaded.
         let studio = base.join("studio/project.toml");
-        let text = fs::read_to_string(&studio).unwrap();
+        let text = signal_project::read_regular_to_string(&studio).unwrap();
         let edited = text.replace(
             "bus = { module = \"std.mix\", gain_a = 0.45,",
             "bus = { module = \"std.mix\", gain_a = 0.4,",

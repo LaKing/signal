@@ -62,7 +62,7 @@ impl Host {
                 format!("{file} is reached through a link: only the project's own files are read"),
             ));
         }
-        match fs::read_to_string(self.opening.dir.join(&file)) {
+        match signal_project::read_regular_to_string(self.opening.dir.join(&file)) {
             Ok(text) => Ok(json!({
                 "type": "file.read",
                 "file": file,
@@ -105,7 +105,7 @@ impl Host {
         }
         let path = self.opening.dir.join(&file);
         let current = || -> Result<Option<String>, Failure> {
-            match fs::read_to_string(&path) {
+            match signal_project::read_regular_to_string(&path) {
                 Ok(text) => Ok(Some(text)),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(error) => Err(fail("write-failed", format!("{file}: {error}"))),
@@ -263,7 +263,7 @@ impl Host {
                 "vendor needs `base`, the SHA-256 of project.toml",
             )
         })?;
-        let now = fs::read(self.opening.dir.join(PROJECT_FILE))
+        let now = signal_project::read_regular(self.opening.dir.join(PROJECT_FILE))
             .ok()
             .map(|bytes| sha256_hex(&bytes));
         if now.as_deref() != Some(base) {
@@ -285,7 +285,7 @@ impl Host {
             VendorError::Changed(ref file) => fail_with(
                 "conflict",
                 error.to_string(),
-                json!({"file": file, "base": fs::read(self.opening.dir.join(file)).ok().map(|bytes| sha256_hex(&bytes))}),
+                json!({"file": file, "base": signal_project::read_regular(self.opening.dir.join(file)).ok().map(|bytes| sha256_hex(&bytes))}),
             ),
             VendorError::Io { .. } => fail("write-failed", error.to_string()),
         };
@@ -357,7 +357,7 @@ impl Host {
             return Err(unknown());
         }
         let path = crate::http::file(&project_ui(&self.opening.dir), name).ok_or_else(unknown)?;
-        let text = std::fs::read_to_string(path).map_err(|_| unknown())?;
+        let text = signal_project::read_regular_to_string(path).map_err(|_| unknown())?;
         let plan = self
             .plan
             .as_ref()
@@ -484,7 +484,7 @@ impl Host {
                 ),
             ));
         }
-        let text = match fs::read_to_string(&path) {
+        let text = match signal_project::read_regular_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(
@@ -542,7 +542,7 @@ impl Host {
             ));
         }
         let current = |path: &Path| -> Result<Option<String>, Failure> {
-            match fs::read_to_string(path) {
+            match signal_project::read_regular_to_string(path) {
                 Ok(text) => Ok(Some(text)),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(error) => Err(fail("write-failed", format!("{file}: {error}"))),
@@ -637,7 +637,7 @@ impl Host {
                 "plate": null, "text": null, "html": null, "editable": true, "reason": null, "planned": planned}),
             );
         }
-        let text = fs::read_to_string(&path)
+        let text = signal_project::read_regular_to_string(&path)
             .map_err(|e| fail("unknown-panel", format!("ui/{name}: {e}")))?;
         let (html, reason) = match panel_content(&text) {
             Ok((start, end)) => (json!(text[start..end]), Value::Null),
@@ -705,7 +705,7 @@ impl Host {
         let _lock = ctx
             .lock()
             .map_err(|e| fail("write-failed", format!("ui/{name} was not written: {e}")))?;
-        let before = match fs::read_to_string(&path) {
+        let before = match signal_project::read_regular_to_string(&path) {
             Ok(text) => Some(text),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(fail("write-failed", format!("ui/{name}: {e}"))),
@@ -786,7 +786,7 @@ impl Host {
         )
         .map_err(failed)?
         {
-            let now = fs::read_to_string(&path).ok();
+            let now = signal_project::read_regular_to_string(&path).ok();
             return Err(conflict(now.as_deref()));
         }
         self.seen(&Path::new("ui").join(name));

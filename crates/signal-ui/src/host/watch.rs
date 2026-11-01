@@ -1,7 +1,6 @@
 //! The project folder's watch: live reloads of the running project's files,
 //! the stopped project's graph push, and the pattern files.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -71,7 +70,10 @@ impl Host {
         run.retry = false;
         self.reloads += 1;
         // Read before the reload: a later edit makes it differ from the file.
-        let file = fs::read_to_string(self.opening.dir.join(signal_project::PROJECT_FILE)).ok();
+        let file = signal_project::read_regular_to_string(
+            self.opening.dir.join(signal_project::PROJECT_FILE),
+        )
+        .ok();
         run.file = None;
         let mut observed = Observed {
             values: &mut self.live.values,
@@ -182,7 +184,7 @@ impl Host {
             if linked {
                 continue;
             }
-            let Ok(text) = fs::read_to_string(&path) else {
+            let Ok(text) = signal_project::read_regular_to_string(&path) else {
                 continue;
             };
             self.broadcast(&json!({

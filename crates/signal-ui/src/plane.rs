@@ -403,8 +403,8 @@ mod tests {
     fn the_studios_plane_checks_clean() {
         let root =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../projects/studio/ui");
-        let panel = std::fs::read_to_string(root.join("main.html")).unwrap();
-        let plane = std::fs::read_to_string(root.join(PLANE_FILE)).unwrap();
+        let panel = signal_project::read_regular_to_string(root.join("main.html")).unwrap();
+        let plane = signal_project::read_regular_to_string(root.join(PLANE_FILE)).unwrap();
         let cards: Vec<String> = panel_cards(&panel).into_iter().map(|c| c.id).collect();
         assert_eq!(
             cards,

@@ -1,6 +1,5 @@
 //! The project's structure: `describe`, `graph`, `modules` and their pushes.
 
-use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 
@@ -301,19 +300,20 @@ impl Host {
                 structure.get("insides").cloned(),
             )
         };
-        let (positions, error) = match fs::read_to_string(self.opening.dir.join(SCHEMATIC_FILE)) {
-            Ok(text) => match schematic::read_positions(&text) {
-                Ok(positions) => (positions, None),
-                Err(error) => (Default::default(), Some(error)),
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                (Default::default(), None)
-            }
-            Err(error) => (
-                Default::default(),
-                Some(format!("{SCHEMATIC_FILE}: {error}")),
-            ),
-        };
+        let (positions, error) =
+            match signal_project::read_regular_to_string(self.opening.dir.join(SCHEMATIC_FILE)) {
+                Ok(text) => match schematic::read_positions(&text) {
+                    Ok(positions) => (positions, None),
+                    Err(error) => (Default::default(), Some(error)),
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    (Default::default(), None)
+                }
+                Err(error) => (
+                    Default::default(),
+                    Some(format!("{SCHEMATIC_FILE}: {error}")),
+                ),
+            };
         let positions: serde_json::Map<String, Value> = positions
             .into_iter()
             .map(|(level, entries)| {

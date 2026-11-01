@@ -1271,7 +1271,7 @@ fn rewrite_one(text: &str, old: &str, new: &str) -> Option<String> {
 pub fn references(ui: &Path, prefixes: &[String]) -> Vec<(String, usize, String)> {
     let mut found = Vec::new();
     for path in panel_files(ui).unwrap_or_default() {
-        let Ok(text) = fs::read_to_string(&path) else {
+        let Ok(text) = signal_project::read_regular_to_string(&path) else {
             continue;
         };
         let name = path
@@ -1315,14 +1315,16 @@ pub fn check_project(
     let ui = crate::project_ui(dir);
     let mut checked = Vec::new();
     for path in panel_files(&ui).map_err(|e| format!("{}: {e}", ui.display()))? {
-        let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let text = signal_project::read_regular_to_string(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         checked.push(check(&format!("ui/{name}"), &text, &targets));
     }
     // ADR 0046: the slots' parts, each at its roots.
     let parts = ui.join(crate::parts::PARTS_DIR);
     for path in panel_files(&parts).map_err(|e| format!("{}: {e}", parts.display()))? {
-        let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let text = signal_project::read_regular_to_string(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         checked.push(check_file(
             &format!("{}/{name}", crate::parts::PARTS_DIR),
@@ -1343,9 +1345,9 @@ pub fn check_project(
 /// and `output` when an audio sink has signal inputs) and the top-level slots with a part.
 fn check_plane(ui: &Path, panel: &Panel, plan: &ExecutionPlan) -> Option<Checked> {
     let path = ui.join(crate::plane::PLANE_FILE);
-    let text = fs::read_to_string(&path).ok()?;
+    let text = signal_project::read_regular_to_string(&path).ok()?;
     let main = ui.join(MAIN_PANEL);
-    let cards: Vec<String> = match fs::read_to_string(&main) {
+    let cards: Vec<String> = match signal_project::read_regular_to_string(&main) {
         Ok(html) => crate::plane::panel_cards(&html)
             .into_iter()
             .map(|c| c.id)

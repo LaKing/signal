@@ -528,7 +528,7 @@ impl Windows {
         let text = self
             .dir
             .as_ref()
-            .and_then(|dir| std::fs::read_to_string(dir.join(WINDOWS_FILE)).ok())
+            .and_then(|dir| signal_project::read_regular_to_string(dir.join(WINDOWS_FILE)).ok())
             .unwrap_or_default();
         match read_layout(&text, &self.screens.key) {
             Ok(Some(layout)) if !layout.windows.is_empty() => layout,
