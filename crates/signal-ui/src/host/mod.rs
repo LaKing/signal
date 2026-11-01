@@ -19,6 +19,7 @@
 //! ([`crate::document`]); `signal ui` reopens only the project it serves.
 
 mod app_mode;
+mod clients;
 mod controls;
 mod failure;
 mod files;
@@ -37,9 +38,7 @@ mod watch;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{SyncSender, TrySendError};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
@@ -62,10 +61,11 @@ use crate::document::Document;
 use crate::keys::{self, Keys};
 use crate::panel::Panel;
 use crate::player::Backend;
-use crate::server::{Inbound, Outbound, Server, ServerOptions};
+use crate::server::{Inbound, Server, ServerOptions};
 use crate::setup::{DEFAULT_BUFFER, Setup, Window};
 
 use app_mode::{AppMode, app_only, power_json};
+use clients::Client;
 use failure::{Failure, fail};
 use live::{Failed, Pending};
 use project_io::SaveWait;
@@ -204,14 +204,6 @@ pub struct Finished {
     pub clipped: u64,
     /// Meters dropped.
     pub meter_overflows: u64,
-}
-
-struct Client {
-    queue: SyncSender<Outbound>,
-    evicted: Arc<AtomicBool>,
-    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
-    gate: Arc<AtomicBool>,
-    dropped: u64,
 }
 
 /// The protocol's host.
@@ -1006,65 +998,6 @@ impl Host {
             "ceilinged": controller.map(Controller::ceilinged),
             "writes": self.writes,
         })
-    }
-
-    fn send_text(&mut self, client: u64, value: &Value) {
-        self.send_serialised(client, value.to_string());
-    }
-
-    fn send_serialised(&mut self, client: u64, text: String) {
-        let Some(c) = self.clients.get(&client) else {
-            return;
-        };
-        match c.queue.try_send(Outbound::Text(text)) {
-            Ok(()) => {}
-            // A client that cannot take a reply is not keeping up.
-            Err(TrySendError::Full(_)) => self.evict(client),
-            Err(TrySendError::Disconnected(_)) => self.remove(client),
-        }
-    }
-
-    fn send_binary(&mut self, client: u64, bytes: Vec<u8>) {
-        let Some(c) = self.clients.get_mut(&client) else {
-            return;
-        };
-        match c.queue.try_send(Outbound::Binary(bytes)) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => c.dropped += 1,
-            Err(TrySendError::Disconnected(_)) => self.remove(client),
-        }
-    }
-
-    fn broadcast(&mut self, value: &Value) {
-        let clients: Vec<u64> = self.clients.keys().copied().collect();
-        for client in clients {
-            self.send_text(client, value);
-        }
-    }
-
-    /// A message already serialised, to every client.
-    fn broadcast_text(&mut self, text: &str) {
-        let clients: Vec<u64> = self.clients.keys().copied().collect();
-        for client in clients {
-            self.send_serialised(client, text.to_owned());
-        }
-    }
-
-    /// Flags the client and drops its queue: its thread sees either and
-    /// ends on its own; nothing here waits for it.
-    fn evict(&mut self, client: u64) {
-        if let Some(c) = self.clients.remove(&client) {
-            c.evicted.store(true, Ordering::Relaxed);
-            self.evicted += 1;
-        }
-        self.release(client);
-        self.end_notes(client);
-    }
-
-    fn remove(&mut self, client: u64) {
-        self.clients.remove(&client);
-        self.release(client);
-        self.end_notes(client);
     }
 
     /// A client gone or evicted with a key held (a closed page, a lost
