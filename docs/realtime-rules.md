@@ -24,6 +24,13 @@ Why: an audio callback has a hard deadline (128 frames at 96 kHz is 1.33 ms). Mi
 - ***k*-partition invariance** (ADR 0002): results must not depend on how frames are grouped into calls.
 - **No semantics tied to the callback.** Control-rate work ticks on an absolute frame grid, never "once per callback".
 
+### The engine's event delivery: its worst case (review 2026-11-01)
+The executor's own per-call work on events is bounded, and its worst case is stated here as the rule above asks. For a call of *K* frames (at most the block, 256 by default), an event output keeps at most 16 events per frame, so at most *E* = 16·*K* events per call:
+- **Delivery** (`gather`, `crates/signal-engine/src/engine.rs`): for each event input, and each parameter driven by events, every frame of the call scans each source's events of the call for that frame, so one event connection costs *K*·*E* = 16·*K*² comparisons per call, times its `copies`; staged external events are found by binary search (log of the staged count) per frame and target.
+- **The fault guard** (`check`, run by `commit` frame by frame): each event output's events are scanned once per frame of the call, again 16·*K*² per event output.
+
+At *K* = 256 that is about 1.05 million comparisons per event connection (and per event output) per block in the worst case, 16 events on every frame; with the usual few events per block it is *K*·(events) and small. It allocates nothing and cannot block, so no rule above is broken; it is quadratic in the frames per call, not linear. A delivery linear in frames plus events (a cursor per source over events kept in offset order) would give identical output for every partition, since the canonical order (external events by sequence, then sources in order, each in emission order, frame by frame) is unchanged; it is not built until a dense plan's benchmark shows the cost matters. Not measured yet: the dense-plan benchmark is an open item.
+
 ## How it is enforced
 
 - **Contract suite** (M1), run on every primitive in `crates/` and `lab/`:
