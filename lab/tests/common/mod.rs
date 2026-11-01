@@ -114,9 +114,14 @@ pub fn gpu() -> Option<Gpu> {
                 "SIGNAL_REQUIRE_GPU is set, but there is no usable GPU adapter ({:?})",
                 signal_gpu::inventory().error
             );
-            eprintln!(
-                "skipped: no usable GPU adapter ({:?}); operator steps: docs/benchmarks.md, \"GPU partial bank (M2.6-4)\"",
-                signal_gpu::inventory().error
+            // Written to stderr itself, past the harness's capture: a skip
+            // never reads as a pass.
+            let _ = std::io::Write::write_fmt(
+                &mut std::io::stderr(),
+                format_args!(
+                    "SKIPPED: no usable GPU adapter ({:?}); operator steps: docs/benchmarks.md, \"GPU partial bank (M2.6-4)\"\n",
+                    signal_gpu::inventory().error
+                ),
             );
             None
         }

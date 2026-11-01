@@ -2,11 +2,12 @@
 //! `scripts/third-party-notices.mjs` makes of Cargo.lock now, and every crate
 //! the shipped binaries link is under an allowed licence. The script's
 //! `--check` mode decides both; here it also fails on a stale file and on a
-//! linked crate whose licence is outside the set. Skipped, with a message,
-//! when `node` is not on PATH.
+//! linked crate whose licence is outside the set. Without `node` on PATH it
+//! fails where `CI` is set (the workflow provisions Node) and is skipped
+//! elsewhere, with a `SKIPPED` line written past the harness's capture.
 
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -27,7 +28,16 @@ fn notices(args: &[&std::ffi::OsStr]) -> Option<Output> {
     {
         Ok(output) => Some(output),
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            eprintln!("skipped: node is not on PATH");
+            let ci = std::env::var("CI").is_ok_and(|v| !matches!(v.as_str(), "" | "0" | "false"));
+            assert!(
+                !ci,
+                "node is not on PATH, and CI is set (.github/workflows/ci.yml provisions Node)"
+            );
+            // Written to stderr itself, which the harness does not capture.
+            let _ = writeln!(
+                std::io::stderr(),
+                "SKIPPED the licence check: node is not on PATH (outside CI only); install Node to run it"
+            );
             None
         }
         Err(error) => panic!("node did not run: {error}"),

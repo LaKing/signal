@@ -1,9 +1,11 @@
-//! The UI library's logic tests (`node --test ui/`), run from `cargo test`;
-//! skipped, with a message, when `node` is not on PATH. Also checks that
+//! The UI library's logic tests (`node --test ui/`), run from `cargo test`.
+//! Without `node` on PATH they fail where `CI` is set (the workflow
+//! provisions Node) and are skipped elsewhere, with a `SKIPPED` line written
+//! past the test harness's capture, so a skip never reads as a pass. Also checks that
 //! `ui/index.js`, the entry `node --test ui/` runs, imports every test file.
 
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -42,6 +44,24 @@ fn the_test_entry_imports_every_test_file() {
     }
 }
 
+/// Whether this is a CI run (`CI` set, and not empty, `0` or `false`).
+fn in_ci() -> bool {
+    std::env::var("CI").is_ok_and(|v| !matches!(v.as_str(), "" | "0" | "false"))
+}
+
+/// `node` is not on PATH: a failure in CI, else a skip said on the terminal
+/// (written to stderr itself, which the harness does not capture).
+fn without_node(what: &str) {
+    assert!(
+        !in_ci(),
+        "{what}: node is not on PATH, and CI is set (.github/workflows/ci.yml provisions Node)"
+    );
+    let _ = writeln!(
+        std::io::stderr(),
+        "SKIPPED {what}: node is not on PATH (outside CI only); install Node to run it"
+    );
+}
+
 #[test]
 fn node_test_passes() {
     let output = match Command::new("node")
@@ -55,8 +75,7 @@ fn node_test_passes() {
     {
         Ok(output) => output,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            eprintln!("skipping the JS tests: node is not on PATH");
-            return;
+            return without_node("node --test ui/");
         }
         Err(error) => panic!("node did not run: {error}"),
     };

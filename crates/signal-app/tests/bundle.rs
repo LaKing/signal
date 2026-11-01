@@ -39,7 +39,11 @@ fn plist_value(plist: &Path, key: &str) -> String {
 fn bundle_app_builds_a_signed_bundle() {
     for tool in ["codesign", "plutil"] {
         if !available(tool) {
-            eprintln!("skipped: {tool} is not available");
+            // Written to stderr itself, past the harness's capture.
+            let _ = std::io::Write::write_fmt(
+                &mut std::io::stderr(),
+                format_args!("SKIPPED the bundle build: {tool} is not available\n"),
+            );
             return;
         }
     }

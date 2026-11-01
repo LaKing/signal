@@ -847,7 +847,16 @@ fn the_page_reads_its_part_from_a_real_server() {
     {
         Ok(child) => child,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("skipping: node is not on PATH");
+            let ci = std::env::var("CI").is_ok_and(|v| !matches!(v.as_str(), "" | "0" | "false"));
+            assert!(
+                !ci,
+                "node is not on PATH, and CI is set (.github/workflows/ci.yml provisions Node)"
+            );
+            // Written to stderr itself, which the harness does not capture.
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr(),
+                b"SKIPPED the page's part read: node is not on PATH (outside CI only)\n",
+            );
             rig.finish();
             return;
         }

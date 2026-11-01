@@ -5,6 +5,7 @@
 
 signal_contract::install_counting_allocator!();
 
+use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -517,8 +518,11 @@ fn gpu() -> Option<Lease> {
                 "SIGNAL_REQUIRE_GPU is set, but there is no usable GPU adapter ({:?})",
                 signal_gpu::inventory().error
             );
-            eprintln!(
-                "skipped: no usable GPU adapter ({:?}); the operator runs this on the M5 Max",
+            // Written to stderr itself, past the harness's capture: a skip
+            // never reads as a pass.
+            let _ = writeln!(
+                std::io::stderr(),
+                "SKIPPED: no usable GPU adapter ({:?}); the operator runs this on the M5 Max",
                 signal_gpu::inventory().error
             );
             None

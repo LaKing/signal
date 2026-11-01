@@ -165,7 +165,11 @@ fn devices_compute_lists_the_gpu_adapters() {
             "SIGNAL_REQUIRE_GPU is set, but there is no usable GPU adapter ({})",
             gpu["reason"]
         );
-        eprintln!("skipped: no usable GPU adapter ({})", gpu["reason"]);
+        // Written to stderr itself, past the harness's capture.
+        let _ = std::io::Write::write_fmt(
+            &mut std::io::stderr(),
+            format_args!("SKIPPED: no usable GPU adapter ({})\n", gpu["reason"]),
+        );
         assert!(gpu["reason"].is_string());
     }
     for adapter in adapters {
